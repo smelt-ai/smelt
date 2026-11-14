@@ -1,5 +1,6 @@
-//! 不进核心订阅的话题单独订一条（为什么分开见 `smelt_event_protocol` 的模块文档）。这些
-//! 话题只有事件、没有快照；运行时不认识其中哪个就拒掉这一条，调用方据此知道那项功能在这台
+//! 不进核心订阅的话题单独订一条（为什么分开见 `smelt_event_protocol` 的模块文档）。带快照的
+//! 话题（如 `attention.changed`）订上时和积压丢了事件之后各收一份快照，按协议登记的快照种类
+//! 认出是哪个话题的；运行时不认识其中哪个话题就拒掉这一条，调用方据此知道那项功能在这台
 //! 机器上不可用，核心订阅不受影响。和 [`super::DaemonStateEventClient`] 一样只吃字符串、
 //! 不碰 IO。
 
@@ -15,19 +16,36 @@ pub enum TopicMessage {
         topic: String,
         payload: serde_json::Value,
     },
-    /// 运行时那边积压，丢了事件：订的话题都当作变过。
+    /// 带快照的话题的整份状态：订上时一份，积压丢了事件后再一份。
+    Snapshot {
+        topic: String,
+        payload: serde_json::Value,
+    },
+    /// 运行时那边积压，丢了事件：订的话题都当作变过。带快照的话题后面跟着一份快照。
     Lagged,
 }
 
 pub struct TopicEventClient {
     handshake: EventSubscribeRequest,
+    /// 订的话题里带快照的：快照种类 → 话题。
+    snapshots: Vec<(String, String)>,
 }
 
 impl TopicEventClient {
     /// `topics` 是协议里登记过的话题名。
     pub fn new(topics: Vec<&str>) -> Self {
+        let snapshots = smelt_event_protocol::core_topic_descriptors()
+            .expect("core topic descriptors are valid")
+            .into_iter()
+            .filter(|descriptor| topics.contains(&descriptor.topic.as_str()))
+            .filter_map(|descriptor| {
+                let kind = descriptor.snapshot_kind?;
+                Some((kind.0, descriptor.topic.as_str().to_string()))
+            })
+            .collect();
         Self {
             handshake: desktop_handshake(topics),
+            snapshots,
         }
     }
 
@@ -55,12 +73,26 @@ impl TopicEventClient {
                     payload: envelope.payload,
                 }))
             }
+            SubscribeMessage::Snapshot { kind, payload, .. } => {
+                let topic = self
+                    .snapshots
+                    .iter()
+                    .find(|(snapshot, _)| *snapshot == kind.0)
+                    .map(|(_, topic)| topic.clone())
+                    .ok_or_else(|| {
+                        DaemonEventClientError::Protocol(format!(
+                            "snapshot {} does not belong to a subscribed topic",
+                            kind.0
+                        ))
+                    })?;
+                Ok(Some(TopicMessage::Snapshot { topic, payload }))
+            }
             SubscribeMessage::Lag { .. } => Ok(Some(TopicMessage::Lagged)),
             SubscribeMessage::Error { code, message } => {
                 Err(DaemonEventClientError::Server { code, message })
             }
-            // 这些话题没有快照；比这个客户端新的运行时发的消息类型也跳过。
-            SubscribeMessage::Snapshot { .. } | SubscribeMessage::Unknown => Ok(None),
+            // 比这个客户端新的运行时发的消息类型跳过。
+            SubscribeMessage::Unknown => Ok(None),
         }
     }
 }
@@ -137,6 +169,42 @@ mod tests {
                 .decode_line(r#"{"type":"some_future_message","anything":1}"#)
                 .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn snapshots_are_attributed_to_their_topic() {
+        use smelt_event_protocol::{
+            AttentionSnapshot, CORE_SNAPSHOT_ATTENTION, CORE_TOPIC_ATTENTION_CHANGED, SnapshotKind,
+        };
+        let snapshot = |kind: &str| SubscribeMessage::Snapshot {
+            kind: SnapshotKind(kind.to_string()),
+            watermark: 0,
+            revision: 3,
+            payload: serde_json::to_value(AttentionSnapshot {
+                revision: 3,
+                sessions: Vec::new(),
+            })
+            .unwrap(),
+        };
+        let attention = TopicEventClient::new(vec![
+            CORE_TOPIC_PI_CONFIG_CHANGED,
+            CORE_TOPIC_ATTENTION_CHANGED,
+        ]);
+        assert_eq!(
+            attention
+                .decode_line(&line(snapshot(CORE_SNAPSHOT_ATTENTION)))
+                .unwrap(),
+            Some(TopicMessage::Snapshot {
+                topic: CORE_TOPIC_ATTENTION_CHANGED.to_string(),
+                payload: serde_json::json!({ "revision": 3, "sessions": [] }),
+            })
+        );
+        // 没订那个话题，运行时却发来它的快照：协议出错。
+        assert!(
+            client()
+                .decode_line(&line(snapshot(CORE_SNAPSHOT_ATTENTION)))
+                .is_err()
         );
     }
 

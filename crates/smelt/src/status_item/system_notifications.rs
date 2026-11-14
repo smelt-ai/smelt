@@ -9,8 +9,8 @@ use crate::RuntimeKey;
 use block2::{DynBlock, RcBlock};
 use objc2::AnyThread;
 use objc2::rc::Retained;
-use objc2::runtime::{Bool, ProtocolObject};
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
     UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
@@ -29,6 +29,15 @@ const REMOTE_AUTOMATION_RUN_IDENTIFIER_PREFIX: &str = "smelt.automation.remote-r
 const AUTOMATION_THREAD_PREFIX: &str = "automation:";
 const REMOTE_AUTOMATION_THREAD_PREFIX: &str = "automation@";
 const APP_IDENTIFIER: &str = "smelt.app.";
+/// 插件给了 id 的通知：前缀后面是插件给的 id。同一个 id 再发换掉上一条，可以撤回。
+const PLUGIN_IDENTIFIER_PREFIX: &str = "smelt.notify.";
+/// 点通知要执行的命令（[`smelt_plugin_api::NotificationClick`] 的 JSON）存在通知内容的
+/// userInfo 里这个键下，应用重启后点也找得到。
+const CLICK_COMMAND_KEY: &str = "smelt.click";
+
+fn plugin_notification_identifier(id: &str) -> String {
+    format!("{PLUGIN_IDENTIFIER_PREFIX}{id}")
+}
 
 fn notification_identifier(session_id: &str) -> String {
     format!("{SESSION_IDENTIFIER_PREFIX}{session_id}")
@@ -88,6 +97,8 @@ struct QueuedNotification {
     thread_identifier: String,
     subtitle: String,
     body: String,
+    /// 点它执行的命令，JSON。
+    on_click: Option<String>,
     generation: u64,
 }
 
@@ -111,6 +122,7 @@ impl NotificationQueue {
             session_id.to_string(),
             subtitle,
             body,
+            None,
         );
     }
 
@@ -127,15 +139,29 @@ impl NotificationQueue {
             automation_thread_identifier(runtime, automation_id),
             subtitle,
             body,
+            None,
         );
     }
 
-    fn enqueue_app(&mut self, subtitle: &str, body: &str) {
+    fn enqueue_app(&mut self, subtitle: &str, body: &str, on_click: Option<String>) {
         self.enqueue_with_identifier(
             format!("{APP_IDENTIFIER}{}", uuid::Uuid::new_v4()),
             "app".to_string(),
             subtitle,
             body,
+            on_click,
+        );
+    }
+
+    /// 插件给了 id 的通知：同一个 id 再发换掉上一条（还在排队的直接换，投递过的由系统按同一个
+    /// 标识替换），通知中心里同一个 id 归一组。
+    fn enqueue_plugin(&mut self, id: &str, subtitle: &str, body: &str, on_click: Option<String>) {
+        self.enqueue_with_identifier(
+            plugin_notification_identifier(id),
+            id.to_string(),
+            subtitle,
+            body,
+            on_click,
         );
     }
 
@@ -145,6 +171,7 @@ impl NotificationQueue {
         thread_identifier: String,
         subtitle: &str,
         body: &str,
+        on_click: Option<String>,
     ) {
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         self.active_identifiers.insert(identifier.clone());
@@ -155,6 +182,7 @@ impl NotificationQueue {
                 thread_identifier,
                 subtitle: subtitle.to_string(),
                 body: body.to_string(),
+                on_click,
                 generation: self.next_generation,
             },
         );
@@ -280,6 +308,10 @@ impl NotificationQueue {
 
     fn remove_automation_run(&mut self, runtime: &RuntimeKey, run_id: &str) {
         self.remove_identifier(&automation_notification_identifier(runtime, run_id));
+    }
+
+    fn remove_plugin(&mut self, id: &str) {
+        self.remove_identifier(&plugin_notification_identifier(id));
     }
 
     fn remove_identifier(&mut self, identifier: &str) {
@@ -408,16 +440,19 @@ objc2::define_class!(
                         automation_id: automation_id.to_string(),
                         run_id,
                     })
-            } else if identifier.starts_with(APP_IDENTIFIER) {
+            } else if identifier.starts_with(APP_IDENTIFIER)
+                || identifier.starts_with(PLUGIN_IDENTIFIER_PREFIX)
+            {
                 let mut state = state()
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                // 只有投递回执尚未返回时，队列才可能还在跟踪这条通知。
+                // 应用通知只有投递回执尚未返回时队列才还在跟踪；插件的点过就不在了，撤掉。
                 if state.queue.active_identifiers.contains(&identifier) {
                     state.queue.remove_identifier(&identifier);
                     send_state_changed();
                 }
-                None
+                drop(state);
+                click_command(response)
             } else {
                 None
             };
@@ -431,6 +466,24 @@ objc2::define_class!(
         }
     }
 );
+
+/// 通知里存的点击命令；没存或存的不认识是 `None`（那就只把应用拿到前面来）。
+fn click_command(response: &UNNotificationResponse) -> Option<StatusItemEvent> {
+    let user_info = response.notification().request().content().userInfo();
+    let key = NSString::from_str(CLICK_COMMAND_KEY);
+    let key: &AnyObject = &key;
+    let json = user_info.objectForKey(key)?.downcast::<NSString>().ok()?;
+    match serde_json::from_str::<smelt_plugin_api::NotificationClick>(&json.to_string()) {
+        Ok(click) => Some(StatusItemEvent::RunCommand {
+            command: click.command,
+            args: click.args,
+        }),
+        Err(error) => {
+            eprintln!("[notifications] 通知里的点击命令认不出：{error}");
+            None
+        }
+    }
+}
 
 impl NotificationDelegate {
     fn new() -> Retained<Self> {
@@ -557,6 +610,16 @@ fn submit(notification: QueuedNotification) {
     content.setBody(&NSString::from_str(&notification.body));
     content.setThreadIdentifier(&NSString::from_str(&notification.thread_identifier));
     content.setSound(Some(&UNNotificationSound::defaultSound()));
+    if let Some(on_click) = &notification.on_click {
+        let key = NSString::from_str(CLICK_COMMAND_KEY);
+        let value = NSString::from_str(on_click);
+        let user_info = NSDictionary::<NSString, NSString>::from_slices(&[&*key], &[&*value]);
+        // SAFETY: userInfo 要的是能存进属性列表的键值，这里键值都是 NSString；只是把泛型参数
+        // 换成 setter 声明的 AnyObject。
+        unsafe {
+            content.setUserInfo(&Retained::cast_unchecked::<NSDictionary>(user_info));
+        }
+    }
 
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
         &NSString::from_str(&notification.identifier),
@@ -684,9 +747,43 @@ pub fn deliver_app_notification(subtitle: &str, body: &str) {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // 和会话通知一样先排队：权限还没查清（刚启动）或正在问人时也不丢。被拒、不可用时
         // 查完权限会清掉排着的应用通知（[`NotificationQueue::discard_pending_app_notifications`]）。
-        state.queue.enqueue_app(subtitle, body);
+        state.queue.enqueue_app(subtitle, body, None);
         prepare_queued_notification(&mut state);
     }
+    sync_system_notifications();
+}
+
+/// 插件发的通知（`smelt.app/notify`）。没给 id 的同应用通知，一次性；给了 id 的像会话通知
+/// 一样留着，投递失败等权限恢复再发，直到插件撤回或人点掉。
+pub fn deliver_plugin_notification(notify: &smelt_plugin_api::Notify) {
+    let on_click = notify
+        .on_click
+        .as_ref()
+        .and_then(|click| serde_json::to_string(click).ok());
+    {
+        let mut state = state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &notify.id {
+            Some(id) => state
+                .queue
+                .enqueue_plugin(id, &notify.subtitle, &notify.body, on_click),
+            None => state
+                .queue
+                .enqueue_app(&notify.subtitle, &notify.body, on_click),
+        }
+        prepare_queued_notification(&mut state);
+    }
+    sync_system_notifications();
+}
+
+/// 撤回插件给了 id 的通知。应用重启前发的也撤得掉：通知中心按标识撤，不看队列记没记着。
+pub fn withdraw_plugin_notification(id: &str) {
+    state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .queue
+        .remove_plugin(id);
     sync_system_notifications();
 }
 
@@ -798,7 +895,7 @@ mod tests {
         APP_IDENTIFIER, NotificationQueue, authorization_from_settings,
         automation_from_thread_identifier, automation_notification_identifier,
         automation_run_from_identifier, automation_thread_identifier, notification_identifier,
-        prepare_queued_notification, session_id_from_identifier,
+        plugin_notification_identifier, prepare_queued_notification, session_id_from_identifier,
     };
     use crate::RuntimeKey;
     use crate::status_item::SystemNotificationAuthorization;
@@ -822,6 +919,34 @@ mod tests {
             authorization_from_settings(UNAuthorizationStatus::Provisional),
             SystemNotificationAuthorization::Authorized
         );
+    }
+
+    /// 插件给了 id 的通知：同一个 id 再发换掉排着的那条，撤回后不再投递，也撤掉投递过的。
+    #[test]
+    fn plugin_notifications_replace_by_id_and_withdraw() {
+        let mut queue = NotificationQueue::default();
+        let click = Some(r#"{"command":"smelt.sessions/activate","args":{}}"#.to_string());
+        queue.enqueue_plugin("smelt-notifications/s1", "完成", "第一条", None);
+        queue.enqueue_plugin("smelt-notifications/s1", "完成", "第二条", click.clone());
+        let ready = queue.take_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(
+            ready[0].identifier,
+            plugin_notification_identifier("smelt-notifications/s1")
+        );
+        assert_eq!(ready[0].body, "第二条");
+        assert_eq!(ready[0].on_click, click);
+        queue.complete(&ready[0].identifier, ready[0].generation, None);
+        assert!(queue.take_retractions().is_empty());
+        // 投递过的留着，直到插件撤回。
+        assert!(queue.active_identifiers.contains(&ready[0].identifier));
+        queue.remove_plugin("smelt-notifications/s1");
+        assert_eq!(queue.take_retractions(), vec![ready[0].identifier.clone()]);
+        assert!(queue.take_ready().is_empty());
+        // 重启后队列里没有它，撤回照样交给通知中心去撤。
+        let mut fresh = NotificationQueue::default();
+        fresh.remove_plugin("smelt-notifications/s1");
+        assert_eq!(fresh.take_retractions(), vec![ready[0].identifier.clone()]);
     }
 
     #[test]
@@ -875,8 +1000,8 @@ mod tests {
     fn app_notifications_are_independent_and_retire_after_delivery() {
         let mut queue = NotificationQueue::default();
         queue.enqueue("session-1", "done", "session body");
-        queue.enqueue_app("错误", "模型 ID 不能为空");
-        queue.enqueue_app("完成", "已保存");
+        queue.enqueue_app("错误", "模型 ID 不能为空", None);
+        queue.enqueue_app("完成", "已保存", None);
 
         let ready = queue.take_ready();
         assert_eq!(ready.len(), 3);
@@ -914,7 +1039,7 @@ mod tests {
     #[test]
     fn failed_app_notification_is_not_retried() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue_app("提示", "操作完成");
+        queue.enqueue_app("提示", "操作完成", None);
         let request = queue.take_ready().pop().unwrap();
         queue.complete(&request.identifier, request.generation, Some("rejected"));
         assert_eq!(queue.pending_count(), 0);
@@ -927,8 +1052,8 @@ mod tests {
     fn discarding_undeliverable_app_notifications_keeps_session_alerts() {
         let mut queue = NotificationQueue::default();
         queue.enqueue("session-1", "done", "session body");
-        queue.enqueue_app("提示", "第一条");
-        queue.enqueue_app("提示", "第二条");
+        queue.enqueue_app("提示", "第一条", None);
+        queue.enqueue_app("提示", "第二条", None);
         queue.discard_pending_app_notifications();
         let ready = queue.take_ready();
         assert_eq!(ready.len(), 1);
@@ -950,7 +1075,7 @@ mod tests {
             state.authorization,
             SystemNotificationAuthorization::Unknown
         );
-        state.queue.enqueue_app("提示", "操作完成");
+        state.queue.enqueue_app("提示", "操作完成", None);
         prepare_queued_notification(&mut state);
         assert_eq!(state.queue.pending_count(), 1);
         state.queue.discard_pending_app_notifications();

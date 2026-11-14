@@ -159,14 +159,17 @@ impl HistoryPage {
                     self.refresh(cx);
                 }
             }
-            HostEvent::ActiveProjectChanged
+            HostEvent::ActiveContextChanged if api::active_context(cx).project == self.project => {}
+            HostEvent::ActiveContextChanged
             | HostEvent::AgentSettingsChanged
             | HostEvent::MachinesChanged => {
                 self.sync_project(cx);
                 self.refresh(cx);
                 cx.notify();
             }
-            HostEvent::RuntimeTopic { machine, topic } if topic == CORE_TOPIC_HISTORY_CHANGED => {
+            HostEvent::RuntimeTopic { machine, topic, .. }
+                if topic == CORE_TOPIC_HISTORY_CHANGED =>
+            {
                 self.mark_stale(machine, cx);
             }
             HostEvent::Reconnected(machine) => self.mark_stale(machine, cx),
@@ -177,7 +180,7 @@ impl HistoryPage {
     /// 重读当前项目和它是不是智能体的 space。换了项目，右边的详情清掉。
     fn sync_project(&mut self, cx: &mut Context<Self>) {
         let host = api::host(cx);
-        let project = host.active_project(cx);
+        let project = api::active_context(cx).project;
         self.engine = project.as_ref().and_then(|project| {
             let home = host
                 .machines(cx)
@@ -697,6 +700,7 @@ fn notify(subtitle: &str, body: &str, cx: &mut App) {
     let notify = api::Notify {
         subtitle: subtitle.to_string(),
         body: body.to_string(),
+        ..Default::default()
     };
     api::NOTIFY.run(&notify, cx).detach();
 }

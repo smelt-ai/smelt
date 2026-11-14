@@ -12,7 +12,7 @@
 
 /// 菜单栏与系统通知桥发回 GPUI 主循环的事件。
 pub enum StatusItemEvent {
-    /// 菜单栏菜单里点了一项：执行它带的命令。
+    /// 菜单栏菜单里点了一项，或点了带命令的系统通知：执行它带的命令。
     RunCommand {
         command: String,
         args: serde_json::Value,
@@ -363,6 +363,8 @@ mod imp {
     }
     pub fn deliver_notification(_session_id: &str, _subtitle: &str, _body: &str) {}
     pub fn deliver_app_notification(_subtitle: &str, _body: &str) {}
+    pub fn deliver_plugin_notification(_notify: &smelt_plugin_api::Notify) {}
+    pub fn withdraw_plugin_notification(_id: &str) {}
     pub fn notify_error(message: impl AsRef<str>) {
         deliver_app_notification("错误", message.as_ref());
     }
@@ -400,19 +402,21 @@ pub use imp::{activate_app, is_app_active, set_menu, setup};
 #[cfg(target_os = "macos")]
 pub use system_notifications::{
     deliver_app_notification, deliver_automation_notification, deliver_notification,
-    notify_error, notify_success,
+    deliver_plugin_notification, notify_error, notify_success,
     refresh_system_notification_authorization, remove_automation_notification,
     remove_system_notification, retain_automation_notifications, retain_system_notifications,
     sync_system_notifications, system_notification_status, take_system_notification_errors,
+    withdraw_plugin_notification,
 };
 
 #[cfg(not(target_os = "macos"))]
 pub use imp::{
     deliver_app_notification, deliver_automation_notification, deliver_notification,
-    notify_error, notify_success,
+    deliver_plugin_notification, notify_error, notify_success,
     refresh_system_notification_authorization, remove_automation_notification,
     remove_system_notification, retain_automation_notifications, retain_system_notifications,
     sync_system_notifications, system_notification_status, take_system_notification_errors,
+    withdraw_plugin_notification,
 };
 
 #[cfg(test)]

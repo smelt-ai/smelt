@@ -32,6 +32,7 @@ pub use smelt_ui::theme_catalog::{
 };
 
 mod command;
+mod context;
 mod file;
 mod layout;
 pub mod sessions;
@@ -45,6 +46,7 @@ pub use command::{
     Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, NO_MAIN_WINDOW,
     RunCommand, command, commands, invoke, register_commands, run, unregister_commands,
 };
+pub use context::{ActiveContext, ViewedSession, active_context, set_active_context};
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
@@ -87,10 +89,36 @@ pub struct Project {
 /// 发送系统通知；是否显示由系统的通知权限和设置决定。
 pub const NOTIFY: Command<Notify, ()> = Command::new("smelt.app/notify");
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notify {
+    /// 给了 id 的通知留在通知中心里由插件管：同一个 id 再发换掉上一条，用
+    /// [`WITHDRAW_NOTIFICATION`] 撤回，应用重启后也认得。id 以插件 id 开头（`<插件 id>/…`），
+    /// 免得和别的插件撞上。不给是一次性的提示，投递完就不管了。
+    #[serde(default)]
+    pub id: Option<String>,
     pub subtitle: String,
     pub body: String,
+    /// 点这条通知时执行的命令。不给就只是把应用拿到前面来。
+    #[serde(default)]
+    pub on_click: Option<NotificationClick>,
+}
+
+/// 点通知执行的命令。存在通知里，应用重启后点也照样执行。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationClick {
+    pub command: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+/// 撤回 [`NOTIFY`] 发过的、给了 id 的通知：还没投递的不再投递，通知中心里的撤掉。没有这条
+/// 通知也不算错。
+pub const WITHDRAW_NOTIFICATION: Command<WithdrawNotification, ()> =
+    Command::new("smelt.app/withdraw-notification");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithdrawNotification {
+    pub id: String,
 }
 
 /// 用系统文本编辑器打开这台电脑上的文件。
@@ -191,9 +219,13 @@ pub struct Attention {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
     /// 那台机器推了一条运行时话题（核心订阅以外的那些，如
-    /// [`model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED`]）。宿主只转发话题名，不解读；
-    /// 积压丢了事件时，每个话题都当作推过一次。
-    RuntimeTopic { machine: RuntimeKey, topic: String },
+    /// [`model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED`]、
+    /// [`model::daemon_state::CORE_TOPIC_ATTENTION_CHANGED`]）。宿主原样转发，不解读。
+    RuntimeTopic {
+        machine: RuntimeKey,
+        topic: String,
+        message: TopicMessage,
+    },
     /// 重新订阅上那台机器：断开期间错过的推送要自己重读，它替你建的监听（如
     /// `project.watch`）也要重新登记。
     Reconnected(RuntimeKey),
@@ -206,8 +238,8 @@ pub enum HostEvent {
     OverlayChanged,
     /// 挂着的机器变了：加了、移除了、改了名或连接状态。
     MachinesChanged,
-    /// 工作台的当前项目变了（读 [`Host::active_project`]）。
-    ActiveProjectChanged,
+    /// 活动上下文变了：当前项目或舞台上露着的会话（读 [`active_context`]）。
+    ActiveContextChanged,
     /// 有机器的会话状态或工作区目录变了（读 [`Host::session_states`]、
     /// [`Host::workspace_directory`]）。
     SessionsChanged,
@@ -229,6 +261,18 @@ pub enum HostEvent {
     SettingsPagesChanged,
 }
 
+/// 一条运行时话题推来的东西。载荷的形状见协议里那个话题的类型。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TopicMessage {
+    /// 一条事件。
+    Event(serde_json::Value),
+    /// 带快照的话题的整份状态：订上（含重连）时一份，积压丢了事件后再一份。收到就整份换掉
+    /// 自己留的那份。
+    Snapshot(serde_json::Value),
+    /// 断开或积压，可能错过了事件。没有快照的话题要自己重读；带快照的话题后面跟着一份快照。
+    Lagged,
+}
+
 /// [`HostEvent`] 的发送方。宿主装好，插件订阅。
 pub struct HostEvents;
 
@@ -241,8 +285,6 @@ pub trait Host: 'static {
     fn machines(&self, cx: &App) -> Vec<Machine>;
     /// 那台机器的运行时客户端；机器已经移除是 `None`。
     fn client(&self, machine: &RuntimeKey, cx: &App) -> Option<RuntimeClient>;
-    /// 工作台的当前项目，可能在远程机器上；没有项目时是 `None`。
-    fn active_project(&self, cx: &App) -> Option<Project>;
     /// 那台机器的智能体配置：自定义 Agent（profile）、智能体定义、环境变量。还没读到是
     /// `None`。只读；变了发 [`HostEvent::AgentSettingsChanged`]。
     fn agent_settings<'a>(

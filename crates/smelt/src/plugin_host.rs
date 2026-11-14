@@ -12,7 +12,7 @@ use smelt_plugin_api::{self as api, CommandSpec, HostEvent, Machine, Project, Ru
 use smelt_runtime_client::RuntimeClient;
 
 use crate::dir_picker::DirPickerPurpose;
-use crate::{MainWindow, Workspace, WorkspaceRoute, current_workspace, runtimes};
+use crate::{MainWindow, Workspace, WorkspaceRoute, current_workspace, runtimes, status_item};
 
 struct SmeltHost {
     current: Rc<RefCell<Option<MainWindow>>>,
@@ -49,14 +49,6 @@ impl api::Host for SmeltHost {
         runtimes::client(machine, cx)
     }
 
-    fn active_project(&self, cx: &App) -> Option<Project> {
-        let project = self.workspace()?.read(cx).active_project_ref(cx)?;
-        Some(Project {
-            machine: project.runtime,
-            root: project.root,
-        })
-    }
-
     fn agent_settings<'a>(
         &self,
         machine: &RuntimeKey,
@@ -89,8 +81,12 @@ impl api::Host for SmeltHost {
     }
 
     fn window_active(&self, cx: &App) -> bool {
-        self.workspace()
-            .is_some_and(|workspace| workspace.read(cx).workspace_window_active)
+        // 应用在不在前台现问：全屏窗口切到别的 Space 后不再出帧，窗口也还是 key，只有应用级的
+        // 状态跟得上。窗口是不是 key 随激活事件记下，不靠出帧。
+        status_item::is_app_active()
+            && self
+                .workspace()
+                .is_some_and(|workspace| workspace.read(cx).main_window_key)
     }
 
     fn overlay_open(&self, cx: &App) -> bool {
@@ -223,7 +219,14 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             Ok(())
         }),
         api::NOTIFY.spec("发送系统通知", |args, _, _| {
-            crate::status_item::deliver_app_notification(&args.subtitle, &args.body);
+            if args.id.as_deref().is_some_and(str::is_empty) {
+                return Err("通知 id 不能是空的".to_string());
+            }
+            crate::status_item::deliver_plugin_notification(&args);
+            Ok(())
+        }),
+        api::WITHDRAW_NOTIFICATION.spec("撤回系统通知", |args, _, _| {
+            crate::status_item::withdraw_plugin_notification(&args.id);
             Ok(())
         }),
         api::OPEN_IN_TEXT_EDITOR.spec("用系统文本编辑器打开", |args, _, _| {
@@ -369,14 +372,17 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 当前项目变了就告诉插件。在可见刷新里调：当前项目跟着会话、侧栏选中、项目分组
-    /// 变，这些变更都会排一次可见刷新。
-    pub(crate) fn note_active_project(&mut self, cx: &mut Context<Self>) {
-        let project = self.active_project_ref(cx);
-        if self.plugin_project != project {
-            self.plugin_project = project;
-            api::emit(HostEvent::ActiveProjectChanged, cx);
-        }
+    /// 发布活动上下文（当前项目、舞台上露着的会话），变了插件收到
+    /// [`HostEvent::ActiveContextChanged`]。在可见刷新里调：当前项目、活动会话跟着会话、
+    /// 侧栏选中、项目分组、路由变，这些变更都会排一次可见刷新；舞台露出或被挡、终端换活动
+    /// 分屏、对话翻看历史的开关不排刷新，在那里另调。
+    pub(crate) fn note_active_context(&mut self, cx: &mut Context<Self>) {
+        let project = self.active_project_ref(cx).map(|project| Project {
+            machine: project.runtime,
+            root: project.root,
+        });
+        let session = self.viewed_session(cx);
+        api::set_active_context(api::ActiveContext { project, session }, cx);
     }
 
     /// 看得见的视图变了就告诉插件：布局里所在组显示着的，加上舞台上开成当前页的那个。

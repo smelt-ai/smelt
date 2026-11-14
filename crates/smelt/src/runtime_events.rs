@@ -40,13 +40,15 @@ use crate::terminal::DaemonStateEvent;
 use smelt_client::daemon_state::{TopicMessage, TopicSubscription, TopicSubscriptionCloser};
 
 pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
-/// 单独订阅收到的：哪台运行时的。
-pub(crate) type RuntimeTopicEvent = (RuntimeKey, TopicMessage);
+/// 单独订阅收到的：哪台运行时、哪条订阅的话题。
+pub(crate) type RuntimeTopicEvent = (RuntimeKey, &'static str, TopicMessage);
 
 /// 单独订的话题，各占一条订阅：后加的话题旧运行时不认，会拒掉整条订阅，不能连累别的。
+/// 宿主不解读这些话题，原样转给插件（`HostEvent::RuntimeTopic`）。
 pub(crate) const SEPARATE_TOPICS: &[&str] = &[
     smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED,
     smelt_client::daemon_state::CORE_TOPIC_HISTORY_CHANGED,
+    smelt_client::daemon_state::CORE_TOPIC_ATTENTION_CHANGED,
 ];
 
 /// 事件的接收端：核心订阅的，和单独订阅的。
@@ -307,7 +309,7 @@ fn appearance_event(message: TopicMessage) -> Option<DaemonStateEvent> {
             eprintln!("[runtime-events] 外观请求订阅积压，丢失的请求不会重放");
             None
         }
-        TopicMessage::Event { .. } => None,
+        TopicMessage::Event { .. } | TopicMessage::Snapshot { .. } => None,
     }
 }
 
@@ -546,7 +548,9 @@ pub(crate) fn spawn_subscription(
                                 let topic_key = key.clone();
                                 let topic_sender = sender.topics.clone();
                                 SeparateSubscription::open(&runtime, vec![topic], move |message| {
-                                    topic_sender.try_send((topic_key.clone(), message)).is_ok()
+                                    topic_sender
+                                        .try_send((topic_key.clone(), topic, message))
+                                        .is_ok()
                                 })
                             })
                             .collect();

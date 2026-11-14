@@ -156,7 +156,7 @@ impl CapabilitiesPage {
 
     fn on_host_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {
         match event {
-            HostEvent::RuntimeTopic { machine, topic }
+            HostEvent::RuntimeTopic { machine, topic, .. }
                 if *machine == self.machine && topic == CORE_TOPIC_PI_CONFIG_CHANGED =>
             {
                 self.on_pi_config_changed(cx);
@@ -178,7 +178,7 @@ impl CapabilitiesPage {
                 }
                 cx.notify();
             }
-            HostEvent::ActiveProjectChanged
+            HostEvent::ActiveContextChanged
             | HostEvent::AgentSettingsChanged
             | HostEvent::ShownViewsChanged
             | HostEvent::ViewsChanged
@@ -377,6 +377,7 @@ fn notify(subtitle: &str, body: &str, cx: &mut App) {
     let notify = api::Notify {
         subtitle: subtitle.to_string(),
         body: body.to_string(),
+        ..Default::default()
     };
     api::NOTIFY.run(&notify, cx).detach();
 }

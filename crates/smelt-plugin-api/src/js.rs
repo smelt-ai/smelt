@@ -27,7 +27,7 @@ use serde_json::Value;
 
 use crate::{
     CommandSpec, Handled, HostEvent, RuntimeKey, SettingsGroup, SettingsPageBuilder,
-    SettingsPageSpec, rusqlite,
+    SettingsPageSpec, TopicMessage, rusqlite,
 };
 
 /// 模块名，和 Rust 这边的 crate 同名。
@@ -41,8 +41,23 @@ export interface Project {
   /** 根目录，按那台机器的路径写。 */
   root: string;
 }
-/** 工作台的当前项目，可能在远程机器上；没有项目时为 null。 */
-export function active_project(): Project | null;
+/** 舞台上露着的一段会话。 */
+export interface ViewedSession {
+  machine: Machine;
+  /** 守护会话 id（终端是那一格），同 session_states 里的。 */
+  id: string;
+  /** 最新的内容在眼前；对话往上翻着看历史时为 false，终端总是 true。 */
+  at_latest: boolean;
+}
+/** 用户眼下在看什么。 */
+export interface ActiveContext {
+  /** 当前项目，可能在远程机器上；没有项目时为 null。 */
+  project: Project | null;
+  /** 舞台上露着的会话；舞台被挡住、收起、换成别的页，或没有会话时为 null。 */
+  session: ViewedSession | null;
+}
+/** 用户眼下在看什么。变了发 active_context_changed。 */
+export function active_context(): ActiveContext;
 /** 那台机器的运行时报的会话状态，每格终端、每段对话一条（形状同运行时 subscribe 推的会话状态）。主窗口关着也照常更新；变了发 sessions_changed。 */
 export function session_states(machine: Machine): unknown[];
 /** 那台机器的工作区目录：开着的项目和对话，是会话的名册（形状同运行时的 workspace 目录）；还没收到时为 null。变了发 sessions_changed。 */
@@ -110,7 +125,11 @@ export function next_command(): Promise<CommandCall>;
  * 脚本登记的命令接到就算成功，结果是 null。
  *
  * 宿主的动作也是命令：
- * - "smelt.app/notify" { subtitle: string, body: string }：发系统通知，显示受系统通知授权和设置影响。
+ * - "smelt.app/notify" { id?: string, subtitle: string, body: string, on_click?: { command: string, args?: unknown } }：
+ *   发系统通知，显示受系统通知授权和设置影响。给了 id（以插件 id 开头，"<插件 id>/…"）的留在通知中心里由插件管：
+ *   同一个 id 再发换掉上一条，可以撤回，应用重启后也认得；不给是一次性的提示。on_click 是点它时执行的命令，
+ *   不给就只是把应用拿到前面来。
+ * - "smelt.app/withdraw-notification" { id: string }：撤回给了 id 的通知；没有这条也不算错。
  * - "smelt.app/open-in-text-editor" { path: string }：用系统文本编辑器打开这台电脑上的文件。
  * - "smelt.app/pick-paths" { machine: Machine, title: string, confirm: string, files?: boolean, multiple?: boolean }
  *   → string[] | null：在那台机器上选路径，title 是选择框标题，confirm 是确认按钮上的动词；取消时为 null。
@@ -158,13 +177,13 @@ export function store_query(sql: string, params?: SqlValue[]): Promise<Record<st
 /** 在本插件自己的库里执行一条语句，返回改动的行数。 */
 export function store_execute(sql: string, params?: SqlValue[]): Promise<number>;
 export type HostEvent =
-  | { type: "runtime_topic"; machine: Machine; topic: string }
+  | { type: "runtime_topic"; machine: Machine; topic: string; message: TopicMessage }
   | { type: "reconnected"; machine: Machine }
   | { type: "project_changed"; machine: Machine; root: string }
   | { type: "window_activated" }
   | { type: "overlay_changed" }
   | { type: "machines_changed" }
-  | { type: "active_project_changed" }
+  | { type: "active_context_changed" }
   | { type: "sessions_changed" }
   | { type: "attention_changed" }
   | { type: "agent_settings_changed" }
@@ -174,7 +193,18 @@ export type HostEvent =
   | { type: "layouts_changed" }
   | { type: "commands_changed" }
   | { type: "settings_pages_changed" };
-/** 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份。同时只能有一个在等。 */
+/**
+ * 运行时话题推来的：一条事件；带快照的话题（如 attention.changed）订上和积压后的整份状态，收到就整份换掉
+ * 自己留的；断开或积压可能错过了事件（没有快照的话题自己重读）。载荷形状见协议里那个话题的类型。
+ */
+export type TopicMessage =
+  | { kind: "event"; payload: unknown }
+  | { kind: "snapshot"; payload: unknown }
+  | { kind: "lagged" };
+/**
+ * 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份；一台机器一个话题的快照或积压到了，
+ * 这个话题之前没取走的就不留了。同时只能有一个在等。
+ */
 export function next_event(): Promise<HostEvent>;
 "#;
 
@@ -270,14 +300,25 @@ impl JsPlugin {
         let settings = self.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
-            .function("active_project", |_| {
-                let project = in_app("active_project", |cx| crate::host(cx).active_project(cx))?;
-                Ok(project.map_or(HostValue::Null, |project| {
+            .function("active_context", |_| {
+                let context = in_app("active_context", |cx| crate::active_context(cx))?;
+                let project = context.project.map_or(HostValue::Null, |project| {
                     HostObject::new()
                         .field("machine", machine_value(&project.machine))
                         .field("root", project.root.as_str())
                         .into()
-                }))
+                });
+                let session = context.session.map_or(HostValue::Null, |session| {
+                    HostObject::new()
+                        .field("machine", machine_value(&session.machine))
+                        .field("id", session.id.as_str())
+                        .field("at_latest", session.at_latest)
+                        .into()
+                });
+                Ok(HostObject::new()
+                    .field("project", project)
+                    .field("session", session)
+                    .into())
             })
             .function("agent_settings", |arguments| {
                 let machine = machine_argument("agent_settings", arguments, 0)?;
@@ -513,9 +554,22 @@ impl JsPlugin {
             },
             None => event.clone(),
         };
-        if !state.queue.contains(&event) {
-            state.queue.push_back(event);
+        if state.queue.contains(&event) {
+            return;
         }
+        // 快照、积压之前同一台机器同一个话题没取走的，被它取代了。
+        if let HostEvent::RuntimeTopic {
+            machine,
+            topic,
+            message: TopicMessage::Snapshot(_) | TopicMessage::Lagged,
+        } = &event
+        {
+            state.queue.retain(|queued| {
+                !matches!(queued, HostEvent::RuntimeTopic { machine: m, topic: t, .. }
+                    if m == machine && t == topic)
+            });
+        }
+        state.queue.push_back(event);
     }
 
     fn next_command(&self) -> impl Future<Output = Result<HostValue, HostError>> + Send + use<> {
@@ -914,10 +968,23 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::RuntimeTopic {
             machine: key,
             topic,
-        } => HostObject::new()
-            .field("type", "runtime_topic")
-            .field("machine", machine(key))
-            .field("topic", topic.as_str()),
+            message,
+        } => {
+            let message = match message {
+                TopicMessage::Event(payload) => HostObject::new()
+                    .field("kind", "event")
+                    .field("payload", host_value(payload)),
+                TopicMessage::Snapshot(payload) => HostObject::new()
+                    .field("kind", "snapshot")
+                    .field("payload", host_value(payload)),
+                TopicMessage::Lagged => HostObject::new().field("kind", "lagged"),
+            };
+            HostObject::new()
+                .field("type", "runtime_topic")
+                .field("machine", machine(key))
+                .field("topic", topic.as_str())
+                .field("message", message)
+        }
         HostEvent::Reconnected(key) => HostObject::new()
             .field("type", "reconnected")
             .field("machine", machine(key)),
@@ -928,8 +995,8 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::WindowActivated => HostObject::new().field("type", "window_activated"),
         HostEvent::OverlayChanged => HostObject::new().field("type", "overlay_changed"),
         HostEvent::MachinesChanged => HostObject::new().field("type", "machines_changed"),
-        HostEvent::ActiveProjectChanged => {
-            HostObject::new().field("type", "active_project_changed")
+        HostEvent::ActiveContextChanged => {
+            HostObject::new().field("type", "active_context_changed")
         }
         HostEvent::SessionsChanged => HostObject::new().field("type", "sessions_changed"),
         HostEvent::AttentionChanged => HostObject::new().field("type", "attention_changed"),
@@ -1268,13 +1335,55 @@ mod tests {
     #[test]
     fn queued_events_are_not_duplicated() {
         let plugin = JsPlugin::new();
-        plugin.deliver(&HostEvent::ActiveProjectChanged);
-        plugin.deliver(&HostEvent::ActiveProjectChanged);
+        plugin.deliver(&HostEvent::ActiveContextChanged);
+        plugin.deliver(&HostEvent::ActiveContextChanged);
         plugin.deliver(&HostEvent::MachinesChanged);
         assert_eq!(
             plugin.0.borrow().queue,
-            [HostEvent::ActiveProjectChanged, HostEvent::MachinesChanged]
+            [HostEvent::ActiveContextChanged, HostEvent::MachinesChanged]
         );
+    }
+
+    /// 话题事件按顺序排着；快照到了，同一台机器同一个话题之前排着的就不要了。
+    #[test]
+    fn a_topic_snapshot_supersedes_queued_messages_of_that_topic() {
+        let topic =
+            |machine: RuntimeKey, topic: &str, message: TopicMessage| HostEvent::RuntimeTopic {
+                machine,
+                topic: topic.to_string(),
+                message,
+            };
+        let plugin = JsPlugin::new();
+        let first = topic(
+            RuntimeKey::Local,
+            "attention.changed",
+            TopicMessage::Event(serde_json::json!({ "revision": 1 })),
+        );
+        let other_machine = topic(
+            RuntimeKey::Remote("box".into()),
+            "attention.changed",
+            TopicMessage::Event(serde_json::json!({ "revision": 1 })),
+        );
+        let other_topic = topic(RuntimeKey::Local, "history.changed", TopicMessage::Lagged);
+        let snapshot = topic(
+            RuntimeKey::Local,
+            "attention.changed",
+            TopicMessage::Snapshot(serde_json::json!({ "revision": 2, "sessions": [] })),
+        );
+        for event in [&first, &other_machine, &other_topic, &snapshot] {
+            plugin.deliver(event);
+        }
+        assert_eq!(
+            plugin.0.borrow().queue,
+            [other_machine, other_topic, snapshot.clone()]
+        );
+        let value = event_value(&snapshot);
+        let message = value.get("message").expect("带着消息");
+        assert_eq!(
+            message.get("kind").and_then(HostValue::as_str),
+            Some("snapshot")
+        );
+        assert!(message.get("payload").is_some());
     }
 
     #[test]

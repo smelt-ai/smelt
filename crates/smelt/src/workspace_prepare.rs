@@ -81,7 +81,7 @@ impl Workspace {
         self.align_visible_route(window, cx);
         self.prewarm_ide_catalog_after_idle(window, cx);
 
-        self.note_active_project(cx);
+        self.note_active_context(cx);
         self.note_shown_views(cx);
 
         let want_bg = cx.global::<Appearance>().window_bg();

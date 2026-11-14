@@ -1847,8 +1847,6 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
-    /// 上次告诉插件的当前项目（见 `note_active_project`），只用来判断变没变。
-    plugin_project: Option<ProjectRef>,
     /// 看得见的视图：布局里露着的，加上舞台上开着的那页（见 `note_shown_views`）。插件
     /// 问的 `view_shown` 和自带的文件、变更视图都按这份。
     plugin_shown_views: HashSet<String>,
@@ -1907,6 +1905,9 @@ struct Workspace {
     session_manager_tombstones: HashSet<String>,
     /// 上一帧工作区窗口是否在前台。上升沿用来清正在看的会话未读。
     workspace_window_active: bool,
+    /// 主窗口是不是 key window，窗口激活变化时和每帧记下。插件问窗口在不在前台时和现问的
+    /// 应用前台合起来答（见 `SmeltHost::window_active`）。
+    main_window_key: bool,
     /// 各运行时的工作区目录来自 app 级唯一 daemon 订阅，见 [`WorkspaceDirectoriesGlobal`]；
     /// 随 Workspace 释放，避免创建第二条 socket 订阅或后台轮询线程。
     _workspace_directories_sub: Option<Subscription>,
@@ -2152,7 +2153,6 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
-            plugin_project: None,
             plugin_shown_views: HashSet::new(),
             plugin_overlay_open: false,
             font_options: std::cell::OnceCell::new(),
@@ -2176,6 +2176,7 @@ impl Workspace {
             session_manager_list: None,
             session_manager_tombstones: HashSet::new(),
             workspace_window_active: false,
+            main_window_key: false,
             saved_active_session_id,
             saved_conversation_ui: workspace_persist::load_conversation_ui(),
             saved_sidebar_orders: workspace_persist::load_sidebar_orders(),
@@ -2260,6 +2261,7 @@ impl Workspace {
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
         let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.note_window_activation(window, cx);
             if window.is_window_active() {
                 this.recheck_date(cx);
                 this.check_daemon_outdated_on_event(cx);
@@ -3072,42 +3074,44 @@ fn main() {
             states: daemon_state_rx,
             topics: topic_rx,
         } = runtime_events::start(cx);
-        // 单独订阅的话题。积压丢了事件（`Lagged`）就当作都变过。
+        // 单独订阅的话题，原样转给插件。
         let current_ws_for_topics = current_ws.clone();
         cx.spawn(async move |cx| {
             use smelt_app_state::provider_status_global::ProviderStatus;
             use smelt_client::daemon_state::{CORE_TOPIC_PI_CONFIG_CHANGED, TopicMessage};
-            while let Ok((runtime, message)) = topic_rx.recv().await {
-                let topics: Vec<String> = match message {
-                    TopicMessage::Event { topic, .. } => vec![topic],
-                    TopicMessage::Lagged => runtime_events::SEPARATE_TOPICS
-                        .iter()
-                        .map(|topic| topic.to_string())
-                        .collect(),
-                };
-                for topic in topics {
-                    // 宿主自己（会话、智能体编辑器）还要管的 Pi 配置变化。
-                    if topic == CORE_TOPIC_PI_CONFIG_CHANGED {
-                        // 凭据或模型可能变了：活着的会话重拉模型目录。会话眼下只跟本机的
-                        // Pi 目录走。
-                        if runtime == RuntimeKey::Local {
-                            cx.update(ProviderStatus::bump_pi_catalog);
-                        }
-                        // 删插件时运行时顺带清掉了智能体的勾选。
-                        cx.update(|cx| settings::reload_agent_host(&runtime, cx));
-                        if let Some(ws) = current_workspace(&current_ws_for_topics) {
-                            let _ = ws
-                                .update(cx, |ws, cx| ws.on_agent_pi_config_changed(&runtime, cx));
-                        }
+            while let Ok((runtime, topic, message)) = topic_rx.recv().await {
+                let message = match message {
+                    TopicMessage::Event { payload, .. } => {
+                        smelt_plugin_api::TopicMessage::Event(payload)
                     }
-                    let machine = runtime.clone();
-                    cx.update(|cx| {
-                        smelt_plugin_api::emit(
-                            smelt_plugin_api::HostEvent::RuntimeTopic { machine, topic },
-                            cx,
-                        )
-                    });
+                    TopicMessage::Snapshot { payload, .. } => {
+                        smelt_plugin_api::TopicMessage::Snapshot(payload)
+                    }
+                    TopicMessage::Lagged => smelt_plugin_api::TopicMessage::Lagged,
+                };
+                // 宿主自己（会话、智能体编辑器）还要管的 Pi 配置变化；积压丢了事件也当作变过。
+                if topic == CORE_TOPIC_PI_CONFIG_CHANGED {
+                    // 凭据或模型可能变了：活着的会话重拉模型目录。会话眼下只跟本机的
+                    // Pi 目录走。
+                    if runtime == RuntimeKey::Local {
+                        cx.update(ProviderStatus::bump_pi_catalog);
+                    }
+                    // 删插件时运行时顺带清掉了智能体的勾选。
+                    cx.update(|cx| settings::reload_agent_host(&runtime, cx));
+                    if let Some(ws) = current_workspace(&current_ws_for_topics) {
+                        let _ = ws.update(cx, |ws, cx| ws.on_agent_pi_config_changed(&runtime, cx));
+                    }
                 }
+                cx.update(|cx| {
+                    smelt_plugin_api::emit(
+                        smelt_plugin_api::HostEvent::RuntimeTopic {
+                            machine: runtime,
+                            topic: topic.to_string(),
+                            message,
+                        },
+                        cx,
+                    )
+                });
             }
         })
         .detach();

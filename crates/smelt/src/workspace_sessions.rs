@@ -994,7 +994,8 @@ impl Workspace {
                 acp_view::AcpViewEvent::Recovered => {
                     // 保留视图自身的快照更新。
                 }
-                acp_view::AcpViewEvent::ReturnedToLatest => {
+                acp_view::AcpViewEvent::ViewingHistoryChanged => {
+                    this.note_active_context(cx);
                     // 往上翻着看时到的完成没算已读；滚回最新位置才补上。
                     if this.workspace_window_active {
                         this.mark_visible_session_read(cx);
@@ -1544,6 +1545,7 @@ impl Workspace {
                         return;
                     }
                     sess.set_active_term(view);
+                    this.note_active_context(cx);
                     this.save_state(cx);
                     cx.notify();
                 })
@@ -2128,6 +2130,7 @@ impl Workspace {
         if was_active && let Some(first) = sess.term_leaves().first().cloned() {
             sess.set_active_term(first);
         }
+        self.note_active_context(cx);
         self.focus_active(window, cx);
         self.save_state(cx);
         cx.notify();
@@ -2152,6 +2155,7 @@ impl Workspace {
         if let Some(sess) = self.sessions.get_mut(self.active_session) {
             sess.set_active_term(e.clone());
         }
+        self.note_active_context(cx);
         e.update(cx, |terminal, cx| terminal.mark_read(cx));
         let h = e.read(cx).focus_handle();
         window.focus(&h, cx);
@@ -2216,17 +2220,32 @@ impl Workspace {
         self.activate(order[next], window, cx);
     }
 
-    pub(crate) fn viewed_session_id(&self, cx: &App) -> Option<String> {
+    /// 舞台上露着的会话：舞台显示着、路由在看会话时才有。插件经活动上下文读它（见
+    /// `note_active_context`）。
+    pub(crate) fn viewed_session(&self, cx: &App) -> Option<smelt_plugin_api::ViewedSession> {
         if !self.view_shown(crate::builtin_views::Builtin::Stage.id()) {
             return None;
         }
         if !route_views_session(self.active_tab(), self.nav.agents().conversation_sid()) {
             return None;
         }
-        match &self.sessions.get(self.active_session)?.kind {
-            SessionKind::Term { active, .. } => Some(active.read(cx).session_id().to_string()),
-            SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
-        }
+        let session = self.sessions.get(self.active_session)?;
+        let (id, at_latest) = match &session.kind {
+            SessionKind::Term { active, .. } => (active.read(cx).session_id().to_string(), true),
+            SessionKind::Conversation(view) => {
+                let view = view.read(cx);
+                (view.session_id().to_string(), !view.is_viewing_history())
+            }
+        };
+        Some(smelt_plugin_api::ViewedSession {
+            machine: session.runtime(cx).key().clone(),
+            id,
+            at_latest,
+        })
+    }
+
+    pub(crate) fn viewed_session_id(&self, cx: &App) -> Option<String> {
+        self.viewed_session(cx).map(|session| session.id)
     }
 
     /// 用户正在看的会话标已读。切会话、窗口回到前台、或正在看时新关注到达。
@@ -2235,23 +2254,17 @@ impl Workspace {
         if cx.try_global::<AttentionGlobal>().is_none() {
             return;
         }
-        let scrolled_away = self.cur().is_some_and(|session| match &session.kind {
-            SessionKind::Conversation(view) => view.read(cx).is_viewing_history(),
-            SessionKind::Term { .. } => false,
-        });
-        if scrolled_away {
-            return;
-        }
-        if let Some(sid) = self.viewed_session_id(cx) {
-            status_item::remove_system_notification(&sid);
-            AttentionGlobal::mark_read(&sid, cx);
+        if let Some(session) = self.viewed_session(cx).filter(|session| session.at_latest) {
+            status_item::remove_system_notification(&session.id);
+            AttentionGlobal::mark_read(&session.id, cx);
         }
     }
 
     pub(crate) fn note_window_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
         let application_active = status_item::is_app_active();
         smelt_ui::motion::set_ambient_application_active(cx, application_active);
-        let active = application_active && window.is_window_active();
+        self.main_window_key = window.is_window_active();
+        let active = application_active && self.main_window_key;
         let became_active = active && !self.workspace_window_active;
         self.workspace_window_active = active;
         if became_active {

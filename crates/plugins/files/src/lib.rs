@@ -215,7 +215,7 @@ pub(crate) struct FilesPanel {
     focus_handle: FocusHandle,
     /// 文件树自己的焦点：点进树里，方向键才归树。
     tree_focus: FocusHandle,
-    /// 当前项目。随 [`HostEvent::ActiveProjectChanged`] 更新，render 只读这份。
+    /// 当前项目。随 [`HostEvent::ActiveContextChanged`] 更新，render 只读这份。
     project: Option<ProjectRef>,
     /// 别的项目停着的界面。
     parked: HashMap<ProjectRef, ProjectFilesUi>,
@@ -335,9 +335,10 @@ impl FilesPanel {
 
     fn on_host_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {
         match event {
-            HostEvent::ActiveProjectChanged => {
-                self.sync_project(cx);
-                self.schedule_visible_refresh(cx);
+            HostEvent::ActiveContextChanged => {
+                if self.sync_project(cx) {
+                    self.schedule_visible_refresh(cx);
+                }
             }
             HostEvent::ShownViewsChanged | HostEvent::MachinesChanged => {
                 self.schedule_visible_refresh(cx);
@@ -380,13 +381,14 @@ impl FilesPanel {
     }
 
     /// 重读当前项目。换了就把这个项目的界面停走，换上新项目停着的那份；没停过就从库里读。
-    fn sync_project(&mut self, cx: &mut Context<Self>) {
-        let project = self.host.active_project(cx).map(|project| ProjectRef {
+    /// 返回换没换。
+    fn sync_project(&mut self, cx: &mut Context<Self>) -> bool {
+        let project = api::active_context(cx).project.map(|project| ProjectRef {
             runtime: project.machine,
             root: project.root,
         });
         if project == self.project {
-            return;
+            return false;
         }
         if let Some(old) = self.project.take() {
             let ui = self.take_project_ui();
@@ -405,6 +407,7 @@ impl FilesPanel {
         self.cancel_file_search();
         self.search = None;
         cx.notify();
+        true
     }
 
     fn load_project_ui(&self, project: &ProjectRef) -> ProjectFilesUi {
@@ -580,6 +583,7 @@ pub(crate) fn notify_error(message: String, cx: &mut App) {
     let notify = api::Notify {
         subtitle: "错误".to_string(),
         body: message,
+        ..Default::default()
     };
     api::NOTIFY.run(&notify, cx).detach();
 }

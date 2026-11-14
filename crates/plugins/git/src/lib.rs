@@ -164,6 +164,7 @@ pub(crate) fn notify_error(message: &str, cx: &mut App) {
     let notify = api::Notify {
         subtitle: "错误".to_string(),
         body: message.to_string(),
+        ..Default::default()
     };
     api::NOTIFY.run(&notify, cx).detach();
 }
@@ -268,7 +269,7 @@ struct ProjectGitUi {
 pub(crate) struct GitPanel {
     host: Rc<dyn Host>,
     focus_handle: FocusHandle,
-    /// 当前项目。随 [`HostEvent::ActiveProjectChanged`] 更新，render 只读这份。
+    /// 当前项目。随 [`HostEvent::ActiveContextChanged`] 更新，render 只读这份。
     project: Option<ProjectRef>,
     /// 别的项目停着的界面。
     parked: HashMap<ProjectRef, ProjectGitUi>,
@@ -345,7 +346,7 @@ impl GitPanel {
         let _events = cx.subscribe(&events, |this, _, event: &HostEvent, cx| {
             this.on_host_event(event, cx);
         });
-        let project = host.active_project(cx).map(|project| ProjectRef {
+        let project = api::active_context(cx).project.map(|project| ProjectRef {
             runtime: project.machine,
             root: project.root,
         });
@@ -408,9 +409,10 @@ impl GitPanel {
 
     fn on_host_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {
         match event {
-            HostEvent::ActiveProjectChanged => {
-                self.sync_project(cx);
-                self.schedule_visible_refresh(cx);
+            HostEvent::ActiveContextChanged => {
+                if self.sync_project(cx) {
+                    self.schedule_visible_refresh(cx);
+                }
             }
             HostEvent::ShownViewsChanged | HostEvent::MachinesChanged => {
                 self.schedule_visible_refresh(cx);
@@ -434,13 +436,14 @@ impl GitPanel {
     }
 
     /// 重读当前项目。换了就把这个项目的界面停走，换上新项目停着的那份（没有就是空的）。
-    fn sync_project(&mut self, cx: &mut Context<Self>) {
-        let project = self.host.active_project(cx).map(|project| ProjectRef {
+    /// 返回换没换。
+    fn sync_project(&mut self, cx: &mut Context<Self>) -> bool {
+        let project = api::active_context(cx).project.map(|project| ProjectRef {
             runtime: project.machine,
             root: project.root,
         });
         if project == self.project {
-            return;
+            return false;
         }
         if let Some(old) = self.project.take() {
             let ui = self.take_project_ui();
@@ -463,6 +466,7 @@ impl GitPanel {
         self.diff_gen = self.diff_gen.wrapping_add(1);
         self.publish_diff_body(cx);
         cx.notify();
+        true
     }
 
     fn take_project_ui(&mut self) -> ProjectGitUi {
