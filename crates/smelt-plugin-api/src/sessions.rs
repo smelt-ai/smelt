@@ -20,6 +20,16 @@ pub const HANDOFF: Command<Handoff, ()> = Command::new("smelt.sessions/handoff")
 /// 会话时失败。
 pub const SEND_TEXT: Command<SendText, ()> = Command::new("smelt.sessions/send-text");
 
+/// 在主窗口里露出这个会话（终端是那一格），把主窗口拿到前面来；主窗口关着就先开。会话还在
+/// 恢复的话等恢复完再跳，恢复完还没有就算了。
+pub const ACTIVATE: Command<Activate, ()> = Command::new("smelt.sessions/activate");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Activate {
+    /// 守护会话 id，同 [`crate::Host::session_states`] 里的。
+    pub session_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendText {
     pub text: String,

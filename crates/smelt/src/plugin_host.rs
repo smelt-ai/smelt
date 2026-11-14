@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::*;
+use smelt_app_state::daemon_states_global::{AttentionGlobal, DaemonStates};
 use smelt_plugin_api::{self as api, CommandSpec, HostEvent, Machine, Project, RuntimeKey};
 use smelt_runtime_client::RuntimeClient;
 
@@ -107,6 +108,39 @@ impl api::Host for SmeltHost {
     fn path_style(&self, machine: &RuntimeKey, cx: &App) -> api::model::runtime_path::PathStyle {
         runtimes::path_style(machine, cx)
     }
+
+    fn session_states(
+        &self,
+        machine: &RuntimeKey,
+        cx: &App,
+    ) -> Vec<api::model::daemon_state::DaemonSessionState> {
+        DaemonStates::snapshot(machine, cx)
+    }
+
+    fn workspace_directory(
+        &self,
+        machine: &RuntimeKey,
+        cx: &App,
+    ) -> Option<api::model::workspace_directory::WorkspaceDirectory> {
+        cx.try_global::<crate::WorkspaceDirectoriesGlobal>()?
+            .received
+            .get(machine)
+            .cloned()
+    }
+
+    fn attention(&self, cx: &App) -> Vec<api::Attention> {
+        let Some(store) = cx.try_global::<AttentionGlobal>() else {
+            return Vec::new();
+        };
+        let sessions = store.0.lock().unwrap().badge_sessions();
+        sessions
+            .into_iter()
+            .map(|(session_id, requires_action)| api::Attention {
+                session_id,
+                requires_action,
+            })
+            .collect()
+    }
 }
 
 /// 宿主动作命令取工作台用：工作台没建（测试里只登记命令表）时是 `None`。
@@ -128,11 +162,66 @@ pub(crate) fn main_window(window: Option<&mut Window>) -> Result<&mut Window, St
     window.ok_or_else(|| api::NO_MAIN_WINDOW.to_string())
 }
 
+/// 主窗口的槽位，跟 `main` 里管窗口的是同一份：主窗口关着时命令要能再开一扇。
+struct MainWindowSlot(Rc<RefCell<Option<MainWindow>>>);
+
+impl Global for MainWindowSlot {}
+
+/// 在主窗口里对工作台做 `f`，再把主窗口拿到前面来。`window` 是命令拿到的主窗口；没有就是
+/// 主窗口关着，先开一扇（命令不是在主窗口的 update 里跑的，可以开）。
+pub(crate) fn in_main_window<R>(
+    window: Option<&mut Window>,
+    workspace: &WorkspaceRef,
+    cx: &mut App,
+    f: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) -> R,
+) -> Result<R, String> {
+    let result = match window {
+        Some(window) => {
+            let workspace = workspace(cx).ok_or_else(|| api::NO_MAIN_WINDOW.to_string())?;
+            let result = workspace.update(cx, |workspace, cx| f(workspace, window, cx));
+            // 应用前置之外再激活主窗口，macOS 才会切回它所在的原生全屏 Space。
+            window.activate_window();
+            result
+        }
+        None => {
+            let current = cx
+                .try_global::<MainWindowSlot>()
+                .map(|slot| slot.0.clone())
+                .ok_or_else(|| api::NO_MAIN_WINDOW.to_string())?;
+            let main = crate::ensure_main_window(&current, cx);
+            main.window
+                .update(cx, |_, window, cx| {
+                    let result = main
+                        .workspace
+                        .update(cx, |workspace, cx| f(workspace, window, cx));
+                    window.activate_window();
+                    result
+                })
+                .map_err(|error| format!("主窗口开不了：{error}"))?
+                .map_err(|_| api::NO_MAIN_WINDOW.to_string())?
+        }
+    };
+    crate::status_item::activate_app();
+    Ok(result)
+}
+
 /// 宿主的动作 `smelt.app/*`（参数、结果见 `smelt_plugin_api` 里的同名常量）。
 pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
     let picker = workspace.clone();
     let views = workspace.clone();
+    let shown = workspace.clone();
     vec![
+        api::SHOW_MAIN_WINDOW.spec("显示主窗口", move |_, window, cx| {
+            in_main_window(window, &shown, cx, |_, _, _| ())
+        }),
+        api::SET_STATUS_MENU.spec("设置菜单栏菜单", |menu, _, _| {
+            crate::status_item::set_menu(&menu);
+            Ok(())
+        }),
+        api::SET_DOCK_BADGE.spec("设置 Dock 角标", |badge, _, _| {
+            crate::dock::set_badge(badge.label.as_deref());
+            Ok(())
+        }),
         api::NOTIFY.spec("发送系统通知", |args, _, _| {
             crate::status_item::deliver_app_notification(&args.subtitle, &args.body);
             Ok(())
@@ -140,19 +229,26 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
         api::OPEN_IN_TEXT_EDITOR.spec("用系统文本编辑器打开", |args, _, _| {
             crate::ide::open_in_system_text_editor(&args.path)
         }),
-        api::PICK_PATHS.spec_async("选择路径", move |request, _, cx| {
+        api::PICK_PATHS.spec_async("选择路径", move |request, window, cx| {
             let Some(runtime) = runtimes::runtime(&request.machine, cx) else {
                 return Task::ready(Err(api::MACHINE_REMOVED.to_string()));
             };
-            let (done, picked) = smol::channel::bounded(1);
-            if let Err(error) = update_workspace(&picker, cx, |workspace, cx| {
-                workspace.open_dir_picker(runtime, DirPickerPurpose::Plugin { request, done }, cx);
-                Ok(())
+            let (done, received) = smol::channel::bounded(1);
+            let purpose = DirPickerPurpose::Plugin { request, done };
+            if runtime.is_local() {
+                // 系统选择框不需要主窗口；从菜单栏等处调用时 app 可能在后台，先拿到前面来。
+                crate::status_item::activate_app();
+                let picked = crate::dir_picker::pick_local_paths(&purpose, cx);
+                return cx.spawn(async move |_| Ok(picked.await));
+            }
+            // 远程机器在主窗口里逐级浏览，主窗口关着就先开一扇。
+            if let Err(error) = in_main_window(window, &picker, cx, |workspace, _, cx| {
+                workspace.open_dir_picker(runtime, purpose, cx)
             }) {
                 return Task::ready(Err(error));
             }
             // 取消时选择框连同 `done` 一起扔掉，这边收到关闭。
-            cx.spawn(async move |_| Ok(picked.recv().await.ok()))
+            cx.spawn(async move |_| Ok(received.recv().await.ok()))
         }),
         api::OPEN_VIEW.spec("打开视图", move |args, window, cx| {
             let window = main_window(window)?;
@@ -165,6 +261,7 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
 
 /// 启动时、开主窗口之前调一次：装好宿主服务，登记内置插件。
 pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
+    cx.set_global(MainWindowSlot(current.clone()));
     api::install(SmeltHost { current }, cx);
     // 机器加了、移除了、改名、连上断开都记在 RuntimeHub 上。
     cx.observe_global::<runtimes::RuntimeHub>(|cx| api::emit(HostEvent::MachinesChanged, cx))
@@ -174,11 +271,21 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
         api::emit(HostEvent::AgentSettingsChanged, cx)
     })
     .detach();
+    // 会话状态（守护推的）和工作区目录（项目、对话的名册）都写在全局上，主窗口关着也照常。
+    cx.observe_global::<DaemonStates>(|cx| api::emit(HostEvent::SessionsChanged, cx))
+        .detach();
+    cx.observe_global::<crate::WorkspaceDirectoriesGlobal>(|cx| {
+        api::emit(HostEvent::SessionsChanged, cx)
+    })
+    .detach();
+    cx.observe_global::<AttentionGlobal>(|cx| api::emit(HostEvent::AttentionChanged, cx))
+        .detach();
     smelt_capabilities::register(cx);
     smelt_files_ui::register(cx);
     smelt_git_ui::register(cx);
     smelt_history::register(cx);
     smelt_layouts::register(cx);
+    smelt_menubar::register(cx);
 }
 
 impl Workspace {

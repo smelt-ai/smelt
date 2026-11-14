@@ -98,35 +98,18 @@ impl Workspace {
         self.dir_picker_navigate(None, cx);
     }
 
-    /// 本机运行时：弹系统的选择框。走 GPUI 的异步 `prompt_for_paths`，不能在回调里同步跑
-    /// 模态框（见对话输入栏「+」的注释）。
+    /// 本机运行时：弹系统的选择框，选好交给 [`Self::use_chosen_paths`]。
     fn prompt_local_paths(
         &mut self,
         runtime: crate::runtimes::Runtime,
         purpose: DirPickerPurpose,
         cx: &mut Context<Self>,
     ) {
-        let rx = cx.prompt_for_paths(system_prompt_options(&purpose));
+        let picked = pick_local_paths(&purpose, cx);
         cx.spawn(async move |this, cx| {
-            let paths = match rx.await {
-                Ok(Ok(Some(paths))) => paths,
-                // 用户取消。
-                Ok(Ok(None)) | Err(_) => return,
-                Ok(Err(error)) => {
-                    crate::status_item::notify_error(format!("打不开系统选择框：{error}"));
-                    return;
-                }
-            };
-            let chosen: Vec<String> = paths
-                .iter()
-                .filter_map(|path| path.to_str().map(str::to_string))
-                .collect();
-            if chosen.len() < paths.len() {
-                crate::status_item::notify_error("有路径不是 UTF-8，没法用，已跳过".to_string());
-            }
-            if chosen.is_empty() {
+            let Some(chosen) = picked.await else {
                 return;
-            }
+            };
             let _ = this.update(cx, |this, cx| {
                 this.use_chosen_paths(&runtime, purpose, chosen, cx);
             });
@@ -458,6 +441,35 @@ impl Workspace {
 }
 
 /// 系统选择框的选项：都能选目录；导入扩展还能选单个文件；绑定目录可以多选。
+/// 本机的系统选择框。它不挂在主窗口上，主窗口关着也能弹。走 GPUI 的异步
+/// `prompt_for_paths`，不能在回调里同步跑模态框（见对话输入栏「+」的注释）。
+/// 取消、出错、一条能用的路径都没有时交回 `None`。
+pub(crate) fn pick_local_paths(
+    purpose: &DirPickerPurpose,
+    cx: &mut App,
+) -> Task<Option<Vec<String>>> {
+    let rx = cx.prompt_for_paths(system_prompt_options(purpose));
+    cx.spawn(async move |_| {
+        let paths = match rx.await {
+            Ok(Ok(Some(paths))) => paths,
+            // 用户取消。
+            Ok(Ok(None)) | Err(_) => return None,
+            Ok(Err(error)) => {
+                crate::status_item::notify_error(format!("打不开系统选择框：{error}"));
+                return None;
+            }
+        };
+        let chosen: Vec<String> = paths
+            .iter()
+            .filter_map(|path| path.to_str().map(str::to_string))
+            .collect();
+        if chosen.len() < paths.len() {
+            crate::status_item::notify_error("有路径不是 UTF-8，没法用，已跳过".to_string());
+        }
+        (!chosen.is_empty()).then_some(chosen)
+    })
+}
+
 fn system_prompt_options(purpose: &DirPickerPurpose) -> PathPromptOptions {
     PathPromptOptions {
         files: purpose.include_files(),

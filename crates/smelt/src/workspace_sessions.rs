@@ -811,7 +811,6 @@ impl Workspace {
                 acp_view::AcpViewEvent::Changed => {
                     this.touch_acp_session(_view);
                     this.save_state(cx);
-                    this.sync_notification_surfaces(cx);
                     // save_state 只排队写盘，不会重绘。正文增量只归 AcpView 重画；
                     // 侧栏「运行中」读的是 Session::status，相位一变事实就变，
                     // 这里立刻通知。
@@ -835,7 +834,6 @@ impl Workspace {
                     // 后者在冷恢复时拥有更高优先级。
                     this.touch_acp_session(_view);
                     this.save_state(cx);
-                    this.sync_notification_surfaces(cx);
                     cx.notify();
                 }
                 acp_view::AcpViewEvent::PreviewImage(image) => {
@@ -2331,16 +2329,6 @@ impl Workspace {
             self.save_state(cx);
             self.schedule_visible_refresh(cx);
             cx.notify();
-        }
-    }
-
-    /// 侧栏右键「强制重启」：ACP 会话卡死（`session/cancel` 打不断正在跑的
-    /// 工具调用）时的兜底，见 `AcpView::force_restart` 注释。非 ACP 会话
-    /// （`active_acp` 返回 None）是 no-op，调用方（右键菜单）也只在 ACP
-    /// 会话上才显示这一项。
-    pub(crate) fn force_restart_acp_session(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(view) = self.sessions.get(ix).and_then(|s| s.active_acp()).cloned() {
-            view.update(cx, |v, cx| v.force_restart(cx));
         }
     }
 

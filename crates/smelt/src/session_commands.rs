@@ -8,7 +8,7 @@ use smelt_plugin_api::CommandSpec;
 use smelt_plugin_api::sessions::{self, Handoff, Resume};
 
 use super::*;
-use crate::plugin_host::{WorkspaceRef, main_window, update_workspace};
+use crate::plugin_host::{WorkspaceRef, in_main_window, main_window, update_workspace};
 
 /// 宿主登记的会话命令，跟 `smelt.sessions` 的自带命令一起登记。
 pub(crate) fn commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
@@ -16,7 +16,13 @@ pub(crate) fn commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
     let in_terminal = workspace.clone();
     let handoff = workspace.clone();
     let send = workspace.clone();
+    let activate = workspace.clone();
     vec![
+        sessions::ACTIVATE.spec("跳到会话", move |args, window, cx| {
+            in_main_window(window, &activate, cx, |this, window, cx| {
+                this.request_notification_session_jump(args.session_id, window, cx)
+            })
+        }),
         sessions::RESUME.spec("续接历史会话", move |args, window, cx| {
             let window = main_window(window)?;
             update_workspace(&resume, cx, |this, cx| {

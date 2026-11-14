@@ -38,6 +38,7 @@ members = [
     "crates/plugins/git",
     "crates/plugins/history",
     "crates/plugins/layouts",
+    "crates/plugins/menubar",
     "crates/plugins/themes",
     "crates/smelt",
     "crates/smelt-iroh",

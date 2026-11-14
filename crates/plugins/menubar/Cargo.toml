@@ -1,0 +1,13 @@
+# 内置插件「菜单栏」：菜单栏图标旁的计数、点开的会话菜单和 Dock 角标。
+# 只依赖插件接口和 gpui，宿主里没有它的类型（见 docs/app-plugins.md）。
+[package]
+name = "smelt-menubar"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }

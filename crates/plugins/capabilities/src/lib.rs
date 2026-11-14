@@ -168,7 +168,9 @@ impl CapabilitiesPage {
             | HostEvent::Reconnected(_)
             | HostEvent::ProjectChanged { .. }
             | HostEvent::WindowActivated
-            | HostEvent::OverlayChanged => {}
+            | HostEvent::OverlayChanged
+            | HostEvent::SessionsChanged
+            | HostEvent::AttentionChanged => {}
             HostEvent::MachinesChanged => {
                 // 在配的那台远程机器已经移除时，回到本机。
                 if api::host(cx).client(&self.machine, cx).is_none() {

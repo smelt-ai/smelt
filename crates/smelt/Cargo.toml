@@ -30,6 +30,7 @@ smelt-files-ui = { path = "../plugins/files" }
 smelt-git-ui = { path = "../plugins/git" }
 smelt-history = { path = "../plugins/history" }
 smelt-layouts = { path = "../plugins/layouts" }
+smelt-menubar = { path = "../plugins/menubar" }
 smelt-themes = { path = "../plugins/themes" }
 smelt-acp-view = { path = "../smelt-acp-view" }
 tokio = { version = "1", features = ["full"] }

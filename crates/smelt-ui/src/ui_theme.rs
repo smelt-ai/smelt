@@ -659,7 +659,8 @@ pub fn agent_status_color(status: AgentStatus) -> Rgba {
     rgb(agent_status_u32(status))
 }
 
-fn agent_status_u32(status: AgentStatus) -> u32 {
+/// 同一套状态色的 `0xRRGGBB` 形态，给菜单栏这类不走 gpui 的地方用。
+pub fn agent_status_u32(status: AgentStatus) -> u32 {
     role_for_status(&palette(), status)
 }
 
@@ -669,12 +670,6 @@ fn role_for_status(palette: &Palette, status: AgentStatus) -> u32 {
         AgentStatus::Running => palette.blue,
         AgentStatus::Idle => palette.text_faint,
     }
-}
-
-/// 同一套状态色的 (r, g, b) 形态，给 mac 菜单栏（status_item）用。
-pub fn agent_status_rgb8(status: AgentStatus) -> (u8, u8, u8) {
-    let c = agent_status_u32(status);
-    ((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
 /// 左侧会话 / pane 状态色。空闲是灰，不另画点。

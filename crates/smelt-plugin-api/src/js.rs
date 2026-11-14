@@ -40,6 +40,22 @@ export interface Project {
 }
 /** 工作台的当前项目，可能在远程机器上；没有项目时为 null。 */
 export function active_project(): Project | null;
+/** 那台机器的运行时报的会话状态，每格终端、每段对话一条（形状同运行时 subscribe 推的会话状态）。主窗口关着也照常更新；变了发 sessions_changed。 */
+export function session_states(machine: Machine): unknown[];
+/** 那台机器的工作区目录：开着的项目和对话，是会话的名册（形状同运行时的 workspace 目录）；还没收到时为 null。变了发 sessions_changed。 */
+export function workspace_directory(machine: Machine): unknown | null;
+export interface Attention {
+  /** 守护会话 id。 */
+  session_id: string;
+  /** 还等人处理（批准、输入、失败），看过也留着；false 是看过就消的提醒。 */
+  requires_action: boolean;
+}
+/** 要人看一眼的会话，所有机器的。变了发 attention_changed。 */
+export function attention(): Attention[];
+/** 菜单栏菜单里的一项。icon 只取 PNG（字节数组）的透明度当形状，涂成 color（0xRRGGBB）。 */
+export type StatusMenuItem =
+  | { type: "action"; label: string; icon?: { png: number[]; color: number } | null; command: string; args?: unknown }
+  | { type: "separator" };
 /** 那台机器的智能体配置（profiles、agents、env 等，形状同运行时的 agent_host.get）；还没读到时为 null。变了发 agent_settings_changed。 */
 export function agent_settings(machine: Machine): unknown | null;
 /** 那个视图此刻看得见。变了发 shown_views_changed。 */
@@ -97,6 +113,11 @@ export function next_command(): Promise<CommandCall>;
  *   → string[] | null：在那台机器上选路径，title 是选择框标题，confirm 是确认按钮上的动词；取消时为 null。
  * - "smelt.app/open-view" { view: string, args?: unknown } → boolean：打开一个视图，布局里摆了它就让它露出来，
  *   没摆就在舞台上开成一页，再把 args 交给它；没有这个视图时为 false。
+ * - "smelt.app/show-main-window"：把主窗口拿到前面来，已经关了就新开一扇。
+ * - "smelt.app/set-status-menu" { title?: string, tooltip?: string, items?: StatusMenuItem[] }：设置菜单栏图标旁的字、
+ *   提示和点开的菜单，后设的为准；只有 macOS 有。
+ * - "smelt.app/set-dock-badge" { label: string | null }：设置 Dock 图标的角标，null 清掉；只有 macOS 有。
+ * - "smelt.sessions/activate" { session_id: string }：在主窗口里露出这个会话并拿到前面来，主窗口关着就先开。
  * - "smelt.sessions/send-text" { text: string }：把文字交给当前会话（终端打进输入、对话填进输入框，不替用户发出）；
  *   没有能接的会话时 reject。
  * - "smelt.sessions/resume" / "smelt.sessions/resume-in-terminal" / "smelt.sessions/handoff"：续接、交接历史会话。
@@ -122,6 +143,8 @@ export type HostEvent =
   | { type: "overlay_changed" }
   | { type: "machines_changed" }
   | { type: "active_project_changed" }
+  | { type: "sessions_changed" }
+  | { type: "attention_changed" }
   | { type: "agent_settings_changed" }
   | { type: "shown_views_changed" }
   | { type: "views_changed" }
@@ -207,6 +230,24 @@ impl JsPlugin {
                         "agent_settings：配置转不成 JSON：{error}"
                     ))),
                 }
+            })
+            .function("session_states", |arguments| {
+                let machine = machine_argument("session_states", arguments, 0)?;
+                let states = in_app("session_states", |cx| {
+                    crate::host(cx).session_states(&machine, cx)
+                })?;
+                serialized("session_states", &states)
+            })
+            .function("workspace_directory", |arguments| {
+                let machine = machine_argument("workspace_directory", arguments, 0)?;
+                let directory = in_app("workspace_directory", |cx| {
+                    crate::host(cx).workspace_directory(&machine, cx)
+                })?;
+                serialized("workspace_directory", &directory)
+            })
+            .function("attention", |_| {
+                let attention = in_app("attention", |cx| crate::host(cx).attention(cx))?;
+                serialized("attention", &attention)
             })
             .function("view_shown", |arguments| {
                 let id = arguments.string(0)?;
@@ -667,6 +708,13 @@ fn json_value(value: &HostValue) -> Value {
     }
 }
 
+/// 宿主的数据转成给脚本的值。
+fn serialized(name: &str, value: &impl serde::Serialize) -> Result<HostValue, HostError> {
+    serde_json::to_value(value)
+        .map(|value| host_value(&value))
+        .map_err(|error| HostError::new(format!("{name}：转不成 JSON：{error}")))
+}
+
 /// 命令参数转成给脚本的值。JS 的数字都是 f64。
 fn host_value(value: &Value) -> HostValue {
     match value {
@@ -732,6 +780,8 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::ActiveProjectChanged => {
             HostObject::new().field("type", "active_project_changed")
         }
+        HostEvent::SessionsChanged => HostObject::new().field("type", "sessions_changed"),
+        HostEvent::AttentionChanged => HostObject::new().field("type", "attention_changed"),
         HostEvent::AgentSettingsChanged => {
             HostObject::new().field("type", "agent_settings_changed")
         }
@@ -779,11 +829,13 @@ mod tests {
     #[test]
     fn host_queries_check_their_arguments_before_entering_app() {
         let module = JsPlugin::new().module();
-        for machine in [HostValue::Bool(true), HostValue::Number(1.0)] {
-            let error = module
-                .call("agent_settings", &HostArguments::new([machine]))
-                .unwrap_err();
-            assert!(error.message().contains("机器要是 null 或字符串"));
+        for query in ["agent_settings", "session_states", "workspace_directory"] {
+            for machine in [HostValue::Bool(true), HostValue::Number(1.0)] {
+                let error = module
+                    .call(query, &HostArguments::new([machine]))
+                    .unwrap_err();
+                assert!(error.message().contains("机器要是 null 或字符串"));
+            }
         }
         assert!(
             module

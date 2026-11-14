@@ -490,7 +490,8 @@ fn apply_daemon_attention_baseline(
     AttentionGlobal::apply_daemon_baseline(state, cx);
 }
 
-/// 新关注事件入队后的应用级协调出口。这里一次性完成角标、菜单和通知投递；
+/// 新关注事件入队后的应用级协调出口。这里投递通知（菜单栏、角标由插件按
+/// `HostEvent::AttentionChanged` 自己画）；
 /// `Workspace::render` 不参与消费队列，因此原生全屏窗口在其它 Space 暂停绘制时，
 /// hook/OSC/ACP 事件仍会立即变成系统通知。
 fn dispatch_pending_attention(current_ws: &Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
@@ -504,21 +505,15 @@ fn dispatch_pending_attention(current_ws: &Rc<RefCell<Option<MainWindow>>>, cx: 
     };
     // The batch leaves AttentionStore here, but system-channel payloads are synchronously copied
     // into the native bridge's retry queue before any asynchronous UserNotifications call starts.
-    let (badge_count, batch, unread_session_ids) = {
+    let (batch, unread_session_ids) = {
         let mut store = store.lock().unwrap();
         let unread_session_ids = store
             .unread_items()
             .into_iter()
             .map(|item| item.session_id)
             .collect::<Vec<_>>();
-        (
-            store.badge_count(),
-            store.drain_deliveries(),
-            unread_session_ids,
-        )
+        (store.drain_deliveries(), unread_session_ids)
     };
-    dock::set_badge(badge_count);
-    status_item::set_attention_count(badge_count);
     status_item::retain_system_notifications(&unread_session_ids);
 
     // `NSApplication.isActive` 只回答“Smelt 是否在前台”；应用内可能还有设置窗口。
@@ -535,7 +530,6 @@ fn dispatch_pending_attention(current_ws: &Rc<RefCell<Option<MainWindow>>>, cx: 
         .and_then(|workspace| {
             workspace
                 .update(cx, |workspace, cx| {
-                    workspace.sync_notification_surfaces(cx);
                     if workspace_window_active {
                         workspace.mark_visible_session_read(cx);
                     }
@@ -648,8 +642,7 @@ impl Session {
         }
     }
 
-    /// ACP 会话的视图；终端会话返回 None（跟 `active_term` 反过来，供侧栏右键
-    /// 的「强制重启」这类 ACP 专属操作用）。
+    /// ACP 会话的视图；终端会话返回 None（跟 `active_term` 反过来）。
     fn active_acp(&self) -> Option<&Entity<acp_view::AcpView>> {
         match &self.kind {
             SessionKind::Term { .. } => None,
@@ -1891,13 +1884,6 @@ struct Workspace {
     /// 它原先直接写在 `render_settings_content` 里，设置窗口每帧都要重算一遍，下拉一
     /// 展开就肉眼可见掉帧。字体列表在进程生命周期内几乎不变，不值得每帧重扫。
     font_options: std::cell::OnceCell<std::sync::Arc<Vec<(SharedString, SharedString)>>>,
-    /// 上次同步给 Dock 的待关注会话数；None 强制首次同步。
-    dock_badge_count: Option<usize>,
-    /// 上次同步给菜单栏图标的运行中会话数；None 强制首次同步。
-    status_running_count: Option<usize>,
-    /// 上次同步给菜单栏下拉菜单的会话快照；None 强制首次同步。只在快照真的变化
-    /// 时才重建 AppKit 菜单，避免高频 daemon 状态事件反复拆建。
-    status_menu_snapshot: Option<Vec<status_item::SessionEntry>>,
     /// 正在重命名的对象 + 弹窗里的文本框（None = 没在重命名）。见
     /// `start_rename`/`confirm_rename`。
     rename_target: Option<RenameTarget>,
@@ -2193,9 +2179,6 @@ impl Workspace {
             plugin_shown_views: HashSet::new(),
             plugin_overlay_open: false,
             font_options: std::cell::OnceCell::new(),
-            dock_badge_count: None,
-            status_running_count: None,
-            status_menu_snapshot: None,
             rename_target: None,
             rename_input: None,
             rename_initial: None,
@@ -3054,7 +3037,6 @@ fn main() {
                     let states: Vec<_> = states.into_iter().map(|(_, state)| state).collect();
                     ws.refresh_agent_memories_after_turns(&states, cx);
                     ws.retry_daemon_restart_when_idle(cx);
-                    ws.sync_notification_surfaces(cx);
                     if ws.session_manager_open {
                         ws.refresh_session_manager(cx);
                     }
@@ -3503,7 +3485,15 @@ fn main() {
                     }
                     continue;
                 }
-                // 窗口句柄失效时先关掉设置窗口再重开，避免菜单栏跳出第二份 Workspace。
+                // 菜单栏菜单项带的命令照常执行，开不开窗口由命令自己定。
+                if let status_item::StatusItemEvent::RunCommand { command, args } = event {
+                    cx.update(|cx| {
+                        let result = smelt_plugin_api::run(&command, args, cx);
+                        workspace_commands::report_failure(result, cx);
+                    });
+                    continue;
+                }
+                // 窗口句柄失效时先关掉设置窗口再重开，避免通知点击跳出第二份 Workspace。
                 let workspace =
                     cx.update(|cx| ensure_main_window(&current_ws_status, cx).workspace);
                 let _ = workspace.update_in(cx, |ws, window, cx| {
@@ -3523,7 +3513,7 @@ fn main() {
                                 cx,
                             );
                         }
-                        status_item::StatusItemEvent::ActivateMain
+                        status_item::StatusItemEvent::RunCommand { .. }
                         | status_item::StatusItemEvent::SystemNotificationStateChanged => {}
                     }
                     // activateIgnoringOtherApps 负责前置应用；这里再显式激活主窗口，

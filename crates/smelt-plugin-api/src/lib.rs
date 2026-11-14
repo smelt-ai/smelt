@@ -119,6 +119,69 @@ pub struct PathRequest {
     pub multiple: bool,
 }
 
+/// 把主窗口拿到前面来；已经关了就新开一扇。
+pub const SHOW_MAIN_WINDOW: Command<(), ()> = Command::new("smelt.app/show-main-window");
+
+/// 设置菜单栏图标旁的文字和点开的菜单。菜单栏图标只有一个、是应用图标，后设的为准；没人
+/// 设过就不显示。只有 macOS 有，别的系统什么都不做。
+pub const SET_STATUS_MENU: Command<StatusMenu, ()> = Command::new("smelt.app/set-status-menu");
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusMenu {
+    /// 图标右边的字；空的只显示图标。
+    #[serde(default)]
+    pub title: String,
+    /// 鼠标停在图标上时的提示。
+    #[serde(default)]
+    pub tooltip: String,
+    /// 点开的菜单，从上往下。
+    #[serde(default)]
+    pub items: Vec<StatusMenuItem>,
+}
+
+/// 菜单里的一项。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StatusMenuItem {
+    /// 点了执行 `command`（带 `args`），失败由宿主报给用户。
+    Action {
+        label: String,
+        #[serde(default)]
+        icon: Option<StatusIcon>,
+        command: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
+    Separator,
+}
+
+/// 菜单项左边的小图标：只取 PNG 的透明度当形状，涂成 `color`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusIcon {
+    pub png: Vec<u8>,
+    /// `0xRRGGBB`。
+    pub color: u32,
+}
+
+/// 设置 Dock 图标上的角标。只有 macOS 有，别的系统什么都不做。
+pub const SET_DOCK_BADGE: Command<DockBadge, ()> = Command::new("smelt.app/set-dock-badge");
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockBadge {
+    /// 角标上的字；`None` 清掉。
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// 一个要人看一眼的会话：有没看的提醒，或者还等人处理（批准、输入、失败）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attention {
+    /// 守护会话 id（终端是一格终端，对话是整段对话）。
+    pub session_id: String,
+    /// 还等人处理：看过也留着，到 agent 接着跑才消。`false` 是看过就消的提醒。
+    pub requires_action: bool,
+}
+
 /// 宿主转给插件的事。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
@@ -140,6 +203,11 @@ pub enum HostEvent {
     MachinesChanged,
     /// 工作台的当前项目变了（读 [`Host::active_project`]）。
     ActiveProjectChanged,
+    /// 有机器的会话状态或工作区目录变了（读 [`Host::session_states`]、
+    /// [`Host::workspace_directory`]）。
+    SessionsChanged,
+    /// 要人看一眼的会话变了（读 [`Host::attention`]）。
+    AttentionChanged,
     /// 某台机器的智能体配置变了（读 [`Host::agent_settings`]）。
     AgentSettingsChanged,
     /// 看得见的视图变了：有的露出来、有的被挡住或收起（读 [`Host::view_shown`]）。
@@ -192,6 +260,22 @@ pub trait Host: 'static {
     fn overlay_open(&self, cx: &App) -> bool;
     /// 那台机器上的路径怎么切（`/` 还是 `\`）。远程机器还没连上过时按 POSIX。
     fn path_style(&self, machine: &RuntimeKey, cx: &App) -> model::runtime_path::PathStyle;
+    /// 那台机器的运行时报的会话状态：每格终端、每段对话一条，id 是守护会话 id。没连上过
+    /// 是空的。主窗口关着也照常更新；变了发 [`HostEvent::SessionsChanged`]。
+    fn session_states(
+        &self,
+        machine: &RuntimeKey,
+        cx: &App,
+    ) -> Vec<model::daemon_state::DaemonSessionState>;
+    /// 那台机器的工作区目录：开着的项目和对话，是会话的名册（会话状态里没有的对话是还没
+    /// 起过）。还没收到是 `None`。变了发 [`HostEvent::SessionsChanged`]。
+    fn workspace_directory(
+        &self,
+        machine: &RuntimeKey,
+        cx: &App,
+    ) -> Option<model::workspace_directory::WorkspaceDirectory>;
+    /// 要人看一眼的会话，所有机器的，按会话 id 排。变了发 [`HostEvent::AttentionChanged`]。
+    fn attention(&self, cx: &App) -> Vec<Attention>;
 }
 
 struct HostGlobal {
@@ -338,6 +422,48 @@ mod tests {
             assert_eq!(machine_from_json(&machine_to_json(&machine)), Some(machine));
         }
         assert_eq!(machine_from_json(&serde_json::json!(1)), None);
+    }
+
+    #[test]
+    fn status_menu_items_are_tagged_for_scripts() {
+        let menu = StatusMenu {
+            title: "1@".into(),
+            tooltip: String::new(),
+            items: vec![
+                StatusMenuItem::Action {
+                    label: "会话".into(),
+                    icon: Some(StatusIcon {
+                        png: vec![1, 2],
+                        color: 0x112233,
+                    }),
+                    command: "smelt.sessions/activate".into(),
+                    args: serde_json::json!({ "session_id": "s" }),
+                },
+                StatusMenuItem::Separator,
+            ],
+        };
+        let value = serde_json::to_value(&menu).unwrap();
+        assert_eq!(value["items"][0]["type"], "action");
+        assert_eq!(value["items"][0]["icon"]["png"], serde_json::json!([1, 2]));
+        assert_eq!(
+            value["items"][1],
+            serde_json::json!({ "type": "separator" })
+        );
+        assert_eq!(serde_json::from_value::<StatusMenu>(value).unwrap(), menu);
+        // 脚本可以只给菜单项，项里可以不带图标和参数。
+        let bare: StatusMenu = serde_json::from_value(serde_json::json!({
+            "items": [{ "type": "action", "label": "打开", "command": "smelt.app/show-main-window" }],
+        }))
+        .unwrap();
+        assert_eq!(bare.title, "");
+        assert!(matches!(
+            &bare.items[0],
+            StatusMenuItem::Action {
+                icon: None,
+                args: serde_json::Value::Null,
+                ..
+            }
+        ));
     }
 
     #[test]

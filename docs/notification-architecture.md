@@ -127,8 +127,13 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
 - 其余未查看事件一律走 macOS 系统通知。
 - 前后台以 `NSApplication.isActive` 为事实源；不能用全屏窗口的 key 状态代替。抑制
   系统通知还要求主工作区窗口本身聚焦；焦点在设置窗口时仍投递系统通知。
-- 应用级 observer 在事件到达时立即把投递 batch 转交给渠道协调器并同步 Dock/菜单栏；
+- 应用级 observer 在事件到达时立即把投递 batch 转交给渠道协调器；
   窗口 render 不参与通知正确性，切换 Space 或窗口暂停绘制不会延迟通知。
+- Dock 角标和菜单栏由内置插件 `crates/plugins/menubar` 画：它订阅宿主的
+  `SessionsChanged`、`AttentionChanged`，读 `session_states`、`workspace_directory`、
+  `attention`，再用 `SET_DOCK_BADGE`、`SET_STATUS_MENU` 交给宿主。宿主只提供菜单栏图标和
+  Dock 的机制，不知道菜单里是什么；菜单项点了执行插件给的命令（跳会话是
+  `sessions::ACTIVATE`）。
 - daemon 首次订阅快照只建立基线，不把历史终态当作新边沿：成功不生成关注项；审批、
   等待输入和失败静默恢复成已读行动项，保留角标但不进入系统投递队列。断线重连保留
   旧镜像并正常比较边沿，不能漏掉断线期间的变化。
@@ -152,7 +157,9 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
   原始内容照常解析和显示。OSC 7501 根记录是唯一能改 phase 的终端序列，接通后由它而不是
   hook 决定该会话的 phase（见上）。
 - 铃铛展示未读；Dock 数字统计未读或仍需行动的会话（每个会话计 1）。菜单栏图标右侧
-  使用紧凑的 `N@·M`：N 是待关注会话数，M 是运行中会话数；为 0 的项省略。
+  使用紧凑的 `N@·M`：N 是待关注会话数，M 是运行中会话数；为 0 的项省略。会话状态一律
+  取守护镜像，菜单里列出运行中、要你处理和有未读的对话，分屏终端跳到提出提醒的那格，
+  没有就跳到状态最高的那格。
 - 用户看过审批/输入只会标记已读；daemon 离开等待 phase 后才真正解决行动项。
 - 用户关闭会话或 pane 时清理对应 store 条目和待投递事件。
 - 系统通知点击携带稳定 daemon session id。主窗口已关闭或仍在恢复时先挂起跳转，目标

@@ -10928,6 +10928,7 @@ dependencies = [
  "smelt-history",
  "smelt-iroh",
  "smelt-layouts",
+ "smelt-menubar",
  "smelt-model",
  "smelt-pairing",
  "smelt-paths",
@@ -11174,6 +11175,14 @@ dependencies = [
 
 [[package]]
 name = "smelt-layouts"
+version = "0.0.0"
+dependencies = [
+ "gpui-pre",
+ "smelt-plugin-api",
+]
+
+[[package]]
+name = "smelt-menubar"
 version = "0.0.0"
 dependencies = [
  "gpui-pre",

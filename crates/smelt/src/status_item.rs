@@ -1,19 +1,24 @@
-//! macOS 菜单栏右上角常驻图标（`NSStatusItem`）：显示待关注和运行中的会话数字，
-//! 点开是一个下拉菜单——只列运行中、未读、或仍要处理的会话，点某一项跳过去；
-//! 菜单底部固定一项「打开 smelt 主窗口」，对应原来「点图标就唤出/前置窗口」的行为。
+//! macOS 菜单栏右上角常驻图标（`NSStatusItem`）和系统通知桥。
+//!
+//! 菜单栏图标是宿主给插件的机制（`smelt.app/set-status-menu`）：图标是应用图标，旁边的字、
+//! 提示和点开的菜单都由插件给，点一项就执行它带的命令。列什么、怎么排，宿主不管。
 //!
 //! GPUI 本身完全没有 status item 这个概念，得绕开它直接摸 AppKit。这里还有一道坎：
 //! 要**响应点击**，而 AppKit 的按钮/菜单项只认 target-action（一个 Objective-C 对象 +
 //! 一个 selector），不认 Rust 闭包或 block，所以必须用 `objc::declare::ClassDecl` 声明
 //! 一个最小的 Objective-C 类当 "靶子"。这个类的实例、菜单栏图标、下拉菜单本身都常驻到
-//! 进程退出，不需要考虑释放；但下拉菜单里的会话条目会随会话状态变化反复重建，那些临时
+//! 进程退出，不需要考虑释放；但下拉菜单里的条目会随插件的设置反复重建，那些临时
 //! 对象在交给菜单持有后就显式 release 掉，避免每次重建都攒一份泄漏。
 
 /// 菜单栏与系统通知桥发回 GPUI 主循环的事件。
 pub enum StatusItemEvent {
-    ActivateMain,
-    /// 跳到某个会话。菜单项和系统通知都只带守护会话 id：主窗口可能已经关了、
-    /// 会话可能重排，到点击时再按 id 找当前位置。
+    /// 菜单栏菜单里点了一项：执行它带的命令。
+    RunCommand {
+        command: String,
+        args: serde_json::Value,
+    },
+    /// 点了一条会话的系统通知。通知只带守护会话 id：主窗口可能已经关了、会话可能重排，
+    /// 到点击时再按 id 找当前位置。
     JumpToDaemonSession(String),
     /// 跳到某台机器上某条自动化的一次运行。
     JumpToAutomationRun {
@@ -87,96 +92,48 @@ pub(crate) fn system_notification_status_presentation(
 #[cfg(target_os = "macos")]
 mod system_notifications;
 
-/// 下拉菜单里一个会话条目的渲染数据：应用级 attention/daemon 观察器在状态变化时
-/// 把最新会话快照喂给 `update_menu`，本文件负责把它翻译成 AppKit 菜单项。
-#[derive(Clone, PartialEq)]
-pub struct SessionEntry {
-    /// 点击要跳去的守护会话 id（终端会话是要露出来的那个 pane）。
-    ///
-    /// 不能存 `self.sessions` 的下标：主窗口关掉后点菜单会新开一个工作区，
-    /// 重新恢复出来的会话列表和旧下标对不上，只能丢掉跳转，打开的是上次停留的页面。
-    pub session_id: String,
-    pub title: String,
-    pub status_text: &'static str,
-    pub color: (u8, u8, u8),
-    /// 会话的 agent 身份 id（裸终端为 None）。菜单项左侧按它查 logo，取不到
-    /// （裸终端，或这一家还没有母图）时使用终端图标。
-    ///
-    /// 存的是 id 而不是枚举：ACP 表和终端表是两张表，只能 ACP 跑的 agent 在
-    /// 终端表里根本没有变体，用枚举就得在这里替它硬凑一个。
-    pub agent: Option<&'static str>,
+/// 菜单项点下去要执行的命令，挂在菜单项的 `representedObject` 上（JSON 字符串）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MenuAction {
+    command: String,
+    args: serde_json::Value,
 }
 
-fn status_title(attention_count: usize, running_count: usize) -> String {
-    match (attention_count, running_count) {
-        (0, 0) => String::new(),
-        (attention, 0) => format!("{attention}@"),
-        (0, running) => running.to_string(),
-        (attention, running) => format!("{attention}@·{running}"),
+/// 把 PNG 的透明度当形状，涂成 `color`（`0xRRGGBB`）。不是 PNG 是 `None`。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn tint_png(data: &[u8], color: u32) -> Option<Vec<u8>> {
+    let mut rgba = ::image::load_from_memory(data).ok()?.to_rgba8();
+    let [_, red, green, blue] = color.to_be_bytes();
+    for pixel in rgba.pixels_mut() {
+        pixel.0[0] = red;
+        pixel.0[1] = green;
+        pixel.0[2] = blue;
     }
-}
-
-fn status_tooltip(attention_count: usize, running_count: usize) -> String {
-    match (attention_count, running_count) {
-        (0, 0) => "smelt".to_string(),
-        (attention, 0) => format!("{attention} 个会话需要关注"),
-        (0, running) => format!("{running} 个会话运行中"),
-        (attention, running) => {
-            format!("{attention} 个会话需要关注，{running} 个会话运行中")
-        }
-    }
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    ::image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut encoded, ::image::ImageFormat::Png)
+        .ok()?;
+    Some(encoded.into_inner())
 }
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::{
-        SessionEntry, StatusItemEvent, status_title, status_tooltip, system_notifications,
-    };
+    use super::{MenuAction, StatusItemEvent, system_notifications, tint_png};
     use objc::declare::ClassDecl;
     use objc::runtime::{Class, Object, Sel};
     use objc::{class, msg_send, sel, sel_impl};
-    use std::sync::{
-        OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
+    use smelt_plugin_api::{StatusMenu, StatusMenuItem};
+    use std::sync::OnceLock;
 
-    /// 应用图标母图（`scripts/make-icon.sh` 产出），直接编进二进制当菜单栏图标用——
-    /// 不用 SF Symbol 占位符了，用户要的是自己的 logo。彩色原样显示（不走
-    /// `setTemplate:`，那个只吃 alpha 通道，会把带颜色的方形 logo 拍成纯色剪影）。
+    /// 应用图标母图（`scripts/make-icon.sh` 产出），直接编进二进制当菜单栏图标用。
+    /// 彩色原样显示（不走 `setTemplate:`，那个只吃 alpha 通道，会把带颜色的方形 logo
+    /// 拍成纯色剪影）。
     const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon-1024.png");
 
-    /// 各家 agent 的菜单栏 logo（`crates/smelt/assets/icons/agent-*.svg` 对应的单色
-    /// 母图，`assets/agent-*.png`）。菜单项的状态色由 Smelt 自己决定，不能依赖
-    /// `setTemplate:` 的系统白/灰色，因此 update_menu 会按状态色把 alpha 蒙版重新着色。
-    ///
-    /// 按 agent id 查表，不按枚举序号索引：序号索引要求这张表和某一个枚举一一
-    /// 对齐，而 agent 现在有 ACP 与终端两张表，且互不为子集。查不到就退回终端
-    /// glyph——少一枚 logo 是能看的降级，越界 panic 不是。
-    pub(super) const AGENT_LOGO_PNG: &[(&str, &[u8])] = &[
-        ("claude", include_bytes!("../../../assets/agent-claude.png")),
-        (
-            "copilot",
-            include_bytes!("../../../assets/agent-copilot.png"),
-        ),
-        ("codex", include_bytes!("../../../assets/agent-codex.png")),
-        ("grok", include_bytes!("../../../assets/agent-grok.png")),
-        (
-            "antigravity",
-            include_bytes!("../../../assets/agent-antigravity.png"),
-        ),
-        ("cursor", include_bytes!("../../../assets/agent-cursor.png")),
-        (
-            "opencode",
-            include_bytes!("../../../assets/agent-opencode.png"),
-        ),
-        ("kiro", include_bytes!("../../../assets/agent-kiro.png")),
-        ("pi", include_bytes!("../../../assets/agent-pi.png")),
-        ("crush", include_bytes!("../../../assets/agent-crush.png")),
-    ];
-
     /// 菜单项左侧图标统一占用的尺寸。菜单栏是 2x 显示时，13pt 已经足够辨认，
-    /// 也能让 agent logo 和终端 glyph 使用同一条文字基线。
-    const SESSION_ICON_SIZE: f64 = 13.0;
+    /// 也能让各项图标使用同一条文字基线。
+    const MENU_ICON_SIZE: f64 = 13.0;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -185,61 +142,26 @@ mod imp {
         height: f64,
     }
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct NSPoint {
-        x: f64,
-        y: f64,
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct NSRect {
-        origin: NSPoint,
-        size: NSSize,
-    }
-
-    /// 点击/选中菜单项只能拿到 Objective-C 层的 self/selector/sender，没法直接闭包
-    /// 捕获；用一个全局单例 channel 把事件转发出去，由调用方在 GPUI 事件循环里 drain
-    /// （这个文件全程原始 AppKit 调用，不能在这里直接摸 GPUI 的 `Context`）。
+    /// 点击菜单项只能拿到 Objective-C 层的 self/selector/sender，没法直接闭包捕获；用一个
+    /// 全局单例 channel 把事件转发出去，由调用方在 GPUI 事件循环里 drain（这个文件全程原始
+    /// AppKit 调用，不能在这里直接摸 GPUI 的 `Context`）。
     static EVENT_TX: OnceLock<smol::channel::Sender<StatusItemEvent>> = OnceLock::new();
 
-    /// AppKit 对象只能在主线程摸，但 `setup()` 建好之后，`update_menu`/`set_counts`
-    /// 这些后续调用要复用同一个 NSMenu / NSStatusBarButton / target 实例；把指针存成
-    /// 整数绕开裸指针不是 `Send`/`Sync` 的限制——本文件所有访问都发生在主线程
-    /// （AppKit 和 GPUI 事件循环共用同一条主线程），等价于原始指针的正常用法。
-    static MENU_PTR: OnceLock<usize> = OnceLock::new();
-    static BUTTON_PTR: OnceLock<usize> = OnceLock::new();
-    static TARGET_PTR: OnceLock<usize> = OnceLock::new();
-    static BUTTON_HAS_IMAGE: AtomicBool = AtomicBool::new(false);
-    static ATTENTION_COUNT: AtomicUsize = AtomicUsize::new(0);
-    static RUNNING_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-    fn update_status_title() {
-        let Some(&ptr) = BUTTON_PTR.get() else { return };
-        let attention_count = ATTENTION_COUNT.load(Ordering::Relaxed);
-        let running_count = RUNNING_COUNT.load(Ordering::Relaxed);
-        let mut title = status_title(attention_count, running_count);
-        if title.is_empty() && !BUTTON_HAS_IMAGE.load(Ordering::Relaxed) {
-            title.push_str("smelt");
-        }
-        let tooltip = status_tooltip(attention_count, running_count);
-        unsafe {
-            let button = ptr as *mut Object;
-            let _: () = msg_send![button, setTitle: nsstring(&title)];
-            let _: () = msg_send![button, setToolTip: nsstring(&tooltip)];
-        }
+    /// 菜单栏图标建好后常驻：按钮、菜单、点击靶子。AppKit 对象只能在主线程摸；指针存成
+    /// 整数绕开裸指针不是 `Send`/`Sync` 的限制——本文件所有访问都发生在主线程（AppKit 和
+    /// GPUI 事件循环共用同一条主线程），等价于原始指针的正常用法。
+    struct Item {
+        button: usize,
+        menu: usize,
+        target: usize,
+        has_image: bool,
     }
 
-    extern "C" fn on_activate(_this: &Object, _cmd: Sel, _sender: *mut Object) {
-        if let Some(tx) = EVENT_TX.get() {
-            let _ = tx.try_send(StatusItemEvent::ActivateMain);
-        }
-    }
+    static ITEM: OnceLock<Item> = OnceLock::new();
 
-    /// 会话菜单项的 action：`representedObject` 是 `update_menu` 挂上的守护会话 id。
-    extern "C" fn on_jump(_this: &Object, _cmd: Sel, sender: *mut Object) {
-        let session_id = unsafe {
+    /// 菜单项的 action：`representedObject` 是 [`set_menu`] 挂上的 [`MenuAction`] JSON。
+    extern "C" fn on_run(_this: &Object, _cmd: Sel, sender: *mut Object) {
+        let text = unsafe {
             let value: *mut Object = msg_send![sender, representedObject];
             if value.is_null() {
                 return;
@@ -252,8 +174,14 @@ mod imp {
                 .to_string_lossy()
                 .into_owned()
         };
+        let Ok(action) = serde_json::from_str::<MenuAction>(&text) else {
+            return;
+        };
         if let Some(tx) = EVENT_TX.get() {
-            let _ = tx.try_send(StatusItemEvent::JumpToDaemonSession(session_id));
+            let _ = tx.try_send(StatusItemEvent::RunCommand {
+                command: action.command,
+                args: action.args,
+            });
         }
     }
 
@@ -265,12 +193,8 @@ mod imp {
                 .expect("SmeltStatusItemTarget 类重复注册");
             unsafe {
                 decl.add_method(
-                    sel!(smeltStatusItemActivate:),
-                    on_activate as extern "C" fn(&Object, Sel, *mut Object),
-                );
-                decl.add_method(
-                    sel!(smeltStatusItemJump:),
-                    on_jump as extern "C" fn(&Object, Sel, *mut Object),
+                    sel!(smeltStatusItemRun:),
+                    on_run as extern "C" fn(&Object, Sel, *mut Object),
                 );
             }
             decl.register()
@@ -283,105 +207,30 @@ mod imp {
         msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()]
     }
 
-    /// 生成和左侧会话菜单一致的方框终端图标。这里直接用 AppKit 画 Lucide
-    /// `SquareTerminal` 的几条线，避免依赖 GPUI 的运行时 SVG 资源；调用方用完
-    /// （挂到菜单项上）后自己 release 这一份。
-    unsafe fn terminal_image(color: (u8, u8, u8)) -> *mut Object {
-        let size = NSSize {
-            width: SESSION_ICON_SIZE,
-            height: SESSION_ICON_SIZE,
-        };
-        let image: *mut Object = msg_send![class!(NSImage), alloc];
-        let image: *mut Object = msg_send![image, initWithSize: size];
-        let _: () = msg_send![image, lockFocus];
-        let ns_color: *mut Object = msg_send![class!(NSColor),
-            colorWithSRGBRed: color.0 as f64 / 255.0
-            green: color.1 as f64 / 255.0
-            blue: color.2 as f64 / 255.0
-            alpha: 1.0f64];
-        let _: () = msg_send![ns_color, set];
-        let scale = SESSION_ICON_SIZE / 24.0;
-        let rect = NSRect {
-            origin: NSPoint {
-                x: 3.0 * scale,
-                y: 3.0 * scale,
-            },
-            size: NSSize {
-                width: 18.0 * scale,
-                height: 18.0 * scale,
-            },
-        };
-        let frame: *mut Object = msg_send![class!(NSBezierPath),
-            bezierPathWithRoundedRect: rect
-            xRadius: 2.0 * scale
-            yRadius: 2.0 * scale];
-        let _: () = msg_send![frame, setLineWidth: 2.0 * scale];
-        let _: () = msg_send![frame, stroke];
-
-        // NSImage 的原点在左下，SquareTerminal SVG 的原点在左上，所以 y 轴要翻转。
-        let point = |x: f64, y: f64| NSPoint {
-            x: x * scale,
-            y: (24.0 - y) * scale,
-        };
-        let prompt: *mut Object = msg_send![class!(NSBezierPath), bezierPath];
-        let _: () = msg_send![prompt, moveToPoint: point(7.0, 11.0)];
-        let _: () = msg_send![prompt, lineToPoint: point(9.0, 9.0)];
-        let _: () = msg_send![prompt, lineToPoint: point(7.0, 7.0)];
-        let _: () = msg_send![prompt, setLineWidth: 2.0 * scale];
-        let _: () = msg_send![prompt, stroke];
-
-        let underscore: *mut Object = msg_send![class!(NSBezierPath), bezierPath];
-        let _: () = msg_send![underscore, moveToPoint: point(11.0, 13.0)];
-        let _: () = msg_send![underscore, lineToPoint: point(15.0, 13.0)];
-        let _: () = msg_send![underscore, setLineWidth: 2.0 * scale];
-        let _: () = msg_send![underscore, stroke];
-        let _: () = msg_send![image, unlockFocus];
-        image
-    }
-
-    fn tint_agent_logo(data: &[u8], color: (u8, u8, u8)) -> Option<Vec<u8>> {
-        let mut rgba = ::image::load_from_memory(data).ok()?.to_rgba8();
-        for pixel in rgba.pixels_mut() {
-            pixel.0[0] = color.0;
-            pixel.0[1] = color.1;
-            pixel.0[2] = color.2;
-        }
-        let mut encoded = std::io::Cursor::new(Vec::new());
-        ::image::DynamicImage::ImageRgba8(rgba)
-            .write_to(&mut encoded, ::image::ImageFormat::Png)
-            .ok()?;
-        Some(encoded.into_inner())
-    }
-
-    /// 生成一枚按会话状态着色的 agent 菜单栏 logo。与 `terminal_image` 一样：返回的
-    /// NSImage 归调用方，挂到菜单项上后由调用方 release 这一份。这一家没有母图
-    /// 时返回 None，由调用方退回终端 glyph。
-    unsafe fn agent_logo_image(agent: &str, color: (u8, u8, u8)) -> Option<*mut Object> {
-        let data = AGENT_LOGO_PNG
-            .iter()
-            .find(|(id, _)| *id == agent)
-            .map(|(_, data)| *data)?;
-        let tinted = tint_agent_logo(data, color).unwrap_or_else(|| data.to_vec());
+    /// PNG → `NSImage`（+1，调用方挂到菜单项上后 release）。数据坏了是 `None`。
+    unsafe fn image(data: &[u8], size: f64) -> Option<*mut Object> {
         let ns_data: *mut Object = msg_send![
             class!(NSData),
-            dataWithBytes: tinted.as_ptr() as *const std::ffi::c_void
-            length: tinted.len()
+            dataWithBytes: data.as_ptr() as *const std::ffi::c_void
+            length: data.len()
         ];
         let image: *mut Object = msg_send![class!(NSImage), alloc];
         let image: *mut Object = msg_send![image, initWithData: ns_data];
+        if image.is_null() {
+            return None;
+        }
         let _: () = msg_send![image, setSize: NSSize {
-            width: SESSION_ICON_SIZE,
-            height: SESSION_ICON_SIZE,
+            width: size,
+            height: size,
         }];
         Some(image)
     }
 
-    /// 建菜单栏图标 + 空下拉菜单：应用 icon 母图缩到菜单栏尺寸，取不到（理论上不会，
-    /// PNG 编进二进制里的，兜底而已）就退化成文字。菜单内容留给 `update_menu` 按会话
-    /// 状态填充。图标、菜单、点击靶子实例都常驻到进程退出，故意不释放。
-    pub fn setup(tx: smol::channel::Sender<StatusItemEvent>) {
-        let _ = EVENT_TX.set(tx.clone());
-        unsafe {
+    /// 第一次设菜单时建菜单栏图标：应用 icon 母图缩到菜单栏尺寸，取不到（理论上不会，PNG
+    /// 编进二进制里的，兜底而已）就退化成文字。图标、菜单、点击靶子实例都常驻到进程退出，
+    /// 故意不释放。
+    fn item() -> &'static Item {
+        ITEM.get_or_init(|| unsafe {
             let bar: *mut Object = msg_send![class!(NSStatusBar), systemStatusBar];
             // NSVariableStatusItemLength == -1.0，让系统按内容自适应宽度。
             let item: *mut Object = msg_send![bar, statusItemWithLength: -1.0f64];
@@ -390,106 +239,96 @@ mod imp {
 
             let button: *mut Object = msg_send![item, button];
             let _: () = msg_send![button, retain];
-            let _ = BUTTON_PTR.set(button as usize);
-
-            let data: *mut Object = msg_send![
-                class!(NSData),
-                dataWithBytes: APP_ICON_PNG.as_ptr() as *const std::ffi::c_void
-                length: APP_ICON_PNG.len()
-            ];
-            let image: *mut Object = msg_send![class!(NSImage), alloc];
-            let image: *mut Object = msg_send![image, initWithData: data];
-            if !image.is_null() {
-                // 母图是 1024×1024，菜单栏图标按 20pt 显示（跟系统自带图标的观感尺寸
-                // 对齐），NSImage 自己插值缩小，不用额外裁剪/预生成小图。
-                let _: () = msg_send![image, setSize: NSSize { width: 20.0, height: 20.0 }];
-                let _: () = msg_send![button, setImage: image];
-                let _: () = msg_send![button, setImagePosition: 2u64]; // NSImageLeft：图标靠左，角标数字（若有）跟在右边
-                BUTTON_HAS_IMAGE.store(true, Ordering::Relaxed);
-            } else {
-                let _: () = msg_send![button, setTitle: nsstring("smelt")];
-            }
-            update_status_title();
+            // 母图是 1024×1024，菜单栏图标按 20pt 显示（跟系统自带图标的观感尺寸对齐），
+            // NSImage 自己插值缩小，不用额外裁剪/预生成小图。
+            let has_image = match image(APP_ICON_PNG, 20.0) {
+                Some(icon) => {
+                    let _: () = msg_send![button, setImage: icon];
+                    let _: () = msg_send![icon, release];
+                    let _: () = msg_send![button, setImagePosition: 2u64]; // NSImageLeft：图标靠左，字跟在右边
+                    true
+                }
+                None => false,
+            };
 
             let target: *mut Object = msg_send![target_class(), new]; // +1，永不 release
-            let _ = TARGET_PTR.set(target as usize);
-
             let menu: *mut Object = msg_send![class!(NSMenu), new]; // +1，永不 release
-            let _ = MENU_PTR.set(menu as usize);
-            let _: () = msg_send![item, setMenu: menu]; // 挂了菜单后，点按钮直接弹菜单，不再走 button 的 target/action
-        }
+            let _: () = msg_send![item, setMenu: menu]; // 挂了菜单后，点按钮直接弹菜单
+            Item {
+                button: button as usize,
+                menu: menu as usize,
+                target: target as usize,
+                has_image,
+            }
+        })
+    }
+
+    /// 装好点击事件的出口和系统通知桥。菜单栏图标等第一次设菜单时才建。
+    pub fn setup(tx: smol::channel::Sender<StatusItemEvent>) {
+        let _ = EVENT_TX.set(tx.clone());
         system_notifications::setup(tx);
     }
 
-    /// Attention observer 可能在工作区不可用时独立到达，因此允许只更新 `@` 前的计数，
-    /// 并保留已有运行数。
-    pub fn set_attention_count(attention_count: usize) {
-        ATTENTION_COUNT.store(attention_count, Ordering::Relaxed);
-        update_status_title();
-    }
-
-    /// 同步完整状态栏计数：`N@·M` 中 N 是待关注会话数，M 是运行中会话数。
-    /// 任一项为 0 时省略该项及分隔点，两项都为 0 时只保留应用图标。
-    pub fn set_counts(attention_count: usize, running_count: usize) {
-        ATTENTION_COUNT.store(attention_count, Ordering::Relaxed);
-        RUNNING_COUNT.store(running_count, Ordering::Relaxed);
-        update_status_title();
-    }
-
-    /// 按需要关心的会话快照重建下拉菜单：先清空，逐条建一个由 agent logo（裸终端为方框终端
-    /// 图标）、标题和状态文字组成的菜单项（挂着守护会话 id，点击经 `on_jump` 转发），最后加
-    /// 一条分隔线 + 固定的「打开 smelt 主窗口」项。没有此类会话时只留那一项。
-    ///
-    /// 只在会话快照真的变化时被调用（见 main.rs），不是每帧都建。
-    pub fn update_menu(entries: &[SessionEntry]) {
-        let (Some(&menu_ptr), Some(&target_ptr)) = (MENU_PTR.get(), TARGET_PTR.get()) else {
-            return;
-        };
+    /// 按插件给的设置重画菜单栏图标旁的字、提示和菜单：先清空，逐项建菜单项（命令挂在
+    /// `representedObject` 上，点击经 `on_run` 转发）。
+    pub fn set_menu(status: &StatusMenu) {
+        let item = item();
         unsafe {
-            let menu = menu_ptr as *mut Object;
-            let target = target_ptr as *mut Object;
+            let button = item.button as *mut Object;
+            let title = if status.title.is_empty() && !item.has_image {
+                "smelt"
+            } else {
+                status.title.as_str()
+            };
+            let _: () = msg_send![button, setTitle: nsstring(title)];
+            let _: () = msg_send![button, setToolTip: nsstring(&status.tooltip)];
+
+            let menu = item.menu as *mut Object;
+            let target = item.target as *mut Object;
             let _: () = msg_send![menu, removeAllItems];
-
-            for entry in entries.iter() {
-                let title = format!("{} — {}", entry.title, entry.status_text);
-                let item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-                let item: *mut Object = msg_send![item,
-                    initWithTitle: nsstring(&title)
-                    action: sel!(smeltStatusItemJump:)
-                    keyEquivalent: nsstring("")];
-                // 会话 id 挂在 representedObject 上（菜单项强引用它），点击经 on_jump 带回。
-                let _: () = msg_send![item, setRepresentedObject: nsstring(&entry.session_id)];
-                let _: () = msg_send![item, setTarget: target];
-                // 左侧图标：有 agent 身份用按状态着色的 logo，裸终端使用同一套
-                // SquareTerminal glyph；两者都占 SESSION_ICON_SIZE，确保文字对齐。
-                let icon = entry
-                    .agent
-                    .and_then(|agent| agent_logo_image(agent, entry.color))
-                    .unwrap_or_else(|| terminal_image(entry.color));
-                let _: () = msg_send![item, setImage: icon];
-                let _: () = msg_send![icon, release]; // setImage: 会 copy 一份，这份原件用不着了
-                let _: () = msg_send![menu, addItem: item];
-                let _: () = msg_send![item, release]; // addItem: 会 retain 一份，这份原件用不着了
+            for entry in &status.items {
+                match entry {
+                    StatusMenuItem::Separator => {
+                        let separator: *mut Object = msg_send![class!(NSMenuItem), separatorItem];
+                        let _: () = msg_send![menu, addItem: separator];
+                    }
+                    StatusMenuItem::Action {
+                        label,
+                        icon,
+                        command,
+                        args,
+                    } => {
+                        let Ok(action) = serde_json::to_string(&MenuAction {
+                            command: command.clone(),
+                            args: args.clone(),
+                        }) else {
+                            continue;
+                        };
+                        let menu_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
+                        let menu_item: *mut Object = msg_send![menu_item,
+                            initWithTitle: nsstring(label)
+                            action: sel!(smeltStatusItemRun:)
+                            keyEquivalent: nsstring("")];
+                        // 菜单项强引用 representedObject，点击经 on_run 带回。
+                        let _: () = msg_send![menu_item, setRepresentedObject: nsstring(&action)];
+                        let _: () = msg_send![menu_item, setTarget: target];
+                        let icon = icon.as_ref().and_then(|icon| {
+                            let tinted = tint_png(&icon.png, icon.color)?;
+                            image(&tinted, MENU_ICON_SIZE)
+                        });
+                        if let Some(icon) = icon {
+                            let _: () = msg_send![menu_item, setImage: icon];
+                            let _: () = msg_send![icon, release]; // setImage: 会 copy 一份
+                        }
+                        let _: () = msg_send![menu, addItem: menu_item];
+                        let _: () = msg_send![menu_item, release]; // addItem: 会 retain 一份
+                    }
+                }
             }
-
-            if !entries.is_empty() {
-                let sep: *mut Object = msg_send![class!(NSMenuItem), separatorItem];
-                let _: () = msg_send![menu, addItem: sep];
-            }
-
-            let open_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-            let open_item: *mut Object = msg_send![open_item,
-                initWithTitle: nsstring("打开 smelt 主窗口")
-                action: sel!(smeltStatusItemActivate:)
-                keyEquivalent: nsstring("")];
-            let _: () = msg_send![open_item, setTarget: target];
-            let _: () = msg_send![menu, addItem: open_item];
-            let _: () = msg_send![open_item, release];
         }
     }
 
-    /// 点「打开 smelt 主窗口」时若主窗口已经活着：把 app 前置（smelt 目前只有一扇主
-    /// 窗口，前置整个 app 等价于前置它，不需要单独找出那扇窗口）。
+    /// 把 app 前置（smelt 只有一扇主窗口，前置整个 app 等价于前置它）。
     pub fn activate_app() {
         unsafe {
             let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
@@ -513,11 +352,11 @@ mod imp {
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    use super::{
-        SessionEntry, StatusItemEvent, SystemNotificationAuthorization, SystemNotificationStatus,
-    };
+    use super::{StatusItemEvent, SystemNotificationAuthorization, SystemNotificationStatus};
+    use smelt_plugin_api::StatusMenu;
 
     pub fn setup(_tx: smol::channel::Sender<StatusItemEvent>) {}
+    pub fn set_menu(_status: &StatusMenu) {}
     pub fn activate_app() {}
     pub fn is_app_active() -> bool {
         true
@@ -554,12 +393,9 @@ mod imp {
     pub fn take_system_notification_errors() -> Vec<String> {
         Vec::new()
     }
-    pub fn set_attention_count(_attention_count: usize) {}
-    pub fn set_counts(_attention_count: usize, _running_count: usize) {}
-    pub fn update_menu(_entries: &[SessionEntry]) {}
 }
 
-pub use imp::{activate_app, is_app_active, set_attention_count, set_counts, setup, update_menu};
+pub use imp::{activate_app, is_app_active, set_menu, setup};
 
 #[cfg(target_os = "macos")]
 pub use system_notifications::{
@@ -582,46 +418,25 @@ pub use imp::{
 #[cfg(test)]
 mod tests {
     use super::{
-        SystemNotificationAuthorization, SystemNotificationStatus, status_title, status_tooltip,
-        system_notification_status_presentation,
+        SystemNotificationAuthorization, SystemNotificationStatus,
+        system_notification_status_presentation, tint_png,
     };
 
-    /// 每一家 agent 都要有菜单栏母图。
-    ///
-    /// 查表是按 id 的，查不到就静默退回终端方块——那是个「图标不对」的 bug，
-    /// 不会崩、也不会有人在 code review 里看出来，所以用不变量把它变成红测试。
-    /// 两张表都要覆盖：一家 agent 可能只走 ACP 或只走终端（antigravity）。
-    #[cfg(target_os = "macos")]
+    /// 上色只换颜色，形状（透明度）不动。
     #[test]
-    fn every_agent_has_a_status_menu_logo() {
-        use smelt_model::agent_kind::{ConversationAgentKind, TerminalAgentKind};
-        let ids: Vec<&str> = super::imp::AGENT_LOGO_PNG
-            .iter()
-            .map(|(id, _)| *id)
-            .collect();
-        for kind in TerminalAgentKind::ALL {
-            assert!(
-                ids.contains(&kind.id()),
-                "终端 agent {} 没有菜单栏母图",
-                kind.id()
-            );
-        }
-        for kind in ConversationAgentKind::ALL {
-            assert!(
-                ids.contains(&kind.id()),
-                "ACP agent {} 没有菜单栏母图",
-                kind.id()
-            );
-        }
-    }
-
-    #[test]
-    fn status_label_matches_the_compact_attention_and_running_format() {
-        assert_eq!(status_title(0, 0), "");
-        assert_eq!(status_title(5, 0), "5@");
-        assert_eq!(status_title(0, 660), "660");
-        assert_eq!(status_title(5, 660), "5@·660");
-        assert_eq!(status_tooltip(5, 660), "5 个会话需要关注，660 个会话运行中");
+    fn tinting_keeps_the_alpha_mask() {
+        let mut source = ::image::RgbaImage::new(2, 1);
+        source.put_pixel(0, 0, ::image::Rgba([255, 255, 255, 255]));
+        source.put_pixel(1, 0, ::image::Rgba([0, 0, 0, 0]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        ::image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .unwrap();
+        let tinted = tint_png(png.get_ref(), 0x112233).expect("是 PNG");
+        let tinted = ::image::load_from_memory(&tinted).unwrap().to_rgba8();
+        assert_eq!(tinted.get_pixel(0, 0).0, [0x11, 0x22, 0x33, 255]);
+        assert_eq!(tinted.get_pixel(1, 0).0[3], 0);
+        assert_eq!(tint_png(b"not a png", 0), None);
     }
 
     #[test]
