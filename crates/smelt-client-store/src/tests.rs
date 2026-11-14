@@ -16,6 +16,7 @@ fn temp_store() -> (ClientStore, PathBuf) {
 // 带进旧版本迁移夹具。
 fn create_v7_schema(connection: &Connection) {
     connection.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    restore_v11_notify_prefs(connection);
     connection
         .execute_batch(
             "ALTER TABLE key_binding RENAME COLUMN command TO action_id;
@@ -66,8 +67,35 @@ fn create_v7_schema(connection: &Connection) {
         .unwrap();
 }
 
+/// v11 及以前客户端库里还有通知偏好表。
+fn restore_v11_notify_prefs(connection: &Connection) {
+    connection
+        .execute_batch(
+            "CREATE TABLE notify_prefs (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               approval INTEGER NOT NULL CHECK (approval IN (0, 1)),
+               input INTEGER NOT NULL CHECK (input IN (0, 1)),
+               success INTEGER NOT NULL CHECK (success IN (0, 1)),
+               failure INTEGER NOT NULL CHECK (failure IN (0, 1)),
+               terminal_bell INTEGER NOT NULL CHECK (terminal_bell IN (0, 1))
+             );",
+        )
+        .unwrap();
+}
+
+fn has_table(connection: &Connection, name: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 /// 把当前结构的对话界面状态退回 v10 的形状：文件树、Git 页的列还在，路径单独一张表。
 fn restore_v10_conversation_route(connection: &Connection) {
+    restore_v11_notify_prefs(connection);
     connection
         .execute_batch(
             "DROP TABLE conversation_route;
@@ -293,16 +321,6 @@ fn records_round_trip_and_start_empty() {
     };
     store.put_update_settings(&settings).unwrap();
     assert_eq!(store.update_settings().unwrap(), Some(settings));
-
-    let prefs = NotifyPrefsRecord {
-        approval: true,
-        input: false,
-        success: true,
-        failure: true,
-        terminal_bell: false,
-    };
-    store.put_notify_prefs(&prefs).unwrap();
-    assert_eq!(store.notify_prefs().unwrap(), Some(prefs));
 
     store.put_workspace_ui(&workspace_ui()).unwrap();
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
@@ -602,27 +620,19 @@ fn legacy_preference_rows_move_into_tables_once() {
     let store = ClientStore::open(&path).unwrap();
     assert_eq!(store.appearance().unwrap(), Some(appearance()));
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
-    assert_eq!(
-        store.notify_prefs().unwrap(),
-        None,
-        "解析不了的旧值用出厂值重来"
-    );
     assert!(store.runtime_migrated().unwrap());
     drop(store);
 
     let connection = Connection::open(&path).unwrap();
+    assert!(
+        !has_table(&connection, "notify_prefs"),
+        "通知偏好不搬，归通知插件"
+    );
     let version: u32 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, schema::SCHEMA_VERSION);
-    let leftover: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'client_pref')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!leftover);
+    assert!(!has_table(&connection, "client_pref"));
     drop(connection);
     cleanup(&path);
 }
@@ -1009,6 +1019,35 @@ fn v10_conversation_routes_keep_only_terminal_state() {
     drop(connection);
     assert!(
         path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v10"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
+    cleanup(&path);
+}
+
+/// v11 的通知偏好归了通知插件：升到 v12 时这张表删掉，别的数据原样留下；迁移前留了备份。
+#[test]
+fn v11_drops_notify_prefs() {
+    let (store, path) = temp_store();
+    store.put_appearance(&appearance()).unwrap();
+    drop(store);
+    let v11 = Connection::open(&path).unwrap();
+    restore_v11_notify_prefs(&v11);
+    v11.execute_batch(
+        "INSERT INTO notify_prefs VALUES (1, 1, 0, 1, 1, 0);
+         PRAGMA user_version = 11;",
+    )
+    .unwrap();
+    drop(v11);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(store.appearance().unwrap(), Some(appearance()));
+    drop(store);
+    let connection = Connection::open(&path).unwrap();
+    assert!(!has_table(&connection, "notify_prefs"));
+    drop(connection);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v11"))
             .exists(),
         "迁移前必须留下备份"
     );
