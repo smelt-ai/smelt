@@ -109,6 +109,8 @@ impl SessionRecord {
             provider: self.provider,
             conversation_id: self.conversation_id,
             custom_title: None,
+            conversation_name: None,
+            name: None,
             cli_exited: self.cli_exited,
             agent_token: String::new(),
             title: self.title,
@@ -283,6 +285,13 @@ impl SessionDirectory {
         }
 
         let changed = match state.entries.get_mut(&incoming.id) {
+            // 和总线同一条规则（`DaemonEventHub::publish_session`）：活实例顶掉留下的那份，
+            // 留下的那份不盖活实例。
+            Some(current) if incoming.instance != 0 && current.instance == 0 => {
+                *current = incoming.clone();
+                true
+            }
+            Some(current) if incoming.instance == 0 && current.instance != 0 => false,
             Some(current)
                 if incoming.instance != 0
                     && current.instance != 0
@@ -526,6 +535,8 @@ mod tests {
             provider: Some("claude".to_string()),
             conversation_id: Some("conv-1".to_string()),
             custom_title: None,
+            conversation_name: None,
+            name: None,
             cli_exited: false,
             agent_token: "secret-token".to_string(),
             title: Some("重构存储层".to_string()),

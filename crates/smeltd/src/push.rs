@@ -122,7 +122,8 @@ pub(crate) enum Command {
 /// 推送里显示的文字，取自提醒产生那一刻的会话状态，已按 `smelt_push` 的上限截好。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Content {
-    /// 会话名：用户起的名字优先，其次是智能体报的标题。
+    /// 会话名：各端显示的那个对话名（见 `crate::session_names`）；不在工作区目录里的会话
+    /// 没有，用用户起的名字，再其次是智能体报的标题。
     title: Option<String>,
     /// 项目名：工作目录的最后一级。
     subtitle: Option<String>,
@@ -132,10 +133,14 @@ pub(crate) struct Content {
 
 impl Content {
     pub(crate) fn of(state: &DaemonSessionState) -> Self {
-        let title = [state.custom_title.as_deref(), state.title.as_deref()]
-            .into_iter()
-            .flatten()
-            .find_map(|title| excerpt(title, TITLE_MAX_CHARS));
+        let title = [
+            state.conversation_name.as_deref(),
+            state.custom_title.as_deref(),
+            state.title.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|title| excerpt(title, TITLE_MAX_CHARS));
         let subtitle = state
             .cwd
             .as_deref()

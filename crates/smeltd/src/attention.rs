@@ -300,6 +300,7 @@ fn phase_item(state: &DaemonSessionState) -> Option<AttentionItem> {
     }
     let message = state
         .detail_line()
+        .or_else(|| state.conversation_name.clone())
         .or_else(|| state.title.clone())
         .unwrap_or_else(|| format!("会话 {}", &state.id[..8.min(state.id.len())]));
     Some(AttentionItem {

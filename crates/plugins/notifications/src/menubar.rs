@@ -9,10 +9,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use api::model::agent_kind::{ConversationAgentKind, agent_id_from_launch};
+use api::model::agent_kind::agent_id_from_launch;
 use api::model::agent_status::{AgentStatus, terminal_agent_status};
 use api::model::daemon_state::DaemonSessionState;
-use api::model::session_title::{TerminalTitle, acp_display_title, display_title};
 use api::model::workspace_directory::WorkspaceConversation;
 use api::sessions::{self, Activate};
 use api::ui::ui_theme::agent_status_u32;
@@ -168,18 +167,12 @@ fn conversation_row(
     remote: Option<&str>,
 ) -> Option<Row> {
     let status_of = |id: &str| terminal_agent_status(states.get(id));
+    // 名字运行时算好了，同一段对话里每一格报的都一样。还没推来（旧运行时）写通用名。
     let (ids, title, agent) = if let Some(acp) = &conversation.acp {
-        let state = states.get(&acp.sid);
-        let label = ConversationAgentKind::from_id(&acp.agent)
-            .map(ConversationAgentKind::label)
-            .unwrap_or(acp.agent.as_str());
-        let fallback = acp_display_title(acp.session_title.as_deref(), label, None);
-        let title = display_title(
-            conversation.custom_title.as_deref(),
-            state.and_then(|state| state.title.as_deref()),
-            None,
-            Some(&fallback),
-        );
+        let title = states
+            .get(&acp.sid)
+            .and_then(|state| state.conversation_name.clone())
+            .unwrap_or_else(|| "对话".to_string());
         (vec![acp.sid.clone()], title, Some(acp.agent.clone()))
     } else {
         let started: Vec<_> = conversation
@@ -187,19 +180,13 @@ fn conversation_row(
             .iter()
             .filter_map(|terminal| Some((terminal.id.clone()?, terminal)))
             .collect();
-        // 菜单栏不知道哪格是活动的，名字和 agent 取第一格；规则和侧栏是同一条。
+        // 菜单栏不知道哪格是活动的，agent 取第一格。
         let (first_id, first) = started.first()?;
         let state = states.get(first_id);
-        let title = TerminalTitle {
-            conversation_custom: state.and_then(|state| state.custom_title.as_deref()),
-            session_custom: conversation.custom_title.as_deref(),
-            pane_count: conversation.terminals.len(),
-            pane_custom: first.custom_title.as_deref(),
-            session_title: state.and_then(|state| state.title.as_deref()),
-            launch_label: first.launch_label.as_deref(),
-            fallback: None,
-        }
-        .display();
+        let title = started
+            .iter()
+            .find_map(|(id, _)| states.get(id)?.conversation_name.clone())
+            .unwrap_or_else(|| "终端".to_string());
         // 明确的启动命令优先；裸终端里手动起的 agent 认 hook 报的。
         let agent = first
             .launch_cmd

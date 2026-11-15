@@ -70,6 +70,13 @@ pub struct DaemonSessionState {
     pub pending_request: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// 这段对话的展示名，运行时算好（见 `SessionStateChanged::conversation_name`）。侧栏
+    /// 的对话行、菜单栏、资源页直接显示它，没有就显示通用名。
+    #[serde(default)]
+    pub conversation_name: Option<String>,
+    /// 这一格自己的展示名（分屏的子行、手机上的一格），运行时算好。
+    #[serde(default)]
+    pub name: Option<String>,
     /// 守护下发的启动命令；远程客户端在菜单快照缺少 agent 信息时用它兜底识别 provider。
     #[serde(default)]
     pub launch: Option<String>,
@@ -144,6 +151,8 @@ impl Default for DaemonSessionState {
             pending_question: None,
             pending_request: None,
             title: None,
+            conversation_name: None,
+            name: None,
             launch: None,
             provider: None,
             conversation_id: None,

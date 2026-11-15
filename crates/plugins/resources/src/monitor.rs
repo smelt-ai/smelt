@@ -5,12 +5,10 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use api::RuntimeKey;
-use api::model::agent_kind::ConversationAgentKind;
 use api::model::control_api::{
     ProcessEntry, ProcessUsage, ResourceUsageResult, SessionResourceUsage,
 };
 use api::model::daemon_state::DaemonSessionState;
-use api::model::session_title::{TerminalTitle, acp_display_title, display_title};
 use api::model::workspace_directory::WorkspaceConversation;
 use api::process_usage::{MemoryBreakdown, ProcessSampler};
 use gpui::App;
@@ -405,7 +403,7 @@ pub(crate) struct Section {
 }
 
 /// 每个守护会话属于哪段对话：守护会话 id → (对话下标, 名字)。终端分屏每格一个守护会话，
-/// 都归到同一段对话。名字的规则和侧栏是同一条（`session_title`）；归档了的不算。
+/// 都归到同一段对话。名字是运行时算好推来的，和侧栏同一个；归档了的不算。
 fn session_owners(
     conversations: Vec<WorkspaceConversation>,
     states: Vec<DaemonSessionState>,
@@ -434,39 +432,26 @@ fn conversation_sessions(
     conversation: &WorkspaceConversation,
     states: &HashMap<String, DaemonSessionState>,
 ) -> Option<(Vec<String>, String)> {
-    if let Some(acp) = &conversation.acp {
-        let state = states.get(&acp.sid);
-        let label = ConversationAgentKind::from_id(&acp.agent)
-            .map(ConversationAgentKind::label)
-            .unwrap_or(acp.agent.as_str());
-        let fallback = acp_display_title(acp.session_title.as_deref(), label, None);
-        let title = display_title(
-            conversation.custom_title.as_deref(),
-            state.and_then(|state| state.title.as_deref()),
-            None,
-            Some(&fallback),
-        );
-        return Some((vec![acp.sid.clone()], title));
+    // 名字运行时算好了，同一段对话里每一格报的都一样。还没推来（旧运行时）写通用名。
+    let (ids, fallback): (Vec<String>, &str) = match &conversation.acp {
+        Some(acp) => (vec![acp.sid.clone()], "对话"),
+        None => (
+            conversation
+                .terminals
+                .iter()
+                .filter_map(|terminal| terminal.id.clone())
+                .collect(),
+            "终端",
+        ),
+    };
+    if ids.is_empty() {
+        return None;
     }
-    let started: Vec<_> = conversation
-        .terminals
+    let title = ids
         .iter()
-        .filter_map(|terminal| Some((terminal.id.clone()?, terminal)))
-        .collect();
-    // 这里不知道哪格是活动的，名字取第一格。
-    let (first_id, first) = started.first()?;
-    let state = states.get(first_id);
-    let title = TerminalTitle {
-        conversation_custom: state.and_then(|state| state.custom_title.as_deref()),
-        session_custom: conversation.custom_title.as_deref(),
-        pane_count: conversation.terminals.len(),
-        pane_custom: first.custom_title.as_deref(),
-        session_title: state.and_then(|state| state.title.as_deref()),
-        launch_label: first.launch_label.as_deref(),
-        fallback: None,
-    }
-    .display();
-    Some((started.into_iter().map(|(id, _)| id).collect(), title))
+        .find_map(|id| states.get(id)?.conversation_name.clone())
+        .unwrap_or_else(|| fallback.to_string());
+    Some((ids, title))
 }
 
 #[cfg(test)]
@@ -478,6 +463,7 @@ mod tests {
     use smelt_plugin_api::model::control_api::{
         ProcessEntry, ProcessUsage, ResourceUsageResult, SessionResourceUsage,
     };
+    use smelt_plugin_api::model::daemon_state::DaemonSessionState;
     use smelt_plugin_api::model::workspace_directory::{
         WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal,
     };
@@ -640,7 +626,7 @@ mod tests {
         assert_eq!(monitor.local_total(), Some(usage(7., 70, 5)));
     }
 
-    /// 归档的对话不算；终端分屏的几格归到同一段对话，没起过的格不占 id。
+    /// 归档的对话不算；终端分屏的几格归到同一段对话，没起过的格不占 id；名字认运行时报的。
     #[test]
     fn owners_follow_the_directory_conversations() {
         let terminal = |id: Option<&str>| WorkspaceTerminal {
@@ -658,7 +644,6 @@ mod tests {
                 ..Default::default()
             },
             WorkspaceConversation {
-                custom_title: Some("对话".to_string()),
                 acp: Some(WorkspaceAcp {
                     sid: "acp".to_string(),
                     ..Default::default()
@@ -666,7 +651,6 @@ mod tests {
                 ..Default::default()
             },
             WorkspaceConversation {
-                custom_title: Some("分屏".to_string()),
                 terminals: vec![terminal(Some("a")), terminal(None), terminal(Some("b"))],
                 ..Default::default()
             },
@@ -675,10 +659,17 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let owners = session_owners(conversations, Vec::new());
+        let named = |id: &str, name: &str| DaemonSessionState {
+            id: id.to_string(),
+            conversation_name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let owners = session_owners(conversations, vec![named("b", "分屏")]);
         assert_eq!(owners.len(), 3);
         assert!(!owners.contains_key("archived"));
+        // 还没推名字来：通用名。
         assert_eq!(owners["acp"], (1, "对话".to_string()));
+        // 哪格报上来都认。
         assert_eq!(owners["a"], (2, "分屏".to_string()));
         assert_eq!(owners["b"], (2, "分屏".to_string()));
     }

@@ -29,6 +29,8 @@ fn recovered_state(id: &str) -> SessionState {
         provider: Some("claude".to_string()),
         conversation_id: Some("conv-1".to_string()),
         custom_title: None,
+        conversation_name: None,
+        name: None,
         cli_exited: false,
         agent_token: "should-not-persist".to_string(),
         title: Some("崩溃前的会话".to_string()),
