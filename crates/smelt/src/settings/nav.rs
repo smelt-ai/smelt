@@ -562,10 +562,7 @@ mod tests {
             child_titles(&nav, "通用"),
             ["外观", "快捷键", "面板插件", "提醒"]
         );
-        assert_eq!(
-            child_titles(&nav, "系统"),
-            ["资源占用", "维护", "关于", "磁盘"]
-        );
+        assert_eq!(child_titles(&nav, "系统"), ["维护", "关于", "磁盘"]);
         assert_eq!(child_titles(&nav, "插件"), ["行情"]);
         // 没有挑「插件」组的页就没有这一组。
         assert_eq!(

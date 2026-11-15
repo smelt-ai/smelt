@@ -1,5 +1,5 @@
 use super::*;
-use api::model::agent_kind::TerminalAgentKind;
+use api::model::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 use api::model::daemon_state::DaemonPhase;
 use api::model::workspace_directory::{WorkspaceAcp, WorkspaceTerminal};
 
