@@ -10935,6 +10935,7 @@ dependencies = [
  "smelt-pairing",
  "smelt-paths",
  "smelt-plugin-api",
+ "smelt-resources",
  "smelt-runtime-client",
  "smelt-store",
  "smelt-sys",
@@ -11272,6 +11273,7 @@ dependencies = [
  "smelt-client-store",
  "smelt-model",
  "smelt-runtime-client",
+ "smelt-sys",
  "smelt-ui",
  "smol",
 ]
@@ -11300,6 +11302,16 @@ dependencies = [
  "smelt-push",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "smelt-resources"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "smelt-plugin-api",
+ "smol",
 ]
 
 [[package]]

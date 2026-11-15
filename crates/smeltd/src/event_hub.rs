@@ -240,6 +240,11 @@ impl DaemonEventHub {
             return Ok(false);
         }
         let changed = match projection.sessions.get(&state.id) {
+            // 实例 0 是没有运行时的留下的会话（崩溃恢复、归档）。活实例一来就顶掉它，不比
+            // 修订：留下的那份也会改展示字段重发（见 `crate::session_names`），修订可能比
+            // 刚起来、还没发出去的活实例新。反过来留下的那份不能盖掉活实例。
+            Some(current) if state.instance != 0 && current.instance == 0 => true,
+            Some(current) if state.instance == 0 && current.instance != 0 => false,
             Some(current)
                 if state.instance != 0
                     && current.instance != 0
@@ -273,6 +278,12 @@ impl DaemonEventHub {
         // 还在投影锁里：同一段会话先后两次状态按发布的顺序进提醒。
         self.update_attention(|ledger| ledger.observe(dto.into(), Instant::now()));
         Ok(true)
+    }
+
+    /// 总线上现在发布着的这段会话状态。
+    pub(crate) fn published_session(&self, id: &str) -> Option<SessionState> {
+        let projection = self.projection.lock().ok()?;
+        projection.sessions.get(id).cloned()
     }
 
     pub(crate) fn remove_session(&self, id: &str, instance: u64) -> Result<bool, EventBusError> {
@@ -331,14 +342,18 @@ impl DaemonEventHub {
         &self,
         directory: &smelt_core::workspace_directory::WorkspaceDirectory,
     ) -> Result<bool, EventBusError> {
-        self.publish_projection(
+        let published = self.publish_projection(
             CORE_TOPIC_WORKSPACE_CHANGED,
             directory.revision,
             serde_json::to_value(directory).map_err(|error| {
                 EventBusError::new(format!("serialize workspace directory: {error}"))
             })?,
             ProjectionTarget::Workspace,
-        )
+        )?;
+        if published {
+            crate::session_names::directory(directory);
+        }
+        Ok(published)
     }
 
     pub(crate) fn publish_automations(
@@ -836,6 +851,8 @@ fn session_dto(state: &SessionState) -> SessionStateChanged {
         conversation_id: state.conversation_id.clone(),
         custom_title: state.custom_title.clone(),
         title: state.title.clone(),
+        conversation_name: state.conversation_name.clone(),
+        name: state.name.clone(),
         phase: match state.phase {
             Phase::Connecting => CoreSessionPhase::Connecting,
             Phase::Thinking => CoreSessionPhase::Thinking,

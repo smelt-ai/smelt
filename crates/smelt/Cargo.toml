@@ -33,6 +33,7 @@ smelt-git-ui = { path = "../plugins/git" }
 smelt-history = { path = "../plugins/history" }
 smelt-layouts = { path = "../plugins/layouts" }
 smelt-notifications = { path = "../plugins/notifications" }
+smelt-resources = { path = "../plugins/resources" }
 smelt-themes = { path = "../plugins/themes" }
 smelt-acp-view = { path = "../smelt-acp-view" }
 tokio = { version = "1", features = ["full"] }

@@ -140,6 +140,7 @@ mod session_branch;
 mod session_catalog;
 mod session_control;
 mod session_directory;
+mod session_names;
 mod session_state;
 mod terminal_graphics;
 mod terminal_names;
@@ -1125,9 +1126,35 @@ fn broadcast_state(event_hub: &EventHubHandle, state: &SessionState) {
         Ok(true) => {
             with_session_directory(|directory| directory.upsert(state));
             session_branch::observe(state);
+            session_names::observe(state);
         }
         Ok(false) => {}
         Err(error) => eprintln!("[event-hub] session state publish failed: {error}"),
+    }
+}
+
+/// 没有运行时的留下的会话（崩溃恢复、归档后重启留下的，实例 0）改展示字段再发布。它没有
+/// 活的状态锁，就在提交门里对着总线上发布着的那份改。已经被活实例接管的不动：活实例自己
+/// 发布时会带上新值。
+fn republish_dormant(
+    event_hub: &EventHubHandle,
+    id: &str,
+    update: impl FnOnce(&mut SessionState) -> bool,
+) {
+    let _commit = STATE_DIRECTORY_COMMIT_GATE.lock().unwrap();
+    let Some(mut state) = event_hub.published_session(id) else {
+        return;
+    };
+    if state.instance != 0 || !update(&mut state) {
+        return;
+    }
+    session_state::bump_state_revision(&mut state);
+    match event_hub.publish_session(&state) {
+        Ok(true) => {
+            with_session_directory(|directory| directory.upsert(&state));
+        }
+        Ok(false) => {}
+        Err(error) => eprintln!("[event-hub] dormant session publish failed: {error}"),
     }
 }
 
@@ -1139,6 +1166,7 @@ fn forget_session(event_hub: &EventHubHandle, id: &str, instance: u64) {
         Ok(true) => {
             with_session_directory(|directory| directory.remove_instance(id, instance));
             session_branch::forget(id);
+            session_names::forget(id);
         }
         Ok(false) => {}
         Err(error) => eprintln!("[event-hub] session removal publish failed: {error}"),
@@ -1157,6 +1185,7 @@ fn suspend_terminal_identity(
         return Err("终端实例已替换，不能归档旧实例".to_string());
     }
     session_branch::forget(&state.id);
+    session_names::forget(&state.id);
     with_session_directory(|directory| directory.suspend_instance(state))
         .unwrap_or_else(|| Err("终端身份目录尚未初始化".to_string()))
 }
@@ -2585,6 +2614,12 @@ fn main() {
         &acp_sessions,
         automations.lock().unwrap().snapshot(),
     ));
+    // 留下的会话进了总线才起：它们也要按目录算名字。
+    session_names::spawn(
+        Arc::clone(&sessions),
+        Arc::clone(&acp_sessions),
+        Arc::clone(&event_hub),
+    );
 
     automation_runtime::spawn(
         Arc::clone(&automations),

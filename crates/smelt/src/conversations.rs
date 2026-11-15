@@ -266,10 +266,7 @@ impl Workspace {
             let sid = view.read(cx).session_id().to_string();
             let selected = selected_sid == Some(sid.as_str());
             let runtime = view.read(cx).runtime().key().clone();
-            let title = conversation_row_title(
-                session.custom_title.as_deref(),
-                view.read(cx).auto_title().as_deref(),
-            );
+            let title = session.title(cx);
             let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
             // 行尾一格：要人管时写状态；对话所在的机器用不了时写它怎么了；否则写时间。
             let meta: (SharedString, Hsla) =
@@ -773,16 +770,6 @@ fn conversation_agent_mark(agent_name: Option<&str>) -> String {
     }
 }
 
-/// 对话行只展示用户命名或对话自己的自动标题。
-fn conversation_row_title(custom_title: Option<&str>, auto_title: Option<&str>) -> String {
-    custom_title
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .or_else(|| auto_title.map(str::trim).filter(|title| !title.is_empty()))
-        .unwrap_or("新对话")
-        .to_string()
-}
-
 fn agent_display_name(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
@@ -796,7 +783,7 @@ fn agent_display_name(name: &str) -> String {
 mod tests {
     use super::{
         bound_agent_definition_id, bound_agent_identity, conversation_agent_mark,
-        conversation_row_title, recent_conversation_order,
+        recent_conversation_order,
     };
     use crate::{AgentStatus, Workspace};
     use gpui::rgb;
@@ -854,21 +841,6 @@ mod tests {
             None,
             "自动化 Run 不是对话"
         );
-    }
-
-    #[test]
-    fn conversation_row_title_uses_title_source_not_agent_name_equality() {
-        assert_eq!(
-            conversation_row_title(Some("量化交易助手"), Some("自动标题")),
-            "量化交易助手",
-            "用户把会话命名成智能体名时不能被自动标题覆盖"
-        );
-        assert_eq!(
-            conversation_row_title(None, Some("季度复盘")),
-            "季度复盘",
-            "智能体改名不能影响已经生成的对话标题"
-        );
-        assert_eq!(conversation_row_title(None, None), "新对话");
     }
 
     #[test]

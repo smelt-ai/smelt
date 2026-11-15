@@ -41,6 +41,7 @@ members = [
     "crates/plugins/history",
     "crates/plugins/layouts",
     "crates/plugins/notifications",
+    "crates/plugins/resources",
     "crates/plugins/themes",
     "crates/smelt",
     "crates/smelt-iroh",

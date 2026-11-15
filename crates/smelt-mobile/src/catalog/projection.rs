@@ -293,9 +293,7 @@ struct ListedProject {
 struct Row {
     id: String,
     kind: view::SessionKind,
-    /// 用户起的名字。
-    custom_title: Option<String>,
-    /// 没有用户名字、运行时也还没报标题时显示的。
+    /// 运行时还没报名字时显示的（见 [`mobile_summary`]）。
     fallback_title: String,
     cwd: Option<String>,
     /// 所在项目分组在 [`Listing::projects`] 里的下标；没有分组（智能体对话、自动化运行）
@@ -381,12 +379,7 @@ impl Listing {
             self.rows.push(Row {
                 id: acp.sid.clone(),
                 kind: view::SessionKind::Acp,
-                custom_title: conversation.custom_title.clone(),
-                fallback_title: acp
-                    .session_title
-                    .clone()
-                    .filter(|title| !title.trim().is_empty())
-                    .unwrap_or_else(|| format!("{} conversation", acp.agent)),
+                fallback_title: format!("{} conversation", acp.agent),
                 cwd: acp.cwd.clone(),
                 project,
                 agent: Some(acp.agent.clone()),
@@ -397,28 +390,16 @@ impl Listing {
             });
             return;
         }
-        let single = conversation.terminals.len() == 1;
         for (leaf, terminal) in conversation.terminals.iter().enumerate() {
             // 没起过的终端守护里没有，手机打不开。
             let Some(id) = terminal.id.clone() else {
                 continue;
             };
-            // 只有一个终端时，对话的名字就是这个终端的名字。
-            let custom_title = terminal.custom_title.clone().or_else(|| {
-                single
-                    .then(|| conversation.custom_title.clone())
-                    .flatten()
-            });
             let project = self.group_for_cwd(terminal.cwd.as_deref(), false);
             self.rows.push(Row {
                 id,
                 kind: view::SessionKind::Terminal,
-                custom_title,
-                fallback_title: terminal
-                    .launch_label
-                    .clone()
-                    .filter(|label| !label.trim().is_empty())
-                    .unwrap_or_else(|| "Terminal".to_string()),
+                fallback_title: "Terminal".to_string(),
                 cwd: terminal.cwd.clone(),
                 project,
                 agent: terminal
@@ -456,7 +437,6 @@ impl Listing {
             self.rows.push(Row {
                 id: session_id.to_string(),
                 kind: view::SessionKind::Acp,
-                custom_title: None,
                 fallback_title: run.context.automation_name.clone(),
                 cwd: Some(run.context.cwd.clone()),
                 project: None,
@@ -644,12 +624,11 @@ fn mobile_summary(
     })
     .or_else(|| row.agent.clone())
     .unwrap_or_else(|| "other".to_string());
-    let title = smelt_model::session_title::display_title(
-        row.custom_title.as_deref(),
-        daemon.and_then(|state| state.title.as_deref()),
-        None,
-        Some(row.fallback_title.as_str()),
-    );
+    // 名字运行时按工作区目录算好了，和桌面侧栏同一个：对话是整段的名字，终端是这一格的。
+    // 自动化运行不在目录里，运行时不给名字，用自动化的名字。
+    let title = daemon
+        .and_then(|state| state.name.clone())
+        .unwrap_or_else(|| row.fallback_title.clone());
     view::SessionSummary {
         id: row.id.clone(),
         kind: row.kind,

@@ -57,6 +57,15 @@ pub(crate) struct SessionState {
     /// [`crate::terminal_names`] 在换对话、改名时写；`conversation_id` 变了就清掉。
     #[serde(default)]
     pub(crate) custom_title: Option<String>,
+    /// 各端显示的这段对话的名字（侧栏的对话行、菜单栏、资源页）。同一段对话里每一格都是
+    /// 同一个值。和 [`Self::name`] 一样只由 [`crate::session_names`] 按工作区目录现算后写，
+    /// 不在目录里的会话没有。
+    #[serde(default)]
+    pub(crate) conversation_name: Option<String>,
+    /// 各端显示的这一格自己的名字（分屏的子行、手机上的一格）。只有一格时和
+    /// [`Self::conversation_name`] 相同。
+    #[serde(default)]
+    pub(crate) name: Option<String>,
     /// CLI 进程已经退出、终端回到 shell。`SessionEnded` 置位；之后又有
     /// `SessionStarted`，或相位门控放行的活事件，再清掉。对话 id 不受影响。
     /// 为 true 时这条终端不能 `--resume`（见 `resume_of`）。不发 SessionEnd 的
@@ -144,6 +153,8 @@ impl Default for SessionState {
             title: None,
             conversation_id: None,
             custom_title: None,
+            conversation_name: None,
+            name: None,
             cli_exited: false,
             phase: Phase::Idle,
             phase_since: 0,

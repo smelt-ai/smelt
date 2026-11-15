@@ -31,7 +31,7 @@ Current behavior. Keep these in sync with the code.
 
 Each design states its status at the top.
 
-- [`app-plugins.md`](app-plugins.md) — The whole app as gpui-shell plugins: what the host provides, and how features move out of `Workspace`. Direction set; in progress on `feat/app-plugins`.
+- [`app-plugins.md`](app-plugins.md) — The whole app as gpui-shell plugins: the end state (what stays in the host, the plugin API, the plugin list, the session core) and the migration order derived from it.
 - [`agent-memory.md`](agent-memory.md) — Agent memory. Phase 1 is implemented; later work is listed in the doc.
 - [`subagents.md`](subagents.md) — Pi subagents as entities with their own session files. Implemented; the mobile UI is not.
 - [`pi-session-messaging-design.html`](pi-session-messaging-design.html) — Pi↔Pi session messaging (transcript as inbox). P0 is implemented (#55); P1 and P2 are not.

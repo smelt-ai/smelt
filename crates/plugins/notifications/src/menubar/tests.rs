@@ -1,5 +1,5 @@
 use super::*;
-use api::model::agent_kind::TerminalAgentKind;
+use api::model::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 use api::model::daemon_state::DaemonPhase;
 use api::model::workspace_directory::{WorkspaceAcp, WorkspaceTerminal};
 
@@ -90,54 +90,36 @@ fn terminals_never_started_are_not_sessions_yet() {
 #[test]
 fn terminal_status_name_and_agent() {
     let mut conversation = terminals(&[Some("a"), Some("b")]);
-    conversation.custom_title = Some("整段的名字".into());
     conversation.terminals[0].launch_cmd = Some("claude".into());
-    let row = conversation_row(
-        &conversation,
-        &states(&[("a", DaemonPhase::Idle), ("b", DaemonPhase::Thinking)]),
-        Some("远程机"),
-    )
-    .unwrap();
+    let mut reported = states(&[("a", DaemonPhase::Idle), ("b", DaemonPhase::Thinking)]);
+    reported.get_mut("b").unwrap().conversation_name = Some("整段的名字".into());
+    let row = conversation_row(&conversation, &reported, Some("远程机")).unwrap();
     assert_eq!(row.status(), AgentStatus::Running);
+    // 名字是运行时算好的，哪格报上来都认。
     assert_eq!(row.title, "整段的名字 · 远程机");
     assert!(agent_id_from_launch("claude").is_some());
     assert_eq!(row.agent.as_deref(), agent_id_from_launch("claude"));
 
-    // 和侧栏同一条规则：对话的用户命名 > 会话名 > 只有一格时的格子名。
-    let mut single = terminals(&[Some("a")]);
-    single.terminals[0].custom_title = Some("格子名".into());
+    let single = terminals(&[Some("a")]);
     let mut reported = states(&[("a", DaemonPhase::Idle)]);
     reported.get_mut("a").unwrap().provider = Some("codex".into());
     let row = conversation_row(&single, &reported, None).unwrap();
-    assert_eq!(row.title, "格子名");
+    // 运行时还没推名字来：通用名。
+    assert_eq!(row.title, "终端");
     // 没有启动命令就认 hook 报的。
     assert_eq!(row.agent.as_deref(), Some("codex"));
-    single.custom_title = Some("会话名".into());
-    assert_eq!(
-        conversation_row(&single, &reported, None).unwrap().title,
-        "会话名"
-    );
-    reported.get_mut("a").unwrap().custom_title = Some("对话名".into());
-    assert_eq!(
-        conversation_row(&single, &reported, None).unwrap().title,
-        "对话名"
-    );
 }
 
 #[test]
-fn conversation_name_falls_back_to_the_agent() {
-    let mut conversation = acp("s", "claude");
+fn conversation_name_comes_from_the_runtime() {
+    let conversation = acp("s", "claude");
     let row = conversation_row(&conversation, &HashMap::new(), None).unwrap();
     assert_eq!(row.ids, vec!["s".to_string()]);
     assert_eq!(row.agent.as_deref(), Some("claude"));
-    assert!(row.title.ends_with("对话"), "{}", row.title);
-
-    conversation.acp.as_mut().unwrap().session_title = Some("修 bug".into());
-    let row = conversation_row(&conversation, &HashMap::new(), None).unwrap();
-    assert_eq!(row.title, "修 bug");
+    assert_eq!(row.title, "对话");
 
     let mut live = states(&[("s", DaemonPhase::AwaitingApproval)]);
-    live.get_mut("s").unwrap().title = Some("运行时报的名字".into());
+    live.get_mut("s").unwrap().conversation_name = Some("运行时报的名字".into());
     let row = conversation_row(&conversation, &live, None).unwrap();
     assert_eq!(row.title, "运行时报的名字");
     assert_eq!(row.status(), AgentStatus::NeedsYou);

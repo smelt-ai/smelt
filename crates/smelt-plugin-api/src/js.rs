@@ -81,7 +81,7 @@ export type StatusMenuItem =
 export function agent_settings(machine: Machine): unknown | null;
 /** 那台机器的智能体配置最近一次读取或保存失败的原因；没有失败为 null。变了发 agent_settings_changed。 */
 export function agent_settings_error(machine: Machine): string | null;
-/** 那个视图此刻看得见。变了发 shown_views_changed。 */
+/** 那个视图此刻看得见；设置页（"<来源>/<名字>"）是设置窗口开着、停在这一页。变了发 shown_views_changed。 */
 export function view_shown(view: string): boolean;
 /** 主窗口此刻在前台。回到前台发 window_activated，去后台不发：定时做事的醒来时问这里，不在前台就停。 */
 export function window_active(): boolean;

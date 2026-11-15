@@ -1658,8 +1658,6 @@ pub struct AcpView {
     /// 受管运行时在本轮开始时明确上报的 system prompt 与可用工具定义。
     runtime_debug: RuntimeDebug,
     history_loading: bool,
-    /// 分页尾页可能不含首条用户消息，标题由快照单独携带。
-    session_title: Option<String>,
     /// 本会话的 agent 是否收图（握手 Ready 带来）。握手前默认 true——那时还没
     /// 粘图的机会，先假设支持，Ready 到了再按实际能力修正（Grok = false）。
     supports_image: bool,
@@ -2158,7 +2156,6 @@ impl AcpView {
             tool_debug: Default::default(),
             runtime_debug: Default::default(),
             history_loading: false,
-            session_title: None,
             supports_image: true,
             paste_hint: None,
             completion: None,
@@ -3051,12 +3048,6 @@ impl AcpView {
         self.layout_cache.borrow_mut().dirty_from = Some(0);
         self.loaded_entries_offset = snapshot.entries_offset;
         self.entries_total = self.entries_total.max(snapshot.entries_total);
-        // 省略或空白不是清空。
-        if let Some(title) =
-            smelt_model::session_title::provider_session_title(snapshot.session_title.as_deref())
-        {
-            self.session_title = Some(title.to_string());
-        }
         if let Some(tool_debug) = snapshot.tool_debug {
             self.tool_debug = tool_debug;
         }
@@ -3128,13 +3119,6 @@ impl AcpView {
         &self.sid
     }
 
-    /// 通用 ACP `session_info_update` 的 Agent 标题优先；Agent 尚未上报时由
-    /// smeltd 从首条用户消息生成稳定兜底。侧栏和完成通知共用这个结果。
-    pub fn auto_title(&self) -> Option<String> {
-        let fallback = smelt_model::acp_chat::auto_title(&self.entries);
-        smelt_model::session_title::session_name(self.session_title.as_deref(), fallback.as_deref())
-    }
-
     /// 存档快照：写进 AcpSaved.history_session_id，GUI 重开后「重新开始」
     /// 才有旧 session id 可用来尝试真续接。
     pub fn history_session_id_for_save(&self) -> Option<SessionId> {
@@ -3171,14 +3155,6 @@ impl AcpView {
     /// 的消费事实，不会被这里的旧镜像重新写入。
     pub fn restore_pending_agent_preset(&mut self, prompt: Option<String>) {
         self.pending_agent_preset = prompt.filter(|prompt| !prompt.trim().is_empty());
-    }
-
-    /// 冷启动恢复出来的视图没有消息，`auto_title` 的推导兜底也就无从谈起。
-    /// 存档里记着上次生效的标题，先摆上去；agent 之后上报新标题会覆盖它。
-    pub fn restore_session_title(&mut self, title: Option<String>) {
-        if let Some(title) = title.filter(|title| !title.trim().is_empty()) {
-            self.session_title = Some(title);
-        }
     }
 
     /// daemon 不存在时用 workspace 的最后镜像创建会话；热 attach 后首份快照会以
@@ -4495,11 +4471,6 @@ impl AcpView {
             self.history_error = snap.history_error;
             if config_rejection_is_new(self.notice.as_ref(), snap.notice.as_ref()) {
                 self.pending_config_values.clear();
-            }
-            if let Some(title) =
-                smelt_model::session_title::provider_session_title(snap.session_title.as_deref())
-            {
-                self.session_title = Some(title.to_string());
             }
             self.available_commands = snap.available_commands;
             self.usage = snap.usage;

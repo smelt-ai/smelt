@@ -448,6 +448,14 @@ pub struct SessionStateChanged {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_title: Option<String>,
     pub title: Option<String>,
+    /// 各端显示的这段对话的名字（侧栏的对话行、菜单栏）：运行时按工作区目录、用户改的名、
+    /// 会话名、智能体定义现算好，同一段对话里每一格都是同一个值。客户端直接显示，不再自己
+    /// 拼。不在工作区目录里的会话、旧运行时没有，客户端显示通用名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_name: Option<String>,
+    /// 这一格自己的名字（分屏的子行、手机上的一格）。只有一格时和 `conversation_name` 相同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub phase: CoreSessionPhase,
     #[serde(rename = "phase_since")]
     pub phase_since_unix_seconds: u64,

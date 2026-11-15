@@ -1094,7 +1094,11 @@ fn dispatch_control(
                     Err(response) => return response,
                 };
             match smelt_core::agent_host::apply_edit(&edit) {
-                Ok(settings) => success_value(control_version, &request_id, settings),
+                Ok(settings) => {
+                    // 编辑里可能带着智能体定义、自定义 Agent 的增删改。
+                    crate::session_names::agents_changed();
+                    success_value(control_version, &request_id, settings)
+                }
                 Err(error) => error_value(
                     control_version,
                     request_id,
@@ -1198,11 +1202,14 @@ fn dispatch_control(
                 agent_definition_store::create_agent_definition_on(&store, params)
                     .map_err(control_error_for_definition)
             }) {
-                Ok(agent) => success_value(
-                    control_version,
-                    &request_id,
-                    AgentDefinitionGetResult { agent },
-                ),
+                Ok(agent) => {
+                    crate::session_names::agents_changed();
+                    success_value(
+                        control_version,
+                        &request_id,
+                        AgentDefinitionGetResult { agent },
+                    )
+                }
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
@@ -1216,11 +1223,14 @@ fn dispatch_control(
                 agent_definition_store::update_agent_definition_on(&store, &params.id, params.patch)
                     .map_err(control_error_for_definition)
             }) {
-                Ok(agent) => success_value(
-                    control_version,
-                    &request_id,
-                    AgentDefinitionGetResult { agent },
-                ),
+                Ok(agent) => {
+                    crate::session_names::agents_changed();
+                    success_value(
+                        control_version,
+                        &request_id,
+                        AgentDefinitionGetResult { agent },
+                    )
+                }
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
@@ -1234,7 +1244,10 @@ fn dispatch_control(
                 agent_definition_store::delete_agent_definition_on(&store, &params.id)
                     .map_err(control_error_for_definition)
             }) {
-                Ok(()) => success_value(control_version, &request_id, params),
+                Ok(()) => {
+                    crate::session_names::agents_changed();
+                    success_value(control_version, &request_id, params)
+                }
                 Err(error) => error_value(control_version, request_id, error),
             }
         }

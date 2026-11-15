@@ -34,7 +34,6 @@ mod plugin_host;
 mod plugins;
 mod project_repositories;
 mod provider_quota;
-mod resource_monitor;
 mod runtime_call;
 mod runtime_events;
 mod runtime_space;
@@ -336,7 +335,8 @@ struct Session {
     kind: SessionKind,
     /// 最近一次会话内容或运行状态变化的 unix 秒时间戳。
     last_updated_at: u64,
-    /// 用户手动改过的会话名（侧栏右键「重命名」）；None = 用下面 title() 的自动推导。
+    /// 用户手动改过的会话名（侧栏右键「重命名」），写进工作区目录；None = 没改过。显示的
+    /// 名字由运行时算（见 `title()`）。
     custom_title: Option<String>,
     /// 创建这段对话时选择的产品级智能体。智能体本身不是会话；同一个定义可以被
     /// 任意多段会话引用。None 表示用户直接选择了底层 provider。
@@ -536,52 +536,21 @@ impl Session {
         }
     }
 
-    /// 会话标题：用户重命名最高优先；单 pane 终端继续使用该 pane 的自定义名，
-    /// 多 pane 时会话名与各 pane 名保持分离。ACP 走协议标题/首条消息兜底。
+    /// 会话名：运行时按工作区目录算好推来（见 smeltd `session_names`）。同一段对话里每一格
+    /// 报的都是同一个值，取哪格的都行。还没推来（一格都没起、旧运行时）显示通用名。
     fn title(&self, cx: &App) -> String {
         match &self.kind {
-            SessionKind::Term { active, .. } => {
-                let view = active.read(cx);
-                let state = daemon_state_for(active, cx);
-                let state = state.as_ref();
-                smelt_model::session_title::TerminalTitle {
-                    conversation_custom: state.and_then(|state| state.custom_title.as_deref()),
-                    session_custom: self.custom_title.as_deref(),
-                    pane_count: self.pane_count(),
-                    pane_custom: view.custom_title(),
-                    session_title: state.and_then(|state| state.title.as_deref()),
-                    launch_label: view.launch_label(),
-                    fallback: Some(view.title()),
-                }
-                .display()
-            }
-            SessionKind::Conversation(view) => self.custom_title.clone().unwrap_or_else(|| {
+            SessionKind::Term { .. } => self
+                .term_leaves()
+                .iter()
+                .find_map(|view| daemon_state_for(view, cx)?.conversation_name)
+                .unwrap_or_else(|| "终端".to_string()),
+            SessionKind::Conversation(view) => {
                 let view = view.read(cx);
-                let title = view.auto_title();
-                let cwd = view.cwd();
-                let dir = cwd.as_deref().and_then(|cwd| {
-                    crate::runtimes::path_style(view.runtime().key(), cx).file_name(cwd.trim())
-                });
-                // 自定义 Agent 的会话用它自己的名字（「Til 对话 · smelt」），不用底层种类名。
-                let agent_label = view.agent_label(cx);
-                let fallback = self
-                    .agent_definition_id
-                    .as_deref()
-                    .and_then(|id| settings::agent_hosts(cx)?.agent(view.runtime().key(), id))
-                    .map(|definition| definition.name.trim())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(&agent_label);
-                if self.agent_definition_id.is_some() {
-                    title
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|title| !title.is_empty())
-                        .unwrap_or(fallback)
-                        .to_string()
-                } else {
-                    smelt_model::session_title::acp_display_title(title.as_deref(), fallback, dir)
-                }
-            }),
+                daemon_state_for_session_id(view.runtime().key(), view.session_id(), cx)
+                    .and_then(|state| state.conversation_name)
+                    .unwrap_or_else(|| "对话".to_string())
+            }
         }
     }
 
@@ -762,22 +731,6 @@ impl RenameTarget {
     }
 }
 
-/// 单个终端 pane 自动推导的标题。
-///
-/// 会话名只来自守护已经发布的那份（provider 标题或首条 prompt 兜底）。
-/// 终端标题栏的 OSC 对所有 provider 都不是会话名；没有守护状态时回退到
-/// 启动项或目录名。不看用户改的名字。
-fn pane_auto_title(view: &Entity<TerminalView>, cx: &App) -> String {
-    let t = view.read(cx);
-    let session_title = daemon_state_for(view, cx).and_then(|state| state.title);
-    smelt_model::session_title::display_title(
-        None,
-        session_title.as_deref(),
-        t.launch_label(),
-        Some(t.title()),
-    )
-}
-
 fn resolve_terminal_provider(
     launch_provider: Option<settings::TerminalAgentKind>,
     detected_provider: Option<&str>,
@@ -853,21 +806,12 @@ impl CopySessionIdSource {
     }
 }
 
-/// 用户给这一格当前那段对话起过的名字（历史页 / 侧栏改名写的是同一份）。运行时按
-/// 这一格的身份查好，随会话状态推来。
-fn pane_conversation_custom_title(view: &Entity<TerminalView>, cx: &App) -> Option<String> {
-    daemon_state_for(view, cx)?.custom_title
-}
-
-/// 侧栏分屏子行显示的 pane 标题：用户改过名就用改的，否则走自动推导。
-///
-/// 跟 `pane_auto_title` 分开是有意的：`Session::title` 拿的是活动 pane 的自动标题，
-/// 若这里的自定义名漏进去，给活动 pane 改名会连带改掉侧栏父行（会话名），切换
-/// 活动 pane 后父行又跳回来——会话名和 pane 名得各归各的。
+/// 侧栏分屏子行、终端坞标签上这一格的名字，运行时算好推来（见 smeltd `session_names`）。
+/// 还没推来显示通用名。
 fn pane_title(view: &Entity<TerminalView>, cx: &App) -> String {
-    pane_conversation_custom_title(view, cx)
-        .or_else(|| view.read(cx).custom_title().map(str::to_string))
-        .unwrap_or_else(|| pane_auto_title(view, cx))
+    daemon_state_for(view, cx)
+        .and_then(|state| state.name)
+        .unwrap_or_else(|| "终端".to_string())
 }
 
 /// 单个终端 pane 的状态：逻辑同 Session::status，但只看这一个 pane 自己
@@ -1612,9 +1556,6 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
-    /// 看得见的视图：布局里露着的，加上舞台上开着的那页（见 `note_shown_views`）。插件
-    /// 问的 `view_shown` 和自带的文件、变更视图都按这份。
-    plugin_shown_views: HashSet<String>,
     /// 上次告诉插件的遮罩层开关（见 `note_overlay`），只用来判断变没变。
     plugin_overlay_open: bool,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
@@ -1640,8 +1581,6 @@ struct Workspace {
     /// 额度刷新循环的手动信号通道。额度状态本身不在 Workspace，而在
     /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
     provider_quota_refresh_tx: Option<smol::channel::Sender<provider_quota::QuotaTarget>>,
-    /// 资源占用的最新一轮结果和本机内存曲线。见 resource_monitor 模块。
-    resource_monitor: resource_monitor::ResourceMonitor,
 
     /// 守护进程是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见，需手动重启守护
     /// 才生效新代码）；None 表示还没查过，驱动设置页「更新」分区的重启提示。
@@ -1900,7 +1839,6 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
-            plugin_shown_views: HashSet::new(),
             plugin_overlay_open: false,
             font_options: std::cell::OnceCell::new(),
             rename_target: None,
@@ -1911,7 +1849,6 @@ impl Workspace {
             dir_picker: None,
             project_repositories: None,
             provider_quota_refresh_tx: None,
-            resource_monitor: Default::default(),
 
             daemon_outdated: None,
             daemon_upgrade_msg: None,
@@ -1954,8 +1891,6 @@ impl Workspace {
         ws.preload_file_manager_icon(window, cx);
         // 额度是应用级账户状态，启动后独立刷新，不依赖任何 ACP 会话是否创建。
         ws.start_provider_quota_watch(cx);
-        // 资源页的采样循环。平时睡着，设置窗口停在资源页时才量。
-        ws.start_resource_monitor(cx);
         // 侧栏「+」菜单按本机已装 CLI 过滤；启动后立刻探一次，免得等用户打开设置。
         ws.refresh_acp_runtime(cx);
         // 被系统转移、放在只读位置的 App 装不上更新：先提议移到「应用程序」，不恢复也不
@@ -1995,6 +1930,9 @@ impl Workspace {
             this.sync_host_dialogs(cx);
             this.note_overlay(cx);
         }));
+        // 主窗口关了，工作台里的视图就都看不见了。
+        cx.on_release(|_, cx| plugin_host::set_workbench_shown(HashSet::new(), cx))
+            .detach();
         ws._shell_dock_subs = workspace_layout::watch_shell_dock(&ws.shell_dock, window, cx);
         // 装布局要用 `cx.entity()` 背后的工作台（自带视图画它），等它建好。
         cx.defer_in(window, |this, window, cx| {

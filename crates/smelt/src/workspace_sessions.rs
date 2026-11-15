@@ -247,7 +247,6 @@ impl Workspace {
                         let pending_agent_preset = saved.pending_agent_preset.clone();
                         let agent_definition_id = saved.agent_definition_id.clone();
                         let automation_id = saved.automation_id.clone();
-                        let session_title = saved.session_title.clone();
                         // 第一次连上前由运行时补齐：旧版重启丢掉的插件和 MCP 勾选按当前定义
                         // 补全，完好的快照原样沿用；记忆目录由智能体 id 决定，一并补上。
                         let launch_prep = acp_view::LaunchPrep {
@@ -277,7 +276,6 @@ impl Workspace {
                             view.restore_config_values(config_values);
                             view.restore_pending_prompt(pending_prompt, pending_delivery_id);
                             view.restore_pending_agent_preset(pending_agent_preset);
-                            view.restore_session_title(session_title);
                         });
                         let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, window, cx));
                         if this.session_list_revision != restore_revision {

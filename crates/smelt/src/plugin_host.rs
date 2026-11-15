@@ -58,8 +58,8 @@ impl api::Host for SmeltHost {
     }
 
     fn view_shown(&self, id: &str, cx: &App) -> bool {
-        self.workspace()
-            .is_some_and(|workspace| workspace.read(cx).plugin_shown_views.contains(id))
+        cx.try_global::<ShownViews>()
+            .is_some_and(|shown| shown.contains(id))
     }
 
     /// 页面画在舞台上、舞台又顶着窗口上沿时，页头让出顶栏、给红黄绿按钮让位、能拖窗口；
@@ -345,6 +345,42 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     smelt_history::register(cx);
     smelt_layouts::register(cx);
     smelt_notifications::register(cx);
+    smelt_resources::register(cx);
+}
+
+/// 此刻看得见的视图。摆视图的地方各报各的：主窗口的工作台报布局里露着的和舞台上开着的
+/// 那页，设置窗口报它停着的那一页。插件只看并起来的一套（`Host::view_shown`），不分视图
+/// 摆在哪。
+#[derive(Default)]
+pub(crate) struct ShownViews {
+    workbench: HashSet<String>,
+    settings: Option<SharedString>,
+}
+
+impl Global for ShownViews {}
+
+impl ShownViews {
+    fn contains(&self, id: &str) -> bool {
+        self.workbench.contains(id) || self.settings.as_deref() == Some(id)
+    }
+}
+
+/// 工作台里看得见的视图；主窗口关了报空的。
+pub(crate) fn set_workbench_shown(shown: HashSet<String>, cx: &mut App) {
+    let views = cx.default_global::<ShownViews>();
+    if views.workbench != shown {
+        views.workbench = shown;
+        api::emit(HostEvent::ShownViewsChanged, cx);
+    }
+}
+
+/// 设置窗口停着的插件设置页；停在宿主自己的页、窗口关了报 `None`。
+pub(crate) fn set_settings_shown(page: Option<SharedString>, cx: &mut App) {
+    let views = cx.default_global::<ShownViews>();
+    if views.settings != page {
+        views.settings = page;
+        api::emit(HostEvent::ShownViewsChanged, cx);
+    }
 }
 
 impl Workspace {
@@ -455,10 +491,7 @@ impl Workspace {
         {
             shown.insert(id.clone());
         }
-        if self.plugin_shown_views != shown {
-            self.plugin_shown_views = shown;
-            api::emit(HostEvent::ShownViewsChanged, cx);
-        }
+        set_workbench_shown(shown, cx);
     }
 
     /// 遮罩层开了或关了就告诉插件：画着原生网页视图的插件要让开。插件视图在面板里是缓存着
