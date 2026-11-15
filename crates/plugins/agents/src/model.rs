@@ -314,6 +314,15 @@ pub(crate) fn clear_default_conversation_agent(runtime: &RuntimeKey, cx: &mut Ap
     );
 }
 
+/// 删掉一个智能体；它是「新对话」的默认就一起清掉。放在同一份修改里：运行时先删定义、
+/// 删成了才改默认，删除被拒（比如还挂着自动化）时默认还在。
+pub(crate) fn remove_agent(config: &mut api::model::agent_host::AgentHostSettings, id: &str) {
+    config.agents.retain(|agent| agent.id != id);
+    if config.default_conversation_agent.as_deref() == Some(id) {
+        config.default_conversation_agent = None;
+    }
+}
+
 /// 不等结果的配置修改：失败原因宿主记在 [`api::Host::agent_settings_error`]，页面从那里
 /// 显示，这里只记日志。
 pub(crate) fn report_edit(task: Task<Result<(), String>>, cx: &mut App) {

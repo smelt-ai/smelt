@@ -208,7 +208,12 @@ impl AgentsPage {
                                 column.child(render_agent_machine_header(group, cx))
                             })
                             .children(group.agents.iter().map(|agent| {
-                                self.render_agent_catalog_row(&group.runtime, agent, entity.clone())
+                                self.render_agent_catalog_row(
+                                    &group.runtime,
+                                    agent,
+                                    entity.clone(),
+                                    cx,
+                                )
                             }))
                     })),
             )
@@ -220,6 +225,7 @@ impl AgentsPage {
         runtime: &RuntimeKey,
         agent: &AgentDefinition,
         entity: Entity<AgentsPage>,
+        cx: &App,
     ) -> AnyElement {
         let agent_ref = AgentRef::new(runtime.clone(), agent.id.clone());
         let row_id = match runtime {
@@ -235,7 +241,7 @@ impl AgentsPage {
             .unwrap_or_else(|| agent.engine_kind_id.clone());
         let summary = agent_card_prompt(&agent.prompt);
         let show_engine = agent_engine_kinds().len() > 1;
-        let automation_count = self.automation_count(&agent_ref);
+        let automation_count = self.automation_count(&agent_ref, cx);
         let menu_talk_entity = open_entity.clone();
         let menu_talk_agent = agent_ref.clone();
         let menu_delete_entity = open_entity.clone();
@@ -408,7 +414,7 @@ impl AgentsPage {
         entity: Entity<AgentsPage>,
         cx: &App,
     ) -> AnyElement {
-        let automation_count = self.automation_count(&editor.agent);
+        let automation_count = self.automation_count(&editor.agent, cx);
         let error = self
             .error
             .clone()

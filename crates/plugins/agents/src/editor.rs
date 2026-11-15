@@ -883,13 +883,10 @@ impl AgentsPage {
             return;
         };
         self.arm_conversation_on_create = false;
-        if is_default_conversation_agent(&draft, cx) {
-            clear_default_conversation_agent(&draft.runtime, cx);
-        }
         let removed_id = draft.id.clone();
         let task = api::edit_agent_settings(
             &draft.runtime,
-            move |config| config.agents.retain(|agent| agent.id != removed_id),
+            move |config| remove_agent(config, &removed_id),
             cx,
         );
         if self
@@ -910,7 +907,8 @@ impl AgentsPage {
         .detach();
     }
 
-    /// 点删除先确认。引用它的自动化还在时不让删：自动化会跑不起来。
+    /// 点删除先确认。还挂着自动化的不让删（自动化会跑不起来）由运行时判定：被拒时配置退回
+    /// 运行时那份，原因见 [`api::Host::agent_settings_error`]。
     pub(crate) fn start_delete_agent(
         &mut self,
         agent: AgentRef,
@@ -923,11 +921,6 @@ impl AgentsPage {
         else {
             return;
         };
-        if let Err(error) = self.automations_block_delete(&agent) {
-            self.error = Some(error);
-            cx.notify();
-            return;
-        }
         let conversations = agent_conversation_count(&agent, cx);
         let kept = if conversations == 0 {
             String::new()
@@ -950,48 +943,16 @@ impl AgentsPage {
         .open(window, cx);
     }
 
-    /// 自动化库还没读到、读不出来，或还有自动化挂着它时，不能删。引用它的自动化只可能在
-    /// 同一台机器上。
-    fn automations_block_delete(&self, agent: &AgentRef) -> Result<(), String> {
-        if self.machines_without_automations.contains(&agent.runtime) {
-            return Ok(());
-        }
-        let machine = self.automations.get(&agent.runtime);
-        if let Some(error) = machine.and_then(|machine| machine.store_error.as_ref()) {
-            return Err(format!("自动化存储不可用，暂时不能删除智能体：{error}"));
-        }
-        let Some(machine) = machine.filter(|machine| machine.is_ready()) else {
-            return Err("正在读取关联自动化，请稍后再试".to_string());
-        };
-        match machine.automations_for(&agent.id).len() {
-            0 => Ok(()),
-            count => Err(format!("请先删除该智能体关联的 {count} 条自动化")),
-        }
-    }
-
     fn delete_agent(&mut self, agent: AgentRef, cx: &mut Context<Self>) {
-        // 确认框开着的时候可能刚有自动化挂上它。
-        if let Err(error) = self.automations_block_delete(&agent) {
-            self.error = Some(error);
-            cx.notify();
-            return;
-        }
         self.error = None;
         if self.conversation_draft.as_ref() == Some(&agent) {
             self.conversation_draft = None;
             self.arm_conversation_on_create = false;
         }
-        if is_default_conversation_agent(&agent, cx) {
-            clear_default_conversation_agent(&agent.runtime, cx);
-        }
         let deleted_id = agent.id.clone();
         let task = api::edit_agent_settings(
             &agent.runtime,
-            move |config| {
-                config
-                    .agents
-                    .retain(|definition| definition.id != deleted_id)
-            },
+            move |config| remove_agent(config, &deleted_id),
             cx,
         );
         if self
@@ -1004,11 +965,10 @@ impl AgentsPage {
         self.report_failure(task, cx);
     }
 
-    /// 挂着它的自动化有几条；那台机器的自动化库还没读到时算 0。
-    pub(crate) fn automation_count(&self, agent: &AgentRef) -> usize {
-        self.automations
-            .get(&agent.runtime)
-            .map_or(0, |machine| machine.automations_for(&agent.id).len())
+    /// 挂着它的自动化有几条，只拿来显示；还没推来时算 0。
+    pub(crate) fn automation_count(&self, agent: &AgentRef, cx: &App) -> usize {
+        cx.global::<crate::automations::AgentAutomations>()
+            .count(agent)
     }
 
     /// 去能力库管那台机器的插件、MCP。
