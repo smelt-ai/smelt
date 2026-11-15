@@ -76,6 +76,9 @@ pub(crate) struct ResourcesPage {
     sort: SortBy,
     /// 展开了明细的行（按行 id 记）。
     expanded: Rc<HashSet<SharedString>>,
+    /// 上次收到可见性变化时这一页看不看得见。事件不分是谁变了（工作台里切个标签也发），
+    /// 只有这一页自己翻转了才叫醒采样循环，不然每次都多采一轮。
+    visible: bool,
     wake: smol::channel::Sender<()>,
     _sampler: Task<()>,
     _events: Subscription,
@@ -89,7 +92,11 @@ impl ResourcesPage {
                 // 露出来要叫醒采样循环；藏起来也叫醒，循环才能确认看不见了，马上睡下，
                 // 不用再等一轮。
                 HostEvent::ShownViewsChanged => {
-                    let _ = page.wake.try_send(());
+                    let visible = shown(cx);
+                    if visible != page.visible {
+                        page.visible = visible;
+                        let _ = page.wake.try_send(());
+                    }
                 }
                 // 会话改了名、开了关了，机器加了减了：行名和分组跟着变，数等下一轮。
                 HostEvent::SessionsChanged | HostEvent::MachinesChanged if shown(cx) => {
@@ -104,6 +111,7 @@ impl ResourcesPage {
             snapshot: Rc::default(),
             sort: SortBy::default(),
             expanded: Rc::default(),
+            visible: shown(cx),
             wake,
             _sampler: sampler,
             _events: events,
@@ -193,7 +201,15 @@ async fn sample_loop(
     let mut showing = false;
     loop {
         // 看不看得见、问哪几台只能在主线程定；问本身在后台跑。
-        let Ok(calls) = this.update(cx, |_, cx| shown(cx).then(|| start_calls(cx))) else {
+        let Ok(calls) = this.update(cx, |page, cx| {
+            let calls = shown(cx).then(|| start_calls(cx));
+            if calls.is_some() && !showing {
+                // 重新露出来：上次看到的数和曲线作废，马上换掉，不留到第一轮真的采完。
+                page.monitor.reset();
+                page.rebuild(cx);
+            }
+            calls
+        }) else {
             break;
         };
         let Some(calls) = calls else {
@@ -207,11 +223,8 @@ async fn sample_loop(
         sampler = returned;
         if !showing {
             // CPU 是跟上一次采样比的，上一次可能是很久以前，比出来是那一大段的平均。这一轮
-            // 只当垫底，隔一小会再采第一轮真的；上次看到的数和曲线也都作废。
+            // 只当垫底，隔一小会再采第一轮真的。
             cx.background_executor().timer(PRIME_DELAY).await;
-            if this.update(cx, |page, _| page.monitor.reset()).is_err() {
-                break;
-            }
             showing = true;
             continue;
         }
