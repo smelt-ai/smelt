@@ -806,7 +806,7 @@ fn render_narrow_git_row(
                 .pl(px(12. + *depth as f32 * NARROW_GIT_INDENT))
                 .pr_2()
                 .py_1()
-                .child(gpui_component::input::Textarea::new(input).h(px(*input_h)))
+                .child(smelt_plugin_api::ui::TextArea::new(input).h(px(*input_h)))
                 .child(
                     h_flex()
                         .gap_1p5()

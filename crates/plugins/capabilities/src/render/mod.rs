@@ -1,8 +1,9 @@
 //! 能力库正文：只画当前页签那一页。页头和页签在 [`CapabilitiesPage`] 的 render 里。
 
 use super::*;
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::InputState;
 use gpui_component::tag::Tag;
+use smelt_plugin_api::ui::TextInput;
 
 mod auth;
 mod mcp;

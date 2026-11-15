@@ -2,22 +2,12 @@
 
 use super::*;
 
-const IDENTITY_NAME_HEIGHT: f32 = 28.;
-
 pub(crate) fn render_identity_name(input: &Entity<InputState>) -> AnyElement {
-    editor_field_frame()
+    TextInput::new(input)
+        .small()
+        .aria_label("智能体名称")
         .w_full()
-        .child(
-            Input::new(input)
-                .appearance(false)
-                .focus_bordered(false)
-                .focus_ring(false)
-                .w_full()
-                .h(px(IDENTITY_NAME_HEIGHT))
-                .px_2()
-                .text_lg()
-                .font_semibold(),
-        )
+        .font_semibold()
         .into_any_element()
 }
 
@@ -500,7 +490,12 @@ pub(crate) fn render_agent_context_card(
             div()
                 .px_3()
                 .pb_2()
-                .child(framed_text_input(&editor.context_link, "上下文链接").w_full()),
+                .child(
+                    TextInput::new(&editor.context_link)
+                        .small()
+                        .aria_label("上下文链接")
+                        .w_full(),
+                ),
         )
         .child(
             div()
@@ -531,9 +526,8 @@ pub(crate) fn agent_memory_switch(
         } else {
             "打开后在对话和自动化里使用记忆"
         })
-        .on_click(move |checked, _, cx| {
+        .on_change(move |enabled, _, cx| {
             let agent_id = agent_id.clone();
-            let enabled = *checked;
             entity.update(cx, |page, cx| {
                 page.set_agent_memory_enabled(agent_id, enabled, cx)
             });
@@ -724,7 +718,7 @@ pub(crate) fn render_agent_memory_card(
                     div()
                         .flex_1()
                         .min_w(px(200.))
-                        .child(Input::new(&editor.memory_query).small().cleanable(true)),
+                        .child(TextInput::new(&editor.memory_query).small().cleanable(true)),
                 )
                 .child(filters),
         )
@@ -1362,7 +1356,7 @@ pub(crate) fn agent_plugin_row(
             .checked(checked)
             .disabled(!usable && !checked)
             .accessibility_label(name.to_string())
-            .on_click(move |_, _, cx| {
+            .on_change(move |_, _, cx| {
                 let agent_id = toggle_agent.clone();
                 let plugin_id = toggle_plugin.clone();
                 entity.update(cx, |page, cx| match pick {
@@ -1410,42 +1404,6 @@ pub(crate) fn agent_plugin_row(
         .into_any_element()
 }
 
-/// 组件默认描边叠在卡片底上几乎看不见；聚焦时还会在外侧加 3px ring，把整块撑开。
-/// 短输入共用这一层：固定 1px 边 + 锁死高度 + 裁掉 ring。智能体和自动化都走这里。
-pub(crate) fn editor_field_frame() -> Div {
-    div()
-        .flex()
-        .items_center()
-        .flex_none()
-        .h(ui_theme::height::sm())
-        .overflow_hidden()
-        .border_1()
-        .border_color(ui_theme::hair_strong())
-        .rounded(px(8.))
-        .bg(rgb(ui_theme::side()))
-}
-
-pub(crate) fn framed_text_input(input: &Entity<InputState>, aria: &'static str) -> Div {
-    editor_field_frame().child(
-        Input::new(input)
-            .small()
-            .appearance(false)
-            .focus_bordered(false)
-            .focus_ring(false)
-            .w_full()
-            .aria_label(aria),
-    )
-}
-
-pub(crate) fn framed_textarea(textarea: Textarea) -> AnyElement {
-    div()
-        .border_1()
-        .border_color(ui_theme::hair_strong())
-        .rounded(px(8.))
-        .bg(rgb(ui_theme::side()))
-        .child(textarea.appearance(false))
-        .into_any_element()
-}
 pub(crate) fn compact_chip(id: impl Into<ElementId>) -> Button {
     Button::new(id).quiet().small()
 }

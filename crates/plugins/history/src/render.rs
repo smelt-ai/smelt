@@ -6,13 +6,13 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable, StyledExt, h_flex, v_flex};
 use smelt_plugin_api::model::acp_chat::is_interrupt_marker;
 use smelt_plugin_api::model::agent_kind::HistorySourceKind;
 use smelt_plugin_api::model::session_history::{SessionSummary, Turn};
+use smelt_plugin_api::ui::TextInput;
 use smelt_plugin_api::ui::button::Button;
 use smelt_plugin_api::ui::markdown_links::FileLinks;
 use smelt_plugin_api::ui::markdown_mermaid::chat_markdown_view;
@@ -307,7 +307,7 @@ impl Render for HistoryPage {
                     .w_full()
                     .px_2()
                     .pt_2()
-                    .child(Input::new(&self.filter).small().cleanable(true)),
+                    .child(TextInput::new(&self.filter).small().cleanable(true)),
             )
             .child(list_body);
 

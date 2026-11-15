@@ -4,7 +4,6 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::tooltip::Tooltip;
@@ -14,7 +13,7 @@ use gpui_component::{
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::client::protocol::files::is_previewable_image;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
-use smelt_plugin_api::ui::{Button, IconAction as _};
+use smelt_plugin_api::ui::{Button, IconAction as _, TextInput};
 
 use crate::model::{
     FileTreeRow, OpenFile, PreviewKind, SearchState, SearchTreeDir, breadcrumb_segments,
@@ -73,7 +72,7 @@ impl FilesPanel {
             .py(px(6.))
             .border_b_1()
             .border_color(ui_theme::hair())
-            .child(div().flex_1().min_w_0().child(Input::new(&self.filter).small()))
+            .child(div().flex_1().min_w_0().child(TextInput::new(&self.filter).small()))
             // 只能钉本机目录：远程项目的树里不混进本机目录。
             .when(local, |el| {
                 el.child(

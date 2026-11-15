@@ -89,8 +89,8 @@ fn quota_setting_item(
                     Switch::new(SharedString::from(format!("quota-enabled-{id}")))
                         .checked(provider.enabled)
                         .accessibility_label(format!("查询 {} 的额度", target.display_name()))
-                        .on_click(move |checked, _window, cx: &mut App| {
-                            set_quota_enabled(target, *checked, toggle_workspace.clone(), cx);
+                        .on_change(move |checked, _window, cx: &mut App| {
+                            set_quota_enabled(target, checked, toggle_workspace.clone(), cx);
                         }),
                 )
         }),
@@ -211,11 +211,11 @@ fn agent_groups(
                                         .w_full()
                                         .gap_2()
                                         .items_center()
-                                        .child(Input::new(label).w(name_w))
+                                        .child(TextInput::new(label).w(name_w))
                                         // 命令是 shell 代码，用终端同款等宽字体——参数里的
                                         // `-`/`_` 对齐后好读，也一眼跟左边的显示名区分开。
                                         .child(
-                                            Input::new(command)
+                                            TextInput::new(command)
                                                 .w(cmd_w)
                                                 .font_family(mono.clone()),
                                         )
@@ -500,7 +500,7 @@ fn agent_groups(
                                             menu
                                         }),
                                 )
-                                .child(div().flex_1().child(Input::new(&row.label)))
+                                .child(div().flex_1().child(TextInput::new(&row.label)))
                                 .child(
                                     Button::new(("del-profile", row_key))
                                         .quiet()
@@ -524,9 +524,9 @@ fn agent_groups(
                                 .items_center()
                                 .child(caption("启动命令"))
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .child(Input::new(&row.command).font_family(mono.clone())),
+                                    div().flex_1().child(
+                                        TextInput::new(&row.command).font_family(mono.clone()),
+                                    ),
                                 ),
                         )
                         .child(
@@ -535,7 +535,7 @@ fn agent_groups(
                                 .gap_2()
                                 .items_start()
                                 .child(caption("环境变量").pt_1())
-                                .child(div().flex_1().child(Textarea::new(&row.env))),
+                                .child(div().flex_1().child(TextArea::new(&row.env))),
                         );
                     if let Some(var) = p.workspace_env_var() {
                         card = card.child(
@@ -547,7 +547,7 @@ fn agent_groups(
                                 .child(
                                     div()
                                         .flex_1()
-                                        .child(Input::new(&row.dir).font_family(mono.clone())),
+                                        .child(TextInput::new(&row.dir).font_family(mono.clone())),
                                 )
                                 .child(div().text_xs().text_color(muted).child(var)),
                         );

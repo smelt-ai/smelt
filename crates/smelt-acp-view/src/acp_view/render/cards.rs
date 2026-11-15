@@ -1,10 +1,9 @@
 //! ACP 审批卡与选择题卡。
 
 use super::*;
-use gpui_component::checkbox::Checkbox;
-use gpui_component::radio::Radio;
+use smelt_ui::{Checkbox, Radio, TextInput};
 
-/// 选择题的一行。外框、字号和悬停透明度留在这里；勾选语义交给库的单选 / 复选框。
+/// 选择题的一行。外框、字号和悬停透明度留在这里；勾选语义交给 smelt-ui 的单选 / 复选框。
 fn elicit_choice_row<E>(row: E, selected: bool, border: gpui::Hsla) -> E
 where
     E: gpui::Styled + gpui::InteractiveElement,
@@ -349,7 +348,7 @@ impl AcpView {
                                 field.title,
                                 if *secret { "（保密）" } else { "" }
                             )))
-                            .children(input.map(|input| Input::new(&input).w_full())),
+                            .children(input.map(|input| TextInput::new(&input).w_full())),
                     );
                     continue;
                 }
@@ -370,15 +369,16 @@ impl AcpView {
                     let selected = chosen.contains(&oix);
                     let id = gpui::SharedString::from(format!("acp-elicit-opt-{fix}-{oix}"));
                     let label = opt.label.clone();
+                    let pick = cx.listener(move |this, _: &(), _window, cx| {
+                        this.pick_elicit_option(fix, oix, cx);
+                    });
                     list = list.child(if is_multi {
                         elicit_choice_row(
                             Checkbox::new(id)
                                 .checked(selected)
                                 .label(label)
                                 .debug_selector(move || format!("acp-elicit-opt-{fix}-{oix}"))
-                                .on_click(cx.listener(move |this, _: &bool, _window, cx| {
-                                    this.pick_elicit_option(fix, oix, cx);
-                                })),
+                                .on_change(move |_, window, cx| pick(&(), window, cx)),
                             selected,
                             t.border,
                         )
@@ -389,9 +389,7 @@ impl AcpView {
                                 .checked(selected)
                                 .label(label)
                                 .debug_selector(move || format!("acp-elicit-opt-{fix}-{oix}"))
-                                .on_click(cx.listener(move |this, _: &bool, _window, cx| {
-                                    this.pick_elicit_option(fix, oix, cx);
-                                })),
+                                .on_select(move |window, cx| pick(&(), window, cx)),
                             selected,
                             t.border,
                         )
@@ -411,7 +409,7 @@ impl AcpView {
                                     .text_color(muted)
                                     .child("以上都不是？输入自己的答案"),
                             )
-                            .child(Input::new(&input).w_full())
+                            .child(TextInput::new(&input).w_full())
                     }));
                 }
                 inner = inner.child(

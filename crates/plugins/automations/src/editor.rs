@@ -1018,7 +1018,8 @@ pub(crate) fn render_schedule_rule(
             })
     });
     let clock = |input: &Entity<InputState>, aria: &'static str| {
-        framed_text_input(input, aria)
+        TextInput::new(input)
+            .aria_label(aria)
             .w(px(108.))
             .into_any_element()
     };
@@ -1070,7 +1071,8 @@ pub(crate) fn render_schedule_rule(
                         .items_center()
                         .gap_2()
                         .child(
-                            framed_number_input(&rule.interval)
+                            TextInput::new(&rule.interval)
+                                .aria_label("间隔")
                                 .w(px(120.))
                                 .into_any_element(),
                         )

@@ -18,7 +18,7 @@ use gpui::{
     px, size, uniform_list,
 };
 use gpui_component::clipboard::Clipboard;
-use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_component::input::{InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
 use gpui_component::scroll::{Scrollbar, ScrollbarMode};

@@ -511,7 +511,7 @@ impl HistoryPage {
             page.update(cx, |page, cx| page.submit_rename(cx));
             true
         })
-        .body(move |_, _| gpui_component::input::Input::new(&dialog_input).into_any_element())
+        .body(move |_, _| api::ui::TextInput::new(&dialog_input).into_any_element())
         .on_close(move |_, cx| {
             on_close.update(cx, |page, _| page.renaming = None);
         })

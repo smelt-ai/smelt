@@ -4,7 +4,9 @@
 
 pub mod acp_completion;
 pub mod button;
+pub mod choice;
 pub mod dialog;
+pub mod field;
 pub mod frame_stats;
 pub mod global_wait;
 pub mod icon_action;
@@ -15,14 +17,18 @@ mod markdown_literal_html;
 pub mod markdown_mermaid;
 pub mod motion;
 pub mod segmented;
+pub mod switch;
 pub mod theme_catalog;
 pub mod truncated_line;
 pub mod ui_theme;
 
 pub use button::Button;
+pub use choice::{Checkbox, Radio};
+pub use field::{Select, TextArea, TextInput};
 pub use icon_action::IconAction;
 pub use list_row::ListRow;
 pub use segmented::{Segment, Segmented};
+pub use switch::Switch;
 
 /// 组件库没有垃圾桶：`Delete` 是带 X 的退格键，`CircleX` 是带圈的关。
 /// 删除/移除统一用这枚 Lucide trash-2。

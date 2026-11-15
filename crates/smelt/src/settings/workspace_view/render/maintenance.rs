@@ -447,8 +447,8 @@ fn update_group(
                                 Switch::new("auto-install-update")
                                     .checked(auto_install)
                                     .accessibility_label("自动下载安装")
-                                    .on_click(|checked, _window, cx: &mut App| {
-                                        apply_auto_install(*checked, cx);
+                                    .on_change(|checked, _window, cx: &mut App| {
+                                        apply_auto_install(checked, cx);
                                         cx.refresh_windows();
                                     }),
                             ),

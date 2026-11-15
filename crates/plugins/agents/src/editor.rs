@@ -6,7 +6,6 @@ use super::*;
 pub(crate) struct AgentEditor {
     pub(crate) agent: AgentRef,
     pub(crate) name: Entity<InputState>,
-    /// 名字平时当标题看，点一下才变成输入框，避免一进编辑器就闪光标。
     pub(crate) instructions: Entity<TextareaState>,
     /// 绑定参考链接用的输入框。目录走选择框，链接只能手输。
     pub(crate) context_link: Entity<InputState>,

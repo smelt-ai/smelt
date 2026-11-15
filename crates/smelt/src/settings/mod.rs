@@ -19,9 +19,8 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::progress::Progress;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
-use gpui_component::switch::Switch;
 use gpui_component::*;
-pub(crate) use smelt_ui::Button;
+pub(crate) use smelt_ui::{Button, Switch};
 
 #[cfg(any(target_os = "macos", windows))]
 use crate::updater;
