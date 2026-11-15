@@ -183,7 +183,7 @@ pub(crate) fn inline_rename_input(
         .on_action(move |_: &gpui_component::input::Escape, _window, cx| {
             workspace.update(cx, |ws, cx| ws.cancel_rename(cx));
         })
-        .child(gpui_component::input::Input::new(input).small())
+        .child(smelt_ui::TextInput::new(input).small())
 }
 
 /// 分组行开头那一格的宽度。项目、「对话」两种分组共用，下面会话的引导线对着它的中线。

@@ -3,6 +3,9 @@
 //! 一整条胶囊，底 `soft`；选中的段 `surface` 抬起，和外框同一个轮廓。选中只靠底色和
 //! 字色表示，不加描边。它不是一组按钮：单选时每段是一个单选项，多选（如星期）时每段
 //! 是一个开关，焦点、键盘、无障碍都交给 gpui-base 的无样式原件，样子在这里画。
+//!
+//! 单选时抬起的那块是独立的一层，换选中时从旧段滑到新段，宽度跟着变；多选各段各自
+//! 亮灭，没有谁滑向谁，不做动效。
 
 use std::rc::Rc;
 
@@ -16,7 +19,7 @@ use gpui_component::StyledExt as _;
 use gpui_component::tooltip::Tooltip;
 
 use crate::button::{DISABLED_OPACITY, focus_ring};
-use crate::ui_theme;
+use crate::{motion, ui_theme};
 
 type SelectHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
@@ -140,8 +143,32 @@ impl Styled for Segmented {
     }
 }
 
-/// 一段的样子：单选项和开关共用。
-fn paint_segment<E>(segment: E, selected: bool, interactive: bool, label: SharedString) -> E
+/// 各段相对第一段的左边和宽度，上一帧量出来的；选中块按它定位。
+#[derive(Default)]
+struct SegmentLayout(Vec<(f32, f32)>);
+
+/// 选中块在 `pos` 处的左边和宽度。`pos` 是段下标，滑动途中落在两段之间，按相邻两段
+/// 线性插值；跨过几段时依次经过中间的段，宽度一路跟着变。
+fn indicator_at(layout: &[(f32, f32)], pos: f32) -> Option<(f32, f32)> {
+    let last = layout.len().checked_sub(1)?;
+    let pos = pos.clamp(0., last as f32);
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(last);
+    let t = pos - lo as f32;
+    let (x0, w0) = layout[lo];
+    let (x1, w1) = layout[hi];
+    Some((x0 + (x1 - x0) * t, w0 + (w1 - w0) * t))
+}
+
+/// 一段的样子：单选项和开关共用。`raised` 时这段自己画抬起的底：多选的选中段，
+/// 以及单选还没量出各段位置的第一帧。
+fn paint_segment<E>(
+    segment: E,
+    selected: bool,
+    raised: bool,
+    interactive: bool,
+    label: SharedString,
+) -> E
 where
     E: Styled + ParentElement + StatefulInteractiveElement + IntoElement,
 {
@@ -161,7 +188,7 @@ where
         } else {
             ui_theme::muted()
         }))
-        .when(selected, |this| {
+        .when(raised, |this| {
             this.bg(rgb(ui_theme::surface()))
                 .shadow(ui_theme::lift_shadow())
         })
@@ -212,7 +239,7 @@ fn paint_track<E: Styled + IntoElement>(track: E, disabled: bool) -> E {
 }
 
 impl RenderOnce for Segmented {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Segmented {
             id,
             style,
@@ -221,54 +248,117 @@ impl RenderOnce for Segmented {
             disabled,
             on_select,
         } = self;
-        let multiple = matches!(selection, Selection::Multiple(_));
         let count = segments.len();
         let interactive = !disabled && on_select.is_some();
-        let segments = segments.into_iter().enumerate().map(|(ix, segment)| {
-            let is_selected = selection.is_selected(ix);
-            let on_select = on_select.clone();
-            let Segment { label, tooltip } = segment;
-            if multiple {
-                let toggle = Toggle::new(ix)
-                    .pressed(is_selected)
-                    .disabled(disabled)
-                    .accessibility_label(label.clone())
-                    .when_some(on_select, |this, on_select| {
-                        this.on_change(move |_, _, window, cx| on_select(ix, window, cx))
-                    });
-                with_tooltip(
-                    paint_segment(toggle, is_selected, interactive, label),
-                    tooltip,
-                )
-                .into_any_element()
+
+        let selected = match &selection {
+            Selection::Multiple(_) => {
+                let segments = segments.into_iter().enumerate().map(|(ix, segment)| {
+                    let is_selected = selection.is_selected(ix);
+                    let Segment { label, tooltip } = segment;
+                    let toggle = Toggle::new(ix)
+                        .pressed(is_selected)
+                        .disabled(disabled)
+                        .accessibility_label(label.clone())
+                        .when_some(on_select.clone(), |this, on_select| {
+                            this.on_change(move |_, _, window, cx| on_select(ix, window, cx))
+                        });
+                    with_tooltip(
+                        paint_segment(toggle, is_selected, is_selected, interactive, label),
+                        tooltip,
+                    )
+                });
+                return paint_track(ToggleGroup::new(id), disabled)
+                    .children(segments)
+                    .refine_style(&style)
+                    .into_any_element();
+            }
+            Selection::Single(selected) => selected.filter(|ix| *ix < count),
+        };
+
+        let layout = window.use_keyed_state(
+            ElementId::NamedChild(id.clone().into(), "layout".into()),
+            cx,
+            |_, _| SegmentLayout::default(),
+        );
+        // 只在有选中时取过渡值：从没选到选上，过渡状态是新建的，直接到位不滑。
+        let indicator = selected.and_then(|ix| {
+            let pos = gpui_base::motion::transition(
+                ElementId::NamedChild(id.clone().into(), "indicator".into()),
+                ix as f32,
+                motion::snap_transition(),
+                window,
+                cx,
+            );
+            let measured = layout.read(cx);
+            if measured.0.len() == count {
+                indicator_at(&measured.0, pos)
             } else {
-                let radio = Radio::new(ix)
-                    .checked(is_selected)
-                    .disabled(disabled)
-                    .set_position(ix + 1, count)
-                    .accessibility_label(label.clone())
-                    .when_some(on_select, |this, on_select| {
-                        this.on_change(move |_, _, window, cx| on_select(ix, window, cx))
-                    });
-                with_tooltip(
-                    paint_segment(radio, is_selected, interactive, label),
-                    tooltip,
-                )
-                .into_any_element()
+                None
             }
         });
-        let segments: Vec<AnyElement> = segments.collect();
-        if multiple {
-            paint_track(ToggleGroup::new(id), disabled)
-                .children(segments)
-                .refine_style(&style)
-                .into_any_element()
-        } else {
-            paint_track(RadioGroup::new(id).axis(gpui::Axis::Horizontal), disabled)
-                .children(segments)
-                .refine_style(&style)
-                .into_any_element()
-        }
+        let segments = segments.into_iter().enumerate().map(|(ix, segment)| {
+            let is_selected = selected == Some(ix);
+            let Segment { label, tooltip } = segment;
+            let radio = Radio::new(ix)
+                .checked(is_selected)
+                .disabled(disabled)
+                .set_position(ix + 1, count)
+                .accessibility_label(label.clone())
+                .when_some(on_select.clone(), |this, on_select| {
+                    this.on_change(move |_, _, window, cx| on_select(ix, window, cx))
+                });
+            let raised = is_selected && indicator.is_none();
+            with_tooltip(
+                paint_segment(radio, is_selected, raised, interactive, label),
+                tooltip,
+            )
+        });
+        // 各段放进一层普通容器，才能在布局后拿到它们的位置。位置相对第一段记，
+        // 和窗口里的绝对位置、外层滚动都无关；变了就让视图下一帧按新位置画。
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(px(SEGMENT_GAP))
+            .on_children_prepainted(move |bounds, _, cx| {
+                let Some(first) = bounds.first() else {
+                    return;
+                };
+                let next: Vec<(f32, f32)> = bounds
+                    .iter()
+                    .map(|b| {
+                        (
+                            f32::from(b.origin.x - first.origin.x),
+                            f32::from(b.size.width),
+                        )
+                    })
+                    .collect();
+                layout.update(cx, |layout, cx| {
+                    if layout.0 != next {
+                        layout.0 = next;
+                        cx.notify();
+                    }
+                });
+            })
+            .children(segments);
+        paint_track(RadioGroup::new(id).axis(gpui::Axis::Horizontal), disabled)
+            .relative()
+            .when_some(indicator, |this, (left, width)| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(INSET))
+                        .left(px(INSET + left))
+                        .w(px(width))
+                        .h(px(SEGMENT_HEIGHT))
+                        .rounded_full()
+                        .bg(rgb(ui_theme::surface()))
+                        .shadow(ui_theme::lift_shadow()),
+                )
+            })
+            .child(row)
+            .refine_style(&style)
+            .into_any_element()
     }
 }
 
@@ -292,6 +382,24 @@ mod tests {
         assert!(!days.is_selected(1));
         assert!(days.is_selected(2));
         assert!(!days.is_selected(3), "少给的算没选");
+    }
+
+    #[test]
+    fn indicator_rests_on_a_segment_and_blends_between_neighbours() {
+        let layout = [(0., 40.), (42., 60.), (104., 50.)];
+        assert_eq!(indicator_at(&layout, 1.), Some((42., 60.)));
+        assert_eq!(indicator_at(&layout, 0.5), Some((21., 50.)));
+        assert_eq!(
+            indicator_at(&layout, 2.),
+            Some((104., 50.)),
+            "最后一段不越界"
+        );
+        assert_eq!(
+            indicator_at(&layout, -0.2),
+            Some((0., 40.)),
+            "缓动越过端点时钳住"
+        );
+        assert_eq!(indicator_at(&[], 0.), None);
     }
 
     #[test]

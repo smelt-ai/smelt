@@ -661,7 +661,7 @@ fn diff_comment_composer(
         .children(input.map(|state| {
             div()
                 .w_full()
-                .child(gpui_component::input::Textarea::new(&state))
+                .child(smelt_plugin_api::ui::TextArea::new(&state))
         }))
         .child(
             h_flex()

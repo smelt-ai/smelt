@@ -596,9 +596,10 @@ impl AgentsPage {
                                     ),
                             )
                             .child(
-                                div().px_5().pb_3().child(framed_textarea(Textarea::new(
-                                    &editor.instructions,
-                                ))),
+                                div()
+                                    .px_5()
+                                    .pb_3()
+                                    .child(TextArea::new(&editor.instructions)),
                             )
                             .child(
                                 div()

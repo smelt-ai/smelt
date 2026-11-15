@@ -152,7 +152,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
             .w_full()
             .gap_1()
             .child(div().text_xs().text_color(fg).child(label))
-            .child(Input::new(input))
+            .child(TextInput::new(input))
     };
 
     let test_form = form.clone();

@@ -6,13 +6,14 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
     dialog::Dialog,
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, InputState},
     *,
 };
 use smelt_model::workspace_directory::{
     WorkspaceDirectory, WorkspaceProjectRepository, WorkspaceProjectRepositoryAction as Action,
     WorkspaceProjectRepositoryActionParams, WorkspaceWorkset, WorkspaceWorksetCreateParams,
 };
+use smelt_ui::TextInput;
 
 use crate::{Workspace, runtimes::Runtime, ui_theme};
 
@@ -367,7 +368,7 @@ impl Workspace {
             let task = state.task.read(cx).value().trim().to_string();
             content = content
                 .child(div().text_sm().child("任务名"))
-                .child(Input::new(&state.task).disabled(busy))
+                .child(TextInput::new(&state.task).disabled(busy))
                 .child(
                     div()
                         .text_xs()
@@ -375,7 +376,7 @@ impl Workspace {
                         .child("支持中文；建议使用与分支名接近的英文名，不含路径分隔符。"),
                 )
                 .child(div().text_sm().child("分支名"))
-                .child(Input::new(&state.branch).disabled(busy))
+                .child(TextInput::new(&state.branch).disabled(busy))
                 .child(div().text_xs().text_color(muted).child(format!(
                     "留空使用 feat/{}；也可输入完整分支名（如 fix/search）。分支名不能包含空格。",
                     if task.is_empty() {
@@ -421,24 +422,27 @@ impl Workspace {
                     .border_color(cx.theme().border)
                     .rounded(ui_theme::row_radius());
                 if mode == Mode::Create {
-                    row = row.child(
-                        checkbox::Checkbox::new(SharedString::from(format!("repo-check-{name}")))
+                    let checkbox =
+                        smelt_ui::Checkbox::new(SharedString::from(format!("repo-check-{name}")))
                             .checked(state.selected.contains(&name))
                             .disabled(busy)
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                if let Some(state) = this
-                                    .project_repositories
-                                    .as_mut()
-                                    .filter(|state| !state.busy)
-                                {
-                                    if *checked {
-                                        state.selected.insert(name.clone());
-                                    } else {
-                                        state.selected.remove(&name);
-                                    }
-                                    cx.notify();
-                                }
-                            })),
+                            .accessibility_label(name.clone());
+                    let toggle = cx.listener(move |this, checked: &bool, _, cx| {
+                        if let Some(state) = this
+                            .project_repositories
+                            .as_mut()
+                            .filter(|state| !state.busy)
+                        {
+                            if *checked {
+                                state.selected.insert(name.clone());
+                            } else {
+                                state.selected.remove(&name);
+                            }
+                            cx.notify();
+                        }
+                    });
+                    row = row.child(
+                        checkbox.on_change(move |checked, window, cx| toggle(&checked, window, cx)),
                     );
                 }
                 let location = repo
@@ -569,7 +573,7 @@ impl Workspace {
             } else {
                 content = content
                     .child(div().text_sm().child("Git URL"))
-                    .child(Input::new(&state.url).disabled(busy))
+                    .child(TextInput::new(&state.url).disabled(busy))
                     .child(
                         div()
                             .text_xs()
@@ -588,7 +592,7 @@ impl Workspace {
             };
             content = content
                 .child(div().text_sm().child("仓库名称（可修改）"))
-                .child(Input::new(&state.name).disabled(busy))
+                .child(TextInput::new(&state.name).disabled(busy))
                 .child(div().text_sm().text_color(muted).child(format!(
                     "名称：{} · {destination_hint}",
                     if name.is_empty() {

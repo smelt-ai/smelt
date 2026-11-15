@@ -2,7 +2,8 @@
 
 use super::*;
 use gpui_component::IndexPath;
-use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
+use gpui_component::select::{SearchableVec, SelectEvent, SelectItem, SelectState};
+use smelt_ui::Select;
 use smelt_ui::theme_catalog::ThemeSwatch;
 use smelt_ui::truncated_line::truncated_line;
 use std::collections::HashMap;

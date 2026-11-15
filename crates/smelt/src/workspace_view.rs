@@ -6,8 +6,8 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::dialog::Dialog;
-use gpui_component::input::Input;
 use gpui_component::*;
+use smelt_ui::TextInput;
 use smelt_ui::truncated_line::truncated_line;
 
 use crate::{CloseConfirm, RenameTarget, Workspace, request_app_quit, ui_theme};
@@ -674,7 +674,9 @@ impl Workspace {
             ));
         dialog
             .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
-            .child(smelt_ui::dialog::content(heading, Some(hint.into())).child(Input::new(input)))
+            .child(
+                smelt_ui::dialog::content(heading, Some(hint.into())).child(TextInput::new(input)),
+            )
             .footer(footer)
     }
 
@@ -696,7 +698,7 @@ impl Workspace {
             format!("{} 的中继", crate::runtimes::runtime_name(&key, cx)),
             Some(hint.into()),
         )
-        .child(Input::new(&edit.input).disabled(edit.saving))
+        .child(TextInput::new(&edit.input).disabled(edit.saving))
         .children(
             edit.error
                 .clone()

@@ -23,41 +23,6 @@ pub(crate) fn render_agent_error(error: String) -> AnyElement {
     gpui_component::alert::Alert::error("agent-error", error).into_any_element()
 }
 
-pub(crate) fn editor_field_frame() -> Div {
-    div()
-        .flex()
-        .items_center()
-        .flex_none()
-        .h(ui_theme::height::sm())
-        .overflow_hidden()
-        .border_1()
-        .border_color(ui_theme::hair_strong())
-        .rounded(px(8.))
-        .bg(rgb(ui_theme::side()))
-}
-
-pub(crate) fn framed_text_input(input: &Entity<InputState>, aria: &'static str) -> Div {
-    editor_field_frame().child(
-        Input::new(input)
-            .small()
-            .appearance(false)
-            .focus_bordered(false)
-            .focus_ring(false)
-            .w_full()
-            .aria_label(aria),
-    )
-}
-
-pub(crate) fn framed_number_input(input: &Entity<InputState>) -> Div {
-    editor_field_frame().child(
-        NumberInput::new(input)
-            .small()
-            .appearance(false)
-            .focus_ring(false)
-            .w_full(),
-    )
-}
-
 pub(crate) fn framed_automation_textarea(textarea: Textarea) -> AnyElement {
     div()
         .w_full()

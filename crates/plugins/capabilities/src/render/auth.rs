@@ -387,7 +387,7 @@ pub(super) fn login_panel(
                         .items_center()
                         .children(
                             view.active_input()
-                                .map(|input| div().flex_1().min_w_0().child(Input::new(input))),
+                                .map(|input| div().flex_1().min_w_0().child(TextInput::new(input))),
                         )
                         .child({
                             let submit_entity = entity.clone();

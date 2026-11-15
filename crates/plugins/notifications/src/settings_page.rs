@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use api::ui::Button;
+use api::ui::{Button, Switch};
 use api::{HostEvent, NotificationPermission, SettingsGroup, SettingsPageSpec};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, SharedString, Window, div, px};
@@ -74,15 +74,19 @@ impl Render for NotifySettings {
             let write = self.plugin.clone();
             let item = SettingItem::new(
                 label,
-                SettingField::switch(
-                    move |_: &App| get(&read.borrow().prefs),
-                    move |value: bool, _: &mut App| {
-                        let mut plugin = write.borrow_mut();
-                        set(&mut plugin.prefs, value);
-                        let prefs = plugin.prefs;
-                        plugin.store.save_prefs(prefs);
-                    },
-                ),
+                SettingField::render(move |_, _, _| {
+                    let write = write.clone();
+                    Switch::new(label)
+                        .checked(get(&read.borrow().prefs))
+                        .accessibility_label(label)
+                        .on_change(move |value, window, _| {
+                            let mut plugin = write.borrow_mut();
+                            set(&mut plugin.prefs, value);
+                            let prefs = plugin.prefs;
+                            plugin.store.save_prefs(prefs);
+                            window.refresh();
+                        })
+                }),
             );
             match description {
                 Some(description) => item.description(description),

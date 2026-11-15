@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::input::Input;
 use smelt_client::daemon_state::RuntimePresence;
+use smelt_ui::TextInput;
 use smol::Timer;
 
 use crate::terminal::{self, Terminal};
@@ -1694,7 +1694,7 @@ impl Render for TerminalView {
                             .flex_1()
                             .min_w_0()
                             .child(if let Some(input) = search_input {
-                                Input::new(&input).cleanable(true).into_any_element()
+                                TextInput::new(&input).small().cleanable(true).into_any_element()
                             } else {
                                 div().into_any_element()
                             }),

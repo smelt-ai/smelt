@@ -314,15 +314,7 @@ impl AutomationsPage {
             framed_automation_textarea(Textarea::new(&editor.command))
         };
         let instruction_label = if is_agent { "指令" } else { "命令" };
-        let name_field = automation_form_row().child(
-            Input::new(&editor.name)
-                .appearance(false)
-                .focus_bordered(false)
-                .focus_ring(false)
-                .w_full()
-                .text_sm()
-                .aria_label("名称"),
-        );
+        let name_field = TextInput::new(&editor.name).aria_label("名称").w_full();
 
         div()
             .id("automation-editor-scroll")

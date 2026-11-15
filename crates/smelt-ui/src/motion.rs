@@ -658,6 +658,14 @@ impl Element for FlipSlot {
     }
 }
 
+/// 控件状态切换的过渡：开关滑块、分段选中块、焦点。`BASE_MS` 加 `ease_snap`。
+///
+/// 交给 `gpui_base::motion::transition` 用：第一帧直接采用目标值（页面刚打开不会滑），
+/// 中途换目标从当前采样值掉头，减弱动效时直接到位。
+pub fn snap_transition() -> gpui_base::motion::Transition {
+    gpui_base::motion::Transition::new(Duration::from_millis(BASE_MS)).ease(ease_snap)
+}
+
 /// 0 到 1 的焦点类过渡。第一帧直接采用当前值，之后才插值。
 pub fn unit_transition(
     id: impl Into<gpui_base::motion::TransitionId>,
@@ -665,13 +673,7 @@ pub fn unit_transition(
     window: &mut Window,
     cx: &mut App,
 ) -> f32 {
-    gpui_base::motion::transition(
-        id,
-        target,
-        gpui_base::motion::Transition::new(Duration::from_millis(BASE_MS)).ease(ease_snap),
-        window,
-        cx,
-    )
+    gpui_base::motion::transition(id, target, snap_transition(), window, cx)
 }
 
 #[cfg(test)]

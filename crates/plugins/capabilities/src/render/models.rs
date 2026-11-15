@@ -853,7 +853,7 @@ fn default_model_form(
                                 .text_color(fg)
                                 .child("提供方 (Provider)"),
                         )
-                        .child(Input::new(&editor.provider)),
+                        .child(TextInput::new(&editor.provider)),
                 )
                 .child(
                     v_flex()
@@ -867,7 +867,7 @@ fn default_model_form(
                                 .text_color(fg)
                                 .child("默认模型 ID"),
                         )
-                        .child(Input::new(&editor.model)),
+                        .child(TextInput::new(&editor.model)),
                 ),
         )
         .child(
@@ -887,7 +887,7 @@ fn default_model_form(
                                 .text_color(fg)
                                 .child("API 地址 (可选)"),
                         )
-                        .child(Input::new(&editor.base_url)),
+                        .child(TextInput::new(&editor.base_url)),
                 )
                 .child(
                     v_flex()
@@ -901,7 +901,7 @@ fn default_model_form(
                                 .text_color(fg)
                                 .child("API key"),
                         )
-                        .child(Input::new(&editor.api_key))
+                        .child(TextInput::new(&editor.api_key))
                         .child(
                             div()
                                 .text_xs()
@@ -1026,7 +1026,7 @@ fn custom_provider_form(
                                 .min_w_0()
                                 .gap_1()
                                 .child(div().text_xs().text_color(muted).child("模型 ID"))
-                                .child(Input::new(&model.id)),
+                                .child(TextInput::new(&model.id)),
                         )
                         .child(
                             v_flex()
@@ -1034,7 +1034,7 @@ fn custom_provider_form(
                                 .min_w_0()
                                 .gap_1()
                                 .child(div().text_xs().text_color(muted).child("显示名称"))
-                                .child(Input::new(&model.name)),
+                                .child(TextInput::new(&model.name)),
                         ),
                 )
                 .child(
@@ -1053,7 +1053,7 @@ fn custom_provider_form(
                                         .text_color(muted)
                                         .child("上下文长度（可选）"),
                                 )
-                                .child(Input::new(&model.context_window)),
+                                .child(TextInput::new(&model.context_window)),
                         )
                         .child(
                             v_flex()
@@ -1061,7 +1061,7 @@ fn custom_provider_form(
                                 .min_w_0()
                                 .gap_1()
                                 .child(div().text_xs().text_color(muted).child("最大输出（可选）"))
-                                .child(Input::new(&model.max_tokens)),
+                                .child(TextInput::new(&model.max_tokens)),
                         ),
                 ),
         );
@@ -1109,7 +1109,7 @@ fn custom_provider_form(
                                 .text_color(fg)
                                 .child("Provider ID"),
                         )
-                        .child(Input::new(&editor.id))
+                        .child(TextInput::new(&editor.id))
                         .child(
                             div()
                                 .text_xs()
@@ -1129,7 +1129,7 @@ fn custom_provider_form(
                                 .text_color(fg)
                                 .child("显示名称（可选）"),
                         )
-                        .child(Input::new(&editor.display_name)),
+                        .child(TextInput::new(&editor.display_name)),
                 ),
         )
         .child(
@@ -1149,7 +1149,7 @@ fn custom_provider_form(
                                 .text_color(fg)
                                 .child("API 地址"),
                         )
-                        .child(Input::new(&editor.base_url)),
+                        .child(TextInput::new(&editor.base_url)),
                 )
                 .child(
                     v_flex()
@@ -1187,7 +1187,7 @@ fn custom_provider_form(
                         .text_color(fg)
                         .child("API key"),
                 )
-                .child(Input::new(&editor.api_key))
+                .child(TextInput::new(&editor.api_key))
                 .child(
                     div()
                         .text_xs()

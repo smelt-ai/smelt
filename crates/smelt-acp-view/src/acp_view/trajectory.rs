@@ -4,9 +4,10 @@
 //! Overview 用 sequence 等宽色块（DSH 也有 sequence 模式），账本按 Turn 分组。
 
 use super::*;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::separator::Separator;
 use gpui_component::tab::{Tab, TabBar};
+use smelt_ui::TextInput;
 use smelt_ui::truncated_line::truncated_line;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -478,7 +479,11 @@ fn render_trajectory_toolbar(
                 .child(stat_text("EVENTS", event_count)),
         )
         .child(div().flex_1())
-        .child(div().w(px(240.)).child(Input::new(search).cleanable(true)))
+        .child(
+            div()
+                .w(px(240.))
+                .child(TextInput::new(search).small().cleanable(true)),
+        )
 }
 
 fn stat_text(label: &'static str, value: String) -> gpui::Div {

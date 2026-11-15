@@ -7,8 +7,9 @@
 //! 不把整组设置堆进一个可滚动长页。
 
 use super::*;
-use gpui_component::input::{Input, InputState, Textarea};
+use gpui_component::input::InputState;
 use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
+use smelt_ui::{TextArea, TextInput};
 
 mod agent;
 mod appearance;
@@ -99,7 +100,7 @@ fn render_nav(
     let mut header = v_flex()
         .w_full()
         .gap_1p5()
-        .child(Input::new(&search).prefix(IconName::Search));
+        .child(TextInput::new(&search).prefix(IconName::Search));
     if !query.trim().is_empty() {
         header = header.child(
             div()

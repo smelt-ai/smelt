@@ -26,17 +26,13 @@ use api::model::daemon_state::{
 use api::serde_json;
 use api::ui::IconAction as _;
 use api::ui::truncated_line::truncated_line;
-use api::ui::{Button, ListRow, Segment, Segmented, ui_theme};
+use api::ui::{Button, ListRow, Segment, Segmented, Switch, TextArea, TextInput, ui_theme};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_component::input::{InputEvent, InputState, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
-use gpui_component::switch::Switch;
 use gpui_component::tag::Tag;
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Sizable as _,
-    StyledExt as _,
-};
+use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _};
 use smelt_plugin_api::{
     self as api, CommandSpec, Handled, HostEvent, PluginView, RuntimeKey, TopicMessage, ViewHandle,
     ViewSpec,

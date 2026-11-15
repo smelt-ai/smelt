@@ -3,7 +3,7 @@
 
 use super::*;
 use gpui_component::dialog::Dialog;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use smelt_model::remote_config::RemoteAccessState;
 use smelt_ui::truncated_line::truncated_line;
 
@@ -188,7 +188,7 @@ fn outgoing_group() -> SettingGroup {
                     h_flex()
                         .gap_2()
                         .items_center()
-                        .child(div().w(px(260.)).child(Input::new(&input)))
+                        .child(div().w(px(260.)).child(TextInput::new(&input)))
                         .child(
                             Button::new("add-runtime")
                                 .small()
@@ -282,8 +282,8 @@ fn incoming_group() -> SettingGroup {
                             Switch::new("remote-access-enabled")
                                 .checked(enabled)
                                 .accessibility_label("远程访问")
-                                .on_click(|checked, _window, cx: &mut App| {
-                                    apply_remote_toggle(*checked, cx)
+                                .on_change(|checked, _window, cx: &mut App| {
+                                    apply_remote_toggle(checked, cx)
                                 }),
                         )
                 }),
