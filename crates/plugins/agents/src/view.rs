@@ -109,16 +109,14 @@ impl AgentsPage {
         let tabs = self.editor.as_ref().map(|editor| {
             const TABS: [AgentEditorTab; 2] = [AgentEditorTab::Config, AgentEditorTab::Memory];
             let entity = entity.clone();
-            choice_tabs(
-                "agent-editor-tabs",
-                TABS.iter().position(|tab| *tab == editor.tab),
-                TABS.map(|tab| Tab::new().label(agent_editor_tab_label(tab, editor))),
-                move |ix, cx| {
+            Segmented::new("agent-editor-tabs")
+                .segments(TABS.map(|tab| agent_editor_tab_label(tab, editor)))
+                .selected(TABS.iter().position(|tab| *tab == editor.tab))
+                .on_select(move |ix, _, cx| {
                     if let Some(tab) = TABS.get(ix).copied() {
                         entity.update(cx, |page, cx| page.select_agent_editor_tab(tab, cx));
                     }
-                },
-            )
+                })
         });
         let start_entity = entity;
         api::host(cx)

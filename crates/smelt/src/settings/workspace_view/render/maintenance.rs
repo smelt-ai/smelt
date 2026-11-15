@@ -3,7 +3,7 @@
 use super::*;
 #[cfg(any(target_os = "macos", windows))]
 use gpui_component::link::Link;
-use gpui_component::tab::{Tab, TabBar};
+use smelt_ui::Segmented;
 
 pub(super) fn maintenance_page(
     entity: Entity<Workspace>,
@@ -243,29 +243,21 @@ fn update_group(
         // 则锁定选择，避免下载源和状态提示在中途发生错配。
         let channel_locked = !can_check;
         let channel_entity = update_entity.clone();
-        let channel_selector = TabBar::new("update-channel")
-            .segmented()
-            .flex_none()
-            .when_some(
+        let channel_selector = Segmented::new("update-channel")
+            .segments(updater::UpdateChannel::ALL.map(|option| option.label()))
+            .selected(
                 updater::UpdateChannel::ALL
                     .iter()
                     .position(|option| *option == channel),
-                |bar, ix| bar.selected_index(ix),
             )
-            .on_click(move |ix, _, cx| {
-                if channel_locked {
-                    return;
-                }
-                if let Some(option) = updater::UpdateChannel::ALL.get(*ix).copied() {
+            .disabled(channel_locked)
+            .on_select(move |ix, _, cx| {
+                if let Some(option) = updater::UpdateChannel::ALL.get(ix).copied() {
                     channel_entity.update(cx, |workspace, cx| {
                         workspace.set_update_channel(option, cx);
                     });
                 }
-            })
-            .children(
-                updater::UpdateChannel::ALL
-                    .map(|option| Tab::new().label(option.label()).disabled(channel_locked)),
-            );
+            });
 
         let check_entity = update_entity.clone();
         let check_btn = Button::new("check-update")

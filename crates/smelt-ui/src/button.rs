@@ -146,7 +146,7 @@ const DISMISS_RADIUS: f32 = 6.;
 const GAP: f32 = 6.;
 const FOCUS_GAP: f32 = 2.;
 const FOCUS_RING: f32 = 2.;
-const DISABLED_OPACITY: f32 = 0.4;
+pub(crate) const DISABLED_OPACITY: f32 = 0.4;
 
 #[derive(IntoElement)]
 pub struct Button {
@@ -387,7 +387,7 @@ impl DropdownMenu for Button {}
 
 /// 键盘焦点环：2px `bg` 间隙外再套 2px `focus`。环用实色，免得半透明的焦点色
 /// 透出底下那圈间隙。
-fn focus_ring() -> Vec<BoxShadow> {
+pub(crate) fn focus_ring() -> Vec<BoxShadow> {
     let bg = ui_theme::bg();
     let ring = ui_theme::flatten(ui_theme::focus(), bg);
     let spread = |width: f32, color: u32| {

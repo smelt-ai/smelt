@@ -1006,18 +1006,16 @@ pub(crate) fn render_schedule_rule(
     let frequency = (!rule.kind.is_interval()).then(|| {
         let kinds = ScheduleKind::clock_kinds();
         let frequency_entity = entity.clone();
-        choice_tabs(
-            ("agent-trigger-frequency", index),
-            kinds.iter().position(|kind| *kind == rule.kind),
-            kinds.iter().map(|kind| Tab::new().label(kind.label())),
-            move |ix, cx| {
+        Segmented::new(("agent-trigger-frequency", index))
+            .segments(kinds.map(|kind| kind.label()))
+            .selected(kinds.iter().position(|kind| *kind == rule.kind))
+            .on_select(move |ix, _, cx| {
                 if let Some(kind) = kinds.get(ix).copied() {
                     frequency_entity.update(cx, |page, cx| {
                         page.set_trigger_schedule_kind(index, kind, cx);
                     });
                 }
-            },
-        )
+            })
     });
     let clock = |input: &Entity<InputState>, aria: &'static str| {
         framed_text_input(input, aria)
@@ -1030,29 +1028,14 @@ pub(crate) fn render_schedule_rule(
             .text_color(cx.theme().muted_foreground)
             .child(local_timezone_label())
     };
-    // 星期可以多选，用开关组而不是单选的分段页签。
+    // 星期可以多选：每天各自开关。
     let weekday_picker = |id_prefix: &'static str| {
         let mask = rule.weekday_mask;
         let day_entity = entity.clone();
-        ToggleGroup::new((id_prefix, index))
-            .outline()
-            .segmented()
-            .flex_none()
-            .children((0..7).map(|day_index| {
-                Toggle::new(day_index)
-                    .w(px(32.))
-                    .label(api::model::automation::SCHEDULE_DAY_LABELS[day_index])
-                    .checked(mask & (1_u8 << day_index) != 0)
-            }))
-            .on_click(move |checks, _, cx| {
-                // 一次只点一格：和当前不一样的那一格就是被点的。
-                let Some(day_index) = checks
-                    .iter()
-                    .enumerate()
-                    .position(|(day, on)| *on != (mask & (1_u8 << day) != 0))
-                else {
-                    return;
-                };
+        Segmented::new((id_prefix, index))
+            .segments(api::model::automation::SCHEDULE_DAY_LABELS)
+            .multiple((0..7).map(|day_index| mask & (1_u8 << day_index) != 0))
+            .on_select(move |day_index, _, cx| {
                 day_entity.update(cx, |page, cx| {
                     page.toggle_schedule_weekday(index, 1_u8 << day_index, cx);
                 });
@@ -1063,20 +1046,20 @@ pub(crate) fn render_schedule_rule(
         ScheduleKind::Interval => {
             let scopes = IntervalDayScope::all();
             let scope_entity = entity.clone();
-            let day_scope = choice_tabs(
-                ("automation-interval-days", index),
-                scopes
-                    .iter()
-                    .position(|scope| *scope == rule.interval_day_scope),
-                scopes.iter().map(|scope| Tab::new().label(scope.label())),
-                move |ix, cx| {
+            let day_scope = Segmented::new(("automation-interval-days", index))
+                .segments(scopes.map(|scope| scope.label()))
+                .selected(
+                    scopes
+                        .iter()
+                        .position(|scope| *scope == rule.interval_day_scope),
+                )
+                .on_select(move |ix, _, cx| {
                     if let Some(scope) = scopes.get(ix).copied() {
                         scope_entity.update(cx, |page, cx| {
                             page.set_interval_day_scope(index, scope, cx);
                         });
                     }
-                },
-            );
+                });
             let mut interval_body = div()
                 .flex()
                 .flex_col()
@@ -1095,18 +1078,16 @@ pub(crate) fn render_schedule_rule(
                             const UNITS: [IntervalUnit; 2] =
                                 [IntervalUnit::Minutes, IntervalUnit::Hours];
                             let unit_entity = entity.clone();
-                            choice_tabs(
-                                ("automation-interval-unit", index),
-                                UNITS.iter().position(|unit| *unit == interval_unit),
-                                UNITS.iter().map(|unit| Tab::new().label(unit.label())),
-                                move |ix, cx| {
+                            Segmented::new(("automation-interval-unit", index))
+                                .segments(UNITS.map(|unit| unit.label()))
+                                .selected(UNITS.iter().position(|unit| *unit == interval_unit))
+                                .on_select(move |ix, _, cx| {
                                     if let Some(unit) = UNITS.get(ix).copied() {
                                         unit_entity.update(cx, |page, cx| {
                                             page.set_interval_unit(index, unit, cx);
                                         });
                                     }
-                                },
-                            )
+                                })
                         }),
                 )
                 .child(day_scope);

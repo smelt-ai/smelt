@@ -14,6 +14,7 @@ pub mod markdown_links;
 mod markdown_literal_html;
 pub mod markdown_mermaid;
 pub mod motion;
+pub mod segmented;
 pub mod theme_catalog;
 pub mod truncated_line;
 pub mod ui_theme;
@@ -21,6 +22,7 @@ pub mod ui_theme;
 pub use button::Button;
 pub use icon_action::IconAction;
 pub use list_row::ListRow;
+pub use segmented::{Segment, Segmented};
 
 /// 组件库没有垃圾桶：`Delete` 是带 X 的退格键，`CircleX` 是带圈的关。
 /// 删除/移除统一用这枚 Lucide trash-2。

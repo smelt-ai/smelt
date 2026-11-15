@@ -655,22 +655,20 @@ pub(crate) fn render_agent_memory_card(
     let filter = editor.memory_filter;
     let narrowed = !query.trim().is_empty() || filter != MemoryFilter::All;
     let filter_entity = entity.clone();
-    let filters = choice_tabs(
-        "agent-memory-filters",
-        MemoryFilter::ALL
-            .iter()
-            .position(|option| *option == filter),
-        MemoryFilter::ALL.into_iter().map(|option| {
-            Tab::new().label(option.label()).tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(option.tooltip()).build(window, cx)
-            })
-        }),
-        move |ix, cx| {
+    let filters = Segmented::new("agent-memory-filters")
+        .segments(
+            MemoryFilter::ALL.map(|option| Segment::new(option.label()).tooltip(option.tooltip())),
+        )
+        .selected(
+            MemoryFilter::ALL
+                .iter()
+                .position(|option| *option == filter),
+        )
+        .on_select(move |ix, _, cx| {
             if let Some(option) = MemoryFilter::ALL.get(ix).copied() {
                 filter_entity.update(cx, |page, cx| page.set_agent_memory_filter(option, cx));
             }
-        },
-    );
+        });
     agent_surface_card()
         .flex()
         .flex_col()
@@ -1450,19 +1448,4 @@ pub(crate) fn framed_textarea(textarea: Textarea) -> AnyElement {
 }
 pub(crate) fn compact_chip(id: impl Into<ElementId>) -> Button {
     Button::new(id).quiet().small()
-}
-
-/// 几个互斥选项的分段开关，选中块在选项之间滑动。`on_select` 拿到被点的下标。
-pub(crate) fn choice_tabs(
-    id: impl Into<ElementId>,
-    selected: Option<usize>,
-    tabs: impl IntoIterator<Item = Tab>,
-    on_select: impl Fn(usize, &mut App) + 'static,
-) -> TabBar {
-    TabBar::new(id)
-        .segmented()
-        .flex_none()
-        .when_some(selected, |bar, ix| bar.selected_index(ix))
-        .on_click(move |ix, _, cx| on_select(*ix, cx))
-        .children(tabs)
 }

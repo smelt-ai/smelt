@@ -125,18 +125,3 @@ pub(crate) fn automation_section_label(label: &'static str) -> AnyElement {
         .child(label)
         .into_any_element()
 }
-
-/// 几个互斥选项的分段开关，选中块在选项之间滑动。`on_select` 拿到被点的下标。
-pub(crate) fn choice_tabs(
-    id: impl Into<ElementId>,
-    selected: Option<usize>,
-    tabs: impl IntoIterator<Item = Tab>,
-    on_select: impl Fn(usize, &mut App) + 'static,
-) -> TabBar {
-    TabBar::new(id)
-        .segmented()
-        .flex_none()
-        .when_some(selected, |bar, ix| bar.selected_index(ix))
-        .on_click(move |ix, _, cx| on_select(*ix, cx))
-        .children(tabs)
-}

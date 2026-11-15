@@ -27,18 +27,18 @@ impl AutomationsPage {
         header
             .justify_between()
             .gap_3()
-            .child(choice_tabs(
-                "automations-tabs",
-                TABS.iter().position(|(tab, _)| *tab == current),
-                TABS.map(|(_, label)| Tab::new().label(label)),
-                move |ix, cx| {
-                    if let Some((tab, _)) = TABS.get(ix).copied() {
-                        tab_entity.update(cx, |page, cx| {
-                            page.set_automation_catalog_tab(tab, cx);
-                        });
-                    }
-                },
-            ))
+            .child(
+                Segmented::new("automations-tabs")
+                    .segments(TABS.map(|(_, label)| label))
+                    .selected(TABS.iter().position(|(tab, _)| *tab == current))
+                    .on_select(move |ix, _, cx| {
+                        if let Some((tab, _)) = TABS.get(ix).copied() {
+                            tab_entity.update(cx, |page, cx| {
+                                page.set_automation_catalog_tab(tab, cx);
+                            });
+                        }
+                    }),
+            )
             .child(machine_picking_button(
                 Button::new("automations-add")
                     .icon(IconName::Plus)
@@ -450,24 +450,17 @@ impl AutomationsPage {
                 .into_iter()
                 .map(|category| (Some(category), category.label())),
         );
-        let selected_ix = filters.iter().position(|(filter, _)| *filter == selected);
-        let tabs: Vec<Tab> = filters
-            .iter()
-            .map(|(_, label)| Tab::new().label(*label))
-            .collect();
-        choice_tabs(
-            "automation-template-filters",
-            selected_ix,
-            tabs,
-            move |ix, cx| {
+        Segmented::new("automation-template-filters")
+            .segments(filters.iter().map(|(_, label)| *label))
+            .selected(filters.iter().position(|(filter, _)| *filter == selected))
+            .on_select(move |ix, _, cx| {
                 if let Some((filter, _)) = filters.get(ix).copied() {
                     entity.update(cx, |page, cx| {
                         page.set_automation_template_filter(filter, cx);
                     });
                 }
-            },
-        )
-        .into_any_element()
+            })
+            .into_any_element()
     }
 
     pub(crate) fn render_template_grid(

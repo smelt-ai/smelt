@@ -396,6 +396,16 @@ pub fn tint(color: u32, alpha: u8) -> Rgba {
     rgba((color << 8) | alpha as u32)
 }
 
+/// 抬起：贴在底上、比底高一点的东西（分段控件选中的那段）。1px `hair` 细圈加一层淡投影，
+/// 比 [`float_shadow`] 轻得多。
+pub fn lift_shadow() -> Vec<BoxShadow> {
+    let alpha = if is_light() { 0.06 } else { 0.30 };
+    vec![
+        BoxShadow::new(px(0.), px(2.), Hsla::from(rgb(0x000000)).alpha(alpha)).blur_radius(px(10.)),
+        BoxShadow::new(px(0.), px(0.), hair().into()).spread_radius(px(1.)),
+    ]
+}
+
 /// 浮起：真正浮在内容上的东西（菜单、对话框、浮动按钮）。两层投影加 1px `hair` 细圈；
 /// 深色下投影加深，细圈本来就是浅色的 `hair`。
 pub fn float_shadow() -> Vec<BoxShadow> {

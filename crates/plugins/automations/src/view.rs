@@ -288,22 +288,20 @@ impl AutomationsPage {
                 menu
             });
         let action_entity = entity.clone();
-        let action_kind = choice_tabs(
-            "automation-action-kind",
-            BUILTIN_AUTOMATION_ACTIONS
-                .iter()
-                .position(|kind| *kind == editor.action_kind),
-            BUILTIN_AUTOMATION_ACTIONS
-                .iter()
-                .map(|kind| Tab::new().label(kind.label())),
-            move |ix, cx| {
+        let action_kind = Segmented::new("automation-action-kind")
+            .segments(BUILTIN_AUTOMATION_ACTIONS.iter().map(|kind| kind.label()))
+            .selected(
+                BUILTIN_AUTOMATION_ACTIONS
+                    .iter()
+                    .position(|kind| *kind == editor.action_kind),
+            )
+            .on_select(move |ix, _, cx| {
                 if let Some(kind) = BUILTIN_AUTOMATION_ACTIONS.get(ix).copied() {
                     action_entity.update(cx, |page, cx| {
                         page.set_automation_action_kind(kind, cx);
                     });
                 }
-            },
-        );
+            });
         let trigger_field = render_trigger_entries(editor, entity.clone(), cx);
         let is_agent = editor.action_kind == AutomationActionKindId::Agent;
         let is_webhook = editor
