@@ -8,9 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::*;
-use gpui_component::WindowExt as _;
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{EditorState, InputEvent, Position};
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::client::protocol::control::{ControlClientError, ControlErrorCode};
@@ -18,6 +15,7 @@ use smelt_plugin_api::client::protocol::files::{
     FileContent, FileOpenCall, FileOpenResult, FilePathParams, FileSaveCall, FileSaveParams,
     is_previewable_image,
 };
+use smelt_plugin_api::ui::dialog::Confirm;
 
 use crate::html_preview::HtmlPreview;
 use crate::model::{FileRef, OpenFile, PreviewKind, editor_language_for_path};
@@ -182,59 +180,30 @@ impl FilesPanel {
             .unwrap_or_default();
         let target_name = name(&target, cx);
         let panel = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let discard_panel = panel.clone();
-            let save_panel = panel.clone();
-            let close_panel = panel.clone();
-            let discard_target = target.clone();
-            let save_target = target.clone();
-            alert
-                .title(format!("「{current}」有未保存的改动"))
-                .description(format!(
-                    "要切换到「{target_name}」了，这些改动还没保存，要怎么处理？"
-                ))
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            Button::new("unsaved-cancel")
-                                .label("取消")
-                                .outline()
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("unsaved-discard")
-                                .label("不保存，直接切换")
-                                .outline()
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    discard_panel.update(cx, |this, cx| {
-                                        this.open_file_now(
-                                            discard_target.clone(),
-                                            line,
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                }),
-                        )
-                        .child(
-                            Button::new("unsaved-save-switch")
-                                .label("保存并切换")
-                                .primary()
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    save_panel.update(cx, |this, cx| {
-                                        this.pending_switch_after_save =
-                                            Some((current_id, save_target.clone()));
-                                        this.save_open_file(cx);
-                                    });
-                                }),
-                        ),
-                )
-                .on_close(move |_, _, cx| {
-                    close_panel.update(cx, |this, cx| this.dialog_toggled(cx))
-                })
-        });
+        let discard_panel = panel.clone();
+        let close_panel = panel.clone();
+        let discard_target = target.clone();
+        Confirm::new(
+            format!("「{current}」有未保存的改动"),
+            "保存并切换",
+            move |_, cx| {
+                panel.update(cx, |this, cx| {
+                    this.pending_switch_after_save = Some((current_id, target.clone()));
+                    this.save_open_file(cx);
+                });
+                true
+            },
+        )
+        .description(format!(
+            "要切换到「{target_name}」了，这些改动还没保存，要怎么处理？"
+        ))
+        .alternative("不保存，直接切换", move |window, cx| {
+            discard_panel.update(cx, |this, cx| {
+                this.open_file_now(discard_target.clone(), line, window, cx);
+            });
+        })
+        .on_close(move |_, cx| close_panel.update(cx, |this, cx| this.dialog_toggled(cx)))
+        .open(window, cx);
         self.dialog_toggled(cx);
     }
 

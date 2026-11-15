@@ -120,7 +120,7 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16 appearan
 
 允许的外观设置：
 
-- `appearance.theme`：主题名，例如 `Default Dark`、`Ayu Light`。
+- `appearance.theme`：主题名，例如 `smelt Dark`、`Ayu Light`。
 - `appearance.theme_mode`：dark|light，把当前主题拨到同一族的另一侧。
 - `appearance.ui_font_px`（14–26）、`appearance.ui_font_family`。
 - `appearance.font_px`（9–22）、`appearance.font_family`。

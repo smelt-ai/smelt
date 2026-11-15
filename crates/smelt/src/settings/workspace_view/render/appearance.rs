@@ -124,7 +124,7 @@ fn layout_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
         SettingField::render(move |_, _, _: &mut App| {
             let entity = entity.clone();
             Button::new("restore-layout")
-                .compact()
+                .small()
                 .label("恢复")
                 .on_click(move |_, _, cx: &mut App| {
                     entity.update(cx, |workspace, cx| workspace.restore_layout(cx));
@@ -445,7 +445,7 @@ fn window_group(
                     }))
                     .child(
                         Button::new("pick-img")
-                            .compact()
+                            .small()
                             .label(if has_image {
                                 "更换…"
                             } else {
@@ -460,7 +460,7 @@ fn window_group(
                         row.child(
                             Button::new("clear-img")
                                 .quiet()
-                                .compact()
+                                .small()
                                 .label("清除")
                                 .flex_shrink_0()
                                 .on_click(move |_, _window, cx: &mut App| {

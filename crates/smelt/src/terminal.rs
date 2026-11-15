@@ -95,7 +95,7 @@ pub fn default_fg() -> u32 {
     }
 }
 
-/// 默认背景色：跟卡片本体同色系（`ui_theme::bg_stage`），不再是独立的 Tokyo
+/// 默认背景色：跟卡片本体同色系（`ui_theme::bg`），不再是独立的 Tokyo
 /// Night 深蓝黑——终端面板紧贴在舞台头下面，两者用不同色系时，标题栏透明后
 /// 反而更显眼地露出一条界缝。ANSI 16 色板（下面 PALETTE_DARK/LIGHT）仍保留
 /// Tokyo Night 配色（语法高亮，不是 UI 皮），只有「没手动设置背景色」时兜底的
@@ -106,7 +106,7 @@ pub fn default_fg() -> u32 {
 /// 挑错档。
 pub fn default_bg() -> u32 {
     match BG_OVERRIDE.load(Ordering::Relaxed) {
-        NO_BG_OVERRIDE => crate::ui_theme::bg_stage(),
+        NO_BG_OVERRIDE => crate::ui_theme::bg(),
         color => color,
     }
 }
@@ -3033,7 +3033,7 @@ mod event_proxy_answers_tests {
         set_bg_override(None);
         assert_eq!(
             default_bg(),
-            crate::ui_theme::bg_stage(),
+            crate::ui_theme::bg(),
             "清掉自选色后应回到跟随主题"
         );
     }

@@ -884,7 +884,6 @@ fn fixed_row(
             .into_any_element();
     }
     let head = ListRow::new(ElementId::from(id.clone()))
-        .card()
         .px_2()
         .py_1()
         .gap_3()
@@ -986,7 +985,7 @@ fn session_row(
             .child(
                 Button::new(SharedString::from(format!("{id}-jump")))
                     .quiet()
-                    .icon_size()
+                    .small()
                     .icon(IconName::ExternalLink)
                     .icon_action("跳到会话")
                     .on_click(move |_, _, cx| {
@@ -998,7 +997,6 @@ fn session_row(
             )
     });
     let head = ListRow::new(ElementId::from(id.clone()))
-        .card()
         .px_2()
         .py_1()
         .gap_3()

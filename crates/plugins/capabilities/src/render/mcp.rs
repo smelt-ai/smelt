@@ -98,8 +98,7 @@ fn preset_row(
         let entity = entity.clone();
         // 点完会换成上面的「已添加」胶囊，按钮用同高的胶囊占同一个位置，各行右侧轮廓一致。
         Button::new(format!("pi-mcp-add-{}", preset.id))
-            .compact()
-            .capsule()
+            .small()
             .label("添加")
             .tooltip(if preset.transport.needs_sign_in() {
                 "写入 ~/.pi/agent/mcp.json，之后点「登录」授权"
@@ -117,7 +116,7 @@ fn preset_row(
     let install = preset.extension_url.map(|url| {
         Button::new(format!("pi-mcp-extension-{}", preset.id))
             .quiet()
-            .icon_size()
+            .small()
             .label("安装扩展")
             .tooltip("打开 Chrome 应用商店里的扩展页")
             .on_click(move |_, _, cx| cx.open_url(url))
@@ -244,7 +243,7 @@ fn server_row(
         let entity = entity.clone();
         let name = server.name.clone();
         Button::new(format!("pi-mcp-login-{}", server.name))
-            .icon_size()
+            .small()
             .label(if logging_in {
                 "等待授权…"
             } else if server.signed_in {
@@ -267,7 +266,7 @@ fn server_row(
         let enable = !server.enabled;
         Button::new(format!("pi-mcp-toggle-{}", server.name))
             .quiet()
-            .icon_size()
+            .small()
             .label(if enable { "启用" } else { "停用" })
             .disabled(logging_in)
             .on_click(move |_, _, cx| {
@@ -282,7 +281,7 @@ fn server_row(
         let name = server.name.clone();
         Button::new(format!("pi-mcp-remove-{}", server.name))
             .quiet()
-            .icon_size()
+            .small()
             .icon(api::ui::trash_icon())
             .icon_action("从 mcp.json 移除")
             .disabled(logging_in || removing)
@@ -339,7 +338,7 @@ fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palett
                 .child(
                     Button::new("pi-mcp-remove-cancel")
                         .quiet()
-                        .icon_size()
+                        .small()
                         .label("取消")
                         .on_click(move |_, _, cx| {
                             cancel_entity
@@ -349,7 +348,7 @@ fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palett
                 .child(
                     Button::new("pi-mcp-remove-confirm")
                         .danger()
-                        .icon_size()
+                        .small()
                         .label("移除")
                         .on_click(move |_, _, cx| {
                             let name = confirm_name.clone();
@@ -386,7 +385,7 @@ fn footer(entity: &Entity<CapabilitiesPage>, mcp_path: &str, palette: Palette) -
                 .child(
                     Button::new("pi-edit-mcp-file")
                         .quiet()
-                        .icon_size()
+                        .small()
                         .label("mcp.json")
                         .tooltip(mcp_path.to_string())
                         .on_click(move |_, window, cx| {

@@ -608,7 +608,7 @@ impl TabGroupRenderer for SmeltTabGroup {
     fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
         self.inner
             .frame(group, window, cx)
-            .bg(Hsla::from(rgb(ui_theme::bg_column())))
+            .bg(Hsla::from(rgb(ui_theme::side())))
     }
 
     fn content_frame(
@@ -895,7 +895,7 @@ fn zoom_button(group: &TabGroupContext, cx: &App) -> Option<AnyElement> {
             .child(
                 Button::new("smelt-dock-zoom")
                     .quiet()
-                    .compact()
+                    .small()
                     .selected(zoomed)
                     .toggled(zoomed)
                     .icon(if zoomed {
@@ -965,7 +965,7 @@ fn dock_toggle(placement: DockPlacement, open: bool, area: Entity<DockArea>) -> 
         .child(
             Button::new(id)
                 .quiet()
-                .compact()
+                .small()
                 .icon(icon)
                 .icon_action(label)
                 .on_click(move |_, window, cx| {
@@ -1000,7 +1000,7 @@ impl Workspace {
         let focused_key = self.sidebar_focused_key(window);
         let list =
             self.render_session_list(cx.entity(), window, cx, &statuses, animate, focused_key);
-        workspace_frame::card(rgb(ui_theme::bg_column()).into())
+        workspace_frame::card(rgb(ui_theme::side()).into())
             .when(at_top, |card| card.pt(workspace_frame::TOP_BAR_HEIGHT))
             // 从访达拖文件夹进会话列表 = 打开项目。不挂整个窗口：对话输入框要自己收文件。
             .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
@@ -1048,7 +1048,7 @@ impl Workspace {
             .child(stage_content);
         // 标题胶囊和拖窗口的顶带浮在舞台内容上沿，只盖舞台自己。
         let chrome = self.render_stage_chrome(self.chrome_left_guard(window), cx);
-        workspace_frame::card(rgb(ui_theme::bg_stage()).into())
+        workspace_frame::card(rgb(ui_theme::bg()).into())
             .child(content)
             .child(chrome)
             .into_any_element()
@@ -1080,7 +1080,7 @@ impl Workspace {
                     .min_w_0()
                     .min_h_0()
                     .flex()
-                    .bg(rgb(ui_theme::bg_stage()))
+                    .bg(rgb(ui_theme::bg()))
                     .children(appearance.bg_image.as_deref().map(|path| {
                         workspace_frame::background_image_layer(
                             path,
@@ -1113,7 +1113,7 @@ impl Workspace {
                 "配对一台 Linux 或 macOS 机器后，就可以在这里打开项目、对话和终端。",
                 Some(
                     Button::new("empty-add-runtime")
-                        .commit()
+                        .primary()
                         .label("添加远程机器")
                         .on_click(cx.listener(|this, _, _window, cx| {
                             this.open_settings_section(

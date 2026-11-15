@@ -11,7 +11,7 @@ pub struct AppearanceSnapshot {
     pub blur: bool,
     pub glass_style: String,
     pub theme_mode: String,
-    /// 主题注册名，例如 `Default Dark`、`Ayu Light`。
+    /// 主题注册名，例如 `smelt Dark`、`Ayu Light`。
     pub theme_name: String,
     pub ui_font_px: u32,
     pub ui_font_family: String,
@@ -247,8 +247,8 @@ mod tests {
 
     fn catalog() -> Vec<ThemeEntry> {
         vec![
-            ThemeEntry::new("Default Dark", "dark", "Default"),
-            ThemeEntry::new("Default Light", "light", "Default"),
+            ThemeEntry::new(crate::theme_index::DEFAULT_DARK, "dark", "smelt"),
+            ThemeEntry::new(crate::theme_index::DEFAULT_LIGHT, "light", "smelt"),
             ThemeEntry::new("Plug Night", "dark", "Plug"),
             ThemeEntry::new("Plug Day", "light", "Plug"),
             ThemeEntry::new("Weird", "sepia", "Weird"),

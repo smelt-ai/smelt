@@ -12,12 +12,11 @@ use std::rc::Rc;
 
 use api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED;
 use api::serde_json;
-use api::ui::Button;
+use api::ui::{Button, Segmented};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
-use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 use smelt_plugin_api::{self as api, HostEvent, PluginView, RuntimeKey, ViewHandle, ViewSpec};
 
@@ -262,7 +261,7 @@ impl CapabilitiesPage {
         let entity = cx.entity();
         Button::new("capabilities-runtime")
             .quiet()
-            .compact()
+            .small()
             .label(format!("机器：{current}"))
             .icon(IconName::ChevronDown)
             .dropdown_menu(move |menu, _window, _cx| {
@@ -317,21 +316,14 @@ impl Render for CapabilitiesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = api::host(cx);
         let entity = cx.entity();
-        let tabs = TabBar::new("capabilities-tabs")
-            .segmented()
-            .flex_none()
-            .selected_index(
-                CapabilitiesTab::ALL
-                    .iter()
-                    .position(|tab| *tab == self.tab)
-                    .unwrap_or_default(),
-            )
-            .on_click(move |ix, _, cx| {
-                if let Some(tab) = CapabilitiesTab::ALL.get(*ix).copied() {
+        let tabs = Segmented::new("capabilities-tabs")
+            .segments(CapabilitiesTab::ALL.map(|tab| tab.label()))
+            .selected(CapabilitiesTab::ALL.iter().position(|tab| *tab == self.tab))
+            .on_select(move |ix, _, cx| {
+                if let Some(tab) = CapabilitiesTab::ALL.get(ix).copied() {
                     entity.update(cx, |page, cx| page.select_tab(tab, cx));
                 }
-            })
-            .children(CapabilitiesTab::ALL.map(|tab| Tab::new().label(tab.label())));
+            });
         // 挂了别的机器，才需要选在配哪台。
         let several_machines = host.machines(cx).len() > 1;
         let header = host
@@ -341,7 +333,7 @@ impl Render for CapabilitiesPage {
                 div()
                     .text_sm()
                     .font_medium()
-                    .text_color(rgb(api::ui::ui_theme::text_bright()))
+                    .text_color(rgb(api::ui::ui_theme::text()))
                     .child("能力库"),
             )
             .child(tabs)
@@ -353,7 +345,7 @@ impl Render for CapabilitiesPage {
 
         v_flex()
             .size_full()
-            .bg(rgb(api::ui::ui_theme::bg_stage()))
+            .bg(rgb(api::ui::ui_theme::bg()))
             .child(header)
             .child(
                 div()

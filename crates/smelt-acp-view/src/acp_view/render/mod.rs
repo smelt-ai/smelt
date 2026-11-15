@@ -134,10 +134,10 @@ impl AcpView {
                         .items_center()
                         .border_b_1()
                         .border_color(t.border)
-                        .bg(gpui::rgb(ui_theme::bg_bar()))
+                        .bg(gpui::rgb(ui_theme::side()))
                         .child(ambient_spinner(
                             "acp-starting-banner-spinner",
-                            gpui::rgb(ui_theme::text_muted()).into(),
+                            gpui::rgb(ui_theme::muted()).into(),
                             animate_ambient,
                         ))
                         .child(
@@ -169,7 +169,7 @@ impl AcpView {
                     .gap_2()
                     .border_b_1()
                     .border_color(t.border)
-                    .bg(gpui::rgb(ui_theme::bg_bar()))
+                    .bg(gpui::rgb(ui_theme::side()))
                     .child(
                         h_flex()
                             .w_full()
@@ -184,8 +184,7 @@ impl AcpView {
                             .child(div().flex_1())
                             .child(
                                 Button::new("acp-restart")
-                                    .commit()
-                                    .capsule()
+                                    .primary()
                                     .label("重新开始")
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.restart(window, cx);
@@ -212,7 +211,7 @@ impl AcpView {
                 .expect("non-fresh startup always has loading copy");
             let indicator = ambient_spinner(
                 "acp-starting-placeholder-spinner",
-                gpui::rgb(ui_theme::text_muted()).into(),
+                gpui::rgb(ui_theme::muted()).into(),
                 animate_ambient,
             )
             .into_any_element();
@@ -302,12 +301,12 @@ impl AcpView {
                                 .justify_center()
                                 .rounded_full()
                                 .border_1()
-                                .border_color(ui_theme::tint(ui_theme::red(), 0x48))
-                                .bg(ui_theme::tint(ui_theme::red(), 0x14))
+                                .border_color(ui_theme::tint(ui_theme::bad(), 0x48))
+                                .bg(ui_theme::tint(ui_theme::bad(), 0x14))
                                 .child(
                                     Icon::new(IconName::CircleX)
                                         .size(px(24.))
-                                        .text_color(gpui::rgb(ui_theme::red())),
+                                        .text_color(gpui::rgb(ui_theme::bad())),
                                 ),
                         )
                         .child(
@@ -327,8 +326,7 @@ impl AcpView {
                         )
                         .child(
                             Button::new("acp-restart")
-                                .commit()
-                                .capsule()
+                                .primary()
                                 .label(action_label)
                                 .on_click(cx.listener(|this, _ev, window, cx| {
                                     this.restart(window, cx);
@@ -377,8 +375,6 @@ impl AcpView {
                 let prompt = prompt.to_string();
                 prompt_chips = prompt_chips.child(
                     Button::new((gpui::ElementId::from("acp-empty-prompt"), title))
-                        .normal()
-                        .capsule()
                         .label(title)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.insert_prompt_text(&prompt, window, cx);
@@ -448,17 +444,9 @@ impl AcpView {
                 .justify_center()
                 .child(
                     Button::new("acp-jump-to-latest")
-                        .surface()
-                        .capsule()
-                        .accessibility_label("回到最新")
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_medium()
-                                .text_color(gpui::rgb(ui_theme::text_mid()))
-                                .child("回到最新"),
-                        )
-                        .child(div().text_sm().text_color(muted).child("↓"))
+                        .floating()
+                        .icon(IconName::ArrowDown)
+                        .label("回到最新")
                         .on_click(cx.listener(|this, _event, _window, cx| {
                             this.set_viewing_history(false, cx);
                             this.list_state.set_follow_mode(FollowMode::Tail);
@@ -630,15 +618,14 @@ impl AcpView {
                     .py_1p5()
                     .border_t_1()
                     .border_color(border)
-                    .bg(ui_theme::tint(ui_theme::yellow(), 0x14))
+                    .bg(ui_theme::tint(ui_theme::need(), 0x14))
                     .text_xs()
-                    .text_color(gpui::rgb(ui_theme::yellow()))
+                    .text_color(gpui::rgb(ui_theme::need()))
                     .child(div().flex_1().min_w(px(0.)).child(notice.text.clone()))
                     .child(
                         Button::new(("acp-notice-dismiss", id as usize))
                             .dismiss()
                             .icon(IconName::Close)
-                            .text_color(gpui::rgb(ui_theme::yellow()))
                             .icon_action("关闭提示")
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 this.dismissed_notice_id = Some(id);
@@ -654,9 +641,9 @@ impl AcpView {
                     .py_1p5()
                     .border_t_1()
                     .border_color(border)
-                    .bg(ui_theme::tint(ui_theme::yellow(), 0x14))
+                    .bg(ui_theme::tint(ui_theme::need(), 0x14))
                     .text_xs()
-                    .text_color(gpui::rgb(ui_theme::yellow()))
+                    .text_color(gpui::rgb(ui_theme::need()))
                     .child(msg.clone())
             }))
             .children(input_row);

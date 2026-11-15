@@ -104,10 +104,10 @@ fn chrome_island(id: &'static str, max_width: f32, tip: String) -> Stateful<Div>
         .justify_center()
         .rounded_full()
         // 浮层实色：平时一档卡片底，指上去再抬到悬停色。不透、不糊。
-        .bg(ui_theme::glass_floating())
+        .bg(gpui::rgb(ui_theme::surface()))
         .border_1()
-        .border_color(ui_theme::card_stroke())
-        .hover(|island| island.bg(rgb(ui_theme::bg_hover())))
+        .border_color(ui_theme::hair())
+        .hover(|island| island.bg(rgb(ui_theme::soft())))
         .shadow_lg()
         .tooltip(move |window, cx| {
             gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
@@ -123,7 +123,7 @@ fn chrome_title_island(title: String, tip: String) -> Stateful<Div> {
                 .overflow_hidden()
                 .text_sm()
                 .font_semibold()
-                .text_color(rgb(ui_theme::text_bright()))
+                .text_color(rgb(ui_theme::text()))
                 .child(truncated_line(title)),
         ),
     )
@@ -141,7 +141,7 @@ fn chrome_prompt_island(
             div()
                 .flex_shrink_0()
                 .text_sm()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .child("↑"),
         )
         .child(

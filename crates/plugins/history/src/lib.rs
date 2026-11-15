@@ -506,22 +506,16 @@ impl HistoryPage {
         });
         let page = cx.entity();
         let dialog_input = input.clone();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let on_ok = page.clone();
-            let on_close = page.clone();
-            alert
-                .confirm()
-                .title("重命名")
-                .child(gpui_component::input::Input::new(&dialog_input))
-                .ok_text("确定")
-                .on_ok(move |_, _, cx| {
-                    on_ok.update(cx, |page, cx| page.submit_rename(cx));
-                    true
-                })
-                .on_close(move |_, _, cx| {
-                    on_close.update(cx, |page, _| page.renaming = None);
-                })
-        });
+        let on_close = page.clone();
+        api::ui::dialog::Confirm::new("重命名", "重命名", move |_, cx| {
+            page.update(cx, |page, cx| page.submit_rename(cx));
+            true
+        })
+        .body(move |_, _| gpui_component::input::Input::new(&dialog_input).into_any_element())
+        .on_close(move |_, cx| {
+            on_close.update(cx, |page, _| page.renaming = None);
+        })
+        .open(window, cx);
         window.defer(cx, move |window, cx| {
             // 名字整段选中：直接打字就是换掉，按方向键才是在原名上改。
             input.update(cx, |input, cx| {
@@ -586,24 +580,20 @@ impl HistoryPage {
         );
         let title = session.title.clone();
         let page = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let page = page.clone();
-            let params = params.clone();
-            let machine = project.machine.clone();
-            let title = title.clone();
-            alert
-                .confirm()
-                .title("确定删除这条历史会话吗？")
-                .description(description.clone())
-                .ok_text("确定删除")
-                .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    page.update(cx, |page, cx| {
-                        page.delete(&machine, params.clone(), title.clone(), cx);
-                    });
-                    true
-                })
-        });
+        let machine = project.machine.clone();
+        api::ui::dialog::Confirm::new(
+            "确定删除这条历史会话吗？",
+            "删除",
+            move |_, cx| {
+                page.update(cx, |page, cx| {
+                    page.delete(&machine, params.clone(), title.clone(), cx);
+                });
+                true
+            },
+        )
+        .danger()
+        .description(description)
+        .open(window, cx);
     }
 
     /// 删掉。运行时确认存档确实在这个项目的列表里才删，删完推 `history.changed`。

@@ -208,7 +208,7 @@ pub(crate) fn placeholder_view(text: &str, muted: Hsla) -> Div {
 
 /// 左右拆分（日志页的提交列表和详情），分隔条是和侧栏同一根发丝。
 ///
-/// 组件库悬停时只在中间亮一小段药丸；这里整根从 `border_dim` 亮到 `text_faint`。命中和
+/// 组件库悬停时只在中间亮一小段药丸；这里整根从 `hair` 亮到 `faint`。命中和
 /// 拖拽仍由组件库负责。
 pub(crate) fn h_resizable(id: impl Into<ElementId>) -> ResizablePanelGroup {
     gpui_base::h_resizable(id).with_handle_appearance(hairline_handle())
@@ -218,11 +218,11 @@ pub(crate) fn h_resizable(id: impl Into<ElementId>) -> ResizablePanelGroup {
 /// [`ResizeHandleState`] 走，按下和拖拽也保持亮着。
 fn hairline_handle() -> ResizeHandleRenderer {
     Rc::new(|handle, _, _| {
-        let color = rgb(if handle.state() == ResizeHandleState::Idle {
-            ui_theme::border_dim()
+        let color = if handle.state() == ResizeHandleState::Idle {
+            ui_theme::hair()
         } else {
-            ui_theme::text_faint()
-        });
+            rgb(ui_theme::faint())
+        };
         let line = div().flex_none().bg(color);
         let line = match handle.axis() {
             Axis::Horizontal => line.w(px(1.)).h_full(),
@@ -622,8 +622,8 @@ impl GitPanel {
                     .left(px(3.))
                     .w(px(1.))
                     .h_full()
-                    .bg(rgb(ui_theme::border_dim()))
-                    .group_hover(id, |line| line.bg(rgb(ui_theme::text_faint()))),
+                    .bg(ui_theme::hair())
+                    .group_hover(id, |line| line.bg(rgb(ui_theme::faint()))),
             )
             .on_mouse_down(
                 MouseButton::Left,

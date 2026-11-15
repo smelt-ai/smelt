@@ -273,33 +273,34 @@ fn composer_usage_breakdown(
         let aligned = buckets.clone().aligned_to_used(used);
         return vec![
             usage_row(
-                ui_theme::text_muted(),
+                ui_theme::muted(),
                 "System prompt",
                 aligned.system_prompt,
                 size,
             ),
+            // 分项是并列的类别，用分类色，不借状态色。
             usage_row(
-                ui_theme::purple(),
+                ui_theme::chart(0),
                 "Tool definitions",
                 aligned.tools_definition,
                 size,
             ),
-            usage_row(ui_theme::green(), "Rules", aligned.rules, size),
-            usage_row(ui_theme::yellow(), "Skills", aligned.skills, size),
+            usage_row(ui_theme::chart(1), "Rules", aligned.rules, size),
+            usage_row(ui_theme::chart(2), "Skills", aligned.skills, size),
             usage_row(
-                ui_theme::accent(),
+                ui_theme::chart(3),
                 "MCP & dynamic tools",
                 aligned.mcp_dynamic,
                 size,
             ),
             usage_row(
-                ui_theme::blue(),
+                ui_theme::chart(4),
                 "Subagent definitions",
                 aligned.subagent,
                 size,
             ),
             usage_row(
-                ui_theme::red(),
+                ui_theme::faint(),
                 "Summarized conversation",
                 aligned.summarized,
                 size,
@@ -377,19 +378,19 @@ fn render_usage_hover_card(used: u64, size: u64, cached_read: Option<u64>) -> gp
             div()
                 .text_sm()
                 .font_medium()
-                .text_color(gpui::rgb(ui_theme::text_bright()))
+                .text_color(gpui::rgb(ui_theme::text()))
                 .child(format!("{pct}% context used")),
         )
         .child(
             div()
                 .text_sm()
-                .text_color(gpui::rgb(ui_theme::text_muted()))
+                .text_color(gpui::rgb(ui_theme::muted()))
                 .child(tokens),
         )
         .children(cached_read.filter(|tokens| *tokens > 0).map(|tokens| {
             div()
                 .text_sm()
-                .text_color(gpui::rgb(ui_theme::text_muted()))
+                .text_color(gpui::rgb(ui_theme::muted()))
                 .child(format!("{} cached", compact_token_count(tokens)))
         }))
         .into_any_element()
@@ -462,9 +463,9 @@ fn format_cost(cost: f64) -> String {
 /// 用量平时不冒泡；75% 黄、90% 红。
 fn usage_warn_color(pct: u32) -> Option<u32> {
     if pct >= 90 {
-        Some(ui_theme::red())
+        Some(ui_theme::bad())
     } else if pct >= 75 {
-        Some(ui_theme::yellow())
+        Some(ui_theme::need())
     } else {
         None
     }
@@ -473,13 +474,13 @@ fn usage_warn_color(pct: u32) -> Option<u32> {
 /// 用量环已用弧。平时用蓝，和跑动态同一套；75% 黄、90% 红。
 /// 轨道仍是弱灰，不把整圈染成强调色。
 fn usage_ring_color(pct: u32) -> u32 {
-    usage_warn_color(pct).unwrap_or(ui_theme::blue())
+    usage_warn_color(pct).unwrap_or(ui_theme::run())
 }
 
 /// 没有分桶时，弹层里整条对话占用的颜色。环上的蓝不要再用到这里，
 /// 否则和 Subagent 那一桶撞色。
 fn usage_meter_color(pct: u32) -> u32 {
-    usage_warn_color(pct).unwrap_or(ui_theme::text_faint())
+    usage_warn_color(pct).unwrap_or(ui_theme::faint())
 }
 
 /// 会话面板要先露配置。模型一长，必须收进二级，否则贴底的菜单只看得见模型。
@@ -4906,7 +4907,7 @@ impl AcpView {
                 IconName::Copy
             })
             .quiet()
-            .icon_size()
+            .small()
             .when_some(opacity, |button, opacity| button.opacity(opacity))
             .icon_action(tooltip)
             .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -5301,7 +5302,7 @@ impl AcpView {
         let summary_color = gpui::rgb(if done == total {
             ui_theme::text()
         } else {
-            ui_theme::text_muted()
+            ui_theme::muted()
         });
         let current_step = plan_current_step(plan).unwrap_or("等待下一步").to_string();
         let progress = (done as f32 + in_progress as f32 * 0.5) / total as f32;
@@ -5309,7 +5310,7 @@ impl AcpView {
         let mut bar = gpui_component::v_flex()
             .w_full()
             .border_b_1()
-            .border_color(ui_theme::hairline())
+            .border_color(ui_theme::hair())
             .child(
                 h_flex().w_full().justify_center().child(
                     h_flex()
@@ -5330,14 +5331,14 @@ impl AcpView {
                             div()
                                 .w(px(10.))
                                 .text_xs()
-                                .text_color(gpui::rgb(ui_theme::text_muted()))
+                                .text_color(gpui::rgb(ui_theme::muted()))
                                 .child(if self.plan_collapsed { "▸" } else { "▾" }),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .font_semibold()
-                                .text_color(gpui::rgb(ui_theme::text_mid()))
+                                .text_color(gpui::rgb(ui_theme::muted()))
                                 .child("任务进度"),
                         )
                         .child(
@@ -5346,7 +5347,7 @@ impl AcpView {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_sm()
-                                .text_color(gpui::rgb(ui_theme::text_bright()))
+                                .text_color(gpui::rgb(ui_theme::text()))
                                 .child(truncated_line(current_step)),
                         )
                         .child(
@@ -5362,7 +5363,7 @@ impl AcpView {
                                 .with_size(px(5.))
                                 .flex_shrink_0()
                                 .w(px(120.))
-                                .color(gpui::rgb(ui_theme::text_muted()))
+                                .color(gpui::rgb(ui_theme::muted()))
                                 .value(progress.clamp(0., 1.) * 100.),
                         ),
                 ),
@@ -5384,13 +5385,13 @@ impl AcpView {
                                 .flex_shrink_0()
                                 .w(px(15.))
                                 .text_xs()
-                                .text_color(gpui::rgb(ui_theme::text_faint()))
+                                .text_color(gpui::rgb(ui_theme::faint()))
                                 .child("✓"),
                         )
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(gpui::rgb(ui_theme::text_faint()))
+                                .text_color(gpui::rgb(ui_theme::faint()))
                                 .line_through()
                                 .child(entry.content.clone()),
                         ),
@@ -5401,7 +5402,7 @@ impl AcpView {
                                 .size(px(15.))
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(ui_theme::card_stroke())
+                                .border_color(ui_theme::hair())
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -5409,7 +5410,7 @@ impl AcpView {
                                     div()
                                         .size(px(7.))
                                         .rounded_xs()
-                                        .bg(gpui::rgb(ui_theme::text_muted())),
+                                        .bg(gpui::rgb(ui_theme::muted())),
                                 ),
                         )
                         .child(
@@ -5426,7 +5427,7 @@ impl AcpView {
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                                        .text_color(gpui::rgb(ui_theme::muted()))
                                         .child("进行中"),
                                 ),
                         ),
@@ -5438,12 +5439,12 @@ impl AcpView {
                                 .size(px(15.))
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(gpui::rgb(ui_theme::border_focus())),
+                                .border_color(ui_theme::focus()),
                         )
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(gpui::rgb(ui_theme::text_mid()))
+                                .text_color(gpui::rgb(ui_theme::muted()))
                                 .child(entry.content.clone()),
                         ),
                 };
@@ -6596,15 +6597,13 @@ fn trajectory_lane_label(lane: TrajectoryLane) -> &'static str {
     }
 }
 
+/// 轨迹分道是并列的类别，用分类色，不借状态色。
 fn trajectory_lane_color(lane: TrajectoryLane) -> u32 {
     match lane {
-        TrajectoryLane::User => ui_theme::blue(),
-        TrajectoryLane::Assistant => ui_theme::purple(),
-        TrajectoryLane::Thinking => ui_theme::yellow(),
-        TrajectoryLane::Tool => ui_theme::green(),
-        TrajectoryLane::ModelCall => ui_theme::purple(),
-        TrajectoryLane::Compaction => ui_theme::yellow(),
-        TrajectoryLane::Request => ui_theme::blue(),
+        TrajectoryLane::User | TrajectoryLane::Request => ui_theme::chart(0),
+        TrajectoryLane::Assistant | TrajectoryLane::ModelCall => ui_theme::chart(3),
+        TrajectoryLane::Thinking | TrajectoryLane::Compaction => ui_theme::chart(2),
+        TrajectoryLane::Tool => ui_theme::chart(1),
     }
 }
 
@@ -6748,14 +6747,14 @@ fn render_compact_diff_stats(added: usize, removed: usize) -> gpui::AnyElement {
             div()
                 .text_xs()
                 .font_family(smelt_model::font_config::font_family())
-                .text_color(gpui::rgb(ui_theme::green()))
+                .text_color(gpui::rgb(ui_theme::ok()))
                 .child(format!("+{added}")),
         )
         .child(
             div()
                 .text_xs()
                 .font_family(smelt_model::font_config::font_family())
-                .text_color(gpui::rgb(ui_theme::red()))
+                .text_color(gpui::rgb(ui_theme::bad()))
                 .child(format!("-{removed}")),
         )
         .into_any_element()
@@ -7463,14 +7462,14 @@ fn render_diff_lines(
     for (line_ix, line) in lines.iter().enumerate() {
         let (bg, prefix, fg): (Option<gpui::Hsla>, &str, gpui::Hsla) = match line.tag {
             DiffLineTag::Removed => (
-                Some(smelt_ui::ui_theme::tint(smelt_ui::ui_theme::red(), 0x22).into()),
+                Some(smelt_ui::ui_theme::tint(smelt_ui::ui_theme::bad(), 0x22).into()),
                 "-",
-                gpui::rgb(smelt_ui::ui_theme::red()).into(),
+                gpui::rgb(smelt_ui::ui_theme::bad()).into(),
             ),
             DiffLineTag::Added => (
-                Some(smelt_ui::ui_theme::tint(smelt_ui::ui_theme::green(), 0x22).into()),
+                Some(smelt_ui::ui_theme::tint(smelt_ui::ui_theme::ok(), 0x22).into()),
                 "+",
-                gpui::rgb(smelt_ui::ui_theme::diff_add_text()).into(),
+                gpui::rgb(smelt_ui::ui_theme::ok()).into(),
             ),
             DiffLineTag::Context => (None, " ", muted_color),
         };

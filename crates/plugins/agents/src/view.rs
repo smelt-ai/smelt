@@ -18,7 +18,6 @@ impl AgentsPage {
             ([runtime], [kind]) => {
                 let (runtime, kind) = (runtime.clone(), *kind);
                 Button::new("agents-add")
-                    .normal()
                     .icon(IconName::Plus)
                     .label("新建智能体")
                     .on_click(move |_, window, cx| {
@@ -29,7 +28,6 @@ impl AgentsPage {
                     .into_any_element()
             }
             _ => Button::new("agents-add")
-                .normal()
                 .icon(IconName::Plus)
                 .label("新建智能体")
                 .dropdown_menu(move |menu, _, cx| {
@@ -111,16 +109,14 @@ impl AgentsPage {
         let tabs = self.editor.as_ref().map(|editor| {
             const TABS: [AgentEditorTab; 2] = [AgentEditorTab::Config, AgentEditorTab::Memory];
             let entity = entity.clone();
-            choice_tabs(
-                "agent-editor-tabs",
-                TABS.iter().position(|tab| *tab == editor.tab),
-                TABS.map(|tab| Tab::new().label(agent_editor_tab_label(tab, editor))),
-                move |ix, cx| {
+            Segmented::new("agent-editor-tabs")
+                .segments(TABS.map(|tab| agent_editor_tab_label(tab, editor)))
+                .selected(TABS.iter().position(|tab| *tab == editor.tab))
+                .on_select(move |ix, _, cx| {
                     if let Some(tab) = TABS.get(ix).copied() {
                         entity.update(cx, |page, cx| page.select_agent_editor_tab(tab, cx));
                     }
-                },
-            )
+                })
         });
         let start_entity = entity;
         api::host(cx)
@@ -145,14 +141,14 @@ impl AgentsPage {
                         div()
                             .text_lg()
                             .font_semibold()
-                            .text_color(rgb(ui_theme::text_bright()))
+                            .text_color(rgb(ui_theme::text()))
                             .overflow_hidden()
                             .child(truncated_line(agent_display_name(name))),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(ui_theme::text_muted()))
+                            .text_color(rgb(ui_theme::muted()))
                             .child(if draft {
                                 "开始对话后会设为默认。返回会取消，不保留这个智能体。"
                             } else {
@@ -164,8 +160,8 @@ impl AgentsPage {
             .when(draft, |row| {
                 row.child(
                     Button::new("agent-draft-start-conversation")
-                        .commit()
-                        .compact()
+                        .primary()
+                        .small()
                         .label("开始对话")
                         .on_click(move |_, _, cx| {
                             start_entity.update(cx, |page, cx| page.commit_conversation_draft(cx));
@@ -210,7 +206,12 @@ impl AgentsPage {
                                 column.child(render_agent_machine_header(group, cx))
                             })
                             .children(group.agents.iter().map(|agent| {
-                                self.render_agent_catalog_row(&group.runtime, agent, entity.clone())
+                                self.render_agent_catalog_row(
+                                    &group.runtime,
+                                    agent,
+                                    entity.clone(),
+                                    cx,
+                                )
                             }))
                     })),
             )
@@ -222,6 +223,7 @@ impl AgentsPage {
         runtime: &RuntimeKey,
         agent: &AgentDefinition,
         entity: Entity<AgentsPage>,
+        cx: &App,
     ) -> AnyElement {
         let agent_ref = AgentRef::new(runtime.clone(), agent.id.clone());
         let row_id = match runtime {
@@ -237,12 +239,12 @@ impl AgentsPage {
             .unwrap_or_else(|| agent.engine_kind_id.clone());
         let summary = agent_card_prompt(&agent.prompt);
         let show_engine = agent_engine_kinds().len() > 1;
-        let automation_count = self.automation_count(&agent_ref);
+        let automation_count = self.automation_count(&agent_ref, cx);
         let menu_talk_entity = open_entity.clone();
         let menu_talk_agent = agent_ref.clone();
         let menu_delete_entity = open_entity.clone();
         let menu_delete_agent = agent_ref;
-        content_card_style(ListRow::new(row_id).card())
+        content_card_style(ListRow::new(row_id))
             .w_full()
             .px_4()
             .py_3()
@@ -269,7 +271,7 @@ impl AgentsPage {
                                     .flex_1()
                                     .text_sm()
                                     .font_semibold()
-                                    .text_color(rgb(ui_theme::text_bright()))
+                                    .text_color(rgb(ui_theme::text()))
                                     .overflow_hidden()
                                     .child(truncated_line(name.clone())),
                             )
@@ -286,7 +288,7 @@ impl AgentsPage {
                             div()
                                 .text_xs()
                                 .line_height(px(18.))
-                                .text_color(rgb(ui_theme::text_muted()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .child(summary),
                         )
                     }),
@@ -359,13 +361,13 @@ impl AgentsPage {
                                 div()
                                     .text_lg()
                                     .font_semibold()
-                                    .text_color(rgb(ui_theme::text_bright()))
+                                    .text_color(rgb(ui_theme::text()))
                                     .child("还没有智能体"),
                             )
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(ui_theme::text_muted()))
+                                    .text_color(rgb(ui_theme::muted()))
                                     .text_center()
                                     .child(if self.arm_conversation_on_create {
                                         "创建一个可复用的智能体。开始对话后会用它开场，并设为默认。返回则不保留。"
@@ -376,8 +378,7 @@ impl AgentsPage {
                     )
                     .child({
                         let button = Button::new("agents-empty-add")
-                            .normal()
-                            .compact()
+                            .small()
                             .icon(IconName::Plus)
                             .label("新建智能体");
                         // 挂了不止一台机器时先选建在哪台机器上。
@@ -411,7 +412,7 @@ impl AgentsPage {
         entity: Entity<AgentsPage>,
         cx: &App,
     ) -> AnyElement {
-        let automation_count = self.automation_count(&editor.agent);
+        let automation_count = self.automation_count(&editor.agent, cx);
         let error = self
             .error
             .clone()
@@ -423,7 +424,7 @@ impl AgentsPage {
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .bg(rgb(ui_theme::bg_stage()))
+                .bg(rgb(ui_theme::bg()))
                 .overflow_y_scroll()
                 .child(
                     agent_definition_column()
@@ -462,8 +463,8 @@ impl AgentsPage {
         let conversation_agent = editor.agent.clone();
         let talk_entity = entity.clone();
         let talk_button = Button::new("agent-new-conversation")
-            .commit()
-            .compact()
+            .primary()
+            .small()
             .label("新对话")
             .tooltip("新开一段对话")
             .on_click(move |_, _, cx| {
@@ -480,7 +481,7 @@ impl AgentsPage {
         };
         let delete_button = Button::new("agent-delete")
             .quiet()
-            .compact()
+            .small()
             .icon(IconName::Ellipsis)
             .accessibility_label("更多操作")
             .tooltip(delete_tooltip)
@@ -505,7 +506,7 @@ impl AgentsPage {
             .flex_1()
             .min_w_0()
             .h_full()
-            .bg(rgb(ui_theme::bg_stage()))
+            .bg(rgb(ui_theme::bg()))
             .overflow_y_scroll()
             .child(
                 agent_definition_column()
@@ -550,7 +551,7 @@ impl AgentsPage {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(ui_theme::text_faint()))
+                                                    .text_color(rgb(ui_theme::faint()))
                                                     .child(agent_usage_summary(
                                                         agent_conversation_count(&editor.agent, cx),
                                                         automation_count,
@@ -585,16 +586,13 @@ impl AgentsPage {
                                         div()
                                             .text_sm()
                                             .font_medium()
-                                            .text_color(rgb(ui_theme::text_bright()))
+                                            .text_color(rgb(ui_theme::text()))
                                             .child("工作方式"),
                                     )
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(ui_theme::text_muted()))
-                                            .child(
-                                                "长期规则。对话和自动化都会带上，不会当成第一条消息。",
-                                            ),
+                                        div().text_xs().text_color(rgb(ui_theme::muted())).child(
+                                            "长期规则。对话和自动化都会带上，不会当成第一条消息。",
+                                        ),
                                     ),
                             )
                             .child(
@@ -608,7 +606,7 @@ impl AgentsPage {
                                     .pt_1()
                                     .pb_3()
                                     .text_xs()
-                                    .text_color(rgb(ui_theme::text_faint()))
+                                    .text_color(rgb(ui_theme::faint()))
                                     .child(instructions_footer),
                             ),
                     )
@@ -655,7 +653,7 @@ impl AgentsPage {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui_theme::bg_stage()))
+            .bg(rgb(ui_theme::bg()))
             .child(header)
             .child(body)
             .into_any_element()
@@ -673,13 +671,13 @@ pub(crate) fn agent_monogram(name: &str, size: f32, on_card: bool) -> Div {
         .items_center()
         .justify_center()
         .bg(rgb(if on_card {
-            ui_theme::bg_stage()
+            ui_theme::bg()
         } else {
-            ui_theme::bg_card()
+            ui_theme::surface()
         }))
         .text_size(px(if compact { size * 0.34 } else { size * 0.42 }))
         .font_medium()
-        .text_color(rgb(ui_theme::text_bright()))
+        .text_color(rgb(ui_theme::text()))
         .child(monogram)
 }
 
@@ -803,20 +801,20 @@ pub(crate) fn render_agent_machine_header(group: &AgentMachineGroup, cx: &App) -
             div()
                 .text_xs()
                 .font_medium()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .child(machine_name(&group.runtime, cx)),
         )
         .children(group.status.clone().map(|status| {
             div()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(status)
         }))
         .when(group.status.is_none() && group.agents.is_empty(), |row| {
             row.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(ui_theme::text_faint()))
+                    .text_color(rgb(ui_theme::faint()))
                     .child("还没有智能体"),
             )
         })

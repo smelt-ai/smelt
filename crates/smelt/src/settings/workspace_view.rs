@@ -60,9 +60,6 @@ impl Workspace {
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
-            show_daemon_restart_confirm: self.show_daemon_restart_confirm,
-            show_update_install_confirm: self.show_update_install_confirm,
-            session_manager_open: self.session_manager_open,
             resources: (self.settings_section == SettingsSection::Resources)
                 .then(|| self.resources_snapshot(cx)),
             attention: self.settings_attention(cx),

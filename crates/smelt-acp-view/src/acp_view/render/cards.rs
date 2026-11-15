@@ -9,7 +9,7 @@ fn elicit_choice_row<E>(row: E, selected: bool, border: gpui::Hsla) -> E
 where
     E: gpui::Styled + gpui::InteractiveElement,
 {
-    let accent = gpui::rgb(ui_theme::accent());
+    let ink = gpui::rgb(ui_theme::ink());
     row.w_full()
         .min_w_0()
         .min_h(px(36.))
@@ -18,9 +18,9 @@ where
         .text_sm()
         .rounded_lg()
         .border_1()
-        .border_color(if selected { accent.into() } else { border })
+        .border_color(if selected { ink.into() } else { border })
         .bg(if selected {
-            gpui::rgb(ui_theme::bg_selected())
+            gpui::rgb(ui_theme::soft_hover())
         } else {
             ui_theme::overlay(0x10)
         })
@@ -73,8 +73,7 @@ impl AcpView {
                 buttons = buttons.child(
                     h_flex().w_full().min_w_0().child(
                         Button::new((gpui::ElementId::from("acp-perm-primary"), option_id.clone()))
-                            .commit()
-                            .capsule()
+                            .primary()
                             .label(format!("{name} ⌘⏎"))
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 this.pick_permission(&tool_call_id, &option_id, cx);
@@ -86,20 +85,11 @@ impl AcpView {
                 if Some(ix) == primary_ix {
                     continue;
                 }
-                let danger = matches!(
-                    opt.kind,
-                    PermissionOptionKindView::RejectOnce | PermissionOptionKindView::RejectAlways
-                );
+                // 拒绝不毁东西，和其它选项一样是次要按钮；红色留给删除、停止这类不可逆的。
                 let option_id = opt.option_id.clone();
                 let tool_call_id = tool_call_id.clone();
                 let button =
-                    Button::new((gpui::ElementId::from("acp-perm-opt"), option_id.clone()))
-                        .capsule();
-                let button = if danger {
-                    button.danger()
-                } else {
-                    button.outline()
-                };
+                    Button::new((gpui::ElementId::from("acp-perm-opt"), option_id.clone()));
                 let button = button.label(opt.name.clone()).on_click(cx.listener(
                     move |this, _ev, _window, cx| {
                         this.pick_permission(&tool_call_id, &option_id, cx);
@@ -128,7 +118,7 @@ impl AcpView {
                             .whitespace_normal()
                             .text_sm()
                             .font_family(smelt_model::font_config::font_family())
-                            .text_color(gpui::rgb(ui_theme::text_mid()))
+                            .text_color(gpui::rgb(ui_theme::muted()))
                             .child(command.clone()),
                     )
                     .children(
@@ -149,7 +139,7 @@ impl AcpView {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(gpui::rgb(ui_theme::text_mid()))
+                            .text_color(gpui::rgb(ui_theme::muted()))
                             .child(reason.clone().unwrap_or_else(|| pending.question.clone())),
                     )
                     .children(grant_root.as_ref().map(|root| {
@@ -162,12 +152,12 @@ impl AcpView {
                     .into_any_element(),
                 ApprovalDetailsView::Permissions { summary } => div()
                     .text_sm()
-                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                    .text_color(gpui::rgb(ui_theme::muted()))
                     .child(summary.clone())
                     .into_any_element(),
                 ApprovalDetailsView::Generic => div()
                     .text_sm()
-                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                    .text_color(gpui::rgb(ui_theme::muted()))
                     .child(pending.question.clone())
                     .into_any_element(),
             };
@@ -190,7 +180,7 @@ impl AcpView {
                             .absolute()
                             .inset_0()
                             .rounded_full()
-                            .bg(gpui::rgb(ui_theme::yellow()))
+                            .bg(gpui::rgb(ui_theme::need()))
                             .opacity((1.0 - delta).max(0.0) * 0.7)
                             .size(px(8. * scale))
                     },
@@ -213,8 +203,8 @@ impl AcpView {
                         .gap_3()
                         .rounded(ui_theme::card_radius())
                         .border_1()
-                        .border_color(gpui::rgb(ui_theme::yellow()))
-                        .bg(ui_theme::tint(ui_theme::yellow(), 0x0c))
+                        .border_color(gpui::rgb(ui_theme::need()))
+                        .bg(ui_theme::tint(ui_theme::need(), 0x0c))
                         .child(
                             h_flex()
                                 .gap_2()
@@ -230,7 +220,7 @@ impl AcpView {
                                             .inset_0()
                                             .size_2()
                                             .rounded_full()
-                                            .bg(gpui::rgb(ui_theme::yellow())),
+                                            .bg(gpui::rgb(ui_theme::need())),
                                     ),
                                 )
                                 .child(div().text_sm().font_semibold().child("需要批准"))
@@ -276,7 +266,7 @@ impl AcpView {
                 );
             let skip = Button::new("acp-elicit-skip")
                 .quiet()
-                .compact()
+                .small()
                 .label("跳过")
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.dismiss_elicitation(cx);
@@ -292,8 +282,8 @@ impl AcpView {
                 .gap_3()
                 .rounded(ui_theme::card_radius())
                 .border_1()
-                .border_color(ui_theme::card_stroke())
-                .bg(ui_theme::glass_card())
+                .border_color(ui_theme::hair())
+                .bg(gpui::rgb(ui_theme::surface()))
                 .child(
                     h_flex()
                         .w_full()
@@ -337,8 +327,7 @@ impl AcpView {
                                     gpui::ElementId::from("acp-elicit-url"),
                                     field.key.clone(),
                                 ))
-                                .commit()
-                                .capsule()
+                                .primary()
                                 .label("打开并继续")
                                 .on_click(cx.listener(
                                     move |this, _ev, _window, cx| {
@@ -445,8 +434,7 @@ impl AcpView {
                     h_flex().w_full().gap_2().items_center().child(
                         Button::new("acp-elicit-submit")
                             .debug_selector(|| "acp-elicit-submit".to_string())
-                            .commit()
-                            .capsule()
+                            .primary()
                             .disabled(!ready)
                             .label("提交")
                             .on_click(cx.listener(|this, _ev, _window, cx| {

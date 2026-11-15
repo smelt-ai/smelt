@@ -102,7 +102,7 @@ fn runtime_name_with_indicator(
         .min_w_0()
         .overflow_hidden()
         .text_sm()
-        .text_color(rgb(ui_theme::text_mid()))
+        .text_color(rgb(ui_theme::muted()))
         .child(truncated_line(name));
     let Some(indicator) = indicator else {
         return name.into_any_element();
@@ -155,10 +155,10 @@ fn runtime_section_header(
     let indicator = crate::runtimes::runtime_indicator(&key, cx);
     let has_desktop = crate::runtimes::runtime_has_desktop(&key, cx);
     let icon_color = match indicator.as_ref().map(|i| i.light) {
-        Some(crate::runtimes::LinkLight::Good) => ui_theme::green(),
-        Some(crate::runtimes::LinkLight::Degraded) => ui_theme::yellow(),
-        Some(crate::runtimes::LinkLight::Down) => ui_theme::red(),
-        None => ui_theme::text_muted(),
+        Some(crate::runtimes::LinkLight::Good) => ui_theme::ok(),
+        Some(crate::runtimes::LinkLight::Degraded) => ui_theme::need(),
+        Some(crate::runtimes::LinkLight::Down) => ui_theme::bad(),
+        None => ui_theme::muted(),
     };
     let group = SharedString::from(format!("runtime-header-{key:?}"));
     let toggle_workspace = workspace.clone();
@@ -201,7 +201,7 @@ fn runtime_section_header(
                         .child(
                             Icon::new(IconName::ChevronRight)
                                 .size(px(12.))
-                                .text_color(rgb(ui_theme::text_muted()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .transform(Transformation::rotate(radians(
                                     chevron_degrees.to_radians(),
                                 ))),
@@ -241,7 +241,7 @@ fn runtime_section_header(
                     "runtime-desktop-{key:?}"
                 ))))
                 .quiet()
-                .icon_size()
+                .small()
                 .icon(Icon::empty().path("smelt-icons/monitor.svg"))
                 .icon_action("远程桌面")
                 .opacity(0.0)
@@ -260,7 +260,7 @@ fn runtime_section_header(
                 "runtime-open-project-{key:?}"
             ))))
             .quiet()
-            .icon_size()
+            .small()
             .icon(Icon::empty().path("smelt-icons/folder-plus.svg"))
             .icon_action("打开项目")
             .opacity(0.0)
@@ -283,7 +283,7 @@ fn runtime_section_header(
                         "runtime-menu-{key:?}"
                     ))))
                     .quiet()
-                    .icon_size()
+                    .small()
                     .icon(IconName::Ellipsis)
                     .icon_action("这台机器")
                     .dropdown_menu(move |menu, _window, cx| {
@@ -405,9 +405,9 @@ fn quota_popover(quotas: Vec<FooterQuota>, workspace: Entity<Workspace>) -> Div 
         .w_full()
         .p_1()
         // Popover 本身是无样式宿主，内容自己铺实色底和描边，跟新建菜单一样。
-        .bg(ui_theme::glass_floating())
+        .bg(gpui::rgb(ui_theme::surface()))
         .border_1()
-        .border_color(ui_theme::card_stroke())
+        .border_color(ui_theme::hair())
         .rounded(px(8.))
         .flex()
         .flex_col()
@@ -419,7 +419,7 @@ fn quota_popover(quotas: Vec<FooterQuota>, workspace: Entity<Workspace>) -> Div 
                 .items_center()
                 .text_xs()
                 .font_medium()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .child("账户额度"),
         )
         .children(quotas.into_iter().map(|quota| {
@@ -458,7 +458,7 @@ fn quota_popover(quotas: Vec<FooterQuota>, workspace: Entity<Workspace>) -> Div 
                         .h(px(4.))
                         .rounded_full()
                         .overflow_hidden()
-                        .bg(rgb(ui_theme::border_dim()))
+                        .bg(ui_theme::hair())
                         .child(
                             div()
                                 .h_full()
@@ -864,7 +864,7 @@ impl Workspace {
             .child(
                 Button::new("session-grouping")
                     .quiet()
-                    .compact()
+                    .small()
                     .icon(Icon::new(gpui_kit_assets::IconName::SlidersHorizontal))
                     .icon_action("筛选与分组")
                     .dropdown_menu(move |menu, _window, _cx| {
@@ -945,7 +945,7 @@ impl Workspace {
                                 .flex_shrink_0()
                                 .text_xs()
                                 .font_medium()
-                                .text_color(rgb(ui_theme::text_muted()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .child("项目"),
                         )
                         .child(div().flex_1())
@@ -964,7 +964,7 @@ impl Workspace {
                                         .child(
                                             Button::new("open-project")
                                                 .quiet()
-                                                .compact()
+                                                .small()
                                                 .icon(
                                                     Icon::empty()
                                                         .path("smelt-icons/folder-plus.svg"),
@@ -1035,13 +1035,7 @@ impl Workspace {
             }
             div()
                 .when(!runtime_sections && separated, |d| {
-                    d.child(
-                        div()
-                            .mx_2()
-                            .mt_3()
-                            .h(px(1.))
-                            .bg(rgb(ui_theme::border_dim())),
-                    )
+                    d.child(div().mx_2().mt_3().h(px(1.)).bg(ui_theme::hair()))
                 })
                 .child(runtime_section_header(
                     runtime,
@@ -1269,16 +1263,16 @@ impl Workspace {
                                         // 选中字色加中等字重。
                                         .when(project_header_selected, |name| name.font_medium())
                                         .text_color(rgb(if project_header_selected {
-                                            ui_theme::text_selected()
+                                            ui_theme::text()
                                         } else if is_active_group {
-                                            ui_theme::text_bright()
+                                            ui_theme::text()
                                         } else if crate::sidebar_order::project_header_is_dimmed(
                                             is_active_group,
                                             empty_group,
                                         ) {
-                                            ui_theme::text_muted()
+                                            ui_theme::muted()
                                         } else {
-                                            ui_theme::text_mid()
+                                            ui_theme::muted()
                                         }))
                                         .child(truncated_line(group_name.clone())),
                                 )
@@ -1304,7 +1298,7 @@ impl Workspace {
                                         .overflow_hidden()
                                         .text_xs()
                                         .font_family(crate::terminal_view::font_family())
-                                        .text_color(rgb(ui_theme::text_faint()))
+                                        .text_color(rgb(ui_theme::faint()))
                                         .tooltip(move |window, cx| {
                                             gpui_component::tooltip::Tooltip::new(
                                                 full_branch.clone(),
@@ -1317,7 +1311,7 @@ impl Workspace {
                                     div()
                                         .flex_shrink_0()
                                         .text_xs()
-                                        .text_color(rgb(ui_theme::text_faint()))
+                                        .text_color(rgb(ui_theme::faint()))
                                         .child(format!("{repository_count} 仓库"))
                                 })),
                         )
@@ -1344,7 +1338,7 @@ impl Workspace {
                                         .items_center()
                                         .justify_center()
                                         .text_xs()
-                                        .text_color(rgb(ui_theme::text_muted()))
+                                        .text_color(rgb(ui_theme::muted()))
                                         .group_hover(PROJ_HEADER_GROUP, |style| {
                                             style.opacity(0.0)
                                         })
@@ -1600,7 +1594,7 @@ impl Workspace {
                             .top_0()
                             .bottom(px(4.))
                             .w(px(1.))
-                            .bg(ui_theme::hairline()),
+                            .bg(ui_theme::hair()),
                     )
                 })
                 .when(grouping != SidebarGrouping::None, |d| {
@@ -1850,9 +1844,9 @@ impl Workspace {
                                     if is_active {
                                         title
                                             .font_medium()
-                                            .text_color(rgb(ui_theme::text_selected()))
+                                            .text_color(rgb(ui_theme::text()))
                                     } else {
-                                        title.text_color(rgb(ui_theme::text_muted())).group_hover(
+                                        title.text_color(rgb(ui_theme::muted())).group_hover(
                                             SESSION_ROW_GROUP,
                                             |style| style.text_color(rgb(ui_theme::text())),
                                         )
@@ -1880,8 +1874,8 @@ impl Workspace {
                             .px_1()
                             .rounded(px(3.))
                             .text_xs()
-                            .text_color(rgb(ui_theme::text_muted()))
-                            .bg(ui_theme::hairline())
+                            .text_color(rgb(ui_theme::muted()))
+                            .bg(ui_theme::hair())
                             .tooltip(move |window, cx| {
                                 gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
                             })
@@ -1894,7 +1888,7 @@ impl Workspace {
                             .flex_shrink_0()
                             .text_xs()
                             .font_family(crate::terminal_view::font_family())
-                            .text_color(rgb(ui_theme::text_faint()))
+                            .text_color(rgb(ui_theme::faint()))
                             .child(s.clone())
                     }))
                     // 按状态 / 不分组时，项目标题已经不存在，把来源项目与分支补到行内。
@@ -1906,12 +1900,12 @@ impl Workspace {
                             .items_center()
                             .gap_1()
                             .text_xs()
-                            .text_color(rgb(ui_theme::text_muted()))
+                            .text_color(rgb(ui_theme::muted()))
                             .child(project)
                             .children(branch.map(|name| {
                                 div()
                                     .font_family(crate::terminal_view::font_family())
-                                    .text_color(rgb(ui_theme::text_faint()))
+                                    .text_color(rgb(ui_theme::faint()))
                                     .child(name)
                             }))
                     }))
@@ -1935,7 +1929,7 @@ impl Workspace {
                             Some(label) => (label.into(), ui_theme::session_dot_color(status).into()),
                             None => match turn_text {
                                 Some(text) => (text.into(), ui_theme::session_dot_color(status).into()),
-                                None => (updated_text.into(), rgb(ui_theme::text_muted()).into()),
+                                None => (updated_text.into(), rgb(ui_theme::muted()).into()),
                             },
                         }),
                         Button::new(("close-session", ui_id))
@@ -2160,11 +2154,11 @@ impl Workspace {
                                             .map(|title| {
                                                 if is_current_view {
                                                     title.font_medium().text_color(rgb(
-                                                        ui_theme::text_selected(),
+                                                        ui_theme::text(),
                                                     ))
                                                 } else {
                                                     title
-                                                        .text_color(rgb(ui_theme::text_muted()))
+                                                        .text_color(rgb(ui_theme::muted()))
                                                         .group_hover(SESSION_ROW_GROUP, |style| {
                                                             style.text_color(rgb(ui_theme::text()))
                                                         })
@@ -2189,7 +2183,7 @@ impl Workspace {
                                         ),
                                         None => (
                                             pane_updated_text.into(),
-                                            rgb(ui_theme::text_muted()).into(),
+                                            rgb(ui_theme::muted()).into(),
                                         ),
                                     }),
                                     Button::new(("close-pane", pane_entity_id))
@@ -2311,7 +2305,7 @@ impl Workspace {
                                 .border_l_1()
                                 .border_t_1()
                                 .border_b_1()
-                                .border_color(rgb(ui_theme::border_loud()))
+                                .border_color(ui_theme::hair_strong())
                                 .rounded(px(7.)),
                         );
 
@@ -2392,7 +2386,7 @@ impl Workspace {
                     });
                 })
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(format!("已隐藏 {hidden_empty} 个无会话项目"))
                 .into_any_element()
         };
@@ -2487,7 +2481,7 @@ impl Workspace {
                                 .top_0()
                                 .bottom(px(4.))
                                 .w(px(1.))
-                                .bg(ui_theme::hairline()),
+                                .bg(ui_theme::hair()),
                         )
                         .children(machine_items)
                         .into_any_element()
@@ -2499,7 +2493,7 @@ impl Workspace {
                         .items_center()
                         .justify_center()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .child("暂无项目")
                         .into_any_element()
                 };
@@ -2656,9 +2650,9 @@ impl Workspace {
                                         .top(px(3.5))
                                         .w_full()
                                         .h(px(1.))
-                                        .bg(rgb(ui_theme::border_dim()))
+                                        .bg(ui_theme::hair())
                                         .group_hover("sidebar-section-split-hit", |s| {
-                                            s.bg(rgb(ui_theme::text_faint()))
+                                            s.bg(rgb(ui_theme::faint()))
                                         }),
                                 ),
                         )
@@ -2850,7 +2844,7 @@ impl Workspace {
                     .flex_shrink_0()
                     .text_xs()
                     .font_family(crate::terminal_view::font_family())
-                    .text_color(rgb(ui_theme::text_faint()))
+                    .text_color(rgb(ui_theme::faint()))
                     .child("额度查询中…")
                     .into_any_element()
             })
@@ -2929,7 +2923,7 @@ impl Workspace {
             .gap_2()
             .px_2()
             .border_t_1()
-            .border_color(ui_theme::hairline())
+            .border_color(ui_theme::hair())
             .child(
                 div()
                     .id("sidebar-settings")
@@ -2952,7 +2946,7 @@ impl Workspace {
                                 .right(px(4.))
                                 .size(px(5.))
                                 .rounded_full()
-                                .bg(rgb(ui_theme::red())),
+                                .bg(rgb(ui_theme::bad())),
                         )
                     }),
             )
@@ -2974,7 +2968,7 @@ impl Workspace {
                 self.render_sidebar_navigation(this.clone(), cx)
                     .border_b_1()
                     .border_color(if self.sidebar_scroll.offset().y < px(0.) {
-                        Hsla::from(ui_theme::hairline())
+                        Hsla::from(ui_theme::hair())
                     } else {
                         gpui::transparent_black()
                     }),

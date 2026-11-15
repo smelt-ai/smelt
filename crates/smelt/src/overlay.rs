@@ -10,225 +10,15 @@ use smelt_ui::IconAction as _;
 
 use super::*;
 
-/// 确认框的叠放顺序。同一扇窗里只有最上层做成 Dialog，底下的只留卡片，
-/// 这样不会共用一个 `dialog-host` 和焦点句柄。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModalLayer {
-    Rename,
-    ProjectRepositories,
-    RelayEdit,
-    Quit,
-    #[cfg(target_os = "macos")]
-    MoveApp,
-    CloseConfirm,
-    SessionManager,
-    DaemonRestart,
-    UpdateInstall,
-    DirPicker,
-}
-
-impl ModalLayer {
-    pub(crate) fn rank(self) -> u8 {
-        match self {
-            Self::Rename => 1,
-            Self::ProjectRepositories => 1,
-            Self::RelayEdit => 1,
-            Self::Quit => 2,
-            #[cfg(target_os = "macos")]
-            Self::MoveApp => 14,
-            Self::CloseConfirm => 3,
-            Self::SessionManager => 1,
-            Self::DaemonRestart => 2,
-            Self::UpdateInstall => 3,
-            // 选目录盖在所有主窗口确认框之上：它总是从一次明确的点击打开。
-            Self::DirPicker => 15,
-        }
-    }
-
-    fn is_settings(self) -> bool {
-        matches!(
-            self,
-            Self::SessionManager | Self::DaemonRestart | Self::UpdateInstall
-        )
-    }
-}
-
 impl Workspace {
-    /// 当前最上层主窗口确认框。数字大的盖住数字小的。
-    pub(crate) fn main_modal_rank(&self) -> Option<u8> {
-        let mut rank = None;
-        let raise = |rank: &mut Option<u8>, open: bool, value: u8| {
-            if open {
-                *rank = Some(rank.unwrap_or(0).max(value));
-            }
-        };
-        raise(
-            &mut rank,
-            self.dir_picker.is_some(),
-            ModalLayer::DirPicker.rank(),
-        );
-        raise(
-            &mut rank,
-            self.rename_target.is_some(),
-            ModalLayer::Rename.rank(),
-        );
-        raise(
-            &mut rank,
-            self.project_repositories.is_some(),
-            ModalLayer::ProjectRepositories.rank(),
-        );
-        raise(
-            &mut rank,
-            self.relay_edit.is_some(),
-            ModalLayer::RelayEdit.rank(),
-        );
-        raise(&mut rank, self.show_quit_confirm, ModalLayer::Quit.rank());
-        #[cfg(target_os = "macos")]
-        raise(
-            &mut rank,
-            self.show_move_app_confirm,
-            ModalLayer::MoveApp.rank(),
-        );
-        raise(
-            &mut rank,
-            self.close_confirm.is_some(),
-            ModalLayer::CloseConfirm.rank(),
-        );
-        rank
-    }
-
-    /// 主窗口里有 Workspace 自己画的遮罩层开着（确认框、命令面板、大图预览）。原生网页视图
+    /// 主窗口里有 Workspace 自己的遮罩层开着（宿主对话框、命令面板、大图预览）。原生网页视图
     /// 会盖住这些层，开着时文件面板的 HTML 预览让开。
     pub(crate) fn main_overlay_open(&self) -> bool {
-        self.main_modal_rank().is_some()
-            || self.palette.is_some()
-            || self.acp_image_preview.is_some()
+        self.main_host_dialog_open() || self.palette.is_some() || self.acp_image_preview.is_some()
     }
 
-    pub(crate) fn settings_modal_rank(&self) -> Option<u8> {
-        let mut rank = None;
-        if self.session_manager_open {
-            rank = Some(ModalLayer::SessionManager.rank());
-        }
-        if self.show_daemon_restart_confirm {
-            rank = Some(rank.unwrap_or(0).max(ModalLayer::DaemonRestart.rank()));
-        }
-        if self.show_update_install_confirm {
-            rank = Some(rank.unwrap_or(0).max(ModalLayer::UpdateInstall.rank()));
-        }
-        rank
-    }
-
-    pub(crate) fn modal_is_top(&self, layer: ModalLayer) -> bool {
-        let current = if layer.is_settings() {
-            self.settings_modal_rank()
-        } else {
-            self.main_modal_rank()
-        };
-        current == Some(layer.rank())
-    }
-
-    /// 在改名框这类输入框拿到焦点之前调用。
-    /// 渲染时再记焦点会把那个输入框当成「打开前的焦点」，关弹窗时又抢回来。
-    /// `hold` 让紧接着的 sync 不要因为层级变化把焦点从输入框抢回对话框。
-    pub(crate) fn begin_main_modal_focus(&mut self, window: &mut Window, cx: &mut App) {
-        self.arm_modal_focus(false, window, cx);
-        self.main_modal_hold = true;
-    }
-
-    pub(crate) fn sync_main_modal_focus(&mut self, window: &mut Window, cx: &mut App) {
-        self.sync_modal_rank(false, self.main_modal_rank(), window, cx);
-    }
-
-    pub(crate) fn sync_settings_modal_focus(&mut self, window: &mut Window, cx: &mut App) {
-        self.sync_modal_rank(true, self.settings_modal_rank(), window, cx);
-    }
-
-    fn sync_modal_rank(
-        &mut self,
-        settings: bool,
-        rank: Option<u8>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let (guard, hold, current) = if settings {
-            (self.settings_modal_guard, false, self.settings_modal_rank)
-        } else {
-            (
-                self.main_modal_guard,
-                self.main_modal_hold,
-                self.main_modal_rank,
-            )
-        };
-        if let Some(rank) = rank {
-            if !guard {
-                self.arm_modal_focus(settings, window, cx);
-            } else if !hold && current != Some(rank) {
-                self.modal_focus.focus(window, cx);
-            }
-            if settings {
-                self.settings_modal_rank = Some(rank);
-            } else {
-                self.main_modal_rank = Some(rank);
-                self.main_modal_hold = false;
-            }
-        } else {
-            if settings {
-                self.settings_modal_rank = None;
-            } else {
-                self.main_modal_rank = None;
-                self.main_modal_hold = false;
-            }
-            self.release_modal_focus(settings, window, cx);
-        }
-    }
-
-    fn arm_modal_focus(&mut self, settings: bool, window: &mut Window, cx: &mut App) {
-        let armed = if settings {
-            self.settings_modal_guard
-        } else {
-            self.main_modal_guard
-        };
-        if armed {
-            return;
-        }
-        let previous = window.focused(cx).map(|handle| handle.downgrade());
-        if settings {
-            self.settings_modal_restore = previous;
-            self.settings_modal_guard = true;
-        } else {
-            self.main_modal_restore = previous;
-            self.main_modal_guard = true;
-        }
-        self.modal_focus.focus(window, cx);
-    }
-
-    fn release_modal_focus(&mut self, settings: bool, window: &mut Window, cx: &mut App) {
-        let armed = if settings {
-            self.settings_modal_guard
-        } else {
-            self.main_modal_guard
-        };
-        if !armed {
-            return;
-        }
-        if settings {
-            self.settings_modal_guard = false;
-        } else {
-            self.main_modal_guard = false;
-        }
-        let previous = if settings {
-            self.settings_modal_restore.take()
-        } else {
-            self.main_modal_restore.take()
-        };
-        if let Some(handle) = previous.and_then(|handle| handle.upgrade()) {
-            handle.focus(window, cx);
-        }
-    }
-
-    /// Dismiss the topmost Workspace-owned surface on Escape. Returns whether the
-    /// key was consumed so the main key handler does not also change the active pane.
+    /// Esc 关掉最上面那层 Workspace 自己画的东西。宿主对话框归 kit 的对话框层管，不在这里。
+    /// 返回按键用掉了没有，用掉了主键位处理就不再切面板。
     pub(crate) fn dismiss_workspace_overlay(
         &mut self,
         window: &mut Window,
@@ -239,54 +29,6 @@ impl Workspace {
             true
         } else if self.palette.is_some() {
             self.close_palette(window, cx);
-            true
-        } else if self.dir_picker.is_some() {
-            self.cancel_dir_picker(cx);
-            true
-        } else if self.project_repositories.is_some()
-            && self.modal_is_top(ModalLayer::ProjectRepositories)
-        {
-            self.close_project_repositories(cx);
-            true
-        } else if self.rename_target.is_some() {
-            self.cancel_rename(cx);
-            true
-        } else if self.relay_edit.is_some() {
-            self.cancel_relay_edit(cx);
-            true
-        } else if self.show_quit_confirm {
-            self.show_quit_confirm = false;
-            cx.notify();
-            true
-        } else if {
-            #[cfg(target_os = "macos")]
-            {
-                self.show_move_app_confirm
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                false
-            }
-        } {
-            // Esc 等于「以后再说」；正在移动时不能撤，移完就退出了。
-            #[cfg(target_os = "macos")]
-            if !self.moving_app {
-                self.show_move_app_confirm = false;
-                cx.notify();
-            }
-            true
-        } else if self.close_confirm.is_some() {
-            if matches!(
-                self.close_confirm,
-                Some(
-                    CloseConfirm::Workset { pending: true, .. }
-                        | CloseConfirm::RestoreWorkset { pending: true, .. }
-                )
-            ) {
-                return true;
-            }
-            self.close_confirm = None;
-            cx.notify();
             true
         } else {
             false
@@ -299,7 +41,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.sync_main_modal_focus(window, cx);
         let palette_overlay = self.palette.as_ref().map(|state| {
             let (commands, sessions) = self.palette_groups(cx);
             let command_ids: Vec<SharedString> =
@@ -338,7 +79,7 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .overflow_hidden()
-                        .bg(ui_theme::glass_floating())
+                        .bg(gpui::rgb(ui_theme::surface()))
                         .border_1()
                         .border_color(ui_theme::overlay(0x22))
                         .rounded(ui_theme::composer_radius())
@@ -423,8 +164,7 @@ impl Workspace {
                 )
                 .child(
                     Button::new("workspace-image-preview-close")
-                        .surface()
-                        .circle()
+                        .floating()
                         .icon(IconName::Close)
                         .icon_action("关闭预览")
                         .absolute()
@@ -441,41 +181,6 @@ impl Workspace {
             .absolute()
             .inset_0()
             .children(palette_overlay)
-            .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
-            .children({
-                #[cfg(target_os = "macos")]
-                {
-                    self.show_move_app_confirm
-                        .then(|| self.render_move_app_confirm(cx))
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    None::<gpui::AnyElement>
-                }
-            })
-            // 侧栏行上的改名画在那一行里（见 `RenameTarget::is_inline`），这里只画弹窗那几种。
-            .children(
-                self.rename_target
-                    .as_ref()
-                    .is_some_and(|target| !target.is_inline())
-                    .then(|| self.render_rename_session(cx)),
-            )
-            .children(
-                self.relay_edit
-                    .is_some()
-                    .then(|| self.render_relay_edit(cx)),
-            )
-            .children(self.project_repositories.is_some().then(|| self.render_project_repositories(cx)))
-            .children(
-                self.dir_picker
-                    .is_some()
-                    .then(|| self.render_dir_picker(cx)),
-            )
-            .children(
-                self.close_confirm
-                    .is_some()
-                    .then(|| self.render_close_confirm(cx)),
-            )
             .children(self.debug_hud.then(|| debug_hud(window, cx)))
             .children(image_preview_overlay)
             .into_any_element()

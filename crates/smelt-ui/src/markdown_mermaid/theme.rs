@@ -3,7 +3,7 @@
 //! 走 mermaid 的 `base` 主题。只有它按 `themeVariables` 整套重算；`default` /
 //! `dark` 是 mermaid 官网那套淡紫、淡黄，smelt 换成什么主题都不搭。做法参照 Zed
 //! 的 `mermaid_render`：节点、连线、文字、分组取界面语义色；饼图、git 分支、思维
-//! 导图这类要区分多个系列的图，用几个语义色轮换。
+//! 导图这类要区分多个系列的图，用主题的分类色轮换（不借状态色）。
 //!
 //! `darkMode` 必须写进 `themeVariables`。merman 跟 mermaid.js 一样只从这里读，
 //! 写在配置根上不生效。
@@ -25,7 +25,7 @@ const SERIES_LEN: usize = 8;
 const SCALE_LEN: usize = 12;
 /// 分区底从卡片底往系列色走多少。
 const SECTION_TINT: f32 = 0.3;
-/// 便签底从卡片底往黄色走多少。
+/// 便签底从卡片底往便签色走多少。
 const NOTE_TINT: f32 = 0.18;
 
 /// 画 mermaid 要用的那几个语义色。只放从色板原样取来的值，派生计算留给
@@ -37,17 +37,12 @@ pub(super) struct DiagramColors {
     column: u32,
     card: u32,
     hover: u32,
+    /// SVG 里没有半透明线的层次，`hair` / `hair_strong` 压在卡片底上取实色。
     border: u32,
-    border_mid: u32,
-    border_loud: u32,
+    border_strong: u32,
     text: u32,
     text_muted: u32,
-    accent: u32,
-    blue: u32,
-    green: u32,
-    yellow: u32,
-    purple: u32,
-    red: u32,
+    chart: [u32; 5],
 }
 
 impl DiagramColors {
@@ -60,21 +55,15 @@ impl DiagramColors {
     pub(super) fn from_palette(palette: &Palette, light: bool) -> Self {
         Self {
             light,
-            stage: palette.bg_stage,
-            column: palette.bg_column,
-            card: palette.bg_card,
-            hover: palette.bg_hover,
-            border: palette.border,
-            border_mid: palette.border_mid,
-            border_loud: palette.border_loud,
+            stage: palette.bg,
+            column: palette.side,
+            card: palette.surface,
+            hover: palette.soft,
+            border: ui_theme::flatten(palette.hair, palette.surface),
+            border_strong: ui_theme::flatten(palette.hair_strong, palette.surface),
             text: palette.text,
-            text_muted: palette.text_muted,
-            accent: palette.accent,
-            blue: palette.blue,
-            green: palette.green,
-            yellow: palette.yellow,
-            purple: palette.purple,
-            red: palette.red,
+            text_muted: palette.muted,
+            chart: palette.chart,
         }
     }
 
@@ -92,17 +81,18 @@ impl DiagramColors {
         self.hash(&mut Feed(digest));
     }
 
-    /// 要区分多个系列时轮换的颜色：五个语义色，再补三个两两混出来的。
+    /// 要区分多个系列时轮换的颜色：五个分类色，再补三个两两混出来的。
     fn series(&self) -> [u32; SERIES_LEN] {
+        let [c0, c1, c2, c3, c4] = self.chart;
         [
-            self.blue,
-            self.green,
-            self.purple,
-            self.yellow,
-            self.red,
-            ui_theme::mix(self.blue, self.green, 0.5),
-            ui_theme::mix(self.purple, self.red, 0.5),
-            ui_theme::mix(self.yellow, self.green, 0.5),
+            c0,
+            c1,
+            c2,
+            c3,
+            c4,
+            ui_theme::mix(c0, c1, 0.5),
+            ui_theme::mix(c3, c4, 0.5),
+            ui_theme::mix(c2, c1, 0.5),
         ]
     }
 
@@ -126,13 +116,14 @@ impl DiagramColors {
         let column = css_hex(self.column);
         let card = css_hex(self.card);
         let hover = css_hex(self.hover);
-        let border = css_hex(self.border_mid);
+        let border = css_hex(self.border_strong);
         let line = css_hex(self.text_muted);
         let cluster_border = css_hex(self.border);
-        let actor_line = css_hex(self.border_loud);
-        let note = css_hex(ui_theme::mix(self.card, self.yellow, NOTE_TINT));
-        let note_border = css_hex(self.yellow);
-        let point = css_hex(self.accent);
+        let actor_line = css_hex(self.border_strong);
+        let [point, _, note_tone, _, _] = self.chart;
+        let note = css_hex(ui_theme::mix(self.card, note_tone, NOTE_TINT));
+        let note_border = css_hex(note_tone);
+        let point = css_hex(point);
 
         let fixed: &[(&str, &String)] = &[
             ("background", &stage),

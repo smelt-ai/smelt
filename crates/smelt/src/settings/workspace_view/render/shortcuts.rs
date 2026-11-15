@@ -211,13 +211,13 @@ fn editable_row(
                     keys.child(
                         Button::new(format!("shortcut-reassign-cancel-{id}"))
                             .quiet()
-                            .compact()
+                            .small()
                             .label("算了")
                             .on_click(|_, _, cx| keymap::cancel_reassign(cx)),
                     )
                     .child(
                         Button::new(format!("shortcut-reassign-{id}"))
-                            .compact()
+                            .small()
                             .label("改绑")
                             .on_click(|_, _, cx| keymap::confirm_reassign(cx)),
                     )
@@ -226,7 +226,7 @@ fn editable_row(
                     keys.child(
                         Button::new(format!("shortcut-reset-{id}"))
                             .quiet()
-                            .compact()
+                            .small()
                             .label("恢复默认")
                             .on_click(move |_, _, cx| keymap::reset(id.clone(), cx)),
                     )

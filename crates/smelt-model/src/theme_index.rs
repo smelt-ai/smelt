@@ -5,9 +5,9 @@
 
 use serde::Deserialize;
 
-/// gpui-kit 自带的默认主题。`gpui_component::init` 装进注册表的就是这一对。
-pub const DEFAULT_DARK: &str = "Default Dark";
-pub const DEFAULT_LIGHT: &str = "Default Light";
+/// 默认主题：组件库 smelt-ui 自带的这一对（`crates/smelt-ui/themes/smelt.json`）。
+pub const DEFAULT_DARK: &str = "smelt Dark";
+pub const DEFAULT_LIGHT: &str = "smelt Light";
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct ThemeEntry {
@@ -43,9 +43,9 @@ pub fn default_for_mode(mode: &str) -> &'static str {
     }
 }
 
-/// 在给定目录里把当前主题拨到 `mode`。同一族里有对应明暗就用它，否则回到库的
-/// Default。一族里同一明暗有多份时，用目录里的最后一份。当前主题不在目录里时
-/// 也回到 Default。
+/// 在给定目录里把当前主题拨到 `mode`。同一族里有对应明暗就用它，否则回到默认的
+/// smelt 主题。一族里同一明暗有多份时，用目录里的最后一份。当前主题不在目录里时
+/// 也回到默认。
 pub fn sibling_in(catalog: &[ThemeEntry], current: &str, mode: &str) -> String {
     let mode = if mode == "light" { "light" } else { "dark" };
     let Some(entry) = find_in(catalog, current) else {
@@ -68,8 +68,8 @@ mod tests {
 
     fn catalog() -> Vec<ThemeEntry> {
         vec![
-            ThemeEntry::new(DEFAULT_DARK, "dark", "Default"),
-            ThemeEntry::new(DEFAULT_LIGHT, "light", "Default"),
+            ThemeEntry::new(DEFAULT_DARK, "dark", "smelt"),
+            ThemeEntry::new(DEFAULT_LIGHT, "light", "smelt"),
             ThemeEntry::new("Ayu Dark", "dark", "Ayu"),
             ThemeEntry::new("Ayu Light", "light", "Ayu"),
             ThemeEntry::new("Catppuccin Latte", "light", "Catppuccin"),
@@ -84,9 +84,9 @@ mod tests {
 
     #[test]
     fn default_is_the_builtin_pair() {
-        assert_eq!(sibling("Default Dark", "light"), DEFAULT_LIGHT);
-        assert_eq!(sibling("Default Light", "dark"), DEFAULT_DARK);
-        assert_eq!(sibling("Default Dark", "dark"), DEFAULT_DARK);
+        assert_eq!(sibling(DEFAULT_DARK, "light"), DEFAULT_LIGHT);
+        assert_eq!(sibling(DEFAULT_LIGHT, "dark"), DEFAULT_DARK);
+        assert_eq!(sibling(DEFAULT_DARK, "dark"), DEFAULT_DARK);
         assert_eq!(sibling("missing", "light"), DEFAULT_LIGHT);
         assert_eq!(sibling("Sand Dark", "light"), DEFAULT_LIGHT);
     }

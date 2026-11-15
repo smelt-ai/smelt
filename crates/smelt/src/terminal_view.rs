@@ -1677,9 +1677,9 @@ impl Render for TerminalView {
                     .py_1()
                     .rounded_md()
                     // 底色跟随全局色板（写死的深蓝在换色板后会突兀）。
-                    .bg(rgb(crate::ui_theme::bg_card()))
+                    .bg(rgb(crate::ui_theme::surface()))
                     .border_1()
-                    .border_color(rgb(crate::ui_theme::border_mid()))
+                    .border_color(crate::ui_theme::hair())
                     .shadow_md()
                     // 搜索框的按键在这里就地处理：Esc 关闭；其它键归输入框，
                     // 不再冒泡给终端（会进 PTY）或工作区快捷键。
@@ -1726,12 +1726,12 @@ impl Render for TerminalView {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .bg(rgb(crate::ui_theme::bg_card()))
+                        .bg(rgb(crate::ui_theme::surface()))
                         .border_1()
-                        .border_color(rgb(crate::ui_theme::border_mid()))
+                        .border_color(crate::ui_theme::hair())
                         .shadow_md()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .text_color(rgb(crate::ui_theme::muted()))
                         .child(format!(
                             "与「{runtime}」的连接已断开，正在重连…期间的输入会在恢复后发出"
                         )),
@@ -1779,7 +1779,7 @@ impl TerminalView {
         let (thumb_h, thumb_y) =
             scrollbar_thumb(track_h, info.viewport_rows, info.max_offset, info.offset);
         // 中性灰，不要焦点蓝。终端底比侧栏更深，border_loud 会融进去，用 text_faint 才能看见。
-        let thumb_color = rgb(crate::ui_theme::text_faint());
+        let thumb_color = rgb(crate::ui_theme::faint());
         let max_off = info.max_offset;
         let viewport = info.viewport_rows;
 

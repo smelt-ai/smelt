@@ -9,13 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::*;
-use gpui_component::WindowExt as _;
-use gpui_component::button::ButtonVariant;
 use smelt_plugin_api::client::protocol::files::{
     ProjectDeleteEntryCall, ProjectDirParams, ProjectPathParams, ProjectRootParams,
     ProjectSearchCall, ProjectSearchParams, ProjectTreeCall, ProjectWatchCall,
 };
 use smelt_plugin_api::client::protocol::git::{GitRootParams, GitStatusCall};
+use smelt_plugin_api::ui::dialog::Confirm;
 use smelt_plugin_api::{self as api, PathRequest, RuntimeKey, sessions};
 
 use crate::model::{
@@ -703,24 +702,15 @@ impl FilesPanel {
             )
         };
         let panel = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let ok_panel = panel.clone();
-            let close_panel = panel.clone();
-            let path = path.clone();
-            alert
-                .confirm()
-                .title(title)
-                .description(description.clone())
-                .ok_text("确定删除")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    ok_panel.update(cx, |this, cx| this.perform_delete(path.clone(), is_dir, cx));
-                    true
-                })
-                .on_close(move |_, _, cx| {
-                    close_panel.update(cx, |this, cx| this.dialog_toggled(cx))
-                })
-        });
+        let close_panel = panel.clone();
+        Confirm::new(title, "删除", move |_, cx| {
+            panel.update(cx, |this, cx| this.perform_delete(path.clone(), is_dir, cx));
+            true
+        })
+        .danger()
+        .description(description)
+        .on_close(move |_, cx| close_panel.update(cx, |this, cx| this.dialog_toggled(cx)))
+        .open(window, cx);
         self.dialog_toggled(cx);
     }
 

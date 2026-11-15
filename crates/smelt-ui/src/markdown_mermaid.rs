@@ -564,7 +564,7 @@ impl Render for MermaidPreview {
                     .child(
                         crate::Button::new("mermaid-preview-zoom-out")
                             .quiet()
-                            .compact()
+                            .small()
                             .label("缩小")
                             .debug_selector(|| "MERMAID_PREVIEW_ZOOM_OUT".to_string())
                             .disabled(scale.is_some_and(|scale| scale <= MIN_PREVIEW_SCALE))
@@ -576,7 +576,7 @@ impl Render for MermaidPreview {
                     .child(
                         crate::Button::new("mermaid-preview-zoom-in")
                             .quiet()
-                            .compact()
+                            .small()
                             .label("放大")
                             .debug_selector(|| "MERMAID_PREVIEW_ZOOM_IN".to_string())
                             .disabled(scale.is_some_and(|scale| scale >= MAX_PREVIEW_SCALE))
@@ -588,7 +588,7 @@ impl Render for MermaidPreview {
                     .child(
                         crate::Button::new("mermaid-preview-zoom-fit")
                             .quiet()
-                            .compact()
+                            .small()
                             .label("适合窗口")
                             .debug_selector(|| "MERMAID_PREVIEW_ZOOM_FIT".to_string())
                             .disabled(self.zoom == PreviewZoom::Fit)
@@ -617,7 +617,7 @@ fn open_mermaid_preview(image: Arc<MermaidImage>, window: &mut Window, cx: &mut 
         // 对话框会把宽高夹在窗口减去边距以内，这里只表达「尽量大」，不替它算边距。
         let viewport = window.viewport_size();
         let preview = preview.clone();
-        dialog
+        crate::dialog::present(dialog)
             .title("Mermaid 图表")
             .width(viewport.width)
             .h(viewport.height)
@@ -1315,10 +1315,10 @@ pub fn markdown_view_clickable(
 }
 
 fn markdown_text_view_style() -> TextViewStyle {
-    // 围栏代码块走 `cx.theme().highlight_theme` / `tokens.muted`（= bg_card）。
+    // 围栏代码块走 `cx.theme().highlight_theme` / `tokens.muted`。
     // 行内 code 面积小，同样用卡片底会糊进正文，改用选中表面拉开对比。
     let inline_code = HighlightStyle {
-        background_color: Some(rgb(crate::ui_theme::bg_selected()).into()),
+        background_color: Some(rgb(crate::ui_theme::soft_hover()).into()),
         ..Default::default()
     };
     // 右上角挂了语言名和复制按钮（见 `code_block_corner`），首行要让开它，跟

@@ -506,12 +506,12 @@ fn composer_usage_is_readonly_and_only_warns_when_high() {
     assert_eq!(compact_token_count(999), "999");
     assert_eq!(usage_percent(164_000, 200_000), 82);
     assert_eq!(usage_warn_color(6), None);
-    assert_eq!(usage_warn_color(75), Some(ui_theme::yellow()));
-    assert_eq!(usage_warn_color(90), Some(ui_theme::red()));
-    assert_eq!(usage_ring_color(38), ui_theme::blue());
-    assert_eq!(usage_ring_color(75), ui_theme::yellow());
-    assert_eq!(usage_ring_color(90), ui_theme::red());
-    let conversation = composer_usage_breakdown(12_400, 200_000, None, None, ui_theme::accent());
+    assert_eq!(usage_warn_color(75), Some(ui_theme::need()));
+    assert_eq!(usage_warn_color(90), Some(ui_theme::bad()));
+    assert_eq!(usage_ring_color(38), ui_theme::run());
+    assert_eq!(usage_ring_color(75), ui_theme::need());
+    assert_eq!(usage_ring_color(90), ui_theme::bad());
+    let conversation = composer_usage_breakdown(12_400, 200_000, None, None, ui_theme::text());
     assert_eq!(conversation[0].label, "Conversation");
     assert_eq!(conversation[0].tokens, 12_400);
     assert_eq!(conversation.len(), 1);
@@ -525,8 +525,7 @@ fn composer_usage_is_readonly_and_only_warns_when_high() {
         summarized: 8_700,
         conversation: 333_000,
     };
-    let rows =
-        composer_usage_breakdown(362_502, 1_000_000, None, Some(&buckets), ui_theme::accent());
+    let rows = composer_usage_breakdown(362_502, 1_000_000, None, Some(&buckets), ui_theme::text());
     assert_eq!(
         rows.iter().map(|row| row.label).collect::<Vec<_>>(),
         [

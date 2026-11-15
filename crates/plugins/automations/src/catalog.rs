@@ -27,21 +27,20 @@ impl AutomationsPage {
         header
             .justify_between()
             .gap_3()
-            .child(choice_tabs(
-                "automations-tabs",
-                TABS.iter().position(|(tab, _)| *tab == current),
-                TABS.map(|(_, label)| Tab::new().label(label)),
-                move |ix, cx| {
-                    if let Some((tab, _)) = TABS.get(ix).copied() {
-                        tab_entity.update(cx, |page, cx| {
-                            page.set_automation_catalog_tab(tab, cx);
-                        });
-                    }
-                },
-            ))
+            .child(
+                Segmented::new("automations-tabs")
+                    .segments(TABS.map(|(_, label)| label))
+                    .selected(TABS.iter().position(|(tab, _)| *tab == current))
+                    .on_select(move |ix, _, cx| {
+                        if let Some((tab, _)) = TABS.get(ix).copied() {
+                            tab_entity.update(cx, |page, cx| {
+                                page.set_automation_catalog_tab(tab, cx);
+                            });
+                        }
+                    }),
+            )
             .child(machine_picking_button(
                 Button::new("automations-add")
-                    .normal()
                     .icon(IconName::Plus)
                     .label("新建自动化"),
                 add_entity,
@@ -103,7 +102,7 @@ impl AutomationsPage {
                 column.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::muted()))
                         .child("还没有自动化，可从下面的模板添加。"),
                 )
             })
@@ -139,7 +138,7 @@ impl AutomationsPage {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(ui_theme::text_muted()))
+                            .text_color(rgb(ui_theme::muted()))
                             .child("暂无运行记录"),
                     )
                     .into_any_element()
@@ -262,7 +261,6 @@ impl AutomationsPage {
             runtime_element_key(runtime),
             automation.id
         ))
-        .card()
         .w_full()
         .px_4()
         .py_3()
@@ -291,14 +289,14 @@ impl AutomationsPage {
                             div()
                                 .text_sm()
                                 .font_semibold()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .overflow_hidden()
                                 .child(truncated_line(display_name)),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_faint()))
+                                .text_color(rgb(ui_theme::faint()))
                                 .overflow_hidden()
                                 .child(truncated_line(action_summary)),
                         ),
@@ -307,7 +305,7 @@ impl AutomationsPage {
         .child(
             automation_fixed_col(AUTOMATION_COL_SCHEDULE)
                 .text_xs()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(schedule)),
         )
@@ -322,14 +320,14 @@ impl AutomationsPage {
                             .flex_shrink_0()
                             .size(px(6.))
                             .rounded_full()
-                            .bg(rgb(ui_theme::red())),
+                            .bg(rgb(ui_theme::bad())),
                     )
                 })
                 .child(
                     div()
                         .min_w_0()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::muted()))
                         .overflow_hidden()
                         .child(truncated_line(last_run)),
                 ),
@@ -337,7 +335,7 @@ impl AutomationsPage {
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
                 .text_xs()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(next_run)),
         )
@@ -389,7 +387,6 @@ impl AutomationsPage {
             "automation-catalog-run-{}-{run_id}",
             runtime_element_key(runtime)
         ))
-        .card()
         .w_full()
         .px_4()
         .py_3()
@@ -436,7 +433,7 @@ impl AutomationsPage {
                         div()
                             .text_sm()
                             .font_medium()
-                            .text_color(rgb(ui_theme::text_bright()))
+                            .text_color(rgb(ui_theme::text()))
                             .child("模板"),
                     )
                     .child(self.render_template_filters(entity.clone())),
@@ -453,24 +450,17 @@ impl AutomationsPage {
                 .into_iter()
                 .map(|category| (Some(category), category.label())),
         );
-        let selected_ix = filters.iter().position(|(filter, _)| *filter == selected);
-        let tabs: Vec<Tab> = filters
-            .iter()
-            .map(|(_, label)| Tab::new().label(*label))
-            .collect();
-        choice_tabs(
-            "automation-template-filters",
-            selected_ix,
-            tabs,
-            move |ix, cx| {
+        Segmented::new("automation-template-filters")
+            .segments(filters.iter().map(|(_, label)| *label))
+            .selected(filters.iter().position(|(filter, _)| *filter == selected))
+            .on_select(move |ix, _, cx| {
                 if let Some((filter, _)) = filters.get(ix).copied() {
                     entity.update(cx, |page, cx| {
                         page.set_automation_template_filter(filter, cx);
                     });
                 }
-            },
-        )
-        .into_any_element()
+            })
+            .into_any_element()
     }
 
     pub(crate) fn render_template_grid(
@@ -535,31 +525,31 @@ pub(crate) fn automation_table_header() -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child("自动化"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_SCHEDULE)
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child("日程"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_LAST)
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child("上次运行"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child("下次运行"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_STATUS)
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child("状态"),
         )
         .child(automation_fixed_col(AUTOMATION_COL_MENU))
@@ -589,7 +579,7 @@ pub(crate) fn render_automation_row_menu(
         target.id
     ))
     .quiet()
-    .compact()
+    .small()
     .icon(IconName::Ellipsis)
     .accessibility_label("更多操作")
     .dropdown_menu(move |mut menu, _, _| {
@@ -684,7 +674,7 @@ pub(crate) fn render_template_card(
                 .child(machine_picking_button(
                     Button::new(format!("automation-template-add-{id}"))
                         .quiet()
-                        .compact()
+                        .small()
                         .label("添加"),
                     add_entity,
                     move |page, runtime, window, cx| {
@@ -703,13 +693,13 @@ pub(crate) fn render_template_card(
                     div()
                         .text_sm()
                         .font_semibold()
-                        .text_color(rgb(ui_theme::text_bright()))
+                        .text_color(rgb(ui_theme::text()))
                         .child(template.name),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::muted()))
                         .child(template.description),
                 ),
         )
@@ -721,12 +711,12 @@ pub(crate) fn render_template_card(
                 .child(
                     Icon::new(IconName::Calendar)
                         .size(px(12.))
-                        .text_color(rgb(ui_theme::text_faint())),
+                        .text_color(rgb(ui_theme::faint())),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .child(template.schedule.summary()),
                 ),
         )
@@ -856,13 +846,13 @@ pub(crate) fn render_automation_machine_header(
             div()
                 .text_xs()
                 .font_medium()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .child(machine_name(&group.runtime, cx)),
         )
         .children(group.status.clone().map(|status| {
             div()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(status)
         }))
         .when(
@@ -871,7 +861,7 @@ pub(crate) fn render_automation_machine_header(
                 row.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .child("还没有自动化"),
                 )
             },
@@ -881,11 +871,11 @@ pub(crate) fn render_automation_machine_header(
 
 pub(crate) fn automation_status_cell(status: AutomationRowStatus) -> AnyElement {
     let dot = match status {
-        AutomationRowStatus::Running => Some(ui_theme::blue()),
+        AutomationRowStatus::Running => Some(ui_theme::run()),
         AutomationRowStatus::AgentMissing | AutomationRowStatus::Unavailable => {
-            Some(ui_theme::red())
+            Some(ui_theme::bad())
         }
-        AutomationRowStatus::Paused => Some(ui_theme::text_faint()),
+        AutomationRowStatus::Paused => Some(ui_theme::faint()),
         AutomationRowStatus::Active => None,
     };
     div()
@@ -896,7 +886,7 @@ pub(crate) fn automation_status_cell(status: AutomationRowStatus) -> AnyElement 
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .child(automation_row_status_label(status)),
         )
         .into_any_element()

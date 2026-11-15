@@ -7,8 +7,8 @@ pub(crate) fn content_card_style<E: Styled>(element: E) -> E {
     element
         .rounded(ui_theme::card_radius())
         .border_1()
-        .border_color(ui_theme::card_stroke())
-        .bg(rgb(ui_theme::bg_card()))
+        .border_color(ui_theme::hair())
+        .bg(rgb(ui_theme::surface()))
 }
 
 pub(crate) fn content_card() -> Div {
@@ -31,9 +31,9 @@ pub(crate) fn editor_field_frame() -> Div {
         .h(ui_theme::height::sm())
         .overflow_hidden()
         .border_1()
-        .border_color(rgb(ui_theme::border_loud()))
+        .border_color(ui_theme::hair_strong())
         .rounded(px(8.))
-        .bg(rgb(ui_theme::bg_column()))
+        .bg(rgb(ui_theme::side()))
 }
 
 pub(crate) fn framed_text_input(input: &Entity<InputState>, aria: &'static str) -> Div {
@@ -69,7 +69,7 @@ pub(crate) fn framed_automation_textarea(textarea: Textarea) -> AnyElement {
 }
 
 pub(crate) fn compact_chip(id: impl Into<ElementId>) -> Button {
-    Button::new(id).quiet().compact()
+    Button::new(id).quiet().small()
 }
 
 pub(crate) fn automation_form_shell() -> Div {
@@ -94,7 +94,7 @@ pub(crate) fn automation_run_lines(title: String, detail: String, error: Option<
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(detail)),
         )
@@ -102,7 +102,7 @@ pub(crate) fn automation_run_lines(title: String, detail: String, error: Option<
             column.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(ui_theme::red()))
+                    .text_color(rgb(ui_theme::bad()))
                     .overflow_hidden()
                     .child(truncated_line(error)),
             )
@@ -121,22 +121,7 @@ pub(crate) fn automation_section_label(label: &'static str) -> AnyElement {
     div()
         .text_sm()
         .font_medium()
-        .text_color(rgb(ui_theme::text_bright()))
+        .text_color(rgb(ui_theme::text()))
         .child(label)
         .into_any_element()
-}
-
-/// 几个互斥选项的分段开关，选中块在选项之间滑动。`on_select` 拿到被点的下标。
-pub(crate) fn choice_tabs(
-    id: impl Into<ElementId>,
-    selected: Option<usize>,
-    tabs: impl IntoIterator<Item = Tab>,
-    on_select: impl Fn(usize, &mut App) + 'static,
-) -> TabBar {
-    TabBar::new(id)
-        .segmented()
-        .flex_none()
-        .when_some(selected, |bar, ix| bar.selected_index(ix))
-        .on_click(move |ix, _, cx| on_select(*ix, cx))
-        .children(tabs)
 }

@@ -410,9 +410,9 @@ impl Panel for TermPane {
         div()
             .text_xs()
             .text_color(rgb(if active {
-                crate::ui_theme::text_mid()
+                crate::ui_theme::muted()
             } else {
-                crate::ui_theme::text_faint()
+                crate::ui_theme::faint()
             }))
             .child(SharedString::from(crate::pane_title(&self.view, cx)))
     }

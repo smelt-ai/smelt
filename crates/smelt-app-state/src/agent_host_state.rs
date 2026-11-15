@@ -12,7 +12,7 @@ pub use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::agent_host::{AgentHostEdit, AgentHostSettings};
 use smelt_model::control_api::{AgentHostApplyEdit, AgentHostGet};
 use smelt_runtime_client::RuntimeClient;
-use smelt_runtime_client::protocol::control::EmptyParams;
+use smelt_runtime_client::protocol::control::{ControlClientError, EmptyParams};
 
 /// 读写运行时配置的上限。一次合并写库，正常是毫秒级。
 const RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -226,7 +226,12 @@ fn submit_agent_host_edit(
                 .spawn(async move {
                     apply_client
                         .call::<AgentHostApplyEdit>(&edit, RUNTIME_TIMEOUT)
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| match error {
+                            // 运行时拒绝的原因本来就是写给人看的（如「请先删除该智能体关联的
+                            // 2 条自动化」），不带错误码。
+                            ControlClientError::Protocol(error) => error.message,
+                            error => error.to_string(),
+                        })
                 })
                 .await;
             // 后面还有排着的修改时，这一包不是最终状态，先不覆盖本地。

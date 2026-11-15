@@ -39,7 +39,7 @@ impl AutomationsPage {
                             .min_w_0()
                             .text_lg()
                             .font_semibold()
-                            .text_color(rgb(ui_theme::text_bright()))
+                            .text_color(rgb(ui_theme::text()))
                             .overflow_hidden()
                             .child(truncated_line(title)),
                     )
@@ -73,7 +73,7 @@ impl AutomationsPage {
                 .flex_shrink_0()
                 .child(
                     Button::new("automation-create")
-                        .commit()
+                        .primary()
                         .label("创建")
                         .loading(saving)
                         .disabled(!missing.is_empty())
@@ -103,7 +103,7 @@ impl AutomationsPage {
             .child(
                 Button::new("automation-editor-more")
                     .quiet()
-                    .compact()
+                    .small()
                     .icon(IconName::Ellipsis)
                     .accessibility_label("更多操作")
                     .dropdown_menu(move |mut menu, _, _| {
@@ -210,7 +210,7 @@ impl AutomationsPage {
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(ui_theme::hairline())
+            .border_color(ui_theme::hair())
             .overflow_y_scroll()
             .p_2()
             .gap_1()
@@ -236,7 +236,7 @@ impl AutomationsPage {
                     .pt_2()
                     .pb_1()
                     .text_xs()
-                    .text_color(rgb(ui_theme::text_faint()))
+                    .text_color(rgb(ui_theme::faint()))
                     .child("运行记录"),
             )
             .children(rows)
@@ -267,7 +267,7 @@ impl AutomationsPage {
         let agent_entity = entity.clone();
         let agent_selector = Button::new("automation-agent")
             .quiet()
-            .compact()
+            .small()
             .icon(IconName::Bot)
             .label(current_agent_name)
             .disabled(no_ready_agents)
@@ -288,22 +288,20 @@ impl AutomationsPage {
                 menu
             });
         let action_entity = entity.clone();
-        let action_kind = choice_tabs(
-            "automation-action-kind",
-            BUILTIN_AUTOMATION_ACTIONS
-                .iter()
-                .position(|kind| *kind == editor.action_kind),
-            BUILTIN_AUTOMATION_ACTIONS
-                .iter()
-                .map(|kind| Tab::new().label(kind.label())),
-            move |ix, cx| {
+        let action_kind = Segmented::new("automation-action-kind")
+            .segments(BUILTIN_AUTOMATION_ACTIONS.iter().map(|kind| kind.label()))
+            .selected(
+                BUILTIN_AUTOMATION_ACTIONS
+                    .iter()
+                    .position(|kind| *kind == editor.action_kind),
+            )
+            .on_select(move |ix, _, cx| {
                 if let Some(kind) = BUILTIN_AUTOMATION_ACTIONS.get(ix).copied() {
                     action_entity.update(cx, |page, cx| {
                         page.set_automation_action_kind(kind, cx);
                     });
                 }
-            },
-        );
+            });
         let trigger_field = render_trigger_entries(editor, entity.clone(), cx);
         let is_agent = editor.action_kind == AutomationActionKindId::Agent;
         let is_webhook = editor
@@ -370,7 +368,7 @@ impl AutomationsPage {
                                             .justify_between()
                                             .gap_3()
                                             .border_b_1()
-                                            .border_color(ui_theme::hairline())
+                                            .border_color(ui_theme::hair())
                                             .child(action_kind)
                                             .when(is_agent, |toolbar| {
                                                 if no_ready_agents {
@@ -439,7 +437,7 @@ impl AutomationsPage {
                     .items_center()
                     .gap_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::border()))
+                    .border_color(ui_theme::hair())
                     .child(crate::run_detail::run_status_dot(run.status))
                     .child(
                         div()
@@ -455,8 +453,8 @@ impl AutomationsPage {
                         let run_id = run_id.clone();
                         bar.child(
                             Button::new("automation-run-pane-cancel")
-                                .danger()
-                                .compact()
+                                .danger_quiet()
+                                .small()
                                 .icon(IconName::Close)
                                 .label("停止")
                                 .on_click(move |_, _, cx| {
@@ -478,7 +476,7 @@ impl AutomationsPage {
                     .min_w_0()
                     .min_h_0()
                     .flex()
-                    .bg(rgb(ui_theme::bg_stage()))
+                    .bg(rgb(ui_theme::bg()))
                     .child(view.cached(StyleRefinement::default().size_full()))
                     .into_any_element(),
                 None => div()
@@ -522,7 +520,7 @@ impl AutomationsPage {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .bg(rgb(ui_theme::bg_stage()))
+                .bg(rgb(ui_theme::bg()))
                 .child(self.render_automations_catalog_header(header, entity.clone(), cx))
                 .child(self.render_automations_catalog(error, entity, cx))
                 .into_any_element();
@@ -595,9 +593,9 @@ impl AutomationsPage {
             .and_then(|editor| {
                 let text = automation_save_hint(&editor.missing_fields(cx), editor.is_new)?;
                 let color = if editor.is_new {
-                    ui_theme::text_faint()
+                    ui_theme::faint()
                 } else {
-                    ui_theme::red()
+                    ui_theme::bad()
                 };
                 Some((SharedString::from(text), color))
             });
@@ -626,7 +624,7 @@ impl AutomationsPage {
                     .flex_1()
                     .p_5()
                     .text_sm()
-                    .text_color(rgb(ui_theme::text_muted()))
+                    .text_color(rgb(ui_theme::muted()))
                     .child("这条自动化已经不在了。")
                     .into_any_element()
             }
@@ -645,7 +643,7 @@ impl AutomationsPage {
                     .flex_1()
                     .p_5()
                     .text_sm()
-                    .text_color(rgb(ui_theme::text_muted()))
+                    .text_color(rgb(ui_theme::muted()))
                     .child("选择一次运行。")
                     .into_any_element()
             };
@@ -665,7 +663,7 @@ impl AutomationsPage {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui_theme::bg_stage()))
+            .bg(rgb(ui_theme::bg()))
             .child(header)
             .child(body)
             .into_any_element()
@@ -675,7 +673,7 @@ impl AutomationsPage {
 pub(crate) fn automation_field_hint(text: &'static str) -> AnyElement {
     div()
         .text_xs()
-        .text_color(rgb(ui_theme::text_faint()))
+        .text_color(rgb(ui_theme::faint()))
         .child(text)
         .into_any_element()
 }

@@ -138,7 +138,7 @@ fn permission_status(cx: &mut App) -> AnyElement {
             ),
         };
         Button::new(id)
-            .compact()
+            .small()
             .label(label)
             .on_click(move |_, _, cx| {
                 let task = command.run(&(), cx);

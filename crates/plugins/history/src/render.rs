@@ -8,7 +8,6 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
-use gpui_component::tab::{Tab, TabBar};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable, StyledExt, h_flex, v_flex};
 use smelt_plugin_api::model::acp_chat::is_interrupt_marker;
@@ -17,6 +16,7 @@ use smelt_plugin_api::model::session_history::{SessionSummary, Turn};
 use smelt_plugin_api::ui::button::Button;
 use smelt_plugin_api::ui::markdown_links::FileLinks;
 use smelt_plugin_api::ui::markdown_mermaid::chat_markdown_view;
+use smelt_plugin_api::ui::segmented::Segmented;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::ui_theme;
 use smelt_plugin_api::{self as api, RuntimeKey};
@@ -330,7 +330,7 @@ impl Render for HistoryPage {
 }
 
 impl HistoryPage {
-    /// 顶栏：左边手动刷新，右边来源标签。放不下时占位收成零，标签条自己横向滚。
+    /// 顶栏：左边手动刷新，右边来源分段。放不下时占位收成零，分段在自己那格里横向滚。
     fn render_switcher(
         &self,
         tabs: Vec<SourceTab>,
@@ -346,6 +346,7 @@ impl HistoryPage {
             .map(|tab| (tab.kind, tab.profile_id.clone()))
             .collect();
         let page = cx.entity();
+        let switcher = page.clone();
         h_flex()
             .w_full()
             .h(px(38.))
@@ -358,7 +359,7 @@ impl HistoryPage {
             .child(
                 Button::new("history-refresh")
                     .quiet()
-                    .icon_size()
+                    .small()
                     .icon(Icon::new(IconName::RefreshCw))
                     .tooltip("刷新")
                     .on_click(move |_, _, cx| {
@@ -369,16 +370,24 @@ impl HistoryPage {
             // 智能体的 space 只有一家，不画标签。
             .when(self.engine.is_none(), |bar| {
                 bar.child(
-                    TabBar::new("history-agent-switcher")
-                        .segmented()
+                    div()
+                        .id("history-agent-switcher-scroll")
                         .min_w_0()
-                        .when_some(selected, |bar, ix| bar.selected_index(ix))
-                        .on_click(cx.listener(move |page, ix: &usize, _, cx| {
-                            if let Some((kind, profile)) = targets.get(*ix).cloned() {
-                                page.select_source(kind, profile, cx);
-                            }
-                        }))
-                        .children(tabs.into_iter().map(|tab| Tab::new().label(tab.label))),
+                        .flex()
+                        .overflow_x_scroll()
+                        .child(
+                            Segmented::new("history-agent-switcher")
+                                .flex_none()
+                                .segments(tabs.into_iter().map(|tab| tab.label))
+                                .selected(selected)
+                                .on_select(move |ix, _, cx| {
+                                    if let Some((kind, profile)) = targets.get(ix).cloned() {
+                                        switcher.update(cx, |page, cx| {
+                                            page.select_source(kind, profile, cx);
+                                        });
+                                    }
+                                }),
+                        ),
                 )
             })
     }

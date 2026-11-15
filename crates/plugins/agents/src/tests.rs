@@ -7,9 +7,12 @@ use smelt_plugin_api::model::daemon_state::DaemonPhase;
 
 // 不用 `use super::*;`：父模块有 gpui 的 glob 导入，`gpui::test` 会顶掉 `#[test]`，
 // 也让 trait 解析变慢。只导入用到的名字。
+use smelt_plugin_api::model::agent_definition::AgentDefinition;
+use smelt_plugin_api::model::agent_host::AgentHostSettings;
+
 use super::model::{
     MemoryFilter, agent_catalog_monogram, memory_summary_text, new_conversation_title,
-    session_phase_settled, visible_memories,
+    remove_agent, session_phase_settled, visible_memories,
 };
 
 fn memory(name: &str, kind: Option<&str>) -> MemoryEntry {
@@ -220,4 +223,25 @@ fn new_conversation_title_names_the_default_agent() {
         "新对话 · 写作助手"
     );
     assert_eq!(new_conversation_title(Some("  ")), "新对话 · 未命名");
+}
+
+/// 删智能体和清掉指向它的默认在同一份修改里：运行时拒了删除，默认也跟着不动。
+#[test]
+fn removing_an_agent_clears_the_default_in_the_same_edit() {
+    let agent = |id: &str| AgentDefinition {
+        id: id.to_string(),
+        ..Default::default()
+    };
+    let mut config = AgentHostSettings::fresh();
+    config.agents = vec![agent("a"), agent("b")];
+    config.default_conversation_agent = Some("a".to_string());
+
+    let mut other = config.clone();
+    remove_agent(&mut other, "b");
+    assert_eq!(other.agents, [agent("a")]);
+    assert_eq!(other.default_conversation_agent.as_deref(), Some("a"));
+
+    remove_agent(&mut config, "a");
+    assert_eq!(config.agents, [agent("b")]);
+    assert_eq!(config.default_conversation_agent, None);
 }

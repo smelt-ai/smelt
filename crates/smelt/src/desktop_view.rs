@@ -283,13 +283,13 @@ impl DesktopView {
         let closed = matches!(self.status, Status::Closed(_));
         let (label, color) = match &self.status {
             Status::Connected if self.type_error.is_some() => {
-                (self.type_error.clone().unwrap_or_default(), ui_theme::red())
+                (self.type_error.clone().unwrap_or_default(), ui_theme::bad())
             }
-            Status::Connecting => ("正在连接…".to_string(), ui_theme::text_muted()),
-            Status::Reconnecting => ("连接断了，正在重连…".to_string(), ui_theme::text_muted()),
-            Status::Closed(reason) => (reason.clone(), ui_theme::text_muted()),
-            Status::Connected if self.controlling => ("接管中".to_string(), ui_theme::yellow()),
-            Status::Connected => ("只看".to_string(), ui_theme::text_muted()),
+            Status::Connecting => ("正在连接…".to_string(), ui_theme::muted()),
+            Status::Reconnecting => ("连接断了，正在重连…".to_string(), ui_theme::muted()),
+            Status::Closed(reason) => (reason.clone(), ui_theme::muted()),
+            Status::Connected if self.controlling => ("接管中".to_string(), ui_theme::need()),
+            Status::Connected => ("只看".to_string(), ui_theme::muted()),
         };
         let controlling = self.controlling;
         h_flex()
@@ -298,7 +298,7 @@ impl DesktopView {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(ui_theme::hairline())
+            .border_color(ui_theme::hair())
             .child(
                 div()
                     .flex_1()
@@ -311,8 +311,7 @@ impl DesktopView {
             .when(closed, |d| {
                 d.child(
                     Button::new("desktop-reconnect")
-                        .compact()
-                        .outline()
+                        .small()
                         .label("重新连接")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.connect(window, cx);
@@ -322,16 +321,16 @@ impl DesktopView {
             })
             .child({
                 let button = Button::new("desktop-control")
-                    .compact()
+                    .small()
                     .disabled(!connected)
                     .label(if controlling { "只看" } else { "接管" })
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.set_control(!controlling, cx)),
                     );
                 if controlling {
-                    button.outline()
+                    button
                 } else {
-                    button.commit()
+                    button.primary()
                 }
             })
     }
@@ -348,7 +347,7 @@ impl Render for DesktopView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .bg(rgb(ui_theme::bg_stage()))
+                    .bg(rgb(ui_theme::bg()))
                     .children(self.webview.clone()),
             )
     }
@@ -387,14 +386,14 @@ impl crate::Workspace {
                 div()
                     .text_sm()
                     .font_medium()
-                    .text_color(rgb(ui_theme::text_bright()))
+                    .text_color(rgb(ui_theme::text()))
                     .child(format!("远程桌面 · {name}")),
             )
             .child(div().flex_1())
             // 回到会话页；离开这一页时视图和连接一起关掉。
             .child(
                 Button::new("desktop-close")
-                    .compact()
+                    .small()
                     .quiet()
                     .label("关闭")
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -407,7 +406,7 @@ impl crate::Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui_theme::bg_stage()))
+            .bg(rgb(ui_theme::bg()))
             .child(header)
             .child(div().flex_1().min_h_0().child(view))
             .into_any_element()

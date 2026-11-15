@@ -3,7 +3,6 @@
 //! 只组 UI。写缓存、跑 git、改面板字段的方法留在 `ops.rs`，由按钮 listener 调用。
 
 use super::*;
-use gpui_component::button::ButtonVariant;
 use gpui_component::tab::{Tab, TabBar};
 
 /// 一个会丢东西的操作的确认框写什么。
@@ -16,8 +15,8 @@ pub(super) struct DangerConfirm {
 }
 
 impl GitPanel {
-    /// 弹确认框。点确定调 `confirm`，它返回 false（这个仓库还在跑别的写入）就不关；
-    /// 关掉时（取消、Esc、确定之后）调 `close`，清掉待确认的目标。
+    /// 弹确认框。点确认按钮调 `confirm`，它返回 false（这个仓库还在跑别的写入）就不关；
+    /// 关掉时（取消、Esc、Enter、确认之后）调 `close`，清掉待确认的目标。
     pub(super) fn open_danger_confirm(
         &self,
         text: DangerConfirm,
@@ -27,25 +26,22 @@ impl GitPanel {
         cx: &mut Context<Self>,
     ) {
         let panel = cx.entity();
-        let text = Rc::new(text);
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let danger = cx.theme().danger;
-            let ok_panel = panel.clone();
-            let close_panel = panel.clone();
-            alert
-                .confirm()
-                .title(text.title)
-                .description(
-                    v_flex()
-                        .gap_2()
-                        .child(text.body.clone())
-                        .child(div().text_color(danger).child(text.warning)),
-                )
-                .ok_text(text.ok)
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| ok_panel.update(cx, |panel, cx| confirm(panel, cx)))
-                .on_close(move |_, _, cx| close_panel.update(cx, |panel, cx| close(panel, cx)))
-        });
+        let close_panel = panel.clone();
+        let warning = text.warning;
+        smelt_plugin_api::ui::dialog::Confirm::new(text.title, text.ok, move |_, cx| {
+            panel.update(cx, |panel, cx| confirm(panel, cx))
+        })
+        .danger()
+        .description(text.body)
+        .body(move |_, _| {
+            div()
+                .text_sm()
+                .text_color(rgb(crate::ui_theme::bad()))
+                .child(warning)
+                .into_any_element()
+        })
+        .on_close(move |_, cx| close_panel.update(cx, |panel, cx| close(panel, cx)))
+        .open(window, cx);
     }
 
     /// 「丢弃文件改动」。未跟踪文件是直接删盘，措辞要比 restore 更重。
@@ -134,13 +130,13 @@ impl GitPanel {
                             div()
                                 .text_lg()
                                 .font_semibold()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .child(title),
                         )
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(ui_theme::text_faint()))
+                                .text_color(rgb(ui_theme::faint()))
                                 .child(hint),
                         ),
                 )
@@ -181,11 +177,11 @@ impl GitPanel {
             None => format!("↑{ahead} ↓{behind}"),
         };
         let sync_color = if busy.is_some() {
-            rgb(ui_theme::yellow())
+            rgb(ui_theme::need())
         } else if ahead + behind > 0 {
-            rgb(ui_theme::green())
+            rgb(ui_theme::ok())
         } else {
-            rgb(ui_theme::text_faint())
+            rgb(ui_theme::faint())
         };
         let tab_view = cx.entity();
         // 仓库集合要在头部之前算好：历史页的仓库选择器和改动页的分组都用它。
@@ -251,10 +247,9 @@ impl GitPanel {
         let scope_view = cx.entity();
         let scope_control = Button::new("git-diff-scope")
             .quiet()
-            .icon_size()
+            .small()
             .label(self.diff_scope.label())
             .dropdown_caret(true)
-            .text_color(rgb(ui_theme::text_muted()))
             .dropdown_menu(move |mut menu, _window, _cx| {
                 for scope in [DiffScope::All, DiffScope::Staged, DiffScope::Unstaged] {
                     let view = scope_view.clone();
@@ -282,10 +277,9 @@ impl GitPanel {
                 bar.child(
                     Button::new("git-log-repo")
                         .quiet()
-                        .icon_size()
+                        .small()
                         .label(active_repo_label)
                         .dropdown_caret(true)
-                        .text_color(rgb(ui_theme::text_muted()))
                         .dropdown_menu(move |mut menu, _window, _cx| {
                             for (label, repo_root) in repo_choices.clone() {
                                 let ws = ws_log_repo.clone();
@@ -308,7 +302,7 @@ impl GitPanel {
                 bar.child(
                     Button::new("git-sync-menu")
                         .quiet()
-                        .icon_size()
+                        .small()
                         .label(sync_label)
                         .dropdown_caret(busy.is_none())
                         .font_family(crate::mono_font())
@@ -504,12 +498,12 @@ impl GitPanel {
                 .justify_center()
                 .gap_1()
                 .text_sm()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(
                     div()
                         .text_lg()
                         .font_semibold()
-                        .text_color(rgb(ui_theme::text_bright()))
+                        .text_color(rgb(ui_theme::text()))
                         .child(if message == "工作区干净" {
                             "工作区干净"
                         } else {
@@ -520,7 +514,7 @@ impl GitPanel {
                     col.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(ui_theme::text_faint()))
+                            .text_color(rgb(ui_theme::faint()))
                             .child("没有要提交的更改"),
                     )
                 })
@@ -587,7 +581,7 @@ impl GitPanel {
                         .px_3()
                         .py_1()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .child("仓库太多，只列出了一部分"),
                 )
                 .into_any_element()
@@ -605,7 +599,7 @@ impl GitPanel {
                     .pb_1()
                     .text_xs()
                     .font_semibold()
-                    .text_color(rgb(ui_theme::text_faint()))
+                    .text_color(rgb(ui_theme::faint()))
                     .child("变更"),
             )
             .child(list);

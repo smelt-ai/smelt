@@ -93,7 +93,7 @@ impl Render for JsPluginView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let base = div().size_full().min_h_0().flex().flex_col();
         match &self.content {
-            Ok(view) => base.bg(rgb(ui_theme::bg_stage())).child(view.clone()),
+            Ok(view) => base.bg(rgb(ui_theme::bg())).child(view.clone()),
             Err(error) => base
                 .p_4()
                 .text_sm()

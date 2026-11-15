@@ -419,7 +419,7 @@ impl AcpView {
                                     Button::new(("acp-edit-message", i))
                                         .icon(Icon::new(IconName::Undo2))
                                         .quiet()
-                                        .icon_size()
+                                        .small()
                                         .icon_action("编辑并重发最后一条消息")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
@@ -493,7 +493,7 @@ impl AcpView {
                                     Button::new(("acp-edit-message", i))
                                         .icon(Icon::new(IconName::Undo2))
                                         .quiet()
-                                        .icon_size()
+                                        .small()
                                         .icon_action("编辑并重发最后一条消息（图片需重新添加）")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
@@ -593,7 +593,7 @@ impl AcpView {
                                                                 .path("smelt-icons/git-branch.svg"),
                                                         )
                                                         .quiet()
-                                                        .icon_size()
+                                                        .small()
                                                         .icon_action("分叉对话")
                                                         .on_click(cx.listener(
                                                             move |this, _ev, _window, cx| {
@@ -627,16 +627,16 @@ impl AcpView {
                         let task_cwd = this.cwd.clone();
                         let (status_label, status_color) = match status {
                             ToolCallStatus::Pending => {
-                                ("等待完成", gpui::rgb(ui_theme::text_muted()))
+                                ("等待完成", gpui::rgb(ui_theme::muted()))
                             }
                             ToolCallStatus::InProgress => {
-                                ("正在完成", gpui::rgb(ui_theme::blue()))
+                                ("正在完成", gpui::rgb(ui_theme::run()))
                             }
                             ToolCallStatus::Completed => {
-                                ("完成", gpui::rgb(ui_theme::green()))
+                                ("完成", gpui::rgb(ui_theme::ok()))
                             }
                             ToolCallStatus::Failed => {
-                                ("完成失败", gpui::rgb(ui_theme::red()))
+                                ("完成失败", gpui::rgb(ui_theme::bad()))
                             }
                         };
                         let summary = completion_summary_text(output);
@@ -775,9 +775,9 @@ impl AcpView {
                                 this.rendered_diffs.get(id).map(|parts| parts.as_slice()),
                             )
                             .or_else(|| diff_stats_for_output(output));
-                            let faint = gpui::rgb(ui_theme::text_faint());
+                            let faint = gpui::rgb(ui_theme::faint());
                             let ink = if failed {
-                                gpui::rgb(ui_theme::red()).into()
+                                gpui::rgb(ui_theme::bad()).into()
                             } else {
                                 muted
                             };
@@ -794,7 +794,7 @@ impl AcpView {
                                         .text_color(ink)
                                         .when(can_expand, |icon| {
                                             icon.group_hover(PEEK_ROW_GROUP, |s| {
-                                                s.text_color(gpui::rgb(ui_theme::text_bright()))
+                                                s.text_color(gpui::rgb(ui_theme::text()))
                                             })
                                         })
                                         .child(
@@ -810,7 +810,7 @@ impl AcpView {
                                         .text_color(ink)
                                         .when(can_expand, |label| {
                                             label.group_hover(PEEK_ROW_GROUP, |s| {
-                                                s.text_color(gpui::rgb(ui_theme::text_bright()))
+                                                s.text_color(gpui::rgb(ui_theme::text()))
                                             })
                                         })
                                         .child(truncated_line(headline.clone())),
@@ -820,7 +820,7 @@ impl AcpView {
                                     div()
                                         .flex_shrink_0()
                                         .text_xs()
-                                        .text_color(gpui::rgb(ui_theme::red()))
+                                        .text_color(gpui::rgb(ui_theme::bad()))
                                         .child("失败"),
                                 );
                             } else if let Some((added, removed)) = diff_stats {
@@ -878,9 +878,9 @@ impl AcpView {
                                 cx,
                             )
                         } else {
-                            let faint = gpui::rgb(ui_theme::text_faint());
+                            let faint = gpui::rgb(ui_theme::faint());
                             let ink = if failed {
-                                gpui::rgb(ui_theme::red()).into()
+                                gpui::rgb(ui_theme::bad()).into()
                             } else {
                                 muted
                             };
@@ -908,7 +908,7 @@ impl AcpView {
                             } else if failed {
                                 div()
                                     .text_xs()
-                                    .text_color(gpui::rgb(ui_theme::red()))
+                                    .text_color(gpui::rgb(ui_theme::bad()))
                                     .child(status_label)
                                     .into_any_element()
                             } else if let Some((total_added, total_removed)) = diff_stats {
@@ -1060,13 +1060,12 @@ impl AcpView {
                                                                 part_ix,
                                                             ))
                                                             .quiet()
-                                                            .icon_size()
+                                                            .small()
                                                             .label(if expanded {
                                                                 "收起".to_string()
                                                             } else {
                                                                 format!("展开全部 {total} 行")
                                                             })
-                                                            .text_color(faint)
                                                             .on_click(
                                                                     cx.listener(
                                                                         move |this, _ev, _window, cx| {
@@ -1353,7 +1352,7 @@ impl AcpView {
         entry_ix: usize,
         animate_ambient: bool,
     ) -> gpui::AnyElement {
-        let mark: gpui::Hsla = gpui::rgb(ui_theme::yellow()).into();
+        let mark: gpui::Hsla = gpui::rgb(ui_theme::need()).into();
         v_flex()
             .id(("acp-provider-retry", entry_ix))
             .gap_0p5()
@@ -1362,7 +1361,7 @@ impl AcpView {
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                    .text_color(gpui::rgb(ui_theme::muted()))
                     .child(quiet_dots(
                         ("acp-provider-retry-dots", entry_ix),
                         mark,
@@ -1375,7 +1374,7 @@ impl AcpView {
                     div()
                         .pl(px(14.))
                         .overflow_hidden()
-                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                        .text_color(gpui::rgb(ui_theme::muted()))
                         .child(truncated_line(retry.error.clone())),
                 )
             })
@@ -1398,13 +1397,13 @@ impl AcpView {
                 .py_2()
                 .rounded(ui_theme::card_radius())
                 .border_1()
-                .border_color(ui_theme::card_stroke())
+                .border_color(ui_theme::hair())
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .text_sm()
-                        .text_color(gpui::rgb(ui_theme::yellow()))
+                        .text_color(gpui::rgb(ui_theme::need()))
                         .child(message),
                 )
                 .children(action.map(|action| {
@@ -1413,7 +1412,7 @@ impl AcpView {
                         TurnOutcomeAction::Continue => "继续",
                     };
                     Button::new(("acp-turn-outcome-action", entry_ix))
-                        .compact()
+                        .small()
                         .label(label)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.rerun_last_turn(action, window, cx);
@@ -1432,7 +1431,7 @@ impl AcpView {
         let elapsed = elapsed_ms
             .map(format_duration)
             .unwrap_or_else(|| "0s".to_string());
-        let mark: gpui::Hsla = gpui::rgb(ui_theme::text_muted()).into();
+        let mark: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
         h_flex()
             .id(("acp-working", entry_ix))
             .debug_selector(move || format!("ACP_WORKING_{entry_ix}"))
@@ -1441,7 +1440,7 @@ impl AcpView {
             .items_center()
             .text_xs()
             .font_features(ui_theme::tabular_figures())
-            .text_color(gpui::rgb(ui_theme::text_muted()))
+            .text_color(gpui::rgb(ui_theme::muted()))
             .child(quiet_dots(
                 ("acp-working-dots", entry_ix),
                 mark,
@@ -1462,7 +1461,7 @@ impl AcpView {
         let group_key = group.first;
         let group_end = group.end;
         let group_label = process_group_header_label(&self.entries, group);
-        let group_accent_u32 = ui_theme::text_muted();
+        let group_accent_u32 = ui_theme::muted();
         let group_accent = gpui::rgb(group_accent_u32);
         // 有工具在跑仍用 spinner。只有思考、没有进行中的工具或子 agent 时换成安静的点。
         let thinking = group.active
@@ -1506,7 +1505,7 @@ impl AcpView {
                 div()
                     .flex_shrink_0()
                     .text_xs()
-                    .text_color(gpui::rgb(ui_theme::text_faint()))
+                    .text_color(gpui::rgb(ui_theme::faint()))
                     .child(if expanded { "▾" } else { "▸" }),
             )
             .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -1530,7 +1529,7 @@ impl AcpView {
         let start = run.start;
         let open = self.tool_run_is_open(start);
         let count = run.indices.len();
-        let faint = gpui::rgb(ui_theme::text_faint());
+        let faint = gpui::rgb(ui_theme::faint());
         let owner_cache = &self.layout_cache;
         let run_owner = run
             .indices
@@ -1617,7 +1616,7 @@ impl AcpView {
                             .text_color(faint)
                             .when(can_expand, |icon| {
                                 icon.group_hover(PEEK_ROW_GROUP, |s| {
-                                    s.text_color(gpui::rgb(ui_theme::text_bright()))
+                                    s.text_color(gpui::rgb(ui_theme::text()))
                                 })
                             })
                             .child(Icon::new(process_timeline_icon(&run.kind)).size(px(13.))),
@@ -1631,7 +1630,7 @@ impl AcpView {
                             .text_color(faint)
                             .when(can_expand, |label| {
                                 label.group_hover(PEEK_ROW_GROUP, |s| {
-                                    s.text_color(gpui::rgb(ui_theme::text_bright()))
+                                    s.text_color(gpui::rgb(ui_theme::text()))
                                 })
                             })
                             .child(truncated_line(headline.clone())),
@@ -1669,7 +1668,7 @@ impl AcpView {
         muted: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let red: gpui::Hsla = gpui::rgb(ui_theme::red()).into();
+        let red: gpui::Hsla = gpui::rgb(ui_theme::bad()).into();
         let running = matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress);
         let failed = send.error.is_some() || matches!(status, ToolCallStatus::Failed);
         let kind = send.kind.label();
@@ -1758,7 +1757,7 @@ impl AcpView {
     ) -> gpui::AnyElement {
         let (icon, ink): (IconName, gpui::Hsla) =
             if peer.kind == smelt_model::acp_session::PeerMessageKind::Bounce {
-                (IconName::TriangleAlert, gpui::rgb(ui_theme::red()).into())
+                (IconName::TriangleAlert, gpui::rgb(ui_theme::bad()).into())
             } else {
                 (IconName::Inbox, muted)
             };
@@ -1823,7 +1822,7 @@ impl AcpView {
         let sid = sid.to_string();
         Button::new(id)
             .quiet()
-            .compact()
+            .small()
             .label(label.clone())
             .tooltip(sid.clone())
             .accessibility_label(format!("打开对话 {label}"))
@@ -1846,7 +1845,7 @@ impl AcpView {
     ) -> gpui::AnyElement {
         Button::new(id)
             .quiet()
-            .icon_size()
+            .small()
             .icon(Icon::new(if expanded {
                 IconName::ChevronDown
             } else {
@@ -1889,8 +1888,8 @@ impl AcpView {
             border,
             live_elapsed,
         } = card;
-        let faint = gpui::rgb(ui_theme::text_faint());
-        let red = gpui::rgb(ui_theme::red());
+        let faint = gpui::rgb(ui_theme::faint());
+        let red = gpui::rgb(ui_theme::bad());
         let ink = if failed { red.into() } else { muted };
         let running = matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending)
             || smelt_model::acp_chat::has_unfinished_tool_call(children);
@@ -1985,7 +1984,7 @@ impl AcpView {
             .rounded(ui_theme::card_radius())
             .border_1()
             .border_color(if failed { red.into() } else { border })
-            .bg(ui_theme::glass_card())
+            .bg(gpui::rgb(ui_theme::surface()))
             .px_3()
             .py_2()
             .gap_1p5()
@@ -2038,8 +2037,8 @@ impl AcpView {
             border,
             ..
         } = card;
-        let faint = gpui::rgb(ui_theme::text_faint());
-        let red = gpui::rgb(ui_theme::red());
+        let faint = gpui::rgb(ui_theme::faint());
+        let red = gpui::rgb(ui_theme::bad());
         let now = now_unix_ms();
         let dispatch_running = matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending);
         let statuses: Vec<SubagentStatus> = subagents
@@ -2160,7 +2159,7 @@ impl AcpView {
             .rounded(ui_theme::card_radius())
             .border_1()
             .border_color(if progress.problem { red.into() } else { border })
-            .bg(ui_theme::glass_card())
+            .bg(gpui::rgb(ui_theme::surface()))
             .px_3()
             .py_2()
             .gap_1()
@@ -2197,8 +2196,8 @@ impl AcpView {
         now: u64,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let faint = gpui::rgb(ui_theme::text_faint());
-        let red = gpui::rgb(ui_theme::red());
+        let faint = gpui::rgb(ui_theme::faint());
+        let red = gpui::rgb(ui_theme::bad());
         let view = self.subagents.iter().find(|view| view.id == run.id);
         let problem = matches!(run_status, SubagentStatus::Failed | SubagentStatus::Interrupted);
         let detail = view
@@ -2270,7 +2269,7 @@ impl AcpView {
                 div()
                     .flex_shrink_0()
                     .text_xs()
-                    .text_color(gpui::rgb(ui_theme::text_muted()))
+                    .text_color(gpui::rgb(ui_theme::muted()))
                     .child("正在停止…")
                     .into_any_element(),
             );
@@ -2279,8 +2278,8 @@ impl AcpView {
         // 整行 hover 才显出来，用透明度而不是不渲染，耗时才不会跳。
         Some(
             Button::new((gpui::ElementId::from("acp-subagent-stop"), stop_id.clone()))
-                .danger()
-                .icon_size()
+                .danger_quiet()
+                .small()
                 .label("停止")
                 .flex_shrink_0()
                 .opacity(0.0)
@@ -2306,8 +2305,8 @@ impl AcpView {
         if !roster {
             return render_nested_transcript(children, muted);
         }
-        let faint = gpui::rgb(ui_theme::text_faint());
-        let red = gpui::rgb(ui_theme::red());
+        let faint = gpui::rgb(ui_theme::faint());
+        let red = gpui::rgb(ui_theme::bad());
         let mut col = v_flex().w_full().gap_1();
         for child in children {
             col = col.child(match child {
@@ -2456,7 +2455,7 @@ impl AcpView {
                     .trigger(trigger);
             }
         };
-        let border: gpui::Hsla = ui_theme::card_stroke().into();
+        let border: gpui::Hsla = ui_theme::hair().into();
         let view = cx.weak_entity();
         Popover::new(owner_id("acp-tool-output-pop", &tool_id))
             .anchor(Anchor::BottomLeft)
@@ -2602,7 +2601,6 @@ impl AcpView {
             });
         if interactive {
             row = row
-                .card()
                 .role(gpui::Role::Button)
                 .aria_label(preview)
                 .when(!in_process, |row| {
@@ -2733,9 +2731,8 @@ impl AcpView {
                         .child(
                             Button::new(owner_part("acp-tool-toggle", &owner, part_ix))
                                 .quiet()
-                                .icon_size()
+                                .small()
                                 .label(toggle_label)
-                                .text_color(gpui::rgb(ui_theme::text_faint()))
                                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                                     if !this.expanded_tools.remove(&key) {
                                         this.expanded_tools.insert(key.clone());
@@ -2908,9 +2905,7 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                                 .rounded_md()
                                 .border_1()
                                 .border_color(border)
-                                .hover(|s| {
-                                    s.border_color(ui_theme::tint(ui_theme::accent(), 0x72))
-                                })
+                                .hover(|s| s.border_color(ui_theme::hair_strong()))
                                 .on_click(move |_, window, cx| {
                                     on_preview(preview_image.clone(), window, cx)
                                 })
@@ -2936,9 +2931,9 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
         .max_w(px(520.))
         .max_h(px(360.))
         .overflow_y_scroll()
-        .bg(ui_theme::glass_floating())
+        .bg(gpui::rgb(ui_theme::surface()))
         .border_1()
-        .border_color(ui_theme::card_stroke())
+        .border_color(ui_theme::hair())
         .rounded(px(8.))
         .child(col)
         .into_any_element()
@@ -3006,7 +3001,7 @@ fn popover_plain_log(
                 .child(
                     div()
                         .text_xs()
-                        .text_color(gpui::rgb(ui_theme::text_faint()))
+                        .text_color(gpui::rgb(ui_theme::faint()))
                         .child(format!("共 {total} 行")),
                 )
                 .child(
@@ -3100,7 +3095,7 @@ fn nested_tool_row(
 ) -> gpui::AnyElement {
     let failed = matches!(status, ToolCallStatus::Failed);
     let ink = if failed {
-        gpui::rgb(ui_theme::red()).into()
+        gpui::rgb(ui_theme::bad()).into()
     } else {
         muted
     };
@@ -3138,7 +3133,7 @@ fn nested_tool_row(
             div()
                 .flex_shrink_0()
                 .text_xs()
-                .text_color(gpui::rgb(ui_theme::red()))
+                .text_color(gpui::rgb(ui_theme::bad()))
                 .child("失败"),
         );
     }
@@ -3166,7 +3161,7 @@ pub(super) fn subagent_status_icon(
     animate_ambient: bool,
     muted: gpui::Hsla,
 ) -> gpui::AnyElement {
-    let faint: gpui::Hsla = gpui::rgb(ui_theme::text_faint()).into();
+    let faint: gpui::Hsla = gpui::rgb(ui_theme::faint()).into();
     let (icon, color) = match status {
         SubagentStatus::Running => {
             return if animate_ambient {
@@ -3179,10 +3174,8 @@ pub(super) fn subagent_status_icon(
             };
         }
         SubagentStatus::Completed => (IconName::CircleCheck, faint),
-        SubagentStatus::Failed => (IconName::CircleX, gpui::rgb(ui_theme::red()).into()),
-        SubagentStatus::Interrupted => {
-            (IconName::TriangleAlert, gpui::rgb(ui_theme::red()).into())
-        }
+        SubagentStatus::Failed => (IconName::CircleX, gpui::rgb(ui_theme::bad()).into()),
+        SubagentStatus::Interrupted => (IconName::TriangleAlert, gpui::rgb(ui_theme::bad()).into()),
         SubagentStatus::Stopped => (IconName::Pause, faint),
     };
     Icon::new(icon)
@@ -3223,7 +3216,7 @@ fn subagent_child_status_glyph(
     if failed {
         return Icon::new(IconName::Close)
             .size(px(12.))
-            .text_color(gpui::rgb(ui_theme::red()))
+            .text_color(gpui::rgb(ui_theme::bad()))
             .into_any_element();
     }
     if spinning {
@@ -3352,7 +3345,7 @@ fn render_clickable_image_thumb(
         .border_1()
         .border_color(border)
         
-        .hover(|image| image.border_color(ui_theme::tint(ui_theme::accent(), 0x72)))
+        .hover(|image| image.border_color(ui_theme::hair_strong()))
         .on_click(cx.listener(move |_this, _ev, _window, cx| {
             cx.emit(AcpViewEvent::PreviewImage(preview_image.clone()));
         }))

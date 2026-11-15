@@ -90,7 +90,7 @@ fn toolbar_item(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> Sett
                 .child(
                     Button::new("reload-panel-plugins")
                         .quiet()
-                        .compact()
+                        .small()
                         .label("重新加载")
                         .disabled(busy)
                         .on_click(move |_, _, cx| {
@@ -102,7 +102,7 @@ fn toolbar_item(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> Sett
                 .child(
                     Button::new("open-panel-plugin-dir")
                         .quiet()
-                        .compact()
+                        .small()
                         .label("打开插件目录")
                         .on_click(move |_, _, cx| {
                             open_entity.update(cx, |workspace, cx| {
@@ -112,7 +112,7 @@ fn toolbar_item(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> Sett
                 )
                 .child(
                     Button::new("import-panel-plugin")
-                        .compact()
+                        .small()
                         .label("导入插件…")
                         .loading(busy)
                         .disabled(busy)
@@ -142,7 +142,7 @@ fn authoring_group() -> SettingGroup {
                     .child(
                         Button::new("open-panel-plugin-log")
                             .quiet()
-                            .compact()
+                            .small()
                             .label("打开日志")
                             .on_click(|_, _, _| {
                                 let opened = smelt_sys::app_log::log_path()
@@ -154,11 +154,10 @@ fn authoring_group() -> SettingGroup {
                             }),
                     )
                     .child(
-                        Button::new("open-panel-plugin-demo")
-                            .link()
-                            .icon_size()
-                            .label("示例和教程 ↗")
-                            .on_click(move |_, _, cx| cx.open_url(DEMO_URL)),
+                        gpui_component::link::Link::new("open-panel-plugin-demo")
+                            .href(DEMO_URL)
+                            .text_sm()
+                            .child("示例和教程 ↗"),
                     )
                     .into_any_element()
             }),
@@ -212,7 +211,7 @@ fn plugin_item(
                     .child(
                         Button::new(format!("confirm-delete-panel-plugin-{id}"))
                             .danger()
-                            .compact()
+                            .small()
                             .label("确认删除")
                             .disabled(busy)
                             .on_click(move |_, _, cx| {
@@ -225,7 +224,7 @@ fn plugin_item(
                     .child(
                         Button::new(format!("cancel-delete-panel-plugin-{id}"))
                             .quiet()
-                            .compact()
+                            .small()
                             .label("取消")
                             .on_click(move |_, _, cx| {
                                 cancel_entity.update(cx, |workspace, cx| {
@@ -237,7 +236,7 @@ fn plugin_item(
             } else {
                 Button::new(format!("delete-panel-plugin-{id}"))
                     .quiet()
-                    .compact()
+                    .small()
                     .label("删除…")
                     .disabled(busy)
                     .on_click(move |_, _, cx| {

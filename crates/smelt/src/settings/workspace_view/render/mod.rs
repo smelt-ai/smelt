@@ -146,7 +146,7 @@ fn render_nav(
                             div()
                                 .size(px(6.))
                                 .rounded_full()
-                                .bg(rgb(crate::ui_theme::red()))
+                                .bg(rgb(crate::ui_theme::bad()))
                         })
                     } else {
                         item

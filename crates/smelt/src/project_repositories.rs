@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
+    dialog::Dialog,
     input::{Input, InputEvent, InputState},
     *,
 };
@@ -78,6 +79,13 @@ fn suggested_name(source: &str) -> String {
 }
 
 impl Workspace {
+    /// 仓库对话框正在跑一次写入（建工作树、克隆、添加）。这时不能关，也不能另开一个。
+    pub(crate) fn project_repositories_busy(&self) -> bool {
+        self.project_repositories
+            .as_ref()
+            .is_some_and(|state| state.busy)
+    }
+
     pub(crate) fn open_project_repositories(
         &mut self,
         runtime: Runtime,
@@ -86,14 +94,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .project_repositories
-            .as_ref()
-            .is_some_and(|state| state.busy)
-        {
+        if self.project_repositories_busy() {
             return;
         }
-        self.begin_main_modal_focus(window, cx);
         let task =
             cx.new(|cx| InputState::new(window, cx).placeholder("例如 add-search 或 搜索功能"));
         let branch = cx.new(|cx| {
@@ -342,9 +345,13 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn render_project_repositories(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_project_repositories(
+        &self,
+        dialog: Dialog,
+        cx: &mut Context<Self>,
+    ) -> Dialog {
         let Some(state) = self.project_repositories.as_ref() else {
-            return div().into_any_element();
+            return dialog;
         };
         let busy = state.busy;
         let mode = state.mode;
@@ -355,14 +362,7 @@ impl Workspace {
             Mode::Bind => "添加已有仓库",
             Mode::Clone => "从 Git URL 克隆",
         };
-        let mut content = v_flex()
-            .child(Self::modal_title(cx.theme().foreground, title))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(state.project_root.clone()),
-            );
+        let mut content = smelt_ui::dialog::content(title, Some(state.project_root.clone().into()));
         if mode == Mode::Create {
             let task = state.task.read(cx).value().trim().to_string();
             content = content
@@ -482,7 +482,7 @@ impl Workspace {
                     row = row.child(
                         smelt_ui::Button::new(SharedString::from(format!("repo-remove-{name}")))
                             .quiet()
-                            .compact()
+                            .small()
                             .label("移除")
                             .disabled(busy || !referenced.is_empty())
                             .tooltip(if referenced.is_empty() {
@@ -508,7 +508,7 @@ impl Workspace {
                 h_flex()
                     .gap_2()
                     .child(
-                        Self::modal_normal_button(
+                        Self::modal_secondary_button(
                             "repo-bind-entry",
                             "选择已有仓库…",
                             |this, _, window, cx| {
@@ -532,7 +532,7 @@ impl Workspace {
                         .disabled(busy),
                     )
                     .child(
-                        Self::modal_normal_button(
+                        Self::modal_secondary_button(
                             "repo-clone-entry",
                             "从 Git URL 克隆…",
                             |this, _, window, cx| {
@@ -562,7 +562,7 @@ impl Workspace {
             if mode == Mode::Bind {
                 content = content.child(div().text_sm().text_color(muted).child(
                     "选择已有 Git 仓库的根目录。项目外的仓库只在 repos/ 下建软链接，原目录不会移动。",
-                )).child(Self::modal_normal_button("repo-choose-folder", "选择文件夹…", |this, _, _, cx| {
+                )).child(Self::modal_secondary_button("repo-choose-folder", "选择文件夹…", |this, _, _, cx| {
                     let Some(state) = this.project_repositories.as_ref().filter(|state| !state.busy) else { return };
                     this.open_dir_picker(state.runtime.clone(), crate::dir_picker::DirPickerPurpose::ProjectRepository { id: state.id }, cx);
                 }, cx).disabled(busy)).child(div().text_sm().child(state.source.clone().unwrap_or_else(|| "尚未选择目录".into())));
@@ -610,7 +610,7 @@ impl Workspace {
                         h_flex()
                             .gap_2()
                             .child(
-                                Self::modal_normal_button(
+                                Self::modal_cancel_button(
                                     "repo-remove-cancel",
                                     "保留关联",
                                     |this, _, _, cx| {
@@ -663,57 +663,47 @@ impl Workspace {
                 Mode::Clone => "克隆并添加",
             }
         };
-        content = content.child(
-            h_flex()
-                .justify_end()
-                .gap_2()
-                .when(matches!(mode, Mode::Bind | Mode::Clone), |row| {
-                    row.child(
-                        Self::modal_normal_button(
-                            "repo-form-back",
-                            "返回",
-                            |this, _, _, cx| {
-                                if let Some(state) = this
-                                    .project_repositories
-                                    .as_mut()
-                                    .filter(|state| !state.busy)
-                                {
-                                    state.mode = state.return_mode;
-                                    state.error = None;
-                                    cx.notify();
-                                }
-                            },
-                            cx,
-                        )
-                        .disabled(busy),
-                    )
-                })
-                .child(
-                    Self::modal_normal_button(
-                        "repo-modal-close",
-                        "关闭",
-                        |this, _, _, cx| this.close_project_repositories(cx),
+        let footer = smelt_ui::dialog::footer()
+            .when(matches!(mode, Mode::Bind | Mode::Clone), |row| {
+                row.child(
+                    Self::modal_cancel_button(
+                        "repo-form-back",
+                        "返回",
+                        |this, _, _, cx| {
+                            if let Some(state) = this
+                                .project_repositories
+                                .as_mut()
+                                .filter(|state| !state.busy)
+                            {
+                                state.mode = state.return_mode;
+                                state.error = None;
+                                cx.notify();
+                            }
+                        },
                         cx,
                     )
                     .disabled(busy),
                 )
-                .child(
-                    Self::modal_commit_button(
-                        "repo-modal-submit",
-                        label,
-                        |this, _, _, cx| this.submit_project_repositories(cx),
-                        cx,
-                    )
-                    .disabled(busy || (mode == Mode::Create && state.repositories.is_empty())),
-                ),
-        );
-        self.modal_shell(
-            620.,
-            false,
-            content,
-            crate::overlay::ModalLayer::ProjectRepositories,
-            cx,
-        )
+            })
+            .child(
+                Self::modal_cancel_button(
+                    "repo-modal-close",
+                    "关闭",
+                    |this, _, _, cx| this.close_project_repositories(cx),
+                    cx,
+                )
+                .disabled(busy),
+            )
+            .child(
+                Self::modal_primary_button(
+                    "repo-modal-submit",
+                    label,
+                    |this, _, _, cx| this.submit_project_repositories(cx),
+                    cx,
+                )
+                .disabled(busy || (mode == Mode::Create && state.repositories.is_empty())),
+            );
+        dialog.w(px(620.)).child(content).footer(footer)
     }
 }
 

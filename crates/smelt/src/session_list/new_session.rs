@@ -712,7 +712,7 @@ impl Render for NewSessionPickerState {
                         .id("workset-launch-cwd")
                         .px_2()
                         .text_xs()
-                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                        .text_color(gpui::rgb(ui_theme::muted()))
                         .tooltip(move |window, cx| {
                             gpui_component::tooltip::Tooltip::new(full_path.clone())
                                 .build(window, cx)
@@ -737,7 +737,7 @@ impl Render for NewSessionPickerState {
                     .items_center()
                     .text_size(px(10.))
                     .font_semibold()
-                    .text_color(gpui::rgb(ui_theme::text_faint()))
+                    .text_color(gpui::rgb(ui_theme::faint()))
                     .child(*label),
             );
 
@@ -761,7 +761,7 @@ impl Render for NewSessionPickerState {
                 let pin_key = item_key.clone();
                 let pin_button = Button::new("new-session-picker-pin")
                     .quiet()
-                    .icon_size()
+                    .small()
                     .flex_shrink_0()
                     .icon(pin_icon)
                     .icon_action(pin_tip)
@@ -788,8 +788,8 @@ impl Render for NewSessionPickerState {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .when(selected, |this| this.bg(gpui::rgb(ui_theme::bg_hover())))
-                        .hover(|this| this.bg(gpui::rgb(ui_theme::bg_hover())))
+                        .when(selected, |this| this.bg(gpui::rgb(ui_theme::soft())))
+                        .hover(|this| this.bg(gpui::rgb(ui_theme::soft())))
                         .on_hover(move |hovered, window, cx| {
                             if *hovered {
                                 hover_state.update(cx, |state, cx| {
@@ -809,7 +809,7 @@ impl Render for NewSessionPickerState {
                             picker_item_icon(&item.target)
                                 .size(px(15.))
                                 .flex_shrink_0()
-                                .text_color(gpui::rgb(ui_theme::text_muted())),
+                                .text_color(gpui::rgb(ui_theme::muted())),
                         )
                         .child(
                             div()
@@ -832,7 +832,7 @@ impl Render for NewSessionPickerState {
                     .items_center()
                     .justify_center()
                     .text_size(px(12.))
-                    .text_color(gpui::rgb(ui_theme::text_faint()))
+                    .text_color(gpui::rgb(ui_theme::faint()))
                     .child("没有可用的启动项"),
             );
         }
@@ -855,7 +855,7 @@ impl NewSessionPicker {
     pub(super) fn icon_trigger(mut self, id: ElementId) -> Self {
         self.trigger = Button::new(id)
             .quiet()
-            .icon_size()
+            .small()
             .tab_stop(true)
             .icon(IconName::Plus)
             .icon_action("在此工作树新建会话");
@@ -876,7 +876,7 @@ pub(super) fn new_session_picker(
     let trigger_id = ElementId::from((ElementId::from("proj-new"), cwd.clone()));
     let trigger = Button::new(trigger_id)
         .quiet()
-        .icon_size()
+        .small()
         .icon(IconName::Plus)
         .icon_action("新建会话");
     let trigger = if workset_id.is_some() {
@@ -1042,9 +1042,9 @@ impl RenderOnce for NewSessionPicker {
                     .w_full()
                     // Popover 本身是无样式宿主；必须给内容实色背景，否则
                     // 选中行的半透明强调色会把后面的终端文字透进来，形成叠字。
-                    .bg(ui_theme::glass_floating())
+                    .bg(gpui::rgb(ui_theme::surface()))
                     .border_1()
-                    .border_color(ui_theme::card_stroke())
+                    .border_color(ui_theme::hair())
                     .rounded(px(8.))
                     .flex()
                     .flex_col()
@@ -1062,12 +1062,12 @@ impl RenderOnce for NewSessionPicker {
                         (state.workset_id.is_none() && state.cwd.is_some()).then(|| {
                             let create_picker = picker.clone();
                             let manage_picker = picker.clone();
-                            div().border_t_1().border_color(ui_theme::hairline()).p_1().flex().flex_col().gap_1()
-                                .child(Button::new("project-plus-create-workset").quiet().compact().label("新建工作树…")
+                            div().border_t_1().border_color(ui_theme::hair()).p_1().flex().flex_col().gap_1()
+                                .child(Button::new("project-plus-create-workset").quiet().small().label("新建工作树…")
                                     .on_click(move |_, window, cx| {
                                         create_picker.update(cx, |state, cx| state.open_project_repositories(true, window, cx));
                                     }))
-                                .child(Button::new("project-plus-manage-repos").quiet().compact().label("管理项目仓库…")
+                                .child(Button::new("project-plus-manage-repos").quiet().small().label("管理项目仓库…")
                                     .on_click(move |_, window, cx| {
                                         manage_picker.update(cx, |state, cx| state.open_project_repositories(false, window, cx));
                                     }))
@@ -1078,11 +1078,11 @@ impl RenderOnce for NewSessionPicker {
                             .h(px(PICKER_FOOTER_HEIGHT))
                             .px_2()
                             .border_t_1()
-                            .border_color(ui_theme::hairline())
+                            .border_color(ui_theme::hair())
                             .flex()
                             .items_center()
                             .text_size(px(9.))
-                            .text_color(gpui::rgb(ui_theme::text_faint()))
+                            .text_color(gpui::rgb(ui_theme::faint()))
                             .child(footer),
                     )
             })
