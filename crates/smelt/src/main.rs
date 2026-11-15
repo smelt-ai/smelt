@@ -1611,9 +1611,6 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
-    /// 看得见的视图：布局里露着的，加上舞台上开着的那页（见 `note_shown_views`）。插件
-    /// 问的 `view_shown` 和自带的文件、变更视图都按这份。
-    plugin_shown_views: HashSet<String>,
     /// 上次告诉插件的遮罩层开关（见 `note_overlay`），只用来判断变没变。
     plugin_overlay_open: bool,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
@@ -1897,7 +1894,6 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
-            plugin_shown_views: HashSet::new(),
             plugin_overlay_open: false,
             font_options: std::cell::OnceCell::new(),
             rename_target: None,
@@ -1989,6 +1985,9 @@ impl Workspace {
             this.sync_host_dialogs(cx);
             this.note_overlay(cx);
         }));
+        // 主窗口关了，工作台里的视图就都看不见了。
+        cx.on_release(|_, cx| plugin_host::set_workbench_shown(HashSet::new(), cx))
+            .detach();
         ws._shell_dock_subs = workspace_layout::watch_shell_dock(&ws.shell_dock, window, cx);
         // 装布局要用 `cx.entity()` 背后的工作台（自带视图画它），等它建好。
         cx.defer_in(window, |this, window, cx| {

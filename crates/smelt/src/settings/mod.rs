@@ -1192,7 +1192,8 @@ impl SettingsContentView {
     ) -> Self {
         let mut this = Self {
             plugin_pages: Vec::new(),
-            _clear_shown_page: cx.on_release(|_, cx| set_shown_settings_page(None, cx)),
+            _clear_shown_page: cx
+                .on_release(|_, cx| crate::plugin_host::set_settings_shown(None, cx)),
             _settings_pages: cx.subscribe_in(
                 &smelt_plugin_api::events(cx),
                 window,
@@ -1245,7 +1246,7 @@ impl SettingsContentView {
             SettingsSection::Plugin(id) => Some(id.clone()),
             _ => None,
         };
-        set_shown_settings_page(page, cx);
+        crate::plugin_host::set_settings_shown(page, cx);
     }
 
     /// 放掉登记已经换过或撤下的页，当前停在插件的页上而它还没建就建。快照换了、设置页
@@ -1443,24 +1444,6 @@ impl Render for SettingsWindow {
 pub struct SettingsWindowHandle(pub WindowHandle<Root>);
 
 impl Global for SettingsWindowHandle {}
-
-/// 设置窗口此刻露着的插件设置页 id；窗口关着、停在宿主自己的页是 `None`。由设置内容视图
-/// 维护（它活着就是窗口开着），宿主据此答 `Host::settings_page_shown`。
-#[derive(Default)]
-pub(crate) struct ShownSettingsPage(pub(crate) Option<SharedString>);
-
-impl Global for ShownSettingsPage {}
-
-fn set_shown_settings_page(page: Option<SharedString>, cx: &mut App) {
-    let current = cx
-        .try_global::<ShownSettingsPage>()
-        .and_then(|shown| shown.0.as_ref());
-    if current == page.as_ref() {
-        return;
-    }
-    cx.set_global(ShownSettingsPage(page));
-    smelt_plugin_api::emit(smelt_plugin_api::HostEvent::ShownSettingsPageChanged, cx);
-}
 
 // ===================== Workspace 方法 =====================
 

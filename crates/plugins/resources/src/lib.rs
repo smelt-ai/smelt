@@ -4,7 +4,7 @@
 //! 自己和每个会话的整棵进程树（见 smeltd `resource_usage`）。远程机器上的会话就在那台
 //! 机器上量，这里按工作区目录把守护会话对上对话（终端分屏的几格合成一行）。
 //!
-//! 只在这一页看得见时采样（[`api::Host::settings_page_shown`]），每 [`monitor::INTERVAL`]
+//! 只在这一页看得见时采样（[`api::Host::view_shown`]），每 [`monitor::INTERVAL`]
 //! 一轮；看不见时循环睡在唤醒信号上，一次也不量。采样循环归页面：设置窗口关了页面放掉，
 //! 循环跟着停。曲线只放内存、不落库：它是此刻的观察，不是业务数据。
 //!
@@ -88,7 +88,7 @@ impl ResourcesPage {
             match event {
                 // 露出来要叫醒采样循环；藏起来也叫醒，循环才能确认看不见了，马上睡下，
                 // 不用再等一轮。
-                HostEvent::ShownSettingsPageChanged => {
+                HostEvent::ShownViewsChanged => {
                     let _ = page.wake.try_send(());
                 }
                 // 会话改了名、开了关了，机器加了减了：行名和分组跟着变，数等下一轮。
@@ -145,7 +145,7 @@ impl Render for ResourcesPage {
 
 /// 这一页此刻看得见：设置窗口开着、停在这一页。
 fn shown(cx: &App) -> bool {
-    api::host(cx).settings_page_shown(PAGE, cx)
+    api::host(cx).view_shown(PAGE, cx)
 }
 
 /// 从设置窗口跳回主窗口的那段会话。

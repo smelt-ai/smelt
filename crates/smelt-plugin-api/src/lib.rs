@@ -384,10 +384,9 @@ pub enum HostEvent {
     NotificationPermissionChanged,
     /// 某台机器的智能体配置变了（读 [`Host::agent_settings`]）。
     AgentSettingsChanged,
-    /// 看得见的视图变了：有的露出来、有的被挡住或收起（读 [`Host::view_shown`]）。
+    /// 看得见的视图变了：有的露出来、有的被挡住或收起，设置窗口换了页、开了或关了（读
+    /// [`Host::view_shown`]）。
     ShownViewsChanged,
-    /// 看得见的设置页变了：设置窗口换了页、开了或关了（读 [`Host::settings_page_shown`]）。
-    ShownSettingsPageChanged,
     /// 视图登记变了：加了、替换了或撤下了（见 [`register_view`]）。
     ViewsChanged,
     /// 有视图的角标变了（读 [`view_badge`]）。
@@ -436,13 +435,11 @@ pub trait Host: 'static {
     /// 那台机器的智能体配置最近一次读取或保存失败的原因；没有失败是 `None`。变了发
     /// [`HostEvent::AgentSettingsChanged`]。
     fn agent_settings_error(&self, machine: &RuntimeKey, cx: &App) -> Option<String>;
-    /// 那个视图此刻看得见：摆在布局里且所在组显示着它，或在舞台上开成了当前页。变了发
-    /// [`HostEvent::ShownViewsChanged`]。
+    /// 那个视图此刻看得见：摆在布局里且所在组显示着它，或在舞台上开成了当前页；设置页
+    /// （`<来源>/<名字>`，见 [`register_settings_pages`]）是设置窗口开着、停在这一页。视图
+    /// 被挡住、切走后还活着，要靠它知道自己露没露着，看不见时不做只为显示的事（采样、刷新）。
+    /// 变了发 [`HostEvent::ShownViewsChanged`]。
     fn view_shown(&self, id: &str, cx: &App) -> bool;
-    /// 那个设置页（`<来源>/<名字>`，见 [`register_settings_pages`]）此刻看得见：设置窗口
-    /// 开着、停在这一页。页面切走后还活着（再回来是同一份），要靠它知道自己露没露着，
-    /// 看不见时不做只为显示的事（采样、刷新）。变了发 [`HostEvent::ShownSettingsPageChanged`]。
-    fn settings_page_shown(&self, id: &str, cx: &App) -> bool;
     /// 页面的页头底板：留好拖窗口条、交通灯和右上角开关的位置，页面往里放标题和按钮。
     fn page_header(&self, window: &Window, cx: &App) -> Div;
     /// 主窗口（工作台那扇）；还没开或已经关了是 `None`。命令在这里执行（见 [`run`]）。
@@ -743,9 +740,6 @@ mod tests {
             None
         }
         fn view_shown(&self, _: &str, _: &App) -> bool {
-            false
-        }
-        fn settings_page_shown(&self, _: &str, _: &App) -> bool {
             false
         }
         fn page_header(&self, _: &Window, _: &App) -> Div {
