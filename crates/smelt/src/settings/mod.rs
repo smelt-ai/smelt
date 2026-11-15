@@ -1153,8 +1153,6 @@ struct SettingsRenderSnapshot {
     daemon_info: Option<crate::local_daemon::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
-    /// 资源页的数。只在停在资源页时取，别的页用不着拼它。
-    resources: Option<std::rc::Rc<crate::resource_monitor::PanelSnapshot>>,
     /// 有要处理的事的那一页，设置侧栏在它后面标红点。
     attention: Option<SettingsSection>,
 }
@@ -1169,6 +1167,8 @@ pub struct SettingsContentView {
     plugin_pages: Vec<BuiltSettingsPage>,
     _observe_workspace: Subscription,
     _settings_pages: Subscription,
+    /// 视图放掉就是设置窗口关了：露着的插件设置页随之清空。
+    _clear_shown_page: Subscription,
     _observe_settings_globals: Vec<Subscription>,
     last_refresh: Option<Instant>,
     refresh_pending: bool,
@@ -1192,6 +1192,7 @@ impl SettingsContentView {
     ) -> Self {
         let mut this = Self {
             plugin_pages: Vec::new(),
+            _clear_shown_page: cx.on_release(|_, cx| set_shown_settings_page(None, cx)),
             _settings_pages: cx.subscribe_in(
                 &smelt_plugin_api::events(cx),
                 window,
@@ -1234,7 +1235,17 @@ impl SettingsContentView {
             refresh_generation: 0,
         };
         this.sync_plugin_pages(window, cx);
+        this.publish_shown_page(cx);
         this
+    }
+
+    /// 告诉插件此刻露着哪个设置页。快照换了页时调：快照停在哪页，窗口里画的就是哪页。
+    fn publish_shown_page(&self, cx: &mut App) {
+        let page = match &self.snapshot.settings_section {
+            SettingsSection::Plugin(id) => Some(id.clone()),
+            _ => None,
+        };
+        set_shown_settings_page(page, cx);
     }
 
     /// 放掉登记已经换过或撤下的页，当前停在插件的页上而它还没建就建。快照换了、设置页
@@ -1286,6 +1297,7 @@ impl SettingsContentView {
             workspace.settings_render_snapshot(cx)
         });
         self.sync_plugin_pages(window, cx);
+        self.publish_shown_page(cx);
         self.last_refresh = Some(Instant::now());
         self.refresh_pending = false;
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
@@ -1429,7 +1441,26 @@ impl Render for SettingsWindow {
 
 /// 设置窗口的单例句柄：已经开着就聚焦复用，避免重复开出好几扇一样的窗口。
 pub struct SettingsWindowHandle(pub WindowHandle<Root>);
+
 impl Global for SettingsWindowHandle {}
+
+/// 设置窗口此刻露着的插件设置页 id；窗口关着、停在宿主自己的页是 `None`。由设置内容视图
+/// 维护（它活着就是窗口开着），宿主据此答 `Host::settings_page_shown`。
+#[derive(Default)]
+pub(crate) struct ShownSettingsPage(pub(crate) Option<SharedString>);
+
+impl Global for ShownSettingsPage {}
+
+fn set_shown_settings_page(page: Option<SharedString>, cx: &mut App) {
+    let current = cx
+        .try_global::<ShownSettingsPage>()
+        .and_then(|shown| shown.0.as_ref());
+    if current == page.as_ref() {
+        return;
+    }
+    cx.set_global(ShownSettingsPage(page));
+    smelt_plugin_api::emit(smelt_plugin_api::HostEvent::ShownSettingsPageChanged, cx);
+}
 
 // ===================== Workspace 方法 =====================
 

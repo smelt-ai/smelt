@@ -20,8 +20,6 @@ pub enum SettingsSection {
     Agents,
     /// 连到其他机器的运行时，以及让配对过的设备连进这台机器。
     Remote,
-    /// 停在这一页时才采样。
-    Resources,
     /// 后台服务、终端里的 smelt 命令（macOS）、旧版本残留。
     Maintenance,
     /// 版本、应用更新（macOS、Windows）、帮助与反馈。
@@ -48,7 +46,6 @@ impl SettingsSection {
             Self::PanelPlugins => "panel-plugins".into(),
             Self::Agents => "agents".into(),
             Self::Remote => "remote".into(),
-            Self::Resources => "resources".into(),
             Self::Maintenance => "maintenance".into(),
             Self::About => "about".into(),
             Self::Plugin(id) => format!("plugin:{id}").into(),
@@ -277,23 +274,6 @@ fn host_nav() -> Vec<SettingsNavCategory> {
             keywords: &[],
             children: vec![
                 leaf(
-                    "资源占用",
-                    IconName::MemoryStick,
-                    SettingsSection::Resources,
-                    &[
-                        "资源",
-                        "性能",
-                        "内存",
-                        "内存占用",
-                        "CPU",
-                        "占用",
-                        "卡",
-                        "慢",
-                        "活动监视器",
-                        "GPUI",
-                    ],
-                ),
-                leaf(
                     "维护",
                     Icon::new(gpui_kit_assets::IconName::Wrench),
                     SettingsSection::Maintenance,
@@ -497,7 +477,7 @@ mod tests {
         assert_eq!(titles(&nav), ["通用", "Agent 与远程", "系统"]);
         assert_eq!(child_titles(&nav, "通用"), ["外观", "快捷键", "面板插件"]);
         assert_eq!(child_titles(&nav, "Agent 与远程"), ["Agent", "远程"]);
-        assert_eq!(child_titles(&nav, "系统"), ["资源占用", "维护", "关于"]);
+        assert_eq!(child_titles(&nav, "系统"), ["维护", "关于"]);
         let sections = nav
             .iter()
             .flat_map(|category| category.children.iter())
@@ -511,7 +491,6 @@ mod tests {
                 SettingsSection::PanelPlugins,
                 SettingsSection::Agents,
                 SettingsSection::Remote,
-                SettingsSection::Resources,
                 SettingsSection::Maintenance,
                 SettingsSection::About,
             ]
@@ -540,7 +519,6 @@ mod tests {
         for (query, expected) in [
             ("Relay 地址", SettingsSection::Remote),
             ("添加机器", SettingsSection::Remote),
-            ("内存占用", SettingsSection::Resources),
             ("导入插件", SettingsSection::PanelPlugins),
             ("自动下载安装", SettingsSection::About),
             ("清缓存", SettingsSection::Maintenance),

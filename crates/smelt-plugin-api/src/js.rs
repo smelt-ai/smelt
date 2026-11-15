@@ -83,6 +83,8 @@ export function agent_settings(machine: Machine): unknown | null;
 export function agent_settings_error(machine: Machine): string | null;
 /** 那个视图此刻看得见。变了发 shown_views_changed。 */
 export function view_shown(view: string): boolean;
+/** 那个设置页（"<来源>/<名字>"）此刻看得见：设置窗口开着、停在这一页。变了发 shown_settings_page_changed。 */
+export function settings_page_shown(page: string): boolean;
 /** 主窗口此刻在前台。回到前台发 window_activated，去后台不发：定时做事的醒来时问这里，不在前台就停。 */
 export function window_active(): boolean;
 /** 主窗口里宿主的遮罩层（确认框、命令面板、大图预览）开着。开关时发 overlay_changed。 */
@@ -204,6 +206,7 @@ export type HostEvent =
   | { type: "notification_permission_changed" }
   | { type: "agent_settings_changed" }
   | { type: "shown_views_changed" }
+  | { type: "shown_settings_page_changed" }
   | { type: "views_changed" }
   | { type: "view_badges_changed" }
   | { type: "themes_changed" }
@@ -385,6 +388,13 @@ impl JsPlugin {
             .function("view_shown", |arguments| {
                 let id = arguments.string(0)?;
                 Ok(in_app("view_shown", |cx| crate::host(cx).view_shown(id, cx))?.into())
+            })
+            .function("settings_page_shown", |arguments| {
+                let id = arguments.string(0)?;
+                Ok(in_app("settings_page_shown", |cx| {
+                    crate::host(cx).settings_page_shown(id, cx)
+                })?
+                .into())
             })
             .function("window_active", |_arguments| {
                 Ok(in_app("window_active", |cx| crate::host(cx).window_active(cx))?.into())
@@ -1063,6 +1073,9 @@ fn event_value(event: &HostEvent) -> HostValue {
             HostObject::new().field("type", "agent_settings_changed")
         }
         HostEvent::ShownViewsChanged => HostObject::new().field("type", "shown_views_changed"),
+        HostEvent::ShownSettingsPageChanged => {
+            HostObject::new().field("type", "shown_settings_page_changed")
+        }
         HostEvent::ViewsChanged => HostObject::new().field("type", "views_changed"),
         HostEvent::ViewBadgesChanged => HostObject::new().field("type", "view_badges_changed"),
         HostEvent::ThemesChanged => HostObject::new().field("type", "themes_changed"),
@@ -1123,11 +1136,9 @@ mod tests {
                 assert!(error.message().contains("机器要是 null 或字符串"));
             }
         }
-        assert!(
-            module
-                .call("view_shown", &HostArguments::default())
-                .is_err()
-        );
+        for query in ["view_shown", "settings_page_shown"] {
+            assert!(module.call(query, &HostArguments::default()).is_err());
+        }
         // 参数对了才去找宿主，测试里没有脚本上下文。
         let outside_script = module
             .call("agent_settings", &HostArguments::new([HostValue::Null]))

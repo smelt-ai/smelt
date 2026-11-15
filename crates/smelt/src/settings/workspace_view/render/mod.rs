@@ -162,14 +162,7 @@ fn select_section(entity: &Entity<Workspace>, section: SettingsSection, cx: &mut
         if workspace.settings_section != section {
             // 远程页的延迟平时只在连接换路径时读，切过去重读一次。
             let remote = section == SettingsSection::Remote;
-            // 资源页只在看得见时采样：切过去要叫醒采样循环；离开也叫醒，循环才能确认
-            // 看不见了，马上睡下，不用再等一轮。
-            let resources = section == SettingsSection::Resources
-                || workspace.settings_section == SettingsSection::Resources;
             workspace.settings_section = section;
-            if resources {
-                workspace.wake_resource_monitor();
-            }
             if remote {
                 crate::runtimes::sample_links(cx);
             }
@@ -199,9 +192,6 @@ fn section_page(
             }
         }
         SettingsSection::Remote => collaboration::remote_page(entity, snapshot, cx),
-        SettingsSection::Resources => {
-            crate::resource_monitor::resources_page(entity, snapshot.resources.clone())
-        }
         SettingsSection::Maintenance => maintenance::maintenance_page(entity, snapshot, cx),
         SettingsSection::About => maintenance::about_page(entity, snapshot, cx),
         SettingsSection::Plugin(_) => return None,

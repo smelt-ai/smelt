@@ -60,8 +60,6 @@ impl Workspace {
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
-            resources: (self.settings_section == SettingsSection::Resources)
-                .then(|| self.resources_snapshot(cx)),
             attention: self.settings_attention(cx),
         }
     }
@@ -127,8 +125,6 @@ impl Workspace {
     /// 的重入保护直接 panic 崩溃（"cannot update ... while it is already being
     /// updated"）——这就是「点设置整个 app 崩溃」的真正原因。
     pub fn open_settings_window(&mut self, cx: &mut Context<Self>) {
-        // 已经开着、换到资源页时，采样循环要醒来看一眼；新开的窗口在下面开好之后再叫一次。
-        self.wake_resource_monitor();
         super::refresh_agent_hooks_status(cx);
         super::refresh_remote(cx);
         super::refresh_quota_settings(cx);
@@ -205,7 +201,6 @@ impl Workspace {
                 })
                 .expect("打开设置窗口失败");
             cx.set_global(SettingsWindowHandle(handle));
-            workspace.read(cx).wake_resource_monitor();
         });
     }
 }

@@ -34,7 +34,6 @@ mod plugin_host;
 mod plugins;
 mod project_repositories;
 mod provider_quota;
-mod resource_monitor;
 mod runtime_call;
 mod runtime_events;
 mod runtime_space;
@@ -1640,8 +1639,6 @@ struct Workspace {
     /// 额度刷新循环的手动信号通道。额度状态本身不在 Workspace，而在
     /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
     provider_quota_refresh_tx: Option<smol::channel::Sender<provider_quota::QuotaTarget>>,
-    /// 资源占用的最新一轮结果和本机内存曲线。见 resource_monitor 模块。
-    resource_monitor: resource_monitor::ResourceMonitor,
 
     /// 守护进程是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见，需手动重启守护
     /// 才生效新代码）；None 表示还没查过，驱动设置页「更新」分区的重启提示。
@@ -1911,7 +1908,6 @@ impl Workspace {
             dir_picker: None,
             project_repositories: None,
             provider_quota_refresh_tx: None,
-            resource_monitor: Default::default(),
 
             daemon_outdated: None,
             daemon_upgrade_msg: None,
@@ -1954,8 +1950,6 @@ impl Workspace {
         ws.preload_file_manager_icon(window, cx);
         // 额度是应用级账户状态，启动后独立刷新，不依赖任何 ACP 会话是否创建。
         ws.start_provider_quota_watch(cx);
-        // 资源页的采样循环。平时睡着，设置窗口停在资源页时才量。
-        ws.start_resource_monitor(cx);
         // 侧栏「+」菜单按本机已装 CLI 过滤；启动后立刻探一次，免得等用户打开设置。
         ws.refresh_acp_runtime(cx);
         // 被系统转移、放在只读位置的 App 装不上更新：先提议移到「应用程序」，不恢复也不

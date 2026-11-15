@@ -62,6 +62,12 @@ impl api::Host for SmeltHost {
             .is_some_and(|workspace| workspace.read(cx).plugin_shown_views.contains(id))
     }
 
+    fn settings_page_shown(&self, id: &str, cx: &App) -> bool {
+        cx.try_global::<crate::settings::ShownSettingsPage>()
+            .and_then(|shown| shown.0.as_deref())
+            == Some(id)
+    }
+
     /// 页面画在舞台上、舞台又顶着窗口上沿时，页头让出顶栏、给红黄绿按钮让位、能拖窗口；
     /// 摆在自己面板里的视图上面有面板的标题带，页头只是一条普通的头。
     fn page_header(&self, window: &Window, cx: &App) -> Div {
@@ -345,6 +351,7 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     smelt_history::register(cx);
     smelt_layouts::register(cx);
     smelt_notifications::register(cx);
+    smelt_resources::register(cx);
 }
 
 impl Workspace {
