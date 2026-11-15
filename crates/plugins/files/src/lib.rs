@@ -37,9 +37,9 @@ use store::{FilesStore, SavedProject};
 
 pub(crate) use api::ui::ui_theme;
 
-const VIEW_ID: &str = "files";
+const VIEW_ID: &str = "smelt.files/main";
 /// 命令的来源，也是本插件库的名字。和搬出宿主之前一样，用户改过的快捷键还对得上。
-const COMMAND_OWNER: &str = "smelt.files";
+const OWNER: &str = "smelt.files";
 /// 整个视图的键位 context（保存在这里生效）。
 const FILES_KEY_CONTEXT: &str = "Files";
 /// 文件树的键位 context：方向键只在焦点在树里时归它。
@@ -67,20 +67,22 @@ actions!(
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
-    api::register_view(
-        ViewSpec {
-            id: VIEW_ID.into(),
+    api::register_views(
+        OWNER,
+        vec![ViewSpec {
+            name: "main".into(),
             title: "文件".into(),
             icon: gpui_kit_assets::IconName::FolderTree.path(),
             per_machine: false,
             draws_top_bar: false,
+            settings: None,
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| FilesPanel::new(window, cx))) as Rc<dyn ViewHandle>
             }),
-        },
+        }],
         cx,
     )
-    .expect("文件的视图 id 不是宿主保留的");
+    .expect("文件的视图表写错了");
     // 方向键不进命令表：命令的键要带 ⌘，方向键在别处（终端、输入框）另有用处。只绑在
     // 树自己的 context 上，焦点不在树里时不起作用。
     cx.bind_keys([
@@ -149,8 +151,8 @@ pub fn register(cx: &mut App) {
             }),
         },
     ];
-    api::register_commands(COMMAND_OWNER, "文件", commands, cx).expect("文件的命令表写错了");
-    api::register_file_opener(COMMAND_OWNER, "open", cx);
+    api::register_commands(OWNER, "文件", commands, cx).expect("文件的命令表写错了");
+    api::register_file_opener(OWNER, "open", cx);
 }
 
 /// 建好了的那份视图。没露出来过就还没建。

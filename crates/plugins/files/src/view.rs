@@ -7,9 +7,7 @@ use gpui::*;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_virtual_list,
-};
+use gpui_component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_virtual_list};
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::client::protocol::files::is_previewable_image;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
@@ -511,7 +509,7 @@ impl FilesPanel {
                                 "发送选中内容到会话",
                                 Box::new(smelt_plugin_api::RunCommand::new(format!(
                                     "{}/send-selection",
-                                    crate::COMMAND_OWNER
+                                    crate::OWNER
                                 ))),
                             )
                     }),

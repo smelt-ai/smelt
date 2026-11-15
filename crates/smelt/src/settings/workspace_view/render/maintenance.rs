@@ -691,7 +691,7 @@ fn storage_group(cx: &App) -> SettingGroup {
     )
 }
 
-/// 进入或退出「确认清理」。整份换掉全局，设置窗口跟着重绘（跟扫描按钮同一个做法）。
+/// 进入或退出「确认清理」。整份换掉全局，设置跟着重绘（跟扫描按钮同一个做法）。
 fn set_confirming(confirming: bool, cx: &mut App) {
     let mut state = cx.try_global::<CleanupState>().cloned().unwrap_or_default();
     state.confirming = confirming;

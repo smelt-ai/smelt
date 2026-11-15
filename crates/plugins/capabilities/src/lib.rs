@@ -1,7 +1,7 @@
 //! 能力库：给某台机器上的 Pi 配模型与凭据、MCP 服务器、技能与扩展、记忆召回。
 //!
 //! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道，宿主里没有它的类型。视图 id 是
-//! [`VIEW_ID`]，打开时的参数：`{"tab": "models" | "plugins" | "mcp" | "memory",
+//! `smelt.capabilities/main`，打开时的参数：`{"tab": "models" | "plugins" | "mcp" | "memory",
 //! "machine": …}`（机器的写法见 [`api::machine_to_json`]），都可以不给。
 //!
 //! 状态全在 [`CapabilitiesPage`] 上：在配哪台机器、那台机器的 Pi 配置快照、各表单。
@@ -31,24 +31,26 @@ mod state;
 use config::PiConfigSlot;
 use state::*;
 
-const VIEW_ID: &str = "capabilities";
+const OWNER: &str = "smelt.capabilities";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
-    api::register_view(
-        ViewSpec {
-            id: VIEW_ID.into(),
+    api::register_views(
+        OWNER,
+        vec![ViewSpec {
+            name: "main".into(),
             title: "能力库".into(),
             icon: IconName::LayoutDashboard.path(),
             per_machine: true,
             draws_top_bar: false,
+            settings: None,
             build: Rc::new(|_window, cx| {
                 Rc::new(cx.new(CapabilitiesPage::new)) as Rc<dyn ViewHandle>
             }),
-        },
+        }],
         cx,
     )
-    .expect("能力库的视图 id 不是宿主保留的");
+    .expect("能力库的视图表写错了");
 }
 
 /// 页面里平级的几个页签。
@@ -184,8 +186,8 @@ impl CapabilitiesPage {
             | HostEvent::ViewBadgesChanged
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged
-            | HostEvent::CommandsChanged
-            | HostEvent::SettingsPagesChanged => {}
+            | HostEvent::PagesChanged
+            | HostEvent::CommandsChanged => {}
         }
     }
 

@@ -33,7 +33,8 @@ mod render;
 
 use model::*;
 
-const VIEW_ID: &str = "history";
+const OWNER: &str = "smelt.history";
+const VIEW_ID: &str = "smelt.history/main";
 
 /// 选中的来源多久没读就在露出来时重读。
 const CURRENT_MAX_AGE: Duration = Duration::from_secs(10);
@@ -42,20 +43,22 @@ const PREFETCH_MAX_AGE: Duration = Duration::from_secs(60);
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
-    api::register_view(
-        ViewSpec {
-            id: VIEW_ID.into(),
+    api::register_views(
+        OWNER,
+        vec![ViewSpec {
+            name: "main".into(),
             title: "历史".into(),
             icon: gpui_kit_assets::IconName::Clock.path(),
             per_machine: false,
             draws_top_bar: false,
+            settings: None,
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| HistoryPage::new(window, cx))) as Rc<dyn ViewHandle>
             }),
-        },
+        }],
         cx,
     )
-    .expect("历史的视图 id 不是宿主保留的");
+    .expect("历史的视图表写错了");
 }
 
 /// 一份读到的列表。

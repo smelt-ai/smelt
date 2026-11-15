@@ -249,7 +249,7 @@ fn runtime_section_header(
                 .on_click(move |_ev, window, cx| {
                     cx.stop_propagation();
                     let runtime = runtime.clone();
-                    workspace.update(cx, |ws, cx| ws.open_desktop(runtime, window, cx));
+                    workspace.update(cx, |ws, cx| ws.open_desktop(runtime.key(), window, cx));
                 }),
             )
         })
@@ -829,7 +829,7 @@ impl Workspace {
                     }
                 }
             });
-        let session_route_active = self.active_tab().is_session();
+        let session_route_active = self.project_session_shown(cx);
         // 正在就地改名的那一行：标题那一格换成输入框。
         let rename_input = self.rename_input.clone();
         let renaming_session = match &self.rename_target {
@@ -2550,7 +2550,6 @@ impl Workspace {
                 })
                 .collect();
 
-            let n = sections.len();
             let is_animating = sections
                 .iter()
                 .any(|s| s.progress > 0.001 && s.progress < 0.999);
@@ -2806,7 +2805,7 @@ impl Workspace {
 
         // ---- 底部操作条：设置 ----
         // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。「设置」点一下直接
-        // 开设置窗口；有要处理的事（新版本、后台服务旧了、机器要处理）时挂红点，打开就停在那一页。
+        // 打开设置；有要处理的事（新版本、后台服务旧了、机器要处理）时挂红点，打开就停在那一页。
         let e_settings = this.clone();
         let settings_needs_attention = self.settings_attention(cx).is_some();
 
@@ -2934,8 +2933,8 @@ impl Workspace {
                             .quiet()
                             .icon(IconName::Settings)
                             .label("设置")
-                            .on_click(move |_, _, cx| {
-                                e_settings.update(cx, |ws, cx| ws.open_settings(cx));
+                            .on_click(move |_, window, cx| {
+                                e_settings.update(cx, |ws, cx| ws.open_settings(window, cx));
                             }),
                     )
                     .when(settings_needs_attention, |d| {

@@ -1,4 +1,5 @@
-//! 工作台外壳：整个工作台是一块 `DockArea`，这里是 smelt 给它的皮肤和面板。
+//! 页的外壳：主窗口的每一页是一块 `DockArea`（见 `workspace_layout`），这里是 smelt 给它的
+//! 皮肤和面板。
 //!
 //! 摆什么、怎么切、选中哪个、放大都在 Dock 上（布局和存档就是它的 `DockAreaState`，见
 //! `workspace_layout`）。这里只管：
@@ -19,8 +20,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Axis, Context, Div, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, Hsla, Pixels, SharedString, Stateful, Subscription, Window, div,
-    prelude::*, px, rgb, size,
+    FocusHandle, Focusable, Pixels, SharedString, Stateful, Subscription, Window, div, prelude::*,
+    px, rgb, size,
 };
 use gpui_base::ResizeHandleContext;
 use gpui_component::dock::{
@@ -42,9 +43,7 @@ use smelt_ui::IconAction as _;
 
 use crate::builtin_views::Builtin;
 use crate::settings::Appearance;
-use crate::{
-    AgentStatus, SessionKind, Workspace, WorkspaceRoute, terminal, ui_theme, workspace_frame,
-};
+use crate::{AgentStatus, SessionKind, Workspace, terminal, ui_theme, workspace_frame};
 
 /// Dock 的四个区域，按画的先后。
 const PLACEMENTS: [DockPlacement; 4] = [
@@ -234,9 +233,8 @@ fn build_panel(state: &PanelState, window: &mut Window, cx: &mut App) -> Arc<dyn
             .as_mut()
             .is_none_or(|pass| pass.placed.insert(id.to_string()))
     });
-    let spec = api::views(cx)
-        .into_iter()
-        .find(|spec| spec.id.as_ref() == id);
+    // 设置页由设置摆，布局里摆了也当不认识。
+    let spec = api::view(id, cx).filter(|spec| spec.settings.is_none());
     let built = first
         .then(|| spec.and_then(|spec| Some((spec, api::ensure_view(id, window, cx)?))))
         .flatten();
@@ -329,11 +327,14 @@ pub(crate) fn placement_of(area: &DockArea, panel: PanelId) -> Option<DockPlacem
     })
 }
 
-/// 摆着什么、看得见什么。Dock 一变就重算（`Workspace::sync_shell_view`），render 只读它。
+/// 开着的那页摆着什么、看得见什么。Dock 一变、换页就重算（`Workspace::sync_shell_view`），
+/// render 只读它。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ShellView {
-    /// 布局里摆着的视图。
+    /// 开着的那页的布局里摆着的视图。
     pub(crate) laid_out: HashSet<String>,
+    /// 别的页的布局里摆着的视图：打开它们是去那一页，不在这页的舞台上开。
+    pub(crate) elsewhere: HashSet<String>,
     /// 此刻看得见的视图：所在组显示着的那个，没被另一组的放大挡住，也不在收起的 dock 里。
     pub(crate) shown: HashSet<String>,
     /// 看得见、所在组既没有标签条也没有标题带、又贴着窗口上沿的视图：它自己的顶上就是
@@ -342,15 +343,35 @@ pub(crate) struct ShellView {
     /// 贴着窗口左上角的组，和它显示着的视图。那组开头要给红黄绿按钮和左侧开合按钮让位。
     pub(crate) top_left_group: Option<NodeId>,
     pub(crate) top_left: Option<String>,
-    /// 贴着窗口右上角的组。那组末尾要给右侧开合按钮让位。
+    /// 贴着窗口右上角的组，和它显示着的视图。那组末尾要给右侧开合按钮让位。
     pub(crate) top_right_group: Option<NodeId>,
+    pub(crate) top_right: Option<String>,
     /// 左、右停靠区的开合按钮：`Some(开着没有)` 是要画，`None` 是布局里没有这个停靠区、
     /// 或者有组放大着（放大时别的都让开，按钮也不画）。
     pub(crate) left_dock: Option<bool>,
     pub(crate) right_dock: Option<bool>,
+    /// 这页的出口（`smelt_plugin_api::OUTLET_VIEW`）里显示的视图；这页没摆出口是 `None`。
+    /// 上面几项说的是 Dock 里的面板，出口里的视图要按出口查（[`Self::panel_of`]）；
+    /// 只有 `shown` 把它也算进去。
+    pub(crate) outlet: Option<String>,
 }
 
 impl ShellView {
+    /// 哪页的布局里摆着这个视图：打开它是去那里让它露出来，不放进出口。
+    pub(crate) fn paged(&self, id: &str) -> bool {
+        self.laid_out.contains(id) || self.elsewhere.contains(id)
+    }
+
+    /// 视图画在哪个面板里：出口里显示着的是出口，别的是它自己。
+    pub(crate) fn panel_of<'a>(&self, id: &'a str) -> &'a str {
+        if self.outlet.as_deref() == Some(id) {
+            smelt_plugin_api::OUTLET_VIEW
+        } else {
+            id
+        }
+    }
+
+    /// 只看这页的 Dock；`elsewhere` 由工作台补上。
     pub(crate) fn of(area: &DockArea, cx: &App) -> Self {
         let zoomed = area.zoomed_group();
         let mut view = Self::default();
@@ -395,6 +416,9 @@ impl ShellView {
                 }
                 if Some(node.id()) == top_left_of(area) {
                     view.top_left = Some(id.clone());
+                }
+                if Some(node.id()) == top_right_of(area) {
+                    view.top_right = Some(id.clone());
                 }
                 view.shown.insert(id);
             });
@@ -557,7 +581,10 @@ impl DockAreaRenderer for SmeltDockRenderer {
         window: &mut Window,
         cx: &mut App,
     ) -> Stateful<Div> {
+        // 皮肤给分栏铺 `tab_bar` 实色，会挡住会话列表后面的玻璃。分栏里的组各自铺底，
+        // 分栏自己不用铺。
         DockAreaRenderer::split_frame(&*self.skin, node, axis, window, cx)
+            .bg(gpui::transparent_black())
     }
 
     fn render_split_handle(
@@ -605,10 +632,19 @@ struct SmeltTabGroup {
 
 impl TabGroupRenderer for SmeltTabGroup {
     /// 组的底色是栏的底色，不用主题的背景色：主题色可能带透明度，会透出窗口后面。
+    /// 只放着会话列表的组例外，铺侧栏的玻璃底（`workspace_frame::sidebar_surface`）。
     fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
-        self.inner
-            .frame(group, window, cx)
-            .bg(Hsla::from(rgb(ui_theme::side())))
+        let mut visible = group.panels().iter().filter(|panel| panel.visible(cx));
+        let sessions_only = visible
+            .next()
+            .is_some_and(|panel| panel.panel_name(cx) == Builtin::Sessions.id())
+            && visible.next().is_none();
+        let surface = if sessions_only {
+            workspace_frame::sidebar_surface()
+        } else {
+            rgb(ui_theme::side()).into()
+        };
+        self.inner.frame(group, window, cx).bg(surface)
     }
 
     fn content_frame(
@@ -921,11 +957,11 @@ impl Workspace {
     /// [`ShellView::trailing_inset`]）。`inset` 是 Dock 外面那圈内边距。
     pub(crate) fn render_dock_toggles(&self, inset: Pixels, window: &Window) -> Vec<AnyElement> {
         let left = self.shell_view.left_dock.map(|open| {
-            dock_toggle(DockPlacement::Left, open, self.shell_dock.clone())
+            dock_toggle(DockPlacement::Left, open, self.shell_dock().clone())
                 .left(inset + lights_width(window))
         });
         let right = self.shell_view.right_dock.map(|open| {
-            dock_toggle(DockPlacement::Right, open, self.shell_dock.clone()).right(inset)
+            dock_toggle(DockPlacement::Right, open, self.shell_dock().clone()).right(inset)
         });
         [left, right]
             .into_iter()
@@ -1000,7 +1036,8 @@ impl Workspace {
         let focused_key = self.sidebar_focused_key(window);
         let list =
             self.render_session_list(cx.entity(), window, cx, &statuses, animate, focused_key);
-        workspace_frame::card(rgb(ui_theme::side()).into())
+        // 底由所在的组铺（`SmeltTabGroup::frame`），这里再铺一层，玻璃就透不出来了。
+        workspace_frame::card(gpui::transparent_black())
             .when(at_top, |card| card.pt(workspace_frame::TOP_BAR_HEIGHT))
             // 从访达拖文件夹进会话列表 = 打开项目。不挂整个窗口：对话输入框要自己收文件。
             .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
@@ -1023,22 +1060,13 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 舞台：当前会话，或侧栏选中的对话、远程桌面，或没摆进布局的插件视图。
+    /// 舞台：活动会话（项目里的会话，或侧栏「对话」里选中的那段）。
     pub(crate) fn render_stage_dock(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let stage_content: AnyElement = match self.active_tab().clone() {
-            WorkspaceRoute::Conversation => self.render_conversation_stage(cx),
-            // 摆进布局的视图画在它自己的面板里，一个视图不能画两处。
-            WorkspaceRoute::Page(id) if self.shell_view.laid_out.contains(id.as_str()) => {
-                div().flex_1().into_any_element()
-            }
-            WorkspaceRoute::Page(id) => self.render_page(&id, cx),
-            WorkspaceRoute::Desktop => self.render_desktop_page(window, cx),
-            WorkspaceRoute::Session => self.render_stage_session(cx),
-        };
+        let stage_content = self.render_stage_session(cx);
         let content = div()
             .size_full()
             .min_w_0()
@@ -1055,11 +1083,10 @@ impl Workspace {
     }
 
     fn render_stage_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(session) = self
-            .sessions
-            .get(self.active_session)
-            .filter(|session| !session.is_product_conversation(cx))
-        else {
+        // 自动化跑出来的对话在自动化里看，不上舞台。
+        let Some(session) = self.sessions.get(self.active_session).filter(|session| {
+            !session.is_product_conversation(cx) || session.is_agent_conversation(cx)
+        }) else {
             return self.render_stage_empty(cx);
         };
         let body = match &session.kind {
@@ -1115,9 +1142,10 @@ impl Workspace {
                     Button::new("empty-add-runtime")
                         .primary()
                         .label("添加远程机器")
-                        .on_click(cx.listener(|this, _, _window, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.open_settings_section(
                                 crate::settings::SettingsSection::Remote,
+                                window,
                                 cx,
                             );
                         })),

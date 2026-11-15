@@ -1,4 +1,4 @@
-//! 设置窗口的信息架构：左侧按分组列出各页，每页一个独立内容页。
+//! 设置的信息架构：左侧按分组列出各页，每页一个独立内容页。
 //!
 //! gpui-component 的 `Settings` 在 `groups.len() > 1` 时会画二级菜单，但点击只是
 //! 滚动到分组，右侧仍是整页。这里把每一页做成独立 `SettingsSection`，由壳层只渲染
@@ -6,9 +6,9 @@
 
 use gpui::SharedString;
 use gpui_component::{Icon, IconName};
-use smelt_plugin_api::{SettingsGroup, SettingsPage};
+use smelt_plugin_api::{SettingsGroup, ViewInfo};
 
-/// 设置窗口当前选中的内容页。深链接（检查更新、外观、机器、资源）也走这里。
+/// 设置当前选中的内容页。深链接（检查更新、外观、机器、资源）也走这里。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SettingsSection {
     /// 主题、字号与字体、窗口与背景。
@@ -24,7 +24,7 @@ pub enum SettingsSection {
     Maintenance,
     /// 版本、应用更新（macOS、Windows）、帮助与反馈。
     About,
-    /// 插件登记的页（见 `smelt_plugin_api::register_settings_pages`），带登记的 id。
+    /// 插件登记的页（带 `settings` 的视图，见 `smelt_plugin_api::register_views`），带视图 id。
     Plugin(SharedString),
 }
 
@@ -69,19 +69,22 @@ pub struct SettingsNavCategory {
 }
 
 /// 设置侧栏：宿主的三组，每组一行小标题加若干页；插件的页按它挑的组排在宿主的页后面，
-/// 挑「插件」组的单独成一组放在最后。
-pub fn settings_nav(plugin_pages: &[SettingsPage]) -> Vec<SettingsNavCategory> {
+/// 挑「插件」组的单独成一组放在最后。`views` 是登记过的全部视图，只取设置页。
+pub fn settings_nav(views: &[ViewInfo]) -> Vec<SettingsNavCategory> {
     let mut nav = host_nav();
     let mut plugins = SettingsNavCategory {
         title: "插件",
         keywords: &["扩展", "plugin"],
         children: Vec::new(),
     };
-    for page in plugin_pages {
+    for view in views {
+        let Some(page) = &view.settings else {
+            continue;
+        };
         let leaf = SettingsNavLeaf {
-            title: page.title.to_string(),
-            icon: Icon::empty().path(page.icon.clone()),
-            section: SettingsSection::Plugin(page.id.clone()),
+            title: view.title.to_string(),
+            icon: Icon::empty().path(view.icon.clone()),
+            section: SettingsSection::Plugin(view.id.clone()),
             keywords: page.keywords.iter().map(ToString::to_string).collect(),
         };
         let category = match page.group {
@@ -535,18 +538,28 @@ mod tests {
         }
     }
 
-    fn plugin_page(id: &str, title: &str, group: SettingsGroup, keywords: &[&str]) -> SettingsPage {
-        SettingsPage {
+    fn view(id: &str, title: &str, settings: Option<smelt_plugin_api::SettingsEntry>) -> ViewInfo {
+        ViewInfo {
             id: id.to_string().into(),
             title: title.to_string().into(),
             icon: "icons/bell.svg".into(),
-            group,
-            keywords: keywords
-                .iter()
-                .map(|word| SharedString::from(word.to_string()))
-                .collect(),
+            per_machine: false,
+            draws_top_bar: false,
+            settings,
             build: std::rc::Rc::new(|_, _| unreachable!("侧栏不建页")),
         }
+    }
+
+    fn plugin_page(id: &str, title: &str, group: SettingsGroup, keywords: &[&str]) -> ViewInfo {
+        let keywords = keywords
+            .iter()
+            .map(|word| SharedString::from(word.to_string()))
+            .collect();
+        view(
+            id,
+            title,
+            Some(smelt_plugin_api::SettingsEntry { group, keywords }),
+        )
     }
 
     #[test]
@@ -554,6 +567,8 @@ mod tests {
         let pages = [
             plugin_page("notify/main", "提醒", SettingsGroup::General, &["系统通知"]),
             plugin_page("trader/prefs", "行情", SettingsGroup::Plugins, &["股票"]),
+            // 不是设置页的视图不进设置。
+            view("trader/main", "交易", None),
             plugin_page("probe/disk", "磁盘", SettingsGroup::System, &[]),
         ];
         let nav = settings_nav(&pages);

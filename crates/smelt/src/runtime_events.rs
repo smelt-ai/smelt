@@ -11,7 +11,7 @@
 //! 不等空闲——对不上时桌面什么都用不了，等也没有意义。
 //!
 //! 连不上和对不上都退避重探；「重新连接」（[`reconnect`]）叫醒线程立刻再试，退避从头算。
-//! 远程机器回来不会通知这台桌面，离线时的退避翻倍到分钟级；应用回到前台、打开设置窗口时
+//! 远程机器回来不会通知这台桌面，离线时的退避翻倍到分钟级；应用回到前台、打开设置时
 //! （[`probe_remotes`]）叫醒连不上的再探一次。
 //!
 //! 订阅线程是远程运行时连通性的唯一来源：每次探测的结果、订阅断开，都报回 [`RuntimeHub`]，
@@ -121,7 +121,7 @@ fn incompatible_backoff(attempt: u32) -> Duration {
 /// 几秒内就能接回；关机好几天的，一小时只拨十来次。
 // 轮询例外：远程机器开机、联网后不会通知这台桌面，连上之前收不到它的任何东西，只能隔一阵
 // 拨一次；每次拨号都要过 relay 和地址发现，关机时一直勤探白白耗电耗流量，所以封顶拉到分钟
-// 级，应用回到前台、打开设置窗口（[`probe_remotes`]）和「重新连接」会立刻叫醒；周期 250ms
+// 级，应用回到前台、打开设置（[`probe_remotes`]）和「重新连接」会立刻叫醒；周期 250ms
 // 起翻倍，上限 5min。
 fn remote_offline_backoff(attempt: u32) -> Duration {
     (Duration::from_millis(250) * 2u32.pow(attempt.min(11))).min(Duration::from_secs(300))
@@ -202,7 +202,7 @@ pub(crate) fn upgrade_remote(key: &RuntimeKey, cx: &mut App) {
     .detach();
 }
 
-/// 请连不上、版本对不上的远程运行时立刻再探一次（打开设置窗口、应用回到前台时），不重新
+/// 请连不上、版本对不上的远程运行时立刻再探一次（打开设置、应用回到前台时），不重新
 /// 请求升级。在线的连着订阅，断了自己会知道；连接中、升级中的正在探，都不用叫。
 pub(crate) fn probe_remotes(cx: &App) {
     if let Some(subscriptions) = cx.try_global::<RuntimeSubscriptions>() {
@@ -617,7 +617,7 @@ pub(crate) fn spawn_subscription(
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                 };
                 // 攒着的几次叫醒并成一次，有人点过「重新连接」就按它算。只是再探一次
-                // （回到前台、开设置窗口）的不动退避，见 [`Wake::Probe`]。
+                // （回到前台、打开设置）的不动退避，见 [`Wake::Probe`]。
                 let reconnect = std::iter::once(wake)
                     .chain(woken.try_iter())
                     .any(|wake| wake == Wake::Reconnect);

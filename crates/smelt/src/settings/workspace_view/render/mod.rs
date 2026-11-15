@@ -1,6 +1,6 @@
 //! 设置页主体元素树的渲染实现。
 //!
-//! 快照构建和独立窗口生命周期留在父模块；这里只组装各设置页。
+//! 快照构建和设置视图留在父模块；这里只组装各设置页。
 //! 各页实现按主题拆到同目录的 sibling 模块。
 //!
 //! 左侧导航按分组列出各页：分组只是一行小标题，不折叠、不缩进；点一页只渲染那一页，
@@ -18,8 +18,8 @@ mod maintenance;
 mod panel_plugin;
 mod shortcuts;
 
-/// 渲染独立设置页面：左侧分组导航切换内容页，右侧只显示当前选中项。选中插件的页时
-/// `plugin_page` 是建好的那一页（由设置内容视图在事件里建，见 `SettingsContentView`）。
+/// 渲染设置页面：左侧分组导航切换内容页，右侧只显示当前选中项。选中插件的页时
+/// `plugin_page` 是建好的那一页（由设置视图在事件里建，见 `SettingsContentView`）。
 pub(super) fn render_settings_content(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -46,7 +46,7 @@ impl RenderOnce for SettingsShell {
             InputState::new(window, cx).placeholder("搜索设置、功能或命令")
         });
         let query = search.read(cx).value().to_string();
-        let nav = filter_settings_nav(&settings_nav(&smelt_plugin_api::settings_pages(cx)), &query);
+        let nav = filter_settings_nav(&settings_nav(&smelt_plugin_api::views(cx)), &query);
         let selected = self.snapshot.settings_section.clone();
         let content = match section_page(self.entity.clone(), &self.snapshot, &selected, cx) {
             Some(page) => smelt_plugin_api::settings_pane(

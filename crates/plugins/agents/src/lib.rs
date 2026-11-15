@@ -32,7 +32,7 @@ use gpui::*;
 use gpui_component::input::{InputEvent, InputState, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _};
+use gpui_component::{ActiveTheme as _, Icon, IconName, StyledExt as _};
 use smelt_plugin_api::{
     self as api, CommandSpec, Handled, HostEvent, PluginView, RuntimeKey, TopicMessage, ViewHandle,
     ViewSpec,
@@ -51,27 +51,29 @@ use cards::*;
 use editor::*;
 use model::*;
 
-const VIEW_ID: &str = "agents";
-const COMMAND_OWNER: &str = "smelt.agents";
+const OWNER: &str = "smelt.agents";
+const VIEW_ID: &str = "smelt.agents/main";
 /// 跟默认智能体开一段新对话。
 pub const NEW_CONVERSATION: &str = "smelt.agents/new-conversation";
 /// 能力库的视图。没装就没有「管理插件 / MCP」的入口。
-const CAPABILITIES_VIEW: &str = "capabilities";
+const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
-    api::register_view(
-        ViewSpec {
-            id: VIEW_ID.into(),
+    api::register_views(
+        OWNER,
+        vec![ViewSpec {
+            name: "main".into(),
             title: "智能体".into(),
             icon: gpui_kit_assets::IconName::Bot.path(),
             per_machine: false,
             draws_top_bar: false,
+            settings: None,
             build: Rc::new(|_window, cx| Rc::new(cx.new(AgentsPage::new)) as Rc<dyn ViewHandle>),
-        },
+        }],
         cx,
     )
-    .expect("智能体的视图 id 不是宿主保留的");
+    .expect("智能体的视图表写错了");
     automations::install(cx);
     register_commands(new_conversation_title(None), cx);
     sync_new_conversation_title(cx);
@@ -89,7 +91,7 @@ pub fn register(cx: &mut App) {
 
 fn register_commands(new_conversation_title: String, cx: &mut App) {
     api::register_commands(
-        COMMAND_OWNER,
+        OWNER,
         "智能体",
         vec![CommandSpec {
             name: "new-conversation".to_string(),
@@ -241,8 +243,8 @@ impl AgentsPage {
             | HostEvent::ViewBadgesChanged
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged
-            | HostEvent::CommandsChanged
-            | HostEvent::SettingsPagesChanged => {}
+            | HostEvent::PagesChanged
+            | HostEvent::CommandsChanged => {}
         }
     }
 

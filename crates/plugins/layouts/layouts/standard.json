@@ -8,7 +8,7 @@
         "panel_name": "TabPanel",
         "info": { "tabs": { "active_index": 0 } },
         "children": [
-          { "panel_name": "stage", "children": [], "info": { "panel": null } }
+          { "panel_name": "smelt/outlet", "children": [], "info": { "panel": null } }
         ]
       }
     ]
@@ -21,7 +21,7 @@
       "panel_name": "TabPanel",
       "info": { "tabs": { "active_index": 0 } },
       "children": [
-        { "panel_name": "sessions", "children": [], "info": { "panel": null } }
+        { "panel_name": "smelt.sessions/list", "children": [], "info": { "panel": null } }
       ]
     }
   },
@@ -33,10 +33,10 @@
       "panel_name": "TabPanel",
       "info": { "tabs": { "active_index": 0 } },
       "children": [
-        { "panel_name": "files", "children": [], "info": { "panel": null } },
-        { "panel_name": "git", "children": [], "info": { "panel": null } },
-        { "panel_name": "history", "children": [], "info": { "panel": null } },
-        { "panel_name": "com.smelt.skills", "children": [], "info": { "panel": null } }
+        { "panel_name": "smelt.files/main", "children": [], "info": { "panel": null } },
+        { "panel_name": "smelt.git/main", "children": [], "info": { "panel": null } },
+        { "panel_name": "smelt.history/main", "children": [], "info": { "panel": null } },
+        { "panel_name": "com.smelt.skills/main", "children": [], "info": { "panel": null } }
       ]
     }
   }

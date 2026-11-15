@@ -121,6 +121,7 @@ pub struct WorkspaceUiRecord {
     pub active_session: usize,
     /// 当前看的那段对话的稳定 id。
     pub active_session_id: Option<String>,
+    /// 首页出口里放着的视图 id；空是默认内容。
     pub route: String,
     pub collapsed_projects: Vec<ProjectKey>,
     pub collapsed_agents: Vec<String>,

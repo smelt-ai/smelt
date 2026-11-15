@@ -82,9 +82,10 @@ fn terminal_group(snapshot: &SettingsRenderSnapshot) -> SettingGroup {
     ])
 }
 
-/// 布局：用哪份，和把它恢复成本来的样子。选项是插件登记的布局（只读内存）。
+/// 布局：首页用哪份，和把它恢复成本来的样子。选项是插件给首页登记的布局（只读内存）；
+/// 别的页（如设置）各用登记给它的那份，不在这里选。
 fn layout_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
-    let options: Vec<(SharedString, SharedString)> = smelt_plugin_api::layouts(cx)
+    let options: Vec<(SharedString, SharedString)> = crate::workspace_layout::home_layouts(cx)
         .into_iter()
         .map(|layout| (layout.id, layout.title))
         .collect();
@@ -108,7 +109,7 @@ fn layout_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
             options,
             // 选的布局暂时没登记时显示实际在用的那份，不改保存的选择。
             |cx: &App| {
-                crate::workspace_layout::effective_layout(cx)
+                crate::workspace_layout::effective_home_layout(cx)
                     .unwrap_or_default()
                     .into()
             },
@@ -207,7 +208,7 @@ fn displayed_theme_name(cx: &App) -> String {
     }
 }
 
-/// 主题下拉：可搜索，每项带三个色点和所属系列。挂在设置窗口的元素状态上，窗口关了就丢。
+/// 主题下拉：可搜索，每项带三个色点和所属系列。挂在设置的元素状态上。
 struct ThemePicker {
     select: Entity<SelectState<SearchableVec<ThemeOption>>>,
     /// 每款主题的色点，建下拉时一次算好：每项都要把主题配置套一遍，不放进重绘。
@@ -356,7 +357,7 @@ fn window_group(
                 slider_with_value(opacity_slider.clone(), format!("{opacity}%"), cx)
             }),
         )
-        .description("只作用于工作台窗口，默认 95%；设置窗口始终不透明"),
+        .description("作用于整扇窗口，默认 95%"),
     ];
     // 系统玻璃是 macOS 26 的标题栏材质，别的平台没有这个东西。
     #[cfg(target_os = "macos")]

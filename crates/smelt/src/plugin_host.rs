@@ -1,6 +1,5 @@
-//! 宿主这一侧的插件接口：实现 [`smelt_plugin_api::Host`]，登记内置插件，决定插件视图摆在
-//! 哪：布局里摆了它就在它的面板里（见 `workspace_shell`），没摆的是舞台上的一页（工作台
-//! 路由 `Page(id)`），侧栏给它一个入口。设计见 `docs/app-plugins.md`。
+//! 宿主这一侧的插件接口：实现 [`smelt_plugin_api::Host`]，登记内置插件，把打开视图、换页
+//! 的命令接到主窗口的路由上（见 `workspace_layout`）。
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -12,7 +11,7 @@ use smelt_plugin_api::{self as api, CommandSpec, HostEvent, Machine, Project, Ru
 use smelt_runtime_client::RuntimeClient;
 
 use crate::dir_picker::DirPickerPurpose;
-use crate::{MainWindow, Workspace, WorkspaceRoute, current_workspace, runtimes, status_item};
+use crate::{MainWindow, Workspace, current_workspace, runtimes, status_item};
 
 struct SmeltHost {
     current: Rc<RefCell<Option<MainWindow>>>,
@@ -58,26 +57,27 @@ impl api::Host for SmeltHost {
     }
 
     fn view_shown(&self, id: &str, cx: &App) -> bool {
-        cx.try_global::<ShownViews>()
-            .is_some_and(|shown| shown.contains(id))
+        view_shown(id, cx)
     }
 
-    /// 页面画在舞台上、舞台又顶着窗口上沿时，页头让出顶栏、给红黄绿按钮让位、能拖窗口；
-    /// 摆在自己面板里的视图上面有面板的标题带，页头只是一条普通的头。
+    /// 页头所在的面板（视图自己的，或装着它的出口）单独一组、没有标签条和标题带、顶着窗口
+    /// 上沿时，页头让出顶栏、给红黄绿按钮让位、能拖窗口；上面有标签条或标题带时只是一条
+    /// 普通的头。
     fn page_header(&self, window: &Window, cx: &App) -> Div {
-        let left_guard = self.workspace().and_then(|workspace| {
+        let guards = self.workspace().and_then(|workspace| {
             let workspace = workspace.read(cx);
-            let WorkspaceRoute::Page(id) = workspace.active_tab() else {
-                return None;
+            let drawing = |id: &str| {
+                api::built_view(id, cx)
+                    .is_some_and(|view| view.view().entity_id() == window.current_view())
             };
-            let on_stage = !workspace.shell_view.laid_out.contains(id.as_str())
-                && api::built_view(id, cx)
-                    .is_some_and(|view| view.view().entity_id() == window.current_view());
-            on_stage
-                .then(|| workspace.chrome_left_guard(window))
-                .flatten()
+            let id = workspace.shell_view.shown.iter().find(|id| drawing(id))?;
+            Some((
+                workspace.chrome_left_guard_of(id, window),
+                workspace.chrome_right_inset_of(id),
+            ))
         });
-        crate::workspace_frame::page_chrome(left_guard)
+        let (left_guard, right_inset) = guards.unwrap_or((None, px(0.)));
+        crate::workspace_frame::page_chrome(left_guard, right_inset)
     }
 
     fn window_active(&self, cx: &App) -> bool {
@@ -216,6 +216,7 @@ pub(crate) fn in_main_window<R>(
 pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
     let picker = workspace.clone();
     let views = workspace.clone();
+    let pages = workspace.clone();
     let shown = workspace.clone();
     vec![
         api::SHOW_MAIN_WINDOW.spec("显示主窗口", move |_, window, cx| {
@@ -291,7 +292,16 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
         api::OPEN_VIEW.spec("打开视图", move |args, window, cx| {
             let window = main_window(window)?;
             update_workspace(&views, cx, |workspace, cx| {
-                Ok(workspace.open_page(&args.view, args.args, window, cx))
+                Ok(workspace.open_view(&args.view, args.args, window, cx))
+            })
+        }),
+        api::OPEN_PAGE.spec("打开页", move |args, window, cx| {
+            let window = main_window(window)?;
+            update_workspace(&pages, cx, |workspace, cx| {
+                if api::page(&args.page, cx).is_none() {
+                    return Ok(false);
+                }
+                Ok(workspace.navigate(Some(args.page), window, cx))
             })
         }),
     ]
@@ -348,12 +358,12 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     smelt_resources::register(cx);
 }
 
-/// 此刻看得见的视图。摆视图的地方各报各的：主窗口的工作台报布局里露着的和舞台上开着的
-/// 那页，设置窗口报它停着的那一页。插件只看并起来的一套（`Host::view_shown`），不分视图
-/// 摆在哪。
+/// 此刻看得见的视图。摆视图的地方各报各的：主窗口报开着的那页里露着的和舞台上开着的
+/// 视图，设置报它停着的那一页，设置视图本身露着时那一页才算看得见。插件只看并起来的一套
+/// （`Host::view_shown`），不分视图摆在哪。
 #[derive(Default)]
 pub(crate) struct ShownViews {
-    workbench: HashSet<String>,
+    window: HashSet<String>,
     settings: Option<SharedString>,
 }
 
@@ -361,20 +371,28 @@ impl Global for ShownViews {}
 
 impl ShownViews {
     fn contains(&self, id: &str) -> bool {
-        self.workbench.contains(id) || self.settings.as_deref() == Some(id)
+        self.window.contains(id)
+            || (self.settings.as_deref() == Some(id)
+                && self.window.contains(crate::settings::SETTINGS_VIEW))
     }
 }
 
-/// 工作台里看得见的视图；主窗口关了报空的。
-pub(crate) fn set_workbench_shown(shown: HashSet<String>, cx: &mut App) {
+/// 视图此刻看得见，和插件看到的是同一套。只读内存。
+pub(crate) fn view_shown(id: &str, cx: &App) -> bool {
+    cx.try_global::<ShownViews>()
+        .is_some_and(|shown| shown.contains(id))
+}
+
+/// 主窗口里看得见的视图；主窗口关了报空的。
+pub(crate) fn set_window_shown(shown: HashSet<String>, cx: &mut App) {
     let views = cx.default_global::<ShownViews>();
-    if views.workbench != shown {
-        views.workbench = shown;
+    if views.window != shown {
+        views.window = shown;
         api::emit(HostEvent::ShownViewsChanged, cx);
     }
 }
 
-/// 设置窗口停着的插件设置页；停在宿主自己的页、窗口关了报 `None`。
+/// 设置停着的插件设置页；停在宿主自己的页、设置视图放掉了报 `None`。
 pub(crate) fn set_settings_shown(page: Option<SharedString>, cx: &mut App) {
     let views = cx.default_global::<ShownViews>();
     if views.settings != page {
@@ -384,46 +402,8 @@ pub(crate) fn set_settings_shown(page: Option<SharedString>, cx: &mut App) {
 }
 
 impl Workspace {
-    /// 打开一个视图：布局里摆了它就让它的面板露出来，没摆就在舞台上开成一页。没登记过
-    /// 这个 id 就什么都不做，返回 `false`。
-    pub(crate) fn open_page(
-        &mut self,
-        id: &str,
-        args: serde_json::Value,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some((view, _)) = api::ensure_view(id, window, cx) else {
-            return false;
-        };
-        if !self.show_view(id, window, cx) {
-            self.activate_workspace_tab(WorkspaceRoute::Page(id.to_string()), window, cx);
-        }
-        view.open(&args, window, cx);
-        true
-    }
-
-    /// 让停着的插件页对上注册表：启动时恢复上次停的那页，视图登记变了（插件加载、
-    /// 卸载、替换）时重新取。视图已经没有了、或者已经摆进布局了就回会话；新建的视图打开
-    /// 一次，让它读数据。
-    pub(crate) fn sync_page_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let WorkspaceRoute::Page(id) = self.active_tab().clone() else {
-            return;
-        };
-        if self.shell_view.laid_out.contains(id.as_str()) {
-            self.nav.set_active(WorkspaceRoute::Session);
-            self.show_view(&id, window, cx);
-            return;
-        }
-        match api::ensure_view(&id, window, cx) {
-            Some((view, true)) => view.open(&serde_json::Value::Null, window, cx),
-            Some((_, false)) => {}
-            None => self.nav.set_active(WorkspaceRoute::Session),
-        }
-    }
-
     /// 宿主事件里工作台自己要管的：视图登记变了要重装布局（新登记的补上、撤下的变
-    /// 占位）、对路由，侧栏入口要重画。
+    /// 占位）、对出口，侧栏入口要重画；页、布局登记变了要重挑各页的布局。
     pub(crate) fn subscribe_host_events(
         &mut self,
         window: &mut Window,
@@ -435,12 +415,12 @@ impl Workspace {
             |this, _, event: &HostEvent, window, cx| match event {
                 HostEvent::ViewsChanged => {
                     this.reload_layout(window, cx);
-                    this.sync_page_route(window, cx);
+                    this.sync_outlet(window, cx);
                     cx.notify();
                 }
                 // 侧栏里插件页的入口带角标。
                 HostEvent::ViewBadgesChanged => cx.notify(),
-                HostEvent::LayoutsChanged => this.sync_layout_choice(window, cx),
+                HostEvent::LayoutsChanged | HostEvent::PagesChanged => this.sync_pages(window, cx),
                 HostEvent::ThemesChanged => {
                     if let Some(appearance) = cx.try_global::<crate::settings::Appearance>() {
                         let selected = appearance.theme_name.clone();
@@ -454,21 +434,9 @@ impl Workspace {
         )
     }
 
-    /// 只取已经建好的视图，不建。
-    pub(crate) fn render_page(&self, id: &str, cx: &App) -> AnyElement {
-        div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .children(api::built_view(id, cx).map(|view| view.view()))
-            .into_any_element()
-    }
-
     /// 发布活动上下文（当前项目、舞台上露着的会话），变了插件收到
     /// [`HostEvent::ActiveContextChanged`]。在可见刷新里调：当前项目、活动会话跟着会话、
-    /// 侧栏选中、项目分组、路由变，这些变更都会排一次可见刷新；舞台露出或被挡、终端换活动
+    /// 侧栏选中、项目分组变，这些变更都会排一次可见刷新；舞台露出或被挡、终端换活动
     /// 分屏、对话翻看历史的开关不排刷新，在那里另调。
     pub(crate) fn note_active_context(&mut self, cx: &mut Context<Self>) {
         let project = self.active_project_ref(cx).map(|project| Project {
@@ -477,21 +445,6 @@ impl Workspace {
         });
         let session = self.viewed_session(cx);
         api::set_active_context(api::ActiveContext { project, session }, cx);
-    }
-
-    /// 看得见的视图变了就告诉插件：布局里所在组显示着的，加上舞台上开成当前页的那个。
-    /// Dock 变了（`sync_shell_view`）和路由变了（可见刷新）时调。
-    pub(crate) fn note_shown_views(&mut self, cx: &mut Context<Self>) {
-        let mut shown: HashSet<String> = self.shell_view.shown.clone();
-        if let WorkspaceRoute::Page(id) = self.active_tab()
-            && self
-                .shell_view
-                .shown
-                .contains(crate::builtin_views::Builtin::Stage.id())
-        {
-            shown.insert(id.clone());
-        }
-        set_workbench_shown(shown, cx);
     }
 
     /// 遮罩层开了或关了就告诉插件：画着原生网页视图的插件要让开。插件视图在面板里是缓存着

@@ -54,7 +54,7 @@ fn machine_actions(runtime: Runtime, workspace: Entity<Workspace>, cx: &App) -> 
                     run: Rc::new(move |window, cx| {
                         let args = args.clone();
                         workspace.update(cx, |ws, cx| {
-                            ws.open_page(&view.id, args, window, cx);
+                            ws.open_view(&view.id, args, window, cx);
                         });
                     }),
                 }
@@ -70,7 +70,7 @@ fn machine_actions(runtime: Runtime, workspace: Entity<Workspace>, cx: &App) -> 
                 let workspace = workspace.clone();
                 move |window, cx| {
                     let runtime = runtime.clone();
-                    workspace.update(cx, |ws, cx| ws.open_desktop(runtime, window, cx));
+                    workspace.update(cx, |ws, cx| ws.open_desktop(runtime.key(), window, cx));
                 }
             }),
         });

@@ -168,11 +168,6 @@ mod appearance_tests {
             WindowBackgroundAppearance::Blurred
         );
     }
-
-    #[test]
-    fn settings_window_stays_opaque_for_readability() {
-        assert_eq!(super::SETTINGS_WINDOW_OPACITY, 1.0);
-    }
 }
 
 #[cfg(all(test, any(target_os = "macos", windows)))]

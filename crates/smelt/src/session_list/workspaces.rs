@@ -529,7 +529,7 @@ impl Render for WorkspaceOverview {
                 return div().into_any_element();
             };
             let active = ws.sessions.get(ws.active_session).filter(|session| {
-                ws.active_tab().is_session() && session.runtime(cx).key() == &self.project.runtime
+                ws.project_session_shown(cx) && session.runtime(cx).key() == &self.project.runtime
             });
             let worksets = project_worksets(&space.worksets, &self.project.root);
             let count = worksets.len();

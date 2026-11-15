@@ -4,7 +4,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use api::ui::{Button, Switch};
-use api::{HostEvent, NotificationPermission, SettingsGroup, SettingsPageSpec};
+use api::{
+    HostEvent, NotificationPermission, PluginView, SettingsEntry, SettingsGroup, ViewHandle,
+    ViewSpec,
+};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, SharedString, Window, div, px};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
@@ -15,34 +18,38 @@ use crate::store::Prefs;
 use crate::{OWNER, Plugin};
 
 pub(crate) fn register(plugin: Rc<RefCell<Plugin>>, cx: &mut App) {
-    let spec = SettingsPageSpec {
+    let spec = ViewSpec {
         name: "main".into(),
         title: "通知".into(),
         icon: IconName::Bell.path(),
-        group: SettingsGroup::General,
-        keywords: [
-            "Agent",
-            "提醒",
-            "notification",
-            "系统通知",
-            "等待批准",
-            "等待输入",
-            "任务完成",
-            "任务失败",
-            "审批",
-            "批准",
-            "响铃",
-            "bell",
-        ]
-        .into_iter()
-        .map(SharedString::from)
-        .collect(),
+        per_machine: false,
+        draws_top_bar: false,
+        settings: Some(SettingsEntry {
+            group: SettingsGroup::General,
+            keywords: [
+                "Agent",
+                "提醒",
+                "notification",
+                "系统通知",
+                "等待批准",
+                "等待输入",
+                "任务完成",
+                "任务失败",
+                "审批",
+                "批准",
+                "响铃",
+                "bell",
+            ]
+            .into_iter()
+            .map(SharedString::from)
+            .collect(),
+        }),
         build: Rc::new(move |_, cx| {
             let plugin = plugin.clone();
-            cx.new(|cx| NotifySettings::new(plugin, cx)).into()
+            Rc::new(cx.new(|cx| NotifySettings::new(plugin, cx))) as Rc<dyn ViewHandle>
         }),
     };
-    if let Err(error) = api::register_settings_pages(OWNER, vec![spec], cx) {
+    if let Err(error) = api::register_views(OWNER, vec![spec], cx) {
         eprintln!("[notifications] 设置页登记失败：{error}");
     }
 }
@@ -62,6 +69,10 @@ impl NotifySettings {
         .detach();
         Self { plugin }
     }
+}
+
+impl PluginView for NotifySettings {
+    fn open(&mut self, _: &api::serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
 }
 
 impl Render for NotifySettings {

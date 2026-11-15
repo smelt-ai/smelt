@@ -6,7 +6,7 @@ use gpui::{Action, KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
 use smelt_plugin_api::{self as api, RunCommand};
 
 use crate::keymap::{Overrides, app_key_bindings, bind_commands};
-use crate::{CloseSettingsWindow, DismissWorkspace, SidebarOpen, workspace_commands};
+use crate::{DismissWorkspace, SidebarOpen, workspace_commands};
 
 fn keymap() -> Keymap {
     let bindings = TestAppContext::single().update(|cx| {
@@ -121,25 +121,6 @@ fn session_and_split_chords_carry_their_commands() {
     );
 }
 
-/// 设置和退出在设置窗口里也能按，设置窗口把命令转给主窗口。
-#[test]
-fn app_chords_also_work_in_the_settings_window() {
-    for stack in [&["Workspace", "Terminal"][..], &["SettingsWindow"][..]] {
-        assert_eq!(
-            first_command("cmd-q", stack).as_deref(),
-            Some("smelt.app/quit")
-        );
-        assert_eq!(
-            first_command("cmd-,", stack).as_deref(),
-            Some("smelt.app/settings")
-        );
-    }
-    assert!(
-        matched("cmd-k", &["SettingsWindow"]).is_empty(),
-        "工作台的键不该在设置窗口里命中"
-    );
-}
-
 #[test]
 fn workspace_chords_are_not_bound_at_the_root_context() {
     for spec in [
@@ -160,20 +141,4 @@ fn workspace_chords_are_not_bound_at_the_root_context() {
         let (bindings, _) = keymap().bindings_for_input(&[stroke(spec)], &contexts(&["Terminal"]));
         assert!(bindings.is_empty(), "{spec} 不该在没有 Workspace 时命中");
     }
-}
-
-/// 与 `app_key_bindings` 里关设置窗口的键一致。`Keystroke::parse` 不接受 `secondary-`。
-#[cfg(target_os = "macos")]
-const CLOSE_SETTINGS_CHORD: &str = "cmd-w";
-#[cfg(not(target_os = "macos"))]
-const CLOSE_SETTINGS_CHORD: &str = "ctrl-w";
-
-/// 设置窗口 Cmd+W（Windows / Linux 是 Ctrl+W）关窗；它是普通窗口，Esc 不关它。
-#[test]
-fn settings_window_closes_on_secondary_w_but_not_escape() {
-    assert!(first_is::<CloseSettingsWindow>(
-        CLOSE_SETTINGS_CHORD,
-        &["SettingsWindow"]
-    ));
-    assert!(matched("escape", &["SettingsWindow"]).is_empty());
 }

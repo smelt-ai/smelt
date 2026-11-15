@@ -63,6 +63,42 @@ pub(crate) fn card(surface: Hsla) -> Div {
         .bg(surface)
 }
 
+/// 侧栏透出的比例：浅色底亮，模糊过的桌面压得住，透得多一点；深色底上桌面的亮色更跳，
+/// 透得少一点。
+const SIDEBAR_GLASS_ALPHA_LIGHT: f32 = 0.72;
+const SIDEBAR_GLASS_ALPHA_DARK: f32 = 0.80;
+
+/// 窗口有没有玻璃可透：macOS 上整窗背后是系统的模糊（`Appearance::window_bg` 的
+/// `Blurred`）。别的平台的 `Blurred` 靠不住（Linux 看合成器，可能只是透明不模糊），
+/// 一律当没有。
+const fn window_has_glass() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// 窗口的底。有玻璃时不铺，侧栏才透得出去；舞台和别的面板各自铺实色。
+pub(crate) fn window_surface() -> Hsla {
+    if window_has_glass() {
+        transparent_black()
+    } else {
+        rgb(crate::ui_theme::bg()).into()
+    }
+}
+
+/// 会话列表那一栏的底：有玻璃时是半透明的 `side`，透出窗口背后的模糊；没有时是实色。
+/// 色板里的 `side` 仍是实色，`soft` 这些照旧压在它上面取实色。
+pub(crate) fn sidebar_surface() -> Hsla {
+    let side: Hsla = rgb(crate::ui_theme::side()).into();
+    if !window_has_glass() {
+        return side;
+    }
+    let alpha = if crate::ui_theme::is_light() {
+        SIDEBAR_GLASS_ALPHA_LIGHT
+    } else {
+        SIDEBAR_GLASS_ALPHA_DARK
+    };
+    side.opacity(alpha)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TitlebarMouseAction {
     MoveWindow,
@@ -125,12 +161,13 @@ pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div 
 /// `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐，标题和按钮放在这条下面，
 /// 左侧再让出给的宽度；在标签条下面（`None`）时顶上那条归标签条，这里只留常规内边距。
 /// 底边是发丝。按钮自己拦住点击。
-pub(crate) fn page_chrome(left_guard: Option<Pixels>) -> Div {
+pub(crate) fn page_chrome(left_guard: Option<Pixels>, right_inset: Pixels) -> Div {
     let header = div()
         .w_full()
         .flex_shrink_0()
         .pb(px(8.))
-        .px(px(20.))
+        .pl(px(20.))
+        .pr(right_inset + px(20.))
         .border_b_1()
         .border_color(crate::ui_theme::hair())
         .flex()

@@ -37,6 +37,7 @@ mod command;
 mod context;
 mod file;
 mod layout;
+mod page;
 pub mod sessions;
 mod settings;
 mod view;
@@ -54,14 +55,15 @@ pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
     register_layouts, unregister_layouts,
 };
-pub use settings::{
-    SettingsGroup, SettingsPage, SettingsPageBuilder, SettingsPageSpec, register_settings_pages,
-    settings_page, settings_pages, settings_pane, unregister_settings_pages,
+pub use page::{
+    OPEN_PAGE, OUTLET_VIEW, OpenPage, PageInfo, PageSource, home_page, page, pages, register_pages,
+    unregister_pages,
 };
+pub use settings::{SettingsEntry, SettingsGroup, settings_pane};
 pub use view::{
-    OPEN_VIEW, OpenView, PluginView, RESERVED_VIEW_IDS, SET_VIEW_BADGE, ViewBadge, ViewBuilder,
-    ViewHandle, ViewSpec, built_view, ensure_view, is_registered, register_view, set_view_badge,
-    unregister_view, view_badge, views,
+    OPEN_VIEW, OpenView, PluginView, SET_VIEW_BADGE, ViewBadge, ViewBuilder, ViewHandle, ViewInfo,
+    ViewSpec, built_view, ensure_view, is_registered, register_views, set_view_badge,
+    unregister_views, view, view_badge, views,
 };
 
 /// 桌面挂着的一台机器。
@@ -384,10 +386,10 @@ pub enum HostEvent {
     NotificationPermissionChanged,
     /// 某台机器的智能体配置变了（读 [`Host::agent_settings`]）。
     AgentSettingsChanged,
-    /// 看得见的视图变了：有的露出来、有的被挡住或收起，设置窗口换了页、开了或关了（读
+    /// 看得见的视图变了：有的露出来、有的被挡住或收起，设置换了页、开了或关了（读
     /// [`Host::view_shown`]）。
     ShownViewsChanged,
-    /// 视图登记变了：加了、替换了或撤下了（见 [`register_view`]）。
+    /// 视图登记变了：加了、替换了或撤下了，设置页也算（见 [`register_views`]）。
     ViewsChanged,
     /// 有视图的角标变了（读 [`view_badge`]）。
     ViewBadgesChanged,
@@ -395,10 +397,10 @@ pub enum HostEvent {
     ThemesChanged,
     /// 布局登记变了（见 [`register_layouts`]）：选的布局可能刚登记上或撤下了。
     LayoutsChanged,
+    /// 页登记变了（见 [`register_pages`]）：首页可能换了，正开着的页可能撤下了。
+    PagesChanged,
     /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
     CommandsChanged,
-    /// 设置页登记变了（见 [`register_settings_pages`]）：设置侧栏要跟着变。
-    SettingsPagesChanged,
 }
 
 /// 一条运行时话题推来的东西。载荷的形状见协议里那个话题的类型。
@@ -436,7 +438,7 @@ pub trait Host: 'static {
     /// [`HostEvent::AgentSettingsChanged`]。
     fn agent_settings_error(&self, machine: &RuntimeKey, cx: &App) -> Option<String>;
     /// 那个视图此刻看得见：摆在布局里且所在组显示着它，或在舞台上开成了当前页；设置页
-    /// （`<来源>/<名字>`，见 [`register_settings_pages`]）是设置窗口开着、停在这一页。视图
+    /// 是设置开着、停在这一页。视图
     /// 被挡住、切走后还活着，要靠它知道自己露没露着，看不见时不做只为显示的事（采样、刷新）。
     /// 变了发 [`HostEvent::ShownViewsChanged`]。
     fn view_shown(&self, id: &str, cx: &App) -> bool;

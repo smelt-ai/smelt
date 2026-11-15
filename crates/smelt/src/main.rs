@@ -25,6 +25,7 @@ mod desktop_view;
 mod dir_picker;
 mod dock;
 mod host_dialog;
+mod host_views;
 mod ide;
 mod keymap;
 mod liquid_glass;
@@ -34,6 +35,7 @@ mod plugin_host;
 mod plugins;
 mod project_repositories;
 mod provider_quota;
+mod router;
 mod runtime_call;
 mod runtime_events;
 mod runtime_space;
@@ -56,7 +58,6 @@ mod workspace_commands;
 mod workspace_directory;
 mod workspace_frame;
 mod workspace_layout;
-mod workspace_nav;
 mod workspace_palette;
 mod workspace_persist;
 mod workspace_prepare;
@@ -66,7 +67,6 @@ mod workspace_update;
 mod workspace_view;
 
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
-pub(crate) use workspace_nav::{WorkspaceNav, WorkspaceRoute};
 pub(crate) use workspace_persist::load_workspace_ui;
 #[cfg(test)]
 pub(crate) use workspace_persist::persisted_active_position;
@@ -151,13 +151,6 @@ struct DaemonStatesSubscription {
 
 impl Global for DaemonStatesSubscription {}
 
-/// 主窗口关闭时关掉设置窗口。订阅必须由 app 持有，否则初始化闭包返回就取消了。
-struct MainWindowClosedSubscription {
-    _subscription: Subscription,
-}
-
-impl Global for MainWindowClosedSubscription {}
-
 /// 各运行时推来的工作区目录，等 Workspace 认领。唯一的 daemon 订阅循环写入：首帧整份
 /// 替换，之后的推送只收版本更新的（库换过的算新的，见 `WorkspaceRevision::supersedes`）。Workspace 观察它，认领后交给各自的运行时空间对账。
 #[derive(Default)]
@@ -201,7 +194,6 @@ gpui::actions!(
         SidebarExpand,
         SidebarOpen,
         SidebarExit,
-        CloseSettingsWindow,
     ]
 );
 
@@ -228,8 +220,8 @@ fn unix_now_secs() -> u64 {
         .unwrap_or_default()
 }
 
-/// 当前主工作台。窗口在不在只看 `window`：设置窗口强持有同一份 `Workspace`，
-/// 主窗口关掉之后 `workspace` 仍能 `upgrade`。
+/// 当前主工作台。窗口在不在只看 `window`：主窗口关掉之后，别处（还没跑完的任务）可能
+/// 还握着 `Workspace`，它仍能 `upgrade`。
 #[derive(Clone)]
 struct MainWindow {
     window: WindowHandle<Root>,
@@ -246,28 +238,7 @@ fn window_handle_is_open<V: 'static + Render>(window: &WindowHandle<V>, cx: &mut
     window.is_active(cx).is_some()
 }
 
-fn close_settings_window(cx: &mut App) {
-    let Some(handle) = cx
-        .try_global::<settings::SettingsWindowHandle>()
-        .map(|handle| handle.0)
-    else {
-        return;
-    };
-    let _ = handle.update(cx, |_, window, _| window.remove_window());
-}
-
-fn close_settings_if_main_window_closed(
-    main_id: Option<WindowId>,
-    closed_id: WindowId,
-    cx: &mut App,
-) {
-    if main_id == Some(closed_id) {
-        close_settings_window(cx);
-    }
-}
-
-/// 主窗口还在就原样返回。已经关掉时，先关掉仍绑着旧 Workspace 的设置窗口，再开一扇。
-/// 设置窗口若留着，新窗口会从磁盘装出第二份 Workspace，设置页仍改着旧的那份。
+/// 主窗口还在就原样返回，已经关掉就再开一扇。
 /// 不要在主窗口自己的 update 里调用：窗口被借用时 `is_active` 也是 `None`。
 fn ensure_main_window(current: &Rc<RefCell<Option<MainWindow>>>, cx: &mut App) -> MainWindow {
     let existing = current.borrow().clone();
@@ -276,7 +247,6 @@ fn ensure_main_window(current: &Rc<RefCell<Option<MainWindow>>>, cx: &mut App) -
     {
         return main;
     }
-    close_settings_window(cx);
     let window_bg = cx
         .try_global::<Appearance>()
         .map(|appearance| appearance.window_bg())
@@ -1208,47 +1178,8 @@ fn should_auto_resume_active_acp(sessions_restored: bool) -> bool {
     sessions_restored
 }
 
-/// 路由停在「对话」上却对不上哪一段对话，得纠正。
-///
-/// 看哪段对话不落盘，冷启动恢复出来的「对话」路由没有对象，要等会话恢复完按当前会话
-/// 补上；看着的那段被别处移走了也是一样。会话还没恢复完时不动：存档下标还没对上。
-fn conversation_route_needs_target(
-    sessions_restored: bool,
-    route: &WorkspaceRoute,
-    conversation_found: bool,
-) -> bool {
-    sessions_restored && matches!(route, WorkspaceRoute::Conversation) && !conversation_found
-}
-
-/// 智能体对话占着项目舞台是不一致状态，必须纠正。
-///
-/// 项目舞台画的是 `sessions[active_session]`，而智能体对话不属于项目会话列表；
-/// 让它落在这条路由上会把工作台对话渲染进项目舞台。
-fn agent_conversation_occupies_project_stage(
-    route: &WorkspaceRoute,
-    active_is_agent_conversation: bool,
-) -> bool {
-    active_is_agent_conversation && matches!(route, WorkspaceRoute::Session)
-}
-
-fn route_views_session(route: &WorkspaceRoute, conversation_sid: Option<&str>) -> bool {
-    route.is_session()
-        || (matches!(route, WorkspaceRoute::Conversation) && conversation_sid.is_some())
-}
-
 fn should_defer_notification_session_jump(sessions_restored: bool, target_found: bool) -> bool {
     !sessions_restored && !target_found
-}
-
-/// 恢复完成前 `active_session` 仍是存档下标，ACP 先插入时会对到别人。
-/// 不能在窗口期按这个下标把舞台拽去「对话」。
-fn should_correct_agent_conversation_on_project_stage(
-    sessions_restored: bool,
-    route: &WorkspaceRoute,
-    active_is_agent_conversation: bool,
-) -> bool {
-    sessions_restored
-        && agent_conversation_occupies_project_stage(route, active_is_agent_conversation)
 }
 
 /// 新会话 id（uuid v4）：GUI 与 smeltd 之间的持久身份。
@@ -1406,8 +1337,6 @@ struct Workspace {
         HashMap<workspace_persist::ConversationKey, workspace_persist::SavedConversationUi>,
     /// 客户端库里记着的各运行时侧栏顺序。运行时的第一份目录到了，按它排项目和会话。
     saved_sidebar_orders: HashMap<RuntimeKey, smelt_client_store::SidebarOrderRecord>,
-    /// 一级入口：对话 / 插件页面 / 远程桌面 / 会话。
-    nav: WorkspaceNav,
     /// 当前 Workspace 热字段属于哪个 session。每帧渲染前与 active session 对齐，
     /// 因而所有切换入口（点击、快捷键、任务跳转、恢复）都走同一套快照交换。
     ui_session_id: Option<u64>,
@@ -1424,20 +1353,18 @@ struct Workspace {
         std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
     /// 正在拖的分隔条：(起点 y, 上方分段起始像素高度, 下方分段起始像素高度, 两者权重之和)。
     pub(crate) sidebar_split_drag: Option<(f32, f32, f32, f32)>,
-    /// 整个工作台：一块 Dock，会话列表、舞台、文件这些都是里面的面板（见 `workspace_shell`）。
-    shell_dock: Entity<gpui_component::dock::DockArea>,
-    /// Dock 摆着什么、看得见什么的快照。Dock 一变就重算，render 只读它。
+    /// 主窗口开过的页，每页一块 Dock，视图都是里面的面板（见 `workspace_layout`、
+    /// `workspace_shell`）。开着的那页总在里面。
+    pages: Vec<workspace_layout::PageDock>,
+    /// 主窗口的路由：开着哪页、来路、各页出口里放着什么（见 `router`）。
+    router: router::Router,
+    /// 上次退出时首页出口里放着的视图。视图登记好、进首页时放回去（见 `open_home_page`）。
+    startup_outlet: Option<String>,
+    /// 开着的那页摆着什么、看得见什么的快照。Dock 一变、换页就重算，render 只读它。
     pub(crate) shell_view: workspace_shell::ShellView,
-    /// 装着的布局，存档按它的 id 记。
-    layout: workspace_layout::InstalledLayout,
-    /// 上次写进库的布局存档原文。一样就不再写。
-    layout_state_written: Option<String>,
-    _shell_dock_subs: Vec<Subscription>,
+    _layout_choice_sub: Option<Subscription>,
     /// 关闭前的二次确认弹窗。Some = 弹窗开着。
     close_confirm: Option<CloseConfirm>,
-    /// 远程桌面页正在看的那台运行时（`WorkspaceRoute::Desktop`）。离开这一页就丢掉，
-    /// 网页视图和连接随之关掉，不在后台推画面。
-    desktop: Option<Entity<desktop_view::DesktopView>>,
     /// 已打开的项目根目录（有序，就是侧栏分组的骨架）。项目是**独立于会话**的实体：
     /// 活动项目的 **root 路径**（不是显示名——同名目录是两个项目，见 ProjectGroup）：
     /// 会话列表里高亮哪一组、顶栏显示谁、「+对话/+终端」新建到哪个 cwd。None 或该组
@@ -1547,7 +1474,7 @@ struct Workspace {
     /// 上次移动失败的原因，确认框和设置页都显示。
     #[cfg(target_os = "macos")]
     move_app_error: Option<SharedString>,
-    /// 设置窗口打开时要停在哪一页（对应左侧子菜单的独立内容页）。
+    /// 设置停在哪一页（对应左侧子菜单的独立内容页）。
     settings_section: settings::SettingsSection,
     /// 每请求跳一次页就 +1，用来变更 `Settings` 元素的 id。
     ///
@@ -1562,7 +1489,7 @@ struct Workspace {
     ///
     /// `all_font_names()` 在 mac 上枚举的是全部字体 face 的 descriptor（本机 902 个），
     /// 再逐个 CopyAttribute 取 family name，实测约 50ms/次——远超 60fps 的 16.6ms 预算。
-    /// 它原先直接写在 `render_settings_content` 里，设置窗口每帧都要重算一遍，下拉一
+    /// 它原先直接写在 `render_settings_content` 里，设置每帧都要重算一遍，下拉一
     /// 展开就肉眼可见掉帧。字体列表在进程生命周期内几乎不变，不值得每帧重扫。
     font_options: std::cell::OnceCell<std::sync::Arc<Vec<(SharedString, SharedString)>>>,
     /// 正在重命名的对象 + 弹窗里的文本框（None = 没在重命名）。见
@@ -1660,7 +1587,7 @@ struct Workspace {
     /// focus 显式认领到这个句柄上，保证 Workspace context 始终在 dispatch 路径上。
     focus_handle: FocusHandle,
     /// 开着的宿主对话框，按打开先后（见 `host_dialog`）。
-    host_dialogs: Vec<host_dialog::PresentedDialog>,
+    host_dialogs: Vec<host_dialog::HostDialog>,
     /// 主窗口关闭期间点击系统通知时，会话还在异步恢复。先保留稳定 sid，目标装回
     /// 列表后再消费，不能退化成只打开一扇空窗口。
     pending_notification_session_id: Option<String>,
@@ -1746,7 +1673,6 @@ impl Workspace {
                 .collect();
             space
         };
-        let shell_dock = workspace_shell::new_area(cx.weak_entity(), window, cx);
         let saved_active_session_id = ui.active_session_id.clone().filter(|id| !id.is_empty());
         let sessions: Vec<Session> = Vec::new();
         // 日志页三栏 resize（不落盘：日志是临时查看，没必要持久化）。
@@ -1754,24 +1680,22 @@ impl Workspace {
         let mut ws = Self {
             sessions,
             active_session: 0,
-            nav: WorkspaceNav::from_persisted(ui.route.clone()),
             ui_session_id: None,
             acp_image_preview: None,
             sidebar_section_heights: Default::default(),
             sidebar_section_weights: Default::default(),
             sidebar_split_drag: None,
-            shell_dock,
+            pages: Vec::new(),
+            router: Default::default(),
+            startup_outlet: ui.outlet.clone(),
             shell_view: Default::default(),
-            layout: Default::default(),
-            layout_state_written: None,
-            _shell_dock_subs: Vec::new(),
+            _layout_choice_sub: None,
             pending_notification_session_id: None,
             pending_conversation_wakes: Vec::new(),
             startup_active_session,
             ws_snapshot_epoch: 0,
             ws_snapshot_finalizing: false,
             close_confirm: None,
-            desktop: None,
             spaces: {
                 let mut spaces = vec![space_with_ui(crate::runtimes::Runtime::local())];
                 if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
@@ -1924,6 +1848,7 @@ impl Workspace {
         // 自带视图和插件登记在同一张视图注册表里，布局按 id 摆它们。先登记再订阅：
         // 这几次登记不用重装布局，布局本来就还没装。
         builtin_views::register(cx.weak_entity(), cx);
+        host_views::register(cx.weak_entity(), cx);
         ws._host_events_sub = Some(ws.subscribe_host_events(window, cx));
         // 对话框和遮罩层的开关散在各处（确认框、命令面板、大图预览），开关时都会通知工作台。
         ws._overlay_sub = Some(cx.observe_self(|this, cx| {
@@ -1931,13 +1856,14 @@ impl Workspace {
             this.note_overlay(cx);
         }));
         // 主窗口关了，工作台里的视图就都看不见了。
-        cx.on_release(|_, cx| plugin_host::set_workbench_shown(HashSet::new(), cx))
+        cx.on_release(|_, cx| plugin_host::set_window_shown(HashSet::new(), cx))
             .detach();
-        ws._shell_dock_subs = workspace_layout::watch_shell_dock(&ws.shell_dock, window, cx);
+        // 进首页之前先有一页空的，render 总有 Dock 可画。
+        ws.pages.push(Self::new_page_dock(None, window, cx));
+        ws._layout_choice_sub = Some(Self::watch_layout_choice(window, cx));
         // 装布局要用 `cx.entity()` 背后的工作台（自带视图画它），等它建好。
         cx.defer_in(window, |this, window, cx| {
-            this.install_layout(window, cx);
-            this.sync_page_route(window, cx);
+            this.open_home_page(window, cx);
         });
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
@@ -2177,8 +2103,8 @@ impl Render for Workspace {
         self.prepare_frame(window, cx);
 
         // 主题色 token（跟随 gpui-component 主题，替代硬编码）
-        // 内容区按 Grok Bot 画不透明实底。顶部导航的系统玻璃是窗口铬，不往分栏上叠透明度。
-        let shell_surface: Hsla = rgb(ui_theme::bg()).into();
+        // 有玻璃时窗口本身不铺底：会话列表透出窗口背后的模糊，舞台和别的面板各自铺实色。
+        let shell_surface = workspace_frame::window_surface();
         let shell_padding = ui_theme::shell_padding();
 
         // 壳层走界面字体（默认系统 UI）；终端/diff/代码块各自绑代码字体。
@@ -2215,7 +2141,7 @@ impl Render for Workspace {
                 }
                 cx.propagate();
             }))
-            // 整个工作台是一块 Dock，会话列表、舞台、文件这些都是里面的面板。
+            // 开着的那页是一块 Dock，会话列表、舞台、文件、设置这些都是里面的面板。
             .child(
                 div()
                     .relative()
@@ -2224,7 +2150,7 @@ impl Render for Workspace {
                     .flex()
                     .p(shell_padding)
                     .bg(shell_surface)
-                    .child(self.shell_dock.clone())
+                    .child(self.shell_dock().clone())
                     .children(self.render_dock_toggles(shell_padding, window)),
             )
             // 确认框、命令面板和图片预览都留在当前 Workspace 的 GPUI 树内。
@@ -2388,7 +2314,7 @@ fn open_workspace_window(cx: &mut App, window_bg: WindowBackgroundAppearance) ->
             window.set_rem_size(px(ui_font_px as f32));
             let view = cx.new(|cx| Workspace::new(window, cx));
             workspace = Some(view.downgrade());
-            // Windows 上关掉主窗口就是退出（设置窗口跟着关，GPUI 随后退出），不走 Quit
+            // Windows 上关掉主窗口就是退出（GPUI 随后退出），不走 Quit
             // 动作。待装更新在窗口还在、Workspace 还活着的时候接上。
             #[cfg(windows)]
             {
@@ -2570,8 +2496,8 @@ fn main() {
     // （没有 GPUI 的 cx），一样经 channel 转发到下面 run() 里 drain。
     let (status_tx, status_rx) = smol::channel::unbounded::<status_item::StatusItemEvent>();
 
-    // 当前主窗口。窗口在不在看 WindowHandle，不看 Workspace 弱句柄：设置窗口强持有
-    // 那份实体，主窗口关掉后 upgrade 仍然成功。
+    // 当前主窗口。窗口在不在看 WindowHandle，不看 Workspace 弱句柄：主窗口关掉后，
+    // 还没跑完的任务可能还握着那份实体，upgrade 仍然成功。
     // on_reopen 得在 run() 之前挂在 Application builder 上（跟 on_open_urls 一样），
     // 但它触发时 run() 早已跑起来，Rc 到时候已经被 run() 里的首启逻辑填过了。
     let current_ws: Rc<RefCell<Option<MainWindow>>> = Rc::new(RefCell::new(None));
@@ -2909,20 +2835,6 @@ fn main() {
         // 首启主窗口，记入 current_ws（reopen 回调 / URL 投递循环都靠它判断当前主窗口）。
         *current_ws.borrow_mut() = Some(open_workspace_window(cx, window_bg));
 
-        // 主窗口关掉后，设置窗口不能继续强持有那份 Workspace。回调发生时窗口已经不在，
-        // 只能比 window id。订阅必须由 app global 持有，否则初始化闭包返回就取消了。
-        let current_ws_closed = current_ws.clone();
-        let main_window_closed = cx.on_window_closed(move |cx, closed_id| {
-            let main_id = current_ws_closed
-                .borrow()
-                .as_ref()
-                .map(|main| main.window.window_id());
-            close_settings_if_main_window_closed(main_id, closed_id, cx);
-        });
-        cx.set_global(MainWindowClosedSubscription {
-            _subscription: main_window_closed,
-        });
-
         // 退出前尽量提交最后一次 workspace 文档。订阅必须由 app global 持有，否则
         // app.run 的初始化闭包返回时会被 Subscription::drop 自动取消。
         let current_ws_quit = current_ws.clone();
@@ -2951,7 +2863,7 @@ fn main() {
         });
 
         // 消费 Dock / Finder 投递的目录：每个开一个项目（文件取父目录）。循环常驻到应用退出。
-        // 主窗口没了就先关掉设置窗口再重开，避免把路径写进用户看不见的那份 Workspace。
+        // 主窗口没了就重开，避免把路径写进用户看不见的那份 Workspace。
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_rx.recv().await {
                 let internal_files: Vec<InternalFileLink> = urls
