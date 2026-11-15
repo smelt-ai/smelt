@@ -32,7 +32,7 @@ impl Default for TerminalThemeSnapshot {
         Self {
             version: TERMINAL_THEME_VERSION,
             dark: true,
-            background: 0x0a0a0a,
+            background: 0x1e1e1d,
             foreground: 0xd8d8d8,
             cursor: 0xd8d8d8,
             selection: 0x0c3d7a,
