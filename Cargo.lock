@@ -11373,6 +11373,7 @@ version = "0.0.0"
 dependencies = [
  "gpui-base",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-apple",
  "hex",
