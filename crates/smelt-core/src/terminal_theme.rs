@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn wire_uses_hex_strings_and_full_palette() {
         let wire = TerminalThemeSnapshot::default().to_wire();
-        assert_eq!(wire["background"], "#0a0a0a");
+        assert_eq!(wire["background"], "#1e1e1d");
         assert_eq!(wire["foreground"], "#d8d8d8");
         assert_eq!(wire["palette"].as_array().unwrap().len(), 16);
         assert_eq!(wire["palette"][0], "#15161e");
