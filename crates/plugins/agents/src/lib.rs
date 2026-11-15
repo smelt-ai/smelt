@@ -30,7 +30,6 @@ use api::ui::truncated_line::truncated_line;
 use api::ui::{Button, ListRow, ui_theme};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::WindowExt as _;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::switch::Switch;

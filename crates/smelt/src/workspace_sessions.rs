@@ -2535,14 +2535,15 @@ impl Workspace {
             }
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current.clone()));
-        // 先记下打开前的焦点，再把焦点交给输入框。顺序反了，关掉时会把输入框当成返回点。
-        self.begin_main_modal_focus(window, cx);
-        // 名字整段选中：直接打字就是换掉，按方向键才是在原名上改。
-        input.update(cx, |s, cx| {
-            s.focus(window, cx);
-            s.select_all(window, cx);
-        });
         let inline = target.is_inline();
+        // 弹窗里的输入框等对话框开好再聚焦（见 `host_dialog`），不然关掉时焦点会回到它。
+        if inline {
+            // 名字整段选中：直接打字就是换掉，按方向键才是在原名上改。
+            input.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.select_all(window, cx);
+            });
+        }
         self._rename_sub = Some(cx.subscribe_in(
             &input,
             window,
@@ -2733,8 +2734,7 @@ impl Workspace {
                 .placeholder("留空用 n0 的公共 relay")
                 .default_value(current)
         });
-        self.begin_main_modal_focus(window, cx);
-        input.update(cx, |s, cx| s.focus(window, cx));
+        // 输入框等对话框开好再聚焦，见 `host_dialog`。
         let sub = cx.subscribe_in(&input, window, |this, _input, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
                 this.confirm_relay_edit(cx);

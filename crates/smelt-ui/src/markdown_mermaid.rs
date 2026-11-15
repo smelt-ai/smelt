@@ -617,7 +617,7 @@ fn open_mermaid_preview(image: Arc<MermaidImage>, window: &mut Window, cx: &mut 
         // 对话框会把宽高夹在窗口减去边距以内，这里只表达「尽量大」，不替它算边距。
         let viewport = window.viewport_size();
         let preview = preview.clone();
-        dialog
+        crate::dialog::present(dialog)
             .title("Mermaid 图表")
             .width(viewport.width)
             .h(viewport.height)

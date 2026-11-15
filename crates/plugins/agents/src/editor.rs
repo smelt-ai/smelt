@@ -726,21 +726,15 @@ impl AgentsPage {
         );
         let page = cx.entity();
         let target = Rc::new(RefCell::new(Some(target)));
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let page = page.clone();
-            let target = target.clone();
-            alert
-                .confirm()
-                .title("确定删除这条记忆吗？")
-                .child(message.clone())
-                .ok_text("确定删除")
-                .on_ok(move |_, _, cx| {
-                    if let Some(target) = target.borrow_mut().take() {
-                        page.update(cx, |page, cx| page.delete_agent_memory(target, cx));
-                    }
-                    true
-                })
-        });
+        api::ui::dialog::Confirm::new("确定删除这条记忆吗？", "删除", move |_, cx| {
+            if let Some(target) = target.borrow_mut().take() {
+                page.update(cx, |page, cx| page.delete_agent_memory(target, cx));
+            }
+            true
+        })
+        .danger()
+        .description(message)
+        .open(window, cx);
     }
 
     fn delete_agent_memory(&mut self, target: MemoryDeleteTarget, cx: &mut Context<Self>) {
@@ -942,20 +936,18 @@ impl AgentsPage {
         };
         let message = format!("将删除智能体「{name}」和它的指令、插件设置。{kept}此操作不可撤销。");
         let page = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let page = page.clone();
-            let agent = agent.clone();
-            alert
-                .confirm()
-                .title("确定删除这个智能体吗？")
-                .child(message.clone())
-                .ok_text("确定删除")
-                .on_ok(move |_, _, cx| {
-                    let agent = agent.clone();
-                    page.update(cx, |page, cx| page.delete_agent(agent, cx));
-                    true
-                })
-        });
+        api::ui::dialog::Confirm::new(
+            "确定删除这个智能体吗？",
+            "删除",
+            move |_, cx| {
+                let agent = agent.clone();
+                page.update(cx, |page, cx| page.delete_agent(agent, cx));
+                true
+            },
+        )
+        .danger()
+        .description(message)
+        .open(window, cx);
     }
 
     /// 自动化库还没读到、读不出来，或还有自动化挂着它时，不能删。引用它的自动化只可能在

@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::dialog::Dialog;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 use smelt_runtime_client::protocol::workspace::{
@@ -191,12 +192,13 @@ impl Workspace {
         cx.notify();
     }
 
-    fn dir_picker_confirm(&mut self, cx: &mut Context<Self>) {
+    /// 确认按钮和对话框里的 Enter 都走这里。还在读下一层时列表是上一层的，不能确认。
+    pub(crate) fn dir_picker_confirm(&mut self, cx: &mut Context<Self>) {
         let Some(picker) = self.dir_picker.take() else {
             return;
         };
         let current = match &picker.listing {
-            Some(Ok(listing)) => listing.path.clone(),
+            Some(Ok(listing)) if !picker.loading => listing.path.clone(),
             _ => {
                 self.dir_picker = Some(picker);
                 return;
@@ -237,9 +239,9 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn render_dir_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_dir_picker(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
         let Some(picker) = self.dir_picker.as_ref() else {
-            return div().into_any_element();
+            return dialog;
         };
         let (fg, muted, border) = {
             let theme = cx.theme();
@@ -388,19 +390,16 @@ impl Workspace {
             (DirPickerPurpose::OpenProject, _) => "打开当前目录".into(),
             (DirPickerPurpose::ProjectRepository { .. }, _) => "选择当前仓库目录".into(),
         };
-        let content = v_flex()
-            .child(Self::modal_title(
-                fg,
-                if picker.runtime.is_local() {
-                    picker.purpose.title().to_string()
-                } else {
-                    format!(
-                        "{}（{}）",
-                        picker.purpose.title(),
-                        crate::runtimes::runtime_name(picker.runtime.key(), cx)
-                    )
-                },
-            ))
+        let title = if picker.runtime.is_local() {
+            picker.purpose.title().to_string()
+        } else {
+            format!(
+                "{}（{}）",
+                picker.purpose.title(),
+                crate::runtimes::runtime_name(picker.runtime.key(), cx)
+            )
+        };
+        let content = smelt_ui::dialog::content(title, None)
             .child(toolbar)
             .child(body)
             .when(multiple && !picker.selected.is_empty(), |content| {
@@ -410,28 +409,24 @@ impl Workspace {
                         .text_color(muted)
                         .child(format!("已选 {} 个目录", picker.selected.len())),
                 )
-            })
+            });
+        let footer = smelt_ui::dialog::footer()
+            .child(Self::modal_cancel_button(
+                "cancel-dir-picker",
+                "取消",
+                |this, _, _, cx| this.cancel_dir_picker(cx),
+                cx,
+            ))
             .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_cancel_button(
-                        "cancel-dir-picker",
-                        "取消",
-                        |this, _, _, cx| this.cancel_dir_picker(cx),
-                        cx,
-                    ))
-                    .child(
-                        Self::modal_primary_button(
-                            "confirm-dir-picker",
-                            confirm_label,
-                            |this, _, _, cx| this.dir_picker_confirm(cx),
-                            cx,
-                        )
-                        .disabled(current.is_none() || picker.loading),
-                    ),
+                Self::modal_primary_button(
+                    "confirm-dir-picker",
+                    confirm_label,
+                    |this, _, _, cx| this.dir_picker_confirm(cx),
+                    cx,
+                )
+                .disabled(current.is_none() || picker.loading),
             );
-        self.modal_shell(520., content, crate::overlay::ModalLayer::DirPicker, cx)
+        dialog.w(px(520.)).child(content).footer(footer)
     }
 }
 

@@ -11,7 +11,6 @@ pub(crate) use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 pub(crate) use gpui_component::tab::{Tab, TabBar};
 pub(crate) use gpui_component::{
     ActiveTheme as _, FocusableExt as _, Icon, IconName, Sizable as _, StyledExt as _,
-    WindowExt as _,
 };
 pub(crate) use smelt_plugin_api::{self as api, RuntimeKey};
 

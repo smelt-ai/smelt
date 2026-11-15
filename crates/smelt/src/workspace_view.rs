@@ -1,9 +1,11 @@
-//! 工作台页面：分屏、确认弹窗、舞台覆盖页。
+//! 宿主对话框的内容：关闭确认、会话管理、退出、改名、中继、重启确认。
 //!
-//! 只组 UI。打开/关闭项目、升级守护、改名等写状态的方法留在 main.rs。
+//! 只组 UI，什么时候开关见 `host_dialog`。打开/关闭项目、升级守护、改名等写状态的方法
+//! 不在这里。
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::dialog::Dialog;
 use gpui_component::input::Input;
 use gpui_component::*;
 use smelt_ui::truncated_line::truncated_line;
@@ -19,15 +21,26 @@ enum ModalRole {
     Danger,
 }
 
+/// 退出确认要说的话。普通退出仍保留后台守护；待装更新的退出会停掉守护。
+struct QuitPrompt {
+    title: SharedString,
+    body: SharedString,
+    confirm: SharedString,
+    /// 停守护会打断进行中的会话：危险按钮，Enter 不执行。
+    danger: bool,
+    width: f32,
+}
+
 impl Workspace {
     fn render_restore_workset(
         &self,
+        dialog: Dialog,
         runtime: &crate::RuntimeKey,
         old_root: &str,
         pending: bool,
         error: Option<&str>,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Dialog {
         let style = crate::runtimes::path_style(runtime, cx);
         let project_root = style.parent(old_root).and_then(|path| style.parent(&path));
         let worksets = self
@@ -41,13 +54,14 @@ impl Workspace {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let mut content = v_flex()
-            .child(Self::modal_title(cx.theme().foreground, "原工作树已关闭"))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground)
-                .child(format!("原目录：{old_root}")))
-            .child(div().text_sm().child(
-                "请选择原项目的工作树。恢复后终端和智能体的工作目录将改为所选工作树根目录，工作树外已打开的文件及固定目录不会恢复；智能体能否续接取决于其服务商。"
-            ));
+        let muted = cx.theme().muted_foreground;
+        let mut content = smelt_ui::dialog::content(
+            "原工作树已关闭",
+            Some(format!("原目录：{old_root}").into()),
+        )
+        .child(div().text_sm().child(
+            "请选择原项目的工作树。恢复后终端和智能体的工作目录将改为所选工作树根目录，工作树外已打开的文件及固定目录不会恢复；智能体能否续接取决于其服务商。"
+        ));
         if worksets.is_empty() {
             content = content.child(div().text_sm().child("没有可用工作树，请先新建。"));
         }
@@ -82,67 +96,63 @@ impl Workspace {
                     .child(message.to_string()),
             );
         }
-        let runtime = runtime.clone();
-        content = content.child(
-            h_flex()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Self::modal_cancel_button(
-                        "restore-workset-cancel",
-                        "取消",
-                        |this, _, _, cx| this.cancel_close_confirm(cx),
-                        cx,
-                    )
-                    .disabled(pending),
-                )
-                .child(
-                    Self::modal_secondary_button(
-                        "restore-workset-create",
-                        "新建工作树…",
-                        move |this, _, window, cx| {
-                            let Some(root) = project_root.clone() else {
-                                if let Some(CloseConfirm::RestoreWorkset { error, .. }) =
-                                    &mut this.close_confirm
-                                {
-                                    *error = Some("无法识别原项目目录".into());
-                                }
-                                cx.notify();
-                                return;
-                            };
-                            let Some(target_runtime) =
-                                this.space(&runtime).map(|space| space.runtime.clone())
-                            else {
-                                if let Some(CloseConfirm::RestoreWorkset { error, .. }) =
-                                    &mut this.close_confirm
-                                {
-                                    *error = Some("运行时已断开，无法新建工作树".into());
-                                }
-                                cx.notify();
-                                return;
-                            };
-                            this.close_confirm = None;
-                            this.open_project_repositories(target_runtime, root, true, window, cx);
-                        },
-                        cx,
-                    )
-                    .disabled(pending),
-                ),
-        );
         content = content.child(
             div()
                 .text_xs()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(muted)
                 .child("新建完成后，请再次点击归档会话的恢复按钮。"),
         );
-        self.modal_shell(460., content, crate::overlay::ModalLayer::CloseConfirm, cx)
+        let runtime = runtime.clone();
+        let footer = smelt_ui::dialog::footer()
+            .child(
+                Self::modal_cancel_button(
+                    "restore-workset-cancel",
+                    "取消",
+                    |this, _, _, cx| this.cancel_close_confirm(cx),
+                    cx,
+                )
+                .disabled(pending),
+            )
+            .child(
+                Self::modal_secondary_button(
+                    "restore-workset-create",
+                    "新建工作树…",
+                    move |this, _, window, cx| {
+                        let Some(root) = project_root.clone() else {
+                            if let Some(CloseConfirm::RestoreWorkset { error, .. }) =
+                                &mut this.close_confirm
+                            {
+                                *error = Some("无法识别原项目目录".into());
+                            }
+                            cx.notify();
+                            return;
+                        };
+                        let Some(target_runtime) =
+                            this.space(&runtime).map(|space| space.runtime.clone())
+                        else {
+                            if let Some(CloseConfirm::RestoreWorkset { error, .. }) =
+                                &mut this.close_confirm
+                            {
+                                *error = Some("运行时已断开，无法新建工作树".into());
+                            }
+                            cx.notify();
+                            return;
+                        };
+                        this.close_confirm = None;
+                        this.open_project_repositories(target_runtime, root, true, window, cx);
+                    },
+                    cx,
+                )
+                .disabled(pending),
+            );
+        dialog.w(px(460.)).child(content).footer(footer)
     }
 
-    /// 关闭确认弹窗：关项目说清会连带关掉几个会话；关正在跑的会话说清这一轮会被终止。
+    /// 关闭确认：关项目说清会连带关掉几个会话；关正在跑的会话说清这一轮会被终止。
     /// 用危险配色。
-    pub(crate) fn render_close_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_close_confirm(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
         let Some(target) = self.close_confirm.clone() else {
-            return div().into_any_element();
+            return dialog;
         };
         if let CloseConfirm::RestoreWorkset {
             runtime,
@@ -152,12 +162,16 @@ impl Workspace {
             ..
         } = &target
         {
-            return self.render_restore_workset(runtime, old_root, *pending, error.as_deref(), cx);
+            return self.render_restore_workset(
+                dialog,
+                runtime,
+                old_root,
+                *pending,
+                error.as_deref(),
+                cx,
+            );
         }
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
+        let muted = cx.theme().muted_foreground;
         let (title, body, confirm_label) = match &target {
             CloseConfirm::Archive { title, .. } => (
                 "确定归档这个会话吗？",
@@ -217,9 +231,7 @@ impl Workspace {
             CloseConfirm::Workset { error, .. } => error.as_ref(),
             _ => None,
         };
-        let content = v_flex()
-            .child(Self::modal_title(fg, title))
-            .child(div().text_sm().text_color(muted).child(body))
+        let content = smelt_ui::dialog::content(title, Some(body.into()))
             .children(error.map(|error| {
                 div()
                     .text_sm()
@@ -231,40 +243,39 @@ impl Workspace {
                     .text_sm()
                     .text_color(muted)
                     .child("请处理问题后取消并重新打开此弹窗，再尝试关闭。")
-            }))
+            }));
+        let footer = smelt_ui::dialog::footer()
             .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(
-                        Self::modal_cancel_button(
-                            "cancel-close-confirm",
-                            "取消",
-                            |this, _, _, cx| this.cancel_close_confirm(cx),
-                            cx,
-                        )
-                        .disabled(pending),
-                    )
-                    .child(
-                        Self::modal_danger_button(
-                            "confirm-close-confirm",
-                            if pending {
-                                "关闭中…"
-                            } else {
-                                confirm_label
-                            },
-                            |this, _, window, cx| this.confirm_close(window, cx),
-                            cx,
-                        )
-                        .disabled(target.confirmation_blocked()),
-                    ),
+                Self::modal_cancel_button(
+                    "cancel-close-confirm",
+                    "取消",
+                    |this, _, _, cx| this.cancel_close_confirm(cx),
+                    cx,
+                )
+                .disabled(pending),
+            )
+            .child(
+                Self::modal_danger_button(
+                    "confirm-close-confirm",
+                    if pending {
+                        "关闭中…"
+                    } else {
+                        confirm_label
+                    },
+                    |this, _, window, cx| this.confirm_close(window, cx),
+                    cx,
+                )
+                .disabled(target.confirmation_blocked()),
             );
-        self.modal_shell(380., content, crate::overlay::ModalLayer::CloseConfirm, cx)
+        dialog
+            .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
+            .child(content)
+            .footer(footer)
     }
 
-    /// 「会话管理」弹窗：列出守护进程持有的全部会话，标出哪些是游离会话（没有任何
-    /// 侧栏在追踪），逐个/批量清理。入口和弹层都在设置窗口里。
-    pub(crate) fn render_session_manager(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// 「会话管理」：列出守护进程持有的全部会话，标出哪些是游离会话（没有任何
+    /// 侧栏在追踪），逐个/批量清理。入口和对话框都在设置窗口里。
+    pub(crate) fn render_session_manager(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
         let (fg, muted, border) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground, t.border)
@@ -381,107 +392,36 @@ impl Workspace {
             .map(|l| l.iter().any(|s| !tracked.contains(&s.id)))
             .unwrap_or(false);
 
-        let content = v_flex()
-            .child(Self::modal_title(fg, "会话管理"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("守护进程持有的全部会话；游离会话是没有被任何窗口侧栏追踪的（测试跑出来的、忘了关的临时会话），清理它们不影响正常使用中的会话。"),
-            )
-            .child(div().border_t_1().border_color(border).pt_3().child(body))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_cancel_button(
-                        "close-session-manager",
-                        "关闭",
-                        |this, _, _, cx| {
-                            this.session_manager_open = false;
-                            this.session_manager_tombstones.clear();
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .when(has_detached, |el| {
-                        el.child(Self::modal_danger_button(
-                            "kill-all-detached",
-                            "清理全部游离会话",
-                            |this, _, _, cx| {
-                                this.kill_all_detached_in_manager(cx);
-                            },
-                            cx,
-                        ))
-                    }),
-            );
-        self.modal_shell(
-            420.,
-            content,
-            crate::overlay::ModalLayer::SessionManager,
-            cx,
+        let content = smelt_ui::dialog::content(
+            "会话管理",
+            Some("守护进程持有的全部会话；游离会话是没有被任何窗口侧栏追踪的（测试跑出来的、忘了关的临时会话），清理它们不影响正常使用中的会话。".into()),
         )
+        .child(div().border_t_1().border_color(border).pt_3().child(body));
+        let footer = smelt_ui::dialog::footer()
+            .child(Self::modal_cancel_button(
+                "close-session-manager",
+                "关闭",
+                |this, _, _, cx| {
+                    this.session_manager_open = false;
+                    this.session_manager_tombstones.clear();
+                    cx.notify();
+                },
+                cx,
+            ))
+            .when(has_detached, |el| {
+                el.child(Self::modal_danger_button(
+                    "kill-all-detached",
+                    "清理全部游离会话",
+                    |this, _, _, cx| {
+                        this.kill_all_detached_in_manager(cx);
+                    },
+                    cx,
+                ))
+            });
+        dialog.w(px(520.)).child(content).footer(footer)
     }
 
-    /// 弹窗标题：半粗、跟正文同色阶，不要 `font_bold` + `text_lg` 喊出来。
-    pub(crate) fn modal_title(fg: Hsla, label: impl Into<SharedString>) -> Div {
-        div().font_semibold().text_color(fg).child(label.into())
-    }
-
-    /// 弹窗遮罩 + 居中卡片壳。沙色卡片和遮罩还是原来的；外壳换成
-    /// `gpui_base::Dialog`，只为了焦点陷阱。不走组件库那套 Dialog 皮肤。
-    ///
-    /// Esc 仍由 Workspace 捕获关掉。Dialog 的 Enter=Confirm 会无视当前按钮直接
-    /// 跑确定，危险操作不能这样，所以键盘上下文关掉。Tab 到按钮后，按钮自己的
-    /// Enter / Space 才生效。点遮罩不关闭。
-    pub(crate) fn modal_shell(
-        &self,
-        width: f32,
-        content: Div,
-        layer: crate::overlay::ModalLayer,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let card = content
-            .occlude()
-            .w(px(width))
-            .p_5()
-            .bg(gpui::rgb(ui_theme::surface()))
-            .border_1()
-            .border_color(ui_theme::overlay(0x22))
-            .rounded(ui_theme::card_radius())
-            .shadow_sm()
-            .gap_4();
-        // 底下那层若也是 Dialog，会和最上层共用 dialog-host 与焦点句柄，
-        // 后画的列表会盖住确认框。底下只留卡片，焦点陷阱只挂最上层。
-        if !self.modal_is_top(layer) {
-            return div()
-                .absolute()
-                .inset_0()
-                .bg(ui_theme::scrim())
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(card)
-                .into_any_element();
-        }
-        let backdrop = ui_theme::scrim();
-        gpui_base::Dialog::new(cx)
-            .focus_handle(self.modal_focus.clone())
-            .close_on_escape(false)
-            .close_on_backdrop_press(false)
-            .layer(layer.rank() as usize, true)
-            .backdrop(
-                div()
-                    .size_full()
-                    .bg(backdrop)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
-            )
-            .popup(card)
-            .into_any_element()
-    }
-
-    /// 弹窗里退出这一步的按钮：取消、返回、关闭、以后再说。
+    /// 对话框里退出这一步的按钮：取消、返回、关闭、以后再说。
     pub(crate) fn modal_cancel_button(
         id: &'static str,
         label: impl Into<SharedString>,
@@ -491,7 +431,7 @@ impl Workspace {
         Self::modal_role_button(id, label, ModalRole::Quiet, on_click, cx)
     }
 
-    /// 弹窗里和主操作并列的其它选择。
+    /// 对话框里和主操作并列的其它选择。
     pub(crate) fn modal_secondary_button(
         id: &'static str,
         label: impl Into<SharedString>,
@@ -501,7 +441,7 @@ impl Workspace {
         Self::modal_role_button(id, label, ModalRole::Secondary, on_click, cx)
     }
 
-    /// 这块确认里唯一的默认提交（退出、改名、未保存、选目录）。
+    /// 这块确认里唯一的默认提交（退出、改名、选目录）。
     pub(crate) fn modal_primary_button(
         id: &'static str,
         label: impl Into<SharedString>,
@@ -521,6 +461,7 @@ impl Workspace {
         Self::modal_role_button(id, label, ModalRole::Danger, on_click, cx)
     }
 
+    /// 按钮只改 Workspace 上的状态；对话框跟着状态关，见 `host_dialog`。
     fn modal_role_button(
         id: &'static str,
         label: impl Into<SharedString>,
@@ -548,13 +489,7 @@ impl Workspace {
         })
     }
 
-    /// 渲染退出确认。普通退出仍保留后台守护；待装更新的退出会停掉守护，
-    /// 只有存在进行中的会话时才走到这里。
-    pub(crate) fn render_quit_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
+    fn quit_prompt(&self) -> QuitPrompt {
         #[cfg(any(target_os = "macos", windows))]
         let update_is_applying =
             matches!(self.update_status, updater::UpdateStatus::Applying { .. });
@@ -571,93 +506,102 @@ impl Workspace {
             super::daemon_restart_prompt::DaemonStopReason::QuitToInstall,
             &self.stop_prompt_names,
         );
-        let title = if installing {
-            prompt.title
-        } else {
-            "退出 Smelt？"
-        };
-        let body = if update_is_applying {
-            "正在安全应用更新，完成后会自动重启。".to_string()
-        } else if installing {
-            prompt.body
-        } else {
-            "后台会话将继续运行，当前连接会断开。".to_string()
-        };
-        let confirm_label: SharedString = if self.quit_requested {
-            "正在退出…".into()
-        } else if update_is_applying {
-            "正在更新…".into()
-        } else if installing {
-            prompt.confirm.into()
-        } else {
-            "退出".into()
-        };
+        QuitPrompt {
+            title: if installing {
+                prompt.title.into()
+            } else {
+                "退出 Smelt？".into()
+            },
+            body: if update_is_applying {
+                "正在安全应用更新，完成后会自动重启。".into()
+            } else if installing {
+                prompt.body.into()
+            } else {
+                "后台会话将继续运行，当前连接会断开。".into()
+            },
+            confirm: if self.quit_requested {
+                "正在退出…".into()
+            } else if update_is_applying {
+                "正在更新…".into()
+            } else if installing {
+                prompt.confirm.into()
+            } else {
+                "退出".into()
+            },
+            danger: installing && prompt.danger,
+            width: if installing {
+                420.
+            } else {
+                smelt_ui::dialog::CONFIRM_WIDTH
+            },
+        }
+    }
+
+    /// 退出确认里的危险版本（停守护打断会话）Enter 不执行。
+    pub(crate) fn quit_confirm_is_danger(&self) -> bool {
+        self.quit_prompt().danger
+    }
+
+    /// 确认退出。待装更新时退出只是统一安装驱动的一种触发策略：helper 派生成功后退出，
+    /// 并在本进程完全消失后才提交同一份事务。
+    pub(crate) fn confirm_quit(&mut self, cx: &mut Context<Self>) {
+        if self.quit_requested {
+            return;
+        }
+        // Applying 表示 helper 已派生且当前 GUI 正在退出，不能再启动第二条退出或安装流程。
+        #[cfg(any(target_os = "macos", windows))]
+        if matches!(self.update_status, updater::UpdateStatus::Applying { .. }) {
+            return;
+        }
+        self.quit_requested = true;
+        cx.notify();
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some(update) = self.update_status.ready_update().cloned() {
+            self.start_update_install(update, UpdateInstallTrigger::Quit, cx);
+            return;
+        }
+        request_app_quit(cx);
+    }
+
+    /// 退出确认。普通退出仍保留后台守护；待装更新的退出会停掉守护，
+    /// 只有存在进行中的会话时才走到这里。
+    pub(crate) fn render_quit_confirm(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
+        let prompt = self.quit_prompt();
         let on_confirm =
             |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
-                if this.quit_requested {
-                    return;
-                }
-                // Applying 表示 helper 已派生且当前 GUI 正在退出，不能再启动
-                // 第二条退出或安装流程。
-                #[cfg(any(target_os = "macos", windows))]
-                if matches!(this.update_status, updater::UpdateStatus::Applying { .. }) {
-                    return;
-                }
-                this.quit_requested = true;
-                cx.notify();
-                // 退出只是统一安装驱动的一种触发策略：helper 派生成功后退出，
-                // 并在本进程完全消失后才提交同一份事务。
-                #[cfg(any(target_os = "macos", windows))]
-                if let Some(update) = this.update_status.ready_update().cloned() {
-                    this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
-                    return;
-                }
-                request_app_quit(cx);
+                this.confirm_quit(cx)
             };
-        let confirm = if installing && prompt.danger {
-            Self::modal_danger_button("confirm-quit", confirm_label, on_confirm, cx)
+        let confirm = if prompt.danger {
+            Self::modal_danger_button("confirm-quit", prompt.confirm, on_confirm, cx)
         } else {
-            Self::modal_primary_button("confirm-quit", confirm_label, on_confirm, cx)
+            Self::modal_primary_button("confirm-quit", prompt.confirm, on_confirm, cx)
         };
-
-        let content = v_flex()
-            .child(Self::modal_title(fg, title))
-            .child(div().text_sm().text_color(muted).child(body))
+        let footer = smelt_ui::dialog::footer()
             .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_cancel_button(
-                        "cancel-quit",
-                        "取消",
-                        |this, _, _, cx| {
-                            if this.quit_requested {
-                                return;
-                            }
-                            this.show_quit_confirm = false;
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(confirm),
-            );
-        self.modal_shell(
-            if installing { 420. } else { 320. },
-            content,
-            crate::overlay::ModalLayer::Quit,
-            cx,
-        )
+                Self::modal_cancel_button(
+                    "cancel-quit",
+                    "取消",
+                    |this, _, _, cx| {
+                        this.show_quit_confirm = false;
+                        cx.notify();
+                    },
+                    cx,
+                )
+                .disabled(self.quit_requested),
+            )
+            .child(confirm);
+        dialog
+            .w(px(prompt.width))
+            .child(smelt_ui::dialog::content(prompt.title, Some(prompt.body)))
+            .footer(footer)
     }
 
     /// 启动时提议把 App 移到「应用程序」：被系统转移或放在只读位置时更新装不上。
     /// 「以后再说」只关这一次，设置页的更新栏里一直留着同一个按钮。
     /// 只在 macOS 上存在（设计文档 D4）。
     #[cfg(target_os = "macos")]
-    pub(crate) fn render_move_app_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted, danger) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground, t.danger)
-        };
+    pub(crate) fn render_move_app_confirm(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
+        let danger = cx.theme().danger;
         let body = match self.app_location_issue {
             Some(smelt_client::app_location::LocationIssue::ReadOnly) => {
                 "Smelt 正从只读位置（比如安装盘映像）运行，自动更新装不上。移过去后会自动重新打开，后台会话不受影响。"
@@ -666,56 +610,45 @@ impl Workspace {
                 "Smelt 没放进「应用程序」就打开了，macOS 让它在一个临时的只读位置运行，自动更新因此装不上。移过去后会自动重新打开，后台会话不受影响。"
             }
         };
-        let content = v_flex()
-            .child(Self::modal_title(fg, "把 Smelt 移到「应用程序」？"))
-            .child(div().text_sm().text_color(muted).child(body))
+        let content = smelt_ui::dialog::content("把 Smelt 移到「应用程序」？", Some(body.into()))
             .when_some(self.move_app_error.clone(), |content, error| {
                 content.child(div().text_sm().text_color(danger).child(error))
-            })
+            });
+        let footer = smelt_ui::dialog::footer()
             .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_cancel_button(
-                        "move-app-later",
-                        "以后再说",
-                        |this, _, _, cx| {
-                            if this.moving_app {
-                                return;
-                            }
-                            this.show_move_app_confirm = false;
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(Self::modal_primary_button(
-                        "move-app-confirm",
-                        if self.moving_app {
-                            "正在移动…"
-                        } else {
-                            "移过去并重新打开"
-                        },
-                        |this, _, _, cx| this.move_app_to_applications(cx),
-                        cx,
-                    )),
-            );
-        self.modal_shell(380., content, crate::overlay::ModalLayer::MoveApp, cx)
+                Self::modal_cancel_button(
+                    "move-app-later",
+                    "以后再说",
+                    |this, _, _, cx| {
+                        this.show_move_app_confirm = false;
+                        cx.notify();
+                    },
+                    cx,
+                )
+                .disabled(self.moving_app),
+            )
+            .child(Self::modal_primary_button(
+                "move-app-confirm",
+                if self.moving_app {
+                    "正在移动…"
+                } else {
+                    "移过去并重新打开"
+                },
+                |this, _, _, cx| this.move_app_to_applications(cx),
+                cx,
+            ));
+        dialog
+            .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
+            .child(content)
+            .footer(footer)
     }
 
-    /// 侧栏「重命名」弹层：与 render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩），
-    /// 正文换成预填当前标题的文本框。仅在 self.rename_input 就绪时被调用（见
-    /// start_rename/上面 .children(self.rename_target.is_some()...)）。
-    pub(crate) fn render_rename_session(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
+    /// 改名对话框：工作树和机器。会话行、分屏子行的改名画在侧栏那一行里。
+    pub(crate) fn render_rename(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
         let Some(input) = self.rename_input.as_ref() else {
-            return div().into_any_element();
+            return dialog;
         };
-        // 会话行和分屏子行共用这个弹窗，标题得说清改的是哪个。
         let (heading, hint) = match self.rename_target {
-            Some(RenameTarget::Pane(_)) => ("重命名终端", "留空则恢复自动识别的标题。"),
             Some(RenameTarget::Runtime(_)) => (
                 "重命名机器",
                 "侧栏和设置里显示这个名字，只在这台电脑上生效。",
@@ -723,42 +656,34 @@ impl Workspace {
             Some(RenameTarget::Workset(_)) => {
                 ("重命名工作树", "会同步重命名工作树目录，分支名保持不变。")
             }
+            Some(RenameTarget::Pane(_)) => ("重命名终端", "留空则恢复自动识别的标题。"),
             _ => ("重命名会话", "留空则恢复自动识别的标题。"),
         };
-
-        let content = v_flex()
-            .child(Self::modal_title(fg, heading))
-            .child(div().text_sm().text_color(muted).child(hint))
-            .child(Input::new(input))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_cancel_button(
-                        "cancel-rename",
-                        "取消",
-                        |this, _, _, cx| this.cancel_rename(cx),
-                        cx,
-                    ))
-                    .child(Self::modal_primary_button(
-                        "confirm-rename",
-                        "确定",
-                        |this, _, window, cx| this.confirm_rename(window, cx),
-                        cx,
-                    )),
-            );
-        self.modal_shell(320., content, crate::overlay::ModalLayer::Rename, cx)
+        let footer = smelt_ui::dialog::footer()
+            .child(Self::modal_cancel_button(
+                "cancel-rename",
+                "取消",
+                |this, _, _, cx| this.cancel_rename(cx),
+                cx,
+            ))
+            .child(Self::modal_primary_button(
+                "confirm-rename",
+                "重命名",
+                |this, _, window, cx| this.confirm_rename(window, cx),
+                cx,
+            ));
+        dialog
+            .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
+            .child(smelt_ui::dialog::content(heading, Some(hint.into())).child(Input::new(input)))
+            .footer(footer)
     }
 
-    /// 机器菜单「中继…」弹层：和改名同款，多一行没改成的原因。在线和离线改的东西不一样，
+    /// 机器菜单「中继…」：和改名同款，多一行没改成的原因。在线和离线改的东西不一样，
     /// 说明里讲清楚。
-    pub(crate) fn render_relay_edit(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted, danger) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground, t.danger)
-        };
+    pub(crate) fn render_relay_edit(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
+        let danger = cx.theme().danger;
         let Some(edit) = self.relay_edit.as_ref() else {
-            return div().into_any_element();
+            return dialog;
         };
         let key = crate::RuntimeKey::Remote(edit.runtime_id.clone());
         let hint = if crate::runtimes::runtime_online(&key, cx) {
@@ -767,113 +692,107 @@ impl Workspace {
         } else {
             "那台机器现在连不上，只改这台电脑这边：那台机器要已经用 smeltd relay 改成同一个。"
         };
-        let content = v_flex()
-            .child(Self::modal_title(
-                fg,
-                format!("{} 的中继", crate::runtimes::runtime_name(&key, cx)),
+        let content = smelt_ui::dialog::content(
+            format!("{} 的中继", crate::runtimes::runtime_name(&key, cx)),
+            Some(hint.into()),
+        )
+        .child(Input::new(&edit.input).disabled(edit.saving))
+        .children(
+            edit.error
+                .clone()
+                .map(|error| div().text_sm().text_color(danger).child(error)),
+        );
+        let footer = smelt_ui::dialog::footer()
+            .child(Self::modal_cancel_button(
+                "cancel-relay-edit",
+                "取消",
+                |this, _, _, cx| this.cancel_relay_edit(cx),
+                cx,
             ))
-            .child(div().text_sm().text_color(muted).child(hint))
-            .child(Input::new(&edit.input).disabled(edit.saving))
-            .children(
-                edit.error
-                    .clone()
-                    .map(|error| div().text_sm().text_color(danger).child(error)),
-            )
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_cancel_button(
-                        "cancel-relay-edit",
-                        "取消",
-                        |this, _, _, cx| this.cancel_relay_edit(cx),
-                        cx,
-                    ))
-                    .child(Self::modal_primary_button(
-                        "confirm-relay-edit",
-                        if edit.saving {
-                            "正在保存…"
-                        } else {
-                            "保存"
-                        },
-                        |this, _, _, cx| this.confirm_relay_edit(cx),
-                        cx,
-                    )),
-            );
-        self.modal_shell(380., content, crate::overlay::ModalLayer::RelayEdit, cx)
+            .child(Self::modal_primary_button(
+                "confirm-relay-edit",
+                if edit.saving {
+                    "正在保存…"
+                } else {
+                    "保存"
+                },
+                |this, _, _, cx| this.confirm_relay_edit(cx),
+                cx,
+            ));
+        dialog
+            .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
+            .child(content)
+            .footer(footer)
     }
 
-    /// 「重启守护进程」确认。只在有进行中的会话时打开，挂在设置窗上。
-    pub(crate) fn render_daemon_restart_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
+    /// 「重启守护进程」确认。只在有进行中的会话时打开，在设置窗口里。
+    pub(crate) fn render_daemon_restart_confirm(
+        &self,
+        dialog: Dialog,
+        cx: &mut Context<Self>,
+    ) -> Dialog {
         let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
             super::daemon_restart_prompt::DaemonStopReason::ExplicitRestart,
             &self.stop_prompt_names,
         );
-
-        let content = v_flex()
-            .child(Self::modal_title(fg, prompt.title))
-            .child(div().text_sm().text_color(muted).child(prompt.body))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_secondary_button(
-                        "cancel-daemon-restart",
-                        "取消",
-                        |this, _, _, cx| {
-                            this.show_daemon_restart_confirm = false;
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(Self::modal_danger_button(
-                        "confirm-daemon-restart",
-                        prompt.confirm,
-                        |this, _, _, cx| this.confirm_restart_daemon(cx),
-                        cx,
-                    )),
-            );
-        self.modal_shell(420., content, crate::overlay::ModalLayer::DaemonRestart, cx)
+        let footer = smelt_ui::dialog::footer()
+            .child(Self::modal_cancel_button(
+                "cancel-daemon-restart",
+                "取消",
+                |this, _, _, cx| {
+                    this.show_daemon_restart_confirm = false;
+                    cx.notify();
+                },
+                cx,
+            ))
+            .child(Self::modal_danger_button(
+                "confirm-daemon-restart",
+                prompt.confirm,
+                |this, _, _, cx| this.confirm_restart_daemon(cx),
+                cx,
+            ));
+        dialog
+            .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
+            .child(smelt_ui::dialog::content(
+                prompt.title,
+                Some(prompt.body.into()),
+            ))
+            .footer(footer)
     }
 
-    /// 「立即重启更新」确认。有进行中的会话时挂在设置窗上。
-    pub(crate) fn render_update_install_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
+    /// 「立即重启更新」确认。有进行中的会话时打开，在设置窗口里。
+    pub(crate) fn render_update_install_confirm(
+        &self,
+        dialog: Dialog,
+        cx: &mut Context<Self>,
+    ) -> Dialog {
         let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
             super::daemon_restart_prompt::DaemonStopReason::UpdateInstall,
             &self.stop_prompt_names,
         );
-        let content = v_flex()
-            .child(Self::modal_title(fg, prompt.title))
-            .child(div().text_sm().text_color(muted).child(prompt.body))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_secondary_button(
-                        "cancel-update-install",
-                        "取消",
-                        |this, _, _, cx| {
-                            this.show_update_install_confirm = false;
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(Self::modal_danger_button(
-                        "confirm-update-install",
-                        prompt.confirm,
-                        |this, _, _, cx| this.confirm_update_install(cx),
-                        cx,
-                    )),
-            );
-        self.modal_shell(420., content, crate::overlay::ModalLayer::UpdateInstall, cx)
+        let footer = smelt_ui::dialog::footer()
+            .child(Self::modal_cancel_button(
+                "cancel-update-install",
+                "取消",
+                |this, _, _, cx| {
+                    this.show_update_install_confirm = false;
+                    cx.notify();
+                },
+                cx,
+            ))
+            .child(Self::modal_danger_button(
+                "confirm-update-install",
+                prompt.confirm,
+                |this, _, _, cx| this.confirm_update_install(cx),
+                cx,
+            ));
+        dialog
+            .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
+            .child(smelt_ui::dialog::content(
+                prompt.title,
+                Some(prompt.body.into()),
+            ))
+            .footer(footer)
     }
 }
 

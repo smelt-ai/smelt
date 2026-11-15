@@ -86,8 +86,8 @@ pub(crate) const COMMANDS: &[Def] = &[
             "quit",
             "退出 Smelt",
             Some("cmd-q"),
-            |this, _, window, cx| {
-                this.request_quit(window, cx);
+            |this, _, _, cx| {
+                this.request_quit(cx);
                 Handled::ok()
             },
         ),
@@ -426,7 +426,7 @@ pub(crate) fn register_inert(cx: &mut App) {
 
 impl Workspace {
     /// 退出：有进行中的会话、或者要先装更新时先确认，不能把正在输出的对话静默杀掉。
-    pub(crate) fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) {
         if self.quit_requested {
             return;
         }
@@ -448,7 +448,6 @@ impl Workspace {
             }
             self.stop_prompt_names = names;
         }
-        self.begin_main_modal_focus(window, cx);
         self.show_quit_confirm = true;
         cx.notify();
     }

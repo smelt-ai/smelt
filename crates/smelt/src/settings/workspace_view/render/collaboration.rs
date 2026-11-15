@@ -307,7 +307,9 @@ fn incoming_group() -> SettingGroup {
                         .when(!running, |button| button.tooltip("先开启远程访问"))
                         .on_click(|_, window, cx: &mut App| {
                             begin_pairing(cx);
-                            window.open_dialog(cx, |dialog, _, cx| pairing_dialog(dialog, cx));
+                            window.open_dialog(cx, |dialog, _, cx| {
+                                pairing_dialog(smelt_ui::dialog::present(dialog), cx)
+                            });
                         })
                 }),
             )

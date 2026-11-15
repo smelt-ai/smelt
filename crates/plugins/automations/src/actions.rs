@@ -360,21 +360,18 @@ impl AutomationsPage {
             format!("「{name}」和它的 {runs} 条运行记录会被删除，此操作不可撤销。")
         };
         let page = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let page = page.clone();
-            let target = target.clone();
-            alert
-                .confirm()
-                .title("确定删除这条自动化吗？")
-                .description(description.clone())
-                .ok_text("确定删除")
-                .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    let target = target.clone();
-                    let _ = page.update(cx, |page, cx| page.delete_automation(target, cx));
-                    true
-                })
-        });
+        api::ui::dialog::Confirm::new(
+            "确定删除这条自动化吗？",
+            "删除",
+            move |_, cx| {
+                let target = target.clone();
+                let _ = page.update(cx, |page, cx| page.delete_automation(target, cx));
+                true
+            },
+        )
+        .danger()
+        .description(description)
+        .open(window, cx);
     }
 
     pub(crate) fn delete_automation(&mut self, target: AutomationRef, cx: &mut Context<Self>) {

@@ -24,6 +24,7 @@ mod daemon_restart_prompt;
 mod desktop_view;
 mod dir_picker;
 mod dock;
+mod host_dialog;
 mod ide;
 mod keymap;
 mod liquid_glass;
@@ -1680,7 +1681,8 @@ struct Workspace {
     _runtime_hub_sub: Option<Subscription>,
     /// 宿主转给插件的事件里，工作台自己要管的（见 `subscribe_host_events`）。
     _host_events_sub: Option<Subscription>,
-    /// 每次重画前看遮罩层开关变没变（见 `note_overlay`）。
+    /// 每次通知后让宿主对话框跟上状态，再看遮罩层开关变没变（见 `sync_host_dialogs`、
+    /// `note_overlay`）。
     _overlay_sub: Option<Subscription>,
     /// 侧栏对话行读各台机器的智能体配置（`AgentHosts`）画名字；不观察的话配置读到后
     /// 侧栏不会重绘。
@@ -1718,19 +1720,8 @@ struct Workspace {
     /// 于是匹配不到，表现为"切到别的页面后快捷键全部失灵"。切到非终端页面时把
     /// focus 显式认领到这个句柄上，保证 Workspace context 始终在 dispatch 路径上。
     focus_handle: FocusHandle,
-    /// 确认弹窗共用的焦点陷阱。`Dialog::new` 每次都会新造一个句柄，不能用那个。
-    modal_focus: FocusHandle,
-    /// 主窗口弹窗已经记下打开前的焦点。嵌套弹窗不再覆盖。
-    main_modal_guard: bool,
-    main_modal_restore: Option<WeakFocusHandle>,
-    /// 这一帧的打开动作会自己把焦点放进输入框，sync 不要再抢回对话框。
-    main_modal_hold: bool,
-    /// 当前最上层确认框的层级。变了才把焦点交给新的那一层。
-    main_modal_rank: Option<u8>,
-    /// 设置窗口的弹窗单独记一份。主窗口的 prepare 不能把焦点抢到另一扇窗。
-    settings_modal_guard: bool,
-    settings_modal_restore: Option<WeakFocusHandle>,
-    settings_modal_rank: Option<u8>,
+    /// 开着的宿主对话框，按打开先后（见 `host_dialog`）。
+    host_dialogs: Vec<host_dialog::PresentedDialog>,
     /// 主窗口关闭期间点击系统通知时，会话还在异步恢复。先保留稳定 sid，目标装回
     /// 列表后再消费，不能退化成只打开一扇空窗口。
     pending_notification_session_id: Option<String>,
@@ -1956,14 +1947,7 @@ impl Workspace {
             session_list_revision: 0,
             active_session_revision: 0,
             focus_handle: cx.focus_handle(),
-            modal_focus: cx.focus_handle(),
-            main_modal_guard: false,
-            main_modal_restore: None,
-            main_modal_hold: false,
-            main_modal_rank: None,
-            settings_modal_guard: false,
-            settings_modal_restore: None,
-            settings_modal_rank: None,
+            host_dialogs: Vec::new(),
         };
         // 只预取一个已知的系统 Finder 图标，不枚举第三方应用；真实 IDE 列表由
         // stage.rs 在有项目舞台显示后的空闲期再低优先级预热。
@@ -2006,8 +1990,11 @@ impl Workspace {
         // 这几次登记不用重装布局，布局本来就还没装。
         builtin_views::register(cx.weak_entity(), cx);
         ws._host_events_sub = Some(ws.subscribe_host_events(window, cx));
-        // 遮罩层的开关散在各处（确认框、命令面板、大图预览），开关时都会通知工作台。
-        ws._overlay_sub = Some(cx.observe_self(|this, cx| this.note_overlay(cx)));
+        // 对话框和遮罩层的开关散在各处（确认框、命令面板、大图预览），开关时都会通知工作台。
+        ws._overlay_sub = Some(cx.observe_self(|this, cx| {
+            this.sync_host_dialogs(cx);
+            this.note_overlay(cx);
+        }));
         ws._shell_dock_subs = workspace_layout::watch_shell_dock(&ws.shell_dock, window, cx);
         // 装布局要用 `cx.entity()` 背后的工作台（自带视图画它），等它建好。
         cx.defer_in(window, |this, window, cx| {

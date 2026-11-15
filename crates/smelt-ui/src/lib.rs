@@ -4,6 +4,7 @@
 
 pub mod acp_completion;
 pub mod button;
+pub mod dialog;
 pub mod frame_stats;
 pub mod global_wait;
 pub mod icon_action;
