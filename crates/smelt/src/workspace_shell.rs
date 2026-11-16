@@ -21,7 +21,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, Axis, Context, Div, Entity, EventEmitter, ExternalPaths,
     FocusHandle, Focusable, Pixels, SharedString, Stateful, Subscription, Window, div, prelude::*,
-    px, rgb, size,
+    px, size,
 };
 use gpui_base::ResizeHandleContext;
 use gpui_component::dock::{
@@ -42,8 +42,7 @@ pub(crate) use smelt_ui::Button;
 use smelt_ui::IconAction as _;
 
 use crate::builtin_views::Builtin;
-use crate::settings::Appearance;
-use crate::{AgentStatus, SessionKind, Workspace, terminal, ui_theme, workspace_frame};
+use crate::{AgentStatus, SessionKind, Workspace, ui_theme, workspace_frame};
 
 /// Dock 的四个区域，按画的先后。
 const PLACEMENTS: [DockPlacement; 4] = [
@@ -581,8 +580,7 @@ impl DockAreaRenderer for SmeltDockRenderer {
         window: &mut Window,
         cx: &mut App,
     ) -> Stateful<Div> {
-        // 皮肤给分栏铺 `tab_bar` 实色，会挡住会话列表后面的玻璃。分栏里的组各自铺底，
-        // 分栏自己不用铺。
+        // 皮肤给分栏铺 `tab_bar` 实色，会盖住窗口那一层底。底只由窗口铺一层，分栏不铺。
         DockAreaRenderer::split_frame(&*self.skin, node, axis, window, cx)
             .bg(gpui::transparent_black())
     }
@@ -631,20 +629,14 @@ struct SmeltTabGroup {
 }
 
 impl TabGroupRenderer for SmeltTabGroup {
-    /// 组的底色是栏的底色，不用主题的背景色：主题色可能带透明度，会透出窗口后面。
-    /// 只放着会话列表的组例外，铺侧栏的玻璃底（`workspace_frame::sidebar_surface`）。
+    /// 组不铺底，底是窗口那一层（`workspace_frame::window_surface`），每一组都一样。上游
+    /// 的组框自己铺一层 `background` 实色，这里清掉。不按组里摆的是什么（出口还是别的
+    /// 视图）分深浅：布局由插件定，宿主按位置猜「这是侧栏」就会猜错；栏与栏之间靠分栏
+    /// 手柄上那条 `hair` 分开。
     fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
-        let mut visible = group.panels().iter().filter(|panel| panel.visible(cx));
-        let sessions_only = visible
-            .next()
-            .is_some_and(|panel| panel.panel_name(cx) == Builtin::Sessions.id())
-            && visible.next().is_none();
-        let surface = if sessions_only {
-            workspace_frame::sidebar_surface()
-        } else {
-            rgb(ui_theme::side()).into()
-        };
-        self.inner.frame(group, window, cx).bg(surface)
+        self.inner
+            .frame(group, window, cx)
+            .bg(gpui::transparent_black())
     }
 
     fn content_frame(
@@ -1036,7 +1028,7 @@ impl Workspace {
         let focused_key = self.sidebar_focused_key(window);
         let list =
             self.render_session_list(cx.entity(), window, cx, &statuses, animate, focused_key);
-        // 底由所在的组铺（`SmeltTabGroup::frame`），这里再铺一层，玻璃就透不出来了。
+        // 底是窗口那一层（`workspace_frame::window_surface`），会话列表不另铺。
         workspace_frame::card(gpui::transparent_black())
             .when(at_top, |card| card.pt(workspace_frame::TOP_BAR_HEIGHT))
             // 从访达拖文件夹进会话列表 = 打开项目。不挂整个窗口：对话输入框要自己收文件。
@@ -1076,7 +1068,8 @@ impl Workspace {
             .child(stage_content);
         // 标题胶囊和拖窗口的顶带浮在舞台内容上沿，只盖舞台自己。
         let chrome = self.render_stage_chrome(self.chrome_left_guard(window), cx);
-        workspace_frame::card(rgb(ui_theme::bg()).into())
+        // 底是窗口那一层（`workspace_frame::window_surface`），舞台不另铺。
+        workspace_frame::card(gpui::transparent_black())
             .child(content)
             .child(chrome)
             .into_any_element()
@@ -1090,37 +1083,25 @@ impl Workspace {
             return self.render_stage_empty(cx);
         };
         let body = match &session.kind {
+            // 终端不铺底，底就是窗口那一层，顶上给标题胶囊让出的那条和下面连成一片。
             SessionKind::Term { dock, .. } => div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .flex()
-                .bg(rgb(terminal::default_bg()))
                 .pt(px(ui_theme::CHROME_ISLAND_BAND_PX))
                 .child(dock.area().clone())
                 .into_any_element(),
-            SessionKind::Conversation(view) => {
-                let appearance = cx.global::<Appearance>();
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .bg(rgb(ui_theme::bg()))
-                    .children(appearance.bg_image.as_deref().map(|path| {
-                        workspace_frame::background_image_layer(
-                            path,
-                            appearance.bg_image_opacity,
-                            cx,
-                        )
-                    }))
-                    .child(
-                        view.clone()
-                            .cached(gpui::StyleRefinement::default().size_full()),
-                    )
-                    .into_any_element()
-            }
+            SessionKind::Conversation(view) => div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .child(
+                    view.clone()
+                        .cached(gpui::StyleRefinement::default().size_full()),
+                )
+                .into_any_element(),
         };
         div()
             .flex_1()

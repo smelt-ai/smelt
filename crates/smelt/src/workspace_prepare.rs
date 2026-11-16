@@ -32,6 +32,16 @@ impl Workspace {
         }
     }
 
+    /// 让窗口材质的种类跟上外观、深浅跟上 smelt 的主题。都没变就不再发给系统。
+    pub(crate) fn sync_window_backdrop(&mut self, window: &Window, cx: &App) {
+        let material = cx.global::<Appearance>().material;
+        let dark = !crate::ui_theme::is_light();
+        if self.applied_backdrop != Some((material, dark)) {
+            crate::window_backdrop::sync(window, material, dark);
+            self.applied_backdrop = Some((material, dark));
+        }
+    }
+
     /// 后台失败当时就送出系统通知。不再等下一帧来取，调用方也就不用持有 Window。
     pub(crate) fn report_background_error(&mut self, message: impl Into<String>) {
         crate::status_item::notify_error(message.into());
@@ -81,17 +91,7 @@ impl Workspace {
 
         self.note_active_context(cx);
 
-        // 试玻璃侧栏：顶上那条液态玻璃先不装，侧栏透出的是整窗的模糊，两种材质叠着没法看。
-        let want_bg = cx.global::<Appearance>().window_bg();
-        if self.applied_window_bg != Some(want_bg) {
-            window.set_background_appearance(want_bg);
-            self.applied_window_bg = Some(want_bg);
-        }
-        let window_opacity = cx.global::<Appearance>().window_opacity();
-        if self.applied_window_opacity != Some(window_opacity) {
-            settings::apply_window_opacity(window, window_opacity);
-            self.applied_window_opacity = Some(window_opacity);
-        }
+        self.sync_window_backdrop(window, cx);
         let ui_font_px = cx.global::<Appearance>().ui_font_px;
         if self.applied_ui_font_px != Some(ui_font_px) {
             window.set_rem_size(px(ui_font_px as f32));

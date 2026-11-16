@@ -30,8 +30,6 @@ impl Workspace {
         );
 
         SettingsRenderSnapshot {
-            bg_color_picker: self.bg_color_picker.clone(),
-            opacity_slider: self.opacity_slider.clone(),
             ui_font_size_slider: self.ui_font_size_slider.clone(),
             font_size_slider: self.font_size_slider.clone(),
             bg_image_opacity_slider: self.bg_image_opacity_slider.clone(),

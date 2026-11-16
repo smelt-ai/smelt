@@ -112,6 +112,16 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 [target.'cfg(unix)'.dev-dependencies]
 smelt-core = { path = "../smelt-core" }
 
+# Windows 11 的 Mica 要按窗口设深浅，系统版本要绕过兼容层读真的（见 window_backdrop.rs）。
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_System_SystemInformation",
+] }
+
 # 构建脚本编给主机。图标只在 Windows 目标上嵌（见 build.rs），清单不在这里，
 # gpui-pre 的 windows-manifest 已经嵌了一份。
 [build-dependencies]

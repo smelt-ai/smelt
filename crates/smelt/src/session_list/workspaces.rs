@@ -261,7 +261,6 @@ pub(super) fn worktree_row(
             .flex_1()
             .min_w_0()
             .text_sm()
-            .text_color(rgb(ui_theme::muted()))
             .child(truncated_line(workset.task.clone())),
     )
     .children(pinned.then(|| {

@@ -218,7 +218,6 @@ pub(crate) fn group_disclosure(
         .items_center()
         .justify_center()
         .text_color(rgb(ui_theme::muted()))
-        .group_hover(group, |style| style.text_color(rgb(ui_theme::text())))
         .child(
             div()
                 .flex()

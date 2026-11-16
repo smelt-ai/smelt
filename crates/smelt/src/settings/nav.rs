@@ -11,7 +11,7 @@ use smelt_plugin_api::{SettingsGroup, ViewInfo};
 /// 设置当前选中的内容页。深链接（检查更新、外观、机器、资源）也走这里。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SettingsSection {
-    /// 主题、字号与字体、窗口与背景。
+    /// 主题、字号与字体、布局、背景。
     #[default]
     Appearance,
     Shortcuts,
@@ -136,19 +136,16 @@ fn host_nav() -> Vec<SettingsNavCategory> {
                         "代码字体",
                         "等宽字体",
                         "字体",
-                        "窗口",
                         "背景",
                         "背景图",
                         "背景图片",
                         "壁纸",
                         "透明",
                         "透明度",
-                        "不透明度",
                         "背景透明",
-                        "标题栏玻璃",
-                        "玻璃",
-                        "液态玻璃",
+                        "材质",
                         "毛玻璃",
+                        "模糊",
                     ],
                 ),
                 leaf(
@@ -526,7 +523,7 @@ mod tests {
             ("自动下载安装", SettingsSection::About),
             ("清缓存", SettingsSection::Maintenance),
             ("终端字号", SettingsSection::Appearance),
-            ("毛玻璃", SettingsSection::Appearance),
+            ("壁纸", SettingsSection::Appearance),
             ("背景图", SettingsSection::Appearance),
             ("hook", SettingsSection::Agents),
             ("快捷启动项", SettingsSection::Agents),

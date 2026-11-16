@@ -36,7 +36,6 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::ui_theme;
 use anyhow::Context as _;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
@@ -86,12 +85,12 @@ struct JsPluginView {
 }
 
 impl Render for JsPluginView {
-    /// 底色由宿主铺，和自带视图一样是实底的舞台色：主题原色可能带透明度，插件自己铺会
-    /// 透出窗口后面的东西。插件只画内容，不画页面底。
+    /// 页面底归宿主：整窗一层底，每一组都一样（`workspace_frame::window_surface`、
+    /// `SmeltTabGroup::frame`）。插件只画内容，不画页面底，铺了就把毛玻璃盖住。
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let base = div().size_full().min_h_0().flex().flex_col();
         match &self.content {
-            Ok(view) => base.bg(rgb(ui_theme::bg())).child(view.clone()),
+            Ok(view) => base.child(view.clone()),
             Err(error) => base
                 .p_4()
                 .text_sm()

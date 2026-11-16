@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 #[cfg(any(target_os = "macos", windows))]
 use gpui_component::progress::Progress;
@@ -25,7 +24,8 @@ pub(crate) use smelt_ui::{Button, Switch};
 
 #[cfg(any(target_os = "macos", windows))]
 use crate::updater;
-use crate::{Workspace, liquid_glass, terminal, terminal_view};
+use crate::window_backdrop::WindowMaterial;
+use crate::{Workspace, terminal, terminal_view};
 
 mod agent_hooks;
 mod bundled_helpers;
@@ -100,35 +100,20 @@ fn default_font_px() -> u32 {
     13
 }
 
-/// `bg_color` 从未被用户改过时的出厂值——终端背景层要不要跟着主题模式自动换色，
-/// 就看当前值是不是还等于这个（见 `Appearance::bg_color_is_default`）。
-const DEFAULT_BG_COLOR: u32 = 0x1a1b26;
-
-/// 背景图出厂透明度：25% 是业内常用起点（WezTerm/Windows Terminal 的
-/// backgroundImageOpacity 0.15–0.35 区间），既保留壁纸观感又不压过文字。
 fn default_bg_image_opacity() -> f32 {
-    0.25
+    smelt_model::appearance_settings::DEFAULT_BG_IMAGE_OPACITY
 }
 
 /// 窗口与终端外观设置（全局单例；存 SQLite KV）。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Appearance {
-    /// 终端底色（0xRRGGBB）。
-    pub bg_color: u32,
     /// 背景图片绝对路径（None = 无）。
     pub bg_image: Option<String>,
     /// 背景图片透明度 0–1（0=全透，1=全不透明）。默认低透明度做装饰层，
-    /// 让主题底色和窗口材质透出，避免明亮图片直接铺满破坏可读性（对齐
+    /// 让主题底色透出，避免明亮图片直接铺满破坏可读性（对齐
     /// WezTerm / Windows Terminal 的 backgroundImageOpacity 惯例）。
     #[serde(default = "default_bg_image_opacity")]
     pub bg_image_opacity: f32,
-    /// 不透明度 0.3–1.0；应用到整扇原生窗口，后方应用会参与系统合成。
-    pub opacity: f32,
-    /// 旧配置兼容字段；支持时使用液态玻璃，旧系统继续使用毛玻璃。
-    pub blur: bool,
-    /// 液态玻璃材质档位（macOS 26+；旧系统忽略）。老配置文件缺省 = 标准。
-    #[serde(default)]
-    pub glass_style: liquid_glass::GlassStyle,
     /// 明暗。跟着 `theme_name` 走，CLI 的 `appearance.theme_mode` 会把主题拨到同一族的另一侧。
     #[serde(default = "default_theme_mode")]
     pub theme_mode: ThemeMode,
@@ -153,19 +138,16 @@ pub struct Appearance {
     /// （插件还没加载、被卸了）时照样留着，不改写成别的。
     #[serde(default)]
     pub layout_id: Option<String>,
+    /// 窗口底下垫哪一种系统材质。只存在客户端库里，不进旧的 JSON 形式。
+    #[serde(skip, default = "WindowMaterial::platform_default")]
+    pub material: WindowMaterial,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            bg_color: DEFAULT_BG_COLOR,
             bg_image: None,
             bg_image_opacity: default_bg_image_opacity(),
-            // 95% keeps the native Liquid Glass visible without making text and controls
-            // look washed out. Existing user-configured values are preserved on load.
-            opacity: 0.95,
-            blur: true,
-            glass_style: liquid_glass::GlassStyle::Regular,
             theme_mode: ThemeMode::Dark,
             theme_name: default_theme_name(),
             ui_font_px: default_ui_font_px(),
@@ -173,61 +155,12 @@ impl Default for Appearance {
             font_px: default_font_px(),
             font_family: String::new(),
             layout_id: None,
+            material: WindowMaterial::platform_default(),
         }
     }
 }
 
 impl Global for Appearance {}
-
-impl Appearance {
-    /// 持久化配置可能被手动改坏；所有窗口都使用同一份合法的原生窗口透明度。
-    pub fn window_opacity(&self) -> f32 {
-        if self.opacity.is_finite() {
-            self.opacity.clamp(0.3, 1.0)
-        } else {
-            1.0
-        }
-    }
-
-    /// 整窗继续使用系统优化过的传统毛玻璃。Liquid Glass 仅用于顶部的稳定导航区域；
-    /// 若把它铺在终端/ACP 这些高频更新内容下，会触发全帧背景重采样并造成掉帧。
-    pub fn window_bg(&self) -> WindowBackgroundAppearance {
-        WindowBackgroundAppearance::Blurred
-    }
-
-    /// `bg_color` 是否还是没被用户碰过的出厂值。是的话终端背景层该跟主题模式自动
-    /// 切换（见 terminal_view.rs 的 bg_layer）；用户显式选过颜色后就不再跟随，
-    /// 保留其选择（深浅色模式来回切也不丢）。
-    pub fn bg_color_is_default(&self) -> bool {
-        self.bg_color == DEFAULT_BG_COLOR
-    }
-}
-
-/// 通过 AppKit 的 `alphaValue` 改整扇原生窗口的合成透明度。和元素 `.opacity()` 不同，
-/// 这也会作用于 GPUI 内容下方的原生液态玻璃/毛玻璃，因此能实际看见窗口后的应用。
-#[cfg(target_os = "macos")]
-pub fn apply_window_opacity(window: &Window, opacity: f32) {
-    use objc::runtime::Object;
-    use objc::{msg_send, sel, sel_impl};
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    let handle = HasWindowHandle::window_handle(window)
-        .expect("GPUI window must expose a native window handle");
-    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        unreachable!("macOS GPUI windows must use AppKit window handles");
-    };
-    let native_view = handle.ns_view.as_ptr().cast::<Object>();
-
-    unsafe {
-        let native_window: *mut Object = msg_send![native_view, window];
-        if !native_window.is_null() {
-            let _: () = msg_send![native_window, setAlphaValue: opacity as f64];
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn apply_window_opacity(_window: &Window, _opacity: f32) {}
 
 /// 在线更新配置（全局单例，存 SQLite KV）。
 ///
@@ -369,7 +302,7 @@ fn apply_requested_appearance_on(
     let mut snapshot = snapshot_from_appearance(&current);
     let catalog = registered_theme_entries(cx);
     smelt_model::appearance_settings::apply_patch(&mut snapshot, settings, &catalog)?;
-    let next = appearance_from_snapshot(snapshot, current.layout_id);
+    let next = appearance_from_snapshot(snapshot, current);
     save_appearance_on(&next, store)
         .map_err(|error| smelt_model::appearance_settings::SettingsError::Store(format!("保存外观失败：{error}")))?;
     install_appearance(next, cx);
@@ -382,18 +315,22 @@ fn install_appearance(appearance: Appearance, cx: &mut App) {
     terminal_view::set_font_family(&appearance.font_family);
     cx.set_global(appearance.clone());
     apply_named_theme(&appearance.theme_name, cx);
-    apply_bg_color(&appearance);
     cx.refresh_windows();
 }
 
 /// 按主题名装上配色。组件库走 `apply_config`，自绘色板从这份主题投影，终端跟着明暗切。
-/// 字号和字体在装完之后写回 Appearance，主题文件里的字号不覆盖用户设置。
+/// 字色按外观里选的窗口材质配（见 `ui_theme::fit_text_to_backdrop`），所以换了材质也要
+/// 重装一次。字号和字体在装完之后写回 Appearance，主题文件里的字号不覆盖用户设置。
 /// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`。
 pub fn apply_named_theme(name: &str, cx: &mut App) {
-    let requested_dark = cx
-        .try_global::<Appearance>()
+    let appearance = cx.try_global::<Appearance>();
+    let requested_dark = appearance
         .map(|appearance| appearance.theme_mode.is_dark())
         .unwrap_or(true);
+    let material = appearance
+        .map(|appearance| appearance.material)
+        .unwrap_or_else(WindowMaterial::platform_default);
+    crate::ui_theme::set_window_material(crate::window_backdrop::text_tone(material));
     let applied = smelt_ui::theme_catalog::apply(name, cx)
         || smelt_ui::theme_catalog::apply(
             smelt_model::theme_index::default_for_mode(if requested_dark {
@@ -454,7 +391,7 @@ fn sync_theme_fonts(cx: &mut App) {
 /// TUI 以为的底色跟实际底色对不上，就是对比度问题。所以颜色真源只有 PC 这一份，
 /// 而且一部手机可以连多台设备，配色必须**按设备**下发而不是客户端内置。
 ///
-/// 主题、用户自选底色变化时都要调（见 `apply_named_theme` / `apply_appearance`）。
+/// 主题变化时要调（见 `apply_named_theme`）。
 ///
 /// 交给运行时落盘，在后台按顺序发：主题切换时会连着调好几次，只有最后一份要紧。
 pub fn publish_terminal_theme() {
@@ -508,12 +445,8 @@ pub fn load_appearance() -> Appearance {
     match smelt_client_store::client_store().and_then(|store| store.appearance()) {
         Ok(Some(record)) => appearance_from_snapshot(
             smelt_model::appearance_settings::AppearanceSnapshot {
-                bg_color: record.bg_color,
                 bg_image: record.bg_image,
                 bg_image_opacity: record.bg_image_opacity,
-                opacity: record.opacity,
-                blur: record.blur,
-                glass_style: record.glass_style,
                 theme_mode: record.theme_mode,
                 theme_name: record.theme_name,
                 ui_font_px: record.ui_font_px,
@@ -521,7 +454,11 @@ pub fn load_appearance() -> Appearance {
                 font_px: record.font_px,
                 font_family: record.font_family,
             },
-            record.layout_id,
+            Appearance {
+                layout_id: record.layout_id,
+                material: WindowMaterial::from_key(&record.material),
+                ..Appearance::default()
+            },
         ),
         Ok(None) => Appearance::default(),
         Err(error) => {
@@ -545,12 +482,8 @@ fn save_appearance_on(
 ) -> Result<(), smelt_client_store::ClientStoreError> {
     let snapshot = snapshot_from_appearance(appearance);
     let record = smelt_client_store::AppearanceRecord {
-        bg_color: snapshot.bg_color,
         bg_image: snapshot.bg_image,
         bg_image_opacity: snapshot.bg_image_opacity,
-        opacity: snapshot.opacity,
-        blur: snapshot.blur,
-        glass_style: snapshot.glass_style,
         theme_mode: snapshot.theme_mode,
         theme_name: snapshot.theme_name,
         ui_font_px: snapshot.ui_font_px,
@@ -558,6 +491,7 @@ fn save_appearance_on(
         font_px: snapshot.font_px,
         font_family: snapshot.font_family,
         layout_id: appearance.layout_id.clone(),
+        material: appearance.material.key().to_string(),
     };
     store.put_appearance(&record)
 }
@@ -566,15 +500,8 @@ fn snapshot_from_appearance(
     appearance: &Appearance,
 ) -> smelt_model::appearance_settings::AppearanceSnapshot {
     smelt_model::appearance_settings::AppearanceSnapshot {
-        bg_color: appearance.bg_color,
         bg_image: appearance.bg_image.clone(),
         bg_image_opacity: appearance.bg_image_opacity,
-        opacity: appearance.opacity,
-        blur: appearance.blur,
-        glass_style: match appearance.glass_style {
-            liquid_glass::GlassStyle::Regular => "regular".into(),
-            liquid_glass::GlassStyle::Clear => "clear".into(),
-        },
         theme_mode: serde_json::to_value(appearance.theme_mode)
             .ok()
             .and_then(|value| value.as_str().map(str::to_string))
@@ -591,21 +518,14 @@ fn snapshot_from_appearance(
     }
 }
 
-/// 快照只有能脚本改的那些键；选的布局不在里面，由调用方带上。
+/// 快照只有能脚本改的那些键；别的（选的布局、材质）照抄 `base`。
 fn appearance_from_snapshot(
     snapshot: smelt_model::appearance_settings::AppearanceSnapshot,
-    layout_id: Option<String>,
+    base: Appearance,
 ) -> Appearance {
     Appearance {
-        bg_color: snapshot.bg_color,
         bg_image: snapshot.bg_image,
         bg_image_opacity: snapshot.bg_image_opacity,
-        opacity: snapshot.opacity,
-        blur: snapshot.blur,
-        glass_style: match snapshot.glass_style.as_str() {
-            "clear" => liquid_glass::GlassStyle::Clear,
-            _ => liquid_glass::GlassStyle::Regular,
-        },
         theme_mode: serde_json::from_value(serde_json::Value::String(snapshot.theme_mode.clone()))
             .unwrap_or_else(|_| default_theme_mode()),
         theme_name: if snapshot.theme_name.trim().is_empty() {
@@ -617,7 +537,7 @@ fn appearance_from_snapshot(
         ui_font_family: snapshot.ui_font_family,
         font_px: snapshot.font_px,
         font_family: snapshot.font_family,
-        layout_id,
+        ..base
     }
 }
 
@@ -1019,23 +939,17 @@ fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
     let mut edited = cx.global::<Appearance>().clone();
     f(&mut edited);
     save_appearance(&edited);
-    // 用户自选底色要镜像给 PTY 线程（OSC 11 应答）和移动端配色快照，三处同源。
-    apply_bg_color(&edited);
     cx.set_global(edited);
     sync_theme_fonts(cx);
 }
 
-/// 把 `Appearance.bg_color` 落到终端默认底色：没被用户改过就跟主题走。
-pub fn apply_bg_color(a: &Appearance) {
-    terminal::set_bg_override((!a.bg_color_is_default()).then_some(a.bg_color));
-    publish_terminal_theme();
-}
-
-/// Hsla → 0xRRGGBB（取色器回调把颜色写回 config 用）。
-fn hsla_to_rgb(c: Hsla) -> u32 {
-    let rgba = Rgba::from(c);
-    let q = |f: f32| ((f.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xff;
-    (q(rgba.r) << 16) | (q(rgba.g) << 8) | q(rgba.b)
+/// 换窗口材质：存进外观，再按新材质重装主题（字色按材质配）。窗口上的材质由工作台在
+/// 外观变化时换（`Workspace::sync_window_backdrop`）。
+pub(crate) fn set_window_material(material: WindowMaterial, cx: &mut App) {
+    apply_appearance(move |a| a.material = material, cx);
+    let theme_name = cx.global::<Appearance>().theme_name.clone();
+    apply_named_theme(&theme_name, cx);
+    cx.refresh_windows();
 }
 
 // ===================== 设置页专属类型 =====================
@@ -1123,8 +1037,6 @@ const SETTINGS_CONTENT_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(25
 /// 失效缓存。可交互控件仍保留实体句柄，点击回调再回到 Workspace 执行。
 #[derive(Clone)]
 struct SettingsRenderSnapshot {
-    bg_color_picker: Option<Entity<ColorPickerState>>,
-    opacity_slider: Option<Entity<SliderState>>,
     ui_font_size_slider: Option<Entity<SliderState>>,
     font_size_slider: Option<Entity<SliderState>>,
     bg_image_opacity_slider: Option<Entity<SliderState>>,
@@ -1358,7 +1270,7 @@ impl SettingsContentView {
     fn refresh_snapshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(snapshot) = self.workspace.upgrade().map(|workspace| {
             workspace.update(cx, |workspace, cx| {
-                workspace.ensure_appearance_controls(window, cx);
+                workspace.ensure_appearance_controls(cx);
                 workspace.ensure_launch_inputs(window, cx);
                 workspace.ensure_profile_inputs(window, cx);
                 workspace.settings_render_snapshot(cx)

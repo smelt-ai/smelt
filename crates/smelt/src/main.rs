@@ -28,7 +28,6 @@ mod host_dialog;
 mod host_views;
 mod ide;
 mod keymap;
-mod liquid_glass;
 mod local_daemon;
 mod overlay;
 mod plugin_host;
@@ -53,6 +52,7 @@ mod term_dock;
 mod terminal;
 mod terminal_images;
 mod terminal_view;
+mod window_backdrop;
 mod workspace_attention;
 mod workspace_commands;
 mod workspace_directory;
@@ -84,7 +84,6 @@ use std::time::{Duration, SystemTime};
 use chrono::{Local, TimeZone};
 use gpui::InteractiveElement;
 use gpui::*;
-use gpui_component::color_picker::ColorPickerState;
 use gpui_component::slider::SliderState;
 use gpui_component::*;
 use smelt_model::workspace_directory::{project_labels, project_root_of};
@@ -247,11 +246,7 @@ fn ensure_main_window(current: &Rc<RefCell<Option<MainWindow>>>, cx: &mut App) -
     {
         return main;
     }
-    let window_bg = cx
-        .try_global::<Appearance>()
-        .map(|appearance| appearance.window_bg())
-        .unwrap_or(WindowBackgroundAppearance::Opaque);
-    let main = open_workspace_window(cx, window_bg);
+    let main = open_workspace_window(cx);
     *current.borrow_mut() = Some(main.clone());
     main
 }
@@ -1426,21 +1421,14 @@ struct Workspace {
     profile_inputs: Option<settings::ProfileInputs>,
     /// 面板插件（gpui-shell 插件，每个是一个视图）设置页的状态，见 `settings::panel_plugins`。
     panel_plugins: settings::PanelPluginsState,
-    /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 界面字号滑块 + 终端字号滑块 + 背景色取色器
-    /// + 背景图透明度滑块。
-    opacity_slider: Option<Entity<SliderState>>,
+    /// 设置面板的有状态组件（懒创建）：界面字号滑块 + 终端字号滑块 + 背景图透明度滑块。
     ui_font_size_slider: Option<Entity<SliderState>>,
     font_size_slider: Option<Entity<SliderState>>,
     bg_image_opacity_slider: Option<Entity<SliderState>>,
-    bg_color_picker: Option<Entity<ColorPickerState>>,
     /// 上面组件的变更订阅。
     settings_subs: Vec<Subscription>,
-    /// 上次应用到窗口的原生背景外观。外观变化时才再发给 AppKit。
-    applied_window_bg: Option<WindowBackgroundAppearance>,
-    /// 上次应用到原生 NSWindow 的整体透明度，避免重复发送 AppKit 消息。
-    applied_window_opacity: Option<f32>,
-    /// 上次安装/更新的液态玻璃材质档位。配置变化时才重新 setStyle。
-    applied_glass_style: Option<liquid_glass::GlassStyle>,
+    /// 上次设到窗口上的材质种类和明暗。换材质、换主题、系统换深浅时才再发给系统。
+    applied_backdrop: Option<(window_backdrop::WindowMaterial, bool)>,
     /// 上次应用到窗口的界面基准字号（rem_size）。
     applied_ui_font_px: Option<u32>,
     /// 主窗口。没有 Window 的变更用它在本轮更新结束后、绘制前刷新可见数据。
@@ -1567,6 +1555,8 @@ struct Workspace {
     _system_wake_sub: Option<Subscription>,
     /// 主窗口激活时补查跨日、守护是否落后。
     _window_activation_sub: Option<Subscription>,
+    /// 系统换深浅时把窗口材质的深浅设回 smelt 的主题，见 [`Self::sync_window_backdrop`]。
+    _system_appearance_sub: Option<Subscription>,
     /// 本机运行时最近一次是不是在线。从不在线变成在线，就是守护（重新）连上了。
     local_runtime_online: bool,
     /// 本机运行时连上时刷新守护落后的提示，见 [`Self::start_daemon_outdated_watch`]。
@@ -1733,15 +1723,11 @@ impl Workspace {
             launch_inputs: None,
             profile_inputs: None,
             panel_plugins: Default::default(),
-            opacity_slider: None,
             ui_font_size_slider: None,
             font_size_slider: None,
             bg_image_opacity_slider: None,
-            bg_color_picker: None,
             settings_subs: Vec::new(),
-            applied_window_bg: None,
-            applied_window_opacity: None,
-            applied_glass_style: None,
+            applied_backdrop: None,
             applied_ui_font_px: None,
             window_handle: window.window_handle(),
             visible_refresh_scheduled: false,
@@ -1801,6 +1787,7 @@ impl Workspace {
             _turn_clock: None,
             _system_wake_sub: None,
             _window_activation_sub: None,
+            _system_appearance_sub: None,
             local_runtime_online: false,
             _local_runtime_sub: None,
             _daemon_binary_watcher: None,
@@ -1877,6 +1864,17 @@ impl Workspace {
             }
         });
         ws._window_activation_sub = Some(activation);
+        // Windows 上系统换深浅时，GPUI 先通知这里，再把窗口的深浅标记改回跟系统，Mica 和
+        // 系统标题栏就跟主题对不上了。所以等这条系统消息处理完，再按主题设一次。
+        ws._system_appearance_sub =
+            Some(cx.observe_window_appearance(window, |this, window, cx| {
+                this.applied_backdrop = None;
+                cx.spawn_in(window, async move |this, cx| {
+                    this.update_in(cx, |this, window, cx| this.sync_window_backdrop(window, cx))
+                        .ok();
+                })
+                .detach();
+            }));
         ws._agent_hosts_sub =
             Some(cx.observe_global_in::<settings::AgentHosts>(window, |_, _, cx| cx.notify()));
         ws._provider_status_sub = Some(
@@ -2102,10 +2100,14 @@ impl Render for Workspace {
         // 帧上只清拖拽、认前台。目录、git、历史和窗口材质在选中与数据变化时刷新。
         self.prepare_frame(window, cx);
 
-        // 主题色 token（跟随 gpui-component 主题，替代硬编码）
-        // 有玻璃时窗口本身不铺底：会话列表透出窗口背后的模糊，舞台和别的面板各自铺实色。
+        // 整窗只在这里管底，有窗口材质时不铺、拿毛玻璃做底；里面的分栏和视图不铺页面底。
+        // 背景图也在这一层，铺满整扇窗口，压在材质上、所有内容下面。
         let shell_surface = workspace_frame::window_surface();
         let shell_padding = ui_theme::shell_padding();
+        let appearance = cx.global::<Appearance>();
+        let background_image = appearance.bg_image.as_deref().map(|path| {
+            workspace_frame::background_image_layer(path, appearance.bg_image_opacity, cx)
+        });
 
         // 壳层走界面字体（默认系统 UI）；终端/diff/代码块各自绑代码字体。
         div()
@@ -2114,6 +2116,7 @@ impl Render for Workspace {
             .flex_col()
             .size_full()
             .bg(shell_surface)
+            .children(background_image)
             .font_family(settings::resolved_ui_font_family(
                 cx.global::<Appearance>(),
             ))
@@ -2149,7 +2152,6 @@ impl Render for Workspace {
                     .min_h_0()
                     .flex()
                     .p(shell_padding)
-                    .bg(shell_surface)
                     .child(self.shell_dock().clone())
                     .children(self.render_dock_toggles(shell_padding, window)),
             )
@@ -2301,9 +2303,11 @@ fn smelt_file_url_to_target(url: &str) -> Option<InternalFileLink> {
 /// 首启和「点 Dock 图标重开」共用这一份：`Workspace::new` 本来就会从存档 + smeltd
 /// 重新拼出会话布局，跟正常重启应用效果一致。
 /// 返回值同时留下窗口句柄：主窗口还在不在看它，不看 Workspace 还能不能升级。
-fn open_workspace_window(cx: &mut App, window_bg: WindowBackgroundAppearance) -> MainWindow {
-    let window_options =
-        workspace_frame::workspace_window_options(ui_theme::shell_padding(), window_bg);
+fn open_workspace_window(cx: &mut App) -> MainWindow {
+    let window_options = workspace_frame::workspace_window_options(
+        ui_theme::shell_padding(),
+        cx.global::<Appearance>().material,
+    );
     let mut workspace = None;
     let window_handle = cx
         .open_window(window_options, |window, cx| {
@@ -2541,20 +2545,17 @@ fn main() {
                 ),
             ])
             .expect("加载内嵌字体失败");
-        // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
+        // 外观设置：读盘设为全局单例。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。
         // 主题先登记再恢复外观，插件主题在首帧前即可生效。
         smelt_themes::register(cx);
         plugins::register_initial_themes(cx);
         let appearance = load_appearance();
-        let window_bg = appearance.window_bg();
         cx.set_global(appearance.clone());
         // 代码字体必须在装主题之前落地：Theme.mono_font_family 从这里读。
         terminal_view::set_font_px(appearance.font_px);
         terminal_view::set_font_family(&appearance.font_family);
         settings::apply_named_theme(&appearance.theme_name, cx);
-        // 用户自选终端底色要在首帧前生效，并连同主题一起发布给守护（移动端配色）。
-        settings::apply_bg_color(&appearance);
         cx.set_global(settings::LaunchConfig::default());
         settings::start_launch_config_load(cx);
         #[cfg(any(target_os = "macos", windows))]
@@ -2833,7 +2834,7 @@ fn main() {
         // 远程访问同理跑在 smeltd 里，GUI 退出不影响远程设备。
         settings::start_remote_config_load(cx);
         // 首启主窗口，记入 current_ws（reopen 回调 / URL 投递循环都靠它判断当前主窗口）。
-        *current_ws.borrow_mut() = Some(open_workspace_window(cx, window_bg));
+        *current_ws.borrow_mut() = Some(open_workspace_window(cx));
 
         // 退出前尽量提交最后一次 workspace 文档。订阅必须由 app global 持有，否则
         // app.run 的初始化闭包返回时会被 Subscription::drop 自动取消。

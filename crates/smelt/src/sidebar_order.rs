@@ -148,11 +148,6 @@ pub(crate) fn neighbor_in_group(order: &[usize], closed: usize) -> Option<usize>
         .copied()
 }
 
-/// 空项目标题再降一档；当前项目即使没会话也保持可读（落地页）。
-pub(crate) fn project_header_is_dimmed(is_active: bool, is_empty: bool) -> bool {
-    is_empty && !is_active
-}
-
 /// 菜单里切换固定，并把项目挪到固定区与未固定区的交界：新固定的排在固定区末尾，
 /// 取消固定的排在未固定区开头。不挪的话它会落在两区里按原骨架顺序算出的位置，
 /// 点完要满屏找。隐式组先补进 `projects`，挪动才能落盘。

@@ -18,12 +18,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, HeadlessAppContext, IntoElement, ParentElement,
-    Render, Styled, Window, div, px, rgb, size,
+    AnyElement, App, AppContext as _, Context, ElementId, HeadlessAppContext, IntoElement,
+    ParentElement, Render, Styled, Window, div, px, rgb, size,
 };
 use gpui_component::input::{InputState, TextareaState};
-use gpui_component::{IconName, Root};
+use gpui_component::{IconName, Root, StyledExt as _};
 use smelt_model::theme_index::{DEFAULT_DARK, DEFAULT_LIGHT};
 use smelt_ui::{
     Button, Checkbox, IconAction as _, ListRow, Radio, Segmented, Switch, TextArea, TextInput,
@@ -59,7 +60,7 @@ const SNAPSHOTS: &[Snapshot] = &[
     },
     Snapshot {
         name: "list-row",
-        size: (360., 180.),
+        size: (680., 180.),
         setup: list_rows,
     },
     Snapshot {
@@ -361,22 +362,48 @@ fn segmented(_: &mut Window, _: &mut App) -> Draw {
 
 fn list_rows(_: &mut Window, _: &mut App) -> Draw {
     Box::new(|_, _| {
-        let item = |id: &'static str, label: &'static str| {
+        // 行尾的时间是附属信息：选中行里换成按选中底配过的那档次要字。
+        let item = |id: ElementId, label: &'static str, selected: bool| {
             ListRow::new(id)
                 .w(px(280.))
                 .px_3()
                 .py_2()
+                .flex()
                 .text_sm()
-                .child(label)
+                .selected(selected)
+                .child(
+                    div()
+                        .flex_1()
+                        .when(selected, |name| name.font_medium())
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(ui_theme::row_muted(selected)))
+                        .child("3 分钟前"),
+                )
                 .on_click(|_, _, _| {})
+        };
+        // 左边压在实色窗口底上，右边压在一块彩色上，代替窗口材质：选中的底要透出它。
+        let column = |key: &'static str, backdrop: u32| {
+            let id = |row: &'static str| ElementId::Name(format!("{key}-{row}").into());
+            div()
+                .p_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .bg(rgb(backdrop))
+                .child(item(id("plain"), "普通行", false))
+                // 名字的字色三行一样；选中只换底，名字加中等字重（调用点给）。
+                .child(item(id("selected"), "选中的行", true))
+                .child(item(id("disabled"), "禁用的行", false).disabled(true))
         };
         div()
             .flex()
-            .flex_col()
-            .gap_1()
-            .child(item("plain", "普通行"))
-            .child(item("selected", "选中的行").selected(true))
-            .child(item("disabled", "禁用的行").disabled(true))
+            .gap_4()
+            .child(column("bg", ui_theme::bg()))
+            .child(column("backdrop", ui_theme::chart(0)))
             .into_any_element()
     })
 }

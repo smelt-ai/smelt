@@ -178,11 +178,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                                 .flex_shrink_0()
                                 .text_size(px(12.))
                                 .font_semibold()
-                                .text_color(rgb(if drag.empty {
-                                    ui_theme::muted()
-                                } else {
-                                    ui_theme::text()
-                                }))
+                                .text_color(rgb(ui_theme::text()))
                                 .child(drag.label.clone()),
                         )
                         .when(drag.agg != AgentStatus::Idle, |row| {

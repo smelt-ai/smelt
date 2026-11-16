@@ -96,16 +96,23 @@ fn runtime_name_with_indicator(
     name: impl Into<SharedString>,
     indicator: Option<crate::runtimes::RuntimeIndicator>,
 ) -> AnyElement {
-    // 机器是项目上面一层，层级靠字号和分隔线，不靠高亮。每台机器一个样子：焦点在哪由选中的
-    // 对话说明，机器再亮一档只会抢眼。
+    // 分段标题和「项目」标题同一套：小一号、中等字重、次要字色。它是给下面的项目分区的，
+    // 不是要读的名字，压低了下面的项目、会话才显得出层级。
     let name = div()
         .min_w_0()
         .overflow_hidden()
-        .text_sm()
+        .text_xs()
+        .font_medium()
         .text_color(rgb(ui_theme::muted()))
         .child(truncated_line(name));
     let Some(indicator) = indicator else {
         return name.into_any_element();
+    };
+    // 远程机器名字后跟一个连接灯（绿：在线；黄：慢、连接中、升级中；红：离线、版本不兼容）。
+    let light = match indicator.light {
+        crate::runtimes::LinkLight::Good => ui_theme::ok(),
+        crate::runtimes::LinkLight::Degraded => ui_theme::need(),
+        crate::runtimes::LinkLight::Down => ui_theme::bad(),
     };
     let detail = SharedString::from(indicator.detail);
     h_flex()
@@ -116,6 +123,7 @@ fn runtime_name_with_indicator(
         .gap_1p5()
         .items_center()
         .child(name)
+        .child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(rgb(light)))
         .tooltip(move |window, cx| {
             gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
         })
@@ -131,19 +139,18 @@ fn runtime_name_with_indicator(
         .into_any_element()
 }
 
-/// 侧栏里一台机器的分段标题：点整行折起或展开；远程机器图标颜色体现连接状态（绿：在线；
-/// 黄：慢、连接中、升级中；红：离线、版本不兼容），悬停名字看走哪条路、多慢、什么版本，
-/// 要人处理的状态名字后再写几个字。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
+/// 侧栏里一台机器的分段标题，样子和「项目」标题一样：小字、次要字色，不带机器图标，
+/// 跟下面带图标的项目行一眼分得开。点整行折起或展开；远程机器名字后有连接灯，悬停名字看
+/// 走哪条路、多慢、什么版本。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
 /// 「远程桌面」（装了的才有）和「打开项目」的快捷按钮。`grouping` 是侧栏的「筛选与
 /// 分组」按钮：分了机器段就没有「项目」标题了，它挂在第一段的标题上。
 ///
-/// 28 高，本机文字、远程连接灯和下面各行的图标落在同一条左缘。多台机器时它是最上面一层，第二段起上面再隔一条
-/// 线（见 `header_for`）。
-/// 折叠箭头跟在名字后面，折起时常显，展开时悬停才出现。
+/// 28 高，名字和下面项目行的图标落在同一条左缘。多台机器时它是最上面一层，第二段起上面
+/// 再隔一条线（见 `header_for`）。折叠箭头跟在名字后面，折起时常显，展开时悬停才出现。
 fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
-    _folded: bool,
+    folded: bool,
     chevron_degrees: f32,
     grouping: Option<Div>,
     // 键盘焦点环、滚到这一行用的锚，见 `keyboard`。
@@ -154,12 +161,6 @@ fn runtime_section_header(
     let name = crate::runtimes::runtime_name(&key, cx);
     let indicator = crate::runtimes::runtime_indicator(&key, cx);
     let has_desktop = crate::runtimes::runtime_has_desktop(&key, cx);
-    let icon_color = match indicator.as_ref().map(|i| i.light) {
-        Some(crate::runtimes::LinkLight::Good) => ui_theme::ok(),
-        Some(crate::runtimes::LinkLight::Degraded) => ui_theme::need(),
-        Some(crate::runtimes::LinkLight::Down) => ui_theme::bad(),
-        None => ui_theme::muted(),
-    };
     let group = SharedString::from(format!("runtime-header-{key:?}"));
     let toggle_workspace = workspace.clone();
     let toggle_key = key.clone();
@@ -175,58 +176,32 @@ fn runtime_section_header(
         .mt_3()
         .pl(px(PROJECT_HEADER_PAD_X))
         .pr_1()
-        .h(ui_theme::height::md())
+        .h(ui_theme::height::sm())
         .flex()
         .items_center()
-        .gap_2()
+        .gap_1()
         .rounded(ui_theme::row_radius())
         .on_click(move |_ev, _window, cx| {
             toggle_workspace.update(cx, |ws, cx| ws.toggle_runtime_fold(&toggle_key, cx));
         })
-        // 跟「对话」分组行同一套：最左折叠箭头（常显、随开合转），再是机器图标，再是名字。
+        .child(runtime_name_with_indicator(&key, name, indicator))
         .child(
             div()
+                .flex_shrink_0()
                 .flex()
                 .items_center()
-                .gap_1()
-                .flex_none()
+                .when(!folded, |chevron| {
+                    chevron
+                        .opacity(0.0)
+                        .group_hover(group.clone(), |style| style.opacity(1.0))
+                })
                 .child(
-                    div()
-                        .w(px(row::GROUP_ICON_BOX))
-                        .h(px(16.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Icon::new(IconName::ChevronRight)
-                                .size(px(12.))
-                                .text_color(rgb(ui_theme::muted()))
-                                .transform(Transformation::rotate(radians(
-                                    chevron_degrees.to_radians(),
-                                ))),
-                        ),
-                )
-                .child(
-                    div()
-                        .w(px(15.))
-                        .h(px(16.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Icon::new(if key == RuntimeKey::Local {
-                                gpui_kit_assets::IconName::Monitor
-                            } else {
-                                gpui_kit_assets::IconName::Server
-                            })
-                            .size(px(15.))
-                            .text_color(rgb(icon_color)),
-                        ),
+                    Icon::new(IconName::ChevronRight)
+                        .size(px(12.))
+                        .text_color(rgb(ui_theme::muted()))
+                        .transform(Transformation::rotate(radians(chevron_degrees.to_radians()))),
                 ),
         )
-        .child(runtime_name_with_indicator(&key, name, indicator))
         .child(div().flex_1())
         .children(grouping.map(|grouping| {
             grouping
@@ -1252,28 +1227,14 @@ impl Workspace {
                                 .overflow_hidden()
                                 .child(
                                     // 项目名与会话同为 text_sm、常规字重：层级靠文件夹图标和
-                                    // 会话的缩进表达，不靠加粗。活动项目提亮；空项目降一档到
-                                    // muted，不降到 faint：它仍是能点、能新建会话的条目，faint
-                                    // 读起来像禁用。
+                                    // 会话的缩进表达，不靠加粗，也不靠字色（字色由 `ListRow`
+                                    // 给，空项目、不在用的项目都一样读得清）。项目行自己被选中
+                                    // （它的会话没露出来）时跟会话行一样加中等字重。
                                     div()
                                         .min_w_0()
                                         .overflow_hidden()
                                         .text_sm()
-                                        // 项目行自己被选中（它的会话没露出来）时跟会话行一样：
-                                        // 选中字色加中等字重。
                                         .when(project_header_selected, |name| name.font_medium())
-                                        .text_color(rgb(if project_header_selected {
-                                            ui_theme::text()
-                                        } else if is_active_group {
-                                            ui_theme::text()
-                                        } else if crate::sidebar_order::project_header_is_dimmed(
-                                            is_active_group,
-                                            empty_group,
-                                        ) {
-                                            ui_theme::muted()
-                                        } else {
-                                            ui_theme::muted()
-                                        }))
                                         .child(truncated_line(group_name.clone())),
                                 )
                                 .when(is_pinned, |row| {
@@ -1298,7 +1259,7 @@ impl Workspace {
                                         .overflow_hidden()
                                         .text_xs()
                                         .font_family(crate::terminal_view::font_family())
-                                        .text_color(rgb(ui_theme::faint()))
+                                        .text_color(rgb(ui_theme::row_faint(project_header_selected)))
                                         .tooltip(move |window, cx| {
                                             gpui_component::tooltip::Tooltip::new(
                                                 full_branch.clone(),
@@ -1311,7 +1272,7 @@ impl Workspace {
                                     div()
                                         .flex_shrink_0()
                                         .text_xs()
-                                        .text_color(rgb(ui_theme::faint()))
+                                        .text_color(rgb(ui_theme::row_faint(project_header_selected)))
                                         .child(format!("{repository_count} 仓库"))
                                 })),
                         )
@@ -1338,7 +1299,7 @@ impl Workspace {
                                         .items_center()
                                         .justify_center()
                                         .text_xs()
-                                        .text_color(rgb(ui_theme::muted()))
+                                        .text_color(rgb(ui_theme::row_muted(project_header_selected)))
                                         .group_hover(PROJ_HEADER_GROUP, |style| {
                                             style.opacity(0.0)
                                         })
@@ -1833,25 +1794,13 @@ impl Workspace {
                             Some(input) => {
                                 inline_rename_input(input, this.clone()).into_any_element()
                             }
-                            // 选中照组件库侧栏：选中底、选中字色、中等字重。没选中的标题
-                            // 压到弱字，悬停才提亮：选中底和悬停底在不少深色主题里是相近
-                            // 的两档灰，光靠底色分不出哪行是选中、哪行只是鼠标停着。
+                            // 字色由 `ListRow` 给；选中加中等字重，跟只是悬停的行分开
+                            // （两档底在不少深色主题里很接近）。
                             None => div()
                                 .flex_1()
                                 .min_w_0()
                                 .text_sm()
-                                .map(|title| {
-                                    if is_active {
-                                        title
-                                            .font_medium()
-                                            .text_color(rgb(ui_theme::text()))
-                                    } else {
-                                        title.text_color(rgb(ui_theme::muted())).group_hover(
-                                            SESSION_ROW_GROUP,
-                                            |style| style.text_color(rgb(ui_theme::text())),
-                                        )
-                                    }
-                                })
+                                .when(is_active, |title| title.font_medium())
                                 .overflow_hidden()
                                 .child(truncated_line(title.clone()))
                                 .into_any_element(),
@@ -1874,7 +1823,7 @@ impl Workspace {
                             .px_1()
                             .rounded(px(3.))
                             .text_xs()
-                            .text_color(rgb(ui_theme::muted()))
+                            .text_color(rgb(ui_theme::row_muted(is_active)))
                             .bg(ui_theme::hair())
                             .tooltip(move |window, cx| {
                                 gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
@@ -1888,7 +1837,7 @@ impl Workspace {
                             .flex_shrink_0()
                             .text_xs()
                             .font_family(crate::terminal_view::font_family())
-                            .text_color(rgb(ui_theme::faint()))
+                            .text_color(rgb(ui_theme::row_faint(is_active)))
                             .child(s.clone())
                     }))
                     // 按状态 / 不分组时，项目标题已经不存在，把来源项目与分支补到行内。
@@ -1900,12 +1849,12 @@ impl Workspace {
                             .items_center()
                             .gap_1()
                             .text_xs()
-                            .text_color(rgb(ui_theme::muted()))
+                            .text_color(rgb(ui_theme::row_muted(is_active)))
                             .child(project)
                             .children(branch.map(|name| {
                                 div()
                                     .font_family(crate::terminal_view::font_family())
-                                    .text_color(rgb(ui_theme::faint()))
+                                    .text_color(rgb(ui_theme::row_faint(is_active)))
                                     .child(name)
                             }))
                     }))
@@ -1929,7 +1878,7 @@ impl Workspace {
                             Some(label) => (label.into(), ui_theme::session_dot_color(status).into()),
                             None => match turn_text {
                                 Some(text) => (text.into(), ui_theme::session_dot_color(status).into()),
-                                None => (updated_text.into(), rgb(ui_theme::muted()).into()),
+                                None => (updated_text.into(), rgb(ui_theme::row_muted(is_active)).into()),
                             },
                         }),
                         Button::new(("close-session", ui_id))
@@ -2149,21 +2098,8 @@ impl Workspace {
                                             .flex_1()
                                             .min_w_0()
                                             .text_sm()
-                                            // 当前 pane 跟会话行同口径：选中亮，其余弱字、
-                                            // 悬停提亮。
-                                            .map(|title| {
-                                                if is_current_view {
-                                                    title.font_medium().text_color(rgb(
-                                                        ui_theme::text(),
-                                                    ))
-                                                } else {
-                                                    title
-                                                        .text_color(rgb(ui_theme::muted()))
-                                                        .group_hover(SESSION_ROW_GROUP, |style| {
-                                                            style.text_color(rgb(ui_theme::text()))
-                                                        })
-                                                }
-                                            })
+                                            // 当前 pane 跟会话行同口径：选中加中等字重。
+                                            .when(is_current_view, |title| title.font_medium())
                                             .overflow_hidden()
                                             .child(truncated_line(p_title))
                                             .into_any_element(),
@@ -2183,7 +2119,7 @@ impl Workspace {
                                         ),
                                         None => (
                                             pane_updated_text.into(),
-                                            rgb(ui_theme::muted()).into(),
+                                            rgb(ui_theme::row_muted(is_current_view)).into(),
                                         ),
                                     }),
                                     Button::new(("close-pane", pane_entity_id))

@@ -252,7 +252,7 @@ impl AcpView {
                 .h_full()
                 .border_l_1()
                 .border_color(t.border)
-                .bg(gpui::rgb(ui_theme::side()))
+                .bg(ui_theme::shade(ui_theme::side()))
                 .child(
                     h_flex()
                         .w_full()

@@ -43,11 +43,11 @@ pub(crate) fn titlebar_options(shell_padding: Pixels) -> TitlebarOptions {
 /// 设置、会话追踪用系统标题栏，继续让 AppKit 拖，不要套这份选项。
 pub(crate) fn workspace_window_options(
     shell_padding: Pixels,
-    window_background: WindowBackgroundAppearance,
+    material: crate::window_backdrop::WindowMaterial,
 ) -> WindowOptions {
     WindowOptions {
         titlebar: Some(titlebar_options(shell_padding)),
-        window_background,
+        window_background: crate::window_backdrop::window_background(material),
         app_owns_titlebar_drag: !NATIVE_TITLEBAR,
         ..Default::default()
     }
@@ -63,40 +63,15 @@ pub(crate) fn card(surface: Hsla) -> Div {
         .bg(surface)
 }
 
-/// 侧栏透出的比例：浅色底亮，模糊过的桌面压得住，透得多一点；深色底上桌面的亮色更跳，
-/// 透得少一点。
-const SIDEBAR_GLASS_ALPHA_LIGHT: f32 = 0.72;
-const SIDEBAR_GLASS_ALPHA_DARK: f32 = 0.80;
-
-/// 窗口有没有玻璃可透：macOS 上整窗背后是系统的模糊（`Appearance::window_bg` 的
-/// `Blurred`）。别的平台的 `Blurred` 靠不住（Linux 看合成器，可能只是透明不模糊），
-/// 一律当没有。
-const fn window_has_glass() -> bool {
-    cfg!(target_os = "macos")
-}
-
-/// 窗口的底。有玻璃时不铺，侧栏才透得出去；舞台和别的面板各自铺实色。
+/// 整扇窗口的底：有窗口材质（`window_backdrop`）时什么都不铺，毛玻璃就是底；没有时铺一层
+/// `bg`。全窗口只有这一处管底，页签栏和各个视图（自带的、插件的）都不铺页面底，铺了就把
+/// 材质盖住。
 pub(crate) fn window_surface() -> Hsla {
-    if window_has_glass() {
-        transparent_black()
+    if crate::window_backdrop::available() {
+        gpui::transparent_black()
     } else {
         rgb(crate::ui_theme::bg()).into()
     }
-}
-
-/// 会话列表那一栏的底：有玻璃时是半透明的 `side`，透出窗口背后的模糊；没有时是实色。
-/// 色板里的 `side` 仍是实色，`soft` 这些照旧压在它上面取实色。
-pub(crate) fn sidebar_surface() -> Hsla {
-    let side: Hsla = rgb(crate::ui_theme::side()).into();
-    if !window_has_glass() {
-        return side;
-    }
-    let alpha = if crate::ui_theme::is_light() {
-        SIDEBAR_GLASS_ALPHA_LIGHT
-    } else {
-        SIDEBAR_GLASS_ALPHA_DARK
-    };
-    side.opacity(alpha)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,8 +109,8 @@ pub(crate) fn with_window_drag<E: InteractiveElement>(el: E) -> E {
         .on_mouse_down(MouseButton::Left, titlebar_mouse_down)
 }
 
-/// 会话内容区共用的背景图层：始终覆盖容器，裁切方式和终端保持一致。
-/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，主题底色透出。
+/// 整扇窗口的背景图层（挂在窗口根上，见 `Workspace::render`）：铺满容器，按比例裁切。
+/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，底下的材质（没材质时是 `bg`）透出。
 /// 透明度为 0 时不读文件。栅格图只画降采样预览，不把原图交给 `img()`。
 pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div {
     let layer = div().absolute().inset_0();
@@ -181,7 +156,7 @@ pub(crate) fn page_chrome(left_guard: Option<Pixels>, right_inset: Pixels) -> Di
 #[cfg(test)]
 mod tests {
     use super::{TitlebarMouseAction, titlebar_mouse_action, workspace_window_options};
-    use gpui::{WindowBackgroundAppearance, px};
+    use gpui::px;
 
     #[test]
     fn plain_titlebar_region_moves_or_double_clicks() {
@@ -222,7 +197,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_uses_the_system_titlebar() {
-        let options = workspace_window_options(px(0.), WindowBackgroundAppearance::Opaque);
+        let options = workspace_window_options(
+            px(0.),
+            crate::window_backdrop::WindowMaterial::platform_default(),
+        );
         assert!(!options.app_owns_titlebar_drag, "拖动归系统标题栏");
         let titlebar = options.titlebar.expect("主窗口要给系统标题栏一个标题");
         assert!(
@@ -234,7 +212,10 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn self_drawn_titlebar_owns_its_drag() {
-        let options = workspace_window_options(px(0.), WindowBackgroundAppearance::Opaque);
+        let options = workspace_window_options(
+            px(0.),
+            crate::window_backdrop::WindowMaterial::platform_default(),
+        );
         assert!(
             options.app_owns_titlebar_drag,
             "自绘顶栏必须声明应用拥有拖动，否则 AppKit 扣住标题栏里的单击"

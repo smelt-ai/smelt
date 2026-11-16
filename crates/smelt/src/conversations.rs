@@ -85,21 +85,17 @@ impl Workspace {
             .items_center()
             .gap_2()
             .rounded(crate::ui_theme::row_radius())
-            .child(Icon::new(icon).size(px(16.)).text_color(rgb(if selected {
-                crate::ui_theme::muted()
-            } else {
-                crate::ui_theme::muted()
-            })))
+            .child(
+                Icon::new(icon)
+                    .size(px(16.))
+                    .text_color(rgb(crate::ui_theme::row_muted(selected))),
+            )
+            // 名字的字色由 `ListRow` 给；选中加中等字重。
             .child(
                 div()
                     .flex_1()
                     .text_sm()
-                    .font_medium()
-                    .text_color(rgb(if selected {
-                        crate::ui_theme::text()
-                    } else {
-                        crate::ui_theme::muted()
-                    }))
+                    .when(selected, |label| label.font_medium())
                     .child(label.into()),
             )
             .when(attention, |row| {
@@ -158,6 +154,8 @@ impl Workspace {
                     .is_some_and(|view| view.read(cx).session_id() == sid)
             })
         });
+        // 折起来时选中的对话藏在里面，分组行代它显示选中。
+        let header_selected = collapsed && selected_inside;
         let toggle_entity = entity.clone();
         let group_key = crate::session_list::SidebarItem::ConversationGroup.key();
         let reveal_target = self.sidebar_reveal.target();
@@ -178,7 +176,7 @@ impl Workspace {
                     entity.clone(),
                 ))
             })
-            .selected(collapsed && selected_inside)
+            .selected(header_selected)
             .h(crate::ui_theme::height::md())
             .px_2()
             .flex()
@@ -202,7 +200,9 @@ impl Workspace {
                                 .child(
                                     Icon::new(IconName::ChevronRight)
                                         .size(px(12.))
-                                        .text_color(rgb(crate::ui_theme::muted()))
+                                        .text_color(rgb(crate::ui_theme::row_muted(
+                                            header_selected,
+                                        )))
                                         .transform(Transformation::rotate(radians(
                                             deg.to_radians(),
                                         ))),
@@ -211,7 +211,7 @@ impl Workspace {
                         .child(
                             Icon::new(gpui_kit_assets::IconName::MessageSquare)
                                 .size(px(15.))
-                                .text_color(rgb(crate::ui_theme::muted())),
+                                .text_color(rgb(crate::ui_theme::row_muted(header_selected))),
                         )
                         .into_any_element()
                 } else {
@@ -231,7 +231,7 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .text_sm()
-                    .text_color(rgb(crate::ui_theme::muted()))
+                    .when(header_selected, |label| label.font_medium())
                     .child("对话"),
             )
             .when(collapsed && agg != AgentStatus::Idle, |row| {
@@ -248,7 +248,7 @@ impl Workspace {
                     div()
                         .flex_shrink_0()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::muted()))
+                        .text_color(rgb(crate::ui_theme::row_muted(header_selected)))
                         .child(product.len().to_string()),
                 )
             })
@@ -294,7 +294,7 @@ impl Workspace {
                             cx,
                         )
                         .into(),
-                        rgb(crate::ui_theme::muted()).into(),
+                        rgb(crate::ui_theme::row_muted(selected)).into(),
                     ),
                 };
             let tooltip = conversation_row_tooltip(&title, &runtime, cx);
@@ -368,17 +368,12 @@ impl Workspace {
                             crate::session_list::row::inline_rename_input(input, entity.clone())
                                 .into_any_element()
                         }
-                        // 选中跟项目下的会话行同口径：选中字色加中等字重。
+                        // 跟项目下的会话行同口径：字色由 `ListRow` 给，选中加中等字重。
                         None => div()
                             .flex_1()
                             .min_w_0()
                             .text_sm()
                             .when(selected, |title| title.font_medium())
-                            .text_color(rgb(if selected {
-                                crate::ui_theme::text()
-                            } else {
-                                crate::ui_theme::text()
-                            }))
                             .overflow_hidden()
                             .child(truncated_line(title))
                             .into_any_element(),

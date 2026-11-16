@@ -82,7 +82,7 @@ impl AcpView {
                 .gap_1p5()
                 .border_t_1()
                 .border_color(border)
-                .bg(gpui::rgb(ui_theme::side()))
+                .bg(ui_theme::shade(ui_theme::side()))
                 .child(header)
                 .child(rows)
                 .children(self.memory_error.as_ref().map(|error| {

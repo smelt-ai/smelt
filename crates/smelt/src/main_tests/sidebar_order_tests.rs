@@ -4,8 +4,8 @@ use super::{indices_share_group, reorder_vec};
 use crate::sidebar_order::{
     apply_pinned_project_drop, is_pinned_project, move_index_near, move_project_root_near,
     neighbor_in_group, pinned_projects_first, previous_viewed,
-    project_header_click_toggles_collapse, project_header_is_dimmed, same_project_root,
-    sidebar_empty_project_visible, toggle_pinned_project, toggle_pinned_project_at_boundary,
+    project_header_click_toggles_collapse, same_project_root, sidebar_empty_project_visible,
+    toggle_pinned_project, toggle_pinned_project_at_boundary,
 };
 
 #[test]
@@ -102,13 +102,6 @@ fn pin_toggle_is_keyed_by_normalized_root() {
     assert!(is_pinned_project(&pinned, "/repo/smelt"));
     toggle_pinned_project(&mut pinned, "/repo/smelt");
     assert!(!is_pinned_project(&pinned, "/repo/smelt/"));
-}
-
-#[test]
-fn empty_project_title_is_dimmed_unless_it_is_the_active_project() {
-    assert!(project_header_is_dimmed(false, true));
-    assert!(!project_header_is_dimmed(true, true));
-    assert!(!project_header_is_dimmed(false, false));
 }
 
 #[test]

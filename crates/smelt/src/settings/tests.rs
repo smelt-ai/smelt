@@ -2,27 +2,7 @@ use super::*;
 
 #[cfg(test)]
 mod appearance_tests {
-    use super::{Appearance, ThemeMode, liquid_glass};
-    use gpui::WindowBackgroundAppearance;
-
-    #[test]
-    fn window_opacity_clamps_invalid_persisted_values() {
-        let mut appearance = Appearance::default();
-
-        assert_eq!(appearance.window_opacity(), 0.95);
-
-        appearance.opacity = 0.2;
-        assert_eq!(appearance.window_opacity(), 0.3);
-
-        appearance.opacity = 0.6;
-        assert_eq!(appearance.window_opacity(), 0.6);
-
-        appearance.opacity = 1.2;
-        assert_eq!(appearance.window_opacity(), 1.0);
-
-        appearance.opacity = f32::NAN;
-        assert_eq!(appearance.window_opacity(), 1.0);
-    }
+    use super::{Appearance, ThemeMode};
 
     #[test]
     fn appearance_deserialization_defaults() {
@@ -42,7 +22,6 @@ mod appearance_tests {
     #[test]
     fn appearance_survives_the_snapshot_round_trip() {
         let appearance = Appearance {
-            glass_style: liquid_glass::GlassStyle::Clear,
             theme_mode: ThemeMode::Light,
             theme_name: "Ayu Light".to_string(),
             ui_font_px: 18,
@@ -50,10 +29,8 @@ mod appearance_tests {
             ..Appearance::default()
         };
         let snapshot = super::snapshot_from_appearance(&appearance);
-        assert_eq!(snapshot.glass_style, "clear");
         assert_eq!(snapshot.theme_mode, "light");
-        let back = super::appearance_from_snapshot(snapshot, None);
-        assert_eq!(back.glass_style, liquid_glass::GlassStyle::Clear);
+        let back = super::appearance_from_snapshot(snapshot, Appearance::default());
         assert_eq!(back.theme_mode, ThemeMode::Light);
         assert_eq!(back.theme_name, "Ayu Light");
         assert_eq!(back.ui_font_px, 18);
@@ -116,8 +93,8 @@ mod appearance_tests {
             });
             super::apply_requested_appearance_on(
                 &std::collections::BTreeMap::from([(
-                    "appearance.opacity".into(),
-                    serde_json::json!(0.6),
+                    "appearance.ui_font_family".into(),
+                    serde_json::json!("Menlo"),
                 )]),
                 &store,
                 cx,
@@ -128,7 +105,7 @@ mod appearance_tests {
                 Some("trader/two-columns")
             );
             let saved = store.appearance().unwrap().unwrap();
-            assert_eq!(saved.opacity, 0.6);
+            assert_eq!(saved.ui_font_family, "Menlo");
             assert_eq!(saved.layout_id.as_deref(), Some("trader/two-columns"));
         });
         drop(store);
@@ -145,28 +122,20 @@ mod appearance_tests {
         cx.update(gpui_component::init);
         cx.update(|cx| {
             cx.set_global(Appearance::default());
-            let original = cx.global::<Appearance>().opacity;
+            let original = cx.global::<Appearance>().ui_font_family.clone();
             let result = super::apply_requested_appearance_on(
                 &std::collections::BTreeMap::from([(
-                    "appearance.opacity".into(), serde_json::json!(0.6),
+                    "appearance.ui_font_family".into(), serde_json::json!("Menlo"),
                 )]),
                 &store,
                 cx,
             );
             assert!(matches!(result, Err(smelt_model::appearance_settings::SettingsError::Store(_))));
-            assert_eq!(cx.global::<Appearance>().opacity, original);
+            assert_eq!(cx.global::<Appearance>().ui_font_family, original);
             assert!(store.appearance().unwrap().is_none());
         });
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn liquid_glass_keeps_a_stable_blurred_window_backdrop() {
-        assert_eq!(
-            Appearance::default().window_bg(),
-            WindowBackgroundAppearance::Blurred
-        );
     }
 }
 
@@ -353,7 +322,7 @@ mod antigravity_terminal_tests {
 }
 
 /// 下发给移动端的配色快照必须跟 PC 实际渲染色同源——这里锁住两件事：
-/// 快照读的就是当前主题色（切浅色能跟着变、用户自选底色能盖掉主题色），以及
+/// 快照读的就是当前主题色（切浅色能跟着变），以及
 /// `smelt-core` 侧那份「守护读不到快照文件时」的默认值没跟深色主题漂移。
 #[cfg(test)]
 mod terminal_theme_tests {
@@ -366,7 +335,6 @@ mod terminal_theme_tests {
         let _guard = terminal::lock_theme_globals();
         terminal::set_dark_mode(true);
         crate::ui_theme::set_light(false);
-        terminal::set_bg_override(None);
         assert_eq!(
             current_terminal_theme(),
             TerminalThemeSnapshot::default(),
@@ -375,11 +343,10 @@ mod terminal_theme_tests {
     }
 
     #[test]
-    fn snapshot_follows_theme_mode_and_user_background() {
+    fn snapshot_follows_theme_mode() {
         let _guard = terminal::lock_theme_globals();
         terminal::set_dark_mode(false);
         crate::ui_theme::set_light(true);
-        terminal::set_bg_override(None);
         let light = current_terminal_theme();
         assert!(!light.dark);
         assert_eq!(light.background, crate::ui_theme::bg());
@@ -389,14 +356,6 @@ mod terminal_theme_tests {
             "浅色主题要发浅色板，不能原样发深色板"
         );
 
-        terminal::set_bg_override(Some(0x00123456));
-        assert_eq!(
-            current_terminal_theme().background,
-            0x00123456,
-            "用户自选底色要盖过主题色"
-        );
-
-        terminal::set_bg_override(None);
         terminal::set_dark_mode(true);
         crate::ui_theme::set_light(false);
     }
