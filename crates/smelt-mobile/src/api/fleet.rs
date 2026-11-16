@@ -137,8 +137,8 @@ pub fn verify_connections() {
     crate::fleet::fleet().verify();
 }
 
-/// 网络变了（切 Wi-Fi / 蜂窝、断网又恢复，App 侧监听到时调用）：让 iroh 重新找路径，并像
-/// [`verify_connections`] 一样确认每台机器的链路，旧路径跟着旧网络没了的立刻换新链路重连。
+/// 网络变了（切 Wi-Fi / 蜂窝、断网又恢复，App 侧监听到时调用）：换掉旧 iroh endpoint，所有
+/// 机器在新 endpoint 上重新连（旧 endpoint 跨网络后常常再也连不上 relay）。
 pub fn network_changed() {
     crate::fleet::fleet().network_changed();
 }

@@ -149,6 +149,11 @@ class _LifecycleState extends State<_Lifecycle> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       final model = widget.model;
       model.backend.verifyConnections();
+      // 后台时换了网络（在家 Wi-Fi 下锁屏、出门换蜂窝）不保证收得到变化事件：回前台自己
+      // 查一次，变了就按网络变化处理（换掉旧 endpoint 重连）。
+      unawaited(
+        Connectivity().checkConnectivity().then(_onNetwork, onError: (_) {}),
+      );
       unawaited(model.updater.resumed());
       unawaited(model.push.resumed());
       unawaited(model.push.clearHandled(model.stillWaiting));

@@ -119,17 +119,22 @@ impl Transport for IrohDialer {
         Ok(true)
     }
 
-    fn network_change(&self) {
-        // 还没建 endpoint 就没有要迁移的路径，下次拨号时自然按新网络来。
-        let client = self
+    fn network_change(&self) -> bool {
+        // 不指望旧 endpoint 自己迁到新网络：在家 Wi-Fi 下用过、出门换蜂窝后，旧 endpoint
+        // 常常再也连不上 relay，每次拨号都等满超时，杀掉 App 重开（新 endpoint）立刻就通。
+        // 桌面长睡醒来是同一个毛病（见 smelt 的 `reset_iroh_after_wake`）。所以网络一变就
+        // 丢掉它，下次拨号按新网络重建。还没建过就什么都不用做。
+        let old = self
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .client
-            .clone();
-        if let Some(client) = client {
-            client.network_change();
+            .take();
+        if old.is_some() {
+            log::info!("网络变了，换掉旧的 iroh endpoint");
         }
+        // 各节点的旧会话还拿着它，调用方让节点重新 connect，旧会话退出时释放。
+        old.is_some()
     }
 }
 
