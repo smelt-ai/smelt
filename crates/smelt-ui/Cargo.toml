@@ -42,8 +42,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+# 组件快照（tests/snapshots.rs）画图标要用应用同一套图标资源。
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 
 # 截断宽度的问题只在真实字形下才有，测试默认的 Noop 字体系统是等宽假字。特性与
 # crates/smelt 里 gpui_platform 开的一致：同一套字体后端，且免装 Metal 工具链。
+# test-support 打开离屏 Metal 渲染（MetalHeadlessRenderer），组件快照用它出图。
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_apple = { package = "gpui-pre-apple", version = "=0.3.11", features = ["font-kit", "runtime_shaders"] }
+gpui_apple = { package = "gpui-pre-apple", version = "=0.3.11", features = ["font-kit", "runtime_shaders", "test-support"] }

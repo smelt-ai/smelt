@@ -10,9 +10,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
-    Window, div, prelude::FluentBuilder as _, px, rgb,
+    App, ElementId, FontWeight, IntoElement, MouseButton, ParentElement, RenderOnce, SharedString,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
+    px, rgb,
 };
 use gpui_base::{GlobalState, Radio, RadioGroup, Toggle, ToggleGroup};
 use gpui_component::StyledExt as _;

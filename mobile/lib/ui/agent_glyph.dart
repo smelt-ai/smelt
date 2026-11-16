@@ -74,7 +74,7 @@ Future<void> loadAgentIcons([AssetBundle? bundle]) async {
 void resetAgentIconsForTest() => _iconIds = null;
 
 /// 认不出返回 null。服务端对普通长度的 id 用包含匹配（自定义 agent 常是 `claude-quant`），
-/// 短 id `pi` 用边界匹配，不误中 `copilot`；长 id 先试。
+/// 短 id `pi` 和 `omp` 用边界匹配，不误中 `copilot` 或 `company`；长 id 先试。
 String? agentIconAsset(String agent) {
   final key = agent.trim().toLowerCase();
   if (key.isEmpty) return null;
@@ -84,7 +84,7 @@ String? agentIconAsset(String agent) {
   for (final id in ordered) {
     // 通用 ACP 的图标只给精确的 `custom`：它不是品牌，别让带 custom 字样的名字误中。
     if (id == 'custom') continue;
-    final hit = id.length > 2
+    final hit = id.length > 2 && id != 'omp'
         ? key.contains(id)
         : RegExp(
             '(^|[^a-z0-9_])${RegExp.escape(id)}([^a-z0-9_]|\$)',
@@ -103,6 +103,7 @@ String agentDisplayName(String agent) {
     'copilot': 'Copilot',
     'grok': 'Grok',
     'pi': 'Pi',
+    'omp': 'Oh My Pi',
     'cursor': 'Cursor',
     'opencode': 'OpenCode',
     'kiro': 'Kiro',
@@ -112,7 +113,13 @@ String agentDisplayName(String agent) {
   final known = names[key];
   if (known != null) return known;
   for (final entry in names.entries) {
-    if (entry.key.length > 2 && key.contains(entry.key)) return entry.value;
+    if (entry.key == 'omp') {
+      if (RegExp(r'(^|[^a-z0-9_])omp([^a-z0-9_]|$)').hasMatch(key)) {
+        return entry.value;
+      }
+    } else if (entry.key.length > 2 && key.contains(entry.key)) {
+      return entry.value;
+    }
   }
   if (key.isEmpty || key == 'other') return 'Agent';
   return key[0].toUpperCase() + key.substring(1);

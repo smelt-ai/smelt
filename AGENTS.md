@@ -35,6 +35,6 @@
 
 ## 流程
 
-- **构建和测试请人执行**：可以编写或修改测试代码，但不要自主运行构建或测试，包括 `cargo build`、`cargo check`、`cargo clippy`、`cargo test`、`cargo nextest`，以及其它编译、打包、测试命令。需要跑时把命令写给用户请人执行，等回报结果再据此继续。
+- **构建和测试请人执行**：可以编写或修改测试代码，但不要自主运行构建或测试，包括 `cargo build`、`cargo check`、`cargo clippy`、`cargo test`、`cargo nextest`，以及其它编译、打包、测试命令。需要跑时把命令写给用户请人执行，等回报结果再据此继续。唯一例外是 smelt-ui 组件快照：`cargo test -p smelt-ui --test snapshots`（`SMELT_SNAPSHOT=<名字>` 只画名字含它的那组）可以自己跑。改了 smelt-ui 组件的样子就跑一次，读 `target/tmp/snapshots/smelt-ui/` 下深浅两套 PNG 核对；新组件或新状态顺手在 `tests/snapshots.rs` 里加上。
 - **不跑 `cargo fmt`**：main 不是 rustfmt 干净的，`cargo fmt` 会顺手改动大量无关文件。只检查自己改的文件：`rustfmt --edition 2024 --config-path rustfmt.toml --emit stdout < 文件 | diff 文件 -`，按差异修自己的部分。
 - **版本号跟随日期**：发版号是 `YYYY.MDD.N`，日期就是打 tag 那天。前几天没发完的 rc 隔天再发，取今天的新号（`2026.1027.0-rc.1`），不接着用旧日期打 `2026.1026.0-rc.3`。一律用 `scripts/release.sh` 取号，不手改版本号，规则见 `docs/release.md` 的「版本号」。

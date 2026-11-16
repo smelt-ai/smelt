@@ -7,7 +7,6 @@ impl AgentsPage {
         &self,
         count: usize,
         entity: Entity<AgentsPage>,
-        window: &Window,
         cx: &App,
     ) -> AnyElement {
         let add_entity = entity.clone();
@@ -46,8 +45,6 @@ impl AgentsPage {
                 .children(self.render_default_agent_picker(entity, cx))
                 .child(add_button)
                 .into_any_element(),
-            window,
-            cx,
         )
     }
 
@@ -101,7 +98,6 @@ impl AgentsPage {
         &self,
         name: &str,
         entity: Entity<AgentsPage>,
-        window: &Window,
         cx: &App,
     ) -> AnyElement {
         let draft = self.editing_conversation_draft();
@@ -119,9 +115,7 @@ impl AgentsPage {
                 })
         });
         let start_entity = entity;
-        api::host(cx)
-            .page_header(window, cx)
-            .gap_2()
+        api::ui::page_toolbar()
             .child(product_back_button(
                 "agent-editor-back",
                 if draft { "取消" } else { "返回" },
@@ -129,39 +123,42 @@ impl AgentsPage {
                     back_entity.update(cx, |page, cx| page.close_agent_settings(cx));
                 },
             ))
-            .child(agent_monogram(name, 28., false))
+            .child(agent_monogram(name, 20., false))
+            // 名字之外只在草稿时补一句后果，长期规则的说明在正文的指令卡上。
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap_1()
+                    .items_center()
+                    .gap_2()
                     .child(
                         div()
-                            .text_lg()
-                            .font_semibold()
+                            .min_w_0()
+                            .text_sm()
+                            .font_medium()
                             .text_color(rgb(ui_theme::text()))
                             .overflow_hidden()
                             .child(truncated_line(agent_display_name(name))),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(ui_theme::muted()))
-                            .child(if draft {
-                                "开始对话后会设为默认。返回会取消，不保留这个智能体。"
-                            } else {
-                                "长期规则会带进对话和自动化，不会当成第一条消息。"
-                            }),
-                    ),
+                    .when(draft, |row| {
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(rgb(ui_theme::muted()))
+                                .overflow_hidden()
+                                .child(truncated_line(
+                                    "开始对话后设为默认；返回就取消，不保留这个智能体",
+                                )),
+                        )
+                    }),
             )
             .children(tabs)
             .when(draft, |row| {
                 row.child(
                     Button::new("agent-draft-start-conversation")
                         .primary()
-                        .small()
                         .label("开始对话")
                         .on_click(move |_, _, cx| {
                             start_entity.update(cx, |page, cx| page.commit_conversation_draft(cx));
@@ -424,7 +421,6 @@ impl AgentsPage {
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .bg(rgb(ui_theme::bg()))
                 .overflow_y_scroll()
                 .child(
                     agent_definition_column()
@@ -506,7 +502,6 @@ impl AgentsPage {
             .flex_1()
             .min_w_0()
             .h_full()
-            .bg(rgb(ui_theme::bg()))
             .overflow_y_scroll()
             .child(
                 agent_definition_column()
@@ -618,11 +613,7 @@ impl AgentsPage {
             )
             .into_any_element()
     }
-    pub(crate) fn render_agents_page(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(crate) fn render_agents_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let groups = agent_machine_groups(cx);
         let count: usize = groups.iter().map(|group| group.agents.len()).sum();
         let entity = cx.entity();
@@ -633,11 +624,11 @@ impl AgentsPage {
             .and_then(|editor| editor.agent.definition(cx).map(|agent| (agent, editor)));
         let (header, body) = match editing {
             Some((agent, editor)) => (
-                self.render_agent_editor_header(&agent.name, entity.clone(), window, cx),
+                self.render_agent_editor_header(&agent.name, entity.clone(), cx),
                 self.render_agent_config_panel(agent, editor, entity, cx),
             ),
             None => {
-                let header = self.render_agents_header(count, entity.clone(), window, cx);
+                let header = self.render_agents_header(count, entity.clone(), cx);
                 let body = if count == 0 && groups.len() <= 1 {
                     self.render_agents_empty(entity, cx)
                 } else {
@@ -654,7 +645,6 @@ impl AgentsPage {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui_theme::bg()))
             .child(header)
             .child(body)
             .into_any_element()

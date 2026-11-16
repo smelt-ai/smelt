@@ -153,8 +153,8 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
   点了执行 `sessions::ACTIVATE` 跳过去；运行时说它没有未读了（哪一端看过、开了新一轮），
   按 id 撤回。发过哪些记在插件自己的库里，重启后也撤得掉；机器移除时撤掉它的。没记未读的
   （后台对话的终端通知等）发一次性的。
-- 哪类提醒发系统通知是这台设备自己的偏好，存在插件库里，设置窗口「通知」页由插件登记
-  （`register_settings_pages`）。终端通知、智能体的消息没有开关。页面标题旁显示系统授权
+- 哪类提醒发系统通知是这台设备自己的偏好，存在插件库里，设置里的「通知」页由插件登记
+  （`register_views`，带 `settings`）。终端通知、智能体的消息没有开关。页面标题旁显示系统授权
   （`Host::notification_permission`，变了发 `NotificationPermissionChanged`），一直显示：还没
   问过的给「请求授权」（`REQUEST_NOTIFICATION_PERMISSION`）；其余都给按钮执行
   `OPEN_NOTIFICATION_SETTINGS`，直接落到系统设置里本应用那一页。被禁止，或允许了但横幅（提醒

@@ -15,21 +15,13 @@ use crate::session_control::AcpAgentOption;
 /// 落盘的启动项（无 GUI 进程也能读）。库里没有这份快照时退回出厂默认，
 /// 否则守护侧会在用户第一次改设置之前把终端分组渲染成空的。
 pub fn stored_launch_entries() -> Vec<LaunchEntry> {
-    let snapshot = crate::sqlite_state::default_sqlite_store()
-        .ok()
-        .and_then(|store| store.get_launch_snapshot().ok().flatten());
-    let Some(snapshot) = snapshot else {
-        return default_launch_entries();
-    };
-    snapshot
-        .entries
-        .into_iter()
-        .map(|entry| LaunchEntry {
-            label: entry.label,
-            command: entry.command,
-            provider: entry.provider,
-        })
-        .collect()
+    crate::sqlite_state::default_sqlite_store()
+        .map(|store| stored_launch_entries_on(&store))
+        .unwrap_or_else(|_| default_launch_entries())
+}
+
+fn stored_launch_entries_on(store: &smelt_store::Store) -> Vec<LaunchEntry> {
+    crate::launch_settings::load_on(store).entries
 }
 
 pub fn load_preferences() -> NewSessionPreferences {
@@ -99,6 +91,29 @@ mod tests {
     use super::*;
     use crate::agent_kind::ConversationLaunchSpec;
     use crate::agent_kind::{ConversationAgentKind, TerminalAgentKind};
+
+    #[test]
+    fn stored_launch_entries_add_new_builtins_to_existing_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = smelt_store::Store::open_or_create(dir.path().join("smelt.db")).unwrap();
+        store
+            .put_launch_snapshot(&smelt_store::LaunchSnapshot {
+                version: crate::launch_settings::LAUNCH_CONFIG_VERSION,
+                entries: vec![smelt_store::LaunchEntryRecord {
+                    label: "My shell".into(),
+                    command: "zsh".into(),
+                    provider: None,
+                }],
+            })
+            .unwrap();
+        let entries = stored_launch_entries_on(&store);
+        assert!(entries.iter().any(|entry| entry.command == "zsh"));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.provider.as_deref() == Some("omp"))
+        );
+    }
 
     fn option(id: &str, kind: ConversationAgentKind, label: &str) -> AcpAgentOption {
         AcpAgentOption {

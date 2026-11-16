@@ -43,11 +43,11 @@ pub(crate) fn titlebar_options(shell_padding: Pixels) -> TitlebarOptions {
 /// 设置、会话追踪用系统标题栏，继续让 AppKit 拖，不要套这份选项。
 pub(crate) fn workspace_window_options(
     shell_padding: Pixels,
-    window_background: WindowBackgroundAppearance,
+    material: crate::window_backdrop::WindowMaterial,
 ) -> WindowOptions {
     WindowOptions {
         titlebar: Some(titlebar_options(shell_padding)),
-        window_background,
+        window_background: crate::window_backdrop::window_background(material),
         app_owns_titlebar_drag: !NATIVE_TITLEBAR,
         ..Default::default()
     }
@@ -61,6 +61,17 @@ pub(crate) fn card(surface: Hsla) -> Div {
         .relative()
         .overflow_hidden()
         .bg(surface)
+}
+
+/// 整扇窗口的底：有窗口材质（`window_backdrop`）时什么都不铺，毛玻璃就是底；没有时铺一层
+/// `bg`。全窗口只有这一处管底，页签栏和各个视图（自带的、插件的）都不铺页面底，铺了就把
+/// 材质盖住。
+pub(crate) fn window_surface() -> Hsla {
+    if crate::window_backdrop::available() {
+        gpui::transparent_black()
+    } else {
+        rgb(crate::ui_theme::bg()).into()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +91,11 @@ fn titlebar_mouse_action(click_count: usize) -> TitlebarMouseAction {
 fn titlebar_mouse_down(event: &MouseDownEvent, window: &mut Window, cx: &mut App) {
     // 拖窗口的那一下停在标题区。胶囊和侧栏安全条都浮在内容上，不能再落到终端或消息。
     cx.stop_propagation();
+    // 按在顶栏里的控件上：按钮按下时、可聚焦的元素拿焦点时都会 `prevent_default`，子元素
+    // 先收到这一下。这时不拖窗口：一进 AppKit 的拖动循环，松手就到不了控件，点不下去。
+    if window.default_prevented() {
+        return;
+    }
     match titlebar_mouse_action(event.click_count) {
         TitlebarMouseAction::MoveWindow => window.start_window_move(),
         TitlebarMouseAction::DoubleClick => window.titlebar_double_click(),
@@ -98,8 +114,8 @@ pub(crate) fn with_window_drag<E: InteractiveElement>(el: E) -> E {
         .on_mouse_down(MouseButton::Left, titlebar_mouse_down)
 }
 
-/// 会话内容区共用的背景图层：始终覆盖容器，裁切方式和终端保持一致。
-/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，主题底色透出。
+/// 整扇窗口的背景图层（挂在窗口根上，见 `Workspace::render`）：铺满容器，按比例裁切。
+/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，底下的材质（没材质时是 `bg`）透出。
 /// 透明度为 0 时不读文件。栅格图只画降采样预览，不把原图交给 `img()`。
 pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div {
     let layer = div().absolute().inset_0();
@@ -119,32 +135,33 @@ pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div 
     )
 }
 
-/// 舞台上一页的页头底子：插件页面、远程桌面共用。这些面不画标题胶囊。
+/// 自己画顶上那条的宿主页（设置）的标题行。只放标题文字这类不比字高的东西：贴着窗口顶时
+/// 它就是 [`TOP_BAR_HEIGHT`] 高的标题栏，放不下按钮和分段控件，那些放进页面自己的工具行
+/// （`smelt_ui::page_toolbar`）。
 ///
-/// `left_guard` 见 `Workspace::chrome_left_guard`。页面贴着窗口顶（`Some`）时，最上
-/// `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐，标题和按钮放在这条下面，
-/// 左侧再让出给的宽度；在标签条下面（`None`）时顶上那条归标签条，这里只留常规内边距。
-/// 底边是发丝。按钮自己拦住点击。
-pub(crate) fn page_chrome(left_guard: Option<Pixels>) -> Div {
+/// `left_guard` 见 `Workspace::chrome_left_guard_of`。贴着窗口顶（`Some`）时和红黄绿按钮、
+/// 侧栏顶上那条同一行，左侧让出给的宽度，空白处拖窗口；在标签条下面（`None`）时顶上那条
+/// 归标签条，这里只是一条常规内边距的头。底边是发丝。
+pub(crate) fn page_chrome(left_guard: Option<Pixels>, right_inset: Pixels) -> Div {
     let header = div()
         .w_full()
         .flex_shrink_0()
-        .pb(px(8.))
-        .px(px(20.))
+        .pl(px(20.))
+        .pr(right_inset + px(20.))
         .border_b_1()
         .border_color(crate::ui_theme::hair())
         .flex()
         .items_center();
     match left_guard {
-        Some(left) => with_window_drag(header.pt(TOP_BAR_HEIGHT).pl(left + px(20.))),
-        None => header.pt(px(8.)),
+        Some(left) => with_window_drag(header.min_h(TOP_BAR_HEIGHT).pl(left + px(20.))),
+        None => header.py(px(8.)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{TitlebarMouseAction, titlebar_mouse_action, workspace_window_options};
-    use gpui::{WindowBackgroundAppearance, px};
+    use gpui::px;
 
     #[test]
     fn plain_titlebar_region_moves_or_double_clicks() {
@@ -185,7 +202,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_uses_the_system_titlebar() {
-        let options = workspace_window_options(px(0.), WindowBackgroundAppearance::Opaque);
+        let options = workspace_window_options(
+            px(0.),
+            crate::window_backdrop::WindowMaterial::platform_default(),
+        );
         assert!(!options.app_owns_titlebar_drag, "拖动归系统标题栏");
         let titlebar = options.titlebar.expect("主窗口要给系统标题栏一个标题");
         assert!(
@@ -197,7 +217,10 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn self_drawn_titlebar_owns_its_drag() {
-        let options = workspace_window_options(px(0.), WindowBackgroundAppearance::Opaque);
+        let options = workspace_window_options(
+            px(0.),
+            crate::window_backdrop::WindowMaterial::platform_default(),
+        );
         assert!(
             options.app_owns_titlebar_drag,
             "自绘顶栏必须声明应用拥有拖动，否则 AppKit 扣住标题栏里的单击"

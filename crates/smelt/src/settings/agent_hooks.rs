@@ -18,7 +18,7 @@ pub struct AgentHooksCache {
 
 impl Global for AgentHooksCache {}
 
-/// 重新取一次状态。打开设置窗口时调；外部手改了配置，重开设置就能看到。
+/// 重新取一次状态。打开设置时调；外部手改了配置，重开设置就能看到。
 pub fn refresh_agent_hooks_status(cx: &mut App) {
     run::<smelt_model::control_api::AgentHooksStatus>(None, cx);
 }

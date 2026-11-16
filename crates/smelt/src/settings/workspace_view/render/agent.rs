@@ -2,7 +2,6 @@
 //! 账户额度（每家的查询开关）。
 
 use super::*;
-use smelt_ui::IconAction as _;
 use smelt_ui::truncated_line::truncated_line;
 
 pub(super) fn agents_page(
@@ -27,7 +26,7 @@ pub(super) fn agents_page(
         .group(quota_group(entity, cx))
 }
 
-/// 每家账户一行：查询开关，钥匙串被拒绝时再带一个重试。状态在设置窗口打开时和每轮刷新后取好，
+/// 每家账户一行：查询开关，钥匙串被拒绝时再带一个重试。状态在打开设置时和每轮刷新后取好，
 /// 这里只读全局。
 fn quota_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
     let state = cx
@@ -581,7 +580,7 @@ fn agent_groups(
             "agent",
         ]),
         hooks: SettingItem::render(move |_, _, cx: &mut App| {
-            // 状态由运行时检测，这里只读设置窗口打开时取回的缓存。
+            // 状态由运行时检测，这里只读打开设置时取回的缓存。
             let (hook_status, notify_path, busy) = cx
                 .try_global::<AgentHooksCache>()
                 .map(|cache| {

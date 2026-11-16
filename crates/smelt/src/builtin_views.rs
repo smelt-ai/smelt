@@ -3,6 +3,9 @@
 //! 过渡期的适配层：这几块的状态和画法还在 `Workspace` 上，没搬进各自的插件 crate（迁移
 //! 顺序见 `docs/app-plugins.md`）。这里把每一块包成一个视图，登记进和插件同一张视图注册表，
 //! 由布局按 id 摆放，宿主的外壳不再认识它们。拆走一块，就从这里删掉一项。
+//!
+//! 舞台只画会话（当前会话的终端或对话）。出厂的工作台不直接摆它：它是那页出口的默认内容
+//! （页登记时的 `index`），出口里打开别的视图时换下去，点会话再换回来。
 
 use std::rc::Rc;
 
@@ -21,14 +24,24 @@ pub(crate) enum Builtin {
     Stage,
 }
 
+/// 自带视图登记用的来源。会话列表和舞台以后拆成会话插件，id 就是那时的 id，布局不用改。
+const OWNER: &str = "smelt.sessions";
+
 impl Builtin {
     pub(crate) const ALL: [Self; 2] = [Self::Sessions, Self::Stage];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sessions => "list",
+            Self::Stage => "stage",
+        }
+    }
 
     /// 视图 id，布局文件里引用的就是它。
     pub(crate) fn id(self) -> &'static str {
         match self {
-            Self::Sessions => "sessions",
-            Self::Stage => "stage",
+            Self::Sessions => "smelt.sessions/list",
+            Self::Stage => "smelt.sessions/stage",
         }
     }
 
@@ -103,35 +116,37 @@ impl PluginView for BuiltinView {
 /// 把自带视图登记进视图注册表。工作台建好时调；窗口重开时新工作台再登记一遍，替换掉
 /// 指着旧工作台的那份。
 pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
-    for kind in Builtin::ALL {
-        let workspace = workspace.clone();
-        let spec = ViewSpec {
-            id: kind.id().into(),
-            title: kind.title().into(),
-            icon: kind.icon(),
-            per_machine: false,
-            draws_top_bar: kind.owns_top_bar(),
-            build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
-                let workspace = workspace.clone();
-                Rc::new(cx.new(|cx| BuiltinView::new(workspace, kind, cx)))
-            }),
-        };
-        if let Err(error) = api::register_view(spec, cx) {
-            eprintln!("[plugins] 自带视图 {} 登记失败：{error}", kind.id());
-        }
+    let specs = Builtin::ALL
+        .into_iter()
+        .map(|kind| {
+            let workspace = workspace.clone();
+            ViewSpec {
+                name: kind.name().into(),
+                title: kind.title().into(),
+                icon: kind.icon(),
+                per_machine: false,
+                draws_top_bar: kind.owns_top_bar(),
+                settings: None,
+                build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
+                    let workspace = workspace.clone();
+                    Rc::new(cx.new(|cx| BuiltinView::new(workspace, kind, cx)))
+                }),
+            }
+        })
+        .collect();
+    if let Err(error) = api::register_views(OWNER, specs, cx) {
+        eprintln!("[plugins] 自带视图登记失败：{error}");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Builtin;
+    use super::{Builtin, OWNER};
 
     #[test]
-    fn builtin_ids_are_distinct_and_not_reserved() {
-        let ids: std::collections::HashSet<_> = Builtin::ALL.iter().map(|b| b.id()).collect();
-        assert_eq!(ids.len(), Builtin::ALL.len());
-        for id in ids {
-            assert!(!smelt_plugin_api::RESERVED_VIEW_IDS.contains(&id));
+    fn builtin_ids_are_owner_and_name() {
+        for kind in Builtin::ALL {
+            assert_eq!(kind.id(), format!("{OWNER}/{}", kind.name()));
         }
     }
 }

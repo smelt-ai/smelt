@@ -1976,19 +1976,16 @@ mod tests {
         assert_eq!(registered, HistorySourceKind::ALL);
     }
 
-    /// 历史来源是 ACP 种类的超集：每个 ACP agent 都得能读历史，但反过来不成立。
-    /// 这条测试防的是「新增 ACP agent 却忘了注册历史 Provider」。
+    /// ACP 和历史解析是独立能力。没有解析器时不能把另一家的历史冒充成自己的。
     #[test]
-    fn every_acp_agent_has_a_history_source() {
-        for kind in ConversationAgentKind::ALL {
-            let source = HistorySourceKind::from(kind);
-            assert_eq!(source.acp(), Some(kind), "{}", kind.id());
-            assert!(has_history(source), "{} 没注册历史 Provider", kind.id());
+    fn acp_agents_without_history_parser_have_no_provider() {
+        for kind in [ConversationAgentKind::Custom, ConversationAgentKind::OhMyPi] {
+            assert!(
+                !has_history(kind.into()),
+                "{} 不应冒用历史解析器",
+                kind.id()
+            );
         }
-        assert!(
-            !has_history(ConversationAgentKind::Custom.into()),
-            "通用 ACP 没有本地 transcript"
-        );
     }
 
     /// Antigravity 只有 TUI，它必须能读历史、但不能被当成 ACP 对象。

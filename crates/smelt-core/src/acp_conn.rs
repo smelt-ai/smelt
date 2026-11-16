@@ -3846,10 +3846,15 @@ fn inspect_runtime_program(program: &str, search_path: &str) -> RuntimeExecutabl
     inspect_runtime_path(
         program,
         resolve_in_path(program, search_path).map(std::path::PathBuf::from),
+        search_path,
     )
 }
 
-fn inspect_runtime_path(program: &str, path: Option<std::path::PathBuf>) -> RuntimeExecutable {
+fn inspect_runtime_path(
+    program: &str,
+    path: Option<std::path::PathBuf>,
+    search_path: &str,
+) -> RuntimeExecutable {
     let mut status = RuntimeExecutable {
         program: program.to_string(),
         ..Default::default()
@@ -3859,7 +3864,7 @@ fn inspect_runtime_path(program: &str, path: Option<std::path::PathBuf>) -> Runt
     };
 
     status.path = Some(path.to_string_lossy().into_owned());
-    match run_runtime_version(&path) {
+    match run_runtime_version(&path, search_path) {
         Ok(output) if output.status.success() => {
             status.version = runtime_output_line(&output.stdout, &output.stderr);
             if status.version.is_none() {
@@ -3882,7 +3887,10 @@ fn inspect_runtime_path(program: &str, path: Option<std::path::PathBuf>) -> Runt
 /// 版本查询必须有上限：用户自己的 shell shim 或损坏的 CLI 不能让设置页永久处于
 /// 「检测中」。stdout / stderr 各由一条线程边跑边读，输出再多也不会把子进程卡在写
 /// 管道上；进程退出由 `wait` 告知，超过上限便杀掉并收回。
-fn run_runtime_version(path: &std::path::Path) -> Result<std::process::Output, String> {
+fn run_runtime_version(
+    path: &std::path::Path,
+    search_path: &str,
+) -> Result<std::process::Output, String> {
     const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
     let mut command = std::process::Command::new(path);
     command
@@ -3895,6 +3903,7 @@ fn run_runtime_version(path: &std::path::Path) -> Result<std::process::Output, S
     // 都会失败，设置页于是把"装好了但环境没带全"误报成"未安装"，把用户引向
     // 重装这条完全错误的路。
     crate::login_env::apply_login_environment(&mut command, []);
+    command.env("PATH", search_path);
     let mut child = command
         .spawn()
         .map_err(|error| format!("无法执行 `--version`：{error}"))?;
@@ -3993,17 +4002,18 @@ impl AcpCliInstallPlan {
     }
 }
 
-/// 通过本机已有的 Homebrew 或 npm 安装指定的 Agent CLI。
+/// 通过本机已有的 Homebrew、npm 或 Bun 安装指定的 Agent CLI。
 ///
 /// 不执行各厂商的 `curl | sh` 安装器，也不调用 shell 或 sudo；只有用户点设置页
-/// 的「安装」按钮时才会进入这里。Claude、Codex、Copilot 优先使用官方 Homebrew
-/// cask，Grok 使用 xAI 官方 npm 包。包管理器不存在或命令失败时会返回可展示错误。
+/// 的「安装」按钮时才会进入这里。优先使用官方 Homebrew 包，否则使用对应的包管理器。
+/// 包管理器不存在或命令失败时会返回可展示错误。
 pub fn install_acp_cli(agent: ConversationAgentKind) -> Result<AcpCliInstallReport, String> {
     let search_path = extended_search_path();
     let plan = acp_cli_install_plan(
         agent,
         resolve_in_path("brew", &search_path),
         resolve_in_path("npm", &search_path),
+        resolve_in_path("bun", &search_path),
     )?;
     let report = plan.report();
     run_acp_cli_install(&plan, &search_path)?;
@@ -4014,24 +4024,37 @@ fn acp_cli_install_plan(
     agent: ConversationAgentKind,
     brew: Option<String>,
     npm: Option<String>,
+    bun: Option<String>,
 ) -> Result<AcpCliInstallPlan, String> {
-    if let (Some(executable), Some(cask)) = (brew, agent.homebrew_cask()) {
-        return Ok(AcpCliInstallPlan {
-            installer: "Homebrew",
-            executable,
-            display_executable: "brew",
-            args: ["install", "--cask", cask]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        });
+    let formula = agent.descriptor().homebrew_formula;
+    let cask = agent.homebrew_cask();
+    if let Some(executable) = brew {
+        let args = if let Some(formula) = formula {
+            Some(vec!["install", formula])
+        } else {
+            cask.map(|cask| vec!["install", "--cask", cask])
+        };
+        if let Some(args) = args {
+            return Ok(AcpCliInstallPlan {
+                installer: "Homebrew",
+                executable,
+                display_executable: "brew",
+                args: args.into_iter().map(str::to_string).collect(),
+            });
+        }
     }
 
-    if let (Some(executable), Some(package)) = (npm, agent.npm_package()) {
+    let use_bun = agent.descriptor().install_with_bun;
+    let (executable, installer, display_executable) = if use_bun {
+        (bun, "Bun", "bun")
+    } else {
+        (npm, "npm", "npm")
+    };
+    if let (Some(executable), Some(package)) = (executable, agent.npm_package()) {
         return Ok(AcpCliInstallPlan {
-            installer: "npm",
+            installer,
             executable,
-            display_executable: "npm",
+            display_executable,
             args: ["install", "--global", package]
                 .into_iter()
                 .map(str::to_string)
@@ -4039,7 +4062,13 @@ fn acp_cli_install_plan(
         });
     }
 
-    let help = match (agent.homebrew_cask(), agent.npm_package()) {
+    if let (Some(formula), Some(package)) = (formula, agent.npm_package()) {
+        return Err(format!(
+            "无法安装 {}：需要 Homebrew 或 {installer}（`brew install {formula}` 或 `{display_executable} install -g {package}`）",
+            agent.label()
+        ));
+    }
+    let help = match (cask, agent.npm_package()) {
         (None, None) => format!(
             "{} CLI 请用官方安装器：curl https://cursor.com/install -fsS | bash",
             agent.label()
@@ -4121,6 +4150,7 @@ fn extend_search_path(login: &str, home: Option<&std::path::Path>) -> String {
             "bin",
             ".cargo/bin",
             ".volta/bin",
+            ".bun/bin",
         ] {
             entries.push(home.join(sub));
         }
@@ -4325,8 +4355,26 @@ mod runtime_tests {
         } else {
             std::path::PathBuf::from("/usr/bin/true")
         };
-        let output = run_runtime_version(&program);
+        let output = run_runtime_version(&program, &extended_search_path());
         assert!(output.is_ok(), "短命令的版本探测应正常收尾：{output:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_version_probe_uses_the_same_path_as_cli_detection() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path().join("test-bun");
+        let cli = dir.path().join("omp");
+        std::fs::write(&runtime, "#!/bin/sh\necho omp 1.0\n").unwrap();
+        std::fs::write(&cli, "#!/usr/bin/env test-bun\n").unwrap();
+        for path in [&runtime, &cli] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let status = inspect_runtime_program("omp", dir.path().to_str().unwrap());
+        assert_eq!(status.version.as_deref(), Some("omp 1.0"));
+        assert_eq!(status.error, None);
     }
 
     /// 输出超过管道容量时，退出前没人读就会卡在写上，只能等到超时。
@@ -4346,7 +4394,8 @@ mod runtime_tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&program, permissions).unwrap();
 
-        let output = run_runtime_version(&program).expect("大量输出不该让版本探测超时");
+        let output = run_runtime_version(&program, &extended_search_path())
+            .expect("大量输出不该让版本探测超时");
         assert!(output.status.success());
         assert_eq!(output.stderr.len(), 256 * 1024);
         assert_eq!(
@@ -4360,40 +4409,63 @@ mod runtime_tests {
         let brew = Some("/opt/homebrew/bin/brew".to_string());
         let npm = Some("/opt/homebrew/bin/npm".to_string());
 
-        let claude = acp_cli_install_plan(ConversationAgentKind::Claude, brew.clone(), npm.clone())
-            .expect("Claude 应有安装方案");
+        let claude = acp_cli_install_plan(
+            ConversationAgentKind::Claude,
+            brew.clone(),
+            npm.clone(),
+            None,
+        )
+        .expect("Claude 应有安装方案");
         assert_eq!(claude.report().command, "brew install --cask claude-code");
 
-        let codex = acp_cli_install_plan(ConversationAgentKind::Codex, brew.clone(), npm.clone())
-            .expect("Codex 应有安装方案");
+        let codex = acp_cli_install_plan(
+            ConversationAgentKind::Codex,
+            brew.clone(),
+            npm.clone(),
+            None,
+        )
+        .expect("Codex 应有安装方案");
         assert_eq!(codex.report().command, "brew install --cask codex");
 
-        let copilot =
-            acp_cli_install_plan(ConversationAgentKind::Copilot, brew.clone(), npm.clone())
-                .expect("Copilot 应有安装方案");
+        let copilot = acp_cli_install_plan(
+            ConversationAgentKind::Copilot,
+            brew.clone(),
+            npm.clone(),
+            None,
+        )
+        .expect("Copilot 应有安装方案");
         assert_eq!(copilot.report().command, "brew install --cask copilot-cli");
 
-        let grok = acp_cli_install_plan(ConversationAgentKind::Grok, brew.clone(), npm.clone())
-            .expect("Grok 应有安装方案");
+        let grok =
+            acp_cli_install_plan(ConversationAgentKind::Grok, brew.clone(), npm.clone(), None)
+                .expect("Grok 应有安装方案");
         assert_eq!(
             grok.report().command,
             "npm install --global @xai-official/grok"
         );
 
-        let cursor_err =
-            acp_cli_install_plan(ConversationAgentKind::Cursor, brew.clone(), npm.clone())
-                .expect_err("Cursor 没有 brew/npm 包");
+        let cursor_err = acp_cli_install_plan(
+            ConversationAgentKind::Cursor,
+            brew.clone(),
+            npm.clone(),
+            None,
+        )
+        .expect_err("Cursor 没有 brew/npm 包");
         assert!(cursor_err.contains("cursor.com/install"));
 
-        let opencode =
-            acp_cli_install_plan(ConversationAgentKind::OpenCode, brew.clone(), npm.clone())
-                .expect("OpenCode 应有安装方案");
+        let opencode = acp_cli_install_plan(
+            ConversationAgentKind::OpenCode,
+            brew.clone(),
+            npm.clone(),
+            None,
+        )
+        .expect("OpenCode 应有安装方案");
         assert_eq!(
             opencode.report().command,
             "npm install --global opencode-ai"
         );
 
-        let pi = acp_cli_install_plan(ConversationAgentKind::Pi, brew, npm)
+        let pi = acp_cli_install_plan(ConversationAgentKind::Pi, brew, npm, None)
             .expect("Pi 应有 npm 安装方案");
         assert_eq!(
             pi.report().command,
@@ -4407,6 +4479,7 @@ mod runtime_tests {
             ConversationAgentKind::Codex,
             None,
             Some("/usr/local/bin/npm".to_string()),
+            None,
         )
         .expect("npm 应作为回退安装器");
 
@@ -4415,8 +4488,59 @@ mod runtime_tests {
     }
 
     #[test]
+    fn oh_my_pi_prefers_formula_and_falls_back_to_bun_only() {
+        let brew = Some("/opt/homebrew/bin/brew".to_string());
+        let npm = Some("/usr/local/bin/npm".to_string());
+        let bun = Some("/home/user/.bun/bin/bun".to_string());
+
+        let plan = acp_cli_install_plan(
+            ConversationAgentKind::OhMyPi,
+            brew,
+            npm.clone(),
+            bun.clone(),
+        )
+        .expect("应优先使用 Homebrew 公式");
+        assert_eq!(plan.executable, "/opt/homebrew/bin/brew");
+        assert_eq!(plan.report().command, "brew install can1357/tap/omp");
+        let brew_only = acp_cli_install_plan(
+            ConversationAgentKind::OhMyPi,
+            Some("/opt/homebrew/bin/brew".to_string()),
+            None,
+            None,
+        )
+        .expect("Homebrew 不应依赖 npm 或 Bun");
+        assert_eq!(brew_only.report().command, "brew install can1357/tap/omp");
+
+        let plan = acp_cli_install_plan(ConversationAgentKind::OhMyPi, None, npm.clone(), bun)
+            .expect("没有 Homebrew 时应使用 Bun");
+        assert_eq!(plan.executable, "/home/user/.bun/bin/bun");
+        assert_eq!(plan.installer, "Bun");
+        assert_eq!(
+            plan.report().command,
+            "bun install --global @oh-my-pi/pi-coding-agent"
+        );
+        let bun_only = acp_cli_install_plan(
+            ConversationAgentKind::OhMyPi,
+            None,
+            None,
+            Some("/home/user/.bun/bin/bun".to_string()),
+        )
+        .expect("Bun 不应依赖 npm");
+        assert_eq!(bun_only.report(), plan.report());
+
+        for npm in [npm, None] {
+            let error = acp_cli_install_plan(ConversationAgentKind::OhMyPi, None, npm, None)
+                .expect_err("没有 Homebrew 和 Bun 时不能使用 npm");
+            assert!(error.contains("Homebrew"));
+            assert!(error.contains("Bun"));
+            assert!(error.contains("can1357/tap/omp"));
+            assert!(error.contains("@oh-my-pi/pi-coding-agent"));
+        }
+    }
+
+    #[test]
     fn missing_package_managers_produces_actionable_error() {
-        let error = acp_cli_install_plan(ConversationAgentKind::Claude, None, None)
+        let error = acp_cli_install_plan(ConversationAgentKind::Claude, None, None, None)
             .expect_err("没有安装器时应失败");
 
         assert!(error.contains("Homebrew 或 npm"));
@@ -5068,6 +5192,20 @@ mod path_resolve_tests {
         let entries: Vec<_> = std::env::split_paths(&extended).collect();
         assert_eq!(&entries[..2], &login_dirs[..]);
         assert!(entries.contains(&home.join(".cargo/bin")), "{extended}");
+        assert!(entries.contains(&home.join(".bun/bin")), "{extended}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bun_default_bin_is_available_to_installer_and_cli_detection() {
+        let root = temp_root("bun-bin");
+        let bin = root.join(".bun/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let bun = write_executable(&bin, "bun");
+        let omp = write_executable(&bin, "omp");
+        let path = extend_search_path("", Some(&root));
+        assert_eq!(resolve_in_path("bun", &path).as_deref(), bun.to_str());
+        assert_eq!(resolve_in_path("omp", &path).as_deref(), omp.to_str());
         let _ = std::fs::remove_dir_all(&root);
     }
 

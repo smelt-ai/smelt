@@ -40,11 +40,34 @@ fn every_agent_has_a_sidebar_icon() {
 }
 
 #[test]
+fn oh_my_pi_sidebar_icon_is_registered() {
+    let bytes = crate::agent_icon_svg("smelt-icons/agent-omp.svg")
+        .expect("Oh My Pi 的侧栏图标必须登记");
+    assert!(!bytes.is_empty());
+}
+
+#[test]
 fn non_agent_paths_are_not_claimed() {
     assert!(crate::agent_icon_svg("smelt-icons/not-an-agent.svg").is_none());
     assert!(crate::agent_icon_svg("smelt-icons/git-branch.svg").is_none());
     assert!(crate::agent_icon_svg("smelt-icons/trash.svg").is_none());
     assert!(crate::agent_icon_svg("smelt-icons/agent-nope.svg").is_none());
+}
+
+#[test]
+fn machine_os_icons_are_bundled_with_the_application() {
+    use gpui::AssetSource as _;
+
+    for path in [
+        "smelt-icons/machine-linux.svg",
+        "smelt-icons/machine-windows.svg",
+    ] {
+        let icon = crate::SmeltAssets
+            .load(path)
+            .unwrap()
+            .expect("机器系统图标必须打包进应用资源");
+        assert!(!icon.is_empty());
+    }
 }
 
 #[test]

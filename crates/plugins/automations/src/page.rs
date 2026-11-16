@@ -18,7 +18,7 @@ use crate::prelude::*;
 use crate::projection::AutomationStore;
 
 /// 智能体页的视图 id，由「智能体」插件登记；没装就不给去那里的入口。
-pub(crate) const AGENTS_VIEW_ID: &str = "agents";
+pub(crate) const AGENTS_VIEW_ID: &str = "smelt.agents/main";
 
 /// 某台机器上的一条自动化：两台机器上同 id 的自动化是两回事。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -198,12 +198,12 @@ impl Focusable for AutomationsPage {
 }
 
 impl Render for AutomationsPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .track_focus(&self.focus_handle)
             .size_full()
             .flex()
-            .child(self.render_automations_page(window, cx))
+            .child(self.render_automations_page(cx))
     }
 }
 

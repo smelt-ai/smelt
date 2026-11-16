@@ -5,8 +5,8 @@
 //! 机器上量，这里按工作区目录把守护会话对上对话（终端分屏的几格合成一行）。
 //!
 //! 只在这一页看得见时采样（[`api::Host::view_shown`]），每 [`monitor::INTERVAL`]
-//! 一轮；看不见时循环睡在唤醒信号上，一次也不量。采样循环归页面：设置窗口关了页面放掉，
-//! 循环跟着停。曲线只放内存、不落库：它是此刻的观察，不是业务数据。
+//! 一轮；看不见时循环睡在唤醒信号上，一次也不量。采样循环归页面，页面的登记撤下时跟着
+//! 停。曲线只放内存、不落库：它是此刻的观察，不是业务数据。
 //!
 //! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道。
 
@@ -21,7 +21,7 @@ use api::client::protocol::control::EmptyParams;
 use api::model::control_api::ResourceUsage;
 use api::process_usage::ProcessSampler;
 use api::sessions::{self, Activate};
-use api::{HostEvent, RuntimeKey, SettingsGroup, SettingsPageSpec};
+use api::{HostEvent, PluginView, RuntimeKey, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, IntoElement, Render, SharedString, Subscription, Task,
     WeakEntity, Window,
@@ -41,34 +41,38 @@ const PAGE: &str = "smelt.resources/main";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
-    let spec = SettingsPageSpec {
+    let spec = ViewSpec {
         name: "main".into(),
         title: "资源占用".into(),
         icon: IconName::MemoryStick.path(),
-        group: SettingsGroup::System,
-        keywords: [
-            "资源",
-            "性能",
-            "内存",
-            "内存占用",
-            "CPU",
-            "占用",
-            "卡",
-            "慢",
-            "活动监视器",
-            "GPUI",
-        ]
-        .into_iter()
-        .map(SharedString::from)
-        .collect(),
-        build: Rc::new(|_, cx| cx.new(ResourcesPage::new).into()),
+        per_machine: false,
+        draws_top_bar: false,
+        settings: Some(SettingsEntry {
+            group: SettingsGroup::System,
+            keywords: [
+                "资源",
+                "性能",
+                "内存",
+                "内存占用",
+                "CPU",
+                "占用",
+                "卡",
+                "慢",
+                "活动监视器",
+                "GPUI",
+            ]
+            .into_iter()
+            .map(SharedString::from)
+            .collect(),
+        }),
+        build: Rc::new(|_, cx| Rc::new(cx.new(ResourcesPage::new)) as Rc<dyn ViewHandle>),
     };
-    if let Err(error) = api::register_settings_pages(OWNER, vec![spec], cx) {
+    if let Err(error) = api::register_views(OWNER, vec![spec], cx) {
         eprintln!("[resources] 设置页登记失败：{error}");
     }
 }
 
-/// 设置窗口里的资源页。
+/// 设置里的资源页。
 pub(crate) struct ResourcesPage {
     monitor: ResourceMonitor,
     /// 画这一页要的全部内容，采到一轮、会话或机器变了时拼好，render 只读它。
@@ -139,6 +143,10 @@ impl ResourcesPage {
     }
 }
 
+impl PluginView for ResourcesPage {
+    fn open(&mut self, _: &api::serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+}
+
 impl Render for ResourcesPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = view::page(
@@ -151,12 +159,12 @@ impl Render for ResourcesPage {
     }
 }
 
-/// 这一页此刻看得见：设置窗口开着、停在这一页。
+/// 这一页此刻看得见：设置开着、停在这一页。
 fn shown(cx: &App) -> bool {
     api::host(cx).view_shown(PAGE, cx)
 }
 
-/// 从设置窗口跳回主窗口的那段会话。
+/// 从设置里的这一页跳到那段会话。
 pub(crate) fn jump_to_session(session_id: String, cx: &mut App) {
     let task = sessions::ACTIVATE.run(&Activate { session_id }, cx);
     cx.spawn(async move |_| {

@@ -14,9 +14,7 @@ pub(super) fn panel_plugin_page(
     snapshot: &SettingsRenderSnapshot,
 ) -> SettingPage {
     let state = &snapshot.panel_plugins;
-    let mut page = SettingPage::new("面板插件")
-        .description("每个插件是一个视图：摆进工作台布局的是面板，没摆进去的从侧栏当页面打开。")
-        .resettable(false);
+    let mut page = SettingPage::new("面板插件").resettable(false);
     if let Some(error) = state.error.clone() {
         page = page.group(
             SettingGroup::new()
@@ -42,6 +40,7 @@ fn list_group(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> Settin
     };
     let mut group = SettingGroup::new()
         .title(title)
+        .description("每个插件是一个视图：摆进工作台布局的是面板，没摆进去的从侧栏当页面打开。")
         .item(toolbar_item(entity.clone(), state))
         // 页脚本身是小号字，这里只把颜色换成警告色：导入别人的插件等于给它整台机器的权限。
         .footer(|_, cx| {

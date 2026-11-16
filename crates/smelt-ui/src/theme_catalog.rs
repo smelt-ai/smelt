@@ -320,6 +320,8 @@ pub fn apply(name: &str, cx: &mut App) -> bool {
         theme.scrollbar_mode = scrollbar_mode;
         // 通知固定在右下角，避开左侧会话列表。主题文件不带这个位置。
         theme.notification.placement = gpui::Anchor::BottomRight;
+        // 毛玻璃时字压在材质上，不是压在主题底色上，字色按材质配够对比。
+        ui_theme::fit_text_to_backdrop(theme);
     });
     ui_theme::adopt_active_theme(cx);
     true

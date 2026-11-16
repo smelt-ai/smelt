@@ -22,7 +22,6 @@ use crate::workspace_directory::{
 };
 use crate::{
     AcpSaved, PaneState, RuntimeKey, SessionKind, SessionState, SidebarGrouping, Workspace,
-    WorkspaceRoute,
 };
 
 pub(crate) fn merge_restore_pending<T: Clone>(
@@ -160,7 +159,8 @@ fn directory_terminal(leaf: PaneState) -> Option<WorkspaceTerminal> {
 pub(crate) struct WorkspaceUiState {
     pub(crate) active_session: usize,
     pub(crate) active_session_id: Option<String>,
-    pub(crate) route: WorkspaceRoute,
+    /// 首页出口里放着的视图 id（见 `router`）；放的是默认内容时是 `None`。
+    pub(crate) outlet: Option<String>,
     /// 各运行时上折叠、置顶的项目。
     pub(crate) collapsed_projects: Vec<ProjectKey>,
     pub(crate) collapsed_agents: Vec<String>,
@@ -280,7 +280,8 @@ pub(crate) fn load_workspace_ui() -> WorkspaceUiState {
     WorkspaceUiState {
         active_session: record.active_session,
         active_session_id: record.active_session_id,
-        route: crate::settings::enum_from_name(&record.route).unwrap_or_default(),
+        // 视图 id 是 `<来源>/<名字>`；旧版存的舞台路由名（session、conversation）不是。
+        outlet: Some(record.route).filter(|view| view.contains('/')),
         collapsed_projects: record.collapsed_projects,
         collapsed_agents: record.collapsed_agents,
         sidebar_grouping: crate::settings::enum_from_name(&record.sidebar_grouping)
@@ -295,7 +296,7 @@ fn save_workspace_ui(ui: &WorkspaceUiState) -> Result<(), String> {
     let record = smelt_client_store::WorkspaceUiRecord {
         active_session: ui.active_session,
         active_session_id: ui.active_session_id.clone(),
-        route: crate::settings::enum_name(&ui.route),
+        route: ui.outlet.clone().unwrap_or_default(),
         collapsed_projects: ui.collapsed_projects.clone(),
         collapsed_agents: ui.collapsed_agents.clone(),
         sidebar_grouping: crate::settings::enum_name(&ui.sidebar_grouping),
@@ -1256,7 +1257,7 @@ impl Workspace {
             .commands(&desired)
             .filter(|commands| !commands.is_empty());
         let ui = (*key == RuntimeKey::Local).then(|| ClientSnapshot {
-            ui: self.workspace_ui_state(),
+            ui: self.workspace_ui_state(cx),
             routes: self.conversation_route_records(cx),
             orders: self.sidebar_order_records(cx),
         });
@@ -1270,7 +1271,7 @@ impl Workspace {
     }
 
     /// 客户端界面状态：折叠、置顶按运行时收齐。
-    fn workspace_ui_state(&self) -> WorkspaceUiState {
+    fn workspace_ui_state(&self, cx: &App) -> WorkspaceUiState {
         let mut ui = WorkspaceUiState {
             active_session: self
                 .space(&RuntimeKey::Local)
@@ -1288,7 +1289,7 @@ impl Workspace {
                 .map(|session| session.conversation_id.clone())
                 .or_else(|| self.saved_active_session_id.clone())
                 .filter(|id| !id.is_empty()),
-            route: self.nav.persist(),
+            outlet: self.persisted_outlet(cx),
             collapsed_projects: Vec::new(),
             collapsed_agents: self.collapsed_agents.iter().cloned().collect(),
             sidebar_grouping: self.sidebar_grouping,

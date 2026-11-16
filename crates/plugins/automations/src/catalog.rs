@@ -13,7 +13,6 @@ pub(crate) const TEMPLATE_COLUMNS: usize = 3;
 impl AutomationsPage {
     pub(crate) fn render_automations_catalog_header(
         &self,
-        header: Div,
         entity: Entity<AutomationsPage>,
         cx: &App,
     ) -> AnyElement {
@@ -24,7 +23,7 @@ impl AutomationsPage {
         let current = self.catalog_tab;
         let tab_entity = entity.clone();
         let add_entity = entity;
-        header
+        api::ui::page_toolbar()
             .justify_between()
             .gap_3()
             .child(

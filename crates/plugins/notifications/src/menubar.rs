@@ -48,6 +48,7 @@ const AGENT_LOGO_PNG: &[(&str, &[u8])] = &[
     ),
     ("kiro", include_bytes!("../../../../assets/agent-kiro.png")),
     ("pi", include_bytes!("../../../../assets/agent-pi.png")),
+    ("omp", include_bytes!("../../../../assets/agent-omp.png")),
     (
         "crush",
         include_bytes!("../../../../assets/agent-crush.png"),

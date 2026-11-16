@@ -1181,26 +1181,6 @@ impl Render for TerminalView {
         let search_input = self.search_input.clone();
         let scroll_info = self.terminal.scroll_info();
 
-        // 背景层：底色（带透明度）+ 可选背景图，铺在终端内容之下。
-        // 终端「默认底色」格子渲染时留空（见 render_row），故背景层能透出——所以这层
-        // 的颜色必须跟 terminal::default_bg() 是同一个值。用户自选的底色已经并进
-        // default_bg()（见 terminal::set_bg_override），OSC 11 应答和下发给手机的
-        // 配色快照也都取它，四处同源。
-        let ap = cx.global::<crate::Appearance>().clone();
-        let bg_color = terminal::default_bg();
-        // 终端是最高频的绘制区域。整窗透明度已由 NSWindow 统一处理，这里保持实底，
-        // 避免每次终端输出都触发整块窗口的额外 alpha 混合。
-        let mut bg_layer = div().absolute().inset_0().bg(rgb(bg_color));
-        if let Some(path) = &ap.bg_image {
-            bg_layer = bg_layer.child(crate::workspace_frame::background_image_layer(
-                path,
-                ap.bg_image_opacity,
-                cx,
-            ));
-        }
-        // 整扇窗口的透明度由原生 NSWindow 统一处理，不能在这里重复叠加，
-        // 否则终端背景会比侧栏/舞台额外变淡一次。
-
         div()
             .relative()
             .track_focus(&self.focus_handle)
@@ -1534,8 +1514,6 @@ impl Render for TerminalView {
                     cx.notify();
                 }),
             )
-            // 背景层（最底）：底色 / 背景图 / 透明度
-            .child(bg_layer)
             // 终端主体：逐行画 alacritty 网格快照（底色 / 文字 / 光标 / 选区 / IME）。
             //
             // 走 canvas 直接 paint、而不是「每行一个 div + StyledText」：网格对齐要靠

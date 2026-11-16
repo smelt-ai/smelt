@@ -124,7 +124,7 @@ impl Workspace {
 
     /// 重新读盘、重新挂载全部插件。插件作者改完脚本点它，不用重启。
     ///
-    /// 挂载要用工作台窗口，而这里多半是从设置窗口的按钮进来的，正占着 `Workspace`：
+    /// 挂载要用工作台窗口，而这里多半是从设置页的按钮进来的，正占着 `Workspace`：
     /// 推到这一轮更新结束后再进工作台窗口，免得重入。
     pub(crate) fn reload_panel_plugins(&mut self, cx: &mut Context<Self>) {
         let handle = self.window_handle;

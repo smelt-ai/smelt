@@ -90,18 +90,29 @@ fn workset_element_id(name: &'static str, project: &ProjectRef, workset_id: &str
         .into()
 }
 
-/// 机器名字，远程的由机器图标颜色体现连接状态；悬停看完整的连接说明。
+/// 与手机端机器列表使用同一套系统图标；未知系统不猜测。
+fn machine_os_icon(os: Option<&str>) -> &'static str {
+    match os.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+        "macos" | "darwin" => "icons/apple.svg",
+        "linux" => "smelt-icons/machine-linux.svg",
+        "windows" => "smelt-icons/machine-windows.svg",
+        _ => "icons/laptop-minimal.svg",
+    }
+}
+
+/// 机器名字；图标颜色体现连接状态，悬停看完整的连接说明。
 fn runtime_name_with_indicator(
     key: &RuntimeKey,
     name: impl Into<SharedString>,
     indicator: Option<crate::runtimes::RuntimeIndicator>,
 ) -> AnyElement {
-    // 机器是项目上面一层，层级靠字号和分隔线，不靠高亮。每台机器一个样子：焦点在哪由选中的
-    // 对话说明，机器再亮一档只会抢眼。
+    // 分段标题和「项目」标题同一套：小一号、中等字重、次要字色。它是给下面的项目分区的，
+    // 不是要读的名字，压低了下面的项目、会话才显得出层级。
     let name = div()
         .min_w_0()
         .overflow_hidden()
-        .text_sm()
+        .text_xs()
+        .font_medium()
         .text_color(rgb(ui_theme::muted()))
         .child(truncated_line(name));
     let Some(indicator) = indicator else {
@@ -131,19 +142,11 @@ fn runtime_name_with_indicator(
         .into_any_element()
 }
 
-/// 侧栏里一台机器的分段标题：点整行折起或展开；远程机器图标颜色体现连接状态（绿：在线；
-/// 黄：慢、连接中、升级中；红：离线、版本不兼容），悬停名字看走哪条路、多慢、什么版本，
-/// 要人处理的状态名字后再写几个字。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
-/// 「远程桌面」（装了的才有）和「打开项目」的快捷按钮。`grouping` 是侧栏的「筛选与
-/// 分组」按钮：分了机器段就没有「项目」标题了，它挂在第一段的标题上。
-///
-/// 28 高，本机文字、远程连接灯和下面各行的图标落在同一条左缘。多台机器时它是最上面一层，第二段起上面再隔一条
-/// 线（见 `header_for`）。
-/// 折叠箭头跟在名字后面，折起时常显，展开时悬停才出现。
+/// 机器分段标题：左侧是固定位置的展开箭头和系统图标，图标颜色表示连接状态。
+/// 悬停名字看连接详情；`⋯` 和右键是同一份机器菜单（[`machine_menu`]）。
 fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
-    _folded: bool,
     chevron_degrees: f32,
     grouping: Option<Div>,
     // 键盘焦点环、滚到这一行用的锚，见 `keyboard`。
@@ -153,13 +156,14 @@ fn runtime_section_header(
     let key = runtime.key().clone();
     let name = crate::runtimes::runtime_name(&key, cx);
     let indicator = crate::runtimes::runtime_indicator(&key, cx);
-    let has_desktop = crate::runtimes::runtime_has_desktop(&key, cx);
-    let icon_color = match indicator.as_ref().map(|i| i.light) {
+    let icon = machine_os_icon(crate::runtimes::runtime_os(&key, cx));
+    let icon_color = match indicator.as_ref().map(|indicator| indicator.light) {
         Some(crate::runtimes::LinkLight::Good) => ui_theme::ok(),
         Some(crate::runtimes::LinkLight::Degraded) => ui_theme::need(),
         Some(crate::runtimes::LinkLight::Down) => ui_theme::bad(),
         None => ui_theme::muted(),
     };
+    let has_desktop = crate::runtimes::runtime_has_desktop(&key, cx);
     let group = SharedString::from(format!("runtime-header-{key:?}"));
     let toggle_workspace = workspace.clone();
     let toggle_key = key.clone();
@@ -175,57 +179,30 @@ fn runtime_section_header(
         .mt_3()
         .pl(px(PROJECT_HEADER_PAD_X))
         .pr_1()
-        .h(ui_theme::height::md())
+        .h(ui_theme::height::sm())
         .flex()
         .items_center()
-        .gap_2()
+        .gap_1()
         .rounded(ui_theme::row_radius())
         .on_click(move |_ev, _window, cx| {
             toggle_workspace.update(cx, |ws, cx| ws.toggle_runtime_fold(&toggle_key, cx));
         })
-        // 跟「对话」分组行同一套：最左折叠箭头（常显、随开合转），再是机器图标，再是名字。
         .child(
             div()
+                .w(px(row::GROUP_ICON_BOX))
+                .h(px(16.))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
-                .gap_1()
-                .flex_none()
+                .justify_center()
                 .child(
-                    div()
-                        .w(px(row::GROUP_ICON_BOX))
-                        .h(px(16.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Icon::new(IconName::ChevronRight)
-                                .size(px(12.))
-                                .text_color(rgb(ui_theme::muted()))
-                                .transform(Transformation::rotate(radians(
-                                    chevron_degrees.to_radians(),
-                                ))),
-                        ),
-                )
-                .child(
-                    div()
-                        .w(px(15.))
-                        .h(px(16.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Icon::new(if key == RuntimeKey::Local {
-                                gpui_kit_assets::IconName::Monitor
-                            } else {
-                                gpui_kit_assets::IconName::Server
-                            })
-                            .size(px(15.))
-                            .text_color(rgb(icon_color)),
-                        ),
+                    Icon::new(IconName::ChevronRight)
+                        .size(px(12.))
+                        .text_color(rgb(ui_theme::muted()))
+                        .transform(Transformation::rotate(radians(chevron_degrees.to_radians()))),
                 ),
         )
+        .child(Icon::empty().path(icon).size(px(14.)).text_color(rgb(icon_color)))
         .child(runtime_name_with_indicator(&key, name, indicator))
         .child(div().flex_1())
         .children(grouping.map(|grouping| {
@@ -249,7 +226,7 @@ fn runtime_section_header(
                 .on_click(move |_ev, window, cx| {
                     cx.stop_propagation();
                     let runtime = runtime.clone();
-                    workspace.update(cx, |ws, cx| ws.open_desktop(runtime, window, cx));
+                    workspace.update(cx, |ws, cx| ws.open_desktop(runtime.key(), window, cx));
                 }),
             )
         })
@@ -397,6 +374,94 @@ fn project_workset_menu(
 
 /// 底栏额度弹层的宽度：名字一栏、用量条、百分比放得下。
 const QUOTA_POPOVER_WIDTH: f32 = 268.;
+
+/// 额度环跟对话上下文环一样用路径绘制，长度表示已用量；双环依次是 5 小时、周。
+fn quota_rings(rings: Vec<(String, f64)>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let center_x = f32::from(bounds.origin.x + bounds.size.width / 2.0);
+            let center_y = f32::from(bounds.origin.y + bounds.size.height / 2.0);
+            let stroke = if rings.len() > 1 { 1.75_f32 } else { 2.0_f32 };
+            let outer_radius = if rings.len() > 1 {
+                12.125_f32
+            } else {
+                10.0_f32
+            };
+            for (index, (_, used)) in rings.iter().enumerate() {
+                let radius = outer_radius - index as f32 * 3.5;
+                let radii = point(px(radius), px(radius));
+                let top = point(px(center_x), px(center_y - radius));
+                let bottom = point(px(center_x), px(center_y + radius));
+                let mut track = PathBuilder::stroke(px(stroke));
+                track.move_to(top);
+                track.arc_to(radii, px(0.), false, true, bottom);
+                track.arc_to(radii, px(0.), false, true, top);
+                if let Ok(path) = track.build() {
+                    window.paint_path(path, ui_theme::hair());
+                }
+
+                let fraction = row::quota_ring_fraction(*used);
+                if fraction <= 0.0 {
+                    continue;
+                }
+                let color = if *used >= 90.0 {
+                    ui_theme::bad()
+                } else if *used >= 50.0 {
+                    ui_theme::need()
+                } else {
+                    ui_theme::ok()
+                };
+                let mut progress = PathBuilder::stroke(px(stroke));
+                progress.move_to(top);
+                let end = if fraction >= 0.999 {
+                    progress.arc_to(radii, px(0.), false, true, bottom);
+                    progress.arc_to(radii, px(0.), false, true, top);
+                    None
+                } else {
+                    let theta = fraction * std::f32::consts::TAU;
+                    let end = point(
+                        px(center_x + radius * theta.sin()),
+                        px(center_y - radius * theta.cos()),
+                    );
+                    progress.arc_to(radii, px(0.), fraction > 0.5, true, end);
+                    Some(end)
+                };
+                if let Ok(path) = progress.build() {
+                    window.paint_path(path, rgb(color));
+                }
+                // PathBuilder 的弧线端点是平的，补两个半径为半线宽的圆作圆头。
+                if let Some(end) = end {
+                    let cap_radius = px(stroke / 2.0);
+                    for cap in [top, end] {
+                        let mut dot = PathBuilder::fill();
+                        dot.move_to(point(cap.x - cap_radius, cap.y));
+                        dot.arc_to(
+                            point(cap_radius, cap_radius),
+                            px(0.),
+                            false,
+                            true,
+                            point(cap.x + cap_radius, cap.y),
+                        );
+                        dot.arc_to(
+                            point(cap_radius, cap_radius),
+                            px(0.),
+                            false,
+                            true,
+                            point(cap.x - cap_radius, cap.y),
+                        );
+                        if let Ok(path) = dot.build() {
+                            window.paint_path(path, rgb(color));
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
 
 /// 底栏额度点开的列表：每家一行，名字、用量条、百分比。悬停看各窗口和重置时间，点哪家
 /// 刷新哪家（只刷这一家）。
@@ -829,7 +894,7 @@ impl Workspace {
                     }
                 }
             });
-        let session_route_active = self.active_tab().is_session();
+        let session_route_active = self.project_session_shown(cx);
         // 正在就地改名的那一行：标题那一格换成输入框。
         let rename_input = self.rename_input.clone();
         let renaming_session = match &self.rename_target {
@@ -1040,7 +1105,6 @@ impl Workspace {
                 .child(runtime_section_header(
                     runtime,
                     this.clone(),
-                    self.runtime_folded(&key),
                     chevron_degrees,
                     grouping,
                     extras,
@@ -1252,28 +1316,14 @@ impl Workspace {
                                 .overflow_hidden()
                                 .child(
                                     // 项目名与会话同为 text_sm、常规字重：层级靠文件夹图标和
-                                    // 会话的缩进表达，不靠加粗。活动项目提亮；空项目降一档到
-                                    // muted，不降到 faint：它仍是能点、能新建会话的条目，faint
-                                    // 读起来像禁用。
+                                    // 会话的缩进表达，不靠加粗，也不靠字色（字色由 `ListRow`
+                                    // 给，空项目、不在用的项目都一样读得清）。项目行自己被选中
+                                    // （它的会话没露出来）时跟会话行一样加中等字重。
                                     div()
                                         .min_w_0()
                                         .overflow_hidden()
                                         .text_sm()
-                                        // 项目行自己被选中（它的会话没露出来）时跟会话行一样：
-                                        // 选中字色加中等字重。
                                         .when(project_header_selected, |name| name.font_medium())
-                                        .text_color(rgb(if project_header_selected {
-                                            ui_theme::text()
-                                        } else if is_active_group {
-                                            ui_theme::text()
-                                        } else if crate::sidebar_order::project_header_is_dimmed(
-                                            is_active_group,
-                                            empty_group,
-                                        ) {
-                                            ui_theme::muted()
-                                        } else {
-                                            ui_theme::muted()
-                                        }))
                                         .child(truncated_line(group_name.clone())),
                                 )
                                 .when(is_pinned, |row| {
@@ -1298,7 +1348,7 @@ impl Workspace {
                                         .overflow_hidden()
                                         .text_xs()
                                         .font_family(crate::terminal_view::font_family())
-                                        .text_color(rgb(ui_theme::faint()))
+                                        .text_color(rgb(ui_theme::row_faint(project_header_selected)))
                                         .tooltip(move |window, cx| {
                                             gpui_component::tooltip::Tooltip::new(
                                                 full_branch.clone(),
@@ -1311,7 +1361,7 @@ impl Workspace {
                                     div()
                                         .flex_shrink_0()
                                         .text_xs()
-                                        .text_color(rgb(ui_theme::faint()))
+                                        .text_color(rgb(ui_theme::row_faint(project_header_selected)))
                                         .child(format!("{repository_count} 仓库"))
                                 })),
                         )
@@ -1338,7 +1388,7 @@ impl Workspace {
                                         .items_center()
                                         .justify_center()
                                         .text_xs()
-                                        .text_color(rgb(ui_theme::muted()))
+                                        .text_color(rgb(ui_theme::row_muted(project_header_selected)))
                                         .group_hover(PROJ_HEADER_GROUP, |style| {
                                             style.opacity(0.0)
                                         })
@@ -1833,25 +1883,13 @@ impl Workspace {
                             Some(input) => {
                                 inline_rename_input(input, this.clone()).into_any_element()
                             }
-                            // 选中照组件库侧栏：选中底、选中字色、中等字重。没选中的标题
-                            // 压到弱字，悬停才提亮：选中底和悬停底在不少深色主题里是相近
-                            // 的两档灰，光靠底色分不出哪行是选中、哪行只是鼠标停着。
+                            // 字色由 `ListRow` 给；选中加中等字重，跟只是悬停的行分开
+                            // （两档底在不少深色主题里很接近）。
                             None => div()
                                 .flex_1()
                                 .min_w_0()
                                 .text_sm()
-                                .map(|title| {
-                                    if is_active {
-                                        title
-                                            .font_medium()
-                                            .text_color(rgb(ui_theme::text()))
-                                    } else {
-                                        title.text_color(rgb(ui_theme::muted())).group_hover(
-                                            SESSION_ROW_GROUP,
-                                            |style| style.text_color(rgb(ui_theme::text())),
-                                        )
-                                    }
-                                })
+                                .when(is_active, |title| title.font_medium())
                                 .overflow_hidden()
                                 .child(truncated_line(title.clone()))
                                 .into_any_element(),
@@ -1874,7 +1912,7 @@ impl Workspace {
                             .px_1()
                             .rounded(px(3.))
                             .text_xs()
-                            .text_color(rgb(ui_theme::muted()))
+                            .text_color(rgb(ui_theme::row_muted(is_active)))
                             .bg(ui_theme::hair())
                             .tooltip(move |window, cx| {
                                 gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
@@ -1888,7 +1926,7 @@ impl Workspace {
                             .flex_shrink_0()
                             .text_xs()
                             .font_family(crate::terminal_view::font_family())
-                            .text_color(rgb(ui_theme::faint()))
+                            .text_color(rgb(ui_theme::row_faint(is_active)))
                             .child(s.clone())
                     }))
                     // 按状态 / 不分组时，项目标题已经不存在，把来源项目与分支补到行内。
@@ -1900,12 +1938,12 @@ impl Workspace {
                             .items_center()
                             .gap_1()
                             .text_xs()
-                            .text_color(rgb(ui_theme::muted()))
+                            .text_color(rgb(ui_theme::row_muted(is_active)))
                             .child(project)
                             .children(branch.map(|name| {
                                 div()
                                     .font_family(crate::terminal_view::font_family())
-                                    .text_color(rgb(ui_theme::faint()))
+                                    .text_color(rgb(ui_theme::row_faint(is_active)))
                                     .child(name)
                             }))
                     }))
@@ -1929,7 +1967,7 @@ impl Workspace {
                             Some(label) => (label.into(), ui_theme::session_dot_color(status).into()),
                             None => match turn_text {
                                 Some(text) => (text.into(), ui_theme::session_dot_color(status).into()),
-                                None => (updated_text.into(), rgb(ui_theme::muted()).into()),
+                                None => (updated_text.into(), rgb(ui_theme::row_muted(is_active)).into()),
                             },
                         }),
                         Button::new(("close-session", ui_id))
@@ -2149,21 +2187,8 @@ impl Workspace {
                                             .flex_1()
                                             .min_w_0()
                                             .text_sm()
-                                            // 当前 pane 跟会话行同口径：选中亮，其余弱字、
-                                            // 悬停提亮。
-                                            .map(|title| {
-                                                if is_current_view {
-                                                    title.font_medium().text_color(rgb(
-                                                        ui_theme::text(),
-                                                    ))
-                                                } else {
-                                                    title
-                                                        .text_color(rgb(ui_theme::muted()))
-                                                        .group_hover(SESSION_ROW_GROUP, |style| {
-                                                            style.text_color(rgb(ui_theme::text()))
-                                                        })
-                                                }
-                                            })
+                                            // 当前 pane 跟会话行同口径：选中加中等字重。
+                                            .when(is_current_view, |title| title.font_medium())
                                             .overflow_hidden()
                                             .child(truncated_line(p_title))
                                             .into_any_element(),
@@ -2183,7 +2208,7 @@ impl Workspace {
                                         ),
                                         None => (
                                             pane_updated_text.into(),
-                                            rgb(ui_theme::muted()).into(),
+                                            rgb(ui_theme::row_muted(is_current_view)).into(),
                                         ),
                                     }),
                                     Button::new(("close-pane", pane_entity_id))
@@ -2550,7 +2575,6 @@ impl Workspace {
                 })
                 .collect();
 
-            let n = sections.len();
             let is_animating = sections
                 .iter()
                 .any(|s| s.progress > 0.001 && s.progress < 0.999);
@@ -2806,15 +2830,14 @@ impl Workspace {
 
         // ---- 底部操作条：设置 ----
         // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。「设置」点一下直接
-        // 开设置窗口；有要处理的事（新版本、后台服务旧了、机器要处理）时挂红点，打开就停在那一页。
+        // 打开设置；有要处理的事（新版本、后台服务旧了、机器要处理）时挂红点，打开就停在那一页。
         let e_settings = this.clone();
         let settings_needs_attention = self.settings_attention(cx).is_some();
 
         // ---- 底部额度：跟设置同一条底栏，放在右边 ----
-        // provider 账户额度（Codex / Claude / Copilot / Grok / Cursor），只列「检测到额度」
-        // 的。一家就是一个图标加百分比，几家都常显，不收起来：要看额度还得悬停就白放在
-        // 底栏了。侧栏窄、一行放不下时折到第二行，底栏跟着长高。悬停哪块看哪块的各窗口
-        // 和重置时间；点开是全部：每家一行，点哪家刷新哪家。
+        // provider 账户额度只列「检测到额度」的。每家用图标和已用额度环常显，
+        // 双环外 5 小时内周；总额未知时保留剩余数字。悬停看各窗口和重置时间；
+        // 点开看全部，点哪家刷新哪家。侧栏窄时折行。
         // Pi 不在这里：它底下几家 provider 是独立账户，额度跟在对话模型菜单的
         // provider 名字后面（括号），那里才说得清数字属于谁。
         // 状态在这里一次性读完，弹层的构造闭包里不再碰全局。
@@ -2823,14 +2846,22 @@ impl Workspace {
             .into_iter()
             .filter_map(|target| {
                 let status = crate::provider_quota::ProviderStatus::quota_status(target, cx)?;
-                let used = status.quota.as_ref()?.used_percent();
+                let quota = status.quota.as_ref()?;
+                let used = quota.used_percent();
+                let rings = row::quota_ring_windows(quota);
                 let row = provider_quota_row(target, &status)?;
+                let hint = if rings.len() > 1 {
+                    format!("{} · 外环 {}，内环 {}", row.hint, rings[0].0, rings[1].0)
+                } else {
+                    row.hint
+                };
                 Some(FooterQuota {
                     target,
                     text: row.text,
                     color: row.color,
-                    hint: row.hint,
+                    hint,
                     used,
+                    rings,
                     refreshing: crate::provider_quota::ProviderStatus::is_manually_refreshing(
                         target, cx,
                     ),
@@ -2870,30 +2901,46 @@ impl Workspace {
                     } else {
                         quota.hint.clone()
                     };
+                    let icon_size = if quota.rings.len() > 1 { 9. } else { 11. };
                     h_flex()
                         .id(SharedString::from(format!(
                             "quota-chip-{}",
                             quota.target.id()
                         )))
                         .flex_shrink_0()
-                        .gap_1()
                         .items_center()
-                        .text_color(rgb(quota.color))
-                        .child(acp_provider_icon(quota.target.agent).size(px(12.)))
-                        .map(|chip| {
-                            if quota.refreshing {
-                                chip.child(smelt_ui::motion::ambient_spinner(
-                                    SharedString::from(format!(
-                                        "quota-chip-refresh-{}",
-                                        quota.target.id()
-                                    )),
-                                    rgb(quota.color).into(),
-                                    true,
-                                ))
-                            } else {
-                                chip.child(quota.text.clone())
-                            }
-                        })
+                        .gap_1()
+                        .child(
+                            div()
+                                .relative()
+                                .size(px(26.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .children(
+                                    (!quota.rings.is_empty())
+                                        .then(|| quota_rings(quota.rings.clone())),
+                                )
+                                .text_color(rgb(ui_theme::text()))
+                                .map(|icon| {
+                                    if quota.refreshing {
+                                        icon.child(smelt_ui::motion::ambient_spinner(
+                                            SharedString::from(format!(
+                                                "quota-chip-refresh-{}",
+                                                quota.target.id()
+                                            )),
+                                            rgb(quota.color).into(),
+                                            true,
+                                        ))
+                                    } else {
+                                        icon.child(
+                                            acp_provider_icon(quota.target.agent)
+                                                .size(px(icon_size)),
+                                        )
+                                    }
+                                }),
+                        )
+                        .children(quota.rings.is_empty().then(|| quota.text.clone()))
                         .tooltip(move |window, cx| {
                             gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                         })
@@ -2934,8 +2981,8 @@ impl Workspace {
                             .quiet()
                             .icon(IconName::Settings)
                             .label("设置")
-                            .on_click(move |_, _, cx| {
-                                e_settings.update(cx, |ws, cx| ws.open_settings(cx));
+                            .on_click(move |_, window, cx| {
+                                e_settings.update(cx, |ws, cx| ws.open_settings(window, cx));
                             }),
                     )
                     .when(settings_needs_attention, |d| {
@@ -3099,8 +3146,8 @@ mod tests {
     use super::{
         PROJECT_ACTION_SLOT_HEIGHT, PROJECT_DISCLOSURE_ICON_SIZE, PROJECT_GUIDE_LEFT,
         PROJECT_NEW_BUTTON_SIZE, PROJECT_SESSION_INDENT, SESSION_AGENT_ICON_BOX_SIZE,
-        SESSION_AGENT_ICON_SIZE, project_disclosure_icon, project_header_is_selected,
-        session_row_is_selected, session_row_status_label, status_text,
+        SESSION_AGENT_ICON_SIZE, machine_os_icon, project_disclosure_icon,
+        project_header_is_selected, session_row_is_selected, session_row_status_label, status_text,
     };
     use crate::AgentStatus;
     use gpui_component::IconName;
@@ -3114,6 +3161,22 @@ mod tests {
         assert!(SESSION_AGENT_ICON_SIZE >= 17.);
         assert!(SESSION_AGENT_ICON_BOX_SIZE >= SESSION_AGENT_ICON_SIZE);
     };
+
+    #[test]
+    fn machine_icons_match_the_mobile_os_mapping() {
+        assert_eq!(machine_os_icon(Some("macos")), "icons/apple.svg");
+        assert_eq!(machine_os_icon(Some(" Darwin ")), "icons/apple.svg");
+        assert_eq!(
+            machine_os_icon(Some("LINUX")),
+            "smelt-icons/machine-linux.svg"
+        );
+        assert_eq!(
+            machine_os_icon(Some("windows")),
+            "smelt-icons/machine-windows.svg"
+        );
+        assert_eq!(machine_os_icon(None), "icons/laptop-minimal.svg");
+        assert_eq!(machine_os_icon(Some("other")), "icons/laptop-minimal.svg");
+    }
 
     #[test]
     fn project_and_agent_icons_are_visually_distinct() {

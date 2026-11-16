@@ -7,15 +7,21 @@
 //! 存档时把 `DockArea::dump` 转成运行时认得的 [`PaneState`]，不把组件库自己的存档格式
 //! 交给运行时；恢复时反过来用 [`DockLayout`] 搭回去，不经面板注册表。
 
+use std::rc::Rc;
+use std::sync::Arc;
+
 use gpui::{
-    App, AppContext as _, Axis, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, WeakEntity, Window, div, hsla, prelude::FluentBuilder as _, rgb,
+    AnyElement, AnyView, App, AppContext as _, Axis, Context, Div, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
+    Render, SharedString, Stateful, Styled as _, Subscription, WeakEntity, Window, div, hsla,
+    prelude::FluentBuilder as _, rgb,
 };
+use gpui_base::ResizeHandleContext;
 use gpui_component::Placement;
 use gpui_component::dock::{
-    BasePanel, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, InsertTarget, Panel,
-    PanelControl, PanelEvent, PanelId, PanelInfo, PanelState, panel_handle,
+    BasePanel, BasePanelView, DockArea, DockAreaRenderer, DockContext, DockEvent, DockLayout,
+    DockPlacement, DockSkin, DropIndicator, InsertTarget, NodeId, Panel, PanelControl, PanelEvent,
+    PanelId, PanelInfo, PanelState, TabGroupContext, TabGroupRenderer, panel_handle,
 };
 
 use crate::terminal_view::TerminalView;
@@ -51,7 +57,11 @@ impl TermDock {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Self {
-        let (area, _skin) = DockSkin::dock_area("smelt-term", None, window, cx);
+        let area = cx.new(|cx| {
+            let skin = DockSkin::new(cx);
+            DockArea::new("smelt-term", None, window, cx)
+                .with_renderer(Rc::new(TermDockRenderer(skin)))
+        });
         area.update(cx, |area, cx| area.set_center(layout, window, cx));
         let _layout_changed = cx.subscribe_in(
             &area,
@@ -452,5 +462,119 @@ impl Render for TermPane {
             .when(split && !active, |this| {
                 this.child(div().absolute().inset_0().bg(hsla(0., 0., 0., 0.28)))
             })
+    }
+}
+
+/// 终端 Dock 的画法：组件库的皮肤，去掉它给分栏和组铺的实底。底只由窗口铺一层
+/// （`workspace_frame::window_surface`），这里再铺就盖住了窗口材质。
+struct TermDockRenderer(Rc<DockSkin>);
+
+impl DockAreaRenderer for TermDockRenderer {
+    fn frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+        DockAreaRenderer::frame(&*self.0, window, cx)
+    }
+
+    fn split_frame(
+        &self,
+        node: NodeId,
+        axis: Axis,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Stateful<Div> {
+        DockAreaRenderer::split_frame(&*self.0, node, axis, window, cx)
+            .bg(gpui::transparent_black())
+    }
+
+    fn center_frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+        DockAreaRenderer::center_frame(&*self.0, window, cx)
+    }
+
+    fn render_split_handle(
+        &self,
+        handle: &ResizeHandleContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        DockAreaRenderer::render_split_handle(&*self.0, handle, window, cx)
+    }
+
+    fn render_dock(
+        &self,
+        dock: &DockContext,
+        content: AnyElement,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        DockAreaRenderer::render_dock(&*self.0, dock, content, window, cx)
+    }
+
+    fn build_placeholder(
+        &self,
+        state: &PanelState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Arc<dyn BasePanelView>> {
+        DockAreaRenderer::build_placeholder(&*self.0, state, window, cx)
+    }
+
+    fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
+        Rc::new(TermTabGroup(DockAreaRenderer::tab_group_renderer(&*self.0)))
+    }
+}
+
+/// 终端格子组的画法：皮肤的全部，只是组框不铺底。
+struct TermTabGroup(Rc<dyn TabGroupRenderer>);
+
+impl TabGroupRenderer for TermTabGroup {
+    fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+        self.0
+            .frame(group, window, cx)
+            .bg(gpui::transparent_black())
+    }
+
+    fn content_frame(
+        &self,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Stateful<Div> {
+        self.0.content_frame(group, window, cx)
+    }
+
+    fn render_tab_bar(
+        &self,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        self.0.render_tab_bar(group, window, cx)
+    }
+
+    fn render_active_panel(
+        &self,
+        panel: AnyView,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        self.0.render_active_panel(panel, group, window, cx)
+    }
+
+    fn render_drop_indicator(
+        &self,
+        indicator: DropIndicator,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.0.render_drop_indicator(indicator, window, cx)
+    }
+
+    fn render_empty(
+        &self,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.0.render_empty(group, window, cx)
     }
 }

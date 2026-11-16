@@ -482,16 +482,16 @@ fn help_group() -> SettingGroup {
                             .label("打开日志")
                             .on_click(|_, _window, _cx| reveal_app_log()),
                     )
+                    // 链接只管打开网页，不顺手做别的；找日志是旁边那个按钮。
                     .child(
                         Link::new("settings-report-issue-link")
                             .href(FEEDBACK_URL)
                             .text_sm()
-                            .child("反馈问题 ↗")
-                            .on_click(|_, _window, _cx| reveal_app_log()),
+                            .child("反馈问题 ↗"),
                     )
             }),
         )
-        .description("会同时在文件管理器里找出日志，拖进反馈页就行"),
+        .description("先打开日志，再把它拖进反馈页"),
         SettingItem::new(
             "源码",
             SettingField::render(|_, _, _| {
@@ -691,7 +691,7 @@ fn storage_group(cx: &App) -> SettingGroup {
     )
 }
 
-/// 进入或退出「确认清理」。整份换掉全局，设置窗口跟着重绘（跟扫描按钮同一个做法）。
+/// 进入或退出「确认清理」。整份换掉全局，设置跟着重绘（跟扫描按钮同一个做法）。
 fn set_confirming(confirming: bool, cx: &mut App) {
     let mut state = cx.try_global::<CleanupState>().cloned().unwrap_or_default();
     state.confirming = confirming;

@@ -24,6 +24,28 @@ MIT License 发布。Kiro 名称与商标归 Amazon / AWS 所有。
 发布（Copyright (c) 2025 Mario Zechner）；仅将填充色表达为 `currentColor`。Pi 名称
 与商标归其权利人所有。
 
+`agent-omp.svg` 改编自 [Oh My Pi 官方图标](https://github.com/can1357/oh-my-pi/blob/main/assets/icon.svg)，
+以 MIT License 发布（Copyright (c) 2025 Mario Zechner，Copyright (c) 2025–2026 Can Bölük，
+Copyright (c) 2026 Stencil Labs, Inc.）。改为单色、保留插件接头的负形并居中为方形。
+Oh My Pi 名称与商标归其权利人所有。
+
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this
+> software and associated documentation files (the "Software"), to deal in the Software
+> without restriction, including without limitation the rights to use, copy, modify,
+> merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+> permit persons to whom the Software is furnished to do so, subject to the following
+> conditions:
+>
+> The above copyright notice and this permission notice shall be included in all copies
+> or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+> INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+> PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+> HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+> CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+> OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 `agent-crush.svg` 是 Crush 官方
 [`crush-icon-solo.png`](https://github.com/charmbracelet/crush/blob/main/internal/ui/notification/crush-icon-solo.png)
 的单色小尺寸改编，保留像素心形角色的轮廓与脸部负形。上游资源

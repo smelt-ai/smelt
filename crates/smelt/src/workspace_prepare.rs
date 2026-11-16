@@ -9,9 +9,7 @@
 use gpui::*;
 
 use crate::settings::Appearance;
-use crate::{
-    SessionKind, Workspace, WorkspaceRoute, liquid_glass, settings, should_auto_resume_active_acp,
-};
+use crate::{SessionKind, Workspace, settings, should_auto_resume_active_acp};
 
 impl Workspace {
     /// 绘制前唯一还留在帧上的准备。
@@ -31,6 +29,16 @@ impl Workspace {
             self.stop_sidebar_drag_scroll();
         } else if self.sidebar_drag.is_some() {
             cx.set_active_drag_cursor_style(CursorStyle::ClosedHand, window);
+        }
+    }
+
+    /// 让窗口材质的种类跟上外观、深浅跟上 smelt 的主题。都没变就不再发给系统。
+    pub(crate) fn sync_window_backdrop(&mut self, window: &Window, cx: &App) {
+        let material = cx.global::<Appearance>().material;
+        let dark = !crate::ui_theme::is_light();
+        if self.applied_backdrop != Some((material, dark)) {
+            crate::window_backdrop::sync(window, material, dark);
+            self.applied_backdrop = Some((material, dark));
         }
     }
 
@@ -69,37 +77,21 @@ impl Workspace {
         });
     }
 
-    /// 按当前路由把可见页的缓存、输入框和窗口材质补齐。
+    /// 把看得见的视图的缓存、输入框和窗口材质补齐。
     ///
     /// 调用方是构造、排队后的延迟，以及外观变化。不要从 `render` 里进这里。
     pub(crate) fn refresh_visible_caches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.visible_refresh_scheduled = false;
         self.visible_refresh_running = true;
 
-        // 先把活动和路由对齐，后面的文件树才看得到这一次切换的结果。
-        // 对齐里的 activate 会再请求刷新；running 让那次请求直接丢掉，
-        // 因为这次刷新还会继续往下走。
+        // 先把活动会话和项目对齐，后面的文件树才看得到这一次切换的结果。
         self.sync_session_ui(cx);
-        self.align_visible_route(window, cx);
+        self.align_restored_conversation(cx);
         self.prewarm_ide_catalog_after_idle(window, cx);
 
         self.note_active_context(cx);
-        self.note_shown_views(cx);
 
-        let want_bg = cx.global::<Appearance>().window_bg();
-        let glass_style = cx.global::<Appearance>().glass_style;
-        if self.applied_window_bg != Some(want_bg) || self.applied_glass_style != Some(glass_style)
-        {
-            window.set_background_appearance(want_bg);
-            liquid_glass::sync(window, glass_style);
-            self.applied_window_bg = Some(want_bg);
-            self.applied_glass_style = Some(glass_style);
-        }
-        let window_opacity = cx.global::<Appearance>().window_opacity();
-        if self.applied_window_opacity != Some(window_opacity) {
-            settings::apply_window_opacity(window, window_opacity);
-            self.applied_window_opacity = Some(window_opacity);
-        }
+        self.sync_window_backdrop(window, cx);
         let ui_font_px = cx.global::<Appearance>().ui_font_px;
         if self.applied_ui_font_px != Some(ui_font_px) {
             window.set_rem_size(px(ui_font_px as f32));
@@ -117,36 +109,27 @@ impl Workspace {
         self.visible_refresh_running = false;
     }
 
-    /// 「对话」路由对上一段对话，并守住「对话不能占项目舞台」。
-    ///
-    /// 冷启动恢复出来的「对话」路由不知道看哪段：会话恢复完按当前会话补上，当前会话
-    /// 不是侧栏对话就回项目舞台。项目舞台上的对话是不变量，恢复完成后一直守着。
-    fn align_visible_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let restored = self.session_restore_settled(self.active_session, cx);
-        let active_is_agent_conversation = self
+    /// 冷启动恢复到一段侧栏对话上时，右侧工具面板的上下文跟上它的工作目录。点对话时由
+    /// `open_agent_conversation` 设；恢复出来的没人点，在这里补一次。已经有活动项目
+    /// （人点过项目或会话）就不动。
+    fn align_restored_conversation(&mut self, cx: &mut Context<Self>) {
+        if self.active_project.is_some() || !self.session_restore_settled(self.active_session, cx) {
+            return;
+        }
+        let Some(session) = self
             .sessions
             .get(self.active_session)
-            .is_some_and(|session| session.is_agent_conversation(cx));
-        if crate::conversation_route_needs_target(
-            restored,
-            self.active_tab(),
-            self.selected_conversation_view(cx).is_some(),
-        ) {
-            if active_is_agent_conversation {
-                self.open_agent_conversation(self.active_session, window, cx);
-            } else {
-                self.nav.set_active(WorkspaceRoute::Session);
-                self.save_state(cx);
-                cx.notify();
-            }
-        }
-
-        if crate::should_correct_agent_conversation_on_project_stage(
-            restored,
-            self.active_tab(),
-            active_is_agent_conversation,
-        ) {
-            self.activate(self.active_session, window, cx);
-        }
+            .filter(|session| session.is_agent_conversation(cx))
+        else {
+            return;
+        };
+        let Some(cwd) = session.cwd(cx).filter(|cwd| !cwd.is_empty()) else {
+            return;
+        };
+        self.active_project = Some(crate::ProjectRef {
+            runtime: session.runtime(cx).key().clone(),
+            root: cwd.trim_end_matches('/').to_string(),
+        });
+        cx.notify();
     }
 }

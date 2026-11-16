@@ -478,14 +478,9 @@ mod legacy {
 
     #[derive(Deserialize)]
     struct Appearance {
-        bg_color: u32,
         bg_image: Option<String>,
         #[serde(default = "default_bg_image_opacity")]
         bg_image_opacity: f32,
-        opacity: f32,
-        blur: bool,
-        #[serde(default = "default_glass_style")]
-        glass_style: String,
         #[serde(default = "default_theme_mode")]
         theme_mode: String,
         #[serde(default = "default_theme_name")]
@@ -502,9 +497,6 @@ mod legacy {
 
     fn default_bg_image_opacity() -> f32 {
         0.25
-    }
-    fn default_glass_style() -> String {
-        "regular".to_string()
     }
     fn default_theme_mode() -> String {
         "dark".to_string()
@@ -627,12 +619,8 @@ mod legacy {
             crate::write_appearance(
                 transaction,
                 &AppearanceRecord {
-                    bg_color: old.bg_color,
                     bg_image: old.bg_image,
                     bg_image_opacity: old.bg_image_opacity,
-                    opacity: old.opacity,
-                    blur: old.blur,
-                    glass_style: old.glass_style,
                     theme_mode: old.theme_mode,
                     theme_name: old.theme_name,
                     ui_font_px: old.ui_font_px,
@@ -640,6 +628,7 @@ mod legacy {
                     font_px: old.font_px,
                     font_family: old.font_family,
                     layout_id: None,
+                    material: String::new(),
                 },
             )?;
         }

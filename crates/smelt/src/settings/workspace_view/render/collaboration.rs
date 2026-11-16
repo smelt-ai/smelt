@@ -208,7 +208,7 @@ fn outgoing_group() -> SettingGroup {
         )
 }
 
-/// 「添加机器」的输入框。改动写回 RuntimeHub，添加按钮从那里取。挂在设置窗口的元素状态上。
+/// 「添加机器」的输入框。改动写回 RuntimeHub，添加按钮从那里取。挂在设置的元素状态上。
 struct PairingInput {
     input: Entity<InputState>,
     _change: Subscription,

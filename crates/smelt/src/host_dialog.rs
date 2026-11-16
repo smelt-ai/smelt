@@ -9,11 +9,11 @@
 //! 就关。用户在对话框里关（Esc、取消、Enter 关危险确认）走 kit，`on_close` 再把状态清掉。
 //!
 //! kit 只会关最上面那个对话框，没有按 id 关的接口。所以状态没了的对话框要等它在
-//! 本窗口宿主对话框里排到最上面才关，在那之前不画。插件的对话框若叠在宿主对话框上面，
+//! 宿主对话框里排到最上面才关，在那之前不画。插件的对话框若叠在宿主对话框上面，
 //! 这时宿主那个的状态没了，关掉的会是插件那个；宿主对话框盖着整个窗口，插件只能从
 //! 快捷键或后台任务开出对话框，暂且接受。
 
-use gpui::{AnyWindowHandle, App, Context, Styled as _, Window};
+use gpui::{App, Context, Styled as _, Window};
 use gpui_component::WindowExt as _;
 use gpui_component::dialog::{Dialog, DialogEntrance};
 
@@ -51,20 +51,6 @@ impl HostDialog {
         Self::MoveApp,
         Self::DirPicker,
     ];
-
-    /// 开在设置窗口里的：入口都在设置页。
-    fn in_settings(self) -> bool {
-        matches!(
-            self,
-            Self::SessionManager | Self::DaemonRestart | Self::UpdateInstall
-        )
-    }
-}
-
-/// 已经交给 kit 的一个宿主对话框，开在哪扇窗口。
-pub(crate) struct PresentedDialog {
-    kind: HostDialog,
-    window: AnyWindowHandle,
 }
 
 impl Workspace {
@@ -183,69 +169,40 @@ impl Workspace {
             return;
         }
 
-        // 窗口没了（设置窗口被关掉），对话框跟着没了，状态也不留：下次打开设置不该冒出来。
-        let mut ix = 0;
-        while ix < self.host_dialogs.len() {
-            let entry = &self.host_dialogs[ix];
-            if entry.window.update(cx, |_, _, _| {}).is_ok() {
-                ix += 1;
-                continue;
+        // 状态没了的，从上往下关。kit 只关最上面那个，所以只关最上面的宿主对话框，压在
+        // 底下的等上面的关掉再说（这期间不画，见 `build_host_dialog`）。
+        let window = self.window_handle;
+        while let Some(&top) = self.host_dialogs.last() {
+            if self.host_dialog_live(top) {
+                break;
             }
-            let kind = self.host_dialogs.remove(ix).kind;
-            self.dismiss_host_dialog(kind, cx);
-        }
-
-        // 状态没了的，从上往下关。kit 只关最上面那个，所以只关每扇窗口最上面的宿主对话框，
-        // 压在底下的等上面的关掉再说（这期间不画，见 `build_host_dialog`）。
-        let mut ix = self.host_dialogs.len();
-        while ix > 0 {
-            ix -= 1;
-            let entry = &self.host_dialogs[ix];
-            let window = entry.window;
-            let topmost = !self.host_dialogs[ix + 1..]
-                .iter()
-                .any(|above| above.window == window);
-            if !topmost || self.host_dialog_live(entry.kind) {
-                continue;
-            }
-            self.host_dialogs.remove(ix);
+            self.host_dialogs.pop();
             let _ = window.update(cx, |_, window, cx| window.close_dialog(cx));
-            // 下面那个可能刚好也该关，从头再看。
-            ix = self.host_dialogs.len();
         }
 
         for &kind in HostDialog::ALL {
-            if !self.host_dialog_live(kind)
-                || self.host_dialogs.iter().any(|entry| entry.kind == kind)
-            {
+            if !self.host_dialog_live(kind) || self.host_dialogs.contains(&kind) {
                 continue;
             }
-            let window = if kind.in_settings() {
-                cx.try_global::<settings::SettingsWindowHandle>()
-                    .map(|handle| handle.0.into())
-            } else {
-                Some(self.window_handle)
-            };
             let workspace = cx.weak_entity();
-            let opened = window.is_some_and(|handle| {
-                handle
-                    .update(cx, |_, window, cx| {
-                        window.open_dialog(cx, move |dialog, _, cx| {
-                            let Some(workspace) = workspace.upgrade() else {
-                                return dialog.entrance(DialogEntrance::None).invisible();
-                            };
-                            workspace.update(cx, |workspace, cx| {
-                                workspace.build_host_dialog(kind, dialog, cx)
-                            })
-                        });
-                        self.focus_host_dialog(kind, window, cx);
-                    })
-                    .is_ok()
-            });
-            match window.filter(|_| opened) {
-                Some(window) => self.host_dialogs.push(PresentedDialog { kind, window }),
-                // 没有窗口可开（设置窗口已经关了）：当作没开过。
-                None => self.dismiss_host_dialog(kind, cx),
+            let opened = window
+                .update(cx, |_, window, cx| {
+                    window.open_dialog(cx, move |dialog, _, cx| {
+                        let Some(workspace) = workspace.upgrade() else {
+                            return dialog.entrance(DialogEntrance::None).invisible();
+                        };
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.build_host_dialog(kind, dialog, cx)
+                        })
+                    });
+                    self.focus_host_dialog(kind, window, cx);
+                })
+                .is_ok();
+            if opened {
+                self.host_dialogs.push(kind);
+            } else {
+                // 主窗口没了：当作没开过。
+                self.dismiss_host_dialog(kind, cx);
             }
         }
     }
@@ -302,7 +259,7 @@ impl Workspace {
             .on_close(move |_, _, cx| {
                 let _ = workspace.update(cx, |this, cx| {
                     // kit 已经关了它，同步时不能再关一次（会关掉底下那个）。
-                    this.host_dialogs.retain(|entry| entry.kind != kind);
+                    this.host_dialogs.retain(|&open| open != kind);
                     this.dismiss_host_dialog(kind, cx);
                 });
             });
@@ -323,8 +280,6 @@ impl Workspace {
 
     /// 主窗口里开着宿主对话框。
     pub(crate) fn main_host_dialog_open(&self) -> bool {
-        self.host_dialogs
-            .iter()
-            .any(|entry| entry.window == self.window_handle)
+        !self.host_dialogs.is_empty()
     }
 }

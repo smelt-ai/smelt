@@ -16,6 +16,7 @@ pub mod markdown_links;
 mod markdown_literal_html;
 pub mod markdown_mermaid;
 pub mod motion;
+pub mod page_toolbar;
 pub mod segmented;
 pub mod switch;
 pub mod theme_catalog;
@@ -27,6 +28,7 @@ pub use choice::{Checkbox, Radio};
 pub use field::{Select, TextArea, TextInput};
 pub use icon_action::IconAction;
 pub use list_row::ListRow;
+pub use page_toolbar::page_toolbar;
 pub use segmented::{Segment, Segmented};
 pub use switch::Switch;
 
