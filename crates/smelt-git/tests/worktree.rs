@@ -243,7 +243,13 @@ fn merge_on_remote(project: &Path, name: &str, branch: &str, how: &str) {
     fs::create_dir_all(clone.parent().unwrap()).unwrap();
     git(
         project,
-        &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
+        &[
+            "clone",
+            "--branch",
+            "main",
+            remote.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
     );
     git(&clone, &["config", "user.name", "Remote Merger"]);
     git(&clone, &["config", "user.email", "merger@example.invalid"]);
