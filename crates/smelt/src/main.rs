@@ -2427,6 +2427,16 @@ impl gpui::AssetSource for SmeltAssets {
                 include_bytes!("../assets/icons/monitor.svg").as_slice(),
             )));
         }
+        if path == "smelt-icons/machine-linux.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/machine-linux.svg").as_slice(),
+            )));
+        }
+        if path == "smelt-icons/machine-windows.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/machine-windows.svg").as_slice(),
+            )));
+        }
         // 停靠区开合按钮的展开态：分隔线外侧加实心色块。自带的 panel-left / panel-right
         // 只有一根细线，18px 下开合两态分不清。
         if path == "smelt-icons/panel-left-filled.svg" {

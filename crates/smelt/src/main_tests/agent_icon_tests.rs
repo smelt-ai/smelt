@@ -55,6 +55,22 @@ fn non_agent_paths_are_not_claimed() {
 }
 
 #[test]
+fn machine_os_icons_are_bundled_with_the_application() {
+    use gpui::AssetSource as _;
+
+    for path in [
+        "smelt-icons/machine-linux.svg",
+        "smelt-icons/machine-windows.svg",
+    ] {
+        let icon = crate::SmeltAssets
+            .load(path)
+            .unwrap()
+            .expect("机器系统图标必须打包进应用资源");
+        assert!(!icon.is_empty());
+    }
+}
+
+#[test]
 fn archive_sidebar_icon_is_bundled_with_the_application() {
     use gpui::AssetSource as _;
 

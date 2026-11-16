@@ -90,7 +90,17 @@ fn workset_element_id(name: &'static str, project: &ProjectRef, workset_id: &str
         .into()
 }
 
-/// 机器名字，远程的由机器图标颜色体现连接状态；悬停看完整的连接说明。
+/// 与手机端机器列表使用同一套系统图标；未知系统不猜测。
+fn machine_os_icon(os: Option<&str>) -> &'static str {
+    match os.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+        "macos" | "darwin" => "icons/apple.svg",
+        "linux" => "smelt-icons/machine-linux.svg",
+        "windows" => "smelt-icons/machine-windows.svg",
+        _ => "icons/laptop-minimal.svg",
+    }
+}
+
+/// 机器名字；图标颜色体现连接状态，悬停看完整的连接说明。
 fn runtime_name_with_indicator(
     key: &RuntimeKey,
     name: impl Into<SharedString>,
@@ -108,12 +118,6 @@ fn runtime_name_with_indicator(
     let Some(indicator) = indicator else {
         return name.into_any_element();
     };
-    // 远程机器名字后跟一个连接灯（绿：在线；黄：慢、连接中、升级中；红：离线、版本不兼容）。
-    let light = match indicator.light {
-        crate::runtimes::LinkLight::Good => ui_theme::ok(),
-        crate::runtimes::LinkLight::Degraded => ui_theme::need(),
-        crate::runtimes::LinkLight::Down => ui_theme::bad(),
-    };
     let detail = SharedString::from(indicator.detail);
     h_flex()
         .id(ElementId::from(SharedString::from(format!(
@@ -123,7 +127,6 @@ fn runtime_name_with_indicator(
         .gap_1p5()
         .items_center()
         .child(name)
-        .child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(rgb(light)))
         .tooltip(move |window, cx| {
             gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
         })
@@ -139,18 +142,11 @@ fn runtime_name_with_indicator(
         .into_any_element()
 }
 
-/// 侧栏里一台机器的分段标题，样子和「项目」标题一样：小字、次要字色，不带机器图标，
-/// 跟下面带图标的项目行一眼分得开。点整行折起或展开；远程机器名字后有连接灯，悬停名字看
-/// 走哪条路、多慢、什么版本。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
-/// 「远程桌面」（装了的才有）和「打开项目」的快捷按钮。`grouping` 是侧栏的「筛选与
-/// 分组」按钮：分了机器段就没有「项目」标题了，它挂在第一段的标题上。
-///
-/// 28 高，名字和下面项目行的图标落在同一条左缘。多台机器时它是最上面一层，第二段起上面
-/// 再隔一条线（见 `header_for`）。折叠箭头跟在名字后面，折起时常显，展开时悬停才出现。
+/// 机器分段标题：左侧是固定位置的展开箭头和系统图标，图标颜色表示连接状态。
+/// 悬停名字看连接详情；`⋯` 和右键是同一份机器菜单（[`machine_menu`]）。
 fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
-    folded: bool,
     chevron_degrees: f32,
     grouping: Option<Div>,
     // 键盘焦点环、滚到这一行用的锚，见 `keyboard`。
@@ -160,6 +156,13 @@ fn runtime_section_header(
     let key = runtime.key().clone();
     let name = crate::runtimes::runtime_name(&key, cx);
     let indicator = crate::runtimes::runtime_indicator(&key, cx);
+    let icon = machine_os_icon(crate::runtimes::runtime_os(&key, cx));
+    let icon_color = match indicator.as_ref().map(|indicator| indicator.light) {
+        Some(crate::runtimes::LinkLight::Good) => ui_theme::ok(),
+        Some(crate::runtimes::LinkLight::Degraded) => ui_theme::need(),
+        Some(crate::runtimes::LinkLight::Down) => ui_theme::bad(),
+        None => ui_theme::muted(),
+    };
     let has_desktop = crate::runtimes::runtime_has_desktop(&key, cx);
     let group = SharedString::from(format!("runtime-header-{key:?}"));
     let toggle_workspace = workspace.clone();
@@ -184,17 +187,14 @@ fn runtime_section_header(
         .on_click(move |_ev, _window, cx| {
             toggle_workspace.update(cx, |ws, cx| ws.toggle_runtime_fold(&toggle_key, cx));
         })
-        .child(runtime_name_with_indicator(&key, name, indicator))
         .child(
             div()
+                .w(px(row::GROUP_ICON_BOX))
+                .h(px(16.))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
-                .when(!folded, |chevron| {
-                    chevron
-                        .opacity(0.0)
-                        .group_hover(group.clone(), |style| style.opacity(1.0))
-                })
+                .justify_center()
                 .child(
                     Icon::new(IconName::ChevronRight)
                         .size(px(12.))
@@ -202,6 +202,8 @@ fn runtime_section_header(
                         .transform(Transformation::rotate(radians(chevron_degrees.to_radians()))),
                 ),
         )
+        .child(Icon::empty().path(icon).size(px(14.)).text_color(rgb(icon_color)))
+        .child(runtime_name_with_indicator(&key, name, indicator))
         .child(div().flex_1())
         .children(grouping.map(|grouping| {
             grouping
@@ -1103,7 +1105,6 @@ impl Workspace {
                 .child(runtime_section_header(
                     runtime,
                     this.clone(),
-                    self.runtime_folded(&key),
                     chevron_degrees,
                     grouping,
                     extras,
@@ -3145,8 +3146,8 @@ mod tests {
     use super::{
         PROJECT_ACTION_SLOT_HEIGHT, PROJECT_DISCLOSURE_ICON_SIZE, PROJECT_GUIDE_LEFT,
         PROJECT_NEW_BUTTON_SIZE, PROJECT_SESSION_INDENT, SESSION_AGENT_ICON_BOX_SIZE,
-        SESSION_AGENT_ICON_SIZE, project_disclosure_icon, project_header_is_selected,
-        session_row_is_selected, session_row_status_label, status_text,
+        SESSION_AGENT_ICON_SIZE, machine_os_icon, project_disclosure_icon,
+        project_header_is_selected, session_row_is_selected, session_row_status_label, status_text,
     };
     use crate::AgentStatus;
     use gpui_component::IconName;
@@ -3160,6 +3161,22 @@ mod tests {
         assert!(SESSION_AGENT_ICON_SIZE >= 17.);
         assert!(SESSION_AGENT_ICON_BOX_SIZE >= SESSION_AGENT_ICON_SIZE);
     };
+
+    #[test]
+    fn machine_icons_match_the_mobile_os_mapping() {
+        assert_eq!(machine_os_icon(Some("macos")), "icons/apple.svg");
+        assert_eq!(machine_os_icon(Some(" Darwin ")), "icons/apple.svg");
+        assert_eq!(
+            machine_os_icon(Some("LINUX")),
+            "smelt-icons/machine-linux.svg"
+        );
+        assert_eq!(
+            machine_os_icon(Some("windows")),
+            "smelt-icons/machine-windows.svg"
+        );
+        assert_eq!(machine_os_icon(None), "icons/laptop-minimal.svg");
+        assert_eq!(machine_os_icon(Some("other")), "icons/laptop-minimal.svg");
+    }
 
     #[test]
     fn project_and_agent_icons_are_visually_distinct() {
