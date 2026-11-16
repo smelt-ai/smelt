@@ -40,15 +40,11 @@ impl From<ClientStoreError> for String {
     }
 }
 
-/// 外观。枚举类字段存的是它们的 serde 名（如 `dark`、`regular`），由界面转换。
+/// 外观。枚举类字段存的是它们的 serde 名（如 `dark`），由界面转换。
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppearanceRecord {
-    pub bg_color: u32,
     pub bg_image: Option<String>,
     pub bg_image_opacity: f32,
-    pub opacity: f32,
-    pub blur: bool,
-    pub glass_style: String,
     pub theme_mode: String,
     pub theme_name: String,
     pub ui_font_px: u32,
@@ -57,6 +53,8 @@ pub struct AppearanceRecord {
     pub font_family: String,
     /// 选的是哪份布局。`None` 是没选过，用第一个登记的布局。
     pub layout_id: Option<String>,
+    /// 窗口底下垫的系统材质的名字。空的、不认识的由界面回到这个平台的默认。
+    pub material: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +119,7 @@ pub struct WorkspaceUiRecord {
     pub active_session: usize,
     /// 当前看的那段对话的稳定 id。
     pub active_session_id: Option<String>,
+    /// 首页出口里放着的视图 id；空是默认内容。
     pub route: String,
     pub collapsed_projects: Vec<ProjectKey>,
     pub collapsed_agents: Vec<String>,
@@ -225,26 +224,26 @@ pub(crate) fn write_appearance(
     connection: &Connection,
     record: &AppearanceRecord,
 ) -> Result<(), String> {
+    // TODO(下次升库): `bg_color`、`opacity`、`blur` 三列已经没人读，删掉；`glass_style`
+    // 现在存的是材质（`material`），改名。没升库前照旧给没人读的列填固定值，免得 NOT NULL
+    // 拦住写入。
     connection
         .execute(
             "INSERT OR REPLACE INTO appearance (id, bg_color, bg_image, bg_image_opacity, opacity,
                blur, glass_style, theme_mode, theme_name, ui_font_px, ui_font_family, font_px,
                font_family, layout_id)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             VALUES (1, 0, ?1, ?2, 1.0, 1, ?10, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                record.bg_color,
                 record.bg_image,
                 record.bg_image_opacity,
-                record.opacity,
-                record.blur,
-                record.glass_style,
                 record.theme_mode,
                 record.theme_name,
                 record.ui_font_px,
                 record.ui_font_family,
                 record.font_px,
                 record.font_family,
-                record.layout_id
+                record.layout_id,
+                record.material
             ],
         )
         .map(drop)
@@ -630,26 +629,22 @@ impl ClientStore {
         self.with(|connection| {
             connection
                 .query_row(
-                    "SELECT bg_color, bg_image, bg_image_opacity, opacity, blur, glass_style,
-                       theme_mode, theme_name, ui_font_px, ui_font_family, font_px, font_family,
-                       layout_id
+                    "SELECT bg_image, bg_image_opacity, theme_mode, theme_name, ui_font_px,
+                       ui_font_family, font_px, font_family, layout_id, glass_style
                      FROM appearance WHERE id = 1",
                     [],
                     |row| {
                         Ok(AppearanceRecord {
-                            bg_color: row.get(0)?,
-                            bg_image: row.get(1)?,
-                            bg_image_opacity: row.get(2)?,
-                            opacity: row.get(3)?,
-                            blur: row.get(4)?,
-                            glass_style: row.get(5)?,
-                            theme_mode: row.get(6)?,
-                            theme_name: row.get(7)?,
-                            ui_font_px: row.get(8)?,
-                            ui_font_family: row.get(9)?,
-                            font_px: row.get(10)?,
-                            font_family: row.get(11)?,
-                            layout_id: row.get(12)?,
+                            bg_image: row.get(0)?,
+                            bg_image_opacity: row.get(1)?,
+                            theme_mode: row.get(2)?,
+                            theme_name: row.get(3)?,
+                            ui_font_px: row.get(4)?,
+                            ui_font_family: row.get(5)?,
+                            font_px: row.get(6)?,
+                            font_family: row.get(7)?,
+                            layout_id: row.get(8)?,
+                            material: row.get(9)?,
                         })
                     },
                 )

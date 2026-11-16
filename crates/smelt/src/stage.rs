@@ -1,10 +1,8 @@
 //! 舞台顶上浮着的东西：可见舞台身份的胶囊，舞台贴着窗口顶时还有拖窗口的条。
 //! 用其他应用打开在项目右键。
 //!
-//! 标题不拉成通栏。它是舞台正中的一颗胶囊。
-//! 标题槽只填当前舞台没有自己页头的那一面（项目会话、侧栏对话）。
+//! 标题不拉成通栏。它是舞台正中的一颗胶囊，写活动会话（项目会话或侧栏对话）的名字。
 //! 对话里最近一问整条滚出视口后，胶囊换成那一问，按下滚回去。
-//! 插件页面有自己的页头，铬不重复写，也不回落到上一会话。
 //!
 //! `impl Workspace` 方法，字段仍在 main.rs。
 
@@ -13,10 +11,10 @@ use gpui::*;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
 
-use crate::{Workspace, WorkspaceRoute, acp_view, ui_theme, workspace_frame};
+use crate::{Workspace, acp_view, ui_theme, workspace_frame};
 use smelt_ui::truncated_line::truncated_line;
 
-/// 共用顶栏标题槽。插件页面、远程桌面都有页头，那些面必须是 `Hidden`。
+/// 舞台顶上的标题槽。没有会话、名字是空的时候不画。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChromeTitle {
     Hidden,
@@ -48,42 +46,12 @@ impl ChromeTitle {
     }
 }
 
-/// 舞台自己有页头或页签时，拖窗口交给那一条，不要再盖一层把按钮挡住。
-pub(crate) fn stage_has_page_header(route: &WorkspaceRoute) -> bool {
-    match route {
-        WorkspaceRoute::Page(_) | WorkspaceRoute::Desktop => true,
-        WorkspaceRoute::Conversation | WorkspaceRoute::Session => false,
-    }
-}
-
-/// 舞台贴着窗口顶（单独一组、没有标签条）时，顶上这一条拖窗口；有页头时交给页头。
+/// 舞台贴着窗口顶（单独一组、没有标签条）时，顶上这一条拖窗口。
 ///
 /// `left_guard` 见 [`Workspace::chrome_left_guard`]：`None` 是舞台不贴窗口顶，`Some` 是
 /// 左边要让出的宽度（贴左上角时是红黄绿按钮和左侧开合按钮）。返回值是 `(left, height)`。
-pub(crate) fn stage_content_drag_band(
-    left_guard: Option<Pixels>,
-    page_header: bool,
-) -> Option<(Pixels, Pixels)> {
-    if page_header {
-        return None;
-    }
+pub(crate) fn stage_content_drag_band(left_guard: Option<Pixels>) -> Option<(Pixels, Pixels)> {
     left_guard.map(|left| (left, workspace_frame::TOP_BAR_HEIGHT))
-}
-
-/// 铬标题跟可见面走，不读裸的 `active_session`。
-///
-/// `project_session` 是项目舞台上那条会话；切到插件页面后它往往还在，
-/// 但不能再显示——那就是「顶栏还停在上一场 Grok」这条 bug。
-pub(crate) fn chrome_title_for_stage(
-    route: &WorkspaceRoute,
-    conversation: Option<ChromeSessionTitle>,
-    project_session: Option<ChromeSessionTitle>,
-) -> ChromeTitle {
-    match route {
-        WorkspaceRoute::Session => ChromeTitle::from_session(project_session),
-        WorkspaceRoute::Conversation => ChromeTitle::from_session(conversation),
-        WorkspaceRoute::Page(_) | WorkspaceRoute::Desktop => ChromeTitle::Hidden,
-    }
 }
 
 /// 静止宽度。胶囊浮在内容第一行正中，左右常是终端自己的路径和用量，只能留一个短名字。
@@ -367,13 +335,19 @@ impl Workspace {
         }
     }
 
-    /// 舞台上的页头、拖窗口条从哪起。舞台单独一组、没有标签条时贴着窗口顶，返回左边要
-    /// 让出的宽度：贴左上角时让红黄绿按钮和左侧开合按钮，不然是 0。舞台在标签条下面时是 `None`：顶上
-    /// 那条归标签条，页头不用再留拖窗口的高度。只读缓存（见 `workspace_layout`）。
+    /// 舞台上的页头、拖窗口条从哪起，见 [`Self::chrome_left_guard_of`]。
     pub(crate) fn chrome_left_guard(&self, window: &Window) -> Option<Pixels> {
-        let stage = crate::builtin_views::Builtin::Stage.id();
-        self.shell_view.bare.contains(stage).then(|| {
-            if self.shell_view.top_left.as_deref() == Some(stage) {
+        self.chrome_left_guard_of(crate::builtin_views::Builtin::Stage.id(), window)
+    }
+
+    /// 一个视图的页头、拖窗口条从哪起。它（或装着它的出口）单独一组、没有标签条时贴着
+    /// 窗口顶，返回左边要让出的宽度：贴左上角时让红黄绿按钮和左侧开合按钮，不然是 0。在
+    /// 标签条下面时是 `None`：顶上那条归标签条，页头不用再留拖窗口的高度。只读缓存（见
+    /// `workspace_layout`）。
+    pub(crate) fn chrome_left_guard_of(&self, view: &str, window: &Window) -> Option<Pixels> {
+        let view = self.shell_view.panel_of(view);
+        self.shell_view.bare.contains(view).then(|| {
+            if self.shell_view.top_left.as_deref() == Some(view) {
                 self.shell_view.leading_inset(window)
             } else {
                 px(0.)
@@ -381,31 +355,44 @@ impl Workspace {
         })
     }
 
+    /// 自己画顶上那条的宿主视图（设置）的标题行，按它此刻摆在哪让位，见
+    /// `workspace_frame::page_chrome`。
+    pub(crate) fn page_chrome_of(&self, view: &str, window: &Window) -> Div {
+        crate::workspace_frame::page_chrome(
+            self.chrome_left_guard_of(view, window),
+            self.chrome_right_inset_of(view),
+        )
+    }
+
+    /// 一个视图贴着窗口右上角时，页头末尾要给右侧开合按钮让出的宽度；不贴着是 0。
+    pub(crate) fn chrome_right_inset_of(&self, view: &str) -> Pixels {
+        let view = self.shell_view.panel_of(view);
+        if self.shell_view.bare.contains(view) && self.shell_view.top_right.as_deref() == Some(view)
+        {
+            self.shell_view.trailing_inset()
+        } else {
+            px(0.)
+        }
+    }
+
+    /// 舞台画的那个会话（见 `render_stage_session`）的名字。
     fn chrome_title(&self, cx: &App) -> ChromeTitle {
-        let conversation =
-            self.selected_conversation_view(cx)
-                .map(|(ix, view)| ChromeSessionTitle {
-                    title: Self::title_with_runtime(&self.sessions[ix], cx),
-                    model: view.read(cx).model_name(),
-                    conversation: Some(view),
-                });
-        let project_session = self.sessions.get(self.active_session).and_then(|session| {
-            if session.is_product_conversation(cx) {
-                return None;
-            }
+        let session = self.sessions.get(self.active_session).filter(|session| {
+            !session.is_product_conversation(cx) || session.is_agent_conversation(cx)
+        });
+        ChromeTitle::from_session(session.map(|session| {
             let conversation = session.active_acp().cloned();
-            Some(ChromeSessionTitle {
+            ChromeSessionTitle {
                 title: Self::title_with_runtime(session, cx),
                 model: conversation
                     .as_ref()
                     .and_then(|view| view.read(cx).model_name()),
                 conversation,
-            })
-        });
-        chrome_title_for_stage(self.active_tab(), conversation, project_session)
+            }
+        }))
     }
 
-    /// 浮在舞台内容上的标题胶囊，以及舞台贴窗口顶、没有页头时的拖窗口条。不占布局高度。
+    /// 浮在舞台内容上的标题胶囊，以及舞台贴窗口顶时的拖窗口条。不占布局高度。
     pub(crate) fn render_stage_chrome(
         &mut self,
         left_guard: Option<Pixels>,
@@ -432,10 +419,7 @@ impl Workspace {
                 })
             }
         };
-        let drag_band = stage_content_drag_band(
-            left_guard,
-            stage_has_page_header(self.active_tab()),
-        );
+        let drag_band = stage_content_drag_band(left_guard);
         div()
             .absolute()
             .inset_0()
@@ -462,115 +446,51 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ChromeSessionTitle, ChromeTitle, chrome_title_for_stage, stage_content_drag_band,
-        stage_has_page_header,
-    };
-    use crate::{WorkspaceRoute, workspace_frame};
+    use super::{ChromeSessionTitle, ChromeTitle, stage_content_drag_band};
+    use crate::workspace_frame;
     use gpui::px;
 
-    fn grok() -> ChromeSessionTitle {
-        ChromeSessionTitle {
-            title: ".: - Waiting for response... - PI-Desktop 插件架构与 UI 扩展边界 - grok".into(),
-            model: None,
-            conversation: None,
-        }
-    }
-
-    fn agent_chat() -> ChromeSessionTitle {
-        ChromeSessionTitle {
+    #[test]
+    fn the_chrome_shows_the_session_title() {
+        let title = ChromeSessionTitle {
             title: "查登录".into(),
             model: Some("grok-4".into()),
             conversation: None,
-        }
-    }
-
-    #[test]
-    fn leaving_a_session_for_a_plugin_page_clears_the_chrome_title() {
+        };
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Page("agents".into()), None, Some(grok())),
-            ChromeTitle::Hidden,
-        );
-    }
-
-    #[test]
-    fn a_missing_conversation_does_not_keep_the_previous_session() {
-        assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Conversation, None, Some(grok())),
-            ChromeTitle::Hidden,
-        );
-    }
-
-    #[test]
-    fn agent_conversation_uses_that_thread_not_the_project_session() {
-        assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Conversation,
-                Some(agent_chat()),
-                Some(grok()),
-            ),
+            ChromeTitle::from_session(Some(title)),
             ChromeTitle::Visible {
                 title: "查登录".into(),
                 model: Some("grok-4".into()),
                 conversation: None,
             },
         );
-    }
-
-    #[test]
-    fn project_stage_still_shows_the_session_title() {
-        assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok())),
-            ChromeTitle::Visible {
-                title: grok().title,
-                model: None,
-                conversation: None,
-            },
-        );
-        assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, Some(agent_chat()), None),
-            ChromeTitle::Hidden,
-        );
+        assert_eq!(ChromeTitle::from_session(None), ChromeTitle::Hidden);
     }
 
     #[test]
     fn blank_titles_do_not_occupy_the_chrome() {
         assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Session,
-                None,
-                Some(ChromeSessionTitle {
-                    title: "   ".into(),
-                    model: None,
-                    conversation: None,
-                }),
-            ),
+            ChromeTitle::from_session(Some(ChromeSessionTitle {
+                title: "   ".into(),
+                model: None,
+                conversation: None,
+            })),
             ChromeTitle::Hidden,
         );
     }
 
     #[test]
     fn a_stage_at_the_window_top_drags_there() {
-        let band = stage_content_drag_band(Some(px(0.)), false).expect("贴窗口顶要能拖");
+        let band = stage_content_drag_band(Some(px(0.))).expect("贴窗口顶要能拖");
         assert_eq!(band, (px(0.), workspace_frame::TOP_BAR_HEIGHT));
 
-        let corner = stage_content_drag_band(Some(px(80.)), false).expect("左上角让开红黄绿");
+        let corner = stage_content_drag_band(Some(px(80.))).expect("左上角让开红黄绿");
         assert_eq!(corner.0, px(80.));
 
         assert!(
-            stage_content_drag_band(None, false).is_none(),
+            stage_content_drag_band(None).is_none(),
             "在标签条下面，拖窗口归标签条"
         );
-    }
-
-    #[test]
-    fn page_headers_own_the_drag_instead_of_a_covering_strip() {
-        assert!(stage_content_drag_band(Some(px(0.)), true).is_none());
-        assert!(stage_has_page_header(&WorkspaceRoute::Page(
-            "capabilities".into()
-        )));
-        assert!(stage_has_page_header(&WorkspaceRoute::Desktop));
-        assert!(!stage_has_page_header(&WorkspaceRoute::Conversation));
-        assert!(!stage_has_page_header(&WorkspaceRoute::Session));
     }
 }

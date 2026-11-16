@@ -42,7 +42,7 @@
   `missing_fields`、删智能体时关联自动化的检查也只看本机。
 - 通知标识 `smelt.automation.run.{run_id}`、跳转 `JumpToAutomationRun{automation_id, run_id}` 不带机器；
   终态提醒去重按 `session_id` 比，不看机器。
-- 导航 `AutomationsView::List / Editor`（`workspace_nav.rs`）里的自动化只用 `id` 指。
+- 自动化插件页面（`crates/plugins/automations/src/page.rs`）的编辑状态里，自动化只用 `id` 指。
 
 ### 手机：只能看、开关、跑一次
 

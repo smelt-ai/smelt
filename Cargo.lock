@@ -10948,6 +10948,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11373,6 +11374,7 @@ version = "0.0.0"
 dependencies = [
  "gpui-base",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-apple",
  "hex",

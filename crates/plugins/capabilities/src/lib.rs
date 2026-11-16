@@ -1,7 +1,7 @@
 //! 能力库：给某台机器上的 Pi 配模型与凭据、MCP 服务器、技能与扩展、记忆召回。
 //!
 //! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道，宿主里没有它的类型。视图 id 是
-//! [`VIEW_ID`]，打开时的参数：`{"tab": "models" | "plugins" | "mcp" | "memory",
+//! `smelt.capabilities/main`，打开时的参数：`{"tab": "models" | "plugins" | "mcp" | "memory",
 //! "machine": …}`（机器的写法见 [`api::machine_to_json`]），都可以不给。
 //!
 //! 状态全在 [`CapabilitiesPage`] 上：在配哪台机器、那台机器的 Pi 配置快照、各表单。
@@ -31,24 +31,26 @@ mod state;
 use config::PiConfigSlot;
 use state::*;
 
-const VIEW_ID: &str = "capabilities";
+const OWNER: &str = "smelt.capabilities";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
-    api::register_view(
-        ViewSpec {
-            id: VIEW_ID.into(),
+    api::register_views(
+        OWNER,
+        vec![ViewSpec {
+            name: "main".into(),
             title: "能力库".into(),
             icon: IconName::LayoutDashboard.path(),
             per_machine: true,
             draws_top_bar: false,
+            settings: None,
             build: Rc::new(|_window, cx| {
                 Rc::new(cx.new(CapabilitiesPage::new)) as Rc<dyn ViewHandle>
             }),
-        },
+        }],
         cx,
     )
-    .expect("能力库的视图 id 不是宿主保留的");
+    .expect("能力库的视图表写错了");
 }
 
 /// 页面里平级的几个页签。
@@ -184,8 +186,8 @@ impl CapabilitiesPage {
             | HostEvent::ViewBadgesChanged
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged
-            | HostEvent::CommandsChanged
-            | HostEvent::SettingsPagesChanged => {}
+            | HostEvent::PagesChanged
+            | HostEvent::CommandsChanged => {}
         }
     }
 
@@ -261,7 +263,6 @@ impl CapabilitiesPage {
         let entity = cx.entity();
         Button::new("capabilities-runtime")
             .quiet()
-            .small()
             .label(format!("机器：{current}"))
             .icon(IconName::ChevronDown)
             .dropdown_menu(move |menu, _window, _cx| {
@@ -313,7 +314,7 @@ impl PluginView for CapabilitiesPage {
 }
 
 impl Render for CapabilitiesPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = api::host(cx);
         let entity = cx.entity();
         let tabs = Segmented::new("capabilities-tabs")
@@ -326,16 +327,9 @@ impl Render for CapabilitiesPage {
             });
         // 挂了别的机器，才需要选在配哪台。
         let several_machines = host.machines(cx).len() > 1;
-        let header = host
-            .page_header(window, cx)
+        // 页名在外壳画的标题带（或标签）上，这一行不再写一遍。
+        let header = api::ui::page_toolbar()
             .gap_3()
-            .child(
-                div()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(rgb(api::ui::ui_theme::text()))
-                    .child("能力库"),
-            )
             .child(tabs)
             .when(several_machines, |header| {
                 header
@@ -343,18 +337,14 @@ impl Render for CapabilitiesPage {
                     .child(self.render_machine_picker(cx))
             });
 
-        v_flex()
-            .size_full()
-            .bg(rgb(api::ui::ui_theme::bg()))
-            .child(header)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .child(render::content(self, cx)),
-            )
+        v_flex().size_full().child(header).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .child(render::content(self, cx)),
+        )
     }
 }
 

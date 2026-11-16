@@ -253,8 +253,8 @@ class _MachineRow extends StatelessWidget {
           children: [
             Semantics(
               label: osLabel(l10n, os),
-              child: Icon(
-                osIcon(os),
+              child: MachineOsIcon(
+                os: os,
                 size: Strokes.iconSmall,
                 color: c.inkMuted,
               ),

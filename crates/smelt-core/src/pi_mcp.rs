@@ -535,7 +535,7 @@ mod tests {
             "mcpServers": {
                 "rea": {
                     "command": launcher,
-                    "args": ["x", "--bun", "rea-agents@6.5.0", "mcp"],
+                    "args": ["x", "--bun", "rea-agents@6.9.0", "mcp"],
                     "env": {"BUN_BE_BUN": "1", "GHIDRA_INSTALL_DIR": "/opt/ghidra"},
                     "timeout": 120,
                 },
@@ -553,6 +553,7 @@ mod tests {
         upgrade_preset_pins_at(&dir, false).unwrap();
 
         let rea_pin = find_preset("rea").unwrap().pinned_package().unwrap().1;
+        assert_eq!(rea_pin, "rea-agents@6.7.0");
         let playwright_pin = find_preset("playwright")
             .unwrap()
             .pinned_package()
@@ -615,7 +616,7 @@ mod tests {
         );
         assert_eq!(
             rea["args"],
-            serde_json::json!(["x", "--bun", "rea-agents@6.9.0", "mcp"]),
+            serde_json::json!(["x", "--bun", "rea-agents@6.7.0", "mcp"]),
             "持久注册必须钉死版本，不能用 @latest；--bun 防止转交给系统 node"
         );
         assert_eq!(
@@ -637,7 +638,7 @@ mod tests {
                 args: vec![
                     "x".into(),
                     "--bun".into(),
-                    "rea-agents@6.9.0".into(),
+                    "rea-agents@6.7.0".into(),
                     "mcp".into(),
                 ],
             }
@@ -725,6 +726,50 @@ mod tests {
         assert_eq!(preset.id, "playwright", "换接法不换服务器名");
         assert!(preset.extension_url.is_none(), "走调试端口，不需要扩展");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn chrome_devtools_presets_connect_to_the_right_chrome() {
+        for (remote_desktop, connection) in [
+            (false, "--auto-connect"),
+            (true, "--browser-url=http://127.0.0.1:9222"),
+        ] {
+            let dir = temp_dir();
+            add_pi_mcp_preset_at(&dir, "chrome-devtools", remote_desktop).unwrap();
+
+            let chrome = &read(&dir)["mcpServers"]["chrome-devtools"];
+            assert_eq!(
+                chrome["command"],
+                smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH
+            );
+            assert_eq!(
+                chrome["args"],
+                serde_json::json!([
+                    "x",
+                    "--bun",
+                    "chrome-devtools-mcp@1.13.0",
+                    connection,
+                    "--memory-debugging",
+                    "--no-usage-statistics",
+                    "--no-performance-crux"
+                ])
+            );
+            assert_eq!(
+                chrome["env"],
+                serde_json::json!({"BUN_BE_BUN": "1", "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS": "1"})
+            );
+            assert_eq!(chrome["exposure"], "deferred");
+            assert_eq!(chrome["timeout"], 120);
+            let preset = find_preset("chrome-devtools")
+                .unwrap()
+                .for_machine(remote_desktop);
+            assert_eq!(
+                preset.pinned_package(),
+                Some(("chrome-devtools-mcp", "chrome-devtools-mcp@1.13.0"))
+            );
+            assert!(preset.extension_url.is_none());
+            std::fs::remove_dir_all(dir).ok();
+        }
     }
 
     /// 只有浏览器类预设分机器；其余的在远程桌面上照原样写。

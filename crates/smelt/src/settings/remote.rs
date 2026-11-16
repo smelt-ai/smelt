@@ -127,7 +127,7 @@ pub fn start_remote_config_load(cx: &mut App) {
     .detach();
 }
 
-/// 取一次远程状态和设备列表。打开设置窗口时调；绑定中就等它绑完（见
+/// 取一次远程状态和设备列表。打开设置时调；绑定中就等它绑完（见
 /// [`watch_remote_status`]）。
 pub fn refresh_remote(cx: &mut App) {
     run_call::<RemoteStatus>(EmptyParams::default(), cx, |result, cx| {
@@ -151,7 +151,7 @@ struct RemoteStatusWatch {
 impl Global for RemoteStatusWatch {}
 
 /// 远程访问正在绑定（要联网找 relay，可能十几秒）时跟着它，直到绑完或失败：每次请运行时
-/// 等状态和手里的不一样了再回（`remote.status.wait`），不隔一会儿查一次。设置窗口关了就
+/// 等状态和手里的不一样了再回（`remote.status.wait`），不隔一会儿查一次。设置收起来就
 /// 不再等，重开时 [`refresh_remote`] 会重新取一次。
 fn watch_remote_status(cx: &mut App) {
     let task = cx.spawn(async move |cx| {
@@ -182,7 +182,8 @@ fn watch_remote_status(cx: &mut App) {
                     let status = status.clone();
                     update_state(cx, |state| state.status = status);
                 }
-                status == RemoteAccessState::Starting && settings_window_open(cx)
+                status == RemoteAccessState::Starting
+                    && crate::plugin_host::view_shown(super::SETTINGS_VIEW, cx)
             });
             if !keep_waiting {
                 return;
@@ -196,17 +197,6 @@ fn watch_remote_status(cx: &mut App) {
 // 运行时最多挂 REMOTE_STATUS_WAIT_MAX 就回，等它的读超时要比这长，不然没变化时会报超时。
 const _: () =
     assert!(crate::runtime_call::RUNTIME_CALL_TIMEOUT.as_secs() > REMOTE_STATUS_WAIT_MAX.as_secs());
-
-/// 设置窗口还开着。远程访问的状态只在那里显示。
-fn settings_window_open(cx: &mut App) -> bool {
-    let Some(handle) = cx
-        .try_global::<super::SettingsWindowHandle>()
-        .map(|handle| handle.0)
-    else {
-        return false;
-    };
-    handle.is_active(cx).is_some()
-}
 
 fn refresh_devices(cx: &mut App) {
     run_call::<DeviceList>(EmptyParams::default(), cx, |result, cx| {

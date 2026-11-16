@@ -188,7 +188,7 @@ impl Workspace {
 }
 
 /// 调试 HUD（Cmd+Shift+F）：gpui-fps 的帧耗时、慢帧、掉帧和 GPU/CPU/内存。
-/// 让出顶部标题栏，免得盖住窗口按钮。主窗口和设置窗口共用，每个窗口各一份监视器。
+/// 让出顶部标题栏，免得盖住窗口按钮。
 pub(crate) fn debug_hud(window: &mut Window, cx: &mut App) -> Div {
     div()
         .absolute()

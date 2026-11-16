@@ -13,21 +13,21 @@ use gpui_component::{Icon, IconName, StyledExt as _};
 use smelt_ui::truncated_line::truncated_line;
 use smelt_ui::{Button, IconAction as _, ListRow};
 
-use crate::{AgentStatus, Workspace, WorkspaceRoute, acp_view, settings};
+use crate::{AgentStatus, Workspace, acp_view, settings};
 
 /// 智能体插件登记的「新对话」命令。侧栏顶上的按钮和 ⌘N 都是它。
 const NEW_CONVERSATION: &str = "smelt.agents/new-conversation";
 /// 智能体插件的视图 id：对话里「管理能力」（按智能体）、「看记忆」去那里。
-const AGENTS_VIEW: &str = "agents";
+const AGENTS_VIEW: &str = "smelt.agents/main";
 /// 能力库插件的视图 id：对话里「管理能力」（不按智能体）去那里。
-const CAPABILITIES_VIEW: &str = "capabilities";
+const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
 
 /// 「对话」分组行、对话行的 hover group 名。
 const CONVERSATION_GROUP_HOVER: &str = "conversation-group-hover";
 const CONVERSATION_ROW_HOVER: &str = "product-conv-row";
 
 impl Workspace {
-    /// 侧栏顶上固定的入口：「新对话」，和没摆进布局的插件视图（当舞台上的一页打开）。
+    /// 侧栏顶上固定的入口：「新对话」，和哪页都没摆的视图（点了放进出口）。
     pub(crate) fn render_sidebar_navigation(&self, entity: Entity<Workspace>, cx: &App) -> Div {
         div()
             .flex_shrink_0()
@@ -38,13 +38,20 @@ impl Workspace {
             .flex_col()
             .gap_1()
             .children(new_conversation_button(cx))
-            // 摆进布局的视图就在布局里看，不再给入口。舞台自己当不了舞台上的页。
-            .children(
+            // 摆进哪页布局的视图就在那页看，不再给入口；哪页出口的默认内容（舞台）点会话
+            // 就回去；远程桌面要先挑机器，入口在机器那一行。
+            .children({
+                let indexes: Vec<_> = smelt_plugin_api::pages(cx)
+                    .into_iter()
+                    .filter_map(|page| page.index)
+                    .collect();
                 smelt_plugin_api::views(cx)
                     .into_iter()
-                    .filter(|view| {
-                        !self.shell_view.laid_out.contains(view.id.as_ref())
-                            && view.id.as_ref() != crate::builtin_views::Builtin::Stage.id()
+                    .filter(move |view| {
+                        view.settings.is_none()
+                            && !self.shell_view.paged(&view.id)
+                            && !indexes.contains(&view.id)
+                            && view.id.as_ref() != crate::desktop_view::DESKTOP_VIEW
                     })
                     .map(|view| {
                         let attention = smelt_plugin_api::view_badge(&view.id, cx).is_some();
@@ -55,11 +62,11 @@ impl Workspace {
                             attention,
                             entity.clone(),
                         )
-                    }),
-            )
+                    })
+            })
     }
 
-    /// 侧栏顶上一个插件视图的入口：点了总是进那一页。
+    /// 侧栏顶上一个视图的入口：点了放进出口；出口里正显示着它时亮着。
     fn render_view_navigation_row(
         &self,
         view_id: String,
@@ -68,7 +75,8 @@ impl Workspace {
         attention: bool,
         entity: Entity<Workspace>,
     ) -> AnyElement {
-        let selected = matches!(self.active_tab(), WorkspaceRoute::Page(id) if *id == view_id);
+        let selected = self.shell_view.outlet.as_deref() == Some(view_id.as_str())
+            && self.shell_view.shown.contains(&view_id);
         ListRow::new(SharedString::from(format!("{view_id}-route")))
             .selected(selected)
             .h(crate::ui_theme::height::md())
@@ -77,21 +85,17 @@ impl Workspace {
             .items_center()
             .gap_2()
             .rounded(crate::ui_theme::row_radius())
-            .child(Icon::new(icon).size(px(16.)).text_color(rgb(if selected {
-                crate::ui_theme::muted()
-            } else {
-                crate::ui_theme::muted()
-            })))
+            .child(
+                Icon::new(icon)
+                    .size(px(16.))
+                    .text_color(rgb(crate::ui_theme::row_muted(selected))),
+            )
+            // 名字的字色由 `ListRow` 给；选中加中等字重。
             .child(
                 div()
                     .flex_1()
                     .text_sm()
-                    .font_medium()
-                    .text_color(rgb(if selected {
-                        crate::ui_theme::text()
-                    } else {
-                        crate::ui_theme::muted()
-                    }))
+                    .when(selected, |label| label.font_medium())
                     .child(label.into()),
             )
             .when(attention, |row| {
@@ -105,7 +109,7 @@ impl Workspace {
             })
             .on_click(move |_, window, cx| {
                 entity.update(cx, |workspace, cx| {
-                    workspace.open_page(&view_id, serde_json::Value::Null, window, cx)
+                    workspace.open_view(&view_id, serde_json::Value::Null, window, cx);
                 });
             })
             .into_any_element()
@@ -132,7 +136,11 @@ impl Workspace {
             .iter()
             .map(|&ix| (ix, self.sessions[ix].effective_updated_at(cx)))
             .collect();
-        let selected_sid = self.nav.conversation_sid();
+        let selected = self.selected_conversation_view(cx);
+        let selected_sid = selected
+            .as_ref()
+            .map(|(_, view)| view.read(cx).session_id().to_string());
+        let selected_sid = selected_sid.as_deref();
         let collapsed = self.sidebar_conversations_collapsed;
         let agg = product
             .iter()
@@ -146,6 +154,8 @@ impl Workspace {
                     .is_some_and(|view| view.read(cx).session_id() == sid)
             })
         });
+        // 折起来时选中的对话藏在里面，分组行代它显示选中。
+        let header_selected = collapsed && selected_inside;
         let toggle_entity = entity.clone();
         let group_key = crate::session_list::SidebarItem::ConversationGroup.key();
         let reveal_target = self.sidebar_reveal.target();
@@ -166,7 +176,7 @@ impl Workspace {
                     entity.clone(),
                 ))
             })
-            .selected(collapsed && selected_inside)
+            .selected(header_selected)
             .h(crate::ui_theme::height::md())
             .px_2()
             .flex()
@@ -190,7 +200,9 @@ impl Workspace {
                                 .child(
                                     Icon::new(IconName::ChevronRight)
                                         .size(px(12.))
-                                        .text_color(rgb(crate::ui_theme::muted()))
+                                        .text_color(rgb(crate::ui_theme::row_muted(
+                                            header_selected,
+                                        )))
                                         .transform(Transformation::rotate(radians(
                                             deg.to_radians(),
                                         ))),
@@ -199,7 +211,7 @@ impl Workspace {
                         .child(
                             Icon::new(gpui_kit_assets::IconName::MessageSquare)
                                 .size(px(15.))
-                                .text_color(rgb(crate::ui_theme::muted())),
+                                .text_color(rgb(crate::ui_theme::row_muted(header_selected))),
                         )
                         .into_any_element()
                 } else {
@@ -219,7 +231,7 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .text_sm()
-                    .text_color(rgb(crate::ui_theme::muted()))
+                    .when(header_selected, |label| label.font_medium())
                     .child("对话"),
             )
             .when(collapsed && agg != AgentStatus::Idle, |row| {
@@ -236,7 +248,7 @@ impl Workspace {
                     div()
                         .flex_shrink_0()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::muted()))
+                        .text_color(rgb(crate::ui_theme::row_muted(header_selected)))
                         .child(product.len().to_string()),
                 )
             })
@@ -282,7 +294,7 @@ impl Workspace {
                             cx,
                         )
                         .into(),
-                        rgb(crate::ui_theme::muted()).into(),
+                        rgb(crate::ui_theme::row_muted(selected)).into(),
                     ),
                 };
             let tooltip = conversation_row_tooltip(&title, &runtime, cx);
@@ -356,17 +368,12 @@ impl Workspace {
                             crate::session_list::row::inline_rename_input(input, entity.clone())
                                 .into_any_element()
                         }
-                        // 选中跟项目下的会话行同口径：选中字色加中等字重。
+                        // 跟项目下的会话行同口径：字色由 `ListRow` 给，选中加中等字重。
                         None => div()
                             .flex_1()
                             .min_w_0()
                             .text_sm()
                             .when(selected, |title| title.font_medium())
-                            .text_color(rgb(if selected {
-                                crate::ui_theme::text()
-                            } else {
-                                crate::ui_theme::text()
-                            }))
                             .overflow_hidden()
                             .child(truncated_line(title))
                             .into_any_element(),
@@ -473,52 +480,6 @@ impl Workspace {
         }
     }
 
-    /// 舞台上的对话：「对话」路由对上的那一段。对不上（冷启动还没补位、刚被移走）时
-    /// 先空着，`align_visible_route` 会纠正。
-    pub(crate) fn render_conversation_stage(&self, cx: &App) -> AnyElement {
-        let Some((_, view)) = self.selected_conversation_view(cx) else {
-            return div()
-                .flex_1()
-                .bg(rgb(crate::ui_theme::bg()))
-                .into_any_element();
-        };
-        let appearance = cx.try_global::<settings::Appearance>();
-        let background_image = appearance.and_then(|appearance| appearance.bg_image.clone());
-        let bg_image_opacity = appearance
-            .map(|appearance| appearance.bg_image_opacity)
-            .unwrap_or(0.25);
-        div()
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .bg(rgb(crate::ui_theme::bg()))
-            .children(background_image.as_deref().map(|path| {
-                crate::workspace_frame::background_image_layer(path, bg_image_opacity, cx)
-            }))
-            .child(view.cached(gpui::StyleRefinement::default().size_full()))
-            .into_any_element()
-    }
-
-    /// 换到一个宿主入口（远程桌面、项目会话）。这些页都画在舞台上：舞台得露出来。
-    pub(crate) fn activate_workspace_tab(
-        &mut self,
-        tab: WorkspaceRoute,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if tab != WorkspaceRoute::Desktop {
-            self.desktop = None;
-        }
-        self.nav.set_active(tab);
-        self.show_view(crate::builtin_views::Builtin::Stage.id(), window, cx);
-        window.focus(&self.focus_handle, cx);
-        self.save_state(cx);
-        self.schedule_visible_refresh(cx);
-        cx.notify();
-    }
-
     pub(crate) fn open_agent_conversation(
         &mut self,
         session_ix: usize,
@@ -532,12 +493,11 @@ impl Workspace {
             return;
         }
         let view = session.active_acp().cloned();
-        let Some(sid) = view
-            .as_ref()
-            .map(|view| view.read(cx).session_id().to_string())
-        else {
+        if view.is_none() {
             return;
-        };
+        }
+        // 舞台画活动会话：先露出舞台（出口里放着别的就放回来），再换活动会话。
+        let stage_hidden = !self.reveal_view(crate::builtin_views::Builtin::Stage.id(), window, cx);
         if self.active_session != session_ix {
             self.active_session_revision = self.active_session_revision.wrapping_add(1);
             self.active_session = session_ix;
@@ -559,33 +519,33 @@ impl Workspace {
                 root: cwd.trim_end_matches('/').to_string(),
             });
         }
-        self.desktop = None;
-        self.nav.open_conversation(sid);
         self.schedule_visible_refresh(cx);
         self.sync_session_ui(cx);
         if let Some(view) = view {
             view.update(cx, |view, cx| {
                 view.maybe_auto_resume(window, cx);
-                view.focus_input(window, cx);
+                if !stage_hidden {
+                    view.focus_input(window, cx);
+                }
             });
         }
         self.save_state(cx);
         cx.notify();
     }
 
-    /// 「对话」路由正在看的那段对话。
+    /// 舞台上露着的那段对话：舞台看得见、活动会话是侧栏「对话」里的一段时才有。
     pub(crate) fn selected_conversation_view(
         &self,
         cx: &App,
     ) -> Option<(usize, Entity<acp_view::AcpView>)> {
-        let sid = self.nav.conversation_sid()?;
-        self.sessions.iter().enumerate().find_map(|(ix, session)| {
-            if !session.is_agent_conversation(cx) {
-                return None;
-            }
-            let view = session.active_acp()?;
-            (view.read(cx).session_id() == sid).then(|| (ix, view.clone()))
-        })
+        if !self.view_shown(crate::builtin_views::Builtin::Stage.id()) {
+            return None;
+        }
+        let session = self.sessions.get(self.active_session)?;
+        if !session.is_agent_conversation(cx) {
+            return None;
+        }
+        Some((self.active_session, session.active_acp()?.clone()))
     }
 
     /// 对话里「管理能力」（不按智能体管）：去能力库的插件页签。能力库插件没装就不动。
@@ -594,7 +554,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_page(
+        self.open_view(
             CAPABILITIES_VIEW,
             serde_json::json!({ "tab": "plugins" }),
             window,
@@ -621,7 +581,7 @@ impl Workspace {
         if let Some(tab) = tab {
             args["tab"] = tab.into();
         }
-        self.open_page(AGENTS_VIEW, args, window, cx);
+        self.open_view(AGENTS_VIEW, args, window, cx);
     }
 
     /// 对话里记忆卡片上的采纳、删除。成功后卡片随 smeltd 推来的快照更新；开着的

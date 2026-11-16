@@ -302,8 +302,8 @@ pub(crate) fn open_in_file_manager(path: &Path) -> Result<(), String> {
 }
 
 /// Open a text file in the platform's default editor without routing through
-/// the workspace file panel. This is used by standalone settings windows,
-/// which have no visible Workspace file panel to reveal an opened document in.
+/// the workspace file panel. Settings pages use it: revealing the file in the
+/// workspace would navigate away from the page the user is editing.
 pub(crate) fn open_in_system_text_editor(path: &Path) -> Result<(), String> {
     if !path.is_file() {
         return Err(format!("配置文件不存在或不可访问：{}", path.display()));

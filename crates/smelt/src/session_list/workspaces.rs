@@ -261,7 +261,6 @@ pub(super) fn worktree_row(
             .flex_1()
             .min_w_0()
             .text_sm()
-            .text_color(rgb(ui_theme::muted()))
             .child(truncated_line(workset.task.clone())),
     )
     .children(pinned.then(|| {
@@ -529,7 +528,7 @@ impl Render for WorkspaceOverview {
                 return div().into_any_element();
             };
             let active = ws.sessions.get(ws.active_session).filter(|session| {
-                ws.active_tab().is_session() && session.runtime(cx).key() == &self.project.runtime
+                ws.project_session_shown(cx) && session.runtime(cx).key() == &self.project.runtime
             });
             let worksets = project_worksets(&space.worksets, &self.project.root);
             let count = worksets.len();

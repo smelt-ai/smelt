@@ -1,4 +1,4 @@
-//! 设置页：外观（主题、字号与字体、布局、窗口与背景）。
+//! 设置页：外观（主题、字号与字体、布局、背景）。
 
 use super::*;
 use gpui_component::IndexPath;
@@ -17,7 +17,7 @@ pub(super) fn appearance_page(
         .group(interface_group(snapshot))
         .group(terminal_group(snapshot))
         .group(layout_group(entity.clone(), cx))
-        .group(window_group(entity, snapshot, cx))
+        .group(background_group(entity, snapshot, cx))
 }
 
 /// 界面：主题、界面字号、界面字体。
@@ -82,9 +82,10 @@ fn terminal_group(snapshot: &SettingsRenderSnapshot) -> SettingGroup {
     ])
 }
 
-/// 布局：用哪份，和把它恢复成本来的样子。选项是插件登记的布局（只读内存）。
+/// 布局：首页用哪份，和把它恢复成本来的样子。选项是插件给首页登记的布局（只读内存）；
+/// 别的页（如设置）各用登记给它的那份，不在这里选。
 fn layout_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
-    let options: Vec<(SharedString, SharedString)> = smelt_plugin_api::layouts(cx)
+    let options: Vec<(SharedString, SharedString)> = crate::workspace_layout::home_layouts(cx)
         .into_iter()
         .map(|layout| (layout.id, layout.title))
         .collect();
@@ -108,7 +109,7 @@ fn layout_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
             options,
             // 选的布局暂时没登记时显示实际在用的那份，不改保存的选择。
             |cx: &App| {
-                crate::workspace_layout::effective_layout(cx)
+                crate::workspace_layout::effective_home_layout(cx)
                     .unwrap_or_default()
                     .into()
             },
@@ -207,7 +208,7 @@ fn displayed_theme_name(cx: &App) -> String {
     }
 }
 
-/// 主题下拉：可搜索，每项带三个色点和所属系列。挂在设置窗口的元素状态上，窗口关了就丢。
+/// 主题下拉：可搜索，每项带三个色点和所属系列。挂在设置的元素状态上。
 struct ThemePicker {
     select: Entity<SelectState<SearchableVec<ThemeOption>>>,
     /// 每款主题的色点，建下拉时一次算好：每项都要把主题配置套一遍，不放进重绘。
@@ -341,80 +342,17 @@ fn theme_dots(swatch: ThemeSwatch, border: gpui::Hsla) -> impl IntoElement {
     )
 }
 
-fn window_group(
+fn background_group(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingGroup {
     let appearance = cx.global::<Appearance>();
-    let opacity_slider = snapshot.opacity_slider.clone();
-    let mut items = vec![
-        SettingItem::new(
-            "不透明度",
-            SettingField::render(move |_, _, cx: &mut App| {
-                let opacity = (cx.global::<Appearance>().window_opacity() * 100.0).round() as u32;
-                slider_with_value(opacity_slider.clone(), format!("{opacity}%"), cx)
-            }),
-        )
-        .description("只作用于工作台窗口，默认 95%；设置窗口始终不透明"),
-    ];
-    // 系统玻璃是 macOS 26 的标题栏材质，别的平台没有这个东西。
-    #[cfg(target_os = "macos")]
-    items.push(
-        SettingItem::new(
-            "标题栏玻璃",
-            SettingField::dropdown(
-                vec![
-                    ("regular".into(), "标准".into()),
-                    ("clear".into(), "清透".into()),
-                ],
-                |cx: &App| match cx.global::<Appearance>().glass_style {
-                    liquid_glass::GlassStyle::Regular => "regular".into(),
-                    liquid_glass::GlassStyle::Clear => "clear".into(),
-                },
-                |v: SharedString, cx: &mut App| {
-                    let style = if v == "clear" {
-                        liquid_glass::GlassStyle::Clear
-                    } else {
-                        liquid_glass::GlassStyle::Regular
-                    };
-                    apply_appearance(move |a| a.glass_style = style, cx);
-                    cx.refresh_windows();
-                },
-            ),
-        )
-        .description("macOS 26 起；系统开了「减少透明度」时不生效"),
-    );
-    let bg_color_picker = snapshot.bg_color_picker.clone();
-    items.push(
-        SettingItem::new(
-            "背景色",
-            SettingField::render(move |_, _, cx: &mut App| {
-                // 没改过时写「跟随主题」：出厂值会跟着明暗自动换（见 bg_color_is_default）。
-                let appearance = cx.global::<Appearance>();
-                let label = if appearance.bg_color_is_default() {
-                    "跟随主题".to_string()
-                } else {
-                    format!("#{:06x}", appearance.bg_color)
-                };
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(label),
-                    )
-                    .children(
-                        bg_color_picker
-                            .as_ref()
-                            .map(|p| ColorPicker::new(p).small()),
-                    )
-            }),
-        )
-        .description("会话内容区的底色"),
-    );
+    let mut items = Vec::new();
+    // 没有材质的机器（Linux、更早的 Windows）不给选。
+    if crate::window_backdrop::available() {
+        items.push(material_item());
+    }
     // 背景图：没设时只给「选择图片…」；设了才出文件名、「清除」和透明度。
     let has_image = appearance.bg_image.is_some();
     let pick_entity = entity.clone();
@@ -471,7 +409,7 @@ fn window_group(
                     })
             }),
         )
-        .description("会话内容区，终端和对话共用"),
+        .description("铺满整个窗口，压在毛玻璃上"),
     );
     if has_image {
         let bg_image_opacity_slider = snapshot.bg_image_opacity_slider.clone();
@@ -484,8 +422,28 @@ fn window_group(
                     slider_with_value(bg_image_opacity_slider.clone(), format!("{opacity}%"), cx)
                 }),
             )
-            .description("默认 25%，越低越不抢文字"),
+            .description("默认 15%，越低越不抢文字"),
         );
     }
-    SettingGroup::new().title("窗口").items(items)
+    SettingGroup::new().title("背景").items(items)
+}
+
+/// 窗口底下垫哪一种系统毛玻璃。选项是这个平台有的材质（只读常量）。
+fn material_item() -> SettingItem {
+    use crate::window_backdrop::WindowMaterial;
+    let options = WindowMaterial::choices()
+        .iter()
+        .map(|material| (material.key().into(), material.label().into()))
+        .collect::<Vec<(SharedString, SharedString)>>();
+    SettingItem::new(
+        "材质",
+        SettingField::dropdown(
+            options,
+            |cx: &App| cx.global::<Appearance>().material.key().into(),
+            |key: SharedString, cx: &mut App| {
+                crate::settings::set_window_material(WindowMaterial::from_key(&key), cx);
+            },
+        ),
+    )
+    .description("垫在整个窗口下面的系统毛玻璃；模糊程度由系统定，不能调")
 }

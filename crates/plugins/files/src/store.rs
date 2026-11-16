@@ -10,7 +10,7 @@ use std::sync::Arc;
 use smelt_plugin_api::rusqlite::{self, OptionalExtension as _, params};
 use smelt_plugin_api::{PluginStore, RuntimeKey};
 
-use crate::{COMMAND_OWNER, MAX_TREE_WIDTH, MIN_TREE_WIDTH, ProjectRef};
+use crate::{MAX_TREE_WIDTH, MIN_TREE_WIDTH, OWNER, ProjectRef};
 
 const MIGRATIONS: &[&str] = &["
     CREATE TABLE settings (
@@ -78,7 +78,7 @@ pub(crate) struct FilesStore {
 impl FilesStore {
     /// 打开本插件的库。打不开就是个什么都不记的空壳。
     pub(crate) fn open() -> Self {
-        let store = smelt_plugin_api::plugin_store(COMMAND_OWNER).and_then(|store| {
+        let store = smelt_plugin_api::plugin_store(OWNER).and_then(|store| {
             store.migrate(MIGRATIONS)?;
             Ok(store)
         });

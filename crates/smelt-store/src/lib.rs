@@ -7948,6 +7948,77 @@ CREATE TABLE published_session (
     }
 
     #[test]
+    fn conversations_created_inside_a_task_root_bind_to_its_workset() {
+        let dir = temp_dir("workset-bind-by-cwd");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let project = std::fs::canonicalize(&*dir).unwrap().join("project");
+        let task_root = project.join("worktrees/issue-1");
+        let path = |path: &std::path::Path| path.to_str().unwrap().to_string();
+        let workset = WorkspaceWorksetRecord {
+            id: "workset-1".into(),
+            project_root: path(&project),
+            task: "issue-1".into(),
+            branch: "feat/issue-1".into(),
+            position: 0,
+            repositories: vec![WorkspaceWorksetRepositoryRecord {
+                name: "api".into(),
+                root: path(&project.join("repos/api")),
+                worktree: path(&task_root.join("api")),
+                base_ref: "refs/remotes/origin/main".into(),
+                branch_created: true,
+                position: 0,
+            }],
+        };
+        store.create_workspace_workset(&workset).unwrap();
+        let binding = |id: &str| {
+            store
+                .workspace_directory()
+                .unwrap()
+                .1
+                .sessions
+                .into_iter()
+                .find(|session| session.id == id)
+                .unwrap()
+                .workset_id
+        };
+
+        let mut acp = acp_conversation("acp-in-task", Some("sid-1"), None);
+        acp.acp.as_mut().unwrap().cwd = Some(path(&task_root.join("api/src")));
+        store.create_workspace_conversation(&acp).unwrap();
+        assert_eq!(binding("acp-in-task").as_deref(), Some("workset-1"));
+
+        store
+            .create_workspace_conversation(&terminal_conversation(
+                "terminal-in-task",
+                "terminal-1",
+                &path(&task_root),
+            ))
+            .unwrap();
+        assert_eq!(binding("terminal-in-task").as_deref(), Some("workset-1"));
+
+        for (id, cwd) in [
+            ("at-project-root", project.clone()),
+            ("sibling-task", project.join("worktrees/issue-10")),
+            ("escapes-task", task_root.join("../other")),
+        ] {
+            store
+                .create_workspace_conversation(&terminal_conversation(
+                    id,
+                    &format!("terminal-{id}"),
+                    &path(&cwd),
+                ))
+                .unwrap();
+            assert_eq!(binding(id), None, "{id}");
+        }
+
+        assert!(matches!(
+            store.delete_workspace_workset("workset-1"),
+            Err(StoreError::WorkspaceWorksetInUse { .. })
+        ));
+        drop(store);
+    }
+
+    #[test]
     fn repository_initialization_survives_removal_and_reopening() {
         let dir = temp_dir("repository-initialization");
         let path = dir.join(DATABASE_FILE_NAME);

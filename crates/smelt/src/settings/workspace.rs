@@ -7,25 +7,16 @@ use super::*;
 
 impl Workspace {
     /// 懒创建外观设置的有状态控件（需要 window）。
-    pub fn ensure_appearance_controls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.opacity_slider.is_some()
-            && self.ui_font_size_slider.is_some()
+    pub fn ensure_appearance_controls(&mut self, cx: &mut Context<Self>) {
+        if self.ui_font_size_slider.is_some()
             && self.font_size_slider.is_some()
             && self.bg_image_opacity_slider.is_some()
-            && self.bg_color_picker.is_some()
         {
             return;
         }
 
-        // 不透明度滑块 + 界面字号滑块 + 终端字号滑块 + 背景图透明度滑块 + 背景色取色器。
+        // 界面字号滑块 + 终端字号滑块 + 背景图透明度滑块。
         let ap = cx.global::<Appearance>().clone();
-        let opacity_slider = cx.new(|_| {
-            SliderState::new()
-                .min(60.0)
-                .max(100.0)
-                .step(1.0)
-                .default_value(ap.window_opacity() * 100.0)
-        });
         let ui_font_size_slider = cx.new(|_| {
             SliderState::new()
                 .min(MIN_UI_FONT_PX as f32)
@@ -47,20 +38,9 @@ impl Workspace {
                 .step(1.0)
                 .default_value(ap.bg_image_opacity.clamp(0.0, 1.0) * 100.0)
         });
-        let bg_color_picker =
-            cx.new(|cx| ColorPickerState::new(window, cx).default_value(rgb(ap.bg_color)));
 
         self.settings_subs.clear();
 
-        self.settings_subs.push(
-            cx.subscribe(&opacity_slider, |this, _s, ev: &SliderEvent, cx| {
-                let (SliderEvent::Change(v) | SliderEvent::Release(v)) = ev;
-                if let SliderValue::Single(x) = v {
-                    let op = (*x / 100.0).clamp(0.3, 1.0);
-                    this.set_appearance(move |a| a.opacity = op, cx);
-                }
-            }),
-        );
         self.settings_subs.push(cx.subscribe(
             &ui_font_size_slider,
             |this, _s, ev: &SliderEvent, cx| {
@@ -98,25 +78,13 @@ impl Workspace {
                 }
             },
         ));
-        self.settings_subs.push(cx.subscribe(
-            &bg_color_picker,
-            |this, _s, ev: &ColorPickerEvent, cx| {
-                let ColorPickerEvent::Change(c) = ev;
-                if let Some(hsla) = c {
-                    let color = hsla_to_rgb(*hsla);
-                    this.set_appearance(move |a| a.bg_color = color, cx);
-                }
-            },
-        ));
-        self.opacity_slider = Some(opacity_slider);
         self.ui_font_size_slider = Some(ui_font_size_slider);
         self.font_size_slider = Some(font_size_slider);
         self.bg_image_opacity_slider = Some(bg_image_opacity_slider);
-        self.bg_color_picker = Some(bg_color_picker);
     }
 
-    /// 无 window 版：改全局 + 存盘 + 重绘。窗口背景（透明/模糊）由 render 里的
-    /// applied_window_bg 同步——供 slider/color_picker 的订阅回调用（它们拿不到 window）。
+    /// 无 window 版：改全局 + 存盘 + 重绘。字号和材质的明暗由外观观察器排的
+    /// `refresh_visible_caches` 同步——供 slider/color_picker 的订阅回调用（它们拿不到 window）。
     pub fn set_appearance(&mut self, f: impl FnOnce(&mut Appearance), cx: &mut Context<Self>) {
         apply_appearance(f, cx);
         cx.notify();
@@ -527,7 +495,7 @@ impl Workspace {
 }
 
 impl Workspace {
-    /// 设置 / 清除背景图（不影响窗口透明度，故无需 window）。
+    /// 设置 / 清除背景图（挂在窗口根上，跟着重绘换，无需 window）。
     pub fn set_bg_image(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         apply_appearance(|a| a.bg_image = path, cx);
         cx.notify();

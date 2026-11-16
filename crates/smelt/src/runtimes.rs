@@ -37,6 +37,14 @@ pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
     }
 }
 
+/// 机器操作系统：远程取连接时缓存的值，未知时不猜测。
+pub(crate) fn runtime_os<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a str> {
+    match key {
+        RuntimeKey::Local => Some(std::env::consts::OS),
+        RuntimeKey::Remote(_) => remote_of(key, cx)?.connection.os.as_deref(),
+    }
+}
+
 /// 那台机器上的路径（会话 cwd、项目根）按哪种系统的规则切：本机就是这台电脑；远程的取
 /// 连上时记下的 `os`，还没连上过当 POSIX——运行时开始支持 Windows 之前就在报 `os` 了，
 /// 不报的只会是 Linux、macOS。
@@ -376,13 +384,10 @@ fn link_summary(link: &RuntimeLink) -> String {
     }
 }
 
-/// 侧栏标题上的连接指示，见 [`RuntimeIndicator`]。本机只在出了状况（守护没起来、
-/// 版本不对、正在升级）时显示：平时它总在，挂一盏绿灯只是噪音。
+/// 侧栏标题上的连接指示，见 [`RuntimeIndicator`]；本机和远程都显示实际连接状态。
 pub(crate) fn runtime_indicator(key: &RuntimeKey, cx: &gpui::App) -> Option<RuntimeIndicator> {
     match key {
-        RuntimeKey::Local => status_of_key(key, cx)
-            .filter(|status| !matches!(status, RuntimeStatus::Online { .. }))
-            .map(|status| indicator(status, None)),
+        RuntimeKey::Local => status_of_key(key, cx).map(|status| indicator(status, None)),
         RuntimeKey::Remote(_) => {
             let remote = remote_of(key, cx)?;
             Some(indicator(&remote.status, remote.link.as_ref()))
@@ -1519,6 +1524,25 @@ mod tests {
             desktop: false,
             smelt_home: None,
         }
+    }
+
+    #[gpui::test]
+    fn local_machine_shows_actual_connection_status(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(RuntimeHub::default());
+            assert!(runtime_indicator(&RuntimeKey::Local, cx).is_none());
+
+            cx.global_mut::<RuntimeHub>().local_status = Some(online());
+            let connected = runtime_indicator(&RuntimeKey::Local, cx).unwrap();
+            assert_eq!(connected.light, LinkLight::Good);
+            assert_eq!(connected.detail, "在线");
+
+            cx.global_mut::<RuntimeHub>().local_status =
+                Some(RuntimeStatus::Offline("连接中断".into()));
+            let disconnected = runtime_indicator(&RuntimeKey::Local, cx).unwrap();
+            assert_eq!(disconnected.light, LinkLight::Down);
+            assert_eq!(disconnected.detail, "离线：连接中断");
+        });
     }
 
     /// 调用按 key 发给那台机器自己的客户端；机器移除了就取不到，不能悄悄退回本机。

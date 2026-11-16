@@ -38,7 +38,7 @@ fn apply_error(error: String, cx: &mut App) {
     cx.set_global(state);
 }
 
-/// 取一次开关和拒绝状态。打开设置窗口和每轮额度刷新后调。
+/// 取一次开关和拒绝状态。打开设置和每轮额度刷新后调。
 pub(crate) fn refresh_quota_settings(cx: &mut App) {
     run_call::<QuotaSettingsGet>(EmptyParams::default(), cx, |result, cx| match result {
         Ok(settings) => apply_settings(settings.providers, cx),

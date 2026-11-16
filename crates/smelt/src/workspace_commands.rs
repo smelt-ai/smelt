@@ -33,9 +33,6 @@ pub(crate) const OWNERS: &[(&str, &str)] = &[
     ("smelt.stage", "分屏"),
 ];
 
-/// 设置窗口里也要能用的键：设置窗口把收到的命令转给主窗口执行。
-const APP_CONTEXT: &str = "Workspace || SettingsWindow";
-
 const fn def(
     owner: &'static str,
     name: &'static str,
@@ -61,36 +58,26 @@ const fn hidden(def: Def) -> Def {
     }
 }
 
-const fn within(context: &'static str, def: Def) -> Def {
-    Def { context, ..def }
-}
-
 pub(crate) const COMMANDS: &[Def] = &[
-    within(
-        APP_CONTEXT,
-        def(
-            "smelt.app",
-            "settings",
-            "打开设置",
-            Some("cmd-,"),
-            |this, _, _, cx| {
-                this.open_settings(cx);
-                Handled::ok()
-            },
-        ),
+    def(
+        "smelt.app",
+        "settings",
+        "打开设置",
+        Some("cmd-,"),
+        |this, _, window, cx| {
+            this.open_settings(window, cx);
+            Handled::ok()
+        },
     ),
-    within(
-        APP_CONTEXT,
-        def(
-            "smelt.app",
-            "quit",
-            "退出 Smelt",
-            Some("cmd-q"),
-            |this, _, _, cx| {
-                this.request_quit(cx);
-                Handled::ok()
-            },
-        ),
+    def(
+        "smelt.app",
+        "quit",
+        "退出 Smelt",
+        Some("cmd-q"),
+        |this, _, _, cx| {
+            this.request_quit(cx);
+            Handled::ok()
+        },
     ),
     // 更新器只在 macOS 上有（设计文档 D4）。
     #[cfg(target_os = "macos")]
@@ -99,12 +86,12 @@ pub(crate) const COMMANDS: &[Def] = &[
         "check-update",
         "检查更新",
         None,
-        |this, _, _, cx| {
-            // 顺手发起一次检查，再把设置窗口开到「更新」页看进度。
+        |this, _, window, cx| {
+            // 顺手发起一次检查，再把设置开到「更新」页看进度。
             if this.update_status.can_check() || this.update_status.can_retry_recovery() {
                 this.check_or_recover_update(false, cx);
             }
-            this.open_settings_section(settings::SettingsSection::app_update(), cx);
+            this.open_settings_section(settings::SettingsSection::app_update(), window, cx);
             Handled::ok()
         },
     ),
