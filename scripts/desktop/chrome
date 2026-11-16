@@ -55,8 +55,11 @@ fi
 # 沙箱要么靠用户命名空间，要么靠 setuid 的 chrome-sandbox（Google Chrome 的包带，Debian 的
 # Chromium 不带）。容器默认的 seccomp 不让建用户命名空间，两样都没有时 Chrome 起不来，
 # 只能关沙箱，并留一句话在日志里。
+# 以 root 运行时 Chrome 不带 --no-sandbox 就不肯起。
 sandbox="$(dirname "$(readlink -f "$chrome")")/chrome-sandbox"
-if ! unshare --user true 2>/dev/null && [[ ! -u "$sandbox" ]]; then
+if [[ "$(id -u)" == 0 ]]; then
+  flags+=(--no-sandbox)
+elif ! unshare --user true 2>/dev/null && [[ ! -u "$sandbox" ]]; then
   echo "这里建不了用户命名空间，也没有 setuid 的 chrome-sandbox：Chrome 关掉沙箱运行" >&2
   flags+=(--no-sandbox)
 fi

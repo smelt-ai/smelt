@@ -8,6 +8,9 @@
 set -uo pipefail
 
 SMELT_HOME="${SMELT_HOME:-$HOME/.smelt}"
+# 以 root 运行（以 root 执行 install.sh 时的默认）：Claude Code 见到 root 就拒绝跳过权限确认，除非
+# 声明这是沙箱。有 systemd 的机器上这句在 smeltd.service 的 drop-in 里。
+[[ "$(id -u)" != 0 ]] || export IS_SANDBOX=1
 BIN="$SMELT_HOME/bin"
 DESKTOP="$SMELT_HOME/desktop/bin"
 LOGS="$SMELT_HOME/logs"

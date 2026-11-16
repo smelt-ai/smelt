@@ -12,13 +12,15 @@
 #                                 或 URL）。不给时先试官方源，连不上（中国大陆常见）就自动换
 #                                 APT_MIRRORS 里头一个连得上的。只用于这次安装，不改 /etc/apt
 #
-# 装在谁名下：运行时不用 root 跑。以 root 执行时（容器里常见），装完系统包后建一个普通用户
-# （默认 smelt，SMELT_USER 可改），运行时和桌面都装在它名下；以普通用户执行时装在自己名下，
-# 装系统包、开 linger 时用 sudo。
+# 装在谁名下：谁执行就装在谁名下。以普通用户执行时装系统包、开 linger 用 sudo；以 root 执行时
+# 运行时就以 root 跑（见 runtime_user），SMELT_USER 可以改成装在一个普通用户名下。以 root 运行
+# 时告诉 Claude Code 这是沙箱（IS_SANDBOX=1），否则它拒绝跳过权限确认；Chrome 也得关沙箱才肯
+# 以 root 起。
 #
-# 怎么敲到命令（smeltd 和命令行 smelt）：以 root 执行时生成 /usr/local/bin/ 下的同名脚本，切到
-# 那个用户再跑（见 root_command_script）；以普通用户执行时在 ~/.local/bin 放软链接，不改 shell
-# 配置。运行时起的智能体不靠这些：它们的 PATH 里本来就有 ~/.smelt/bin。
+# 怎么敲到命令（smeltd 和命令行 smelt）：运行用户是 root 时在 /usr/local/bin 放软链接；是另一个
+# 用户时在那里生成同名脚本，切到那个用户再跑（见 root_command_script）；以普通用户执行时在
+# ~/.local/bin 放软链接，不改 shell 配置。运行时起的智能体不靠这些：它们的 PATH 里本来就有
+# ~/.smelt/bin。
 #
 # 怎么常驻：有 systemd 的机器装成 systemd 用户服务（smeltd、smelt-display、smelt-desktop、
 # smelt-chrome），开 linger 让它们开机就起、退出登录也不停。没有 systemd 的（多半是 Docker
@@ -241,11 +243,41 @@ system_phase() {
   return 0
 }
 
-# root 执行：系统部分做完，建普通用户，把用户那部分交给它跑。
+# root 执行时运行时装在谁名下：SMELT_USER 优先；没给时以前装在 smelt 名下的接着用它（重新执行
+# 就是升级，换个用户等于另装一份、丢掉配对和会话），否则就是 root。
+runtime_user() {
+  if [[ -n "${SMELT_USER:-}" ]]; then
+    echo "$SMELT_USER"
+  elif id -u smelt >/dev/null 2>&1 \
+    && [[ -e "$(getent passwd smelt | cut -d: -f6)/.smelt/bin/smeltd" ]]; then
+    echo smelt
+  else
+    echo root
+  fi
+}
+
+# 开 linger 拉起这个用户的 systemd，等它的总线出来才能 systemctl --user。
+start_user_manager() {
+  local user=$1 uid=$2
+  loginctl enable-linger "$user"
+  local i
+  for ((i = 0; i < 60; i++)); do
+    [[ -S "/run/user/$uid/bus" ]] && break
+    sleep 0.5
+  done
+  [[ -S "/run/user/$uid/bus" ]] || die "等不到用户 $user 的 systemd（/run/user/$uid/bus）"
+}
+
+# root 执行：系统部分做完，用户那部分交给运行用户跑。
 install_as_root() {
   system_phase
 
-  local user="${SMELT_USER:-smelt}"
+  local user
+  user="$(runtime_user)"
+  if [[ "$user" == root ]]; then
+    install_for_root
+    return
+  fi
   if ! id -u "$user" >/dev/null 2>&1; then
     say "建用户 ${user}：运行时和桌面都在它名下运行"
     useradd --create-home --shell /bin/bash "$user"
@@ -253,19 +285,12 @@ install_as_root() {
   local uid home
   uid="$(id -u "$user")"
   home="$(getent passwd "$user" | cut -d: -f6)"
-  [[ "$uid" != 0 ]] || die "SMELT_USER 不能是 root：运行时不用 root 跑"
+  [[ "$uid" != 0 ]] || die "SMELT_USER=$user 是 uid 0 的用户：要以 root 运行就写 SMELT_USER=root"
 
   local env=(HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash
     PATH=/usr/local/bin:/usr/bin:/bin)
   if has_systemd; then
-    loginctl enable-linger "$user"
-    # linger 会拉起这个用户的 systemd，等它的总线出来才能 systemctl --user。
-    local i
-    for ((i = 0; i < 60; i++)); do
-      [[ -S "/run/user/$uid/bus" ]] && break
-      sleep 0.5
-    done
-    [[ -S "/run/user/$uid/bus" ]] || die "等不到用户 $user 的 systemd（/run/user/$uid/bus）"
+    start_user_manager "$user" "$uid"
     env+=(XDG_RUNTIME_DIR="/run/user/$uid"
       DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus")
   fi
@@ -288,6 +313,20 @@ install_as_root() {
   done
   echo
   say "运行时在用户 $user 名下。常用命令（root 或 sudo 都行）：smeltd status、smeltd pair、smelt agent list"
+}
+
+# 运行用户就是 root：用户那部分直接在这个进程里跑。HOME 等按 root 的账户重设，sudo 执行时
+# 可能还是调用者的。
+install_for_root() {
+  export HOME USER=root LOGNAME=root
+  HOME="$(getent passwd root | cut -d: -f6)"
+  if has_systemd; then
+    start_user_manager root 0
+    export XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+  fi
+  user_phase
+  link_commands "$ROOT_COMMAND_DIR"
+  say "运行时以 root 运行（要装在普通用户名下，用 SMELT_USER=<用户名> 重新执行）"
 }
 
 ROOT_COMMAND_DIR=/usr/local/bin
@@ -363,31 +402,33 @@ install_as_user() {
     sudo loginctl enable-linger "$USER" || warn "开 linger 失败，退出登录后运行时会停"
   fi
   user_phase
-  link_user_command
+  link_commands "$HOME/.local/bin"
 }
 
-# 普通用户：~/.local/bin 放软链接，不改 shell 配置。自定义了 SMELT_HOME 时不放：软链接带不
-# 上这个变量，会连到另一份运行时。
-link_user_command() {
+# 在 dir 下放指向 ~/.smelt/bin 的软链接，不改 shell 配置：普通用户放 ~/.local/bin，root 放
+# /usr/local/bin。覆盖自己放的软链接和以前生成的切用户脚本，别人的文件不动。自定义了
+# SMELT_HOME 时不放：软链接带不上这个变量，会连到另一份运行时。
+link_commands() {
+  local dir=$1
   echo
   if [[ "$SMELT_HOME" != "$HOME/.smelt" ]]; then
     say "SMELT_HOME 是自定义的，调用时带上它：SMELT_HOME=$SMELT_HOME $BIN/smeltd status"
     return 0
   fi
-  mkdir -p "$HOME/.local/bin"
+  mkdir -p "$dir"
   local command link
   for command in "${COMMANDS[@]}"; do
-    link="$HOME/.local/bin/$command"
-    if [[ -e "$link" && ! -L "$link" ]]; then
-      warn "$link 已存在且不是软链接，没有覆盖；用 $BIN/$command 调用"
+    link="$dir/$command"
+    if [[ -e "$link" && ! -L "$link" ]] && ! grep -qF "$ROOT_COMMAND_MARKER" "$link" 2>/dev/null; then
+      warn "$link 已存在且不是安装脚本放的，没有覆盖；用 $BIN/$command 调用"
       continue
     fi
     ln -sfn "$BIN/$command" "$link"
   done
   say "常用命令：smeltd status、smeltd pair、smelt agent list"
   case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *) say "~/.local/bin 不在 PATH 里，加上后才能直接敲：export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+    *":$dir:"*) ;;
+    *) say "$dir 不在 PATH 里，加上后才能直接敲：export PATH=\"$dir:\$PATH\"" ;;
   esac
 }
 
@@ -527,7 +568,6 @@ wait_for_runtime() {
 }
 
 user_phase() {
-  [[ "$(id -u)" != 0 ]] || die "运行时不用 root 跑"
   [[ "$(uname -s)" == Linux ]] || die "这个包只能装在 Linux 上"
   local program
   for program in "${PROGRAMS[@]}"; do
@@ -548,6 +588,14 @@ user_phase() {
   [[ -x "$HERE/smelt-agent" && -f "$HERE/photon_rs_bg.wasm" ]] || die "包里缺少 smelt-agent 或 photon_rs_bg.wasm"
   # 跨 Agent 消息下线后留下的旧 helper。
   rm -f "$BIN/smelt-agent-mcp"
+
+  # 以 root 运行：Claude Code 见到 root 就拒绝跳过权限确认，除非声明这是沙箱。要在
+  # `smeltd install` 启动服务之前写好。没有 systemd 时由 smelt-up 设。
+  if [[ "$(id -u)" == 0 ]] && has_systemd; then
+    local dropin="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/smeltd.service.d"
+    mkdir -p "$dropin"
+    printf '[Service]\nEnvironment=IS_SANDBOX=1\n' >"$dropin/sandbox.conf"
+  fi
 
   # 发布不可变映像、拨启动名（已经在跑就交接到新版本，会话保留）；有 systemd 时写用户单元
   # 并启动。
@@ -580,8 +628,12 @@ user_phase() {
     echo
     echo "这台机器没有 systemd：${watched}由 smelt-up 看着，日志在 $SMELT_HOME/logs。"
     echo "容器重启后要再拉起它，或者直接把它设成容器的启动命令："
-    echo "  runuser -u $USER -- $BIN/smelt-up    （以 root）"
-    echo "  $BIN/smelt-up &    （以 ${USER}）"
+    if [[ "$USER" == root ]]; then
+      echo "  $BIN/smelt-up"
+    else
+      echo "  runuser -u $USER -- $BIN/smelt-up    （以 root）"
+      echo "  $BIN/smelt-up &    （以 ${USER}）"
+    fi
   fi
 }
 
