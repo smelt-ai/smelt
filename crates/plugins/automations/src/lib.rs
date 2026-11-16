@@ -36,23 +36,25 @@ use page::AutomationsPage;
 pub(crate) const OWNER: &str = "smelt.automations";
 
 /// 自动化页的视图 id。
-pub(crate) const VIEW_ID: &str = "automations";
+pub(crate) const VIEW_ID: &str = "smelt.automations/main";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
     projection::install(cx);
-    api::register_view(
-        ViewSpec {
-            id: VIEW_ID.into(),
+    api::register_views(
+        OWNER,
+        vec![ViewSpec {
+            name: "main".into(),
             title: "自动化".into(),
             icon: gpui_kit_assets::IconName::Workflow.path(),
             per_machine: false,
             draws_top_bar: false,
+            settings: None,
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| AutomationsPage::new(window, cx))) as Rc<dyn ViewHandle>
             }),
-        },
+        }],
         cx,
     )
-    .expect("自动化的视图 id 不是宿主保留的");
+    .expect("自动化的视图表写错了");
 }

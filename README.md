@@ -65,7 +65,7 @@ smeltd status
 smeltd pair
 smeltd devices
 smeltd relay [<url>|off]     # show, set, or clear the custom iroh relay
-smeltd mcp add <id>          # playwright, figma, rea, browser-mcp
+smeltd mcp add <id>          # playwright, figma, rea, browser-mcp, chrome-devtools
 ```
 
 ## Features

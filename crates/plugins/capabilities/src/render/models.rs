@@ -15,7 +15,7 @@ use api::ui::truncated_line::truncated_line;
 const PAGE_MAX_WIDTH: f32 = 760.;
 const THINKING_LEVELS: [&str; 4] = ["off", "low", "medium", "high"];
 /// 列表行标题和侧栏行同走 `text_sm`，不加粗；按钮一律 xsmall。
-/// 这页原来套的是设置窗口的 14px 粗体加 small 按钮，夹在侧栏和右栏中间显得又大又重。
+/// 这页原来套的是设置的 14px 粗体加 small 按钮，夹在侧栏和右栏中间显得又大又重。
 
 #[derive(Clone, Copy)]
 pub(super) struct Palette {

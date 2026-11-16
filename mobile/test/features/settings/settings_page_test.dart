@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/data/preferences.dart';
 import 'package:smelt_mobile/features/machines/machine_detail_page.dart';
+import 'package:smelt_mobile/features/machines/machine_text.dart';
 import 'package:smelt_mobile/features/settings/settings_page.dart';
 
 import 'harness.dart';
@@ -28,6 +29,32 @@ void main() {
       tester.getTopLeft(find.text('Pair a new machine')).dy,
       greaterThan(y.last),
     );
+  });
+
+  testWidgets('机器列表和详情都显示 Linux 图标，列表保留系统读屏名', (tester) async {
+    await pumpSettingsHarness(tester, SettingsBackend(), const SettingsPage());
+
+    final linuxIcon = find.byWidgetPredicate(
+      (w) => w is MachineOsIcon && w.os == 'linux',
+    );
+    expect(linuxIcon, findsOneWidget);
+    expect(
+      find.ancestor(
+        of: linuxIcon,
+        matching: find.byWidgetPredicate(
+          (w) => w is Semantics && w.properties.label == 'Linux',
+        ),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('build-01'));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(of: find.byType(MachineDetailPage), matching: linuxIcon),
+      findsOneWidget,
+    );
+    expect(find.text('Linux · build-01'), findsOneWidget);
   });
 
   testWidgets('点一台机器打开它的详情', (tester) async {

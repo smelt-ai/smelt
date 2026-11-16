@@ -365,7 +365,11 @@ class _MachineDetailPageState extends State<MachineDetailPage> {
           osLabel(l10n, os),
           if (hostname != null && hostname.isNotEmpty) hostname,
         ].join(' · '),
-        leading: Icon(osIcon(os), size: Strokes.iconSmall, color: c.inkMuted),
+        leading: MachineOsIcon(
+          os: os,
+          size: Strokes.iconSmall,
+          color: c.inkMuted,
+        ),
       ),
     ];
   }

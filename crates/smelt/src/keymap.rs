@@ -133,13 +133,6 @@ pub(crate) fn bind_commands(
 pub(crate) fn app_key_bindings(bound: &[Bound], cx: &App) -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("escape", DismissWorkspace, Some("Workspace")),
-        // 设置窗口：Cmd+W（Windows / Linux 是 Ctrl+W）关窗。它是普通窗口，不是模态层，
-        // Esc 不关它，留给下拉框、弹出层和输入框。`KeyBinding::new` 不解析 `secondary-`，
-        // 按目标平台写成显式修饰键。
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-w", CloseSettingsWindow, Some("SettingsWindow")),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-w", CloseSettingsWindow, Some("SettingsWindow")),
         KeyBinding::new("up", SidebarUp, Some("Sidebar")),
         KeyBinding::new("down", SidebarDown, Some("Sidebar")),
         KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
@@ -206,7 +199,7 @@ pub(crate) fn app_key_bindings(bound: &[Bound], cx: &App) -> Vec<KeyBinding> {
 }
 
 /// 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、「设置… ⌘,」+「退出 Smelt ⌘Q」
-/// （跟侧栏「设置」一样开独立设置窗口，符合 mac 惯例）；帮助文档和反馈问题按 mac 惯例
+/// （跟侧栏「设置」一样打开设置，符合 mac 惯例）；帮助文档和反馈问题按 mac 惯例
 /// 放「帮助」菜单。设置「关于」页也有这两项，没有菜单栏的平台从那里进。
 ///
 /// 菜单项上的快捷键是设菜单那一刻从键表里取的，改键后要重设一次。
@@ -426,8 +419,8 @@ pub(crate) fn cancel_reassign(cx: &mut App) {
     cx.update_global::<KeymapState, _>(|state, _| state.reassign = None);
 }
 
-/// 设置页点了某条的键帽：开始录。设置窗口里的下一次按键先到这里，不派发成动作，所以
-/// ⌘W、⌘Q 这种已经有用处的键也录得到。按键落在别的窗口（设置窗口关了、切走了）就不录了，
+/// 设置页点了某条的键帽：开始录。这扇窗口里的下一次按键先到这里，不派发成动作，所以
+/// ⌘W、⌘Q 这种已经有用处的键也录得到。按键落在别的窗口（这扇关了、切走了）就不录了，
 /// 那个键照常交给那个窗口。
 pub(crate) fn start_recording(id: SharedString, window: &Window, cx: &mut App) {
     let recording_window = window.window_handle().window_id();
@@ -577,11 +570,10 @@ fn recorded<'a>(
     Recorded::Set(Some(keystroke.unparse(os)))
 }
 
-/// 键表里改不了、录键时要让开的键。命令的键按 [`Bound`] 算冲突，不看键表里的旧键；设置
-/// 窗口自己的关窗键只在设置窗口里生效，不和工作台的键冲突。
+/// 键表里改不了、录键时要让开的键。命令的键按 [`Bound`] 算冲突，不看键表里的旧键。
 fn is_fixed(binding: &KeyBinding) -> bool {
     let action = binding.action().as_any();
-    !action.is::<RunCommand>() && !action.is::<NoAction>() && !action.is::<CloseSettingsWindow>()
+    !action.is::<RunCommand>() && !action.is::<NoAction>()
 }
 
 fn same_key(spec: &str, keystroke: &Keystroke, os: OperatingSystem) -> bool {

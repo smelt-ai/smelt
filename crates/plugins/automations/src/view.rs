@@ -5,10 +5,9 @@
 use crate::prelude::*;
 
 impl AutomationsPage {
-    /// 编辑器的页头：返回、标题（和保存提示）、右侧操作。`header` 是宿主给的页头底板。
+    /// 编辑器的工具行：返回、标题（和保存提示）、右侧操作。
     pub(crate) fn render_automation_drill_header(
         &self,
-        header: Div,
         title: impl Into<SharedString>,
         subtitle: Option<(SharedString, u32)>,
         trailing: Option<AnyElement>,
@@ -16,7 +15,7 @@ impl AutomationsPage {
         entity: Entity<AutomationsPage>,
     ) -> AnyElement {
         let back_entity = entity;
-        header
+        api::ui::page_toolbar()
             .gap_3()
             .child(
                 Button::new("automation-drill-back")
@@ -27,24 +26,25 @@ impl AutomationsPage {
                         back_entity.update(cx, |page, cx| page.close_automation_editor(cx));
                     }),
             )
+            // 名字后面跟保存状态，不另起一行副标题：工具行里的控件是一行高。
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap_1()
+                    .items_center()
+                    .gap_2()
                     .child(
                         div()
                             .min_w_0()
-                            .text_lg()
-                            .font_semibold()
+                            .text_sm()
+                            .font_medium()
                             .text_color(rgb(ui_theme::text()))
                             .overflow_hidden()
                             .child(truncated_line(title)),
                     )
-                    .when_some(subtitle, |column, (text, color)| {
-                        column.child(
+                    .when_some(subtitle, |row, (text, color)| {
+                        row.child(
                             div()
                                 .min_w_0()
                                 .text_xs()
@@ -103,7 +103,6 @@ impl AutomationsPage {
             .child(
                 Button::new("automation-editor-more")
                     .quiet()
-                    .small()
                     .icon(IconName::Ellipsis)
                     .accessibility_label("更多操作")
                     .dropdown_menu(move |mut menu, _, _| {
@@ -468,7 +467,6 @@ impl AutomationsPage {
                     .min_w_0()
                     .min_h_0()
                     .flex()
-                    .bg(rgb(ui_theme::bg()))
                     .child(view.cached(StyleRefinement::default().size_full()))
                     .into_any_element(),
                 None => div()
@@ -490,11 +488,7 @@ impl AutomationsPage {
             .into_any_element()
     }
 
-    pub(crate) fn render_automations_page(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(crate) fn render_automations_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         // 只借用插件里那份投影、按需取值。整份克隆会连带所有运行的输出，每帧重绘都复制一遍。
         let config = automations(cx);
         // 列表页的错误：本机的自动化库读不了。远程机器的在它那一组的标题上说。
@@ -504,7 +498,6 @@ impl AutomationsPage {
                 .and_then(|machine| machine.store_error.clone())
         });
         let entity = cx.entity();
-        let header = api::host(cx).page_header(window, cx);
         let Some(automation) = self.route.as_ref().cloned() else {
             return div()
                 .flex_1()
@@ -512,8 +505,7 @@ impl AutomationsPage {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .bg(rgb(ui_theme::bg()))
-                .child(self.render_automations_catalog_header(header, entity.clone(), cx))
+                .child(self.render_automations_catalog_header(entity.clone(), cx))
                 .child(self.render_automations_catalog(error, entity, cx))
                 .into_any_element();
         };
@@ -597,7 +589,6 @@ impl AutomationsPage {
             .filter(|editor| editor.automation == automation)
             .map(|editor| self.render_automation_editor_actions(editor, entity.clone(), cx));
         let header = self.render_automation_drill_header(
-            header,
             title,
             subtitle,
             header_actions,
@@ -655,7 +646,6 @@ impl AutomationsPage {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui_theme::bg()))
             .child(header)
             .child(body)
             .into_any_element()

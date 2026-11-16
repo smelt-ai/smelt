@@ -93,6 +93,8 @@ flutter:
   # 标时这里要跟着换（THIRD_PARTY_NOTICES.md 一并复制，LobeHub Icons / MIT）。
   assets:
     - assets/agent-icons/
+    # 机器系统品牌图标：Font Awesome Free / CC BY 4.0，见该目录的许可说明。
+    - assets/machine-icons/
     - assets/fonts/jetbrains-mono/OFL.txt
 
   # 单据头、耗时、命令、代码、终端用的等宽字。用无连字版（NL）：终端和代码里不该出现连字。

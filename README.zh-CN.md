@@ -63,7 +63,7 @@ smeltd status
 smeltd pair
 smeltd devices
 smeltd relay [<url>|off]     # 查看、设置或清除自定义 iroh 中继
-smeltd mcp add <id>          # playwright、figma、rea、browser-mcp
+smeltd mcp add <id>          # playwright、figma、rea、browser-mcp、chrome-devtools
 ```
 
 ## 功能

@@ -202,6 +202,7 @@ fn typed_host_commands_require_args() {
             api::OPEN_IN_TEXT_EDITOR.id(),
             api::PICK_PATHS.id(),
             api::OPEN_VIEW.id(),
+            api::OPEN_PAGE.id(),
             api::sessions::RESUME.id(),
             api::sessions::RESUME_IN_TERMINAL.id(),
             api::sessions::HANDOFF.id(),
@@ -348,8 +349,7 @@ fn a_key_used_by_another_command_asks_to_reassign() {
     assert_eq!(judge(PALETTE, "cmd-k", &none), Recorded::Reset);
 }
 
-/// 编辑键、终端自己处理的键和系统用的键直接拒；键表里改不了的键也拒，设置窗口的关窗键
-/// 不算。
+/// 编辑键、终端自己处理的键和系统用的键直接拒；键表里改不了的键也拒。
 #[test]
 fn reserved_and_fixed_keys_are_refused() {
     let none = Overrides::new();

@@ -4,12 +4,8 @@
 /// 一份完整外观。字段名和桌面的外观结构一致，取值规则见 [`apply_patch`]。
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppearanceSnapshot {
-    pub bg_color: u32,
     pub bg_image: Option<String>,
     pub bg_image_opacity: f32,
-    pub opacity: f32,
-    pub blur: bool,
-    pub glass_style: String,
     pub theme_mode: String,
     /// 主题注册名，例如 `smelt Dark`、`Ayu Light`。
     pub theme_name: String,
@@ -37,8 +33,6 @@ pub const FONT_PX: &str = "appearance.font_px";
 
 pub const FONT_FAMILY: &str = "appearance.font_family";
 
-pub const OPACITY: &str = "appearance.opacity";
-
 pub const MIN_UI_FONT_PX: u32 = 14;
 
 pub const MAX_UI_FONT_PX: u32 = 26;
@@ -46,10 +40,6 @@ pub const MAX_UI_FONT_PX: u32 = 26;
 pub const MIN_FONT_PX: u32 = 9;
 
 pub const MAX_FONT_PX: u32 = 22;
-
-pub const MIN_OPACITY: f32 = 0.3;
-
-pub const MAX_OPACITY: f32 = 1.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsError {
@@ -116,15 +106,14 @@ pub fn apply_patch(
     Ok(())
 }
 
+/// 背景图出厂透明度。背景图铺满整扇窗口、压在所有字下面，15% 看得出图，又不和字抢。
+pub const DEFAULT_BG_IMAGE_OPACITY: f32 = 0.15;
+
 /// 库里还没有外观记录时的默认值，GUI 与 CLI / Control API 共用这一份。
 pub fn default_snapshot() -> AppearanceSnapshot {
     AppearanceSnapshot {
-        bg_color: 0x1a1b26,
         bg_image: None,
-        bg_image_opacity: 0.25,
-        opacity: 0.95,
-        blur: true,
-        glass_style: "regular".into(),
+        bg_image_opacity: DEFAULT_BG_IMAGE_OPACITY,
         theme_mode: "dark".into(),
         theme_name: crate::theme_index::DEFAULT_DARK.into(),
         ui_font_px: 16,
@@ -142,7 +131,6 @@ enum Change {
     UiFontFamily(String),
     FontPx(u32),
     FontFamily(String),
-    Opacity(f32),
 }
 
 fn parse_change(key: &str, value: &Value) -> Result<Change, SettingsError> {
@@ -168,18 +156,6 @@ fn parse_change(key: &str, value: &Value) -> Result<Change, SettingsError> {
         UI_FONT_FAMILY => Change::UiFontFamily(string_value(value, UI_FONT_FAMILY)?),
         FONT_PX => Change::FontPx(u32_in(value, FONT_PX, MIN_FONT_PX, MAX_FONT_PX)?),
         FONT_FAMILY => Change::FontFamily(string_value(value, FONT_FAMILY)?),
-        OPACITY => {
-            let opacity = value
-                .as_f64()
-                .ok_or_else(|| SettingsError::Invalid("appearance.opacity 必须是数字".into()))?
-                as f32;
-            if !opacity.is_finite() || !(MIN_OPACITY..=MAX_OPACITY).contains(&opacity) {
-                return Err(SettingsError::Invalid(format!(
-                    "appearance.opacity 必须在 {MIN_OPACITY} 和 {MAX_OPACITY} 之间"
-                )));
-            }
-            Change::Opacity(opacity)
-        }
         other => {
             return Err(SettingsError::Invalid(format!("未知设置: {other}")));
         }
@@ -213,7 +189,6 @@ fn apply_change(
         Change::UiFontFamily(family) => snapshot.ui_font_family = family,
         Change::FontPx(px) => snapshot.font_px = px,
         Change::FontFamily(family) => snapshot.font_family = family,
-        Change::Opacity(opacity) => snapshot.opacity = opacity,
     }
     Ok(())
 }
@@ -272,7 +247,6 @@ mod tests {
             patch(&[(THEME_MODE, json!("sepia"))]),
             patch(&[(UI_FONT_PX, json!(MAX_UI_FONT_PX + 1))]),
             patch(&[(FONT_PX, json!(-1))]),
-            patch(&[(OPACITY, json!(0.1))]),
             patch(&[(FONT_FAMILY, json!(1))]),
             patch(&[("appearance.nope", json!(1))]),
         ] {

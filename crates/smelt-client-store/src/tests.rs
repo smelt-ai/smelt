@@ -147,12 +147,8 @@ fn cleanup(path: &Path) {
 
 fn appearance() -> AppearanceRecord {
     AppearanceRecord {
-        bg_color: 0x1e1e1e,
         bg_image: Some("/Users/me/bg.png".to_string()),
         bg_image_opacity: 0.25,
-        opacity: 0.95,
-        blur: true,
-        glass_style: "regular".to_string(),
         theme_mode: "dark".to_string(),
         theme_name: "Default Dark".to_string(),
         ui_font_px: 16,
@@ -160,6 +156,7 @@ fn appearance() -> AppearanceRecord {
         font_px: 13,
         font_family: "JetBrains Mono".to_string(),
         layout_id: None,
+        material: "hud".to_string(),
     }
 }
 
@@ -374,7 +371,14 @@ fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
     let routes = store.conversation_routes().unwrap();
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].active_terminal_id.as_deref(), Some("term-2"));
-    assert_eq!(store.appearance().unwrap(), Some(appearance()));
+    // 旧库这一列是从来没人读过的 `regular`，原样读出来，界面认不出会回到默认材质。
+    assert_eq!(
+        store.appearance().unwrap(),
+        Some(AppearanceRecord {
+            material: "regular".to_string(),
+            ..appearance()
+        })
+    );
     assert_eq!(store.workspace_layout_state("default").unwrap(), None);
     drop(store);
     assert!(
@@ -739,7 +743,14 @@ fn legacy_preference_rows_move_into_tables_once() {
     drop(legacy);
 
     let store = ClientStore::open(&path).unwrap();
-    assert_eq!(store.appearance().unwrap(), Some(appearance()));
+    // 旧偏好没有材质，留空由界面回到默认。
+    assert_eq!(
+        store.appearance().unwrap(),
+        Some(AppearanceRecord {
+            material: String::new(),
+            ..appearance()
+        })
+    );
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
     assert!(store.runtime_migrated().unwrap());
     drop(store);

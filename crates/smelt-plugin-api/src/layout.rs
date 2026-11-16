@@ -1,9 +1,10 @@
-//! 布局注册表：插件能给的工作台摆法。
+//! 布局注册表：一页（见 [`crate::page`]）怎么摆。
 //!
-//! 布局是 gpui-base 的 `DockAreaState` 原文，面板名就是视图 id（见 [`crate::view`]）。插件
-//! 按来源整组登记，id 是 `<来源>/<名字>`，所以一个插件替换不了别人的布局。用哪份由用户在
-//! 设置里选，宿主按选择装；选的那份没登记（插件还没加载、被卸了）时宿主先用别的，选择
-//! 不改。
+//! 布局是 gpui-base 的 `DockAreaState` 原文，面板名就是视图 id（见 [`crate::view`]）。每份
+//! 布局说明自己给哪一页，一页可以有好几份，别的插件也能给不是自己的页带布局。插件按来源
+//! 整组登记，id 是 `<来源>/<名字>`，所以一个插件替换不了别人的布局。首页用哪份由用户在
+//! 设置里选，别的页用给它登记的第一份；选的那份没登记（插件还没加载、被卸了）时宿主先用
+//! 别的，选择不改。
 
 use gpui::{App, Global, SharedString};
 
@@ -30,6 +31,8 @@ pub fn parse_layout(text: &str) -> Result<DockAreaState, String> {
 /// 登记一份布局要给的东西。
 #[derive(Clone, Debug)]
 pub struct LayoutSource<'a> {
+    /// 给哪一页，页 id `<来源>/<名字>`。页不必已经登记：登记上了就用得上。
+    pub page: &'a str,
     /// 来源内的名字，不含 `/`。
     pub name: &'a str,
     /// 设置里给人看的名字。
@@ -43,6 +46,8 @@ pub struct LayoutSource<'a> {
 pub struct LayoutInfo {
     /// `<来源>/<名字>`。
     pub id: SharedString,
+    /// 给哪一页。
+    pub page: SharedString,
     pub title: SharedString,
 }
 
@@ -79,11 +84,22 @@ pub fn register_layouts(
         if entries.iter().any(|entry: &Entry| entry.info.id == id) {
             return Err(format!("布局「{id}」登记了两次"));
         }
+        if source
+            .page
+            .split_once('/')
+            .is_none_or(|(owner, name)| owner.is_empty() || name.is_empty() || name.contains('/'))
+        {
+            return Err(format!(
+                "布局「{id}」给的页「{}」不是 `<来源>/<名字>`",
+                source.page
+            ));
+        }
         let state = parse_layout(source.state).map_err(|error| format!("布局「{id}」{error}"))?;
         entries.push(Entry {
             owner: owner.to_string(),
             info: LayoutInfo {
                 id,
+                page: source.page.to_string().into(),
                 title: source.title.to_string().into(),
             },
             state,
@@ -153,6 +169,7 @@ mod tests {
 
     fn source<'a>(name: &'a str, state: &'a str) -> LayoutSource<'a> {
         LayoutSource {
+            page: "smelt/work",
             name,
             title: name,
             state,
@@ -192,6 +209,10 @@ mod tests {
                 vec![source("b", TWO), source("b", ONE)],
                 vec![source("", ONE)],
                 vec![source("x/y", ONE)],
+                vec![LayoutSource {
+                    page: "work",
+                    ..source("b", TWO)
+                }],
             ] {
                 assert!(register_layouts("trader", &bad, cx).is_err());
             }

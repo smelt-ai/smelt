@@ -36,14 +36,13 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::ui_theme;
 use anyhow::Context as _;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
 use gpui_shell::plugin::{MANIFEST_FILE, PluginManifest};
 use gpui_shell::policy::{self, Policy};
 use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
-use smelt_plugin_api::js::{JsPlugin, SettingsPageLoader};
+use smelt_plugin_api::js::{JsPlugin, MAIN_VIEW, SettingsPageLoader};
 use smelt_plugin_api::{self as api, PluginView, ViewHandle, ViewSpec};
 
 pub(crate) use log::install as install_log;
@@ -65,7 +64,7 @@ struct Registry {
     panels: Vec<PluginPanel>,
     /// 已登记主题的插件来源，重载时整批撤下再登记。
     theme_owners: Vec<String>,
-    /// 这一批插件的权限，设置页在设置窗口里单独加载时也用它。
+    /// 这一批插件的权限，设置页单独加载时也用它。
     capabilities: Option<Capabilities>,
 }
 
@@ -75,8 +74,6 @@ struct PluginPanel {
     version: String,
     root: PathBuf,
     source: PluginSource,
-    /// 纯主题插件没有视图。
-    has_view: bool,
     /// 加载失败的原因。
     error: Option<String>,
 }
@@ -88,12 +85,12 @@ struct JsPluginView {
 }
 
 impl Render for JsPluginView {
-    /// 底色由宿主铺，和自带视图一样是实底的舞台色：主题原色可能带透明度，插件自己铺会
-    /// 透出窗口后面的东西。插件只画内容，不画页面底。
+    /// 页面底归宿主：整窗一层底，每一组都一样（`workspace_frame::window_surface`、
+    /// `SmeltTabGroup::frame`）。插件只画内容，不画页面底，铺了就把毛玻璃盖住。
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let base = div().size_full().min_h_0().flex().flex_col();
         match &self.content {
-            Ok(view) => base.bg(rgb(ui_theme::bg())).child(view.clone()),
+            Ok(view) => base.child(view.clone()),
             Err(error) => base
                 .p_4()
                 .text_sm()
@@ -108,7 +105,7 @@ impl PluginView for JsPluginView {
     fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
 }
 
-/// 插件的一页设置：设置窗口里单独加载的那份脚本，或加载失败的原因。底色用设置窗口的，
+/// 插件的一页设置：第一次打开时单独加载的那份脚本，或加载失败的原因。底色用设置的，
 /// 不另铺。
 struct JsSettingsPage {
     content: Result<Entity<ScriptView>, String>,
@@ -126,6 +123,11 @@ impl Render for JsSettingsPage {
                 .child(format!("设置页加载失败：{error}")),
         }
     }
+}
+
+impl PluginView for JsSettingsPage {
+    /// 脚本自己管打开时看什么，宿主不传参数。
+    fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
 }
 
 /// 插件从哪个目录加载的。
@@ -212,7 +214,6 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                         id,
                         root,
                         source,
-                        has_view: false,
                         error: theme_error,
                     });
                 }
@@ -250,17 +251,18 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     id,
                     root,
                     source,
-                    has_view: true,
                     error: theme_error.or_else(|| content.as_ref().err().cloned()),
                 };
-                // 同 id 的旧登记被替换，旧视图随之放掉。
+                // 旧登记在开头已经撤下，旧视图随之放掉。
+                let failed = content.is_err();
                 let view = Rc::new(RefCell::new(Some(content)));
                 let spec = ViewSpec {
-                    id: panel.id.clone().into(),
+                    name: MAIN_VIEW.into(),
                     title: panel.title.clone().into(),
                     icon: gpui_kit_assets::IconName::Puzzle.path(),
                     per_machine: false,
                     draws_top_bar: false,
+                    settings: None,
                     build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
                         // 内容在挂载时已经建好；视图只建一次，第二次（登记被替换前不会有）
                         // 给一个说明。
@@ -271,7 +273,13 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                         Rc::new(cx.new(|_| JsPluginView { content }))
                     }),
                 };
-                if let Err(error) = api::register_view(spec, cx) {
+                // 挂上了就和脚本登记的设置页并成一组；没挂上只登记说明加载失败的那一页。
+                let registered = if failed {
+                    api::register_views(&panel.id, vec![spec], cx)
+                } else {
+                    plugin.set_main_view(spec, cx)
+                };
+                if let Err(error) = registered {
                     eprintln!("[plugins] {} 登记失败：{error}", panel.id);
                     unregister_contributions(&panel.id, cx);
                     return None;
@@ -283,14 +291,6 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     // 默认 Policy 不留最后那个插件的：之后再有脚本在视图外跑，什么都不给。
     policy::set_default(Policy::new());
 
-    for gone in previous.iter().filter(|old| {
-        old.has_view
-            && !panels
-                .iter()
-                .any(|panel| panel.has_view && panel.id == old.id)
-    }) {
-        api::unregister_view(&gone.id, cx);
-    }
     REGISTRY.with(|registry| registry.borrow_mut().panels = panels);
     // 首次挂载时订阅可能还没装；后续重载也只在批次末通知一次。
     api::emit(api::HostEvent::ThemesChanged, cx);
@@ -301,17 +301,18 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     }
 }
 
-/// 脚本挂载时登记的东西：布局、命令、文件打开者、设置页。主题另算（见
+/// 插件挂载时登记的东西：布局、页、命令、文件打开者、视图（主入口和设置页）。主题另算（见
 /// `register_theme_contributions`）。
 fn unregister_contributions(id: &str, cx: &mut App) {
     api::unregister_layouts(id, cx);
+    api::unregister_pages(id, cx);
     api::unregister_commands(id, cx);
     api::unregister_file_opener(id, cx);
-    api::unregister_settings_pages(id, cx);
+    api::unregister_views(id, cx);
 }
 
-/// 插件的设置页怎么建：入口是插件目录里的另一个脚本，点开那一页时在设置窗口里单独加载、
-/// 挂载，和主入口是两份实例（像浏览器扩展的 options 页）。
+/// 插件的设置页怎么建：入口是插件目录里的另一个脚本，第一次打开那一页时单独加载、挂载，
+/// 和主入口是两份实例（像浏览器扩展的 options 页）。
 fn settings_loader(
     id: &str,
     name: &str,
@@ -325,9 +326,9 @@ fn settings_loader(
             check_settings_entry(&root, entry)?;
             let (id, name, root, entry) =
                 (id.clone(), name.clone(), root.clone(), entry.to_string());
-            Ok(Rc::new(move |window, cx| -> AnyView {
+            Ok(Rc::new(move |window, cx| -> Rc<dyn ViewHandle> {
                 let content = mount_settings_page(&id, &name, &root, &entry, source, window, cx);
-                cx.new(|_| JsSettingsPage { content }).into()
+                Rc::new(cx.new(|_| JsSettingsPage { content }))
             }))
         }),
     }
@@ -350,7 +351,7 @@ fn check_settings_entry(root: &std::path::Path, entry: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// 在设置窗口里加载、挂载插件的一页设置。权限和主入口一样，身份是同一个插件，但不能登记。
+/// 加载、挂载插件的一页设置。权限和主入口一样，身份是同一个插件，但不能登记。
 fn mount_settings_page(
     id: &str,
     name: &str,
@@ -401,11 +402,8 @@ fn plugin_policy(
 pub(crate) fn shutdown(cx: &mut App) {
     let panels = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().panels));
     for panel in panels {
-        // 设置页的建页函数要在运行时之前放掉，理由同上。
-        api::unregister_settings_pages(&panel.id, cx);
-        if panel.has_view {
-            api::unregister_view(&panel.id, cx);
-        }
+        // 视图和设置页的建页函数都要在运行时之前放掉，理由同上。
+        api::unregister_views(&panel.id, cx);
     }
     let runtime = REGISTRY.with(|registry| registry.borrow_mut().runtime.take());
     drop(runtime);

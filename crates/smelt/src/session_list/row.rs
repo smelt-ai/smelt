@@ -218,7 +218,6 @@ pub(crate) fn group_disclosure(
         .items_center()
         .justify_center()
         .text_color(rgb(ui_theme::muted()))
-        .group_hover(group, |style| style.text_color(rgb(ui_theme::text())))
         .child(
             div()
                 .flex()
@@ -380,7 +379,9 @@ pub(super) struct FooterQuota {
     pub(super) color: u32,
     pub(super) hint: String,
     pub(super) used: f64,
-    /// 用户手点刷新、还没回来。只有这种在百分比的位置转圈；启动首查和定时刷新不打扰。
+    /// 从外到内的窗口和已用百分比；未知总额时为空，不把未知画成满额。
+    pub(super) rings: Vec<(String, f64)>,
+    /// 用户手点刷新、还没回来。启动首查和定时刷新不打扰。
     pub(super) refreshing: bool,
 }
 
@@ -388,6 +389,41 @@ pub(super) struct ProviderQuotaRow {
     pub(super) text: String,
     pub(super) color: u32,
     pub(super) hint: String,
+}
+
+/// 彩色弧的长度表示已用比例。
+pub(super) fn quota_ring_fraction(used_percent: f64) -> f32 {
+    (used_percent.clamp(0.0, 100.0) / 100.0) as f32
+}
+
+/// 5 小时在外、周额度在内；没有标准窗口时只画最紧张的窗口。
+/// Copilot 不提供总额时无法算出比例，保留剩余数字，不画虚假的额度环。
+pub(super) fn quota_ring_windows(
+    quota: &crate::provider_quota::ProviderQuotaData,
+) -> Vec<(String, f64)> {
+    match quota {
+        crate::provider_quota::ProviderQuotaData::Windows(quota) => {
+            let standard: Vec<_> = ["5h", "7d"]
+                .into_iter()
+                .filter_map(|label| quota.windows.iter().find(|window| window.label == label))
+                .map(|window| (window.label.clone(), window.used_percent))
+                .collect();
+            if !standard.is_empty() {
+                standard
+            } else {
+                quota
+                    .windows
+                    .iter()
+                    .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent))
+                    .map(|window| vec![(window.label.clone(), window.used_percent)])
+                    .unwrap_or_default()
+            }
+        }
+        crate::provider_quota::ProviderQuotaData::Copilot(copilot) if copilot.limit.is_some() => {
+            vec![("本周期".into(), quota.used_percent())]
+        }
+        crate::provider_quota::ProviderQuotaData::Copilot(_) => Vec::new(),
+    }
 }
 
 /// 把两种 provider 额度模型归一成侧栏的一行。注册表负责“查哪家”，这里仅负责
@@ -446,7 +482,7 @@ pub(super) fn provider_quota_row(
 mod tests {
     use super::{
         effective_pane_updated_at, format_relative_since, progress_fraction, provider_quota_row,
-        session_turn_text, session_updated_at_text,
+        quota_ring_fraction, quota_ring_windows, session_turn_text, session_updated_at_text,
     };
     use crate::provider_quota::{ProviderQuotaData, QuotaStatus, QuotaTarget};
     use crate::settings::ConversationAgentKind;
@@ -467,6 +503,71 @@ mod tests {
         assert_eq!(format_relative_since(100, 100 + 400 * 86400), "1 年前");
         // 远程机器的时钟可能比本机快，不写成负数。
         assert_eq!(format_relative_since(100 + 3600, 100), "刚刚");
+    }
+
+    #[test]
+    fn quota_ring_fraction_represents_used_quota() {
+        assert_eq!(quota_ring_fraction(0.0), 0.0);
+        assert_eq!(quota_ring_fraction(20.0), 0.2);
+        assert_eq!(quota_ring_fraction(80.0), 0.8);
+        assert_eq!(quota_ring_fraction(100.0), 1.0);
+        assert_eq!(quota_ring_fraction(150.0), 1.0);
+    }
+
+    #[test]
+    fn quota_rings_show_five_hours_outside_and_week_inside() {
+        let quota = ProviderQuotaData::Windows(ProviderQuota {
+            windows: vec![
+                ProviderQuotaWindow {
+                    label: "5h".into(),
+                    used_percent: 20.0,
+                    resets_at_ms: None,
+                    reset_after_seconds: None,
+                },
+                ProviderQuotaWindow {
+                    label: "7d".into(),
+                    used_percent: 90.0,
+                    resets_at_ms: None,
+                    reset_after_seconds: None,
+                },
+            ],
+        });
+        assert_eq!(
+            quota_ring_windows(&quota),
+            vec![("5h".into(), 20.0), ("7d".into(), 90.0)]
+        );
+    }
+
+    #[test]
+    fn quota_ring_uses_most_constrained_window_when_periods_are_not_standard() {
+        let quota = ProviderQuotaData::Windows(ProviderQuota {
+            windows: vec![
+                ProviderQuotaWindow {
+                    label: "月".into(),
+                    used_percent: 35.0,
+                    resets_at_ms: None,
+                    reset_after_seconds: None,
+                },
+                ProviderQuotaWindow {
+                    label: "次".into(),
+                    used_percent: 75.0,
+                    resets_at_ms: None,
+                    reset_after_seconds: None,
+                },
+            ],
+        });
+        assert_eq!(quota_ring_windows(&quota), vec![("次".into(), 75.0)]);
+    }
+
+    #[test]
+    fn quota_ring_does_not_invent_a_copilot_total() {
+        let quota = ProviderQuotaData::Copilot(CopilotQuota {
+            unit: CopilotQuotaUnit::PremiumRequests,
+            remaining: 75.0,
+            limit: None,
+            used: None,
+        });
+        assert!(quota_ring_windows(&quota).is_empty());
     }
 
     #[test]

@@ -184,38 +184,22 @@ pub(crate) fn product_back_button(
         .on_click(on_click)
 }
 
-/// 目录页头：和自动化顶栏同一条高度。左边页名加个数，不写副标题；右边是同尺寸的新建按钮。
+/// 目录的工具行：和自动化的同一条高度。左边是有几个（页名在外壳画的标题带或标签上，
+/// 这里不再写一遍），右边是新建按钮。
 pub(crate) fn product_page_header(
-    title: &'static str,
+    noun: &'static str,
     count: usize,
     count_unit: &'static str,
     action: AnyElement,
-    window: &Window,
-    cx: &App,
 ) -> AnyElement {
-    api::host(cx)
-        .page_header(window, cx)
+    api::ui::page_toolbar()
         .justify_between()
         .gap_3()
         .child(
             div()
-                .h(ui_theme::height::sm())
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_medium()
-                        .text_color(rgb(ui_theme::text()))
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(ui_theme::muted()))
-                        .child(format!("{count} {count_unit}")),
-                ),
+                .text_sm()
+                .text_color(rgb(ui_theme::muted()))
+                .child(format!("{count} {count_unit}{noun}")),
         )
         .child(action)
         .into_any_element()

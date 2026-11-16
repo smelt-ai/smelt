@@ -1,0 +1,8 @@
+<!-- Source: Oh My Pi assets/icon.svg (https://github.com/can1357/oh-my-pi), MIT License; monochrome adaptation. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 120 120" fill="currentColor">
+  <title>Oh My Pi</title>
+  <rect x="10" y="23" width="100" height="12" rx="2"/>
+  <rect x="25" y="35" width="12" height="62" rx="2"/>
+  <rect x="75" y="35" width="12" height="38" rx="2"/>
+  <path fill-rule="evenodd" d="M74 70h14a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H74a3 3 0 0 1-3-3V73a3 3 0 0 1 3-3Zm3 4a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-6a1 1 0 0 0-1-1Zm6 0a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-6a1 1 0 0 0-1-1Z"/>
+</svg>

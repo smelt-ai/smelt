@@ -134,7 +134,7 @@ impl AcpView {
                         .items_center()
                         .border_b_1()
                         .border_color(t.border)
-                        .bg(gpui::rgb(ui_theme::side()))
+                        .bg(ui_theme::shade(ui_theme::side()))
                         .child(ambient_spinner(
                             "acp-starting-banner-spinner",
                             gpui::rgb(ui_theme::muted()).into(),
@@ -169,7 +169,7 @@ impl AcpView {
                     .gap_2()
                     .border_b_1()
                     .border_color(t.border)
-                    .bg(gpui::rgb(ui_theme::side()))
+                    .bg(ui_theme::shade(ui_theme::side()))
                     .child(
                         h_flex()
                             .w_full()

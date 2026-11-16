@@ -348,32 +348,22 @@ pub fn finish_workset(workset: &Workset) -> Result<FinishReport, WorktreeError> 
         }
 
         if local_branch_exists(&repository.root, &workset.branch)? {
-            let merged = run_git(
-                &repository.root.to_string_lossy(),
-                &[
-                    "merge-base",
-                    "--is-ancestor",
-                    &workset.branch,
-                    &repository.base_ref,
-                ],
-            )
-            .map_err(|error| {
-                WorktreeError::new(format!(
-                    "检查仓库 {} 的分支合并状态失败：{error}",
-                    repository.name
-                ))
-            })?;
-            if !merged.success() {
-                if merged.code == Some(1) {
-                    return Err(WorktreeError::new(format!(
-                        "仓库 {} 的分支 {} 尚未合并，已阻止关闭工作树",
-                        repository.name, workset.branch
-                    )));
-                }
+            let merged = merged_into_base(&repository.root, &workset.branch, &repository.base_ref)
+                .map_err(|error| {
+                    WorktreeError::new(format!(
+                        "检查仓库 {} 的分支合并状态失败：{error}",
+                        repository.name
+                    ))
+                })?;
+            if !merged {
                 return Err(WorktreeError::new(format!(
-                    "检查仓库 {} 的分支合并状态失败：{}",
+                    "仓库 {} 的分支 {} 还有改动没进 {}，已阻止关闭工作树",
                     repository.name,
-                    git_error(&merged, "git merge-base 失败")
+                    workset.branch,
+                    repository
+                        .base_ref
+                        .strip_prefix("refs/remotes/")
+                        .unwrap_or(&repository.base_ref)
                 )));
             }
         } else if repository.branch_created {
@@ -453,6 +443,75 @@ pub fn finish_workset(workset: &Workset) -> Result<FinishReport, WorktreeError> 
             .collect(),
         leftover_entries,
     })
+}
+
+/// 关闭前把各仓库基线所在的远端 fetch 一次，合并判定才看得到远端刚合进去的改动。
+/// 走网络，调用方不要拿着目录锁调。fetch 失败不中断关闭：返回每条失败说明，判定照用
+/// 本地已有的远端引用。
+pub fn refresh_workset_bases(workset: &Workset) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut fetched = HashSet::new();
+    for repository in &workset.repositories {
+        let Some(remote) = base_remote(&repository.root, &repository.base_ref) else {
+            continue;
+        };
+        if !fetched.insert((repository.root.clone(), remote.clone())) {
+            continue;
+        }
+        let failure = match git_output(&repository.root, &["fetch", &remote]) {
+            Ok(output) if output.success() => continue,
+            Ok(output) => git_error(&output, "git fetch 失败"),
+            Err(error) => error,
+        };
+        failures.push(format!(
+            "仓库 {} fetch {remote} 失败：{failure}",
+            repository.name
+        ));
+    }
+    failures
+}
+
+/// `refs/remotes/<远端>/<分支>` 里的远端名。远端名可以带 `/`，取能对上的最长那个。
+fn base_remote(root: &Path, base_ref: &str) -> Option<String> {
+    let rest = base_ref.strip_prefix("refs/remotes/")?;
+    let remotes = git_output(root, &["remote"])
+        .ok()
+        .filter(GitOutput::success)?;
+    remotes
+        .stdout_str()
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty() && rest.starts_with(&format!("{remote}/")))
+        .max_by_key(|remote| remote.len())
+        .map(str::to_string)
+}
+
+/// 分支上的改动是否都已经进了基线。普通合并后分支是基线的祖先；squash / rebase 合并
+/// 生成的是新提交，分支不再是祖先，这时看把分支合进基线会不会改动什么：合并结果的树
+/// 等于基线的树，就说明改动都已在基线里。合并有冲突（比如合进去之后基线又改过同一处）
+/// 按没合并算，宁可拦下让人看一眼。
+fn merged_into_base(root: &Path, branch: &str, base: &str) -> Result<bool, String> {
+    let ancestor = git_output(root, &["merge-base", "--is-ancestor", branch, base])?;
+    match ancestor.code {
+        Some(0) => return Ok(true),
+        Some(1) => {}
+        _ => return Err(git_error(&ancestor, "git merge-base 失败")),
+    }
+    let merged = git_output(
+        root,
+        &["merge-tree", "--write-tree", "--no-messages", base, branch],
+    )?;
+    match merged.code {
+        Some(0) => {}
+        Some(1) => return Ok(false),
+        _ => return Err(git_error(&merged, "git merge-tree 失败")),
+    }
+    let base_tree = git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])?;
+    if !base_tree.success() {
+        return Err(git_error(&base_tree, "git rev-parse 失败"));
+    }
+    let merged_tree = merged.stdout_str();
+    Ok(merged_tree.lines().next().map(str::trim) == Some(base_tree.stdout_str().trim()))
 }
 
 pub fn abort_workset_creation(workset: &Workset) -> Result<(), WorktreeError> {

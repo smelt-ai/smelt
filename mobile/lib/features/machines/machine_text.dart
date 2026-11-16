@@ -4,6 +4,7 @@
 library;
 
 import 'package:flutter/widgets.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../data/models.dart';
@@ -12,12 +13,40 @@ import '../../l10n/gen/l10n.dart';
 /// 运行时报的系统名（`macos`、`linux`…）规整成小写再比，老运行时可能报别的写法。
 String? _osKey(String? os) => os?.trim().toLowerCase();
 
-IconData osIcon(String? os) => switch (_osKey(os)) {
-  'macos' || 'darwin' => LucideIcons.apple,
-  'linux' => LucideIcons.squareTerminal,
-  'windows' => LucideIcons.monitor,
-  _ => LucideIcons.laptopMinimal,
-};
+/// 系统品牌 SVG 与其他单色图标一样由调用方提供尺寸和颜色。
+class MachineOsIcon extends StatelessWidget {
+  const MachineOsIcon({
+    super.key,
+    required this.os,
+    required this.size,
+    required this.color,
+  });
+
+  final String? os;
+  final double size;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final key = _osKey(os);
+    if (key == 'linux' || key == 'windows') {
+      return SvgPicture.asset(
+        'assets/machine-icons/$key.svg',
+        width: size,
+        height: size,
+        colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+      );
+    }
+    return Icon(
+      switch (key) {
+        'macos' || 'darwin' => LucideIcons.apple,
+        _ => LucideIcons.laptopMinimal,
+      },
+      size: size,
+      color: color,
+    );
+  }
+}
 
 String osLabel(L10n l10n, String? os) => switch (_osKey(os)) {
   'macos' || 'darwin' => l10n.machinesOsMacos,

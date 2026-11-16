@@ -8,7 +8,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::text::{TextView, TextViewState};
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable, StyledExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Icon, IconName, StyledExt, h_flex, v_flex};
 use smelt_plugin_api::model::acp_chat::is_interrupt_marker;
 use smelt_plugin_api::model::agent_kind::HistorySourceKind;
 use smelt_plugin_api::model::session_history::{SessionSummary, Turn};

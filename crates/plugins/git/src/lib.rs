@@ -31,31 +31,33 @@ use panel::{
 
 pub(crate) use api::ui::ui_theme;
 
-const VIEW_ID: &str = "git";
+const VIEW_ID: &str = "smelt.git/main";
 /// 命令的来源。和搬出宿主之前一样，用户改过的快捷键还对得上。
-const COMMAND_OWNER: &str = "smelt.git";
+const OWNER: &str = "smelt.git";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
-    api::register_view(
-        ViewSpec {
-            id: VIEW_ID.into(),
+    api::register_views(
+        OWNER,
+        vec![ViewSpec {
+            name: "main".into(),
             title: "变更".into(),
             icon: gpui_kit_assets::IconName::GitBranch.path(),
             per_machine: false,
             draws_top_bar: false,
+            settings: None,
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| GitPanel::new(window, cx))) as Rc<dyn ViewHandle>
             }),
-        },
+        }],
         cx,
     )
-    .expect("变更的视图 id 不是宿主保留的");
+    .expect("变更的视图表写错了");
     let commands = vec![
         jump_hunk_command("prev-hunk", "上一个差异", "shift-f7", false),
         jump_hunk_command("next-hunk", "下一个差异", "f7", true),
     ];
-    api::register_commands(COMMAND_OWNER, "改动", commands, cx).expect("变更的命令表写错了");
+    api::register_commands(OWNER, "改动", commands, cx).expect("变更的命令表写错了");
 }
 
 /// F7 / Shift+F7 跳到下一块 / 上一块改动。只在焦点在「改动」页里时生效：焦点在终端里，

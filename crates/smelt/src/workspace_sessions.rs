@@ -2188,13 +2188,9 @@ impl Workspace {
                 view.update(cx, |v, cx| v.shutdown(cx));
             }
         }
-        let closed_conversation_sid = match &self.sessions[ix].kind {
-            SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
-            SessionKind::Term { .. } => None,
-        };
-        let closed_current_conversation = closed_conversation_sid
-            .as_deref()
-            .is_some_and(|sid| self.nav.conversation_sid() == Some(sid));
+        // 舞台看哪段对话就是活动会话是哪段（见 `render_stage_dock`）。
+        let closed_current_conversation =
+            ix == self.active_session && self.sessions[ix].is_agent_conversation(cx);
         // 关的是正在看的对话：回到上一个看过的对话，没有就落到最后一段。
         let next_conversation_ix = if closed_current_conversation {
             self.previous_viewed_session(closed_ui_id, |session| session.is_agent_conversation(cx))
@@ -2217,21 +2213,8 @@ impl Workspace {
             let next = if next > ix { next - 1 } else { next };
             self.active_session_revision = self.active_session_revision.wrapping_add(1);
             self.active_session = next;
-            if let Some(sid) = self.sessions.get(next).and_then(|session| {
-                session
-                    .active_acp()
-                    .map(|view| view.read(cx).session_id().to_string())
-            }) {
-                self.nav.open_conversation(sid);
-            } else {
-                self.nav.set_active(WorkspaceRoute::Session);
-            }
         } else {
-            // 没有别的对话可看：回到会话。
-            if closed_current_conversation {
-                self.nav.set_active(WorkspaceRoute::Session);
-            }
-            // 空列表时 active_session 归 0（各处都是 sessions.get(ix) 取，取不到就是无会话态）。
+            // 没有别的对话可看：落到项目会话上。空列表时 active_session 归 0（各处都是 sessions.get(ix) 取，取不到就是无会话态）。
             if let Some(next) = project_next {
                 self.active_session_revision = self.active_session_revision.wrapping_add(1);
                 self.active_session = if next > ix { next - 1 } else { next };
@@ -2288,8 +2271,13 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Cmd+W：会话内多 pane 时关掉活动 pane（切到相邻），否则关整个会话。正在跑的先确认。
+    /// Cmd+W：关看得见的会话。会话内多 pane 时关掉活动 pane（切到相邻），否则关整个会话；
+    /// 正在跑的先确认。舞台没露出来（在别的页、出口里放着别的视图）时什么都不做：不管路由，
+    /// 也不能关到看不见的会话。
     pub(crate) fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.view_shown(crate::builtin_views::Builtin::Stage.id()) {
+            return;
+        }
         match self.cur().and_then(|s| s.active_term().cloned()) {
             Some(view) => self.request_close_session_pane(self.active_session, view, window, cx),
             // ACP 会话没有分屏树，只能整个关。
@@ -2371,13 +2359,18 @@ impl Workspace {
         self.activate(order[next], window, cx);
     }
 
-    /// 舞台上露着的会话：舞台显示着、路由在看会话时才有。插件经活动上下文读它（见
-    /// `note_active_context`）。
+    /// 舞台露着、上面是项目里的会话（不是侧栏「对话」里的一段）：侧栏项目里的那一行亮着。
+    pub(crate) fn project_session_shown(&self, cx: &App) -> bool {
+        self.view_shown(crate::builtin_views::Builtin::Stage.id())
+            && !self
+                .sessions
+                .get(self.active_session)
+                .is_some_and(|session| session.is_agent_conversation(cx))
+    }
+
+    /// 舞台上露着的会话：舞台显示着时才有。插件经活动上下文读它（见 `note_active_context`）。
     pub(crate) fn viewed_session(&self, cx: &App) -> Option<smelt_plugin_api::ViewedSession> {
         if !self.view_shown(crate::builtin_views::Builtin::Stage.id()) {
-            return None;
-        }
-        if !route_views_session(self.active_tab(), self.nav.conversation_sid()) {
             return None;
         }
         let session = self.sessions.get(self.active_session)?;
@@ -2415,8 +2408,9 @@ impl Workspace {
     }
 
     pub(crate) fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        // 要看这个会话：舞台得露出来。舞台不在布局里就看不见，不标已读、不抢焦点。
-        let stage_hidden = !self.show_view(crate::builtin_views::Builtin::Stage.id(), window, cx);
+        // 要看这个会话：舞台得露出来（在出口里就把出口放回舞台）。哪都放不下就看不见，
+        // 不标已读、不抢焦点。
+        let stage_hidden = !self.reveal_view(crate::builtin_views::Builtin::Stage.id(), window, cx);
         if ix < self.sessions.len() && self.sessions[ix].is_agent_conversation(cx) {
             self.open_agent_conversation(ix, window, cx);
             return;
@@ -2452,8 +2446,6 @@ impl Workspace {
                 });
             }
             self.sync_session_ui(cx);
-            self.desktop = None;
-            self.nav.set_active(WorkspaceRoute::Session);
             let route_has_overlay = stage_hidden;
             // 要读会话视图（取运行时），必须在下面 update 这个视图之前算好：
             // 视图更新期间再读它会 panic。

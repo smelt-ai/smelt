@@ -226,7 +226,6 @@ impl Workspace {
                     .min_w_0()
                     .overflow_hidden()
                     .text_sm()
-                    .text_color(rgb(ui_theme::muted()))
                     .child("归档"),
             )
             .child(
@@ -300,15 +299,7 @@ impl Workspace {
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(ui_theme::muted()))
-                                .group_hover(ARCHIVE_ROW_GROUP, |style| {
-                                    style.text_color(rgb(ui_theme::text()))
-                                })
-                                .child(truncated_line(title)),
-                        )
+                        .child(div().text_sm().child(truncated_line(title)))
                         .child(
                             div()
                                 .text_xs()

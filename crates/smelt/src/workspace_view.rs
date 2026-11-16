@@ -274,7 +274,7 @@ impl Workspace {
     }
 
     /// 「会话管理」：列出守护进程持有的全部会话，标出哪些是游离会话（没有任何
-    /// 侧栏在追踪），逐个/批量清理。入口和对话框都在设置窗口里。
+    /// 侧栏在追踪），逐个/批量清理。入口在设置里。
     pub(crate) fn render_session_manager(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
         let (fg, muted, border) = {
             let t = cx.theme();
@@ -727,7 +727,7 @@ impl Workspace {
             .footer(footer)
     }
 
-    /// 「重启守护进程」确认。只在有进行中的会话时打开，在设置窗口里。
+    /// 「重启守护进程」确认。只在有进行中的会话时打开。
     pub(crate) fn render_daemon_restart_confirm(
         &self,
         dialog: Dialog,
@@ -762,7 +762,7 @@ impl Workspace {
             .footer(footer)
     }
 
-    /// 「立即重启更新」确认。有进行中的会话时打开，在设置窗口里。
+    /// 「立即重启更新」确认。有进行中的会话时打开。
     pub(crate) fn render_update_install_confirm(
         &self,
         dialog: Dialog,
