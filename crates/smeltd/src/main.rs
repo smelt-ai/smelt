@@ -153,6 +153,7 @@ mod terminal_snapshot;
 mod webhook;
 mod workset_control;
 mod workspace_directory;
+mod worktree_setup;
 
 use acp_host::*;
 use protocol::*;

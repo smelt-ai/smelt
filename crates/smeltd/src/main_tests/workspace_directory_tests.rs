@@ -691,43 +691,48 @@ fn a_subscriber_gets_the_directory_the_daemon_could_not_read_at_startup() {
     assert_eq!(published.conversations, std::slice::from_ref(&conversation));
 }
 
+fn run_git(root: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 项目根本身是一个有远端的仓库（建工作树要从远端拿基线）。
+fn project_with_remote(temp: &TempStore) -> std::path::PathBuf {
+    let project = temp.dir.join("project");
+    let remote = temp.dir.join("remote.git");
+    std::fs::create_dir_all(&project).unwrap();
+    run_git(&project, &["init", "--initial-branch=main"]);
+    run_git(&project, &["config", "user.name", "Test"]);
+    run_git(&project, &["config", "user.email", "test@example.invalid"]);
+    run_git(&project, &["commit", "--allow-empty", "-m", "seed"]);
+    run_git(&temp.dir, &["init", "--bare", remote.to_str().unwrap()]);
+    run_git(
+        &project,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    run_git(&project, &["push", "-u", "origin", "main"]);
+    run_git(&project, &["remote", "set-head", "origin", "main"]);
+    project
+}
+
 /// 建工作树要 fetch 远端，期间不能占着目录锁：会话的目录写入照常进行。远端的
 /// upload-pack 换成一个脚本，开始时通知测试、等测试放行再继续，模拟一次很慢的 fetch。
 #[test]
 #[cfg(unix)]
 fn creating_a_workset_does_not_block_directory_writes_while_fetching() {
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
-
-    fn git(root: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
 
     let temp = TempStore::new();
     let event_hub = new_event_hub();
-    let project = temp.dir.join("project");
-    let remote = temp.dir.join("remote.git");
-    std::fs::create_dir_all(&project).unwrap();
-    git(&project, &["init", "--initial-branch=main"]);
-    git(&project, &["config", "user.name", "Test"]);
-    git(&project, &["config", "user.email", "test@example.invalid"]);
-    git(&project, &["commit", "--allow-empty", "-m", "seed"]);
-    git(&temp.dir, &["init", "--bare", remote.to_str().unwrap()]);
-    git(
-        &project,
-        &["remote", "add", "origin", remote.to_str().unwrap()],
-    );
-    git(&project, &["push", "-u", "origin", "main"]);
-    git(&project, &["remote", "set-head", "origin", "main"]);
+    let project = project_with_remote(&temp);
 
     let started = temp.dir.join("fetch-started");
     let release = temp.dir.join("fetch-release");
@@ -751,7 +756,7 @@ fn creating_a_workset_does_not_block_directory_writes_while_fetching() {
     )
     .unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    git(
+    run_git(
         &project,
         &["config", "remote.origin.uploadpack", hook.to_str().unwrap()],
     );
@@ -804,4 +809,112 @@ fn creating_a_workset_does_not_block_directory_writes_while_fetching() {
     let directory = workspace_catalog::directory_on(&temp.store).unwrap();
     assert_eq!(directory.worksets.len(), 1);
     assert_eq!(directory.conversations.len(), 1);
+}
+
+/// 打开项目、按项目根这个仓库建一个工作树，返回回执和任务目录。
+fn create_workset_in(
+    temp: &TempStore,
+    project: &std::path::Path,
+    event_hub: &EventHubHandle,
+) -> (
+    smelt_core::workspace_directory::WorkspaceWorksetCreateResult,
+    std::path::PathBuf,
+) {
+    let root = project.to_str().unwrap().to_string();
+    workspace_directory::open_project(&temp.store, &root, event_hub).unwrap();
+    let repository = workspace_catalog::directory_on(&temp.store)
+        .unwrap()
+        .repositories[0]
+        .name
+        .clone();
+    let worktree = project.join("worktrees/setup").join(&repository);
+    let created = crate::workset_control::create(
+        &temp.store,
+        smelt_core::workspace_directory::WorkspaceWorksetCreateParams {
+            project_root: root,
+            task: "setup".into(),
+            branch_prefix: "feat/".into(),
+            branch: None,
+            repository_names: vec![repository],
+        },
+        event_hub,
+    )
+    .unwrap();
+    (created, worktree)
+}
+
+#[test]
+#[cfg(unix)]
+fn creating_a_workset_runs_the_setup_script_from_the_source_repository() {
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let project = project_with_remote(&temp);
+    // 脚本和 .env 都没提交，只在源仓库的工作区里。
+    std::fs::write(project.join(".env"), "TOKEN=1\n").unwrap();
+    std::fs::create_dir_all(project.join(".smelt")).unwrap();
+    std::fs::write(
+        project.join(".smelt/worktree-setup"),
+        "cp \"$SMELT_SOURCE_ROOT/.env\" .\nprintf %s \"$SMELT_TASK_ROOT\" > task-root\n",
+    )
+    .unwrap();
+
+    let (created, worktree) = create_workset_in(&temp, &project, &event_hub);
+
+    assert_eq!(created.setup.len(), 1);
+    assert!(created.setup[0].success, "{:?}", created.setup);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".env")).unwrap(),
+        "TOKEN=1\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("task-root")).unwrap(),
+        std::fs::canonicalize(&project)
+            .unwrap()
+            .join("worktrees/setup")
+            .to_str()
+            .unwrap()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_failing_setup_script_keeps_the_workset_and_reports_its_output() {
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let project = project_with_remote(&temp);
+    std::fs::create_dir_all(project.join(".smelt")).unwrap();
+    std::fs::write(
+        project.join(".smelt/worktree-setup"),
+        "echo installing\necho 'npm ERR! offline' >&2\nexit 3\n",
+    )
+    .unwrap();
+
+    let (created, worktree) = create_workset_in(&temp, &project, &event_hub);
+
+    assert_eq!(created.setup.len(), 1);
+    let setup = &created.setup[0];
+    assert!(!setup.success);
+    for expected in ["installing", "npm ERR! offline", "退出码 3"] {
+        assert!(setup.output.contains(expected), "{}", setup.output);
+    }
+    assert!(worktree.exists());
+    assert_eq!(
+        workspace_catalog::directory_on(&temp.store)
+            .unwrap()
+            .worksets
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_workset_without_a_setup_script_reports_nothing() {
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let project = project_with_remote(&temp);
+
+    let (created, worktree) = create_workset_in(&temp, &project, &event_hub);
+
+    assert!(created.setup.is_empty());
+    assert!(worktree.exists());
 }

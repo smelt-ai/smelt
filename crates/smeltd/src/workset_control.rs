@@ -4,7 +4,8 @@ use smelt_core::{
     workspace_catalog::{self, DirectoryChange, DirectoryError},
     workspace_directory::{
         WorkspaceDirectory, WorkspaceRevision, WorkspaceWorkset, WorkspaceWorksetCreateParams,
-        WorkspaceWorksetFinishParams, WorkspaceWorksetFinishResult, WorkspaceWorksetRenameParams,
+        WorkspaceWorksetCreateResult, WorkspaceWorksetFinishParams, WorkspaceWorksetFinishResult,
+        WorkspaceWorksetRenameParams,
     },
 };
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
@@ -248,7 +249,7 @@ pub(crate) fn create(
     store: &smelt_store::Store,
     params: WorkspaceWorksetCreateParams,
     event_hub: &EventHubHandle,
-) -> Result<WorkspaceRevision, ControlError> {
+) -> Result<WorkspaceWorksetCreateResult, ControlError> {
     // 建 worktree 要 fetch 各仓库的远端，可能很久。这期间只占着工作树操作锁，不拿目录锁，
     // 会话的新建、改名这些目录写入照常进行；工作树和仓库的增删改由工作树操作锁排成一队，
     // 读到的仓库配置不会在建的过程中被改掉。
@@ -300,7 +301,11 @@ pub(crate) fn create(
     match saved {
         Ok(change) => {
             publish_change(&change, event_hub);
-            Ok(change.directory.version())
+            // 工作树已经可用，再跑各仓库的初始化脚本。失败不回滚，只在回执里报。
+            Ok(WorkspaceWorksetCreateResult {
+                revision: change.directory.version(),
+                setup: crate::worktree_setup::run_setup_scripts(&workset),
+            })
         }
         Err(error) => {
             let rollback = smelt_git::worktree::abort_workset_creation(&workset);
