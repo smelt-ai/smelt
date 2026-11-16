@@ -72,7 +72,8 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         summary: "在本机拆解应用、二进制、网页和抓包，带证据讲清某个功能是怎么实现的。用 Smelt 自带的 Bun 运行，不用装 Node。",
         description: "REA (Reverse Engineer Anything): local, evidence-backed reverse engineering of desktop apps, binaries, Electron/JavaScript bundles, websites and traffic captures",
         transport: PiMcpPresetTransport::Bun {
-            args: &["x", "--bun", "rea-agents@6.9.0", "mcp"],
+            // 6.8+ 要求的 Node 兼容版本高于当前内置 Bun；待上游兼容后再升级。
+            args: &["x", "--bun", "rea-agents@6.7.0", "mcp"],
             env: &[],
         },
         exposure: None,
