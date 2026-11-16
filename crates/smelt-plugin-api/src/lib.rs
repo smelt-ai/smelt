@@ -23,9 +23,20 @@ pub use smelt_client::session_ops;
 // 插件自己的库：每个来源一个 SQLite 文件，表由插件自己建、自己迁移。
 pub use smelt_client_store::{PluginStore, plugin_store, rusqlite};
 pub use smelt_model as model;
+// 本机数据目录（`~/.smelt`）在哪。
+pub use smelt_paths as paths;
 pub use smelt_runtime_client as client;
 // 量进程的 CPU 和内存（桌面进程自己在这里量，会话的由运行时报）。
 pub use smelt_sys::process_usage;
+// 应用日志（`app.log`）和在后台线程里跑一个要 tokio 的 future。
+pub use smelt_sys::{app_log, block_on};
+// 这个构建的版本号。
+pub use smelt_version;
+// 桌面的在线更新（macOS 换 .app 包，Windows 拉起安装程序），和 macOS 上 App 放的位置。
+#[cfg(target_os = "macos")]
+pub use smelt_client::app_location;
+#[cfg(any(target_os = "macos", windows))]
+pub use smelt_client::updater;
 pub use smelt_ui as ui;
 // 主题目录：内置主题和第三方主题按来源登记、卸下，同一套接口（见 smelt_ui::theme_catalog）。
 pub use smelt_ui::theme_catalog::{
@@ -37,7 +48,10 @@ mod command;
 mod context;
 mod file;
 mod layout;
+mod menu;
+mod open_with;
 mod page;
+mod quit;
 pub mod sessions;
 mod settings;
 mod view;
@@ -55,10 +69,15 @@ pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
     register_layouts, unregister_layouts,
 };
+pub use menu::{MenuEntry, MenuSlot, menu_items, register_menu_items, unregister_menu_items};
+pub use open_with::{
+    OpenWith, OpenWithApp, observe_open_with_apps, open_with_apps, register_open_with_apps,
+};
 pub use page::{
     OPEN_PAGE, OUTLET_VIEW, OpenPage, PageInfo, PageSource, home_page, page, pages, register_pages,
     unregister_pages,
 };
+pub use quit::{QUIT_NOW, QuitGuard, quit_guarded, register_quit_guard, unregister_quit_guard};
 pub use settings::{SettingsEntry, SettingsGroup, settings_pane};
 pub use view::{
     OPEN_VIEW, OpenView, PluginView, SET_VIEW_BADGE, ViewBadge, ViewBuilder, ViewHandle, ViewInfo,

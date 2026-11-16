@@ -1,4 +1,4 @@
-//! 宿主自己的对话框：退出、改名、中继、关闭确认、选目录、仓库、会话管理、重启确认。
+//! 宿主自己的对话框：退出、改名、中继、关闭确认、选目录、仓库。
 //!
 //! 和插件的对话框是同一套：kit 的窗口对话框层（`window.open_dialog`），同样的外观、
 //! Esc / Enter、焦点陷阱和关掉后焦点回到原处，叠起来时也只有最上面那个能操作。
@@ -25,13 +25,8 @@ pub(crate) enum HostDialog {
     Rename,
     RelayEdit,
     ProjectRepositories,
-    SessionManager,
     Quit,
-    DaemonRestart,
     CloseConfirm,
-    UpdateInstall,
-    #[cfg(target_os = "macos")]
-    MoveApp,
     DirPicker,
 }
 
@@ -42,13 +37,8 @@ impl HostDialog {
         Self::Rename,
         Self::RelayEdit,
         Self::ProjectRepositories,
-        Self::SessionManager,
         Self::Quit,
-        Self::DaemonRestart,
         Self::CloseConfirm,
-        Self::UpdateInstall,
-        #[cfg(target_os = "macos")]
-        Self::MoveApp,
         Self::DirPicker,
     ];
 }
@@ -58,8 +48,6 @@ impl Workspace {
     fn host_dialog_live(&self, kind: HostDialog) -> bool {
         match kind {
             HostDialog::Quit => self.show_quit_confirm,
-            #[cfg(target_os = "macos")]
-            HostDialog::MoveApp => self.show_move_app_confirm,
             // 侧栏行上的改名画在那一行里（见 `RenameTarget::is_inline`），不是对话框。
             HostDialog::Rename => {
                 self.rename_input.is_some()
@@ -72,18 +60,13 @@ impl Workspace {
             HostDialog::CloseConfirm => self.close_confirm.is_some(),
             HostDialog::ProjectRepositories => self.project_repositories.is_some(),
             HostDialog::DirPicker => self.dir_picker.is_some(),
-            HostDialog::SessionManager => self.session_manager_open,
-            HostDialog::DaemonRestart => self.show_daemon_restart_confirm,
-            HostDialog::UpdateInstall => self.show_update_install_confirm,
         }
     }
 
-    /// 现在能不能取消。手上的事撤不回时（正在退出、正在移动、正在关工作树）不能。
+    /// 现在能不能取消。手上的事撤不回时（正在退出、正在关工作树）不能。
     fn host_dialog_cancellable(&self, kind: HostDialog) -> bool {
         match kind {
             HostDialog::Quit => !self.quit_requested,
-            #[cfg(target_os = "macos")]
-            HostDialog::MoveApp => !self.moving_app,
             HostDialog::CloseConfirm => !matches!(
                 self.close_confirm,
                 Some(
@@ -93,12 +76,7 @@ impl Workspace {
             ),
             HostDialog::ProjectRepositories => !self.project_repositories_busy(),
             // 中继已经提交的照常做完，只是不再等结果。
-            HostDialog::Rename
-            | HostDialog::RelayEdit
-            | HostDialog::DirPicker
-            | HostDialog::SessionManager
-            | HostDialog::DaemonRestart
-            | HostDialog::UpdateInstall => true,
+            HostDialog::Rename | HostDialog::RelayEdit | HostDialog::DirPicker => true,
         }
     }
 
@@ -106,19 +84,11 @@ impl Workspace {
     fn dismiss_host_dialog(&mut self, kind: HostDialog, cx: &mut Context<Self>) {
         match kind {
             HostDialog::Quit => self.show_quit_confirm = false,
-            #[cfg(target_os = "macos")]
-            HostDialog::MoveApp => self.show_move_app_confirm = false,
             HostDialog::Rename => self.cancel_rename(cx),
             HostDialog::RelayEdit => self.cancel_relay_edit(cx),
             HostDialog::CloseConfirm => self.close_confirm = None,
             HostDialog::ProjectRepositories => self.close_project_repositories(cx),
             HostDialog::DirPicker => self.cancel_dir_picker(cx),
-            HostDialog::SessionManager => {
-                self.session_manager_open = false;
-                self.session_manager_tombstones.clear();
-            }
-            HostDialog::DaemonRestart => self.show_daemon_restart_confirm = false,
-            HostDialog::UpdateInstall => self.show_update_install_confirm = false,
         }
         cx.notify();
     }
@@ -133,12 +103,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         match kind {
-            HostDialog::Quit if self.quit_confirm_is_danger() => {
-                return self.host_dialog_cancellable(kind);
-            }
             HostDialog::Quit => self.confirm_quit(cx),
-            #[cfg(target_os = "macos")]
-            HostDialog::MoveApp => self.move_app_to_applications(cx),
             HostDialog::Rename => self.confirm_rename(window, cx),
             HostDialog::RelayEdit => self.confirm_relay_edit(cx),
             HostDialog::DirPicker => self.dir_picker_confirm(cx),
@@ -148,11 +113,9 @@ impl Workspace {
                     self.close_confirm,
                     Some(CloseConfirm::RestoreWorkset { .. })
                 ) => {}
-            HostDialog::CloseConfirm | HostDialog::DaemonRestart | HostDialog::UpdateInstall => {
-                return self.host_dialog_cancellable(kind);
-            }
-            // 表单和列表，没有一个说得清的默认操作。
-            HostDialog::ProjectRepositories | HostDialog::SessionManager => {}
+            HostDialog::CloseConfirm => return self.host_dialog_cancellable(kind),
+            // 表单，没有一个说得清的默认操作。
+            HostDialog::ProjectRepositories => {}
         }
         false
     }
@@ -265,16 +228,11 @@ impl Workspace {
             });
         match kind {
             HostDialog::Quit => self.render_quit_confirm(dialog, cx),
-            #[cfg(target_os = "macos")]
-            HostDialog::MoveApp => self.render_move_app_confirm(dialog, cx),
             HostDialog::Rename => self.render_rename(dialog, cx),
             HostDialog::RelayEdit => self.render_relay_edit(dialog, cx),
             HostDialog::CloseConfirm => self.render_close_confirm(dialog, cx),
             HostDialog::ProjectRepositories => self.render_project_repositories(dialog, cx),
             HostDialog::DirPicker => self.render_dir_picker(dialog, cx),
-            HostDialog::SessionManager => self.render_session_manager(dialog, cx),
-            HostDialog::DaemonRestart => self.render_daemon_restart_confirm(dialog, cx),
-            HostDialog::UpdateInstall => self.render_update_install_confirm(dialog, cx),
         }
     }
 

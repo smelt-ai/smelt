@@ -20,13 +20,11 @@ pub(crate) use smelt_ui::ui_theme;
 mod builtin_views;
 mod conversation_layout;
 mod conversations;
-mod daemon_restart_prompt;
 mod desktop_view;
 mod dir_picker;
 mod dock;
 mod host_dialog;
 mod host_views;
-mod ide;
 mod keymap;
 mod local_daemon;
 mod overlay;
@@ -47,7 +45,7 @@ mod settings;
 mod sidebar_order;
 mod stage;
 mod status_item;
-mod storage_cleanup;
+mod system_open;
 mod term_dock;
 mod terminal;
 mod terminal_images;
@@ -70,8 +68,6 @@ pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
 pub(crate) use workspace_persist::load_workspace_ui;
 #[cfg(test)]
 pub(crate) use workspace_persist::persisted_active_position;
-
-mod updater;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -1406,12 +1402,10 @@ struct Workspace {
     /// 运行内记，重启后从当前会话重新记起。
     recent_sessions: Vec<u64>,
     sidebar_auto_scroll: gpui_component::scroll::AutoScroll,
-    /// 已发现 IDE 的按需缓存。没有项目目录时完全不触发；首次打开 IDE 菜单才后台
-    /// 填充，之后菜单只读这里的快照。
-    ide_catalog: ide::IdeCatalog,
-    /// 首次扫描尚未完成时打开的 IDE 菜单。弱引用不会把已经关闭的弹层留在内存里；
-    /// 完成后统一原地替换其加载项。
-    ide_popup_waiters: Vec<stage::IdePopupWaiter>,
+    /// 开着的「用其他应用打开」菜单。插件登记的应用变了时原地重建（见 stage.rs）。
+    open_with_popups: Vec<stage::OpenWithPopup>,
+    /// 盯着插件登记的应用；第一次开这个菜单时才订。
+    _open_with_apps_sub: Option<Subscription>,
     /// 命令面板（Cmd+K）；None 表示未打开。查询和选中在 CommandState 里。
     palette: Option<Entity<gpui_component::command::CommandState>>,
 
@@ -1441,27 +1435,8 @@ struct Workspace {
     debug_hud: bool,
     /// 退出确认拦截弹窗开关
     show_quit_confirm: bool,
-    /// 用户已确认退出；防止异步更新收尾期间重复提交退出动作。
+    /// 用户已确认退出；防止重复提交退出动作。
     quit_requested: bool,
-    /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 侧栏「设置」红点。
-    #[cfg(any(target_os = "macos", windows))]
-    update_status: updater::UpdateStatus,
-    /// 每次开始或取消安装等待时递增，防止旧的后台重试在新请求上继续执行。
-    #[cfg(any(target_os = "macos", windows))]
-    update_install_generation: u64,
-    /// App 放的位置装不上更新（被系统转移、只读），启动时查一次；见
-    /// `smelt_client::app_location`。有问题时更新入口都停在「需要先移到『应用程序』」。
-    #[cfg(target_os = "macos")]
-    app_location_issue: Option<smelt_client::app_location::LocationIssue>,
-    /// 启动时提议「移到『应用程序』」的确认框。
-    #[cfg(target_os = "macos")]
-    show_move_app_confirm: bool,
-    /// 正在移动；移完就退出，从新位置重开。
-    #[cfg(target_os = "macos")]
-    moving_app: bool,
-    /// 上次移动失败的原因，确认框和设置页都显示。
-    #[cfg(target_os = "macos")]
-    move_app_error: Option<SharedString>,
     /// 设置停在哪一页（对应左侧子菜单的独立内容页）。
     settings_section: settings::SettingsSection,
     /// 每请求跳一次页就 +1，用来变更 `Settings` 元素的 id。
@@ -1497,32 +1472,8 @@ struct Workspace {
     /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
     provider_quota_refresh_tx: Option<smol::channel::Sender<provider_quota::QuotaTarget>>,
 
-    /// 守护进程是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见，需手动重启守护
-    /// 才生效新代码）；None 表示还没查过，驱动设置页「更新」分区的重启提示。
-    daemon_outdated: Option<bool>,
-    /// 最近一次无缝升级的结果提示（设置页守护分区显示；None = 没试过）。
-    daemon_upgrade_msg: Option<String>,
-    /// 重启守护进行中（按钮置灰防连点）。
+    /// 守护落后时的自动重启进行中，防止重入。
     daemon_upgrading: bool,
-    /// 设置页「立即重启更新」：只有有进行中的会话时才弹出。
-    show_update_install_confirm: bool,
-    /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
-    /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
-    daemon_info: Option<local_daemon::DaemonInfo>,
-    /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
-    show_daemon_restart_confirm: bool,
-    /// 停掉守护会打断的会话名。退出、重启守护、装更新的确认框打开时算一次，
-    /// 弹窗的 render 只读这份，不在每次重绘时整份克隆会话状态。
-    stop_prompt_names: Vec<String>,
-    /// 「会话管理」弹窗开关：设置页「更新」tab 点开会话数详情用。守护进程持有
-    /// 的会话不只 GUI 侧栏认领的那些——测试跑出来的游离会话、忘了关的临时会话都会
-    /// 计进「N 个会话」里但从没在任何侧栏露过面，只有这里能看见并单独清理，
-    /// 不用被迫走「重启守护进程」这种会误伤正常会话的核选项。
-    session_manager_open: bool,
-    /// 弹窗数据：最近一次身份镜像快照，None = 镜像未到。
-    session_manager_list: Option<Vec<terminal::DaemonSessionState>>,
-    /// 刚杀掉、subscribe 尚未确认消失的 id。刷新时滤掉，避免 Update 把条目刷回来。
-    session_manager_tombstones: HashSet<String>,
     /// 上一帧工作区窗口是否在前台。上升沿用来清正在看的会话未读。
     workspace_window_active: bool,
     /// 主窗口是不是 key window，窗口激活变化时和每帧记下。插件问窗口在不在前台时和现问的
@@ -1590,20 +1541,6 @@ struct Workspace {
     /// 会被淘汰，不能在最终快照之后反向覆盖。
     ws_snapshot_epoch: u64,
     ws_snapshot_finalizing: bool,
-}
-
-#[cfg(any(target_os = "macos", windows))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UpdateInstallTrigger {
-    User,
-    Quit,
-}
-
-#[cfg(any(target_os = "macos", windows))]
-impl UpdateInstallTrigger {
-    fn relaunches(self) -> bool {
-        !matches!(self, Self::Quit)
-    }
 }
 
 /// 自动重连循环每轮的结果。
@@ -1717,8 +1654,8 @@ impl Workspace {
             sidebar_cursor: None,
             sidebar_typeahead: None,
             sidebar_auto_scroll: gpui_component::scroll::AutoScroll::default(),
-            ide_catalog: ide::IdeCatalog::default(),
-            ide_popup_waiters: Vec::new(),
+            open_with_popups: Vec::new(),
+            _open_with_apps_sub: None,
             palette: None,
             launch_inputs: None,
             profile_inputs: None,
@@ -1735,18 +1672,6 @@ impl Workspace {
             debug_hud: false,
             show_quit_confirm: false,
             quit_requested: false,
-            #[cfg(any(target_os = "macos", windows))]
-            update_status: updater::UpdateStatus::default(),
-            #[cfg(any(target_os = "macos", windows))]
-            update_install_generation: 0,
-            #[cfg(target_os = "macos")]
-            app_location_issue: None,
-            #[cfg(target_os = "macos")]
-            show_move_app_confirm: false,
-            #[cfg(target_os = "macos")]
-            moving_app: false,
-            #[cfg(target_os = "macos")]
-            move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
             plugin_overlay_open: false,
@@ -1760,16 +1685,7 @@ impl Workspace {
             project_repositories: None,
             provider_quota_refresh_tx: None,
 
-            daemon_outdated: None,
-            daemon_upgrade_msg: None,
             daemon_upgrading: false,
-            show_update_install_confirm: false,
-            daemon_info: None,
-            show_daemon_restart_confirm: false,
-            stop_prompt_names: Vec::new(),
-            session_manager_open: false,
-            session_manager_list: None,
-            session_manager_tombstones: HashSet::new(),
             workspace_window_active: false,
             main_window_key: false,
             saved_active_session_id,
@@ -1797,30 +1713,10 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             host_dialogs: Vec::new(),
         };
-        // 只预取一个已知的系统 Finder 图标，不枚举第三方应用；真实 IDE 列表由
-        // stage.rs 在有项目舞台显示后的空闲期再低优先级预热。
-        ws.preload_file_manager_icon(window, cx);
         // 额度是应用级账户状态，启动后独立刷新，不依赖任何 ACP 会话是否创建。
         ws.start_provider_quota_watch(cx);
         // 侧栏「+」菜单按本机已装 CLI 过滤；启动后立刻探一次，免得等用户打开设置。
         ws.refresh_acp_runtime(cx);
-        // 被系统转移、放在只读位置的 App 装不上更新：先提议移到「应用程序」，不恢复也不
-        // 检查，免得下载了还是装不上。移过去重开后才走下面的正常流程。
-        #[cfg(target_os = "macos")]
-        {
-            ws.app_location_issue = smelt_client::app_location::current_issue();
-            if ws.app_location_issue.is_some() {
-                ws.update_status = updater::UpdateStatus::Failed(updater::UpdateFailure::Location);
-                ws.show_move_app_confirm = true;
-            } else {
-                // 状态恢复、交换事务收敛和旧包清理由 updater 在同一把锁内完成；之后做常规静默
-                // 检查，恢复出的待安装作业由检查决定保留还是换成更新源上更新的包。
-                ws.recover_update_at_launch(true, cx);
-            }
-        }
-        // Windows 不是安装程序装的（开发构建等）在检查时拦下，见 `blocked_by_app_location`。
-        #[cfg(windows)]
-        ws.recover_update_at_launch(true, cx);
         ws.apply_received_workspace_directories(window, cx);
         ws._workspace_directories_sub = Some(
             cx.observe_global_in::<WorkspaceDirectoriesGlobal>(window, |this, window, cx| {
@@ -1979,9 +1875,7 @@ impl Workspace {
     /// 守护落后、因为有会话在跑没重启的话，会话状态一变就看看是不是都停下来了，停了就再查
     /// 一次（查到还落后就重启）。只看内存里的会话状态。
     pub(crate) fn retry_daemon_restart_when_idle(&mut self, cx: &mut Context<Self>) {
-        if self.daemon_restart_waiting_idle
-            && !daemon_restart_prompt::should_confirm(&self.busy_work_names(cx))
-        {
+        if self.daemon_restart_waiting_idle && !self.local_has_busy_work(cx) {
             self.daemon_restart_waiting_idle = false;
             self.check_daemon_outdated(cx);
         }
@@ -2318,18 +2212,6 @@ fn open_workspace_window(cx: &mut App) -> MainWindow {
             window.set_rem_size(px(ui_font_px as f32));
             let view = cx.new(|cx| Workspace::new(window, cx));
             workspace = Some(view.downgrade());
-            // Windows 上关掉主窗口就是退出（GPUI 随后退出），不走 Quit
-            // 动作。待装更新在窗口还在、Workspace 还活着的时候接上。
-            #[cfg(windows)]
-            {
-                let ws = view.downgrade();
-                window.on_window_should_close(cx, move |_window, cx| {
-                    if let Some(ws) = ws.upgrade() {
-                        ws.read(cx).install_ready_update_on_exit();
-                    }
-                    true
-                });
-            }
             // 顶层视图必须包一层 Root（组件库的主题/遮罩系统要求）。
             cx.new(|cx| Root::new(view, window, cx).bg(gpui::transparent_black()))
         })
@@ -2457,16 +2339,6 @@ impl gpui::AssetSource for SmeltAssets {
     }
 }
 
-fn schedule_obsolete_file_cleanup() {
-    // 启动时只删已经没有任何读写路径的废弃文件；旧版 worktree 目录要用户在设置页确认。
-    let _ = thread::spawn(|| {
-        let removed = storage_cleanup::remove_obsolete_files_at_startup();
-        if removed > 0 {
-            eprintln!("[storage] 启动时清理了 {removed} 个历史残留文件");
-        }
-    });
-}
-
 fn main() {
     if let Some(code) = smelt_cli::maybe_run(std::env::args()) {
         std::process::exit(code);
@@ -2475,7 +2347,7 @@ fn main() {
     // 后才可交换 Bundle；若交换已经开始，新 GUI fail-fast，避免从旧 vnode 启动。
     // 这把锁保护的是 macOS .app 交换，其它平台没有安装事务（设计文档 D4）。
     #[cfg(target_os = "macos")]
-    let _app_runtime_lease = match updater::acquire_app_runtime_lease() {
+    let _app_runtime_lease = match smelt_client::updater::acquire_app_runtime_lease() {
         Ok(lease) => lease,
         Err(error) => {
             eprintln!("Smelt 正在更新，暂时无法启动：{error:#}");
@@ -2491,7 +2363,6 @@ fn main() {
     smelt_sys::app_log::tee_stderr("smelt");
     // 插件的 console 输出和脚本错误是 tracing 事件，不接就看不见。
     plugins::install_log();
-    schedule_obsolete_file_cleanup();
     // Finder / launchd 启动的 GUI 默认软上限常是 256；在创建窗口、socket 和终端
     // 线程之前先抬高，避免正常多会话也让更新检查等新连接触发 EMFILE。
     smelt_sys::fd_limit::raise_fd_limit();
@@ -2565,8 +2436,6 @@ fn main() {
         settings::apply_named_theme(&appearance.theme_name, cx);
         cx.set_global(settings::LaunchConfig::default());
         settings::start_launch_config_load(cx);
-        #[cfg(any(target_os = "macos", windows))]
-        cx.set_global(settings::load_update_settings());
 
         // 原生通知/菜单栏桥必须先于任何 Attention producer 就绪。daemon 快照可能在
         // 首帧前到达；若先启动观察器再 setup，应用级消费者会正确 drain 事件，但
@@ -2590,9 +2459,6 @@ fn main() {
             if let Some(ws) = current_workspace(&current_ws_for_daemon_states) {
                 let _ = ws.update(cx, |ws, cx| {
                     ws.retry_daemon_restart_when_idle(cx);
-                    if ws.session_manager_open {
-                        ws.refresh_session_manager(cx);
-                    }
                     ws.notify_if_session_facts_changed(cx);
                 });
             }
@@ -2606,9 +2472,6 @@ fn main() {
         if let Err(error) = settings::sync_bundled_smelt_notify() {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
-        // 终端和智能体里的 `smelt` 命令指向这个 App（macOS 上 GUI 自己就是命令行）。
-        #[cfg(target_os = "macos")]
-        settings::sync_cli_command(cx);
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
         cx.set_global(settings::AgentHosts::default());
@@ -2873,7 +2736,7 @@ fn main() {
                 .and_then(|main| main.workspace.upgrade())
                 .map(|ws| ws.update(cx, |ws, cx| ws.flush_ws_state_on_quit(cx)));
             // 刚关掉的会话，kill 可能还在路上（见 smelt_client::session_kill）。GPUI 只给
-            // 收尾一小段时间，超时的就算了：会话留在运行时上，会话管理里还能关。
+            // 收尾一小段时间，超时的就算了：会话留在运行时上，直到守护下次重启。
             let kills = cx.background_executor().spawn(async {
                 smelt_client::session_kill::wait_settled(gpui::SHUTDOWN_TIMEOUT);
             });

@@ -8,7 +8,7 @@ use gpui::SharedString;
 use gpui_component::{Icon, IconName};
 use smelt_plugin_api::{SettingsGroup, ViewInfo};
 
-/// 设置当前选中的内容页。深链接（检查更新、外观、机器、资源）也走这里。
+/// 设置当前选中的内容页。深链接（外观、机器、资源、插件的设置页）也走这里。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SettingsSection {
     /// 主题、字号与字体、布局、背景。
@@ -20,10 +20,6 @@ pub enum SettingsSection {
     Agents,
     /// 连到其他机器的运行时，以及让配对过的设备连进这台机器。
     Remote,
-    /// 后台服务、终端里的 smelt 命令（macOS）、旧版本残留。
-    Maintenance,
-    /// 版本、应用更新（macOS、Windows）、帮助与反馈。
-    About,
     /// 插件登记的页（带 `settings` 的视图，见 `smelt_plugin_api::register_views`），带视图 id。
     Plugin(SharedString),
 }
@@ -33,12 +29,6 @@ impl SettingsSection {
         Self::Appearance
     }
 
-    /// 检查更新的深链接。
-    #[cfg(any(target_os = "macos", windows))]
-    pub fn app_update() -> Self {
-        Self::About
-    }
-
     pub fn element_key(&self) -> SharedString {
         match self {
             Self::Appearance => "appearance".into(),
@@ -46,8 +36,6 @@ impl SettingsSection {
             Self::PanelPlugins => "panel-plugins".into(),
             Self::Agents => "agents".into(),
             Self::Remote => "remote".into(),
-            Self::Maintenance => "maintenance".into(),
-            Self::About => "about".into(),
             Self::Plugin(id) => format!("plugin:{id}").into(),
         }
     }
@@ -95,13 +83,15 @@ pub fn settings_nav(views: &[ViewInfo]) -> Vec<SettingsNavCategory> {
         };
         category.children.push(leaf);
     }
-    if !plugins.children.is_empty() {
-        nav.push(plugins);
-    }
+    nav.push(plugins);
+    // 「系统」组宿主自己没有页，全靠插件；一页都没有的组不露。
+    nav.retain(|category| !category.children.is_empty());
     nav
 }
 
 /// 宿主自己的页：通用、Agent 与远程、系统三组，次序和 [`settings_nav`] 里按组放插件页对应。
+/// 「系统」组的页都是插件的：「关于」在「更新与帮助」（smelt-updater-ui），终端里的 smelt
+/// 命令在「维护」（smelt-maintenance）。
 fn host_nav() -> Vec<SettingsNavCategory> {
     vec![
         SettingsNavCategory {
@@ -272,70 +262,7 @@ fn host_nav() -> Vec<SettingsNavCategory> {
         SettingsNavCategory {
             title: "系统",
             keywords: &[],
-            children: vec![
-                leaf(
-                    "维护",
-                    Icon::new(gpui_kit_assets::IconName::Wrench),
-                    SettingsSection::Maintenance,
-                    &[
-                        "smeltd",
-                        "守护进程",
-                        "守护",
-                        "后台",
-                        "服务",
-                        "后台服务",
-                        "进程",
-                        "重启",
-                        "重启守护进程",
-                        "重启以升级",
-                        "会话服务",
-                        "卡死",
-                        "残留数据清理",
-                        "清理",
-                        "残留",
-                        "存储",
-                        "空间",
-                        "缓存",
-                        "清缓存",
-                        "磁盘",
-                        "旧数据",
-                        "~/.smelt",
-                        "高级",
-                        "命令行",
-                        "CLI",
-                        "终端命令",
-                        "PATH",
-                    ],
-                ),
-                leaf(
-                    "关于",
-                    IconName::Info,
-                    SettingsSection::About,
-                    &[
-                        "软件版本",
-                        "应用版本",
-                        "版本",
-                        "更新",
-                        "检查更新",
-                        "更新通道",
-                        "自动下载安装",
-                        "升级",
-                        "下载",
-                        "通道",
-                        "生产版",
-                        "内测版",
-                        "自动更新",
-                        "帮助",
-                        "帮助文档",
-                        "文档",
-                        "反馈",
-                        "反馈问题",
-                        "日志",
-                        "源码",
-                        "GitHub",
-                    ],
-                ),
-            ],
+            children: Vec::new(),
         },
     ]
 }
@@ -474,10 +401,9 @@ mod tests {
     #[test]
     fn nav_is_two_groups_of_pages() {
         let nav = settings_nav(&[]);
-        assert_eq!(titles(&nav), ["通用", "Agent 与远程", "系统"]);
+        assert_eq!(titles(&nav), ["通用", "Agent 与远程"]);
         assert_eq!(child_titles(&nav, "通用"), ["外观", "快捷键", "面板插件"]);
         assert_eq!(child_titles(&nav, "Agent 与远程"), ["Agent", "远程"]);
-        assert_eq!(child_titles(&nav, "系统"), ["维护", "关于"]);
         let sections = nav
             .iter()
             .flat_map(|category| category.children.iter())
@@ -491,8 +417,6 @@ mod tests {
                 SettingsSection::PanelPlugins,
                 SettingsSection::Agents,
                 SettingsSection::Remote,
-                SettingsSection::Maintenance,
-                SettingsSection::About,
             ]
         );
     }
@@ -500,9 +424,9 @@ mod tests {
     #[test]
     fn search_keeps_only_matching_pages_under_their_group() {
         let nav = settings_nav(&[]);
-        let filtered = filter_settings_nav(&nav, "守护");
-        assert_eq!(titles(&filtered), ["系统"]);
-        assert_eq!(child_titles(&filtered, "系统"), ["维护"]);
+        let filtered = filter_settings_nav(&nav, "relay");
+        assert_eq!(titles(&filtered), ["Agent 与远程"]);
+        assert_eq!(child_titles(&filtered, "Agent 与远程"), ["远程"]);
 
         let by_group = filter_settings_nav(&nav, "通用");
         assert_eq!(child_titles(&by_group, "通用").len(), 3);
@@ -511,25 +435,16 @@ mod tests {
     #[test]
     fn search_understands_user_tasks_and_multiple_terms() {
         let nav = settings_nav(&[]);
-        assert_eq!(
-            matching_sections(&nav, "后台服务"),
-            [SettingsSection::Maintenance]
-        );
-
         for (query, expected) in [
             ("Relay 地址", SettingsSection::Remote),
             ("添加机器", SettingsSection::Remote),
             ("导入插件", SettingsSection::PanelPlugins),
-            ("自动下载安装", SettingsSection::About),
-            ("清缓存", SettingsSection::Maintenance),
             ("终端字号", SettingsSection::Appearance),
             ("壁纸", SettingsSection::Appearance),
             ("背景图", SettingsSection::Appearance),
             ("hook", SettingsSection::Agents),
             ("快捷启动项", SettingsSection::Agents),
             ("config dir", SettingsSection::Agents),
-            ("反馈问题", SettingsSection::About),
-            ("帮助文档", SettingsSection::About),
         ] {
             assert_eq!(matching_sections(&nav, query), [expected], "query: {query}");
         }
@@ -574,13 +489,10 @@ mod tests {
             child_titles(&nav, "通用"),
             ["外观", "快捷键", "面板插件", "提醒"]
         );
-        assert_eq!(child_titles(&nav, "系统"), ["维护", "关于", "磁盘"]);
+        assert_eq!(child_titles(&nav, "系统"), ["磁盘"]);
         assert_eq!(child_titles(&nav, "插件"), ["行情"]);
-        // 没有挑「插件」组的页就没有这一组。
-        assert_eq!(
-            titles(&settings_nav(&pages[..1])),
-            ["通用", "Agent 与远程", "系统"]
-        );
+        // 一页都没有的组不露：没有挑「插件」组、「系统」组的页就没有这两组。
+        assert_eq!(titles(&settings_nav(&pages[..1])), ["通用", "Agent 与远程"]);
 
         assert_eq!(
             matching_sections(&nav, "股票"),

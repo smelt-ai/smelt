@@ -46,16 +46,6 @@ impl Workspace {
                 .map(|inputs| inputs.rows.clone())
                 .unwrap_or_default(),
             panel_plugins: self.panel_plugins_snapshot(),
-            #[cfg(any(target_os = "macos", windows))]
-            update_status: self.update_status.clone(),
-            #[cfg(target_os = "macos")]
-            moving_app: self.moving_app,
-            #[cfg(target_os = "macos")]
-            move_app_error: self.move_app_error.clone(),
-            daemon_outdated: self.daemon_outdated,
-            daemon_upgrading: self.daemon_upgrading,
-            daemon_upgrade_msg: self.daemon_upgrade_msg.clone(),
-            daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
         }
@@ -80,16 +70,14 @@ impl Workspace {
         render::render_settings_nav(entity, selected, attention, search, cx)
     }
 
-    /// 设置里有没有要你处理的事，有的话落在哪一页：有新版本、后台服务旧了 → 系统；有机器
-    /// 要处理 → 远程。侧栏「设置」上的红点和设置导航里那一页的红点都看它。只读内存。
+    /// 设置里有没有要你处理的事，有的话落在哪一页：插件的设置页挂着角标（比如「关于」页
+    /// 有新版本）→ 那一页；有机器要处理 → 远程。侧栏「设置」上的红点
+    /// 和设置导航里那一页的红点都看它。只读内存。
     pub(crate) fn settings_attention(&self, cx: &App) -> Option<SettingsSection> {
-        #[cfg(any(target_os = "macos", windows))]
-        if self.update_available() {
-            return Some(SettingsSection::app_update());
-        }
-        #[cfg(unix)]
-        if self.daemon_outdated == Some(true) {
-            return Some(SettingsSection::Maintenance);
+        if let Some(view) = smelt_plugin_api::views(cx).into_iter().find(|view| {
+            view.settings.is_some() && smelt_plugin_api::view_badge(&view.id, cx).is_some()
+        }) {
+            return Some(SettingsSection::Plugin(view.id));
         }
         crate::runtimes::any_runtime_needs_attention(cx).then_some(SettingsSection::Remote)
     }
@@ -97,7 +85,6 @@ impl Workspace {
     /// 打开设置：⌘,、菜单栏「设置…」、侧栏「设置」都走这里。设置已经露着就不换页；
     /// 没露着时有要处理的事就停在那一页，没有就停在上次那页。
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.check_daemon_outdated(cx);
         if !crate::plugin_host::view_shown(SETTINGS_VIEW, cx)
             && let Some(section) = self.settings_attention(cx)
         {

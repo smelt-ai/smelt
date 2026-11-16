@@ -201,6 +201,10 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
         api::SHOW_MAIN_WINDOW.spec("显示主窗口", move |_, window, cx| {
             in_main_window(window, &shown, cx, |_, _, _| ())
         }),
+        api::QUIT_NOW.spec("直接退出", |_, _, cx| {
+            crate::request_app_quit(cx);
+            Ok(())
+        }),
         api::SET_STATUS_MENU.spec("设置菜单栏菜单", |menu, _, _| {
             crate::status_item::set_menu(&menu);
             Ok(())
@@ -231,10 +235,10 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             Ok(())
         }),
         api::OPEN_IN_TEXT_EDITOR.spec("用系统文本编辑器打开", |args, _, _| {
-            crate::ide::open_in_system_text_editor(&args.path)
+            crate::system_open::open_in_system_text_editor(&args.path)
         }),
         api::OPEN_IN_FILE_MANAGER.spec("用文件管理器打开", |args, _, _| {
-            crate::ide::open_in_file_manager(&args.path)
+            crate::system_open::open_in_file_manager(&args.path)
         }),
         api::EDIT_AGENT_SETTINGS.spec_async("改智能体配置", |edit, _, cx| {
             let sent = api::send_agent_settings_edit(edit, cx);
@@ -308,9 +312,13 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     smelt_files_ui::register(cx);
     smelt_git_ui::register(cx);
     smelt_history::register(cx);
+    smelt_ide::register(cx);
     smelt_layouts::register(cx);
+    smelt_maintenance::register(cx);
     smelt_notifications::register(cx);
     smelt_resources::register(cx);
+    smelt_desktop::register(cx);
+    smelt_updater_ui::register(cx);
 }
 
 /// 此刻看得见的视图。摆视图的地方各报各的：主窗口报开着的那页里露着的和舞台上开着的

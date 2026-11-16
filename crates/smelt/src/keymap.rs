@@ -198,31 +198,44 @@ pub(crate) fn app_key_bindings(bound: &[Bound], cx: &App) -> Vec<KeyBinding> {
         .collect()
 }
 
-/// 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、「设置… ⌘,」+「退出 Smelt ⌘Q」
-/// （跟侧栏「设置」一样打开设置，符合 mac 惯例）；帮助文档和反馈问题按 mac 惯例
-/// 放「帮助」菜单。设置「关于」页也有这两项，没有菜单栏的平台从那里进。
+/// 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、插件放进来的项（见
+/// [`api::menu_items`]）、「设置… ⌘,」+「退出 Smelt ⌘Q」（跟侧栏「设置」一样打开设置，
+/// 符合 mac 惯例）；「帮助」菜单全是插件放的，没人放就没有。
 ///
-/// 菜单项上的快捷键是设菜单那一刻从键表里取的，改键后要重设一次。
-fn app_menus() -> Vec<Menu> {
+/// 菜单项上的快捷键是设菜单那一刻从键表里取的，改键后要重设一次；插件的菜单项变了也发
+/// `CommandsChanged`，跟着重设。
+fn app_menus(cx: &App) -> Vec<Menu> {
+    let entries = api::menu_items(cx);
+    let plugin_items = |slot: api::MenuSlot| -> Vec<MenuItem> {
+        entries
+            .iter()
+            .filter(|entry| entry.slot == slot)
+            .map(|entry| {
+                MenuItem::action(entry.title.clone(), RunCommand::new(entry.command.clone()))
+            })
+            .collect()
+    };
     let command =
         |title: &'static str, id: &'static str| MenuItem::action(title, RunCommand::new(id));
-    vec![
-        Menu::new("Smelt").items([
-            MenuItem::action(format!("v{}", smelt_version::VERSION), NoAction).disabled(true),
-            #[cfg(target_os = "macos")]
-            MenuItem::Separator,
-            #[cfg(target_os = "macos")]
-            command("检查更新…", "smelt.app/check-update"),
-            MenuItem::Separator,
-            command("设置…", "smelt.app/settings"),
-            MenuItem::Separator,
-            command("退出 Smelt", "smelt.app/quit"),
-        ]),
-        Menu::new("帮助").items([
-            command("帮助文档", "smelt.app/docs"),
-            command("反馈问题", "smelt.app/report-issue"),
-        ]),
-    ]
+    let app_items = plugin_items(api::MenuSlot::App);
+    let mut app_menu =
+        vec![MenuItem::action(format!("v{}", smelt_version::VERSION), NoAction).disabled(true)];
+    if !app_items.is_empty() {
+        app_menu.push(MenuItem::Separator);
+        app_menu.extend(app_items);
+    }
+    app_menu.extend([
+        MenuItem::Separator,
+        command("设置…", "smelt.app/settings"),
+        MenuItem::Separator,
+        command("退出 Smelt", "smelt.app/quit"),
+    ]);
+    let mut menus = vec![Menu::new("Smelt").items(app_menu)];
+    let help_items = plugin_items(api::MenuSlot::Help);
+    if !help_items.is_empty() {
+        menus.push(Menu::new("帮助").items(help_items));
+    }
+    menus
 }
 
 /// 快捷键的全局状态：用户的覆盖、每条命令现在的键，以及设置页正在录哪一条。
@@ -324,7 +337,7 @@ fn install(cx: &mut App) {
     };
     cx.clear_key_bindings();
     cx.bind_keys(rebuilt);
-    cx.set_menus(app_menus());
+    cx.set_menus(app_menus(cx));
 }
 
 /// smelt 那一段换成 `app`，放在原来第一条 smelt 键的位置；原来没有就接在最后。

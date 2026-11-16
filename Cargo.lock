@@ -10900,9 +10900,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "gpui-shell",
- "gpui-webview",
  "image",
- "lb-wry",
  "libc",
  "notify",
  "objc",
@@ -10924,12 +10922,15 @@ dependencies = [
  "smelt-client",
  "smelt-client-store",
  "smelt-core",
+ "smelt-desktop",
  "smelt-event-protocol",
  "smelt-files-ui",
  "smelt-git-ui",
  "smelt-history",
+ "smelt-ide",
  "smelt-iroh",
  "smelt-layouts",
+ "smelt-maintenance",
  "smelt-model",
  "smelt-notifications",
  "smelt-pairing",
@@ -10941,6 +10942,7 @@ dependencies = [
  "smelt-sys",
  "smelt-themes",
  "smelt-ui",
+ "smelt-updater-ui",
  "smelt-version",
  "smol",
  "tokio",
@@ -11117,6 +11119,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-desktop"
+version = "0.0.0"
+dependencies = [
+ "gpui-pre",
+ "gpui-webview",
+ "lb-wry",
+ "smelt-plugin-api",
+ "smol",
+]
+
+[[package]]
 name = "smelt-event-bus"
 version = "0.0.0"
 dependencies = [
@@ -11181,6 +11194,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-ide"
+version = "0.0.0"
+dependencies = [
+ "gpui-kit-assets",
+ "gpui-pre",
+ "objc",
+ "smelt-plugin-api",
+]
+
+[[package]]
 name = "smelt-iroh"
 version = "0.0.0"
 dependencies = [
@@ -11204,6 +11227,16 @@ dependencies = [
 name = "smelt-layouts"
 version = "0.0.0"
 dependencies = [
+ "gpui-pre",
+ "smelt-plugin-api",
+]
+
+[[package]]
+name = "smelt-maintenance"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "smelt-plugin-api",
 ]
@@ -11270,9 +11303,11 @@ dependencies = [
  "smelt-client",
  "smelt-client-store",
  "smelt-model",
+ "smelt-paths",
  "smelt-runtime-client",
  "smelt-sys",
  "smelt-ui",
+ "smelt-version",
  "smol",
 ]
 
@@ -11384,6 +11419,17 @@ dependencies = [
  "smol",
  "url",
  "usvg 0.46.0",
+]
+
+[[package]]
+name = "smelt-updater-ui"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "gpui-component",
+ "gpui-pre",
+ "smelt-plugin-api",
+ "smol",
 ]
 
 [[package]]

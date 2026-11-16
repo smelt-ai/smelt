@@ -126,15 +126,59 @@ fn chrome_prompt_island(
         })
 }
 
-/// 首次 IDE 扫描完成后需要更新的菜单。菜单可能已经被用户关闭，因此只持有弱引用。
-pub(crate) struct IdePopupWaiter {
+/// 开着的「用其他应用打开」菜单。只持弱引用：菜单关了不留在内存里。
+pub(crate) struct OpenWithPopup {
     popup: WeakEntity<PopupMenu>,
     root: String,
 }
 
+/// 把插件登记的应用（`smelt_plugin_api::register_open_with_apps`）排成菜单项。只读内存，
+/// 第一次构建和登记变了之后的 `PopupMenu::rebuild` 共用。
+fn open_with_items(
+    mut menu: PopupMenu,
+    root: &str,
+    apps: &[smelt_plugin_api::OpenWithApp],
+) -> PopupMenu {
+    if apps.is_empty() {
+        return menu.item(PopupMenuItem::new("没有可用的应用").disabled(true));
+    }
+    for app in apps {
+        let image = app.image.clone();
+        let icon = app.icon.clone();
+        let label = app.label.clone();
+        let command = app.command.clone();
+        let args = smelt_plugin_api::OpenWith {
+            app: app.app.clone(),
+            path: std::path::PathBuf::from(root),
+        };
+        menu = menu.item(
+            // ElementItem 不经过 PopupMenu 的 Icon/SVG 通道，应用自己的彩色图标直接作为
+            // 菜单行的一部分画出来。
+            PopupMenuItem::element(move |_window, _cx| {
+                let row = h_flex().flex_1().items_center().gap_x_2();
+                let row = match image.clone() {
+                    Some(image) => {
+                        row.child(img(image).size(px(17.)).object_fit(ObjectFit::Contain))
+                    }
+                    None => row.child(Icon::default().path(icon.clone()).size(px(16.))),
+                };
+                row.child(label.clone())
+            })
+            .on_click(move |_ev, _window, cx| {
+                let opened = match serde_json::to_value(&args) {
+                    Ok(args) => smelt_plugin_api::run(&command, args, cx),
+                    Err(error) => Task::ready(Err(format!("项目路径转不成命令参数：{error}"))),
+                };
+                crate::workspace_commands::report_failure(opened, cx);
+            }),
+        );
+    }
+    menu
+}
+
 impl Workspace {
-    /// 构建「使用其他应用打开」菜单。Finder 始终立即可用；IDE 首次发现留在后台，
-    /// `PopupMenu::rebuild` 会在结果回来后把其余应用原地补进菜单。
+    /// 构建「用其他应用打开」菜单。有哪些应用由插件登记，这里照登记的画，点了执行登记者
+    /// 的命令。菜单开着时登记变了（插件探测完、图标读到了），原地重建。
     pub(crate) fn build_ide_popup_menu(
         &mut self,
         menu: PopupMenu,
@@ -143,196 +187,44 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PopupMenu {
-        let snapshot = self.ide_catalog.snapshot();
-        if snapshot.installed.is_none() {
-            self.ide_popup_waiters.push(IdePopupWaiter {
-                popup: popup.downgrade(),
-                root: root.clone(),
-            });
-            if !snapshot.scanning {
-                self.refresh_ide_catalog(window, cx);
-            }
-        }
-        Self::ide_popup_items(menu, root, snapshot, cx.entity())
-    }
-
-    /// 后台刷新本机 IDE 目录。首次扫描结束后会原地补齐所有仍打开的应用菜单。
-    fn refresh_ide_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.ide_catalog.begin_refresh() {
-            return;
-        }
-        cx.notify();
-
-        cx.spawn_in(window, async move |this, cx| {
-            let installed = cx
-                .background_executor()
-                .spawn(async move { crate::ide::detect_installed() })
-                .await;
-
-            let _ = this.update_in(cx, |workspace, window, cx| {
-                workspace.ide_catalog.finish_refresh(installed);
-                let snapshot = workspace.ide_catalog.snapshot();
-                let waiters = std::mem::take(&mut workspace.ide_popup_waiters);
-                let workspace_entity = cx.entity();
-
-                for waiter in waiters {
-                    let snapshot = snapshot.clone();
-                    let workspace_entity = workspace_entity.clone();
-                    let _ = waiter.popup.update(cx, |popup_menu, popup_cx| {
-                        popup_menu.rebuild(window, popup_cx, |menu, _, _| {
-                            Self::ide_popup_items(menu, waiter.root, snapshot, workspace_entity)
+        self.open_with_popups
+            .retain(|open| open.popup.upgrade().is_some());
+        self.open_with_popups.push(OpenWithPopup {
+            popup: popup.downgrade(),
+            root: root.clone(),
+        });
+        if self._open_with_apps_sub.is_none() {
+            let workspace = cx.entity().downgrade();
+            let window_handle = window.window_handle();
+            self._open_with_apps_sub =
+                Some(smelt_plugin_api::observe_open_with_apps(cx, move |cx| {
+                    let Some(workspace) = workspace.upgrade() else {
+                        return;
+                    };
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.rebuild_open_with_popups(window, cx);
                         });
                     });
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Finder 是确定存在的系统应用，单独在后台预取它的图标。这个请求不会枚举 IDE，
-    /// 也不在 UI 线程调用 AppKit，因此左侧主操作会尽早显示 Finder 的真实图标。
-    pub(crate) fn preload_file_manager_icon(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.ide_catalog.begin_file_manager_icon_load() {
-            return;
+                }));
         }
-
-        cx.spawn_in(window, async move |this, cx| {
-            let icon = cx
-                .background_executor()
-                .spawn(async move { crate::ide::detect_file_manager_icon() })
-                .await;
-
-            let _ = this.update_in(cx, |workspace, _window, cx| {
-                workspace.ide_catalog.finish_file_manager_icon_load(icon);
-                cx.notify();
-            });
-        })
-        .detach();
+        open_with_items(menu, &root, &smelt_plugin_api::open_with_apps(cx))
     }
 
-    /// 等首屏稳定后再预热一次应用目录。macOS 查询的是 Launch Services 已维护的注册
-    /// 表，仍放在后台；用户若先点开菜单，`begin_refresh` 的去重闸门会立刻接管。
-    pub(crate) fn prewarm_ide_catalog_after_idle(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.ide_catalog.schedule_idle_prewarm() {
-            return;
-        }
-
-        cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(750))
-                .await;
-            let _ = this.update_in(cx, |workspace, window, cx| {
-                workspace.refresh_ide_catalog(window, cx);
-            });
-        })
-        .detach();
-    }
-
-    /// 把某个缓存快照转成菜单项。这个函数只操作已在内存里的数据，因此既可由首次
-    /// 点击构建，也可由异步结果通过 `PopupMenu::rebuild` 复用。
-    fn ide_popup_items(
-        mut menu: PopupMenu,
-        root: String,
-        snapshot: crate::ide::IdeCatalogSnapshot,
-        workspace: Entity<Self>,
-    ) -> PopupMenu {
-        let crate::ide::IdeCatalogSnapshot {
-            installed,
-            file_manager_icon,
-            ..
-        } = snapshot;
-
-        let Some(installed) = installed else {
-            return menu.item(Self::file_manager_menu_item(
-                root,
-                file_manager_icon,
-                workspace,
-            ));
-        };
-
-        if installed.is_empty() {
-            menu = menu.item(Self::file_manager_menu_item(
-                root,
-                file_manager_icon,
-                workspace,
-            ));
-        } else {
-            for installed_ide in installed {
-                let workspace = workspace.clone();
-                let root = root.clone();
-                let icon = installed_ide.icon.clone();
-                let label = installed_ide.label.to_string();
-                menu = menu.item(
-                    // ElementItem 不经过 PopupMenu 的 Icon/SVG 通道，直接把
-                    // NSWorkspace 返回的彩色 Image 作为菜单行的一部分。
-                    PopupMenuItem::element(move |_window, _cx| {
-                        let mut row = h_flex().flex_1().items_center().gap_x_2();
-                        row = if let Some(icon) = icon.clone() {
-                            row.child(img(icon).size(px(17.)).object_fit(ObjectFit::Contain))
-                        } else {
-                            row.child(Icon::new(IconName::SquareTerminal).size(px(16.)))
-                        };
-                        row.child(label.clone())
-                    })
-                    .on_click(move |_ev, _window, cx| {
-                        let result =
-                            crate::ide::open_in(&installed_ide, std::path::Path::new(&root));
-                        workspace.update(cx, |ws, workspace_cx| {
-                            if let Err(error) = result {
-                                ws.report_background_error(error);
-                                workspace_cx.notify();
-                            }
-                        });
-                    }),
-                );
-            }
-            menu = menu.item(Self::file_manager_menu_item(
-                root,
-                file_manager_icon,
-                workspace,
-            ));
-        }
-        menu
-    }
-
-    /// 文件管理器是稳定的系统能力，跟按需发现的 IDE 共用同一菜单，但不依赖扫描
-    /// 结果；图标尚未从后台缓存回来时，使用线性文件夹图标作无阻塞回退。
-    fn file_manager_menu_item(
-        root: String,
-        icon: Option<std::sync::Arc<gpui::Image>>,
-        workspace: Entity<Self>,
-    ) -> PopupMenuItem {
-        let label = crate::ide::file_manager_label();
-        PopupMenuItem::element(move |_window, _cx| {
-            let mut row = h_flex().flex_1().items_center().gap_x_2();
-            row = if let Some(icon) = icon.clone() {
-                row.child(img(icon).size(px(17.)).object_fit(ObjectFit::Contain))
-            } else {
-                row.child(Icon::new(IconName::FolderOpen).size(px(16.)))
+    /// 登记的应用变了：开着的菜单按新的原地重建，关掉的顺手丢掉。
+    fn rebuild_open_with_popups(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let apps = smelt_plugin_api::open_with_apps(cx);
+        self.open_with_popups.retain(|open| {
+            let Some(popup) = open.popup.upgrade() else {
+                return false;
             };
-            row.child(label)
-        })
-        .on_click(move |_ev, _window, cx| {
-            workspace.update(cx, |ws, workspace_cx| {
-                ws.open_project_in_file_manager(&root, workspace_cx);
+            popup.update(cx, |menu, menu_cx| {
+                menu.rebuild(window, menu_cx, |menu, _, _| {
+                    open_with_items(menu, &open.root, &apps)
+                });
             });
-        })
-    }
-
-    pub(crate) fn open_project_in_file_manager(&mut self, root: &str, cx: &mut Context<Self>) {
-        if let Err(error) = crate::ide::open_in_file_manager(std::path::Path::new(root)) {
-            self.report_background_error(error);
-            cx.notify();
-        }
+            true
+        });
     }
 
     /// 舞台上的页头、拖窗口条从哪起，见 [`Self::chrome_left_guard_of`]。

@@ -14,7 +14,6 @@ use smelt_ui::{TextArea, TextInput};
 mod agent;
 mod appearance;
 mod collaboration;
-mod maintenance;
 mod panel_plugin;
 mod shortcuts;
 
@@ -208,8 +207,6 @@ fn section_page(
         SettingsSection::PanelPlugins => panel_plugin::panel_plugin_page(entity, snapshot),
         SettingsSection::Agents => agent::agents_page(entity, snapshot, cx),
         SettingsSection::Remote => collaboration::remote_page(entity, snapshot, cx),
-        SettingsSection::Maintenance => maintenance::maintenance_page(entity, snapshot, cx),
-        SettingsSection::About => maintenance::about_page(entity, snapshot, cx),
         SettingsSection::Plugin(_) => return None,
     })
 }

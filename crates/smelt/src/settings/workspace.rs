@@ -91,20 +91,6 @@ impl Workspace {
         cx.refresh_windows();
     }
 
-    /// 切换在线更新通道并立即检查一次。通道切换只影响后续更新来源，不改变当前包的
-    /// 展示版本；若新通道指向不同发布包，仍按 URL 差异正常下载。
-    #[cfg(any(target_os = "macos", windows))]
-    pub fn set_update_channel(&mut self, channel: updater::UpdateChannel, cx: &mut Context<Self>) {
-        if cx.global::<UpdateSettings>().channel == channel {
-            return;
-        }
-        if !self.update_status.can_check() {
-            return;
-        }
-        apply_update_channel(channel, cx);
-        self.check_for_update(false, cx);
-    }
-
     /// 后台刷新运行时那台机器上 Agent CLI 的诊断快照。
     ///
     /// 这条路径只运行固定的 `--version`，不启动 agent 或访问网络；因此设置页可

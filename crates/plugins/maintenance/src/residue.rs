@@ -1,4 +1,4 @@
-//! 扫描并清理 `~/.smelt` 下的历史残留文件。
+//! 启动时删掉 `~/.smelt` 下的历史残留文件。
 //!
 //! 几处已知的残留来源（都是 schema/实现换过之后，老文件没人再读写了）：
 //! - `smelt.db`、根目录调试文件和 `*.bak`：instincts 下线后的库、崩溃备份、临时诊断。
@@ -8,22 +8,21 @@
 //! - `mermaid_cache/`：旧版 mermaid 磁盘缓存，渲染已改为只走内存。
 //! - `handoffs/`：已废弃的交接底稿目录。
 //! - `automation-runs/`：自动化对话曾旁路成 JSON 文件，现只走 SQLite。
-//! - `worktrees/`：更早版本固定的 worktree 检出目录，smelt 已经不管 worktree 了。
 //!
-//! `worktrees/` 里可能还有用户没提交的检出，启动时不删，只在设置页由用户确认后清理。
+//! 更早版本在 `~/.smelt/worktrees/` 下的检出里可能还有没提交的改动，不删，留给用户自己处理
+//! （现在的工作树在项目目录下的 `worktrees/`，和这里无关）。
+//!
+//! 这里全是阻塞的文件 IO，只在后台线程上调。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn smelt_home() -> Option<PathBuf> {
-    smelt_paths::smelt_home()
-}
+use smelt_plugin_api::paths::smelt_home;
 
 /// 启动时回收已经没有任何读写路径的废弃文件。
 ///
-/// 包含 instincts 旧库、根目录调试/备份文件和已迁走的 JSON。旧版 `worktrees/`
-/// 不在这里删。
-pub fn remove_obsolete_files_at_startup() -> usize {
+/// 包含 instincts 旧库、根目录调试/备份文件和已迁走的 JSON。
+pub(crate) fn remove_obsolete_files_at_startup() -> usize {
     let Some(home) = smelt_home() else {
         return 0;
     };
@@ -148,82 +147,9 @@ fn dir_is_effectively_empty(path: &Path) -> bool {
     })
 }
 
-#[derive(Default, Clone)]
-pub struct CleanupScan {
-    pub obsolete_files: Vec<PathBuf>,
-    pub legacy_worktree_dirs: Vec<PathBuf>,
-    pub obsolete_dirs: Vec<PathBuf>,
-}
-
-impl CleanupScan {
-    pub fn is_empty(&self) -> bool {
-        self.obsolete_files.is_empty()
-            && self.legacy_worktree_dirs.is_empty()
-            && self.obsolete_dirs.is_empty()
-    }
-
-    pub fn total_items(&self) -> usize {
-        self.obsolete_files.len() + self.legacy_worktree_dirs.len() + self.obsolete_dirs.len()
-    }
-}
-
-/// 只扫描、不落地任何改动，供设置页展示。
-pub fn scan() -> CleanupScan {
-    let mut out = CleanupScan::default();
-    let Some(home) = smelt_home() else {
-        return out;
-    };
-
-    out.obsolete_files = obsolete_home_files(&home);
-    out.obsolete_dirs = obsolete_home_dirs(&home);
-
-    let worktrees_dir = home.join("worktrees");
-    if worktrees_dir.is_dir() {
-        out.legacy_worktree_dirs.push(worktrees_dir);
-    }
-
-    out
-}
-
-/// 执行清理：删掉 `scan()` 报出的历史文件/目录，返回成功删除的条目数。
-pub fn clean(scan: &CleanupScan) -> usize {
-    let mut removed = 0;
-    for path in &scan.obsolete_files {
-        if fs::remove_file(path).is_ok() {
-            removed += 1;
-        }
-    }
-    for dir in scan
-        .legacy_worktree_dirs
-        .iter()
-        .chain(scan.obsolete_dirs.iter())
-    {
-        if fs::remove_dir_all(dir).is_ok() {
-            removed += 1;
-        }
-    }
-    removed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn scan_report_counts_match_total_items() {
-        let s = CleanupScan {
-            obsolete_files: vec![PathBuf::from("smelt.db"), PathBuf::from("a.txt")],
-            legacy_worktree_dirs: vec![],
-            obsolete_dirs: vec![],
-        };
-        assert_eq!(s.total_items(), 2);
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn empty_scan_is_empty() {
-        assert!(CleanupScan::default().is_empty());
-    }
 
     #[test]
     fn obsolete_home_files_include_instincts_db_and_backups() {

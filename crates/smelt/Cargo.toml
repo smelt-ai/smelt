@@ -28,13 +28,17 @@ smelt-plugin-api = { path = "../smelt-plugin-api", features = ["js"] }
 smelt-agents = { path = "../plugins/agents" }
 smelt-automations = { path = "../plugins/automations" }
 smelt-capabilities = { path = "../plugins/capabilities" }
+smelt-desktop = { path = "../plugins/desktop" }
 smelt-files-ui = { path = "../plugins/files" }
 smelt-git-ui = { path = "../plugins/git" }
 smelt-history = { path = "../plugins/history" }
+smelt-ide = { path = "../plugins/ide" }
 smelt-layouts = { path = "../plugins/layouts" }
+smelt-maintenance = { path = "../plugins/maintenance" }
 smelt-notifications = { path = "../plugins/notifications" }
 smelt-resources = { path = "../plugins/resources" }
 smelt-themes = { path = "../plugins/themes" }
+smelt-updater-ui = { path = "../plugins/updater" }
 smelt-acp-view = { path = "../smelt-acp-view" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -82,13 +86,6 @@ agent-client-protocol = "=5.0.0"
 # 设置页跨网分享链接二维码
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-# 远程桌面页：noVNC 跑在原生网页视图里。gpui-webview 和上面的组件库同一个 rev，一起升级；
-# crates.io 上的 gpui-wry 是它改名前的旧名字，钉死了 gpui-pre 版本，会卡住升级。
-# 不开 gpui-fast：跟着 gpui-kit 用默认的 gpui-pre，代价是网页视图盖住同一块区域里的 GPUI
-# 弹层。gpui-shell 也不能开它的 webview 特性，那会把整个应用切到 GPUI Fast。
-# wry 必须和它用同一份。
-gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
-wry = { package = "lb-wry", version = "0.53.3" }
 # 生成 agent hook 命令时按 shell 规则引用 smelt-notify 路径。
 # macOS：菜单栏 status item 需要直接操作 AppKit（GPUI 没有 status item 概念），
 # 用 objc crate 声明 Objective-C 类做 target-action。系统通知使用现代、带异步回执的

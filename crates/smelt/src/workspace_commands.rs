@@ -79,37 +79,6 @@ pub(crate) const COMMANDS: &[Def] = &[
             Handled::ok()
         },
     ),
-    // 更新器只在 macOS 上有（设计文档 D4）。
-    #[cfg(target_os = "macos")]
-    def(
-        "smelt.app",
-        "check-update",
-        "检查更新",
-        None,
-        |this, _, window, cx| {
-            // 顺手发起一次检查，再把设置开到「更新」页看进度。
-            if this.update_status.can_check() || this.update_status.can_retry_recovery() {
-                this.check_or_recover_update(false, cx);
-            }
-            this.open_settings_section(settings::SettingsSection::app_update(), window, cx);
-            Handled::ok()
-        },
-    ),
-    // 链接打包时可换，见 `settings::DOCS_URL`。
-    def("smelt.app", "docs", "帮助文档", None, |_, _, _, cx| {
-        cx.open_url(settings::DOCS_URL);
-        Handled::ok()
-    }),
-    def(
-        "smelt.app",
-        "report-issue",
-        "反馈问题",
-        None,
-        |_, _, _, cx| {
-            cx.open_url(settings::FEEDBACK_URL);
-            Handled::ok()
-        },
-    ),
     // 帧耗时、GPU/CPU/内存。编辑器把同一组合键绑成 Replace，更深的 Input 优先。
     hidden(def(
         "smelt.app",
@@ -412,28 +381,14 @@ pub(crate) fn register_inert(cx: &mut App) {
 }
 
 impl Workspace {
-    /// 退出：有进行中的会话、或者要先装更新时先确认，不能把正在输出的对话静默杀掉。
+    /// 退出：先问插件的退出守卫（比如更新插件要在退出时装待装的包），有一个接手就交给它；
+    /// 没有的话弹宿主的退出确认。
     pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) {
         if self.quit_requested {
             return;
         }
-        self.stop_prompt_names.clear();
-        #[cfg(any(target_os = "macos", windows))]
-        if !matches!(self.update_status, updater::UpdateStatus::Applying { .. })
-            && self.update_status.ready_update().is_some()
-        {
-            // 有待装更新时退出会换包，macOS 还会停掉守护。没有进行中的会话、或者
-            // 不停守护，就直接走；否则必须先确认。
-            let names = self.busy_work_names(cx);
-            if !updater::INSTALL_STOPS_LOCAL_DAEMON
-                || !daemon_restart_prompt::should_confirm(&names)
-            {
-                if let Some(update) = self.update_status.ready_update().cloned() {
-                    self.start_update_install(update, UpdateInstallTrigger::Quit, cx);
-                }
-                return;
-            }
-            self.stop_prompt_names = names;
+        if api::quit_guarded(cx) {
+            return;
         }
         self.show_quit_confirm = true;
         cx.notify();

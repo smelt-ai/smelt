@@ -1,6 +1,6 @@
-//! 宿主对话框的内容：关闭确认、会话管理、退出、改名、中继、重启确认。
+//! 宿主对话框的内容：关闭确认、退出、改名、中继。
 //!
-//! 只组 UI，什么时候开关见 `host_dialog`。打开/关闭项目、升级守护、改名等写状态的方法
+//! 只组 UI，什么时候开关见 `host_dialog`。打开/关闭项目、改名等写状态的方法
 //! 不在这里。
 
 use gpui::prelude::FluentBuilder;
@@ -8,27 +8,14 @@ use gpui::*;
 use gpui_component::dialog::Dialog;
 use gpui_component::*;
 use smelt_ui::TextInput;
-use smelt_ui::truncated_line::truncated_line;
 
-use crate::{CloseConfirm, RenameTarget, Workspace, request_app_quit, ui_theme};
-#[cfg(any(target_os = "macos", windows))]
-use crate::{UpdateInstallTrigger, updater};
+use crate::{CloseConfirm, RenameTarget, Workspace, request_app_quit};
 
 enum ModalRole {
     Quiet,
     Secondary,
     Primary,
     Danger,
-}
-
-/// 退出确认要说的话。普通退出仍保留后台守护；待装更新的退出会停掉守护。
-struct QuitPrompt {
-    title: SharedString,
-    body: SharedString,
-    confirm: SharedString,
-    /// 停守护会打断进行中的会话：危险按钮，Enter 不执行。
-    danger: bool,
-    width: f32,
 }
 
 impl Workspace {
@@ -273,154 +260,6 @@ impl Workspace {
             .footer(footer)
     }
 
-    /// 「会话管理」：列出守护进程持有的全部会话，标出哪些是游离会话（没有任何
-    /// 侧栏在追踪），逐个/批量清理。入口在设置里。
-    pub(crate) fn render_session_manager(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
-        let (fg, muted, border) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground, t.border)
-        };
-        let tracked = self.tracked_session_ids(cx);
-
-        let body: AnyElement = match &self.session_manager_list {
-            None => div()
-                .text_sm()
-                .text_color(muted)
-                .child("查询中…")
-                .into_any_element(),
-            Some(list) if list.is_empty() => div()
-                .text_sm()
-                .text_color(muted)
-                .child("守护进程当前没有任何会话。")
-                .into_any_element(),
-            Some(list) => {
-                let detached_count = list.iter().filter(|s| !tracked.contains(&s.id)).count();
-                let mut rows = v_flex()
-                    .id("session-manager-list")
-                    .gap_1()
-                    .max_h(px(360.))
-                    .overflow_y_scroll();
-                for s in list {
-                    let is_detached = !tracked.contains(&s.id);
-                    let is_acp = s.id.starts_with("acp-");
-                    let label: SharedString = s
-                        .cwd
-                        .clone()
-                        .or_else(|| s.title.clone())
-                        .unwrap_or_else(|| s.id.clone())
-                        .into();
-                    let id_for_kill = s.id.clone();
-                    rows = rows.child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .justify_between()
-                            .py_1()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .min_w_0()
-                                    .child(div().size_2().rounded_full().bg(if is_detached {
-                                        rgb(ui_theme::bad())
-                                    } else {
-                                        rgb(ui_theme::ok())
-                                    }))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .flex_shrink_0()
-                                            .text_color(muted)
-                                            .child(if is_acp { "对话" } else { "终端" }),
-                                    )
-                                    .child(
-                                        div()
-                                            .id((
-                                                ElementId::from("session-manager-label"),
-                                                id_for_kill.clone(),
-                                            ))
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_sm()
-                                            .text_color(fg)
-                                            .overflow_hidden()
-                                            .tooltip({
-                                                let tip = label.clone();
-                                                move |window, cx| {
-                                                    gpui_component::tooltip::Tooltip::new(
-                                                        tip.clone(),
-                                                    )
-                                                    .build(window, cx)
-                                                }
-                                            })
-                                            .child(truncated_line(label.clone())),
-                                    )
-                                    .children(is_detached.then(|| {
-                                        div()
-                                            .text_xs()
-                                            .flex_shrink_0()
-                                            .text_color(rgb(ui_theme::bad()))
-                                            .child("游离会话（无侧栏追踪）")
-                                    })),
-                            )
-                            .child(Self::modal_secondary_button(
-                                "kill-session-in-manager",
-                                "关闭",
-                                move |this, _, _, cx| {
-                                    this.kill_session_in_manager(id_for_kill.clone(), cx);
-                                },
-                                cx,
-                            )),
-                    );
-                }
-                v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("共 {} 个，{detached_count} 个游离会话", list.len())),
-                    )
-                    .child(rows)
-                    .into_any_element()
-            }
-        };
-
-        let has_detached = self
-            .session_manager_list
-            .as_ref()
-            .map(|l| l.iter().any(|s| !tracked.contains(&s.id)))
-            .unwrap_or(false);
-
-        let content = smelt_ui::dialog::content(
-            "会话管理",
-            Some("守护进程持有的全部会话；游离会话是没有被任何窗口侧栏追踪的（测试跑出来的、忘了关的临时会话），清理它们不影响正常使用中的会话。".into()),
-        )
-        .child(div().border_t_1().border_color(border).pt_3().child(body));
-        let footer = smelt_ui::dialog::footer()
-            .child(Self::modal_cancel_button(
-                "close-session-manager",
-                "关闭",
-                |this, _, _, cx| {
-                    this.session_manager_open = false;
-                    this.session_manager_tombstones.clear();
-                    cx.notify();
-                },
-                cx,
-            ))
-            .when(has_detached, |el| {
-                el.child(Self::modal_danger_button(
-                    "kill-all-detached",
-                    "清理全部游离会话",
-                    |this, _, _, cx| {
-                        this.kill_all_detached_in_manager(cx);
-                    },
-                    cx,
-                ))
-            });
-        dialog.w(px(520.)).child(content).footer(footer)
-    }
-
     /// 对话框里退出这一步的按钮：取消、返回、关闭、以后再说。
     pub(crate) fn modal_cancel_button(
         id: &'static str,
@@ -489,93 +328,28 @@ impl Workspace {
         })
     }
 
-    fn quit_prompt(&self) -> QuitPrompt {
-        #[cfg(any(target_os = "macos", windows))]
-        let update_is_applying =
-            matches!(self.update_status, updater::UpdateStatus::Applying { .. });
-        #[cfg(not(any(target_os = "macos", windows)))]
-        let update_is_applying = false;
-        // 「退出并安装」的提示讲的是停守护；不停守护的平台照普通退出说。
-        #[cfg(any(target_os = "macos", windows))]
-        let installing = updater::INSTALL_STOPS_LOCAL_DAEMON
-            && !update_is_applying
-            && self.update_status.ready_update().is_some();
-        #[cfg(not(any(target_os = "macos", windows)))]
-        let installing = false;
-        let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
-            super::daemon_restart_prompt::DaemonStopReason::QuitToInstall,
-            &self.stop_prompt_names,
-        );
-        QuitPrompt {
-            title: if installing {
-                prompt.title.into()
-            } else {
-                "退出 Smelt？".into()
-            },
-            body: if update_is_applying {
-                "正在安全应用更新，完成后会自动重启。".into()
-            } else if installing {
-                prompt.body.into()
-            } else {
-                "后台会话将继续运行，当前连接会断开。".into()
-            },
-            confirm: if self.quit_requested {
-                "正在退出…".into()
-            } else if update_is_applying {
-                "正在更新…".into()
-            } else if installing {
-                prompt.confirm.into()
-            } else {
-                "退出".into()
-            },
-            danger: installing && prompt.danger,
-            width: if installing {
-                420.
-            } else {
-                smelt_ui::dialog::CONFIRM_WIDTH
-            },
-        }
-    }
-
-    /// 退出确认里的危险版本（停守护打断会话）Enter 不执行。
-    pub(crate) fn quit_confirm_is_danger(&self) -> bool {
-        self.quit_prompt().danger
-    }
-
-    /// 确认退出。待装更新时退出只是统一安装驱动的一种触发策略：helper 派生成功后退出，
-    /// 并在本进程完全消失后才提交同一份事务。
+    /// 确认退出。后台守护和里面的会话照常跑着，只是这个窗口断开。
     pub(crate) fn confirm_quit(&mut self, cx: &mut Context<Self>) {
         if self.quit_requested {
             return;
         }
-        // Applying 表示 helper 已派生且当前 GUI 正在退出，不能再启动第二条退出或安装流程。
-        #[cfg(any(target_os = "macos", windows))]
-        if matches!(self.update_status, updater::UpdateStatus::Applying { .. }) {
-            return;
-        }
         self.quit_requested = true;
         cx.notify();
-        #[cfg(any(target_os = "macos", windows))]
-        if let Some(update) = self.update_status.ready_update().cloned() {
-            self.start_update_install(update, UpdateInstallTrigger::Quit, cx);
-            return;
-        }
         request_app_quit(cx);
     }
 
-    /// 退出确认。普通退出仍保留后台守护；待装更新的退出会停掉守护，
-    /// 只有存在进行中的会话时才走到这里。
+    /// 退出确认。退出时要做别的事的插件（比如装更新）经退出守卫接手，不走这里。
     pub(crate) fn render_quit_confirm(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
-        let prompt = self.quit_prompt();
-        let on_confirm =
-            |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
-                this.confirm_quit(cx)
-            };
-        let confirm = if prompt.danger {
-            Self::modal_danger_button("confirm-quit", prompt.confirm, on_confirm, cx)
-        } else {
-            Self::modal_primary_button("confirm-quit", prompt.confirm, on_confirm, cx)
-        };
+        let confirm = Self::modal_primary_button(
+            "confirm-quit",
+            if self.quit_requested {
+                "正在退出…"
+            } else {
+                "退出"
+            },
+            |this, _, _, cx| this.confirm_quit(cx),
+            cx,
+        );
         let footer = smelt_ui::dialog::footer()
             .child(
                 Self::modal_cancel_button(
@@ -591,55 +365,11 @@ impl Workspace {
             )
             .child(confirm);
         dialog
-            .w(px(prompt.width))
-            .child(smelt_ui::dialog::content(prompt.title, Some(prompt.body)))
-            .footer(footer)
-    }
-
-    /// 启动时提议把 App 移到「应用程序」：被系统转移或放在只读位置时更新装不上。
-    /// 「以后再说」只关这一次，设置页的更新栏里一直留着同一个按钮。
-    /// 只在 macOS 上存在（设计文档 D4）。
-    #[cfg(target_os = "macos")]
-    pub(crate) fn render_move_app_confirm(&self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
-        let danger = cx.theme().danger;
-        let body = match self.app_location_issue {
-            Some(smelt_client::app_location::LocationIssue::ReadOnly) => {
-                "Smelt 正从只读位置（比如安装盘映像）运行，自动更新装不上。移过去后会自动重新打开，后台会话不受影响。"
-            }
-            _ => {
-                "Smelt 没放进「应用程序」就打开了，macOS 让它在一个临时的只读位置运行，自动更新因此装不上。移过去后会自动重新打开，后台会话不受影响。"
-            }
-        };
-        let content = smelt_ui::dialog::content("把 Smelt 移到「应用程序」？", Some(body.into()))
-            .when_some(self.move_app_error.clone(), |content, error| {
-                content.child(div().text_sm().text_color(danger).child(error))
-            });
-        let footer = smelt_ui::dialog::footer()
-            .child(
-                Self::modal_cancel_button(
-                    "move-app-later",
-                    "以后再说",
-                    |this, _, _, cx| {
-                        this.show_move_app_confirm = false;
-                        cx.notify();
-                    },
-                    cx,
-                )
-                .disabled(self.moving_app),
-            )
-            .child(Self::modal_primary_button(
-                "move-app-confirm",
-                if self.moving_app {
-                    "正在移动…"
-                } else {
-                    "移过去并重新打开"
-                },
-                |this, _, _, cx| this.move_app_to_applications(cx),
-                cx,
-            ));
-        dialog
             .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
-            .child(content)
+            .child(smelt_ui::dialog::content(
+                "退出 Smelt？",
+                Some("后台会话将继续运行，当前连接会断开。".into()),
+            ))
             .footer(footer)
     }
 
@@ -724,76 +454,6 @@ impl Workspace {
         dialog
             .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
             .child(content)
-            .footer(footer)
-    }
-
-    /// 「重启守护进程」确认。只在有进行中的会话时打开。
-    pub(crate) fn render_daemon_restart_confirm(
-        &self,
-        dialog: Dialog,
-        cx: &mut Context<Self>,
-    ) -> Dialog {
-        let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
-            super::daemon_restart_prompt::DaemonStopReason::ExplicitRestart,
-            &self.stop_prompt_names,
-        );
-        let footer = smelt_ui::dialog::footer()
-            .child(Self::modal_cancel_button(
-                "cancel-daemon-restart",
-                "取消",
-                |this, _, _, cx| {
-                    this.show_daemon_restart_confirm = false;
-                    cx.notify();
-                },
-                cx,
-            ))
-            .child(Self::modal_danger_button(
-                "confirm-daemon-restart",
-                prompt.confirm,
-                |this, _, _, cx| this.confirm_restart_daemon(cx),
-                cx,
-            ));
-        dialog
-            .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
-            .child(smelt_ui::dialog::content(
-                prompt.title,
-                Some(prompt.body.into()),
-            ))
-            .footer(footer)
-    }
-
-    /// 「立即重启更新」确认。有进行中的会话时打开。
-    pub(crate) fn render_update_install_confirm(
-        &self,
-        dialog: Dialog,
-        cx: &mut Context<Self>,
-    ) -> Dialog {
-        let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
-            super::daemon_restart_prompt::DaemonStopReason::UpdateInstall,
-            &self.stop_prompt_names,
-        );
-        let footer = smelt_ui::dialog::footer()
-            .child(Self::modal_cancel_button(
-                "cancel-update-install",
-                "取消",
-                |this, _, _, cx| {
-                    this.show_update_install_confirm = false;
-                    cx.notify();
-                },
-                cx,
-            ))
-            .child(Self::modal_danger_button(
-                "confirm-update-install",
-                prompt.confirm,
-                |this, _, _, cx| this.confirm_update_install(cx),
-                cx,
-            ));
-        dialog
-            .w(px(smelt_ui::dialog::CONFIRM_WIDTH))
-            .child(smelt_ui::dialog::content(
-                prompt.title,
-                Some(prompt.body.into()),
-            ))
             .footer(footer)
     }
 }

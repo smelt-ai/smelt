@@ -1,94 +1,20 @@
-//! 本地 IDE 探测、应用图标缓存与项目目录启动。
+//! 本机 IDE 探测、应用图标缓存与项目目录启动。
 //!
-//! 项目行的快捷入口只负责展示本机实际可用的编辑器：macOS 优先通过 Launch
-//! Services 探测 `.app`，优先读取应用包声明的彩色图标；其他平台使用 PATH 中的 CLI。
-//! 探测可能需要访问系统注册表和文件系统，必须在后台执行；菜单 render 只消费
-//! `IdeCatalog` 已有的快照。启动时始终通过 `Command` 传递参数，不经过 shell，避免
-//! 项目路径中的空格或特殊字符被错误解释。
+//! 只列本机实际可用的编辑器：macOS 优先通过 Launch Services 探测 `.app`，优先读取应用包
+//! 声明的彩色图标；其他平台使用 PATH 中的 CLI。探测要访问系统注册表和文件系统，只在后台
+//! 调。启动时始终通过 `Command` 传递参数，不经过 shell，避免项目路径中的空格或特殊字符被
+//! 错误解释。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-
-/// Workspace 生命周期内的 IDE 发现快照。
-///
-/// `installed: None` 表示尚未得到过结果，`Some(vec![])` 则是已经完成扫描但确实
-/// 没有匹配项。刷新时保留旧快照，让菜单继续可用而不是退回加载态。
-#[derive(Default)]
-pub(crate) struct IdeCatalog {
-    installed: Option<Vec<InstalledIde>>,
-    file_manager_icon: Option<Arc<gpui::Image>>,
-    file_manager_icon_loading: bool,
-    file_manager_icon_loaded: bool,
-    scanning: bool,
-    idle_prewarm_scheduled: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IdeCatalogSnapshot {
-    pub(crate) installed: Option<Vec<InstalledIde>>,
-    pub(crate) file_manager_icon: Option<Arc<gpui::Image>>,
-    pub(crate) scanning: bool,
-}
-
-impl IdeCatalog {
-    /// 取得可跨出可变借用使用的菜单快照。
-    pub(crate) fn snapshot(&self) -> IdeCatalogSnapshot {
-        IdeCatalogSnapshot {
-            installed: self.installed.clone(),
-            file_manager_icon: self.file_manager_icon.clone(),
-            scanning: self.scanning,
-        }
-    }
-
-    /// 标记一轮发现开始。已经在扫描时返回 false，避免多个菜单重复起后台任务。
-    pub(crate) fn begin_refresh(&mut self) -> bool {
-        if self.scanning {
-            return false;
-        }
-        self.scanning = true;
-        self.idle_prewarm_scheduled = false;
-        true
-    }
-
-    /// 原子替换结果；即使结果为空，也要记成已扫描，避免每次打开都重新探测。
-    pub(crate) fn finish_refresh(&mut self, installed: Vec<InstalledIde>) {
-        self.installed = Some(installed);
-        self.scanning = false;
-    }
-
-    /// Finder 图标单独预取：它是一个已知系统应用，不需要等整份应用列表发现完成。
-    pub(crate) fn begin_file_manager_icon_load(&mut self) -> bool {
-        if self.file_manager_icon_loaded || self.file_manager_icon_loading {
-            return false;
-        }
-        self.file_manager_icon_loading = true;
-        true
-    }
-
-    pub(crate) fn finish_file_manager_icon_load(&mut self, icon: Option<Arc<gpui::Image>>) {
-        self.file_manager_icon = icon;
-        self.file_manager_icon_loading = false;
-        self.file_manager_icon_loaded = true;
-    }
-
-    /// 首屏绘制后只预约一次低优先级预热。菜单先被点开时，`begin_refresh` 会抢占这
-    /// 个预约并立即开始，避免用户操作等待计时器。
-    pub(crate) fn schedule_idle_prewarm(&mut self) -> bool {
-        if self.installed.is_some() || self.scanning || self.idle_prewarm_scheduled {
-            return false;
-        }
-        self.idle_prewarm_scheduled = true;
-        true
-    }
-}
 
 /// 一个支持打开项目目录的本地 IDE。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InstalledIde {
     pub(crate) label: &'static str,
     /// macOS 上优先使用应用包声明的原始图标，避免系统为透明图标叠加通用底板；
-    /// CLI-only 或取图标失败时为空，UI 会使用通用线性图标作为明确的回退。
+    /// CLI-only 或取图标失败时为空，菜单使用通用线性图标作为明确的回退。
     pub(crate) icon: Option<Arc<gpui::Image>>,
     launcher: Launcher,
 }
@@ -112,7 +38,7 @@ struct IdeDefinition {
     commands: &'static [&'static str],
 }
 
-// 这里按常见程度排序；新增编辑器只需要补一条定义，不必改 UI。
+// 这里按常见程度排序；新增编辑器只需要补一条定义，不必改菜单。
 const IDE_DEFINITIONS: &[IdeDefinition] = &[
     IdeDefinition {
         label: "Zed",
@@ -216,7 +142,8 @@ const IDE_DEFINITIONS: &[IdeDefinition] = &[
     },
 ];
 
-/// 返回当前机器上可以打开目录的 IDE，顺序稳定且每个 IDE 只出现一次。
+/// 返回当前机器上可以打开目录的 IDE，顺序稳定且每个 IDE 只出现一次。会访问系统注册表和
+/// 文件系统，只在后台调。
 pub(crate) fn detect_installed() -> Vec<InstalledIde> {
     IDE_DEFINITIONS
         .iter()
@@ -243,7 +170,7 @@ pub(crate) fn detect_installed() -> Vec<InstalledIde> {
         .collect()
 }
 
-/// 返回当前平台文件管理器在界面中使用的名称。
+/// 当前平台文件管理器在菜单中使用的名称。
 pub(crate) fn file_manager_label() -> &'static str {
     #[cfg(target_os = "macos")]
     {
@@ -256,9 +183,9 @@ pub(crate) fn file_manager_label() -> &'static str {
     }
 }
 
-/// 在后台读取系统文件管理器的应用图标。macOS 上把 Finder 和已发现 IDE 一起缓存，
-/// 这样头栏 render 只读取内存快照，不会为了画一个按钮访问 Launch Services。
-pub(crate) fn detect_file_manager_icon() -> Option<Arc<gpui::Image>> {
+/// 读取系统文件管理器的应用图标。macOS 上和已发现的 IDE 共用一份图标缓存。会访问
+/// Launch Services，只在后台调。
+pub(crate) fn file_manager_icon() -> Option<Arc<gpui::Image>> {
     #[cfg(target_os = "macos")]
     {
         mac_app_path("Finder").and_then(|app_path| mac_app_icon_cached(&app_path))
@@ -268,70 +195,6 @@ pub(crate) fn detect_file_manager_icon() -> Option<Arc<gpui::Image>> {
     {
         None
     }
-}
-
-/// 在系统文件管理器中打开目录。该函数不等待文件管理器退出。
-pub(crate) fn open_in_file_manager(path: &Path) -> Result<(), String> {
-    if !path.is_dir() {
-        return Err(format!("项目目录不存在或不可访问：{}", path.display()));
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let mut command = Command::new("open");
-        command.arg(path);
-        spawn_detached(&mut command, file_manager_label())
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = Command::new("explorer");
-        command.arg(path);
-        return spawn_detached(&mut command, file_manager_label());
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let mut command = Command::new("xdg-open");
-        command.arg(path);
-        return spawn_detached(&mut command, file_manager_label());
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
-    Err("当前平台不支持打开文件管理器".to_string())
-}
-
-/// Open a text file in the platform's default editor without routing through
-/// the workspace file panel. Settings pages use it: revealing the file in the
-/// workspace would navigate away from the page the user is editing.
-pub(crate) fn open_in_system_text_editor(path: &Path) -> Result<(), String> {
-    if !path.is_file() {
-        return Err(format!("配置文件不存在或不可访问：{}", path.display()));
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let mut command = Command::new("open");
-        command.arg("-t").arg(path);
-        spawn_detached(&mut command, "系统文本编辑器")
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = Command::new("notepad");
-        command.arg(path);
-        return spawn_detached(&mut command, "系统文本编辑器");
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let mut command = Command::new("xdg-open");
-        command.arg(path);
-        return spawn_detached(&mut command, "系统文本编辑器");
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
-    Err("当前平台不支持打开文本编辑器".to_string())
 }
 
 /// 在指定 IDE 中打开目录。该函数不等待 IDE 退出，只负责把启动请求交给系统。
@@ -360,17 +223,13 @@ pub(crate) fn open_in(ide: &InstalledIde, path: &Path) -> Result<(), String> {
         }
     };
 
-    spawn_detached(&mut command, ide.label)
-}
-
-fn spawn_detached(command: &mut Command, application: &str) -> Result<(), String> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("启动 {application} 失败：{error}"))
+        .map_err(|error| format!("启动 {} 失败：{error}", ide.label))
 }
 
 fn executable_in_path(program: &str) -> bool {
@@ -442,11 +301,12 @@ fn mac_app_path(app: &str) -> Option<PathBuf> {
 /// Launch Services 按显示名解析时可能把「Antigravity」命中到
 /// `Antigravity IDE.app`。菜单要拆成两项，所以解析结果必须和查询名同一
 /// 个 `.app` 文件名。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mac_app_bundle_matches_name(path: &Path, app: &str) -> bool {
     path.file_stem().and_then(|stem| stem.to_str()) == Some(app)
 }
 
-/// 每个已发现的 `.app` 路径只做一次图标转换；后续 render 只复用已经解码好的
+/// 每个已发现的 `.app` 路径只做一次图标转换；之后菜单只复用已经解码好的
 /// `gpui::Image`，不再读取应用包或经过 AppKit 转码。
 #[cfg(target_os = "macos")]
 fn mac_app_icon_cached(app_path: &Path) -> Option<Arc<gpui::Image>> {
@@ -633,42 +493,8 @@ unsafe fn ns_string_value(value: *mut objc::runtime::Object) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IDE_DEFINITIONS, IdeCatalog, executable_in_path};
+    use super::{IDE_DEFINITIONS, executable_in_path};
     use std::path::Path;
-
-    #[test]
-    fn catalog_keeps_a_ready_snapshot_while_refreshing() {
-        let mut catalog = IdeCatalog::default();
-        assert!(catalog.begin_refresh());
-        assert_eq!(catalog.snapshot().installed, None);
-        assert!(catalog.snapshot().scanning);
-
-        catalog.finish_refresh(Vec::new());
-        assert_eq!(catalog.snapshot().installed, Some(Vec::new()));
-        assert!(!catalog.snapshot().scanning);
-
-        assert!(catalog.begin_refresh());
-        assert_eq!(catalog.snapshot().installed, Some(Vec::new()));
-        assert!(catalog.snapshot().scanning);
-    }
-
-    #[test]
-    fn catalog_schedules_idle_prewarm_once_and_click_can_take_over() {
-        let mut catalog = IdeCatalog::default();
-        assert!(catalog.schedule_idle_prewarm());
-        assert!(!catalog.schedule_idle_prewarm());
-
-        // 菜单先被打开时不等 idle timer，直接开始后台发现。
-        assert!(catalog.begin_refresh());
-        assert!(!catalog.schedule_idle_prewarm());
-    }
-
-    #[test]
-    fn catalog_deduplicates_concurrent_refreshes() {
-        let mut catalog = IdeCatalog::default();
-        assert!(catalog.begin_refresh());
-        assert!(!catalog.begin_refresh());
-    }
 
     #[test]
     fn antigravity_desktop_and_ide_are_separate_definitions() {
@@ -760,14 +586,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn finder_icon_is_non_empty_and_cached() {
-        let Some(icon) = super::detect_file_manager_icon() else {
+        let Some(icon) = super::file_manager_icon() else {
             return;
         };
         assert_eq!(icon.format, gpui::ImageFormat::Png);
         assert!(!icon.bytes.is_empty());
 
-        let cached = super::detect_file_manager_icon()
-            .expect("Finder 图标第一次读取成功后应保留在应用图标缓存中");
+        let cached =
+            super::file_manager_icon().expect("Finder 图标第一次读取成功后应保留在应用图标缓存中");
         assert_eq!(icon.id, cached.id);
     }
 }

@@ -6,9 +6,8 @@
 //! 跟 agents 同一个套路：从 main.rs 拆出来的 `impl Workspace`
 //! 方法 + 独立类型/函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
 //!
-//! 自动更新（`update_status`/`check_for_update`/`request_daemon_restart` 等）**不在
-//! 这里**——那是应用级生命周期状态，不属于任何一个面板，仍留在 main.rs；这里的
-//! 「维护」SettingPage 只是读它、展示它、提供按钮触发它。
+//! 「系统」组的页都在内置插件里：「关于」在「更新与帮助」（`smelt-updater-ui`），终端里的
+//! smelt 命令在「维护」（`smelt-maintenance`）。
 
 use std::time::{Duration, Instant};
 
@@ -16,23 +15,17 @@ use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-#[cfg(any(target_os = "macos", windows))]
-use gpui_component::progress::Progress;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::*;
 use smelt_ui::IconAction as _;
 pub(crate) use smelt_ui::{Button, Switch};
 
-#[cfg(any(target_os = "macos", windows))]
-use crate::updater;
 use crate::window_backdrop::WindowMaterial;
 use crate::{Workspace, terminal, terminal_view};
 
 mod agent_hooks;
 mod bundled_helpers;
-#[cfg(target_os = "macos")]
-mod cli_command;
 mod nav;
 mod panel_plugins;
 mod quota;
@@ -45,24 +38,6 @@ pub(crate) use quota::refresh_quota_settings;
 pub(super) use quota::{QuotaSettingsState, set_quota_enabled};
 pub(super) use remote::*;
 
-/// 「反馈问题」入口统一跳转的链接。菜单栏「帮助」和设置「关于」页共用。
-/// 打包时设 `SMELT_FEEDBACK_URL` 换成自己的反馈渠道。
-pub const FEEDBACK_URL: &str = build_time_url(
-    option_env!("SMELT_FEEDBACK_URL"),
-    "https://github.com/smelt-ai/smelt/issues/new/choose",
-);
-
-/// 「帮助文档」入口的链接，菜单栏「帮助」和设置「关于」页共用。打包时设 `SMELT_DOCS_URL` 换掉。
-pub const DOCS_URL: &str = build_time_url(option_env!("SMELT_DOCS_URL"), "https://smelt.onoo.io/");
-
-/// 打包时没设或设成空串，都用开源版的默认地址。
-const fn build_time_url(value: Option<&'static str>, default: &'static str) -> &'static str {
-    match value {
-        Some(url) if !url.is_empty() => url,
-        _ => default,
-    }
-}
-
 #[cfg(test)]
 pub(super) use remote::qr_png_for_url;
 
@@ -71,10 +46,6 @@ pub(super) use agent_hooks::{
     uninstall_agent_hooks,
 };
 pub(super) use bundled_helpers::sync_bundled_smelt_notify;
-#[cfg(target_os = "macos")]
-pub(super) use cli_command::sync_cli_command;
-#[cfg(target_os = "macos")]
-use cli_command::{CliCommandState, SystemCommand, install_system_command};
 pub(crate) use panel_plugins::{PanelPluginsSnapshot, PanelPluginsState};
 
 // ===================== 外观 / 启动 配置类型 =====================
@@ -164,39 +135,6 @@ impl Default for Appearance {
 
 impl Global for Appearance {}
 
-/// 在线更新配置（全局单例，存 SQLite KV）。
-///
-/// 通道只决定更新源给哪一路包（GitHub 上认不认预发布，或打包时指定的哪份清单）；
-/// 更新流程本身仍由 updater 统一处理。
-#[cfg(any(target_os = "macos", windows))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct UpdateSettings {
-    #[serde(default)]
-    pub channel: updater::UpdateChannel,
-    /// 发现新版本后是否自动下载并装好。关掉只影响"要不要自动下载"这一步，
-    /// 检查照常做——否则用户既不会自动更新也看不到有新版，等于彻底静默。
-    #[serde(default = "default_auto_install")]
-    pub auto_install: bool,
-}
-
-#[cfg(any(target_os = "macos", windows))]
-fn default_auto_install() -> bool {
-    true
-}
-
-#[cfg(any(target_os = "macos", windows))]
-impl Default for UpdateSettings {
-    fn default() -> Self {
-        Self {
-            channel: updater::UpdateChannel::default(),
-            auto_install: default_auto_install(),
-        }
-    }
-}
-
-#[cfg(any(target_os = "macos", windows))]
-impl Global for UpdateSettings {}
-
 /// 枚举在客户端库里存它的 serde 名（`dev`、`dark`、`session`……），和协议里的写法一致。
 pub(crate) fn enum_name<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_value(value)
@@ -208,55 +146,6 @@ pub(crate) fn enum_name<T: serde::Serialize>(value: &T) -> String {
 /// 认不出的名字（库是别的版本写的）返回 `None`，由调用方用出厂值。
 pub(crate) fn enum_from_name<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
     serde_json::from_value(serde_json::Value::String(name.to_string())).ok()
-}
-
-/// 更新设置归客户端（每台设备各自管自己的更新），存在客户端库。
-#[cfg(any(target_os = "macos", windows))]
-pub fn load_update_settings() -> UpdateSettings {
-    let record = match smelt_client_store::client_store().and_then(|store| store.update_settings())
-    {
-        Ok(record) => record,
-        Err(error) => {
-            eprintln!("[storage] 读取更新设置失败，使用默认值: {error}");
-            None
-        }
-    };
-    let Some(record) = record else {
-        return UpdateSettings::default();
-    };
-    UpdateSettings {
-        channel: enum_from_name(&record.channel).unwrap_or_default(),
-        auto_install: record.auto_install,
-    }
-}
-
-#[cfg(any(target_os = "macos", windows))]
-pub fn save_update_settings(settings: &UpdateSettings) {
-    let record = smelt_client_store::UpdateSettingsRecord {
-        channel: enum_name(&settings.channel),
-        auto_install: settings.auto_install,
-    };
-    if let Err(error) =
-        smelt_client_store::client_store().and_then(|store| store.put_update_settings(&record))
-    {
-        eprintln!("[storage] 保存更新设置失败: {error}");
-    }
-}
-
-#[cfg(any(target_os = "macos", windows))]
-pub fn apply_update_channel(channel: updater::UpdateChannel, cx: &mut App) {
-    let mut settings = *cx.global::<UpdateSettings>();
-    settings.channel = channel;
-    save_update_settings(&settings);
-    cx.set_global(settings);
-}
-
-#[cfg(any(target_os = "macos", windows))]
-pub fn apply_auto_install(auto_install: bool, cx: &mut App) {
-    let mut settings = *cx.global::<UpdateSettings>();
-    settings.auto_install = auto_install;
-    save_update_settings(&settings);
-    cx.set_global(settings);
 }
 
 /// 不同插件可以使用相同的族名，明暗切换只能在同一个来源内寻找。
@@ -852,18 +741,6 @@ struct CopyFlash {
 
 impl Global for CopyFlash {}
 
-/// 「维护 → 旧版本残留」的扫描结果、是否正在确认清理，以及上一次清理的提示文案（点按钮
-/// 时同步刷新，扫描很快不值得像更新检查那样搞异步状态机）。
-#[derive(Clone, Default)]
-struct CleanupState {
-    scan: Option<crate::storage_cleanup::CleanupScan>,
-    /// 点了「清理…」，等「确认清理」。删的是文件，先确认一次。
-    confirming: bool,
-    message: Option<SharedString>,
-}
-
-impl Global for CleanupState {}
-
 /// Agent CLI 的只读探测结果。实际命令探测在后台执行；设置页只读取这个快照，
 /// 避免打开设置时被多个 `--version` 子进程卡住。
 #[derive(Clone, Default)]
@@ -993,52 +870,6 @@ pub struct ProfileRow {
     pub(crate) env_error: Option<String>,
 }
 
-/// 运行时长的人话格式：秒 → 「3 小时 12 分」。只保留两级单位，设置页那行不需要秒级精度。
-fn fmt_uptime(secs: u64) -> String {
-    let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
-    match (d, h, m) {
-        (0, 0, 0) => format!("{secs} 秒"),
-        (0, 0, m) => format!("{m} 分钟"),
-        (0, h, m) => format!("{h} 小时 {m} 分"),
-        (d, h, _) => format!("{d} 天 {h} 小时"),
-    }
-}
-
-/// 守护运行信息拼成一行：`v0.5.4 · PID 64954 · 启动于 07-16 20:38（已运行 3 小时 12 分）· 5 个会话`。
-/// 老守护回不出的字段直接不显示——宁可少一段，也不摆「未知」占位。
-fn daemon_info_line(info: &crate::local_daemon::DaemonInfo) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(v) = &info.version {
-        parts.push(format!("v{v}"));
-    }
-    if let Some(pid) = info.pid {
-        parts.push(format!("PID {pid}"));
-    }
-    if let Some(started) = info.started_at {
-        // 本地时区显示；秒数换算成人话时长跟在后面。
-        let started_txt = chrono::DateTime::from_timestamp(started as i64, 0)
-            .map(|t| {
-                t.with_timezone(&chrono::Local)
-                    .format("%m-%d %H:%M")
-                    .to_string()
-            })
-            .unwrap_or_else(|| "?".into());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // saturating：守护跟 GUI 之间时钟若有漂移，别算出个天文数字。
-        parts.push(format!(
-            "启动于 {started_txt}（已运行 {}）",
-            fmt_uptime(now.saturating_sub(started))
-        ));
-    }
-    if let Some(n) = info.session_count {
-        parts.push(format!("{n} 个会话"));
-    }
-    parts.join(" · ")
-}
-
 /// Workspace 同时承载终端、任务和动画，通知频率会远高于设置页所需。设置主体只取
 /// 最终状态，因此将连续更新合并到这一间隔；本地输入控件仍由各自的实体即时刷新。
 const SETTINGS_CONTENT_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(250);
@@ -1060,17 +891,6 @@ struct SettingsRenderSnapshot {
     )>,
     profile_rows: Vec<ProfileRow>,
     panel_plugins: PanelPluginsSnapshot,
-    #[cfg(any(target_os = "macos", windows))]
-    update_status: updater::UpdateStatus,
-    /// 正在把 App 移到「应用程序」，见 `Workspace::move_app_to_applications`。
-    #[cfg(target_os = "macos")]
-    moving_app: bool,
-    #[cfg(target_os = "macos")]
-    move_app_error: Option<SharedString>,
-    daemon_outdated: Option<bool>,
-    daemon_upgrading: bool,
-    daemon_upgrade_msg: Option<String>,
-    daemon_info: Option<crate::local_daemon::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
 }
@@ -1314,11 +1134,6 @@ impl SettingsContentView {
                 Self::observe_settings_global::<LaunchConfig>(window, cx),
                 Self::observe_settings_global::<AgentHosts>(window, cx),
                 Self::observe_settings_global::<AcpRuntimeState>(window, cx),
-                #[cfg(any(target_os = "macos", windows))]
-                Self::observe_settings_global::<UpdateSettings>(window, cx),
-                Self::observe_settings_global::<CleanupState>(window, cx),
-                #[cfg(target_os = "macos")]
-                Self::observe_settings_global::<CliCommandState>(window, cx),
                 Self::observe_settings_global::<CopyFlash>(window, cx),
                 Self::observe_settings_global::<RemoteConfig>(window, cx),
                 Self::observe_settings_global::<RemoteSettingsState>(window, cx),

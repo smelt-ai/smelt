@@ -139,39 +139,6 @@ mod appearance_tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", windows)))]
-mod update_settings_tests {
-    use super::UpdateSettings;
-    use crate::updater::UpdateChannel;
-
-    /// 开关是后加的，已有 update-settings.json 里没有这个键。缺省必须补成 true，
-    /// 否则老用户升上来会静默失去自动更新——这是最不该出现的回归。
-    #[test]
-    fn auto_install_defaults_to_enabled_for_old_config() {
-        let settings: UpdateSettings = serde_json::from_str("{}").unwrap();
-        assert!(settings.auto_install);
-
-        let settings: UpdateSettings = serde_json::from_str(r#"{"channel":"dev"}"#).unwrap();
-        assert!(settings.auto_install);
-        assert_eq!(settings.channel, UpdateChannel::Dev);
-
-        assert!(UpdateSettings::default().auto_install);
-    }
-
-    /// 显式关掉要能存下来也读得回来，别被 default 覆盖。
-    #[test]
-    fn auto_install_roundtrips_when_disabled() {
-        let settings = UpdateSettings {
-            channel: UpdateChannel::Dev,
-            auto_install: false,
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        let parsed: UpdateSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, settings);
-        assert!(!parsed.auto_install);
-    }
-}
-
 #[cfg(test)]
 mod pairing_qr_tests {
     use super::qr_png_for_url;
@@ -187,69 +154,6 @@ mod pairing_qr_tests {
         );
         let png = qr_png_for_url(&uri).expect("配对串必须能生成二维码");
         assert!(!png.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod daemon_info_tests {
-    #[cfg(unix)]
-    use super::daemon_info_line;
-    use super::fmt_uptime;
-    #[cfg(unix)]
-    use crate::local_daemon::DaemonInfo;
-
-    #[test]
-    fn fmt_uptime_picks_two_units() {
-        assert_eq!(fmt_uptime(45), "45 秒");
-        assert_eq!(fmt_uptime(600), "10 分钟");
-        assert_eq!(fmt_uptime(3600 * 3 + 60 * 12), "3 小时 12 分");
-        assert_eq!(fmt_uptime(86400 * 2 + 3600 * 5), "2 天 5 小时");
-    }
-
-    /// 老守护只回 version/exe_mtime：拿不到的字段整段省掉，不摆「未知」占位。
-    #[test]
-    #[cfg(unix)]
-    fn old_daemon_without_new_fields_shows_only_version() {
-        let info = DaemonInfo {
-            version: Some("0.5.4".into()),
-            ..Default::default()
-        };
-        assert_eq!(daemon_info_line(&info), "v0.5.4");
-    }
-
-    /// 全字段齐活：各段用 · 连起来，PID 和会话数都在。
-    #[test]
-    #[cfg(unix)]
-    fn full_info_joins_all_parts() {
-        let info = DaemonInfo {
-            version: Some("0.5.4".into()),
-            pid: Some(64954),
-            started_at: Some(1_000_000),
-            session_count: Some(5),
-        };
-        let line = daemon_info_line(&info);
-        assert!(
-            line.starts_with("v0.5.4 · PID 64954 · 启动于 "),
-            "got {line}"
-        );
-        assert!(line.contains("已运行 "), "got {line}");
-        assert!(line.ends_with("· 5 个会话"), "got {line}");
-    }
-
-    /// 守护时钟比 GUI 快时不能算出天文数字（saturating_sub 兜底）。
-    #[test]
-    #[cfg(unix)]
-    fn future_started_at_does_not_underflow() {
-        let future = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 9999;
-        let info = DaemonInfo {
-            started_at: Some(future),
-            ..Default::default()
-        };
-        assert!(daemon_info_line(&info).contains("已运行 0 秒"));
     }
 }
 

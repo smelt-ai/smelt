@@ -173,7 +173,7 @@ JS 插件的宿主模块也叫 `smelt-plugin-api`，是 Rust 那份接口的薄�
 | `desktop` | 远程桌面视图，机器菜单里的入口 | `desktop_view.rs`（已是宿主登记的视图 `smelt/desktop`） |
 | `ide` | 项目菜单里的「用 IDE 打开」 | `ide.rs` 的探测和启动部分、`stage.rs` 里的 IDE 菜单 |
 | `remote-access` | 设置里的「被远程访问」：开关、自建中继、设备配对和吊销 | `settings/remote.rs`、`collaboration.rs` 里被访问的那一半 |
-| `maintenance` | 设置里的维护页：守护会话管理、`smelt` 终端命令安装、旧文件清理 | `workspace_update.rs` 里的会话管理、`settings/cli_command.rs`、`storage_cleanup.rs` |
+| `maintenance`（已拆） | 设置「系统 → 命令行」：`smelt` 终端命令安装；启动时清掉旧版本留下的废弃文件。守护会话管理、手动重启守护、后台服务页已删 | `settings/cli_command.rs`、`storage_cleanup.rs` |
 | `automations`、`capabilities`、`files`、`git`、`history`、`notifications`、`resources`、`layouts`、`themes` | 已经是插件 | 只需跟着接口收口 |
 
 宿主里还会剩的、拆不走的：

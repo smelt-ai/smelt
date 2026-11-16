@@ -1,7 +1,7 @@
-//! 宿主自己登记的视图：出口、设置（导航和内容）、远程桌面。和插件视图在同一张注册表里，布局按 id 摆。
+//! 宿主自己登记的视图：出口、设置（导航和内容）。和插件视图在同一张注册表里，布局按 id 摆。
 //!
 //! 出口（[`api::OUTLET_VIEW`]）是路由的机制：布局里摆它的地方显示路由到的视图（见
-//! `router`、`workspace_layout`）。设置、远程桌面是还没拆成插件的功能，先由宿主登记。
+//! `router`、`workspace_layout`）。设置是还没拆成插件的功能，先由宿主登记。
 //! 同一个来源的视图整组登记，所以都在这里一起交。
 
 use std::rc::Rc;
@@ -22,8 +22,7 @@ pub(crate) const HOST_OWNER: &str = "smelt";
 pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut gpui::App) {
     crate::settings::register_page(cx);
     let mut specs = vec![outlet_spec(workspace.clone())];
-    specs.extend(crate::settings::view_specs(workspace.clone()));
-    specs.push(crate::desktop_view::view_spec(workspace));
+    specs.extend(crate::settings::view_specs(workspace));
     if let Err(error) = api::register_views(HOST_OWNER, specs, cx) {
         eprintln!("[plugins] 宿主视图登记失败：{error}");
     }

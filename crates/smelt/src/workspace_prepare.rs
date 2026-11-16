@@ -87,7 +87,6 @@ impl Workspace {
         // 先把活动会话和项目对齐，后面的文件树才看得到这一次切换的结果。
         self.sync_session_ui(cx);
         self.align_restored_conversation(cx);
-        self.prewarm_ide_catalog_after_idle(window, cx);
 
         self.note_active_context(cx);
 

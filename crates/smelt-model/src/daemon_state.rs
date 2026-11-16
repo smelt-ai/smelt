@@ -3,7 +3,6 @@
 //! 解在 [`DaemonStateEventClient`]（不进核心订阅的话题在 [`TopicEventClient`]）；连接
 //! 本身在客户端。
 
-use std::collections::HashSet;
 use std::time::Duration;
 
 pub use smelt_event_protocol::{
@@ -115,7 +114,7 @@ pub struct DaemonSessionState {
     /// 单独不会置位；旧守护缺字段时为 false，客户端必须对活动状态 fail closed。
     #[serde(default)]
     pub turn_events: bool,
-    /// 会话是否仍有客户端连接（list op 附带）；会话管理器据此展示在线/游离状态。
+    /// 会话是否仍有客户端连接（list op 附带）。
     /// 未连接不等于应删除：GUI 退出后终端与 ACP 会话可以继续由 daemon 托管。旧版
     /// 守护不报该字段，反序列化默认 true，避免把未知状态误判为游离。
     #[serde(default = "default_connected")]
@@ -255,20 +254,6 @@ impl DaemonSessionState {
     }
 }
 
-/// 会话管理刚杀掉的 id，在 subscribe 确认消失前从快照里滤掉。
-/// 返回过滤后的列表，并丢掉镜像里已经没有的 tombstone。
-pub fn apply_identity_tombstones(
-    snapshot: Vec<DaemonSessionState>,
-    tombstones: &mut HashSet<String>,
-) -> Vec<DaemonSessionState> {
-    let live: HashSet<&str> = snapshot.iter().map(|state| state.id.as_str()).collect();
-    tombstones.retain(|id| live.contains(id.as_str()));
-    snapshot
-        .into_iter()
-        .filter(|state| !tombstones.contains(&state.id))
-        .collect()
-}
-
 /// 跟 smeltd 的 `Phase`（见 `smeltd::session_state`）对应，同样 `rename_all = "snake_case"`。
 #[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -343,27 +328,6 @@ pub enum DaemonStateEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn identity_tombstones_hide_until_snapshot_drops_them() {
-        let live = |id: &str| DaemonSessionState {
-            id: id.into(),
-            runtime: true,
-            ..Default::default()
-        };
-        let mut tombstones = HashSet::from(["gone".into()]);
-        let filtered = apply_identity_tombstones(vec![live("keep"), live("gone")], &mut tombstones);
-        assert_eq!(
-            filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-            vec!["keep"]
-        );
-        assert_eq!(tombstones, HashSet::from(["gone".into()]));
-
-        let filtered = apply_identity_tombstones(vec![live("keep")], &mut tombstones);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].id, "keep");
-        assert!(tombstones.is_empty());
-    }
 
     #[test]
     fn runtime_presence_waits_until_mirror_is_primed() {

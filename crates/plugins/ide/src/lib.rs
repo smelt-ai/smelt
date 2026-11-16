@@ -1,0 +1,125 @@
+//! 用其他应用打开：探测这台电脑上装了哪些编辑器 / IDE，连同系统文件管理器一起登记进项目
+//! 右键菜单（见 [`api::register_open_with_apps`]），点了用它打开项目目录。
+//!
+//! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道。菜单怎么画、开着的菜单怎么跟着变归
+//! 宿主；有哪些应用、图标、怎么启动归这里。文件管理器那一项交给宿主的
+//! `smelt.app/open-in-file-manager`，不另写一份。
+//!
+//! 探测要问 Launch Services、翻 PATH、读应用包里的图标，放后台低优先级跑：启动时一次，
+//! 之后主窗口每回到前台再探一次（装了、卸了编辑器都是在别的应用里做的，回来时菜单就对
+//! 了）。没探完之前菜单里只有文件管理器。没有定时器。
+
+mod detect;
+
+use std::path::Path;
+use std::sync::Arc;
+
+use api::{HostEvent, OpenWith, OpenWithApp};
+use gpui::{App, Global, Priority, Task};
+use gpui_kit_assets::IconName;
+use smelt_plugin_api as api;
+
+use detect::InstalledIde;
+
+/// 本插件的来源 id。
+const OWNER: &str = "smelt.ide";
+
+/// 菜单项点了执行的命令。参数里的 `app` 是 [`FILE_MANAGER`] 或 IDE 的名字。
+const OPEN_WITH: api::Command<OpenWith, ()> = api::Command::new("smelt.ide/open-with");
+
+/// 文件管理器那一项的 [`OpenWith::app`]。IDE 用自己的名字，不会和它撞。
+const FILE_MANAGER: &str = "file-manager";
+
+/// 最近一次探测的结果。
+#[derive(Default)]
+struct Catalog {
+    ides: Vec<InstalledIde>,
+    file_manager_icon: Option<Arc<gpui::Image>>,
+    /// 后台正在探：这期间再来的探测请求不另起一份。
+    scanning: bool,
+}
+
+impl Global for Catalog {}
+
+/// 宿主启动时调一次。
+pub fn register(cx: &mut App) {
+    cx.set_global(Catalog::default());
+    api::register_commands(
+        OWNER,
+        "用其他应用打开",
+        vec![OPEN_WITH.spec_async("用其他应用打开", |args, _, cx| open_with(args, cx))],
+        cx,
+    )
+    .expect("用其他应用打开的命令表写错了");
+    // 先把文件管理器登记上：它一定在，不用等探测。
+    publish(cx);
+    scan(cx);
+    let events = api::events(cx);
+    cx.subscribe(&events, |_, event: &HostEvent, cx| {
+        if matches!(event, HostEvent::WindowActivated) {
+            scan(cx);
+        }
+    })
+    .detach();
+}
+
+fn open_with(args: OpenWith, cx: &mut App) -> Task<Result<(), String>> {
+    if args.app == FILE_MANAGER {
+        return api::OPEN_IN_FILE_MANAGER.run(&api::OpenInFileManager { path: args.path }, cx);
+    }
+    let catalog = cx.global::<Catalog>();
+    let Some(ide) = catalog.ides.iter().find(|ide| ide.label == args.app) else {
+        return Task::ready(Err(format!("没找到 {}，可能已经卸载了", args.app)));
+    };
+    Task::ready(detect::open_in(ide, Path::new(&args.path)))
+}
+
+/// 在后台重新探一次，探完把菜单换成新的。正在探就不另起。
+fn scan(cx: &mut App) {
+    let catalog = cx.global_mut::<Catalog>();
+    if catalog.scanning {
+        return;
+    }
+    catalog.scanning = true;
+    let found = cx
+        .background_executor()
+        .spawn_with_priority(Priority::Low, async {
+            (detect::detect_installed(), detect::file_manager_icon())
+        });
+    cx.spawn(async move |cx| {
+        let (ides, file_manager_icon) = found.await;
+        cx.update(|cx| {
+            let catalog = cx.global_mut::<Catalog>();
+            catalog.scanning = false;
+            catalog.ides = ides;
+            catalog.file_manager_icon = file_manager_icon;
+            publish(cx);
+        });
+    })
+    .detach();
+}
+
+/// 把目录登记成菜单：IDE 在前，文件管理器在最后。和上次一样时宿主什么都不做。
+fn publish(cx: &mut App) {
+    let catalog = cx.global::<Catalog>();
+    let command = OPEN_WITH.id().to_string();
+    let mut apps: Vec<OpenWithApp> = catalog
+        .ides
+        .iter()
+        .map(|ide| OpenWithApp {
+            label: ide.label.into(),
+            image: ide.icon.clone(),
+            icon: IconName::SquareTerminal.path(),
+            command: command.clone(),
+            app: ide.label.to_string(),
+        })
+        .collect();
+    apps.push(OpenWithApp {
+        label: detect::file_manager_label().into(),
+        image: catalog.file_manager_icon.clone(),
+        icon: IconName::FolderOpen.path(),
+        command,
+        app: FILE_MANAGER.to_string(),
+    });
+    api::register_open_with_apps(OWNER, apps, cx);
+}

@@ -511,17 +511,6 @@ impl Workspace {
                     }
                     // restore 完成后再查/升级守护，避免与 reattach / 重试并行 handoff。
                     this.check_daemon_outdated(cx);
-                    // 恢复完成后刷新会话管理器，但不要在启动时自动删除未连接会话。
-                    // 未连接并不等于用户想删除：守护重启、网络短暂中断和恢复竞态都会
-                    // 产生这种状态；删除应由用户在会话管理器中明确操作。
-                    cx.spawn(async move |this, cx| {
-                        let _ = this.update(cx, |this, cx| {
-                            if this.session_manager_open {
-                                this.refresh_session_manager(cx);
-                            }
-                        });
-                    })
-                    .detach();
                 }
                 this.schedule_visible_refresh(cx);
                 cx.notify();
@@ -1473,7 +1462,7 @@ impl Workspace {
     /// terminal.rs::spawn / `smeltd::terminal_registry`），`label` 用作侧栏初始显示名。
     ///
     /// **禁止**在 UI/`update`/拖放 FFI 回调里同步 `Terminal::spawn`：连守护 + 握手
-    /// 含 sleep/超时，拖文件夹进窗口会整窗 beachball（见 `confirm_restart_daemon`）。
+    /// 含 sleep/超时，拖文件夹进窗口会整窗 beachball（见 `restart_daemon_and_rebuild_terminals`）。
     /// 专用 OS 线程做阻塞 spawn，主线程只接结果建 Entity（比塞进 async executor 更稳）。
     pub(crate) fn add_session_with_launch(
         &mut self,

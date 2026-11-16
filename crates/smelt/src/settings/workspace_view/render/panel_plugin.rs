@@ -146,7 +146,9 @@ fn authoring_group() -> SettingGroup {
                             .on_click(|_, _, _| {
                                 let opened = smelt_sys::app_log::log_path()
                                     .ok_or_else(|| "找不到日志文件".to_string())
-                                    .and_then(|path| crate::ide::open_in_system_text_editor(&path));
+                                    .and_then(|path| {
+                                        crate::system_open::open_in_system_text_editor(&path)
+                                    });
                                 if let Err(error) = opened {
                                     crate::status_item::notify_error(error);
                                 }

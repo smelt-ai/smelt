@@ -15,8 +15,12 @@ smelt-model = { path = "../smelt-model" }
 smelt-client = { path = "../smelt-client" }
 smelt-client-store = { path = "../smelt-client-store" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
+# 本机数据目录（`~/.smelt`，`SMELT_HOME` 可改）。
+smelt-paths = { path = "../smelt-paths" }
 # 进程资源占用（`process_usage`）：插件量桌面进程自己用。
 smelt-sys = { path = "../smelt-sys" }
+# 这个构建的版本号（「关于」页、菜单栏显示）。
+smelt-version = { path = "../smelt-version" }
 smelt-ui = { path = "../smelt-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
