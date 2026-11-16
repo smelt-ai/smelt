@@ -188,6 +188,8 @@ enum NarrowGitRow {
         behind: u32,
         stash_n: u32,
         has_changes: bool,
+        /// 当前分支设了 upstream（推送过）。
+        upstream: bool,
     },
     /// 仓库自己的提交区：输入框 + 提交按钮。紧跟在它的仓库行下面，
     /// 跟 VS Code 一样——提交信息属于仓库，放在面板底部会让人看不出在往哪提交。
@@ -662,6 +664,7 @@ fn render_narrow_git_row(
             behind,
             stash_n,
             has_changes,
+            upstream,
         } => {
             let ws_pick = ws.clone();
             let root_pick = at(root);
@@ -669,7 +672,8 @@ fn render_narrow_git_row(
             let root_toggle = at(root);
             let ws_ops = ws.clone();
             let root_ops = at(root);
-            let (ahead, behind, stash_n, has_changes) = (*ahead, *behind, *stash_n, *has_changes);
+            let (ahead, behind, stash_n, has_changes, upstream) =
+                (*ahead, *behind, *stash_n, *has_changes, *upstream);
             let sync_label = if ahead + behind > 0 {
                 format!("↑{ahead} ↓{behind}")
             } else {
@@ -767,6 +771,7 @@ fn render_narrow_git_row(
                                 behind,
                                 stash_n,
                                 has_changes,
+                                upstream,
                             )
                         }),
                 )
@@ -1202,6 +1207,7 @@ fn git_ops_menu_items(
     behind: u32,
     stash_n: u32,
     has_changes: bool,
+    upstream: bool,
 ) -> gpui_component::menu::PopupMenu {
     /// 菜单项统一入口：先认仓库，再干活。
     fn item(
@@ -1226,6 +1232,12 @@ fn git_ops_menu_items(
     if ahead > 0 {
         menu = menu.item(item(&ws, &root, format!("推送 ↑{ahead}"), |w, cx| {
             w.push_only(cx)
+        }));
+    }
+    // 已推送完的分支才能开 PR：还有没推的提交时，网页上看到的不是最新的。
+    if ahead == 0 && upstream {
+        menu = menu.item(item(&ws, &root, "在浏览器中创建 PR", |w, cx| {
+            w.open_pull_request(cx)
         }));
     }
     menu = menu

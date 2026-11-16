@@ -36,6 +36,9 @@ fn session(
         automation: None,
         agent_definition_id: None,
         profile_id: None,
+        workset_id: None,
+        workset_task: None,
+        workset_branch: None,
     }
 }
 

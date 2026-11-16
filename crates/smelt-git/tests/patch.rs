@@ -260,3 +260,59 @@ fn repo_info_treats_a_worktree_checkout_as_an_ordinary_repo() {
     assert_eq!(load_repo_info(plain.to_str().unwrap()), None);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 开 PR 要的三样：推送去的远端 URL、它的默认分支、upstream 在远端上的分支名。
+#[test]
+fn repo_info_reports_the_remote_a_pull_request_would_target() {
+    let root = repo_with_change("repo-info-remote", "a\n", "a\n");
+    let r = root.to_str().unwrap();
+    let remote = root.with_file_name(format!(
+        "smelt-git-test-{}-repo-info-remote.git",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&remote);
+    let ok = |args: &[&str]| {
+        let out = run_git(r, args).unwrap();
+        assert!(
+            out.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    ok(&["branch", "-M", "main"]);
+
+    // 没有远端：只有分支名。
+    let info = load_repo_info(r).unwrap();
+    assert_eq!(
+        (info.remote_url, info.default_branch, info.upstream_branch),
+        (None, None, None)
+    );
+
+    ok(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+    ok(&[
+        "remote",
+        "add",
+        "upstream",
+        "git@github.com:someone/other.git",
+    ]);
+    ok(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    ok(&["push", "-q", "-u", "origin", "main"]);
+    ok(&["remote", "set-head", "origin", "main"]);
+    ok(&["checkout", "-q", "-b", "feat/本地名"]);
+    ok(&["push", "-q", "-u", "origin", "feat/本地名:feat/remote-name"]);
+
+    let info = load_repo_info(r).unwrap();
+    assert_eq!(info.branch, "feat/本地名");
+    assert_eq!(info.remote_url.as_deref(), remote.to_str());
+    assert_eq!(info.default_branch.as_deref(), Some("main"));
+    assert_eq!(info.upstream_branch.as_deref(), Some("feat/remote-name"));
+
+    // 没设 upstream 的分支：远端退到 origin，upstream 分支为空。
+    ok(&["checkout", "-q", "-b", "local-only"]);
+    let info = load_repo_info(r).unwrap();
+    assert_eq!(info.remote_url.as_deref(), remote.to_str());
+    assert_eq!(info.upstream_branch, None);
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&remote);
+}

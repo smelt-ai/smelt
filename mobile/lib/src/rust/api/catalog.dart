@@ -920,6 +920,11 @@ class SessionSummary {
   /// 自定义 Agent 开的对话：它的 id。名字到工作区目录的 `agents` 里按 `profile:<id>` 配。
   final String? profileId;
 
+  /// 绑定的任务工作树：id、任务名、分支。列表里同一项目下按工作树再分小组。
+  final String? worksetId;
+  final String? worksetTask;
+  final String? worksetBranch;
+
   const SessionSummary({
     required this.id,
     required this.kind,
@@ -939,6 +944,9 @@ class SessionSummary {
     this.automation,
     this.agentDefinitionId,
     this.profileId,
+    this.worksetId,
+    this.worksetTask,
+    this.worksetBranch,
   });
 
   @override
@@ -960,7 +968,10 @@ class SessionSummary {
       attention.hashCode ^
       automation.hashCode ^
       agentDefinitionId.hashCode ^
-      profileId.hashCode;
+      profileId.hashCode ^
+      worksetId.hashCode ^
+      worksetTask.hashCode ^
+      worksetBranch.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -984,7 +995,10 @@ class SessionSummary {
           attention == other.attention &&
           automation == other.automation &&
           agentDefinitionId == other.agentDefinitionId &&
-          profileId == other.profileId;
+          profileId == other.profileId &&
+          worksetId == other.worksetId &&
+          worksetTask == other.worksetTask &&
+          worksetBranch == other.worksetBranch;
 }
 
 class WorkspaceCatalog {

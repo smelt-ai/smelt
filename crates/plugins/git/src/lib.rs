@@ -23,6 +23,7 @@ use smelt_plugin_api::{
 mod log;
 mod log_view;
 mod panel;
+mod pull_request;
 
 use panel::{
     BranchList, Cached, DiffScope, GitDiff, GitDiffBody, GitSeenChange, GitStatusData, GitWrite,

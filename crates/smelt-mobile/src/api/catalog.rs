@@ -135,6 +135,10 @@ pub struct SessionSummary {
     pub agent_definition_id: Option<String>,
     /// 自定义 Agent 开的对话：它的 id。名字到工作区目录的 `agents` 里按 `profile:<id>` 配。
     pub profile_id: Option<String>,
+    /// 绑定的任务工作树：id、任务名、分支。列表里同一项目下按工作树再分小组。
+    pub workset_id: Option<String>,
+    pub workset_task: Option<String>,
+    pub workset_branch: Option<String>,
 }
 
 /// 当前已知的会话列表。
