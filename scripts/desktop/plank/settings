@@ -1,0 +1,15 @@
+# 停靠栏（Plank）的设置。Plank 只认 GSettings；容器里常常没有 dconf，install.sh 让它用
+# GLib 自带的 keyfile 后端（GSETTINGS_BACKEND=keyfile），设置就是这份文件，装到
+# ~/.config/glib-2.0/settings/keyfile。值是 GVariant 文本，枚举写名字。
+#
+# 停靠栏一直显示、不躲窗口：最大化的窗口给它让出位置，同 macOS 的默认。图标不放大（见
+# dock.theme）。三个启动图标（浏览器、终端、文件管理器）由 install.sh 写在
+# ~/.config/plank/dock1/launchers/。
+[net/launchpad/plank/docks/dock1]
+theme='Smelt'
+position='bottom'
+alignment='center'
+hide-mode='none'
+icon-size=44
+zoom-enabled=false
+dock-items=['browser.dockitem', 'terminal.dockitem', 'files.dockitem']

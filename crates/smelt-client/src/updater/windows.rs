@@ -138,15 +138,8 @@ async fn expected_sha256(installer_url: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("安装程序地址里没有文件名：{installer_url}"))?
         .to_string();
     let sums_url = url.join(CHECKSUMS_ASSET)?;
-    validate_download_url(sums_url.as_str())?;
-    let resp = reqwest::Client::new()
-        .get(sums_url.clone())
-        .header("User-Agent", "smelt-updater")
-        .send()
-        .await?
-        .error_for_status()?;
-    validate_download_url(resp.url().as_str())?;
-    let sums = resp.text().await?;
+    let sums = fetch_metadata(sums_url.as_str(), "*/*").await?;
+    let sums = String::from_utf8(sums).with_context(|| format!("{sums_url} 不是文本"))?;
     smelt_version::checksum_for(&sums, &file)
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| anyhow::anyhow!("{sums_url} 里还没有 {file}，发布可能还没传完"))
@@ -231,21 +224,7 @@ async fn download_verified(
     expected: &str,
     on_progress: &dyn Fn(DownloadProgress),
 ) -> anyhow::Result<()> {
-    let mut resp = reqwest::Client::new()
-        .get(url)
-        .header("User-Agent", "smelt-updater")
-        .send()
-        .await?
-        .error_for_status()?;
-    validate_download_url(resp.url().as_str())?;
-    if resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
-    {
-        anyhow::bail!("更新地址返回了 HTML，不是安装程序：{url}");
-    }
+    let mut resp = open_package_download(url, "安装程序").await?;
     let total = resp.content_length();
     on_progress(DownloadProgress::Bytes { received: 0, total });
 
@@ -254,9 +233,10 @@ async fn download_verified(
     let mut received = 0u64;
     let mut reported = 0u64;
     while let Some(chunk) = resp.chunk().await? {
+        received += chunk.len() as u64;
+        ensure_package_size(received)?;
         file.write_all(&chunk)?;
         hasher.update(&chunk);
-        received += chunk.len() as u64;
         if received - reported >= PROGRESS_REPORT_STEP || Some(received) == total {
             reported = received;
             on_progress(DownloadProgress::Bytes { received, total });

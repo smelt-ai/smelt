@@ -12,13 +12,15 @@
 #                                 或 URL）。不给时先试官方源，连不上（中国大陆常见）就自动换
 #                                 APT_MIRRORS 里头一个连得上的。只用于这次安装，不改 /etc/apt
 #
-# 装在谁名下：运行时不用 root 跑。以 root 执行时（容器里常见），装完系统包后建一个普通用户
-# （默认 smelt，SMELT_USER 可改），运行时和桌面都装在它名下；以普通用户执行时装在自己名下，
-# 装系统包、开 linger 时用 sudo。
+# 装在谁名下：谁执行就装在谁名下。以普通用户执行时装系统包、开 linger 用 sudo；以 root 执行时
+# 运行时就以 root 跑（见 runtime_user），SMELT_USER 可以改成装在一个普通用户名下。以 root 运行
+# 时告诉 Claude Code 这是沙箱（IS_SANDBOX=1），否则它拒绝跳过权限确认；Chrome 也得关沙箱才肯
+# 以 root 起。
 #
-# 怎么敲到命令（smeltd 和命令行 smelt）：以 root 执行时生成 /usr/local/bin/ 下的同名脚本，切到
-# 那个用户再跑（见 root_command_script）；以普通用户执行时在 ~/.local/bin 放软链接，不改 shell
-# 配置。运行时起的智能体不靠这些：它们的 PATH 里本来就有 ~/.smelt/bin。
+# 怎么敲到命令（smeltd 和命令行 smelt）：运行用户是 root 时在 /usr/local/bin 放软链接；是另一个
+# 用户时在那里生成同名脚本，切到那个用户再跑（见 root_command_script）；以普通用户执行时在
+# ~/.local/bin 放软链接，不改 shell 配置。运行时起的智能体不靠这些：它们的 PATH 里本来就有
+# ~/.smelt/bin。
 #
 # 怎么常驻：有 systemd 的机器装成 systemd 用户服务（smeltd、smelt-display、smelt-desktop、
 # smelt-chrome），开 linger 让它们开机就起、退出登录也不停。没有 systemd 的（多半是 Docker
@@ -36,10 +38,14 @@ COMMANDS=(smeltd smelt)
 BASE_PACKAGES=(ca-certificates curl)
 # D9 实测过的一套；不装中文字体，中文网页全是方块。装时不带推荐包（容器里能省几百 MB），
 # 所以 Xvnc 要的 X 核心字体（fixed）、图标主题和终端的等宽字体要自己列上。图标用 Papirus
-# （只占磁盘，不耗 CPU）；Adwaita 留着给鼠标指针，也是 Papirus 缺图标时的后备。
+# （只占磁盘，不耗 CPU）；Adwaita 留着给鼠标指针，也是 Papirus 缺图标时的后备。GTK3 只内置
+# 浅色的 Adwaita，xsettings.xml 里的 Adwaita-dark 在 gnome-themes-extra-data 里，不装就退回
+# 浅色。开始菜单用 Whisker（带搜索和收藏夹），文件管理器用 Thunar，底部的停靠栏用 Plank，
+# 界面字体用 Inter（接近 macOS 的系统字体）。
 DESKTOP_PACKAGES=(
   tigervnc-standalone-server xauth xfonts-base xfce4 xfce4-terminal adwaita-icon-theme
-  papirus-icon-theme dbus xdotool fonts-noto-cjk fonts-dejavu-core
+  papirus-icon-theme gnome-themes-extra-data xfce4-whiskermenu-plugin thunar plank dbus xdotool
+  fonts-noto-cjk fonts-dejavu-core fonts-inter
 )
 # 运行时装成 systemd 用户服务：linger 拉起用户的 systemd 要 pam_systemd 给它建
 # XDG_RUNTIME_DIR，systemctl --user 要用户总线（/run/user/<uid>/bus）。minbase 一类的精简
@@ -241,11 +247,41 @@ system_phase() {
   return 0
 }
 
-# root 执行：系统部分做完，建普通用户，把用户那部分交给它跑。
+# root 执行时运行时装在谁名下：SMELT_USER 优先；没给时以前装在 smelt 名下的接着用它（重新执行
+# 就是升级，换个用户等于另装一份、丢掉配对和会话），否则就是 root。
+runtime_user() {
+  if [[ -n "${SMELT_USER:-}" ]]; then
+    echo "$SMELT_USER"
+  elif id -u smelt >/dev/null 2>&1 \
+    && [[ -e "$(getent passwd smelt | cut -d: -f6)/.smelt/bin/smeltd" ]]; then
+    echo smelt
+  else
+    echo root
+  fi
+}
+
+# 开 linger 拉起这个用户的 systemd，等它的总线出来才能 systemctl --user。
+start_user_manager() {
+  local user=$1 uid=$2
+  loginctl enable-linger "$user"
+  local i
+  for ((i = 0; i < 60; i++)); do
+    [[ -S "/run/user/$uid/bus" ]] && break
+    sleep 0.5
+  done
+  [[ -S "/run/user/$uid/bus" ]] || die "等不到用户 $user 的 systemd（/run/user/$uid/bus）"
+}
+
+# root 执行：系统部分做完，用户那部分交给运行用户跑。
 install_as_root() {
   system_phase
 
-  local user="${SMELT_USER:-smelt}"
+  local user
+  user="$(runtime_user)"
+  if [[ "$user" == root ]]; then
+    install_for_root
+    return
+  fi
   if ! id -u "$user" >/dev/null 2>&1; then
     say "建用户 ${user}：运行时和桌面都在它名下运行"
     useradd --create-home --shell /bin/bash "$user"
@@ -253,19 +289,12 @@ install_as_root() {
   local uid home
   uid="$(id -u "$user")"
   home="$(getent passwd "$user" | cut -d: -f6)"
-  [[ "$uid" != 0 ]] || die "SMELT_USER 不能是 root：运行时不用 root 跑"
+  [[ "$uid" != 0 ]] || die "SMELT_USER=$user 是 uid 0 的用户：要以 root 运行就写 SMELT_USER=root"
 
   local env=(HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash
     PATH=/usr/local/bin:/usr/bin:/bin)
   if has_systemd; then
-    loginctl enable-linger "$user"
-    # linger 会拉起这个用户的 systemd，等它的总线出来才能 systemctl --user。
-    local i
-    for ((i = 0; i < 60; i++)); do
-      [[ -S "/run/user/$uid/bus" ]] && break
-      sleep 0.5
-    done
-    [[ -S "/run/user/$uid/bus" ]] || die "等不到用户 $user 的 systemd（/run/user/$uid/bus）"
+    start_user_manager "$user" "$uid"
     env+=(XDG_RUNTIME_DIR="/run/user/$uid"
       DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus")
   fi
@@ -288,6 +317,20 @@ install_as_root() {
   done
   echo
   say "运行时在用户 $user 名下。常用命令（root 或 sudo 都行）：smeltd status、smeltd pair、smelt agent list"
+}
+
+# 运行用户就是 root：用户那部分直接在这个进程里跑。HOME 等按 root 的账户重设，sudo 执行时
+# 可能还是调用者的。
+install_for_root() {
+  export HOME USER=root LOGNAME=root
+  HOME="$(getent passwd root | cut -d: -f6)"
+  if has_systemd; then
+    start_user_manager root 0
+    export XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+  fi
+  user_phase
+  link_commands "$ROOT_COMMAND_DIR"
+  say "运行时以 root 运行（要装在普通用户名下，用 SMELT_USER=<用户名> 重新执行）"
 }
 
 ROOT_COMMAND_DIR=/usr/local/bin
@@ -363,31 +406,33 @@ install_as_user() {
     sudo loginctl enable-linger "$USER" || warn "开 linger 失败，退出登录后运行时会停"
   fi
   user_phase
-  link_user_command
+  link_commands "$HOME/.local/bin"
 }
 
-# 普通用户：~/.local/bin 放软链接，不改 shell 配置。自定义了 SMELT_HOME 时不放：软链接带不
-# 上这个变量，会连到另一份运行时。
-link_user_command() {
+# 在 dir 下放指向 ~/.smelt/bin 的软链接，不改 shell 配置：普通用户放 ~/.local/bin，root 放
+# /usr/local/bin。覆盖自己放的软链接和以前生成的切用户脚本，别人的文件不动。自定义了
+# SMELT_HOME 时不放：软链接带不上这个变量，会连到另一份运行时。
+link_commands() {
+  local dir=$1
   echo
   if [[ "$SMELT_HOME" != "$HOME/.smelt" ]]; then
     say "SMELT_HOME 是自定义的，调用时带上它：SMELT_HOME=$SMELT_HOME $BIN/smeltd status"
     return 0
   fi
-  mkdir -p "$HOME/.local/bin"
+  mkdir -p "$dir"
   local command link
   for command in "${COMMANDS[@]}"; do
-    link="$HOME/.local/bin/$command"
-    if [[ -e "$link" && ! -L "$link" ]]; then
-      warn "$link 已存在且不是软链接，没有覆盖；用 $BIN/$command 调用"
+    link="$dir/$command"
+    if [[ -e "$link" && ! -L "$link" ]] && ! grep -qF "$ROOT_COMMAND_MARKER" "$link" 2>/dev/null; then
+      warn "$link 已存在且不是安装脚本放的，没有覆盖；用 $BIN/$command 调用"
       continue
     fi
     ln -sfn "$BIN/$command" "$link"
   done
   say "常用命令：smeltd status、smeltd pair、smelt agent list"
   case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *) say "~/.local/bin 不在 PATH 里，加上后才能直接敲：export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+    *":$dir:"*) ;;
+    *) say "$dir 不在 PATH 里，加上后才能直接敲：export PATH=\"$dir:\$PATH\"" ;;
   esac
 }
 
@@ -421,17 +466,40 @@ write_unit() {
   } >"$UNIT_DIR/$name"
 }
 
-# XFCE 的精简设置随包走，按内容记一份指纹：包里的设置没变就不动，人在远程桌面里改过的
-# 保留；变了（包括有指纹之前装的机器）就整份换掉，再重启会话让它读新的。
+# XFCE 和停靠栏的设置随包走，按内容记一份指纹：包里的设置没变就不动，人在远程桌面里改过
+# 的保留；变了（包括有指纹之前装的机器）就整份换掉，再重启会话让它读新的。
 apply_desktop_config() {
-  local dir=$1 config=$2
+  local dir=$1 config=$2 browser=$3
   local stamp="$dir/config.sha256" xml_dir="$config/xfce4/xfconf/xfce-perchannel-xml" want
-  want="$(cat "$HERE"/desktop/xfce4/*.xml "$HERE/desktop/terminalrc" | sha256sum | cut -d' ' -f1)"
+  # 图片和主题也算进去：窗口管理器、xfdesktop、面板和停靠栏都只在起来时读一次，换了要重启
+  # 会话才看得到。浏览器也算：停靠栏上的图标指向它。
+  want="$({
+    cat "$HERE"/desktop/xfce4/*.xml "$HERE/desktop/terminalrc" "$HERE"/desktop/*.{png,jpg} \
+      "$HERE"/desktop/xfwm4/* "$HERE"/desktop/plank/*
+    echo "$browser"
+  } | sha256sum | cut -d' ' -f1)"
   [[ "$(cat "$stamp" 2>/dev/null)" == "$want" ]] && return 0
   mkdir -p "$xml_dir" "$config/xfce4/terminal"
   install -m 0644 "$HERE"/desktop/xfce4/*.xml "$xml_dir/"
+  # xfconf 不展开 ~ 和变量，壁纸要写绝对路径。
+  sed -i "s|@DESKTOP_DIR@|$dir|g" "$xml_dir/xfce4-desktop.xml"
   # xfce4-terminal 1.0 以前的版本不读 xfconf，读这份；和 xfce4-terminal.xml 内容相同。
   install -m 0644 "$HERE/desktop/terminalrc" "$config/xfce4/terminal/terminalrc"
+
+  # 停靠栏：设置（见 desktop/plank/settings）和三个启动图标。图标按文件名排在设置的
+  # dock-items 里；人在停靠栏上拖走、加上的，Plank 自己增删这里的文件。
+  mkdir -p "$config/glib-2.0/settings"
+  install -m 0644 "$HERE/desktop/plank/settings" "$config/glib-2.0/settings/keyfile"
+  local launchers="$config/plank/dock1/launchers" apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  rm -rf "$launchers"
+  mkdir -p "$launchers"
+  local item desktop
+  for item in "browser:$apps/$browser.desktop" terminal:/usr/share/applications/xfce4-terminal.desktop \
+    files:/usr/share/applications/thunar.desktop; do
+    desktop=${item#*:}
+    printf '[PlankDockItemPreferences]\nLauncher=file://%s\n' "$desktop" >"$launchers/${item%%:*}.dockitem"
+  done
+
   restart_desktop_session
   echo "$want" >"$stamp"
 }
@@ -446,7 +514,7 @@ restart_desktop_session() {
     systemctl --user restart smelt-desktop.service
     return 0
   fi
-  pkill -KILL -u "$(id -u)" -x '(xfce4-session|xfwm4|xfce4-panel|xfdesktop|xfsettingsd|xfconfd)' || true
+  pkill -KILL -u "$(id -u)" -x '(xfce4-session|xfwm4|xfce4-panel|xfdesktop|xfsettingsd|xfconfd|plank)' || true
   # 换成 dbus-run-session 之前，会话的总线由 dbus-launch 起，会话死了它还留着。
   pkill -KILL -u "$(id -u)" -x dbus-launch || true
   pkill -KILL -u "$(id -u)" -f '^dbus-daemon .*--session' || true
@@ -460,27 +528,65 @@ install_desktop() {
     put 0755 "$HERE/desktop/$script" "$dir/bin/$script"
   done
 
-  # 任务栏的两个启动图标（xfce4-panel.xml 里的 launcher-1、launcher-2）。Chrome 图标调同一个
-  # 启动脚本，开的是 agent 用的那个实例，不会另起一个没有登录状态、agent 也连不上的 Chrome。
-  local icon=chromium
-  command -v google-chrome-stable >/dev/null 2>&1 && icon=google-chrome
-  mkdir -p "$config/xfce4/panel/launcher-1" "$config/xfce4/panel/launcher-2"
-  cat >"$config/xfce4/panel/launcher-1/smelt-chrome.desktop" <<EOF
+  # 壁纸（xfce4-desktop.xml）和开始菜单按钮的图标；以前的 png 壁纸和彩色图标不用了。
+  put 0644 "$HERE/desktop/wallpaper.jpg" "$dir/wallpaper.jpg"
+  put 0644 "$HERE/desktop/menu-icon.png" "$dir/menu-icon.png"
+  rm -f "$dir/wallpaper.png" "$dir/smelt.png"
+
+  # 窗口主题（xfwm4.xml 选的 Smelt）和停靠栏主题（desktop/plank/settings 选的 Smelt），装到
+  # 用户自己的主题目录，两个程序都会去那里找。
+  local data="${XDG_DATA_HOME:-$HOME/.local/share}"
+  mkdir -p "$data/themes/Smelt/xfwm4" "$data/plank/themes/Smelt"
+  install -m 0644 "$HERE"/desktop/xfwm4/* "$data/themes/Smelt/xfwm4/"
+  install -m 0644 "$HERE/desktop/plank/dock.theme" "$data/plank/themes/Smelt/dock.theme"
+  # 会话起来时拉起停靠栏。Plank 只认 GSettings，这里多半没有 dconf，让它用 GLib 自带的
+  # keyfile 后端，设置写在 ~/.config/glib-2.0/settings/keyfile（见 apply_desktop_config）。
+  mkdir -p "$config/autostart"
+  cat >"$config/autostart/smelt-dock.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
-Name=Chrome
-Exec="$dir/bin/chrome" --new-window
-Icon=$icon
+Name=Dock
+Exec=env GSETTINGS_BACKEND=keyfile plank
+NoDisplay=true
 EOF
-  cat >"$config/xfce4/panel/launcher-2/smelt-terminal.desktop" <<EOF
+
+  # 浏览器的菜单项用同名文件盖掉系统那份（用户目录里同名的优先），改成调同一个启动脚本：
+  # 从菜单、文件管理器或别的程序打开网页，开的都是 agent 用的那个实例，不会另起一个没有
+  # 登录状态、agent 也连不上的 Chrome。带 --new-window：不带参数是服务在拉起（见 chrome）。
+  # MimeType 照抄系统那份，网页和链接仍然归它打开。
+  local browser=chromium name=Chromium
+  if command -v google-chrome-stable >/dev/null 2>&1; then
+    browser=google-chrome name=Chrome
+  fi
+  local apps="$data/applications"
+  mkdir -p "$apps"
+  cat >"$apps/$browser.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=终端
-Exec=xfce4-terminal
-Icon=utilities-terminal
+Name=$name
+Exec="$dir/bin/chrome" --new-window %U
+Icon=$browser
+Categories=Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
 EOF
-  # 启动图标写好之后再换设置：要重启会话的话，新会话一起来就看得到它们。
-  apply_desktop_config "$dir" "$config"
+  # 开始菜单（Whisker）的默认设置：按钮只有 Smelt 的白色剪影、不带文字，同 macOS 菜单栏
+  # 左上角的苹果；菜单里不放用户头像（profile-shape=2）；收藏夹放浏览器、终端、文件管理器。
+  # 2.7（Debian 12、Ubuntu 22.04）和 2.8 起都先读这份，人在菜单里改过的另存，不受它影响。
+  mkdir -p "$config/xfce4/whiskermenu"
+  cat >"$config/xfce4/whiskermenu/defaults.rc" <<EOF
+favorites=$browser.desktop,xfce4-terminal.desktop,thunar.desktop
+button-icon=$dir/menu-icon.png
+show-button-icon=true
+show-button-title=false
+profile-shape=2
+EOF
+  # 更早的版本在面板上放过两个启动图标，现在的面板没有了。
+  rm -f "$config/xfce4/panel/launcher-1/smelt-chrome.desktop" \
+    "$config/xfce4/panel/launcher-2/smelt-terminal.desktop"
+  rmdir "$config/xfce4/panel/launcher-1" "$config/xfce4/panel/launcher-2" 2>/dev/null || true
+
+  # 菜单项写好之后再换设置：要重启会话的话，新会话一起来就看得到它们。
+  apply_desktop_config "$dir" "$config" "$browser"
 
   if has_systemd; then
     UNIT_DIR="$config/systemd/user"
@@ -527,7 +633,6 @@ wait_for_runtime() {
 }
 
 user_phase() {
-  [[ "$(id -u)" != 0 ]] || die "运行时不用 root 跑"
   [[ "$(uname -s)" == Linux ]] || die "这个包只能装在 Linux 上"
   local program
   for program in "${PROGRAMS[@]}"; do
@@ -548,6 +653,14 @@ user_phase() {
   [[ -x "$HERE/smelt-agent" && -f "$HERE/photon_rs_bg.wasm" ]] || die "包里缺少 smelt-agent 或 photon_rs_bg.wasm"
   # 跨 Agent 消息下线后留下的旧 helper。
   rm -f "$BIN/smelt-agent-mcp"
+
+  # 以 root 运行：Claude Code 见到 root 就拒绝跳过权限确认，除非声明这是沙箱。要在
+  # `smeltd install` 启动服务之前写好。没有 systemd 时由 smelt-up 设。
+  if [[ "$(id -u)" == 0 ]] && has_systemd; then
+    local dropin="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/smeltd.service.d"
+    mkdir -p "$dropin"
+    printf '[Service]\nEnvironment=IS_SANDBOX=1\n' >"$dropin/sandbox.conf"
+  fi
 
   # 发布不可变映像、拨启动名（已经在跑就交接到新版本，会话保留）；有 systemd 时写用户单元
   # 并启动。
@@ -580,8 +693,12 @@ user_phase() {
     echo
     echo "这台机器没有 systemd：${watched}由 smelt-up 看着，日志在 $SMELT_HOME/logs。"
     echo "容器重启后要再拉起它，或者直接把它设成容器的启动命令："
-    echo "  runuser -u $USER -- $BIN/smelt-up    （以 root）"
-    echo "  $BIN/smelt-up &    （以 ${USER}）"
+    if [[ "$USER" == root ]]; then
+      echo "  $BIN/smelt-up"
+    else
+      echo "  runuser -u $USER -- $BIN/smelt-up    （以 root）"
+      echo "  $BIN/smelt-up &    （以 ${USER}）"
+    fi
   fi
 }
 

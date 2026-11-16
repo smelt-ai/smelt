@@ -2468,10 +2468,6 @@ fn schedule_obsolete_file_cleanup() {
 }
 
 fn main() {
-    #[cfg(target_os = "macos")]
-    if let Some(code) = local_daemon::maybe_run_install_app(std::env::args()) {
-        std::process::exit(code);
-    }
     if let Some(code) = smelt_cli::maybe_run(std::env::args()) {
         std::process::exit(code);
     }

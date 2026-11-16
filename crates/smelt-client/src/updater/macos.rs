@@ -858,6 +858,181 @@ pub fn run_installer(update_id: &str, attempt_id: &str) -> anyhow::Result<()> {
     }
 }
 
+/// 本地构建的包（`make install`）的前半段：校验，复制到目标同目录的交换位置。返回交换
+/// id，交给 [`commit_local_app`] 提交；交不出去时用 [`discard_local_app`] 删掉副本。
+/// 先复制好，GUI 和守护停下的时间就只剩一次交换。
+///
+/// 交换位置先登记成待回收的旧包（`cleanup_app`）再复制：它在哪一步都是要删的东西，
+/// 交换前是新包的副本，交换后是换下的旧包。复制时 Ctrl-C、提交进程被杀，下次 GUI
+/// 启动的恢复都会把它收掉。和在线更新一样，上次换下的旧包没回收掉就不开始新的替换。
+///
+/// 候选是开发者自己刚打的包：不走下载事务，也不和已装版本比签名身份。
+pub fn stage_local_app(source: &Path, target: &Path) -> anyhow::Result<String> {
+    validate_local_app(source)?;
+    if target.extension().and_then(|value| value.to_str()) != Some("app") {
+        anyhow::bail!("安装目标不是 .app：{}", target.display());
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let swap = swap_path(target, &id)?;
+    {
+        let _guard = acquire_update_lock()?;
+        let state_path = update_state_path()?;
+        let mut state = load_update_state_locked(&state_path)?;
+        reject_applying_update(&state)?;
+        if !cleanup_registered_app_locked(&state_path, &mut state, target)? {
+            anyhow::bail!("上次换下的旧 App 仍被占用，已停止替换");
+        }
+        state.cleanup_app = Some(swap.clone());
+        save_update_state_locked(&state_path, &state)?;
+    }
+    // 复制几百 MB 不占着更新锁：GUI 启动时的恢复也要拿这把锁。
+    if let Err(error) = copy_app_bundle(source, &swap) {
+        let _ = discard_local_app(target, &id);
+        return Err(error);
+    }
+    Ok(id)
+}
+
+/// 删掉还没换上去的新包副本，撤掉它的回收登记。登记已经不是它（被 GUI 启动时的恢复
+/// 收掉了）就不碰。
+pub fn discard_local_app(target: &Path, id: &str) -> anyhow::Result<()> {
+    let swap = swap_path(target, id)?;
+    let _guard = acquire_update_lock()?;
+    let state_path = update_state_path()?;
+    let mut state = load_update_state_locked(&state_path)?;
+    if state.cleanup_app.as_deref() != Some(swap.as_path()) {
+        return Ok(());
+    }
+    remove_registered_swap(target, &swap)?;
+    state.cleanup_app = None;
+    save_update_state_locked(&state_path, &state)
+}
+
+/// 后半段，和在线更新同一条顺序：让 GUI 退出并等它们全部退出，确认没人在用目标 App、
+/// 停守护，原子交换 App，回收旧包，再打开 `target`。守护和 smelt-agent 由新 GUI 启动时
+/// 从 App 里换上，这里不碰 `~/.smelt/bin`。
+///
+/// 守护停机会杀掉它名下终端和 ACP 的进程组，而 `make install` 常在 Smelt 自己的终端里
+/// 跑：这一段必须放在脱离那个终端的新会话里（见 `smelt-installer`），也就看不到终端，
+/// 进度和错误只写 app.log。
+pub fn commit_local_app(target: &Path, id: &str) -> anyhow::Result<()> {
+    let swap = swap_path(target, id)?;
+    if let Err(error) = request_running_app_quit() {
+        smelt_sys::app_log::warn(
+            "installer",
+            &format!("没能让 Smelt 自己退出，等用户手动退出：{error:#}"),
+        );
+    }
+    let committed = swap_local_app(target, &swap);
+    if committed.is_err() {
+        // 没换上：交换位置里还是新包副本。删不掉也还登记着，下次 GUI 启动时回收。
+        let _ = discard_local_app(target, id);
+    }
+    // 成功打开新版；失败也把刚才让它退出的旧版拉回来。
+    let relaunched = relaunch_app(target);
+    committed?;
+    relaunched
+}
+
+fn validate_local_app(app: &Path) -> anyhow::Result<()> {
+    if app.extension().and_then(|value| value.to_str()) != Some("app") || !app.is_dir() {
+        anyhow::bail!("不是 .app 包：{}", app.display());
+    }
+    if !app.join("Contents/Info.plist").is_file() {
+        anyhow::bail!("App 缺少 Contents/Info.plist：{}", app.display());
+    }
+    for name in ["smelt", "smeltd", "smelt-notify", INSTALLER_NAME] {
+        if !app.join("Contents/MacOS").join(name).is_file() {
+            anyhow::bail!("App 缺少 Contents/MacOS/{name}：{}", app.display());
+        }
+    }
+    Ok(())
+}
+
+/// 和用户按 ⌘Q 不同，Apple Event 的 quit 不弹退出确认，GUI 照常落盘布局后退出。
+fn request_running_app_quit() -> anyhow::Result<()> {
+    let script = format!(
+        "if application id \"{BUNDLE_ID}\" is running then tell application id \"{BUNDLE_ID}\" to quit"
+    );
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .context("运行 osascript 失败")?;
+    if !output.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
+fn reject_applying_update(state: &UpdateState) -> anyhow::Result<()> {
+    if state
+        .staged
+        .as_ref()
+        .is_some_and(|staged| staged.phase == StagedUpdatePhase::Applying)
+    {
+        anyhow::bail!("在线更新的交换还没收尾，先打开一次 Smelt 让它恢复");
+    }
+    Ok(())
+}
+
+/// 交换之前的失败都返回错误，交换位置里仍是新包副本；交换之后只剩收尾，失败只记日志，
+/// 不把已经装上的新版报成失败。
+fn swap_local_app(target: &Path, swap: &Path) -> anyhow::Result<()> {
+    let runtime_lease = acquire_installer_runtime_lease()?;
+    let _guard = acquire_update_lock()?;
+    let state_path = update_state_path()?;
+    let mut state = load_update_state_locked(&state_path)?;
+    if state.cleanup_app.as_deref() != Some(swap) {
+        anyhow::bail!("新包副本已被回收（期间打开过 Smelt？），重新运行 make install");
+    }
+    reject_applying_update(&state)?;
+    if std::fs::symlink_metadata(target).is_ok() {
+        quiesce_app_target(target)?;
+        swap_app_bundles(target, swap)?;
+    } else {
+        // 还没装过：直接放上去，交换位置空了，登记跟着撤掉。
+        std::fs::rename(swap, target)
+            .with_context(|| format!("安装 App 失败：{}", target.display()))?;
+        state.cleanup_app = None;
+    }
+    drop(runtime_lease);
+
+    // 之前下好还没装的在线更新是给换下去的那一版准备的，留着它，⌘Q 退出时会把刚装的包
+    // 盖回去。状态先落盘再删缓存，和作废暂存作业同一个顺序。
+    let discarded = state.staged.take();
+    if let Err(error) = save_update_state_locked(&state_path, &state) {
+        smelt_sys::app_log::warn(
+            "installer",
+            &format!("App 已换上，更新状态没写进去，旧包留到下次启动回收：{error:#}"),
+        );
+        return Ok(());
+    }
+    if let Some(update) = &discarded {
+        discard_update_artifacts(update);
+    }
+    // 换下的旧包没人用就现在删；还有人用就留着登记，下次 GUI 启动时回收。
+    if let Err(error) = cleanup_registered_app_locked(&state_path, &mut state, target) {
+        smelt_sys::app_log::warn(
+            "installer",
+            &format!("旧 App 暂未删除，留到下次启动回收：{error:#}"),
+        );
+    }
+    Ok(())
+}
+
+/// 交换 App 前的最后一步，在线更新和 `make install` 共用：调用方持有独占的 runtime
+/// lease，懂锁的 GUI 都已退出、新的起不来；lsof 再兜住不懂锁的旧版 GUI。之后停本机守护。
+fn quiesce_app_target(app_bundle: &Path) -> anyhow::Result<()> {
+    if bundle_use_state(app_bundle)? != BundleUseState::Unused {
+        anyhow::bail!("目标 App 又被进程使用，拒绝替换");
+    }
+    if !shutdown_local_daemon() {
+        anyhow::bail!("旧守护进程没有退出，已停止替换 App");
+    }
+    Ok(())
+}
+
 fn cache_root() -> anyhow::Result<PathBuf> {
     let dir = dirs::cache_dir()
         .ok_or_else(|| anyhow::anyhow!("找不到系统缓存目录"))?
@@ -887,21 +1062,7 @@ pub async fn download_and_stage(
     let _ = std::fs::remove_file(&zip_path);
 
     let result = async {
-        let mut resp = reqwest::Client::new()
-            .get(url)
-            .header("User-Agent", "smelt-updater")
-            .send()
-            .await?
-            .error_for_status()?;
-        validate_download_url(resp.url().as_str())?;
-        if resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
-        {
-            anyhow::bail!("更新地址返回了 HTML，不是 ZIP：{url}");
-        }
+        let mut resp = open_package_download(url, " ZIP").await?;
         let total = resp.content_length();
         on_progress(DownloadProgress::Bytes { received: 0, total });
 
@@ -909,8 +1070,9 @@ pub async fn download_and_stage(
         let mut received = 0u64;
         let mut reported = 0u64;
         while let Some(chunk) = resp.chunk().await? {
-            file.write_all(&chunk)?;
             received += chunk.len() as u64;
+            ensure_package_size(received)?;
+            file.write_all(&chunk)?;
             if received - reported >= PROGRESS_REPORT_STEP || Some(received) == total {
                 reported = received;
                 on_progress(DownloadProgress::Bytes { received, total });
@@ -1461,7 +1623,11 @@ fn abandon_pending_update_locked(
     app_bundle: &Path,
     verified_cleanup_app: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    state.cleanup_app = verified_cleanup_app;
+    // 只有作废 Applying 作业时才带着它的交换目录进来，那时登记位一定是空的（finalize 在
+    // 登记位有东西时不开始交换）。别的情况登记位里可能是还没回收的旧包，不能冲掉。
+    if verified_cleanup_app.is_some() {
+        state.cleanup_app = verified_cleanup_app;
+    }
     state.staged = None;
     save_update_state_locked(state_path, state)?;
     discard_update_artifacts(pending);
@@ -1624,11 +1790,8 @@ fn finalize_pending_update_for_attempt(
         anyhow::bail!("installer 目标 App 与持久化 attempt 不一致");
     }
     finalize_pending_update_at(&update, Some(attempt_id), target_app, |_| {
-        if shutdown_local_daemon() {
-            Ok(InstallPreparation::Proceed)
-        } else {
-            anyhow::bail!("旧守护进程没有退出，已停止替换 App")
-        }
+        quiesce_app_target(target_app)?;
+        Ok(InstallPreparation::Proceed)
     })
 }
 
@@ -1656,11 +1819,6 @@ fn finalize_pending_update_at(
             .as_ref()
             .filter(|attempt| attempt.id == expected_attempt_id && attempt.target_app == app_bundle)
             .ok_or_else(|| anyhow::anyhow!("installer attempt 已被撤销或替换"))?;
-        // 调用者持有 AppRuntimeLease 独占锁；所有新 GUI 要先拿共享锁，因此这里到
-        // RENAME_SWAP 之间不会再有 GUI 从目标 Bundle 启动。lsof 继续兜住不懂锁的旧版。
-        if bundle_use_state(app_bundle)? != BundleUseState::Unused {
-            anyhow::bail!("目标 App 又被进程使用，拒绝提交更新");
-        }
     }
     // 旧 Bundle 可能仍被 managed 迁移前的 smeltd 引用。提交正确性不依赖旧包清理；
     // 无法证明没有进程使用时必须保留，由独立 fail-closed GC 后续处理。
@@ -2269,6 +2427,31 @@ mod tests {
         let persisted = load_update_state_locked(&state_path).unwrap();
         assert!(persisted.staged.is_none());
         assert_eq!(persisted.current_url, state.current_url);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 作废暂存作业不能冲掉还没回收的旧包登记，否则旧包就没人删了。
+    #[test]
+    fn discarding_a_staged_job_keeps_the_pending_cleanup() {
+        let root = test_root("discard-keeps-cleanup");
+        let app = fake_current_app(&root, b"current-version");
+        // 不在 App 同目录：清理会拒绝它，登记应原样留着。
+        let cleanup = root.join("elsewhere/.Smelt.smelt-update-old.app");
+        std::fs::create_dir_all(&cleanup).unwrap();
+        let state_path = root.join("update-state.json");
+        let ready = staged_update("ready");
+        let mut state = UpdateState {
+            current_url: None,
+            staged: Some(ready.clone()),
+            cleanup_app: Some(cleanup.clone()),
+        };
+
+        discard_staged_update_locked(&state_path, &mut state, &ready, &app).unwrap();
+
+        let persisted = load_update_state_locked(&state_path).unwrap();
+        assert!(persisted.staged.is_none());
+        assert_eq!(persisted.cleanup_app, Some(cleanup.clone()));
+        assert!(cleanup.is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,46 +1,45 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Smelt 远程桌面：只有底部居中一条停靠栏，长度随内容，放「Chrome」「终端」两个启动图标
-     和已打开的窗口（同一个程序的窗口合成一个图标，不显示文字）。没有顶部任务栏。
-     两个启动图标的 .desktop 由 install.sh 写进 ~/.config/xfce4/panel/launcher-1、launcher-2
-     （里面要写绝对路径）。停靠栏是不透明的直角矩形：圆角和半透明要开合成器，这里不开
-     （见 xfwm4.xml）。 -->
+<!-- Smelt 远程桌面的顶栏，同 macOS 的菜单栏：贴着屏幕上边的一条半透明窄条，左边开始菜单
+     （Whisker，按钮是 Smelt 的白色剪影，收藏夹放浏览器、终端、文件管理器，见 install.sh 写的
+     whiskermenu/defaults.rc），右边日期和时间。开着的窗口在底部的停靠栏（Plank）里，顶栏不放
+     窗口列表。半透明要合成器（见 xfwm4.xml）。
+     时钟只写 digital-format：4.16 认它；4.18 改成 digital-layout 加 digital-time-format，新的
+     一个都没设时把旧的 digital-format 原样当时间格式用。只到分钟，一分钟才重画一次。星期和
+     月份的写法跟着系统语言。 -->
 <channel name="xfce4-panel" version="1.0">
   <property name="configver" type="int" value="2"/>
   <property name="panels" type="array">
     <value type="int" value="1"/>
     <property name="panel-1" type="empty">
-      <property name="position" type="string" value="p=10;x=0;y=0"/>
+      <property name="position" type="string" value="p=6;x=0;y=0"/>
       <property name="position-locked" type="bool" value="true"/>
-      <property name="length" type="uint" value="1"/>
-      <property name="length-adjust" type="bool" value="true"/>
-      <property name="size" type="uint" value="48"/>
-      <property name="icon-size" type="uint" value="32"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="size" type="uint" value="26"/>
+      <property name="icon-size" type="uint" value="16"/>
+      <property name="dark-mode" type="bool" value="true"/>
+      <property name="background-style" type="uint" value="1"/>
+      <property name="background-rgba" type="array">
+        <value type="double" value="0.09"/>
+        <value type="double" value="0.09"/>
+        <value type="double" value="0.10"/>
+        <value type="double" value="0.62"/>
+      </property>
       <property name="plugin-ids" type="array">
         <value type="int" value="1"/>
         <value type="int" value="2"/>
         <value type="int" value="3"/>
-        <value type="int" value="4"/>
       </property>
     </property>
   </property>
   <property name="plugins" type="empty">
-    <property name="plugin-1" type="string" value="launcher">
-      <property name="items" type="array">
-        <value type="string" value="smelt-chrome.desktop"/>
-      </property>
-    </property>
-    <property name="plugin-2" type="string" value="launcher">
-      <property name="items" type="array">
-        <value type="string" value="smelt-terminal.desktop"/>
-      </property>
-    </property>
-    <property name="plugin-3" type="string" value="separator">
+    <property name="plugin-1" type="string" value="whiskermenu"/>
+    <property name="plugin-2" type="string" value="separator">
       <property name="style" type="uint" value="0"/>
+      <property name="expand" type="bool" value="true"/>
     </property>
-    <property name="plugin-4" type="string" value="tasklist">
-      <property name="grouping" type="uint" value="1"/>
-      <property name="show-labels" type="bool" value="false"/>
-      <property name="flat-buttons" type="bool" value="true"/>
+    <property name="plugin-3" type="string" value="clock">
+      <property name="mode" type="uint" value="2"/>
+      <property name="digital-format" type="string" value="%a %b %-d  %H:%M"/>
     </property>
   </property>
 </channel>

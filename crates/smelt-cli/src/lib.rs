@@ -272,7 +272,6 @@ mod tests {
         assert_eq!(maybe_run(["smelt", "--help"]), Some(0));
         assert_eq!(maybe_run(["smelt", "--version"]), Some(0));
         assert_eq!(maybe_run(["smelt"]), None);
-        assert_eq!(maybe_run(["smelt", "--install-app"]), None);
     }
 
     #[test]

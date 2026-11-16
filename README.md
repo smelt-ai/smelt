@@ -58,7 +58,7 @@ curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh
 
 Or download `smeltd-<version>-linux-<arch>.tar.gz` and run `./install.sh`. `--with-desktop` also installs TigerVNC, XFCE, and a resident Chrome, then runs `smeltd mcp add playwright`. `--relay=<url>` sets the initial iroh relay. `--apt-mirror=<mirror>` selects an apt mirror for this install.
 
-Run as root, the installer creates a `smelt` user for the runtime and adds `/usr/local/bin/smeltd`, which switches to that user. Run as a normal user, it links `~/.local/bin/smeltd` and tells you if that directory isn't on `PATH`. There is no `smelt` command on Linux; that's the desktop app. Running the installer again upgrades.
+Run as root, the runtime runs as root and `smeltd` / `smelt` are linked into `/usr/local/bin`; Claude Code is told it is in a sandbox (`IS_SANDBOX=1`) so it still skips permission prompts. Agents then can modify the whole machine: to keep them under a normal user, set `SMELT_USER=<name>` and the installer creates that user and adds `/usr/local/bin/smeltd` and `/usr/local/bin/smelt`, which switch to it. An existing install under `smelt` keeps using it. Run as a normal user, it links `~/.local/bin/smeltd` and `~/.local/bin/smelt` and tells you if that directory isn't on `PATH`. Running the installer again upgrades.
 
 ```sh
 smeltd status
