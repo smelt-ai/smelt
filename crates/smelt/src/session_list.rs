@@ -373,6 +373,94 @@ fn project_workset_menu(
 /// 底栏额度弹层的宽度：名字一栏、用量条、百分比放得下。
 const QUOTA_POPOVER_WIDTH: f32 = 268.;
 
+/// 额度环跟对话上下文环一样用路径绘制，长度表示已用量；双环依次是 5 小时、周。
+fn quota_rings(rings: Vec<(String, f64)>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let center_x = f32::from(bounds.origin.x + bounds.size.width / 2.0);
+            let center_y = f32::from(bounds.origin.y + bounds.size.height / 2.0);
+            let stroke = if rings.len() > 1 { 1.75_f32 } else { 2.0_f32 };
+            let outer_radius = if rings.len() > 1 {
+                12.125_f32
+            } else {
+                10.0_f32
+            };
+            for (index, (_, used)) in rings.iter().enumerate() {
+                let radius = outer_radius - index as f32 * 3.5;
+                let radii = point(px(radius), px(radius));
+                let top = point(px(center_x), px(center_y - radius));
+                let bottom = point(px(center_x), px(center_y + radius));
+                let mut track = PathBuilder::stroke(px(stroke));
+                track.move_to(top);
+                track.arc_to(radii, px(0.), false, true, bottom);
+                track.arc_to(radii, px(0.), false, true, top);
+                if let Ok(path) = track.build() {
+                    window.paint_path(path, ui_theme::hair());
+                }
+
+                let fraction = row::quota_ring_fraction(*used);
+                if fraction <= 0.0 {
+                    continue;
+                }
+                let color = if *used >= 90.0 {
+                    ui_theme::bad()
+                } else if *used >= 50.0 {
+                    ui_theme::need()
+                } else {
+                    ui_theme::ok()
+                };
+                let mut progress = PathBuilder::stroke(px(stroke));
+                progress.move_to(top);
+                let end = if fraction >= 0.999 {
+                    progress.arc_to(radii, px(0.), false, true, bottom);
+                    progress.arc_to(radii, px(0.), false, true, top);
+                    None
+                } else {
+                    let theta = fraction * std::f32::consts::TAU;
+                    let end = point(
+                        px(center_x + radius * theta.sin()),
+                        px(center_y - radius * theta.cos()),
+                    );
+                    progress.arc_to(radii, px(0.), fraction > 0.5, true, end);
+                    Some(end)
+                };
+                if let Ok(path) = progress.build() {
+                    window.paint_path(path, rgb(color));
+                }
+                // PathBuilder 的弧线端点是平的，补两个半径为半线宽的圆作圆头。
+                if let Some(end) = end {
+                    let cap_radius = px(stroke / 2.0);
+                    for cap in [top, end] {
+                        let mut dot = PathBuilder::fill();
+                        dot.move_to(point(cap.x - cap_radius, cap.y));
+                        dot.arc_to(
+                            point(cap_radius, cap_radius),
+                            px(0.),
+                            false,
+                            true,
+                            point(cap.x + cap_radius, cap.y),
+                        );
+                        dot.arc_to(
+                            point(cap_radius, cap_radius),
+                            px(0.),
+                            false,
+                            true,
+                            point(cap.x - cap_radius, cap.y),
+                        );
+                        if let Ok(path) = dot.build() {
+                            window.paint_path(path, rgb(color));
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
+
 /// 底栏额度点开的列表：每家一行，名字、用量条、百分比。悬停看各窗口和重置时间，点哪家
 /// 刷新哪家（只刷这一家）。
 fn quota_popover(quotas: Vec<FooterQuota>, workspace: Entity<Workspace>) -> Div {
@@ -2746,10 +2834,9 @@ impl Workspace {
         let settings_needs_attention = self.settings_attention(cx).is_some();
 
         // ---- 底部额度：跟设置同一条底栏，放在右边 ----
-        // provider 账户额度（Codex / Claude / Copilot / Grok / Cursor），只列「检测到额度」
-        // 的。一家就是一个图标加百分比，几家都常显，不收起来：要看额度还得悬停就白放在
-        // 底栏了。侧栏窄、一行放不下时折到第二行，底栏跟着长高。悬停哪块看哪块的各窗口
-        // 和重置时间；点开是全部：每家一行，点哪家刷新哪家。
+        // provider 账户额度只列「检测到额度」的。每家用图标和已用额度环常显，
+        // 双环外 5 小时内周；总额未知时保留剩余数字。悬停看各窗口和重置时间；
+        // 点开看全部，点哪家刷新哪家。侧栏窄时折行。
         // Pi 不在这里：它底下几家 provider 是独立账户，额度跟在对话模型菜单的
         // provider 名字后面（括号），那里才说得清数字属于谁。
         // 状态在这里一次性读完，弹层的构造闭包里不再碰全局。
@@ -2758,14 +2845,22 @@ impl Workspace {
             .into_iter()
             .filter_map(|target| {
                 let status = crate::provider_quota::ProviderStatus::quota_status(target, cx)?;
-                let used = status.quota.as_ref()?.used_percent();
+                let quota = status.quota.as_ref()?;
+                let used = quota.used_percent();
+                let rings = row::quota_ring_windows(quota);
                 let row = provider_quota_row(target, &status)?;
+                let hint = if rings.len() > 1 {
+                    format!("{} · 外环 {}，内环 {}", row.hint, rings[0].0, rings[1].0)
+                } else {
+                    row.hint
+                };
                 Some(FooterQuota {
                     target,
                     text: row.text,
                     color: row.color,
-                    hint: row.hint,
+                    hint,
                     used,
+                    rings,
                     refreshing: crate::provider_quota::ProviderStatus::is_manually_refreshing(
                         target, cx,
                     ),
@@ -2805,30 +2900,46 @@ impl Workspace {
                     } else {
                         quota.hint.clone()
                     };
+                    let icon_size = if quota.rings.len() > 1 { 9. } else { 11. };
                     h_flex()
                         .id(SharedString::from(format!(
                             "quota-chip-{}",
                             quota.target.id()
                         )))
                         .flex_shrink_0()
-                        .gap_1()
                         .items_center()
-                        .text_color(rgb(quota.color))
-                        .child(acp_provider_icon(quota.target.agent).size(px(12.)))
-                        .map(|chip| {
-                            if quota.refreshing {
-                                chip.child(smelt_ui::motion::ambient_spinner(
-                                    SharedString::from(format!(
-                                        "quota-chip-refresh-{}",
-                                        quota.target.id()
-                                    )),
-                                    rgb(quota.color).into(),
-                                    true,
-                                ))
-                            } else {
-                                chip.child(quota.text.clone())
-                            }
-                        })
+                        .gap_1()
+                        .child(
+                            div()
+                                .relative()
+                                .size(px(26.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .children(
+                                    (!quota.rings.is_empty())
+                                        .then(|| quota_rings(quota.rings.clone())),
+                                )
+                                .text_color(rgb(ui_theme::text()))
+                                .map(|icon| {
+                                    if quota.refreshing {
+                                        icon.child(smelt_ui::motion::ambient_spinner(
+                                            SharedString::from(format!(
+                                                "quota-chip-refresh-{}",
+                                                quota.target.id()
+                                            )),
+                                            rgb(quota.color).into(),
+                                            true,
+                                        ))
+                                    } else {
+                                        icon.child(
+                                            acp_provider_icon(quota.target.agent)
+                                                .size(px(icon_size)),
+                                        )
+                                    }
+                                }),
+                        )
+                        .children(quota.rings.is_empty().then(|| quota.text.clone()))
                         .tooltip(move |window, cx| {
                             gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                         })
