@@ -38,10 +38,13 @@ COMMANDS=(smeltd smelt)
 BASE_PACKAGES=(ca-certificates curl)
 # D9 实测过的一套；不装中文字体，中文网页全是方块。装时不带推荐包（容器里能省几百 MB），
 # 所以 Xvnc 要的 X 核心字体（fixed）、图标主题和终端的等宽字体要自己列上。图标用 Papirus
-# （只占磁盘，不耗 CPU）；Adwaita 留着给鼠标指针，也是 Papirus 缺图标时的后备。
+# （只占磁盘，不耗 CPU）；Adwaita 留着给鼠标指针，也是 Papirus 缺图标时的后备。GTK3 只内置
+# 浅色的 Adwaita，xsettings.xml 里的 Adwaita-dark 在 gnome-themes-extra-data 里，不装就退回
+# 浅色。开始菜单用 Whisker（带搜索和收藏夹），文件管理器用 Thunar。
 DESKTOP_PACKAGES=(
   tigervnc-standalone-server xauth xfonts-base xfce4 xfce4-terminal adwaita-icon-theme
-  papirus-icon-theme dbus xdotool fonts-noto-cjk fonts-dejavu-core
+  papirus-icon-theme gnome-themes-extra-data xfce4-whiskermenu-plugin thunar dbus xdotool
+  fonts-noto-cjk fonts-dejavu-core
 )
 # 运行时装成 systemd 用户服务：linger 拉起用户的 systemd 要 pam_systemd 给它建
 # XDG_RUNTIME_DIR，systemctl --user 要用户总线（/run/user/<uid>/bus）。minbase 一类的精简
@@ -467,10 +470,14 @@ write_unit() {
 apply_desktop_config() {
   local dir=$1 config=$2
   local stamp="$dir/config.sha256" xml_dir="$config/xfce4/xfconf/xfce-perchannel-xml" want
-  want="$(cat "$HERE"/desktop/xfce4/*.xml "$HERE/desktop/terminalrc" | sha256sum | cut -d' ' -f1)"
+  # 图片也算进去：xfdesktop 和面板只在起来时读一次，换了图要重启会话才看得到。
+  want="$(cat "$HERE"/desktop/xfce4/*.xml "$HERE/desktop/terminalrc" "$HERE"/desktop/*.png \
+    | sha256sum | cut -d' ' -f1)"
   [[ "$(cat "$stamp" 2>/dev/null)" == "$want" ]] && return 0
   mkdir -p "$xml_dir" "$config/xfce4/terminal"
   install -m 0644 "$HERE"/desktop/xfce4/*.xml "$xml_dir/"
+  # xfconf 不展开 ~ 和变量，壁纸要写绝对路径。
+  sed -i "s|@DESKTOP_DIR@|$dir|g" "$xml_dir/xfce4-desktop.xml"
   # xfce4-terminal 1.0 以前的版本不读 xfconf，读这份；和 xfce4-terminal.xml 内容相同。
   install -m 0644 "$HERE/desktop/terminalrc" "$config/xfce4/terminal/terminalrc"
   restart_desktop_session
@@ -501,26 +508,42 @@ install_desktop() {
     put 0755 "$HERE/desktop/$script" "$dir/bin/$script"
   done
 
-  # 任务栏的两个启动图标（xfce4-panel.xml 里的 launcher-1、launcher-2）。Chrome 图标调同一个
-  # 启动脚本，开的是 agent 用的那个实例，不会另起一个没有登录状态、agent 也连不上的 Chrome。
-  local icon=chromium
-  command -v google-chrome-stable >/dev/null 2>&1 && icon=google-chrome
-  mkdir -p "$config/xfce4/panel/launcher-1" "$config/xfce4/panel/launcher-2"
-  cat >"$config/xfce4/panel/launcher-1/smelt-chrome.desktop" <<EOF
+  # 壁纸（xfce4-desktop.xml）和开始菜单按钮的图标。
+  put 0644 "$HERE/desktop/wallpaper.png" "$dir/wallpaper.png"
+  put 0644 "$HERE/desktop/smelt.png" "$dir/smelt.png"
+
+  # 浏览器的菜单项用同名文件盖掉系统那份（用户目录里同名的优先），改成调同一个启动脚本：
+  # 从菜单、文件管理器或别的程序打开网页，开的都是 agent 用的那个实例，不会另起一个没有
+  # 登录状态、agent 也连不上的 Chrome。带 --new-window：不带参数是服务在拉起（见 chrome）。
+  # MimeType 照抄系统那份，网页和链接仍然归它打开。
+  local browser=chromium name=Chromium
+  if command -v google-chrome-stable >/dev/null 2>&1; then
+    browser=google-chrome name=Chrome
+  fi
+  local apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  mkdir -p "$apps"
+  cat >"$apps/$browser.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Chrome
-Exec="$dir/bin/chrome" --new-window
-Icon=$icon
+Name=$name
+Exec="$dir/bin/chrome" --new-window %U
+Icon=$browser
+Categories=Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
 EOF
-  cat >"$config/xfce4/panel/launcher-2/smelt-terminal.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=终端
-Exec=xfce4-terminal
-Icon=utilities-terminal
+  # 开始菜单（Whisker）的默认设置：按钮是 Smelt 的图标，收藏夹放浏览器、终端、文件管理器。
+  # 2.7（Debian 12、Ubuntu 22.04）和 2.8 起都先读这份，人在菜单里改过的另存，不受它影响。
+  mkdir -p "$config/xfce4/whiskermenu"
+  cat >"$config/xfce4/whiskermenu/defaults.rc" <<EOF
+favorites=$browser.desktop,xfce4-terminal.desktop,thunar.desktop
+button-icon=$dir/smelt.png
 EOF
-  # 启动图标写好之后再换设置：要重启会话的话，新会话一起来就看得到它们。
+  # 以前停靠栏上的两个启动图标，现在的面板没有了。
+  rm -f "$config/xfce4/panel/launcher-1/smelt-chrome.desktop" \
+    "$config/xfce4/panel/launcher-2/smelt-terminal.desktop"
+  rmdir "$config/xfce4/panel/launcher-1" "$config/xfce4/panel/launcher-2" 2>/dev/null || true
+
+  # 菜单项写好之后再换设置：要重启会话的话，新会话一起来就看得到它们。
   apply_desktop_config "$dir" "$config"
 
   if has_systemd; then

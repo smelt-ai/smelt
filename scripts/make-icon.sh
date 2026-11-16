@@ -2,7 +2,8 @@
 # 从 assets/icon.svg 渲染前景 + 深石墨渐变圆角方块底，合成 macOS app 图标。
 # 产出 assets/icon-1024.png（母图）和 assets/AppIcon.icns（打包用）。
 # 另把 crates/smelt/assets/icons/agent-*.svg 渲染成 assets/agent-*.png
-# （macOS 菜单栏下拉里各 agent 会话的 logo，见 status_item.rs 的 AGENT_LOGO_PNG）。
+# （macOS 菜单栏下拉里各 agent 会话的 logo，见 status_item.rs 的 AGENT_LOGO_PNG），
+# 以及 Linux 远程桌面的菜单图标和壁纸 scripts/desktop/{smelt,wallpaper}.png。
 # 依赖：rsvg-convert（brew install librsvg）、python3 + Pillow、系统 sips / iconutil。
 set -euo pipefail
 
@@ -74,6 +75,28 @@ for a in claude copilot codex grok antigravity cursor opencode kiro pi crush; do
   rsvg-convert -w 32 -h 32 "$AGENT_ICON_DIR/agent-$a.svg" -o "$ASSETS/agent-$a.png"
   echo "   saved $ASSETS/agent-$a.png"
 done
+
+# Linux 远程桌面（install.sh --with-desktop）：开始菜单按钮的图标，和壁纸（同 App 图标底色
+# 的竖直渐变，前景在正中略偏上：底部有面板）。壁纸 2560×1600，xfdesktop 按屏幕铺满裁边。
+echo "▶ 渲染远程桌面的菜单图标和壁纸 …"
+DESKTOP_DIR="$ROOT/scripts/desktop"
+rsvg-convert -w 128 -h 128 "$SVG" -o "$DESKTOP_DIR/smelt.png"
+rsvg-convert -w 256 -h 256 "$SVG" -o "$TMP/wallpaper-fg.png"
+python3 - "$TMP/wallpaper-fg.png" "$DESKTOP_DIR/wallpaper.png" <<'PY'
+import sys
+from PIL import Image
+W, H = 2560, 1600
+fg = Image.open(sys.argv[1]).convert("RGBA")
+top, bot = (0x33, 0x34, 0x3d), (0x16, 0x16, 0x1b)
+grad = Image.new("RGB", (1, H))
+for y in range(H):
+    t = y / (H - 1)
+    grad.putpixel((0, y), tuple(round(top[i] + (bot[i] - top[i]) * t) for i in range(3)))
+img = grad.resize((W, H)).convert("RGBA")
+img.alpha_composite(fg, ((W - fg.width) // 2, (H - fg.height) // 2 - 80))
+img.convert("RGB").save(sys.argv[2], optimize=True)
+PY
+echo "   saved $DESKTOP_DIR/smelt.png、$DESKTOP_DIR/wallpaper.png"
 
 echo "✅ 图标已生成：$ASSETS/AppIcon.icns（重新 make dist 即会打进包）"
 echo "✅ agent logo 已生成：$ASSETS/agent-*.png"
