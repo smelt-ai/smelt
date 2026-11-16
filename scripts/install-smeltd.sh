@@ -40,11 +40,12 @@ BASE_PACKAGES=(ca-certificates curl)
 # 所以 Xvnc 要的 X 核心字体（fixed）、图标主题和终端的等宽字体要自己列上。图标用 Papirus
 # （只占磁盘，不耗 CPU）；Adwaita 留着给鼠标指针，也是 Papirus 缺图标时的后备。GTK3 只内置
 # 浅色的 Adwaita，xsettings.xml 里的 Adwaita-dark 在 gnome-themes-extra-data 里，不装就退回
-# 浅色。开始菜单用 Whisker（带搜索和收藏夹），文件管理器用 Thunar。
+# 浅色。开始菜单用 Whisker（带搜索和收藏夹），文件管理器用 Thunar，底部的停靠栏用 Plank，
+# 界面字体用 Inter（接近 macOS 的系统字体）。
 DESKTOP_PACKAGES=(
   tigervnc-standalone-server xauth xfonts-base xfce4 xfce4-terminal adwaita-icon-theme
-  papirus-icon-theme gnome-themes-extra-data xfce4-whiskermenu-plugin thunar dbus xdotool
-  fonts-noto-cjk fonts-dejavu-core
+  papirus-icon-theme gnome-themes-extra-data xfce4-whiskermenu-plugin thunar plank dbus xdotool
+  fonts-noto-cjk fonts-dejavu-core fonts-inter
 )
 # 运行时装成 systemd 用户服务：linger 拉起用户的 systemd 要 pam_systemd 给它建
 # XDG_RUNTIME_DIR，systemctl --user 要用户总线（/run/user/<uid>/bus）。minbase 一类的精简
@@ -465,14 +466,18 @@ write_unit() {
   } >"$UNIT_DIR/$name"
 }
 
-# XFCE 的精简设置随包走，按内容记一份指纹：包里的设置没变就不动，人在远程桌面里改过的
-# 保留；变了（包括有指纹之前装的机器）就整份换掉，再重启会话让它读新的。
+# XFCE 和停靠栏的设置随包走，按内容记一份指纹：包里的设置没变就不动，人在远程桌面里改过
+# 的保留；变了（包括有指纹之前装的机器）就整份换掉，再重启会话让它读新的。
 apply_desktop_config() {
-  local dir=$1 config=$2
+  local dir=$1 config=$2 browser=$3
   local stamp="$dir/config.sha256" xml_dir="$config/xfce4/xfconf/xfce-perchannel-xml" want
-  # 图片也算进去：xfdesktop 和面板只在起来时读一次，换了图要重启会话才看得到。
-  want="$(cat "$HERE"/desktop/xfce4/*.xml "$HERE/desktop/terminalrc" "$HERE"/desktop/*.png \
-    | sha256sum | cut -d' ' -f1)"
+  # 图片和主题也算进去：窗口管理器、xfdesktop、面板和停靠栏都只在起来时读一次，换了要重启
+  # 会话才看得到。浏览器也算：停靠栏上的图标指向它。
+  want="$({
+    cat "$HERE"/desktop/xfce4/*.xml "$HERE/desktop/terminalrc" "$HERE"/desktop/*.{png,jpg} \
+      "$HERE"/desktop/xfwm4/* "$HERE"/desktop/plank/*
+    echo "$browser"
+  } | sha256sum | cut -d' ' -f1)"
   [[ "$(cat "$stamp" 2>/dev/null)" == "$want" ]] && return 0
   mkdir -p "$xml_dir" "$config/xfce4/terminal"
   install -m 0644 "$HERE"/desktop/xfce4/*.xml "$xml_dir/"
@@ -480,6 +485,21 @@ apply_desktop_config() {
   sed -i "s|@DESKTOP_DIR@|$dir|g" "$xml_dir/xfce4-desktop.xml"
   # xfce4-terminal 1.0 以前的版本不读 xfconf，读这份；和 xfce4-terminal.xml 内容相同。
   install -m 0644 "$HERE/desktop/terminalrc" "$config/xfce4/terminal/terminalrc"
+
+  # 停靠栏：设置（见 desktop/plank/settings）和三个启动图标。图标按文件名排在设置的
+  # dock-items 里；人在停靠栏上拖走、加上的，Plank 自己增删这里的文件。
+  mkdir -p "$config/glib-2.0/settings"
+  install -m 0644 "$HERE/desktop/plank/settings" "$config/glib-2.0/settings/keyfile"
+  local launchers="$config/plank/dock1/launchers" apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  rm -rf "$launchers"
+  mkdir -p "$launchers"
+  local item desktop
+  for item in "browser:$apps/$browser.desktop" terminal:/usr/share/applications/xfce4-terminal.desktop \
+    files:/usr/share/applications/thunar.desktop; do
+    desktop=${item#*:}
+    printf '[PlankDockItemPreferences]\nLauncher=file://%s\n' "$desktop" >"$launchers/${item%%:*}.dockitem"
+  done
+
   restart_desktop_session
   echo "$want" >"$stamp"
 }
@@ -494,7 +514,7 @@ restart_desktop_session() {
     systemctl --user restart smelt-desktop.service
     return 0
   fi
-  pkill -KILL -u "$(id -u)" -x '(xfce4-session|xfwm4|xfce4-panel|xfdesktop|xfsettingsd|xfconfd)' || true
+  pkill -KILL -u "$(id -u)" -x '(xfce4-session|xfwm4|xfce4-panel|xfdesktop|xfsettingsd|xfconfd|plank)' || true
   # 换成 dbus-run-session 之前，会话的总线由 dbus-launch 起，会话死了它还留着。
   pkill -KILL -u "$(id -u)" -x dbus-launch || true
   pkill -KILL -u "$(id -u)" -f '^dbus-daemon .*--session' || true
@@ -508,9 +528,27 @@ install_desktop() {
     put 0755 "$HERE/desktop/$script" "$dir/bin/$script"
   done
 
-  # 壁纸（xfce4-desktop.xml）和开始菜单按钮的图标。
-  put 0644 "$HERE/desktop/wallpaper.png" "$dir/wallpaper.png"
-  put 0644 "$HERE/desktop/smelt.png" "$dir/smelt.png"
+  # 壁纸（xfce4-desktop.xml）和开始菜单按钮的图标；以前的 png 壁纸和彩色图标不用了。
+  put 0644 "$HERE/desktop/wallpaper.jpg" "$dir/wallpaper.jpg"
+  put 0644 "$HERE/desktop/menu-icon.png" "$dir/menu-icon.png"
+  rm -f "$dir/wallpaper.png" "$dir/smelt.png"
+
+  # 窗口主题（xfwm4.xml 选的 Smelt）和停靠栏主题（desktop/plank/settings 选的 Smelt），装到
+  # 用户自己的主题目录，两个程序都会去那里找。
+  local data="${XDG_DATA_HOME:-$HOME/.local/share}"
+  mkdir -p "$data/themes/Smelt/xfwm4" "$data/plank/themes/Smelt"
+  install -m 0644 "$HERE"/desktop/xfwm4/* "$data/themes/Smelt/xfwm4/"
+  install -m 0644 "$HERE/desktop/plank/dock.theme" "$data/plank/themes/Smelt/dock.theme"
+  # 会话起来时拉起停靠栏。Plank 只认 GSettings，这里多半没有 dconf，让它用 GLib 自带的
+  # keyfile 后端，设置写在 ~/.config/glib-2.0/settings/keyfile（见 apply_desktop_config）。
+  mkdir -p "$config/autostart"
+  cat >"$config/autostart/smelt-dock.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Dock
+Exec=env GSETTINGS_BACKEND=keyfile plank
+NoDisplay=true
+EOF
 
   # 浏览器的菜单项用同名文件盖掉系统那份（用户目录里同名的优先），改成调同一个启动脚本：
   # 从菜单、文件管理器或别的程序打开网页，开的都是 agent 用的那个实例，不会另起一个没有
@@ -520,7 +558,7 @@ install_desktop() {
   if command -v google-chrome-stable >/dev/null 2>&1; then
     browser=google-chrome name=Chrome
   fi
-  local apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  local apps="$data/applications"
   mkdir -p "$apps"
   cat >"$apps/$browser.desktop" <<EOF
 [Desktop Entry]
@@ -531,20 +569,24 @@ Icon=$browser
 Categories=Network;WebBrowser;
 MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
 EOF
-  # 开始菜单（Whisker）的默认设置：按钮是 Smelt 的图标，收藏夹放浏览器、终端、文件管理器。
+  # 开始菜单（Whisker）的默认设置：按钮只有 Smelt 的白色剪影、不带文字，同 macOS 菜单栏
+  # 左上角的苹果；菜单里不放用户头像（profile-shape=2）；收藏夹放浏览器、终端、文件管理器。
   # 2.7（Debian 12、Ubuntu 22.04）和 2.8 起都先读这份，人在菜单里改过的另存，不受它影响。
   mkdir -p "$config/xfce4/whiskermenu"
   cat >"$config/xfce4/whiskermenu/defaults.rc" <<EOF
 favorites=$browser.desktop,xfce4-terminal.desktop,thunar.desktop
-button-icon=$dir/smelt.png
+button-icon=$dir/menu-icon.png
+show-button-icon=true
+show-button-title=false
+profile-shape=2
 EOF
-  # 以前停靠栏上的两个启动图标，现在的面板没有了。
+  # 更早的版本在面板上放过两个启动图标，现在的面板没有了。
   rm -f "$config/xfce4/panel/launcher-1/smelt-chrome.desktop" \
     "$config/xfce4/panel/launcher-2/smelt-terminal.desktop"
   rmdir "$config/xfce4/panel/launcher-1" "$config/xfce4/panel/launcher-2" 2>/dev/null || true
 
   # 菜单项写好之后再换设置：要重启会话的话，新会话一起来就看得到它们。
-  apply_desktop_config "$dir" "$config"
+  apply_desktop_config "$dir" "$config" "$browser"
 
   if has_systemd; then
     UNIT_DIR="$config/systemd/user"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 远程桌面的 XFCE 会话，跑在 display 起的那块虚拟屏幕上。精简过的设置（深色主题、底部
-# 面板、关合成器……）在安装时写进 ~/.config/xfce4，见 install.sh。
+# 远程桌面的 XFCE 会话，跑在 display 起的那块虚拟屏幕上。设置（深色主题、顶栏、停靠栏、
+# 窗口主题……）在安装时写进 ~/.config，见 install.sh 的 install_desktop。
 set -euo pipefail
 
 source "$(dirname "$0")/common.sh"
