@@ -90,7 +90,7 @@ dist: ## 用已有 release 产物打包 app + dmg
 dist-build: ## 先编 release 再打包（一步到位）
 	./scripts/package-mac.sh --build
 
-install: $(SMELT_AGENT) ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
+install: $(SMELT_AGENT) ## 原子安装到 /Applications（不打 dmg）：退出 Smelt、停守护、换 App、重新打开
 	@# make build && make install 必须装刚编的二进制；只检查 dist 是否存在会把
 	@# 旧包再装一遍，守护永远跑不到新代码。插件脚本没有 cargo binary，因此同时
 	@# 检查 plugins 的源内容（按 .gitignore 排除编辑器生成文件和本地 clone 的外部仓库）。
@@ -132,10 +132,8 @@ install: $(SMELT_AGENT) ## 原子安装到 /Applications（不打 dmg）；活�
 		echo "· dist 落后于 release、签名不对，或插件脚本有改动，重新打包"; \
 		./scripts/package-mac.sh --no-dmg; \
 	fi
-	@# 存量 make install 仍走旧的显式安装入口；在线更新已改由进程外 installer
-	@# 在 GUI 完全退出后提交。这里保留 daemon handoff 语义，后续再收敛到同一 core。
-	@./target/release/$(BIN) --install-app dist/Smelt.app /Applications/Smelt.app
-	@echo "✅ 安装完成"
+	@# 和在线更新同一条提交：让 Smelt 退出 → 停守护 → 原子交换 App → 打开新版。
+	@./target/release/smelt-installer --local-app dist/Smelt.app
 
 dev: ## 编译 release 并原子安装到 /Applications（= make build 后 make install）
 	@# 不写成 `dev: build install` 依赖：make -j 会把两者并行，install 可能装上旧产物。

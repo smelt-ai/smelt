@@ -1,13 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Smelt 远程桌面：只留一个工作区。最大化的窗口照样画标题栏：Chrome 在 XFCE 下用窗口
-     管理器的标题栏，不画就没有关闭、最小化按钮。合成器关着：没有显卡全靠 CPU，窗口一动就整片重绘，VNC 要传的变化也多；阴影、
-     圆角、半透明都靠它，所以都没有。Default 窗口主题的配色跟着 GTK 主题（xsettings.xml）。 -->
+<!-- Smelt 远程桌面的窗口管理器：主题是随包的 Smelt（themerc 和图片在 desktop/xfwm4/），按钮
+     在左边，顺序同 macOS：关闭、最小化、最大化；标题居中。只留一个工作区。最大化的窗口照样
+     画标题栏：Chrome 在 XFCE 下用窗口管理器的标题栏，不画就没有关闭、最小化按钮。
+     合成器开着：窗口阴影、顶栏和停靠栏的半透明都靠它。没有显卡，全靠 CPU 用 XRender 画，
+     比关着多耗一些 CPU，换来像样的桌面。不等垂直同步（vblank_mode=off）：Xvnc 没有显示器
+     可等，等了只会卡。菜单和弹出框也带阴影；面板和停靠栏不带：它们的窗口是整块矩形，阴影
+     会落在透明的圆角外面。
+     标题字体是 Inter，中文退到 Noto Sans CJK（字体名可以写一串，按顺序找字）。 -->
 <channel name="xfwm4" version="1.0">
   <property name="general" type="empty">
+    <property name="theme" type="string" value="Smelt"/>
+    <property name="button_layout" type="string" value="CHM|"/>
+    <property name="title_alignment" type="string" value="center"/>
+    <property name="title_font" type="string" value="Inter,Noto Sans CJK SC Semi-Bold 10"/>
     <property name="titleless_maximize" type="bool" value="false"/>
-    <property name="use_compositing" type="bool" value="false"/>
     <property name="workspace_count" type="int" value="1"/>
-    <property name="theme" type="string" value="Default"/>
-    <property name="title_font" type="string" value="Noto Sans CJK SC Bold 9"/>
+    <property name="use_compositing" type="bool" value="true"/>
+    <property name="vblank_mode" type="string" value="off"/>
+    <property name="show_frame_shadow" type="bool" value="true"/>
+    <property name="show_popup_shadow" type="bool" value="true"/>
+    <property name="show_dock_shadow" type="bool" value="false"/>
   </property>
 </channel>

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 验证 install-smeltd.sh 生成的 /usr/local/bin/smeltd、/usr/local/bin/smelt：root 先切用户再执行、参数原样传、
-# 其他用户拿到明确提示。用假的 id、runuser，不需要 root。
+# 其他用户拿到明确提示。用假的 id、runuser，不需要 root。再验证以 root 执行时选哪个运行用户，
+# 以及放软链接时换掉以前生成的切用户脚本、不动别人的文件。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -83,4 +84,53 @@ if output="$(FAKE_UID=1002 "$CLI" agent list 2>&1)"; then
   exit 1
 fi
 expect "$output" "请用 sudo smelt agent list" "smelt 给其他用户的提示"
+
+# ── 运行用户 ──
+eval "$(sed -n '/^runtime_user() {$/,/^}$/p' "$ROOT/scripts/install-smeltd.sh")"
+SMELT_HOME_OF_SMELT="$WORK/smelt-home"
+cat >"$WORK/fake/getent" <<SCRIPT
+#!/bin/bash
+echo "smelt:x:1001:1001::$SMELT_HOME_OF_SMELT:/bin/bash"
+SCRIPT
+# 假 id：FAKE_SMELT_EXISTS=1 时认得 smelt 这个用户。
+cat >"$WORK/fake/id" <<'SCRIPT'
+#!/bin/bash
+if [[ "${1:-}" == -u && -n "${2:-}" ]]; then
+  [[ "$2" == smelt && "${FAKE_SMELT_EXISTS:-0}" == 1 ]] && { echo 1001; exit 0; }
+  exit 1
+fi
+echo "$FAKE_UID"
+SCRIPT
+chmod +x "$WORK/fake/getent" "$WORK/fake/id"
+
+unset SMELT_USER
+[[ "$(runtime_user)" == root ]] || { echo "FAIL: 默认 root" >&2; exit 1; }
+[[ "$(SMELT_USER=dev runtime_user)" == dev ]] || { echo "FAIL: SMELT_USER 指定普通用户" >&2; exit 1; }
+mkdir -p "$SMELT_HOME_OF_SMELT/.smelt/bin"
+touch "$SMELT_HOME_OF_SMELT/.smelt/bin/smeltd"
+[[ "$(FAKE_SMELT_EXISTS=1 runtime_user)" == smelt ]] \
+  || { echo "FAIL: 已经装在 smelt 名下的要接着用" >&2; exit 1; }
+[[ "$(FAKE_SMELT_EXISTS=0 runtime_user)" == root ]] \
+  || { echo "FAIL: 没有 smelt 用户时不看它的目录" >&2; exit 1; }
+[[ "$(FAKE_SMELT_EXISTS=1 SMELT_USER=root runtime_user)" == root ]] \
+  || { echo "FAIL: SMELT_USER 优先" >&2; exit 1; }
+
+# ── 放软链接 ──
+eval "$(sed -n '/^link_commands() {$/,/^}$/p' "$ROOT/scripts/install-smeltd.sh")"
+say() { :; }
+warn() { echo "$*" >&2; }
+COMMANDS=(smeltd smelt)
+HOME="$WORK/root-home"
+SMELT_HOME="$HOME/.smelt"
+BIN="$SMELT_HOME/bin"
+LINKS="$WORK/usr-local-bin"
+mkdir -p "$BIN" "$LINKS"
+cp "$COMMAND" "$LINKS/smeltd"
+echo "别人的 smelt" >"$LINKS/smelt"
+output="$(link_commands "$LINKS" 2>&1)"
+[[ "$(readlink "$LINKS/smeltd")" == "$BIN/smeltd" ]] \
+  || { echo "FAIL: 以前生成的切用户脚本要换成软链接" >&2; exit 1; }
+[[ ! -L "$LINKS/smelt" && "$(cat "$LINKS/smelt")" == "别人的 smelt" ]] \
+  || { echo "FAIL: 别人的文件不能动" >&2; exit 1; }
+expect "$output" "$LINKS/smelt 已存在且不是安装脚本放的" "不覆盖时要说"
 echo "ok"

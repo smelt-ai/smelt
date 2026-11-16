@@ -1,0 +1,39 @@
+# Smelt 远程桌面的停靠栏（Plank）主题：半透明深色底、上方圆角、一圈细亮边，同 macOS 深色
+# 模式的程序坞。图标不带阴影、不放大：没有显卡，动画全靠 CPU 画，VNC 还要把每一帧传过去。
+# install.sh 装到 ~/.local/share/plank/themes/Smelt/。颜色是 R;;G;;B;;A，0–255。
+
+[PlankTheme]
+TopRoundness=14
+BottomRoundness=0
+LineWidth=1
+OuterStrokeColor=0;;0;;0;;120
+FillStartColor=48;;48;;52;;190
+FillEndColor=36;;36;;40;;190
+InnerStrokeColor=255;;255;;255;;30
+
+[PlankDockTheme]
+# 以下几项的单位是图标大小的千分之一。
+HorizPadding=2
+TopPadding=2
+BottomPadding=2
+ItemPadding=2.5
+IndicatorSize=4
+IconShadowSize=0
+# 点开程序时图标跳一下，提示正在启动；有程序要人处理时也跳。
+UrgentBounceHeight=1.6666666666666667
+LaunchBounceHeight=0.625
+FadeOpacity=1
+ClickTime=300
+UrgentBounceTime=600
+LaunchBounceTime=600
+ActiveTime=300
+SlideTime=300
+FadeTime=250
+HideTime=250
+GlowSize=30
+GlowTime=10000
+GlowPulseTime=2000
+UrgentHueShift=150
+ItemMoveTime=450
+CascadeHide=true
+BadgeColor=0;;0;;0;;0

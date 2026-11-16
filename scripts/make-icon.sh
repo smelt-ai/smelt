@@ -2,7 +2,8 @@
 # 从 assets/icon.svg 渲染前景 + 深石墨渐变圆角方块底，合成 macOS app 图标。
 # 产出 assets/icon-1024.png（母图）和 assets/AppIcon.icns（打包用）。
 # 另把 crates/smelt/assets/icons/agent-*.svg 渲染成 assets/agent-*.png
-# （macOS 菜单栏下拉里各 agent 会话的 logo，见 status_item.rs 的 AGENT_LOGO_PNG）。
+# （macOS 菜单栏下拉里各 agent 会话的 logo，见 status_item.rs 的 AGENT_LOGO_PNG），
+# 以及 Linux 远程桌面的窗口主题、壁纸和菜单图标（scripts/desktop/，见 make-desktop-theme.py）。
 # 依赖：rsvg-convert（brew install librsvg）、python3 + Pillow、系统 sips / iconutil。
 set -euo pipefail
 
@@ -74,6 +75,13 @@ for a in claude copilot codex grok antigravity cursor opencode kiro pi crush; do
   rsvg-convert -w 32 -h 32 "$AGENT_ICON_DIR/agent-$a.svg" -o "$ASSETS/agent-$a.png"
   echo "   saved $ASSETS/agent-$a.png"
 done
+
+# Linux 远程桌面（install.sh --with-desktop）的窗口主题、壁纸和顶栏菜单图标，见
+# make-desktop-theme.py。
+echo "▶ 生成远程桌面的主题图片 …"
+rsvg-convert -w 256 -h 256 "$SVG" -o "$TMP/mascot.png"
+python3 "$ROOT/scripts/make-desktop-theme.py" "$TMP/mascot.png"
+echo "   saved $ROOT/scripts/desktop/{xfwm4/*.png,wallpaper.jpg,menu-icon.png}"
 
 echo "✅ 图标已生成：$ASSETS/AppIcon.icns（重新 make dist 即会打进包）"
 echo "✅ agent logo 已生成：$ASSETS/agent-*.png"

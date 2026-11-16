@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Smelt 远程桌面：桌面不放图标、右键和中键都不弹菜单。背景是 xfdesktop 自己画的上下
-     渐变（color-style 2），不带图片文件；静态背景，只在整屏刷新时比纯色多压一点。Xvnc 的
-     输出叫 VNC-0；老版本 xfdesktop 按序号 monitor0 认，两个都写上。 -->
+<!-- Smelt 远程桌面：桌面不放图标、右键和中键都不弹菜单。背景是随包的 wallpaper.jpg（深色底上
+     几团柔和的蓝光和一点暖光，由 scripts/make-desktop-theme.py 生成），按屏幕铺满裁边
+     （image-style 5），屏幕大小跟着远程桌面页变也不变形。路径由 install.sh 把 @DESKTOP_DIR@
+     换成 ~/.smelt/desktop 的绝对路径；图读不出来时退回接近的纯色底。静态背景，只在整屏刷新时画。Xvnc 的输出叫
+     VNC-0；老版本 xfdesktop 按序号 monitor0 认，两个都写上。 -->
 <channel name="xfce4-desktop" version="1.0">
   <property name="desktop-icons" type="empty">
     <property name="style" type="int" value="0"/>
@@ -16,36 +18,26 @@
     <property name="screen0" type="empty">
       <property name="monitorVNC-0" type="empty">
         <property name="workspace0" type="empty">
-          <property name="image-style" type="int" value="0"/>
-          <property name="color-style" type="int" value="2"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="@DESKTOP_DIR@/wallpaper.jpg"/>
+          <property name="color-style" type="int" value="0"/>
           <property name="rgba1" type="array">
-            <value type="double" value="0.15"/>
-            <value type="double" value="0.11"/>
-            <value type="double" value="0.25"/>
-            <value type="double" value="1"/>
-          </property>
-          <property name="rgba2" type="array">
-            <value type="double" value="0.42"/>
-            <value type="double" value="0.18"/>
-            <value type="double" value="0.30"/>
+            <value type="double" value="0.07"/>
+            <value type="double" value="0.07"/>
+            <value type="double" value="0.09"/>
             <value type="double" value="1"/>
           </property>
         </property>
       </property>
       <property name="monitor0" type="empty">
         <property name="workspace0" type="empty">
-          <property name="image-style" type="int" value="0"/>
-          <property name="color-style" type="int" value="2"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="@DESKTOP_DIR@/wallpaper.jpg"/>
+          <property name="color-style" type="int" value="0"/>
           <property name="rgba1" type="array">
-            <value type="double" value="0.15"/>
-            <value type="double" value="0.11"/>
-            <value type="double" value="0.25"/>
-            <value type="double" value="1"/>
-          </property>
-          <property name="rgba2" type="array">
-            <value type="double" value="0.42"/>
-            <value type="double" value="0.18"/>
-            <value type="double" value="0.30"/>
+            <value type="double" value="0.07"/>
+            <value type="double" value="0.07"/>
+            <value type="double" value="0.09"/>
             <value type="double" value="1"/>
           </property>
         </property>
