@@ -350,7 +350,7 @@ smeltd status
 smeltd relay                     # 查看当前 iroh 中继
 smeltd relay <url>               # 只用这个自建中继
 smeltd relay off                 # 改回 n0 的公共中继
-smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea、browser-mcp
+smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea、browser-mcp、chrome-devtools
 ```
 
 `pair` 会把远程访问打开（保留已填写的自建 relay）。配对串 10 分钟、用一次。配对等于把这台机器上当前用户的 shell 交给对方。macOS 和 Windows 上守护由桌面拉起，`smeltd install` 只在 Linux 注册 systemd 单元。细节在 `crates/smeltd/src/service.rs` 和 `scripts/install-smeltd.sh`。

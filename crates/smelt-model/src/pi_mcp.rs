@@ -31,7 +31,10 @@ pub enum PiMcpPresetTransport {
         oauth_client_name: Option<&'static str>,
     },
     /// 用 smelt-agent 自带的 Bun 跑：`smelt-agent <args>`，带上 `BUN_BE_BUN=1`。
-    Bun { args: &'static [&'static str] },
+    Bun {
+        args: &'static [&'static str],
+        env: &'static [(&'static str, &'static str)],
+    },
 }
 
 impl PiMcpPresetTransport {
@@ -70,6 +73,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         description: "REA (Reverse Engineer Anything): local, evidence-backed reverse engineering of desktop apps, binaries, Electron/JavaScript bundles, websites and traffic captures",
         transport: PiMcpPresetTransport::Bun {
             args: &["x", "--bun", "rea-agents@6.9.0", "mcp"],
+            env: &[],
         },
         exposure: None,
         timeout_secs: Some(120),
@@ -89,6 +93,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         description: "Browser automation in the user's own signed-in Chrome: navigate, click, fill forms, read pages and take screenshots, and ask the user for 2FA codes or CAPTCHAs",
         transport: PiMcpPresetTransport::Bun {
             args: &["x", "--bun", "@agent360/browser-mcp@1.30.2"],
+            env: &[],
         },
         exposure: Some("deferred"),
         timeout_secs: None,
@@ -111,6 +116,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         description: "Browser automation with Playwright in the user's own signed-in Chrome via the Playwright extension: navigate, click, type, fill forms, read accessibility snapshots, take screenshots and inspect console and network",
         transport: PiMcpPresetTransport::Bun {
             args: &["x", "--bun", "@playwright/mcp@0.0.83", "--extension"],
+            env: &[],
         },
         exposure: Some("deferred"),
         timeout_secs: None,
@@ -118,6 +124,31 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
             "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
         ),
         on_remote_desktop: Some(&PLAYWRIGHT_ON_REMOTE_DESKTOP),
+    },
+    // Chrome DevTools MCP 专注网页调试；上游不支持 Bun，这里按用户选择尝试运行，
+    // 兼容性需要实际验证。本机接已登录的 Chrome，远程桌面接常驻 Chrome 的调试端口。
+    // 关闭统计、CrUX 查询和周期更新检查；工具较多且逐步交互，按需声明。
+    PiMcpPreset {
+        id: "chrome-devtools",
+        name: "Chrome 开发调试",
+        summary: "检查 Chrome 的网络、控制台、性能和内存。需 Chrome 144 以上，在 chrome://inspect/#remote-debugging 开启远程调试并授权。尝试用 Smelt 自带 Bun 运行（上游不支持 Bun）。",
+        description: "Chrome DevTools: inspect network requests and console messages, analyze page performance and memory, and automate or debug pages in the user's running Chrome",
+        transport: PiMcpPresetTransport::Bun {
+            args: &[
+                "x",
+                "--bun",
+                "chrome-devtools-mcp@1.13.0",
+                "--auto-connect",
+                "--memory-debugging",
+                "--no-usage-statistics",
+                "--no-performance-crux",
+            ],
+            env: &[("CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS", "1")],
+        },
+        exposure: Some("deferred"),
+        timeout_secs: Some(120),
+        extension_url: None,
+        on_remote_desktop: Some(&CHROME_DEVTOOLS_ON_REMOTE_DESKTOP),
     },
 ];
 
@@ -137,9 +168,33 @@ const PLAYWRIGHT_ON_REMOTE_DESKTOP: PiMcpPreset = PiMcpPreset {
             "--cdp-endpoint",
             "http://127.0.0.1:9222",
         ],
+        env: &[],
     },
     exposure: Some("deferred"),
     timeout_secs: None,
+    extension_url: None,
+    on_remote_desktop: None,
+};
+
+const CHROME_DEVTOOLS_ON_REMOTE_DESKTOP: PiMcpPreset = PiMcpPreset {
+    id: "chrome-devtools",
+    name: "Chrome 开发调试",
+    summary: "检查远程桌面 Chrome 的网络、控制台、性能和内存。尝试用 Smelt 自带 Bun 运行（上游不支持 Bun）。",
+    description: "Chrome DevTools: inspect network requests and console messages, analyze page performance and memory, and automate or debug pages in the remote desktop Chrome",
+    transport: PiMcpPresetTransport::Bun {
+        args: &[
+            "x",
+            "--bun",
+            "chrome-devtools-mcp@1.13.0",
+            "--browser-url=http://127.0.0.1:9222",
+            "--memory-debugging",
+            "--no-usage-statistics",
+            "--no-performance-crux",
+        ],
+        env: &[("CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS", "1")],
+    },
+    exposure: Some("deferred"),
+    timeout_secs: Some(120),
     extension_url: None,
     on_remote_desktop: None,
 };
@@ -156,7 +211,7 @@ impl PiMcpPreset {
 
     /// `bun x` 跑的预设钉的那个包：`(包名, 包@版本)`。
     pub fn pinned_package(&self) -> Option<(&'static str, &'static str)> {
-        let PiMcpPresetTransport::Bun { args } = self.transport else {
+        let PiMcpPresetTransport::Bun { args, .. } = self.transport else {
             return None;
         };
         let spec = *args.iter().skip(1).find(|arg| !arg.starts_with('-'))?;
@@ -178,7 +233,7 @@ impl PiMcpPreset {
                     entry.insert("oauth".into(), Value::Object(oauth));
                 }
             }
-            PiMcpPresetTransport::Bun { args } => {
+            PiMcpPresetTransport::Bun { args, env } => {
                 entry.insert(
                     "command".into(),
                     Value::String(crate::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH.into()),
@@ -192,9 +247,12 @@ impl PiMcpPreset {
                     ),
                 );
                 let (name, value) = crate::agent_paths::BUN_BE_BUN;
-                let mut env = Map::new();
-                env.insert(name.into(), Value::String(value.into()));
-                entry.insert("env".into(), Value::Object(env));
+                let mut variables = Map::new();
+                variables.insert(name.into(), Value::String(value.into()));
+                for &(name, value) in env {
+                    variables.insert(name.into(), Value::String(value.into()));
+                }
+                entry.insert("env".into(), Value::Object(variables));
             }
         }
         entry.insert("description".into(), Value::String(self.description.into()));
