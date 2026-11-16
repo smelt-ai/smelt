@@ -159,6 +159,11 @@ fn on_topic(
         TopicMessage::Event(payload) => (payload, AutomationProjectionOrigin::Incremental),
         // 带快照的话题：后面跟着一份快照，等它。
         TopicMessage::Lagged => return,
+        // 这一轮不会再推，留着上次收到的；重新连上时再订。
+        TopicMessage::Unavailable(reason) => {
+            eprintln!("[automations] {machine:?} 不推自动化：{reason}");
+            return;
+        }
     };
     let snapshot = match decode_automations_payload(payload.clone()) {
         Ok(Some(snapshot)) => snapshot,

@@ -2616,10 +2616,21 @@ fn main() {
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
         cx.set_global(settings::AgentHosts::default());
-        settings::attach_agent_host(RuntimeKey::Local, runtimes::local(), cx, |cx| {
-            if settings::agent_host_settings(&RuntimeKey::Local, cx).hooks_enabled {
-                settings::reconcile_agent_hooks(cx);
+        // 本机的智能体配置第一次推来时（订阅连上，见 `runtime_events`）做一次。
+        cx.spawn(async move |cx| {
+            let loaded =
+                |cx: &App| settings::agent_host_loaded(&RuntimeKey::Local, cx).then_some(());
+            if smelt_ui::global_wait::wait_for_global::<settings::AgentHosts, ()>(cx, loaded)
+                .await
+                .is_none()
+            {
+                return;
             }
+            cx.update(|cx| {
+                if settings::agent_host_settings(&RuntimeKey::Local, cx).hooks_enabled {
+                    settings::reconcile_agent_hooks(cx);
+                }
+            });
             // 运行时已经连上：请它照端点刷新 Pi 里标记为「自动」的自定义 provider
             // 的模型目录。用户没手填模型就是把这份目录交给我们维护，中转网关上下线模型
             // 不该要他再来点一次。放后台跑。
@@ -2635,7 +2646,8 @@ fn main() {
                     }
                 })
                 .detach();
-        });
+        })
+        .detach();
         // 登记过的远程运行时：同步读客户端库，iroh 推迟到第一次连接时在后台绑。
         runtimes::start_runtime_hub(cx);
         // 插件要读机器列表，在 RuntimeHub 之后、开主窗口之前装。
@@ -2649,11 +2661,17 @@ fn main() {
             states: daemon_state_rx,
             topics: topic_rx,
         } = runtime_events::start(cx);
-        // 单独订阅的话题，原样转给插件。
+        // 单独订阅的话题，原样转给插件；智能体配置除外，宿主收进自己的缓存。
         cx.spawn(async move |cx| {
             use smelt_app_state::provider_status_global::ProviderStatus;
-            use smelt_client::daemon_state::{CORE_TOPIC_PI_CONFIG_CHANGED, TopicMessage};
+            use smelt_client::daemon_state::{
+                CORE_TOPIC_AGENT_HOST_CHANGED, CORE_TOPIC_PI_CONFIG_CHANGED, TopicMessage,
+            };
             while let Ok((runtime, topic, message)) = topic_rx.recv().await {
+                if topic == CORE_TOPIC_AGENT_HOST_CHANGED {
+                    cx.update(|cx| settings::receive_agent_host_topic(&runtime, message, cx));
+                    continue;
+                }
                 let message = match message {
                     TopicMessage::Event { payload, .. } => {
                         smelt_plugin_api::TopicMessage::Event(payload)
@@ -2662,16 +2680,17 @@ fn main() {
                         smelt_plugin_api::TopicMessage::Snapshot(payload)
                     }
                     TopicMessage::Lagged => smelt_plugin_api::TopicMessage::Lagged,
-                };
-                // 宿主自己（会话、智能体配置缓存）还要管的 Pi 配置变化；积压丢了事件也当作变过。
-                if topic == CORE_TOPIC_PI_CONFIG_CHANGED {
-                    // 凭据或模型可能变了：活着的会话重拉模型目录。会话眼下只跟本机的
-                    // Pi 目录走。
-                    if runtime == RuntimeKey::Local {
-                        cx.update(ProviderStatus::bump_pi_catalog);
+                    TopicMessage::Unavailable(reason) => {
+                        smelt_plugin_api::TopicMessage::Unavailable(reason)
                     }
-                    // 删插件时运行时顺带清掉了智能体的勾选。
-                    cx.update(|cx| settings::reload_agent_host(&runtime, cx));
+                };
+                // 宿主自己（会话）还要管的 Pi 配置变化；积压丢了事件也当作变过。凭据或模型
+                // 可能变了：活着的会话重拉模型目录。会话眼下只跟本机的 Pi 目录走。
+                if topic == CORE_TOPIC_PI_CONFIG_CHANGED
+                    && runtime == RuntimeKey::Local
+                    && !matches!(message, smelt_plugin_api::TopicMessage::Unavailable(_))
+                {
+                    cx.update(ProviderStatus::bump_pi_catalog);
                 }
                 cx.update(|cx| {
                     smelt_plugin_api::emit(
@@ -2710,11 +2729,10 @@ fn main() {
                     cx.update(|cx| smelt_plugin_api::emit(event, cx));
                     continue;
                 }
-                // 重新订阅上：断开期间 Pi 配置可能变过，单独订阅的事件补不回来；插件据
-                // 「重新连上」重取自己的（运行时换了进程，它替插件建的监听也没了）。
+                // 重新订阅上：插件据「重新连上」重取自己的（运行时换了进程，它替插件建的
+                // 监听也没了）。
                 if let terminal::DaemonStateEvent::Snapshot { .. } = &event {
                     cx.update(|cx| {
-                        settings::reload_agent_host(&runtime, cx);
                         smelt_plugin_api::emit(
                             smelt_plugin_api::HostEvent::Reconnected(runtime.clone()),
                             cx,

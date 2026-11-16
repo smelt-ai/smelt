@@ -23,6 +23,10 @@ pub enum TopicMessage {
     },
     /// 运行时那边积压，丢了事件：订的话题都当作变过。带快照的话题后面跟着一份快照。
     Lagged,
+    /// 运行时拒掉了这条订阅（多半是比这些话题旧）或推来的解不开：这一轮连接上不会再有推送，
+    /// 下次重新订上时再看。原因是给人看的。不是线上的消息，[`TopicEventClient`] 不会解出它，
+    /// 由收订阅的一方在订阅停下时补上。
+    Unavailable(String),
 }
 
 pub struct TopicEventClient {

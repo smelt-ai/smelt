@@ -89,7 +89,8 @@ impl Mirror {
                     alert: changed.alert,
                 }
             }
-            TopicMessage::Lagged => Applied::Nothing,
+            // 积压时后面跟着一份快照；这一轮不会再推时留着上次收到的，重新连上时再订。
+            TopicMessage::Lagged | TopicMessage::Unavailable(_) => Applied::Nothing,
         }
     }
 

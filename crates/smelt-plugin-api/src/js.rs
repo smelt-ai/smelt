@@ -77,10 +77,10 @@ export function notification_permission():
 export type StatusMenuItem =
   | { type: "action"; label: string; icon?: { png: number[]; color: number } | null; command: string; args?: unknown }
   | { type: "separator" };
-/** 那台机器的智能体配置（profiles、agents、env 等，形状同运行时的 agent_host.get）；还没读到时为 null。变了发 agent_settings_changed。 */
+/** 那台机器的智能体配置（profiles、agents、env 等，形状同运行时的 agent_host.get），运行时推来的那份；还没收到、给不了时为 null。变了发 agent_settings_changed。 */
 export function agent_settings(machine: Machine): unknown | null;
-/** 那台机器的智能体配置最近一次读取或保存失败的原因；没有失败为 null。变了发 agent_settings_changed。 */
-export function agent_settings_error(machine: Machine): string | null;
+/** 那台机器给不了智能体配置的原因（运行时太旧等）；收到了、还没收到为 null。变了发 agent_settings_changed。 */
+export function agent_settings_unavailable(machine: Machine): string | null;
 /**
  * 那个视图此刻看得见；设置页是设置开着、停在这一页。变了发 shown_views_changed。
  * 视图 id 是 "<来源>/<名字>"：插件主入口是 "<插件 id>/main"，设置页是 "<插件 id>/<name>"。
@@ -173,8 +173,8 @@ export function next_command(): Promise<CommandCall>;
  *   null 清掉；视图建没建都画，变了发 view_badges_changed。
  * - "smelt.app/open-in-file-manager" { path: string }：用系统文件管理器打开这台电脑上的一个目录。
  * - "smelt.app/edit-agent-settings" { machine: Machine, before: unknown, after: unknown }：改那台机器的智能体配置，
- *   before 是 agent_settings 读到的那份、after 是改成的那份；宿主手里的已经不是 before 时 reject，重读再改。
- * - "smelt.app/reload-agent-settings"：从各台机器重读智能体配置（CLI 改过定义不会推过来）。
+ *   before 是 agent_settings 读到的那份、after 是改成的那份；那台机器的运行时只写两者不同的字段。改完由运行时
+ *   推回来（发 agent_settings_changed），不先改本地；连着改时等上一次 resolve 再发下一次。
  * - "smelt.sessions/start-conversation" { machine: Machine, agent_definition_id: string, cwd: string }：
  *   跟一个智能体在那台机器的 cwd 里开一段新对话，露在主窗口里。
  * - "smelt.sessions/activate" { session_id: string }：在主窗口里露出这个会话并拿到前面来，主窗口关着就先开。
@@ -236,12 +236,14 @@ export type HostEvent =
   | { type: "commands_changed" };
 /**
  * 运行时话题推来的：一条事件；带快照的话题（如 attention.changed）订上和积压后的整份状态，收到就整份换掉
- * 自己留的；断开或积压可能错过了事件（没有快照的话题自己重读）。载荷形状见协议里那个话题的类型。
+ * 自己留的；断开或积压可能错过了事件（没有快照的话题自己重读）；那台机器这一轮连接上不会再推这个话题
+ * （运行时太旧拒掉了订阅等，reason 给人看，重新连上时再订）。载荷形状见协议里那个话题的类型。
  */
 export type TopicMessage =
   | { kind: "event"; payload: unknown }
   | { kind: "snapshot"; payload: unknown }
-  | { kind: "lagged" };
+  | { kind: "lagged" }
+  | { kind: "unavailable"; reason: string };
 /**
  * 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份；一台机器一个话题的快照或积压到了，
  * 这个话题之前没取走的就不留了。同时只能有一个在等。
@@ -425,10 +427,10 @@ impl JsPlugin {
                     ))),
                 }
             })
-            .function("agent_settings_error", |arguments| {
-                let machine = machine_argument("agent_settings_error", arguments, 0)?;
-                let error = in_app("agent_settings_error", |cx| {
-                    crate::host(cx).agent_settings_error(&machine, cx)
+            .function("agent_settings_unavailable", |arguments| {
+                let machine = machine_argument("agent_settings_unavailable", arguments, 0)?;
+                let error = in_app("agent_settings_unavailable", |cx| {
+                    crate::host(cx).agent_settings_unavailable(&machine, cx)
                 })?;
                 Ok(error.map_or(HostValue::Null, |error| error.into()))
             })
@@ -1174,6 +1176,9 @@ fn event_value(event: &HostEvent) -> HostValue {
                     .field("kind", "snapshot")
                     .field("payload", host_value(payload)),
                 TopicMessage::Lagged => HostObject::new().field("kind", "lagged"),
+                TopicMessage::Unavailable(reason) => HostObject::new()
+                    .field("kind", "unavailable")
+                    .field("reason", reason.as_str()),
             };
             HostObject::new()
                 .field("type", "runtime_topic")
@@ -1249,7 +1254,7 @@ mod tests {
         let module = JsPlugin::new().module();
         for query in [
             "agent_settings",
-            "agent_settings_error",
+            "agent_settings_unavailable",
             "session_states",
             "workspace_directory",
         ] {

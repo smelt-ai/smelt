@@ -1093,12 +1093,11 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match smelt_core::agent_host::apply_edit(&edit) {
-                Ok(settings) => {
-                    // 编辑里可能带着智能体定义、自定义 Agent 的增删改。
-                    crate::session_names::agents_changed();
-                    success_value(control_version, &request_id, settings)
-                }
+            let applied = smelt_core::agent_host::apply_edit(&edit);
+            // 失败的也推：偏好和定义分两步写，可能改了一半。
+            event_hub.agent_host_changed();
+            match applied {
+                Ok(settings) => success_value(control_version, &request_id, settings),
                 Err(error) => error_value(
                     control_version,
                     request_id,
@@ -1203,7 +1202,7 @@ fn dispatch_control(
                     .map_err(control_error_for_definition)
             }) {
                 Ok(agent) => {
-                    crate::session_names::agents_changed();
+                    event_hub.agent_host_changed();
                     success_value(
                         control_version,
                         &request_id,
@@ -1224,7 +1223,7 @@ fn dispatch_control(
                     .map_err(control_error_for_definition)
             }) {
                 Ok(agent) => {
-                    crate::session_names::agents_changed();
+                    event_hub.agent_host_changed();
                     success_value(
                         control_version,
                         &request_id,
@@ -1245,7 +1244,7 @@ fn dispatch_control(
                     .map_err(control_error_for_definition)
             }) {
                 Ok(()) => {
-                    crate::session_names::agents_changed();
+                    event_hub.agent_host_changed();
                     success_value(control_version, &request_id, params)
                 }
                 Err(error) => error_value(control_version, request_id, error),

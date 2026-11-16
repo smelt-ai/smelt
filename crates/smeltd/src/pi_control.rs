@@ -25,6 +25,13 @@ pub(crate) fn dispatch(
     if changes_config(method) {
         notify_changed(event_hub);
     }
+    // 删 MCP 服务器、删插件时运行时顺带清掉各智能体对它的勾选，那是智能体配置的一部分。
+    if matches!(
+        method,
+        ControlMethod::PiMcpRemove | ControlMethod::PiPluginsRemove
+    ) {
+        event_hub.agent_host_changed();
+    }
     result
 }
 

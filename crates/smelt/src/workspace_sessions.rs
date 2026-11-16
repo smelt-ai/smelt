@@ -203,13 +203,18 @@ impl Workspace {
             if daemon_ready_rx.recv().await.is_err() {
                 return;
             }
-            // ACP 会话的启动命令、profile、智能体定义来自会话所在那台机器的配置；没读到
+            // ACP 会话的启动命令、profile、智能体定义来自会话所在那台机器的配置；没收到
             // 之前拼出来的是出厂命令，用户配的命令和环境变量会全部失效。守护已经就绪，
-            // 正常一次往返就到，读到时 AgentHosts 一变就接着往下走。还没连上的远程机器
-            // 等不来，按存档里的启动命令恢复。
+            // 订阅连上就推来，AgentHosts 一变就接着往下走；那台机器给不了（运行时太旧）
+            // 也不再等。不在线的远程机器等不来，按存档里的启动命令恢复；本机一定会连上。
+            // 等的时候远程机器掉线不会叫醒这里，它连回来推来配置时接着走。
             let settled_key = key.clone();
-            let settled =
-                move |cx: &App| settings::agent_host_settled(&settled_key, cx).then_some(());
+            let settled = move |cx: &App| {
+                (settings::agent_host_settled(&settled_key, cx)
+                    || (settled_key != RuntimeKey::Local
+                        && !crate::runtimes::runtime_online(&settled_key, cx)))
+                .then_some(())
+            };
             if smelt_ui::global_wait::wait_for_global::<settings::AgentHosts, ()>(cx, settled)
                 .await
                 .is_none()
@@ -864,11 +869,18 @@ impl Workspace {
                     let config_id = config_id.clone();
                     let value_id = value_id.clone();
                     // 记在会话所在的那台机器上：下次在那台机器上开同一家 agent 时沿用。
-                    settings::apply_agent_host(
+                    let remembered = smelt_plugin_api::edit_agent_settings(
                         &runtime,
                         move |config| config.remember_acp_config_value(agent, config_id, value_id),
                         cx,
                     );
+                    // 只是下次的默认值，没记上不打扰人。
+                    cx.spawn(async move |_, _| {
+                        if let Err(error) = remembered.await {
+                            eprintln!("[agent-host] 记住会话选项失败：{error}");
+                        }
+                    })
+                    .detach();
                     // 同一次选择既要成为该 agent 的下次默认，也要保存进当前会话，
                     // 后者在冷恢复时拥有更高优先级。
                     this.touch_acp_session(_view);
@@ -1186,7 +1198,14 @@ impl Workspace {
         // 启动命令、profile、智能体定义都来自会话所在那台机器的配置。还没读到就不起
         // 会话：按出厂命令启动的话，用户配的命令和环境变量全不生效。
         if !settings::agent_host_loaded(request.runtime.key(), cx) {
-            crate::status_item::notify_error("正在读取那台机器的智能体配置，请稍后再试");
+            let unavailable = settings::agent_hosts(cx)
+                .and_then(|hosts| hosts.unavailable(request.runtime.key()))
+                .map(|reason| format!("那台机器的智能体配置不可用：{reason}"));
+            crate::status_item::notify_error(
+                unavailable
+                    .as_deref()
+                    .unwrap_or("正在读取那台机器的智能体配置，请稍后再试"),
+            );
             return;
         }
         let NewAcpSessionRequest {

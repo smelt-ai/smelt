@@ -254,10 +254,10 @@ pub struct OpenInFileManager {
     pub path: PathBuf,
 }
 
-/// 改一台机器的智能体配置（[`Host::agent_settings`]）。`before` 是改之前读到的那份，
-/// `after` 是改成的那份；运行时按两者的差别合并，只写真正改了的字段。宿主手里的那份已经
-/// 不是 `before`（这期间别处改过）就不接受，重读再改。本地立刻生效，再按机器排队提交给
-/// 运行时；提交失败退回运行时的那份，原因见 [`Host::agent_settings_error`]。
+/// 改一台机器的智能体配置（[`Host::agent_settings`]），给 JS 插件用；Rust 插件用
+/// [`edit_agent_settings`]。`before` 是改之前读到的那份，`after` 是改成的那份；那台机器的
+/// 运行时按两者的差别合并，只写真正改了的字段，这期间别处改的其它字段不会被盖掉。改完由
+/// 运行时推回来（发 [`HostEvent::AgentSettingsChanged`]），宿主不先改本地。
 pub const EDIT_AGENT_SETTINGS: Command<AgentSettingsEdit, ()> =
     Command::new("smelt.app/edit-agent-settings");
 
@@ -269,15 +269,31 @@ pub struct AgentSettingsEdit {
     pub after: model::agent_host::AgentHostSettings,
 }
 
-/// 从各台机器重读智能体配置。CLI、Control API 改了定义不会推过来，看定义的页面打开时
-/// 调一次。
-pub const RELOAD_AGENT_SETTINGS: Command<(), ()> = Command::new("smelt.app/reload-agent-settings");
+/// 发一次智能体配置修改的上限。运行时那边一次合并写库，正常是毫秒级。
+pub const AGENT_SETTINGS_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 改 [`Host::agent_settings`] 那份配置：按 [`EDIT_AGENT_SETTINGS`] 发出 `f` 改出来的结果。
-/// 配置还没读到、或 `f` 什么都没改时不发。
+/// 把 `edit` 发给那台机器的运行时，见 [`EDIT_AGENT_SETTINGS`]。返回运行时合并后的那份。
+pub fn send_agent_settings_edit(
+    edit: AgentSettingsEdit,
+    cx: &App,
+) -> Task<Result<model::agent_host::AgentHostSettings, String>> {
+    call::<model::control_api::AgentHostApplyEdit>(
+        &edit.machine,
+        model::agent_host::AgentHostEdit {
+            before: edit.before,
+            after: edit.after,
+        },
+        AGENT_SETTINGS_TIMEOUT,
+        cx,
+    )
+}
+
+/// 改那台机器的智能体配置：在 [`Host::agent_settings`] 那份上调 `f`，把改动发给它的运行时
+/// （见 [`EDIT_AGENT_SETTINGS`]）。改完由运行时推回来，这里不先改本地；配置还没收到、
+/// 给不了时报错，`f` 什么都没改时不发。
 ///
-/// 宿主只收基于它手里那份配置的修改，同一拍里发出的两份后一份必被拒；所以这里排队，
-/// 一次只发一份，轮到时才按那时的配置调 `f`。连着调几次就按调用的顺序都改上。
+/// 每台机器一条队列，一次只发一份，轮到时才调 `f`：连着调几次就按调用的顺序都改上，后一份
+/// 看得到前一份的结果。前一份改完时推送可能还没到，所以接着改的以运行时回的那份为底。
 pub fn edit_agent_settings(
     machine: &RuntimeKey,
     f: impl FnOnce(&mut model::agent_host::AgentHostSettings) + 'static,
@@ -285,16 +301,25 @@ pub fn edit_agent_settings(
 ) -> Task<Result<(), String>> {
     let (done, result) = futures_channel::oneshot::channel();
     let edits = cx.default_global::<AgentSettingsEdits>();
-    edits.queue.push_back(AgentSettingsEditJob {
-        machine: machine.clone(),
-        edit: Box::new(f),
-        done,
-    });
-    if !edits.running {
-        edits.running = true;
+    let idle = !edits.0.contains_key(machine);
+    edits
+        .0
+        .entry(machine.clone())
+        .or_default()
+        .push_back(AgentSettingsEditJob {
+            edit: Box::new(f),
+            done,
+        });
+    if idle {
+        let machine = machine.clone();
         cx.spawn(async move |cx| {
-            while let Some((task, done)) = cx.update(next_agent_settings_edit) {
-                let _ = done.send(task.await);
+            let mut last = None;
+            while let Some((job, before)) =
+                cx.update(|cx| next_agent_settings_edit(&machine, last.take(), cx))
+            {
+                let _ = job.done.send(
+                    apply_agent_settings_edit(&machine, job.edit, before, &mut last, cx).await,
+                );
             }
         })
         .detach();
@@ -306,52 +331,77 @@ pub fn edit_agent_settings(
     })
 }
 
-/// 等着发的配置修改。
+/// 每台机器等着发的配置修改。有队列就是那台机器正在发，排空了就拿掉。
 #[derive(Default)]
-struct AgentSettingsEdits {
-    queue: std::collections::VecDeque<AgentSettingsEditJob>,
-    /// 有一份正在发，后面的排着。
-    running: bool,
-}
+struct AgentSettingsEdits(
+    std::collections::BTreeMap<RuntimeKey, std::collections::VecDeque<AgentSettingsEditJob>>,
+);
 
 impl Global for AgentSettingsEdits {}
 
+type AgentSettingsChange = Box<dyn FnOnce(&mut model::agent_host::AgentHostSettings)>;
+
 struct AgentSettingsEditJob {
-    machine: RuntimeKey,
-    edit: Box<dyn FnOnce(&mut model::agent_host::AgentHostSettings)>,
+    edit: AgentSettingsChange,
     done: futures_channel::oneshot::Sender<Result<(), String>>,
 }
 
-type AgentSettingsEditStart = (
-    Task<Result<(), String>>,
-    futures_channel::oneshot::Sender<Result<(), String>>,
-);
-
-/// 取下一份修改，按眼下的配置算出来发出去；队列空了就停。
-fn next_agent_settings_edit(cx: &mut App) -> Option<AgentSettingsEditStart> {
+/// 取那台机器的下一份修改和它的底稿：`last` 是上一份改完运行时回的，没有就用眼下收到的
+/// 那份。队列空了就拿掉它，返回 `None`。
+fn next_agent_settings_edit(
+    machine: &RuntimeKey,
+    last: Option<model::agent_host::AgentHostSettings>,
+    cx: &mut App,
+) -> Option<(
+    AgentSettingsEditJob,
+    Result<model::agent_host::AgentHostSettings, String>,
+)> {
     let edits = cx.global_mut::<AgentSettingsEdits>();
-    let Some(job) = edits.queue.pop_front() else {
-        edits.running = false;
+    let Some(job) = edits.0.get_mut(machine).and_then(|queue| queue.pop_front()) else {
+        edits.0.remove(machine);
         return None;
     };
-    let Some(before) = host(cx).agent_settings(&job.machine, cx).cloned() else {
-        let error = "这台机器的智能体配置还没读到，稍后再改".to_string();
-        return Some((Task::ready(Err(error)), job.done));
+    let before = match last {
+        Some(last) => Ok(last),
+        None => host(cx)
+            .agent_settings(machine, cx)
+            .cloned()
+            .ok_or_else(|| {
+                host(cx)
+                    .agent_settings_unavailable(machine, cx)
+                    .unwrap_or_else(|| "这台机器的智能体配置还没收到，稍后再改".to_string())
+            }),
     };
+    Some((job, before))
+}
+
+/// 在 `before` 上改，发出去；改上了把运行时回的那份记进 `last`。
+async fn apply_agent_settings_edit(
+    machine: &RuntimeKey,
+    edit: AgentSettingsChange,
+    before: Result<model::agent_host::AgentHostSettings, String>,
+    last: &mut Option<model::agent_host::AgentHostSettings>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<(), String> {
+    let before = before?;
     let mut after = before.clone();
-    (job.edit)(&mut after);
+    edit(&mut after);
     if after == before {
-        return Some((Task::ready(Ok(())), job.done));
+        *last = Some(before);
+        return Ok(());
     }
-    let task = EDIT_AGENT_SETTINGS.run(
-        &AgentSettingsEdit {
-            machine: job.machine,
-            before,
-            after,
-        },
-        cx,
-    );
-    Some((task, job.done))
+    let sent = cx.update(|cx| {
+        send_agent_settings_edit(
+            AgentSettingsEdit {
+                machine: machine.clone(),
+                before,
+                after,
+            },
+            cx,
+        )
+    });
+    *last = Some(sent.await?);
+    Ok(())
 }
 
 /// 宿主转给插件的事。
@@ -413,6 +463,9 @@ pub enum TopicMessage {
     Snapshot(serde_json::Value),
     /// 断开或积压，可能错过了事件。没有快照的话题要自己重读；带快照的话题后面跟着一份快照。
     Lagged,
+    /// 那台机器这一轮连接上不会再推这个话题：运行时拒掉了订阅（多半是比这个话题旧），或推来的
+    /// 解不开。原因给人看。重新连上时还会再订，订上了照常推。
+    Unavailable(String),
 }
 
 /// [`HostEvent`] 的发送方。宿主装好，插件订阅。
@@ -427,16 +480,17 @@ pub trait Host: 'static {
     fn machines(&self, cx: &App) -> Vec<Machine>;
     /// 那台机器的运行时客户端；机器已经移除是 `None`。
     fn client(&self, machine: &RuntimeKey, cx: &App) -> Option<RuntimeClient>;
-    /// 那台机器的智能体配置：自定义 Agent（profile）、智能体定义、环境变量。还没读到是
-    /// `None`。只读；变了发 [`HostEvent::AgentSettingsChanged`]。
+    /// 那台机器的智能体配置：自定义 Agent（profile）、智能体定义、环境变量。运行时推来的
+    /// 那一份，各处都读它；还没收到、给不了是 `None`。只读，改用 [`edit_agent_settings`]；
+    /// 变了发 [`HostEvent::AgentSettingsChanged`]。
     fn agent_settings<'a>(
         &self,
         machine: &RuntimeKey,
         cx: &'a App,
     ) -> Option<&'a model::agent_host::AgentHostSettings>;
-    /// 那台机器的智能体配置最近一次读取或保存失败的原因；没有失败是 `None`。变了发
-    /// [`HostEvent::AgentSettingsChanged`]。
-    fn agent_settings_error(&self, machine: &RuntimeKey, cx: &App) -> Option<String>;
+    /// 那台机器给不了智能体配置的原因（运行时太旧等），给人看；收到了、还没收到是 `None`。
+    /// 变了发 [`HostEvent::AgentSettingsChanged`]。
+    fn agent_settings_unavailable(&self, machine: &RuntimeKey, cx: &App) -> Option<String>;
     /// 那个视图此刻看得见：摆在布局里且所在组显示着它，或在舞台上开成了当前页；设置页
     /// 是设置开着、停在这一页。视图
     /// 被挡住、切走后还活着，要靠它知道自己露没露着，看不见时不做只为显示的事（采样、刷新）。
@@ -715,19 +769,61 @@ mod tests {
         assert!(!request.files && !request.multiple);
     }
 
-    /// 只有智能体配置的宿主：配置记在全局上，改配置走 [`EDIT_AGENT_SETTINGS`]。
-    struct SettingsHost;
+    /// 只有智能体配置的宿主：推来的配置记在全局上，客户端连着一个假运行时。
+    struct SettingsHost(FakeRuntime);
 
     struct FakeSettings(model::agent_host::AgentHostSettings);
 
     impl Global for FakeSettings {}
+
+    /// 假运行时：`agent.host.apply_edit` 记下收到的修改，把 `after` 存成它的配置并回给客户端；
+    /// 不推送，看得出客户端有没有先改本地。
+    #[derive(Clone, Default)]
+    struct FakeRuntime {
+        edits: std::sync::Arc<std::sync::Mutex<Vec<model::agent_host::AgentHostEdit>>>,
+    }
+
+    impl FakeRuntime {
+        fn edits(&self) -> Vec<model::agent_host::AgentHostEdit> {
+            self.edits.lock().unwrap().clone()
+        }
+
+        /// 每次连接给出一对 socket，另一端在新线程里答一条控制请求。
+        fn client(&self) -> RuntimeClient {
+            use smelt_runtime_client::protocol::control::ControlResponse;
+            use std::io::{BufRead as _, Write as _};
+
+            let fake = self.clone();
+            RuntimeClient::new(move || {
+                let (client, server) = smelt_runtime_client::RuntimeStream::pair()?;
+                let fake = fake.clone();
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    std::io::BufReader::new(server.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request["method"], "agent.host.apply_edit");
+                    let request_id = request["request_id"].as_str().unwrap().to_string();
+                    let edit: model::agent_host::AgentHostEdit =
+                        serde_json::from_value(request["params"].clone()).unwrap();
+                    let after = edit.after.clone();
+                    fake.edits.lock().unwrap().push(edit);
+                    let response =
+                        serde_json::to_value(ControlResponse::ok(request_id, after)).unwrap();
+                    writeln!(&server, "{response}").unwrap();
+                });
+                Ok(client)
+            })
+        }
+    }
 
     impl Host for SettingsHost {
         fn machines(&self, _: &App) -> Vec<Machine> {
             Vec::new()
         }
         fn client(&self, _: &RuntimeKey, _: &App) -> Option<RuntimeClient> {
-            None
+            Some(self.0.client())
         }
         fn agent_settings<'a>(
             &self,
@@ -736,7 +832,7 @@ mod tests {
         ) -> Option<&'a model::agent_host::AgentHostSettings> {
             Some(&cx.global::<FakeSettings>().0)
         }
-        fn agent_settings_error(&self, _: &RuntimeKey, _: &App) -> Option<String> {
+        fn agent_settings_unavailable(&self, _: &RuntimeKey, _: &App) -> Option<String> {
             None
         }
         fn view_shown(&self, _: &str, _: &App) -> bool {
@@ -781,27 +877,20 @@ mod tests {
         }
     }
 
+    /// 同一拍里连着改两次：按顺序都发出去，第二份以运行时回的第一份为底（推送还没到也看得到
+    /// 第一份的结果），本地那份一直不动，等运行时推回来。
     #[gpui::test]
     fn edits_in_one_tick_all_apply_in_order(cx: &mut gpui::TestAppContext) {
+        let runtime = FakeRuntime::default();
+        let fresh = model::agent_host::AgentHostSettings::fresh();
         let (first, second) = cx.update(|cx| {
-            cx.set_global(FakeSettings(model::agent_host::AgentHostSettings::fresh()));
-            install(SettingsHost, cx);
-            // 和宿主一样：手里那份不是 `before` 就拒。
-            let edit = EDIT_AGENT_SETTINGS.spec("改智能体配置", |edit, _, cx| {
-                let settings = &mut cx.global_mut::<FakeSettings>().0;
-                if *settings != edit.before {
-                    return Err("智能体配置刚被别处改过，请重试".to_string());
-                }
-                *settings = edit.after;
-                Ok(())
-            });
-            register_commands("smelt.app", "应用", vec![edit], cx).unwrap();
+            cx.set_global(FakeSettings(fresh.clone()));
+            install(SettingsHost(runtime.clone()), cx);
             let first = edit_agent_settings(
                 &RuntimeKey::Local,
                 |settings| settings.default_conversation_agent = Some("a".to_string()),
                 cx,
             );
-            // 第二份要在第一份改完之后才算：看得到第一份的结果。
             let second = edit_agent_settings(
                 &RuntimeKey::Local,
                 |settings| {
@@ -815,10 +904,25 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(cx.foreground_executor().block_test(first), Ok(()));
         assert_eq!(cx.foreground_executor().block_test(second), Ok(()));
-        cx.update(|cx| {
-            let settings = &cx.global::<FakeSettings>().0;
-            assert_eq!(settings.default_conversation_agent.as_deref(), Some("a"));
-            assert!(!settings.hooks_enabled);
+        let edits = runtime.edits();
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].before, fresh);
+        assert_eq!(edits[1].before, edits[0].after);
+        assert!(!edits[1].after.hooks_enabled);
+        cx.update(|cx| assert_eq!(cx.global::<FakeSettings>().0, fresh, "本地不先改"));
+    }
+
+    /// 什么都没改的不发。
+    #[gpui::test]
+    fn an_edit_that_changes_nothing_is_not_sent(cx: &mut gpui::TestAppContext) {
+        let runtime = FakeRuntime::default();
+        let unchanged = cx.update(|cx| {
+            cx.set_global(FakeSettings(model::agent_host::AgentHostSettings::fresh()));
+            install(SettingsHost(runtime.clone()), cx);
+            edit_agent_settings(&RuntimeKey::Local, |_| {}, cx)
         });
+        cx.run_until_parked();
+        assert_eq!(cx.foreground_executor().block_test(unchanged), Ok(()));
+        assert!(runtime.edits().is_empty());
     }
 }

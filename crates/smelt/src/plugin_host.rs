@@ -108,11 +108,10 @@ impl api::Host for SmeltHost {
         status_item::notification_permission()
     }
 
-    fn agent_settings_error(&self, machine: &RuntimeKey, cx: &App) -> Option<String> {
+    fn agent_settings_unavailable(&self, machine: &RuntimeKey, cx: &App) -> Option<String> {
         crate::settings::agent_hosts(cx)?
-            .machine(machine)?
-            .error
-            .clone()
+            .unavailable(machine)
+            .map(str::to_string)
     }
 
     fn embed_conversation(
@@ -237,12 +236,9 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
         api::OPEN_IN_FILE_MANAGER.spec("用文件管理器打开", |args, _, _| {
             crate::ide::open_in_file_manager(&args.path)
         }),
-        api::EDIT_AGENT_SETTINGS.spec("改智能体配置", |edit, _, cx| {
-            edit_agent_settings(edit, cx)
-        }),
-        api::RELOAD_AGENT_SETTINGS.spec("重读智能体配置", |_, _, cx| {
-            crate::settings::reload_agent_hosts(cx);
-            Ok(())
+        api::EDIT_AGENT_SETTINGS.spec_async("改智能体配置", |edit, _, cx| {
+            let sent = api::send_agent_settings_edit(edit, cx);
+            cx.spawn(async move |_| sent.await.map(|_| ()))
         }),
         api::PICK_PATHS.spec_async("选择路径", move |request, window, cx| {
             let Some(runtime) = runtimes::runtime(&request.machine, cx) else {
@@ -285,27 +281,6 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             })
         }),
     ]
-}
-
-/// 插件改智能体配置：宿主手里的那份还是插件读到的 `before` 才接受，免得盖掉这期间别处
-/// 的修改。
-fn edit_agent_settings(edit: api::AgentSettingsEdit, cx: &mut App) -> Result<(), String> {
-    let current = crate::settings::agent_hosts(cx)
-        .and_then(|hosts| hosts.settings(&edit.machine))
-        .cloned()
-        .ok_or_else(|| "这台机器的智能体配置还没读到，稍后再改".to_string())?;
-    if current != edit.before {
-        return Err("智能体配置刚被别处改过，请重试".to_string());
-    }
-    let after = edit.after;
-    if crate::settings::try_apply_agent_host(&edit.machine, move |settings| *settings = after, cx) {
-        Ok(())
-    } else {
-        Err(crate::settings::agent_hosts(cx)
-            .and_then(|hosts| hosts.machine(&edit.machine))
-            .and_then(|machine| machine.error.clone())
-            .unwrap_or_else(|| "这台机器的智能体配置改不了".to_string()))
-    }
 }
 
 /// 启动时、开主窗口之前调一次：装好宿主服务，登记内置插件。

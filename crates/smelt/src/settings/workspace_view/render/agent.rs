@@ -658,7 +658,7 @@ fn agent_groups(
                                         .disabled(busy)
                                         .on_click(move |_, _window, cx: &mut App| {
                                             // 先关闭自动安装，避免部分移除失败后重启又被装回。
-                                            apply_agent_host(
+                                            edit_agent_host(
                                                 &crate::RuntimeKey::Local,
                                                 |c| c.hooks_enabled = false,
                                                 cx,
@@ -678,7 +678,7 @@ fn agent_groups(
                                         .on_click(move |_, _window, cx: &mut App| {
                                             // 先记用户意图：即使某个 provider 本次安装失败，
                                             // 下次启动也会继续校正，而不是悄悄退回关闭。
-                                            apply_agent_host(
+                                            edit_agent_host(
                                                 &crate::RuntimeKey::Local,
                                                 |c| c.hooks_enabled = true,
                                                 cx,

@@ -283,6 +283,8 @@ impl AgentsPage {
                     TopicMessage::Snapshot(_) | TopicMessage::Lagged => {
                         self.editor_machine() == Some(machine)
                     }
+                    // 这一轮不会再推，编辑器里的记忆照旧，手动刷新还能重扫。
+                    TopicMessage::Unavailable(_) => false,
                 };
                 if affected {
                     self.refresh_agent_memories(cx);
@@ -352,8 +354,6 @@ impl AgentsPage {
 
 impl PluginView for AgentsPage {
     fn open(&mut self, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
-        // CLI、Control API 改了定义不会推过来，每次进来重读一遍。
-        api::RELOAD_AGENT_SETTINGS.run(&(), cx).detach();
         self.error = None;
         let new_conversation = args
             .get("new_conversation")

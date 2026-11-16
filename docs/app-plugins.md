@@ -92,7 +92,8 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 - 宿主按话题转发，并缓存每个话题的最新快照，插件用 `topic(machine, 话题)` 读，不解读。
 - 插件之间不各自镜像一份：现在智能体和自动化两个插件各存了一份自动化列表，终态里两边读同一份缓存。
 - 宿主自己不解读这些话题。退出或重启守护进程前，宿主要知道哪些会话还在跑：这时直接问 smeltd，不去读缓存里的会话状态。
-- 还没有话题的数据（比如智能体配置现在只能 `call` 去取），由 smeltd 补上话题。
+- 还没有话题的数据，由 smeltd 补上话题。
+- 智能体配置（自定义 Agent、智能体定义、环境变量、hook 开关）2026-11-16 已改：smeltd 是唯一写入方，改完整份推 `agent_host.changed`（订上先给快照）；桌面只留一份只读缓存（`smelt-app-state` 的 `AgentHosts`），只靠推送更新，插件经 `Host::agent_settings` 读、`edit_agent_settings` 改，改动发给运行时、不先改本地。旧运行时拒掉这个话题时，那台机器的配置显示「升级运行时后可用」，在上面开不了新的 ACP 对话。
 
 ### 会话名由 smeltd 给
 
@@ -328,7 +329,7 @@ my-theme/
 | --- | --- | --- |
 | `settings_page_shown`、`ShownSettingsPageChanged` | 和 `view_shown` 平行的第二套可见性 | 1（已收） |
 | `register_view` 单个登记、`register_settings_pages` | 视图和设置页是两张表，登记方式也不一样 | 1 |
-| `session_states`、`workspace_directory`、`agent_settings`、`EDIT_AGENT_SETTINGS`、`RELOAD_AGENT_SETTINGS`、`AgentSettingsChanged` | 宿主在解读运行时数据 | 2 |
+| `session_states`、`workspace_directory`、`agent_settings`、`EDIT_AGENT_SETTINGS`、`AgentSettingsChanged`（`RELOAD_AGENT_SETTINGS` 2026-11-16 已删） | 宿主在解读运行时数据 | 2 |
 | `embed_conversation` | 对话组件应该直接用 | 4 |
 | `RESERVED_VIEW_IDS` | 视图 id 带来源以后撞不上路由名 | 1 |
 | 宿主按名字找 `smelt.agents/new-conversation` 和视图 `agents`、`capabilities` | 舞台路由还写死在宿主里 | 5（`page_header` 已收） |
@@ -337,7 +338,7 @@ my-theme/
 
 ## 待定，要确认后再动
 
-- **第 2 步要改运行时协议**：smeltd 推送的数据里加会话的显示名，并补上智能体配置的话题。项目记忆里的规矩是「协议能不升就不升」，但这几项是让数据只有一个权威所必需的。动手前先列出具体字段。
+- **第 2 步要改运行时协议**：smeltd 推送的数据里加会话的显示名，并补上智能体配置的话题。项目记忆里的规矩是「协议能不升就不升」，但这几项是让数据只有一个权威所必需的。动手前先列出具体字段。智能体配置的话题 2026-11-16 已加（`agent_host.changed`，快照 `core.agent_host.v1`），没升协议版本：旧运行时按不认识的话题拒掉这一条订阅。
 - **第 5 步要改客户端库的表**：`workspace_ui`、`conversation_route`、`sidebar_*_order` 搬进会话插件的库，客户端库版本加一。按 `AGENTS.md`，改之前先列出改动、等确认。
 - **侧栏里那排插件入口**（智能体、自动化等没摆进布局的视图），现在是宿主在会话列表里画的。终态里宿主不画。可以交给布局（默认布局把它们摆成标签），也可以由会话插件按「所有视图」画一排入口。前者更干净，但用户找入口会变；拆到第 5 步之前要定下来。
 

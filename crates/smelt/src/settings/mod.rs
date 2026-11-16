@@ -733,8 +733,7 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // 哪台机器。会话按它所在的运行时取，设置页眼下只配本机。
 pub use smelt_app_state::agent_host_state::{
     AgentDefinition, AgentHosts, agent_host_loaded, agent_host_settled, agent_hosts,
-    apply_agent_host, detach_agent_host, reload_agent_host, reload_agent_hosts,
-    try_apply_agent_host,
+    forget_agent_host,
 };
 pub use smelt_model::agent_host::AgentHostSettings;
 pub use smelt_model::agent_kind::{
@@ -742,35 +741,42 @@ pub use smelt_model::agent_kind::{
 };
 use smelt_model::agent_kind::{ConversationLaunchSpec, format_env_lines, parse_env_lines};
 
-/// 挂上一台机器并在后台读它的配置：等那台机器在线再读，读失败就退避后回去等（见
-/// [`crate::runtime_events::wait_online`]），直到读到或机器被移除。已经挂着的只换客户端
-/// （比如改了中继），不重读。`on_first_load` 在第一次读到后调用一次。
-pub fn attach_agent_host(
-    key: crate::RuntimeKey,
-    client: smelt_runtime_client::RuntimeClient,
+/// 那台机器推来的智能体配置（话题 `agent_host.changed`）：整份换上缓存。积压丢了事件不用管，
+/// 后面跟着一份快照；订阅被拒（运行时太旧）就记成给不了。
+pub fn receive_agent_host_topic(
+    runtime: &crate::RuntimeKey,
+    message: smelt_client::daemon_state::TopicMessage,
     cx: &mut App,
-    on_first_load: impl FnOnce(&mut App) + 'static,
 ) {
-    use smelt_app_state::agent_host_state::{AgentHostLoad, load_agent_host, register_agent_host};
+    use smelt_app_state::agent_host_state::{agent_host_unavailable, receive_agent_host};
+    use smelt_client::daemon_state::TopicMessage;
 
-    if !register_agent_host(&key, client, cx) {
-        return;
-    }
-    cx.spawn(async move |cx| {
-        let mut failures = 0u32;
-        loop {
-            if !crate::runtime_events::wait_online(&key, failures, cx).await {
-                return;
-            }
-            // 刚断线、订阅还没察觉时会读失败，先安静重试几次再报。
-            match load_agent_host(&key, failures >= 4, cx).await {
-                AgentHostLoad::Loaded => {
-                    cx.update(on_first_load);
-                    return;
+    match message {
+        TopicMessage::Event { payload, .. } | TopicMessage::Snapshot { payload, .. } => {
+            match serde_json::from_value::<AgentHostSettings>(payload) {
+                Ok(settings) => receive_agent_host(runtime, settings, cx),
+                Err(error) => {
+                    eprintln!("[agent-host] {runtime:?} 推来的智能体配置解不开：{error}");
+                    agent_host_unavailable(runtime, format!("智能体配置解不开：{error}"), cx);
                 }
-                AgentHostLoad::Detached => return,
-                AgentHostLoad::Failed => failures = failures.saturating_add(1),
             }
+        }
+        TopicMessage::Lagged => {}
+        TopicMessage::Unavailable(reason) => agent_host_unavailable(runtime, reason, cx),
+    }
+}
+
+/// 改那台机器的智能体配置（宿主自己的设置页用）：发给它的运行时，改完由它推回来；没改上
+/// 就报给人看。
+pub fn edit_agent_host(
+    runtime: &crate::RuntimeKey,
+    f: impl FnOnce(&mut AgentHostSettings) + 'static,
+    cx: &mut App,
+) {
+    let edit = smelt_plugin_api::edit_agent_settings(runtime, f, cx);
+    cx.spawn(async move |_| {
+        if let Err(error) = edit.await {
+            crate::status_item::notify_error(format!("保存智能体配置失败：{error}"));
         }
     })
     .detach();
@@ -978,6 +984,8 @@ pub struct ProfileInputs {
 #[derive(Clone)]
 pub struct ProfileRow {
     pub(crate) id: String,
+    /// 建这一行时的类型：输入框的占位字跟着类型走，换了类型要重建。
+    pub(crate) kind_id: String,
     pub(crate) label: Entity<gpui_component::input::InputState>,
     pub(crate) command: Entity<gpui_component::input::InputState>,
     pub(crate) env: Entity<gpui_component::input::TextareaState>,

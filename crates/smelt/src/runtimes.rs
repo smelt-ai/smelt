@@ -918,7 +918,6 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
     if !changed {
         return;
     }
-    let online = matches!(status, RuntimeStatus::Online { .. });
     let mut learned = None;
     update_hub(cx, |hub| match key {
         RuntimeKey::Local => hub.local_status = Some(status),
@@ -973,14 +972,6 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
                 }
             })
             .detach();
-    }
-    // 远程机器第一次连上时挂上它的智能体配置；本机启动时就挂了。之后断线重连不重读，
-    // 已经挂着的只换客户端。
-    if online
-        && key != &RuntimeKey::Local
-        && let Some(client) = client(key, cx)
-    {
-        crate::settings::attach_agent_host(key.clone(), client, cx, |_| {});
     }
 }
 
@@ -1210,12 +1201,6 @@ pub(crate) fn add_runtime(cx: &mut gpui::App) {
             .spawn(async move { pair_with(&uri) })
             .await;
         cx.update(|cx| {
-            // 配对时已经连上：之后订阅报的还是「在线」，`set_status` 看不出变化，就在这里挂。
-            let online = added
-                .as_ref()
-                .ok()
-                .filter(|remote| matches!(remote.status, RuntimeStatus::Online { .. }))
-                .map(|remote| remote.runtime.clone());
             update_hub(cx, |hub| {
                 hub.adding = false;
                 match added {
@@ -1229,14 +1214,6 @@ pub(crate) fn add_runtime(cx: &mut gpui::App) {
                     Err(error) => hub.error = Some(error),
                 }
             });
-            if let Some(runtime) = online {
-                crate::settings::attach_agent_host(
-                    runtime.key().clone(),
-                    runtime.client().clone(),
-                    cx,
-                    |_| {},
-                );
-            }
         });
     })
     .detach();
@@ -1485,7 +1462,7 @@ pub(crate) fn remove_runtime(runtime_id: String, cx: &mut gpui::App) {
             });
             if removed.is_ok() {
                 remote.route.unwatch();
-                crate::settings::detach_agent_host(remote.runtime.key(), cx);
+                crate::settings::forget_agent_host(remote.runtime.key(), cx);
             }
         });
         if deleted && revoke {

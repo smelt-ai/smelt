@@ -8,9 +8,9 @@ use std::time::Duration;
 
 pub use smelt_event_protocol::{
     AgentMemoryChanged, AttentionChanged, AttentionItem, AttentionKind, AttentionSnapshot,
-    CORE_TOPIC_AGENT_MEMORY_CHANGED, CORE_TOPIC_ATTENTION_CHANGED, CORE_TOPIC_AUTOMATIONS_CHANGED,
-    CORE_TOPIC_HISTORY_CHANGED, CORE_TOPIC_PI_CONFIG_CHANGED, SessionAttention, TerminalProgress,
-    TerminalProgressState,
+    CORE_TOPIC_AGENT_HOST_CHANGED, CORE_TOPIC_AGENT_MEMORY_CHANGED, CORE_TOPIC_ATTENTION_CHANGED,
+    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_HISTORY_CHANGED, CORE_TOPIC_PI_CONFIG_CHANGED,
+    SessionAttention, TerminalProgress, TerminalProgressState,
 };
 
 use crate::automation::AutomationFile;
