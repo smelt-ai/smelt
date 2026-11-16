@@ -690,3 +690,118 @@ fn a_subscriber_gets_the_directory_the_daemon_could_not_read_at_startup() {
     let published = published_directory(&event_hub).expect("库好了，新订阅拿到目录");
     assert_eq!(published.conversations, std::slice::from_ref(&conversation));
 }
+
+/// 建工作树要 fetch 远端，期间不能占着目录锁：会话的目录写入照常进行。远端的
+/// upload-pack 换成一个脚本，开始时通知测试、等测试放行再继续，模拟一次很慢的 fetch。
+#[test]
+#[cfg(unix)]
+fn creating_a_workset_does_not_block_directory_writes_while_fetching() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let project = temp.dir.join("project");
+    let remote = temp.dir.join("remote.git");
+    std::fs::create_dir_all(&project).unwrap();
+    git(&project, &["init", "--initial-branch=main"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["config", "user.email", "test@example.invalid"]);
+    git(&project, &["commit", "--allow-empty", "-m", "seed"]);
+    git(&temp.dir, &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        &project,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&project, &["push", "-u", "origin", "main"]);
+    git(&project, &["remote", "set-head", "origin", "main"]);
+
+    let started = temp.dir.join("fetch-started");
+    let release = temp.dir.join("fetch-release");
+    for fifo in [&started, &release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let hook = temp.dir.join("slow-upload-pack");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho started > '{}'\ncat '{}' > /dev/null\nexec git upload-pack \"$@\"\n",
+            started.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &project,
+        &["config", "remote.origin.uploadpack", hook.to_str().unwrap()],
+    );
+
+    let root = project.to_str().unwrap().to_string();
+    workspace_directory::open_project(&temp.store, &root, &event_hub).unwrap();
+    let repository = workspace_catalog::directory_on(&temp.store)
+        .unwrap()
+        .repositories[0]
+        .name
+        .clone();
+
+    std::thread::scope(|scope| {
+        let creating = scope.spawn(|| {
+            crate::workset_control::create(
+                &temp.store,
+                smelt_core::workspace_directory::WorkspaceWorksetCreateParams {
+                    project_root: root.clone(),
+                    task: "slow".into(),
+                    branch_prefix: "feat/".into(),
+                    branch: None,
+                    repository_names: vec![repository],
+                },
+                &event_hub,
+            )
+        });
+        // fetch 开始了：upload-pack 脚本卡在等放行上。
+        std::fs::read(&started).unwrap();
+
+        let (sent, written) = std::sync::mpsc::channel();
+        let (store, hub) = (&temp.store, &event_hub);
+        scope.spawn(move || {
+            let conversation = terminal_conversation();
+            let _ = sent.send(workspace_directory::create_conversation(
+                store,
+                &conversation,
+                hub,
+            ));
+        });
+        let written = written.recv_timeout(std::time::Duration::from_secs(10));
+
+        std::fs::write(&release, b"go").unwrap();
+        creating.join().unwrap().unwrap();
+        assert!(
+            matches!(written, Ok(Ok(_))),
+            "fetch 期间目录写入被挡住了：{written:?}"
+        );
+    });
+
+    let directory = workspace_catalog::directory_on(&temp.store).unwrap();
+    assert_eq!(directory.worksets.len(), 1);
+    assert_eq!(directory.conversations.len(), 1);
+}

@@ -11,6 +11,15 @@ use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 
 use crate::EventHubHandle;
 
+/// 工作树和项目仓库的增删改排成一队。和目录锁分开：建工作树时的 fetch 只占这把锁，
+/// 不挡会话的目录写入。要同时拿两把锁时，一律先拿这把。
+fn lock_worksets() -> std::sync::MutexGuard<'static, ()> {
+    static WORKSETS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WORKSETS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub(crate) fn repository_action(
     store: &smelt_store::Store,
     params: smelt_core::workspace_directory::WorkspaceProjectRepositoryActionParams,
@@ -37,6 +46,7 @@ pub(crate) fn repository_action(
     } else {
         None
     };
+    let _worksets = lock_worksets();
     let _guard = workspace_catalog::lock_catalog();
     let directory = workspace_catalog::directory_on_locked(store).map_err(directory_error)?;
     if matches!(&params.action, Action::Discover)
@@ -239,8 +249,11 @@ pub(crate) fn create(
     params: WorkspaceWorksetCreateParams,
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceRevision, ControlError> {
-    let _guard = workspace_catalog::lock_catalog();
-    let directory = workspace_catalog::directory_on_locked(store).map_err(directory_error)?;
+    // 建 worktree 要 fetch 各仓库的远端，可能很久。这期间只占着工作树操作锁，不拿目录锁，
+    // 会话的新建、改名这些目录写入照常进行；工作树和仓库的增删改由工作树操作锁排成一队，
+    // 读到的仓库配置不会在建的过程中被改掉。
+    let _worksets = lock_worksets();
+    let directory = workspace_catalog::directory_on(store).map_err(directory_error)?;
     let mut selected_names = HashSet::new();
     let repositories = params
         .repository_names
@@ -280,7 +293,11 @@ pub(crate) fn create(
     })
     .map_err(worktree_error)?;
     let record = model_workset(&workset, uuid::Uuid::new_v4().simple().to_string(), 0);
-    match workspace_catalog::create_workset_on_locked(store, &record) {
+    let saved = {
+        let _guard = workspace_catalog::lock_catalog();
+        workspace_catalog::create_workset_on_locked(store, &record)
+    };
+    match saved {
         Ok(change) => {
             publish_change(&change, event_hub);
             Ok(change.directory.version())
@@ -304,6 +321,7 @@ pub(crate) fn rename(
     params: WorkspaceWorksetRenameParams,
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceRevision, ControlError> {
+    let _worksets = lock_worksets();
     let _guard = workspace_catalog::lock_catalog();
     let directory = workspace_catalog::directory_on_locked(store).map_err(directory_error)?;
     let workset = directory
@@ -349,6 +367,7 @@ pub(crate) fn finish(
     params: WorkspaceWorksetFinishParams,
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceWorksetFinishResult, ControlError> {
+    let _worksets = lock_worksets();
     let _guard = workspace_catalog::lock_catalog();
     let directory = workspace_catalog::directory_on_locked(store).map_err(directory_error)?;
     let workset = directory
