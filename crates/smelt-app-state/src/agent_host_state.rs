@@ -178,6 +178,9 @@ mod tests {
     }
 
     /// 同样的一份再推来不算变化：不惊动观察这个全局的界面和插件。
+    ///
+    /// 每次推送各占一轮 `update`：GPUI 一轮里同一个全局的通知只留一份，挤在一轮里就算不去重
+    /// 也只数到 1，测不出来；观察者也要到登记那一轮结束才生效。
     #[gpui::test]
     fn the_same_push_twice_is_not_a_change(cx: &mut TestAppContext) {
         let changes = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -186,10 +189,10 @@ mod tests {
             let counted = changes.clone();
             cx.observe_global::<AgentHosts>(move |_| counted.set(counted.get() + 1))
                 .detach();
-            receive_agent_host(&RuntimeKey::Local, named("本机的"), cx);
-            receive_agent_host(&RuntimeKey::Local, named("本机的"), cx);
-            forget_agent_host(&RuntimeKey::Remote("没有".into()), cx);
         });
+        cx.update(|cx| receive_agent_host(&RuntimeKey::Local, named("本机的"), cx));
+        cx.update(|cx| receive_agent_host(&RuntimeKey::Local, named("本机的"), cx));
+        cx.update(|cx| forget_agent_host(&RuntimeKey::Remote("没有".into()), cx));
         cx.run_until_parked();
         assert_eq!(changes.get(), 1);
     }
