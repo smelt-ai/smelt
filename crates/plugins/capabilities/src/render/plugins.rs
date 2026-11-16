@@ -4,6 +4,8 @@
 //! 只列全局目录和随 smelt-agent 发布的内置技能：智能体对话的工作目录是一次性空目录，
 //! 项目级插件永远扫不到。内置技能跟着运行时更新，不能删。
 
+use std::collections::HashMap;
+
 use super::*;
 use api::model::pi_plugin_catalog::{
     PiPlugin, PiPluginKind, global_extension_root, global_skill_roots,
@@ -12,9 +14,10 @@ use api::model::pi_plugin_catalog::{
 pub(super) fn pi_plugin_page(
     entity: Entity<CapabilitiesPage>,
     page: &CapabilitiesPage,
-    _cx: &App,
+    cx: &App,
 ) -> SettingPage {
     let plugins = page.pi_plugins();
+    let users = agent_names_using_plugins(&page.machine, cx);
     let usable = plugins.iter().filter(|plugin| plugin.is_usable()).count();
     let broken = plugins.len() - usable;
 
@@ -36,7 +39,7 @@ pub(super) fn pi_plugin_page(
         entity,
         &plugins,
         page.pi_plugin_pending_delete.clone(),
-        page,
+        &users,
     ));
 
     SettingPage::new("智能体插件")
@@ -137,11 +140,28 @@ fn overview_group(entity: Entity<CapabilitiesPage>, plugins: &[PiPlugin]) -> Set
         )
 }
 
+/// 插件 id → 那台机器上勾了它的智能体名，从运行时推来的智能体配置里数；还没收到时是空的。
+fn agent_names_using_plugins(machine: &RuntimeKey, cx: &App) -> HashMap<String, Vec<String>> {
+    let mut users: HashMap<String, Vec<String>> = HashMap::new();
+    let Some(settings) = api::host(cx).agent_settings(machine, cx) else {
+        return users;
+    };
+    for agent in &settings.agents {
+        for plugin in &agent.plugins {
+            users
+                .entry(plugin.clone())
+                .or_default()
+                .push(agent.name.clone());
+        }
+    }
+    users
+}
+
 fn list_group(
     entity: Entity<CapabilitiesPage>,
     plugins: &[PiPlugin],
     pending_delete: Option<String>,
-    page: &CapabilitiesPage,
+    users: &HashMap<String, Vec<String>>,
 ) -> SettingGroup {
     if plugins.is_empty() {
         return SettingGroup::new()
@@ -162,7 +182,7 @@ fn list_group(
                 entity.clone(),
                 plugin,
                 pending_delete.as_deref() == Some(plugin.id.as_str()),
-                page,
+                users.get(&plugin.id).cloned().unwrap_or_default(),
             )
         })
         .collect::<Vec<_>>();
@@ -177,13 +197,8 @@ fn plugin_item(
     entity: Entity<CapabilitiesPage>,
     plugin: &PiPlugin,
     pending: bool,
-    page: &CapabilitiesPage,
+    users: Vec<String>,
 ) -> SettingItem {
-    let users = page
-        .agent_names_using_plugin
-        .get(&plugin.id)
-        .cloned()
-        .unwrap_or_default();
     let id = plugin.id.clone();
     let name = plugin.name.clone();
     let kind_label = plugin.kind.label();

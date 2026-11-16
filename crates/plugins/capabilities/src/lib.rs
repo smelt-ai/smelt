@@ -7,7 +7,6 @@
 //! 状态全在 [`CapabilitiesPage`] 上：在配哪台机器、那台机器的 Pi 配置快照、各表单。
 //! 页面一直留着，离开再回来表单还在；每次打开重读快照。
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED;
@@ -18,7 +17,9 @@ use gpui::*;
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::*;
-use smelt_plugin_api::{self as api, HostEvent, PluginView, RuntimeKey, ViewHandle, ViewSpec};
+use smelt_plugin_api::{
+    self as api, HostEvent, PluginView, RuntimeKey, TopicMessage, ViewHandle, ViewSpec,
+};
 
 mod auth;
 mod config;
@@ -122,8 +123,6 @@ pub struct CapabilitiesPage {
     pi_plugin_pending_delete: Option<String>,
     /// 插件导入 / 删除的最近一次错误。
     pi_plugin_error: Option<String>,
-    /// 插件 id → 勾选了它的智能体名。进插件页签时向那台机器读。
-    agent_names_using_plugin: HashMap<String, Vec<String>>,
     _host_events: Subscription,
 }
 
@@ -150,15 +149,19 @@ impl CapabilitiesPage {
             pi_model_editor_error: None,
             pi_plugin_pending_delete: None,
             pi_plugin_error: None,
-            agent_names_using_plugin: HashMap::new(),
             _host_events: host_events,
         }
     }
 
     fn on_host_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {
         match event {
-            HostEvent::RuntimeTopic { machine, topic, .. }
-                if *machine == self.machine && topic == CORE_TOPIC_PI_CONFIG_CHANGED =>
+            HostEvent::RuntimeTopic {
+                machine,
+                topic,
+                message,
+            } if *machine == self.machine
+                && topic == CORE_TOPIC_PI_CONFIG_CHANGED
+                && !matches!(message, TopicMessage::Unavailable(_)) =>
             {
                 self.on_pi_config_changed(cx);
             }
@@ -179,8 +182,9 @@ impl CapabilitiesPage {
                 }
                 cx.notify();
             }
+            // 插件页签上「谁在用」从这里算。
+            HostEvent::AgentSettingsChanged => cx.notify(),
             HostEvent::ActiveContextChanged
-            | HostEvent::AgentSettingsChanged
             | HostEvent::ShownViewsChanged
             | HostEvent::ViewsChanged
             | HostEvent::ViewBadgesChanged
@@ -194,10 +198,6 @@ impl CapabilitiesPage {
     /// 正在配的那台机器的 Pi 配置变了，或者重新连上（断开期间可能错过推送）：重读。
     fn on_pi_config_changed(&mut self, cx: &mut Context<Self>) {
         self.refresh_pi_library(cx);
-        // 删插件时运行时会顺带清掉智能体的勾选。
-        if self.tab == CapabilitiesTab::Plugins {
-            self.refresh_plugin_users(cx);
-        }
     }
 
     /// 重读快照和当前页签要的东西：进页面、换机器时。
@@ -207,14 +207,10 @@ impl CapabilitiesPage {
     }
 
     /// 页签露出来时要读的：模型页签一打开就读内置 Provider 的登录状态，不用再点「查看」
-    /// （失败后停在 Failed，由用户点重试）；插件页签读谁在用。
+    /// （失败后停在 Failed，由用户点重试）。
     fn load_tab(&mut self, cx: &mut Context<Self>) {
-        match self.tab {
-            CapabilitiesTab::Models if self.pi_auth_providers.is_none() => {
-                self.refresh_pi_auth_providers(cx);
-            }
-            CapabilitiesTab::Plugins => self.refresh_plugin_users(cx),
-            CapabilitiesTab::Models | CapabilitiesTab::Mcp | CapabilitiesTab::Memory => {}
+        if self.tab == CapabilitiesTab::Models && self.pi_auth_providers.is_none() {
+            self.refresh_pi_auth_providers(cx);
         }
     }
 
@@ -224,31 +220,6 @@ impl CapabilitiesPage {
             self.load_tab(cx);
             cx.notify();
         }
-    }
-
-    /// 读那台机器上哪些智能体勾了哪些插件。
-    fn refresh_plugin_users(&mut self, cx: &mut Context<Self>) {
-        self.run_pi_call::<api::model::control_api::AgentHostGet>(
-            api::client::protocol::control::EmptyParams::default(),
-            api::CALL_TIMEOUT,
-            cx,
-            |this, result, cx| match result {
-                Ok(settings) => {
-                    let mut users: HashMap<String, Vec<String>> = HashMap::new();
-                    for agent in &settings.agents {
-                        for plugin in &agent.plugins {
-                            users
-                                .entry(plugin.clone())
-                                .or_default()
-                                .push(agent.name.clone());
-                        }
-                    }
-                    this.agent_names_using_plugin = users;
-                    cx.notify();
-                }
-                Err(error) => eprintln!("[capabilities] 读取智能体配置失败：{error}"),
-            },
-        );
     }
 
     /// 在配哪台机器：一个按钮，点开选本机或别的机器。离线的照样能选，选了会说读不到。

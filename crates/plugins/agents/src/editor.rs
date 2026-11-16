@@ -906,8 +906,8 @@ impl AgentsPage {
         .detach();
     }
 
-    /// 点删除先确认。还挂着自动化的不让删（自动化会跑不起来）由运行时判定：被拒时配置退回
-    /// 运行时那份，原因见 [`api::Host::agent_settings_error`]。
+    /// 点删除先确认。还挂着自动化的不让删（自动化会跑不起来）由运行时判定：被拒时配置不变，
+    /// 原因显示在页面上。
     pub(crate) fn start_delete_agent(
         &mut self,
         agent: AgentRef,

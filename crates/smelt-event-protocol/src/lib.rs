@@ -100,6 +100,13 @@ pub const CORE_TOPIC_TERMINAL_NOTIFICATION: &str = "terminal.notification";
 /// 加在事件协议 v7 之后、没有升版本，所以只放在单独的一条订阅里，v7 的运行时会拒掉那一条，
 /// 那台机器上就没有提醒。
 pub const CORE_TOPIC_ATTENTION_CHANGED: &str = "attention.changed";
+/// 那台机器的智能体配置（自定义 Agent、智能体定义、环境变量、hook 开关）变了，载荷是改完的
+/// 整份 `smelt_model::agent_host::AgentHostSettings`（同 `agent.host.get` 的结果），带快照
+/// [`CORE_SNAPSHOT_AGENT_HOST`]。配置只有运行时写，谁改的都发；客户端只留这一份，不另读。
+///
+/// 加在事件协议 v7 之后、没有升版本，同 [`CORE_TOPIC_ATTENTION_CHANGED`] 只放在单独的一条
+/// 订阅里；v7 的运行时会拒掉那一条，那台机器的智能体配置要等它升级后才可用。
+pub const CORE_TOPIC_AGENT_HOST_CHANGED: &str = "agent_host.changed";
 /// 终端里的程序用 OSC 9;4（ConEmu 进度）报的进度变了。运行时变了就发，进度条还在时
 /// 每 5 秒重发一次（后连上的客户端据此补齐），15 秒没新报告就清掉。不进会话投影。
 pub const CORE_TOPIC_TERMINAL_PROGRESS: &str = "terminal.progress";
@@ -117,6 +124,7 @@ pub const CORE_SNAPSHOT_SESSIONS: &str = "core.sessions.v1";
 pub const CORE_SNAPSHOT_WORKSPACE: &str = "core.workspace.v1";
 pub const CORE_SNAPSHOT_AUTOMATIONS: &str = "core.automations.v1";
 pub const CORE_SNAPSHOT_ATTENTION: &str = "core.attention.v1";
+pub const CORE_SNAPSHOT_AGENT_HOST: &str = "core.agent_host.v1";
 
 pub const FIRST_PARTY_DESKTOP_PLUGIN_ID: &str = "core.desktop";
 
@@ -784,6 +792,13 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             Some(CORE_SNAPSHOT_ATTENTION),
             48 * 1024,
         )?,
+        // 智能体定义带着系统提示词、技能和环境变量，和自动化定义同一个量级。
+        descriptor(
+            CORE_TOPIC_AGENT_HOST_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            Some(CORE_SNAPSHOT_AGENT_HOST),
+            1024 * 1024,
+        )?,
     ])
 }
 
@@ -1082,6 +1097,11 @@ mod tests {
             (
                 CORE_TOPIC_ATTENTION_CHANGED,
                 Some(CORE_SNAPSHOT_ATTENTION),
+                1,
+            ),
+            (
+                CORE_TOPIC_AGENT_HOST_CHANGED,
+                Some(CORE_SNAPSHOT_AGENT_HOST),
                 1,
             ),
         ];

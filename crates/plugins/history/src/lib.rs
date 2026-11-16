@@ -25,7 +25,7 @@ use gpui::*;
 use gpui_component::WindowExt;
 use gpui_component::input::{InputEvent, InputState};
 use smelt_plugin_api::{
-    self as api, HostEvent, PluginView, Project, RuntimeKey, ViewHandle, ViewSpec,
+    self as api, HostEvent, PluginView, Project, RuntimeKey, TopicMessage, ViewHandle, ViewSpec,
 };
 
 mod model;
@@ -170,8 +170,12 @@ impl HistoryPage {
                 self.refresh(cx);
                 cx.notify();
             }
-            HostEvent::RuntimeTopic { machine, topic, .. }
-                if topic == CORE_TOPIC_HISTORY_CHANGED =>
+            HostEvent::RuntimeTopic {
+                machine,
+                topic,
+                message,
+            } if topic == CORE_TOPIC_HISTORY_CHANGED
+                && !matches!(message, TopicMessage::Unavailable(_)) =>
             {
                 self.mark_stale(machine, cx);
             }

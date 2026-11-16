@@ -179,7 +179,7 @@ impl AgentsPage {
         let error = self.error.clone().or_else(|| {
             groups
                 .iter()
-                .find_map(|group| api::host(cx).agent_settings_error(&group.runtime, cx))
+                .find_map(|group| api::host(cx).agent_settings_unavailable(&group.runtime, cx))
         });
         div()
             .id("agent-catalog-scroll")
@@ -413,7 +413,7 @@ impl AgentsPage {
         let error = self
             .error
             .clone()
-            .or_else(|| api::host(cx).agent_settings_error(&editor.agent.runtime, cx));
+            .or_else(|| api::host(cx).agent_settings_unavailable(&editor.agent.runtime, cx));
         if editor.tab == AgentEditorTab::Memory {
             // 单独的滚动区：两个页签各记各的滚动位置。
             return div()

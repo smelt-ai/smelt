@@ -10,8 +10,9 @@ use smelt_event_bus::{
     Delivery, EventBusError, EventHub, Snapshot, SnapshotProvider, StoredEvent, TopicRegistry,
 };
 use smelt_event_protocol::{
-    AggregateRef, AttentionKind, CORE_SNAPSHOT_ATTENTION, CORE_SNAPSHOT_AUTOMATIONS,
-    CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AUTOMATIONS_CHANGED,
+    AggregateRef, AttentionKind, CORE_SNAPSHOT_AGENT_HOST, CORE_SNAPSHOT_ATTENTION,
+    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE,
+    CORE_TOPIC_AGENT_HOST_CHANGED, CORE_TOPIC_AUTOMATIONS_CHANGED,
     CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED, Capability,
     ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId, EventEnvelope,
@@ -133,6 +134,22 @@ impl SnapshotProvider for AttentionSnapshotProvider {
     }
 }
 
+/// 智能体配置的快照现读库：配置只在库里，运行时不另留一份。
+struct AgentHostSnapshotProvider;
+
+impl SnapshotProvider for AgentHostSnapshotProvider {
+    fn snapshot(&self, kind: &SnapshotKind, watermark: u64) -> Result<Snapshot, EventBusError> {
+        let settings = smelt_core::agent_host::load().map_err(EventBusError::new)?;
+        Ok(Snapshot {
+            kind: kind.clone(),
+            watermark,
+            revision: 0,
+            payload: serde_json::to_value(settings)
+                .map_err(|error| EventBusError::new(error.to_string()))?,
+        })
+    }
+}
+
 fn projection_value(projection: &Option<CoreProjectionEvent>) -> (u64, serde_json::Value) {
     match projection {
         Some(projection) => (
@@ -159,6 +176,8 @@ pub(crate) struct DaemonEventHub {
     /// 每个终端正在显示的进度条（会话 id → 实例号、进度）。只为新订阅者补发：
     /// `terminal.progress` 没有快照，后连上的客户端靠它看到已经在跑的进度条。
     terminal_progress: Mutex<BTreeMap<String, (u64, smelt_event_protocol::TerminalProgress)>>,
+    /// 推智能体配置时拿着：读库和发布在同一把锁里，见 [`Self::agent_host_changed`]。
+    agent_host: Mutex<()>,
 }
 
 impl DaemonEventHub {
@@ -183,6 +202,7 @@ impl DaemonEventHub {
             projection,
             attention,
             terminal_progress: Mutex::new(BTreeMap::new()),
+            agent_host: Mutex::new(()),
         }))
     }
 
@@ -472,6 +492,35 @@ impl DaemonEventHub {
             None,
         )?;
         Ok(())
+    }
+
+    /// 智能体配置写过了：谁写的、改成功还是改了一半都调。读出整份推给客户端（没人订阅就不推，
+    /// 后订阅的从快照拿），会话名也跟着重算。
+    ///
+    /// 读库和发布在同一把锁里：两次写挨着发生时，先读到旧配置的那次一定先发出去，客户端最后
+    /// 拿到的总是新的那份。
+    pub(crate) fn agent_host_changed(&self) {
+        crate::session_names::agents_changed();
+        let Ok(_publishing) = self.agent_host.lock() else {
+            eprintln!("[event-hub] agent host lock poisoned");
+            return;
+        };
+        let topic =
+            Topic::new(CORE_TOPIC_AGENT_HOST_CHANGED).expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic).unwrap_or(true) {
+            return;
+        }
+        let published = smelt_core::agent_host::load()
+            .map_err(EventBusError::new)
+            .and_then(|settings| {
+                serde_json::to_value(settings).map_err(|error| {
+                    EventBusError::new(format!("serialize agent host settings: {error}"))
+                })
+            })
+            .and_then(|payload| self.publish_core(CORE_TOPIC_AGENT_HOST_CHANGED, payload, None));
+        if let Err(error) = published {
+            eprintln!("[event-hub] agent host publish failed: {error}");
+        }
     }
 
     /// 经运行时改了历史存档。没人订阅就不发。
@@ -776,6 +825,10 @@ fn register_snapshot_providers(
         Arc::new(AttentionSnapshotProvider {
             attention: Arc::clone(attention),
         }),
+    )?;
+    hub.register_snapshot_provider(
+        SnapshotKind(CORE_SNAPSHOT_AGENT_HOST.to_string()),
+        Arc::new(AgentHostSnapshotProvider),
     )?;
     let projection_provider: Arc<dyn SnapshotProvider> = Arc::new(ProjectionSnapshotProvider {
         projection: Arc::clone(projection),

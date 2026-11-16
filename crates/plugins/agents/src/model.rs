@@ -323,13 +323,22 @@ pub(crate) fn remove_agent(config: &mut api::model::agent_host::AgentHostSetting
     }
 }
 
-/// 不等结果的配置修改：失败原因宿主记在 [`api::Host::agent_settings_error`]，页面从那里
-/// 显示，这里只记日志。
+/// 不等结果的配置修改（可能不在页面上点的，比如「新对话」顺手清掉失效的默认）：失败时
+/// 发一条通知，配置还是运行时推来的那份。
 pub(crate) fn report_edit(task: Task<Result<(), String>>, cx: &mut App) {
-    cx.spawn(async move |_| {
-        if let Err(error) = task.await {
-            eprintln!("[agents] 改智能体配置失败：{error}");
-        }
+    cx.spawn(async move |cx| {
+        let Err(error) = task.await else {
+            return;
+        };
+        eprintln!("[agents] 改智能体配置失败：{error}");
+        cx.update(|cx| {
+            let notify = api::Notify {
+                subtitle: "错误".to_string(),
+                body: format!("保存智能体配置失败：{error}"),
+                ..Default::default()
+            };
+            api::NOTIFY.run(&notify, cx).detach();
+        });
     })
     .detach();
 }

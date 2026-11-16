@@ -44,13 +44,15 @@ pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
 pub(crate) type RuntimeTopicEvent = (RuntimeKey, &'static str, TopicMessage);
 
 /// 单独订的话题，各占一条订阅：后加的话题旧运行时不认，会拒掉整条订阅，不能连累别的。
-/// 宿主不解读这些话题，原样转给插件（`HostEvent::RuntimeTopic`）。
+/// 宿主不解读这些话题，原样转给插件（`HostEvent::RuntimeTopic`）；只有智能体配置例外，
+/// 宿主起会话要用，收进它自己的缓存（`AgentHosts`），插件从那里读。
 pub(crate) const SEPARATE_TOPICS: &[&str] = &[
     smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED,
     smelt_client::daemon_state::CORE_TOPIC_HISTORY_CHANGED,
     smelt_client::daemon_state::CORE_TOPIC_ATTENTION_CHANGED,
     smelt_event_protocol::CORE_TOPIC_AUTOMATIONS_CHANGED,
     smelt_event_protocol::CORE_TOPIC_AGENT_MEMORY_CHANGED,
+    smelt_event_protocol::CORE_TOPIC_AGENT_HOST_CHANGED,
 ];
 
 /// 事件的接收端：核心订阅的，和单独订阅的。
@@ -311,7 +313,23 @@ fn appearance_event(message: TopicMessage) -> Option<DaemonStateEvent> {
             eprintln!("[runtime-events] 外观请求订阅积压，丢失的请求不会重放");
             None
         }
+        TopicMessage::Unavailable(reason) => {
+            eprintln!("[runtime-events] 收不到外观请求：{reason}");
+            None
+        }
         TopicMessage::Event { .. } | TopicMessage::Snapshot { .. } => None,
+    }
+}
+
+/// 单独订阅停下的原因，给人看。
+fn unavailable_reason(error: &smelt_client::daemon_state::DaemonEventClientError) -> String {
+    use smelt_client::daemon_state::DaemonEventClientError;
+    match error {
+        DaemonEventClientError::Server {
+            code: smelt_event_protocol::SubscribeErrorCode::Rejected,
+            ..
+        } => "这台机器的运行时版本较旧，升级运行时后可用".to_string(),
+        error => format!("运行时的推送出错：{error}"),
     }
 }
 
@@ -319,7 +337,8 @@ fn appearance_event(message: TopicMessage) -> Option<DaemonStateEvent> {
 ///
 /// 连接自己断了（核心订阅还连着）就在线程里退避重订，订上后先交一条
 /// [`TopicMessage::Lagged`]：断开期间可能错过了推送，收的一方当作每个话题都推过一次。
-/// 运行时拒掉订阅（多半是比这些话题旧）就停，等下一轮核心订阅再试。
+/// 运行时拒掉订阅（多半是比这些话题旧）或推来的解不开就交一条
+/// [`TopicMessage::Unavailable`] 后停下，等下一轮核心订阅再试。
 struct SeparateSubscription {
     shared: Arc<SeparateShared>,
     reader: std::thread::JoinHandle<()>,
@@ -397,6 +416,7 @@ impl SeparateSubscription {
                         });
                         if let Err(error) = result {
                             eprintln!("[runtime-events] {thread_key:?} 单独订阅停了：{error}");
+                            emit(TopicMessage::Unavailable(unavailable_reason(&error)));
                             return;
                         }
                         if receiver_gone {

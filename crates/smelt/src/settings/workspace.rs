@@ -323,21 +323,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 自定义 Agent 条数变了就重建输入框（增删后调用）。
-    pub fn reset_profile_inputs(&mut self) {
-        self.profile_inputs = None;
-    }
-
-    /// 懒创建自定义 Agent 编辑器（需要 window）。
+    /// 懒创建自定义 Agent 编辑器（需要 window）。增删、换类型都是运行时推回新配置后才看得到，
+    /// 那时这一排和配置对不上就重建；只改了字的不重建，免得打断正在输入的那一格。
     pub fn ensure_profile_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ids: Vec<String> = super::agent_host_settings(&crate::RuntimeKey::Local, cx)
-            .profiles
-            .iter()
-            .map(|profile| profile.id.clone())
-            .collect();
+        let settings = super::agent_host_settings(&crate::RuntimeKey::Local, cx);
         let stale = self.profile_inputs.as_ref().is_none_or(|inputs| {
-            inputs.rows.len() != ids.len()
-                || inputs.rows.iter().zip(&ids).any(|(row, id)| &row.id != id)
+            inputs.rows.len() != settings.profiles.len()
+                || inputs
+                    .rows
+                    .iter()
+                    .zip(&settings.profiles)
+                    .any(|(row, profile)| row.id != profile.id || row.kind_id != profile.kind_id)
         });
         if stale {
             self.init_profile_inputs(window, cx);
@@ -414,7 +410,7 @@ impl Workspace {
                 }
                 if let Ok(env) = parsed {
                     let id = id.clone();
-                    apply_agent_host(
+                    edit_agent_host(
                         &crate::RuntimeKey::Local,
                         move |c| {
                             if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
@@ -427,6 +423,7 @@ impl Workspace {
             }));
             rows.push(ProfileRow {
                 id: p.id.clone(),
+                kind_id: p.kind_id.clone(),
                 label,
                 command,
                 env,
@@ -440,7 +437,7 @@ impl Workspace {
     /// 新增一个自定义 Agent：默认是通用 ACP，要用户自己填启动命令；想沿用某个内置
     /// Agent 的适配器和历史，在类型里换过去即可。
     pub fn add_profile(&mut self, cx: &mut Context<Self>) {
-        apply_agent_host(
+        edit_agent_host(
             &crate::RuntimeKey::Local,
             |c| {
                 c.profiles.push(AcpProfile {
@@ -454,19 +451,15 @@ impl Workspace {
             },
             cx,
         );
-        self.reset_profile_inputs();
-        cx.notify();
     }
 
     /// 按 id 删：配置可能在渲染和点击之间被整份换掉，下标会指到别的 Agent。
     pub fn remove_profile(&mut self, id: String, cx: &mut Context<Self>) {
-        apply_agent_host(
+        edit_agent_host(
             &crate::RuntimeKey::Local,
             move |c| c.profiles.retain(|p| p.id != id),
             cx,
         );
-        self.reset_profile_inputs();
-        cx.notify();
     }
 
     /// 改某个自定义 Agent 的类型（下拉菜单选中项回调）。换到不支持数据目录的类型时
@@ -477,7 +470,7 @@ impl Workspace {
         kind: ConversationAgentKind,
         cx: &mut Context<Self>,
     ) {
-        apply_agent_host(
+        edit_agent_host(
             &crate::RuntimeKey::Local,
             move |c| {
                 if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
@@ -489,8 +482,6 @@ impl Workspace {
             },
             cx,
         );
-        self.reset_profile_inputs();
-        cx.notify();
     }
 }
 
@@ -551,7 +542,7 @@ fn subscribe_profile_text(
         }
         let value = s.read(cx).value().to_string();
         let id = id.clone();
-        apply_agent_host(
+        edit_agent_host(
             &crate::RuntimeKey::Local,
             move |c| {
                 if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {

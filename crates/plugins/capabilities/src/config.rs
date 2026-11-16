@@ -90,7 +90,6 @@ impl CapabilitiesPage {
         self.pi_model_editor_error = None;
         self.pi_plugin_pending_delete = None;
         self.pi_plugin_error = None;
-        self.agent_names_using_plugin.clear();
         self.refresh_pi_library(cx);
         if self.tab == CapabilitiesTab::Models {
             self.refresh_pi_auth_providers(cx);

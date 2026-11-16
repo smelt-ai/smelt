@@ -10991,12 +10991,9 @@ name = "smelt-app-state"
 version = "0.0.0"
 dependencies = [
  "gpui-pre",
- "serde_json",
  "smelt-client",
  "smelt-client-store",
  "smelt-model",
- "smelt-runtime-client",
- "smol",
 ]
 
 [[package]]
