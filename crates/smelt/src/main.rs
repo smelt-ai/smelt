@@ -2370,6 +2370,7 @@ const AGENT_ICON_SVG: &[(&str, &[u8])] = &[
     ),
     ("kiro", include_bytes!("../assets/icons/agent-kiro.svg")),
     ("pi", include_bytes!("../assets/icons/agent-pi.svg")),
+    ("omp", include_bytes!("../assets/icons/agent-omp.svg")),
     ("crush", include_bytes!("../assets/icons/agent-crush.svg")),
     // 通用 ACP 的自定义 Agent 名字为空时的兜底；有名字时侧栏画首字徽标。
     ("custom", include_bytes!("../assets/icons/agent-custom.svg")),

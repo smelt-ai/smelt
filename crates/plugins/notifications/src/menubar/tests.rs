@@ -68,6 +68,12 @@ fn every_agent_has_a_menu_logo() {
 }
 
 #[test]
+fn oh_my_pi_has_its_own_menu_logo() {
+    assert_ne!(logo(Some("omp")), TERMINAL_PNG);
+    assert_ne!(logo(Some("omp")), logo(Some("pi")));
+}
+
+#[test]
 fn title_matches_the_compact_attention_and_running_format() {
     assert_eq!(status_title(0, 0), "");
     assert_eq!(status_title(5, 0), "5@");

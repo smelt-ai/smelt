@@ -592,6 +592,7 @@ pub fn icon_for_agent_kind(agent: TerminalAgentKind) -> IconName {
         | TerminalAgentKind::OpenCode
         | TerminalAgentKind::Kiro
         | TerminalAgentKind::Pi
+        | TerminalAgentKind::OhMyPi
         | TerminalAgentKind::Crush => IconName::Bot,
     }
 }

@@ -200,8 +200,12 @@ pub struct ConversationAgentDescriptor {
     pub default_env: &'static [(&'static str, &'static str)],
     /// Homebrew cask 名。Grok / Cursor 没有 cask，用 None。
     pub homebrew_cask: Option<&'static str>,
-    /// npm 包名（用于 `npx` 或 `npm install -g`）。Cursor 走官方 install 脚本，没有 npm 包。
+    /// 包名（用于 npm 或 Bun 全局安装）。Cursor 走官方安装脚本，没有包名。
     pub npm_package: Option<&'static str>,
+    /// Homebrew formula（区别于 cask）。
+    pub homebrew_formula: Option<&'static str>,
+    /// 包需要 Bun 而非 npm 安装。
+    pub install_with_bun: bool,
     /// 自动任务使用的 session config 参数映射。
     pub task_params: TaskAgentParams,
     /// 终端 CLI 续接历史会话的语法。`None` = 没有对应 CLI，调用方应藏入口。
@@ -231,6 +235,8 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         default_env: &[],
         homebrew_cask: Some("claude-code"),
         npm_package: Some("@anthropic-ai/claude-code"),
+        homebrew_formula: None,
+        install_with_bun: false,
         task_params: TaskAgentParams {
             thinking_key: Some("effort"),
             fast_mode_key: Some("fast"),
@@ -250,6 +256,8 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         default_env: &[],
         homebrew_cask: Some("copilot-cli"),
         npm_package: Some("@github/copilot"),
+        homebrew_formula: None,
+        install_with_bun: false,
         // Copilot 的 ACP 实现目前不公开这些参数
         task_params: TaskAgentParams {
             thinking_key: None,
@@ -279,6 +287,8 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         default_env: &[],
         homebrew_cask: Some("codex"),
         npm_package: Some("@openai/codex"),
+        homebrew_formula: None,
+        install_with_bun: false,
         task_params: TaskAgentParams {
             thinking_key: Some("reasoning_effort"),
             fast_mode_key: Some("fast-mode"),
@@ -298,6 +308,8 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         default_env: &[],
         homebrew_cask: None,
         npm_package: Some("@xai-official/grok"),
+        homebrew_formula: None,
+        install_with_bun: false,
         // Grok 的 ACP 实现目前不公开这些参数
         task_params: TaskAgentParams {
             thinking_key: None,
@@ -322,6 +334,8 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         default_env: &[],
         homebrew_cask: None,
         npm_package: None,
+        homebrew_formula: None,
+        install_with_bun: false,
         // Cursor ACP 目前不公开无人值守任务所需的这些 session config 参数
         task_params: TaskAgentParams {
             thinking_key: None,
@@ -351,6 +365,8 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         default_env: &[("OPENCODE_CONFIG_CONTENT", r#"{"permission":"allow"}"#)],
         homebrew_cask: None,
         npm_package: Some("opencode-ai"),
+        homebrew_formula: None,
+        install_with_bun: false,
         // OpenCode ACP 目前不公开无人值守任务所需的这些 session config 参数
         task_params: TaskAgentParams {
             thinking_key: None,
@@ -378,6 +394,8 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         default_env: &[],
         homebrew_cask: Some("kiro-cli"),
         npm_package: None,
+        homebrew_formula: None,
+        install_with_bun: false,
         // Kiro 的 thinking 走 CLI `--effort`，不是 ACP session config。Terminal 可用
         // `--trust-all-tools`；v3 ACP 拒绝 trust flags，权限改走标准 ACP 请求。
         task_params: TaskAgentParams {
@@ -403,6 +421,8 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         default_env: &[],
         homebrew_cask: None,
         npm_package: Some("@earendil-works/pi-coding-agent"),
+        homebrew_formula: None,
+        install_with_bun: false,
         // 对话由 Smelt 直接驱动 Pi 官方 JSONL RPC；终端入口仍是 Pi CLI。
         // Pi 不接受 ACP session/new 的 MCP 参数；这里保持 true 是为了阻止上层
         // 错把 Copilot 专用 `--additional-mcp-config` 参数注入 Pi。
@@ -414,6 +434,31 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         cli_resume: Some(CliResumeSyntax::SessionFlag),
         task_cli: TaskCliPatch::None,
         engine_owns_model_defaults: true,
+    },
+    ConversationAgentDescriptor {
+        id: "omp",
+        label: "Oh My Pi",
+        short_label: "Oh My Pi",
+        accepts_images: true,
+        default_cmd: default_acp_oh_my_pi_cmd,
+        previous_default_cmds: &[],
+        default_env: &[],
+        homebrew_cask: None,
+        npm_package: Some("@oh-my-pi/pi-coding-agent"),
+        homebrew_formula: Some("can1357/tap/omp"),
+        install_with_bun: true,
+        task_params: TaskAgentParams {
+            thinking_key: None,
+            fast_mode_key: None,
+            full_access_mode: None,
+        },
+        cli_resume: Some(CliResumeSyntax::Flag),
+        task_cli: TaskCliPatch::Append {
+            full_access: "--yolo",
+            full_access_aliases: &["--auto-approve"],
+            thinking_flag: None,
+        },
+        engine_owns_model_defaults: false,
     },
 ];
 
@@ -431,6 +476,8 @@ pub static CUSTOM_AGENT: ConversationAgentDescriptor = ConversationAgentDescript
     default_env: &[],
     homebrew_cask: None,
     npm_package: None,
+    homebrew_formula: None,
+    install_with_bun: false,
     task_params: TaskAgentParams {
         thinking_key: None,
         fast_mode_key: None,
@@ -461,6 +508,7 @@ pub enum ConversationAgentKind {
     OpenCode,
     Kiro,
     Pi,
+    OhMyPi,
     /// 通用 ACP（见 [`CUSTOM_AGENT`]）。只经由 [`AcpProfile`] 启动，不在 `ALL` 里。
     Custom,
 }
@@ -468,7 +516,7 @@ pub enum ConversationAgentKind {
 impl ConversationAgentKind {
     /// 内置 agent，新建菜单 / 设置页的排列顺序。不含 [`Self::Custom`]：凡是
     /// 「每一家都检测 / 安装 / 配一条命令」的地方都只该遍历内置的这些。
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Claude,
         Self::Copilot,
         Self::Codex,
@@ -477,6 +525,7 @@ impl ConversationAgentKind {
         Self::OpenCode,
         Self::Kiro,
         Self::Pi,
+        Self::OhMyPi,
     ];
 
     /// 这一家的静态属性。变体序号即表下标，见 `CONVERSATION_AGENTS` 的顺序约定。
@@ -609,11 +658,15 @@ impl ConversationAgentKind {
     }
 
     /// 从任意命令字符串宽松猜 agent 种类（忽略大小写、不认参数位置）。为保持
-    /// 旧存档兼容，普通长度的标识仍使用包含匹配；短标识（Pi）改用边界匹配。
+    /// 旧存档兼容，普通长度的标识仍使用包含匹配；短标识（Pi、omp）使用边界匹配。
     /// 这样 `pi-acp` 仍能识别 Pi，`api-key` 或 `copilot` 却不会误分类。按 `ALL`
     /// 顺序取第一个命中；同时出现多家关键字这种边缘情况谁在前谁赢。
     pub fn from_command_loose(cmd: &str) -> Option<Self> {
         let c = cmd.to_ascii_lowercase();
+        // Oh My Pi 的安装路径和包名含 `pi`，不能先被 Pi 的短标识截走。
+        if command_contains_identifier(&c, "omp") || c.contains("oh-my-pi") {
+            return Some(Self::OhMyPi);
+        }
         Self::ALL
             .into_iter()
             .find(|kind| command_contains_identifier(&c, kind.id()))
@@ -625,9 +678,9 @@ fn command_contains_identifier(command: &str, identifier: &str) -> bool {
         return false;
     }
     let identifier = identifier.to_ascii_lowercase();
-    // Keep the established coarse `contains` behavior for normal-length provider
-    // ids. Pi is intentionally short, so only short ids need token boundaries.
-    if identifier.len() > 2 {
+    // Short ids such as pi and omp otherwise match unrelated words like copilot
+    // and completion. Keep the established contains behavior for longer ids.
+    if identifier.len() > 3 {
         return command.contains(identifier.as_str());
     }
     command
@@ -776,6 +829,16 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
+        id: "omp",
+        cli_program: "omp",
+        label: "Oh My Pi",
+        quick_terminal_label: "Oh My Pi",
+        quick_terminal_cmd: "omp --yolo",
+        previous_quick_terminal_cmds: &[],
+        status_bridge: TerminalStatusBridge::None,
+        terminal_only_cli_resume: None,
+    },
+    TerminalAgentDescriptor {
         id: "crush",
         cli_program: "crush",
         label: "Crush",
@@ -803,12 +866,13 @@ pub enum TerminalAgentKind {
     OpenCode,
     Kiro,
     Pi,
+    OhMyPi,
     Crush,
 }
 
 impl TerminalAgentKind {
     /// 快捷终端菜单的出厂排列顺序。
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Claude,
         Self::Copilot,
         Self::Codex,
@@ -818,6 +882,7 @@ impl TerminalAgentKind {
         Self::OpenCode,
         Self::Kiro,
         Self::Pi,
+        Self::OhMyPi,
         Self::Crush,
     ];
 
@@ -928,9 +993,8 @@ pub fn agent_id_from_launch(launch: &str) -> Option<&'static str> {
         .or_else(|| TerminalAgentKind::from_command_prefix(launch).map(TerminalAgentKind::id))
 }
 
-/// 历史页能列出的「会话来源」。它是 [`ConversationAgentKind`] 的**超集**：一个
-/// agent 能不能被读历史，取决于它有没有在本机落盘 transcript，跟它有没有 ACP
-/// stdio 服务是两件独立的事。
+/// 历史页能列出的「会话来源」。能不能读历史取决于是否有对应的 transcript
+/// 解析器，与是否支持 ACP 是两件独立的事。
 ///
 /// 之前历史 tab 直接按 `ConversationAgentKind::ALL` 枚举，等于把「可接 ACP」
 /// 当成了「可读历史」的同义词。Antigravity 只有 `agy` TUI，却实打实把会话写在
@@ -951,8 +1015,8 @@ pub enum HistorySourceKind {
 }
 
 impl HistorySourceKind {
-    /// 历史页来源 tab 的出厂顺序：先全部 ACP 种类（保持原有排列），再挂纯终端来源。
-    /// 纯终端来源必须显式登记——不是所有 TUI 都在本机留下可解析的 transcript。
+    /// 历史页来源 tab 的出厂顺序：先有解析器的 ACP 种类，再挂纯终端来源。
+    /// 来源必须显式登记；有 ACP 或 TUI 不代表已有可用的 transcript 解析器。
     pub const ALL: [Self; 9] = [
         Self::Conversation(ConversationAgentKind::Claude),
         Self::Conversation(ConversationAgentKind::Copilot),
@@ -1082,17 +1146,45 @@ mod history_source_tests {
         assert_eq!(ids.len(), count, "历史来源 id 有重复");
     }
 
-    /// 历史来源是 ACP 种类的超集，且 `id` 在两边一致。
+    /// ACP 能力不代表有本地历史解析器；OMP 的日志格式不同于 Pi。
     #[test]
-    fn history_sources_are_a_superset_of_acp_kinds() {
-        for kind in ConversationAgentKind::ALL {
-            let source = HistorySourceKind::from(kind);
-            assert_eq!(source.id(), kind.id());
-            assert!(HistorySourceKind::ALL.contains(&source), "{}", kind.id());
-        }
+    fn history_sources_are_independent_of_acp_kinds() {
+        let omp = HistorySourceKind::from(ConversationAgentKind::OhMyPi);
+        assert_eq!(omp.id(), "omp");
+        assert!(!HistorySourceKind::ALL.contains(&omp));
         assert!(
-            HistorySourceKind::ALL.len() > ConversationAgentKind::ALL.len(),
-            "超集应严格大于 ACP 种类集合"
+            HistorySourceKind::ALL.contains(&HistorySourceKind::TerminalOnly(
+                TerminalAgentKind::Antigravity
+            ))
+        );
+    }
+
+    #[test]
+    fn oh_my_pi_has_distinct_conversation_and_terminal_identity() {
+        let kind = ConversationAgentKind::OhMyPi;
+        assert_eq!(kind.id(), "omp");
+        assert_eq!(kind.default_cmd(), "omp acp --yolo");
+        assert_eq!(kind.cli_resume_syntax(), Some(CliResumeSyntax::Flag));
+        assert_eq!(kind.terminal(), Some(TerminalAgentKind::OhMyPi));
+        assert_eq!(
+            TerminalAgentKind::from_command_prefix("omp --yolo"),
+            kind.terminal()
+        );
+        assert_eq!(
+            ConversationAgentKind::from_command_loose("omp acp"),
+            Some(kind)
+        );
+        assert_eq!(
+            ConversationAgentKind::from_command_loose("/opt/oh-my-pi/bin/omp acp"),
+            Some(kind)
+        );
+        assert_eq!(
+            ConversationAgentKind::from_command_loose("bunx @oh-my-pi/pi-coding-agent acp"),
+            Some(kind)
+        );
+        assert_eq!(
+            ConversationAgentKind::from_command_loose("completion"),
+            None
         );
     }
 
@@ -1197,6 +1289,11 @@ pub fn default_acp_kiro_cmd() -> String {
     //
     // 官方能力：`loadSession: true`，`promptCapabilities.image: true`。
     "kiro-cli acp --agent-engine v3 --auth-method cli".to_string()
+}
+
+pub fn default_acp_oh_my_pi_cmd() -> String {
+    // Oh My Pi 自带 ACP；--yolo 与快捷终端的全权限默认值一致。
+    "omp acp --yolo".to_string()
 }
 
 pub fn default_acp_pi_cmd() -> String {
@@ -1544,6 +1641,13 @@ mod tests {
             }
         ));
         assert!(matches!(
+            ConversationAgentKind::OhMyPi.task_cli(),
+            TaskCliPatch::Append {
+                full_access: "--yolo",
+                ..
+            }
+        ));
+        assert!(matches!(
             ConversationAgentKind::Grok.task_cli(),
             TaskCliPatch::AfterMarker { .. }
         ));
@@ -1576,6 +1680,7 @@ mod tests {
             ConversationAgentKind::OpenCode,
             ConversationAgentKind::Kiro,
             ConversationAgentKind::Pi,
+            ConversationAgentKind::OhMyPi,
         ] {
             assert!(
                 kind.supports_headless_runtime(),
@@ -1601,7 +1706,7 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi"
+                "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi", "omp"
             ]
         );
     }
@@ -1676,7 +1781,7 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi"
+                "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi", "omp"
             ]
         );
     }

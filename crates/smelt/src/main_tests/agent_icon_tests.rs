@@ -40,6 +40,13 @@ fn every_agent_has_a_sidebar_icon() {
 }
 
 #[test]
+fn oh_my_pi_sidebar_icon_is_registered() {
+    let bytes = crate::agent_icon_svg("smelt-icons/agent-omp.svg")
+        .expect("Oh My Pi 的侧栏图标必须登记");
+    assert!(!bytes.is_empty());
+}
+
+#[test]
 fn non_agent_paths_are_not_claimed() {
     assert!(crate::agent_icon_svg("smelt-icons/not-an-agent.svg").is_none());
     assert!(crate::agent_icon_svg("smelt-icons/git-branch.svg").is_none());
