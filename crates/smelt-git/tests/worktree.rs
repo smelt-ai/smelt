@@ -5,7 +5,8 @@ use std::{
 };
 
 use smelt_git::worktree::{
-    CreateWorkset, Repository, create_workset, finish_workset, rename_workset,
+    CreateWorkset, Repository, create_workset, finish_workset, refresh_workset_bases,
+    rename_workset,
 };
 
 fn git(root: &Path, args: &[&str]) -> Output {
@@ -232,6 +233,107 @@ fn finish_refuses_the_whole_workset_if_any_created_branch_is_unmerged() {
             .iter()
             .all(|repository| repository.worktree.exists())
     );
+}
+
+/// 在另一个克隆里把工作树分支合进远端 main 并推上去，本地的 `origin/main` 不动，
+/// 和在 GitHub 上合并 PR 一样。
+fn merge_on_remote(project: &Path, name: &str, branch: &str, how: &str) {
+    let remote = project.join("remotes").join(format!("{name}.git"));
+    let clone = project.join("clones").join(format!("{name}-{how}"));
+    fs::create_dir_all(clone.parent().unwrap()).unwrap();
+    git(
+        project,
+        &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
+    );
+    git(&clone, &["config", "user.name", "Remote Merger"]);
+    git(&clone, &["config", "user.email", "merger@example.invalid"]);
+    // 合并前 main 上先有一个别人的提交，rebase 合并才会生成新的提交。
+    fs::write(clone.join("other.txt"), "other\n").unwrap();
+    git(&clone, &["add", "other.txt"]);
+    git(&clone, &["commit", "-m", "other work"]);
+    let source = format!("origin/{branch}");
+    match how {
+        "merge" => {
+            git(&clone, &["merge", "--no-ff", "-m", "merge", &source]);
+        }
+        "squash" => {
+            git(&clone, &["merge", "--squash", &source]);
+            git(&clone, &["commit", "-m", "squashed"]);
+        }
+        "rebase" => {
+            git(&clone, &["cherry-pick", &format!("main..{source}")]);
+        }
+        _ => unreachable!(),
+    }
+    git(&clone, &["push", "origin", "main"]);
+}
+
+fn commit_and_push(worktree: &Path, branch: &str) {
+    fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
+    git(worktree, &["add", "feature.txt"]);
+    git(worktree, &["commit", "-m", "feature"]);
+    fs::write(worktree.join("feature.txt"), "feature v2\n").unwrap();
+    git(worktree, &["commit", "-am", "feature v2"]);
+    git(worktree, &["push", "origin", branch]);
+}
+
+#[test]
+fn finish_accepts_branches_merged_on_the_remote_by_merge_squash_or_rebase() {
+    for how in ["merge", "squash", "rebase"] {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+        let workset = create_workset(request(project, vec![repo(project, "api")])).unwrap();
+        commit_and_push(&workset.repositories[0].worktree, &workset.branch);
+        merge_on_remote(project, "api", &workset.branch, how);
+
+        // 本地的远端分支还是旧的：不刷新就判成没合并。
+        let stale = finish_workset(&workset).unwrap_err().to_string();
+        assert!(stale.contains("还有改动没进 origin/main"), "{how}: {stale}");
+
+        assert!(refresh_workset_bases(&workset).is_empty(), "{how}");
+        finish_workset(&workset).unwrap_or_else(|error| panic!("{how}: {error}"));
+        assert!(!workset.repositories[0].worktree.exists(), "{how}");
+        assert!(
+            !String::from_utf8_lossy(
+                &git(&workset.repositories[0].root, &["branch", "--list"]).stdout
+            )
+            .contains(&workset.branch),
+            "{how}"
+        );
+    }
+}
+
+#[test]
+fn finish_refuses_a_branch_only_partly_merged_on_the_remote() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let workset = create_workset(request(project, vec![repo(project, "api")])).unwrap();
+    let worktree = &workset.repositories[0].worktree;
+    commit_and_push(worktree, &workset.branch);
+    merge_on_remote(project, "api", &workset.branch, "squash");
+    fs::write(worktree.join("late.txt"), "late\n").unwrap();
+    git(worktree, &["add", "late.txt"]);
+    git(worktree, &["commit", "-m", "late change"]);
+
+    assert!(refresh_workset_bases(&workset).is_empty());
+    assert!(finish_workset(&workset).is_err());
+    assert!(worktree.exists());
+}
+
+#[test]
+fn refresh_reports_unreachable_remotes_without_failing() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let workset = create_workset(request(project, vec![repo(project, "api")])).unwrap();
+    fs::remove_dir_all(project.join("remotes/api.git")).unwrap();
+
+    let failures = refresh_workset_bases(&workset);
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0].contains("仓库 api fetch origin 失败"),
+        "{failures:?}"
+    );
+    finish_workset(&workset).unwrap();
 }
 
 #[test]
