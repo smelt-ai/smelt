@@ -962,11 +962,18 @@ mod tests {
             } else {
                 (0x2a2a28, 0x323230)
             };
-            let materials = TEST_MATERIALS
-                .iter()
-                .flat_map(|tone| [tone.dark, tone.light]);
-            for backdrop in std::iter::once(p.bg).chain(materials) {
-                let rows = row_fills(hover, active, p.bg, p.text, p.muted, backdrop);
+            for material in std::iter::once(None).chain(TEST_MATERIALS.into_iter().map(Some)) {
+                let backdrop = text_backdrop(material, opaque(p.bg), !light);
+                // 装主题时先按同一外观的材质配字色，再由色板计算行底。
+                let (text, muted) = if material.is_some() {
+                    (
+                        legible(p.text, backdrop, TEXT_MIN_CONTRAST),
+                        legible(p.muted, backdrop, TEXT_MUTED_MIN_CONTRAST),
+                    )
+                } else {
+                    (p.text, p.muted)
+                };
+                let rows = row_fills(hover, active, p.bg, text, muted, backdrop);
                 let hover_under = flatten(rows.hover, backdrop);
                 let selected_under = flatten(rows.selected, backdrop);
                 let at = format!("light={light} backdrop={backdrop:06x}");
