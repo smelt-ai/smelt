@@ -165,6 +165,7 @@ impl GitPanel {
             .unwrap_or((0, 0));
         let stash_n = status.as_ref().map(|d| d.stash_count).unwrap_or(0);
         let has_changes = status.as_ref().is_some_and(|d| !d.files.is_empty());
+        let upstream = status.as_ref().is_some_and(|d| d.upstream.is_some());
         let ws_ops = cx.entity();
         let root_ops = active_repo.clone();
         // 进行中反馈：点了拉取/获取几秒内没动静会以为没反应，op 跑着时按钮直接显示
@@ -316,6 +317,7 @@ impl GitPanel {
                                 behind,
                                 stash_n,
                                 has_changes,
+                                upstream,
                             )
                         }),
                 )
@@ -408,6 +410,7 @@ impl GitPanel {
                     behind: repo_status.map(|d| d.behind).unwrap_or(0),
                     stash_n: repo_status.map(|d| d.stash_count).unwrap_or(0),
                     has_changes,
+                    upstream: repo_status.is_some_and(|d| d.upstream.is_some()),
                 });
             }
             // 折起来的仓库只留标题行。

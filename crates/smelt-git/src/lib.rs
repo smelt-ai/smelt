@@ -283,7 +283,50 @@ pub fn load_repo_info_with(subprocess: &dyn Subprocess, root: &str) -> Option<Re
         return None;
     }
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Some(RepoInfo { branch })
+    let stdout = |args: &[&str]| {
+        run_git_with(subprocess, root, args)
+            .ok()
+            .filter(GitOutput::success)
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let remotes = stdout(&["remote"]).unwrap_or_default();
+    let remotes = remotes.lines().map(str::trim).collect::<Vec<_>>();
+    let upstream_remote = stdout(&["config", "--get", &format!("branch.{branch}.remote")])
+        .filter(|remote| remotes.contains(&remote.as_str()));
+    let remote = upstream_remote.clone().or_else(|| {
+        remotes
+            .iter()
+            .find(|remote| **remote == "origin")
+            .or(remotes.first())
+            .map(|remote| remote.to_string())
+    });
+    let (remote_url, default_branch) = match &remote {
+        Some(remote) => (
+            stdout(&["remote", "get-url", remote]),
+            stdout(&[
+                "symbolic-ref",
+                "--quiet",
+                &format!("refs/remotes/{remote}/HEAD"),
+            ])
+            .and_then(|head| {
+                head.strip_prefix(&format!("refs/remotes/{remote}/"))
+                    .map(str::to_string)
+            }),
+        ),
+        None => (None, None),
+    };
+    let upstream_branch = upstream_remote.and_then(|_| {
+        stdout(&["config", "--get", &format!("branch.{branch}.merge")])?
+            .strip_prefix("refs/heads/")
+            .map(str::to_string)
+    });
+    Some(RepoInfo {
+        branch,
+        remote_url,
+        default_branch,
+        upstream_branch,
+    })
 }
 
 pub fn load_repo_info(root: &str) -> Option<RepoInfo> {

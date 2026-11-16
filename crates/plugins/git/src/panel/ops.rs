@@ -1653,6 +1653,33 @@ impl GitPanel {
         }
     }
 
+    /// 在浏览器里打开代码托管网站的新建 PR 页。远端 URL 和默认分支问运行时：仓库可能在
+    /// 远程机器上。
+    pub fn open_pull_request(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.git_write_target(cx) else {
+            return;
+        };
+        let client = match crate::rt::target(&root.runtime, cx) {
+            Ok(client) => client,
+            Err(error) => {
+                self.report_background_error(error, cx);
+                return;
+            }
+        };
+        let params = root_params(&root);
+        cx.spawn(async move |this, cx| {
+            let info = cx
+                .background_executor()
+                .spawn(async move { git_call::<GitRepoInfoCall>(&client, params) })
+                .await;
+            let _ = this.update(cx, |this, cx| match pull_request_link(info) {
+                Ok(url) => cx.open_url(&url),
+                Err(error) => this.report_background_error(error, cx),
+            });
+        })
+        .detach();
+    }
+
     /// 后台跑一条 git 操作，回来刷新状态 / 报错。fetch·pull·stash 共用这个骨架。
     /// `reload_log` = 操作会改历史（pull）时顺带重拉 log；`silent` = 失败不弹顶部
     /// 错误通知（自动 fetch 用，避免离线/无凭据时反复刷屏）。
@@ -1939,4 +1966,21 @@ fn stash_push(client: &RuntimeClient, root: &ProjectRef) -> Result<(), String> {
 
 fn stash_pop(client: &RuntimeClient, root: &ProjectRef) -> Result<(), String> {
     git_call::<GitStashPopCall>(client, root_params(root)).map(drop)
+}
+
+/// 运行时回来的仓库信息 → 新建 PR 页的链接，或者给用户看的原因。
+pub(super) fn pull_request_link(info: Result<GitRepoInfoResult, String>) -> Result<String, String> {
+    let info = info?.info.ok_or("不是 Git 仓库")?;
+    let head = info
+        .upstream_branch
+        .ok_or("当前分支还没推送到远端，先推送再创建 PR")?;
+    let base = info
+        .default_branch
+        .ok_or("不知道远端的默认分支，可以先执行 git remote set-head <远端> --auto")?;
+    if head == base {
+        return Err(format!("当前就在默认分支 {base} 上，切到功能分支再创建 PR"));
+    }
+    let remote = info.remote_url.ok_or("仓库没有配置远端")?;
+    crate::pull_request::pull_request_url(&remote, &base, &head)
+        .ok_or_else(|| format!("认不出远端 {remote} 是哪家代码托管，无法生成 PR 链接"))
 }
