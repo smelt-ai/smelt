@@ -60,26 +60,6 @@ impl api::Host for SmeltHost {
         view_shown(id, cx)
     }
 
-    /// 页头所在的面板（视图自己的，或装着它的出口）单独一组、没有标签条和标题带、顶着窗口
-    /// 上沿时，页头让出顶栏、给红黄绿按钮让位、能拖窗口；上面有标签条或标题带时只是一条
-    /// 普通的头。
-    fn page_header(&self, window: &Window, cx: &App) -> Div {
-        let guards = self.workspace().and_then(|workspace| {
-            let workspace = workspace.read(cx);
-            let drawing = |id: &str| {
-                api::built_view(id, cx)
-                    .is_some_and(|view| view.view().entity_id() == window.current_view())
-            };
-            let id = workspace.shell_view.shown.iter().find(|id| drawing(id))?;
-            Some((
-                workspace.chrome_left_guard_of(id, window),
-                workspace.chrome_right_inset_of(id),
-            ))
-        });
-        let (left_guard, right_inset) = guards.unwrap_or((None, px(0.)));
-        crate::workspace_frame::page_chrome(left_guard, right_inset)
-    }
-
     fn window_active(&self, cx: &App) -> bool {
         // 应用在不在前台现问：全屏窗口切到别的 Space 后不再出帧，窗口也还是 key，只有应用级的
         // 状态跟得上。窗口是不是 key 随激活事件记下，不靠出帧。

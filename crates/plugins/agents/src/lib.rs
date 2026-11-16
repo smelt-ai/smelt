@@ -396,7 +396,7 @@ impl PluginView for AgentsPage {
 }
 
 impl Render for AgentsPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_agents_page(window, cx)
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_agents_page(cx)
     }
 }

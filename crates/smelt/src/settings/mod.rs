@@ -1,5 +1,7 @@
-//! 设置：主窗口里的一个视图（[`SETTINGS_VIEW`]），左边分组导航，右边一页一页的设置。
-//! 一页只画那一页，页内再分节。
+//! 设置：主窗口里单独一页（[`SETTINGS_PAGE`]），两栏：左边是导航视图
+//! （[`SETTINGS_NAV_VIEW`]，分组、搜索），右边是内容视图（[`SETTINGS_VIEW`]，一页一页的
+//! 设置）。一页只画那一页，页内再分节。两个视图都看工作台的 `settings_section`：导航改它，
+//! 内容按它画。
 //!
 //! 跟 agents 同一个套路：从 main.rs 拆出来的 `impl Workspace`
 //! 方法 + 独立类型/函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
@@ -38,7 +40,7 @@ mod remote;
 mod workspace;
 mod workspace_view;
 
-pub(crate) use nav::{SettingsNavCategory, SettingsSection, filter_settings_nav, settings_nav};
+pub(crate) use nav::{SettingsSection, filter_settings_nav, settings_nav};
 pub(crate) use quota::refresh_quota_settings;
 pub(super) use quota::{QuotaSettingsState, set_quota_enabled};
 pub(super) use remote::*;
@@ -1062,32 +1064,40 @@ struct SettingsRenderSnapshot {
     daemon_info: Option<crate::local_daemon::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
-    /// 有要处理的事的那一页，设置侧栏在它后面标红点。
-    attention: Option<SettingsSection>,
 }
 
-/// 设置视图的 id。设置是宿主的一个视图，和插件的视图在同一张表里；它单独一页
-/// （[`SETTINGS_PAGE`]），打开设置就是去那一页。
+/// 设置内容视图的 id，打开设置就是打开它。宿主的视图，和插件的视图在同一张表里；只摆在
+/// 设置那一页（[`SETTINGS_PAGE`]），打开它就是去那一页。
 pub(crate) const SETTINGS_VIEW: &str = "smelt/settings";
+
+/// 设置导航视图的 id，摆在设置那一页的左栏。
+const SETTINGS_NAV_VIEW: &str = "smelt/settings-nav";
 
 /// 设置那一页的 id。
 const SETTINGS_PAGE: &str = "smelt/settings";
 
-/// 设置那一页的布局：只有设置视图，占满整页。左边导航、右边内容是设置视图自己画的。
+/// 设置那一页的布局：左右两栏，左边导航、右边内容，中间的分隔条能拖。
 const SETTINGS_LAYOUT: &str = r#"{
   "version": 1,
   "center": {
     "panel_name": "StackPanel",
-    "info": { "stack": { "sizes": [820], "axis": 0 } },
-    "children": [{
-      "panel_name": "TabPanel",
-      "info": { "tabs": { "active_index": 0 } },
-      "children": [{ "panel_name": "smelt/settings", "children": [], "info": { "panel": null } }]
-    }]
+    "info": { "stack": { "sizes": [220, 1000], "axis": 0 } },
+    "children": [
+      {
+        "panel_name": "TabPanel",
+        "info": { "tabs": { "active_index": 0 } },
+        "children": [{ "panel_name": "smelt/settings-nav", "children": [], "info": { "panel": null } }]
+      },
+      {
+        "panel_name": "TabPanel",
+        "info": { "tabs": { "active_index": 0 } },
+        "children": [{ "panel_name": "smelt/settings", "children": [], "info": { "panel": null } }]
+      }
+    ]
   }
 }"#;
 
-/// 设置那一页和它的布局登记进页、布局注册表；设置视图由 [`view_spec`] 交给
+/// 设置那一页和它的布局登记进页、布局注册表；设置的两个视图由 [`view_specs`] 交给
 /// `host_views` 和宿主别的视图一起登记。没变就不动。
 pub(crate) fn register_page(cx: &mut App) {
     let page = smelt_plugin_api::PageSource {
@@ -1113,26 +1123,141 @@ pub(crate) fn register_page(cx: &mut App) {
     }
 }
 
-/// 设置视图。
-pub(crate) fn view_spec(workspace: WeakEntity<Workspace>) -> smelt_plugin_api::ViewSpec {
-    smelt_plugin_api::ViewSpec {
-        name: "settings".into(),
-        title: "设置".into(),
-        icon: gpui_kit_assets::IconName::Settings.path(),
-        per_machine: false,
-        // 单独一页贴着窗口顶，顶上那条（拖窗口、给红黄绿按钮让位）由页头画。
-        draws_top_bar: true,
-        settings: None,
-        build: std::rc::Rc::new(
-            move |window, cx| -> std::rc::Rc<dyn smelt_plugin_api::ViewHandle> {
-                let workspace = workspace.clone();
-                std::rc::Rc::new(cx.new(|cx| SettingsContentView::new(workspace, window, cx)))
-            },
-        ),
+/// 设置的两个视图：导航和内容。
+pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> [smelt_plugin_api::ViewSpec; 2] {
+    let nav = workspace.clone();
+    [
+        smelt_plugin_api::ViewSpec {
+            name: "settings-nav".into(),
+            title: "设置导航".into(),
+            icon: gpui_kit_assets::IconName::Settings.path(),
+            per_machine: false,
+            // 贴着窗口顶，顶上那条（拖窗口、给红黄绿按钮让位、标题）由页头画。
+            draws_top_bar: true,
+            settings: None,
+            build: std::rc::Rc::new(
+                move |window, cx| -> std::rc::Rc<dyn smelt_plugin_api::ViewHandle> {
+                    let workspace = nav.clone();
+                    std::rc::Rc::new(cx.new(|cx| SettingsNavView::new(workspace, window, cx)))
+                },
+            ),
+        },
+        smelt_plugin_api::ViewSpec {
+            name: "settings".into(),
+            title: "设置".into(),
+            icon: gpui_kit_assets::IconName::Settings.path(),
+            per_machine: false,
+            // 贴着窗口顶，顶上那条（拖窗口、关闭按钮）由页头画。
+            draws_top_bar: true,
+            settings: None,
+            build: std::rc::Rc::new(
+                move |window, cx| -> std::rc::Rc<dyn smelt_plugin_api::ViewHandle> {
+                    let workspace = workspace.clone();
+                    std::rc::Rc::new(cx.new(|cx| SettingsContentView::new(workspace, window, cx)))
+                },
+            ),
+        },
+    ]
+}
+
+/// 设置导航：搜索框和按组列出的各页，点一页就停到那一页（改工作台的 `settings_section`）。
+/// 选中哪页、哪页有要处理的事随工作台的通知和机器状态的变化比一下，变了才重画：工作台
+/// 通知很密（终端、spinner），不跟着每次都重画。
+struct SettingsNavView {
+    workspace: WeakEntity<Workspace>,
+    search: Entity<gpui_component::input::InputState>,
+    selected: SettingsSection,
+    attention: Option<SettingsSection>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl SettingsNavView {
+    fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx).placeholder("搜索设置、功能或命令")
+        });
+        let mut subscriptions = vec![
+            cx.subscribe(&search, |_, _, event, cx| {
+                if matches!(event, gpui_component::input::InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+            // 插件的设置页登记、撤下了，导航跟着变。
+            cx.subscribe(
+                &smelt_plugin_api::events(cx),
+                |_, _, event: &smelt_plugin_api::HostEvent, cx| {
+                    if matches!(event, smelt_plugin_api::HostEvent::ViewsChanged) {
+                        cx.notify();
+                    }
+                },
+            ),
+        ];
+        if let Some(host) = workspace.upgrade() {
+            subscriptions.push(cx.observe(&host, |this: &mut Self, _, cx| this.sync(cx)));
+        }
+        // 机器断了、慢了不一定通知工作台，远程那页的红点直接跟它。
+        subscriptions.push(
+            cx.observe_global::<crate::runtimes::RuntimeHub>(|this: &mut Self, cx| this.sync(cx)),
+        );
+        // 建它的地方（打开设置、装布局）正更新着工作台，这时读不了，推后一拍再读。
+        cx.defer_in(window, |this, _, cx| this.sync(cx));
+        Self {
+            workspace,
+            search,
+            selected: SettingsSection::default(),
+            attention: None,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// 重读选中的那页、有要处理的事的那页，变了才重画。只读内存。
+    fn sync(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.workspace.upgrade() else {
+            return;
+        };
+        let workspace = host.read(cx);
+        let selected = workspace.settings_section.clone();
+        let attention = workspace.settings_attention(cx);
+        if selected != self.selected || attention != self.attention {
+            self.selected = selected;
+            self.attention = attention;
+            cx.notify();
+        }
     }
 }
 
-/// 设置视图：左边分组导航和搜索，右边选中的那一页。设置快照和终端等高频通知隔开。
+impl Render for SettingsNavView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 顶上只是标题栏那一行：红黄绿按钮、拖窗口。侧栏从上到下是一整块，不画分隔线；
+        // 页名在右边内容的标题行里。
+        let header = self
+            .workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).page_chrome_of(SETTINGS_NAV_VIEW, window))
+            .map(|header| header.border_b_0());
+        let nav = self.workspace.upgrade().map(|workspace| {
+            Workspace::render_settings_nav(
+                workspace,
+                &self.selected,
+                self.attention.as_ref(),
+                &self.search,
+                cx,
+            )
+        });
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .children(header)
+            .children(nav)
+    }
+}
+
+impl smelt_plugin_api::PluginView for SettingsNavView {
+    /// 停在哪一页由工作台的 `settings_section` 定，参数没有用处。
+    fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+}
+
+/// 设置内容：导航选中的那一页。设置快照和终端等高频通知隔开。
 pub struct SettingsContentView {
     /// 弱引用：视图记在全局的视图注册表里，不能替关掉的主窗口留着工作台。
     workspace: WeakEntity<Workspace>,
@@ -1238,8 +1363,10 @@ impl SettingsContentView {
     /// 当前停在插件的设置页上而它还没建就建，建好打开一次。建好的那份记在视图注册表里，
     /// 登记换了或撤下跟着放掉。快照换了、视图登记变了时调。
     fn sync_plugin_pages(&mut self, window: &mut Window, cx: &mut App) {
-        let Some(SettingsSection::Plugin(id)) =
-            self.snapshot.as_ref().map(|snapshot| &snapshot.settings_section)
+        let Some(SettingsSection::Plugin(id)) = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| &snapshot.settings_section)
         else {
             return;
         };
@@ -1249,6 +1376,16 @@ impl SettingsContentView {
         if let Some((view, true)) = smelt_plugin_api::ensure_view(id, window, cx) {
             view.open(&serde_json::Value::Null, window, cx);
         }
+    }
+
+    /// 停着的那一页的名字，和导航里写的一样。只读内存。
+    fn page_title(&self, cx: &App) -> Option<SharedString> {
+        let selected = &self.snapshot.as_ref()?.settings_section;
+        settings_nav(&smelt_plugin_api::views(cx))
+            .into_iter()
+            .flat_map(|category| category.children)
+            .find(|leaf| &leaf.section == selected)
+            .map(|leaf| leaf.title.into())
     }
 
     /// 当前停着的插件设置页，建好了才有。只读内存。
@@ -1293,11 +1430,9 @@ impl SettingsContentView {
             return;
         };
         // 子菜单切换必须立刻生效，不能被设置页 250ms 刷新节流挡住。
-        if self
-            .workspace
-            .upgrade()
-            .is_some_and(|workspace| workspace.read(cx).settings_section != snapshot.settings_section)
-        {
+        if self.workspace.upgrade().is_some_and(|workspace| {
+            workspace.read(cx).settings_section != snapshot.settings_section
+        }) {
             self.refresh_snapshot(window, cx);
             return;
         }
@@ -1340,45 +1475,36 @@ impl SettingsContentView {
 impl Render for SettingsContentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _timing = smelt_ui::frame_stats::RenderTiming::start("SettingsContent");
-        // 设置单独一页、贴着窗口顶：页头让出顶栏、给红黄绿按钮让位、能拖窗口。关闭按钮
-        // 和 ⌘W 一样，回到来的那页。
-        let workspace = self.workspace.clone();
-        let header = smelt_plugin_api::host(cx)
-            .page_header(window, cx)
-            .child(
+        // 工具栏就是标题栏那一行，只写这一页的名字（返回在左边导航的最上面）。Agent 页改的
+        // 都是本机运行时上的东西（CLI、hooks、启动命令），挂了远程机器时在名字旁注明。
+        let local_only = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.settings_section == SettingsSection::Agents)
+            && crate::runtimes::has_remote_runtimes(cx);
+        let header = self
+            .workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).page_chrome_of(SETTINGS_VIEW, window))
+            .unwrap_or_else(div)
+            .gap_2()
+            .children(self.page_title(cx).map(|title| {
                 div()
-                    .flex_1()
+                    .min_w_0()
+                    .truncate()
                     .text_sm()
                     .font_medium()
                     .text_color(rgb(crate::ui_theme::text()))
-                    .child("设置"),
-            )
-            .child(
-                // 在拖窗口的条上：按下先拦住，不让它变成拖窗口。
-                div()
-                    .flex_none()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        Button::new("settings-close")
-                            .quiet()
-                            .small()
-                            .icon(IconName::Close)
-                            .icon_action("关闭设置")
-                            .on_click(move |_, window, cx| {
-                                let _ = workspace.update(cx, |workspace, cx| {
-                                    workspace.go_back(window, cx);
-                                });
-                            }),
-                    ),
-            );
+                    .child(title)
+            }))
+            .when(local_only, |header| {
+                header.child(crate::runtimes::local_runtime_scope_chip())
+            });
         let body = match (self.workspace.upgrade(), &self.snapshot) {
-            (Some(workspace), Some(snapshot)) => Workspace::render_settings_content(
-                workspace,
-                snapshot,
-                self.plugin_page(cx),
-                cx,
-            )
-            .into_any_element(),
+            (Some(workspace), Some(snapshot)) => {
+                Workspace::render_settings_content(workspace, snapshot, self.plugin_page(cx), cx)
+                    .into_any_element()
+            }
             _ => div().into_any_element(),
         };
         v_flex()

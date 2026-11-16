@@ -360,3 +360,37 @@ mod terminal_theme_tests {
         crate::ui_theme::set_light(false);
     }
 }
+
+mod page_tests {
+    use super::super::{SETTINGS_NAV_VIEW, SETTINGS_PAGE, SETTINGS_VIEW, register_page};
+
+    /// 设置那一页的布局按官方格式解析得了：中间横排两栏，左边导航、右边内容，各自单独一组。
+    #[gpui::test]
+    fn the_settings_page_lays_out_nav_and_content_side_by_side(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            register_page(cx);
+            let layouts = smelt_plugin_api::layouts(cx);
+            assert_eq!(layouts.len(), 1);
+            assert_eq!(layouts[0].page.as_ref(), SETTINGS_PAGE);
+            let state = smelt_plugin_api::layout(&layouts[0].id, cx).expect("登记上了");
+            let center = serde_json::to_value(&state).unwrap()["center"].clone();
+            assert_eq!(center["panel_name"], "StackPanel");
+            assert_eq!(center["info"]["stack"]["axis"], 0, "0 是横排");
+            let columns: Vec<Vec<&str>> = center["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tabs| {
+                    assert_eq!(tabs["panel_name"], "TabPanel");
+                    tabs["children"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|panel| panel["panel_name"].as_str().unwrap())
+                        .collect()
+                })
+                .collect();
+            assert_eq!(columns, [[SETTINGS_NAV_VIEW], [SETTINGS_VIEW]]);
+        });
+    }
+}

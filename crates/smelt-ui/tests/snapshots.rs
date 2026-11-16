@@ -59,6 +59,11 @@ const SNAPSHOTS: &[Snapshot] = &[
         setup: segmented,
     },
     Snapshot {
+        name: "page-toolbar",
+        size: (600., 200.),
+        setup: page_toolbars,
+    },
+    Snapshot {
         name: "list-row",
         size: (680., 180.),
         setup: list_rows,
@@ -357,6 +362,43 @@ fn segmented(_: &mut Window, _: &mut App) -> Draw {
                 ],
             ),
         ])
+    })
+}
+
+/// 页面工具行：分段控件、个数和中号按钮放在一行里，上下留得开；只有文字时也一样高。
+fn page_toolbars(_: &mut Window, _: &mut App) -> Draw {
+    Box::new(|_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(
+                smelt_ui::page_toolbar()
+                    .gap_3()
+                    .child(
+                        Segmented::new("toolbar-tabs")
+                            .segments(["自动化", "运行"])
+                            .selected(Some(0))
+                            .on_select(|_, _, _| {})
+                            .into_any_element(),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("toolbar-add")
+                            .icon(IconName::Plus)
+                            .label("新建")
+                            .into_any_element(),
+                    ),
+            )
+            .child(
+                smelt_ui::page_toolbar().child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(ui_theme::muted()))
+                        .child("3 个智能体"),
+                ),
+            )
+            .into_any_element()
     })
 }
 

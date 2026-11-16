@@ -612,9 +612,15 @@ impl Workspace {
     /// 重算开着的那页摆着什么、出口里放着什么、看得见什么。变了才重画；有视图刚露出来就
     /// 刷一次它要的缓存。出口里的视图建没建由 [`Self::sync_outlet`] 管。
     fn sync_shell_view(&mut self, cx: &mut Context<Self>) {
-        let mut next = ShellView::of(self.shell_dock().read(cx), cx);
+        let dock = self.shell_dock().clone();
+        let mut next = ShellView::of(dock.read(cx), cx);
+        let outlet = self.outlet_content(&next.laid_out, cx);
+        if workspace_shell::show_in_outlet(&dock, outlet.as_deref(), cx) {
+            // 出口顶上那条换了人画：出口有没有标题带变了，贴着窗口顶的按新的重算。
+            next = ShellView::of(dock.read(cx), cx);
+        }
         next.elsewhere = self.views_on_other_pages(cx);
-        next.outlet = self.outlet_content(&next.laid_out, cx);
+        next.outlet = outlet;
         if let Some(content) = &next.outlet
             && next.shown.contains(api::OUTLET_VIEW)
         {

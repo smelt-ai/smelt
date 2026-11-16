@@ -104,7 +104,16 @@ impl Render for NotifySettings {
                 None => item,
             }
         };
+        // 系统授权放在最前面：没授权的话下面怎么开都弹不出来。页名在设置的工具栏里，组件库
+        // 的页头不画，状态不能挂在标题旁。
         let page = SettingPage::new("通知")
+            .group(
+                SettingGroup::new()
+                    .title("系统通知")
+                    .item(SettingItem::render(|_, _, cx: &mut App| {
+                        permission_status(cx)
+                    })),
+            )
             .group(SettingGroup::new().title("Agent 什么时候叫你").items(vec![
                 switch("等待批准", None, |p| p.approval, |p, v| p.approval = v),
                 switch(
@@ -121,17 +130,25 @@ impl Render for NotifySettings {
                 Some("终端输出 BEL 时提醒"),
                 |p| p.bell,
                 |p, v| p.bell = v,
-            )))
-            .title_suffix(|_, cx| permission_status(cx));
+            )));
         api::settings_pane("notifications-settings", page)
     }
 }
 
-/// 页面标题旁一直写着系统通知的状态，并给出按钮：没问过的先问，别的都能一键去系统设置里
-/// 本应用那一页。有挡着提醒的写明是哪项。还在读、这个系统没有通知时不出。
+/// 系统通知的状态，并给出按钮：没问过的先问，别的都能一键去系统设置里本应用那一页。有挡着
+/// 提醒的写明是哪项。还在读、这个系统没有通知时只写一句。
 fn permission_status(cx: &mut App) -> AnyElement {
-    let Some(line) = permission_line(&api::host(cx).notification_permission(cx)) else {
-        return div().into_any_element();
+    let permission = api::host(cx).notification_permission(cx);
+    let Some(line) = permission_line(&permission) else {
+        let text = match permission {
+            NotificationPermission::Unsupported => "这个系统上没有通知",
+            _ => "正在读取…",
+        };
+        return div()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(text)
+            .into_any_element();
     };
     let color = match line.severity {
         Severity::Ok => cx.theme().success,
@@ -165,11 +182,20 @@ fn permission_status(cx: &mut App) -> AnyElement {
                 .detach();
             })
     });
+    // 卡片里的一行：状态在左，处理它的按钮在右，跟别的设置项的「名字左、控件右」一致。
     h_flex()
+        .w_full()
         .items_center()
         .gap_2()
-        .child(div().size(px(6.)).rounded_full().bg(color))
-        .child(div().text_xs().text_color(color).child(line.text))
+        .child(div().flex_none().size(px(6.)).rounded_full().bg(color))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .text_color(color)
+                .child(line.text),
+        )
         .children(fix)
         .into_any_element()
 }
@@ -195,7 +221,7 @@ enum Fix {
     OpenSettings,
 }
 
-/// 标题旁那一行。声音关了不算问题：那是用户自己选的安静，提醒照样到；横幅和角标关了，
+/// 「系统通知」那一行。声音关了不算问题：那是用户自己选的安静，提醒照样到；横幅和角标关了，
 /// 人就看不见提醒。
 fn permission_line(permission: &NotificationPermission) -> Option<PermissionLine> {
     let line = |text: &str, severity, fix| PermissionLine {

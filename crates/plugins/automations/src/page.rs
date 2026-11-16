@@ -198,12 +198,12 @@ impl Focusable for AutomationsPage {
 }
 
 impl Render for AutomationsPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .track_focus(&self.focus_handle)
             .size_full()
             .flex()
-            .child(self.render_automations_page(window, cx))
+            .child(self.render_automations_page(cx))
     }
 }
 

@@ -58,7 +58,6 @@ impl Workspace {
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
-            attention: self.settings_attention(cx),
         }
     }
 
@@ -71,8 +70,18 @@ impl Workspace {
         render::render_settings_content(entity, snapshot, plugin_page, cx)
     }
 
+    pub(super) fn render_settings_nav(
+        entity: Entity<Workspace>,
+        selected: &SettingsSection,
+        attention: Option<&SettingsSection>,
+        search: &Entity<gpui_component::input::InputState>,
+        cx: &App,
+    ) -> AnyElement {
+        render::render_settings_nav(entity, selected, attention, search, cx)
+    }
+
     /// 设置里有没有要你处理的事，有的话落在哪一页：有新版本、后台服务旧了 → 系统；有机器
-    /// 要处理 → 远程。侧栏「设置」上的红点和设置侧栏那一页的红点都看它。
+    /// 要处理 → 远程。侧栏「设置」上的红点和设置导航里那一页的红点都看它。只读内存。
     pub(crate) fn settings_attention(&self, cx: &App) -> Option<SettingsSection> {
         #[cfg(any(target_os = "macos", windows))]
         if self.update_available() {

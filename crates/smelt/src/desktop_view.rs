@@ -12,13 +12,12 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{StyledExt as _, h_flex};
-use smelt_ui::truncated_line::truncated_line;
 use smelt_runtime_client::desktop::DesktopProxy;
 use smelt_runtime_client::protocol::desktop::{DesktopTypeTextCall, DesktopTypeTextParams};
 pub(crate) use smelt_ui::Button;
+use smelt_ui::truncated_line::truncated_line;
 
-use crate::runtimes::Runtime;
+use crate::runtimes::{Runtime, runtime_name};
 use crate::ui_theme;
 
 enum Status {
@@ -72,6 +71,8 @@ fn page_event(body: &str) -> Option<PageEvent> {
 
 pub(crate) struct DesktopView {
     runtime: Runtime,
+    /// 「断开」把出口放回默认内容。弱引用：视图挂在全局的视图注册表下面。
+    workspace: WeakEntity<crate::Workspace>,
     proxy: Option<DesktopProxy>,
     webview: Option<Entity<gpui_webview::WebView>>,
     status: Status,
@@ -91,7 +92,12 @@ pub(crate) struct DesktopView {
 }
 
 impl DesktopView {
-    pub(crate) fn new(runtime: Runtime, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        runtime: Runtime,
+        workspace: WeakEntity<crate::Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (typer, queue) = smol::channel::unbounded::<String>();
         let client = runtime.client().clone();
         let typing = cx.spawn(async move |this, cx| {
@@ -126,6 +132,7 @@ impl DesktopView {
         });
         let mut view = Self {
             runtime,
+            workspace,
             proxy: None,
             webview: None,
             status: Status::Connecting,
@@ -289,13 +296,8 @@ impl DesktopView {
             Status::Connected => ("只看".to_string(), ui_theme::muted()),
         };
         let controlling = self.controlling;
-        h_flex()
-            .w_full()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(ui_theme::hair())
+        // 页名「远程桌面」在外壳画的标题带上；这一行写连的哪台、连得怎么样，和操作。
+        page_toolbar(runtime_name(self.runtime.key(), cx))
             .child(
                 div()
                     .flex_1()
@@ -308,7 +310,6 @@ impl DesktopView {
             .when(closed, |d| {
                 d.child(
                     Button::new("desktop-reconnect")
-                        .small()
                         .label("重新连接")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.connect(window, cx);
@@ -318,7 +319,6 @@ impl DesktopView {
             })
             .child({
                 let button = Button::new("desktop-control")
-                    .small()
                     .disabled(!connected)
                     .label(if controlling { "只看" } else { "接管" })
                     .on_click(
@@ -330,7 +330,32 @@ impl DesktopView {
                     button.primary()
                 }
             })
+            .child(disconnect_button(self.workspace.clone()))
     }
+}
+
+/// 远程桌面的工具行：最前面是连的哪台机器。
+fn page_toolbar(machine: String) -> Div {
+    smelt_ui::page_toolbar().gap_3().child(
+        div()
+            .flex_shrink_0()
+            .text_sm()
+            .text_color(rgb(ui_theme::text()))
+            .child(machine),
+    )
+}
+
+/// 远程桌面是侧栏点开的一页，换到别处连接就放掉，跟别的页一样不需要「关闭」。这里留的是
+/// 断开：说清楚按下去的后果，出口放回默认内容（会话）。
+fn disconnect_button(workspace: WeakEntity<crate::Workspace>) -> Button {
+    Button::new("desktop-disconnect")
+        .quiet()
+        .label("断开")
+        .on_click(move |_, window, cx| {
+            let _ = workspace.update(cx, |workspace, cx| {
+                workspace.reset_outlet(window, cx);
+            });
+        })
 }
 
 impl Render for DesktopView {
@@ -340,13 +365,7 @@ impl Render for DesktopView {
             .flex()
             .flex_col()
             .child(self.render_toolbar(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .bg(rgb(ui_theme::bg()))
-                    .children(self.webview.clone()),
-            )
+            .child(div().flex_1().min_h_0().children(self.webview.clone()))
     }
 }
 
@@ -361,8 +380,8 @@ pub(crate) fn view_spec(workspace: WeakEntity<crate::Workspace>) -> smelt_plugin
         title: "远程桌面".into(),
         icon: "smelt-icons/monitor.svg".into(),
         per_machine: false,
-        // 页头自己画顶上那条。
-        draws_top_bar: true,
+        // 顶上那条是外壳的标题带，连的哪台机器和「断开」在视图自己的工具行里。
+        draws_top_bar: false,
         settings: None,
         build: std::rc::Rc::new(
             move |window, cx| -> std::rc::Rc<dyn smelt_plugin_api::ViewHandle> {
@@ -419,7 +438,8 @@ impl DesktopPage {
                 .as_ref()
                 .and_then(|machine| crate::runtimes::runtime(machine, cx))
         {
-            self.view = Some(cx.new(|cx| DesktopView::new(runtime, window, cx)));
+            let workspace = self.workspace.clone();
+            self.view = Some(cx.new(|cx| DesktopView::new(runtime, workspace, window, cx)));
             cx.notify();
         }
     }
@@ -442,56 +462,39 @@ impl smelt_plugin_api::PluginView for DesktopPage {
 }
 
 impl Render for DesktopPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = match &self.machine {
-            Some(machine) => format!("远程桌面 · {}", crate::runtimes::runtime_name(machine, cx)),
-            None => "远程桌面".to_string(),
-        };
-        let workspace = self.workspace.clone();
-        let header = smelt_plugin_api::host(cx)
-            .page_header(window, cx)
-            .gap_3()
-            .child(
-                div()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(rgb(ui_theme::text()))
-                    .child(title),
-            )
-            .child(div().flex_1())
-            // 出口放回默认内容（会话）；看不见了连接随之放掉。
-            .child(
-                Button::new("desktop-close")
-                    .small()
-                    .quiet()
-                    .label("关闭")
-                    .on_click(move |_, window, cx| {
-                        let _ = workspace.update(cx, |workspace, cx| {
-                            workspace.reset_outlet(window, cx);
-                        });
-                    }),
-            );
-        let body = match &self.view {
-            Some(view) => view.clone().into_any_element(),
-            None => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(rgb(ui_theme::muted()))
-                .child("这台机器现在连不上")
-                .into_any_element(),
-        };
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 连着时工具行归里面的远程桌面画（连接状态、接管、断开都在那一行）。
+        if let Some(view) = &self.view {
+            return view.clone().into_any_element();
+        }
+        let machine = self
+            .machine
+            .as_ref()
+            .map(|machine| runtime_name(machine, cx))
+            .unwrap_or_default();
         div()
             .size_full()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui_theme::bg()))
-            .child(header)
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                page_toolbar(machine)
+                    .child(div().flex_1())
+                    .child(disconnect_button(self.workspace.clone())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(rgb(ui_theme::muted()))
+                    .child("这台机器现在连不上"),
+            )
+            .into_any_element()
     }
 }
 

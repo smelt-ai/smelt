@@ -91,9 +91,72 @@ pub(crate) struct ViewPanel {
     info: Value,
     /// 登记时说的 [`smelt_plugin_api::ViewSpec::draws_top_bar`]。
     owns_top_bar: bool,
+    /// 出口里显示着的视图（只有出口有，见 [`show_in_outlet`]）。出口只是个位置：标题、角标、
+    /// 顶上那条归谁画都跟着里面的视图，不然插件页放进出口就没人画标题栏。
+    content: Option<OutletContent>,
     focus_handle: FocusHandle,
     /// 角标变了重画标签。
     _badges: Subscription,
+}
+
+/// 出口里显示着的视图登记时说的那几项。
+#[derive(Clone, Debug, PartialEq)]
+struct OutletContent {
+    id: SharedString,
+    title: SharedString,
+    draws_top_bar: bool,
+}
+
+impl ViewPanel {
+    fn shown_title(&self) -> SharedString {
+        match &self.content {
+            Some(content) => content.title.clone(),
+            None => self.title.clone(),
+        }
+    }
+
+    fn draws_top_bar(&self) -> bool {
+        match &self.content {
+            Some(content) => content.draws_top_bar,
+            None => self.owns_top_bar,
+        }
+    }
+
+    /// 角标按哪个视图 id 取。
+    fn badge_view(&self) -> &str {
+        match &self.content {
+            Some(content) => &content.id,
+            None => self.id,
+        }
+    }
+}
+
+/// 出口里换了视图（`content`，空着是 `None`）：出口的标题、角标、顶上那条画不画换成那个
+/// 视图登记的。返回顶上那条的归属变没变：变了，哪些视图贴着窗口顶要重算。布局里没摆出口
+/// 时什么都不做。
+pub(crate) fn show_in_outlet(area: &Entity<DockArea>, content: Option<&str>, cx: &mut App) -> bool {
+    let dock = area.read(cx);
+    let Some(panel) = find_view(dock, api::OUTLET_VIEW, cx)
+        .and_then(|id| dock.panel(id))
+        .and_then(|panel| panel.view().downcast::<ViewPanel>().ok())
+    else {
+        return false;
+    };
+    let content = content
+        .and_then(|id| api::view(id, cx))
+        .map(|info| OutletContent {
+            id: info.id,
+            title: info.title,
+            draws_top_bar: info.draws_top_bar,
+        });
+    panel.update(cx, |panel, cx| {
+        let before = panel.draws_top_bar();
+        if panel.content != content {
+            panel.content = content;
+            cx.notify();
+        }
+        panel.draws_top_bar() != before
+    })
 }
 
 impl EventEmitter<PanelEvent> for ViewPanel {}
@@ -115,7 +178,7 @@ impl BasePanel for ViewPanel {
     }
 
     fn zoomable(&self, _: &App) -> bool {
-        !self.owns_top_bar
+        !self.draws_top_bar()
     }
 
     fn dump(&self, _: &App) -> PanelState {
@@ -129,25 +192,25 @@ impl BasePanel for ViewPanel {
 
 impl Panel for ViewPanel {
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.title.clone())
+        Some(self.shown_title())
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.title.clone()
+        self.shown_title()
     }
 
     /// 角标由插件推（`smelt_plugin_api::set_view_badge`）。
     fn title_suffix(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        smelt_plugin_api::view_badge(self.id, cx)
+        smelt_plugin_api::view_badge(self.badge_view(), cx)
             .map(|badge| Tag::primary().small().rounded_full().child(badge))
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        (!self.owns_top_bar).then_some(PanelControl::Toolbar)
+        (!self.draws_top_bar()).then_some(PanelControl::Toolbar)
     }
 
     fn title_bar(&self, _: &App) -> bool {
-        !self.owns_top_bar
+        !self.draws_top_bar()
     }
 
     fn inner_padding(&self, _: &App) -> bool {
@@ -261,6 +324,7 @@ fn build_panel(state: &PanelState, window: &mut Window, cx: &mut App) -> Arc<dyn
         id: panel_name(id),
         title: spec.title,
         owns_top_bar: spec.draws_top_bar,
+        content: None,
         view,
         info,
         focus_handle: cx.focus_handle(),

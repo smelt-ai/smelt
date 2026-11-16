@@ -355,6 +355,15 @@ impl Workspace {
         })
     }
 
+    /// 自己画顶上那条的宿主视图（设置）的标题行，按它此刻摆在哪让位，见
+    /// `workspace_frame::page_chrome`。
+    pub(crate) fn page_chrome_of(&self, view: &str, window: &Window) -> Div {
+        crate::workspace_frame::page_chrome(
+            self.chrome_left_guard_of(view, window),
+            self.chrome_right_inset_of(view),
+        )
+    }
+
     /// 一个视图贴着窗口右上角时，页头末尾要给右侧开合按钮让出的宽度；不贴着是 0。
     pub(crate) fn chrome_right_inset_of(&self, view: &str) -> Pixels {
         let view = self.shell_view.panel_of(view);

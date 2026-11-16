@@ -3,12 +3,12 @@
 //! 快照构建和设置视图留在父模块；这里只组装各设置页。
 //! 各页实现按主题拆到同目录的 sibling 模块。
 //!
-//! 左侧导航按分组列出各页：分组只是一行小标题，不折叠、不缩进；点一页只渲染那一页，
-//! 不把整组设置堆进一个可滚动长页。
+//! 导航（设置那页左边一栏的视图）按分组列出各页：分组只是一行小标题，不折叠、不缩进；
+//! 点一页，内容（右边一栏的视图）只画那一页，不把整组设置堆进一个可滚动长页。
 
 use super::*;
 use gpui_component::input::InputState;
-use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
+use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem};
 use smelt_ui::{TextArea, TextInput};
 
 mod agent;
@@ -18,8 +18,8 @@ mod maintenance;
 mod panel_plugin;
 mod shortcuts;
 
-/// 渲染设置页面：左侧分组导航切换内容页，右侧只显示当前选中项。选中插件的页时
-/// `plugin_page` 是建好的那一页（由设置视图在事件里建，见 `SettingsContentView`）。
+/// 画设置的内容：只画导航选中的那一页。选中插件的页时 `plugin_page` 是建好的那一页（由
+/// 内容视图在事件里建，见 `SettingsContentView`）。
 pub(super) fn render_settings_content(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -33,6 +33,9 @@ pub(super) fn render_settings_content(
     })
 }
 
+/// 设置内容一栏最宽多少（rem）。
+const SETTINGS_CONTENT_MAX_WIDTH: f32 = 45.;
+
 #[derive(IntoElement)]
 struct SettingsShell {
     entity: Entity<Workspace>,
@@ -41,12 +44,7 @@ struct SettingsShell {
 }
 
 impl RenderOnce for SettingsShell {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let search = window.use_keyed_state("settings-nav-search", cx, |window, cx| {
-            InputState::new(window, cx).placeholder("搜索设置、功能或命令")
-        });
-        let query = search.read(cx).value().to_string();
-        let nav = filter_settings_nav(&settings_nav(&smelt_plugin_api::views(cx)), &query);
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let selected = self.snapshot.settings_section.clone();
         let content = match section_page(self.entity.clone(), &self.snapshot, &selected, cx) {
             Some(page) => smelt_plugin_api::settings_pane(
@@ -69,38 +67,50 @@ impl RenderOnce for SettingsShell {
             },
         };
 
-        h_flex()
-            .size_full()
-            .child(render_nav(
-                self.entity.clone(),
-                &nav,
-                &selected,
-                self.snapshot.attention.as_ref(),
-                &query,
-                search,
-                cx,
-            ))
-            .child(div().flex_1().min_w_0().h_full().child(content))
+        // 表单不跟着窗口无限拉宽：一行的名字和开关离太远就对不上了。窄于这个宽度时照常
+        // 跟着缩；宽出来的部分两边平分。
+        h_flex().size_full().min_w_0().justify_center().child(
+            div()
+                .h_full()
+                .w_full()
+                .min_w_0()
+                .max_w(rems(SETTINGS_CONTENT_MAX_WIDTH))
+                .child(content),
+        )
     }
 }
 
-fn render_nav(
+/// 画设置的导航：搜索框，和按组列出的各页（按搜索词筛过）。点一页就停到那一页。
+pub(super) fn render_settings_nav(
     entity: Entity<Workspace>,
-    nav: &[SettingsNavCategory],
     selected: &SettingsSection,
     attention: Option<&SettingsSection>,
-    query: &str,
-    search: Entity<InputState>,
+    search: &Entity<InputState>,
     cx: &App,
-) -> impl IntoElement {
+) -> AnyElement {
+    let query = search.read(cx).value().to_string();
+    let nav = filter_settings_nav(&settings_nav(&smelt_plugin_api::views(cx)), &query);
     let result_count = nav
         .iter()
         .map(|category| category.children.len())
         .sum::<usize>();
+    // 返回放在导航最上面，跟 Codex、Linear 的设置一样：设置换掉了整个工作台，侧栏的第一行
+    // 就是回去的路。长得和下面的导航项一样，只是不会被选中。
+    let back_entity = entity.clone();
+    let back = BackRow(
+        SidebarMenu::new().child(
+            SidebarMenuItem::new("返回应用")
+                .icon(IconName::ChevronLeft)
+                .on_click(move |_, window, cx| {
+                    back_entity.update(cx, |workspace, cx| workspace.go_back(window, cx));
+                }),
+        ),
+    );
     let mut header = v_flex()
         .w_full()
         .gap_1p5()
-        .child(TextInput::new(&search).prefix(IconName::Search));
+        .child(back)
+        .child(TextInput::new(search).prefix(IconName::Search));
     if !query.trim().is_empty() {
         header = header.child(
             div()
@@ -115,13 +125,14 @@ fn render_nav(
         );
     }
 
+    // 宽度由布局给（两栏之间的分隔条能拖），这里铺满这一栏。上游 Sidebar 自己铺一层实色的
+    // `sidebar` 底，会盖住窗口材质；这一栏的底归所在的组（`SmeltTabGroup::frame`），这里清掉。
     Sidebar::new("settings-nav")
-        .w(px(260.))
-        .flex_none()
-        .h_full()
+        .bg(gpui::transparent_black())
+        .w_full()
+        .flex_1()
+        .min_h_0()
         .border_0()
-        .border_r_1()
-        .border_color(cx.theme().border)
         .collapsible(false)
         .collapsed(false)
         .header(header)
@@ -155,6 +166,19 @@ fn render_nav(
                 },
             )))
         }))
+        .into_any_element()
+}
+
+/// 上游的 `SidebarMenu` 只是 `SidebarItem`，只能放进 `Sidebar` 的列表，放不进 `header`；
+/// 列表又只收同一种项（下面是 `SidebarGroup`）。包一层借它自己的画法，返回这一行和下面
+/// 的导航项长得一样。
+#[derive(IntoElement)]
+struct BackRow(SidebarMenu);
+
+impl RenderOnce for BackRow {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        SidebarItem::render(self.0, "settings-nav-back", window, cx)
+    }
 }
 
 fn select_section(entity: &Entity<Workspace>, section: SettingsSection, cx: &mut App) {
@@ -182,15 +206,7 @@ fn section_page(
         SettingsSection::Appearance => appearance::appearance_page(entity, snapshot, cx),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
         SettingsSection::PanelPlugins => panel_plugin::panel_plugin_page(entity, snapshot),
-        SettingsSection::Agents => {
-            let page = agent::agents_page(entity, snapshot, cx);
-            // 这一页改的都是本机运行时上的东西（CLI、hooks、启动命令）。
-            if crate::runtimes::has_remote_runtimes(cx) {
-                page.title_suffix(|_, _| crate::runtimes::local_runtime_scope_chip())
-            } else {
-                page
-            }
-        }
+        SettingsSection::Agents => agent::agents_page(entity, snapshot, cx),
         SettingsSection::Remote => collaboration::remote_page(entity, snapshot, cx),
         SettingsSection::Maintenance => maintenance::maintenance_page(entity, snapshot, cx),
         SettingsSection::About => maintenance::about_page(entity, snapshot, cx),

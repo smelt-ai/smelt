@@ -30,21 +30,17 @@ pub(crate) fn page(
     sort: SortBy,
     expanded: Rc<HashSet<SharedString>>,
 ) -> SettingPage {
-    // 它是监视器不是设置：标题旁写刷新频率，口径说明放到总量卡片底部。
+    // 它是监视器不是设置：总量卡片标题旁写刷新频率，口径说明放到卡片底部。页名在设置的
+    // 工具栏里，组件库的页头不画。
     let summary = snapshot.clone();
-    let mut setting_page = SettingPage::new("资源占用")
-        .title_suffix(|_, cx| {
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("停在这一页时每 2 秒刷新")
-        })
-        .resettable(false)
-        .group(
-            SettingGroup::new().item(SettingItem::render(move |_, _, cx: &mut App| {
+    let mut setting_page = SettingPage::new("资源占用").resettable(false).group(
+        SettingGroup::new()
+            .title("本机合计")
+            .description("停在这一页时每 2 秒刷新")
+            .item(SettingItem::render(move |_, _, cx: &mut App| {
                 summary_view(&summary, cx)
             })),
-        );
+    );
     for ix in 0..snapshot.sections.len() {
         let snapshot = snapshot.clone();
         let expanded = expanded.clone();
@@ -121,7 +117,7 @@ fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
         );
     }
     view.child(div().text_xs().text_color(theme.muted_foreground).child(
-        "本机合计：Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
+        "含 Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
                  包括智能体起的命令；CPU 按单核计，多核可超过 100%。",
     ))
     .into_any_element()

@@ -263,7 +263,6 @@ impl CapabilitiesPage {
         let entity = cx.entity();
         Button::new("capabilities-runtime")
             .quiet()
-            .small()
             .label(format!("机器：{current}"))
             .icon(IconName::ChevronDown)
             .dropdown_menu(move |menu, _window, _cx| {
@@ -315,7 +314,7 @@ impl PluginView for CapabilitiesPage {
 }
 
 impl Render for CapabilitiesPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = api::host(cx);
         let entity = cx.entity();
         let tabs = Segmented::new("capabilities-tabs")
@@ -328,16 +327,9 @@ impl Render for CapabilitiesPage {
             });
         // 挂了别的机器，才需要选在配哪台。
         let several_machines = host.machines(cx).len() > 1;
-        let header = host
-            .page_header(window, cx)
+        // 页名在外壳画的标题带（或标签）上，这一行不再写一遍。
+        let header = api::ui::page_toolbar()
             .gap_3()
-            .child(
-                div()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(rgb(api::ui::ui_theme::text()))
-                    .child("能力库"),
-            )
             .child(tabs)
             .when(several_machines, |header| {
                 header
@@ -345,18 +337,14 @@ impl Render for CapabilitiesPage {
                     .child(self.render_machine_picker(cx))
             });
 
-        v_flex()
-            .size_full()
-            .bg(rgb(api::ui::ui_theme::bg()))
-            .child(header)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .child(render::content(self, cx)),
-            )
+        v_flex().size_full().child(header).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .child(render::content(self, cx)),
+        )
     }
 }
 

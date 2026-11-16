@@ -91,6 +91,11 @@ fn titlebar_mouse_action(click_count: usize) -> TitlebarMouseAction {
 fn titlebar_mouse_down(event: &MouseDownEvent, window: &mut Window, cx: &mut App) {
     // 拖窗口的那一下停在标题区。胶囊和侧栏安全条都浮在内容上，不能再落到终端或消息。
     cx.stop_propagation();
+    // 按在顶栏里的控件上：按钮按下时、可聚焦的元素拿焦点时都会 `prevent_default`，子元素
+    // 先收到这一下。这时不拖窗口：一进 AppKit 的拖动循环，松手就到不了控件，点不下去。
+    if window.default_prevented() {
+        return;
+    }
     match titlebar_mouse_action(event.click_count) {
         TitlebarMouseAction::MoveWindow => window.start_window_move(),
         TitlebarMouseAction::DoubleClick => window.titlebar_double_click(),
@@ -130,17 +135,17 @@ pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div 
     )
 }
 
-/// 舞台上一页的页头底子：插件页面、远程桌面共用。这些面不画标题胶囊。
+/// 自己画顶上那条的宿主页（设置）的标题行。只放标题文字这类不比字高的东西：贴着窗口顶时
+/// 它就是 [`TOP_BAR_HEIGHT`] 高的标题栏，放不下按钮和分段控件，那些放进页面自己的工具行
+/// （`smelt_ui::page_toolbar`）。
 ///
-/// `left_guard` 见 `Workspace::chrome_left_guard`。页面贴着窗口顶（`Some`）时，最上
-/// `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐，标题和按钮放在这条下面，
-/// 左侧再让出给的宽度；在标签条下面（`None`）时顶上那条归标签条，这里只留常规内边距。
-/// 底边是发丝。按钮自己拦住点击。
+/// `left_guard` 见 `Workspace::chrome_left_guard_of`。贴着窗口顶（`Some`）时和红黄绿按钮、
+/// 侧栏顶上那条同一行，左侧让出给的宽度，空白处拖窗口；在标签条下面（`None`）时顶上那条
+/// 归标签条，这里只是一条常规内边距的头。底边是发丝。
 pub(crate) fn page_chrome(left_guard: Option<Pixels>, right_inset: Pixels) -> Div {
     let header = div()
         .w_full()
         .flex_shrink_0()
-        .pb(px(8.))
         .pl(px(20.))
         .pr(right_inset + px(20.))
         .border_b_1()
@@ -148,8 +153,8 @@ pub(crate) fn page_chrome(left_guard: Option<Pixels>, right_inset: Pixels) -> Di
         .flex()
         .items_center();
     match left_guard {
-        Some(left) => with_window_drag(header.pt(TOP_BAR_HEIGHT).pl(left + px(20.))),
-        None => header.pt(px(8.)),
+        Some(left) => with_window_drag(header.min_h(TOP_BAR_HEIGHT).pl(left + px(20.))),
+        None => header.py(px(8.)),
     }
 }
 

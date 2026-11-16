@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{AnyWindowHandle, App, AppContext, Div, Entity, EventEmitter, Global, Task, Window};
+use gpui::{AnyWindowHandle, App, AppContext, Entity, EventEmitter, Global, Task, Window};
 use serde::{Deserialize, Serialize};
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, ControlErrorCode};
@@ -442,8 +442,6 @@ pub trait Host: 'static {
     /// 被挡住、切走后还活着，要靠它知道自己露没露着，看不见时不做只为显示的事（采样、刷新）。
     /// 变了发 [`HostEvent::ShownViewsChanged`]。
     fn view_shown(&self, id: &str, cx: &App) -> bool;
-    /// 页面的页头底板：留好拖窗口条、交通灯和右上角开关的位置，页面往里放标题和按钮。
-    fn page_header(&self, window: &Window, cx: &App) -> Div;
     /// 主窗口（工作台那扇）；还没开或已经关了是 `None`。命令在这里执行（见 [`run`]）。
     fn main_window(&self, cx: &App) -> Option<AnyWindowHandle>;
     /// 主窗口此刻在前台、人在用。回到前台发 [`HostEvent::WindowActivated`]；去后台不发，
@@ -743,9 +741,6 @@ mod tests {
         }
         fn view_shown(&self, _: &str, _: &App) -> bool {
             false
-        }
-        fn page_header(&self, _: &Window, _: &App) -> Div {
-            gpui::div()
         }
         fn main_window(&self, _: &App) -> Option<AnyWindowHandle> {
             None

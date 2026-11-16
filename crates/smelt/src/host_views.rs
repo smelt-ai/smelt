@@ -1,4 +1,4 @@
-//! 宿主自己登记的视图：出口、设置、远程桌面。和插件视图在同一张注册表里，布局按 id 摆。
+//! 宿主自己登记的视图：出口、设置（导航和内容）、远程桌面。和插件视图在同一张注册表里，布局按 id 摆。
 //!
 //! 出口（[`api::OUTLET_VIEW`]）是路由的机制：布局里摆它的地方显示路由到的视图（见
 //! `router`、`workspace_layout`）。设置、远程桌面是还没拆成插件的功能，先由宿主登记。
@@ -21,11 +21,9 @@ pub(crate) const HOST_OWNER: &str = "smelt";
 /// 指着旧工作台的那份视图，页和布局没变就不动。
 pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut gpui::App) {
     crate::settings::register_page(cx);
-    let specs = vec![
-        outlet_spec(workspace.clone()),
-        crate::settings::view_spec(workspace.clone()),
-        crate::desktop_view::view_spec(workspace),
-    ];
+    let mut specs = vec![outlet_spec(workspace.clone())];
+    specs.extend(crate::settings::view_specs(workspace.clone()));
+    specs.push(crate::desktop_view::view_spec(workspace));
     if let Err(error) = api::register_views(HOST_OWNER, specs, cx) {
         eprintln!("[plugins] 宿主视图登记失败：{error}");
     }
@@ -37,7 +35,8 @@ fn outlet_spec(workspace: WeakEntity<Workspace>) -> ViewSpec {
         title: "内容".into(),
         icon: gpui_kit_assets::IconName::AppWindow.path(),
         per_machine: false,
-        // 顶上那条由出口里的视图画（舞台的标题胶囊、插件的页头）。
+        // 只管出口空着的时候：里面放了视图，标题和顶上那条归谁画都跟着那个视图（见
+        // `workspace_shell::show_in_outlet`）。空着什么都不画。
         draws_top_bar: true,
         settings: None,
         build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {

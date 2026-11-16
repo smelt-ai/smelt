@@ -107,7 +107,6 @@ impl FilesPanel {
                         .min_h_0()
                         .overflow_hidden()
                         .flex()
-                        .bg(rgb(ui_theme::bg()))
                         .child(div().size_full().min_h_0().flex().flex_col().child(tree)),
                 )
         });
@@ -453,7 +452,6 @@ impl FilesPanel {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgb(ui_theme::bg()))
                 .child(smelt_plugin_api::ui::image::image_surface(image))
                 .into_any_element();
         }

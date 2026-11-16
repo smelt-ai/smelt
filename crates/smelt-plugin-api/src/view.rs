@@ -101,7 +101,10 @@ pub struct ViewSpec {
     /// `{"machine": …}`（见 [`crate::machine_to_json`]）。
     pub per_machine: bool,
     /// 视图自己画顶上那一条（拖窗口、给红黄绿按钮让位、标题）：单独一组时外壳不给它画
-    /// 标题带，也不让放大。画法上的事，和摆在哪无关。
+    /// 标题带，也不让放大。画法上的事，和摆在哪无关；放进出口也一样。
+    ///
+    /// 不画的（一般的插件页）由外壳画一条 34 高的标题带：居中写 `title`，能拖窗口。那条
+    /// 只放标题，页面的切换、新建这些控件放在视图自己的第一行（`ui::page_toolbar`）。
     pub draws_top_bar: bool,
     /// 是一页设置：放进设置侧栏的哪一组、按哪些词能搜到。设置页由设置摆，布局不摆它。
     pub settings: Option<SettingsEntry>,
