@@ -23,7 +23,8 @@ use smelt_model::new_session::{NewSessionAction, NewSessionSections, NewSessionT
 use smelt_model::runtime_path::PathStyle;
 use smelt_model::session_control::AcpAgentOption;
 use smelt_model::workspace_directory::{
-    WorkspaceConversation, WorkspaceDirectory, WorkspaceRevision, project_labels, project_root_of,
+    WorkspaceConversation, WorkspaceDirectory, WorkspaceRevision, WorkspaceWorkset, project_labels,
+    project_root_of,
 };
 use smelt_runtime_client::protocol::workspace::BrowseDirsResult;
 
@@ -189,7 +190,11 @@ impl CatalogState {
     fn listing(&self) -> Listing {
         let empty_directory = WorkspaceDirectory::default();
         let directory = self.workspace.as_ref().unwrap_or(&empty_directory);
-        let mut listing = Listing::new(PathStyle::of_os(self.os.as_deref()), &directory.projects);
+        let mut listing = Listing::new(
+            PathStyle::of_os(self.os.as_deref()),
+            &directory.projects,
+            &directory.worksets,
+        );
         for conversation in &directory.conversations {
             if conversation.archived_at.is_some() {
                 continue;
@@ -261,6 +266,7 @@ impl CatalogState {
                     mobile_summary(
                         row,
                         listing.project(row),
+                        listing.workset(row),
                         self.sessions.get(&row.id),
                         &self.attention,
                         sources.get(&row.id).cloned(),
@@ -269,9 +275,16 @@ impl CatalogState {
                 )
             })
             .collect();
+        // 项目里先是没绑工作树的会话，再按工作树的次序一棵一棵排，同一棵树的会话挨着。
+        let workset_order = |row: &Row| {
+            listing
+                .workset(row)
+                .map(|workset| (workset.position, workset.id.clone()))
+        };
         rows.sort_by(|(a_row, a), (b_row, b)| {
             a.project_order
                 .cmp(&b.project_order)
+                .then(workset_order(a_row).cmp(&workset_order(b_row)))
                 .then(b_row.pinned.cmp(&a_row.pinned))
                 .then(a_row.order.cmp(&b_row.order))
                 .then(a_row.leaf.cmp(&b_row.leaf))
@@ -302,6 +315,8 @@ struct Row {
     agent: Option<String>,
     /// 自定义 Agent 开的对话：它的 id。
     profile_id: Option<String>,
+    /// 绑定的工作树在 [`Listing::worksets`] 里的下标。
+    workset: Option<usize>,
     /// 在名册里的先后，和同一段对话里第几个终端。
     order: u32,
     leaf: u32,
@@ -313,15 +328,17 @@ struct Listing {
     style: PathStyle,
     opened: Vec<String>,
     projects: Vec<ListedProject>,
+    worksets: Vec<WorkspaceWorkset>,
     rows: Vec<Row>,
 }
 
 impl Listing {
-    fn new(style: PathStyle, opened: &[String]) -> Self {
+    fn new(style: PathStyle, opened: &[String], worksets: &[WorkspaceWorkset]) -> Self {
         let mut listing = Self {
             style,
             opened: opened.to_vec(),
             projects: Vec::new(),
+            worksets: worksets.to_vec(),
             rows: Vec::new(),
         };
         for root in opened {
@@ -332,6 +349,19 @@ impl Listing {
 
     fn project(&self, row: &Row) -> Option<&ListedProject> {
         row.project.map(|index| &self.projects[index])
+    }
+
+    fn workset(&self, row: &Row) -> Option<&WorkspaceWorkset> {
+        row.workset.map(|index| &self.worksets[index])
+    }
+
+    /// 对话绑定的工作树，和它该归的项目分组。绑了工作树的按工作树的项目归组，不看 cwd，
+    /// 和桌面侧栏一样；工作树已经不在目录里时当没绑。
+    fn workset_group(&mut self, conversation: &WorkspaceConversation) -> Option<(usize, usize)> {
+        let id = conversation.workset_id.as_deref()?;
+        let index = self.worksets.iter().position(|workset| workset.id == id)?;
+        let root = self.worksets[index].project_root.clone();
+        Some((index, self.group_for_root(&root)))
     }
 
     fn group_for_root(&mut self, root: &str) -> usize {
@@ -372,10 +402,15 @@ impl Listing {
 
     fn push_conversation(&mut self, conversation: &WorkspaceConversation) {
         let order = self.next_order();
+        let bound = self.workset_group(conversation);
+        let workset = bound.map(|(workset, _)| workset);
         if let Some(acp) = &conversation.acp {
             let agent_conversation =
                 acp.agent_definition_id.is_some() || acp.automation_id.is_some();
-            let project = self.group_for_cwd(acp.cwd.as_deref(), agent_conversation);
+            let project = match bound {
+                Some((_, project)) => Some(project),
+                None => self.group_for_cwd(acp.cwd.as_deref(), agent_conversation),
+            };
             self.rows.push(Row {
                 id: acp.sid.clone(),
                 kind: view::SessionKind::Acp,
@@ -384,6 +419,7 @@ impl Listing {
                 project,
                 agent: Some(acp.agent.clone()),
                 profile_id: acp.profile_id.clone(),
+                workset,
                 order,
                 leaf: 0,
                 pinned: conversation.pinned_at.is_some(),
@@ -395,7 +431,10 @@ impl Listing {
             let Some(id) = terminal.id.clone() else {
                 continue;
             };
-            let project = self.group_for_cwd(terminal.cwd.as_deref(), false);
+            let project = match bound {
+                Some((_, project)) => Some(project),
+                None => self.group_for_cwd(terminal.cwd.as_deref(), false),
+            };
             self.rows.push(Row {
                 id,
                 kind: view::SessionKind::Terminal,
@@ -407,6 +446,7 @@ impl Listing {
                     .as_deref()
                     .map(|launch| agent_from_launch(launch).to_string()),
                 profile_id: None,
+                workset,
                 order,
                 leaf: u32::try_from(leaf).unwrap_or(u32::MAX),
                 pinned: conversation.pinned_at.is_some(),
@@ -442,6 +482,7 @@ impl Listing {
                 project: None,
                 agent: run.context.engine_kind_id.clone(),
                 profile_id: None,
+                workset: None,
                 order,
                 leaf: 0,
                 pinned: false,
@@ -605,6 +646,7 @@ pub(crate) fn attention_item(item: &ModelAttention) -> view::AttentionItem {
 fn mobile_summary(
     row: &Row,
     project: Option<&ListedProject>,
+    workset: Option<&WorkspaceWorkset>,
     daemon: Option<&DaemonSessionState>,
     attention_store: &AttentionStore,
     automation: Option<view::AutomationSource>,
@@ -659,6 +701,9 @@ fn mobile_summary(
         automation,
         agent_definition_id,
         profile_id: row.profile_id.clone(),
+        workset_id: workset.map(|workset| workset.id.clone()),
+        workset_task: workset.map(|workset| workset.task.clone()),
+        workset_branch: workset.map(|workset| workset.branch.clone()),
     }
 }
 

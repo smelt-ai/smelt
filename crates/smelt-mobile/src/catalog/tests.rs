@@ -161,6 +161,61 @@ fn archives_are_hidden_and_pins_stay_within_their_project() {
     assert_eq!(ids_of(&state.summaries()), ["pinned", "normal", "outside"]);
 }
 
+/// 绑了工作树的会话归工作树所在的项目，带上任务名和分支；项目里先是没绑的会话，再按
+/// 工作树的次序一棵一棵排。已经不在目录里的工作树当没绑。
+#[test]
+fn worktree_sessions_carry_their_worktree_and_sit_together() {
+    let mut state = CatalogState::default();
+    let bound = |id: &str, kind: &str, workset: &str, order: u32| {
+        let mut value = conversation(
+            id,
+            kind,
+            Some((&format!("/repo/worktrees/{workset}"), 0)),
+            order,
+        );
+        value["workset_id"] = json!(workset);
+        value
+    };
+    let mut directory = one_project_directory(vec![
+        bound("b-1", "acp", "task-b", 0),
+        conversation("plain", "terminal", Some(("/repo", 0)), 1),
+        bound("a-1", "terminal", "task-a", 2),
+        bound("b-2", "terminal", "task-b", 3),
+        bound("gone", "acp", "closed", 4),
+    ]);
+    directory["worksets"] = json!([
+        {"id": "task-a", "project_root": "/repo", "task": "task-a", "branch": "feat/a",
+         "position": 0, "repositories": []},
+        {"id": "task-b", "project_root": "/repo", "task": "task-b", "branch": "fix/b",
+         "position": 1, "repositories": []},
+    ]);
+    state.apply(
+        snapshot(Vec::new(), Some(parse_directory(directory)), None),
+        Instant::now(),
+    );
+
+    let sessions = state.summaries();
+    assert_eq!(ids_of(&sessions), ["plain", "gone", "a-1", "b-1", "b-2"]);
+    for id in ["plain", "gone", "a-1", "b-1", "b-2"] {
+        assert_eq!(
+            find(&sessions, id).project_root.as_deref(),
+            Some("/repo"),
+            "{id}"
+        );
+    }
+    let b = find(&sessions, "b-2");
+    assert_eq!(
+        (
+            b.workset_id.as_deref(),
+            b.workset_task.as_deref(),
+            b.workset_branch.as_deref()
+        ),
+        (Some("task-b"), Some("task-b"), Some("fix/b"))
+    );
+    assert_eq!(find(&sessions, "gone").workset_id, None);
+    assert_eq!(find(&sessions, "plain").workset_id, None);
+}
+
 #[test]
 fn projection_lists_the_directory_and_live_automation_runs() {
     let mut state = CatalogState::default();
@@ -1383,6 +1438,9 @@ fn cached_list_shows_until_the_live_snapshot_then_the_live_list_is_saved() {
         automation: None,
         agent_definition_id: None,
         profile_id: None,
+        workset_id: None,
+        workset_task: None,
+        workset_branch: None,
     };
     cache.save_session_list("ep-a", &vec![old.clone()]);
     let source = FakeSource::new(Some(Arc::clone(&cache)));

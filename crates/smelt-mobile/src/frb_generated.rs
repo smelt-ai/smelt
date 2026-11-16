@@ -5765,6 +5765,9 @@ impl SseDecode for crate::api::catalog::SessionSummary {
             <Option<crate::api::catalog::AutomationSource>>::sse_decode(deserializer);
         let mut var_agentDefinitionId = <Option<String>>::sse_decode(deserializer);
         let mut var_profileId = <Option<String>>::sse_decode(deserializer);
+        let mut var_worksetId = <Option<String>>::sse_decode(deserializer);
+        let mut var_worksetTask = <Option<String>>::sse_decode(deserializer);
+        let mut var_worksetBranch = <Option<String>>::sse_decode(deserializer);
         return crate::api::catalog::SessionSummary {
             id: var_id,
             kind: var_kind,
@@ -5784,6 +5787,9 @@ impl SseDecode for crate::api::catalog::SessionSummary {
             automation: var_automation,
             agent_definition_id: var_agentDefinitionId,
             profile_id: var_profileId,
+            workset_id: var_worksetId,
+            workset_task: var_worksetTask,
+            workset_branch: var_worksetBranch,
         };
     }
 }
@@ -8675,6 +8681,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::catalog::SessionSummary {
             self.automation.into_into_dart().into_dart(),
             self.agent_definition_id.into_into_dart().into_dart(),
             self.profile_id.into_into_dart().into_dart(),
+            self.workset_id.into_into_dart().into_dart(),
+            self.workset_task.into_into_dart().into_dart(),
+            self.workset_branch.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -11311,6 +11320,9 @@ impl SseEncode for crate::api::catalog::SessionSummary {
         <Option<crate::api::catalog::AutomationSource>>::sse_encode(self.automation, serializer);
         <Option<String>>::sse_encode(self.agent_definition_id, serializer);
         <Option<String>>::sse_encode(self.profile_id, serializer);
+        <Option<String>>::sse_encode(self.workset_id, serializer);
+        <Option<String>>::sse_encode(self.workset_task, serializer);
+        <Option<String>>::sse_encode(self.workset_branch, serializer);
     }
 }
 

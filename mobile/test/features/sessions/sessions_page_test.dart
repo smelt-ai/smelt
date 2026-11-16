@@ -91,6 +91,54 @@ void main() {
     expect(find.text('多运行时连接状态机'), findsOneWidget);
   });
 
+  testWidgets('同一棵工作树的会话前面有一行树名和分支，只出现一次', (tester) async {
+    final filter = ValueNotifier<String?>('rt-mbp');
+    addTearDown(filter.dispose);
+    SessionSummary inProject(String id, String title, {String? workset}) =>
+        SessionSummary(
+          id: id,
+          kind: SessionKind.terminal,
+          title: title,
+          phase: SessionPhase.idle,
+          status: SessionStatus.idle,
+          agent: 'other',
+          cwd: '/Users/demo/wt-app',
+          projectRoot: '/Users/demo/wt-app',
+          projectTitle: 'wt-app',
+          projectOrder: 40,
+          updatedAt: 0,
+          turnStartedAt: 0,
+          worksetId: workset,
+          worksetTask: workset == null ? null : '搜索框',
+          worksetBranch: workset == null ? null : 'feat/search',
+        );
+    await pumpHarness(
+      tester,
+      TestBackend(
+        extra: {
+          'rt-mbp': [
+            inProject('wt-plain', '普通终端'),
+            inProject('wt-1', '写接口', workset: 'ws-1'),
+            inProject('wt-2', '跑测试', workset: 'ws-1'),
+          ],
+        },
+      ),
+      SessionsPage(filter: filter),
+    );
+    await tester.scrollUntilVisible(
+      find.text('跑测试'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    expect(find.text('搜索框'), findsOneWidget);
+    expect(find.text('feat/search'), findsOneWidget);
+    double y(String text) => tester.getTopLeft(find.text(text)).dy;
+    expect(y('普通终端'), lessThan(y('搜索框')));
+    expect(y('搜索框'), lessThan(y('写接口')));
+    expect(y('写接口'), lessThan(y('跑测试')));
+  });
+
   testWidgets('搜索标题、项目、agent；没有匹配时说清楚', (tester) async {
     final filter = ValueNotifier<String?>(null);
     addTearDown(filter.dispose);

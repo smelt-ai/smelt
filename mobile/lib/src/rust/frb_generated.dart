@@ -5156,8 +5156,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SessionSummary dco_decode_session_summary(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 18)
-      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
+    if (arr.length != 21)
+      throw Exception('unexpected arr length: expect 21 but see ${arr.length}');
     return SessionSummary(
       id: dco_decode_String(arr[0]),
       kind: dco_decode_session_kind(arr[1]),
@@ -5177,6 +5177,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       automation: dco_decode_opt_box_autoadd_automation_source(arr[15]),
       agentDefinitionId: dco_decode_opt_String(arr[16]),
       profileId: dco_decode_opt_String(arr[17]),
+      worksetId: dco_decode_opt_String(arr[18]),
+      worksetTask: dco_decode_opt_String(arr[19]),
+      worksetBranch: dco_decode_opt_String(arr[20]),
     );
   }
 
@@ -8163,6 +8166,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
     var var_agentDefinitionId = sse_decode_opt_String(deserializer);
     var var_profileId = sse_decode_opt_String(deserializer);
+    var var_worksetId = sse_decode_opt_String(deserializer);
+    var var_worksetTask = sse_decode_opt_String(deserializer);
+    var var_worksetBranch = sse_decode_opt_String(deserializer);
     return SessionSummary(
       id: var_id,
       kind: var_kind,
@@ -8182,6 +8188,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       automation: var_automation,
       agentDefinitionId: var_agentDefinitionId,
       profileId: var_profileId,
+      worksetId: var_worksetId,
+      worksetTask: var_worksetTask,
+      worksetBranch: var_worksetBranch,
     );
   }
 
@@ -10860,6 +10869,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_automation_source(self.automation, serializer);
     sse_encode_opt_String(self.agentDefinitionId, serializer);
     sse_encode_opt_String(self.profileId, serializer);
+    sse_encode_opt_String(self.worksetId, serializer);
+    sse_encode_opt_String(self.worksetTask, serializer);
+    sse_encode_opt_String(self.worksetBranch, serializer);
   }
 
   @protected
