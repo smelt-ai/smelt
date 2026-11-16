@@ -1021,7 +1021,8 @@ impl Workspace {
                         >(
                             runtime.client(),
                             params,
-                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                            // 关闭前要 fetch 各仓库的远端，和新建工作树一样给足时间。
+                            std::time::Duration::from_secs(30 * 60),
                         )
                         .map_err(crate::runtime_call::error_text)
                 })

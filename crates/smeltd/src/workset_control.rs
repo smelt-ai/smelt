@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::PathBuf};
 use smelt_core::{
     workspace_catalog::{self, DirectoryChange, DirectoryError},
     workspace_directory::{
-        WorkspaceRevision, WorkspaceWorkset, WorkspaceWorksetCreateParams,
+        WorkspaceDirectory, WorkspaceRevision, WorkspaceWorkset, WorkspaceWorksetCreateParams,
         WorkspaceWorksetFinishParams, WorkspaceWorksetFinishResult, WorkspaceWorksetRenameParams,
     },
 };
@@ -349,24 +349,25 @@ pub(crate) fn finish(
     params: WorkspaceWorksetFinishParams,
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceWorksetFinishResult, ControlError> {
+    // 先在锁外检查会话、fetch 基线：fetch 走网络，拿着目录锁会卡住所有目录写入。
+    let directory = workspace_catalog::directory_on(store).map_err(directory_error)?;
+    let workset = closable_workset(&directory, &params.workset_id)?;
+    let refresh_failures = smelt_git::worktree::refresh_workset_bases(&git_workset(workset));
+
     let _guard = workspace_catalog::lock_catalog();
     let directory = workspace_catalog::directory_on_locked(store).map_err(directory_error)?;
-    let workset = directory
-        .worksets
-        .iter()
-        .find(|workset| workset.id == params.workset_id)
-        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "工作树不存在"))?;
-    if directory.conversations.iter().any(|conversation| {
-        conversation.workset_id.as_deref() == Some(workset.id.as_str())
-            && conversation.archived_at.is_none()
-    }) {
-        return Err(ControlError::new(
-            ControlErrorCode::FailedPrecondition,
-            "工作树仍绑定未归档会话；请先关闭或归档这些会话",
-        ));
-    }
-    let report =
-        smelt_git::worktree::finish_workset(&git_workset(workset)).map_err(worktree_error)?;
+    let workset = closable_workset(&directory, &params.workset_id)?;
+    let report = smelt_git::worktree::finish_workset(&git_workset(workset)).map_err(|error| {
+        let mut error = worktree_error(error);
+        if !refresh_failures.is_empty() {
+            error.message = format!(
+                "{}\n没能刷新远端，按本地已有的远端分支判断：\n{}",
+                error.message,
+                refresh_failures.join("\n")
+            );
+        }
+        error
+    })?;
     let change =
         workspace_catalog::delete_workset_on_locked(store, &workset.id).map_err(|error| {
             ControlError::new(
@@ -384,6 +385,26 @@ pub(crate) fn finish(
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
     })
+}
+
+fn closable_workset<'a>(
+    directory: &'a WorkspaceDirectory,
+    id: &str,
+) -> Result<&'a WorkspaceWorkset, ControlError> {
+    let workset = directory
+        .worksets
+        .iter()
+        .find(|workset| workset.id == id)
+        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "工作树不存在"))?;
+    if directory.conversations.iter().any(|conversation| {
+        conversation.workset_id.as_deref() == Some(id) && conversation.archived_at.is_none()
+    }) {
+        return Err(ControlError::new(
+            ControlErrorCode::FailedPrecondition,
+            "工作树仍绑定未归档会话；请先关闭或归档这些会话",
+        ));
+    }
+    Ok(workset)
 }
 
 fn model_workset(
