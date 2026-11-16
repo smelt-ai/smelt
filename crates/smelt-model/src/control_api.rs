@@ -1003,7 +1003,7 @@ pi_calls! {
         -> crate::workspace_directory::WorkspaceDirectory;
     /// 在已配置的仓库中创建一个多仓库工作集。
     WorkspaceWorksetCreate => WorkspaceWorksetCreate(crate::workspace_directory::WorkspaceWorksetCreateParams)
-        -> crate::workspace_directory::WorkspaceRevision;
+        -> crate::workspace_directory::WorkspaceWorksetCreateResult;
     /// 重命名工作树并移动 worktree，保留原分支。
     WorkspaceWorksetRename => WorkspaceWorksetRename(crate::workspace_directory::WorkspaceWorksetRenameParams)
         -> crate::workspace_directory::WorkspaceRevision;

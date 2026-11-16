@@ -236,6 +236,25 @@ pub struct WorkspaceWorksetFinishParams {
     pub workset_id: String,
 }
 
+/// 新建工作树的回执。目录版本平铺在顶层，和以前只回 `WorkspaceRevision` 时同一个形状。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetCreateResult {
+    #[serde(flatten)]
+    pub revision: WorkspaceRevision,
+    /// 跑了初始化脚本（`<源仓库>/.smelt/worktree-setup`）的仓库，没有脚本的不列。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup: Vec<WorkspaceWorksetSetupResult>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetSetupResult {
+    pub repository: String,
+    pub success: bool,
+    /// 失败时输出的末尾一段（stdout 和 stderr 合在一起），成功时为空。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorksetFinishResult {
     pub revision: WorkspaceRevision,

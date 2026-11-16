@@ -326,6 +326,15 @@ impl Workspace {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // 工作树已经建好，初始化脚本失败不算新建失败：弹窗照常关，失败单独报。
+                if let Ok(created) = &result {
+                    for setup in created.setup.iter().filter(|setup| !setup.success) {
+                        this.report_background_error(format!(
+                            "工作树已建好，但仓库 {} 的初始化脚本（.smelt/worktree-setup）失败：\n{}",
+                            setup.repository, setup.output
+                        ));
+                    }
+                }
                 let Some(state) = this
                     .project_repositories
                     .as_mut()
