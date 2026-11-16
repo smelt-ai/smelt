@@ -137,6 +137,7 @@ impl ResourceMonitor {
         let mut section = Section {
             name: machine.name,
             id_prefix: format!("{:?}", machine.key),
+            machine: machine.key.clone(),
             total: None,
             fixed: Vec::new(),
             sessions: Vec::new(),
@@ -393,6 +394,8 @@ pub(crate) struct Section {
     pub(crate) name: String,
     /// 行 id 的前缀，几台机器的行不能撞。
     pub(crate) id_prefix: String,
+    /// 这台机器：「跳到会话」跳的是它上面的会话。
+    pub(crate) machine: RuntimeKey,
     pub(crate) total: Option<ProcessUsage>,
     /// 桌面进程（只有本机）和守护进程。
     pub(crate) fixed: Vec<Row>,

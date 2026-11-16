@@ -282,6 +282,10 @@ impl AcpView {
                 let t = cx.theme().colors;
                 let muted = t.muted_foreground;
                 let presentation = conversation_layout.get(i).copied().unwrap_or_default();
+                let empty_body = this.entries.get(i).is_some_and(is_empty_assistant_body);
+                if empty_body && i + 1 < this.entries.len() {
+                    return div().h(px(0.)).w_full().overflow_hidden().into_any_element();
+                }
                 let final_answer = presentation.final_answer;
                 let process_group = presentation.process_group;
                 let process_expanded = process_group.is_some_and(|group| {
@@ -521,18 +525,22 @@ impl AcpView {
                             ))
                             .into_any_element()
                     }
-                    // 过程组里的思考和中间正文都走进展行：一行摘要，长文可展开。
-                    AcpEntry::Assistant { text, .. }
+                    // 过程组只收思考和工具，普通正文始终以完整 Markdown 显示。
+                    AcpEntry::Assistant { text, thought: false } if text.trim().is_empty() => {
+                        div().h(px(0.)).w_full().overflow_hidden().into_any_element()
+                    }
+                    AcpEntry::Assistant { text, thought: true }
                         if process_group.is_some() && text.trim().is_empty() =>
                     {
                         div().h(px(0.)).w_full().overflow_hidden().into_any_element()
                     }
-                    AcpEntry::Assistant { text, .. } if process_group.is_some() => this
+                    AcpEntry::Assistant { text, thought: true } if process_group.is_some() => this
                         .render_progress_entry(
                             i,
                             entry,
                             text,
                             true,
+                            false,
                             muted,
                             row_elapsed,
                             animate_ambient,
@@ -546,6 +554,7 @@ impl AcpView {
                         entry,
                         text,
                         false,
+                        presentation.show_settled_thought_elapsed,
                         muted,
                         row_elapsed,
                         animate_ambient,
@@ -605,7 +614,6 @@ impl AcpView {
                                         ),
                                 )
                             })
-                            .when(!final_answer, |col| col.text_color(muted).text_xs())
                             .context_menu(move |menu, window, cx| {
                                 selected_text_context_menu(
                                     menu,
@@ -1259,7 +1267,7 @@ impl AcpView {
                 }
                 if current_turn_active
                     && i + 1 == this.entries.len()
-                    && is_user_entry(entry)
+                    && (is_user_entry(entry) || empty_body)
                     && !current_turn_has_agent_output(&this.entries)
                     && this.provider_retry.is_none()
                 {
@@ -1295,7 +1303,7 @@ impl AcpView {
                 }
                 // `gpui::list` 不像 flex 容器那样处理 `gap`；间距必须属于
                 // 虚拟项本身，否则测得的高度不包含消息间的留白。
-                let bottom = if in_process_timeline {
+                let bottom = if in_process_timeline || empty_body {
                     0.
                 } else {
                     match entry {
@@ -1315,7 +1323,7 @@ impl AcpView {
                 };
                 // 没有顶栏时，第一条和从胶囊跳回的那一问让开标题胶囊；滚上去
                 // 仍会钻到它底下。
-                let top = if clear_capsule && (i == 0 || this.revealed_prompt == Some(i)) {
+                let top = if !empty_body && clear_capsule && (i == 0 || this.revealed_prompt == Some(i)) {
                     ui_theme::CHROME_ISLAND_CLEARANCE_PX
                 } else {
                     0.
@@ -2498,6 +2506,7 @@ impl AcpView {
         entry: &AcpEntry,
         text: &str,
         in_process: bool,
+        show_settled_elapsed: bool,
         muted: gpui::Hsla,
         live_elapsed: Option<u64>,
         animate_ambient: bool,
@@ -2513,7 +2522,7 @@ impl AcpView {
         // 一直在组里，摘要只有一行，长文必须能点开，否则后半段永远看不到。
         // 悬停底和点击同一条件，避免看起来不能点却还能点。
         let interactive = has_details;
-        let settled = if !in_process && live_elapsed.is_none() {
+        let settled = if show_settled_elapsed && live_elapsed.is_none() {
             settled_thought_elapsed(
                 &self.entries,
                 entry_ix,

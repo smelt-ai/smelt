@@ -18,7 +18,7 @@ use crate::prelude::*;
 use crate::projection::AutomationStore;
 
 /// 智能体页的视图 id，由「智能体」插件登记；没装就不给去那里的入口。
-pub(crate) const AGENTS_VIEW_ID: &str = "smelt.agents/main";
+pub(crate) const AGENTS_VIEW_ID: &str = api::contracts::agents::VIEW;
 
 /// 某台机器上的一条自动化：两台机器上同 id 的自动化是两回事。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

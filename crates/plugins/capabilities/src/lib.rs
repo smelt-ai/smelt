@@ -2,13 +2,15 @@
 //!
 //! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道，宿主里没有它的类型。视图 id 是
 //! `smelt.capabilities/main`，打开时的参数：`{"tab": "models" | "plugins" | "mcp" | "memory",
-//! "machine": …}`（机器的写法见 [`api::machine_to_json`]），都可以不给。
+//! "machine": …}`（机器的写法见 [`api::machine_to_json`]），都可以不给。每台机器的菜单里也
+//! 登记一项「能力库」（[`MACHINE_MENU`]），点了打开时带上那台机器。
 //!
 //! 状态全在 [`CapabilitiesPage`] 上：在配哪台机器、那台机器的 Pi 配置快照、各表单。
 //! 页面一直留着，离开再回来表单还在；每次打开重读快照。
 
 use std::rc::Rc;
 
+use api::contracts::sessions::{MACHINE_MENU, MachineMenuContext};
 use api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED;
 use api::serde_json;
 use api::ui::{Button, Segmented};
@@ -18,7 +20,8 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::*;
 use smelt_plugin_api::{
-    self as api, HostEvent, PluginView, RuntimeKey, TopicMessage, ViewHandle, ViewSpec,
+    self as api, ContextMenuAction, ContextMenuItem, HostEvent, PluginView, RuntimeKey,
+    TopicMessage, ViewHandle, ViewSpec,
 };
 
 mod auth;
@@ -34,6 +37,10 @@ use state::*;
 
 const OWNER: &str = "smelt.capabilities";
 
+/// 机器菜单里那一项点了执行的命令：打开能力库，配右键的那台机器。
+const OPEN_ON_MACHINE: api::Command<MachineMenuContext, ()> =
+    api::Command::new("smelt.capabilities/open-on-machine");
+
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
     api::register_views(
@@ -42,8 +49,8 @@ pub fn register(cx: &mut App) {
             name: "main".into(),
             title: "能力库".into(),
             icon: IconName::LayoutDashboard.path(),
-            per_machine: true,
             draws_top_bar: false,
+            instances: false,
             settings: None,
             build: Rc::new(|_window, cx| {
                 Rc::new(cx.new(CapabilitiesPage::new)) as Rc<dyn ViewHandle>
@@ -52,6 +59,43 @@ pub fn register(cx: &mut App) {
         cx,
     )
     .expect("能力库的视图表写错了");
+    api::register_commands(
+        OWNER,
+        "能力库",
+        vec![
+            OPEN_ON_MACHINE.spec_async("在这台机器上打开能力库", |args, _, cx| {
+                open_on_machine(args, cx)
+            }),
+        ],
+        cx,
+    )
+    .expect("能力库的命令表写错了");
+    let item = ContextMenuItem {
+        label: "能力库".into(),
+        image: None,
+        icon: Some(IconName::LayoutDashboard.path()),
+        machine: None,
+        action: ContextMenuAction::Run {
+            command: OPEN_ON_MACHINE.id().to_string(),
+            args: serde_json::Value::Null,
+        },
+    };
+    api::register_context_menu_items(OWNER, MACHINE_MENU, vec![item], cx)
+        .expect("能力库的菜单项写错了");
+}
+
+fn open_on_machine(args: MachineMenuContext, cx: &mut App) -> Task<Result<(), String>> {
+    let opened = api::OPEN_VIEW.run(
+        &api::OpenView {
+            view: api::contracts::capabilities::VIEW.to_string(),
+            args: serde_json::json!({ "machine": api::machine_to_json(&args.machine) }),
+        },
+        cx,
+    );
+    cx.spawn(async move |_| match opened.await? {
+        true => Ok(()),
+        false => Err("没有能放能力库的地方".to_string()),
+    })
 }
 
 /// 页面里平级的几个页签。
@@ -123,6 +167,9 @@ pub struct CapabilitiesPage {
     pi_plugin_pending_delete: Option<String>,
     /// 插件导入 / 删除的最近一次错误。
     pi_plugin_error: Option<String>,
+    /// 那台机器装了远程桌面（运行时 `system.describe` 报的）：浏览器类 MCP 预设在那里接
+    /// 远程桌面里的 Chrome。进页面、换机器、重连时问一次，还没问到当没装。
+    remote_desktop: bool,
     _host_events: Subscription,
 }
 
@@ -149,6 +196,7 @@ impl CapabilitiesPage {
             pi_model_editor_error: None,
             pi_plugin_pending_delete: None,
             pi_plugin_error: None,
+            remote_desktop: false,
             _host_events: host_events,
         }
     }
@@ -167,6 +215,8 @@ impl CapabilitiesPage {
             }
             HostEvent::Reconnected(machine) if *machine == self.machine => {
                 self.on_pi_config_changed(cx);
+                // 重连可能是运行时重装、升级过，装没装远程桌面也可能变了。
+                self.refresh_remote_desktop(cx);
             }
             HostEvent::RuntimeTopic { .. }
             | HostEvent::Reconnected(_)
@@ -191,7 +241,9 @@ impl CapabilitiesPage {
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged
             | HostEvent::PagesChanged
-            | HostEvent::CommandsChanged => {}
+            | HostEvent::CommandsChanged
+            | HostEvent::Plugin { .. }
+            | HostEvent::OpenPaths { .. } => {}
         }
     }
 
@@ -203,6 +255,7 @@ impl CapabilitiesPage {
     /// 重读快照和当前页签要的东西：进页面、换机器时。
     fn reload(&mut self, cx: &mut Context<Self>) {
         self.refresh_pi_library(cx);
+        self.refresh_remote_desktop(cx);
         self.load_tab(cx);
     }
 

@@ -32,7 +32,7 @@ pub(super) fn pi_mcp_page(
                 .child(presets_section(
                     &entity,
                     servers,
-                    page.pi_mcp_remote_desktop(cx),
+                    page.pi_mcp_remote_desktop(),
                     palette,
                 ))
                 .child(servers_section(&entity, page, servers, palette, cx))

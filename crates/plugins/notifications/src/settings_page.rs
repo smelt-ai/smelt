@@ -22,8 +22,8 @@ pub(crate) fn register(plugin: Rc<RefCell<Plugin>>, cx: &mut App) {
         name: "main".into(),
         title: "通知".into(),
         icon: IconName::Bell.path(),
-        per_machine: false,
         draws_top_bar: false,
+        instances: false,
         settings: Some(SettingsEntry {
             group: SettingsGroup::General,
             keywords: [

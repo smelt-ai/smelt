@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{AnyWindowHandle, App, AppContext, Entity, EventEmitter, Global, Task, Window};
@@ -17,9 +18,12 @@ use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, ControlErrorCode};
 
 pub use serde_json;
-pub use smelt_client::runtime::RuntimeKey;
+// 一台机器的运行时：哪台 + 连它守护的客户端。
+pub use smelt_client::runtime::{Runtime, RuntimeKey};
 // 发给运行时的短请求（守护协议），如改历史会话的名字。
 pub use smelt_client::session_ops;
+// 杀会话的请求放专用线程发（远程要拨号），App 退出时在收尾时间里等它们发完。
+pub use smelt_client::session_kill;
 // 插件自己的库：每个来源一个 SQLite 文件，表由插件自己建、自己迁移。
 pub use smelt_client_store::{PluginStore, plugin_store, rusqlite};
 pub use smelt_model as model;
@@ -46,13 +50,15 @@ pub use smelt_ui::theme_catalog::{
 
 mod command;
 mod context;
+mod context_menu;
+pub mod contracts;
+mod event;
 mod file;
 mod layout;
 mod menu;
-mod open_with;
+mod online;
 mod page;
 mod quit;
-pub mod sessions;
 mod settings;
 mod view;
 
@@ -64,15 +70,18 @@ pub use command::{
     RunCommand, command, commands, invoke, register_commands, run, unregister_commands,
 };
 pub use context::{ActiveContext, ViewedSession, active_context, set_active_context};
+pub use context_menu::{
+    ContextMenuAction, ContextMenuItem, context_menu_args, context_menu_items,
+    observe_context_menu_items, register_context_menu_items, unregister_context_menu_items,
+};
+pub use event::Event;
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
     register_layouts, unregister_layouts,
 };
 pub use menu::{MenuEntry, MenuSlot, menu_items, register_menu_items, unregister_menu_items};
-pub use open_with::{
-    OpenWith, OpenWithApp, observe_open_with_apps, open_with_apps, register_open_with_apps,
-};
+pub use online::wait_online;
 pub use page::{
     OPEN_PAGE, OUTLET_VIEW, OpenPage, PageInfo, PageSource, home_page, page, pages, register_pages,
     unregister_pages,
@@ -81,8 +90,8 @@ pub use quit::{QUIT_NOW, QuitGuard, quit_guarded, register_quit_guard, unregiste
 pub use settings::{SettingsEntry, SettingsGroup, settings_pane};
 pub use view::{
     OPEN_VIEW, OpenView, PluginView, SET_VIEW_BADGE, ViewBadge, ViewBuilder, ViewHandle, ViewInfo,
-    ViewSpec, built_view, ensure_view, is_registered, register_views, set_view_badge,
-    unregister_views, view, view_badge, views,
+    ViewInstance, ViewSpec, built_view, create_view, ensure_view, is_registered, register_views,
+    set_view_badge, unregister_views, view, view_badge, views,
 };
 
 /// 桌面挂着的一台机器。
@@ -92,8 +101,6 @@ pub struct Machine {
     pub name: String,
     /// 眼下用不了的原因（离线、版本不对），给人看的短语；能用是 `None`。
     pub unavailable: Option<String>,
-    /// 装了远程桌面、眼下连着。
-    pub has_desktop: bool,
     /// 那台机器的 `SMELT_HOME`，按那台机器的路径写。远程机器还没连上过（或运行时太旧
     /// 不报）是 `None`。智能体的 space 在它下面。
     pub smelt_home: Option<String>,
@@ -470,6 +477,18 @@ pub enum HostEvent {
     PagesChanged,
     /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
     CommandsChanged,
+    /// 插件发的事件（见 [`Event`]）：`name` 是 `<来源>/<名字>`，载荷的形状由发的插件定，用
+    /// [`Event::parse`] 认。
+    Plugin {
+        name: gpui::SharedString,
+        payload: serde_json::Value,
+    },
+    /// 要在那台机器上打开这些路径：拖到 Dock 图标上的、Finder 里「用 Smelt 打开」的。路径
+    /// 是那台机器上的绝对路径，可能是目录也可能是文件。谁认谁开，宿主自己不开。
+    OpenPaths {
+        machine: RuntimeKey,
+        paths: Vec<String>,
+    },
 }
 
 /// 一条运行时话题推来的东西。载荷的形状见协议里那个话题的类型。
@@ -499,6 +518,14 @@ pub trait Host: 'static {
     fn machines(&self, cx: &App) -> Vec<Machine>;
     /// 那台机器的运行时客户端；机器已经移除是 `None`。
     fn client(&self, machine: &RuntimeKey, cx: &App) -> Option<RuntimeClient>;
+    /// 开到那台机器运行时的长连接（终端、对话的字节流）用的连接器：在主线程上要，带去后台
+    /// 线程连，每次 `connect` 新开一条、阻塞。本机守护没在跑时由它拉起；远程的经 iroh 拨号，
+    /// 连不上就是连不上，调用方按断线处理（[`wait_online`] 等它回来再连）。短请求用
+    /// [`Host::client`]。机器已经移除是 `None`。
+    fn connector(&self, machine: &RuntimeKey, cx: &App) -> Option<Arc<dyn client::Connector>>;
+    /// 那台机器此刻在线：最近一次探测连得上、版本对得上。本机守护重启、升级的那一会儿也
+    /// 不在线。变了发 [`HostEvent::MachinesChanged`]；要等它在线用 [`wait_online`]。
+    fn machine_online(&self, machine: &RuntimeKey, cx: &App) -> bool;
     /// 那台机器的智能体配置：自定义 Agent（profile）、智能体定义、环境变量。运行时推来的
     /// 那一份，各处都读它；还没收到、给不了是 `None`。只读，改用 [`edit_agent_settings`]；
     /// 变了发 [`HostEvent::AgentSettingsChanged`]。
@@ -534,6 +561,15 @@ pub trait Host: 'static {
         machine: &RuntimeKey,
         cx: &App,
     ) -> Vec<model::daemon_state::DaemonSessionState>;
+    /// 那台机器当前这一轮会话快照里，这个会话的运行时还在不在；订阅还没就绪、判断不了是
+    /// `None`。断线重连前先问它：没了就不再接，只剩身份的按原 id 重新打开。变了发
+    /// [`HostEvent::SessionsChanged`]。
+    fn session_presence(
+        &self,
+        machine: &RuntimeKey,
+        session_id: &str,
+        cx: &App,
+    ) -> Option<model::daemon_state::RuntimePresence>;
     /// 那台机器的工作区目录：开着的项目和对话，是会话的名册（会话状态里没有的对话是还没
     /// 起过）。还没收到是 `None`。变了发 [`HostEvent::SessionsChanged`]。
     fn workspace_directory(
@@ -736,7 +772,7 @@ mod tests {
                         color: 0x112233,
                     }),
                     command: "smelt.sessions/activate".into(),
-                    args: serde_json::json!({ "session_id": "s" }),
+                    args: serde_json::json!({ "machine": null, "session_id": "s" }),
                 },
                 StatusMenuItem::Separator,
             ],
@@ -844,6 +880,12 @@ mod tests {
         fn client(&self, _: &RuntimeKey, _: &App) -> Option<RuntimeClient> {
             Some(self.0.client())
         }
+        fn connector(&self, _: &RuntimeKey, _: &App) -> Option<Arc<dyn client::Connector>> {
+            None
+        }
+        fn machine_online(&self, _: &RuntimeKey, _: &App) -> bool {
+            true
+        }
         fn agent_settings<'a>(
             &self,
             _: &RuntimeKey,
@@ -875,6 +917,14 @@ mod tests {
             _: &App,
         ) -> Vec<model::daemon_state::DaemonSessionState> {
             Vec::new()
+        }
+        fn session_presence(
+            &self,
+            _: &RuntimeKey,
+            _: &str,
+            _: &App,
+        ) -> Option<model::daemon_state::RuntimePresence> {
+            None
         }
         fn workspace_directory(
             &self,

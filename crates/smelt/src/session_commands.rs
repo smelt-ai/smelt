@@ -1,11 +1,11 @@
-//! 会话的命令（`smelt.sessions/resume` 等，参数见 `smelt_plugin_api::sessions`）。
+//! 会话的命令（`smelt.sessions/resume` 等，参数见 `smelt_plugin_api::contracts::sessions`）。
 //!
 //! 会话归工作台管，插件只说开什么；启动命令、环境变量、初始配置在这里按那台机器的
 //! 智能体配置现算。
 
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, HistorySourceKind};
 use smelt_plugin_api::CommandSpec;
-use smelt_plugin_api::sessions::{self, Handoff, Resume, StartConversation};
+use smelt_plugin_api::contracts::sessions::{self, Handoff, Resume, StartConversation};
 
 use super::*;
 use crate::plugin_host::{WorkspaceRef, in_main_window, main_window, update_workspace};
@@ -26,7 +26,7 @@ pub(crate) fn commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
         }),
         sessions::ACTIVATE.spec("跳到会话", move |args, window, cx| {
             in_main_window(window, &activate, cx, |this, window, cx| {
-                this.request_notification_session_jump(args.session_id, window, cx)
+                this.request_notification_session_jump(args.machine, args.session_id, window, cx)
             })
         }),
         sessions::RESUME.spec("续接历史会话", move |args, window, cx| {

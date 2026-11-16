@@ -24,12 +24,12 @@ use alacritty_terminal::term::{
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use gpui::RenderImage;
-use smelt_model::kitty_graphics::{
+use smelt_plugin_api::client::protocol::daemon::{DaemonOperation, TerminalOpenErrorCode};
+use smelt_plugin_api::client::{Connector, RuntimeStream};
+use smelt_plugin_api::model::kitty_graphics::{
     GraphicsSplitter, Layout, PLACEHOLDER, Piece, PlaceholderCell, Relay, anchors_in,
     placeholder_marks, resolve_placeholder, without_anchors, without_graphics,
 };
-use smelt_runtime_client::RuntimeStream;
-use smelt_runtime_client::protocol::daemon::{DaemonOperation, TerminalOpenErrorCode};
 
 type SearchMatch = (Point, Point);
 type SearchResult = (u64, String, i32, Vec<SearchMatch>);
@@ -100,7 +100,7 @@ pub fn default_fg() -> u32 {
 /// 按查到的底色挑灰度。ANSI 16 色板（下面 PALETTE_DARK/LIGHT）仍是 Tokyo Night 配色（语法
 /// 高亮，不是界面皮）。
 pub fn default_bg() -> u32 {
-    crate::ui_theme::bg()
+    smelt_plugin_api::ui::ui_theme::bg()
 }
 
 /// 16 色 ANSI 调色板：深色沿用 Tokyo Night（白/亮白改为灰白/纯白，iTerm2 风格）；
@@ -151,7 +151,7 @@ fn palette() -> &'static [u32; 16] {
     }
 }
 
-/// 当前 ANSI 16 色板（构建下发给移动端的配色快照用，见 `settings::publish_terminal_theme`）。
+/// 当前 ANSI 16 色板（宿主构建下发给移动端的配色快照用）。
 pub fn ansi_palette() -> &'static [u32; 16] {
     palette()
 }
@@ -432,7 +432,7 @@ struct TermMetrics {
 #[derive(Default)]
 struct DaemonGeometrySignal {
     generation: u64,
-    geometry: Option<smelt_model::osc::TerminalGeometryOsc>,
+    geometry: Option<smelt_plugin_api::model::osc::TerminalGeometryOsc>,
 }
 
 /// smeltd 对单帧的硬上限；大输入由 writer 线程按这个值流式切分后再写 socket。
@@ -761,32 +761,23 @@ fn os_clipboard_write(text: &str) {
 
 /// 让运行时杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
 /// 等回执再返回，阻塞，不能在主线程调；UI 回调用 [`kill_remote_in_background`]。
-pub(crate) fn kill_remote(runtime: &crate::runtimes::Runtime, id: &str) {
+pub fn kill_remote(runtime: &smelt_plugin_api::Runtime, id: &str) {
     let _ = runtime.client().request(
         &serde_json::json!({ "op": DaemonOperation::Kill, "id": id }),
-        smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+        smelt_plugin_api::client::DEFAULT_REQUEST_TIMEOUT,
     );
 }
 
-/// [`kill_remote`] 放专用线程（见 `smelt_client::session_kill`）：远程运行时要经 iroh
+/// [`kill_remote`] 放专用线程（见 `smelt_plugin_api::session_kill`）：远程运行时要经 iroh
 /// 拨号，离线时要等到超时，主线程不能跟着等；App 退出时会在收尾时间里等它发完。
-pub(crate) fn kill_remote_in_background(runtime: &crate::runtimes::Runtime, id: &str) {
+pub fn kill_remote_in_background(runtime: &smelt_plugin_api::Runtime, id: &str) {
     let runtime = runtime.clone();
     let id = id.to_string();
-    smelt_client::session_kill::spawn("smelt-session-kill", move || kill_remote(&runtime, &id));
+    smelt_plugin_api::session_kill::spawn("smelt-session-kill", move || kill_remote(&runtime, &id));
 }
 
-// ===================== 状态通道（见 docs/archive/state-channel-plan.md） =====================
-//
-// 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP
-// 视图独立成 crate 后也要用同一份），这里重导出成原来的裸名字。
-pub(crate) use smelt_client::daemon_state::{
-    DaemonSessionState, DaemonStateEvent, daemon_reconnect_backoff,
-    subscribe_daemon_states_blocking,
-};
-
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
-/// - 解析语义（kitty_keyboard 等）来自 `smelt_model::term_config`，与 smeltd 的权威
+/// - 解析语义（kitty_keyboard 等）来自 `smelt_plugin_api::model::term_config`，与 smeltd 的权威
 ///   Term 同源；GUI 不得在这里单独改解析语义。
 /// - semantic_escape_chars：双击选词的断词字符。默认集合只有半角标点，中文场景下
 ///   全角标点也该断词（双击「数据层：字段」不该整段连选），追加常用全角标点。
@@ -798,7 +789,7 @@ fn term_config() -> Config {
         // OSC 52 只许写、不许读：终端里任何程序（包括远程运行时上的）都能发读请求，
         // 放开就等于让它们静默读走本机剪贴板。主流终端默认也是关着或逐次询问。
         osc52: Osc52::OnlyCopy,
-        ..smelt_model::term_config::emulation_config()
+        ..smelt_plugin_api::model::term_config::emulation_config()
     }
 }
 
@@ -1128,7 +1119,7 @@ fn wait_daemon_gone(mut reader: BufReader<RuntimeStream>) -> anyhow::Result<()> 
     }
 }
 
-pub(crate) fn open_request(
+pub fn open_request(
     rows: usize,
     cols: usize,
     cwd: Option<&str>,
@@ -1163,31 +1154,34 @@ impl Terminal {
     /// 自报 Ghostty / LANG 兜底，见 smeltd）。id 已存在 → attach，守护先重放输出
     /// 缓冲恢复画面，再实时转发。`launch`：新建会话时要先跑的命令（编进 shell 启动
     /// 命令行，见 `smeltd::terminal_registry`），只在新建时生效，reattach 会被忽略。
-    pub(crate) fn spawn(
-        runtime: &crate::runtimes::Runtime,
+    ///
+    /// `connector` 是那台机器的长连接连接器（[`smelt_plugin_api::Host::connector`]）。阻塞，
+    /// 只在后台线程调。
+    pub fn spawn(
+        connector: &dyn Connector,
         rows: usize,
         cols: usize,
         cwd: Option<&str>,
         id: &str,
         launch: Option<&str>,
     ) -> anyhow::Result<Self> {
-        Self::spawn_inner(runtime, rows, cols, cwd, id, launch, true)
+        Self::spawn_inner(connector, rows, cols, cwd, id, launch, true)
     }
 
     /// 只重新附着守护中仍存在的 PTY。用于实时流异常断开后的自动恢复；会话已经
     /// 正常退出时返回错误，绝不创建一个同 id 的新 shell 冒充原会话。
-    pub(crate) fn reattach(
-        runtime: &crate::runtimes::Runtime,
+    pub fn reattach(
+        connector: &dyn Connector,
         rows: usize,
         cols: usize,
         cwd: Option<&str>,
         id: &str,
     ) -> anyhow::Result<Self> {
-        Self::spawn_inner(runtime, rows, cols, cwd, id, None, false)
+        Self::spawn_inner(connector, rows, cols, cwd, id, None, false)
     }
 
     fn spawn_inner(
-        runtime: &crate::runtimes::Runtime,
+        connector: &dyn Connector,
         rows: usize,
         cols: usize,
         cwd: Option<&str>,
@@ -1201,20 +1195,20 @@ impl Terminal {
         // 守护停机（升级换映像，或退出）期间来的请求，新守护立刻回 daemon_stopping，并把
         // 连接留到旧进程 exec 或退出才断；老守护不回这个码，请求卡到旧进程走掉时连接被
         // 无声关掉。两种都等到「旧守护已经走了」这个事件（同一条连接读到 EOF）再连一次：
-        // 本机 connect_terminal 连不上会拉起守护、等它的就绪管道；远程重新拨号。只再连
+        // 本机的连接器连不上会拉起守护、等它的就绪管道；远程重新拨号。只再连
         // 这一次，第二次不管什么失败都交给调用方。其它失败（守护明确回错、读超时、
         // connect 失败即自动拉起守护都没就绪）立即返回，不重试。
         let handshake = |writer: RuntimeStream| {
             Self::handshake_on(writer, rows, cols, cwd, id, launch, create_if_missing)
         };
         let (buffered, size, replay_len, geometry_token, daemon_answers) =
-            match handshake(crate::runtimes::connect_terminal(runtime)?)? {
+            match handshake(connector.connect()?)? {
                 HandshakeReply::Opened(opened) => opened,
                 stopping_or_closed => {
                     if let HandshakeReply::DaemonStopping(reader) = stopping_or_closed {
                         wait_daemon_gone(reader)?;
                     }
-                    match handshake(crate::runtimes::connect_terminal(runtime)?)? {
+                    match handshake(connector.connect()?)? {
                         HandshakeReply::Opened(opened) => opened,
                         HandshakeReply::DaemonStopping(_) => {
                             anyhow::bail!("守护正在停机，接班的守护还没起来")
@@ -1271,7 +1265,7 @@ impl Terminal {
             // vte；命令可能被 read 切断，状态跨 read 保持。
             let mut graphics_scan = GraphicsSplitter::default();
             let mut geometry_osc = geometry_token
-                .map(smelt_model::osc::TerminalGeometryOscScan::new)
+                .map(smelt_plugin_api::model::osc::TerminalGeometryOscScan::new)
                 .unwrap_or_default();
             let mut buf = [0u8; 4096];
             let mut bytes_seen: usize = 0;
@@ -2305,25 +2299,84 @@ impl Terminal {
 mod damage_gate_tests {
     use super::*;
 
+    /// 测试用的连接器：只开本机守护的连接，守护没在跑就拉起构建目录里的 smeltd。
+    fn test_connect() -> std::io::Result<RuntimeStream> {
+        // 并行的用例同时发现守护没在跑时只拉起一份。
+        static SPAWN: Mutex<()> = Mutex::new(());
+        let runtime = smelt_plugin_api::Runtime::local();
+        if let Ok(stream) = runtime.client().connect() {
+            return Ok(stream);
+        }
+        let _spawning = SPAWN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Ok(stream) = runtime.client().connect() {
+            return Ok(stream);
+        }
+        spawn_test_daemon()?;
+        runtime.client().connect()
+    }
+
+    /// 构建目录里的 smeltd：cargo 把测试二进制放在 `target/<profile>/deps/`，smeltd 在
+    /// 上一级的 profile 目录。
+    fn test_daemon_path() -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let path = exe.parent()?.parent()?.join("smeltd");
+        path.is_file().then_some(path)
+    }
+
+    /// 拉起构建目录里的 smeltd（数据目录随测试沙箱），阻塞到它报就绪或退出。就绪信号同
+    /// 宿主拉起守护的协议：管道写端的 fd 经 `SMELT_READY_PIPE` 递给它，绑好 socket 写一个
+    /// 字节；没就绪就退出时读到 EOF，交给调用方再连一次见分晓（可能别的测试进程先起好了）。
+    fn spawn_test_daemon() -> std::io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        use std::process::{Command, Stdio};
+
+        let daemon = test_daemon_path().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "缺少构建目录里的 smeltd")
+        })?;
+        let (mut ready, writer) = std::io::pipe()?;
+        let fd = writer.as_raw_fd();
+        let mut cmd = Command::new(&daemon);
+        smelt_plugin_api::paths::export_to(&mut cmd);
+        cmd.env("SMELT_READY_PIPE", fd.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: 闭包在 fork 之后、exec 之前的子进程里跑，只调异步信号安全的 fcntl；
+        // 父进程里的这个 fd 仍带 CLOEXEC。
+        unsafe {
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn()?;
+        drop(writer);
+        // 守护是测试进程的子进程，没人 wait 就成僵尸。
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+        let mut byte = [0u8; 1];
+        let _ = ready.read(&mut byte);
+        Ok(())
+    }
+
     /// 这组测试连真实守护进程：测试进程在沙箱 home 里，只能用构建目录里的 smeltd
-    /// （`target/<profile>/smeltd`）。单独 `cargo test -p smelt` 不会构建它，缺了就说清楚
-    /// 怎么补，别让人去查 `~/.smelt/bin`。
+    /// （`target/<profile>/smeltd`）。单独 `cargo test -p smelt-terminal` 不会构建它，缺了就
+    /// 说清楚怎么补，别让人去查 `~/.smelt/bin`。
     fn spawn_test_terminal(dir: &std::path::Path, id: &str) -> Terminal {
-        if crate::local_daemon::bundled_daemon_path().is_none() {
+        if test_daemon_path().is_none() {
             panic!(
                 "缺少构建目录里的 smeltd：这组测试要连真实守护进程，请先 `cargo build -p smeltd`\
                  （`make test` 会一并构建）"
             );
         }
-        Terminal::spawn(
-            &crate::runtimes::Runtime::local(),
-            24,
-            80,
-            dir.to_str(),
-            id,
-            None,
-        )
-        .expect("spawn 失败")
+        Terminal::spawn(&test_connect, 24, 80, dir.to_str(), id, None).expect("spawn 失败")
     }
 
     /// 一次性测试会话的自动清理：Drop 无论函数正常返回还是中途 panic（assert
@@ -2339,7 +2392,7 @@ mod damage_gate_tests {
     struct TestSessionGuard(String);
     impl Drop for TestSessionGuard {
         fn drop(&mut self) {
-            kill_remote(&crate::runtimes::Runtime::local(), &self.0);
+            kill_remote(&smelt_plugin_api::Runtime::local(), &self.0);
         }
     }
 
@@ -2359,7 +2412,7 @@ mod damage_gate_tests {
 
         // 等 shell 起来（读线程确实在跑），再杀掉会话模拟连接断开。
         thread::sleep(Duration::from_millis(500));
-        kill_remote(&crate::runtimes::Runtime::local(), &id);
+        kill_remote(&smelt_plugin_api::Runtime::local(), &id);
 
         // 守护 remove 会话并 shutdown client → 读线程 EOF → dead 置位。
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -2934,7 +2987,7 @@ mod event_proxy_answers_tests {
     fn background_color_query_gets_answered() {
         let _guard = lock_theme_globals();
         set_dark_mode(true); // 全局态，跟其它测试共进程跑，显式定住深色断言的前提
-        crate::ui_theme::set_light(false);
+        smelt_plugin_api::ui::ui_theme::set_light(false);
         let (proxy, mut probe) = make_proxy();
         let size = TermSize { rows: 24, cols: 80 };
         let mut term = Term::new(Config::default(), &size, proxy);
@@ -3226,7 +3279,7 @@ mod color_override_tests {
 mod attachment_cleanup_tests {
     use super::TerminalWriter;
     use super::{TERMINAL_FRAME_MAX_BYTES, TERMINAL_WRITE_QUEUE_MAX_BYTES};
-    use smelt_runtime_client::RuntimeStream;
+    use smelt_plugin_api::client::RuntimeStream;
     use std::io::Read;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -3353,7 +3406,7 @@ mod search_resync_tests {
         {
             let mut signal = terminal.daemon_geometry.lock().unwrap();
             signal.generation = 1;
-            signal.geometry = Some(smelt_model::osc::TerminalGeometryOsc {
+            signal.geometry = Some(smelt_plugin_api::model::osc::TerminalGeometryOsc {
                 cols: 49,
                 rows: 47,
                 cell_width: 8,
@@ -3521,7 +3574,7 @@ mod scroll_wheel_plan_tests {
     }
 }
 
-// OSC 通知解析单测见 smelt_model::osc。
+// OSC 通知解析单测见 smelt_plugin_api::model::osc。
 
 #[cfg(test)]
 mod search_literal_tests {

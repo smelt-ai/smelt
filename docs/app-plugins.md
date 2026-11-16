@@ -75,7 +75,7 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 
 | 类别 | 内容 |
 | --- | --- |
-| 读 | `machines`（只有 key、名字、不可用的原因）、`client`、`path_style`、`main_window`、`window_active`、`overlay_open`、`notification_permission`、`view_shown`、`topic`（某台机器某个话题的最新快照） |
+| 读 | `machines`（只有 key、名字、不可用的原因）、`client`、`connector`（开长连接用，如终端的字节流）、`machine_online`、`session_presence`（会话进程还在不在）、`path_style`、`main_window`、`window_active`、`overlay_open`、`notification_permission`、`view_shown`、`topic`（某台机器某个话题的最新快照） |
 | 事件 | `MachinesChanged`、`RuntimeTopic`（宿主只转发，不解读）、`Reconnected`、`WindowActivated`、`OverlayChanged`、`NotificationPermissionChanged`、`ShownViewsChanged`、`ActiveContextChanged`，以及各注册表的 `*Changed` |
 | 命令 | 通知；菜单栏和 Dock 角标；选路径；在编辑器或文件管理器里打开；`OPEN_VIEW`（打开设置页也是它：带 `settings` 的视图在设置里打开）；`SHOW_MAIN_WINDOW`；机器管理（配对添加、删除、改名、设中继、重连、升级） |
 | 路径 | 应用日志、数据根目录。维护类插件要用 |
@@ -115,14 +115,16 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 - JS 插件的设置页仍是插件目录里另一个入口脚本（`entry`），单独加载、单独挂载，和主入口不共享内存。这份脚本里调 `register_*` 一律报错。
 - JS 插件挂载时主入口登记成视图 `<插件 id>/main`；脚本登记的设置页和它是同一来源的一组，宿主的加载器把两样并起来整组登记，`main` 这个名字设置页不能用。
 - 视图登记里不写位置，也不写「能不能针对某台机器打开」（现在的 `per_machine`）。入口放在哪，是菜单贡献的事。
+- 按实例建的视图（`instances`，如每段会话一份的终端、对话）不进布局、没有入口：别的插件用 `create_view(id, 参数)` 建一份自己摆、自己留着（拿到 `ViewInstance`，焦点经它交）；只想放进主窗口看的（JS 插件只能这样，JS 不嵌原生视图）用 `OPEN_VIEW` 带参数打开，宿主建一份放进出口，出口换了内容就放掉，重启不放回来。2026-11-16 已做。
 
 ### 菜单贡献
 
 插件要在别人画的地方放一个入口，比如机器菜单里的「远程桌面」、项目菜单里的「用 IDE 打开」，用菜单贡献：
 
-- 登记：`register_menu_items(来源, 菜单项)`。每一项写：菜单 id、标题、图标、要执行的命令。还可以只对指定的几台机器或几个项目出现；条件变了，插件自己重新登记。
-- 菜单 id 是字符串，由画菜单的那个插件定义和公布（如 `smelt.sessions/machine`、`smelt.sessions/project`）。宿主只存这张表，不认识任何一个菜单 id。
-- 画菜单的插件按菜单 id 取菜单项，点击时执行命令，并带上下文参数（机器、项目根目录）。
+- 登记：`register_context_menu_items(来源, 菜单 id, 菜单项)`，按（来源，菜单）整组替换。每一项写：标题、彩色图标或线性图标、要执行的命令和参数，或者一层子菜单；可以只在某台机器上列。条件变了，插件自己重新登记。2026-11-16 已做，「用其他应用打开」已改用它（原来专用的 `register_open_with_apps` 删了）。
+- 菜单 id 是字符串，由画菜单的那个插件定义和公布（`contracts::sessions::PROJECT_MENU`、`MACHINE_MENU`），上下文的形状写在同一处。宿主只存这张表，不认识任何一个菜单 id。
+- 画菜单的插件按菜单 id 取菜单项，点击时执行命令，参数是登记的参数并上上下文（机器、项目根目录，`context_menu_args`）。会话列表还在宿主里，眼下由宿主画（`plugin_menus.rs`）。
+- 应用菜单（App、帮助）是另一张表：`register_menu_items(来源, 菜单项)`，项写在哪个菜单、标题、命令。
 - 不为侧栏底部这类地方开「区域贡献」：一块想单独露出来的东西，就做成视图，由布局摆。比如额度条做成一个小视图，摆在会话列表下面。
 
 ### 插件之间的约定
@@ -154,6 +156,8 @@ JS 插件的宿主模块也叫 `smelt-plugin-api`，是 Rust 那份接口的薄�
 - 事件用 `await next_event()` 取；每个插件一条队列，同样的事件只留一份。
 - 每个 JS 插件挂载时登记成一个视图，和 Rust 视图一样由布局摆放。
 - 终态里 Rust 和 JS 两边能拿到的东西一样。现在 JS 还缺 `machines`、`call`、`topic`。
+- 2026-11-16 补上：应用菜单（`register_menu_items`）、右键菜单项（`register_context_menu_items`）、退出守卫（`set_quit_guard`：设着时退出一律交给那条命令，脚本答不了同步的「接不接手」，接手后要退出调 `smelt.app/quit-now`）、按实例建的视图（`run("smelt.app/open-view", {view, args})` 放进出口）、`machine_online`、`wait_online`、`session_presence`。
+- 映射不了的：`connector` 开的是原生字节流，gpui-shell 的宿主函数只收发普通数据，没有回调和流；JS 也不嵌原生视图，所以拿不到 `create_view` 的实例。要终端、对话，用 `OPEN_VIEW` 打开或经约定里的命令递话。
 
 ### 主题
 
@@ -191,7 +195,7 @@ JS 插件的宿主模块也叫 `smelt-plugin-api`，是 Rust 那份接口的薄�
 
 - 工作区目录（项目、工作集、对话、终端）只有 smeltd 一个写者。
 - 客户端只发操作（新建、改名、归档、置顶、关闭、改配置），然后等推送回来。
-- 现在客户端从活着的视图拼出 `WorkspaceConversation` 推给 smeltd，并靠 `DirectorySync` 账本对账（`directory_conversation`、`snapshot_acp_view`）。这是第二个写者，要删掉。对话的配置值、启动参数、待发的 prompt 改由会话插件在变化的那一刻发操作。
+- 客户端在新开对话的那一刻发一次新建（带开的那一刻的样子），之后只发单条操作：关掉、换终端格子、改名、归档、置顶。ACP 对话新建之后的配置值、待发的 prompt 和预设是否用掉、最近活动时间由 smeltd 按它看到的写，客户端不回写。2026-11-16 已做（原来的 `DirectorySync` 账本对账已删）。
 
 **列表只读推送的数据。**
 
@@ -304,7 +308,7 @@ my-theme/
    - 会话名由 smeltd 算好推送。通知、资源两个插件和手机里那几份算会话名的代码删掉。2026-11-15 已做，没等话题机制：名字放在已有的会话状态推送里。
    - 收掉 `session_states`、`workspace_directory`、`agent_settings` 和它的改写命令；`smelt-app-state` 里对应的全局删掉。
 3. **目录只有 smeltd 写。**
-   - 客户端改成只发操作，删掉 `DirectorySync`、`directory_conversation`、`snapshot_acp_view`。
+   - 客户端改成只发操作，删掉 `DirectorySync`、`directory_conversation`、`snapshot_acp_view`。2026-11-16 已做。
    - 这一步还在宿主里做，因为会话代码现在还在宿主里。先把数据的权威理顺，下一步搬的时候不用连账本一起搬。
 4. **组件独立出来。**
    - 终端搬进 `smelt-terminal`；对话组件不再读 `smelt-app-state`。两者由 `smelt-plugin-api` 再导出。

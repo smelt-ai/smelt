@@ -16,8 +16,8 @@ pub(crate) fn register(cx: &mut App) {
         name: "cli".into(),
         title: "命令行".into(),
         icon: gpui_kit_assets::IconName::SquareTerminal.path(),
-        per_machine: false,
         draws_top_bar: false,
+        instances: false,
         settings: Some(SettingsEntry {
             group: SettingsGroup::System,
             keywords: keywords.into_iter().map(SharedString::from).collect(),

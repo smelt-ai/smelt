@@ -4084,6 +4084,67 @@ fn blank_resume_id_is_treated_as_a_new_session() {
 }
 
 #[test]
+fn open_request_carries_initial_config_and_prompt() {
+    let req = parse_acp_open_request(&serde_json::json!({
+        "id": "acp-initial",
+        "launch": {"command": "pi"},
+        "initial_config": [["model", "deepseek/flash"], ["mode", "bypassPermissions"]],
+        "initial_prompt": {
+            "text": "先读一遍代码",
+            "images": [{"mime": "image/png", "data_b64": "AAAA"}]
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        req.initial_config,
+        vec![
+            ("model".to_string(), "deepseek/flash".to_string()),
+            ("mode".to_string(), "bypassPermissions".to_string()),
+        ]
+    );
+    let prompt = req.initial_prompt.expect("首条消息");
+    assert_eq!(prompt.text, "先读一遍代码");
+    assert_eq!(prompt.images.len(), 1);
+
+    // 旧客户端不带这两项；空白首条消息等于没有。
+    let old = parse_acp_open_request(&serde_json::json!({
+        "id": "acp-old-client",
+        "launch": {"command": "pi"}
+    }))
+    .unwrap();
+    assert!(old.initial_config.is_empty());
+    assert!(old.initial_prompt.is_none());
+    let blank = parse_acp_open_request(&serde_json::json!({
+        "id": "acp-blank-initial",
+        "launch": {"command": "pi"},
+        "initial_prompt": {"text": "   "}
+    }))
+    .unwrap();
+    assert!(blank.initial_prompt.is_none());
+}
+
+#[test]
+fn a_pending_initial_prompt_reports_thinking_instead_of_idle() {
+    assert_eq!(
+        acp_phase_with_initial_prompt(Phase::Idle, true),
+        Phase::Thinking
+    );
+    assert_eq!(
+        acp_phase_with_initial_prompt(Phase::Idle, false),
+        Phase::Idle
+    );
+    assert_eq!(
+        acp_phase_with_initial_prompt(Phase::Connecting, true),
+        Phase::Connecting,
+        "还在建连就照实报建连"
+    );
+    assert_eq!(
+        acp_phase_with_initial_prompt(Phase::Failed, true),
+        Phase::Failed
+    );
+}
+
+#[test]
 fn blank_acp_session_does_not_reuse_runtime_id_as_history() {
     let mut reduced = smelt_core::acp_session::AcpSessionState::default();
     reduced.acp_session_id = Some("runtime-only".into());

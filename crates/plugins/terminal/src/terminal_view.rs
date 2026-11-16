@@ -9,19 +9,18 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use smelt_client::daemon_state::RuntimePresence;
-use smelt_ui::TextInput;
+use smelt_plugin_api::model::daemon_state::RuntimePresence;
+use smelt_plugin_api::ui::TextInput;
 use smol::Timer;
 
 use crate::terminal::{self, Terminal};
-use smelt_model::kitty_graphics::{MILLI_CELLS, source_size};
+use smelt_plugin_api::model::kitty_graphics::{MILLI_CELLS, source_size};
 
 /// 选区高亮背景色：跟终端主题一起切换（深色用暗蓝，浅色换成不刺眼的浅蓝，
 /// 否则深色定死的暗蓝铺在浅底上，选中文字会糊在一起看不清）。
 ///
-/// `pub(crate)`：下发给移动端的配色快照要带上同一份值，两端选区色才一致
-/// （见 `settings::publish_terminal_theme`）。
-pub(crate) fn sel_bg() -> u32 {
+/// 公开：宿主下发给移动端的配色快照要带上同一份值，两端选区色才一致。
+pub fn sel_bg() -> u32 {
     if terminal::is_dark() {
         0x000c_3d7a
     } else {
@@ -30,7 +29,7 @@ pub(crate) fn sel_bg() -> u32 {
 }
 
 /// 搜索命中底色：普通命中暗琥珀，当前命中亮琥珀（跟选区蓝区分开）；同样跟主题走。
-pub(crate) fn search_hit_bg(active: bool) -> u32 {
+pub fn search_hit_bg(active: bool) -> u32 {
     match (active, terminal::is_dark()) {
         (true, true) => 0x00d4_a017,
         (true, false) => 0x00ff_c107,
@@ -48,9 +47,8 @@ fn link_fg() -> u32 {
     }
 }
 
-// 终端字体族配置：搬进 smelt-core（跟 markdown_mermaid 的代码块渲染共用同一份，
-// 见 font_config.rs），这里重导出成原来的裸名字。
-pub(crate) use smelt_model::font_config::{DEFAULT_FONT_FAMILY, font_family, set_font_family};
+// 终端字体族配置在 smelt-model（跟代码块渲染共用同一份，见 font_config.rs）。
+use smelt_plugin_api::model::font_config::{DEFAULT_FONT_FAMILY, font_family};
 
 /// 兜底等宽字体：macOS 系统自带，必定存在。放在 fallback 链末尾做最后防线，
 /// 保证 cell_w 与实际字形宽度同源——否则测量和渲染各自 fallback 到不同字体，
@@ -131,7 +129,7 @@ const PAGE_LINES: i32 = 20;
 /// 一个内嵌终端视图。
 pub struct TerminalView {
     /// 会话所在的运行时。断线重连、关闭都找它。
-    runtime: crate::runtimes::Runtime,
+    runtime: smelt_plugin_api::Runtime,
     terminal: Terminal,
     /// 每次替换底层连接递增。旧连接的 redraw 任务退出时只能重连自己的 generation，
     /// 避免显式重启/其它成功重连已经装上新 Terminal 后又被迟到任务覆盖。
@@ -256,13 +254,13 @@ fn terminal_event_needs_redraw(grid_damaged: bool, daemon_geometry_changed: bool
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchKind {
     Terminal,
-    Agent(crate::settings::TerminalAgentKind),
+    Agent(smelt_plugin_api::model::agent_kind::TerminalAgentKind),
 }
 
 impl LaunchKind {
     /// 反过来映射回 `TerminalAgentKind`（`Terminal` 没有对应种类）。可直接接到
     /// `settings::icon_for_agent_kind` 等工具函数，不用再维护一份 Claude→Asterisk 这种 match。
-    pub fn agent_kind(self) -> Option<crate::settings::TerminalAgentKind> {
+    pub fn agent_kind(self) -> Option<smelt_plugin_api::model::agent_kind::TerminalAgentKind> {
         match self {
             Self::Terminal => None,
             Self::Agent(agent) => Some(agent),
@@ -275,7 +273,7 @@ impl LaunchKind {
 /// (`icon_for_launch_command`) 共用同一份逻辑，以后加参数或 agent 不会失配。
 fn classify_launch(launch: Option<&str>) -> LaunchKind {
     launch
-        .and_then(crate::settings::TerminalAgentKind::from_command_prefix)
+        .and_then(smelt_plugin_api::model::agent_kind::TerminalAgentKind::from_command_prefix)
         .map(LaunchKind::Agent)
         .unwrap_or(LaunchKind::Terminal)
 }
@@ -286,9 +284,9 @@ impl TerminalView {
     /// 便捷构造：所有调用方都在 GPUI 的 ObjC 回调栈上（启动
     /// did_finish_launching / 用户事件），panic 不能跨 FFI unwind，一炸就是
     /// 整个 app abort——历史上「重启就崩」「拖文件夹就崩」都是它。
-    pub(crate) fn from_terminal(
+    pub fn from_terminal(
         cx: &mut Context<Self>,
-        runtime: crate::runtimes::Runtime,
+        runtime: smelt_plugin_api::Runtime,
         terminal: Terminal,
         cwd: Option<String>,
         session_id: String,
@@ -366,7 +364,7 @@ impl TerminalView {
 
     /// 守护里的会话 id（关 pane 时用它让守护真正杀掉 shell）。
     /// 会话所在的运行时。
-    pub(crate) fn runtime(&self) -> &crate::runtimes::Runtime {
+    pub fn runtime(&self) -> &smelt_plugin_api::Runtime {
         &self.runtime
     }
 
@@ -424,8 +422,8 @@ impl TerminalView {
     /// handoff、异常重启），那些路径断开连接后没有任何人重连终端 → 全部终端
     /// 永久冻结、只能重启 GUI。这里让终端自己长出一条命来，不依赖调用方。
     ///
-    /// 运行时不在线时不拨号，等订阅线程探到它在线（见
-    /// [`crate::runtime_events::wait_online`]）；在线了 reattach 还失败才退避再试。
+    /// 运行时不在线时不拨号，等宿主探到它在线（见 [`smelt_plugin_api::wait_online`]）；在线了
+    /// reattach 还失败才退避再试。
     fn schedule_auto_reconnect(&mut self, generation: u64, cx: &mut Context<Self>) {
         if self.reconnecting || self.session_runtime_gone {
             return;
@@ -443,7 +441,9 @@ impl TerminalView {
                             this.terminal_generation == generation && !this.session_runtime_gone;
                         // exec 期间 socket 短暂不可连 / 守护还没起来 / 网络断了，都不能判
                         // 「会话没了」——那是要等的，不是要放弃的。
-                        if current && !crate::runtimes::runtime_online(this.runtime.key(), cx) {
+                        if current
+                            && !smelt_plugin_api::host(cx).machine_online(this.runtime.key(), cx)
+                        {
                             this.show_reconnect_notice(cx);
                         }
                         current
@@ -453,21 +453,21 @@ impl TerminalView {
                     return;
                 }
                 // 1) 等运行时在线。机器被移除了就不再接。
-                if !crate::runtime_events::wait_online(runtime.key(), failures, cx).await {
+                if !smelt_plugin_api::wait_online(runtime.key(), failures, cx).await {
                     break;
                 }
-                // 2) 当前 epoch 的快照明确说这个 id 没有运行时进程了，就不再补发。
+                // 2) 当前 epoch 的快照明确说这个 id 没有运行时进程了，就不再补发。连接器在
+                // 主线程上要好，带去后台连；机器这时被移除了就不再接。
                 let sid2 = sid.clone();
-                let presence = this
-                    .update(cx, |this, cx| {
-                        smelt_app_state::daemon_states_global::DaemonStates::runtime_presence(
-                            this.runtime.key(),
-                            &sid2,
-                            cx,
-                        )
-                    })
-                    .ok()
-                    .flatten();
+                let Ok((presence, connector)) = this.update(cx, |this, cx| {
+                    let host = smelt_plugin_api::host(cx);
+                    (
+                        host.session_presence(this.runtime.key(), &sid2, cx),
+                        host.connector(this.runtime.key(), cx),
+                    )
+                }) else {
+                    return; // 视图已销毁
+                };
                 if presence == Some(RuntimePresence::Gone) {
                     let _ = this.update(cx, |this, cx| {
                         if this.terminal_generation == generation {
@@ -477,6 +477,9 @@ impl TerminalView {
                     });
                     break;
                 }
+                let Some(connector) = connector else {
+                    break;
+                };
                 // 3) 重连。守护停过（崩溃）后留下的会话进程已经没了，reattach 只会被拒：
                 // 按原 id 重新打开，守护能续接的 CLI 会接回原来的对话，接不了的起一个新
                 // shell，跟升级、冷启动重开一致。其余 reattach：守护按 id 重放历史画面，
@@ -484,14 +487,14 @@ impl TerminalView {
                 let reopen = presence == Some(RuntimePresence::LeftOver);
                 let sid3 = sid.clone();
                 let cwd3 = cwd.clone();
-                let runtime3 = runtime.clone();
                 let term = cx
                     .background_executor()
                     .spawn(async move {
+                        let connector = connector.as_ref();
                         if reopen {
-                            Terminal::spawn(&runtime3, 24, 80, cwd3.as_deref(), &sid3, None)
+                            Terminal::spawn(connector, 24, 80, cwd3.as_deref(), &sid3, None)
                         } else {
-                            Terminal::reattach(&runtime3, 24, 80, cwd3.as_deref(), &sid3)
+                            Terminal::reattach(connector, 24, 80, cwd3.as_deref(), &sid3)
                         }
                     })
                     .await;
@@ -1054,9 +1057,14 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _timing = smelt_ui::frame_stats::RenderTiming::start("TerminalView");
+        let _timing = smelt_plugin_api::ui::frame_stats::RenderTiming::start("TerminalView");
         if let Some(message) = self.write_error.take() {
-            crate::status_item::notify_error(message);
+            let notify = smelt_plugin_api::Notify {
+                subtitle: "错误".into(),
+                body: message,
+                ..Default::default()
+            };
+            smelt_plugin_api::NOTIFY.run(&notify, cx).detach();
         }
         // 首帧把焦点抢到终端上。
         if !self.did_focus {
@@ -1643,9 +1651,9 @@ impl Render for TerminalView {
                     .py_1()
                     .rounded_md()
                     // 底色跟随全局色板（写死的深蓝在换色板后会突兀）。
-                    .bg(rgb(crate::ui_theme::surface()))
+                    .bg(rgb(smelt_plugin_api::ui::ui_theme::surface()))
                     .border_1()
-                    .border_color(crate::ui_theme::hair())
+                    .border_color(smelt_plugin_api::ui::ui_theme::hair())
                     .shadow_md()
                     // 搜索框的按键在这里就地处理：Esc 关闭；其它键归输入框，
                     // 不再冒泡给终端（会进 PTY）或工作区快捷键。
@@ -1683,7 +1691,16 @@ impl Render for TerminalView {
             })
             // 断线提示：画面停在断开前，不说明的话像是卡死了。
             .when(self.reconnect_notice, |root| {
-                let runtime = crate::runtimes::runtime_name(self.runtime.key(), cx);
+                let key = self.runtime.key();
+                let runtime = smelt_plugin_api::host(cx)
+                    .machines(cx)
+                    .into_iter()
+                    .find(|machine| &machine.key == key)
+                    .map(|machine| machine.name)
+                    .unwrap_or_else(|| match key {
+                        smelt_plugin_api::RuntimeKey::Remote(id) => id.clone(),
+                        smelt_plugin_api::RuntimeKey::Local => String::new(),
+                    });
                 root.child(
                     div()
                         .absolute()
@@ -1692,12 +1709,12 @@ impl Render for TerminalView {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .bg(rgb(crate::ui_theme::surface()))
+                        .bg(rgb(smelt_plugin_api::ui::ui_theme::surface()))
                         .border_1()
-                        .border_color(crate::ui_theme::hair())
+                        .border_color(smelt_plugin_api::ui::ui_theme::hair())
                         .shadow_md()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::muted()))
+                        .text_color(rgb(smelt_plugin_api::ui::ui_theme::muted()))
                         .child(format!(
                             "与「{runtime}」的连接已断开，正在重连…期间的输入会在恢复后发出"
                         )),
@@ -1745,7 +1762,7 @@ impl TerminalView {
         let (thumb_h, thumb_y) =
             scrollbar_thumb(track_h, info.viewport_rows, info.max_offset, info.offset);
         // 中性灰，不要焦点蓝。终端底比侧栏更深，border_loud 会融进去，用 text_faint 才能看见。
-        let thumb_color = rgb(crate::ui_theme::faint());
+        let thumb_color = rgb(smelt_plugin_api::ui::ui_theme::faint());
         let max_off = info.max_offset;
         let viewport = info.viewport_rows;
 
@@ -2738,7 +2755,7 @@ mod tests {
 
     #[test]
     fn classifies_all_builtin_terminal_agents() {
-        for agent in crate::settings::TerminalAgentKind::ALL {
+        for agent in smelt_plugin_api::model::agent_kind::TerminalAgentKind::ALL {
             assert_eq!(
                 classify_launch(Some(agent.quick_terminal_cmd())),
                 LaunchKind::Agent(agent),
@@ -2748,7 +2765,7 @@ mod tests {
         }
         assert_eq!(
             classify_launch(Some("grok --minimal")),
-            LaunchKind::Agent(crate::settings::TerminalAgentKind::Grok)
+            LaunchKind::Agent(smelt_plugin_api::model::agent_kind::TerminalAgentKind::Grok)
         );
         assert_eq!(classify_launch(Some("zsh")), LaunchKind::Terminal);
     }

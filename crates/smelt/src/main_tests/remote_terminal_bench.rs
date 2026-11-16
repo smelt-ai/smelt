@@ -17,7 +17,8 @@ use smelt_model::acp_session::{AcpUserAction, ConversationSnapshot};
 use smelt_model::daemon_state::DaemonPhase;
 
 use crate::runtimes::Runtime;
-use crate::terminal::Terminal;
+// 过渡：会话插件搬走后改为经宿主的视图实例机制和 smelt.terminal 命令使用
+use smelt_terminal::terminal::{self, Terminal};
 
 /// 命令行里写成 `__DO''NE__`，shell 回显命令时不会提前出现标记。
 const DONE: &[u8] = b"__DONE__";
@@ -37,7 +38,7 @@ fn raw_attach(
     BufReader<smelt_runtime_client::RuntimeStream>,
 ) {
     let mut stream = runtime.client().connect().unwrap();
-    let request = crate::terminal::open_request(40, 160, None, id, launch, create);
+    let request = terminal::open_request(40, 160, None, id, launch, create);
     writeln!(stream, "{request}").unwrap();
     let mut reader = BufReader::with_capacity(256 * 1024, stream);
     let mut line = String::new();
@@ -218,7 +219,15 @@ fn remote_terminal_under_heavy_output() {
         let id = sid("desktop");
         sessions.push(id.clone());
         let start = Instant::now();
-        let term = Terminal::spawn(&runtime, 40, 160, None, &id, Some(COLOR_FLOOD)).unwrap();
+        let term = Terminal::spawn(
+            crate::runtimes::connector(&runtime).as_ref(),
+            40,
+            160,
+            None,
+            &id,
+            Some(COLOR_FLOOD),
+        )
+        .unwrap();
         match wait_for_screen(&term, "__DONE__", Duration::from_secs(300)) {
             Some(took) => eprintln!("[桌面 color] 看到结尾用时 {:.1}s", took.as_secs_f64()),
             None => eprintln!(
@@ -266,7 +275,15 @@ fn remote_terminal_under_heavy_output() {
         let flood_id = sid("flood");
         sessions.push(echo_id.clone());
         sessions.push(flood_id.clone());
-        let mut echo = Terminal::spawn(&runtime, 40, 160, None, &echo_id, Some("cat")).unwrap();
+        let mut echo = Terminal::spawn(
+            crate::runtimes::connector(&runtime).as_ref(),
+            40,
+            160,
+            None,
+            &echo_id,
+            Some("cat"),
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_secs(2));
         let measure = |echo: &mut Terminal, tag: &str| -> Option<Duration> {
             let start = Instant::now();
@@ -277,7 +294,15 @@ fn remote_terminal_under_heavy_output() {
             .map(|i| measure(&mut echo, &format!("idle{i}x")))
             .collect();
         eprintln!("[回显 空闲] {:?}", idle);
-        let flood = Terminal::spawn(&runtime, 40, 160, None, &flood_id, Some(COLOR_FLOOD)).unwrap();
+        let flood = Terminal::spawn(
+            crate::runtimes::connector(&runtime).as_ref(),
+            40,
+            160,
+            None,
+            &flood_id,
+            Some(COLOR_FLOOD),
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_secs(1));
         let busy: Vec<_> = (0..5)
             .map(|i| measure(&mut echo, &format!("busy{i}x")))
@@ -319,7 +344,7 @@ fn remote_terminal_under_heavy_output() {
     }
 
     for id in &sessions {
-        crate::terminal::kill_remote(&runtime, id);
+        terminal::kill_remote(&runtime, id);
     }
     unpair_after_bench(&runtime, home);
 }
@@ -356,6 +381,8 @@ fn open_conversation(runtime: &Runtime, id: &str) -> ConversationClientHandle {
             retained_entries_end: 0,
             conversation_binding: Default::default(),
             pending_agent_preset: None,
+            initial_config: Vec::new(),
+            initial_prompt: None,
         },
     )
 }
@@ -612,7 +639,15 @@ fn remote_conversation_under_heavy_output() {
     // 5. 长回复期间同一运行时上另一个终端的回显。
     {
         let echo_id = sid("chat-echo");
-        let mut echo = Terminal::spawn(&runtime, 40, 160, None, &echo_id, Some("cat")).unwrap();
+        let mut echo = Terminal::spawn(
+            crate::runtimes::connector(&runtime).as_ref(),
+            40,
+            160,
+            None,
+            &echo_id,
+            Some("cat"),
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_secs(2));
         send_prompt(&handle, "stream 5000 200 0 busy".to_string());
         let echoes: Vec<_> = (0..5)
@@ -627,7 +662,7 @@ fn remote_conversation_under_heavy_output() {
         let busy = watch_turn(&handle, "busy", Duration::from_secs(300));
         report_turn("对话 长回复（同时敲终端）", &busy);
         drop(echo);
-        crate::terminal::kill_remote(&runtime, &echo_id);
+        terminal::kill_remote(&runtime, &echo_id);
     }
 
     // 6. 带长历史重开（桌面重启、切回这个对话走的就是这条），再往前翻一页。

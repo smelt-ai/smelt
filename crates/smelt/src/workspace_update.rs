@@ -61,19 +61,6 @@ impl Workspace {
         .detach();
     }
 
-    /// 按 id 前缀分流到对应的 kill op——ACP 会话（`acp-` 前缀）只在
-    /// `AcpSessions` 表里，终端的 `kill` op 认不出这个 id，会静默什么都不做
-    /// 却照样回 `{"ok":true}`（真实教训：两条表分开存，用错 op 表面上「成功」
-    /// 实际上会话根本没被杀掉，圈了个大坑）。
-    pub(crate) fn kill_daemon_session(id: &str) {
-        let runtime = crate::runtimes::Runtime::local();
-        if id.starts_with("acp-") {
-            smelt_client::acp_client::kill_acp_session(runtime.client(), id);
-        } else {
-            terminal::kill_remote(&runtime, id);
-        }
-    }
-
     /// 让守护退出（断开本机所有会话）、拉起磁盘上最新的 smeltd，再把各 pane 的终端重建起来。
     ///
     /// **禁止**在 `update` 里同步 `Terminal::spawn`：连守护、握手、等守护换代都会阻塞，
@@ -109,14 +96,20 @@ impl Workspace {
                 .await;
 
             // 握手和等守护换代全在后台；主线程只接结果
-            let runtime = crate::runtimes::Runtime::local();
+            let connector = crate::runtimes::connector(&crate::runtimes::Runtime::local());
             let built = cx
                 .background_executor()
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
                     for (entity, cwd, sid) in jobs {
-                        let term =
-                            terminal::Terminal::spawn(&runtime, 24, 80, cwd.as_deref(), &sid, None);
+                        let term = terminal::Terminal::spawn(
+                            connector.as_ref(),
+                            24,
+                            80,
+                            cwd.as_deref(),
+                            &sid,
+                            None,
+                        );
                         out.push((entity, term));
                     }
                     out

@@ -260,8 +260,8 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     name: MAIN_VIEW.into(),
                     title: panel.title.clone().into(),
                     icon: gpui_kit_assets::IconName::Puzzle.path(),
-                    per_machine: false,
                     draws_top_bar: false,
+                    instances: false,
                     settings: None,
                     build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
                         // 内容在挂载时已经建好；视图只建一次，第二次（登记被替换前不会有）
@@ -308,6 +308,9 @@ fn unregister_contributions(id: &str, cx: &mut App) {
     api::unregister_pages(id, cx);
     api::unregister_commands(id, cx);
     api::unregister_file_opener(id, cx);
+    api::unregister_menu_items(id, cx);
+    api::unregister_context_menu_items(id, cx);
+    api::unregister_quit_guard(id, cx);
     api::unregister_views(id, cx);
 }
 

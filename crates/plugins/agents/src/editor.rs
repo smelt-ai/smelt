@@ -1020,8 +1020,8 @@ pub(crate) fn start_conversation(agent: AgentRef, cx: &mut App) -> Task<Result<(
             .await
             .map_err(|error| format!("无法创建智能体工作区：{error}"))?;
         cx.update(|cx| {
-            api::sessions::START_CONVERSATION.run(
-                &api::sessions::StartConversation {
+            api::contracts::sessions::START_CONVERSATION.run(
+                &api::contracts::sessions::StartConversation {
                     machine: agent.runtime,
                     agent_definition_id: agent.id,
                     cwd: space.path,

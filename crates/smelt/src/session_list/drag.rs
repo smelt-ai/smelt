@@ -127,7 +127,7 @@ fn session_drag_preview(drag: &SessionDrag) -> Div {
             div()
                 .flex_shrink_0()
                 .text_size(px(11.))
-                .font_family(crate::terminal_view::font_family())
+                .font_family(smelt_model::font_config::font_family())
                 .text_color(rgb(ui_theme::faint()))
                 .child(subtitle)
         }))
@@ -195,7 +195,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_size(px(11.))
-                                .font_family(crate::terminal_view::font_family())
+                                .font_family(smelt_model::font_config::font_family())
                                 .text_color(rgb(ui_theme::faint()))
                                 .child(truncated_line(branch))
                         })),

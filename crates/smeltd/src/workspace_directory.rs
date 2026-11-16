@@ -336,6 +336,24 @@ pub(crate) fn remember_acp_session_title(
     }
 }
 
+/// 在跑着的 ACP 会话里，冷启动续上要用的状态变了（选了配置、预设或首条消息发出去、
+/// 回合结束）：写进目录，改了就推。这些在新建之后只由守护写，客户端不再回写。
+pub(crate) fn remember_acp_live(
+    sid: &str,
+    change: smelt_store::AcpLiveChange<'_>,
+    event_hub: &EventHubHandle,
+) {
+    let result = default_store().and_then(|store| {
+        workspace_catalog::update_acp_live_on(&store, sid, change).map_err(control_error)
+    });
+    match result {
+        Ok(change) => {
+            publish(&change, event_hub);
+        }
+        Err(error) => dlog(&format!("记下对话 {sid} 的在跑状态失败：{}", error.message)),
+    }
+}
+
 /// 存储层直接改了目录（守护确认或放弃一段对话的恢复身份）之后，把当前目录推出去。
 pub(crate) fn publish_current(event_hub: &EventHubHandle) {
     match workspace_catalog::directory() {

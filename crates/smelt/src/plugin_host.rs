@@ -37,7 +37,6 @@ impl api::Host for SmeltHost {
             .map(|key| Machine {
                 name: runtimes::runtime_name(&key, cx),
                 unavailable: runtimes::runtime_unavailable_label(&key, cx).map(str::to_string),
-                has_desktop: runtimes::runtime_has_desktop(&key, cx),
                 smelt_home: runtimes::smelt_home(&key, cx),
                 key,
             })
@@ -46,6 +45,18 @@ impl api::Host for SmeltHost {
 
     fn client(&self, machine: &RuntimeKey, cx: &App) -> Option<RuntimeClient> {
         runtimes::client(machine, cx)
+    }
+
+    fn connector(
+        &self,
+        machine: &RuntimeKey,
+        cx: &App,
+    ) -> Option<std::sync::Arc<dyn api::client::Connector>> {
+        runtimes::runtime(machine, cx).map(|runtime| runtimes::connector(&runtime))
+    }
+
+    fn machine_online(&self, machine: &RuntimeKey, cx: &App) -> bool {
+        runtimes::runtime_online(machine, cx)
     }
 
     fn agent_settings<'a>(
@@ -91,6 +102,15 @@ impl api::Host for SmeltHost {
         cx: &App,
     ) -> Vec<api::model::daemon_state::DaemonSessionState> {
         DaemonStates::snapshot(machine, cx)
+    }
+
+    fn session_presence(
+        &self,
+        machine: &RuntimeKey,
+        session_id: &str,
+        cx: &App,
+    ) -> Option<api::model::daemon_state::RuntimePresence> {
+        DaemonStates::runtime_presence(machine, session_id, cx)
     }
 
     fn workspace_directory(
@@ -272,6 +292,11 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
         api::OPEN_VIEW.spec("打开视图", move |args, window, cx| {
             let window = main_window(window)?;
             update_workspace(&views, cx, |workspace, cx| {
+                if api::view(&args.view, cx).is_some_and(|view| view.instances) {
+                    return workspace
+                        .open_instance(&args.view, &args.args, window, cx)
+                        .map(|()| true);
+                }
                 Ok(workspace.open_view(&args.view, args.args, window, cx))
             })
         }),

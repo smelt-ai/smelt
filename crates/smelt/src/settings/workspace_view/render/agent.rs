@@ -159,7 +159,7 @@ fn agent_groups(
         let name_w = px(140.);
         let del_w = px(28.);
         let cmd_w = field_w - name_w - del_w - px(40.);
-        let mono = terminal_view::font_family();
+        let mono = font_config::font_family();
 
         let mut list = v_flex()
                                 .w(field_w)
@@ -417,7 +417,7 @@ fn agent_groups(
                 let kind_w = px(150.);
                 let del_w = px(28.);
                 let caption_w = px(72.);
-                let mono = terminal_view::font_family();
+                let mono = font_config::font_family();
                 let profiles = agent_host_settings(&crate::RuntimeKey::Local, cx)
                     .profiles
                     .clone();

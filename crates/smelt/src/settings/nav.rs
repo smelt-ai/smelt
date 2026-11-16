@@ -455,8 +455,8 @@ mod tests {
             id: id.to_string().into(),
             title: title.to_string().into(),
             icon: "icons/bell.svg".into(),
-            per_machine: false,
             draws_top_bar: false,
+            instances: false,
             settings,
             build: std::rc::Rc::new(|_, _| unreachable!("侧栏不建页")),
         }

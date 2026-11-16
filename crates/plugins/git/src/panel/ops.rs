@@ -1515,8 +1515,10 @@ impl GitPanel {
         // 选区带的是文件路径。聚合 diff 的 `git_diff.path` 是「全部更改」。
         let path = range.path().to_string();
         let msg = diff_feedback_text(&path, range.start(), range.end(), &selected, &comment);
-        let sent = smelt_plugin_api::sessions::SEND_TEXT
-            .run(&smelt_plugin_api::sessions::SendText { text: msg }, cx);
+        let sent = smelt_plugin_api::contracts::sessions::SEND_TEXT.run(
+            &smelt_plugin_api::contracts::sessions::SendText { text: msg },
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
             let sent = sent.await;
             let _ = this.update_in(cx, |this, window, cx| match sent {

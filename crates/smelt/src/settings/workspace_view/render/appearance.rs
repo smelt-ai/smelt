@@ -70,7 +70,7 @@ fn terminal_group(snapshot: &SettingsRenderSnapshot) -> SettingGroup {
                 |cx: &App| cx.global::<Appearance>().font_family.clone().into(),
                 |v: SharedString, cx: &mut App| {
                     let name = v.trim().to_string();
-                    terminal_view::set_font_family(&name);
+                    font_config::set_font_family(&name);
                     apply_appearance(move |a| a.font_family = name, cx);
                     cx.refresh_windows();
                 },

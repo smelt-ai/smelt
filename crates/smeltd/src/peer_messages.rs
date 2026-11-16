@@ -984,6 +984,8 @@ fn spawn(
         conversation_binding: None,
         pending_agent_preset: None,
         omit_history: false,
+        initial_config: Vec::new(),
+        initial_prompt: None,
     };
     let reply = accepted_reply(&message, &id, &title, hops);
     let source_slot = Arc::clone(source_slot);

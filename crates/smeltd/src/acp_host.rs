@@ -213,6 +213,12 @@ pub(crate) struct AcpSession {
     pub(crate) durable_history_session_id: SessionLock<Option<String>>,
     /// 闲置挂起的账本，见 `acp_idle`。
     pub(crate) idle: crate::acp_idle::AcpIdleState,
+    /// runtime 就绪后要补的配置和首条消息，见 `acp_supervise`。不在持着它时往外调。
+    pub(crate) after_ready: SessionLock<crate::acp_supervise::AcpAfterReady>,
+    /// 串起后台补做和用到 runtime 的动作：动作等补做做完再放行，同一份不会做两遍。
+    pub(crate) after_ready_gate: SessionLock<()>,
+    /// 断线自动重连的账本，见 `acp_supervise`。
+    pub(crate) reconnect: SessionLock<crate::acp_supervise::AcpReconnectBudget>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,6 +325,11 @@ pub(crate) struct AcpOpenRequest {
     pub(crate) pending_agent_preset: Option<String>,
     /// 窗口只要活状态。会话宿主和守护之间的镜像必须带历史，否则分页没有正文。
     pub(crate) omit_history: bool,
+    /// 这次打开拉起 runtime 时要写进去的会话配置（`model` 是跨 agent 的语义名）。
+    /// runtime 就绪后由守护写进去；热 attach 不拉起，不读它。
+    pub(crate) initial_config: Vec<(String, String)>,
+    /// 这次打开拉起 runtime 时要发的首条消息。配置落定后由守护发出；热 attach 不读它。
+    pub(crate) initial_prompt: Option<smelt_core::acp_session::AcpInitialPrompt>,
 }
 
 pub(crate) fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenRequest> {
@@ -359,6 +370,19 @@ pub(crate) fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenReq
             .filter(|prompt| !prompt.is_empty())
             .map(String::from),
         omit_history: v["omit_history"].as_bool().unwrap_or(false),
+        initial_config: v
+            .get("initial_config")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default(),
+        initial_prompt: v
+            .get("initial_prompt")
+            .filter(|value| !value.is_null())
+            .and_then(|value| {
+                serde_json::from_value::<smelt_core::acp_session::AcpInitialPrompt>(value.clone())
+                    .ok()
+            })
+            .filter(|prompt| !prompt.text.trim().is_empty() || !prompt.images.is_empty()),
     })
 }
 
@@ -487,6 +511,16 @@ pub(crate) fn acp_runtime_needs_relaunch(
 
 /// ACP 当前活动 → 状态通道 Phase。Thinking 还要看 entries 里有没有进行中的
 /// 工具调用，细分成「执行工具」/「思考中」。
+/// 新建时带来的首条消息还没发出：runtime 就绪后的空闲其实马上要开回合，对外报思考中，
+/// 不在发出前闪一下空闲。
+pub(crate) fn acp_phase_with_initial_prompt(phase: Phase, initial_prompt_pending: bool) -> Phase {
+    if initial_prompt_pending && phase == Phase::Idle {
+        Phase::Thinking
+    } else {
+        phase
+    }
+}
+
 pub(crate) fn compute_acp_daemon_phase(
     reduced: &smelt_core::acp_session::AcpSessionState,
 ) -> Phase {
@@ -674,10 +708,18 @@ fn clear_durable_history_id(sess: &AcpSession, subscribers: &EventHubHandle) {
 /// `AcpView::sync_daemon_state` 是同一件事，只是现在算在 smeltd 侧。
 pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubHandle) {
     persist_confirmed_history_id(sess, subscribers);
+    // 先看守护还欠不欠首条消息，再锁归约状态：两把锁不同时持。
+    let initial_prompt_pending = sess.after_ready.lock().prompt_pending();
     let (phase, pending_question, pending_request, title) = {
         let reduced = sess.reduced.lock();
+        if crate::acp_idle::acp_ready_outcome(&reduced) == Some(Ok(())) {
+            sess.reconnect.lock().usable(Instant::now());
+        }
         (
-            compute_acp_daemon_phase(&reduced),
+            acp_phase_with_initial_prompt(
+                compute_acp_daemon_phase(&reduced),
+                initial_prompt_pending,
+            ),
             acp_pending_question(&reduced),
             acp_pending_request(&reduced),
             reduced.resolved_session_title(),
@@ -688,9 +730,12 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let title_changed;
+    let turn_ended;
     let snapshot = {
         let mut st = sess.state.lock();
+        let was_in_turn = st.phase.in_turn();
         let phase_changed = commit_session_phase(&mut st, PhaseSource::AcpProjection, phase);
+        turn_ended = phase_changed && was_in_turn && !st.phase.in_turn();
         let question_changed = st.pending_question != pending_question;
         let request_changed = st.pending_request != pending_request;
         title_changed = st.title != title;
@@ -715,6 +760,16 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
             crate::workspace_directory::remember_acp_session_title(
                 &snapshot.id,
                 title.as_deref(),
+                subscribers,
+            );
+        }
+        // 对话的最近活动时间按回合记：一轮结束记一次，不随流式输出写库。
+        if turn_ended {
+            crate::workspace_directory::remember_acp_live(
+                &snapshot.id,
+                smelt_store::AcpLiveChange::TurnEnded {
+                    at: now.min(i64::MAX as u64) as i64,
+                },
                 subscribers,
             );
         }
@@ -1867,6 +1922,16 @@ pub(crate) fn start_acp_event_drain(
                 push_acp_snapshot_since(sess, true, None);
             }
             update_acp_daemon_state(sess, &subscribers);
+            // 只是字节流断了（provider 没报失败）：守护自己按记录的启动规格接回来。
+            // provider 报的失败、恢复失败、所有权冲突都不自动重来，等用户决定。
+            if !already_ended {
+                crate::acp_supervise::schedule_acp_auto_reconnect(
+                    &slot,
+                    &session_id,
+                    &acp_sessions,
+                    &subscribers,
+                );
+            }
         }));
         if let Err(payload) = panicked {
             mark_session_driver_panic(
@@ -1923,6 +1988,7 @@ pub(crate) fn acp_relaunch(
 ) {
     let sess = &slot.value;
     sess.idle.mark_running();
+    let relaunch_config;
     let (generation, restore_policy) = {
         let _turn_completion = sess.turn_completion.lock();
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
@@ -1943,6 +2009,8 @@ pub(crate) fn acp_relaunch(
                 },
                 !reduced.entries().is_empty(),
             );
+            // 拉起会清掉镜像里的模型和配置项，必须在那之前记下，就绪后写回。
+            relaunch_config = crate::acp_idle::SuspendedConfig::capture(&reduced);
             smelt_core::acp_session::reset_for_restart(&mut reduced);
             // `resume_id` 只是这次 session/load 的候选身份，不能在 load 成功前
             // 写进 canonical history，也不能改库里已经确认的 id。否则 GUI 收到
@@ -1963,6 +2031,7 @@ pub(crate) fn acp_relaunch(
         };
         (generation, restore_policy)
     };
+    crate::acp_supervise::remember_relaunch_config(sess, relaunch_config);
     // 无头恢复不会经过 GUI 的 AgentHostState 迁移；daemon 自己也要把 Smelt
     // 发布过的旧默认值升到当前适配器，否则历史会话 relaunch 仍会拉旧包。
     upgrade_released_adapter_launch(&mut launch);
@@ -2012,6 +2081,12 @@ pub(crate) fn acp_relaunch(
         id.to_string(),
         acp_sessions,
         generation,
+    );
+    crate::acp_supervise::spawn_after_ready(
+        Arc::clone(slot),
+        id.to_string(),
+        generation,
+        subscribers.clone(),
     );
 }
 
@@ -2126,6 +2201,9 @@ pub(crate) fn make_acp_session(
         pending_agent_preset: SessionLock::new(pending_agent_preset),
         durable_history_session_id: SessionLock::new(None),
         idle: Default::default(),
+        after_ready: SessionLock::new(Default::default()),
+        after_ready_gate: SessionLock::new(()),
+        reconnect: SessionLock::new(Default::default()),
     }
 }
 
@@ -2894,7 +2972,56 @@ pub(crate) fn apply_acp_user_action(
         let id = sess.state.lock().id.clone();
         subscribers.mark_attention_read(&id);
     }
-    apply_acp_user_action_inner(sess, action, subscribers, false)
+    let live_change = acp_live_change_of(&action);
+    let result = apply_acp_user_action_inner(sess, action, subscribers, false);
+    if result.is_ok()
+        && let Some(change) = live_change
+    {
+        let sid = sess.state.lock().id.clone();
+        crate::workspace_directory::remember_acp_live(&sid, change.as_store(), subscribers);
+    }
+    result
+}
+
+/// 用户在这段对话里做的、冷启动续上时要记得的事。新建之后这些只由守护写进目录。
+enum AcpLiveAction {
+    /// 选了一项配置：重开时要再选上。
+    ConfigValue { config_id: String, value_id: String },
+    /// 说了话：新建时带的首条消息（交接、分叉的那条）不再待发。
+    Prompted,
+}
+
+impl AcpLiveAction {
+    fn as_store(&self) -> smelt_store::AcpLiveChange<'_> {
+        match self {
+            Self::ConfigValue {
+                config_id,
+                value_id,
+            } => smelt_store::AcpLiveChange::ConfigValue {
+                config_id,
+                value_id,
+            },
+            Self::Prompted => smelt_store::AcpLiveChange::PendingPromptSent,
+        }
+    }
+}
+
+fn acp_live_change_of(action: &smelt_core::acp_session::AcpUserAction) -> Option<AcpLiveAction> {
+    use smelt_core::acp_session::AcpUserAction;
+    match action {
+        AcpUserAction::SetConfigOption {
+            config_id,
+            value_id,
+            ..
+        } => Some(AcpLiveAction::ConfigValue {
+            config_id: config_id.clone(),
+            value_id: value_id.clone(),
+        }),
+        AcpUserAction::Prompt { .. } | AcpUserAction::FollowUp { .. } => {
+            Some(AcpLiveAction::Prompted)
+        }
+        _ => None,
+    }
 }
 
 fn apply_acp_user_action_inner(
@@ -3262,11 +3389,17 @@ pub(crate) fn dispatch_conversation_input(
     )
     .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
     submitted.remember(input_submission_id);
+    drop(submitted);
     if pending_preset.is_some() {
         *sess.pending_agent_preset.lock() = None;
-        // 显式发布消费状态，确保所有客户端同步，并让 workspace 在进程退出前清掉
-        // 已使用的预设。
+        // 显式发布消费状态，确保所有客户端同步；目录里那份也清掉，冷启动不再带上用过的预设。
         push_acp_snapshot_since(sess, true, None);
+        let sid = sess.state.lock().id.clone();
+        crate::workspace_directory::remember_acp_live(
+            &sid,
+            smelt_store::AcpLiveChange::AgentPresetConsumed,
+            subscribers,
+        );
     }
     Ok(())
 }
@@ -3779,6 +3912,10 @@ pub(crate) fn ensure_acp_session(
             // 只在真正启动新进程前写入；热 attach 不能改变一个已运行子进程的
             // 环境，也不该把下一次任务的凭据混进现有会话。
             *slot.value.ephemeral_env.lock() = req.ephemeral_env.clone();
+            // 初始配置和首条消息也只跟着这次拉起：就绪后由守护写回、发出。
+            crate::acp_supervise::remember_requested_after_ready(&slot.value, req);
+            // 客户端明确要拉起，之前自动重连的失败不再算数。
+            slot.value.reconnect.lock().reset();
             acp_relaunch(
                 &slot,
                 &req.id,

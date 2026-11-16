@@ -73,8 +73,8 @@ pub fn register(cx: &mut App) {
             name: "main".into(),
             title: "文件".into(),
             icon: gpui_kit_assets::IconName::FolderTree.path(),
-            per_machine: false,
             draws_top_bar: false,
+            instances: false,
             settings: None,
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| FilesPanel::new(window, cx))) as Rc<dyn ViewHandle>

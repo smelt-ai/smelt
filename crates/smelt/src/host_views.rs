@@ -33,10 +33,10 @@ fn outlet_spec(workspace: WeakEntity<Workspace>) -> ViewSpec {
         name: "outlet".into(),
         title: "内容".into(),
         icon: gpui_kit_assets::IconName::AppWindow.path(),
-        per_machine: false,
         // 只管出口空着的时候：里面放了视图，标题和顶上那条归谁画都跟着那个视图（见
         // `workspace_shell::show_in_outlet`）。空着什么都不画。
         draws_top_bar: true,
+        instances: false,
         settings: None,
         build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
             let workspace = workspace.clone();
@@ -46,7 +46,7 @@ fn outlet_spec(workspace: WeakEntity<Workspace>) -> ViewSpec {
 }
 
 /// 出口：画开着的这页出口里显示的视图。放什么由路由定，视图由 `Workspace::sync_outlet`
-/// 建好；这里只取，不建。
+/// 建好（按实例建的由 `Workspace::open_instance`）；这里只取，不建。
 struct OutletView {
     workspace: WeakEntity<Workspace>,
     /// 出口里换内容时工作台会通知。
@@ -69,8 +69,13 @@ impl OutletView {
 impl Render for OutletView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = self.workspace.upgrade().and_then(|workspace| {
-            let id = workspace.read(cx).shell_view.outlet.clone()?;
-            api::built_view(&id, cx).map(|view| view.view())
+            let workspace = workspace.read(cx);
+            let id = workspace.shell_view.outlet.clone()?;
+            // 按实例建的那份归工作台留着，别的在注册表里。
+            match workspace.outlet_instance() {
+                Some(instance) if **instance.id() == *id => Some(instance.view()),
+                _ => api::built_view(&id, cx).map(|view| view.view()),
+            }
         });
         div()
             .size_full()

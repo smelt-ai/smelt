@@ -231,12 +231,19 @@ mod antigravity_terminal_tests {
 #[cfg(test)]
 mod terminal_theme_tests {
     use super::current_terminal_theme;
-    use crate::terminal;
     use smelt_model::terminal_theme::TerminalThemeSnapshot;
+    // 过渡：会话插件搬走后改为经宿主的视图实例机制和 smelt.terminal 命令使用
+    use smelt_terminal::terminal;
+
+    /// 深浅色模式是进程级全局态，这两个用例并行跑会互相踩，在这把锁上排队。
+    fn lock_theme_globals() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn dark_snapshot_matches_core_fallback() {
-        let _guard = terminal::lock_theme_globals();
+        let _guard = lock_theme_globals();
         terminal::set_dark_mode(true);
         crate::ui_theme::set_light(false);
         assert_eq!(
@@ -248,7 +255,7 @@ mod terminal_theme_tests {
 
     #[test]
     fn snapshot_follows_theme_mode() {
-        let _guard = terminal::lock_theme_globals();
+        let _guard = lock_theme_globals();
         terminal::set_dark_mode(false);
         crate::ui_theme::set_light(true);
         let light = current_terminal_theme();

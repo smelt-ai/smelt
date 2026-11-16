@@ -23,9 +23,9 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use api::contracts::sessions::{self, Activate};
 use api::model::control_api::{AttentionMarkRead, AttentionMarkReadParams};
 use api::model::daemon_state::{AttentionItem, CORE_TOPIC_ATTENTION_CHANGED, SessionAttention};
-use api::sessions::{self, Activate};
 use api::{HostEvent, NotificationClick, Notify, RuntimeKey, TopicMessage, WithdrawNotification};
 use gpui::{App, Task};
 use smelt_plugin_api as api;
@@ -159,6 +159,7 @@ fn deliver(
         on_click: Some(NotificationClick {
             command: sessions::ACTIVATE.id().to_string(),
             args: api::serde_json::to_value(Activate {
+                machine: machine.clone(),
                 session_id: session.session_id.clone(),
             })
             .unwrap_or_default(),

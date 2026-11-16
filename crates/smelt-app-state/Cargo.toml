@@ -1,6 +1,6 @@
 # 桌面进程里跨功能共享的状态（GPUI Global）：守护上报的会话状态镜像、关注事件、
-# provider 账户状态、各台机器的智能体宿主配置。主 GUI 和 smelt-acp-view 都要读写，
-# 放在这里免得互相依赖。界面组件在 smelt-ui，那边不碰客户端库和运行时。
+# provider 账户状态、各台机器的智能体宿主配置。只有宿主 smelt 读写；对话组件要的那几样由
+# 宿主经 `smelt_acp_view::env` 转给它。界面组件在 smelt-ui，那边不碰客户端库和运行时。
 [package]
 name = "smelt-app-state"
 version.workspace = true

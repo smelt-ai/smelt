@@ -381,6 +381,63 @@ fn a_model_also_listed_as_a_config_option_is_restored_once() {
     );
 }
 
+#[test]
+fn initial_config_from_the_client_is_written_like_a_restore() {
+    let saved = acp_idle::SuspendedConfig::from_values(&[
+        ("model".into(), "deepseek/flash".into()),
+        ("mode".into(), "bypassPermissions".into()),
+        ("thought_level".into(), "  ".into()),
+        ("".into(), "high".into()),
+    ]);
+    assert!(!saved.is_empty());
+    let fresh = fresh_defaults();
+    assert_eq!(
+        debug_all(saved.model_action(&fresh)),
+        [set("model", "deepseek/flash", None)]
+    );
+    assert_eq!(
+        debug_all(saved.option_actions(&fresh)),
+        [set("mode", "bypassPermissions", None)],
+        "空的 id 和值不发"
+    );
+    assert!(acp_idle::SuspendedConfig::from_values(&[]).is_empty());
+}
+
+/// 客户端存的是 agent 自己的模型配置 id（不是 `model` 占位名）时，也要按模型那一步先换，
+/// 不能当普通配置项跟其它项一起写。
+#[test]
+fn initial_config_naming_the_agents_own_model_id_switches_the_model_first() {
+    let saved = acp_idle::SuspendedConfig::from_values(&[
+        ("claude_model".into(), "deepseek/flash".into()),
+        ("mode".into(), "bypassPermissions".into()),
+    ]);
+    let fresh = quiet_with(|state| {
+        let mut model = pi_model("openai/gpt-5");
+        model.config_id = "claude_model".into();
+        state.model = Some(model);
+        state.config_options = vec![
+            mode("逐次审批"),
+            select(
+                "claude_model",
+                "openai/gpt-5",
+                &[
+                    ("openai/gpt-5", "openai/gpt-5"),
+                    ("deepseek/flash", "deepseek/flash"),
+                ],
+            ),
+        ];
+    });
+    assert_eq!(
+        debug_all(saved.model_action(&fresh)),
+        [set("claude_model", "deepseek/flash", None)]
+    );
+    assert_eq!(
+        debug_all(saved.option_actions(&fresh)),
+        [set("mode", "bypassPermissions", None)],
+        "模型只走 model 那一步"
+    );
+}
+
 /// 换模型会把 Pi 的推理强度打回模型默认值，所以必须等模型确认后再写其它项。
 #[test]
 fn restore_waits_for_the_model_before_writing_other_settings() {

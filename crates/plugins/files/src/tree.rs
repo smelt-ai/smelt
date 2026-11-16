@@ -14,8 +14,9 @@ use smelt_plugin_api::client::protocol::files::{
     ProjectSearchCall, ProjectSearchParams, ProjectTreeCall, ProjectWatchCall,
 };
 use smelt_plugin_api::client::protocol::git::{GitRootParams, GitStatusCall};
+use smelt_plugin_api::contracts::sessions;
 use smelt_plugin_api::ui::dialog::Confirm;
-use smelt_plugin_api::{self as api, PathRequest, RuntimeKey, sessions};
+use smelt_plugin_api::{self as api, PathRequest, RuntimeKey};
 
 use crate::model::{
     DirCache, DirListing, FileTreeRow, GitMarks, SearchHit, SearchState, TreeRoots,

@@ -295,8 +295,8 @@ fn build_panel(state: &PanelState, window: &mut Window, cx: &mut App) -> Arc<dyn
             .as_mut()
             .is_none_or(|pass| pass.placed.insert(id.to_string()))
     });
-    // 设置页由设置摆，布局里摆了也当不认识。
-    let spec = api::view(id, cx).filter(|spec| spec.settings.is_none());
+    // 设置页由设置摆，按实例建的由别的插件带参数建，布局里摆了也当不认识。
+    let spec = api::view(id, cx).filter(|spec| spec.settings.is_none() && !spec.instances);
     let built = first
         .then(|| spec.and_then(|spec| Some((spec, api::ensure_view(id, window, cx)?))))
         .flatten();

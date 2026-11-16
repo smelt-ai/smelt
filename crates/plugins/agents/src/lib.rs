@@ -52,11 +52,11 @@ use editor::*;
 use model::*;
 
 const OWNER: &str = "smelt.agents";
-const VIEW_ID: &str = "smelt.agents/main";
+const VIEW_ID: &str = api::contracts::agents::VIEW;
 /// 跟默认智能体开一段新对话。
-pub const NEW_CONVERSATION: &str = "smelt.agents/new-conversation";
+const NEW_CONVERSATION: &str = api::contracts::agents::NEW_CONVERSATION.id();
 /// 能力库的视图。没装就没有「管理插件 / MCP」的入口。
-const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
+const CAPABILITIES_VIEW: &str = api::contracts::capabilities::VIEW;
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
@@ -66,8 +66,8 @@ pub fn register(cx: &mut App) {
             name: "main".into(),
             title: "智能体".into(),
             icon: gpui_kit_assets::IconName::Bot.path(),
-            per_machine: false,
             draws_top_bar: false,
+            instances: false,
             settings: None,
             build: Rc::new(|_window, cx| Rc::new(cx.new(AgentsPage::new)) as Rc<dyn ViewHandle>),
         }],
@@ -94,7 +94,7 @@ fn register_commands(new_conversation_title: String, cx: &mut App) {
         OWNER,
         "智能体",
         vec![CommandSpec {
-            name: "new-conversation".to_string(),
+            name: api::contracts::agents::NEW_CONVERSATION.name().to_string(),
             title: new_conversation_title,
             key: Some("cmd-n".to_string()),
             context: "Workspace".to_string(),
@@ -244,7 +244,9 @@ impl AgentsPage {
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged
             | HostEvent::PagesChanged
-            | HostEvent::CommandsChanged => {}
+            | HostEvent::CommandsChanged
+            | HostEvent::Plugin { .. }
+            | HostEvent::OpenPaths { .. } => {}
         }
     }
 

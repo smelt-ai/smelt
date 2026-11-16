@@ -373,6 +373,18 @@ pub fn set_acp_session_title_on(
     })
 }
 
+/// 守护在跑着的 ACP 会话里看到的状态变了（见 [`smelt_store::AcpLiveChange`]）。只由守护写：
+/// 新建之后客户端不再改这些。
+pub fn update_acp_live_on(
+    store: &smelt_store::Store,
+    sid: &str,
+    change: smelt_store::AcpLiveChange<'_>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.update_workspace_acp_live(sid, change)?.changed, None))
+    })
+}
+
 /// 一段 provider 对话的名字（历史页改名、认得出身份的终端分屏改名），`None` 是清掉。
 pub fn set_history_title_on(
     store: &smelt_store::Store,

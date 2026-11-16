@@ -36,8 +36,10 @@ use std::time::{Duration, Instant};
 use gpui::{App, AsyncApp, Global, Subscription};
 
 use crate::runtimes::{IncompatibleFix, Runtime, RuntimeHub, RuntimeKey, RuntimeStatus};
-use crate::terminal::DaemonStateEvent;
-use smelt_client::daemon_state::{TopicMessage, TopicSubscription, TopicSubscriptionCloser};
+use smelt_client::daemon_state::{
+    DaemonStateEvent, TopicMessage, TopicSubscription, TopicSubscriptionCloser,
+    daemon_reconnect_backoff, subscribe_daemon_states_blocking,
+};
 
 pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
 /// 单独订阅收到的：哪台运行时、哪条订阅的话题。
@@ -227,7 +229,7 @@ pub(crate) async fn wait_online(key: &RuntimeKey, failures: u32, cx: &AsyncApp) 
         // 轮询例外：运行时在线、上一次却没成，没有「可以再试了」的事件可等；离线时不走这里，
         // 退避完回去等在线；周期 250ms 起翻倍，上限 8s。
         cx.background_executor()
-            .timer(crate::terminal::daemon_reconnect_backoff(previous))
+            .timer(daemon_reconnect_backoff(previous))
             .await;
     }
     let key = key.clone();
@@ -429,7 +431,7 @@ impl SeparateSubscription {
                     }
                     // 轮询例外：只有这条订阅断了时，对端能再连不会通知我们；周期 250ms 起
                     // 翻倍，上限 8s。关掉时由 Condvar 立刻叫醒。
-                    let pause = crate::terminal::daemon_reconnect_backoff(attempt);
+                    let pause = daemon_reconnect_backoff(attempt);
                     attempt = attempt.saturating_add(1);
                     let state = shared.lock();
                     let (state, _) = shared
@@ -553,7 +555,7 @@ pub(crate) fn spawn_subscription(
                         let pause = if runtime.is_local() {
                             // 轮询例外：本机守护拉不起来时没有「现在能起了」的事件，探一次就是
                             // 再拉一次；周期 250ms 起翻倍，上限 8s。
-                            crate::terminal::daemon_reconnect_backoff(reconnect_attempt)
+                            daemon_reconnect_backoff(reconnect_attempt)
                         } else {
                             remote_offline_backoff(reconnect_attempt)
                         };
@@ -592,7 +594,7 @@ pub(crate) fn spawn_subscription(
                         } else {
                             None
                         };
-                        crate::terminal::subscribe_daemon_states_blocking(
+                        subscribe_daemon_states_blocking(
                             runtime.client(),
                             runtime.is_local(),
                             |event| {
@@ -625,7 +627,7 @@ pub(crate) fn spawn_subscription(
                         }
                         // 轮询例外：订阅断了，对端重新能连时不会通知我们，只能隔一会儿再探；
                         // 周期 250ms 起翻倍，上限 8s（再探仍连不上就转到上面离线的退避）。
-                        let pause = crate::terminal::daemon_reconnect_backoff(reconnect_attempt);
+                        let pause = daemon_reconnect_backoff(reconnect_attempt);
                         reconnect_attempt = reconnect_attempt.saturating_add(1);
                         pause
                     }

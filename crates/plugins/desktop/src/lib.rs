@@ -1,11 +1,13 @@
 //! 远程桌面：运行时那台机器的整块屏幕，打开就能操作；切到「只看」时鼠标键盘不发（设计文档
 //! D9）。登记一个视图（[`VIEW`]），打开时参数带机器（`{"machine": …}`，见
-//! [`api::machine_to_json`]）。哪页都没摆它，打开时宿主放进出口。
+//! [`api::machine_to_json`]）。哪页都没摆它，打开时宿主放进出口。入口是机器菜单里的一项，
+//! 只给装了远程桌面的机器（见 [`menu`]）。
 //!
 //! 看不见时连接整套放掉，不在后台推画面；再露出来连回上次那台。画面和连接见 [`session`]。
 //!
 //! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道。
 
+mod menu;
 mod session;
 
 use std::rc::Rc;
@@ -21,6 +23,8 @@ use session::{DesktopView, page_toolbar};
 const OWNER: &str = "smelt.desktop";
 /// 远程桌面视图的 id，`<来源>/<名字>`。
 pub const VIEW: &str = "smelt.desktop/desktop";
+/// 视图和菜单项的图标。
+const ICON: &str = "smelt-icons/monitor.svg";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
@@ -29,11 +33,10 @@ pub fn register(cx: &mut App) {
         vec![ViewSpec {
             name: "desktop".into(),
             title: "远程桌面".into(),
-            icon: "smelt-icons/monitor.svg".into(),
-            // 不是每台机器都有：只有装了远程桌面、连着的机器才给入口。
-            per_machine: false,
+            icon: ICON.into(),
             // 顶上那条是外壳的标题带，连的哪台机器和「断开」在视图自己的工具行里。
             draws_top_bar: false,
+            instances: false,
             settings: None,
             build: Rc::new(|window, cx| -> Rc<dyn ViewHandle> {
                 Rc::new(cx.new(|cx| DesktopPage::new(window, cx)))
@@ -42,6 +45,7 @@ pub fn register(cx: &mut App) {
         cx,
     )
     .expect("远程桌面的视图表写错了");
+    menu::register(cx);
 }
 
 /// 那台机器眼下的名字；已经移除是 `None`。

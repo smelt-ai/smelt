@@ -1,10 +1,9 @@
-//! provider 账户状态的共享单例：额度快照 + Pi 模型目录版本。
+//! provider 账户额度的共享单例。
 //!
-//! 额度和「Pi 现在有哪些 provider」都是**进程级账户状态**，不属于任何会话，但
-//! 需要被多处读：侧栏额度行（主 GUI）、对话的模型菜单（`smelt-acp-view`）。两
-//! 个 crate 不能互相依赖，所以状态放在共享层，走 GPUI 的 Global + `revision`
-//! 唤醒 `observe_global`——和 [`crate::daemon_states_global`] 里那两个全局一个
-//! 形状，不另起一套机制。
+//! 额度是**进程级账户状态**，不属于任何会话，但要被多处读：侧栏额度行、设置里的额度页，
+//! 以及对话的模型菜单（宿主经 `smelt_acp_view::env` 转给对话组件，组件不直接读这里）。
+//! 走 GPUI 的 Global + `revision` 唤醒 `observe_global`——和
+//! [`crate::daemon_states_global`] 里那两个全局一个形状，不另起一套机制。
 //!
 //! 写入只走本文件的方法：它们在改完数据后统一 bump `revision`，观察者才会醒。
 //! 直接改内层 `Mutex` 不会触发任何刷新。
@@ -30,13 +29,6 @@ struct ProviderStatusData {
     /// 由用户点击触发、应在侧栏给出绿色反馈的那一家。后台定时和启动首查不写
     /// 这里，避免静默刷新打断额度行原有的风险颜色。
     manual_refreshing: HashSet<QuotaTarget>,
-    /// 本机 Pi 配置的版本号：运行时每推一次 `pi_config.changed`（登录、登出、改 provider
-    /// 等）+1。
-    ///
-    /// Pi 的模型目录只能问 Pi 进程自己（`get_available_models`），而那是会话级
-    /// 的、启动时拉一次。会话订阅这个版本号，变了就重拉自己的目录——这样新登录
-    /// 的 provider 不必等用户重开会话才出现。
-    pi_catalog_revision: u64,
 }
 
 /// provider 账户状态全局单例。`revision` 只为让 GPUI 觉得 Global 变了。
@@ -164,20 +156,6 @@ impl ProviderStatus {
                 .map(ProviderQuotaData::short_text)
         })?
     }
-
-    // ---- Pi 模型目录 ----
-
-    /// 本机的 Pi 配置变了（运行时推了 `pi_config.changed`）。活着的 Pi 会话会据此重拉
-    /// 自己的模型目录。
-    pub fn bump_pi_catalog(cx: &mut App) {
-        Self::update_data(cx, |data| {
-            data.pi_catalog_revision = data.pi_catalog_revision.wrapping_add(1);
-        });
-    }
-
-    pub fn pi_catalog_revision(cx: &App) -> u64 {
-        Self::with_data(cx, |data| data.pi_catalog_revision).unwrap_or(0)
-    }
 }
 
 #[cfg(test)]
@@ -204,5 +182,42 @@ mod tests {
     fn unknown_pi_provider_ids_are_dropped() {
         assert_eq!(QuotaTarget::from_id("pi:modelsight"), None);
         assert_eq!(QuotaTarget::from_id("claude:anthropic"), None);
+    }
+
+    fn quota(used_percent: f64) -> ProviderQuotaData {
+        ProviderQuotaData::Windows(smelt_model::provider_quota::ProviderQuota {
+            windows: vec![smelt_model::provider_quota::ProviderQuotaWindow {
+                label: "5h".to_string(),
+                used_percent,
+                resets_at_ms: None,
+                reset_after_seconds: None,
+            }],
+        })
+    }
+
+    /// 模型菜单里的额度括号：查到的 provider 给短文本；API key 型的 provider（modelsight
+    /// 这类）没有额度查询，永远是 `None`，菜单上不画空括号。
+    #[gpui::test]
+    fn pi_quota_badge_is_the_short_text_of_a_known_provider(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert_eq!(ProviderStatus::pi_quota_badge("anthropic", cx), None);
+            cx.set_global(ProviderStatus::default());
+            ProviderStatus::apply_quota(
+                vec![(
+                    QuotaTarget::pi("anthropic"),
+                    QuotaStatus {
+                        quota: Some(quota(25.0)),
+                        checked_at_ms: 1,
+                        error: None,
+                    },
+                )],
+                cx,
+            );
+            assert_eq!(
+                ProviderStatus::pi_quota_badge("anthropic", cx).as_deref(),
+                Some("25%")
+            );
+            assert_eq!(ProviderStatus::pi_quota_badge("modelsight", cx), None);
+        });
     }
 }

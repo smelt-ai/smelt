@@ -27,8 +27,8 @@ pub(crate) fn register(cx: &mut App) {
         name: "about".into(),
         title: "关于".into(),
         icon: IconName::Info.path(),
-        per_machine: false,
         draws_top_bar: false,
+        instances: false,
         settings: Some(SettingsEntry {
             group: SettingsGroup::System,
             keywords: [

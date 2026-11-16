@@ -1,5 +1,4 @@
-//! 两个跨视图通信用的 GPUI 全局单例：ACP 视图（`smelt-acp-view`）和主 GUI 都要
-//! 读写，放共享层而不是随便哪一边，免得循环依赖。
+//! 各运行时上报的会话状态镜像（GPUI 全局单例），宿主各处都读。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

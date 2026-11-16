@@ -8,6 +8,9 @@ use gpui::*;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, IconName};
 
+use smelt_plugin_api::contracts::sessions::{MACHINE_MENU, MachineMenuContext};
+
+use crate::plugin_menus::PluginMenuTarget;
 use crate::runtimes::Runtime;
 use crate::{RenameTarget, RuntimeKey, Workspace};
 
@@ -30,7 +33,6 @@ fn machine_actions(runtime: Runtime, workspace: Entity<Workspace>, cx: &App) -> 
         icon: Icon::empty().path("smelt-icons/folder-plus.svg"),
         separated: false,
         run: Rc::new({
-            let runtime = runtime.clone();
             let workspace = workspace.clone();
             move |_window, cx| {
                 let runtime = runtime.clone();
@@ -38,43 +40,6 @@ fn machine_actions(runtime: Runtime, workspace: Entity<Workspace>, cx: &App) -> 
             }
         }),
     }];
-    // 能针对机器打开的插件视图：打开时带上这台机器。
-    actions.extend(
-        smelt_plugin_api::views(cx)
-            .into_iter()
-            .filter(|view| view.per_machine)
-            .map(|view| {
-                let args =
-                    serde_json::json!({ "machine": smelt_plugin_api::machine_to_json(&key) });
-                let workspace = workspace.clone();
-                MachineAction {
-                    label: view.title,
-                    icon: Icon::empty().path(view.icon),
-                    separated: false,
-                    run: Rc::new(move |window, cx| {
-                        let args = args.clone();
-                        workspace.update(cx, |ws, cx| {
-                            ws.open_view(&view.id, args, window, cx);
-                        });
-                    }),
-                }
-            }),
-    );
-    // 只有装了远程桌面、眼下连着的机器才有。
-    if crate::runtimes::runtime_has_desktop(&key, cx) {
-        actions.push(MachineAction {
-            label: "远程桌面".into(),
-            icon: Icon::empty().path("smelt-icons/monitor.svg"),
-            separated: false,
-            run: Rc::new({
-                let workspace = workspace.clone();
-                move |window, cx| {
-                    let runtime = runtime.clone();
-                    workspace.update(cx, |ws, cx| ws.open_desktop(runtime.key(), window, cx));
-                }
-            }),
-        });
-    }
     // 连不上、版本对不上时不必等退避：立刻再试，运行时旧就再请它升级一次。
     if crate::runtimes::runtime_can_reconnect(&key, cx) {
         actions.insert(
@@ -144,13 +109,16 @@ fn machine_actions(runtime: Runtime, workspace: Entity<Workspace>, cx: &App) -> 
 }
 
 /// 侧栏分段标题的 `⋯` 和右键用的机器菜单。
+/// 末尾接上别的插件加在机器菜单里的项（`contracts::sessions::MACHINE_MENU`）。
 pub(crate) fn machine_menu(
     menu: PopupMenu,
     runtime: Runtime,
     workspace: Entity<Workspace>,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    machine_actions(runtime, workspace, cx)
+    let machine = runtime.key().clone();
+    let menu = machine_actions(runtime, workspace, cx)
         .into_iter()
         .fold(menu, |menu, action| {
             let menu = if action.separated {
@@ -164,5 +132,14 @@ pub(crate) fn machine_menu(
                     .icon(action.icon)
                     .on_click(move |_ev, window, cx| run(window, cx)),
             )
-        })
+        });
+    let context = MachineMenuContext {
+        machine: machine.clone(),
+    };
+    let target = PluginMenuTarget {
+        menu: MACHINE_MENU,
+        machine,
+        context: serde_json::to_value(context).unwrap_or_default(),
+    };
+    crate::plugin_menus::plugin_menu_items(menu, target, true, window, cx)
 }

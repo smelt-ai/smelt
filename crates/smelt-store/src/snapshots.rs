@@ -83,6 +83,23 @@ pub struct WorkspaceDirectoryCommit {
     pub changed: bool,
 }
 
+/// 守护在跑着的对话里看到的、冷启动续上要用的状态变了。客户端只在新建时带初值，之后
+/// 这些只由守护写（它是看得见这些变化的那一方）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcpLiveChange<'a> {
+    /// 对话选了一项配置（模型、模式等）。同一项只留最新的值，新的一项排在最后。
+    ConfigValue {
+        config_id: &'a str,
+        value_id: &'a str,
+    },
+    /// 待用的智能体预设随第一条消息发出去了。
+    AgentPresetConsumed,
+    /// 新建时带的首条消息发出去了。
+    PendingPromptSent,
+    /// 一个回合结束了：对话的最近活动时间记成 `at`（unix 秒）。
+    TurnEnded { at: i64 },
+}
+
 /// 一段对话：侧栏里的一条。里面有哪些终端、是不是一段 ACP 对话归运行时；终端怎么分屏、
 /// 当前看的是哪个，是每台设备自己的界面状态，归客户端（设计文档 D1）。
 #[derive(Clone, Debug, PartialEq)]

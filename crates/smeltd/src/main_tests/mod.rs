@@ -84,6 +84,9 @@ fn make_acp_session_value(
         pending_agent_preset: SessionLock::new(None),
         durable_history_session_id: SessionLock::new(None),
         idle: Default::default(),
+        after_ready: SessionLock::new(Default::default()),
+        after_ready_gate: SessionLock::new(()),
+        reconnect: SessionLock::new(Default::default()),
     }
 }
 

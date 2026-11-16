@@ -1,7 +1,7 @@
 //! 终端里的 kitty 图形，桌面端这一侧。
 //!
 //! smeltd 把程序的图形命令处理好，转成带 `k=1` 的转发命令混在输出里发过来（见
-//! `smelt_model::kitty_graphics`）。读线程把它们挑出来，图片就地解码成 `RenderImage` 放进这里；
+//! `smelt_plugin_api::model::kitty_graphics`）。读线程把它们挑出来，图片就地解码成 `RenderImage` 放进这里；
 //! 生成画面时按网格里的锚点标记和占位符格子来取。
 //!
 //! 换下来的 `RenderImage` 先攒着，等前台 `drop_image`：sprite atlas 按图片 id 留纹理，只丢
@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::RenderImage;
-use smelt_model::kitty_graphics::{Layout, PixelFormat, PlacementKey, Relay};
+use smelt_plugin_api::model::kitty_graphics::{Layout, PixelFormat, PlacementKey, Relay};
 
 /// 解码后的图片边长上限。sprite atlas 单张纹理到 16384px 就画不出来了；原始尺寸另外记着，
 /// 源图裁剪按原始像素算。

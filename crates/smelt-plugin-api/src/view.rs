@@ -6,10 +6,14 @@
 //! 和命令、布局一样按来源整组登记，id 是 `<来源>/<名字>`，一个插件换不掉别人的视图。
 //! 宿主只记 id，宿主里不出现视图的类型。建好的视图也记在这里：登记被替换或撤下，旧视图
 //! 跟着放掉。
+//!
+//! 按实例建的视图（[`ViewSpec::instances`]，如每段会话一份的终端）不归布局：别的插件用
+//! [`create_view`] 按参数建一份，自己摆、自己留着；只想放进主窗口看的（JS 插件就只能这样）
+//! 用 [`OPEN_VIEW`] 带参数打开，宿主建一份放进出口。
 
 use std::rc::Rc;
 
-use gpui::{AnyView, App, Context, Entity, Global, Render, SharedString, Window};
+use gpui::{AnyView, App, Context, Entity, FocusHandle, Global, Render, SharedString, Window};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +21,10 @@ use crate::{Command, HostEvent, SettingsEntry};
 
 /// 打开一个视图：哪页的布局里摆了它就去那页让它露出来，哪页都没摆就放进出口（见
 /// [`crate::page`]）；设置页在设置里打开、停在这一页。再把 `args` 交给它
-/// （[`PluginView::open`]）。没登记过这个 id 结果是 `false`。
+/// （[`PluginView::open`]）。没登记过这个 id、哪都放不下，结果是 `false`。
+///
+/// 按实例建的（[`ViewSpec::instances`]）每次按 `args` 新建一份放进出口，焦点交给它；出口
+/// 换了内容就放掉，重启后不放回来。建不出来、没有能放的出口是失败。
 pub const OPEN_VIEW: Command<OpenView, bool> = Command::new("smelt.app/open-view");
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -34,12 +41,20 @@ pub trait PluginView: Render {
     /// 被打开：每次打开都会调，参数由打开的地方给（如 `{"tab": "plugins"}`），认不出的
     /// 字段忽略。
     fn open(&mut self, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>);
+
+    /// 聚焦这个视图时键盘焦点落在哪（如终端的输入、对话的输入框）。摆它的一方切过来时
+    /// 聚焦它（见 [`ViewInstance::focus`]）。默认 `None`：不接管焦点。
+    fn focus_target(&self, _cx: &App) -> Option<FocusHandle> {
+        None
+    }
 }
 
 /// 宿主拿着的视图：画出来，或再打开一次。
 pub trait ViewHandle {
     fn view(&self) -> AnyView;
     fn open(&self, args: &serde_json::Value, window: &mut Window, cx: &mut App);
+    /// 见 [`PluginView::focus_target`]。
+    fn focus_target(&self, cx: &App) -> Option<FocusHandle>;
 }
 
 impl<V: PluginView> ViewHandle for Entity<V> {
@@ -49,6 +64,10 @@ impl<V: PluginView> ViewHandle for Entity<V> {
 
     fn open(&self, args: &serde_json::Value, window: &mut Window, cx: &mut App) {
         self.update(cx, |view, cx| view.open(args, window, cx));
+    }
+
+    fn focus_target(&self, cx: &App) -> Option<FocusHandle> {
+        self.read(cx).focus_target(cx)
     }
 }
 
@@ -97,9 +116,6 @@ pub struct ViewSpec {
     pub title: SharedString,
     /// 图标的资源路径，如 `IconName::LayoutDashboard.path()`。
     pub icon: SharedString,
-    /// 能针对某台机器打开：宿主给每台机器都留一个入口，从那里打开时参数带
-    /// `{"machine": …}`（见 [`crate::machine_to_json`]）。
-    pub per_machine: bool,
     /// 视图自己画顶上那一条（拖窗口、给红黄绿按钮让位、标题）：单独一组时外壳不给它画
     /// 标题带，也不让放大。画法上的事，和摆在哪无关；放进出口也一样。
     ///
@@ -108,7 +124,12 @@ pub struct ViewSpec {
     pub draws_top_bar: bool,
     /// 是一页设置：放进设置侧栏的哪一组、按哪些词能搜到。设置页由设置摆，布局不摆它。
     pub settings: Option<SettingsEntry>,
-    /// 第一次露出来时建视图；之后一直用这一份，直到登记被替换或撤下。
+    /// 按实例建：每份参数一个，由别的插件用 [`create_view`] 建、自己摆、自己留着，如每段
+    /// 会话一份的终端和对话。宿主不把它摆进布局，不给它入口；[`OPEN_VIEW`] 带参数打开时
+    /// 建一份放进出口。不能是设置页。
+    pub instances: bool,
+    /// 第一次露出来时建视图；之后一直用这一份，直到登记被替换或撤下。按实例建的每次
+    /// [`create_view`] 建一份新的。
     pub build: ViewBuilder,
 }
 
@@ -122,9 +143,9 @@ pub struct ViewInfo {
     pub id: SharedString,
     pub title: SharedString,
     pub icon: SharedString,
-    pub per_machine: bool,
     pub draws_top_bar: bool,
     pub settings: Option<SettingsEntry>,
+    pub instances: bool,
     pub build: ViewBuilder,
 }
 
@@ -162,13 +183,16 @@ pub fn register_views(owner: &str, specs: Vec<ViewSpec>, cx: &mut App) -> Result
         if spec.title.trim().is_empty() {
             return Err(format!("视图「{id}」没有标题"));
         }
+        if spec.instances && spec.settings.is_some() {
+            return Err(format!("视图「{id}」按实例建，不能是设置页"));
+        }
         infos.push(ViewInfo {
             id,
             title: spec.title,
             icon: spec.icon,
-            per_machine: spec.per_machine,
             draws_top_bar: spec.draws_top_bar,
             settings: spec.settings,
+            instances: spec.instances,
             build: spec.build,
         });
     }
@@ -206,7 +230,8 @@ pub fn register_views(owner: &str, specs: Vec<ViewSpec>, cx: &mut App) -> Result
     Ok(())
 }
 
-/// 撤下一个来源的全部视图，建好的跟着放掉。
+/// 撤下一个来源的全部视图，建好的跟着放掉。已经用 [`create_view`] 建出去的实例归拿着的
+/// 一方，不在这里收回。
 pub fn unregister_views(owner: &str, cx: &mut App) {
     if !cx.has_global::<ViewRegistry>() {
         return;
@@ -245,19 +270,20 @@ pub fn is_registered(id: &str, cx: &App) -> bool {
     entry(id, cx).is_some()
 }
 
-/// 已经建好的视图。只读内存，render 里取它；没建过或没登记是 `None`。
+/// 已经建好的视图。只读内存，render 里取它；没建过或没登记是 `None`。按实例建的视图
+/// 这里不记，也是 `None`。
 pub fn built_view(id: &str, cx: &App) -> Option<Rc<dyn ViewHandle>> {
     entry(id, cx)?.view.clone()
 }
 
 /// 取视图，没建过就现在建。第二项为 `true` 表示这次新建的，宿主随后要 `open` 它一次。
-/// 没登记过是 `None`。在事件里调，不在 render 里。
+/// 没登记过、或按实例建（用 [`create_view`]）是 `None`。在事件里调，不在 render 里。
 pub fn ensure_view(
     id: &str,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<(Rc<dyn ViewHandle>, bool)> {
-    let entry = entry(id, cx)?;
+    let entry = entry(id, cx).filter(|entry| !entry.info.instances)?;
     if let Some(view) = &entry.view {
         return Some((view.clone(), false));
     }
@@ -273,6 +299,62 @@ pub fn ensure_view(
         entry.view = Some(view.clone());
     }
     Some((view, true))
+}
+
+/// 按实例建的视图（[`ViewSpec::instances`]）的一份。谁建谁留着、谁摆；扔掉就放掉，视图
+/// 里的订阅、任务跟着结束。登记被替换或撤下不收回它，拿着的一方要换新的就看
+/// [`HostEvent::ViewsChanged`]。
+pub struct ViewInstance {
+    id: SharedString,
+    handle: Rc<dyn ViewHandle>,
+}
+
+impl ViewInstance {
+    /// 建它的视图 id。
+    pub fn id(&self) -> &SharedString {
+        &self.id
+    }
+
+    /// 画出来用的视图，每次给的都是同一份。
+    pub fn view(&self) -> AnyView {
+        self.handle.view()
+    }
+
+    /// 键盘焦点该落在哪，见 [`PluginView::focus_target`]。只读内存。
+    pub fn focus_handle(&self, cx: &App) -> Option<FocusHandle> {
+        self.handle.focus_target(cx)
+    }
+
+    /// 把键盘焦点交给它。视图不接管焦点（[`PluginView::focus_target`] 是 `None`）就什么
+    /// 都不做，结果是 `false`。
+    pub fn focus(&self, window: &mut Window, cx: &mut App) -> bool {
+        let Some(handle) = self.focus_handle(cx) else {
+            return false;
+        };
+        window.focus(&handle, cx);
+        true
+    }
+}
+
+/// 按 `args` 建一份按实例建的视图，建好先 `open(args)` 一次再交出来。没登记过、或它
+/// 不是按实例建的，是 `Err`（给人看的原因）。在事件里调，不在 render 里。
+pub fn create_view(
+    id: &str,
+    args: &serde_json::Value,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<ViewInstance, String> {
+    let Some(entry) = entry(id, cx) else {
+        return Err(format!("没有视图「{id}」"));
+    };
+    if !entry.info.instances {
+        return Err(format!("视图「{id}」不是按实例建的，用 OPEN_VIEW 打开"));
+    }
+    let id = entry.info.id.clone();
+    let build = entry.info.build.clone();
+    let handle = build(window, cx);
+    handle.open(args, window, cx);
+    Ok(ViewInstance { id, handle })
 }
 
 fn entry<'a>(id: &str, cx: &'a App) -> Option<&'a Entry> {
@@ -300,15 +382,50 @@ mod tests {
         fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
     }
 
+    /// 按实例建的视图：记下打开时给的参数，有自己的焦点。
+    struct Probe {
+        args: Vec<serde_json::Value>,
+        focus: FocusHandle,
+    }
+
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    impl PluginView for Probe {
+        fn open(&mut self, args: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {
+            self.args.push(args.clone());
+        }
+
+        fn focus_target(&self, _: &App) -> Option<FocusHandle> {
+            Some(self.focus.clone())
+        }
+    }
+
     fn spec(name: &str) -> ViewSpec {
         ViewSpec {
             name: name.to_string().into(),
             title: name.to_string().into(),
             icon: "icons/bell.svg".into(),
-            per_machine: false,
             draws_top_bar: false,
             settings: None,
+            instances: false,
             build: Rc::new(|_, cx| -> Rc<dyn ViewHandle> { Rc::new(cx.new(|_| Blank)) }),
+        }
+    }
+
+    fn instance_spec(name: &str) -> ViewSpec {
+        ViewSpec {
+            instances: true,
+            build: Rc::new(|_, cx| -> Rc<dyn ViewHandle> {
+                Rc::new(cx.new(|cx| Probe {
+                    args: Vec::new(),
+                    focus: cx.focus_handle(),
+                }))
+            }),
+            ..spec(name)
         }
     }
 
@@ -354,6 +471,38 @@ mod tests {
             for owner in ["", "a/b"] {
                 assert!(register_views(owner, vec![spec("b")], cx).is_err());
             }
+            // 按实例建的不能是设置页。
+            let mut settings = instance_spec("b");
+            settings.settings = Some(SettingsEntry::default());
+            assert!(register_views("trader", vec![settings], cx).is_err());
+            assert_eq!(ids(cx), ["trader/a"]);
+        });
+    }
+
+    /// 按实例建的每次建一份新的，建好先按参数打开一次；登记里不记，`ensure_view` 不建它。
+    /// 普通视图不能按实例建。
+    #[gpui::test]
+    fn instance_views_are_built_per_call_and_not_cached(cx: &mut TestAppContext) {
+        cx.add_empty_window().update(|window, cx| {
+            register_views("term", vec![instance_spec("pane"), spec("main")], cx).unwrap();
+            assert!(is_registered("term/pane", cx));
+            assert!(ensure_view("term/pane", window, cx).is_none());
+
+            let args = serde_json::json!({ "session_id": "s1" });
+            let first = create_view("term/pane", &args, window, cx).unwrap();
+            let second = create_view("term/pane", &args, window, cx).unwrap();
+            assert_eq!(first.id().as_ref(), "term/pane");
+            assert_ne!(first.view().entity_id(), second.view().entity_id());
+            let probe = first.view().downcast::<Probe>().unwrap();
+            assert_eq!(probe.read(cx).args, [args.clone()]);
+            assert!(built_view("term/pane", cx).is_none());
+
+            assert!(first.focus(window, cx));
+            let focus = first.focus_handle(cx).unwrap();
+            assert!(focus.is_focused(window));
+
+            assert!(create_view("term/main", &args, window, cx).is_err());
+            assert!(create_view("term/missing", &args, window, cx).is_err());
         });
     }
 

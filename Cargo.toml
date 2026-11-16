@@ -45,6 +45,7 @@ members = [
     "crates/plugins/maintenance",
     "crates/plugins/notifications",
     "crates/plugins/resources",
+    "crates/plugins/terminal",
     "crates/plugins/themes",
     "crates/plugins/updater",
     "crates/smelt",

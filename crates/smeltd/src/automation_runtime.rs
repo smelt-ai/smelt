@@ -457,6 +457,8 @@ impl Driver {
             }),
             pending_agent_preset: None,
             omit_history: false,
+            initial_config: Vec::new(),
+            initial_prompt: None,
         };
         ensure_acp_session(&request, &self.sessions, &self.acp_sessions, &self.event_hub)?;
         Ok(())

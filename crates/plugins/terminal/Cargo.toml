@@ -1,0 +1,31 @@
+# 内置插件「终端」（来源 id `smelt.terminal`）：内嵌终端的状态机、网格渲染和输入。PTY 和
+# shell 在 smeltd 里，这里连守护拿字节流，用 alacritty_terminal 解析。只依赖插件接口和第三方库。
+#
+# 过渡：眼下宿主（工作台、侧栏、终端停靠区）还直接用这里的 Rust 类型。会话插件搬走后改为
+# 经宿主的视图实例机制和 `smelt.terminal` 命令使用。
+[package]
+name = "smelt-terminal"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
+# 终端网格的状态机；PTY 子进程在 smeltd 里。
+alacritty_terminal = { version = "0.26", default-features = false }
+# kitty 图形：守护转发来的 PNG 就地解码。
+image = { version = "0.25", default-features = false, features = ["png"] }
+anyhow = "1"
+dirs = "5"
+serde_json = "1"
+smol = "2"
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+# 连真实守护的用例拉起 smeltd 时把就绪管道的写端递给它（清 CLOEXEC）。
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

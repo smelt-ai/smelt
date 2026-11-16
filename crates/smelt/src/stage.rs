@@ -1,5 +1,4 @@
 //! 舞台顶上浮着的东西：可见舞台身份的胶囊，舞台贴着窗口顶时还有拖窗口的条。
-//! 用其他应用打开在项目右键。
 //!
 //! 标题不拉成通栏。它是舞台正中的一颗胶囊，写活动会话（项目会话或侧栏对话）的名字。
 //! 对话里最近一问整条滚出视口后，胶囊换成那一问，按下滚回去。
@@ -8,7 +7,6 @@
 
 use gpui::StatefulInteractiveElement;
 use gpui::*;
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
 
 use crate::{Workspace, acp_view, ui_theme, workspace_frame};
@@ -126,107 +124,7 @@ fn chrome_prompt_island(
         })
 }
 
-/// 开着的「用其他应用打开」菜单。只持弱引用：菜单关了不留在内存里。
-pub(crate) struct OpenWithPopup {
-    popup: WeakEntity<PopupMenu>,
-    root: String,
-}
-
-/// 把插件登记的应用（`smelt_plugin_api::register_open_with_apps`）排成菜单项。只读内存，
-/// 第一次构建和登记变了之后的 `PopupMenu::rebuild` 共用。
-fn open_with_items(
-    mut menu: PopupMenu,
-    root: &str,
-    apps: &[smelt_plugin_api::OpenWithApp],
-) -> PopupMenu {
-    if apps.is_empty() {
-        return menu.item(PopupMenuItem::new("没有可用的应用").disabled(true));
-    }
-    for app in apps {
-        let image = app.image.clone();
-        let icon = app.icon.clone();
-        let label = app.label.clone();
-        let command = app.command.clone();
-        let args = smelt_plugin_api::OpenWith {
-            app: app.app.clone(),
-            path: std::path::PathBuf::from(root),
-        };
-        menu = menu.item(
-            // ElementItem 不经过 PopupMenu 的 Icon/SVG 通道，应用自己的彩色图标直接作为
-            // 菜单行的一部分画出来。
-            PopupMenuItem::element(move |_window, _cx| {
-                let row = h_flex().flex_1().items_center().gap_x_2();
-                let row = match image.clone() {
-                    Some(image) => {
-                        row.child(img(image).size(px(17.)).object_fit(ObjectFit::Contain))
-                    }
-                    None => row.child(Icon::default().path(icon.clone()).size(px(16.))),
-                };
-                row.child(label.clone())
-            })
-            .on_click(move |_ev, _window, cx| {
-                let opened = match serde_json::to_value(&args) {
-                    Ok(args) => smelt_plugin_api::run(&command, args, cx),
-                    Err(error) => Task::ready(Err(format!("项目路径转不成命令参数：{error}"))),
-                };
-                crate::workspace_commands::report_failure(opened, cx);
-            }),
-        );
-    }
-    menu
-}
-
 impl Workspace {
-    /// 构建「用其他应用打开」菜单。有哪些应用由插件登记，这里照登记的画，点了执行登记者
-    /// 的命令。菜单开着时登记变了（插件探测完、图标读到了），原地重建。
-    pub(crate) fn build_ide_popup_menu(
-        &mut self,
-        menu: PopupMenu,
-        root: String,
-        popup: Entity<PopupMenu>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> PopupMenu {
-        self.open_with_popups
-            .retain(|open| open.popup.upgrade().is_some());
-        self.open_with_popups.push(OpenWithPopup {
-            popup: popup.downgrade(),
-            root: root.clone(),
-        });
-        if self._open_with_apps_sub.is_none() {
-            let workspace = cx.entity().downgrade();
-            let window_handle = window.window_handle();
-            self._open_with_apps_sub =
-                Some(smelt_plugin_api::observe_open_with_apps(cx, move |cx| {
-                    let Some(workspace) = workspace.upgrade() else {
-                        return;
-                    };
-                    let _ = window_handle.update(cx, |_, window, cx| {
-                        workspace.update(cx, |workspace, cx| {
-                            workspace.rebuild_open_with_popups(window, cx);
-                        });
-                    });
-                }));
-        }
-        open_with_items(menu, &root, &smelt_plugin_api::open_with_apps(cx))
-    }
-
-    /// 登记的应用变了：开着的菜单按新的原地重建，关掉的顺手丢掉。
-    fn rebuild_open_with_popups(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let apps = smelt_plugin_api::open_with_apps(cx);
-        self.open_with_popups.retain(|open| {
-            let Some(popup) = open.popup.upgrade() else {
-                return false;
-            };
-            popup.update(cx, |menu, menu_cx| {
-                menu.rebuild(window, menu_cx, |menu, _, _| {
-                    open_with_items(menu, &open.root, &apps)
-                });
-            });
-            true
-        });
-    }
-
     /// 舞台上的页头、拖窗口条从哪起，见 [`Self::chrome_left_guard_of`]。
     pub(crate) fn chrome_left_guard(&self, window: &Window) -> Option<Pixels> {
         self.chrome_left_guard_of(crate::builtin_views::Builtin::Stage.id(), window)

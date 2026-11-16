@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use api::RuntimeKey;
 use api::model::control_api::{ProcessEntry, ProcessUsage};
 use api::ui::truncated_line::truncated_line;
 use api::ui::ui_theme;
@@ -195,7 +196,14 @@ fn section_view(
             None => format!("{}-others-{ix}", section.id_prefix),
         });
         let is_open = open.contains(&id);
-        table = table.child(session_row(id, group, is_open, page, colors));
+        table = table.child(session_row(
+            id,
+            &section.machine,
+            group,
+            is_open,
+            page,
+            colors,
+        ));
     }
     if let Some(total) = section.total {
         table = table.child(
@@ -368,6 +376,7 @@ fn disclosure(is_open: bool, colors: RowColors) -> impl IntoElement + use<> {
 /// 一行会话。点整行展开或收起它的进程；右边的按钮跳回主窗口的这个会话。
 fn session_row(
     id: SharedString,
+    machine: &RuntimeKey,
     group: &SessionGroup,
     is_open: bool,
     page: &Entity<ResourcesPage>,
@@ -379,6 +388,7 @@ fn session_row(
         None => format!("自动化、子智能体或别的客户端开的 · {summary}"),
     };
     let jump = group.jump.clone().map(|session_id| {
+        let machine = machine.clone();
         // 按下就截住：不然这一下也会落到外面那一行上，顺手把它展开了。
         div()
             .flex_none()
@@ -389,7 +399,9 @@ fn session_row(
                     .small()
                     .icon(IconName::ExternalLink)
                     .icon_action("跳到会话")
-                    .on_click(move |_, _, cx| crate::jump_to_session(session_id.clone(), cx)),
+                    .on_click(move |_, _, cx| {
+                        crate::jump_to_session(machine.clone(), session_id.clone(), cx)
+                    }),
             )
     });
     let head = ListRow::new(ElementId::from(id.clone()))

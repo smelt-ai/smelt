@@ -1,7 +1,8 @@
-//! 工作区持久化。运行时那份工作区目录（项目、对话）归运行时：这边收 `workspace.changed`
-//! 的推送，改动发成单条命令。项目列表直接取推送里的那份；对话要和本地活着的会话对账
-//! （账本见 [`crate::workspace_directory`]）。客户端自己的界面状态（侧栏开合和顺序、
-//! 当前页、各对话的分屏和路由）存在客户端库。写入走单消费者队列。
+//! 工作区持久化。运行时那份工作区目录（项目、对话）只有运行时写：这边收
+//! `workspace.changed` 的推送，在改动发生的那一刻发单条操作（新建、关掉、换终端格子、
+//! 改名、归档、置顶、开关项目），等推送回来再变。推送怎么落到本地会话见
+//! [`crate::workspace_directory`]。客户端自己的界面状态（侧栏开合和顺序、当前页、各对话
+//! 的分屏和路由）存在客户端库。写入走每个运行时一条的单消费者队列。
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -17,9 +18,7 @@ use smelt_runtime_client::protocol::control::{
 };
 
 use crate::runtimes::Runtime;
-use crate::workspace_directory::{
-    DirectoryCommands, DirectoryOutcome, order_by_saved, without_names,
-};
+use crate::workspace_directory::{Receipts, order_by_saved};
 use crate::{
     AcpSaved, PaneState, RuntimeKey, SessionKind, SessionState, SidebarGrouping, Workspace,
 };
@@ -99,9 +98,7 @@ fn acp_saved_from_directory(acp: WorkspaceAcp) -> AcpSaved {
         profile_id: acp.profile_id,
         agent: Some(acp.agent).filter(|agent| !agent.is_empty()),
         agent_definition_id: acp.agent_definition_id,
-        history_session_id: acp
-            .history_session_id
-            .map(agent_client_protocol::v1::schema::SessionId::new),
+        history_session_id: acp.history_session_id,
         sid: Some(acp.sid).filter(|sid| !sid.is_empty()),
         refresh_launch_from_settings: acp.refresh_launch_from_settings,
         conversation_binding: acp.conversation_binding,
@@ -121,7 +118,7 @@ fn acp_directory(acp: AcpSaved) -> Option<WorkspaceAcp> {
         cwd: acp.cwd,
         agent: acp.agent.unwrap_or_default(),
         profile_id: acp.profile_id,
-        history_session_id: acp.history_session_id.map(|id| id.to_string()),
+        history_session_id: acp.history_session_id,
         launch: acp.launch,
         refresh_launch_from_settings: acp.refresh_launch_from_settings,
         conversation_binding: acp.conversation_binding,
@@ -152,6 +149,21 @@ fn directory_terminal(leaf: PaneState) -> Option<WorkspaceTerminal> {
         }),
         _ => None,
     }
+}
+
+/// 终端对话里现在的格子，按树里的顺序。ACP 对话没有。
+fn session_terminals(session: &crate::Session, cx: &App) -> Vec<WorkspaceTerminal> {
+    let SessionKind::Term { dock, active } = &session.kind else {
+        return Vec::new();
+    };
+    // 树里一格都没有不会发生：关掉最后一格就关整个会话。真碰上了退回活动终端。
+    let layout = dock
+        .pane_state(cx)
+        .unwrap_or_else(|| crate::term_dock::pane_leaf_state(active, cx));
+    crate::conversation_layout::terminals_of(&layout)
+        .into_iter()
+        .filter_map(directory_terminal)
+        .collect()
 }
 
 /// 客户端自己的界面状态。每台设备可以不同（设计文档 D1），不交给运行时。
@@ -333,25 +345,39 @@ pub(crate) fn load_sidebar_orders() -> HashMap<RuntimeKey, SidebarOrderRecord> {
 /// 一个运行时这一轮要写的东西。主线程构建（纯内存），后台线程提交。
 struct SnapshotJob {
     runtime: Runtime,
-    /// 客户端自己的那份（界面状态、各对话路由、侧栏顺序）只有一份，跟本机那份一起写。
+    /// 客户端自己的那份（界面状态、各对话路由、侧栏顺序）只有一份，跟本机那份一起写；
+    /// 本机目录还没收到时不写（活动会话的下标要按恢复上来的会话算）。
     ui: Option<ClientSnapshot>,
-    /// 目录还没收到时为 `None`：什么命令都不发。
-    commands: Option<DirectoryCommands>,
-    /// 用户打开、关闭的项目，按发生的先后。跟在对话命令后面发。
+    /// 用户打开、关闭的项目，按发生的先后。跟在对话操作后面发。
     project_ops: Vec<ProjectOp>,
     conversation_ops: Vec<ConversationOp>,
 }
 
+/// 对一段对话的单条操作，在改动发生的那一刻发。
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ConversationOp {
-    Archive { id: String, archived: bool },
-    Pin { id: String, pinned: bool },
-    Delete { id: String },
+    /// 这边新开了一段对话：开的那一刻的样子（见 `Workspace::new_directory_conversation`）。
+    Create(Box<WorkspaceConversation>),
+    /// 终端对话里的格子变了（分屏、关掉一格）：只看 `terminals`，别的以库里的为准。
+    SetTerminals(Box<WorkspaceConversation>),
+    Archive {
+        id: String,
+        archived: bool,
+    },
+    Pin {
+        id: String,
+        pinned: bool,
+    },
+    Delete {
+        id: String,
+    },
 }
 
 impl ConversationOp {
     pub(crate) fn method(&self) -> ControlMethod {
         match self {
+            Self::Create(_) => ControlMethod::WorkspaceConversationCreate,
+            Self::SetTerminals(_) => ControlMethod::WorkspaceConversationUpdate,
             Self::Archive { .. } => ControlMethod::WorkspaceConversationArchive,
             Self::Pin { .. } => ControlMethod::WorkspaceConversationPin,
             Self::Delete { .. } => ControlMethod::WorkspaceConversationDelete,
@@ -425,9 +451,9 @@ impl WorkspaceSnapshotWriteQueue {
     }
 }
 
-/// 后台线程提交：客户端那份写客户端库，目录命令按顺序发给运行时。返回发成功的对话
-/// 命令（主线程据此记账，没发成功的下一轮再发）、显式操作的错误文案和不支持的方法。
-fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
+/// 后台线程提交：客户端那份写客户端库，操作按发生的先后发给运行时。返回回执（主线程
+/// 据此挡掉旧推送）和失败操作的错误文案。失败的不重发：目录保持运行时那边的样子。
+fn persist_ws_snapshot(job: &SnapshotJob) -> (Receipts, Vec<String>) {
     if let Some(client) = &job.ui {
         if let Err(error) = save_workspace_ui(&client.ui) {
             eprintln!("[workspace] 保存界面状态失败：{error}");
@@ -444,15 +470,12 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
             Err(error) => eprintln!("[workspace] 打开客户端库失败：{error}"),
         }
     }
-    let mut outcome = job
-        .commands
-        .as_ref()
-        .map(|commands| send_directory_commands(&job.runtime, commands))
-        .unwrap_or_default();
-    let mut errors = send_project_ops(&job.runtime, &job.project_ops);
+    let mut receipts = Receipts::default();
+    let mut errors = Vec::new();
     for op in &job.conversation_ops {
         use smelt_model::control_api::{
-            WorkspaceConversationArchive, WorkspaceConversationDelete, WorkspaceConversationPin,
+            WorkspaceConversationArchive, WorkspaceConversationCreate, WorkspaceConversationDelete,
+            WorkspaceConversationPin, WorkspaceConversationUpdate,
         };
         use smelt_model::workspace_directory::{
             WorkspaceConversationArchiveParams, WorkspaceConversationPinParams,
@@ -460,6 +483,12 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
         let client = job.runtime.client();
         let timeout = crate::runtime_call::RUNTIME_CALL_TIMEOUT;
         let result = match op {
+            ConversationOp::Create(conversation) => {
+                client.call::<WorkspaceConversationCreate>(conversation, timeout)
+            }
+            ConversationOp::SetTerminals(conversation) => {
+                client.call::<WorkspaceConversationUpdate>(conversation, timeout)
+            }
             ConversationOp::Archive { id, archived } => client
                 .call::<WorkspaceConversationArchive>(
                     &WorkspaceConversationArchiveParams {
@@ -476,15 +505,23 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
                 },
                 timeout,
             ),
-            ConversationOp::Delete { id } => client.call::<WorkspaceConversationDelete>(
-                &WorkspaceConversationIdParams {
-                    conversation_id: id.clone(),
-                },
-                timeout,
-            ),
+            ConversationOp::Delete { id } => {
+                let result = client.call::<WorkspaceConversationDelete>(
+                    &WorkspaceConversationIdParams {
+                        conversation_id: id.clone(),
+                    },
+                    timeout,
+                );
+                receipts.deletes_done.push(id.clone());
+                result
+            }
         };
         match result {
-            Ok(revision) => outcome.confirm(revision),
+            Ok(revision) => receipts.confirm(revision),
+            // 换格子时对话已经被别处关掉：推送随后会把它从本地摘掉。
+            Err(ControlClientError::Protocol(error))
+                if matches!(op, ConversationOp::SetTerminals(_))
+                    && error.code == ControlErrorCode::NotFound => {}
             Err(error) => {
                 errors.push(format!(
                     "{} 失败：{}",
@@ -494,7 +531,8 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
             }
         }
     }
-    (outcome, errors)
+    errors.extend(send_project_ops(&job.runtime, &job.project_ops));
+    (receipts, errors)
 }
 
 /// 项目操作不重发：运行时连不上就告诉用户，项目列表保持运行时那边的样子。
@@ -533,94 +571,9 @@ fn send_project_ops(runtime: &Runtime, ops: &[ProjectOp]) -> Vec<String> {
         .collect()
 }
 
-/// 按依赖顺序发：先删、再建、再改。一条失败不影响后面的。
-fn send_directory_commands(runtime: &Runtime, commands: &DirectoryCommands) -> DirectoryOutcome {
-    use smelt_model::control_api::{
-        WorkspaceConversationCreate, WorkspaceConversationDelete, WorkspaceConversationUpdate,
-    };
-    let client = runtime.client();
-    let timeout = crate::runtime_call::RUNTIME_CALL_TIMEOUT;
-    let failed = |what: &str, error: ControlClientError| {
-        eprintln!(
-            "[workspace] {what}失败：{}",
-            crate::runtime_call::error_text(error)
-        );
-    };
-    let mut outcome = DirectoryOutcome::default();
-    for id in &commands.deletes {
-        let params = WorkspaceConversationIdParams {
-            conversation_id: id.clone(),
-        };
-        match client.call::<WorkspaceConversationDelete>(&params, timeout) {
-            Ok(revision) => {
-                outcome.confirm(revision);
-                outcome.deleted.push(id.clone());
-            }
-            Err(error) => failed("关闭对话", error),
-        }
-    }
-    for conversation in &commands.creates {
-        match client.call::<WorkspaceConversationCreate>(conversation, timeout) {
-            Ok(revision) => {
-                outcome.confirm(revision);
-                outcome.created.push(conversation.clone());
-            }
-            Err(error) => failed("新建对话", error),
-        }
-    }
-    for conversation in &commands.updates {
-        match client.call::<WorkspaceConversationUpdate>(conversation, timeout) {
-            Ok(revision) => {
-                outcome.confirm(revision);
-                outcome.settled.push(conversation.clone());
-            }
-            // 别处已经关掉了：推送随后会把它从本地摘掉，不必再发。
-            Err(ControlClientError::Protocol(error))
-                if error.code == ControlErrorCode::NotFound => {}
-            // 参数不对，再发也一样：记成发过，等内容变了再发。
-            Err(ControlClientError::Protocol(error))
-                if error.code == ControlErrorCode::InvalidParams =>
-            {
-                eprintln!(
-                    "[workspace] 运行时拒收对话 {}：{}",
-                    conversation.id, error.message
-                );
-                outcome.settled.push(conversation.clone());
-            }
-            Err(error) => failed("更新对话", error),
-        }
-    }
-    outcome
-}
-
-fn snapshot_acp_view(
-    view: &crate::acp_view::AcpView,
-    agent_definition_id: Option<String>,
-    automation_id: Option<String>,
-) -> AcpSaved {
-    AcpSaved {
-        cwd: view.cwd(),
-        launch: view.launch_spec(),
-        profile_id: view.profile_id().map(str::to_string),
-        agent: Some(view.agent_kind().id().to_string()),
-        agent_definition_id,
-        history_session_id: view.history_session_id_for_save(),
-        sid: Some(view.session_id().to_string()),
-        refresh_launch_from_settings: view.refresh_launch_from_settings(),
-        conversation_binding: view.conversation_binding_for_save(),
-        config_values: view.config_values_for_save(),
-        pending_prompt: view.pending_prompt_for_save(),
-        pending_delivery_id: view.pending_delivery_id_for_save(),
-        pending_agent_preset: view.pending_agent_preset_for_save(),
-        automation_id,
-        // agent 报的标题只由守护写进目录，这边不发。
-        session_title: None,
-    }
-}
-
 impl Workspace {
-    /// 把所有会话（各自分屏树 + 活动叶子遍历序）和工作台界面状态写入
-    /// SQLite 工作区类型化快照。
+    /// 把客户端自己的界面状态（工作台、各对话的分屏和路由、侧栏顺序）写进客户端库。
+    /// 目录不走这里：对话的改动在发生的那一刻发操作（见 [`ConversationOp`]）。
     ///
     /// 主线程只做纯内存快照（构建 + 序列化），读盘/写盘一律挪到后台线程——
     /// 历史上 open() 会被系统 EndpointSecurity 钩子（杀毒/EDR/打印管理等）拖住，
@@ -630,14 +583,10 @@ impl Workspace {
         if self.ws_snapshot_finalizing {
             return;
         }
-        let jobs = self
-            .space_keys()
-            .into_iter()
-            .filter_map(|key| Some((key.clone(), self.build_ws_snapshot(&key, cx)?)))
-            .collect::<Vec<_>>();
-        if jobs.is_empty() {
+        let Some(job) = self.build_ws_snapshot(&RuntimeKey::Local, cx) else {
             return;
-        }
+        };
+        let jobs = [(RuntimeKey::Local, job)];
         let epoch = self.ws_snapshot_epoch;
         // render 期间不能再次 update 当前 Workspace 实体。启动首帧会触发一次
         // save_state，直接 spawn 可能在布局仍借用实体时回到 update_entity，最终
@@ -745,26 +694,43 @@ impl Workspace {
             }
         }
         // 名字只从目录来（改名由运行时写、在跑的对话也由它同步给 agent），这里只更新显示。
-        for (id, title) in inbound.retitled {
-            let Some(session) = self
-                .sessions
-                .iter_mut()
-                .find(|session| session.conversation_id == id && session.runtime(cx).key() == key)
-            else {
+        for (id, title) in inbound.titles {
+            let Some(session) = self.sessions.iter_mut().find(|session| {
+                session.conversation_id == id
+                    && session.runtime(cx).key() == key
+                    && session.custom_title != title
+            }) else {
                 continue;
             };
             session.custom_title = title;
             self.session_list_revision = self.session_list_revision.wrapping_add(1);
         }
-        for (terminal_id, title) in inbound.renamed_terminals {
+        for (terminal_id, title) in inbound.terminal_titles {
             let pane = self
                 .sessions
                 .iter()
                 .filter(|session| session.runtime(cx).key() == key)
                 .flat_map(|session| session.term_leaves())
                 .find(|pane| pane.read(cx).session_id() == terminal_id);
-            if let Some(pane) = pane {
+            if let Some(pane) = pane
+                && pane.read(cx).custom_title() != title.as_deref()
+            {
                 pane.update(cx, |pane, _| pane.set_custom_title(title));
+            }
+        }
+        // 运行时的库换过：本地开着、新库里没有的对话按现在的样子重新建进去。
+        for id in inbound.recreate {
+            let conversation = self
+                .sessions
+                .iter()
+                .find(|session| session.conversation_id == id && session.runtime(cx).key() == key)
+                .and_then(|session| self.new_directory_conversation(session, cx));
+            if let Some(conversation) = conversation {
+                self.request_conversation_op(
+                    key,
+                    ConversationOp::Create(Box::new(conversation)),
+                    cx,
+                );
             }
         }
 
@@ -882,12 +848,12 @@ impl Workspace {
                     }
                     break;
                 };
-                let (outcome, operation_errors) = executor
+                let (receipts, operation_errors) = executor
                     .spawn(async move { persist_ws_snapshot(&job) })
                     .await;
                 let _ = workspace.update(cx, |this, cx| {
                     if let Some(space) = this.space_mut(&key) {
-                        space.directory.record(outcome);
+                        space.directory.record(receipts);
                     }
                     for error in operation_errors {
                         eprintln!("[workspace] {error}");
@@ -900,36 +866,43 @@ impl Workspace {
         .detach();
     }
 
-    /// 一段会话在运行时目录里该是的样子。ACP 视图还没就绪时返回 `None`。
-    fn directory_conversation(
+    /// 一段会话开的那一刻在运行时目录里的样子，随 [`ConversationOp::Create`] 发一次。
+    /// 之后的变化各走各的：终端格子见 [`Self::sync_conversation_terminals`]，名字、归档、
+    /// 置顶走各自的操作，ACP 对话的配置、首条消息、预设、活动时间由守护按它看到的写。
+    /// ACP 视图没有守护会话 id 时返回 `None`：运行时按它认这段对话。
+    pub(crate) fn new_directory_conversation(
         &self,
         session: &crate::Session,
         cx: &App,
     ) -> Option<WorkspaceConversation> {
         let last_updated_at = session.effective_updated_at(cx).min(i64::MAX as u64) as i64;
         let (terminals, acp) = match &session.kind {
-            SessionKind::Term { dock, active } => {
-                // 树里一格都没有不会发生：关掉最后一格就关整个会话。真碰上了退回活动终端。
-                let layout = dock
-                    .pane_state(cx)
-                    .unwrap_or_else(|| crate::term_dock::pane_leaf_state(active, cx));
-                let terminals = crate::conversation_layout::terminals_of(&layout)
-                    .into_iter()
-                    .filter_map(directory_terminal)
-                    .collect();
-                (terminals, None)
-            }
+            SessionKind::Term { .. } => (session_terminals(session, cx), None),
             SessionKind::Conversation(view) => {
-                let saved = snapshot_acp_view(
-                    view.read(cx),
-                    session.agent_definition_id.clone(),
-                    session.automation_id.clone(),
-                );
+                let view = view.read(cx);
+                let saved = AcpSaved {
+                    cwd: view.cwd(),
+                    launch: view.launch_spec(),
+                    profile_id: view.profile_id().map(str::to_string),
+                    agent: Some(view.agent_kind().id().to_string()),
+                    agent_definition_id: session.agent_definition_id.clone(),
+                    history_session_id: view.history_session_id_for_save(),
+                    sid: Some(view.session_id().to_string()),
+                    refresh_launch_from_settings: view.refresh_launch_from_settings(),
+                    conversation_binding: view.conversation_binding_for_save(),
+                    config_values: view.config_values_for_save(),
+                    pending_prompt: view.pending_prompt_for_save(),
+                    pending_delivery_id: view.pending_delivery_id_for_save(),
+                    pending_agent_preset: view.pending_agent_preset_for_save(),
+                    automation_id: session.automation_id.clone(),
+                    // agent 报的标题只由守护写进目录。
+                    session_title: None,
+                };
                 (Vec::new(), Some(acp_directory(saved)?))
             }
         };
-        // 名字不随对话发出去：只经 `workspace.rename` 写，见 `request_rename`。
-        Some(without_names(&WorkspaceConversation {
+        // 名字不随新建写：只经 `workspace.rename` 写，见 `request_rename`。
+        Some(WorkspaceConversation {
             id: session.conversation_id.clone(),
             custom_title: None,
             last_updated_at,
@@ -939,7 +912,62 @@ impl Workspace {
             pinned_at: None,
             workset_id: session.workset_id.clone(),
             closed_workset_root: None,
-        }))
+        })
+    }
+
+    /// 这边新开了 `ix` 这段会话：建进运行时目录。只在用户新开的那一刻调；恢复、别处
+    /// 开的推来的都已经在目录里。
+    pub(crate) fn announce_new_conversation(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(session) = self.sessions.get(ix) else {
+            return;
+        };
+        let key = session.runtime(cx).key().clone();
+        let Some(conversation) = self.new_directory_conversation(session, cx) else {
+            eprintln!(
+                "[workspace] 对话 {} 没有守护会话 id，没有建进目录",
+                session.conversation_id
+            );
+            return;
+        };
+        self.request_conversation_op(&key, ConversationOp::Create(Box::new(conversation)), cx);
+    }
+
+    /// 终端对话里的格子变了（分屏、关掉一格、拖进拖出）：和目录里的不一样才发。
+    /// 拖动分隔条、换位置之类格子没变的不发。目录里还没有这段（新建还没推回来）也发：
+    /// 同一条队列里排在新建后面。
+    pub(crate) fn sync_conversation_terminals(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(session) = self.sessions.get(ix) else {
+            return;
+        };
+        if !matches!(session.kind, SessionKind::Term { .. }) {
+            return;
+        }
+        let key = session.runtime(cx).key().clone();
+        let terminals = session_terminals(session, cx);
+        let unchanged = self.space(&key).is_none_or(|space| {
+            space
+                .directory
+                .terminal_ids(&session.conversation_id)
+                .is_some_and(|listed| {
+                    listed
+                        .iter()
+                        .map(String::as_str)
+                        .eq(terminals.iter().filter_map(|t| t.id.as_deref()))
+                })
+        });
+        if unchanged {
+            return;
+        }
+        let conversation = WorkspaceConversation {
+            id: session.conversation_id.clone(),
+            terminals,
+            ..WorkspaceConversation::default()
+        };
+        self.request_conversation_op(
+            &key,
+            ConversationOp::SetTerminals(Box::new(conversation)),
+            cx,
+        );
     }
 
     /// 改名：交给运行时，名字写在哪由它定，改完随目录推送回来再显示。`terminal_id` 是给
@@ -1193,14 +1221,15 @@ impl Workspace {
         self.request_project_op(key, ProjectOp::Close(root.to_string()), cx)
     }
 
+    /// 对话操作进这个运行时的写入队列，排在已经入队的操作后面。
     pub(crate) fn request_conversation_op(
         &mut self,
         key: &RuntimeKey,
         op: ConversationOp,
         cx: &mut Context<Self>,
     ) {
-        let Some(mut job) = self.build_ws_snapshot(key, cx) else {
-            self.report_background_error("运行时还没连上，无法修改对话".to_string());
+        let Some(mut job) = self.ops_job(key, cx) else {
+            self.report_background_error("这台机器已经移除，无法修改对话".to_string());
             return;
         };
         job.conversation_ops.push(op);
@@ -1215,7 +1244,13 @@ impl Workspace {
         op: ProjectOp,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(mut job) = self.build_ws_snapshot(key, cx) else {
+        if !self
+            .space(key)
+            .is_some_and(|space| space.directory.loaded())
+        {
+            return false;
+        }
+        let Some(mut job) = self.ops_job(key, cx) else {
             return false;
         };
         job.project_ops.push(op);
@@ -1233,39 +1268,59 @@ impl Workspace {
         true
     }
 
-    /// 本地关掉了一段对话：运行时目录里也关掉它（运行时顺带收进程），发成功之前一直留着。
-    pub(crate) fn close_directory_conversation(&mut self, key: &RuntimeKey, conversation_id: &str) {
-        if let Some(space) = self.space_mut(key) {
-            space.directory.close_conversation(conversation_id);
-        }
+    /// 本地关掉了一段对话：运行时目录里也关掉它（运行时顺带收进程）。删除回执回来之前，
+    /// 推送里的旧目录不会把它带回来；没删成的报给用户，之后以推送为准。
+    pub(crate) fn close_directory_conversation(
+        &mut self,
+        key: &RuntimeKey,
+        conversation_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(space) = self.space_mut(key) else {
+            return;
+        };
+        space.directory.close_conversation(conversation_id);
+        self.request_conversation_op(
+            key,
+            ConversationOp::Delete {
+                id: conversation_id.to_string(),
+            },
+            cx,
+        );
     }
 
-    /// 主线程构建一个运行时那份待写快照（纯内存，不碰磁盘）。返回 None 表示本次无需写。
+    /// 发操作用的一份待写任务：本机那份顺带写界面状态（目录到了才写）。
+    fn ops_job(&self, key: &RuntimeKey, cx: &mut Context<Self>) -> Option<SnapshotJob> {
+        if *key == RuntimeKey::Local
+            && let Some(job) = self.build_ws_snapshot(key, cx)
+        {
+            return Some(job);
+        }
+        Some(SnapshotJob {
+            runtime: self.space(key)?.runtime.clone(),
+            ui: None,
+            project_ops: Vec::new(),
+            conversation_ops: Vec::new(),
+        })
+    }
+
+    /// 主线程构建客户端界面状态那份待写快照（纯内存，不碰磁盘）。只有本机那份带；本机
+    /// 目录还没到时不写：活动会话的下标要按恢复上来的会话算。
     fn build_ws_snapshot(&self, key: &RuntimeKey, cx: &mut Context<Self>) -> Option<SnapshotJob> {
+        if *key != RuntimeKey::Local {
+            return None;
+        }
         let space = self.space(key)?;
-        // 本机目录还没到时连界面状态也不写：活动会话的下标要按恢复上来的会话算。
         if !space.directory.loaded() {
             return None;
         }
-        let desired = self
-            .sessions
-            .iter()
-            .filter(|session| session.runtime(cx).key() == key)
-            .filter_map(|session| self.directory_conversation(session, cx))
-            .collect::<Vec<_>>();
-        let commands = space
-            .directory
-            .commands(&desired)
-            .filter(|commands| !commands.is_empty());
-        let ui = (*key == RuntimeKey::Local).then(|| ClientSnapshot {
-            ui: self.workspace_ui_state(cx),
-            routes: self.conversation_route_records(cx),
-            orders: self.sidebar_order_records(cx),
-        });
         Some(SnapshotJob {
             runtime: space.runtime.clone(),
-            ui,
-            commands,
+            ui: Some(ClientSnapshot {
+                ui: self.workspace_ui_state(cx),
+                routes: self.conversation_route_records(cx),
+                orders: self.sidebar_order_records(cx),
+            }),
             project_ops: Vec::new(),
             conversation_ops: Vec::new(),
         })
@@ -1407,10 +1462,8 @@ impl Workspace {
         self.ws_snapshot_finalizing = true;
         self.ws_snapshot_epoch = self.ws_snapshot_epoch.wrapping_add(1);
         let epoch = self.ws_snapshot_epoch;
-        for key in self.space_keys() {
-            if let Some(job) = self.build_ws_snapshot(&key, cx) {
-                self.enqueue_ws_snapshot(&key, job, epoch, cx);
-            }
+        if let Some(job) = self.build_ws_snapshot(&RuntimeKey::Local, cx) {
+            self.enqueue_ws_snapshot(&RuntimeKey::Local, job, epoch, cx);
         }
         match self.space_mut(&crate::RuntimeKey::Local) {
             Some(space) => space.write_queue.wait_for_drain(),
@@ -1522,10 +1575,13 @@ mod workspace_snapshot_write_queue_tests {
                     Err(std::io::Error::other("snapshot test"))
                 }),
             ),
-            ui: None,
-            commands: Some(crate::workspace_directory::DirectoryCommands {
-                deletes: vec![name.to_string()],
-                ..Default::default()
+            ui: Some(super::ClientSnapshot {
+                ui: super::WorkspaceUiState {
+                    active_session_id: Some(name.to_string()),
+                    ..Default::default()
+                },
+                routes: Vec::new(),
+                orders: Vec::new(),
             }),
             project_ops: Vec::new(),
             conversation_ops: Vec::new(),
@@ -1592,7 +1648,7 @@ mod workspace_snapshot_write_queue_tests {
     }
 
     fn name(job: SnapshotJob) -> String {
-        job.commands.unwrap().deletes.remove(0)
+        job.ui.unwrap().ui.active_session_id.unwrap()
     }
 
     #[test]
@@ -1655,14 +1711,7 @@ mod agent_conversation_persist_tests {
         let saved = state.acp.expect("ACP 细节");
         assert_eq!(saved.cwd.as_deref(), Some(cwd));
         assert_eq!(saved.sid.as_deref(), Some("acp-global-1"));
-        assert_eq!(
-            saved
-                .history_session_id
-                .as_ref()
-                .map(|id| id.to_string())
-                .as_deref(),
-            Some("pi-history-1")
-        );
+        assert_eq!(saved.history_session_id.as_deref(), Some("pi-history-1"));
         assert_eq!(acp_directory(saved), Some(acp.clone()));
         assert_eq!(
             acp_directory(acp_saved_from_directory(WorkspaceAcp {

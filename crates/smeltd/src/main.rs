@@ -105,6 +105,7 @@
 mod acp_host;
 mod acp_idle;
 mod acp_registry;
+mod acp_supervise;
 mod agent_memory_control;
 mod agent_notify;
 mod attention;

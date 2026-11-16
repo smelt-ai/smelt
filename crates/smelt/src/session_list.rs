@@ -163,7 +163,6 @@ fn runtime_section_header(
         Some(crate::runtimes::LinkLight::Down) => ui_theme::bad(),
         None => ui_theme::muted(),
     };
-    let has_desktop = crate::runtimes::runtime_has_desktop(&key, cx);
     let group = SharedString::from(format!("runtime-header-{key:?}"));
     let toggle_workspace = workspace.clone();
     let toggle_key = key.clone();
@@ -210,26 +209,6 @@ fn runtime_section_header(
                 .opacity(0.0)
                 .group_hover(group.clone(), |style| style.opacity(1.0))
         }))
-        .when(has_desktop, |d| {
-            let runtime = runtime.clone();
-            let workspace = workspace.clone();
-            d.child(
-                Button::new(ElementId::from(SharedString::from(format!(
-                    "runtime-desktop-{key:?}"
-                ))))
-                .quiet()
-                .small()
-                .icon(Icon::empty().path("smelt-icons/monitor.svg"))
-                .icon_action("远程桌面")
-                .opacity(0.0)
-                .group_hover(group.clone(), |style| style.opacity(1.0))
-                .on_click(move |_ev, window, cx| {
-                    cx.stop_propagation();
-                    let runtime = runtime.clone();
-                    workspace.update(cx, |ws, cx| ws.open_desktop(runtime.key(), window, cx));
-                }),
-            )
-        })
         .child({
             let runtime = runtime.clone();
             let workspace = workspace.clone();
@@ -263,29 +242,63 @@ fn runtime_section_header(
                     .small()
                     .icon(IconName::Ellipsis)
                     .icon_action("这台机器")
-                    .dropdown_menu(move |menu, _window, cx| {
-                        machine_menu(menu, menu_runtime.clone(), menu_workspace.clone(), cx)
+                    .dropdown_menu(move |menu, window, cx| {
+                        machine_menu(
+                            menu,
+                            menu_runtime.clone(),
+                            menu_workspace.clone(),
+                            window,
+                            cx,
+                        )
                     }),
                 ),
         )
-        .context_menu(move |menu, _window, cx| {
-            machine_menu(menu, context_runtime.clone(), context_workspace.clone(), cx)
+        .context_menu(move |menu, window, cx| {
+            machine_menu(
+                menu,
+                context_runtime.clone(),
+                context_workspace.clone(),
+                window,
+                cx,
+            )
         })
 }
 
-/// 远程项目的右键菜单：复制路径、置顶、关闭。
+/// 项目行右键菜单里别的插件加的项（`contracts::sessions::PROJECT_MENU`），如「用其他应用
+/// 打开」。
+fn project_plugin_items(
+    menu: PopupMenu,
+    project: &ProjectRef,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let context = smelt_plugin_api::contracts::sessions::ProjectMenuContext {
+        machine: project.runtime.clone(),
+        path: project.root.clone(),
+    };
+    let target = crate::plugin_menus::PluginMenuTarget {
+        menu: smelt_plugin_api::contracts::sessions::PROJECT_MENU,
+        machine: project.runtime.clone(),
+        context: serde_json::to_value(context).unwrap_or_default(),
+    };
+    crate::plugin_menus::plugin_menu_items(menu, target, false, window, cx)
+}
+
+/// 远程项目的右键菜单：复制路径、置顶、关闭，加上插件加的项。
 fn remote_project_menu(
     menu: PopupMenu,
     project: ProjectRef,
     session_count: usize,
     workspace: Entity<Workspace>,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let pinned = workspace.read(cx).is_project_pinned(&project);
     let copy_path = project.root.clone();
     let pin_project = project.clone();
     let pin_workspace = workspace.clone();
-    project_workset_menu(menu, project.clone(), workspace.clone(), cx)
+    let menu = project_workset_menu(menu, project.clone(), workspace.clone(), cx);
+    project_plugin_items(menu, &project, window, cx)
         .item(
             PopupMenuItem::new("复制项目路径")
                 .icon(IconName::Copy)
@@ -539,7 +552,7 @@ fn quota_popover(quotas: Vec<FooterQuota>, workspace: Entity<Workspace>) -> Div 
                         .flex_shrink_0()
                         .flex()
                         .justify_end()
-                        .font_family(crate::terminal_view::font_family())
+                        .font_family(smelt_model::font_config::font_family())
                         .text_color(rgb(color))
                         .map(|cell| {
                             if quota.refreshing {
@@ -1347,7 +1360,7 @@ impl Workspace {
                                         .min_w_0()
                                         .overflow_hidden()
                                         .text_xs()
-                                        .font_family(crate::terminal_view::font_family())
+                                        .font_family(smelt_model::font_config::font_family())
                                         .text_color(rgb(ui_theme::row_faint(project_header_selected)))
                                         .tooltip(move |window, cx| {
                                             gpui_component::tooltip::Tooltip::new(
@@ -1472,14 +1485,14 @@ impl Workspace {
                                 if !is_project_group {
                                     return menu;
                                 }
-                                // 远程项目的文件不在这台机器上，用本机程序打开做不了，只给
-                                // 通用的几项。
+                                // 远程项目没有分支名可复制；插件加的项各自说在哪台机器上列。
                                 if !is_local_group {
                                     return remote_project_menu(
                                         menu,
                                         menu_project.clone(),
                                         sess_n,
                                         e_close_proj.clone(),
+                                        window,
                                         cx,
                                     );
                                 }
@@ -1497,29 +1510,13 @@ impl Workspace {
                                     "置顶"
                                 };
                                 // 按「复制 / 项目 / 离开」分段。
-                                let open_root = copy_path.clone();
-                                let e_open = e_menu.clone();
-                                project_workset_menu(
+                                let menu = project_workset_menu(
                                     menu,
                                     menu_project.clone(),
                                     e_close_proj.clone(),
                                     cx,
-                                )
-                                    .submenu_with_icon(
-                                        Some(IconName::ExternalLink.into()),
-                                        "用其他应用打开",
-                                        window,
-                                        cx,
-                                        move |menu, window, menu_cx| {
-                                            let popup = menu_cx.entity();
-                                            let root = open_root.clone();
-                                            e_open.update(menu_cx, |ws, cx| {
-                                                ws.build_ide_popup_menu(
-                                                    menu, root, popup, window, cx,
-                                                )
-                                            })
-                                        },
-                                    )
+                                );
+                                project_plugin_items(menu, &menu_project, window, cx)
                                     .item(
                                         PopupMenuItem::new("复制项目路径")
                                             .icon(IconName::Copy)
@@ -1925,7 +1922,7 @@ impl Workspace {
                         div()
                             .flex_shrink_0()
                             .text_xs()
-                            .font_family(crate::terminal_view::font_family())
+                            .font_family(smelt_model::font_config::font_family())
                             .text_color(rgb(ui_theme::row_faint(is_active)))
                             .child(s.clone())
                     }))
@@ -1942,7 +1939,7 @@ impl Workspace {
                             .child(project)
                             .children(branch.map(|name| {
                                 div()
-                                    .font_family(crate::terminal_view::font_family())
+                                    .font_family(smelt_model::font_config::font_family())
                                     .text_color(rgb(ui_theme::row_faint(is_active)))
                                     .child(name)
                             }))
@@ -2874,7 +2871,7 @@ impl Workspace {
                 div()
                     .flex_shrink_0()
                     .text_xs()
-                    .font_family(crate::terminal_view::font_family())
+                    .font_family(smelt_model::font_config::font_family())
                     .text_color(rgb(ui_theme::faint()))
                     .child("额度查询中…")
                     .into_any_element()
@@ -2894,7 +2891,7 @@ impl Workspace {
                 .gap_x_2()
                 .gap_y_1()
                 .text_xs()
-                .font_family(crate::terminal_view::font_family())
+                .font_family(smelt_model::font_config::font_family())
                 .children(quotas.iter().map(|quota| {
                     let tip = if quota.refreshing {
                         format!("{} 正在刷新…", quota.hint)

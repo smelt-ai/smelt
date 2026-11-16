@@ -2,34 +2,33 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    AUTO_RECONNECT_ATTEMPTS, CachedDiff, ComposerMenuSection, LoadedSkillsRefresh,
-    LoadedSkillsSnapshot, OwnerIdCache, ProcessGroupInfo, RECONNECT_STABLE_AFTER,
-    RESTORED_ENTRY_HEIGHT_HINT_PX, ReconnectBudget, TurnOutcomeAction, ViewHistoryIdentity,
+    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, OwnerIdCache,
+    ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction, ViewHistoryIdentity,
     append_prompt_text, apply_pending_config_selection, background_task_elapsed,
-    background_task_one_line, background_task_summary,
-    build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
-    build_tool_image_parts, cached_diff_stats, can_load_older_history, classify_attached_paths,
-    compact_token_count, compact_tool_headline, compact_tool_run_label,
-    composer_config_section_label, composer_menu_sections, composer_model_label,
-    composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
-    composer_should_nest_models, composer_usage_breakdown, config_rejection_is_new,
-    config_selection_is_pending, consecutive_compact_tool_run, consume_composer_restore,
-    conversation_input_for_submit, current_turn_has_agent_output, did_recover_from_ended,
-    diff_cache_matches_output, diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress,
-    entries_to_fade_in, external_clipboard_image_paths, filter_trajectory_events,
-    format_attached_paths, is_active_permission_selection, is_fresh_conversation_start,
-    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
-    latest_user_message_index, loaded_capabilities_summary, loaded_entries_end,
-    loaded_skills_refresh, merge_rejected_prompt, merge_snapshot_entries,
-    model_label_with_provider, native_queue_item_kind_label, prefix_skill_command, next_prompt_dispatch_pending,
-    memory_changes_summary, memory_changes_to_show, notice_to_show, overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
-    pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
-    process_group_label, progress_has_details, progress_summary, provider_menu_label,
-    provider_retry_label, provider_switch_value, reconcile_pending_config_values,
-    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt,
-    rows_with_changed_shape, running_background_tasks, running_subagents, search_summary_text,
-    selected_provider_group, session_trajectory_events, settled_thought_elapsed,
-    settled_thought_label, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
+    background_task_one_line, background_task_summary, build_conversation_layout,
+    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
+    cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
+    compact_tool_headline, compact_tool_run_label, composer_config_section_label,
+    composer_menu_sections, composer_model_label, composer_model_scroll,
+    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
+    composer_usage_breakdown, config_rejection_is_new, config_selection_is_pending,
+    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
+    current_turn_has_agent_output, diff_cache_matches_output, diff_stats_for_output,
+    dispatch_elapsed_ms, dispatch_progress, entries_to_fade_in, external_clipboard_image_paths,
+    filter_trajectory_events, format_attached_paths, is_active_permission_selection,
+    is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
+    is_stale_blank_history_id, latest_user_message_index, loaded_capabilities_summary,
+    loaded_entries_end, loaded_skills_refresh, memory_changes_summary, memory_changes_to_show,
+    merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
+    native_queue_item_kind_label, next_prompt_dispatch_pending, notice_to_show,
+    overlay_model_state, overlay_session_configs, pending_config_choice_names, plan_current_step,
+    prefix_skill_command, preformatted_html, process_group_header_label, process_group_label,
+    progress_has_details, progress_summary, provider_menu_label, provider_retry_label,
+    provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
+    resolve_restart_launch, restorable_gui_prompt, rows_with_changed_shape,
+    running_background_tasks, running_subagents, search_summary_text, selected_provider_group,
+    session_trajectory_events, settled_thought_elapsed, settled_thought_label,
+    should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
     should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
     subagent_elapsed_ms, subagent_run_title, subagent_status, task_body_from_selection,
     tool_card_default_expanded, tool_image_cache_matches_output, tool_output_has_content,
@@ -38,7 +37,6 @@ use super::{
     view_history_identity, working_status_label,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
-use smelt_app_state::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_client::daemon_state::DaemonPhase;
 use smelt_model::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
 use smelt_model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
@@ -51,7 +49,6 @@ use smelt_model::acp_session::{
 };
 use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
 use smelt_ui::ui_theme;
-use std::time::{Duration, Instant};
 
 #[test]
 fn cleanshot_external_png_is_treated_as_an_image_attachment() {
@@ -270,29 +267,6 @@ fn sample_model(current: &str) -> ModelState {
         ],
         provider_groups: Vec::new(),
     }
-}
-
-#[test]
-fn user_model_choice_overrides_restored_initial_config() {
-    let mut pending_initial = vec![
-        ("model".into(), "opus".into()),
-        ("mode".into(), "default".into()),
-    ];
-    overlay_pending_initial_config(&mut pending_initial, "model".into(), "sonnet".into());
-    assert_eq!(
-        pending_initial,
-        vec![
-            ("model".into(), "sonnet".into()),
-            ("mode".into(), "default".into()),
-        ]
-    );
-
-    let mut flushed = Vec::new();
-    overlay_pending_initial_config(&mut flushed, "model".into(), "sonnet".into());
-    assert!(
-        flushed.is_empty(),
-        "第一份 Idle 已经发出去之后，不能把用户选择重新塞回待发列表"
-    );
 }
 
 #[test]
@@ -610,39 +584,34 @@ fn provider_group(id: &str) -> ModelProviderGroup {
     }
 }
 
-fn published_quota(used_percent: f64) -> smelt_model::provider_quota::ProviderQuotaData {
-    smelt_model::provider_quota::ProviderQuotaData::Windows(
-        smelt_model::provider_quota::ProviderQuota {
-            windows: vec![smelt_model::provider_quota::ProviderQuotaWindow {
-                label: "5h".to_string(),
-                used_percent,
-                resets_at_ms: None,
-                reset_after_seconds: None,
-            }],
-        },
-    )
+/// 使用方装的外部数据：只有一家 Pi provider 查到了额度，模拟刷新循环刚查完一轮。
+struct QuotaEnv {
+    provider_id: &'static str,
+    badge: &'static str,
 }
 
-/// 把一份额度放进全局单例，模拟刷新循环刚查完一轮。
-fn publish_pi_quota(provider_id: &'static str, used_percent: f64, cx: &mut gpui::App) {
-    cx.set_global(ProviderStatus::default());
-    ProviderStatus::apply_quota(
-        vec![(
-            QuotaTarget::pi(provider_id),
-            QuotaStatus {
-                quota: Some(published_quota(used_percent)),
-                checked_at_ms: 1,
-                error: None,
-            },
-        )],
-        cx,
-    );
+impl crate::env::ConversationEnv for QuotaEnv {
+    fn agent_settings<'a>(
+        &self,
+        _: &smelt_client::runtime::RuntimeKey,
+        _: &'a gpui::App,
+    ) -> Option<&'a AgentHostSettings> {
+        None
+    }
+
+    fn pi_quota_badge(&self, provider_id: &str, _: &gpui::App) -> Option<String> {
+        (provider_id == self.provider_id).then(|| self.badge.to_string())
+    }
+}
+
+fn publish_pi_quota(provider_id: &'static str, badge: &'static str, cx: &mut gpui::App) {
+    crate::env::install(QuotaEnv { provider_id, badge }, cx);
 }
 
 #[gpui::test]
 fn pi_provider_menu_shows_the_quota_in_parentheses(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
-        publish_pi_quota("anthropic", 25.0, cx);
+        publish_pi_quota("anthropic", "25%", cx);
 
         assert_eq!(
             provider_menu_label(ConversationAgentKind::Pi, &provider_group("anthropic"), cx),
@@ -656,7 +625,7 @@ fn pi_provider_menu_shows_the_quota_in_parentheses(cx: &mut gpui::TestAppContext
 #[gpui::test]
 fn providers_without_a_known_quota_keep_their_plain_name(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
-        publish_pi_quota("anthropic", 25.0, cx);
+        publish_pi_quota("anthropic", "25%", cx);
 
         assert_eq!(
             provider_menu_label(ConversationAgentKind::Pi, &provider_group("modelsight"), cx),
@@ -670,7 +639,7 @@ fn providers_without_a_known_quota_keep_their_plain_name(cx: &mut gpui::TestAppC
 #[gpui::test]
 fn non_pi_agents_never_show_pi_quota(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
-        publish_pi_quota("xai", 80.0, cx);
+        publish_pi_quota("xai", "80%", cx);
 
         assert_eq!(
             provider_menu_label(ConversationAgentKind::Claude, &provider_group("xai"), cx),
@@ -679,7 +648,7 @@ fn non_pi_agents_never_show_pi_quota(cx: &mut gpui::TestAppContext) {
     });
 }
 
-/// 没装全局单例时不能 panic，只是不画括号。
+/// 使用方没装外部数据时不能 panic，只是不画括号。
 #[gpui::test]
 fn missing_global_degrades_to_the_plain_name(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
@@ -885,59 +854,6 @@ fn history_pagination_does_not_require_a_live_control_connection() {
 }
 
 #[test]
-fn reconnect_budget_runs_out_when_every_connection_drops_right_after_its_first_snapshot() {
-    // 两台桌面在旧 smeltd 上互踢：每次都拿到 Idle 快照，紧接着又被断开。
-    let mut budget = ReconnectBudget::new();
-    let mut now = Instant::now();
-    let mut attempts = 0;
-    while budget.take() {
-        attempts += 1;
-        assert!(attempts <= AUTO_RECONNECT_ATTEMPTS, "重连停不下来");
-        assert_eq!(budget.failures(), attempts);
-        now += Duration::from_secs(5);
-        budget.connected(now);
-        now += Duration::from_millis(10);
-        budget.disconnected(now);
-    }
-    assert_eq!(attempts, AUTO_RECONNECT_ATTEMPTS);
-}
-
-#[test]
-fn reconnect_budget_refills_after_a_connection_stays_up() {
-    let mut budget = ReconnectBudget::new();
-    let start = Instant::now();
-    assert!(budget.take());
-    assert!(budget.take());
-    budget.connected(start);
-    budget.disconnected(start + RECONNECT_STABLE_AFTER);
-    assert_eq!(budget.failures(), 0);
-}
-
-#[test]
-fn reconnect_budget_keeps_counting_across_short_lived_connections() {
-    let mut budget = ReconnectBudget::new();
-    let start = Instant::now();
-    assert!(budget.take());
-    budget.connected(start);
-    budget.disconnected(start + RECONNECT_STABLE_AFTER - Duration::from_millis(1));
-    // 退避按失败次数翻倍：短命连接之后不能回到第一档。
-    assert_eq!(budget.failures(), 1);
-    // 再次连上时从这一次算起，上一次留下的起点不能顶替。
-    budget.connected(start + RECONNECT_STABLE_AFTER * 2);
-    budget.disconnected(start + RECONNECT_STABLE_AFTER * 2 + Duration::from_millis(1));
-    assert_eq!(budget.failures(), 1);
-}
-
-#[test]
-fn recovered_edge_requires_ended_to_non_ended_transition() {
-    assert!(did_recover_from_ended(true, &DaemonPhase::Idle));
-    assert!(did_recover_from_ended(true, &DaemonPhase::Thinking));
-    assert!(!did_recover_from_ended(true, &DaemonPhase::Connecting));
-    assert!(!did_recover_from_ended(true, &DaemonPhase::Dead));
-    assert!(!did_recover_from_ended(false, &DaemonPhase::Idle));
-}
-
-#[test]
 fn recognizes_only_the_builtin_new_command() {
     assert!(is_new_conversation_command("/clear"));
     assert!(is_new_conversation_command("  /CLEAR  "));
@@ -1103,14 +1019,12 @@ fn empty_conversation_welcome_stays_while_composer_has_unsent_draft() {
 
 #[test]
 fn blank_runtime_id_is_not_reused_as_history() {
-    use agent_client_protocol::v1::schema::SessionId;
-
-    let same = SessionId::new("blank-session");
-    let other = SessionId::new("other-session");
-    assert!(is_stale_blank_history_id(true, Some(&same), Some(&same)));
-    assert!(!is_stale_blank_history_id(true, Some(&same), Some(&other)));
-    assert!(!is_stale_blank_history_id(false, Some(&same), Some(&same)));
-    assert!(!is_stale_blank_history_id(true, Some(&same), None));
+    let same = "blank-session";
+    let other = "other-session";
+    assert!(is_stale_blank_history_id(true, Some(same), Some(same)));
+    assert!(!is_stale_blank_history_id(true, Some(same), Some(other)));
+    assert!(!is_stale_blank_history_id(false, Some(same), Some(same)));
+    assert!(!is_stale_blank_history_id(true, Some(same), None));
 }
 
 #[test]
@@ -1603,11 +1517,108 @@ fn final_answer_is_the_last_body_in_each_user_turn() {
     assert!(layout[3].final_answer);
     assert!(layout[5].final_answer);
 
-    let group = layout[1].process_group.expect("过程正文应进入执行过程组");
-    assert_eq!(group.first, 1);
-    assert_eq!(group.end, 3);
-    assert!(layout[2].process_group.is_some());
+    assert!(layout[1].process_group.is_none(), "中间正文也应可见");
+    let group = layout[2].process_group.expect("工具应进入执行过程组");
+    assert_eq!((group.first, group.end), (2, 3));
     assert!(layout[3].process_group.is_none());
+    assert!(layout[5].process_group.is_none());
+}
+
+#[test]
+fn assistant_bodies_split_process_groups_in_active_and_completed_turns() {
+    let entries = vec![
+        AcpEntry::User("检查并修复".into()),
+        AcpEntry::Assistant {
+            text: "先检查调用方。".into(),
+            thought: false,
+        },
+        thought("先读实现"),
+        completed_tool("read-1", ToolKind::Read, "a.rs"),
+        AcpEntry::Assistant {
+            text: "发现问题，接下来修复。".into(),
+            thought: false,
+        },
+        thought("修改后再验证"),
+        completed_tool("read-2", ToolKind::Read, "b.rs"),
+        AcpEntry::Assistant {
+            text: "修复完成。".into(),
+            thought: false,
+        },
+    ];
+
+    for active in [true, false] {
+        let layout = build_conversation_layout(&entries, active);
+        for ix in [1, 4, 7] {
+            assert!(
+                layout[ix].process_group.is_none(),
+                "正文 {ix} 必须可见，active={active}"
+            );
+        }
+        assert!(!layout[1].final_answer);
+        assert!(!layout[4].final_answer);
+        assert_eq!(layout[7].final_answer, !active);
+        for (first, end) in [(2, 4), (5, 7)] {
+            let group = layout[first].process_group.expect("思考和工具应归入过程组");
+            assert_eq!((group.first, group.end), (first, end));
+            assert_eq!(layout[first + 1].process_group, Some(group));
+        }
+    }
+}
+
+fn background_wakeup_entries() -> Vec<AcpEntry> {
+    vec![
+        AcpEntry::User("在后台运行检查".into()),
+        completed_tool("start", ToolKind::Execute, "start check"),
+        AcpEntry::Assistant {
+            text: "检查已在后台启动。".into(),
+            thought: false,
+        },
+        AcpEntry::TaskNote(TaskNote {
+            kind: Default::default(),
+            id: "bg-1".into(),
+            title: "检查".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            output_tail: "检查通过".into(),
+            runs: Vec::new(),
+            peer: None,
+        }),
+        AcpEntry::Assistant {
+            text: "后台检查完成，我再核对结果。".into(),
+            thought: false,
+        },
+        thought("核对输出"),
+        completed_tool("read", ToolKind::Read, "result.log"),
+        AcpEntry::Assistant {
+            text: "结果正常。".into(),
+            thought: false,
+        },
+        completed_tool("late", ToolKind::Read, "late.log"),
+    ]
+}
+
+#[test]
+fn background_wakeup_keeps_all_bodies_and_the_task_note_visible() {
+    let entries = background_wakeup_entries();
+    for active in [true, false] {
+        let layout = build_conversation_layout(&entries, active);
+        for ix in [2, 3, 4, 7] {
+            assert!(
+                layout[ix].process_group.is_none(),
+                "正文或状态行 {ix} 必须可见，active={active}"
+            );
+        }
+        assert!(!layout[2].final_answer);
+        assert!(!layout[4].final_answer);
+        assert_eq!(layout[7].final_answer, !active);
+        for (first, end) in [(1, 2), (5, 7), (8, 9)] {
+            let group = layout[first].process_group.expect("工具应归入过程组");
+            assert_eq!((group.first, group.end), (first, end));
+            for ix in first..end {
+                assert_eq!(layout[ix].process_group, Some(group));
+            }
+        }
+    }
 }
 
 #[test]
@@ -1649,6 +1660,12 @@ fn incremental_open_turn_layout_matches_full_rebuild() {
     assert!(from >= 3, "已结束回合不应重算，起点={from}");
     super::refresh_conversation_layout_from(&mut layout, &entries, from, true, 0, &[], None);
     assert_eq!(layout, build_conversation_layout(&entries, true));
+    assert!(
+        layout[4].process_group.is_none(),
+        "增量工具不能吞掉已有正文"
+    );
+    let group = layout[5].process_group.expect("新工具应归入过程组");
+    assert_eq!((group.first, group.end), (5, 6));
 }
 
 #[test]
@@ -1694,6 +1711,13 @@ fn thought_only_turn_is_not_an_execution_record() {
 
 #[test]
 fn live_thoughts_count_as_agent_output() {
+    assert!(!current_turn_has_agent_output(&[
+        AcpEntry::User("你好".into()),
+        AcpEntry::Assistant {
+            text: " ".into(),
+            thought: false,
+        },
+    ]));
     let entries = vec![
         AcpEntry::User("你会啥技能".into()),
         AcpEntry::Assistant {
@@ -1778,6 +1802,120 @@ fn completed_process_group_appends_elapsed_like_grok() {
     let live_group = live[1].process_group.expect("进行中也应收成过程组");
     assert!(live_group.active);
     assert_eq!(live_group.elapsed_ms, Some(6_000));
+}
+
+#[test]
+fn split_process_groups_show_turn_elapsed_only_once() {
+    let entries = background_wakeup_entries();
+    let timings = [TurnTiming {
+        user_index: 0,
+        started_at_ms: 1_000,
+        ended_at_ms: Some(5_000),
+    }];
+    let completed = build_conversation_layout_with_timings(&entries, false, 0, &timings, None);
+    for ix in [1, 5] {
+        let group = completed[ix].process_group.unwrap();
+        assert!(!group.show_elapsed);
+        assert_eq!(group.elapsed_ms, None);
+    }
+    let last = completed[8].process_group.unwrap();
+    assert!(last.show_elapsed);
+    assert_eq!(last.elapsed_ms, Some(4_000));
+
+    let mut live = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
+    super::patch_live_elapsed(&mut live, 0, Some(7_000));
+    for ix in [1, 5] {
+        let group = live[ix].process_group.unwrap();
+        assert_eq!(group.elapsed_ms, None);
+        assert_eq!(
+            super::row_live_elapsed(true, ix, &entries, Some(group), Some(7_000), None),
+            None
+        );
+    }
+    let last = live[8].process_group.unwrap();
+    assert_eq!(last.elapsed_ms, Some(7_000));
+    assert_eq!(
+        super::row_live_elapsed(true, 8, &entries, Some(last), Some(7_000), None),
+        Some(7_000)
+    );
+}
+
+#[test]
+fn trailing_thought_is_the_only_live_elapsed_anchor() {
+    let entries = vec![
+        AcpEntry::User("检查".into()),
+        completed_tool("read", ToolKind::Read, "a.rs"),
+        AcpEntry::Assistant {
+            text: "继续分析。".into(),
+            thought: false,
+        },
+        thought("下一步"),
+        AcpEntry::Assistant {
+            text: " ".into(),
+            thought: false,
+        },
+    ];
+    let layout = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
+    let group = layout[1].process_group.unwrap();
+    assert!(!group.show_elapsed);
+    assert_eq!(
+        super::row_live_elapsed(true, 1, &entries, Some(group), Some(6_000), None),
+        None
+    );
+    assert_eq!(
+        super::row_live_elapsed(true, 3, &entries, None, Some(6_000), None),
+        Some(6_000)
+    );
+    assert!(!layout[3].show_settled_thought_elapsed);
+}
+
+#[test]
+fn standalone_thought_does_not_duplicate_completed_process_elapsed() {
+    let entries = vec![
+        AcpEntry::User("检查".into()),
+        thought("先想一想"),
+        AcpEntry::Assistant {
+            text: "开始检查。".into(),
+            thought: false,
+        },
+        completed_tool("read", ToolKind::Read, "a.rs"),
+        AcpEntry::Assistant {
+            text: "完成。".into(),
+            thought: false,
+        },
+    ];
+    let layout = build_conversation_layout(&entries, false);
+    assert!(layout[1].process_group.is_none());
+    assert!(!layout[1].show_settled_thought_elapsed);
+    assert!(layout[3].process_group.unwrap().show_elapsed);
+}
+
+#[test]
+fn empty_body_neither_steals_final_answer_nor_splits_compact_tools() {
+    let entries = vec![
+        AcpEntry::User("检查".into()),
+        completed_tool("one", ToolKind::Read, "a.rs"),
+        AcpEntry::Assistant {
+            text: " ".into(),
+            thought: false,
+        },
+        completed_tool("two", ToolKind::Read, "b.rs"),
+        AcpEntry::Assistant {
+            text: "结果".into(),
+            thought: false,
+        },
+        AcpEntry::Assistant {
+            text: " ".into(),
+            thought: false,
+        },
+    ];
+    let layout = build_conversation_layout(&entries, false);
+    assert!(layout[4].final_answer);
+    assert!(!layout[5].final_answer);
+    let group = layout[1].process_group.unwrap();
+    assert_eq!(layout[3].process_group, Some(group));
+    let run = consecutive_compact_tool_run(&entries, 1, group.first, group.end, None).unwrap();
+    assert_eq!(run.indices, vec![1, 3]);
 }
 
 #[test]
@@ -2265,7 +2403,12 @@ fn task_complete_is_final_and_not_counted_as_a_process_tool() {
 
     assert!(layout[3].final_answer);
     let before = layout[1].process_group.expect("编辑应在过程组");
-    assert_eq!(before.end, 3);
+    assert_eq!(before.end, 2);
+    assert!(
+        layout[2].process_group.is_none(),
+        "完成操作前的说明仍是正文"
+    );
+    assert!(!layout[2].final_answer);
     assert!(layout[3].process_group.is_none());
 }
 
@@ -3321,7 +3464,7 @@ fn short_ordered_list_bubble_does_not_collapse_below_min_width(cx: &mut gpui::Te
 }
 
 #[gpui::test]
-fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::TestAppContext) {
+fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpui::TestAppContext) {
     use gpui::VisualTestContext;
 
     cx.update(gpui_component::init);
@@ -3360,7 +3503,7 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
             thought: false,
         },
     ];
-    let (_view, cx) = cx.add_window_view(move |_window, cx| {
+    let (view, cx) = cx.add_window_view(move |_window, cx| {
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
@@ -3378,7 +3521,7 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
             },
         );
         view.phase = DaemonPhase::Idle;
-        view.expanded_process_groups.insert(1);
+        view.expanded_process_groups.insert(2);
         view
     });
     let cx: &mut VisualTestContext = cx;
@@ -3387,12 +3530,16 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
         let _ = window.draw(cx);
     });
 
+    let body = view
+        .read_with(cx, |view, _| view.list_state.bounds_for_item(1))
+        .expect("中间正文应完整绘制");
     let header = cx
-        .debug_bounds("ACP_PROCESS_GROUP_1")
+        .debug_bounds("ACP_PROCESS_GROUP_2")
         .expect("process header should paint");
-    let progress = cx
-        .debug_bounds("ACP_PROGRESS_1")
-        .expect("progress summary should paint");
+    assert!(
+        cx.debug_bounds("ACP_PROGRESS_1").is_none(),
+        "正文不能画成过程摘要"
+    );
     let tool = cx
         .debug_bounds("ACP_TOOL_COMPACT_2")
         .expect("completed tool should paint as a compact timeline row");
@@ -3403,11 +3550,119 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
         .debug_bounds("ACP_TOOL_COMPACT_4")
         .expect("later read should stay a compact row");
 
+    assert!(body.size.height > px(0.));
     assert!(header.size.width > gpui::px(300.));
-    assert!(progress.origin.y >= header.origin.y + header.size.height);
-    assert!(tool.origin.y >= progress.origin.y + progress.size.height);
+    assert!(header.origin.y >= body.origin.y + body.size.height);
+    assert!(tool.origin.y >= header.origin.y + header.size.height);
     assert!(thought.origin.y >= tool.origin.y + tool.size.height);
     assert!(read.origin.y >= thought.origin.y + thought.size.height);
+}
+
+/// 折叠过程组后，后台唤醒前后的说明和后台任务状态行仍要实际占据可见的行。
+#[gpui::test]
+fn collapsed_background_wakeup_paints_every_body_and_task_note(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = open_conversation(
+        cx,
+        "acp-background-wakeup-bodies",
+        background_wakeup_entries(),
+        DaemonPhase::Idle,
+    );
+    for ix in [2, 3, 4, 7] {
+        cx.update(|_window, cx| {
+            view.update(cx, |view, cx| {
+                view.list_state.scroll_to(gpui::ListOffset {
+                    item_ix: ix,
+                    offset_in_item: px(0.),
+                });
+                cx.notify();
+            })
+        });
+        draw_settled(cx);
+        draw_settled(cx);
+        let bounds = view
+            .read_with(cx, |view, _| view.list_state.bounds_for_item(ix))
+            .expect("正文或状态行应已绘制");
+        assert!(
+            bounds.size.height > px(0.),
+            "行 {ix} 不能被折叠: {bounds:?}"
+        );
+        if ix == 4 {
+            assert!(
+                cx.debug_bounds("ACP_PROGRESS_4").is_none(),
+                "唤醒后的说明不能变成过程摘要"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn empty_streaming_body_keeps_working_status_visible(cx: &mut gpui::TestAppContext) {
+    let (_view, cx) = open_conversation(
+        cx,
+        "acp-empty-streaming-body",
+        vec![
+            AcpEntry::User("你好".into()),
+            AcpEntry::Assistant {
+                text: " ".into(),
+                thought: false,
+            },
+        ],
+        DaemonPhase::Thinking,
+    );
+    draw_settled(cx);
+    assert!(cx.debug_bounds("ACP_WORKING_1").is_some());
+}
+
+/// 最终回答多一排操作按钮，但相同正文的字号和行高不应因此不同。
+#[gpui::test]
+fn final_answer_changes_actions_not_body_text_size(cx: &mut gpui::TestAppContext) {
+    let body = |text: String| AcpEntry::Assistant {
+        text,
+        thought: false,
+    };
+    let short = "正文内容".to_string();
+    let long = (0..12)
+        .map(|_| short.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let (view, cx) = open_conversation(
+        cx,
+        "acp-answer-text-size",
+        vec![
+            AcpEntry::User("短回答".into()),
+            body(short.clone()),
+            body(short),
+            AcpEntry::User("长回答".into()),
+            body(long.clone()),
+            body(long),
+        ],
+        DaemonPhase::Idle,
+    );
+    let mut heights = Vec::new();
+    for ix in [1, 2, 4, 5] {
+        cx.update(|_window, cx| {
+            view.update(cx, |view, cx| {
+                view.list_state.scroll_to(gpui::ListOffset {
+                    item_ix: ix,
+                    offset_in_item: px(0.),
+                });
+                cx.notify();
+            })
+        });
+        draw_settled(cx);
+        draw_settled(cx);
+        let bounds = view
+            .read_with(cx, |view, _| view.list_state.bounds_for_item(ix))
+            .expect("正文行应已测量");
+        heights.push(bounds.size.height);
+    }
+    let non_final_growth = heights[2] - heights[0];
+    let final_growth = heights[3] - heights[1];
+    assert!(non_final_growth > px(0.) && final_growth > px(0.));
+    assert!(
+        (non_final_growth - final_growth).abs() < px(1.),
+        "同样增加正文，最终与非最终回答的高度增量应相同: {heights:?}"
+    );
 }
 
 /// 访达里的图片拖到输入框上：收进待发缩略图，跟「+」选图一样。落在输入框外不收。
@@ -4992,7 +5247,7 @@ fn long_thought_inside_a_process_group_can_be_expanded(cx: &mut gpui::TestAppCon
             },
         );
         view.phase = DaemonPhase::Idle;
-        view.expanded_process_groups.insert(1);
+        view.expanded_process_groups.insert(2);
         view
     });
     let cx: &mut VisualTestContext = cx;

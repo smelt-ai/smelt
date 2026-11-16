@@ -1302,6 +1302,16 @@ impl<'de> serde::Deserialize<'de> for SnapshotPhase {
     }
 }
 
+/// 随 `acp_open` 带来的首条消息。这次打开拉起了 runtime 时，守护等它就绪、初始配置
+/// 落定后发出，发出前对外报「思考中」；热 attach、守护还欠着一条、对话已有正文时都不读它，
+/// 同一条不会发两遍。旧守护不认识这个字段，会忽略它。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AcpInitialPrompt {
+    pub text: String,
+    #[serde(default)]
+    pub images: Vec<PromptImage>,
+}
+
 /// GUI → smeltd 的用户动作，走 `acp_open` 连接的 JSON 行。prompt/取消/切模型
 /// 三种转发进连接线程原有的 `ConversationCommand`；权限/选择题四种直接消费
 /// `AcpSessionState` 自己攥着的 responder，不经过连接线程（那几种压根不是发给

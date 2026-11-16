@@ -57,16 +57,16 @@ pub(crate) fn path_style(key: &RuntimeKey, cx: &gpui::App) -> PathStyle {
     }
 }
 
-/// 给终端开一条连接。本机守护没在跑就先拉起来，这只有本机做得到；远程运行时连不上
-/// 就是连不上，由调用方按断线处理。
-pub(crate) fn connect_terminal(
-    runtime: &Runtime,
-) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
+/// 开终端、对话长连接的连接器（见 [`smelt_plugin_api::Host::connector`]），可以带去后台
+/// 线程。本机守护没在跑就先拉起来，这只有本机做得到；远程运行时连不上就是连不上，由调用方
+/// 按断线处理。
+pub(crate) fn connector(runtime: &Runtime) -> std::sync::Arc<dyn smelt_runtime_client::Connector> {
     if runtime.is_local() {
         // 拉起本机 smeltd 的生命周期见设计文档 D3/D4。
-        return crate::local_daemon::connect_daemon();
+        return std::sync::Arc::new(crate::local_daemon::connect_daemon);
     }
-    runtime.client().connect()
+    let client = runtime.client().clone();
+    std::sync::Arc::new(move || client.connect())
 }
 
 static LOCAL_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -160,8 +160,6 @@ pub(crate) enum RuntimeStatus {
     Online {
         version: String,
         platform: Option<String>,
-        /// 装了远程桌面，侧栏才给「远程桌面」。
-        desktop: bool,
         /// 运行时报的 `SMELT_HOME`，旧运行时不报。见 [`smelt_home`]。
         smelt_home: Option<String>,
     },
@@ -462,12 +460,6 @@ pub(crate) fn runtime_can_reconnect(key: &RuntimeKey, cx: &gpui::App) -> bool {
             RuntimeStatus::Offline(_) | RuntimeStatus::Incompatible { .. }
         )
     })
-}
-
-/// 这台机器装了远程桌面、眼下也连着。本机（macOS）没有这套。
-pub(crate) fn runtime_has_desktop(key: &RuntimeKey, cx: &gpui::App) -> bool {
-    remote_of(key, cx)
-        .is_some_and(|remote| matches!(remote.status, RuntimeStatus::Online { desktop: true, .. }))
 }
 
 /// 机器列表读不出来，或者有哪台机器离线、版本不对、走中继还很慢：侧栏「设置」按钮上挂个点提醒。
@@ -893,7 +885,6 @@ fn described_status(
         return incompatible_status(&incompatible, described.daemon.os.as_deref());
     }
     RuntimeStatus::Online {
-        desktop: described.daemon.desktop.unwrap_or(false),
         smelt_home: described.daemon.smelt_home,
         version: described.daemon.version,
         platform: described
@@ -1498,7 +1489,6 @@ mod tests {
         RuntimeStatus::Online {
             version: "0.9.0".into(),
             platform: None,
-            desktop: false,
             smelt_home: None,
         }
     }
@@ -2099,14 +2089,16 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let subscriber = runtime.client().clone();
         std::thread::spawn(move || {
-            crate::terminal::subscribe_daemon_states_blocking(&subscriber, false, |event| {
-                tx.send(event).is_ok()
-            });
+            smelt_client::daemon_state::subscribe_daemon_states_blocking(
+                &subscriber,
+                false,
+                |event| tx.send(event).is_ok(),
+            );
         });
 
         let sid = format!("remote-test-{}", uuid::Uuid::new_v4().simple());
-        let terminal = crate::terminal::Terminal::spawn(
-            &runtime,
+        let terminal = smelt_terminal::terminal::Terminal::spawn(
+            connector(&runtime).as_ref(),
             24,
             80,
             None,
@@ -2123,7 +2115,7 @@ mod tests {
                 continue;
             };
             seen = match event {
-                crate::terminal::DaemonStateEvent::Snapshot {
+                smelt_client::daemon_state::DaemonStateEvent::Snapshot {
                     sessions,
                     workspace,
                     ..
@@ -2131,7 +2123,7 @@ mod tests {
                     directory |= workspace.is_some();
                     sessions.iter().any(|state| state.id == sid)
                 }
-                crate::terminal::DaemonStateEvent::Update(state) => state.id == sid,
+                smelt_client::daemon_state::DaemonStateEvent::Update(state) => state.id == sid,
                 _ => false,
             };
         }
@@ -2139,7 +2131,7 @@ mod tests {
         assert!(directory, "订阅首帧没带工作区目录");
 
         drop(terminal);
-        crate::terminal::kill_remote(&runtime, &sid);
+        smelt_terminal::terminal::kill_remote(&runtime, &sid);
         // 撤销自己时运行时会先断掉这台设备的连接，回执不一定发得出来；看之后还能不能调。
         let me = iroh_client().unwrap().id().to_string();
         let _ = runtime

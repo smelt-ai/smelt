@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
+serde = { version = "1", features = ["derive"] }
 # 菜单里没有应用图标时的线性图标。
 gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 

@@ -203,10 +203,10 @@ fn typed_host_commands_require_args() {
             api::PICK_PATHS.id(),
             api::OPEN_VIEW.id(),
             api::OPEN_PAGE.id(),
-            api::sessions::RESUME.id(),
-            api::sessions::RESUME_IN_TERMINAL.id(),
-            api::sessions::HANDOFF.id(),
-            api::sessions::SEND_TEXT.id(),
+            api::contracts::sessions::RESUME.id(),
+            api::contracts::sessions::RESUME_IN_TERMINAL.id(),
+            api::contracts::sessions::HANDOFF.id(),
+            api::contracts::sessions::SEND_TEXT.id(),
         ] {
             let command = api::command(id, cx).unwrap_or_else(|| panic!("{id} 没登记上"));
             assert!(command.requires_args, "{id} 要参数");

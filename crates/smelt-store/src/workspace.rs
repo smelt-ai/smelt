@@ -2,9 +2,9 @@
 //! 分屏归客户端，不在这里（设计文档 D1）。
 
 use crate::{
-    StoreError, StoredHistoryIdentity, WorkspaceAcpRecord, WorkspaceProjectRepositoryRecord,
-    WorkspaceSessionRecord, WorkspaceSnapshot, WorkspaceTerminalRecord, WorkspaceWorksetRecord,
-    WorkspaceWorksetRepositoryRecord,
+    AcpLiveChange, StoreError, StoredHistoryIdentity, WorkspaceAcpRecord,
+    WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
+    WorkspaceTerminalRecord, WorkspaceWorksetRecord, WorkspaceWorksetRepositoryRecord,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -215,10 +215,11 @@ pub(crate) fn create_conversation(
     Ok(true)
 }
 
-/// 整段替换一段已有的对话，位置不变。对话已经不在（别的客户端关掉了）回
-/// [`StoreError::ConversationNotFound`]，不把它写回来。写完和原来一样（恢复身份以库里
-/// 的为准，客户端带来的旧值不算改动）返回 `false`。名字和 agent 报的标题以库里的为准：
-/// 名字只经改名命令写，agent 标题只由守护写，客户端带来的值不算数。
+/// 换一段已有对话里的终端格子（分屏、关掉一格），位置不变；别的都以库里的为准：ACP
+/// 那段在新建之后只由守护写（见 [`update_acp_live`]），名字只经改名命令写，归档、置顶、
+/// 工作集、最近活动时间各有各的写法，客户端带来的值都不算数。对话已经不在（别的客户端
+/// 关掉了）回 [`StoreError::ConversationNotFound`]，不把它写回来。写完和原来一样返回
+/// `false`。
 pub(crate) fn update_conversation(
     transaction: &Transaction<'_>,
     saved: &WorkspaceSessionRecord,
@@ -238,6 +239,18 @@ pub(crate) fn update_conversation(
             id: group_id.into(),
         });
     }
+    // 恢复身份、名字、agent 标题都以库里的为准，要在删行之前读出来。
+    let preserved_history = preserved_history_session_ids(transaction)?;
+    let mut saved = with_names(saved, &stored_names(transaction, group_id)?);
+    if let Some(before) = &before {
+        saved.acp = before.acp.clone();
+        saved.last_updated_at = before.last_updated_at;
+        saved.archived_at = before.archived_at;
+        saved.pinned_at = before.pinned_at;
+        saved.workset_id = before.workset_id.clone();
+        saved.closed_workset_root = before.closed_workset_root.clone();
+    }
+    let saved = &saved;
     let (acp_id, terminal_ids) = conversation_session_ids(transaction, saved)?;
     if let Some(workset_id) = before
         .as_ref()
@@ -254,19 +267,10 @@ pub(crate) fn update_conversation(
             });
         }
     }
-    // 恢复身份、名字、agent 标题都以库里的为准，要在删行之前读出来。
-    let preserved_history = preserved_history_session_ids(transaction)?;
-    let mut saved = with_names(saved, &stored_names(transaction, group_id)?);
-    if let Some(before) = &before {
-        saved.archived_at = before.archived_at;
-        saved.pinned_at = before.pinned_at;
-        saved.workset_id = before.workset_id.clone();
-        saved.closed_workset_root = before.closed_workset_root.clone();
-    }
     transaction.execute("DELETE FROM session_group WHERE id = ?1", [group_id])?;
     insert_conversation(
         transaction,
-        &saved,
+        saved,
         position,
         acp_id.as_deref(),
         &terminal_ids,
@@ -1053,6 +1057,67 @@ pub(crate) fn rename_terminal(
          WHERE id = ?2 AND kind = 'terminal' AND custom_title IS NOT ?1",
         params![title, terminal_id.trim()],
     )? > 0)
+}
+
+/// 记下 `sid` 这段 ACP 会话的一处在跑状态。没有这段会话、或和库里一样，返回 `false`。
+pub(crate) fn update_acp_live(
+    transaction: &Transaction<'_>,
+    sid: &str,
+    change: AcpLiveChange<'_>,
+) -> Result<bool, StoreError> {
+    let sid = sid.trim();
+    let changed = match change {
+        AcpLiveChange::ConfigValue {
+            config_id,
+            value_id,
+        } => {
+            let (config_id, value_id) = (config_id.trim(), value_id.trim());
+            if config_id.is_empty() || value_id.is_empty() {
+                return Ok(false);
+            }
+            let updated = transaction.execute(
+                "UPDATE acp_config_value SET value_id = ?3
+                 WHERE session_id = ?1 AND config_id = ?2 AND value_id != ?3",
+                params![sid, config_id, value_id],
+            )?;
+            let known: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM acp_config_value WHERE session_id = ?1 AND config_id = ?2)",
+                params![sid, config_id],
+                |row| row.get(0),
+            )?;
+            if known {
+                updated
+            } else {
+                transaction.execute(
+                    "INSERT INTO acp_config_value(session_id, position, config_id, value_id)
+                     SELECT ?1,
+                            (SELECT COALESCE(MAX(position) + 1, 0) FROM acp_config_value
+                             WHERE session_id = ?1),
+                            ?2, ?3
+                     WHERE EXISTS(SELECT 1 FROM acp_detail WHERE session_id = ?1)",
+                    params![sid, config_id, value_id],
+                )?
+            }
+        }
+        AcpLiveChange::AgentPresetConsumed => transaction.execute(
+            "UPDATE acp_detail SET pending_agent_preset = NULL
+             WHERE session_id = ?1 AND pending_agent_preset IS NOT NULL",
+            [sid],
+        )?,
+        AcpLiveChange::PendingPromptSent => transaction.execute(
+            "UPDATE acp_detail SET pending_prompt = NULL, pending_delivery_id = NULL
+             WHERE session_id = ?1
+               AND (pending_prompt IS NOT NULL OR pending_delivery_id IS NOT NULL)",
+            [sid],
+        )?,
+        AcpLiveChange::TurnEnded { at } => transaction.execute(
+            "UPDATE session_group SET last_updated_at = ?2
+             WHERE id = (SELECT group_id FROM session WHERE id = ?1 AND kind = 'acp')
+               AND last_updated_at < ?2",
+            params![sid, at],
+        )?,
+    };
+    Ok(changed > 0)
 }
 
 /// agent 报的标题变了（只由守护写）。没有这段 ACP 会话返回 `false`。

@@ -10,7 +10,7 @@ use gpui::ScrollHandle;
 
 use crate::SessionState;
 use crate::runtimes::{Runtime, RuntimeKey};
-use crate::workspace_directory::DirectorySync;
+use crate::workspace_directory::DirectoryCache;
 use crate::workspace_persist::WorkspaceSnapshotWriteQueue;
 use smelt_model::workspace_directory::{WorkspaceProjectRepository, WorkspaceWorkset};
 
@@ -35,9 +35,9 @@ pub(crate) struct RuntimeSpace {
     pub(crate) folded: Option<bool>,
     /// 该机器分栏独立的滚动句柄。
     pub(crate) scroll: ScrollHandle,
-    /// 和这个运行时那份工作区目录（项目、对话）的同步账本。目录收到之前不发命令：内存里
-    /// 的空列表不代表运行时上没有对话。
-    pub(crate) directory: DirectorySync,
+    /// 这个运行时那份工作区目录在这边的只读缓存。目录收到之前不摘本地对话：内存里的
+    /// 空列表不代表运行时上没有对话。
+    pub(crate) directory: DirectoryCache,
     /// 这个运行时的唯一写入队列。退出也必须排到这里，不能旁路另起写者。
     pub(crate) write_queue: WorkspaceSnapshotWriteQueue,
     /// 还没恢复上来的会话（运行时未就绪等）。它们仍在运行时的目录里；当前进程会自动
@@ -75,7 +75,7 @@ impl RuntimeSpace {
             pinned_projects: HashSet::new(),
             folded: None,
             scroll: ScrollHandle::new(),
-            directory: DirectorySync::default(),
+            directory: DirectoryCache::default(),
             write_queue: WorkspaceSnapshotWriteQueue::default(),
             restore_pending: Vec::new(),
             restore_retry_attempt: 0,

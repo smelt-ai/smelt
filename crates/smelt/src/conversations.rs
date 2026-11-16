@@ -16,11 +16,11 @@ use smelt_ui::{Button, IconAction as _, ListRow};
 use crate::{AgentStatus, Workspace, acp_view, settings};
 
 /// 智能体插件登记的「新对话」命令。侧栏顶上的按钮和 ⌘N 都是它。
-const NEW_CONVERSATION: &str = "smelt.agents/new-conversation";
+const NEW_CONVERSATION: &str = smelt_plugin_api::contracts::agents::NEW_CONVERSATION.id();
 /// 智能体插件的视图 id：对话里「管理能力」（按智能体）、「看记忆」去那里。
-const AGENTS_VIEW: &str = "smelt.agents/main";
+const AGENTS_VIEW: &str = smelt_plugin_api::contracts::agents::VIEW;
 /// 能力库插件的视图 id：对话里「管理能力」（不按智能体）去那里。
-const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
+const CAPABILITIES_VIEW: &str = smelt_plugin_api::contracts::capabilities::VIEW;
 
 /// 「对话」分组行、对话行的 hover group 名。
 const CONVERSATION_GROUP_HOVER: &str = "conversation-group-hover";
@@ -39,7 +39,7 @@ impl Workspace {
             .gap_1()
             .children(new_conversation_button(cx))
             // 摆进哪页布局的视图就在那页看，不再给入口；哪页出口的默认内容（舞台）点会话
-            // 就回去；远程桌面要先挑机器，入口在机器那一行。
+            // 就回去；远程桌面要先挑机器，入口在机器菜单里；按实例建的由别的插件带参数打开。
             .children({
                 let indexes: Vec<_> = smelt_plugin_api::pages(cx)
                     .into_iter()
@@ -49,6 +49,7 @@ impl Workspace {
                     .into_iter()
                     .filter(move |view| {
                         view.settings.is_none()
+                            && !view.instances
                             && !self.shell_view.paged(&view.id)
                             && !indexes.contains(&view.id)
                             && view.id.as_ref() != crate::desktop_view::DESKTOP_VIEW

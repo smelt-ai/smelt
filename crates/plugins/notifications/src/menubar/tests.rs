@@ -46,6 +46,7 @@ fn acp(sid: &str, agent: &str) -> WorkspaceConversation {
 
 fn row(ids: &[&str], statuses: &[AgentStatus], title: &str) -> Row {
     Row {
+        machine: RuntimeKey::Local,
         ids: ids.iter().map(|id| id.to_string()).collect(),
         statuses: statuses.to_vec(),
         title: title.to_string(),
@@ -86,10 +87,21 @@ fn title_matches_the_compact_attention_and_running_format() {
 #[test]
 fn terminals_never_started_are_not_sessions_yet() {
     assert_eq!(
-        conversation_row(&terminals(&[None]), &HashMap::new(), None),
+        conversation_row(
+            &RuntimeKey::Local,
+            &terminals(&[None]),
+            &HashMap::new(),
+            None
+        ),
         None
     );
-    let row = conversation_row(&terminals(&[None, Some("b")]), &HashMap::new(), None).unwrap();
+    let row = conversation_row(
+        &RuntimeKey::Local,
+        &terminals(&[None, Some("b")]),
+        &HashMap::new(),
+        None,
+    )
+    .unwrap();
     assert_eq!(row.ids, vec!["b".to_string()]);
 }
 
@@ -99,7 +111,8 @@ fn terminal_status_name_and_agent() {
     conversation.terminals[0].launch_cmd = Some("claude".into());
     let mut reported = states(&[("a", DaemonPhase::Idle), ("b", DaemonPhase::Thinking)]);
     reported.get_mut("b").unwrap().conversation_name = Some("整段的名字".into());
-    let row = conversation_row(&conversation, &reported, Some("远程机")).unwrap();
+    let row =
+        conversation_row(&RuntimeKey::Local, &conversation, &reported, Some("远程机")).unwrap();
     assert_eq!(row.status(), AgentStatus::Running);
     // 名字是运行时算好的，哪格报上来都认。
     assert_eq!(row.title, "整段的名字 · 远程机");
@@ -109,7 +122,7 @@ fn terminal_status_name_and_agent() {
     let single = terminals(&[Some("a")]);
     let mut reported = states(&[("a", DaemonPhase::Idle)]);
     reported.get_mut("a").unwrap().provider = Some("codex".into());
-    let row = conversation_row(&single, &reported, None).unwrap();
+    let row = conversation_row(&RuntimeKey::Local, &single, &reported, None).unwrap();
     // 运行时还没推名字来：通用名。
     assert_eq!(row.title, "终端");
     // 没有启动命令就认 hook 报的。
@@ -119,14 +132,14 @@ fn terminal_status_name_and_agent() {
 #[test]
 fn conversation_name_comes_from_the_runtime() {
     let conversation = acp("s", "claude");
-    let row = conversation_row(&conversation, &HashMap::new(), None).unwrap();
+    let row = conversation_row(&RuntimeKey::Local, &conversation, &HashMap::new(), None).unwrap();
     assert_eq!(row.ids, vec!["s".to_string()]);
     assert_eq!(row.agent.as_deref(), Some("claude"));
     assert_eq!(row.title, "对话");
 
     let mut live = states(&[("s", DaemonPhase::AwaitingApproval)]);
     live.get_mut("s").unwrap().conversation_name = Some("运行时报的名字".into());
-    let row = conversation_row(&conversation, &live, None).unwrap();
+    let row = conversation_row(&RuntimeKey::Local, &conversation, &live, None).unwrap();
     assert_eq!(row.title, "运行时报的名字");
     assert_eq!(row.status(), AgentStatus::NeedsYou);
 }
@@ -187,11 +200,9 @@ fn status_menu_ends_with_opening_the_main_window() {
         [StatusMenuItem::Action { command, .. }] if command == api::SHOW_MAIN_WINDOW.id()
     ));
 
-    let listed = menu(
-        vec![row(&["run"], &[AgentStatus::Running], "在跑")],
-        &HashMap::new(),
-    )
-    .status_menu();
+    let mut remote = row(&["run"], &[AgentStatus::Running], "在跑");
+    remote.machine = RuntimeKey::Remote("box".into());
+    let listed = menu(vec![remote], &HashMap::new()).status_menu();
     assert_eq!(listed.items.len(), 3);
     let StatusMenuItem::Action {
         command,
@@ -203,6 +214,7 @@ fn status_menu_ends_with_opening_the_main_window() {
         panic!("第一项是会话");
     };
     assert_eq!(command, sessions::ACTIVATE.id());
+    assert_eq!(args["machine"], "box");
     assert_eq!(args["session_id"], "run");
     assert_eq!(icon.as_ref().unwrap().png, TERMINAL_PNG);
     assert_eq!(listed.items[1], StatusMenuItem::Separator);

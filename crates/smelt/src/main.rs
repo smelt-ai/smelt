@@ -29,6 +29,7 @@ mod keymap;
 mod local_daemon;
 mod overlay;
 mod plugin_host;
+mod plugin_menus;
 mod plugins;
 mod project_repositories;
 mod provider_quota;
@@ -47,9 +48,6 @@ mod stage;
 mod status_item;
 mod system_open;
 mod term_dock;
-mod terminal;
-mod terminal_images;
-mod terminal_view;
 mod window_backdrop;
 mod workspace_attention;
 mod workspace_commands;
@@ -82,8 +80,11 @@ use gpui::InteractiveElement;
 use gpui::*;
 use gpui_component::slider::SliderState;
 use gpui_component::*;
+use smelt_client::daemon_state::{DaemonSessionState, DaemonStateEvent};
 use smelt_model::workspace_directory::{project_labels, project_root_of};
-use terminal_view::TerminalView;
+// 过渡：会话插件搬走后改为经宿主的视图实例机制和 smelt.terminal 命令使用
+use smelt_terminal::terminal;
+use smelt_terminal::terminal_view::{self, TerminalView};
 
 use settings::{Appearance, active_launch_entries, default_launch_entries, load_appearance};
 
@@ -262,13 +263,13 @@ fn daemon_state_for_session_id(
     runtime: &RuntimeKey,
     session_id: &str,
     cx: &App,
-) -> Option<terminal::DaemonSessionState> {
+) -> Option<DaemonSessionState> {
     DaemonStates::get(runtime, session_id, cx)
 }
 
 /// 取某个终端 pane 对应的守护状态；没有全局单例（比如极早期尚未注册）或那个
 /// session id 还没有数据都返回 None。
-fn daemon_state_for(view: &Entity<TerminalView>, cx: &App) -> Option<terminal::DaemonSessionState> {
+fn daemon_state_for(view: &Entity<TerminalView>, cx: &App) -> Option<DaemonSessionState> {
     let view = view.read(cx);
     daemon_state_for_session_id(view.runtime().key(), view.session_id(), cx)
 }
@@ -559,14 +560,12 @@ impl Session {
             return AgentStatus::Idle;
         }
         match &self.kind {
-            // ACP 协议视图与守护镜像可能先后到达；两边都先给出完整 AgentStatus，
-            // 再走同一优先级，避免派发或失败的同步窗口短暂变灰。
+            // 对话的状态只认守护：视图开没开、开了几个，侧栏看到的都一样。
             SessionKind::Conversation(view) => {
                 let v = view.read(cx);
-                let daemon = daemon_state_for_session_id(v.runtime().key(), v.session_id(), cx)
+                daemon_state_for_session_id(v.runtime().key(), v.session_id(), cx)
                     .and_then(|state| AgentStatus::from_daemon_state(&state))
-                    .unwrap_or(AgentStatus::Idle);
-                AgentStatus::highest([daemon, v.agent_status()])
+                    .unwrap_or(AgentStatus::Idle)
             }
             // 每个 pane 只读自己的结构化状态；父会话再做来源无关的聚合。
             SessionKind::Term { .. } => {
@@ -760,7 +759,6 @@ impl CopySessionIdSource {
                 let view = view.read(cx);
                 view.history_session_id_for_save()
                     .or_else(|| view.provider_session_id())
-                    .map(|id| id.to_string())
                     .unwrap_or_else(|| view.session_id().to_string())
             }
         }
@@ -834,7 +832,7 @@ struct AcpSaved {
     agent: Option<String>,
     /// 产品级智能体定义引用；只描述“这段对话由谁创建”，不改变底层 provider。
     agent_definition_id: Option<String>,
-    history_session_id: Option<agent_client_protocol::v1::schema::SessionId>,
+    history_session_id: Option<String>,
     /// smeltd 托管用的会话 id（`AcpView::session_id()`）。旧存档没有这个字段
     /// → None，恢复时退化成生成一个新 id——意味着即便 smeltd 里那个会话还
     /// 活着，GUI 重开后也接不上、只能按 history_session_id 重新 spawn 一次
@@ -1239,7 +1237,7 @@ fn spawn_layout_leaves_rec(
         } => {
             let sid = id.clone().unwrap_or_else(new_sid);
             let terminal = terminal::Terminal::spawn(
-                runtime,
+                crate::runtimes::connector(runtime).as_ref(),
                 24,
                 80,
                 cwd.as_deref(),
@@ -1351,6 +1349,9 @@ struct Workspace {
     router: router::Router,
     /// 上次退出时首页出口里放着的视图。视图登记好、进首页时放回去（见 `open_home_page`）。
     startup_outlet: Option<String>,
+    /// 各页出口里放着的按实例建的视图：路由只记 id，这一份归工作台留着（见
+    /// `Workspace::open_instance`），出口换了内容就放掉。
+    outlet_instances: HashMap<router::PageKey, smelt_plugin_api::ViewInstance>,
     /// 开着的那页摆着什么、看得见什么的快照。Dock 一变、换页就重算，render 只读它。
     pub(crate) shell_view: workspace_shell::ShellView,
     _layout_choice_sub: Option<Subscription>,
@@ -1402,10 +1403,6 @@ struct Workspace {
     /// 运行内记，重启后从当前会话重新记起。
     recent_sessions: Vec<u64>,
     sidebar_auto_scroll: gpui_component::scroll::AutoScroll,
-    /// 开着的「用其他应用打开」菜单。插件登记的应用变了时原地重建（见 stage.rs）。
-    open_with_popups: Vec<stage::OpenWithPopup>,
-    /// 盯着插件登记的应用；第一次开这个菜单时才订。
-    _open_with_apps_sub: Option<Subscription>,
     /// 命令面板（Cmd+K）；None 表示未打开。查询和选中在 CommandState 里。
     palette: Option<Entity<gpui_component::command::CommandState>>,
 
@@ -1469,7 +1466,7 @@ struct Workspace {
     dir_picker: Option<dir_picker::DirPickerState>,
     project_repositories: Option<project_repositories::ProjectRepositoriesState>,
     /// 额度刷新循环的手动信号通道。额度状态本身不在 Workspace，而在
-    /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
+    /// `ProviderStatus` 全局单例：侧栏订阅它，对话模型菜单经 `ConversationEnv` 读它。
     provider_quota_refresh_tx: Option<smol::channel::Sender<provider_quota::QuotaTarget>>,
 
     /// 守护落后时的自动重启进行中，防止重入。
@@ -1529,9 +1526,9 @@ struct Workspace {
     focus_handle: FocusHandle,
     /// 开着的宿主对话框，按打开先后（见 `host_dialog`）。
     host_dialogs: Vec<host_dialog::HostDialog>,
-    /// 主窗口关闭期间点击系统通知时，会话还在异步恢复。先保留稳定 sid，目标装回
-    /// 列表后再消费，不能退化成只打开一扇空窗口。
-    pending_notification_session_id: Option<String>,
+    /// 主窗口关闭期间点击系统通知时，会话还在异步恢复。先保留机器和稳定 sid，目标
+    /// 装回列表后再消费，不能退化成只打开一扇空窗口。
+    pending_notification_session_id: Option<(RuntimeKey, String)>,
     /// 手机在冷恢复把对话占位装回列表之前就要看的对话。装回后照常唤醒，
     /// 恢复跑完仍找不到的就丢掉——daemon 那边会超时告诉手机。
     pending_conversation_wakes: Vec<String>,
@@ -1543,21 +1540,21 @@ struct Workspace {
     ws_snapshot_finalizing: bool,
 }
 
-/// 自动重连循环每轮的结果。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AcpReconnectStep {
-    /// 普通交互会话已恢复到可用相位。
-    Recovered,
-    /// provider 仍在启动；保持当前重连预算。
-    Waiting,
-    /// 本次发起了重连，继续退避等待。
-    Retrying,
-    /// 预算耗尽或 handle 状态不允许再重连；由调用方做终态判定。
-    GiveUp,
-}
+/// 对话视图要的外部数据，从宿主的缓存里读。
+struct ConversationEnv;
 
-fn daemon_owns_acp_delivery_session(delivery_id: Option<&str>) -> bool {
-    delivery_id.is_some()
+impl smelt_acp_view::env::ConversationEnv for ConversationEnv {
+    fn agent_settings<'a>(
+        &self,
+        machine: &RuntimeKey,
+        cx: &'a App,
+    ) -> Option<&'a smelt_model::agent_host::AgentHostSettings> {
+        settings::agent_hosts(cx)?.settings(machine)
+    }
+
+    fn pi_quota_badge(&self, provider_id: &str, cx: &App) -> Option<String> {
+        smelt_app_state::provider_status_global::ProviderStatus::pi_quota_badge(provider_id, cx)
+    }
 }
 
 impl Workspace {
@@ -1615,6 +1612,7 @@ impl Workspace {
             pages: Vec::new(),
             router: Default::default(),
             startup_outlet: ui.outlet.clone(),
+            outlet_instances: HashMap::new(),
             shell_view: Default::default(),
             _layout_choice_sub: None,
             pending_notification_session_id: None,
@@ -1654,8 +1652,6 @@ impl Workspace {
             sidebar_cursor: None,
             sidebar_typeahead: None,
             sidebar_auto_scroll: gpui_component::scroll::AutoScroll::default(),
-            open_with_popups: Vec::new(),
-            _open_with_apps_sub: None,
             palette: None,
             launch_inputs: None,
             profile_inputs: None,
@@ -1911,9 +1907,8 @@ impl Workspace {
         self.arm_date_change_timer(cx);
     }
 
-    /// 将 app 级 daemon 目录投影到当前窗口。全局状态由唯一的 subscribe 循环写入，
-    /// 此处不会轮询文件或额外建立 socket。
-    /// 认领各运行时推来、还没对过账的工作区目录。
+    /// 把各运行时推来、这个窗口还没处理过的工作区目录落到本地会话上。全局状态由唯一的
+    /// subscribe 循环写入，此处不会轮询文件或额外建立 socket。
     fn apply_received_workspace_directories(
         &mut self,
         window: &mut Window,
@@ -2432,7 +2427,7 @@ fn main() {
         cx.set_global(appearance.clone());
         // 代码字体必须在装主题之前落地：Theme.mono_font_family 从这里读。
         terminal_view::set_font_px(appearance.font_px);
-        terminal_view::set_font_family(&appearance.font_family);
+        smelt_model::font_config::set_font_family(&appearance.font_family);
         settings::apply_named_theme(&appearance.theme_name, cx);
         cx.set_global(settings::LaunchConfig::default());
         settings::start_launch_config_load(cx);
@@ -2451,9 +2446,11 @@ fn main() {
         let daemon_states = DaemonStates::default();
         cx.set_global(daemon_states);
         cx.set_global(WorkspaceDirectoriesGlobal::default());
-        // provider 账户状态（额度 + Pi 模型目录版本）：刷新循环写，侧栏和对话
-        // 模型菜单读。必须在建 Workspace 之前装好，否则启动首查无处可写。
+        // provider 账户额度：刷新循环写，侧栏和对话模型菜单读。必须在建 Workspace 之前
+        // 装好，否则启动首查无处可写。
         cx.set_global(smelt_app_state::provider_status_global::ProviderStatus::default());
+        // 对话视图读的智能体配置和额度经这里给，建任何对话之前装。
+        smelt_acp_view::env::install(ConversationEnv, cx);
         let current_ws_for_daemon_states = current_ws.clone();
         let daemon_states_subscription = cx.observe_global::<DaemonStates>(move |cx| {
             if let Some(ws) = current_workspace(&current_ws_for_daemon_states) {
@@ -2522,7 +2519,6 @@ fn main() {
         } = runtime_events::start(cx);
         // 单独订阅的话题，原样转给插件；智能体配置除外，宿主收进自己的缓存。
         cx.spawn(async move |cx| {
-            use smelt_app_state::provider_status_global::ProviderStatus;
             use smelt_client::daemon_state::{
                 CORE_TOPIC_AGENT_HOST_CHANGED, CORE_TOPIC_PI_CONFIG_CHANGED, TopicMessage,
             };
@@ -2549,7 +2545,7 @@ fn main() {
                     && runtime == RuntimeKey::Local
                     && !matches!(message, smelt_plugin_api::TopicMessage::Unavailable(_))
                 {
-                    cx.update(ProviderStatus::bump_pi_catalog);
+                    cx.update(smelt_acp_view::env::pi_config_changed);
                 }
                 cx.update(|cx| {
                     smelt_plugin_api::emit(
@@ -2570,7 +2566,7 @@ fn main() {
                 let is_local = runtime == RuntimeKey::Local;
                 // 唤醒要拿窗口去重启对话视图，走 update_in；它不是状态投影，后面不用再看。
                 // 主窗口已经关掉就放弃这次唤醒，不另开一扇。
-                if let terminal::DaemonStateEvent::ConversationWakeRequested { session_id } = &event {
+                if let DaemonStateEvent::ConversationWakeRequested { session_id } = &event {
                     let workspace = current_workspace(&current_ws_for_events);
                     if let Some(ws) = workspace {
                         let _ = ws.update_in(cx, |ws, window, cx| {
@@ -2580,7 +2576,7 @@ fn main() {
                     continue;
                 }
                 // 项目文件在报事件的那台机器上。
-                if let terminal::DaemonStateEvent::ProjectChanged { root } = &event {
+                if let DaemonStateEvent::ProjectChanged { root } = &event {
                     let event = smelt_plugin_api::HostEvent::ProjectChanged {
                         machine: runtime.clone(),
                         root: root.clone(),
@@ -2590,7 +2586,7 @@ fn main() {
                 }
                 // 重新订阅上：插件据「重新连上」重取自己的（运行时换了进程，它替插件建的
                 // 监听也没了）。
-                if let terminal::DaemonStateEvent::Snapshot { .. } = &event {
+                if let DaemonStateEvent::Snapshot { .. } = &event {
                     cx.update(|cx| {
                         smelt_plugin_api::emit(
                             smelt_plugin_api::HostEvent::Reconnected(runtime.clone()),
@@ -2598,7 +2594,7 @@ fn main() {
                         )
                     });
                 }
-                if let terminal::DaemonStateEvent::TerminalProgress {
+                if let DaemonStateEvent::TerminalProgress {
                     session_id,
                     progress,
                 } = &event
@@ -2607,7 +2603,7 @@ fn main() {
                     continue;
                 }
                 // v7 旧运行时仍用无回执的外观广播；本机桌面继续按原协议处理。
-                if let terminal::DaemonStateEvent::AppearanceChangeRequested { settings } = &event {
+                if let DaemonStateEvent::AppearanceChangeRequested { settings } = &event {
                     if is_local {
                         let result = cx.update(|cx| settings::apply_requested_appearance(settings, cx));
                         if let Err(error) = result {
@@ -2616,7 +2612,7 @@ fn main() {
                     }
                     continue;
                 }
-                if let terminal::DaemonStateEvent::AppearanceApplyRequested { request_id, settings } = &event {
+                if let DaemonStateEvent::AppearanceApplyRequested { request_id, settings } = &event {
                     if is_local {
                         let result = cx.update(|cx| settings::apply_requested_appearance(settings, cx));
                         let outcome = match result {
@@ -2647,14 +2643,14 @@ fn main() {
                     continue;
                 }
                 // 工作区目录交给 Workspace 对账；首帧整份替换，之后只收版本更新的。
-                if let terminal::DaemonStateEvent::Workspace(directory) = &event {
+                if let DaemonStateEvent::Workspace(directory) = &event {
                     let directory = directory.clone();
                     cx.update(|cx| {
                         WorkspaceDirectoriesGlobal::receive(&runtime, directory, false, cx)
                     });
                     continue;
                 }
-                if let terminal::DaemonStateEvent::Snapshot {
+                if let DaemonStateEvent::Snapshot {
                     workspace: Some(directory),
                     ..
                 } = &event
@@ -2664,45 +2660,40 @@ fn main() {
                 }
                 cx.update(|cx| {
                     match &event {
-                        terminal::DaemonStateEvent::Snapshot { .. } => {
-                            // subscribe 的首帧意味着刚连上一个 daemon epoch：还没发出去的目录
-                            // 命令重新放进保存队列。
-                            if let Some(ws) = current_workspace(&current_ws_for_events) {
-                                let _ = ws.update(cx, |ws, cx| ws.save_state(cx));
-                            }
-                        }
+                        // 目录改动在发生的那一刻发操作，重连后没有要补发的。
+                        DaemonStateEvent::Snapshot { .. } => {}
                         // 桌面不在核心订阅里收自动化投影（归自动化插件）。
-                        terminal::DaemonStateEvent::Automations(_) => {}
-                        terminal::DaemonStateEvent::Update(_) => {}
-                        terminal::DaemonStateEvent::Removed { .. } => {}
-                        terminal::DaemonStateEvent::Workspace(_) => {}
-                        terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
-                        terminal::DaemonStateEvent::AppearanceApplyRequested { .. } => {}
-                        terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
-                        terminal::DaemonStateEvent::ProjectChanged { .. } => {}
-                        terminal::DaemonStateEvent::TerminalNotification { .. } => {}
-                        terminal::DaemonStateEvent::TerminalProgress { .. } => {}
-                        terminal::DaemonStateEvent::Disconnected => {}
+                        DaemonStateEvent::Automations(_) => {}
+                        DaemonStateEvent::Update(_) => {}
+                        DaemonStateEvent::Removed { .. } => {}
+                        DaemonStateEvent::Workspace(_) => {}
+                        DaemonStateEvent::ConversationWakeRequested { .. } => {}
+                        DaemonStateEvent::AppearanceApplyRequested { .. } => {}
+                        DaemonStateEvent::AppearanceChangeRequested { .. } => {}
+                        DaemonStateEvent::ProjectChanged { .. } => {}
+                        DaemonStateEvent::TerminalNotification { .. } => {}
+                        DaemonStateEvent::TerminalProgress { .. } => {}
+                        DaemonStateEvent::Disconnected => {}
                     }
                     match event {
-                        terminal::DaemonStateEvent::Snapshot { sessions: list, .. } => {
+                        DaemonStateEvent::Snapshot { sessions: list, .. } => {
                             DaemonStates::replace_all(&runtime, list, cx);
                         }
-                        terminal::DaemonStateEvent::Update(s) => {
+                        DaemonStateEvent::Update(s) => {
                             DaemonStates::upsert(&runtime, s, cx);
                         }
-                        terminal::DaemonStateEvent::Removed { id } => {
+                        DaemonStateEvent::Removed { id } => {
                             DaemonStates::remove(&runtime, &id, cx);
                         }
-                        terminal::DaemonStateEvent::Workspace(_) => {}
-                        terminal::DaemonStateEvent::Automations(_) => {}
-                        terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
-                        terminal::DaemonStateEvent::AppearanceApplyRequested { .. } => {}
-                        terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
-                        terminal::DaemonStateEvent::ProjectChanged { .. } => {}
-                        terminal::DaemonStateEvent::TerminalNotification { .. } => {}
-                        terminal::DaemonStateEvent::TerminalProgress { .. } => {}
-                        terminal::DaemonStateEvent::Disconnected => {
+                        DaemonStateEvent::Workspace(_) => {}
+                        DaemonStateEvent::Automations(_) => {}
+                        DaemonStateEvent::ConversationWakeRequested { .. } => {}
+                        DaemonStateEvent::AppearanceApplyRequested { .. } => {}
+                        DaemonStateEvent::AppearanceChangeRequested { .. } => {}
+                        DaemonStateEvent::ProjectChanged { .. } => {}
+                        DaemonStateEvent::TerminalNotification { .. } => {}
+                        DaemonStateEvent::TerminalProgress { .. } => {}
+                        DaemonStateEvent::Disconnected => {
                             DaemonStates::mark_subscription_disconnected(&runtime, cx);
                         }
                     }

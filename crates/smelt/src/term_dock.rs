@@ -24,8 +24,9 @@ use gpui_component::dock::{
     PanelId, PanelInfo, PanelState, TabGroupContext, TabGroupRenderer, panel_handle,
 };
 
-use crate::terminal_view::TerminalView;
 use crate::{PaneState, Workspace};
+// 过渡：会话插件搬走后改为经宿主的视图实例机制和 smelt.terminal 命令使用
+use smelt_terminal::terminal_view::TerminalView;
 
 /// 存档里认格子用的名字。定了就不要改。
 const TERM_PANE: &str = "smelt.terminal";
@@ -182,15 +183,16 @@ impl TermDock {
 
 impl Workspace {
     /// 某个会话的分屏树变了（拖动、分屏、关格子都会走到这里）：重算格子列表，活动格
-    /// 不在了就换成第一格，再落盘。
+    /// 不在了就换成第一格；格子变了告诉运行时目录，分屏的样子存进客户端库。
     pub(crate) fn term_layout_changed(&mut self, area: &Entity<DockArea>, cx: &mut Context<Self>) {
-        let Some(session) = self
+        let Some(ix) = self
             .sessions
-            .iter_mut()
-            .find(|session| session.term_dock().is_some_and(|dock| dock.area() == area))
+            .iter()
+            .position(|session| session.term_dock().is_some_and(|dock| dock.area() == area))
         else {
             return;
         };
+        let session = &mut self.sessions[ix];
         let crate::SessionKind::Term { dock, active } = &mut session.kind else {
             return;
         };
@@ -200,6 +202,7 @@ impl Workspace {
         {
             *active = first.clone();
         }
+        self.sync_conversation_terminals(ix, cx);
         self.save_state(cx);
         cx.notify();
     }

@@ -539,7 +539,7 @@ impl Workspace {
     }
 
     /// 把文字交给当前会话：终端打进输入，对话填进输入框，都不替用户发出。插件经
-    /// [`smelt_plugin_api::sessions::SEND_TEXT`] 调到这里。
+    /// [`smelt_plugin_api::contracts::sessions::SEND_TEXT`] 调到这里。
     pub(crate) fn send_to_session(
         &mut self,
         text: &str,
@@ -842,11 +842,10 @@ impl Workspace {
             window,
             |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, window, cx| match ev {
                 acp_view::AcpViewEvent::Changed => {
+                    // 对话内容不回写目录：冷启动续上要用的状态由守护在看到的那一刻写。
                     this.touch_acp_session(_view);
-                    this.save_state(cx);
-                    // save_state 只排队写盘，不会重绘。正文增量只归 AcpView 重画；
-                    // 侧栏「运行中」读的是 Session::status，相位一变事实就变，
-                    // 这里立刻通知。
+                    // 正文增量只归 AcpView 重画；侧栏「运行中」读的是 Session::status，
+                    // 相位一变事实就变，这里立刻通知。
                     this.notify_if_session_facts_changed(cx);
                 }
                 acp_view::AcpViewEvent::ConfigSelected {
@@ -870,10 +869,9 @@ impl Workspace {
                         }
                     })
                     .detach();
-                    // 同一次选择既要成为该 agent 的下次默认，也要保存进当前会话，
-                    // 后者在冷恢复时拥有更高优先级。
+                    // 同一次选择也是这段对话冷恢复时的配置：守护收到选项时写进目录，
+                    // 优先于上面记的默认值。
                     this.touch_acp_session(_view);
-                    this.save_state(cx);
                     cx.notify();
                 }
                 acp_view::AcpViewEvent::PreviewImage(image) => {
@@ -917,127 +915,6 @@ impl Workspace {
                 }
                 acp_view::AcpViewEvent::ForkConversation(request) => {
                     this.add_acp_handoff_session(request.as_ref().clone(), window, cx);
-                }
-                acp_view::AcpViewEvent::CompletedTurn { .. } => {
-                    this.touch_acp_session(_view);
-                }
-                acp_view::AcpViewEvent::FailedTurn { .. } => {
-                    this.touch_acp_session(_view);
-                }
-                acp_view::AcpViewEvent::Ended {
-                    kind,
-                    reason: _,
-                    delivery_id,
-                } => {
-                    this.touch_acp_session(_view);
-                    let sid = _view.read(cx).session_id().to_string();
-                    if kind.is_terminated() {
-                        // 会话已在 daemon 侧被终结（本机或手机点了删除）：只拆视图。
-                        // 不能重连——重连会用同一个 sid 重新 acp_open，把删掉的会话
-                        // 原地复活；也不必再发一次 kill。
-                        if let Some(ix) = this.acp_session_index(&sid, cx) {
-                            this.remove_session(ix, false, cx);
-                        }
-                        return;
-                    }
-                    if super::daemon_owns_acp_delivery_session(delivery_id.as_deref()) {
-                        // daemon 会在同一进程内归约 Ended 并执行重连；多个
-                        // GUI 只能旁观，否则每个窗口都会各发一次 restart。
-                        return;
-                    }
-                    if kind.is_transient() {
-                        // 当前没有 daemon 持有的执行时，不论会话采用哪个
-                        // Agent/Controller，都沿用 GUI 的可视重连体验。
-                        let view = _view.clone();
-                        let runtime_key = view.read(cx).runtime().key().clone();
-                        cx.spawn_in(window, async move |_this, cx| {
-                            // 相位一变就叫醒这条循环：AcpView 改相位都会 notify。
-                            let (changed_tx, changed_rx) = smol::channel::bounded::<()>(1);
-                            let Ok(_observe) = cx.update(|_, cx| {
-                                cx.observe(&view, move |_, _| {
-                                    let _ = changed_tx.try_send(());
-                                })
-                            }) else {
-                                return;
-                            };
-                            // 每次重连前退避（250ms 起、翻倍到 8s 上限）并等运行时在线：短故障
-                            // （升级 exec 一两秒）很快重连，运行时不在线就不发；预算在 AcpView
-                            // 内（6 次）防风暴，退避档位也取它的已用次数——连上就被断时每次
-                            // 都会新起一条循环，档位记在循环里会永远停在第一档。Connecting 时
-                            // 不重试也不花预算，等相位变了再看。
-                            loop {
-                                let dead_failures = view
-                                    .update_in(cx, |view, _window, _cx| {
-                                        matches!(
-                                            view.phase(),
-                                            smelt_client::daemon_state::DaemonPhase::Dead
-                                        )
-                                        .then(|| view.auto_reconnect_failures())
-                                    })
-                                    .ok()
-                                    .flatten();
-                                if let Some(failures) = dead_failures
-                                    && !crate::runtime_events::wait_online(
-                                        &runtime_key,
-                                        failures.saturating_add(1),
-                                        cx,
-                                    )
-                                    .await
-                                {
-                                    break;
-                                }
-                                let step = view.update_in(cx, |view, window, cx| {
-                                    // Starting 只是 provider 正在重建，不能重置预算；
-                                    // 等 daemon 返回可用相位。
-                                    match view.phase() {
-                                        smelt_client::daemon_state::DaemonPhase::Connecting => {
-                                            return AcpReconnectStep::Waiting;
-                                        }
-                                        smelt_client::daemon_state::DaemonPhase::Dead => {}
-                                        _ => return AcpReconnectStep::Recovered,
-                                    }
-                                    if view.maybe_auto_reconnect(window, cx) {
-                                        AcpReconnectStep::Retrying
-                                    } else {
-                                        AcpReconnectStep::GiveUp
-                                    }
-                                });
-                                match step {
-                                    // 视图销毁 / 会话已恢复：都不是失败，收尾即可。
-                                    Err(_) | Ok(AcpReconnectStep::Recovered) => break,
-                                    Ok(AcpReconnectStep::GiveUp) => {
-                                        // 预算耗尽：只有会话仍 Ended 才清理普通交互
-                                        // session；带 delivery 的 daemon 会话不会进入这个分支。
-                                        let still_ended = view
-                                            .update_in(cx, |view, _window, _cx| {
-                                                matches!(
-                                                    view.phase(),
-                                                    smelt_client::daemon_state::DaemonPhase::Dead
-                                                )
-                                            })
-                                            .unwrap_or(false);
-                                        if still_ended {
-                                            Self::kill_daemon_session(&sid);
-                                        }
-                                        break;
-                                    }
-                                    Ok(AcpReconnectStep::Retrying) => {}
-                                    Ok(AcpReconnectStep::Waiting) => {
-                                        if changed_rx.recv().await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        })
-                        .detach();
-                    } else {
-                        // 普通交互会话不可恢复时只清理 runtime。
-                        Self::kill_daemon_session(&sid);
-                    }
-                }
-                acp_view::AcpViewEvent::Recovered => {
-                    // 保留视图自身的快照更新。
                 }
                 acp_view::AcpViewEvent::ViewingHistoryChanged => {
                     // 往上翻着看时到的完成不算看过；滚回最新位置时通知插件据此补标已读。
@@ -1167,6 +1044,7 @@ impl Workspace {
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         self.active_session = self.sessions.len() - 1;
+        self.announce_new_conversation(self.active_session, cx);
         self.sync_session_ui(cx);
         view.update(cx, |view, cx| view.focus_input(window, cx));
         self.save_state(cx);
@@ -1265,11 +1143,9 @@ impl Workspace {
                 profile_id,
                 cwd,
                 None,
+                initial_config,
+                pending_prompt,
             )
-        });
-        view.update(cx, |view, _cx| {
-            view.restore_config_values(initial_config);
-            view.restore_pending_prompt(pending_prompt, None);
         });
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
@@ -1285,6 +1161,7 @@ impl Workspace {
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         let ix = self.sessions.len() - 1;
+        self.announce_new_conversation(ix, cx);
         if activate {
             // 人点出来的新对话：侧栏里那一行闪一下。
             self.sidebar_flash = Some(self.sessions[ix].ui_id);
@@ -1302,7 +1179,7 @@ impl Workspace {
         &self,
         agent: settings::ConversationAgentKind,
         cwd: &str,
-        target_id: &agent_client_protocol::v1::schema::SessionId,
+        target_id: &str,
         cx: &App,
     ) -> Option<usize> {
         self.sessions.iter().position(|s| match &s.kind {
@@ -1310,7 +1187,7 @@ impl Workspace {
                 let v = view.read(cx);
                 v.agent_kind() == agent
                     && v.cwd().as_deref() == Some(cwd)
-                    && v.history_session_id_for_save().as_ref() == Some(target_id)
+                    && v.history_session_id_for_save().as_deref() == Some(target_id)
             }
             _ => false,
         })
@@ -1341,7 +1218,7 @@ impl Workspace {
         // 已经开着的必须是**这一条**历史会话（比对 agent + cwd + 具体 session id），
         // 不能只认 agent+cwd——同项目同 agent 可能同时开着好几条不同的历史会话，
         // 之前只按 agent+cwd 找，点哪条「继续」都会跳到"第一个凑巧匹配的"那条。
-        let target_id = agent_client_protocol::v1::schema::SessionId::new(resume_id);
+        let target_id = resume_id;
         if let Some(ix) = self.find_open_acp_session(agent, &cwd, &target_id, cx) {
             let view = match &self.sessions[ix].kind {
                 SessionKind::Conversation(view) => view.clone(),
@@ -1413,6 +1290,7 @@ impl Workspace {
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         let ix = self.sessions.len() - 1;
+        self.announce_new_conversation(ix, cx);
         self.activate(ix, window, cx);
         self.save_state(cx);
     }
@@ -1510,7 +1388,7 @@ impl Workspace {
             .name("smelt-spawn-session".into())
             .spawn(move || {
                 let r = terminal::Terminal::spawn(
-                    &runtime_bg,
+                    crate::runtimes::connector(&runtime_bg).as_ref(),
                     24,
                     80,
                     cwd_bg.as_deref(),
@@ -1564,6 +1442,7 @@ impl Workspace {
                     this.sessions.push(session);
                     this.session_list_revision = this.session_list_revision.wrapping_add(1);
                     let ix = this.sessions.len() - 1;
+                    this.announce_new_conversation(ix, cx);
                     // 新的一行闪一下，并且得看得见：所在项目折着就展开，再滚到它。
                     this.sidebar_flash = Some(this.sessions[ix].ui_id);
                     this.activate(ix, window, cx);
@@ -1601,7 +1480,14 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    terminal::Terminal::spawn(&runtime_bg, 24, 80, cwd_bg.as_deref(), &sid_bg, None)
+                    terminal::Terminal::spawn(
+                        crate::runtimes::connector(&runtime_bg).as_ref(),
+                        24,
+                        80,
+                        cwd_bg.as_deref(),
+                        &sid_bg,
+                        None,
+                    )
                 })
                 .await;
             let terminal = match result {
@@ -2179,7 +2065,7 @@ impl Workspace {
             let session = &self.sessions[ix];
             let key = session.runtime(cx).key().clone();
             let id = session.conversation_id.clone();
-            self.close_directory_conversation(&key, &id);
+            self.close_directory_conversation(&key, &id, cx);
             // 每个 pane 在自己的运行时上杀：远程会话的 shell 在那台机器上。
             let terminals = self.sessions[ix]
                 .term_leaves()

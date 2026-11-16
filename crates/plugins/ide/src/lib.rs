@@ -1,8 +1,8 @@
-//! 用其他应用打开：探测这台电脑上装了哪些编辑器 / IDE，连同系统文件管理器一起登记进项目
-//! 右键菜单（见 [`api::register_open_with_apps`]），点了用它打开项目目录。
+//! 用其他应用打开：探测这台电脑上装了哪些编辑器 / IDE，连同系统文件管理器一起登记进会话
+//! 列表项目行的右键菜单（[`PROJECT_MENU`]，只列本机项目），点了用它打开项目目录。
 //!
 //! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道。菜单怎么画、开着的菜单怎么跟着变归
-//! 宿主；有哪些应用、图标、怎么启动归这里。文件管理器那一项交给宿主的
+//! 画菜单的一方；有哪些应用、图标、怎么启动归这里。文件管理器那一项交给宿主的
 //! `smelt.app/open-in-file-manager`，不另写一份。
 //!
 //! 探测要问 Launch Services、翻 PATH、读应用包里的图标，放后台低优先级跑：启动时一次，
@@ -11,12 +11,14 @@
 
 mod detect;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use api::{HostEvent, OpenWith, OpenWithApp};
+use api::contracts::sessions::PROJECT_MENU;
+use api::{ContextMenuAction, ContextMenuItem, HostEvent, RuntimeKey};
 use gpui::{App, Global, Priority, Task};
 use gpui_kit_assets::IconName;
+use serde::Deserialize;
 use smelt_plugin_api as api;
 
 use detect::InstalledIde;
@@ -24,8 +26,18 @@ use detect::InstalledIde;
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.ide";
 
-/// 菜单项点了执行的命令。参数里的 `app` 是 [`FILE_MANAGER`] 或 IDE 的名字。
+/// 菜单项点了执行的命令。
 const OPEN_WITH: api::Command<OpenWith, ()> = api::Command::new("smelt.ide/open-with");
+
+/// [`OPEN_WITH`] 的参数：登记时给的 `app` 并上菜单的上下文
+/// （[`api::contracts::sessions::ProjectMenuContext`]，这里只用 `path`）。
+#[derive(Deserialize)]
+struct OpenWith {
+    /// [`FILE_MANAGER`] 或 IDE 的名字。
+    app: String,
+    /// 本机项目根目录。
+    path: PathBuf,
+}
 
 /// 文件管理器那一项的 [`OpenWith::app`]。IDE 用自己的名字，不会和它撞。
 const FILE_MANAGER: &str = "file-manager";
@@ -99,27 +111,55 @@ fn scan(cx: &mut App) {
     .detach();
 }
 
-/// 把目录登记成菜单：IDE 在前，文件管理器在最后。和上次一样时宿主什么都不做。
+/// 把目录登记成项目菜单里的一组子菜单：IDE 在前，文件管理器在最后。和上次一样时什么都
+/// 不惊动。
 fn publish(cx: &mut App) {
     let catalog = cx.global::<Catalog>();
-    let command = OPEN_WITH.id().to_string();
-    let mut apps: Vec<OpenWithApp> = catalog
+    let mut apps: Vec<ContextMenuItem> = catalog
         .ides
         .iter()
-        .map(|ide| OpenWithApp {
-            label: ide.label.into(),
-            image: ide.icon.clone(),
-            icon: IconName::SquareTerminal.path(),
-            command: command.clone(),
-            app: ide.label.to_string(),
+        .map(|ide| {
+            app_item(
+                ide.label,
+                ide.icon.clone(),
+                IconName::SquareTerminal,
+                ide.label,
+            )
         })
         .collect();
-    apps.push(OpenWithApp {
-        label: detect::file_manager_label().into(),
-        image: catalog.file_manager_icon.clone(),
-        icon: IconName::FolderOpen.path(),
-        command,
-        app: FILE_MANAGER.to_string(),
-    });
-    api::register_open_with_apps(OWNER, apps, cx);
+    apps.push(app_item(
+        detect::file_manager_label(),
+        catalog.file_manager_icon.clone(),
+        IconName::FolderOpen,
+        FILE_MANAGER,
+    ));
+    let group = ContextMenuItem {
+        label: "用其他应用打开".into(),
+        image: None,
+        icon: Some(IconName::ExternalLink.path()),
+        // 应用都装在这台电脑上，远程项目的目录不在这里。
+        machine: Some(RuntimeKey::Local),
+        action: ContextMenuAction::Submenu(apps),
+    };
+    api::register_context_menu_items(OWNER, PROJECT_MENU, vec![group], cx)
+        .expect("用其他应用打开的菜单项写错了");
+}
+
+/// 子菜单里的一个应用：有自己的彩色图标就画它，没有画 `fallback`。
+fn app_item(
+    label: &'static str,
+    image: Option<Arc<gpui::Image>>,
+    fallback: IconName,
+    app: &str,
+) -> ContextMenuItem {
+    ContextMenuItem {
+        label: label.into(),
+        image,
+        icon: Some(fallback.path()),
+        machine: None,
+        action: ContextMenuAction::Run {
+            command: OPEN_WITH.id().to_string(),
+            args: api::serde_json::json!({ "app": app }),
+        },
+    }
 }

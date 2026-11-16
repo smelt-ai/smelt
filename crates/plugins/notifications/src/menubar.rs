@@ -9,11 +9,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use api::contracts::sessions::{self, Activate};
 use api::model::agent_kind::agent_id_from_launch;
 use api::model::agent_status::{AgentStatus, terminal_agent_status};
 use api::model::daemon_state::DaemonSessionState;
 use api::model::workspace_directory::WorkspaceConversation;
-use api::sessions::{self, Activate};
 use api::ui::ui_theme::agent_status_u32;
 use api::{DockBadge, RuntimeKey, StatusIcon, StatusMenu, StatusMenuItem};
 use gpui::{App, Task};
@@ -111,7 +111,7 @@ fn machine_rows(machine: &api::Machine, cx: &App) -> Vec<Row> {
         .conversations
         .iter()
         .filter(|conversation| conversation.archived_at.is_none())
-        .filter_map(|conversation| conversation_row(conversation, &states, remote))
+        .filter_map(|conversation| conversation_row(&machine.key, conversation, &states, remote))
         .collect()
 }
 
@@ -145,6 +145,8 @@ fn forget_on_failure(
 /// 一段对话在菜单里要用到的。
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Row {
+    /// 对话在哪台机器上。
+    machine: RuntimeKey,
     /// 组成这段对话的守护会话 id：对话一个，终端每格一个。
     ids: Vec<String>,
     /// 每个 id 的状态，跟 `ids` 一一对应。
@@ -160,9 +162,10 @@ impl Row {
     }
 }
 
-/// 一段对话的会话 id、状态、名字和 agent。一个会话都没起过的（终端还没开）是 `None`。
-/// `remote` 是远程机器的名字，接在名字后面。
+/// `machine` 上一段对话的会话 id、状态、名字和 agent。一个会话都没起过的（终端还没开）是
+/// `None`。`remote` 是远程机器的名字，接在名字后面。
 fn conversation_row(
+    machine: &RuntimeKey,
     conversation: &WorkspaceConversation,
     states: &HashMap<String, DaemonSessionState>,
     remote: Option<&str>,
@@ -204,6 +207,7 @@ fn conversation_row(
         None => title,
     };
     Some(Row {
+        machine: machine.clone(),
         statuses: ids.iter().map(|id: &String| status_of(id)).collect(),
         ids,
         title,
@@ -221,7 +225,8 @@ struct Menu {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
-    /// 点了跳到的守护会话 id。
+    /// 点了跳到哪台机器上的哪个守护会话。
+    machine: RuntimeKey,
     session_id: String,
     label: String,
     agent: Option<String>,
@@ -267,6 +272,7 @@ fn menu(rows: Vec<Row>, attention: &HashMap<String, bool>) -> Menu {
             Some((
                 shown,
                 Entry {
+                    machine: row.machine,
                     session_id,
                     label: format!("{} — {text}", row.title),
                     agent: row.agent,
@@ -296,6 +302,7 @@ impl Menu {
                 }),
                 command: sessions::ACTIVATE.id().to_string(),
                 args: api::serde_json::to_value(Activate {
+                    machine: entry.machine.clone(),
                     session_id: entry.session_id.clone(),
                 })
                 .unwrap_or_default(),

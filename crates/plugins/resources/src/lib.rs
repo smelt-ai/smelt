@@ -18,9 +18,9 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use api::client::protocol::control::EmptyParams;
+use api::contracts::sessions::{self, Activate};
 use api::model::control_api::ResourceUsage;
 use api::process_usage::ProcessSampler;
-use api::sessions::{self, Activate};
 use api::{HostEvent, PluginView, RuntimeKey, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, IntoElement, Render, SharedString, Subscription, Task,
@@ -45,8 +45,8 @@ pub fn register(cx: &mut App) {
         name: "main".into(),
         title: "资源占用".into(),
         icon: IconName::MemoryStick.path(),
-        per_machine: false,
         draws_top_bar: false,
+        instances: false,
         settings: Some(SettingsEntry {
             group: SettingsGroup::System,
             keywords: [
@@ -165,8 +165,14 @@ fn shown(cx: &App) -> bool {
 }
 
 /// 从设置里的这一页跳到那段会话。
-pub(crate) fn jump_to_session(session_id: String, cx: &mut App) {
-    let task = sessions::ACTIVATE.run(&Activate { session_id }, cx);
+pub(crate) fn jump_to_session(machine: RuntimeKey, session_id: String, cx: &mut App) {
+    let task = sessions::ACTIVATE.run(
+        &Activate {
+            machine,
+            session_id,
+        },
+        cx,
+    );
     cx.spawn(async move |_| {
         if let Err(error) = task.await {
             eprintln!("[resources] 跳到会话失败：{error}");

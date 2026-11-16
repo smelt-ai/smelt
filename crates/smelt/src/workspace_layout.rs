@@ -99,9 +99,10 @@ fn page_order(cx: &App) -> Vec<PageKey> {
     pages
 }
 
-/// 能放进出口的视图：登记着，不是设置页（设置页由设置摆）。
+/// 能按 id 放进出口的视图：登记着，不是设置页（设置页由设置摆），也不按实例建（那种带着
+/// 建好的一份放进来，见 [`Workspace::open_instance`]）。
 fn outlet_can_hold(id: &str, cx: &App) -> bool {
-    api::view(id, cx).is_some_and(|view| view.settings.is_none())
+    api::view(id, cx).is_some_and(|view| view.settings.is_none() && !view.instances)
 }
 
 /// 给这一页登记的布局，按登记顺序。只读内存。
@@ -177,13 +178,14 @@ fn layout_views(state: &DockAreaState) -> HashSet<String> {
     views
 }
 
-/// 兜底那页摆的视图：登记过的视图按登记顺序，设置页、出口（兜底那页没有默认内容给它放）、
-/// 已经摆进哪页布局里的不摆。
+/// 兜底那页摆的视图：登记过的视图按登记顺序，设置页、按实例建的、出口（兜底那页没有默认
+/// 内容给它放）、已经摆进哪页布局里的不摆。
 fn fallback_views(views: &[api::ViewInfo], elsewhere: &HashSet<String>) -> Vec<String> {
     views
         .iter()
         .filter(|view| {
             view.settings.is_none()
+                && !view.instances
                 && view.id.as_ref() != api::OUTLET_VIEW
                 && !elsewhere.contains(view.id.as_ref())
         })
@@ -427,9 +429,18 @@ impl Workspace {
     }
 
     /// 出口对上注册表：撤下的视图不再放，出口里该放的视图建好（新建的打开一次，让它读
-    /// 数据），再重算看得见什么。换页、出口换内容、视图登记变了时调。
+    /// 数据），再重算看得见什么。按实例建的那份，出口换了内容、登记撤下了就放掉。换页、
+    /// 出口换内容、视图登记变了时调。
     pub(crate) fn sync_outlet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dropped = self.router.retain_views(|id| outlet_can_hold(id, cx));
+        let router = &self.router;
+        self.outlet_instances.retain(|page, instance| {
+            router.outlet(page) == Some(&**instance.id())
+                && api::view(instance.id(), cx).is_some_and(|view| view.instances)
+        });
+        let instances = &self.outlet_instances;
+        let dropped = self
+            .router
+            .retain_views(|page, id| outlet_can_hold(id, cx) || instances.contains_key(page));
         self.sync_shell_view(cx);
         if let Some(id) = self.shell_view.outlet.clone()
             && let Some((view, true)) = api::ensure_view(&id, window, cx)
@@ -442,12 +453,18 @@ impl Workspace {
         }
     }
 
-    /// 首页出口里放着的视图，随界面状态存；远程桌面是现场，重启后不自动连回去。
+    /// 首页出口里放着的视图，随界面状态存；远程桌面是现场，重启后不自动连回去；按实例建的
+    /// 那份参数不存，也不放回去。
     pub(crate) fn persisted_outlet(&self, cx: &App) -> Option<String> {
         self.router
             .outlet(&home_page(cx))
-            .filter(|view| *view != crate::desktop_view::DESKTOP_VIEW)
+            .filter(|view| *view != crate::desktop_view::DESKTOP_VIEW && outlet_can_hold(view, cx))
             .map(str::to_string)
+    }
+
+    /// 开着的这页出口里放着的、按实例建的那份。出口画它（见 `host_views`）。只读内存。
+    pub(crate) fn outlet_instance(&self) -> Option<&api::ViewInstance> {
+        self.outlet_instances.get(self.router.page())
     }
 
     /// 给第 `ix` 页装眼下该装的布局：有能用的存档装存档，否则装布局本来的样子。登记过
@@ -730,23 +747,57 @@ impl Workspace {
         }) {
             return self.navigate(page.clone(), window, cx) && self.show_view(id, window, cx);
         }
-        if !outlet_can_hold(id, cx) {
+        if !outlet_can_hold(id, cx) || !self.go_to_outlet(window, cx) {
             return false;
-        }
-        if !self.page_lays_out(&current, api::OUTLET_VIEW, cx) {
-            let Some(page) = pages.into_iter().find(|page| {
-                page != &current
-                    && page_usable(page, cx)
-                    && self.page_lays_out(page, api::OUTLET_VIEW, cx)
-            }) else {
-                return false;
-            };
-            if !self.navigate(page, window, cx) {
-                return false;
-            }
         }
         self.set_outlet(Some(id.to_string()), window, cx);
         self.show_view(id, window, cx)
+    }
+
+    /// 打开按实例建的视图（`OPEN_VIEW` 给的是这种时）：按 `args` 新建一份放进出口（找出口
+    /// 同 [`Self::reveal_view`]），出口原来放着的放掉，焦点交给它。没登记、建不出来、没有
+    /// 能放的出口是 `Err`（给人看的原因）。
+    pub(crate) fn open_instance(
+        &mut self,
+        id: &str,
+        args: &serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let instance = api::create_view(id, args, window, cx)?;
+        if !self.go_to_outlet(window, cx) {
+            return Err(format!("没有能放视图「{id}」的出口"));
+        }
+        let page = self.router.page().clone();
+        let id = instance.id().to_string();
+        self.outlet_instances.insert(page.clone(), instance);
+        // 同一个视图换一份时路由不变，照样要重建出口、重画。
+        self.router.set_outlet(&page, Some(id.clone()));
+        self.sync_outlet(window, cx);
+        self.save_state(cx);
+        cx.notify();
+        self.show_view(&id, window, cx);
+        if let Some(instance) = self.outlet_instances.get(&page) {
+            instance.focus(window, cx);
+        }
+        Ok(())
+    }
+
+    /// 去有出口的页：开着的这页有出口就留在这页，没有就去有出口的那页（按 [`page_order`]）。
+    /// 哪页都没有、进不去返回 `false`。
+    fn go_to_outlet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let current = self.router.page().clone();
+        if self.page_lays_out(&current, api::OUTLET_VIEW, cx) {
+            return true;
+        }
+        let Some(page) = page_order(cx).into_iter().find(|page| {
+            page != &current
+                && page_usable(page, cx)
+                && self.page_lays_out(page, api::OUTLET_VIEW, cx)
+        }) else {
+            return false;
+        };
+        self.navigate(page, window, cx)
     }
 
     /// 出口放回开着的这页的默认内容。远程桌面页头的关闭用。
@@ -840,8 +891,8 @@ mod tests {
             id: id.to_string().into(),
             title: id.to_string().into(),
             icon: "".into(),
-            per_machine: false,
             draws_top_bar: false,
+            instances: false,
             settings: None,
             build: std::rc::Rc::new(
                 |_: &mut gpui::Window, _: &mut gpui::App| -> std::rc::Rc<dyn api::ViewHandle> {

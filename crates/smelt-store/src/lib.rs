@@ -40,16 +40,16 @@ mod snapshots;
 mod workspace;
 
 pub use snapshots::{
-    AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentDefinitionRecord, AgentProfileEnvRecord,
-    AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord, HistoryTitleSnapshot,
-    LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot, MemoryProvenanceRecord,
-    MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord, MemoryUsageRecord, PairedDevice,
-    PublishedSessionRecord, PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota,
-    QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, QuotaProviderPref,
-    RemoteConfigSnapshot, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogVersion,
-    WorkspaceDirectoryCommit, WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord,
-    WorkspaceSnapshot, WorkspaceTerminalRecord, WorkspaceWorksetRecord,
-    WorkspaceWorksetRepositoryRecord,
+    AcpLiveChange, AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentDefinitionRecord,
+    AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
+    HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
+    MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord,
+    MemoryUsageRecord, PairedDevice, PublishedSessionRecord, PublishedSessionSnapshot,
+    PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
+    QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot, TerminalThemeSnapshot,
+    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit,
+    WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
+    WorkspaceTerminalRecord, WorkspaceWorksetRecord, WorkspaceWorksetRepositoryRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -249,7 +249,8 @@ impl Store {
         imp::create_workspace_conversation(&self.backend, conversation)
     }
 
-    /// 替换一段已有对话。对话已经不在时回 [`StoreError::ConversationNotFound`]。
+    /// 换一段已有对话里的终端格子，别的以库里的为准（见 `workspace::update_conversation`）。
+    /// 对话已经不在时回 [`StoreError::ConversationNotFound`]。
     pub fn update_workspace_conversation(
         &self,
         conversation: &WorkspaceSessionRecord,
@@ -385,6 +386,18 @@ impl Store {
     ) -> Result<WorkspaceDirectoryCommit, StoreError> {
         imp::write_workspace(&self.backend, |transaction| {
             crate::workspace::set_acp_session_title(transaction, sid, title)
+        })
+    }
+
+    /// 守护在跑着的 ACP 会话里看到的状态变了（选了配置、预设或首条消息发出去、回合结束）。
+    /// 只由守护写；没有这段会话时不改。
+    pub fn update_workspace_acp_live(
+        &self,
+        sid: &str,
+        change: AcpLiveChange<'_>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::update_acp_live(transaction, sid, change)
         })
     }
 
@@ -7008,6 +7021,92 @@ CREATE TABLE published_session (
         );
     }
 
+    /// 新建之后，对话的配置、预设、首条消息、活动时间只由守护按它看到的写：
+    /// 真改了才推进版本，没有这段会话不建行，客户端整段替换带来的旧时间不算数。
+    #[test]
+    fn daemon_owns_live_acp_state_after_creation() {
+        let dir = temp_dir("acp-live");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let mut created = acp_conversation("c1", Some("acp-1"), None);
+        if let Some(acp) = &mut created.acp {
+            acp.config_values = vec![("model".into(), "opus".into())];
+            acp.pending_prompt = Some("先读一遍代码".into());
+            acp.pending_agent_preset = Some("你是审查员".into());
+        }
+        store.create_workspace_conversation(&created).unwrap();
+        let acp = |store: &Store| {
+            store.workspace_directory().unwrap().1.sessions[0]
+                .acp
+                .clone()
+                .unwrap()
+        };
+        let live = |change| store.update_workspace_acp_live("acp-1", change).unwrap();
+
+        assert!(
+            live(AcpLiveChange::ConfigValue {
+                config_id: "model",
+                value_id: "sonnet",
+            })
+            .changed
+        );
+        assert!(
+            live(AcpLiveChange::ConfigValue {
+                config_id: "mode",
+                value_id: "plan",
+            })
+            .changed
+        );
+        assert!(
+            !live(AcpLiveChange::ConfigValue {
+                config_id: "mode",
+                value_id: "plan",
+            })
+            .changed
+        );
+        assert_eq!(
+            acp(&store).config_values,
+            vec![
+                ("model".to_string(), "sonnet".to_string()),
+                ("mode".to_string(), "plan".to_string()),
+            ]
+        );
+
+        assert!(live(AcpLiveChange::AgentPresetConsumed).changed);
+        assert!(!live(AcpLiveChange::AgentPresetConsumed).changed);
+        assert!(live(AcpLiveChange::PendingPromptSent).changed);
+        assert_eq!(acp(&store).pending_prompt, None);
+        assert_eq!(acp(&store).pending_agent_preset, None);
+
+        assert!(live(AcpLiveChange::TurnEnded { at: 50 }).changed);
+        assert!(!live(AcpLiveChange::TurnEnded { at: 40 }).changed);
+        // 客户端（含没升级的旧客户端）带着新建时的旧值改对话，改不回去。
+        assert!(
+            !store
+                .update_workspace_conversation(&created)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(
+            store.workspace_directory().unwrap().1.sessions[0].last_updated_at,
+            50,
+            "活动时间只由守护记"
+        );
+        assert_eq!(acp(&store).config_values[0].1, "sonnet");
+        assert_eq!(acp(&store).pending_prompt, None);
+        assert_eq!(acp(&store).pending_agent_preset, None);
+
+        let missing = store
+            .update_workspace_acp_live(
+                "acp-missing",
+                AcpLiveChange::ConfigValue {
+                    config_id: "model",
+                    value_id: "opus",
+                },
+            )
+            .unwrap();
+        assert!(!missing.changed);
+    }
+
     /// 恢复身份是目录的一部分：守护真改了才推进版本，同一个 id 再确认、已经放弃再放弃、
     /// 没有这一行，都不动。
     #[test]
@@ -7078,7 +7177,7 @@ CREATE TABLE published_session (
         store.remember_history_session_id("acp-1", "h1").unwrap();
         assert_eq!(bound("h1").as_deref(), Some("writer"));
 
-        // 先有 provider 身份（从历史续接），后补智能体。
+        // 没有智能体就不记；智能体只在新建时定，客户端改对话补不上。
         let second = with_definition(
             acp_conversation("c2", Some("acp-2"), Some("h2")),
             Some("  "),
@@ -7088,7 +7187,15 @@ CREATE TABLE published_session (
         store
             .update_workspace_conversation(&with_definition(second, Some("coder")))
             .unwrap();
-        assert_eq!(bound("h2").as_deref(), Some("coder"));
+        assert_eq!(bound("h2"), None, "ACP 那段新建之后客户端改不了");
+
+        // 从历史续接：新建时两样都有，当场记上。
+        let resumed = with_definition(
+            acp_conversation("c5", Some("acp-5"), Some("h5")),
+            Some("coder"),
+        );
+        store.create_workspace_conversation(&resumed).unwrap();
+        assert_eq!(bound("h5").as_deref(), Some("coder"));
 
         // 换了智能体续接同一份存档：以对话上现在的为准。
         let third = with_definition(

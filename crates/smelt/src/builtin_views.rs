@@ -124,8 +124,8 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
                 name: kind.name().into(),
                 title: kind.title().into(),
                 icon: kind.icon(),
-                per_machine: false,
                 draws_top_bar: kind.owns_top_bar(),
+                instances: false,
                 settings: None,
                 build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
                     let workspace = workspace.clone();

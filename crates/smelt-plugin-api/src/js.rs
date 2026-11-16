@@ -25,9 +25,11 @@ use gpui_shell::{
 };
 use serde_json::Value;
 
+use crate::model::daemon_state::RuntimePresence;
 use crate::{
-    CommandSpec, Handled, HostEvent, NotificationPermission, RuntimeKey, SettingsEntry,
-    SettingsGroup, TopicMessage, ViewBuilder, ViewSpec, rusqlite,
+    CommandSpec, ContextMenuAction, ContextMenuItem, Handled, HostEvent, MenuEntry, MenuSlot,
+    NotificationPermission, RuntimeKey, SettingsEntry, SettingsGroup, TopicMessage, ViewBuilder,
+    ViewSpec, rusqlite,
 };
 
 /// 模块名，和 Rust 这边的 crate 同名。
@@ -41,7 +43,7 @@ export interface Project {
   /** 根目录，按那台机器的路径写。 */
   root: string;
 }
-/** 舞台上露着的一段会话。 */
+/** 主窗口里露着的一段会话。 */
 export interface ViewedSession {
   machine: Machine;
   /** 守护会话 id（终端是那一格），同 session_states 里的。 */
@@ -163,7 +165,10 @@ export function next_command(): Promise<CommandCall>;
  * - "smelt.app/pick-paths" { machine: Machine, title: string, confirm: string, files?: boolean, multiple?: boolean }
  *   → string[] | null：在那台机器上选路径，title 是选择框标题，confirm 是确认按钮上的动词；取消时为 null。
  * - "smelt.app/open-view" { view: string, args?: unknown } → boolean：打开一个视图，哪页的布局里摆了它就去那页
- *   让它露出来，哪页都没摆就放进出口，再把 args 交给它；没有这个视图时为 false。
+ *   让它露出来，哪页都没摆就放进出口，再把 args 交给它；没有这个视图时为 false。按实例建的视图（会话一份的终端、
+ *   对话，如 "smelt.terminal/terminal"，args 是它的约定里的形状）每次按 args 新建一份放进出口，出口换了内容就释放；
+ *   没有能放的出口时 reject。
+ * - "smelt.app/quit-now"：直接退出，不问退出守卫、不弹退出确认。接手了退出（set_quit_guard）的插件做完自己的事用它。
  * - "smelt.app/open-page" { page: string } → boolean：进一页，来路上有它就退回去；没有这页、这页没有布局时为 false。
  * - "smelt.app/show-main-window"：把主窗口拿到前面来，已经关了就新开一扇。
  * - "smelt.app/set-status-menu" { title?: string, tooltip?: string, items?: StatusMenuItem[] }：设置菜单栏图标旁的字、
@@ -177,7 +182,11 @@ export function next_command(): Promise<CommandCall>;
  *   推回来（发 agent_settings_changed），不先改本地；连着改时等上一次 resolve 再发下一次。
  * - "smelt.sessions/start-conversation" { machine: Machine, agent_definition_id: string, cwd: string }：
  *   跟一个智能体在那台机器的 cwd 里开一段新对话，露在主窗口里。
- * - "smelt.sessions/activate" { session_id: string }：在主窗口里露出这个会话并拿到前面来，主窗口关着就先开。
+ * - "smelt.sessions/activate" { machine: Machine, session_id: string }：在主窗口里露出那台机器上的这个会话并拿到前面来，
+ *   主窗口关着就先开。
+ * - "smelt.sessions/fork" { machine: Machine, session_id: string, provider_session_id: string,
+ *   cut?: { text: string, occurrence: number } | null, prompt?: string }：从这段对话分叉出一段新对话；cut 是从哪条
+ *   用户消息（第 occurrence 次出现的 text）之前切开，不给是整段；prompt 是新对话里先填进输入框的话。
  * - "smelt.sessions/send-text" { text: string }：把文字交给当前会话（终端打进输入、对话填进输入框，不替用户发出）；
  *   没有能接的会话时 reject。
  * - "smelt.sessions/resume" / "smelt.sessions/resume-in-terminal" / "smelt.sessions/handoff"：续接、交接历史会话。
@@ -185,6 +194,50 @@ export function next_command(): Promise<CommandCall>;
 export function run(command: string, args?: unknown): Promise<unknown>;
 /** 那台机器上的路径怎么切。 */
 export function path_style(machine: Machine): "posix" | "windows";
+/** 那台机器此刻在线：最近一次探测连得上、版本对得上；本机守护重启、升级的那一会儿也不在线。变了发 machines_changed。 */
+export function machine_online(machine: Machine): boolean;
+/**
+ * 等那台机器在线，兑现为 true；机器被移除了为 false。等的时候不拨号，跟着宿主探到的状态醒。failures 是在线以后又连
+ * 失败的次数，大于 0 时先按它退避（250ms 起翻倍，上限 8s）再看，免得对着在线却出错的机器连环重试。
+ */
+export function wait_online(machine: Machine, failures?: number): Promise<boolean>;
+/**
+ * 那台机器当前这一轮会话快照里，这个会话的运行时还在不在：live 活着；left_over 守护停过，只剩身份，按原 id 重新打开
+ * 能续接；gone 没了。订阅还没就绪、判断不了为 null。变了发 sessions_changed。
+ */
+export function session_presence(machine: Machine, session_id: string): "live" | "left_over" | "gone" | null;
+export interface MenuItem {
+  /** app 放进应用菜单（「Smelt」，版本号下面、「设置…」上面），help 放进「帮助」菜单。 */
+  slot: "app" | "help";
+  title: string;
+  /** 点了执行的命令 id（"<来源>/<名字>"），不带参数。 */
+  command: string;
+}
+/** 替换本插件放进菜单栏菜单的项。空数组撤下全部；一项不合法整组不登记。 */
+export function register_menu_items(items: MenuItem[]): null;
+/** 右键菜单里的一项（见 register_context_menu_items）：点了执行 command，或者展开 submenu。 */
+export type ContextMenuItem = {
+  label: string;
+  /** 彩色图标（如应用自己的图标），PNG 字节；有它就不画 icon。 */
+  png?: number[] | null;
+  /** 线性图标的资源路径，如 "icons/external-link.svg"；png、icon 都没有就不画图标。 */
+  icon?: string | null;
+  /** 只在这台机器的东西上列（{ machine: null } 是只在本机）；不给是哪台都列。 */
+  only_on?: { machine: Machine } | null;
+} & ({ command: string; args?: Record<string, unknown> | null } | { submenu: ContextMenuItem[] });
+/**
+ * 往别的插件画的右键菜单 menu 里放本插件的项。menu 是 "<来源>/<名字>"，见画它的插件的约定，如会话列表里项目行的
+ * "smelt.sessions/project"（上下文 { machine, path }）、机器行的 "smelt.sessions/machine"（上下文 { machine }）。
+ * 整组替换本插件在这个菜单里原来的项，空数组撤下。点了执行 command，参数是 args 并上菜单的上下文，同名字段以上下文
+ * 为准；命令撤下了那一项就不列。一项不合法整组不登记。
+ */
+export function register_context_menu_items(menu: string, items: ContextMenuItem[]): null;
+/**
+ * 接手用户要退出（⌘Q、菜单「退出 Smelt」）：用户要退出时先执行本插件的命令 name（要另外登记，不带参数），宿主不弹
+ * 自己的退出确认、也不退出。插件做完自己的事用 run("smelt.app/quit-now") 退出，或者不退了。脚本没法当场回答这次
+ * 接不接，所以挂着就是每次都接，用不着时传 null 撤下。插件卸下、这条命令撤下了就不再接。系统关机等不经过这里。
+ */
+export function set_quit_guard(name: string | null): null;
 /** 打开文件，交给登记的文件打开者；没有打开者时本机文件用系统文本编辑器打开，远程的 reject。line 从 1 数。 */
 export function open_file(machine: Machine, path: string, line?: number): Promise<null>;
 export interface SettingsPage {
@@ -233,7 +286,11 @@ export type HostEvent =
   | { type: "themes_changed" }
   | { type: "layouts_changed" }
   | { type: "pages_changed" }
-  | { type: "commands_changed" };
+  | { type: "commands_changed" }
+  /** 插件发的事件（见 emit_event）：name 是 "<来源>/<名字>"，载荷形状由发的插件定。 */
+  | { type: "plugin"; name: string; payload: unknown }
+  /** 要在那台机器上打开这些路径（拖到 Dock 图标上的、Finder 里「用 Smelt 打开」的），绝对路径，可能是目录也可能是文件。 */
+  | { type: "open_paths"; machine: Machine; paths: string[] };
 /**
  * 运行时话题推来的：一条事件；带快照的话题（如 attention.changed）订上和积压后的整份状态，收到就整份换掉
  * 自己留的；断开或积压可能错过了事件（没有快照的话题自己重读）；那台机器这一轮连接上不会再推这个话题
@@ -245,10 +302,15 @@ export type TopicMessage =
   | { kind: "lagged" }
   | { kind: "unavailable"; reason: string };
 /**
- * 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份；一台机器一个话题的快照或积压到了，
- * 这个话题之前没取走的就不留了。同时只能有一个在等。
+ * 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份（plugin、open_paths 每条都留）；一台
+ * 机器一个话题的快照或积压到了，这个话题之前没取走的就不留了。同时只能有一个在等。
  */
 export function next_event(): Promise<HostEvent>;
+/**
+ * 广播一条插件事件，各插件（Rust 内置插件也算）在 next_event 里收到 { type: "plugin", name, payload }，本插件
+ * 自己也收得到。name 是 "<插件 id>/<名字>"，只能发本插件来源下的。事件只报此刻的变化，后订的收不到以前的。
+ */
+export function emit_event(name: string, payload?: unknown): null;
 "#;
 
 /// 宿主怎么把插件目录里的一个入口建成设置页（见 `register_settings_pages`）。
@@ -341,8 +403,8 @@ impl JsPlugin {
             name: MAIN_VIEW.into(),
             title: info.title,
             icon: info.icon,
-            per_machine: info.per_machine,
             draws_top_bar: info.draws_top_bar,
+            instances: info.instances,
             settings: info.settings,
             build: info.build,
         });
@@ -385,11 +447,15 @@ impl JsPlugin {
         let opener_owner = self.0.borrow().id.clone();
         let query_owner = self.0.borrow().id.clone();
         let execute_owner = query_owner.clone();
+        let event_owner = query_owner.clone();
         let themes = self.clone();
         let layouts = self.clone();
         let pages = self.clone();
         let openers = self.clone();
         let settings = self.clone();
+        let menus = self.clone();
+        let context_menus = self.clone();
+        let guards = self.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
             .function("active_context", |_| {
@@ -563,6 +629,113 @@ impl JsPlugin {
                 }
                 .into())
             })
+            .function("machine_online", |arguments| {
+                let machine = machine_argument("machine_online", arguments, 0)?;
+                let online = in_app("machine_online", |cx| {
+                    crate::host(cx).machine_online(&machine, cx)
+                })?;
+                Ok(online.into())
+            })
+            .async_function("wait_online", |arguments| {
+                let machine = machine_argument("wait_online", arguments, 0)?;
+                let failures = match arguments.get(1) {
+                    None | Some(HostValue::Null) => 0,
+                    Some(HostValue::Number(failures))
+                        if *failures >= 0.0
+                            && failures.fract() == 0.0
+                            && *failures <= f64::from(u32::MAX) =>
+                    {
+                        *failures as u32
+                    }
+                    Some(other) => {
+                        return Err(HostError::new(format!(
+                            "wait_online：failures 要是不小于 0 的整数，收到 {}",
+                            other.describe()
+                        )));
+                    }
+                };
+                in_task(
+                    "wait_online",
+                    move |cx| {
+                        cx.spawn(async move |cx| {
+                            Ok::<_, String>(crate::wait_online(&machine, failures, cx).await)
+                        })
+                    },
+                    HostValue::Bool,
+                )
+            })
+            .function("session_presence", |arguments| {
+                let machine = machine_argument("session_presence", arguments, 0)?;
+                let session = arguments.string(1)?.to_string();
+                let presence = in_app("session_presence", |cx| {
+                    crate::host(cx).session_presence(&machine, &session, cx)
+                })?;
+                Ok(match presence {
+                    None => HostValue::Null,
+                    Some(RuntimePresence::Live) => "live".into(),
+                    Some(RuntimePresence::LeftOver) => "left_over".into(),
+                    Some(RuntimePresence::Gone) => "gone".into(),
+                })
+            })
+            .function("register_menu_items", move |arguments| {
+                menus.may_register("register_menu_items")?;
+                let entries = menu_arguments(arguments)?;
+                let owner = menus.0.borrow().id.clone();
+                if owner.is_empty() {
+                    return Err(HostError::new("插件没有命令来源身份"));
+                }
+                in_app("register_menu_items", |cx| {
+                    crate::register_menu_items(&owner, entries, cx)
+                })?;
+                Ok(HostValue::Null)
+            })
+            .function("register_context_menu_items", move |arguments| {
+                context_menus.may_register("register_context_menu_items")?;
+                let menu = arguments.string(0)?.to_string();
+                let items = arguments
+                    .value(1)?
+                    .as_array()
+                    .ok_or_else(|| {
+                        HostError::new("register_context_menu_items：菜单项要是对象的数组")
+                    })?
+                    .iter()
+                    .map(context_menu_item)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let owner = context_menus.0.borrow().id.clone();
+                if owner.is_empty() {
+                    return Err(HostError::new("插件没有命令来源身份"));
+                }
+                in_app("register_context_menu_items", |cx| {
+                    crate::register_context_menu_items(&owner, &menu, items, cx)
+                })?
+                .map_err(|error| HostError::new(format!("register_context_menu_items：{error}")))?;
+                Ok(HostValue::Null)
+            })
+            .function("set_quit_guard", move |arguments| {
+                guards.may_register("set_quit_guard")?;
+                let name = match arguments.value(0)? {
+                    HostValue::Null => None,
+                    HostValue::Str(name) if !name.is_empty() && !name.contains('/') => {
+                        Some(name.clone())
+                    }
+                    other => {
+                        return Err(HostError::new(format!(
+                            "set_quit_guard：要是本插件的命令名（不含 \"/\"）或 null，收到 {}",
+                            other.describe()
+                        )));
+                    }
+                };
+                let owner = guards.0.borrow().id.clone();
+                if owner.is_empty() {
+                    return Err(HostError::new("插件没有命令来源身份"));
+                }
+                let guard = name.map(|name| quit_guard(&guards, format!("{owner}/{name}")));
+                in_app("set_quit_guard", |cx| match guard {
+                    Some(guard) => crate::register_quit_guard(&owner, guard, cx),
+                    None => crate::unregister_quit_guard(&owner, cx),
+                })?;
+                Ok(HostValue::Null)
+            })
             .async_function("open_file", |arguments| {
                 let machine = machine_argument("open_file", arguments, 0)?;
                 let path = arguments.string(1)?.to_string();
@@ -625,6 +798,13 @@ impl JsPlugin {
             })
             .async_function("next_command", move |_| Ok(calls.next_command()))
             .async_function("next_event", move |_| Ok(events.next_event()))
+            .function("emit_event", move |arguments| {
+                let name = arguments.string(0)?;
+                let payload = arguments.get(1).map(json_value).unwrap_or(Value::Null);
+                let event = plugin_event(&event_owner, name, payload)?;
+                in_app("emit_event", |cx| crate::emit(event, cx))?;
+                Ok(HostValue::Null)
+            })
     }
 
     /// 挂载成功后调：开始记宿主事件，视图释放时撤掉。
@@ -675,7 +855,12 @@ impl JsPlugin {
             },
             None => event.clone(),
         };
-        if state.queue.contains(&event) {
+        // 插件事件、要打开的路径每条都是一回事，不能合并：同一条排两次中间可能夹着别的。
+        let each_counts = matches!(
+            event,
+            HostEvent::Plugin { .. } | HostEvent::OpenPaths { .. }
+        );
+        if !each_counts && state.queue.contains(&event) {
             return;
         }
         // 快照、积压之前同一台机器同一个话题没取走的，被它取代了。
@@ -745,6 +930,26 @@ impl JsPlugin {
         state.call_waiter = None;
         state.released = true;
     }
+}
+
+/// 脚本发的插件事件：名字要在本插件来源下（`<插件 id>/<名字>`）。
+fn plugin_event(owner: &str, name: &str, payload: Value) -> Result<HostEvent, HostError> {
+    if owner.is_empty() {
+        return Err(HostError::new("emit_event：插件没有事件来源身份"));
+    }
+    let own = name
+        .strip_prefix(owner)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|rest| !rest.is_empty());
+    if !own {
+        return Err(HostError::new(format!(
+            "emit_event：事件名要是「{owner}/<名字>」，收到「{name}」"
+        )));
+    }
+    Ok(HostEvent::Plugin {
+        name: name.to_string().into(),
+        payload,
+    })
 }
 
 fn in_app<R>(name: &str, f: impl FnOnce(&mut App) -> R) -> Result<R, HostError> {
@@ -998,8 +1203,8 @@ fn settings_page_arguments(
                 name: name.into(),
                 title: title.into(),
                 icon: loader.icon.clone(),
-                per_machine: false,
                 draws_top_bar: false,
+                instances: false,
                 settings: Some(SettingsEntry { group, keywords }),
                 build,
             })
@@ -1055,6 +1260,144 @@ fn command_arguments(
             })
         })
         .collect()
+}
+
+/// `register_menu_items` 的参数。
+fn menu_arguments(arguments: &HostArguments) -> Result<Vec<MenuEntry>, HostError> {
+    let invalid = |what: &str| HostError::new(format!("register_menu_items：{what}"));
+    arguments
+        .value(0)?
+        .as_array()
+        .ok_or_else(|| invalid("参数要是菜单项对象的数组"))?
+        .iter()
+        .map(|item| {
+            let text = |name: &str| {
+                item.get(name)
+                    .and_then(HostValue::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid(&format!("每一项都要有字符串 {name}")))
+            };
+            let slot = match text("slot")?.as_str() {
+                "app" => MenuSlot::App,
+                "help" => MenuSlot::Help,
+                other => return Err(invalid(&format!("slot 只能是 app、help，收到「{other}」"))),
+            };
+            let title = text("title")?;
+            let command = text("command")?;
+            if !command.contains('/') {
+                return Err(invalid(&format!(
+                    "命令「{command}」要写成 \"<来源>/<名字>\""
+                )));
+            }
+            Ok(MenuEntry {
+                slot,
+                title: title.into(),
+                command: command.into(),
+            })
+        })
+        .collect()
+}
+
+/// `register_context_menu_items` 的一项。字没字、命令和参数的形状由
+/// [`crate::register_context_menu_items`] 再查。
+fn context_menu_item(item: &HostValue) -> Result<ContextMenuItem, HostError> {
+    let invalid = |what: &str| HostError::new(format!("register_context_menu_items：{what}"));
+    let text = |name: &str| match item.get(name) {
+        None | Some(HostValue::Null) => Ok(None),
+        Some(HostValue::Str(text)) => Ok(Some(text.clone())),
+        Some(other) => Err(invalid(&format!(
+            "{name} 要是字符串，收到 {}",
+            other.describe()
+        ))),
+    };
+    let label = text("label")?.ok_or_else(|| invalid("每一项都要有 label"))?;
+    let image = match item.get("png") {
+        None | Some(HostValue::Null) => None,
+        Some(HostValue::Array(bytes)) => {
+            let bytes = bytes
+                .iter()
+                .map(|byte| match byte {
+                    HostValue::Number(byte)
+                        if (0.0..=255.0).contains(byte) && byte.fract() == 0.0 =>
+                    {
+                        Ok(*byte as u8)
+                    }
+                    _ => Err(invalid(&format!("「{label}」的 png 要是字节（0–255）数组"))),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(std::sync::Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                bytes,
+            )))
+        }
+        Some(other) => {
+            return Err(invalid(&format!(
+                "「{label}」的 png 要是字节数组，收到 {}",
+                other.describe()
+            )));
+        }
+    };
+    let machine = match item.get("only_on") {
+        None | Some(HostValue::Null) => None,
+        Some(on @ HostValue::Object(_)) => match on.get("machine") {
+            Some(HostValue::Null) => Some(RuntimeKey::Local),
+            Some(HostValue::Str(id)) => Some(RuntimeKey::Remote(id.clone())),
+            _ => {
+                return Err(invalid(&format!(
+                    "「{label}」的 only_on 要是 {{ machine: null 或字符串 }}"
+                )));
+            }
+        },
+        Some(other) => {
+            return Err(invalid(&format!(
+                "「{label}」的 only_on 要是对象，收到 {}",
+                other.describe()
+            )));
+        }
+    };
+    let command = text("command")?;
+    let action = match (command, item.get("submenu")) {
+        (Some(command), None | Some(HostValue::Null)) => ContextMenuAction::Run {
+            command,
+            args: item.get("args").map(json_value).unwrap_or(Value::Null),
+        },
+        (None, Some(HostValue::Array(children))) => ContextMenuAction::Submenu(
+            children
+                .iter()
+                .map(context_menu_item)
+                .collect::<Result<_, _>>()?,
+        ),
+        _ => {
+            return Err(invalid(&format!(
+                "「{label}」要有 command 或 submenu（数组）之一"
+            )));
+        }
+    };
+    Ok(ContextMenuItem {
+        label: label.into(),
+        image,
+        icon: text("icon")?.map(SharedString::from),
+        machine,
+        action,
+    })
+}
+
+/// `set_quit_guard` 登记的守卫：用户要退出时执行插件的命令 `command`，算它接手。插件视图
+/// 释放了、命令撤下了就不接，免得没人处理、谁也退不出去。
+fn quit_guard(plugin: &JsPlugin, command: String) -> crate::QuitGuard {
+    let state = Rc::downgrade(&plugin.0);
+    Rc::new(move |cx: &mut App| {
+        let alive = state
+            .upgrade()
+            .is_some_and(|state| !state.borrow().released);
+        if !alive || crate::command(&command, cx).is_none() {
+            return false;
+        }
+        // 排到这一轮更新之后跑，不在宿主处理退出的当中重入。
+        crate::run(&command, Value::Null, cx).detach();
+        true
+    })
 }
 
 /// 脚本给的值转成命令参数。整数值的数字写成整数，Rust 这边 `as_u64` 读得出来；
@@ -1213,6 +1556,20 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::LayoutsChanged => HostObject::new().field("type", "layouts_changed"),
         HostEvent::PagesChanged => HostObject::new().field("type", "pages_changed"),
         HostEvent::CommandsChanged => HostObject::new().field("type", "commands_changed"),
+        HostEvent::Plugin { name, payload } => HostObject::new()
+            .field("type", "plugin")
+            .field("name", name.as_str())
+            .field("payload", host_value(payload)),
+        HostEvent::OpenPaths {
+            machine: key,
+            paths,
+        } => HostObject::new()
+            .field("type", "open_paths")
+            .field("machine", machine(key))
+            .field(
+                "paths",
+                HostValue::Array(paths.iter().map(|path| path.as_str().into()).collect()),
+            ),
     };
     object.into()
 }
@@ -1441,6 +1798,176 @@ mod tests {
         assert!(error.message().contains("只能在视图"));
     }
 
+    #[test]
+    fn runtime_queries_check_their_arguments_before_entering_app() {
+        let module = JsPlugin::new().module();
+        for query in ["machine_online", "session_presence"] {
+            let error = module
+                .call(query, &HostArguments::new([HostValue::Bool(true)]))
+                .unwrap_err();
+            assert!(error.message().contains("机器要是 null 或字符串"));
+        }
+        assert!(
+            module
+                .call("session_presence", &HostArguments::new([HostValue::Null]))
+                .is_err()
+        );
+        for failures in [HostValue::Number(-1.0), HostValue::Number(1.5), "1".into()] {
+            let error = module
+                .begin(
+                    "wait_online",
+                    &HostArguments::new([HostValue::Null, failures]),
+                )
+                .err()
+                .expect("failures 不对");
+            assert!(error.message().contains("failures"), "{}", error.message());
+        }
+        let outside_script = module
+            .begin("wait_online", &HostArguments::new([HostValue::Null]))
+            .err()
+            .expect("测试里没有脚本上下文");
+        assert!(outside_script.message().contains("只能在视图"));
+    }
+
+    #[test]
+    fn menu_registrations_reject_invalid_arguments_before_entering_app() {
+        let module = JsPlugin::for_plugin("example", "示例").module();
+        let menu_item = |slot: &str, command: &str| {
+            HostValue::Array(vec![object(&[
+                ("slot", slot.into()),
+                ("title", "检查更新".into()),
+                ("command", command.into()),
+            ])])
+        };
+        for items in [
+            HostValue::Null,
+            menu_item("window", "example/check"),
+            menu_item("app", "check"),
+            HostValue::Array(vec![object(&[("slot", "app".into())])]),
+        ] {
+            let error = module
+                .call("register_menu_items", &HostArguments::new([items]))
+                .unwrap_err();
+            assert!(
+                !error.message().contains("只能在视图"),
+                "{}",
+                error.message()
+            );
+        }
+        let error = module
+            .call(
+                "register_menu_items",
+                &HostArguments::new([menu_item("help", "example/docs")]),
+            )
+            .unwrap_err();
+        assert!(error.message().contains("只能在视图"));
+
+        let run = object(&[("label", "Zed".into()), ("command", "example/open".into())]);
+        for item in [
+            object(&[("command", "example/open".into())]),
+            object(&[("label", "Zed".into())]),
+            object(&[
+                ("label", "Zed".into()),
+                ("command", "example/open".into()),
+                ("submenu", HostValue::Array(Vec::new())),
+            ]),
+            object(&[
+                ("label", "Zed".into()),
+                ("command", "example/open".into()),
+                ("png", HostValue::Array(vec![HostValue::Number(256.0)])),
+            ]),
+            object(&[
+                ("label", "Zed".into()),
+                ("command", "example/open".into()),
+                ("only_on", object(&[("machine", HostValue::Number(1.0))])),
+            ]),
+            object(&[
+                ("label", "更多".into()),
+                ("submenu", HostValue::Array(vec![HostValue::Null])),
+            ]),
+        ] {
+            let error = module
+                .call(
+                    "register_context_menu_items",
+                    &HostArguments::new(["example/menu".into(), HostValue::Array(vec![item])]),
+                )
+                .unwrap_err();
+            assert!(
+                !error.message().contains("只能在视图"),
+                "{}",
+                error.message()
+            );
+        }
+        let nested = object(&[
+            ("label", "用其他应用打开".into()),
+            ("only_on", object(&[("machine", HostValue::Null)])),
+            ("submenu", HostValue::Array(vec![run])),
+        ]);
+        let error = module
+            .call(
+                "register_context_menu_items",
+                &HostArguments::new(["example/menu".into(), HostValue::Array(vec![nested])]),
+            )
+            .unwrap_err();
+        assert!(error.message().contains("只能在视图"));
+
+        for name in [HostValue::Number(1.0), "".into(), "other/quit".into()] {
+            let error = module
+                .call("set_quit_guard", &HostArguments::new([name]))
+                .unwrap_err();
+            assert!(
+                !error.message().contains("只能在视图"),
+                "{}",
+                error.message()
+            );
+        }
+        let error = module
+            .call("set_quit_guard", &HostArguments::new([HostValue::Null]))
+            .unwrap_err();
+        assert!(error.message().contains("只能在视图"));
+    }
+
+    #[test]
+    fn a_context_menu_item_maps_to_the_rust_shape() {
+        let item = context_menu_item(&object(&[
+            ("label", "用其他应用打开".into()),
+            ("icon", "icons/external-link.svg".into()),
+            ("only_on", object(&[("machine", "box".into())])),
+            (
+                "submenu",
+                HostValue::Array(vec![object(&[
+                    ("label", "Zed".into()),
+                    (
+                        "png",
+                        HostValue::Array(vec![HostValue::Number(137.0), HostValue::Number(80.0)]),
+                    ),
+                    ("command", "example/open".into()),
+                    ("args", object(&[("app", "zed".into())])),
+                ])]),
+            ),
+        ]))
+        .expect("形状对");
+        assert_eq!(item.label.as_ref(), "用其他应用打开");
+        assert_eq!(item.icon.as_deref(), Some("icons/external-link.svg"));
+        assert_eq!(item.machine, Some(RuntimeKey::Remote("box".to_string())));
+        assert!(item.image.is_none());
+        let ContextMenuAction::Submenu(children) = &item.action else {
+            panic!("应是子菜单");
+        };
+        assert_eq!(children[0].machine, None);
+        assert_eq!(
+            children[0].image.as_ref().map(|image| image.bytes.clone()),
+            Some(vec![137, 80])
+        );
+        assert_eq!(
+            children[0].action,
+            ContextMenuAction::Run {
+                command: "example/open".to_string(),
+                args: serde_json::json!({ "app": "zed" }),
+            }
+        );
+    }
+
     fn object(fields: &[(&str, HostValue)]) -> HostValue {
         let mut object = HostObject::new();
         for (name, value) in fields {
@@ -1610,6 +2137,68 @@ mod tests {
         assert_eq!(
             plugin.0.borrow().queue,
             [HostEvent::ActiveContextChanged, HostEvent::MachinesChanged]
+        );
+    }
+
+    /// 插件事件同一条再来也要排上：中间夹着的那条变了状态，合并掉就丢了来回。
+    #[test]
+    fn plugin_events_are_queued_every_time() {
+        let plugin = JsPlugin::new();
+        let at_latest = |value: bool| HostEvent::Plugin {
+            name: "probe/at-latest".into(),
+            payload: serde_json::json!({ "at_latest": value }),
+        };
+        plugin.deliver(&at_latest(false));
+        plugin.deliver(&at_latest(true));
+        plugin.deliver(&at_latest(false));
+        assert_eq!(
+            plugin.0.borrow().queue,
+            [at_latest(false), at_latest(true), at_latest(false)]
+        );
+    }
+
+    #[test]
+    fn scripts_emit_only_under_their_own_id() {
+        let payload = serde_json::json!({ "n": 1 });
+        assert_eq!(
+            plugin_event("probe", "probe/moved", payload.clone()).unwrap(),
+            HostEvent::Plugin {
+                name: "probe/moved".into(),
+                payload: payload.clone(),
+            }
+        );
+        for name in [
+            "other/moved",
+            "probe",
+            "probe/",
+            "prober/moved",
+            "probemoved",
+        ] {
+            assert!(
+                plugin_event("probe", name, payload.clone()).is_err(),
+                "{name}"
+            );
+        }
+        assert!(plugin_event("", "/moved", payload).is_err());
+    }
+
+    #[test]
+    fn plugin_events_and_paths_reach_scripts_as_declared() {
+        let event = event_value(&HostEvent::Plugin {
+            name: "probe/moved".into(),
+            payload: serde_json::json!({ "at": [1, null] }),
+        });
+        assert_eq!(
+            json_value(&event),
+            serde_json::json!({ "type": "plugin", "name": "probe/moved", "payload": { "at": [1, null] } })
+        );
+        let event = event_value(&HostEvent::OpenPaths {
+            machine: RuntimeKey::Remote("box".into()),
+            paths: vec!["/a".into(), "/b c".into()],
+        });
+        assert_eq!(
+            json_value(&event),
+            serde_json::json!({ "type": "open_paths", "machine": "box", "paths": ["/a", "/b c"] })
         );
     }
 

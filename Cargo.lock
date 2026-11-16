@@ -10885,8 +10885,6 @@ dependencies = [
 name = "smelt"
 version = "0.0.0"
 dependencies = [
- "agent-client-protocol",
- "alacritty_terminal",
  "anyhow",
  "block2 0.6.2",
  "chrono",
@@ -10940,6 +10938,7 @@ dependencies = [
  "smelt-runtime-client",
  "smelt-store",
  "smelt-sys",
+ "smelt-terminal",
  "smelt-themes",
  "smelt-ui",
  "smelt-updater-ui",
@@ -10957,7 +10956,6 @@ dependencies = [
 name = "smelt-acp-view"
 version = "0.0.0"
 dependencies = [
- "agent-client-protocol",
  "base64 0.23.1",
  "gpui-base",
  "gpui-component",
@@ -10965,10 +10963,10 @@ dependencies = [
  "gpui-pre",
  "serde",
  "serde_json",
- "smelt-app-state",
  "smelt-client",
  "smelt-core",
  "smelt-model",
+ "smelt-plugin-api",
  "smelt-runtime-client",
  "smelt-sys",
  "smelt-ui",
@@ -11200,6 +11198,7 @@ dependencies = [
  "gpui-kit-assets",
  "gpui-pre",
  "objc",
+ "serde",
  "smelt-plugin-api",
 ]
 
@@ -11389,6 +11388,22 @@ dependencies = [
  "tokio",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "smelt-terminal"
+version = "0.0.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "dirs 5.0.1",
+ "gpui-component",
+ "gpui-pre",
+ "image",
+ "libc",
+ "serde_json",
+ "smelt-plugin-api",
+ "smol",
 ]
 
 [[package]]

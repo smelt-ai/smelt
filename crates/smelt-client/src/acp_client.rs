@@ -66,6 +66,11 @@ pub struct ConversationClientLaunch {
     /// 只在新 daemon 会话创建时登记。热 attach 不会用客户端的旧存档覆盖 daemon
     /// 已消费的状态。
     pub pending_agent_preset: Option<String>,
+    /// 这次打开若拉起 runtime，就绪后由 smeltd 写进去的会话配置（`model` 是跨 agent
+    /// 的语义名）。热 attach 时 smeltd 不读它。
+    pub initial_config: Vec<(String, String)>,
+    /// 这次打开若拉起 runtime，配置落定后由 smeltd 发出的首条消息。热 attach 时不读。
+    pub initial_prompt: Option<smelt_model::acp_session::AcpInitialPrompt>,
 }
 
 fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
@@ -85,6 +90,12 @@ fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
     });
     if let Some(prompt) = &launch.pending_agent_preset {
         req["pending_agent_preset"] = serde_json::Value::String(prompt.clone());
+    }
+    if !launch.initial_config.is_empty() {
+        req["initial_config"] = serde_json::json!(&launch.initial_config);
+    }
+    if let Some(prompt) = &launch.initial_prompt {
+        req["initial_prompt"] = serde_json::json!(prompt);
     }
     req
 }
@@ -560,15 +571,6 @@ pub fn kill_acp_session(runtime: &RuntimeClient, id: &str) {
     let _ = BufReader::new(s).read_line(&mut resp);
 }
 
-/// 在专用线程中结束 ACP 会话（见 [`crate::session_kill`]）。关闭标签等 UI 回调必须走
-/// 这里，不能在 GPUI 主线程等 daemon 回收 provider；provider 卡住时，`acp_kill` 的有界
-/// 等待也足以让窗口假死。请求仍使用 [`kill_acp_session`] 的完整回执语义。
-pub fn kill_acp_session_in_background(runtime: RuntimeClient, id: String) {
-    crate::session_kill::spawn("smelt-acp-session-kill", move || {
-        kill_acp_session(&runtime, &id)
-    });
-}
-
 /// 强制重启一个卡死的 ACP 会话：杀掉当前 agent 子进程（整个进程组），换一个
 /// 新的接着跑，带 `resume_session_id` 走 `session/load` 接回同一份历史。跟
 /// `kill_acp_session` 不是一回事——那个是终结会话（关标签），这个是会话本体
@@ -624,6 +626,8 @@ mod tests {
             retained_entries_end: 0,
             conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
             pending_agent_preset: None,
+            initial_config: Vec::new(),
+            initial_prompt: None,
         });
 
         assert_eq!(req["op"], "acp_open");
@@ -637,6 +641,36 @@ mod tests {
         );
         assert_eq!(req["ephemeral_env"]["SESSION_TOKEN"], "transient");
         assert!(req.get("cmd").is_none(), "新协议不该再发旧 cmd 字段");
+        assert!(req.get("initial_config").is_none(), "没有就不发");
+        assert!(req.get("initial_prompt").is_none(), "没有就不发");
+    }
+
+    #[test]
+    fn acp_open_request_carries_initial_config_and_prompt() {
+        let req = acp_open_request(&ConversationClientLaunch {
+            id: "acp-3".into(),
+            cwd: Some("/repo".into()),
+            launch: ConversationLaunchSpec::from_command("pi"),
+            engine_kind: ConversationAgentKind::Pi,
+            ephemeral_env: BTreeMap::new(),
+            resume_id: None,
+            fork_id: None,
+            fork_cut: None,
+            retained_entries_end: 0,
+            conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
+            pending_agent_preset: None,
+            initial_config: vec![("model".into(), "deepseek/flash".into())],
+            initial_prompt: Some(smelt_model::acp_session::AcpInitialPrompt {
+                text: "先读一遍代码".into(),
+                images: Vec::new(),
+            }),
+        });
+
+        assert_eq!(
+            req["initial_config"],
+            serde_json::json!([["model", "deepseek/flash"]])
+        );
+        assert_eq!(req["initial_prompt"]["text"], "先读一遍代码");
     }
 
     #[test]
@@ -653,6 +687,8 @@ mod tests {
             retained_entries_end: 0,
             conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
             pending_agent_preset: None,
+            initial_config: Vec::new(),
+            initial_prompt: None,
         });
 
         assert_eq!(req["launch"]["command"], "claude --print");

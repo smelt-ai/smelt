@@ -13,7 +13,7 @@ impl Workspace {
             std::sync::Arc::new(
                 std::iter::once((
                     SharedString::from(""),
-                    SharedString::from(format!("默认（{}）", terminal_view::DEFAULT_FONT_FAMILY)),
+                    SharedString::from(format!("默认（{}）", font_config::DEFAULT_FONT_FAMILY)),
                 ))
                 .chain(
                     names

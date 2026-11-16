@@ -21,8 +21,11 @@ use gpui_component::*;
 use smelt_ui::IconAction as _;
 pub(crate) use smelt_ui::{Button, Switch};
 
+use crate::Workspace;
 use crate::window_backdrop::WindowMaterial;
-use crate::{Workspace, terminal, terminal_view};
+use smelt_model::font_config;
+// 过渡：会话插件搬走后改为经宿主的视图实例机制和 smelt.terminal 命令使用
+use smelt_terminal::{terminal, terminal_view};
 
 mod agent_hooks;
 mod bundled_helpers;
@@ -203,7 +206,7 @@ fn apply_requested_appearance_on(
 /// 把一份完整外观套到所有层并重绘。外观的真源是客户端库，内存里的全局只是它的投影。
 fn install_appearance(appearance: Appearance, cx: &mut App) {
     terminal_view::set_font_px(appearance.font_px);
-    terminal_view::set_font_family(&appearance.font_family);
+    font_config::set_font_family(&appearance.font_family);
     cx.set_global(appearance.clone());
     apply_named_theme(&appearance.theme_name, cx);
     cx.refresh_windows();
@@ -271,7 +274,7 @@ fn sync_theme_fonts(cx: &mut App) {
     Theme::update(cx, |theme| {
         theme.font_size = px(ui_font_px as f32);
         theme.font_family = ui_family;
-        theme.mono_font_family = terminal_view::font_family().into();
+        theme.mono_font_family = font_config::font_family().into();
     });
 }
 
@@ -615,8 +618,7 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // ===================== Agent 身份与宿主状态 =====================
 //
 // ConversationAgentKind / AcpProfile 在 smelt-model（本身不需要 GPUI），按机器的
-// AgentHosts（需要 `gpui::Global`）在 smelt-ui——都是 acp_view.rs 独立成
-// smelt-acp-view crate 之后要跨 crate 共用的数据模型。这里重导出成裸名字。
+// AgentHosts（需要 `gpui::Global`）在 smelt-app-state。这里重导出成裸名字。
 //
 // 智能体配置（启动命令、env、profile、定义）归运行时，每台机器一份：读、改都要说明是
 // 哪台机器。会话按它所在的运行时取，设置页眼下只配本机。
@@ -960,9 +962,9 @@ pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> [smelt_plugin_api:
             name: "settings-nav".into(),
             title: "设置导航".into(),
             icon: gpui_kit_assets::IconName::Settings.path(),
-            per_machine: false,
             // 贴着窗口顶，顶上那条（拖窗口、给红黄绿按钮让位、标题）由页头画。
             draws_top_bar: true,
+            instances: false,
             settings: None,
             build: std::rc::Rc::new(
                 move |window, cx| -> std::rc::Rc<dyn smelt_plugin_api::ViewHandle> {
@@ -975,9 +977,9 @@ pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> [smelt_plugin_api:
             name: "settings".into(),
             title: "设置".into(),
             icon: gpui_kit_assets::IconName::Settings.path(),
-            per_machine: false,
             // 贴着窗口顶，顶上那条（拖窗口、关闭按钮）由页头画。
             draws_top_bar: true,
+            instances: false,
             settings: None,
             build: std::rc::Rc::new(
                 move |window, cx| -> std::rc::Rc<dyn smelt_plugin_api::ViewHandle> {

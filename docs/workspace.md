@@ -43,8 +43,9 @@ cargo run --bin smelt
 工作区是虚拟 workspace，代码全部分布在 `crates/` 下（见根目录 `Cargo.toml` 的成员列表）：
 
 - **`crates/smelt`** —— GUI 主程序（bin 名 `smelt`）：窗口 / 会话列表 / 标签分屏 /
-  文件树 / Git 面板 / 插件（`plugins/`，gpui-shell 脚本应用）等。`terminal.rs` 是内嵌终端前端
-  （连 smeltd 拿字节流 + alacritty 状态机 + 颜色解析），`terminal_view.rs` 是单个终端视图
+  文件树 / Git 面板 / 插件（`plugins/`，gpui-shell 脚本应用）等。
+- **`crates/plugins/terminal`**（`smelt-terminal`）—— 内置插件「终端」：`terminal.rs` 是内嵌终端
+  前端（连 smeltd 拿字节流 + alacritty 状态机 + 颜色解析），`terminal_view.rs` 是单个终端视图
   （渲染/输入/IME/选区/滚动/resize）。PTY 与 shell 在 `smeltd`。
 - **`crates/smelt-model`** —— 桌面、守护、手机共用的类型：Control API、会话状态、事件订阅解码。
   不许引 GPUI，要能编进 iOS / Android。
