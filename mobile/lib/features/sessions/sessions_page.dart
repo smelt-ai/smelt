@@ -533,7 +533,15 @@ class _MachineSection extends StatelessWidget {
         ..add(
           Shelf(
             children: [
-              for (final s in group.sessions)
+              for (final (i, s) in group.sessions.indexed) ...[
+                // 内核已把同一棵工作树的会话排在一起（没绑的在前）：换树时插一行树名。
+                if (s.worksetId != null &&
+                    (i == 0 || group.sessions[i - 1].worksetId != s.worksetId))
+                  _WorktreeRow(
+                    key: ValueKey('${runtime.id}#workset#${s.worksetId}'),
+                    task: s.worksetTask ?? '',
+                    branch: s.worksetBranch ?? '',
+                  ),
                 _SessionRow(
                   key: ValueKey(sessionKey(runtime.id, s.id)),
                   runtimeId: runtime.id,
@@ -544,6 +552,7 @@ class _MachineSection extends StatelessWidget {
                   onDelete: () => onDelete(s),
                   onActions: () => onActions(s),
                 ),
+              ],
               if (showHistory)
                 ShelfRow(
                   leading: Icon(
@@ -605,6 +614,30 @@ class _MachineSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: children,
+    );
+  }
+}
+
+/// 项目里一棵任务工作树的小标题：树名和分支，下面跟着绑在这棵树上的会话。只是标签，点不了。
+class _WorktreeRow extends StatelessWidget {
+  const _WorktreeRow({super.key, required this.task, required this.branch});
+
+  final String task;
+  final String branch;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = GalleyColors.of(context);
+    final t = GalleyText.of(context);
+    return ShelfRow(
+      leading: Icon(
+        LucideIcons.gitBranch,
+        size: Strokes.iconSmall,
+        color: c.inkMuted,
+      ),
+      title: Text(task, maxLines: 1, overflow: TextOverflow.ellipsis),
+      titleStyle: t.callout.copyWith(color: c.inkMuted),
+      trailing: Text(branch, style: t.meta),
     );
   }
 }
