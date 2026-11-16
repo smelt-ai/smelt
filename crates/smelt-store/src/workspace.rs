@@ -189,10 +189,15 @@ pub(crate) fn create_conversation(
     saved.archived_at = None;
     saved.pinned_at = None;
     saved.closed_workset_root = None;
-    let saved = &saved;
     if conversation_position(transaction, group_id)?.is_some() {
         return Ok(false);
     }
+    // 没指明工作树、cwd 却落在某个任务目录里的（手机、命令行、Pi 派生开的对话），按 cwd
+    // 绑上。不绑的话侧栏挂不到工作树下，关闭工作树时也拦不住它。
+    if saved.workset_id.is_none() {
+        saved.workset_id = workset_containing(transaction, &saved)?;
+    }
+    let saved = &saved;
     let (acp_id, terminal_ids) = conversation_session_ids(transaction, saved)?;
     let position: i64 = transaction.query_row(
         "SELECT COALESCE(MAX(position) + 1, 0) FROM session_group",
@@ -243,28 +248,7 @@ pub(crate) fn update_conversation(
             [workset_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        let root = std::path::Path::new(&project_root)
-            .join("worktrees")
-            .join(task);
-        let valid = |cwd: Option<&str>| {
-            cwd.is_some_and(|cwd| {
-                let path = std::path::Path::new(cwd);
-                path.is_absolute()
-                    && path.starts_with(&root)
-                    && !path
-                        .components()
-                        .any(|component| component == std::path::Component::ParentDir)
-            })
-        };
-        if saved
-            .acp
-            .as_ref()
-            .is_some_and(|acp| !valid(acp.cwd.as_deref()))
-            || saved
-                .terminals
-                .iter()
-                .any(|terminal| !valid(terminal.cwd.as_deref()))
-        {
+        if !cwds_within(saved, &task_root(&project_root, &task)) {
             return Err(StoreError::WorksetCwdOutside {
                 id: group_id.into(),
             });
@@ -289,6 +273,63 @@ pub(crate) fn update_conversation(
         &preserved_history,
     )?;
     Ok(read_conversation(transaction, group_id)? != before)
+}
+
+fn task_root(project_root: &str, task: &str) -> std::path::PathBuf {
+    std::path::Path::new(project_root)
+        .join("worktrees")
+        .join(task)
+}
+
+/// 对话的 ACP 和终端 cwd 都在 `root` 里（不带 `..` 的绝对路径）。没有 cwd 的一律算不在。
+fn cwds_within(saved: &WorkspaceSessionRecord, root: &std::path::Path) -> bool {
+    let valid = |cwd: Option<&str>| {
+        cwd.is_some_and(|cwd| {
+            let path = std::path::Path::new(cwd);
+            path.is_absolute()
+                && path.starts_with(root)
+                && !path
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir)
+        })
+    };
+    saved
+        .acp
+        .as_ref()
+        .is_none_or(|acp| valid(acp.cwd.as_deref()))
+        && saved
+            .terminals
+            .iter()
+            .all(|terminal| valid(terminal.cwd.as_deref()))
+}
+
+/// cwd 全部落在哪个工作树的任务目录里。一个 cwd 都没有的对话不归任何工作树；
+/// 任务目录互相嵌套时取最深的那个。
+fn workset_containing(
+    transaction: &Transaction<'_>,
+    saved: &WorkspaceSessionRecord,
+) -> Result<Option<String>, StoreError> {
+    if saved.acp.is_none() && saved.terminals.is_empty() {
+        return Ok(None);
+    }
+    let mut statement = transaction.prepare("SELECT id, project_root, task FROM workset")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut found: Option<(String, usize)> = None;
+    for row in rows {
+        let (id, project_root, task) = row?;
+        let root = task_root(&project_root, &task);
+        let depth = root.components().count();
+        if cwds_within(saved, &root) && found.as_ref().is_none_or(|(_, best)| depth > *best) {
+            found = Some((id, depth));
+        }
+    }
+    Ok(found.map(|(id, _)| id))
 }
 
 fn read_conversation(
