@@ -6,7 +6,7 @@
 //! 窗口失焦变样、系统里关掉透明效果都由系统处理。模糊程度系统不让调，不做。
 //!
 //! - macOS：宿主在 GPUI 的 Metal 视图下面垫一块铺满整窗的 `NSVisualEffectView`，透的是
-//!   窗口后面的桌面和别的窗口。默认用系统侧栏那种（`Sidebar`）。
+//!   窗口后面的桌面和别的窗口。默认用系统内容区材质（`ContentBackground`）。
 //! - Windows 11 22H2 起：系统背景材质 Mica、Acrylic、Mica Alt。GPUI 给了 Mica 和 Mica Alt
 //!   （`MicaBackdrop` / `MicaAltBackdrop`），Acrylic 由这里设。Mica 取的是桌面壁纸的颜色，
 //!   看不到后面的窗口，这是系统的设计；要透出后面的窗口选 Acrylic。
@@ -55,6 +55,7 @@ impl WindowMaterial {
     pub(crate) const fn choices() -> &'static [Self] {
         if cfg!(target_os = "macos") {
             &[
+                Self::ContentBackground,
                 Self::Sidebar,
                 Self::Titlebar,
                 Self::HeaderView,
@@ -65,7 +66,6 @@ impl WindowMaterial {
                 Self::ToolTip,
                 Self::FullScreenUi,
                 Self::WindowBackground,
-                Self::ContentBackground,
                 Self::UnderWindow,
                 Self::UnderPage,
                 Self::Selection,
@@ -434,6 +434,20 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::WindowMaterial;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_defaults_to_content_background_without_overriding_saved_material() {
+        assert_eq!(
+            WindowMaterial::platform_default(),
+            WindowMaterial::ContentBackground
+        );
+        assert_eq!(
+            WindowMaterial::from_key(""),
+            WindowMaterial::ContentBackground
+        );
+        assert_eq!(WindowMaterial::from_key("sidebar"), WindowMaterial::Sidebar);
+    }
 
     /// 这个平台能选的材质按名字存进库再读回来不变；旧库里的 `regular`、空串、别的平台的
     /// 材质都回到默认。
