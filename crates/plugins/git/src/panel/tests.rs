@@ -645,3 +645,60 @@ fn repo_discovery_after_an_event_waits_out_the_minimum_interval() {
         Some(std::time::Duration::ZERO)
     );
 }
+
+#[test]
+fn pull_request_link_explains_why_it_cannot_open_a_page() {
+    use super::ops::pull_request_link;
+    use smelt_plugin_api::client::protocol::git::{GitRepoInfoResult, RepoInfo};
+
+    let pushed = RepoInfo {
+        branch: "feat/x".into(),
+        remote_url: Some("git@github.com:o/r.git".into()),
+        default_branch: Some("main".into()),
+        upstream_branch: Some("feat/x".into()),
+    };
+    let link = |info: RepoInfo| pull_request_link(Ok(GitRepoInfoResult { info: Some(info) }));
+
+    assert_eq!(
+        link(pushed.clone()).as_deref(),
+        Ok("https://github.com/o/r/compare/main...feat/x?expand=1")
+    );
+    let cases = [
+        (
+            RepoInfo {
+                upstream_branch: None,
+                ..pushed.clone()
+            },
+            "还没推送",
+        ),
+        (
+            RepoInfo {
+                default_branch: None,
+                ..pushed.clone()
+            },
+            "默认分支",
+        ),
+        (
+            RepoInfo {
+                upstream_branch: Some("main".into()),
+                ..pushed.clone()
+            },
+            "当前就在默认分支 main",
+        ),
+        (
+            RepoInfo {
+                remote_url: Some("git@git.corp:o/r.git".into()),
+                ..pushed.clone()
+            },
+            "认不出远端",
+        ),
+    ];
+    for (info, reason) in cases {
+        let error = link(info).unwrap_err();
+        assert!(error.contains(reason), "{error}");
+    }
+    assert_eq!(
+        pull_request_link(Ok(GitRepoInfoResult { info: None })),
+        Err("不是 Git 仓库".to_string())
+    );
+}

@@ -120,10 +120,19 @@ impl BranchList {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoInfo {
     /// 当前分支；detached 时是 `HEAD`。
     pub branch: String,
+    /// 当前分支推送去的远端的 URL：有 upstream 用它的远端，没有就用 `origin`，再没有用第一个远端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+    /// 那个远端的默认分支（`refs/remotes/<远端>/HEAD` 指向的分支名）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    /// 当前分支 upstream 在远端上的分支名（不带远端前缀）。没设 upstream 时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_branch: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
