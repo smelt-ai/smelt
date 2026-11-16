@@ -5,8 +5,6 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::Mutex;
-#[cfg(unix)]
-use std::sync::TryLockError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -174,11 +172,6 @@ fn same_daemon_binary(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
-/// 套接字无人应答，并且这份文件没有被任何进程映射，才可以覆盖 `smeltd`。
-fn may_replace_managed_daemon_image(probe: &DaemonProbe, executable_mapped: bool) -> bool {
-    matches!(probe, DaemonProbe::NotRunning) && !executable_mapped
-}
-
 /// 这个路径是不是某个活进程的可执行映像。安装方自己没打开它时，命中的就是正在跑的 daemon。
 fn path_is_live_executable(path: &std::path::Path) -> bool {
     #[cfg(target_os = "macos")]
@@ -296,22 +289,10 @@ fn acquire_file_lock(path: &std::path::Path) -> std::io::Result<ManagedDaemonFil
     })
 }
 
-/// 单次更新尝试不能排队等别的进程的 handoff；拿不到锁时交还给 UI 的可取消等待态。
-fn try_acquire_file_lock(path: &std::path::Path) -> std::io::Result<Option<ManagedDaemonFileLock>> {
-    Ok(smelt_sys::file_lock::ExclusiveFile::try_lock(path)?
-        .map(|file| ManagedDaemonFileLock { _file: file }))
-}
-
 fn acquire_managed_daemon_file_lock() -> std::io::Result<ManagedDaemonFileLock> {
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     acquire_file_lock(&dir.join("smeltd.install.lock"))
-}
-
-fn try_acquire_managed_daemon_file_lock() -> std::io::Result<Option<ManagedDaemonFileLock>> {
-    let dir = managed_daemon_dir();
-    std::fs::create_dir_all(&dir)?;
-    try_acquire_file_lock(&dir.join("smeltd.install.lock"))
 }
 
 /// 确保守护跑在 `~/.smelt/bin/smeltd` 且不旧于 App 内分发物。
@@ -874,14 +855,6 @@ pub enum UpgradeOutcome {
     Failed,
 }
 
-/// 单次 App 安装尝试的结果。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AppInstallOutcome {
-    Installed,
-    /// 另一条安装正占着安装锁；App 包尚未替换。
-    WaitingForInstallLock,
-}
-
 /// 停掉本机守护并拉起受管目录里的目标映像。进行中的回合会中断，历史还在。
 pub fn upgrade_daemon() -> UpgradeOutcome {
     upgrade_daemon_exe(pending_upgrade_exe().as_deref())
@@ -968,182 +941,6 @@ fn image_already_in_managed_dir(path: &std::path::Path, dir: &std::path::Path) -
         return false;
     };
     canon.parent() == Some(dir.as_path())
-}
-
-/// 候选 `.app` 安装的公共前半段：取出候选包里的守护程序，再交到 `~/.smelt/bin`。
-#[cfg(unix)]
-fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
-    let daemon = candidate_app.join("Contents/MacOS/smeltd");
-    if !daemon.is_file() {
-        anyhow::bail!("候选 App 缺少守护程序：{}", daemon.display());
-    }
-    // smelt-agent 和守护分开发布。安装会当场交接守护，交接上来的新守护起 Pi 时链接必须已经
-    // 就位；发布不上就不换 App。
-    let pi_bundle = candidate_app
-        .join("Contents")
-        .join(smelt_sys::agent_image::APP_BUNDLE_DIR);
-    smelt_sys::agent_image::publish(&managed_daemon_dir(), &pi_bundle)
-        .map_err(|error| anyhow::anyhow!("发布 smelt-agent 失败：{error}"))?;
-    Ok(daemon)
-}
-
-/// 安装提交：没在跑就只落盘；无响应先杀掉再装；在跑则停掉旧进程并换上候选映像。
-/// 安装锁被占用时由调用方返回 `WaitingForInstallLock`，这里不再因会话忙碌推迟。
-#[cfg(unix)]
-fn commit_candidate_daemon(
-    candidate_smeltd: &std::path::Path,
-) -> anyhow::Result<AppInstallOutcome> {
-    let probe = probe_daemon_detail();
-    let managed = managed_daemon_path();
-    let mapped = managed.is_file() && path_is_live_executable(&managed);
-    if may_replace_managed_daemon_image(&probe, mapped) {
-        install_managed_daemon_from(candidate_smeltd)?;
-        return Ok(AppInstallOutcome::Installed);
-    }
-    match probe {
-        DaemonProbe::NotRunning => {
-            install_managed_daemon_from(candidate_smeltd)?;
-            Ok(AppInstallOutcome::Installed)
-        }
-        DaemonProbe::Unresponsive => {
-            restart_daemon();
-            install_managed_daemon_from(candidate_smeltd)?;
-            spawn_managed_daemon_and_connect(managed_daemon_path())
-                .map_err(|error| anyhow::anyhow!("旧守护无响应，重启后仍未就绪：{error}"))?;
-            Ok(AppInstallOutcome::Installed)
-        }
-        // 守护住在哪都一样：停掉旧进程，换上候选映像，再拉起。
-        DaemonProbe::Running { .. } => match upgrade_daemon_exe(Some(candidate_smeltd)) {
-            UpgradeOutcome::Upgraded => Ok(AppInstallOutcome::Installed),
-            UpgradeOutcome::Failed => anyhow::bail!("装包前未能停掉旧守护并换上新映像"),
-        },
-    }
-}
-
-#[cfg(unix)]
-fn prepare_and_commit_candidate_app(
-    candidate_app: &std::path::Path,
-) -> anyhow::Result<AppInstallOutcome> {
-    let candidate_smeltd = prepare_candidate_daemon(candidate_app)?;
-    commit_candidate_daemon(&candidate_smeltd)
-}
-
-/// 本地 `make install` 入口：与在线更新同一套「插件映射 → 守护交接 → 换 App」。
-#[cfg(unix)]
-pub fn install_local_app_bundle(
-    source: &std::path::Path,
-    target: &std::path::Path,
-) -> anyhow::Result<AppInstallOutcome> {
-    let _gate = match MANAGED_DAEMON_GATE.try_lock() {
-        Ok(gate) => gate,
-        Err(TryLockError::WouldBlock) => return Ok(AppInstallOutcome::WaitingForInstallLock),
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-    };
-    let Some(_file_gate) = try_acquire_managed_daemon_file_lock()? else {
-        return Ok(AppInstallOutcome::WaitingForInstallLock);
-    };
-
-    match prepare_and_commit_candidate_app(source)? {
-        AppInstallOutcome::Installed => {}
-        other => return Ok(other),
-    }
-
-    atomic_install_app_bundle(source, target)?;
-    sync_managed_helpers_from_app(source)?;
-    Ok(AppInstallOutcome::Installed)
-}
-
-/// `smelt --install-app <src.app> [dst.app]`：给 Makefile 用，避免再写一套 shell 交接。
-#[cfg(target_os = "macos")]
-pub fn maybe_run_install_app<I, S>(args: I) -> Option<i32>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let args: Vec<String> = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_string())
-        .collect();
-    if args.get(1).map(String::as_str) != Some("--install-app") {
-        return None;
-    }
-    let Some(source) = args.get(2).map(std::path::PathBuf::from) else {
-        eprintln!("用法：smelt --install-app <Smelt.app> [/Applications/Smelt.app]");
-        return Some(2);
-    };
-    let target = args
-        .get(3)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/Applications/Smelt.app"));
-    match install_local_app_bundle(&source, &target) {
-        Ok(AppInstallOutcome::Installed) => {
-            reap_managed_daemon_images(&managed_daemon_dir());
-            eprintln!(
-                "✅ 已安装 {}。守护已换成同一版本；进行中的回合已中断，历史记录还在。",
-                target.display()
-            );
-            Some(0)
-        }
-        Ok(AppInstallOutcome::WaitingForInstallLock) => {
-            eprintln!("⏸ 另一条安装正在进行，未替换 App。等它结束后再 make install。");
-            Some(75)
-        }
-        Err(error) => {
-            eprintln!("✗ 安装失败：{error:#}");
-            Some(1)
-        }
-    }
-}
-
-#[cfg(unix)]
-fn atomic_install_app_bundle(
-    source: &std::path::Path,
-    target: &std::path::Path,
-) -> anyhow::Result<()> {
-    let script = std::env::current_dir()
-        .map_err(anyhow::Error::from)?
-        .join("scripts/install-mac-app-atomically.sh");
-    if !script.is_file() {
-        anyhow::bail!(
-            "找不到 {}（请在仓库根目录执行 make install）",
-            script.display()
-        );
-    }
-    let status = std::process::Command::new(&script)
-        .arg(source)
-        .arg(target)
-        .status()
-        .map_err(anyhow::Error::from)?;
-    if !status.success() {
-        anyhow::bail!("原子安装 App 失败，退出码 {}", status.code().unwrap_or(-1));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_managed_helpers_from_app(app: &std::path::Path) -> std::io::Result<()> {
-    let macos = app.join("Contents/MacOS");
-    let dest_dir = managed_daemon_dir();
-    std::fs::create_dir_all(&dest_dir)?;
-    for name in ["smelt-notify"] {
-        let src = macos.join(name);
-        if !src.is_file() {
-            continue;
-        }
-        let staged = dest_dir.join(format!("{name}.next"));
-        let dest = dest_dir.join(name);
-        let _ = std::fs::remove_file(&staged);
-        std::fs::copy(&src, &staged)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&staged)?.permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&staged, permissions)?;
-        }
-        std::fs::rename(&staged, dest)?;
-    }
-    Ok(())
 }
 
 /// 让守护自己退出。**会杀掉它托管的所有 PTY 会话**（进程一死子进程 EOF/SIGHUP），
@@ -1250,26 +1047,6 @@ mod successor_daemon_tests {
 #[cfg(all(test, unix))]
 mod install_commit_tests {
     use super::*;
-
-    #[test]
-    fn only_a_down_and_unmapped_daemon_may_be_replaced() {
-        assert!(may_replace_managed_daemon_image(
-            &DaemonProbe::NotRunning,
-            false
-        ));
-        assert!(!may_replace_managed_daemon_image(
-            &DaemonProbe::NotRunning,
-            true
-        ));
-        assert!(!may_replace_managed_daemon_image(
-            &DaemonProbe::Unresponsive,
-            false
-        ));
-        assert!(!may_replace_managed_daemon_image(
-            &DaemonProbe::Unresponsive,
-            true
-        ));
-    }
 
     #[test]
     fn mapped_executable_is_live_and_a_fresh_file_is_not() {
@@ -1436,15 +1213,6 @@ mod managed_daemon_ensure_tests {
             "跨执行上下文的 managed 安装必须完全串行"
         );
         let _ = std::fs::remove_file(lock_path);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn install_app_cli_is_opt_in() {
-        assert!(maybe_run_install_app(["smelt"]).is_none());
-        assert!(maybe_run_install_app(["smelt", "--help"]).is_none());
-        assert_eq!(smelt_cli::maybe_run(["smelt", "--help"]), Some(0));
-        assert_eq!(maybe_run_install_app(["smelt", "--install-app"]), Some(2));
     }
 
     #[test]

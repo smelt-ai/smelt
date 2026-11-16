@@ -131,31 +131,35 @@ impl Workspace {
             .map(|update| (self.update_status.clone(), update));
         self.update_status = updater::UpdateStatus::Checking;
         let channel = cx.global::<settings::UpdateSettings>().channel;
-        let installed = match updater::installed_release() {
-            Ok(installed) => installed,
-            Err(error) => {
-                smelt_sys::app_log::error(
-                    "updater",
-                    &format!("读取本机更新状态失败，暂停检查：{error:#}"),
-                );
-                self.update_status = staged.map_or(
-                    updater::UpdateStatus::Failed(updater::UpdateFailure::Recovery),
-                    |(status, _)| status,
-                );
-                cx.notify();
-                return;
-            }
-        };
         cx.notify();
         cx.spawn(async move |this, cx| {
+            // 本机已装哪个发布要读包里的文件、拿更新锁读状态库，和查网络一样放后台。
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    smelt_sys::block_on::block_on_tokio(updater::fetch_latest(channel))
-                        .and_then(|r| r)
+                    let installed = updater::installed_release()?;
+                    let latest =
+                        smelt_sys::block_on::block_on_tokio(updater::fetch_latest(channel))
+                            .and_then(|r| r);
+                    anyhow::Ok((installed, latest))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                let (installed, result) = match result {
+                    Ok(checked) => checked,
+                    Err(error) => {
+                        smelt_sys::app_log::error(
+                            "updater",
+                            &format!("读取本机更新状态失败，暂停检查：{error:#}"),
+                        );
+                        this.update_status = staged.map_or(
+                            updater::UpdateStatus::Failed(updater::UpdateFailure::Recovery),
+                            |(status, _)| status,
+                        );
+                        cx.notify();
+                        return;
+                    }
+                };
                 match result {
                     Ok(candidate) => {
                         // 开关读的是"此刻"的值而不是发起检查时的快照：检查期间用户
