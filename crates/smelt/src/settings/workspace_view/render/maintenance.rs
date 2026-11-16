@@ -339,6 +339,18 @@ fn update_group(
         #[cfg(windows)]
         let move_btn: Option<Button> = None;
 
+        // 自动更新走不通时的退路：去发布页手动下载。
+        let manual_btn = status
+            .offers_manual_download()
+            .then(|| updater::manual_download_page(channel))
+            .flatten()
+            .map(|page| {
+                Button::new("manual-download-update")
+                    .small()
+                    .label("去下载页")
+                    .on_click(move |_, _window, cx: &mut App| cx.open_url(&page))
+            });
+
         let mut action_row = h_flex().gap_2().items_center().child(check_btn);
         if let Some(move_btn) = move_btn {
             action_row = action_row.child(move_btn);
@@ -348,6 +360,9 @@ fn update_group(
         }
         if let Some(restart_btn) = restart_btn {
             action_row = action_row.child(restart_btn);
+        }
+        if let Some(manual_btn) = manual_btn {
+            action_row = action_row.child(manual_btn);
         }
 
         v_flex()

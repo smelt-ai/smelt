@@ -1062,21 +1062,7 @@ pub async fn download_and_stage(
     let _ = std::fs::remove_file(&zip_path);
 
     let result = async {
-        let mut resp = reqwest::Client::new()
-            .get(url)
-            .header("User-Agent", "smelt-updater")
-            .send()
-            .await?
-            .error_for_status()?;
-        validate_download_url(resp.url().as_str())?;
-        if resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
-        {
-            anyhow::bail!("更新地址返回了 HTML，不是 ZIP：{url}");
-        }
+        let mut resp = open_package_download(url, " ZIP").await?;
         let total = resp.content_length();
         on_progress(DownloadProgress::Bytes { received: 0, total });
 
@@ -1084,8 +1070,9 @@ pub async fn download_and_stage(
         let mut received = 0u64;
         let mut reported = 0u64;
         while let Some(chunk) = resp.chunk().await? {
-            file.write_all(&chunk)?;
             received += chunk.len() as u64;
+            ensure_package_size(received)?;
+            file.write_all(&chunk)?;
             if received - reported >= PROGRESS_REPORT_STEP || Some(received) == total {
                 reported = received;
                 on_progress(DownloadProgress::Bytes { received, total });
