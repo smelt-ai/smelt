@@ -2,19 +2,31 @@
 //! `import { SmeltButton } from "smelt-ui"`。
 //!
 //! 是 [`crate::ui`] 的 JS 映射，同一套控件、同一套变体和状态，不照搬别的组件库的属性名。
-//! 只登记插件真用到的控件，缺了再加；每个控件一个子模块。
+//! 只登记插件真用到的控件，缺了再加；每个控件一个子模块。别的插件按实例提供的视图（终端、
+//! 对话）经 `SmeltViewInstance` 嵌进来，不按功能各开一个组件。
 //!
 //! 弹层（菜单、确认框）比画出它的那次绘制活得久，脚本回调却只在产生它的那次 render 里
 //! 有效：脚本重绘后旧回调就作废。所以弹层不攥着打开时的回调，每次绘制把最新的回调写进
 //! 按控件 id 保存的槽里（[`latest`]），点下去时再从槽里取。
 
+// 每个控件模块只经 `register` 接进 [`components`]：漏调了整个模块就没人用，在这里报错，
+// 不让控件悄悄从目录里少掉。
+#[deny(dead_code)]
 mod alert;
+#[deny(dead_code)]
 mod badge;
+#[deny(dead_code)]
 mod button;
+#[deny(dead_code)]
 mod choice;
+#[deny(dead_code)]
 mod confirm;
+#[deny(dead_code)]
 mod field;
+#[deny(dead_code)]
 mod menu;
+#[deny(dead_code)]
+mod view;
 
 use gpui::{App, ElementId, Entity, IntoElement, Refineable as _, Styled, Window};
 use gpui_shell::{
@@ -37,6 +49,7 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     field::register(&mut registry)?;
     alert::register(&mut registry)?;
     badge::register(&mut registry)?;
+    view::register(&mut registry)?;
     registry.freeze()
 }
 

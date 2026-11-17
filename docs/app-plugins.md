@@ -115,7 +115,7 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 - JS 插件的设置页仍是插件目录里另一个入口脚本（`entry`），单独加载、单独挂载，和主入口不共享内存。这份脚本里调 `register_*` 一律报错。
 - JS 插件挂载时主入口登记成视图 `<插件 id>/main`；脚本登记的设置页和它是同一来源的一组，宿主的加载器把两样并起来整组登记，`main` 这个名字设置页不能用。
 - 视图登记里不写位置，也不写「能不能针对某台机器打开」（现在的 `per_machine`）。入口放在哪，是菜单贡献的事。
-- 按实例建的视图（`instances`，如每段会话一份的终端、对话）不进布局、没有入口：别的插件用 `create_view(id, 参数)` 建一份自己摆、自己留着（拿到 `ViewInstance`，焦点经它交）；只想放进主窗口看的（JS 插件只能这样，JS 不嵌原生视图）用 `OPEN_VIEW` 带参数打开，宿主建一份放进出口，出口换了内容就放掉，重启不放回来。2026-11-16 已做。
+- 按实例建的视图（`instances`，如每段会话一份的终端、对话）不进布局、没有入口：别的插件用 `create_view(id, 参数)` 建一份自己摆、自己留着（拿到 `ViewInstance`，焦点经它交；JS 插件用 `smelt-ui` 的 `SmeltViewInstance`，实例跟着元素走）；只想放进主窗口看的用 `OPEN_VIEW` 带参数打开，宿主建一份放进出口，出口换了内容就放掉，重启不放回来。2026-11-16 已做。
 
 ### 菜单贡献
 
@@ -156,10 +156,10 @@ JS 插件的宿主模块也叫 `smelt-plugin-api`，是 Rust 那份接口的薄�
 - 每个插件一份自己的 gpui-shell Policy，宿主函数知道是哪个插件在调。
 - 事件用 `await next_event()` 取；每个插件一条队列，同样的事件只留一份。
 - 每个 JS 插件挂载时登记成一个视图，和 Rust 视图一样由布局摆放。
-- 终态里 Rust 和 JS 两边能拿到的东西一样。现在 JS 还缺 `topic`（订阅哪些话题眼下是宿主的固定表，Rust 插件也一样）、一个插件登记多个视图（图标、自己画顶栏、按实例建、收 `OPEN_VIEW` 的参数），以及在自己的界面里嵌别的插件的视图。
+- 终态里 Rust 和 JS 两边能拿到的东西一样。现在 JS 还缺 `topic`（订阅哪些话题眼下是宿主的固定表，Rust 插件也一样）、一个插件登记多个视图（图标、自己画顶栏、按实例建、收 `OPEN_VIEW` 的参数）。在自己的界面里嵌别的插件按实例建的视图已有 `SmeltViewInstance`（2026-11-17）。
 - 2026-11-16 补上：应用菜单（`register_menu_items`）、右键菜单项（`register_context_menu_items`）、退出守卫（`set_quit_guard`：设着时退出一律交给那条命令，脚本答不了同步的「接不接手」，接手后要退出调 `smelt.app/quit-now`）、按实例建的视图（`run("smelt.app/open-view", {view, args})` 放进出口）、`machine_online`、`wait_online`、`session_presence`。
 - 2026-11-17 补上：调运行时控制接口（`call(machine, method, params?, timeout_ms?)`，方法名按线上名字认，不认识的当场报错）、读注册表（`machines`、`views`、`view_badge`、`pages`、`commands`、`command`）、画自己的右键菜单时取别人放进来的项（`context_menu_items`，参数已并上下文）、发布活动上下文（`set_active_context`）、命令交回结果（`next_command` 带 `id`，脚本用 `resolve_command` / `reject_command` 交回，插件卸下时没交回的算失败）。
-- 映射不了的：`connector` 开的是原生字节流，gpui-shell 的宿主函数只收发普通数据，没有回调和流；JS 也不嵌原生视图，所以拿不到 `create_view` 的实例。要终端、对话，用 `OPEN_VIEW` 打开或经约定里的命令递话。
+- 映射不了的：`connector` 开的是原生字节流，gpui-shell 的宿主函数只收发普通数据，没有回调和流；终端、对话这类按实例建的视图用 `SmeltViewInstance` 嵌进自己的界面（按视图 id 和 JSON 参数），递话经约定里的命令。
 
 ### 主题
 
@@ -350,7 +350,7 @@ my-theme/
 
 ## 已知缺口
 
-- gpui-shell 没有拖放绑定（会话列表拖动排序要用）和终端组件；它的 Tree 只有 label，编辑器内容也不能读写。所以会话插件只能用 Rust 写；JS 插件用不了终端，要等上游补，不 fork。
+- gpui-shell 没有拖放绑定（会话列表拖动排序要用）；它的 Tree 只有 label，编辑器内容也不能读写。所以会话插件只能用 Rust 写，拖放要等上游补，不 fork。终端由 `SmeltViewInstance` 嵌（2026-11-17）。
 - gpui-shell 的 `gpui-shell.json` 拒绝未知字段，所以脚本要通过宿主函数登记能力。
   - 命令用 `register_commands` 登记，用 `next_command` 取下一条要执行的，做完用 `resolve_command` / `reject_command` 按 id 交回结果（`run` 它的一方等着），用 `run` 执行别人的命令。
   - 命令只管工作台级的动作；跟着焦点变的键（列表上下移动、输入框编辑）用视图自己的 action。

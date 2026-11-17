@@ -109,6 +109,7 @@ fn components_hold_only_smelt_controls() {
             "SmeltTextInput",
             "SmeltAlert",
             "SmeltBadge",
+            "SmeltViewInstance",
         ]
     );
     let states = components
@@ -315,4 +316,111 @@ export default class App extends View {
     let snapshot = tree(&mut context, &view);
     assert!(snapshot.contains("rejected: 4"), "{snapshot}");
     assert!(snapshot.contains(":item(registered)"), "{snapshot}");
+}
+
+/// 按实例建的视图，记下打开它的参数。
+struct Probe {
+    args: serde_json::Value,
+}
+
+impl gpui::Render for Probe {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::div()
+    }
+}
+
+impl crate::PluginView for Probe {
+    fn open(
+        &mut self,
+        args: &serde_json::Value,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) {
+        self.args = args.clone();
+    }
+}
+
+/// 实例跟着元素走：连着画是同一份，换参数换一份，不画了就放掉；建在绘制之后，不在 render 里。
+#[gpui::test]
+fn view_instance_follows_its_element(cx: &mut TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    let built: Rc<RefCell<Vec<gpui::WeakEntity<Probe>>>> = Rc::default();
+    let builder = built.clone();
+    cx.update(|cx| {
+        let spec = crate::ViewSpec {
+            name: "pane".into(),
+            title: "Pane".into(),
+            icon: "icons/bell.svg".into(),
+            draws_top_bar: false,
+            settings: None,
+            instances: true,
+            build: Rc::new(move |_, cx| -> Rc<dyn crate::ViewHandle> {
+                let probe = gpui::AppContext::new(cx, |_| Probe {
+                    args: serde_json::Value::Null,
+                });
+                builder.borrow_mut().push(probe.downgrade());
+                Rc::new(probe)
+            }),
+        };
+        crate::register_views("probe", vec![spec], cx).unwrap();
+    });
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltButton, SmeltViewInstance } from "smelt-ui";
+export default class App extends View {
+  init() { this.session = "a"; this.shown = true; }
+  render() {
+    let rejected = 0;
+    for (const bad of [
+      () => SmeltViewInstance.new(" "),
+      () => SmeltViewInstance.new("probe/pane").args("{"),
+    ]) {
+      try { bad(); } catch (_) { rejected++; }
+    }
+    const root = div().size_full()
+      .child(SmeltButton.new("next").label("Next").absolute().left(0).top(0)
+        .on_click((_event, cx) => { this.session = "b"; cx.notify(); }))
+      .child(SmeltButton.new("hide").label("Hide").absolute().left(0).top(40)
+        .on_click((_event, cx) => { this.shown = false; cx.notify(); }))
+      .child(`rejected: ${rejected}`);
+    return this.shown
+      ? root.child(SmeltViewInstance.new("probe/pane")
+          .args(JSON.stringify({ session: this.session }))
+          .absolute().left(0).top(80).w(200).h(100))
+      : root;
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    let live = |context: &mut VisualTestContext| {
+        context.update(|_, cx| {
+            built
+                .borrow()
+                .iter()
+                .filter_map(|probe| probe.upgrade())
+                .map(|probe| probe.read(cx).args.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    draw(&mut context);
+    draw(&mut context);
+    assert!(tree(&mut context, &view).contains("rejected: 2"));
+    assert_eq!(live(&mut context), [serde_json::json!({ "session": "a" })]);
+
+    draw(&mut context);
+    assert_eq!(built.borrow().len(), 1, "连着画不重建");
+
+    click(&mut context, 10., 12.);
+    draw(&mut context);
+    assert_eq!(live(&mut context), [serde_json::json!({ "session": "b" })]);
+    assert_eq!(built.borrow().len(), 2);
+
+    click(&mut context, 10., 52.);
+    draw(&mut context);
+    assert!(live(&mut context).is_empty(), "不画了就放掉");
 }

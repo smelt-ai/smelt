@@ -8,8 +8,8 @@
 //! 跟着放掉。
 //!
 //! 按实例建的视图（[`ViewSpec::instances`]，如每段会话一份的终端）不归布局：别的插件用
-//! [`create_view`] 按参数建一份，自己摆、自己留着；只想放进主窗口看的（JS 插件就只能这样）
-//! 用 [`OPEN_VIEW`] 带参数打开，宿主建一份放进出口。
+//! [`create_view`] 按参数建一份，自己摆、自己留着（JS 插件用 `smelt-ui` 的
+//! `SmeltViewInstance`）；只想放进主窗口看的用 [`OPEN_VIEW`] 带参数打开，宿主建一份放进出口。
 
 use std::rc::Rc;
 

@@ -467,6 +467,12 @@ pub fn events(cx: &App) -> Entity<HostEvents> {
     cx.global::<HostGlobal>().events.clone()
 }
 
+/// [`events`]，宿主还没装（测试里）是 `None`。
+#[cfg(feature = "js")]
+pub(crate) fn try_events(cx: &App) -> Option<Entity<HostEvents>> {
+    Some(cx.try_global::<HostGlobal>()?.events.clone())
+}
+
 /// 宿主发一条事件给所有订阅的插件。宿主还没装（测试里）就没人订阅，什么都不做。
 pub fn emit(event: HostEvent, cx: &mut App) {
     if let Some(events) = cx
