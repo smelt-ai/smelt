@@ -1,0 +1,34 @@
+# 外部贡献者签 CLA（CLA.md）。签名记录存在本仓库的 cla-signatures 分支，不进 main。
+# pull_request_target 以 main 的工作流运行、带写权限，所以这里绝不能 checkout 或执行 PR 的代码。
+name: CLA
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request_target'
+      || (github.event.issue.pull_request
+          && (github.event.comment.body == 'recheck'
+              || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    steps:
+      - uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/cla.json
+          path-to-document: https://github.com/smelt-ai/smelt/blob/main/CLA.md
+          branch: cla-signatures
+          # NIO 员工的贡献按劳动合同归 NIO，不必签；把他们的 GitHub 账号加在这里。
+          allowlist: zzfn,dependabot[bot]

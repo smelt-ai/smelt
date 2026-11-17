@@ -122,8 +122,8 @@ Start at [`docs/README.md`](docs/README.md). Current guides: [`workspace`](docs/
 
 ## Contributing
 
-Issues and pull requests are welcome. Before submitting, please make sure `make check-all` passes, and follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages.
+Issues and pull requests are welcome. Before submitting, please make sure `make check-all` passes, and follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. On your first pull request, a bot will ask you to sign the [Contributor License Agreement](CLA.md) with a single comment.
 
 ## License
 
-[Apache License 2.0](LICENSE)
+Copyright 2026 NIO. Licensed under the [Apache License 2.0](LICENSE); see [NOTICE](NOTICE).

@@ -41,8 +41,8 @@ jobs:
           # 桌面与 smeltd 会嵌 assets/，所以这两处也算。
           # android：手机内核 smelt_mobile 及其依赖的 crate（`cargo tree -p smelt_mobile`
           # 里的本地 crate，加依赖时同步这里）和 Flutter 工程。ios-check 也看它。
-          # advisories：只在依赖图或 deny 配置可能变时跑（cargo deny 本身很快，但拉
-          # advisory-db 要网络；纯 .rs 改动不必每次扫）。
+          # advisories：advisories 和 licenses 两项 deny 检查，只在依赖图或 deny 配置可能变时跑
+          # （cargo deny 本身很快，但拉 advisory-db 要网络；纯 .rs 改动不必每次扫）。
           filters: |
             workflow: &workflow
               - '.github/workflows/ci.yml'
@@ -84,7 +84,7 @@ jobs:
               - 'scripts/fetch-bun.sh'
               - 'agent/**'
 
-  # RustSec：只查 advisories，不跑 license/bans（那些噪声大、与本 PR 目标无关）。
+  # RustSec advisories 加依赖许可证白名单（见 deny.toml）；bans / sources 不跑。
   # ubuntu 上跑：不编代码，只要 cargo metadata + advisory-db，通常几十秒内结束。
   cargo-deny:
     needs: changes
@@ -104,8 +104,8 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny
 
-      - name: Check advisories
-        run: cargo deny check advisories
+      - name: Check advisories and licenses
+        run: cargo deny check advisories licenses
 
   rust:
     needs: changes

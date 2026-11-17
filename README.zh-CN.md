@@ -118,8 +118,8 @@ Windows 上，Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%
 
 ## 贡献
 
-欢迎 issue 与 PR。提交前请确保 `make check-all` 通过，commit message 遵循 [Conventional Commits](https://www.conventionalcommits.org/)。
+欢迎 issue 与 PR。提交前请确保 `make check-all` 通过，commit message 遵循 [Conventional Commits](https://www.conventionalcommits.org/)。第一次提 PR 时，机器人会请你在 PR 下回复一句话签署[贡献者许可协议](CLA.md)。
 
 ## License
 
-[Apache License 2.0](LICENSE)
+Copyright 2026 NIO。以 [Apache License 2.0](LICENSE) 授权，另见 [NOTICE](NOTICE)。
