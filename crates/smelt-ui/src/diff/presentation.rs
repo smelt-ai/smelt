@@ -392,8 +392,7 @@ mod tests {
         )
         .unwrap()
         .remove(0);
-        let presentation =
-            FilePresentation::prepare(&file, OPTIONS, None);
+        let presentation = FilePresentation::prepare(&file, OPTIONS, None);
         let ranges = |side, ix| {
             let line = &file.lines(side)[ix];
             presentation
@@ -408,8 +407,7 @@ mod tests {
         )
         .unwrap()
         .remove(0);
-        let presentation =
-            FilePresentation::prepare(&file, OPTIONS, None);
+        let presentation = FilePresentation::prepare(&file, OPTIONS, None);
         let ranges = |side, ix| {
             let line = &file.lines(side)[ix];
             presentation
@@ -423,8 +421,7 @@ mod tests {
             inline_unit: None,
             ..OPTIONS
         };
-        let presentation =
-            FilePresentation::prepare(&file, off, None);
+        let presentation = FilePresentation::prepare(&file, off, None);
         assert_eq!(
             presentation
                 .inline_changes(&file.lines(DiffSide::Original)[0], DiffSide::Original, 0)
@@ -466,11 +463,7 @@ mod tests {
                     .collect()
             }
         });
-        let presentation = FilePresentation::prepare(
-            &file,
-            OPTIONS,
-            Some(&highlighter),
-        );
+        let presentation = FilePresentation::prepare(&file, OPTIONS, Some(&highlighter));
 
         // Each side of each hunk alone, named by the file's language.
         let calls = std::mem::take(&mut *calls.lock().unwrap());
@@ -492,11 +485,7 @@ mod tests {
             syntax_max_line_length: 5,
             ..OPTIONS
         };
-        let presentation = FilePresentation::prepare(
-            &file,
-            short,
-            Some(&highlighter),
-        );
+        let presentation = FilePresentation::prepare(&file, short, Some(&highlighter));
         assert!(styles(&presentation, DiffSide::Modified, 0).is_empty());
 
         // `é` is two bytes, so 5..6 splits it: counted in characters, not bytes.
@@ -506,11 +495,7 @@ mod tests {
                 .remove(0);
         let split: DiffSyntaxHighlighter =
             Arc::new(move |_, _| vec![(0..3, bold), (5..6, bold), (4..6, bold)]);
-        let presentation = FilePresentation::prepare(
-            &file,
-            OPTIONS,
-            Some(&split),
-        );
+        let presentation = FilePresentation::prepare(&file, OPTIONS, Some(&split));
         assert_eq!(
             presentation.syntax_highlights(
                 &file.lines(DiffSide::Modified)[0],
@@ -531,8 +516,7 @@ mod tests {
         )
         .unwrap()
         .remove(0);
-        let presentation =
-            FilePresentation::prepare(&file, OPTIONS, None);
+        let presentation = FilePresentation::prepare(&file, OPTIONS, None);
         let names = |presentation: &FilePresentation, ix: usize| {
             presentation.syntax[DiffSide::Modified as usize]
                 .line(ix)
@@ -559,13 +543,11 @@ mod tests {
             syntax_max_line_length: 5,
             ..OPTIONS
         };
-        let presentation =
-            FilePresentation::prepare(&file, short, None);
+        let presentation = FilePresentation::prepare(&file, short, None);
         assert!(names(&presentation, 0).is_empty());
 
         let as_text = file.clone().with_language("text");
-        let presentation =
-            FilePresentation::prepare(&as_text, OPTIONS, None);
+        let presentation = FilePresentation::prepare(&as_text, OPTIONS, None);
         assert!(names(&presentation, 0).is_empty());
     }
 }

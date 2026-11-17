@@ -44,13 +44,17 @@ url = "2"
 # 版本（0.25、默认关全格式），features 保持 png/jpeg/gif/webp——Bmp/Tiff 等
 # 格式当前调用方不会遇到，不为此扩大解码面。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-# 代码语法高亮（syntax/）：文件页的代码编辑器、Markdown 代码块共用一套。下面的语法包
-# 版本和 gpui-component 用的一致，组件库还在依赖树里（git diff）时 cargo 只编一份。
+# 代码语法高亮（syntax/）：文件页的代码编辑器、Markdown 代码块、差异视图共用一套。
 tree-sitter = "0.26.13"
 # 语法包导出的语言入口类型（`LanguageFn`），tree-sitter 本身不再导出它。
 tree-sitter-language = "0.1"
 # 编辑器的语言服务里 Python 的缩进规则（syntax/editing.rs）。
 regex = "1"
+# 差异视图（diff/）：行内改动按词或字比对、按字素切分、按显示宽度估列宽，行内小数组。
+similar = { version = "2.7", features = ["unicode"] }
+unicode-segmentation = "1"
+unicode-width = "0.2"
+smallvec = "1"
 tree-sitter-astro-next = "0.1.1"
 tree-sitter-bash = "0.23.3"
 tree-sitter-c = "0.24.1"

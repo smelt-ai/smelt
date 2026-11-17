@@ -9,7 +9,6 @@
 pub(crate) use smelt_ui::ui_theme;
 
 mod bundled_helpers;
-mod component_theme;
 mod daemon_states;
 mod dir_picker;
 mod dock;
@@ -594,8 +593,7 @@ fn open_workspace_window(cx: &mut App) -> MainWindow {
             window.set_rem_size(px(ui_font_px as f32));
             let view = cx.new(|cx| Workspace::new(window, cx));
             workspace = Some(view.downgrade());
-            // 顶层视图包一层 Root：对话框、菜单这些窗口层（smelt_ui 的，和组件库还没迁走的）
-            // 都登记在它上面。
+            // 顶层视图包一层 Root：smelt-ui 的对话框、菜单这些窗口层都登记在它上面。
             cx.new(|cx| gpui_base::Root::new(view, window, cx).bg(gpui::transparent_black()))
         })
         .expect("打开窗口失败");
@@ -605,8 +603,8 @@ fn open_workspace_window(cx: &mut App) -> MainWindow {
     }
 }
 
-/// 组件库的图标集里没有的几枚图标（agent 身份、git 分支、机器系统等）由 smelt 自带，走
-/// `smelt-icons/` 前缀，不会跟组件库以后新增的资源撞名。插件按路径取用。
+/// gpui-kit 的图标集里没有的几枚图标（agent 身份、git 分支、机器系统等）由 smelt 自带，走
+/// `smelt-icons/` 前缀，不会跟 gpui-kit 以后新增的资源撞名。插件按路径取用。
 /// agent 身份图标：资源名按稳定的存档 id 拼（`smelt-icons/agent-<id>.svg`），
 /// 所以这里也按 id 建表，而不是一串手写的 `if path == ...`。
 ///
@@ -649,8 +647,8 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
         .map(|(_, bytes)| *bytes)
 }
 
-// 图标用组件库的全套目录（`AllAssets`，Lucide 全部 + 组件库自己的），不只打包组件用到的
-// 那一百来个：插件（包括用户写的 JS 插件）按 Lucide 名字取图标，只编一部分进来，没编进来
+// 图标用 gpui-kit 的全套目录（`AllAssets`，Lucide 全部 + gpui-kit 自己的），不只打包组件
+// 用到的那一百来个：插件（包括用户写的 JS 插件）按 Lucide 名字取图标，只编一部分进来，没编进来
 // 的图标位置就空着。全套 SVG 约 0.7 MB。
 struct SmeltAssets;
 
@@ -763,19 +761,10 @@ fn main() {
     }
 
     app.run(move |cx| {
-        // 组件库还留着 git diff、文件页的代码编辑器和 Markdown 代码块高亮三样。它们的键位
-        // （编辑器的输入、diff 的复制和跳转）只能经组件库的 init 绑上，读的 `Theme` 全局也是
-        // 它装的；它也装 gpui-base（滚动条、分栏手柄、窗口根），gpui-base 的主题由组件库的
-        // `Theme` 投影出来。三样都换掉之前留着。
-        gpui_component::init(cx);
+        // gpui-base：输入框、富文本、滚动条、分栏、窗口根这些行为层和它们的键位。
+        gpui_base::init(cx);
         // smelt 自己的组件：菜单键位、窗口对话框层（挂在窗口根上，要在开窗口之前装）。
         smelt_ui::init(cx);
-        // 组件库的 Theme 跟着 smelt 的主题走，第一次装主题之前装上。
-        component_theme::install(cx);
-        // diff 视图自带的文案（折叠的行数、文件头、冲突的「采用」按钮等）跟界面一起用中文；
-        // 不设就是组件库默认的英文。语言是进程全局的，gpui-base 自带的文案（触屏选区菜单等）
-        // 也跟着走。
-        gpui_component::set_locale("zh-CN");
         // Markdown 中的本地文件链接使用 smelt-file://，由 on_open_urls 回流到
         // Workspace 的内置编辑器。打包时 Info.plist 也声明该 scheme；运行时注册
         // 用于已安装应用升级后无需重启 LaunchServices 数据库。
@@ -808,8 +797,7 @@ fn main() {
         plugins::register_initial_themes(cx);
         let appearance = load_appearance();
         cx.set_global(appearance.clone());
-        // 代码字体必须在装主题之前落地：Theme.mono_font_family 从这里读。
-        smelt_model::font_config::set_font_family(&appearance.font_family);
+        smelt_ui::set_code_font(&appearance.font_family, cx);
         settings::apply_named_theme(&appearance.theme_name, cx);
 
         // 原生通知/菜单栏桥必须先于任何 Attention producer 就绪。daemon 快照可能在

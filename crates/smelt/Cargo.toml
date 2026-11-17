@@ -59,23 +59,18 @@ dirs = "5"
 uuid = { version = "1", features = ["v4"] }
 futures-util = { version = "0.3", features = ["sink", "async-await"] }
 # GPUI 用上游 gpui-kit 钉的 crates.io 快照 gpui-pre =0.3.11。
-# 组件库跟 longbridge/gpui-kit 上游 main，不用 fork。两边必须同一套，
+# gpui-kit 各 crate 跟 longbridge/gpui-kit 上游 main，不用 fork。两边必须同一套，
 # 不能只改其中一个。gpui_platform 开 runtime_shaders 免装完整 Xcode。
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-# 组件库只留给差异视图、代码编辑器和代码高亮：这里调它的 `init`（这两样的键位只经它登记）、
-# 把 smelt 主题投影给它（`component_theme.rs`）。tree-sitter-languages 是 Markdown 代码块和
-# 编辑器高亮用的语法。
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
-# 组件库自带图标资源（Sidebar 等组件的 IconName 需要注册它才能渲染 svg）。
-# 上游已把包名从 gpui-component-assets 改成 gpui-kit-assets。
+# gpui-kit 的图标资源：smelt-ui 的 `IconName` 指向这里的 svg，注册进资源表才画得出来。
 gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 # 调试 HUD（Cmd+Shift+F）：帧耗时取自 GPUI 自己的帧追踪，不靠连续重绘去量。
 gpui-fps = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 # 插件：gpui-shell 脚本应用（见 src/plugins）。JS 写界面，GPUI 原生绘制，
 # 引擎 QuickJS 跑在 UI 线程。脚本能用的控件是 smelt-ui 的（`smelt_plugin_api::js::ui`），
-# 不开 `components`：那是 gpui-component 的控件目录。
+# 不开 `components`：那会带进 gpui-component 和它的控件目录。
 # 不开默认的 `webview`：它会把整个运行时切到 gpui-fast，而 smelt 用 gpui-pre。
 gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", default-features = false, features = ["quickjs"] }
 libc = "0.2"

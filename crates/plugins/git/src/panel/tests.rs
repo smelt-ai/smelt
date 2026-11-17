@@ -338,7 +338,7 @@ rename to new name.rs
 -a
 +b
 ";
-    let files = gpui_component::diff::DiffFile::parse(patch).expect("rename diff");
+    let files = smelt_plugin_api::ui::diff::DiffFile::parse(patch).expect("rename diff");
     assert_eq!(
         diff_scroll_target(&files, "new name.rs"),
         Some("new name.rs")
@@ -574,8 +574,8 @@ fn aggregate_diff_files_stay_expanded_unless_collapsed(cx: &mut gpui::TestAppCon
 
     let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n\
                  diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n";
-    let files = gpui_component::diff::DiffFile::parse(patch).unwrap();
-    let state = cx.new(|cx| gpui_component::diff::DiffState::new(files, cx));
+    let files = smelt_plugin_api::ui::diff::DiffFile::parse(patch).unwrap();
+    let state = cx.new(|cx| smelt_plugin_api::ui::diff::DiffState::new(files, cx));
     let collapsed = HashSet::from(["b.rs".to_string()]);
 
     state.update(cx, |state, cx| {

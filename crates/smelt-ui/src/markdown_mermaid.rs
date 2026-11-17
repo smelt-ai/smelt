@@ -3,7 +3,7 @@
 //! gpui-base 的 `TextView::markdown` 默认把 mermaid 围栏代码块当普通代码块处理
 //! （mermaid 没有 tree-sitter 语法，等于纯文本）。这里接上它的
 //! `markdown_block_parser`/`markdown_block_renderer` 钩子，识别出 mermaid 代码块，
-//! 用 `merman` 0.9.1（纯 Rust，对齐 mermaid.js，Zed 也在用）离线渲成 SVG，再用
+//! 用 `merman`（纯 Rust，对齐 mermaid.js，Zed 也在用）离线渲成 SVG，再用
 //! GPUI 的 `img()` 全彩显示——注意不是 `svg()`：那个元素只做单色 alpha mask 渲染
 //! （图标那条路），画不出多彩图，`img()` 对 `.svg` 走的才是全彩栅格化管线。
 //!

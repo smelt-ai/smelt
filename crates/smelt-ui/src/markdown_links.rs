@@ -1,8 +1,8 @@
 //! 对话消息里 Markdown 链接的点击处理：本地文件路径解析成 Smelt 内部的 file URL。
 //!
 //! 只在点击时解析，不改写消息原文：原文改写认不出代码块，代码里的链接也会被换掉，
-//! 复制出来的也是改写后的。不解析的话，gpui-component 会把链接目标原样交给
-//! `open_url`，相对文件路径在 macOS 上会被 LaunchServices 误当作应用标识并报 -50。
+//! 复制出来的也是改写后的。不解析的话，gpui-base 的 `TextView` 会把链接目标原样交给
+//! `App::open_url`，相对文件路径在 macOS 上会被 LaunchServices 误当作应用标识并报 -50。
 
 use gpui::{App, ClickEvent, MouseButton, SharedString, Window};
 
@@ -40,7 +40,7 @@ pub(crate) fn link_opener(
     }
 }
 
-/// 和 gpui-component 默认的打开条件一致：左键、中键、键盘、非长按的触摸。右键留给菜单。
+/// 和 gpui-base `TextView` 默认的打开条件一致：左键、中键、键盘、非长按的触摸。右键留给菜单。
 fn opens_link(event: &ClickEvent) -> bool {
     match event {
         ClickEvent::Mouse(click) => {

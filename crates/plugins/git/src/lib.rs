@@ -270,9 +270,9 @@ struct ProjectGitUi {
     diff_comment_open: bool,
     git_collapsed_diff_files: HashSet<String>,
     diff_split: bool,
-    diff_view: Option<Entity<gpui_component::diff::DiffState>>,
+    diff_view: Option<Entity<smelt_plugin_api::ui::diff::DiffState>>,
     diff_view_patch: String,
-    diff_comment_range: Option<gpui_component::diff::DiffLineRange>,
+    diff_comment_range: Option<smelt_plugin_api::ui::diff::DiffLineRange>,
     diff_view_sub: Option<Subscription>,
     diff_parse_error: Option<String>,
     git_tree_collapsed: HashSet<String>,
@@ -298,11 +298,11 @@ pub(crate) struct GitPanel {
     git_collapsed_diff_files: HashSet<String>,
     diff_split: bool,
     /// 变更栏正文。补丁原文没变时不调用 `set_files`，滚动和折叠才留得住。
-    diff_view: Option<Entity<gpui_component::diff::DiffState>>,
+    diff_view: Option<Entity<smelt_plugin_api::ui::diff::DiffState>>,
     /// 当前装进 `diff_view` 的补丁原文。
     diff_view_patch: String,
     /// 评论卡锚在这个源码范围的末行。
-    diff_comment_range: Option<gpui_component::diff::DiffLineRange>,
+    diff_comment_range: Option<smelt_plugin_api::ui::diff::DiffLineRange>,
     _diff_view_sub: Option<Subscription>,
     /// `DiffFile::parse` 失败时的说明。git 报错、只有子模块这类非 diff 文本走这里。
     diff_parse_error: Option<String>,

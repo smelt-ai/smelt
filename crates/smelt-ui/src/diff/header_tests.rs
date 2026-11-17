@@ -60,19 +60,6 @@ fn test_diff_builder(cx: &mut TestAppContext) {
     assert_eq!(diff.annotations.items[0].position(), Some(&position));
     assert_eq!(diff.annotations.lines[&position], [0]);
 
-    // Existing consumers keep the original builder spellings.
-    let compatibility = Diff::new(&state)
-        .header(|_, _, _| div().child("header"))
-        .header_prefix(|_, _, _| div().child("prefix"))
-        .header_title_suffix(|_, _, _| div().child("title suffix"))
-        .header_suffix(|_, _, _| div().child("suffix"))
-        .annotation_content(|_, _, _| div().child("annotation"));
-    assert!(compatibility.header.content.is_some());
-    assert!(compatibility.header.prefix.is_some());
-    assert!(compatibility.header.title_suffix.is_some());
-    assert!(compatibility.header.suffix.is_some());
-    assert!(compatibility.annotation_content.is_some());
-
     let window = cx.add_empty_window();
     window.update(|window, cx| {
         let render = diff.header.content.as_ref().unwrap();

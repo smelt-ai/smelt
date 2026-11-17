@@ -18,10 +18,10 @@ struct SendText {
 
 /// 「全部更改」默认展开，只收起用户收起过的文件；单文件 diff 总是展开。
 pub(super) fn apply_collapsed_files(
-    state: &mut gpui_component::diff::DiffState,
+    state: &mut smelt_plugin_api::ui::diff::DiffState,
     aggregate: bool,
     collapsed: &HashSet<String>,
-    cx: &mut Context<gpui_component::diff::DiffState>,
+    cx: &mut Context<smelt_plugin_api::ui::diff::DiffState>,
 ) {
     let paths: Vec<String> = state
         .files()
@@ -33,8 +33,8 @@ pub(super) fn apply_collapsed_files(
     }
 }
 
-fn parse_diff_files(text: &str) -> Result<Vec<gpui_component::diff::DiffFile>, String> {
-    gpui_component::diff::DiffFile::parse(text)
+fn parse_diff_files(text: &str) -> Result<Vec<smelt_plugin_api::ui::diff::DiffFile>, String> {
+    smelt_plugin_api::ui::diff::DiffFile::parse(text)
         .map_err(|err| diff_parse_failure(text, &err.to_string()))
 }
 
@@ -1055,26 +1055,26 @@ impl GitPanel {
         self.publish_diff_body(cx);
     }
 
-    pub(crate) fn current_diff_mode(&self) -> gpui_component::diff::DiffMode {
+    pub(crate) fn current_diff_mode(&self) -> smelt_plugin_api::ui::diff::DiffMode {
         if self.diff_split {
-            gpui_component::diff::DiffMode::Split
+            smelt_plugin_api::ui::diff::DiffMode::Split
         } else {
-            gpui_component::diff::DiffMode::Unified
+            smelt_plugin_api::ui::diff::DiffMode::Unified
         }
     }
 
     fn subscribe_diff_view(
         &mut self,
-        view: &Entity<gpui_component::diff::DiffState>,
+        view: &Entity<smelt_plugin_api::ui::diff::DiffState>,
         cx: &mut Context<Self>,
     ) {
         // 折叠事件只改集合。DiffState 自己会通知正文视图；这里再 notify GitPanel
         // 会把右侧文件列表整列重排。
         self._diff_view_sub = Some(cx.subscribe(view, |this, _, event, _cx| match event {
-            gpui_component::diff::DiffEvent::FileCollapsed(path) => {
+            smelt_plugin_api::ui::diff::DiffEvent::FileCollapsed(path) => {
                 this.git_collapsed_diff_files.insert(path.to_string());
             }
-            gpui_component::diff::DiffEvent::FileExpanded(path) => {
+            smelt_plugin_api::ui::diff::DiffEvent::FileExpanded(path) => {
                 this.git_collapsed_diff_files.remove(path.as_ref());
             }
             _ => {}
@@ -1093,7 +1093,7 @@ impl GitPanel {
     fn install_diff_view(
         &mut self,
         patch: &str,
-        files: Result<Vec<gpui_component::diff::DiffFile>, String>,
+        files: Result<Vec<smelt_plugin_api::ui::diff::DiffFile>, String>,
         cx: &mut Context<Self>,
     ) {
         if self.diff_view_patch == patch {
@@ -1129,7 +1129,8 @@ impl GitPanel {
                 apply_collapsed_files(state, aggregate, &collapsed, cx);
             });
         } else {
-            let view = cx.new(|cx| gpui_component::diff::DiffState::new(files, cx).with_mode(mode));
+            let view =
+                cx.new(|cx| smelt_plugin_api::ui::diff::DiffState::new(files, cx).with_mode(mode));
             view.update(cx, |state, cx| {
                 apply_collapsed_files(state, aggregate, &collapsed, cx)
             });

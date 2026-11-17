@@ -15,9 +15,9 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::diff::Diff;
 use smelt_plugin_api::ui::Badge;
 pub(crate) use smelt_plugin_api::ui::Button;
+use smelt_plugin_api::ui::diff::Diff;
 use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 
@@ -454,17 +454,17 @@ pub fn commit_detail_pane(
 /// 日志页的单文件 diff。提交列表滚动通知的是 GitPanel。
 /// 渲染只读自己持有的 `DiffState`，不能再去读 GitPanel。
 pub struct GitLogDiffBody {
-    view: Option<Entity<gpui_component::diff::DiffState>>,
+    view: Option<Entity<smelt_plugin_api::ui::diff::DiffState>>,
 }
 
 impl GitLogDiffBody {
-    pub fn new(view: Option<Entity<gpui_component::diff::DiffState>>) -> Self {
+    pub fn new(view: Option<Entity<smelt_plugin_api::ui::diff::DiffState>>) -> Self {
         Self { view }
     }
 
     pub fn set_view(
         &mut self,
-        view: Option<Entity<gpui_component::diff::DiffState>>,
+        view: Option<Entity<smelt_plugin_api::ui::diff::DiffState>>,
         cx: &mut Context<Self>,
     ) {
         let same = match (&self.view, &view) {

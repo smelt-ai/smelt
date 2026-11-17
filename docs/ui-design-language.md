@@ -52,7 +52,7 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 
 ### 主题的权威
 
-当前主题只有一处：`smelt_ui::theme_catalog::ActiveTheme` 这个全局。主题文件在登记时由 `theme_config` 解析、求值一次，`theme_catalog::apply` 装上时投影成色板和浮起层级；自绘界面读 `ui_theme::*()`。gpui-component 只剩差异视图、文件编辑器和代码高亮在用，宿主 `crates/smelt/src/component_theme.rs` 观察 `ActiveTheme`，把这几处读得到的色（底、字、线、选区、diff 增删、编辑器和语法高亮）投影给组件库的 `Theme`；那份只是只读投影，别处不改它。
+当前主题只有一处：`smelt_ui::theme_catalog::ActiveTheme` 这个全局。主题文件在登记时由 `theme_config` 解析、求值一次，`theme_catalog::apply` 装上时投影成色板和浮起层级；自绘界面读 `ui_theme::*()`。gpui-base 自己直接画的几样（输入框的光标和选区、富文本的选区和代码字体、滚动条、分栏手柄）读它自己的 `gpui_base::Theme`：`apply` 装主题时一并写进颜色，`smelt_ui::set_code_font` 换代码字体时写进字体，别处不改它。代码高亮（文件编辑器、Markdown 代码块、差异视图）读当前主题的 `syntax` 段，见 `smelt_ui::syntax`。
 
 默认主题是 **smelt Light / smelt Dark**，是组件库自带的主题（`crates/smelt-ui/themes/smelt.json`）。它不属于 themes 插件：删掉 themes 插件，app 照样有默认主题。其它主题由 themes 插件装进来，和它一样可换；主题列表里永远有它，插件里的同名主题不能覆盖它。主题装上之前读色板，拿到的就是同明暗的 smelt Light / Dark（`ui_theme` 从 `smelt.json` 装上那款）。
 
@@ -411,4 +411,4 @@ diff 底色、`need` 和 `bad` 的浅底（悬停用的 8%–12% 透明度）都
 3. 按钮：五种角色，基于 gpui-base 的 `Button`。（已完成）
 4. smelt-ui 脱离 gpui-component：主题解析和目录自己做（`theme_config`、`theme_catalog`，`ActiveTheme` 是唯一出处）；令牌收进 `kit`；输入框、菜单、对话框、提示、滚动条、复制按钮、Markdown 正文换到 gpui-base 上。下拉选择器（`Select`）删掉，用到的地方改菜单或暂用组件库的。（已完成）
 5. 第二阶段：应用和插件里剩下的 gpui-component 换掉——右键菜单、宿主对话框、选择器、设置页、通知、终端等部件换成 smelt-ui；主题改成 smelt 自己的带版本格式（第 2 节）。gpui-component 只留给差异视图、文件编辑器和代码高亮，`component_theme` 收成只投影这几处读的色。（已完成）
-6. 差异视图、编辑器、代码高亮在 gpui-base 上有了原语后换掉，删掉 `component_theme` 和 gpui-component 依赖。
+6. 差异视图、编辑器、代码高亮换到 smelt-ui（`diff`、`code_editor`、`syntax`，tree-sitter 语法包由 smelt-ui 直接依赖），删掉 `component_theme` 和 gpui-component 依赖。（已完成）

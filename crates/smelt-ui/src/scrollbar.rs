@@ -4,14 +4,17 @@
 //! 已有列表等自带视口的组件应将 `Scrollbar` 放在视口的外层兄弟位置，
 //! 并使用默认的句柄视口，不能将条放进滚动内容中。
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use gpui::{
-    AnyElement, App, Axis, Bounds, DispatchPhase, Div, Element, ElementId, Global, GlobalElementId,
-    Hitbox, HitboxBehavior, HitboxId, InspectorElementId, InteractiveElement, IntoElement,
-    LayoutId, OngoingScroll, Overflow, ParentElement, Pixels, Point, PointRefinement, RenderOnce,
-    ScrollDelta, ScrollEvent, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement,
-    StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
+    AnyElement, App, Axis, Bounds, DispatchPhase, Div, Element, ElementId, EntityId, Global,
+    GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId, InteractiveElement,
+    IntoElement, LayoutId, OngoingScroll, Overflow, ParentElement, Pixels, Point, PointRefinement,
+    RenderOnce, ScrollDelta, ScrollEvent, ScrollHandle, SharedString, Stateful,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_base::{InteractiveElementExt as _, StyledExt as _};
 
@@ -21,6 +24,10 @@ pub use gpui_base::{
 };
 
 /// 将内容包装为滚动区域。ID 和句柄由调用方持有并在重绘间保持稳定。
+///
+/// 滚轮先给指针下最里层还能动的 `Scrollable`，它到头了再交给外层。里面的多行输入框、代码
+/// 编辑器先滚，它们滚了外层就不动。里面要再套滚动区域也用 `Scrollable`：GPUI 原生的
+/// `overflow_*_scroll` 滚了也不拦事件，会和外层一起滚。
 #[derive(IntoElement)]
 pub struct Scrollable<E: InteractiveElement + Styled + ParentElement + Element> {
     id: ElementId,
@@ -132,7 +139,9 @@ where
             .map(|this| match self.axis {
                 ScrollbarAxis::Vertical => this.flex_col().overflow_y_scroll(),
                 ScrollbarAxis::Horizontal => this.flex_row().overflow_x_scroll(),
-                ScrollbarAxis::Both => this.overflow_scroll(),
+                // 横排时交叉轴默认拉伸，内容会被压成视口高，纵向就量不出溢出。按内容自己的
+                // 高度排，`min_size_full` 仍保证至少铺满视口。
+                ScrollbarAxis::Both => this.items_start().overflow_scroll(),
             })
             .lock_scroll_axis()
             .child(content);
@@ -216,9 +225,10 @@ fn render_scrollbar<H: ScrollbarHandle + Clone>(
         .child(Scrollbar::new(scroll_handle).id(id).axis(axis))
 }
 
-// Capture has two passes around the child: ancestors nominate themselves first,
-// then descendants replace the candidate. Only the innermost area that can
-// actually move consumes the event, so an edge passes it to its parent.
+// 谁拿这次滚轮：捕获阶段从外往里走，每个这次能动的滚动区域都把自己登记上，最后留下的
+// 是最里层那个；到了边的不登记，滚轮就交给外层。真正去滚放在冒泡阶段最后，里面别的
+// 滚动区域（gpui-base 的输入框等）先滚，滚了就拦下事件，外层不再动。外层自己那块原生
+// 滚动区域在这之前会顺手挪一下，这里写的是捕获时算好的位置，会盖掉它。
 #[derive(Default)]
 struct WheelOwner(Option<HitboxId>);
 impl Global for WheelOwner {}
@@ -355,12 +365,13 @@ impl Element for WheelArea {
                 cx.default_global::<WheelOwner>().0 = Some(hitbox_id);
             }
         });
-        self.child.paint(window, cx);
+        // 冒泡阶段按登记的倒序走，这个在子元素之前登记，所以等里面的都走完才轮到它。
+        // 里面的输入框这类区域滚了会拦下事件，到不了这里，页面就不跟着动。
         let handle = self.handle.clone();
         let state = state.clone();
         let view = window.current_view();
         window.on_mouse_event(move |_: &ScrollEvent, phase, window, cx| {
-            if phase != DispatchPhase::Capture
+            if phase != DispatchPhase::Bubble
                 || !hitbox_id.should_handle_scroll(window)
                 || cx.try_global::<WheelOwner>().and_then(|owner| owner.0) != Some(hitbox_id)
             {
@@ -372,6 +383,7 @@ impl Element for WheelArea {
                 cx.stop_propagation();
             }
         });
+        self.child.paint(window, cx);
     }
 }
 
@@ -382,6 +394,9 @@ struct AxisControl {
     handle: ScrollHandle,
     axis: Axis,
     label: SharedString,
+    /// 画这根条的视图。滚动后要让它重画，可视图只有在画的时候才问得到，所以 prepaint 时
+    /// 记下来，按键和无障碍动作里用。
+    view: Rc<Cell<Option<EntityId>>>,
 }
 
 impl AxisControl {
@@ -392,6 +407,19 @@ impl AxisControl {
         label: SharedString,
     ) -> Self {
         use gpui::accesskit::{Action, ActionData};
+        let view: Rc<Cell<Option<EntityId>>> = Rc::default();
+        let notify = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                if let Some(view) = view.get() {
+                    cx.notify(view);
+                }
+            }
+        };
+        let keyboard_notify = notify.clone();
+        let increment_notify = notify.clone();
+        let decrement_notify = notify.clone();
+        let set_value_notify = notify;
         let keyboard_handle = handle.clone();
         let increment = handle.clone();
         let decrement = handle.clone();
@@ -406,7 +434,7 @@ impl AxisControl {
             .focusable()
             .tab_stop(true)
             .focus_visible(|style| style.shadow(crate::button::focus_ring()))
-            .on_key_down(move |event, window, cx| {
+            .on_key_down(move |event, _, cx| {
                 if event.keystroke.modifiers != gpui::Modifiers::default() {
                     return;
                 }
@@ -427,19 +455,19 @@ impl AxisControl {
                 };
                 if let Some(command) = target {
                     scroll_axis(&keyboard_handle, axis, command);
-                    cx.notify(window.current_view());
+                    keyboard_notify(cx);
                     cx.stop_propagation();
                 }
             })
-            .on_a11y_action(Action::Increment, move |_, window, cx| {
+            .on_a11y_action(Action::Increment, move |_, _, cx| {
                 scroll_axis(&increment, axis, ScrollCommand::By(px(40.)));
-                cx.notify(window.current_view());
+                increment_notify(cx);
             })
-            .on_a11y_action(Action::Decrement, move |_, window, cx| {
+            .on_a11y_action(Action::Decrement, move |_, _, cx| {
                 scroll_axis(&decrement, axis, ScrollCommand::By(-px(40.)));
-                cx.notify(window.current_view());
+                decrement_notify(cx);
             })
-            .on_a11y_action(Action::SetValue, move |data, window, cx| {
+            .on_a11y_action(Action::SetValue, move |data, _, cx| {
                 let value = match data {
                     Some(ActionData::NumericValue(value)) => Some(*value),
                     Some(ActionData::Value(value)) => value.parse::<f64>().ok(),
@@ -452,7 +480,7 @@ impl AxisControl {
                         axis,
                         ScrollCommand::To(px(value.clamp(0., max) as f32)),
                     );
-                    cx.notify(window.current_view());
+                    set_value_notify(cx);
                 }
             });
         Self {
@@ -460,6 +488,7 @@ impl AxisControl {
             handle: handle.clone(),
             axis,
             label,
+            view,
         }
     }
 }
@@ -557,6 +586,7 @@ impl Element for AxisControl {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        self.view.set(Some(window.current_view()));
         self.inner
             .prepaint(id, inspector, bounds, layout, window, cx)
     }
@@ -898,47 +928,53 @@ mod tests {
         assert!(outer.offset().y < px(0.));
     }
 
-    struct NativeNested {
+    struct TextAreaInPage {
         outer: ScrollHandle,
-        inner: ScrollHandle,
+        text: gpui::Entity<crate::field::TextareaState>,
     }
 
-    impl Render for NativeNested {
+    impl Render for TextAreaInPage {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             Scrollable::new(
-                "outer",
+                "page",
                 div()
                     .flex()
                     .flex_col()
-                    .size(px(100.))
-                    .child(
-                        div()
-                            .id("native-inner")
-                            .size(px(80.))
-                            .overflow_y_scroll()
-                            .track_scroll(&self.inner)
-                            .child(div().h(px(300.)).flex_none()),
-                    )
-                    .child(div().h(px(300.)).flex_none()),
+                    .w(px(200.))
+                    .child(crate::field::TextArea::new(&self.text))
+                    .child(div().h(px(600.)).flex_none()),
                 &self.outer,
                 ScrollbarAxis::Vertical,
             )
+            .h(px(200.))
         }
     }
 
+    /// 设置页里内容装不下的多行输入框：滚轮滚它自己，页面不动。
     #[gpui::test]
-    fn native_nested_scroller_must_receive_wheel_before_wrapper(cx: &mut TestAppContext) {
+    fn text_area_inside_takes_the_wheel_before_the_page(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            crate::init(cx);
+        });
         let outer = ScrollHandle::default();
-        let inner = ScrollHandle::default();
-        let (_, cx) = cx.add_window_view({
+        let (view, cx) = cx.add_window_view({
             let outer = outer.clone();
-            let inner = inner.clone();
-            move |_, _| NativeNested { outer, inner }
+            move |window, cx| TextAreaInPage {
+                outer,
+                text: gpui::AppContext::new(cx, |cx| {
+                    crate::field::TextareaState::new(window, cx)
+                        .auto_grow(1, 3)
+                        .default_value((1..=40).map(|n| format!("line {n}\n")).collect::<String>())
+                }),
+            }
         });
         draw(cx);
-        wheel(cx, 30., 30., ScrollDelta::Pixels(point(px(0.), px(-40.))));
-        assert!(inner.offset().y < px(0.));
-        assert_eq!(outer.offset().y, px(0.));
+        draw(cx);
+        wheel(cx, 40., 20., ScrollDelta::Pixels(point(px(0.), px(-30.))));
+        let text = cx.update(|_, cx| view.read(cx).text.read(cx).scroll_offset());
+        assert!(text.y < px(0.), "the text area must scroll, got {text:?}");
+        assert_eq!(outer.offset().y, px(0.), "the page must stay");
     }
 
     #[gpui::test]

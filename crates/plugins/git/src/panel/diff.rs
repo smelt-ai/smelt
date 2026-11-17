@@ -1,4 +1,5 @@
-//! 变更栏正文用 gpui-component 的 Diff。日志页的单文件提交 diff 也用它，见 `git_log_view`。
+//! 变更栏正文用 smelt-ui 的差异视图（`ui::diff::Diff`）。日志页的单文件提交 diff 也用它，
+//! 见 `git_log_view`。
 //!
 //! 文件列表、暂存范围、丢弃确认留在面板里。块操作没有 hunk 头槽位，
 //! 挂在该块第一行的注释下面。当前文件名由 Diff 钉在视口顶上。
@@ -10,7 +11,7 @@
 use std::rc::Rc;
 
 use super::*;
-use gpui_component::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide};
+use smelt_plugin_api::ui::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide};
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 块操作挂在哪一行。优先新文件侧的行号，纯删除才退回旧文件侧。
@@ -67,7 +68,7 @@ pub(crate) fn diff_feedback_text(
 /// 删除文件的展示路径是旧路径，重命名则是新路径。状态栏点的是 porcelain 路径，
 /// 可能是其中任意一侧。对不上就返回 `None`，调用方不要拿标题行的文本去滚。
 pub(crate) fn diff_scroll_target<'a>(
-    files: &'a [gpui_component::diff::DiffFile],
+    files: &'a [smelt_plugin_api::ui::diff::DiffFile],
     requested: &str,
 ) -> Option<&'a str> {
     files.iter().find_map(|file| {
@@ -85,7 +86,7 @@ pub(crate) fn diff_scroll_target<'a>(
 
 /// 画工具条和批注需要的那一份快照。行和块是 `Rc`，装补丁时克隆指针即可。
 struct DiffChrome {
-    view: Entity<gpui_component::diff::DiffState>,
+    view: Entity<smelt_plugin_api::ui::diff::DiffState>,
     name: String,
     aggregate: bool,
     root: ProjectRef,
@@ -474,7 +475,7 @@ fn diff_annotations(
 }
 
 fn diff_header_suffix(
-    file: &gpui_component::diff::DiffFile,
+    file: &smelt_plugin_api::ui::diff::DiffFile,
     ops: HunkOps,
     stage_path: Option<String>,
     root: &ProjectRef,

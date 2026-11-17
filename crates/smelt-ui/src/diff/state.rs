@@ -17,9 +17,7 @@ use super::{
     DiffAnnotation, DiffConflictResolution, DiffFile, DiffFileStatus, DiffInlineUnit,
     DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
     conflict::ConflictPart,
-    presentation::{
-        DiffSyntaxHighlighter, FilePresentation, PresentationOptions,
-    },
+    presentation::{DiffSyntaxHighlighter, FilePresentation, PresentationOptions},
     selection::SelectionGeometry,
 };
 

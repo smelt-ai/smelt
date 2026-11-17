@@ -11,14 +11,12 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::Theme;
 use smelt_ui::Button;
 use smelt_ui::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use smelt_ui::theme_config::ThemeMode;
 
 use crate::Workspace;
 use crate::window_backdrop::WindowMaterial;
-use smelt_model::font_config;
 
 mod appearance_page;
 mod content_view;
@@ -149,15 +147,14 @@ fn apply_requested_appearance_on(
 
 /// 把一份完整外观套到所有层并重绘。外观的真源是客户端库，内存里的全局只是它的投影。
 fn install_appearance(appearance: Appearance, cx: &mut App) {
-    font_config::set_font_family(&appearance.font_family);
+    smelt_ui::set_code_font(&appearance.font_family, cx);
     cx.set_global(appearance.clone());
     apply_named_theme(&appearance.theme_name, cx);
     cx.refresh_windows();
 }
 
-/// 按主题名装上配色。`theme_catalog::apply` 装上自绘色板，组件库的 `Theme` 由
-/// `component_theme` 跟着投影，终端等插件看着当前主题自己跟着切。
-/// 字色按外观里选的窗口材质配，所以换了材质也要重装一次。字号和字体在装完之后写回 Appearance，主题文件里的字号不覆盖用户设置。
+/// 按主题名装上配色。`theme_catalog::apply` 装上自绘色板和 gpui-base 的颜色，终端等插件
+/// 看着当前主题自己跟着切。字色按外观里选的窗口材质配，所以换了材质也要重装一次。
 /// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`。
 pub fn apply_named_theme(name: &str, cx: &mut App) {
     let appearance = cx.try_global::<Appearance>();
@@ -180,7 +177,6 @@ pub fn apply_named_theme(name: &str, cx: &mut App) {
     if !applied {
         crate::ui_theme::set_light(!requested_dark);
     }
-    sync_theme_fonts(cx);
 }
 
 /// 出厂界面字体：随 app 带的 Inter（`smelt_ui::init` 载入），空配置时用它。中文字形
@@ -195,26 +191,6 @@ pub fn resolved_ui_font_family(a: &Appearance) -> SharedString {
     } else {
         name.to_string().into()
     }
-}
-
-/// 把 Appearance 的界面字号/字体、代码字体写进 gpui-component Theme。
-/// Root 每帧用 Theme.font_size 设 rem；部件正文用 Theme.font_family；
-/// TextView 代码块用 Theme.mono_font_family。
-fn sync_theme_fonts(cx: &mut App) {
-    let (ui_font_px, ui_family) = cx
-        .try_global::<Appearance>()
-        .map(|a| (a.ui_font_px, resolved_ui_font_family(a)))
-        .unwrap_or((DEFAULT_UI_FONT_PX, DEFAULT_UI_FONT.into()));
-    if !cx.has_global::<Theme>() {
-        return;
-    }
-    // Root 每帧用 Theme.font_size 设 rem。update 结尾的 sync_base 用当前主题
-    // 重写分栏手柄和滚动条，这里不再另涂一层。
-    Theme::update(cx, |theme| {
-        theme.font_size = px(ui_font_px as f32);
-        theme.font_family = ui_family;
-        theme.mono_font_family = font_config::font_family().into();
-    });
 }
 
 /// 读取外观设置；缺失/损坏回退默认。外观归客户端，存在客户端库。
@@ -317,7 +293,6 @@ fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
     f(&mut edited);
     save_appearance(&edited);
     cx.set_global(edited);
-    sync_theme_fonts(cx);
 }
 
 /// 换窗口材质：存进外观，再按新材质重装主题（字色按材质配）。窗口上的材质由工作台在

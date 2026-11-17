@@ -36,18 +36,21 @@ use gpui_base::{ScrollableMask, Scrollbar, StyledExt as _, TestSupportExt as _, 
 
 use crate::button::Button;
 use crate::icon::{Icon, IconName};
-use theme::DiffTheme as _;
+use crate::kit::TYPE;
 use actions::*;
 use conflict::ConflictPart;
 use decoration::{Decorations, GutterMarkers};
 use presentation::FilePresentation;
 use selection::{CodeText, SelectionLayer};
 use state::{DisplayRow, FoldExpansion, LayoutKey, SelectedLines};
+use theme::DiffTheme as _;
 
-// Private: bindings serve the focused code body only.
+/// 键位只在聚焦的代码区里生效。上下文和动作名带 smelt 前缀，不和别的库的差异视图撞名。
+const KEY_CONTEXT: &str = "SmeltDiff";
+
 mod actions {
     gpui::actions!(
-        diff,
+        smelt_diff,
         [
             ScrollUp,
             ScrollDown,
@@ -65,16 +68,16 @@ mod actions {
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("up", ScrollUp, Some("Diff")),
-        KeyBinding::new("down", ScrollDown, Some("Diff")),
-        KeyBinding::new("left", ScrollLeft, Some("Diff")),
-        KeyBinding::new("right", ScrollRight, Some("Diff")),
-        KeyBinding::new("pageup", PageUp, Some("Diff")),
-        KeyBinding::new("pagedown", PageDown, Some("Diff")),
-        KeyBinding::new("home", First, Some("Diff")),
-        KeyBinding::new("end", Last, Some("Diff")),
-        KeyBinding::new("shift-up", ExtendUp, Some("Diff")),
-        KeyBinding::new("shift-down", ExtendDown, Some("Diff")),
+        KeyBinding::new("up", ScrollUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("down", ScrollDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("left", ScrollLeft, Some(KEY_CONTEXT)),
+        KeyBinding::new("right", ScrollRight, Some(KEY_CONTEXT)),
+        KeyBinding::new("pageup", PageUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("pagedown", PageDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("home", First, Some(KEY_CONTEXT)),
+        KeyBinding::new("end", Last, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-up", ExtendUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-down", ExtendDown, Some(KEY_CONTEXT)),
         KeyBinding::new(
             if cx.platform_info().is_mac() {
                 "cmd-c"
@@ -82,7 +85,7 @@ pub(crate) fn init(cx: &mut App) {
                 "ctrl-c"
             },
             Copy,
-            Some("Diff"),
+            Some(KEY_CONTEXT),
         ),
         KeyBinding::new(
             if cx.platform_info().is_mac() {
@@ -91,7 +94,7 @@ pub(crate) fn init(cx: &mut App) {
                 "ctrl-a"
             },
             SelectAll,
-            Some("Diff"),
+            Some(KEY_CONTEXT),
         ),
     ]);
 }
@@ -414,51 +417,6 @@ impl Diff {
         self.header.suffix = Some(file_renderer(render));
         self
     }
-    /// Compatibility alias for [`Self::render_annotation`].
-    pub fn annotation_content<F, E>(self, render: F) -> Self
-    where
-        F: Fn(&DiffAnnotation, &mut Window, &mut App) -> E + 'static,
-        E: IntoElement,
-    {
-        self.render_annotation(render)
-    }
-
-    /// Compatibility alias for [`Self::render_header`].
-    pub fn header<F, E>(self, render: F) -> Self
-    where
-        F: Fn(&DiffFile, &mut Window, &mut App) -> E + 'static,
-        E: IntoElement,
-    {
-        self.render_header(render)
-    }
-
-    /// Compatibility alias for [`Self::render_header_prefix`].
-    pub fn header_prefix<F, E>(self, render: F) -> Self
-    where
-        F: Fn(&DiffFile, &mut Window, &mut App) -> E + 'static,
-        E: IntoElement,
-    {
-        self.render_header_prefix(render)
-    }
-
-    /// Compatibility alias for [`Self::render_header_title_suffix`].
-    pub fn header_title_suffix<F, E>(self, render: F) -> Self
-    where
-        F: Fn(&DiffFile, &mut Window, &mut App) -> E + 'static,
-        E: IntoElement,
-    {
-        self.render_header_title_suffix(render)
-    }
-
-    /// Compatibility alias for [`Self::render_header_suffix`].
-    pub fn header_suffix<F, E>(self, render: F) -> Self
-    where
-        F: Fn(&DiffFile, &mut Window, &mut App) -> E + 'static,
-        E: IntoElement,
-    {
-        self.render_header_suffix(render)
-    }
-
     /// Shows an add button beside the hovered line and at the end of the
     /// selected lines. The handler receives the selected range when the line
     /// is part of it, or that line alone.
@@ -508,7 +466,8 @@ fn render_diff(
     state.set_window(window.window_handle().window_id());
     state.ensure_presentation(cx);
     let rem = window.rem_size();
-    let font_size = rem * (f32::from(cx.theme().mono_font_size) / 16.);
+    // 字阶按界面字号 16 定，跟着界面字号缩放，和代码编辑器一样大。
+    let font_size = rem * (TYPE.mono.size / 16.);
     let font_family = cx.theme().mono_font_family.clone();
     let row_height = font_size * 1.6;
     let digits = state
@@ -780,7 +739,7 @@ fn render_diff(
         )
         .test_support()
         .track_focus(&state.focus_handle(cx))
-        .key_context("Diff")
+        .key_context(KEY_CONTEXT)
         .role(gpui::accesskit::Role::Document)
         .aria_label(label);
     v_flex()
@@ -1056,14 +1015,11 @@ fn render_fold(
     let expand = |id: (&'static str, usize), expansion: FoldExpansion| {
         let state = code.state.clone();
         let pairs = pairs.clone();
-        Button::new(id)
-            .quiet()
-            .small()
-            .on_click(move |_, _, cx| {
-                state.update(cx, |state, cx| {
-                    state.expand_fold(file, pairs.clone(), expansion, cx)
-                })
+        Button::new(id).quiet().small().on_click(move |_, _, cx| {
+            state.update(cx, |state, cx| {
+                state.expand_fold(file, pairs.clone(), expansion, cx)
             })
+        })
     };
     h_flex()
         .w_full()
@@ -1139,11 +1095,7 @@ fn render_conflict(
         return row
             .bg(cx.theme().muted.opacity(0.35))
             .child(label.to_string())
-            .child(choose(
-                "undo-resolution",
-                "撤销".to_string(),
-                None,
-            ))
+            .child(choose("undo-resolution", "撤销".to_string(), None))
             .into_any_element();
     }
     let title = match part {
@@ -1279,13 +1231,11 @@ fn render_file_header(
                         } else {
                             IconName::ChevronDown
                         })
-                        .accessibility_label(
-                            if collapsed {
-                                format!("展开 {name}")
-                            } else {
-                                format!("收起 {name}")
-                            },
-                        )
+                        .accessibility_label(if collapsed {
+                            format!("展开 {name}")
+                        } else {
+                            format!("收起 {name}")
+                        })
                         .on_click(move |_, _, cx| {
                             state.update(cx, |state, cx| state.toggle_file_collapsed(file, cx))
                         }),
@@ -1383,9 +1333,7 @@ fn render_gutter(
                     .text_color(cx.theme().muted_foreground)
                     .hover(|this| this.text_color(cx.theme().foreground))
                     .role(gpui::accesskit::Role::Button)
-                    .aria_label(
-                        format!("选中{}第 {} 行", side_label(side), position.line()),
-                    )
+                    .aria_label(format!("选中{}第 {} 行", side_label(side), position.line()))
                     .child(position.line().to_string())
                     .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                         down.update(cx, |state, cx| {

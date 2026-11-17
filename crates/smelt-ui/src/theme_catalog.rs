@@ -358,6 +358,7 @@ pub fn apply(name: &str, cx: &mut App) -> bool {
     // 毛玻璃时字压在材质上，不是压在主题底色上，字色按材质配够对比。
     ui_theme::fit_text_to_backdrop(&mut colors, dark);
     ui_theme::install_theme(&colors, config.elevation().clone(), dark);
+    crate::base_theme::install(&colors, dark, cx);
     let syntax: SharedHighlightStyleResolver = Arc::new(SyntaxPalette::new(syntax_styles(&config)));
     crate::syntax::install_code_block_highlighter(syntax.clone());
     cx.set_global(ActiveTheme {

@@ -5,6 +5,7 @@
 pub mod acp_completion;
 pub mod alert;
 pub mod badge;
+mod base_theme;
 pub mod button;
 pub mod chart;
 pub mod choice;
@@ -13,6 +14,7 @@ pub mod code_editor;
 pub mod combobox;
 pub mod command_palette;
 pub mod dialog;
+pub mod diff;
 pub mod divider;
 pub mod dock;
 pub mod field;
@@ -52,6 +54,7 @@ pub mod window_bar;
 
 pub use alert::Alert;
 pub use badge::Badge;
+pub use base_theme::set_code_font;
 pub use button::Button;
 pub use choice::{Checkbox, Radio};
 pub use clipboard::Clipboard;
@@ -72,9 +75,8 @@ pub use select::Select;
 pub use settings::{SettingsPage, SettingsRow, SettingsSection};
 pub use switch::Switch;
 
-/// 装上本库的全局件：界面字体 Inter、菜单、下拉和可搜索列表的键位、窗口对话框层、编辑器的
-/// 语言服务（见 [`syntax`]）。应用启动时、
-/// `gpui_base::init`（组件库的 `init` 会调它）之后、开窗口之前调一次。
+/// 装上本库的全局件：界面字体 Inter、菜单、下拉、可搜索列表和差异视图的键位、窗口对话框层、
+/// 编辑器的语言服务（见 [`syntax`]）。应用启动时、`gpui_base::init` 之后、开窗口之前调一次。
 pub fn init(cx: &mut gpui::App) {
     // 字体随二进制编进来，载不进是构建出了错，不是运行时能恢复的情况。
     cx.text_system()
@@ -83,6 +85,7 @@ pub fn init(cx: &mut gpui::App) {
     menu::init(cx);
     combobox::init(cx);
     dialog::init(cx);
+    diff::init(cx);
     syntax::editing::init(cx);
 }
 

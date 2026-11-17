@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use super::*;
+use smelt_model::font_config;
 use smelt_plugin_api::HostEvent;
 use smelt_ui::kit::{TYPE, TypeStyled as _};
 use smelt_ui::theme_catalog::ThemeSwatch;
@@ -161,7 +162,7 @@ impl AppearancePage {
                         .selected(Some(SharedString::from(current)))
                         .on_change(|name: &SharedString, _, cx| {
                             let name = name.trim().to_string();
-                            font_config::set_font_family(&name);
+                            smelt_ui::set_code_font(&name, cx);
                             apply_appearance(move |a| a.font_family = name, cx);
                             cx.refresh_windows();
                         }),
