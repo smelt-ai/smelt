@@ -218,6 +218,57 @@ pub struct WorkspaceWorksetRenameParams {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorksetFinishParams {
     pub workset_id: String,
+    /// 判断不了分支是否已合并（合进基线有冲突）的仓库也照关。有未提交改动、确实没合并的
+    /// 仍然拦下。用户在确认框里看过 [`WorkspaceWorksetInspectResult`] 再决定。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_unconfirmed_merge: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetInspectParams {
+    pub workset_id: String,
+}
+
+/// 工作树分支上的改动进没进基线。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceWorksetMerge {
+    Merged,
+    /// 确实还有改动没进基线。
+    Unmerged,
+    /// 判断不了：合进基线有冲突，常见于 squash 合并之后基线又改过同一处。
+    Unconfirmed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetRepositoryState {
+    pub name: String,
+    /// 有未提交的改动或未跟踪的文件。
+    pub dirty: bool,
+    /// 本地还有工作树分支时它的合并情况；分支已经不在了是空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<WorkspaceWorksetMerge>,
+}
+
+/// 关闭工作树前的检查：先 fetch 各仓库的基线，再看每个仓库干不干净、分支合没合进去。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetInspectResult {
+    pub repositories: Vec<WorkspaceWorksetRepositoryState>,
+    /// fetch 失败的说明；这时合并情况按本地已有的远端分支算。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refresh_failures: Vec<String>,
+}
+
+impl WorkspaceWorksetInspectResult {
+    /// 每个仓库都干净、分支都已合并（或已经不在），可以直接关。
+    pub fn ready_to_finish(&self) -> bool {
+        self.repositories.iter().all(|repository| {
+            !repository.dirty
+                && repository
+                    .merge
+                    .is_none_or(|merge| merge == WorkspaceWorksetMerge::Merged)
+        })
+    }
 }
 
 /// 新建工作树的回执。目录版本平铺在顶层，和以前只回 `WorkspaceRevision` 时同一个形状。

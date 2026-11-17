@@ -36,6 +36,7 @@ use smelt_plugin_api::{self as api, RuntimeKey};
 use crate::model::{
     self, ConversationKey, Fold, Pin, Placement, Sessions, SidebarGrouping, SidebarUi,
 };
+use crate::worksets::{MergeSummary, WorksetCheck, WorksetKey};
 
 pub(crate) use group::Bucket;
 pub(crate) use view::build_view;
@@ -131,6 +132,11 @@ struct WorksetGroup {
     collapsed: bool,
     status: AgentStatus,
     sessions: Vec<SessionRow>,
+    /// 各仓库：名字和 worktree 目录（「创建 PR」按仓库开）。
+    repositories: Vec<(String, String)>,
+    /// 上一次问到的合并情况；正在问时为真。
+    merge: MergeSummary,
+    checking: bool,
 }
 
 /// 一行会话。
@@ -239,6 +245,7 @@ impl Sidebar {
                     unavailable: section.link.unavailable,
                     remote_name: (!matches!(machine.key, RuntimeKey::Local))
                         .then(|| machine.name.clone()),
+                    checks: &sessions.workset_checks,
                 };
                 fill_machine(&mut section, &input, &sessions.ui, &mut agent_rows);
                 section.buckets = bucket_groups(&section.key, &section.projects, &sessions.ui, now);
@@ -357,6 +364,8 @@ struct MachineInput<'a> {
     unavailable: Option<&'static str>,
     /// 远程机器的名字（「对话」一段里的会话要标出是哪台机器的）。
     remote_name: Option<String>,
+    /// 各棵工作树上一次问到的合并情况。
+    checks: &'a HashMap<WorksetKey, WorksetCheck>,
 }
 
 /// 把一台机器的目录摆成项目组；跟智能体的对话放进 `agent_rows`（「对话」一段）。
@@ -466,18 +475,31 @@ fn project_group(
                 .iter()
                 .map(|repository| repository.name.as_str())
                 .collect();
+            let check = input.checks.get(&WorksetKey {
+                machine: machine.clone(),
+                id: workset.id.clone(),
+            });
+            let merge_lines = match check.and_then(|check| check.last.as_ref()) {
+                Some((_, Ok(result))) => crate::worksets::describe(result),
+                Some((_, Err(error))) => vec![format!("检查合并状态失败：{error}")],
+                None => Vec::new(),
+            };
+            let mut tooltip = format!(
+                "工作树：{}\n分支：{}\n仓库：{}",
+                workset.task,
+                workset.branch,
+                repositories.join("、")
+            );
+            for line in &merge_lines {
+                tooltip.push('\n');
+                tooltip.push_str(line);
+            }
             WorksetGroup {
                 machine: machine.clone(),
                 id: workset.id.clone(),
                 task: workset.task.clone().into(),
                 path: workset.task_root(input.style),
-                tooltip: format!(
-                    "工作树：{}\n分支：{}\n仓库：{}",
-                    workset.task,
-                    workset.branch,
-                    repositories.join("、")
-                )
-                .into(),
+                tooltip: tooltip.into(),
                 pinned: ui.is_pinned(&Pin::Workset {
                     machine: machine.clone(),
                     id: workset.id.clone(),
@@ -488,6 +510,13 @@ fn project_group(
                 }),
                 status: AgentStatus::highest(sessions.iter().map(|row| row.status)),
                 sessions,
+                repositories: workset
+                    .repositories
+                    .iter()
+                    .map(|repository| (repository.name.clone(), repository.worktree.clone()))
+                    .collect(),
+                merge: MergeSummary::of(check),
+                checking: check.is_some_and(|check| check.running),
             }
         })
         .collect();
@@ -903,6 +932,9 @@ mod tests {
             collapsed: false,
             status: AgentStatus::Idle,
             sessions,
+            repositories: Vec::new(),
+            merge: MergeSummary::Unknown,
+            checking: false,
         })
     }
 

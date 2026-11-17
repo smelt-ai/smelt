@@ -308,6 +308,7 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
         &temp.store,
         smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
             workset_id: "workset-1".into(),
+            ..Default::default()
         },
         &event_hub,
     )
@@ -332,6 +333,7 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
         &temp.store,
         smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
             workset_id: "workset-1".into(),
+            ..Default::default()
         },
         &event_hub,
     )
@@ -448,6 +450,7 @@ fn restoring_closed_workset_archive_rebinds_to_selected_workset() {
         &temp.store,
         smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
             workset_id: "old".into(),
+            ..Default::default()
         },
         &event_hub,
     )

@@ -5,7 +5,8 @@ use smelt_core::{
     workspace_directory::{
         WorkspaceDirectory, WorkspaceRevision, WorkspaceWorkset, WorkspaceWorksetCreateParams,
         WorkspaceWorksetCreateResult, WorkspaceWorksetFinishParams, WorkspaceWorksetFinishResult,
-        WorkspaceWorksetRenameParams,
+        WorkspaceWorksetInspectParams, WorkspaceWorksetInspectResult, WorkspaceWorksetMerge,
+        WorkspaceWorksetRenameParams, WorkspaceWorksetRepositoryState,
     },
 };
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
@@ -367,6 +368,39 @@ pub(crate) fn rename(
     }
 }
 
+/// 关闭前的只读检查。fetch 走网络，只占工作树操作锁，不拿目录锁。
+pub(crate) fn inspect(
+    store: &smelt_store::Store,
+    params: WorkspaceWorksetInspectParams,
+) -> Result<WorkspaceWorksetInspectResult, ControlError> {
+    let _worksets = lock_worksets();
+    let directory = workspace_catalog::directory_on(store).map_err(directory_error)?;
+    let workset = directory
+        .worksets
+        .iter()
+        .find(|workset| workset.id == params.workset_id)
+        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "工作树不存在"))?;
+    let workset = git_workset(workset);
+    let refresh_failures = smelt_git::worktree::refresh_workset_bases(&workset);
+    let repositories = smelt_git::worktree::inspect_workset(&workset)
+        .map_err(worktree_error)?
+        .into_iter()
+        .map(|state| WorkspaceWorksetRepositoryState {
+            name: state.name,
+            dirty: state.dirty,
+            merge: state.merge.map(|merge| match merge {
+                smelt_git::worktree::MergeState::Merged => WorkspaceWorksetMerge::Merged,
+                smelt_git::worktree::MergeState::Unmerged => WorkspaceWorksetMerge::Unmerged,
+                smelt_git::worktree::MergeState::Unconfirmed => WorkspaceWorksetMerge::Unconfirmed,
+            }),
+        })
+        .collect();
+    Ok(WorkspaceWorksetInspectResult {
+        repositories,
+        refresh_failures,
+    })
+}
+
 pub(crate) fn finish(
     store: &smelt_store::Store,
     params: WorkspaceWorksetFinishParams,
@@ -382,17 +416,19 @@ pub(crate) fn finish(
     let _guard = workspace_catalog::lock_catalog();
     let directory = workspace_catalog::directory_on_locked(store).map_err(directory_error)?;
     let workset = closable_workset(&directory, &params.workset_id)?;
-    let report = smelt_git::worktree::finish_workset(&git_workset(workset)).map_err(|error| {
-        let mut error = worktree_error(error);
-        if !refresh_failures.is_empty() {
-            error.message = format!(
-                "{}\n没能刷新远端，按本地已有的远端分支判断：\n{}",
-                error.message,
-                refresh_failures.join("\n")
-            );
-        }
-        error
-    })?;
+    let report =
+        smelt_git::worktree::finish_workset(&git_workset(workset), params.allow_unconfirmed_merge)
+            .map_err(|error| {
+                let mut error = worktree_error(error);
+                if !refresh_failures.is_empty() {
+                    error.message = format!(
+                        "{}\n没能刷新远端，按本地已有的远端分支判断：\n{}",
+                        error.message,
+                        refresh_failures.join("\n")
+                    );
+                }
+                error
+            })?;
     let change =
         workspace_catalog::delete_workset_on_locked(store, &workset.id).map_err(|error| {
             ControlError::new(

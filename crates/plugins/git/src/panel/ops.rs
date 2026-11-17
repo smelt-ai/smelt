@@ -1979,7 +1979,7 @@ fn stash_pop(client: &RuntimeClient, root: &ProjectRef) -> Result<(), String> {
 }
 
 /// 运行时回来的仓库信息 → 新建 PR 页的链接，或者给用户看的原因。
-pub(super) fn pull_request_link(info: Result<GitRepoInfoResult, String>) -> Result<String, String> {
+pub(crate) fn pull_request_link(info: Result<GitRepoInfoResult, String>) -> Result<String, String> {
     let info = info?.info.ok_or("不是 Git 仓库")?;
     let head = info
         .upstream_branch

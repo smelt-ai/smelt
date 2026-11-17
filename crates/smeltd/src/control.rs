@@ -945,6 +945,19 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::WorkspaceWorksetInspect => {
+            let params: smelt_core::workspace_directory::WorkspaceWorksetInspectParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::workspace_directory::default_store()
+                .and_then(|store| super::workset_control::inspect(&store, params))
+            {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         ControlMethod::WorkspaceWorksetFinish => {
             let params: smelt_core::workspace_directory::WorkspaceWorksetFinishParams =
                 match params_or_error(control_version, &request_id, params) {

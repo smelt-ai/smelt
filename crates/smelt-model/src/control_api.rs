@@ -1004,6 +1004,9 @@ pi_calls! {
     /// 重命名工作树并移动 worktree，保留原分支。
     WorkspaceWorksetRename => WorkspaceWorksetRename(crate::workspace_directory::WorkspaceWorksetRenameParams)
         -> crate::workspace_directory::WorkspaceRevision;
+    /// 关闭工作树前的只读检查：fetch 基线后看各仓库干不干净、分支合没合进去。
+    WorkspaceWorksetInspect => WorkspaceWorksetInspect(crate::workspace_directory::WorkspaceWorksetInspectParams)
+        -> crate::workspace_directory::WorkspaceWorksetInspectResult;
     /// 安全收工并删除工作集记录。
     WorkspaceWorksetFinish => WorkspaceWorksetFinish(crate::workspace_directory::WorkspaceWorksetFinishParams)
         -> crate::workspace_directory::WorkspaceWorksetFinishResult;

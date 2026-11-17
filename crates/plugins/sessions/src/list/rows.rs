@@ -33,6 +33,7 @@ use super::{
 };
 use crate::lifecycle;
 use crate::model::{ConversationKey, Fold, Selection, Sessions, SidebarGrouping};
+use crate::worksets::MergeSummary;
 use crate::{contract, dialogs};
 
 /// 每缩一级多少。
@@ -633,6 +634,28 @@ fn workset_row(
         .child(title)
         .when(collapsed, |row| {
             row.child(collapsed_summary(workset.status, workset.sessions.len(), false))
+        })
+        // 分支都合进基线了：一直露着一个「关闭工作树」，合完 PR 回来点一下就收。关之前照样
+        // 再查一次、确认一次。
+        .when(workset.merge == MergeSummary::Merged, |row| {
+            let (machine, id, task) = (machine.clone(), workset_id.clone(), workset.task.clone());
+            row.child(
+                Button::new(eid(format!("workset-merged:{id}")))
+                    .quiet()
+                    .small()
+                    .icon(IconName::CircleCheck)
+                    .icon_action("分支都已合并，关闭工作树")
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        actions::finish_workset(
+                            machine.clone(),
+                            id.clone(),
+                            task.clone(),
+                            window,
+                            cx,
+                        )
+                    }),
+            )
         })
         .child(
             hover_only("group-row").child({

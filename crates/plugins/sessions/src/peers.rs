@@ -152,6 +152,25 @@ pub(crate) mod agents {
     }
 }
 
+/// 变更（来源 `smelt.git`）的约定，权威定义在 `crates/plugins/git/src/contract.rs`。
+pub(crate) mod git {
+    use serde::Serialize;
+    use smelt_plugin_api::{Command, RuntimeKey, machine_json};
+
+    // 约定：smelt.git 的 OPEN_PULL_REQUEST。
+    /// 在浏览器里打开那个仓库当前分支的新建 PR 页。开不了时命令失败，原因给人看。
+    pub(crate) const OPEN_PULL_REQUEST: Command<OpenPullRequest, ()> =
+        Command::new("smelt.git/open-pull-request");
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+    pub(crate) struct OpenPullRequest {
+        #[serde(with = "machine_json")]
+        pub machine: RuntimeKey,
+        /// 仓库根目录：工作树里就是那个仓库的 worktree 目录。
+        pub root: String,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

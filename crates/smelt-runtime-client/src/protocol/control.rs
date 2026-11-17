@@ -139,6 +139,7 @@ define_control_methods! {
     WorkspaceProjectRepositoryAction => (WORKSPACE_PROJECT_REPOSITORY_ACTION_METHOD, "workspace.project.repository.action"),
     WorkspaceWorksetCreate => (WORKSPACE_WORKSET_CREATE_METHOD, "workspace.workset.create_with_branch"),
     WorkspaceWorksetRename => (WORKSPACE_WORKSET_RENAME_METHOD, "workspace.workset.rename_preserving_branch"),
+    WorkspaceWorksetInspect => (WORKSPACE_WORKSET_INSPECT_METHOD, "workspace.workset.inspect"),
     WorkspaceWorksetFinish => (WORKSPACE_WORKSET_FINISH_METHOD, "workspace.workset.finish"),
     WorkspaceDirectoryGet => (WORKSPACE_DIRECTORY_GET_METHOD, "workspace.directory"),
     WorkspaceRename => (WORKSPACE_RENAME_METHOD, "workspace.rename"),

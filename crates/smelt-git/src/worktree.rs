@@ -283,11 +283,36 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
     })
 }
 
-pub fn finish_workset(workset: &Workset) -> Result<FinishReport, WorktreeError> {
-    let mut already_removed = HashSet::new();
+/// 分支上的改动进没进基线。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeState {
+    Merged,
+    /// 确实还有改动没进基线。
+    Unmerged,
+    /// 判断不了：把分支合进基线有冲突。常见于 squash 合并之后基线又改过同一处。
+    Unconfirmed,
+}
+
+/// 工作树里一个仓库现在的样子：关闭前要看的几项。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryState {
+    pub name: String,
+    /// worktree 目录还在（上次关闭做了一半时可能已经移除）。
+    pub present: bool,
+    /// 有未提交的改动或未跟踪的文件。
+    pub dirty: bool,
+    /// 本地还有工作树分支时它的合并情况；分支已经不在了是 `None`。
+    pub merge: Option<MergeState>,
+}
+
+/// 只读检查工作树的各个仓库：目录在不在、干不干净、分支合没合进基线。目录和 Git 登记对
+/// 不上这类关不了也不该硬关的情况直接报错。基线用本地已有的远端引用，要最新的先调
+/// [`refresh_workset_bases`]。
+pub fn inspect_workset(workset: &Workset) -> Result<Vec<RepositoryState>, WorktreeError> {
+    let mut states = Vec::with_capacity(workset.repositories.len());
     for repository in &workset.repositories {
         let registered_path = checked_out_at(&repository.root, &workset.branch)?;
-        let exists = match registered_path {
+        let present = match registered_path {
             Some(path) if path == repository.worktree && repository.worktree.exists() => true,
             Some(path) if path == repository.worktree => {
                 return Err(WorktreeError::new(format!(
@@ -311,20 +336,9 @@ pub fn finish_workset(workset: &Workset) -> Result<FinishReport, WorktreeError> 
                     repository.worktree.display()
                 )));
             }
-            None => {
-                already_removed.insert(repository.worktree.clone());
-                false
-            }
+            None => false,
         };
-        if !exists {
-            if repository.branch_created && local_branch_exists(&repository.root, &workset.branch)?
-            {
-                // A previous attempt may have removed the worktree but failed before deleting
-                // its branch. The branch is checked below and removed after every repo passes.
-            } else {
-                continue;
-            }
-        } else {
+        let dirty = present && {
             let status = git_output(
                 &repository.worktree,
                 &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -339,40 +353,82 @@ pub fn finish_workset(workset: &Workset) -> Result<FinishReport, WorktreeError> 
                     git_error(&status, "git status 失败")
                 )));
             }
-            if !status.stdout.is_empty() {
-                return Err(WorktreeError::new(format!(
-                    "仓库 {} 有未提交改动或未跟踪文件，已阻止关闭工作树",
-                    repository.name
-                )));
-            }
-        }
-
-        if local_branch_exists(&repository.root, &workset.branch)? {
-            let merged = merged_into_base(&repository.root, &workset.branch, &repository.base_ref)
-                .map_err(|error| {
-                    WorktreeError::new(format!(
-                        "检查仓库 {} 的分支合并状态失败：{error}",
-                        repository.name
-                    ))
-                })?;
-            if !merged {
-                return Err(WorktreeError::new(format!(
-                    "仓库 {} 的分支 {} 还有改动没进 {}，已阻止关闭工作树",
-                    repository.name,
-                    workset.branch,
-                    repository
-                        .base_ref
-                        .strip_prefix("refs/remotes/")
-                        .unwrap_or(&repository.base_ref)
-                )));
-            }
-        } else if repository.branch_created {
+            !status.stdout.is_empty()
+        };
+        // 目录已经移除、分支也不是这次建的（上次关闭只做了一半，或者复用的分支已被删掉）：
+        // 这个仓库没什么要查的了。
+        let branch_exists = local_branch_exists(&repository.root, &workset.branch)?;
+        let merge = if branch_exists && (present || repository.branch_created) {
+            Some(
+                merged_into_base(&repository.root, &workset.branch, &repository.base_ref).map_err(
+                    |error| {
+                        WorktreeError::new(format!(
+                            "检查仓库 {} 的分支合并状态失败：{error}",
+                            repository.name
+                        ))
+                    },
+                )?,
+            )
+        } else if !branch_exists && repository.branch_created && present {
             return Err(WorktreeError::new(format!(
                 "仓库 {} 的工作树分支 {} 不存在",
                 repository.name, workset.branch
             )));
+        } else {
+            None
+        };
+        states.push(RepositoryState {
+            name: repository.name.clone(),
+            present,
+            dirty,
+            merge,
+        });
+    }
+    Ok(states)
+}
+
+/// 关闭工作树：每个仓库都干净、分支都合进了基线才动手，先移除全部 worktree，再删这次建的
+/// 分支。判断不了是否合并（[`MergeState::Unconfirmed`]）的，`allow_unconfirmed_merge` 为
+/// 真时也关；有未提交改动、确实没合并的一律拦下。
+pub fn finish_workset(
+    workset: &Workset,
+    allow_unconfirmed_merge: bool,
+) -> Result<FinishReport, WorktreeError> {
+    let states = inspect_workset(workset)?;
+    for (repository, state) in workset.repositories.iter().zip(&states) {
+        if state.dirty {
+            return Err(WorktreeError::new(format!(
+                "仓库 {} 有未提交改动或未跟踪文件，已阻止关闭工作树",
+                state.name
+            )));
+        }
+        let base = repository
+            .base_ref
+            .strip_prefix("refs/remotes/")
+            .unwrap_or(&repository.base_ref);
+        match state.merge {
+            Some(MergeState::Unmerged) => {
+                return Err(WorktreeError::new(format!(
+                    "仓库 {} 的分支 {} 还有改动没进 {base}，已阻止关闭工作树",
+                    state.name, workset.branch
+                )));
+            }
+            Some(MergeState::Unconfirmed) if !allow_unconfirmed_merge => {
+                return Err(WorktreeError::new(format!(
+                    "无法确认仓库 {} 的分支 {} 是否已合进 {base}（合进去有冲突），已阻止关闭工作树",
+                    state.name, workset.branch
+                )));
+            }
+            _ => {}
         }
     }
+    let already_removed: HashSet<PathBuf> = workset
+        .repositories
+        .iter()
+        .zip(&states)
+        .filter(|(_, state)| !state.present)
+        .map(|(repository, _)| repository.worktree.clone())
+        .collect();
 
     for repository in &workset.repositories {
         if !already_removed.contains(&repository.worktree) {
@@ -489,11 +545,11 @@ fn base_remote(root: &Path, base_ref: &str) -> Option<String> {
 /// 分支上的改动是否都已经进了基线。普通合并后分支是基线的祖先；squash / rebase 合并
 /// 生成的是新提交，分支不再是祖先，这时看把分支合进基线会不会改动什么：合并结果的树
 /// 等于基线的树，就说明改动都已在基线里。合并有冲突（比如合进去之后基线又改过同一处）
-/// 按没合并算，宁可拦下让人看一眼。
-fn merged_into_base(root: &Path, branch: &str, base: &str) -> Result<bool, String> {
+/// 判断不了，交给人决定。
+fn merged_into_base(root: &Path, branch: &str, base: &str) -> Result<MergeState, String> {
     let ancestor = git_output(root, &["merge-base", "--is-ancestor", branch, base])?;
     match ancestor.code {
-        Some(0) => return Ok(true),
+        Some(0) => return Ok(MergeState::Merged),
         Some(1) => {}
         _ => return Err(git_error(&ancestor, "git merge-base 失败")),
     }
@@ -503,7 +559,7 @@ fn merged_into_base(root: &Path, branch: &str, base: &str) -> Result<bool, Strin
     )?;
     match merged.code {
         Some(0) => {}
-        Some(1) => return Ok(false),
+        Some(1) => return Ok(MergeState::Unconfirmed),
         _ => return Err(git_error(&merged, "git merge-tree 失败")),
     }
     let base_tree = git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])?;
@@ -511,7 +567,13 @@ fn merged_into_base(root: &Path, branch: &str, base: &str) -> Result<bool, Strin
         return Err(git_error(&base_tree, "git rev-parse 失败"));
     }
     let merged_tree = merged.stdout_str();
-    Ok(merged_tree.lines().next().map(str::trim) == Some(base_tree.stdout_str().trim()))
+    Ok(
+        if merged_tree.lines().next().map(str::trim) == Some(base_tree.stdout_str().trim()) {
+            MergeState::Merged
+        } else {
+            MergeState::Unmerged
+        },
+    )
 }
 
 pub fn abort_workset_creation(workset: &Workset) -> Result<(), WorktreeError> {

@@ -36,6 +36,7 @@ use crate::list::{Bucket, Sidebar};
 use crate::peers::conversation::ConversationStart;
 use crate::session_view::Pane;
 use crate::store::SessionsStore;
+use crate::worksets::{WorksetCheck, WorksetKey};
 
 /// 一段会话：哪台机器的工作区目录里的哪条对话。对话 id 是 uuid，跨机器实际不会撞，但
 /// 机器是会话身份的一部分（库里的行、选中、跳转都带着），不靠「不会撞」省掉它。
@@ -70,6 +71,9 @@ pub(crate) struct Sessions {
     pub(crate) agent_names: HashMap<RuntimeKey, HashMap<String, String>>,
     /// 生命周期（S3）自己的状态：订阅、看过哪些机器的目录、对话翻没翻在最新处等。
     pub(crate) lifecycle: lifecycle::State,
+    /// 各棵工作树上一次问到的合并情况（权威在运行时，这里只是缓存），侧栏按它画状态。只由
+    /// [`crate::worksets`] 改。
+    pub(crate) workset_checks: HashMap<WorksetKey, WorksetCheck>,
 }
 
 struct SessionsGlobal(Entity<Sessions>);
@@ -100,6 +104,7 @@ impl Sessions {
                 sidebar: Rc::default(),
                 agent_names: HashMap::new(),
                 lifecycle: lifecycle::State::default(),
+                workset_checks: HashMap::new(),
             };
             sessions.sidebar = Rc::new(Sidebar::build(&sessions, cx));
             sessions

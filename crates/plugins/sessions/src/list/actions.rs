@@ -7,13 +7,16 @@ use std::path::PathBuf;
 use gpui::{App, SharedString, Window};
 use smelt_plugin_api::model::agent_status::AgentStatus;
 use smelt_plugin_api::model::control_api::WorkspaceWorksetFinish;
-use smelt_plugin_api::model::workspace_directory::WorkspaceWorksetFinishParams;
+use smelt_plugin_api::model::workspace_directory::{
+    WorkspaceWorksetFinishParams, WorkspaceWorksetInspectResult,
+};
 use smelt_plugin_api::ui::dialog::Confirm;
 use smelt_plugin_api::{self as api, RuntimeKey};
 
 use super::{GroupKey, Sidebar, move_near, move_to_pin_boundary, splice_group};
-use crate::lifecycle;
 use crate::model::{ConversationKey, Pin, Sessions};
+use crate::worksets::{self, MergeSummary, WorksetKey};
+use crate::{lifecycle, peers};
 
 fn sidebar(cx: &App) -> std::rc::Rc<Sidebar> {
     Sessions::global(cx).read(cx).sidebar.clone()
@@ -236,8 +239,9 @@ pub(super) fn close_project(
     .open(window, cx);
 }
 
-/// 关掉工作树：运行时移除它的目录，下面的会话回到项目里。有没合进去的分支、删不掉的
-/// 文件时说一声。
+/// 关掉工作树：先问运行时各仓库的情况（会 fetch 基线），再按结果确认。都合进去了是普通的
+/// 确认；有判断不了是否已合并的，说清楚哪个仓库、让人决定要不要仍然关闭；有未提交改动、
+/// 确实没合并的直接说为什么关不了。运行时移除目录，下面的会话回到项目里。
 pub(super) fn finish_workset(
     machine: RuntimeKey,
     id: String,
@@ -245,50 +249,135 @@ pub(super) fn finish_workset(
     window: &mut Window,
     cx: &mut App,
 ) {
-    Confirm::new(
-        format!("关闭工作树「{task}」？"),
-        "关闭",
-        move |_, cx| {
-            let params = WorkspaceWorksetFinishParams {
-                workset_id: id.clone(),
-            };
-            let finished =
-                api::call::<WorkspaceWorksetFinish>(&machine, params, api::CALL_TIMEOUT, cx);
-            cx.spawn(async move |cx| match finished.await {
-                Ok(result) => {
-                    let mut notes = Vec::new();
-                    if !result.retained_branches.is_empty() {
-                        notes.push(format!(
-                            "留下了分支：{}",
-                            result.retained_branches.join("、")
-                        ));
-                    }
-                    if !result.leftover_entries.is_empty() {
-                        notes.push(format!(
-                            "这些没删掉：{}",
-                            result.leftover_entries.join("、")
-                        ));
-                    }
-                    if !notes.is_empty() {
-                        let notify = api::Notify {
-                            subtitle: "工作树已关闭".to_string(),
-                            body: notes.join("\n"),
-                            ..Default::default()
-                        };
-                        cx.update(|cx| api::NOTIFY.run(&notify, cx).detach());
-                    }
-                }
-                Err(error) => {
-                    cx.update(|cx| crate::notify_error(&format!("关闭工作树失败：{error}"), cx))
-                }
-            })
-            .detach();
+    let handle = window.window_handle();
+    let key = WorksetKey {
+        machine: machine.clone(),
+        id: id.clone(),
+    };
+    let inspected = worksets::inspect(key, cx);
+    cx.spawn(async move |cx| {
+        let inspected = inspected.await;
+        let shown = handle.update(cx, |_, window, cx| {
+            confirm_finish(machine, id, task, inspected, window, cx)
+        });
+        if shown.is_err() {
+            cx.update(|cx| crate::notify_error("关闭工作树：窗口已经关了", cx));
+        }
+    })
+    .detach();
+}
+
+fn confirm_finish(
+    machine: RuntimeKey,
+    id: String,
+    task: SharedString,
+    inspected: Result<WorkspaceWorksetInspectResult, String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    const MOVES: &str = "会移除工作树的目录；里面的会话回到项目里。";
+    // 查不了（运行时还没有这条命令、Git 登记对不上……）：照旧问一句，关的时候运行时会再查。
+    let (summary, lines) = match &inspected {
+        Ok(result) => (
+            MergeSummary::of_result(result),
+            worksets::describe(result).join("\n"),
+        ),
+        Err(_) => (MergeSummary::Unknown, String::new()),
+    };
+    let finish = move |allow_unconfirmed_merge: bool| {
+        move |_: &mut Window, cx: &mut App| {
+            finish_now(machine.clone(), id.clone(), allow_unconfirmed_merge, cx);
             true
-        },
-    )
-    .danger()
-    .description("会移除工作树的目录；里面的会话回到项目里。")
-    .open(window, cx);
+        }
+    };
+    match summary {
+        MergeSummary::Pending => {
+            crate::notify_error(&format!("工作树「{task}」还不能关闭：\n{lines}"), cx);
+        }
+        MergeSummary::Unconfirmed => {
+            Confirm::new(
+                format!("仍然关闭工作树「{task}」？"),
+                "仍然关闭",
+                finish(true),
+            )
+            .danger()
+            .description(format!(
+                "{lines}\n\n判断不了的仓库，常见于 squash 合并之后基线又改过同一处。确认改动都已经\
+                     合进去了再关：工作树建的分支会被删掉。{MOVES}"
+            ))
+            .open(window, cx);
+        }
+        MergeSummary::Merged | MergeSummary::Unknown => {
+            let description = if lines.is_empty() {
+                MOVES.to_string()
+            } else {
+                format!("{lines}\n\n{MOVES}")
+            };
+            Confirm::new(format!("关闭工作树「{task}」？"), "关闭", finish(false))
+                .danger()
+                .description(description)
+                .open(window, cx);
+        }
+    }
+}
+
+fn finish_now(machine: RuntimeKey, id: String, allow_unconfirmed_merge: bool, cx: &mut App) {
+    let params = WorkspaceWorksetFinishParams {
+        workset_id: id,
+        allow_unconfirmed_merge,
+    };
+    let finished =
+        api::call::<WorkspaceWorksetFinish>(&machine, params, worksets::WORKSET_GIT_TIMEOUT, cx);
+    cx.spawn(async move |cx| match finished.await {
+        Ok(result) => {
+            let mut notes = Vec::new();
+            if !result.retained_branches.is_empty() {
+                notes.push(format!(
+                    "留下了分支：{}",
+                    result.retained_branches.join("、")
+                ));
+            }
+            if !result.leftover_entries.is_empty() {
+                notes.push(format!(
+                    "这些没删掉：{}",
+                    result.leftover_entries.join("、")
+                ));
+            }
+            if !notes.is_empty() {
+                let notify = api::Notify {
+                    subtitle: "工作树已关闭".to_string(),
+                    body: notes.join("\n"),
+                    ..Default::default()
+                };
+                cx.update(|cx| api::NOTIFY.run(&notify, cx).detach());
+            }
+        }
+        Err(error) => cx.update(|cx| crate::notify_error(&format!("关闭工作树失败：{error}"), cx)),
+    })
+    .detach();
+}
+
+/// 菜单里的「检查合并状态」：马上问一次，结果画在工作树行上；查失败了说一声。
+pub(super) fn check_workset(key: WorksetKey, cx: &mut App) {
+    let checked = worksets::inspect(key, cx);
+    cx.spawn(async move |cx| {
+        if let Err(error) = checked.await {
+            cx.update(|cx| crate::notify_error(&format!("检查合并状态失败：{error}"), cx));
+        }
+    })
+    .detach();
+}
+
+/// 工作树里某个仓库的新建 PR 页，交给变更插件开（它认得远端是哪家托管）。
+pub(super) fn open_pull_request(machine: RuntimeKey, root: String, cx: &mut App) {
+    let opened =
+        peers::git::OPEN_PULL_REQUEST.run(&peers::git::OpenPullRequest { machine, root }, cx);
+    cx.spawn(async move |cx| {
+        if let Err(error) = opened.await {
+            cx.update(|cx| crate::notify_error(&format!("创建 PR：{error}"), cx));
+        }
+    })
+    .detach();
 }
 
 // ---- 打开项目 ----

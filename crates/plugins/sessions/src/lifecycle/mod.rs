@@ -88,7 +88,12 @@ pub(crate) fn install(sessions: &Entity<Sessions>, cx: &mut App) {
 
 fn on_event(event: &HostEvent, cx: &mut App) {
     match event {
-        HostEvent::SessionsChanged => on_sessions_changed(cx),
+        HostEvent::SessionsChanged => {
+            on_sessions_changed(cx);
+            crate::worksets::refresh(false, cx);
+        }
+        // 人常常是去浏览器合完 PR 回来：看一眼工作树合进去没有。
+        HostEvent::WindowActivated => crate::worksets::refresh(true, cx),
         HostEvent::MachinesChanged => on_machines_changed(cx),
         HostEvent::ShownViewsChanged => publish_context(cx),
         HostEvent::OpenPaths { machine, paths } => open_paths(machine.clone(), paths.clone(), cx),
