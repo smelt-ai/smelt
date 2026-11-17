@@ -122,7 +122,7 @@ Start at [`docs/README.md`](docs/README.md). Current guides: [`workspace`](docs/
 
 ## Contributing
 
-Issues and pull requests are welcome. Before submitting, please make sure `make check-all` passes, and follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages.
+Issues and pull requests are welcome. Before submitting, please make sure `make check-all` passes, and follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. Unless you state otherwise, contributions you submit are licensed under the Apache License 2.0 (section 5).
 
 ## License
 

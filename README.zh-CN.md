@@ -118,7 +118,7 @@ Windows 上，Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%
 
 ## 贡献
 
-欢迎 issue 与 PR。提交前请确保 `make check-all` 通过，commit message 遵循 [Conventional Commits](https://www.conventionalcommits.org/)。
+欢迎 issue 与 PR。提交前请确保 `make check-all` 通过，commit message 遵循 [Conventional Commits](https://www.conventionalcommits.org/)。除非你另有声明，提交的贡献即按 Apache License 2.0 授权（第 5 条）。
 
 ## License
 
