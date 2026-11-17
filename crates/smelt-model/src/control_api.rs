@@ -1004,6 +1004,9 @@ pi_calls! {
     /// 重命名工作树并移动 worktree，保留原分支。
     WorkspaceWorksetRename => WorkspaceWorksetRename(crate::workspace_directory::WorkspaceWorksetRenameParams)
         -> crate::workspace_directory::WorkspaceRevision;
+    /// 关闭工作树前的只读检查：fetch 基线后看各仓库干不干净、分支合没合进去。
+    WorkspaceWorksetInspect => WorkspaceWorksetInspect(crate::workspace_directory::WorkspaceWorksetInspectParams)
+        -> crate::workspace_directory::WorkspaceWorksetInspectResult;
     /// 安全收工并删除工作集记录。
     WorkspaceWorksetFinish => WorkspaceWorksetFinish(crate::workspace_directory::WorkspaceWorksetFinishParams)
         -> crate::workspace_directory::WorkspaceWorksetFinishResult;
@@ -1058,6 +1061,10 @@ pub struct SessionCreateParams {
     /// space，否则报错。
     #[serde(default)]
     pub project_root: String,
+    /// 开在项目里的哪棵任务工作树（目录里 `worksets[].id`，必须属于 `project_root`）。
+    /// 给了就开在它的任务目录（`worktrees/<任务>`），会话绑到这棵树上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workset_id: Option<String>,
     /// 对话用哪个 agent 选项（`new_session.catalog` 的 `agents[].id`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_option_id: Option<String>,

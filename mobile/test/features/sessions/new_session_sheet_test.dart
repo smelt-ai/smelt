@@ -57,10 +57,35 @@ void main() {
     expect(call.runtimeId, 'rt-mbp');
     expect(call.projectRoot, '/Users/demo/code/smelt');
     expect(call.launchKey, 'codex');
+    expect(call.worksetId, isNull);
     expect(call.requestId, isNotNull);
     // 新会话出现在目录里：弹层收起，会话被打开。
     expect(find.byType(BottomSheet), findsNothing);
     expect(harness.opened, ['rt-mbp/demo-new-1']);
+  });
+
+  testWidgets('选项目下面的工作树：头部写出树名，创建时带上 worksetId', (tester) async {
+    final backend = TestBackend();
+    final filter = ValueNotifier<String?>(null);
+    addTearDown(filter.dispose);
+    await pumpHarness(tester, backend, SessionsPage(filter: filter));
+
+    await tester.tap(find.byTooltip('New session'));
+    await settle(tester);
+    await tester.tap(_inSheet('MacBook Pro'));
+    await settle(tester);
+    expect(_inSheet('feat/search-box'), findsOneWidget);
+
+    await tester.tap(_inSheet('search-box'));
+    await settle(tester);
+    expect(_inSheet(' · smelt · search-box'), findsOneWidget);
+
+    await tester.tap(_inSheet('Codex'));
+    await tester.pump(const Duration(milliseconds: 400));
+    await settle(tester);
+    final call = backend.created.single;
+    expect(call.projectRoot, '/Users/demo/code/smelt');
+    expect(call.worksetId, 'demo-ws-search');
   });
 
   testWidgets('创建失败可重试，重试沿用同一个 requestId', (tester) async {

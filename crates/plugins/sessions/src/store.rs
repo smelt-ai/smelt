@@ -605,10 +605,11 @@ mod tests {
         );
         let ui = store.sidebar();
         assert!(!ui.conversations_collapsed);
+        // 本机什么都不剩时不留这一项。
         assert!(
-            ui.machines[&RuntimeKey::Local]
-                .collapsed_projects
-                .is_empty()
+            ui.machines
+                .get(&RuntimeKey::Local)
+                .is_none_or(|local| local.collapsed_projects.is_empty())
         );
     }
 

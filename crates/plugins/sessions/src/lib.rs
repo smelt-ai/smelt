@@ -101,6 +101,7 @@ mod session_view;
 mod split;
 mod split_layout;
 mod store;
+mod worksets;
 
 use gpui::{App, Task};
 use smelt_plugin_api as api;

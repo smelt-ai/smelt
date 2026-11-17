@@ -950,6 +950,7 @@ fn wire__crate__api__catalog__create_session_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_runtime_id = <String>::sse_decode(&mut deserializer);
             let api_project_root = <String>::sse_decode(&mut deserializer);
+            let api_workset_id = <Option<String>>::sse_decode(&mut deserializer);
             let api_agent_option_id = <Option<String>>::sse_decode(&mut deserializer);
             let api_launch_key = <Option<String>>::sse_decode(&mut deserializer);
             let api_resume_id = <Option<String>>::sse_decode(&mut deserializer);
@@ -962,6 +963,7 @@ fn wire__crate__api__catalog__create_session_impl(
                     let output_ok = crate::api::catalog::create_session(
                         api_runtime_id,
                         api_project_root,
+                        api_workset_id,
                         api_agent_option_id,
                         api_launch_key,
                         api_resume_id,
@@ -4790,6 +4792,20 @@ impl SseDecode for Vec<crate::api::catalog::WorkspaceProject> {
     }
 }
 
+impl SseDecode for Vec<crate::api::catalog::WorkspaceWorksetChoice> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::catalog::WorkspaceWorksetChoice>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for crate::api::agents::McpOption {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -6121,10 +6137,27 @@ impl SseDecode for crate::api::catalog::WorkspaceProject {
         let mut var_root = <String>::sse_decode(deserializer);
         let mut var_title = <String>::sse_decode(deserializer);
         let mut var_order = <u32>::sse_decode(deserializer);
+        let mut var_worksets =
+            <Vec<crate::api::catalog::WorkspaceWorksetChoice>>::sse_decode(deserializer);
         return crate::api::catalog::WorkspaceProject {
             root: var_root,
             title: var_title,
             order: var_order,
+            worksets: var_worksets,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::WorkspaceWorksetChoice {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_task = <String>::sse_decode(deserializer);
+        let mut var_branch = <String>::sse_decode(deserializer);
+        return crate::api::catalog::WorkspaceWorksetChoice {
+            id: var_id,
+            task: var_task,
+            branch: var_branch,
         };
     }
 }
@@ -9116,6 +9149,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::catalog::WorkspaceProject {
             self.root.into_into_dart().into_dart(),
             self.title.into_into_dart().into_dart(),
             self.order.into_into_dart().into_dart(),
+            self.worksets.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -9128,6 +9162,28 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::WorkspaceProject>
     for crate::api::catalog::WorkspaceProject
 {
     fn into_into_dart(self) -> crate::api::catalog::WorkspaceProject {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::WorkspaceWorksetChoice {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.task.into_into_dart().into_dart(),
+            self.branch.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::WorkspaceWorksetChoice
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::WorkspaceWorksetChoice>
+    for crate::api::catalog::WorkspaceWorksetChoice
+{
+    fn into_into_dart(self) -> crate::api::catalog::WorkspaceWorksetChoice {
         self
     }
 }
@@ -10544,6 +10600,16 @@ impl SseEncode for Vec<crate::api::catalog::WorkspaceProject> {
     }
 }
 
+impl SseEncode for Vec<crate::api::catalog::WorkspaceWorksetChoice> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::catalog::WorkspaceWorksetChoice>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for crate::api::agents::McpOption {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -11622,6 +11688,16 @@ impl SseEncode for crate::api::catalog::WorkspaceProject {
         <String>::sse_encode(self.root, serializer);
         <String>::sse_encode(self.title, serializer);
         <u32>::sse_encode(self.order, serializer);
+        <Vec<crate::api::catalog::WorkspaceWorksetChoice>>::sse_encode(self.worksets, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::WorkspaceWorksetChoice {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.task, serializer);
+        <String>::sse_encode(self.branch, serializer);
     }
 }
 

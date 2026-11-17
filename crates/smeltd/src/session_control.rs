@@ -231,10 +231,41 @@ fn require_project<'a>(
         })
 }
 
+/// 项目里的会话开在哪：项目根，或给了 `workset_id` 时那棵工作树的任务目录。工作树必须
+/// 属于这个项目。会话写进目录时按 cwd 绑到这棵树上。
+fn project_cwd(
+    directory: &WorkspaceDirectory,
+    project_root: &str,
+    workset_id: Option<&str>,
+) -> Result<String, ControlError> {
+    let root = require_project(directory, project_root)?;
+    let Some(workset_id) = workset_id else {
+        return Ok(root.to_string());
+    };
+    directory
+        .worksets
+        .iter()
+        .find(|workset| workset.id == workset_id && workset.project_root == root)
+        .map(|workset| {
+            std::path::Path::new(&workset.project_root)
+                .join("worktrees")
+                .join(&workset.task)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .ok_or_else(|| {
+            error(
+                ControlErrorCode::FailedPrecondition,
+                format!("项目 {root} 里没有这个工作树：{workset_id}"),
+            )
+        })
+}
+
 /// 对话开在哪。项目对话必须是工作区里已有的项目；智能体对话可以不带项目，开在
 /// 智能体自己的 space——从「智能体」页开对话时根本没有项目可选。
 fn resolve_acp_cwd(
     project_root: &str,
+    workset_id: Option<&str>,
     option: &AcpAgentOption,
     directory: &WorkspaceDirectory,
 ) -> Result<String, ControlError> {
@@ -249,7 +280,7 @@ fn resolve_acp_cwd(
             .map(|dir| dir.to_string_lossy().into_owned())
             .ok_or_else(|| error(ControlErrorCode::OperationFailed, "无法创建智能体工作区"));
     }
-    require_project(directory, project_root).map(str::to_string)
+    project_cwd(directory, project_root, workset_id)
 }
 
 fn already_bound(message: &str) -> ControlError {
@@ -269,9 +300,10 @@ fn plan_create(
     runtime_taken: impl FnOnce(&str) -> bool,
 ) -> Result<CreatePlan, ControlError> {
     let project_root = params.project_root.trim();
+    let workset_id = non_empty(params.workset_id.as_deref());
     match target {
         CreateTarget::Terminal { launch, label } => {
-            let cwd = require_project(directory, project_root)?.to_string();
+            let cwd = project_cwd(directory, project_root, workset_id)?;
             let id = session_id("term", params.request_id.as_deref())?;
             if let Some(conversation) = conversation_of(directory, &id) {
                 let terminal = conversation
@@ -295,7 +327,7 @@ fn plan_create(
             }))
         }
         CreateTarget::Acp(option) => {
-            let cwd = resolve_acp_cwd(project_root, &option, directory)?;
+            let cwd = resolve_acp_cwd(project_root, workset_id, &option, directory)?;
             let resume_id = non_empty(params.resume_id.as_deref()).map(str::to_string);
             let id = session_id("acp", params.request_id.as_deref())?;
             if let Some(conversation) = conversation_of(directory, &id) {
@@ -626,6 +658,60 @@ mod tests {
             |_| true,
         );
         assert_eq!(plan.err().unwrap().code, ControlErrorCode::Conflict);
+    }
+
+    /// 带 `workset_id` 的新建开在那棵工作树的任务目录里；工作树必须属于这个项目。
+    #[test]
+    fn a_workset_id_opens_the_session_in_its_task_root() {
+        let mut directory = directory_with_projects(&["/repo", "/other"]);
+        directory.worksets = vec![smelt_core::workspace_directory::WorkspaceWorkset {
+            id: "ws-1".into(),
+            project_root: "/repo".into(),
+            task: "search".into(),
+            branch: "feat/search".into(),
+            ..Default::default()
+        }];
+        let task_root = std::path::Path::new("/repo")
+            .join("worktrees")
+            .join("search")
+            .to_string_lossy()
+            .into_owned();
+        let in_workset = |project: &str, workset: &str| SessionCreateParams {
+            workset_id: Some(workset.into()),
+            ..acp_params(project, REQUEST)
+        };
+
+        let Ok(CreatePlan::Acp(conversation)) = plan_acp(in_workset("/repo", "ws-1"), &directory)
+        else {
+            panic!("应规划成对话");
+        };
+        assert_eq!(conversation.cwd, task_root);
+        let Ok(CreatePlan::Terminal(terminal)) = plan_create(
+            in_workset("/repo", "ws-1"),
+            blank_terminal(),
+            &directory,
+            |_| false,
+        ) else {
+            panic!("应规划成终端");
+        };
+        assert_eq!(terminal.cwd, task_root);
+
+        for (project, workset) in [("/other", "ws-1"), ("/repo", "gone")] {
+            let error = plan_acp(in_workset(project, workset), &directory)
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.code,
+                ControlErrorCode::FailedPrecondition,
+                "{project} {workset}"
+            );
+        }
+        // 空的 workset_id 当没给。
+        let Ok(CreatePlan::Acp(conversation)) = plan_acp(in_workset("/repo", " "), &directory)
+        else {
+            panic!("应规划成对话");
+        };
+        assert_eq!(conversation.cwd, "/repo");
     }
 
     #[test]

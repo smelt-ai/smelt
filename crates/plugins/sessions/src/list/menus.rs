@@ -14,6 +14,7 @@ use super::{ProjectGroup, SessionRow, Sidebar, WorksetGroup};
 use crate::contract::{self, MachineMenuContext, ProjectMenuContext};
 use crate::dialogs;
 use crate::model::{Sessions, SidebarGrouping};
+use crate::worksets::WorksetKey;
 
 /// 会话行的菜单。
 pub(super) fn session_menu(row: &SessionRow, view: Entity<ListView>) -> Menu {
@@ -217,6 +218,39 @@ pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Me
                 view.update(cx, |view, cx| view.start_rename(target, task, window, cx));
             })
     };
+    let pull_request = {
+        let open = |machine: RuntimeKey, root: String| {
+            move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+                actions::open_pull_request(machine.clone(), root.clone(), cx)
+            }
+        };
+        let item = MenuItem::new("在浏览器中创建 PR").icon(IconName::ExternalLink);
+        match workset.repositories.as_slice() {
+            [] => item.disabled(true),
+            [(_, root)] => item.on_click(open(machine.clone(), root.clone())),
+            repositories => {
+                item.submenu(repositories.iter().fold(Menu::new(), |menu, (name, root)| {
+                    menu.item(
+                        MenuItem::new(name.clone()).on_click(open(machine.clone(), root.clone())),
+                    )
+                }))
+            }
+        }
+    };
+    let check = {
+        let key = WorksetKey {
+            machine: machine.clone(),
+            id: id.clone(),
+        };
+        MenuItem::new(if workset.checking {
+            "正在检查合并状态…"
+        } else {
+            "检查合并状态"
+        })
+        .icon(IconName::RefreshCw)
+        .disabled(workset.checking)
+        .on_click(move |_, _, cx| actions::check_workset(key.clone(), cx))
+    };
     let finish = {
         let task = workset.task.clone();
         MenuItem::new("关闭工作树…")
@@ -231,6 +265,8 @@ pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Me
         .item(pin)
         .item(rename)
         .separator()
+        .item(pull_request)
+        .item(check)
         .item(finish)
 }
 

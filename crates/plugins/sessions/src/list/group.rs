@@ -114,7 +114,7 @@ pub(super) fn buckets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, TimeZone as _};
+    use chrono::Duration;
 
     fn flatten(groups: &[(Bucket, Vec<usize>)]) -> Vec<usize> {
         groups.iter().flat_map(|(_, ixs)| ixs.clone()).collect()

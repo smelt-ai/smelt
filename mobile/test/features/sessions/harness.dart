@@ -55,6 +55,7 @@ class TestBackend extends DemoBackend {
   Future<String> createSession(
     String runtimeId, {
     required String projectRoot,
+    String? worksetId,
     String? agentOptionId,
     String? launchKey,
     String? resumeId,
@@ -65,6 +66,7 @@ class TestBackend extends DemoBackend {
       CreateCall(
         runtimeId: runtimeId,
         projectRoot: projectRoot,
+        worksetId: worksetId,
         agentOptionId: agentOptionId,
         launchKey: launchKey,
         resumeId: resumeId,
@@ -79,6 +81,7 @@ class TestBackend extends DemoBackend {
     return super.createSession(
       runtimeId,
       projectRoot: projectRoot,
+      worksetId: worksetId,
       agentOptionId: agentOptionId,
       launchKey: launchKey,
       resumeId: resumeId,
@@ -116,6 +119,7 @@ class CreateCall {
   const CreateCall({
     required this.runtimeId,
     required this.projectRoot,
+    this.worksetId,
     this.agentOptionId,
     this.launchKey,
     this.resumeId,
@@ -124,6 +128,7 @@ class CreateCall {
 
   final String runtimeId;
   final String projectRoot;
+  final String? worksetId;
   final String? agentOptionId;
   final String? launchKey;
   final String? resumeId;

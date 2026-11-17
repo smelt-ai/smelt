@@ -34,7 +34,7 @@ use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 #[cfg(test)]
 mod tests;
 mod view;
-mod ops;
+pub(crate) mod ops;
 
 // ===================== 运行时调用 =====================
 

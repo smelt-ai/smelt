@@ -516,8 +516,8 @@ mod tests {
             assert!(apply("Plugin Dark", cx));
             assert_eq!(active(cx).unwrap().config().name().as_ref(), "Plugin Dark");
             assert_eq!(ui_theme::bg(), 0x101820, "自绘色板跟着换");
-            let painted = swatch("Plugin Dark", cx).unwrap();
-            assert_eq!(painted.background, gpui::rgb(0x101820).into());
+            let plugin_swatch = swatch("Plugin Dark", cx).unwrap();
+            assert_eq!(plugin_swatch.background, gpui::rgb(0x101820).into());
             assert!(themes(cx).iter().any(|info| info.name == "Plugin Dark"
                 && info.owner.as_ref().is_some_and(|o| *o == "third")));
 

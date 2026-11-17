@@ -19,6 +19,7 @@ use smelt_plugin_api::{
     ViewSpec,
 };
 
+mod contract;
 mod log;
 mod log_view;
 mod panel;
@@ -57,8 +58,44 @@ pub fn register(cx: &mut App) {
     let commands = vec![
         jump_hunk_command("prev-hunk", "上一个差异", "shift-f7", false),
         jump_hunk_command("next-hunk", "下一个差异", "f7", true),
+        open_pull_request_command(),
     ];
     api::register_commands(OWNER, "改动", commands, cx).expect("变更的命令表写错了");
+}
+
+/// [`contract::OPEN_PULL_REQUEST`]：会话列表的工作树菜单按仓库调它。仓库信息问那台机器的
+/// 运行时，拼好链接用浏览器打开。
+fn open_pull_request_command() -> CommandSpec {
+    CommandSpec {
+        name: contract::OPEN_PULL_REQUEST
+            .id()
+            .strip_prefix("smelt.git/")
+            .expect("命令 id 带来源")
+            .into(),
+        title: "在浏览器中创建 PR".into(),
+        key: None,
+        context: "Workspace".into(),
+        palette: false,
+        requires_args: true,
+        handler: Rc::new(|args, _, cx| {
+            let target: contract::OpenPullRequest = match api::serde_json::from_value(args.clone())
+            {
+                Ok(target) => target,
+                Err(error) => return Handled::err(format!("创建 PR 的参数不对：{error}")),
+            };
+            let info = api::call::<smelt_plugin_api::client::protocol::git::GitRepoInfoCall>(
+                &target.machine,
+                smelt_plugin_api::client::protocol::git::GitRootParams { root: target.root },
+                api::CALL_TIMEOUT,
+                cx,
+            );
+            Handled::Done(cx.spawn(async move |cx| {
+                let url = panel::ops::pull_request_link(info.await)?;
+                cx.update(|cx| cx.open_url(&url));
+                Ok(api::serde_json::Value::Null)
+            }))
+        }),
+    }
 }
 
 /// F7 / Shift+F7 跳到下一块 / 上一块改动。只在焦点在「改动」页里时生效：焦点在终端里，

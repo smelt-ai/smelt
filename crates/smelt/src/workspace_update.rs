@@ -84,9 +84,8 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // `use gpui::*` 会把 gpui 的 `test` 宏一起带进来，让 `#[test]` 展开时绕回自己；
-    // 显式导入的胜过通配，指回标准库的。
-    use std::prelude::v1::test;
+    // `super::*` 带进了 gpui 的 glob，其中的 `test` 宏会顶掉标准库的 `#[test]`，展开时无限递归。
+    use std::prelude::rust_2024::test;
 
     fn state(phase: DaemonPhase, runtime: bool) -> DaemonSessionState {
         DaemonSessionState {

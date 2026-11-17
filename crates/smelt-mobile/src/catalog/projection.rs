@@ -236,11 +236,26 @@ impl CatalogState {
             .as_ref()
             .map(|directory| directory.projects.len())
             .unwrap_or_default();
+        let mut worksets: Vec<&WorkspaceWorkset> = self
+            .workspace
+            .iter()
+            .flat_map(|directory| &directory.worksets)
+            .collect();
+        worksets.sort_by_key(|workset| workset.position);
         self.listing()
             .projects
             .into_iter()
             .take(opened)
             .map(|project| view::WorkspaceProject {
+                worksets: worksets
+                    .iter()
+                    .filter(|workset| workset.project_root == project.root)
+                    .map(|workset| view::WorkspaceWorksetChoice {
+                        id: workset.id.clone(),
+                        task: workset.task.clone(),
+                        branch: workset.branch.clone(),
+                    })
+                    .collect(),
                 root: project.root,
                 title: project.title,
                 order: project.order,
