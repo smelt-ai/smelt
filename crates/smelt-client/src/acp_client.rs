@@ -583,34 +583,13 @@ pub fn spawn_acp_client(
     }
 }
 
-/// 显式结束一个 smeltd 托管的 ACP 会话：杀子进程、摘表、踢掉所有连接
-/// （`acp_kill` op）。跟 `ConversationClientHandle` 的 Drop **不是**同一件事——Drop
-/// 只是"这个客户端不再关心这个会话了"，会话本身照样在 smeltd 里活着；这个
-/// 函数才是真的把会话终结掉，只在用户明确要求"结束这段对话"（比如点 ×
-/// 关掉标签）时调用，跟 GUI 退出/切标签这种"我先不看了"完全是两回事。
-///
-/// 阻塞：等守护回执再返回，跟 `terminal::kill_remote` 同一个理由——避免
-/// 关闭动作和后续可能的 App 退出之间有个窗口，kill 命令还没送达就被中断。
-pub fn kill_acp_session(runtime: &RuntimeClient, id: &str) {
-    let Ok(mut s) = connect_acp_control(runtime) else {
-        return;
-    };
-    let _ = smelt_runtime_client::protocol::write_json_line(
-        &mut s,
-        &serde_json::json!({ "op": DaemonOperation::AcpKill, "id": id }),
-    );
-    let mut resp = String::new();
-    let _ = BufReader::new(s).read_line(&mut resp);
-}
-
 /// 强制重启一个卡死的 ACP 会话：杀掉当前 agent 子进程（整个进程组），换一个
-/// 新的接着跑，带 `resume_session_id` 走 `session/load` 接回同一份历史。跟
-/// `kill_acp_session` 不是一回事——那个是终结会话（关标签），这个是会话本体
+/// 新的接着跑，带 `resume_session_id` 走 `session/load` 接回同一份历史。会话本体
 /// （标签、GUI 那条 `acp_open` 连接、entries 历史）原样保留，只是换掉失联的
 /// 那个子进程，专治 `session/cancel` 打不断的死循环工具调用。
 ///
-/// 阻塞等守护回执，理由同 `kill_acp_session`：调用方（GUI 点"强制重启"）想要
-/// 一个确定的成功/失败结果，不想留下"到底发出去没有"的悬念。
+/// 阻塞等守护回执：调用方（GUI 点"强制重启"）想要一个确定的成功/失败结果，不想留下
+/// "到底发出去没有"的悬念。
 pub fn restart_acp_session(runtime: &RuntimeClient, id: &str) -> Result<(), String> {
     let mut s = connect_acp_control(runtime)?;
     smelt_runtime_client::protocol::write_json_line(

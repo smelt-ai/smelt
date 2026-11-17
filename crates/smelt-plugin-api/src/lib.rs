@@ -22,8 +22,6 @@ pub use serde_json;
 pub use smelt_client::runtime::{Runtime, RuntimeKey};
 // 发给运行时的短请求（守护协议），如改历史会话的名字。
 pub use smelt_client::session_ops;
-// 杀会话的请求放专用线程发（远程要拨号），App 退出时在收尾时间里等它们发完。
-pub use smelt_client::session_kill;
 // 对话的字节流客户端：接上守护里的一段对话、收快照、发用户操作，翻历史页。
 pub use smelt_client::acp_client;
 // 插件自己的库：每个来源一个 SQLite 文件，表由插件自己建、自己迁移。

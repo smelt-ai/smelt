@@ -3322,12 +3322,11 @@ fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpu
                 profile_id: None,
                 cwd: Some("/tmp/smelt".into()),
                 reason: "visual test".into(),
-                entries,
                 resume_session_id: None,
                 saved_sid: Some("acp-process-visual-test".into()),
             },
         );
-        view.phase = DaemonPhase::Idle;
+        view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
         view.expanded_process_groups.insert(2);
         view
     });
@@ -3494,7 +3493,6 @@ fn image_dropped_on_the_composer_is_attached(cx: &mut gpui::TestAppContext) {
                 profile_id: None,
                 cwd: None,
                 reason: "composer drop".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: Some("acp-composer-drop".into()),
             },
@@ -3550,7 +3548,6 @@ fn text_elicitation_inputs_are_ready_before_paint(cx: &mut gpui::TestAppContext)
                 profile_id: None,
                 cwd: None,
                 reason: "test placeholder".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: Some("acp-render-test".into()),
             },
@@ -3597,7 +3594,6 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
                 profile_id: None,
                 cwd: None,
                 reason: "test placeholder".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: Some("acp-elicit-visual-test".into()),
             },
@@ -3677,7 +3673,6 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
                 profile_id: None,
                 cwd: None,
                 reason: "test placeholder".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: Some("acp-custom-answer-test".into()),
             },
@@ -3727,7 +3722,6 @@ fn snapshot_binding_becomes_the_views_persisted_binding(cx: &mut gpui::TestAppCo
                 profile_id: None,
                 cwd: None,
                 reason: "test placeholder".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: Some("acp-binding-test".into()),
             },
@@ -3769,7 +3763,6 @@ fn stop_button_click_requests_cancel_then_force_restarts_on_second_click(
                 profile_id: None,
                 cwd: None,
                 reason: "test placeholder".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: None,
             },
@@ -3894,12 +3887,11 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
                 profile_id: None,
                 cwd: Some("/tmp/smelt".into()),
                 reason: "log viewport".into(),
-                entries,
                 resume_session_id: None,
                 saved_sid: Some("acp-log-viewport".into()),
             },
         );
-        view.phase = DaemonPhase::Idle;
+        view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
         view.expanded_process_groups.insert(group_ix);
         view.expanded_tool_cards.insert("log-1".into());
         view.expanded_tools.insert("log-1".into());
@@ -3963,12 +3955,11 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
                 profile_id: None,
                 cwd: Some("/tmp/smelt".into()),
                 reason: "popover scroll".into(),
-                entries,
                 resume_session_id: None,
                 saved_sid: Some("acp-pop-scroll".into()),
             },
         );
-        view.phase = DaemonPhase::Idle;
+        view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
         view.expanded_process_groups.insert(group_ix);
         view
     });
@@ -4036,7 +4027,6 @@ fn first_history_page_paints_after_the_empty_open_frame(cx: &mut gpui::TestAppCo
                 profile_id: None,
                 cwd: Some("/tmp/smelt".into()),
                 reason: "empty open frame".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: Some("acp-empty-then-history".into()),
             },
@@ -4109,12 +4099,11 @@ fn revealing_the_pinned_prompt_parks_it_below_the_title_island(cx: &mut gpui::Te
                 profile_id: None,
                 cwd: Some("/tmp/smelt".into()),
                 reason: "pinned prompt".into(),
-                entries,
                 resume_session_id: None,
                 saved_sid: Some("acp-pinned-prompt".into()),
             },
         );
-        view.phase = DaemonPhase::Idle;
+        view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
         view
     });
     let cx: &mut VisualTestContext = cx;
@@ -4174,7 +4163,6 @@ fn background_task_popover_closes_when_the_last_task_finishes(cx: &mut gpui::Tes
                 profile_id: None,
                 cwd: None,
                 reason: "background tasks".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: Some("acp-background-popover".into()),
             },
@@ -4290,12 +4278,12 @@ fn conversation_fixture(
             profile_id: None,
             cwd: Some("/tmp/smelt".into()),
             reason: "scroll".into(),
-            entries,
             resume_session_id: None,
             saved_sid: Some(sid.into()),
         },
     );
-    view.phase = phase;
+    // 版本 0 的快照总会收下，后面按版本递增发的尾片照常合并。
+    view.apply_snapshot(tail_snapshot(0, 0, entries, phase), cx);
     view.awaiting_initial_history_snapshot = false;
     view
 }
@@ -4791,7 +4779,6 @@ fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
                 profile_id: None,
                 cwd: None,
                 reason: "test placeholder".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: Some("acp-release-test".into()),
             },
@@ -4822,7 +4809,6 @@ fn frames_after_the_first_history_page_keep_the_loaded_conversation(cx: &mut gpu
                 profile_id: None,
                 cwd: Some("/tmp/smelt".into()),
                 reason: "restored".into(),
-                entries: Vec::new(),
                 resume_session_id: None,
                 saved_sid: Some("acp-idle-reopen".into()),
             },
@@ -5043,12 +5029,11 @@ fn long_thought_inside_a_process_group_can_be_expanded(cx: &mut gpui::TestAppCon
                 profile_id: None,
                 cwd: Some("/tmp/smelt".into()),
                 reason: "visual test".into(),
-                entries,
                 resume_session_id: None,
                 saved_sid: Some("acp-process-thought-expand".into()),
             },
         );
-        view.phase = DaemonPhase::Idle;
+        view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
         view.expanded_process_groups.insert(2);
         view
     });

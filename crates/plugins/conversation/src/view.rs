@@ -1346,7 +1346,6 @@ pub struct ConversationOrigin {
     pub profile_id: Option<String>,
     pub cwd: Option<String>,
     pub reason: String,
-    pub entries: Vec<AcpEntry>,
     pub resume_session_id: Option<String>,
     pub saved_sid: Option<String>,
 }
@@ -1739,8 +1738,8 @@ impl ConversationView {
         cx.notify();
     }
 
-    /// 冷启动恢复用的占位：首次显示时自动启动。`origin.entries` 只用于读取旧版存档的
-    /// 迁移兼容；当前版本以 agent 的 `session/load` 重放作为历史唯一来源。
+    /// 冷启动恢复用的占位：首次显示时自动启动。历史只从守护的快照来（agent 的
+    /// `session/load` 重放），占位本身不带。
     /// `origin.resume_session_id` 是上次握手成功后 agent 分配的 session id。
     ///
     /// `origin.saved_sid`：**这是让 GUI 重开后能真正"接上还活着的 smeltd 会话"而不是
@@ -1757,21 +1756,16 @@ impl ConversationView {
             profile_id,
             cwd,
             reason,
-            entries,
             resume_session_id,
             saved_sid,
         } = origin;
         // 冷恢复会话首次显示就直接进入可用的对话页：有旧 session id 时续接，
-        // 没有时启动新一轮。历史仍先留在本地，守护端若能 attach 会用其快照覆盖。
+        // 没有时启动新一轮。
         let auto_resume_pending = true;
         let agent_definition_id = launch_prep
             .as_ref()
             .and_then(|prep| prep.agent_definition_id.clone());
-        let initial_entry_count = entries.len();
-        let rendered_images = decode_entry_images(&entries, 0);
-        let rendered_diffs = std::collections::HashMap::new();
-        let rendered_markdown = build_markdown_cache(&entries);
-        let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.))
+        let list_state = ListState::new(0, ListAlignment::Top, px(800.))
             .with_uniform_item_height(px(RESTORED_ENTRY_HEIGHT_HINT_PX));
         list_state.set_follow_mode(FollowMode::Tail);
         let view = cx.entity().downgrade();
@@ -1804,7 +1798,7 @@ impl ConversationView {
             auto_resume_pending,
             sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
             cwd,
-            entries,
+            entries: Vec::new(),
             permissions: Vec::new(),
             permission_submitting: None,
             elicitation: None,
@@ -1832,17 +1826,17 @@ impl ConversationView {
             pending_images: Vec::new(),
             pending_external_image_loads: 0,
             prompt_dispatch_pending: false,
-            rendered_images,
-            rendered_diffs,
+            rendered_images: std::collections::HashMap::new(),
+            rendered_diffs: std::collections::HashMap::new(),
             rendered_tool_images: std::collections::HashMap::new(),
-            rendered_markdown,
+            rendered_markdown: Vec::new(),
             retained_text: std::cell::RefCell::default(),
             layout_cache: std::cell::RefCell::default(),
             loaded_skills: None,
             launch_prep,
             transcript,
             loaded_entries_offset: 0,
-            entries_total: initial_entry_count,
+            entries_total: 0,
             tool_debug: Default::default(),
             runtime_debug: Default::default(),
             history_loading: false,

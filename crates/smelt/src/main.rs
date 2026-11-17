@@ -967,11 +967,7 @@ fn main() {
         let quit_subscription = cx.on_app_quit(move |cx| {
             // 插件要在这里释放，别留到线程局部变量析构时（见 `plugins::shutdown`）。
             plugins::shutdown(cx);
-            // 刚关掉的会话，kill 可能还在路上（见 smelt_client::session_kill）。GPUI 只给
-            // 收尾一小段时间，超时的就算了：会话留在运行时上，直到守护下次重启。
-            cx.background_executor().spawn(async {
-                smelt_client::session_kill::wait_settled(gpui::SHUTDOWN_TIMEOUT);
-            })
+            async {}
         });
         cx.set_global(AppQuitSubscription {
             _subscription: quit_subscription,
