@@ -313,6 +313,7 @@ pub(super) fn machines_menu(sidebar: &Sidebar, cx: &App) -> Option<Menu> {
             Some(
                 MenuItem::new(machine.name.clone())
                     .icon_path(machine.os_icon.clone())
+                    .icon_color(machine.link.light.color())
                     .submenu(menu),
             )
         })
@@ -337,6 +338,7 @@ pub(super) fn open_project_menu(sidebar: &Sidebar) -> Menu {
             menu.item(
                 MenuItem::new(machine.name.clone())
                     .icon_path(machine.os_icon.clone())
+                    .icon_color(machine.link.light.color())
                     .disabled(machine.link.unavailable.is_some())
                     .on_click(move |_, _, cx| actions::open_project(key.clone(), cx)),
             )

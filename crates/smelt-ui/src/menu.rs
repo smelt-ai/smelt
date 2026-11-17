@@ -49,6 +49,7 @@ type Trigger = Box<dyn FnOnce(bool) -> AnyElement>;
 pub struct MenuItem {
     label: SharedString,
     icon: Option<SharedString>,
+    icon_color: Option<u32>,
     image: Option<Arc<gpui::Image>>,
     checked: Option<bool>,
     disabled: bool,
@@ -63,6 +64,7 @@ impl MenuItem {
         Self {
             label: label.into(),
             icon: None,
+            icon_color: None,
             image: None,
             checked: None,
             disabled: false,
@@ -81,6 +83,12 @@ impl MenuItem {
     /// 也可传入应用自己的 SVG 资源路径。
     pub fn icon_path(mut self, path: impl Into<SharedString>) -> Self {
         self.icon = Some(path.into());
+        self
+    }
+
+    /// 线性图标自己带的状态色（如机器的连接灯），不跟字色。禁用时照样和字一起灰。
+    pub fn icon_color(mut self, color: u32) -> Self {
+        self.icon_color = Some(color);
         self
     }
 
@@ -721,7 +729,13 @@ fn render_menu(
                                 .when(item.disabled, |image| image.opacity(0.5))
                                 .into_any_element(),
                         ),
-                        (false, None) => item.icon.clone().map(|path| svg_glyph(path, foreground)),
+                        (false, None) => {
+                            let color = match item.icon_color {
+                                Some(color) if !item.disabled => rgb(color),
+                                _ => foreground,
+                            };
+                            item.icon.clone().map(|path| svg_glyph(path, color))
+                        }
                     };
                     row = row.child(
                         div()

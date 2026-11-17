@@ -25,7 +25,6 @@ use smelt_plugin_api::ui::ui_theme::{self, height};
 use smelt_plugin_api::ui::{Button, IconAction as _, ListRow, TextInput};
 use smelt_plugin_api::{self as api, RuntimeKey};
 
-use super::machine::Light;
 use super::motion::{FoldMotion, Frame, arrival_slot, wash};
 use super::view::{DropHint, DropTarget, ListView, RenameTarget};
 use super::{
@@ -302,7 +301,7 @@ fn waiting_machine_row(machine: &MachineInfo, cx: &App) -> AnyElement {
                 svg()
                     .path(machine.os_icon.clone())
                     .size(px(14.))
-                    .text_color(rgb(light_color(machine.link.light))),
+                    .text_color(rgb(machine.link.light.color())),
             ),
         )
         .child(
@@ -334,14 +333,6 @@ fn waiting_machine_row(machine: &MachineInfo, cx: &App) -> AnyElement {
 fn refresh_connections(hovered: &bool, _: &mut Window, cx: &mut App) {
     if *hovered {
         api::REFRESH_CONNECTIONS.run(&(), cx).detach();
-    }
-}
-
-fn light_color(light: Light) -> u32 {
-    match light {
-        Light::Good => ui_theme::ok(),
-        Light::Degraded => ui_theme::need(),
-        Light::Down => ui_theme::bad(),
     }
 }
 
@@ -379,23 +370,43 @@ fn empty_note(text: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-/// 行上标的机器名：一小块底色上的字，跟分支名、项目名分得开。
-fn machine_pill(text: SharedString, color: u32) -> gpui::Div {
+/// 行上标的机器：系统图标按连接上色，后面是灰字写的名字。不加底色，靠图标跟纯文字的分支名
+/// 分开；连接的好坏只看图标的颜色，字不跟着变。
+fn machine_tag(machine: Option<&MachineInfo>, text: SharedString, selected: bool) -> gpui::Div {
     div()
         .flex_shrink_0()
         .max_w(px(120.))
         .min_w_0()
-        .px_1()
-        .rounded(px(3.))
-        .bg(ui_theme::hair())
+        .flex()
+        .items_center()
+        .gap_1()
         .type_style(TYPE.text_xsmall)
-        .text_color(rgb(color))
-        .child(truncated_line(text))
+        .text_color(rgb(ui_theme::row_faint(selected)))
+        .when_some(machine, |tag, machine| {
+            tag.child(
+                svg()
+                    .path(machine.os_icon.clone())
+                    .flex_shrink_0()
+                    .size(px(12.))
+                    .text_color(rgb(machine.link.light.color())),
+            )
+        })
+        .child(div().min_w_0().child(truncated_line(text)))
+}
+
+/// 机器表里的这台机器。
+fn machine_info<'a>(sidebar: &'a Sidebar, key: &RuntimeKey) -> Option<&'a MachineInfo> {
+    sidebar.machines.iter().find(|machine| machine.key == *key)
 }
 
 /// 项目行上的机器标签：远程项目写机器名，机器用不了时再写为什么（本机用不了只写为什么）。
-/// 慢的连接用提醒色；悬停看完整的连接说明。
-fn project_machine_tag(id: &str, project: &ProjectGroup, selected: bool) -> Option<AnyElement> {
+/// 悬停看完整的连接说明。
+fn project_machine_tag(
+    id: &str,
+    project: &ProjectGroup,
+    sidebar: &Sidebar,
+    selected: bool,
+) -> Option<AnyElement> {
     let link = &project.link;
     let text = match (&project.machine_name, link.unavailable) {
         (Some(name), Some(why)) => format!("{name} · {why}"),
@@ -403,18 +414,18 @@ fn project_machine_tag(id: &str, project: &ProjectGroup, selected: bool) -> Opti
         (None, Some(why)) => why.to_string(),
         (None, None) => return None,
     };
-    let color = match link.light {
-        Light::Degraded => ui_theme::need(),
-        Light::Good | Light::Down => ui_theme::row_faint(selected),
-    };
     let detail: SharedString = link.detail.clone().into();
     let remote = project.machine_name.is_some();
     Some(
-        machine_pill(text.into(), color)
-            .id(eid(format!("project-machine:{id}")))
-            .tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx))
-            .when(remote, |tag| tag.on_hover(refresh_connections))
-            .into_any_element(),
+        machine_tag(
+            machine_info(sidebar, &project.machine),
+            text.into(),
+            selected,
+        )
+        .id(eid(format!("project-machine:{id}")))
+        .tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx))
+        .when(remote, |tag| tag.on_hover(refresh_connections))
+        .into_any_element(),
     )
 }
 
@@ -489,7 +500,7 @@ fn project_row(
                         .child(truncated_line(project.name.clone())),
                 )
                 .when(project.pinned, |name| name.child(pin_marker()))
-                .children(project_machine_tag(&id, project, selected))
+                .children(project_machine_tag(&id, project, &ctx.sidebar, selected))
                 .when_some(project.branch.clone(), |name, branch| {
                     // 窄侧栏里分支名常被截掉后半段，悬停看全名。
                     let full = branch.clone();
@@ -803,7 +814,11 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
             )
             .when(row.pinned, |title| title.child(pin_marker()))
             .when_some(row.machine_name.clone(), |title, name| {
-                title.child(machine_pill(name, ui_theme::row_faint(selected)))
+                title.child(machine_tag(
+                    machine_info(&ctx.sidebar, &key.machine),
+                    name,
+                    selected,
+                ))
             })
             .when_some(row.origin.as_ref(), |title, origin| {
                 title.children(origin_labels(&id, origin, selected))

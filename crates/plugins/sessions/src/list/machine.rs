@@ -1,6 +1,7 @@
 //! 机器行上的系统图标和连接指示：一盏灯（图标的颜色），悬停名字看完整说明。从旧宿主
 //! `runtimes.rs` 的 `runtime_indicator` 一族搬来，改成只读插件接口给的连接表。
 
+use smelt_plugin_api::ui::ui_theme;
 use smelt_plugin_api::{
     Connection, ConnectionLink, ConnectionState, Connections, LinkRoute, Machine, RuntimeKey,
 };
@@ -14,6 +15,17 @@ pub(super) enum Light {
     Degraded,
     /// 用不了：离线、版本不兼容。
     Down,
+}
+
+impl Light {
+    /// 灯的颜色：系统图标就画成这个色。
+    pub(super) fn color(self) -> u32 {
+        match self {
+            Light::Good => ui_theme::ok(),
+            Light::Degraded => ui_theme::need(),
+            Light::Down => ui_theme::bad(),
+        }
+    }
 }
 
 /// 一台机器眼下连得怎样。
