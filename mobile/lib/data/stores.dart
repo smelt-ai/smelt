@@ -173,7 +173,8 @@ class WorkspaceStore extends ChangeNotifier {
   }
 
   /// 重取在线机器的目录（下拉刷新）。
-  Future<void> reloadOnline() => Future.wait([for (final id in _online) load(id)]);
+  Future<void> reloadOnline() =>
+      Future.wait([for (final id in _online) load(id)]);
 
   Future<void> load(String runtimeId) async {
     if (!_loading.add(runtimeId)) return;
@@ -216,6 +217,20 @@ class WorkspaceStore extends ChangeNotifier {
       agentName(runtimeId, session) ?? sessionAgentLabel(l10n, session);
 }
 
+/// 对话里关掉的提示和记忆卡片，按会话记在 App 生命周期里：退出对话再进来不再弹出。
+/// 只记 id：服务端有新内容时换更大的 id，卡片照常出现。
+class DismissedCards {
+  final _bySession = <(String, String), DismissedCard>{};
+
+  DismissedCard of(String runtimeId, String sessionId) =>
+      _bySession.putIfAbsent((runtimeId, sessionId), DismissedCard.new);
+}
+
+class DismissedCard {
+  int? noticeId;
+  int? memoryChangesId;
+}
+
 /// 整个 App 的数据根：一个 [Backend] 和由它喂的几份状态。
 class AppModel {
   AppModel(
@@ -248,6 +263,7 @@ class AppModel {
   final pass = PassStore();
   final catalog = CatalogStore();
   late final workspaces = WorkspaceStore(backend);
+  final dismissedCards = DismissedCards();
   final _subscriptions = <StreamSubscription<Object?>>[];
 
   /// 内核初始化（`initClient`）之后调一次。

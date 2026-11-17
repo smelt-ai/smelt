@@ -115,11 +115,11 @@ class _ConversationPageState extends State<ConversationPage> {
   String? _unconfirmedRequestId;
   String? _sendError;
 
-  /// 本页关掉的提示。快照里提示没了就忘掉，新提示照常出来。
-  int? _dismissedNoticeId;
-
-  /// 本页关掉的记忆卡片。有新写入时 id 变大，卡片重新出现；快照里没了就忘掉。
-  int? _dismissedMemoryChangesId;
+  /// 这段会话关掉的提示和记忆卡片。记在 [AppModel] 上，不跟着页面走；快照里没了就忘掉。
+  late final _dismissed = _model.dismissedCards.of(
+    widget.runtimeId,
+    widget.sessionId,
+  );
 
   // 连接 ---------------------------------------------------------------------
   /// 这台机器的连接停过（disconnected）：内核的订阅随之停了，连回来要重新订。
@@ -231,8 +231,8 @@ class _ConversationPageState extends State<ConversationPage> {
             (id) => !view.pendingPermissions.any((p) => p.toolCallId == id),
           );
           if (view.pendingElicitation == null) _answeredElicitation = null;
-          if (view.notice == null) _dismissedNoticeId = null;
-          if (view.memoryChanges == null) _dismissedMemoryChangesId = null;
+          if (view.notice == null) _dismissed.noticeId = null;
+          if (view.memoryChanges == null) _dismissed.memoryChangesId = null;
           _rebuildRows();
           _refreshDock();
         });
@@ -1210,7 +1210,7 @@ class _ConversationPageState extends State<ConversationPage> {
                   memoryCard: _memoryCard(view, session),
                   notice: _visibleNotice(view)?.text,
                   onDismissNotice: () => setState(
-                    () => _dismissedNoticeId = _visibleNotice(view)?.id,
+                    () => _dismissed.noticeId = _visibleNotice(view)?.id,
                   ),
                   footnote: _usage(view, l10n),
                 );
@@ -1226,13 +1226,13 @@ class _ConversationPageState extends State<ConversationPage> {
     final changes = view?.memoryChanges;
     if (changes == null ||
         changes.entries.isEmpty ||
-        changes.id == _dismissedMemoryChangesId) {
+        changes.id == _dismissed.memoryChangesId) {
       return null;
     }
     return MemoryChangesCard(
       runtimeId: widget.runtimeId,
       changes: changes,
-      onDismiss: () => setState(() => _dismissedMemoryChangesId = changes.id),
+      onDismiss: () => setState(() => _dismissed.memoryChangesId = changes.id),
       onOpenMemoryPage: () => unawaited(
         Navigator.of(context).push<void>(
           MaterialPageRoute(
@@ -1251,7 +1251,7 @@ class _ConversationPageState extends State<ConversationPage> {
 
   ConversationNotice? _visibleNotice(ConversationView? view) {
     final notice = view?.notice;
-    return notice == null || notice.id == _dismissedNoticeId ? null : notice;
+    return notice == null || notice.id == _dismissed.noticeId ? null : notice;
   }
 
   List<Widget> _chips(ConversationView view, L10n l10n) {
