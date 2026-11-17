@@ -1,4 +1,4 @@
-//! GUI（未来 web/mobile 也走这条）→ smeltd 的 ACP 会话客户端：连
+//! 对话视图 → smeltd 的 ACP 会话客户端：连
 //! `acp_open`，收 `ConversationSnapshot` 流，发 `AcpUserAction`。跟 `acp_conn.rs` 是
 //! 同一层次的东西，但这边连的是 smeltd 的 unix socket，不是子进程 agent
 //! 自己——smeltd 才持有真正的连接（见 acp_session 模块（`crates/smelt-core/src/acp_session/mod.rs`）文件头：`Permission`/
@@ -14,13 +14,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::daemon_state::DaemonPhase;
 use serde::Deserialize as _;
-use smelt_model::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
-use smelt_model::acp_wire::{FrameDelta, FrameMirror};
-use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
-use smelt_runtime_client::protocol::daemon::DaemonOperation;
-use smelt_runtime_client::{RuntimeClient, RuntimeStream};
+use smelt_plugin_api::client::protocol::daemon::DaemonOperation;
+use smelt_plugin_api::client::{RuntimeClient, RuntimeStream};
+use smelt_plugin_api::model::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
+use smelt_plugin_api::model::acp_wire::{FrameDelta, FrameMirror};
+use smelt_plugin_api::model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
+use smelt_plugin_api::model::daemon_state::DaemonPhase;
 
 pub const ACP_INITIAL_TAIL_LIMIT: usize = 100;
 pub const ACP_HISTORY_PAGE_LIMIT: usize = 100;
@@ -55,14 +55,14 @@ pub struct ConversationClientLaunch {
     pub fork_id: Option<String>,
     /// 与 `fork_id` 搭配的分叉切点：整拷打开后、重放前切到该用户消息之前。
     /// 见 `acp_conn::AcpForkCut`。
-    pub fork_cut: Option<smelt_model::acp_conn::AcpForkCut>,
+    pub fork_cut: Option<smelt_plugin_api::model::acp_conn::AcpForkCut>,
     /// 建连前 GUI 已持有的连续历史末端（全局 offset，不是本地 Vec 长度）。若
     /// 第一份 daemon 快照到达前连接失败，终态快照用它作为 offset，避免把仍可
     /// 展示的分页历史误清空。
     pub retained_entries_end: usize,
     /// 新 daemon 会话的交互输入路由。已有会话 attach 时 daemon 自己的状态优先，
     /// 因此客户端存档不会覆盖一个热会话的当前 binding。
-    pub conversation_binding: smelt_model::conversation::ConversationBinding,
+    pub conversation_binding: smelt_plugin_api::model::conversation::ConversationBinding,
     /// 只在新 daemon 会话创建时登记。热 attach 不会用客户端的旧存档覆盖 daemon
     /// 已消费的状态。
     pub pending_agent_preset: Option<String>,
@@ -70,7 +70,7 @@ pub struct ConversationClientLaunch {
     /// 的语义名）。热 attach 时 smeltd 不读它。
     pub initial_config: Vec<(String, String)>,
     /// 这次打开若拉起 runtime，配置落定后由 smeltd 发出的首条消息。热 attach 时不读。
-    pub initial_prompt: Option<smelt_model::acp_session::AcpInitialPrompt>,
+    pub initial_prompt: Option<smelt_plugin_api::model::acp_session::AcpInitialPrompt>,
 }
 
 fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
@@ -105,7 +105,7 @@ fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
 pub enum ConversationClientEvent {
     Snapshot(ConversationSnapshot),
     /// 打开请求带了首条消息，守护回的第一帧却没确认收到（见
-    /// [`smelt_model::acp_session::AcpSnapshotFrame::initial_ack`]）：这台机器的运行时太旧，
+    /// [`smelt_plugin_api::model::acp_session::AcpSnapshotFrame::initial_ack`]）：这台机器的运行时太旧，
     /// 不认识这个字段，消息没有发出去。排在那一帧的快照前面，窗口先把消息收回来。
     InitialPromptUnsupported,
 }
@@ -223,7 +223,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
 }
 
 fn snapshot_from_live(
-    live: smelt_model::acp_session::SessionLive,
+    live: smelt_plugin_api::model::acp_session::SessionLive,
     entries_offset: usize,
     history_error: Option<String>,
 ) -> ConversationSnapshot {
@@ -260,8 +260,8 @@ enum SnapshotFrame {
 #[derive(serde::Deserialize)]
 struct DecodedAcpSnapshotFrame {
     #[serde(default)]
-    live: Option<smelt_model::acp_session::SessionLive>,
-    snapshot: Option<smelt_model::acp_session::ConversationSnapshot>,
+    live: Option<smelt_plugin_api::model::acp_session::SessionLive>,
+    snapshot: Option<smelt_plugin_api::model::acp_session::ConversationSnapshot>,
 }
 
 fn read_snapshot_frame(
@@ -325,10 +325,10 @@ fn read_snapshot_frame(
     };
     let live = value
         .get("live")
-        .and_then(|live| smelt_model::acp_session::SessionLive::from_json(live).ok())
+        .and_then(|live| smelt_plugin_api::model::acp_session::SessionLive::from_json(live).ok())
         .or_else(|| {
             value.get("snapshot").and_then(|snapshot| {
-                smelt_model::acp_session::SessionLive::from_json(snapshot).ok()
+                smelt_plugin_api::model::acp_session::SessionLive::from_json(snapshot).ok()
             })
         });
     if let Some(snapshot) = value.get("snapshot") {
@@ -415,7 +415,7 @@ pub fn load_acp_history(
     limit: usize,
 ) -> Result<ConversationSnapshot, String> {
     let mut stream = connect_acp_control(runtime)?;
-    smelt_runtime_client::protocol::write_json_line(
+    smelt_plugin_api::client::protocol::write_json_line(
         &mut stream,
         &acp_snapshot_request(id, before, limit),
     )
@@ -485,7 +485,7 @@ pub fn spawn_acp_client(
             // 停止读 action 后无限占住线程并让动作队列持续增长。
             let _ = writer.set_write_timeout(Some(ACP_CONTROL_TIMEOUT));
             let req = acp_open_request(&launch);
-            if smelt_runtime_client::protocol::write_json_line(&mut writer, &req).is_err() {
+            if smelt_plugin_api::client::protocol::write_json_line(&mut writer, &req).is_err() {
                 let _ = event_tx.try_send(ConversationClientEvent::Snapshot(fallback_snapshot(
                     "向 smeltd 发起会话失败",
                     known_entries_end,
@@ -592,7 +592,7 @@ pub fn spawn_acp_client(
 /// "到底发出去没有"的悬念。
 pub fn restart_acp_session(runtime: &RuntimeClient, id: &str) -> Result<(), String> {
     let mut s = connect_acp_control(runtime)?;
-    smelt_runtime_client::protocol::write_json_line(
+    smelt_plugin_api::client::protocol::write_json_line(
         &mut s,
         &serde_json::json!({ "op": DaemonOperation::AcpRestart, "id": id }),
     )
@@ -618,7 +618,8 @@ mod tests {
         history_snapshot_from_response, open_reply_acknowledges_initial, read_snapshot_frame,
         snapshot_after_stream_disconnect,
     };
-    use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
+    use smelt_plugin_api::model::acp_session::SessionLive;
+    use smelt_plugin_api::model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
     use std::collections::BTreeMap;
 
     #[test]
@@ -636,7 +637,8 @@ mod tests {
             fork_id: None,
             fork_cut: None,
             retained_entries_end: 0,
-            conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
+            conversation_binding:
+                smelt_plugin_api::model::conversation::ConversationBinding::Direct,
             pending_agent_preset: None,
             initial_config: Vec::new(),
             initial_prompt: None,
@@ -669,10 +671,11 @@ mod tests {
             fork_id: None,
             fork_cut: None,
             retained_entries_end: 0,
-            conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
+            conversation_binding:
+                smelt_plugin_api::model::conversation::ConversationBinding::Direct,
             pending_agent_preset: None,
             initial_config: vec![("model".into(), "deepseek/flash".into())],
-            initial_prompt: Some(smelt_model::acp_session::AcpInitialPrompt {
+            initial_prompt: Some(smelt_plugin_api::model::acp_session::AcpInitialPrompt {
                 text: "先读一遍代码".into(),
                 images: Vec::new(),
             }),
@@ -697,7 +700,8 @@ mod tests {
             fork_id: None,
             fork_cut: None,
             retained_entries_end: 0,
-            conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
+            conversation_binding:
+                smelt_plugin_api::model::conversation::ConversationBinding::Direct,
             pending_agent_preset: None,
             initial_config: Vec::new(),
             initial_prompt: None,
@@ -717,15 +721,14 @@ mod tests {
             }
         })
         .to_string();
-        let SnapshotFrame::Snapshot(snapshot) =
-            read_snapshot_frame(&line, 4, &mut smelt_model::acp_wire::FrameMirror::default())
-        else {
+        let SnapshotFrame::Snapshot(snapshot) = read_snapshot_frame(
+            &line,
+            4,
+            &mut smelt_plugin_api::model::acp_wire::FrameMirror::default(),
+        ) else {
             panic!("历史坏了也必须留下活状态，不能停在正在启动");
         };
-        assert!(matches!(
-            snapshot.phase,
-            crate::daemon_state::DaemonPhase::Idle
-        ));
+        assert!(matches!(snapshot.phase, DaemonPhase::Idle));
         assert_eq!(snapshot.acp_session_id.as_deref(), Some("agent-1"));
         assert_eq!(snapshot.entries_offset, 4);
         assert!(snapshot.entries.is_empty());
@@ -733,15 +736,33 @@ mod tests {
         assert_eq!(snapshot.end_kind, AcpEndKind::Unknown);
     }
 
-    #[cfg(unix)]
+    /// 守护刚接上、什么都还没有的一份快照（只填协议里必填的字段）。
+    fn blank_snapshot() -> ConversationSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "entries": [],
+            "phase": "idle",
+            "supports_image": false,
+            "available_commands": [],
+            "config_options": [],
+            "completed_unread": false,
+            "should_persist": false,
+        }))
+        .expect("最小快照应能解析")
+    }
+
+    /// 和快照同一份活状态头；`history_len` 有值是新守护的帧：正文只在快照里。
+    fn live_of(snapshot: &ConversationSnapshot, history_len: usize) -> SessionLive {
+        let mut live = SessionLive::from_snapshot(snapshot);
+        live.history_len = Some(history_len);
+        live
+    }
+
     #[test]
     fn snapshot_omitting_history_id_keeps_the_live_id() {
-        let mut state = smelt_core::acp_session::AcpSessionState::default();
-        state.history_session_id = Some("01a128ad".into());
-        state.acp_session_id = Some("runtime".into());
-        state.phase = crate::daemon_state::DaemonPhase::Idle;
-        let live = smelt_core::acp_session::live_from_state(&state);
-        let mut snapshot = state.to_snapshot(false);
+        let mut snapshot = blank_snapshot();
+        snapshot.history_session_id = Some("01a128ad".into());
+        snapshot.acp_session_id = Some("runtime".into());
+        let live = live_of(&snapshot, 0);
         snapshot.history_session_id = None;
         snapshot.entries_offset = 660;
         snapshot.entries_total = 660;
@@ -757,66 +778,58 @@ mod tests {
         let SnapshotFrame::Snapshot(snapshot) = read_snapshot_frame(
             &frame.to_string(),
             0,
-            &mut smelt_model::acp_wire::FrameMirror::default(),
+            &mut smelt_plugin_api::model::acp_wire::FrameMirror::default(),
         ) else {
             panic!("快照对象在，就必须交给窗口");
         };
         assert_eq!(snapshot.history_session_id.as_deref(), Some("01a128ad"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn frame_keeps_entries_written_as_the_turn_closed() {
         // 收尾时写下的报错已经算历史，`live.open_turn` 是空的。快照带着它，
         // 不能拿空的当前一轮把它盖掉。
-        let mut state = smelt_core::acp_session::AcpSessionState::default();
-        state
-            .entries_mut()
-            .push(smelt_model::acp_chat::AcpEntry::User("A".into()));
-        state.phase = crate::daemon_state::DaemonPhase::Thinking;
-        state.turn_started_at_ms = Some(1);
-        smelt_core::acp_session::apply_event(
-            &mut state,
-            smelt_core::acp_conn::ConversationEvent::TurnFailed("499 status code (no body)".into()),
-        );
+        let mut snapshot = blank_snapshot();
+        snapshot.entries = vec![smelt_plugin_api::model::acp_chat::AcpEntry::Assistant {
+            text: "回合失败：499 status code (no body)".into(),
+            thought: false,
+        }];
+        snapshot.entries_offset = 1;
+        snapshot.entries_total = 2;
         let line = serde_json::json!({
-            "live": smelt_core::acp_session::live_from_state(&state),
-            "snapshot": state.to_snapshot_range(false, 1, 2),
+            "live": live_of(&snapshot, 2),
+            "snapshot": snapshot,
         })
         .to_string();
 
-        let SnapshotFrame::Snapshot(snapshot) =
-            read_snapshot_frame(&line, 0, &mut smelt_model::acp_wire::FrameMirror::default())
-        else {
+        let SnapshotFrame::Snapshot(snapshot) = read_snapshot_frame(
+            &line,
+            0,
+            &mut smelt_plugin_api::model::acp_wire::FrameMirror::default(),
+        ) else {
             panic!("读得懂的快照必须交给窗口");
         };
         assert_eq!(snapshot.entries_offset, 1);
         assert_eq!(snapshot.entries_total, 2);
         assert!(matches!(
             snapshot.entries.as_slice(),
-            [smelt_model::acp_chat::AcpEntry::Assistant { text, .. }] if text.contains("回合失败")
+            [smelt_plugin_api::model::acp_chat::AcpEntry::Assistant { text, .. }] if text.contains("回合失败")
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn unreadable_snapshot_phase_ends_startup_wait() {
-        let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
-        snapshot.phase = crate::daemon_state::DaemonPhase::Idle;
-        let mut frame = serde_json::json!({ "snapshot": snapshot });
+        let mut frame = serde_json::json!({ "snapshot": blank_snapshot() });
         frame["snapshot"]["phase"] = serde_json::json!("not-a-phase");
 
         let SnapshotFrame::Unreadable(terminal) = read_snapshot_frame(
             &frame.to_string(),
             12,
-            &mut smelt_model::acp_wire::FrameMirror::default(),
+            &mut smelt_plugin_api::model::acp_wire::FrameMirror::default(),
         ) else {
             panic!("旧相位名不能再被悄悄丢掉，否则页面会停在正在启动");
         };
-        assert!(matches!(
-            terminal.phase,
-            crate::daemon_state::DaemonPhase::Dead
-        ));
+        assert!(matches!(terminal.phase, DaemonPhase::Dead));
         assert_eq!(terminal.end_kind, AcpEndKind::Unknown);
         assert_eq!(terminal.entries_offset, 12);
         assert!(
@@ -829,7 +842,7 @@ mod tests {
     #[test]
     fn disconnect_snapshot_preserves_known_history() {
         let snapshot = snapshot_after_stream_disconnect(
-            Some(crate::daemon_state::DaemonPhase::Idle),
+            Some(DaemonPhase::Idle),
             37,
             Some("修复启动失败".into()),
         )
@@ -838,17 +851,14 @@ mod tests {
         assert_eq!(snapshot.entries_offset, 37);
         assert!(snapshot.entries.is_empty());
         assert_eq!(snapshot.session_title.as_deref(), Some("修复启动失败"));
-        assert!(matches!(
-            snapshot.phase,
-            crate::daemon_state::DaemonPhase::Dead
-        ));
+        assert!(matches!(snapshot.phase, DaemonPhase::Dead));
     }
 
     #[test]
     fn stream_eof_does_not_overwrite_a_provider_failure_snapshot() {
         assert!(
             snapshot_after_stream_disconnect(
-                Some(crate::daemon_state::DaemonPhase::Dead),
+                Some(DaemonPhase::Dead),
                 37,
                 Some("修复启动失败".into()),
             )
@@ -876,10 +886,9 @@ mod tests {
         assert_eq!(error, "ACP 会话不存在");
     }
 
-    #[cfg(unix)]
     #[test]
     fn history_response_returns_the_snapshot() {
-        let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
+        let mut snapshot = blank_snapshot();
         snapshot.entries_offset = 3;
         let response = serde_json::json!({ "snapshot": snapshot }).to_string();
         let parsed = history_snapshot_from_response(&response).expect("合法快照应能读回");
@@ -898,14 +907,14 @@ mod tests {
 
     /// 守护发的一帧：整段帧原样，增量帧由发送方镜像算出。
     fn wire_frame(
-        sender: &mut smelt_model::acp_wire::FrameMirror,
+        sender: &mut smelt_plugin_api::model::acp_wire::FrameMirror,
         snapshot: &ConversationSnapshot,
         full: bool,
     ) -> String {
-        let live = smelt_model::acp_session::SessionLive::from_snapshot(snapshot);
+        let live = smelt_plugin_api::model::acp_session::SessionLive::from_snapshot(snapshot);
         let mut header = snapshot.clone();
         header.entries.clear();
-        let frame = serde_json::to_value(smelt_model::acp_session::AcpSnapshotFrame {
+        let frame = serde_json::to_value(smelt_plugin_api::model::acp_session::AcpSnapshotFrame {
             live: &live,
             snapshot: if full { snapshot } else { &header },
             provider_pid: Some(7),
@@ -926,9 +935,9 @@ mod tests {
     #[test]
     fn open_reply_ack_is_read_from_the_first_frame() {
         let snapshot = fallback_snapshot("", 0);
-        let live = smelt_model::acp_session::SessionLive::from_snapshot(&snapshot);
+        let live = smelt_plugin_api::model::acp_session::SessionLive::from_snapshot(&snapshot);
         let frame = |initial_ack| {
-            serde_json::to_string(&smelt_model::acp_session::AcpSnapshotFrame {
+            serde_json::to_string(&smelt_plugin_api::model::acp_session::AcpSnapshotFrame {
                 live: &live,
                 snapshot: &snapshot,
                 provider_pid: None,
@@ -952,10 +961,12 @@ mod tests {
         let mut snapshot = fallback_snapshot("", 0);
         snapshot.phase = DaemonPhase::Thinking;
         snapshot.end_kind = AcpEndKind::Unknown;
-        snapshot.entries = vec![smelt_model::acp_chat::AcpEntry::User("你好".into())];
+        snapshot.entries = vec![smelt_plugin_api::model::acp_chat::AcpEntry::User(
+            "你好".into(),
+        )];
         snapshot.entries_total = 1;
-        let mut sender = smelt_model::acp_wire::FrameMirror::default();
-        let mut receiver = smelt_model::acp_wire::FrameMirror::default();
+        let mut sender = smelt_plugin_api::model::acp_wire::FrameMirror::default();
+        let mut receiver = smelt_plugin_api::model::acp_wire::FrameMirror::default();
         let SnapshotFrame::Snapshot(first) =
             read_snapshot_frame(&wire_frame(&mut sender, &snapshot, true), 0, &mut receiver)
         else {
@@ -965,7 +976,7 @@ mod tests {
 
         snapshot
             .entries
-            .push(smelt_model::acp_chat::AcpEntry::Assistant {
+            .push(smelt_plugin_api::model::acp_chat::AcpEntry::Assistant {
                 text: "回复".into(),
                 thought: false,
             });
@@ -986,7 +997,7 @@ mod tests {
         assert_eq!(restored.entries_total, 2);
         assert!(matches!(
             &restored.entries[..],
-            [smelt_model::acp_chat::AcpEntry::Assistant { text, .. }] if text == "回复"
+            [smelt_plugin_api::model::acp_chat::AcpEntry::Assistant { text, .. }] if text == "回复"
         ));
     }
 }

@@ -44,7 +44,3 @@ smelt-version = { path = "../smelt-version" }
 
 [dev-dependencies]
 tempfile = "3"
-
-# 造 ACP 快照的测试依赖 smelt-core。那一层是 Unix 进程模型，第 1 步不在 Windows 上编。
-[target.'cfg(unix)'.dev-dependencies]
-smelt-core = { path = "../smelt-core", features = ["test-support"] }

@@ -7,6 +7,7 @@
 //! 事件用这里；对话要别处做的事（开新对话、去智能体页、记住会话选项）按对方的约定转出去
 //! （`instance`、`sessions`、`agents`）。
 
+mod acp_client;
 mod agents;
 mod contract;
 mod instance;

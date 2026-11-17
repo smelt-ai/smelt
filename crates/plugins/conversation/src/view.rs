@@ -3,7 +3,7 @@
 //! **薄客户端**：agent 子进程由 smeltd 托管（`smelt_plugin_api::model::acp_session` 里的
 //! `apply_event` 归约、`ConversationEvent::Permission`/`Elicitation` 的 responder 也
 //! 都在那边——responder 绑在连接线程上没法跨进程传，这里没有资格直接持有
-//! 它们）。这层只做两件事：把 `smelt_plugin_api::acp_client` 收到的 `ConversationSnapshot`
+//! 它们）。这层只做两件事：把 `crate::acp_client` 收到的 `ConversationSnapshot`
 //! 摊平进本地字段渲染出来，把用户操作打包成 `AcpUserAction` 发回去。四档
 //! 着色 / Dock 角标 / 应用内待处理通知现在都由 smeltd 的集中状态订阅驱动
 //! （跟终端会话共用 subscribe 通道），这层只镜像视图态，不再自己判相位跳变。
@@ -29,11 +29,11 @@ use smelt_plugin_api::ui::popover::Popover;
 use smelt_plugin_api::ui::scrollbar::{Scrollbar, ScrollbarMode};
 use smelt_plugin_api::ui::{Icon, IconName};
 
-use smelt_plugin_api::Runtime;
-use smelt_plugin_api::acp_client::{
+use crate::acp_client::{
     ACP_HISTORY_PAGE_LIMIT, ConversationClientEvent, ConversationClientHandle,
     ConversationClientLaunch, load_acp_history, spawn_acp_client,
 };
+use smelt_plugin_api::Runtime;
 use smelt_plugin_api::model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_plugin_api::model::acp_session::{
     AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, BackgroundTaskStatus,
@@ -2901,12 +2901,10 @@ impl ConversationView {
         let sid = self.sid.clone();
         let runtime = self.runtime.client().clone();
         cx.spawn(async move |this, cx| {
-            let result =
-                cx.background_executor()
-                    .spawn(async move {
-                        smelt_plugin_api::acp_client::restart_acp_session(&runtime, &sid)
-                    })
-                    .await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::acp_client::restart_acp_session(&runtime, &sid) })
+                .await;
             let _ = this.update(cx, |view, cx| {
                 view.restarting = false;
                 view.cancel_requested_at = None;
