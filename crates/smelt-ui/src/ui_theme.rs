@@ -202,6 +202,22 @@ pub(crate) fn legible(fg: u32, backdrop: u32, min: f32) -> u32 {
     legible_toward(fg, backdrop, min, away_from(backdrop))
 }
 
+/// 实色按钮悬停、按下两档的底：主题的叠层叠在静息底上。叠完字往哪头挪都不够 4.5:1 时
+/// （浅色主题正文偏浅，主按钮底是中灰，按下往白提，白字就压不住），两档一起反过来、按同样
+/// 的力度往字的另一头压：按下照样看得出，字也看得清。两档同一个方向，不一档变亮一档变暗。
+fn state_fills(rest: u32, overlays: [Rgba; 2]) -> [u32; 2] {
+    let text_side = away_from(rest);
+    let themed = overlays.map(|overlay| flatten(overlay, rest));
+    if themed
+        .iter()
+        .all(|fill| contrast_ratio(text_side, *fill) >= TEXT_MUTED_MIN_CONTRAST)
+    {
+        return themed;
+    }
+    let other_side = 0xffffff - text_side;
+    overlays.map(|overlay| mix(rest, other_side, overlay.a))
+}
+
 /// 离 `backdrop` 更远的那头：白或黑。
 fn away_from(backdrop: u32) -> u32 {
     if contrast_ratio(0xffffff, backdrop) >= contrast_ratio(0x000000, backdrop) {
@@ -315,8 +331,7 @@ fn palette_from_tokens(c: &ThemeColors, text_backdrop: u32) -> Palette {
     let muted = on(c.text_muted);
     let rows = row_fills(on(c.hover), on(c.pressed), bg, text, muted, text_backdrop);
     let ink = on(c.bg_contrast);
-    let ink_hover = flatten(c.contrast_hover, ink);
-    let ink_press = flatten(c.contrast_pressed, ink);
+    let [ink_hover, ink_press] = state_fills(ink, [c.contrast_hover, c.contrast_pressed]);
     // 静息、悬停、按下三层底共用一个字色。字色只往离静息底更远的那头挪：按下那层压得
     // 够深时，挪到头也只是不够 4.5，不会翻成另一头、在静息底上反而看不清。
     let on_fills = |fg: Rgba, fills: [u32; 3]| {
@@ -327,11 +342,8 @@ fn palette_from_tokens(c: &ThemeColors, text_backdrop: u32) -> Palette {
     };
     let on_ink = on_fills(c.text_contrast, [ink, ink_hover, ink_press]);
     let submit = on(c.bg_icon_button_contrast);
-    let submit_fills = [
-        submit,
-        flatten(c.submit_hover, submit),
-        flatten(c.contrast_pressed, submit),
-    ];
+    let [submit_hover, submit_press] = state_fills(submit, [c.submit_hover, c.contrast_pressed]);
+    let submit_fills = [submit, submit_hover, submit_press];
     let on_submit = on_fills(c.submit_icon, submit_fills);
     let bad = on(c.danger.icon);
     let on_bad = [c.text_contrast, c.text_base]
@@ -1053,13 +1065,32 @@ mod tests {
         assert_eq!(palette.chart, [1, 2, 3, 4, 5]);
     }
 
+    /// 主按钮底够深时悬停、按下照主题的叠层往亮提；底是中灰、往亮提就压不住白字时，两档
+    /// 一起往深处压，越按越深，白字始终够 4.5:1。
+    #[test]
+    fn state_fills_flip_only_when_the_overlay_drowns_the_text() {
+        let lighten = [rgba(0xfcfcfc1f), rgba(0xfcfcfc3d)];
+        let deep = 0x171717;
+        assert_eq!(
+            state_fills(deep, lighten),
+            lighten.map(|o| flatten(o, deep))
+        );
+
+        let gray = 0x5c6166;
+        let [hover, press] = state_fills(gray, lighten);
+        let on_white = |fill| contrast_ratio(0xffffff, fill);
+        assert!(on_white(gray) < on_white(hover) && on_white(hover) < on_white(press));
+        assert!(on_white(hover) >= TEXT_MUTED_MIN_CONTRAST);
+    }
+
     /// 次要按钮的底本身半透明时，悬停叠层叠在它上面，结果仍透出底下的窗口。
     #[test]
     fn overlays_compose_onto_translucent_fills() {
         let composed = over(rgba(0xffffff10), rgba(0xffffff20));
         assert!(composed.a > 0x20 as f32 / 255.0 && composed.a < 1.0);
         assert_eq!(rgba_hex(Rgba { a: 1.0, ..composed }), 0xffffffff);
-        assert_eq!(rgba_hex(over(rgba(0x00000080), rgb(0xffffff))), 0x808080ff);
+        // 128/255 的黑叠在白上：255 × (1 − 128/255) = 127。
+        assert_eq!(rgba_hex(over(rgba(0x00000080), rgb(0xffffff))), 0x7f7f7fff);
         assert_eq!(over(rgba(0x00000000), rgba(0x00000000)).a, 0.0);
     }
 

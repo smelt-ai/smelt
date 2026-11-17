@@ -993,8 +993,18 @@ fn contrast(a: Rgba, b: Rgba) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-/// 次要字：在 OKLab 明度上从 `bg` 往 `fg` 走 `amount`（色相取 `tint`），对比不到 `minimum`
-/// 时二分往前走到刚好够；`fg` 自己都不够就是 `fg`。
+/// 落到屏幕上的那个 8 位色。二分「刚好够」的对比时按它判断：浮点色刚好卡在线上，舍入成
+/// 8 位就可能掉到线下。
+fn quantize(color: Rgba) -> Rgba {
+    let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() / 255.0;
+    Rgba {
+        r: q(color.r),
+        g: q(color.g),
+        b: q(color.b),
+        a: color.a,
+    }
+}
+
 /// `color` 压在 `bg` 上对比不到 `minimum` 时，保持色相和彩度，把 OKLab 明度往远离 `bg` 的
 /// 一头挪到刚好够（挪到头也不够就停在头上）。
 fn readable(color: Rgba, bg: Rgba, minimum: f32) -> Rgba {
@@ -1003,7 +1013,12 @@ fn readable(color: Rgba, bg: Rgba, minimum: f32) -> Rgba {
     }
     let [lightness, a, b] = oklab(color);
     let end = if luminance(bg) > 0.18 { 0.0 } else { 1.0 };
-    let at = |t: f32| from_oklab([lightness + (end - lightness) * t, a, b], color.a);
+    let at = |t: f32| {
+        quantize(from_oklab(
+            [lightness + (end - lightness) * t, a, b],
+            color.a,
+        ))
+    };
     let (mut low, mut high) = (0.0, 1.0);
     for _ in 0..24 {
         let mid = (low + high) * 0.5;
@@ -1016,9 +1031,11 @@ fn readable(color: Rgba, bg: Rgba, minimum: f32) -> Rgba {
     at(high)
 }
 
+/// 次要字：在 OKLab 明度上从 `bg` 往 `fg` 走 `amount`（色相取 `tint`），对比不到 `minimum`
+/// 时二分往前走到刚好够；`fg` 自己都不够就是 `fg`。
 fn secondary(bg: Rgba, fg: Rgba, tint: [f32; 2], amount: f32, minimum: f32) -> Rgba {
     let (lb, lf) = (oklab(bg)[0], oklab(fg)[0]);
-    let mix = |t: f32| from_oklab([lb + (lf - lb) * t, tint[0], tint[1]], 1.0);
+    let mix = |t: f32| quantize(from_oklab([lb + (lf - lb) * t, tint[0], tint[1]], 1.0));
     let candidate = mix(amount);
     if contrast(bg, candidate) >= minimum {
         return candidate;

@@ -6751,6 +6751,16 @@ CREATE TABLE published_session (
         transaction.commit().unwrap();
     }
 
+    /// 最近活动时间由守护按新建那一刻写，不用客户端带来的。比对其余字段时把期望里的换成
+    /// 库里存的那个。
+    fn stamped(
+        mut expected: WorkspaceSessionRecord,
+        stored: &WorkspaceSessionRecord,
+    ) -> WorkspaceSessionRecord {
+        expected.last_updated_at = stored.last_updated_at;
+        expected
+    }
+
     /// 一段终端对话、一段 ACP 对话，各字段都填上。
     fn full_conversations() -> Vec<WorkspaceSessionRecord> {
         vec![
@@ -6862,7 +6872,12 @@ CREATE TABLE published_session (
         // 标题丢了，同一智能体的多段对话名字全一样。
         let (_, restored) = store.workspace_directory().unwrap();
         assert_eq!(restored.projects, ["/repo"]);
-        assert_eq!(restored.sessions, conversations);
+        let expected: Vec<_> = conversations
+            .iter()
+            .zip(&restored.sessions)
+            .map(|(expected, stored)| stamped(expected.clone(), stored))
+            .collect();
+        assert_eq!(restored.sessions, expected);
         let acp_columns = connection
             .prepare("PRAGMA table_info(acp_detail)")
             .unwrap()
@@ -7816,7 +7831,8 @@ CREATE TABLE published_session (
 
         let (commit, removed) = store.delete_workspace_conversation("c1").unwrap();
         assert!(commit.changed);
-        assert_eq!(removed, Some(conversation.clone()));
+        let removed = removed.expect("删掉的对话要交回来");
+        assert_eq!(removed, stamped(conversation.clone(), &removed));
         assert!(matches!(
             store.update_workspace_conversation(&conversation),
             Err(StoreError::ConversationNotFound { id }) if id == "c1"
@@ -7870,10 +7886,13 @@ CREATE TABLE published_session (
         // 终端改到了；名字不随更新改，只经改名命令写。
         assert_eq!(
             snapshot.sessions[0],
-            WorkspaceSessionRecord {
-                custom_title: None,
-                ..renamed
-            }
+            stamped(
+                WorkspaceSessionRecord {
+                    custom_title: None,
+                    ..renamed
+                },
+                &snapshot.sessions[0],
+            )
         );
         assert_eq!(directory_ids(&store), ["c1", "c2"]);
     }

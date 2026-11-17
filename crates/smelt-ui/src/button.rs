@@ -587,6 +587,11 @@ fn focused_button_shadows(
     }
 }
 
+/// 激活按钮的键：不带修饰的回车、空格，和 gpui 的键盘点击同一组。
+pub(crate) fn is_activation_key(keystroke: &gpui::Keystroke) -> bool {
+    matches!(keystroke.key.as_str(), "enter" | "space") && !keystroke.modifiers.modified()
+}
+
 /// 键盘焦点环：2px `bg` 间隙外再套 2px `focus`。环用实色，免得半透明的焦点色
 /// 透出底下那圈间隙。
 pub(crate) fn focus_ring() -> Vec<BoxShadow> {
@@ -780,6 +785,15 @@ impl Button {
                     // 点按钮不抢焦点，输入框里的光标留在原处；也不开始窗口级的选字。
                     window.prevent_default();
                     GlobalState::suppress_text_selection(cx);
+                })
+            })
+            // 禁用、加载中的按钮可能还留着焦点。回车、空格拦在它身上，外层（如下拉菜单的
+            // 触发器）不替它响应；指针按下 gpui-base 已经这样拦了。
+            .when(!interactive, |this| {
+                this.on_key_down(|event, _, cx| {
+                    if is_activation_key(&event.keystroke) {
+                        cx.stop_propagation();
+                    }
                 })
             })
             .map(|this| match on_click {
@@ -1352,18 +1366,25 @@ mod tests {
         struct Probe;
         impl Render for Probe {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                // 按钮在格子里居中：无头窗口的鼠标停在原点，贴着原点的按钮会画成悬停。
                 div()
                     .flex()
                     .children([0x1e1e1d, 0x507090].map(|background| {
-                        div().size(px(40.)).bg(rgb(background)).child(
-                            Button::new(if background == 0x1e1e1d {
-                                "dark"
-                            } else {
-                                "blue"
-                            })
-                            .label("")
-                            .size(px(28.)),
-                        )
+                        div()
+                            .size(px(40.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(background))
+                            .child(
+                                Button::new(if background == 0x1e1e1d {
+                                    "dark"
+                                } else {
+                                    "blue"
+                                })
+                                .label("")
+                                .size(px(28.)),
+                            )
                     }))
             }
         }
@@ -1422,8 +1443,8 @@ mod tests {
             let scale_x = image.width() / 80;
             let scale_y = image.height() / 40;
             assert!(scale_x > 0 && scale_y > 0);
-            for (x, background) in [(14, 0x1e1e1d), (54, 0x507090)] {
-                let pixel = image.get_pixel(x * scale_x, 14 * scale_y).0;
+            for (x, background) in [(20, 0x1e1e1d), (60, 0x507090)] {
+                let pixel = image.get_pixel(x * scale_x, 20 * scale_y).0;
                 let expected = ui_theme::flatten(fill, background);
                 for (actual, shift) in pixel[..3].iter().zip([16, 8, 0]) {
                     let channel = ((expected >> shift) & 0xff) as i16;
@@ -1631,15 +1652,13 @@ mod tests {
         );
         cx.update(|cx| {
             init_for_test(cx);
-            // 三态同一个半透明底：悬停、按下的叠层取全透明。
+            // 三态同一个半透明底：悬停、按下的叠层取全透明。主按钮的底总是压在窗口底上
+            // 成实色、走外焦点环，不在这里。
             let fill = rgba(0xffffff80);
             let clear = rgba(0x00000000);
             apply_button_colors(
                 false,
                 &[
-                    ("bg_contrast", fill),
-                    ("contrast_hover", clear),
-                    ("contrast_pressed", clear),
                     ("bg_button_neutral", fill),
                     ("hover", clear),
                     ("pressed", clear),
@@ -1649,7 +1668,6 @@ mod tests {
         });
         for scale in [1_u32, 2] {
             for (role, floating, selected, disabled, loading) in [
-                (Role::Primary, false, false, false, false),
                 (Role::Secondary, false, false, false, false),
                 (Role::Quiet, false, false, false, false),
                 (Role::Danger, false, false, false, false),

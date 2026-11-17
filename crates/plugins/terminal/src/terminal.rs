@@ -2965,7 +2965,7 @@ mod event_proxy_answers_tests {
     }
 
     /// 兼容旧守护：`OSC 11 ?`（查询当前背景色）仍要由客户端兜底，回应里应带上当前主题的
-    /// 默认背景色（深色下 `ui_theme::bg()` = `0x1e1e1d`，窗口底）而不是空/无回应。
+    /// 默认背景色（`ui_theme::bg()`，窗口底）而不是空/无回应。
     #[test]
     fn background_color_query_gets_answered() {
         let _guard = lock_theme_globals();
@@ -2980,9 +2980,12 @@ mod event_proxy_answers_tests {
 
         let (ty, resp) = read_frame(&mut probe);
         assert_eq!(ty, 0);
+        let bg = smelt_plugin_api::ui::ui_theme::bg();
+        let [r, g, b] = [bg >> 16, bg >> 8, bg].map(|channel| channel & 0xff);
+        let expected = format!("rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}");
         assert!(
-            resp.contains("rgb:1e1e/1e1e/1d1d"),
-            "应含默认背景色（深色 0x1e1e1d）的 rgb 十六进制，实际: {resp:?}"
+            resp.contains(&expected),
+            "应含默认背景色 {expected}，实际: {resp:?}"
         );
     }
 

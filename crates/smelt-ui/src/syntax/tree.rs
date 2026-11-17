@@ -398,6 +398,11 @@ fn parse(
     text: &Rope,
     stop: &mut dyn FnMut() -> bool,
 ) -> Result<Option<Tree>, Stopped> {
+    // tree-sitter 只在解析走了一段之后才问进度，短文本或改动很小的增量解析从头到尾都不问。
+    // 开始前先看一眼，已经叫停就不解析。
+    if stop() {
+        return Err(Stopped);
+    }
     let mut parser = Parser::new();
     if parser.set_language(language).is_err()
         || (!included.is_empty() && parser.set_included_ranges(included).is_err())

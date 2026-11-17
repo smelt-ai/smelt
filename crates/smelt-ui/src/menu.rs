@@ -23,12 +23,11 @@ use crate::ui_theme;
 
 gpui::actions!(smelt_menu, [Up, Down, Left, Right, Activate, Dismiss]);
 const MENU_CONTEXT: &str = "SmeltMenu";
-const TRIGGER_CONTEXT: &str = "SmeltMenuTrigger";
 /// 紧凑菜单的行高（命令行、分组标题同高）和面板内边距。
 const ROW_HEIGHT: f32 = 28.;
 const SURFACE_PADDING: f32 = 2.;
 
-/// 安装菜单和下拉触发器的键盘绑定。每个 App 初始化一次。
+/// 安装菜单的键盘绑定。每个 App 初始化一次。
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", Up, Some(MENU_CONTEXT)),
@@ -38,8 +37,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("enter", Activate, Some(MENU_CONTEXT)),
         KeyBinding::new("space", Activate, Some(MENU_CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(MENU_CONTEXT)),
-        KeyBinding::new("enter", Activate, Some(TRIGGER_CONTEXT)),
-        KeyBinding::new("space", Activate, Some(TRIGGER_CONTEXT)),
     ]);
 }
 
@@ -223,6 +220,8 @@ struct MenuState {
     deferred: Option<DeferredPopover>,
     // One selection per level; the last level receives keyboard input.
     selection: Vec<Option<usize>>,
+    /// 下拉触发器上按下回车、空格时的焦点，松开时还是它才算一次键盘激活。
+    key_press: Option<FocusHandle>,
     _focus_out: Subscription,
 }
 
@@ -240,6 +239,7 @@ impl MenuState {
             trigger_bounds: Rc::default(),
             deferred: None,
             selection: Vec::new(),
+            key_press: None,
             _focus_out: focus_out,
         }
     }
@@ -502,11 +502,6 @@ impl RenderOnce for MenuTrigger {
             .relative()
             .refine_style(&self.style)
             .on_prepaint(move |bounds, _, _| trigger_bounds.set(bounds))
-            // 右键菜单常包着编辑器这类能获得焦点的内容，挂上键位上下文会让里面的空格、回车
-            // 也去匹配触发器的绑定。只有下拉按钮要用键盘打开。
-            .when(matches!(kind, TriggerKind::Dropdown(_)), |trigger| {
-                trigger.key_context(TRIGGER_CONTEXT)
-            })
             .child((self.trigger)(open));
         let trigger = if disabled {
             trigger
@@ -535,21 +530,42 @@ impl RenderOnce for MenuTrigger {
                         }
                     },
                 )
+                // 只有下拉按钮用键盘打开；右键菜单常包着编辑器这类内容，回车、空格是它们的。
+                // 照 gpui 原生的键盘点击：按下记下焦点，松开时焦点没挪才开关。触发按钮自己的
+                // 键盘点击照常发生；禁用的按钮把激活键拦在自己身上（见 `Button`），菜单不开，
+                // 和指针一致。不用按键绑定：绑定先于按键派发，会把按钮的键盘点击吞掉。
                 .when(matches!(kind, TriggerKind::Dropdown(_)), |trigger| {
-                    trigger.on_action({
-                        let state = state.clone();
-                        move |_: &Activate, window, cx| {
-                            cx.stop_propagation();
-                            if state.read(cx).menu.is_some() {
-                                state.update(cx, |state, cx| state.close(window, cx));
-                            } else {
-                                let menu = builder(window, cx);
-                                state.update(cx, |state, cx| {
-                                    state.open(menu, Point::default(), window, cx)
-                                });
+                    trigger
+                        .on_key_down({
+                            let state = state.clone();
+                            move |event, window, cx| {
+                                let press = crate::button::is_activation_key(&event.keystroke)
+                                    .then(|| window.focused(cx))
+                                    .flatten();
+                                state.update(cx, |state, _| state.key_press = press);
                             }
-                        }
-                    })
+                        })
+                        .on_key_up({
+                            let state = state.clone();
+                            move |event, window, cx| {
+                                let press = state.update(cx, |state, _| state.key_press.take());
+                                if !crate::button::is_activation_key(&event.keystroke)
+                                    || press.is_none()
+                                    || press != window.focused(cx)
+                                {
+                                    return;
+                                }
+                                cx.stop_propagation();
+                                if state.read(cx).menu.is_some() {
+                                    state.update(cx, |state, cx| state.close(window, cx));
+                                } else {
+                                    let menu = builder(window, cx);
+                                    state.update(cx, |state, cx| {
+                                        state.open(menu, Point::default(), window, cx)
+                                    });
+                                }
+                            }
+                        })
                 })
         };
         let content = open.then(|| {
@@ -874,6 +890,20 @@ fn svg_glyph(path: SharedString, color: gpui::Rgba) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{KeyDownEvent, KeyUpEvent, Keystroke, VisualTestContext};
+
+    /// 按下再松开。下拉触发器和 gpui 的键盘点击一样，松开时才生效；`simulate_keystrokes`
+    /// 只发按下。
+    fn press(window: &mut VisualTestContext, key: &str) {
+        let keystroke =
+            window.update(|_, cx| Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
+        window.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        window.simulate_event(KeyUpEvent { keystroke });
+    }
 
     fn sample() -> Menu {
         Menu::new()
@@ -987,6 +1017,9 @@ mod tests {
             calls: Rc::new(Cell::new(0)),
             context: true,
         });
+        // 测试窗口默认没激活，没激活的窗口不派发焦点离开。
+        window.update(|window, _| window.activate_window());
+        window.run_until_parked();
         window.update(|window, cx| window.draw(cx).clear(cx));
         window.simulate_mouse_down(
             gpui::point(px(20.), px(10.)),
@@ -1043,7 +1076,7 @@ mod tests {
         });
         window.update(|window, cx| window.draw(cx).clear(cx));
         for key in ["enter", "space"] {
-            window.simulate_keystrokes(key);
+            press(window, key);
             window.update(|window, cx| window.draw(cx).clear(cx));
             assert!(window.debug_bounds("smelt-menu-0").is_none(), "{key}");
         }
@@ -1071,7 +1104,7 @@ mod tests {
             let focus = view.read(cx).focus.clone();
             focus.focus(window, cx);
         });
-        window.simulate_keystrokes("enter");
+        press(window, "enter");
         window.update(|window, cx| window.draw(cx).clear(cx));
         window.simulate_keystrokes("down");
         window.update(|window, cx| window.draw(cx).clear(cx));
@@ -1133,7 +1166,7 @@ mod tests {
             window.focus_next(cx);
             window.draw(cx).clear(cx);
         });
-        window.simulate_keystrokes("enter");
+        press(window, "enter");
         window.update(|window, cx| window.draw(cx).clear(cx));
         assert_eq!(builds.get(), 2);
         assert!(window.debug_bounds("smelt-menu-0").is_some());

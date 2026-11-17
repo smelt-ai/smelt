@@ -212,10 +212,12 @@ export default class App extends View {
 }
 "#;
     let (mut context, view, _app) = mount(cx, source);
-    let width = |context: &mut VisualTestContext| {
+    // 加载时底换成 `soft_hover`，平时是次要按钮的底。
+    let loading_fill: gpui::Background = gpui::rgb(smelt_ui::ui_theme::soft_hover()).into();
+    let rest_fill: gpui::Background = smelt_ui::ui_theme::palette().button_secondary[0].into();
+    let width = |context: &mut VisualTestContext, background: gpui::Background| {
         context.update(|window, _| {
             let scale = window.scale_factor();
-            let background: gpui::Background = gpui::rgb(smelt_ui::ui_theme::soft()).into();
             window
                 .painted_quads()
                 .iter()
@@ -233,13 +235,13 @@ export default class App extends View {
         })
     };
     draw(&mut context);
-    let loading_width = width(&mut context);
+    let loading_width = width(&mut context, loading_fill);
     context.simulate_click(point(px(40.), px(52.)), Modifiers::default());
     draw(&mut context);
     assert!(tree(&mut context, &view).contains("hits: 0"));
     context.simulate_click(point(px(40.), px(94.)), Modifiers::default());
     draw(&mut context);
-    assert!((loading_width - width(&mut context)).abs() < 1.);
+    assert!((loading_width - width(&mut context, rest_fill)).abs() < 1.);
     context.simulate_click(point(px(40.), px(52.)), Modifiers::default());
     draw(&mut context);
     assert!(tree(&mut context, &view).contains("hits: 1"));
@@ -275,13 +277,16 @@ export default class App extends View {
     context.update(|window, _| {
         let scale = window.scale_factor();
         let quads = window.painted_quads();
-        for (top, height, color) in [
-            (40., 24., Some(smelt_ui::ui_theme::ink())),
-            (80., 32., Some(smelt_ui::ui_theme::soft())),
+        let palette = smelt_ui::ui_theme::palette();
+        let primary: gpui::Background = palette.button_primary[0].into();
+        let secondary: gpui::Background = palette.button_secondary[0].into();
+        for (top, height, background) in [
+            (40., 24., Some(primary)),
+            (80., 36., Some(secondary)),
             (120., 28., None),
-            (160., 28., Some(smelt_ui::ui_theme::soft())),
+            (160., 28., Some(secondary)),
             (200., 28., None),
-            (240., 28., Some(smelt_ui::ui_theme::soft())),
+            (240., 28., Some(secondary)),
         ] {
             let matching = quads.iter().filter(|quad| {
                 (quad.bounds.origin.x.0 - 30. * scale).abs() < 1.
@@ -289,8 +294,7 @@ export default class App extends View {
                     && (quad.bounds.size.width.0 - 180. * scale).abs() < 1.
                     && (quad.bounds.size.height.0 - height * scale).abs() < 1.
             });
-            if let Some(color) = color {
-                let background: gpui::Background = gpui::rgb(color).into();
+            if let Some(background) = background {
                 assert!(
                     matching
                         .into_iter()
@@ -306,7 +310,6 @@ export default class App extends View {
                 );
             }
         }
-        let background: gpui::Background = gpui::rgb(smelt_ui::ui_theme::soft()).into();
         let width_at = |top: f32| {
             quads
                 .iter()
@@ -314,7 +317,7 @@ export default class App extends View {
                     (quad.bounds.origin.x.0 - 30. * scale).abs() < 1.
                         && (quad.bounds.origin.y.0 - top * scale).abs() < 1.
                         && (quad.bounds.size.height.0 - 24. * scale).abs() < 1.
-                        && quad.background == background
+                        && quad.background == secondary
                 })
                 .expect("labelled button must paint a background")
                 .bounds
@@ -329,11 +332,9 @@ export default class App extends View {
         assert!((short - relabel).abs() < 1., "last label must win");
     });
 
-    // 两个透明角色悬停时都使用中性底色。
-    for (top, color) in [
-        (120., gpui::rgb(smelt_ui::ui_theme::soft())),
-        (200., gpui::rgb(smelt_ui::ui_theme::soft())),
-    ] {
+    // 两个透明角色悬停时都用列表行的悬停底。
+    let row_hover = smelt_ui::ui_theme::palette().row_hover;
+    for (top, color) in [(120., row_hover), (200., row_hover)] {
         context.simulate_mouse_move(point(px(40.), px(top + 14.)), None, Modifiers::default());
         draw(&mut context);
         context.update(|window, _| {

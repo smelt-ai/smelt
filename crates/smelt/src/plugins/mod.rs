@@ -695,11 +695,15 @@ export default class App extends View {
         context.update(|window, _| {
             let scale = window.scale_factor();
             let quads = window.painted_quads();
-            for (top, height, color) in [
+            let secondary: gpui::Background =
+                smelt_ui::ui_theme::palette().button_secondary[0].into();
+            // 主按钮开着 `loading`，加载时底换成 `soft_hover`。
+            let loading: gpui::Background = gpui::rgb(smelt_ui::ui_theme::soft_hover()).into();
+            for (top, height, background) in [
                 (40., 24., None),
-                (80., 24., Some(smelt_ui::ui_theme::soft())),
-                (120., 24., Some(smelt_ui::ui_theme::ink())),
-                (160., 24., Some(smelt_ui::ui_theme::soft())),
+                (80., 24., Some(secondary)),
+                (120., 24., Some(loading)),
+                (160., 24., Some(secondary)),
             ] {
                 let matching = quads.iter().filter(|quad| {
                     (quad.bounds.origin.x.0 - 30. * scale).abs() < 1.
@@ -707,8 +711,7 @@ export default class App extends View {
                         && (quad.bounds.size.width.0 - 180. * scale).abs() < 1.
                         && (quad.bounds.size.height.0 - height * scale).abs() < 1.
                 });
-                if let Some(color) = color {
-                    let background: gpui::Background = gpui::rgb(color).into();
+                if let Some(background) = background {
                     assert!(
                         matching
                             .into_iter()

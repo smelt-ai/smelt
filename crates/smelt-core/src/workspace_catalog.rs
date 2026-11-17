@@ -639,6 +639,10 @@ mod tests {
         let change = create_conversation_on(&store, &conversation).unwrap();
         assert!(change.changed);
         assert_eq!(change.directory.revision, 1);
+        // 最近活动时间由守护按新建那一刻写，不用客户端带来的。
+        let stamped = change.directory.conversations[0].last_updated_at;
+        assert_ne!(stamped, conversation.last_updated_at);
+        conversation.last_updated_at = stamped;
         assert_eq!(change.directory.conversations, [conversation.clone()]);
 
         let removed = delete_conversation_on(&store, "conv-1").unwrap();
