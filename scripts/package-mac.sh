@@ -198,6 +198,13 @@ fi
 if [[ -d "$ROOT/target/smelt-agent/skills" ]]; then
   cp -R "$ROOT/target/smelt-agent/skills" "$PI_DIR/skills"
 fi
+# LICENSE、NOTICE、THIRD_PARTY_LICENSES.txt 放 Resources 根。对外分发（CI 发版）必须带，
+# 缺 cargo-about 直接失败；本机 make install 只是自用，没装就跳过。
+if [[ -n "${CI:-}" ]] || command -v cargo-about >/dev/null; then
+  "$ROOT/scripts/third-party-licenses.sh" "$RES"
+else
+  echo "⚠ 没装 cargo-about，App 里不带第三方许可证清单；自用可以，对外分发不行（cargo install cargo-about --locked）" >&2
+fi
 # 插件（gpui-shell 脚本应用，见 crates/smelt/src/plugins）：整目录随 App
 # 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell 加载时写编辑器文件的行为，
 # 不会写进已签名的 .app）。

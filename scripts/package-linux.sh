@@ -2,6 +2,7 @@
 # 打 Linux 无头运行时（smeltd）的发布包：dist/smeltd-<版本>-linux-<架构>.tar.gz。
 # 由 release.yml 在两种架构的 runner 上各跑一次。
 # 包里还有 smelt-agent、photon wasm，pi-tui 的 native/，以及内置技能 skills/。Bun 编在 smelt-agent 里，不另外打包。
+# 另带 LICENSE、NOTICE、THIRD_PARTY_LICENSES.txt（scripts/third-party-licenses.sh，要 cargo-about）。
 #
 # 不交叉编译：在哪种架构的 Linux 机器上跑，就出哪种架构的包。只编运行时这一侧：
 # 桌面 GUI 那几个 crate 依赖 GPUI，只有 macOS 版。
@@ -60,6 +61,7 @@ if [[ -d target/smelt-agent/skills ]]; then
 fi
 # 远程桌面（install.sh --with-desktop）的启动脚本、XFCE 设置、Chrome 策略。
 cp -R scripts/desktop "$staging/desktop"
+scripts/third-party-licenses.sh "$staging"
 tar -C dist -czf "dist/$name.tar.gz" "$name"
 rm -rf "$staging"
 echo "✓ 产物：dist/$name.tar.gz"
