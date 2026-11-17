@@ -40,16 +40,13 @@ gpui::actions!(tooltip_snapshot, [Save, Sequence]);
 /// 每帧把整页画出来。闭包里可以引用 `setup` 时建好的实体（输入框状态等）。
 type Draw = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
-/// 组件库的全套图标，加上组件自己引用、由应用提供的 svg（`kit::Glyph::Path`）。
-/// 应用里由宿主的资源表提供，这里直接取宿主那一份，不另存副本。
+/// 和应用一样：smelt 自带的图标（`smelt_ui::assets`），再加 gpui-kit 的全套图标。
 struct SnapshotAssets;
 
 impl gpui::AssetSource for SnapshotAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        if path == "smelt-icons/trash.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../../smelt/assets/icons/trash.svg").as_slice(),
-            )));
+        if let Some(bytes) = smelt_ui::assets::load(path) {
+            return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
         }
         gpui_kit_assets::AllAssets.load(path)
     }

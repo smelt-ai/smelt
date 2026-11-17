@@ -88,7 +88,7 @@ flutter:
   uses-material-design: true
   generate: true
 
-  # 各家 agent 的身份图标。**这几个 SVG 是从 `crates/smelt/assets/icons/` 复制来的**
+  # 各家 agent 的身份图标。**这几个 SVG 是从 `crates/smelt-ui/assets/icons/` 复制来的**
   # ——Flutter 的 asset 声明不能指到 package 目录外，所以只能带一份副本。桌面端换图
   # 标时这里要跟着换（THIRD_PARTY_NOTICES.md 一并复制，LobeHub Icons / MIT）。
   assets:

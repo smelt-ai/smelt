@@ -573,101 +573,16 @@ fn open_workspace_window(cx: &mut App) -> MainWindow {
     }
 }
 
-/// gpui-kit 的图标集里没有的几枚图标（agent 身份、git 分支、机器系统等）由 smelt 自带，走
-/// `smelt-icons/` 前缀，不会跟 gpui-kit 以后新增的资源撞名。插件按路径取用。
-/// agent 身份图标：资源名按稳定的存档 id 拼（`smelt-icons/agent-<id>.svg`），
-/// 所以这里也按 id 建表，而不是一串手写的 `if path == ...`。
-///
-/// 那串 if 链是「加一家 agent 要改的第 N 个地方」里最容易漏的一个：漏了不报错、
-/// 不 panic，只是图标那一格空着。查表 + 遍历所有 agent 的不变量测试，把「漏登记」从
-/// 上线后才发现变成编译测试失败。
-const AGENT_ICON_SVG: &[(&str, &[u8])] = &[
-    ("claude", include_bytes!("../assets/icons/agent-claude.svg")),
-    ("codex", include_bytes!("../assets/icons/agent-codex.svg")),
-    (
-        "copilot",
-        include_bytes!("../assets/icons/agent-copilot.svg"),
-    ),
-    ("grok", include_bytes!("../assets/icons/agent-grok.svg")),
-    (
-        "antigravity",
-        include_bytes!("../assets/icons/agent-antigravity.svg"),
-    ),
-    ("cursor", include_bytes!("../assets/icons/agent-cursor.svg")),
-    (
-        "opencode",
-        include_bytes!("../assets/icons/agent-opencode.svg"),
-    ),
-    ("kiro", include_bytes!("../assets/icons/agent-kiro.svg")),
-    ("pi", include_bytes!("../assets/icons/agent-pi.svg")),
-    ("omp", include_bytes!("../assets/icons/agent-omp.svg")),
-    ("crush", include_bytes!("../assets/icons/agent-crush.svg")),
-    // 通用 ACP 的自定义 Agent 名字为空时的兜底；有名字时画首字徽标。
-    ("custom", include_bytes!("../assets/icons/agent-custom.svg")),
-];
-
-/// `smelt-icons/agent-<id>.svg` → 图标字节；不是 agent 图标路径返回 None。
-fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
-    let id = path
-        .strip_prefix("smelt-icons/agent-")?
-        .strip_suffix(".svg")?;
-    AGENT_ICON_SVG
-        .iter()
-        .find(|(name, _)| *name == id)
-        .map(|(_, bytes)| *bytes)
-}
-
-// 图标用 gpui-kit 的全套目录（`AllAssets`，Lucide 全部 + gpui-kit 自己的），不只打包组件
+// 资源：smelt 自带的几枚图标（`smelt_ui::assets`），再加 gpui-kit 的全套目录（`AllAssets`，
+// Lucide 全部 + gpui-kit 自己的），不只打包组件
 // 用到的那一百来个：插件（包括用户写的 JS 插件）按 Lucide 名字取图标，只编一部分进来，没编进来
 // 的图标位置就空着。全套 SVG 约 0.7 MB。
 struct SmeltAssets;
 
 impl gpui::AssetSource for SmeltAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        if let Some(bytes) = agent_icon_svg(path) {
+        if let Some(bytes) = smelt_ui::assets::load(path) {
             return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
-        }
-        if path == "smelt-icons/git-branch.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../assets/icons/git-branch.svg").as_slice(),
-            )));
-        }
-        if path == "smelt-icons/square-pen.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../assets/icons/square-pen.svg").as_slice(),
-            )));
-        }
-        if path == "smelt-icons/trash.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../assets/icons/trash.svg").as_slice(),
-            )));
-        }
-        if path == "smelt-icons/monitor.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../assets/icons/monitor.svg").as_slice(),
-            )));
-        }
-        if path == "smelt-icons/machine-linux.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../assets/icons/machine-linux.svg").as_slice(),
-            )));
-        }
-        if path == "smelt-icons/machine-windows.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../assets/icons/machine-windows.svg").as_slice(),
-            )));
-        }
-        // 停靠区开合按钮的展开态：分隔线外侧加实心色块。自带的 panel-left / panel-right
-        // 只有一根细线，18px 下开合两态分不清。
-        if path == "smelt-icons/panel-left-filled.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../assets/icons/panel-left-filled.svg").as_slice(),
-            )));
-        }
-        if path == "smelt-icons/panel-right-filled.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../assets/icons/panel-right-filled.svg").as_slice(),
-            )));
         }
         gpui_kit_assets::AllAssets.load(path)
     }

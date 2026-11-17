@@ -1726,7 +1726,7 @@ mod tests {
             .and_then(|crates| crates.parent())
             .expect("repo root");
         let bundles = [
-            repo.join("crates/smelt/assets/icons"),
+            repo.join("crates/smelt-ui/assets/icons"),
             repo.join("mobile/assets/agent-icons"),
         ];
 

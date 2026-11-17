@@ -4,6 +4,7 @@
 
 pub mod acp_completion;
 pub mod alert;
+pub mod assets;
 pub mod badge;
 mod base_theme;
 pub mod button;
