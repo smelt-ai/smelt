@@ -55,6 +55,7 @@ fn info(id: &str, key: Option<&str>) -> CommandInfo {
         context: "Workspace".into(),
         palette: true,
         requires_args: false,
+        args: Some(Vec::new()),
     }
 }
 

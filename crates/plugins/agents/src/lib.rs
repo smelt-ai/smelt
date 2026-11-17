@@ -113,6 +113,7 @@ fn register_commands(new_conversation_title: String, cx: &mut App) {
         context: "Workspace".to_string(),
         palette: true,
         requires_args: false,
+        args: Some(Vec::new()),
         handler: Rc::new(|_, _, cx| new_conversation(cx)),
     }];
     commands.extend(agent_hosts::commands());

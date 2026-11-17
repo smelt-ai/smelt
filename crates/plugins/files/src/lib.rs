@@ -100,6 +100,7 @@ pub fn register(cx: &mut App) {
             context: FILES_KEY_CONTEXT.into(),
             palette: true,
             requires_args: false,
+            args: Some(Vec::new()),
             handler: Rc::new(|_, _, cx| {
                 let Some(panel) = built_panel(cx) else {
                     return Handled::Pass;
@@ -117,6 +118,7 @@ pub fn register(cx: &mut App) {
             context: "Workspace".into(),
             palette: false,
             requires_args: true,
+            args: Some(api::FileLocation::arg_fields()),
             handler: Rc::new(|args, _, cx| {
                 if api::FileLocation::from_args(args).is_none() {
                     return Handled::err(format!("打开文件的参数不对：{args}"));

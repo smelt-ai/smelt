@@ -380,12 +380,12 @@ fn plugin_items(
     };
     api::context_menu_items(menu, machine, cx)
         .into_iter()
-        .map(|item| plugin_item(item, &context))
+        .map(|item| plugin_item(item, &context, cx))
         .collect()
 }
 
 /// 一项登记的菜单项。有彩色图标（如应用自己的图标）画它，没有画线性图标。
-fn plugin_item(item: ContextMenuItem, context: &serde_json::Value) -> MenuItem {
+fn plugin_item(item: ContextMenuItem, context: &serde_json::Value, cx: &App) -> MenuItem {
     let mut entry = MenuItem::new(item.label);
     if let Some(icon) = item.icon {
         entry = entry.icon_path(icon);
@@ -395,13 +395,13 @@ fn plugin_item(item: ContextMenuItem, context: &serde_json::Value) -> MenuItem {
     }
     match item.action {
         ContextMenuAction::Run { command, args } => {
-            let args = api::context_menu_args(&args, context);
+            let args = api::context_menu_args(&command, &args, context, cx);
             entry.on_click(move |_, _, cx| run_plugin_command(&command, args.clone(), cx))
         }
         ContextMenuAction::Submenu(items) => entry.submenu(
             items
                 .into_iter()
-                .map(|item| plugin_item(item, context))
+                .map(|item| plugin_item(item, context, cx))
                 .fold(Menu::new(), Menu::item),
         ),
     }

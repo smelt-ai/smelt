@@ -9,9 +9,8 @@
 //! `smelt-plugin-api`（见 `smelt_plugin_api::js`，每个插件一份，模块由此知道是谁在调）和
 //! `smelt-fs`（见 `host_fs`）。gpui-shell 按
 //! 调用所在视图的 Policy 分派宿主函数，所以各插件拿到的是自己那份。挂载时把它设成默认
-//! Policy，视图带着它出生（见 `mount_all`）。插件 manifest 的 `capabilities` 里只认
-//! `network.hosts`：gpui-shell 的网络授权只能逐个列主机名，各插件声明的主机合起来授给
-//! 全部插件。
+//! Policy，视图带着它出生（见 `mount_all`）。插件是可信代码，权限不按 manifest 给，
+//! 一律见 [`unrestricted`]。
 //!
 //! 没用上游的 `PluginManager`：它按 manifest 给每个插件新建一份空 Policy，拿不到
 //! 宿主注册的模块。这里只用公开的 `PluginManifest::read` 发现插件。
@@ -64,8 +63,6 @@ struct Registry {
     panels: Vec<PluginPanel>,
     /// 已登记主题的插件来源，重载时整批撤下再登记。
     theme_owners: Vec<String>,
-    /// 这一批插件的权限，设置页单独加载时也用它。
-    capabilities: Option<Capabilities>,
 }
 
 struct PluginPanel {
@@ -193,14 +190,6 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
         unregister_contributions(&panel.id, cx);
     }
 
-    // 视图出生时定下权限，所以每次挂载前按这一批插件的声明重新装一遍。
-    let hosts = found
-        .iter()
-        .flat_map(|plugin| declared_hosts(&plugin.root))
-        .collect::<Vec<_>>();
-    let capabilities = unrestricted().network_hosts(hosts);
-    REGISTRY.with(|registry| registry.borrow_mut().capabilities = Some(capabilities.clone()));
-
     let panels: Vec<PluginPanel> = found
         .into_iter()
         .filter_map(
@@ -231,7 +220,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     Ok(runtime) => {
                         // 开关挂在运行时上、加载时读，所以每个插件加载前按来源设一次。
                         runtime.set_editor_files(source.editor_files());
-                        plugin_policy(&id, &capabilities, &plugin)
+                        plugin_policy(&id, &plugin)
                             .and_then(|policy| {
                                 // 加载时解析导入、挂载时视图拿走的都是默认 Policy。
                                 policy::set_default(policy);
@@ -372,12 +361,9 @@ fn mount_settings_page(
     cx: &mut App,
 ) -> Result<Entity<ScriptView>, String> {
     let runtime = runtime(cx).map_err(|error| format!("插件运行时启动失败：{error:#}"))?;
-    let capabilities = REGISTRY
-        .with(|registry| registry.borrow().capabilities.clone())
-        .ok_or("插件还没加载")?;
     let plugin = JsPlugin::for_settings_page(id, name);
     runtime.set_editor_files(source.editor_files());
-    let view = plugin_policy(id, &capabilities, &plugin).and_then(|policy| {
+    let view = plugin_policy(id, &plugin).and_then(|policy| {
         policy::set_default(policy);
         let application = runtime.load_application(root, entry)?;
         runtime.mount_application(&application, window, cx)
@@ -390,15 +376,11 @@ fn mount_settings_page(
 }
 
 /// 一个插件自己的 Policy：权限大家一样，宿主模块里的 `smelt-plugin-api` 是它自己的。
-fn plugin_policy(
-    id: &str,
-    capabilities: &Capabilities,
-    plugin: &JsPlugin,
-) -> anyhow::Result<Policy> {
+fn plugin_policy(id: &str, plugin: &JsPlugin) -> anyhow::Result<Policy> {
     let host_error = |error: gpui_shell::HostError| anyhow::anyhow!(error.message().to_string());
     Policy::new()
         .with_application(id)
-        .with_capabilities(capabilities.clone())
+        .with_capabilities(unrestricted())
         .with_host_module(plugin.module())
         .and_then(|policy| policy.with_host_module(host_fs::fs_module(Rc::new(host_fs::HostFs))))
         .map_err(host_error)
@@ -526,9 +508,10 @@ fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
 }
 
 /// 插件是可信代码，和 smelt 自己一样不设限：任意文件、任意命令、剪贴板、全部环境变量。
+/// 这不是安全边界，装别人的插件前要读过它的代码。
 ///
-/// 网络另算：gpui-shell 只认逐个列出的主机名，没有「任意主机」，由调用方补上各插件
-/// 声明的主机（见 `declared_hosts`）。`exit` 不给：
+/// 网络授权不给：gpui-shell 只认逐个列出的主机名，没有「任意主机」，按清单声明逐个授
+/// 又名不副实（插件能跑 `curl`）。所以脚本里的 `fetch` 用不了，要联网经命令执行。`exit` 不给：
 /// 那是请宿主退出，插件不该能关掉 smelt。`localStorage` 不给：那是 JSON 文件，业务数据
 /// 要进 SQLite；插件要存东西就自己写文件。
 fn unrestricted() -> Capabilities {
@@ -541,26 +524,6 @@ fn unrestricted() -> Capabilities {
         .clipboard_write(true)
         // 只能按名字授权，就把启动时有的全部列上。
         .env_variables(std::env::vars_os().filter_map(|(name, _)| name.into_string().ok()))
-}
-
-/// 插件清单里 `capabilities.network.hosts` 声明的主机。只读这一项，其余权限一律放开，
-/// 不看清单。清单坏了发现阶段就已跳过，这里读不出来就当没声明。
-fn declared_hosts(root: &std::path::Path) -> Vec<String> {
-    std::fs::read_to_string(root.join(MANIFEST_FILE))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|manifest| {
-            manifest
-                .pointer("/capabilities/network/hosts")?
-                .as_array()
-                .map(|hosts| {
-                    hosts
-                        .iter()
-                        .filter_map(|host| host.as_str().map(str::to_owned))
-                        .collect()
-                })
-        })
-        .unwrap_or_default()
 }
 
 /// 文件系统的根：Unix 是 `/`，Windows 是每个存在的盘符。
@@ -636,7 +599,7 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MANIFEST_FILE, PluginManifest, declared_hosts, repo_plugin_dir};
+    use super::{MANIFEST_FILE, PluginManifest, repo_plugin_dir};
 
     #[gpui::test]
     fn production_runtime_mounts_skills_button_helper(cx: &mut gpui::TestAppContext) {
@@ -824,27 +787,6 @@ export default class App extends View {
             assert!(super::check_settings_entry(&dir, entry).is_err(), "{entry}");
         }
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn declared_hosts_come_from_the_manifest() {
-        let dir = std::env::temp_dir().join(format!("smelt-plugin-hosts-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(MANIFEST_FILE),
-            r#"{"id":"com.example.x","name":"X","entry":"main.js",
-                "capabilities":{"network":{"hosts":["api.github.com","example.com"]}}}"#,
-        )
-        .unwrap();
-        assert_eq!(declared_hosts(&dir), ["api.github.com", "example.com"]);
-
-        std::fs::write(
-            dir.join(MANIFEST_FILE),
-            r#"{"id":"com.example.x","name":"X","entry":"main.js"}"#,
-        )
-        .unwrap();
-        assert!(declared_hosts(&dir).is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 仓库里每个插件的清单都要能解析、入口存在、id 不重复。本地 clone 进来的

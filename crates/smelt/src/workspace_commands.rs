@@ -124,6 +124,7 @@ fn register_with(
                 context: def.context.to_string(),
                 palette: def.palette,
                 requires_args: false,
+                args: Some(Vec::new()),
                 handler: handler(def),
             })
             .chain(typed)

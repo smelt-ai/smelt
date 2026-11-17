@@ -174,12 +174,18 @@ fn shown(items: Vec<ContextMenuItem>, machine: &RuntimeKey, cx: &App) -> Vec<Con
         .collect()
 }
 
-/// 点了一项交给命令的参数：登记时给的 `args` 并上画菜单那一方给的 `context`（一个对象，形状
-/// 见那个菜单的契约），同名字段以 `context` 为准。
+/// 点了一项交给命令 `command` 的参数：登记时给的 `args` 并上画菜单那一方给的 `context`（一个
+/// 对象，形状见那个菜单的契约），同名字段以 `context` 为准。
+///
+/// 上下文是菜单知道的全部，命令只要其中几样：命令声明了认的参数（[`crate::CommandSpec::args`]）
+/// 时只并它认的字段，免得多出来的字段让命令拒掉。不带参数的命令什么都不并，交 `null`。
 pub fn context_menu_args(
+    command: &str,
     args: &serde_json::Value,
     context: &serde_json::Value,
+    cx: &App,
 ) -> serde_json::Value {
+    let fields = crate::command(command, cx).and_then(|info| info.args);
     let mut merged = match args {
         serde_json::Value::Object(args) => args.clone(),
         _ => serde_json::Map::new(),
@@ -188,8 +194,16 @@ pub fn context_menu_args(
         merged.extend(
             context
                 .iter()
+                .filter(|(key, _)| {
+                    fields
+                        .as_ref()
+                        .is_none_or(|fields| fields.iter().any(|field| field == *key))
+                })
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
+    }
+    if merged.is_empty() && fields.is_some_and(|fields| fields.is_empty()) {
+        return serde_json::Value::Null;
     }
     serde_json::Value::Object(merged)
 }
@@ -240,6 +254,7 @@ mod tests {
             context: "Workspace".to_string(),
             palette: false,
             requires_args: true,
+            args: None,
             handler: Rc::new(|_, _, _| Handled::ok()),
         };
         register_commands(owner, owner, vec![spec], cx).unwrap();
@@ -363,17 +378,61 @@ mod tests {
         assert_eq!(changes.get(), 1);
     }
 
-    #[test]
-    fn context_fields_win_over_registered_args() {
-        let args = serde_json::json!({ "app": "zed", "path": "stale" });
-        let context = serde_json::json!({ "machine": null, "path": "/work" });
-        assert_eq!(
-            context_menu_args(&args, &context),
-            serde_json::json!({ "app": "zed", "machine": null, "path": "/work" })
-        );
-        assert_eq!(
-            context_menu_args(&serde_json::Value::Null, &context),
-            context
-        );
+    #[gpui::test]
+    fn context_fields_win_over_registered_args(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            // 没声明参数的命令拿到全部上下文。
+            register_command("ide", cx);
+            let args = serde_json::json!({ "app": "zed", "path": "stale" });
+            let context = serde_json::json!({ "machine": null, "path": "/work" });
+            assert_eq!(
+                context_menu_args("ide/open-with", &args, &context, cx),
+                serde_json::json!({ "app": "zed", "machine": null, "path": "/work" })
+            );
+            assert_eq!(
+                context_menu_args("ide/open-with", &serde_json::Value::Null, &context, cx),
+                context
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn context_is_cut_to_the_fields_a_command_takes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let declared = |name: &str, fields: &[&str]| CommandSpec {
+                name: name.to_string(),
+                title: name.to_string(),
+                key: None,
+                context: "Workspace".to_string(),
+                palette: false,
+                requires_args: false,
+                args: Some(fields.iter().map(|field| field.to_string()).collect()),
+                handler: Rc::new(|_, _, _| Handled::ok()),
+            };
+            register_commands(
+                "ide",
+                "ide",
+                vec![
+                    declared("open-with", &["app", "path"]),
+                    declared("refresh", &[]),
+                ],
+                cx,
+            )
+            .unwrap();
+            let context = serde_json::json!({ "machine": null, "path": "/work", "name": "w" });
+            assert_eq!(
+                context_menu_args(
+                    "ide/open-with",
+                    &serde_json::json!({ "app": "zed" }),
+                    &context,
+                    cx
+                ),
+                serde_json::json!({ "app": "zed", "path": "/work" })
+            );
+            assert_eq!(
+                context_menu_args("ide/refresh", &serde_json::Value::Null, &context, cx),
+                serde_json::Value::Null
+            );
+        });
     }
 }

@@ -143,6 +143,7 @@ fn shortcut(
         context: "Workspace".to_string(),
         palette: true,
         requires_args: false,
+        args: Some(Vec::new()),
         handler: Rc::new(
             move |_: &serde_json::Value, window: Option<&mut Window>, cx: &mut App| match window {
                 Some(window) => run(window, cx),

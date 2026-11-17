@@ -70,7 +70,7 @@ pub mod js;
 
 pub use command::{
     Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, NO_MAIN_WINDOW,
-    RunCommand, command, commands, invoke, register_commands, run, unregister_commands,
+    RunCommand, arg_fields, command, commands, invoke, register_commands, run, unregister_commands,
 };
 pub use connections::{
     ADD_MACHINE, AddMachine, AddedMachine, Connection, ConnectionLink, ConnectionState,

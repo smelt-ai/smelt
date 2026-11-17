@@ -145,6 +145,11 @@ export interface Command {
   palette?: boolean;
   /** 要带参数才能执行：只给代码用 run 调，不能有 key、不进命令面板、不在快捷键设置里出现。默认 false。 */
   requires_args?: boolean;
+  /**
+   * 认的参数字段（参数对象顶层的键），[] 是不带参数。给了的话执行时参数里有表外的字段，宿主直接报错，不交给
+   * next_command；不给不查。右键菜单的上下文也只并这里列的字段。
+   */
+  args?: string[];
 }
 /** 替换本插件登记的命令。空数组撤下全部；一条不合法整组不登记。执行时由 next_command 取到。 */
 export function register_commands(commands: Command[]): null;
@@ -256,6 +261,8 @@ export interface CommandInfo {
   context: string;
   palette: boolean;
   requires_args: boolean;
+  /** 认的参数字段；null 是没声明，不查。 */
+  args: string[] | null;
 }
 /** 所有来源登记的命令，按登记先后。变了发 commands_changed。 */
 export function commands(): CommandInfo[];
@@ -709,13 +716,11 @@ impl JsPlugin {
                 let context = arguments.get(2).map(json_value).unwrap_or(Value::Null);
                 let items = in_app("context_menu_items", |cx| {
                     crate::context_menu_items(&menu, &machine, cx)
-                })?;
-                Ok(HostValue::Array(
-                    items
                         .iter()
-                        .map(|item| context_menu_value(item, &context))
-                        .collect(),
-                ))
+                        .map(|item| context_menu_value(item, &context, cx))
+                        .collect()
+                })?;
+                Ok(HostValue::Array(items))
             })
             .async_function("call", |arguments| {
                 let machine = machine_argument("call", arguments, 0)?;
@@ -1511,6 +1516,27 @@ fn command_arguments(
             };
             let requires_args = flag("requires_args", false)?;
             let palette = flag("palette", !requires_args)?;
+            let args = match command.get("args") {
+                None | Some(HostValue::Null) => None,
+                Some(HostValue::Array(fields)) => Some(
+                    fields
+                        .iter()
+                        .map(|field| match field {
+                            HostValue::Str(field) if !field.is_empty() => Ok(field.clone()),
+                            other => Err(invalid(&format!(
+                                "args 要是字段名（非空字符串）的数组，收到 {}",
+                                other.describe()
+                            ))),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Some(other) => {
+                    return Err(invalid(&format!(
+                        "args 要是字段名的数组，收到 {}",
+                        other.describe()
+                    )));
+                }
+            };
             let state = Rc::downgrade(&plugin.0);
             let handler_name = name.clone();
             Ok(CommandSpec {
@@ -1518,6 +1544,7 @@ fn command_arguments(
                 context: text("context")?.unwrap_or_else(|| "Workspace".to_string()),
                 palette,
                 requires_args,
+                args,
                 handler: Rc::new(move |args, _, cx| {
                     let Some(result) = state
                         .upgrade()
@@ -1867,11 +1894,17 @@ fn command_value(command: &crate::CommandInfo) -> HostValue {
         .field("context", command.context.as_ref())
         .field("palette", command.palette)
         .field("requires_args", command.requires_args)
+        .field(
+            "args",
+            command.args.as_ref().map_or(HostValue::Null, |fields| {
+                HostValue::Array(fields.iter().map(|field| field.as_str().into()).collect())
+            }),
+        )
         .into()
 }
 
 /// 给脚本画的一项右键菜单：命令的参数已经并上菜单的上下文，点了直接 `run`。
-fn context_menu_value(item: &ContextMenuItem, context: &Value) -> HostValue {
+fn context_menu_value(item: &ContextMenuItem, context: &Value, cx: &App) -> HostValue {
     let png = item.image.as_ref().map_or(HostValue::Null, |image| {
         HostValue::Array(
             image
@@ -1888,7 +1921,10 @@ fn context_menu_value(item: &ContextMenuItem, context: &Value) -> HostValue {
     match &item.action {
         ContextMenuAction::Run { command, args } => object
             .field("command", command.as_str())
-            .field("args", host_value(&crate::context_menu_args(args, context)))
+            .field(
+                "args",
+                host_value(&crate::context_menu_args(command, args, context, cx)),
+            )
             .into(),
         ContextMenuAction::Submenu(items) => object
             .field(
@@ -1896,7 +1932,7 @@ fn context_menu_value(item: &ContextMenuItem, context: &Value) -> HostValue {
                 HostValue::Array(
                     items
                         .iter()
-                        .map(|item| context_menu_value(item, context))
+                        .map(|item| context_menu_value(item, context, cx))
                         .collect(),
                 ),
             )
@@ -2218,6 +2254,19 @@ mod tests {
                 ("name", "a".into()),
                 ("title", "A".into()),
                 ("palette", "yes".into()),
+            ])]),
+            HostArguments::new([command(&[
+                ("name", "a".into()),
+                ("title", "A".into()),
+                ("args", "path".into()),
+            ])]),
+            HostArguments::new([command(&[
+                ("name", "a".into()),
+                ("title", "A".into()),
+                (
+                    "args",
+                    HostValue::Array(vec!["path".into(), HostValue::Number(1.0)]),
+                ),
             ])]),
         ] {
             let error = module.call("register_commands", &arguments).unwrap_err();
@@ -2683,8 +2732,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn context_menu_entries_carry_merged_args() {
+    #[gpui::test]
+    fn context_menu_entries_carry_merged_args(cx: &mut gpui::TestAppContext) {
         let item = ContextMenuItem {
             label: "打开".into(),
             image: None,
@@ -2701,7 +2750,8 @@ mod tests {
                 },
             }]),
         };
-        let value = context_menu_value(&item, &serde_json::json!({ "path": "/w/a.rs" }));
+        let context = serde_json::json!({ "path": "/w/a.rs" });
+        let value = cx.update(|cx| context_menu_value(&item, &context, cx));
         assert_eq!(value.get("png"), Some(&HostValue::Null));
         let HostValue::Array(submenu) = value.get("submenu").unwrap() else {
             panic!("要有子菜单");

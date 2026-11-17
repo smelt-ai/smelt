@@ -77,6 +77,7 @@ fn open_pull_request_command() -> CommandSpec {
         context: "Workspace".into(),
         palette: false,
         requires_args: true,
+        args: api::arg_fields::<contract::OpenPullRequest>(),
         handler: Rc::new(|args, _, cx| {
             let target: contract::OpenPullRequest = match api::serde_json::from_value(args.clone())
             {
@@ -108,6 +109,7 @@ fn jump_hunk_command(name: &str, title: &str, key: &str, forward: bool) -> Comma
         context: CHANGES_KEY_CONTEXT.into(),
         palette: true,
         requires_args: false,
+        args: Some(Vec::new()),
         handler: Rc::new(move |_, _, cx| {
             let Some(panel) = built_panel(cx) else {
                 return Handled::Pass;

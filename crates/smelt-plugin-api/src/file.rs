@@ -28,6 +28,11 @@ impl FileLocation {
         })
     }
 
+    /// [`Self::to_args`] 里的字段，打开者命令登记时填进 [`crate::CommandSpec::args`]。
+    pub fn arg_fields() -> Vec<String> {
+        ["machine", "path", "line"].map(str::to_string).to_vec()
+    }
+
     /// [`Self::to_args`] 的反过来；形状不对是 `None`。
     pub fn from_args(args: &serde_json::Value) -> Option<Self> {
         Some(Self {
@@ -110,6 +115,7 @@ mod tests {
             context: "Workspace".to_string(),
             palette: false,
             requires_args: true,
+            args: Some(FileLocation::arg_fields()),
             handler: Rc::new(|_, _, _| Handled::ok()),
         }
     }

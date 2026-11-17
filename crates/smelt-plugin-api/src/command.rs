@@ -17,7 +17,7 @@ use gpui::{
     AnyWindowHandle, App, Global, KeyBindingContextPredicate, Keystroke, SharedString, Task, Window,
 };
 use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::de::{self, DeserializeOwned, Visitor};
 
 use crate::HostEvent;
 
@@ -78,8 +78,8 @@ impl Handled {
 }
 
 /// 命令的处理函数。`window` 是主窗口，主窗口没开时是 `None`：用不到窗口的命令（发通知、
-/// 打开文件）照样做，用得到的交回 [`NO_MAIN_WINDOW`]。参数认不出的字段忽略。出错放进结果
-/// 交回，不自己报。
+/// 打开文件）照样做，用得到的交回 [`NO_MAIN_WINDOW`]。参数里有登记时没声明的字段，宿主
+/// 不调它，直接交回错误（见 [`CommandSpec::args`]）。出错放进结果交回，不自己报。
 pub type CommandHandler = Rc<dyn Fn(&serde_json::Value, Option<&mut Window>, &mut App) -> Handled>;
 
 /// 命令要主窗口、主窗口却没开时交回的原因。
@@ -176,6 +176,7 @@ impl<A: DeserializeOwned + 'static, R: Serialize + 'static> Command<A, R> {
             context: "Workspace".to_string(),
             palette: false,
             requires_args: true,
+            args: arg_fields::<A>(),
             handler: Rc::new(move |args, window, cx| {
                 match serde_json::from_value::<A>(args.clone()) {
                     Ok(args) => handler(args, window, cx),
@@ -188,6 +189,90 @@ impl<A: DeserializeOwned + 'static, R: Serialize + 'static> Command<A, R> {
 
 fn to_json<T: Serialize>(value: T) -> CommandResult {
     serde_json::to_value(value).map_err(|error| format!("命令的结果转不成 JSON：{error}"))
+}
+
+/// 参数类型 `A` 认的字段：serde 按结构体反序列化时交给反序列化器的那张字段表，带类型的
+/// 命令登记时用它填 [`CommandSpec::args`]。`()` 是空表，即不带参数。别的形状（枚举、
+/// `flatten` 了字段的结构体、自己写反序列化的）读不出字段，是 `None`。
+pub fn arg_fields<A: DeserializeOwned>() -> Option<Vec<String>> {
+    let mut fields = None;
+    // 探针在交出字段表后就报错停下，这个错是意料之中的。
+    let _ = A::deserialize(FieldProbe {
+        fields: &mut fields,
+    });
+    fields
+}
+
+/// 只为读出字段表的反序列化器：记下 serde 要的形状就停。
+struct FieldProbe<'a> {
+    fields: &'a mut Option<Vec<String>>,
+}
+
+impl<'de> de::Deserializer<'de> for FieldProbe<'_> {
+    type Error = de::value::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+        Err(de::Error::custom("不是结构体"))
+    }
+
+    fn deserialize_unit<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+        *self.fields = Some(Vec::new());
+        Err(de::Error::custom("不带参数"))
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _: &'static str,
+        fields: &'static [&'static str],
+        _: V,
+    ) -> Result<V::Value, Self::Error> {
+        *self.fields = Some(fields.iter().map(|field| field.to_string()).collect());
+        Err(de::Error::custom("已读出字段"))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+        option unit_struct newtype_struct seq tuple tuple_struct map enum identifier ignored_any
+    }
+}
+
+/// 参数里有没有命令不认的字段。只查对象顶层的键：缺字段、类型不对由处理函数按类型报。
+/// 没声明参数（`None`）的不查。
+fn check_args(info: &CommandInfo, args: &serde_json::Value) -> Result<(), String> {
+    let Some(fields) = &info.args else {
+        return Ok(());
+    };
+    let unknown: Vec<&str> = match args {
+        serde_json::Value::Null => return Ok(()),
+        serde_json::Value::Object(args) => args
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !fields.iter().any(|field| field == key))
+            .collect(),
+        _ if fields.is_empty() => {
+            return Err(format!("命令「{}」不带参数，收到了 {args}", info.id));
+        }
+        _ => return Ok(()),
+    };
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let list = |names: &mut dyn Iterator<Item = &str>| {
+        names
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    let unknown = list(&mut unknown.into_iter());
+    Err(if fields.is_empty() {
+        format!("命令「{}」不带参数，收到了 {unknown}", info.id)
+    } else {
+        format!(
+            "命令「{}」不认识参数 {unknown}；它认的参数：{}",
+            info.id,
+            list(&mut fields.iter().map(String::as_str))
+        )
+    })
 }
 
 /// 登记一条命令要给的东西。
@@ -207,6 +292,10 @@ pub struct CommandSpec {
     /// 要带参数才能执行：只给代码用 [`crate::run`] 调，不进命令面板、不绑键，也不在快捷键
     /// 设置里出现。这种命令 `key` 要空、`palette` 要关。
     pub requires_args: bool,
+    /// 认的参数字段（对象顶层的键）。执行时参数里有表外的字段，宿主不调处理函数，交回
+    /// 「不认识参数 …；它认的参数：…」。空表是不带参数。`None` 是没声明，不查；带类型的
+    /// 命令（[`Command::spec`]）按参数类型自动填（见 [`arg_fields`]）。
+    pub args: Option<Vec<String>>,
     pub handler: CommandHandler,
 }
 
@@ -222,6 +311,8 @@ pub struct CommandInfo {
     pub context: SharedString,
     pub palette: bool,
     pub requires_args: bool,
+    /// 认的参数字段，见 [`CommandSpec::args`]。
+    pub args: Option<Vec<String>>,
 }
 
 struct Entry {
@@ -291,6 +382,7 @@ pub fn register_commands(
                 context: spec.context.into(),
                 palette: spec.palette,
                 requires_args: spec.requires_args,
+                args: spec.args,
             },
             handler: spec.handler,
         });
@@ -348,7 +440,8 @@ pub fn command(id: &str, cx: &App) -> Option<CommandInfo> {
 }
 
 /// 执行一条命令，`window` 是主窗口（没开时 `None`）。宿主收到 [`RunCommand`] 时调；别处
-/// 要执行命令用 [`run`]。没登记的命令（键表还没跟上注册表）算 [`Handled::Pass`]。
+/// 要执行命令用 [`run`]。没登记的命令（键表还没跟上注册表）算 [`Handled::Pass`]；参数里
+/// 有命令不认的字段算失败，不调处理函数。
 pub fn invoke(
     id: &str,
     args: &serde_json::Value,
@@ -356,15 +449,16 @@ pub fn invoke(
     cx: &mut App,
 ) -> Handled {
     // 先把处理函数拿出来再调：处理函数里可能再登记命令。
-    let handler = cx.try_global::<CommandRegistry>().and_then(|registry| {
+    let found = cx.try_global::<CommandRegistry>().and_then(|registry| {
         registry
             .commands
             .iter()
             .find(|entry| entry.info.id.as_ref() == id)
-            .map(|entry| entry.handler.clone())
+            .map(|entry| (check_args(&entry.info, args), entry.handler.clone()))
     });
-    match handler {
-        Some(handler) => handler(args, window, cx),
+    match found {
+        Some((Err(error), _)) => Handled::err(error),
+        Some((Ok(()), handler)) => handler(args, window, cx),
         None => {
             eprintln!("[commands] 没有登记的命令 {id}");
             Handled::Pass
@@ -429,6 +523,7 @@ mod tests {
             context: "Workspace".to_string(),
             palette: true,
             requires_args: false,
+            args: None,
             handler: Rc::new(|_, _, _| Handled::ok()),
         }
     }
@@ -545,6 +640,99 @@ mod tests {
     #[derive(serde::Serialize, serde::Deserialize)]
     struct Order {
         qty: u32,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Renamed {
+        #[serde(rename = "machine")]
+        key: Option<String>,
+        #[serde(default)]
+        note: String,
+        #[serde(skip_deserializing)]
+        cache: u32,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Flattened {
+        #[serde(flatten)]
+        order: Order,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    enum Side {
+        Buy,
+        Sell,
+    }
+
+    #[test]
+    fn arg_fields_come_from_the_serde_shape() {
+        assert_eq!(arg_fields::<Order>(), Some(vec!["qty".to_string()]));
+        // 按线上的名字，跳过不反序列化的字段。
+        assert_eq!(
+            arg_fields::<Renamed>(),
+            Some(vec!["machine".to_string(), "note".to_string()])
+        );
+        assert_eq!(arg_fields::<()>(), Some(Vec::new()));
+        // 读不出字段的形状不查。
+        assert_eq!(arg_fields::<Flattened>(), None);
+        assert_eq!(arg_fields::<Side>(), None);
+        assert_eq!(arg_fields::<serde_json::Value>(), None);
+    }
+
+    #[gpui::test]
+    async fn unknown_args_are_refused_before_the_handler_runs(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_empty_window();
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let seen = calls.clone();
+        window.update(|_, cx| {
+            register_commands(
+                "trader",
+                "交易",
+                vec![
+                    BUY.spec("买", move |order, _, _| {
+                        seen.set(seen.get() + 1);
+                        Ok(order.qty)
+                    }),
+                    CommandSpec {
+                        args: Some(Vec::new()),
+                        ..spec("refresh", None)
+                    },
+                ],
+                cx,
+            )
+            .unwrap();
+            assert_eq!(
+                command(BUY.id(), cx).unwrap().args,
+                Some(vec!["qty".to_string()])
+            );
+        });
+        let Some(Err(error)) =
+            invoke_and_wait(window, BUY.id(), serde_json::json!({ "qty": 1, "qyt": 2 })).await
+        else {
+            panic!("多余的字段应该失败");
+        };
+        assert_eq!(
+            error,
+            "命令「trader/buy」不认识参数 `qyt`；它认的参数：`qty`"
+        );
+        assert_eq!(calls.get(), 0);
+
+        let Some(Err(error)) =
+            invoke_and_wait(window, "trader/refresh", serde_json::json!({ "all": true })).await
+        else {
+            panic!("不带参数的命令收到字段应该失败");
+        };
+        assert_eq!(error, "命令「trader/refresh」不带参数，收到了 `all`");
+        // 不带参数的命令照样能用 null 和空对象执行。
+        for args in [serde_json::Value::Null, serde_json::json!({})] {
+            assert_eq!(
+                invoke_and_wait(window, "trader/refresh", args).await,
+                Some(Ok(serde_json::Value::Null))
+            );
+        }
     }
 
     const BUY: Command<Order, u32> = Command::new("trader/buy");

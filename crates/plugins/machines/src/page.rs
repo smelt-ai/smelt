@@ -99,6 +99,7 @@ pub(crate) fn add_machine_command() -> api::CommandSpec {
         context: "Workspace".to_string(),
         palette: true,
         requires_args: false,
+        args: Some(Vec::new()),
         handler: Rc::new(|_, _, cx| {
             let opened = api::OPEN_VIEW.run(
                 &api::OpenView {

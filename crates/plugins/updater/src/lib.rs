@@ -61,6 +61,7 @@ fn command(name: &str, title: &str, run: impl Fn(&mut App) + 'static) -> Command
         context: "Workspace".into(),
         palette: true,
         requires_args: false,
+        args: Some(Vec::new()),
         handler: Rc::new(move |_, _, cx| {
             run(cx);
             Handled::ok()
