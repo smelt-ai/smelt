@@ -1,13 +1,18 @@
-//! 对话消息里 Markdown 链接的点击处理：本地文件路径解析成 Smelt 内部的 file URL。
+//! 对话消息里 Markdown 链接的点击处理：本地文件交给应用登记的打开者，其余交给系统。
 //!
 //! 只在点击时解析，不改写消息原文：原文改写认不出代码块，代码里的链接也会被换掉，
 //! 复制出来的也是改写后的。不解析的话，gpui-base 的 `TextView` 会把链接目标原样交给
 //! `App::open_url`，相对文件路径在 macOS 上会被 LaunchServices 误当作应用标识并报 -50。
+//!
+//! 文件链接在进程里直接交给 [`set_file_link_handler`] 登记的处理函数，不绕系统的 URL
+//! 协议：那要在每个平台注册协议、再由系统回调应用，Linux、Windows 上还不一定注册得上。
 
-use gpui::{App, ClickEvent, MouseButton, SharedString, Window};
+use std::rc::Rc;
+
+use gpui::{App, ClickEvent, Global, MouseButton, SharedString, Window};
 
 /// Markdown 里文件链接的解析基准。相对路径按 `cwd` 补全；`runtime` 是远程运行时的 id，
-/// 写进链接的 host，桌面据此知道文件在哪台机器上，不会去打开本机同路径的文件。
+/// 跟着链接交出去，应用据此知道文件在哪台机器上，不会去打开本机同路径的文件。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FileLinks<'a> {
     cwd: Option<&'a str>,
@@ -20,9 +25,50 @@ impl<'a> FileLinks<'a> {
     }
 }
 
-/// 点击链接时要打开的地址：本地文件路径解析成 Smelt 内部的 file URL，其余原样返回。
-pub fn link_target(url: &str, links: FileLinks<'_>) -> String {
-    resolve_relative_file_link(url, links).unwrap_or_else(|| url.to_string())
+/// 点中的本地文件。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLinkTarget {
+    /// 文件所在的远程运行时 id；本机是 `None`。
+    pub runtime: Option<String>,
+    /// 那台机器上的绝对路径。
+    pub path: String,
+    /// 行号（1 基）。
+    pub line: Option<u32>,
+}
+
+/// 点击链接时要做的事。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// 本地文件，交给 [`set_file_link_handler`] 登记的处理函数。
+    File(FileLinkTarget),
+    /// 别的（网址、补不全的相对路径），原样交给系统。
+    Url(String),
+}
+
+/// 解析点中的链接。
+pub fn link_target(url: &str, links: FileLinks<'_>) -> LinkTarget {
+    // 哪些算文件链接、相对路径怎么补全、`path:行号` 怎么拆，和手机共用 smelt-model 的规则。
+    match smelt_model::file_link::parse_file_link(
+        url,
+        links.cwd,
+        smelt_model::runtime_path::PathStyle::LOCAL,
+    ) {
+        Some(link) => LinkTarget::File(FileLinkTarget {
+            runtime: links.runtime.map(str::to_owned),
+            line: link.line(),
+            path: link.path,
+        }),
+        None => LinkTarget::Url(url.to_string()),
+    }
+}
+
+struct FileLinkHandler(Rc<dyn Fn(FileLinkTarget, &mut App)>);
+
+impl Global for FileLinkHandler {}
+
+/// 登记点中文件链接时怎么打开。应用启动时登记一次；没登记时点文件链接什么都不做。
+pub fn set_file_link_handler(handler: impl Fn(FileLinkTarget, &mut App) + 'static, cx: &mut App) {
+    cx.set_global(FileLinkHandler(Rc::new(handler)));
 }
 
 /// 给 `TextView::on_link_click` 的处理函数，见 [`link_target`]。
@@ -35,8 +81,14 @@ pub(crate) fn link_opener(
         if !opens_link(event) {
             return;
         }
-        let links = FileLinks::new(cwd.as_deref(), runtime.as_deref());
-        cx.open_url(&link_target(url, links));
+        match link_target(url, FileLinks::new(cwd.as_deref(), runtime.as_deref())) {
+            LinkTarget::File(target) => {
+                if let Some(handler) = cx.try_global::<FileLinkHandler>().map(|h| h.0.clone()) {
+                    handler(target, cx);
+                }
+            }
+            LinkTarget::Url(url) => cx.open_url(&url),
+        }
     }
 }
 
@@ -51,45 +103,36 @@ fn opens_link(event: &ClickEvent) -> bool {
     }
 }
 
-fn resolve_relative_file_link(target: &str, links: FileLinks<'_>) -> Option<String> {
-    // 哪些算文件链接、相对路径怎么补全、`path:行号` 怎么拆，和手机共用 smelt-model 的规则。
-    let link = smelt_model::file_link::parse_file_link(
-        target,
-        links.cwd,
-        smelt_model::runtime_path::PathStyle::LOCAL,
-    )?;
-    let mut url = url::Url::from_file_path(&link.path).ok()?;
-    // 远程运行时上的文件：host 写运行时 id。本机的不带 host。
-    if let Some(runtime) = links.runtime {
-        url.set_host(Some(runtime)).ok()?;
-    }
-    if !link.fragment.is_empty() {
-        url.set_fragment(Some(&link.fragment));
-    }
-    // `Url::set_scheme` 会把自定义 scheme 序列化成 `smelt-file:/path`
-    // （单斜杠），而 macOS URL scheme 与主进程解析器都按 authority 形式接收。
-    // 从标准 file URL 替换前缀可稳定保留 `smelt-file:///absolute/path`。
-    Some(url.to_string().replacen("file://", "smelt-file://", 1))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn file(runtime: Option<&str>, path: &str, line: Option<u32>) -> LinkTarget {
+        LinkTarget::File(FileLinkTarget {
+            runtime: runtime.map(str::to_owned),
+            path: path.to_string(),
+            line,
+        })
+    }
+
     #[test]
-    fn local_files_become_internal_file_urls() {
+    fn local_files_become_file_targets() {
         let links = FileLinks::new(Some("/tmp/project"), None);
         assert_eq!(
             link_target("docs/workspace.md", links),
-            "smelt-file:///tmp/project/docs/workspace.md"
+            file(None, "/tmp/project/docs/workspace.md", None)
         );
         assert_eq!(
             link_target("/tmp/source.rs#L42", links),
-            "smelt-file:///tmp/source.rs#L42"
+            file(None, "/tmp/source.rs", Some(42))
+        );
+        assert_eq!(
+            link_target("/tmp/a b.rs", links),
+            file(None, "/tmp/a b.rs", None)
         );
         assert_eq!(
             link_target("https://example.com", links),
-            "https://example.com"
+            LinkTarget::Url("https://example.com".into())
         );
     }
 
@@ -100,23 +143,25 @@ mod tests {
                 "/tmp/smelt-current-notification-final.png",
                 FileLinks::default()
             ),
-            "smelt-file:///tmp/smelt-current-notification-final.png"
+            file(None, "/tmp/smelt-current-notification-final.png", None)
         );
         // 没有 cwd 补不全的相对路径原样交出去，不猜。
-        assert_eq!(link_target("docs/a.md", FileLinks::default()), "docs/a.md");
+        assert_eq!(
+            link_target("docs/a.md", FileLinks::default()),
+            LinkTarget::Url("docs/a.md".into())
+        );
     }
 
-    /// grep / 编译器诊断常见的 `path:行号` 引用格式（不是 `#L行号` 片段）也要能
-    /// 拆出行号——原来只认 `#`，`:2765` 会整段被当成文件名拼进路径，导致读不到
-    /// 文件、误报“可能是二进制文件”（见用户反馈：点 ACP 对话里的文件引用链接）。
+    /// grep / 编译器诊断常见的 `path:行号` 引用格式（不是 `#L行号` 片段）也要能拆出行号，
+    /// 不能把 `:2765` 当成文件名的一部分。
     #[test]
-    fn colon_line_refs_resolve_to_fragment() {
+    fn colon_line_refs_resolve_to_a_line() {
         assert_eq!(
             link_target(
-                "crates/smelt-acp-view/src/acp_view.rs:2765",
+                "crates/app/src/view.rs:2765",
                 FileLinks::new(Some("/tmp/project"), None),
             ),
-            "smelt-file:///tmp/project/crates/smelt-acp-view/src/acp_view.rs#L2765"
+            file(None, "/tmp/project/crates/app/src/view.rs", Some(2765))
         );
     }
 
@@ -128,24 +173,45 @@ mod tests {
                 "src/main.rs:10:5",
                 FileLinks::new(Some("/tmp/project"), None)
             ),
-            "smelt-file:///tmp/project/src/main.rs#L10"
+            file(None, "/tmp/project/src/main.rs", Some(10))
         );
     }
 
-    /// 远程对话里的文件在另一台机器上：链接带上运行时 id，桌面不会去打开本机同路径的文件。
+    /// 远程对话里的文件在另一台机器上：带上运行时 id，应用不会去打开本机同路径的文件。
     #[test]
     fn files_in_remote_conversations_carry_the_runtime() {
-        let links = FileLinks::new(
-            Some("/root/project"),
-            Some("39fafd41-9942-49b0-b9ec-7eb670d2711e"),
-        );
+        let remote = "39fafd41-9942-49b0-b9ec-7eb670d2711e";
+        let links = FileLinks::new(Some("/root/project"), Some(remote));
         assert_eq!(
             link_target("src/main.rs:3", links),
-            "smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/root/project/src/main.rs#L3"
+            file(Some(remote), "/root/project/src/main.rs", Some(3))
         );
         assert_eq!(
             link_target("/etc/hosts", links),
-            "smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/etc/hosts"
+            file(Some(remote), "/etc/hosts", None)
+        );
+    }
+
+    #[gpui::test]
+    fn clicked_files_go_to_the_registered_handler(cx: &mut gpui::TestAppContext) {
+        let opened = Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let opened = opened.clone();
+            set_file_link_handler(move |target, _| opened.borrow_mut().push(target), cx);
+        });
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            let open = link_opener(FileLinks::new(Some("/repo"), None));
+            let click = ClickEvent::Keyboard(Default::default());
+            open(&"src/lib.rs:7".into(), &click, window, cx);
+        });
+        assert_eq!(
+            *opened.borrow(),
+            [FileLinkTarget {
+                runtime: None,
+                path: "/repo/src/lib.rs".into(),
+                line: Some(7),
+            }]
         );
     }
 }

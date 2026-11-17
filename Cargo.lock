@@ -11200,7 +11200,6 @@ dependencies = [
  "tree-sitter-zig",
  "unicode-segmentation",
  "unicode-width",
- "url",
  "usvg",
 ]
 

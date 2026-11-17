@@ -544,36 +544,6 @@ fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(String::from_utf8(bytes).ok()?))
 }
 
-/// ACP Markdown 的内部文件链接。使用独立 scheme，避免 `file://` 被 macOS
-/// LaunchServices 交给外部应用；`#L42` 可选片段用于定位行号。远程运行时上的文件
-/// 以运行时 id 作 host（`smelt-file://<id>/path`），本机的不带 host。
-#[derive(Debug, PartialEq)]
-struct InternalFileLink {
-    /// 远程运行时的 id；本机为 None。
-    runtime: Option<String>,
-    path: String,
-    line: Option<usize>,
-}
-
-fn smelt_file_url_to_target(url: &str) -> Option<InternalFileLink> {
-    let rest = url.strip_prefix("smelt-file://")?;
-    let (rest, fragment) = rest.split_once('#').unwrap_or((rest, ""));
-    let (runtime, path_part) = match rest.find('/')? {
-        0 => (None, rest),
-        host_end => (Some(rest[..host_end].to_string()), &rest[host_end..]),
-    };
-    let path = file_url_to_path(&format!("file://{path_part}"))?;
-    let path = path.to_str()?.to_string();
-    let line = fragment
-        .strip_prefix('L')
-        .and_then(|value| value.parse().ok());
-    Some(InternalFileLink {
-        runtime,
-        path,
-        line,
-    })
-}
-
 /// 开一扇主工作台窗口（Workspace + Root 包装）。
 /// 首启和「点 Dock 图标重开」共用这一份：`Workspace::new` 本来就会从存档重新摆出布局，
 /// 功能的状态在插件和运行时里，跟正常重启应用效果一致。
@@ -765,16 +735,19 @@ fn main() {
         gpui_base::init(cx);
         // smelt 自己的组件：菜单键位、窗口对话框层（挂在窗口根上，要在开窗口之前装）。
         smelt_ui::init(cx);
-        // Markdown 中的本地文件链接使用 smelt-file://，由 on_open_urls 回流到
-        // Workspace 的内置编辑器。打包时 Info.plist 也声明该 scheme；运行时注册
-        // 用于已安装应用升级后无需重启 LaunchServices 数据库。
-        let register_file_scheme = cx.register_url_scheme("smelt-file");
-        cx.spawn(async move |_cx| {
-            if let Err(error) = register_file_scheme.await {
-                eprintln!("[workspace] 注册 smelt-file URL scheme 失败：{error}");
-            }
-        })
-        .detach();
+        // 消息里点中的文件链接交给登记的文件打开者。链接带着文件所在的机器：远程的就去
+        // 那台机器读，不能打开本机同路径的文件。
+        smelt_ui::markdown_links::set_file_link_handler(
+            |target, cx| {
+                let location = smelt_plugin_api::FileLocation {
+                    machine: target.runtime.map_or(RuntimeKey::Local, RuntimeKey::Remote),
+                    path: target.path,
+                    line: target.line.map(|line| line as usize),
+                };
+                workspace_commands::report_failure(smelt_plugin_api::open_file(location, cx), cx);
+            },
+            cx,
+        );
         // 内嵌终端默认字体 Maple Mono NF（Regular/Bold，v7.9）。Ghostty 同款思路：
         // 默认字体自己带，不赌用户装没装——任何机器上默认字体族都能解析成功，
         // 杜绝"没装字体 → 测量/渲染各自 fallback 到不同字体 → 列宽错乱"。它是打过
@@ -977,40 +950,23 @@ fn main() {
         // 循环常驻到应用退出。主窗口没了先重开，路径要开在用户看得见的地方。
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_rx.recv().await {
-                let internal_files: Vec<InternalFileLink> = urls
-                    .iter()
-                    .filter_map(|url| smelt_file_url_to_target(url))
-                    .collect();
                 let paths: Vec<String> = urls
                     .iter()
                     .filter_map(|u| file_url_to_path(u))
                     .map(|path| path.to_string_lossy().into_owned())
                     .collect();
-                if paths.is_empty() && internal_files.is_empty() {
+                if paths.is_empty() {
                     continue;
                 }
                 cx.update(|cx| {
                     ensure_main_window(&current_ws, cx);
-                    if !paths.is_empty() {
-                        smelt_plugin_api::emit(
-                            smelt_plugin_api::HostEvent::OpenPaths {
-                                machine: RuntimeKey::Local,
-                                paths,
-                            },
-                            cx,
-                        );
-                    }
-                    for link in internal_files {
-                        // 链接带着文件所在的机器：远程的就去那台机器读，不能打开本机同路径的
-                        // 文件。谁来打开由登记的文件打开者定。
-                        let location = smelt_plugin_api::FileLocation {
-                            machine: link.runtime.map_or(RuntimeKey::Local, RuntimeKey::Remote),
-                            path: link.path,
-                            line: link.line,
-                        };
-                        let opened = smelt_plugin_api::open_file(location, cx);
-                        workspace_commands::report_failure(opened, cx);
-                    }
+                    smelt_plugin_api::emit(
+                        smelt_plugin_api::HostEvent::OpenPaths {
+                            machine: RuntimeKey::Local,
+                            paths,
+                        },
+                        cx,
+                    );
                 });
             }
         })
