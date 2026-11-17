@@ -91,7 +91,7 @@ smelt {version}
 对话：
   smelt conversation list [--agent <智能体id>] [--archived]
   smelt conversation rename <id> --title <标题>
-  smelt conversation archive|unarchive|pin|unpin|delete <id>
+  smelt conversation archive|unarchive|delete <id>
 
 自动化：
   smelt automation list | get <id>

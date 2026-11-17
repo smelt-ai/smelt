@@ -21,7 +21,7 @@ use api::model::memory_settings::{
 };
 use api::serde_json::Value;
 use gpui::{AppContext, Context, Entity, Window};
-use gpui_component::input::InputState;
+use smelt_plugin_api::ui::field::InputState;
 use smelt_plugin_api::{self as api, RuntimeKey};
 
 const KEY_SET_PLACEHOLDER: &str = "已设置";

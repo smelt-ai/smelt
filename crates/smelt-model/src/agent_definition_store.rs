@@ -10,8 +10,23 @@ pub struct LaunchPrep {
     pub agent_definition_id: Option<String>,
     /// 恢复存档里的会话：完好的快照原样沿用创建时的内容（见
     /// [`repair_agent_definition_launch`]），只补记忆目录。否则按当前定义重新组装。
+    /// 带了 `restart` 时不看它。
     #[serde(default)]
     pub restore: bool,
+    /// 用户点了「重新开始」：按运行时当前的设置和智能体定义重拼整份启动规格，传入的
+    /// 规格只作拼不出来时的退路。旧运行时不认识这一项，会按 `restore` 处理，所以重新开始
+    /// 时 `restore` 填 `true`：沿用原来的规格，不会拼出一份不对的。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<LaunchRestart>,
+}
+
+/// 重新开始时运行时重拼启动规格要的会话身份。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchRestart {
+    /// 执行引擎标识（`ConversationAgentKind::id()`）。运行时不认识就沿用原来的规格。
+    pub engine_kind: String,
+    /// 自定义 Agent 的 id。设置里已经删了就沿用原来的规格。
+    pub profile_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

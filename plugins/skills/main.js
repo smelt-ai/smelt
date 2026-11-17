@@ -4,9 +4,9 @@
 // 界面是 GPUI 元素。磁盘操作都是异步的，在事件里 `cx.spawn` 等它们，结果缓存在
 // 视图上，render 只画缓存。
 //
-// 只有一层列表，不切页：点一行就地展开（`Collapsible`），作用范围表单在展开区里再
-// 展开一层；「导入」展开在列表顶部。问题就标在出问题的那一行上，不另设汇总横幅。表单见 `editors.js`，小部件见
-// `ui.js`。只有删除、清理这类确认用居中的 `AlertDialog`。
+// 只有一层列表，不切页：点一行就地展开，作用范围表单在展开区里再展开一层；「导入」
+// 展开在列表顶部。问题就标在出问题的那一行上，不另设汇总横幅。表单见 `editors.js`，
+// 小部件见 `ui.js`。只有删除、清理这类确认在窗口中间问一句（`SmeltConfirmButton`）。
 //
 // 当前项目读 `active_context().project`，技能读写的是这台电脑的磁盘，只认本机项目
 // （`machine` 为 null）。活动上下文变了宿主发 `active_context_changed`（切会话、翻历史
@@ -14,19 +14,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import {
-  Collapsible,
-  DropdownMenu,
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyTitle,
-  ErrorAlert,
-  InfoAlert,
-  Input,
-  InputState,
-  Radio,
-} from "gpui-component";
+import { SmeltAlert, SmeltInputState, SmeltMenuButton, SmeltRadio, SmeltTextInput } from "smelt-ui";
 import { homedir } from "os";
 import { realpath } from "smelt-fs";
 import { active_context, next_event } from "smelt-plugin-api";
@@ -66,7 +54,11 @@ export default class Skills extends View {
     // 同名冲突里各自选了留哪一份：主条目目录 → 选中的副本目录。
     this.keep = new Map();
     this.query = "";
-    this.search = InputState.new("搜索名称或描述");
+    this.search = SmeltInputState.new("搜索名称或描述");
+    this.search.on("change", (_event, cx) => {
+      this.query = this.search.value();
+      cx.notify();
+    });
 
     // 两个表单的状态。
     const env = {
@@ -276,12 +268,6 @@ export default class Skills extends View {
     cx.notify();
   }
 
-  /// 确认框自己出错（比如内容画不出来）时的消息。
-  reportDialogError(error, cx) {
-    this.notice = { level: "error", text: error };
-    cx.notify();
-  }
-
   // ---------------------------------------------------------------- 界面
 
   render(cx) {
@@ -302,7 +288,7 @@ export default class Skills extends View {
       .size_full()
       .text_color(colors.foreground)
       .child(this.header(cx))
-      .when(this.notice !== null, (el) => el.child(this.noticeBar()))
+      .when(this.notice !== null, (el) => el.child(this.noticeBar(cx)))
       .child(
         v_flex()
           .flex_1()
@@ -315,11 +301,12 @@ export default class Skills extends View {
               this.empty(
                 "还没有 skill",
                 "点「导入」选一个含 SKILL.md 的目录，或放到 ~/.agents/skills/<名字>/。",
+                cx,
               ),
             ),
           )
           .when(this.state.skills.length > 0 && shown.length === 0, (el) =>
-            el.child(this.empty("没有匹配的技能", `名称和描述里都没有「${this.query.trim()}」。`)),
+            el.child(this.empty("没有匹配的技能", `名称和描述里都没有「${this.query.trim()}」。`, cx)),
           )
           .children(groups.flatMap((group) => [this.groupLabel(group, cx), ...group.skills.map((skill) => this.row(skill, cx))]))
           // 失效链接不属于任何 skill，搜索时不列。
@@ -331,7 +318,11 @@ export default class Skills extends View {
   header(cx) {
     const colors = cx.theme().colors;
     const missing = this.missingSkills();
-    let more = DropdownMenu.new("more", "⋯")
+    let more = SmeltMenuButton.new("more")
+      .label("⋯")
+      .accessibility_label("更多操作")
+      .small()
+      .quiet()
       .item("刷新", (cx) => {
         this.notice = null;
         cx.spawn(async (cx) => {
@@ -353,37 +344,32 @@ export default class Skills extends View {
       .child(div().text_sm().font_semibold().child("技能"))
       .child(div().text_xs().text_color(colors.muted_foreground).child(String(this.state.skills.length)))
       .child(div().flex_1())
-      .child(
-        div()
-          .w(180)
-          .child(
-            Input.new(this.search)
-              .aria_label("搜索技能")
-              .on_change((text, cx) => {
-                this.query = text;
-                cx.notify();
-              }),
-          ),
-      )
+      .child(SmeltTextInput.new(this.search).aria_label("搜索技能").small().cleanable(true).w(180))
       .child(
         button(
           "import",
           this.importing ? "收起导入" : "导入",
           (cx) => this.toggleImport(cx),
-          this.importing ? "outline" : "primary",
+          this.importing ? "secondary" : "primary",
         ),
       )
       .child(more);
   }
 
-  noticeBar() {
-    const Kind = this.notice.level === "error" ? ErrorAlert : InfoAlert;
+  /// 上一次操作的结果：出错用提示块，做完了只要一行弱色的字。
+  noticeBar(cx) {
+    const colors = cx.theme().colors;
+    const text = this.notice.text;
     return h_flex()
       .items_center()
       .gap(SPACE.sm)
       .px(SPACE.lg)
       .pt(SPACE.sm)
-      .child(div().flex_1().min_w_0().child(Kind.new("notice", this.notice.text).size("small")))
+      .child(
+        this.notice.level === "error"
+          ? SmeltAlert.new("notice", text).flex_1().min_w_0()
+          : div().flex_1().min_w_0().text_xs().whitespace_normal().text_color(colors.muted_foreground).child(text),
+      )
       .child(
         button("notice-close", "关闭", (cx) => {
           this.notice = null;
@@ -392,16 +378,12 @@ export default class Skills extends View {
       );
   }
 
-  empty(title, description) {
-    return div()
+  empty(title, description, cx) {
+    return v_flex()
+      .gap(SPACE.xs)
       .p(SPACE.lg)
-      .child(
-        Empty.new().header(
-          EmptyHeader.new()
-            .title(EmptyTitle.new().child(title))
-            .description(EmptyDescription.new().child(description)),
-        ),
-      );
+      .child(div().text_sm().font_semibold().child(title))
+      .child(hint(description, cx));
   }
 
   groupLabel(group, cx) {
@@ -424,10 +406,9 @@ export default class Skills extends View {
   /// 白白耗时。
   row(skill, cx) {
     const open = this.expanded === skill.dir;
-    return Collapsible.new()
-      .open(open)
+    return v_flex()
       .child(this.rowHeader(skill, open, cx))
-      .when(open, (el) => el.content(this.rowDetail(skill, cx)));
+      .when(open, (el) => el.child(this.rowDetail(skill, cx)));
   }
 
   /// 名字、标签、一行描述；右侧固定是覆盖情况。悬停只改底色，不换内容。
@@ -476,9 +457,9 @@ export default class Skills extends View {
     if (skill.conflicts.length > 0) {
       return div().flex_none().text_xs().text_color(colors.destructive).child("需选择");
     }
-    if (skill.placement === "legacy") return tag("没有 agent 读到", "warning");
-    if (missing.length === 1) return tag(`${missing[0].label} 还不能用`, "warning");
-    if (missing.length > 1) return tag(`${missing.length} 个 agent 还不能用`, "warning");
+    if (skill.placement === "legacy") return tag("没有 agent 读到", "need");
+    if (missing.length === 1) return tag(`${missing[0].label} 还不能用`, "need");
+    if (missing.length > 1) return tag(`${missing.length} 个 agent 还不能用`, "need");
     return div()
       .flex_none()
       .text_xs()
@@ -562,7 +543,7 @@ export default class Skills extends View {
               .gap(SPACE.xs)
               .children(
                 skill.coverage.map((row) =>
-                  row.state === "missing" ? tag(`${row.label} · 还不能用`, "warning") : tag(row.label, "success"),
+                  row.state === "missing" ? tag(`${row.label} · 还不能用`, "need") : tag(row.label, "ok"),
                 ),
               ),
       );
@@ -578,7 +559,7 @@ export default class Skills extends View {
         this.labelLine(
           "作用范围",
           `${who} · ${level}`,
-          button(`scope-${skill.dir}`, this.editing ? "收起" : "修改", (cx) => this.toggleScope(cx), "outline"),
+          button(`scope-${skill.dir}`, this.editing ? "收起" : "修改", (cx) => this.toggleScope(cx), "secondary"),
           cx,
         ),
       )
@@ -614,8 +595,8 @@ export default class Skills extends View {
           "删除…",
           `删除「${skill.name}」？`,
           `技能目录会移到 ~/${TRASH}，可以手动找回。所有 agent 都不会再用到它。`,
+          "删除",
           (cx) => this.run(cx, `删除 ${skill.name}`, () => trashSkill(this.home, skill)),
-          (error, cx) => this.reportDialogError(error, cx),
         ),
       );
   }
@@ -629,7 +610,7 @@ export default class Skills extends View {
         h_flex()
           .justify_end()
           .gap(SPACE.sm)
-          .child(button("cancel-scope", "取消", (cx) => this.toggleScope(cx), "outline"))
+          .child(button("cancel-scope", "取消", (cx) => this.toggleScope(cx), "secondary"))
           .child(button("apply-scope", "应用", (cx) => this.applyScope(cx), "primary").disabled(!this.scope.ready())),
       ],
       cx,
@@ -661,7 +642,7 @@ export default class Skills extends View {
             h_flex()
               .justify_end()
               .gap(SPACE.sm)
-              .child(button("cancel-import", "取消", (cx) => this.toggleImport(cx), "outline"))
+              .child(button("cancel-import", "取消", (cx) => this.toggleImport(cx), "secondary"))
               .child(button("submit-import", "导入", (cx) => this.submitImport(cx), "primary").disabled(!session.ready())),
           ],
           cx,
@@ -700,8 +681,8 @@ export default class Skills extends View {
     );
   }
 
-  /// 一份副本：单选「以它为准」，下面是它在哪。各份之间夹着路径，放不进只收 `Radio`
-  /// 的单选组，所以每份一个独立的受控 `Radio`。
+  /// 一份副本：单选「以它为准」，下面是它在哪。每份一个受控的 `SmeltRadio`，选中哪份由
+  /// `this.keep` 定。
   copyChoice(skill, copy, keep, cx) {
     const colors = cx.theme().colors;
     const where =
@@ -709,11 +690,10 @@ export default class Skills extends View {
     return v_flex()
       .gap(2)
       .child(
-        Radio.new(`keep-${copy.dir}`)
+        SmeltRadio.new(`keep-${copy.dir}`)
           .label(`${where} · ${edited(copy.modified_ms)}`)
           .checked(keep === copy.dir)
-          .on_change((checked, cx) => {
-            if (!checked) return;
+          .on_select((cx) => {
             this.keep.set(skill.dir, copy.dir);
             cx.notify();
           }),
@@ -756,8 +736,8 @@ export default class Skills extends View {
               "清理…",
               `清理 ${broken.length} 个已失效的条目？`,
               `它们指向的技能已经不存在。只删这些条目本身，不会动任何真实目录。\n${shown.join("\n")}`,
+              "清理",
               (cx) => this.run(cx, "清理已失效的条目", () => pruneLinks(broken)),
-              (error, cx) => this.reportDialogError(error, cx),
             ),
           ),
       )
@@ -779,9 +759,9 @@ export default class Skills extends View {
 
   /// 作用范围标签：通用 / 指定 agent / 旧位置 / 冲突。
   chip(skill) {
-    if (skill.conflicts.length > 0) return tag(`冲突 ×${skill.conflicts.length + 1}`, "danger");
-    if (skill.placement === "agent") return tag(skill.agent ?? "agent", "info");
-    if (skill.placement === "legacy") return tag("旧位置", "warning");
-    return tag("通用", "secondary");
+    if (skill.conflicts.length > 0) return tag(`冲突 ×${skill.conflicts.length + 1}`, "bad");
+    if (skill.placement === "agent") return tag(skill.agent ?? "agent");
+    if (skill.placement === "legacy") return tag("旧位置", "need");
+    return tag("通用");
   }
 }

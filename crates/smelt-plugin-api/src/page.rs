@@ -40,7 +40,7 @@ pub struct PageSource<'a> {
     pub title: &'a str,
     /// 启动时进这一页。好几个来源都说是首页时，登记在前的算。
     pub home: bool,
-    /// 出口没放东西时显示的视图 id，如工作台的会话舞台。布局里没摆出口的页用不上。
+    /// 出口没放东西时显示的视图 id，如工作台的会话视图。布局里没摆出口的页用不上。
     pub index: Option<&'a str>,
 }
 

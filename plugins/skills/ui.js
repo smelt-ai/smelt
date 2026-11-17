@@ -1,36 +1,30 @@
-// 技能插件各视图共用的小部件。控件一律用 `"gpui-component"` 里带样式的组件，和 smelt
-// 主界面同一套主题；布局用 gpui-base 的 `v_flex` / `h_flex`。
+// 技能插件各视图共用的小部件。控件都是 smelt 自己的，从 `"smelt-ui"` 导入；布局用
+// gpui-base 的 `v_flex` / `h_flex`。
 //
 // 视觉规格跟 smelt 自己的面板走：字号只用跟随界面缩放的 `text_xs` / `text_sm`，不写
 // 像素；按钮用紧凑档；不画页面底色（宿主铺实底），悬停、选中用 `accent`。
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { AlertDialog, Button, Tag } from "gpui-component";
+import { SmeltBadge, SmeltButton, SmeltConfirmButton } from "smelt-ui";
 
 export const SPACE = { xs: 4, sm: 8, md: 12, lg: 16 };
 export const MONO = "SF Mono, Menlo, monospace";
 /** 回收目录，相对主目录。 */
 export const TRASH = ".smelt/trash/skills";
 
-/// gpui-component 的按钮，默认 `ghost`、`xsmall`：和 smelt 自己面板里的紧凑按钮同一档。
-/// 回调要用它自己收到的 cx：render 的 cx 只在那一次 render 里有效。
-/**
- * @param {"ghost" | "outline" | "primary" | "danger"} [variant]
- * @param {"xsmall" | "small"} [size]
- */
-export function button(id, label, onClick, variant = "ghost", size = /** @type {"xsmall" | "small"} */ ("xsmall")) {
-  return Button.new(id)
-    .label(label)
-    .size(size)
-    [variant]()
-    .on_click((_event, cx) => onClick(cx));
+/// 默认安静角色、小号。回调要用它自己收到的 cx：render 的 cx 只在那一次 render 里有效。
+/** @param {"quiet" | "secondary" | "primary" | "danger"} [variant] */
+export function button(id, label, onClick, variant = "quiet") {
+  const control = SmeltButton.new(id).label(label).small();
+  return control[variant]().on_click((_event, cx) => onClick(cx));
 }
 
-/// @param {"secondary" | "danger" | "info" | "warning" | "success"} variant
-export function tag(text, variant) {
-  // 描边：实底的 warning/danger 在深色面板上太抢眼，压过旁边的正文。
-  return Tag.new().variant(variant).outline().size("xsmall").flex_none().child(text);
+/// 小标记。不给状态是中性灰；状态色只给状态：`ok` 正常、`need` 要你处理、`bad` 出错。
+/** @param {"ok" | "need" | "bad"} [tone] */
+export function tag(text, tone) {
+  const badge = SmeltBadge.new();
+  return (tone === undefined ? badge : badge[tone]()).flex_none().child(text);
 }
 
 export function hint(text, cx) {
@@ -69,14 +63,17 @@ export function section(title, action, children, cx) {
     .children(children);
 }
 
-/// 危险操作的确认：居中的模态框。`AlertDialog` 本身就是那个触发按钮，点「确定」时
-/// `onOk(cx)` 收到的是这次点击的 cx。`onError` 收弹窗自己出错的消息。
-export function confirm(id, label, title, description, onOk, onError) {
-  return AlertDialog.new(id, label, onError)
+/// 要先确认的操作：一个安静的小按钮，点了在窗口中间问一句，确认才 `onConfirm(cx)`。
+/// `action` 是确认按钮上的动词（「删除」），不写「确定」。只给能找回的操作用：Enter 就是确认。
+export function confirm(id, label, title, description, action, onConfirm) {
+  return SmeltConfirmButton.new(id)
+    .label(label)
+    .small()
+    .quiet()
     .title(title)
     .description(description)
-    .show_cancel(true)
-    .on_ok((cx) => onOk(cx));
+    .action(action)
+    .on_confirm((cx) => onConfirm(cx));
 }
 
 export function edited(ms) {

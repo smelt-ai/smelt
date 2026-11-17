@@ -6,6 +6,8 @@
 name = "smelt-updater-ui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
@@ -13,7 +15,6 @@ workspace = true
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 # 下载线程往界面推进度的通道（见 update.rs）。
 smol = "2"
 anyhow = "1"

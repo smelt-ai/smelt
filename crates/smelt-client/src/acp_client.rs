@@ -100,9 +100,19 @@ fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
     req
 }
 
+/// 连接线程交给窗口的消息。
+#[derive(Debug)]
+pub enum ConversationClientEvent {
+    Snapshot(ConversationSnapshot),
+    /// 打开请求带了首条消息，守护回的第一帧却没确认收到（见
+    /// [`smelt_model::acp_session::AcpSnapshotFrame::initial_ack`]）：这台机器的运行时太旧，
+    /// 不认识这个字段，消息没有发出去。排在那一帧的快照前面，窗口先把消息收回来。
+    InitialPromptUnsupported,
+}
+
 pub struct ConversationClientHandle {
     pub action_tx: smol::channel::Sender<AcpUserAction>,
-    pub snapshot_rx: smol::channel::Receiver<ConversationSnapshot>,
+    pub event_rx: smol::channel::Receiver<ConversationClientEvent>,
     /// 连接建立后由后台线程填进来（建连是异步的，构造 `ConversationClientHandle` 时
     /// 还没有 fd 可存）。Drop 时用它在后台主动 `shutdown()`：读/写两条线程各自
     /// `try_clone()` 了一份来跑，克隆的 fd 各自独立，只 drop 掉 channel 端
@@ -417,9 +427,19 @@ pub fn load_acp_history(
     history_snapshot_from_response(&response)
 }
 
+/// `acp_open` 回的第一帧有没有确认收到首条消息。按这一行原文看：第一帧总是整段帧。
+fn open_reply_acknowledges_initial(line: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct OpenReply {
+        #[serde(default)]
+        initial_ack: bool,
+    }
+    serde_json::from_str::<OpenReply>(line.trim()).is_ok_and(|reply| reply.initial_ack)
+}
+
 /// 连 smeltd 的 `acp_open`，起连接线程，立即返回（不阻塞调用方——旧版
 /// `spawn_acp` 就是这个约定，「握手结果以事件回来」）。连不上 smeltd、握手
-/// 失败都不 panic，而是塞一份 `Ended` 快照进 `snapshot_rx`，跟
+/// 失败都不 panic，而是塞一份 `Ended` 快照进 `event_rx`，跟
 /// `acp_conn::spawn_acp` 遇到起不来的情况一律走 `ConversationEvent::Fatal` 是同一个
 /// 约定，调用方（GUI 视图）只需要处理"连不上"和"agent 本身连不上"两种一样
 /// 的终态展示，不用分别处理。
@@ -430,7 +450,7 @@ pub fn spawn_acp_client(
     // UI 回调只做 `try_send`。daemon 停止读 action 时，既不能等待，也不能无限积压
     // 大型图片 prompt；队列满后视图保留草稿，连接恢复后用户可再次提交。
     let (action_tx, action_rx) = smol::channel::bounded::<AcpUserAction>(ACP_ACTION_QUEUE_CAPACITY);
-    let (snapshot_tx, snapshot_rx) = smol::channel::unbounded::<ConversationSnapshot>();
+    let (event_tx, event_rx) = smol::channel::unbounded::<ConversationClientEvent>();
     let conn_cell: Arc<Mutex<Option<RuntimeStream>>> = Arc::new(Mutex::new(None));
     let conn_cell_for_thread = Arc::clone(&conn_cell);
     // 读线程在镜像接不上时自己要整段帧，和用户动作走同一条写端。
@@ -443,21 +463,22 @@ pub fn spawn_acp_client(
             let mut known_entries_end = launch.retained_entries_end;
             let mut known_session_title = None;
             let mut last_phase = None;
+            // 只看第一帧：带了首条消息的打开请求，守护得在那一帧上确认收到。
+            let mut awaiting_initial_ack = launch.initial_prompt.is_some();
             let conn = match runtime.connect() {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = snapshot_tx.try_send(fallback_snapshot(
-                        &format!("连不上 smeltd：{e}"),
-                        known_entries_end,
+                    let _ = event_tx.try_send(ConversationClientEvent::Snapshot(
+                        fallback_snapshot(&format!("连不上 smeltd：{e}"), known_entries_end),
                     ));
                     return;
                 }
             };
             let Ok(mut writer) = conn.try_clone() else {
-                let _ = snapshot_tx.try_send(fallback_snapshot(
+                let _ = event_tx.try_send(ConversationClientEvent::Snapshot(fallback_snapshot(
                     "无法建立 smeltd 双向连接",
                     known_entries_end,
-                ));
+                )));
                 return;
             };
             // UI 端只做 try_send，实际写在这条后台线程；仍给它一个上限，避免 daemon
@@ -465,10 +486,10 @@ pub fn spawn_acp_client(
             let _ = writer.set_write_timeout(Some(ACP_CONTROL_TIMEOUT));
             let req = acp_open_request(&launch);
             if smelt_runtime_client::protocol::write_json_line(&mut writer, &req).is_err() {
-                let _ = snapshot_tx.try_send(fallback_snapshot(
+                let _ = event_tx.try_send(ConversationClientEvent::Snapshot(fallback_snapshot(
                     "向 smeltd 发起会话失败",
                     known_entries_end,
-                ));
+                )));
                 return;
             }
             // 握手请求已经发出去才把 conn 交给 Drop 兜底——期间若 handle 已经
@@ -523,14 +544,25 @@ pub fn spawn_acp_client(
                 match frame {
                     SnapshotFrame::NeedsFullFrame | SnapshotFrame::Ignore => continue,
                     SnapshotFrame::Unreadable(terminal) => {
-                        let _ = snapshot_tx.try_send(terminal);
+                        let _ = event_tx.try_send(ConversationClientEvent::Snapshot(terminal));
                         return;
                     }
                     SnapshotFrame::Snapshot(snap) => {
+                        if std::mem::take(&mut awaiting_initial_ack)
+                            && !open_reply_acknowledges_initial(&line)
+                            && event_tx
+                                .try_send(ConversationClientEvent::InitialPromptUnsupported)
+                                .is_err()
+                        {
+                            return;
+                        }
                         known_entries_end = snap.entries_offset.saturating_add(snap.entries.len());
                         known_session_title = snap.session_title.clone();
                         last_phase = Some(snap.phase);
-                        if snapshot_tx.try_send(snap).is_err() {
+                        if event_tx
+                            .try_send(ConversationClientEvent::Snapshot(snap))
+                            .is_err()
+                        {
                             return; // 接收端（GUI 视图）没了
                         }
                     }
@@ -539,14 +571,14 @@ pub fn spawn_acp_client(
             if let Some(disconnected) =
                 snapshot_after_stream_disconnect(last_phase, known_entries_end, known_session_title)
             {
-                let _ = snapshot_tx.try_send(disconnected);
+                let _ = event_tx.try_send(ConversationClientEvent::Snapshot(disconnected));
             }
         })
         .expect("spawn acp client thread");
 
     ConversationClientHandle {
         action_tx,
-        snapshot_rx,
+        event_rx,
         conn_cell,
     }
 }
@@ -604,7 +636,8 @@ mod tests {
     use super::{
         ACP_INITIAL_TAIL_LIMIT, AcpEndKind, ConversationClientLaunch, ConversationSnapshot,
         DaemonPhase, SnapshotFrame, acp_open_request, acp_snapshot_request, fallback_snapshot,
-        history_snapshot_from_response, read_snapshot_frame, snapshot_after_stream_disconnect,
+        history_snapshot_from_response, open_reply_acknowledges_initial, read_snapshot_frame,
+        snapshot_after_stream_disconnect,
     };
     use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
     use std::collections::BTreeMap;
@@ -897,6 +930,7 @@ mod tests {
             live: &live,
             snapshot: if full { snapshot } else { &header },
             provider_pid: Some(7),
+            initial_ack: false,
         })
         .unwrap();
         if full {
@@ -907,6 +941,31 @@ mod tests {
             .encode(&frame, 0, &snapshot.entries, 0, snapshot.entries.len(), 0)
             .unwrap();
         serde_json::json!({ "delta": delta }).to_string()
+    }
+
+    /// 带首条消息打开时，窗口靠第一帧上的确认判断守护有没有接手这条消息。
+    #[test]
+    fn open_reply_ack_is_read_from_the_first_frame() {
+        let snapshot = fallback_snapshot("", 0);
+        let live = smelt_model::acp_session::SessionLive::from_snapshot(&snapshot);
+        let frame = |initial_ack| {
+            serde_json::to_string(&smelt_model::acp_session::AcpSnapshotFrame {
+                live: &live,
+                snapshot: &snapshot,
+                provider_pid: None,
+                initial_ack,
+            })
+            .unwrap()
+        };
+        assert!(open_reply_acknowledges_initial(&frame(true)));
+        // 旧守护的第一帧不带这个字段。
+        let old = frame(false);
+        assert!(!old.contains("initial_ack"));
+        assert!(!open_reply_acknowledges_initial(&old));
+        // 打开请求被拒时回的是只有快照的一帧。
+        let rejected = serde_json::json!({ "snapshot": snapshot, "initial_ack": true });
+        assert!(open_reply_acknowledges_initial(&rejected.to_string()));
+        assert!(!open_reply_acknowledges_initial("不是 JSON"));
     }
 
     #[test]

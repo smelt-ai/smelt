@@ -7,7 +7,9 @@
 //!
 //! 只是给表加一列、且该表没有表级约束时，用 `ALTER TABLE … ADD COLUMN`，并把新列写在
 //! `CREATE_SCHEMA` 里这张表的最后：SQLite 只改表定义、不搬数据，改完的建表语句去掉空白后
-//! 也和 `CREATE_SCHEMA` 一致。改约束、改默认值、删列、调列序这些 ALTER 做不到的，才整表重建。
+//! 也和 `CREATE_SCHEMA` 一致。删列时只要列上没有索引、外键、唯一约束，也没有别的列或表级
+//! 约束提到它，就用 `ALTER TABLE … DROP COLUMN`，删完的建表语句同样一致。改约束、改默认值、
+//! 调列序这些 ALTER 做不到的，才整表重建。
 //! 默认值要和列类型一致：BLOB 列用 `X'…'`，不要写文本字面量。
 //!
 //! 业务数据一律按字段建表：单例设置用 `id = 1` 的单行表，列表放子表并带 `position`。
@@ -285,7 +287,6 @@ CREATE TABLE session_group (
   custom_title TEXT,
   last_updated_at INTEGER NOT NULL DEFAULT 0,
   archived_at INTEGER,
-  pinned_at INTEGER,
   workset_id TEXT REFERENCES workset(id) ON DELETE SET NULL,
   closed_workset_root TEXT
 );
@@ -308,13 +309,9 @@ CREATE TABLE acp_detail (
   profile_id TEXT,
   history_session_id TEXT,
   launch_command TEXT NOT NULL,
-  refresh_launch_from_settings INTEGER NOT NULL DEFAULT 0
-    CHECK (refresh_launch_from_settings IN (0, 1)),
   pending_prompt TEXT,
-  pending_delivery_id TEXT,
   agent_definition_id TEXT,
   automation_id TEXT,
-  binding_automation_run_id TEXT,
   pending_agent_preset TEXT,
   session_title TEXT
 );
@@ -1881,6 +1878,21 @@ CREATE TABLE workset_repository (
 ALTER TABLE session_group ADD COLUMN workset_id TEXT REFERENCES workset(id) ON DELETE SET NULL;
 ALTER TABLE session_group ADD COLUMN closed_workset_root TEXT;
 ";
+
+/// v39：运行时目录只留运行时要据此行动的。删掉的四列：
+/// - `session_group.pinned_at`：置顶是会话插件自己的界面数据，存在插件库里；
+/// - `acp_detail.pending_delivery_id`：旧版外部投递的首包标记，投递早已只由守护执行；
+/// - `acp_detail.binding_automation_run_id`：客户端存的绑定镜像，绑定以守护会话里的为准；
+/// - `acp_detail.refresh_launch_from_settings`：重新开始一律由运行时按当前设置重拼，没人读了。
+///
+/// 这几列没有约束牵连别的列、也没有索引，SQLite 的 DROP COLUMN 能删，删完的建表语句去掉空白后
+/// 和 `CREATE_SCHEMA` 一致。逐列判断，已经没有的跳过（用当前结构造的夹具）。
+pub const V38_TO_V39_DROPPED_COLUMNS: [(&str, &str); 4] = [
+    ("session_group", "pinned_at"),
+    ("acp_detail", "refresh_launch_from_settings"),
+    ("acp_detail", "pending_delivery_id"),
+    ("acp_detail", "binding_automation_run_id"),
+];
 
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。
 pub const MIGRATE_V29_TO_V30: &str = "

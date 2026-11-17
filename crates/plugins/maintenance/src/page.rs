@@ -2,10 +2,11 @@
 
 use std::rc::Rc;
 
-use api::ui::Button;
+use api::ui::{Button, SettingsPage, SettingsRow, SettingsSection};
 use api::{PluginView, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
-use gpui::{App, AppContext as _, Context, IntoElement, Render, SharedString, Window};
-use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
+use gpui::{
+    App, AppContext as _, Context, IntoElement, ParentElement as _, Render, SharedString, Window,
+};
 use smelt_plugin_api as api;
 
 use crate::cli_command::{self, SYSTEM_LINK, SystemCommand};
@@ -15,7 +16,7 @@ pub(crate) fn register(cx: &mut App) {
     let spec = ViewSpec {
         name: "cli".into(),
         title: "命令行".into(),
-        icon: gpui_kit_assets::IconName::SquareTerminal.path(),
+        icon: api::ui::IconName::SquareTerminal.path(),
         draws_top_bar: false,
         instances: false,
         settings: Some(SettingsEntry {
@@ -106,27 +107,19 @@ impl Render for CommandPage {
         };
         let disabled = installing || system == SystemCommand::Taken;
         let page = cx.entity();
-        let group = SettingGroup::new().item(
-            SettingItem::new(
-                "终端里的 smelt 命令",
-                SettingField::render(move |_, _, _| {
-                    let page = page.clone();
-                    Button::new("install-cli-command")
-                        .small()
-                        .label(if installing { "安装中…" } else { label })
-                        .loading(installing)
-                        .disabled(disabled)
-                        .on_click(move |_, _, cx: &mut App| {
-                            page.update(cx, |page, cx| page.install(cx));
-                        })
-                }),
-            )
-            .description(description),
-        );
-        api::settings_pane(
-            "maintenance-cli",
-            SettingPage::new("命令行").resettable(false).group(group),
-        )
+        let row = SettingsRow::new("终端里的 smelt 命令")
+            .description(description)
+            .child(
+                Button::new("install-cli-command")
+                    .small()
+                    .label(if installing { "安装中…" } else { label })
+                    .loading(installing)
+                    .disabled(disabled)
+                    .on_click(move |_, _, cx: &mut App| {
+                        page.update(cx, |page, cx| page.install(cx));
+                    }),
+            );
+        SettingsPage::new("maintenance-cli").child(SettingsSection::new().child(row))
     }
 }
 

@@ -245,4 +245,4 @@ smeltd 和历史：
 
 ## 待定
 
-- ~~侧边视图的组件形态：对话内可调宽的右侧分栏，还是浮在对话上的侧边抽屉。~~ 已随实现定下，见 `crates/smelt-acp-view/src/acp_view/render/subagents.rs`。
+- ~~侧边视图的组件形态：对话内可调宽的右侧分栏，还是浮在对话上的侧边抽屉。~~ 已随实现定下，见 `crates/plugins/conversation/src/view/render/subagents.rs`。

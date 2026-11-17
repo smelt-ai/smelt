@@ -3,6 +3,7 @@
 //! 写入一律发给自动化所在的那台机器；结果等运行时经 `automations.changed` 推回来，命令回包
 //! 不写同一份数据。
 
+use crate::peers::conversation::{ConversationArgs, ConversationSpec};
 use crate::prelude::*;
 
 impl AutomationsPage {
@@ -117,7 +118,7 @@ impl AutomationsPage {
         if self
             .live
             .as_ref()
-            .is_some_and(|live| live.session_id == session_id)
+            .is_some_and(|live| live.args.session_id == session_id)
         {
             self.error = None;
             cx.notify();
@@ -125,8 +126,7 @@ impl AutomationsPage {
         }
         // 运行的会话不进工作区目录：用的哪个 agent、开在哪看运行记录；守护里已经没有它
         // （运行结束、runtime 已回收）就没有现场可看。
-        let host = api::host(cx);
-        let live = host
+        let live = api::host(cx)
             .session_states(runtime_key, cx)
             .iter()
             .any(|state| state.id == session_id);
@@ -148,15 +148,19 @@ impl AutomationsPage {
             return;
         };
         // 现场在跑这次运行的那台机器上；接的是守护里正在跑的会话，不按规格重新起。
-        let request = api::EmbedConversation {
+        let args = ConversationArgs {
             machine: runtime_key.clone(),
             session_id: session_id.to_string(),
-            agent: agent.id().to_string(),
-            cwd: run.context.cwd.clone(),
-            binding: api::model::conversation::ConversationBinding::Automation { run_id: run.id },
-            reason: "正在打开自动化运行现场…".to_string(),
+            spec: Some(ConversationSpec {
+                agent: agent.id().to_string(),
+                cwd: run.context.cwd.clone(),
+                binding: api::model::conversation::ConversationBinding::Automation {
+                    run_id: run.id,
+                },
+            }),
+            placeholder: Some("正在打开自动化运行现场…".to_string()),
         };
-        match host.embed_conversation(request, window, cx) {
+        match LiveRun::start(args, window, cx) {
             Ok(live) => {
                 self.live = Some(live);
                 self.error = None;

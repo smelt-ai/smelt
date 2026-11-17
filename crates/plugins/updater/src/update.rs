@@ -12,13 +12,13 @@ use std::rc::Rc;
 
 use api::model::daemon_state::{DaemonPhase, DaemonSessionState};
 use api::ui::dialog::Confirm;
+#[cfg(target_os = "macos")]
+use api::ui::ui_theme;
 use api::updater::{self, UpdateFailure, UpdateStatus};
 use gpui::prelude::*;
 use gpui::{App, AsyncApp, Context, Entity, Global, Window};
 #[cfg(target_os = "macos")]
-use gpui::{SharedString, div};
-#[cfg(target_os = "macos")]
-use gpui_component::ActiveTheme as _;
+use gpui::{SharedString, div, rgb};
 use smelt_plugin_api as api;
 
 use crate::store::{Prefs, UpdaterStore};
@@ -714,13 +714,13 @@ fn offer_move_app(cx: &mut App) {
         .body(move |_, cx| {
             let this = state.read(cx);
             let (text, color) = match (&this.move_app_error, this.moving_app) {
-                (_, true) => ("正在移动…".into(), cx.theme().muted_foreground),
-                (Some(error), false) => (error.clone(), cx.theme().danger),
-                (None, false) => (SharedString::default(), cx.theme().muted_foreground),
+                (_, true) => ("正在移动…".into(), ui_theme::muted()),
+                (Some(error), false) => (error.clone(), ui_theme::bad()),
+                (None, false) => (SharedString::default(), ui_theme::muted()),
             };
             div()
                 .text_sm()
-                .text_color(color)
+                .text_color(rgb(color))
                 .child(text)
                 .into_any_element()
         })

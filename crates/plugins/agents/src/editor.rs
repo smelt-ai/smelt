@@ -94,7 +94,7 @@ impl AgentsPage {
             return;
         };
         let id = agent_id.to_string();
-        let task = api::edit_agent_settings(
+        let task = agent_hosts::edit(
             &runtime,
             move |config| {
                 if let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == id) {
@@ -140,7 +140,7 @@ impl AgentsPage {
             format!("{} 智能体 {}", kind.short_label(), existing + 1)
         };
         let agent = AgentRef::new(runtime.clone(), id.clone());
-        let task = api::edit_agent_settings(
+        let task = agent_hosts::edit(
             &runtime,
             move |config| {
                 config.agents.push(AgentDefinition {
@@ -883,7 +883,7 @@ impl AgentsPage {
         };
         self.arm_conversation_on_create = false;
         let removed_id = draft.id.clone();
-        let task = api::edit_agent_settings(
+        let task = agent_hosts::edit(
             &draft.runtime,
             move |config| remove_agent(config, &removed_id),
             cx,
@@ -949,7 +949,7 @@ impl AgentsPage {
             self.arm_conversation_on_create = false;
         }
         let deleted_id = agent.id.clone();
-        let task = api::edit_agent_settings(
+        let task = agent_hosts::edit(
             &agent.runtime,
             move |config| remove_agent(config, &deleted_id),
             cx,
@@ -998,6 +998,22 @@ impl AgentsPage {
     }
 }
 
+// 约定：smelt.sessions 的 START_CONVERSATION，权威定义在
+// crates/plugins/sessions/src/contract.rs。
+const START_CONVERSATION: api::Command<StartConversation, ()> =
+    api::Command::new("smelt.sessions/start-conversation");
+
+/// [`START_CONVERSATION`] 的参数。
+#[derive(serde::Serialize)]
+struct StartConversation {
+    #[serde(with = "api::machine_json")]
+    machine: RuntimeKey,
+    /// 智能体定义的 id。
+    agent_definition_id: String,
+    /// 那台机器上的工作目录。
+    cwd: String,
+}
+
 /// 智能体本身不「启动」：每次都新开一段引用它的对话，开在它那台机器上它自己的工作目录里。
 /// 目录由那台机器的运行时建好并给出路径；起对话（引擎、模型、启动命令）归宿主。
 pub(crate) fn start_conversation(agent: AgentRef, cx: &mut App) -> Task<Result<(), String>> {
@@ -1020,8 +1036,8 @@ pub(crate) fn start_conversation(agent: AgentRef, cx: &mut App) -> Task<Result<(
             .await
             .map_err(|error| format!("无法创建智能体工作区：{error}"))?;
         cx.update(|cx| {
-            api::contracts::sessions::START_CONVERSATION.run(
-                &api::contracts::sessions::StartConversation {
+            START_CONVERSATION.run(
+                &StartConversation {
                     machine: agent.runtime,
                     agent_definition_id: agent.id,
                     cwd: space.path,

@@ -1,22 +1,25 @@
 //! 界面主题目录：内存里的一张「名字 → 主题配置」表，按名字 `apply`。
 //!
-//! 组件库自带 smelt Light / smelt Dark（`themes/smelt.json`，名字保留），删掉主题插件
-//! 也还在。gpui-kit 的 [`ThemeRegistry`] 只能加不能删，它自带的 Default 那对是 shadcn
-//! 外观，smelt 不列出也不用；别的主题都登记在这里的 [`ThemeCatalog`] 上，不往
-//! [`ThemeRegistry`] 里装。内置主题和第三方主题走同一套
-//! 接口：按「来源」（owner，通常是插件 id）整组登记 [`register_theme_sets`]，整组换掉
-//! 或 [`unregister_themes`] 卸下。登记是原子的：任何一份解析失败、名字为空、同组重名、
-//! 和保留名或别的来源重名，整组都不生效，原来的登记原样保留。
+//! smelt-ui 自带 smelt Light / smelt Dark（`themes/smelt.json`，名字保留），删掉主题插件
+//! 也还在。内置主题和第三方主题走同一套接口：按「来源」（owner，通常是插件 id）整组登记
+//! [`register_theme_sets`]，整组换掉或 [`unregister_themes`] 卸下。登记是原子的：任何一份
+//! 解析失败、名字为空、同组重名、和保留名或别的来源重名，整组都不生效，原来的登记原样保留。
+//!
+//! 主题文件的格式和求值见 [`crate::theme_config`]，登记时解析、求值一次。装上的主题是
+//! [`ActiveTheme`] 这个全局，它是当前主题的唯一出处：自绘色板（`ui_theme`）在 [`apply`] 里
+//! 从它投影；应用里还用组件库画的 diff 和代码编辑器由应用观察这个全局，把同一份主题投影给
+//! 组件库（见 `smelt` 的 `component_theme`）。
 //!
 //! 只在登记时解析 JSON；[`apply`] / [`swatch`] / [`themes`] 只读内存，可以在 render 里调。
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::rc::Rc;
+use std::sync::{Arc, LazyLock};
 
 use gpui::{App, Global, Hsla, SharedString};
-use gpui_component::{Theme, ThemeConfig, ThemeMode, ThemeRegistry, ThemeSet};
 
+use crate::theme_config::{self, ThemeColors};
+pub use crate::theme_config::{ThemeConfig, ThemeMode};
 use crate::ui_theme;
 
 /// 一款主题的代表色：背景、前景、强调（primary）。设置页拿它画色点。
@@ -42,7 +45,7 @@ pub struct ThemeInfo {
 pub enum ThemeRegisterError {
     /// 来源名为空。
     EmptyOwner,
-    /// 第 `index` 份主题文件不是合法的主题集 JSON。
+    /// 第 `index` 份主题文件不合法（格式见 `theme_config`）。
     Parse { index: usize, message: String },
     /// 主题集没有系列名或没有主题。
     EmptySet { index: usize },
@@ -79,7 +82,7 @@ impl std::error::Error for ThemeRegisterError {}
 struct Registered {
     owner: SharedString,
     family: SharedString,
-    config: Rc<ThemeConfig>,
+    config: Arc<ThemeConfig>,
 }
 
 /// 主题目录本体。宿主经 [`register_theme_sets`] 等函数用它的全局实例；
@@ -94,7 +97,8 @@ pub struct ThemeCatalog {
 impl Global for ThemeCatalog {}
 
 impl ThemeCatalog {
-    /// 把 `owner` 的主题整组换成 `sources` 里的主题集（每份是 gpui-kit 主题集 JSON）。
+    /// 把 `owner` 的主题整组换成 `sources` 里的主题集（每份是一个 smelt 主题文件，格式见
+    /// [`crate::theme_config`]）。
     /// `is_reserved` 判断名字是否保留。成功返回这组的主题名（按文件里的顺序）；
     /// 失败时目录不变，`owner` 原来的那组还在。`sources` 为空等于卸下。
     pub fn register(
@@ -109,12 +113,11 @@ impl ThemeCatalog {
         let owner = SharedString::from(owner.to_string());
         let mut parsed: Vec<(SharedString, ThemeConfig)> = Vec::new();
         for (index, source) in sources.iter().enumerate() {
-            let set = serde_json::from_str::<ThemeSet>(source).map_err(|err| {
-                ThemeRegisterError::Parse {
+            let set =
+                theme_config::parse_theme_set(source).map_err(|err| ThemeRegisterError::Parse {
                     index,
                     message: err.to_string(),
-                }
-            })?;
+                })?;
             if set.name.trim().is_empty() || set.themes.is_empty() {
                 return Err(ThemeRegisterError::EmptySet { index });
             }
@@ -127,7 +130,7 @@ impl ThemeCatalog {
         }
         let mut seen = HashSet::new();
         for (_, config) in &parsed {
-            let name = &config.name;
+            let name = config.name();
             if name.trim().is_empty() {
                 return Err(ThemeRegisterError::EmptyName);
             }
@@ -150,15 +153,15 @@ impl ThemeCatalog {
         self.themes.retain(|_, entry| entry.owner != owner);
         let names = parsed
             .iter()
-            .map(|(_, config)| config.name.clone())
+            .map(|(_, config)| config.name().clone())
             .collect();
         for (family, config) in parsed {
             self.themes.insert(
-                config.name.clone(),
+                config.name().clone(),
                 Registered {
                     owner: owner.clone(),
                     family,
-                    config: Rc::new(config),
+                    config: Arc::new(config),
                 },
             );
         }
@@ -182,7 +185,7 @@ impl ThemeCatalog {
         removed
     }
 
-    pub fn get(&self, name: &str) -> Option<&Rc<ThemeConfig>> {
+    pub fn get(&self, name: &str) -> Option<&Arc<ThemeConfig>> {
         self.themes.get(name).map(|entry| &entry.config)
     }
 
@@ -192,8 +195,8 @@ impl ThemeCatalog {
 
     pub fn themes(&self) -> impl Iterator<Item = ThemeInfo> + '_ {
         self.themes.values().map(|entry| ThemeInfo {
-            name: entry.config.name.clone(),
-            mode: entry.config.mode,
+            name: entry.config.name().clone(),
+            mode: entry.config.mode(),
             family: entry.family.clone(),
             owner: Some(entry.owner.clone()),
         })
@@ -203,19 +206,60 @@ impl ThemeCatalog {
 /// 库自带的 smelt Light / smelt Dark。只在第一次用到时解析一次。
 const BUILTIN_SOURCE: &str = include_str!("../themes/smelt.json");
 
-thread_local! {
-    static BUILTIN: (SharedString, Vec<Rc<ThemeConfig>>) = {
-        let set = serde_json::from_str::<ThemeSet>(BUILTIN_SOURCE)
-            .expect("themes/smelt.json 必须是合法的主题集");
-        (set.name, set.themes.into_iter().map(Rc::new).collect())
-    };
+static BUILTIN: LazyLock<(SharedString, Vec<Arc<ThemeConfig>>)> = LazyLock::new(|| {
+    let set = theme_config::parse_theme_set(BUILTIN_SOURCE)
+        .expect("themes/smelt.json 必须是合法的主题文件");
+    (set.name, set.themes.into_iter().map(Arc::new).collect())
+});
+
+fn builtin(name: &str) -> Option<Arc<ThemeConfig>> {
+    BUILTIN
+        .1
+        .iter()
+        .find(|config| config.name() == name)
+        .cloned()
 }
 
-fn builtin(name: &str) -> Option<Rc<ThemeConfig>> {
-    BUILTIN.with(|(_, themes)| themes.iter().find(|config| config.name == name).cloned())
+/// 同明暗的 smelt 主题：还没装主题、或用户选的主题没了时用它。
+pub(crate) fn builtin_for_mode(mode: ThemeMode) -> Arc<ThemeConfig> {
+    BUILTIN
+        .1
+        .iter()
+        .find(|config| config.mode() == mode)
+        .cloned()
+        .expect("themes/smelt.json 深浅两款都要有")
 }
 
-fn lookup(name: &str, cx: &App) -> Option<Rc<ThemeConfig>> {
+/// 当前装上的主题。由 [`apply`] 整份换上；换主题时观察它的全局观察者都会被叫到。
+pub struct ActiveTheme {
+    config: Arc<ThemeConfig>,
+    colors: ThemeColors,
+}
+
+impl Global for ActiveTheme {}
+
+impl ActiveTheme {
+    /// 装上的那款主题。
+    pub fn config(&self) -> &ThemeConfig {
+        &self.config
+    }
+
+    pub fn mode(&self) -> ThemeMode {
+        self.config.mode()
+    }
+
+    /// 装上的语义色。窗口底下垫了材质时字色已按材质配够对比，可能和主题文件求出的不同。
+    pub fn colors(&self) -> &ThemeColors {
+        &self.colors
+    }
+}
+
+/// 当前装上的主题；还没 [`apply`] 过时是 `None`。
+pub fn active(cx: &App) -> Option<&ActiveTheme> {
+    cx.try_global::<ActiveTheme>()
+}
+
+fn lookup(name: &str, cx: &App) -> Option<Arc<ThemeConfig>> {
     if let Some(config) = builtin(name) {
         return Some(config);
     }
@@ -244,19 +288,17 @@ pub fn unregister_themes(owner: &str, cx: &mut App) -> Vec<SharedString> {
 
 /// 目录里能选的全部主题：先是库自带的 smelt（浅色在前），再是登记的主题（按名字）。
 pub fn themes(cx: &App) -> Vec<ThemeInfo> {
-    let mut list: Vec<ThemeInfo> = BUILTIN.with(|(family, themes)| {
-        let mut builtin: Vec<_> = themes
-            .iter()
-            .map(|config| ThemeInfo {
-                name: config.name.clone(),
-                mode: config.mode,
-                family: family.clone(),
-                owner: None,
-            })
-            .collect();
-        builtin.sort_by_key(|info| info.mode.is_dark());
-        builtin
-    });
+    let (family, builtin) = &*BUILTIN;
+    let mut list: Vec<ThemeInfo> = builtin
+        .iter()
+        .map(|config| ThemeInfo {
+            name: config.name().clone(),
+            mode: config.mode(),
+            family: family.clone(),
+            owner: None,
+        })
+        .collect();
+    list.sort_by_key(|info| info.mode.is_dark());
     if let Some(catalog) = cx.try_global::<ThemeCatalog>() {
         list.extend(catalog.themes());
     }
@@ -274,56 +316,29 @@ pub fn contains(name: &str, cx: &App) -> bool {
     lookup(name, cx).is_some()
 }
 
-/// 按名字取一款主题的代表色。颜色由 gpui-kit 自己解析主题配置得出，换上这款主题后
-/// 界面就是这几个色；不另写一套解析。名字不在目录里时是 `None`。只读内存。
+/// 按名字取一款主题的代表色：装上这款主题后界面就是这几个色。名字不在目录里时是
+/// `None`。只读内存。
 pub fn swatch(name: &str, cx: &App) -> Option<ThemeSwatch> {
     let config = lookup(name, cx)?;
-    let mut theme = Theme::global(cx).clone();
-    theme.apply_config(&config);
+    let colors = config.colors();
     Some(ThemeSwatch {
-        background: theme.background,
-        foreground: theme.foreground,
-        accent: theme.primary,
+        background: colors.bg_base.into(),
+        foreground: colors.text_base.into(),
+        accent: colors.bg_accent.into(),
     })
 }
 
 /// 按名字装上主题，产品色跟着换成这份主题。名字不在目录里时返回 false，当前主题不变。
 pub fn apply(name: &str, cx: &mut App) -> bool {
-    if !cx.has_global::<ThemeRegistry>() || !cx.has_global::<Theme>() {
-        return false;
-    }
     let Some(config) = lookup(name, cx) else {
         return false;
     };
-    Theme::update(cx, |theme| {
-        // 换主题是整份换上，不是在上一份上面改漏掉的字段。先回到库的默认
-        // 圆角和阴影，主题文件写了的再盖上去。字号字体属于 Appearance。
-        let font_family = theme.font_family.clone();
-        let font_size = theme.font_size;
-        let mono_family = theme.mono_font_family.clone();
-        let mono_size = theme.mono_font_size;
-        let scrollbar_mode = theme.scrollbar_mode;
-        theme.radius = gpui::px(6.);
-        theme.radius_lg = gpui::px(8.);
-        theme.shadow = true;
-        // gpui-kit 在没有 highlight 时保留旧值；先还原默认，避免串到上一款主题。
-        theme.highlight_theme = if config.mode.is_dark() {
-            gpui_component::highlighter::HighlightTheme::default_dark()
-        } else {
-            gpui_component::highlighter::HighlightTheme::default_light()
-        };
-        theme.apply_config(&config);
-        theme.font_family = font_family;
-        theme.font_size = font_size;
-        theme.mono_font_family = mono_family;
-        theme.mono_font_size = mono_size;
-        theme.scrollbar_mode = scrollbar_mode;
-        // 通知固定在右下角，避开左侧会话列表。主题文件不带这个位置。
-        theme.notification.placement = gpui::Anchor::BottomRight;
-        // 毛玻璃时字压在材质上，不是压在主题底色上，字色按材质配够对比。
-        ui_theme::fit_text_to_backdrop(theme);
-    });
-    ui_theme::adopt_active_theme(cx);
+    let dark = config.mode().is_dark();
+    let mut colors = *config.colors();
+    // 毛玻璃时字压在材质上，不是压在主题底色上，字色按材质配够对比。
+    ui_theme::fit_text_to_backdrop(&mut colors, dark);
+    ui_theme::install_theme(&colors, config.elevation().clone(), dark);
+    cx.set_global(ActiveTheme { config, colors });
     true
 }
 
@@ -340,11 +355,11 @@ mod tests {
                 serde_json::json!({
                     "name": name,
                     "mode": "dark",
-                    "colors": { "background": bg, "foreground": "#fafafa", "primary.background": "#3366ff" }
+                    "colors": { "bg_base": bg, "text_base": "#fafafa", "bg_accent": "#3366ff" }
                 })
             })
             .collect();
-        serde_json::json!({ "name": "test", "themes": themes }).to_string()
+        serde_json::json!({ "version": 1, "name": "test", "themes": themes }).to_string()
     }
 
     fn no_reserved(_: &str) -> bool {
@@ -453,35 +468,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn theme_without_highlight_does_not_keep_the_previous_theme_highlight(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        cx.update(|cx| {
-            let source = r#"{"name":"Test","themes":[
-                {"name":"Highlighted","mode":"dark","highlight":{"syntax":{}}},
-                {"name":"No highlight","mode":"dark"}
-            ]}"#;
-            register_theme_sets("test", &[source], cx).unwrap();
-            assert!(apply("Highlighted", cx));
-            let default = gpui_component::highlighter::HighlightTheme::default_dark();
-            assert!(!std::sync::Arc::ptr_eq(
-                &Theme::global(cx).highlight_theme,
-                &default
-            ));
-            assert!(apply("No highlight", cx));
-            assert!(std::sync::Arc::ptr_eq(
-                &Theme::global(cx).highlight_theme,
-                &default
-            ));
-        });
-    }
-
-    #[gpui::test]
     fn apply_follows_registration(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
         cx.update(|cx| {
-            // 库自带的 smelt 主题不用登记就能选，也不能被抢名；gpui-kit 的 Default 不列出。
+            // 库自带的 smelt 主题不用登记就能选，也不能被抢名；旧版本存的 Default 认不出。
             assert!(apply(smelt_model::theme_index::DEFAULT_LIGHT, cx));
+            assert!(!active(cx).unwrap().mode().is_dark());
             assert!(apply(smelt_model::theme_index::DEFAULT_DARK, cx));
+            assert!(active(cx).unwrap().mode().is_dark());
             assert!(!apply("Default Dark", cx));
             assert!(themes(cx).iter().all(|info| info.family != "Default"));
             let clash = set(&[(smelt_model::theme_index::DEFAULT_DARK, "#000000")]);
@@ -494,22 +487,17 @@ mod tests {
             let source = set(&[("Plugin Dark", "#101820")]);
             register_theme_sets("third", &[&source], cx).unwrap();
             assert!(contains("Plugin Dark", cx));
-            let font = Theme::global(cx).font_size;
             assert!(apply("Plugin Dark", cx));
-            assert_eq!(Theme::global(cx).font_size, font, "换主题不动字号");
-            assert!(swatch("Plugin Dark", cx).is_some());
+            assert_eq!(active(cx).unwrap().config().name().as_ref(), "Plugin Dark");
+            assert_eq!(ui_theme::bg(), 0x101820, "自绘色板跟着换");
+            let swatch = swatch("Plugin Dark", cx).unwrap();
+            assert_eq!(swatch.background, gpui::rgb(0x101820).into());
             assert!(themes(cx).iter().any(|info| info.name == "Plugin Dark"
                 && info.owner.as_ref().is_some_and(|o| *o == "third")));
 
             assert_eq!(unregister_themes("third", cx), ["Plugin Dark"]);
             assert!(!apply("Plugin Dark", cx));
             assert_eq!(swatch("Plugin Dark", cx), None);
-            // gpui-kit 的注册表没被写进去过。
-            assert!(
-                !ThemeRegistry::global(cx)
-                    .themes()
-                    .contains_key(&SharedString::from("Plugin Dark"))
-            );
         });
     }
 }

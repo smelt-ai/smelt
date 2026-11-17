@@ -1,6 +1,8 @@
 //! 改键：命令的键怎么算、覆盖怎么生效、键表里怎么换段、录到的键怎么判。不拉窗口。
 
-use gpui::{App, KeyBinding, KeyContext, Keymap, Keystroke, OperatingSystem, TestAppContext};
+use gpui::{
+    App, KeyBinding, KeyContext, Keymap, Keystroke, NoAction, OperatingSystem, TestAppContext,
+};
 use smelt_client_store::KeyBindingRecord;
 use smelt_plugin_api::{self as api, CommandInfo, RunCommand};
 
@@ -8,8 +10,8 @@ use super::{
     APP_KEYMAP, Bound, Overrides, Recorded, app_key_bindings, bind_commands,
     overrides_from_records, recorded, splice_app_bindings,
 };
+use crate::DismissWorkspace;
 use crate::workspace_commands::{self, COMMANDS};
-use crate::{DismissWorkspace, SidebarOpen};
 
 /// 测试 App 的本机系统，录键判定和解析都按它来，跟装键表时一致。
 fn os() -> OperatingSystem {
@@ -203,10 +205,6 @@ fn typed_host_commands_require_args() {
             api::PICK_PATHS.id(),
             api::OPEN_VIEW.id(),
             api::OPEN_PAGE.id(),
-            api::contracts::sessions::RESUME.id(),
-            api::contracts::sessions::RESUME_IN_TERMINAL.id(),
-            api::contracts::sessions::HANDOFF.id(),
-            api::contracts::sessions::SEND_TEXT.id(),
         ] {
             let command = api::command(id, cx).unwrap_or_else(|| panic!("{id} 没登记上"));
             assert!(command.requires_args, "{id} 要参数");
@@ -228,7 +226,7 @@ fn unknown_commands_are_kept_and_broken_keystrokes_dropped() {
                 keystroke: Some("cmd-j".to_string()),
             },
             KeyBindingRecord {
-                command: "smelt.sessions/focus-list".to_string(),
+                command: "example.a/list".to_string(),
                 keystroke: None,
             },
             KeyBindingRecord {
@@ -237,7 +235,7 @@ fn unknown_commands_are_kept_and_broken_keystrokes_dropped() {
             },
             // 不认识的修饰键解析不了。`cmd-` 倒是合法的：⌘ 加减号键。
             KeyBindingRecord {
-                command: "smelt.stage/split-right".to_string(),
+                command: "example.b/split".to_string(),
                 keystroke: Some("hyper-k".to_string()),
             },
         ],
@@ -247,7 +245,7 @@ fn unknown_commands_are_kept_and_broken_keystrokes_dropped() {
         loaded,
         overrides(&[
             (PALETTE, Some("cmd-j")),
-            ("smelt.sessions/focus-list", None),
+            ("example.a/list", None),
             ("trader/buy", Some("cmd-l")),
         ])
     );
@@ -263,15 +261,12 @@ fn unknown_commands_are_kept_and_broken_keystrokes_dropped() {
 #[test]
 fn rebuilding_swaps_only_the_app_segment_in_place() {
     let before = KeyBinding::new("cmd-shift-x", DismissWorkspace, Some("Component"));
-    let after = KeyBinding::new("cmd-shift-y", SidebarOpen, Some("Plugin"));
+    let after = KeyBinding::new("cmd-shift-y", NoAction, Some("Plugin"));
     let mut existing = vec![before];
     existing.extend(app_bindings(&Overrides::new()));
     existing.push(after);
 
-    let app = app_bindings(&overrides(&[(
-        "smelt.sessions/focus-list",
-        Some("cmd-shift-m"),
-    )]));
+    let app = app_bindings(&overrides(&[("smelt.app/settings", Some("cmd-shift-m"))]));
     let app_len = app.len();
     let rebuilt = splice_app_bindings(existing, app);
 
@@ -287,10 +282,10 @@ fn rebuilding_swaps_only_the_app_segment_in_place() {
         rebuilt[app_len + 1].keystrokes()[0].inner(),
         &stroke("cmd-shift-y")
     );
-    let focus_list = RunCommand::new("smelt.sessions/focus-list");
+    let settings = RunCommand::new("smelt.app/settings");
     let moved: Vec<_> = rebuilt
         .iter()
-        .filter(|binding| binding.action().partial_eq(&focus_list))
+        .filter(|binding| binding.action().partial_eq(&settings))
         .collect();
     assert_eq!(moved.len(), 1, "旧的那段不能留下来");
     assert_eq!(moved[0].keystrokes()[0].inner(), &stroke("cmd-shift-m"));
@@ -302,7 +297,7 @@ fn escape_cancels_and_backspace_clears() {
     assert_eq!(judge(PALETTE, "escape", &none), Recorded::Cancel);
     assert_eq!(judge(PALETTE, "backspace", &none), Recorded::Set(None));
     assert_set(judge(PALETTE, "cmd-shift-p", &none), "cmd-shift-p");
-    assert_set(judge("smelt.stage/split-right", "f8", &none), "f8");
+    assert_set(judge("smelt.app/quit", "f8", &none), "f8");
 }
 
 #[test]
@@ -327,9 +322,9 @@ fn keys_without_command_are_left_to_the_terminal_and_inputs() {
 fn a_key_used_by_another_command_asks_to_reassign() {
     let none = Overrides::new();
     for (spec, other) in [
-        ("cmd-shift-e", "smelt.sessions/focus-list"),
+        ("cmd-,", "smelt.app/settings"),
         ("cmd-q", "smelt.app/quit"),
-        ("cmd-1", "smelt.sessions/activate-1"),
+        ("cmd-shift-f", "smelt.app/debug-hud"),
     ] {
         match judge(PALETTE, spec, &none) {
             Recorded::Taken {
@@ -343,8 +338,11 @@ fn a_key_used_by_another_command_asks_to_reassign() {
         }
     }
     // 改走以后，原来的键就空出来了。
-    let moved = overrides(&[("smelt.sessions/focus-list", Some("cmd-shift-m"))]);
-    assert_set(judge(PALETTE, "cmd-shift-e", &moved), "cmd-shift-e");
+    let moved = overrides(&[("smelt.app/settings", Some("cmd-shift-m"))]);
+    assert_set(judge(PALETTE, "cmd-,", &moved), "cmd-,");
+    // 清掉键的命令也让出原来的键。
+    let cleared = overrides(&[("smelt.app/quit", None)]);
+    assert_set(judge(PALETTE, "cmd-q", &cleared), "cmd-q");
     // 自己现在的键不算冲突。
     assert_eq!(judge(PALETTE, "cmd-k", &none), Recorded::Reset);
 }
@@ -369,10 +367,4 @@ fn reserved_and_fixed_keys_are_refused() {
         judge_with(PALETTE, "cmd-shift-x", &none, &[component]),
         Recorded::Rejected(_)
     ));
-
-    #[cfg(target_os = "macos")]
-    {
-        let cleared = overrides(&[("smelt.stage/close-pane", None)]);
-        assert_set(judge(PALETTE, "cmd-w", &cleared), "cmd-w");
-    }
 }

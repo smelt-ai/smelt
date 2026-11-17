@@ -285,7 +285,6 @@ impl CatalogState {
             a.project_order
                 .cmp(&b.project_order)
                 .then(workset_order(a_row).cmp(&workset_order(b_row)))
-                .then(b_row.pinned.cmp(&a_row.pinned))
                 .then(a_row.order.cmp(&b_row.order))
                 .then(a_row.leaf.cmp(&b_row.leaf))
                 .then(a.title.cmp(&b.title))
@@ -320,7 +319,6 @@ struct Row {
     /// 在名册里的先后，和同一段对话里第几个终端。
     order: u32,
     leaf: u32,
-    pinned: bool,
 }
 
 /// 现拼的列表。项目分组先是目录里开着的项目，之后是会话 cwd 撑起来的分组。
@@ -422,7 +420,6 @@ impl Listing {
                 workset,
                 order,
                 leaf: 0,
-                pinned: conversation.pinned_at.is_some(),
             });
             return;
         }
@@ -449,7 +446,6 @@ impl Listing {
                 workset,
                 order,
                 leaf: u32::try_from(leaf).unwrap_or(u32::MAX),
-                pinned: conversation.pinned_at.is_some(),
             });
         }
     }
@@ -485,7 +481,6 @@ impl Listing {
                 workset: None,
                 order,
                 leaf: 0,
-                pinned: false,
             });
         }
 

@@ -992,15 +992,6 @@ dependencies = [
 
 [[package]]
 name = "bit-set"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
-dependencies = [
- "bit-vec 0.8.0",
-]
-
-[[package]]
-name = "bit-set"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
@@ -1016,12 +1007,6 @@ checksum = "56d87354e4229f54a44f7bf2435906a4656dba36026ab6eaca629a2c436a691c"
 dependencies = [
  "bit-vec 0.10.1",
 ]
-
-[[package]]
-name = "bit-vec"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
 name = "bit-vec"
@@ -3079,17 +3064,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
-name = "fancy-regex"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
-dependencies = [
- "bit-set 0.8.0",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4055,7 +4029,6 @@ dependencies = [
  "similar 2.7.0",
  "smallvec",
  "smol",
- "syntect",
  "tracing",
  "tree-sitter",
  "tree-sitter-astro-next",
@@ -4092,7 +4065,6 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-yaml",
  "tree-sitter-zig",
- "two-face 0.4.5",
  "unicode-segmentation",
  "unicode-width",
  "uuid",
@@ -4759,7 +4731,6 @@ dependencies = [
  "flate2",
  "fs2",
  "gpui-base",
- "gpui-component",
  "gpui-fps",
  "gpui-kit",
  "gpui-pre",
@@ -10887,7 +10858,6 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
- "chrono",
  "dirs 5.0.1",
  "embed-resource",
  "futures-util",
@@ -10905,20 +10875,19 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
  "objc2-user-notifications",
- "qrcode",
  "raw-window-handle",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
- "smelt-acp-view",
  "smelt-agents",
- "smelt-app-state",
+ "smelt-archive",
  "smelt-automations",
  "smelt-capabilities",
  "smelt-cli",
  "smelt-client",
  "smelt-client-store",
+ "smelt-conversation",
  "smelt-core",
  "smelt-desktop",
  "smelt-event-protocol",
@@ -10927,7 +10896,9 @@ dependencies = [
  "smelt-history",
  "smelt-ide",
  "smelt-iroh",
+ "smelt-launcher",
  "smelt-layouts",
+ "smelt-machines",
  "smelt-maintenance",
  "smelt-model",
  "smelt-notifications",
@@ -10936,6 +10907,7 @@ dependencies = [
  "smelt-plugin-api",
  "smelt-resources",
  "smelt-runtime-client",
+ "smelt-sessions",
  "smelt-store",
  "smelt-sys",
  "smelt-terminal",
@@ -10953,47 +10925,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-acp-view"
+name = "smelt-agents"
 version = "0.0.0"
 dependencies = [
- "base64 0.23.1",
+ "chrono",
  "gpui-base",
- "gpui-component",
- "gpui-kit-assets",
  "gpui-pre",
  "serde",
- "serde_json",
- "smelt-client",
- "smelt-core",
- "smelt-model",
  "smelt-plugin-api",
- "smelt-runtime-client",
- "smelt-sys",
- "smelt-ui",
  "smol",
  "uuid",
 ]
 
 [[package]]
-name = "smelt-agents"
+name = "smelt-archive"
 version = "0.0.0"
 dependencies = [
  "chrono",
- "gpui-component",
- "gpui-kit-assets",
+ "gpui-base",
  "gpui-pre",
+ "serde",
  "smelt-plugin-api",
- "uuid",
-]
-
-[[package]]
-name = "smelt-app-state"
-version = "0.0.0"
-dependencies = [
- "gpui-pre",
- "smelt-client",
- "smelt-client-store",
- "smelt-model",
 ]
 
 [[package]]
@@ -11001,8 +10953,7 @@ name = "smelt-automations"
 version = "0.0.0"
 dependencies = [
  "chrono",
- "gpui-component",
- "gpui-kit-assets",
+ "gpui-base",
  "gpui-pre",
  "serde",
  "smelt-plugin-api",
@@ -11014,8 +10965,9 @@ dependencies = [
 name = "smelt-capabilities"
 version = "0.0.0"
 dependencies = [
- "gpui-component",
+ "gpui-base",
  "gpui-pre",
+ "serde",
  "smelt-plugin-api",
 ]
 
@@ -11074,6 +11026,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-conversation"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "gpui-base",
+ "gpui-pre",
+ "serde",
+ "serde_json",
+ "smelt-plugin-api",
+ "smol",
+ "uuid",
+]
+
+[[package]]
 name = "smelt-core"
 version = "0.0.0"
 dependencies = [
@@ -11123,6 +11089,7 @@ dependencies = [
  "gpui-pre",
  "gpui-webview",
  "lb-wry",
+ "serde",
  "smelt-plugin-api",
  "smol",
 ]
@@ -11147,11 +11114,12 @@ dependencies = [
 name = "smelt-files-ui"
 version = "0.0.0"
 dependencies = [
+ "gpui-base",
  "gpui-component",
- "gpui-kit-assets",
  "gpui-pre",
  "gpui-webview",
  "lb-wry",
+ "serde",
  "smelt-plugin-api",
  "smol",
  "tempfile",
@@ -11176,8 +11144,8 @@ dependencies = [
  "chrono",
  "gpui-base",
  "gpui-component",
- "gpui-kit-assets",
  "gpui-pre",
+ "serde",
  "smelt-plugin-api",
 ]
 
@@ -11185,9 +11153,9 @@ dependencies = [
 name = "smelt-history"
 version = "0.0.0"
 dependencies = [
- "gpui-component",
- "gpui-kit-assets",
+ "gpui-base",
  "gpui-pre",
+ "serde",
  "smelt-plugin-api",
 ]
 
@@ -11195,7 +11163,6 @@ dependencies = [
 name = "smelt-ide"
 version = "0.0.0"
 dependencies = [
- "gpui-kit-assets",
  "gpui-pre",
  "objc",
  "serde",
@@ -11223,6 +11190,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-launcher"
+version = "0.0.0"
+dependencies = [
+ "gpui-kit-assets",
+ "gpui-pre",
+ "smelt-plugin-api",
+]
+
+[[package]]
 name = "smelt-layouts"
 version = "0.0.0"
 dependencies = [
@@ -11231,11 +11207,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-machines"
+version = "0.0.0"
+dependencies = [
+ "gpui-pre",
+ "image",
+ "qrcode",
+ "serde",
+ "smelt-plugin-api",
+ "smol",
+]
+
+[[package]]
 name = "smelt-maintenance"
 version = "0.0.0"
 dependencies = [
- "gpui-component",
- "gpui-kit-assets",
  "gpui-pre",
  "smelt-plugin-api",
 ]
@@ -11267,8 +11253,8 @@ dependencies = [
 name = "smelt-notifications"
 version = "0.0.0"
 dependencies = [
- "gpui-component",
  "gpui-pre",
+ "serde",
  "smelt-plugin-api",
  "tempfile",
 ]
@@ -11294,7 +11280,7 @@ name = "smelt-plugin-api"
 version = "0.0.0"
 dependencies = [
  "futures-channel",
- "gpui-component",
+ "gpui-base",
  "gpui-pre",
  "gpui-shell",
  "serde",
@@ -11340,8 +11326,9 @@ dependencies = [
 name = "smelt-resources"
 version = "0.0.0"
 dependencies = [
- "gpui-component",
+ "gpui-base",
  "gpui-pre",
+ "serde",
  "smelt-plugin-api",
  "smol",
 ]
@@ -11360,6 +11347,22 @@ dependencies = [
  "smelt-paths",
  "smelt-sys",
  "tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "smelt-sessions"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "gpui-base",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "serde",
+ "serde_json",
+ "smelt-plugin-api",
+ "smol",
+ "tempfile",
  "uuid",
 ]
 
@@ -11397,10 +11400,10 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "dirs 5.0.1",
- "gpui-component",
  "gpui-pre",
  "image",
  "libc",
+ "serde",
  "serde_json",
  "smelt-plugin-api",
  "smol",
@@ -11410,7 +11413,6 @@ dependencies = [
 name = "smelt-themes"
 version = "0.0.0"
 dependencies = [
- "gpui-component",
  "gpui-pre",
  "smelt-plugin-api",
 ]
@@ -11420,7 +11422,6 @@ name = "smelt-ui"
 version = "0.0.0"
 dependencies = [
  "gpui-base",
- "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-apple",
@@ -11441,7 +11442,6 @@ name = "smelt-updater-ui"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "gpui-component",
  "gpui-pre",
  "smelt-plugin-api",
  "smol",
@@ -11470,7 +11470,7 @@ dependencies = [
  "smelt-pairing",
  "smelt-runtime-client",
  "syntect",
- "two-face 0.5.2+bat-0.26.1",
+ "two-face",
  "uuid",
 ]
 
@@ -11844,7 +11844,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "656b45c05d95a5704399aeef6bd0ddec7b2b3531b7c9e900abbf7c4d2190c925"
 dependencies = [
  "bincode",
- "fancy-regex",
  "flate2",
  "fnv",
  "once_cell",
@@ -12952,17 +12951,6 @@ dependencies = [
  "thiserror 2.0.21",
  "url",
  "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "two-face"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39e51b6e60e545cfdae5a4639ff423818f52372211a8d9a3e892b4b0761f76b2"
-dependencies = [
- "serde",
- "serde_derive",
- "syntect",
 ]
 
 [[package]]

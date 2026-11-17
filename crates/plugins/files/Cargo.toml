@@ -13,9 +13,9 @@ workspace = true
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+# 打开文件用它的代码编辑器（行号、搜索、tree-sitter 高亮）。
 gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
-# 视图图标：完整的 lucide 图标表。
-gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 # HTML 预览：原生网页视图。gpui-webview 和组件库同一个 rev，wry 必须和它用同一份。
 gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 wry = { package = "lb-wry", version = "0.53.3" }
@@ -23,6 +23,8 @@ wry = { package = "lb-wry", version = "0.53.3" }
 smol = "2"
 # 「浏览器打开」：本机路径转成 file:// 地址。
 url = "2"
+# 照抄别的插件的约定（命令参数、菜单上下文）要按同样的 JSON 形状收发。
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }

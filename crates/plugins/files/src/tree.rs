@@ -14,7 +14,6 @@ use smelt_plugin_api::client::protocol::files::{
     ProjectSearchCall, ProjectSearchParams, ProjectTreeCall, ProjectWatchCall,
 };
 use smelt_plugin_api::client::protocol::git::{GitRootParams, GitStatusCall};
-use smelt_plugin_api::contracts::sessions;
 use smelt_plugin_api::ui::dialog::Confirm;
 use smelt_plugin_api::{self as api, PathRequest, RuntimeKey};
 
@@ -24,6 +23,16 @@ use crate::model::{
 };
 use crate::rt::{RUNTIME_CALL_TIMEOUT, call_on, error_text, target};
 use crate::{FilesPanel, ProjectRef, TreeActivate, TreeDown, TreeLeft, TreeRight, TreeUp};
+
+// 约定：smelt.sessions 的 SEND_TEXT，权威定义在 crates/plugins/sessions/src/contract.rs。
+/// 把文字交给当前会话（终端打进输入、对话填进输入框），不替用户发出。
+const SEND_TEXT: api::Command<SendText, ()> = api::Command::new("smelt.sessions/send-text");
+
+/// [`SEND_TEXT`] 的参数。
+#[derive(serde::Serialize)]
+struct SendText {
+    text: String,
+}
 
 impl FilesPanel {
     /// 树里挂出来的根，都在 [`Self::tree_runtime`] 那台机器上：当前项目在最前，后面是钉住
@@ -672,7 +681,7 @@ impl FilesPanel {
     }
 
     pub(crate) fn send_to_session(&self, text: String, cx: &mut App) {
-        let sent = sessions::SEND_TEXT.run(&sessions::SendText { text }, cx);
+        let sent = SEND_TEXT.run(&SendText { text }, cx);
         cx.spawn(async move |cx| {
             if let Err(error) = sent.await {
                 cx.update(|cx| crate::notify_error(format!("发送到会话失败：{error}"), cx));

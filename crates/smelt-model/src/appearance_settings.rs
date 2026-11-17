@@ -11,7 +11,7 @@ pub struct AppearanceSnapshot {
     pub theme_name: String,
     pub ui_font_px: u32,
     pub ui_font_family: String,
-    pub font_px: u32,
+    /// 等宽字体（代码、终端）。终端字号归终端插件，不在外观里。
     pub font_family: String,
 }
 
@@ -29,17 +29,11 @@ pub const UI_FONT_PX: &str = "appearance.ui_font_px";
 
 pub const UI_FONT_FAMILY: &str = "appearance.ui_font_family";
 
-pub const FONT_PX: &str = "appearance.font_px";
-
 pub const FONT_FAMILY: &str = "appearance.font_family";
 
 pub const MIN_UI_FONT_PX: u32 = 14;
 
 pub const MAX_UI_FONT_PX: u32 = 26;
-
-pub const MIN_FONT_PX: u32 = 9;
-
-pub const MAX_FONT_PX: u32 = 22;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsError {
@@ -118,7 +112,6 @@ pub fn default_snapshot() -> AppearanceSnapshot {
         theme_name: crate::theme_index::DEFAULT_DARK.into(),
         ui_font_px: 16,
         ui_font_family: String::new(),
-        font_px: 13,
         font_family: String::new(),
     }
 }
@@ -129,7 +122,6 @@ enum Change {
     ThemeName(String),
     UiFontPx(u32),
     UiFontFamily(String),
-    FontPx(u32),
     FontFamily(String),
 }
 
@@ -154,7 +146,6 @@ fn parse_change(key: &str, value: &Value) -> Result<Change, SettingsError> {
         }
         UI_FONT_PX => Change::UiFontPx(u32_in(value, UI_FONT_PX, MIN_UI_FONT_PX, MAX_UI_FONT_PX)?),
         UI_FONT_FAMILY => Change::UiFontFamily(string_value(value, UI_FONT_FAMILY)?),
-        FONT_PX => Change::FontPx(u32_in(value, FONT_PX, MIN_FONT_PX, MAX_FONT_PX)?),
         FONT_FAMILY => Change::FontFamily(string_value(value, FONT_FAMILY)?),
         other => {
             return Err(SettingsError::Invalid(format!("未知设置: {other}")));
@@ -187,7 +178,6 @@ fn apply_change(
         }
         Change::UiFontPx(px) => snapshot.ui_font_px = px,
         Change::UiFontFamily(family) => snapshot.ui_font_family = family,
-        Change::FontPx(px) => snapshot.font_px = px,
         Change::FontFamily(family) => snapshot.font_family = family,
     }
     Ok(())
@@ -246,7 +236,8 @@ mod tests {
             patch(&[(THEME_NAME, json!("x".repeat(81)))]),
             patch(&[(THEME_MODE, json!("sepia"))]),
             patch(&[(UI_FONT_PX, json!(MAX_UI_FONT_PX + 1))]),
-            patch(&[(FONT_PX, json!(-1))]),
+            // 终端字号归了终端插件，外观不再认这个键。
+            patch(&[("appearance.font_px", json!(13))]),
             patch(&[(FONT_FAMILY, json!(1))]),
             patch(&[("appearance.nope", json!(1))]),
         ] {

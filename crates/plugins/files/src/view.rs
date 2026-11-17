@@ -4,20 +4,66 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_virtual_list};
+use gpui_base::{StyledExt as _, v_virtual_list};
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::client::protocol::files::is_previewable_image;
+use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
+use smelt_plugin_api::ui::scrollbar::{Scrollable, Scrollbar, ScrollbarAxis};
+use smelt_plugin_api::ui::tooltip::Tooltip;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
-use smelt_plugin_api::ui::{Button, IconAction as _, TextInput};
+use smelt_plugin_api::ui::{Button, Icon, IconAction as _, IconName, TextInput};
 
 use crate::model::{
     FileTreeRow, OpenFile, PreviewKind, SearchState, SearchTreeDir, breadcrumb_segments,
     build_search_tree, file_tree_row_height, file_tree_row_id, name_likely_truncated,
 };
 use crate::{FilesPanel, MAX_TREE_WIDTH, MIN_TREE_WIDTH, TREE_KEY_CONTEXT, ui_theme};
+
+/// 编辑器的右键菜单。打开时按编辑器当下的选区和只读与否定哪些项可用；编辑类的项先把
+/// 焦点还给编辑器再派发动作，动作才落到它身上。
+fn editor_menu(
+    editor: &Entity<gpui_base::input::EditorState>,
+    panel: WeakEntity<FilesPanel>,
+) -> impl Fn(&mut Window, &mut App) -> Menu + 'static {
+    use gpui_base::input::{Copy, Cut, Paste, SelectAll};
+
+    let editor = editor.downgrade();
+    move |_, cx| {
+        let Some(editor) = editor.upgrade() else {
+            return Menu::new();
+        };
+        let capabilities = editor.read(cx).context_menu_capabilities();
+        let focus = editor.focus_handle(cx);
+        let item = |label: &'static str, enabled: bool, action: fn() -> Box<dyn Action>| {
+            let focus = focus.clone();
+            MenuItem::new(label)
+                .disabled(!enabled)
+                .on_click(move |_, window, cx| {
+                    focus.focus(window, cx);
+                    window.dispatch_action(action(), cx);
+                })
+        };
+        let editable = capabilities.is_editable();
+        let copyable = capabilities.is_copyable();
+        let panel = panel.clone();
+        Menu::new()
+            .item(item("剪切", editable && copyable, || Box::new(Cut)))
+            .item(item("复制", copyable, || Box::new(Copy)))
+            .item(item("粘贴", editable, || Box::new(Paste)))
+            .separator()
+            .item(item("全选", true, || Box::new(SelectAll)))
+            .separator()
+            .item(
+                MenuItem::new("发送选中内容到会话")
+                    .disabled(!capabilities.has_selection())
+                    .on_click(move |_, _, cx| {
+                        panel
+                            .update(cx, |panel, cx| panel.send_open_file_selection(cx))
+                            .ok();
+                    }),
+            )
+    }
+}
 
 fn placeholder_view(text: &str, muted: Hsla) -> Div {
     div()
@@ -64,7 +110,7 @@ impl FilesPanel {
             self.file_tree(tree_w, window, cx)
         };
         let local = self.tree_runtime() == RuntimeKey::Local;
-        let search_box = h_flex()
+        let search_box = div().flex().items_center()
             .gap_1()
             .px_2()
             .py(px(6.))
@@ -154,10 +200,9 @@ impl FilesPanel {
 
     /// 保留命中文件的目录层级；点文件跳到内容命中的那一行。
     fn search_results_view(&self, state: &SearchState, cx: &mut Context<Self>) -> AnyElement {
-        let (muted, fg, hover) = {
-            let theme = cx.theme();
-            (theme.muted_foreground, theme.foreground, theme.accent)
-        };
+        let muted: Hsla = rgb(ui_theme::muted()).into();
+        let fg: Hsla = rgb(ui_theme::text()).into();
+        let hover: Hsla = ui_theme::row_hover().into();
         let status = if !state.done {
             "搜索中…".to_string()
         } else if state.hits.is_empty() {
@@ -191,17 +236,15 @@ impl FilesPanel {
                     .child(status),
             )
             .child(
-                div()
-                    .id("search-results-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .pb_1()
-                    .track_scroll(&self.search_scroll)
-                    .vertical_scrollbar(&self.search_scroll)
-                    .children(rows),
+                Scrollable::new(
+                    "search-results-list",
+                    div().flex().flex_col().pb_1().children(rows),
+                    &self.search_scroll,
+                    ScrollbarAxis::Vertical,
+                )
+                .vertical_label("搜索结果滚动条")
+                .flex_1()
+                .min_h_0(),
             )
             .into_any_element()
     }
@@ -210,13 +253,12 @@ impl FilesPanel {
 
     /// 单根时根隐式展开、不画根标题行；多根时每个根一行可收起的标题，子项缩进一级。
     fn file_tree(&self, panel_w: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
         let colors = RowColors {
-            muted: theme.muted_foreground,
-            fg: theme.foreground,
-            hover: theme.accent,
-            active_bg: theme.border,
-            accent: theme.primary,
+            muted: rgb(ui_theme::muted()).into(),
+            fg: rgb(ui_theme::text()).into(),
+            hover: ui_theme::row_hover().into(),
+            active_bg: ui_theme::row_selected().into(),
+            accent: rgb(ui_theme::ink()).into(),
         };
         let roots = self.tree_roots();
         if roots.is_empty() {
@@ -282,7 +324,7 @@ impl FilesPanel {
                 window.focus(&focus, cx);
             })
             .child(list)
-            .vertical_scrollbar(&self.tree_scroll)
+            .child(Scrollbar::vertical(&self.tree_scroll).id("file-tree-scrollbar"))
             .into_any_element()
     }
 
@@ -290,7 +332,7 @@ impl FilesPanel {
 
     /// 路径栏（有打开的文件时）和内容体。
     fn file_content_parts(&self, cx: &mut Context<Self>) -> (Option<AnyElement>, AnyElement) {
-        let muted = cx.theme().muted_foreground;
+        let muted: Hsla = rgb(ui_theme::muted()).into();
         match &self.open_file {
             None => (None, placeholder_view("文件", muted).into_any_element()),
             Some(of) => (Some(self.file_header(of, cx)), self.file_body(of, cx)),
@@ -298,15 +340,10 @@ impl FilesPanel {
     }
 
     fn file_header(&self, of: &OpenFile, cx: &mut Context<Self>) -> AnyElement {
-        let (muted, fg, border, warning) = {
-            let theme = cx.theme();
-            (
-                theme.muted_foreground,
-                theme.foreground,
-                theme.border,
-                theme.warning,
-            )
-        };
+        let muted: Hsla = rgb(ui_theme::muted()).into();
+        let fg: Hsla = rgb(ui_theme::text()).into();
+        let border: Hsla = ui_theme::hair().into();
+        let warning: Hsla = rgb(ui_theme::need()).into();
         // 面包屑：项目名 > 中间目录 > 文件名。光看文件名分不清是哪个项目、哪层目录下的，
         // 多根时尤其如此。只有树那台机器上的文件对得上根。
         let roots = if of.runtime == self.tree_runtime() {
@@ -322,9 +359,10 @@ impl FilesPanel {
         let last = segs.len().saturating_sub(1);
         let on_tree_machine = of.runtime == self.tree_runtime();
         let view = cx.entity();
-        let breadcrumb = h_flex()
-            .id("file-breadcrumb")
+        let breadcrumb = div()
+            .flex()
             .items_center()
+            .id("file-breadcrumb")
             .gap_1()
             .min_w_0()
             .children(segs.iter().enumerate().flat_map(|(ix, seg)| {
@@ -344,7 +382,7 @@ impl FilesPanel {
                     .line_height(relative(1.2))
                     .when(is_last, |el| el.text_color(fg).font_semibold())
                     .when(!is_last, |el| el.text_color(muted))
-                    .hover(move |el| el.bg(border).text_color(fg))
+                    .hover(move |el| el.bg(ui_theme::row_hover()).text_color(fg))
                     .child(seg.label.clone())
                     // 别的机器上的文件在树里定位不到。
                     .when(on_tree_machine, |el| {
@@ -365,8 +403,7 @@ impl FilesPanel {
                     .chain(sep.map(IntoElement::into_any_element))
             }));
         let tree_open = self.tree_open;
-        h_flex()
-            .items_center()
+        div().flex().items_center()
             .justify_between()
             .gap_2()
             .px_3()
@@ -374,8 +411,7 @@ impl FilesPanel {
             .border_b_1()
             .border_color(border)
             .child(
-                h_flex()
-                    .items_center()
+                div().flex().items_center()
                     .gap_2()
                     .min_w_0()
                     .flex_1()
@@ -437,7 +473,7 @@ impl FilesPanel {
     }
 
     fn file_body(&self, of: &OpenFile, cx: &mut Context<Self>) -> AnyElement {
-        let fg = cx.theme().foreground;
+        let fg: Hsla = rgb(ui_theme::text()).into();
         let preview = of.preview && PreviewKind::for_path(&of.path).is_some();
         // 图片过大、读不出来时没有字节，落到编辑器分支显示原因。
         if let Some(image) = of.image.as_ref() {
@@ -481,36 +517,25 @@ impl FilesPanel {
                 ))
                 .into_any_element();
         }
+        // 代码编辑器留在组件库：语法高亮（tree-sitter 高亮器和高亮主题）、搜索栏、折叠图标
+        // 都是组件库的 `Editor` 装上的，gpui-base 只有编辑状态。状态本身是 gpui-base 的。
+        let editor = gpui_component::input::Editor::new(&of.editor)
+            .h_full()
+            // 编辑器自带行号栏，去掉 Input 预设的横向内边距。
+            .px_0()
+            // 右键菜单由外面这层出。编辑器自带的那份留着开关、只给空菜单：右键落在选区外
+            // 时它照常把光标挪过去，空菜单不弹出来。关掉开关的话光标就不跟着右键走了。
+            .context_menu(|menu, _, _| menu);
         div()
             .flex_1()
             .min_h_0()
             .child(
-                // 菜单在编辑器自己的右键回调里建，那时编辑器正在 update：这里不能读它，
-                // 不然重入借用直接崩。剪切、复制、发送执行时各自判空。
-                gpui_component::input::Editor::new(&of.editor)
-                    .h_full()
-                    // 编辑器自带行号栏，去掉 Input 预设的横向内边距。
-                    .px_0()
-                    .context_menu(move |menu, _, cx| {
-                        let has_paste = cx.read_from_clipboard().is_some();
-                        menu.menu("剪切", Box::new(gpui_component::input::Cut))
-                            .menu("复制", Box::new(gpui_component::input::Copy))
-                            .menu_with_disabled(
-                                "粘贴",
-                                !has_paste,
-                                Box::new(gpui_component::input::Paste),
-                            )
-                            .separator()
-                            .menu("全选", Box::new(gpui_component::input::SelectAll))
-                            .separator()
-                            .menu(
-                                "发送选中内容到会话",
-                                Box::new(smelt_plugin_api::RunCommand::new(format!(
-                                    "{}/send-selection",
-                                    crate::OWNER
-                                ))),
-                            )
-                    }),
+                MenuTrigger::context(
+                    ("files-editor-menu", of.editor.entity_id()),
+                    editor,
+                    editor_menu(&of.editor, cx.entity().downgrade()),
+                )
+                .size_full(),
             )
             .into_any_element()
     }
@@ -817,17 +842,15 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
             if !*pinned {
                 return header.into_any_element();
             }
-            header
-                .context_menu(move |menu, _, _| {
-                    let view = menu_view.clone();
-                    let root = menu_root.clone();
-                    menu.item(
-                        PopupMenuItem::new("从文件树移除").on_click(move |_, _, cx| {
-                            view.update(cx, |this, cx| this.unpin_root(&root, cx));
-                        }),
-                    )
-                })
-                .into_any_element()
+            let menu_id = (ElementId::from("root-menu"), path.clone());
+            MenuTrigger::context(menu_id, header, move |_, _| {
+                let view = menu_view.clone();
+                let root = menu_root.clone();
+                Menu::new().item(MenuItem::new("从文件树移除").on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.unpin_root(&root, cx));
+                }))
+            })
+            .into_any_element()
         }
         FileTreeRow::Entry {
             depth,
@@ -859,7 +882,8 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
             let menu_path = path.clone();
             let is_dir = *is_dir;
             let local = paint.local;
-            base.gap_1()
+            let row = base
+                .gap_1()
                 .pl(indent)
                 .pr_2()
                 .overflow_hidden()
@@ -878,43 +902,6 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
                             this.view_file(click_path.clone(), window, cx);
                         }
                     });
-                })
-                .context_menu(move |menu, _, _| {
-                    let send = (menu_view.clone(), menu_path.clone());
-                    let copy = menu_path.clone();
-                    let finder = menu_path.clone();
-                    let delete = (menu_view.clone(), menu_path.clone());
-                    menu.item(PopupMenuItem::new("发送到会话").on_click(move |_, _, cx| {
-                        send.0
-                            .update(cx, |this, cx| this.send_path_to_session(&send.1, cx));
-                    }))
-                    .item(
-                        PopupMenuItem::new("复制文件路径").on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                        }),
-                    )
-                    .when(local, |menu| {
-                        menu.item(
-                            PopupMenuItem::new(if cfg!(target_os = "macos") {
-                                "在 Finder 中显示"
-                            } else {
-                                "在文件管理器中显示"
-                            })
-                            .on_click(move |_, _, _| FilesPanel::reveal_path_in_finder(&finder)),
-                        )
-                    })
-                    .item(
-                        PopupMenuItem::new(if is_dir {
-                            "删除文件夹"
-                        } else {
-                            "删除文件"
-                        })
-                        .on_click(move |_, window, cx| {
-                            delete.0.update(cx, |this, cx| {
-                                this.start_delete(delete.1.clone(), is_dir, window, cx)
-                            });
-                        }),
-                    )
                 })
                 .child(arrow)
                 .child(type_icon)
@@ -938,8 +925,47 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
                         .font_bold()
                         .text_color(git_mark_color(mark))
                         .child(mark.to_string())
-                }))
-                .into_any_element()
+                }));
+            let menu_id = (ElementId::from("file-menu"), path.clone());
+            MenuTrigger::context(menu_id, row, move |_, _| {
+                let send = (menu_view.clone(), menu_path.clone());
+                let copy = menu_path.clone();
+                let finder = menu_path.clone();
+                let delete = (menu_view.clone(), menu_path.clone());
+                let mut menu = Menu::new()
+                    .item(MenuItem::new("发送到会话").on_click(move |_, _, cx| {
+                        send.0
+                            .update(cx, |this, cx| this.send_path_to_session(&send.1, cx));
+                    }))
+                    .item(MenuItem::new("复制文件路径").on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                    }));
+                if local {
+                    menu = menu.item(
+                        MenuItem::new(if cfg!(target_os = "macos") {
+                            "在 Finder 中显示"
+                        } else {
+                            "在文件管理器中显示"
+                        })
+                        .on_click(move |_, _, _| FilesPanel::reveal_path_in_finder(&finder)),
+                    );
+                }
+                menu.separator().item(
+                    MenuItem::new(if is_dir {
+                        "删除文件夹"
+                    } else {
+                        "删除文件"
+                    })
+                    .icon(smelt_plugin_api::ui::trash_icon())
+                    .danger()
+                    .on_click(move |_, window, cx| {
+                        delete.0.update(cx, |this, cx| {
+                            this.start_delete(delete.1.clone(), is_dir, window, cx)
+                        });
+                    }),
+                )
+            })
+            .into_any_element()
         }
     }
 }

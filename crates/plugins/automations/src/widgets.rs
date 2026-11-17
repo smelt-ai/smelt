@@ -20,16 +20,17 @@ pub(crate) fn agent_surface_card() -> Div {
 }
 
 pub(crate) fn render_agent_error(error: String) -> AnyElement {
-    gpui_component::alert::Alert::error("agent-error", error).into_any_element()
+    api::ui::Alert::error("agent-error", error).into_any_element()
 }
 
-pub(crate) fn framed_automation_textarea(textarea: Textarea) -> AnyElement {
+/// 嵌在表单卡里的多行框：外框是卡片，文本框自己不再画。
+pub(crate) fn framed_automation_textarea(textarea: TextArea) -> AnyElement {
     div()
         .w_full()
         .px_3()
         .py_3()
         .min_h(px(120.))
-        .child(textarea.appearance(false))
+        .child(textarea.bare())
         .into_any_element()
 }
 

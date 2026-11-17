@@ -1,5 +1,5 @@
-//! 单个终端视图：一个 Terminal + 焦点 + IME + 网格渲染 + 键盘/滚轮输入。
-//! 多个 TerminalView 由 Workspace 以标签形式管理。
+//! 一格终端的画面和输入：一个 [`Terminal`] + 焦点 + IME + 网格渲染 + 键盘/滚轮输入，断线
+//! 自己接回。插件内部用，对外是 [`crate::instance`] 的实例视图。
 
 use std::cell::Cell as StdCell;
 use std::collections::VecDeque;
@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::daemon_state::RuntimePresence;
 use smelt_plugin_api::ui::TextInput;
 use smol::Timer;
@@ -19,8 +20,8 @@ use smelt_plugin_api::model::kitty_graphics::{MILLI_CELLS, source_size};
 /// 选区高亮背景色：跟终端主题一起切换（深色用暗蓝，浅色换成不刺眼的浅蓝，
 /// 否则深色定死的暗蓝铺在浅底上，选中文字会糊在一起看不清）。
 ///
-/// 公开：宿主下发给移动端的配色快照要带上同一份值，两端选区色才一致。
-pub fn sel_bg() -> u32 {
+/// 发给运行时的配色快照（[`crate::theme`]）也带这一份，手机上的选区色才一致。
+pub(crate) fn sel_bg() -> u32 {
     if terminal::is_dark() {
         0x000c_3d7a
     } else {
@@ -29,7 +30,7 @@ pub fn sel_bg() -> u32 {
 }
 
 /// 搜索命中底色：普通命中暗琥珀，当前命中亮琥珀（跟选区蓝区分开）；同样跟主题走。
-pub fn search_hit_bg(active: bool) -> u32 {
+pub(crate) fn search_hit_bg(active: bool) -> u32 {
     match (active, terminal::is_dark()) {
         (true, true) => 0x00d4_a017,
         (true, false) => 0x00ff_c107,
@@ -72,17 +73,21 @@ fn terminal_font() -> Font {
 
 // Tab / Shift-Tab 在终端聚焦时的专属动作。
 //
-// gpui-component 的 `Root` 全局把 "tab"/"shift-tab" 绑成了焦点跳转（`window.focus_next`），
+// gpui-base 的 `Root` 全局把 "tab"/"shift-tab" 绑成了焦点跳转（`window.focus_next`），
 // context 是 "Root"——而 GPUI 按键分发时，keymap 匹配到的 action 会在
 // `on_key_down` 之类的原始按键监听器之前就被消费掉，根本轮不到终端自己处理，
 // 导致 Tab 补全在终端里形同虚设。这里在 "Terminal" 这个更贴近焦点的 context 上
 // 重新绑一份，深度更深的 context 按 GPUI 的 keymap 优先级规则会盖过 Root 那份，
 // 从而把 Tab/Shift-Tab 交还给终端本身（见下方 render 里的 `.on_action`）。
+//
+// Esc 同理：工作台在 "Workspace" 上绑了 Esc（关弹层、还原放大的面板组），终端里的 vim 等
+// 要先拿到它。
 gpui::actions!(
     smelt_terminal,
     [
         TerminalTab,
         TerminalBackTab,
+        TerminalEscape,
         TerminalFind,
         TerminalFindNext,
         TerminalFindPrev,
@@ -90,16 +95,18 @@ gpui::actions!(
     ]
 );
 
-/// 终端字号（px）：跟随设置页「字体大小」全局切换，见 `set_font_px`。单进程只有
-/// 一套终端字号，用全局原子量足够，不必给每处渲染/量measure 调用各传一份——
-/// 跟 terminal.rs 的 DARK_MODE 是同一路数。
-static FONT_PX_ATOM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(13);
+/// 终端字号（px）：本插件的设置页改它（见 [`crate::settings_page`]），存在本插件的库里。
+/// 单进程只有一套终端字号，用全局原子量足够，不必给每处渲染、测量各传一份。
+static FONT_PX_ATOM: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(DEFAULT_FONT_PX);
+/// 出厂字号。
+pub(crate) const DEFAULT_FONT_PX: u32 = 13;
 /// 字号可调范围：太小认不清字形，太大一屏放不下几列，都没意义。
-pub const MIN_FONT_PX: u32 = 9;
-pub const MAX_FONT_PX: u32 = 22;
+pub(crate) const MIN_FONT_PX: u32 = 9;
+pub(crate) const MAX_FONT_PX: u32 = 22;
 
 /// 切换终端字号（px，自动夹到 [MIN_FONT_PX, MAX_FONT_PX]）。
-pub fn set_font_px(px: u32) {
+pub(crate) fn set_font_px(px: u32) {
     FONT_PX_ATOM.store(
         px.clamp(MIN_FONT_PX, MAX_FONT_PX),
         std::sync::atomic::Ordering::Relaxed,
@@ -107,7 +114,7 @@ pub fn set_font_px(px: u32) {
 }
 
 /// 当前终端字号（px）。
-pub fn font_px() -> f32 {
+pub(crate) fn font_px() -> f32 {
     FONT_PX_ATOM.load(std::sync::atomic::Ordering::Relaxed) as f32
 }
 
@@ -126,16 +133,15 @@ const PAD_Y: f32 = 8.0;
 /// Shift+PageUp/Down 每次滚动的行数。
 const PAGE_LINES: i32 = 20;
 
-/// 一个内嵌终端视图。
-pub struct TerminalView {
-    /// 会话所在的运行时。断线重连、关闭都找它。
-    runtime: smelt_plugin_api::Runtime,
+/// 一格终端的画面和输入。
+pub(crate) struct TerminalView {
+    /// 会话所在的机器。断线重连找它。
+    machine: RuntimeKey,
     terminal: Terminal,
     /// 每次替换底层连接递增。旧连接的 redraw 任务退出时只能重连自己的 generation，
     /// 避免显式重启/其它成功重连已经装上新 Terminal 后又被迟到任务覆盖。
     terminal_generation: u64,
     focus_handle: FocusHandle,
-    did_focus: bool,
     /// 上一帧的焦点状态，用来把「焦点变了」这件事上报给应用（DEC 1004，见 report_focus）。
     was_focused: bool,
     /// 上一帧的网格快照，渲染和命中测试共用（Zed 同样把 last_content 缓存在 model 上）。
@@ -145,11 +151,7 @@ pub struct TerminalView {
     last_frame: Option<Rc<terminal::Frame>>,
     /// 输入法合成中的预编辑文本（未提交），仅用于满足 IME 协议，不发给 PTY。
     marked_text: Option<String>,
-    /// 用户在侧栏子行右键改过的 pane 名；None = 没改过。显示的名字由运行时算（见
-    /// `pane_title`），这里只为写进工作区目录。
-    /// 跟着 `PaneState::Leaf` 一起持久化，重开 GUI 按 session_id reattach 时灌回来。
-    custom_title: Option<String>,
-    /// 初始工作目录（新建标签继承用）。
+    /// 新起时的工作目录。守护崩过、会话只剩身份时按原 id 重开要用。
     cwd: Option<String>,
     /// 是否正在拖动框选（mouse_down 置位、mouse_up 清）。选区本体存在 alacritty 的
     /// Term.selection 里（缓冲区绝对坐标，滚动跟随/新输出漂移由它维护），这里只记
@@ -160,7 +162,7 @@ pub struct TerminalView {
     app_mouse: bool,
     /// 终端内搜索：打开时顶部出输入条（Cmd+F）；命中高亮在 paint 里画。
     search_open: bool,
-    search_input: Option<Entity<gpui_component::input::InputState>>,
+    search_input: Option<Entity<smelt_plugin_api::ui::field::InputState>>,
     _search_sub: Option<Subscription>,
     /// 当前可视区内所有搜索命中（含 active）；关搜索时清空。
     search_hits: Vec<terminal::SearchHit>,
@@ -185,20 +187,12 @@ pub struct TerminalView {
     hover_url: Option<Vec<(usize, usize, usize)>>,
     /// 最近一帧的光标位置 (行, 列)，供 IME 定位候选窗（bounds_for_range）。
     cursor: Option<(usize, usize)>,
-    /// 守护里的会话 id（持久化到工作区快照；重开 GUI 按它 reattach）。
+    /// 守护里的会话 id，断线后按它接回。
     session_id: String,
     /// 触控板滚轮的像素余数：触控板每帧只送几像素的增量，若逐事件独立按
     /// LINE_PX 取整会把大部分小增量截断成 0（滚了但没反应），造成"很不跟手"
     /// 的卡顿感。改为跨事件累加像素，攒够一整行再吐出、余数留到下次。
     scroll_accum: f32,
-    /// 建终端时的启动方式（侧栏行图标用，见 `LaunchKind`）。
-    launch_kind: LaunchKind,
-    /// 快捷启动项的显示名（设置里配的 label）。侧栏标题在 agent 还没上报任务名时
-    /// 回退到它，而不是 cwd 末段——否则「+ → Claude Code」建出来却显示项目名。
-    launch_label: Option<String>,
-    /// 快捷启动实际命令行。仅用于标识这个 pane 最初的启动方式；daemon 中会话
-    /// 丢失后不会重跑该命令。
-    launch_cmd: Option<String>,
     /// 首帧布局或 reattach 后强制发一次 PTY resize（含真实 cell 像素）。reattach
     /// 后守护 jolt 用 cell=0；普通 `resize` 同尺寸早退——两者都盖不住「同网格但缺
     /// 像素」的 TUI 排版。
@@ -248,73 +242,28 @@ fn terminal_event_needs_redraw(grid_damaged: bool, daemon_geometry_changed: bool
     grid_damaged || daemon_geometry_changed
 }
 
-/// 建终端时用的启动方式，决定侧栏行图标——跟「+」下拉菜单里注册的终端 agent
-/// 一一对应，一眼认出这一行是哪种会话。
-/// 建好之后不变：daemon 重启触发的 `reconnect()` 只换底层连接，不重置这个。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LaunchKind {
-    Terminal,
-    Agent(smelt_plugin_api::model::agent_kind::TerminalAgentKind),
-}
-
-impl LaunchKind {
-    /// 反过来映射回 `TerminalAgentKind`（`Terminal` 没有对应种类）。可直接接到
-    /// `settings::icon_for_agent_kind` 等工具函数，不用再维护一份 Claude→Asterisk 这种 match。
-    pub fn agent_kind(self) -> Option<smelt_plugin_api::model::agent_kind::TerminalAgentKind> {
-        match self {
-            Self::Terminal => None,
-            Self::Agent(agent) => Some(agent),
-        }
-    }
-}
-
-/// 从 `launch` 命令行猜启动方式。前缀匹配的判断本体是
-/// `TerminalAgentKind::from_command_prefix`——跟「+」菜单图标
-/// (`icon_for_launch_command`) 共用同一份逻辑，以后加参数或 agent 不会失配。
-fn classify_launch(launch: Option<&str>) -> LaunchKind {
-    launch
-        .and_then(smelt_plugin_api::model::agent_kind::TerminalAgentKind::from_command_prefix)
-        .map(LaunchKind::Agent)
-        .unwrap_or(LaunchKind::Terminal)
-}
-
 impl TerminalView {
     /// 用已 spawn 的 `Terminal` 包一层视图。**这是唯一的构造入口**——先
     /// `Terminal::spawn`（可失败）再决定是否建 Entity；不提供包着 expect 的
-    /// 便捷构造：所有调用方都在 GPUI 的 ObjC 回调栈上（启动
-    /// did_finish_launching / 用户事件），panic 不能跨 FFI unwind，一炸就是
-    /// 整个 app abort——历史上「重启就崩」「拖文件夹就崩」都是它。
-    pub fn from_terminal(
+    /// 便捷构造：panic 不能跨 FFI unwind，一炸就是整个 app abort。
+    pub(crate) fn from_terminal(
         cx: &mut Context<Self>,
-        runtime: smelt_plugin_api::Runtime,
+        machine: RuntimeKey,
         terminal: Terminal,
         cwd: Option<String>,
         session_id: String,
-        launch: Option<&str>,
-        launch_label: Option<&str>,
     ) -> Self {
         // Zed 式事件驱动重绘：读线程一有新内容就唤醒这里 cx.notify()（见 drive_redraws）。
         Self::drive_redraws(terminal.redraw_channel(), 0, cx);
-        let launch_kind = classify_launch(launch);
-        let launch_cmd = launch
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let launch_label = launch_label
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
 
         Self {
-            runtime,
+            machine,
             terminal,
             terminal_generation: 0,
             focus_handle: cx.focus_handle(),
-            did_focus: false,
             was_focused: false,
             last_frame: None,
             marked_text: None,
-            custom_title: None,
             cwd,
             selecting: false,
             app_mouse: false,
@@ -334,9 +283,6 @@ impl TerminalView {
             cursor: None,
             session_id,
             scroll_accum: 0.0,
-            launch_kind,
-            launch_label,
-            launch_cmd,
             pty_kick_pending: true,
             reconnecting: false,
             reconnect_notice: false,
@@ -345,31 +291,6 @@ impl TerminalView {
             write_error: None,
             session_runtime_gone: false,
         }
-    }
-
-    /// 建终端时的启动方式（侧栏行图标对齐「+」菜单用）。
-    pub fn launch_kind(&self) -> LaunchKind {
-        self.launch_kind
-    }
-
-    /// 快捷启动项显示名（见字段注释）；普通「新建终端」为 None。
-    pub fn launch_label(&self) -> Option<&str> {
-        self.launch_label.as_deref()
-    }
-
-    /// 快捷启动实际命令行；裸终端为 None。
-    pub fn launch_cmd(&self) -> Option<&str> {
-        self.launch_cmd.as_deref()
-    }
-
-    /// 守护里的会话 id（关 pane 时用它让守护真正杀掉 shell）。
-    /// 会话所在的运行时。
-    pub fn runtime(&self) -> &smelt_plugin_api::Runtime {
-        &self.runtime
-    }
-
-    pub fn session_id(&self) -> &str {
-        &self.session_id
     }
 
     /// 驱动重绘的常驻任务：await 读线程的唤醒 → `cx.notify()`。内容一到就画，
@@ -431,7 +352,7 @@ impl TerminalView {
         self.reconnecting = true;
         let sid = self.session_id.clone();
         let cwd = self.cwd.clone();
-        let runtime = self.runtime.clone();
+        let machine = self.machine.clone();
         cx.spawn(async move |this, cx| {
             let mut failures = 0u32;
             loop {
@@ -441,8 +362,7 @@ impl TerminalView {
                             this.terminal_generation == generation && !this.session_runtime_gone;
                         // exec 期间 socket 短暂不可连 / 守护还没起来 / 网络断了，都不能判
                         // 「会话没了」——那是要等的，不是要放弃的。
-                        if current
-                            && !smelt_plugin_api::host(cx).machine_online(this.runtime.key(), cx)
+                        if current && !smelt_plugin_api::host(cx).machine_online(&this.machine, cx)
                         {
                             this.show_reconnect_notice(cx);
                         }
@@ -453,7 +373,7 @@ impl TerminalView {
                     return;
                 }
                 // 1) 等运行时在线。机器被移除了就不再接。
-                if !smelt_plugin_api::wait_online(runtime.key(), failures, cx).await {
+                if !smelt_plugin_api::wait_online(&machine, failures, cx).await {
                     break;
                 }
                 // 2) 当前 epoch 的快照明确说这个 id 没有运行时进程了，就不再补发。连接器在
@@ -462,8 +382,8 @@ impl TerminalView {
                 let Ok((presence, connector)) = this.update(cx, |this, cx| {
                     let host = smelt_plugin_api::host(cx);
                     (
-                        host.session_presence(this.runtime.key(), &sid2, cx),
-                        host.connector(this.runtime.key(), cx),
+                        host.session_presence(&this.machine, &sid2, cx),
+                        host.connector(&this.machine, cx),
                     )
                 }) else {
                     return; // 视图已销毁
@@ -546,8 +466,8 @@ impl TerminalView {
         }
     }
 
-    /// 用已经在后台线程建好的 [`Terminal`] 替换当前连接（硬重启守护后批量重连用）。
-    pub fn adopt_terminal(&mut self, terminal: Terminal, cx: &mut Context<Self>) {
+    /// 用断线重连在后台建好的 [`Terminal`] 替换当前连接。
+    fn adopt_terminal(&mut self, terminal: Terminal, cx: &mut Context<Self>) {
         self.terminal_generation = self.terminal_generation.wrapping_add(1);
         // 旧连接的 kitty 图形纹理随连接一起释放，新连接的关键帧会重新带上还用得到的图。
         for image in self.terminal.release_all_images() {
@@ -569,26 +489,12 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 用户给这个 pane 起的名字；None = 还没改过名。
-    pub fn custom_title(&self) -> Option<&str> {
-        self.custom_title.as_deref()
-    }
-
-    /// 改名。传 None（或提交空串）= 清掉自定义名，名字由运行时按别的来源算。
-    pub fn set_custom_title(&mut self, title: Option<String>) {
-        self.custom_title = title.filter(|s| !s.trim().is_empty());
-    }
-
-    pub fn cwd(&self) -> Option<String> {
-        self.cwd.clone()
-    }
-
-    /// 从外部写一段文本到 PTY（等价于粘贴），供 diff 视图「发到终端」等场景复用。
+    /// 从外部写一段文本到 PTY（等价于粘贴），`smelt.terminal/send-text` 命令走这里。
     /// 走 [`Terminal::paste`]：bracketed paste + 换行规范化，跟 Cmd+V 同一条路。
     ///
     /// **不会提交**：Claude 等开了 bracketed paste 时，粘贴内容里的 `\n` 只是多行文本。
     /// 若需回车执行，调用方应在文本末尾附带回车符（`\r`）。
-    pub fn send_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub(crate) fn send_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if !self.terminal.paste(text) {
             self.defer_input(RecoveryInput::Paste(text.to_string()));
             self.recover_input_transport(cx);
@@ -676,8 +582,8 @@ impl TerminalView {
     }
 
     /// 打开终端内搜索条（Cmd+F）。输入框获焦；Enter 下一个，Shift+Enter 上一个，Esc 关闭。
-    pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_component::input::{InputEvent, InputState};
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use smelt_plugin_api::ui::field::{InputEvent, InputState};
         if self.search_open {
             if let Some(input) = &self.search_input {
                 input.update(cx, |s, cx| s.focus(window, cx));
@@ -714,7 +620,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    pub fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = false;
         self.search_input = None;
         self._search_sub = None;
@@ -742,7 +648,7 @@ impl TerminalView {
         }
     }
 
-    pub fn focus_handle(&self) -> FocusHandle {
+    pub(crate) fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
 
@@ -834,14 +740,14 @@ impl TerminalView {
     /// 因为正好卡在断行处就点出被截断的错误地址（#21）。
     fn url_at(&self, (r, c): (usize, usize)) -> Option<String> {
         let frame = self.last_frame.as_ref()?;
-        link_at(frame, r, c, self.runtime.is_local()).map(|(_, url)| url)
+        link_at(frame, r, c, self.machine == RuntimeKey::Local).map(|(_, url)| url)
     }
 
     /// 单元处链接跨越的所有物理行区间 [(行, 起列, 止列), ...]，用于悬停高亮——软换行的
     /// 链接可能横跨好几行，每行各给一段列区间。
     fn link_range_at(&self, (r, c): (usize, usize)) -> Option<Vec<(usize, usize, usize)>> {
         let frame = self.last_frame.as_ref()?;
-        link_at(frame, r, c, self.runtime.is_local()).map(|(segs, _)| segs)
+        link_at(frame, r, c, self.machine == RuntimeKey::Local).map(|(segs, _)| segs)
     }
 }
 
@@ -1066,12 +972,6 @@ impl Render for TerminalView {
             };
             smelt_plugin_api::NOTIFY.run(&notify, cx).detach();
         }
-        // 首帧把焦点抢到终端上。
-        if !self.did_focus {
-            self.did_focus = true;
-            window.focus(&self.focus_handle, cx);
-        }
-
         // 正常由 PTY 事件处理先同步；这里兜底首帧/重连竞态。守护可能把尺寸所有权
         // 交给移动端，应用其 canonical grid 时不能把 resize 再回写给守护。
         self.terminal.sync_daemon_geometry();
@@ -1212,6 +1112,19 @@ impl Render for TerminalView {
                 this.send_input(b"\x1b[Z", cx); // xterm 反向 Tab（back-tab）序列
                 this.terminal.scroll_to_bottom();
                 cx.notify();
+            }))
+            // 终端本身获焦才是它的；搜索框里的 Esc 交给工作台和搜索框自己（见下面的
+            // `on_key_down`）。输入法合成中的 Esc 归输入法，不发给 PTY。
+            .on_action(cx.listener(|this, _: &TerminalEscape, window, cx| {
+                if !this.focus_handle.is_focused(window) {
+                    cx.propagate();
+                    return;
+                }
+                if this.marked_text.is_none() {
+                    this.send_input(b"\x1b", cx);
+                    this.terminal.scroll_to_bottom();
+                    cx.notify();
+                }
             }))
             .on_action(cx.listener(|this, _: &TerminalFind, window, cx| {
                 this.open_search(window, cx);
@@ -1691,15 +1604,15 @@ impl Render for TerminalView {
             })
             // 断线提示：画面停在断开前，不说明的话像是卡死了。
             .when(self.reconnect_notice, |root| {
-                let key = self.runtime.key();
+                let key = &self.machine;
                 let runtime = smelt_plugin_api::host(cx)
                     .machines(cx)
                     .into_iter()
                     .find(|machine| &machine.key == key)
                     .map(|machine| machine.name)
                     .unwrap_or_else(|| match key {
-                        smelt_plugin_api::RuntimeKey::Remote(id) => id.clone(),
-                        smelt_plugin_api::RuntimeKey::Local => String::new(),
+                        RuntimeKey::Remote(id) => id.clone(),
+                        RuntimeKey::Local => String::new(),
                     });
                 root.child(
                     div()
@@ -2726,9 +2639,9 @@ fn super_natural_edit(key: &str) -> Option<Vec<u8>> {
 mod tests {
     // 不能 `use super::*`：那会把 gpui 的 `test` 属性宏一起带进来，盖掉标准 #[test]。
     use super::{
-        CellStyle, LaunchKind, SCROLLBAR_THUMB_MIN, bg_spans, cells_to_token, classify_launch,
-        expand_existing_path, keystroke_to_bytes, link_at, scrollbar_thumb,
-        terminal_event_needs_redraw, text_batches, visible_end,
+        CellStyle, SCROLLBAR_THUMB_MIN, bg_spans, cells_to_token, expand_existing_path,
+        keystroke_to_bytes, link_at, scrollbar_thumb, terminal_event_needs_redraw, text_batches,
+        visible_end,
     };
     use crate::terminal;
     use crate::terminal::Cell;
@@ -2751,23 +2664,6 @@ mod tests {
         assert!(terminal_event_needs_redraw(false, true));
         assert!(terminal_event_needs_redraw(true, false));
         assert!(!terminal_event_needs_redraw(false, false));
-    }
-
-    #[test]
-    fn classifies_all_builtin_terminal_agents() {
-        for agent in smelt_plugin_api::model::agent_kind::TerminalAgentKind::ALL {
-            assert_eq!(
-                classify_launch(Some(agent.quick_terminal_cmd())),
-                LaunchKind::Agent(agent),
-                "{} 的快捷命令应由统一注册表分类",
-                agent.id()
-            );
-        }
-        assert_eq!(
-            classify_launch(Some("grok --minimal")),
-            LaunchKind::Agent(smelt_plugin_api::model::agent_kind::TerminalAgentKind::Grok)
-        );
-        assert_eq!(classify_launch(Some("zsh")), LaunchKind::Terminal);
     }
 
     /// 造一行 cell：宽字符（中文）自动补一个 '\0' 占位格，跟 alacritty 的网格一致。

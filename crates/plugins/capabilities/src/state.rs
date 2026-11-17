@@ -4,29 +4,29 @@ use super::*;
 
 #[derive(Clone)]
 pub struct PiModelEditor {
-    pub provider: Entity<gpui_component::input::InputState>,
-    pub model: Entity<gpui_component::input::InputState>,
-    pub base_url: Entity<gpui_component::input::InputState>,
-    pub api_key: Entity<gpui_component::input::InputState>,
+    pub provider: Entity<InputState>,
+    pub model: Entity<InputState>,
+    pub base_url: Entity<InputState>,
+    pub api_key: Entity<InputState>,
     pub thinking_level: String,
     pub credential_configured: bool,
 }
 
 #[derive(Clone)]
 pub struct PiCustomModelEditor {
-    pub id: Entity<gpui_component::input::InputState>,
-    pub name: Entity<gpui_component::input::InputState>,
-    pub context_window: Entity<gpui_component::input::InputState>,
-    pub max_tokens: Entity<gpui_component::input::InputState>,
+    pub id: Entity<InputState>,
+    pub name: Entity<InputState>,
+    pub context_window: Entity<InputState>,
+    pub max_tokens: Entity<InputState>,
 }
 
 #[derive(Clone)]
 pub struct PiCustomProviderEditor {
     pub previous_id: Option<String>,
-    pub id: Entity<gpui_component::input::InputState>,
-    pub display_name: Entity<gpui_component::input::InputState>,
-    pub api_key: Entity<gpui_component::input::InputState>,
-    pub base_url: Entity<gpui_component::input::InputState>,
+    pub id: Entity<InputState>,
+    pub display_name: Entity<InputState>,
+    pub api_key: Entity<InputState>,
+    pub base_url: Entity<InputState>,
     pub api: String,
     pub models: Vec<PiCustomModelEditor>,
     /// 「获取模型列表」的进度与结果；`None` 表示还没点过。
@@ -102,8 +102,8 @@ pub struct PiLoginView {
     pub prompt: Option<PiLoginPrompt>,
     /// 两个输入框在登录开始时就建好：提问是从子进程的事件流里来的，那里没有
     /// `Window`，建不了控件，也改不了掩码。按提问类型选用哪一个即可。
-    pub input: Entity<gpui_component::input::InputState>,
-    pub secret_input: Entity<gpui_component::input::InputState>,
+    pub input: Entity<InputState>,
+    pub secret_input: Entity<InputState>,
     /// 输入框上的回车订阅。快照会 clone 整个 view，而订阅一旦被丢弃回车就失灵，
     /// 所以放进 `Rc` 跟着 view 一起活。订阅不是 `Send`，不能用 `Arc`。
     #[allow(dead_code, reason = "只为让订阅活到面板关闭，没有读取方")]
@@ -137,7 +137,7 @@ impl PiLoginView {
         }
     }
     /// 当前提问该用哪个输入框。
-    pub fn active_input(&self) -> Option<&Entity<gpui_component::input::InputState>> {
+    pub fn active_input(&self) -> Option<&Entity<InputState>> {
         match self.prompt.as_ref()?.kind {
             api::model::pi_auth::PiPromptKind::Select => None,
             api::model::pi_auth::PiPromptKind::Secret => Some(&self.secret_input),
@@ -209,13 +209,22 @@ pub(crate) fn render_model_discovery_section(
                         });
                     })
             });
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .gap_1()
                 .child(note(
                     muted,
                     format!("该端点提供 {total} 个模型，点击添加到下方列表："),
                 ))
-                .child(h_flex().gap_2().flex_wrap().children(buttons))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(buttons),
+                )
                 .into_any_element()
         }
     }

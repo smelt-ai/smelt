@@ -184,7 +184,8 @@ pub struct SubscriptionShape {
     pub workspace: bool,
     /// 自动化投影。桌面不在核心订阅里收：自动化插件单独订 `automations.changed`。
     pub automations: bool,
-    /// 冷恢复的对话启动规格只在桌面端手里，唤醒请求只能由它兑现。
+    /// 有人要看一段没在跑的对话时，请订阅方把它拉起来。眼下没有一方兑现（桌面不再兑现，
+    /// 运行时自己拉起另做），谁都不订。
     pub conversation_wake: bool,
     /// 外观归桌面端，CLI 发来的外观改动由它来改。
     pub appearance_requests: bool,
@@ -192,21 +193,22 @@ pub struct SubscriptionShape {
     pub project_changes: bool,
     /// 终端程序发的 OSC 通知，运行时扫好再推过来，桌面不再自己扫字节流。
     pub terminal_notifications: bool,
-    /// 终端程序用 OSC 9;4 报的进度，侧栏画进度条。
+    /// 终端程序用 OSC 9;4 报的进度。眼下桌面没有画它的地方，不订。
     pub terminal_progress: bool,
 }
 
 impl SubscriptionShape {
-    /// 桌面端：宿主自己要的都收，并承担唤醒对话、改外观这些只有它能兑现的请求。自动化
-    /// 投影、智能体记忆变化归插件，单独订阅。
+    /// 桌面端：宿主自己要的都收，并承担改外观这种只有它能兑现的请求。自动化投影、智能体
+    /// 记忆变化归插件，单独订阅。不订唤醒请求：桌面不再兑现，订了运行时会以为冷对话拉得
+    /// 起来，让手机干等到超时。
     pub const DESKTOP: Self = Self {
         workspace: true,
         automations: false,
-        conversation_wake: true,
+        conversation_wake: false,
         appearance_requests: true,
         project_changes: true,
         terminal_notifications: true,
-        terminal_progress: true,
+        terminal_progress: false,
     };
 
     /// 只看目录（手机）：会话状态、远程目录、工作区目录和自动化投影。不订唤醒请求和外观
@@ -896,7 +898,7 @@ mod tests {
         let topics = line["request"]["subscription"]["topics"]
             .as_array()
             .unwrap();
-        assert_eq!(topics.len(), 8);
+        assert_eq!(topics.len(), 6);
         assert!(
             topics
                 .iter()
@@ -913,8 +915,8 @@ mod tests {
         assert!(
             topics
                 .iter()
-                .any(|topic| topic == CORE_TOPIC_CONVERSATION_WAKE_REQUESTED),
-            "桌面端是冷恢复对话的唯一启动方，必须接唤醒请求"
+                .all(|topic| topic != CORE_TOPIC_CONVERSATION_WAKE_REQUESTED),
+            "桌面不兑现唤醒请求，订了运行时会以为冷对话拉得起来"
         );
         assert!(
             topics
@@ -1183,14 +1185,17 @@ mod tests {
     }
 
     #[test]
-    fn desktop_decodes_conversation_wake_requests() {
+    fn wake_subscribers_decode_conversation_wake_requests() {
         let wake = || {
             event_message(
                 CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
                 serde_json::json!({ "session_id": "acp-dormant" }),
             )
         };
-        let mut desktop = desktop_client();
+        let mut desktop = DaemonStateEventClient::new(SubscriptionShape {
+            conversation_wake: true,
+            ..SubscriptionShape::DESKTOP
+        });
         let _ = complete_snapshot(&mut desktop, 7, vec![]);
         assert!(matches!(
             desktop.decode_message(wake()).unwrap(),
@@ -1226,8 +1231,11 @@ mod tests {
     }
 
     #[test]
-    fn desktop_decodes_terminal_progress() {
-        let mut desktop = desktop_client();
+    fn progress_subscribers_decode_terminal_progress() {
+        let mut desktop = DaemonStateEventClient::new(SubscriptionShape {
+            terminal_progress: true,
+            ..SubscriptionShape::DESKTOP
+        });
         let _ = complete_snapshot(&mut desktop, 7, vec![]);
         assert!(matches!(
             desktop

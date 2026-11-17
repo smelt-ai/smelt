@@ -42,7 +42,7 @@ smelt agent delete <id>
 ```sh
 smelt conversation list [--agent <智能体id>] [--archived]
 smelt conversation rename <id> --title "新标题"
-smelt conversation archive|unarchive|pin|unpin <id>
+smelt conversation archive|unarchive <id>
 smelt conversation delete <id>
 ```
 
@@ -115,7 +115,7 @@ smelt quota
 ```sh
 smelt settings get
 smelt settings set appearance.theme_mode=dark
-smelt settings set appearance.theme_mode=light appearance.ui_font_px=16 appearance.font_px=13
+smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
 ```
 
 允许的外观设置：
@@ -123,7 +123,7 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16 appearan
 - `appearance.theme`：主题名，例如 `smelt Dark`、`Ayu Light`。
 - `appearance.theme_mode`：dark|light，把当前主题拨到同一族的另一侧。
 - `appearance.ui_font_px`（14–26）、`appearance.ui_font_family`。
-- `appearance.font_px`（9–22）、`appearance.font_family`。
+- `appearance.font_family`：等宽字体（代码、终端）。终端字号在桌面设置的终端页里调，CLI 不提供。
 
 外观存在桌面客户端里：改动经 smeltd 转给打开着的桌面，立刻生效；桌面没开时 `set` 外观会报错。`settings get` 只列记忆这类存在 smeltd 里的设置。
 

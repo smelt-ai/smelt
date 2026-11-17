@@ -9,7 +9,7 @@ use smelt_plugin_api as api;
 /// 登记主题用的来源名。卸下时用它。
 pub const OWNER: &str = "smelt.themes";
 
-/// 随程序带的主题集文件（gpui-kit 主题集 JSON）。
+/// 随程序带的主题集文件（smelt 主题文件格式，见 `docs/ui-design-language.md` 第 2 节）。
 pub static THEME_FILES: &[&str] = &[
     include_str!("../themes/adventure.json"),
     include_str!("../themes/alduin.json"),
@@ -34,7 +34,7 @@ pub static THEME_FILES: &[&str] = &[
     include_str!("../themes/twilight.json"),
 ];
 
-/// 宿主启动时调一次：在 `gpui_component::init` 之后、按设置装上主题之前。
+/// 宿主启动时调一次：按设置装上主题之前。
 /// 再调一次是整组替换，结果相同。
 pub fn register(cx: &mut App) {
     api::register_theme_sets(OWNER, THEME_FILES, cx).expect("内置主题文件不合法或与已有主题重名");
@@ -53,19 +53,15 @@ mod tests {
 
     #[gpui::test]
     fn bundled_themes_cover_the_index(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
         cx.update(|cx| {
             register(cx);
             // 再登记一次是替换，不算重名。
             register(cx);
             for source in THEME_FILES {
-                let set: gpui_component::ThemeSet = api::serde_json::from_str(source).unwrap();
-                for theme in set.themes {
-                    assert!(
-                        api::theme_contains(&theme.name, cx),
-                        "{} 没登记上",
-                        theme.name
-                    );
+                let set: api::serde_json::Value = api::serde_json::from_str(source).unwrap();
+                for theme in set["themes"].as_array().unwrap() {
+                    let name = theme["name"].as_str().unwrap();
+                    assert!(api::theme_contains(name, cx), "{name} 没登记上");
                 }
             }
             assert!(api::apply_theme("Ayu Dark", cx));

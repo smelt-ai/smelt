@@ -608,12 +608,15 @@ pub(crate) fn render_add_trigger_button(entity: Entity<AutomationsPage>) -> AnyE
         .flex()
         .items_center()
         .child(
-            Button::new("automation-add-trigger")
-                .quiet()
-                .w_full()
-                .icon(IconName::Plus)
-                .label("添加触发器")
-                .dropdown_menu(move |mut menu, _, _| {
+            MenuTrigger::dropdown(
+                "automation-add-trigger-menu",
+                Button::new("automation-add-trigger")
+                    .quiet()
+                    .w_full()
+                    .icon(IconName::Plus)
+                    .label("添加触发器"),
+                move |_, _| {
+                    let mut menu = Menu::new();
                     let mut saw_advanced = false;
                     for preset in BUILTIN_AUTOMATION_TRIGGER_PRESETS {
                         if preset.is_advanced() && !saw_advanced {
@@ -623,7 +626,7 @@ pub(crate) fn render_add_trigger_button(entity: Entity<AutomationsPage>) -> AnyE
                         let entity = entity.clone();
                         let preset = *preset;
                         menu = menu.item(
-                            PopupMenuItem::new(format!("{} · {}", preset.label(), preset.hint()))
+                            MenuItem::new(format!("{} · {}", preset.label(), preset.hint()))
                                 .icon(trigger_preset_icon(preset))
                                 .on_click(move |_, window, cx| {
                                     entity.update(cx, |page, cx| {
@@ -633,20 +636,18 @@ pub(crate) fn render_add_trigger_button(entity: Entity<AutomationsPage>) -> AnyE
                         );
                     }
                     menu
-                }),
+                },
+            )
+            .w_full(),
         )
         .into_any_element()
 }
 
-pub(crate) fn trigger_preset_icon(preset: AutomationTriggerPresetId) -> Icon {
+pub(crate) fn trigger_preset_icon(preset: AutomationTriggerPresetId) -> IconName {
     match preset {
-        AutomationTriggerPresetId::Webhook => Icon::new(gpui_kit_assets::IconName::Webhook),
-        AutomationTriggerPresetId::Hourly | AutomationTriggerPresetId::Interval => {
-            Icon::new(gpui_kit_assets::IconName::Clock)
-        }
-        AutomationTriggerPresetId::Daily | AutomationTriggerPresetId::Weekly => {
-            IconName::Calendar.into()
-        }
+        AutomationTriggerPresetId::Webhook => IconName::Webhook,
+        AutomationTriggerPresetId::Hourly | AutomationTriggerPresetId::Interval => IconName::Clock,
+        AutomationTriggerPresetId::Daily | AutomationTriggerPresetId::Weekly => IconName::Calendar,
     }
 }
 
@@ -662,14 +663,14 @@ pub(crate) fn render_trigger_entry(
     let hint = trigger_entry_hint(entry);
     let show_hint = title != hint;
     let icon: Icon = match entry.trigger_kind {
-        AutomationTriggerKindId::Webhook => Icon::new(gpui_kit_assets::IconName::Webhook),
-        AutomationTriggerKindId::Interval => Icon::new(gpui_kit_assets::IconName::Clock),
+        AutomationTriggerKindId::Webhook => Icon::new(IconName::Webhook),
+        AutomationTriggerKindId::Interval => Icon::new(IconName::Clock),
         AutomationTriggerKindId::Calendar => IconName::Calendar.into(),
     };
     let body = match entry.trigger_kind {
         AutomationTriggerKindId::Webhook => render_webhook_entry(index, entry, editor, entity, cx),
         AutomationTriggerKindId::Calendar | AutomationTriggerKindId::Interval => {
-            render_schedule_rule(index, &entry.schedule, false, entity, cx)
+            render_schedule_rule(index, &entry.schedule, false, entity)
         }
     };
     let row_key = entry.schedule.time.entity_id();
@@ -711,7 +712,7 @@ pub(crate) fn render_trigger_entry(
                 )
                 .child(
                     compact_chip("automation-remove-trigger")
-                        .icon(api::ui::trash_icon())
+                        .icon_path("smelt-icons/trash.svg")
                         .icon_action("删除触发器")
                         .on_click(move |_, _, cx| {
                             remove_entity.update(cx, |page, cx| {
@@ -726,6 +727,7 @@ pub(crate) fn render_trigger_entry(
 
 /// 目录和编辑器里的小图标。不染色，底就是悬停灰。
 pub(crate) fn neutral_icon_mark(icon: impl Into<Icon>, size: f32) -> AnyElement {
+    let icon: Icon = icon.into();
     div()
         .size(px(size))
         .rounded(ui_theme::row_radius())
@@ -735,8 +737,7 @@ pub(crate) fn neutral_icon_mark(icon: impl Into<Icon>, size: f32) -> AnyElement 
         .justify_center()
         .bg(rgb(ui_theme::soft()))
         .child(
-            Icon::new(icon)
-                .size(px((size * 0.5).round()))
+            icon.size(px((size * 0.5).round()))
                 .text_color(rgb(ui_theme::muted())),
         )
         .into_any_element()
@@ -796,18 +797,24 @@ pub(crate) fn render_notification_field(
 ) -> AnyElement {
     let selected = editor.notification;
     let picker_entity = entity;
+    let button = Button::new("automation-notification")
+        .quiet()
+        .w_full()
+        .dropdown_caret(true);
+    let button = match selected {
+        AutomationNotificationPreset::Off => button.icon(IconName::BellOff),
+        AutomationNotificationPreset::App => button.icon(IconName::Bell),
+    };
     let picker = automation_form_row().child(
-        Button::new("automation-notification")
-            .quiet()
-            .w_full()
-            .dropdown_caret(true)
-            .icon(notification_preset_icon(selected))
-            .label(selected.label())
-            .dropdown_menu(move |mut menu, _, _| {
+        MenuTrigger::dropdown(
+            "automation-notification-menu",
+            button.label(selected.label()),
+            move |_, _| {
+                let mut menu = Menu::new();
                 for preset in AutomationNotificationPreset::ALL {
                     let entity = picker_entity.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(preset.label())
+                        MenuItem::new(preset.label())
                             .icon(notification_preset_icon(preset))
                             .checked(preset == selected)
                             .on_click(move |_, _, cx| {
@@ -818,7 +825,9 @@ pub(crate) fn render_notification_field(
                     );
                 }
                 menu
-            }),
+            },
+        )
+        .w_full(),
     );
     div()
         .flex()
@@ -859,10 +868,10 @@ pub(crate) fn automation_access_note(is_agent: bool) -> &'static str {
     }
 }
 
-pub(crate) fn notification_preset_icon(preset: AutomationNotificationPreset) -> Icon {
+pub(crate) fn notification_preset_icon(preset: AutomationNotificationPreset) -> IconName {
     match preset {
-        AutomationNotificationPreset::Off => Icon::new(gpui_kit_assets::IconName::BellOff),
-        AutomationNotificationPreset::App => IconName::Bell.into(),
+        AutomationNotificationPreset::Off => IconName::BellOff,
+        AutomationNotificationPreset::App => IconName::Bell,
     }
 }
 
@@ -893,7 +902,7 @@ pub(crate) fn render_webhook_entry(
         .child(
             div()
                 .text_xs()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(rgb(ui_theme::muted()))
                 .child(if live_url.is_some() {
                     "向此地址发送 POST 请求即可触发运行。"
                 } else {
@@ -1001,7 +1010,6 @@ pub(crate) fn render_schedule_rule(
     rule: &ScheduleRuleEditor,
     can_remove: bool,
     entity: Entity<AutomationsPage>,
-    cx: &App,
 ) -> AnyElement {
     let frequency = (!rule.kind.is_interval()).then(|| {
         let kinds = ScheduleKind::clock_kinds();
@@ -1026,7 +1034,7 @@ pub(crate) fn render_schedule_rule(
     let timezone = || {
         div()
             .text_xs()
-            .text_color(cx.theme().muted_foreground)
+            .text_color(rgb(ui_theme::muted()))
             .child(local_timezone_label())
     };
     // 星期可以多选：每天各自开关。
@@ -1107,14 +1115,14 @@ pub(crate) fn render_schedule_rule(
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(cx.theme().muted_foreground)
+                                .text_color(rgb(ui_theme::muted()))
                                 .child("从"),
                         )
                         .child(clock(&rule.window_start, "开始时间"))
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(cx.theme().muted_foreground)
+                                .text_color(rgb(ui_theme::muted()))
                                 .child("到"),
                         )
                         .child(clock(&rule.window_end, "结束时间"))
@@ -1175,7 +1183,7 @@ pub(crate) fn render_schedule_rule(
     let remove = can_remove.then(|| {
         let remove_entity = entity.clone();
         compact_chip("automation-remove-schedule")
-            .icon(api::ui::trash_icon())
+            .icon_path("smelt-icons/trash.svg")
             .icon_action("删除时间设置")
             .on_click(move |_, _, cx| {
                 remove_entity.update(cx, |page, cx| {

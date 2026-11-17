@@ -12,7 +12,6 @@
 use std::rc::{Rc, Weak};
 
 use gpui::*;
-use gpui_component::{ActiveTheme as _, WindowExt as _};
 use gpui_webview::{WebView, WebViewHandle};
 
 pub(crate) struct HtmlPreview {
@@ -94,13 +93,15 @@ impl Render for HtmlPreview {
                 .items_center()
                 .justify_center()
                 .text_sm()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(rgb(crate::ui_theme::muted()))
                 .child(error.clone());
         }
         let (Some(webview), Some(hide_native)) = (&self.webview, &self.hide_native) else {
             return surface;
         };
-        if window.has_active_dialog(cx) {
+        // 原生网页视图盖得住任何 GPUI 画的层：开着对话框时让开。宿主、Rust 插件和 JS 插件的
+        // 对话框都在 smelt 的对话框层。
+        if smelt_plugin_api::ui::dialog::is_open(window, cx) {
             return surface;
         }
         surface.child(webview.clone()).child(HideWhenNotPainted {

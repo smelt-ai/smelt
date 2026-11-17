@@ -2,7 +2,7 @@
 
 smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机器，有终端、改动、审批。界面要像一个安静的桌面 app，不像后台管理系统；同时要撑得住工作台的复杂度，不能为了好看把信息砍掉。
 
-这份文档定三件事：**主题管什么**、**组件长什么样**、**状态怎么表达**。组件库是 `crates/smelt-ui`，基于 gpui-base 自己做样式，不套库里现成的 shadcn 外观。
+这份文档定三件事：**主题管什么**、**组件长什么样**、**状态怎么表达**。组件库是 `crates/smelt-ui`：行为（焦点、键盘、浮层定位、无障碍）用 gpui-base 的原语，样子全是自己的，不依赖 gpui-component，也不套它的 shadcn 外观。
 
 ---
 
@@ -10,12 +10,49 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 
 | 归谁 | 管什么 | 不管什么 |
 |---|---|---|
-| 主题（gpui-kit 主题 JSON） | 颜色：底色梯度、文字三档、主操作、状态色、分类色、语法高亮 | 圆角、尺寸、字号、阴影形状 |
-| 组件（`smelt-ui`） | 形状、尺寸、密度、阴影、动效 | 具体色值 |
+| 主题（数据，smelt 主题文件，第 2 节） | 颜色：底色梯度、文字三档、主操作、状态色、分类色、语法高亮；浮起层级的阴影 | 圆角、尺寸、字号 |
+| 设计令牌（`smelt_ui::kit`） | 圆角阶梯、字档、浮起层级、组件用的图标 | 具体色值 |
+| 组件（`smelt-ui`） | 用令牌和色板拼出形状、尺寸、密度、状态、动效 | 自己的数值和色值 |
 
-换主题只换颜色，形状和密度不跟着变。gpui-kit 的主题格式也能写 `radius`、`font_size`，smelt 不读这些位，主题插件里也不写。
+换主题只换颜色和阴影，形状和密度不跟着变。主题文件里没有圆角、字号的位。
 
-默认主题是 **smelt Light / smelt Dark**，是组件库自带的主题（`crates/smelt-ui/themes/smelt.json`），代替 gpui-kit 自带的 Default。它不属于 themes 插件：删掉 themes 插件，app 照样有默认主题。其它主题由 themes 插件装进来，和它一样可换；主题列表里永远有它，插件里的同名主题不能覆盖它。主题装上之前的首帧用 `ui_theme::builtin_fallback`，色值和 smelt Light / Dark 一致，有测试守着。
+### 令牌
+
+一套主题拆成调色板、浮起层级、字、圆角、动效、控件尺寸、图标几块，组件只读语义令牌，不写数值。
+
+| 令牌 | 在哪 | 内容 |
+|---|---|---|
+| 调色板 | `ui_theme::Palette`（第 2 节） | 语义色位；随主题整份换 |
+| 浮起层级 | 主题的 `elevation`（`ui_theme::elevation()`），组件经 `kit::elevation` 取 | `input`、`button_neutral`、`button_contrast`、`elements`、`switch_off` / `switch_on`、`knob`、`raised`、`floating`、`overlay`、`md` 十一档，随主题换，细圈在投影里（第 2、3 节） |
+| 字 | `kit::TYPE` | 十二档，见下表 |
+| 圆角 | `kit::RADIUS.{xs, sm, md, lg, xl}` | 2 / 4 / 6 / 8 / 10 |
+| 动效 | `kit::MOTION`（第 7 节） | 临界阻尼弹簧：`control` 200ms、`overlay` 240ms、`disclosure` 300ms |
+| 控件尺寸 | `kit::ControlSize` | `Mini` 16 / `Small` 20 / `Regular` 24（默认）/ `Large` 28 / `ExtraLarge` 36，各控件按档给高度、内边距、圆角（第 4 节） |
+| 图标 | `kit::GLYPHS` | 勾、复制、关、上下箭头、转圈、垃圾桶、眼睛、搜索；Lucide 没有的用 `smelt-icons/*.svg` |
+
+字档（字号 / 行高 / 字重，px，界面字号 16 时；字号和行高用 rem，跟着界面字号缩放）：
+
+| 档 | 值 | 用在哪 |
+|---|---|---|
+| `ui` / `ui_medium` | 13 / 20 / 440、530 | 控件正文、页签、单选标签；按钮字、对话框标题 |
+| `ui_compact` | 13 / 16 / 440 | 单行控件：输入框、菜单行、下拉列表 |
+| `small` / `small_medium` | 11 / 12 / 440、530 | 徽标、键帽（行高收到 11）、提示、菜单分组名 |
+| `body` / `body_medium` | 14 / 21 / 400、500 | 正文段落 |
+| `text_small` / `text_small_medium` | 13 / 19.5 / 400、500 | 说明文字、复选框标签 |
+| `text_xsmall` / `text_xsmall_medium` | 12 / 18 / 400、500 | 更小的说明 |
+| `mono` | 12 / 18 / 400 | 等宽；字体族是用户设的等宽字体 |
+
+设计上 `ui` 带 -0.04、`small` 带 +0.05 的字距，GPUI 没有字距，画不出来。
+
+**界面字体是 Inter**，随 app 带六个静态字面（400、440、500、530、600、700，`assets/fonts/Inter-*.ttf`，OFL 1.1），`smelt_ui::init` 启动时装一次。GPUI 按字重在同族静态字面里挑最近的，不设可变轴，所以不带可变字体；用到新字重要先用 `scripts/inter-static.py` 切一份。等宽字体不变。
+
+圆角按嵌套从小到大：键帽、徽标 `xs`，菜单项、提示、复选框、`Mini` / `Small` 按钮 `sm`，`Regular` 按钮、输入框、分段控件、列表行、菜单外框、弹出卡片、对话框 `md`，`Large` 按钮、悬停卡片 `lg`，`ExtraLarge` 按钮 `xl`。里外两层同心时，里层圆角不大于外层。
+
+### 主题的权威
+
+当前主题只有一处：`smelt_ui::theme_catalog::ActiveTheme` 这个全局。主题文件在登记时由 `theme_config` 解析、求值一次，`theme_catalog::apply` 装上时投影成色板和浮起层级；自绘界面读 `ui_theme::*()`。gpui-component 只剩差异视图、文件编辑器和代码高亮在用，宿主 `crates/smelt/src/component_theme.rs` 观察 `ActiveTheme`，把这几处读得到的色（底、字、线、选区、diff 增删、编辑器和语法高亮）投影给组件库的 `Theme`；那份只是只读投影，别处不改它。
+
+默认主题是 **smelt Light / smelt Dark**，是组件库自带的主题（`crates/smelt-ui/themes/smelt.json`）。它不属于 themes 插件：删掉 themes 插件，app 照样有默认主题。其它主题由 themes 插件装进来，和它一样可换；主题列表里永远有它，插件里的同名主题不能覆盖它。主题装上之前读色板，拿到的就是同明暗的 smelt Light / Dark（`ui_theme` 从 `smelt.json` 装上那款）。
 
 存着的主题名找不到时（比如旧版本存的 `Default Dark`），按亮暗回到 smelt Light / Dark。
 
@@ -23,40 +60,151 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 
 ## 2 · 颜色
 
-### 语义位
+### 主题文件
 
-组件只认下面这些语义位，调用点不写十六进制。左边是 `ui_theme::Palette` 里的名字，中间是读的主题位。
+主题是数据，格式是 smelt 自己的 JSON，带版本号。解析、校验、求值都在 `smelt_ui::theme_config`，登记时做一次：
 
-| 语义 | 主题位 | 用在哪 | smelt Light | smelt Dark |
-|---|---|---|---|---|
-| `bg` | `background` | 整窗的底（没有窗口材质时） | `#FFFFFF` | `#1E1E1D` |
-| `side` | `sidebar.background` | 内容里比底深一档的块（子智能体、记忆这类面板，用 `ui_theme::shade` 叠上去） | `#F7F7F5` | `#171716` |
-| `surface` | `popover.background` | 菜单、对话框、卡片、输入框、composer | `#FFFFFF` | `#262625` |
-| `soft` | `secondary.background` | 次要按钮、标签 | `#F1F0EC` | `#2A2A28` |
-| `soft_hover` | `secondary.hover.background` | 次要按钮悬停 | `#E9E8E3` | `#323230` |
-| `soft_press` | `secondary.active.background` | 次要按钮按下、开关关闭底 | `#E1E0DA` | `#3A3A37` |
-| `row_hover` | `list.hover.background` | 列表行悬停（半透明 `text`，见下） | `#F1F0EC` 起 | `#2A2A28` 起 |
-| `row_selected` | `list.active.background` | 列表行选中（同上） | `#E9E8E3` 起 | `#323230` 起 |
-| `hair` | `border` | 分隔线、卡片外沿 | `#1A1A18` 9% | `#FFFFFA` 8% |
-| `hair_strong` | `input.border` | 输入框、复选框外沿 | `#1A1A18` 16% | `#FFFFFA` 15% |
-| `text` | `foreground` | 正文、标题 | `#1A1A18` | `#ECECE8` |
-| `muted` | `muted.foreground` | 说明、次级信息、图标 | `#6B6A65` | `#A3A29C` |
-| `faint` | 由 `muted` 往字底下的窗口底（毛玻璃时是材质，不然是 `bg`）混出来，对它至少 3:1 | 占位、时间、快捷键、空闲 | 约 `#807F7B` | 约 `#6E6D6A` |
-| `ink` | `primary.background` | 主操作、选中的复选框和开关 | `#1A1A18` | `#ECECE8` |
-| `ink_hover` / `ink_press` | `primary.hover.background` / `primary.active.background` | 主操作悬停、按下 | `#33332F` / `#000000` | `#FFFFFF` / `#D6D6D0` |
-| `on_ink` | `primary.foreground` | 主操作上的字 | `#FFFFFF` | `#1A1A18` |
-| `focus` | `ring` | 焦点环 | `#3A6EE1` 45% | `#6EA0FF` 55% |
-| `run` | `base.blue` | 在跑 | `#3A6EE1` | `#6EA0FF` |
-| `need` | `warning.background` | 要你处理、提醒、git 已修改 | `#D2602A` | `#F08A55` |
-| `ok` | `success.background` | 完成、通过、diff 新增 | `#2E7D4F` | `#6BC28E` |
-| `bad` | `danger.background` | 出错、危险操作、diff 删除 | `#C8372D` | `#F0776D` |
-| `on_bad` | `danger.foreground` | 危险按钮上的字 | `#FFFFFF` | `#1A1A18` |
-| `scrim` | `overlay` | 对话框后的遮罩 | `#1A1A18` 22% | `#000000` 45% |
-| `chart(0..5)` | `chart.1`–`chart.5` | 分类：用量构成、轨迹分道、图表系列 | `#4F7CD9` `#3F9A6A` `#C98A2B` `#8B63C7` `#C2506F` | `#7FA3F0` `#6CC294` `#E0AD5C` `#B293E6` `#E07A97` |
+```json
+{
+  "version": 1,
+  "name": "系列名",
+  "author": "选填",
+  "url": "选填",
+  "themes": [{
+    "name": "主题名",
+    "mode": "dark",
+    "colors": { "bg_base": "#1a1b26", "text_base": "#c0caf5", "bg_accent": "#7aa2f7" },
+    "elevation": { "floating": [{ "y": 4, "blur": 8, "color": "#0000004d" }] },
+    "syntax": { "keyword": { "color": "#bb9af7", "font_weight": 600 } }
+  }]
+}
+```
 
-主题没写某个位时，按 gpui-kit 的规则回落；`faint`、diff 底色、`need` 和 `bad` 的浅底（悬停用的 8%–12% 透明度）都从上面这些位算出来，不另设主题位。`soft` 系列在主题里可以是半透明的，色板读进来时压到 `side` 上取实色。列表行的悬停和选中（`row_hover`、`row_selected`）不铺实色，铺半透明的 `text`，底透出窗口材质时行底跟着透。透明度先照主题那一档（压在 `bg` 上和主题的实色一样深），再按字实际压着的那层窗口底保底：和它的明度差（CIE L*）悬停至少 5、选中至少 15，主题配得更深的照主题。按明度差不按对比度：同一个对比度在亮底上看着比暗底上重得多。材质一般比深色主题的底亮，同一层白压上去显得淡，只照主题会糊成一片。选中行里的次要字压在选中底上，另有按它配过的一档（`muted_selected`、`faint_selected`，至少 4.5:1 / 3:1），调用点用 `ui_theme::row_muted(selected)` / `row_faint(selected)` 取。
+- `version`：必填，当前是 1。格式改了就加一。
+- `mode`：`light` 或 `dark`。
+- `colors`：键是下面「语义色」表里的名字。只有 `bg_base`、`text_base` 两个种子色必填，且不透明。没写的色在 OKLab 里从已经求出的色推出来；写了的就用写的，下游的色跟着它推。所以只给种子色、逐个写死、两者混着写都行。色值写 `#rgb`、`#rgba`、`#rrggbb` 或 `#rrggbbaa`。
+- `elevation`：选填，键是下面「浮起层级」表里的档。每档是一组叠起来的阴影层 `{x, y, blur, spread, color, inset}`，`color` 必填，其余缺省是 0 / `false`；`[]` 是没有阴影。
+- `syntax`：选填，代码高亮。键是记号类别（`keyword`、`string`、`comment.doc`……，全表见 `theme_config::SYNTAX_KEYS`），值是 `{color, font_style, font_weight}`，`font_style` 只能是 `normal`、`italic`、`underline`，`font_weight` 是 100–900 的整百数。一项都没写时用组件库的默认高亮色。
 
-`hair`、`hair_strong`、`focus`、`scrim` 本身带透明度，色板里是 `Rgba`；其余都是实色。
+**校验是严格的。** 版本不是 1、缺版本、出现不认识的键、颜色写法不对、种子色带透明度、类型不对，整份文件都不收。插件带的主题文件有一份不收，就登记报错，这个插件的主题一个都不装，不会装上一半。外观设置里只存主题名；存的名字找不到（插件卸了、主题文件不收了）时，按明暗回到 smelt Light / Dark。
+
+推法以 `theme_config::ThemeColors`、`theme_config::Elevation` 的字段注释为准，下面两张表照它写。smelt Light / Dark 把每个色都写死了；其它主题大多只给种子色，靠这些推法补齐，所以推法要保证只给种子色时主内容、侧栏、卡片、层分得开，悬停看得见，线不刺眼。「抬 x」是把 `bg_base` 的 OKLab 明度往前景方向挪 x（深色往亮、浅色往暗；深色从不低于 0.145 的明度起抬），色度按同样的比例从 `bg_base` 的往 `text_base` 的走（明度走到正文色的一半，色度也走一半；暗处直接套正文色的色度会饱和得发脏）；「字 x%」是 `text_base` 换成 x% 的不透明度。
+
+#### 语义色
+
+| 键 | 含义 | 没写时 |
+|---|---|---|
+| **底色** | | |
+| `page` | 窗口最外层（侧栏），主内容像一张纸浮在上面 | `bg_base` 的 OKLab 明度降 0.02（深浅都往暗走） |
+| `bg_base` | 主内容底。种子色，必填，不透明 |  |
+| `bg_deep` | 比主内容更靠后的一层 | `page` |
+| `layer_01` | 一档档抬起来的层；紧凑菜单、悬停提示、下拉的底 | 抬 深色 0.06 / 浅色 0.015 |
+| `layer_02` |  | 抬 0.10 / 0.04 |
+| `layer_03` |  | 抬 0.15 / 0.05 |
+| `layer_04` | 最高一层：关着的开关槽、滑块的槽 | 抬 0.275 / 0.11 |
+| `bg_inverse` | 反色底 | `text_base` |
+| `bg_contrast` | 高对比底：带字的主按钮，两种明暗下都是压浅色字的深色块 | 深色 `layer_04` / 浅色 `text_base` |
+| `bg_button_neutral` | 中性按钮底 | 深色 字 6% / 浅色 `bg_base` |
+| `bg_icon_button_contrast` | 只有图标的主按钮（发送）底，深色主题里反过来是浅色块 | 深色 OKLab 明度 0.89、色相色度同 `text_base` / 浅色 `bg_contrast` |
+| `bg_accent` | 强调色：开关打开、单选。种子色，选填 | 蓝 oklch(0.55, 0.23, 268) |
+| **发送按钮** | | |
+| `submit_highlight` | 上端的高光 | 白 深色 60% / 浅色 20% |
+| `submit_hover` |  | 深色 黑 8% / 浅色 `bg_base` 12% |
+| `submit_fg` |  | 深色 `text_inverse` / 浅色 `text_contrast` |
+| `submit_icon` |  | `submit_fg` |
+| **文字** | | |
+| `text_base` | 正文。种子色，必填，不透明 |  |
+| `text_muted` | 次要字 | 从 `bg_base` 往 `text_base` 走 深色 72% / 浅色 57% 的 OKLab 明度，对比不到 4.5:1 时再往前走到够（`text_base` 自己都不够就是 `text_base`） |
+| `text_faint` | 最弱字 | 同上，走 54% / 36%，保底 3:1 |
+| `text_inverse` | 压在反色底上的字 | `bg_base` |
+| `text_contrast` | 压在高对比底上的字，两种明暗下都是浅的那头 | 深色 `text_base` / 浅色 `bg_base` |
+| `text_accent` | 强调色的字（链接） | `bg_accent`，压在 `bg_base` 上不到 4.5:1 时保持色相把明度往远离底色的方向挪到够 |
+| **图标** | | |
+| `icon_base` |  | `text_base` |
+| `icon_muted` |  | `text_muted` |
+| `icon_faint` |  | `text_faint` |
+| `icon_inverse` |  | `text_inverse` |
+| `icon_contrast` |  | `text_contrast` |
+| `icon_accent` |  | `text_accent` |
+| **线** | | |
+| `border_muted` |  | 字 8% |
+| `border_base` | 分隔线、卡片外沿 | 字 深色 11% / 浅色 10% |
+| `border_strong` | 输入框外沿 | 字 20% |
+| `border_focus` | 焦点环 | 蓝 oklch(0.70, 0.15, 268) |
+| **叠层和固定色** | | |
+| `hover` | 悬停叠层：列表行、安静按钮、输入框 | 字 深色 6% / 浅色 4% |
+| `pressed` | 按下叠层 | 字 深色 10% / 浅色 8% |
+| `contrast_hover` | 压在高对比底和强调色上的悬停叠层：浅色主题把深色块提亮，深色主题把灰块压暗 | 深色 黑 24% / 浅色 `bg_base` 12% |
+| `contrast_pressed` |  | 深色 黑 40% / 浅色 `bg_base` 24% |
+| `scrim` | 对话框后的遮罩 | 黑 深色 60% / 浅色 40% |
+| `depth_top` | 立体高光的上端（圆钮的上沿、描边） | 白 |
+| `depth_bottom` | 立体高光的下端 | 白 0% |
+| `white` | 开关槽、主按钮上的白光 | 白 |
+| `black` |  | 黑 |
+| `knob` | 开关、滑块的圆钮，两种明暗下都是近白的实体 | OKLab 明度 0.96，色相色度取 `bg_base` 和 `text_base` 里更鲜艳的那个 |
+| `knob_on` | 打开时的圆钮，比关着的略暗 | 明度 0.95，色相同上 |
+| **浮起的面** | | |
+| `surface_raised` | 标准菜单、弹出卡片、对话框、卡片 | 深色 抬 0.015 / 浅色 `bg_base` |
+| **选区、分类色** | | |
+| `selection` | 文字选区 | `text_accent` 30% |
+| **状态**（`success`、`warning`、`danger`、`info` 各四个，键写成 `success.bg`） | | |
+| `*.bg` | 浅底：提示条、标记底 | 从「抬 0」那层（`bg_base`，深色明度不低于 0.145）往 `fg` 走 12%（OKLab） |
+| `*.fg` | 字色 | 中性色相 oklch(深色 0.75 / 浅色 0.5, 0.15, h)，h 成功 150、警告 80、危险 25、信息 256 |
+| `*.border` | 边框 | 同 `bg`，走 35% |
+| `*.icon` | 图标、状态点 | `fg` |
+| `chart.1`–`chart.5` | 分类色 | oklch(深色 0.72 / 浅色 0.58, 0.13, h)，h 依次 255、150、75、300、0 |
+
+#### 浮起层级
+
+没写的档按中性几何推：阴影是黑色，外圈线是 0.5px 的「字 浅色 12% / 深色 16%」（半像素的线画出来比 1px 边框淡，要比 `border_base` 浓才看得出同样的边）。「浮起 y」是一远一近两层：近的下移 y、模糊 2y，黑 深色 30% / 浅色 8%；远的下移 2y、模糊 4y，黑 深色 30% / 浅色 4%。
+
+| 档 | 用在哪 | 没写时 |
+|---|---|---|
+| `raised` | 贴着内容抬起一点的卡片、浮在内容上的按钮 | 浮起 1 + 外圈线 |
+| `floating` | 紧凑菜单、下拉、悬停提示 | 浮起 4 + 外圈线 |
+| `overlay` | 对话框 | 浮起 8 + 外圈线 |
+| `button_neutral` | 中性按钮 | 下移 1 模糊 1.5，黑 深色 40% / 浅色 10% + 外圈线 |
+| `button_contrast` | 高对比按钮 | 下移 1 模糊 1.5，黑 深色 40% / 浅色 20% |
+| `elements` | 开关、滑块的圆钮 | 下移 0.5 模糊 0.5，黑 40% |
+| `switch_off` | 关着的开关槽 | 外圈线换成内圈 |
+| `switch_on` | 开着的开关槽 | 同上 |
+| `md` | 自带 1px 边框的弹层，不再叠外圈线 | 浮起 3 |
+| `knob` | 圆钮（备用档） | 下移 1 模糊 3，黑 深色 30% / 浅色 8% |
+| `input` | 输入框 | `button_neutral` |
+
+### 色板
+
+组件只认 `ui_theme::Palette` 里的位，调用点不写十六进制。色板是主题装上时从语义色投影出来的，不另存；smelt Light / Dark 的具体色值在 `crates/smelt-ui/themes/smelt.json`。
+
+| 色板位 | 读哪个语义色 | 用在哪 |
+|---|---|---|
+| `bg` | `bg_base` | 整窗的底（没有窗口材质时） |
+| `side` | `page` | 内容里比底深一档的块（子智能体、记忆这类面板，用 `ui_theme::shade` 叠上去） |
+| `surface` | `surface_raised` | 菜单、对话框、卡片、输入框、composer |
+| `soft` / `soft_hover` / `soft_press` | `layer_01` / `layer_02` / `layer_03` | 标签、开关关闭底这类比底深一档的面 |
+| `row_hover` / `row_selected` | `hover` / `pressed` | 列表行悬停、选中（见下） |
+| `hair` | `border_base` | 分隔线、卡片外沿 |
+| `hair_strong` | `border_strong` | 输入框、复选框外沿 |
+| `text` | `text_base` | 正文、标题 |
+| `muted` | `text_muted` | 说明、次级信息、图标 |
+| `faint` | `text_faint` | 占位、时间、快捷键、空闲 |
+| `ink` / `ink_hover` / `ink_press` | `bg_contrast`，悬停、按下再叠 `contrast_hover` / `contrast_pressed` | 主操作、选中的复选框 |
+| `on_ink` | `text_contrast`，在 `ink` 三档上都配够 4.5:1 | 主操作上的字 |
+| `button_submit` / `button_submit_foreground` | `bg_icon_button_contrast`，悬停、按下再叠 `submit_hover` / `contrast_pressed`；图标 `submit_icon`，三档上配够 4.5:1 | 只有图标的主按钮（发送） |
+| `button_secondary` | `bg_button_neutral`，悬停、按下再叠 `hover` / `pressed` | 次要按钮三档 |
+| `focus` | `border_focus` | 焦点环 |
+| `selection` | `selection` | 文字选区（输入框、Markdown） |
+| `link` | `text_accent` | 正文里的链接 |
+| `run` | `info.fg` | 在跑（`info.icon` 可以另配色相，不拿来表示在跑） |
+| `need` | `warning.icon` | 要你处理、提醒、git 已修改 |
+| `ok` | `success.icon` | 完成、通过、diff 新增 |
+| `bad` | `danger.icon` | 出错、危险操作、diff 删除 |
+| `on_bad` | `text_contrast`、`text_base` 里对 `bad` 对比高的那个，配够 4.5:1 | 危险色底上的字 |
+| `popover_text` | `text_base` | 弹层（菜单、提示）里的正文 |
+| `scrim` | `scrim` | 对话框后的遮罩 |
+| `chart(0..5)` | `chart.1`–`chart.5` | 分类：用量构成、轨迹分道、图表系列 |
+
+diff 底色、`need` 和 `bad` 的浅底（悬停用的 8%–12% 透明度）都从色板位算出来，不另设语义色。实色位读进来时压到各自的底上取实色（`soft` 系列压在 `side` 上）；线、焦点环、选区、遮罩、按钮底保留透明度，色板里是 `Rgba`。列表行的悬停和选中（`row_hover`、`row_selected`）不铺实色，铺半透明的 `text`，底透出窗口材质时行底跟着透。透明度先照主题那一档（压在 `bg` 上和主题的实色一样深），再按字实际压着的那层窗口底保底：和它的明度差（CIE L*）悬停至少 5、选中至少 15，主题配得更深的照主题。按明度差不按对比度：同一个对比度在亮底上看着比暗底上重得多。材质一般比深色主题的底亮，同一层白压上去显得淡，只照主题会糊成一片。选中行里的次要字压在选中底上，另有按它配过的一档（`muted_selected`、`faint_selected`，至少 4.5:1 / 3:1），调用点用 `ui_theme::row_muted(selected)` / `row_faint(selected)` 取。主按钮、发送按钮的字和图标在静息、悬停、按下三档上共用一个色，只往离静息底更远的那头（白或黑）挪：按下那层压得够深时挪到头也许还差一点，但不会翻成另一头、在静息底上反而看不清。
 
 ### 用色规则
 
@@ -76,13 +224,20 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 |---|---|---|---|
 | 舞台、侧栏 | 整窗一层底：有材质时是窗口材质，不然是 `bg`；每一组都一样，不另压 | 无，栏间一条 `hair` | 无 |
 | 内嵌卡片（审批、工具调用、代码块） | `surface` / `side` | 1px `hair` | 无 |
-| 分段控件里选中的那段 | `surface` | — | 抬起：`0 0 0 1px` + `0 2px 10px` 淡阴影 |
-| 浮层（菜单、对话框、补全、提示、composer） | `surface` | 阴影里带 1px 细圈 | 浮起：`0 10px 30px` + `0 2px 6px`（`ui_theme::float_shadow()`） |
-| 浮在内容上的按钮（回到最新、图片预览的关闭、侧栏「N 个需要你」） | `surface` | 同上 | 浮起，按钮的 `floating()` |
+| 分段控件里选中的那段 | `bg` | 1px `hair_strong` 细圈 | 无，靠细圈和底色差 |
+| 输入框 | `bg` | 投影里带 0.5px 细圈 | `input`；聚焦时换成 1px 内焦点线 |
+| 次要、危险按钮 | `button_secondary`（`bg_button_neutral`） | 投影里带 0.5px 细圈 | `button_neutral`；主操作 `button_contrast`（再叠一道上沿白、往下淡到透明的高光：带字的白 20%，发送按钮 `submit_highlight`）；安静按钮无 |
+| 开关、滑块 | 槽：关 `layer_04`、开 `bg_accent`（开关的槽下沿压一层白光）；滑块的槽 `layer_04` | 内阴影细圈 | 轨道 `switch_off` → `switch_on` 随开关插值；圆钮 `knob` / `knob_on`，`elements` |
+| 菜单、下拉、悬停提示 | `soft`（`layer_01`） | 投影里带 0.5px 细圈 | `floating` |
+| 弹出卡片、悬停卡片 | `surface` | 1px `hair` 边 | `md` |
+| 对话框 | `surface` | 投影里带 0.5px 细圈 | `overlay` |
+| 浮在内容上的按钮（回到最新、图片预览的关闭、侧栏「N 个需要你」） | `surface` | 投影里带 0.5px 细圈 | `raised`，按钮的 `floating()` |
 
-阴影只给真正浮在上面的东西，不给整栏外壳，也不给普通卡片。深色下阴影加深、细圈换成浅色。
+弹出的东西分两种面：紧凑的（菜单、下拉、悬停提示）铺 `soft`、靠投影里的细圈收边；带内容的（弹出卡片、悬停卡片、对话框）铺 `surface`，弹出卡片、悬停卡片另画 1px `hair` 边。按离触发点的远近取 `floating` / `md` / `overlay`。用外投影的面底色必须不透明：GPUI 的外投影也画进矩形内部，半透明底会透出一圈灰。细圈在设计上是 0.5px；1x 屏上 GPUI 画不出 0.5px 的内阴影，内焦点线、加载中的内圈用 1px。
 
-**窗口材质。** 有材质时主窗口透明，内容下面是一整块系统材质（`window_backdrop.rs`）：macOS 上宿主垫一块 `NSVisualEffectView`，透出后面的桌面和窗口，默认是系统内容区材质（`ContentBackground`），设置里能换成 `NSVisualEffectMaterial` 里没废弃的全部 14 种（标题栏、菜单、浮层、窗口底、窗口下层等，名字照系统定的用途叫）；Windows 11 22H2 起是系统背景材质的全部三种：Mica（默认）和 Mica Alt 取的是壁纸的颜色，看不到后面的窗口，Acrylic 透出后面的窗口。着色、失焦变样、系统里关掉透明效果都由系统处理，明暗跟着 smelt 的主题（Windows 上系统标题栏也跟着）。整窗只有窗口根上管底（`workspace_frame::window_surface`）：有材质时什么都不铺，毛玻璃就是底，颜色是材质自己的。不给开关，也不做不透明度滑杆：毛玻璃是 smelt 的样子，不是一项偏好；材质自己带一层灰，上面再盖半透明的 `bg`，中间那些档既不像玻璃也不是主题色。能选的只是哪一种系统材质（`window_backdrop::WindowMaterial`，存在外观里），模糊程度系统不让调。布局里的每一组、每个视图都由插件定，所以规则对所有组一样：哪一组都不另铺、不另压（`SmeltTabGroup::frame`）。宿主不按组里摆的是不是出口分「舞台」「侧栏」两档深浅：那是按位置猜用途，插件把大视图摆在出口外面就猜错了。视图（自带的、插件的）不画页面底，铺了就把材质盖住，终端也不铺。不给自选背景色：颜色归主题，自选一个实色就把材质盖住了。背景图也挂在窗口根上，铺满整扇窗口，按用户设的透明度（默认 15%）叠在材质上、所有内容下面。字、卡片、控件、浮层照旧铺实色。主题的字色是按它自己的 `background` 配的，毛玻璃时字实际压在材质上（深色时比主题底亮、浅色时比主题底暗），所以装主题时（`theme_catalog::apply`）按所选材质的代表色（`ui_theme::MaterialTone`，宿主按材质种类给，换材质时重装主题）把正文（`foreground`、`sidebar_foreground`）配到至少 7:1、次要字（`muted_foreground`）至少 4.5:1，`faint` 也按材质算（`ui_theme::fit_text_to_backdrop`）。改在组件库的主题上，组件库、自绘色板、插件读到的是同一组字色。材质的颜色跟着桌面变、程序读不到，代表色取常见值往不利的那头留了余量。别的系统没有材质，窗口不透明、铺 `bg`：更早的 Windows 只有走没公开接口的 Acrylic（GPUI 的 `Blurred`），拖窗口会卡，不拿它兜底。不用 GPUI 在 macOS 上的 `Blurred`（剥掉了系统的着色和饱和度，只剩纯模糊，和实色分不出来），也不用液态玻璃（那是给浮在内容上的控件的）。也不做整扇窗口的不透明度：窗口 `alphaValue` 一低于 1，系统就不再画窗口背后的模糊，材质退成清楚的透明，字也跟着发虚。
+大投影只给真正浮在上面的东西，不给整栏外壳，也不给普通卡片；输入框、按钮、开关的投影只是一圈细边加一点下沉或高光，让控件立在底上。深色下投影加深、细圈换成浅色。每档投影都来自主题的 `elevation`（第 2 节），组件经 `kit::elevation` 取，组件里不写阴影色。
+
+**窗口材质。** 有材质时主窗口透明，内容下面是一整块系统材质（`window_backdrop.rs`）：macOS 上宿主垫一块 `NSVisualEffectView`，透出后面的桌面和窗口，默认是系统内容区材质（`ContentBackground`），设置里能换成 `NSVisualEffectMaterial` 里没废弃的全部 14 种（标题栏、菜单、浮层、窗口底、窗口下层等，名字照系统定的用途叫）；Windows 11 22H2 起是系统背景材质的全部三种：Mica（默认）和 Mica Alt 取的是壁纸的颜色，看不到后面的窗口，Acrylic 透出后面的窗口。着色、失焦变样、系统里关掉透明效果都由系统处理，明暗跟着 smelt 的主题（Windows 上系统标题栏也跟着）。整窗只有窗口根上管底（`workspace_frame::window_surface`）：有材质时什么都不铺，毛玻璃就是底，颜色是材质自己的。不给开关，也不做不透明度滑杆：毛玻璃是 smelt 的样子，不是一项偏好；材质自己带一层灰，上面再盖半透明的 `bg`，中间那些档既不像玻璃也不是主题色。能选的只是哪一种系统材质（`window_backdrop::WindowMaterial`，存在外观里），模糊程度系统不让调。布局里的每一组、每个视图都由插件定，所以规则对所有组一样：哪一组都不另铺、不另压（`SmeltTabGroup::frame`）。宿主不按组里摆的是不是出口分「舞台」「侧栏」两档深浅：那是按位置猜用途，插件把大视图摆在出口外面就猜错了。视图（自带的、插件的）不画页面底，铺了就把材质盖住，终端也不铺。不给自选背景色：颜色归主题，自选一个实色就把材质盖住了。背景图也挂在窗口根上，铺满整扇窗口，按用户设的透明度（默认 15%）叠在材质上、所有内容下面。字、卡片、控件、浮层照旧铺实色。主题的字色是按它自己的 `bg_base` 配的，毛玻璃时字实际压在材质上（深色时比主题底亮、浅色时比主题底暗），所以装主题时（`theme_catalog::apply`）按所选材质的代表色（`ui_theme::MaterialTone`，宿主按材质种类给，换材质时重装主题）把正文和图标（`text_base`、`icon_base`）配到至少 7:1、次要字（`text_muted`、`icon_muted`）至少 4.5:1、最弱字（`text_faint`、`icon_faint`）至少 3:1（`ui_theme::fit_text_to_backdrop`）。改在 `ActiveTheme` 上，自绘色板和组件库的投影（`component_theme`）读到的是同一组字色。材质的颜色跟着桌面变、程序读不到，代表色取常见值往不利的那头留了余量。别的系统没有材质，窗口不透明、铺 `bg`：更早的 Windows 只有走没公开接口的 Acrylic（GPUI 的 `Blurred`），拖窗口会卡，不拿它兜底。不用 GPUI 在 macOS 上的 `Blurred`（剥掉了系统的着色和饱和度，只剩纯模糊，和实色分不出来），也不用液态玻璃（那是给浮在内容上的控件的）。也不做整扇窗口的不透明度：窗口 `alphaValue` 一低于 1，系统就不再画窗口背后的模糊，材质退成清楚的透明，字也跟着发虚。
 
 **页面顶上两行。** 顶着窗口上沿的那一条是标题带，34 高，跟系统标题栏一样：红黄绿按钮、侧栏开关、标签条都在这一行，只放得下小号控件。页面（视图）不自己画它：外壳按视图登记的标题画居中的页名、给交通灯和开合按钮让位、能拖窗口；出口里放着哪个视图，就画哪个视图的标题。页面自己的操作（分段控件、新建、筛选）放在标题带下面的工具行里，用正常尺寸，不往标题带里挤。只有舞台这类要自己画顶上那条的视图登记 `draws_top_bar: true`，它们自己负责让位和拖窗口。
 
@@ -94,20 +249,29 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 
 | 组件 | 高度 | 圆角 | 说明 |
 |---|---|---|---|
-| 按钮 | 小 28 / 中 32 / 大 36 | 胶囊 | 横向内边距 12 / 14 / 18；图标按钮是正方形，同样胶囊圆角。对话框底部用大号 |
-| 关闭控件 | 20 | 6 | 提示条、卡片角上的 ×，`faint` 字 |
-| 文本框、下拉框 | 默认 36 / 小 28 | 12 / 8 | `surface` 底，1px `hair_strong` 描边，正文字号不随尺寸缩。默认用在表单和对话框；小号用在工具栏筛选框和行内改名，跟紧凑列表行一样高。多行文本框圆角 12，高度跟内容长（`smelt_ui::field`） |
-| 复选框、单选 | 18 | 6 / 圆 | 没勾是 1px `hair_strong` 边；勾上 `ink` 实底，勾和圆点用 `on_ink`。标签在右，间距 8，点标签等于点框 |
-| 开关 | 22×36 | 胶囊 | 开是 `ink`，关是 `soft_press`；滑块 18，开时 `on_ink`，关时 `surface` 抬起。不做悬停变色 |
-| 分段控件 | 32（段 26） | 胶囊 | 底 `soft`，选中段 `surface` 抬起 |
+| 按钮 | 按 `ControlSize`：16 / 20 / 24 / 28 / 36 | `sm` / `sm` / `md` / `lg` / `xl` | 文字按钮左右 8 / 10 / 12 / 14 / 18，图标 12 / 14 / 16 / 16 / 16，字 `small_medium` / `small_medium` / `ui_medium` / `ui_medium` / `ui_medium`（安静按钮不加重）。图标按钮见方，圆角 4 / 4 / 6 / 6 / 8，图标 12 / 16 / 16 / 16 / 18。三档简写：文字按钮 `small()` → `Regular`、默认 → `Large`、`large()` → `ExtraLarge`；图标按钮 `Small` / `Regular` / `Large`。默认字号下的最小尺寸，随界面字号缩放，多行内容撑高按钮。对话框底部用 `Regular` |
+| 关闭控件 | 20 | `md` | 提示条、卡片角上的 ×，`faint` 字 |
+| 悬停提示 | 随内容 | `sm` | `soft` 底，`TYPE.small_medium`，横向内边距 6、纵向 5；可带快捷键，键帽 `xs` 圆角。正文和快捷键与底色至少 4.5:1 |
+| 文本框 | 28（两档同高） | `md` | `bg` 底，不画描边，`input` 层级；`TYPE.ui_compact`，左右内边距 8，前后缀和字之间 6。多行文本框同样外形，高度跟内容长（`smelt_ui::field`）。嵌在浮层里的搜索框用 `bare()`：不画底和投影 |
+| 复选框、单选 | 16 | `sm` / 圆 | 没勾是 1px `hair_strong` 边；勾上 `ink` 实底，勾 10、圆点 6，用 `on_ink`。标签在右，复选框间距 12、行高 24、`text_small`；单选间距 8、行高 20、`ui`；点标签等于点框 |
+| 开关 | 16×36 | 胶囊 | 开是 `bg_accent`，关是 `layer_04`，上沿是底色、下沿压一层白光（关 20%、开 10%）；悬停时关着的叠 `hover`、开着的叠 `contrast_hover`。滑块 14×21、离轨道边 1，`knob` / `knob_on` 底压一道 `depth_top` → `depth_bottom` 的高光、0.5px `depth_top` 描边。悬停时滑块拉长 2、按下拉长 5 |
+| 滑块 | 20 | 胶囊 | 槽 4 高 `layer_04`，已选那段 `ink`；圆钮 14，`knob` 加同开关的高光，1px `hair_strong` 边，`elements` 投影 |
+| 分段控件 | 28 | `md` | 每段左右 12，字 13 / 440；轨道 `soft` 底加 0.5px `hair` 细圈；选中块 `bg` 底加 0.5px `hair_strong` 细圈，从旧段滑到新段 |
 | 页面工具行 | 至少 48 | — | 页名下面那一行（`smelt_ui::page_toolbar`）：左右 20、上下 8，底下一条 `hair`。放分段控件、个数、新建之类，按钮和分段控件用默认的中号 |
-| 列表行 | 舒适 34 / 紧凑 28 | 10 / 8 | 见第 5 节 |
-| 菜单 | — | 14 | 内边距 6，菜单项 32 高、圆角 8 |
-| 对话框 | — | 20 | 内边距 24，块之间 16；宽度按内容定，确认框 440。窗口里居中、原地淡入，不从顶上滑下来（`smelt_ui::dialog`） |
+| 列表行 | 舒适 34 / 紧凑 28 | `md` | 见第 5 节 |
+| 菜单 | 随内容，最高半屏且不超过 450 | 外框 `md`，菜单项 `sm` | 内边距 2，宽 160–500，`floating` 层级；菜单项 28 高、左 12 右 6、图标和字之间 8，`TYPE.ui_compact`；分组名同高、`small_medium`、`faint`；分隔线上下各 2、横向顶到外框边。内容超高时菜单自己滚，子菜单照样跟着行出 |
+| 对话框 | 随内容 | `md` | 内边距 16，块之间 16，`overlay` 层级；有说明时标题 15 / 20 / 530，没有时 `ui_medium` 行高 16；说明 `ui`、`muted`。宽度按内容定，确认框 440，离窗口边至少 32。窗口里居中，不做进场动画（`smelt_ui::dialog`） |
+| 弹出卡片 | 随内容，宽 200–320 | `md` | 内边距 12，1px `hair` 边，`md` 层级，离触发点 4（`smelt_ui::popover`） |
+| 悬停卡片 | 随内容，宽 200–320 | `lg` | 内边距 4，其余同弹出卡片（`smelt_ui::hover_card`） |
+| 可搜索下拉 | 列表最高 192 | 外框 `md`，选项 `sm` | 搜索框 36 高、不画底；下面一条 `hair`；选项 28 高、左右 8、勾 14，`ui_compact`（`smelt_ui::combobox`） |
+| 徽标 | 16 | `xs` | 左右 4，`small_medium`、行高 11 |
+| 键帽 | 14，最窄 14 | `xs` | 左右 4，`small_medium`、行高 11；同一步的键隔 2，步与步隔 6 |
 | 卡片 | — | 16 | 审批、工具调用、提示 |
 | 代码块 | — | 10 | 行内代码 6 |
 | composer | 至少两行 | 24 | 上面是输入，下面一排附件、模型、发送 |
 | 标签、筛选条 | 28 | 胶囊 | `soft` 底 |
+
+卡片、代码块、composer、气泡还在各自插件里画，数值是插件的，第二阶段收进 smelt-ui 时一起对到令牌上。
 
 字号：正文 14，次级 13，说明和时间 12，对话正文 15、行高 1.7，页面标题 22。等宽字体只用于代码、命令、路径和分支名。
 
@@ -122,11 +286,11 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 | | 舒适 | 紧凑 |
 |---|---|---|
 | 行高 | 34 | 28 |
-| 圆角 | 10 | 8 |
+| 圆角 | `md` | `md` |
 | 字号 | 14 | 13 |
 | 层级缩进 | 16 | 14 |
 
-默认舒适；文件树、改动列表这类一屏要看很多行的地方用紧凑。密度是组件参数，不是主题位。
+默认舒适；文件树、改动列表这类一屏要看很多行的地方用紧凑。行高由调用点按档位给（`ListRow` 只管底、字色、圆角和光标），密度不是主题位。
 
 ---
 
@@ -136,25 +300,30 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 
 | 角色 | 样子 | 用在哪 |
 |---|---|---|
-| 主操作 | `ink` 实底、`on_ink` 字 | 发送、提交、允许。一处一个 |
-| 次要 | `soft` 底、`text` 字 | 和主操作并列的其它选择、工具栏上要看得见的按钮 |
-| 安静 | 透明底、`muted` 字，悬停出 `soft` 底、字变 `text` | 取消、图标按钮、行内操作 |
-| 危险 | `bad` 实底、`on_bad` 字 | 确认删除这类不可撤销的操作，只出现在确认的那一步：确认对话框，或点过一次后原地变出的「确认删除」 |
-| 危险·安静 | 透明底、`bad` 字，悬停出 `bad` 浅底 | 删除、停止这类入口，点了还要再确认或会打断正在跑的东西 |
+| 主操作 | `ink` 实底、`on_ink` 字；只有图标时（发送）换成 `button_submit` 底、`button_submit_foreground` 图标，深色主题里是浅色块 | 发送、提交、允许。一处一个 |
+| 次要 | `button_secondary` 底、`text` 字 | 和主操作并列的其它选择、工具栏上要看得见的按钮 |
+| 安静 | 透明底、`muted` 字，悬停、按下出 `row_hover` / `row_selected` 底、字变 `text` | 取消、图标按钮、行内操作 |
+| 危险 | `button_secondary` 底、`bad` 字 | 确认删除这类不可撤销的操作，只出现在确认的那一步；字色按每个状态的底色调整，至少 4.5:1 |
+| 危险·安静 | 透明底、`bad` 字，悬停、按下同安静 | 删除、停止这类入口，点了还要再确认或会打断正在跑的东西；字色按窗口底及各状态底色调整 |
 
 拒绝审批不毁东西，用次要，不用红色。
 
-两个修饰，不是角色：关闭控件（`dismiss()`，见第 4 节）悬停和安静一样出 `soft` 底，不变红；浮起（`floating()`）把底换成 `surface` 并加浮起阴影，用在浮在内容上的按钮。
+安静按钮的悬停用半透明叠层而不是 `soft`：浅色主题里 `soft`（`layer_01`）和白底只差一点，铺上去看不出悬停。
 
-没有描边按钮、没有链接样式的按钮。外部链接用文本链接（`gpui_component::link::Link`），不用按钮。分段控件是单独的组件，不是一组按钮。
+两个修饰，不是角色：关闭控件（`dismiss()`，见第 4 节）悬停和安静一样，不变红；浮起（`floating()`）把底换成 `surface` 并加浮起阴影，用在浮在内容上的按钮。
+
+没有描边按钮、没有链接样式的按钮。外部链接用文本链接，不用按钮；应用内的命令一律是按钮。分段控件是单独的组件，不是一组按钮。
+
+打开菜单的按钮（`smelt_ui::menu::MenuTrigger::dropdown`）在菜单开着时保持按下的样子（`Selectable::open`），看得出菜单是从哪来的；菜单关了才回到平常。触发器要是 `Selectable` 的元素，smelt 的 `Button` 就是。
 
 对话框里的按钮（确认框是 `smelt_ui::dialog::Confirm`）：
 
 - 标题写对象和动作（「确定删除这条自动化吗？」），确认按钮写动词（「删除」「丢弃更改」），不写「确定」。
-- 底部右对齐，都用大号：安静的「取消」、需要时一个次要的第三选择（「不保存，直接切换」）、最后是主操作或危险按钮。
+- 底部右对齐，按钮之间 8，都用默认的 `Regular`（24 高）：安静的「取消」、需要时一个次要的第三选择（「不保存，直接切换」）、最后是主操作或危险按钮。
 - 确认框不放右上角的 ×，Esc 和「取消」就是关。
 - Enter 在普通确认里执行；在危险确认里等于取消，只有点危险按钮才执行。破坏性操作不做默认按钮。
-- 只有一套对话框：kit 的窗口对话框层。插件用 `smelt_ui::dialog`；宿主自己的（退出、改名、关闭确认、选目录、会话管理……）也开在同一层，按 Workspace 上的状态开关（`host_dialog`），正文用 `dialog::content`、按钮行用 `dialog::footer`。不另画遮罩卡片。
+- 对话框层是 `smelt_ui::dialog`：挂在 gpui-base 的 `Root` 上，`open` 压一张、`close` 关最上面那张；遮罩只铺最底下那张，叠起来不越压越黑。正文用 `dialog::content`、按钮行用 `dialog::footer`，不另画遮罩卡片。
+- 宿主自己的（退出、改名、关闭确认、选目录……，`host_dialog`）现在还开在组件库的窗口对话框层上，外观照同一张卡片摆，smelt 的层叠在它上面，两层各关各的。第二阶段搬到 `smelt_ui::dialog`，只剩一层。
 
 ---
 
@@ -164,10 +333,11 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 
 | 状态 | 表达 |
 |---|---|
-| 悬停 | 底色深一档（`soft` → `soft_hover`，`ink` → `ink_hover`） |
+| 悬停 | 底色深一档：实底叠 `hover`（次要按钮），高对比底叠 `contrast_hover`（`ink` → `ink_hover`），透明底铺 `row_hover`（列表行、安静按钮） |
 | 按下 | 再深一档（GPUI 的样式没有缩放，不做按下缩小） |
 | 焦点（键盘） | 2px `bg` 间隙外再套 2px `focus` 环；鼠标点击不出环 |
-| 焦点（文本框、下拉框） | 描边换 `focus`，外圈 3px 半透明 `focus`；鼠标点进去也画，打字的位置得一直看得出来 |
+| 焦点（文本框） | 层级投影换成边内 1px `focus` 线；鼠标点进去也画，打字的位置得一直看得出来 |
+| 菜单开着 | 触发按钮保持按下的样子；菜单里键盘或鼠标停着的那项铺 `soft_hover` |
 | 选中 | 列表行 `row_selected` 底 + 中等字重；其它控件见各自一行 |
 | 不可用 | 整体 40% 透明度，不响应悬停和点击 |
 | 加载中 | 按钮宽度不变，文字换成转圈；不可再点 |
@@ -175,15 +345,19 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 
 ### 动效
 
-动效只用来交代「东西从哪到哪」，不给每个组件都加。控件的状态切换统一用
-`motion::snap_transition()`（200ms、`ease_snap`），交给 gpui-base 的 `motion::transition`：
-第一帧直接到位（页面刚打开不滑），中途反悔从当前位置掉头，系统减弱动效时直接到位。
+动效只用来交代「东西从哪到哪」，不给每个组件都加。用 `kit::MOTION` 的三档临界阻尼弹簧（不过冲，值是响应周期），交给 gpui-base 的 `motion::spring`：第一帧直接到位（页面刚打开不滑），中途反悔保留速度从当前位置掉头，系统减弱动效时直接到位。
+
+| 档 | 响应周期 | 用在哪 |
+|---|---|---|
+| `control` | 200ms | 控件自身的状态：开关滑块、分段选中块、停靠落点 |
+| `overlay` | 240ms | 浮层出现；浮层每次打开都是新挂上的元素，入场用 `overlay_enter()` 的定时过渡 |
+| `disclosure` | 300ms | 展开收起 |
 
 | 组件 | 动什么 |
 |---|---|
-| 开关 | 滑块滑到另一头，底色、滑块颜色和阴影跟着过渡 |
-| 分段控件（单选） | 抬起的选中块从旧段滑到新段，宽度跟着变；多选各段各自亮灭，不动 |
-| 对话框 | 原地淡入（组件库自带） |
+| 开关 | 滑块按 `control` 滑到另一头，底色、滑块颜色和轨道内阴影跟着过渡；悬停、按下的伸长不过渡 |
+| 分段控件（单选） | 选中块从旧段滑到新段，宽度跟着变；多选各段各自亮灭，不动 |
+| 对话框、菜单、弹出卡片 | 不动：出来就在原地。设计上关的时候淡出，但 gpui-base 关掉就卸下内容，做不了。Esc 关最上面那层，焦点回到打开它的地方 |
 | 按钮、复选框、单选、悬停 | 不动：结果就在点的地方，过渡只会让它显得迟钝 |
 
 ### 会话的状态
@@ -231,7 +405,8 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 ## 落地顺序
 
 1. 本文档。
-2. 色板：`Palette` 换成第 2 节的语义位，去掉 `border_dim` / `border_mid` / `border_loud` / `bg_card` 等旧分层；组件库自带 smelt Light / Dark 并设为默认，`builtin_fallback` 对齐。
-3. 按钮：九种变体收成第 6 节的五种，基于 gpui-base 的 `Button` 重写，尺寸和状态按第 4、7 节；外部链接换成文本链接；和第 2 步一个 PR。kit 对话框自带的确定 / 取消按钮跟第 4 步的对话框一起换。
-4. 输入、复选框、开关、分段控件、`ListRow`（两档密度）、菜单、对话框、提示、浮动通知。
-5. 各页面跟着插件化一起换上新组件。
+2. 色板：`Palette` 换成第 2 节的语义位；组件库自带 smelt Light / Dark 并设为默认。（已完成）
+3. 按钮：五种角色，基于 gpui-base 的 `Button`。（已完成）
+4. smelt-ui 脱离 gpui-component：主题解析和目录自己做（`theme_config`、`theme_catalog`，`ActiveTheme` 是唯一出处）；令牌收进 `kit`；输入框、菜单、对话框、提示、滚动条、复制按钮、Markdown 正文换到 gpui-base 上。下拉选择器（`Select`）删掉，用到的地方改菜单或暂用组件库的。（已完成）
+5. 第二阶段：应用和插件里剩下的 gpui-component 换掉——右键菜单、宿主对话框、选择器、设置页、通知、终端等部件换成 smelt-ui；主题改成 smelt 自己的带版本格式（第 2 节）。gpui-component 只留给差异视图、文件编辑器和代码高亮，`component_theme` 收成只投影这几处读的色。（已完成）
+6. 差异视图、编辑器、代码高亮在 gpui-base 上有了原语后换掉，删掉 `component_theme` 和 gpui-component 依赖。

@@ -13,7 +13,7 @@
 //! 不会吞内容。
 
 use gpui::{App, SharedString, Window};
-use gpui_component::text::{
+use gpui_base::text::{
     InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin,
     markdown_ast,
 };

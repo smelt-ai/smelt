@@ -109,7 +109,6 @@ pub struct WorkspaceSessionRecord {
     pub custom_title: Option<String>,
     pub last_updated_at: i64,
     pub archived_at: Option<i64>,
-    pub pinned_at: Option<i64>,
     pub workset_id: Option<String>,
     pub closed_workset_root: Option<String>,
     /// 这段对话里的终端，按客户端给的顺序。
@@ -137,15 +136,11 @@ pub struct WorkspaceAcpRecord {
     pub launch_command: String,
     /// 启动环境变量，按名字排序。
     pub launch_env: Vec<(String, String)>,
-    pub refresh_launch_from_settings: bool,
     pub pending_prompt: Option<String>,
-    pub pending_delivery_id: Option<String>,
     pub agent_definition_id: Option<String>,
     pub automation_id: Option<String>,
     /// 最后生效的 provider 配置：`(config_id, value_id)`，按设置顺序。
     pub config_values: Vec<(String, String)>,
-    /// 绑定到自动化 Run 时是它的 id；普通对话为 `None`。
-    pub binding_automation_run_id: Option<String>,
     pub pending_agent_preset: Option<String>,
     pub session_title: Option<String>,
 }

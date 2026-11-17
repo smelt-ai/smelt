@@ -12,13 +12,11 @@ impl CapabilitiesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (
-        Entity<gpui_component::input::InputState>,
-        Entity<gpui_component::input::InputState>,
-        Entity<gpui_component::input::InputState>,
-        Entity<gpui_component::input::InputState>,
+        Entity<InputState>,
+        Entity<InputState>,
+        Entity<InputState>,
+        Entity<InputState>,
     ) {
-        use gpui_component::input::InputState;
-
         let id = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("例如 gpt-5-mini")
@@ -43,8 +41,6 @@ impl CapabilitiesPage {
     }
 
     pub fn edit_pi_model_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_component::input::InputState;
-
         self.pi_model_editor_error = None;
         let settings = match self.pi_model_settings().cloned() {
             Ok(settings) => settings,
@@ -199,8 +195,6 @@ impl CapabilitiesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use gpui_component::input::InputState;
-
         let settings = match self.pi_model_settings().cloned() {
             Ok(settings) => settings,
             Err(error) => {

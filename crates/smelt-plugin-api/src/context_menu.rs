@@ -1,7 +1,7 @@
 //! 右键菜单里别的插件加的项，如会话列表里项目行的「用其他应用打开」。
 //!
 //! 菜单归画它的插件：它定菜单 id（`<来源>/<名字>`）和点了交给命令的上下文（项目在哪台
-//! 机器、根目录这些），写进它的契约（如 [`crate::contracts::sessions::PROJECT_MENU`]）。别的
+//! 机器、根目录这些），写进它自己对外的约定里。别的
 //! 插件往这个 id 下登记项，画菜单的一方只按登记的画，不认识登记者。
 //!
 //! 一项点了执行一条命令，参数是登记时给的 `args` 加上画菜单那一方给的上下文（见
@@ -21,8 +21,7 @@ use crate::RuntimeKey;
 pub struct ContextMenuItem {
     /// 菜单上的字。
     pub label: SharedString,
-    /// 彩色图标（如应用自己的图标），已经解码好：菜单直接画，不读文件。没有时画 `icon`；
-    /// 子菜单那一项只画 `icon`。
+    /// 彩色图标（如应用自己的图标），已经解码好：菜单直接画，不读文件。没有时画 `icon`。
     pub image: Option<Arc<gpui::Image>>,
     /// 线性图标的资源路径，如 `IconName::FolderOpen.path()`；都没有就不画图标。
     pub icon: Option<SharedString>,

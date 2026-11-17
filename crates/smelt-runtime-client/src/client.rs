@@ -14,8 +14,8 @@ use crate::RuntimeStream;
 use crate::connector::Connector;
 use crate::protocol::control::{
     CONTROL_API_VERSION, ControlCall, ControlClientError, ControlError, ControlErrorCode,
-    EmptyParams, SystemDescribe, SystemDescribeResult, decode_response_with_version,
-    encode_request_with_version,
+    ControlMethod, EmptyParams, SystemDescribe, SystemDescribeResult, decode_method_response,
+    decode_response_with_version, encode_method_request, encode_request_with_version,
 };
 
 /// 短请求的默认读写时限。调用方都在后台线程，但运行时不回包时仍要及时放掉线程。
@@ -116,8 +116,32 @@ impl RuntimeClient {
         params: &C::Params,
         timeout: Duration,
     ) -> Result<C::Result, ControlClientError> {
-        let request_id = format!("request-{}", uuid::Uuid::new_v4().simple());
+        let request_id = new_request_id();
         let request = encode_request_with_version::<C>(control_version, &request_id, params)?;
+        let response = self.exchange_control(&request, timeout)?;
+        decode_response_with_version::<C>(control_version, &request_id, response)
+    }
+
+    /// 按方法名调，参数和结果都是 JSON：调哪个方法要到运行时才知道的（脚本插件）用它，
+    /// 编译期知道的用 [`Self::call`]。
+    pub fn call_method(
+        &self,
+        method: ControlMethod,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, ControlClientError> {
+        let request_id = new_request_id();
+        let request = encode_method_request(CONTROL_API_VERSION, &request_id, method, params)?;
+        let response = self.exchange_control(&request, timeout)?;
+        decode_method_response(CONTROL_API_VERSION, &request_id, response)
+    }
+
+    /// 发一个控制请求，读回一行 JSON。
+    fn exchange_control(
+        &self,
+        request: &Value,
+        timeout: Duration,
+    ) -> Result<Value, ControlClientError> {
         let transport = |error: io::Error| ControlClientError::Transport(error.to_string());
         let stream = self.connect_with_timeout(timeout).map_err(transport)?;
         let line = exchange_line(stream, &request.to_string()).map_err(transport)?;
@@ -126,9 +150,8 @@ impl RuntimeClient {
                 "smeltd closed the control request without a response".to_string(),
             ));
         }
-        let response = serde_json::from_str(&line)
-            .map_err(|error| ControlClientError::InvalidResponse(error.to_string()))?;
-        decode_response_with_version::<C>(control_version, &request_id, response)
+        serde_json::from_str(&line)
+            .map_err(|error| ControlClientError::InvalidResponse(error.to_string()))
     }
 
     /// 握手：运行时身份、版本、平台和支持的方法。
@@ -152,6 +175,11 @@ impl RuntimeClient {
             result => result,
         }
     }
+}
+
+/// 控制请求的 id：一问一答对得上就行，每次新取。
+fn new_request_id() -> String {
+    format!("request-{}", uuid::Uuid::new_v4().simple())
 }
 
 fn exchange_line(mut stream: RuntimeStream, request: &str) -> io::Result<String> {

@@ -1,196 +1,184 @@
 //! 设置页：外观（主题、字号与字体、布局、背景）。
 
 use super::*;
-use gpui_component::IndexPath;
-use gpui_component::select::{SearchableVec, SelectEvent, SelectItem, SelectState};
-use smelt_ui::Select;
 use smelt_ui::theme_catalog::ThemeSwatch;
-use smelt_ui::truncated_line::truncated_line;
-use std::collections::HashMap;
+use smelt_ui::{Combobox, ComboboxGroup, ComboboxOption, Select};
 
 pub(super) fn appearance_page(
+    id: SharedString,
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
-) -> SettingPage {
-    SettingPage::new("外观")
-        .group(interface_group(snapshot))
-        .group(terminal_group(snapshot))
-        .group(layout_group(entity.clone(), cx))
-        .group(background_group(entity, snapshot, cx))
+) -> SettingsPage {
+    SettingsPage::new(id)
+        .child(interface_section(snapshot, cx))
+        .child(code_font_section(snapshot, cx))
+        .child(layout_section(entity.clone(), cx))
+        .child(background_section(entity, snapshot, cx))
 }
 
 /// 界面：主题、界面字号、界面字体。
-fn interface_group(snapshot: &SettingsRenderSnapshot) -> SettingGroup {
-    let ui_font_size_slider = snapshot.ui_font_size_slider.clone();
-    SettingGroup::new().title("界面").items(vec![
-        theme_item(),
-        SettingItem::new(
-            "界面字号",
-            SettingField::render(move |_, _, cx: &mut App| {
-                let size = cx.global::<Appearance>().ui_font_px;
-                slider_with_value(ui_font_size_slider.clone(), format!("{size}px"), cx)
-            }),
+fn interface_section(snapshot: &SettingsRenderSnapshot, cx: &App) -> Section {
+    let appearance = cx.global::<Appearance>();
+    let size = appearance.ui_font_px;
+    Section::new()
+        .title("界面")
+        .child(theme_row(snapshot, cx))
+        .child(
+            Row::new("界面字号").description("默认 16px").child(slider_with_value(
+                snapshot.ui_font_size_slider.as_ref(),
+                format!("{size}px"),
+            )),
         )
-        .description("默认 16px"),
-        // 值本身写着「默认（系统）」，不再另配说明。
-        SettingItem::new(
-            "界面字体",
-            SettingField::scrollable_dropdown(
-                snapshot.ui_font_options.as_ref().clone(),
-                |cx: &App| cx.global::<Appearance>().ui_font_family.clone().into(),
-                |v: SharedString, cx: &mut App| {
-                    let name = v.trim().to_string();
-                    apply_appearance(move |a| a.ui_font_family = name, cx);
-                    cx.refresh_windows();
-                },
-            )
-            .max_w(px(220.))
-            .overflow_hidden(),
-        ),
-    ])
+        // 值本身写着「默认（Inter）」，不再另配说明。
+        .child(
+            Row::new("界面字体").child(
+                Select::new("settings-ui-font")
+                    .options(snapshot.ui_font_options.iter().cloned())
+                    .selected(Some(SharedString::from(
+                        appearance.ui_font_family.clone(),
+                    )))
+                    .on_change(|name: &SharedString, _, cx| {
+                        let name = name.trim().to_string();
+                        apply_appearance(move |a| a.ui_font_family = name, cx);
+                        cx.refresh_windows();
+                    }),
+            ),
+        )
 }
 
-/// 终端与代码：终端字号、代码字体。
-fn terminal_group(snapshot: &SettingsRenderSnapshot) -> SettingGroup {
-    let font_size_slider = snapshot.font_size_slider.clone();
-    SettingGroup::new().title("终端与代码").items(vec![
-        SettingItem::new(
-            "终端字号",
-            SettingField::render(move |_, _, cx: &mut App| {
-                let size = cx.global::<Appearance>().font_px;
-                slider_with_value(font_size_slider.clone(), format!("{size}px"), cx)
-            }),
-        )
-        .description("默认 14px"),
-        SettingItem::new(
-            "代码字体",
-            SettingField::scrollable_dropdown(
-                snapshot.font_options.as_ref().clone(),
-                |cx: &App| cx.global::<Appearance>().font_family.clone().into(),
-                |v: SharedString, cx: &mut App| {
-                    let name = v.trim().to_string();
-                    font_config::set_font_family(&name);
-                    apply_appearance(move |a| a.font_family = name, cx);
-                    cx.refresh_windows();
-                },
-            )
-            .max_w(px(220.))
-            .overflow_hidden(),
-        )
-        .description("终端、diff 和代码块共用，建议选等宽；缺字时回落内嵌的 Maple Mono NF"),
-    ])
+/// 代码字体：终端、diff、代码块共用。终端字号在终端插件自己的设置页。
+fn code_font_section(snapshot: &SettingsRenderSnapshot, cx: &App) -> Section {
+    let current = cx.global::<Appearance>().font_family.clone();
+    Section::new().title("代码").child(
+        Row::new("代码字体")
+            .description("终端、diff 和代码块共用，建议选等宽；缺字时回落内嵌的 Maple Mono NF")
+            .child(
+                Select::new("settings-code-font")
+                    .options(snapshot.font_options.iter().cloned())
+                    .selected(Some(SharedString::from(current)))
+                    .on_change(|name: &SharedString, _, cx| {
+                        let name = name.trim().to_string();
+                        font_config::set_font_family(&name);
+                        apply_appearance(move |a| a.font_family = name, cx);
+                        cx.refresh_windows();
+                    }),
+            ),
+    )
 }
 
 /// 布局：首页用哪份，和把它恢复成本来的样子。选项是插件给首页登记的布局（只读内存）；
 /// 别的页（如设置）各用登记给它的那份，不在这里选。
-fn layout_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
+fn layout_section(entity: Entity<Workspace>, cx: &App) -> Section {
     let options: Vec<(SharedString, SharedString)> = crate::workspace_layout::home_layouts(cx)
         .into_iter()
         .map(|layout| (layout.id, layout.title))
         .collect();
+    let section = Section::new().title("布局");
     if options.is_empty() {
-        let choice = SettingItem::new(
-        "布局",
-        SettingField::render(|_, _, cx: &mut App| {
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("没有可选的布局")
-        }),
-    )
-    .description("所有视图摆在中间一组；装了带布局的插件后可以在这里换");
-    // 兜底的摆法不存档，没有可恢复的。
-    return SettingGroup::new().title("布局").item(choice);
+        // 兜底的摆法不存档，没有可恢复的。
+        return section.child(
+            Row::new("布局")
+                .description("所有视图摆在中间一组；装了带布局的插件后可以在这里换")
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::muted()))
+                        .child("没有可选的布局"),
+                ),
+        );
     }
-    let choice = SettingItem::new(
-        "布局",
-        SettingField::dropdown(
-            options,
-            // 选的布局暂时没登记时显示实际在用的那份，不改保存的选择。
-            |cx: &App| {
-                crate::workspace_layout::effective_home_layout(cx)
-                    .unwrap_or_default()
-                    .into()
-            },
-            |id: SharedString, cx: &mut App| {
-                let id = id.to_string();
-                // 工作台盯着外观里的这一项，变了自己换布局。
-                apply_appearance(move |a| a.layout_id = Some(id), cx);
-            },
-        ),
-    )
-    .description("工作台里各个视图怎么摆；插件可以带自己的布局");
-    let restore = SettingItem::new(
-        "恢复布局",
-        SettingField::render(move |_, _, _: &mut App| {
-            let entity = entity.clone();
-            Button::new("restore-layout")
-                .small()
-                .label("恢复")
-                .on_click(move |_, _, cx: &mut App| {
-                    entity.update(cx, |workspace, cx| workspace.restore_layout(cx));
-                })
-        }),
-    )
-    .description("扔掉拖动、拆分、收起过的样子，回到这份布局本来的样子");
-    SettingGroup::new().title("布局").items(vec![choice, restore])
+    // 选的布局暂时没登记时显示实际在用的那份，不改保存的选择。
+    let current =
+        SharedString::from(crate::workspace_layout::effective_home_layout(cx).unwrap_or_default());
+    section
+        .child(
+            Row::new("布局")
+                .description("工作台里各个视图怎么摆；插件可以带自己的布局")
+                .child(
+                    Select::new("settings-layout")
+                        .options(options)
+                        .selected(Some(current))
+                        .on_change(|id: &SharedString, _, cx| {
+                            let id = id.to_string();
+                            // 工作台盯着外观里的这一项，变了自己换布局。
+                            apply_appearance(move |a| a.layout_id = Some(id), cx);
+                        }),
+                ),
+        )
+        .child(
+            Row::new("恢复布局")
+                .description("扔掉拖动、拆分、收起过的样子，回到这份布局本来的样子")
+                .child(
+                    Button::new("restore-layout")
+                        .small()
+                        .label("恢复")
+                        .on_click(move |_, _, cx: &mut App| {
+                            entity.update(cx, |workspace, cx| workspace.restore_layout(cx));
+                        }),
+                ),
+        )
 }
 
 /// 滑块加右侧数值。数值框留够「100%」的宽度并右对齐，几行的数字对得齐。
-fn slider_with_value(
-    slider: Option<Entity<SliderState>>,
-    value: String,
-    cx: &App,
-) -> impl IntoElement + use<> {
-    h_flex()
+fn slider_with_value(slider: Option<&Entity<SliderState>>, value: String) -> Div {
+    div()
+        .flex()
         .items_center()
         .gap_2()
-        .child(div().w(px(200.)).children(slider.as_ref().map(Slider::new)))
+        .child(div().w(px(200.)).children(slider.map(Slider::new)))
         .child(
             div()
                 .w(px(40.))
                 .text_right()
                 .text_xs()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(rgb(crate::ui_theme::muted()))
                 .child(value),
         )
 }
 
-fn theme_item() -> SettingItem {
-    SettingItem::new(
-        "主题",
-        SettingField::render(|_, window, cx: &mut App| {
-            let key: SharedString = format!(
-                "settings-theme-picker-{}",
-                smelt_ui::theme_catalog::generation(cx)
-            )
-            .into();
-            let picker = window.use_keyed_state(key, cx, ThemePicker::new);
-            let select = picker.read(cx).select.clone();
-            let border = cx.theme().border;
-            // 别处换了主题（命令面板等）时，下拉跟着对上，不停在旧的那项。只对目录里
-            // 有的名字同步：选不中的名字每次重绘都会再选一遍，停不下来。
-            let current = SharedString::from(displayed_theme_name(cx));
-            let swatch = picker.read(cx).swatches.get(&current).copied();
-            if swatch.is_some() && select.read(cx).selected_value() != Some(&current) {
-                select.update(cx, |select, cx| {
-                    select.set_selected_value(&current, window, cx)
-                });
-            }
-            h_flex()
-                .items_center()
-                .gap_2()
-                .children(swatch.map(|swatch| theme_dots(swatch, border)))
-                .child(
-                    Select::new(&select)
-                        .w(px(220.))
-                        .menu_width(px(300.))
-                        .search_placeholder("搜索主题，如 Ayu、Catppuccin"),
-                )
-        }),
-    )
-    .description("界面和终端配色一起换，明暗跟着主题走")
+/// 主题：按钮上是当前主题和它的三个色点；点开是可搜索的列表，按系列分组，当前那款打勾。
+fn theme_row(snapshot: &SettingsRenderSnapshot, cx: &App) -> Row {
+    Row::new("主题")
+        .description("界面和终端配色一起换，明暗跟着主题走")
+        .child(
+            Combobox::new("settings-theme", snapshot.theme_options.clone())
+                .selected(Some(displayed_theme_name(cx)))
+                .on_change(|name, _, cx| select_theme(name.to_string(), cx)),
+        )
+}
+
+/// 主题选择的选项：每个系列一组，系列按目录里第一次出现的先后排（库自带的在前）；每款
+/// 前面是它的三个色点，按系列名、明暗也搜得到。要解析每款主题的颜色，只在主题目录变了时
+/// 算（见 `Workspace::settings_render_snapshot`），不在 render 里算。
+pub(in crate::settings) fn theme_options(cx: &App) -> Vec<ComboboxGroup> {
+    let mut families: Vec<(SharedString, Vec<ComboboxOption>)> = Vec::new();
+    for theme in smelt_ui::theme_catalog::themes(cx) {
+        let mode = if theme.mode.is_dark() {
+            ["深色", "dark"]
+        } else {
+            ["浅色", "light"]
+        };
+        let mut option = ComboboxOption::new(theme.name.clone(), theme.name.clone()).keywords([
+            theme.family.clone(),
+            mode[0].into(),
+            mode[1].into(),
+        ]);
+        if let Some(swatch) = smelt_ui::theme_catalog::swatch(&theme.name, cx) {
+            option = option.prefix(move || theme_dots(swatch));
+        }
+        match families
+            .iter_mut()
+            .find(|(family, _)| *family == theme.family)
+        {
+            Some((_, options)) => options.push(option),
+            None => families.push((theme.family, vec![option])),
+        }
+    }
+    families
+        .into_iter()
+        .map(|(family, options)| ComboboxGroup::new(Some(family), options))
+        .collect()
 }
 
 /// 主题暂时不可用时显示实际生效的 Default，不覆盖保存的用户选择。
@@ -205,102 +193,6 @@ fn displayed_theme_name(cx: &App) -> String {
             "light"
         })
         .to_string()
-    }
-}
-
-/// 主题下拉：可搜索，每项带三个色点和所属系列。挂在设置的元素状态上。
-struct ThemePicker {
-    select: Entity<SelectState<SearchableVec<ThemeOption>>>,
-    /// 每款主题的色点，建下拉时一次算好：每项都要把主题配置套一遍，不放进重绘。
-    swatches: HashMap<SharedString, ThemeSwatch>,
-    _confirm: Subscription,
-}
-
-impl ThemePicker {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let current = displayed_theme_name(cx);
-        let options = smelt_ui::theme_catalog::themes(cx)
-            .into_iter()
-            .map(|entry| ThemeOption {
-                swatch: smelt_ui::theme_catalog::swatch(&entry.name, cx),
-                name: entry.name,
-                family: entry.family,
-            })
-            .collect::<Vec<_>>();
-        let selected = options
-            .iter()
-            .position(|option| *option.name == *current)
-            .map(IndexPath::new);
-        let swatches = options
-            .iter()
-            .filter_map(|option| Some((option.name.clone(), option.swatch?)))
-            .collect();
-        let select = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(options), selected, window, cx).searchable(true)
-        });
-        let _confirm = cx.subscribe(
-            &select,
-            |_, _, event: &SelectEvent<SearchableVec<ThemeOption>>, cx| {
-                if let SelectEvent::Confirm(Some(name)) = event {
-                    select_theme(name.to_string(), cx);
-                }
-            },
-        );
-        Self {
-            select,
-            swatches,
-            _confirm,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ThemeOption {
-    name: SharedString,
-    family: SharedString,
-    swatch: Option<ThemeSwatch>,
-}
-
-impl SelectItem for ThemeOption {
-    type Value = SharedString;
-
-    fn title(&self) -> SharedString {
-        self.name.clone()
-    }
-
-    fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let border = cx.theme().border;
-        let muted = cx.theme().muted_foreground;
-        h_flex()
-            .w_full()
-            .min_w_0()
-            .items_center()
-            .gap_2()
-            .children(self.swatch.map(|swatch| theme_dots(swatch, border)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(truncated_line(self.name.clone())),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(self.family.clone()),
-            )
-    }
-
-    fn value(&self) -> &SharedString {
-        &self.name
-    }
-
-    /// 名字或系列（Ayu、Catppuccin）都能搜。
-    fn matches(&self, query: &str) -> bool {
-        let query = query.to_lowercase();
-        self.name.to_lowercase().contains(&query) || self.family.to_lowercase().contains(&query)
     }
 }
 
@@ -328,122 +220,105 @@ fn select_theme(name: String, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// 背景、前景、强调三个色点。描边用当前主题的边框色，深色主题的底色点在深色界面上也看得见。
-fn theme_dots(swatch: ThemeSwatch, border: gpui::Hsla) -> impl IntoElement {
-    h_flex().flex_none().items_center().gap_1().children(
+/// 背景、前景、强调三个色点。描边用 `hair_strong`，深色主题的底色点在深色界面上也看得见。
+fn theme_dots(swatch: ThemeSwatch) -> Div {
+    div().flex().items_center().flex_none().gap_1().children(
         [swatch.background, swatch.foreground, swatch.accent].map(|color| {
             div()
                 .size(px(10.))
                 .rounded_full()
                 .bg(color)
                 .border_1()
-                .border_color(border)
+                .border_color(crate::ui_theme::hair_strong())
         }),
     )
 }
 
-fn background_group(
+fn background_section(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
-) -> SettingGroup {
+) -> Section {
     let appearance = cx.global::<Appearance>();
-    let mut items = Vec::new();
+    let mut section = Section::new().title("背景");
     // 没有材质的机器（Linux、更早的 Windows）不给选。
     if crate::window_backdrop::available() {
-        items.push(material_item());
+        section = section.child(material_row(cx));
     }
     // 背景图：没设时只给「选择图片…」；设了才出文件名、「清除」和透明度。
-    let has_image = appearance.bg_image.is_some();
+    let name = appearance
+        .bg_image
+        .as_deref()
+        .and_then(|path| path.rsplit('/').next())
+        .map(str::to_string);
+    let has_image = name.is_some();
     let pick_entity = entity.clone();
     let clear_entity = entity;
-    items.push(
-        SettingItem::new(
-            "背景图片",
-            SettingField::render(move |_, _, cx: &mut App| {
-                let name = cx
-                    .global::<Appearance>()
-                    .bg_image
-                    .as_deref()
-                    .and_then(|path| path.rsplit('/').next())
-                    .map(str::to_string);
-                let pick_entity = pick_entity.clone();
-                let clear_entity = clear_entity.clone();
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .children(name.map(|name| {
-                        div()
-                            .max_w(px(160.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis_middle()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(name)
-                    }))
-                    .child(
-                        Button::new("pick-img")
-                            .small()
-                            .label(if has_image {
-                                "更换…"
-                            } else {
-                                "选择图片…"
-                            })
-                            .flex_shrink_0()
-                            .on_click(move |_, _window, cx: &mut App| {
-                                pick_entity.update(cx, |this, cx| this.pick_bg_image(cx));
-                            }),
-                    )
-                    .when(has_image, |row| {
-                        row.child(
-                            Button::new("clear-img")
-                                .quiet()
-                                .small()
-                                .label("清除")
-                                .flex_shrink_0()
-                                .on_click(move |_, _window, cx: &mut App| {
-                                    clear_entity.update(cx, |this, cx| this.set_bg_image(None, cx));
-                                }),
-                        )
+    section = section.child(
+        Row::new("背景图片")
+            .description("铺满整个窗口，压在毛玻璃上")
+            .children(name.map(|name| {
+                div()
+                    .max_w(px(160.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_middle()
+                    .text_xs()
+                    .text_color(rgb(crate::ui_theme::muted()))
+                    .child(name)
+            }))
+            .child(
+                Button::new("pick-img")
+                    .small()
+                    .label(if has_image {
+                        "更换…"
+                    } else {
+                        "选择图片…"
                     })
+                    .on_click(move |_, _window, cx: &mut App| {
+                        pick_entity.update(cx, |this, cx| this.pick_bg_image(cx));
+                    }),
+            )
+            .when(has_image, |row| {
+                row.child(
+                    Button::new("clear-img")
+                        .quiet()
+                        .small()
+                        .label("清除")
+                        .on_click(move |_, _window, cx: &mut App| {
+                            clear_entity.update(cx, |this, cx| this.set_bg_image(None, cx));
+                        }),
+                )
             }),
-        )
-        .description("铺满整个窗口，压在毛玻璃上"),
     );
     if has_image {
-        let bg_image_opacity_slider = snapshot.bg_image_opacity_slider.clone();
-        items.push(
-            SettingItem::new(
-                "背景图透明度",
-                SettingField::render(move |_, _, cx: &mut App| {
-                    let opacity =
-                        (cx.global::<Appearance>().bg_image_opacity * 100.0).round() as u32;
-                    slider_with_value(bg_image_opacity_slider.clone(), format!("{opacity}%"), cx)
-                }),
-            )
-            .description("默认 15%，越低越不抢文字"),
+        let opacity = (appearance.bg_image_opacity * 100.0).round() as u32;
+        section = section.child(
+            Row::new("背景图透明度")
+                .description("默认 15%，越低越不抢文字")
+                .child(slider_with_value(
+                    snapshot.bg_image_opacity_slider.as_ref(),
+                    format!("{opacity}%"),
+                )),
         );
     }
-    SettingGroup::new().title("背景").items(items)
+    section
 }
 
 /// 窗口底下垫哪一种系统毛玻璃。选项是这个平台有的材质（只读常量）。
-fn material_item() -> SettingItem {
+fn material_row(cx: &App) -> Row {
     use crate::window_backdrop::WindowMaterial;
     let options = WindowMaterial::choices()
         .iter()
-        .map(|material| (material.key().into(), material.label().into()))
-        .collect::<Vec<(SharedString, SharedString)>>();
-    SettingItem::new(
-        "材质",
-        SettingField::dropdown(
-            options,
-            |cx: &App| cx.global::<Appearance>().material.key().into(),
-            |key: SharedString, cx: &mut App| {
-                crate::settings::set_window_material(WindowMaterial::from_key(&key), cx);
-            },
-        ),
-    )
-    .description("垫在整个窗口下面的系统毛玻璃；模糊程度由系统定，不能调")
+        .map(|material| (material.key(), SharedString::from(material.label())));
+    Row::new("材质")
+        .description("垫在整个窗口下面的系统毛玻璃；模糊程度由系统定，不能调")
+        .child(
+            Select::new("settings-material")
+                .options(options)
+                .selected(Some(cx.global::<Appearance>().material.key()))
+                .on_change(|key: &&'static str, _, cx| {
+                    crate::settings::set_window_material(WindowMaterial::from_key(key), cx);
+                }),
+        )
 }

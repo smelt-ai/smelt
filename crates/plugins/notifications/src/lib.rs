@@ -16,6 +16,7 @@
 
 mod attention;
 mod menubar;
+mod sessions;
 mod settings_page;
 mod store;
 
@@ -23,7 +24,6 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use api::contracts::sessions::{self, Activate};
 use api::model::control_api::{AttentionMarkRead, AttentionMarkReadParams};
 use api::model::daemon_state::{AttentionItem, CORE_TOPIC_ATTENTION_CHANGED, SessionAttention};
 use api::{HostEvent, NotificationClick, Notify, RuntimeKey, TopicMessage, WithdrawNotification};
@@ -31,6 +31,7 @@ use gpui::{App, Task};
 use smelt_plugin_api as api;
 
 use attention::{Applied, Mirror};
+use sessions::Activate;
 use store::{Delivered, NotifyStore, Prefs};
 
 /// 本插件的来源 id：库文件名、设置页、通知 id 都用它。

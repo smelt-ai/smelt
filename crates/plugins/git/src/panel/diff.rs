@@ -10,7 +10,6 @@
 use std::rc::Rc;
 
 use super::*;
-use gpui_component::button::Toggle;
 use gpui_component::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide};
 
 /// 块操作挂在哪一行。优先新文件侧的行号，纯删除才退回旧文件侧。
@@ -96,7 +95,7 @@ struct DiffChrome {
     ops: HunkOps,
     split: bool,
     comment_range: Option<DiffLineRange>,
-    comment_input: Option<Entity<gpui_component::input::TextareaState>>,
+    comment_input: Option<Entity<smelt_plugin_api::ui::field::TextareaState>>,
 }
 
 /// 变更栏 diff 正文。GitPanel 持有它，它只弱引用 GitPanel，避免互相留住。
@@ -162,22 +161,21 @@ impl GitPanel {
     ///
     /// 这里不能 `read` DiffState。render 期间读到的实体，之后每次 `notify`
     /// 都会把整个 GitPanel 标脏，右侧文件列表就跟着 diff 的高亮和滚动重排。
-    pub(crate) fn git_diff_pane(&self, empty_hint: &str, cx: &mut Context<Self>) -> Div {
-        let muted = cx.theme().muted_foreground;
+    pub(crate) fn git_diff_pane(&self, empty_hint: &str) -> Div {
         let Some(diff) = self.git_diff.as_ref() else {
-            return placeholder_view(empty_hint, muted);
+            return placeholder_view(empty_hint);
         };
         if diff.patch.is_none() {
-            return placeholder_view("正在读取…", muted);
+            return placeholder_view("正在读取…");
         }
         if let Some(err) = self.diff_parse_error.as_deref() {
-            return diff_status_note(err, muted);
+            return diff_status_note(err);
         }
         if self.diff_view.is_none() {
-            return placeholder_view("（无差异）", muted);
+            return placeholder_view("（无差异）");
         }
         let Some(body) = self.diff_body.clone() else {
-            return placeholder_view("（无差异）", muted);
+            return placeholder_view("（无差异）");
         };
         div()
             .flex_1()
@@ -248,19 +246,17 @@ impl GitPanel {
 
 impl GitDiffBody {
     fn render_chrome(&self, cx: &mut Context<Self>) -> Div {
-        let (muted, border) = {
-            let theme = cx.theme();
-            (theme.muted_foreground, theme.border)
-        };
+        let muted: Hsla = rgb(crate::ui_theme::muted()).into();
+        let border = crate::ui_theme::hair();
         let Some(chrome) = self.chrome.as_ref() else {
-            return placeholder_view("（无差异）", muted);
+            return placeholder_view("（无差异）");
         };
         let view = chrome.view.clone();
         let (file_path, all_collapsed) = {
             let state = view.read(cx);
             let files = state.files();
             if files.is_empty() {
-                return placeholder_view("（无差异）", muted);
+                return placeholder_view("（无差异）");
             }
             let all_collapsed = !files.is_empty()
                 && files
@@ -311,12 +307,13 @@ impl GitDiffBody {
                 })
         });
         // 并排是开关：按下是并排，抬起是统一。
-        let toggle = Toggle::new("diff-split-toggle")
-            .xsmall()
+        let toggle = Button::new("diff-split-toggle")
+            .quiet()
+            .small()
             .flex_none()
-            .px_2()
             .label("并排")
-            .checked(chrome.split)
+            .toggled(chrome.split)
+            .selected(chrome.split)
             .tooltip("并排对照新旧两侧；关掉是统一视图")
             .on_click({
                 let host = host.clone();
@@ -420,7 +417,7 @@ impl GitDiffBody {
     }
 }
 
-fn diff_status_note(text: &str, muted: Hsla) -> Div {
+fn diff_status_note(text: &str) -> Div {
     div()
         .flex_1()
         .min_h_0()
@@ -428,7 +425,7 @@ fn diff_status_note(text: &str, muted: Hsla) -> Div {
         .p_4()
         .text_sm()
         .whitespace_normal()
-        .text_color(muted)
+        .text_color(rgb(crate::ui_theme::muted()))
         .child(text.to_string())
 }
 
@@ -549,7 +546,7 @@ fn render_diff_annotation(
     ops: HunkOps,
     root: ProjectRef,
     comment_label: Option<String>,
-    input: Option<Entity<gpui_component::input::TextareaState>>,
+    input: Option<Entity<smelt_plugin_api::ui::field::TextareaState>>,
     host: WeakEntity<GitPanel>,
     cx: &mut App,
 ) -> AnyElement {
@@ -561,7 +558,7 @@ fn render_diff_annotation(
             let Some(label) = comment_label else {
                 return div().into_any_element();
             };
-            diff_comment_composer(label, input, host, cx).into_any_element()
+            diff_comment_composer(label, input, host).into_any_element()
         }
         _ => div().into_any_element(),
     }
@@ -618,23 +615,24 @@ fn hunk_ops_row(
 
 fn diff_comment_composer(
     range_label: String,
-    input: Option<Entity<gpui_component::input::TextareaState>>,
+    input: Option<Entity<smelt_plugin_api::ui::field::TextareaState>>,
     host: WeakEntity<GitPanel>,
-    cx: &mut App,
 ) -> Div {
-    let (muted, border) = {
-        let theme = cx.theme();
-        (theme.muted_foreground, theme.border)
-    };
+    let muted: Hsla = rgb(crate::ui_theme::muted()).into();
+    let border = crate::ui_theme::hair();
     let clear_host = host.clone();
-    v_flex()
+    div()
+        .flex()
+        .flex_col()
         .gap_3()
         .child(
-            h_flex()
+            div()
+                .flex()
                 .items_center()
                 .justify_between()
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
                         .items_center()
                         .gap_2()
                         .child(
@@ -664,7 +662,9 @@ fn diff_comment_composer(
                 .child(smelt_plugin_api::ui::TextArea::new(&state))
         }))
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .justify_end()
                 .gap_2()
                 .child(

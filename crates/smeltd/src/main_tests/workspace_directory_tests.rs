@@ -245,7 +245,6 @@ fn archiving_preserves_the_record_and_restoring_publishes_it_again() {
     let event_hub = new_event_hub();
     let conversation = terminal_conversation();
     workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
-    workspace_directory::pin_conversation(&temp.store, &conversation.id, true, &event_hub).unwrap();
     for archived in [true, false] {
         workspace_directory::archive_conversation(
             &temp.store,
@@ -261,7 +260,6 @@ fn archiving_preserves_the_record_and_restoring_publishes_it_again() {
         assert_eq!(directory.conversations.len(), 1);
         let stored = &directory.conversations[0];
         assert_eq!(stored.archived_at.is_some(), archived);
-        assert_eq!(stored.pinned_at, None);
         assert_eq!(stored.terminals, conversation.terminals);
     }
 }
@@ -363,7 +361,10 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
             .to_string_lossy()
             .into_owned(),
     );
-    assert!(workspace_directory::update_conversation(&temp.store, &stale, &event_hub).is_err());
+    assert!(
+        workspace_directory::update_conversation(&temp.store, &stale, &new_sessions(), &event_hub)
+            .is_err()
+    );
     assert_eq!(
         workspace_catalog::directory_on(&temp.store)
             .unwrap()
@@ -480,8 +481,12 @@ fn restoring_closed_workset_archive_rebinds_to_selected_workset() {
         Some("provider-history")
     );
     assert_eq!(restored_acp.sid, "acp-session");
-    let stale_update =
-        workspace_directory::update_conversation(&temp.store, &conversation, &event_hub);
+    let stale_update = workspace_directory::update_conversation(
+        &temp.store,
+        &conversation,
+        &new_sessions(),
+        &event_hub,
+    );
     assert!(
         stale_update.is_err(),
         "旧客户端不能把恢复后的会话改回失效目录"
@@ -562,8 +567,13 @@ fn directory_commands_publish_the_changed_directory() {
     assert!(published.revision > created.revision);
     assert!(published.conversations.is_empty());
 
-    let late = workspace_directory::update_conversation(&temp.store, &conversation, &event_hub)
-        .unwrap_err();
+    let late = workspace_directory::update_conversation(
+        &temp.store,
+        &conversation,
+        &new_sessions(),
+        &event_hub,
+    )
+    .unwrap_err();
     assert_eq!(late.code, ControlErrorCode::NotFound);
 }
 

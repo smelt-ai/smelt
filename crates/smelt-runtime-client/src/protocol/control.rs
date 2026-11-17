@@ -134,7 +134,6 @@ define_control_methods! {
     WorkspaceConversationUpdate => (WORKSPACE_CONVERSATION_UPDATE_METHOD, "workspace.conversation.update"),
     WorkspaceConversationDelete => (WORKSPACE_CONVERSATION_DELETE_METHOD, "workspace.conversation.delete"),
     WorkspaceConversationArchive => (WORKSPACE_CONVERSATION_ARCHIVE_METHOD, "workspace.conversation.archive"),
-    WorkspaceConversationPin => (WORKSPACE_CONVERSATION_PIN_METHOD, "workspace.conversation.pin"),
     WorkspaceProjectOpen => (WORKSPACE_PROJECT_OPEN_METHOD, "workspace.project.open"),
     WorkspaceProjectClose => (WORKSPACE_PROJECT_CLOSE_METHOD, "workspace.project.close"),
     WorkspaceProjectRepositoryAction => (WORKSPACE_PROJECT_REPOSITORY_ACTION_METHOD, "workspace.project.repository.action"),
@@ -482,18 +481,28 @@ pub fn encode_request_with_version<C: ControlCall>(
     request_id: &str,
     params: &C::Params,
 ) -> Result<Value, ControlClientError> {
+    let params = serde_json::to_value(params)
+        .map_err(|error| ControlClientError::InvalidRequest(error.to_string()))?;
+    encode_method_request(control_version, request_id, C::METHOD, params)
+}
+
+/// 按方法构造请求，参数已经是 JSON：调用方在运行时才知道调哪个方法（脚本插件）时用。
+pub fn encode_method_request(
+    control_version: u16,
+    request_id: &str,
+    method: ControlMethod,
+    params: Value,
+) -> Result<Value, ControlClientError> {
     if !valid_request_id(request_id) {
         return Err(ControlClientError::InvalidRequest(format!(
             "request_id must contain 1..={MAX_CONTROL_REQUEST_ID_BYTES} non-control bytes"
         )));
     }
-    let params = serde_json::to_value(params)
-        .map_err(|error| ControlClientError::InvalidRequest(error.to_string()))?;
     Ok(serde_json::json!({
         "op": DaemonOperation::Control,
         "control_version": control_version,
         "request_id": request_id,
-        "method": C::METHOD.as_str(),
+        "method": method.as_str(),
         "params": params,
     }))
 }
@@ -590,7 +599,18 @@ pub fn decode_response_with_version<C: ControlCall>(
     expected_request_id: &str,
     value: Value,
 ) -> Result<C::Result, ControlClientError> {
-    let response: ControlResponse<C::Result> = serde_json::from_value(value)
+    let result = decode_method_response(expected_control_version, expected_request_id, value)?;
+    serde_json::from_value(result)
+        .map_err(|error| ControlClientError::InvalidResponse(error.to_string()))
+}
+
+/// 解回包，结果留成 JSON，形状由调用方认（见 [`encode_method_request`]）。
+pub fn decode_method_response(
+    expected_control_version: u16,
+    expected_request_id: &str,
+    value: Value,
+) -> Result<Value, ControlClientError> {
+    let response: ControlResponse<Value> = serde_json::from_value(value)
         .map_err(|error| ControlClientError::InvalidResponse(error.to_string()))?;
     if response.request_id != expected_request_id {
         return Err(ControlClientError::InvalidResponse(format!(
@@ -634,6 +654,35 @@ mod tests {
                 "params": {},
             })
         );
+    }
+
+    #[test]
+    fn calls_by_method_name_match_typed_calls_on_the_wire() {
+        let typed = encode_request::<SystemDescribe>("request-1", &EmptyParams::default())
+            .expect("request should serialize");
+        let by_name = encode_method_request(
+            CONTROL_API_VERSION,
+            "request-1",
+            ControlMethod::SystemDescribe,
+            serde_json::json!({}),
+        )
+        .expect("request should serialize");
+        assert_eq!(by_name, typed);
+
+        let ok = serde_json::json!({
+            "control_version": CONTROL_API_VERSION,
+            "request_id": "request-1",
+            "status": "ok",
+            "result": { "anything": [1, 2] },
+        });
+        assert_eq!(
+            decode_method_response(CONTROL_API_VERSION, "request-1", ok.clone()).unwrap(),
+            serde_json::json!({ "anything": [1, 2] })
+        );
+        assert!(matches!(
+            decode_method_response(CONTROL_API_VERSION, "request-2", ok),
+            Err(ControlClientError::InvalidResponse(_))
+        ));
     }
 
     #[test]

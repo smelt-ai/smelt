@@ -1612,6 +1612,11 @@ pub struct AcpSnapshotFrame<'a> {
     pub live: &'a SessionLive,
     pub snapshot: &'a ConversationSnapshot,
     pub provider_pid: Option<i32>,
+    /// 只在 `acp_open` 回的第一帧上、打开请求带了 `initial_prompt` 或 `initial_config` 时为
+    /// `true`：守护认得这两个字段，已按 [`AcpInitialPrompt`] 的约定接手。旧守护不认识它们，
+    /// 会静默丢掉，也不会带这个字段；客户端据此知道首条消息没人发。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub initial_ack: bool,
 }
 
 impl AcpSnapshotFrame<'_> {

@@ -1,27 +1,12 @@
 use smelt_model::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 
-use super::resolve_terminal_provider;
-
 #[test]
-fn explicit_launch_provider_wins_and_bare_terminal_uses_hook_provider() {
-    assert_eq!(
-        resolve_terminal_provider(Some(TerminalAgentKind::Claude), Some("codex")),
-        Some(TerminalAgentKind::Claude)
-    );
-    assert_eq!(
-        resolve_terminal_provider(None, Some("codex")),
-        Some(TerminalAgentKind::Codex)
-    );
-    assert_eq!(resolve_terminal_provider(None, Some("unknown")), None);
-}
-
-#[test]
-fn every_agent_has_a_sidebar_icon() {
+fn every_agent_has_an_icon() {
     for kind in TerminalAgentKind::ALL {
         let path = format!("smelt-icons/agent-{}.svg", kind.id());
         assert!(
             crate::agent_icon_svg(&path).is_some(),
-            "终端 agent {} 没有登记侧栏图标：{path}",
+            "终端 agent {} 没有登记图标：{path}",
             kind.id()
         );
     }
@@ -33,16 +18,16 @@ fn every_agent_has_a_sidebar_icon() {
         let path = format!("smelt-icons/agent-{}.svg", kind.id());
         assert!(
             crate::agent_icon_svg(&path).is_some(),
-            "ACP agent {} 没有登记侧栏图标：{path}",
+            "ACP agent {} 没有登记图标：{path}",
             kind.id()
         );
     }
 }
 
 #[test]
-fn oh_my_pi_sidebar_icon_is_registered() {
-    let bytes = crate::agent_icon_svg("smelt-icons/agent-omp.svg")
-        .expect("Oh My Pi 的侧栏图标必须登记");
+fn oh_my_pi_icon_is_registered() {
+    let bytes =
+        crate::agent_icon_svg("smelt-icons/agent-omp.svg").expect("Oh My Pi 的图标必须登记");
     assert!(!bytes.is_empty());
 }
 
@@ -71,13 +56,13 @@ fn machine_os_icons_are_bundled_with_the_application() {
 }
 
 #[test]
-fn archive_sidebar_icon_is_bundled_with_the_application() {
+fn kit_icons_are_bundled_with_the_application() {
     use gpui::AssetSource as _;
 
     let path = gpui_kit_assets::IconName::Archive.path();
     let icon = crate::SmeltAssets
         .load(path.as_ref())
         .unwrap()
-        .expect("归档分组的图标必须打包进应用资源");
+        .expect("组件库的图标必须打包进应用资源");
     assert!(!icon.is_empty());
 }

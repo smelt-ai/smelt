@@ -47,12 +47,10 @@ use gpui::{
     StatefulInteractiveElement, Style, Styled, StyledImage, SvgSize, Task, Window, canvas, div,
     img, point, px, rgb, size,
 };
-use gpui_component::scroll::{ScrollableElement as _, ScrollbarAxis};
-use gpui_component::text::{
-    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, TextViewState, TextViewStyle,
-    markdown_ast,
+use gpui_base::text::{
+    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextViewStyle, markdown_ast,
 };
-use gpui_component::{ActiveTheme, WindowExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 use merman::svg::{
     DeterministicTextMeasurer, MeasurementProfileId, SvgPipeline, TextMeasurementPolicy,
     TextMeasurementProfile, TextMeasurementProfileIdentity, TextStyle,
@@ -64,6 +62,11 @@ use merman::{
 use sha2::{Digest, Sha256};
 
 use crate::IconAction as _;
+use crate::scrollbar::{Scrollbar, ScrollbarAxis};
+use crate::ui_theme;
+
+/// 调用方拿到的视图和它留住的解析状态。插件经这里拿，不直接认 gpui-base 的富文本模块。
+pub use gpui_base::text::{TextView, TextViewState};
 
 mod theme;
 
@@ -529,8 +532,7 @@ impl Render for MermaidPreview {
                     cx.notify();
                 }),
             )
-            .child(content)
-            .scrollbar(&self.scroll, ScrollbarAxis::Both);
+            .child(content);
 
         let measure = canvas(
             {
@@ -558,7 +560,7 @@ impl Render for MermaidPreview {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(cx.theme().muted_foreground)
+                            .text_color(rgb(ui_theme::muted()))
                             .children(scale.map(|scale| format!("{:.0}%", scale * 100.0))),
                     )
                     .child(
@@ -603,9 +605,16 @@ impl Render for MermaidPreview {
                     .overflow_hidden()
                     .rounded_md()
                     .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
+                    .border_color(ui_theme::hair())
+                    .bg(rgb(ui_theme::bg()))
                     .child(viewport)
+                    .child(
+                        div().absolute().inset_0().child(
+                            Scrollbar::new(&self.scroll)
+                                .id("mermaid-preview-scrollbar")
+                                .axis(ScrollbarAxis::Both),
+                        ),
+                    )
                     .child(measure),
             )
     }
@@ -613,15 +622,15 @@ impl Render for MermaidPreview {
 
 fn open_mermaid_preview(image: Arc<MermaidImage>, window: &mut Window, cx: &mut App) {
     let preview = cx.new(|cx| MermaidPreview::new(image, cx));
-    window.open_dialog(cx, move |dialog, window, _cx| {
+    crate::dialog::open(window, cx, move |card, window, _cx| {
         // 对话框会把宽高夹在窗口减去边距以内，这里只表达「尽量大」，不替它算边距。
         let viewport = window.viewport_size();
-        let preview = preview.clone();
-        crate::dialog::present(dialog)
-            .title("Mermaid 图表")
-            .width(viewport.width)
-            .h(viewport.height)
-            .content(move |content, _, _| content.min_h_0().child(preview.clone()))
+        card.w(viewport.width).h(viewport.height).child(
+            crate::dialog::content("Mermaid 图表", None)
+                .flex_1()
+                .min_h_0()
+                .child(preview.clone()),
+        )
     });
 }
 
@@ -1218,7 +1227,7 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
     let digest = source_digest(&data.source, &colors);
 
     if let Some(result) = MERMAID_RENDER_CACHE.with(|c| c.borrow().get(&digest).cloned()) {
-        return mermaid_result_element(result, &digest, &data.source, cx);
+        return mermaid_result_element(result, &digest, &data.source);
     }
 
     // 缓存未命中但已有在途任务 → 占位，等后台完成刷新后重渲染命中缓存。
@@ -1250,12 +1259,7 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
         .into_any_element()
 }
 
-fn mermaid_result_element(
-    result: MermaidRender,
-    digest: &str,
-    source: &str,
-    cx: &App,
-) -> AnyElement {
+fn mermaid_result_element(result: MermaidRender, digest: &str, source: &str) -> AnyElement {
     match result {
         MermaidRender::Ok(m) => {
             let preview = m.clone();
@@ -1282,13 +1286,13 @@ fn mermaid_result_element(
             .gap_1()
             .child(
                 div()
-                    .text_color(cx.theme().warning_foreground)
+                    .text_color(rgb(ui_theme::need()))
                     .child(format!("⚠ mermaid 渲染失败：{msg}")),
             )
             .child(
                 div()
                     .font_family(smelt_model::font_config::font_family())
-                    .text_color(cx.theme().foreground)
+                    .text_color(rgb(ui_theme::text()))
                     .child(source.to_string()),
             )
             .into_any_element(),
@@ -1304,7 +1308,32 @@ pub fn markdown_view(id: impl Into<ElementId>, text: impl Into<SharedString>) ->
     markdown_view_with_selection(id, text, true)
 }
 
-/// ACP 对话里的 Markdown：正文可框选复制，同时链接保持可点击——gpui-component
+/// 原样显示的纯文本（工具输出、diff 原文等），可框选复制。不解析 Markdown：转义后放进
+/// `<pre>`，按 HTML 渲染，样式和 Markdown 正文同一套色板。
+pub fn plain_text_view(id: impl Into<ElementId>, text: &str) -> TextView {
+    TextView::html(id, preformatted_html(text))
+        .selectable(true)
+        .style(text_view_style(gpui::StyleRefinement::default()))
+}
+
+fn preformatted_html(text: &str) -> String {
+    let mut html = String::with_capacity(text.len() + 11);
+    html.push_str("<pre>");
+    for ch in text.chars() {
+        match ch {
+            '&' => html.push_str("&amp;"),
+            '<' => html.push_str("&lt;"),
+            '>' => html.push_str("&gt;"),
+            '"' => html.push_str("&quot;"),
+            '\'' => html.push_str("&#39;"),
+            _ => html.push(ch),
+        }
+    }
+    html.push_str("</pre>");
+    html
+}
+
+/// ACP 对话里的 Markdown：正文可框选复制，同时链接保持可点击——gpui-base
 /// 的链接打开（MouseUp）会先检查是否已有文本选择，拖拽选择时不会误触链接，
 /// 因此打开 selectable 不会破坏链接点击。
 pub fn markdown_view_clickable(
@@ -1314,46 +1343,67 @@ pub fn markdown_view_clickable(
     markdown_view_with_selection(id, text, true)
 }
 
+/// smelt 的富文本样式，全部取自色板。显式给出，不走 gpui-base 的全局默认样式：全局默认由
+/// 组件库的主题适配器装，跟着组件库的 `Theme` 走，不是 smelt 的主题。
+///
+/// 围栏代码块的语法高亮用全局默认里的高亮器：tree-sitter 高亮器在组件库里，组件库装上时
+/// 一并装好。配色来自主题文件的 `syntax` 段，由应用的主题同步（`component_theme`）投影给
+/// 组件库，换主题时跟着换。smelt-ui 不依赖组件库，没装组件库时代码块不着色。
 fn markdown_text_view_style() -> TextViewStyle {
-    // 围栏代码块走 `cx.theme().highlight_theme` / `tokens.muted`。
-    // 行内 code 面积小，同样用卡片底会糊进正文，改用选中表面拉开对比。
+    // 右上角挂了语言名和复制按钮（见 `code_block_corner`），首行要让开它。
+    text_view_style(gpui::StyleRefinement::default().pt(px(28.)))
+}
+
+/// 两种富文本共用的色板样式；`code_block` 是各自对代码块的额外要求。
+fn text_view_style(code_block: gpui::StyleRefinement) -> TextViewStyle {
+    let radius = px(crate::kit::RADIUS.md);
+    let code_block = code_block.rounded(radius);
+    let table = gpui::StyleRefinement::default().rounded(radius);
+    let table_head = gpui::StyleRefinement::default()
+        .bg(rgb(ui_theme::soft()))
+        .text_color(rgb(ui_theme::text()));
+    // 行内 code 面积小，用代码块的底会糊进正文，改用悬停那档拉开对比。
     let inline_code = HighlightStyle {
-        background_color: Some(rgb(crate::ui_theme::soft_hover()).into()),
+        background_color: Some(rgb(ui_theme::soft_hover()).into()),
         ..Default::default()
     };
-    // 右上角挂了语言名和复制按钮（见 `code_block_corner`），首行要让开它，跟
-    // gpui-component 自带语言标签时的留白一致。
-    let code_block = gpui::StyleRefinement::default().pt(px(28.));
-    let mut style = TextViewStyle::default()
-        .inline_code(inline_code)
-        .code_block(code_block);
-    style.is_dark = !crate::ui_theme::is_light();
-    style
+    TextViewStyle::default()
+        .with_foreground(rgb(ui_theme::text()).into())
+        .with_muted_foreground(rgb(ui_theme::muted()).into())
+        .with_link(rgb(ui_theme::link()).into())
+        .with_selection(ui_theme::selection().into())
+        .with_code_background(rgb(ui_theme::soft()).into())
+        .with_border(ui_theme::hair().into())
+        .with_code_block(code_block)
+        .with_table(table)
+        .with_table_head(table_head)
+        .with_inline_code(inline_code)
+        .with_dark(!ui_theme::is_light())
 }
 
 /// 围栏代码块右上角：语言名 + 复制按钮。
 ///
-/// 一旦接了 `code_block_actions`，gpui-component 就不再画它自带的语言标签，所以
+/// 一旦接了 `code_block_actions`，gpui-base 就不再画它自带的语言标签，所以
 /// 语言名在这里一并画。按钮 id 用固定的 `"copy"` 即可：框架按代码块给 actions
 /// 套了一层带位置的 id，不同代码块之间不会撞。
 fn code_block_corner(
     code_block: &gpui_base::text::CodeBlock,
     _window: &mut Window,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> AnyElement {
     let lang = code_block.lang().filter(|lang| !lang.is_empty());
-    gpui_component::h_flex()
+    h_flex()
         .gap_1()
         .items_center()
         .children(lang.map(|lang| {
             div()
                 .px_1()
                 .text_xs()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(rgb(ui_theme::muted()))
                 .child(lang)
         }))
         .child(
-            gpui_component::clipboard::Clipboard::new("copy")
+            crate::Clipboard::new("copy")
                 .value(code_block.code())
                 .icon_action("复制代码"),
         )
@@ -1423,6 +1473,14 @@ fn chat_markdown_extensions() -> &'static MarkdownExtensions {
 mod tests {
     use super::*;
 
+    #[test]
+    fn preformatted_html_preserves_literal_tool_output() {
+        assert_eq!(
+            preformatted_html("# heading\n* item\n`code` <tag> & \"quoted\" 'single'"),
+            "<pre># heading\n* item\n`code` &lt;tag&gt; &amp; &quot;quoted&quot; &#39;single&#39;</pre>"
+        );
+    }
+
     /// 测试用的配色：库自带的兜底色板，不碰进程级的当前主题。
     fn colors(dark: bool) -> DiagramColors {
         DiagramColors::from_palette(&crate::ui_theme::builtin_fallback(!dark), !dark)
@@ -1448,7 +1506,10 @@ mod tests {
     /// 对话里的原始 HTML 原样显示：不认识的标签不吞内容，代码里不多出 `\`。
     #[gpui::test]
     fn chat_markdown_shows_raw_html_as_written(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            crate::init(cx);
+        });
         let source = "前 <section class=\"card\">内容</section> 和 <panel>\n\n\
                       <div>\n块里的字\n</div>\n\n\
                       1. 步骤\n   - 子项\n\n     ```rust\n     let v: Vec<String> = vec![];\n     ```\n";
@@ -1490,13 +1551,16 @@ mod tests {
     fn clicking_mermaid_opens_the_zoom_preview(cx: &mut gpui::TestAppContext) {
         use gpui::VisualTestContext;
 
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            crate::init(cx);
+        });
         let source = "```mermaid\nflowchart TD\nA-->B\n```";
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| ChatMarkdownRoot {
                 state: cx.new(|cx| TextViewState::markdown(source, cx)),
             });
-            gpui_component::Root::new(view, window, cx)
+            gpui_base::Root::new(view, window, cx)
         });
         let cx: &mut VisualTestContext = cx;
         cx.run_until_parked();
@@ -1521,7 +1585,7 @@ mod tests {
             let _ = window.draw(cx);
         });
         assert!(
-            cx.debug_bounds("dialog-layer").is_some(),
+            cx.update(|window, cx| crate::dialog::is_open(window, cx)),
             "点击图表后应打开带缩放控件的预览对话框"
         );
         assert!(cx.debug_bounds("MERMAID_PREVIEW_ZOOM_OUT").is_some());

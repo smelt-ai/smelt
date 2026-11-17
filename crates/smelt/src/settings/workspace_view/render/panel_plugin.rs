@@ -10,172 +10,149 @@ use crate::plugins::{InstalledPlugin, PluginSource};
 const DEMO_URL: &str = "https://github.com/smelt-ai/smelt-plugin-demo";
 
 pub(super) fn panel_plugin_page(
+    id: SharedString,
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
-) -> SettingPage {
+) -> SettingsPage {
     let state = &snapshot.panel_plugins;
-    let mut page = SettingPage::new("面板插件").resettable(false);
-    if let Some(error) = state.error.clone() {
-        page = page.group(
-            SettingGroup::new()
-                .title("上一次操作失败")
-                .item(SettingItem::render(move |_, _, cx: &mut App| {
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().danger)
-                        .child(error.clone())
-                        .into_any_element()
-                })),
-        );
-    }
-    page.group(list_group(entity, state))
-        .group(authoring_group())
+    SettingsPage::new(id)
+        .children(state.error.clone().map(|error| {
+            Section::new().title("上一次操作失败").child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(crate::ui_theme::bad()))
+                    .child(error),
+            )
+        }))
+        .child(list_section(entity, state))
+        .child(authoring_section())
 }
 
-/// 页面的主体：已装的插件。导入、打开目录、重新加载是对这张列表的操作，放在它的第一行。
-fn list_group(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> SettingGroup {
+/// 页面的主体：已装的插件。导入、打开目录、重新加载是对这张列表的操作，放在它的第一格。
+fn list_section(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> Section {
     let title = match state.plugins.len() {
         0 => "已装插件".to_string(),
         count => format!("已装 {count} 个"),
     };
-    let mut group = SettingGroup::new()
+    let section = Section::new()
         .title(title)
-        .description("每个插件是一个视图：摆进工作台布局的是面板，没摆进去的从侧栏当页面打开。")
-        .item(toolbar_item(entity.clone(), state))
-        // 页脚本身是小号字，这里只把颜色换成警告色：导入别人的插件等于给它整台机器的权限。
-        .footer(|_, cx| {
-            div().text_color(cx.theme().warning).child(
-                "插件和 Smelt 一样能读写任意文件、运行任意命令，只导入你信任的。\
-                 删除的插件挪进 ~/.smelt/trash/plugins，需要时能找回。",
-            )
-        });
+        .description("每个插件是一个视图：摆进工作台布局的是面板，没摆进去的打开时显示在主区域。")
+        .child(toolbar_cell(entity.clone(), state));
     if state.plugins.is_empty() {
-        return group.item(SettingItem::render(|_, _, cx: &mut App| {
+        return section.child(
             div()
                 .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("还没有插件。")
-                .into_any_element()
-        }));
+                .text_color(rgb(crate::ui_theme::muted()))
+                .child("还没有插件。"),
+        );
     }
-    for plugin in &state.plugins {
-        group = group.item(plugin_item(
+    section.children(state.plugins.iter().map(|plugin| {
+        plugin_row(
             entity.clone(),
             plugin,
             state.pending_delete.as_deref() == Some(plugin.id.as_str()),
             state.busy,
-        ));
-    }
-    group
+        )
+    }))
 }
 
-/// 列表第一行：左边说明导入会做什么，右边三个操作，导入是唯一的主按钮。
-fn toolbar_item(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> SettingItem {
+/// 列表第一格：左边说明导入会做什么，右边三个操作，导入是唯一的主按钮；下面一句警告。
+fn toolbar_cell(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> Div {
     let user_dir = state
         .user_dir
         .as_ref()
         .map(|dir| dir.display().to_string())
         .unwrap_or_default();
     let busy = state.busy;
-    SettingItem::new(
-        "导入",
-        SettingField::render(move |_, _, _| {
-            let import_entity = entity.clone();
-            let open_entity = entity.clone();
-            let reload_entity = entity.clone();
-            h_flex()
-                .gap_1()
-                .items_center()
-                .child(
-                    Button::new("reload-panel-plugins")
-                        .quiet()
-                        .small()
-                        .label("重新加载")
-                        .disabled(busy)
-                        .on_click(move |_, _, cx| {
-                            reload_entity.update(cx, |workspace, cx| {
-                                workspace.reload_panel_plugins(cx);
-                            });
-                        }),
-                )
-                .child(
-                    Button::new("open-panel-plugin-dir")
-                        .quiet()
-                        .small()
-                        .label("打开插件目录")
-                        .on_click(move |_, _, cx| {
-                            open_entity.update(cx, |workspace, cx| {
-                                workspace.open_panel_plugin_dir(cx);
-                            });
-                        }),
-                )
-                .child(
-                    Button::new("import-panel-plugin")
-                        .small()
-                        .label("导入插件…")
-                        .loading(busy)
-                        .disabled(busy)
-                        .on_click(move |_, _, cx| {
-                            import_entity.update(cx, |workspace, cx| {
-                                workspace.import_panel_plugin(cx);
-                            });
-                        }),
-                )
-                .into_any_element()
-        }),
-    )
-    .description(format!(
-        "选一个含 gpui-shell.json 的目录，复制进 {user_dir}；改了脚本点「重新加载」，不用重启。"
-    ))
+    let import_entity = entity.clone();
+    let open_entity = entity.clone();
+    let reload_entity = entity;
+    let row = Row::new("导入")
+        .description(format!(
+            "选一个含 gpui-shell.json 的目录，复制进 {user_dir}；改了脚本点「重新加载」，不用重启。"
+        ))
+        .child(
+            Button::new("reload-panel-plugins")
+                .quiet()
+                .small()
+                .label("重新加载")
+                .disabled(busy)
+                .on_click(move |_, _, cx| {
+                    reload_entity.update(cx, |workspace, cx| {
+                        workspace.reload_panel_plugins(cx);
+                    });
+                }),
+        )
+        .child(
+            Button::new("open-panel-plugin-dir")
+                .quiet()
+                .small()
+                .label("打开插件目录")
+                .on_click(move |_, _, cx| {
+                    open_entity.update(cx, |workspace, cx| {
+                        workspace.open_panel_plugin_dir(cx);
+                    });
+                }),
+        )
+        .child(
+            Button::new("import-panel-plugin")
+                .small()
+                .label("导入插件…")
+                .loading(busy)
+                .disabled(busy)
+                .on_click(move |_, _, cx| {
+                    import_entity.update(cx, |workspace, cx| {
+                        workspace.import_panel_plugin(cx);
+                    });
+                }),
+        );
+    // 用警告色：导入别人的插件等于给它整台机器的权限。
+    let warning = div()
+        .text_xs()
+        .text_color(rgb(crate::ui_theme::need()))
+        .child(
+            "插件和 Smelt 一样能读写任意文件、运行任意命令，只导入你信任的。\
+             删除的插件挪进 ~/.smelt/trash/plugins，需要时能找回。",
+        );
+    div().flex().flex_col().gap_2().child(row).child(warning)
 }
 
 /// 给插件作者看的：示例和日志。放在最后，不跟装插件的人抢位置。
-fn authoring_group() -> SettingGroup {
-    SettingGroup::new().title("自己写插件").item(
-        SettingItem::new(
-            "示例和教程",
-            SettingField::render(|_, _, _| {
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .child(
-                        Button::new("open-panel-plugin-log")
-                            .quiet()
-                            .small()
-                            .label("打开日志")
-                            .on_click(|_, _, _| {
-                                let opened = smelt_sys::app_log::log_path()
-                                    .ok_or_else(|| "找不到日志文件".to_string())
-                                    .and_then(|path| {
-                                        crate::system_open::open_in_system_text_editor(&path)
-                                    });
-                                if let Err(error) = opened {
-                                    crate::status_item::notify_error(error);
-                                }
-                            }),
-                    )
-                    .child(
-                        gpui_component::link::Link::new("open-panel-plugin-demo")
-                            .href(DEMO_URL)
-                            .text_sm()
-                            .child("示例和教程 ↗"),
-                    )
-                    .into_any_element()
-            }),
-        )
-        .description(
-            "gpui-shell 脚本：JavaScript 描述界面，GPUI 原生绘制。console.log 和脚本错误写进日志，\
-             带 [plugin] 标记。",
-        ),
+fn authoring_section() -> Section {
+    Section::new().title("自己写插件").child(
+        Row::new("示例和教程")
+            .description(
+                "gpui-shell 脚本：JavaScript 描述界面，GPUI 原生绘制。console.log 和脚本错误写进日志，\
+                 带 [plugin] 标记。",
+            )
+            .child(
+                Button::new("open-panel-plugin-log")
+                    .quiet()
+                    .small()
+                    .label("打开日志")
+                    .on_click(|_, _, _| {
+                        let opened = smelt_sys::app_log::log_path()
+                            .ok_or_else(|| "找不到日志文件".to_string())
+                            .and_then(|path| crate::system_open::open_in_system_text_editor(&path));
+                        if let Err(error) = opened {
+                            crate::status_item::notify_error(error);
+                        }
+                    }),
+            )
+            .child(
+                smelt_ui::Link::new("open-panel-plugin-demo", DEMO_URL)
+                    .text_sm()
+                    .child("示例和教程 ↗"),
+            ),
     )
 }
 
-fn plugin_item(
+fn plugin_row(
     entity: Entity<Workspace>,
     plugin: &InstalledPlugin,
     pending: bool,
     busy: bool,
-) -> SettingItem {
+) -> Row {
     let id = plugin.id.clone();
     let removable = plugin.source == PluginSource::User;
 
@@ -195,60 +172,51 @@ fn plugin_item(
         detail.push(format!("加载失败：{error}"));
     }
 
-    SettingItem::new(
-        plugin.name.clone(),
-        SettingField::render(move |_, _, _| {
-            if !removable {
-                return div().into_any_element();
-            }
-            let request_entity = entity.clone();
-            let confirm_entity = entity.clone();
-            let cancel_entity = entity.clone();
-            let id_for_request = id.clone();
-            let id_for_confirm = id.clone();
-            if pending {
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new(format!("confirm-delete-panel-plugin-{id}"))
-                            .danger()
-                            .small()
-                            .label("确认删除")
-                            .disabled(busy)
-                            .on_click(move |_, _, cx| {
-                                let id = id_for_confirm.clone();
-                                confirm_entity.update(cx, |workspace, cx| {
-                                    workspace.confirm_panel_plugin_delete(id, cx);
-                                });
-                            }),
-                    )
-                    .child(
-                        Button::new(format!("cancel-delete-panel-plugin-{id}"))
-                            .quiet()
-                            .small()
-                            .label("取消")
-                            .on_click(move |_, _, cx| {
-                                cancel_entity.update(cx, |workspace, cx| {
-                                    workspace.cancel_panel_plugin_delete(cx);
-                                });
-                            }),
-                    )
-                    .into_any_element()
-            } else {
-                Button::new(format!("delete-panel-plugin-{id}"))
-                    .quiet()
-                    .small()
-                    .label("删除…")
-                    .disabled(busy)
-                    .on_click(move |_, _, cx| {
-                        let id = id_for_request.clone();
-                        request_entity.update(cx, |workspace, cx| {
-                            workspace.request_panel_plugin_delete(id, cx);
-                        });
-                    })
-                    .into_any_element()
-            }
-        }),
-    )
-    .description(detail.join("\n"))
+    let row = Row::new(plugin.name.clone()).description(detail.join("\n"));
+    if !removable {
+        return row;
+    }
+    if pending {
+        let confirm_entity = entity.clone();
+        let cancel_entity = entity;
+        let confirm_id = id.clone();
+        row.child(
+            Button::new(format!("confirm-delete-panel-plugin-{id}"))
+                .danger()
+                .small()
+                .label("确认删除")
+                .disabled(busy)
+                .on_click(move |_, _, cx| {
+                    let id = confirm_id.clone();
+                    confirm_entity.update(cx, |workspace, cx| {
+                        workspace.confirm_panel_plugin_delete(id, cx);
+                    });
+                }),
+        )
+        .child(
+            Button::new(format!("cancel-delete-panel-plugin-{id}"))
+                .quiet()
+                .small()
+                .label("取消")
+                .on_click(move |_, _, cx| {
+                    cancel_entity.update(cx, |workspace, cx| {
+                        workspace.cancel_panel_plugin_delete(cx);
+                    });
+                }),
+        )
+    } else {
+        row.child(
+            Button::new(format!("delete-panel-plugin-{id}"))
+                .quiet()
+                .small()
+                .label("删除…")
+                .disabled(busy)
+                .on_click(move |_, _, cx| {
+                    let id = id.clone();
+                    entity.update(cx, |workspace, cx| {
+                        workspace.request_panel_plugin_delete(id, cx);
+                    });
+                }),
+        )
+    }
 }

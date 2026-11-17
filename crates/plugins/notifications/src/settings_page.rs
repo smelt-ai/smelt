@@ -3,15 +3,14 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use api::ui::{Button, Switch};
+use api::ui::IconName;
+use api::ui::{Button, SettingsPage, SettingsRow, SettingsSection, Switch, ui_theme};
 use api::{
     HostEvent, NotificationPermission, PluginView, SettingsEntry, SettingsGroup, ViewHandle,
     ViewSpec,
 };
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, SharedString, Window, div, px};
-use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
-use gpui_component::{ActiveTheme as _, IconName, IconNamed as _, h_flex};
+use gpui::{AnyElement, App, Context, SharedString, Window, div, px, rgb};
 use smelt_plugin_api as api;
 
 use crate::store::Prefs;
@@ -76,62 +75,71 @@ impl PluginView for NotifySettings {
 }
 
 impl Render for NotifySettings {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let prefs = self.plugin.borrow().prefs;
         let switch = |label: &'static str,
                       description: Option<&'static str>,
                       get: fn(&Prefs) -> bool,
                       set: fn(&mut Prefs, bool)| {
-            let read = self.plugin.clone();
             let write = self.plugin.clone();
-            let item = SettingItem::new(
-                label,
-                SettingField::render(move |_, _, _| {
-                    let write = write.clone();
-                    Switch::new(label)
-                        .checked(get(&read.borrow().prefs))
-                        .accessibility_label(label)
-                        .on_change(move |value, window, _| {
-                            let mut plugin = write.borrow_mut();
-                            set(&mut plugin.prefs, value);
-                            let prefs = plugin.prefs;
-                            plugin.store.save_prefs(prefs);
-                            window.refresh();
-                        })
-                }),
+            let row = SettingsRow::new(label).child(
+                Switch::new(label)
+                    .checked(get(&prefs))
+                    .accessibility_label(label)
+                    .on_change(move |value, window, _| {
+                        let mut plugin = write.borrow_mut();
+                        set(&mut plugin.prefs, value);
+                        let prefs = plugin.prefs;
+                        plugin.store.save_prefs(prefs);
+                        window.refresh();
+                    }),
             );
             match description {
-                Some(description) => item.description(description),
-                None => item,
+                Some(description) => row.description(description),
+                None => row,
             }
         };
-        // 系统授权放在最前面：没授权的话下面怎么开都弹不出来。页名在设置的工具栏里，组件库
-        // 的页头不画，状态不能挂在标题旁。
-        let page = SettingPage::new("通知")
-            .group(
-                SettingGroup::new()
+        // 系统授权放在最前面：没授权的话下面怎么开都弹不出来。
+        SettingsPage::new("notifications-settings")
+            .child(
+                SettingsSection::new()
                     .title("系统通知")
-                    .item(SettingItem::render(|_, _, cx: &mut App| {
-                        permission_status(cx)
-                    })),
+                    .child(permission_status(cx)),
             )
-            .group(SettingGroup::new().title("Agent 什么时候叫你").items(vec![
-                switch("等待批准", None, |p| p.approval, |p, v| p.approval = v),
-                switch(
-                    "等待输入",
-                    Some("提问或等你继续时"),
-                    |p| p.input,
-                    |p, v| p.input = v,
-                ),
-                switch("任务完成", None, |p| p.success, |p, v| p.success = v),
-                switch("任务失败", None, |p| p.failure, |p, v| p.failure = v),
-            ]))
-            .group(SettingGroup::new().title("终端").item(switch(
+            .child(
+                SettingsSection::new()
+                    .title("Agent 什么时候叫你")
+                    .child(switch(
+                        "等待批准",
+                        None,
+                        |p| p.approval,
+                        |p, v| p.approval = v,
+                    ))
+                    .child(switch(
+                        "等待输入",
+                        Some("提问或等你继续时"),
+                        |p| p.input,
+                        |p, v| p.input = v,
+                    ))
+                    .child(switch(
+                        "任务完成",
+                        None,
+                        |p| p.success,
+                        |p, v| p.success = v,
+                    ))
+                    .child(switch(
+                        "任务失败",
+                        None,
+                        |p| p.failure,
+                        |p, v| p.failure = v,
+                    )),
+            )
+            .child(SettingsSection::new().title("终端").child(switch(
                 "响铃",
                 Some("终端输出 BEL 时提醒"),
                 |p| p.bell,
                 |p, v| p.bell = v,
-            )));
-        api::settings_pane("notifications-settings", page)
+            )))
     }
 }
 
@@ -146,16 +154,16 @@ fn permission_status(cx: &mut App) -> AnyElement {
         };
         return div()
             .text_sm()
-            .text_color(cx.theme().muted_foreground)
+            .text_color(rgb(ui_theme::muted()))
             .child(text)
             .into_any_element();
     };
-    let color = match line.severity {
-        Severity::Ok => cx.theme().success,
-        Severity::Error => cx.theme().danger,
-        Severity::Warning => cx.theme().warning,
-        Severity::Info => cx.theme().muted_foreground,
-    };
+    let color = rgb(match line.severity {
+        Severity::Ok => ui_theme::ok(),
+        Severity::Error => ui_theme::bad(),
+        Severity::Warning => ui_theme::need(),
+        Severity::Info => ui_theme::muted(),
+    });
     let fix = line.fix.map(|fix| {
         let (id, label, command) = match fix {
             Fix::Request => (
@@ -183,8 +191,10 @@ fn permission_status(cx: &mut App) -> AnyElement {
             })
     });
     // 卡片里的一行：状态在左，处理它的按钮在右，跟别的设置项的「名字左、控件右」一致。
-    h_flex()
+    div()
+        .flex()
         .w_full()
+        .min_h(px(28.))
         .items_center()
         .gap_2()
         .child(div().flex_none().size(px(6.)).rounded_full().bg(color))

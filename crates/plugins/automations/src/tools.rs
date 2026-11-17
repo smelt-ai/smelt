@@ -1,7 +1,7 @@
 //! 执行过程里一次工具调用的样子：动词句和图标。照对话视图的写法，运行详情和现场读起来一致。
 
 use api::model::acp_chat::ToolKind;
-use gpui_component::{Icon, IconName};
+use api::ui::{Icon, IconName};
 use smelt_plugin_api as api;
 
 /// 时间线上单条工具的动词句。
@@ -31,14 +31,14 @@ pub(crate) fn process_icon(kind: &ToolKind) -> Icon {
         ToolKind::Search => IconName::Search.into(),
         ToolKind::Execute => IconName::SquareTerminal.into(),
         ToolKind::Read | ToolKind::Move | ToolKind::Image => IconName::File.into(),
-        ToolKind::Edit => Icon::empty().path("smelt-icons/square-pen.svg"),
-        ToolKind::Delete => Icon::empty().path("smelt-icons/trash.svg"),
+        ToolKind::Edit => Icon::path("smelt-icons/square-pen.svg"),
+        ToolKind::Delete => Icon::path("smelt-icons/trash.svg"),
         ToolKind::Collaborate => IconName::Bot.into(),
         ToolKind::Review | ToolKind::Compact | ToolKind::Think | ToolKind::SwitchMode => {
             IconName::Asterisk.into()
         }
-        ToolKind::Wait => Icon::new(gpui_kit_assets::IconName::Clock),
-        ToolKind::Other => Icon::new(gpui_kit_assets::IconName::Wrench),
+        ToolKind::Wait => Icon::new(IconName::Clock),
+        ToolKind::Other => Icon::new(IconName::Wrench),
     }
 }
 

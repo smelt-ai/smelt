@@ -77,12 +77,17 @@ impl Render for OutletView {
                 _ => api::built_view(&id, cx).map(|view| view.view()),
             }
         });
+        // 空着又贴着窗口顶：顶上那条归它，至少留一条能拖窗口的顶带。
+        let area = api::safe_area(cx.entity_id(), cx);
+        let empty_bar = (content.is_none() && area.title_bar)
+            .then(|| smelt_ui::window_bar::window_bar("outlet-empty-bar", &area));
         div()
             .size_full()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
+            .children(empty_bar)
             .children(content)
     }
 }

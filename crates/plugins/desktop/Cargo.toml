@@ -5,6 +5,8 @@
 name = "smelt-desktop"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
@@ -19,3 +21,5 @@ gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f
 wry = { package = "lb-wry", version = "0.53.3" }
 # 页面消息从网页视图的回调线程送回 UI 线程；要打到远端的文字排队逐段发。
 smol = "2"
+# 照抄别的插件的约定（命令参数、菜单上下文）要按同样的 JSON 形状收发。
+serde = { version = "1", features = ["derive"] }

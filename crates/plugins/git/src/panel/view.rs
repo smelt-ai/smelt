@@ -3,7 +3,7 @@
 //! 只组 UI。写缓存、跑 git、改面板字段的方法留在 `ops.rs`，由按钮 listener 调用。
 
 use super::*;
-use gpui_component::tab::{Tab, TabBar};
+use smelt_plugin_api::ui::Segmented;
 
 /// 一个会丢东西的操作的确认框写什么。
 pub(super) struct DangerConfirm {
@@ -115,7 +115,9 @@ impl GitPanel {
 
         let Some(project) = self.active_project_ref(cx) else {
             let (title, hint) = ("没有项目", "打开一个项目后再看更改".to_string());
-            return v_flex()
+            return div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_h_0()
                 .child(
@@ -219,16 +221,15 @@ impl GitPanel {
             .unwrap_or_else(|| active_repo.root.clone());
         let ws_log_repo = cx.entity();
 
-        let view_tabs = TabBar::new("git-view-tabs")
-            .underline()
-            .xsmall()
-            .selected_index(match self.git_tab {
+        let view_tabs = Segmented::new("git-view-tabs")
+            .segments(["更改", "历史"])
+            .selected(Some(match self.git_tab {
                 GitTab::Changes => 0,
                 GitTab::Log => 1,
-            })
-            .on_click(move |ix, _window, cx| {
+            }))
+            .on_select(move |ix, _window, cx| {
                 tab_view.update(cx, |workspace, cx| {
-                    let tab = if *ix == 0 {
+                    let tab = if ix == 0 {
                         GitTab::Changes
                     } else {
                         GitTab::Log
@@ -242,19 +243,19 @@ impl GitPanel {
                     }
                     cx.notify();
                 });
-            })
-            .child(Tab::new().label("更改"))
-            .child(Tab::new().label("历史"));
+            });
         let scope_view = cx.entity();
-        let scope_control = Button::new("git-diff-scope")
+        let scope_button = Button::new("git-diff-scope")
             .quiet()
             .small()
             .label(self.diff_scope.label())
-            .dropdown_caret(true)
-            .dropdown_menu(move |mut menu, _window, _cx| {
+            .dropdown_caret(true);
+        let scope_control =
+            MenuTrigger::dropdown("git-diff-scope-menu", scope_button, move |_window, _cx| {
+                let mut menu = Menu::new();
                 for scope in [DiffScope::All, DiffScope::Staged, DiffScope::Unstaged] {
                     let view = scope_view.clone();
-                    menu = menu.item(PopupMenuItem::new(scope.label()).on_click(
+                    menu = menu.item(MenuItem::new(scope.label()).on_click(
                         move |_event, _window, cx| {
                             view.update(cx, |workspace, cx| {
                                 workspace.set_diff_scope(scope, cx);
@@ -267,7 +268,7 @@ impl GitPanel {
         // 改动 / 历史是长期可见的同级视图，不属于操作菜单；与标题合并到同一行，
         // 避免旧的第二条 tab 栏挤压本就有限的 Git 内容高度。页签条铺满这一行，
         // 它自己的底线就是分隔线；作用范围、仓库、同步这些操作收在右侧。
-        let actions = h_flex()
+        let actions = div().flex().items_center()
             .gap_2()
             .when(self.git_tab == GitTab::Changes, |bar| {
                 bar.child(scope_control)
@@ -275,57 +276,73 @@ impl GitPanel {
             // 历史是"某个仓库的历史"。多仓工作区里不写明是谁的，看到的提交
             // 就完全没法对应到项目里的哪一块。
             .when(self.git_tab == GitTab::Log && repo_choices.len() > 1, |bar| {
-                bar.child(
+                bar.child(MenuTrigger::dropdown(
+                    "git-log-repo-menu",
                     Button::new("git-log-repo")
                         .quiet()
                         .small()
                         .label(active_repo_label)
-                        .dropdown_caret(true)
-                        .dropdown_menu(move |mut menu, _window, _cx| {
-                            for (label, repo_root) in repo_choices.clone() {
-                                let ws = ws_log_repo.clone();
-                                menu = menu.item(PopupMenuItem::new(label).on_click(
-                                    move |_ev, _window, cx| {
-                                        let root = repo_root.clone();
-                                        ws.update(cx, |workspace, cx| {
-                                            workspace.set_active_git_repo(root, cx);
-                                        });
-                                    },
-                                ));
-                            }
-                            menu
-                        }),
-                )
+                        .dropdown_caret(true),
+                    move |_window, _cx| {
+                        let mut menu = Menu::new();
+                        for (label, repo_root) in repo_choices.clone() {
+                            let ws = ws_log_repo.clone();
+                            menu = menu.item(MenuItem::new(label).on_click(
+                                move |_ev, _window, cx| {
+                                    let root = repo_root.clone();
+                                    ws.update(cx, |workspace, cx| {
+                                        workspace.set_active_git_repo(root, cx);
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    },
+                ))
             })
             // 历史页还没有分仓概念，仍用当前目标仓库的操作菜单；改动页的操作
             // 已经下放到每个仓库自己那一行，这里不再摆一个"作用于谁不明确"的全局按钮。
             .when(self.git_tab == GitTab::Log, |bar| {
-                bar.child(
+                bar.child(MenuTrigger::dropdown(
+                    "git-sync-menu-popup",
                     Button::new("git-sync-menu")
                         .quiet()
                         .small()
                         .label(sync_label)
                         .dropdown_caret(busy.is_none())
                         .font_family(crate::mono_font())
-                        .text_color(sync_color)
-                        .dropdown_menu(move |menu, _window, _cx| {
-                            git_ops_menu_items(
-                                menu,
-                                ws_ops.clone(),
-                                root_ops.clone(),
-                                ahead,
-                                behind,
-                                stash_n,
-                                has_changes,
-                                upstream,
-                            )
-                        }),
-                )
+                        .text_color(sync_color),
+                    move |_window, _cx| {
+                        git_ops_menu_items(
+                            ws_ops.clone(),
+                            root_ops.clone(),
+                            ahead,
+                            behind,
+                            stash_n,
+                            has_changes,
+                            upstream,
+                        )
+                    },
+                ))
             });
-        let header = view_tabs.w_full().flex_shrink_0().px_3().suffix(actions);
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .w_full()
+            .flex_shrink_0()
+            .px_3()
+            .py_1p5()
+            .border_b_1()
+            .border_color(crate::ui_theme::hair())
+            .child(view_tabs)
+            .child(actions);
 
         if self.git_tab == GitTab::Log {
-            return v_flex()
+            return div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_h_0()
                 .child(header)
@@ -553,7 +570,9 @@ impl GitPanel {
                                 // 虚拟列表用 layout_as_root 排每一行，只给可用宽度、不强制
                                 // 行宽：行根没有显式宽度就按内容收缩，提交框会被挤成一个字宽。
                                 // 在这里统一撑满列宽，各类行不用各自记得加 w_full。
-                                v_flex()
+                                div()
+                                    .flex()
+                                    .flex_col()
                                     .w_full()
                                     .child(render_narrow_git_row(
                                         &rows[ix],
@@ -569,13 +588,15 @@ impl GitPanel {
                     .size_full()
                     .track_scroll(&self.git_list_scroll),
                 )
-                .vertical_scrollbar(&self.git_list_scroll)
+                .child(Scrollbar::vertical(&self.git_list_scroll).id("narrow-git-list-scrollbar"))
                 .into_any_element()
         };
         // 发现被上限截断时必须说清楚。默不作声会让用户以为没列出来的仓库
         // 没改动，而事实是根本没看。
         let list: AnyElement = if repo_set.as_ref().is_some_and(|set| set.truncated) {
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_h_0()
                 .child(list)
@@ -592,7 +613,9 @@ impl GitPanel {
             list
         };
 
-        let list_and_commit = v_flex()
+        let list_and_commit = div()
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .pt_2()
@@ -620,7 +643,7 @@ impl GitPanel {
             } else {
                 "没有文件更改"
             };
-            let diff_pane = self.git_diff_pane(empty_hint, cx);
+            let diff_pane = self.git_diff_pane(empty_hint);
             div()
                 .flex_1()
                 .relative()
@@ -654,7 +677,9 @@ impl GitPanel {
                 .into_any_element()
         };
 
-        v_flex()
+        div()
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .child(header)

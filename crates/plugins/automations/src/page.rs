@@ -11,14 +11,12 @@
 //! render 只读内存：投影变了（[`AutomationStore`]）在事件里对账——要看的自动化没了就退回
 //! 目录、选中的运行没了就取消选中、选中运行的落库内容过期了就排后台读取。
 
-use api::model::agent_definition::AgentDefinition;
-use api::{EmbeddedConversation, HostEvent, PluginView};
+use api::{HostEvent, PluginView, ViewInstance};
 
+use crate::agents::AgentCache;
+use crate::peers::conversation::{self, ConversationArgs};
 use crate::prelude::*;
 use crate::projection::AutomationStore;
-
-/// 智能体页的视图 id，由「智能体」插件登记；没装就不给去那里的入口。
-pub(crate) const AGENTS_VIEW_ID: &str = api::contracts::agents::VIEW;
 
 /// 某台机器上的一条自动化：两台机器上同 id 的自动化是两回事。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -48,8 +46,8 @@ pub(crate) struct AutomationsPage {
     /// 在看的那条自动化；`None` 是目录。
     pub(crate) route: Option<AutomationRef>,
     pub(crate) editor: Option<AutomationEditor>,
-    /// 选中运行的现场：守护里还在跑的那段会话，由宿主嵌进来。
-    pub(crate) live: Option<EmbeddedConversation>,
+    /// 选中运行的现场：守护里还在跑的那段会话，由对话插件的实例视图画。
+    pub(crate) live: Option<LiveRun>,
     pub(crate) error: Option<String>,
     pub(crate) catalog_tab: AutomationCatalogTab,
     pub(crate) template_filter: Option<crate::templates::AutomationTemplateCategory>,
@@ -70,6 +68,7 @@ impl AutomationsPage {
                 this.reconcile(window, cx);
                 cx.notify();
             }),
+            cx.observe_global::<AgentCache>(|_, cx| cx.notify()),
             cx.subscribe_in(
                 &api::events(cx),
                 window,
@@ -78,7 +77,12 @@ impl AutomationsPage {
                         this.reconcile(window, cx);
                         cx.notify();
                     }
-                    HostEvent::AgentSettingsChanged | HostEvent::ViewsChanged => cx.notify(),
+                    // 对话插件登记上了（冷启动时可能晚于本插件）或撤下了：补建、扔掉现场。
+                    HostEvent::ViewsChanged => {
+                        this.sync_live_view(window, cx);
+                        this.reconcile(window, cx);
+                        cx.notify();
+                    }
                     _ => {}
                 },
             ),
@@ -151,13 +155,84 @@ impl AutomationsPage {
         }
     }
 
-    /// 这次运行的现场正嵌着。
+    /// 这次运行的现场正嵌着。对话插件没装时没有现场，看落库内容。
     pub(crate) fn shows_live(&self, run: &api::model::automation::AutomationRun) -> bool {
+        self.live_view_for(run).is_some()
+    }
+
+    /// 这次运行的现场视图；没有现场、对话插件没装是 `None`。
+    pub(crate) fn live_view_for(
+        &self,
+        run: &api::model::automation::AutomationRun,
+    ) -> Option<&ViewInstance> {
+        let session_id = run.session_id.as_deref()?;
+        self.live
+            .as_ref()
+            .filter(|live| live.args.session_id == session_id)?
+            .view
+            .as_ref()
+    }
+
+    /// 这次运行有现场，但对话插件没登记，画不出来。
+    pub(crate) fn lacks_conversation_view(
+        &self,
+        run: &api::model::automation::AutomationRun,
+    ) -> bool {
         run.session_id.as_deref().is_some_and(|session_id| {
             self.live
                 .as_ref()
-                .is_some_and(|live| live.session_id == session_id)
+                .is_some_and(|live| live.args.session_id == session_id && live.view.is_none())
         })
+    }
+
+    /// 现场跟着对话视图的登记走：登记上了补建，撤下了扔掉（旧实例不再有人维护）。
+    fn sync_live_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        if !api::is_registered(conversation::VIEW, cx) {
+            live.view = None;
+        } else if live.view.is_none() {
+            match LiveRun::build(&live.args, window, cx) {
+                Ok(view) => live.view = view,
+                Err(error) => {
+                    self.live = None;
+                    self.error = Some(error);
+                }
+            }
+        }
+    }
+}
+
+/// 一次运行的现场：按这些参数建的对话实例。
+pub(crate) struct LiveRun {
+    pub(crate) args: ConversationArgs,
+    /// 对话插件没登记（没装、冷启动还没登记上）时是 `None`，等 `HostEvent::ViewsChanged`。
+    pub(crate) view: Option<ViewInstance>,
+}
+
+impl LiveRun {
+    /// 按参数建现场。对话插件没登记是 `Ok(None)`。
+    pub(crate) fn start(
+        args: ConversationArgs,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Self, String> {
+        let view = Self::build(&args, window, cx)?;
+        Ok(Self { args, view })
+    }
+
+    fn build(
+        args: &ConversationArgs,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Option<ViewInstance>, String> {
+        if !api::is_registered(conversation::VIEW, cx) {
+            return Ok(None);
+        }
+        let args = api::serde_json::to_value(args)
+            .map_err(|error| format!("现场的参数转不成 JSON：{error}"))?;
+        api::create_view(conversation::VIEW, &args, window, cx).map(Some)
     }
 }
 
@@ -265,14 +340,6 @@ pub(crate) fn client_for(
         .ok_or_else(|| api::MACHINE_REMOVED.to_string())
 }
 
-/// 那台机器上的智能体；配置还没读到是空的。
-pub(crate) fn agents_on<'a>(machine: &RuntimeKey, cx: &'a App) -> &'a [AgentDefinition] {
-    api::host(cx)
-        .agent_settings(machine, cx)
-        .map(|settings| settings.agents.as_slice())
-        .unwrap_or_default()
-}
-
 pub(crate) fn agent_definition<'a>(
     machine: &RuntimeKey,
     agent_id: &str,
@@ -286,7 +353,7 @@ pub(crate) fn agent_definition<'a>(
 /// 去智能体页，停在那台机器上。
 pub(crate) fn open_agents_view(machine: &RuntimeKey, cx: &mut App) {
     let open = api::OpenView {
-        view: AGENTS_VIEW_ID.to_string(),
+        view: crate::peers::agents::VIEW.to_string(),
         args: api::serde_json::json!({ "machine": api::machine_to_json(machine) }),
     };
     let task = api::OPEN_VIEW.run(&open, cx);

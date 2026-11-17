@@ -204,10 +204,10 @@ pub(crate) fn automation_row_status_label(status: AutomationRowStatus) -> &'stat
 }
 
 /// 「启用」不用 Play：同一个菜单里「运行一次」已经是 Play。
-pub(crate) fn automation_enabled_toggle_item(enabled: bool) -> PopupMenuItem {
+pub(crate) fn automation_enabled_toggle_item(enabled: bool) -> MenuItem {
     if enabled {
-        PopupMenuItem::new("暂停").icon(IconName::Pause)
+        MenuItem::new("暂停").icon(IconName::Pause)
     } else {
-        PopupMenuItem::new("启用").icon(IconName::CircleCheck)
+        MenuItem::new("启用").icon(IconName::CircleCheck)
     }
 }

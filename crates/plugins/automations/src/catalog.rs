@@ -39,6 +39,7 @@ impl AutomationsPage {
                     }),
             )
             .child(machine_picking_button(
+                "automations-add-menu",
                 Button::new("automations-add")
                     .icon(IconName::Plus)
                     .label("新建自动化"),
@@ -273,10 +274,7 @@ impl AutomationsPage {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(neutral_icon_mark(
-                    Icon::new(gpui_kit_assets::IconName::Workflow),
-                    28.,
-                ))
+                .child(neutral_icon_mark(Icon::new(IconName::Workflow), 28.))
                 .child(
                     div()
                         .flex_1()
@@ -572,78 +570,84 @@ pub(crate) fn render_automation_row_menu(
     let view_entity = entity.clone();
     let delete_entity = entity.clone();
     let cancel_entity = entity;
-    Button::new(format!(
-        "automation-row-more-{}-{}",
-        runtime_element_key(&target.runtime),
-        target.id
-    ))
-    .quiet()
-    .small()
-    .icon(IconName::Ellipsis)
-    .accessibility_label("更多操作")
-    .dropdown_menu(move |mut menu, _, _| {
-        if let Some(active_run_id) = cancel_run_id.clone() {
-            let entity = cancel_entity.clone();
-            let runtime = runtime.clone();
-            menu = menu.item(PopupMenuItem::new("停止").icon(IconName::Close).on_click(
-                move |_, _, cx| {
-                    let run_id = active_run_id.clone();
-                    entity.update(cx, |page, cx| {
-                        page.cancel_automation_run(&runtime, run_id, cx);
-                    });
-                },
-            ));
-        } else {
-            let entity = run_entity.clone();
-            let id = run_id.clone();
-            menu = menu.item(
-                PopupMenuItem::new("运行一次")
-                    .icon(IconName::Play)
-                    .disabled(!can_run)
-                    .on_click(move |_, _, cx| {
-                        let id = id.clone();
+    let key = format!("{}-{}", runtime_element_key(&target.runtime), target.id);
+    let trigger = Button::new(format!("automation-row-more-{key}"))
+        .quiet()
+        .small()
+        .icon(IconName::Ellipsis)
+        .accessibility_label("更多操作");
+    MenuTrigger::dropdown(
+        format!("automation-row-more-menu-{key}"),
+        trigger,
+        move |_, _| {
+            let mut menu = Menu::new();
+            if let Some(active_run_id) = cancel_run_id.clone() {
+                let entity = cancel_entity.clone();
+                let runtime = runtime.clone();
+                menu = menu.item(
+                    MenuItem::new("停止")
+                        .icon(IconName::Close)
+                        .danger()
+                        .on_click(move |_, _, cx| {
+                            let run_id = active_run_id.clone();
+                            entity.update(cx, |page, cx| {
+                                page.cancel_automation_run(&runtime, run_id, cx);
+                            });
+                        }),
+                );
+            } else {
+                let entity = run_entity.clone();
+                let id = run_id.clone();
+                menu = menu.item(
+                    MenuItem::new("运行一次")
+                        .icon(IconName::Play)
+                        .disabled(!can_run)
+                        .on_click(move |_, _, cx| {
+                            let id = id.clone();
+                            entity.update(cx, |page, cx| {
+                                page.run_automation_once(id, cx);
+                            });
+                        }),
+                );
+            }
+            if let Some(latest_run_id) = latest_run_id.clone() {
+                let entity = view_entity.clone();
+                let runtime = runtime.clone();
+                menu = menu.item(MenuItem::new("查看运行").icon(IconName::Eye).on_click(
+                    move |_, window, cx| {
+                        let run_id = latest_run_id.clone();
+                        let runtime = runtime.clone();
                         entity.update(cx, |page, cx| {
-                            page.run_automation_once(id, cx);
+                            page.open_catalog_automation_run(runtime, run_id, window, cx);
                         });
-                    }),
-            );
-        }
-        if let Some(latest_run_id) = latest_run_id.clone() {
-            let entity = view_entity.clone();
-            let runtime = runtime.clone();
-            menu = menu.item(PopupMenuItem::new("查看运行").icon(IconName::Eye).on_click(
-                move |_, window, cx| {
-                    let run_id = latest_run_id.clone();
-                    let runtime = runtime.clone();
-                    entity.update(cx, |page, cx| {
-                        page.open_catalog_automation_run(runtime, run_id, window, cx);
-                    });
-                },
-            ));
-        }
-        let toggle_entity = toggle_entity.clone();
-        let toggle_id = toggle_id.clone();
-        menu = menu.item(
-            automation_enabled_toggle_item(enabled).on_click(move |_, _, cx| {
-                let id = toggle_id.clone();
-                toggle_entity.update(cx, |page, cx| {
-                    page.set_automation_enabled(id, !enabled, cx);
-                });
-            }),
-        );
-        let delete_entity = delete_entity.clone();
-        let delete_id = delete_id.clone();
-        menu.item(
-            PopupMenuItem::new("删除自动化")
-                .icon(api::ui::trash_icon())
-                .on_click(move |_, window, cx| {
-                    let id = delete_id.clone();
-                    delete_entity.update(cx, |page, cx| {
-                        page.start_delete_automation(id, window, cx);
+                    },
+                ));
+            }
+            let toggle_entity = toggle_entity.clone();
+            let toggle_id = toggle_id.clone();
+            menu = menu.item(
+                automation_enabled_toggle_item(enabled).on_click(move |_, _, cx| {
+                    let id = toggle_id.clone();
+                    toggle_entity.update(cx, |page, cx| {
+                        page.set_automation_enabled(id, !enabled, cx);
                     });
                 }),
-        )
-    })
+            );
+            let delete_entity = delete_entity.clone();
+            let delete_id = delete_id.clone();
+            menu.separator().item(
+                MenuItem::new("删除自动化")
+                    .icon(api::ui::trash_icon())
+                    .danger()
+                    .on_click(move |_, window, cx| {
+                        let id = delete_id.clone();
+                        delete_entity.update(cx, |page, cx| {
+                            page.start_delete_automation(id, window, cx);
+                        });
+                    }),
+            )
+        },
+    )
     .into_any_element()
 }
 
@@ -671,6 +675,7 @@ pub(crate) fn render_template_card(
                 .gap_2()
                 .child(neutral_icon_mark(template_icon(template.glyph), 32.))
                 .child(machine_picking_button(
+                    SharedString::from(format!("automation-template-add-menu-{id}")),
                     Button::new(format!("automation-template-add-{id}"))
                         .quiet()
                         .small()
@@ -750,6 +755,7 @@ pub(crate) fn automation_creation_machines(cx: &App) -> Vec<RuntimeKey> {
 
 /// 「在某台机器上新建」的按钮：只有一台机器时直接建，多台时点开先选机器。
 pub(crate) fn machine_picking_button(
+    menu_id: impl Into<ElementId>,
     button: Button,
     entity: Entity<AutomationsPage>,
     action: impl Fn(&mut AutomationsPage, RuntimeKey, &mut Window, &mut Context<AutomationsPage>)
@@ -772,25 +778,21 @@ pub(crate) fn machine_picking_button(
         .iter()
         .map(|runtime| (runtime.clone(), machine_name(runtime, cx)))
         .collect::<Vec<_>>();
-    button
-        .dropdown_caret(true)
-        .dropdown_menu(move |mut menu, _, _| {
-            menu = menu.item(PopupMenuItem::label("建在哪台机器上"));
-            for (runtime, name) in &names {
-                let entity = entity.clone();
+    MenuTrigger::dropdown(menu_id, button.dropdown_caret(true), move |_, _| {
+        let mut menu = Menu::new().label("建在哪台机器上");
+        for (runtime, name) in &names {
+            let entity = entity.clone();
+            let runtime = runtime.clone();
+            let action = action.clone();
+            menu = menu.item(MenuItem::new(name.clone()).on_click(move |_, window, cx| {
                 let runtime = runtime.clone();
                 let action = action.clone();
-                menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
-                    move |_, window, cx| {
-                        let runtime = runtime.clone();
-                        let action = action.clone();
-                        entity.update(cx, |page, cx| action(page, runtime, window, cx));
-                    },
-                ));
-            }
-            menu
-        })
-        .into_any_element()
+                entity.update(cx, |page, cx| action(page, runtime, window, cx));
+            }));
+        }
+        menu
+    })
+    .into_any_element()
 }
 
 /// 自动化列表里的一台机器。

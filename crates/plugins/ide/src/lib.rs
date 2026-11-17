@@ -14,10 +14,9 @@ mod detect;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use api::contracts::sessions::PROJECT_MENU;
+use api::ui::IconName;
 use api::{ContextMenuAction, ContextMenuItem, HostEvent, RuntimeKey};
 use gpui::{App, Global, Priority, Task};
-use gpui_kit_assets::IconName;
 use serde::Deserialize;
 use smelt_plugin_api as api;
 
@@ -26,11 +25,14 @@ use detect::InstalledIde;
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.ide";
 
+// 约定：smelt.sessions 的 PROJECT_MENU，上下文是 `{machine, path}`；权威定义在
+// crates/plugins/sessions/src/contract.rs。
+const PROJECT_MENU: &str = "smelt.sessions/project";
+
 /// 菜单项点了执行的命令。
 const OPEN_WITH: api::Command<OpenWith, ()> = api::Command::new("smelt.ide/open-with");
 
-/// [`OPEN_WITH`] 的参数：登记时给的 `app` 并上菜单的上下文
-/// （[`api::contracts::sessions::ProjectMenuContext`]，这里只用 `path`）。
+/// [`OPEN_WITH`] 的参数：登记时给的 `app` 并上 [`PROJECT_MENU`] 的上下文（这里只用 `path`）。
 #[derive(Deserialize)]
 struct OpenWith {
     /// [`FILE_MANAGER`] 或 IDE 的名字。

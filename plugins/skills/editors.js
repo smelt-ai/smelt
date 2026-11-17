@@ -3,12 +3,11 @@
 // 表单状态放在会话对象里，渲染函数只读它。表单画在列表视图里，点选的回调由列表传进来，
 // 改完由列表重算预览、重绘自己。
 //
-// 不放进 `Dialog`：gpui-shell 给脚本的 `Dialog` 内容在打开时定格，而且不画按钮、不能
-// 指定位置（只开放了标题和确定、取消、关闭三个回调）。
+// 不放进对话框：表单要跟着预览一起变，就地展开在被改的那一行下面，看得到改的是谁。
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { Checkbox, HorizontalRadioGroup, Radio, WarningAlert } from "gpui-component";
+import { SmeltAlert, SmeltCheckbox, SmeltRadio } from "smelt-ui";
 import {
   message,
   scopeChoices,
@@ -167,24 +166,26 @@ export function scopeForm(session, cx, changed) {
   const choices = (session.choices ?? []).filter(
     (choice) => choice.installed || form.labels.includes(choice.label),
   );
-  const line = (label, control) =>
+  const line = (label, controls) =>
     h_flex()
       .items_center()
       .gap(SPACE.sm)
       .child(div().w(40).flex_none().child(hint(label, cx)))
-      .child(control);
+      .child(h_flex().flex_wrap().gap(SPACE.md).children(controls));
+  /// 一行里的一个单选：选中由表单定，点了交给 `pick(cx)`。
+  const radio = (id, label, checked, pick) =>
+    SmeltRadio.new(id).label(label).checked(checked).on_select((cx) => pick(cx));
   return [
-    line(
-      "给谁",
-      HorizontalRadioGroup.new("scope-kind")
-        .selected_index(form.universal ? 0 : 1)
-        .on_change((index, cx) => {
-          session.setUniversal(index === 0);
-          changed(cx);
-        })
-        .child(Radio.new("scope-kind-universal").label("所有 agent（通用）"))
-        .child(Radio.new("scope-kind-agent").label("仅指定 agent")),
-    ),
+    line("给谁", [
+      radio("scope-kind-universal", "所有 agent（通用）", form.universal, (cx) => {
+        session.setUniversal(true);
+        changed(cx);
+      }),
+      radio("scope-kind-agent", "仅指定 agent", !form.universal, (cx) => {
+        session.setUniversal(false);
+        changed(cx);
+      }),
+    ]),
     ...(form.universal
       ? []
       : [
@@ -194,7 +195,7 @@ export function scopeForm(session, cx, changed) {
             .gap(SPACE.sm)
             .children(
               choices.map((choice) =>
-                Checkbox.new(`agent-${choice.label}`)
+                SmeltCheckbox.new(`agent-${choice.label}`)
                   .label(choice.installed ? choice.label : `${choice.label}（未安装）`)
                   .checked(form.labels.includes(choice.label))
                   .on_change((_checked, cx) => {
@@ -204,21 +205,19 @@ export function scopeForm(session, cx, changed) {
               ),
             ),
         ]),
-    line(
-      "层级",
-      HorizontalRadioGroup.new("scope-level")
-        .selected_index(form.project_scope ? 1 : 0)
-        .on_change((index, cx) => {
-          if (session.setLevel(index === 1)) changed(cx);
-          else cx.notify();
-        })
-        .child(Radio.new("scope-level-user").label("用户级"))
-        .child(
-          Radio.new("scope-level-project").label(
-            projectRoot ? `项目级（${pretty(session.env.home(), projectRoot)}）` : "项目级（没有打开项目）",
-          ),
-        ),
-    ),
+    line("层级", [
+      radio("scope-level-user", "用户级", !form.project_scope, (cx) => {
+        session.setLevel(false);
+        changed(cx);
+      }),
+      // 没有打开项目时选不了。
+      projectRoot
+        ? radio("scope-level-project", `项目级（${pretty(session.env.home(), projectRoot)}）`, form.project_scope, (cx) => {
+            if (session.setLevel(true)) changed(cx);
+            else cx.notify();
+          })
+        : SmeltRadio.new("scope-level-project").label("项目级（没有打开项目）").disabled(true),
+    ]),
   ];
 }
 
@@ -268,7 +267,7 @@ export function importSource(session, cx, pick) {
                 .child(pretty(session.env.home(), session.source)),
             ),
         )
-        .child(button("repick", "换一个…", pick, "outline").loading(session.picking)),
+        .child(button("repick", "换一个…", pick, "secondary").loading(session.picking)),
     )
     .when(Boolean(info && info.description), (el) => el.child(hint(info.description, cx)));
 }
@@ -279,14 +278,14 @@ export function importWarnings(session) {
   const info = session.sourceInfo;
   const warnings = [];
   if (session.plan !== null && session.plan.replaces) {
-    warnings.push(WarningAlert.new("replaces", `已有同名技能，导入会替换它，旧版本移进 ~/${TRASH}。`).size("small"));
+    warnings.push(SmeltAlert.new("replaces", `已有同名技能，导入会替换它，旧版本移进 ~/${TRASH}。`).need());
   }
   if (info && info.has_global && session.form.project_scope) {
     warnings.push(
-      WarningAlert.new(
+      SmeltAlert.new(
         "global",
         `用户级已有同名「${info.name}」。装到项目级会在这个项目里盖过它；想更新用户级那份，把层级改成用户级。`,
-      ).size("small"),
+      ).need(),
     );
   }
   return warnings;

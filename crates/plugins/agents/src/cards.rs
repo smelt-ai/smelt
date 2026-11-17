@@ -33,13 +33,12 @@ pub(crate) fn agent_surface_card() -> Div {
 }
 
 pub(crate) fn render_agent_error(error: String) -> AnyElement {
-    gpui_component::alert::Alert::error("agent-error", error).into_any_element()
+    api::ui::Alert::error("agent-error", error).into_any_element()
 }
 
 pub(crate) fn render_engine_mark(kind: Option<ConversationAgentKind>, size: f32) -> Icon {
     match kind {
-        Some(kind) => Icon::empty()
-            .path(kind.icon_asset())
+        Some(kind) => Icon::path(kind.icon_asset())
             .size(px(size))
             .text_color(rgb(ui_theme::muted())),
         None => Icon::new(IconName::Bot)
@@ -56,24 +55,26 @@ pub(crate) fn render_agent_engine_control(
 ) -> AnyElement {
     let icon = render_engine_mark(kind, 12.);
     if agent_engine_kinds().len() > 1 {
-        Button::new("agent-engine")
+        let trigger = Button::new("agent-engine")
             .quiet()
             .small()
-            .icon(icon)
-            .label(label)
-            .tooltip("执行这个智能体的运行时。后续 skill 和插件会挂在这个引擎上。")
-            .dropdown_menu(move |mut menu, _, _| {
-                for kind in agent_engine_kinds() {
-                    let entity = entity.clone();
-                    let id = agent_id.clone();
-                    menu = menu.item(PopupMenuItem::new(kind.label()).on_click(move |_, _, cx| {
-                        let id = id.clone();
-                        entity.update(cx, |page, cx| page.set_agent_engine(id, kind, cx));
-                    }));
-                }
-                menu
-            })
-            .into_any_element()
+            .accessibility_label(label.clone())
+            .child(icon)
+            .child(div().min_w_0().text_ellipsis().child(label))
+            .tooltip("执行这个智能体的运行时。后续 skill 和插件会挂在这个引擎上。");
+        MenuTrigger::dropdown("agent-engine-menu", trigger, move |_, _| {
+            let mut menu = Menu::new();
+            for kind in agent_engine_kinds() {
+                let entity = entity.clone();
+                let id = agent_id.clone();
+                menu = menu.item(MenuItem::new(kind.label()).on_click(move |_, _, cx| {
+                    let id = id.clone();
+                    entity.update(cx, |page, cx| page.set_agent_engine(id, kind, cx));
+                }));
+            }
+            menu
+        })
+        .into_any_element()
     } else {
         render_engine_chip(label, kind)
     }
@@ -91,81 +92,64 @@ pub(crate) fn render_agent_model_control(
     } else {
         format!("{model_provider} / {model_id}")
     };
-    Button::new("agent-model")
+    let trigger = Button::new("agent-model")
         .quiet()
         .small()
         .label(label)
-        .tooltip("这个智能体的新对话和自动化用这套模型。对话里仍可再改。")
-        .dropdown_menu(move |mut menu, window, cx| {
-            let inherit_entity = entity.clone();
-            let inherit_id = agent.id.clone();
-            menu = menu.item(
-                PopupMenuItem::new("跟随 Pi 默认")
-                    .checked(inherit)
-                    .on_click(move |_, _, cx| {
-                        let id = inherit_id.clone();
-                        inherit_entity.update(cx, |page, cx| {
-                            page.set_agent_model(id, String::new(), String::new(), cx);
-                        });
-                    }),
-            );
-            // 模型在智能体那台机器上跑，可选的也是那台机器的：取编辑器读到的那份。
-            let groups = entity
-                .read(cx)
-                .editor
-                .as_ref()
-                .filter(|editor| editor.agent == agent)
-                .map(|editor| editor.pi_model_choice_groups().to_vec())
-                .unwrap_or_default();
-            if !groups.is_empty() {
-                menu = menu.separator();
-            }
-            for group in groups {
+        .tooltip("这个智能体的新对话和自动化用这套模型。对话里仍可再改。");
+    MenuTrigger::dropdown("agent-model-menu", trigger, move |_, cx| {
+        let inherit_entity = entity.clone();
+        let inherit_id = agent.id.clone();
+        let mut menu = Menu::new().item(MenuItem::new("跟随 Pi 默认").checked(inherit).on_click(
+            move |_, _, cx| {
+                let id = inherit_id.clone();
+                inherit_entity.update(cx, |page, cx| {
+                    page.set_agent_model(id, String::new(), String::new(), cx);
+                });
+            },
+        ));
+        // 模型在智能体那台机器上跑，可选的也是那台机器的：取编辑器读到的那份。
+        let groups = entity
+            .read(cx)
+            .editor
+            .as_ref()
+            .filter(|editor| editor.agent == agent)
+            .map(|editor| editor.pi_model_choice_groups().to_vec())
+            .unwrap_or_default();
+        if !groups.is_empty() {
+            menu = menu.separator();
+        }
+        for group in groups {
+            // 这一层没有再嵌套。模型一多就超出窗口，在二级里滚。
+            let mut sub = Menu::new();
+            for choice in &group.models {
+                let checked = choice.provider == model_provider && choice.id == model_id;
                 let item_entity = entity.clone();
                 let item_id = agent.id.clone();
-                let current_provider = model_provider.clone();
-                let current_model = model_id.clone();
-                let models = group.models;
-                menu = menu.submenu(
-                    group.provider_name.clone(),
-                    window,
-                    cx,
-                    move |mut sub, _, _| {
-                        for choice in &models {
-                            let checked =
-                                choice.provider == current_provider && choice.id == current_model;
-                            let item_entity = item_entity.clone();
-                            let item_id = item_id.clone();
-                            let provider = choice.provider.clone();
-                            let model = choice.id.clone();
-                            sub = sub.item(
-                                PopupMenuItem::new(choice.short_label().to_string())
-                                    .checked(checked)
-                                    .on_click(move |_, _, cx| {
-                                        let id = item_id.clone();
-                                        let provider = provider.clone();
-                                        let model = model.clone();
-                                        item_entity.update(cx, |page, cx| {
-                                            page.set_agent_model(id, provider, model, cx);
-                                        });
-                                    }),
-                            );
-                        }
-                        // 这一层没有再嵌套。模型一多就超出窗口，在二级里滚。
-                        sub.scrollable(true)
-                    },
+                let provider = choice.provider.clone();
+                let model = choice.id.clone();
+                sub = sub.item(
+                    MenuItem::new(choice.short_label().to_string())
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let id = item_id.clone();
+                            let provider = provider.clone();
+                            let model = model.clone();
+                            item_entity.update(cx, |page, cx| {
+                                page.set_agent_model(id, provider, model, cx);
+                            });
+                        }),
                 );
             }
-            menu
-        })
-        .into_any_element()
+            menu = menu.item(MenuItem::new(group.provider_name.clone()).submenu(sub));
+        }
+        menu
+    })
+    .into_any_element()
 }
 
 pub(crate) fn render_engine_chip(label: String, kind: Option<ConversationAgentKind>) -> AnyElement {
-    Tag::secondary()
-        .rounded_full()
-        .flex_none()
-        .gap_1()
+    Badge::new()
         .child(render_engine_mark(kind, 12.))
         .child(label)
         .into_any_element()
@@ -218,9 +202,7 @@ pub(crate) fn render_agent_plugin_card(
 
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-plugins-refresh")
-        .icon(gpui_component::Icon::new(
-            gpui_kit_assets::IconName::RefreshCw,
-        ))
+        .icon(IconName::RefreshCw)
         .icon_action("重新扫描插件目录")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |page, cx| page.refresh_agent_plugins(cx));
@@ -251,7 +233,6 @@ pub(crate) fn render_agent_plugin_card(
                 plugin.broken.clone(),
                 selected.contains(&plugin.id),
                 entity.clone(),
-                cx,
             )
         })
         .collect();
@@ -276,7 +257,6 @@ pub(crate) fn render_agent_plugin_card(
             Some("磁盘上已经找不到了".to_string()),
             true,
             entity.clone(),
-            cx,
         ));
     }
 
@@ -622,9 +602,7 @@ pub(crate) fn render_agent_memory_card(
     let memory_enabled = agent.memory_enabled;
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-memory-refresh")
-        .icon(gpui_component::Icon::new(
-            gpui_kit_assets::IconName::RefreshCw,
-        ))
+        .icon(IconName::RefreshCw)
         .icon_action("重新读取记忆")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |page, cx| page.refresh_agent_memories(cx));
@@ -1116,7 +1094,7 @@ pub(crate) fn agent_context_row(
         )
         .child(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
-                .icon(api::ui::trash_icon())
+                .icon_path("smelt-icons/trash.svg")
                 .icon_action(if is_folder {
                     "解除这个目录的绑定"
                 } else {
@@ -1149,9 +1127,7 @@ pub(crate) fn render_agent_mcp_card(
 
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-mcp-refresh")
-        .icon(gpui_component::Icon::new(
-            gpui_kit_assets::IconName::RefreshCw,
-        ))
+        .icon(IconName::RefreshCw)
         .icon_action("重新读取 mcp.json")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |page, cx| page.refresh_agent_plugins(cx));
@@ -1190,7 +1166,6 @@ pub(crate) fn render_agent_mcp_card(
                 broken,
                 selected.contains(&server.name),
                 entity.clone(),
-                cx,
             )
         })
         .collect();
@@ -1215,7 +1190,6 @@ pub(crate) fn render_agent_mcp_card(
             Some("mcp.json 里已经没有这台服务器".to_string()),
             true,
             entity.clone(),
-            cx,
         ));
     }
 
@@ -1310,7 +1284,6 @@ pub(crate) fn agent_plugin_row(
     broken: Option<String>,
     checked: bool,
     entity: Entity<AgentsPage>,
-    cx: &App,
 ) -> AnyElement {
     let toggle_agent = agent_id.to_string();
     let toggle_plugin = plugin_id.to_string();
@@ -1323,7 +1296,7 @@ pub(crate) fn agent_plugin_row(
     let subtitle_color = if usable {
         rgb(ui_theme::faint())
     } else {
-        cx.theme().danger.into()
+        rgb(ui_theme::bad())
     };
 
     div()

@@ -1,6 +1,6 @@
 # 本地状态存储
 
-Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。启动时会删掉已经没有读写路径的旧 JSON（`workspace.json`、`appearance.json`、`launch.json`、`collab.json`、`llm.json`、`pet.json` 等），见 `crates/smelt/src/storage_cleanup.rs`。
+Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。启动时会删掉已经没有读写路径的旧 JSON（`workspace.json`、`appearance.json`、`launch.json`、`collab.json`、`llm.json`、`pet.json` 等），见维护插件的 `crates/plugins/maintenance/src/residue.rs`。
 
 ## 运行时库
 
@@ -45,7 +45,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 | `update_settings` / `update_state` / `staged_update` / `installer_attempt` | 这台 App 的更新 |
 | `key_binding` | 用户改过的快捷键：命令 id（`<来源>/<名字>`）→ 按键，按键为空是用户清掉了。没有行的命令用出厂键位；命令还没登记（插件没加载）的行照样留着 |
 | `workspace_ui` | 当前路由、归档分段展开 |
-| `workspace_layout_state` | 每份布局被用户拖成的样子：gpui-base 的 `DockAreaState` 原文。版本对得上就用，布局文件后来改了也照用；要回到布局文件就删掉这份存档 |
+| `workspace_layout_state` | 每份布局被用户拖成的样子：gpui-base 的 `DockAreaState` 原文。版本对得上、摆的视图和摞（`smelt/stack`）跟布局文件一样就用，只是拖动、换组、改大小的照用；布局文件增减了视图或改了摞，存档过时不用；要回到布局文件就删掉这份存档 |
 | `collapsed_project` / `pinned_project` / `collapsed_agent` | 按 `runtime_id` 记住折叠和置顶 |
 | `sidebar_project_order` / `sidebar_conversation_order` | 按 `runtime_id` 记住侧栏里项目、对话从上到下的顺序。每台设备各记各的，运行时目录里只有新建的先后 |
 | `conversation_route` | 某个运行时上某段对话的终端分屏布局（带版本号的 JSON）、当前终端 |

@@ -60,16 +60,15 @@ fn insert_conversation(
     let group_id = saved.id.trim();
     transaction.execute(
         "INSERT INTO session_group(
-             id, position, custom_title, last_updated_at, archived_at, pinned_at, workset_id,
+             id, position, custom_title, last_updated_at, archived_at, workset_id,
              closed_workset_root
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             group_id,
             position,
             saved.custom_title.as_deref(),
             saved.last_updated_at,
             saved.archived_at,
-            saved.pinned_at,
             saved.workset_id.as_deref(),
             saved.closed_workset_root.as_deref(),
         ],
@@ -122,22 +121,18 @@ fn write_acp_record(
     transaction.execute(
         "INSERT INTO acp_detail(
                session_id, agent, profile_id, history_session_id, launch_command,
-               refresh_launch_from_settings, pending_prompt, pending_delivery_id,
-               agent_definition_id, automation_id, binding_automation_run_id,
-               pending_agent_preset, session_title
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+               pending_prompt, agent_definition_id, automation_id, pending_agent_preset,
+               session_title
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             session_id,
             acp.agent,
             acp.profile_id.as_deref(),
             history_session_id,
             acp.launch_command,
-            acp.refresh_launch_from_settings,
             acp.pending_prompt.as_deref(),
-            acp.pending_delivery_id.as_deref(),
             acp.agent_definition_id.as_deref(),
             acp.automation_id.as_deref(),
-            acp.binding_automation_run_id.as_deref(),
             acp.pending_agent_preset.as_deref(),
             acp.session_title.as_deref(),
         ],
@@ -187,8 +182,9 @@ pub(crate) fn create_conversation(
     let group_id = validated_conversation_id(saved)?;
     let mut saved = with_names(saved, &StoredNames::default());
     saved.archived_at = None;
-    saved.pinned_at = None;
     saved.closed_workset_root = None;
+    // 最近活动时间只由守护记：新建算一次活动（之后每轮结束再记），客户端带来的不算数。
+    saved.last_updated_at = now_ms() / 1000;
     if conversation_position(transaction, group_id)?.is_some() {
         return Ok(false);
     }
@@ -216,8 +212,8 @@ pub(crate) fn create_conversation(
 }
 
 /// 换一段已有对话里的终端格子（分屏、关掉一格），位置不变；别的都以库里的为准：ACP
-/// 那段在新建之后只由守护写（见 [`update_acp_live`]），名字只经改名命令写，归档、置顶、
-/// 工作集、最近活动时间各有各的写法，客户端带来的值都不算数。对话已经不在（别的客户端
+/// 那段在新建之后只由守护写（见 [`update_acp_live`]），名字只经改名命令写，归档、工作集、
+/// 最近活动时间各有各的写法，客户端带来的值都不算数。对话已经不在（别的客户端
 /// 关掉了）回 [`StoreError::ConversationNotFound`]，不把它写回来。写完和原来一样返回
 /// `false`。
 pub(crate) fn update_conversation(
@@ -246,7 +242,6 @@ pub(crate) fn update_conversation(
         saved.acp = before.acp.clone();
         saved.last_updated_at = before.last_updated_at;
         saved.archived_at = before.archived_at;
-        saved.pinned_at = before.pinned_at;
         saved.workset_id = before.workset_id.clone();
         saved.closed_workset_root = before.closed_workset_root.clone();
     }
@@ -371,7 +366,7 @@ pub(crate) fn set_conversation_archived(
         validate_restore_workset(transaction, workset_id)?;
     }
     transaction.execute(
-        "UPDATE session_group SET archived_at = ?2, pinned_at = NULL WHERE id = ?1",
+        "UPDATE session_group SET archived_at = ?2 WHERE id = ?1",
         params![id, archived_at],
     )?;
     Ok(true)
@@ -414,7 +409,7 @@ pub(crate) fn restore_conversation_into_workset(
         params![id, target],
     )?;
     transaction.execute(
-        "UPDATE session_group SET workset_id = ?2, archived_at = NULL, pinned_at = NULL WHERE id = ?1",
+        "UPDATE session_group SET workset_id = ?2, archived_at = NULL WHERE id = ?1",
         params![id, workset_id],
     )?;
     Ok(true)
@@ -457,27 +452,6 @@ fn validate_restore_workset(
         }
     }
     Ok((project_root, target))
-}
-
-pub(crate) fn set_conversation_pinned(
-    transaction: &Transaction<'_>,
-    id: &str,
-    pinned_at: Option<i64>,
-) -> Result<bool, StoreError> {
-    let id = id.trim();
-    let current = read_conversation(transaction, id)?
-        .ok_or_else(|| StoreError::ConversationNotFound { id: id.into() })?;
-    if current.archived_at.is_some() {
-        return Err(StoreError::ConversationArchived { id: id.into() });
-    }
-    if current.pinned_at.is_some() == pinned_at.is_some() {
-        return Ok(false);
-    }
-    transaction.execute(
-        "UPDATE session_group SET pinned_at = ?2 WHERE id = ?1",
-        params![id, pinned_at],
-    )?;
-    Ok(true)
 }
 
 /// 删掉一段对话，返回删掉前的样子（调用方据此收掉它的终端和 ACP 会话）。已经不在时
@@ -1105,9 +1079,8 @@ pub(crate) fn update_acp_live(
             [sid],
         )?,
         AcpLiveChange::PendingPromptSent => transaction.execute(
-            "UPDATE acp_detail SET pending_prompt = NULL, pending_delivery_id = NULL
-             WHERE session_id = ?1
-               AND (pending_prompt IS NOT NULL OR pending_delivery_id IS NOT NULL)",
+            "UPDATE acp_detail SET pending_prompt = NULL
+             WHERE session_id = ?1 AND pending_prompt IS NOT NULL",
             [sid],
         )?,
         AcpLiveChange::TurnEnded { at } => transaction.execute(
@@ -1324,7 +1297,7 @@ pub(crate) fn read_workspace_snapshot(
         // 没有身份的用对话自己的。一个名字只存在其中一处，读的时候合起来。
         .prepare(
             "SELECT g.id, COALESCE(h.custom_title, g.custom_title), g.last_updated_at,
-                    g.archived_at, g.pinned_at, g.workset_id, g.closed_workset_root
+                    g.archived_at, g.workset_id, g.closed_workset_root
              FROM session_group g
              LEFT JOIN session s ON s.group_id = g.id AND s.kind = 'acp'
              LEFT JOIN acp_detail a ON a.session_id = s.id
@@ -1340,23 +1313,15 @@ pub(crate) fn read_workspace_snapshot(
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut cache = WorkspaceReadCache::load(connection)?;
     let mut sessions = Vec::new();
-    for (
-        group_id,
-        custom_title,
-        last_updated_at,
-        archived_at,
-        pinned_at,
-        workset_id,
-        closed_workset_root,
-    ) in groups
+    for (group_id, custom_title, last_updated_at, archived_at, workset_id, closed_workset_root) in
+        groups
     {
         let terminals = cache
             .terminals_by_group
@@ -1371,7 +1336,6 @@ pub(crate) fn read_workspace_snapshot(
             custom_title,
             last_updated_at: last_updated_at.max(0),
             archived_at,
-            pinned_at,
             workset_id,
             closed_workset_root,
             terminals,
@@ -1438,9 +1402,8 @@ impl WorkspaceReadCache {
         let mut acp_rows = HashMap::new();
         let mut statement = connection.prepare(
             "SELECT session_id, agent, profile_id, history_session_id, launch_command,
-                    refresh_launch_from_settings, pending_prompt, pending_delivery_id,
-                    agent_definition_id, automation_id, binding_automation_run_id,
-                    pending_agent_preset, session_title
+                    pending_prompt, agent_definition_id, automation_id, pending_agent_preset,
+                    session_title
              FROM acp_detail",
         )?;
         let rows = statement.query_map([], |row| {
@@ -1454,15 +1417,12 @@ impl WorkspaceReadCache {
                     history_session_id: row.get(3)?,
                     launch_command: row.get(4)?,
                     launch_env: Vec::new(),
-                    refresh_launch_from_settings: row.get(5)?,
-                    pending_prompt: row.get(6)?,
-                    pending_delivery_id: row.get(7)?,
-                    agent_definition_id: row.get(8)?,
-                    automation_id: row.get(9)?,
+                    pending_prompt: row.get(5)?,
+                    agent_definition_id: row.get(6)?,
+                    automation_id: row.get(7)?,
                     config_values: Vec::new(),
-                    binding_automation_run_id: row.get(10)?,
-                    pending_agent_preset: row.get(11)?,
-                    session_title: row.get(12)?,
+                    pending_agent_preset: row.get(8)?,
+                    session_title: row.get(9)?,
                 },
             ))
         })?;

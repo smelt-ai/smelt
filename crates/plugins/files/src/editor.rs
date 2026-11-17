@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::*;
-use gpui_component::input::{EditorState, InputEvent, Position};
+use gpui_base::input::{EditorState, InputEvent, Position};
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::client::protocol::control::{ControlClientError, ControlErrorCode};
 use smelt_plugin_api::client::protocol::files::{
@@ -354,9 +354,7 @@ impl FilesPanel {
         } else {
             of.saved_version.clone()
         };
-        let Some(window) = self.host.main_window(cx) else {
-            return;
-        };
+        let entity_id = cx.entity_id();
         cx.spawn(async move |this, cx| {
             let text = content.clone();
             let outcome = cx
@@ -382,38 +380,41 @@ impl FilesPanel {
                     }
                 })
                 .await;
-            let _ = cx.update_window(window, |_, window, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    let switch_target = this
-                        .pending_switch_after_save
-                        .take_if(|(from, _)| *from == id)
-                        .map(|(_, target)| target);
-                    let Some(of) = this.open_file_with_id(id) else {
-                        return;
-                    };
-                    match outcome {
-                        SaveOutcome::Saved(version) => {
-                            of.saved_content = Rc::new(content);
-                            of.saved_version = Some(version);
-                            of.save_error = None;
-                            of.conflict_pending = false;
-                            if let Some(target) = switch_target
-                                && this.open_file.as_ref().is_some_and(|of| of.id == id)
-                            {
-                                this.open_file_now(target, None, window, cx);
+            cx.update(|cx| {
+                cx.with_window(entity_id, |window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        let switch_target = this
+                            .pending_switch_after_save
+                            .take_if(|(from, _)| *from == id)
+                            .map(|(_, target)| target);
+                        let Some(of) = this.open_file_with_id(id) else {
+                            return;
+                        };
+                        match outcome {
+                            SaveOutcome::Saved(version) => {
+                                of.saved_content = Rc::new(content);
+                                of.saved_version = Some(version);
+                                of.save_error = None;
+                                of.conflict_pending = false;
+                                if let Some(target) = switch_target
+                                    && this.open_file.as_ref().is_some_and(|of| of.id == id)
+                                {
+                                    this.open_file_now(target, None, window, cx);
+                                }
+                            }
+                            SaveOutcome::Conflict => {
+                                of.conflict_pending = true;
+                                of.save_error = Some(
+                                    "文件已被外部修改；再按一次 ⌘S 会强制覆盖磁盘上的改动"
+                                        .to_string(),
+                                );
+                            }
+                            SaveOutcome::Error(error) => {
+                                of.save_error = Some(format!("保存失败：{error}"));
                             }
                         }
-                        SaveOutcome::Conflict => {
-                            of.conflict_pending = true;
-                            of.save_error = Some(
-                                "文件已被外部修改；再按一次 ⌘S 会强制覆盖磁盘上的改动".to_string(),
-                            );
-                        }
-                        SaveOutcome::Error(error) => {
-                            of.save_error = Some(format!("保存失败：{error}"));
-                        }
-                    }
-                    cx.notify();
+                        cx.notify();
+                    });
                 });
             });
         })
@@ -446,9 +447,7 @@ impl FilesPanel {
     }
 
     pub(crate) fn reload_open_file(&mut self, cx: &mut Context<Self>) {
-        let Some(window) = self.host.main_window(cx) else {
-            return;
-        };
+        let entity_id = cx.entity_id();
         let Some(of) = self.open_file.as_mut() else {
             return;
         };
@@ -466,34 +465,37 @@ impl FilesPanel {
                     call_on::<FileOpenCall>(&client, FilePathParams { path }, RUNTIME_CALL_TIMEOUT)
                 })
                 .await;
-            let _ = cx.update_window(window, |_, window, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    let Some(of) = this.open_file_with_id(id) else {
-                        return;
-                    };
-                    of.reload_inflight = false;
-                    let again = std::mem::take(&mut of.reload_again);
-                    if let Ok(FileOpenResult {
-                        content: FileContent::Text { text, version },
-                    }) = read
-                        && of.saved_version.as_deref() != Some(version.as_str())
-                    {
-                        if of.dirty(cx) {
-                            of.save_error =
-                                Some("这个文件已在别处被改过；保存时会提示冲突".to_string());
-                        } else {
-                            of.editor
-                                .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
-                            of.saved_content = Rc::new(text.clone());
-                            of.saved_version = Some(version);
-                            of.preview_source = text.into();
-                            of.sync_html_preview(cx);
+            cx.update(|cx| {
+                cx.with_window(entity_id, |window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        let Some(of) = this.open_file_with_id(id) else {
+                            return;
+                        };
+                        of.reload_inflight = false;
+                        let again = std::mem::take(&mut of.reload_again);
+                        if let Ok(FileOpenResult {
+                            content: FileContent::Text { text, version },
+                        }) = read
+                            && of.saved_version.as_deref() != Some(version.as_str())
+                        {
+                            if of.dirty(cx) {
+                                of.save_error =
+                                    Some("这个文件已在别处被改过；保存时会提示冲突".to_string());
+                            } else {
+                                of.editor.update(cx, |state, cx| {
+                                    state.set_value(text.clone(), window, cx)
+                                });
+                                of.saved_content = Rc::new(text.clone());
+                                of.saved_version = Some(version);
+                                of.preview_source = text.into();
+                                of.sync_html_preview(cx);
+                            }
+                            cx.notify();
                         }
-                        cx.notify();
-                    }
-                    if again && this.open_file.as_ref().is_some_and(|of| of.id == id) {
-                        this.reload_open_file(cx);
-                    }
+                        if again && this.open_file.as_ref().is_some_and(|of| of.id == id) {
+                            this.reload_open_file(cx);
+                        }
+                    });
                 });
             });
         })

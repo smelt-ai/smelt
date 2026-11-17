@@ -3,19 +3,21 @@
 pub(crate) use chrono::{Local, TimeZone, Utc};
 pub(crate) use gpui::prelude::FluentBuilder;
 pub(crate) use gpui::*;
-pub(crate) use gpui_component::input::{InputEvent, InputState, Textarea, TextareaState};
-pub(crate) use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-pub(crate) use gpui_component::{ActiveTheme as _, Icon, IconName, StyledExt as _};
+pub(crate) use gpui_base::StyledExt as _;
 pub(crate) use smelt_plugin_api::{self as api, RuntimeKey};
 
 pub(crate) use api::model::agent_definition::AgentDefinition;
 pub(crate) use api::model::agent_kind::ConversationAgentKind;
 pub(crate) use api::model::automation_projection::MachineAutomations;
+pub(crate) use api::ui::field::{InputEvent, InputState, TextareaState};
+pub(crate) use api::ui::menu::{Menu, MenuItem, MenuTrigger};
 pub(crate) use api::ui::truncated_line::truncated_line;
 pub(crate) use api::ui::{
-    Button, IconAction as _, ListRow, Segmented, TextInput, markdown_mermaid, ui_theme,
+    Button, Icon, IconAction as _, IconName, ListRow, Segmented, TextArea, TextInput,
+    markdown_mermaid, ui_theme,
 };
 
+pub(crate) use crate::agents::agents_on;
 pub(crate) use crate::editor::*;
 pub(crate) use crate::format::*;
 pub(crate) use crate::kinds::*;

@@ -8,9 +8,9 @@
 use gpui::{
     AnyElement, App, AsyncApp, Bounds, BoxShadow, Element, ElementId, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Rgba, Styled as _,
-    Transformation, Window, hsla, percentage, point, px,
+    Transformation, Window, hsla, percentage, point, px, svg,
 };
-use gpui_component::{Icon, IconName, Sizable as _, h_flex};
+use gpui_base::h_flex;
 // 时间一律从 `cx.background_executor().now()` 取（测试里可换假时钟）。它返回的
 // `Instant` 在桌面端就是 std 的，直接用 std 的类型名，不为一个类型依赖 scheduler 包。
 use std::time::{Duration, Instant};
@@ -205,7 +205,7 @@ pub fn ambient_animation<E: IntoElement + 'static>(
 }
 
 /// 按周期一直循环的装饰动画，`animate == false` 时停在相位 1。
-fn ambient_loop<E: IntoElement + 'static>(
+pub(crate) fn ambient_loop<E: IntoElement + 'static>(
     id: impl Into<ElementId>,
     cycle: Duration,
     animate: bool,
@@ -222,10 +222,12 @@ fn ambient_loop<E: IntoElement + 'static>(
 /// 进行中一直转。`animate == false` 或系统开启减弱动态效果时停在静态图标。
 pub fn ambient_spinner(id: impl Into<ElementId>, color: Hsla, animate: bool) -> AnyElement {
     ambient_loop(id, Duration::from_millis(800), animate, move |delta| {
-        Icon::new(IconName::Loader)
-            .xsmall()
+        svg()
+            .path(gpui_kit_assets::IconName::Loader.path())
+            .size_3()
+            .flex_shrink_0()
             .text_color(color)
-            .transform(Transformation::rotate(percentage(delta)))
+            .with_transformation(Transformation::rotate(percentage(delta)))
     })
     .into_any_element()
 }

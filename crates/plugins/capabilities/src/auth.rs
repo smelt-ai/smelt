@@ -116,7 +116,7 @@ impl CapabilitiesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use gpui_component::input::{InputEvent, InputState};
+        use smelt_plugin_api::ui::field::{InputEvent, InputState};
 
         self.cancel_pi_login(cx);
         self.pi_auth_error = None;

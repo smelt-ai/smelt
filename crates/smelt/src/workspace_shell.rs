@@ -4,45 +4,37 @@
 //! 摆什么、怎么切、选中哪个、放大都在 Dock 上（布局和存档就是它的 `DockAreaState`，见
 //! `workspace_layout`）。这里只管：
 //! - 面板（[`ViewPanel`]）：视图注册表里的一个视图（`smelt_plugin_api::view`），面板名就是
-//!   视图 id。外壳不认识视图是什么，自带的也一样（见 `builtin_views`）。
+//!   视图 id。外壳不认识视图是什么，宿主自己登记的出口、设置也一样（见 `host_views`）。
 //! - 占位（[`PlaceholderPanel`]）：没登记的视图、同一个视图摆了第二份。不显示，存档时原样
 //!   写回：插件装回来就又出现了。
-//! - 皮肤（[`SmeltDockRenderer`] / [`SmeltTabGroup`]）：组件库 `DockSkin` 外面包一层，标签条
-//!   由 smelt 画——角标、拖窗口的空白、给红黄绿按钮让位、放大按钮、拖动重排。
+//! - 皮肤（[`SmeltDockRenderer`] / [`SmeltTabGroup`]）：分隔条、停靠区边、落点这些和会话分屏
+//!   共用的取 `smelt_ui::dock`；标签条是这里的——角标、拖窗口的空白、给角上的控件让位、放大
+//!   按钮、拖动重排。
 //! - 读 Dock：[`ShellView`] 是摆着什么、看得见什么的快照，工作台缓存一份给 render 读。
-//!
-//! 终端分屏是舞台里另一个 Dock（`term_dock`），和这里无关。
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Axis, Context, Div, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, Pixels, SharedString, Stateful, Subscription, Window, div, prelude::*,
-    px, size,
+    AnyElement, App, AppContext as _, Axis, Context, Div, Edges, Entity, EventEmitter, FocusHandle,
+    Focusable, Pixels, SharedString, Subscription, Window, div, prelude::*, px, rgb, size,
 };
 use gpui_base::ResizeHandleContext;
-use gpui_component::dock::{
-    BasePanel, BasePanelView, DockArea, DockAreaRenderer, DockAreaState, DockContext,
-    DockPlacement, DockSkin, DragPanel, DropIndicator, NodeId, PaneNode, PaneRef, Panel,
-    PanelControl, PanelEvent, PanelHandle, PanelId, PanelInfo, PanelState, TabGroupContext,
-    TabGroupRenderer, panel_handle,
+use gpui_base::dock::{
+    DockArea, DockAreaRenderer, DockAreaState, DockContext, DockPlacement, DragPanel,
+    DropIndicator, NodeId, PaneNode, PaneRef, Panel, PanelEvent, PanelId, PanelInfo, PanelState,
+    PanelView, TabGroupContext, TabGroupRenderer,
 };
-use gpui_component::empty::{
-    Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
-};
-use gpui_component::tab::{Tab, TabBar};
-use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable as _, h_flex};
 use serde_json::Value;
 use smelt_plugin_api::{self as api, ViewHandle};
 pub(crate) use smelt_ui::Button;
-use smelt_ui::IconAction as _;
+use smelt_ui::dock::{DockEdges, TabLabel, tab_strip};
+use smelt_ui::window_bar::{Adapt, SafeArea, TOP_BAR_HEIGHT, with_window_drag};
+use smelt_ui::{Badge, IconAction as _, IconName, ui_theme};
 
-use crate::builtin_views::Builtin;
-use crate::{AgentStatus, SessionKind, Workspace, ui_theme, workspace_frame};
+use crate::Workspace;
 
 /// Dock 的四个区域，按画的先后。
 const PLACEMENTS: [DockPlacement; 4] = [
@@ -52,14 +44,8 @@ const PLACEMENTS: [DockPlacement; 4] = [
     DockPlacement::Bottom,
 ];
 
-/// 红黄绿按钮占的宽度。
-const TRAFFIC_LIGHTS_WIDTH: f32 = 80.;
-
 /// 左右停靠区开合按钮占的宽度。
 const DOCK_TOGGLE_WIDTH: f32 = 32.;
-
-/// 拖标签时跟着鼠标的那块的大小。和组件库的一样。
-const DRAG_PREVIEW_SIZE: gpui::Size<Pixels> = size(px(96.), px(30.));
 
 // ---- 面板 ----
 
@@ -129,6 +115,17 @@ impl ViewPanel {
             None => self.id,
         }
     }
+
+    /// 标签条上的样子。角标由插件推（`smelt_plugin_api::set_view_badge`）。
+    fn tab_label(&self, cx: &App) -> TabLabel {
+        let title = self.shown_title();
+        TabLabel {
+            text: title.clone(),
+            label: title.into_any_element(),
+            badge: smelt_plugin_api::view_badge(self.badge_view(), cx)
+                .map(|badge| Badge::new().accent().child(badge).into_any_element()),
+        }
+    }
 }
 
 /// 出口里换了视图（`content`，空着是 `None`）：出口的标题、角标、顶上那条画不画换成那个
@@ -167,7 +164,7 @@ impl Focusable for ViewPanel {
     }
 }
 
-impl BasePanel for ViewPanel {
+impl Panel for ViewPanel {
     fn panel_name(&self) -> &'static str {
         self.id
     }
@@ -187,34 +184,6 @@ impl BasePanel for ViewPanel {
             children: Vec::new(),
             info: PanelInfo::panel(self.info.clone()),
         }
-    }
-}
-
-impl Panel for ViewPanel {
-    fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.shown_title())
-    }
-
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.shown_title()
-    }
-
-    /// 角标由插件推（`smelt_plugin_api::set_view_badge`）。
-    fn title_suffix(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        smelt_plugin_api::view_badge(self.badge_view(), cx)
-            .map(|badge| Tag::primary().small().rounded_full().child(badge))
-    }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        (!self.draws_top_bar()).then_some(PanelControl::Toolbar)
-    }
-
-    fn title_bar(&self, _: &App) -> bool {
-        !self.draws_top_bar()
-    }
-
-    fn inner_padding(&self, _: &App) -> bool {
-        false
     }
 }
 
@@ -244,7 +213,7 @@ impl Focusable for PlaceholderPanel {
     }
 }
 
-impl BasePanel for PlaceholderPanel {
+impl Panel for PlaceholderPanel {
     fn panel_name(&self) -> &'static str {
         "smelt.placeholder"
     }
@@ -266,11 +235,239 @@ impl BasePanel for PlaceholderPanel {
     }
 }
 
-impl Panel for PlaceholderPanel {}
-
 impl Render for PlaceholderPanel {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
+    }
+}
+
+/// 一摞（[`api::STACK_PANEL`]）：几个视图按顺序排在一格里，没有分隔条，`fit` 的按内容定
+/// 大小，其余平分。建不出来的项（没登记、摆了第二份）不画，存档时原文照写。
+pub(crate) struct StackPanel {
+    /// 布局里它的 `info.panel`，原样写回存档。
+    info: Value,
+    /// 建出来的那些项；一项都没建出来是 `None`，整摞不显示。
+    root: Option<StackNode>,
+    focus_handle: FocusHandle,
+}
+
+enum StackNode {
+    View {
+        id: String,
+        title: SharedString,
+        view: Rc<dyn ViewHandle>,
+    },
+    Stack {
+        axis: api::StackAxis,
+        /// 每项和它的 `fit`。
+        items: Vec<(StackNode, bool)>,
+    },
+}
+
+impl StackNode {
+    /// 按布局里写的建，建不出来的项去掉，去空了的一摞也去掉。
+    fn build(stack: &api::Stack, window: &mut Window, cx: &mut App) -> Option<Self> {
+        let items: Vec<(StackNode, bool)> = stack
+            .items
+            .iter()
+            .filter_map(|item| {
+                let node = match &item.content {
+                    api::StackContent::View(id) => {
+                        let (spec, view) = place_view(id, window, cx)?;
+                        StackNode::View {
+                            id: id.clone(),
+                            title: spec.title,
+                            view,
+                        }
+                    }
+                    api::StackContent::Stack(stack) => StackNode::build(stack, window, cx)?,
+                };
+                Some((node, item.fit))
+            })
+            .collect();
+        (!items.is_empty()).then_some(StackNode::Stack {
+            axis: stack.axis,
+            items,
+        })
+    }
+
+    fn views(&self, out: &mut Vec<String>) {
+        match self {
+            StackNode::View { id, .. } => out.push(id.clone()),
+            StackNode::Stack { items, .. } => items.iter().for_each(|(node, _)| node.views(out)),
+        }
+    }
+
+    fn titles(&self, out: &mut Vec<SharedString>) {
+        match self {
+            StackNode::View { title, .. } => out.push(title.clone()),
+            StackNode::Stack { items, .. } => items.iter().for_each(|(node, _)| node.titles(out)),
+        }
+    }
+
+    /// 把这一格的 safe area 按各项碰到哪几条边分下去。
+    fn areas(&self, area: SafeArea, f: &mut impl FnMut(&str, SafeArea)) {
+        match self {
+            StackNode::View { id, .. } => f(id, area),
+            StackNode::Stack { axis, items } => {
+                let last = items.len().saturating_sub(1);
+                for (ix, (node, _)) in items.iter().enumerate() {
+                    let (first, end) = (ix == 0, ix == last);
+                    let touches = match axis {
+                        api::StackAxis::Vertical => Edges {
+                            top: first,
+                            bottom: end,
+                            left: true,
+                            right: true,
+                        },
+                        api::StackAxis::Horizontal => Edges {
+                            top: true,
+                            bottom: true,
+                            left: first,
+                            right: end,
+                        },
+                    };
+                    node.areas(area.child(touches), f);
+                }
+            }
+        }
+    }
+
+    fn render(&self) -> AnyElement {
+        match self {
+            StackNode::View { view, .. } => view.view().into_any_element(),
+            StackNode::Stack { axis, items } => {
+                let vertical = *axis == api::StackAxis::Vertical;
+                div()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .when(vertical, |stack| stack.flex_col())
+                    .when(!vertical, |stack| stack.flex_row())
+                    .children(items.iter().map(|(node, fit)| {
+                        let item = div().min_w_0().min_h_0().flex().flex_col();
+                        let item = match (vertical, *fit) {
+                            (true, true) => item.flex_none().w_full(),
+                            (false, true) => item.flex_none().h_full(),
+                            (true, false) => item.flex_1().w_full(),
+                            (false, false) => item.flex_1().h_full(),
+                        };
+                        item.child(node.render())
+                    }))
+                    .into_any_element()
+            }
+        }
+    }
+}
+
+impl StackPanel {
+    /// 建出来的项里的视图，按先后。
+    pub(crate) fn views(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(root) = &self.root {
+            root.views(&mut out);
+        }
+        out
+    }
+
+    /// 和别的面板叠成标签时标签上的样子：各项的标题连起来。一摞自己没有标题。
+    fn tab_label(&self) -> TabLabel {
+        let mut titles = Vec::new();
+        if let Some(root) = &self.root {
+            root.titles(&mut titles);
+        }
+        let text: SharedString = titles.join(" · ").into();
+        TabLabel {
+            text: text.clone(),
+            label: text.into_any_element(),
+            badge: None,
+        }
+    }
+
+    /// 整摞的 safe area 分给各项的视图。
+    fn areas(&self, area: SafeArea, f: &mut impl FnMut(&str, SafeArea)) {
+        if let Some(root) = &self.root {
+            root.areas(area, f);
+        }
+    }
+}
+
+/// 面板是一摞就取出来。
+fn stack_of(panel: &Arc<dyn PanelView>) -> Option<Entity<StackPanel>> {
+    panel.view().downcast::<StackPanel>().ok()
+}
+
+/// 面板是一个视图就取出来。
+fn view_panel_of(panel: &Arc<dyn PanelView>) -> Option<Entity<ViewPanel>> {
+    panel.view().downcast::<ViewPanel>().ok()
+}
+
+/// 组里只有这一块时，组顶上画不画标题带：视图自己不画顶（`draws_top_bar` 为假）才画。一摞的
+/// 各项自己画顶，占位看不见。
+fn has_title_band(panel: &Arc<dyn PanelView>, cx: &App) -> bool {
+    view_panel_of(panel).is_some_and(|panel| !panel.read(cx).draws_top_bar())
+}
+
+/// 面板在标签条上的样子。
+fn tab_label(panel: &Arc<dyn PanelView>, cx: &App) -> TabLabel {
+    if let Some(view) = view_panel_of(panel) {
+        return view.read(cx).tab_label(cx);
+    }
+    if let Some(stack) = stack_of(panel) {
+        return stack.read(cx).tab_label();
+    }
+    let text: SharedString = panel.panel_name(cx).into();
+    TabLabel {
+        text: text.clone(),
+        label: text.into_any_element(),
+        badge: None,
+    }
+}
+
+impl EventEmitter<PanelEvent> for StackPanel {}
+
+impl Focusable for StackPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Panel for StackPanel {
+    fn panel_name(&self) -> &'static str {
+        api::STACK_PANEL
+    }
+
+    fn visible(&self, _: &App) -> bool {
+        self.root.is_some()
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+
+    /// 各项自己画顶，整摞没有标题带，也就没有放大按钮。
+    fn zoomable(&self, _: &App) -> bool {
+        false
+    }
+
+    fn dump(&self, _: &App) -> PanelState {
+        PanelState {
+            panel_name: api::STACK_PANEL.to_string(),
+            children: Vec::new(),
+            info: PanelInfo::panel(self.info.clone()),
+        }
+    }
+}
+
+impl Render for StackPanel {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .children(self.root.as_ref().map(StackNode::render))
     }
 }
 
@@ -286,29 +483,25 @@ thread_local! {
     static LOAD_PASS: RefCell<Option<LoadPass>> = const { RefCell::new(None) };
 }
 
-/// 布局里的一个面板名换成面板。Dock 自己的注册表里什么都没登记，所有面板都从这里建
-/// （[`SmeltDockRenderer::build_placeholder`]）。
-fn build_panel(state: &PanelState, window: &mut Window, cx: &mut App) -> Arc<dyn BasePanelView> {
-    let id = state.panel_name.as_str();
+/// 布局里摆的一个视图：这次装布局里第一次摆、登记着、能摆进布局，就建出来（已经建过的
+/// 取那一份）。新建的记下，装完打开一次。
+fn place_view(
+    id: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<(api::ViewInfo, Rc<dyn ViewHandle>)> {
     let first = LOAD_PASS.with(|pass| {
         pass.borrow_mut()
             .as_mut()
             .is_none_or(|pass| pass.placed.insert(id.to_string()))
     });
+    if !first {
+        eprintln!("[layout] 视图 `{id}` 摆了不止一份，多出来的不显示");
+        return None;
+    }
     // 设置页由设置摆，按实例建的由别的插件带参数建，布局里摆了也当不认识。
-    let spec = api::view(id, cx).filter(|spec| spec.settings.is_none() && !spec.instances);
-    let built = first
-        .then(|| spec.and_then(|spec| Some((spec, api::ensure_view(id, window, cx)?))))
-        .flatten();
-    let Some((spec, (view, new))) = built else {
-        if !first {
-            eprintln!("[layout] 视图 `{id}` 摆了不止一份，多出来的不显示");
-        }
-        return Arc::new(cx.new(|cx| PlaceholderPanel {
-            state: state.clone(),
-            focus_handle: cx.focus_handle(),
-        }));
-    };
+    let spec = api::view(id, cx).filter(|spec| spec.settings.is_none() && !spec.instances)?;
+    let (view, new) = api::ensure_view(id, window, cx)?;
     if new {
         LOAD_PASS.with(|pass| {
             if let Some(pass) = pass.borrow_mut().as_mut() {
@@ -316,11 +509,38 @@ fn build_panel(state: &PanelState, window: &mut Window, cx: &mut App) -> Arc<dyn
             }
         });
     }
+    Some((spec, view))
+}
+
+/// 布局里的一个面板名换成面板。Dock 自己的注册表里什么都没登记，所有面板都从这里建
+/// （[`SmeltDockRenderer::build_placeholder`]）。
+fn build_panel(state: &PanelState, window: &mut Window, cx: &mut App) -> Arc<dyn PanelView> {
+    let placeholder = |cx: &mut App| -> Arc<dyn PanelView> {
+        Arc::new(cx.new(|cx| PlaceholderPanel {
+            state: state.clone(),
+            focus_handle: cx.focus_handle(),
+        }))
+    };
+    if let Some(stack) = api::Stack::of(state) {
+        let (Ok(stack), PanelInfo::Panel(info)) = (stack, &state.info) else {
+            return placeholder(cx);
+        };
+        let root = StackNode::build(&stack, window, cx);
+        return Arc::new(cx.new(|cx| StackPanel {
+            info: info.clone(),
+            root,
+            focus_handle: cx.focus_handle(),
+        }));
+    }
+    let id = state.panel_name.as_str();
+    let Some((spec, view)) = place_view(id, window, cx) else {
+        return placeholder(cx);
+    };
     let info = match &state.info {
         PanelInfo::Panel(info) => info.clone(),
         PanelInfo::Stack { .. } | PanelInfo::Tabs { .. } => Value::Null,
     };
-    panel_handle(cx.new(|cx| ViewPanel {
+    Arc::new(cx.new(|cx| ViewPanel {
         id: panel_name(id),
         title: spec.title,
         owns_top_bar: spec.draws_top_bar,
@@ -367,11 +587,16 @@ fn all_panels(area: &DockArea) -> impl Iterator<Item = PanelId> + '_ {
         .flat_map(|tree| tree.panels())
 }
 
-/// 布局里摆着这个视图的面板。占位不算。
+/// 布局里摆着这个视图的面板，在一摞里的是那一摞。占位不算。
 pub(crate) fn find_view(area: &DockArea, id: &str, cx: &App) -> Option<PanelId> {
     all_panels(area).find(|&panel| {
-        area.panel(panel)
-            .is_some_and(|panel| panel.visible(cx) && panel.panel_name(cx) == id)
+        area.panel(panel).is_some_and(|panel| {
+            panel.visible(cx)
+                && match stack_of(panel) {
+                    Some(stack) => stack.read(cx).views().iter().any(|view| view == id),
+                    None => panel.panel_name(cx) == id,
+                }
+        })
     })
 }
 
@@ -396,19 +621,17 @@ pub(crate) fn placement_of(area: &DockArea, panel: PanelId) -> Option<DockPlacem
 pub(crate) struct ShellView {
     /// 开着的那页的布局里摆着的视图。
     pub(crate) laid_out: HashSet<String>,
-    /// 别的页的布局里摆着的视图：打开它们是去那一页，不在这页的舞台上开。
-    pub(crate) elsewhere: HashSet<String>,
-    /// 此刻看得见的视图：所在组显示着的那个，没被另一组的放大挡住，也不在收起的 dock 里。
+    /// 此刻看得见的视图：所在组显示着的那个（显示着一摞就是摞里的每一个），没被另一组的
+    /// 放大挡住，也不在收起的 dock 里。
     pub(crate) shown: HashSet<String>,
-    /// 看得见、所在组既没有标签条也没有标题带、又贴着窗口上沿的视图：它自己的顶上就是
-    /// 窗口顶，拖窗口、标题这些归它自己画。
-    pub(crate) bare: HashSet<String>,
-    /// 贴着窗口左上角的组，和它显示着的视图。那组开头要给红黄绿按钮和左侧开合按钮让位。
-    pub(crate) top_left_group: Option<NodeId>,
-    pub(crate) top_left: Option<String>,
-    /// 贴着窗口右上角的组，和它显示着的视图。那组末尾要给右侧开合按钮让位。
-    pub(crate) top_right_group: Option<NodeId>,
-    pub(crate) top_right: Option<String>,
+    /// 看得见、所在组既没有标签条也没有标题带、又贴着窗口上沿的视图的 safe area：它自己的
+    /// 顶上就是窗口顶，拖窗口、标题这些归它自己画，占着窗口角的还要给角上的控件让位。不在
+    /// 这里的全为 0。
+    areas: HashMap<String, SafeArea>,
+    /// 显示着的组的 safe area：贴着窗口上沿（或放大着）的组顶上是标题栏，贴着窗口左上、右上
+    /// 角的组那个角让给红黄绿按钮和停靠区开合按钮。组有标签条、标题带时由它们按这个让位，
+    /// 没有时整份给显示着的视图（[`Self::areas`]）。不在这里的全为 0。
+    groups: HashMap<NodeId, SafeArea>,
     /// 左、右停靠区的开合按钮：`Some(开着没有)` 是要画，`None` 是布局里没有这个停靠区、
     /// 或者有组放大着（放大时别的都让开，按钮也不画）。
     pub(crate) left_dock: Option<bool>,
@@ -417,14 +640,12 @@ pub(crate) struct ShellView {
     /// 上面几项说的是 Dock 里的面板，出口里的视图要按出口查（[`Self::panel_of`]）；
     /// 只有 `shown` 把它也算进去。
     pub(crate) outlet: Option<String>,
+    /// 红黄绿按钮占的宽度：全屏、Windows 下是 0。窗口进出全屏时工作台更新它（见
+    /// `Workspace::traffic_lights`）。
+    pub(crate) lights: Pixels,
 }
 
 impl ShellView {
-    /// 哪页的布局里摆着这个视图：打开它是去那里让它露出来，不放进出口。
-    pub(crate) fn paged(&self, id: &str) -> bool {
-        self.laid_out.contains(id) || self.elsewhere.contains(id)
-    }
-
     /// 视图画在哪个面板里：出口里显示着的是出口，别的是它自己。
     pub(crate) fn panel_of<'a>(&self, id: &'a str) -> &'a str {
         if self.outlet.as_deref() == Some(id) {
@@ -434,10 +655,36 @@ impl ShellView {
         }
     }
 
-    /// 只看这页的 Dock；`elsewhere` 由工作台补上。
-    pub(crate) fn of(area: &DockArea, cx: &App) -> Self {
+    /// 视图的 safe area：它贴着窗口顶、顶上没有标签条和标题带时顶上是标题栏，占着窗口
+    /// 左上、右上角时那个角让给红黄绿按钮和停靠区开合按钮。别的视图（在标签条下面、没摆
+    /// 着、藏着）全为 0。只读缓存。
+    pub(crate) fn safe_area_of(&self, id: &str) -> SafeArea {
+        self.areas
+            .get(self.panel_of(id))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// 组的 safe area，标签条、标题带按它让位。只读缓存。
+    pub(crate) fn group_area(&self, node: NodeId) -> SafeArea {
+        self.groups.get(&node).copied().unwrap_or_default()
+    }
+
+    /// 只看这页的 Dock。`lights` 是红黄绿按钮此刻占的宽度。
+    pub(crate) fn of(area: &DockArea, lights: Pixels, cx: &App) -> Self {
         let zoomed = area.zoomed_group();
-        let mut view = Self::default();
+        let toggle = |placement| {
+            (zoomed.is_none() && area.is_dock_collapsible(placement))
+                .then(|| area.is_dock_open(placement))
+        };
+        let (top_left, top_right) = (top_left_of(area), top_right_of(area));
+        let mut view = Self {
+            lights,
+            left_dock: toggle(DockPlacement::Left),
+            right_dock: toggle(DockPlacement::Right),
+            ..Self::default()
+        };
+        let (leading, trailing) = (view.leading_inset(), view.trailing_inset());
         let mut top_groups = HashSet::new();
         for placement in PLACEMENTS {
             let open = placement == DockPlacement::Center || area.is_dock_open(placement);
@@ -451,14 +698,19 @@ impl ShellView {
                 let PaneRef::Tabs { panels, active_ix } = node.kind() else {
                     return;
                 };
-                let visible: Vec<(usize, &Arc<dyn BasePanelView>)> = panels
+                let visible: Vec<(usize, &Arc<dyn PanelView>)> = panels
                     .iter()
                     .enumerate()
                     .filter_map(|(ix, id)| Some((ix, area.panel(*id)?)))
                     .filter(|(_, panel)| panel.visible(cx))
                     .collect();
                 for (_, panel) in &visible {
-                    view.laid_out.insert(panel.panel_name(cx).to_string());
+                    match stack_of(panel) {
+                        Some(stack) => view.laid_out.extend(stack.read(cx).views()),
+                        None => {
+                            view.laid_out.insert(panel.panel_name(cx).to_string());
+                        }
+                    }
                 }
                 if !open || zoomed.is_some_and(|zoomed| zoomed != node.id()) {
                     return;
@@ -471,35 +723,40 @@ impl ShellView {
                 else {
                     return;
                 };
-                let id = displayed.panel_name(cx).to_string();
-                let no_bar = visible.len() == 1
-                    && !PanelHandle::of(displayed).is_some_and(|handle| handle.title_bar(cx));
-                if no_bar && (zoomed.is_some() || top_groups.contains(&node.id())) {
-                    view.bare.insert(id.clone());
+                let mut group = SafeArea::default();
+                if zoomed.is_some() || top_groups.contains(&node.id()) {
+                    group.title_bar = true;
+                    if top_left == Some(node.id()) {
+                        group.corners.top_left = size(leading, TOP_BAR_HEIGHT);
+                    }
+                    if top_right == Some(node.id()) {
+                        group.corners.top_right = size(trailing, TOP_BAR_HEIGHT);
+                    }
+                    view.groups.insert(node.id(), group);
                 }
-                if Some(node.id()) == top_left_of(area) {
-                    view.top_left = Some(id.clone());
+                // 有标签条、标题带的组顶上归它们，里面的视图在它们下面，什么都不用让。
+                let bare = visible.len() == 1 && !has_title_band(displayed, cx);
+                if !bare {
+                    group = SafeArea::default();
                 }
-                if Some(node.id()) == top_right_of(area) {
-                    view.top_right = Some(id.clone());
+                let mut show = |id: &str, area: SafeArea| {
+                    if area != SafeArea::default() {
+                        view.areas.insert(id.to_string(), area);
+                    }
+                    view.shown.insert(id.to_string());
+                };
+                match stack_of(displayed) {
+                    Some(stack) => stack.read(cx).areas(group, &mut show),
+                    None => show(displayed.panel_name(cx), group),
                 }
-                view.shown.insert(id);
             });
         }
-        view.top_left_group = top_left_of(area);
-        view.top_right_group = top_right_of(area);
-        let toggle = |placement| {
-            (zoomed.is_none() && area.is_dock_collapsible(placement))
-                .then(|| area.is_dock_open(placement))
-        };
-        view.left_dock = toggle(DockPlacement::Left);
-        view.right_dock = toggle(DockPlacement::Right);
         view
     }
 
     /// 贴左上角的组开头让出的宽度：红黄绿按钮，再加左侧开合按钮。
-    pub(crate) fn leading_inset(&self, window: &Window) -> Pixels {
-        lights_width(window)
+    fn leading_inset(&self) -> Pixels {
+        self.lights
             + match self.left_dock {
                 Some(_) => px(DOCK_TOGGLE_WIDTH),
                 None => px(0.),
@@ -507,7 +764,7 @@ impl ShellView {
     }
 
     /// 贴右上角的组末尾让出的宽度：右侧开合按钮。
-    pub(crate) fn trailing_inset(&self) -> Pixels {
+    fn trailing_inset(&self) -> Pixels {
         match self.right_dock {
             Some(_) => px(DOCK_TOGGLE_WIDTH),
             None => px(0.),
@@ -581,91 +838,57 @@ fn top_right_group(node: &PaneNode) -> Option<NodeId> {
     }
 }
 
-/// 红黄绿按钮占的宽度：全屏、Windows 下是 0。
-fn lights_width(window: &Window) -> Pixels {
-    if workspace_frame::traffic_lights_visible(window) {
-        px(TRAFFIC_LIGHTS_WIDTH)
-    } else {
-        px(0.)
-    }
-}
-
 // ---- 皮肤 ----
 
 /// 建好整个工作台的 Dock，套上 smelt 的皮肤。里面还是空的，布局由 `workspace_layout` 装。
+///
+/// 面板不让关，停靠区的开合按钮由外壳画在窗口上角（`Workspace::render_dock_toggles`），标签条
+/// 里都不画。
 pub(crate) fn new_area(
     workspace: gpui::WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<DockArea> {
-    let mut skin = None;
-    let area = cx.new(|cx| {
-        let inner = DockSkin::new(cx);
-        skin = Some(inner.clone());
+    cx.new(|cx| {
+        let renderer = SmeltDockRenderer {
+            workspace,
+            edges: DockEdges::new(cx.weak_entity()),
+        };
         DockArea::new(
             "smelt-shell",
             Some(smelt_plugin_api::LAYOUT_VERSION),
             window,
             cx,
         )
-        .with_renderer(Rc::new(SmeltDockRenderer {
-            skin: inner,
-            workspace,
-        }))
-    });
-    // 上面的闭包在 `cx.new` 返回前就跑完了。
-    let skin = skin.expect("DockSkin::new 在构造 Dock 时已经跑过");
-    // 面板不让关。停靠区的开合按钮由外壳画在窗口上角（`Workspace::render_dock_toggles`）：
-    // 皮肤的画在标签条里，自己管顶上的视图（会话列表、舞台）没有标签条。
-    skin.set_toggle_button_visible(false, cx);
-    skin.set_close_button_visible(false, cx);
-    area
+        .with_renderer(Rc::new(renderer))
+    })
 }
 
-/// 外层 Dock 的画法：`DockSkin` 的全部，加上 smelt 的标签条和面板。
+/// 外层 Dock 的画法。区域、分栏、中间的框用 gpui-base 的光框：底只由窗口铺一层
+/// （`workspace_frame::window_surface`），栏与栏之间靠分隔条那根 `hair` 分开。
 struct SmeltDockRenderer {
-    skin: Rc<DockSkin>,
     workspace: gpui::WeakEntity<Workspace>,
+    edges: DockEdges,
 }
 
 impl DockAreaRenderer for SmeltDockRenderer {
-    fn frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
-        DockAreaRenderer::frame(&*self.skin, window, cx)
-    }
-
-    fn center_frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
-        DockAreaRenderer::center_frame(&*self.skin, window, cx)
-    }
-
-    fn split_frame(
-        &self,
-        node: NodeId,
-        axis: Axis,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Stateful<Div> {
-        // 皮肤给分栏铺 `tab_bar` 实色，会盖住窗口那一层底。底只由窗口铺一层，分栏不铺。
-        DockAreaRenderer::split_frame(&*self.skin, node, axis, window, cx)
-            .bg(gpui::transparent_black())
-    }
-
     fn render_split_handle(
         &self,
         handle: &ResizeHandleContext,
-        window: &mut Window,
-        cx: &mut App,
+        _: &mut Window,
+        _: &mut App,
     ) -> Option<AnyElement> {
-        DockAreaRenderer::render_split_handle(&*self.skin, handle, window, cx)
+        Some(smelt_ui::dock::split_handle(handle))
     }
 
     fn render_dock(
         &self,
         dock: &DockContext,
         content: AnyElement,
-        window: &mut Window,
-        cx: &mut App,
+        _: &mut Window,
+        _: &mut App,
     ) -> AnyElement {
-        DockAreaRenderer::render_dock(&*self.skin, dock, content, window, cx)
+        self.edges.render(dock, content)
     }
 
     /// Dock 自己的注册表是空的，每个面板都走到这里，按面板名去视图注册表里取。
@@ -674,46 +897,26 @@ impl DockAreaRenderer for SmeltDockRenderer {
         state: &PanelState,
         window: &mut Window,
         cx: &mut App,
-    ) -> Option<Arc<dyn BasePanelView>> {
+    ) -> Option<Arc<dyn PanelView>> {
         Some(build_panel(state, window, cx))
     }
 
     fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
         Rc::new(SmeltTabGroup {
-            inner: DockAreaRenderer::tab_group_renderer(&*self.skin),
             workspace: self.workspace.clone(),
         })
     }
 }
 
-/// 标签组的画法：标签条是 smelt 的，其余交给皮肤。
+/// 标签组的画法。组不铺底，不按组里摆的是什么（出口还是别的视图）分深浅：布局由插件定，
+/// 宿主按位置猜「这是侧栏」就会猜错。
 struct SmeltTabGroup {
-    inner: Rc<dyn TabGroupRenderer>,
     workspace: gpui::WeakEntity<Workspace>,
 }
 
 impl TabGroupRenderer for SmeltTabGroup {
-    /// 组不铺底，底是窗口那一层（`workspace_frame::window_surface`），每一组都一样。上游
-    /// 的组框自己铺一层 `background` 实色，这里清掉。不按组里摆的是什么（出口还是别的
-    /// 视图）分深浅：布局由插件定，宿主按位置猜「这是侧栏」就会猜错；栏与栏之间靠分栏
-    /// 手柄上那条 `hair` 分开。
-    fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
-        self.inner
-            .frame(group, window, cx)
-            .bg(gpui::transparent_black())
-    }
-
-    fn content_frame(
-        &self,
-        group: &TabGroupContext,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Stateful<Div> {
-        self.inner.content_frame(group, window, cx)
-    }
-
     /// 组里两个以上面板画一排标签；只有一个时画一条居中的标题带，自己管顶上的视图
-    /// （会话列表、舞台）什么都不画。
+    /// （`draws_top_bar`）和一摞什么都不画。两头按组的 safe area 给角上的控件让位。
     fn render_tab_bar(
         &self,
         group: &TabGroupContext,
@@ -727,33 +930,20 @@ impl TabGroupRenderer for SmeltTabGroup {
             .filter(|(_, panel)| panel.visible(cx))
             .map(|(ix, _)| ix)
             .collect();
-        let (leading, trailing) = match self.workspace.upgrade() {
-            Some(workspace) => {
-                let shell = &workspace.read(cx).shell_view;
-                let at = |corner: Option<NodeId>| corner == Some(group.node());
-                (
-                    match at(shell.top_left_group) {
-                        true => shell.leading_inset(window),
-                        false => px(0.),
-                    },
-                    match at(shell.top_right_group) {
-                        true => shell.trailing_inset(),
-                        false => px(0.),
-                    },
-                )
-            }
-            None => (px(0.), px(0.)),
-        };
+        let area = self
+            .workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).shell_view.group_area(group.node()))
+            .unwrap_or_default();
         match visible.as_slice() {
             [] => gpui::Empty.into_any_element(),
             [ix] => {
-                let panel = &group.panels()[*ix];
-                if !PanelHandle::of(panel).is_some_and(|handle| handle.title_bar(cx)) {
+                if !has_title_band(&group.panels()[*ix], cx) {
                     return gpui::Empty.into_any_element();
                 }
-                render_title_band(group, *ix, leading, trailing, window, cx)
+                render_title_band(group, *ix, &area, window, cx)
             }
-            _ => render_tabs(group, visible, leading, trailing, window, cx),
+            _ => render_tabs(group, visible, &area, cx),
         }
     }
 
@@ -761,10 +951,10 @@ impl TabGroupRenderer for SmeltTabGroup {
         &self,
         panel: gpui::AnyView,
         group: &TabGroupContext,
-        window: &mut Window,
-        cx: &mut App,
+        _: &mut Window,
+        _: &mut App,
     ) -> AnyElement {
-        self.inner.render_active_panel(panel, group, window, cx)
+        smelt_ui::dock::active_panel(panel, group)
     }
 
     fn render_drop_indicator(
@@ -773,202 +963,96 @@ impl TabGroupRenderer for SmeltTabGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        self.inner.render_drop_indicator(indicator, window, cx)
-    }
-
-    fn render_empty(
-        &self,
-        group: &TabGroupContext,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<AnyElement> {
-        self.inner.render_empty(group, window, cx)
+        Some(smelt_ui::dock::drop_indicator(indicator, window, cx))
     }
 }
 
-/// 只有一块面板的组：一条居中的标题，整条拖窗口；别的组的标签拖到这里，并进这一组。
+/// 只有一块面板的组：一条居中的标题；在窗口标题栏上时整条拖窗口。别的组的标签拖到这里，
+/// 并进这一组。
 fn render_title_band(
     group: &TabGroupContext,
     ix: usize,
-    leading: Pixels,
-    trailing: Pixels,
-    window: &mut Window,
+    area: &SafeArea,
+    _: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let bar_h = workspace_frame::TOP_BAR_HEIGHT;
-    let panel = &group.panels()[ix];
-    let title = panel_label(panel, window, cx);
-    let badge = PanelHandle::of(panel).and_then(|handle| handle.title_suffix(window, cx));
-    let muted = cx.theme().muted_foreground;
+    let insets = area.insets(Adapt::Horizontal);
+    let label = tab_label(&group.panels()[ix], cx);
     let droppable = group.is_droppable();
     let target = group.clone();
-    workspace_frame::with_window_drag(
-        h_flex()
-            .id("smelt-title-band")
-            .flex_none()
-            .w_full()
-            .h(bar_h)
-            .pl(leading)
-            .pr(trailing)
-            .when(droppable, |this| {
-                this.drag_over::<DragPanel>(|this, _, _, cx| this.bg(cx.theme().tokens.drop_target))
-                    .on_drop(move |drag: &DragPanel, window, cx| {
-                        target.drop_panel(drag.clone(), None, true, window, cx);
-                    })
-            })
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .gap_1()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(title)
-                    .children(badge),
-            )
-            .children(zoom_button(group, cx)),
-    )
-    .into_any_element()
+    let band = div()
+        .id("smelt-title-band")
+        .flex()
+        .items_center()
+        .flex_none()
+        .w_full()
+        .h(TOP_BAR_HEIGHT)
+        .pl(insets.left)
+        .pr(insets.right)
+        .when(droppable, |this| {
+            this.drag_over::<DragPanel>(|this, _, _, _| this.bg(ui_theme::row_selected()))
+                .on_drop(move |drag: &DragPanel, window, cx| {
+                    target.drop_panel(drag.clone(), None, true, window, cx);
+                })
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .gap_1()
+                .justify_center()
+                .text_sm()
+                .text_color(rgb(ui_theme::muted()))
+                .child(label.label)
+                .children(label.badge),
+        )
+        .children(zoom_button(group, cx));
+    if area.title_bar {
+        with_window_drag(band).into_any_element()
+    } else {
+        band.into_any_element()
+    }
 }
 
-/// 两块以上面板的组：一排标签，拖标签重排、拖进别的组。标签本身不拖窗口，开头的让位和
-/// 标签后的空白拖。
+/// 两块以上面板的组：一排标签，拖标签重排、拖进别的组。在窗口标题栏上时开头的让位和标签
+/// 后的空白拖窗口，标签本身不拖。
 fn render_tabs(
     group: &TabGroupContext,
     visible: Vec<usize>,
-    leading: Pixels,
-    trailing: Pixels,
-    window: &mut Window,
+    area: &SafeArea,
     cx: &mut App,
 ) -> AnyElement {
-    let bar_h = workspace_frame::TOP_BAR_HEIGHT;
-    let selected = visible.iter().position(|ix| *ix == group.active_ix());
-    let draggable = group.is_draggable();
-    let droppable = group.is_droppable();
-    let tabs: Vec<Tab> = visible
-        .iter()
-        .map(|&ix| {
-            let panel = group.panels()[ix].clone();
-            // 角标由面板自己给（`Panel::title_suffix`），这里不认具体是哪块。
-            let badge = PanelHandle::of(&panel).and_then(|handle| handle.title_suffix(window, cx));
-            let label = panel_label(&panel, window, cx);
-            let drag = draggable.then(|| group.drag_panel(ix, cx)).flatten();
-            Tab::new()
-                .child(label)
-                .when_some(badge, |tab, badge| tab.suffix(badge))
-                .when_some(drag, |tab, drag| {
-                    tab.on_drag(drag, move |drag, offset, _window, cx| {
-                        cx.stop_propagation();
-                        drag.set_drag_offset(offset);
-                        drag.set_preview_size(DRAG_PREVIEW_SIZE);
-                        let title: SharedString = panel_text(&panel, cx);
-                        cx.new(|_| DragPreview { title })
-                    })
-                })
-                .when(droppable, |tab| {
-                    let group = group.clone();
-                    tab.drag_over::<DragPanel>(|this, _, _, cx| {
-                        this.border_l_2().border_color(cx.theme().drag_border)
-                    })
-                    .on_drop(move |drag: &DragPanel, window, cx| {
-                        group.drop_panel(drag.clone(), Some(ix), true, window, cx);
-                    })
-                })
-        })
+    let insets = area.insets(Adapt::Horizontal);
+    let tabs = visible
+        .into_iter()
+        .map(|ix| (ix, tab_label(&group.panels()[ix], cx)))
         .collect();
-    let tabs_count = group.panels().len();
-    let select = group.clone();
-    let tail = group.clone();
-    let node = group.node();
-    TabBar::new("smelt-tab-bar")
-        .underline()
-        .xsmall()
+    let lead = div().w(insets.left + px(8.)).h_full().flex_none();
+    div()
+        .flex()
+        .items_center()
         .w_full()
-        .h(bar_h)
+        .h(TOP_BAR_HEIGHT)
         .flex_none()
-        .when_some(selected, |bar, ix| bar.selected_index(ix))
-        // 标签条按显示的先后编号，隐藏的面板不占号，换回组里的下标再选。
-        .on_click(move |shown: &usize, window, cx| {
-            if let Some(&ix) = visible.get(*shown) {
-                select.select_tab(ix, window, cx);
-            }
+        .child(if area.title_bar {
+            with_window_drag(lead)
+        } else {
+            lead
         })
-        .children(tabs)
-        .prefix(workspace_frame::with_window_drag(
-            div().w(leading + px(16.)).h(bar_h).flex_none(),
-        ))
-        // 标签后的空白：拖窗口，也收拖过来的标签（放到最后）。
-        .last_empty_space(workspace_frame::with_window_drag(
+        .child(tab_strip(group, tabs, area.title_bar, cx))
+        .child(
             div()
-                .id("smelt-tab-bar-empty")
-                .flex_1()
-                .min_w_0()
-                .h(bar_h)
-                .when(droppable, |this| {
-                    this.drag_over::<DragPanel>(|this, _, _, cx| {
-                        this.bg(cx.theme().tokens.drop_target)
-                    })
-                    .on_drop(move |drag: &DragPanel, window, cx| {
-                        // 自己组里的拖到最后一格；别处来的追加在后面，不抢显示。
-                        let ix = (drag.source() == node).then(|| tabs_count - 1);
-                        tail.drop_panel(drag.clone(), ix, false, window, cx);
-                    })
-                }),
-        ))
-        .suffix(
-            h_flex()
+                .flex()
+                .items_center()
                 .flex_none()
-                .h(bar_h)
-                .pr(trailing)
+                .h_full()
+                .pr(insets.right)
                 .children(zoom_button(group, cx)),
         )
         .into_any_element()
-}
-
-/// 拖标签时跟着鼠标的那块。组件库的 `DragPanelPreview` 建不出来（字段私有），照它的样子画。
-struct DragPreview {
-    title: SharedString,
-}
-
-impl Render for DragPreview {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
-            .id("smelt-drag-panel")
-            .cursor_grab()
-            .py_1()
-            .px_3()
-            .w_24()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .border_1()
-            .border_color(theme.border)
-            .rounded(theme.radius)
-            .text_color(theme.tab_foreground)
-            .bg(theme.tokens.tab_active)
-            .opacity(0.75)
-            .child(self.title.clone())
-    }
-}
-
-/// 标签上的名字：面板给的短名，没有就用它的标题。
-fn panel_label(panel: &Arc<dyn BasePanelView>, window: &mut Window, cx: &mut App) -> AnyElement {
-    match PanelHandle::of(panel) {
-        Some(handle) => match handle.tab_name(cx) {
-            Some(name) => name.into_any_element(),
-            None => handle.title(window, cx),
-        },
-        None => panel_text(panel, cx).into_any_element(),
-    }
-}
-
-/// 面板名字的纯文本，拖动预览用。只读内存。
-fn panel_text(panel: &Arc<dyn BasePanelView>, cx: &App) -> SharedString {
-    PanelHandle::of(panel)
-        .and_then(|handle| handle.tab_name(cx))
-        .unwrap_or_else(|| panel.panel_name(cx).into())
 }
 
 /// 放大 / 还原这一组。放大是 Dock 自己的：这一组铺满整个工作台，别的都让开。
@@ -1009,12 +1093,12 @@ impl Workspace {
     /// 位置。按停靠区给，不认里面摆的是什么视图：布局把什么放进左右停靠区，什么就能收起。
     /// 停靠区收起后宽度是 0，什么都画不出来，重新打开只能靠这里。
     ///
-    /// 贴着这两个角的组给按钮让了位（[`ShellView::leading_inset`]、
-    /// [`ShellView::trailing_inset`]）。`inset` 是 Dock 外面那圈内边距。
-    pub(crate) fn render_dock_toggles(&self, inset: Pixels, window: &Window) -> Vec<AnyElement> {
+    /// 贴着这两个角的组按它的 safe area 给按钮让了位（[`ShellView::group_area`]）。`inset`
+    /// 是 Dock 外面那圈内边距。
+    pub(crate) fn render_dock_toggles(&self, inset: Pixels) -> Vec<AnyElement> {
         let left = self.shell_view.left_dock.map(|open| {
             dock_toggle(DockPlacement::Left, open, self.shell_dock().clone())
-                .left(inset + lights_width(window))
+                .left(inset + self.shell_view.lights)
         });
         let right = self.shell_view.right_dock.map(|open| {
             dock_toggle(DockPlacement::Right, open, self.shell_dock().clone()).right(inset)
@@ -1029,207 +1113,35 @@ impl Workspace {
 
 /// 一个停靠区的开合按钮。横向位置由调用方给。
 fn dock_toggle(placement: DockPlacement, open: bool, area: Entity<DockArea>) -> Div {
-    let (id, label, icon): (&str, &str, Icon) = match (placement, open) {
-        (DockPlacement::Left, true) => (
-            "dock-toggle-left",
-            "收起左侧",
-            Icon::empty().path("smelt-icons/panel-left-filled.svg"),
-        ),
-        (DockPlacement::Left, false) => {
-            ("dock-toggle-left", "展开左侧", IconName::PanelLeft.into())
-        }
-        (_, true) => (
-            "dock-toggle-right",
-            "收起右侧",
-            Icon::empty().path("smelt-icons/panel-right-filled.svg"),
-        ),
-        (_, false) => ("dock-toggle-right", "展开右侧", IconName::PanelRight.into()),
+    let (id, label) = match (placement, open) {
+        (DockPlacement::Left, true) => ("dock-toggle-left", "收起左侧"),
+        (DockPlacement::Left, false) => ("dock-toggle-left", "展开左侧"),
+        (_, true) => ("dock-toggle-right", "收起右侧"),
+        (_, false) => ("dock-toggle-right", "展开右侧"),
+    };
+    let button = Button::new(id).quiet().small();
+    let button = match (placement, open) {
+        (DockPlacement::Left, true) => button.icon_path("smelt-icons/panel-left-filled.svg"),
+        (DockPlacement::Left, false) => button.icon(IconName::PanelLeft),
+        (_, true) => button.icon_path("smelt-icons/panel-right-filled.svg"),
+        (_, false) => button.icon(IconName::PanelRight),
     };
     div()
         .absolute()
         .w(px(DOCK_TOGGLE_WIDTH))
-        .h(workspace_frame::TOP_BAR_HEIGHT)
+        .h(TOP_BAR_HEIGHT)
         .flex()
         .items_center()
         .justify_center()
         // 浮在拖窗口的顶带上：按下先拦住，不让它变成拖窗口。
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
-            Button::new(id)
-                .quiet()
-                .small()
-                .icon(icon)
+            button
                 .icon_action(label)
                 .on_click(move |_, window, cx| {
                     area.update(cx, |area, cx| area.toggle_dock(placement, window, cx));
                 }),
         )
-}
-
-// ---- 会话列表和舞台的画法 ----
-
-impl Workspace {
-    /// 会话列表。自己顶着窗口上沿时（单独一组、贴顶）让出顶栏的高度，空白处拖窗口；
-    /// 贴左上角时拖窗口的条从红黄绿按钮右边开始。
-    pub(crate) fn render_sidebar_dock(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let sessions = Builtin::Sessions.id();
-        let animate = self.workspace_window_active && self.view_shown(sessions);
-        let at_top = self.shell_view.bare.contains(sessions);
-        let drag_left = if self.shell_view.top_left.as_deref() == Some(sessions) {
-            self.shell_view.leading_inset(window)
-        } else {
-            px(0.)
-        };
-        let statuses: Vec<AgentStatus> = self
-            .sessions
-            .iter()
-            .map(|session| session.status(cx))
-            .collect();
-        let focused_key = self.sidebar_focused_key(window);
-        let list =
-            self.render_session_list(cx.entity(), window, cx, &statuses, animate, focused_key);
-        // 底是窗口那一层（`workspace_frame::window_surface`），会话列表不另铺。
-        workspace_frame::card(gpui::transparent_black())
-            .when(at_top, |card| card.pt(workspace_frame::TOP_BAR_HEIGHT))
-            // 从访达拖文件夹进会话列表 = 打开项目。不挂整个窗口：对话输入框要自己收文件。
-            .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
-                style.bg(cx.theme().drop_target)
-            })
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
-                this.open_paths(paths.paths(), cx);
-            }))
-            .child(div().size_full().min_w_0().child(list))
-            .when(at_top, |card| {
-                card.child(workspace_frame::with_window_drag(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left(drag_left)
-                        .right_0()
-                        .h(workspace_frame::TOP_BAR_HEIGHT),
-                ))
-            })
-            .into_any_element()
-    }
-
-    /// 舞台：活动会话（项目里的会话，或侧栏「对话」里选中的那段）。
-    pub(crate) fn render_stage_dock(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let stage_content = self.render_stage_session(cx);
-        let content = div()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(stage_content);
-        // 标题胶囊和拖窗口的顶带浮在舞台内容上沿，只盖舞台自己。
-        let chrome = self.render_stage_chrome(self.chrome_left_guard(window), cx);
-        // 底是窗口那一层（`workspace_frame::window_surface`），舞台不另铺。
-        workspace_frame::card(gpui::transparent_black())
-            .child(content)
-            .child(chrome)
-            .into_any_element()
-    }
-
-    fn render_stage_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        // 自动化跑出来的对话在自动化里看，不上舞台。
-        let Some(session) = self.sessions.get(self.active_session).filter(|session| {
-            !session.is_product_conversation(cx) || session.is_agent_conversation(cx)
-        }) else {
-            return self.render_stage_empty(cx);
-        };
-        let body = match &session.kind {
-            // 终端不铺底，底就是窗口那一层，顶上给标题胶囊让出的那条和下面连成一片。
-            SessionKind::Term { dock, .. } => div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .pt(px(ui_theme::CHROME_ISLAND_BAND_PX))
-                .child(dock.area().clone())
-                .into_any_element(),
-            SessionKind::Conversation(view) => div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .child(
-                    view.clone()
-                        .cached(gpui::StyleRefinement::default().size_full()),
-                )
-                .into_any_element(),
-        };
-        div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(div().flex_1().min_w_0().min_h_0().flex().child(body))
-            .into_any_element()
-    }
-
-    fn render_stage_empty(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        if self.spaces.is_empty() {
-            return stage_empty_state(
-                gpui_kit_assets::IconName::Server,
-                "添加远程机器",
-                "配对一台 Linux 或 macOS 机器后，就可以在这里打开项目、对话和终端。",
-                Some(
-                    Button::new("empty-add-runtime")
-                        .primary()
-                        .label("添加远程机器")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_settings_section(
-                                crate::settings::SettingsSection::Remote,
-                                window,
-                                cx,
-                            );
-                        })),
-                ),
-            )
-            .into_any_element();
-        }
-        stage_empty_state(
-            gpui_kit_assets::IconName::Coffee,
-            "休息一下",
-            "没有打开的会话",
-            None,
-        )
-        .into_any_element()
-    }
-}
-
-/// 舞台空态。
-fn stage_empty_state(
-    icon: impl Into<Icon>,
-    title: &'static str,
-    description: &'static str,
-    action: Option<Button>,
-) -> Div {
-    let empty = Empty::new()
-        .header(
-            EmptyHeader::new()
-                .media(
-                    EmptyMedia::new()
-                        .with_variant(EmptyMediaVariant::Icon)
-                        .child(Icon::new(icon)),
-                )
-                .title(EmptyTitle::new().child(title))
-                .description(EmptyDescription::new().max_w(px(420.)).child(description)),
-        )
-        .when_some(action, |empty, action| {
-            empty.content(EmptyContent::new().child(action))
-        });
-    div().flex_1().flex().child(empty)
 }
 
 #[cfg(test)]

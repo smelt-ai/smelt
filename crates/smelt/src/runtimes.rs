@@ -37,14 +37,6 @@ pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
     }
 }
 
-/// 机器操作系统：远程取连接时缓存的值，未知时不猜测。
-pub(crate) fn runtime_os<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a str> {
-    match key {
-        RuntimeKey::Local => Some(std::env::consts::OS),
-        RuntimeKey::Remote(_) => remote_of(key, cx)?.connection.os.as_deref(),
-    }
-}
-
 /// 那台机器上的路径（会话 cwd、项目根）按哪种系统的规则切：本机就是这台电脑；远程的取
 /// 连上时记下的 `os`，还没连上过当 POSIX——运行时开始支持 Windows 之前就在报 `os` 了，
 /// 不报的只会是 Linux、macOS。
@@ -111,24 +103,7 @@ pub(crate) fn runtime_name(key: &RuntimeKey, cx: &gpui::App) -> String {
     }
 }
 
-/// 有没有配对过远程运行时。没有时一切都在本机，界面上不必标「只作用于本机」。
-pub(crate) fn has_remote_runtimes(cx: &gpui::App) -> bool {
-    cx.try_global::<RuntimeHub>()
-        .is_some_and(|hub| !hub.remotes.is_empty())
-}
-
-/// 设置里只管本机运行时的页面挂的标签：有远程运行时以后，这些页面改的东西
-/// 对远程不生效，得说清楚。
-pub(crate) fn local_runtime_scope_chip() -> gpui_component::tag::Tag {
-    use gpui::{ParentElement as _, Styled as _};
-    gpui_component::tag::Tag::secondary()
-        .outline()
-        .rounded_full()
-        .flex_none()
-        .child("只作用于本机运行时")
-}
-
-/// 远程运行时不能用时侧栏标的字（按最近一次探测），能用就是 `None`。本机总能用。
+/// 远程运行时不能用时给机器标的字（按最近一次探测），能用就是 `None`。本机总能用。
 pub(crate) fn runtime_unavailable_label(key: &RuntimeKey, cx: &gpui::App) -> Option<&'static str> {
     match key {
         RuntimeKey::Local => None,
@@ -279,85 +254,6 @@ fn link_changed(old: Option<&RuntimeLink>, new: Option<&RuntimeLink>) -> bool {
     }
 }
 
-/// 状态文字的轻重。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LinkTone {
-    Muted,
-    Warning,
-}
-
-/// 一台机器的连接状态写成字：走哪条路、多慢，版本不对时是什么版本。
-fn link_text(status: &RuntimeStatus, link: Option<&RuntimeLink>) -> (String, LinkTone) {
-    match status {
-        RuntimeStatus::Connecting => ("连接中".to_string(), LinkTone::Muted),
-        RuntimeStatus::Offline(_) => ("离线".to_string(), LinkTone::Muted),
-        RuntimeStatus::Incompatible { version, .. } => {
-            let text = format!("版本不兼容 · {version}");
-            // 连得上，连接路径照样有：也说走哪条路、多慢。
-            let text = match link {
-                Some(link) => format!("{text} · {}", link_summary(link)),
-                None => text,
-            };
-            (text, LinkTone::Warning)
-        }
-        RuntimeStatus::Upgrading(progress) => (progress.clone(), LinkTone::Muted),
-        RuntimeStatus::Online { .. } => {
-            let Some(link) = link else {
-                return ("在线".to_string(), LinkTone::Muted);
-            };
-            let tone = if link.rtt_ms >= SLOW_RTT_MS {
-                LinkTone::Warning
-            } else {
-                LinkTone::Muted
-            };
-            match &link.kind {
-                LinkKind::Other => (format!("在线 · {}ms", link.rtt_ms), tone),
-                _ => (link_summary(link), tone),
-            }
-        }
-    }
-}
-
-/// 侧栏标题上的连接指示灯。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LinkLight {
-    /// 在线，延迟正常。
-    Good,
-    /// 能用但要留意：连接中、升级中、延迟高。
-    Degraded,
-    /// 用不了：离线、版本不兼容。
-    Down,
-}
-
-/// 侧栏标题上一台远程机器的连接状态：一盏灯，悬停看完整说明。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RuntimeIndicator {
-    pub(crate) light: LinkLight,
-    pub(crate) detail: String,
-}
-
-fn indicator(status: &RuntimeStatus, link: Option<&RuntimeLink>) -> RuntimeIndicator {
-    let light = match status {
-        RuntimeStatus::Online { .. } => match link {
-            Some(link) if link.rtt_ms >= SLOW_RTT_MS => LinkLight::Degraded,
-            _ => LinkLight::Good,
-        },
-        RuntimeStatus::Connecting => LinkLight::Degraded,
-        RuntimeStatus::Upgrading(_) => LinkLight::Degraded,
-        RuntimeStatus::Offline(_) => LinkLight::Down,
-        RuntimeStatus::Incompatible { .. } => LinkLight::Down,
-    };
-    let detail = match status {
-        RuntimeStatus::Offline(error) => format!("离线：{error}"),
-        // 光说对不上不够：悬停要看得到为什么、该升级哪一边。
-        RuntimeStatus::Incompatible { detail, .. } if !detail.is_empty() => {
-            format!("{}\n{detail}", link_text(status, link).0)
-        }
-        _ => link_text(status, link).0,
-    };
-    RuntimeIndicator { light, detail }
-}
-
 fn remote_of<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a RemoteRuntime> {
     cx.try_global::<RuntimeHub>()?
         .remotes
@@ -370,36 +266,6 @@ fn status_of_key<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a RuntimeS
     match key {
         RuntimeKey::Local => cx.try_global::<RuntimeHub>()?.local_status.as_ref(),
         RuntimeKey::Remote(_) => remote_of(key, cx).map(|remote| &remote.status),
-    }
-}
-
-/// 走哪条路、多慢。
-fn link_summary(link: &RuntimeLink) -> String {
-    match &link.kind {
-        LinkKind::Direct => format!("直连 · {}ms", link.rtt_ms),
-        LinkKind::Relay(relay) => format!("中继 {relay} · {}ms", link.rtt_ms),
-        LinkKind::Other => format!("{}ms", link.rtt_ms),
-    }
-}
-
-/// 侧栏标题上的连接指示，见 [`RuntimeIndicator`]；本机和远程都显示实际连接状态。
-pub(crate) fn runtime_indicator(key: &RuntimeKey, cx: &gpui::App) -> Option<RuntimeIndicator> {
-    match key {
-        RuntimeKey::Local => status_of_key(key, cx).map(|status| indicator(status, None)),
-        RuntimeKey::Remote(_) => {
-            let remote = remote_of(key, cx)?;
-            Some(indicator(&remote.status, remote.link.as_ref()))
-        }
-    }
-}
-
-/// 一台机器的完整连接说明，设置「远程」页的机器一节用。
-pub(crate) fn runtime_link_detail(key: &RuntimeKey, cx: &gpui::App) -> (String, LinkTone) {
-    match key {
-        RuntimeKey::Local => ("这台 Mac".to_string(), LinkTone::Muted),
-        RuntimeKey::Remote(_) => remote_of(key, cx)
-            .map(|remote| link_text(&remote.status, remote.link.as_ref()))
-            .unwrap_or_else(|| ("离线".to_string(), LinkTone::Muted)),
     }
 }
 
@@ -462,36 +328,72 @@ pub(crate) fn runtime_can_reconnect(key: &RuntimeKey, cx: &gpui::App) -> bool {
     })
 }
 
-/// 机器列表读不出来，或者有哪台机器离线、版本不对、走中继还很慢：侧栏「设置」按钮上挂个点提醒。
-pub(crate) fn any_runtime_needs_attention(cx: &gpui::App) -> bool {
-    cx.try_global::<RuntimeHub>().is_some_and(|hub| {
-        hub.load_error.is_some()
-            || hub
-                .local_status
-                .as_ref()
-                .is_some_and(|status| indicator(status, None).light == LinkLight::Down)
-            || hub.remotes.iter().any(|remote| {
-                match indicator(&remote.status, remote.link.as_ref()).light {
-                    LinkLight::Down => true,
-                    // 连接中、升级中是过程，不算；在线却慢才算。
-                    LinkLight::Degraded => matches!(remote.status, RuntimeStatus::Online { .. }),
-                    LinkLight::Good => false,
-                }
-            })
-    })
+/// 远程机器的连接表，交给插件（[`smelt_plugin_api::Host::connections`]）。只读内存。
+pub(crate) fn connections(cx: &gpui::App) -> smelt_plugin_api::Connections {
+    use smelt_plugin_api::{Connection, ConnectionLink, ConnectionState, LinkRoute};
+    let Some(hub) = cx.try_global::<RuntimeHub>() else {
+        return Default::default();
+    };
+    let remotes = hub
+        .remotes
+        .iter()
+        .map(|remote| {
+            let key = remote.runtime.key();
+            Connection {
+                machine: key.clone(),
+                name: remote.connection.name.clone(),
+                relay: remote.connection.relay_url.clone(),
+                os: remote.connection.os.clone(),
+                state: match &remote.status {
+                    RuntimeStatus::Connecting => ConnectionState::Connecting,
+                    RuntimeStatus::Online {
+                        version, platform, ..
+                    } => ConnectionState::Online {
+                        version: version.clone(),
+                        platform: platform.clone(),
+                    },
+                    RuntimeStatus::Offline(error) => ConnectionState::Offline {
+                        error: error.clone(),
+                    },
+                    RuntimeStatus::Incompatible {
+                        version, detail, ..
+                    } => ConnectionState::Incompatible {
+                        version: version.clone(),
+                        detail: detail.clone(),
+                    },
+                    RuntimeStatus::Upgrading(progress) => ConnectionState::Upgrading {
+                        progress: progress.clone(),
+                    },
+                },
+                link: remote.link.as_ref().map(|link| ConnectionLink {
+                    route: match &link.kind {
+                        LinkKind::Direct => LinkRoute::Direct,
+                        LinkKind::Relay(relay) => LinkRoute::Relay {
+                            relay: relay.clone(),
+                        },
+                        LinkKind::Other => LinkRoute::Other,
+                    },
+                    rtt_ms: link.rtt_ms,
+                    slow: link.rtt_ms >= SLOW_RTT_MS,
+                }),
+                upgrade_note: remote.upgrade_note.clone(),
+                can_upgrade: runtime_can_upgrade(key, cx),
+                can_reconnect: runtime_can_reconnect(key, cx),
+            }
+        })
+        .collect();
+    smelt_plugin_api::Connections {
+        remotes,
+        load_error: hub.load_error.clone(),
+    }
 }
 
-/// 桌面挂着的远程运行时，以及「添加运行时」的输入和进度。设置页只读它。
+/// 桌面挂着的远程运行时。插件经 [`connections`] 读。
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeHub {
     pub(crate) remotes: Vec<RemoteRuntime>,
-    /// 设置页里正在输入的配对串。
-    pub(crate) pairing_input: String,
-    pub(crate) adding: bool,
-    /// 最近一次添加、移除的失败原因。
-    pub(crate) error: Option<String>,
     /// 启动时没读出登记过的机器（比如客户端库版本比程序新）。这时列表里只剩本机，不说
-    /// 一声就像机器全丢了，所以设置「远程」页的机器一节要显示它。
+    /// 一声就像机器全丢了，所以管机器的插件要显示它（见 [`connections`]）。
     pub(crate) load_error: Option<String>,
     /// 本机守护最近一次探到的状态，订阅线程报来（见 `runtime_events`）。还没探过是 `None`。
     pub(crate) local_status: Option<RuntimeStatus>,
@@ -972,8 +874,8 @@ fn update_hub(cx: &mut gpui::App, change: impl FnOnce(&mut RuntimeHub)) {
     cx.set_global(hub);
 }
 
-/// 启动时读出登记过的远程运行时（客户端库在本机，同步读，主窗口一起来侧栏就有它们
-/// 的分段），再起连接变化的处理循环。连通性由订阅线程报（见 `runtime_events`）。
+/// 启动时读出登记过的远程运行时（客户端库在本机，同步读，主窗口一起来插件就读得到它们
+/// 的连接），再起连接变化的处理循环。连通性由订阅线程报（见 `runtime_events`）。
 pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
     init_local_runtime_name(cx);
     let mut hub = RuntimeHub::default();
@@ -1079,18 +981,6 @@ fn sync_link_watch(key: &RuntimeKey, status: &RuntimeStatus, cx: &mut gpui::App)
     .detach();
 }
 
-/// 现在就重读一台机器的连接路径和延迟：悬停在侧栏的机器名上时调。
-pub(crate) fn sample_link(key: &RuntimeKey, cx: &mut gpui::App) {
-    let Some(remote) = remote_of(key, cx) else {
-        return;
-    };
-    if !connected(&remote.status) {
-        return;
-    }
-    let target = vec![(remote.connection.runtime_id.clone(), remote.route.clone())];
-    sample(target, cx);
-}
-
 /// 现在就重读各台连着的机器的连接路径和延迟：设置停在机器页时调。延迟只在有人看时采样，
 /// 平时只在 iroh 换了路径时读。
 pub(crate) fn sample_links(cx: &mut gpui::App) {
@@ -1128,7 +1018,7 @@ fn sample(targets: Vec<(String, RemoteRoute)>, cx: &mut gpui::App) {
 }
 
 /// 把读到的连接路径记到各台机器上。没连着的不记（读回来时它可能已经断了）；没变化就不动
-/// hub，免得看着它的侧栏跟着重画。
+/// hub，免得看着连接表的插件跟着重画。
 fn apply_links(links: Vec<(String, Option<RuntimeLink>)>, cx: &mut gpui::App) {
     let changed = cx.try_global::<RuntimeHub>().is_some_and(|hub| {
         links.iter().any(|(runtime_id, link)| {
@@ -1167,47 +1057,31 @@ fn remote_by_id<'a>(runtime_id: &str, cx: &'a gpui::App) -> Option<&'a RemoteRun
         .find(|remote| remote.connection.runtime_id == runtime_id)
 }
 
-pub(crate) fn set_pairing_input(value: &str, cx: &mut gpui::App) {
-    let value = value.trim().to_string();
-    update_hub(cx, |hub| hub.pairing_input = value);
-}
-
 /// 用配对串添加一个远程运行时：以这台机器的主机名配对，问出它的 runtime_id 和主机名，
-/// 记进客户端库。同一个运行时重新配对就更新原来那条。
-pub(crate) fn add_runtime(cx: &mut gpui::App) {
-    let uri = cx
-        .try_global::<RuntimeHub>()
-        .map(|hub| hub.pairing_input.clone())
-        .unwrap_or_default();
+/// 记进客户端库。同一个运行时重新配对就更新原来那条。交回它的 key 和名字。
+pub(crate) fn add_runtime(
+    uri: String,
+    cx: &mut gpui::App,
+) -> gpui::Task<Result<(RuntimeKey, String), String>> {
+    let uri = uri.trim().to_string();
     if uri.is_empty() {
-        return;
+        return gpui::Task::ready(Err("先粘贴那台机器的配对串".to_string()));
     }
-    update_hub(cx, |hub| {
-        hub.adding = true;
-        hub.error = None;
-    });
     cx.spawn(async move |cx| {
-        let added = cx
+        let remote = cx
             .background_executor()
             .spawn(async move { pair_with(&uri) })
-            .await;
+            .await?;
+        let added = (remote.runtime.key().clone(), remote.connection.name.clone());
         cx.update(|cx| {
             update_hub(cx, |hub| {
-                hub.adding = false;
-                match added {
-                    Ok(remote) => {
-                        hub.pairing_input.clear();
-                        hub.remotes.retain(|known| {
-                            known.connection.runtime_id != remote.connection.runtime_id
-                        });
-                        hub.remotes.push(remote);
-                    }
-                    Err(error) => hub.error = Some(error),
-                }
+                hub.remotes
+                    .retain(|known| known.connection.runtime_id != remote.connection.runtime_id);
+                hub.remotes.push(remote);
             });
         });
+        Ok(added)
     })
-    .detach();
 }
 
 pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
@@ -1265,7 +1139,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
     })
 }
 
-/// 改一台机器在这台电脑上的显示名：先改 hub，侧栏和设置页立刻换上；客户端库在后台写。
+/// 改一台机器在这台电脑上的显示名：先改 hub，看着连接表的插件立刻换上；客户端库在后台写。
 pub(crate) fn rename_runtime(runtime_id: String, name: String, cx: &mut gpui::App) {
     let mut renamed = None;
     update_hub(cx, |hub| {
@@ -1295,13 +1169,6 @@ pub(crate) fn rename_runtime(runtime_id: String, name: String, cx: &mut gpui::Ap
 /// 最近一次探测是在线。
 pub(crate) fn runtime_online(key: &RuntimeKey, cx: &gpui::App) -> bool {
     status_of_key(key, cx).is_some_and(|status| matches!(status, RuntimeStatus::Online { .. }))
-}
-
-/// 这台电脑经哪个中继连这台远程机器（配对时记下、或之后改过的）。空的是 n0 的公共 relay。
-pub(crate) fn runtime_relay(key: &RuntimeKey, cx: &gpui::App) -> String {
-    remote_of(key, cx)
-        .and_then(|remote| remote.connection.relay_url.clone())
-        .unwrap_or_default()
 }
 
 /// 改一台远程机器的中继，`relay` 空着就是 n0 的公共 relay。
@@ -1417,15 +1284,19 @@ fn relay_set_reply<T>(
 /// 配对要走公网拨号，比本机调用慢得多。
 const PAIR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// 移除一个远程运行时：先请它撤销这台设备（连不上就算了），再从客户端库删掉。
-pub(crate) fn remove_runtime(runtime_id: String, cx: &mut gpui::App) {
+/// 移除一个远程运行时：从客户端库删掉，在线的再请它撤销这台设备（连不上就算了）。
+/// 删完就交回，不等撤销。
+pub(crate) fn remove_runtime(
+    runtime_id: String,
+    cx: &mut gpui::App,
+) -> gpui::Task<Result<(), String>> {
     let Some(remote) = cx.try_global::<RuntimeHub>().and_then(|hub| {
         hub.remotes
             .iter()
             .find(|remote| remote.connection.runtime_id == runtime_id)
             .cloned()
     }) else {
-        return;
+        return gpui::Task::ready(Err(smelt_plugin_api::MACHINE_REMOVED.to_string()));
     };
     // 在线才顺手请它吊销本机的配对。离线的连不上，拨号要等到超时，不能让移除跟着等；
     // 那台机器上的配对记录留着，要清就在那台机器上撤。
@@ -1443,20 +1314,16 @@ pub(crate) fn remove_runtime(runtime_id: String, cx: &mut gpui::App) {
                 }
             })
             .await;
-        let deleted = removed.is_ok();
+        removed?;
         cx.update(|cx| {
-            update_hub(cx, |hub| match &removed {
-                Ok(()) => hub
-                    .remotes
-                    .retain(|remote| remote.connection.runtime_id != runtime_id),
-                Err(error) => hub.error = Some(error.clone()),
+            update_hub(cx, |hub| {
+                hub.remotes
+                    .retain(|remote| remote.connection.runtime_id != runtime_id)
             });
-            if removed.is_ok() {
-                remote.route.unwatch();
-                crate::settings::forget_agent_host(remote.runtime.key(), cx);
-            }
+            remote.route.unwatch();
         });
-        if deleted && revoke {
+        if revoke {
+            // 撤销不拖住移除：在后台发完就算。
             cx.background_executor()
                 .spawn(async move {
                     if let Ok(client) = iroh_client() {
@@ -1471,10 +1338,10 @@ pub(crate) fn remove_runtime(runtime_id: String, cx: &mut gpui::App) {
                             );
                     }
                 })
-                .await;
+                .detach();
         }
+        Ok(())
     })
-    .detach();
 }
 
 #[cfg(test)]
@@ -1491,25 +1358,6 @@ mod tests {
             platform: None,
             smelt_home: None,
         }
-    }
-
-    #[gpui::test]
-    fn local_machine_shows_actual_connection_status(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            cx.set_global(RuntimeHub::default());
-            assert!(runtime_indicator(&RuntimeKey::Local, cx).is_none());
-
-            cx.global_mut::<RuntimeHub>().local_status = Some(online());
-            let connected = runtime_indicator(&RuntimeKey::Local, cx).unwrap();
-            assert_eq!(connected.light, LinkLight::Good);
-            assert_eq!(connected.detail, "在线");
-
-            cx.global_mut::<RuntimeHub>().local_status =
-                Some(RuntimeStatus::Offline("连接中断".into()));
-            let disconnected = runtime_indicator(&RuntimeKey::Local, cx).unwrap();
-            assert_eq!(disconnected.light, LinkLight::Down);
-            assert_eq!(disconnected.detail, "离线：连接中断");
-        });
     }
 
     /// 调用按 key 发给那台机器自己的客户端；机器移除了就取不到，不能悄悄退回本机。
@@ -1605,7 +1453,7 @@ mod tests {
         );
     }
 
-    /// 延迟抖一下就让侧栏重画不值得；换了路径、或者变化够大才算变。
+    /// 延迟抖一下就让看着连接表的插件重画不值得；换了路径、或者变化够大才算变。
     #[test]
     fn small_latency_jitter_is_not_a_change() {
         let relay = |rtt| Some(link(LinkKind::Relay("n0 usw1-1".into()), rtt));
@@ -1617,77 +1465,6 @@ mod tests {
         ));
         assert!(link_changed(relay(437).as_ref(), None));
         assert!(!link_changed(None, None));
-    }
-
-    /// 设置「远程」页的机器一节里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
-    #[test]
-    fn the_machine_panel_spells_the_link_out() {
-        let status = online();
-        assert_eq!(
-            link_text(&status, Some(&link(LinkKind::Direct, 12))),
-            ("直连 · 12ms".into(), LinkTone::Muted)
-        );
-        assert_eq!(link_text(&status, None), ("在线".into(), LinkTone::Muted));
-        assert_eq!(
-            link_text(
-                &status,
-                Some(&link(LinkKind::Relay("n0 usw1-1".into()), 437))
-            ),
-            ("中继 n0 usw1-1 · 437ms".into(), LinkTone::Warning)
-        );
-        assert_eq!(
-            link_text(&RuntimeStatus::Offline("断了".into()), None),
-            ("离线".into(), LinkTone::Muted)
-        );
-        let incompatible = RuntimeStatus::Incompatible {
-            version: "0.9.0-rc.3".into(),
-            detail: "运行时 0.9.0-rc.3 较旧，需要升级运行时（控制协议 v1，客户端要 v2）".into(),
-            fix: IncompatibleFix::UpgradeRuntime,
-        };
-        assert_eq!(
-            link_text(
-                &incompatible,
-                Some(&link(LinkKind::Relay("n0 usw1-1".into()), 437))
-            ),
-            (
-                "版本不兼容 · 0.9.0-rc.3 · 中继 n0 usw1-1 · 437ms".into(),
-                LinkTone::Warning
-            )
-        );
-    }
-
-    /// 侧栏标题一盏灯：在线绿、慢或过程中黄、用不了红，悬停看全。
-    #[test]
-    fn the_sidebar_light_follows_the_link() {
-        let fast = indicator(
-            &online(),
-            Some(&link(LinkKind::Relay("n0 usw1-1".into()), 60)),
-        );
-        assert_eq!(fast.light, LinkLight::Good);
-        assert_eq!(fast.detail, "中继 n0 usw1-1 · 60ms");
-
-        let slow = indicator(
-            &online(),
-            Some(&link(LinkKind::Relay("n0 usw1-1".into()), 628)),
-        );
-        assert_eq!(slow.light, LinkLight::Degraded);
-
-        let offline = indicator(&RuntimeStatus::Offline("connection refused".into()), None);
-        assert_eq!(offline.light, LinkLight::Down);
-        assert_eq!(offline.detail, "离线：connection refused");
-
-        let incompatible = indicator(
-            &RuntimeStatus::Incompatible {
-                version: "0.9.0".into(),
-                detail: String::new(),
-                fix: IncompatibleFix::UpgradeRuntime,
-            },
-            None,
-        );
-        assert_eq!(incompatible.light, LinkLight::Down);
-
-        let upgrading = indicator(&RuntimeStatus::Upgrading("正在升级".into()), None);
-        assert_eq!(upgrading.light, LinkLight::Degraded);
     }
 
     /// 每次连接都用 `respond` 回一条 `system.describe`，模拟另一个版本的运行时。
@@ -1880,7 +1657,7 @@ mod tests {
         assert!(detail.contains("需要升级客户端"), "{detail}");
     }
 
-    /// 订阅线程把每次探测到的连通性报回来，订阅断开也报：侧栏的「离线」靠它更新，
+    /// 订阅线程把每次探测到的连通性报回来，订阅断开也报：机器的「离线」靠它更新，
     /// 不能只在启动时探一次。
     #[test]
     fn subscription_reports_reachability_changes() {
@@ -2096,16 +1873,21 @@ mod tests {
             );
         });
 
+        // 和终端插件一样发 open 开一个终端；连接留着就是附着着。
         let sid = format!("remote-test-{}", uuid::Uuid::new_v4().simple());
-        let terminal = smelt_terminal::terminal::Terminal::spawn(
-            connector(&runtime).as_ref(),
-            24,
-            80,
-            None,
-            &sid,
-            Some("echo smelt-remote-ok; sleep 60"),
-        )
-        .unwrap();
+        let mut terminal = runtime.client().connect().unwrap();
+        {
+            use std::io::Write as _;
+            let open = serde_json::json!({
+                "op": smelt_runtime_client::protocol::daemon::DaemonOperation::Open,
+                "id": sid,
+                "cols": 80,
+                "rows": 24,
+                "initial_launch": "echo smelt-remote-ok; sleep 60",
+                "create_if_missing": true,
+            });
+            writeln!(terminal, "{open}").unwrap();
+        }
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut seen = false;
@@ -2131,7 +1913,13 @@ mod tests {
         assert!(directory, "订阅首帧没带工作区目录");
 
         drop(terminal);
-        smelt_terminal::terminal::kill_remote(&runtime, &sid);
+        let _ = runtime.client().request(
+            &serde_json::json!({
+                "op": smelt_runtime_client::protocol::daemon::DaemonOperation::Kill,
+                "id": sid,
+            }),
+            smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+        );
         // 撤销自己时运行时会先断掉这台设备的连接，回执不一定发得出来；看之后还能不能调。
         let me = iroh_client().unwrap().id().to_string();
         let _ = runtime

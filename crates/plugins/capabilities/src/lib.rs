@@ -10,22 +10,23 @@
 
 use std::rc::Rc;
 
-use api::contracts::sessions::{MACHINE_MENU, MachineMenuContext};
 use api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED;
 use api::serde_json;
-use api::ui::{Button, Segmented};
+use api::ui::field::InputState;
+use api::ui::menu::{Menu, MenuItem, MenuTrigger};
+use api::ui::{Button, IconName, Segmented, SettingsPage, SettingsRow, SettingsSection, ui_theme};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
-use gpui_component::*;
+use gpui_base::StyledExt as _;
 use smelt_plugin_api::{
     self as api, ContextMenuAction, ContextMenuItem, HostEvent, PluginView, RuntimeKey,
     TopicMessage, ViewHandle, ViewSpec,
 };
 
+mod agents;
 mod auth;
 mod config;
+mod contract;
 mod mcp;
 mod memory;
 mod models;
@@ -37,12 +38,25 @@ use state::*;
 
 const OWNER: &str = "smelt.capabilities";
 
+// 约定：smelt.sessions 的 MACHINE_MENU 和它的上下文，权威定义在
+// crates/plugins/sessions/src/contract.rs。
+const MACHINE_MENU: &str = "smelt.sessions/machine";
+
+/// [`MACHINE_MENU`] 点了交给命令的上下文：右键的是哪台机器。
+#[derive(serde::Deserialize)]
+struct MachineMenuContext {
+    #[serde(with = "api::machine_json")]
+    machine: RuntimeKey,
+}
+
 /// 机器菜单里那一项点了执行的命令：打开能力库，配右键的那台机器。
 const OPEN_ON_MACHINE: api::Command<MachineMenuContext, ()> =
     api::Command::new("smelt.capabilities/open-on-machine");
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
+    agents::install(cx);
+    refresh_auto_providers_once_online(cx);
     api::register_views(
         OWNER,
         vec![ViewSpec {
@@ -84,10 +98,32 @@ pub fn register(cx: &mut App) {
         .expect("能力库的菜单项写错了");
 }
 
+/// 本机运行时第一次连上时，请它照端点刷新 Pi 里标记为「自动」的自定义 provider 的模型目录。
+/// 用户没手填模型就是把这份目录交给我们维护，中转网关上下线模型不该要他再来点一次。
+fn refresh_auto_providers_once_online(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        if !api::wait_online(&RuntimeKey::Local, 0, cx).await {
+            return;
+        }
+        let refreshed = cx.update(|cx| {
+            api::call::<api::model::control_api::PiProvidersRefreshAuto>(
+                &RuntimeKey::Local,
+                Default::default(),
+                std::time::Duration::from_secs(300),
+                cx,
+            )
+        });
+        if let Err(error) = refreshed.await {
+            eprintln!("[pi] 刷新自动模型目录失败：{error}");
+        }
+    })
+    .detach();
+}
+
 fn open_on_machine(args: MachineMenuContext, cx: &mut App) -> Task<Result<(), String>> {
     let opened = api::OPEN_VIEW.run(
         &api::OpenView {
-            view: api::contracts::capabilities::VIEW.to_string(),
+            view: contract::VIEW.to_string(),
             args: serde_json::json!({ "machine": api::machine_to_json(&args.machine) }),
         },
         cx,
@@ -171,6 +207,8 @@ pub struct CapabilitiesPage {
     /// 远程桌面里的 Chrome。进页面、换机器、重连时问一次，还没问到当没装。
     remote_desktop: bool,
     _host_events: Subscription,
+    /// 插件页签上「谁在用」从智能体配置算，它换了就重画。
+    _agent_settings: Subscription,
 }
 
 impl CapabilitiesPage {
@@ -179,6 +217,7 @@ impl CapabilitiesPage {
         let host_events = cx.subscribe(&events, |this, _, event: &HostEvent, cx| {
             this.on_host_event(event, cx);
         });
+        let agent_settings = cx.observe_global::<agents::AgentSettingsCache>(|_, cx| cx.notify());
         Self {
             machine: RuntimeKey::Local,
             epoch: 0,
@@ -198,6 +237,7 @@ impl CapabilitiesPage {
             pi_plugin_error: None,
             remote_desktop: false,
             _host_events: host_events,
+            _agent_settings: agent_settings,
         }
     }
 
@@ -232,12 +272,12 @@ impl CapabilitiesPage {
                 }
                 cx.notify();
             }
-            // 插件页签上「谁在用」从这里算。
-            HostEvent::AgentSettingsChanged => cx.notify(),
             HostEvent::ActiveContextChanged
             | HostEvent::ShownViewsChanged
+            | HostEvent::LaidOutViewsChanged
             | HostEvent::ViewsChanged
             | HostEvent::ViewBadgesChanged
+            | HostEvent::SafeAreaChanged
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged
             | HostEvent::PagesChanged
@@ -285,29 +325,28 @@ impl CapabilitiesPage {
             .unwrap_or_default();
         let selected = self.machine.clone();
         let entity = cx.entity();
-        Button::new("capabilities-runtime")
+        let trigger = Button::new("capabilities-runtime")
             .quiet()
             .label(format!("机器：{current}"))
-            .icon(IconName::ChevronDown)
-            .dropdown_menu(move |menu, _window, _cx| {
-                machines.iter().fold(menu, |menu, machine| {
-                    let label = match &machine.unavailable {
-                        Some(reason) => format!("{}（{reason}）", machine.name),
-                        None => machine.name.clone(),
-                    };
-                    let key = machine.key.clone();
-                    let entity = entity.clone();
-                    menu.item(
-                        PopupMenuItem::new(label)
-                            .checked(machine.key == selected)
-                            .on_click(move |_, _window, cx| {
-                                let key = key.clone();
-                                entity
-                                    .update(cx, |page, cx| page.select_pi_library_runtime(key, cx));
-                            }),
-                    )
-                })
+            .icon(IconName::ChevronDown);
+        MenuTrigger::dropdown("capabilities-runtime-menu", trigger, move |_window, _cx| {
+            machines.iter().fold(Menu::new(), |menu, machine| {
+                let label = match &machine.unavailable {
+                    Some(reason) => format!("{}（{reason}）", machine.name),
+                    None => machine.name.clone(),
+                };
+                let key = machine.key.clone();
+                let entity = entity.clone();
+                menu.item(
+                    MenuItem::new(label)
+                        .checked(machine.key == selected)
+                        .on_click(move |_, _window, cx| {
+                            let key = key.clone();
+                            entity.update(cx, |page, cx| page.select_pi_library_runtime(key, cx));
+                        }),
+                )
             })
+        })
     }
 }
 
@@ -338,7 +377,7 @@ impl PluginView for CapabilitiesPage {
 }
 
 impl Render for CapabilitiesPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = api::host(cx);
         let entity = cx.entity();
         let tabs = Segmented::new("capabilities-tabs")
@@ -361,13 +400,13 @@ impl Render for CapabilitiesPage {
                     .child(self.render_machine_picker(cx))
             });
 
-        v_flex().size_full().child(header).child(
+        div().flex().flex_col().size_full().child(header).child(
             div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .flex()
-                .child(render::content(self, cx)),
+                .child(render::content(self, window, cx)),
         )
     }
 }

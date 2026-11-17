@@ -1,5 +1,5 @@
 # 内置插件「资源占用」：设置里那一页，列出桌面进程、各台机器的守护进程和会话占的 CPU 与
-# 内存。会话的数由运行时报（`resource.usage`），只依赖插件接口和 gpui 组件库，宿主里没有
+# 内存。会话的数由运行时报（`resource.usage`），只依赖插件接口和 gpui，宿主里没有
 # 它的类型（见 docs/app-plugins.md）。
 [package]
 name = "smelt-resources"
@@ -14,6 +14,8 @@ workspace = true
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 # 采样循环睡在唤醒信号和间隔之间（见 lib.rs）。
 smol = "2"
+# 照抄别的插件的约定（命令参数、菜单上下文）要按同样的 JSON 形状收发。
+serde = { version = "1", features = ["derive"] }

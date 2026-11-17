@@ -25,23 +25,30 @@ use api::model::daemon_state::{
 };
 use api::serde_json;
 use api::ui::IconAction as _;
+use api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use api::ui::truncated_line::truncated_line;
-use api::ui::{Button, ListRow, Segment, Segmented, Switch, TextArea, TextInput, ui_theme};
+use api::ui::{
+    Badge, Button, Icon, IconName, ListRow, Segment, Segmented, Switch, TextArea, TextInput,
+    ui_theme,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::input::{InputEvent, InputState, TextareaState};
-use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
-use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme as _, Icon, IconName, StyledExt as _};
+use gpui_base::StyledExt as _;
+use smelt_plugin_api::ui::field::{InputEvent, InputState, TextareaState};
 use smelt_plugin_api::{
     self as api, CommandSpec, Handled, HostEvent, PluginView, RuntimeKey, TopicMessage, ViewHandle,
     ViewSpec,
 };
 
+mod agent_hosts;
 mod automations;
 mod cards;
+mod contract;
 mod editor;
 mod model;
+mod quota;
+mod quota_view;
+mod settings_page;
 mod view;
 
 #[cfg(test)]
@@ -52,59 +59,65 @@ use editor::*;
 use model::*;
 
 const OWNER: &str = "smelt.agents";
-const VIEW_ID: &str = api::contracts::agents::VIEW;
+const VIEW_ID: &str = contract::VIEW;
 /// 跟默认智能体开一段新对话。
-const NEW_CONVERSATION: &str = api::contracts::agents::NEW_CONVERSATION.id();
+const NEW_CONVERSATION: &str = contract::NEW_CONVERSATION.id();
 /// 能力库的视图。没装就没有「管理插件 / MCP」的入口。
-const CAPABILITIES_VIEW: &str = api::contracts::capabilities::VIEW;
+// 约定：smelt.capabilities 的 VIEW，权威定义在 crates/plugins/capabilities/src/contract.rs。
+const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
     api::register_views(
         OWNER,
-        vec![ViewSpec {
-            name: "main".into(),
-            title: "智能体".into(),
-            icon: gpui_kit_assets::IconName::Bot.path(),
-            draws_top_bar: false,
-            instances: false,
-            settings: None,
-            build: Rc::new(|_window, cx| Rc::new(cx.new(AgentsPage::new)) as Rc<dyn ViewHandle>),
-        }],
+        vec![
+            ViewSpec {
+                name: "main".into(),
+                title: "智能体".into(),
+                icon: IconName::Bot.path(),
+                draws_top_bar: false,
+                instances: false,
+                settings: None,
+                build: Rc::new(|_window, cx| {
+                    Rc::new(cx.new(AgentsPage::new)) as Rc<dyn ViewHandle>
+                }),
+            },
+            settings_page::view_spec(),
+            quota_view::view_spec(),
+        ],
         cx,
     )
     .expect("智能体的视图表写错了");
+    agent_hosts::install(cx);
+    quota::install(cx);
     automations::install(cx);
     register_commands(new_conversation_title(None), cx);
     sync_new_conversation_title(cx);
+    cx.observe_global::<agent_hosts::AgentHosts>(sync_new_conversation_title)
+        .detach();
     let events = api::events(cx);
     cx.subscribe(&events, |_, event, cx| {
-        if matches!(
-            event,
-            HostEvent::AgentSettingsChanged | HostEvent::MachinesChanged
-        ) {
+        if matches!(event, HostEvent::MachinesChanged) {
             sync_new_conversation_title(cx);
         }
     })
     .detach();
 }
 
+/// 登记本插件的全部命令。登记是整套替换，所以「新对话」改标题时也要把别的一起带上。
 fn register_commands(new_conversation_title: String, cx: &mut App) {
-    api::register_commands(
-        OWNER,
-        "智能体",
-        vec![CommandSpec {
-            name: api::contracts::agents::NEW_CONVERSATION.name().to_string(),
-            title: new_conversation_title,
-            key: Some("cmd-n".to_string()),
-            context: "Workspace".to_string(),
-            palette: true,
-            requires_args: false,
-            handler: Rc::new(|_, _, cx| new_conversation(cx)),
-        }],
-        cx,
-    )
-    .expect("智能体的命令登记不上");
+    let mut commands = vec![CommandSpec {
+        name: contract::NEW_CONVERSATION.name().to_string(),
+        title: new_conversation_title,
+        key: Some("cmd-n".to_string()),
+        context: "Workspace".to_string(),
+        palette: true,
+        requires_args: false,
+        handler: Rc::new(|_, _, cx| new_conversation(cx)),
+    }];
+    commands.extend(agent_hosts::commands());
+    commands.extend(quota::commands());
+    api::register_commands(OWNER, "智能体", commands, cx).expect("智能体的命令登记不上");
 }
 
 /// 默认智能体换了、改名了、配置读到了，「新对话」的标题跟着换。标题没变不重新登记：
@@ -185,6 +198,7 @@ pub(crate) struct AgentsPage {
     session_settled: HashMap<String, bool>,
     _host_events: Subscription,
     _automations: Subscription,
+    _agent_hosts: Subscription,
 }
 
 impl AgentsPage {
@@ -204,6 +218,7 @@ impl AgentsPage {
             session_settled: HashMap::new(),
             _host_events: host_events,
             _automations: cx.observe_global::<automations::AgentAutomations>(|_, cx| cx.notify()),
+            _agent_hosts: cx.observe_global::<agent_hosts::AgentHosts>(Self::on_agents_changed),
         }
     }
 
@@ -224,9 +239,7 @@ impl AgentsPage {
                 }
             }
             HostEvent::SessionsChanged => self.on_sessions_changed(cx),
-            HostEvent::AgentSettingsChanged | HostEvent::MachinesChanged => {
-                self.on_agents_changed(cx)
-            }
+            HostEvent::MachinesChanged => self.on_agents_changed(cx),
             HostEvent::ShownViewsChanged => {
                 // 离开这页就是不要草稿了。
                 if !api::host(cx).view_shown(VIEW_ID, cx) {
@@ -239,8 +252,10 @@ impl AgentsPage {
             | HostEvent::OverlayChanged
             | HostEvent::ActiveContextChanged
             | HostEvent::NotificationPermissionChanged
+            | HostEvent::LaidOutViewsChanged
             | HostEvent::ViewsChanged
             | HostEvent::ViewBadgesChanged
+            | HostEvent::SafeAreaChanged
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged
             | HostEvent::PagesChanged
@@ -332,8 +347,7 @@ impl AgentsPage {
         // 配置还没读到（机器刚断开重连）时先留着，读到了再判断。
         let gone = |agent: &AgentRef, cx: &App| {
             !machines.contains(&agent.runtime)
-                || api::host(cx)
-                    .agent_settings(&agent.runtime, cx)
+                || agent_hosts::settings(&agent.runtime, cx)
                     .is_some_and(|config| !config.agents.iter().any(|it| it.id == agent.id))
         };
         if self

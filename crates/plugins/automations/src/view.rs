@@ -2,6 +2,9 @@
 //!
 //! 运行记录留在编辑器左侧。选中一次运行后，右侧是详情；有会话时这块详情就是现场。
 //! 只组 UI，不做 IO。写入在 `actions.rs`。
+use api::ViewInstance;
+
+use crate::peers::agents::VIEW as AGENTS_VIEW;
 use crate::prelude::*;
 
 impl AutomationsPage {
@@ -100,47 +103,49 @@ impl AutomationsPage {
         let toggle_id = editor.automation.clone();
         div()
             .flex_shrink_0()
-            .child(
+            .child(MenuTrigger::dropdown(
+                "automation-editor-more-menu",
                 Button::new("automation-editor-more")
                     .quiet()
                     .icon(IconName::Ellipsis)
-                    .accessibility_label("更多操作")
-                    .dropdown_menu(move |mut menu, _, _| {
-                        let run_entity = test_entity.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new("运行一次")
-                                .icon(IconName::Play)
-                                .disabled(header_saving)
-                                .on_click(move |_, _, cx| {
-                                    run_entity.update(cx, |page, cx| {
-                                        page.test_automation_editor(cx);
-                                    });
-                                }),
-                        );
-                        let toggle_entity = toggle_entity.clone();
-                        let toggle_id = toggle_id.clone();
-                        menu = menu.item(automation_enabled_toggle_item(enabled).on_click(
-                            move |_, _, cx| {
-                                let id = toggle_id.clone();
-                                toggle_entity.update(cx, |page, cx| {
-                                    page.set_automation_enabled(id, !enabled, cx);
+                    .accessibility_label("更多操作"),
+                move |_, _| {
+                    let run_entity = test_entity.clone();
+                    let mut menu = Menu::new().item(
+                        MenuItem::new("运行一次")
+                            .icon(IconName::Play)
+                            .disabled(header_saving)
+                            .on_click(move |_, _, cx| {
+                                run_entity.update(cx, |page, cx| {
+                                    page.test_automation_editor(cx);
                                 });
-                            },
-                        ));
-                        let delete_entity = delete_entity.clone();
-                        let delete_id = delete_id.clone();
-                        menu.item(
-                            PopupMenuItem::new("删除自动化")
-                                .icon(api::ui::trash_icon())
-                                .on_click(move |_, window, cx| {
-                                    let id = delete_id.clone();
-                                    delete_entity.update(cx, |page, cx| {
-                                        page.start_delete_automation(id, window, cx)
-                                    });
-                                }),
-                        )
-                    }),
-            )
+                            }),
+                    );
+                    let toggle_entity = toggle_entity.clone();
+                    let toggle_id = toggle_id.clone();
+                    menu = menu.item(automation_enabled_toggle_item(enabled).on_click(
+                        move |_, _, cx| {
+                            let id = toggle_id.clone();
+                            toggle_entity.update(cx, |page, cx| {
+                                page.set_automation_enabled(id, !enabled, cx);
+                            });
+                        },
+                    ));
+                    let delete_entity = delete_entity.clone();
+                    let delete_id = delete_id.clone();
+                    menu.separator().item(
+                        MenuItem::new("删除自动化")
+                            .icon(api::ui::trash_icon())
+                            .danger()
+                            .on_click(move |_, window, cx| {
+                                let id = delete_id.clone();
+                                delete_entity.update(cx, |page, cx| {
+                                    page.start_delete_automation(id, window, cx)
+                                });
+                            }),
+                    )
+                },
+            ))
             .into_any_element()
     }
 
@@ -264,19 +269,21 @@ impl AutomationsPage {
             .unwrap_or_else(|| "选择智能体".to_string());
         let no_ready_agents = ready_agents.is_empty();
         let agent_entity = entity.clone();
-        let agent_selector = Button::new("automation-agent")
+        let agent_button = Button::new("automation-agent")
             .quiet()
             .small()
             .icon(IconName::Bot)
             .label(current_agent_name)
             .disabled(no_ready_agents)
-            .dropdown_caret(true)
-            .dropdown_menu(move |mut menu, _, _| {
+            .dropdown_caret(true);
+        let agent_selector =
+            MenuTrigger::dropdown("automation-agent-menu", agent_button, move |_, _| {
+                let mut menu = Menu::new();
                 for agent in &ready_agents {
                     let entity = agent_entity.clone();
                     let id = agent.id.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(agent.name.clone())
+                        MenuItem::new(agent.name.clone())
                             .icon(IconName::Bot)
                             .on_click(move |_, _, cx| {
                                 let id = id.clone();
@@ -285,7 +292,8 @@ impl AutomationsPage {
                     );
                 }
                 menu
-            });
+            })
+            .disabled(no_ready_agents);
         let action_entity = entity.clone();
         let action_kind = Segmented::new("automation-action-kind")
             .segments(BUILTIN_AUTOMATION_ACTIONS.iter().map(|kind| kind.label()))
@@ -308,9 +316,9 @@ impl AutomationsPage {
             .iter()
             .any(|entry| entry.trigger_kind == AutomationTriggerKindId::Webhook);
         let instruction = if is_agent {
-            framed_automation_textarea(Textarea::new(&editor.prompt))
+            framed_automation_textarea(TextArea::new(&editor.prompt).aria_label("指令"))
         } else {
-            framed_automation_textarea(Textarea::new(&editor.command))
+            framed_automation_textarea(TextArea::new(&editor.command).aria_label("命令"))
         };
         let instruction_label = if is_agent { "指令" } else { "命令" };
         let name_field = TextInput::new(&editor.name).aria_label("名称").w_full();
@@ -366,7 +374,7 @@ impl AutomationsPage {
                                                     // 智能体页由「智能体」插件提供，没装就不给入口。
                                                     let machine = editor.automation.runtime.clone();
                                                     toolbar.when(
-                                                        api::is_registered(AGENTS_VIEW_ID, cx),
+                                                        api::is_registered(AGENTS_VIEW, cx),
                                                         |toolbar| {
                                                             toolbar.child(
                                                                 compact_chip(
@@ -405,7 +413,6 @@ impl AutomationsPage {
         run: api::model::automation::AutomationRun,
         live_view: Option<AnyView>,
         entity: Entity<AutomationsPage>,
-        cx: &App,
     ) -> AnyElement {
         let can_cancel = run.status.is_active();
         let source = run_source_label(run.source);
@@ -436,7 +443,7 @@ impl AutomationsPage {
                             .min_w_0()
                             .text_sm()
                             .font_medium()
-                            .text_color(cx.theme().foreground)
+                            .text_color(rgb(ui_theme::text()))
                             .overflow_hidden()
                             .child(truncated_line(format!("{source} · {status}"))),
                     )
@@ -460,6 +467,19 @@ impl AutomationsPage {
                         )
                     }),
             )
+            .when(self.lacks_conversation_view(&run), |pane| {
+                pane.child(
+                    div()
+                        .flex_shrink_0()
+                        .px_4()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(ui_theme::hair())
+                        .text_xs()
+                        .text_color(rgb(ui_theme::muted()))
+                        .child("对话插件未安装，看不到运行现场；下面是落库的记录。"),
+                )
+            })
             .child(match live_view {
                 Some(view) => div()
                     .relative()
@@ -525,13 +545,10 @@ impl AutomationsPage {
             .as_ref()
             .and_then(|run_id| runs.iter().find(|run| run.id == *run_id))
             .cloned();
-        let live_view = selected_run.as_ref().and_then(|run| {
-            let session_id = run.session_id.as_deref()?;
-            self.live
-                .as_ref()
-                .filter(|live| live.session_id == session_id)
-                .map(|live| live.view.clone())
-        });
+        let live_view = selected_run
+            .as_ref()
+            .and_then(|run| self.live_view_for(run))
+            .map(ViewInstance::view);
         let show_task = self
             .editor
             .as_ref()
@@ -614,7 +631,7 @@ impl AutomationsPage {
         } else {
             let column = self.render_automation_run_column(&runs, show_task, entity.clone(), cx);
             let detail = if let Some(run) = selected_run {
-                self.render_automation_run_pane(run, live_view, entity, cx)
+                self.render_automation_run_pane(run, live_view, entity)
             } else if let Some(editor) = self
                 .editor
                 .as_ref()

@@ -4016,6 +4016,65 @@ fn acp_open_invalid_request_still_returns_ended_snapshot() {
     assert!(!snapshot.end_reason.is_empty());
 }
 
+/// 打开请求带了首条消息或初始配置，回的第一帧要确认收到；旧守护不会带这个字段，客户端
+/// 据此把首条消息放回输入框。被拒的请求也照样确认，免得把拒绝误报成运行时太旧。
+#[test]
+fn acp_open_first_frame_acknowledges_initial_prompt_and_config() {
+    let first_frame = |request: serde_json::Value| {
+        let (server, client) = RuntimeStream::pair().unwrap();
+        let reader = BufReader::new(server.try_clone().unwrap());
+        let acp_sessions = new_test_acp_sessions();
+        let worker = thread::spawn(move || {
+            handle_acp_open(
+                server,
+                reader,
+                &request,
+                new_sessions(),
+                acp_sessions,
+                new_event_hub(),
+            );
+        });
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        drop(reader);
+        drop(client);
+        worker.join().unwrap();
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()
+    };
+    let launch = serde_json::json!({"command": "/definitely/not/a/real/binary-xyz"});
+
+    let with_prompt = first_frame(serde_json::json!({
+        "id": "acp-initial-prompt",
+        "launch": launch,
+        "initial_prompt": {"text": "先读一遍代码"}
+    }));
+    assert_eq!(with_prompt["initial_ack"], true);
+    assert!(with_prompt.get("snapshot").is_some());
+
+    let with_config = first_frame(serde_json::json!({
+        "id": "acp-initial-config",
+        "launch": launch,
+        "initial_config": [["model", "deepseek/flash"]]
+    }));
+    assert_eq!(with_config["initial_ack"], true);
+
+    let plain = first_frame(serde_json::json!({
+        "id": "acp-plain",
+        "launch": launch
+    }));
+    assert!(plain.get("initial_ack").is_none());
+
+    let rejected = first_frame(serde_json::json!({
+        "op": "acp_open",
+        "initial_prompt": {"text": "先读一遍代码"}
+    }));
+    let rejected_snapshot: smelt_core::acp_session::ConversationSnapshot =
+        serde_json::from_value(rejected["snapshot"].clone()).unwrap();
+    assert_eq!(rejected_snapshot.phase, DaemonPhase::Dead);
+    assert_eq!(rejected["initial_ack"], true);
+}
+
 #[test]
 fn acp_open_rejects_malformed_conversation_state_instead_of_erasing_it() {
     let malformed_binding = parse_acp_open_request(&serde_json::json!({

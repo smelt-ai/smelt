@@ -26,13 +26,12 @@ pub(super) struct Palette {
 }
 
 impl Palette {
-    pub(super) fn new(cx: &App) -> Self {
-        let theme = cx.theme();
+    pub(super) fn new() -> Self {
         Self {
-            fg: theme.foreground,
-            muted: theme.muted_foreground,
-            border: theme.border,
-            danger: theme.danger,
+            fg: rgb(ui_theme::text()).into(),
+            muted: rgb(ui_theme::muted()).into(),
+            border: ui_theme::hair().into(),
+            danger: rgb(ui_theme::bad()).into(),
         }
     }
 }
@@ -42,13 +41,15 @@ pub(super) fn pi_model_page(
     page: &CapabilitiesPage,
     cx: &App,
 ) -> AnyElement {
-    let palette = Palette::new(cx);
+    let palette = Palette::new();
     div()
         .id("pi-model-page")
         .size_full()
         .overflow_y_scroll()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .w_full()
                 .max_w(px(PAGE_MAX_WIDTH))
                 .mx_auto()
@@ -68,14 +69,17 @@ pub(super) fn section(
     body: impl IntoElement,
     palette: Palette,
 ) -> Div {
-    v_flex()
+    div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_2()
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .w_full()
                 .min_h(px(28.))
-                .items_center()
                 .justify_between()
                 .child(
                     // 分组标题跟侧栏「最近对话」「项目」一个级别：小号、灰、不加粗。
@@ -91,7 +95,9 @@ pub(super) fn section(
 }
 
 pub(super) fn card(palette: Palette) -> Div {
-    v_flex()
+    div()
+        .flex()
+        .flex_col()
         .w_full()
         .rounded_lg()
         .border_1()
@@ -122,13 +128,13 @@ fn default_model_section(
         _ => String::new(),
     };
 
-    let mut status = h_flex().gap_2().items_center().flex_wrap();
+    let mut status = div().flex().items_center().gap_2().flex_wrap();
     match page.pi_settings() {
         Err(error) => {
             status = status.child(
-                Tag::danger()
-                    .rounded_full()
-                    .flex_none()
+                div()
+                    .text_xs()
+                    .text_color(palette.danger)
                     .child(format!("无法读取 settings.json：{error}")),
             );
         }
@@ -144,15 +150,10 @@ fn default_model_section(
     }
     match page.pi_model_settings() {
         Ok(settings) if settings.credential_configured => {
-            status = status.child(
-                Tag::success()
-                    .rounded_full()
-                    .flex_none()
-                    .child("凭据已配置"),
-            );
+            status = status.child(Badge::new().ok().child("凭据已配置"));
         }
         Ok(_) => {
-            status = status.child(Tag::warning().rounded_full().flex_none().child("缺少凭据"));
+            status = status.child(Badge::new().need().child("缺少凭据"));
         }
         Err(error) => {
             status = status.child(div().text_xs().text_color(palette.danger).child(error));
@@ -167,13 +168,16 @@ fn default_model_section(
         .p_4()
         .gap_3()
         .child(
-            h_flex()
-                .w_full()
+            div()
+                .flex()
                 .items_center()
+                .w_full()
                 .justify_between()
                 .gap_3()
                 .child(
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_w_0()
                         .gap_1()
@@ -238,59 +242,51 @@ fn change_model_button(
     editing: bool,
 ) -> impl IntoElement {
     let entity = entity.clone();
-    Button::new("pi-change-default-model")
+    let trigger = Button::new("pi-change-default-model")
         .small()
         .label("更换模型")
-        .disabled(editing)
-        .dropdown_menu(move |mut menu, window, cx| {
-            let groups = entity.read(cx).pi_model_choice_groups();
-            if groups.is_empty() {
-                menu = menu.item(
-                    PopupMenuItem::new("还没有可选的模型：先在下面登录或添加 Provider")
-                        .disabled(true),
-                );
-            }
-            for group in groups {
-                let group_entity = entity.clone();
-                let current = current.clone();
-                let models = group.models;
-                menu = menu.submenu(
-                    group.provider_name.clone(),
-                    window,
-                    cx,
-                    move |mut sub, _, _| {
-                        for choice in &models {
-                            let checked = current.as_ref().is_some_and(|(provider, model)| {
-                                provider == &choice.provider && model == &choice.id
+        .disabled(editing);
+    MenuTrigger::dropdown("pi-change-default-model-menu", trigger, move |_, cx| {
+        let mut menu = Menu::new();
+        let groups = entity.read(cx).pi_model_choice_groups();
+        if groups.is_empty() {
+            menu = menu.item(
+                MenuItem::new("还没有可选的模型：先在下面登录或添加 Provider").disabled(true),
+            );
+        }
+        for group in groups {
+            let mut sub = Menu::new();
+            for choice in &group.models {
+                let checked = current.as_ref().is_some_and(|(provider, model)| {
+                    provider == &choice.provider && model == &choice.id
+                });
+                let item_entity = entity.clone();
+                let provider = choice.provider.clone();
+                let model = choice.id.clone();
+                sub = sub.item(
+                    MenuItem::new(choice.short_label().to_string())
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let (provider, model) = (provider.clone(), model.clone());
+                            item_entity.update(cx, |workspace, cx| {
+                                workspace.set_pi_default_model(provider, model, cx);
                             });
-                            let item_entity = group_entity.clone();
-                            let provider = choice.provider.clone();
-                            let model = choice.id.clone();
-                            sub = sub.item(
-                                PopupMenuItem::new(choice.short_label().to_string())
-                                    .checked(checked)
-                                    .on_click(move |_, _, cx| {
-                                        let (provider, model) = (provider.clone(), model.clone());
-                                        item_entity.update(cx, |workspace, cx| {
-                                            workspace.set_pi_default_model(provider, model, cx);
-                                        });
-                                    }),
-                            );
-                        }
-                        sub.scrollable(true)
-                    },
+                        }),
                 );
             }
-            let manual_entity = entity.clone();
-            menu.separator()
-                .item(PopupMenuItem::new("手动填写 Provider 和模型…").on_click(
-                    move |_, window, cx| {
-                        manual_entity.update(cx, |workspace, cx| {
-                            workspace.edit_pi_model_settings(window, cx);
-                        });
-                    },
-                ))
-        })
+            menu = menu.item(MenuItem::new(group.provider_name.clone()).submenu(sub));
+        }
+        let manual_entity = entity.clone();
+        menu.separator()
+            .item(
+                MenuItem::new("手动填写 Provider 和模型…").on_click(move |_, window, cx| {
+                    manual_entity.update(cx, |workspace, cx| {
+                        workspace.edit_pi_model_settings(window, cx);
+                    });
+                }),
+            )
+    })
+    .disabled(editing)
 }
 
 /// 推理强度直接写盘。没选过默认模型时禁用：写它会顺带把 Pi 的兜底模型固化成
@@ -309,9 +305,10 @@ fn thinking_level_row(
                 .map(|settings| settings.default_model.thinking_level.clone())
         })
         .unwrap_or_default();
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .gap_3()
         .child(
             div()
@@ -321,7 +318,9 @@ fn thinking_level_row(
                 .child("推理强度"),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .gap_1()
                 .children(THINKING_LEVELS.into_iter().map(|level| {
                     let level_entity = entity.clone();
@@ -453,7 +452,7 @@ fn provider_section(
         })
         .into_any_element();
 
-    let mut body = v_flex().w_full().gap_2();
+    let mut body = div().flex().flex_col().w_full().gap_2();
     if let Some(error) = &page.pi_auth_error {
         body = body.child(
             div()
@@ -477,7 +476,7 @@ fn provider_section(
     let mut rendered_login = false;
     let mut rendered_picker = false;
     for (index, entry) in entries.iter().enumerate() {
-        let mut row = v_flex().w_full().px_4().py_3().gap_3();
+        let mut row = div().flex().flex_col().w_full().px_4().py_3().gap_3();
         if index > 0 {
             row = row.border_t_1().border_color(palette.border);
         }
@@ -538,7 +537,7 @@ fn provider_section(
     }
 
     // 登录 / 选模型的那个 Provider 可能被折叠了（比如刚切回「只看常用」），面板不能跟着消失。
-    let mut orphans = v_flex().w_full().gap_2();
+    let mut orphans = div().flex().flex_col().w_full().gap_2();
     if let Some(view) = login.filter(|_| !rendered_login) {
         orphans = orphans.child(super::auth::login_panel(
             entity.clone(),
@@ -572,13 +571,14 @@ fn provider_list_footer(
     has_rows: bool,
     palette: Palette,
 ) -> Div {
-    let mut footer = h_flex()
+    let mut footer = div()
+        .flex()
+        .items_center()
         .w_full()
         .min_h(px(36.))
         .px_4()
         .py_1()
         .gap_2()
-        .items_center()
         .justify_between();
     if has_rows {
         footer = footer.border_t_1().border_color(palette.border);
@@ -631,7 +631,7 @@ fn provider_list_footer(
                     })
             });
             footer
-                .child(h_flex().children(toggle))
+                .child(div().flex().items_center().children(toggle))
                 .child(retry("刷新状态"))
         }
     }
@@ -658,20 +658,24 @@ fn custom_provider_row(
     } else {
         "无凭据"
     };
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .justify_between()
         .gap_3()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_w_0()
                 .gap_0p5()
                 .child(
-                    h_flex()
-                        .gap_2()
+                    div()
+                        .flex()
                         .items_center()
+                        .gap_2()
                         .child(
                             div()
                                 .overflow_hidden()
@@ -679,11 +683,8 @@ fn custom_provider_row(
                                 .text_color(palette.fg)
                                 .child(truncated_line(name)),
                         )
-                        .child(Tag::secondary().rounded_full().flex_none().child("自定义"))
-                        .children(
-                            is_default
-                                .then(|| Tag::success().rounded_full().flex_none().child("默认")),
-                        ),
+                        .child(Badge::new().child("自定义"))
+                        .children(is_default.then(|| Badge::new().accent().child("默认"))),
                 )
                 .child(
                     div()
@@ -699,7 +700,9 @@ fn custom_provider_row(
                 ),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .flex_none()
                 .gap_1()
                 .child(
@@ -719,7 +722,7 @@ fn custom_provider_row(
                     Button::new(format!("pi-delete-custom-provider-{delete_id}"))
                         .quiet()
                         .small()
-                        .icon(api::ui::trash_icon())
+                        .icon_path("smelt-icons/trash.svg")
                         .icon_action("删除此 Provider")
                         .disabled(editor_open)
                         .on_click(move |_, window, cx| {
@@ -753,9 +756,10 @@ fn config_files_footer(
                 })
         };
     let refresh_entity = entity.clone();
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .gap_1()
         .pt_3()
         .border_t_1()
@@ -791,7 +795,7 @@ fn config_files_footer(
             Button::new("pi-refresh-settings")
                 .quiet()
                 .small()
-                .icon(gpui_component::Icon::new(IconName::RefreshCw))
+                .icon(IconName::RefreshCw)
                 .icon_action("重新读取 ~/.pi/agent/ 下的配置")
                 .on_click(move |_, _, cx| {
                     refresh_entity.update(cx, |workspace, cx| {
@@ -818,14 +822,18 @@ fn default_model_form(
         "尚未检测到 API key；请在下方输入。"
     };
 
-    let form = v_flex()
+    let form = div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_4()
         .pt_4()
         .border_t_1()
         .border_color(border)
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .gap_1()
                 .child(
                     div()
@@ -837,12 +845,16 @@ fn default_model_form(
                 .child(div().text_xs().text_color(muted).child(credential_status)),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .w_full()
                 .gap_3()
                 .items_start()
                 .child(
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_w_0()
                         .gap_1()
@@ -856,7 +868,9 @@ fn default_model_form(
                         .child(TextInput::new(&editor.provider)),
                 )
                 .child(
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_w_0()
                         .gap_1()
@@ -871,12 +885,16 @@ fn default_model_form(
                 ),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .w_full()
                 .gap_3()
                 .items_start()
                 .child(
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_w_0()
                         .gap_1()
@@ -890,7 +908,9 @@ fn default_model_form(
                         .child(TextInput::new(&editor.base_url)),
                 )
                 .child(
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_w_0()
                         .gap_1()
@@ -911,7 +931,9 @@ fn default_model_form(
                 ),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .w_full()
                 .gap_2()
                 .justify_end()
@@ -976,12 +998,14 @@ fn custom_provider_form(
         "尚未配置凭据；无鉴权端点可留空 API key。"
     };
 
-    let mut model_rows = v_flex().w_full().gap_2();
+    let mut model_rows = div().flex().flex_col().w_full().gap_2();
     for (index, model) in editor.models.iter().enumerate() {
         let remove_entity = manage_entity.clone();
         let row_key = model.id.entity_id();
         model_rows = model_rows.child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .id(("pi-custom-model", row_key))
                 .w_full()
                 .gap_2()
@@ -990,10 +1014,11 @@ fn custom_provider_form(
                 .border_1()
                 .border_color(border)
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
+                        .items_center()
                         .w_full()
                         .gap_2()
-                        .items_center()
                         .child(
                             div()
                                 .text_xs()
@@ -1006,7 +1031,7 @@ fn custom_provider_form(
                             Button::new("pi-remove-custom-model")
                                 .quiet()
                                 .small()
-                                .icon(api::ui::trash_icon())
+                                .icon_path("smelt-icons/trash.svg")
                                 .icon_action("移除此模型")
                                 .on_click(move |_, _, cx| {
                                     remove_entity.update(cx, |workspace, cx| {
@@ -1016,12 +1041,16 @@ fn custom_provider_form(
                         ),
                 )
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
+                        .items_center()
                         .w_full()
                         .gap_3()
                         .items_start()
                         .child(
-                            v_flex()
+                            div()
+                                .flex()
+                                .flex_col()
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
@@ -1029,7 +1058,9 @@ fn custom_provider_form(
                                 .child(TextInput::new(&model.id)),
                         )
                         .child(
-                            v_flex()
+                            div()
+                                .flex()
+                                .flex_col()
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
@@ -1038,12 +1069,16 @@ fn custom_provider_form(
                         ),
                 )
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
+                        .items_center()
                         .w_full()
                         .gap_3()
                         .items_start()
                         .child(
-                            v_flex()
+                            div()
+                                .flex()
+                                .flex_col()
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
@@ -1056,7 +1091,9 @@ fn custom_provider_form(
                                 .child(TextInput::new(&model.context_window)),
                         )
                         .child(
-                            v_flex()
+                            div()
+                                .flex()
+                                .flex_col()
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
@@ -1067,7 +1104,9 @@ fn custom_provider_form(
         );
     }
 
-    let form = v_flex()
+    let form = div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_4()
         .p_4()
@@ -1075,12 +1114,15 @@ fn custom_provider_form(
         .border_1()
         .border_color(border)
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .gap_1()
                 .child(
-                    h_flex()
-                        .gap_2()
+                    div()
+                        .flex()
                         .items_center()
+                        .gap_2()
                         .child(div().text_sm().font_semibold().text_color(fg).child(
                             if editor.previous_id.is_some() {
                                 "编辑自定义 Provider"
@@ -1088,17 +1130,21 @@ fn custom_provider_form(
                                 "添加自定义 Provider"
                             },
                         ))
-                        .child(Tag::secondary().rounded_full().flex_none().child("原生 Pi")),
+                        .child(Badge::new().child("原生 Pi")),
                 )
                 .child(div().text_xs().text_color(muted).child(credential_status)),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .w_full()
                 .gap_3()
                 .items_start()
                 .child(
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_w_0()
                         .gap_1()
@@ -1118,7 +1164,9 @@ fn custom_provider_form(
                         ),
                 )
                 .child(
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_w_0()
                         .gap_1()
@@ -1133,12 +1181,16 @@ fn custom_provider_form(
                 ),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .w_full()
                 .gap_3()
                 .items_end()
                 .child(
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_w_0()
                         .gap_1()
@@ -1152,32 +1204,38 @@ fn custom_provider_form(
                         .child(TextInput::new(&editor.base_url)),
                 )
                 .child(
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .w(px(220.))
                         .gap_1()
                         .child(div().text_xs().font_semibold().text_color(fg).child("协议"))
-                        .child(
+                        .child(MenuTrigger::dropdown(
+                            "pi-custom-provider-api-menu",
                             Button::new("pi-custom-provider-api")
                                 .small()
-                                .label(editor.api.clone())
-                                .dropdown_menu(move |mut menu, _window, _cx| {
-                                    for api in api::model::provider_api::PROVIDER_API_PROTOCOLS {
-                                        let api_entity = api_entity.clone();
-                                        menu = menu.item(PopupMenuItem::new(*api).on_click(
-                                            move |_ev, _window, cx| {
-                                                api_entity.update(cx, |workspace, cx| {
-                                                    workspace.set_pi_custom_api(api, cx);
-                                                });
-                                            },
-                                        ));
-                                    }
-                                    menu
-                                }),
-                        ),
+                                .label(editor.api.clone()),
+                            move |_window, _cx| {
+                                let mut menu = Menu::new();
+                                for api in api::model::provider_api::PROVIDER_API_PROTOCOLS {
+                                    let api_entity = api_entity.clone();
+                                    menu = menu.item(MenuItem::new(*api).on_click(
+                                        move |_ev, _window, cx| {
+                                            api_entity.update(cx, |workspace, cx| {
+                                                workspace.set_pi_custom_api(api, cx);
+                                            });
+                                        },
+                                    ));
+                                }
+                                menu
+                            },
+                        )),
                 ),
         )
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .w_full()
                 .gap_1()
                 .child(
@@ -1196,9 +1254,10 @@ fn custom_provider_form(
                 ),
         )
         .child(
-            h_flex()
-                .w_full()
+            div()
+                .flex()
                 .items_center()
+                .w_full()
                 .justify_between()
                 .child(
                     div()
@@ -1208,7 +1267,9 @@ fn custom_provider_form(
                         .child("模型目录"),
                 )
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
+                        .items_center()
                         .gap_2()
                         .child(
                             Button::new("pi-discover-custom-models")
@@ -1253,7 +1314,9 @@ fn custom_provider_form(
             model_editor_error.map(|error| div().text_xs().text_color(danger_fg).child(error)),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .w_full()
                 .gap_2()
                 .justify_end()

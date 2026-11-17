@@ -1425,6 +1425,7 @@ pub(crate) fn encode_acp_snapshot(
         live: &live,
         snapshot: &snap,
         provider_pid,
+        initial_ack: false,
     })
     .expect("ACP snapshot frame contains only serializable data");
     let payload = match entries_delta {
@@ -3629,14 +3630,15 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
     subscribers: EventHubHandle,
 ) {
     let Some(req) = parse_acp_open_request(v) else {
-        write_rejected_acp_snapshot(conn, "无效的 ACP 打开请求");
+        write_rejected_acp_snapshot(conn, v, "无效的 ACP 打开请求");
         return;
     };
+    let initial_ack = open_request_carries_initial(v);
     let id = req.id.clone();
     let mut slot = match ensure_acp_session(&req, &sessions, &acp_sessions, &subscribers) {
         Ok(slot) => slot,
         Err(error) => {
-            write_rejected_acp_snapshot(conn, &error);
+            write_rejected_acp_snapshot(conn, v, &error);
             return;
         }
     };
@@ -3650,7 +3652,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
             slot = match ensure_acp_session(&req, &sessions, &acp_sessions, &subscribers) {
                 Ok(current) => current,
                 Err(error) => {
-                    write_rejected_acp_snapshot(conn, &error);
+                    write_rejected_acp_snapshot(conn, v, &error);
                     return;
                 }
             };
@@ -3680,6 +3682,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
                     live: &live,
                     snapshot: &snapshot,
                     provider_pid,
+                    initial_ack,
                 })
                 .expect("ACP snapshot frame contains only serializable data"),
             );
@@ -3773,16 +3776,31 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
     }
 }
 
-pub(crate) fn write_rejected_acp_snapshot<C: ClientSocket>(mut conn: C, reason: &str) {
+/// 打开请求带没带首条消息或初始配置。按原始请求看：请求读不懂、被拒时回的那一帧也要确认
+/// （[`smelt_core::acp_session::AcpSnapshotFrame::initial_ack`]），否则客户端会把拒绝误报成
+/// 运行时太旧。
+fn open_request_carries_initial(request: &serde_json::Value) -> bool {
+    ["initial_prompt", "initial_config"]
+        .iter()
+        .any(|key| request.get(key).is_some_and(|value| !value.is_null()))
+}
+
+/// `request` 是被拒的打开请求原文，用来回 `initial_ack`。
+pub(crate) fn write_rejected_acp_snapshot<C: ClientSocket>(
+    mut conn: C,
+    request: &serde_json::Value,
+    reason: &str,
+) {
     let mut state = smelt_core::acp_session::AcpSessionState::default();
     state.phase = smelt_core::daemon_state::DaemonPhase::Dead;
     state.end_reason = reason.to_string();
     state.end_kind = smelt_core::acp_session::AcpEndKind::ProviderFailed;
     let snapshot = state.to_snapshot(true);
-    let _ = smelt_runtime_client::protocol::write_json_line(
-        &mut conn,
-        &serde_json::json!({ "snapshot": snapshot }),
-    );
+    let mut frame = serde_json::json!({ "snapshot": snapshot });
+    if open_request_carries_initial(request) {
+        frame["initial_ack"] = serde_json::Value::Bool(true);
+    }
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &frame);
 }
 
 /// 停机前把没写完的回合收成中断。

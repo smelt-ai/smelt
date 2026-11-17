@@ -254,7 +254,7 @@ pub fn thumb_element(
             .h(height)
             .w(height.min(max_width))
             .rounded(px(corner_radius))
-            .bg(rgba(0x00000014))
+            .bg(rgb(crate::ui_theme::soft_hover()))
             .into_any_element(),
         ThumbPaint::Svg => img(image.clone())
             .h(height)

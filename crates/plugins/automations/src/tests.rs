@@ -3,11 +3,11 @@
 //! 不用 `crate::prelude::*`：那里带进 `gpui::*` 里的 `test` 属性宏，会把这里的 `#[test]`
 //! 换成 gpui 的版本。
 
-use gpui_component::input::InputEvent;
 use smelt_plugin_api::model::automation::{
     AutomationAction, AutomationRunStatus, AutomationSchedule, AutomationSink, AutomationTrigger,
     SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_WEEKDAYS_MASK,
 };
+use smelt_plugin_api::ui::field::InputEvent;
 
 use crate::kinds::{
     AutomationActionKindId, AutomationNotificationPreset, AutomationTriggerKindId,

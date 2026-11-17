@@ -67,14 +67,100 @@ fn create_v7_schema(connection: &Connection) {
         .unwrap();
 }
 
-/// v11 及以前客户端库里还有通知偏好表。
-/// v12 及更早没有固定工作树的表。
+/// v14 及以前客户端库里还有会话列表、分屏的界面状态和终端字号。外观、界面状态表照
+/// v14 的列顺序重建，已有的行搬过去（位置插入的夹具靠这个顺序）。
+fn restore_v14_session_ui(connection: &Connection) {
+    connection
+        .execute_batch(
+            "CREATE TABLE appearance_v14 (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               bg_color INTEGER NOT NULL,
+               bg_image TEXT,
+               bg_image_opacity REAL NOT NULL,
+               opacity REAL NOT NULL,
+               blur INTEGER NOT NULL CHECK (blur IN (0, 1)),
+               glass_style TEXT NOT NULL,
+               theme_mode TEXT NOT NULL,
+               theme_name TEXT NOT NULL,
+               ui_font_px INTEGER NOT NULL,
+               ui_font_family TEXT NOT NULL,
+               font_px INTEGER NOT NULL,
+               font_family TEXT NOT NULL,
+               layout_id TEXT
+             );
+             INSERT INTO appearance_v14 SELECT id, 0, bg_image, bg_image_opacity, 1.0, 1,
+               material, theme_mode, theme_name, ui_font_px, ui_font_family, 13, font_family,
+               layout_id FROM appearance;
+             DROP TABLE appearance;
+             ALTER TABLE appearance_v14 RENAME TO appearance;
+             CREATE TABLE workspace_ui_v14 (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               active_session INTEGER NOT NULL CHECK (active_session >= 0),
+               active_session_id TEXT,
+               route TEXT NOT NULL,
+               sidebar_grouping TEXT NOT NULL,
+               sidebar_hide_empty_projects INTEGER NOT NULL
+                 CHECK (sidebar_hide_empty_projects IN (0, 1)),
+               archive_expanded INTEGER NOT NULL DEFAULT 0 CHECK (archive_expanded IN (0, 1))
+             );
+             INSERT INTO workspace_ui_v14 (id, active_session, route, sidebar_grouping,
+               sidebar_hide_empty_projects)
+               SELECT id, 0, outlet, 'project', 0 FROM workspace_ui;
+             DROP TABLE workspace_ui;
+             ALTER TABLE workspace_ui_v14 RENAME TO workspace_ui;
+             CREATE TABLE collapsed_project (
+               runtime_id TEXT NOT NULL,
+               root TEXT NOT NULL,
+               position INTEGER NOT NULL,
+               PRIMARY KEY (runtime_id, root)
+             ) WITHOUT ROWID;
+             CREATE TABLE collapsed_agent (
+               agent_id TEXT PRIMARY KEY,
+               position INTEGER NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE pinned_project (
+               runtime_id TEXT NOT NULL,
+               root TEXT NOT NULL,
+               position INTEGER NOT NULL,
+               PRIMARY KEY (runtime_id, root)
+             ) WITHOUT ROWID;
+             CREATE TABLE pinned_workset (
+               runtime_id TEXT NOT NULL,
+               workset_id TEXT NOT NULL,
+               PRIMARY KEY (runtime_id, workset_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE conversation_route (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               active_terminal_id TEXT,
+               dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
+               PRIMARY KEY (runtime_id, conversation_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE sidebar_project_order (
+               runtime_id TEXT NOT NULL,
+               root TEXT NOT NULL,
+               position INTEGER NOT NULL,
+               PRIMARY KEY (runtime_id, root)
+             ) WITHOUT ROWID;
+             CREATE TABLE sidebar_conversation_order (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               position INTEGER NOT NULL,
+               PRIMARY KEY (runtime_id, conversation_id)
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+}
+
+/// v13 的界面状态表还有选中的智能体。
 fn restore_v13_selected_agent(connection: &Connection) {
+    restore_v14_session_ui(connection);
     connection
         .execute_batch("ALTER TABLE workspace_ui ADD COLUMN selected_agent_id TEXT;")
         .unwrap();
 }
 
+/// v12 及更早没有固定工作树的表。
 fn restore_v12_without_pinned_worksets(connection: &Connection) {
     restore_v13_selected_agent(connection);
     connection
@@ -82,6 +168,7 @@ fn restore_v12_without_pinned_worksets(connection: &Connection) {
         .unwrap();
 }
 
+/// v11 及以前客户端库里还有通知偏好表。
 fn restore_v11_notify_prefs(connection: &Connection) {
     restore_v12_without_pinned_worksets(connection);
     connection
@@ -105,6 +192,17 @@ fn has_table(connection: &Connection, name: &str) -> bool {
             [name],
             |row| row.get(0),
         )
+        .unwrap()
+}
+
+fn columns(connection: &Connection, table: &str) -> Vec<String> {
+    let mut statement = connection
+        .prepare("SELECT name FROM pragma_table_info(?1)")
+        .unwrap();
+    statement
+        .query_map([table], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap()
 }
 
@@ -153,7 +251,6 @@ fn appearance() -> AppearanceRecord {
         theme_name: "Default Dark".to_string(),
         ui_font_px: 16,
         ui_font_family: String::new(),
-        font_px: 13,
         font_family: "JetBrains Mono".to_string(),
         layout_id: None,
         material: "hud".to_string(),
@@ -162,74 +259,8 @@ fn appearance() -> AppearanceRecord {
 
 fn workspace_ui() -> WorkspaceUiRecord {
     WorkspaceUiRecord {
-        active_session: 2,
-        active_session_id: Some("s-1".to_string()),
-        route: "session".to_string(),
-        collapsed_projects: vec![ProjectKey::local("/repo/b"), ProjectKey::local("/repo/a")],
-        collapsed_agents: vec!["writer".to_string()],
-        sidebar_grouping: "project".to_string(),
-        pinned_projects: vec![ProjectKey::local("/repo/z"), ProjectKey::local("/repo/a")],
-        sidebar_hide_empty_projects: true,
-        archive_expanded: false,
+        outlet: "session".to_string(),
     }
-}
-
-#[test]
-fn archive_expansion_round_trips() {
-    let (store, path) = temp_store();
-    let mut record = workspace_ui();
-    record.archive_expanded = true;
-    store.put_workspace_ui(&record).unwrap();
-    drop(store);
-    let store = ClientStore::open(&path).unwrap();
-    assert!(store.workspace_ui().unwrap().unwrap().archive_expanded);
-    drop(store);
-    cleanup(&path);
-}
-
-#[test]
-fn worktree_pins_are_persistent_and_isolated_by_runtime() {
-    let (store, path) = temp_store();
-    store.set_workset_pinned(None, "shared-id", true).unwrap();
-    store
-        .set_workset_pinned(Some("remote"), "shared-id", true)
-        .unwrap();
-    store.set_workset_pinned(None, "shared-id", false).unwrap();
-    drop(store);
-
-    let store = ClientStore::open(&path).unwrap();
-    assert!(store.pinned_worksets(None).unwrap().is_empty());
-    assert_eq!(
-        store.pinned_worksets(Some("remote")).unwrap(),
-        vec!["shared-id"]
-    );
-    drop(store);
-    cleanup(&path);
-}
-
-#[test]
-fn v8_migrates_worktree_pins_without_losing_workspace_state() {
-    let path = temp_path();
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let v8 = Connection::open(&path).unwrap();
-    create_v7_schema(&v8);
-    v8.execute_batch(
-        "ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0;
-         INSERT INTO workspace_ui VALUES
-           (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1, 1);
-         PRAGMA user_version = 8;",
-    )
-    .unwrap();
-    drop(v8);
-    let store = ClientStore::open(&path).unwrap();
-    assert!(store.workspace_ui().unwrap().unwrap().archive_expanded);
-    assert!(store.pinned_worksets(None).unwrap().is_empty());
-    store.set_workset_pinned(None, "task", true).unwrap();
-    drop(store);
-    let store = ClientStore::open(&path).unwrap();
-    assert_eq!(store.pinned_worksets(None).unwrap(), vec!["task"]);
-    drop(store);
-    cleanup(&path);
 }
 
 /// v13 → v14：选中的智能体那一列删掉，别的界面状态留着；改过的「新对话」快捷键跟着命令
@@ -252,10 +283,7 @@ fn v13_drops_the_selected_agent_and_moves_the_new_conversation_key() {
     .unwrap();
     drop(v13);
     let store = ClientStore::open(&path).unwrap();
-    let ui = store.workspace_ui().unwrap().unwrap();
-    assert_eq!(ui.route, "agents");
-    assert_eq!(ui.active_session_id.as_deref(), Some("s-1"));
-    assert!(ui.sidebar_hide_empty_projects);
+    assert_eq!(store.workspace_ui().unwrap().unwrap().outlet, "agents");
     assert_eq!(
         store.key_bindings().unwrap(),
         vec![
@@ -273,8 +301,112 @@ fn v13_drops_the_selected_agent_and_moves_the_new_conversation_key() {
     cleanup(&path);
 }
 
+/// v14 → v15：会话列表、分屏的界面状态和终端字号归了插件，那些表和列删掉；外观里没人读的
+/// 三列删掉、`glass_style` 改名 `material`，路由列改名 `outlet`；值和布局存档留着。分屏的
+/// 五条快捷键搬到会话插件的同名命令上（新 id 已有记录的以新的为准），别的 `smelt.stage/*`
+/// 和按侧栏顺序跳的键删掉。迁移前留了备份。
 #[test]
-fn v12_gains_worktree_pins_without_losing_layout() {
+fn v14_drops_the_session_ui_and_moves_the_pane_keys() {
+    let (store, path) = temp_store();
+    store.put_appearance(&appearance()).unwrap();
+    drop(store);
+    let v14 = Connection::open(&path).unwrap();
+    restore_v14_session_ui(&v14);
+    v14.execute_batch(
+        "INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'smelt.archive/main', 'agent', 1, 1);
+         UPDATE appearance SET font_px = 17;
+         INSERT INTO workspace_layout_state VALUES ('default', '{\"version\":1}');
+         INSERT INTO collapsed_project VALUES ('', '/repo/b', 0);
+         INSERT INTO collapsed_agent VALUES ('writer', 0);
+         INSERT INTO pinned_project VALUES ('', '/repo/z', 0);
+         INSERT INTO pinned_workset VALUES ('rt-linux', 'task');
+         INSERT INTO conversation_route VALUES ('', 'conv-1', 'term-2', '{\"v\":1}');
+         INSERT INTO sidebar_project_order VALUES ('', '/repo/a', 0);
+         INSERT INTO sidebar_conversation_order VALUES ('', 'conv-1', 0);
+         INSERT INTO key_binding VALUES
+           ('smelt.stage/prev-pane', 'cmd-shift-['),
+           ('smelt.stage/next-pane', NULL),
+           ('smelt.stage/split-right', 'cmd-e'),
+           ('smelt.stage/split-down', 'cmd-shift-e'),
+           ('smelt.stage/close-pane', 'cmd-shift-w'),
+           ('smelt.sessions/close-pane', 'cmd-alt-w'),
+           ('smelt.stage/cover', 'cmd-k'),
+           ('smelt.sessions/activate-1', 'ctrl-1'),
+           ('smelt.sessions/focus-list', 'cmd-0'),
+           ('smelt.palette/toggle', 'cmd-j');
+         PRAGMA user_version = 14;",
+    )
+    .unwrap();
+    drop(v14);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(
+        store.workspace_ui().unwrap(),
+        Some(WorkspaceUiRecord {
+            outlet: "smelt.archive/main".to_string(),
+        })
+    );
+    assert_eq!(store.appearance().unwrap(), Some(appearance()));
+    assert!(store.workspace_layout_state("default").unwrap().is_some());
+    let record = |command: &str, keystroke: Option<&str>| KeyBindingRecord {
+        command: command.to_string(),
+        keystroke: keystroke.map(str::to_string),
+    };
+    assert_eq!(
+        store.key_bindings().unwrap(),
+        vec![
+            record("smelt.palette/toggle", Some("cmd-j")),
+            record("smelt.sessions/close-pane", Some("cmd-alt-w")),
+            record("smelt.sessions/focus-list", Some("cmd-0")),
+            record("smelt.sessions/next-pane", None),
+            record("smelt.sessions/prev-pane", Some("cmd-shift-[")),
+            record("smelt.sessions/split-down", Some("cmd-shift-e")),
+            record("smelt.sessions/split-right", Some("cmd-e")),
+        ]
+    );
+    drop(store);
+
+    let connection = Connection::open(&path).unwrap();
+    for table in [
+        "pinned_project",
+        "pinned_workset",
+        "collapsed_project",
+        "collapsed_agent",
+        "conversation_route",
+        "sidebar_project_order",
+        "sidebar_conversation_order",
+    ] {
+        assert!(!has_table(&connection, table), "{table}");
+    }
+    assert_eq!(columns(&connection, "workspace_ui"), ["id", "outlet"]);
+    // 没人读的背景色、不透明度、模糊和终端字号删掉，`glass_style` 改名 `material`（值见上面
+    // 外观的断言）。
+    assert_eq!(
+        columns(&connection, "appearance"),
+        [
+            "id",
+            "bg_image",
+            "bg_image_opacity",
+            "material",
+            "theme_mode",
+            "theme_name",
+            "ui_font_px",
+            "ui_font_family",
+            "font_family",
+            "layout_id",
+        ]
+    );
+    drop(connection);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v14"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn v12_keeps_the_layout_state() {
     let (store, path) = temp_store();
     drop(store);
     let v12 = Connection::open(&path).unwrap();
@@ -286,16 +418,13 @@ fn v12_gains_worktree_pins_without_losing_layout() {
     .unwrap();
     drop(v12);
     let store = ClientStore::open(&path).unwrap();
-    assert!(store.pinned_worksets(None).unwrap().is_empty());
     assert!(store.workspace_layout_state("default").unwrap().is_some());
-    store.set_workset_pinned(None, "task", true).unwrap();
-    assert_eq!(store.pinned_worksets(None).unwrap(), vec!["task"]);
     drop(store);
     cleanup(&path);
 }
 
 #[test]
-fn v7_gains_a_collapsed_archive_section_and_preserves_workspace_state() {
+fn v7_keeps_the_route_and_leaves_a_backup() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v7 = Connection::open(&path).unwrap();
@@ -309,19 +438,11 @@ fn v7_gains_a_collapsed_archive_section_and_preserves_workspace_state() {
     drop(v7);
 
     let store = ClientStore::open(&path).unwrap();
-    let migrated = store.workspace_ui().unwrap().unwrap();
-    let expected = WorkspaceUiRecord {
-        collapsed_projects: Vec::new(),
-        collapsed_agents: Vec::new(),
-        pinned_projects: Vec::new(),
-        ..workspace_ui()
-    };
-    assert_eq!(migrated, expected);
-    assert!(!migrated.archive_expanded);
+    assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
     drop(store);
 
     let store = ClientStore::open(&path).unwrap();
-    assert_eq!(store.workspace_ui().unwrap(), Some(expected));
+    assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
     drop(store);
     let backup = Connection::open(path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v7")))
         .expect("迁移前必须留下备份");
@@ -333,8 +454,8 @@ fn v7_gains_a_collapsed_archive_section_and_preserves_workspace_state() {
     cleanup(&path);
 }
 
-/// v8 的三栏宽度、开合和每段对话的工具面板状态升到 v9 时丢掉，别的界面状态和外观留着；
-/// 外观里还没选过布局，布局存档表是空的。
+/// v8 的三栏宽度、开合和每段对话的工具面板状态升到 v9 时丢掉，路由和外观留着；外观里
+/// 还没选过布局，布局存档表是空的。
 #[test]
 fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
     let path = temp_path();
@@ -358,19 +479,7 @@ fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
     drop(v8);
 
     let store = ClientStore::open(&path).unwrap();
-    assert_eq!(
-        store.workspace_ui().unwrap(),
-        Some(WorkspaceUiRecord {
-            collapsed_projects: Vec::new(),
-            collapsed_agents: Vec::new(),
-            pinned_projects: Vec::new(),
-            archive_expanded: true,
-            ..workspace_ui()
-        })
-    );
-    let routes = store.conversation_routes().unwrap();
-    assert_eq!(routes.len(), 1);
-    assert_eq!(routes[0].active_terminal_id.as_deref(), Some("term-2"));
+    assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
     // 旧库这一列是从来没人读过的 `regular`，原样读出来，界面认不出会回到默认材质。
     assert_eq!(
         store.appearance().unwrap(),
@@ -449,26 +558,11 @@ fn records_round_trip_and_start_empty() {
 
     store.put_workspace_ui(&workspace_ui()).unwrap();
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
-    let shrunk = WorkspaceUiRecord {
-        collapsed_projects: Vec::new(),
-        pinned_projects: vec![ProjectKey::local("/repo/a")],
-        ..workspace_ui()
+    let moved = WorkspaceUiRecord {
+        outlet: "smelt.archive/main".to_string(),
     };
-    store.put_workspace_ui(&shrunk).unwrap();
-    assert_eq!(store.workspace_ui().unwrap(), Some(shrunk));
-
-    // 两个运行时上可以有同一个路径，各算各的。
-    let remote_a = ProjectKey {
-        runtime_id: Some("rt-linux".to_string()),
-        root: "/repo/a".to_string(),
-    };
-    let both = WorkspaceUiRecord {
-        pinned_projects: vec![remote_a.clone(), ProjectKey::local("/repo/a")],
-        collapsed_projects: vec![remote_a],
-        ..workspace_ui()
-    };
-    store.put_workspace_ui(&both).unwrap();
-    assert_eq!(store.workspace_ui().unwrap(), Some(both));
+    store.put_workspace_ui(&moved).unwrap();
+    assert_eq!(store.workspace_ui().unwrap(), Some(moved));
 
     store.mark_runtime_migrated().unwrap();
     store.mark_runtime_migrated().unwrap();
@@ -476,65 +570,8 @@ fn records_round_trip_and_start_empty() {
     cleanup(&path);
 }
 
-fn route(runtime_id: Option<&str>, conversation_id: &str) -> ConversationRouteRecord {
-    ConversationRouteRecord {
-        runtime_id: runtime_id.map(str::to_string),
-        conversation_id: conversation_id.to_string(),
-        active_terminal_id: Some("term-2".to_string()),
-        dock_layout: Some(r#"{"v":1,"center":{"terminal":"term-2"}}"#.to_string()),
-    }
-}
-
-/// 对话的界面状态整份换：关掉的对话不留；两个运行时上同一个对话 id 各算各的。
-#[test]
-fn conversation_routes_are_replaced_as_a_whole() {
-    let (store, path) = temp_store();
-    assert!(store.conversation_routes().unwrap().is_empty());
-
-    let routes = vec![
-        route(None, "conv-1"),
-        route(Some("rt-linux"), "conv-1"),
-        ConversationRouteRecord {
-            active_terminal_id: None,
-            dock_layout: None,
-            ..route(None, "conv-2")
-        },
-    ];
-    store.put_conversation_routes(&routes).unwrap();
-    let key = |record: &ConversationRouteRecord| {
-        (record.runtime_id.clone(), record.conversation_id.clone())
-    };
-    let mut read = store.conversation_routes().unwrap();
-    read.sort_by_key(key);
-    let mut expected = routes.clone();
-    expected.sort_by_key(key);
-    assert_eq!(read, expected);
-
-    store.put_conversation_routes(&routes[1..2]).unwrap();
-    assert_eq!(store.conversation_routes().unwrap(), routes[1..2].to_vec());
-    cleanup(&path);
-}
-
-/// 分屏布局只当 JSON 存：不是合法 JSON 的写不进去，整份写入跟着回滚。
-#[test]
-fn a_dock_layout_must_be_json() {
-    let (store, path) = temp_store();
-    store
-        .put_conversation_routes(&[route(None, "conv-1")])
-        .unwrap();
-    let broken = ConversationRouteRecord {
-        dock_layout: Some("{not json".to_string()),
-        ..route(None, "conv-2")
-    };
-    assert!(store.put_conversation_routes(&[broken]).is_err());
-    assert_eq!(
-        store.conversation_routes().unwrap(),
-        vec![route(None, "conv-1")]
-    );
-    cleanup(&path);
-}
-
-/// v2 的会话路由按活动终端的 id 存，对不上对话的稳定 id，升到 v3 时丢掉；别的界面状态留着。
+/// v2 的会话路由按活动终端的 id 存，对不上对话的稳定 id，升到 v3 时丢掉；对话界面状态到
+/// v15 整张归了会话插件。路由留着，迁移前留了备份。
 #[test]
 fn v2_session_routes_are_dropped() {
     let path = temp_path();
@@ -587,18 +624,17 @@ fn v2_session_routes_are_dropped() {
     drop(v2);
 
     let store = ClientStore::open(&path).unwrap();
-    assert!(store.conversation_routes().unwrap().is_empty());
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
-    store
-        .put_conversation_routes(&[route(None, "conv-1")])
-        .unwrap();
-    assert_eq!(store.conversation_routes().unwrap().len(), 1);
     drop(store);
-    let version: u32 = Connection::open(&path)
-        .unwrap()
+    let connection = Connection::open(&path).unwrap();
+    let version: u32 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, schema::SCHEMA_VERSION);
+    for table in ["session_route", "session_route_path", "conversation_route"] {
+        assert!(!has_table(&connection, table), "{table}");
+    }
+    drop(connection);
 
     // 迁移前的库原样留了一份，覆盖回去就回到 v2。
     let backup = Connection::open(path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v2")))
@@ -743,7 +779,7 @@ fn legacy_preference_rows_move_into_tables_once() {
     drop(legacy);
 
     let store = ClientStore::open(&path).unwrap();
-    // 旧偏好没有材质，留空由界面回到默认。
+    // 旧偏好没有材质，留空由界面回到默认；终端字号归了终端插件，不搬。
     assert_eq!(
         store.appearance().unwrap(),
         Some(AppearanceRecord {
@@ -769,9 +805,9 @@ fn legacy_preference_rows_move_into_tables_once() {
     cleanup(&path);
 }
 
-/// v1 的折叠、置顶不分运行时，升上来都算本机的。
+/// v1 一路迁到当前版本：中间各步都在 v1 的表上跑得通，路由留着。
 #[test]
-fn v1_projects_become_local_projects() {
+fn v1_migrates_through_to_the_current_version() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v1 = Connection::open(&path).unwrap();
@@ -900,102 +936,9 @@ fn v4_runtime_connections_gain_an_empty_os() {
     cleanup(&path);
 }
 
-fn sidebar_order(
-    runtime_id: Option<&str>,
-    projects: &[&str],
-    conversations: &[&str],
-) -> SidebarOrderRecord {
-    SidebarOrderRecord {
-        runtime_id: runtime_id.map(str::to_string),
-        projects: projects.iter().map(|item| item.to_string()).collect(),
-        conversations: conversations.iter().map(|item| item.to_string()).collect(),
-    }
-}
-
-/// 侧栏顺序按运行时存取：本机（`None`）和远程各记各的，读回来本机在最前。
+/// v5 升上来：远程运行时和路由原样留下，迁移前留了备份。
 #[test]
-fn sidebar_orders_round_trip() {
-    let (store, path) = temp_store();
-    assert!(store.sidebar_orders().unwrap().is_empty());
-
-    let remote = sidebar_order(Some("rt-linux"), &["/home/a", "/home/b"], &["conv-9"]);
-    let local = sidebar_order(
-        None,
-        &["/repo/z", "/repo/a"],
-        &["conv-2", "conv-1", "conv-3"],
-    );
-    store
-        .put_sidebar_orders(&[remote.clone(), local.clone()])
-        .unwrap();
-    assert_eq!(store.sidebar_orders().unwrap(), vec![local, remote]);
-
-    // 只有对话、没有项目的运行时也读得回来。
-    let conversations_only = sidebar_order(Some("rt-win"), &[], &["conv-5"]);
-    store
-        .put_sidebar_orders(std::slice::from_ref(&conversations_only))
-        .unwrap();
-    assert!(
-        store
-            .sidebar_orders()
-            .unwrap()
-            .contains(&conversations_only)
-    );
-    cleanup(&path);
-}
-
-/// 只换给出的运行时：别的运行时的顺序原样留着；给出空列表就清掉这个运行时的顺序。
-#[test]
-fn putting_one_runtime_keeps_the_others() {
-    let (store, path) = temp_store();
-    let local = sidebar_order(None, &["/repo/a", "/repo/b"], &["conv-1", "conv-2"]);
-    let remote = sidebar_order(Some("rt-linux"), &["/home/a"], &["conv-9"]);
-    store.put_sidebar_orders(&[local, remote.clone()]).unwrap();
-
-    let reordered = sidebar_order(None, &["/repo/b", "/repo/c"], &["conv-2"]);
-    store
-        .put_sidebar_orders(std::slice::from_ref(&reordered))
-        .unwrap();
-    assert_eq!(
-        store.sidebar_orders().unwrap(),
-        vec![reordered, remote.clone()]
-    );
-
-    store
-        .put_sidebar_orders(&[sidebar_order(None, &[], &[])])
-        .unwrap();
-    assert_eq!(store.sidebar_orders().unwrap(), vec![remote.clone()]);
-
-    // 什么都不给就什么都不动。
-    store.put_sidebar_orders(&[]).unwrap();
-    assert_eq!(store.sidebar_orders().unwrap(), vec![remote]);
-    cleanup(&path);
-}
-
-/// 同一运行时里重复的条目只留第一次出现的位置。
-#[test]
-fn duplicate_sidebar_entries_keep_the_first() {
-    let (store, path) = temp_store();
-    store
-        .put_sidebar_orders(&[sidebar_order(
-            None,
-            &["/repo/a", "/repo/b", "/repo/a"],
-            &["conv-2", "conv-1", "conv-2", "conv-1"],
-        )])
-        .unwrap();
-    assert_eq!(
-        store.sidebar_orders().unwrap(),
-        vec![sidebar_order(
-            None,
-            &["/repo/a", "/repo/b"],
-            &["conv-2", "conv-1"]
-        )]
-    );
-    cleanup(&path);
-}
-
-/// v5 还没有侧栏顺序：升到 v6 时建两张空表，别的数据原样留下，迁移前留了备份。
-#[test]
-fn v5_gains_empty_sidebar_order_tables() {
+fn v5_keeps_runtime_connections() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v5 = Connection::open(&path).unwrap();
@@ -1016,17 +959,11 @@ fn v5_gains_empty_sidebar_order_tables() {
     drop(v5);
 
     let store = ClientStore::open(&path).unwrap();
-    assert!(store.sidebar_orders().unwrap().is_empty());
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
     assert_eq!(
         store.runtime_connections().unwrap()[0].os.as_deref(),
         Some("windows")
     );
-    let order = sidebar_order(Some("rt-win"), &["/repo"], &["conv-1"]);
-    store
-        .put_sidebar_orders(std::slice::from_ref(&order))
-        .unwrap();
-    assert_eq!(store.sidebar_orders().unwrap(), vec![order]);
     drop(store);
 
     let version: u32 = Connection::open(&path)
@@ -1078,7 +1015,7 @@ fn key_bindings_override_and_reset_per_command() {
 }
 
 /// v9 的快捷键按写死的动作名存：升到 v10 时换成命令 id，早已下线的动作名删掉，清掉的键
-/// （`NULL`）照样留着；迁移前留了备份。
+/// （`NULL`）照样留着；分屏命令到 v15 跟着搬进会话插件。迁移前留了备份。
 #[test]
 fn v9_key_bindings_move_to_command_ids() {
     let (store, path) = temp_store();
@@ -1106,7 +1043,7 @@ fn v9_key_bindings_move_to_command_ids() {
         vec![
             record("smelt.git/next-hunk", None),
             record("smelt.palette/toggle", Some("cmd-j")),
-            record("smelt.stage/split-right", Some("cmd-e")),
+            record("smelt.sessions/split-right", Some("cmd-e")),
         ]
     );
     drop(store);
@@ -1118,10 +1055,10 @@ fn v9_key_bindings_move_to_command_ids() {
     cleanup(&path);
 }
 
-/// v10 的对话界面状态带着文件树、Git 页的状态：升到 v11 时这些列和路径表删掉，终端的
-/// 分屏和当前终端留着；迁移前留了备份。
+/// v10 的对话界面状态带着文件树、Git 页的状态：路径表在 v11 删掉，整张对话界面状态在 v15
+/// 归了会话插件；迁移前留了备份。
 #[test]
-fn v10_conversation_routes_keep_only_terminal_state() {
+fn v10_conversation_ui_tables_are_gone() {
     let (store, path) = temp_store();
     drop(store);
     let v10 = Connection::open(&path).unwrap();
@@ -1136,26 +1073,10 @@ fn v10_conversation_routes_keep_only_terminal_state() {
     .unwrap();
     drop(v10);
 
-    let store = ClientStore::open(&path).unwrap();
-    assert_eq!(
-        store.conversation_routes().unwrap(),
-        vec![ConversationRouteRecord {
-            runtime_id: None,
-            conversation_id: "conv-1".to_string(),
-            active_terminal_id: Some("term-2".to_string()),
-            dock_layout: Some(r#"{"v":1}"#.to_string()),
-        }]
-    );
-    drop(store);
+    drop(ClientStore::open(&path).unwrap());
     let connection = Connection::open(&path).unwrap();
-    let path_tables: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'conversation_route_path'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(path_tables, 0);
+    assert!(!has_table(&connection, "conversation_route_path"));
+    assert!(!has_table(&connection, "conversation_route"));
     drop(connection);
     assert!(
         path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v10"))

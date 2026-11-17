@@ -18,15 +18,14 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use api::client::protocol::control::EmptyParams;
-use api::contracts::sessions::{self, Activate};
 use api::model::control_api::ResourceUsage;
 use api::process_usage::ProcessSampler;
+use api::ui::IconName;
 use api::{HostEvent, PluginView, RuntimeKey, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, IntoElement, Render, SharedString, Subscription, Task,
     WeakEntity, Window,
 };
-use gpui_component::{IconName, IconNamed as _};
 use smelt_plugin_api as api;
 
 use monitor::{
@@ -38,6 +37,17 @@ use monitor::{
 const OWNER: &str = "smelt.resources";
 /// 登记的那一页，`<来源>/<名字>`。
 const PAGE: &str = "smelt.resources/main";
+
+// 约定：smelt.sessions 的 ACTIVATE，权威定义在 crates/plugins/sessions/src/contract.rs。
+const ACTIVATE: api::Command<Activate, ()> = api::Command::new("smelt.sessions/activate");
+
+/// [`ACTIVATE`] 的参数：哪台机器上的哪段守护会话。
+#[derive(serde::Serialize)]
+struct Activate {
+    #[serde(with = "api::machine_json")]
+    machine: RuntimeKey,
+    session_id: String,
+}
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
@@ -149,13 +159,12 @@ impl PluginView for ResourcesPage {
 
 impl Render for ResourcesPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let page = view::page(
+        view::page(
             cx.entity(),
             self.snapshot.clone(),
             self.sort,
             self.expanded.clone(),
-        );
-        api::settings_pane("resources-settings", page)
+        )
     }
 }
 
@@ -166,7 +175,7 @@ fn shown(cx: &App) -> bool {
 
 /// 从设置里的这一页跳到那段会话。
 pub(crate) fn jump_to_session(machine: RuntimeKey, session_id: String, cx: &mut App) {
-    let task = sessions::ACTIVATE.run(
+    let task = ACTIVATE.run(
         &Activate {
             machine,
             session_id,

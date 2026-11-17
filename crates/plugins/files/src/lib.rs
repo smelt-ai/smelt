@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use gpui::*;
-use gpui_component::VirtualListScrollHandle;
-use gpui_component::input::{InputEvent, InputState};
+use gpui_base::VirtualListScrollHandle;
+use smelt_plugin_api::ui::field::{InputEvent, InputState};
 use smelt_plugin_api::{
     self as api, CommandSpec, Handled, Host, HostEvent, PluginView, RuntimeKey, ViewHandle,
     ViewSpec,
@@ -72,7 +72,7 @@ pub fn register(cx: &mut App) {
         vec![ViewSpec {
             name: "main".into(),
             title: "文件".into(),
-            icon: gpui_kit_assets::IconName::FolderTree.path(),
+            icon: api::ui::IconName::FolderTree.path(),
             draws_top_bar: false,
             instances: false,
             settings: None,
@@ -132,22 +132,6 @@ pub fn register(cx: &mut App) {
                     true => Ok(api::serde_json::Value::Null),
                     false => Err("文件视图没登记上".to_string()),
                 }))
-            }),
-        },
-        // 编辑器右键菜单里的那一项，见 `send_open_file_selection`。
-        CommandSpec {
-            name: "send-selection".into(),
-            title: "发送选中内容到会话".into(),
-            key: None,
-            context: FILES_KEY_CONTEXT.into(),
-            palette: false,
-            requires_args: false,
-            handler: Rc::new(|_, _, cx| {
-                let Some(panel) = built_panel(cx) else {
-                    return Handled::Pass;
-                };
-                panel.update(cx, |panel, cx| panel.send_open_file_selection(cx));
-                Handled::ok()
             }),
         },
     ];
@@ -488,19 +472,17 @@ impl FilesPanel {
     }
 
     /// 把一次刷新排到这一轮之后。同一轮里多次调用合并成一次；刷新要窗口（打开文件要建
-    /// 编辑器），在主窗口里跑。
+    /// 编辑器），在视图自己所在的窗口里跑。
     pub(crate) fn schedule_visible_refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_scheduled {
             return;
         }
-        let Some(window) = self.host.main_window(cx) else {
-            return;
-        };
         self.refresh_scheduled = true;
         let view = cx.weak_entity();
+        let entity_id = cx.entity_id();
         cx.defer(move |cx| {
             let refreshed = cx
-                .update_window(window, |_, window, cx| {
+                .with_window(entity_id, |window, cx| {
                     view.update(cx, |this, cx| this.refresh(window, cx)).is_ok()
                 })
                 .unwrap_or(false);

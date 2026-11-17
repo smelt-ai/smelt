@@ -15,14 +15,16 @@ pub(super) fn pi_mcp_page(
     page: &CapabilitiesPage,
     cx: &App,
 ) -> AnyElement {
-    let palette = Palette::new(cx);
+    let palette = Palette::new();
     let servers: &[PiMcpServer] = page.pi_mcp_servers().map(Vec::as_slice).unwrap_or_default();
     div()
         .id("pi-mcp-page")
         .size_full()
         .overflow_y_scroll()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .w_full()
                 .max_w(px(PAGE_MAX_WIDTH))
                 .mx_auto()
@@ -42,7 +44,7 @@ pub(super) fn pi_mcp_page(
 }
 
 fn row(index: usize, palette: Palette) -> Div {
-    let row = v_flex().w_full().px_4().py_3().gap_2();
+    let row = div().flex().flex_col().w_full().px_4().py_3().gap_2();
     if index > 0 {
         row.border_t_1().border_color(palette.border)
     } else {
@@ -89,11 +91,7 @@ fn preset_row(
     palette: Palette,
 ) -> Div {
     let action = if added {
-        Tag::secondary()
-            .rounded_full()
-            .flex_none()
-            .child("已添加")
-            .into_any_element()
+        Badge::new().child("已添加").into_any_element()
     } else {
         let entity = entity.clone();
         // 点完会换成上面的「已添加」胶囊，按钮用同高的胶囊占同一个位置，各行右侧轮廓一致。
@@ -121,13 +119,16 @@ fn preset_row(
             .tooltip("打开 Chrome 应用商店里的扩展页")
             .on_click(move |_, _, cx| cx.open_url(url))
     });
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .justify_between()
         .gap_3()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_w_0()
                 .gap_0p5()
@@ -140,10 +141,11 @@ fn preset_row(
                 ),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .flex_none()
                 .gap_1()
-                .items_center()
                 .children(install)
                 .child(action),
         )
@@ -156,7 +158,7 @@ fn servers_section(
     palette: Palette,
     cx: &App,
 ) -> Div {
-    let mut body = v_flex().w_full().gap_2();
+    let mut body = div().flex().flex_col().w_full().gap_2();
     if let Some(error) = &page.pi_mcp_error {
         body = body.child(
             div()
@@ -229,14 +231,15 @@ fn server_row(
     let any_login = running_login.is_some();
     let removing = page.pi_mcp_pending_remove.is_some();
 
-    let mut badges = h_flex()
-        .gap_2()
+    let mut badges = div()
+        .flex()
         .items_center()
+        .gap_2()
         .child(row_title(server.name.clone(), palette));
     if !server.enabled {
-        badges = badges.child(Tag::secondary().rounded_full().flex_none().child("已停用"));
+        badges = badges.child(Badge::new().child("已停用"));
     } else if server.signed_in {
-        badges = badges.child(Tag::success().rounded_full().flex_none().child("已登录"));
+        badges = badges.child(Badge::new().ok().child("已登录"));
     }
 
     let login = (server.is_http() && server.enabled).then(|| {
@@ -282,7 +285,7 @@ fn server_row(
         Button::new(format!("pi-mcp-remove-{}", server.name))
             .quiet()
             .small()
-            .icon(api::ui::trash_icon())
+            .icon_path("smelt-icons/trash.svg")
             .icon_action("从 mcp.json 移除")
             .disabled(logging_in || removing)
             .on_click(move |_, _, cx| {
@@ -293,13 +296,16 @@ fn server_row(
             })
     };
 
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .justify_between()
         .gap_3()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_w_0()
                 .gap_0p5()
@@ -307,10 +313,11 @@ fn server_row(
                 .child(row_detail(detail, palette)),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .flex_none()
                 .gap_1()
-                .items_center()
                 .children(login)
                 .child(toggle)
                 .child(remove),
@@ -321,9 +328,10 @@ fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palett
     let confirm_entity = entity.clone();
     let cancel_entity = entity.clone();
     let confirm_name = name.to_string();
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .justify_between()
         .gap_3()
         .child(
@@ -332,7 +340,9 @@ fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palett
             ),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .flex_none()
                 .gap_1()
                 .child(
@@ -363,16 +373,15 @@ fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palett
 /// 原生文件入口，以及「改了要怎样才生效」的提示：Pi 只在会话启动时读 mcp.json。
 fn footer(entity: &Entity<CapabilitiesPage>, mcp_path: &str, palette: Palette) -> Div {
     let open_entity = entity.clone();
-    v_flex()
+    div().flex().flex_col()
         .w_full()
         .gap_2()
         .pt_3()
         .border_t_1()
         .border_color(palette.border)
         .child(
-            h_flex()
+            div().flex().items_center()
                 .w_full()
-                .items_center()
                 .gap_1()
                 .child(
                     div()

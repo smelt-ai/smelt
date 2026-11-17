@@ -9,7 +9,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use api::contracts::sessions::{self, Activate};
 use api::model::agent_kind::agent_id_from_launch;
 use api::model::agent_status::{AgentStatus, terminal_agent_status};
 use api::model::daemon_state::DaemonSessionState;
@@ -18,6 +17,8 @@ use api::ui::ui_theme::agent_status_u32;
 use api::{DockBadge, RuntimeKey, StatusIcon, StatusMenu, StatusMenuItem};
 use gpui::{App, Task};
 use smelt_plugin_api as api;
+
+use crate::sessions::{self, Activate};
 
 /// 各家 agent 的单色母图（32px，只用透明度当形状），手机端也用这一份。
 const AGENT_LOGO_PNG: &[(&str, &[u8])] = &[

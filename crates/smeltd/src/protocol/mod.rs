@@ -115,7 +115,7 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         };
         if let Some(message) = message {
             if operation == DaemonOperation::AcpOpen {
-                crate::acp_host::write_rejected_acp_snapshot(conn, &message);
+                crate::acp_host::write_rejected_acp_snapshot(conn, &v, &message);
             } else {
                 let mut conn = conn;
                 write_terminal_error(

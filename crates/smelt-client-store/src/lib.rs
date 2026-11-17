@@ -1,7 +1,8 @@
 //! 桌面客户端自己的库：`~/.smelt/client.sqlite3`。
 //!
 //! 放的是每台设备可以不同、不该交给运行时的东西（设计文档 D1）：外观、更新设置、
-//! 通知开关、侧栏等界面状态、远程运行时的连接。运行时的数据在运行时自己的库里，GUI
+//! 快捷键、工作台布局和页面路由、远程运行时的连接。插件的界面状态存在插件自己的库里
+//! （[`plugin_store`]）。运行时的数据在运行时自己的库里，GUI
 //! 只经协议读写。每样东西一张表、一个字段一列，表结构见 `schema.rs`。
 
 use std::path::{Path, PathBuf};
@@ -49,7 +50,7 @@ pub struct AppearanceRecord {
     pub theme_name: String,
     pub ui_font_px: u32,
     pub ui_font_family: String,
-    pub font_px: u32,
+    /// 等宽字体（代码、终端）。空是出厂默认。
     pub font_family: String,
     /// 选的是哪份布局。`None` 是没选过，用第一个登记的布局。
     pub layout_id: Option<String>,
@@ -71,62 +72,11 @@ pub struct KeyBindingRecord {
     pub keystroke: Option<String>,
 }
 
-/// 侧栏里的一个项目：哪个运行时上的哪个根目录。路径只在一个运行时里唯一。
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ProjectKey {
-    /// `None` 是本机运行时。
-    pub runtime_id: Option<String>,
-    pub root: String,
-}
-
-impl ProjectKey {
-    pub fn local(root: impl Into<String>) -> Self {
-        Self {
-            runtime_id: None,
-            root: root.into(),
-        }
-    }
-}
-
-/// 一段对话在这台设备上的界面状态：终端怎么分屏、当前看哪个。文件树、变更页这些插件的
-/// 状态存在插件自己的库里，不在这里。
-#[derive(Clone, Debug, PartialEq)]
-pub struct ConversationRouteRecord {
-    /// `None` 是本机运行时。
-    pub runtime_id: Option<String>,
-    /// 对话的稳定 id，和运行时工作区目录里的一致。
-    pub conversation_id: String,
-    /// 当前看的终端（守护里的会话 id）。
-    pub active_terminal_id: Option<String>,
-    /// 终端的分屏布局。格式归界面定义并带版本号，这里只当一段 JSON 存取。
-    pub dock_layout: Option<String>,
-}
-
-/// 侧栏顺序：某个运行时上项目、对话从上到下的顺序。每台客户端自己记，不交给运行时。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SidebarOrderRecord {
-    /// `None` 是本机运行时（和 `ProjectKey::runtime_id`、`ConversationRouteRecord::runtime_id` 同一个约定）。
-    pub runtime_id: Option<String>,
-    /// 项目根目录，从上到下。
-    pub projects: Vec<String>,
-    /// 对话 id，从上到下。
-    pub conversations: Vec<String>,
-}
-
-/// 侧栏、路由这些界面状态。列表按原顺序存取。
-#[derive(Clone, Debug, PartialEq)]
+/// 宿主自己的界面状态：页面路由。会话列表、分屏这些插件的状态存在插件自己的库里。
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceUiRecord {
-    pub active_session: usize,
-    /// 当前看的那段对话的稳定 id。
-    pub active_session_id: Option<String>,
     /// 首页出口里放着的视图 id；空是默认内容。
-    pub route: String,
-    pub collapsed_projects: Vec<ProjectKey>,
-    pub collapsed_agents: Vec<String>,
-    pub sidebar_grouping: String,
-    pub pinned_projects: Vec<ProjectKey>,
-    pub sidebar_hide_empty_projects: bool,
-    pub archive_expanded: bool,
+    pub outlet: String,
 }
 
 /// 一份布局被用户改过之后的样子。`state` 是 Dock 的 `DockAreaState` 原样序列化，格式归
@@ -224,26 +174,21 @@ pub(crate) fn write_appearance(
     connection: &Connection,
     record: &AppearanceRecord,
 ) -> Result<(), String> {
-    // TODO(下次升库): `bg_color`、`opacity`、`blur` 三列已经没人读，删掉；`glass_style`
-    // 现在存的是材质（`material`），改名。没升库前照旧给没人读的列填固定值，免得 NOT NULL
-    // 拦住写入。
     connection
         .execute(
-            "INSERT OR REPLACE INTO appearance (id, bg_color, bg_image, bg_image_opacity, opacity,
-               blur, glass_style, theme_mode, theme_name, ui_font_px, ui_font_family, font_px,
-               font_family, layout_id)
-             VALUES (1, 0, ?1, ?2, 1.0, 1, ?10, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO appearance (id, bg_image, bg_image_opacity, material,
+               theme_mode, theme_name, ui_font_px, ui_font_family, font_family, layout_id)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 record.bg_image,
                 record.bg_image_opacity,
+                record.material,
                 record.theme_mode,
                 record.theme_name,
                 record.ui_font_px,
                 record.ui_font_family,
-                record.font_px,
                 record.font_family,
-                record.layout_id,
-                record.material
+                record.layout_id
             ],
         )
         .map(drop)
@@ -263,249 +208,17 @@ pub(crate) fn write_update_settings(
         .map_err(sql)
 }
 
-fn write_list(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-    items: &[String],
-) -> Result<(), String> {
-    connection
-        .execute(&format!("DELETE FROM {table}"), [])
-        .map_err(sql)?;
-    let mut statement = connection
-        .prepare(&format!(
-            "INSERT OR IGNORE INTO {table} ({column}, position) VALUES (?1, ?2)"
-        ))
-        .map_err(sql)?;
-    for (position, item) in items.iter().enumerate() {
-        statement
-            .execute(params![item, position as i64])
-            .map_err(sql)?;
-    }
-    Ok(())
-}
-
-fn read_list(connection: &Connection, table: &str, column: &str) -> Result<Vec<String>, String> {
-    let mut statement = connection
-        .prepare(&format!("SELECT {column} FROM {table} ORDER BY position"))
-        .map_err(sql)?;
-    let rows = statement.query_map([], |row| row.get(0)).map_err(sql)?;
-    rows.collect::<Result<_, _>>().map_err(sql)
-}
-
-/// 项目表里本机运行时的 `runtime_id` 存空串：它要进主键，不能是 NULL。
-const LOCAL_RUNTIME_ID: &str = "";
-
-fn write_project_list(
-    connection: &Connection,
-    table: &str,
-    items: &[ProjectKey],
-) -> Result<(), String> {
-    connection
-        .execute(&format!("DELETE FROM {table}"), [])
-        .map_err(sql)?;
-    let mut statement = connection
-        .prepare(&format!(
-            "INSERT OR IGNORE INTO {table} (runtime_id, root, position) VALUES (?1, ?2, ?3)"
-        ))
-        .map_err(sql)?;
-    for (position, item) in items.iter().enumerate() {
-        statement
-            .execute(params![
-                item.runtime_id.as_deref().unwrap_or(LOCAL_RUNTIME_ID),
-                item.root,
-                position as i64
-            ])
-            .map_err(sql)?;
-    }
-    Ok(())
-}
-
-fn read_project_list(connection: &Connection, table: &str) -> Result<Vec<ProjectKey>, String> {
-    let mut statement = connection
-        .prepare(&format!(
-            "SELECT runtime_id, root FROM {table} ORDER BY position"
-        ))
-        .map_err(sql)?;
-    let rows = statement
-        .query_map([], |row| {
-            let runtime_id: String = row.get(0)?;
-            Ok(ProjectKey {
-                runtime_id: (runtime_id != LOCAL_RUNTIME_ID).then_some(runtime_id),
-                root: row.get(1)?,
-            })
-        })
-        .map_err(sql)?;
-    rows.collect::<Result<_, _>>().map_err(sql)
-}
-
-fn write_conversation_routes(
-    connection: &Connection,
-    records: &[ConversationRouteRecord],
-) -> Result<(), String> {
-    connection
-        .execute_batch("DELETE FROM conversation_route;")
-        .map_err(sql)?;
-    let mut route = connection
-        .prepare(
-            "INSERT OR REPLACE INTO conversation_route (runtime_id, conversation_id,
-               active_terminal_id, dock_layout)
-             VALUES (?1, ?2, ?3, ?4)",
-        )
-        .map_err(sql)?;
-    for record in records {
-        let runtime_id = record.runtime_id.as_deref().unwrap_or(LOCAL_RUNTIME_ID);
-        route
-            .execute(params![
-                runtime_id,
-                record.conversation_id,
-                record.active_terminal_id,
-                record.dock_layout
-            ])
-            .map_err(sql)?;
-    }
-    Ok(())
-}
-
-fn read_conversation_routes(
-    connection: &Connection,
-) -> Result<Vec<ConversationRouteRecord>, String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT runtime_id, conversation_id, active_terminal_id, dock_layout
-             FROM conversation_route ORDER BY runtime_id, conversation_id",
-        )
-        .map_err(sql)?;
-    statement
-        .query_map([], |row| {
-            let runtime_id: String = row.get(0)?;
-            Ok(ConversationRouteRecord {
-                runtime_id: (runtime_id != LOCAL_RUNTIME_ID).then_some(runtime_id),
-                conversation_id: row.get(1)?,
-                active_terminal_id: row.get(2)?,
-                dock_layout: row.get(3)?,
-            })
-        })
-        .map_err(sql)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(sql)
-}
-
-/// 侧栏顺序的两张表和各自的条目列。
-const SIDEBAR_ORDER_TABLES: [(&str, &str); 2] = [
-    ("sidebar_project_order", "root"),
-    ("sidebar_conversation_order", "conversation_id"),
-];
-
-fn sidebar_order_items<'a>(record: &'a SidebarOrderRecord, table: &str) -> &'a [String] {
-    match table {
-        "sidebar_project_order" => &record.projects,
-        _ => &record.conversations,
-    }
-}
-
-fn sidebar_order_items_mut<'a>(
-    record: &'a mut SidebarOrderRecord,
-    table: &str,
-) -> &'a mut Vec<String> {
-    match table {
-        "sidebar_project_order" => &mut record.projects,
-        _ => &mut record.conversations,
-    }
-}
-
-/// 只换给出的运行时：先删掉它们的旧行再按新顺序写。同一运行时里重复的条目留第一次出现的位置
-/// （`INSERT OR IGNORE` 撞主键就跳过）；同一个运行时给了两次，后一份为准。
-fn write_sidebar_orders(
-    connection: &Connection,
-    records: &[SidebarOrderRecord],
-) -> Result<(), String> {
-    for (table, column) in SIDEBAR_ORDER_TABLES {
-        let mut delete = connection
-            .prepare(&format!("DELETE FROM {table} WHERE runtime_id = ?1"))
-            .map_err(sql)?;
-        let mut insert = connection
-            .prepare(&format!(
-                "INSERT OR IGNORE INTO {table} (runtime_id, {column}, position) VALUES (?1, ?2, ?3)"
-            ))
-            .map_err(sql)?;
-        for record in records {
-            let runtime_id = record.runtime_id.as_deref().unwrap_or(LOCAL_RUNTIME_ID);
-            delete.execute(params![runtime_id]).map_err(sql)?;
-            for (position, item) in sidebar_order_items(record, table).iter().enumerate() {
-                insert
-                    .execute(params![runtime_id, item, position as i64])
-                    .map_err(sql)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// 每个有顺序的运行时一条，按 `runtime_id` 排（本机在最前）。
-fn read_sidebar_orders(connection: &Connection) -> Result<Vec<SidebarOrderRecord>, String> {
-    let mut records: Vec<SidebarOrderRecord> = Vec::new();
-    for (table, column) in SIDEBAR_ORDER_TABLES {
-        let mut statement = connection
-            .prepare(&format!(
-                "SELECT runtime_id, {column} FROM {table} ORDER BY runtime_id, position"
-            ))
-            .map_err(sql)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(sql)?;
-        for row in rows {
-            let (runtime_id, item) = row.map_err(sql)?;
-            let runtime_id = (runtime_id != LOCAL_RUNTIME_ID).then_some(runtime_id);
-            let index = match records
-                .iter()
-                .position(|record| record.runtime_id == runtime_id)
-            {
-                Some(index) => index,
-                None => {
-                    records.push(SidebarOrderRecord {
-                        runtime_id,
-                        ..SidebarOrderRecord::default()
-                    });
-                    records.len() - 1
-                }
-            };
-            sidebar_order_items_mut(&mut records[index], table).push(item);
-        }
-    }
-    records.sort_by(|a, b| a.runtime_id.cmp(&b.runtime_id));
-    Ok(records)
-}
-
 pub(crate) fn write_workspace_ui(
     connection: &Connection,
     record: &WorkspaceUiRecord,
 ) -> Result<(), String> {
     connection
         .execute(
-            "INSERT OR REPLACE INTO workspace_ui (id, active_session, active_session_id, route,
-               sidebar_grouping, sidebar_hide_empty_projects, archive_expanded)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                record.active_session as i64,
-                record.active_session_id,
-                record.route,
-                record.sidebar_grouping,
-                record.sidebar_hide_empty_projects,
-                record.archive_expanded
-            ],
+            "INSERT OR REPLACE INTO workspace_ui (id, outlet) VALUES (1, ?1)",
+            params![record.outlet],
         )
-        .map_err(sql)?;
-    write_project_list(connection, "collapsed_project", &record.collapsed_projects)?;
-    write_list(
-        connection,
-        "collapsed_agent",
-        "agent_id",
-        &record.collapsed_agents,
-    )?;
-    write_project_list(connection, "pinned_project", &record.pinned_projects)
+        .map(drop)
+        .map_err(sql)
 }
 
 pub(crate) fn write_update_state(
@@ -630,7 +343,7 @@ impl ClientStore {
             connection
                 .query_row(
                     "SELECT bg_image, bg_image_opacity, theme_mode, theme_name, ui_font_px,
-                       ui_font_family, font_px, font_family, layout_id, glass_style
+                       ui_font_family, font_family, layout_id, material
                      FROM appearance WHERE id = 1",
                     [],
                     |row| {
@@ -641,10 +354,9 @@ impl ClientStore {
                             theme_name: row.get(3)?,
                             ui_font_px: row.get(4)?,
                             ui_font_family: row.get(5)?,
-                            font_px: row.get(6)?,
-                            font_family: row.get(7)?,
-                            layout_id: row.get(8)?,
-                            material: row.get(9)?,
+                            font_family: row.get(6)?,
+                            layout_id: row.get(7)?,
+                            material: row.get(8)?,
                         })
                     },
                 )
@@ -688,78 +400,20 @@ impl ClientStore {
     #[track_caller]
     pub fn workspace_ui(&self) -> Result<Option<WorkspaceUiRecord>, ClientStoreError> {
         self.with(|connection| {
-            let Some(mut record) = connection
-                .query_row(
-                    "SELECT active_session, active_session_id, route, sidebar_grouping,
-                       sidebar_hide_empty_projects, archive_expanded
-                     FROM workspace_ui WHERE id = 1",
-                    [],
-                    |row| {
-                        Ok(WorkspaceUiRecord {
-                            active_session: row.get::<_, i64>(0)? as usize,
-                            active_session_id: row.get(1)?,
-                            route: row.get(2)?,
-                            collapsed_projects: Vec::new(),
-                            collapsed_agents: Vec::new(),
-                            sidebar_grouping: row.get(3)?,
-                            pinned_projects: Vec::new(),
-                            sidebar_hide_empty_projects: row.get(4)?,
-                            archive_expanded: row.get(5)?,
-                        })
-                    },
-                )
+            connection
+                .query_row("SELECT outlet FROM workspace_ui WHERE id = 1", [], |row| {
+                    Ok(WorkspaceUiRecord {
+                        outlet: row.get(0)?,
+                    })
+                })
                 .optional()
-                .map_err(sql)?
-            else {
-                return Ok(None);
-            };
-            record.collapsed_projects = read_project_list(connection, "collapsed_project")?;
-            record.collapsed_agents = read_list(connection, "collapsed_agent", "agent_id")?;
-            record.pinned_projects = read_project_list(connection, "pinned_project")?;
-            Ok(Some(record))
+                .map_err(sql)
         })
     }
 
     #[track_caller]
     pub fn put_workspace_ui(&self, record: &WorkspaceUiRecord) -> Result<(), ClientStoreError> {
         self.write(|connection| write_workspace_ui(connection, record))
-    }
-
-    pub fn pinned_worksets(
-        &self,
-        runtime_id: Option<&str>,
-    ) -> Result<Vec<String>, ClientStoreError> {
-        self.with(|connection| {
-            let mut statement = connection
-                .prepare("SELECT workset_id FROM pinned_workset WHERE runtime_id = ?1 ORDER BY workset_id")
-                .map_err(sql)?;
-            let rows = statement
-                .query_map([runtime_id.unwrap_or(LOCAL_RUNTIME_ID)], |row| row.get(0))
-                .map_err(sql)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(sql)
-        })
-    }
-
-    pub fn set_workset_pinned(
-        &self,
-        runtime_id: Option<&str>,
-        workset_id: &str,
-        pinned: bool,
-    ) -> Result<(), ClientStoreError> {
-        self.write(|connection| {
-            let statement = if pinned {
-                "INSERT OR IGNORE INTO pinned_workset (runtime_id, workset_id) VALUES (?1, ?2)"
-            } else {
-                "DELETE FROM pinned_workset WHERE runtime_id = ?1 AND workset_id = ?2"
-            };
-            connection
-                .execute(
-                    statement,
-                    params![runtime_id.unwrap_or(LOCAL_RUNTIME_ID), workset_id],
-                )
-                .map_err(sql)?;
-            Ok(())
-        })
     }
 
     /// 一份布局的存档。没改过是 `None`。
@@ -815,33 +469,6 @@ impl ClientStore {
                 .map(drop)
                 .map_err(sql)
         })
-    }
-
-    #[track_caller]
-    pub fn conversation_routes(&self) -> Result<Vec<ConversationRouteRecord>, ClientStoreError> {
-        self.with(|connection| read_conversation_routes(connection))
-    }
-
-    /// 整份换掉：不在里面的对话（关掉了）的界面状态一并删掉。
-    pub fn put_conversation_routes(
-        &self,
-        records: &[ConversationRouteRecord],
-    ) -> Result<(), ClientStoreError> {
-        self.write(|connection| write_conversation_routes(connection, records))
-    }
-
-    #[track_caller]
-    pub fn sidebar_orders(&self) -> Result<Vec<SidebarOrderRecord>, ClientStoreError> {
-        self.with(|connection| read_sidebar_orders(connection))
-    }
-
-    /// 替换给出的这些运行时的顺序；没给出的运行时原样保留。
-    #[track_caller]
-    pub fn put_sidebar_orders(
-        &self,
-        records: &[SidebarOrderRecord],
-    ) -> Result<(), ClientStoreError> {
-        self.write(|connection| write_sidebar_orders(connection, records))
     }
 
     #[track_caller]

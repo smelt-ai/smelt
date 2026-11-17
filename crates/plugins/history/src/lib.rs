@@ -16,22 +16,23 @@ use api::client::protocol::history::{
     HistoryDeleteCall, HistoryDeleteParams, HistoryDetailCall, HistoryDetailParams,
     HistoryListCall, HistoryListParams,
 };
-use api::contracts::sessions::{self, Handoff, Resume};
 use api::model::agent_kind::{ConversationAgentKind, HistorySourceKind};
 use api::model::daemon_state::CORE_TOPIC_HISTORY_CHANGED;
 use api::model::session_history::{SessionDetail, SessionSummary};
 use api::serde_json;
 use gpui::*;
-use gpui_component::WindowExt;
-use gpui_component::input::{InputEvent, InputState};
+use smelt_plugin_api::ui::field::{InputEvent, InputState};
 use smelt_plugin_api::{
     self as api, HostEvent, PluginView, Project, RuntimeKey, TopicMessage, ViewHandle, ViewSpec,
 };
 
+mod agents;
 mod model;
 mod render;
+mod sessions;
 
 use model::*;
+use sessions::{Handoff, Resume};
 
 const OWNER: &str = "smelt.history";
 const VIEW_ID: &str = "smelt.history/main";
@@ -43,12 +44,13 @@ const PREFETCH_MAX_AGE: Duration = Duration::from_secs(60);
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
+    agents::install(cx);
     api::register_views(
         OWNER,
         vec![ViewSpec {
             name: "main".into(),
             title: "历史".into(),
-            icon: gpui_kit_assets::IconName::Clock.path(),
+            icon: api::ui::IconName::Clock.path(),
             draws_top_bar: false,
             instances: false,
             settings: None,
@@ -124,6 +126,12 @@ impl HistoryPage {
             cx.subscribe(&events, |this, _, event: &HostEvent, cx| {
                 this.on_host_event(event, cx);
             }),
+            // 智能体配置换了：智能体 space 的引擎、来源标签都可能变。
+            cx.observe_global::<agents::AgentSettingsCache>(|this, cx| {
+                this.sync_project(cx);
+                this.refresh(cx);
+                cx.notify();
+            }),
             // 过滤在内存里做，键入只要重画。
             cx.subscribe(&filter, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -163,9 +171,7 @@ impl HistoryPage {
                 }
             }
             HostEvent::ActiveContextChanged if api::active_context(cx).project == self.project => {}
-            HostEvent::ActiveContextChanged
-            | HostEvent::AgentSettingsChanged
-            | HostEvent::MachinesChanged => {
+            HostEvent::ActiveContextChanged | HostEvent::MachinesChanged => {
                 self.sync_project(cx);
                 self.refresh(cx);
                 cx.notify();
@@ -197,7 +203,7 @@ impl HistoryPage {
             space_engine(
                 project,
                 home.as_deref(),
-                host.agent_settings(&project.machine, cx),
+                agents::settings_on(&project.machine, cx),
             )
         });
         if self.project != project {
@@ -250,8 +256,7 @@ impl HistoryPage {
         };
         let current = self.source();
         let tabs = {
-            let host = api::host(cx);
-            let settings = host.agent_settings(&project.machine, cx);
+            let settings = agents::settings_on(&project.machine, cx);
             source_tabs(
                 self.engine,
                 settings.into_iter().flat_map(|settings| &settings.profiles),
@@ -430,10 +435,7 @@ impl HistoryPage {
         let Some(list) = self.lists.get(&key) else {
             return HashMap::new();
         };
-        known_bindings(
-            &list.bindings,
-            api::host(cx).agent_settings(&project.machine, cx),
-        )
+        known_bindings(&list.bindings, agents::settings_on(&project.machine, cx))
     }
 
     /// 迁移：读出源会话，写成交接说明，交给目标 agent 起一段新会话。存档可能有几 MB，
@@ -447,8 +449,7 @@ impl HistoryPage {
             return;
         };
         let profile_label = profile_id.as_deref().and_then(|id| {
-            api::host(cx)
-                .agent_settings(&project.machine, cx)?
+            agents::settings_on(&project.machine, cx)?
                 .find_profile(id)
                 .map(|profile| profile.label.clone())
         });
@@ -458,7 +459,6 @@ impl HistoryPage {
             title: session.title.clone(),
             cwd: project.root.clone(),
         };
-        let resume_id = session.resume_id.clone();
         let path = session.path.clone();
         let call = load_detail(&project.machine, agent, &path, cx);
         cx.spawn(async move |_, cx| {
@@ -480,7 +480,6 @@ impl HistoryPage {
                     agent: target.agent.id().to_string(),
                     profile_id: target.profile_id.clone(),
                     prompt: handoff_prompt(&source, &detail, &target),
-                    source_session_id: resume_id,
                 };
                 report_failure(sessions::HANDOFF.run(&args, cx), cx);
             });
@@ -502,7 +501,7 @@ impl HistoryPage {
         let enter = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.submit_rename(cx);
-                window.close_dialog(cx);
+                api::ui::dialog::close(window, cx);
             }
         });
         self.renaming = Some(Renaming {

@@ -17,8 +17,7 @@
 //! 露出视图。打开一个视图（`Workspace::open_view`）：哪页的布局里摆了它就去那页露出来；
 //! 哪页都没摆就放进出口（`smelt_plugin_api::OUTLET_VIEW`）——开着的这页有出口放这页的，
 //! 没有就去有出口的那页（先首页）。出口里换内容不换页、不记来路，没放东西时显示这页的默认
-//! 内容（页登记时给的 `index`）。页头的关闭退回来的那页。⌘W 不管路由：它关的是看得见的
-//! 会话。来路只记在内存里，重启回首页；首页出口里放着什么随界面状态存。
+//! 内容（页登记时给的 `index`）。页头的关闭退回来的那页。⌘W 不管路由。来路只记在内存里，重启回首页；首页出口里放着什么随界面状态存。
 //!
 //! 几个信号：
 //! - `DockEvent::LayoutChanged`（装布局、拖动、选中、拖分隔条）：存那一页的档；开着的页里
@@ -30,7 +29,7 @@
 use std::collections::HashSet;
 
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
-use gpui_component::dock::{DockArea, DockAreaState, DockEvent, DockPlacement};
+use gpui_base::dock::{DockArea, DockAreaState, DockEvent, DockPlacement};
 use smelt_client_store::WorkspaceLayoutStateRecord;
 use smelt_plugin_api as api;
 
@@ -56,6 +55,8 @@ pub(crate) struct PageDock {
     page: PageKey,
     area: Entity<DockArea>,
     layout: InstalledLayout,
+    /// 装的那份登记时摆着的视图和摞。插件替换了同一份布局、这些变了，就得重装。
+    frame: LayoutFrame,
     /// 上次写进库的布局存档原文。一样就不再写。
     written: Option<String>,
     _subs: Vec<Subscription>,
@@ -149,33 +150,72 @@ fn landing_page(cx: &App) -> PageKey {
     home_page(cx).filter(|_| effective_home_layout(cx).is_some())
 }
 
-/// 一份布局里摆着的视图 id。面板树的叶子是视图，`StackPanel`、`TabPanel` 是框架。
+/// 一份布局里存档动不了的部分：摆了哪些视图，各摞（`api::STACK_PANEL`）里排的什么。存档
+/// 只改摆法（组、顺序、大小、选中），摞里拖不动；这部分和登记的不同，就是布局升级了。
+#[derive(Clone, Debug, Default, PartialEq)]
+struct LayoutFrame {
+    views: HashSet<String>,
+    /// 各摞写回 JSON 的样子，排好序：摞整块挪到别处不算变。
+    stacks: Vec<String>,
+}
+
+fn layout_frame(state: &DockAreaState) -> LayoutFrame {
+    let mut stacks: Vec<String> = api::layout_stacks(state)
+        .iter()
+        .map(|stack| serde_json::to_string(stack).expect("摞总能写成 JSON"))
+        .collect();
+    stacks.sort();
+    LayoutFrame {
+        views: layout_views(state),
+        stacks,
+    }
+}
+
+/// 一份布局里摆着的视图 id：面板树的叶子，和摞里的每一项。`StackPanel`、`TabPanel` 是框架。
 fn layout_views(state: &DockAreaState) -> HashSet<String> {
-    fn walk(node: &serde_json::Value, views: &mut HashSet<String>) {
-        match node {
-            serde_json::Value::Object(object) => {
-                let leaf = object
-                    .get("children")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(Vec::is_empty);
-                if leaf
-                    && let Some(name) = object.get("panel_name").and_then(serde_json::Value::as_str)
-                    && name.contains('/')
-                {
-                    views.insert(name.to_string());
-                }
-                object.values().for_each(|child| walk(child, views));
+    fn walk(panel: &api::PanelState, views: &mut HashSet<String>) {
+        if let Some(stack) = api::Stack::of(panel) {
+            if let Ok(stack) = stack {
+                views.extend(stack.views().into_iter().map(str::to_string));
             }
-            serde_json::Value::Array(items) => items.iter().for_each(|child| walk(child, views)),
-            _ => {}
+            return;
         }
+        if panel.children.is_empty() && panel.panel_name.contains('/') {
+            views.insert(panel.panel_name.clone());
+        }
+        panel.children.iter().for_each(|child| walk(child, views));
     }
     let mut views = HashSet::new();
-    walk(
-        &serde_json::to_value(state).expect("DockAreaState 总能写成 JSON"),
-        &mut views,
-    );
+    walk(&state.center, &mut views);
+    for dock in [&state.left_dock, &state.right_dock, &state.bottom_dock]
+        .into_iter()
+        .flatten()
+    {
+        walk(dock.panel(), &mut views);
+    }
     views
+}
+
+/// 各页眼下该装的布局里摆着的视图，兜底那页（首页进不去时才进得去）摆的也算。没摆的视图
+/// 打开时放进出口。按登记的样子算：存档只改摆法、不增减视图（见 [`saved_state`]）。只读内存。
+fn laid_out_views(cx: &App) -> HashSet<String> {
+    page_order(cx)
+        .iter()
+        .filter(|page| page_usable(page, cx))
+        .flat_map(|page| match page.as_deref() {
+            Some(page) => effective_layout(page, cx)
+                .and_then(|id| api::layout(&id, cx))
+                .map(|state| layout_views(&state))
+                .unwrap_or_default(),
+            None => current_fallback_views(cx).into_iter().collect(),
+        })
+        .collect()
+}
+
+/// 重算各页摆着的视图，交给插件（`Host::view_laid_out`）。页、布局、视图登记变了，外观里换了
+/// 布局时调；没变不发事件。
+pub(crate) fn sync_laid_out_views(cx: &mut App) {
+    plugin_host::set_laid_out(laid_out_views(cx), cx);
 }
 
 /// 兜底那页摆的视图：登记过的视图按登记顺序，设置页、按实例建的、出口（兜底那页没有默认
@@ -235,20 +275,34 @@ fn to_text(state: &DockAreaState) -> String {
     serde_json::to_string(state).expect("DockAreaState 总能写成 JSON")
 }
 
-/// 存档能不能用：内容是当前版本的布局就用。布局后来改了也照用——那是用户自己摆的样子；
-/// 要布局本来的样子，扔掉存档（恢复）就是。
-fn usable_saved_state(record: &WorkspaceLayoutStateRecord) -> Option<DockAreaState> {
-    match api::parse_layout(&record.state) {
-        Ok(state) => Some(state),
+/// 存档能不能用：是当前版本的布局、摆的视图和摞（[`LayoutFrame`]）和布局本来的一样就用。
+/// 拖动、换组、改大小都只改摆法，照用；布局登记后增减了视图、改了摞（升级带来新的一块、
+/// 把几格并成一摞），存档就过时了，不用，装布局本来的样子——不然布局的升级永远到不了已经
+/// 存过档的人那里。
+fn usable_saved_state(
+    record: &WorkspaceLayoutStateRecord,
+    registered: &DockAreaState,
+) -> Option<DockAreaState> {
+    let state = match api::parse_layout(&record.state) {
+        Ok(state) => state,
         Err(error) => {
             eprintln!("[layout] 布局 `{}` 的存档不用：{error}", record.layout_id);
-            None
+            return None;
         }
+    };
+    if layout_frame(&state) != layout_frame(registered) {
+        eprintln!(
+            "[layout] 布局 `{}` 摆的视图或摞变了，存档不用",
+            record.layout_id
+        );
+        return None;
     }
+    Some(state)
 }
 
-/// 库里这份布局的存档和它的原文。读不出来、用不了都当没存过。
-fn saved_state(id: &str) -> Option<(DockAreaState, String)> {
+/// 库里这份布局的存档和它的原文。读不出来、用不了都当没存过。`registered` 是这份布局登记的
+/// 样子。
+fn saved_state(id: &str, registered: &DockAreaState) -> Option<(DockAreaState, String)> {
     let record = match smelt_client_store::client_store()
         .and_then(|store| store.workspace_layout_state(id))
     {
@@ -258,7 +312,7 @@ fn saved_state(id: &str) -> Option<(DockAreaState, String)> {
             return None;
         }
     };
-    let state = usable_saved_state(&record)?;
+    let state = usable_saved_state(&record, registered)?;
     Some((state, record.state))
 }
 
@@ -275,6 +329,7 @@ impl Workspace {
             page,
             area,
             layout: InstalledLayout::NotInstalled,
+            frame: LayoutFrame::default(),
             written: None,
             _subs: subs,
         }
@@ -328,6 +383,7 @@ impl Workspace {
     /// `Workspace::new` 里，插件在 `plugins::mount_all`），所以由 `Workspace::new` 推迟到
     /// 建完再调。
     pub(crate) fn open_home_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        sync_laid_out_views(cx);
         let landing = landing_page(cx);
         if let Some(view) = self.startup_outlet.take()
             && outlet_can_hold(&view, cx)
@@ -407,14 +463,30 @@ impl Workspace {
     }
 
     /// 路由换到了一页（或开着的这页刚装上）：焦点先收回工作台——可能还在换下去的那页里，
-    /// 出口里的视图建好，露着舞台就把焦点还给会话。
+    /// 出口里的视图建好、露着，再把焦点交给它（它接管焦点时）。
     fn page_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle, cx);
         self.sync_outlet(window, cx);
-        if self.view_shown(crate::builtin_views::Builtin::Stage.id()) {
-            self.focus_active_stage(window, cx);
-        }
+        self.focus_outlet(window, cx);
         cx.notify();
+    }
+
+    /// 把键盘焦点交给开着的这页出口里显示着的视图，见 [`api::PluginView::focus_target`]。
+    /// 出口没露着、视图不接管焦点就什么都不做。
+    fn focus_outlet(&self, window: &mut Window, cx: &mut App) {
+        let Some(id) = self.shell_view.outlet.as_deref() else {
+            return;
+        };
+        if !self.view_shown(id) {
+            return;
+        }
+        if let Some(instance) = self.outlet_instance() {
+            instance.focus(window, cx);
+        } else if let Some((view, _)) = api::ensure_view(id, window, cx)
+            && let Some(handle) = view.focus_target(cx)
+        {
+            window.focus(&handle, cx);
+        }
     }
 
     /// 开着的这页的出口放这个视图；`None`、这页的默认内容都是放回默认内容。换内容不记来路。
@@ -445,6 +517,7 @@ impl Workspace {
         if let Some(id) = self.shell_view.outlet.clone()
             && let Some((view, true)) = api::ensure_view(&id, window, cx)
         {
+            self.publish_safe_areas(vec![id], cx);
             view.open(&serde_json::Value::Null, window, cx);
             cx.notify();
         }
@@ -453,12 +526,11 @@ impl Workspace {
         }
     }
 
-    /// 首页出口里放着的视图，随界面状态存；远程桌面是现场，重启后不自动连回去；按实例建的
-    /// 那份参数不存，也不放回去。
+    /// 首页出口里放着的视图，随界面状态存；按实例建的那份参数不存，也不放回去。
     pub(crate) fn persisted_outlet(&self, cx: &App) -> Option<String> {
         self.router
             .outlet(&home_page(cx))
-            .filter(|view| *view != crate::desktop_view::DESKTOP_VIEW && outlet_can_hold(view, cx))
+            .filter(|view| outlet_can_hold(view, cx))
             .map(str::to_string)
     }
 
@@ -470,39 +542,42 @@ impl Workspace {
     /// 给第 `ix` 页装眼下该装的布局：有能用的存档装存档，否则装布局本来的样子。登记过
     /// 的页没有给它的布局时装不了，返回 `false`。
     fn install_layout(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let (installed, state, written) = match self.pages[ix].page.as_deref() {
+        let (installed, frame, state, written) = match self.pages[ix].page.as_deref() {
             Some(page) => {
                 let Some(id) = effective_layout(page, cx) else {
                     return false;
                 };
-                let (state, written) = match saved_state(&id) {
+                let registered = api::layout(&id, cx).expect("effective_layout 只给登记着的布局");
+                let frame = layout_frame(&registered);
+                let (state, written) = match saved_state(&id, &registered) {
                     Some((state, text)) => (state, Some(text)),
-                    None => (
-                        api::layout(&id, cx).expect("effective_layout 只给登记着的布局"),
-                        None,
-                    ),
+                    None => (registered, None),
                 };
-                (InstalledLayout::Registered(id), state, written)
+                (InstalledLayout::Registered(id), frame, state, written)
             }
             None => {
                 let views = current_fallback_views(cx);
                 let state = fallback_layout(&views);
-                (InstalledLayout::Fallback(views), state, None)
+                let frame = layout_frame(&state);
+                (InstalledLayout::Fallback(views), frame, state, None)
             }
         };
         let dock = &mut self.pages[ix];
         // 按存档装的，装完 dump 出来和库里一样就不用再写。
         dock.written = written;
         dock.layout = installed;
+        dock.frame = frame;
         let area = dock.area.clone();
         load_state(&area, state, window, cx);
         true
     }
 
     /// 页、布局登记变了，外观里换了布局：进不去的页的 Dock 放掉、从来路上拿掉，开着的那页
-    /// 进不去了就回去（有了首页，兜底的那页也算进不去）；各页该装的和装着的不同就换。
-    /// 装着的那份已经随每次改动存过档，直接换。外观里拖滑块也走到这里，比一下就回去。
+    /// 进不去了就回去（有了首页，兜底的那页也算进不去）；各页该装的和装着的不同（换了一份，
+    /// 或插件替换了这份、摆的视图变了）就换。装着的那份已经随每次改动存过档，直接换。外观里
+    /// 拖滑块也走到这里，比一下就回去。
     pub(crate) fn sync_pages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        sync_laid_out_views(cx);
         if self
             .pages
             .iter()
@@ -526,13 +601,15 @@ impl Workspace {
                 InstalledLayout::Registered(id) => {
                     let page = self.pages[ix].page.as_deref();
                     page.and_then(|page| effective_layout(page, cx)).as_ref() != Some(id)
+                        || api::layout(id, cx)
+                            .is_some_and(|state| layout_frame(&state) != self.pages[ix].frame)
                 }
             };
             if stale {
                 self.install_layout(ix, window, cx);
             }
         }
-        // 别的页摆着什么、出口的默认内容跟着登记变。
+        // 出口的默认内容跟着页的登记变。
         self.sync_outlet(window, cx);
     }
 
@@ -626,38 +703,49 @@ impl Workspace {
         }
     }
 
-    /// 重算开着的那页摆着什么、出口里放着什么、看得见什么。变了才重画；有视图刚露出来就
-    /// 刷一次它要的缓存。出口里的视图建没建由 [`Self::sync_outlet`] 管。
-    fn sync_shell_view(&mut self, cx: &mut Context<Self>) {
+    /// 重算开着的那页摆着什么、出口里放着什么、看得见什么。变了才重画。出口里的视图建没建
+    /// 由 [`Self::sync_outlet`] 管。
+    pub(crate) fn sync_shell_view(&mut self, cx: &mut Context<Self>) {
         let dock = self.shell_dock().clone();
-        let mut next = ShellView::of(dock.read(cx), cx);
+        let mut next = ShellView::of(dock.read(cx), self.traffic_lights, cx);
         let outlet = self.outlet_content(&next.laid_out, cx);
         if workspace_shell::show_in_outlet(&dock, outlet.as_deref(), cx) {
             // 出口顶上那条换了人画：出口有没有标题带变了，贴着窗口顶的按新的重算。
-            next = ShellView::of(dock.read(cx), cx);
+            next = ShellView::of(dock.read(cx), self.traffic_lights, cx);
         }
-        next.elsewhere = self.views_on_other_pages(cx);
         next.outlet = outlet;
         if let Some(content) = &next.outlet
             && next.shown.contains(api::OUTLET_VIEW)
         {
             next.shown.insert(content.clone());
         }
-        if next == self.shell_view {
+        let before = std::mem::replace(&mut self.shell_view, next);
+        // 新建的视图这时可能才第一次摆上，没变也补一遍（没变的不会再发）。
+        let ids: Vec<String> = [&before, &self.shell_view]
+            .into_iter()
+            .flat_map(|view| view.laid_out.iter().chain(&view.outlet))
+            .cloned()
+            .collect();
+        self.publish_safe_areas(ids, cx);
+        if self.shell_view == before {
             return;
         }
-        let revealed = next
-            .shown
-            .difference(&self.shell_view.shown)
-            .next()
-            .is_some();
-        self.shell_view = next;
         plugin_host::set_window_shown(self.shell_view.shown.clone(), cx);
-        self.note_active_context(cx);
-        if revealed {
-            self.schedule_visible_refresh(cx);
-        }
         cx.notify();
+    }
+
+    /// 把这几个视图此刻的 safe area（[`ShellView::safe_area_of`]）设给它们。不在这页了的
+    /// 设回全零。还没建的跳过，建好后再来一遍（见 [`Self::sync_outlet`]）。
+    fn publish_safe_areas(&self, ids: Vec<String>, cx: &mut App) {
+        for id in ids {
+            let view = match self.outlet_instance() {
+                Some(instance) if **instance.id() == *id => Some(instance.view()),
+                _ => api::built_view(&id, cx).map(|view| view.view()),
+            };
+            if let Some(view) = view {
+                api::set_safe_area(&view, self.shell_view.safe_area_of(&id), cx);
+            }
+        }
     }
 
     /// 开着的这页出口里显示的视图：路由给这页放的，没放就是这页的默认内容。这页没摆出口、
@@ -672,31 +760,6 @@ impl Workspace {
             .map(str::to_string)
             .or_else(|| page_index(page, cx))
             .filter(|id| !laid_out.contains(id) && api::is_registered(id, cx))
-    }
-
-    /// 别的页的布局里摆着的视图：开过的看它的 Dock，没开过的看它会装的那份登记的样子
-    /// （存档只改摆法、不增减视图）。兜底的那页不算：它摆的就是别处都没摆的。只读内存。
-    fn views_on_other_pages(&self, cx: &App) -> HashSet<String> {
-        let mut views = HashSet::new();
-        for page in api::pages(cx) {
-            let page: PageKey = Some(page.id.to_string());
-            if &page == self.router.page() {
-                continue;
-            }
-            if let Some(ix) = self.page_ix(&page)
-                && self.pages[ix].layout != InstalledLayout::NotInstalled
-            {
-                let area = self.pages[ix].area.read(cx);
-                views.extend(ShellView::of(area, cx).laid_out);
-            } else if let Some(state) = page
-                .as_deref()
-                .and_then(|page| effective_layout(page, cx))
-                .and_then(|layout| api::layout(&layout, cx))
-            {
-                views.extend(layout_views(&state));
-            }
-        }
-        views
     }
 
     /// 打开一个视图：设置页在设置里打开、停在这一页；别的视图露出来（[`Self::reveal_view`]）。
@@ -798,11 +861,6 @@ impl Workspace {
             return false;
         };
         self.navigate(page, window, cx)
-    }
-
-    /// 出口放回开着的这页的默认内容。远程桌面页头的关闭用。
-    pub(crate) fn reset_outlet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_outlet(None, window, cx);
     }
 
     /// 这一页的布局里摆着这个视图。开过的看它的 Dock，没开过的看它会装的那份登记的样子
@@ -938,10 +996,10 @@ mod tests {
         let elsewhere = HashSet::from(["smelt/settings".to_string()]);
         let views = fallback_views(
             &[
-                view("smelt.sessions/list"),
+                view("example.b/list"),
                 page,
                 view("smelt/settings"),
-                view("smelt.sessions/stage"),
+                view("example.a/main"),
                 view("smelt.files/main"),
             ],
             &elsewhere,
@@ -958,11 +1016,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            [
-                "smelt.sessions/list",
-                "smelt.sessions/stage",
-                "smelt.files/main"
-            ]
+            ["example.b/list", "example.a/main", "smelt.files/main"]
         );
         assert_eq!(api::parse_layout(&to_text(&state)), Ok(state));
     }
@@ -976,38 +1030,99 @@ mod tests {
               "version": 1,
               "center": { "panel_name": "StackPanel", "info": { "stack": { "sizes": [820], "axis": 0 } },
                 "children": [{ "panel_name": "TabPanel", "info": { "tabs": { "active_index": 0 } },
-                  "children": [{ "panel_name": "smelt.sessions/stage", "children": [], "info": { "panel": null } }] }] },
+                  "children": [{ "panel_name": "example.a/main", "children": [], "info": { "panel": null } }] }] },
               "left_dock": { "placement": "left", "size": 260.0, "open": false,
                 "panel": { "panel_name": "TabPanel", "info": { "tabs": { "active_index": 0 } },
-                  "children": [{ "panel_name": "smelt.sessions/list", "children": [], "info": { "panel": null } }] } }
+                  "children": [{ "panel_name": "example.b/list", "children": [], "info": { "panel": null } }] } }
             }"#,
         )
         .unwrap();
         assert_eq!(
             layout_views(&state),
-            HashSet::from([
-                "smelt.sessions/stage".to_string(),
-                "smelt.sessions/list".to_string()
-            ])
+            HashSet::from(["example.a/main".to_string(), "example.b/list".to_string()])
         );
     }
 
-    /// 存档只要是当前版本的布局就用，和布局现在长什么样无关；版本不对、解析不了不用。
+    /// 存档是当前版本、摆的视图和登记的一样就用，摆法（组、顺序、大小）随它；摆的视图变了
+    /// （布局升级加了一块）、版本不对、解析不了不用。
     #[test]
-    fn a_saved_state_is_used_while_its_version_is_current() {
+    fn a_saved_state_is_used_while_it_lays_out_the_same_views() {
         let record = |state: String| WorkspaceLayoutStateRecord {
             layout_id: "smelt.layouts/standard".into(),
             state,
         };
-        // 和哪份登记的布局都不一样，照样用。
-        let moved = fallback_layout(&["smelt.files/main".to_string()]);
+        let registered = fallback_layout(&["a/main".to_string(), "b/main".to_string()]);
+        // 换了顺序：只是摆法，照用。
+        let moved = fallback_layout(&["b/main".to_string(), "a/main".to_string()]);
         assert_eq!(
-            usable_saved_state(&record(to_text(&moved))),
+            usable_saved_state(&record(to_text(&moved)), &registered),
             Some(moved.clone())
+        );
+        // 布局后来多摆了一个视图，旧存档里没有：过时了。
+        let older = fallback_layout(&["a/main".to_string()]);
+        assert_eq!(
+            usable_saved_state(&record(to_text(&older)), &registered),
+            None
         );
         let mut newer = moved;
         newer.version = Some(api::LAYOUT_VERSION + 1);
-        assert_eq!(usable_saved_state(&record(to_text(&newer))), None);
-        assert_eq!(usable_saved_state(&record("{}".into())), None);
+        assert_eq!(
+            usable_saved_state(&record(to_text(&newer)), &registered),
+            None
+        );
+        assert_eq!(usable_saved_state(&record("{}".into()), &registered), None);
+    }
+
+    /// 侧栏原来是三格可拖的组（入口、会话列表、设置和额度），现在并成一摞：视图一样，旧存档
+    /// 也不能用，不然存过档的人永远停在旧侧栏。摞里的视图算摆着的；摞原样存回去的存档照用。
+    #[test]
+    fn a_saved_state_without_the_new_stack_is_stale() {
+        let leaf = |name: &str| {
+            format!(r#"{{"panel_name":"{name}","children":[],"info":{{"panel":null}}}}"#)
+        };
+        let tabs = |children: &[String]| {
+            format!(
+                r#"{{"panel_name":"TabPanel","info":{{"tabs":{{"active_index":0}}}},"children":[{}]}}"#,
+                children.join(",")
+            )
+        };
+        let split = |axis: u8, children: &[String]| {
+            format!(
+                r#"{{"panel_name":"StackPanel","info":{{"stack":{{"sizes":[],"axis":{axis}}}}},"children":[{}]}}"#,
+                children.join(",")
+            )
+        };
+        let layout = |left: String| {
+            api::parse_layout(&format!(
+                r#"{{"version":1,"center":{},"left_dock":{{"placement":"left","size":260.0,"open":true,"panel":{left}}}}}"#,
+                tabs(&[leaf("smelt/outlet")])
+            ))
+            .unwrap()
+        };
+        let old = layout(split(
+            1,
+            &[
+                tabs(&[leaf("a/nav")]),
+                tabs(&[leaf("b/list")]),
+                split(0, &[tabs(&[leaf("a/settings")]), tabs(&[leaf("c/quota")])]),
+            ],
+        ));
+        let stack = r#"{"panel_name":"smelt/stack","children":[],"info":{"panel":{"axis":"vertical","items":[
+            {"view":"a/nav","fit":true},{"view":"b/list"},
+            {"stack":{"axis":"horizontal","items":[{"view":"a/settings"},{"view":"c/quota","fit":true}]},"fit":true}
+        ]}}}"#;
+        let registered = layout(tabs(&[stack.to_string()]));
+        assert_eq!(layout_views(&old), layout_views(&registered));
+        assert!(layout_views(&registered).contains("c/quota"));
+        assert!(!layout_views(&registered).contains(api::STACK_PANEL));
+        let record = |state: &api::DockAreaState| WorkspaceLayoutStateRecord {
+            layout_id: "smelt.layouts/standard".into(),
+            state: to_text(state),
+        };
+        assert_eq!(usable_saved_state(&record(&old), &registered), None);
+        assert_eq!(
+            usable_saved_state(&record(&registered), &registered),
+            Some(registered.clone())
+        );
     }
 }

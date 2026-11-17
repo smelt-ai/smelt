@@ -53,7 +53,7 @@ impl Workspace {
                     if this.local_has_busy_work(cx) {
                         this.daemon_restart_waiting_idle = true;
                     } else {
-                        this.restart_daemon_and_rebuild_terminals(cx);
+                        this.restart_local_daemon(cx);
                     }
                 }
             });
@@ -61,32 +61,13 @@ impl Workspace {
         .detach();
     }
 
-    /// 让守护退出（断开本机所有会话）、拉起磁盘上最新的 smeltd，再把各 pane 的终端重建起来。
-    ///
-    /// **禁止**在 `update` 里同步 `Terminal::spawn`：连守护、握手、等守护换代都会阻塞，
-    /// 多 pane 会把 UI 卡死。流程：后台杀+拉起守护 → 后台按 cwd/sid 建 Terminal → 主线程
-    /// `adopt_terminal` 挂回各 pane。
-    pub(crate) fn restart_daemon_and_rebuild_terminals(&mut self, cx: &mut Context<Self>) {
+    /// 让守护退出（断开本机所有会话），拉起磁盘上最新的 smeltd。各个终端、对话自己发现断线、
+    /// 等本机重新上线再连回去，这里不管。杀和拉起都阻塞，放后台。
+    pub(crate) fn restart_local_daemon(&mut self, cx: &mut Context<Self>) {
         if self.daemon_upgrading {
             return;
         }
         self.daemon_upgrading = true;
-        // 收集重建参数（Entity 可 Clone；真正 spawn 扔后台）。
-        // 硬重启会清掉守护里的会话。终端 agent 不做语义恢复，缺失会话统一重开 shell。
-        let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String)> = Vec::new();
-        for sess in &self.sessions {
-            // 硬重启只清本机守护里的会话。远程机器上的终端不动。
-            if !sess.runtime(cx).is_local() {
-                continue;
-            }
-            let leaves = sess.term_leaves();
-            for leaf in leaves {
-                let view = leaf.read(cx);
-                let cwd = view.cwd();
-                let sid = view.session_id().to_string();
-                jobs.push((leaf, cwd, sid));
-            }
-        }
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .spawn(async {
@@ -94,51 +75,7 @@ impl Workspace {
                     crate::local_daemon::ensure_daemon_running();
                 })
                 .await;
-
-            // 握手和等守护换代全在后台；主线程只接结果
-            let connector = crate::runtimes::connector(&crate::runtimes::Runtime::local());
-            let built = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut out = Vec::with_capacity(jobs.len());
-                    for (entity, cwd, sid) in jobs {
-                        let term = terminal::Terminal::spawn(
-                            connector.as_ref(),
-                            24,
-                            80,
-                            cwd.as_deref(),
-                            &sid,
-                            None,
-                        );
-                        out.push((entity, term));
-                    }
-                    out
-                })
-                .await;
-
-            let _ = this.update(cx, |this, cx| {
-                this.daemon_upgrading = false;
-                let mut failed = 0usize;
-                for (entity, term) in built {
-                    match term {
-                        Ok(t) => {
-                            entity.update(cx, |view, cx| view.adopt_terminal(t, cx));
-                        }
-                        Err(e) => {
-                            failed += 1;
-                            eprintln!("[workspace] 硬重启后重开终端失败：{e:#}");
-                        }
-                    }
-                }
-                if failed > 0 {
-                    this.report_background_error(format!(
-                        "守护已重启，但有 {failed} 个终端没能重开（侧栏会话仍在，可关了再开）"
-                    ));
-                }
-                // 布局没变，写盘刷新 launch_cmd 等字段即可。
-                this.save_state(cx);
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, _| this.daemon_upgrading = false);
         })
         .detach();
     }

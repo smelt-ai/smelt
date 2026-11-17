@@ -15,7 +15,7 @@
 //! （[`probe_remotes`]）叫醒连不上的再探一次。
 //!
 //! 订阅线程是远程运行时连通性的唯一来源：每次探测的结果、订阅断开，都报回 [`RuntimeHub`]，
-//! 侧栏的「离线」跟着它走，不是只在启动时探一次。
+//! 插件看到的「离线」跟着它走，不是只在启动时探一次。
 //!
 //! 运行时比桌面旧时先请它升到桌面的版本（设计文档 D7，见 [`upgrade_then_probe`]），升完
 //! 再探；每条订阅线程只请一次，升了还对不上就照常标不兼容，不反复请，人点「重新连接」
@@ -46,8 +46,7 @@ pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
 pub(crate) type RuntimeTopicEvent = (RuntimeKey, &'static str, TopicMessage);
 
 /// 单独订的话题，各占一条订阅：后加的话题旧运行时不认，会拒掉整条订阅，不能连累别的。
-/// 宿主不解读这些话题，原样转给插件（`HostEvent::RuntimeTopic`）；只有智能体配置例外，
-/// 宿主起会话要用，收进它自己的缓存（`AgentHosts`），插件从那里读。
+/// 宿主不解读这些话题，原样转给插件（`HostEvent::RuntimeTopic`）。
 pub(crate) const SEPARATE_TOPICS: &[&str] = &[
     smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED,
     smelt_client::daemon_state::CORE_TOPIC_HISTORY_CHANGED,

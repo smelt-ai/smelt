@@ -21,7 +21,29 @@
       "panel_name": "TabPanel",
       "info": { "tabs": { "active_index": 0 } },
       "children": [
-        { "panel_name": "smelt.sessions/list", "children": [], "info": { "panel": null } }
+        {
+          "panel_name": "smelt/stack",
+          "children": [],
+          "info": {
+            "panel": {
+              "axis": "vertical",
+              "items": [
+                { "view": "smelt.launcher/nav", "fit": true },
+                { "view": "smelt.sessions/list" },
+                {
+                  "stack": {
+                    "axis": "horizontal",
+                    "items": [
+                      { "view": "smelt.launcher/settings", "fit": true },
+                      { "view": "smelt.agents/quota" }
+                    ]
+                  },
+                  "fit": true
+                }
+              ]
+            }
+          }
+        }
       ]
     }
   },

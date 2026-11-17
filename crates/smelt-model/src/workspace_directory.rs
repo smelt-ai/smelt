@@ -2,13 +2,12 @@
 //!
 //! 运行时是唯一的写入方。客户端用单条命令改它（`workspace.conversation.*`、
 //! `workspace.project.*`），经 `workspace.changed` 收整份投影，订阅首帧就带着当前这份。
-//! 对话归档、置顶跨客户端共享；侧栏手动序、折叠和项目固定、终端分屏、当前看哪个，
-//! 是每台客户端自己的界面状态，不在这里。
+//! 对话归档跨客户端共享；置顶、侧栏手动序、折叠、终端分屏、当前看哪个，是客户端界面上
+//! 的功能数据，归会话插件自己存，不在这里。
 
 use serde::{Deserialize, Serialize};
 
 use crate::agent_kind::ConversationLaunchSpec;
-use crate::conversation::ConversationBinding;
 use crate::runtime_path::PathStyle;
 
 /// 整份目录。`revision` 每次有改动加一，只在同一个 `epoch` 里能比，见 [`WorkspaceRevision`]。
@@ -95,15 +94,12 @@ pub struct WorkspaceConversation {
     pub id: String,
     #[serde(default)]
     pub custom_title: Option<String>,
-    /// 最近一次内容变化的 unix 秒。
+    /// 最近一轮结束的 unix 秒。只由守护在回合结束时写，客户端带来的值不算数（新建时填 0）。
     #[serde(default)]
     pub last_updated_at: i64,
     /// 只由运行时的归档命令修改，整段更新不能覆盖。
     #[serde(default)]
     pub archived_at: Option<i64>,
-    /// 项目组内置顶；归档时清除。
-    #[serde(default)]
-    pub pinned_at: Option<i64>,
     /// 新会话创建时绑定的工作集；旧会话保持未绑定。
     #[serde(default)]
     pub workset_id: Option<String>,
@@ -146,17 +142,11 @@ pub struct WorkspaceAcp {
     #[serde(default)]
     pub history_session_id: Option<String>,
     pub launch: ConversationLaunchSpec,
-    #[serde(default)]
-    pub refresh_launch_from_settings: bool,
-    #[serde(default)]
-    pub conversation_binding: ConversationBinding,
     /// 最后生效的 provider 配置：`(config_id, value_id)`，按设置顺序。
     #[serde(default)]
     pub config_values: Vec<(String, String)>,
     #[serde(default)]
     pub pending_prompt: Option<String>,
-    #[serde(default)]
-    pub pending_delivery_id: Option<String>,
     #[serde(default)]
     pub pending_agent_preset: Option<String>,
     #[serde(default)]
@@ -178,12 +168,6 @@ pub struct WorkspaceConversationArchiveParams {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_workset_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceConversationPinParams {
-    pub conversation_id: String,
-    pub pinned: bool,
 }
 
 /// `workspace.rename` 的参数。带 `terminal_id` 是给这段对话里的这一格终端改名，不带是给

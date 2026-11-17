@@ -61,18 +61,10 @@ impl DaemonAnswers {
     }
 }
 
-/// 深浅色模式：进程内只有一套主题（设置页全局切换），用一个原子量足够，不必给
-/// 每个 Terminal/EventProxy 各传一份——见 `set_dark_mode`（main.rs 在
-/// Appearance.theme_mode 变化时同步调用）与下面 `default_fg`/`default_bg`/`palette`。
-static DARK_MODE: AtomicBool = AtomicBool::new(true);
-
-/// 切换终端配色跟随的深浅色模式。
-pub fn set_dark_mode(dark: bool) {
-    DARK_MODE.store(dark, Ordering::Relaxed);
-}
-
+/// 深浅色跟着当前主题：主题装上时组件库记下它的明暗（`ui_theme::is_light`），终端不另存
+/// 一份。下面的 `default_fg`/`default_bg`/`palette` 都按它取。
 pub fn is_dark() -> bool {
-    DARK_MODE.load(Ordering::Relaxed)
+    !smelt_plugin_api::ui::ui_theme::is_light()
 }
 
 /// 测试用：深浅色模式和用户自选底色都是进程级全局态，同一个测试二进制里的用例
@@ -151,7 +143,7 @@ fn palette() -> &'static [u32; 16] {
     }
 }
 
-/// 当前 ANSI 16 色板（宿主构建下发给移动端的配色快照用）。
+/// 当前 ANSI 16 色板（发给运行时的配色快照用，见 [`crate::theme`]）。
 pub fn ansi_palette() -> &'static [u32; 16] {
     palette()
 }
@@ -685,7 +677,7 @@ impl EventProxy {
     /// alacritty 自己不记「当前实际渲染色」，查询颜色时要由我们把 RGB 值喂回去。
     /// smelt 没有运行时改色的路径（无 OSC 4/10/11 set-color 场景），直接用当前主题的
     /// 默认前景 / 背景 / 16 色板作答，覆盖 CLI 常见的「查一下背景色决定用什么灰」——
-    /// 取的是 `palette()`/`default_fg`/`default_bg`，跟着 `set_dark_mode` 一起切换。
+    /// 取的是 `palette()`/`default_fg`/`default_bg`，跟着当前主题的明暗一起切换。
     fn resolve_color(index: usize) -> Rgb {
         let to_rgb = |hex: u32| Rgb {
             r: ((hex >> 16) & 0xff) as u8,
@@ -758,23 +750,6 @@ fn os_clipboard_write(text: &str) {
 }
 
 // OSC 9/99/777 通知由 smeltd 在 PTY 输出泵里扫，走事件总线推来，客户端不扫。
-
-/// 让运行时杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
-/// 等回执再返回，阻塞，不能在主线程调；UI 回调用 [`kill_remote_in_background`]。
-pub fn kill_remote(runtime: &smelt_plugin_api::Runtime, id: &str) {
-    let _ = runtime.client().request(
-        &serde_json::json!({ "op": DaemonOperation::Kill, "id": id }),
-        smelt_plugin_api::client::DEFAULT_REQUEST_TIMEOUT,
-    );
-}
-
-/// [`kill_remote`] 放专用线程（见 `smelt_plugin_api::session_kill`）：远程运行时要经 iroh
-/// 拨号，离线时要等到超时，主线程不能跟着等；App 退出时会在收尾时间里等它发完。
-pub fn kill_remote_in_background(runtime: &smelt_plugin_api::Runtime, id: &str) {
-    let runtime = runtime.clone();
-    let id = id.to_string();
-    smelt_plugin_api::session_kill::spawn("smelt-session-kill", move || kill_remote(&runtime, &id));
-}
 
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
 /// - 解析语义（kitty_keyboard 等）来自 `smelt_plugin_api::model::term_config`，与 smeltd 的权威
@@ -2380,7 +2355,7 @@ mod damage_gate_tests {
     }
 
     /// 一次性测试会话的自动清理：Drop 无论函数正常返回还是中途 panic（assert
-    /// 失败）都会执行，不像原来手写在函数末尾的 `kill_remote(&id)`——那种写法
+    /// 失败）都会执行，不像原来手写在函数末尾的 `kill_session(&id)`——那种写法
     /// 一旦前面某个 assert 炸了就会被 unwind 跳过，永远执行不到。
     ///
     /// 真实教训：这几个测试连的是真实 smeltd 守护进程（不是 mock），而它们本身
@@ -2392,8 +2367,16 @@ mod damage_gate_tests {
     struct TestSessionGuard(String);
     impl Drop for TestSessionGuard {
         fn drop(&mut self) {
-            kill_remote(&smelt_plugin_api::Runtime::local(), &self.0);
+            kill_session(&self.0);
         }
+    }
+
+    /// 让本机守护杀掉测试会话。关会话归会话插件（它发运行时的删除操作），终端插件不提供。
+    fn kill_session(id: &str) {
+        let _ = smelt_plugin_api::Runtime::local().client().request(
+            &serde_json::json!({ "op": DaemonOperation::Kill, "id": id }),
+            smelt_plugin_api::client::DEFAULT_REQUEST_TIMEOUT,
+        );
     }
 
     /// 自动重连的触发前提：连接断开后 `is_dead()` 必须置位。模拟守护侧杀掉会话
@@ -2406,13 +2389,13 @@ mod damage_gate_tests {
         let dir = std::env::temp_dir().join(format!("smelt-dead-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let id = format!("dead-test-{}", uuid_like());
-        // 不持 guard：会话由下面的 kill_remote 主动清理。
+        // 不持 guard：会话由下面的 kill_session 主动清理。
         let term = spawn_test_terminal(&dir, &id);
         assert!(!term.is_dead(), "刚连上不该是断的");
 
         // 等 shell 起来（读线程确实在跑），再杀掉会话模拟连接断开。
         thread::sleep(Duration::from_millis(500));
-        kill_remote(&smelt_plugin_api::Runtime::local(), &id);
+        kill_session(&id);
 
         // 守护 remove 会话并 shutdown client → 读线程 EOF → dead 置位。
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -2986,7 +2969,7 @@ mod event_proxy_answers_tests {
     #[test]
     fn background_color_query_gets_answered() {
         let _guard = lock_theme_globals();
-        set_dark_mode(true); // 全局态，跟其它测试共进程跑，显式定住深色断言的前提
+        // 全局态，跟其它测试共进程跑，显式定住深色断言的前提
         smelt_plugin_api::ui::ui_theme::set_light(false);
         let (proxy, mut probe) = make_proxy();
         let size = TermSize { rows: 24, cols: 80 };

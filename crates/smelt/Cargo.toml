@@ -22,28 +22,30 @@ smelt-pairing = { path = "../smelt-pairing" }
 smelt-iroh = { path = "../smelt-iroh" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-client-store = { path = "../smelt-client-store" }
-# 共享 GPUI UI 基建（色板/markdown+mermaid/@补全/ACP agent UI 偏好数据模型）与
-# ACP 会话消息流渲染层，均已独立成 crate（见各自 Cargo.toml 文件头注释）。
+# 共享 GPUI 组件库（见它的 Cargo.toml 文件头注释）。
 smelt-ui = { path = "../smelt-ui" }
-smelt-app-state = { path = "../smelt-app-state" }
 smelt-plugin-api = { path = "../smelt-plugin-api", features = ["js"] }
+# 内置插件：只在 `plugin_host::install` 里登记，宿主别处不认识它们。
 smelt-agents = { path = "../plugins/agents" }
+smelt-archive = { path = "../plugins/archive" }
 smelt-automations = { path = "../plugins/automations" }
 smelt-capabilities = { path = "../plugins/capabilities" }
+smelt-conversation = { path = "../plugins/conversation" }
 smelt-desktop = { path = "../plugins/desktop" }
 smelt-files-ui = { path = "../plugins/files" }
 smelt-git-ui = { path = "../plugins/git" }
 smelt-history = { path = "../plugins/history" }
 smelt-ide = { path = "../plugins/ide" }
+smelt-launcher = { path = "../plugins/launcher" }
 smelt-layouts = { path = "../plugins/layouts" }
+smelt-machines = { path = "../plugins/machines" }
 smelt-maintenance = { path = "../plugins/maintenance" }
 smelt-notifications = { path = "../plugins/notifications" }
 smelt-resources = { path = "../plugins/resources" }
-# 过渡：会话插件搬走后改为经宿主的视图实例机制和 smelt.terminal 命令使用
+smelt-sessions = { path = "../plugins/sessions" }
 smelt-terminal = { path = "../plugins/terminal" }
 smelt-themes = { path = "../plugins/themes" }
 smelt-updater-ui = { path = "../plugins/updater" }
-smelt-acp-view = { path = "../smelt-acp-view" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -54,7 +56,6 @@ reqwest = { version = "0.13", features = ["json"] }
 url = "2"
 anyhow = "1"
 dirs = "5"
-chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 futures-util = { version = "0.3", features = ["sink", "async-await"] }
 # GPUI 用上游 gpui-kit 钉的 crates.io 快照 gpui-pre =0.3.11。
@@ -63,8 +64,9 @@ futures-util = { version = "0.3", features = ["sink", "async-await"] }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-# tree-sitter-languages：文件树打开文件用组件自带的 Editor（CodeEditor 模式），
-# 语法高亮 + 行号 + 搜索都是组件自己做的，不再需要 syntect。
+# 组件库只留给差异视图、代码编辑器和代码高亮：这里调它的 `init`（这两样的键位只经它登记）、
+# 把 smelt 主题投影给它（`component_theme.rs`）。tree-sitter-languages 是 Markdown 代码块和
+# 编辑器高亮用的语法。
 gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
 # 组件库自带图标资源（Sidebar 等组件的 IconName 需要注册它才能渲染 svg）。
 # 上游已把包名从 gpui-component-assets 改成 gpui-kit-assets。
@@ -72,18 +74,16 @@ gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd7
 # 调试 HUD（Cmd+Shift+F）：帧耗时取自 GPUI 自己的帧追踪，不靠连续重绘去量。
 gpui-fps = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 # 插件：gpui-shell 脚本应用（见 src/plugins）。JS 写界面，GPUI 原生绘制，
-# 引擎 QuickJS 跑在 UI 线程。`components` 把 gpui-component 的控件登记进脚本运行时。
+# 引擎 QuickJS 跑在 UI 线程。脚本能用的控件是 smelt-ui 的（`smelt_plugin_api::js::ui`），
+# 不开 `components`：那是 gpui-component 的控件目录。
 # 不开默认的 `webview`：它会把整个运行时切到 gpui-fast，而 smelt 用 gpui-pre。
-gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", default-features = false, features = ["quickjs", "components"] }
+gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", default-features = false, features = ["quickjs"] }
 libc = "0.2"
 smol = "2"  # 定时器、channel
 # 盯着 App 里的 smeltd：重编译、覆盖安装后查一次守护是否落后（见 Workspace::start_daemon_outdated_watch）。
 notify = "8"
-# Git 状态改用文件监听而非轮询：macOS 走 FSEvents，仓库一有变化就标脏触发刷新。
-# 设置页跨网分享链接二维码
-qrcode = { version = "0.14", default-features = false, features = ["image"] }
+# 菜单栏图标按颜色重新着色（见 src/status_item.rs 的 `tint_png`）。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-# 生成 agent hook 命令时按 shell 规则引用 smelt-notify 路径。
 # macOS：菜单栏 status item 需要直接操作 AppKit（GPUI 没有 status item 概念），
 # 用 objc crate 声明 Objective-C 类做 target-action。系统通知使用现代、带异步回执的
 # UserNotifications API；objc2 相关版本与现有依赖树对齐。

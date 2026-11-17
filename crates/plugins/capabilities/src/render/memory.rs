@@ -3,7 +3,6 @@
 use super::*;
 use crate::memory::{MemorySettingsForm, rerank_model_label};
 use api::model::memory_settings::RerankModel;
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 
 const DESCRIPTION: &str = "按问题把相关的记忆附到对话里。关键词检索总是开着；重排模型和向量检索都可选，不可用时自动退回。";
 
@@ -11,27 +10,21 @@ const DESCRIPTION: &str = "按问题把相关的记忆附到对话里。关键�
 pub(super) fn pi_memory_page(
     entity: Entity<CapabilitiesPage>,
     page: &CapabilitiesPage,
-) -> SettingPage {
-    let rerank_runtime = page.machine.clone();
-    let form_runtime = page.machine.clone();
-    SettingPage::new("记忆 · 召回")
-        .description(DESCRIPTION)
-        .default_open(true)
-        .group(
-            SettingGroup::new()
+    window: &mut Window,
+    cx: &mut App,
+) -> SettingsPage {
+    let form = memory_form(&page.machine, window, cx);
+    SettingsPage::new("capabilities-pane:memory")
+        .child(page_intro(DESCRIPTION))
+        .child(
+            SettingsSection::new()
                 .title("重排模型")
-                .item(SettingItem::render(move |_, window, cx: &mut App| {
-                    let form = memory_form(&rerank_runtime, window, cx);
-                    render_rerank_model(entity.clone(), form, cx)
-                })),
+                .child(render_rerank_model(entity, form.clone(), cx)),
         )
-        .group(
-            SettingGroup::new()
+        .child(
+            SettingsSection::new()
                 .title("向量检索服务（可选）")
-                .item(SettingItem::render(move |_, window, cx: &mut App| {
-                    let form = memory_form(&form_runtime, window, cx);
-                    render_form(form, cx)
-                })),
+                .child(render_form(form, cx)),
         )
 }
 
@@ -57,63 +50,50 @@ fn render_rerank_model(
     form: Entity<MemorySettingsForm>,
     cx: &mut App,
 ) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
+    let muted = rgb(ui_theme::muted());
     let current = form.read(cx).rerank_model.clone();
     let label = rerank_model_label(current.as_ref());
-    let picker = Button::new("pi-memory-rerank-model")
-        .small()
-        .label(label)
-        .dropdown_menu(move |mut menu, window, cx| {
-            let auto_form = form.clone();
-            menu = menu.item(
-                PopupMenuItem::new(rerank_model_label(None))
-                    .checked(current.is_none())
-                    .on_click(move |_, _, cx| {
-                        auto_form.update(cx, |form, cx| form.set_rerank_model(None, cx));
-                    }),
-            );
-            // 重排在那台机器的运行时上跑，模型也从那台机器的里选。表单按机器分开，和页面
-            // 在配的是同一台。
-            let groups = page.read(cx).pi_model_choice_groups();
-            if !groups.is_empty() {
-                menu = menu.separator();
-            }
-            for group in groups {
-                let group_form = form.clone();
-                let current = current.clone();
-                let models = group.models;
-                menu = menu.submenu(
-                    group.provider_name.clone(),
-                    window,
-                    cx,
-                    move |mut sub, _, _| {
-                        for choice in &models {
-                            let checked = current.as_ref().is_some_and(|model| {
-                                model.provider == choice.provider && model.id == choice.id
-                            });
-                            let item_form = group_form.clone();
-                            let model = RerankModel {
-                                provider: choice.provider.clone(),
-                                id: choice.id.clone(),
-                            };
-                            sub = sub.item(
-                                PopupMenuItem::new(choice.short_label().to_string())
-                                    .checked(checked)
-                                    .on_click(move |_, _, cx| {
-                                        let model = model.clone();
-                                        item_form.update(cx, |form, cx| {
-                                            form.set_rerank_model(Some(model), cx)
-                                        });
-                                    }),
-                            );
-                        }
-                        sub.scrollable(true)
-                    },
+    let trigger = Button::new("pi-memory-rerank-model").small().label(label);
+    let picker = MenuTrigger::dropdown("pi-memory-rerank-model-menu", trigger, move |_, cx| {
+        let auto_form = form.clone();
+        let mut menu = Menu::new().item(
+            MenuItem::new(rerank_model_label(None))
+                .checked(current.is_none())
+                .on_click(move |_, _, cx| {
+                    auto_form.update(cx, |form, cx| form.set_rerank_model(None, cx));
+                }),
+        );
+        // 重排在那台机器的运行时上跑，模型也从那台机器的里选。表单按机器分开，和页面
+        // 在配的是同一台。
+        let groups = page.read(cx).pi_model_choice_groups();
+        if !groups.is_empty() {
+            menu = menu.separator();
+        }
+        for group in groups {
+            let mut sub = Menu::new();
+            for choice in &group.models {
+                let checked = current.as_ref().is_some_and(|model| {
+                    model.provider == choice.provider && model.id == choice.id
+                });
+                let item_form = form.clone();
+                let model = RerankModel {
+                    provider: choice.provider.clone(),
+                    id: choice.id.clone(),
+                };
+                sub = sub.item(
+                    MenuItem::new(choice.short_label().to_string())
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let model = model.clone();
+                            item_form.update(cx, |form, cx| form.set_rerank_model(Some(model), cx));
+                        }),
                 );
             }
-            menu
-        });
-    v_flex()
+            menu = menu.item(MenuItem::new(group.provider_name.clone()).submenu(sub));
+        }
+        menu
+    });
+    div().flex().flex_col()
         .w_full()
         .gap_2()
         .child(picker)
@@ -125,15 +105,10 @@ fn render_rerank_model(
 }
 
 fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
-    let (fg, muted, danger, success) = {
-        let theme = cx.theme();
-        (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.danger,
-            theme.success,
-        )
-    };
+    let fg = rgb(ui_theme::text());
+    let muted = rgb(ui_theme::muted());
+    let danger = rgb(ui_theme::bad());
+    let success = rgb(ui_theme::ok());
     let state = form.read(cx);
     let status = state.status_line();
     let error = state.error.clone();
@@ -148,7 +123,9 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
     );
 
     let field = |label: &'static str, input: &Entity<InputState>| {
-        v_flex()
+        div()
+            .flex()
+            .flex_col()
             .w_full()
             .gap_1()
             .child(div().text_xs().text_color(fg).child(label))
@@ -160,9 +137,10 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
     let clear_key_form = form.clone();
     let clear_all_form = form.clone();
 
-    let mut actions = h_flex()
-        .gap_2()
+    let mut actions = div()
+        .flex()
         .items_center()
+        .gap_2()
         .child(
             Button::new("test-pi-memory")
                 .small()
@@ -210,7 +188,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
         actions = actions.child(div().text_xs().text_color(muted).child(notice));
     }
 
-    let mut content = v_flex()
+    let mut content = div().flex().flex_col()
         .w_full()
         .gap_3()
         .child(div().text_xs().text_color(muted).child(

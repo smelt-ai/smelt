@@ -113,58 +113,67 @@ pub(super) fn builtin_provider_row(
         let manual_oauth = manual_oauth.map(std::rc::Rc::new);
         let api_key = api_key.map(std::rc::Rc::new);
         let logout = logout.map(std::rc::Rc::new);
-        Button::new(format!("pi-auth-more-{}", provider.id))
+        let trigger = Button::new(format!("pi-auth-more-{}", provider.id))
             .quiet()
             .small()
             .icon(IconName::Ellipsis)
-            .accessibility_label("更多操作")
-            .dropdown_menu(move |mut menu, _, _| {
+            .accessibility_label("更多操作");
+        MenuTrigger::dropdown(
+            SharedString::from(format!("pi-auth-more-menu-{}", provider.id)),
+            trigger,
+            move |_, _| {
+                let mut menu = Menu::new();
                 if let Some(handler) = reauth.clone() {
                     menu = menu.item(
-                        PopupMenuItem::new("重新登录")
+                        MenuItem::new("重新登录")
                             .disabled(login_busy)
                             .on_click(move |event, window, cx| (*handler)(event, window, cx)),
                     );
                 }
                 if let Some(handler) = manual_oauth.clone() {
                     menu = menu.item(
-                        PopupMenuItem::new("逐项登录（企业版域名、登录方式等）")
+                        MenuItem::new("逐项登录（企业版域名、登录方式等）")
                             .disabled(login_busy)
                             .on_click(move |event, window, cx| (*handler)(event, window, cx)),
                     );
                 }
                 if let Some(handler) = api_key.clone() {
                     menu = menu.item(
-                        PopupMenuItem::new(api_key_label)
+                        MenuItem::new(api_key_label)
                             .disabled(login_busy)
                             .on_click(move |event, window, cx| (*handler)(event, window, cx)),
                     );
                 }
                 if let Some(handler) = logout.clone() {
                     menu = menu.separator().item(
-                        PopupMenuItem::new("注销")
+                        MenuItem::new("注销")
                             .disabled(login_busy)
                             .on_click(move |event, window, cx| (*handler)(event, window, cx)),
                     );
                 }
                 menu
-            })
+            },
+        )
     });
 
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .justify_between()
         .gap_3()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_w_0()
                 .gap_0p5()
                 .child(
-                    h_flex()
-                        .gap_2()
+                    div()
+                        .flex()
                         .items_center()
+                        .gap_2()
                         .child(
                             div()
                                 .overflow_hidden()
@@ -172,15 +181,8 @@ pub(super) fn builtin_provider_row(
                                 .text_color(palette.fg)
                                 .child(truncated_line(provider.name.clone())),
                         )
-                        .children(
-                            provider
-                                .subscription
-                                .then(|| Tag::secondary().rounded_full().flex_none().child("订阅")),
-                        )
-                        .children(
-                            is_default
-                                .then(|| Tag::success().rounded_full().flex_none().child("默认")),
-                        ),
+                        .children(provider.subscription.then(|| Badge::new().child("订阅")))
+                        .children(is_default.then(|| Badge::new().accent().child("默认"))),
                 )
                 .child(
                     div()
@@ -191,10 +193,11 @@ pub(super) fn builtin_provider_row(
                 ),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .flex_none()
                 .gap_1()
-                .items_center()
                 .children(primary)
                 .children(more),
         )
@@ -206,12 +209,12 @@ pub(super) fn login_panel(
     current_default: Option<&str>,
     cx: &App,
 ) -> impl IntoElement {
-    let theme = cx.theme();
-    let fg = theme.foreground;
-    let muted = theme.muted_foreground;
-    let border = theme.border;
-    let danger_fg = theme.danger_foreground;
-    let mut panel = v_flex()
+    let fg: Hsla = rgb(ui_theme::text()).into();
+    let muted: Hsla = rgb(ui_theme::muted()).into();
+    let border: Hsla = ui_theme::hair().into();
+    let mut panel = div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_3()
         .p_4()
@@ -219,9 +222,10 @@ pub(super) fn login_panel(
         .border_1()
         .border_color(border)
         .child(
-            h_flex()
-                .w_full()
+            div()
+                .flex()
                 .items_center()
+                .w_full()
                 .justify_between()
                 .child(
                     div()
@@ -260,7 +264,9 @@ pub(super) fn login_panel(
         let uri = verification_uri.clone();
         let code = user_code.clone();
         panel = panel.child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .w_full()
                 .gap_2()
                 .child(
@@ -270,9 +276,10 @@ pub(super) fn login_panel(
                         .child("在浏览器里打开验证页，输入下面这串码："),
                 )
                 .child(
-                    h_flex()
-                        .gap_2()
+                    div()
+                        .flex()
                         .items_center()
+                        .gap_2()
                         .child(
                             div()
                                 .px_3()
@@ -313,11 +320,15 @@ pub(super) fn login_panel(
         let open_url = url.clone();
         let copy_url = url.clone();
         panel = panel.child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .w_full()
                 .gap_2()
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
+                        .items_center()
                         .gap_2()
                         .child(
                             Button::new("pi-login-open-url")
@@ -347,7 +358,9 @@ pub(super) fn login_panel(
 
     if let Some(prompt) = &view.prompt {
         panel = panel.child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .w_full()
                 .gap_2()
                 .child(
@@ -364,7 +377,9 @@ pub(super) fn login_panel(
                         .child(format!("示例：{placeholder}"))
                 }))
                 .child(match prompt.kind {
-                    PiPromptKind::Select => h_flex()
+                    PiPromptKind::Select => div()
+                        .flex()
+                        .items_center()
                         .gap_2()
                         .flex_wrap()
                         .children(prompt.options.iter().map(|option| {
@@ -381,10 +396,11 @@ pub(super) fn login_panel(
                                 })
                         }))
                         .into_any_element(),
-                    _ => h_flex()
+                    _ => div()
+                        .flex()
+                        .items_center()
                         .w_full()
                         .gap_2()
-                        .items_center()
                         .children(
                             view.active_input()
                                 .map(|input| div().flex_1().min_w_0().child(TextInput::new(input))),
@@ -422,7 +438,7 @@ pub(super) fn login_panel(
             panel = panel.child(
                 div()
                     .text_xs()
-                    .text_color(danger_fg)
+                    .text_color(rgb(ui_theme::bad()))
                     .child(format!("登录失败：{error}")),
             );
         }
@@ -492,7 +508,7 @@ fn model_choices(
         Some(Ok(models)) => models,
     };
 
-    let mut section = v_flex().w_full().gap_2().child(
+    let mut section = div().flex().flex_col().w_full().gap_2().child(
         div()
             .text_xs()
             .font_semibold()
@@ -505,9 +521,10 @@ fn model_choices(
         let provider = provider_id.to_string();
         let model_id = model.id.clone();
         section = section.child(
-            h_flex()
-                .w_full()
+            div()
+                .flex()
                 .items_center()
+                .w_full()
                 .justify_between()
                 .gap_3()
                 .px_3()
@@ -562,7 +579,9 @@ pub(super) fn model_picker_panel(
     muted: gpui::Hsla,
     border: gpui::Hsla,
 ) -> impl IntoElement {
-    v_flex()
+    div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_3()
         .p_4()
@@ -570,9 +589,10 @@ pub(super) fn model_picker_panel(
         .border_1()
         .border_color(border)
         .child(
-            h_flex()
-                .w_full()
+            div()
+                .flex()
                 .items_center()
+                .w_full()
                 .justify_between()
                 .child(
                     div()

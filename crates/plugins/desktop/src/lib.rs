@@ -1,7 +1,8 @@
 //! 远程桌面：运行时那台机器的整块屏幕，打开就能操作；切到「只看」时鼠标键盘不发（设计文档
 //! D9）。登记一个视图（[`VIEW`]），打开时参数带机器（`{"machine": …}`，见
-//! [`api::machine_to_json`]）。哪页都没摆它，打开时宿主放进出口。入口是机器菜单里的一项，
-//! 只给装了远程桌面的机器（见 [`menu`]）。
+//! [`api::machine_to_json`]）。按实例建：每次打开按参数新建一份放进出口，出口换了内容就放掉；
+//! 是现场，不随界面状态存，重启后不自动连回去。入口是机器菜单里的一项，只给装了远程桌面的
+//! 机器（见 [`menu`]）。
 //!
 //! 看不见时连接整套放掉，不在后台推画面；再露出来连回上次那台。画面和连接见 [`session`]。
 //!
@@ -36,7 +37,7 @@ pub fn register(cx: &mut App) {
             icon: ICON.into(),
             // 顶上那条是外壳的标题带，连的哪台机器和「断开」在视图自己的工具行里。
             draws_top_bar: false,
-            instances: false,
+            instances: true,
             settings: None,
             build: Rc::new(|window, cx| -> Rc<dyn ViewHandle> {
                 Rc::new(cx.new(|cx| DesktopPage::new(window, cx)))
@@ -152,7 +153,7 @@ impl PluginView for DesktopPage {
 }
 
 impl Render for DesktopPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         // 连着时工具行归里面的画面画（连接状态、接管、断开都在那一行）。
         if let Some(view) = &self.view {
             return view.clone().into_any_element();

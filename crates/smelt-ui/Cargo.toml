@@ -19,8 +19,11 @@ smelt-model = { path = "../smelt-model" }
 smol = "2"
 serde_json = "1"
 gpui = { package = "gpui-pre", version = "=0.3.11" }
+# 组件的行为（焦点、键盘、无障碍、对话框层、输入框、富文本）都取 gpui-base，外观自己画。
+# 不依赖 gpui-component：它的外观读它自己的 `Theme`，和 smelt 的主题是两个权威。
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
+# 组件的图标用共享图标资源，不依赖 component 的 Icon 外观层。
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 # mermaid 代码块画图，见 markdown_mermaid.rs。版本锁死。
 # 不开 layout-elk：它带进 EPL-2.0 的 merman-elk-layered，分发二进制要随附源码和声明；
 # 默认布局也会从 dagre 换成 ELK（见 markdown_mermaid.rs 文件头）。不走默认 features /
@@ -44,9 +47,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
-# 组件快照（tests/snapshots.rs）画图标要用应用同一套图标资源。
-gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
-
 # 截断宽度的问题只在真实字形下才有，测试默认的 Noop 字体系统是等宽假字。特性与
 # crates/smelt 里 gpui_platform 开的一致：同一套字体后端，且免装 Metal 工具链。
 # test-support 打开离屏 Metal 渲染（MetalHeadlessRenderer），组件快照用它出图。

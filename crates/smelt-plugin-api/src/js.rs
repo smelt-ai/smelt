@@ -14,8 +14,10 @@
 //! 插件摆在哪不由插件定，这里没有登记位置的函数；插件可以登记整份布局，用不用由用户在
 //! 设置里选（见 `docs/app-plugins.md`）。
 
+pub mod ui;
+
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use futures_channel::oneshot;
@@ -25,6 +27,7 @@ use gpui_shell::{
 };
 use serde_json::Value;
 
+use crate::client::protocol::control::ControlMethod;
 use crate::model::daemon_state::RuntimePresence;
 use crate::{
     CommandSpec, ContextMenuAction, ContextMenuItem, Handled, HostEvent, MenuEntry, MenuSlot,
@@ -55,11 +58,16 @@ export interface ViewedSession {
 export interface ActiveContext {
   /** 当前项目，可能在远程机器上；没有项目时为 null。 */
   project: Project | null;
-  /** 舞台上露着的会话；舞台被挡住、收起、换成别的页，或没有会话时为 null。 */
+  /** 露着的会话；会话视图被挡住、收起、换成别的页，或没有会话时为 null。 */
   session: ViewedSession | null;
 }
 /** 用户眼下在看什么。变了发 active_context_changed。 */
 export function active_context(): ActiveContext;
+/**
+ * 发布用户眼下在看什么：画项目和会话的插件在用户选中、切换时调，别的插件靠 active_context 跟着。和上次一样就什么都
+ * 不做，变了发 active_context_changed。session 不给 at_latest 算 true。
+ */
+export function set_active_context(context: ActiveContext): null;
 /** 那台机器的运行时报的会话状态，每格终端、每段对话一条（形状同运行时 subscribe 推的会话状态）。主窗口关着也照常更新；变了发 sessions_changed。 */
 export function session_states(machine: Machine): unknown[];
 /** 那台机器的工作区目录：开着的项目和对话，是会话的名册（形状同运行时的 workspace 目录）；还没收到时为 null。变了发 sessions_changed。 */
@@ -79,20 +87,18 @@ export function notification_permission():
 export type StatusMenuItem =
   | { type: "action"; label: string; icon?: { png: number[]; color: number } | null; command: string; args?: unknown }
   | { type: "separator" };
-/** 那台机器的智能体配置（profiles、agents、env 等，形状同运行时的 agent_host.get），运行时推来的那份；还没收到、给不了时为 null。变了发 agent_settings_changed。 */
-export function agent_settings(machine: Machine): unknown | null;
-/** 那台机器给不了智能体配置的原因（运行时太旧等）；收到了、还没收到为 null。变了发 agent_settings_changed。 */
-export function agent_settings_unavailable(machine: Machine): string | null;
 /**
  * 那个视图此刻看得见；设置页是设置开着、停在这一页。变了发 shown_views_changed。
  * 视图 id 是 "<来源>/<名字>"：插件主入口是 "<插件 id>/main"，设置页是 "<插件 id>/<name>"。
  */
 export function view_shown(view: string): boolean;
+/** 那个视图摆在某一页眼下装的布局里（不管露没露着）。没摆的视图打开时放进出口。变了发 laid_out_views_changed。 */
+export function view_laid_out(view: string): boolean;
 /** 主窗口此刻在前台。回到前台发 window_activated，去后台不发：定时做事的醒来时问这里，不在前台就停。 */
 export function window_active(): boolean;
 /** 主窗口里宿主的遮罩层（确认框、命令面板、大图预览）开着。开关时发 overlay_changed。 */
 export function overlay_open(): boolean;
-/** 替换本插件由脚本登记的主题，每项是 gpui-kit ThemeSet JSON。空数组撤下全部。 */
+/** 替换本插件由脚本登记的主题，每项是一份 smelt 主题文件 JSON（带 version，格式见 docs/ui-design-language.md 第 2 节）。有一份不合法就整批不装。空数组撤下全部。 */
 export function register_themes(themeSets: string[]): null;
 export interface Page {
   /** 本插件内的名字，不含 "/"；页 id 是 "<插件 id>/<name>"。 */
@@ -117,7 +123,11 @@ export interface Layout {
   name: string;
   /** 设置里显示的名字。 */
   title: string;
-  /** gpui-base DockAreaState JSON，面板名是视图 id，version 为 1。 */
+  /**
+   * gpui-base DockAreaState JSON，面板名是视图 id，version 为 1。叶子也可以是一摞 "smelt/stack"：
+   * info.panel 写 { axis: "vertical" | "horizontal", items: [{ view: "<视图 id>", fit?: true } | { stack: {...}, fit?: true }] }，
+   * 几个视图按顺序排在一格里，没有分隔条，fit 的按内容定大小，其余平分；不分标签、不能单独放大。
+   */
   layout: string;
 }
 /** 替换本插件登记的布局。空数组撤下全部；一份不合法整组不登记。首页用哪份由用户在设置里选，别的页用第一份。 */
@@ -139,18 +149,27 @@ export interface Command {
 /** 替换本插件登记的命令。空数组撤下全部；一条不合法整组不登记。执行时由 next_command 取到。 */
 export function register_commands(commands: Command[]): null;
 export interface CommandCall {
+  /** 这一次执行，交回结果时用（resolve_command / reject_command）。 */
+  id: number;
   /** 本插件内的名字。 */
   name: string;
   /** 执行时带的参数；快捷键、菜单、命令面板执行时为 null。 */
   args: unknown;
 }
-/** 等本插件命令的下一次执行。从登记起开始记，按顺序一次不落。同时只能有一个在等。 */
+/**
+ * 等本插件命令的下一次执行。从登记起开始记，按顺序一次不落。同时只能有一个在等。每次执行都要用 resolve_command 或
+ * reject_command 交回，执行的一方（run 的 Promise）等着它；插件卸下时还没交回的都算失败。
+ */
 export function next_command(): Promise<CommandCall>;
+/** 交回 id 那次执行的结果，run 它的一方兑现为 result（不给是 null）。已经交回过、没有这一次时报错。 */
+export function resolve_command(id: number, result?: unknown): null;
+/** 那次执行失败，run 它的一方 reject，reason 是给人看的原因。 */
+export function reject_command(id: number, reason: string): null;
 /**
  * 执行一条命令，任何来源的都行（id 是 "<来源>/<名字>"），兑现为命令交回的结果。排到这一轮之后跑；
  * 主窗口没开也照样执行，要主窗口的命令这时 reject。命令不存在、眼下不适用、执行失败时 reject，带可以直接
  * 给人看的原因。不 await 命令也照样跑完。
- * 脚本登记的命令接到就算成功，结果是 null。
+ * 脚本登记的命令兑现为脚本交回的结果（见 resolve_command）。
  *
  * 宿主的动作也是命令：
  * - "smelt.app/notify" { id?: string, subtitle: string, body: string, on_click?: { command: string, args?: unknown } }：
@@ -165,9 +184,8 @@ export function next_command(): Promise<CommandCall>;
  * - "smelt.app/pick-paths" { machine: Machine, title: string, confirm: string, files?: boolean, multiple?: boolean }
  *   → string[] | null：在那台机器上选路径，title 是选择框标题，confirm 是确认按钮上的动词；取消时为 null。
  * - "smelt.app/open-view" { view: string, args?: unknown } → boolean：打开一个视图，哪页的布局里摆了它就去那页
- *   让它露出来，哪页都没摆就放进出口，再把 args 交给它；没有这个视图时为 false。按实例建的视图（会话一份的终端、
- *   对话，如 "smelt.terminal/terminal"，args 是它的约定里的形状）每次按 args 新建一份放进出口，出口换了内容就释放；
- *   没有能放的出口时 reject。
+ *   让它露出来，哪页都没摆就放进出口，再把 args 交给它；没有这个视图时为 false。按实例建的视图（args 是提供它的
+ *   插件的约定里的形状）每次按 args 新建一份放进出口，出口换了内容就释放；没有能放的出口时 reject。
  * - "smelt.app/quit-now"：直接退出，不问退出守卫、不弹退出确认。接手了退出（set_quit_guard）的插件做完自己的事用它。
  * - "smelt.app/open-page" { page: string } → boolean：进一页，来路上有它就退回去；没有这页、这页没有布局时为 false。
  * - "smelt.app/show-main-window"：把主窗口拿到前面来，已经关了就新开一扇。
@@ -177,25 +195,116 @@ export function next_command(): Promise<CommandCall>;
  * - "smelt.app/set-view-badge" { view: string, label: string | null }：设视图入口（面板标签、侧栏那一行）上的角标，
  *   null 清掉；视图建没建都画，变了发 view_badges_changed。
  * - "smelt.app/open-in-file-manager" { path: string }：用系统文件管理器打开这台电脑上的一个目录。
- * - "smelt.app/edit-agent-settings" { machine: Machine, before: unknown, after: unknown }：改那台机器的智能体配置，
- *   before 是 agent_settings 读到的那份、after 是改成的那份；那台机器的运行时只写两者不同的字段。改完由运行时
- *   推回来（发 agent_settings_changed），不先改本地；连着改时等上一次 resolve 再发下一次。
- * - "smelt.sessions/start-conversation" { machine: Machine, agent_definition_id: string, cwd: string }：
- *   跟一个智能体在那台机器的 cwd 里开一段新对话，露在主窗口里。
- * - "smelt.sessions/activate" { machine: Machine, session_id: string }：在主窗口里露出那台机器上的这个会话并拿到前面来，
- *   主窗口关着就先开。
- * - "smelt.sessions/fork" { machine: Machine, session_id: string, provider_session_id: string,
- *   cut?: { text: string, occurrence: number } | null, prompt?: string }：从这段对话分叉出一段新对话；cut 是从哪条
- *   用户消息（第 occurrence 次出现的 text）之前切开，不给是整段；prompt 是新对话里先填进输入框的话。
- * - "smelt.sessions/send-text" { text: string }：把文字交给当前会话（终端打进输入、对话填进输入框，不替用户发出）；
- *   没有能接的会话时 reject。
- * - "smelt.sessions/resume" / "smelt.sessions/resume-in-terminal" / "smelt.sessions/handoff"：续接、交接历史会话。
+ * - "smelt.app/add-machine" { pairing_uri: string } → { machine: Machine, name: string }：用配对串添加一台远程机器，
+ *   要走公网拨号，最长等半分钟；同一台机器重新配对就更新原来那条。
+ * - "smelt.app/remove-machine" { machine: Machine }：移除一台远程机器，它的项目和会话从这边移走，它上面的会话照常运行。
+ * - "smelt.app/rename-machine" { machine: Machine, name: string }：改远程机器在这台电脑上的显示名。
+ * - "smelt.app/set-machine-relay" { machine: Machine, relay: string }：改连它用的中继，空的是 n0 的公共 relay；
+ *   在线时先请它自己改用新中继，离线时只改这边。
+ * - "smelt.app/reconnect-machine" { machine: Machine }：马上重连一台离线或版本对不上的机器。
+ * - "smelt.app/upgrade-machine" { machine: Machine }：请它把运行时升到这个桌面的版本，进度看 connections。
+ * - "smelt.app/refresh-connections"：有人在看连接状态了，现在重读连接路径和延迟、重探离线的；露出来时调一次。
  */
 export function run(command: string, args?: unknown): Promise<unknown>;
 /** 那台机器上的路径怎么切。 */
 export function path_style(machine: Machine): "posix" | "windows";
+/**
+ * 调那台机器的运行时控制接口：method 是线上方法名（如 "session.list"），params 是它的参数（不给是 {}），兑现为
+ * 运行时交回的结果。参数、结果的形状见 smelt-runtime-client 里那个方法的定义。运行时报的错、连不上、超时（timeout_ms，
+ * 默认 60 秒）都 reject，带可以直接给人看的原因；没有这个方法当场报错。
+ */
+export function call(machine: Machine, method: string, params?: unknown, timeout_ms?: number): Promise<unknown>;
+/** 桌面挂着的机器，本机在最前。unavailable 是眼下用不了的原因；smelt_home 是那台机器的 SMELT_HOME，没连上过是 null。变了发 machines_changed。 */
+export function machines(): { machine: Machine; name: string; unavailable: string | null; smelt_home: string | null }[];
+/** 登记了的一个视图（见 views）。 */
+export interface ViewInfo {
+  /** "<来源>/<名字>"。 */
+  id: string;
+  title: string;
+  /** 图标资源路径，如 "icons/terminal.svg"。 */
+  icon: string;
+  /** 视图自己画顶栏，宿主不给它加标题栏。 */
+  draws_top_bar: boolean;
+  /** 按实例建：每次打开按参数新建一份（参数形状见提供方的约定）。 */
+  instances: boolean;
+  /** 是一页设置时：放在哪一组、按哪些词能搜到；不是为 null。 */
+  settings: { group: "general" | "agents" | "system" | "plugins"; keywords: string[] } | null;
+}
+/** 所有来源登记的视图，按登记先后。变了发 views_changed。 */
+export function views(): ViewInfo[];
+/** 视图入口上的角标（"smelt.app/set-view-badge" 设的）；没有为 null。变了发 view_badges_changed。 */
+export function view_badge(view: string): string | null;
+/** 一个角被宿主控件占掉的宽高。 */
+export interface CornerSize { width: number; height: number }
+/**
+ * 视图的 safe area：title_bar 是顶上一行是窗口标题栏（34 高，空白处拖窗口），corners 是四角被宿主控件
+ * （红黄绿按钮、停靠区开合按钮）占的宽高。外壳替它画标题带的视图顶上不是标题栏，JS 视图都是这种，
+ * 自己的总是全 0。视图还没建、没摆着时也全为 0。变了发 safe_area_changed。
+ */
+export function safe_area(view: string): {
+  title_bar: boolean;
+  corners: { top_left: CornerSize; top_right: CornerSize; bottom_right: CornerSize; bottom_left: CornerSize };
+};
+/** 所有来源登记的页（形状同 register_pages，id 是 "<来源>/<名字>"），按登记先后。变了发 pages_changed。 */
+export function pages(): { id: string; title: string; home: boolean; index: string | null }[];
+/** 登记了的一条命令（见 commands）。key 是登记时给的出厂快捷键（用户可能在设置里改了），没有为 null；group 是来源给人看的名字。 */
+export interface CommandInfo {
+  id: string;
+  group: string;
+  title: string;
+  key: string | null;
+  context: string;
+  palette: boolean;
+  requires_args: boolean;
+}
+/** 所有来源登记的命令，按登记先后。变了发 commands_changed。 */
+export function commands(): CommandInfo[];
+/** 一条命令；没登记为 null。 */
+export function command(id: string): CommandInfo | null;
+/** 画右键菜单时取的一项：args 已经并上 context，点了直接 run(command, args)。 */
+export type ContextMenuEntry = {
+  label: string;
+  png: number[] | null;
+  icon: string | null;
+} & ({ command: string; args: Record<string, unknown> } | { submenu: ContextMenuEntry[] });
+/**
+ * 画自己的右键菜单 menu（"<本插件 id>/<名字>"）时取别的插件放进来的项（register_context_menu_items），只列在 machine
+ * 上的东西该有的；context 是这个菜单带的上下文，形状由本插件在约定里写明。打开菜单时取，不要缓存。
+ */
+export function context_menu_items(menu: string, machine: Machine, context?: Record<string, unknown> | null): ContextMenuEntry[];
 /** 那台机器此刻在线：最近一次探测连得上、版本对得上；本机守护重启、升级的那一会儿也不在线。变了发 machines_changed。 */
 export function machine_online(machine: Machine): boolean;
+/** 一台远程机器的连接（见 connections）。 */
+export interface Connection {
+  machine: Machine;
+  /** 在这台电脑上的显示名。 */
+  name: string;
+  /** 这台电脑经哪个中继连它；null 是 n0 的公共 relay。 */
+  relay: string | null;
+  /** 它跑的系统（"linux"、"macos"、"windows"），最近一次连上时报的，离线也在；从没连上过是 null。 */
+  os: string | null;
+  state:
+    | { state: "connecting" }
+    | { state: "online"; version: string; platform: string | null }
+    | { state: "offline"; error: string }
+    | { state: "incompatible"; version: string; detail: string }
+    | { state: "upgrading"; progress: string };
+  /** 连着时走哪条路、多慢；slow 是慢到值得提醒。只在有人看时采样（"smelt.app/refresh-connections"）。 */
+  link: {
+    route: { kind: "direct" } | { kind: "relay"; relay: string } | { kind: "other" };
+    rtt_ms: number;
+    slow: boolean;
+  } | null;
+  /** 最近一次手动升级没升成的原因。 */
+  upgrade_note: string | null;
+  can_upgrade: boolean;
+  can_reconnect: boolean;
+}
+/**
+ * 远程机器的连接表：配对了哪些、各自连得怎样；本机不在里面。load_error 是启动时没读出登记过的机器的原因。
+ * 改用 "smelt.app/add-machine" 等命令。变了发 machines_changed。
+ */
+export function connections(): { remotes: Connection[]; load_error: string | null };
 /**
  * 等那台机器在线，兑现为 true；机器被移除了为 false。等的时候不拨号，跟着宿主探到的状态醒。failures 是在线以后又连
  * 失败的次数，大于 0 时先按它退避（250ms 起翻倍，上限 8s）再看，免得对着在线却出错的机器连环重试。
@@ -226,8 +335,7 @@ export type ContextMenuItem = {
   only_on?: { machine: Machine } | null;
 } & ({ command: string; args?: Record<string, unknown> | null } | { submenu: ContextMenuItem[] });
 /**
- * 往别的插件画的右键菜单 menu 里放本插件的项。menu 是 "<来源>/<名字>"，见画它的插件的约定，如会话列表里项目行的
- * "smelt.sessions/project"（上下文 { machine, path }）、机器行的 "smelt.sessions/machine"（上下文 { machine }）。
+ * 往别的插件画的右键菜单 menu 里放本插件的项。menu 是 "<来源>/<名字>"，菜单名和它带的上下文见画它的插件的约定。
  * 整组替换本插件在这个菜单里原来的项，空数组撤下。点了执行 command，参数是 args 并上菜单的上下文，同名字段以上下文
  * 为准；命令撤下了那一项就不列。一项不合法整组不登记。
  */
@@ -279,10 +387,11 @@ export type HostEvent =
   | { type: "active_context_changed" }
   | { type: "sessions_changed" }
   | { type: "notification_permission_changed" }
-  | { type: "agent_settings_changed" }
   | { type: "shown_views_changed" }
+  | { type: "laid_out_views_changed" }
   | { type: "views_changed" }
   | { type: "view_badges_changed" }
+  | { type: "safe_area_changed" }
   | { type: "themes_changed" }
   | { type: "layouts_changed" }
   | { type: "pages_changed" }
@@ -313,6 +422,15 @@ export function next_event(): Promise<HostEvent>;
 export function emit_event(name: string, payload?: unknown): null;
 "#;
 
+/// 执行了一次插件的命令，等脚本取走、交回结果。
+#[derive(Debug)]
+struct CommandCall {
+    /// 交回结果时认这一次（`resolve_command` / `reject_command`）。
+    id: u64,
+    name: String,
+    args: Value,
+}
+
 /// 宿主怎么把插件目录里的一个入口建成设置页（见 `register_settings_pages`）。
 #[derive(Clone)]
 pub struct SettingsPageLoader {
@@ -341,9 +459,13 @@ struct PluginState {
     theme_owner: String,
     queue: VecDeque<HostEvent>,
     waiter: Option<oneshot::Sender<HostEvent>>,
-    /// 执行过、脚本还没取走的命令：名字和参数。
-    calls: VecDeque<(String, Value)>,
-    call_waiter: Option<oneshot::Sender<(String, Value)>>,
+    /// 执行过、脚本还没取走的命令。
+    calls: VecDeque<CommandCall>,
+    call_waiter: Option<oneshot::Sender<CommandCall>>,
+    /// 交给脚本、还没交回结果的执行：执行的一方在等这些。
+    replies: HashMap<u64, oneshot::Sender<crate::CommandResult>>,
+    /// 下一次执行的编号。
+    next_call: u64,
     /// 视图已经释放：它登记的命令不再接。
     released: bool,
     /// 设置页那份脚本：和主入口同一个身份，但不能登记，登记会顶掉主入口登记的那组。
@@ -456,6 +578,8 @@ impl JsPlugin {
         let menus = self.clone();
         let context_menus = self.clone();
         let guards = self.clone();
+        let resolved = self.clone();
+        let rejected = self.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
             .function("active_context", |_| {
@@ -477,28 +601,6 @@ impl JsPlugin {
                     .field("project", project)
                     .field("session", session)
                     .into())
-            })
-            .function("agent_settings", |arguments| {
-                let machine = machine_argument("agent_settings", arguments, 0)?;
-                let settings = in_app("agent_settings", |cx| {
-                    crate::host(cx)
-                        .agent_settings(&machine, cx)
-                        .map(serde_json::to_value)
-                })?;
-                match settings {
-                    None => Ok(HostValue::Null),
-                    Some(Ok(value)) => Ok(host_value(&value)),
-                    Some(Err(error)) => Err(HostError::new(format!(
-                        "agent_settings：配置转不成 JSON：{error}"
-                    ))),
-                }
-            })
-            .function("agent_settings_unavailable", |arguments| {
-                let machine = machine_argument("agent_settings_unavailable", arguments, 0)?;
-                let error = in_app("agent_settings_unavailable", |cx| {
-                    crate::host(cx).agent_settings_unavailable(&machine, cx)
-                })?;
-                Ok(error.map_or(HostValue::Null, |error| error.into()))
             })
             .function("session_states", |arguments| {
                 let machine = machine_argument("session_states", arguments, 0)?;
@@ -524,11 +626,133 @@ impl JsPlugin {
                 let id = arguments.string(0)?;
                 Ok(in_app("view_shown", |cx| crate::host(cx).view_shown(id, cx))?.into())
             })
+            .function("view_laid_out", |arguments| {
+                let id = arguments.string(0)?;
+                Ok(in_app("view_laid_out", |cx| crate::host(cx).view_laid_out(id, cx))?.into())
+            })
             .function("window_active", |_arguments| {
                 Ok(in_app("window_active", |cx| crate::host(cx).window_active(cx))?.into())
             })
             .function("overlay_open", |_arguments| {
                 Ok(in_app("overlay_open", |cx| crate::host(cx).overlay_open(cx))?.into())
+            })
+            .function("set_active_context", |arguments| {
+                let context = active_context_argument(arguments.value(0)?)?;
+                in_app("set_active_context", |cx| {
+                    crate::set_active_context(context, cx)
+                })?;
+                Ok(HostValue::Null)
+            })
+            .function("machines", |_| {
+                let machines = in_app("machines", |cx| crate::host(cx).machines(cx))?;
+                Ok(HostValue::Array(
+                    machines
+                        .iter()
+                        .map(|machine| {
+                            HostObject::new()
+                                .field("machine", machine_value(&machine.key))
+                                .field("name", machine.name.as_str())
+                                .field("unavailable", optional_text(machine.unavailable.as_deref()))
+                                .field("smelt_home", optional_text(machine.smelt_home.as_deref()))
+                                .into()
+                        })
+                        .collect(),
+                ))
+            })
+            .function("views", |_| {
+                let views = in_app("views", |cx| crate::views(cx))?;
+                Ok(HostValue::Array(views.iter().map(view_value).collect()))
+            })
+            .function("view_badge", |arguments| {
+                let id = arguments.string(0)?;
+                let badge = in_app("view_badge", |cx| crate::view_badge(id, cx))?;
+                Ok(optional_text(badge.as_deref()))
+            })
+            .function("safe_area", |arguments| {
+                let id = arguments.string(0)?;
+                let area = in_app("safe_area", |cx| {
+                    crate::built_view(id, cx)
+                        .map(|view| crate::safe_area(view.view().entity_id(), cx))
+                        .unwrap_or_default()
+                })?;
+                Ok(safe_area_value(&area))
+            })
+            .function("pages", |_| {
+                let pages = in_app("pages", |cx| crate::pages(cx))?;
+                Ok(HostValue::Array(
+                    pages
+                        .iter()
+                        .map(|page| {
+                            HostObject::new()
+                                .field("id", page.id.as_ref())
+                                .field("title", page.title.as_ref())
+                                .field("home", page.home)
+                                .field("index", optional_text(page.index.as_deref()))
+                                .into()
+                        })
+                        .collect(),
+                ))
+            })
+            .function("commands", |_| {
+                let commands = in_app("commands", |cx| crate::commands(cx))?;
+                Ok(HostValue::Array(
+                    commands.iter().map(command_value).collect(),
+                ))
+            })
+            .function("command", |arguments| {
+                let id = arguments.string(0)?;
+                let command = in_app("command", |cx| crate::command(id, cx))?;
+                Ok(command.as_ref().map_or(HostValue::Null, command_value))
+            })
+            .function("context_menu_items", |arguments| {
+                let menu = arguments.string(0)?.to_string();
+                let machine = machine_argument("context_menu_items", arguments, 1)?;
+                let context = arguments.get(2).map(json_value).unwrap_or(Value::Null);
+                let items = in_app("context_menu_items", |cx| {
+                    crate::context_menu_items(&menu, &machine, cx)
+                })?;
+                Ok(HostValue::Array(
+                    items
+                        .iter()
+                        .map(|item| context_menu_value(item, &context))
+                        .collect(),
+                ))
+            })
+            .async_function("call", |arguments| {
+                let machine = machine_argument("call", arguments, 0)?;
+                let name = arguments.string(1)?;
+                let method = ControlMethod::from_wire_name(name)
+                    .ok_or_else(|| HostError::new(format!("call：运行时没有「{name}」这个方法")))?;
+                let params = match arguments.get(2) {
+                    None | Some(HostValue::Null) => Value::Object(Default::default()),
+                    Some(params) => json_value(params),
+                };
+                let timeout = match arguments.get(3) {
+                    None | Some(HostValue::Null) => crate::CALL_TIMEOUT,
+                    Some(HostValue::Number(ms)) if *ms > 0.0 && ms.is_finite() => {
+                        std::time::Duration::from_millis(*ms as u64)
+                    }
+                    Some(other) => {
+                        return Err(HostError::new(format!(
+                            "call：timeout_ms 要是正数，收到 {}",
+                            other.describe()
+                        )));
+                    }
+                };
+                in_task(
+                    "call",
+                    move |cx| {
+                        let client = crate::host(cx).client(&machine, cx);
+                        cx.background_executor().spawn(async move {
+                            let client =
+                                client.ok_or_else(|| crate::MACHINE_REMOVED.to_string())?;
+                            client
+                                .call_method(method, params, timeout)
+                                .map_err(crate::call_error_text)
+                        })
+                    },
+                    |value| host_value(&value),
+                )
             })
             .function("register_themes", move |arguments| {
                 themes.may_register("register_themes")?;
@@ -628,6 +852,10 @@ impl JsPlugin {
                     crate::model::runtime_path::PathStyle::Windows => "windows",
                 }
                 .into())
+            })
+            .function("connections", |_| {
+                let connections = in_app("connections", |cx| crate::host(cx).connections(cx))?;
+                serialized("connections", &connections)
             })
             .function("machine_online", |arguments| {
                 let machine = machine_argument("machine_online", arguments, 0)?;
@@ -797,6 +1025,16 @@ impl JsPlugin {
                 Ok(async move { store_execute(&owner, &sql, params) })
             })
             .async_function("next_command", move |_| Ok(calls.next_command()))
+            .function("resolve_command", move |arguments| {
+                let id = call_id("resolve_command", arguments)?;
+                let result = arguments.get(1).map(json_value).unwrap_or(Value::Null);
+                resolved.reply("resolve_command", id, Ok(result))
+            })
+            .function("reject_command", move |arguments| {
+                let id = call_id("reject_command", arguments)?;
+                let reason = arguments.string(1)?.to_string();
+                rejected.reply("reject_command", id, Err(reason))
+            })
             .async_function("next_event", move |_| Ok(events.next_event()))
             .function("emit_event", move |arguments| {
                 let name = arguments.string(0)?;
@@ -889,26 +1127,40 @@ impl JsPlugin {
             None => state.call_waiter = Some(sender),
         }
         async move {
-            let (name, args) = receiver
+            let call = receiver
                 .await
                 .map_err(|_| HostError::new("next_command：被后一次 next_command 顶掉了"))?;
             Ok(HostObject::new()
-                .field("name", name)
-                .field("args", host_value(&args))
+                .field("id", HostValue::Number(call.id as f64))
+                .field("name", call.name)
+                .field("args", host_value(&call.args))
                 .into())
         }
     }
 
-    /// 宿主执行了这个插件的一条命令。视图已经释放就不接，按键交给下一条绑定。
-    fn deliver_command(&self, name: &str, args: &Value) -> Handled {
+    /// 宿主执行了这个插件的一条命令：排给脚本，交回等结果的那一头。视图已经释放就不接
+    /// （`None`），按键交给下一条绑定。
+    fn deliver_command(
+        &self,
+        name: &str,
+        args: &Value,
+    ) -> Option<oneshot::Receiver<crate::CommandResult>> {
         let mut state = self.0.borrow_mut();
         if state.released {
-            return Handled::Pass;
+            return None;
         }
-        let call = (name.to_string(), args.clone());
+        let id = state.next_call;
+        state.next_call += 1;
+        let (reply, result) = oneshot::channel();
+        state.replies.insert(id, reply);
+        let call = CommandCall {
+            id,
+            name: name.to_string(),
+            args: args.clone(),
+        };
         let call = match state.call_waiter.take() {
             Some(waiter) => match waiter.send(call) {
-                Ok(()) => return Handled::ok(),
+                Ok(()) => return Some(result),
                 // 等的那个 Promise 已经没人要了，照常排队。
                 Err(call) => call,
             },
@@ -916,7 +1168,18 @@ impl JsPlugin {
         };
         // 每次执行都要到，不去重。
         state.calls.push_back(call);
-        Handled::ok()
+        Some(result)
+    }
+
+    /// 脚本交回一次执行的结果。
+    fn reply(&self, function: &str, id: u64, result: crate::CommandResult) -> HostResult {
+        let reply =
+            self.0.borrow_mut().replies.remove(&id).ok_or_else(|| {
+                HostError::new(format!("{function}：没有在等结果的第 {id} 次执行"))
+            })?;
+        // 执行的一方不等了（任务被扔掉）不算错。
+        let _ = reply.send(result);
+        Ok(HostValue::Null)
     }
 
     /// 视图释放了：扔掉队列和订阅。登记的命令由宿主随插件撤下（见 `mount_all`），
@@ -928,9 +1191,14 @@ impl JsPlugin {
         state._events = None;
         state.calls.clear();
         state.call_waiter = None;
+        // 等结果的那一头收到「没执行完」。
+        state.replies.clear();
         state.released = true;
     }
 }
+
+/// 脚本没交回结果插件就卸下了。
+const UNFINISHED_COMMAND: &str = "插件已卸下，命令没有执行完";
 
 /// 脚本发的插件事件：名字要在本插件来源下（`<插件 id>/<名字>`）。
 fn plugin_event(owner: &str, name: &str, payload: Value) -> Result<HostEvent, HostError> {
@@ -1251,9 +1519,18 @@ fn command_arguments(
                 context: text("context")?.unwrap_or_else(|| "Workspace".to_string()),
                 palette,
                 requires_args,
-                handler: Rc::new(move |args, _, _| match state.upgrade() {
-                    Some(state) => JsPlugin(state).deliver_command(&handler_name, args),
-                    None => Handled::Pass,
+                handler: Rc::new(move |args, _, cx| {
+                    let Some(result) = state
+                        .upgrade()
+                        .and_then(|state| JsPlugin(state).deliver_command(&handler_name, args))
+                    else {
+                        return Handled::Pass;
+                    };
+                    Handled::Done(cx.background_executor().spawn(async move {
+                        result
+                            .await
+                            .unwrap_or_else(|_| Err(UNFINISHED_COMMAND.to_string()))
+                    }))
                 }),
                 name,
                 title,
@@ -1466,6 +1743,168 @@ fn machine_argument(
     }
 }
 
+/// `resolve_command` / `reject_command` 的第一个参数：`next_command` 给的那次执行的 id。
+fn call_id(name: &str, arguments: &HostArguments) -> Result<u64, HostError> {
+    match arguments.value(0)? {
+        HostValue::Number(id) if *id >= 0.0 && id.fract() == 0.0 && *id <= MAX_SAFE_INTEGER => {
+            Ok(*id as u64)
+        }
+        other => Err(HostError::new(format!(
+            "{name}：id 要是 next_command 给的整数，收到 {}",
+            other.describe()
+        ))),
+    }
+}
+
+/// `set_active_context` 的参数：`{ project, session }`，各自可以是 null。
+fn active_context_argument(value: &HostValue) -> Result<crate::ActiveContext, HostError> {
+    let invalid = |what: &str| HostError::new(format!("set_active_context：{what}"));
+    if !matches!(value, HostValue::Object(_)) {
+        return Err(invalid(&format!(
+            "参数要是 {{ project, session }}，收到 {}",
+            value.describe()
+        )));
+    }
+    let machine = |object: &HostValue, of: &str| match object.get("machine") {
+        Some(HostValue::Null) => Ok(RuntimeKey::Local),
+        Some(HostValue::Str(id)) => Ok(RuntimeKey::Remote(id.clone())),
+        _ => Err(invalid(&format!("{of}.machine 要是 null 或字符串"))),
+    };
+    let text = |object: &HostValue, of: &str, name: &str| match object.get(name) {
+        Some(HostValue::Str(text)) if !text.is_empty() => Ok(text.clone()),
+        _ => Err(invalid(&format!("{of}.{name} 要是非空字符串"))),
+    };
+    let project = match value.get("project") {
+        None | Some(HostValue::Null) => None,
+        Some(project @ HostValue::Object(_)) => Some(crate::Project {
+            machine: machine(project, "project")?,
+            root: text(project, "project", "root")?,
+        }),
+        Some(_) => return Err(invalid("project 要是对象或 null")),
+    };
+    let session = match value.get("session") {
+        None | Some(HostValue::Null) => None,
+        Some(session @ HostValue::Object(_)) => Some(crate::ViewedSession {
+            machine: machine(session, "session")?,
+            id: text(session, "session", "id")?,
+            at_latest: match session.get("at_latest") {
+                None | Some(HostValue::Null) => true,
+                Some(HostValue::Bool(at_latest)) => *at_latest,
+                Some(_) => return Err(invalid("session.at_latest 要是布尔值")),
+            },
+        }),
+        Some(_) => return Err(invalid("session 要是对象或 null")),
+    };
+    Ok(crate::ActiveContext { project, session })
+}
+
+fn optional_text(text: Option<&str>) -> HostValue {
+    text.map_or(HostValue::Null, HostValue::from)
+}
+
+fn safe_area_value(area: &crate::SafeArea) -> HostValue {
+    let corner = |size: gpui::Size<gpui::Pixels>| -> HostValue {
+        HostObject::new()
+            .field("width", HostValue::Number(f64::from(f32::from(size.width))))
+            .field(
+                "height",
+                HostValue::Number(f64::from(f32::from(size.height))),
+            )
+            .into()
+    };
+    HostObject::new()
+        .field("title_bar", area.title_bar)
+        .field(
+            "corners",
+            HostObject::new()
+                .field("top_left", corner(area.corners.top_left))
+                .field("top_right", corner(area.corners.top_right))
+                .field("bottom_right", corner(area.corners.bottom_right))
+                .field("bottom_left", corner(area.corners.bottom_left)),
+        )
+        .into()
+}
+
+fn view_value(view: &crate::ViewInfo) -> HostValue {
+    let settings = view.settings.as_ref().map_or(HostValue::Null, |settings| {
+        HostObject::new()
+            .field(
+                "group",
+                match settings.group {
+                    SettingsGroup::General => "general",
+                    SettingsGroup::Agents => "agents",
+                    SettingsGroup::System => "system",
+                    SettingsGroup::Plugins => "plugins",
+                },
+            )
+            .field(
+                "keywords",
+                HostValue::Array(
+                    settings
+                        .keywords
+                        .iter()
+                        .map(|keyword| HostValue::from(keyword.as_ref()))
+                        .collect(),
+                ),
+            )
+            .into()
+    });
+    HostObject::new()
+        .field("id", view.id.as_ref())
+        .field("title", view.title.as_ref())
+        .field("icon", view.icon.as_ref())
+        .field("draws_top_bar", view.draws_top_bar)
+        .field("instances", view.instances)
+        .field("settings", settings)
+        .into()
+}
+
+fn command_value(command: &crate::CommandInfo) -> HostValue {
+    HostObject::new()
+        .field("id", command.id.as_ref())
+        .field("group", command.group.as_ref())
+        .field("title", command.title.as_ref())
+        .field("key", optional_text(command.key.as_deref()))
+        .field("context", command.context.as_ref())
+        .field("palette", command.palette)
+        .field("requires_args", command.requires_args)
+        .into()
+}
+
+/// 给脚本画的一项右键菜单：命令的参数已经并上菜单的上下文，点了直接 `run`。
+fn context_menu_value(item: &ContextMenuItem, context: &Value) -> HostValue {
+    let png = item.image.as_ref().map_or(HostValue::Null, |image| {
+        HostValue::Array(
+            image
+                .bytes
+                .iter()
+                .map(|byte| HostValue::Number(f64::from(*byte)))
+                .collect(),
+        )
+    });
+    let object = HostObject::new()
+        .field("label", item.label.as_ref())
+        .field("icon", optional_text(item.icon.as_deref()))
+        .field("png", png);
+    match &item.action {
+        ContextMenuAction::Run { command, args } => object
+            .field("command", command.as_str())
+            .field("args", host_value(&crate::context_menu_args(args, context)))
+            .into(),
+        ContextMenuAction::Submenu(items) => object
+            .field(
+                "submenu",
+                HostValue::Array(
+                    items
+                        .iter()
+                        .map(|item| context_menu_value(item, context))
+                        .collect(),
+                ),
+            )
+            .into(),
+    }
+}
+
 fn machine_value(key: &RuntimeKey) -> HostValue {
     match key {
         RuntimeKey::Local => HostValue::Null,
@@ -1546,12 +1985,11 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::NotificationPermissionChanged => {
             HostObject::new().field("type", "notification_permission_changed")
         }
-        HostEvent::AgentSettingsChanged => {
-            HostObject::new().field("type", "agent_settings_changed")
-        }
         HostEvent::ShownViewsChanged => HostObject::new().field("type", "shown_views_changed"),
+        HostEvent::LaidOutViewsChanged => HostObject::new().field("type", "laid_out_views_changed"),
         HostEvent::ViewsChanged => HostObject::new().field("type", "views_changed"),
         HostEvent::ViewBadgesChanged => HostObject::new().field("type", "view_badges_changed"),
+        HostEvent::SafeAreaChanged => HostObject::new().field("type", "safe_area_changed"),
         HostEvent::ThemesChanged => HostObject::new().field("type", "themes_changed"),
         HostEvent::LayoutsChanged => HostObject::new().field("type", "layouts_changed"),
         HostEvent::PagesChanged => HostObject::new().field("type", "pages_changed"),
@@ -1609,12 +2047,7 @@ mod tests {
     #[test]
     fn host_queries_check_their_arguments_before_entering_app() {
         let module = JsPlugin::new().module();
-        for query in [
-            "agent_settings",
-            "agent_settings_unavailable",
-            "session_states",
-            "workspace_directory",
-        ] {
+        for query in ["session_states", "workspace_directory"] {
             for machine in [HostValue::Bool(true), HostValue::Number(1.0)] {
                 let error = module
                     .call(query, &HostArguments::new([machine]))
@@ -1627,9 +2060,15 @@ mod tests {
                 .call("view_shown", &HostArguments::default())
                 .is_err()
         );
+        assert!(
+            module
+                .call("view_laid_out", &HostArguments::default())
+                .is_err()
+        );
+        assert!(module.call("safe_area", &HostArguments::default()).is_err());
         // 参数对了才去找宿主，测试里没有脚本上下文。
         let outside_script = module
-            .call("agent_settings", &HostArguments::new([HostValue::Null]))
+            .call("session_states", &HostArguments::new([HostValue::Null]))
             .unwrap_err();
         assert!(outside_script.message().contains("只能在视图"));
     }
@@ -2101,23 +2540,179 @@ mod tests {
     fn command_calls_are_queued_in_order_and_stop_after_release() {
         let plugin = JsPlugin::for_plugin("example", "示例");
         let args = serde_json::json!({ "n": 1 });
-        assert!(!plugin.deliver_command("a", &args).is_pass());
-        assert!(!plugin.deliver_command("a", &args).is_pass());
+        let first = plugin.deliver_command("a", &args).expect("视图在就接");
+        let second = plugin.deliver_command("a", &args).expect("视图在就接");
         let value = smol::block_on(plugin.next_command()).unwrap();
         assert_eq!(value.get("name").and_then(HostValue::as_str), Some("a"));
+        assert_eq!(value.get("id"), Some(&HostValue::Number(0.0)));
         assert_eq!(
             value.get("args").and_then(|args| args.get("n")),
             Some(&HostValue::Number(1.0))
         );
         assert_eq!(plugin.0.borrow().calls.len(), 1);
         assert!(smol::block_on(plugin.next_command()).is_ok());
+        // 脚本交回第一次的结果；第二次没交回，插件卸下时执行的一方收到失败，不会一直等。
+        plugin
+            .reply(
+                "resolve_command",
+                0,
+                Ok(serde_json::json!({ "done": true })),
+            )
+            .unwrap();
+        assert_eq!(
+            smol::block_on(first).unwrap(),
+            Ok(serde_json::json!({ "done": true }))
+        );
+        assert!(plugin.reply("resolve_command", 0, Ok(Value::Null)).is_err());
         // 队列空了，这次挂起等着；视图释放后它收到错误，不会一直挂着。
         let waiting = plugin.next_command();
         assert!(plugin.0.borrow().call_waiter.is_some());
         plugin.detach();
         assert!(smol::block_on(waiting).is_err());
-        assert!(plugin.deliver_command("a", &args).is_pass());
+        assert!(smol::block_on(second).is_err());
+        assert!(plugin.deliver_command("a", &args).is_none());
         assert!(plugin.0.borrow().calls.is_empty());
+    }
+
+    #[test]
+    fn scripts_reply_to_command_calls_by_id() {
+        let plugin = JsPlugin::for_plugin("example", "示例");
+        let module = plugin.module();
+        let pending = plugin.deliver_command("a", &Value::Null).unwrap();
+        for id in [
+            HostValue::Null,
+            HostValue::Number(-1.0),
+            HostValue::Number(0.5),
+        ] {
+            let error = module
+                .call("reject_command", &HostArguments::new([id, "不行".into()]))
+                .unwrap_err();
+            assert!(error.message().contains("id 要是"));
+        }
+        let unknown = module
+            .call(
+                "reject_command",
+                &HostArguments::new([HostValue::Number(7.0), "不行".into()]),
+            )
+            .unwrap_err();
+        assert!(unknown.message().contains("第 7 次"));
+        module
+            .call(
+                "reject_command",
+                &HostArguments::new([HostValue::Number(0.0), "不行".into()]),
+            )
+            .unwrap();
+        assert_eq!(smol::block_on(pending).unwrap(), Err("不行".to_string()));
+    }
+
+    #[test]
+    fn runtime_calls_check_method_and_timeout_before_entering_app() {
+        let module = JsPlugin::new().module();
+        let call = |arguments: Vec<HostValue>| {
+            module
+                .begin("call", &HostArguments::new(arguments))
+                .err()
+                .expect("测试里没有脚本上下文，到不了运行时")
+                .message()
+                .to_string()
+        };
+        assert!(
+            call(vec![HostValue::Null, "no.such-method".into()]).contains("没有「no.such-method」")
+        );
+        assert!(call(vec![HostValue::Bool(true), "session.list".into()]).contains("机器要是"));
+        assert!(
+            call(vec![
+                HostValue::Null,
+                "session.list".into(),
+                HostValue::Null,
+                HostValue::Number(0.0),
+            ])
+            .contains("timeout_ms")
+        );
+        // 参数都对，才去找宿主。
+        assert!(call(vec![HostValue::Null, "session.list".into()]).contains("只能在视图"));
+    }
+
+    #[test]
+    fn active_context_comes_from_script_objects() {
+        let object = |fields: Vec<(&str, HostValue)>| {
+            fields
+                .into_iter()
+                .fold(HostObject::new(), |object, (name, value)| {
+                    object.field(name, value)
+                })
+                .into()
+        };
+        let empty = active_context_argument(&object(vec![])).unwrap();
+        assert_eq!(empty, crate::ActiveContext::default());
+        let context = active_context_argument(&object(vec![
+            (
+                "project",
+                object(vec![("machine", "box".into()), ("root", "/w".into())]),
+            ),
+            (
+                "session",
+                object(vec![("machine", HostValue::Null), ("id", "s1".into())]),
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(
+            context.project,
+            Some(crate::Project {
+                machine: RuntimeKey::Remote("box".into()),
+                root: "/w".into(),
+            })
+        );
+        let session = context.session.unwrap();
+        assert_eq!(session.machine, RuntimeKey::Local);
+        assert!(session.at_latest);
+        for bad in [
+            HostValue::Null,
+            object(vec![(
+                "project",
+                object(vec![("machine", HostValue::Null)]),
+            )]),
+            object(vec![(
+                "session",
+                object(vec![
+                    ("machine", HostValue::Number(1.0)),
+                    ("id", "s".into()),
+                ]),
+            )]),
+        ] {
+            assert!(active_context_argument(&bad).is_err());
+        }
+    }
+
+    #[test]
+    fn context_menu_entries_carry_merged_args() {
+        let item = ContextMenuItem {
+            label: "打开".into(),
+            image: None,
+            icon: Some("icons/external-link.svg".into()),
+            machine: None,
+            action: ContextMenuAction::Submenu(vec![ContextMenuItem {
+                label: "用 Zed".into(),
+                image: None,
+                icon: None,
+                machine: None,
+                action: ContextMenuAction::Run {
+                    command: "ide/open".into(),
+                    args: serde_json::json!({ "app": "zed", "path": "旧的" }),
+                },
+            }]),
+        };
+        let value = context_menu_value(&item, &serde_json::json!({ "path": "/w/a.rs" }));
+        assert_eq!(value.get("png"), Some(&HostValue::Null));
+        let HostValue::Array(submenu) = value.get("submenu").unwrap() else {
+            panic!("要有子菜单");
+        };
+        let args = json_value(submenu[0].get("args").unwrap());
+        assert_eq!(args, serde_json::json!({ "app": "zed", "path": "/w/a.rs" }));
+        assert_eq!(
+            submenu[0].get("command").and_then(HostValue::as_str),
+            Some("ide/open")
+        );
     }
 
     #[test]

@@ -78,14 +78,45 @@ pub(crate) fn create_conversation(
     Ok(publish(&change, event_hub))
 }
 
+/// 改一条对话。终端格从对话里拿掉就是不要它了：先收掉那几格的进程再改目录，和
+/// [`delete_conversation`] 一样收不掉就报错、目录不动。调用方只管改目录，不另发结束会话。
 pub(crate) fn update_conversation(
     store: &Store,
     conversation: &WorkspaceConversation,
+    sessions: &Sessions,
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceRevision, ControlError> {
+    let directory = workspace_catalog::directory_on(store).map_err(control_error)?;
+    if let Some(before) = directory
+        .conversations
+        .iter()
+        .find(|existing| existing.id == conversation.id)
+    {
+        for removed in removed_terminals(before, conversation) {
+            super::kill_terminal_session(removed, sessions, event_hub)
+                .map_err(|message| ControlError::new(ControlErrorCode::OperationFailed, message))?;
+        }
+    }
     let change =
         workspace_catalog::update_conversation_on(store, conversation).map_err(control_error)?;
     Ok(publish(&change, event_hub))
+}
+
+/// `before` 里有、`after` 里没有的终端会话 id。
+fn removed_terminals<'a>(
+    before: &'a WorkspaceConversation,
+    after: &WorkspaceConversation,
+) -> impl Iterator<Item = &'a str> {
+    let kept: Vec<&str> = after
+        .terminals
+        .iter()
+        .filter_map(|terminal| terminal.id.as_deref())
+        .collect();
+    before
+        .terminals
+        .iter()
+        .filter_map(|terminal| terminal.id.as_deref())
+        .filter(move |id| !kept.contains(id))
 }
 
 /// 先收会话再删目录：收不掉（provider 没能退出）就报错、目录留着，用户还能再关一次。
@@ -191,17 +222,6 @@ pub(crate) fn archive_conversation(
     }
     let change =
         workspace_catalog::archive_conversation_on(store, id, archived).map_err(control_error)?;
-    Ok(publish(&change, event_hub))
-}
-
-pub(crate) fn pin_conversation(
-    store: &Store,
-    id: &str,
-    pinned: bool,
-    event_hub: &EventHubHandle,
-) -> Result<WorkspaceRevision, ControlError> {
-    let change =
-        workspace_catalog::pin_conversation_on(store, id.trim(), pinned).map_err(control_error)?;
     Ok(publish(&change, event_hub))
 }
 

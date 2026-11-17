@@ -45,7 +45,7 @@ pub(crate) struct OpenFile {
     /// 文件在哪台机器上。读写都发给它，跟当前项目在哪台机器上无关。
     pub(crate) runtime: RuntimeKey,
     pub(crate) path: String,
-    pub(crate) editor: Entity<gpui_component::input::EditorState>,
+    pub(crate) editor: Entity<gpui_base::input::EditorState>,
     /// 磁盘上（或最近一次保存后）的内容，跟编辑器当前内容一比就知道有没有没保存的改动。
     pub(crate) saved_content: Rc<String>,
     /// 运行时给的内容版本，跟 `saved_content` 同步；保存时带回去做冲突检测。

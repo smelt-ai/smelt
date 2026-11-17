@@ -12,7 +12,7 @@ pub enum ProviderQuotaData {
 }
 
 impl ProviderQuotaData {
-    /// 侧栏额度行和模型菜单括号共用的短文本：通常是已用百分比。
+    /// 额度那一条和模型菜单括号共用的短文本：通常是已用百分比。
     ///
     /// 两处必须是同一个口径，否则同一个账户在两个地方显示出不同的数字。
     pub fn short_text(&self) -> String {

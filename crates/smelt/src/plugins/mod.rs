@@ -22,10 +22,10 @@
 //! 2. App 自带的 `Contents/Resources/plugins/`，只读加载。
 //! 3. debug 构建直接读仓库里的 `plugins/`，改完脚本重新加载即可。
 //!
-//! 脚本可以从 `"gpui-component"` 导入带皮肤的控件。这些控件的 dialog、sheet、
-//! notification 走组件库的 `Root`，和这扇窗口的根一致。`gpui-shell` 自己的
+//! 脚本从 `"smelt-ui"` 导入 smelt 自己的控件（`smelt_plugin_api::js::ui`），确认框走 smelt-ui
+//! 登记在窗口根（`gpui_base::Root`）上的对话框层（`smelt_ui::init`）。`gpui-shell` 自己的
 //! `window.open_dialog` 要找 `ShellRoot`（窗口第一层，或 `Root` 里面那一层），
-//! 工作台没有包它，这条暂时用不了。
+//! 工作台没有包它，这条用不了。
 
 mod host_fs;
 mod log;
@@ -38,7 +38,6 @@ use std::rc::Rc;
 
 use anyhow::Context as _;
 use gpui::*;
-use gpui_component::ActiveTheme as _;
 use gpui_shell::plugin::{MANIFEST_FILE, PluginManifest};
 use gpui_shell::policy::{self, Policy};
 use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
@@ -87,14 +86,14 @@ struct JsPluginView {
 impl Render for JsPluginView {
     /// 页面底归宿主：整窗一层底，每一组都一样（`workspace_frame::window_surface`、
     /// `SmeltTabGroup::frame`）。插件只画内容，不画页面底，铺了就把毛玻璃盖住。
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let base = div().size_full().min_h_0().flex().flex_col();
         match &self.content {
             Ok(view) => base.child(view.clone()),
             Err(error) => base
                 .p_4()
                 .text_sm()
-                .text_color(cx.theme().danger)
+                .text_color(rgb(smelt_ui::ui_theme::bad()))
                 .child(format!("插件加载失败：{error}")),
         }
     }
@@ -112,14 +111,21 @@ struct JsSettingsPage {
 }
 
 impl Render for JsSettingsPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let base = div().size_full().min_h_0().flex().flex_col();
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // 和内置的设置页一样宽（`smelt_ui::SettingsPage` 自己限宽，脚本的页由这里限）。
+        let base = div()
+            .size_full()
+            .max_w(rems(smelt_ui::settings::PAGE_MAX_WIDTH))
+            .mx_auto()
+            .min_h_0()
+            .flex()
+            .flex_col();
         match &self.content {
             Ok(view) => base.child(view.clone()),
             Err(error) => base
                 .p_6()
                 .text_sm()
-                .text_color(cx.theme().danger)
+                .text_color(rgb(smelt_ui::ui_theme::bad()))
                 .child(format!("设置页加载失败：{error}")),
         }
     }
@@ -510,13 +516,9 @@ fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
     if let Some(runtime) = REGISTRY.with(|registry| registry.borrow().runtime.clone()) {
         return Ok(runtime);
     }
-    // 不调 `gpui_shell::init`，也不调 `init_with_components`。后者会再跑一遍目录里
-    // 登记的 `gpui_component::init`，而启动时已经调用过；`gpui_base::init` 重复做会
-    // 重复绑键。样式表首次用到时自会建好。
-    //
-    // 只要组件目录，不用它的开窗口函数：那是给 gpui-shell 自己当应用入口用的。
-    let components =
-        gpui_shell::components::components().context("构建 gpui-component 脚本组件目录")?;
+    // 不调 `gpui_shell::init`：它会再跑一遍 `gpui_base::init`，而启动时已经调用过，重复做会
+    // 重复绑键。样式表首次用到时自会建好；控件要的全局件由启动时的 `smelt_ui::init` 装好。
+    let components = smelt_plugin_api::js::ui::components().context("构建脚本组件目录 smelt-ui")?;
     let runtime = ShellRuntime::new_with_components(cx, components)?;
     REGISTRY.with(|registry| registry.borrow_mut().runtime = Some(runtime.clone()));
     Ok(runtime)
@@ -636,6 +638,121 @@ mod tests {
     use super::{MANIFEST_FILE, PluginManifest, declared_hosts, repo_plugin_dir};
 
     #[gpui::test]
+    fn production_runtime_mounts_skills_button_helper(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, VisualTestContext, point, px, size};
+        use std::ops::Deref;
+
+        let dir = std::env::temp_dir().join(format!("smelt-skills-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("ui.js"),
+            include_str!("../../../../plugins/skills/ui.js"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { SmeltBadge, SmeltButton } from "smelt-ui";
+import { button } from "./ui.js";
+export default class App extends View {
+  init() { this.picking = true; this.hits = 0; }
+  render() {
+    const hit = cx => { this.hits++; cx.notify(); };
+    return div().size_full()
+      .child(button("ghost", "Ghost", hit).absolute().left(30).top(40).w(180))
+      .child(button("secondary", "Secondary", hit, "secondary").absolute().left(30).top(80).w(180))
+      .child(button("primary", "Primary", hit, "primary").loading(this.picking).absolute().left(30).top(120).w(180))
+      .child(button("danger", "Danger", hit, "danger").absolute().left(30).top(160).w(180))
+      .child(SmeltButton.new("toggle").label("Toggle").absolute().left(30).top(200)
+        .on_click((_event, cx) => { this.picking = false; cx.notify(); }))
+      .child(SmeltBadge.new().child("smelt badge"))
+      .child(`hits: ${this.hits}`);
+  }
+}
+"#).unwrap();
+        // 与 app 启动一样先初始化一次；runtime 不再初始化。
+        cx.update(|cx| {
+            gpui_shell::init(cx);
+            smelt_ui::init(cx);
+        });
+        let runtime = cx.update(super::runtime).unwrap();
+        runtime.set_editor_files(false);
+        let app = runtime.load_application(&dir, "main.js").unwrap();
+        let mounted = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = mounted.clone();
+        let window = cx.open_window(size(px(500.), px(300.)), move |window, cx| {
+            let view = runtime.mount_application(&app, window, cx).unwrap();
+            *slot.borrow_mut() = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        let view = mounted.borrow().clone().unwrap();
+        let draw = |context: &mut VisualTestContext| {
+            context.run_until_parked();
+            context.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        draw(&mut context);
+        context.update(|window, _| {
+            let scale = window.scale_factor();
+            let quads = window.painted_quads();
+            for (top, height, color) in [
+                (40., 24., None),
+                (80., 24., Some(smelt_ui::ui_theme::soft())),
+                (120., 24., Some(smelt_ui::ui_theme::ink())),
+                (160., 24., Some(smelt_ui::ui_theme::soft())),
+            ] {
+                let matching = quads.iter().filter(|quad| {
+                    (quad.bounds.origin.x.0 - 30. * scale).abs() < 1.
+                        && (quad.bounds.origin.y.0 - top * scale).abs() < 1.
+                        && (quad.bounds.size.width.0 - 180. * scale).abs() < 1.
+                        && (quad.bounds.size.height.0 - height * scale).abs() < 1.
+                });
+                if let Some(color) = color {
+                    let background: gpui::Background = gpui::rgb(color).into();
+                    assert!(
+                        matching
+                            .into_iter()
+                            .any(|quad| quad.background == background),
+                        "top={top}, quads={quads:?}"
+                    );
+                } else {
+                    assert!(
+                        !matching.into_iter().any(|quad| quad
+                            .background
+                            .as_solid()
+                            .is_some_and(|color| color.a > 0.)),
+                        "top={top}, quads={quads:?}"
+                    );
+                }
+            }
+        });
+        context.simulate_click(point(px(40.), px(132.)), Modifiers::default());
+        draw(&mut context);
+        let tree = context.update(|_, cx| view.read(cx).snapshot().unwrap().debug_tree());
+        assert!(
+            tree.contains("hits: 0") && tree.contains("smelt badge"),
+            "{tree}"
+        );
+        for method in [
+            "quiet",
+            "secondary",
+            "primary",
+            "danger",
+            "small",
+            "loading",
+        ] {
+            assert!(tree.contains(&format!(":{method}(registered)")), "{tree}");
+        }
+        context.simulate_click(point(px(40.), px(214.)), Modifiers::default());
+        draw(&mut context);
+        context.simulate_click(point(px(40.), px(132.)), Modifiers::default());
+        draw(&mut context);
+        let tree = context.update(|_, cx| view.read(cx).snapshot().unwrap().debug_tree());
+        assert!(tree.contains("hits: 1"), "{tree}");
+        cx.update(super::shutdown);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[gpui::test]
     fn theme_files_are_registered_reloaded_and_removed(cx: &mut gpui::TestAppContext) {
         let dir =
             std::env::temp_dir().join(format!("smelt-plugin-themes-{}", uuid::Uuid::new_v4()));
@@ -646,13 +763,16 @@ mod tests {
         )
         .unwrap();
         let path = dir.join("themes/colors.json");
-        std::fs::write(&path, r##"{"name":"Sample","themes":[{"name":"Sample Dark","mode":"dark","colors":{"background":"#123456"}}]}"##).unwrap();
+        std::fs::write(&path, r##"{"version":1,"name":"Sample","themes":[{"name":"Sample Dark","mode":"dark","colors":{"bg_base":"#123456","text_base":"#fafafa"}}]}"##).unwrap();
         let found = super::Found {
             root: dir.clone(),
             manifest: PluginManifest::read(&dir).unwrap(),
             source: super::PluginSource::User,
         };
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            smelt_ui::init(cx);
+        });
         cx.update(|cx| {
             assert!(
                 super::register_theme_contributions(std::slice::from_ref(&found), cx).is_empty()
@@ -660,7 +780,7 @@ mod tests {
             assert!(smelt_ui::theme_catalog::contains("Sample Dark", cx));
             std::fs::write(
                 &path,
-                r#"{"name":"Sample","themes":[{"name":"Sample Light","mode":"light"}]}"#,
+                r##"{"version":1,"name":"Sample","themes":[{"name":"Sample Light","mode":"light","colors":{"bg_base":"#ffffff","text_base":"#1a1a1a"}}]}"##,
             )
             .unwrap();
             assert!(

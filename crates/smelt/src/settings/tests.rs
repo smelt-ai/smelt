@@ -5,17 +5,10 @@ mod appearance_tests {
     use super::{Appearance, ThemeMode};
 
     #[test]
-    fn appearance_deserialization_defaults() {
-        // 旧版本 appearance.json 没有 ui_font_px / ui_font_family 字段时回退默认
-        let json = r#"{"bg_color":1710886,"opacity":0.95,"blur":true,"font_px":13}"#;
-        let ap: Appearance = serde_json::from_str(json).unwrap();
+    fn empty_ui_font_family_means_the_bundled_inter() {
+        let ap = Appearance::default();
         assert_eq!(ap.ui_font_px, super::DEFAULT_UI_FONT_PX);
-        assert_eq!(ap.ui_font_family, "");
-        assert_eq!(ap.font_px, 13);
-        assert_eq!(
-            super::resolved_ui_font_family(&ap).as_ref(),
-            ".SystemUIFont"
-        );
+        assert_eq!(super::resolved_ui_font_family(&ap).as_ref(), "Inter");
     }
 
     /// 外观存进客户端库再读回来，枚举字段按名字往返不丢。
@@ -62,7 +55,10 @@ mod appearance_tests {
     fn requested_appearance_reports_unknown_theme(cx: &mut gpui::TestAppContext) {
         let dir = std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
         let store = smelt_client_store::ClientStore::open(dir.join("client.sqlite3")).unwrap();
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            smelt_ui::init(cx);
+        });
         cx.update(|cx| {
             cx.set_global(Appearance::default());
             let result = super::apply_requested_appearance_on(
@@ -85,7 +81,10 @@ mod appearance_tests {
         let dir =
             std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
         let store = smelt_client_store::ClientStore::open(dir.join("client.sqlite3")).unwrap();
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            smelt_ui::init(cx);
+        });
         cx.update(|cx| {
             cx.set_global(Appearance {
                 layout_id: Some("trader/two-columns".to_string()),
@@ -119,7 +118,10 @@ mod appearance_tests {
         let connection = rusqlite::Connection::open(store.path()).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_appearance BEFORE INSERT ON appearance BEGIN SELECT RAISE(FAIL, 'save blocked'); END;").unwrap();
         drop(connection);
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            smelt_ui::init(cx);
+        });
         cx.update(|cx| {
             cx.set_global(Appearance::default());
             let original = cx.global::<Appearance>().ui_font_family.clone();
@@ -136,139 +138,6 @@ mod appearance_tests {
         });
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-}
-
-#[cfg(test)]
-mod pairing_qr_tests {
-    use super::qr_png_for_url;
-
-    #[test]
-    fn pairing_uri_renders_to_a_qr() {
-        // endpoint id 有 64 个十六进制字符，钉住「配对串确实能编成二维码」：
-        // 超长内容会让 QrCode::new 失败。
-        let uri = smelt_pairing::pairing_uri(
-            &"a".repeat(64),
-            "ABCD-EFGH",
-            Some("https://relay.example.test"),
-        );
-        let png = qr_png_for_url(&uri).expect("配对串必须能生成二维码");
-        assert!(!png.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod antigravity_terminal_tests {
-    use super::{LaunchConfig, LaunchEntry, default_launch_entries, remove_launch_entry_at};
-
-    #[test]
-    fn default_terminal_entries_include_registered_full_permission_launches() {
-        let entries = default_launch_entries();
-        let antigravity = entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("antigravity"))
-            .expect("出厂快捷项应包含 Antigravity");
-        assert_eq!(antigravity.label, "Antigravity");
-        assert_eq!(antigravity.command, "agy --dangerously-skip-permissions");
-        let grok = entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("grok"))
-            .expect("出厂快捷项应包含 Grok");
-        assert_eq!(grok.command, "grok --always-approve");
-        let cursor = entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("cursor"))
-            .expect("出厂快捷项应包含 Cursor Agent");
-        assert_eq!(cursor.label, "Cursor Agent");
-        assert_eq!(cursor.command, "cursor-agent --force");
-        let opencode = entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("opencode"))
-            .expect("出厂快捷项应包含 OpenCode");
-        assert_eq!(opencode.label, "OpenCode");
-        assert_eq!(opencode.command, "opencode --auto");
-        let kiro = entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("kiro"))
-            .expect("出厂快捷项应包含 Kiro");
-        assert_eq!(kiro.label, "Kiro");
-        assert_eq!(kiro.command, "kiro-cli chat --v3 --trust-all-tools");
-        let pi = entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("pi"))
-            .expect("出厂快捷项应包含 Pi");
-        assert_eq!(pi.label, "Pi");
-        assert_eq!(pi.command, "pi --approve");
-        let crush = entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("crush"))
-            .expect("出厂快捷项应包含 Crush");
-        assert_eq!(crush.label, "Crush");
-        assert_eq!(crush.command, "crush --yolo");
-    }
-
-    #[test]
-    fn builtin_launch_entries_are_fixed_but_custom_entries_can_be_removed() {
-        let mut config = LaunchConfig::default();
-        let builtin_count = config.entries.len();
-        config.entries.push(LaunchEntry {
-            label: "My command".into(),
-            // 即使命令与内置项相同，provider=None 也明确表示这是用户自定义项。
-            command: "claude --dangerously-skip-permissions".into(),
-            provider: None,
-        });
-
-        assert!(!remove_launch_entry_at(&mut config, 0));
-        assert_eq!(config.entries.len(), builtin_count + 1);
-        assert!(remove_launch_entry_at(&mut config, builtin_count));
-        assert_eq!(config.entries.len(), builtin_count);
-    }
-}
-
-/// 下发给移动端的配色快照必须跟 PC 实际渲染色同源——这里锁住两件事：
-/// 快照读的就是当前主题色（切浅色能跟着变），以及
-/// `smelt-core` 侧那份「守护读不到快照文件时」的默认值没跟深色主题漂移。
-#[cfg(test)]
-mod terminal_theme_tests {
-    use super::current_terminal_theme;
-    use smelt_model::terminal_theme::TerminalThemeSnapshot;
-    // 过渡：会话插件搬走后改为经宿主的视图实例机制和 smelt.terminal 命令使用
-    use smelt_terminal::terminal;
-
-    /// 深浅色模式是进程级全局态，这两个用例并行跑会互相踩，在这把锁上排队。
-    fn lock_theme_globals() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    #[test]
-    fn dark_snapshot_matches_core_fallback() {
-        let _guard = lock_theme_globals();
-        terminal::set_dark_mode(true);
-        crate::ui_theme::set_light(false);
-        assert_eq!(
-            current_terminal_theme(),
-            TerminalThemeSnapshot::default(),
-            "smelt-core 的默认快照要跟 PC 深色主题实际色值一致：守护先于 GUI 起来时用的就是它"
-        );
-    }
-
-    #[test]
-    fn snapshot_follows_theme_mode() {
-        let _guard = lock_theme_globals();
-        terminal::set_dark_mode(false);
-        crate::ui_theme::set_light(true);
-        let light = current_terminal_theme();
-        assert!(!light.dark);
-        assert_eq!(light.background, crate::ui_theme::bg());
-        assert_ne!(
-            light.palette,
-            TerminalThemeSnapshot::default().palette,
-            "浅色主题要发浅色板，不能原样发深色板"
-        );
-
-        terminal::set_dark_mode(true);
-        crate::ui_theme::set_light(false);
     }
 }
 

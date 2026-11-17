@@ -1,6 +1,6 @@
 //! Git 面板的纯逻辑与 Git 命令回归测试。
 
-// 不用 `use super::*;`：父模块顶部有 gpui/gpui_component 的 glob 导入，带进测试
+// 不用 `use super::*;`：父模块顶部有 gpui 的 glob 导入，带进测试
 // 模块会让 trait 解析图爆炸，`cargo test` 编译期能把 rustc 撑崩。只导入真正
 // 用到的名字。
 use super::RepoSet;

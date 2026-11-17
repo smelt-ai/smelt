@@ -12,9 +12,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::*;
-use gpui_base::{ResizablePanelGroup, ResizeHandleRenderer, ResizeHandleState};
-use gpui_component::{StyledExt as _, VirtualListScrollHandle};
-use gpui_component::resizable::ResizableState;
+use gpui_base::{StyledExt as _, VirtualListScrollHandle};
+use smelt_plugin_api::ui::resizable::ResizableState;
 use smelt_plugin_api::{
     self as api, CommandSpec, Handled, Host, HostEvent, PluginView, RuntimeKey, ViewHandle,
     ViewSpec,
@@ -43,7 +42,7 @@ pub fn register(cx: &mut App) {
         vec![ViewSpec {
             name: "main".into(),
             title: "变更".into(),
-            icon: gpui_kit_assets::IconName::GitBranch.path(),
+            icon: smelt_plugin_api::ui::IconName::GitBranch.path(),
             draws_top_bar: false,
             instances: false,
             settings: None,
@@ -190,7 +189,7 @@ pub(crate) fn reveal_in_finder(path: &str) {
 }
 
 /// 居中的空状态 / 加载中。
-pub(crate) fn placeholder_view(text: &str, muted: Hsla) -> Div {
+pub(crate) fn placeholder_view(text: &str) -> Div {
     div()
         .flex_1()
         .min_w_0()
@@ -204,35 +203,9 @@ pub(crate) fn placeholder_view(text: &str, muted: Hsla) -> Div {
                 .text_sm()
                 .font_medium()
                 .text_center()
-                .text_color(muted)
+                .text_color(rgb(ui_theme::muted()))
                 .child(text.to_string()),
         )
-}
-
-/// 左右拆分（日志页的提交列表和详情），分隔条是和侧栏同一根发丝。
-///
-/// 组件库悬停时只在中间亮一小段药丸；这里整根从 `hair` 亮到 `faint`。命中和
-/// 拖拽仍由组件库负责。
-pub(crate) fn h_resizable(id: impl Into<ElementId>) -> ResizablePanelGroup {
-    gpui_base::h_resizable(id).with_handle_appearance(hairline_handle())
-}
-
-/// 拖拽一两像素后指针就离开命中带，组件库自己的 hover 会灭；颜色跟
-/// [`ResizeHandleState`] 走，按下和拖拽也保持亮着。
-fn hairline_handle() -> ResizeHandleRenderer {
-    Rc::new(|handle, _, _| {
-        let color = if handle.state() == ResizeHandleState::Idle {
-            ui_theme::hair()
-        } else {
-            rgb(ui_theme::faint())
-        };
-        let line = div().flex_none().bg(color);
-        let line = match handle.axis() {
-            Axis::Horizontal => line.w(px(1.)).h_full(),
-            Axis::Vertical => line.h(px(1.)).w_full(),
-        };
-        Some(line.into_any_element())
-    })
 }
 
 /// 改动页右边那列（改动树 + 提交框）的宽度范围。
@@ -305,10 +278,10 @@ pub(crate) struct GitPanel {
     diff_gen: u64,
     git_log: log::GitLogState,
     git_log_resize: Entity<ResizableState>,
-    diff_comment_input: Option<Entity<gpui_component::input::TextareaState>>,
+    diff_comment_input: Option<Entity<smelt_plugin_api::ui::field::TextareaState>>,
     diff_body: Option<Entity<GitDiffBody>>,
     /// 每个仓库一个提交框：提交信息属于仓库。
-    commit_msg_inputs: HashMap<ProjectRef, Entity<gpui_component::input::TextareaState>>,
+    commit_msg_inputs: HashMap<ProjectRef, Entity<smelt_plugin_api::ui::field::TextareaState>>,
     commit_errors: HashMap<ProjectRef, String>,
     git_list_scroll: VirtualListScrollHandle,
     /// 改动页右边那列的宽度，和拖它的分隔条时按下的位置。
@@ -518,19 +491,17 @@ impl GitPanel {
     }
 
     /// 把一次刷新排到这一轮之后。同一轮里多次调用合并成一次；刷新要窗口（建输入框），
-    /// 在主窗口里跑。
+    /// 在视图自己所在的窗口里跑。
     pub(crate) fn schedule_visible_refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_scheduled {
             return;
         }
-        let Some(window) = self.host.main_window(cx) else {
-            return;
-        };
         self.refresh_scheduled = true;
         let view = cx.weak_entity();
+        let entity_id = cx.entity_id();
         cx.defer(move |cx| {
             let refreshed = cx
-                .update_window(window, |_, window, cx| {
+                .with_window(entity_id, |window, cx| {
                     view.update(cx, |this, cx| this.refresh(window, cx)).is_ok()
                 })
                 .unwrap_or(false);
@@ -730,9 +701,6 @@ impl Render for GitPanel {
             .child(self.git_narrow_panel(window, cx))
     }
 }
-
-#[cfg(test)]
-mod split_tests;
 
 #[cfg(test)]
 mod autofetch_tests {

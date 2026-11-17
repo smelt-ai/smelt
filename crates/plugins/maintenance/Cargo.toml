@@ -1,9 +1,11 @@
 # 内置插件「维护」：这台电脑上的杂务。启动时删 `~/.smelt` 下旧版本留下的废弃文件；macOS 上
-# 管终端里的 `smelt` 命令（设置「系统 → 命令行」）。不经运行时；只依赖插件接口和 gpui 组件库。
+# 管终端里的 `smelt` 命令（设置「系统 → 命令行」）。不经运行时；只依赖插件接口。
 [package]
 name = "smelt-maintenance"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
@@ -11,8 +13,3 @@ workspace = true
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
-
-# 设置页只有 macOS 有。
-[target.'cfg(target_os = "macos")'.dependencies]
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
-gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }

@@ -6,12 +6,10 @@
 
 use crate::{control, flag_value, id_arg, respond, usage};
 use smelt_model::control_api::{
-    WorkspaceConversationArchive, WorkspaceConversationDelete, WorkspaceConversationPin,
-    WorkspaceDirectoryGet,
+    WorkspaceConversationArchive, WorkspaceConversationDelete, WorkspaceDirectoryGet,
 };
 use smelt_model::workspace_directory::{
     WorkspaceConversation, WorkspaceConversationArchiveParams, WorkspaceConversationIdParams,
-    WorkspaceConversationPinParams,
 };
 use smelt_runtime_client::protocol::control::EmptyParams;
 
@@ -31,14 +29,14 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 Err(message) => usage(&message),
             }
         }
-        Some(verb @ ("archive" | "unarchive" | "pin" | "unpin" | "delete")) => {
+        Some(verb @ ("archive" | "unarchive" | "delete")) => {
             let Some(id) = id_arg(rest) else {
                 return usage(&format!("smelt conversation {verb} <id>"));
             };
             respond(change(verb, id))
         }
         Some(command) => usage(&format!("未知子命令: {command}")),
-        None => usage("smelt conversation list|rename|archive|unarchive|pin|unpin|delete"),
+        None => usage("smelt conversation list|rename|archive|unarchive|delete"),
     }
 }
 
@@ -115,7 +113,6 @@ fn summary(conversation: &WorkspaceConversation) -> serde_json::Value {
         "automation_id": acp.and_then(|acp| acp.automation_id.as_ref()),
         "cwd": acp.and_then(|acp| acp.cwd.as_ref()),
         "archived": conversation.archived_at.is_some(),
-        "pinned": conversation.pinned_at.is_some(),
         "last_updated_at": conversation.last_updated_at,
         "terminal": acp.is_none(),
     })
@@ -159,10 +156,6 @@ fn change(verb: &str, id: &str) -> Result<serde_json::Value, String> {
                 target_workset_id: None,
             })
         }
-        "pin" | "unpin" => control::<WorkspaceConversationPin>(WorkspaceConversationPinParams {
-            conversation_id: conversation_id.clone(),
-            pinned: verb == "pin",
-        }),
         _ => control::<WorkspaceConversationDelete>(WorkspaceConversationIdParams {
             conversation_id: conversation_id.clone(),
         }),

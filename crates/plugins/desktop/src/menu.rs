@@ -10,12 +10,22 @@ use std::collections::HashMap;
 
 use api::client::DEFAULT_REQUEST_TIMEOUT;
 use api::client::protocol::control::{EmptyParams, SystemDescribe};
-use api::contracts::sessions::{MACHINE_MENU, MachineMenuContext};
 use api::{ContextMenuAction, ContextMenuItem, HostEvent, RuntimeKey};
 use gpui::{App, Global, Task};
 use smelt_plugin_api as api;
 
 use crate::{ICON, OWNER, VIEW};
+
+// 约定：smelt.sessions 的 MACHINE_MENU 和它的上下文，权威定义在
+// crates/plugins/sessions/src/contract.rs。
+const MACHINE_MENU: &str = "smelt.sessions/machine";
+
+/// [`MACHINE_MENU`] 点了交给命令的上下文：右键的是哪台机器。
+#[derive(serde::Deserialize)]
+struct MachineMenuContext {
+    #[serde(with = "api::machine_json")]
+    machine: RuntimeKey,
+}
 
 /// 菜单项点了执行的命令。参数是菜单的上下文：右键的是哪台机器。
 const OPEN: api::Command<MachineMenuContext, ()> = api::Command::new("smelt.desktop/open");

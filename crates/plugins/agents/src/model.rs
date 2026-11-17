@@ -17,8 +17,7 @@ impl AgentRef {
 
     /// 它现在的定义；机器没挂、还没读到或已经删了是 `None`。
     pub(crate) fn definition(&self, cx: &App) -> Option<AgentDefinition> {
-        api::host(cx)
-            .agent_settings(&self.runtime, cx)?
+        agent_hosts::settings(&self.runtime, cx)?
             .agents
             .iter()
             .find(|agent| agent.id == self.id)
@@ -169,18 +168,16 @@ pub(crate) fn attached_agent_machines(cx: &App) -> Vec<api::Machine> {
 
 /// 其中智能体配置已经读到的。
 pub(crate) fn agent_machines(cx: &App) -> Vec<RuntimeKey> {
-    let host = api::host(cx);
     attached_agent_machines(cx)
         .into_iter()
         .map(|machine| machine.key)
-        .filter(|key| host.agent_settings(key, cx).is_some())
+        .filter(|key| agent_hosts::settings(key, cx).is_some())
         .collect()
 }
 
 /// 那台机器上的智能体定义；配置还没读到是空的。
 pub(crate) fn agents_on(runtime: &RuntimeKey, cx: &App) -> Vec<AgentDefinition> {
-    api::host(cx)
-        .agent_settings(runtime, cx)
+    agent_hosts::settings(runtime, cx)
         .map(|config| config.agents.clone())
         .unwrap_or_default()
 }
@@ -243,8 +240,7 @@ pub(crate) fn plan_new_conversation(draft: Option<&AgentRef>, cx: &App) -> NewCo
     let mut ready = Vec::new();
     let mut stale_defaults = Vec::new();
     for key in agent_machines(cx) {
-        let host = api::host(cx);
-        let Some(config) = host.agent_settings(&key, cx) else {
+        let Some(config) = agent_hosts::settings(&key, cx) else {
             continue;
         };
         let draft_id = draft
@@ -290,8 +286,7 @@ pub(crate) fn plan_new_conversation(draft: Option<&AgentRef>, cx: &App) -> NewCo
 
 /// 它是不是侧栏「新对话」记着的默认。
 pub(crate) fn is_default_conversation_agent(agent: &AgentRef, cx: &App) -> bool {
-    api::host(cx)
-        .agent_settings(&agent.runtime, cx)
+    agent_hosts::settings(&agent.runtime, cx)
         .and_then(|config| config.default_conversation_agent.as_deref())
         == Some(agent.id.as_str())
 }
@@ -301,7 +296,7 @@ pub(crate) fn set_default_conversation_agent(agent: &AgentRef, cx: &mut App) {
     for key in agent_machines(cx) {
         let target = (key == agent.runtime).then(|| agent.id.clone());
         report_edit(
-            api::edit_agent_settings(&key, move |c| c.default_conversation_agent = target, cx),
+            agent_hosts::edit(&key, move |c| c.default_conversation_agent = target, cx),
             cx,
         );
     }
@@ -309,7 +304,7 @@ pub(crate) fn set_default_conversation_agent(agent: &AgentRef, cx: &mut App) {
 
 pub(crate) fn clear_default_conversation_agent(runtime: &RuntimeKey, cx: &mut App) {
     report_edit(
-        api::edit_agent_settings(runtime, |c| c.default_conversation_agent = None, cx),
+        agent_hosts::edit(runtime, |c| c.default_conversation_agent = None, cx),
         cx,
     );
 }

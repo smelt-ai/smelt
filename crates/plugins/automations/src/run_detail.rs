@@ -682,6 +682,7 @@ pub(crate) fn transcript_step(
     entity: &Entity<AutomationsPage>,
     body: Option<impl FnOnce() -> AnyElement>,
 ) -> AnyElement {
+    let icon: Icon = icon.into();
     let expandable = body.is_some();
     let expanded = expandable && detail.is_expanded(key);
     let ink = if flag == Some(StepFlag::Failed) {
@@ -700,7 +701,7 @@ pub(crate) fn transcript_step(
         .items_center()
         .gap_2()
         .rounded(ui_theme::row_radius())
-        .child(Icon::new(icon).size(px(12.)).text_color(rgb(ink)))
+        .child(icon.size(px(12.)).text_color(rgb(ink)))
         .child(
             div()
                 .flex_1()

@@ -9,7 +9,6 @@
 //! 跑在 FFI 边界上不可 unwind，panic 会直接 abort——表现为「点一下标签整个 App 闪退」，
 //! 且崩溃报告里只有 `panic_cannot_unwind`，看不到真正的 panic 消息，极难查。
 //! `cx.entity()` 本身只是拿句柄，安全；危险的是紧跟着的 `.read(cx)`。
-//! 同样的教训见 file_tree 模块里 context_menu 那段注释。
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -17,10 +16,9 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::diff::Diff;
-use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme, Sizable as _, h_flex, v_flex};
+use smelt_plugin_api::ui::Badge;
 pub(crate) use smelt_plugin_api::ui::Button;
+use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 
 use crate::log::{CommitNode, Edge, GitLogState, GraphRow, LogScope};
@@ -178,12 +176,11 @@ fn commit_row(
     root: &Rc<crate::ProjectRef>,
     fg: Hsla,
     muted: Hsla,
-    accent: Hsla,
 ) -> impl IntoElement {
     let hash = commit.hash.clone();
     let ws_click = ws.clone();
     let root_click = root.clone();
-    h_flex()
+    div().flex().items_center()
         .id((ElementId::from("log-row"), hash.clone()))
         .h(px(ROW_H))
         .w_full()
@@ -195,9 +192,8 @@ fn commit_row(
         .gap_2()
         .pr_3()
         .text_sm()
-        
-        .hover(|d| d.bg(accent))
-        .when(is_sel, |d| d.bg(accent))
+        .hover(|d| d.bg(ui_theme::row_hover()))
+        .when(is_sel, |d| d.bg(ui_theme::row_selected()))
         .on_click(move |_ev, _w, cx| {
             let (h, r) = (hash.clone(), root_click.as_ref().clone());
             ws_click.update(cx, |this, cx| this.select_commit(r, h, cx));
@@ -207,9 +203,7 @@ fn commit_row(
         // 引用标签（分支 / tag）。最多两个、每个限宽——CI 生成的
         // tag 名能长到 `3242.67318.0.f5206a4c`，不限宽会把标题挤没。
         .children(commit.refs.iter().take(2).map(|r| {
-            Tag::info()
-                .small()
-                .flex_none()
+            Badge::new()
                 .max_w(px(120.))
                 .child(div().min_w_0().overflow_hidden().child(truncated_line(r.clone())))
         }))
@@ -251,15 +245,13 @@ pub fn git_log_view(
     head_branch: Option<String>,
     cx: &mut Context<GitPanel>,
 ) -> Div {
-    let (muted, fg, accent) = {
-        let t = cx.theme();
-        (t.muted_foreground, t.foreground, t.accent)
-    };
+    let muted: Hsla = rgb(ui_theme::muted()).into();
+    let fg: Hsla = rgb(ui_theme::text()).into();
     // 只拿句柄给回调用，不 read。
     let ws = cx.entity();
 
     let Some(root) = root else {
-        return placeholder_view("当前会话没有工作目录", muted);
+        return placeholder_view("当前会话没有工作目录");
     };
 
     if state.commits.is_empty() {
@@ -268,7 +260,7 @@ pub fn git_log_view(
         } else {
             "没有提交记录"
         };
-        return placeholder_view(hint, muted);
+        return placeholder_view(hint);
     }
 
     let rows = state.graph.clone();
@@ -295,7 +287,6 @@ pub fn git_log_view(
                     &root_rows,
                     fg,
                     muted,
-                    accent,
                 )
                 .into_any_element()
             })
@@ -322,7 +313,7 @@ pub fn git_log_view(
         .flex_col()
         .child(list);
 
-    v_flex()
+    div().flex().flex_col()
         .flex_1()
         .min_h_0()
         // 根节点也得夹宽度，否则里层的 flex_1 没有可收缩的参照，一路溢出到隔壁栏。
@@ -330,7 +321,7 @@ pub fn git_log_view(
         .min_w_0()
         .child(
             // 顶部：过滤条。
-            h_flex()
+            div().flex().items_center()
                 .w_full()
                 .min_w_0()
                 .gap_2()
@@ -394,25 +385,23 @@ pub fn commit_detail_pane(
     state: &GitLogState,
     cx: &mut Context<GitPanel>,
 ) -> Div {
-    let (muted, fg) = {
-        let t = cx.theme();
-        (t.muted_foreground, t.foreground)
-    };
+    let muted: Hsla = rgb(ui_theme::muted()).into();
+    let fg: Hsla = rgb(ui_theme::text()).into();
     let Some(sel) = state.selected.as_ref() else {
-        return placeholder_view("选择要查看更改的提交", muted);
+        return placeholder_view("选择要查看更改的提交");
     };
     let Some(c) = state.commits.iter().find(|c| &c.hash == sel) else {
-        return placeholder_view("选择要查看更改的提交", muted);
+        return placeholder_view("选择要查看更改的提交");
     };
 
-    v_flex()
+    div().flex().flex_col()
         .flex_1()
         .min_h_0()
         .w_full()
         .min_w_0()
         .overflow_hidden()
         .child(
-            v_flex()
+            div().flex().flex_col()
                 .w_full()
                 .min_w_0()
                 .gap_1()
@@ -431,7 +420,7 @@ pub fn commit_detail_pane(
                         .child(truncated_line(c.subject.clone())),
                 )
                 .child(
-                    h_flex()
+                    div().flex().items_center()
                         .w_full()
                         .min_w_0()
                         .gap_2()
@@ -454,7 +443,7 @@ pub fn commit_detail_pane(
                 .w_full()
                 .min_w_0()
                 .child(if state.detail_loading {
-                    placeholder_view("正在读取这次提交的更改…", muted)
+                    placeholder_view("正在读取这次提交的更改…")
                 } else {
                     commit_diff_list(root, state, cx)
                 }),
@@ -513,12 +502,10 @@ fn commit_diff_list(
     state: &GitLogState,
     cx: &mut Context<GitPanel>,
 ) -> Div {
-    let (muted, fg, accent) = {
-        let t = cx.theme();
-        (t.muted_foreground, t.foreground, t.accent)
-    };
+    let muted: Hsla = rgb(ui_theme::muted()).into();
+    let fg: Hsla = rgb(ui_theme::text()).into();
     if state.detail_files.is_empty() {
-        return placeholder_view("这次提交没有文件更改", muted);
+        return placeholder_view("这次提交没有文件更改");
     }
     let ws = cx.entity();
     let files = state.detail_files.clone();
@@ -528,7 +515,9 @@ fn commit_diff_list(
     let detail_body = state.detail_body.clone();
     let has_diff_view = state.detail_view.is_some();
 
-    let file_list = v_flex()
+    let file_list = div()
+        .flex()
+        .flex_col()
         .flex_none()
         .max_h(px(160.))
         .p_1()
@@ -536,15 +525,17 @@ fn commit_diff_list(
             let is_sel = sel_file.as_deref() == Some(path.as_str());
             let ws_click = ws.clone();
             let (p, r) = (path.clone(), root.clone());
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .id((ElementId::from("commit-file"), path.clone()))
                 .gap_2()
                 .px_2()
                 .py(px(1.0))
                 .text_sm()
                 .rounded_sm()
-                .hover(|d| d.bg(accent))
-                .when(is_sel, |d| d.bg(accent))
+                .hover(|d| d.bg(ui_theme::row_hover()))
+                .when(is_sel, |d| d.bg(ui_theme::row_selected()))
                 .on_click(move |_ev, _w, cx| {
                     let (p, r) = (p.clone(), r.clone());
                     ws_click.update(cx, |this, cx| {
@@ -573,9 +564,9 @@ fn commit_diff_list(
 
     // 不在这里 read DiffState。提交列表和这份正文不在同一次重绘里。
     let diff = if sel_file.is_none() {
-        placeholder_view("选择一个文件查看这次提交的更改", muted).into_any_element()
+        placeholder_view("选择一个文件查看这次提交的更改").into_any_element()
     } else if !patch_ready {
-        placeholder_view("正在读取…", muted).into_any_element()
+        placeholder_view("正在读取…").into_any_element()
     } else if let Some(err) = detail_error {
         div()
             .flex_1()
@@ -588,7 +579,7 @@ fn commit_diff_list(
             .child(err)
             .into_any_element()
     } else if !has_diff_view {
-        placeholder_view("（无差异）", muted).into_any_element()
+        placeholder_view("（无差异）").into_any_element()
     } else if let Some(body) = detail_body {
         div()
             .flex_1()
@@ -597,10 +588,16 @@ fn commit_diff_list(
             .child(body.cached(StyleRefinement::default().size_full()))
             .into_any_element()
     } else {
-        placeholder_view("（无差异）", muted).into_any_element()
+        placeholder_view("（无差异）").into_any_element()
     };
 
-    v_flex().flex_1().min_h_0().child(file_list).child(diff)
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .child(file_list)
+        .child(diff)
 }
 
 /// 左侧分支树。
@@ -616,10 +613,8 @@ pub fn branch_tree(
     head_branch: Option<String>,
     cx: &mut Context<GitPanel>,
 ) -> Div {
-    let (muted, fg, accent) = {
-        let t = cx.theme();
-        (t.muted_foreground, t.foreground, t.accent)
-    };
+    let muted: Hsla = rgb(ui_theme::muted()).into();
+    let fg: Hsla = rgb(ui_theme::text()).into();
     let ws = cx.entity();
     let (local, remote) = match branches {
         Some(b) => (b.local_names().to_vec(), b.remote_names().to_vec()),
@@ -633,15 +628,17 @@ pub fn branch_tree(
                  on: bool,
                  ws: Entity<GitPanel>,
                  root: Option<crate::ProjectRef>| {
-        h_flex()
+        div()
+            .flex()
+            .items_center()
             .id(id)
             .gap_1()
             .px_2()
             .py(px(1.0))
             .text_sm()
             .rounded_sm()
-            .hover(|d| d.bg(accent))
-            .when(on, |d| d.bg(accent))
+            .hover(|d| d.bg(ui_theme::row_hover()))
+            .when(on, |d| d.bg(ui_theme::row_selected()))
             .on_click(move |_ev, _w, cx| {
                 let (r, s) = (root.clone(), target.clone());
                 ws.update(cx, |this, cx| {
@@ -660,7 +657,9 @@ pub fn branch_tree(
                  ws: Entity<GitPanel>,
                  root: Option<crate::ProjectRef>,
                  is_remote: bool| {
-        v_flex()
+        div()
+            .flex()
+            .flex_col()
             .child(
                 div()
                     .px_2()
@@ -674,13 +673,13 @@ pub fn branch_tree(
                 let is_head = head.as_deref() == Some(name.as_str());
                 let (ws2, r2, n2) = (ws.clone(), root.clone(), name.clone());
                 // 右键菜单要用的副本（上面那组会被 on_click 闭包吃掉）。
-                let (ws2b, r2b, head2) = (ws.clone(), root.clone(), head.clone());
+                let (ws3, r3) = (ws.clone(), root.clone());
                 let row_kind = if is_remote {
                     "git-branch-remote"
                 } else {
                     "git-branch-local"
                 };
-                h_flex()
+                let row = div().flex().items_center()
                     .id((ElementId::from(row_kind), name.clone()))
                     .gap_1()
                     .pl_3()
@@ -688,9 +687,8 @@ pub fn branch_tree(
                     .py(px(1.0))
                     .text_sm()
                     .rounded_sm()
-                    
-                    .hover(|d| d.bg(accent))
-                    .when(on, |d| d.bg(accent))
+                    .hover(|d| d.bg(ui_theme::row_hover()))
+                    .when(on, |d| d.bg(ui_theme::row_selected()))
                     .on_click(move |_ev, _w, cx| {
                         let (r, n) = (r2.clone(), n2.clone());
                         ws2.update(cx, |this, cx| {
@@ -720,83 +718,72 @@ pub fn branch_tree(
                             .tooltip({
                                 let n = name.clone();
                                 move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(n.clone())
+                                    smelt_plugin_api::ui::tooltip::Tooltip::new(n.clone())
                                         .build(window, cx)
                                 }
                             }),
-                    )
-                    // 右键：签出 / 合并到当前 / 删除。远端分支签出时 git 的 DWIM
-                    // 会自动建同名本地跟踪分支，所以两边用同一条命令。
-                    .context_menu({
-                        let (ws3, r3, n3, head3) =
-                            (ws2b, r2b, name, head2);
-                        move |menu, _window, _cx| {
-                            let is_head = head3.as_deref() == Some(n3.as_str());
-                            let (ws_co, r_co, n_co) = (ws3.clone(), r3.clone(), n3.clone());
-                            let (ws_mg, r_mg, n_mg) = (ws3.clone(), r3.clone(), n3.clone());
-                            let (ws_del, r_del, n_del) = (ws3.clone(), r3.clone(), n3.clone());
-                            let remote = is_remote;
-                            let mut menu = menu;
-                            if is_head {
-                                // 当前分支不能签出到自己、也不能合并/删除自己。
-                                menu = menu.item(PopupMenuItem::new("（当前分支）"));
-                                return menu;
-                            }
-                            menu = menu
-                                .item(PopupMenuItem::new("签出").on_click(
-                                    move |_ev, _window, cx| {
-                                        let r = r_co.clone();
-                                        // 远程分支要用短名（去掉 `<remote>/` 前缀）走 git
-                                        // 内建 DWIM 自动建跟踪分支；直接传 `origin/xxx`
-                                        // 全名会变成 detached HEAD。Git 页的分支下拉早
-                                        // 就这么处理了，这里别再踩一遍。
-                                        let n = if remote {
-                                            n_co.split_once('/')
-                                                .map(|(_, b)| b.to_string())
-                                                .unwrap_or_else(|| n_co.clone())
-                                        } else {
-                                            n_co.clone()
-                                        };
-                                        ws_co.update(cx, |this, cx| {
-                                            if let Some(r) = r {
-                                                this.checkout_branch(r, n, cx);
-                                            }
-                                        });
-                                    },
-                                ))
-                                .item(PopupMenuItem::new("合并到当前分支").on_click(
-                                    move |_ev, _window, cx| {
-                                        let (r, n) = (r_mg.clone(), n_mg.clone());
-                                        ws_mg.update(cx, |this, cx| {
-                                            if let Some(r) = r {
-                                                this.merge_branch(r, n, cx);
-                                            }
-                                        });
-                                    },
-                                ))
-                                .separator()
-                                .item(
-                                    PopupMenuItem::new(if remote {
-                                        "删除远端分支…"
-                                    } else {
-                                        "删除分支…"
-                                    })
-                                    .on_click(
-                                        move |_ev, window, cx| {
-                                            let (r, n) = (r_del.clone(), n_del.clone());
-                                            ws_del.update(cx, |this, cx| {
-                                                if let Some(r) = r {
-                                                    this.start_delete_branch(
-                                                        r, n, remote, window, cx,
-                                                    );
-                                                }
-                                            });
-                                        },
-                                    ),
-                                );
-                            menu
-                        }
-                    })
+                    );
+                // 当前分支签出、合并、删除都不适用，不给菜单。
+                if is_head {
+                    return row.into_any_element();
+                }
+                // 右键：签出 / 合并到当前 / 删除。远端分支签出时 git 的 DWIM
+                // 会自动建同名本地跟踪分支，所以两边用同一条命令。
+                let menu_id = (ElementId::from(row_kind), format!("{name}-menu"));
+                let remote = is_remote;
+                MenuTrigger::context(menu_id, row, move |_, _| {
+                    let (ws_co, r_co, n_co) = (ws3.clone(), r3.clone(), name.clone());
+                    let (ws_mg, r_mg, n_mg) = (ws3.clone(), r3.clone(), name.clone());
+                    let (ws_del, r_del, n_del) = (ws3.clone(), r3.clone(), name.clone());
+                    Menu::new()
+                        .item(MenuItem::new("签出").on_click(move |_ev, _window, cx| {
+                            let r = r_co.clone();
+                            // 远程分支要用短名（去掉 `<remote>/` 前缀）走 git 内建 DWIM
+                            // 自动建跟踪分支；直接传 `origin/xxx` 全名会变成 detached
+                            // HEAD。Git 页的分支下拉早就这么处理了，这里别再踩一遍。
+                            let n = if remote {
+                                n_co.split_once('/')
+                                    .map(|(_, b)| b.to_string())
+                                    .unwrap_or_else(|| n_co.clone())
+                            } else {
+                                n_co.clone()
+                            };
+                            ws_co.update(cx, |this, cx| {
+                                if let Some(r) = r {
+                                    this.checkout_branch(r, n, cx);
+                                }
+                            });
+                        }))
+                        .item(
+                            MenuItem::new("合并到当前分支").on_click(move |_ev, _window, cx| {
+                                let (r, n) = (r_mg.clone(), n_mg.clone());
+                                ws_mg.update(cx, |this, cx| {
+                                    if let Some(r) = r {
+                                        this.merge_branch(r, n, cx);
+                                    }
+                                });
+                            }),
+                        )
+                        .separator()
+                        .item(
+                            MenuItem::new(if remote {
+                                "删除远端分支…"
+                            } else {
+                                "删除分支…"
+                            })
+                            .icon(smelt_plugin_api::ui::trash_icon())
+                            .danger()
+                            .on_click(move |_ev, window, cx| {
+                                let (r, n) = (r_del.clone(), n_del.clone());
+                                ws_del.update(cx, |this, cx| {
+                                    if let Some(r) = r {
+                                        this.start_delete_branch(r, n, remote, window, cx);
+                                    }
+                                });
+                            }),
+                        )
+                })
+                .into_any_element()
             }))
     };
 
@@ -804,7 +791,9 @@ pub fn branch_tree(
         Some(b) => format!("当前分支（{b}）"),
         None => "当前分支".to_string(),
     };
-    v_flex()
+    div()
+        .flex()
+        .flex_col()
         .size_full()
         .min_h_0()
         .min_w_0()

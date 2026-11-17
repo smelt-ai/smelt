@@ -8,7 +8,6 @@
 use std::sync::{Mutex, MutexGuard};
 
 use smelt_model::agent_kind::ConversationLaunchSpec;
-use smelt_model::conversation::ConversationBinding;
 use smelt_model::workspace_directory::{
     WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceProjectRepository,
     WorkspaceTerminal, WorkspaceWorkset, WorkspaceWorksetRepository,
@@ -139,22 +138,6 @@ pub fn archive_conversation_on(
         Ok((
             store
                 .set_workspace_conversation_archived(id, timestamp)?
-                .changed,
-            None,
-        ))
-    })
-}
-
-pub fn pin_conversation_on(
-    store: &smelt_store::Store,
-    id: &str,
-    pinned: bool,
-) -> Result<DirectoryChange, DirectoryError> {
-    change_on(store, |store| {
-        let timestamp = pinned.then(|| chrono::Utc::now().timestamp());
-        Ok((
-            store
-                .set_workspace_conversation_pinned(id, timestamp)?
                 .changed,
             None,
         ))
@@ -496,7 +479,6 @@ fn conversation_record(
         custom_title: conversation.custom_title.clone(),
         last_updated_at: conversation.last_updated_at,
         archived_at: conversation.archived_at,
-        pinned_at: conversation.pinned_at,
         workset_id: conversation.workset_id.clone(),
         closed_workset_root: conversation.closed_workset_root.clone(),
         terminals: conversation
@@ -553,16 +535,10 @@ fn acp_record(acp: &WorkspaceAcp) -> smelt_store::WorkspaceAcpRecord {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect(),
-        refresh_launch_from_settings: acp.refresh_launch_from_settings,
         pending_prompt: acp.pending_prompt.clone(),
-        pending_delivery_id: acp.pending_delivery_id.clone(),
         agent_definition_id: acp.agent_definition_id.clone(),
         automation_id: acp.automation_id.clone(),
         config_values: acp.config_values.clone(),
-        binding_automation_run_id: match &acp.conversation_binding {
-            ConversationBinding::Automation { run_id } => Some(run_id.clone()),
-            ConversationBinding::Direct => None,
-        },
         pending_agent_preset: acp.pending_agent_preset.clone(),
         session_title: acp.session_title.clone(),
     }
@@ -574,7 +550,6 @@ fn conversation_from_record(record: smelt_store::WorkspaceSessionRecord) -> Work
         custom_title: record.custom_title,
         last_updated_at: record.last_updated_at,
         archived_at: record.archived_at,
-        pinned_at: record.pinned_at,
         workset_id: record.workset_id,
         closed_workset_root: record.closed_workset_root,
         terminals: record
@@ -603,14 +578,8 @@ fn acp_from_record(acp: smelt_store::WorkspaceAcpRecord) -> WorkspaceAcp {
             command: acp.launch_command,
             env: acp.launch_env.into_iter().collect(),
         },
-        refresh_launch_from_settings: acp.refresh_launch_from_settings,
-        conversation_binding: match acp.binding_automation_run_id {
-            Some(run_id) => ConversationBinding::Automation { run_id },
-            None => ConversationBinding::Direct,
-        },
         config_values: acp.config_values,
         pending_prompt: acp.pending_prompt,
-        pending_delivery_id: acp.pending_delivery_id,
         pending_agent_preset: acp.pending_agent_preset,
         session_title: acp.session_title,
         agent_definition_id: acp.agent_definition_id,
@@ -639,7 +608,6 @@ mod tests {
             custom_title: Some("标题".to_string()),
             last_updated_at: 7,
             archived_at: None,
-            pinned_at: None,
             workset_id: None,
             closed_workset_root: None,
             terminals: Vec::new(),
@@ -650,13 +618,8 @@ mod tests {
                 profile_id: Some("work".to_string()),
                 history_session_id: Some("history-1".to_string()),
                 launch: ConversationLaunchSpec::from_command("claude").with_env("A", "1"),
-                refresh_launch_from_settings: true,
-                conversation_binding: ConversationBinding::Automation {
-                    run_id: "run-1".to_string(),
-                },
                 config_values: vec![("model".to_string(), "opus".to_string())],
                 pending_prompt: Some("hi".to_string()),
-                pending_delivery_id: Some("delivery".to_string()),
                 pending_agent_preset: Some("preset".to_string()),
                 session_title: Some("会话".to_string()),
                 agent_definition_id: Some("agent-1".to_string()),

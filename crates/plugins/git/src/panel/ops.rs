@@ -5,6 +5,17 @@
 
 use super::*;
 
+// 约定：smelt.sessions 的 SEND_TEXT，权威定义在 crates/plugins/sessions/src/contract.rs。
+/// 把文字交给当前会话（终端打进输入、对话填进输入框），不替用户发出。
+const SEND_TEXT: smelt_plugin_api::Command<SendText, ()> =
+    smelt_plugin_api::Command::new("smelt.sessions/send-text");
+
+/// [`SEND_TEXT`] 的参数。
+#[derive(serde::Serialize)]
+struct SendText {
+    text: String,
+}
+
 /// 「全部更改」默认展开，只收起用户收起过的文件；单文件 diff 总是展开。
 pub(super) fn apply_collapsed_files(
     state: &mut gpui_component::diff::DiffState,
@@ -673,7 +684,7 @@ impl GitPanel {
             if self.commit_msg_inputs.contains_key(&repo_root) {
                 continue;
             }
-            use gpui_component::input::TextareaState;
+            use smelt_plugin_api::ui::field::TextareaState;
             let branch = self
                 .git_status
                 .get(&repo_root)
@@ -703,7 +714,7 @@ impl GitPanel {
                 self.open_all_diffs(root.clone(), cx);
             }
             if self.git_diff.is_some() && self.diff_comment_input.is_none() {
-                use gpui_component::input::TextareaState;
+                use smelt_plugin_api::ui::field::TextareaState;
                 let state = cx.new(|cx| {
                     TextareaState::new(window, cx)
                         .auto_grow(2, 6)
@@ -1515,10 +1526,7 @@ impl GitPanel {
         // 选区带的是文件路径。聚合 diff 的 `git_diff.path` 是「全部更改」。
         let path = range.path().to_string();
         let msg = diff_feedback_text(&path, range.start(), range.end(), &selected, &comment);
-        let sent = smelt_plugin_api::contracts::sessions::SEND_TEXT.run(
-            &smelt_plugin_api::contracts::sessions::SendText { text: msg },
-            cx,
-        );
+        let sent = SEND_TEXT.run(&SendText { text: msg }, cx);
         cx.spawn_in(window, async move |this, cx| {
             let sent = sent.await;
             let _ = this.update_in(cx, |this, window, cx| match sent {

@@ -1,0 +1,27 @@
+# 内置插件「对话」（来源 id `smelt.conversation`）：一段智能体对话的视图，按实例建，每段
+# 对话一份。是个薄客户端——agent 子进程由 smeltd 托管（连接层和归约都在守护里），这里只
+# 消费推来的快照并渲染、把用户操作打包发回去，见 view.rs 文件头注释。只依赖插件接口和
+# 第三方库。
+[package]
+name = "smelt-conversation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+smol = "2"
+uuid = { version = "1", features = ["v4"] }
+# ACP 对话粘贴图片：协议要 base64 后的字节（见 PromptImage）。
+base64 = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }

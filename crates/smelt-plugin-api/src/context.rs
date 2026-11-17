@@ -1,4 +1,4 @@
-//! 活动上下文：用户眼下在看什么。显示会话的舞台发布（眼下是宿主的工作台），别的插件读：
+//! 活动上下文：用户眼下在看什么。显示会话的插件发布，别的插件读：
 //! 文件、Git 这类按它决定看哪个项目，通知按它判断哪段会话已经看过。存在这里的只是最后
 //! 发布的那一份，宿主不解读。
 
@@ -9,13 +9,13 @@ use crate::{HostEvent, Project, RuntimeKey};
 /// 用户眼下在看的东西。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ActiveContext {
-    /// 当前项目，可能在远程机器上；没有项目是 `None`。舞台换成别的页时还是原来那个。
+    /// 当前项目，可能在远程机器上；没有项目是 `None`。会话视图换成别的页时还是原来那个。
     pub project: Option<Project>,
-    /// 舞台上露着的会话。舞台被挡住、收起，换成别的页，或者没有会话时是 `None`。
+    /// 露着的会话。会话视图被挡住、收起，换成别的页，或者没有会话时是 `None`。
     pub session: Option<ViewedSession>,
 }
 
-/// 舞台上露着的一段会话。
+/// 露着的一段会话。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewedSession {
     pub machine: RuntimeKey,

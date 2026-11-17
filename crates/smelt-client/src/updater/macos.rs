@@ -1022,13 +1022,20 @@ fn swap_local_app(target: &Path, swap: &Path) -> anyhow::Result<()> {
 }
 
 /// 交换 App 前的最后一步，在线更新和 `make install` 共用：调用方持有独占的 runtime
-/// lease，懂锁的 GUI 都已退出、新的起不来；lsof 再兜住不懂锁的旧版 GUI。之后停本机守护。
+/// lease，懂锁的 GUI 都已退出、新的起不来。先停守护及其会话，再用 lsof 检查剩余占用。
 fn quiesce_app_target(app_bundle: &Path) -> anyhow::Result<()> {
-    if bundle_use_state(app_bundle)? != BundleUseState::Unused {
-        anyhow::bail!("目标 App 又被进程使用，拒绝替换");
-    }
-    if !shutdown_local_daemon() {
+    quiesce_app_target_with(shutdown_local_daemon, || bundle_use_state(app_bundle))
+}
+
+fn quiesce_app_target_with(
+    shutdown: impl FnOnce() -> bool,
+    probe: impl FnOnce() -> anyhow::Result<BundleUseState>,
+) -> anyhow::Result<()> {
+    if !shutdown() {
         anyhow::bail!("旧守护进程没有退出，已停止替换 App");
+    }
+    if probe()? != BundleUseState::Unused {
+        anyhow::bail!("目标 App 又被进程使用，拒绝替换");
     }
     Ok(())
 }
@@ -1939,11 +1946,59 @@ mod tests {
         classify_applying_recovery, classify_bundle_use_output, clear_installer_attempt_in_state,
         clear_preparing_update_in_state, decide_staged_update_check, discard_staged_update_locked,
         installer_attempt_from_state, is_valid_update_id, load_update_state_locked,
-        promote_staged_update_in_state, reconcile_update_state_locked,
+        promote_staged_update_in_state, quiesce_app_target_with, reconcile_update_state_locked,
         record_installer_failure_in_state, resolve_installed_release, safe_component, same_update,
         save_update_state_locked, staged_update_to_replace, update_asset,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn quiesce_stops_daemon_before_probing_its_app_holder() {
+        use std::cell::Cell;
+
+        let managed_holder_alive = Cell::new(true);
+        let result = quiesce_app_target_with(
+            || {
+                managed_holder_alive.set(false);
+                true
+            },
+            || {
+                Ok(if managed_holder_alive.get() {
+                    BundleUseState::InUse
+                } else {
+                    BundleUseState::Unused
+                })
+            },
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn quiesce_refuses_unknown_holders_or_failed_daemon_shutdown() {
+        use std::cell::Cell;
+
+        let stopped = Cell::new(false);
+        let occupied = quiesce_app_target_with(
+            || {
+                stopped.set(true);
+                true
+            },
+            || Ok(BundleUseState::InUse),
+        );
+        assert!(stopped.get());
+        assert!(occupied.is_err());
+
+        let probed = Cell::new(false);
+        let failed = quiesce_app_target_with(
+            || false,
+            || {
+                probed.set(true);
+                Ok(BundleUseState::Unused)
+            },
+        );
+        assert!(failed.is_err());
+        assert!(!probed.get());
+    }
 
     /// 自更新记下 1031 之后手动装了 1102：认包里的地址，不认状态里的旧地址。
     #[test]

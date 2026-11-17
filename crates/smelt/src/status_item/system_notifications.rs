@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn plugin_notifications_replace_by_id_and_withdraw() {
         let mut queue = NotificationQueue::default();
-        let click = Some(r#"{"command":"smelt.sessions/activate","args":{}}"#.to_string());
+        let click = Some(r#"{"command":"example/open","args":{}}"#.to_string());
         queue.enqueue_plugin("smelt-notifications/s1", "完成", "第一条", None);
         queue.enqueue_plugin("smelt-notifications/s1", "完成", "第二条", click.clone());
         let ready = queue.take_ready();

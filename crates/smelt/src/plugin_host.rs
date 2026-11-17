@@ -6,12 +6,11 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::*;
-use smelt_app_state::daemon_states_global::DaemonStates;
-use smelt_plugin_api::{self as api, CommandSpec, HostEvent, Machine, Project, RuntimeKey};
+use smelt_plugin_api::{self as api, CommandSpec, HostEvent, Machine, RuntimeKey};
 use smelt_runtime_client::RuntimeClient;
 
-use crate::dir_picker::DirPickerPurpose;
-use crate::{MainWindow, Workspace, current_workspace, runtimes, status_item};
+use crate::dir_picker::PathPick;
+use crate::{DaemonStates, MainWindow, Workspace, current_workspace, runtimes, status_item};
 
 struct SmeltHost {
     current: Rc<RefCell<Option<MainWindow>>>,
@@ -59,16 +58,17 @@ impl api::Host for SmeltHost {
         runtimes::runtime_online(machine, cx)
     }
 
-    fn agent_settings<'a>(
-        &self,
-        machine: &RuntimeKey,
-        cx: &'a App,
-    ) -> Option<&'a api::model::agent_host::AgentHostSettings> {
-        crate::settings::agent_hosts(cx)?.settings(machine)
+    fn connections(&self, cx: &App) -> api::Connections {
+        runtimes::connections(cx)
     }
 
     fn view_shown(&self, id: &str, cx: &App) -> bool {
         view_shown(id, cx)
+    }
+
+    fn view_laid_out(&self, id: &str, cx: &App) -> bool {
+        cx.try_global::<LaidOutViews>()
+            .is_some_and(|views| views.0.contains(id))
     }
 
     fn window_active(&self, cx: &App) -> bool {
@@ -126,26 +126,6 @@ impl api::Host for SmeltHost {
 
     fn notification_permission(&self, _cx: &App) -> api::NotificationPermission {
         status_item::notification_permission()
-    }
-
-    fn agent_settings_unavailable(&self, machine: &RuntimeKey, cx: &App) -> Option<String> {
-        crate::settings::agent_hosts(cx)?
-            .unavailable(machine)
-            .map(str::to_string)
-    }
-
-    fn embed_conversation(
-        &self,
-        request: api::EmbedConversation,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Result<api::EmbeddedConversation, String> {
-        let workspace = self
-            .workspace()
-            .ok_or_else(|| api::NO_MAIN_WINDOW.to_string())?;
-        workspace.update(cx, |workspace, cx| {
-            workspace.embed_conversation(request, window, cx)
-        })
     }
 }
 
@@ -260,25 +240,21 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
         api::OPEN_IN_FILE_MANAGER.spec("用文件管理器打开", |args, _, _| {
             crate::system_open::open_in_file_manager(&args.path)
         }),
-        api::EDIT_AGENT_SETTINGS.spec_async("改智能体配置", |edit, _, cx| {
-            let sent = api::send_agent_settings_edit(edit, cx);
-            cx.spawn(async move |_| sent.await.map(|_| ()))
-        }),
         api::PICK_PATHS.spec_async("选择路径", move |request, window, cx| {
             let Some(runtime) = runtimes::runtime(&request.machine, cx) else {
                 return Task::ready(Err(api::MACHINE_REMOVED.to_string()));
             };
-            let (done, received) = smol::channel::bounded(1);
-            let purpose = DirPickerPurpose::Plugin { request, done };
             if runtime.is_local() {
                 // 系统选择框不需要主窗口；从菜单栏等处调用时 app 可能在后台，先拿到前面来。
                 crate::status_item::activate_app();
-                let picked = crate::dir_picker::pick_local_paths(&purpose, cx);
+                let picked = crate::dir_picker::pick_local_paths(&request, cx);
                 return cx.spawn(async move |_| Ok(picked.await));
             }
+            let (done, received) = smol::channel::bounded(1);
+            let pick = PathPick { request, done };
             // 远程机器在主窗口里逐级浏览，主窗口关着就先开一扇。
             if let Err(error) = in_main_window(window, &picker, cx, |workspace, _, cx| {
-                workspace.open_dir_picker(runtime, purpose, cx)
+                workspace.open_dir_picker(runtime, pick, cx)
             }) {
                 return Task::ready(Err(error));
             }
@@ -309,7 +285,65 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
                 Ok(workspace.navigate(Some(args.page), window, cx))
             })
         }),
+        // 远程机器的连接表归宿主（它据此拨号、订阅），插件经这几条命令改，见
+        // `smelt_plugin_api::connections`。
+        api::ADD_MACHINE.spec_async("添加远程机器", |args, _, cx| {
+            let added = runtimes::add_runtime(args.pairing_uri, cx);
+            cx.spawn(async move |_| {
+                let (machine, name) = added.await?;
+                Ok(api::AddedMachine { machine, name })
+            })
+        }),
+        api::REMOVE_MACHINE.spec_async("移除远程机器", |args, _, cx| {
+            match remote_id(&args.machine, cx) {
+                Ok(id) => runtimes::remove_runtime(id, cx),
+                Err(error) => Task::ready(Err(error)),
+            }
+        }),
+        api::RENAME_MACHINE.spec("重命名远程机器", |args, _, cx| {
+            let id = remote_id(&args.machine, cx)?;
+            let name = args.name.trim();
+            if name.is_empty() {
+                return Err("名字不能是空的".to_string());
+            }
+            runtimes::rename_runtime(id, name.to_string(), cx);
+            Ok(())
+        }),
+        api::SET_MACHINE_RELAY.spec_async("改远程机器的中继", |args, _, cx| {
+            let id = match remote_id(&args.machine, cx) {
+                Ok(id) => id,
+                Err(error) => return Task::ready(Err(error)),
+            };
+            runtimes::set_runtime_relay(id, args.relay, cx)
+        }),
+        api::RECONNECT_MACHINE.spec("重新连接远程机器", |args, _, cx| {
+            remote_id(&args.machine, cx)?;
+            crate::runtime_events::reconnect(&args.machine, cx);
+            Ok(())
+        }),
+        api::UPGRADE_MACHINE.spec("升级远程机器的运行时", |args, _, cx| {
+            remote_id(&args.machine, cx)?;
+            if !runtimes::runtime_can_upgrade(&args.machine, cx) {
+                return Err("这台机器现在不能远程升级".to_string());
+            }
+            crate::runtime_events::upgrade_remote(&args.machine, cx);
+            Ok(())
+        }),
+        api::REFRESH_CONNECTIONS.spec("刷新远程连接状态", |(), _, cx| {
+            runtimes::sample_links(cx);
+            crate::runtime_events::probe_remotes(cx);
+            Ok(())
+        }),
     ]
+}
+
+/// 连接表里的一台远程机器的 id。本机不在表里，移除、改名这些都不适用。
+fn remote_id(machine: &RuntimeKey, cx: &App) -> Result<String, String> {
+    match machine {
+        RuntimeKey::Local => Err("本机不是远程机器".to_string()),
+        RuntimeKey::Remote(id) if runtimes::runtime(machine, cx).is_some() => Ok(id.clone()),
+        RuntimeKey::Remote(_) => Err(api::MACHINE_REMOVED.to_string()),
+    }
 }
 
 /// 启动时、开主窗口之前调一次：装好宿主服务，登记内置插件。
@@ -319,11 +353,6 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     // 机器加了、移除了、改名、连上断开都记在 RuntimeHub 上。
     cx.observe_global::<runtimes::RuntimeHub>(|cx| api::emit(HostEvent::MachinesChanged, cx))
         .detach();
-    // 各台机器的智能体配置读到、改了、重读了都写在这个全局上。
-    cx.observe_global::<crate::settings::AgentHosts>(|cx| {
-        api::emit(HostEvent::AgentSettingsChanged, cx)
-    })
-    .detach();
     // 会话状态（守护推的）和工作区目录（项目、对话的名册）都写在全局上，主窗口关着也照常。
     cx.observe_global::<DaemonStates>(|cx| api::emit(HostEvent::SessionsChanged, cx))
         .detach();
@@ -331,23 +360,30 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
         api::emit(HostEvent::SessionsChanged, cx)
     })
     .detach();
+    // 会话插件起来就要用终端、对话的视图和智能体配置，这三个排在它前面。
+    smelt_terminal::register(cx);
+    smelt_conversation::register(cx);
     smelt_agents::register(cx);
+    smelt_sessions::register(cx);
+    smelt_archive::register(cx);
     smelt_automations::register(cx);
     smelt_capabilities::register(cx);
+    smelt_desktop::register(cx);
     smelt_files_ui::register(cx);
     smelt_git_ui::register(cx);
     smelt_history::register(cx);
     smelt_ide::register(cx);
+    smelt_launcher::register(cx);
     smelt_layouts::register(cx);
+    smelt_machines::register(cx);
     smelt_maintenance::register(cx);
     smelt_notifications::register(cx);
     smelt_resources::register(cx);
-    smelt_desktop::register(cx);
     smelt_updater_ui::register(cx);
 }
 
-/// 此刻看得见的视图。摆视图的地方各报各的：主窗口报开着的那页里露着的和舞台上开着的
-/// 视图，设置报它停着的那一页，设置视图本身露着时那一页才算看得见。插件只看并起来的一套
+/// 此刻看得见的视图。摆视图的地方各报各的：主窗口报开着的那页里露着的视图（含出口里
+/// 放着的），设置报它停着的那一页，设置视图本身露着时那一页才算看得见。插件只看并起来的一套
 /// （`Host::view_shown`），不分视图摆在哪。
 #[derive(Default)]
 pub(crate) struct ShownViews {
@@ -389,9 +425,25 @@ pub(crate) fn set_settings_shown(page: Option<SharedString>, cx: &mut App) {
     }
 }
 
+/// 摆在各页眼下装的布局里的视图（`workspace_layout::sync_laid_out_views` 算），插件经
+/// `Host::view_laid_out` 读。
+#[derive(Default)]
+struct LaidOutViews(HashSet<String>);
+
+impl Global for LaidOutViews {}
+
+/// 换一份摆着的视图；变了发 [`HostEvent::LaidOutViewsChanged`]。
+pub(crate) fn set_laid_out(views: HashSet<String>, cx: &mut App) {
+    let laid_out = cx.default_global::<LaidOutViews>();
+    if laid_out.0 != views {
+        laid_out.0 = views;
+        api::emit(HostEvent::LaidOutViewsChanged, cx);
+    }
+}
+
 impl Workspace {
     /// 宿主事件里工作台自己要管的：视图登记变了要重装布局（新登记的补上、撤下的变
-    /// 占位）、对出口，侧栏入口要重画；页、布局登记变了要重挑各页的布局。
+    /// 占位）、对出口；页、布局登记变了要重挑各页的布局；主题登记变了重新套用选中的。
     pub(crate) fn subscribe_host_events(
         &mut self,
         window: &mut Window,
@@ -402,12 +454,12 @@ impl Workspace {
             window,
             |this, _, event: &HostEvent, window, cx| match event {
                 HostEvent::ViewsChanged => {
+                    // 没有首页时兜底那页摆的视图跟着视图登记变。
+                    crate::workspace_layout::sync_laid_out_views(cx);
                     this.reload_layout(window, cx);
                     this.sync_outlet(window, cx);
                     cx.notify();
                 }
-                // 侧栏里插件页的入口带角标。
-                HostEvent::ViewBadgesChanged => cx.notify(),
                 HostEvent::LayoutsChanged | HostEvent::PagesChanged => this.sync_pages(window, cx),
                 HostEvent::ThemesChanged => {
                     if let Some(appearance) = cx.try_global::<crate::settings::Appearance>() {
@@ -420,19 +472,6 @@ impl Workspace {
                 _ => {}
             },
         )
-    }
-
-    /// 发布活动上下文（当前项目、舞台上露着的会话），变了插件收到
-    /// [`HostEvent::ActiveContextChanged`]。在可见刷新里调：当前项目、活动会话跟着会话、
-    /// 侧栏选中、项目分组变，这些变更都会排一次可见刷新；舞台露出或被挡、终端换活动
-    /// 分屏、对话翻看历史的开关不排刷新，在那里另调。
-    pub(crate) fn note_active_context(&mut self, cx: &mut Context<Self>) {
-        let project = self.active_project_ref(cx).map(|project| Project {
-            machine: project.runtime,
-            root: project.root,
-        });
-        let session = self.viewed_session(cx);
-        api::set_active_context(api::ActiveContext { project, session }, cx);
     }
 
     /// 遮罩层开了或关了就告诉插件：画着原生网页视图的插件要让开。插件视图在面板里是缓存着

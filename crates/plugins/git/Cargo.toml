@@ -15,13 +15,14 @@ workspace = true
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
+# 改动的差异视图（分栏 / 合并、行内评论）。
 gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
 # 面板组的分隔条换成发丝（见 lib.rs 的 h_resizable）。
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
-# 视图图标：完整的 lucide 图标表。
-gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
 # 日志页的提交时间。
 chrono = "0.4"
+# 照抄别的插件的约定（命令参数、菜单上下文）要按同样的 JSON 形状收发。
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }

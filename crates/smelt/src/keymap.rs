@@ -20,9 +20,7 @@ use gpui::{
     App, Global, KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex, Keystroke, Menu,
     MenuItem, NoAction, OperatingSystem, SharedString, Subscription, Window,
 };
-use gpui_component::input::{
-    DeleteToBeginningOfLine, DeleteToEndOfLine, DeleteToPreviousWordStart,
-};
+use gpui_base::input::{DeleteToBeginningOfLine, DeleteToEndOfLine, DeleteToPreviousWordStart};
 use smelt_client_store::KeyBindingRecord;
 use smelt_plugin_api::{self as api, CommandInfo, HostEvent, RunCommand};
 
@@ -133,25 +131,11 @@ pub(crate) fn bind_commands(
 pub(crate) fn app_key_bindings(bound: &[Bound], cx: &App) -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("escape", DismissWorkspace, Some("Workspace")),
-        KeyBinding::new("up", SidebarUp, Some("Sidebar")),
-        KeyBinding::new("down", SidebarDown, Some("Sidebar")),
-        KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
-        KeyBinding::new("right", SidebarExpand, Some("Sidebar")),
-        KeyBinding::new("enter", SidebarOpen, Some("Sidebar")),
-        KeyBinding::new("escape", SidebarExit, Some("Sidebar")),
         // readline / Grok TUI 行编辑：Ctrl+U 删到行首、Ctrl+K 删到行尾、
-        // Ctrl+W 删词。绑在 Input context，所有输入框（ACP composer 等）生效。
+        // Ctrl+W 删词。绑在 Input context，所有输入框（对话输入框等）生效。
         KeyBinding::new("ctrl-u", DeleteToBeginningOfLine, Some("Input")),
         KeyBinding::new("ctrl-k", DeleteToEndOfLine, Some("Input")),
         KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),
-        // 把 Tab/Shift-Tab 从 gpui-component Root 的全局焦点跳转手里要回来，
-        // 终端聚焦时改发给 shell（见 terminal_view.rs 里 TerminalTab 的注释）。
-        KeyBinding::new("tab", terminal_view::TerminalTab, Some("Terminal")),
-        KeyBinding::new(
-            "shift-tab",
-            terminal_view::TerminalBackTab,
-            Some("Terminal"),
-        ),
     ];
     // cmux：Ctrl+Backspace / Ctrl+Delete 也是删行（^U / ^K），不是删词。
     #[cfg(target_os = "macos")]
@@ -199,8 +183,8 @@ pub(crate) fn app_key_bindings(bound: &[Bound], cx: &App) -> Vec<KeyBinding> {
 }
 
 /// 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、插件放进来的项（见
-/// [`api::menu_items`]）、「设置… ⌘,」+「退出 Smelt ⌘Q」（跟侧栏「设置」一样打开设置，
-/// 符合 mac 惯例）；「帮助」菜单全是插件放的，没人放就没有。
+/// [`api::menu_items`]）、「设置… ⌘,」+「退出 Smelt ⌘Q」（符合 mac 惯例）；「帮助」菜单
+/// 全是插件放的，没人放就没有。
 ///
 /// 菜单项上的快捷键是设菜单那一刻从键表里取的，改键后要重设一次；插件的菜单项变了也发
 /// `CommandsChanged`，跟着重设。
@@ -546,7 +530,10 @@ fn recorded<'a>(
         .iter()
         .find(|(reserved, _)| same_key(reserved, &keystroke, os))
     {
-        return Recorded::Rejected(format!("{} 留给{what}", display(&keystroke)));
+        return Recorded::Rejected(format!(
+            "{} 留给{what}",
+            smelt_ui::keybind::label(&keystroke, os)
+        ));
     }
     if let Some(other) = bound.iter().find(|other| {
         other.info.id.as_ref() != id
@@ -576,7 +563,7 @@ fn recorded<'a>(
     if let Some(binding) = taken {
         return Recorded::Rejected(format!(
             "{} 已被别的功能占用（{}）",
-            display(&keystroke),
+            smelt_ui::keybind::label(&keystroke, os),
             binding.action().name()
         ));
     }
@@ -602,10 +589,6 @@ fn is_function_key(key: &str) -> bool {
 
 fn is_modifier_key(key: &str) -> bool {
     matches!(key, "shift" | "control" | "alt" | "platform" | "function")
-}
-
-pub(crate) fn display(keystroke: &Keystroke) -> String {
-    gpui_component::kbd::Kbd::format(keystroke)
 }
 
 #[cfg(test)]
