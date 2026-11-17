@@ -11086,6 +11086,7 @@ dependencies = [
  "gpui-base",
  "gpui-kit-assets",
  "gpui-pre",
+ "image",
  "serde",
  "serde_json",
  "smelt-plugin-api",

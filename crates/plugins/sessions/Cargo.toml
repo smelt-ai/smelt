@@ -26,6 +26,8 @@ smol = "2"
 uuid = { version = "1", features = ["v4"] }
 # 列表行上的「今天 / 昨天」和时刻。
 chrono = "0.4"
+# 解行首小人的零件（编进来的 WebP）交给 gpui 画。版本跟 gpui 用的同一个，帧类型才对得上。
+image = { version = "0.25", default-features = false, features = ["webp"] }
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }

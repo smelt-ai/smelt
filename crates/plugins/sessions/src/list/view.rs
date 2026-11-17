@@ -11,6 +11,7 @@ use gpui::{
 };
 use gpui_base::AutoScroll;
 use gpui_base::input::{Escape, InputEvent, InputState};
+use smelt_plugin_api::model::agent_status::AgentStatus;
 use smelt_plugin_api::model::control_api::{WorkspaceRename, WorkspaceWorksetRename};
 use smelt_plugin_api::model::workspace_directory::{
     WorkspaceRenameParams, WorkspaceWorksetRenameParams,
@@ -22,10 +23,11 @@ use smelt_plugin_api::ui::window_bar::window_bar;
 use smelt_plugin_api::{self as api, PluginView, RuntimeKey, ViewHandle};
 
 use super::actions;
+use super::buddy::Stage;
 use super::motion::ListMotion;
 use super::rows::{self, ProjectDrag, RowCtx, SessionDrag};
 use crate::contract::ListArgs;
-use crate::model::{ConversationKey, Sessions};
+use crate::model::{ConversationKey, Selection, Sessions};
 
 /// 建会话列表视图（视图 [`crate::contract::LIST`]，`register` 登记）。只建一份。
 pub(crate) fn build_view(_: &mut Window, cx: &mut App) -> Rc<dyn ViewHandle> {
@@ -43,7 +45,23 @@ pub(super) struct ListView {
     auto_scroll: AutoScroll,
     /// 重排滑动、新会话落进列表、开始跑时图标亮一下。
     pub(super) motion: ListMotion,
+    /// 行首小人各在演什么（干活、喊你、欢呼、打招呼）。
+    buddies: Stage,
     _subscriptions: Vec<Subscription>,
+}
+
+/// 侧栏里所有会话（折起来的也算）和它们的状态，给小人比前后。
+fn session_statuses(
+    sidebar: &super::Sidebar,
+) -> impl Iterator<Item = (&ConversationKey, AgentStatus)> {
+    sidebar.session_rows().map(|row| (&row.key, row.status))
+}
+
+fn selected_session(selection: &Selection) -> Option<&ConversationKey> {
+    match selection {
+        Selection::Session(key) => Some(key),
+        _ => None,
+    }
 }
 
 /// 行内改名。
@@ -78,6 +96,14 @@ impl ListView {
     fn new(cx: &mut Context<Self>) -> Self {
         let sessions = Sessions::global(cx);
         let motion = ListMotion::new(&sessions.read(cx).sidebar);
+        let buddies = {
+            let sessions = sessions.read(cx);
+            Stage::new(
+                session_statuses(&sessions.sidebar),
+                selected_session(&sessions.selection),
+                cx.background_executor().now(),
+            )
+        };
         let _subscriptions = vec![
             // 侧栏重算、选中变了都在 `Sessions` 上 notify。侧栏换了一份就比一下前后：重排、
             // 刚开始跑的会话、刚在这里新建的会话露面了，各起各的动画。
@@ -93,6 +119,7 @@ impl ListView {
             drop: None,
             auto_scroll: AutoScroll::default(),
             motion,
+            buddies,
             _subscriptions,
         }
     }
@@ -177,11 +204,17 @@ impl ListView {
         }
     }
 
-    /// `Sessions` 通知了，比一下侧栏前后。选中变了也会通知，那时侧栏没变，比出来什么也不起。
+    /// `Sessions` 通知了，比一下侧栏前后。选中变了也会通知，那时侧栏没变，只有小人看选中
+    /// （刚选中的闲着就打个招呼）。
     fn sidebar_changed(&mut self, sessions: &Entity<Sessions>, cx: &mut Context<Self>) {
         let sidebar = sessions.read(cx).sidebar.clone();
         let now = cx.background_executor().now();
         self.motion.track(&sidebar, now);
+        self.buddies.track(
+            session_statuses(&sidebar),
+            selected_session(&sessions.read(cx).selection),
+            now,
+        );
         let fresh = sessions
             .read(cx)
             .fresh
@@ -189,6 +222,7 @@ impl ListView {
             .filter(|key| sidebar.has_session(key));
         if let Some(key) = fresh {
             sessions.update(cx, |sessions, _| sessions.fresh = None);
+            self.buddies.greet(&key, now);
             self.motion.arrive(key, now);
         }
     }
@@ -265,12 +299,17 @@ impl Render for ListView {
                 .map(|rename| (rename.target.clone(), rename.input.clone())),
             now: chrono::Utc::now().timestamp().max(0) as u64,
             motion,
+            buddies: self.buddies.frame(now, ambient && !cx.reduce_motion()),
         };
         let content = div()
             .flex()
             .flex_col()
             .pb_3()
             .children(rows::sidebar(&ctx, window, cx));
+        // 画出来的行里有在动的小人才要下一帧；都站着、看不见时不重绘。
+        if ctx.buddies.wants_frame() {
+            window.request_animation_frame();
+        }
         let area = api::safe_area(cx.entity_id(), cx);
         // 滚过了才出上沿那条细线，下面还有才出下沿那条，和上下摆着的东西分开。线一直占着
         // 1px，只换颜色，出现时不跳。

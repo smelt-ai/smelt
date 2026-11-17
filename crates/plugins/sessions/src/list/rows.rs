@@ -25,6 +25,7 @@ use smelt_plugin_api::ui::ui_theme::{self, height};
 use smelt_plugin_api::ui::{Button, IconAction as _, ListRow, TextInput};
 use smelt_plugin_api::{self as api, RuntimeKey};
 
+use super::buddy::StageFrame;
 use super::motion::{FoldMotion, Frame, arrival_slot, wash};
 use super::view::{DropHint, DropTarget, ListView, RenameTarget};
 use super::{
@@ -42,6 +43,11 @@ use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 const INDENT: f32 = 16.;
 /// 行首那一格（图标、展开箭头）的边长。
 const LEAD: f32 = 16.;
+/// 会话行首小人头像的边长，和放得下它的会话行高。
+const AVATAR: f32 = 36.;
+const SESSION_ROW: f32 = 44.;
+/// 头像右下角标明哪家 CLI、哪个智能体的小圆标。
+const BADGE: f32 = 14.;
 
 /// 画一遍要的东西：算好的侧栏，加上视图上的临时状态。
 pub(super) struct RowCtx {
@@ -55,6 +61,8 @@ pub(super) struct RowCtx {
     pub(super) now: u64,
     /// 重排滑动、新会话落进列表这一帧的取样。
     pub(super) motion: Frame,
+    /// 行首小人这一帧的取样。画了在动的小人时它记下来，画完由视图要下一帧。
+    pub(super) buddies: StageFrame,
 }
 
 /// 整个列表从上到下的行。
@@ -133,7 +141,7 @@ fn conversations(
         .on_click(move |_, _, cx| toggle_fold(Fold::Conversations, !collapsed, cx));
     rows.push(header.into_any_element());
     fold.body(rows, window, cx, |rows, _, _| {
-        rows.extend(section.rows.iter().map(|row| session(row, 1, ctx)));
+        rows.extend(section.rows.iter().map(|row| session(row, 0, ctx)));
     });
 }
 
@@ -166,7 +174,7 @@ fn buckets(ctx: &RowCtx, window: &mut Window, cx: &mut App, rows: &mut Vec<AnyEl
         let fold = FoldMotion::new(&key, bucket.collapsed, window, cx);
         let mut group = vec![bucket_row(bucket, fold.angle())];
         fold.body(&mut group, window, cx, |rows, _, _| {
-            rows.extend(bucket.rows.iter().map(|row| session(row, 2, ctx)));
+            rows.extend(bucket.rows.iter().map(|row| session(row, 1, ctx)));
         });
         rows.push(flip(ctx, key, group_block(group)));
     }
@@ -187,14 +195,14 @@ fn project_groups(ctx: &RowCtx, window: &mut Window, cx: &mut App, rows: &mut Ve
         fold.body(&mut group, window, cx, |rows, window, cx| {
             for (item_index, item) in project.items.iter().enumerate() {
                 match item {
-                    ProjectItem::Session(row) => rows.push(session(row, 2, ctx)),
+                    ProjectItem::Session(row) => rows.push(session(row, 1, ctx)),
                     ProjectItem::Workset(workset) => {
                         let key = workset_flip(&workset.machine, &workset.id);
                         let fold = FoldMotion::new(&key, workset.collapsed, window, cx);
                         let at = (project_index, item_index);
                         let mut group = vec![workset_row(at, workset, fold.angle(), ctx)];
                         fold.body(&mut group, window, cx, |rows, _, _| {
-                            rows.extend(workset.sessions.iter().map(|row| session(row, 3, ctx)));
+                            rows.extend(workset.sessions.iter().map(|row| session(row, 2, ctx)));
                         });
                         rows.push(flip(ctx, key, group_block(group)));
                     }
@@ -778,6 +786,8 @@ pub(super) struct SessionDrag {
     title: SharedString,
 }
 
+/// `depth` 取它上一级那行的缩进：头像左边对齐上一级的行首图标。头像比行首图标宽，标题
+/// 自然比上一级的名字往右错开一截，看着就是缩了一级；再多缩一级会把窄侧栏里的标题挤没。
 fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
     let key = row.key.clone();
     let id = format!("{}:{}", machine_id(&key.machine), key.id);
@@ -841,7 +851,7 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
         .selected(selected)
         .group("session-row")
         .relative()
-        .h(height::md())
+        .h(px(SESSION_ROW))
         .mx_2()
         .pl(px(8. + INDENT * depth as f32))
         .pr_1()
@@ -850,8 +860,9 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
         .gap_2()
         .type_style(TYPE.ui)
         .when_some(arrival, |item, arrival| item.child(wash(arrival.wash)))
-        .child(session_icon(
+        .child(session_avatar(
             &id,
+            ctx.buddies.draw(&key, row.buddy, row.status),
             &row.icon,
             row.status,
             selected,
@@ -927,7 +938,7 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
         menus::session_menu(&row, view.clone())
     })
     .into_any_element();
-    flip(ctx, flip_key, arrival_slot(arrival, height::md(), item))
+    flip(ctx, flip_key, arrival_slot(arrival, px(SESSION_ROW), item))
 }
 
 /// 按状态、时间分组时标题后面补的来源：工作树的小标签，项目名和分支。
@@ -991,10 +1002,12 @@ fn origin_labels(id: &str, origin: &RowOrigin, selected: bool) -> Vec<AnyElement
     labels
 }
 
-/// 行首的图标，按状态上色：空闲随行的次要字色，在跑、要人管的用状态色。`glow` 是刚开始跑
-/// 时亮一下的进度：只提亮度不淡出，图标还要认得出是哪家 agent。
-fn session_icon(
+/// 行首的小人头像：`figure` 是这一帧拼好的小人（[`StageFrame::draw`]）。右下角的小圆标
+/// 标明是哪家 CLI（智能体对话是名字的第一个字），按状态上色：空闲随行的次要字色，在跑、要人
+/// 管的用状态色。`glow` 是刚开始跑时亮一下的进度：只提亮度不淡出，还要认得出是哪家。
+fn session_avatar(
     id: &str,
+    figure: AnyElement,
     icon: &RowIcon,
     status: AgentStatus,
     selected: bool,
@@ -1008,39 +1021,49 @@ fn session_icon(
     let glyph = |path: SharedString| {
         svg()
             .path(path)
-            .size(px(14.))
+            .size(px(10.))
             .text_color(color)
             .into_any_element()
     };
-    let inner = match icon {
-        RowIcon::Agent { mark, name } => {
-            let name = name.clone();
+    let (mark, tip): (AnyElement, Option<SharedString>) = match icon {
+        RowIcon::Agent { mark, name } => (
             div()
-                .id(eid(format!("session-agent:{id}")))
-                .size(px(LEAD))
-                .rounded_full()
-                .bg(rgb(ui_theme::soft_hover()))
-                .flex()
-                .items_center()
-                .justify_center()
-                .type_style(TYPE.small_medium)
+                .text_size(px(8.))
+                .line_height(px(BADGE))
+                .font_weight(TYPE.ui_medium.weight)
                 .text_color(color)
                 .child(mark.clone())
-                .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
-                .into_any_element()
-        }
-        RowIcon::Provider { path, label } => {
-            let label = label.clone();
-            div()
-                .id(eid(format!("session-provider:{id}")))
-                .child(glyph(path.clone()))
-                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
-                .into_any_element()
-        }
-        RowIcon::Terminal => glyph(IconName::SquareTerminal.path()),
-        RowIcon::Conversation => glyph(IconName::MessageSquare.path()),
+                .into_any_element(),
+            Some(name.clone()),
+        ),
+        RowIcon::Provider { path, label } => (glyph(path.clone()), Some(label.clone())),
+        RowIcon::Terminal => (glyph(IconName::SquareTerminal.path()), None),
+        RowIcon::Conversation => (glyph(IconName::MessageSquare.path()), None),
     };
-    lead_box().child(inner).into_any_element()
+    let badge = div()
+        .absolute()
+        .right(px(-2.))
+        .bottom(px(-1.))
+        .size(px(BADGE))
+        .rounded_full()
+        .bg(rgb(ui_theme::surface()))
+        .border_1()
+        .border_color(ui_theme::hair_strong())
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(mark);
+    div()
+        .id(eid(format!("session-avatar:{id}")))
+        .relative()
+        .size(px(AVATAR))
+        .flex_shrink_0()
+        .child(figure)
+        .child(badge)
+        .when_some(tip, |avatar, tip| {
+            avatar.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        })
+        .into_any_element()
 }
 
 /// 行尾平时写的字：用不了的机器写为什么，要人管的写「需要你」，在跑的写这一轮跑了多久，

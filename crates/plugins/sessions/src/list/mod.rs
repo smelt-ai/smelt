@@ -18,6 +18,7 @@
 //! 或归别的插件）。
 
 mod actions;
+mod buddy;
 mod group;
 mod machine;
 mod menus;
@@ -35,6 +36,8 @@ use smelt_plugin_api::model::daemon_state::DaemonSessionState;
 use smelt_plugin_api::model::runtime_path::PathStyle;
 use smelt_plugin_api::model::workspace_directory::{WorkspaceConversation, WorkspaceDirectory};
 use smelt_plugin_api::{self as api, RuntimeKey};
+
+use buddy::Buddy;
 
 use crate::model::{
     self, ConversationKey, Fold, Pin, Placement, ProjectKey, Sessions, SidebarGrouping, SidebarUi,
@@ -151,6 +154,8 @@ struct SessionRow {
     session_id: Option<String>,
     title: SharedString,
     icon: RowIcon,
+    /// 行首的小人：跟智能体的对话按智能体名认（同一个智能体到哪都是同一个），别的按会话 id。
+    buddy: Buddy,
     status: AgentStatus,
     pinned: bool,
     /// 最近一次动静（unix 秒）；守护里还没有它时用目录里的更新时间。
@@ -716,13 +721,20 @@ fn session_row(
         0
     };
     let title: SharedString = model::title(conversation, states).into();
+    let icon = row_icon(conversation, states, input.agents);
+    let buddy = Buddy::of(match &icon {
+        RowIcon::Agent { name, .. } => name.as_str(),
+        _ => key.id.as_str(),
+    });
+    buddy.prepare();
     SessionRow {
         pinned: ui.is_pinned(&Pin::Conversation(key.clone())),
         session_id: model::session_ids(conversation).next().map(str::to_string),
         key,
         tooltip: title.clone(),
         title,
-        icon: row_icon(conversation, states, input.agents),
+        icon,
+        buddy,
         status,
         activity,
         turn_started_at,
@@ -1059,6 +1071,7 @@ mod tests {
             session_id: None,
             title: id.to_string().into(),
             icon: RowIcon::Terminal,
+            buddy: Buddy::of(id),
             status,
             pinned,
             activity: 0,
