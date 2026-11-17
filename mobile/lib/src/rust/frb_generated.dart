@@ -181,6 +181,7 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiCatalogCreateSession({
     required String runtimeId,
     required String projectRoot,
+    String? worksetId,
     String? agentOptionId,
     String? launchKey,
     String? resumeId,
@@ -1202,6 +1203,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<String> crateApiCatalogCreateSession({
     required String runtimeId,
     required String projectRoot,
+    String? worksetId,
     String? agentOptionId,
     String? launchKey,
     String? resumeId,
@@ -1214,6 +1216,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(runtimeId, serializer);
           sse_encode_String(projectRoot, serializer);
+          sse_encode_opt_String(worksetId, serializer);
           sse_encode_opt_String(agentOptionId, serializer);
           sse_encode_opt_String(launchKey, serializer);
           sse_encode_opt_String(resumeId, serializer);
@@ -1234,6 +1237,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         argValues: [
           runtimeId,
           projectRoot,
+          worksetId,
           agentOptionId,
           launchKey,
           resumeId,
@@ -1251,6 +1255,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         argNames: [
           "runtimeId",
           "projectRoot",
+          "worksetId",
           "agentOptionId",
           "launchKey",
           "resumeId",
@@ -4524,6 +4529,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<WorkspaceWorksetChoice> dco_decode_list_workspace_workset_choice(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_workspace_workset_choice)
+        .toList();
+  }
+
+  @protected
   McpOption dco_decode_mcp_option(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -5399,12 +5414,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WorkspaceProject dco_decode_workspace_project(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return WorkspaceProject(
       root: dco_decode_String(arr[0]),
       title: dco_decode_String(arr[1]),
       order: dco_decode_u_32(arr[2]),
+      worksets: dco_decode_list_workspace_workset_choice(arr[3]),
+    );
+  }
+
+  @protected
+  WorkspaceWorksetChoice dco_decode_workspace_workset_choice(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return WorkspaceWorksetChoice(
+      id: dco_decode_String(arr[0]),
+      task: dco_decode_String(arr[1]),
+      branch: dco_decode_String(arr[2]),
     );
   }
 
@@ -7299,6 +7328,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<WorkspaceWorksetChoice> sse_decode_list_workspace_workset_choice(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <WorkspaceWorksetChoice>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_workspace_workset_choice(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   McpOption sse_decode_mcp_option(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_name = sse_decode_String(deserializer);
@@ -8421,7 +8464,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_root = sse_decode_String(deserializer);
     var var_title = sse_decode_String(deserializer);
     var var_order = sse_decode_u_32(deserializer);
-    return WorkspaceProject(root: var_root, title: var_title, order: var_order);
+    var var_worksets = sse_decode_list_workspace_workset_choice(deserializer);
+    return WorkspaceProject(
+      root: var_root,
+      title: var_title,
+      order: var_order,
+      worksets: var_worksets,
+    );
+  }
+
+  @protected
+  WorkspaceWorksetChoice sse_decode_workspace_workset_choice(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_task = sse_decode_String(deserializer);
+    var var_branch = sse_decode_String(deserializer);
+    return WorkspaceWorksetChoice(
+      id: var_id,
+      task: var_task,
+      branch: var_branch,
+    );
   }
 
   @protected
@@ -10111,6 +10175,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_workspace_workset_choice(
+    List<WorkspaceWorksetChoice> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_workspace_workset_choice(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_mcp_option(McpOption self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.name, serializer);
@@ -11059,6 +11135,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.root, serializer);
     sse_encode_String(self.title, serializer);
     sse_encode_u_32(self.order, serializer);
+    sse_encode_list_workspace_workset_choice(self.worksets, serializer);
+  }
+
+  @protected
+  void sse_encode_workspace_workset_choice(
+    WorkspaceWorksetChoice self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.task, serializer);
+    sse_encode_String(self.branch, serializer);
   }
 }
 

@@ -106,6 +106,7 @@ pub(crate) type EventListener = Box<dyn Fn(&CatalogEvent) -> bool + Send>;
 /// `create_session` 的参数。
 pub(crate) struct CreateSession {
     pub project_root: String,
+    pub workset_id: Option<String>,
     pub agent_option_id: Option<String>,
     pub launch_key: Option<String>,
     pub resume_id: Option<String>,
@@ -839,6 +840,7 @@ impl Catalog {
         let runtime = self.runtime()?;
         let params = SessionCreateParams {
             project_root: params.project_root.trim().to_string(),
+            workset_id: nonempty(params.workset_id),
             agent_option_id: nonempty(params.agent_option_id),
             launch_key: nonempty(params.launch_key),
             resume_id: nonempty(params.resume_id),

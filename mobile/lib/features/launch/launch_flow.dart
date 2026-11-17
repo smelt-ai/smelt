@@ -27,6 +27,7 @@ class LaunchIntent {
     required this.projectRoot,
     required this.requestId,
     required this.label,
+    this.worksetId,
     this.agentOptionId,
     this.launchKey,
     this.resumeId,
@@ -36,6 +37,9 @@ class LaunchIntent {
 
   /// 空串：不选项目，只有产品智能体的对话可以。
   final String projectRoot;
+
+  /// 开在项目里的哪棵任务工作树；空就是项目根。
+  final String? worksetId;
   final String requestId;
 
   /// 给人看的名字（「Claude Code」「工作助手」、历史会话标题），进度和报错里用。
@@ -47,6 +51,7 @@ class LaunchIntent {
   Future<String> send(Backend backend) => backend.createSession(
     runtimeId,
     projectRoot: projectRoot,
+    worksetId: worksetId,
     agentOptionId: agentOptionId,
     launchKey: launchKey,
     resumeId: resumeId,

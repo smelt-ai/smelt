@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// 所有机器的会话目录事件流，事件带 `runtime_id`。订阅时每台机器先推一次当前已知的列表；
 /// 之后配对的机器同样会推。忘记一台机器时推一次它的空列表（`cached = true`、没有
@@ -31,9 +31,11 @@ Future<WorkspaceCatalog> workspaceCatalog({required String runtimeId}) =>
 /// - 否则 `kind` 为空或 `Acp` 时开对话（要 `agent_option_id`），`Terminal` 开空白终端。
 /// - `project_root` 为空：只有产品智能体的对话可以，开在智能体自己的 space。
 /// - `request_id`：一次新建意图的 UUID，重试时复用，落到同一个会话。
+/// - `workset_id`：开在项目里的哪棵任务工作树（[`WorkspaceProject::worksets`]），空就是项目根。
 Future<String> createSession({
   required String runtimeId,
   required String projectRoot,
+  String? worksetId,
   String? agentOptionId,
   String? launchKey,
   String? resumeId,
@@ -42,6 +44,7 @@ Future<String> createSession({
 }) => RustLib.instance.api.crateApiCatalogCreateSession(
   runtimeId: runtimeId,
   projectRoot: projectRoot,
+  worksetId: worksetId,
   agentOptionId: agentOptionId,
   launchKey: launchKey,
   resumeId: resumeId,
@@ -1031,14 +1034,19 @@ class WorkspaceProject {
   final String title;
   final int order;
 
+  /// 项目里的任务工作树，按桌面侧栏的次序。新建会话可以开在其中一棵里。
+  final List<WorkspaceWorksetChoice> worksets;
+
   const WorkspaceProject({
     required this.root,
     required this.title,
     required this.order,
+    required this.worksets,
   });
 
   @override
-  int get hashCode => root.hashCode ^ title.hashCode ^ order.hashCode;
+  int get hashCode =>
+      root.hashCode ^ title.hashCode ^ order.hashCode ^ worksets.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1047,5 +1055,31 @@ class WorkspaceProject {
           runtimeType == other.runtimeType &&
           root == other.root &&
           title == other.title &&
-          order == other.order;
+          order == other.order &&
+          worksets == other.worksets;
+}
+
+/// 新建会话时可选的一棵任务工作树。
+class WorkspaceWorksetChoice {
+  final String id;
+  final String task;
+  final String branch;
+
+  const WorkspaceWorksetChoice({
+    required this.id,
+    required this.task,
+    required this.branch,
+  });
+
+  @override
+  int get hashCode => id.hashCode ^ task.hashCode ^ branch.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WorkspaceWorksetChoice &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          task == other.task &&
+          branch == other.branch;
 }
