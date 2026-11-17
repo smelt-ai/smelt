@@ -288,6 +288,8 @@ struct FakeTransport {
     shape: Mutex<Shape>,
     changes: AtomicUsize,
     network_changes: AtomicUsize,
+    /// 拨过号（建过 endpoint）没有；网络变化时按它报要不要重连。
+    built: AtomicBool,
 }
 
 impl FakeTransport {
@@ -297,6 +299,7 @@ impl FakeTransport {
             shape: Mutex::new(Shape::Preset),
             changes: AtomicUsize::new(0),
             network_changes: AtomicUsize::new(0),
+            built: AtomicBool::new(false),
         })
     }
 
@@ -307,6 +310,7 @@ impl FakeTransport {
 
 impl Dialer for FakeTransport {
     fn route(&self, target: &Target) -> Result<Arc<dyn Route>, SmeltError> {
+        self.built.store(true, Ordering::SeqCst);
         self.runtimes
             .lock()
             .unwrap()
@@ -333,8 +337,9 @@ impl Transport for FakeTransport {
         Ok(true)
     }
 
-    fn network_change(&self) {
+    fn network_change(&self) -> bool {
         self.network_changes.fetch_add(1, Ordering::SeqCst);
+        self.built.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -943,19 +948,44 @@ fn reconnect_and_verify_reach_the_runtime() {
     });
 }
 
+/// 网络变了就换掉 endpoint：旧 endpoint 跨网络后常常再也连不上 relay，在它上面怎么重拨都
+/// 没用，每台机器都要在新 endpoint 上重新连。
 #[test]
-fn network_change_tells_the_transport_and_checks_every_link() {
+fn network_change_replaces_the_endpoint_and_reconnects_every_node() {
     let a = FakeRuntime::new("ra", "mac-a");
-    let h = harness(&[(&a, None)], &[]);
+    let b = FakeRuntime::new("rb", "mac-b");
+    let h = harness(&[(&a, None), (&b, None)], &[]);
     h.wait_state("ra", ConnectionState::Connected);
-    let describes = a.describes.load(Ordering::SeqCst);
+    h.wait_state("rb", ConnectionState::Connected);
+    let generations = (h.generation("ra"), h.generation("rb"));
 
     h.fleet.network_changed();
 
     assert_eq!(h.transport.network_changes.load(Ordering::SeqCst), 1);
-    wait_until("网络变了立刻探活", || {
+    wait_until("每台机器都重新 connect", || {
+        h.generation("ra") > generations.0
+            && h.generation("rb") > generations.1
+            && h.state("ra") == Some(ConnectionState::Connected)
+            && h.state("rb") == Some(ConnectionState::Connected)
+    });
+}
+
+/// 还没建过 endpoint（没拨过号）时没有要换的，只确认一遍链路。
+#[test]
+fn network_change_without_an_endpoint_only_verifies() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let h = harness(&[(&a, None)], &[]);
+    h.wait_state("ra", ConnectionState::Connected);
+    h.transport.built.store(false, Ordering::SeqCst);
+    let generation = h.generation("ra");
+    let describes = a.describes.load(Ordering::SeqCst);
+
+    h.fleet.network_changed();
+
+    wait_until("立刻探活", || {
         a.describes.load(Ordering::SeqCst) > describes
     });
+    assert_eq!(h.generation("ra"), generation, "没换代");
 }
 
 #[test]
