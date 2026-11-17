@@ -126,8 +126,18 @@ void main() {
   test('工作区里还没有会话的项目也列出来，搜索时不列', () {
     const workspace = WorkspaceCatalog(
       projects: [
-        WorkspaceProject(root: '/code/web', title: 'web', order: 1),
-        WorkspaceProject(root: '/code/docs', title: 'docs', order: 2),
+        WorkspaceProject(
+          root: '/code/web',
+          title: 'web',
+          order: 1,
+          worksets: [],
+        ),
+        WorkspaceProject(
+          root: '/code/docs',
+          title: 'docs',
+          order: 2,
+          worksets: [],
+        ),
       ],
       agents: [],
       sections: LaunchSections(common: [], terminal: [], conversation: []),
@@ -176,9 +186,8 @@ void main() {
       query: 'zeta',
       agentName: (rt, s) => s.profileId == 'p-z' ? 'Zeta' : null,
     );
-    expect(
-      machines.single.groups.expand((g) => g.sessions).map((s) => s.id),
-      ['1'],
-    );
+    expect(machines.single.groups.expand((g) => g.sessions).map((s) => s.id), [
+      '1',
+    ]);
   });
 }

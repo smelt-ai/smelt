@@ -54,6 +54,7 @@ abstract interface class Backend {
   Future<String> createSession(
     String runtimeId, {
     required String projectRoot,
+    String? worksetId,
     String? agentOptionId,
     String? launchKey,
     String? resumeId,
@@ -332,6 +333,7 @@ class FrbBackend implements Backend {
   Future<String> createSession(
     String runtimeId, {
     required String projectRoot,
+    String? worksetId,
     String? agentOptionId,
     String? launchKey,
     String? resumeId,
@@ -340,6 +342,7 @@ class FrbBackend implements Backend {
   }) => catalog.createSession(
     runtimeId: runtimeId,
     projectRoot: projectRoot,
+    worksetId: worksetId,
     agentOptionId: agentOptionId,
     launchKey: launchKey,
     resumeId: resumeId,

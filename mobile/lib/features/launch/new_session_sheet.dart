@@ -70,6 +70,9 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
 
   /// 选好的项目；[_agentSpace] 为真时表示「不选项目，跟智能体对话」。
   WorkspaceProject? _project;
+
+  /// 选好的项目里的任务工作树；空就开在项目根。
+  WorkspaceWorksetChoice? _workset;
   bool _agentSpace = false;
 
   WorkspaceCatalog? _workspace;
@@ -113,6 +116,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     void apply() {
       _runtimeId = runtimeId;
       _project = null;
+      _workset = null;
       _agentSpace = false;
       _workspace = null;
       _workspaceError = null;
@@ -142,11 +146,25 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     unawaited(_loadWorkspace(id));
   }
 
-  void _chooseProject(WorkspaceProject? project) => setState(() {
+  void _chooseProject(
+    WorkspaceProject? project, {
+    WorkspaceWorksetChoice? workset,
+  }) => setState(() {
     _project = project;
+    _workset = workset;
     _agentSpace = project == null;
     _step = _Step.action;
   });
+
+  /// 头部写的地方：项目名，选了工作树时再带上树名。
+  String? _placeTitle() {
+    final project = _project;
+    if (project == null) return null;
+    final workset = _workset;
+    return workset == null
+        ? project.title
+        : '${project.title} · ${workset.task}';
+  }
 
   // 选目录 -------------------------------------------------------------------
 
@@ -231,6 +249,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     LaunchIntent(
       runtimeId: _runtimeId!,
       projectRoot: _project?.root ?? '',
+      worksetId: _workset?.id,
       launchKey: action.key,
       label: action.label,
       requestId: widget.model.backend.newRequestId(),
@@ -241,6 +260,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     LaunchIntent(
       runtimeId: _runtimeId!,
       projectRoot: _project?.root ?? '',
+      worksetId: _workset?.id,
       agentOptionId: agent.id,
       label: agent.label,
       requestId: widget.model.backend.newRequestId(),
@@ -319,7 +339,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
                   : widget.model.fleet.runtime(_runtimeId!),
               place: switch (_step) {
                 _Step.action || _Step.launching =>
-                  _agentSpace ? l10n.launchNoProject : _project?.title,
+                  _agentSpace ? l10n.launchNoProject : _placeTitle(),
                 _ => null,
               },
               onBack: _canGoBack ? _back : null,
@@ -440,7 +460,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
               trailing: _chevron(c),
               onTap: () => _chooseProject(null),
             ),
-          for (final project in workspace.projects)
+          for (final project in workspace.projects) ...[
             ShelfRow(
               leading: Icon(
                 LucideIcons.folder,
@@ -452,6 +472,23 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
               trailing: _chevron(c),
               onTap: () => _chooseProject(project),
             ),
+            // 项目里的任务工作树紧跟在项目下面，缩进一级：开在那棵树的任务目录里。
+            for (final workset in project.worksets)
+              ShelfRow(
+                leading: Padding(
+                  padding: const EdgeInsets.only(left: Space.md),
+                  child: Icon(
+                    LucideIcons.gitBranch,
+                    size: Strokes.icon,
+                    color: c.inkMuted,
+                  ),
+                ),
+                title: Text(workset.task),
+                subtitle: Text(workset.branch),
+                trailing: _chevron(c),
+                onTap: () => _chooseProject(project, workset: workset),
+              ),
+          ],
           ShelfRow(
             leading: Icon(
               LucideIcons.folderPlus,

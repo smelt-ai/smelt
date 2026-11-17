@@ -543,6 +543,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<WorkspaceProject> dco_decode_list_workspace_project(dynamic raw);
 
   @protected
+  List<WorkspaceWorksetChoice> dco_decode_list_workspace_workset_choice(
+    dynamic raw,
+  );
+
+  @protected
   McpOption dco_decode_mcp_option(dynamic raw);
 
   @protected
@@ -825,6 +830,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WorkspaceProject dco_decode_workspace_project(dynamic raw);
+
+  @protected
+  WorkspaceWorksetChoice dco_decode_workspace_workset_choice(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
@@ -1446,6 +1454,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<WorkspaceWorksetChoice> sse_decode_list_workspace_workset_choice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   McpOption sse_decode_mcp_option(SseDeserializer deserializer);
 
   @protected
@@ -1774,6 +1787,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WorkspaceProject sse_decode_workspace_project(SseDeserializer deserializer);
+
+  @protected
+  WorkspaceWorksetChoice sse_decode_workspace_workset_choice(
+    SseDeserializer deserializer,
+  );
 
   @protected
   void sse_encode_AnyhowException(
@@ -2596,6 +2614,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_workspace_workset_choice(
+    List<WorkspaceWorksetChoice> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_mcp_option(McpOption self, SseSerializer serializer);
 
   @protected
@@ -3001,6 +3025,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_workspace_project(
     WorkspaceProject self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_workspace_workset_choice(
+    WorkspaceWorksetChoice self,
     SseSerializer serializer,
   );
 }
