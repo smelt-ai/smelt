@@ -894,7 +894,13 @@ fn process_absent(pid: i32) -> bool {
         return true;
     }
     let sent = unsafe { libc::kill(pid, 0) };
-    sent != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    if sent != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    // 不归我们收的僵尸已经死了。我们自己的僵尸仍算在：要留给原来的 wait 收走，
+    // 见 `prove_process_group_dead_without_reaping`。
+    linux_process_status(pid)
+        .is_some_and(|status| status.zombie && status.ppid != std::process::id() as i32)
 }
 
 /// 终止一个 provider 进程组并证明它死了：发 SIGKILL + [`prove_process_group_dead`]。
@@ -1057,7 +1063,47 @@ fn process_group_absent(pgid: i32) -> bool {
         return true;
     }
     let sent = unsafe { libc::kill(-pgid, 0) };
-    sent != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    if sent != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    // 僵尸也让 kill(-pgid, 0) 成功。provider 的子进程在组长死后被过继给 PID 1，
+    // 容器里的 PID 1 常常不收尸（Jupyter、sleep 之类），这些僵尸会永远挂在组里，
+    // 光看 kill 就永远证明不了组已死。组员全是僵尸就算组已死：它们已经退出，
+    // 号在被收走前也不会复用。组长本人另由 `process_absent` 判。
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let members = process_group_members(pgid);
+    !members.is_empty()
+        && members
+            .iter()
+            .all(|&pid| linux_process_status(pid).is_some_and(|status| status.zombie))
+}
+
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct ProcessStatus {
+    zombie: bool,
+    ppid: i32,
+}
+
+/// 读 `/proc/<pid>/stat` 的状态和父进程。只有 Linux 需要：macOS 上过继的进程由
+/// launchd 收尸，不会留下僵尸。
+#[cfg(target_os = "linux")]
+fn linux_process_status(pid: i32) -> Option<ProcessStatus> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    let state = fields.next()?;
+    let ppid = fields.next()?.parse().ok()?;
+    Some(ProcessStatus {
+        zombie: state == "Z",
+        ppid,
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn linux_process_status(_pid: i32) -> Option<ProcessStatus> {
+    None
 }
 
 /// 这个进程组里现在还挂着哪些 pid。用来等组员退出，而不是隔几毫秒问组还在不在。
@@ -6013,6 +6059,68 @@ mod process_reap_tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         let status = child.wait().expect("原来的 wait 必须还能收走这个僵尸");
         assert!(status.success());
+    }
+
+    /// 容器里 PID 1 常常不收尸：provider 组被 SIGKILL 后，过继给它的组员永远停在僵尸。
+    /// 这里用一个只会 sleep、从不 wait 的父进程模拟它：组里只剩僵尸时必须算已死，
+    /// 否则每次重启都报「旧 provider 未能退出」。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn group_left_as_zombie_under_non_reaping_parent_is_proven_dead() {
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let parent = unsafe { libc::fork() };
+        assert!(parent >= 0, "fork 失败");
+        if parent == 0 {
+            // 不收尸的父进程：fork 出组长后 exec 成 sleep，从不 wait。
+            let leader = unsafe { libc::fork() };
+            if leader == 0 {
+                unsafe {
+                    libc::setpgid(0, 0);
+                    libc::close(pipe[0]);
+                    let pid = libc::getpid();
+                    let _ = libc::write(
+                        pipe[1],
+                        (&pid as *const libc::pid_t).cast(),
+                        std::mem::size_of::<libc::pid_t>(),
+                    );
+                    libc::close(pipe[1]);
+                }
+            }
+            unsafe {
+                libc::close(pipe[0]);
+                libc::close(pipe[1]);
+                let sleep = c"/bin/sleep".as_ptr();
+                let arg = c"30".as_ptr();
+                let argv = [sleep, arg, std::ptr::null::<libc::c_char>()];
+                libc::execv(sleep, argv.as_ptr());
+                libc::_exit(127);
+            }
+        }
+        unsafe { libc::close(pipe[1]) };
+        let mut leader: libc::pid_t = 0;
+        let n = unsafe {
+            libc::read(
+                pipe[0],
+                (&mut leader as *mut libc::pid_t).cast(),
+                std::mem::size_of::<libc::pid_t>(),
+            )
+        };
+        unsafe { libc::close(pipe[0]) };
+        assert_eq!(
+            n as usize,
+            std::mem::size_of::<libc::pid_t>(),
+            "读组长 pid 失败"
+        );
+
+        let dead = kill_and_reap_process_group(leader, Duration::from_secs(2));
+        let zombie = super::linux_process_status(leader).is_some_and(|status| status.zombie);
+        unsafe {
+            libc::kill(parent, libc::SIGKILL);
+            libc::waitpid(parent, std::ptr::null_mut(), 0);
+        }
+        assert!(zombie, "组长应停在没人收的僵尸");
+        assert!(dead, "只剩僵尸的组应证明已死");
     }
 
     /// 出生标识：同一进程反复读不变，不同进程不同，死进程读不出。
