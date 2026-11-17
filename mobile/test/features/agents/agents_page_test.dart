@@ -74,6 +74,7 @@ class _Backend extends DemoBackend {
   Future<String> createSession(
     String runtimeId, {
     required String projectRoot,
+    String? worksetId,
     String? agentOptionId,
     String? launchKey,
     String? resumeId,

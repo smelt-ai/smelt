@@ -1061,6 +1061,10 @@ pub struct SessionCreateParams {
     /// space，否则报错。
     #[serde(default)]
     pub project_root: String,
+    /// 开在项目里的哪棵任务工作树（目录里 `worksets[].id`，必须属于 `project_root`）。
+    /// 给了就开在它的任务目录（`worktrees/<任务>`），会话绑到这棵树上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workset_id: Option<String>,
     /// 对话用哪个 agent 选项（`new_session.catalog` 的 `agents[].id`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_option_id: Option<String>,

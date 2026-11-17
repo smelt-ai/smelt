@@ -285,6 +285,44 @@ fn projection_lists_the_directory_and_live_automation_runs() {
     );
 }
 
+/// 新建会话能选的项目带上各自的工作树，按桌面侧栏的次序（`position`），别的项目的不混进来。
+#[test]
+fn projects_list_their_worksets_for_new_sessions() {
+    let mut state = CatalogState::default();
+    let mut directory = one_project_directory(Vec::new());
+    directory["projects"] = json!(["/repo", "/other"]);
+    directory["worksets"] = json!([
+        {"id": "ws-b", "project_root": "/repo", "task": "b", "branch": "fix/b",
+         "position": 1, "repositories": []},
+        {"id": "ws-x", "project_root": "/other", "task": "x", "branch": "feat/x",
+         "position": 0, "repositories": []},
+        {"id": "ws-a", "project_root": "/repo", "task": "a", "branch": "feat/a",
+         "position": 0, "repositories": []},
+    ]);
+    state.apply(
+        snapshot(Vec::new(), Some(parse_directory(directory)), None),
+        Instant::now(),
+    );
+    let worksets: Vec<(String, Vec<String>)> = state
+        .projects()
+        .into_iter()
+        .map(|project| {
+            let ids = project.worksets.into_iter().map(|w| w.id).collect();
+            (project.root, ids)
+        })
+        .collect();
+    assert_eq!(
+        worksets,
+        [
+            (
+                "/repo".to_string(),
+                vec!["ws-a".to_string(), "ws-b".to_string()]
+            ),
+            ("/other".to_string(), vec!["ws-x".to_string()]),
+        ]
+    );
+}
+
 /// 运行时一个项目都没开：会话按 cwd 自成一组，但没有能新建会话的项目。
 #[test]
 fn conversations_outside_every_project_still_list() {
@@ -1738,6 +1776,7 @@ fn create_session_sends_only_the_given_fields() {
     let id = catalog
         .create_session(CreateSession {
             project_root: "/repo".into(),
+            workset_id: Some("ws-1".into()),
             agent_option_id: Some("profile:work".into()),
             launch_key: Some(" ".into()),
             resume_id: Some("r1".into()),
@@ -1748,6 +1787,7 @@ fn create_session_sends_only_the_given_fields() {
     catalog
         .create_session(CreateSession {
             project_root: "/repo".into(),
+            workset_id: Some(" ".into()),
             agent_option_id: None,
             launch_key: None,
             resume_id: None,
@@ -1760,7 +1800,8 @@ fn create_session_sends_only_the_given_fields() {
     assert_eq!(
         runtime.controls("session.create"),
         [
-            json!({"project_root": "/repo", "agent_option_id": "profile:work", "resume_id": "r1",
+            json!({"project_root": "/repo", "workset_id": "ws-1",
+                   "agent_option_id": "profile:work", "resume_id": "r1",
                    "kind": "acp", "request_id": "6f1c2b8e-4d5a-4f3b-9c2d-1e0f9a8b7c6d"}),
             json!({"project_root": "/repo", "kind": "terminal"}),
         ]

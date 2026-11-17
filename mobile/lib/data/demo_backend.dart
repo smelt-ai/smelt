@@ -660,6 +660,16 @@ class DemoBackend implements Backend {
     root: root,
     title: _name(root),
     order: _projectRoots.indexOf(root),
+    // 演示一棵任务工作树：新建会话时可以选它。
+    worksets: root.endsWith('/smelt')
+        ? const [
+            WorkspaceWorksetChoice(
+              id: 'demo-ws-search',
+              task: 'search-box',
+              branch: 'feat/search-box',
+            ),
+          ]
+        : const [],
   );
 
   @override
@@ -755,6 +765,7 @@ class DemoBackend implements Backend {
   Future<String> createSession(
     String runtimeId, {
     required String projectRoot,
+    String? worksetId,
     String? agentOptionId,
     String? launchKey,
     String? resumeId,
