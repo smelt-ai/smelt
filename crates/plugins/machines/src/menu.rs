@@ -18,6 +18,7 @@ use smelt_plugin_api as api;
 use smelt_plugin_api::ui::field::{InputEvent, InputState};
 
 use crate::OWNER;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 // 约定：smelt.sessions 的 MACHINE_MENU 和它的上下文，权威定义在
 // crates/plugins/sessions/src/contract.rs。
@@ -354,14 +355,16 @@ impl Render for RelayForm {
             .flex_col()
             .gap_2()
             .child(TextInput::new(&self.input).disabled(self.saving))
-            .children(
-                self.saving
-                    .then(|| div().text_sm().text_color(muted).child("正在保存…")),
-            )
+            .children(self.saving.then(|| {
+                div()
+                    .type_style(TYPE.ui)
+                    .text_color(muted)
+                    .child("正在保存…")
+            }))
             .children(
                 self.error
                     .clone()
-                    .map(|error| div().text_sm().text_color(bad).child(error)),
+                    .map(|error| div().type_style(TYPE.ui).text_color(bad).child(error)),
             )
     }
 }

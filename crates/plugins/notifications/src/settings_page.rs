@@ -15,6 +15,7 @@ use smelt_plugin_api as api;
 
 use crate::store::Prefs;
 use crate::{OWNER, Plugin};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) fn register(plugin: Rc<RefCell<Plugin>>, cx: &mut App) {
     let spec = ViewSpec {
@@ -153,7 +154,7 @@ fn permission_status(cx: &mut App) -> AnyElement {
             _ => "正在读取…",
         };
         return div()
-            .text_sm()
+            .type_style(TYPE.ui)
             .text_color(rgb(ui_theme::muted()))
             .child(text)
             .into_any_element();
@@ -202,7 +203,7 @@ fn permission_status(cx: &mut App) -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(color)
                 .child(line.text),
         )

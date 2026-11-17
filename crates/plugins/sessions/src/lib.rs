@@ -48,8 +48,9 @@
 //! - S0 `model`
 //!   - `Sessions::install(cx) -> Entity<Sessions>`、`Sessions::global(cx) -> Entity<Sessions>`。
 //!   - 侧栏状态：`Sessions::{set_pinned(Pin, bool), set_collapsed(Fold, bool),
-//!     set_project_order(&RuntimeKey, Vec<String>), set_conversation_order(&RuntimeKey,
-//!     Vec<String>)}`，改缓存、写库、重算侧栏一步做完（S1 调）；读用
+//!     set_project_order(Vec<ProjectKey>), set_conversation_order(&RuntimeKey,
+//!     Vec<String>)}`，改缓存、写库、重算侧栏一步做完（S1 调）。项目顺序是所有机器排在一起
+//!     的一份，会话顺序按机器分；读用
 //!     `SidebarUi::{machine, is_pinned, is_collapsed}`。
 //!   - `Sessions::rebuild_sidebar(cx)`、`Sessions::prune(machine, style, &directory)`、
 //!     `Sessions::forget_machine(machine)`（S3 调）。

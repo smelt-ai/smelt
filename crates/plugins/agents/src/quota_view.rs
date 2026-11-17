@@ -18,11 +18,11 @@ use api::{HostEvent, PluginView, ViewHandle, ViewSpec};
 use chrono::Local;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_base::StyledExt as _;
 use smelt_plugin_api as api;
 
 use crate::contract::{self, Quota};
 use crate::quota;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 点开的列表宽度：名字一栏、用量条、百分比放得下。
 const POPOVER_WIDTH: f32 = 268.;
@@ -110,7 +110,7 @@ impl Render for QuotaBar {
             .flex()
             .items_center()
             .justify_end()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .font_family(api::model::font_config::font_family());
         if chips.is_empty() {
             // 完全没有数据：查询中时给个过渡，不然空着。
@@ -300,8 +300,7 @@ fn popover(quotas: Vec<Chip>) -> Div {
                 .px_2()
                 .flex()
                 .items_center()
-                .text_xs()
-                .font_medium()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::muted()))
                 .child("账户额度"),
         )
@@ -320,7 +319,7 @@ fn popover(quotas: Vec<Chip>) -> Div {
                 .items_center()
                 .gap_2()
                 .rounded(px(6.))
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .child(
                     Icon::path(target.agent.icon_asset())
                         .size(px(14.))
@@ -522,6 +521,9 @@ mod tests {
     use api::model::provider_quota::ProviderQuota;
 
     use super::*;
+    // `use gpui::*` 会把 gpui 的 `test` 宏一起带进来，让 `#[test]` 展开时绕回自己；
+    // 显式导入的胜过通配，指回标准库的。
+    use std::prelude::v1::test;
 
     fn window(label: &str, used_percent: f64) -> ProviderQuotaWindow {
         ProviderQuotaWindow {

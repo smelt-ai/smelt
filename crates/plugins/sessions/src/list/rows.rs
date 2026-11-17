@@ -1,16 +1,16 @@
-//! 各种行怎么画：「对话」一段、机器、项目、工作树、会话。只读 [`Sidebar`] 和视图上的
-//! 临时状态（[`RowCtx`]），不读库、不读文件。
+//! 各种行怎么画：「对话」一段、「项目」标题、项目、工作树、会话，和还没收到目录的机器。
+//! 只读 [`Sidebar`] 和视图上的临时状态（[`RowCtx`]），不读库、不读文件。
 //!
-//! 层级靠缩进：「对话」标题、机器标题（或只有本机时的「项目」标题）在最外，项目、按状态
-//! 和时间分的组、「对话」里的会话缩一级，项目和组里的会话、工作树再缩一级，工作树里的会话
-//! 再缩一级。
+//! 层级靠缩进：「对话」「项目」两个标题在最外，项目、按状态和时间分的组、「对话」里的会话、
+//! 等目录的机器缩一级，项目和组里的会话、工作树再缩一级，工作树里的会话再缩一级。机器不占
+//! 一层：远程项目和会话行上标机器名。
 
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Render, SharedString,
+    IntoElement, MouseButton, ParentElement as _, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Transformation, Window, div, px, radians, rgb,
     svg,
 };
@@ -19,6 +19,7 @@ use gpui_base::input::InputState;
 use gpui_kit_assets::IconName;
 use smelt_plugin_api::model::agent_status::AgentStatus;
 use smelt_plugin_api::ui::menu::{Menu, MenuTrigger};
+use smelt_plugin_api::ui::motion::flip_slot;
 use smelt_plugin_api::ui::tooltip::Tooltip;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::ui_theme::{self, height};
@@ -26,14 +27,17 @@ use smelt_plugin_api::ui::{Button, IconAction as _, ListRow, TextInput};
 use smelt_plugin_api::{self as api, RuntimeKey};
 
 use super::machine::Light;
+use super::motion::{FoldMotion, Frame, arrival_slot, wash};
 use super::view::{DropHint, DropTarget, ListView, RenameTarget};
 use super::{
-    BucketGroup, ConversationsSection, GroupKey, MachineSection, ProjectGroup, ProjectItem,
-    RowIcon, RowOrigin, SessionRow, Sidebar, WorksetGroup, actions, menus, project_visible,
+    BucketGroup, ConversationsSection, GroupKey, MachineInfo, ProjectGroup, ProjectItem, RowIcon,
+    RowOrigin, SessionRow, Sidebar, WorksetGroup, actions, bucket_flip, machine_id, menus,
+    project_flip, project_visible, session_flip, workset_flip,
 };
+use crate::dialogs;
 use crate::lifecycle;
-use crate::model::{ConversationKey, Fold, Selection, Sessions, SidebarGrouping};
-use crate::{contract, dialogs};
+use crate::model::{ConversationKey, Fold, ProjectKey, Selection, Sessions, SidebarGrouping};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 每缩一级多少。
 const INDENT: f32 = 16.;
@@ -50,20 +54,39 @@ pub(super) struct RowCtx {
     pub(super) rename: Option<(RenameTarget, Entity<InputState>)>,
     /// 现在（unix 秒），行尾的相对时间按它算。
     pub(super) now: u64,
+    /// 重排滑动、新会话落进列表这一帧的取样。
+    pub(super) motion: Frame,
 }
 
 /// 整个列表从上到下的行。
-pub(super) fn sidebar(ctx: &RowCtx, cx: &App) -> Vec<AnyElement> {
+pub(super) fn sidebar(ctx: &RowCtx, window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
     let mut rows = Vec::new();
     if let Some(section) = &ctx.sidebar.conversations {
-        conversations(section, ctx, &mut rows);
+        conversations(section, ctx, window, cx, &mut rows);
     }
-    // 「筛选与分组」只有一个：不分段时在「项目」标题上，分段时在第一台机器的标题上。
-    let mut grouping = Some(grouping_button(&ctx.sidebar));
-    for (machine_index, section) in ctx.sidebar.machines.iter().enumerate() {
-        machine(machine_index, section, grouping.take(), ctx, cx, &mut rows);
-    }
+    rows.push(projects_header(&ctx.sidebar, cx));
+    projects(ctx, window, cx, &mut rows);
     rows
+}
+
+/// 套一层重排时的滑动：先后变了，这一项从上一帧画的位置滑到新位置；是刚拖着放下的那一项，
+/// 就从手放下的地方落下去。`key` 是 `Sidebar::flip_order` 里的身份。一组（项目、工作树、
+/// 按状态分的组）连标题带子行套一层，整组一起走；组里的行各有一层，在组里换位置时用。
+fn flip(ctx: &RowCtx, key: String, child: impl IntoElement) -> AnyElement {
+    let landing = ctx
+        .motion
+        .landing
+        .as_ref()
+        .filter(|(landed, _)| *landed == key)
+        .map(|(_, top)| *top);
+    flip_slot(eid(format!("flip:{key}")), ctx.motion.reorder, child)
+        .from_top(landing)
+        .into_any_element()
+}
+
+/// 一组的行收成一块，好整块滑。
+fn group_block(rows: Vec<AnyElement>) -> gpui::Div {
+    div().flex().flex_col().children(rows)
 }
 
 /// 「筛选与分组」按钮：分组依据和显示哪些项目。
@@ -84,8 +107,15 @@ fn grouping_button(sidebar: &Sidebar) -> AnyElement {
 
 // ---- 「对话」一段 ----
 
-fn conversations(section: &ConversationsSection, ctx: &RowCtx, rows: &mut Vec<AnyElement>) {
+fn conversations(
+    section: &ConversationsSection,
+    ctx: &RowCtx,
+    window: &mut Window,
+    cx: &mut App,
+    rows: &mut Vec<AnyElement>,
+) {
     let collapsed = section.collapsed;
+    let fold = FoldMotion::new("conversations", collapsed, window, cx);
     let header = ListRow::new("sessions-conversations")
         .group("group-row")
         .h(height::sm())
@@ -95,175 +125,121 @@ fn conversations(section: &ConversationsSection, ctx: &RowCtx, rows: &mut Vec<An
         .flex()
         .items_center()
         .gap_2()
-        .text_xs()
-        .font_medium()
-        .child(disclosure(IconName::MessageSquare, collapsed, true))
+        .type_style(TYPE.text_xsmall_medium)
+        .child(disclosure(IconName::MessageSquare, fold.angle(), true))
         .child(div().flex_1().min_w_0().child("对话"))
         .when(collapsed, |row| {
             row.child(collapsed_summary(section.status, section.rows.len(), false))
         })
         .on_click(move |_, _, cx| toggle_fold(Fold::Conversations, !collapsed, cx));
     rows.push(header.into_any_element());
-    if !collapsed {
+    fold.body(rows, window, cx, |rows, _, _| {
         rows.extend(section.rows.iter().map(|row| session(row, 1, ctx)));
+    });
+}
+
+// ---- 项目 ----
+
+/// 「项目」标题下面那些行：项目（或按状态、时间分的组）和里面的会话，所有机器的排在一起；
+/// 最后是还没收到目录的机器，一台一行。
+fn projects(ctx: &RowCtx, window: &mut Window, cx: &mut App, rows: &mut Vec<AnyElement>) {
+    let sidebar = &ctx.sidebar;
+    // 一台机器的目录都还没收到时不知道有没有项目，只画下面那几行机器。
+    let received = sidebar.machines.iter().any(|machine| machine.received);
+    if received && sidebar.projects.is_empty() {
+        rows.push(empty_note("没有打开的项目"));
+    } else if sidebar.grouping != SidebarGrouping::Project {
+        buckets(ctx, window, cx, rows);
+    } else {
+        project_groups(ctx, window, cx, rows);
+    }
+    for machine in sidebar.machines.iter().filter(|machine| !machine.received) {
+        rows.push(waiting_machine_row(machine, cx));
     }
 }
 
-// ---- 机器 ----
+fn buckets(ctx: &RowCtx, window: &mut Window, cx: &mut App, rows: &mut Vec<AnyElement>) {
+    if ctx.sidebar.buckets.is_empty() {
+        rows.push(empty_note("没有会话"));
+    }
+    for bucket in &ctx.sidebar.buckets {
+        let key = bucket_flip(bucket.bucket);
+        let fold = FoldMotion::new(&key, bucket.collapsed, window, cx);
+        let mut group = vec![bucket_row(bucket, fold.angle())];
+        fold.body(&mut group, window, cx, |rows, _, _| {
+            rows.extend(bucket.rows.iter().map(|row| session(row, 2, ctx)));
+        });
+        rows.push(flip(ctx, key, group_block(group)));
+    }
+}
 
-fn machine(
-    machine_index: usize,
-    section: &MachineSection,
-    grouping: Option<AnyElement>,
-    ctx: &RowCtx,
-    cx: &App,
-    rows: &mut Vec<AnyElement>,
-) {
-    rows.push(if ctx.sidebar.segmented {
-        machine_header(section, grouping, cx)
-    } else {
-        projects_header(section, grouping, cx)
-    });
-    if section.collapsed {
-        return;
-    }
-    if !section.received {
-        rows.push(empty_note("连接后显示项目"));
-        return;
-    }
-    if section.projects.is_empty() {
-        rows.push(empty_note("没有打开的项目"));
-        return;
-    }
-    if ctx.sidebar.grouping != SidebarGrouping::Project {
-        if section.buckets.is_empty() {
-            rows.push(empty_note("没有会话"));
-        }
-        for bucket in &section.buckets {
-            rows.push(bucket_row(&section.key, bucket));
-            if !bucket.collapsed {
-                rows.extend(bucket.rows.iter().map(|row| session(row, 2, ctx)));
-            }
-        }
-        return;
-    }
+fn project_groups(ctx: &RowCtx, window: &mut Window, cx: &mut App, rows: &mut Vec<AnyElement>) {
     let mut hidden = 0;
-    for (project_index, project) in section.projects.iter().enumerate() {
+    for (project_index, project) in ctx.sidebar.projects.iter().enumerate() {
         let selected = is_selected_project(ctx, project);
         let has_items = !project.items.is_empty();
         if !project_visible(ctx.sidebar.hide_empty, has_items, project.pinned, selected) {
             hidden += 1;
             continue;
         }
-        rows.push(project_row(machine_index, project_index, project, ctx));
-        if project.collapsed {
-            continue;
-        }
-        for (item_index, item) in project.items.iter().enumerate() {
-            match item {
-                ProjectItem::Session(row) => rows.push(session(row, 2, ctx)),
-                ProjectItem::Workset(workset) => {
-                    let at = (machine_index, project_index, item_index);
-                    rows.push(workset_row(at, workset, ctx));
-                    if !workset.collapsed {
-                        rows.extend(workset.sessions.iter().map(|row| session(row, 3, ctx)));
+        let key = project_flip(&project.machine, &project.root);
+        let fold = FoldMotion::new(&key, project.collapsed, window, cx);
+        let mut group = vec![project_row(project_index, project, fold.angle(), ctx)];
+        fold.body(&mut group, window, cx, |rows, window, cx| {
+            for (item_index, item) in project.items.iter().enumerate() {
+                match item {
+                    ProjectItem::Session(row) => rows.push(session(row, 2, ctx)),
+                    ProjectItem::Workset(workset) => {
+                        let key = workset_flip(&workset.machine, &workset.id);
+                        let fold = FoldMotion::new(&key, workset.collapsed, window, cx);
+                        let at = (project_index, item_index);
+                        let mut group = vec![workset_row(at, workset, fold.angle(), ctx)];
+                        fold.body(&mut group, window, cx, |rows, _, _| {
+                            rows.extend(workset.sessions.iter().map(|row| session(row, 3, ctx)));
+                        });
+                        rows.push(flip(ctx, key, group_block(group)));
                     }
                 }
             }
-        }
+        });
+        rows.push(flip(ctx, key, group_block(group)));
     }
     if hidden > 0 {
-        rows.push(hidden_empty_row(&section.key, hidden));
+        rows.push(hidden_empty_row(hidden));
     }
 }
 
-/// 挂了远程机器时每台机器的段标题：系统图标按连接上色，悬停整行换成开合箭头、悬停名字看
-/// 连接说明，点行开合；折起时行尾标状态点和会话数。能用时悬停露出「打开项目」，第一台还带
-/// 「筛选与分组」。
-fn machine_header(section: &MachineSection, grouping: Option<AnyElement>, cx: &App) -> AnyElement {
-    let key = section.key.clone();
-    let id = machine_id(&key).to_string();
-    let local = matches!(key, RuntimeKey::Local);
-    let light = match section.link.light {
-        Light::Good => ui_theme::ok(),
-        Light::Degraded => ui_theme::need(),
-        Light::Down => ui_theme::bad(),
-    };
-    let detail: SharedString = section.link.detail.clone().into();
-    let collapsed = section.collapsed;
-    let icon = svg()
-        .path(section.os_icon.clone())
-        .size(px(13.))
-        .text_color(rgb(light));
-    let header = div()
-        .id(eid(format!("machine:{id}")))
-        .group("machine-row")
-        .h(height::sm())
-        .mx_2()
-        .mt_3()
-        .px_2()
-        .flex()
-        .items_center()
-        .gap_2()
-        .text_xs()
-        .font_medium()
-        .text_color(rgb(ui_theme::muted()))
-        .child(disclosure_slot("machine-row", icon, collapsed, true))
-        .child(
-            div()
-                .id(eid(format!("machine-name:{id}")))
-                .flex_1()
-                .min_w_0()
-                .child(truncated_line(section.name.clone()))
-                .tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx)),
+/// 「项目」标题：悬停露出「筛选与分组」「添加项目」和机器菜单（别的插件给机器登记的项，
+/// 如重新连接、改名、远程桌面）；机器菜单也接右键。挂着远程机器时「添加项目」先选机器。
+fn projects_header(sidebar: &Rc<Sidebar>, cx: &App) -> AnyElement {
+    let machines_menu = menus::has_machines_menu(sidebar, cx).then(|| {
+        let sidebar = sidebar.clone();
+        move |_: &mut Window, cx: &mut App| {
+            menus::machines_menu(&sidebar, cx).unwrap_or_else(Menu::new)
+        }
+    });
+    let open_project = if sidebar.has_remote() {
+        let sidebar = sidebar.clone();
+        MenuTrigger::dropdown(
+            "open-project-menu",
+            Button::new("open-project")
+                .quiet()
+                .small()
+                .icon(IconName::FolderPlus)
+                .icon_action("添加项目"),
+            move |_, _| menus::open_project_menu(&sidebar),
         )
-        .when(collapsed, |header| {
-            let status = AgentStatus::highest(section.projects.iter().map(|p| p.status));
-            let count = section.projects.iter().map(|p| p.sessions).sum();
-            header.child(collapsed_summary(status, count, false))
-        })
-        .on_click({
-            let key = key.clone();
-            move |_, _, cx| {
-                Sessions::global(cx).update(cx, |sessions, cx| {
-                    sessions.set_machine_collapsed(&key, !collapsed, cx)
-                })
-            }
-        })
-        // 连接说明里的延迟只在有人看时采样：悬停远程机器时叫宿主重读一次。
-        .when(!local, |header| {
-            header.on_hover(|hovered, _, cx| {
-                if *hovered {
-                    api::REFRESH_CONNECTIONS.run(&(), cx).detach();
-                }
-            })
-        })
-        .child(
-            hover_only("machine-row")
-                .flex()
-                .items_center()
-                // 点按钮不开合这台机器。
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .children(grouping)
-                // 连不上的机器挑不了目录，不给按钮。
-                .when(section.link.unavailable.is_none(), |slot| {
-                    let key = key.clone();
-                    slot.child(
-                        Button::new(eid(format!("machine-open:{id}")))
-                            .quiet()
-                            .small()
-                            .icon(IconName::FolderPlus)
-                            .icon_action("打开项目")
-                            .on_click(move |_, _, cx| actions::pick_project(key.clone(), cx)),
-                    )
-                }),
-        );
-    with_machine_menu(&key, header, cx)
-}
-
-/// 只挂着本机时最上面的「项目」标题（不画机器行）：悬停露出「筛选与分组」和「添加项目」；
-/// 本机的菜单（别的插件登记的）也挂在这里，跟机器行一样。
-fn projects_header(section: &MachineSection, grouping: Option<AnyElement>, cx: &App) -> AnyElement {
+        .anchor(gpui::Anchor::TopRight)
+        .into_any_element()
+    } else {
+        Button::new("open-project")
+            .quiet()
+            .small()
+            .icon(IconName::FolderPlus)
+            .icon_action("添加项目")
+            .on_click(|_, _, cx| actions::open_project(RuntimeKey::Local, cx))
+            .into_any_element()
+    };
     let header = div()
         .id("project-section-header")
         .group("projects-header")
@@ -274,71 +250,111 @@ fn projects_header(section: &MachineSection, grouping: Option<AnyElement>, cx: &
         .flex()
         .items_center()
         .gap_2()
-        .text_xs()
-        .font_medium()
+        .type_style(TYPE.text_xsmall_medium)
         .text_color(rgb(ui_theme::muted()))
         .child(div().flex_1().min_w_0().child("项目"))
         .child(
             hover_only("projects-header")
                 .flex()
                 .items_center()
-                .children(grouping)
-                .when(section.link.unavailable.is_none(), |slot| {
+                .child(grouping_button(sidebar))
+                .child(open_project)
+                .when_some(machines_menu.clone(), |slot, menu| {
                     slot.child(
-                        Button::new("open-project")
-                            .quiet()
-                            .small()
-                            .icon(IconName::FolderPlus)
-                            .icon_action("添加项目")
-                            .on_click(|_, _, cx| {
-                                let opened = contract::OPEN_PROJECT.run(&(), cx);
-                                crate::report_failure("添加项目", opened, cx);
-                            }),
+                        MenuTrigger::dropdown(
+                            "machines-menu",
+                            Button::new("machines-more")
+                                .quiet()
+                                .small()
+                                .icon(IconName::Ellipsis)
+                                .icon_action("机器"),
+                            menu,
+                        )
+                        .anchor(gpui::Anchor::TopRight),
                     )
                 }),
         );
-    with_machine_menu(&section.key, header, cx)
+    match machines_menu {
+        Some(menu) => MenuTrigger::context("machines-context", header, menu).into_any_element(),
+        None => header.into_any_element(),
+    }
 }
 
-/// 机器有菜单（别的插件往 [`contract::MACHINE_MENU`] 登记了项）时，标题行尾加「⋯」，整行
-/// 接右键。
-fn with_machine_menu(key: &RuntimeKey, header: gpui::Stateful<gpui::Div>, cx: &App) -> AnyElement {
-    if !menus::has_machine_menu(key, cx) {
-        return header.into_any_element();
-    }
-    let id = machine_id(key).to_string();
-    let header = header.child({
-        let key = key.clone();
-        MenuTrigger::dropdown(
-            eid(format!("machine-menu:{id}")),
-            Button::new(eid(format!("machine-more:{id}")))
-                .quiet()
-                .small()
-                .icon(IconName::Ellipsis)
-                .icon_action("更多"),
-            move |_, cx| menus::machine_menu(&key, cx).unwrap_or_else(Menu::new),
+/// 还没收到目录的机器（刚启动在连、离线、版本不兼容）：它有哪些项目还不知道，留一行说一声。
+/// 系统图标按连接上色，悬停看连接说明，右键是这台机器的菜单（重新连接等）。
+fn waiting_machine_row(machine: &MachineInfo, cx: &App) -> AnyElement {
+    let key = machine.key.clone();
+    let id = machine_id(&key).to_string();
+    let detail: SharedString = machine.link.detail.clone().into();
+    let row = div()
+        .id(eid(format!("machine-waiting:{id}")))
+        .h(height::md())
+        .mx_2()
+        .pl(px(8. + INDENT))
+        .pr_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .type_style(TYPE.ui)
+        .text_color(rgb(ui_theme::faint()))
+        .child(
+            lead_box().child(
+                svg()
+                    .path(machine.os_icon.clone())
+                    .size(px(14.))
+                    .text_color(rgb(light_color(machine.link.light))),
+            ),
         )
-        .anchor(gpui::Anchor::TopRight)
-    });
-    let key = key.clone();
-    MenuTrigger::context(
-        eid(format!("machine-context:{id}")),
-        header,
-        move |_, cx| menus::machine_menu(&key, cx).unwrap_or_else(Menu::new),
-    )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(truncated_line(machine.name.clone())),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .type_style(TYPE.text_xsmall)
+                .child(machine.link.unavailable.unwrap_or("连接中")),
+        )
+        .tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx))
+        .when(!matches!(key, RuntimeKey::Local), |row| {
+            row.on_hover(refresh_connections)
+        });
+    if !menus::has_machine_menu(&key, cx) {
+        return row.into_any_element();
+    }
+    MenuTrigger::context(eid(format!("machine-context:{id}")), row, move |_, cx| {
+        menus::machine_menu(&key, cx).unwrap_or_else(Menu::new)
+    })
     .into_any_element()
 }
 
+/// 连接说明里的延迟只在有人看时采样：悬停远程机器的名字时叫宿主重测一次。
+fn refresh_connections(hovered: &bool, _: &mut Window, cx: &mut App) {
+    if *hovered {
+        api::REFRESH_CONNECTIONS.run(&(), cx).detach();
+    }
+}
+
+fn light_color(light: Light) -> u32 {
+    match light {
+        Light::Good => ui_theme::ok(),
+        Light::Degraded => ui_theme::need(),
+        Light::Down => ui_theme::bad(),
+    }
+}
+
 /// 按项目分组、「显示：有会话」时，藏起来的空项目有几个；点一下回到「显示：全部」。
-fn hidden_empty_row(machine: &RuntimeKey, count: usize) -> AnyElement {
-    ListRow::new(eid(format!("hidden-empty:{}", machine_id(machine))))
+fn hidden_empty_row(count: usize) -> AnyElement {
+    ListRow::new("hidden-empty")
         .h(height::sm())
         .mx_2()
         .pl(px(8. + INDENT))
         .pr_2()
         .flex()
         .items_center()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::faint()))
         .child(format!("已隐藏 {count} 个无会话项目"))
         .on_click(|_, _, cx| {
@@ -357,13 +373,50 @@ fn empty_note(text: &'static str) -> AnyElement {
         .h(height::sm())
         .flex()
         .items_center()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::faint()))
         .child(text)
         .into_any_element()
 }
 
-// ---- 项目 ----
+/// 行上标的机器名：一小块底色上的字，跟分支名、项目名分得开。
+fn machine_pill(text: SharedString, color: u32) -> gpui::Div {
+    div()
+        .flex_shrink_0()
+        .max_w(px(120.))
+        .min_w_0()
+        .px_1()
+        .rounded(px(3.))
+        .bg(ui_theme::hair())
+        .type_style(TYPE.text_xsmall)
+        .text_color(rgb(color))
+        .child(truncated_line(text))
+}
+
+/// 项目行上的机器标签：远程项目写机器名，机器用不了时再写为什么（本机用不了只写为什么）。
+/// 慢的连接用提醒色；悬停看完整的连接说明。
+fn project_machine_tag(id: &str, project: &ProjectGroup, selected: bool) -> Option<AnyElement> {
+    let link = &project.link;
+    let text = match (&project.machine_name, link.unavailable) {
+        (Some(name), Some(why)) => format!("{name} · {why}"),
+        (Some(name), None) => name.to_string(),
+        (None, Some(why)) => why.to_string(),
+        (None, None) => return None,
+    };
+    let color = match link.light {
+        Light::Degraded => ui_theme::need(),
+        Light::Good | Light::Down => ui_theme::row_faint(selected),
+    };
+    let detail: SharedString = link.detail.clone().into();
+    let remote = project.machine_name.is_some();
+    Some(
+        machine_pill(text.into(), color)
+            .id(eid(format!("project-machine:{id}")))
+            .tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx))
+            .when(remote, |tag| tag.on_hover(refresh_connections))
+            .into_any_element(),
+    )
+}
 
 #[derive(Clone)]
 pub(super) struct ProjectDrag {
@@ -373,9 +426,9 @@ pub(super) struct ProjectDrag {
 }
 
 fn project_row(
-    machine_index: usize,
     project_index: usize,
     project: &ProjectGroup,
+    angle: f32,
     ctx: &RowCtx,
 ) -> AnyElement {
     let machine = project.machine.clone();
@@ -413,10 +466,10 @@ fn project_row(
         .flex()
         .items_center()
         .gap_2()
-        .text_sm()
+        .type_style(TYPE.ui)
         .child(fold_toggle(
             eid(format!("project-fold:{id}")),
-            disclosure(IconName::Folder, collapsed, collapsible),
+            disclosure(IconName::Folder, angle, collapsible),
             collapsible.then_some((fold, collapsed)),
         ))
         .child(
@@ -429,10 +482,14 @@ fn project_row(
                 .child(
                     div()
                         .min_w_0()
-                        .when(selected, |name| name.font_medium())
+                        .when(selected, |name| name.font_weight(TYPE.ui_medium.weight))
+                        .when(project.link.unavailable.is_some(), |name| {
+                            name.text_color(rgb(ui_theme::row_faint(selected)))
+                        })
                         .child(truncated_line(project.name.clone())),
                 )
                 .when(project.pinned, |name| name.child(pin_marker()))
+                .children(project_machine_tag(&id, project, selected))
                 .when_some(project.branch.clone(), |name, branch| {
                     // 窄侧栏里分支名常被截掉后半段，悬停看全名。
                     let full = branch.clone();
@@ -442,7 +499,7 @@ fn project_row(
                             .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx))
                             .flex_shrink_0()
                             .max_w(px(120.))
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::row_faint(selected)))
                             .child(truncated_line(branch)),
                     )
@@ -451,7 +508,7 @@ fn project_row(
                     name.child(
                         div()
                             .flex_shrink_0()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::row_faint(selected)))
                             .child(format!("{} 仓库", project.repositories)),
                     )
@@ -493,8 +550,8 @@ fn project_row(
         })
         .on_drag(drag, {
             let view = view.clone();
-            move |drag, _, window, cx| {
-                clear_drop(&view, cx);
+            move |drag, grab, window, cx| {
+                start_drag(&view, grab.y, cx);
                 preview(drag.name.clone(), window, cx)
             }
         })
@@ -505,7 +562,8 @@ fn project_row(
                     return;
                 }
                 let dragged = event.drag(cx);
-                let hint = (dragged.machine == machine && dragged.root != root).then(|| DropHint {
+                let same = dragged.machine == machine && dragged.root == root;
+                let hint = (!same).then(|| DropHint {
                     target: DropTarget::Project {
                         machine: machine.clone(),
                         root: root.clone(),
@@ -517,7 +575,7 @@ fn project_row(
         })
         .on_drop::<ProjectDrag>({
             let (view, machine, root) = (view.clone(), machine.clone(), root.clone());
-            move |dragged, _, cx| {
+            move |dragged, window, cx| {
                 let target = DropTarget::Project {
                     machine: machine.clone(),
                     root: root.clone(),
@@ -525,16 +583,22 @@ fn project_row(
                 let Some(before) = take_drop(&view, &target, cx) else {
                     return;
                 };
-                if dragged.machine == machine {
-                    actions::drop_project(&machine, &dragged.root, &root, before, cx);
-                }
+                let from = ProjectKey {
+                    machine: dragged.machine.clone(),
+                    root: dragged.root.clone(),
+                };
+                let to = ProjectKey {
+                    machine: machine.clone(),
+                    root: root.clone(),
+                };
+                drop_at(&view, project_flip(&from.machine, &from.root), window, cx);
+                actions::drop_project(&from, &to, before, cx);
             }
         });
 
     let sidebar = ctx.sidebar.clone();
     MenuTrigger::context(eid(format!("project-menu:{id}")), row, move |_, cx| {
-        let project = &sidebar.machines[machine_index].projects[project_index];
-        menus::project_menu(project, cx)
+        menus::project_menu(&sidebar.projects[project_index], cx)
     })
     .into_any_element()
 }
@@ -548,10 +612,9 @@ fn is_selected_project(ctx: &RowCtx, project: &ProjectGroup) -> bool {
 // ---- 按状态、时间分的组 ----
 
 /// 组的标题行：点一下开合。组是现算的，没有菜单、不能拖、不能在组里新建会话。
-fn bucket_row(machine: &RuntimeKey, group: &BucketGroup) -> AnyElement {
+fn bucket_row(group: &BucketGroup, angle: f32) -> AnyElement {
     let (bucket, collapsed) = (group.bucket, group.collapsed);
-    let machine = machine.clone();
-    ListRow::new(eid(format!("bucket:{}:{bucket:?}", machine_id(&machine))))
+    ListRow::new(eid(bucket_flip(bucket)))
         .group("group-row")
         .h(height::md())
         .mx_2()
@@ -560,8 +623,8 @@ fn bucket_row(machine: &RuntimeKey, group: &BucketGroup) -> AnyElement {
         .flex()
         .items_center()
         .gap_2()
-        .text_sm()
-        .child(disclosure(IconName::Folder, collapsed, true))
+        .type_style(TYPE.ui)
+        .child(disclosure(IconName::Folder, angle, true))
         .child(
             div()
                 .flex_1()
@@ -573,7 +636,7 @@ fn bucket_row(machine: &RuntimeKey, group: &BucketGroup) -> AnyElement {
         })
         .on_click(move |_, _, cx| {
             Sessions::global(cx).update(cx, |sessions, cx| {
-                sessions.set_bucket_collapsed(&machine, bucket, !collapsed, cx)
+                sessions.set_bucket_collapsed(bucket, !collapsed, cx)
             });
         })
         .into_any_element()
@@ -582,8 +645,9 @@ fn bucket_row(machine: &RuntimeKey, group: &BucketGroup) -> AnyElement {
 // ---- 工作树 ----
 
 fn workset_row(
-    (machine_index, project_index, item_index): (usize, usize, usize),
+    (project_index, item_index): (usize, usize),
     workset: &WorksetGroup,
+    angle: f32,
     ctx: &RowCtx,
 ) -> AnyElement {
     let machine = workset.machine.clone();
@@ -628,8 +692,8 @@ fn workset_row(
         .flex()
         .items_center()
         .gap_2()
-        .text_sm()
-        .child(disclosure(IconName::GitBranch, collapsed, collapsible))
+        .type_style(TYPE.ui)
+        .child(disclosure(IconName::GitBranch, angle, collapsible))
         .child(title)
         .when(collapsed, |row| {
             row.child(collapsed_summary(workset.status, workset.sessions.len(), false))
@@ -661,13 +725,14 @@ fn workset_row(
         });
 
     let sidebar = ctx.sidebar.clone();
-    MenuTrigger::context(eid(format!("workset-menu:{id}")), row, move |_, _| {
-        let project = &sidebar.machines[machine_index].projects[project_index];
-        match &project.items[item_index] {
+    MenuTrigger::context(
+        eid(format!("workset-menu:{id}")),
+        row,
+        move |_, _| match &sidebar.projects[project_index].items[item_index] {
             ProjectItem::Workset(workset) => menus::workset_menu(workset, view.clone()),
             ProjectItem::Session(_) => Menu::new(),
-        }
-    })
+        },
+    )
     .into_any_element()
 }
 
@@ -694,6 +759,11 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
         _ => None,
     });
     let view = ctx.view.clone();
+    let arrival = ctx
+        .motion
+        .arrival
+        .as_ref()
+        .filter(|arrival| arrival.key == key);
 
     let title = match renaming {
         Some(input) => rename_field(input),
@@ -706,10 +776,13 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
             .child(
                 div()
                     .min_w_0()
-                    .when(selected, |title| title.font_medium())
+                    .when(selected, |title| title.font_weight(TYPE.ui_medium.weight))
                     .child(truncated_line(row.title.clone())),
             )
             .when(row.pinned, |title| title.child(pin_marker()))
+            .when_some(row.machine_name.clone(), |title, name| {
+                title.child(machine_pill(name, ui_theme::row_faint(selected)))
+            })
             .when_some(row.origin.as_ref(), |title, origin| {
                 title.children(origin_labels(&id, origin, selected))
             })
@@ -738,8 +811,15 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
         .flex()
         .items_center()
         .gap_2()
-        .text_sm()
-        .child(session_icon(&id, &row.icon, row.status, selected))
+        .type_style(TYPE.ui)
+        .when_some(arrival, |item, arrival| item.child(wash(arrival.wash)))
+        .child(session_icon(
+            &id,
+            &row.icon,
+            row.status,
+            selected,
+            ctx.motion.glows.get(&key).copied(),
+        ))
         .child(title)
         .child(trailing(meta(row, selected, ctx.now), close))
         .tooltip({
@@ -770,8 +850,8 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
             let group = row.group.clone();
             item.on_drag(drag, {
                 let view = view.clone();
-                move |drag, _, window, cx| {
-                    clear_drop(&view, cx);
+                move |drag, grab, window, cx| {
+                    start_drag(&view, grab.y, cx);
                     preview(drag.title.clone(), window, cx)
                 }
             })
@@ -791,23 +871,26 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
             })
             .on_drop::<SessionDrag>({
                 let (view, key) = (view.clone(), key.clone());
-                move |dragged, _, cx| {
+                move |dragged, window, cx| {
                     let target = DropTarget::Session(key.clone());
                     let Some(before) = take_drop(&view, &target, cx) else {
                         return;
                     };
                     if dragged.group == group {
+                        drop_at(&view, session_flip(&dragged.key), window, cx);
                         actions::drop_session(&dragged.key, &key, &group, before, cx);
                     }
                 }
             })
         });
 
+    let flip_key = session_flip(&key);
     let row = row.clone();
-    MenuTrigger::context(eid(format!("session-menu:{id}")), item, move |_, _| {
+    let item = MenuTrigger::context(eid(format!("session-menu:{id}")), item, move |_, _| {
         menus::session_menu(&row, view.clone())
     })
-    .into_any_element()
+    .into_any_element();
+    flip(ctx, flip_key, arrival_slot(arrival, height::md(), item))
 }
 
 /// 按状态、时间分组时标题后面补的来源：工作树的小标签，项目名和分支。
@@ -826,7 +909,7 @@ fn origin_labels(id: &str, origin: &RowOrigin, selected: bool) -> Vec<AnyElement
                 .px_1()
                 .rounded(px(3.))
                 .bg(ui_theme::hair())
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::row_muted(selected)))
                 .child(
                     svg()
@@ -848,7 +931,7 @@ fn origin_labels(id: &str, origin: &RowOrigin, selected: bool) -> Vec<AnyElement
             .flex()
             .items_center()
             .gap_1()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::row_muted(selected)))
             .child(
                 div()
@@ -871,12 +954,19 @@ fn origin_labels(id: &str, origin: &RowOrigin, selected: bool) -> Vec<AnyElement
     labels
 }
 
-/// 行首的图标，按状态上色：空闲随行的次要字色，在跑、要人管的用状态色。
-fn session_icon(id: &str, icon: &RowIcon, status: AgentStatus, selected: bool) -> AnyElement {
-    let color = if status == AgentStatus::Idle {
-        rgb(ui_theme::row_muted(selected))
-    } else {
-        ui_theme::session_dot_color(status)
+/// 行首的图标，按状态上色：空闲随行的次要字色，在跑、要人管的用状态色。`glow` 是刚开始跑
+/// 时亮一下的进度：只提亮度不淡出，图标还要认得出是哪家 agent。
+fn session_icon(
+    id: &str,
+    icon: &RowIcon,
+    status: AgentStatus,
+    selected: bool,
+    glow: Option<f32>,
+) -> AnyElement {
+    let color = match (status, glow) {
+        (AgentStatus::Idle, _) => rgb(ui_theme::row_muted(selected)),
+        (AgentStatus::Running, Some(phase)) => ui_theme::running_glow_color(phase),
+        _ => ui_theme::session_dot_color(status),
     };
     let glyph = |path: SharedString| {
         svg()
@@ -896,8 +986,7 @@ fn session_icon(id: &str, icon: &RowIcon, status: AgentStatus, selected: bool) -
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(10.))
-                .font_medium()
+                .type_style(TYPE.small_medium)
                 .text_color(color)
                 .child(mark.clone())
                 .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
@@ -949,7 +1038,7 @@ fn trailing((text, color): (String, u32), close: Button) -> impl IntoElement {
         .justify_end()
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(color))
                 .group_hover("session-row", |style| style.opacity(0.0))
                 .child(text),
@@ -984,13 +1073,14 @@ fn lead_box() -> gpui::Div {
 }
 
 /// 分组行开头那一格：平时是分组自己的图标，悬停整行时换成展开 / 收起箭头（收起朝右，
-/// 展开朝下）。没东西可折的只有图标。两样叠在同一格里只换透明度，名字不跟着动。
-fn disclosure(icon: IconName, collapsed: bool, collapsible: bool) -> gpui::Div {
+/// 展开朝下）。没东西可折的只有图标。两样叠在同一格里只换透明度，名字不跟着动。`angle` 是
+/// 箭头转到的角度（[`FoldMotion::angle`]），开合时跟着转。
+fn disclosure(icon: IconName, angle: f32, collapsible: bool) -> gpui::Div {
     let icon = svg()
         .path(icon.path())
         .size(px(14.))
         .text_color(rgb(ui_theme::muted()));
-    disclosure_slot("group-row", icon, collapsed, collapsible)
+    disclosure_slot("group-row", icon, angle, collapsible)
 }
 
 /// [`disclosure`] 的通用版：`icon` 是平时那个图标（机器行的是按连接上色的系统图标），悬停
@@ -998,10 +1088,9 @@ fn disclosure(icon: IconName, collapsed: bool, collapsible: bool) -> gpui::Div {
 fn disclosure_slot(
     group: &'static str,
     icon: gpui::Svg,
-    collapsed: bool,
+    angle: f32,
     collapsible: bool,
 ) -> gpui::Div {
-    let angle: f32 = if collapsed { 0. } else { 90. };
     lead_box()
         .relative()
         .text_color(rgb(ui_theme::muted()))
@@ -1051,7 +1140,7 @@ fn collapsed_summary(status: AgentStatus, count: usize, selected: bool) -> impl 
         .flex()
         .items_center()
         .gap_1p5()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::row_faint(selected)))
         .when(status != AgentStatus::Idle, |summary| {
             summary.child(
@@ -1122,9 +1211,18 @@ fn toggle_fold(fold: Fold, collapsed: bool, cx: &mut App) {
     });
 }
 
-/// 开始拖：清掉上一次没放下就松手留下的落点。
-fn clear_drop(view: &Entity<ListView>, cx: &mut App) {
-    view.update(cx, |view, cx| view.set_drop(None, cx));
+/// 开始拖：清掉上一次没放下就松手留下的落点，记下指针按在行上多高的地方（`grab`）。
+fn start_drag(view: &Entity<ListView>, grab: Pixels, cx: &mut App) {
+    view.update(cx, |view, cx| {
+        view.motion.start_drag(grab);
+        view.set_drop(None, cx);
+    });
+}
+
+/// 放下了：被拖的那一项（`Sidebar::flip_order` 里的身份）从拖拽牌子这时的高度落到新位置。
+fn drop_at(view: &Entity<ListView>, key: String, window: &Window, cx: &mut App) {
+    let pointer = window.mouse_position().y;
+    view.update(cx, |view, _| view.motion.drop_at(key, pointer));
 }
 
 /// 放下时取走落点：只认落点就在放下的这一行上（`target`）。
@@ -1154,7 +1252,7 @@ impl Render for DragPreview {
             .border_1()
             .border_color(ui_theme::hair_strong())
             .shadow_md()
-            .text_sm()
+            .type_style(TYPE.ui)
             .text_color(rgb(ui_theme::text()))
             .child(truncated_line(self.0.clone()))
     }
@@ -1162,13 +1260,6 @@ impl Render for DragPreview {
 
 fn preview(label: SharedString, _: &mut Window, cx: &mut App) -> Entity<DragPreview> {
     cx.new(|_| DragPreview(label))
-}
-
-fn machine_id(machine: &RuntimeKey) -> &str {
-    match machine {
-        RuntimeKey::Local => "@local",
-        RuntimeKey::Remote(id) => id,
-    }
 }
 
 fn eid(id: String) -> ElementId {

@@ -23,6 +23,7 @@ use smelt_plugin_api as api;
 
 use crate::store::{Prefs, UpdaterStore};
 use crate::{ABOUT_VIEW, OWNER};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 装更新会停掉后台服务时，确认框里讲后果的那句。
 const UPDATE_SENTENCE: &str =
@@ -719,7 +720,7 @@ fn offer_move_app(cx: &mut App) {
                 (None, false) => (SharedString::default(), ui_theme::muted()),
             };
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(color))
                 .child(text)
                 .into_any_element()

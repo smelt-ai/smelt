@@ -10,6 +10,7 @@ use api::model::pi_auth::PiAuthProvider;
 use api::model::pi_model_settings::{PiCustomProvider, PiModelSettings};
 use api::ui::IconAction as _;
 use api::ui::truncated_line::truncated_line;
+use smelt_plugin_api::ui::kit::TYPE;
 
 /// 宽屏上标签和值隔太远就读不成一行了，正文限宽居中。
 const PAGE_MAX_WIDTH: f32 = 760.;
@@ -84,8 +85,7 @@ pub(super) fn section(
                 .child(
                     // 分组标题跟侧栏「最近对话」「项目」一个级别：小号、灰、不加粗。
                     div()
-                        .text_xs()
-                        .font_medium()
+                        .type_style(TYPE.text_xsmall_medium)
                         .text_color(palette.muted)
                         .child(title),
                 )
@@ -133,7 +133,7 @@ fn default_model_section(
         Err(error) => {
             status = status.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(palette.danger)
                     .child(format!("无法读取 settings.json：{error}")),
             );
@@ -141,7 +141,7 @@ fn default_model_section(
         Ok(_) if explicit.is_none() => {
             status = status.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(palette.muted)
                     .child("尚未选择，正在用 Pi 的内置默认值"),
             );
@@ -156,7 +156,12 @@ fn default_model_section(
             status = status.child(Badge::new().need().child("缺少凭据"));
         }
         Err(error) => {
-            status = status.child(div().text_xs().text_color(palette.danger).child(error));
+            status = status.child(
+                div()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(palette.danger)
+                    .child(error),
+            );
         }
     }
 
@@ -184,8 +189,7 @@ fn default_model_section(
                         .child(
                             div()
                                 .overflow_hidden()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(palette.fg)
                                 .child(truncated_line(title)),
                         )
@@ -201,7 +205,7 @@ fn default_model_section(
     {
         body = body.child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.danger)
                 .child(format!("操作失败：{error}")),
         );
@@ -313,7 +317,7 @@ fn thinking_level_row(
         .child(
             div()
                 .flex_none()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
                 .child("推理强度"),
         )
@@ -338,7 +342,7 @@ fn thinking_level_row(
         )
         .children((!enabled).then(|| {
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
                 .child("先选一个默认模型")
         }))
@@ -456,7 +460,7 @@ fn provider_section(
     if let Some(error) = &page.pi_auth_error {
         body = body.child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.danger)
                 .child(format!("操作失败：{error}")),
         );
@@ -598,7 +602,7 @@ fn provider_list_footer(
         // 进页签时会自动读；这里只是读之前的一帧。
         None | Some(PiAuthProvidersState::Loading) => footer.child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
                 .child("正在读取内置 Provider 的登录状态…首次需要准备 Pi 运行时，可能要等一会"),
         ),
@@ -607,7 +611,7 @@ fn provider_list_footer(
                 div()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(palette.danger)
                     .child(truncated_line(format!("读取内置 Provider 失败：{error}"))),
             )
@@ -679,7 +683,7 @@ fn custom_provider_row(
                         .child(
                             div()
                                 .overflow_hidden()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(palette.fg)
                                 .child(truncated_line(name)),
                         )
@@ -689,7 +693,7 @@ fn custom_provider_row(
                 .child(
                     div()
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(palette.muted)
                         .child(truncated_line(format!(
                             "{} · {} 个模型 · {}",
@@ -768,7 +772,7 @@ fn config_files_footer(
             div()
                 .flex_none()
                 .mr_2()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
                 .child("原生配置文件"),
         )
@@ -837,12 +841,16 @@ fn default_model_form(
                 .gap_1()
                 .child(
                     div()
-                        .text_sm()
-                        .font_semibold()
+                        .type_style(TYPE.ui_medium)
                         .text_color(fg)
                         .child("手动填写 Provider 和模型"),
                 )
-                .child(div().text_xs().text_color(muted).child(credential_status)),
+                .child(
+                    div()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(muted)
+                        .child(credential_status),
+                ),
         )
         .child(
             div()
@@ -860,8 +868,7 @@ fn default_model_form(
                         .gap_1()
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
                                 .child("提供方 (Provider)"),
                         )
@@ -876,8 +883,7 @@ fn default_model_form(
                         .gap_1()
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
                                 .child("默认模型 ID"),
                         )
@@ -900,8 +906,7 @@ fn default_model_form(
                         .gap_1()
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
                                 .child("API 地址 (可选)"),
                         )
@@ -916,15 +921,14 @@ fn default_model_form(
                         .gap_1()
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
                                 .child("API key"),
                         )
                         .child(TextInput::new(&editor.api_key))
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
                                 .child("凭据将安全存放于 ~/.pi/agent/auth.json"),
                         ),
@@ -1021,8 +1025,7 @@ fn custom_provider_form(
                         .gap_2()
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
                                 .child(format!("模型 {}", index + 1)),
                         )
@@ -1054,7 +1057,12 @@ fn custom_provider_form(
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
-                                .child(div().text_xs().text_color(muted).child("模型 ID"))
+                                .child(
+                                    div()
+                                        .type_style(TYPE.text_xsmall)
+                                        .text_color(muted)
+                                        .child("模型 ID"),
+                                )
                                 .child(TextInput::new(&model.id)),
                         )
                         .child(
@@ -1064,7 +1072,12 @@ fn custom_provider_form(
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
-                                .child(div().text_xs().text_color(muted).child("显示名称"))
+                                .child(
+                                    div()
+                                        .type_style(TYPE.text_xsmall)
+                                        .text_color(muted)
+                                        .child("显示名称"),
+                                )
                                 .child(TextInput::new(&model.name)),
                         ),
                 )
@@ -1084,7 +1097,7 @@ fn custom_provider_form(
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_xs()
+                                        .type_style(TYPE.text_xsmall)
                                         .text_color(muted)
                                         .child("上下文长度（可选）"),
                                 )
@@ -1097,7 +1110,12 @@ fn custom_provider_form(
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
-                                .child(div().text_xs().text_color(muted).child("最大输出（可选）"))
+                                .child(
+                                    div()
+                                        .type_style(TYPE.text_xsmall)
+                                        .text_color(muted)
+                                        .child("最大输出（可选）"),
+                                )
                                 .child(TextInput::new(&model.max_tokens)),
                         ),
                 ),
@@ -1123,7 +1141,7 @@ fn custom_provider_form(
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(div().text_sm().font_semibold().text_color(fg).child(
+                        .child(div().type_style(TYPE.ui_medium).text_color(fg).child(
                             if editor.previous_id.is_some() {
                                 "编辑自定义 Provider"
                             } else {
@@ -1132,7 +1150,12 @@ fn custom_provider_form(
                         ))
                         .child(Badge::new().child("原生 Pi")),
                 )
-                .child(div().text_xs().text_color(muted).child(credential_status)),
+                .child(
+                    div()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(muted)
+                        .child(credential_status),
+                ),
         )
         .child(
             div()
@@ -1150,15 +1173,14 @@ fn custom_provider_form(
                         .gap_1()
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
                                 .child("Provider ID"),
                         )
                         .child(TextInput::new(&editor.id))
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
                                 .child("字母开头，可含字母、数字和短连字符"),
                         ),
@@ -1172,8 +1194,7 @@ fn custom_provider_form(
                         .gap_1()
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
                                 .child("显示名称（可选）"),
                         )
@@ -1196,8 +1217,7 @@ fn custom_provider_form(
                         .gap_1()
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
                                 .child("API 地址"),
                         )
@@ -1209,7 +1229,12 @@ fn custom_provider_form(
                         .flex_col()
                         .w(px(220.))
                         .gap_1()
-                        .child(div().text_xs().font_semibold().text_color(fg).child("协议"))
+                        .child(
+                            div()
+                                .type_style(TYPE.text_xsmall_medium)
+                                .text_color(fg)
+                                .child("协议"),
+                        )
                         .child(MenuTrigger::dropdown(
                             "pi-custom-provider-api-menu",
                             Button::new("pi-custom-provider-api")
@@ -1240,15 +1265,14 @@ fn custom_provider_form(
                 .gap_1()
                 .child(
                     div()
-                        .text_xs()
-                        .font_semibold()
+                        .type_style(TYPE.text_xsmall_medium)
                         .text_color(fg)
                         .child("API key"),
                 )
                 .child(TextInput::new(&editor.api_key))
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child("凭据存放于 ~/.pi/agent/auth.json"),
                 ),
@@ -1261,8 +1285,7 @@ fn custom_provider_form(
                 .justify_between()
                 .child(
                     div()
-                        .text_sm()
-                        .font_semibold()
+                        .type_style(TYPE.ui_medium)
                         .text_color(fg)
                         .child("模型目录"),
                 )
@@ -1310,9 +1333,12 @@ fn custom_provider_form(
             danger_fg,
         ))
         .child(model_rows)
-        .children(
-            model_editor_error.map(|error| div().text_xs().text_color(danger_fg).child(error)),
-        )
+        .children(model_editor_error.map(|error| {
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(danger_fg)
+                .child(error)
+        }))
         .child(
             div()
                 .flex()

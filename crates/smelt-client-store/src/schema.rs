@@ -72,7 +72,6 @@ CREATE TABLE runtime_connection (
   relay_url TEXT,
   position INTEGER NOT NULL,
   added_at_ms INTEGER NOT NULL,
-  smelt_home TEXT,
   os TEXT
 ) WITHOUT ROWID;
 CREATE TABLE key_binding (
@@ -291,7 +290,8 @@ UPDATE key_binding SET command = 'smelt.agents/new-conversation'
 /// `workspace_ui` 只剩宿主自己的页面路由，列名跟宿主的说法改成 `outlet`。
 ///
 /// 外观里早已没人读的 `bg_color`、`opacity`、`blur` 删掉；`glass_style` 存的其实是材质，
-/// 改名 `material`。
+/// 改名 `material`。远程机器的 `smelt_home` 删掉：智能体 space 在哪改由运行时随智能体配置
+/// 推来，客户端不再记。
 ///
 /// 分屏命令跟着从 `smelt.stage` 搬到会话插件，名字不变，改过的键搬到新 id 上；新 id 已经
 /// 有记录的（用户在新版里改过）以新的为准。别的 `smelt.stage/*` 和按侧栏顺序跳的
@@ -315,6 +315,7 @@ ALTER TABLE appearance DROP COLUMN bg_color;
 ALTER TABLE appearance DROP COLUMN opacity;
 ALTER TABLE appearance DROP COLUMN blur;
 ALTER TABLE appearance RENAME COLUMN glass_style TO material;
+ALTER TABLE runtime_connection DROP COLUMN smelt_home;
 UPDATE OR IGNORE key_binding SET command = CASE command
   WHEN 'smelt.stage/prev-pane' THEN 'smelt.sessions/prev-pane'
   WHEN 'smelt.stage/next-pane' THEN 'smelt.sessions/next-pane'

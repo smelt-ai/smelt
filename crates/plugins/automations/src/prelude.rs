@@ -3,7 +3,6 @@
 pub(crate) use chrono::{Local, TimeZone, Utc};
 pub(crate) use gpui::prelude::FluentBuilder;
 pub(crate) use gpui::*;
-pub(crate) use gpui_base::StyledExt as _;
 pub(crate) use smelt_plugin_api::{self as api, RuntimeKey};
 
 pub(crate) use api::model::agent_definition::AgentDefinition;

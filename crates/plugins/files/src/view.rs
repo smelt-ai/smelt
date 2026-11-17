@@ -11,57 +11,35 @@ use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smelt_plugin_api::ui::scrollbar::{Scrollable, Scrollbar, ScrollbarAxis};
 use smelt_plugin_api::ui::tooltip::Tooltip;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
-use smelt_plugin_api::ui::{Button, Icon, IconAction as _, IconName, TextInput};
+use smelt_plugin_api::ui::{Button, CodeEditor, Icon, IconAction as _, IconName, TextInput};
 
 use crate::model::{
     FileTreeRow, OpenFile, PreviewKind, SearchState, SearchTreeDir, breadcrumb_segments,
     build_search_tree, file_tree_row_height, file_tree_row_id, name_likely_truncated,
 };
 use crate::{FilesPanel, MAX_TREE_WIDTH, MIN_TREE_WIDTH, TREE_KEY_CONTEXT, ui_theme};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
-/// 编辑器的右键菜单。打开时按编辑器当下的选区和只读与否定哪些项可用；编辑类的项先把
-/// 焦点还给编辑器再派发动作，动作才落到它身上。
-fn editor_menu(
+/// 编辑器右键菜单在剪切、复制、粘贴、全选之后追加的项。打开时按当下有没有选区定可不可用。
+fn editor_menu_items(
     editor: &Entity<gpui_base::input::EditorState>,
     panel: WeakEntity<FilesPanel>,
-) -> impl Fn(&mut Window, &mut App) -> Menu + 'static {
-    use gpui_base::input::{Copy, Cut, Paste, SelectAll};
-
+) -> impl Fn(Menu, &mut Window, &mut App) -> Menu + 'static {
     let editor = editor.downgrade();
-    move |_, cx| {
-        let Some(editor) = editor.upgrade() else {
-            return Menu::new();
-        };
-        let capabilities = editor.read(cx).context_menu_capabilities();
-        let focus = editor.focus_handle(cx);
-        let item = |label: &'static str, enabled: bool, action: fn() -> Box<dyn Action>| {
-            let focus = focus.clone();
-            MenuItem::new(label)
-                .disabled(!enabled)
-                .on_click(move |_, window, cx| {
-                    focus.focus(window, cx);
-                    window.dispatch_action(action(), cx);
-                })
-        };
-        let editable = capabilities.is_editable();
-        let copyable = capabilities.is_copyable();
+    move |menu, _, cx| {
+        let has_selection = editor
+            .upgrade()
+            .is_some_and(|editor| editor.read(cx).context_menu_capabilities().has_selection());
         let panel = panel.clone();
-        Menu::new()
-            .item(item("剪切", editable && copyable, || Box::new(Cut)))
-            .item(item("复制", copyable, || Box::new(Copy)))
-            .item(item("粘贴", editable, || Box::new(Paste)))
-            .separator()
-            .item(item("全选", true, || Box::new(SelectAll)))
-            .separator()
-            .item(
-                MenuItem::new("发送选中内容到会话")
-                    .disabled(!capabilities.has_selection())
-                    .on_click(move |_, _, cx| {
-                        panel
-                            .update(cx, |panel, cx| panel.send_open_file_selection(cx))
-                            .ok();
-                    }),
-            )
+        menu.item(
+            MenuItem::new("发送选中内容到会话")
+                .disabled(!has_selection)
+                .on_click(move |_, _, cx| {
+                    panel
+                        .update(cx, |panel, cx| panel.send_open_file_selection(cx))
+                        .ok();
+                }),
+        )
     }
 }
 
@@ -76,8 +54,7 @@ fn placeholder_view(text: &str, muted: Hsla) -> Div {
         .px_4()
         .child(
             div()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .text_center()
                 .text_color(muted)
                 .child(text.to_string()),
@@ -231,7 +208,7 @@ impl FilesPanel {
                 div()
                     .px_2()
                     .py_1()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child(status),
             )
@@ -378,9 +355,8 @@ impl FilesPanel {
                     .rounded_md()
                     .flex()
                     .items_center()
-                    .text_size(px(14.))
-                    .line_height(relative(1.2))
-                    .when(is_last, |el| el.text_color(fg).font_semibold())
+                    .type_style(TYPE.ui)
+                    .when(is_last, |el| el.text_color(fg).font_weight(TYPE.ui_medium.weight))
                     .when(!is_last, |el| el.text_color(muted))
                     .hover(move |el| el.bg(ui_theme::row_hover()).text_color(fg))
                     .child(seg.label.clone())
@@ -395,7 +371,7 @@ impl FilesPanel {
                 let sep = (!is_last).then(|| {
                     div()
                         .flex_shrink_0()
-                        .text_size(px(14.))
+                        .type_style(TYPE.ui)
                         .text_color(muted)
                         .child(">")
                 });
@@ -423,7 +399,7 @@ impl FilesPanel {
                     .children(
                         of.save_error
                             .clone()
-                            .map(|message| div().text_xs().text_color(warning).child(message)),
+                            .map(|message| div().type_style(TYPE.text_xsmall).text_color(warning).child(message)),
                     ),
             )
             // 浏览器只能打开这台电脑上的文件。
@@ -509,7 +485,7 @@ impl FilesPanel {
                 .overflow_x_scroll()
                 .overflow_y_scroll()
                 .p_3()
-                .child(div().text_sm().text_color(fg).child(
+                .child(div().type_style(TYPE.ui).text_color(fg).child(
                     smelt_plugin_api::ui::markdown_mermaid::markdown_view(
                         "md-preview-body",
                         of.preview_source.clone(),
@@ -517,25 +493,13 @@ impl FilesPanel {
                 ))
                 .into_any_element();
         }
-        // 代码编辑器留在组件库：语法高亮（tree-sitter 高亮器和高亮主题）、搜索栏、折叠图标
-        // 都是组件库的 `Editor` 装上的，gpui-base 只有编辑状态。状态本身是 gpui-base 的。
-        let editor = gpui_component::input::Editor::new(&of.editor)
-            .h_full()
-            // 编辑器自带行号栏，去掉 Input 预设的横向内边距。
-            .px_0()
-            // 右键菜单由外面这层出。编辑器自带的那份留着开关、只给空菜单：右键落在选区外
-            // 时它照常把光标挪过去，空菜单不弹出来。关掉开关的话光标就不跟着右键走了。
-            .context_menu(|menu, _, _| menu);
         div()
             .flex_1()
             .min_h_0()
             .child(
-                MenuTrigger::context(
-                    ("files-editor-menu", of.editor.entity_id()),
-                    editor,
-                    editor_menu(&of.editor, cx.entity().downgrade()),
-                )
-                .size_full(),
+                CodeEditor::new(&of.editor)
+                    .aria_label(of.path.clone())
+                    .context_menu(editor_menu_items(&of.editor, cx.entity().downgrade())),
             )
             .into_any_element()
     }
@@ -666,7 +630,7 @@ fn search_tree_rows(
                 .pl(px(8. + depth as f32 * 16.))
                 .pr_2()
                 .py(px(2.))
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(context.fg)
                 .child(
                     Icon::new(IconName::ChevronDown)
@@ -709,7 +673,7 @@ fn search_tree_rows(
                 .pl(px(8. + depth as f32 * 16. + 14.))
                 .pr_2()
                 .py(px(2.))
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(context.fg)
                 .hover(move |row| row.bg(hover))
                 .child(
@@ -791,7 +755,7 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
         .h(paint.row_h)
         .flex()
         .items_center()
-        .text_sm()
+        .type_style(TYPE.ui)
         // 点行也把焦点交给树，方向键接着用。
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             window.focus(&focus, cx);
@@ -921,7 +885,7 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
                 .children(git_mark.map(|mark| {
                     div()
                         .flex_none()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_bold()
                         .text_color(git_mark_color(mark))
                         .child(mark.to_string())

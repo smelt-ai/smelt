@@ -35,6 +35,7 @@ use smelt_ui::window_bar::{Adapt, SafeArea, TOP_BAR_HEIGHT, with_window_drag};
 use smelt_ui::{Badge, IconAction as _, IconName, ui_theme};
 
 use crate::Workspace;
+use smelt_ui::kit::{TYPE, TypeStyled as _};
 
 /// Dock 的四个区域，按画的先后。
 const PLACEMENTS: [DockPlacement; 4] = [
@@ -1004,7 +1005,7 @@ fn render_title_band(
                 .h_full()
                 .gap_1()
                 .justify_center()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child(label.label)
                 .children(label.badge),

@@ -7,6 +7,7 @@ use crate::models::PiConfigFileKind;
 use api::model::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
 use api::ui::IconAction as _;
 use api::ui::truncated_line::truncated_line;
+use smelt_plugin_api::ui::kit::TYPE;
 
 const PAGE_MAX_WIDTH: f32 = 760.;
 
@@ -55,7 +56,7 @@ fn row(index: usize, palette: Palette) -> Div {
 fn row_title(text: impl Into<SharedString>, palette: Palette) -> Div {
     div()
         .overflow_hidden()
-        .text_sm()
+        .type_style(TYPE.ui)
         .text_color(palette.fg)
         .child(truncated_line(text))
 }
@@ -63,7 +64,7 @@ fn row_title(text: impl Into<SharedString>, palette: Palette) -> Div {
 fn row_detail(text: impl Into<SharedString>, palette: Palette) -> Div {
     div()
         .overflow_hidden()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(palette.muted)
         .child(truncated_line(text))
 }
@@ -135,7 +136,7 @@ fn preset_row(
                 .child(row_title(preset.name, palette))
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(palette.muted)
                         .child(preset.summary),
                 ),
@@ -162,7 +163,7 @@ fn servers_section(
     if let Some(error) = &page.pi_mcp_error {
         body = body.child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.danger)
                 .child(format!("操作失败：{error}")),
         );
@@ -171,7 +172,7 @@ fn servers_section(
         Err(error) => {
             body = body.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(palette.danger)
                     .child(format!("无法读取 mcp.json：{error}")),
             );
@@ -180,7 +181,7 @@ fn servers_section(
             body = body.child(
                 card(palette).px_4().py_3().child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(palette.muted)
                         .child("还没有 MCP 服务器。添加上面的内置服务器，或直接编辑 mcp.json。"),
                 ),
@@ -335,9 +336,12 @@ fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palett
         .justify_between()
         .gap_3()
         .child(
-            div().text_xs().text_color(palette.muted).child(
-                "从 mcp.json 删掉这一项。登录凭据保留，重新添加同名同地址的服务器不用再登录。",
-            ),
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(palette.muted)
+                .child(
+                    "从 mcp.json 删掉这一项。登录凭据保留，重新添加同名同地址的服务器不用再登录。",
+                ),
         )
         .child(
             div()
@@ -387,7 +391,7 @@ fn footer(entity: &Entity<CapabilitiesPage>, mcp_path: &str, palette: Palette) -
                     div()
                         .flex_none()
                         .mr_2()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(palette.muted)
                         .child("原生配置文件"),
                 )
@@ -406,7 +410,7 @@ fn footer(entity: &Entity<CapabilitiesPage>, mcp_path: &str, palette: Palette) -
         )
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
                 .child(
                     "普通 Pi 对话连所有启用的服务器；智能体只连在它的详情页里勾选的。改动对新开的对话生效，已经开着的对话发 /reload 重新加载。",

@@ -16,6 +16,7 @@ use smelt_plugin_api::{self as api, PluginView, RuntimeKey, ViewHandle, ViewSpec
 use crate::contract::{TerminalArgs, TerminalText, VIEW};
 use crate::terminal::Terminal;
 use crate::terminal_view::TerminalView;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 实例视图的登记项。
 pub(crate) fn spec() -> ViewSpec {
@@ -168,7 +169,7 @@ impl Render for TerminalInstance {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child("正在连接终端…"),
             State::Failed(message) => shell
@@ -179,7 +180,7 @@ impl Render for TerminalInstance {
                 .gap_3()
                 .child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::muted()))
                         .child(message.clone()),
                 )

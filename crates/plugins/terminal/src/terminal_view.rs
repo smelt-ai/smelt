@@ -16,6 +16,7 @@ use smol::Timer;
 
 use crate::terminal::{self, Terminal};
 use smelt_plugin_api::model::kitty_graphics::{MILLI_CELLS, source_size};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 选区高亮背景色：跟终端主题一起切换（深色用暗蓝，浅色换成不刺眼的浅蓝，
 /// 否则深色定死的暗蓝铺在浅底上，选中文字会糊在一起看不清）。
@@ -1588,7 +1589,7 @@ impl Render for TerminalView {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(if terminal::is_dark() {
                                 0x0080_8a9a
                             } else {
@@ -1626,7 +1627,7 @@ impl Render for TerminalView {
                         .border_1()
                         .border_color(smelt_plugin_api::ui::ui_theme::hair())
                         .shadow_md()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(smelt_plugin_api::ui::ui_theme::muted()))
                         .child(format!(
                             "与「{runtime}」的连接已断开，正在重连…期间的输入会在恢复后发出"

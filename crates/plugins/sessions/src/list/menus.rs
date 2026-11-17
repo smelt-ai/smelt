@@ -1,4 +1,5 @@
-//! 列表上的菜单：会话、项目、工作树、机器，和「筛选与分组」。项目、机器菜单里还有别的插件登记进来的项
+//! 列表上的菜单：会话、项目、工作树、机器（挂在「项目」标题上），「添加项目」选机器，和
+//! 「筛选与分组」。项目、机器菜单里还有别的插件登记进来的项
 //! （[`contract::PROJECT_MENU`]、[`contract::MACHINE_MENU`]，如「在 IDE 里打开」、机器的重连、
 //! 改名），点了按登记的命令执行，参数并上菜单的上下文。
 
@@ -9,7 +10,7 @@ use smelt_plugin_api::{self as api, ContextMenuAction, ContextMenuItem, RuntimeK
 
 use super::actions;
 use super::view::{ListView, RenameTarget};
-use super::{ProjectGroup, SessionRow, WorksetGroup};
+use super::{ProjectGroup, SessionRow, Sidebar, WorksetGroup};
 use crate::contract::{self, MachineMenuContext, ProjectMenuContext};
 use crate::dialogs;
 use crate::model::{Sessions, SidebarGrouping};
@@ -138,6 +139,14 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
             );
         }
     }
+    // 远程项目带上那台机器的菜单：机器连不上时它的项目变灰，右键就能重新连接。
+    if let Some(name) = &project.machine_name
+        && let Some(machine_menu) = machine_menu(&machine, cx)
+    {
+        menu = menu
+            .separator()
+            .item(MenuItem::new(format!("机器「{name}」")).submenu(machine_menu));
+    }
     let pin = {
         let (machine, root, pinned) = (machine.clone(), root.clone(), project.pinned);
         MenuItem::new(if pinned { "取消置顶" } else { "置顶" })
@@ -254,7 +263,52 @@ pub(super) fn grouping_menu(grouping: SidebarGrouping, hide_empty: bool) -> Menu
         .item(show(true, "有会话"))
 }
 
-/// 机器的菜单：全是别的插件登记的（机器插件的重连、升级、改名、移除，能力库、远程桌面
+/// 「项目」标题上的机器菜单。挂着远程机器时每台机器一个子菜单（没有项的不列）；只有本机
+/// 时直接是本机的项。一项都没有是 `None`，不画「⋯」。
+pub(super) fn machines_menu(sidebar: &Sidebar, cx: &App) -> Option<Menu> {
+    if !sidebar.has_remote() {
+        return machine_menu(&RuntimeKey::Local, cx);
+    }
+    let items: Vec<MenuItem> = sidebar
+        .machines
+        .iter()
+        .filter_map(|machine| {
+            let menu = machine_menu(&machine.key, cx)?;
+            Some(
+                MenuItem::new(machine.name.clone())
+                    .icon_path(machine.os_icon.clone())
+                    .submenu(menu),
+            )
+        })
+        .collect();
+    (!items.is_empty()).then(|| items.into_iter().fold(Menu::new(), Menu::item))
+}
+
+/// 有没有机器菜单（画不画「⋯」、标题接不接右键）。只查登记表，不建菜单。
+pub(super) fn has_machines_menu(sidebar: &Sidebar, cx: &App) -> bool {
+    sidebar
+        .machines
+        .iter()
+        .any(|machine| has_machine_menu(&machine.key, cx))
+}
+
+/// 挂着远程机器时「添加项目」先选在哪台机器上打开。连不上的机器挑不了目录，灰着。
+pub(super) fn open_project_menu(sidebar: &Sidebar) -> Menu {
+    sidebar.machines.iter().fold(
+        Menu::new().label("在哪台机器上打开"),
+        |menu, machine| {
+            let key = machine.key.clone();
+            menu.item(
+                MenuItem::new(machine.name.clone())
+                    .icon_path(machine.os_icon.clone())
+                    .disabled(machine.link.unavailable.is_some())
+                    .on_click(move |_, _, cx| actions::open_project(key.clone(), cx)),
+            )
+        },
+    )
+}
+
+/// 一台机器的菜单：全是别的插件登记的（机器插件的重连、升级、改名、移除，能力库、远程桌面
 /// 等）。一项都没有是 `None`，不画「⋯」。
 pub(super) fn machine_menu(machine: &RuntimeKey, cx: &App) -> Option<Menu> {
     let context = MachineMenuContext {
@@ -267,7 +321,7 @@ pub(super) fn machine_menu(machine: &RuntimeKey, cx: &App) -> Option<Menu> {
     Some(items.into_iter().fold(Menu::new(), Menu::item))
 }
 
-/// 这台机器有没有菜单（画不画「⋯」、接不接右键）。只查登记表，不建菜单。
+/// 这台机器有没有菜单。只查登记表，不建菜单。
 pub(super) fn has_machine_menu(machine: &RuntimeKey, cx: &App) -> bool {
     !api::context_menu_items(contract::MACHINE_MENU, machine, cx).is_empty()
 }

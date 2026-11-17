@@ -41,6 +41,7 @@ use crate::view::{
     ConversationOrigin, ConversationView, ConversationViewEvent, LaunchPrep, MemoryAction,
     MemoryActionKind,
 };
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 实例视图的登记项。
 pub(crate) fn spec() -> ViewSpec {
@@ -333,7 +334,7 @@ impl Render for ConversationInstance {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child(text)
             }
@@ -345,7 +346,7 @@ impl Render for ConversationInstance {
                 .gap_3()
                 .child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::muted()))
                         .child(message.clone()),
                 )
@@ -576,7 +577,7 @@ fn title_island(title: String, view: &Entity<ConversationView>, drag: bool, cx: 
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::muted()))
                         .child("↑"),
                 )
@@ -584,7 +585,7 @@ fn title_island(title: String, view: &Entity<ConversationView>, drag: bool, cx: 
                     div()
                         .min_w(px(0.))
                         .overflow_hidden()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::text()))
                         .child(truncated_line(prompt)),
                 )
@@ -598,8 +599,7 @@ fn title_island(title: String, view: &Entity<ConversationView>, drag: bool, cx: 
                 div()
                     .min_w(px(0.))
                     .overflow_hidden()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .type_style(TYPE.ui_medium)
                     .text_color(rgb(ui_theme::text()))
                     .child(truncated_line(title)),
             );

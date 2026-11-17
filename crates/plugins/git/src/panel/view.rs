@@ -4,6 +4,7 @@
 
 use super::*;
 use smelt_plugin_api::ui::Segmented;
+use smelt_plugin_api::ui::kit::TYPE;
 
 /// 一个会丢东西的操作的确认框写什么。
 pub(super) struct DangerConfirm {
@@ -35,7 +36,7 @@ impl GitPanel {
         .description(text.body)
         .body(move |_, _| {
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(crate::ui_theme::bad()))
                 .child(warning)
                 .into_any_element()
@@ -137,7 +138,7 @@ impl GitPanel {
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(rgb(ui_theme::faint()))
                                 .child(hint),
                         ),
@@ -517,7 +518,7 @@ impl GitPanel {
                 .items_center()
                 .justify_center()
                 .gap_1()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::faint()))
                 .child(
                     div()
@@ -533,7 +534,7 @@ impl GitPanel {
                 .when(message == "工作区干净", |col| {
                     col.child(
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::faint()))
                             .child("没有要提交的更改"),
                     )
@@ -604,7 +605,7 @@ impl GitPanel {
                     div()
                         .px_3()
                         .py_1()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
                         .child("仓库太多，只列出了一部分"),
                 )
@@ -623,8 +624,7 @@ impl GitPanel {
                 div()
                     .px_3()
                     .pb_1()
-                    .text_xs()
-                    .font_semibold()
+                    .type_style(TYPE.text_xsmall_medium)
                     .text_color(rgb(ui_theme::faint()))
                     .child("变更"),
             )

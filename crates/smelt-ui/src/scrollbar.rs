@@ -579,10 +579,9 @@ impl Element for AxisControl {
 mod tests {
     use super::*;
     use gpui::{
-        Context, InteractiveElement as _, IntoElement, ListAlignment, ListState, Modifiers,
-        MouseButton, ParentElement as _, Render, ScrollDelta, ScrollEvent, ScrollHandle,
-        StatefulInteractiveElement as _, Styled as _, TestAppContext, VisualTestContext, Window,
-        div, list, point, px,
+        Context, IntoElement, ListAlignment, ListState, Modifiers, MouseButton, Render,
+        ScrollDelta, ScrollEvent, ScrollHandle, TestAppContext, VisualTestContext, Window, div,
+        list, point, px,
     };
 
     struct Area {

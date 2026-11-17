@@ -7,8 +7,8 @@
 //!
 //! 主题文件的格式和求值见 [`crate::theme_config`]，登记时解析、求值一次。装上的主题是
 //! [`ActiveTheme`] 这个全局，它是当前主题的唯一出处：自绘色板（`ui_theme`）在 [`apply`] 里
-//! 从它投影；应用里还用组件库画的 diff 和代码编辑器由应用观察这个全局，把同一份主题投影给
-//! 组件库（见 `smelt` 的 `component_theme`）。
+//! 从它投影，代码编辑器的高亮样式也挂在它上面；应用里还用组件库画的 diff 由应用观察这个
+//! 全局，把同一份主题投影给组件库（见 `smelt` 的 `component_theme`）。
 //!
 //! 只在登记时解析 JSON；[`apply`] / [`swatch`] / [`themes`] 只读内存，可以在 render 里调。
 
@@ -17,8 +17,9 @@ use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use gpui::{App, Global, Hsla, SharedString};
+use gpui_base::input::SharedHighlightStyleResolver;
 
-use crate::theme_config::{self, ThemeColors};
+use crate::theme_config::{self, SyntaxPalette, SyntaxStyle, ThemeColors};
 pub use crate::theme_config::{ThemeConfig, ThemeMode};
 use crate::ui_theme;
 
@@ -230,10 +231,24 @@ pub(crate) fn builtin_for_mode(mode: ThemeMode) -> Arc<ThemeConfig> {
         .expect("themes/smelt.json 深浅两款都要有")
 }
 
+/// 这款主题的代码高亮样式。文件里没写 `syntax` 的主题用同明暗的 smelt 主题的：高亮是整套
+/// 配出来的，只补缺的几项会和主题自己写的混成两套，所以要么全用主题的，要么全用 smelt 的。
+pub fn syntax_styles(config: &ThemeConfig) -> &[(&'static str, SyntaxStyle)] {
+    if !config.syntax().is_empty() {
+        return config.syntax();
+    }
+    BUILTIN
+        .1
+        .iter()
+        .find(|builtin| builtin.mode() == config.mode())
+        .map_or(&[], |builtin| builtin.syntax())
+}
+
 /// 当前装上的主题。由 [`apply`] 整份换上；换主题时观察它的全局观察者都会被叫到。
 pub struct ActiveTheme {
     config: Arc<ThemeConfig>,
     colors: ThemeColors,
+    syntax: SharedHighlightStyleResolver,
 }
 
 impl Global for ActiveTheme {}
@@ -251,6 +266,11 @@ impl ActiveTheme {
     /// 装上的语义色。窗口底下垫了材质时字色已按材质配够对比，可能和主题文件求出的不同。
     pub fn colors(&self) -> &ThemeColors {
         &self.colors
+    }
+
+    /// 代码编辑器的高亮样式（[`syntax_styles`] 建成的查表），换主题时建一次。
+    pub fn syntax(&self) -> &SharedHighlightStyleResolver {
+        &self.syntax
     }
 }
 
@@ -338,7 +358,13 @@ pub fn apply(name: &str, cx: &mut App) -> bool {
     // 毛玻璃时字压在材质上，不是压在主题底色上，字色按材质配够对比。
     ui_theme::fit_text_to_backdrop(&mut colors, dark);
     ui_theme::install_theme(&colors, config.elevation().clone(), dark);
-    cx.set_global(ActiveTheme { config, colors });
+    let syntax: SharedHighlightStyleResolver = Arc::new(SyntaxPalette::new(syntax_styles(&config)));
+    crate::syntax::install_code_block_highlighter(syntax.clone());
+    cx.set_global(ActiveTheme {
+        config,
+        colors,
+        syntax,
+    });
     true
 }
 
@@ -490,8 +516,8 @@ mod tests {
             assert!(apply("Plugin Dark", cx));
             assert_eq!(active(cx).unwrap().config().name().as_ref(), "Plugin Dark");
             assert_eq!(ui_theme::bg(), 0x101820, "自绘色板跟着换");
-            let swatch = swatch("Plugin Dark", cx).unwrap();
-            assert_eq!(swatch.background, gpui::rgb(0x101820).into());
+            let painted = swatch("Plugin Dark", cx).unwrap();
+            assert_eq!(painted.background, gpui::rgb(0x101820).into());
             assert!(themes(cx).iter().any(|info| info.name == "Plugin Dark"
                 && info.owner.as_ref().is_some_and(|o| *o == "third")));
 
@@ -499,5 +525,42 @@ mod tests {
             assert!(!apply("Plugin Dark", cx));
             assert_eq!(swatch("Plugin Dark", cx), None);
         });
+    }
+
+    /// 没写 `syntax` 的主题整套用同明暗的 smelt 高亮；写了的只用自己的。带点的名字退到第一段。
+    #[test]
+    fn syntax_falls_back_to_the_builtin_set_as_a_whole() {
+        use gpui_base::input::HighlightStyleResolver as _;
+
+        let mut catalog = ThemeCatalog::default();
+        let bare = set(&[("Bare", "#101010")]);
+        catalog.register("bare", &[&bare], no_reserved).unwrap();
+        let builtin = builtin_for_mode(ThemeMode::Dark);
+        assert!(!builtin.syntax().is_empty());
+        assert_eq!(
+            syntax_styles(catalog.get("Bare").unwrap()),
+            builtin.syntax()
+        );
+
+        let own = serde_json::json!({
+            "version": 1,
+            "name": "own",
+            "themes": [{
+                "name": "Own",
+                "mode": "dark",
+                "colors": { "bg_base": "#101010", "text_base": "#fafafa" },
+                "syntax": { "keyword": { "color": "#ff0000", "font_style": "underline" } }
+            }]
+        });
+        catalog
+            .register("own", &[&own.to_string()], no_reserved)
+            .unwrap();
+        let styles = syntax_styles(catalog.get("Own").unwrap());
+        assert_eq!(styles.len(), 1);
+        let palette = SyntaxPalette::new(styles);
+        let keyword = palette.style("keyword.modifier").unwrap();
+        assert_eq!(keyword.color, Some(gpui::rgb(0xff0000).into()));
+        assert!(keyword.underline.is_some());
+        assert!(palette.style("string").is_none());
     }
 }

@@ -214,8 +214,8 @@ export function path_style(machine: Machine): "posix" | "windows";
  * 默认 60 秒）都 reject，带可以直接给人看的原因；没有这个方法当场报错。
  */
 export function call(machine: Machine, method: string, params?: unknown, timeout_ms?: number): Promise<unknown>;
-/** 桌面挂着的机器，本机在最前。unavailable 是眼下用不了的原因；smelt_home 是那台机器的 SMELT_HOME，没连上过是 null。变了发 machines_changed。 */
-export function machines(): { machine: Machine; name: string; unavailable: string | null; smelt_home: string | null }[];
+/** 桌面挂着的机器，本机在最前。unavailable 是眼下用不了的原因。变了发 machines_changed。 */
+export function machines(): { machine: Machine; name: string; unavailable: string | null }[];
 /** 登记了的一个视图（见 views）。 */
 export interface ViewInfo {
   /** "<来源>/<名字>"。 */
@@ -653,7 +653,6 @@ impl JsPlugin {
                                 .field("machine", machine_value(&machine.key))
                                 .field("name", machine.name.as_str())
                                 .field("unavailable", optional_text(machine.unavailable.as_deref()))
-                                .field("smelt_home", optional_text(machine.smelt_home.as_deref()))
                                 .into()
                         })
                         .collect(),

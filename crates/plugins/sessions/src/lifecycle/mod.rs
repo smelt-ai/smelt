@@ -429,7 +429,7 @@ fn lead_pane(conversation: &WorkspaceConversation) -> Option<Pane> {
         })
 }
 
-// ---- 目录操作。结果由目录推回来，这里不改本地状态（`Sessions::starts` 除外） ----
+// ---- 目录操作。结果由目录推回来，这里不改本地状态（`Sessions::starts`、`fresh` 除外） ----
 
 /// 把一段新会话写进那台机器的目录，然后 [`open_session`] 过去（带上写进去的目录版本，
 /// 目录推到之前会话视图等着）。对话的 `start` 记进 `Sessions::starts`，建视图时带上；写
@@ -444,12 +444,14 @@ pub(crate) fn create_conversation(
         machine: machine.clone(),
         id: conversation.id.clone(),
     };
-    // 先记再写：目录可能在调用回来之前就推到，那时有人选它也要带上。
-    if let Some(start) = start {
-        Sessions::global(cx).update(cx, |sessions, _| {
+    // 先记再写：目录可能在调用回来之前就推到，那时有人选它也要带上；列表也要认得出它是
+    // 刚建的。
+    Sessions::global(cx).update(cx, |sessions, _| {
+        if let Some(start) = start {
             sessions.starts.insert(key.clone(), start);
-        });
-    }
+        }
+        sessions.fresh = Some(key.clone());
+    });
     let created =
         api::call::<WorkspaceConversationCreate>(&machine, conversation, api::CALL_TIMEOUT, cx);
     cx.spawn(async move |cx| {
@@ -472,6 +474,9 @@ pub(crate) fn create_conversation(
             Err(error) => {
                 Sessions::global(cx).update(cx, |sessions, _| {
                     sessions.starts.remove(&key);
+                    if sessions.fresh.as_ref() == Some(&key) {
+                        sessions.fresh = None;
+                    }
                 });
                 Err(error)
             }

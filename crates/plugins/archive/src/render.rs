@@ -2,7 +2,6 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_base::StyledExt as _;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smelt_plugin_api::ui::truncated_line::truncated_line;
@@ -12,6 +11,7 @@ use smelt_plugin_api::ui::{
 
 use crate::ArchivePage;
 use crate::model::{ArchivedRow, MachineGroup, ProjectGroup};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 悬停一行才露出恢复、删除按钮。
 const ROW_GROUP: &str = "archive-row";
@@ -59,21 +59,20 @@ impl ArchivePage {
             .gap_2()
             .child(
                 div()
-                    .text_sm()
-                    .font_semibold()
+                    .type_style(TYPE.ui_medium)
                     .text_color(rgb(ui_theme::text()))
                     .child(machine.name.clone()),
             )
             .child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::muted()))
                     .child(count.to_string()),
             )
             .when_some(machine.unavailable.clone(), |row, reason| {
                 row.child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
                         .child(reason),
                 )
@@ -105,7 +104,7 @@ impl ArchivePage {
                 project.root
             )))
             .px_2()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::muted()))
             .overflow_hidden()
             .child(truncated_line(project.label.clone()))
@@ -170,11 +169,15 @@ impl ArchivePage {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(div().text_sm().child(truncated_line(row.title.clone())))
+                    .child(
+                        div()
+                            .type_style(TYPE.ui)
+                            .child(truncated_line(row.title.clone())),
+                    )
                     .when(!row.when.is_empty(), |column| {
                         column.child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
                                 .child(truncated_line(row.when.clone())),
                         )
@@ -246,7 +249,7 @@ pub(crate) fn workset_choices(
 ) -> AnyElement {
     if candidates.is_empty() {
         return div()
-            .text_sm()
+            .type_style(TYPE.ui)
             .text_color(rgb(ui_theme::muted()))
             .child("这个项目下没有可用的工作树。先在会话列表里给项目新建一个工作树，再回来恢复。")
             .into_any_element();
@@ -282,7 +285,7 @@ fn placeholder(text: &'static str) -> Div {
         .px_4()
         .child(
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child(text),
         )

@@ -140,8 +140,7 @@ pub fn is_background_acp_session_id(id: &str) -> bool {
 /// `agent_definition_id` 只在还没有 cwd 时当归属（冷恢复占位、测试夹具）。
 /// 有 cwd 时，托管目录本身就是判据：归属字段缺失（旧库没落盘）也不会掉进「项目」。
 ///
-/// 托管目录按本机的 `SMELT_HOME` 算，只用来判断本机运行时上的会话；别的机器上的会话用
-/// [`is_agent_conversation_on`]。
+/// 托管目录按本机的 `SMELT_HOME` 算，只用来判断本机运行时上的会话（运行时判断自己的会话）。
 pub fn is_agent_conversation(
     automation_id: Option<&str>,
     agent_definition_id: Option<&str>,
@@ -156,10 +155,9 @@ pub fn is_agent_conversation(
     )
 }
 
-/// 同 [`is_agent_conversation`]，托管目录按 `smelt_home`（会话所在那台机器的
-/// `SMELT_HOME`）算。那台机器的 `SMELT_HOME` 还不知道（运行时早于上报它、从没连上过）
-/// 时，有 cwd 的一律算项目：宁可放进项目列表，也不把项目对话藏进「最近对话」。
-pub fn is_agent_conversation_on(
+/// 同 [`is_agent_conversation`]，托管目录按给定的 `SMELT_HOME` 算。主目录不知道时有 cwd
+/// 的一律算项目：宁可放进项目列表，也不把项目对话藏进「最近对话」。
+fn is_agent_conversation_on(
     smelt_home: Option<&str>,
     automation_id: Option<&str>,
     agent_definition_id: Option<&str>,
@@ -184,14 +182,14 @@ pub fn is_agent_conversation_cwd(cwd: &str) -> bool {
     })
 }
 
-/// 同 [`is_agent_conversation_cwd`]，按 cwd 所在那台机器的 `SMELT_HOME` 算。
-pub fn is_agent_conversation_cwd_in(smelt_home: &str, cwd: &str) -> bool {
+/// 同 [`is_agent_conversation_cwd`]，按给定的 `SMELT_HOME` 算。
+fn is_agent_conversation_cwd_in(smelt_home: &str, cwd: &str) -> bool {
     crate::agent_paths::is_agent_space_in(smelt_home, cwd)
         || crate::agent_paths::is_workbench_conversation_workspace_in(smelt_home, cwd)
 }
 
 /// 不进项目会话列表：智能体对话、自动化 Run，以及旧档里的后台自动化 session。按本机的
-/// `SMELT_HOME` 算，别的机器上的会话用 [`is_product_conversation_on`]。
+/// `SMELT_HOME` 算。
 pub fn is_product_conversation(
     automation_id: Option<&str>,
     agent_definition_id: Option<&str>,
@@ -208,8 +206,8 @@ pub fn is_product_conversation(
     )
 }
 
-/// 同 [`is_product_conversation`]，按会话所在那台机器的 `SMELT_HOME` 算。
-pub fn is_product_conversation_on(
+/// 同 [`is_product_conversation`]，按给定的 `SMELT_HOME` 算。
+fn is_product_conversation_on(
     smelt_home: Option<&str>,
     automation_id: Option<&str>,
     agent_definition_id: Option<&str>,
@@ -293,7 +291,7 @@ pub fn directory_session_kind(
 mod machine_home_tests {
     use super::*;
 
-    /// 远程机器上的 space 按那台机器的 SMELT_HOME 认，跟本机的主目录无关。
+    /// space 按给定的 SMELT_HOME 认，换一个主目录就不是它的。
     #[test]
     fn agent_conversations_are_recognised_by_their_own_machine_home() {
         let remote = "/home/someone/.smelt";

@@ -19,6 +19,7 @@ use smelt_plugin_api::{self as api, HostEvent, PluginView, RuntimeKey, ViewHandl
 pub(crate) use api::ui::ui_theme;
 
 use session::{DesktopView, page_toolbar};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.desktop";
@@ -177,7 +178,7 @@ impl Render for DesktopPage {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child(reason),
             )

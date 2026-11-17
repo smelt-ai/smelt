@@ -82,8 +82,9 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 
 和现在相比，下面这些都不在终态里。各自什么时候收，见「要收掉的接口」：
 
-- 某一个功能专用的读写：`has_desktop`、`smelt_home`、`embed_conversation`、`agent_settings` 和它的改写命令。
-- 解读运行时数据的方法：`session_states`、`workspace_directory`。
+- 某一个功能专用的读写，都已删：`embed_conversation`、`agent_settings` 和它的改写命令、`has_desktop`、`smelt_home`。`smelt_home` 2026-11-17 删：智能体 space 在哪由运行时随智能体配置推来（`AgentHostSettings::agent_spaces_root`，只在线上，不存库、不经编辑合并），插件用 `agent_for_space` 认路径。
+
+`session_states`、`workspace_directory` 留在宿主（2026-11-17 定），见「运行时数据只是话题」。
 
 ### 运行时数据只是话题
 
@@ -91,7 +92,7 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 
 - 宿主按话题转发，并缓存每个话题的最新快照，插件用 `topic(machine, 话题)` 读，不解读。
 - 插件之间不各自镜像一份：现在智能体和自动化两个插件各存了一份自动化列表，终态里两边读同一份缓存。
-- 宿主自己不解读这些话题。退出或重启守护进程前，宿主要知道哪些会话还在跑：这时直接问 smeltd，不去读缓存里的会话状态。
+- 例外：会话状态和工作区目录（`session_states`、`workspace_directory`）留作宿主接口，不改成话题。三问都答「是」：宿主自己据此行动（重启守护进程前看有没有会话在跑）；只有宿主看得见（多台机器的订阅合并、机器上下线的代数，插件看不到）；插件再小心也做不对（每个插件各自合并一遍，结果会不一样）。读它们的插件多，留一份宿主镜像（`crates/smelt/src/daemon_states.rs`），插件只读。
 - 还没有话题的数据，由 smeltd 补上话题。
 - 智能体配置（自定义 Agent、智能体定义、环境变量、hook 开关）2026-11-16 已改：smeltd 是唯一写入方，改完整份推 `agent_host.changed`（订上先给快照）；桌面上只读缓存归智能体插件（`crates/plugins/agents/src/agent_hosts.rs`），只靠推送更新；别的插件经它的命令取现状、订它的事件跟着换、用它的命令改（约定见它的 `contract.rs`），改动发给运行时、不先改本地。旧运行时拒掉这个话题时，那台机器的配置显示「升级运行时后可用」，在上面开不了新的 ACP 对话。
 
@@ -106,12 +107,12 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 
 - 视图和设置页是同一种东西，按来源整组登记：`register_views(来源, 视图)`，id 是 `<来源>/<名字>`，和命令、布局、主题一样。
 - 设置页就是带 `settings: {组, 搜索关键词}` 的视图。
-- 设置不另开窗口，是主窗口里单独一页，摆两个视图：导航 `smelt/settings-nav`（分组、搜索）和内容 `smelt/settings`（选中的那一页）。两个视图都看工作台上选中的是哪页，导航改它、内容按它画：
+- 设置不另开窗口，是主窗口里单独一页，摆两个视图：导航 `smelt/settings-nav`（分组、搜索）和内容 `smelt/settings`（选中的那一页）。两个视图都看选中的是哪页（宿主的一个全局，不在 `Workspace` 上），导航改它、内容按它摆：
   - 打开带 `settings` 的视图，就是打开设置、停在这一页。布局不摆设置页，设置页也不在侧栏的插件入口里出现。
   - 设置那页是 `smelt/settings`（见「摆放」），宿主登记这一页和它的布局：左右两栏，左导航、右内容，分隔条能拖。打开设置就是打开内容视图、去这一页。像原生 app 的设置：导航顶上是标题栏那一行，下面第一项是「返回应用」（回到来的那页），再下面是搜索和各页；内容的工具栏和红黄绿按钮同一行，只写这一页的名字；内容限宽居中。
 - 可见性只有一套：`view_shown` 和 `ShownViewsChanged`。主窗口报开着的那页里露着的；设置内容视图露着时，它停着的那一页也算露着。宿主把两边并起来（`plugin_host::ShownViews`）。
 - 视图活多久，设置页和别的视图一样：第一次露出来时建，之后一直留着，直到登记被替换或撤下。页面照样不靠自己活着保存东西：打开时从自己的库里读，改了马上写回。
-- 设置的 `SettingsSection` 枚举和那份写死的搜索关键词都删掉。枚举一页一页地退：宿主机制的几页在设置搬进主窗口时改成视图；功能页随它的插件拆走时删，不为马上要搬走的页先改一遍。
+- 设置的 `SettingsSection` 枚举和那份写死的搜索关键词都删掉。枚举一页一页地退：宿主机制的几页在设置搬进主窗口时改成视图；功能页随它的插件拆走时删，不为马上要搬走的页先改一遍。2026-11-17 已删完：宿主的三页也是带 `settings` 的视图，导航只按登记的视图列，组内宿主的页排在前面。
 - JS 插件的设置页仍是插件目录里另一个入口脚本（`entry`），单独加载、单独挂载，和主入口不共享内存。这份脚本里调 `register_*` 一律报错。
 - JS 插件挂载时主入口登记成视图 `<插件 id>/main`；脚本登记的设置页和它是同一来源的一组，宿主的加载器把两样并起来整组登记，`main` 这个名字设置页不能用。
 - 视图登记里不写位置，也不写「能不能针对某台机器打开」（现在的 `per_machine`）。入口放在哪，是菜单贡献的事。
@@ -202,7 +203,7 @@ JS 插件的宿主模块也叫 `smelt-plugin-api`，是 Rust 那份接口的薄�
 **列表只读推送的数据。**
 
 - 会话插件从话题缓存读目录和会话状态，名字、状态、时间都由 smeltd 给（见上文「会话名由 smeltd 给」），不靠活着的视图来算。
-- 选中哪个、展开哪个、怎么分组、排序、滚到哪，是插件自己的界面状态，存在插件自己的库里。现在这些在客户端库的 `workspace_ui`、`conversation_route`、`sidebar_*_order` 表里。
+- 选中哪个、展开哪个、怎么分组、排序、滚到哪，是插件自己的界面状态，存在插件自己的库里。客户端库 v15 已删掉原来存这些的表和列，旧数据不搬。
 
 **舞台是会话插件的一个视图。**
 
@@ -303,12 +304,12 @@ my-theme/
    - 视图和设置页合并成一张表：`register_views(来源, 视图)`，可选带 `settings`；删 `register_view`、`register_settings_pages`。九个插件和 JS 映射跟着改。2026-11-15 已做。
    - 视图 id 变成 `<来源>/<名字>`，旧的布局存档对不上，默认布局换一个新 id，不写兼容。宿主的路由名不含 `/`，不会再和视图 id 撞上，`RESERVED_VIEW_IDS` 删掉。
    - 会话列表和舞台直接用终态的 id（`smelt.sessions/list`、`smelt.sessions/stage`），第 5 步搬走时布局不用再改。（第 5 步舞台改名 `smelt.sessions/session`，出厂页的 `index` 跟着改了。）
-   - 设置搬进主窗口：设置窗口、`SettingsWindow`、`CloseSettingsWindow`、对话框的「开在设置窗口里」都删掉；宿主机制的几页和更新页改成视图（见「终态：宿主留什么」）。设置视图 `smelt/settings` 2026-11-15 已做；宿主机制的几页和更新页还没改。
+   - 设置搬进主窗口：设置窗口、`SettingsWindow`、`CloseSettingsWindow`、对话框的「开在设置窗口里」都删掉；宿主机制的几页和更新页改成视图（见「终态：宿主留什么」）。设置视图 `smelt/settings` 2026-11-15 已做；更新页归更新插件；外观、快捷键、面板插件三页 2026-11-17 改成宿主登记的设置视图（`smelt/appearance`、`smelt/shortcuts`、`smelt/panel-plugins`），设置导航、内容只按登记的视图摆，停在哪页记在一个全局里，不在 `Workspace` 上。
 2. **运行时数据只是话题。**
-   - 宿主加话题快照缓存和 `topic` 读取。
-   - 会话状态、目录、智能体配置走话题；smeltd 补齐缺的话题。
+   - 宿主加话题快照缓存和 `topic` 读取。等有第二个插件要读同一份运行时数据时再做；会话状态、目录不走这条（见「运行时数据只是话题」的例外）。
+   - 智能体配置走话题；smeltd 补齐缺的话题。
    - 会话名由 smeltd 算好推送。通知、资源两个插件和手机里那几份算会话名的代码删掉。2026-11-15 已做，没等话题机制：名字放在已有的会话状态推送里。
-   - 收掉 `session_states`、`workspace_directory`、`agent_settings` 和它的改写命令；`smelt-app-state` 里对应的全局删掉。2026-11-17：`agent_settings` 和改写命令已收掉（归智能体插件），`smelt-app-state` 已删；`session_states`、`workspace_directory` 还是宿主接口。
+   - 收掉 `session_states`、`workspace_directory`、`agent_settings` 和它的改写命令；`smelt-app-state` 里对应的全局删掉。2026-11-17：`agent_settings` 和改写命令已收掉（归智能体插件），`smelt-app-state` 已删；`session_states`、`workspace_directory` 留作宿主接口，不收。
 3. **目录只有 smeltd 写。**
    - 客户端改成只发操作，删掉 `DirectorySync`、`directory_conversation`、`snapshot_acp_view`。2026-11-16 已做。
    - 这一步还在宿主里做，因为会话代码现在还在宿主里。先把数据的权威理顺，下一步搬的时候不用连账本一起搬。
@@ -323,30 +324,30 @@ my-theme/
 6. **菜单贡献和外围功能。**
    - 加 `register_menu_items` 和机器管理命令。
    - 拆 `desktop`、`ide`、`quota`、`remote-access`、`maintenance` 这几个插件，以及「智能体」设置页。其中只是设置页的部分不依赖第 2～5 步，可以提前搬。
-   - 删 `Machine.has_desktop`、`Machine.smelt_home`、视图登记里的 `per_machine`。
+   - 删 `Machine.has_desktop`、`Machine.smelt_home`、视图登记里的 `per_machine`。都已删（`smelt_home` 2026-11-17）。
 7. **收尾。**
-   - `SettingsSection` 删完。
-   - `Workspace` 只剩窗口和工作台机制。
-   - `scripts/lint-crate-deps.sh` 加一条：宿主 crate 里不出现插件的来源 id。
+   - `SettingsSection` 删完。2026-11-17 已做。
+   - `Workspace` 只剩窗口和工作台机制。设置的状态（滑块、字体和主题选项、插件列表、停在哪页）2026-11-17 已从 `Workspace` 移进各设置视图。
+   - `scripts/lint-crate-deps.sh` 加一条：宿主 crate 里不出现插件的来源 id。2026-11-17 已做：宿主源码点名插件 crate 只能调 `register`，字符串里不出现插件 `OWNER` 开头的 id。
 
 ## 要收掉的接口
 
 | 接口 | 为什么不该有 | 第几步收 |
 | --- | --- | --- |
 | `settings_page_shown`、`ShownSettingsPageChanged` | 和 `view_shown` 平行的第二套可见性 | 1（已收） |
-| `register_view` 单个登记、`register_settings_pages` | 视图和设置页是两张表，登记方式也不一样 | 1 |
-| `session_states`、`workspace_directory`、`agent_settings`、`EDIT_AGENT_SETTINGS`、`AgentSettingsChanged`（`RELOAD_AGENT_SETTINGS` 2026-11-16 已删） | 宿主在解读运行时数据 | 2 |
-| `embed_conversation` | 对话组件应该直接用 | 4 |
-| `RESERVED_VIEW_IDS` | 视图 id 带来源以后撞不上路由名 | 1 |
-| 宿主按名字找 `smelt.agents/new-conversation` 和视图 `agents`、`capabilities` | 舞台路由还写死在宿主里 | 5（`page_header` 已收） |
-| 宿主里的 `sessions::*` 处理函数 | 会话的动作由宿主处理 | 5（约定在会话插件的 `contract.rs`） |
-| `Machine.has_desktop`、`Machine.smelt_home`、`ViewSpec.per_machine` | 一个功能的属性挂在机器或视图上 | 6 |
+| `register_view` 单个登记、`register_settings_pages` | 视图和设置页是两张表，登记方式也不一样 | 1（已收；JS 的 `register_settings_pages` 只是 JS 映射，登记的仍是带 `settings` 的视图） |
+| `agent_settings`、`EDIT_AGENT_SETTINGS`、`AgentSettingsChanged`（`RELOAD_AGENT_SETTINGS` 2026-11-16 已删） | 宿主在解读运行时数据 | 2（已收） |
+| `embed_conversation` | 对话组件应该直接用 | 4（已收） |
+| `RESERVED_VIEW_IDS` | 视图 id 带来源以后撞不上路由名 | 1（已收） |
+| 宿主按名字找 `smelt.agents/new-conversation` 和视图 `agents`、`capabilities` | 舞台路由还写死在宿主里 | 5（已收；`scripts/lint-crate-deps.sh` 第 3 条守着宿主源码不写插件 id） |
+| 宿主里的 `sessions::*` 处理函数 | 会话的动作由宿主处理 | 5（已收；约定在会话插件的 `contract.rs`） |
+| `Machine.has_desktop`、`Machine.smelt_home`、`ViewSpec.per_machine` | 一个功能的属性挂在机器或视图上 | 6（已收） |
 
 ## 待定，要确认后再动
 
 - **第 2 步要改运行时协议**：smeltd 推送的数据里加会话的显示名，并补上智能体配置的话题。项目记忆里的规矩是「协议能不升就不升」，但这几项是让数据只有一个权威所必需的。动手前先列出具体字段。智能体配置的话题 2026-11-16 已加（`agent_host.changed`，快照 `core.agent_host.v1`），没升协议版本：旧运行时按不认识的话题拒掉这一条订阅。
-- **第 5 步要改客户端库的表**：`workspace_ui`、`conversation_route`、`sidebar_*_order` 搬进会话插件的库，客户端库版本加一。按 `AGENTS.md`，改之前先列出改动、等确认。
-- **侧栏里那排插件入口**（智能体、自动化等没摆进布局的视图），现在是宿主在会话列表里画的。终态里宿主不画。可以交给布局（默认布局把它们摆成标签），也可以由会话插件按「所有视图」画一排入口。前者更干净，但用户找入口会变；拆到第 5 步之前要定下来。
+- **第 5 步要改客户端库的表**：已做，并进客户端库 v15（会话列表、分屏的表和列删掉，旧数据不搬；同一版删掉 `runtime_connection.smelt_home`）。
+- **侧栏里那排插件入口**：已定，由启动栏插件（`crates/plugins/launcher`）画：布局没摆、不用参数就能开的视图在入口列表里一行，点了经 `OPEN_VIEW` 打开。宿主不画；不想要的布局不摆启动栏的视图。
 
 ## 已知缺口
 

@@ -11,9 +11,11 @@ use smelt_plugin_api::model::workspace_directory::WorkspaceWorksetFinishParams;
 use smelt_plugin_api::ui::dialog::Confirm;
 use smelt_plugin_api::{self as api, RuntimeKey};
 
-use super::{GroupKey, Sidebar, move_near, move_to_pin_boundary, splice_group};
-use crate::lifecycle;
-use crate::model::{ConversationKey, Pin, Sessions};
+use super::{
+    GroupKey, Sidebar, merge_project_order, move_near, move_to_pin_boundary, splice_group,
+};
+use crate::model::{ConversationKey, Pin, ProjectKey, Sessions};
+use crate::{contract, lifecycle};
 
 fn sidebar(cx: &App) -> std::rc::Rc<Sidebar> {
     Sessions::global(cx).read(cx).sidebar.clone()
@@ -21,32 +23,36 @@ fn sidebar(cx: &App) -> std::rc::Rc<Sidebar> {
 
 // ---- 置顶 ----
 
+fn project_pin(key: &ProjectKey) -> Pin {
+    Pin::Project {
+        machine: key.machine.clone(),
+        root: key.root.clone(),
+    }
+}
+
 /// 置顶或取消置顶一个项目，并把它挪到置顶区和其余的交界（见 [`move_to_pin_boundary`]）。
+/// 置顶区不分机器：所有机器的项目排在一份列表里。
 pub(super) fn pin_project(machine: &RuntimeKey, root: &str, pinned: bool, cx: &mut App) {
-    let Some(roots) = sidebar(cx).machine(machine).map(|m| m.roots.clone()) else {
-        return;
+    let item = ProjectKey {
+        machine: machine.clone(),
+        root: root.to_string(),
     };
+    let shown = sidebar(cx).project_keys();
     let sessions = Sessions::global(cx);
     let order = {
         let ui = &sessions.read(cx).ui;
-        move_to_pin_boundary(&roots, root, |other| {
-            if other == root {
+        let shown = move_to_pin_boundary(&shown, &item, |other| {
+            if *other == item {
                 pinned
             } else {
-                ui.is_pinned(&Pin::Project {
-                    machine: machine.clone(),
-                    root: other.to_string(),
-                })
+                ui.is_pinned(&project_pin(other))
             }
-        })
+        });
+        merge_project_order(&ui.project_order, shown)
     };
     sessions.update(cx, |sessions, cx| {
-        let pin = Pin::Project {
-            machine: machine.clone(),
-            root: root.to_string(),
-        };
-        sessions.set_pinned(pin, pinned, cx);
-        sessions.set_project_order(machine, order, cx);
+        sessions.set_pinned(project_pin(&item), pinned, cx);
+        sessions.set_project_order(order, cx);
     });
 }
 
@@ -65,18 +71,16 @@ pub(super) fn pin_session(key: &ConversationKey, group: &GroupKey, pinned: bool,
                 .collect();
             let ui = &sessions.read(cx).ui;
             let moved = move_to_pin_boundary(&group_ids, &key.id, |other| {
-                if other == key.id {
+                if *other == key.id {
                     pinned
                 } else {
                     ui.is_pinned(&Pin::Conversation(ConversationKey {
                         machine: machine.clone(),
-                        id: other.to_string(),
+                        id: other.clone(),
                     }))
                 }
             });
-            sidebar
-                .machine(machine)
-                .map(|section| splice_group(&section.conversation_ids, &moved))
+            Some(splice_group(sidebar.conversation_ids(machine), &moved))
         }
     };
     sessions.update(cx, |sessions, cx| {
@@ -97,24 +101,24 @@ pub(super) fn pin_workset(machine: &RuntimeKey, id: &str, pinned: bool, cx: &mut
 
 // ---- 拖动 ----
 
-/// 把项目 `from` 放到同一台机器上的 `to` 前面或后面。跨过置顶区和其余的交界就跟着
-/// `to` 置顶或取消置顶。
-pub(super) fn drop_project(machine: &RuntimeKey, from: &str, to: &str, before: bool, cx: &mut App) {
-    let Some(mut roots) = sidebar(cx).machine(machine).map(|m| m.roots.clone()) else {
-        return;
-    };
-    if !move_near(&mut roots, from, to, before) {
+/// 把项目 `from` 放到 `to` 前面或后面，哪台机器上的都行（所有机器的项目排在一份列表里）。
+/// 跨过置顶区和其余的交界就跟着 `to` 置顶或取消置顶。
+pub(super) fn drop_project(from: &ProjectKey, to: &ProjectKey, before: bool, cx: &mut App) {
+    let mut shown = sidebar(cx).project_keys();
+    if !move_near(&mut shown, from, to, before) {
         return;
     }
     let sessions = Sessions::global(cx);
-    let pin_of = |root: &str| Pin::Project {
-        machine: machine.clone(),
-        root: root.to_string(),
+    let (pinned, order) = {
+        let ui = &sessions.read(cx).ui;
+        (
+            ui.is_pinned(&project_pin(to)),
+            merge_project_order(&ui.project_order, shown),
+        )
     };
-    let pinned = sessions.read(cx).ui.is_pinned(&pin_of(to));
     sessions.update(cx, |sessions, cx| {
-        sessions.set_pinned(pin_of(from), pinned, cx);
-        sessions.set_project_order(machine, roots, cx);
+        sessions.set_pinned(project_pin(from), pinned, cx);
+        sessions.set_project_order(order, cx);
     });
 }
 
@@ -138,12 +142,7 @@ pub(super) fn drop_session(
     if !move_near(&mut ids, &from.id, &to.id, before) {
         return;
     }
-    let Some(order) = sidebar
-        .machine(machine)
-        .map(|section| splice_group(&section.conversation_ids, &ids))
-    else {
-        return;
-    };
+    let order = splice_group(sidebar.conversation_ids(machine), &ids);
     let sessions = Sessions::global(cx);
     let pinned = sessions
         .read(cx)
@@ -293,8 +292,19 @@ pub(super) fn finish_workset(
 
 // ---- 打开项目 ----
 
-/// 在那台机器上挑一个目录打开成项目。本机是系统选择框，远程机器由宿主画浏览那台机器的框。
-pub(super) fn pick_project(machine: RuntimeKey, cx: &mut App) {
+/// 在那台机器上打开项目：本机走「打开项目…」命令（系统选择框，能多选），远程机器在宿主画的
+/// 浏览框里挑一个目录。
+pub(super) fn open_project(machine: RuntimeKey, cx: &mut App) {
+    if matches!(machine, RuntimeKey::Local) {
+        let opened = contract::OPEN_PROJECT.run(&(), cx);
+        crate::report_failure("添加项目", opened, cx);
+    } else {
+        pick_project(machine, cx);
+    }
+}
+
+/// 在远程机器上挑一个目录打开成项目，浏览框由宿主画。
+fn pick_project(machine: RuntimeKey, cx: &mut App) {
     let picked = api::PICK_PATHS.run(
         &api::PathRequest {
             machine: machine.clone(),
@@ -319,7 +329,7 @@ pub(super) fn pick_project(machine: RuntimeKey, cx: &mut App) {
         };
         cx.update(|cx| {
             let opened = lifecycle::open_project(machine, root, cx);
-            crate::report_failure("打开项目", opened, cx);
+            crate::report_failure("添加项目", opened, cx);
         });
     })
     .detach();
@@ -357,7 +367,7 @@ pub(super) fn open_dropped_paths(paths: Vec<PathBuf>, cx: &mut App) {
             }
             for root in roots {
                 let opened = lifecycle::open_project(RuntimeKey::Local, root, cx);
-                crate::report_failure("打开项目", opened, cx);
+                crate::report_failure("添加项目", opened, cx);
             }
         });
     })

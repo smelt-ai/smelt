@@ -41,6 +41,7 @@ use crate::agent_hosts;
 use crate::contract;
 use crate::model::save_on_input_event;
 use crate::quota;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 装 CLI 要等包管理器下载，比普通调用久得多。
 const CLI_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -770,7 +771,7 @@ impl AgentSettingsPage {
             .justify_between()
             .child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::muted()))
                     .child(checked_at_text(self.cli.checked_at)),
             )
@@ -780,7 +781,7 @@ impl AgentSettingsPage {
         let Some(diagnostics) = &self.cli.diagnostics else {
             cells.push(
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child(if refreshing {
                         "正在检测本机 Agent 与运行时…"
@@ -797,7 +798,7 @@ impl AgentSettingsPage {
         }));
         cells.extend(self.cli.install_result.clone().map(|(message, failed)| {
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(if failed {
                     ui_theme::bad()
                 } else {
@@ -834,21 +835,22 @@ impl AgentSettingsPage {
                         .gap_1()
                         .items_center()
                         .child(div().size(px(6.)).rounded_full().bg(dot))
-                        .child(div().text_xs().child(provider.label.clone()))
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(if provider.installed {
-                                    "已接入"
-                                } else {
-                                    "未接入"
-                                }),
+                                .type_style(TYPE.text_xsmall)
+                                .child(provider.label.clone()),
                         )
+                        .child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
+                            if provider.installed {
+                                "已接入"
+                            } else {
+                                "未接入"
+                            },
+                        ))
                 }))
                 .into_any_element(),
             None => div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child("正在读取接入状态…")
                 .into_any_element(),
@@ -895,7 +897,7 @@ impl AgentSettingsPage {
                 |this, path| {
                     this.child(
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(muted)
                             .child(format!("smelt-notify：{path}")),
                     )
@@ -914,7 +916,7 @@ impl AgentSettingsPage {
             };
             return vec![
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child(text)
                     .into_any_element(),
@@ -937,7 +939,7 @@ impl AgentSettingsPage {
                     .w_full()
                     .gap_2()
                     .items_center()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child(div().w(name_w).flex_none().child("名称"))
                     .child(div().flex_1().min_w_0().child("命令"))
@@ -997,7 +999,7 @@ impl AgentSettingsPage {
                 .unwrap_or_else(|| "正在读取本机的智能体配置…".to_string());
             return vec![
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::muted()))
                     .child(text)
                     .into_any_element(),
@@ -1072,7 +1074,7 @@ fn cli_row(
             div()
                 .w(px(102.))
                 .flex_none()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::text()))
                 .child(agent.label()),
         )
@@ -1086,14 +1088,14 @@ fn cli_row(
                 .child(
                     div()
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(color))
                         .child(truncated_line(status)),
                 )
                 .child(
                     div()
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::muted()))
                         .child(truncated_line(path)),
                 ),
@@ -1112,7 +1114,7 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
         div()
             .w(px(72.))
             .flex_none()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(muted)
             .child(text)
     };
@@ -1205,7 +1207,12 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
                             .flex_1()
                             .child(TextInput::new(&inputs.dir).font_family(mono.clone())),
                     )
-                    .child(div().text_xs().text_color(muted).child(var)),
+                    .child(
+                        div()
+                            .type_style(TYPE.text_xsmall)
+                            .text_color(muted)
+                            .child(var),
+                    ),
             )
         });
     // 环境变量写错时没存，先报这条；其余按存下来的配置判断能不能启动。
@@ -1216,7 +1223,7 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
     card.when_some(problem, |card, problem| {
         card.child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::bad()))
                 .child(problem),
         )
@@ -1235,7 +1242,7 @@ fn quota_section(cx: &App) -> SettingsSection {
                 div()
                     .max_w(px(320.))
                     .overflow_hidden()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::muted()))
                     .child(truncated_line(error)),
             )

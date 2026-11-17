@@ -10,6 +10,7 @@ use super::*;
 use api::model::pi_plugin_catalog::{
     PiPlugin, PiPluginKind, global_extension_root, global_skill_roots,
 };
+use smelt_plugin_api::ui::kit::TYPE;
 
 pub(super) fn pi_plugin_page(
     entity: Entity<CapabilitiesPage>,
@@ -34,7 +35,7 @@ pub(super) fn pi_plugin_page(
         .children(page.pi_plugin_error.clone().map(|error| {
             SettingsSection::new().title("上一次操作失败").child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::bad()))
                     .child(error),
             )
@@ -137,7 +138,7 @@ fn list_section(
     if plugins.is_empty() {
         return SettingsSection::new().title("已安装").child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .child("还没有装任何插件。"),
         );

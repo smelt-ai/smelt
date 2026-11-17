@@ -1,6 +1,7 @@
 //! ACP 审批卡与选择题卡。
 
 use super::*;
+use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::{Checkbox, Radio, TextInput};
 
 /// 选择题的一行。外框、字号和悬停透明度留在这里；勾选语义交给 smelt-ui 的单选 / 复选框。
@@ -14,7 +15,7 @@ where
         .min_h(px(36.))
         .px_3p5()
         .py_2()
-        .text_sm()
+        .type_style(TYPE.ui)
         .rounded_lg()
         .border_1()
         .border_color(if selected {
@@ -48,7 +49,7 @@ impl ConversationView {
                     .flex_shrink_0()
                     .h(ui_theme::height::lg())
                     .gap_2()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(muted)
                     .child(ambient_spinner(
                         "acp-permission-submit-spinner",
@@ -128,19 +129,20 @@ impl ConversationView {
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_normal()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .font_family(smelt_plugin_api::model::font_config::font_family())
                             .text_color(gpui::rgb(ui_theme::muted()))
                             .child(command.clone()),
                     )
-                    .children(
-                        reason
-                            .as_ref()
-                            .map(|reason| div().text_xs().text_color(muted).child(reason.clone())),
-                    )
+                    .children(reason.as_ref().map(|reason| {
+                        div()
+                            .type_style(TYPE.text_xsmall)
+                            .text_color(muted)
+                            .child(reason.clone())
+                    }))
                     .children(cwd.as_ref().map(|cwd| {
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .font_family(smelt_plugin_api::model::font_config::font_family())
                             .text_color(muted)
                             .child(format!("工作目录：{cwd}"))
@@ -152,25 +154,25 @@ impl ConversationView {
                     .gap_1()
                     .child(
                         div()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(gpui::rgb(ui_theme::muted()))
                             .child(reason.clone().unwrap_or_else(|| pending.question.clone())),
                     )
                     .children(grant_root.as_ref().map(|root| {
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .font_family(smelt_plugin_api::model::font_config::font_family())
                             .text_color(muted)
                             .child(format!("授权目录：{root}"))
                     }))
                     .into_any_element(),
                 ApprovalDetailsView::Permissions { summary } => div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(gpui::rgb(ui_theme::muted()))
                     .child(summary.clone())
                     .into_any_element(),
                 ApprovalDetailsView::Generic => div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(gpui::rgb(ui_theme::muted()))
                     .child(pending.question.clone())
                     .into_any_element(),
@@ -244,7 +246,7 @@ impl ConversationView {
                                             .bg(gpui::rgb(ui_theme::need())),
                                     ),
                                 )
-                                .child(div().text_sm().font_semibold().child("需要批准"))
+                                .child(div().type_style(TYPE.ui_medium).child("需要批准"))
                                 .child(div().flex_1())
                                 .when(remaining > 1, |row| {
                                     row.child(
@@ -253,7 +255,7 @@ impl ConversationView {
                                             .py_0p5()
                                             .rounded_full()
                                             .bg(ui_theme::overlay(0x18))
-                                            .text_xs()
+                                            .type_style(TYPE.text_xsmall)
                                             .text_color(muted)
                                             .child(format!("{remaining} 项待处理")),
                                     )
@@ -313,7 +315,7 @@ impl ConversationView {
                         .items_center()
                         .w_full()
                         .gap_2()
-                        .child(div().text_sm().font_semibold().child("等你选择"))
+                        .child(div().type_style(TYPE.ui_medium).child("等你选择"))
                         .child(div().flex_1())
                         .when(has_multi, |row| {
                             row.child(
@@ -322,7 +324,7 @@ impl ConversationView {
                                     .py_0p5()
                                     .rounded_full()
                                     .bg(ui_theme::overlay(0x18))
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(muted)
                                     .child("可多选"),
                             )
@@ -334,7 +336,7 @@ impl ConversationView {
                         div()
                             .w_full()
                             .min_w_0()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(muted)
                             .child(card.message.clone()),
                     )
@@ -347,7 +349,12 @@ impl ConversationView {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(div().text_xs().text_color(muted).child(field.title.clone()))
+                            .child(
+                                div()
+                                    .type_style(TYPE.text_xsmall)
+                                    .text_color(muted)
+                                    .child(field.title.clone()),
+                            )
                             .child(
                                 Button::new((
                                     gpui::ElementId::from("acp-elicit-url"),
@@ -372,11 +379,9 @@ impl ConversationView {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(div().text_xs().text_color(muted).child(format!(
-                                "{}{}",
-                                field.title,
-                                if *secret { "（保密）" } else { "" }
-                            )))
+                            .child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
+                                format!("{}{}", field.title, if *secret { "（保密）" } else { "" }),
+                            ))
                             .children(input.map(|input| TextInput::new(&input).w_full())),
                     );
                     continue;
@@ -436,7 +441,7 @@ impl ConversationView {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(muted)
                                     .child("以上都不是？输入自己的答案"),
                             )
@@ -451,11 +456,13 @@ impl ConversationView {
                         .min_w_0()
                         .gap_1()
                         .when(card.fields.len() > 1, |d| {
-                            d.child(div().text_xs().text_color(muted).child(format!(
-                                "{}{}",
-                                field.title.clone(),
-                                if is_multi { "（可多选）" } else { "" }
-                            )))
+                            d.child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
+                                format!(
+                                    "{}{}",
+                                    field.title.clone(),
+                                    if is_multi { "（可多选）" } else { "" }
+                                ),
+                            ))
                         })
                         .child(list),
                 );

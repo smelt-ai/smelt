@@ -192,20 +192,10 @@ impl HistoryPage {
 
     /// 重读当前项目和它是不是智能体的 space。换了项目，右边的详情清掉。
     fn sync_project(&mut self, cx: &mut Context<Self>) {
-        let host = api::host(cx);
         let project = api::active_context(cx).project;
-        self.engine = project.as_ref().and_then(|project| {
-            let home = host
-                .machines(cx)
-                .into_iter()
-                .find(|machine| machine.key == project.machine)
-                .and_then(|machine| machine.smelt_home);
-            space_engine(
-                project,
-                home.as_deref(),
-                agents::settings_on(&project.machine, cx),
-            )
-        });
+        self.engine = project
+            .as_ref()
+            .and_then(|project| space_engine(project, agents::settings_on(&project.machine, cx)));
         if self.project != project {
             self.project = project;
             self.close_detail();

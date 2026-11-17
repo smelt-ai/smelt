@@ -13,6 +13,7 @@ use std::rc::{Rc, Weak};
 
 use gpui::*;
 use gpui_webview::{WebView, WebViewHandle};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) struct HtmlPreview {
     webview: Option<Entity<WebView>>,
@@ -92,7 +93,7 @@ impl Render for HtmlPreview {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(crate::ui_theme::muted()))
                 .child(error.clone());
         }

@@ -46,6 +46,7 @@ use crate::peers::terminal::{self, TerminalArgs};
 use crate::session_view::{Pane, PaneKind};
 use crate::split_layout::{self, Node};
 use crate::store::SavedLayout;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// Dock 存档里认格子用的面板名。只在本插件里用（存档走 `split_layout`），但定了就不改。
 const PANE_NAME: &str = "smelt.sessions.pane";
@@ -660,8 +661,7 @@ fn title_island(title: SharedString, title_bar: bool) -> Div {
             div()
                 .min_w(px(0.))
                 .overflow_hidden()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .type_style(TYPE.ui_medium)
                 .text_color(rgb(ui_theme::text()))
                 .child(truncated_line(title)),
         );
@@ -888,7 +888,7 @@ impl PaneView {
         TabLabel {
             text: self.title.clone(),
             label: div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(if self.active {
                     ui_theme::muted()
                 } else {
@@ -943,7 +943,7 @@ impl Render for PaneView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child(self.missing.clone())
                 .into_any_element(),

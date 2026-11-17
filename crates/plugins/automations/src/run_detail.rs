@@ -10,6 +10,7 @@ use api::model::automation::{AutomationRun, AutomationRunStatus};
 
 use crate::prelude::*;
 use crate::tools::{compact_tool_headline, process_icon};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 单块工具输出最多展示的行数。这里供排查，不是完整日志。
 pub(crate) const TOOL_OUTPUT_MAX_LINES: usize = 400;
@@ -176,7 +177,7 @@ impl AutomationsPage {
             .filter(|detail| detail.run_id() == run.id)
         else {
             return div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::faint()))
                 .child("正在读取运行记录…")
                 .into_any_element();
@@ -288,7 +289,7 @@ pub(crate) fn run_summary_line(run: &AutomationRun) -> AnyElement {
         .flex()
         .items_center()
         .gap_2()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::muted()))
         .child(
             Icon::new(IconName::Bot)
@@ -329,14 +330,13 @@ pub(crate) fn run_error_card(error: String) -> AnyElement {
                 .gap_1()
                 .child(
                     div()
-                        .text_sm()
-                        .font_medium()
+                        .type_style(TYPE.ui_medium)
                         .text_color(rgb(red))
                         .child("运行失败"),
                 )
                 .child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::text()))
                         .child(error),
                 ),
@@ -359,7 +359,7 @@ pub(crate) fn run_result_section(run: &AutomationRun, detail: &AutomationRunDeta
                 "这次运行没有给出最终回复。"
             };
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::faint()))
                 .child(hint)
                 .into_any_element()
@@ -372,8 +372,7 @@ pub(crate) fn run_result_section(run: &AutomationRun, detail: &AutomationRunDeta
         .gap_2()
         .child(
             div()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .text_color(rgb(ui_theme::text()))
                 .child("运行结果"),
         )
@@ -386,7 +385,7 @@ pub(crate) fn detail_card(body: impl IntoElement) -> AnyElement {
         .w_full()
         .min_w_0()
         .p(ui_theme::card_padding())
-        .text_sm()
+        .type_style(TYPE.ui)
         .child(body)
         .into_any_element()
 }
@@ -419,14 +418,13 @@ pub(crate) fn run_detail_disclosure(
                 .child(disclosure_chevron(expanded))
                 .child(
                     div()
-                        .text_sm()
-                        .font_medium()
+                        .type_style(TYPE.ui_medium)
                         .text_color(rgb(ui_theme::text()))
                         .child(title),
                 )
                 .children(meta.map(|meta| {
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
                         .child(meta)
                 }))
@@ -493,7 +491,7 @@ pub(crate) fn render_transcript(
             }
             AcpEntry::Assistant { thought: false, .. } if final_reply == Some(ix) => div()
                 .py_1()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child("最终回复，见上方运行结果")
                 .into_any_element(),
@@ -506,7 +504,7 @@ pub(crate) fn render_transcript(
                 }
                 div()
                     .py_1()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .child(markdown_mermaid::markdown_view(
                         format!("automation-run-reply-{}-{key}", detail.run_id()),
                         text.clone(),
@@ -531,7 +529,7 @@ pub(crate) fn render_transcript(
                     entity,
                     Some(|| {
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::muted()))
                             .child(text.to_string())
                             .into_any_element()
@@ -595,7 +593,7 @@ pub(crate) fn render_transcript(
                 .when(!label.trim().is_empty(), |row| {
                     row.child(
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::faint()))
                             .child(label.trim().to_string()),
                     )
@@ -638,7 +636,7 @@ pub(crate) fn transcript_user(key: &str, run_id: &str, text: &str, images: usize
         .gap_1()
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child("输入"),
         )
@@ -707,14 +705,14 @@ pub(crate) fn transcript_step(
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ink))
                 .child(truncated_line(headline)),
         )
         .children(flag.map(|flag| {
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(flag.color()))
                 .child(flag.label())
         }))
@@ -801,7 +799,7 @@ pub(crate) fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyEleme
     }
     if blocks.is_empty() {
         return div()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::faint()))
             .child("（无输出）")
             .into_any_element();
@@ -809,7 +807,7 @@ pub(crate) fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyEleme
     div()
         .w_full()
         .min_w_0()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .child(markdown_mermaid::markdown_view(id, blocks.join("\n\n")))
         .into_any_element()
 }
@@ -902,7 +900,7 @@ pub(crate) fn run_metadata(run: &AutomationRun) -> AnyElement {
                 .py_1()
                 .flex()
                 .gap_4()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .child(
                     div()
                         .w(px(96.))

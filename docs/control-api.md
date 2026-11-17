@@ -83,7 +83,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 }
 ```
 
-`daemon` 字段：`runtime_id` 是运行时永久身份；`os` / `arch` 来自 `std::env::consts`；`hostname` 是默认机器名；`desktop` 表示这台机器装了远程桌面（`install.sh --with-desktop`）；`smelt_home` 是这台运行时的 `SMELT_HOME`，客户端用它认出远程机器上哪些会话是智能体对话。`methods` 在真实响应里是完整清单，这里只示意两项。
+`daemon` 字段：`runtime_id` 是运行时永久身份；`os` / `arch` 来自 `std::env::consts`；`hostname` 是默认机器名；`desktop` 表示这台机器装了远程桌面（`install.sh --with-desktop`）；`smelt_home` 是这台运行时的 `SMELT_HOME`。客户端认智能体 space 不看它，看智能体配置（`agent.host.get`、话题 `agent_host.changed`）里的 `agent_spaces_root`：运行时读出配置时填上，不存库，改配置时忽略；旧运行时不带，那时认不出哪个目录是智能体的 space。`methods` 在真实响应里是完整清单，这里只示意两项。
 
 失败响应：
 

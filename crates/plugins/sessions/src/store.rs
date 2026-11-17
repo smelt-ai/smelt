@@ -16,7 +16,7 @@ use smelt_plugin_api::rusqlite::{self, OptionalExtension as _, Transaction, para
 use smelt_plugin_api::{PluginStore, RuntimeKey};
 
 use crate::OWNER;
-use crate::model::{ConversationKey, Fold, KnownIds, Pin, SidebarUi};
+use crate::model::{ConversationKey, Fold, KnownIds, Pin, ProjectKey, SidebarUi};
 
 const MIGRATIONS: &[&str] = &["
     CREATE TABLE pinned_conversation (
@@ -151,7 +151,7 @@ impl SessionsStore {
                 db,
                 "SELECT machine, root FROM project_order ORDER BY position",
             )? {
-                ui.machine_entry(&machine).project_order.push(root);
+                ui.project_order.push(ProjectKey { machine, root });
             }
             for (machine, id) in pairs(
                 db,
@@ -256,10 +256,21 @@ impl SessionsStore {
         });
     }
 
-    /// 换掉那台机器上项目的手动顺序（整份）。
-    pub(crate) fn set_project_order(&self, machine: &RuntimeKey, roots: &[String]) {
+    /// 换掉项目的手动顺序（所有机器一份，整份）。位置跨机器排，读回来按位置就是侧栏里的顺序。
+    pub(crate) fn set_project_order(&self, order: &[ProjectKey]) {
         self.write("项目顺序", |tx| {
-            replace_order(tx, "project_order", "root", machine, roots)
+            tx.execute("DELETE FROM project_order", [])?;
+            let mut insert = tx.prepare(
+                "INSERT OR IGNORE INTO project_order (machine, root, position) VALUES (?1, ?2, ?3)",
+            )?;
+            for (position, key) in order.iter().enumerate() {
+                insert.execute(params![
+                    machine_column(&key.machine),
+                    key.root,
+                    position as i64
+                ])?;
+            }
+            Ok(())
         });
     }
 
@@ -538,8 +549,19 @@ mod tests {
     #[test]
     fn order_is_replaced_whole_and_collapse_toggles() {
         let (_dir, store) = store();
-        store.set_project_order(&RuntimeKey::Local, &["/b".into(), "/a".into()]);
-        store.set_project_order(&RuntimeKey::Local, &["/a".into(), "/c".into()]);
+        let project = |machine: RuntimeKey, root: &str| ProjectKey {
+            machine,
+            root: root.into(),
+        };
+        store.set_project_order(&[
+            project(RuntimeKey::Local, "/b"),
+            project(RuntimeKey::Local, "/a"),
+        ]);
+        store.set_project_order(&[
+            project(RuntimeKey::Local, "/a"),
+            project(remote(), "/r"),
+            project(RuntimeKey::Local, "/c"),
+        ]);
         store.set_conversation_order(&remote(), &["x".into(), "y".into()]);
         store.set_collapsed(
             &Fold::Project {
@@ -559,7 +581,15 @@ mod tests {
 
         let ui = store.sidebar();
         let local = &ui.machines[&RuntimeKey::Local];
-        assert_eq!(local.project_order, ["/a", "/c"]);
+        // 整份换掉，跨机器的先后照存。
+        assert_eq!(
+            ui.project_order,
+            [
+                project(RuntimeKey::Local, "/a"),
+                project(remote(), "/r"),
+                project(RuntimeKey::Local, "/c"),
+            ]
+        );
         assert!(local.collapsed_projects.contains("/a"));
         assert_eq!(ui.machines[&remote()].conversation_order, ["x", "y"]);
         assert!(ui.machines[&remote()].collapsed_worksets.contains("w"));

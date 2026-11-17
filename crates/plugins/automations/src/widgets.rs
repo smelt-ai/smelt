@@ -1,6 +1,7 @@
 //! 页面里共用的小块：卡片、表单框、分段。
 
 use crate::prelude::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 内容卡：12px 圆角加发丝描边。智能体空状态、自动化表和表单共用。
 pub(crate) fn content_card_style<E: Styled>(element: E) -> E {
@@ -52,14 +53,13 @@ pub(crate) fn automation_run_lines(title: String, detail: String, error: Option<
         .gap_1()
         .child(
             div()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .overflow_hidden()
                 .child(truncated_line(title)),
         )
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(detail)),
@@ -67,7 +67,7 @@ pub(crate) fn automation_run_lines(title: String, detail: String, error: Option<
         .when_some(error, |column, error| {
             column.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::bad()))
                     .overflow_hidden()
                     .child(truncated_line(error)),
@@ -85,8 +85,7 @@ pub(crate) fn automation_form_row() -> Div {
 
 pub(crate) fn automation_section_label(label: &'static str) -> AnyElement {
     div()
-        .text_sm()
-        .font_medium()
+        .type_style(TYPE.ui_medium)
         .text_color(rgb(ui_theme::text()))
         .child(label)
         .into_any_element()

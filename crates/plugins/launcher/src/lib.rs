@@ -23,6 +23,7 @@ use api::ui::{Button, ListRow, ui_theme};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_kit_assets::IconName;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 use smelt_plugin_api::{
     self as api, HostEvent, OpenView, PluginView, RunCommand, ViewHandle, ViewSpec,
 };
@@ -245,8 +246,8 @@ fn entry_row(entry: &Entry) -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .text_sm()
-                .when(selected, |label| label.font_weight(FontWeight::MEDIUM))
+                .type_style(TYPE.ui)
+                .when(selected, |label| label.font_weight(TYPE.ui_medium.weight))
                 .child(truncated_line(entry.title.clone())),
         )
         .when(entry.attention, |row| {
@@ -387,6 +388,9 @@ fn notify_error(message: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `use gpui::*` 会把 gpui 的 `test` 宏一起带进来，让 `#[test]` 展开时绕回自己；
+    // 显式导入的胜过通配，指回标准库的。
+    use std::prelude::v1::test;
 
     #[test]
     fn only_views_openable_without_arguments_get_an_entry() {

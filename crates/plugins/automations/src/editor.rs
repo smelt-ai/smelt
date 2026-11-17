@@ -1,6 +1,7 @@
 //! 编辑器的状态和表单：名称、触发器（定时 / 间隔 / webhook）、动作、完成提醒。
 
 use crate::prelude::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScheduleKind {
@@ -696,15 +697,14 @@ pub(crate) fn render_trigger_entry(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
                                 .child(title),
                         )
                         .when(show_hint, |col| {
                             col.child(
                                 div()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(rgb(ui_theme::muted()))
                                     .child(hint),
                             )
@@ -846,14 +846,13 @@ pub(crate) fn render_automation_access_note(is_agent: bool) -> AnyElement {
         .gap_1()
         .child(
             div()
-                .text_xs()
-                .font_medium()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::muted()))
                 .child("无人值守 · 完全访问"),
         )
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .child(automation_access_note(is_agent)),
         )
@@ -901,7 +900,7 @@ pub(crate) fn render_webhook_entry(
         .gap_2()
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .child(if live_url.is_some() {
                     "向此地址发送 POST 请求即可触发运行。"
@@ -912,7 +911,7 @@ pub(crate) fn render_webhook_entry(
         .when(paused, |body| {
             body.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::muted()))
                     .child("自动化已暂停，启用后可继续接收请求。"),
             )
@@ -937,7 +936,7 @@ pub(crate) fn render_webhook_entry(
                             .border_1()
                             .border_color(ui_theme::hair_strong())
                             .bg(rgb(ui_theme::side()))
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::text()))
                             .child(url),
                     )
@@ -1033,7 +1032,7 @@ pub(crate) fn render_schedule_rule(
     };
     let timezone = || {
         div()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::muted()))
             .child(local_timezone_label())
     };
@@ -1114,14 +1113,14 @@ pub(crate) fn render_schedule_rule(
                         .flex_wrap()
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
                                 .child("从"),
                         )
                         .child(clock(&rule.window_start, "开始时间"))
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
                                 .child("到"),
                         )

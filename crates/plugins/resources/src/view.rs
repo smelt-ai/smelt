@@ -19,6 +19,7 @@ use crate::monitor::{
     MemoryPart, PanelSnapshot, Row, Section, SessionGroup, SortBy, format_bytes, format_cpu,
     process_summary,
 };
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 const CPU_COLUMN: f32 = 64.;
 const MEMORY_COLUMN: f32 = 80.;
@@ -49,7 +50,7 @@ pub(crate) fn page(
 fn summary_view(snapshot: &PanelSnapshot) -> AnyElement {
     let Some(local) = snapshot.local else {
         return div()
-            .text_sm()
+            .type_style(TYPE.ui)
             .text_color(rgb(ui_theme::muted()))
             .child("读取中…")
             .into_any_element();
@@ -77,13 +78,13 @@ fn summary_view(snapshot: &PanelSnapshot) -> AnyElement {
             )
             .child(
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::text()))
                     .child(format!("CPU {}", format_cpu(local.cpu_percent))),
             )
             .children(share.map(|share| {
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child(share)
             })),
@@ -97,10 +98,15 @@ fn summary_view(snapshot: &PanelSnapshot) -> AnyElement {
                 .child(AreaChart::new(snapshot.chart.iter().copied()).max(peak * 1.2)),
         );
     }
-    view.child(div().text_xs().text_color(rgb(ui_theme::muted())).child(
-        "含 Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
+    view.child(
+        div()
+            .type_style(TYPE.text_xsmall)
+            .text_color(rgb(ui_theme::muted()))
+            .child(
+                "含 Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
                  包括智能体起的命令；CPU 按单核计，多核可超过 100%。",
-    ))
+            ),
+    )
     .into_any_element()
 }
 
@@ -122,7 +128,7 @@ fn section_view(
             .w(px(width))
             .text_right()
             .text_color(if sort_by == by { colors.fg } else { colors.muted })
-            .when(sort_by == by, |d| d.font_medium())
+            .when(sort_by == by, |d| d.font_weight(TYPE.ui_medium.weight))
             .on_click(move |_ev, _window, cx| {
                 page.update(cx, |page, cx| page.set_sort(by, cx));
             })
@@ -140,7 +146,7 @@ fn section_view(
             .px_2()
             .pb_1()
             .gap_3()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .child(div().w(px(DISCLOSURE_COLUMN)))
             .child(div().flex_1().text_color(colors.muted).child("名称"))
             .child(sort_header("CPU", SortBy::Cpu, CPU_COLUMN))
@@ -159,7 +165,7 @@ fn section_view(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(colors.muted)
                         .child(note.clone()),
                 ),
@@ -202,8 +208,7 @@ fn section_view(
                 .child(
                     div()
                         .flex_1()
-                        .text_sm()
-                        .font_medium()
+                        .type_style(TYPE.ui_medium)
                         .text_color(colors.fg)
                         .child("合计"),
                 )
@@ -229,7 +234,7 @@ fn usage_columns(usage: ProcessUsage, color: Hsla) -> Div {
         .items_center()
         .flex_none()
         .font_features(ui_theme::tabular_figures())
-        .text_sm()
+        .type_style(TYPE.ui)
         .text_color(color)
         .child(
             div()
@@ -254,14 +259,14 @@ fn row_label(label: String, detail: Option<String>, colors: RowColors) -> Div {
         .child(
             div()
                 .overflow_hidden()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(colors.fg)
                 .child(truncated_line(label)),
         )
         .children(detail.map(|detail| {
             div()
                 .overflow_hidden()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(colors.muted)
                 .child(truncated_line(detail))
         }))
@@ -334,7 +339,7 @@ fn memory_part_row(part: &MemoryPart, colors: RowColors) -> impl IntoElement + u
                 .items_center()
                 .flex_none()
                 .font_features(ui_theme::tabular_figures())
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(colors.muted)
                 .child(div().w(px(CPU_COLUMN)))
                 .child(
@@ -427,7 +432,7 @@ fn session_row(
             div()
                 .px_2()
                 .py_1()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(colors.muted)
                 .child(format!("另有 {unlisted} 个占用更小的进程没列出")),
         );
@@ -464,14 +469,14 @@ fn process_row(process: &ProcessEntry, colors: RowColors) -> impl IntoElement + 
                         .child(
                             div()
                                 .overflow_hidden()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(colors.fg)
                                 .child(truncated_line(process.name.clone())),
                         )
                         .child(
                             div()
                                 .flex_none()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .font_features(ui_theme::tabular_figures())
                                 .text_color(colors.muted)
                                 .child(format!("pid {}", process.pid)),
@@ -480,7 +485,7 @@ fn process_row(process: &ProcessEntry, colors: RowColors) -> impl IntoElement + 
                 .children(command.map(|command| {
                     div()
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(api::model::font_config::font_family())
                         .text_color(colors.muted)
                         .child(truncated_line(command))

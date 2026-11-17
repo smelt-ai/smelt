@@ -27,8 +27,9 @@ use gpui::{
 use gpui_base::{Root, StyledExt as _};
 use gpui_kit_assets::IconName;
 use smelt_model::theme_index::{DEFAULT_DARK, DEFAULT_LIGHT};
+use smelt_ui::code_editor::{CodeEditor, EditorState};
 use smelt_ui::field::{InputState, TextareaState};
-use smelt_ui::kit::ControlSize;
+use smelt_ui::kit::{ControlSize, TYPE, TypeStyled as _};
 use smelt_ui::{
     Button, Checkbox, Clipboard, IconAction as _, ListRow, Radio, Segmented, Switch, TextArea,
     TextInput, theme_catalog, tooltip::Tooltip, ui_theme,
@@ -116,6 +117,11 @@ const SNAPSHOTS: &[Snapshot] = &[
         name: "field",
         size: (600., 360.),
         setup: fields,
+    },
+    Snapshot {
+        name: "code_editor",
+        size: (640., 340.),
+        setup: code_editor,
     },
     Snapshot {
         name: "dialog",
@@ -377,7 +383,7 @@ fn row(label: &'static str, items: Vec<AnyElement>) -> AnyElement {
             div()
                 .w(px(96.))
                 .flex_none()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child(label),
         )
@@ -786,7 +792,7 @@ fn page_toolbars(_: &mut Window, _: &mut App) -> Draw {
             .child(
                 smelt_ui::page_toolbar().child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::muted()))
                         .child("3 个智能体"),
                 ),
@@ -804,7 +810,7 @@ fn list_rows(_: &mut Window, _: &mut App) -> Draw {
                 .px_3()
                 .py_2()
                 .flex()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .selected(selected)
                 .child(
                     div()
@@ -814,7 +820,7 @@ fn list_rows(_: &mut Window, _: &mut App) -> Draw {
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::row_muted(selected)))
                         .child("3 分钟前"),
                 )
@@ -988,7 +994,7 @@ fn context_menu(window: &mut Window, cx: &mut App) -> Draw {
                 .border_dashed()
                 .border_color(ui_theme::hair_strong())
                 .p_3()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child("在这里按右键"),
             |_, _| {
@@ -1090,6 +1096,35 @@ fn fields(window: &mut Window, cx: &mut App) -> Draw {
     })
 }
 
+/// 代码编辑器：行号、当前行，搜索栏开在替换模式、有查询词和匹配。没装语法分析器，
+/// 所以没有高亮和折叠箭头（那两样由调用方装的分析器给）。匹配的底色只在窗口激活时画，离屏
+/// 窗口不激活，图上看不到。应用内嵌的等宽字体这里没装，换成系统自带的 Menlo。
+fn code_editor(window: &mut Window, cx: &mut App) -> Draw {
+    smelt_model::font_config::set_font_family("Menlo");
+    let source = "fn main() {\n    let value = compute(41);\n    println!(\"{value}\");\n}\n\nfn compute(input: u32) -> u32 {\n    // 加一\n    input + 1\n}\n";
+    let state = cx.new(|cx| {
+        EditorState::new(window, cx)
+            .line_number(true)
+            .searchable(true)
+            .soft_wrap(false)
+            .default_value(source)
+    });
+    state.update(cx, |state, cx| {
+        state.open_search(true, cx);
+        state.set_search_query("value", true, cx);
+    });
+    Box::new(move |_, _| {
+        div()
+            .h(px(290.))
+            .rounded(px(8.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(ui_theme::hair())
+            .child(CodeEditor::new(&state))
+            .into_any_element()
+    })
+}
+
 /// 设置页里出现的几种行：下拉、按钮组、开关、多行说明、输入框，和不是行的自由块。
 fn settings_page(window: &mut Window, cx: &mut App) -> Draw {
     use smelt_ui::{Select, SettingsPage, SettingsRow, SettingsSection};
@@ -1120,7 +1155,7 @@ fn settings_page(window: &mut Window, cx: &mut App) -> Draw {
                                 div()
                                     .w(px(40.))
                                     .text_center()
-                                    .text_sm()
+                                    .type_style(TYPE.ui)
                                     .child("14px"),
                             )
                             .child(Button::new("larger").small().label("+")),
@@ -1142,7 +1177,7 @@ fn settings_page(window: &mut Window, cx: &mut App) -> Draw {
                     .description("手机和别的电脑经 relay 连到这台电脑上的运行时。")
                     .child(
                         div()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(rgb(ui_theme::muted()))
                             .child("还没有配对的设备。"),
                     )
@@ -1215,16 +1250,20 @@ fn popover(window: &mut Window, cx: &mut App) -> Draw {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(div().text_sm().font_semibold().child("这个对话能用的能力"))
+                            .child(div().type_style(TYPE.ui_medium).child("这个对话能用的能力"))
                             .child(
                                 div()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(rgb(ui_theme::muted()))
                                     .child("关掉的能力，智能体在这个对话里就用不了。"),
                             )
                             .child(div().flex().flex_col().children(
                                 ["读写文件", "运行命令", "联网搜索"].map(|label| {
-                                    ListRow::new(label).px_2().py_1().text_sm().child(label)
+                                    ListRow::new(label)
+                                        .px_2()
+                                        .py_1()
+                                        .type_style(TYPE.ui)
+                                        .child(label)
                                 }),
                             ))
                     }),
@@ -1373,7 +1412,7 @@ fn hover_card(window: &mut Window, cx: &mut App) -> Draw {
                     .anchor(gpui::Anchor::TopLeft)
                     .trigger(
                         div()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(rgb(ui_theme::muted()))
                             .child("收到：先把对话框层并到一处…"),
                     )
@@ -1381,7 +1420,7 @@ fn hover_card(window: &mut Window, cx: &mut App) -> Draw {
                         div()
                             .w(px(360.))
                             .p_2()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -1456,11 +1495,11 @@ fn links(_: &mut Window, _: &mut App) -> Draw {
             "链接",
             vec![
                 Link::new("docs", "https://example.com")
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .child("帮助文档 ↗")
                     .into_any_element(),
                 Link::new("source", "https://example.com")
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .child("GitHub ↗")
                     .into_any_element(),
             ],
@@ -1515,7 +1554,7 @@ fn resizables(_: &mut Window, cx: &mut App) -> Draw {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child(label)
         };
@@ -1634,7 +1673,7 @@ fn icons(_: &mut Window, _: &mut App) -> Draw {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::muted()))
                         .child(Icon::new(IconName::Folder))
                         .child("跟着字号和字色")
@@ -1691,7 +1730,7 @@ fn window_bars(_: &mut Window, _: &mut App) -> Draw {
                             .flex_1()
                             .flex()
                             .justify_center()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(rgb(ui_theme::muted()))
                             .child(title),
                     )
@@ -1762,7 +1801,7 @@ fn docks(window: &mut Window, cx: &mut App) -> Draw {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child(self.name)
         }

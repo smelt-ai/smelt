@@ -97,6 +97,16 @@ impl TextStyle {
     }
 }
 
+/// 给元素套一档字：`.type_style(TYPE.ui)`。界面里的字号都从 [`TYPE`] 取，不手写
+/// `text_sm()` / `text_xs()`，字重也跟着档走（要加重就用 `*_medium` 那档）。
+pub trait TypeStyled: Styled + Sized {
+    fn type_style(self, style: TextStyle) -> Self {
+        style.apply(self)
+    }
+}
+
+impl<E: Styled> TypeStyled for E {}
+
 /// 字阶：十二档，控件、正文、说明、等宽各几档。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Type {

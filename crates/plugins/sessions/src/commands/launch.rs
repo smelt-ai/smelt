@@ -9,7 +9,6 @@ use smelt_plugin_api::model::agent_host::AgentHostSettings;
 use smelt_plugin_api::model::agent_kind::{
     ConversationAgentKind, ConversationLaunchSpec, HistorySourceKind,
 };
-use smelt_plugin_api::model::agent_paths::agent_definition_id_for_space_in;
 use smelt_plugin_api::model::new_session::{LaunchEntry, default_launch_entries};
 use smelt_plugin_api::model::runtime_path::PathStyle;
 use smelt_plugin_api::model::workspace_directory::{
@@ -196,11 +195,10 @@ pub(super) fn resumed(
 /// 续接一段历史会话的那段对话：引擎按 `agent`（自定义 Agent 按它的命令），续接身份记成
 /// `resume_id`，对话插件拉起时 `session/load`。属于某个智能体的（工作目录是它的 space，
 /// 或参数里给了）按那个智能体续接，权限照智能体对话放开；那个智能体已经不在了就当裸引擎。
-/// `smelt_home` 是那台机器的 `SMELT_HOME`，还不知道是 `None`。
+/// space 在哪按那台运行时推来的配置认（[`AgentHostSettings::agent_for_space`]）。
 pub(super) fn resumed_acp(
     settings: &AgentHostSettings,
     args: &Resume,
-    smelt_home: Option<&str>,
     sid: String,
 ) -> Result<WorkspaceAcp, String> {
     let kind = HistorySourceKind::from_id(&args.agent)
@@ -216,7 +214,11 @@ pub(super) fn resumed_acp(
     let definition = args
         .agent_definition_id
         .clone()
-        .or_else(|| smelt_home.and_then(|home| agent_definition_id_for_space_in(home, &args.cwd)))
+        .or_else(|| {
+            settings
+                .agent_for_space(&args.cwd)
+                .map(|agent| agent.id.clone())
+        })
         .filter(|id| settings.find_agent(id).is_some());
     if definition.is_some() {
         acp.config_values = agent_config(kind);
@@ -570,33 +572,21 @@ mod tests {
     #[test]
     fn resuming_keeps_the_agent_it_belonged_to_while_it_exists() {
         let settings = with_agent("pi", ("", ""));
-        let acp = resumed_acp(
-            &settings,
-            &resume_args("/repo", Some("writer")),
-            None,
-            "s".into(),
-        )
-        .unwrap();
+        let acp =
+            resumed_acp(&settings, &resume_args("/repo", Some("writer")), "s".into()).unwrap();
         assert_eq!(acp.history_session_id.as_deref(), Some("h1"));
         assert_eq!(acp.agent_definition_id.as_deref(), Some("writer"));
 
+        // 工作目录是它的 space 也认得出，space 在哪按运行时推来的配置；运行时没报就认不出。
         let space = "/home/u/.smelt/agents/writer";
-        let acp = resumed_acp(
-            &settings,
-            &resume_args(space, None),
-            Some("/home/u/.smelt"),
-            "s".into(),
-        )
-        .unwrap();
+        let acp = resumed_acp(&settings, &resume_args(space, None), "s".into()).unwrap();
+        assert_eq!(acp.agent_definition_id, None);
+        let mut reported = settings.clone();
+        reported.agent_spaces_root = Some("/home/u/.smelt/agents".into());
+        let acp = resumed_acp(&reported, &resume_args(space, None), "s".into()).unwrap();
         assert_eq!(acp.agent_definition_id.as_deref(), Some("writer"));
 
-        let acp = resumed_acp(
-            &settings,
-            &resume_args("/repo", Some("gone")),
-            None,
-            "s".into(),
-        )
-        .unwrap();
+        let acp = resumed_acp(&settings, &resume_args("/repo", Some("gone")), "s".into()).unwrap();
         assert_eq!(acp.agent_definition_id, None);
         assert!(acp.config_values.is_empty());
 
@@ -606,7 +596,7 @@ mod tests {
                 .into(),
             ..resume_args("/repo", None)
         };
-        assert!(resumed_acp(&settings, &terminal_only, None, "s".into()).is_err());
+        assert!(resumed_acp(&settings, &terminal_only, "s".into()).is_err());
     }
 
     #[test]

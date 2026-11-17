@@ -1,6 +1,7 @@
 //! 能力库各表单、面板的状态类型。
 
 use super::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 #[derive(Clone)]
 pub struct PiModelEditor {
@@ -163,7 +164,12 @@ pub(crate) fn render_model_discovery_section(
     muted: gpui::Hsla,
     danger_fg: gpui::Hsla,
 ) -> gpui::AnyElement {
-    let note = |color: gpui::Hsla, text: String| div().text_xs().text_color(color).child(text);
+    let note = |color: gpui::Hsla, text: String| {
+        div()
+            .type_style(TYPE.text_xsmall)
+            .text_color(color)
+            .child(text)
+    };
 
     match state {
         None if manual_rows == 0 => note(

@@ -111,9 +111,6 @@ pub struct Machine {
     pub name: String,
     /// 眼下用不了的原因（离线、版本不对），给人看的短语；能用是 `None`。
     pub unavailable: Option<String>,
-    /// 那台机器的 `SMELT_HOME`，按那台机器的路径写。远程机器还没连上过（或运行时太旧
-    /// 不报）是 `None`。智能体的 space 在它下面。
-    pub smelt_home: Option<String>,
 }
 
 /// 一个项目：在哪台机器上、根目录（那台机器上的路径）。

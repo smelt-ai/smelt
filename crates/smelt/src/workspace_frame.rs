@@ -89,7 +89,7 @@ pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div 
 /// 它就是 [`TOP_BAR_HEIGHT`] 高的标题栏，放不下按钮和分段控件，那些放进页面自己的工具行
 /// （`smelt_ui::page_toolbar`）。
 ///
-/// `area` 是这个视图的 safe area（`ShellView::safe_area_of`）。顶上是标题栏时两头给角上的
+/// `area` 是这个视图的 safe area（`smelt_plugin_api::safe_area`）。顶上是标题栏时两头给角上的
 /// 控件让位，空白处拖窗口；不是（在标签条下面）时顶上那条归标签条，这里只是一条常规内边距的
 /// 头。底边是发丝。
 pub(crate) fn page_chrome(area: &SafeArea) -> Div {
@@ -107,14 +107,6 @@ pub(crate) fn page_chrome(area: &SafeArea) -> Div {
         with_window_drag(header.min_h(TOP_BAR_HEIGHT))
     } else {
         header.py(px(8.))
-    }
-}
-
-impl crate::Workspace {
-    /// 自己画顶上那条的宿主视图（设置）的标题行，按它此刻摆在哪让位，见 [`page_chrome`]。
-    /// 只读缓存（`shell_view`，见 `workspace_layout`）。
-    pub(crate) fn page_chrome_of(&self, view: &str) -> Div {
-        page_chrome(&self.shell_view.safe_area_of(view))
     }
 }
 

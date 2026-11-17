@@ -46,6 +46,13 @@ pub(crate) struct ConversationKey {
     pub(crate) id: String,
 }
 
+/// 一个项目组：哪台机器上的哪个根目录。侧栏里所有机器的项目排在一份顺序里，靠它认。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ProjectKey {
+    pub(crate) machine: RuntimeKey,
+    pub(crate) root: String,
+}
+
 /// 会话插件的全部内存状态。
 pub(crate) struct Sessions {
     pub(crate) store: SessionsStore,
@@ -61,6 +68,9 @@ pub(crate) struct Sessions {
     /// 新建、分叉刚写进目录、还没建过视图的对话：建对话视图时带上，让它当新对话拉起
     /// （见 `peers::conversation::ConversationArgs::start`）。建视图时取走。
     pub(crate) starts: HashMap<ConversationKey, ConversationStart>,
+    /// 在这台 app 上刚新建、还没在列表里露过面的会话：列表等它出现在侧栏里时取走，播一次
+    /// 落进列表的动画。只由 `lifecycle::create_conversation` 放、列表视图取，不通知。
+    pub(crate) fresh: Option<ConversationKey>,
     /// 侧栏算好的行（列表画它，上一段 / 下一段按它的顺序）。目录、会话状态、机器、
     /// [`Self::ui`] 变了由 [`Self::rebuild_sidebar`] 重算；render 只读它。
     pub(crate) sidebar: Rc<Sidebar>,
@@ -97,6 +107,7 @@ impl Sessions {
                 selection,
                 active_pane: None,
                 starts: HashMap::new(),
+                fresh: None,
                 sidebar: Rc::default(),
                 agent_names: HashMap::new(),
                 lifecycle: lifecycle::State::default(),
@@ -137,24 +148,13 @@ impl Sessions {
         self.rebuild_sidebar(cx);
     }
 
-    /// 换掉那台机器上项目的手动顺序（整份，拖完一次给一次）。
-    pub(crate) fn set_project_order(
-        &mut self,
-        machine: &RuntimeKey,
-        roots: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let order = &mut self
-            .ui
-            .machines
-            .entry(machine.clone())
-            .or_default()
-            .project_order;
-        if *order == roots {
+    /// 换掉项目的手动顺序（所有机器一份，整份给，拖完一次给一次）。
+    pub(crate) fn set_project_order(&mut self, order: Vec<ProjectKey>, cx: &mut Context<Self>) {
+        if self.ui.project_order == order {
             return;
         }
-        self.store.set_project_order(machine, &roots);
-        *order = roots;
+        self.store.set_project_order(&order);
+        self.ui.project_order = order;
         self.rebuild_sidebar(cx);
     }
 
@@ -202,33 +202,14 @@ impl Sessions {
     /// 折起或展开按状态、时间分出来的一组。只改内存（见 [`SidebarUi::collapsed_buckets`]）。
     pub(crate) fn set_bucket_collapsed(
         &mut self,
-        machine: &RuntimeKey,
         bucket: Bucket,
         collapsed: bool,
         cx: &mut Context<Self>,
     ) {
-        let key = (machine.clone(), bucket);
         let changed = if collapsed {
-            self.ui.collapsed_buckets.insert(key)
+            self.ui.collapsed_buckets.insert(bucket)
         } else {
-            self.ui.collapsed_buckets.remove(&key)
-        };
-        if changed {
-            self.rebuild_sidebar(cx);
-        }
-    }
-
-    /// 折起或展开一台机器的分段。只改内存（见 [`SidebarUi::collapsed_machines`]）。
-    pub(crate) fn set_machine_collapsed(
-        &mut self,
-        machine: &RuntimeKey,
-        collapsed: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = if collapsed {
-            self.ui.collapsed_machines.insert(machine.clone())
-        } else {
-            self.ui.collapsed_machines.remove(machine)
+            self.ui.collapsed_buckets.remove(&bucket)
         };
         if changed {
             self.rebuild_sidebar(cx);
@@ -258,8 +239,7 @@ impl Sessions {
     /// 不对离线的调。
     pub(crate) fn forget_machine(&mut self, machine: &RuntimeKey) {
         self.ui.machines.remove(machine);
-        self.ui.collapsed_buckets.retain(|(m, _)| m != machine);
-        self.ui.collapsed_machines.remove(machine);
+        self.ui.project_order.retain(|key| key.machine != *machine);
         self.store.forget_machine(machine);
     }
 }
@@ -270,18 +250,18 @@ impl Sessions {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SidebarUi {
     pub(crate) machines: HashMap<RuntimeKey, MachineUi>,
+    /// 用户拖出来的项目顺序，所有机器一份（侧栏里各机器的项目排在一起）；不在里面的按机器表、
+    /// 目录的顺序接在后面。
+    pub(crate) project_order: Vec<ProjectKey>,
     /// 「对话」那一段折起来了。不分机器：所有机器的智能体对话在一段里。
     pub(crate) conversations_collapsed: bool,
     /// 项目里的会话按什么分组。只管项目里的会话，「对话」一段不受它影响。
     pub(crate) grouping: SidebarGrouping,
     /// 「显示：有会话」：按项目分组时藏起没有会话、也没有工作树的项目（置顶的、选中的照常显示）。
     pub(crate) hide_empty_projects: bool,
-    /// 按状态、时间分组时折起来的组（机器 + 哪一组）。只在内存里：这些组是现算的，不是库里
-    /// 认得的东西，重启回到全展开。
-    pub(crate) collapsed_buckets: HashSet<(RuntimeKey, Bucket)>,
-    /// 分段时折起来的机器。只在内存里，重启回到全展开：折机器多半是一时腾地方，而且机器
-    /// 本身不在插件库认得的东西里（移除了要另清）。
-    pub(crate) collapsed_machines: HashSet<RuntimeKey>,
+    /// 按状态、时间分组时折起来的组（所有机器的会话一起分）。只在内存里：这些组是现算的，
+    /// 不是库里认得的东西，重启回到全展开。
+    pub(crate) collapsed_buckets: HashSet<Bucket>,
 }
 
 /// 侧栏「筛选与分组」里的「分组依据」。
@@ -305,8 +285,6 @@ pub(crate) struct MachineUi {
     pub(crate) pinned_projects: Vec<String>,
     /// 置顶的工作集，在项目里排前面。
     pub(crate) pinned_worksets: HashSet<String>,
-    /// 用户拖出来的项目顺序；不在里面的按目录的顺序接在后面。
-    pub(crate) project_order: Vec<String>,
     /// 用户拖出来的会话顺序；不在里面的按默认顺序接在后面。
     pub(crate) conversation_order: Vec<String>,
     pub(crate) collapsed_projects: HashSet<String>,
@@ -412,6 +390,8 @@ impl SidebarUi {
     }
 
     fn prune(&mut self, machine: &RuntimeKey, known: &KnownIds) {
+        self.project_order
+            .retain(|key| key.machine != *machine || known.roots.contains(&key.root));
         let Some(ui) = self.machines.get_mut(machine) else {
             return;
         };
@@ -420,7 +400,6 @@ impl SidebarUi {
         ui.conversation_order
             .retain(|id| known.conversations.contains(id));
         ui.pinned_projects.retain(|root| known.roots.contains(root));
-        ui.project_order.retain(|root| known.roots.contains(root));
         ui.collapsed_projects
             .retain(|root| known.roots.contains(root));
         ui.pinned_worksets.retain(|id| known.worksets.contains(id));

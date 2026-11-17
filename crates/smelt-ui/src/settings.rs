@@ -12,11 +12,11 @@
 //! 页面里都一样宽。
 
 use gpui::{
-    AnyElement, App, ElementId, FontWeight, IntoElement, ParentElement, RenderOnce, ScrollHandle,
-    SharedString, Styled, Window, div, prelude::FluentBuilder as _, px, rems, rgb,
+    AnyElement, App, ElementId, IntoElement, ParentElement, RenderOnce, ScrollHandle, SharedString,
+    Styled, Window, div, prelude::FluentBuilder as _, px, rems, rgb,
 };
 
-use crate::kit::RADIUS;
+use crate::kit::{RADIUS, TYPE, TypeStyled as _};
 use crate::scrollbar::{Scrollable, ScrollbarAxis};
 use crate::ui_theme;
 
@@ -125,8 +125,7 @@ impl RenderOnce for SettingsSection {
                 .when_some(self.title, |this, title| {
                     this.child(
                         div()
-                            .text_size(rems(13. / 16.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .type_style(TYPE.ui_medium)
                             .text_color(rgb(ui_theme::muted()))
                             .child(title),
                     )
@@ -134,7 +133,7 @@ impl RenderOnce for SettingsSection {
                 .when_some(self.description, |this, description| {
                     this.child(
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::muted()))
                             .child(description),
                     )
@@ -222,14 +221,14 @@ impl RenderOnce for SettingsRow {
             .gap(px(2.))
             .child(
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::text()))
                     .child(self.title),
             )
             .when_some(self.description, |this, description| {
                 this.child(
                     div()
-                        .text_size(rems(13. / 16.))
+                        .type_style(TYPE.text_small)
                         .text_color(rgb(ui_theme::muted()))
                         .child(description),
                 )

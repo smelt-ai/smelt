@@ -4,6 +4,7 @@ use super::*;
 use gpui::SharedString;
 use smelt_plugin_api::model::acp_session::MemoryChangeView;
 use smelt_plugin_api::model::control_api::AgentMemoryLayer;
+use smelt_plugin_api::ui::kit::TYPE;
 
 /// 卡片里的行列表最多这么高，再多就在卡片里滚动，不把消息流挤没。
 const MEMORY_ROWS_MAX_HEIGHT: f32 = 240.;
@@ -37,7 +38,7 @@ impl ConversationView {
                     .flex_1()
                     .min_w(px(0.))
                     .truncate()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::muted()))
                     .child(memory_changes_summary(&changes.entries)),
             )
@@ -92,7 +93,7 @@ impl ConversationView {
                 .child(rows)
                 .children(self.memory_error.as_ref().map(|error| {
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(gpui::rgb(ui_theme::bad()))
                         .child(error.clone())
                 }))
@@ -175,7 +176,7 @@ impl ConversationView {
                                 div()
                                     .min_w(px(0.))
                                     .truncate()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(gpui::rgb(ui_theme::text()))
                                     .child(entry.name.clone()),
                             )
@@ -184,7 +185,7 @@ impl ConversationView {
                     .when(!subtitle.is_empty(), |col| {
                         col.child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(faint)
                                 .when(!expanded, |text| text.truncate())
                                 .child(subtitle),
@@ -194,7 +195,12 @@ impl ConversationView {
 
         let mut actions = div().flex().items_center().flex_shrink_0().gap_1();
         if busy {
-            actions = actions.child(div().text_xs().text_color(faint).child("处理中…"));
+            actions = actions.child(
+                div()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(faint)
+                    .child("处理中…"),
+            );
         } else {
             if pending {
                 let approve_key = key.clone();
@@ -264,7 +270,7 @@ impl ConversationView {
                         .overflow_y_scroll()
                         .rounded(ui_theme::row_radius())
                         .bg(ui_theme::overlay(0x10))
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .whitespace_normal()
                         .text_color(gpui::rgb(ui_theme::muted()))
                         .child(if entry.body.is_empty() {
@@ -284,7 +290,7 @@ fn memory_badge(label: &'static str, color: u32) -> gpui::Div {
         .flex_shrink_0()
         .px_1()
         .rounded_sm()
-        .text_size(px(10.))
+        .type_style(TYPE.small)
         .bg(ui_theme::tint(color, 0x22))
         .text_color(gpui::rgb(color))
         .child(label)

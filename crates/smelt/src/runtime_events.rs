@@ -21,9 +21,6 @@
 //! 再探；每条订阅线程只请一次，升了还对不上就照常标不兼容，不反复请，人点「重新连接」
 //! 才再请一次。人也可以随时点「升级运行时」（[`upgrade_remote`]）：连得上就请，不管兼不兼容。
 //!
-//! 别处要读运行时的（工作区目录、配置、额度、终端重连），用 [`wait_online`] 等这里探到
-//! 在线再读，不各自拨号重试。
-//!
 //! 不进核心订阅的话题（见 `smelt_event_protocol` 模块文档）每一轮在核心订阅之前分别
 //! 订阅，核心订阅断了就关掉，下一轮重开。运行时不认识某个话题时只拒绝那条单独订阅，
 //! 核心订阅和其他话题不受影响。本机外观回执请求也走独立订阅。
@@ -33,7 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gpui::{App, AsyncApp, Global, Subscription};
+use gpui::{App, Global, Subscription};
 
 use crate::runtimes::{IncompatibleFix, Runtime, RuntimeHub, RuntimeKey, RuntimeStatus};
 use smelt_client::daemon_state::{
@@ -214,39 +211,6 @@ pub(crate) fn probe_remotes(cx: &App) {
                 handle.wake(Wake::Probe);
             }
         }
-    }
-}
-
-/// 读运行时之前等它在线。连通性由订阅线程探、记在 [`RuntimeHub`] 上，这里只看着它：在线
-/// 了才往下走，等的时候自己不拨号，远程机器关着也只有订阅线程按它的节奏去探。
-///
-/// `failures` 是这次之前已经连着失败了几次：不是 0 就先退避一会儿再看在不在线，在线却
-/// 失败（刚断线订阅还没察觉、运行时那边出错、会话又断了）时不会对着它连环重试。运行时被
-/// 移除了（远程机器删掉了）或应用要退出了返回 `false`，调用方就此停下。
-pub(crate) async fn wait_online(key: &RuntimeKey, failures: u32, cx: &AsyncApp) -> bool {
-    if let Some(previous) = failures.checked_sub(1) {
-        // 轮询例外：运行时在线、上一次却没成，没有「可以再试了」的事件可等；离线时不走这里，
-        // 退避完回去等在线；周期 250ms 起翻倍，上限 8s。
-        cx.background_executor()
-            .timer(daemon_reconnect_backoff(previous))
-            .await;
-    }
-    let key = key.clone();
-    let ready = move |cx: &App| online_or_removed(&key, cx);
-    smelt_ui::global_wait::wait_for_global::<RuntimeHub, bool>(cx, ready)
-        .await
-        .unwrap_or(false)
-}
-
-/// 在线是 `Some(true)`，移除了是 `Some(false)`；还没探过、离线、版本对不上、升级中都是
-/// `None`，接着等。
-fn online_or_removed(key: &RuntimeKey, cx: &App) -> Option<bool> {
-    if crate::runtimes::runtime_online(key, cx) {
-        Some(true)
-    } else if crate::runtimes::client(key, cx).is_none() {
-        Some(false)
-    } else {
-        None
     }
 }
 

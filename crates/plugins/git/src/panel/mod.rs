@@ -30,6 +30,7 @@ use smelt_plugin_api::ui::truncated_line::truncated_line;
 
 mod diff;
 pub(crate) use diff::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 #[cfg(test)]
 mod tests;
 mod view;
@@ -687,7 +688,7 @@ fn render_narrow_git_row(
                 .pl_1()
                 .pr(px(2.))
                 .rounded(ui_theme::row_radius())
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .when(*active, |d| d.bg(rgb(ui_theme::soft())))
                 .hover(|d| d.bg(rgb(ui_theme::soft())))
                 // 折叠箭头：未初始化的仓库没有内容可折，留空位保持对齐。
@@ -737,7 +738,7 @@ fn render_narrow_git_row(
                         .flex_shrink_0()
                         .max_w(px(96.))
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
                         .child(truncated_line(branch.clone()))
                         .tooltip({
@@ -864,7 +865,7 @@ fn render_narrow_git_row(
                 .when(has_text && !has_staged, |col| {
                     col.child(
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::faint()))
                             .child("先暂存要提交的更改"),
                     )
@@ -880,7 +881,7 @@ fn render_narrow_git_row(
                         .py_1()
                         .rounded(ui_theme::row_radius())
                         .bg(rgb(ui_theme::surface()))
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(crate::mono_font())
                         .text_color(rgb(ui_theme::bad()))
                         .child(err)
@@ -904,8 +905,7 @@ fn render_narrow_git_row(
                 .items_center()
                 .pl(px(12. + *depth as f32 * NARROW_GIT_INDENT))
                 .pr_3()
-                .text_xs()
-                .font_semibold()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::faint()))
                 .child(
                     div()
@@ -986,7 +986,7 @@ fn render_narrow_git_row(
                         .rounded(ui_theme::row_radius())
                         .pl(indent)
                         .pr_3()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(crate::mono_font())
                         .text_color(rgb(ui_theme::muted()))
                         .hover(|d| d.bg(rgb(ui_theme::soft())))
@@ -1080,7 +1080,7 @@ fn render_narrow_git_row(
                         .rounded(ui_theme::row_radius())
                         .pl(indent)
                         .pr_3()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(crate::mono_font())
                         .hover(|d| d.bg(rgb(ui_theme::soft())))
                         // 子模块指针：改的不是文件内容，而是"父仓记录子仓的哪个 commit"。
@@ -1089,7 +1089,7 @@ fn render_narrow_git_row(
                             line.child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(rgb(ui_theme::faint()))
                                     .child(repo_kind_glyph(
                                         RepoKind::Submodule,
@@ -1108,7 +1108,7 @@ fn render_narrow_git_row(
                             line.child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(rgb(ui_theme::faint()))
                                     .child("子模块指针"),
                             )

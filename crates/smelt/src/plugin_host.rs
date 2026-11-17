@@ -36,7 +36,6 @@ impl api::Host for SmeltHost {
             .map(|key| Machine {
                 name: runtimes::runtime_name(&key, cx),
                 unavailable: runtimes::runtime_unavailable_label(&key, cx).map(str::to_string),
-                smelt_home: runtimes::smelt_home(&key, cx),
                 key,
             })
             .collect()
@@ -416,7 +415,7 @@ pub(crate) fn set_window_shown(shown: HashSet<String>, cx: &mut App) {
     }
 }
 
-/// 设置停着的插件设置页；停在宿主自己的页、设置视图放掉了报 `None`。
+/// 设置停着的那一页（设置页视图的 id）；设置视图放掉了报 `None`。
 pub(crate) fn set_settings_shown(page: Option<SharedString>, cx: &mut App) {
     let views = cx.default_global::<ShownViews>();
     if views.settings != page {

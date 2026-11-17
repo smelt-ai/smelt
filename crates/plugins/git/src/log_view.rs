@@ -24,6 +24,7 @@ use smelt_plugin_api::ui::truncated_line::truncated_line;
 use crate::log::{CommitNode, Edge, GitLogState, GraphRow, LogScope};
 use crate::ui_theme;
 use crate::{GitPanel, placeholder_view};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 每行高度。与提交列表逐行对齐，图和文字必须共用同一个值。
 pub const ROW_H: f32 = 24.0;
@@ -191,7 +192,7 @@ fn commit_row(
         .items_center()
         .gap_2()
         .pr_3()
-        .text_sm()
+        .type_style(TYPE.ui)
         .hover(|d| d.bg(ui_theme::row_hover()))
         .when(is_sel, |d| d.bg(ui_theme::row_selected()))
         .on_click(move |_ev, _w, cx| {
@@ -220,7 +221,7 @@ fn commit_row(
                 .flex_none()
                 .w(px(110.))
                 .overflow_hidden()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child(truncated_line(commit.author.clone())),
         )
@@ -232,7 +233,7 @@ fn commit_row(
                 // `2025-04-22`，宽度不一样，左对齐会参差不齐。
                 .flex()
                 .justify_end()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child(fmt_time(commit.time)),
         )
@@ -329,7 +330,7 @@ pub fn git_log_view(
                 .py_1()
                 .border_b_1()
                 .border_color(ui_theme::hair())
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(muted)
                 .child(
                     div()
@@ -415,7 +416,7 @@ pub fn commit_detail_pane(
                         .w_full()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(fg)
                         .child(truncated_line(c.subject.clone())),
                 )
@@ -424,7 +425,7 @@ pub fn commit_detail_pane(
                         .w_full()
                         .min_w_0()
                         .gap_2()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(c.author.clone())))
                         .child(div().flex_none().child(fmt_time(c.time)))
@@ -532,7 +533,7 @@ fn commit_diff_list(
                 .gap_2()
                 .px_2()
                 .py(px(1.0))
-                .text_sm()
+                .type_style(TYPE.ui)
                 .rounded_sm()
                 .hover(|d| d.bg(ui_theme::row_hover()))
                 .when(is_sel, |d| d.bg(ui_theme::row_selected()))
@@ -548,7 +549,7 @@ fn commit_diff_list(
                     div()
                         .flex_none()
                         .w(px(14.))
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(st),
                 )
@@ -573,7 +574,7 @@ fn commit_diff_list(
             .min_h_0()
             .overflow_hidden()
             .p_4()
-            .text_sm()
+            .type_style(TYPE.ui)
             .whitespace_normal()
             .text_color(muted)
             .child(err)
@@ -635,7 +636,7 @@ pub fn branch_tree(
             .gap_1()
             .px_2()
             .py(px(1.0))
-            .text_sm()
+            .type_style(TYPE.ui)
             .rounded_sm()
             .hover(|d| d.bg(ui_theme::row_hover()))
             .when(on, |d| d.bg(ui_theme::row_selected()))
@@ -664,7 +665,7 @@ pub fn branch_tree(
                 div()
                     .px_2()
                     .py(px(1.0))
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child(title),
             )
@@ -685,7 +686,7 @@ pub fn branch_tree(
                     .pl_3()
                     .pr_2()
                     .py(px(1.0))
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .rounded_sm()
                     .hover(|d| d.bg(ui_theme::row_hover()))
                     .when(on, |d| d.bg(ui_theme::row_selected()))
@@ -702,7 +703,7 @@ pub fn branch_tree(
                         div()
                             .w(px(6.))
                             .flex_none()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::ok()))
                             .child(if is_head { "●" } else { "" }),
                     )

@@ -6,6 +6,7 @@ use api::ViewInstance;
 
 use crate::peers::agents::VIEW as AGENTS_VIEW;
 use crate::prelude::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 impl AutomationsPage {
     /// 编辑器的工具行：返回、标题（和保存提示）、右侧操作。
@@ -40,8 +41,7 @@ impl AutomationsPage {
                     .child(
                         div()
                             .min_w_0()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(rgb(ui_theme::text()))
                             .overflow_hidden()
                             .child(truncated_line(title)),
@@ -50,7 +50,7 @@ impl AutomationsPage {
                         row.child(
                             div()
                                 .min_w_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(color))
                                 .overflow_hidden()
                                 .child(truncated_line(text)),
@@ -227,7 +227,7 @@ impl AutomationsPage {
                         .py_2()
                         .rounded(ui_theme::row_radius())
                         // 字色跟着行走，选中时换成选中字色（见 `ListRow`）。
-                        .child(div().text_sm().font_medium().child("设置"))
+                        .child(div().type_style(TYPE.ui_medium).child("设置"))
                         .on_click(move |_, _, cx| {
                             task_entity
                                 .update(cx, |page, cx| page.show_automation_task(cx));
@@ -239,7 +239,7 @@ impl AutomationsPage {
                     .px_2()
                     .pt_2()
                     .pb_1()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::faint()))
                     .child("运行记录"),
             )
@@ -441,8 +441,7 @@ impl AutomationsPage {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(rgb(ui_theme::text()))
                             .overflow_hidden()
                             .child(truncated_line(format!("{source} · {status}"))),
@@ -475,7 +474,7 @@ impl AutomationsPage {
                         .py_2()
                         .border_b_1()
                         .border_color(ui_theme::hair())
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::muted()))
                         .child("对话插件未安装，看不到运行现场；下面是落库的记录。"),
                 )
@@ -623,7 +622,7 @@ impl AutomationsPage {
                 div()
                     .flex_1()
                     .p_5()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child("这条自动化已经不在了。")
                     .into_any_element()
@@ -642,7 +641,7 @@ impl AutomationsPage {
                 div()
                     .flex_1()
                     .p_5()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child("选择一次运行。")
                     .into_any_element()
@@ -671,7 +670,7 @@ impl AutomationsPage {
 
 pub(crate) fn automation_field_hint(text: &'static str) -> AnyElement {
     div()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::faint()))
         .child(text)
         .into_any_element()

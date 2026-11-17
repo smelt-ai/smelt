@@ -1,6 +1,7 @@
 //! 智能体页面：目录、编辑页和各种菜单。
 
 use super::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 impl AgentsPage {
     pub(crate) fn render_agents_header(
@@ -138,8 +139,7 @@ impl AgentsPage {
                     .child(
                         div()
                             .min_w_0()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(rgb(ui_theme::text()))
                             .overflow_hidden()
                             .child(truncated_line(agent_display_name(name))),
@@ -148,7 +148,7 @@ impl AgentsPage {
                         row.child(
                             div()
                                 .min_w_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
                                 .overflow_hidden()
                                 .child(truncated_line(
@@ -179,10 +179,12 @@ impl AgentsPage {
     ) -> AnyElement {
         // 只有一台机器时不分组，跟没挂远程机器时一样。
         let grouped = groups.len() > 1;
+        // 哪台机器给不了配置写在它自己的分组标题里；不分组时没有标题，才放到页顶。
         let error = self.error.clone().or_else(|| {
             groups
-                .iter()
-                .find_map(|group| agent_hosts::unavailable(&group.runtime, cx))
+                .first()
+                .filter(|_| !grouped)
+                .and_then(|group| agent_hosts::unavailable(&group.runtime, cx))
                 .map(str::to_string)
         });
         div()
@@ -271,8 +273,7 @@ impl AgentsPage {
                                 div()
                                     .min_w_0()
                                     .flex_1()
-                                    .text_sm()
-                                    .font_semibold()
+                                    .type_style(TYPE.ui_medium)
                                     .text_color(rgb(ui_theme::text()))
                                     .overflow_hidden()
                                     .child(truncated_line(name.clone())),
@@ -288,7 +289,7 @@ impl AgentsPage {
                     .when_some(summary, |column, summary| {
                         column.child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .line_height(px(18.))
                                 .text_color(rgb(ui_theme::muted()))
                                 .child(summary),
@@ -368,7 +369,7 @@ impl AgentsPage {
                             )
                             .child(
                                 div()
-                                    .text_sm()
+                                    .type_style(TYPE.ui)
                                     .text_color(rgb(ui_theme::muted()))
                                     .text_center()
                                     .child(if self.arm_conversation_on_create {
@@ -557,7 +558,7 @@ impl AgentsPage {
                                             .child(model_control)
                                             .child(
                                                 div()
-                                                    .text_xs()
+                                                    .type_style(TYPE.text_xsmall)
                                                     .text_color(rgb(ui_theme::faint()))
                                                     .child(agent_usage_summary(
                                                         agent_conversation_count(&editor.agent, cx),
@@ -591,13 +592,12 @@ impl AgentsPage {
                                     .gap_1()
                                     .child(
                                         div()
-                                            .text_sm()
-                                            .font_medium()
+                                            .type_style(TYPE.ui_medium)
                                             .text_color(rgb(ui_theme::text()))
                                             .child("工作方式"),
                                     )
                                     .child(
-                                        div().text_xs().text_color(rgb(ui_theme::muted())).child(
+                                        div().type_style(TYPE.text_xsmall).text_color(rgb(ui_theme::muted())).child(
                                             "长期规则。对话和自动化都会带上，不会当成第一条消息。",
                                         ),
                                     ),
@@ -613,7 +613,7 @@ impl AgentsPage {
                                     .px_5()
                                     .pt_1()
                                     .pb_3()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(rgb(ui_theme::faint()))
                                     .child(instructions_footer),
                             ),
@@ -778,6 +778,7 @@ pub(crate) fn agent_machine_groups(cx: &App) -> Vec<AgentMachineGroup> {
         .map(|runtime| {
             let loaded = agent_hosts::settings(&runtime, cx).is_some();
             let status = machine_unavailable(&runtime, cx)
+                .or_else(|| agent_hosts::unavailable(&runtime, cx).map(str::to_string))
                 .or_else(|| (!loaded).then(|| "正在读取…".to_string()));
             AgentMachineGroup {
                 agents: agents_on(&runtime, cx),
@@ -796,21 +797,20 @@ pub(crate) fn render_agent_machine_header(group: &AgentMachineGroup, cx: &App) -
         .gap_2()
         .child(
             div()
-                .text_xs()
-                .font_medium()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::muted()))
                 .child(machine_name(&group.runtime, cx)),
         )
         .children(group.status.clone().map(|status| {
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(status)
         }))
         .when(group.status.is_none() && group.agents.is_empty(), |row| {
             row.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::faint()))
                     .child("还没有智能体"),
             )

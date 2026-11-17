@@ -128,9 +128,6 @@ pub struct RuntimeConnection {
     /// 运行时用了自建 relay 时的地址；`None` 走公共 relay 和地址发现。
     pub relay_url: Option<String>,
     pub added_at_ms: i64,
-    /// 运行时的 `SMELT_HOME`，连上时从 `system.describe` 记下。客户端拿它认出那台机器上
-    /// 哪些会话是智能体对话。还没连上过（或运行时太旧不报）是 `None`。
-    pub smelt_home: Option<String>,
     /// 运行时所在系统（`std::env::consts::OS`，如 `linux`、`windows`），连上时从
     /// `system.describe` 记下。客户端按它切那台机器上的路径。还没连上过是 `None`。
     pub os: Option<String>,
@@ -618,7 +615,7 @@ impl ClientStore {
         self.with(|connection| {
             let mut statement = connection
                 .prepare(
-                    "SELECT runtime_id, name, endpoint_id, relay_url, added_at_ms, smelt_home, os
+                    "SELECT runtime_id, name, endpoint_id, relay_url, added_at_ms, os
                      FROM runtime_connection ORDER BY position, added_at_ms",
                 )
                 .map_err(sql)?;
@@ -630,8 +627,7 @@ impl ClientStore {
                         endpoint_id: row.get(2)?,
                         relay_url: row.get(3)?,
                         added_at_ms: row.get(4)?,
-                        smelt_home: row.get(5)?,
-                        os: row.get(6)?,
+                        os: row.get(5)?,
                     })
                 })
                 .map_err(sql)?;
@@ -650,19 +646,18 @@ impl ClientStore {
             connection
                 .execute(
                     "INSERT INTO runtime_connection
-                       (runtime_id, name, endpoint_id, relay_url, position, added_at_ms, smelt_home, os)
+                       (runtime_id, name, endpoint_id, relay_url, position, added_at_ms, os)
                      VALUES (?1, ?2, ?3, ?4,
-                       (SELECT COALESCE(MAX(position) + 1, 0) FROM runtime_connection), ?5, ?6, ?7)
+                       (SELECT COALESCE(MAX(position) + 1, 0) FROM runtime_connection), ?5, ?6)
                      ON CONFLICT (runtime_id) DO UPDATE SET name = excluded.name,
                        endpoint_id = excluded.endpoint_id, relay_url = excluded.relay_url,
-                       smelt_home = excluded.smelt_home, os = excluded.os",
+                       os = excluded.os",
                     params![
                         runtime.runtime_id,
                         runtime.name,
                         runtime.endpoint_id,
                         runtime.relay_url,
                         runtime.added_at_ms,
-                        runtime.smelt_home,
                         runtime.os
                     ],
                 )

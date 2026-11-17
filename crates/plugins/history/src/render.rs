@@ -6,7 +6,6 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_base::StyledExt as _;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::acp_chat::is_interrupt_marker;
 use smelt_plugin_api::model::agent_kind::HistorySourceKind;
@@ -22,6 +21,7 @@ use smelt_plugin_api::ui::{IconName, TextInput};
 
 use crate::HistoryPage;
 use crate::model::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 会话列表的宽度上下限，和文件、Git 的列表一致。
 const LIST_MIN_WIDTH: f32 = 190.;
@@ -218,8 +218,7 @@ impl Render for HistoryPage {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
-                        .font_semibold()
+                        .type_style(TYPE.ui_medium)
                         .text_color(fg)
                         .overflow_hidden()
                         .child(truncated_line(session.title.clone())),
@@ -424,14 +423,14 @@ fn session_row(
         .child(
             div()
                 .w_full()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .overflow_hidden()
                 .child(truncated_line(title)),
         )
         .child(
             div()
                 .w_full()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::row_muted(is_selected)))
                 .overflow_hidden()
                 .child(truncated_line(secondary)),
@@ -542,7 +541,12 @@ fn history_turn(turn: &Turn, body: TextView, muted: Hsla, fg: Hsla, border: Hsla
             .w_full()
             .gap_2()
             .child(div().flex_1().h(px(1.)).bg(border))
-            .child(div().text_xs().text_color(muted).child("已中断"))
+            .child(
+                div()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(muted)
+                    .child("已中断"),
+            )
             .child(div().flex_1().h(px(1.)).bg(border))
             .into_any_element();
     }
@@ -561,7 +565,7 @@ fn history_turn(turn: &Turn, body: TextView, muted: Hsla, fg: Hsla, border: Hsla
                     .py_2p5()
                     .rounded(ui_theme::bubble_radius())
                     .bg(ui_theme::overlay(0x14))
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(fg)
                     .child(body),
             )
@@ -573,12 +577,12 @@ fn history_turn(turn: &Turn, body: TextView, muted: Hsla, fg: Hsla, border: Hsla
         .w_full()
         .min_w_0()
         .gap_1()
-        .text_sm()
+        .type_style(TYPE.ui)
         .text_color(fg)
         .when(!turn.text.trim().is_empty(), |col| col.child(body))
         .children(tool_summary(&turn.tools).map(|summary| {
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child(format!("🔧 {summary}"))
         }))
@@ -613,7 +617,7 @@ fn tool_summary(tools: &[String]) -> Option<String> {
 fn meta(text: impl Into<SharedString>, muted: Hsla) -> Div {
     div()
         .flex_none()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(muted)
         .child(text.into())
 }
@@ -629,8 +633,7 @@ fn placeholder(text: &'static str, muted: Hsla) -> Div {
         .px_4()
         .child(
             div()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .text_center()
                 .text_color(muted)
                 .child(text),

@@ -6,6 +6,7 @@ use crate::prelude::*;
 use crate::templates::{
     AutomationTemplate, AutomationTemplateCategory, AutomationTemplateGlyph, filtered_templates,
 };
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) const CATALOG_MAX_WIDTH: f32 = 960.;
 pub(crate) const TEMPLATE_COLUMNS: usize = 3;
@@ -101,7 +102,7 @@ impl AutomationsPage {
             .when(empty, |column| {
                 column.child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::muted()))
                         .child("还没有自动化，可从下面的模板添加。"),
                 )
@@ -137,7 +138,7 @@ impl AutomationsPage {
                     .justify_center()
                     .child(
                         div()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(rgb(ui_theme::muted()))
                             .child("暂无运行记录"),
                     )
@@ -284,15 +285,14 @@ impl AutomationsPage {
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_semibold()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
                                 .overflow_hidden()
                                 .child(truncated_line(display_name)),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::faint()))
                                 .overflow_hidden()
                                 .child(truncated_line(action_summary)),
@@ -301,7 +301,7 @@ impl AutomationsPage {
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_SCHEDULE)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(schedule)),
@@ -323,7 +323,7 @@ impl AutomationsPage {
                 .child(
                     div()
                         .min_w_0()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::muted()))
                         .overflow_hidden()
                         .child(truncated_line(last_run)),
@@ -331,7 +331,7 @@ impl AutomationsPage {
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(next_run)),
@@ -428,8 +428,7 @@ impl AutomationsPage {
                     .gap_3()
                     .child(
                         div()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(rgb(ui_theme::text()))
                             .child("模板"),
                     )
@@ -521,31 +520,31 @@ pub(crate) fn automation_table_header() -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child("自动化"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_SCHEDULE)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child("日程"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_LAST)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child("上次运行"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child("下次运行"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_STATUS)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child("状态"),
         )
@@ -695,14 +694,13 @@ pub(crate) fn render_template_card(
                 .gap_1()
                 .child(
                     div()
-                        .text_sm()
-                        .font_semibold()
+                        .type_style(TYPE.ui_medium)
                         .text_color(rgb(ui_theme::text()))
                         .child(template.name),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::muted()))
                         .child(template.description),
                 ),
@@ -719,7 +717,7 @@ pub(crate) fn render_template_card(
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
                         .child(template.schedule.summary()),
                 ),
@@ -845,14 +843,13 @@ pub(crate) fn render_automation_machine_header(
         .gap_2()
         .child(
             div()
-                .text_xs()
-                .font_medium()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::muted()))
                 .child(machine_name(&group.runtime, cx)),
         )
         .children(group.status.clone().map(|status| {
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(status)
         }))
@@ -861,7 +858,7 @@ pub(crate) fn render_automation_machine_header(
             |row| {
                 row.child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
                         .child("还没有自动化"),
                 )
@@ -886,7 +883,7 @@ pub(crate) fn automation_status_cell(status: AutomationRowStatus) -> AnyElement 
         .children(dot.map(|color| div().size(px(6.)).rounded_full().bg(rgb(color))))
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .child(automation_row_status_label(status)),
         )

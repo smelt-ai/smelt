@@ -11,6 +11,7 @@
 use super::*;
 use api::model::pi_auth::{PiAuthProvider, PiAuthStatus, PiLoginMethod, PiPromptKind};
 use api::ui::truncated_line::truncated_line;
+use smelt_plugin_api::ui::kit::TYPE;
 
 /// 内置 Provider 的一行。按钮区只放当下最该点的那一个，其余动作收进「⋯」：
 /// 原来一行最多五个按钮，扫一眼分不出哪个是正路。
@@ -177,7 +178,7 @@ pub(super) fn builtin_provider_row(
                         .child(
                             div()
                                 .overflow_hidden()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(palette.fg)
                                 .child(truncated_line(provider.name.clone())),
                         )
@@ -187,7 +188,7 @@ pub(super) fn builtin_provider_row(
                 .child(
                     div()
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(palette.muted)
                         .child(truncated_line(detail)),
                 ),
@@ -229,8 +230,7 @@ pub(super) fn login_panel(
                 .justify_between()
                 .child(
                     div()
-                        .text_sm()
-                        .font_semibold()
+                        .type_style(TYPE.ui_medium)
                         .text_color(fg)
                         .child(format!("登录 {}", view.title())),
                 )
@@ -254,7 +254,7 @@ pub(super) fn login_panel(
     if view.outcome.is_none() && view.auth_url.is_none() && view.device_code.is_none() {
         panel = panel.child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child("稍后会给出授权链接或验证码，用浏览器完成登录。"),
         );
@@ -271,7 +271,7 @@ pub(super) fn login_panel(
                 .gap_2()
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child("在浏览器里打开验证页，输入下面这串码："),
                 )
@@ -309,7 +309,7 @@ pub(super) fn login_panel(
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(verification_uri.clone()),
                 ),
@@ -348,11 +348,12 @@ pub(super) fn login_panel(
                                 }),
                         ),
                 )
-                .children(
-                    view.instructions
-                        .clone()
-                        .map(|instructions| div().text_xs().text_color(muted).child(instructions)),
-                ),
+                .children(view.instructions.clone().map(|instructions| {
+                    div()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(muted)
+                        .child(instructions)
+                })),
         );
     }
 
@@ -365,14 +366,13 @@ pub(super) fn login_panel(
                 .gap_2()
                 .child(
                     div()
-                        .text_xs()
-                        .font_semibold()
+                        .type_style(TYPE.text_xsmall_medium)
                         .text_color(fg)
                         .child(prompt.message.clone()),
                 )
                 .children(prompt.placeholder.clone().map(|placeholder| {
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(format!("示例：{placeholder}"))
                 }))
@@ -430,14 +430,19 @@ pub(super) fn login_panel(
 
     // 只留最近几条：进度是给人看「还在动」的，不是日志。
     for message in view.messages.iter().rev().take(3).rev() {
-        panel = panel.child(div().text_xs().text_color(muted).child(message.clone()));
+        panel = panel.child(
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(message.clone()),
+        );
     }
 
     match &view.outcome {
         Some(Err(error)) => {
             panel = panel.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::bad()))
                     .child(format!("登录失败：{error}")),
             );
@@ -445,7 +450,7 @@ pub(super) fn login_panel(
         Some(Ok(())) => {
             panel = panel.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(api::ui::ui_theme::ok()))
                     .child(if view.mcp_server().is_some() {
                         "登录成功，凭据已写入 ~/.pi/agent/mcp-auth.json。"
@@ -488,7 +493,7 @@ fn model_choices(
 
     let hint = |text: String| {
         div()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(muted)
             .child(text)
             .into_any_element()
@@ -510,8 +515,7 @@ fn model_choices(
 
     let mut section = div().flex().flex_col().w_full().gap_2().child(
         div()
-            .text_xs()
-            .font_semibold()
+            .type_style(TYPE.text_xsmall_medium)
             .text_color(fg)
             .child("设为默认模型"),
     );
@@ -536,13 +540,13 @@ fn model_choices(
                     div()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(fg)
                         .child(truncated_line(model.label().to_string())),
                 )
                 .child(if is_current {
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child("当前默认")
                         .into_any_element()
@@ -562,10 +566,12 @@ fn model_choices(
         );
     }
     if models.len() > VISIBLE_MODELS {
-        section = section.child(div().text_xs().text_color(muted).child(format!(
-            "另有 {} 个模型，可在「默认模型配置」里填写。",
-            models.len() - VISIBLE_MODELS
-        )));
+        section = section.child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
+            format!(
+                "另有 {} 个模型，可在「默认模型配置」里填写。",
+                models.len() - VISIBLE_MODELS
+            ),
+        ));
     }
     section.into_any_element()
 }
@@ -596,8 +602,7 @@ pub(super) fn model_picker_panel(
                 .justify_between()
                 .child(
                     div()
-                        .text_sm()
-                        .font_semibold()
+                        .type_style(TYPE.ui_medium)
                         .text_color(fg)
                         .child(format!("{} 的可用模型", picker.provider_name)),
                 )

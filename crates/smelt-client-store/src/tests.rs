@@ -67,8 +67,8 @@ fn create_v7_schema(connection: &Connection) {
         .unwrap();
 }
 
-/// v14 及以前客户端库里还有会话列表、分屏的界面状态和终端字号。外观、界面状态表照
-/// v14 的列顺序重建，已有的行搬过去（位置插入的夹具靠这个顺序）。
+/// v14 及以前客户端库里还有会话列表、分屏的界面状态和终端字号，远程机器还记着 `smelt_home`。
+/// 外观、界面状态、远程机器表照 v14 的列顺序重建，已有的行搬过去（位置插入的夹具靠这个顺序）。
 fn restore_v14_session_ui(connection: &Connection) {
     connection
         .execute_batch(
@@ -108,6 +108,22 @@ fn restore_v14_session_ui(connection: &Connection) {
                SELECT id, 0, outlet, 'project', 0 FROM workspace_ui;
              DROP TABLE workspace_ui;
              ALTER TABLE workspace_ui_v14 RENAME TO workspace_ui;
+             CREATE TABLE runtime_connection_v14 (
+               runtime_id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               endpoint_id TEXT NOT NULL,
+               relay_url TEXT,
+               position INTEGER NOT NULL,
+               added_at_ms INTEGER NOT NULL,
+               smelt_home TEXT,
+               os TEXT
+             ) WITHOUT ROWID;
+             INSERT INTO runtime_connection_v14
+               (runtime_id, name, endpoint_id, relay_url, position, added_at_ms, os)
+               SELECT runtime_id, name, endpoint_id, relay_url, position, added_at_ms, os
+               FROM runtime_connection;
+             DROP TABLE runtime_connection;
+             ALTER TABLE runtime_connection_v14 RENAME TO runtime_connection;
              CREATE TABLE collapsed_project (
                runtime_id TEXT NOT NULL,
                root TEXT NOT NULL,
@@ -302,7 +318,8 @@ fn v13_drops_the_selected_agent_and_moves_the_new_conversation_key() {
 }
 
 /// v14 → v15：会话列表、分屏的界面状态和终端字号归了插件，那些表和列删掉；外观里没人读的
-/// 三列删掉、`glass_style` 改名 `material`，路由列改名 `outlet`；值和布局存档留着。分屏的
+/// 三列删掉、`glass_style` 改名 `material`，路由列改名 `outlet`，远程机器的 `smelt_home` 删掉；
+/// 值、远程机器和布局存档留着。分屏的
 /// 五条快捷键搬到会话插件的同名命令上（新 id 已有记录的以新的为准），别的 `smelt.stage/*`
 /// 和按侧栏顺序跳的键删掉。迁移前留了备份。
 #[test]
@@ -323,6 +340,8 @@ fn v14_drops_the_session_ui_and_moves_the_pane_keys() {
          INSERT INTO conversation_route VALUES ('', 'conv-1', 'term-2', '{\"v\":1}');
          INSERT INTO sidebar_project_order VALUES ('', '/repo/a', 0);
          INSERT INTO sidebar_conversation_order VALUES ('', 'conv-1', 0);
+         INSERT INTO runtime_connection
+           VALUES ('rt-linux', 'linux-box', 'aa', NULL, 0, 1, '/home/u/.smelt', 'linux');
          INSERT INTO key_binding VALUES
            ('smelt.stage/prev-pane', 'cmd-shift-['),
            ('smelt.stage/next-pane', NULL),
@@ -348,6 +367,10 @@ fn v14_drops_the_session_ui_and_moves_the_pane_keys() {
     );
     assert_eq!(store.appearance().unwrap(), Some(appearance()));
     assert!(store.workspace_layout_state("default").unwrap().is_some());
+    let machines = store.runtime_connections().unwrap();
+    assert_eq!(machines.len(), 1);
+    assert_eq!(machines[0].name, "linux-box");
+    assert_eq!(machines[0].os.as_deref(), Some("linux"));
     let record = |command: &str, keystroke: Option<&str>| KeyBindingRecord {
         command: command.to_string(),
         keystroke: keystroke.map(str::to_string),
@@ -379,6 +402,18 @@ fn v14_drops_the_session_ui_and_moves_the_pane_keys() {
         assert!(!has_table(&connection, table), "{table}");
     }
     assert_eq!(columns(&connection, "workspace_ui"), ["id", "outlet"]);
+    assert_eq!(
+        columns(&connection, "runtime_connection"),
+        [
+            "runtime_id",
+            "name",
+            "endpoint_id",
+            "relay_url",
+            "position",
+            "added_at_ms",
+            "os",
+        ]
+    );
     // 没人读的背景色、不透明度、模糊和终端字号删掉，`glass_style` 改名 `material`（值见上面
     // 外观的断言）。
     assert_eq!(
@@ -708,7 +743,6 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         endpoint_id: "aa".to_string(),
         relay_url: None,
         added_at_ms: 1,
-        smelt_home: None,
         os: None,
     };
     let pi = RuntimeConnection {
@@ -717,7 +751,6 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         endpoint_id: "bb".to_string(),
         relay_url: Some("https://relay.example".to_string()),
         added_at_ms: 2,
-        smelt_home: Some("/home/pi/.smelt".to_string()),
         os: Some("linux".to_string()),
     };
     store.put_runtime_connection(&linux).unwrap();
@@ -726,7 +759,6 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         .put_runtime_connection(&RuntimeConnection {
             endpoint_id: "cc".to_string(),
             added_at_ms: 3,
-            smelt_home: Some("/home/linux/.smelt".to_string()),
             os: Some("linux".to_string()),
             ..linux
         })
@@ -740,7 +772,6 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         ["rt-linux", "rt-pi"]
     );
     assert_eq!(listed[0].endpoint_id, "cc");
-    assert_eq!(listed[0].smelt_home.as_deref(), Some("/home/linux/.smelt"));
     assert_eq!(listed[0].os.as_deref(), Some("linux"));
     assert_eq!(listed[0].added_at_ms, 1, "重新配对不改添加时间");
     assert!(store.delete_runtime_connection("rt-linux").unwrap());
@@ -857,9 +888,9 @@ fn a_newer_store_is_refused() {
     cleanup(&path);
 }
 
-/// v3 的远程运行时还没有 SMELT_HOME：升到 v4 时原样留下，SMELT_HOME 先空着，连上一次再记。
+/// v3 的远程运行时升上来原样留下：中间 v4 加过、v15 又删掉的 `smelt_home` 不影响它。
 #[test]
-fn v3_runtime_connections_gain_an_empty_smelt_home() {
+fn v3_runtime_connections_survive_the_upgrade() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v3 = Connection::open(&path).unwrap();
@@ -880,19 +911,7 @@ fn v3_runtime_connections_gain_an_empty_smelt_home() {
     let listed = store.runtime_connections().unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "linux-box");
-    assert_eq!(listed[0].smelt_home, None);
-    store
-        .put_runtime_connection(&RuntimeConnection {
-            smelt_home: Some("/home/linux/.smelt".to_string()),
-            ..listed[0].clone()
-        })
-        .unwrap();
-    assert_eq!(
-        store.runtime_connections().unwrap()[0]
-            .smelt_home
-            .as_deref(),
-        Some("/home/linux/.smelt")
-    );
+    assert_eq!(listed[0].os, None);
     cleanup(&path);
 }
 
@@ -918,10 +937,6 @@ fn v4_runtime_connections_gain_an_empty_os() {
     let store = ClientStore::open(&path).unwrap();
     let listed = store.runtime_connections().unwrap();
     assert_eq!(listed.len(), 1);
-    assert_eq!(
-        listed[0].smelt_home.as_deref(),
-        Some("C:\\Users\\w\\.smelt")
-    );
     assert_eq!(listed[0].os, None);
     store
         .put_runtime_connection(&RuntimeConnection {

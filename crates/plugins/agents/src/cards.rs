@@ -1,6 +1,7 @@
 //! 页面上的卡片、表单件和页头。
 
 use super::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) fn render_identity_name(input: &Entity<InputState>) -> AnyElement {
     TextInput::new(input)
@@ -181,7 +182,7 @@ pub(crate) fn product_page_header(
         .gap_3()
         .child(
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child(format!("{count} {count_unit}{noun}")),
         )
@@ -264,7 +265,7 @@ pub(crate) fn render_agent_plugin_card(
         div()
             .px_5()
             .py_4()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::faint()))
             .child(pending.unwrap_or_else(|| {
                 "还没有装任何插件。点「管理」去能力库导入技能或扩展。".to_string()
@@ -300,14 +301,13 @@ pub(crate) fn render_agent_plugin_card(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
                                 .child("技能"),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
                                 .child(format!(
                                     "已勾选 {selected_count} 个。对话只加载勾选的技能和扩展，没勾的一律不加载。改动对新开的对话生效。"
@@ -393,7 +393,7 @@ pub(crate) fn render_agent_context_card(
         div()
             .px_5()
             .py_4()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::faint()))
             .child("还没绑定任何上下文。绑定后智能体就知道去哪儿找素材。")
             .into_any_element()
@@ -427,14 +427,13 @@ pub(crate) fn render_agent_context_card(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
                                 .child("绑定的上下文"),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
                                 .child("目录和链接会写进 system prompt。改动对新开的对话生效。"),
                         ),
@@ -465,7 +464,7 @@ pub(crate) fn render_agent_context_card(
             div()
                 .px_5()
                 .pb_3()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(format!(
                     "{space_root}，同一智能体的所有对话共用它。工作目录和绑定目录下的 {} 会自动作为技能加载。",
@@ -546,8 +545,7 @@ pub(crate) fn render_agent_memory_summary(
         .child(
             div()
                 .flex_shrink_0()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .text_color(rgb(ui_theme::text()))
                 .child("记忆"),
         )
@@ -563,7 +561,7 @@ pub(crate) fn render_agent_memory_summary(
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .child(
                     div()
                         .min_w_0()
@@ -645,12 +643,11 @@ pub(crate) fn render_agent_memory_card(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
                                 .child("记忆"),
                         )
-                        .child(div().text_xs().text_color(rgb(ui_theme::muted())).child(
+                        .child(div().type_style(TYPE.text_xsmall).text_color(rgb(ui_theme::muted())).child(
                             if memory_enabled {
                                 "智能体在对话和自动化里记下的长期信息。改动从下一轮对话起生效。"
                             } else {
@@ -771,7 +768,7 @@ pub(crate) fn agent_memory_section(
         div()
             .px_3()
             .py_1p5()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::faint()))
             .child(if narrowed && !listing.entries.is_empty() {
                 "没有匹配的记忆"
@@ -798,8 +795,7 @@ pub(crate) fn agent_memory_section(
                 .child(
                     div()
                         .flex_1()
-                        .text_xs()
-                        .font_medium()
+                        .type_style(TYPE.text_xsmall_medium)
                         .text_color(rgb(ui_theme::muted()))
                         .child(memory_section_title(title, listing, narrowed.then_some(shown))),
                 )
@@ -810,7 +806,7 @@ pub(crate) fn agent_memory_section(
                 div()
                     .px_3()
                     .py_1()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::bad()))
                     .child(format!(
                         "规则类记忆正文超过 {}KB 常驻上限，启动时只会注入一部分。请合并或删掉过时的规则。",
@@ -902,7 +898,7 @@ pub(crate) fn agent_memory_row(
             div()
                 .flex_shrink_0()
                 .w(px(44.))
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(memory_kind_label(entry.kind.as_deref())),
         )
@@ -940,7 +936,7 @@ pub(crate) fn agent_memory_row(
                         .child(
                             div()
                                 .min_w_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::text()))
                                 .overflow_hidden()
                                 .child(truncated_line(entry.name.clone())),
@@ -949,7 +945,7 @@ pub(crate) fn agent_memory_row(
                 .child(
                     // 待确认时前面挂着原因，一行放不下就把描述挤没了；给两行再省略。
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
                         .text_ellipsis()
                         .line_clamp(2)
@@ -960,7 +956,7 @@ pub(crate) fn agent_memory_row(
             row.child(
                 div()
                     .flex_shrink_0()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(if stale {
                         ui_theme::bad()
                     } else {
@@ -1055,7 +1051,7 @@ pub(crate) fn agent_memory_body(id: String, body: &str) -> AnyElement {
         .overflow_y_scroll()
         .rounded(px(6.))
         .bg(rgb(ui_theme::side()))
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::muted()))
         .children(lines)
         .into_any_element()
@@ -1079,7 +1075,7 @@ pub(crate) fn agent_context_row(
         .child(
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(kind_label.to_string()),
         )
@@ -1087,7 +1083,7 @@ pub(crate) fn agent_context_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::text()))
                 .overflow_hidden()
                 .child(truncated_line(value.to_string())),
@@ -1198,7 +1194,7 @@ pub(crate) fn render_agent_mcp_card(
             div()
                 .px_5()
                 .py_4()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(pending.unwrap_or_else(|| {
                     "还没有配置 MCP 服务器。点「管理」去能力库添加。".to_string()
@@ -1234,14 +1230,13 @@ pub(crate) fn render_agent_mcp_card(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
                                 .child("MCP"),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
                                 .child(format!(
                                     "已勾选 {selected_count} 个。对话只连勾选的服务器，没勾的不启动。改动对新开的对话生效。"
@@ -1336,7 +1331,7 @@ pub(crate) fn agent_plugin_row(
                         .gap_2()
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::text()))
                                 .child(name.to_string()),
                         )
@@ -1345,14 +1340,14 @@ pub(crate) fn agent_plugin_row(
                                 .px_1p5()
                                 .rounded(px(4.))
                                 .bg(rgb(ui_theme::bg()))
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::faint()))
                                 .child(kind_label.to_string()),
                         ),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .overflow_hidden()
                         .text_color(subtitle_color)
                         .child(truncated_line(subtitle)),

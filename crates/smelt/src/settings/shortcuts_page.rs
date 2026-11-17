@@ -1,13 +1,38 @@
 //! 设置页：键盘快捷键。登记过的命令按来源分组列出来，点键帽录新键；视图里面改不了的键
-//! 只列出来。改键的规则见 `crate::keymap`。
+//! 只列出来。改键的规则见 `crate::keymap`。宿主自己的页，和插件的设置页一样是登记的视图
+//! （见 [`super::view_specs`]）。
 
 use super::*;
-use smelt_ui::Keybind;
+use smelt_ui::kit::{TYPE, TypeStyled as _};
+use smelt_ui::{Keybind, SettingsPage, SettingsSection as Section};
 
 use crate::keymap::{self, Bound, KeymapState};
 use crate::ui_theme;
 
-pub(super) fn shortcuts_page(id: SharedString, cx: &App) -> SettingsPage {
+/// 快捷键页：画的全是 [`KeymapState`] 里的，它一变就重画。
+pub(super) struct ShortcutsPage {
+    _keymap: Subscription,
+}
+
+impl ShortcutsPage {
+    pub(super) fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            _keymap: cx.observe_global::<KeymapState>(|_, cx| cx.notify()),
+        }
+    }
+}
+
+impl Render for ShortcutsPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        shortcuts_page(cx)
+    }
+}
+
+impl smelt_plugin_api::PluginView for ShortcutsPage {
+    fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+}
+
+fn shortcuts_page(cx: &App) -> SettingsPage {
     let state = cx.global::<KeymapState>();
     let os = cx.platform_info().os;
     let fixed = |label: &'static str, keys: &[&'static str]| {
@@ -32,11 +57,11 @@ pub(super) fn shortcuts_page(id: SharedString, cx: &App) -> SettingsPage {
         fixed("终端补全 / 反向补全", &["tab", "shift-tab"]),
     ];
 
-    SettingsPage::new(id)
+    SettingsPage::new("settings-page:shortcuts")
         .child(
             div()
                 .px_4()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child("点键帽录新的快捷键：Esc 取消，⌫ 清掉不用。要带 ⌘，或者用 F 键。"),
         )
@@ -59,7 +84,7 @@ fn row(label: &'static str, keys: Vec<gpui::AnyElement>) -> gpui::AnyElement {
         .gap_4()
         .child(
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::text()))
                 .child(label),
         )
@@ -157,13 +182,16 @@ fn editable_row(
                 .gap_0p5()
                 .child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::text()))
                         .child(title),
                 )
-                .children(
-                    note.map(|(text, color)| div().text_xs().text_color(rgb(color)).child(text)),
-                ),
+                .children(note.map(|(text, color)| {
+                    div()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(rgb(color))
+                        .child(text)
+                })),
         )
         .child(
             div()
@@ -213,7 +241,7 @@ fn keycap_text(text: impl Into<SharedString>, border: Rgba) -> gpui::AnyElement 
         .border_1()
         .border_color(border)
         .bg(rgb(ui_theme::surface()))
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::muted()))
         .child(text.into())
         .into_any_element()

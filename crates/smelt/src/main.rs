@@ -21,7 +21,6 @@ mod overlay;
 mod plugin_host;
 mod plugins;
 mod router;
-mod runtime_call;
 mod runtime_events;
 mod runtimes;
 pub(crate) use daemon_states::DaemonStates;
@@ -50,7 +49,6 @@ use std::time::Duration;
 use gpui::InteractiveElement;
 use gpui::*;
 use smelt_client::daemon_state::DaemonStateEvent;
-use smelt_ui::slider::SliderState;
 
 use settings::{Appearance, load_appearance};
 
@@ -185,13 +183,6 @@ struct Workspace {
     _layout_choice_sub: Option<Subscription>,
     /// 开着的命令面板（⌘K），见 `workspace_palette`。
     palette: Option<smelt_ui::dialog::DialogId>,
-    /// 面板插件（gpui-shell 插件，每个是一个视图）设置页的状态，见 `settings::panel_plugins`。
-    panel_plugins: settings::PanelPluginsState,
-    /// 设置面板的有状态组件（懒创建）：界面字号滑块 + 背景图透明度滑块。
-    ui_font_size_slider: Option<Entity<SliderState>>,
-    bg_image_opacity_slider: Option<Entity<SliderState>>,
-    /// 上面组件的变更订阅。
-    settings_subs: Vec<Subscription>,
     /// 上次设到窗口上的材质种类和明暗。换材质、换主题、系统换深浅时才再发给系统。
     applied_backdrop: Option<(window_backdrop::WindowMaterial, bool)>,
     /// 上次应用到窗口的界面基准字号（rem_size）。
@@ -208,26 +199,8 @@ struct Workspace {
     show_quit_confirm: bool,
     /// 用户已确认退出；防止重复提交退出动作。
     quit_requested: bool,
-    /// 设置停在哪一页（对应左侧子菜单的独立内容页）。
-    settings_section: settings::SettingsSection,
-    /// 每请求跳一次页就 +1，用来变更 `Settings` 元素的 id。
-    ///
-    /// `Settings` 把当前选中页存在 `use_keyed_state` 里，只有该 id 首次出现时才读
-    /// `default_selected_index`——窗口已经开着时改字段是不起作用的。把这个自增序号
-    /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
-    /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
-    settings_page_nonce: usize,
     /// 上次告诉插件的遮罩层开关（见 `note_overlay`），只用来判断变没变。
     plugin_overlay_open: bool,
-    /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
-    ///
-    /// `all_font_names()` 在 mac 上枚举的是全部字体 face 的 descriptor（本机 902 个），
-    /// 再逐个 CopyAttribute 取 family name，实测约 50ms/次——远超 60fps 的 16.6ms 预算。
-    /// 字体列表在进程生命周期内几乎不变，不值得每帧重扫。
-    font_options: std::cell::OnceCell<std::sync::Arc<Vec<(SharedString, SharedString)>>>,
-    /// 设置页主题选择的选项（按系列分组、带色点），跟着主题目录的代数缓存：解析一款主题
-    /// 的颜色要整份展开配置，不在每次刷新设置页时重算。
-    theme_options: std::cell::RefCell<Option<(u64, std::rc::Rc<Vec<smelt_ui::ComboboxGroup>>)>>,
     /// 远程机器上的目录选择器：插件要在远程机器上选路径时开（见 `dir_picker`）。
     dir_picker: Option<dir_picker::DirPickerState>,
     /// 守护落后时的自动重启进行中，防止重入。
@@ -242,7 +215,7 @@ struct Workspace {
     /// 每次通知后让宿主对话框跟上状态，再看遮罩层开关变没变（见 `sync_host_dialogs`、
     /// `note_overlay`）。
     _overlay_sub: Option<Subscription>,
-    /// 外观全局变化。不能放进 `settings_subs`：设置滑块重建时会清掉那个 vec。
+    /// 外观全局变化。
     _appearance_sub: Option<Subscription>,
     /// 主窗口激活时告诉插件、补查守护是否落后。
     _window_activation_sub: Option<Subscription>,
@@ -287,10 +260,6 @@ impl Workspace {
             _window_bounds_sub: None,
             _layout_choice_sub: None,
             palette: None,
-            panel_plugins: Default::default(),
-            ui_font_size_slider: None,
-            bg_image_opacity_slider: None,
-            settings_subs: Vec::new(),
             applied_backdrop: None,
             applied_ui_font_px: None,
             window_handle: window.window_handle(),
@@ -299,11 +268,7 @@ impl Workspace {
             debug_hud: false,
             show_quit_confirm: false,
             quit_requested: false,
-            settings_section: settings::SettingsSection::default(),
-            settings_page_nonce: 0,
             plugin_overlay_open: false,
-            font_options: std::cell::OnceCell::new(),
-            theme_options: std::cell::RefCell::new(None),
             dir_picker: None,
             daemon_upgrading: false,
             workspace_window_active: false,

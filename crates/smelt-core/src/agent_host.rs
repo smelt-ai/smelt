@@ -43,6 +43,7 @@ pub(crate) fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHost
             .collect(),
         agents: Vec::new(),
         default_conversation_agent: None,
+        agent_spaces_root: None,
     }
 }
 
@@ -130,6 +131,8 @@ fn load_on(store: &smelt_store::Store) -> Result<AgentHostSettings, String> {
     settings.agents = crate::agent_definition_store::list_agent_definitions_on(store)
         .map_err(|e| e.to_string())?;
     settings.default_conversation_agent = crate::default_conversation::load_on(store);
+    settings.agent_spaces_root = smelt_model::agent_paths::agent_spaces_root()
+        .and_then(|root| root.to_str().map(str::to_owned));
     Ok(settings)
 }
 

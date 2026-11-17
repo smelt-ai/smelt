@@ -19,6 +19,7 @@ use smelt_plugin_api as api;
 #[cfg(any(target_os = "macos", windows))]
 use crate::update;
 use crate::{DOCS_URL, FEEDBACK_URL, OWNER, SOURCE_URL};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) fn register(cx: &mut App) {
     let spec = ViewSpec {
@@ -133,7 +134,7 @@ fn header(version: String) -> SettingsSection {
             )
             .child(
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child(version),
             ),
@@ -445,8 +446,7 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
                                 .min_w_0()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
+                                .type_style(TYPE.ui_medium)
                                 .text_color(status_color)
                                 .child(status_title),
                         ),
@@ -457,7 +457,7 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
             div()
                 .w_full()
                 .pl(px(15.))
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child(status_detail),
         )
@@ -485,7 +485,7 @@ fn help_section() -> SettingsSection {
         .child(
             SettingsRow::new("使用文档").child(
                 Link::new("settings-help-link", DOCS_URL)
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .child("帮助文档 ↗"),
             ),
         )
@@ -502,14 +502,14 @@ fn help_section() -> SettingsSection {
                 // 链接只管打开网页，不顺手做别的；找日志是旁边那个按钮。
                 .child(
                     Link::new("settings-report-issue-link", FEEDBACK_URL)
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .child("反馈问题 ↗"),
                 ),
         )
         .child(
             SettingsRow::new("源码").child(
                 Link::new("settings-github-link", SOURCE_URL)
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .child("GitHub ↗"),
             ),
         )

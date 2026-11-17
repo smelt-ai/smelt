@@ -225,12 +225,14 @@ impl FilesPanel {
         let id = self.next_file_id;
         let preview_kind = PreviewKind::for_path(&path);
         let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
+            let mut editor = EditorState::new(window, cx)
                 .language(editor_language_for_path(&path))
                 .line_number(true)
                 .searchable(true)
                 // 代码换行会破坏缩进对齐，超长行横向滚动。
-                .soft_wrap(false)
+                .soft_wrap(false);
+            editor.set_highlighter_factory(smelt_plugin_api::ui::syntax::highlighter_factory(), cx);
+            editor
         });
         let style = self.path_style(&runtime, cx);
         let client = target(&runtime, cx);

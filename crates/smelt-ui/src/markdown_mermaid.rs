@@ -1,12 +1,11 @@
 //! markdown 渲染里的 mermaid 代码块画图：全仓库唯一入口。
 //!
-//! `gpui-component` 的 `TextView::markdown` 默认把 mermaid 围栏代码块当普通代码
-//! 块处理（纯文本 + 语法高亮壳，mermaid 语法本身没有 tree-sitter 语法，等于纯文
-//! 本）。这里接上它的 `markdown_block_parser`/`markdown_block_renderer` 钩子，识
-//! 别出 mermaid 代码块，用 `merman` 0.9.1（纯 Rust，对齐 mermaid.js，Zed 也在用）
-//! 离线渲成 SVG，再用 GPUI 的 `img()` 全彩显示——注意不是 `svg()`：那个元素只做
-//! 单色 alpha mask 渲染（图标那条路），画不出多彩图，`img()` 对 `.svg` 走的才是
-//! 全彩栅格化管线。
+//! gpui-base 的 `TextView::markdown` 默认把 mermaid 围栏代码块当普通代码块处理
+//! （mermaid 没有 tree-sitter 语法，等于纯文本）。这里接上它的
+//! `markdown_block_parser`/`markdown_block_renderer` 钩子，识别出 mermaid 代码块，
+//! 用 `merman` 0.9.1（纯 Rust，对齐 mermaid.js，Zed 也在用）离线渲成 SVG，再用
+//! GPUI 的 `img()` 全彩显示——注意不是 `svg()`：那个元素只做单色 alpha mask 渲染
+//! （图标那条路），画不出多彩图，`img()` 对 `.svg` 走的才是全彩栅格化管线。
 //!
 //! 渲染库换过两次。最早是 `mermaid-rs-renderer`，反向边绕路。接着换成
 //! `rusty-mermaid` 0.2.0，布局好一些，但中文子图 id 解析失败，中文状态名会在
@@ -30,9 +29,8 @@
 //! 全仓库新增/已有的 `TextView::markdown` 调用点都应该改走这里的 `markdown_view`，
 //! 不要直接调 `TextView::markdown`，否则等于每处都得重新接一遍这两个钩子。
 //!
-//! 内存缓存：GPUI 是即时模式 UI，`BlockNode` 的渲染函数每帧 paint 都会重新调用
-//! （对照 gpui-component `node.rs` 里 `CODE_BLOCK_HIGHLIGHTERS` 那个 thread_local
-//! 先例），同一张图只渲一次，否则滚动会变成每帧重算。不落盘——这是派生图，不是状态。
+//! 内存缓存：GPUI 是即时模式 UI，`BlockNode` 的渲染函数每帧 paint 都会重新调用，
+//! 同一张图只渲一次，否则滚动会变成每帧重算。不落盘——这是派生图，不是状态。
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -70,6 +68,7 @@ pub use gpui_base::text::{TextView, TextViewState};
 
 mod theme;
 
+use crate::kit::{TYPE, TypeStyled as _};
 use theme::DiagramColors;
 
 /// 传给 merman `fontFamily` 的 CSS 字体栈。多词名字必须加引号，否则 CSS 会把
@@ -121,7 +120,7 @@ fn mermaid_source(node: &markdown_ast::Node) -> Option<SharedString> {
     Some(code.value.clone().into())
 }
 
-/// 识别 ```mermaid 围栏代码块。命中就短路掉 gpui-component 默认的 CodeBlock 处理
+/// 识别 ```mermaid 围栏代码块。命中就短路掉 gpui-base 默认的 CodeBlock 处理
 /// （见 `format/markdown.rs` 里 `parse_block` 先跑自定义 parser 再走默认分支）。
 fn parse_mermaid_block(
     node: &markdown_ast::Node,
@@ -559,7 +558,7 @@ impl Render for MermaidPreview {
                     .gap_2()
                     .child(
                         div()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(rgb(ui_theme::muted()))
                             .children(scale.map(|scale| format!("{:.0}%", scale * 100.0))),
                     )
@@ -1343,12 +1342,7 @@ pub fn markdown_view_clickable(
     markdown_view_with_selection(id, text, true)
 }
 
-/// smelt 的富文本样式，全部取自色板。显式给出，不走 gpui-base 的全局默认样式：全局默认由
-/// 组件库的主题适配器装，跟着组件库的 `Theme` 走，不是 smelt 的主题。
-///
-/// 围栏代码块的语法高亮用全局默认里的高亮器：tree-sitter 高亮器在组件库里，组件库装上时
-/// 一并装好。配色来自主题文件的 `syntax` 段，由应用的主题同步（`component_theme`）投影给
-/// 组件库，换主题时跟着换。smelt-ui 不依赖组件库，没装组件库时代码块不着色。
+/// smelt 的富文本样式，全部取自色板。显式给出，不走 gpui-base 的全局默认样式。
 fn markdown_text_view_style() -> TextViewStyle {
     // 右上角挂了语言名和复制按钮（见 `code_block_corner`），首行要让开它。
     text_view_style(gpui::StyleRefinement::default().pt(px(28.)))
@@ -1398,7 +1392,7 @@ fn code_block_corner(
         .children(lang.map(|lang| {
             div()
                 .px_1()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .child(lang)
         }))
@@ -1439,10 +1433,17 @@ pub fn chat_markdown_view(
     .on_link_click(crate::markdown_links::link_opener(links))
 }
 
+/// 围栏代码块按围栏写的语言上色，配色是当前主题的 `syntax` 段（见 [`crate::syntax`]）。
+/// 还没装主题时不上色。
 fn with_markdown_hooks(view: TextView, extensions: &MarkdownExtensions) -> TextView {
-    view.style(markdown_text_view_style())
+    let view = view
+        .style(markdown_text_view_style())
         .code_block_actions(code_block_corner)
-        .markdown_extensions(extensions.clone())
+        .markdown_extensions(extensions.clone());
+    match crate::syntax::code_block_highlighter() {
+        Some(highlighter) => view.shared_code_block_highlighter(highlighter),
+        None => view,
+    }
 }
 
 /// `MarkdownExtensions` assigns a new global revision whenever a parser or renderer is registered.

@@ -15,12 +15,14 @@ use smelt_plugin_api::model::control_api::{WorkspaceRename, WorkspaceWorksetRena
 use smelt_plugin_api::model::workspace_directory::{
     WorkspaceRenameParams, WorkspaceWorksetRenameParams,
 };
+use smelt_plugin_api::ui::motion::{ambient_application_active, ambient_motion_enabled};
 use smelt_plugin_api::ui::scrollbar::{Scrollable, ScrollbarAxis};
 use smelt_plugin_api::ui::ui_theme;
 use smelt_plugin_api::ui::window_bar::window_bar;
 use smelt_plugin_api::{self as api, PluginView, RuntimeKey, ViewHandle};
 
 use super::actions;
+use super::motion::ListMotion;
 use super::rows::{self, ProjectDrag, RowCtx, SessionDrag};
 use crate::contract::ListArgs;
 use crate::model::{ConversationKey, Sessions};
@@ -39,6 +41,8 @@ pub(super) struct ListView {
     pub(super) drop: Option<DropHint>,
     /// 拖着会话、项目停在列表上下边缘时自动滚，好拖到看不见的位置。
     auto_scroll: AutoScroll,
+    /// 重排滑动、新会话落进列表、开始跑时图标亮一下。
+    pub(super) motion: ListMotion,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -73,9 +77,14 @@ pub(super) enum DropTarget {
 impl ListView {
     fn new(cx: &mut Context<Self>) -> Self {
         let sessions = Sessions::global(cx);
+        let motion = ListMotion::new(&sessions.read(cx).sidebar);
         let _subscriptions = vec![
-            // 侧栏重算、选中变了都在 `Sessions` 上 notify。
-            cx.observe(&sessions, |_, _, cx| cx.notify()),
+            // 侧栏重算、选中变了都在 `Sessions` 上 notify。侧栏换了一份就比一下前后：重排、
+            // 刚开始跑的会话、刚在这里新建的会话露面了，各起各的动画。
+            cx.observe(&sessions, |this, sessions, cx| {
+                this.sidebar_changed(&sessions, cx);
+                cx.notify();
+            }),
         ];
         Self {
             focus: cx.focus_handle(),
@@ -83,6 +92,7 @@ impl ListView {
             rename: None,
             drop: None,
             auto_scroll: AutoScroll::default(),
+            motion,
             _subscriptions,
         }
     }
@@ -167,6 +177,22 @@ impl ListView {
         }
     }
 
+    /// `Sessions` 通知了，比一下侧栏前后。选中变了也会通知，那时侧栏没变，比出来什么也不起。
+    fn sidebar_changed(&mut self, sessions: &Entity<Sessions>, cx: &mut Context<Self>) {
+        let sidebar = sessions.read(cx).sidebar.clone();
+        let now = cx.background_executor().now();
+        self.motion.track(&sidebar, now);
+        let fresh = sessions
+            .read(cx)
+            .fresh
+            .clone()
+            .filter(|key| sidebar.has_session(key));
+        if let Some(key) = fresh {
+            sessions.update(cx, |sessions, _| sessions.fresh = None);
+            self.motion.arrive(key, now);
+        }
+    }
+
     /// 落点变了才重画。
     pub(super) fn set_drop(&mut self, drop: Option<DropHint>, cx: &mut Context<Self>) {
         if self.drop != drop {
@@ -215,7 +241,17 @@ impl PluginView for ListView {
 }
 
 impl Render for ListView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ambient = ambient_motion_enabled(
+            ambient_application_active(cx),
+            window.is_window_active(),
+            true,
+        );
+        let now = cx.background_executor().now();
+        let (motion, animating) = self.motion.frame(now, cx.reduce_motion(), ambient);
+        if animating {
+            window.request_animation_frame();
+        }
         let sessions = Sessions::global(cx);
         let sessions = sessions.read(cx);
         let ctx = RowCtx {
@@ -228,12 +264,13 @@ impl Render for ListView {
                 .as_ref()
                 .map(|rename| (rename.target.clone(), rename.input.clone())),
             now: chrono::Utc::now().timestamp().max(0) as u64,
+            motion,
         };
         let content = div()
             .flex()
             .flex_col()
             .pb_3()
-            .children(rows::sidebar(&ctx, cx));
+            .children(rows::sidebar(&ctx, window, cx));
         let area = api::safe_area(cx.entity_id(), cx);
         // 滚过了才出上沿那条细线，下面还有才出下沿那条，和上下摆着的东西分开。线一直占着
         // 1px，只换颜色，出现时不跳。

@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use super::*;
 use gpui_component::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 块操作挂在哪一行。优先新文件侧的行号，纯删除才退回旧文件侧。
 ///
@@ -335,7 +336,7 @@ impl GitDiffBody {
             .min_h_0()
             .flex()
             .flex_col()
-            .text_sm()
+            .type_style(TYPE.ui)
             .child(
                 div()
                     .w_full()
@@ -344,7 +345,7 @@ impl GitDiffBody {
                     .gap_2()
                     .px_3()
                     .py_1()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(muted)
                     .border_b_1()
                     .border_color(border)
@@ -361,7 +362,7 @@ impl GitDiffBody {
                     .min_w_0()
                     .px_3()
                     .py_1()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(muted)
                     .border_b_1()
                     .border_color(border)
@@ -423,7 +424,7 @@ fn diff_status_note(text: &str) -> Div {
         .min_h_0()
         .overflow_hidden()
         .p_4()
-        .text_sm()
+        .type_style(TYPE.ui)
         .whitespace_normal()
         .text_color(rgb(crate::ui_theme::muted()))
         .child(text.to_string())
@@ -646,12 +647,12 @@ fn diff_comment_composer(
                                 .bg(rgb(crate::ui_theme::soft()))
                                 .child(Icon::new(IconName::Bot).size(px(15.))),
                         )
-                        .child(div().text_sm().font_semibold().child("本机留言")),
+                        .child(div().type_style(TYPE.ui_medium).child("本机留言")),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(range_label),
                 ),

@@ -5,6 +5,7 @@
 
 use super::*;
 use smelt_plugin_api::ui::field::{InputEvent, InputState};
+use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::{Divider, Segmented, TextInput};
 
@@ -469,8 +470,7 @@ fn render_trajectory_toolbar(
                 )
                 .child(
                     div()
-                        .text_sm()
-                        .font_semibold()
+                        .type_style(TYPE.ui_medium)
                         .text_color(gpui::rgb(ui_theme::text()))
                         .child("会话追踪"),
                 ),
@@ -481,7 +481,7 @@ fn render_trajectory_toolbar(
                 .flex()
                 .items_center()
                 .gap_3()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child(stat_text("DURATION", format_duration(duration_ms)))
                 .child(stat_text("TURNS", turns.to_string()))
@@ -521,8 +521,7 @@ fn render_ledger_header(muted: gpui::Hsla) -> gpui::Div {
         .border_b_1()
         .border_color(ui_theme::hair())
         .bg(ui_theme::overlay(0x0a))
-        .text_xs()
-        .font_medium()
+        .type_style(TYPE.text_xsmall_medium)
         .text_color(muted)
         .child(div().w(px(64.)).flex_shrink_0().child("TURN"))
         .child(div().w(px(116.)).flex_shrink_0().child("EVENT"))
@@ -549,7 +548,7 @@ fn render_event_ledger(
             .child(Icon::new(IconName::Search).size(px(18.)).text_color(muted))
             .child(
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(muted)
                     .child(if all_events_empty {
                         "还没有会话事件"
@@ -663,8 +662,7 @@ fn render_ledger_row(
                 .child(
                     div()
                         .ml(px(13.))
-                        .text_xs()
-                        .font_medium()
+                        .type_style(TYPE.text_xsmall_medium)
                         .text_color(muted)
                         .when(begins_group, |label| {
                             label.text_color(gpui::rgb(ui_theme::muted()))
@@ -686,8 +684,7 @@ fn render_ledger_row(
                 .child(div().size(px(6.)).rounded_full().bg(gpui::rgb(lane_color)))
                 .child(
                     div()
-                        .text_xs()
-                        .font_medium()
+                        .type_style(TYPE.text_xsmall_medium)
                         .text_color(gpui::rgb(lane_color))
                         .child(trajectory_lane_compact_label(event.lane)),
                 ),
@@ -699,16 +696,20 @@ fn render_ledger_row(
                 .flex_1()
                 .min_w_0()
                 .when(event.depth > 0, |content| {
-                    content
-                        .child(div().flex_shrink_0().w(px(indent)))
-                        .child(div().mr_2().text_xs().text_color(muted).child("└"))
+                    content.child(div().flex_shrink_0().w(px(indent))).child(
+                        div()
+                            .mr_2()
+                            .type_style(TYPE.text_xsmall)
+                            .text_color(muted)
+                            .child("└"),
+                    )
                 })
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(gpui::rgb(ui_theme::muted()))
                         .child(truncated_line(event.text.clone())),
                 ),
@@ -718,7 +719,7 @@ fn render_ledger_row(
                 .w(px(48.))
                 .flex_shrink_0()
                 .text_right()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .font_family(smelt_plugin_api::model::font_config::font_family())
                 .text_color(muted)
                 .child(format!("{:03}", event.seq + 1)),
@@ -798,8 +799,7 @@ fn render_inspector(
                         )
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(gpui::rgb(trajectory_lane_color(event.lane)))
                                 .child(trajectory_lane_label(event.lane)),
                         )
@@ -822,7 +822,12 @@ fn render_inspector(
                         .text_color(gpui::rgb(ui_theme::text()))
                         .child(event.text.clone()),
                 )
-                .child(div().text_xs().text_color(muted).child(kind_zh)),
+                .child(
+                    div()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(muted)
+                        .child(kind_zh),
+                ),
         )
         .child(
             div()
@@ -834,7 +839,7 @@ fn render_inspector(
                 .gap_5()
                 .border_b_1()
                 .border_color(ui_theme::hair())
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .child(inspector_meta(
                     "SEQ",
                     format!("{:03}", event.seq + 1),
@@ -892,13 +897,13 @@ fn render_inspector(
                 .child(
                     div()
                         .p_4()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .line_height(px(20.))
                         .text_color(gpui::rgb(ui_theme::muted()))
                         .when(!preview, |source| {
                             source
                                 .font_family(smelt_plugin_api::model::font_config::font_family())
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                         })
                         .child(body),
                 ),
@@ -938,15 +943,14 @@ fn render_sequence_overview(overview: &TrajectoryOverview, muted: gpui::Hsla) ->
                 .h(px(16.))
                 .child(
                     div()
-                        .text_xs()
-                        .font_semibold()
+                        .type_style(TYPE.text_xsmall_medium)
                         .text_color(gpui::rgb(ui_theme::muted()))
                         .child("SEQUENCE OVERVIEW"),
                 )
                 .child(div().flex_1())
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(format!("{} ordered events", overview.ordered_event_count)),
                 ),
@@ -1000,8 +1004,7 @@ fn overview_lane(
             div()
                 .w(px(48.))
                 .flex_shrink_0()
-                .text_xs()
-                .font_medium()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(gpui::rgb(color))
                 .child(label),
         )

@@ -9,6 +9,7 @@ pub mod button;
 pub mod chart;
 pub mod choice;
 pub mod clipboard;
+pub mod code_editor;
 pub mod combobox;
 pub mod command_palette;
 pub mod dialog;
@@ -40,6 +41,7 @@ pub mod select;
 pub mod settings;
 pub mod slider;
 pub mod switch;
+pub mod syntax;
 pub mod tabs;
 pub mod theme_catalog;
 pub mod theme_config;
@@ -53,6 +55,7 @@ pub use badge::Badge;
 pub use button::Button;
 pub use choice::{Checkbox, Radio};
 pub use clipboard::Clipboard;
+pub use code_editor::CodeEditor;
 pub use combobox::{Combobox, ComboboxGroup, ComboboxOption};
 pub use command_palette::CommandPalette;
 pub use divider::Divider;
@@ -69,7 +72,8 @@ pub use select::Select;
 pub use settings::{SettingsPage, SettingsRow, SettingsSection};
 pub use switch::Switch;
 
-/// 装上本库的全局件：界面字体 Inter、菜单、下拉和可搜索列表的键位、窗口对话框层。应用启动时、
+/// 装上本库的全局件：界面字体 Inter、菜单、下拉和可搜索列表的键位、窗口对话框层、编辑器的
+/// 语言服务（见 [`syntax`]）。应用启动时、
 /// `gpui_base::init`（组件库的 `init` 会调它）之后、开窗口之前调一次。
 pub fn init(cx: &mut gpui::App) {
     // 字体随二进制编进来，载不进是构建出了错，不是运行时能恢复的情况。
@@ -79,6 +83,7 @@ pub fn init(cx: &mut gpui::App) {
     menu::init(cx);
     combobox::init(cx);
     dialog::init(cx);
+    syntax::editing::init(cx);
 }
 
 /// 删除/移除统一用这枚 Lucide trash-2（`kit::GLYPHS.trash`）。

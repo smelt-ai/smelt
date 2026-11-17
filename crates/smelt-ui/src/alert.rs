@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::icon::{Icon, IconName};
-use crate::kit::RADIUS;
+use crate::kit::{RADIUS, TYPE, TypeStyled as _};
 use crate::ui_theme;
 
 #[derive(IntoElement)]
@@ -65,7 +65,7 @@ impl RenderOnce for Alert {
             .py_2()
             .rounded(px(RADIUS.md))
             .bg(rgb(fill))
-            .text_sm()
+            .type_style(TYPE.ui)
             .text_color(rgb(text))
             .child(
                 // 图标和第一行字对齐：14 的图标在 20 的行高里下移 3。

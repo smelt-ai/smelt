@@ -44,6 +44,8 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 
 设计上 `ui` 带 -0.04、`small` 带 +0.05 的字距，GPUI 没有字距，画不出来。
 
+宿主和插件里的字一律用 `.type_style(TYPE.*)`（`kit::TypeStyled`，插件从 `api::ui::kit` 取），不手写 `text_sm()` / `text_xs()` / `text_size(..)`。档自带字重，要加重换 `*_medium` 档，不另调 `font_medium()`；只在某个状态下加重（如选中）时写 `.font_weight(TYPE.ui_medium.weight)`。界面文字默认 `ui`，对话正文这类长段落用 `body`，说明用 `text_small` / `text_xsmall`，徽标小字用 `small`。页面大标题和空状态标题暂时没有档，仍用 `text_lg()`。
+
 **界面字体是 Inter**，随 app 带六个静态字面（400、440、500、530、600、700，`assets/fonts/Inter-*.ttf`，OFL 1.1），`smelt_ui::init` 启动时装一次。GPUI 按字重在同族静态字面里挑最近的，不设可变轴，所以不带可变字体；用到新字重要先用 `scripts/inter-static.py` 切一份。等宽字体不变。
 
 圆角按嵌套从小到大：键帽、徽标 `xs`，菜单项、提示、复选框、`Mini` / `Small` 按钮 `sm`，`Regular` 按钮、输入框、分段控件、列表行、菜单外框、弹出卡片、对话框 `md`，`Large` 按钮、悬停卡片 `lg`，`ExtraLarge` 按钮 `xl`。里外两层同心时，里层圆角不大于外层。

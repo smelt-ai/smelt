@@ -25,18 +25,6 @@ pub(crate) fn runtime(key: &RuntimeKey, cx: &gpui::App) -> Option<Runtime> {
     client(key, cx).map(|client| Runtime::new(key.clone(), client))
 }
 
-/// 那台机器的 `SMELT_HOME`：本机直接算；远程的取连上时记下的，还没连上过（或运行时太旧
-/// 不报）是 `None`。客户端拿它认出那台机器上哪些会话是智能体对话。
-pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
-    match key {
-        // 本机主目录是这台电脑上的路径；比会话 cwd 时按运行时路径字符串用。
-        RuntimeKey::Local => {
-            smelt_paths::smelt_home().and_then(|path| path.to_str().map(str::to_owned))
-        }
-        RuntimeKey::Remote(_) => remote_of(key, cx)?.connection.smelt_home.clone(),
-    }
-}
-
 /// 那台机器上的路径（会话 cwd、项目根）按哪种系统的规则切：本机就是这台电脑；远程的取
 /// 连上时记下的 `os`，还没连上过当 POSIX——运行时开始支持 Windows 之前就在报 `os` 了，
 /// 不报的只会是 Linux、macOS。
@@ -135,8 +123,6 @@ pub(crate) enum RuntimeStatus {
     Online {
         version: String,
         platform: Option<String>,
-        /// 运行时报的 `SMELT_HOME`，旧运行时不报。见 [`smelt_home`]。
-        smelt_home: Option<String>,
     },
     Offline(String),
     /// 连得上，但版本和这个桌面对不上（见 `smelt_runtime_client::compat`），说明里写着该升级
@@ -787,7 +773,6 @@ fn described_status(
         return incompatible_status(&incompatible, described.daemon.os.as_deref());
     }
     RuntimeStatus::Online {
-        smelt_home: described.daemon.smelt_home,
         version: described.daemon.version,
         platform: described
             .daemon
@@ -820,33 +805,15 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
                 .iter_mut()
                 .find(|remote| remote.runtime.key() == key)
             {
-                // SMELT_HOME 和所在系统记在机器上并落库：离线时、下次启动还没连上时也要
-                // 认得出它的智能体对话、切得对它的路径。
-                if let RuntimeStatus::Online {
-                    smelt_home,
-                    platform,
-                    ..
-                } = &status
-                {
-                    let os = platform
+                // 所在系统记在机器上并落库：离线时、下次启动还没连上时也要切得对它的路径。
+                if let RuntimeStatus::Online { platform, .. } = &status
+                    && let Some(os) = platform
                         .as_deref()
-                        .and_then(|platform| platform.split('/').next());
-                    let mut changed = false;
-                    if let Some(home) = smelt_home
-                        && remote.connection.smelt_home.as_ref() != Some(home)
-                    {
-                        remote.connection.smelt_home = Some(home.clone());
-                        changed = true;
-                    }
-                    if let Some(os) = os
-                        && remote.connection.os.as_deref() != Some(os)
-                    {
-                        remote.connection.os = Some(os.to_string());
-                        changed = true;
-                    }
-                    if changed {
-                        learned = Some(remote.connection.clone());
-                    }
+                        .and_then(|platform| platform.split('/').next())
+                    && remote.connection.os.as_deref() != Some(os)
+                {
+                    remote.connection.os = Some(os.to_string());
+                    learned = Some(remote.connection.clone());
                 }
                 if !connected(&status) {
                     remote.link = None;
@@ -861,7 +828,7 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
                 if let Err(error) = smelt_client_store::client_store()
                     .and_then(|store| store.put_runtime_connection(&connection))
                 {
-                    eprintln!("[runtimes] 保存机器的 SMELT_HOME / 系统失败：{error}");
+                    eprintln!("[runtimes] 保存机器的系统失败：{error}");
                 }
             })
             .detach();
@@ -1094,7 +1061,6 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         name: String::new(),
         endpoint_id: pairing.endpoint_id,
         relay_url: pairing.relay_url,
-        smelt_home: None,
         os: None,
         added_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1124,7 +1090,6 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         .hostname
         .clone()
         .unwrap_or_else(|| connection.endpoint_id.chars().take(8).collect());
-    connection.smelt_home = described.daemon.smelt_home.clone();
     connection.os = described.daemon.os.clone();
     smelt_client_store::client_store()
         .and_then(|store| store.put_runtime_connection(&connection))
@@ -1356,7 +1321,6 @@ mod tests {
         RuntimeStatus::Online {
             version: "0.9.0".into(),
             platform: None,
-            smelt_home: None,
         }
     }
 
@@ -1374,7 +1338,6 @@ mod tests {
                         endpoint_id: String::new(),
                         relay_url: None,
                         added_at_ms: 0,
-                        smelt_home: Some("C:\\Users\\far\\.smelt".into()),
                         os: Some("windows".into()),
                     },
                     runtime: remote_runtime(
@@ -1399,12 +1362,6 @@ mod tests {
             );
             assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
             assert!(client(&RuntimeKey::Local, cx).is_some());
-            // 远程机器的 SMELT_HOME 取连上时记下的，跟本机的无关。
-            assert_eq!(
-                smelt_home(&far, cx),
-                Some("C:\\Users\\far\\.smelt".to_string())
-            );
-            assert!(smelt_home(&RuntimeKey::Remote("gone".into()), cx).is_none());
             // 路径按那台机器的系统切，跟本机是什么系统无关。
             assert_eq!(path_style(&far, cx), PathStyle::Windows);
             assert_eq!(

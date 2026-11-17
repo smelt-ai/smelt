@@ -1,20 +1,21 @@
-//! 组件库（gpui-component）的 `Theme` 跟着 smelt 的主题走。
+//! 让组件库（gpui-component）的颜色跟着 smelt 的主题走。
 //!
-//! 主题的权威是 `smelt_ui::theme_catalog::ActiveTheme`。应用里还留着组件库的三样东西：git
-//! diff 视图、文件页的代码编辑器、Markdown 代码块的语法高亮器。它们读组件库的 `Theme` 全局
-//! （编辑器经它投影出的 gpui-base 主题）。这里看着 `ActiveTheme`，每次换主题就把当前语义色
-//! 投影成一份组件库主题整份换上；组件库的 `Theme` 只是这份投影，别处不改它的颜色。
+//! smelt 的主题存在 `smelt_ui::theme_catalog::ActiveTheme`，以它为准。应用里还在用组件库的
+//! 只剩 git diff 视图。它不认 smelt 的主题，只读组件库自己的 `Theme` 全局。所以每次换主题，
+//! 这里就把 smelt 当前的颜色翻译成一份组件库 `Theme` 整份换上。这份只是翻译出来的副本，别处
+//! 不改它。（文件页的代码编辑器和 Markdown 代码块已经用 smelt-ui 自己的高亮，直接读
+//! `ActiveTheme`，不经过这里。）
 //!
-//! 只投影这三样读得到的位：底、字、线、选区、焦点环、列表悬停、状态色、滚动条，加上代码
-//! 高亮（主题文件的 `syntax` 段、编辑器的行号和当前行、诊断状态色）。组件库别的控件已经
-//! 不用，它们的位不填，留组件库的默认值。
+//! 组件库 `Theme` 的字段很多，只填 diff 视图会读的：底、字、线、选区、焦点环、列表悬停、
+//! 状态色、滚动条，加上代码高亮（主题文件的 `syntax` 段、行号和当前行、诊断色）。组件库别的
+//! 控件已经不用，它们的字段不填，留组件库的默认值。
 
 use std::rc::Rc;
 
 use gpui::{App, Rgba, px};
 use gpui_component::Theme;
 use serde_json::{Map, Value, json};
-use smelt_ui::theme_catalog::ActiveTheme;
+use smelt_ui::theme_catalog::{ActiveTheme, syntax_styles};
 use smelt_ui::theme_config::{StateColors, SyntaxFontStyle, ThemeColors, ThemeConfig};
 
 /// 装上同步。在 `gpui_component::init` 之后、第一次装主题之前调一次。
@@ -134,10 +135,11 @@ fn insert_state(highlight: &mut Map<String, Value>, key: &str, state: StateColor
     highlight.insert(format!("{key}.border"), hex(state.border).into());
 }
 
-/// 主题文件 `syntax` 段原样交给高亮器；没写 `syntax` 的主题用高亮器同明暗的默认配色。
+/// 主题的代码高亮样式交给 diff 视图的高亮器，和代码编辑器用同一份
+/// （`theme_catalog::syntax_styles`：没写 `syntax` 的主题用同明暗 smelt 主题的）。
 fn syntax(config: &ThemeConfig) -> Value {
     let mut syntax = Map::new();
-    for (key, style) in config.syntax() {
+    for (key, style) in syntax_styles(config) {
         let mut entry = Map::new();
         if let Some(color) = style.color {
             entry.insert("color".into(), hex(color).into());
@@ -160,14 +162,6 @@ fn syntax(config: &ThemeConfig) -> Value {
             *key
         };
         syntax.insert(key.into(), entry.into());
-    }
-    if syntax.is_empty() {
-        let fallback = if config.mode().is_dark() {
-            gpui_component::highlighter::HighlightTheme::default_dark()
-        } else {
-            gpui_component::highlighter::HighlightTheme::default_light()
-        };
-        return serde_json::to_value(&fallback.style.syntax).unwrap_or_default();
     }
     syntax.into()
 }
@@ -220,9 +214,9 @@ mod tests {
         assert!(style.syntax.style("comment.doc").is_some());
     }
 
-    /// 没写 `syntax` 的主题照样有代码高亮。
+    /// 没写 `syntax` 的主题照样有代码高亮（同明暗 smelt 主题的）。
     #[test]
-    fn missing_syntax_falls_back_to_the_default_palette() {
+    fn missing_syntax_falls_back_to_the_builtin_palette() {
         let mut catalog = smelt_ui::theme_catalog::ThemeCatalog::default();
         let source = r##"{"version":1,"name":"t","themes":[{"name":"L","mode":"light","colors":{"bg_base":"#ffffff","text_base":"#1a1a18"}}]}"##;
         catalog.register("test", &[source], |_| false).unwrap();

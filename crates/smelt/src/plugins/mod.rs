@@ -46,6 +46,7 @@ use smelt_plugin_api::{self as api, PluginView, ViewHandle, ViewSpec};
 
 pub(crate) use log::install as install_log;
 pub(crate) use manage::{import, uninstall, user_plugin_dir};
+use smelt_ui::kit::{TYPE, TypeStyled as _};
 
 /// 用户安装插件的目录（`~/.smelt` 下），也是 App 包里、仓库里放插件的目录名。
 const PLUGIN_DIR: &str = "plugins";
@@ -92,7 +93,7 @@ impl Render for JsPluginView {
             Ok(view) => base.child(view.clone()),
             Err(error) => base
                 .p_4()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(smelt_ui::ui_theme::bad()))
                 .child(format!("插件加载失败：{error}")),
         }
@@ -124,7 +125,7 @@ impl Render for JsSettingsPage {
             Ok(view) => base.child(view.clone()),
             Err(error) => base
                 .p_6()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(smelt_ui::ui_theme::bad()))
                 .child(format!("设置页加载失败：{error}")),
         }

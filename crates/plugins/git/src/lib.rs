@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::*;
-use gpui_base::{StyledExt as _, VirtualListScrollHandle};
+use gpui_base::VirtualListScrollHandle;
 use smelt_plugin_api::ui::resizable::ResizableState;
 use smelt_plugin_api::{
     self as api, CommandSpec, Handled, Host, HostEvent, PluginView, RuntimeKey, ViewHandle,
@@ -30,6 +30,7 @@ use panel::{
 };
 
 pub(crate) use api::ui::ui_theme;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 const VIEW_ID: &str = "smelt.git/main";
 /// 命令的来源。和搬出宿主之前一样，用户改过的快捷键还对得上。
@@ -200,8 +201,7 @@ pub(crate) fn placeholder_view(text: &str) -> Div {
         .px_4()
         .child(
             div()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .text_center()
                 .text_color(rgb(ui_theme::muted()))
                 .child(text.to_string()),

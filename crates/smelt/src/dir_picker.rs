@@ -17,6 +17,7 @@ use smelt_ui::truncated_line::truncated_line;
 use smelt_ui::{Icon, IconName};
 
 use crate::{Workspace, ui_theme};
+use smelt_ui::kit::{TYPE, TypeStyled as _};
 
 /// 一次选路径：怎么选由插件说，选好从 `done` 交回；取消时它随选择框扔掉。
 pub(crate) struct PathPick {
@@ -87,11 +88,8 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     client
-                        .call::<WorkspaceBrowseDirsCall>(
-                            &params,
-                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-                        )
-                        .map_err(crate::runtime_call::error_text)
+                        .call::<WorkspaceBrowseDirsCall>(&params, smelt_plugin_api::CALL_TIMEOUT)
+                        .map_err(smelt_plugin_api::call_error_text)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -208,7 +206,7 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child(truncated_line(
                         current
@@ -220,19 +218,19 @@ impl Workspace {
         let body: AnyElement = match listing {
             None => div()
                 .py_6()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(muted)
                 .child("正在读取…")
                 .into_any_element(),
             Some(Err(error)) => div()
                 .py_6()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::bad()))
                 .child(error.clone())
                 .into_any_element(),
             Some(Ok(listing)) if listing.entries.is_empty() => div()
                 .py_6()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(muted)
                 .child("这里没有子目录")
                 .into_any_element(),
@@ -263,7 +261,7 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(fg)
                                 .child(truncated_line(entry.name.clone())),
                         )
@@ -330,7 +328,7 @@ impl Workspace {
             .when(multiple && !picker.selected.is_empty(), |content| {
                 content.child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(format!("已选 {} 个目录", picker.selected.len())),
                 )

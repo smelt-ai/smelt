@@ -1,17 +1,16 @@
 //! 设置：主窗口里单独一页（[`SETTINGS_PAGE`]），两栏：左边是导航视图
-//! （[`SETTINGS_NAV_VIEW`]，分组、搜索），右边是内容视图（[`SETTINGS_VIEW`]，一页一页的
-//! 设置）。一页只画那一页，页内再分节。两个视图都看工作台的 `settings_section`：导航改它，
-//! 内容按它画。
+//! （`smelt/settings-nav`，分组、搜索），右边是内容视图（[`SETTINGS_VIEW`]）。一次只画
+//! 一页，页内再分节。停在哪页记在 [`SettingsSelection`]：导航改它，内容按它摆。
 //!
-//! 宿主自己只有外观、快捷键、面板插件三页；别的页（Agent、远程、终端、关于……）都是插件
-//! 登记的设置视图，按它挑的组排进导航。`impl Workspace` 的方法在子模块里，字段仍然声明在
-//! main.rs 的 `Workspace` struct 里。
+//! 每一页都是带 `settings` 的视图，按它挑的组排进导航。宿主自己的外观、快捷键、面板插件
+//! 三页管的是宿主据此行动的东西（窗口外观、键表、插件加载），由宿主登记（[`view_specs`]）；
+//! 别的页（Agent、远程、终端、关于……）都是插件登记的。设置这一页只是摆设置视图的机制，
+//! 不认识具体哪一页。
 
-use std::time::{Duration, Instant};
+use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_base::StyledExt as _;
 use gpui_component::Theme;
 use smelt_ui::Button;
 use smelt_ui::slider::{Slider, SliderEvent, SliderState, SliderValue};
@@ -21,13 +20,15 @@ use crate::Workspace;
 use crate::window_backdrop::WindowMaterial;
 use smelt_model::font_config;
 
+mod appearance_page;
+mod content_view;
 mod nav;
-mod panel_plugins;
-mod workspace;
-mod workspace_view;
+mod nav_view;
+mod panel_plugins_page;
+mod shortcuts_page;
 
-pub(crate) use nav::{SettingsSection, filter_settings_nav, settings_nav};
-pub(crate) use panel_plugins::{PanelPluginsSnapshot, PanelPluginsState};
+use nav::{SettingsNavCategory, filter_settings_nav, resolve_page, settings_nav};
+use smelt_plugin_api::{SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
 
 // ===================== 外观 =====================
 
@@ -330,31 +331,9 @@ pub(crate) fn set_window_material(material: WindowMaterial, cx: &mut App) {
 
 // ===================== 设置页 =====================
 
-/// 工作台的通知来源多（插件、窗口状态、各种全局），频率高于设置页所需。设置主体只取
-/// 最终状态，因此将连续更新合并到这一间隔；本地输入控件仍由各自的实体即时刷新。
-const SETTINGS_CONTENT_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(250);
-
-/// 设置页在渲染前从 Workspace 取出的快照。不能在 `Render::render` 中直接访问
-/// Workspace：那样 GPUI 会认为整张设置页都依赖它，工作台每次通知都失效缓存。可交互
-/// 控件仍保留实体句柄，点击回调再回到 Workspace 执行。
-#[derive(Clone)]
-struct SettingsRenderSnapshot {
-    ui_font_size_slider: Option<Entity<SliderState>>,
-    bg_image_opacity_slider: Option<Entity<SliderState>>,
-    font_options: std::sync::Arc<Vec<(SharedString, SharedString)>>,
-    ui_font_options: std::sync::Arc<Vec<(SharedString, SharedString)>>,
-    theme_options: std::rc::Rc<Vec<smelt_ui::ComboboxGroup>>,
-    panel_plugins: PanelPluginsSnapshot,
-    settings_section: SettingsSection,
-    settings_page_nonce: usize,
-}
-
 /// 设置内容视图的 id，打开设置就是打开它。宿主的视图，和插件的视图在同一张表里；只摆在
 /// 设置那一页（[`SETTINGS_PAGE`]），打开它就是去那一页。
 pub(crate) const SETTINGS_VIEW: &str = "smelt/settings";
-
-/// 设置导航视图的 id，摆在设置那一页的左栏。
-const SETTINGS_NAV_VIEW: &str = "smelt/settings-nav";
 
 /// 设置那一页的 id。
 const SETTINGS_PAGE: &str = "smelt/settings";
@@ -380,7 +359,7 @@ const SETTINGS_LAYOUT: &str = r#"{
   }
 }"#;
 
-/// 设置那一页和它的布局登记进页、布局注册表；设置的两个视图由 [`view_specs`] 交给
+/// 设置那一页和它的布局登记进页、布局注册表；设置的视图由 [`view_specs`] 交给
 /// `host_views` 和宿主别的视图一起登记。没变就不动。
 pub(crate) fn register_page(cx: &mut App) {
     let page = smelt_plugin_api::PageSource {
@@ -406,11 +385,137 @@ pub(crate) fn register_page(cx: &mut App) {
     }
 }
 
-/// 设置的两个视图：导航和内容。
-pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> [smelt_plugin_api::ViewSpec; 2] {
+/// 宿主自己的一页设置：登记成视图时的名字、标题、图标和搜索用的词。
+struct HostPage {
+    name: &'static str,
+    title: &'static str,
+    icon: smelt_ui::IconName,
+    keywords: &'static [&'static str],
+    build: fn(&WeakEntity<Workspace>, &mut App) -> Rc<dyn ViewHandle>,
+}
+
+impl HostPage {
+    fn entry(&self) -> SettingsEntry {
+        SettingsEntry {
+            group: SettingsGroup::General,
+            keywords: self
+                .keywords
+                .iter()
+                .copied()
+                .map(SharedString::new_static)
+                .collect(),
+        }
+    }
+}
+
+/// 宿主自己的设置页，按这个次序排在「通用」组的最前面。
+const HOST_PAGES: [HostPage; 3] = [
+    HostPage {
+        name: "appearance",
+        title: "外观",
+        icon: smelt_ui::IconName::Palette,
+        keywords: &[
+            "主题",
+            "颜色模式",
+            "深色",
+            "暗色",
+            "夜间",
+            "浅色",
+            "亮色",
+            "配色",
+            "Default",
+            "Ayu",
+            "Catppuccin",
+            "界面字号",
+            "UI 字号",
+            "界面字体",
+            "字体大小",
+            "调整字号",
+            "缩放",
+            "terminal",
+            "终端",
+            "代码字体",
+            "等宽字体",
+            "字体",
+            "布局",
+            "恢复布局",
+            "背景",
+            "背景图",
+            "背景图片",
+            "壁纸",
+            "透明",
+            "透明度",
+            "背景透明",
+            "材质",
+            "毛玻璃",
+            "模糊",
+        ],
+        build: build_appearance,
+    },
+    HostPage {
+        name: "shortcuts",
+        title: "快捷键",
+        icon: smelt_ui::IconName::Keyboard,
+        keywords: &[
+            "键盘快捷键",
+            "键盘",
+            "按键",
+            "组合键",
+            "改键",
+            "shortcut",
+            "keymap",
+            "keybinding",
+            "keyboard",
+            "hotkey",
+            "cmd",
+            "command",
+        ],
+        build: build_shortcuts,
+    },
+    HostPage {
+        name: "panel-plugins",
+        title: "面板插件",
+        icon: smelt_ui::IconName::Puzzle,
+        keywords: &[
+            "插件",
+            "plugin",
+            "扩展",
+            "面板",
+            "导入插件",
+            "安装插件",
+            "删除插件",
+            "卸载插件",
+            "重新加载",
+            "gpui-shell",
+        ],
+        build: build_panel_plugins,
+    },
+];
+
+fn build_appearance(workspace: &WeakEntity<Workspace>, cx: &mut App) -> Rc<dyn ViewHandle> {
+    let workspace = workspace.clone();
+    Rc::new(cx.new(|cx| appearance_page::AppearancePage::new(workspace, cx)))
+}
+
+fn build_shortcuts(_: &WeakEntity<Workspace>, cx: &mut App) -> Rc<dyn ViewHandle> {
+    Rc::new(cx.new(shortcuts_page::ShortcutsPage::new))
+}
+
+fn build_panel_plugins(_: &WeakEntity<Workspace>, cx: &mut App) -> Rc<dyn ViewHandle> {
+    Rc::new(cx.new(panel_plugins_page::PanelPluginsPage::new))
+}
+
+/// 是宿主自己登记的视图。导航里宿主的页排在同组插件的页前面。
+fn is_host_view(id: &str) -> bool {
+    id.strip_prefix(crate::host_views::HOST_OWNER)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// 设置的视图：导航、内容，和宿主自己的几页设置。
+pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> Vec<ViewSpec> {
     let nav = workspace.clone();
-    [
-        smelt_plugin_api::ViewSpec {
+    let mut specs = vec![
+        ViewSpec {
             name: "settings-nav".into(),
             title: "设置导航".into(),
             icon: gpui_kit_assets::IconName::Settings.path(),
@@ -418,14 +523,12 @@ pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> [smelt_plugin_api:
             draws_top_bar: true,
             instances: false,
             settings: None,
-            build: std::rc::Rc::new(
-                move |window, cx| -> std::rc::Rc<dyn smelt_plugin_api::ViewHandle> {
-                    let workspace = nav.clone();
-                    std::rc::Rc::new(cx.new(|cx| SettingsNavView::new(workspace, window, cx)))
-                },
-            ),
+            build: Rc::new(move |window, cx| -> Rc<dyn ViewHandle> {
+                let workspace = nav.clone();
+                Rc::new(cx.new(|cx| nav_view::SettingsNavView::new(workspace, window, cx)))
+            }),
         },
-        smelt_plugin_api::ViewSpec {
+        ViewSpec {
             name: "settings".into(),
             title: "设置".into(),
             icon: gpui_kit_assets::IconName::Settings.path(),
@@ -433,339 +536,79 @@ pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> [smelt_plugin_api:
             draws_top_bar: true,
             instances: false,
             settings: None,
-            build: std::rc::Rc::new(
-                move |window, cx| -> std::rc::Rc<dyn smelt_plugin_api::ViewHandle> {
-                    let workspace = workspace.clone();
-                    std::rc::Rc::new(cx.new(|cx| SettingsContentView::new(workspace, window, cx)))
-                },
-            ),
+            build: Rc::new(|window, cx| -> Rc<dyn ViewHandle> {
+                Rc::new(cx.new(|cx| content_view::SettingsContentView::new(window, cx)))
+            }),
         },
-    ]
+    ];
+    specs.extend(HOST_PAGES.iter().map(|page| {
+        let workspace = workspace.clone();
+        let build = page.build;
+        ViewSpec {
+            name: page.name.into(),
+            title: page.title.into(),
+            icon: page.icon.path(),
+            draws_top_bar: false,
+            instances: false,
+            settings: Some(page.entry()),
+            build: Rc::new(move |_, cx| build(&workspace, cx)),
+        }
+    }));
+    specs
 }
 
-/// 设置导航：搜索框和按组列出的各页，点一页就停到那一页（改工作台的 `settings_section`）。
-/// 选中哪页、哪页有要处理的事随工作台的通知和视图角标的变化比一下，变了才重画：工作台
-/// 通知很密，不跟着每次都重画。
-struct SettingsNavView {
-    workspace: WeakEntity<Workspace>,
-    search: Entity<smelt_ui::field::InputState>,
-    /// 分组列表的滚动位置。返回和搜索框钉在顶上，不跟着滚。
-    scroll: ScrollHandle,
-    selected: SettingsSection,
-    attention: Option<SettingsSection>,
-    _subscriptions: Vec<Subscription>,
+/// 设置停在哪一页（设置页视图的 id）。`None` 是还没选过；选过的那页撤下了也一样，都停在
+/// 导航里的第一页（见 [`nav::resolve_page`]）。导航改它，内容按它摆。
+#[derive(Default)]
+struct SettingsSelection(Option<SharedString>);
+
+impl Global for SettingsSelection {}
+
+/// 选过的那页，没选过是 `None`。只读内存。
+fn chosen_page(cx: &App) -> Option<&str> {
+    cx.try_global::<SettingsSelection>()?.0.as_deref()
 }
 
-impl SettingsNavView {
-    fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| {
-            smelt_ui::field::InputState::new(window, cx).placeholder("搜索设置、功能或命令")
-        });
-        let mut subscriptions = vec![
-            cx.subscribe(&search, |_, _, event, cx| {
-                if matches!(event, smelt_ui::field::InputEvent::Change) {
-                    cx.notify();
-                }
-            }),
-            // 插件的设置页登记、撤下了，导航跟着变；插件页挂上、摘掉角标，红点跟着变。
-            cx.subscribe(
-                &smelt_plugin_api::events(cx),
-                |this: &mut Self, _, event: &smelt_plugin_api::HostEvent, cx| match event {
-                    smelt_plugin_api::HostEvent::ViewsChanged => cx.notify(),
-                    smelt_plugin_api::HostEvent::ViewBadgesChanged => this.sync(cx),
-                    _ => {}
-                },
-            ),
-        ];
-        if let Some(host) = workspace.upgrade() {
-            subscriptions.push(cx.observe(&host, |this: &mut Self, _, cx| this.sync(cx)));
-        }
-        // 建它的地方（打开设置、装布局）正更新着工作台，这时读不了，推后一拍再读。
-        cx.defer_in(window, |this, _, cx| this.sync(cx));
-        Self {
-            workspace,
-            search,
-            scroll: ScrollHandle::new(),
-            selected: SettingsSection::default(),
-            attention: None,
-            _subscriptions: subscriptions,
-        }
-    }
-
-    /// 重读选中的那页、有要处理的事的那页，变了才重画。只读内存。
-    fn sync(&mut self, cx: &mut Context<Self>) {
-        let Some(host) = self.workspace.upgrade() else {
-            return;
-        };
-        let workspace = host.read(cx);
-        let selected = workspace.settings_section.clone();
-        let attention = workspace.settings_attention(cx);
-        if selected != self.selected || attention != self.attention {
-            self.selected = selected;
-            self.attention = attention;
-            cx.notify();
-        }
+/// 停到这一页。没变不动，免得导航和内容白白重取。
+fn select_page(id: SharedString, cx: &mut App) {
+    if chosen_page(cx) != Some(id.as_ref()) {
+        cx.set_global(SettingsSelection(Some(id)));
     }
 }
 
-impl Render for SettingsNavView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 顶上只是标题栏那一行：红黄绿按钮、拖窗口。侧栏从上到下是一整块，不画分隔线；
-        // 页名在右边内容的标题行里。
-        let header = self
-            .workspace
-            .upgrade()
-            .map(|workspace| workspace.read(cx).page_chrome_of(SETTINGS_NAV_VIEW))
-            .map(|header| header.border_b_0());
-        let nav = self.workspace.upgrade().map(|workspace| {
-            Workspace::render_settings_nav(
-                workspace,
-                &self.selected,
-                self.attention.as_ref(),
-                &self.search,
-                &self.scroll,
-                cx,
-            )
-        });
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_h_0()
-            .children(header)
-            .children(nav)
-    }
-}
-
-impl smelt_plugin_api::PluginView for SettingsNavView {
-    /// 停在哪一页由工作台的 `settings_section` 定，参数没有用处。
-    fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
-}
-
-/// 设置内容：导航选中的那一页。设置快照和终端等高频通知隔开。
-pub struct SettingsContentView {
-    /// 弱引用：视图记在全局的视图注册表里，不能替关掉的主窗口留着工作台。
-    workspace: WeakEntity<Workspace>,
-    /// 第一次打开时在事件里取（见 [`Self::prepare`]）；建视图时工作台可能正被更新着，
-    /// 取不了。
-    snapshot: Option<SettingsRenderSnapshot>,
-    _observe_workspace: Option<Subscription>,
-    _views: Subscription,
-    /// 视图放掉（登记被替换）时，露着的插件设置页随之清空。
-    _clear_shown_page: Subscription,
-    _observe_settings_globals: Vec<Subscription>,
-    last_refresh: Option<Instant>,
-    refresh_pending: bool,
-    refresh_generation: u64,
-}
-
-impl SettingsContentView {
-    fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self {
-            _clear_shown_page: cx
-                .on_release(|_, cx| crate::plugin_host::set_settings_shown(None, cx)),
-            _views: cx.subscribe_in(
-                &smelt_plugin_api::events(cx),
-                window,
-                |this: &mut SettingsContentView, _, event, window, cx| {
-                    if matches!(event, smelt_plugin_api::HostEvent::ViewsChanged) {
-                        this.sync_plugin_pages(window, cx);
-                        cx.notify();
-                    }
-                },
-            ),
-            _observe_workspace: workspace.upgrade().map(|workspace| {
-                cx.observe_in(
-                    &workspace,
-                    window,
-                    |this: &mut SettingsContentView, _, window, cx| {
-                        this.request_refresh(window, cx);
-                    },
-                )
-            }),
-            workspace,
-            snapshot: None,
-            _observe_settings_globals: vec![
-                Self::observe_settings_global::<Appearance>(window, cx),
-                Self::observe_settings_global::<crate::keymap::KeymapState>(window, cx),
-                // 插件登记、撤下主题时，主题选择的选项跟着变。
-                Self::observe_settings_global::<smelt_ui::theme_catalog::ThemeCatalog>(window, cx),
-            ],
-            last_refresh: None,
-            refresh_pending: false,
-            refresh_generation: 0,
-        }
-    }
-
-    /// 告诉插件设置停在哪个插件页上。快照换了页时调：快照停在哪页，画的就是哪页。设置
-    /// 视图本身露没露着由工作台报，两样并起来才是这一页看不看得见（见 `ShownViews`）。
-    fn publish_shown_page(&self, cx: &mut App) {
-        let page = match self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| &snapshot.settings_section)
-        {
-            Some(SettingsSection::Plugin(id)) => Some(id.clone()),
-            _ => None,
-        };
-        crate::plugin_host::set_settings_shown(page, cx);
-    }
-
-    /// 当前停在插件的设置页上而它还没建就建，建好打开一次。建好的那份记在视图注册表里，
-    /// 登记换了或撤下跟着放掉。快照换了、视图登记变了时调。
-    fn sync_plugin_pages(&mut self, window: &mut Window, cx: &mut App) {
-        let Some(SettingsSection::Plugin(id)) = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| &snapshot.settings_section)
-        else {
-            return;
-        };
-        if !smelt_plugin_api::view(id, cx).is_some_and(|view| view.settings.is_some()) {
-            return;
-        }
-        if let Some((view, true)) = smelt_plugin_api::ensure_view(id, window, cx) {
-            view.open(&serde_json::Value::Null, window, cx);
-        }
-    }
-
-    /// 停着的那一页的名字，和导航里写的一样。只读内存。
-    fn page_title(&self, cx: &App) -> Option<SharedString> {
-        let selected = &self.snapshot.as_ref()?.settings_section;
-        settings_nav(&smelt_plugin_api::views(cx))
-            .into_iter()
-            .flat_map(|category| category.children)
-            .find(|leaf| &leaf.section == selected)
-            .map(|leaf| leaf.title.into())
-    }
-
-    /// 当前停着的插件设置页，建好了才有。只读内存。
-    fn plugin_page(&self, cx: &App) -> Option<AnyView> {
-        let SettingsSection::Plugin(id) = &self.snapshot.as_ref()?.settings_section else {
-            return None;
-        };
-        smelt_plugin_api::view(id, cx)?.settings?;
-        Some(smelt_plugin_api::built_view(id, cx)?.view())
-    }
-
-    fn observe_settings_global<G: Global + 'static>(
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Subscription {
-        cx.observe_global_in::<G>(window, |this, window, cx| this.request_refresh(window, cx))
-    }
-
-    fn refresh_snapshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.workspace.upgrade().map(|workspace| {
-            workspace.update(cx, |workspace, cx| {
-                workspace.ensure_appearance_controls(cx);
-                workspace.settings_render_snapshot(cx)
-            })
-        }) else {
-            return;
-        };
-        self.snapshot = Some(snapshot);
-        self.sync_plugin_pages(window, cx);
-        self.publish_shown_page(cx);
-        self.last_refresh = Some(Instant::now());
-        self.refresh_pending = false;
-        self.refresh_generation = self.refresh_generation.wrapping_add(1);
-        cx.notify();
-    }
-
-    fn request_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 还没打开过：打开时才取第一份快照。
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        // 子菜单切换必须立刻生效，不能被设置页 250ms 刷新节流挡住。
-        if self.workspace.upgrade().is_some_and(|workspace| {
-            workspace.read(cx).settings_section != snapshot.settings_section
-        }) {
-            self.refresh_snapshot(window, cx);
-            return;
-        }
-
-        let now = Instant::now();
-        let Some(last_refresh) = self.last_refresh else {
-            self.refresh_snapshot(window, cx);
-            return;
-        };
-
-        // 已经排队的合并刷新会带上此前全部状态；等它执行即可，避免 executor 繁忙时
-        // 又穿透节流发一次立即刷新。
-        if self.refresh_pending {
-            return;
-        }
-
-        let elapsed = now.saturating_duration_since(last_refresh);
-        if elapsed >= SETTINGS_CONTENT_REFRESH_MIN_INTERVAL {
-            self.refresh_snapshot(window, cx);
-            return;
-        }
-
-        self.refresh_pending = true;
-        let generation = self.refresh_generation;
-        let delay = SETTINGS_CONTENT_REFRESH_MIN_INTERVAL.saturating_sub(elapsed);
-        cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            let _ = cx.update(|window, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    if this.refresh_pending && this.refresh_generation == generation {
-                        this.refresh_snapshot(window, cx);
-                    }
-                });
-            });
+/// 设置里有没有要你处理的事，有的话落在哪一页：设置页挂着角标（比如「关于」页有新版本）→
+/// 那一页。导航里那一页的红点看它。只读内存。
+fn attention(cx: &App) -> Option<SharedString> {
+    smelt_plugin_api::views(cx)
+        .into_iter()
+        .find(|view| {
+            view.settings.is_some() && smelt_plugin_api::view_badge(&view.id, cx).is_some()
         })
-        .detach();
-    }
+        .map(|view| view.id)
 }
 
-impl Render for SettingsContentView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _timing = smelt_ui::frame_stats::RenderTiming::start("SettingsContent");
-        // 工具栏就是标题栏那一行，只写这一页的名字（返回在左边导航的最上面）。
-        let header = self
-            .workspace
-            .upgrade()
-            .map(|workspace| workspace.read(cx).page_chrome_of(SETTINGS_VIEW))
-            .unwrap_or_else(div)
-            .gap_2()
-            .children(self.page_title(cx).map(|title| {
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(rgb(crate::ui_theme::text()))
-                    .child(title)
-            }));
-        let body = match (self.workspace.upgrade(), &self.snapshot) {
-            (Some(workspace), Some(snapshot)) => {
-                Workspace::render_settings_content(workspace, snapshot, self.plugin_page(cx), cx)
-                    .into_any_element()
-            }
-            _ => div().into_any_element(),
-        };
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_h_0()
-            .child(header)
-            .child(div().flex_1().min_h_0().child(body))
+impl Workspace {
+    /// 打开设置：⌘,、菜单栏「设置…」、命令都走这里。设置已经露着就不换页；没露着时有要
+    /// 处理的事就停在那一页，没有就停在上次那页。
+    pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::plugin_host::view_shown(SETTINGS_VIEW, cx)
+            && let Some(page) = attention(cx)
+        {
+            return self.open_settings_page(page, window, cx);
+        }
+        self.open_view(SETTINGS_VIEW, serde_json::Value::Null, window, cx);
+    }
+
+    /// 打开设置并停在这一页（设置页视图的 id）。
+    pub(crate) fn open_settings_page(
+        &mut self,
+        page: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        select_page(page, cx);
+        self.open_view(SETTINGS_VIEW, serde_json::Value::Null, window, cx);
     }
 }
-
-impl smelt_plugin_api::PluginView for SettingsContentView {
-    /// 停在哪一页由工作台的 `settings_section` 定，参数没有用处。每次打开都重取一份快照，
-    /// 在事件里推后一拍做：打开它的地方往往正更新着工作台，这里要回头取工作台的快照。
-    fn open(&mut self, _: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
-        cx.defer_in(window, |this, window, cx| this.refresh_snapshot(window, cx));
-    }
-}
-
-// ===================== Workspace 方法 =====================
-
 #[cfg(test)]
 mod tests;

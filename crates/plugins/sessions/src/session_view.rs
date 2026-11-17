@@ -34,6 +34,7 @@ use crate::contract::{self, SessionArgs, SessionAt};
 use crate::lifecycle;
 use crate::model::{self, ConversationKey, Located, Sessions};
 use crate::split::{Split, SplitEvent};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 // 约定：smelt.machines 的 ADD_MACHINE，权威定义在 crates/plugins/machines/src/contract.rs。
 /// 去添加一台远程机器（打开远程机器插件的「远程」页）。不带参数。那个插件没装就没登记，
@@ -496,7 +497,7 @@ fn empty_state(add_machine: bool) -> impl IntoElement {
         .items_center()
         .gap_2()
         .text_center()
-        .text_sm()
+        .type_style(TYPE.ui)
         .child(
             div()
                 .size_8()

@@ -38,6 +38,7 @@ use crate::OWNER;
 use crate::contract::{ADD_MACHINE, VIEW};
 use crate::menu::{confirm_remove, report_failure};
 use crate::status::{self, Tone};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 // 运行时最多挂 REMOTE_STATUS_WAIT_MAX 就回，等它的读超时要比这长，不然没变化时会报超时。
 const _: () = assert!(api::CALL_TIMEOUT.as_secs() > REMOTE_STATUS_WAIT_MAX.as_secs());
@@ -546,7 +547,7 @@ impl RemotePage {
             )
             .children(self.add_error.clone().map(|error| {
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::bad()))
                     .child(error)
             }));
@@ -577,7 +578,7 @@ impl RemotePage {
                             div()
                                 .max_w(px(320.))
                                 .overflow_hidden()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(status_color)
                                 .child(truncated_line(status_text)),
                         ),
@@ -631,7 +632,7 @@ fn machine_list(connections: &Connections) -> AnyElement {
     if let Some(error) = &connections.load_error {
         list = list.child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::bad()))
                 .child(error.clone()),
         );
@@ -640,7 +641,7 @@ fn machine_list(connections: &Connections) -> AnyElement {
         if connections.load_error.is_none() {
             list = list.child(
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(muted)
                     .child("还没有连到其他机器。"),
             );
@@ -664,14 +665,19 @@ fn machine_list(connections: &Connections) -> AnyElement {
                         .gap_0p5()
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::text()))
                                 .child(connection.name.clone()),
                         )
-                        .child(div().text_xs().text_color(tone_color(tone)).child(text))
+                        .child(
+                            div()
+                                .type_style(TYPE.text_xsmall)
+                                .text_color(tone_color(tone))
+                                .child(text),
+                        )
                         .children(connection.upgrade_note.clone().map(|note| {
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::need()))
                                 .child(note)
                         })),
@@ -715,7 +721,7 @@ fn device_list(
     let muted = rgb(ui_theme::muted());
     let mut list = column().gap_2().children(error.map(|error| {
         div()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::bad()))
             .child(error)
     }));
@@ -723,7 +729,7 @@ fn device_list(
         return list
             .child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child("还没有配对过设备。"),
             )
@@ -754,15 +760,17 @@ fn device_list(
                         .gap_0p5()
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::text()))
                                 .child(device.name.clone()),
                         )
-                        .child(div().text_xs().text_color(muted).child(format!(
-                            "{} · {}",
-                            status::short_id(&device.endpoint_id),
-                            status::last_seen_text(device, now_ms)
-                        ))),
+                        .child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
+                            format!(
+                                "{} · {}",
+                                status::short_id(&device.endpoint_id),
+                                status::last_seen_text(device, now_ms)
+                            ),
+                        )),
                 )
                 .child(
                     Button::new(("revoke-device", index))
@@ -801,20 +809,20 @@ fn pairing_dialog(card: dialog::Card, page: &WeakEntity<RemotePage>, cx: &App) -
     let muted = rgb(ui_theme::muted());
     let mut body = dialog::content("配对新设备", None).child(
         div()
-            .text_sm()
+            .type_style(TYPE.ui)
             .text_color(rgb(ui_theme::need()))
             .child("配对一台设备，就是把你在这台机器上的 shell 权限交给它。"),
     );
     if let Some(error) = error {
         body = body.child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::bad()))
                 .child(error),
         );
     }
     body = match offer {
-        None => body.child(div().text_sm().text_color(muted).child(if generating {
+        None => body.child(div().type_style(TYPE.ui).text_color(muted).child(if generating {
             "正在生成配对串…"
         } else {
             "还没有配对串。"
@@ -837,7 +845,7 @@ fn pairing_dialog(card: dialog::Card, page: &WeakEntity<RemotePage>, cx: &App) -
                         .flex_1()
                         .min_w(px(0.))
                         .gap_2()
-                        .child(div().text_sm().text_color(rgb(ui_theme::text())).child(
+                        .child(div().type_style(TYPE.ui).text_color(rgb(ui_theme::text())).child(
                             "手机扫码；或复制配对串，在另一台电脑的「连到其他机器」里粘贴。",
                         ))
                         .child(
@@ -849,7 +857,7 @@ fn pairing_dialog(card: dialog::Card, page: &WeakEntity<RemotePage>, cx: &App) -
                                         .overflow_hidden()
                                         .whitespace_nowrap()
                                         .text_ellipsis_middle()
-                                        .text_xs()
+                                        .type_style(TYPE.text_xsmall)
                                         .text_color(muted)
                                         .child(offer.uri.clone()),
                                 )
@@ -862,7 +870,7 @@ fn pairing_dialog(card: dialog::Card, page: &WeakEntity<RemotePage>, cx: &App) -
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
                                 .child("只能用一次，10 分钟内有效。"),
                         ),

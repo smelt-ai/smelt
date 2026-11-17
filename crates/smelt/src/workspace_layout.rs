@@ -779,11 +779,7 @@ impl Workspace {
             return false;
         };
         if info.settings.is_some() {
-            self.open_settings_section(
-                crate::settings::SettingsSection::Plugin(info.id),
-                window,
-                cx,
-            );
+            self.open_settings_page(info.id, window, cx);
         } else if !self.reveal_view(id, window, cx) {
             return false;
         }
@@ -963,7 +959,7 @@ mod tests {
     fn info(id: &str) -> api::LayoutInfo {
         api::LayoutInfo {
             id: id.to_string().into(),
-            page: "smelt.layouts/workbench".into(),
+            page: "example.layouts/workbench".into(),
             title: id.to_string().into(),
         }
     }
@@ -971,18 +967,18 @@ mod tests {
     /// 选的登记着就用它；没登记（插件还没加载）用第一份；一份都没有就是兜底。
     #[test]
     fn the_chosen_layout_is_used_only_while_registered() {
-        let registered = [info("smelt.layouts/standard"), info("trader/two")];
+        let registered = [info("example.layouts/standard"), info("trader/two")];
         assert_eq!(
             resolve(Some("trader/two"), &registered).as_deref(),
             Some("trader/two")
         );
         assert_eq!(
             resolve(Some("gone/x"), &registered).as_deref(),
-            Some("smelt.layouts/standard")
+            Some("example.layouts/standard")
         );
         assert_eq!(
             resolve(None, &registered).as_deref(),
-            Some("smelt.layouts/standard")
+            Some("example.layouts/standard")
         );
         assert_eq!(resolve(Some("trader/two"), &[]), None);
     }
@@ -1000,7 +996,7 @@ mod tests {
                 page,
                 view("smelt/settings"),
                 view("example.a/main"),
-                view("smelt.files/main"),
+                view("example.c/main"),
             ],
             &elsewhere,
         );
@@ -1016,7 +1012,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["example.b/list", "example.a/main", "smelt.files/main"]
+            ["example.b/list", "example.a/main", "example.c/main"]
         );
         assert_eq!(api::parse_layout(&to_text(&state)), Ok(state));
     }
@@ -1048,7 +1044,7 @@ mod tests {
     #[test]
     fn a_saved_state_is_used_while_it_lays_out_the_same_views() {
         let record = |state: String| WorkspaceLayoutStateRecord {
-            layout_id: "smelt.layouts/standard".into(),
+            layout_id: "example.layouts/standard".into(),
             state,
         };
         let registered = fallback_layout(&["a/main".to_string(), "b/main".to_string()]);
@@ -1116,7 +1112,7 @@ mod tests {
         assert!(layout_views(&registered).contains("c/quota"));
         assert!(!layout_views(&registered).contains(api::STACK_PANEL));
         let record = |state: &api::DockAreaState| WorkspaceLayoutStateRecord {
-            layout_id: "smelt.layouts/standard".into(),
+            layout_id: "example.layouts/standard".into(),
             state: to_text(state),
         };
         assert_eq!(usable_saved_state(&record(&old), &registered), None);

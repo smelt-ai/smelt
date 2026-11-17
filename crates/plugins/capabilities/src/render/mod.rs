@@ -1,6 +1,7 @@
 //! 能力库正文：只画当前页签那一页。页头和页签在 [`CapabilitiesPage`] 的 render 里。
 
 use super::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 use smelt_plugin_api::ui::{Badge, TextInput};
 
 mod auth;
@@ -30,7 +31,7 @@ pub(crate) fn content(
 fn page_intro(text: impl Into<SharedString>) -> Div {
     div()
         .px_4()
-        .text_sm()
+        .type_style(TYPE.ui)
         .text_color(rgb(ui_theme::muted()))
         .child(text.into())
 }

@@ -234,14 +234,9 @@ fn resume(args: Resume, _: Option<&mut Window>, cx: &mut App) -> Task<Result<(),
             cx,
         );
     }
-    let smelt_home = host
-        .machines(cx)
-        .into_iter()
-        .find(|machine| machine.key == args.machine)
-        .and_then(|machine| machine.smelt_home);
     let machine = args.machine.clone();
     with_settings(&machine, cx, move |settings, cx| {
-        let acp = launch::resumed_acp(settings, &args, smelt_home.as_deref(), new_id())?;
+        let acp = launch::resumed_acp(settings, &args, new_id())?;
         Ok(create_acp(
             args.machine,
             acp,

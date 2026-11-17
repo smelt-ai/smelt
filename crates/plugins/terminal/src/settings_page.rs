@@ -11,6 +11,7 @@ use smelt_plugin_api::{
 
 use crate::store::TerminalStore;
 use crate::terminal_view::{MAX_FONT_PX, MIN_FONT_PX, font_px, set_font_px};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) fn spec(store: Rc<TerminalStore>) -> ViewSpec {
     ViewSpec {
@@ -73,7 +74,7 @@ impl Render for TerminalSettings {
                 div()
                     .min_w(px(40.))
                     .text_center()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::text()))
                     .font_features(ui_theme::tabular_figures())
                     .child(format!("{current}px")),

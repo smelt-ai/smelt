@@ -142,7 +142,7 @@ mod appearance_tests {
 }
 
 mod page_tests {
-    use super::super::{SETTINGS_NAV_VIEW, SETTINGS_PAGE, SETTINGS_VIEW, register_page};
+    use super::super::{SETTINGS_PAGE, SETTINGS_VIEW, register_page};
 
     /// 设置那一页的布局按官方格式解析得了：中间横排两栏，左边导航、右边内容，各自单独一组。
     #[gpui::test]
@@ -170,7 +170,7 @@ mod page_tests {
                         .collect()
                 })
                 .collect();
-            assert_eq!(columns, [[SETTINGS_NAV_VIEW], [SETTINGS_VIEW]]);
+            assert_eq!(columns, [["smelt/settings-nav"], [SETTINGS_VIEW]]);
         });
     }
 }

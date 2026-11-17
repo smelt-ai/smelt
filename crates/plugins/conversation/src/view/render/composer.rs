@@ -2,6 +2,7 @@
 
 use super::*;
 use smelt_plugin_api::model::daemon_state::DaemonPhase;
+use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::popover::PopoverState;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 
@@ -42,7 +43,7 @@ fn capabilities_panel(
             div()
                 .px_1()
                 .py_3()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(gpui::rgb(ui_theme::muted()))
                 .child("这场对话没有加载技能或 MCP"),
         );
@@ -107,7 +108,7 @@ fn capabilities_panel(
                 div()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::faint()))
                     .child(truncated_line(source)),
             )
@@ -134,7 +135,7 @@ fn capability_group_header(title: &'static str, count: usize) -> impl IntoElemen
         .pt_1()
         .pb_0p5()
         .justify_between()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(gpui::rgb(ui_theme::faint()))
         .child(title)
         .child(count.to_string())
@@ -157,7 +158,7 @@ fn capability_row(name: String, detail: String, tag: Option<String>) -> gpui::Di
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(gpui::rgb(ui_theme::muted()))
                         .child(truncated_line(name)),
                 )
@@ -166,7 +167,7 @@ fn capability_row(name: String, detail: String, tag: Option<String>) -> gpui::Di
                         .flex_none()
                         .max_w(px(140.))
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(gpui::rgb(ui_theme::faint()))
                         .child(truncated_line(tag))
                 })),
@@ -175,7 +176,7 @@ fn capability_row(name: String, detail: String, tag: Option<String>) -> gpui::Di
             row.child(
                 div()
                     .overflow_hidden()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::muted()))
                     .child(truncated_line(detail)),
             )
@@ -186,7 +187,7 @@ fn capability_none() -> impl IntoElement {
     div()
         .px_1()
         .pb_1()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(gpui::rgb(ui_theme::muted()))
         .child("没有")
 }
@@ -304,7 +305,7 @@ impl ConversationView {
                         .flex()
                         .items_center()
                         .flex_shrink_0()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(smelt_plugin_api::model::font_config::font_family())
                         .text_color(label_color)
                         .child(item.label[..range.start].to_string())
@@ -319,7 +320,7 @@ impl ConversationView {
                 } else {
                     div()
                         .flex_shrink_0()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(smelt_plugin_api::model::font_config::font_family())
                         .text_color(label_color)
                         .child(item.label.clone())
@@ -341,7 +342,7 @@ impl ConversationView {
                         row.child(
                             div()
                                 .min_w_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(if selected {
                                     gpui::rgb(ui_theme::text()).into()
                                 } else {
@@ -365,7 +366,7 @@ impl ConversationView {
                     .py_1()
                     .border_t_1()
                     .border_color(ui_theme::hair())
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child("↑↓ 选择   Enter/Tab 插入   Esc 关闭"),
             )
@@ -578,7 +579,7 @@ impl ConversationView {
                     .rounded_full()
                     .flex()
                     .items_center()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(gpui::rgb(ui_theme::muted()))
                     .child(model_label)
                     .into_any_element()
@@ -717,7 +718,7 @@ impl ConversationView {
                                         div()
                                             .flex_1()
                                             .min_w(px(0.))
-                                            .text_xs()
+                                            .type_style(TYPE.text_xsmall)
                                             .text_color(gpui::rgb(ui_theme::muted()))
                                             .child(format!("{kind} · {preview}")),
                                     )
@@ -802,7 +803,7 @@ impl ConversationView {
                                     div()
                                         .flex_1()
                                         .min_w(px(0.))
-                                        .text_xs()
+                                        .type_style(TYPE.text_xsmall)
                                         .text_color(gpui::rgb(ui_theme::muted()))
                                         .child(format!("排队中 · {preview}{img_suffix}")),
                                 )
@@ -858,7 +859,7 @@ impl ConversationView {
                                             .flex_1()
                                             .min_w(px(0.))
                                             .overflow_hidden()
-                                            .text_xs()
+                                            .type_style(TYPE.text_xsmall)
                                             .text_color(muted)
                                             .child(truncated_line(format!(
                                                 "〈{from}〉{} · 还没送到，手上的工具调用做完就送进来",
@@ -991,7 +992,7 @@ impl ConversationView {
                                 .children(next_turn_notice.as_ref().map(|label| {
                                     div()
                                         .flex_shrink_0()
-                                        .text_xs()
+                                        .type_style(TYPE.text_xsmall)
                                         .text_color(gpui::rgb(ui_theme::need()))
                                         .child(label.clone())
                                 }))
@@ -1071,7 +1072,7 @@ impl ConversationView {
                         .children(self.restart_error.as_ref().map(|err| {
                             div()
                                 .flex_shrink_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::bad()))
                                 .child(format!("重启失败：{err}"))
                         }))
@@ -1203,8 +1204,7 @@ impl ConversationView {
                     .w_full()
                     .child(
                         div()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(gpui::rgb(ui_theme::muted()))
                             .child("Context Usage"),
                     )
@@ -1228,15 +1228,14 @@ impl ConversationView {
                     .items_end()
                     .child(
                         div()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(gpui::rgb(ui_theme::text()))
                             .child(format!("{pct}% Full")),
                     )
                     .child(div().flex_1())
                     .child(
                         div()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(gpui::rgb(ui_theme::muted()))
                             .child(header_tokens),
                     ),
@@ -1267,14 +1266,14 @@ impl ConversationView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(gpui::rgb(ui_theme::text()))
                             .child(row.label),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(gpui::rgb(ui_theme::muted()))
                             .child(compact_token_count(row.tokens)),
                     ),
@@ -1284,7 +1283,7 @@ impl ConversationView {
             panel = panel.child(
                 div().flex().items_center().w_full().px_2().child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(gpui::rgb(ui_theme::faint()))
                         .child(format!("Cost {}", format_cost(cost))),
                 ),
@@ -1304,7 +1303,7 @@ impl ConversationView {
                         ))
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::need()))
                                 .child("压缩中…"),
                         ),
@@ -1417,14 +1416,14 @@ impl ConversationView {
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::run()))
                                 .child(task.status.label()),
                         )
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .font_family(mono.clone())
                                 .text_color(gpui::rgb(ui_theme::faint()))
                                 .child(task.id.clone()),
@@ -1434,21 +1433,21 @@ impl ConversationView {
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(gpui::rgb(ui_theme::text()))
                                 .child(truncated_line(title_line)),
                         )
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::faint()))
                                 .child(background_task_elapsed(task.started_at_ms, now_ms)),
                         )
                         .child(if stopping {
                             div()
                                 .flex_shrink_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::muted()))
                                 .child("正在停止…")
                                 .into_any_element()
@@ -1471,7 +1470,7 @@ impl ConversationView {
                 .child(
                     div()
                         .pl(px(4.))
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .overflow_hidden()
                         .font_family(mono.clone())
                         .text_color(gpui::rgb(ui_theme::muted()))
@@ -1493,7 +1492,7 @@ impl ConversationView {
                     .track_scroll(scroll)
                     .pl(px(4.))
                     .font_family(mono.clone())
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::muted()))
                     .on_click(|_event, _window, cx| cx.stop_propagation());
                 for line in task.output.lines() {
@@ -1525,8 +1524,7 @@ impl ConversationView {
                     .w_full()
                     .child(
                         div()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(gpui::rgb(ui_theme::muted()))
                             .child("后台任务"),
                     )

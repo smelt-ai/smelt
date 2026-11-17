@@ -65,6 +65,7 @@ pub use smelt_plugin_api::model::acp_chat::{
     compact_diff_lines, completion_summary_text, diff_line_stats, diff_lines, is_interrupt_marker,
     is_task_completion_tool_title, strip_code_fence,
 };
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 mod render;
 #[cfg(test)]
@@ -346,20 +347,19 @@ fn render_usage_hover_card(used: u64, size: u64, cached_read: Option<u64>) -> gp
         .gap_1()
         .child(
             div()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .text_color(gpui::rgb(ui_theme::text()))
                 .child(format!("{pct}% context used")),
         )
         .child(
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(gpui::rgb(ui_theme::muted()))
                 .child(tokens),
         )
         .children(cached_read.filter(|tokens| *tokens > 0).map(|tokens| {
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(gpui::rgb(ui_theme::muted()))
                 .child(format!("{} cached", compact_token_count(tokens)))
         }))
@@ -4788,14 +4788,13 @@ impl ConversationView {
                         .child(
                             div()
                                 .w(px(10.))
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::muted()))
                                 .child(if self.plan_collapsed { "▸" } else { "▾" }),
                         )
                         .child(
                             div()
-                                .text_xs()
-                                .font_semibold()
+                                .type_style(TYPE.text_xsmall_medium)
                                 .text_color(gpui::rgb(ui_theme::muted()))
                                 .child("任务进度"),
                         )
@@ -4804,14 +4803,14 @@ impl ConversationView {
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(gpui::rgb(ui_theme::text()))
                                 .child(truncated_line(current_step)),
                         )
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .font_family(smelt_plugin_api::model::font_config::font_family())
                                 .text_color(summary_color)
                                 .child(summary),
@@ -4843,13 +4842,13 @@ impl ConversationView {
                             div()
                                 .flex_shrink_0()
                                 .w(px(15.))
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::faint()))
                                 .child("✓"),
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(gpui::rgb(ui_theme::faint()))
                                 .line_through()
                                 .child(entry.content.clone()),
@@ -4879,14 +4878,13 @@ impl ConversationView {
                                 .gap_1p5()
                                 .child(
                                     div()
-                                        .text_sm()
-                                        .font_medium()
+                                        .type_style(TYPE.ui_medium)
                                         .text_color(gpui::rgb(ui_theme::text()))
                                         .child(entry.content.clone()),
                                 )
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .type_style(TYPE.ui)
                                         .text_color(gpui::rgb(ui_theme::muted()))
                                         .child("进行中"),
                                 ),
@@ -4903,7 +4901,7 @@ impl ConversationView {
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(gpui::rgb(ui_theme::muted()))
                                 .child(entry.content.clone()),
                         ),
@@ -6225,14 +6223,14 @@ fn render_compact_diff_stats(added: usize, removed: usize) -> gpui::AnyElement {
         .gap_1p5()
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .font_family(smelt_plugin_api::model::font_config::font_family())
                 .text_color(gpui::rgb(ui_theme::ok()))
                 .child(format!("+{added}")),
         )
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .font_family(smelt_plugin_api::model::font_config::font_family())
                 .text_color(gpui::rgb(ui_theme::bad()))
                 .child(format!("-{removed}")),
@@ -6966,7 +6964,7 @@ fn render_diff_lines(
         .border_1()
         .border_color(border_color)
         .font_family(smelt_plugin_api::model::font_config::font_family())
-        .text_xs();
+        .type_style(TYPE.text_xsmall);
     for (line_ix, line) in lines.iter().enumerate() {
         let (bg, prefix, fg): (Option<gpui::Hsla>, &str, gpui::Hsla) = match line.tag {
             DiffLineTag::Removed => (
@@ -7003,7 +7001,7 @@ fn render_diff_lines(
                 plain_text_view((id.clone(), line_ix.to_string()), &text)
                     .flex_1()
                     .min_w_0()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .font_family(smelt_plugin_api::model::font_config::font_family())
                     .text_color(fg),
             )
@@ -7011,7 +7009,7 @@ fn render_diff_lines(
                 row.child(
                     div()
                         .flex_none()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted_color)
                         .child("末尾没有换行"),
                 )

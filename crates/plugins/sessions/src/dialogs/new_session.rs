@@ -35,6 +35,7 @@ use super::repositories::{self, Mode};
 use crate::peers::agents::{AGENT_SETTINGS, AGENT_SETTINGS_CHANGED, AgentSettingsState};
 use crate::peers::conversation::ConversationStart;
 use crate::{contract, lifecycle};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 卡片宽度。
 const WIDTH: f32 = 520.;
@@ -573,7 +574,7 @@ impl Render for NewSession {
             .gap_2()
             .child(
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(muted)
                     .child(self.machine_name.clone()),
             )
@@ -603,7 +604,7 @@ impl Render for NewSession {
             .when_some(self.error.clone(), |content, error| {
                 content.child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::bad()))
                         .child(error),
                 )
@@ -616,7 +617,7 @@ impl NewSession {
         let notice = |text: String| {
             div()
                 .py_4()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child(text)
                 .into_any_element()
@@ -672,7 +673,7 @@ impl NewSession {
                         .px_2()
                         .pt_2()
                         .pb_1()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::muted()))
                         .child(SECTION_LABELS[row.section]),
                 );
@@ -707,11 +708,14 @@ impl NewSession {
                     .size(px(16.))
                     .text_color(rgb(ui_theme::row_muted(selected))),
             )
-            .child(div().flex_1().min_w_0().truncate().text_sm().child(format!(
-                "{} · {}",
-                action.label,
-                action.kind.label()
-            )))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .type_style(TYPE.ui)
+                    .child(format!("{} · {}", action.label, action.kind.label())),
+            )
             .child(
                 Button::new(("new-session-pin", ix))
                     .quiet()

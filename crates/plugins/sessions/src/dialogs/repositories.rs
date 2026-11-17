@@ -23,6 +23,7 @@ use smelt_plugin_api::model::workspace_directory::{
     WorkspaceProjectRepositoryActionParams, WorkspaceWorkset, WorkspaceWorksetCreateParams,
 };
 use smelt_plugin_api::ui::dialog;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 use smelt_plugin_api::ui::{Button, Checkbox, TextInput, ui_theme};
 use smelt_plugin_api::{self as api, RuntimeKey};
 
@@ -484,7 +485,7 @@ impl Render for Repositories {
         content.when_some(self.error.clone(), |content, error| {
             content.child(
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::bad()))
                     .child(error),
             )
@@ -493,12 +494,12 @@ impl Render for Repositories {
 }
 
 fn field_label(text: &'static str) -> impl IntoElement {
-    div().text_sm().child(text)
+    div().type_style(TYPE.ui).child(text)
 }
 
 fn hint(text: impl Into<SharedString>) -> impl IntoElement {
     div()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::muted()))
         .child(text.into())
 }
@@ -518,7 +519,7 @@ impl Repositories {
             list = list.child(
                 div()
                     .py_4()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child(if busy {
                         "正在读取项目仓库…"
@@ -593,7 +594,7 @@ impl Repositories {
                 .gap_1()
                 .child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .child(format!("{} · {source_label}", repo.name)),
                 )
                 .child(hint(location));
@@ -669,7 +670,7 @@ impl Repositories {
         let busy = self.busy;
         let content = if self.mode == Mode::Bind {
             content
-                .child(div().text_sm().text_color(rgb(ui_theme::muted())).child(
+                .child(div().type_style(TYPE.ui).text_color(rgb(ui_theme::muted())).child(
                     "选择已有 Git 仓库的根目录。项目外的仓库只在 repos/ 下建软链接，原目录不会移动。",
                 ))
                 .child(
@@ -682,7 +683,7 @@ impl Repositories {
                 )
                 .child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .child(self.source.clone().unwrap_or_else(|| "尚未选择目录".into())),
                 )
         } else {
@@ -707,7 +708,7 @@ impl Repositories {
             .child(TextInput::new(&self.name).disabled(busy))
             .child(
                 div()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child(format!(
                         "名称：{} · {destination}",
@@ -726,7 +727,7 @@ impl Repositories {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_sm().child(format!(
+            .child(div().type_style(TYPE.ui).child(format!(
                 "取消关联「{name}」？真实仓库和分支会保留；仅清理 Smelt 自建的软链接。"
             )))
             .child(

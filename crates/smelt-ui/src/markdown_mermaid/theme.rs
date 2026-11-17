@@ -239,8 +239,6 @@ fn css_hex(color: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use sha2::Digest as _;
-
     use super::*;
 
     fn fallback(light: bool) -> DiagramColors {

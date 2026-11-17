@@ -129,7 +129,7 @@ fn project<M: InputModeKind>(
 }
 
 /// 右键菜单。打开时按状态当下的能力决定哪些项可用；点了先把焦点还给输入框再派发动作。
-fn edit_menu<M: InputModeKind>(
+pub(crate) fn edit_menu<M: InputModeKind>(
     state: &Entity<InputBaseState<M>>,
 ) -> impl Fn(&mut Window, &mut App) -> Menu + 'static {
     let state = state.downgrade();

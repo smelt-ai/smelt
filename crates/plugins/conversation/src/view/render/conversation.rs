@@ -2,6 +2,7 @@
 
 use super::*;
 use gpui_base::motion::MotionReveal;
+use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 
 fn owner_id(name: &'static str, owner: &gpui::SharedString) -> gpui::ElementId {
@@ -51,7 +52,7 @@ fn user_message_bubble(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::D
         .rounded(ui_theme::bubble_radius())
         .bg(ui_theme::overlay(0x14))
         .hover(|bubble| bubble.bg(ui_theme::overlay(0x1c)))
-        .text_sm()
+        .type_style(TYPE.body)
 }
 
 /// 只包刚发送的那一条。nonce 进元素 id，虚拟列表把行卸掉再装上时，过了时钟就不再播。
@@ -105,7 +106,12 @@ fn labeled_divider(
         .gap_2()
         .my_1()
         .child(div().flex_1().h(px(1.)).bg(line))
-        .child(div().text_xs().text_color(muted).child(label))
+        .child(
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(label),
+        )
         .child(div().flex_1().h(px(1.)).bg(line))
         .into_any_element()
 }
@@ -161,7 +167,7 @@ fn event_line(muted: gpui::Hsla) -> gpui::Div {
         .max_w_full()
         .min_w_0()
         .gap_1()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(muted)
 }
 
@@ -566,7 +572,7 @@ impl ConversationView {
                             .id(("acp-assistant-message", i))
                             .w_full()
                             .min_w_0()
-                            .text_sm()
+                            .type_style(TYPE.body)
                             .text_color(gpui::rgb(ui_theme::text()))
                             .child(this.retained_markdown(
                                 "acp-md",
@@ -653,7 +659,7 @@ impl ConversationView {
                             .w_full()
                             .min_w_0()
                             .gap_1()
-                            .text_sm()
+                            .type_style(TYPE.body)
                             .when(!final_answer, |col| col.text_color(muted))
                             .child(
                                 div().flex().items_center()
@@ -665,8 +671,7 @@ impl ConversationView {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .font_medium()
+                                            .type_style(TYPE.text_xsmall_medium)
                                             .text_color(status_color)
                                             .child(status_label),
                                     ),
@@ -799,7 +804,7 @@ impl ConversationView {
                                         .flex_1()
                                         .min_w_0()
                                         .overflow_hidden()
-                                        .text_xs()
+                                        .type_style(TYPE.text_xsmall)
                                         .text_color(ink)
                                         .when(can_expand, |label| {
                                             label.group_hover(PEEK_ROW_GROUP, |s| {
@@ -812,7 +817,7 @@ impl ConversationView {
                                 row = row.child(
                                     div()
                                         .flex_shrink_0()
-                                        .text_xs()
+                                        .type_style(TYPE.text_xsmall)
                                         .text_color(gpui::rgb(ui_theme::bad()))
                                         .child("失败"),
                                 );
@@ -824,7 +829,7 @@ impl ConversationView {
                                 row = row.child(
                                     div()
                                         .flex_shrink_0()
-                                        .text_xs()
+                                        .type_style(TYPE.text_xsmall)
                                         .text_color(faint)
                                         .child(summary),
                                 );
@@ -893,14 +898,14 @@ impl ConversationView {
                                     )
                                 } else {
                                     div()
-                                        .text_xs()
+                                        .type_style(TYPE.text_xsmall)
                                         .text_color(faint)
                                         .child(status_label)
                                         .into_any_element()
                                 }
                             } else if failed {
                                 div()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(gpui::rgb(ui_theme::bad()))
                                     .child(status_label)
                                     .into_any_element()
@@ -911,13 +916,13 @@ impl ConversationView {
                             {
                                 div()
                                     .flex_shrink_0()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(faint)
                                     .child(summary)
                                     .into_any_element()
                             } else if matches!(status, ToolCallStatus::Pending) {
                                 div()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(faint)
                                     .child(status_label)
                                     .into_any_element()
@@ -965,7 +970,7 @@ impl ConversationView {
                                     .flex_1()
                                     .min_w_0()
                                     .overflow_hidden()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(ink)
                                     .child(truncated_line(compact_tool_headline(*kind, title))),
                             )
@@ -994,7 +999,7 @@ impl ConversationView {
                                                         owner_part("acp-diff-path", &owner, part_ix),
                                                         path,
                                                     )
-                                                        .text_xs()
+                                                        .type_style(TYPE.text_xsmall)
                                                         .text_color(muted)
                                                 )
                                                 .children(cached.map(|diff| {
@@ -1033,7 +1038,7 @@ impl ConversationView {
                                                 shown.into(),
                                                 cx,
                                             )
-                                            .text_xs()
+                                            .type_style(TYPE.text_xsmall)
                                             .text_color(muted)
                                             .into_any_element();
                                             card.child(
@@ -1180,7 +1185,7 @@ impl ConversationView {
                                             owner_id("acp-task-note", &note_owner),
                                             &note.output_tail,
                                         )
-                                        .text_xs()
+                                        .type_style(TYPE.text_xsmall)
                                         .text_color(muted)
                                         .font_family(smelt_plugin_api::model::font_config::font_family()),
                                     ),
@@ -1350,7 +1355,7 @@ impl ConversationView {
             .flex_col()
             .id(("acp-provider-retry", entry_ix))
             .gap_0p5()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .child(
                 div()
                     .flex()
@@ -1398,7 +1403,7 @@ impl ConversationView {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(gpui::rgb(ui_theme::need()))
                         .child(message),
                 )
@@ -1435,7 +1440,7 @@ impl ConversationView {
             .debug_selector(move || format!("ACP_WORKING_{entry_ix}"))
             .h(ui_theme::height::xxs())
             .gap_1p5()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .font_features(ui_theme::tabular_figures())
             .text_color(gpui::rgb(ui_theme::muted()))
             .child(quiet_dots(
@@ -1493,7 +1498,7 @@ impl ConversationView {
                 row.child(
                     div()
                         .flex_shrink_0()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(label),
                 )
@@ -1501,7 +1506,7 @@ impl ConversationView {
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::faint()))
                     .child(if expanded { "▾" } else { "▸" }),
             )
@@ -1561,7 +1566,7 @@ impl ConversationView {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child(truncated_line(run_label)),
             )
@@ -1626,7 +1631,7 @@ impl ConversationView {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(faint)
                             .when(can_expand, |label| {
                                 label.group_hover(PEEK_ROW_GROUP, |s| {
@@ -1710,7 +1715,7 @@ impl ConversationView {
                     owner_id("acp-peer-send-hover-body", owner),
                     peer_text_preview(&send.text),
                     plain_text_view(owner_id("acp-peer-send-hover-text", owner), &send.text)
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .into_any_element(),
                     muted,
                 ))
@@ -1732,7 +1737,7 @@ impl ConversationView {
                     .pb_2()
                     .child(
                         plain_text_view(owner_id("acp-peer-send-text", owner), &send.text)
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(muted),
                     ),
             );
@@ -1937,7 +1942,7 @@ impl ConversationView {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(ink)
                     .child(truncated_line(headline)),
             );
@@ -1945,7 +1950,7 @@ impl ConversationView {
             header = header.child(
                 div()
                     .flex_shrink_0()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(if progress_failed { red } else { faint })
                     .child(progress),
             );
@@ -1966,7 +1971,7 @@ impl ConversationView {
         } else if show_fail_label {
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(red)
                 .child("失败")
                 .into_any_element()
@@ -2003,7 +2008,7 @@ impl ConversationView {
                     div()
                         .w_full()
                         .min_w_0()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(text.clone()),
                 );
@@ -2098,7 +2103,7 @@ impl ConversationView {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(ink)
                     .child(truncated_line(headline.clone())),
             )
@@ -2107,7 +2112,7 @@ impl ConversationView {
                     .flex_shrink_0()
                     .max_w(px(360.))
                     .overflow_hidden()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(if progress.problem { red } else { faint })
                     .child(truncated_line(progress.text)),
             )
@@ -2234,7 +2239,7 @@ impl ConversationView {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child(truncated_line(run_title.clone())),
             )
@@ -2243,7 +2248,7 @@ impl ConversationView {
                     .flex_shrink_0()
                     .max_w(px(280.))
                     .overflow_hidden()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(if problem { red } else { faint })
                     .child(truncated_line(detail)),
             )
@@ -2279,7 +2284,7 @@ impl ConversationView {
             return Some(
                 div()
                     .flex_shrink_0()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::muted()))
                     .child("正在停止…")
                     .into_any_element(),
@@ -2328,7 +2333,7 @@ impl ConversationView {
                     } else {
                         div()
                             .pl(px(21.))
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(muted)
                             .overflow_hidden()
                             .child(truncated_line(if *thought {
@@ -2404,7 +2409,7 @@ impl ConversationView {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(ink)
                             .child(truncated_line(name)),
                     );
@@ -2586,8 +2591,7 @@ impl ConversationView {
         } else {
             div()
                 .flex_shrink_0()
-                .text_xs()
-                .font_medium()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(muted)
                 .child("分析摘要")
                 .into_any_element()
@@ -2598,7 +2602,7 @@ impl ConversationView {
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child(truncated_line(preview.clone())),
         )
@@ -2609,7 +2613,7 @@ impl ConversationView {
             row.child(
                 div()
                     .flex_shrink_0()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child(settled_thought_label(elapsed_ms)),
             )
@@ -2622,7 +2626,7 @@ impl ConversationView {
                     row.child(
                         div()
                             .flex_shrink_0()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(muted)
                             .child(if expanded { "▾" } else { "▸" }),
                     )
@@ -2655,7 +2659,7 @@ impl ConversationView {
                 .pr_2()
                 .pt_2()
                 .pb_2()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child(self.retained_markdown(
                     if in_process {
@@ -2700,7 +2704,7 @@ impl ConversationView {
         let body_el = match mode {
             ToolLogMode::Inline => {
                 plain_text_view(owner_part("acp-tool-log-text", &owner, part_ix), body)
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .font_family(font)
                     .into_any_element()
@@ -2709,7 +2713,7 @@ impl ConversationView {
                 owner_part("acp-tool-log-text", &owner, part_ix),
                 &preview.shown,
             )
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(muted)
             .font_family(font)
             .into_any_element(),
@@ -2892,7 +2896,7 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                                 owner_part("acp-tool-pop-diff-path", &tool_id, part_ix),
                                 path,
                             )
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(muted),
                         )
                         .children(cached.map(|diff| {
@@ -2992,7 +2996,7 @@ fn popover_plain_log(
     };
     if !preview.truncated() {
         return plain_text_view(owner_part(text_name, tool_id, part_ix), body)
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(muted)
             .font_family(smelt_plugin_api::model::font_config::font_family())
             .into_any_element();
@@ -3019,7 +3023,7 @@ fn popover_plain_log(
                 .gap_2()
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(gpui::rgb(ui_theme::faint()))
                         .child(format!("共 {total} 行")),
                 )
@@ -3043,7 +3047,7 @@ fn popover_markdown_log(
         owner_part("acp-tool-pop-md", tool_id, part_ix),
         body.to_string(),
     )
-    .text_xs()
+    .type_style(TYPE.text_xsmall)
     .text_color(muted);
     if !preview.truncated() {
         return view.into_any_element();
@@ -3081,7 +3085,7 @@ pub(super) fn render_nested_transcript(children: &[AcpEntry], muted: gpui::Hsla)
                     div().into_any_element()
                 } else {
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .overflow_hidden()
                         .child(truncated_line(if *thought {
@@ -3140,7 +3144,7 @@ fn nested_tool_row(
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(ink)
                 .child(truncated_line(headline)),
         );
@@ -3148,7 +3152,7 @@ fn nested_tool_row(
         row = row.child(
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(gpui::rgb(ui_theme::bad()))
                 .child("失败"),
         );
@@ -3205,7 +3209,7 @@ pub(super) fn subagent_status_icon(
 fn elapsed_suffix(elapsed_ms: u64, color: gpui::Hsla) -> gpui::Div {
     div()
         .flex_shrink_0()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .font_features(ui_theme::tabular_figures())
         .text_color(color)
         .child(format!("· {}", format_duration(elapsed_ms)))

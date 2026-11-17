@@ -23,6 +23,10 @@ pub struct AgentHostSettings {
     pub agents: Vec<AgentDefinition>,
     /// 侧栏「新对话」默认用哪个智能体。指向这台运行时上的定义，所以跟着运行时走。
     pub default_conversation_agent: Option<String>,
+    /// 这台运行时上智能体 space 的根（`~/.smelt/agents`，按那台机器的路径写）。运行时读出
+    /// 配置时填上，不存库、不经编辑合并；旧运行时不报，那时认不出哪个目录是智能体的 space。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_spaces_root: Option<String>,
 }
 
 impl AgentHostSettings {
@@ -36,6 +40,7 @@ impl AgentHostSettings {
             profiles: Vec::new(),
             agents: Vec::new(),
             default_conversation_agent: None,
+            agent_spaces_root: None,
         }
     }
 }
@@ -57,6 +62,14 @@ impl AgentHostSettings {
 
     pub fn find_agent(&self, id: &str) -> Option<&AgentDefinition> {
         self.agents.iter().find(|agent| agent.id == id)
+    }
+
+    /// 这条路径（这台运行时上的）是哪个智能体的 space：只认 space 根本身，子目录不算；定义
+    /// 已经删了、运行时没报 space 在哪时是 `None`。
+    pub fn agent_for_space(&self, path: &str) -> Option<&AgentDefinition> {
+        let root = self.agent_spaces_root.as_deref()?;
+        let id = crate::agent_paths::agent_definition_id_in_spaces(root, path)?;
+        self.find_agent(&id)
     }
 
     /// 某个 agent 当前生效的额外环境变量。
@@ -203,6 +216,38 @@ mod tests {
 
     fn settings() -> AgentHostSettings {
         AgentHostSettings::fresh()
+    }
+
+    #[test]
+    fn a_space_belongs_to_a_known_agent_under_the_reported_root() {
+        let mut config = settings();
+        config.agents.push(AgentDefinition {
+            id: "writer".into(),
+            ..Default::default()
+        });
+        let space = "/home/u/.smelt/agents/writer";
+        assert!(
+            config.agent_for_space(space).is_none(),
+            "运行时没报根，认不出"
+        );
+        config.agent_spaces_root = Some("/home/u/.smelt/agents".into());
+        assert_eq!(
+            config.agent_for_space(space).map(|a| a.id.as_str()),
+            Some("writer")
+        );
+        assert!(
+            config
+                .agent_for_space("/home/u/.smelt/agents/gone")
+                .is_none()
+        );
+        assert!(config.agent_for_space("/home/u/code/app").is_none());
+
+        // 根只在线上传给客户端；旧运行时不带这个字段照样解得开。
+        let mut wire = serde_json::to_value(&config).unwrap();
+        assert_eq!(wire["agent_spaces_root"], "/home/u/.smelt/agents");
+        wire.as_object_mut().unwrap().remove("agent_spaces_root");
+        let old: AgentHostSettings = serde_json::from_value(wire).unwrap();
+        assert_eq!(old.agent_spaces_root, None);
     }
 
     #[test]

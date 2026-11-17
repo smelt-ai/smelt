@@ -3,6 +3,7 @@
 
 use super::conversation::{render_nested_transcript, subagent_status_icon};
 use super::*;
+use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 
 impl ConversationView {
@@ -75,14 +76,14 @@ impl ConversationView {
                         .child(
                             div()
                                 .overflow_hidden()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(gpui::rgb(ui_theme::text()))
                                 .child(truncated_line(title.clone())),
                         )
                         .child(
                             div()
                                 .overflow_hidden()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(faint)
                                 .child(truncated_line(view.last_activity.clone().unwrap_or_else(|| "准备中".into()))),
                         ),
@@ -90,14 +91,14 @@ impl ConversationView {
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(faint)
                         .child(background_task_elapsed(view.started_at_ms, now)),
                 )
                 .child(if stopping {
                     div()
                         .flex_shrink_0()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(gpui::rgb(ui_theme::muted()))
                         .child("正在停止…")
                         .into_any_element()
@@ -150,8 +151,7 @@ impl ConversationView {
                     .gap_2()
                     .child(
                         div()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(gpui::rgb(ui_theme::muted()))
                             .child("子智能体"),
                     )
@@ -212,13 +212,13 @@ impl ConversationView {
         };
         let body: gpui::AnyElement = if let Some(error) = inspector.error.as_ref() {
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(gpui::rgb(ui_theme::bad()))
                 .child(format!("读不到这个子智能体的过程：{error}"))
                 .into_any_element()
         } else if inspector.entries.is_empty() {
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(faint)
                 .child(if inspector.loading || inspector.revision.is_none() {
                     "正在读取…"
@@ -236,7 +236,7 @@ impl ConversationView {
             let stop_id = view.id.clone();
             Some(if self.stopping_subagents.contains(&view.id) {
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::muted()))
                     .child("正在停止…")
                     .into_any_element()
@@ -283,12 +283,11 @@ impl ConversationView {
                                 .child(
                                     div()
                                         .overflow_hidden()
-                                        .text_sm()
-                                        .font_medium()
+                                        .type_style(TYPE.ui_medium)
                                         .text_color(gpui::rgb(ui_theme::text()))
                                         .child(truncated_line(inspector.title.clone())),
                                 )
-                                .child(div().overflow_hidden().text_xs().text_color(faint).child(truncated_line(status_line))),
+                                .child(div().overflow_hidden().type_style(TYPE.text_xsmall).text_color(faint).child(truncated_line(status_line))),
                         )
                         .children(stop)
                         .child(

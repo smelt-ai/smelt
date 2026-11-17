@@ -8,6 +8,7 @@ use smelt_plugin_api::model::daemon_state::DaemonPhase;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 
 use super::ConversationTranscript;
+use smelt_plugin_api::ui::kit::TYPE;
 
 mod cards;
 mod composer;
@@ -145,14 +146,14 @@ impl ConversationView {
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(muted)
                                 .child(truncated_line(detail.clone())),
                         )
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
                                 .child(elapsed.clone()),
                         )
@@ -185,7 +186,7 @@ impl ConversationView {
                             )
                             .child(
                                 div()
-                                    .text_sm()
+                                    .type_style(TYPE.ui)
                                     .text_color(gpui::rgb(ui_theme::bad()))
                                     .child("会话已结束"),
                             )
@@ -203,7 +204,7 @@ impl ConversationView {
                         d.child(
                             div()
                                 .pl_6()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
                                 .font_family(smelt_plugin_api::model::font_config::font_family())
                                 .child(self.end_reason.clone()),
@@ -246,15 +247,14 @@ impl ConversationView {
                         .child(indicator)
                         .child(
                             div()
-                                .text_sm()
-                                .font_semibold()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(gpui::rgb(ui_theme::text()))
                                 .text_center()
                                 .child(title.clone()),
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(muted)
                                 .text_center()
                                 .child(detail.clone()),
@@ -265,14 +265,14 @@ impl ConversationView {
                                 .py_1()
                                 .rounded_full()
                                 .bg(ui_theme::overlay(0x14))
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .font_features(ui_theme::tabular_figures())
                                 .text_color(muted)
                                 .child(elapsed.clone()),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
                                 .text_center()
                                 .child("可以先在下方输入，连接完成后会自动发送"),
@@ -336,7 +336,7 @@ impl ConversationView {
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(muted)
                                 .text_center()
                                 .child(message),
@@ -435,7 +435,7 @@ impl ConversationView {
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(muted)
                                 .text_center()
                                 .child("想让它做什么？"),
@@ -449,13 +449,13 @@ impl ConversationView {
                                 .gap_1()
                                 .rounded_full()
                                 .bg(ui_theme::overlay(0x14))
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
                                 .child(Icon::new(IconName::File).size(px(12.)))
                                 .child(label)
                         }))
                         .children((self.agent == ConversationAgentKind::Pi).then(|| {
-                            div().text_xs().text_color(muted).child(loaded_capabilities_summary(
+                            div().type_style(TYPE.text_xsmall).text_color(muted).child(loaded_capabilities_summary(
                                 self.loaded_skills().len(),
                                 self.loaded_mcp_servers().len(),
                             ))
@@ -495,7 +495,7 @@ impl ConversationView {
                 .w_full()
                 .px_4()
                 .py_2()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(gpui::rgb(ui_theme::bad()))
                 .border_b_1()
                 .border_color(ui_theme::hair())
@@ -648,7 +648,7 @@ impl ConversationView {
                     .border_t_1()
                     .border_color(border)
                     .bg(ui_theme::tint(ui_theme::need(), 0x14))
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::need()))
                     .child(div().flex_1().min_w(px(0.)).child(notice.text.clone()))
                     .child(
@@ -670,7 +670,7 @@ impl ConversationView {
                     .border_t_1()
                     .border_color(border)
                     .bg(ui_theme::tint(ui_theme::need(), 0x14))
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::need()))
                     .child(msg.clone())
             }))

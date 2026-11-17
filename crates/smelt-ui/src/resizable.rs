@@ -46,8 +46,7 @@ pub(crate) fn hairline(axis: Axis, state: ResizeHandleState) -> AnyElement {
 mod tests {
     use gpui::{
         AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
-        MouseButton, ParentElement as _, Render, Styled as _, TestAppContext, Window, div, point,
-        px,
+        MouseButton, ParentElement as _, Render, TestAppContext, Window, div, point, px,
     };
 
     use super::*;
