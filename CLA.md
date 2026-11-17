@@ -1,10 +1,8 @@
 # Smelt Individual Contributor License Agreement
 
-<!-- DRAFT for legal review. Bracketed items marked "LEGAL" must be resolved and removed before publishing. -->
-
 Thank you for your interest in contributing to Smelt. This Contributor License Agreement
-("Agreement") documents the rights granted by contributors to [LEGAL: full legal name of
-the NIO entity] ("NIO", "We" or "Us"). It is adapted from the Apache Software Foundation
+("Agreement") documents the rights granted by contributors to NIO Inc., an exempted company
+incorporated in the Cayman Islands ("NIO", "We" or "Us"). It is adapted from the Apache Software Foundation
 Individual Contributor License Agreement v2.2. A Chinese translation is provided in
 [CLA.zh-CN.md](CLA.zh-CN.md); if the two versions differ, this English version prevails.
 
@@ -70,7 +68,9 @@ that Contribution or Work shall terminate as of the date such litigation is file
 ## 4. Your Representations
 
 You represent that You have the legal capacity to enter into this Agreement and are
-legally entitled to grant the above licenses. If Your employer(s) has rights to
+legally entitled to grant the above licenses. If You have not reached the age of
+majority in Your jurisdiction, Your parent or legal guardian must agree to this
+Agreement on Your behalf. If Your employer(s) has rights to
 intellectual property that You create that includes Your Contributions, You represent
 that You have received permission to make Contributions on behalf of that employer, or
 that Your employer has waived such rights for Your Contributions to Us.
@@ -83,8 +83,7 @@ and which are associated with any part of Your Contributions.
 
 ## 5. Moral Rights
 
-[LEGAL: confirm wording and enforceability under PRC and other applicable law.] To the
-extent permitted by applicable law, You agree not to assert any moral rights in Your
+To the extent permitted by applicable law, You agree not to assert any moral rights in Your
 Contributions against Us, Our Affiliates, or recipients of software distributed by Us or
 Our Affiliates in a way that would prevent the exercise of the licenses granted in this
 Agreement.
@@ -119,7 +118,12 @@ consent.
 
 ## 10. Governing Law
 
-[LEGAL: governing law and dispute resolution forum.]
+This Agreement is governed by the laws of the People's Republic of China (for the
+purposes of this Agreement, excluding the laws of Hong Kong, Macau and Taiwan), without
+regard to its conflict of laws rules. Any dispute arising out of or in connection with
+this Agreement shall be submitted to the Shanghai International Arbitration Center for
+arbitration in Shanghai under its arbitration rules in effect at the time. The arbitral
+award is final and binding on both parties.
 
 ## How to sign
 
@@ -129,7 +133,7 @@ on the pull request:
 > I have read the CLA Document and I hereby sign the CLA
 
 By posting this comment You agree that it constitutes Your electronic signature of this
-Agreement. [LEGAL: confirm validity under the PRC Electronic Signature Law.] You only
+Agreement and that this Agreement is concluded in electronic form. You only
 need to sign once; the signature covers all Your past and future Contributions.
 
 To track signatures, We record Your GitHub username, GitHub user ID, and the pull
