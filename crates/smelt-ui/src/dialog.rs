@@ -654,7 +654,7 @@ mod tests {
     }
 
     fn is_open(cx: &mut VisualTestContext) -> bool {
-        cx.update(|window, cx| is_open(window, cx))
+        cx.update(|window, cx| super::is_open(window, cx))
     }
 
     #[gpui::test]

@@ -169,7 +169,7 @@ mod tests {
     use super::*;
     use gpui::{
         AppContext as _, Context, InteractiveElement, KeyDownEvent, KeyUpEvent, Keystroke,
-        Modifiers, ParentElement, Render, StatefulInteractiveElement, TestAppContext,
+        Modifiers, ParentElement, Render, StatefulInteractiveElement, Styled, TestAppContext,
         VisualTestContext, div, point, px,
     };
     use std::{cell::Cell, rc::Rc};

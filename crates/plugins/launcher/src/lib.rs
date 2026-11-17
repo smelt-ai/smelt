@@ -387,6 +387,8 @@ fn notify_error(message: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `super::*` 带进了 gpui 的 glob，其中的 `test` 宏会顶掉标准库的 `#[test]`，展开时无限递归。
+    use std::prelude::rust_2024::test;
 
     #[test]
     fn only_views_openable_without_arguments_get_an_entry() {

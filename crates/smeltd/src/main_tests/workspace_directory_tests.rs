@@ -224,6 +224,17 @@ fn terminal_conversation() -> WorkspaceConversation {
     }
 }
 
+/// 新建时的活动时间由运行时打上，不用客户端给的：期望值换成目录里那条的时间。
+fn stamped(
+    conversation: &WorkspaceConversation,
+    published: &WorkspaceDirectory,
+) -> WorkspaceConversation {
+    WorkspaceConversation {
+        last_updated_at: published.conversations[0].last_updated_at,
+        ..conversation.clone()
+    }
+}
+
 fn delete(
     store: &smelt_store::Store,
     id: &str,
@@ -559,7 +570,10 @@ fn directory_commands_publish_the_changed_directory() {
         workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
     let published = published_directory(&event_hub).expect("新建之后推过目录");
     assert_eq!(published.revision, created.revision);
-    assert_eq!(published.conversations, std::slice::from_ref(&conversation));
+    assert_eq!(
+        published.conversations,
+        [stamped(&conversation, &published)]
+    );
 
     let deleted = delete(&temp.store, &conversation.id, &event_hub).unwrap();
     let published = published_directory(&event_hub).expect("关掉之后推过目录");
@@ -698,7 +712,10 @@ fn a_subscriber_gets_the_directory_the_daemon_could_not_read_at_startup() {
 
     readable.store(true, Ordering::Release);
     let published = published_directory(&event_hub).expect("库好了，新订阅拿到目录");
-    assert_eq!(published.conversations, std::slice::from_ref(&conversation));
+    assert_eq!(
+        published.conversations,
+        [stamped(&conversation, &published)]
+    );
 }
 
 fn run_git(root: &std::path::Path, args: &[&str]) {

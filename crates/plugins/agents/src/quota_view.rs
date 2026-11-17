@@ -522,6 +522,8 @@ mod tests {
     use api::model::provider_quota::ProviderQuota;
 
     use super::*;
+    // `super::*` 带进了 gpui 的 glob，其中的 `test` 宏会顶掉标准库的 `#[test]`，展开时无限递归。
+    use std::prelude::rust_2024::test;
 
     fn window(label: &str, used_percent: f64) -> ProviderQuotaWindow {
         ProviderQuotaWindow {

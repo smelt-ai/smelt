@@ -996,7 +996,8 @@ mod tests {
         window.update(|window, cx| window.draw(cx).clear(cx));
         assert!(window.debug_bounds("smelt-menu-0").is_some());
         window.update(|window, cx| {
-            view.read(cx).focus.focus(window, cx);
+            let focus = view.read(cx).focus.clone();
+            focus.focus(window, cx);
         });
         window.update(|window, cx| {
             window.draw(cx).clear(cx);
@@ -1067,7 +1068,8 @@ mod tests {
         });
         window.update(|window, cx| {
             window.draw(cx).clear(cx);
-            view.read(cx).focus.focus(window, cx);
+            let focus = view.read(cx).focus.clone();
+            focus.focus(window, cx);
         });
         window.simulate_keystrokes("enter");
         window.update(|window, cx| window.draw(cx).clear(cx));
