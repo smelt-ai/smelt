@@ -1,5 +1,5 @@
-//! 会话插件的对话框（S4）：新建会话（旧宿主 `session_list/new_session.rs`）和项目的仓库
-//! （`project_repositories.rs`）。本目录下的文件都归 S4。
+//! 会话插件的对话框（S4）：新建会话的菜单和项目的仓库（`project_repositories.rs`）。本目录下
+//! 的文件都归 S4。
 //!
 //! 设置页「Agent」里的「新建菜单」不在这里：按 11-16 的决定归智能体插件。
 
@@ -10,7 +10,10 @@ mod repositories;
 use gpui::{App, Window};
 use smelt_plugin_api::RuntimeKey;
 
-/// 打开新建会话的对话框。选好了调 `lifecycle::create_conversation`。
+pub(crate) use new_session::NewSessionButton;
+
+/// 从命令打开新建会话的菜单（钉在窗口上方，带位置行）。项目行、工作树行的「+」贴着按钮弹，
+/// 用 [`NewSessionButton`]。选好了调 `lifecycle::create_conversation`。
 ///
 /// - `machine`：预选的机器；`None` 按眼下活动项目所在的机器，没有就是本机。
 /// - `project`：预选的位置路径（那台机器上的路径）。是项目根就预选那个项目；落在某个工作树

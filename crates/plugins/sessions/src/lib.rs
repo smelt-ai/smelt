@@ -73,8 +73,8 @@
 //!   `close_conversation`（S1、S2）、`archive_conversation`（S1）、`open_project`
 //!   （S5 的 `OPEN_PROJECT`、拖进来的目录）、`close_project`（S1）。工作集、仓库的
 //!   目录操作只有一个包用，各自直接 `api::call`。
-//! - S4 `dialogs`：`open_new_session`、`open_project_repositories`（S1 的行按钮和菜单、
-//!   S5 的 `NEW_SESSION`）。
+//! - S4 `dialogs`：`NewSessionButton`（S1 的项目行、工作树行的「+」）、`open_new_session`
+//!   （S1 的菜单、S5 的 `NEW_SESSION`）、`open_project_repositories`（S1 的行按钮和菜单）。
 //! - S5 `commands`：`register`（`register`）。
 //!
 //! 出错给人看：[`notify_error`]、[`report_failure`]。

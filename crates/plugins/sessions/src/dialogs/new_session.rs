@@ -1,18 +1,28 @@
-//! 新建会话的对话框：选位置（机器、项目、工作树），再从那台机器的新建目录里挑一项。
+//! 新建会话的菜单：从那台机器的新建目录里挑一项，点一下就在选好的位置建好。
+//!
+//! 两个入口，同一份内容：
+//! - 项目行、工作树行的「+」（[`NewSessionButton`]）：贴着按钮弹出，位置就是那一行，不显示
+//!   位置。和终端、编辑器的「新建」下拉一样，就地弹、单列、点一项就建。
+//! - 命令（⌘N、项目菜单）：没有按钮可贴，像命令面板那样钉在窗口上方，顶上多一行位置，
+//!   能换机器、项目、工作树。
+//!
+//! 排法：常用在最上面、不加组标题，行尾标类型和数字键（1~9 直接建，位置固定好记，所以不按
+//! 最近用过重排）；下面按终端、对话分组，组里不再写类型。星标只在选中的那行出现（鼠标移上去
+//! 就选中，键盘和鼠标共用一个高亮）：常用按机器存，设置页只管本机，所以就地改。
 //!
 //! 新建目录（`new_session.catalog`）由那台机器的运行时按它自己的启动项、装没装、常用项
 //! 拼好，打开时和换机器时各读一次；点星标改的是那台机器的常用项，改完重读。对话的启动
-//! 规格按那台机器的智能体配置现算（[`conversation_acp`]），确认时才算，配置在框开着
+//! 规格按那台机器的智能体配置现算（[`conversation_acp`]），选中时才算，配置在菜单开着
 //! 期间变了也以最新的为准。
 //!
 //! 位置的名字在打开、选位置、目录和机器变了时算好存着，render 不读目录。
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px, rgb,
-    svg,
+    App, AppContext as _, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyDownEvent, Keystroke, MouseMoveEvent, ParentElement as _, Render, RenderOnce, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
+    div, px, rgb, svg,
 };
 use gpui_kit_assets::IconName;
 use smelt_plugin_api::client::protocol::control::EmptyParams;
@@ -26,8 +36,11 @@ use smelt_plugin_api::model::workspace_directory::{
     WorkspaceConversation, WorkspaceTerminal, project_labels, project_name,
 };
 use smelt_plugin_api::ui::dialog;
+use smelt_plugin_api::ui::keybind::Keybind;
+use smelt_plugin_api::ui::kit::{RADIUS, TYPE, TypeStyled as _};
 use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
-use smelt_plugin_api::ui::{Button, IconAction as _, ListRow, ui_theme};
+use smelt_plugin_api::ui::popover::{Popover, PopoverState};
+use smelt_plugin_api::ui::{Button, IconAction as _, ui_theme};
 use smelt_plugin_api::{self as api, HostEvent, RuntimeKey};
 
 use super::agents::conversation_acp;
@@ -35,13 +48,19 @@ use super::repositories::{self, Mode};
 use crate::peers::agents::{AGENT_SETTINGS, AGENT_SETTINGS_CHANGED, AgentSettingsState};
 use crate::peers::conversation::ConversationStart;
 use crate::{contract, lifecycle};
-use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
-/// 卡片宽度。
-const WIDTH: f32 = 520.;
-/// 启动项列表最高多高，再多就在里面滚。
-const LIST_HEIGHT: f32 = 360.;
+/// 菜单宽度。从命令打开的那张顶上多一行「机器 · 项目 / 工作树」，宽一些。
+const WIDTH: f32 = 280.;
+const PALETTE_WIDTH: f32 = 360.;
+/// 列表最高多高，再多就在里面滚。
+const LIST_HEIGHT: f32 = 420.;
+/// 从命令打开时卡片顶边离窗口顶，和命令面板一样。
+const PALETTE_TOP: f32 = 80.;
+/// 行高、面板内边距，和组件库的菜单一致。
+const ROW_HEIGHT: f32 = 28.;
+const PADDING: f32 = 2.;
 
+/// 从命令打开：钉在窗口上方，带位置行。
 pub(super) fn open(
     machine: Option<RuntimeKey>,
     project: Option<String>,
@@ -49,17 +68,107 @@ pub(super) fn open(
     cx: &mut App,
 ) {
     let (machine, root, workset) = initial_location(machine, project, cx);
-    let state = cx.new(|cx| NewSession::new(machine, root, workset, cx));
+    let state = cx.new(|cx| NewSession::new(machine, root, workset, Host::Palette, cx));
     let focus = state.read(cx).focus.clone();
-    dialog::open(window, cx, move |card, _, cx| {
+    dialog::open(window, cx, move |card, _, _| {
         let confirm = state.clone();
-        card.w(px(WIDTH))
+        card.top(px(PALETTE_TOP))
+            .w(px(PALETTE_WIDTH))
+            .p(px(PADDING))
+            .gap_0()
             .child(state.clone())
-            .footer(footer(&state, cx))
-            .on_ok(move |_, cx| confirm.update(cx, |state, cx| state.confirm(cx)))
+            // Enter 在对话框层是确认动作，先于按键监听，走这里。
+            .on_ok(move |_, cx| confirm.update(cx, |state, cx| state.launch_selected(cx)))
     });
-    // 对话框层开好时焦点在卡片上；交给列表，上下键才选得动。
+    // 对话框层开好时焦点在卡片上；交给菜单，上下键、数字键才收得到。
     window.defer(cx, move |window, cx| focus.focus(window, cx));
+}
+
+/// 项目行、工作树行的「+」：点开贴着它弹出新建菜单，位置就是 `path`（项目根或工作树路径）。
+///
+/// 给了悬停组（[`Self::revealed_on_hover`]）的平时隐着、悬停那一行才出现；菜单开着时一直
+/// 显示，鼠标移进菜单、离开那一行也不消失。
+#[derive(IntoElement)]
+pub(crate) struct NewSessionButton {
+    id: SharedString,
+    tooltip: &'static str,
+    hover_group: Option<&'static str>,
+    machine: RuntimeKey,
+    path: String,
+}
+
+impl NewSessionButton {
+    pub(crate) fn new(
+        id: impl Into<SharedString>,
+        tooltip: &'static str,
+        machine: RuntimeKey,
+        path: String,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            tooltip,
+            hover_group: None,
+            machine,
+            path,
+        }
+    }
+
+    pub(crate) fn revealed_on_hover(mut self, group: &'static str) -> Self {
+        self.hover_group = Some(group);
+        self
+    }
+}
+
+impl RenderOnce for NewSessionButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self {
+            id,
+            tooltip,
+            hover_group,
+            machine,
+            path,
+        } = self;
+        let open =
+            window.use_keyed_state(ElementId::Name(format!("{id}:open").into()), cx, |_, _| {
+                false
+            });
+        let is_open = *open.read(cx);
+        let popover = Popover::new(ElementId::Name(id.clone()))
+            .w(px(WIDTH))
+            .p(px(PADDING))
+            .on_open_change(move |opened, _, cx| {
+                open.update(cx, |open, cx| {
+                    *open = *opened;
+                    cx.notify();
+                });
+            })
+            .trigger(
+                Button::new(ElementId::Name(format!("{id}:trigger").into()))
+                    .quiet()
+                    .small()
+                    .icon(IconName::Plus)
+                    .icon_action(tooltip),
+            )
+            .content(move |_, window, cx| {
+                let popover = cx.entity().downgrade();
+                // 只在开着时搭，关掉的那一帧起就不再取，状态随之丢掉：每次打开都重读目录。
+                let key = ElementId::Name(format!("{id}:menu").into());
+                window.use_keyed_state(key, cx, move |window, cx| {
+                    let (machine, root, workset) = initial_location(Some(machine), Some(path), cx);
+                    let menu = NewSession::new(machine, root, workset, Host::Popover(popover), cx);
+                    let focus = menu.focus.clone();
+                    window.defer(cx, move |window, cx| focus.focus(window, cx));
+                    menu
+                })
+            });
+        div()
+            .flex_shrink_0()
+            .when_some(hover_group.filter(|_| !is_open), |slot, group| {
+                slot.opacity(0.)
+                    .group_hover(group, |style| style.opacity(1.))
+            })
+            .child(popover)
+    }
 }
 
 /// 预选的位置：机器、项目根、工作树 id。给了位置路径的，是项目根就选那个项目，落在某个
@@ -114,14 +223,58 @@ enum Catalog {
     Failed(String),
 }
 
-/// 列表里的一行：所在的段（`SECTION_LABELS` 的下标）和那一项。常用段里的项在原来的段里
-/// 也有一份，所以选中记行号，不记 key。
+/// 菜单开在哪：关菜单时按这个关。
+#[derive(Clone)]
+enum Host {
+    /// 贴着「+」的弹出层。
+    Popover(WeakEntity<PopoverState>),
+    /// 命令打开的、钉在窗口上方的那张，带位置行。
+    Palette,
+}
+
+impl Host {
+    /// 关掉菜单，焦点回到打开前的地方。
+    fn close(&self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Popover(popover) => {
+                let _ = popover.update(cx, |popover, cx| popover.dismiss(window, cx));
+            }
+            Self::Palette => dialog::close(window, cx),
+        }
+    }
+}
+
+/// 列表里的一行：所在的段（`SECTION_LABELS` 的下标，0 是常用）和那一项。
 struct Row {
     section: usize,
     action: NewSessionAction,
 }
 
+/// 列表里一格放什么。常用不加组标题，和下面的分组之间隔一条线；终端、对话各有组标题。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Separator,
+    Header(usize),
+    Row(usize),
+}
+
+/// 选中项建好要做的事：先关菜单（焦点回原处），再建，新会话拿到的焦点不会被关菜单抢回去。
+struct Launch {
+    machine: RuntimeKey,
+    conversation: WorkspaceConversation,
+    start: Option<ConversationStart>,
+}
+
+impl Launch {
+    fn run(self, cx: &mut App) {
+        let created =
+            lifecycle::create_conversation(self.machine, self.conversation, self.start, cx);
+        crate::report_failure("新建会话", created, cx);
+    }
+}
+
 struct NewSession {
+    host: Host,
     machine: RuntimeKey,
     root: Option<String>,
     workset: Option<String>,
@@ -133,8 +286,9 @@ struct NewSession {
     in_workset: bool,
     catalog: Catalog,
     rows: Vec<Row>,
-    /// 每行在列表里是第几个子元素（段标题也占位），键盘选中后滚过去用。
-    row_children: Vec<usize>,
+    /// 按 `rows` 排好的各格，和每行是第几格（键盘选中后滚过去用）。
+    slots: Vec<Slot>,
+    row_slots: Vec<usize>,
     selected: Option<usize>,
     scroll: ScrollHandle,
     /// 这台机器的智能体配置。`None` 是还没问到。
@@ -153,12 +307,14 @@ impl NewSession {
         machine: RuntimeKey,
         root: Option<String>,
         workset: Option<String>,
+        host: Host,
         cx: &mut Context<Self>,
     ) -> Self {
         let events = cx.subscribe(&api::events(cx), |this, _, event: &HostEvent, cx| {
             this.on_host_event(event, cx);
         });
         let mut this = Self {
+            host,
             machine,
             root,
             workset,
@@ -168,7 +324,8 @@ impl NewSession {
             in_workset: false,
             catalog: Catalog::Loading,
             rows: Vec::new(),
-            row_children: Vec::new(),
+            slots: Vec::new(),
+            row_slots: Vec::new(),
             selected: None,
             scroll: ScrollHandle::new(),
             settings: None,
@@ -291,7 +448,8 @@ impl NewSession {
                     .map(move |action| Row { section, action })
             })
             .collect();
-        self.row_children = child_indexes(&self.rows);
+        self.slots = slots(&self.rows);
+        self.row_slots = row_slots(&self.slots);
         self.selected = previous
             .and_then(|(section, key)| {
                 self.rows
@@ -332,12 +490,16 @@ impl NewSession {
     /// 按眼下的目录和机器表重算位置的名字；等着的工作树到了就选上。
     fn refresh_location(&mut self, cx: &App) {
         let host = api::host(cx);
-        self.machine_name = host
-            .machines(cx)
-            .into_iter()
-            .find(|machine| machine.key == self.machine)
-            .map(|machine| machine.name)
-            .unwrap_or_else(|| "这台机器".into());
+        // 本机的名字是主机名（常是一串序列号），不如「本机」好认。
+        self.machine_name = match self.machine {
+            RuntimeKey::Local => "本机".into(),
+            _ => host
+                .machines(cx)
+                .into_iter()
+                .find(|machine| machine.key == self.machine)
+                .map(|machine| machine.name)
+                .unwrap_or_else(|| "这台机器".into()),
+        };
         let style = host.path_style(&self.machine, cx);
         let directory = host.workspace_directory(&self.machine, cx);
         let worksets = directory
@@ -379,8 +541,8 @@ impl NewSession {
             None => len - 1,
         };
         self.selected = Some(next as usize);
-        if let Some(&child) = self.row_children.get(next as usize) {
-            self.scroll.scroll_to_item(child);
+        if let Some(&slot) = self.row_slots.get(next as usize) {
+            self.scroll.scroll_to_item(slot);
         }
         cx.notify();
     }
@@ -411,22 +573,37 @@ impl NewSession {
         .detach();
     }
 
-    fn fail(&mut self, message: impl Into<String>, cx: &mut Context<Self>) -> bool {
+    fn fail(&mut self, message: impl Into<String>, cx: &mut Context<Self>) -> Option<Launch> {
         self.error = Some(message.into());
         cx.notify();
-        false
+        None
     }
 
-    /// 按选中的那项在选好的位置新建，交给生命周期写目录、跳过去。返回框能不能关：
-    /// 没建成就留着框，把原因写在里面。
-    fn confirm(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(action) = self
-            .selected
-            .and_then(|ix| self.rows.get(ix))
-            .map(|row| row.action.clone())
-        else {
+    /// 点了第 `ix` 行（或按了它的数字键）：建得成就关掉菜单再建，建不成留着菜单写原因。
+    fn launch(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected = Some(ix);
+        let Some(launch) = self.prepare(cx) else {
+            return;
+        };
+        self.host.close(window, cx);
+        cx.defer(move |cx| launch.run(cx));
+    }
+
+    /// 对话框层的 Enter：返回能不能关，关是对话框层自己做的，建推到关完之后。
+    fn launch_selected(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(launch) = self.prepare(cx) else {
             return false;
         };
+        cx.defer(move |cx| launch.run(cx));
+        true
+    }
+
+    /// 按选中的那项和选好的位置拼出要建的会话。拼不成把原因写在菜单里，返回 `None`。
+    fn prepare(&mut self, cx: &mut Context<Self>) -> Option<Launch> {
+        let action = self
+            .selected
+            .and_then(|ix| self.rows.get(ix))
+            .map(|row| row.action.clone())?;
         let host = api::host(cx);
         if let Some(reason) = host
             .machines(cx)
@@ -499,26 +676,48 @@ impl NewSession {
                 None
             }
         };
-        let created = lifecycle::create_conversation(self.machine.clone(), conversation, start, cx);
-        crate::report_failure("新建会话", created, cx);
-        true
+        Some(Launch {
+            machine: self.machine.clone(),
+            conversation,
+            start,
+        })
     }
 }
 
-/// 每行对应列表的第几个子元素：每段第一行前面有一个段标题。和 `render_body` 的摆法一致。
-fn child_indexes(rows: &[Row]) -> Vec<usize> {
+/// 按行排出各格：常用在前、不加标题；常用和下面隔一条线；终端、对话各带组标题。
+fn slots(rows: &[Row]) -> Vec<Slot> {
+    let mut slots = Vec::with_capacity(rows.len() + 3);
     let mut section = None;
-    let mut child = 0;
-    rows.iter()
-        .map(|row| {
-            if section != Some(row.section) {
-                section = Some(row.section);
-                child += 1;
+    for (ix, row) in rows.iter().enumerate() {
+        if section != Some(row.section) {
+            if section.is_some() && row.section > 0 && rows[ix - 1].section == 0 {
+                slots.push(Slot::Separator);
             }
-            child += 1;
-            child - 1
-        })
+            if row.section > 0 {
+                slots.push(Slot::Header(row.section));
+            }
+            section = Some(row.section);
+        }
+        slots.push(Slot::Row(ix));
+    }
+    slots
+}
+
+/// 每行是第几格。
+fn row_slots(slots: &[Slot]) -> Vec<usize> {
+    slots
+        .iter()
+        .enumerate()
+        .filter_map(|(at, slot)| matches!(slot, Slot::Row(_)).then_some(at))
         .collect()
+}
+
+/// 数字键 1~9 对应的常用项：常用排在最前，第 n 项就是第 n 行。
+fn pinned_by_digit(rows: &[Row], key: &str) -> Option<usize> {
+    let n: usize = key.parse().ok().filter(|n| (1..=9).contains(n))?;
+    rows.get(n - 1)
+        .filter(|row| row.section == 0)
+        .map(|_| n - 1)
 }
 
 fn new_terminal(cwd: String, label: Option<String>, command: Option<String>) -> WorkspaceTerminal {
@@ -554,40 +753,12 @@ fn action_icon(target: &NewSessionTarget) -> SharedString {
 
 impl Render for NewSession {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = rgb(ui_theme::muted());
-        let weak = cx.entity().downgrade();
-        let location = Button::new("new-session-location")
-            .label(
-                self.location
-                    .clone()
-                    .unwrap_or_else(|| "选择项目".to_string()),
-            )
-            .icon(if self.in_workset {
-                IconName::GitBranch
-            } else {
-                IconName::Folder
-            })
-            .dropdown_caret(true);
-        let location = div()
+        div()
             .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .type_style(TYPE.ui)
-                    .text_color(muted)
-                    .child(self.machine_name.clone()),
-            )
-            .child(MenuTrigger::dropdown(
-                "new-session-location-menu",
-                location,
-                move |_, cx| location_menu(&weak, cx),
-            ));
-
-        // 焦点挂在整块正文上（列表还没读到时也在），Esc、Enter 照样冒到对话框。
-        dialog::content("新建会话", None)
+            .flex_col()
+            // 焦点挂在整块上（列表还没读到时也在），Esc 照样冒到弹出层、对话框。
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let keystroke = &event.keystroke;
                 if keystroke.modifiers.modified() {
                     return;
@@ -595,15 +766,27 @@ impl Render for NewSession {
                 match keystroke.key.as_str() {
                     "up" => this.step(-1, cx),
                     "down" => this.step(1, cx),
-                    _ => return,
+                    // 弹出层里 Enter 不是动作，落到这里；对话框里它先被对话框层接走（`on_ok`）。
+                    "enter" => match this.selected {
+                        Some(ix) => this.launch(ix, window, cx),
+                        None => return,
+                    },
+                    key => match pinned_by_digit(&this.rows, key) {
+                        Some(ix) => this.launch(ix, window, cx),
+                        None => return,
+                    },
                 }
                 cx.stop_propagation();
             }))
-            .child(location)
+            .when(matches!(self.host, Host::Palette), |menu| {
+                menu.child(self.render_location(cx)).child(separator())
+            })
             .child(self.render_body(cx))
-            .when_some(self.error.clone(), |content, error| {
-                content.child(
+            .when_some(self.error.clone(), |menu, error| {
+                menu.child(
                     div()
+                        .px(px(12.))
+                        .py_1()
                         .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::bad()))
                         .child(error),
@@ -613,33 +796,63 @@ impl Render for NewSession {
 }
 
 impl NewSession {
+    /// 命令打开时顶上那行：机器 · 位置，点开换。
+    fn render_location(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
+        let location = self.location.as_deref().unwrap_or("选择项目");
+        let button = Button::new("new-session-location")
+            .quiet()
+            .small()
+            .label(format!("{} · {location}", self.machine_name))
+            .icon(if self.in_workset {
+                IconName::GitBranch
+            } else {
+                IconName::Folder
+            })
+            .dropdown_caret(true);
+        div()
+            .flex()
+            .items_center()
+            .px(px(6.))
+            .py(px(4.))
+            .child(MenuTrigger::dropdown(
+                "new-session-location-menu",
+                button,
+                move |_, cx| location_menu(&weak, cx),
+            ))
+    }
+
     fn render_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let notice = |text: String| {
             div()
-                .py_4()
+                .px(px(12.))
+                .py_2()
                 .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
                 .child(text)
                 .into_any_element()
         };
         if self.root.is_none() {
+            let host = self.host.clone();
             return div()
                 .flex()
                 .flex_col()
                 .items_start()
-                .gap_2()
                 .child(notice(format!(
                     "「{}」上还没有打开的项目。",
                     self.machine_name
                 )))
                 .child(
-                    Button::new("new-session-open-project")
-                        .label("打开项目…")
-                        .on_click(|_, window, cx| {
-                            dialog::close(window, cx);
-                            let opened = contract::OPEN_PROJECT.run(&(), cx);
-                            crate::report_failure("打开项目", opened, cx);
-                        }),
+                    div().px(px(6.)).pb(px(4.)).child(
+                        Button::new("new-session-open-project")
+                            .small()
+                            .label("打开项目…")
+                            .on_click(move |_, window, cx| {
+                                host.close(window, cx);
+                                let opened = contract::OPEN_PROJECT.run(&(), cx);
+                                crate::report_failure("打开项目", opened, cx);
+                            }),
+                    ),
                 )
                 .into_any_element();
         }
@@ -656,57 +869,69 @@ impl NewSession {
             Catalog::Ready => {}
         }
 
-        let mut list = div()
+        div()
             .id("new-session-actions")
             .track_scroll(&self.scroll)
             .overflow_y_scroll()
             .max_h(px(LIST_HEIGHT))
             .flex()
             .flex_col()
-            .gap_0p5();
-        let mut section = None;
-        for (ix, row) in self.rows.iter().enumerate() {
-            if section != Some(row.section) {
-                section = Some(row.section);
-                list = list.child(
-                    div()
-                        .px_2()
-                        .pt_2()
-                        .pb_1()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(rgb(ui_theme::muted()))
-                        .child(SECTION_LABELS[row.section]),
-                );
-            }
-            list = list.child(self.render_row(ix, row, cx));
-        }
-        list.into_any_element()
-    }
-
-    fn render_row(&self, ix: usize, row: &Row, cx: &mut Context<Self>) -> ListRow {
-        let selected = self.selected == Some(ix);
-        let action = &row.action;
-        let key = action.key.clone();
-        let pinned = action.pinned;
-        ListRow::new(("new-session-action", ix))
-            .selected(selected)
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.selected = Some(ix);
-                if this.confirm(cx) {
-                    dialog::close(window, cx);
+            .children(self.slots.iter().map(|slot| {
+                match *slot {
+                    Slot::Separator => separator().into_any_element(),
+                    Slot::Header(section) => div()
+                        .h(px(ROW_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .px(px(12.))
+                        .type_style(TYPE.small_medium)
+                        .text_color(rgb(ui_theme::faint()))
+                        .child(SECTION_LABELS[section])
+                        .into_any_element(),
+                    Slot::Row(ix) => self.render_row(ix, cx).into_any_element(),
                 }
             }))
+            .into_any_element()
+    }
+
+    /// 一行：图标、名字；常用行再标类型和数字键；选中的那行最右是星标。
+    fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let row = &self.rows[ix];
+        let selected = self.selected == Some(ix);
+        let action = &row.action;
+        let in_common = row.section == 0;
+        let key = action.key.clone();
+        let pinned = action.pinned;
+        let backdrop = if selected {
+            ui_theme::soft_hover()
+        } else {
+            ui_theme::surface()
+        };
+        div()
+            .id(("new-session-action", ix))
+            .h(px(ROW_HEIGHT))
+            .flex_none()
+            .pl(px(12.))
+            .pr(px(4.))
+            .rounded(px(RADIUS.sm))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .when(selected, |row| row.bg(rgb(ui_theme::soft_hover())))
+            // 鼠标和键盘共用一个高亮：移上去就选中，星标跟着出现。
+            .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                if this.selected != Some(ix) {
+                    this.selected = Some(ix);
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| this.launch(ix, window, cx)))
             .child(
                 svg()
                     .path(action_icon(&action.target))
                     .flex_none()
                     .size(px(16.))
-                    .text_color(rgb(ui_theme::row_muted(selected))),
+                    .text_color(rgb(ui_theme::muted())),
             )
             .child(
                 div()
@@ -714,69 +939,60 @@ impl NewSession {
                     .min_w_0()
                     .truncate()
                     .type_style(TYPE.ui)
-                    .child(format!("{} · {}", action.label, action.kind.label())),
+                    .child(action.label.clone()),
             )
-            .child(
-                Button::new(("new-session-pin", ix))
-                    .quiet()
-                    .small()
-                    .icon(if pinned {
-                        IconName::StarFill
-                    } else {
-                        IconName::Star
-                    })
-                    .icon_action(if pinned {
-                        "取消常用"
-                    } else {
-                        "设为常用"
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        // 星标在行里，别让这一下也算点了行。
-                        cx.stop_propagation();
-                        this.toggle_pin(key.clone(), cx);
-                    })),
-            )
+            .when(in_common, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(rgb(ui_theme::muted()))
+                        .child(action.kind.label()),
+                )
+            })
+            .when_some(digit_key(in_common, ix), |row, digit| {
+                row.child(Keybind::new([digit]).backdrop(backdrop))
+            })
+            .child(div().flex_none().w(px(20.)).when(selected, |slot| {
+                slot.child(
+                    Button::new(("new-session-pin", ix))
+                        .quiet()
+                        .small()
+                        .icon(if pinned {
+                            IconName::StarFill
+                        } else {
+                            IconName::Star
+                        })
+                        .icon_action(if pinned {
+                            "取消常用"
+                        } else {
+                            "设为常用"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            // 星标在行里，别让这一下也算点了行。
+                            cx.stop_propagation();
+                            this.toggle_pin(key.clone(), cx);
+                        })),
+                )
+            }))
     }
 }
 
-fn footer(state: &Entity<NewSession>, cx: &App) -> impl IntoElement {
-    let this = state.read(cx);
-    let place = this.root.clone().map(|root| (this.machine.clone(), root));
-    let can_confirm = place.is_some() && this.selected.is_some();
-    let confirm = state.clone();
-    dialog::footer()
-        .child(
-            Button::new("new-session-repositories")
-                .quiet()
-                .small()
-                .label("管理项目仓库…")
-                .disabled(place.is_none())
-                .on_click(move |_, window, cx| {
-                    if let Some((machine, root)) = place.clone() {
-                        repositories::open(machine, root, Mode::Manage, None, window, cx);
-                    }
-                }),
-        )
-        .child(div().flex_1())
-        .child(
-            Button::new("new-session-cancel")
-                .quiet()
-                .small()
-                .label("取消")
-                .on_click(|_, window, cx| dialog::close(window, cx)),
-        )
-        .child(
-            Button::new("new-session-confirm")
-                .primary()
-                .small()
-                .label("新建")
-                .disabled(!can_confirm)
-                .on_click(move |_, window, cx| {
-                    if confirm.update(cx, |state, cx| state.confirm(cx)) {
-                        dialog::close(window, cx);
-                    }
-                }),
-        )
+/// 常用项第 `ix` 行的数字键（只有前 9 项有）。
+fn digit_key(in_common: bool, ix: usize) -> Option<Keystroke> {
+    const DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    let digit = DIGITS.get(ix).filter(|_| in_common)?;
+    Keystroke::parse(digit).ok()
+}
+
+/// 分隔线：上下各 2，横向顶到面板边，和组件库的菜单一致。
+fn separator() -> gpui::Div {
+    div()
+        .flex_none()
+        .h(px(1.))
+        .my(px(2.))
+        .mx(px(-PADDING))
+        .bg(ui_theme::hair())
 }
 
 /// 位置下拉：每台机器上打开的项目和它们的工作树，最后是在选中的项目里新建工作树。
@@ -904,10 +1120,42 @@ mod tests {
     }
 
     #[test]
-    fn section_headers_shift_the_scroll_targets() {
-        let rows = [row(0, "a"), row(1, "a"), row(1, "b"), row(2, "c")];
-        // 标题0 a 标题1 a b 标题2 c
-        assert_eq!(child_indexes(&rows), vec![1, 3, 4, 6]);
+    fn common_comes_first_without_a_header_then_grouped_sections() {
+        let rows = [row(0, "a"), row(0, "b"), row(1, "c"), row(2, "d")];
+        let slots = slots(&rows);
+        assert_eq!(
+            slots,
+            vec![
+                Slot::Row(0),
+                Slot::Row(1),
+                Slot::Separator,
+                Slot::Header(1),
+                Slot::Row(2),
+                Slot::Header(2),
+                Slot::Row(3),
+            ]
+        );
+        assert_eq!(row_slots(&slots), vec![0, 1, 4, 6]);
+    }
+
+    #[test]
+    fn no_separator_without_common_items() {
+        let rows = [row(1, "a"), row(2, "b")];
+        assert_eq!(
+            slots(&rows),
+            vec![Slot::Header(1), Slot::Row(0), Slot::Header(2), Slot::Row(1)]
+        );
+        assert_eq!(slots(&[row(0, "a")]), vec![Slot::Row(0)]);
+    }
+
+    #[test]
+    fn digits_pick_only_common_items() {
+        let rows = [row(0, "a"), row(0, "b"), row(1, "c")];
+        assert_eq!(pinned_by_digit(&rows, "1"), Some(0));
+        assert_eq!(pinned_by_digit(&rows, "2"), Some(1));
+        assert_eq!(pinned_by_digit(&rows, "3"), None);
+        assert_eq!(pinned_by_digit(&rows, "0"), None);
+        assert_eq!(pinned_by_digit(&rows, "a"), None);
     }
 
     #[test]

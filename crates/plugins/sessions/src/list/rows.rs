@@ -539,22 +539,8 @@ fn project_row(
         .when(!root.is_empty(), |row| {
             let (machine, root) = (machine.clone(), root.clone());
             row.child(
-                hover_only("group-row").child(
-                    Button::new(eid(format!("project-new:{id}")))
-                        .quiet()
-                        .small()
-                        .icon(IconName::Plus)
-                        .icon_action("新建会话")
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            dialogs::open_new_session(
-                                Some(machine.clone()),
-                                Some(root.clone()),
-                                window,
-                                cx,
-                            )
-                        }),
-                ),
+                dialogs::NewSessionButton::new(format!("project-new:{id}"), "新建会话", machine, root)
+                    .revealed_on_hover("group-row"),
             )
         })
         .when_some(hint, |row, before| row.child(drop_line(before)))
@@ -740,23 +726,13 @@ fn workset_row(
             )
         })
         .child(
-            hover_only("group-row").child({
-                let (machine, path) = (machine.clone(), workset.path.clone());
-                Button::new(eid(format!("workset-new:{id}")))
-                    .quiet()
-                    .small()
-                    .icon(IconName::Plus)
-                    .icon_action("在工作树里新建会话")
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        dialogs::open_new_session(
-                            Some(machine.clone()),
-                            Some(path.clone()),
-                            window,
-                            cx,
-                        )
-                    })
-            }),
+            dialogs::NewSessionButton::new(
+                format!("workset-new:{id}"),
+                "在工作树里新建会话",
+                machine.clone(),
+                workset.path.clone(),
+            )
+            .revealed_on_hover("group-row"),
         )
         // 工作树没有自己的页：点一下就是开合（改名走菜单，免得双击先开合一次）。
         .on_click(move |_, _, cx| {
