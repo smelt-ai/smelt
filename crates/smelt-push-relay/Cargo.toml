@@ -2,6 +2,8 @@
 name = "smelt-push-relay"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 description = "Smelt push relay: holds the APNs key and forwards runtime pushes to Apple"
 
 # 推送中继：持有 APNs 的 .p8 私钥，替各台 smeltd 把推送转给 Apple。部署见

@@ -2,6 +2,8 @@
 name = "smelt-iroh"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 description = "运行时协议的 iroh 传输：客户端按 EndpointId 拨号运行时，直连/打洞/中继自动回退"
 
 [[bin]]

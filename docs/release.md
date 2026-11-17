@@ -11,6 +11,14 @@
 | iOS 构建（TestFlight） | `ios`（macos-26） | 传到 App Store Connect，处理完自动发给 TestFlight 内部测试组，不挂 Release。签名见下面的「iOS 签名」 |
 | `SHA256SUMS` | `linux-release` → `checksums` | 先只含 Linux 包（一键安装和运行时自动升级马上能用），全部产物到齐后重写成覆盖所有产物 |
 
+## 许可证文件
+
+macOS、Linux、Windows 三种包都带 `LICENSE`、`NOTICE`、`THIRD_PARTY_LICENSES.txt`（macOS 在 `Smelt.app/Contents/Resources`，
+另两种在包的根目录），由 `scripts/third-party-licenses.sh` 在打包时生成。第三方清单有三段：Rust 依赖（cargo-about）、
+编进 smelt-agent 的 npm 依赖（`agent/scripts/third-party-licenses.ts`）、Bun 运行时。允许的许可证只认 `deny.toml`
+的 `[licenses] allow`。三个 job 用 `taiki-e/install-action` 装 cargo-about；本机要对外发包就先
+`cargo install cargo-about --locked`，没装时 `make install` 只是跳过并提示。手机端（APK、iOS）还没带，另做。
+
 ## 发版步骤
 
 版本号只在 tag 上，代码里不写（`Cargo.toml` 固定 `0.0.0`）：打包时从 tag 算出版本号编进程序，见下面的「版本号」。

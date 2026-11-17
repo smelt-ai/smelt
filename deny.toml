@@ -1,5 +1,5 @@
-# RustSec advisory 闸门。CI 只跑 `cargo deny check advisories`
-# （见 .github/workflows/ci.yml）。license / bans / sources 另议。
+# 依赖闸门。CI 跑 `cargo deny check advisories licenses`（见 .github/workflows/ci.yml）。
+# bans / sources 另议。
 
 [graph]
 # 跟 lockfile 对齐；不强制 --all-features，避免扫到未启用的可选依赖树。
@@ -22,4 +22,34 @@ ignore = [
     { id = "RUSTSEC-2026-0391", reason = "zstd 0.13.x 经 llrt_compression 引入（llrt 要求 zstd 0.13）；修复要 >=0.14.3，需上游 llrt 改版本约束" },
     { id = "RUSTSEC-2026-0398", reason = "zstd-safe 随 zstd 0.13 锁在 7.x；修复要 >=8.2.0，同上受 llrt_compression 约束" },
     { id = "RUSTSEC-2026-0403", reason = "同 RUSTSEC-2026-0398：zstd-safe 7.x / llrt_compression，需上游升级" },
+]
+
+# 许可证闸门。商业版用同一棵依赖树、闭源发布，所以只收不传染闭源代码的许可：
+# 宽松许可，加上文件级的 MPL-2.0（只要不改它的源文件，闭源分发没有额外义务）。
+# GPL / LGPL / AGPL / SSPL 一律不收；多选一的表达式（如 `Apache-2.0 OR GPL-2.0-only`）
+# 只要其中一项在下面就通过，按那一项使用。
+# 新依赖带来清单外的许可证时，先确认能闭源分发再加，并在这里写明来自哪个依赖。
+# 没写 `license` 字段的 crate（allo-isolate、tree-sitter-graphql）由 cargo-deny 从
+# LICENSE 文件识别，分别是 Apache-2.0 和 MIT。
+# 只管 Rust 依赖；agent/ 的 npm 依赖和 mobile/ 的 Dart 依赖不在这里。
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    # webpki-roots / webpki-root-certs 的根证书数据。
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    # cssparser、selectors、dwrote、attohttpc、option-ext 等。
+    "MPL-2.0",
+    # libfuzzer-sys 带的 LLVM 代码。
+    "NCSA",
+    # ICU4X 一族（icu_*、zerovec、yoke 等）。
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
 ]

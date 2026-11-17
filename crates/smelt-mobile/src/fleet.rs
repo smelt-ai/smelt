@@ -53,8 +53,9 @@ pub(crate) trait Transport: Dialer {
     /// 要让所有节点重新 connect。relay 不合法时报错、形态不变。
     fn configure(&self, relays: &[Option<String>]) -> Result<bool, SmeltError>;
 
-    /// 网络可能变了，让传输层重新探测地址和路径。
-    fn network_change(&self);
+    /// 网络变了：丢掉旧 endpoint，下次拨号按新网络重建。返回是否真丢了：丢了的话调用方要让所有
+    /// 节点重新 connect。
+    fn network_change(&self) -> bool;
 }
 
 /// 各模块的时限。生产值见 [`Timings::PRODUCTION`]，测试用毫秒级。
@@ -593,14 +594,20 @@ impl Fleet {
         }
     }
 
-    /// 网络变了（切 Wi-Fi / 蜂窝、断网又恢复）：先让传输层重新找路径，再确认每台机器的链路。
-    /// 旧链路的路径多半跟着旧网络一起没了，却要等 QUIC 空闲超时才会报断开；确认不了的
-    /// 立刻换新链路重连（见 [`crate::connection`]）。
+    /// 网络变了（切 Wi-Fi / 蜂窝、断网又恢复）：换掉旧 iroh endpoint，所有机器在新 endpoint 上
+    /// 重新 connect。旧 endpoint 跨网络后常常再也连不上 relay，在它上面怎么重拨都没用。
+    /// 还没建过 endpoint 时只确认一遍链路（重连中的立刻重试）。
     pub(crate) fn network_changed(&self) {
-        if let Ok(env) = self.shared.env() {
-            env.transport.network_change();
+        let Ok(env) = self.shared.env() else {
+            return;
+        };
+        if env.transport.network_change() {
+            for node in self.shared.nodes() {
+                self.shared.spawn_connect(&node);
+            }
+        } else {
+            self.verify();
         }
-        self.verify();
     }
 
     pub(crate) fn detach_all_terminals(&self) {

@@ -36,6 +36,11 @@ jobs:
             scripts/version.sh \
             agent/scripts/build-smelt-agent.sh \
             scripts/fetch-bun.sh \
+            scripts/third-party-licenses.sh \
+            scripts/third-party-licenses.hbs \
+            agent/scripts/third-party-licenses.ts \
+            LICENSE \
+            NOTICE \
             scripts/entitlements.plist \
             scripts/jit-entitlements.plist \
             scripts/make-dmg-bg.py \
@@ -129,6 +134,10 @@ jobs:
       # dmg 的定制窗口（背景/图标摆位）由 dmgbuild 直接写 .DS_Store 完成，不依赖
       # Finder，headless runner 上和本地打出来的完全一致——定制没生效就是 bug，
       # 别再当成 CI 的预期行为。工具链由 package-mac.sh 自建 venv 装，无需在此预装。
+      # 打包时生成第三方许可证清单（scripts/third-party-licenses.sh）。
+      - name: Install cargo-about
+        uses: taiki-e/install-action@cargo-about
+
       - name: Build & package
         env:
           # 前缀就够：临时钥匙串里只有这一张 Developer ID 证书，codesign 按前缀找到它。
@@ -241,6 +250,9 @@ jobs:
             | sh -s -- -y --profile minimal --default-toolchain none
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustup" toolchain install
+
+      - name: Install cargo-about
+        uses: taiki-e/install-action@cargo-about
 
       - name: Package
         run: ./scripts/package-linux.sh
@@ -521,6 +533,14 @@ jobs:
           Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$dir" -Wait
           if (-not (Test-Path "$dir\ISCC.exe")) { throw "Inno Setup 没装上" }
           "INNO_DIR=$dir" >> $env:GITHUB_ENV
+
+      - name: Install cargo-about
+        uses: taiki-e/install-action@cargo-about
+
+      # LICENSE、NOTICE、THIRD_PARTY_LICENSES.txt 先放进暂存目录，安装程序整目录打包。
+      - name: Third-party licenses
+        shell: bash
+        run: bash scripts/third-party-licenses.sh dist/stage
 
       - name: Package
         shell: pwsh

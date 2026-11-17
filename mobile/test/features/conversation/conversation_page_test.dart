@@ -578,6 +578,47 @@ void main() {
       expect(find.text('reply-lang'), findsOneWidget);
     });
 
+    testWidgets('关掉的记忆卡片和提示，退出对话再进来也不再弹出', (tester) async {
+      usePhone(tester);
+      final backend = RecordingBackend(manualWatch: true);
+      final model = startModel(backend);
+      final memory = ConversationMemoryChanges(
+        id: 5,
+        agentId: 'a1',
+        entries: const [
+          ConversationMemoryChange(
+            layer: MemoryLayer.agent,
+            fileName: 'reply-lang.md',
+            name: 'reply-lang',
+            description: 'about reply-lang',
+            created: true,
+            body: 'body',
+          ),
+        ],
+      );
+      const notice = ConversationNotice(id: 10, text: 'compaction failed');
+
+      await tester.pumpWidget(host(model, _page));
+      await tester.pump();
+      backend.watch.add(snapshot(view(memoryChanges: memory, notice: notice)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Hide memory card'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Dismiss notice'));
+      await tester.pumpAndSettle();
+      expect(find.text('reply-lang'), findsNothing);
+      expect(find.text('compaction failed'), findsNothing);
+
+      // 离开对话页，再进来。
+      await tester.pumpWidget(host(model, const SizedBox()));
+      await tester.pumpWidget(host(model, _page));
+      await tester.pump();
+      backend.watch.add(snapshot(view(memoryChanges: memory, notice: notice)));
+      await tester.pumpAndSettle();
+      expect(find.text('reply-lang'), findsNothing);
+      expect(find.text('compaction failed'), findsNothing);
+    });
+
     testWidgets('空闲时没有停止钮', (tester) async {
       usePhone(tester);
       final backend = RecordingBackend(manualWatch: true);
