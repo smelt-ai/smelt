@@ -40,7 +40,7 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 | 命令面板 | 命令注册表上的一个通用界面 |
 | 设置 | 视图注册表上的一个通用界面，单独一页、两个视图：导航（`smelt/settings-nav`）把带 `settings` 的视图按组列出、能搜索，内容（`smelt/settings`）显示选中的那一页。和命令面板一样不认识任何一页 |
 | 插件运行时 | 发现、加载、卸载、热重载；按插件分开的 Policy、日志身份、`smelt-fs`；每个插件一份自己的 SQLite（`plugin_store`） |
-| 运行时连接 | 本机 smeltd 的启动、升级、重启；远程机器的配对、连接、中继、升级；按话题转发运行时推送，并缓存每个话题的最新快照；`call` 调任意控制方法 |
+| 运行时连接 | 本机 smeltd 的启动、升级、重启；远程机器的配对、连接、中继、升级；按插件登记的话题订阅、转发运行时推送；`call` 调任意控制方法 |
 | 系统服务 | 系统通知和权限、菜单栏图标、Dock 角标、选路径（远程机器用宿主画的目录浏览）、用编辑器或文件管理器打开、剪贴板、对话框 |
 | 应用生命周期 | 自动更新、挪到「应用程序」、退出前检查有没有活在跑、应用日志 |
 | 宿主机制自己的页 | 设置页：外观（主题、布局、窗口、字体）、快捷键、插件管理、远程机器（连出去的那一半）、关于；还有更新页（`smelt/update`）。宿主以来源 `smelt` 登记进同一张视图表，和插件的页没有区别。不拆成插件：这几页背后是宿主自己的机制（录快捷键、导入卸载插件、更新的状态流转），拆出去就要给每页开一组只有它一个调用方的接口（原则 6） |
@@ -75,7 +75,7 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 
 | 类别 | 内容 |
 | --- | --- |
-| 读 | `machines`（只有 key、名字、不可用的原因）、`client`、`connector`（开长连接用，如终端的字节流）、`machine_online`、`session_presence`（会话进程还在不在）、`path_style`、`main_window`、`window_active`、`overlay_open`、`notification_permission`、`view_shown`、`view_laid_out`（摆在哪页的布局里，启动栏据此给没摆的视图列入口）、`topic`（某台机器某个话题的最新快照） |
+| 读 | `machines`（只有 key、名字、不可用的原因）、`client`、`connector`（开长连接用，如终端的字节流）、`machine_online`、`session_presence`（会话进程还在不在）、`path_style`、`main_window`、`window_active`、`overlay_open`、`notification_permission`、`view_shown`、`view_laid_out`（摆在哪页的布局里，启动栏据此给没摆的视图列入口） |
 | 事件 | `MachinesChanged`、`RuntimeTopic`（宿主只转发，不解读）、`Reconnected`、`WindowActivated`、`OverlayChanged`、`NotificationPermissionChanged`、`ShownViewsChanged`、`LaidOutViewsChanged`、`ActiveContextChanged`，以及各注册表的 `*Changed` |
 | 命令 | 通知；菜单栏和 Dock 角标；选路径；在编辑器或文件管理器里打开；`OPEN_VIEW`（打开设置页也是它：带 `settings` 的视图在设置里打开）；`SHOW_MAIN_WINDOW`；机器管理（配对添加、删除、改名、设中继、重连、升级） |
 | 路径 | 应用日志、数据根目录。维护类插件要用 |
@@ -90,7 +90,7 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 
 会话状态、工作区目录、智能体配置、额度、自动化，都是 smeltd 的数据：
 
-- 宿主按话题转发，并缓存每个话题的最新快照，插件用 `topic(machine, 话题)` 读，不解读。
+- 插件登记要哪些话题（`register_topics`），宿主按并集订阅、原样转发，不解读，也不缓存：新登记的插件靠重订拿到快照。
 - 插件之间不各自镜像一份：现在智能体和自动化两个插件各存了一份自动化列表，终态里两边读同一份缓存。
 - 例外：会话状态和工作区目录（`session_states`、`workspace_directory`）留作宿主接口，不改成话题。三问都答「是」：宿主自己据此行动（重启守护进程前看有没有会话在跑）；只有宿主看得见（多台机器的订阅合并、机器上下线的代数，插件看不到）；插件再小心也做不对（每个插件各自合并一遍，结果会不一样）。读它们的插件多，留一份宿主镜像（`crates/smelt/src/daemon_states.rs`），插件只读。
 - 还没有话题的数据，由 smeltd 补上话题。
@@ -186,7 +186,7 @@ JS 插件的宿主模块也叫 `smelt-plugin-api`，是 Rust 那份接口的薄�
 - 每个插件一份自己的 gpui-shell Policy，宿主函数知道是哪个插件在调。
 - 事件用 `await next_event()` 取；每个插件一条队列，同样的事件只留一份。
 - 每个 JS 插件挂载时登记成一个视图，和 Rust 视图一样由布局摆放。
-- 终态里 Rust 和 JS 两边能拿到的东西一样。现在 JS 还缺 `topic`（订阅哪些话题眼下是宿主的固定表，Rust 插件也一样）、视图自己的图标和自己画顶栏。在自己的界面里嵌别的插件按实例建的视图已有 `SmeltViewInstance`（2026-11-17）。
+- 终态里 Rust 和 JS 两边能拿到的东西一样。现在 JS 还缺视图自己的图标和自己画顶栏。在自己的界面里嵌别的插件按实例建的视图已有 `SmeltViewInstance`（2026-11-17）。
 - 2026-11-18 补上：一个插件登记多个视图（`register_views`，替掉只能登记设置页的 `register_settings_pages`）、按实例建、填插槽、收打开参数（`view_args`、`view_opened`）。
 - 2026-11-16 补上：应用菜单（`register_menu_items`）、右键菜单项（`register_context_menu_items`）、退出守卫（`set_quit_guard`：设着时退出一律交给那条命令，脚本答不了同步的「接不接手」，接手后要退出调 `smelt.app/quit-now`）、按实例建的视图（`run("smelt.app/open-view", {view, args})` 放进出口）、`machine_online`、`wait_online`、`session_presence`。
 - 2026-11-17 补上：调运行时控制接口（`call(machine, method, params?, timeout_ms?)`，方法名按线上名字认，不认识的当场报错）、读注册表（`machines`、`views`、`view_badge`、`pages`、`commands`、`command`）、画自己的右键菜单时取别人放进来的项（`context_menu_items`，参数已并上下文）、发布活动上下文（`set_active_context`）、命令交回结果（`next_command` 带 `id`，脚本用 `resolve_command` / `reject_command` 交回，插件卸下时没交回的算失败）。
@@ -336,7 +336,7 @@ my-theme/
    - 会话列表和舞台直接用终态的 id（`smelt.sessions/list`、`smelt.sessions/stage`），第 5 步搬走时布局不用再改。（第 5 步舞台改名 `smelt.sessions/session`，出厂页的 `index` 跟着改了。）
    - 设置搬进主窗口：设置窗口、`SettingsWindow`、`CloseSettingsWindow`、对话框的「开在设置窗口里」都删掉；宿主机制的几页和更新页改成视图（见「终态：宿主留什么」）。设置视图 `smelt/settings` 2026-11-15 已做；更新页归更新插件；外观、快捷键、面板插件三页 2026-11-17 改成宿主登记的设置视图（`smelt/appearance`、`smelt/shortcuts`、`smelt/panel-plugins`），设置导航、内容只按登记的视图摆，停在哪页记在一个全局里，不在 `Workspace` 上。
 2. **运行时数据只是话题。**
-   - 宿主加话题快照缓存和 `topic` 读取。等有第二个插件要读同一份运行时数据时再做；会话状态、目录不走这条（见「运行时数据只是话题」的例外）。
+   - 订哪些话题由插件登记（`register_topics`，JS 同名），宿主按并集订、原样广播，不再有写死的话题表。2026-11-18 已做。已有人订着的话题，新来的插件登记时宿主重订那一条（先推 `Lagged` 再推快照），新来的也拿到初始状态，所以不需要宿主的快照缓存，`topic` 读取不做。会话状态、目录不走这条（见「运行时数据只是话题」的例外）。
    - 智能体配置走话题；smeltd 补齐缺的话题。
    - 会话名由 smeltd 算好推送。通知、资源两个插件和手机里那几份算会话名的代码删掉。2026-11-15 已做，没等话题机制：名字放在已有的会话状态推送里。
    - 收掉 `session_states`、`workspace_directory`、`agent_settings` 和它的改写命令；`smelt-app-state` 里对应的全局删掉。2026-11-17：`agent_settings` 和改写命令已收掉（归智能体插件），`smelt-app-state` 已删；`session_states`、`workspace_directory` 留作宿主接口，不收。

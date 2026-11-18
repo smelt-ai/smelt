@@ -36,6 +36,13 @@ const ICON: &str = api::ui::IconName::MessageSquare.asset_path();
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut gpui::App) {
+    if let Err(error) = api::register_topics(
+        OWNER,
+        [api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED],
+        cx,
+    ) {
+        eprintln!("[conversation] 话题登记失败：{error}");
+    }
     agents::install(cx);
     if let Err(error) = api::register_views(OWNER, vec![instance::spec()], cx) {
         eprintln!("[conversation] 视图登记失败：{error}");

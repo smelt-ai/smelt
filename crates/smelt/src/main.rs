@@ -762,7 +762,7 @@ fn main() {
                     smelt_plugin_api::emit(
                         smelt_plugin_api::HostEvent::RuntimeTopic {
                             machine: runtime,
-                            topic: topic.to_string(),
+                            topic,
                             message,
                         },
                         cx,

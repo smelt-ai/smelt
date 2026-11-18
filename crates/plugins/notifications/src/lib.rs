@@ -52,6 +52,13 @@ pub(crate) struct Plugin {
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
+    if let Err(error) = api::register_topics(
+        OWNER,
+        [api::model::daemon_state::CORE_TOPIC_ATTENTION_CHANGED],
+        cx,
+    ) {
+        eprintln!("[notifications] 话题登记失败：{error}");
+    }
     let store = NotifyStore::open();
     let plugin = Rc::new(RefCell::new(Plugin {
         mirror: Mirror::default(),

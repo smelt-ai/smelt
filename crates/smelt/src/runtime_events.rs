@@ -21,14 +21,15 @@
 //! 再探；每条订阅线程只请一次，升了还对不上就照常标不兼容，不反复请，人点「重新连接」
 //! 才再请一次。人也可以随时点「升级运行时」（[`upgrade_remote`]）：连得上就请，不管兼不兼容。
 //!
-//! 不进核心订阅的话题（见 `smelt_event_protocol` 模块文档）每一轮在核心订阅之前分别
-//! 订阅，核心订阅断了就关掉，下一轮重开。运行时不认识某个话题时只拒绝那条单独订阅，
-//! 核心订阅和其他话题不受影响。本机外观回执请求也走独立订阅。
+//! 核心订阅以外的话题由插件登记（`smelt_plugin_api::register_topics`），宿主不认识它们：
+//! 按所有插件要的并集，每一轮在核心订阅之前每个话题单独订一条，核心订阅断了就关掉，下一轮
+//! 重开；一轮当中登记变了，就地增减（见 [`OpenTopics`]）。运行时不认识某个话题时只拒绝那条
+//! 单独订阅，核心订阅和其他话题不受影响。本机外观回执请求宿主自己要处理，也走独立订阅。
 
 use rust_i18n::t;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use gpui::{App, Global, Subscription};
@@ -40,19 +41,108 @@ use smelt_client::daemon_state::{
 };
 
 pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
-/// 单独订阅收到的：哪台运行时、哪条订阅的话题。
-pub(crate) type RuntimeTopicEvent = (RuntimeKey, &'static str, TopicMessage);
+/// 单独订阅收到的：哪台运行时、哪条订阅的话题。宿主不解读，原样转给插件
+/// （`HostEvent::RuntimeTopic`）。
+pub(crate) type RuntimeTopicEvent = (RuntimeKey, String, TopicMessage);
 
-/// 单独订的话题，各占一条订阅：后加的话题旧运行时不认，会拒掉整条订阅，不能连累别的。
-/// 宿主不解读这些话题，原样转给插件（`HostEvent::RuntimeTopic`）。
-pub(crate) const SEPARATE_TOPICS: &[&str] = &[
-    smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED,
-    smelt_client::daemon_state::CORE_TOPIC_HISTORY_CHANGED,
-    smelt_client::daemon_state::CORE_TOPIC_ATTENTION_CHANGED,
-    smelt_event_protocol::CORE_TOPIC_AUTOMATIONS_CHANGED,
-    smelt_event_protocol::CORE_TOPIC_AGENT_MEMORY_CHANGED,
-    smelt_event_protocol::CORE_TOPIC_AGENT_HOST_CHANGED,
-];
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// 插件要订的话题和各自的序号（`smelt_plugin_api::subscribed_topics`），主线程写、订阅线程读。
+#[derive(Clone, Default)]
+pub(crate) struct WantedTopics(Arc<Mutex<BTreeMap<String, u64>>>);
+
+impl WantedTopics {
+    fn get(&self) -> BTreeMap<String, u64> {
+        lock(&self.0).clone()
+    }
+
+    fn set(&self, topics: BTreeMap<String, u64>) {
+        *lock(&self.0) = topics;
+    }
+}
+
+/// 一条订阅线程这一轮开着的话题订阅；不在一轮里（离线、版本对不上、断开后退避中）是 `None`。
+type RoundTopics = Arc<Mutex<Option<OpenTopics>>>;
+
+/// 一轮里开着的话题订阅，每个话题一条：后加的话题旧运行时不认，会拒掉整条订阅，不能连累
+/// 别的。各记着订上时的序号。
+struct OpenTopics {
+    runtime: Runtime,
+    sender: smol::channel::Sender<RuntimeTopicEvent>,
+    open: BTreeMap<String, (u64, SeparateSubscription)>,
+}
+
+impl OpenTopics {
+    fn new(runtime: &Runtime, sender: &smol::channel::Sender<RuntimeTopicEvent>) -> Self {
+        Self {
+            runtime: runtime.clone(),
+            sender: sender.clone(),
+            open: BTreeMap::new(),
+        }
+    }
+
+    /// 关掉不要了的，订上新要的；开着的话题又有插件新要了（序号变大）就重订，新来的也拿到
+    /// 快照（见 `smelt_plugin_api` 的 topic 模块文档）。阻塞（连运行时），不在主线程调。上一次
+    /// 没连上的这次再试。
+    fn reconcile(&mut self, wanted: &BTreeMap<String, u64>) {
+        let opened = self
+            .open
+            .iter()
+            .map(|(topic, (requested, _))| (topic, *requested));
+        for topic in stale_topics(opened, wanted) {
+            let Some((_, subscription)) = self.open.remove(&topic) else {
+                continue;
+            };
+            subscription.close();
+            if wanted.contains_key(&topic) {
+                // 原来订着的插件在重订的空当里可能错过事件：按积压处理，没有快照的话题重读，
+                // 带快照的等重订上的那份。
+                let _ =
+                    self.sender
+                        .try_send((self.runtime.key().clone(), topic, TopicMessage::Lagged));
+            }
+        }
+        for (topic, requested) in wanted {
+            if self.open.contains_key(topic) {
+                continue;
+            }
+            let key = self.runtime.key().clone();
+            let sender = self.sender.clone();
+            let name = topic.clone();
+            let opened = SeparateSubscription::open(&self.runtime, topic.clone(), move |message| {
+                sender
+                    .try_send((key.clone(), name.clone(), message))
+                    .is_ok()
+            });
+            if let Some(subscription) = opened {
+                self.open.insert(topic.clone(), (*requested, subscription));
+            }
+        }
+    }
+
+    fn close(self) {
+        for (_, (_, subscription)) in self.open {
+            subscription.close();
+        }
+    }
+}
+
+/// 开着的话题里要关掉的：没人要了的，和订上之后又有插件新要了、得重订的。
+fn stale_topics<'a>(
+    opened: impl Iterator<Item = (&'a String, u64)>,
+    wanted: &BTreeMap<String, u64>,
+) -> Vec<String> {
+    opened
+        .filter(|(topic, opened)| {
+            wanted
+                .get(*topic)
+                .is_none_or(|requested| requested > opened)
+        })
+        .map(|(topic, _)| topic.clone())
+        .collect()
+}
 
 /// 事件的接收端：核心订阅的，和单独订阅的。
 pub(crate) struct RuntimeEventReceivers {
@@ -69,12 +159,16 @@ pub(crate) struct RuntimeEventSenders {
 
 struct RuntimeSubscriptions {
     sender: RuntimeEventSenders,
+    /// 插件要订的话题，各条订阅线程共用。
+    wanted: WantedTopics,
     /// 订阅线程把远程运行时的连通性报给主线程：哪个运行时、现在怎样。
     status: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
     /// 本机那条。
-    _local: SubscriptionHandle,
+    local: SubscriptionHandle,
     remotes: HashMap<RuntimeKey, SubscriptionHandle>,
     _hub_watch: Option<Subscription>,
+    /// 插件登记的话题变了就增减订阅（[`sync_topics`]）。
+    _topics_watch: Subscription,
     /// 系统睡醒：换掉远程机器共用的 iroh endpoint，见 [`crate::runtimes::reset_iroh_after_wake`]。
     _system_wake: Subscription,
 }
@@ -94,6 +188,8 @@ enum Wake {
 pub(crate) struct SubscriptionHandle {
     stop: Arc<AtomicBool>,
     wake: std::sync::mpsc::Sender<Wake>,
+    /// 这条线程眼下这一轮开着的话题订阅。
+    round: RoundTopics,
 }
 
 impl SubscriptionHandle {
@@ -245,14 +341,29 @@ pub(crate) fn start(cx: &mut App) -> RuntimeEventReceivers {
         }
     })
     .detach();
-    let local = spawn_subscription(Runtime::local(), sender.clone(), status.clone());
+    // 插件在这之前已经登记好（`plugin_host::install`），本机这条第一轮就订上它们要的话题。
+    let wanted = WantedTopics::default();
+    wanted.set(smelt_plugin_api::subscribed_topics(cx));
+    let local = spawn_subscription(
+        Runtime::local(),
+        sender.clone(),
+        status.clone(),
+        wanted.clone(),
+    );
     let system_wake = cx.on_system_wake(crate::runtimes::reset_iroh_after_wake);
+    let topics_watch = cx.subscribe(&smelt_plugin_api::events(cx), |_, event, cx| {
+        if matches!(event, smelt_plugin_api::HostEvent::TopicsChanged) {
+            sync_topics(cx);
+        }
+    });
     cx.set_global(RuntimeSubscriptions {
         sender,
+        wanted,
         status,
-        _local: local,
+        local,
         remotes: HashMap::new(),
         _hub_watch: None,
+        _topics_watch: topics_watch,
         _system_wake: system_wake,
     });
     sync_remote_subscriptions(cx);
@@ -340,11 +451,11 @@ impl SeparateShared {
 }
 
 /// 连上一条单独订阅，连同关它的把手。
-fn open_topics(
+fn open_topic(
     client: &smelt_runtime_client::RuntimeClient,
-    topics: &[&'static str],
+    topic: &str,
 ) -> Result<(TopicSubscriptionCloser, TopicSubscription), String> {
-    TopicSubscription::open(client, topics.to_vec())
+    TopicSubscription::open(client, vec![topic])
         .and_then(|subscription| Ok((subscription.closer()?, subscription)))
 }
 
@@ -352,12 +463,12 @@ impl SeparateSubscription {
     /// 第一次连不上、起不了线程就不订，记日志；下一轮核心订阅再试。
     fn open(
         runtime: &Runtime,
-        topics: Vec<&'static str>,
+        topic: String,
         mut emit: impl FnMut(TopicMessage) -> bool + Send + 'static,
     ) -> Option<Self> {
         let key = runtime.key().clone();
         let client = runtime.client().clone();
-        let (closer, first) = match open_topics(&client, &topics) {
+        let (closer, first) = match open_topic(&client, &topic) {
             Ok(opened) => opened,
             Err(error) => {
                 eprintln!("[runtime-events] {key:?} 单独订阅连不上：{error}");
@@ -414,7 +525,7 @@ impl SeparateSubscription {
                         return;
                     }
                     drop(state);
-                    match open_topics(&client, &topics) {
+                    match open_topic(&client, &topic) {
                         Ok((closer, subscription)) => {
                             let mut state = shared.lock();
                             if state.closed {
@@ -463,13 +574,16 @@ pub(crate) fn spawn_subscription(
     runtime: Runtime,
     sender: RuntimeEventSenders,
     status_tx: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
+    wanted: WantedTopics,
 ) -> SubscriptionHandle {
     let key = runtime.key().clone();
     let stop = Arc::new(AtomicBool::new(false));
     let (wake, woken) = std::sync::mpsc::channel();
+    let round: RoundTopics = Arc::default();
     let handle = SubscriptionHandle {
         stop: Arc::clone(&stop),
         wake,
+        round: Arc::clone(&round),
     };
     std::thread::Builder::new()
         .name(format!("smelt-events-{key:?}"))
@@ -537,26 +651,23 @@ pub(crate) fn spawn_subscription(
                     }
                     _ => {
                         incompatible_attempt = 0;
-                        // 非核心话题分别订阅：旧运行时拒绝新话题时，不能连带其他话题或
-                        // 会话状态一起断开。外观只由本机桌面处理。
-                        let separate: Vec<SeparateSubscription> = SEPARATE_TOPICS
-                            .iter()
-                            .filter_map(|topic| {
-                                let topic_key = key.clone();
-                                let topic_sender = sender.topics.clone();
-                                SeparateSubscription::open(&runtime, vec![topic], move |message| {
-                                    topic_sender
-                                        .try_send((topic_key.clone(), topic, message))
-                                        .is_ok()
-                                })
-                            })
-                            .collect();
+                        // 插件要的话题分别订阅：旧运行时拒绝新话题时，不能连带其他话题或
+                        // 会话状态一起断开。在核心订阅之前订上，插件收到重连时话题已经在推。
+                        // 持着锁订，这一轮当中登记变了的增减（[`sync_topics`]）排在后面。
+                        {
+                            let mut current = lock(&round);
+                            let mut topics = OpenTopics::new(&runtime, &sender.topics);
+                            topics.reconcile(&wanted.get());
+                            *current = Some(topics);
+                        }
+                        // 外观只由本机桌面处理。
                         let appearance = if runtime.is_local() {
                             let appearance_key = key.clone();
                             let state_sender = sender.states.clone();
                             SeparateSubscription::open(
                                 &runtime,
-                                vec![smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED],
+                                smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
+                                    .to_string(),
                                 move |message| match appearance_event(message) {
                                     Some(event) => state_sender
                                         .try_send((appearance_key.clone(), event))
@@ -575,8 +686,8 @@ pub(crate) fn spawn_subscription(
                                     && sender.states.try_send((key.clone(), event)).is_ok()
                             },
                         );
-                        for separate in separate {
-                            separate.close();
+                        if let Some(topics) = lock(&round).take() {
+                            topics.close();
                         }
                         if let Some(appearance) = appearance {
                             appearance.close();
@@ -733,6 +844,32 @@ fn upgrade_then_probe(
     }
 }
 
+/// 插件登记的话题变了：记下新的并集，在后台把各条线程这一轮开着的订阅增减到它（订阅要连
+/// 运行时，不在主线程做）。不在一轮里的线程不用管，下一轮开始时按新的并集订。
+fn sync_topics(cx: &mut App) {
+    let Some(subscriptions) = cx.try_global::<RuntimeSubscriptions>() else {
+        return;
+    };
+    subscriptions
+        .wanted
+        .set(smelt_plugin_api::subscribed_topics(cx));
+    let wanted = subscriptions.wanted.clone();
+    let rounds: Vec<RoundTopics> = std::iter::once(&subscriptions.local)
+        .chain(subscriptions.remotes.values())
+        .map(|handle| Arc::clone(&handle.round))
+        .collect();
+    cx.background_executor()
+        .spawn(async move {
+            for round in rounds {
+                // 先拿这一轮的锁再读并集：几次变化挤在一起时，后跑的按最新的增减。
+                if let Some(topics) = lock(&round).as_mut() {
+                    topics.reconcile(&wanted.get());
+                }
+            }
+        })
+        .detach();
+}
+
 /// 远程运行时的订阅跟着 RuntimeHub 走：新添加的起一条，移除的停掉并丢掉它的状态镜像。
 /// 版本不兼容的线程不停，它自己隔一阵再探（见 [`spawn_subscription`]）。
 fn sync_remote_subscriptions(cx: &mut App) {
@@ -765,6 +902,7 @@ fn sync_remote_subscriptions(cx: &mut App) {
             runtime,
             subscriptions.sender.clone(),
             subscriptions.status.clone(),
+            subscriptions.wanted.clone(),
         );
         subscriptions.remotes.insert(key, handle);
     }
@@ -806,6 +944,23 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn topics_are_closed_when_dropped_and_renewed_when_requested_again() {
+        let opened: BTreeMap<String, u64> = [("kept", 1), ("dropped", 2), ("renewed", 3)]
+            .into_iter()
+            .map(|(topic, requested)| (topic.to_string(), requested))
+            .collect();
+        let wanted: BTreeMap<String, u64> = [("kept", 1), ("renewed", 5), ("new", 6)]
+            .into_iter()
+            .map(|(topic, requested)| (topic.to_string(), requested))
+            .collect();
+        let stale = stale_topics(
+            opened.iter().map(|(topic, requested)| (topic, *requested)),
+            &wanted,
+        );
+        assert_eq!(stale, ["dropped", "renewed"]);
     }
 
     #[test]

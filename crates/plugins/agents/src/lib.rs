@@ -69,6 +69,18 @@ const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
+    if let Err(error) = api::register_topics(
+        OWNER,
+        [
+            api::model::daemon_state::CORE_TOPIC_AUTOMATIONS_CHANGED,
+            api::model::daemon_state::CORE_TOPIC_AGENT_HOST_CHANGED,
+            api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED,
+            api::model::daemon_state::CORE_TOPIC_AGENT_MEMORY_CHANGED,
+        ],
+        cx,
+    ) {
+        eprintln!("[agents] 话题登记失败：{error}");
+    }
     api::register_views(
         OWNER,
         vec![
@@ -281,6 +293,7 @@ impl AgentsPage {
             | HostEvent::LayoutsChanged
             | HostEvent::PagesChanged
             | HostEvent::CommandsChanged
+            | HostEvent::TopicsChanged
             | HostEvent::LocaleChanged
             | HostEvent::Plugin { .. }
             | HostEvent::OpenPaths { .. } => {}

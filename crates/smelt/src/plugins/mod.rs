@@ -375,7 +375,7 @@ fn is_theme_only(manifest: &PluginManifest) -> bool {
         .is_some_and(|extension| extension == "json")
 }
 
-/// 撤下插件挂载时登记的东西：布局、页、命令、文件打开者、菜单、视图（主入口和脚本登记的）、
+/// 撤下插件挂载时登记的东西：布局、页、命令、文件打开者、菜单、话题、视图（主入口和脚本登记的）、
 /// 脚本登记的主题。主题文件里的另算（见 `register_theme_contributions`）。
 fn unmount(id: &str, cx: &mut App) {
     smelt_ui::theme_catalog::unregister_themes(&format!("script:{id}"), cx);
@@ -386,6 +386,7 @@ fn unmount(id: &str, cx: &mut App) {
     api::unregister_menu_items(id, cx);
     api::unregister_context_menu_items(id, cx);
     api::unregister_quit_guard(id, cx);
+    api::unregister_topics(id, cx);
     api::unregister_views(id, cx);
 }
 

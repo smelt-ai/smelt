@@ -48,6 +48,13 @@ const PREFETCH_MAX_AGE: Duration = Duration::from_secs(60);
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
+    if let Err(error) = api::register_topics(
+        OWNER,
+        [api::model::daemon_state::CORE_TOPIC_HISTORY_CHANGED],
+        cx,
+    ) {
+        eprintln!("[history] 话题登记失败：{error}");
+    }
     agents::install(cx);
     api::register_views(
         OWNER,

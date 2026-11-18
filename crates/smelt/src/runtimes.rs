@@ -1650,6 +1650,7 @@ mod tests {
             remote_runtime("rt-test", describe_without("no.such.method")),
             events,
             status,
+            crate::runtime_events::WantedTopics::default(),
         );
         let (key, first) = status_rx.recv_blocking().unwrap();
         assert_eq!(key, RuntimeKey::Remote("rt-test".into()));
@@ -1679,6 +1680,7 @@ mod tests {
             remote_runtime("rt-new", newer),
             events,
             status,
+            crate::runtime_events::WantedTopics::default(),
         );
         let (_, first) = status_rx.recv_blocking().unwrap();
         assert!(

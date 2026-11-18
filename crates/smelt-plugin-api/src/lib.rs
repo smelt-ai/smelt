@@ -63,6 +63,7 @@ mod page;
 mod quit;
 mod safe_area;
 mod settings;
+mod topic;
 mod view;
 
 #[cfg(feature = "js")]
@@ -102,6 +103,7 @@ pub use page::{
 pub use quit::{QUIT_NOW, QuitGuard, quit_guarded, register_quit_guard, unregister_quit_guard};
 pub use safe_area::{Adapt, SafeArea, safe_area, set_safe_area};
 pub use settings::{SettingsEntry, SettingsGroup};
+pub use topic::{register_topics, subscribed_topics, unregister_topics};
 pub use view::{
     OPEN_VIEW, OpenView, PluginView, SET_VIEW_BADGE, ViewBadge, ViewBuilder, ViewHandle, ViewInfo,
     ViewInstance, ViewSpec, built_view, create_view, ensure_view, is_registered, register_views,
@@ -294,9 +296,8 @@ pub struct OpenInFileManager {
 /// 宿主转给插件的事。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
-    /// 那台机器推了一条运行时话题（核心订阅以外的那些，如
-    /// [`model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED`]、
-    /// [`model::daemon_state::CORE_TOPIC_ATTENTION_CHANGED`]）。宿主原样转发，不解读。
+    /// 那台机器推了一条运行时话题：有插件用 [`register_topics`] 登记要的那些，按并集订，
+    /// 推来的广播给所有插件，按 `topic` 认自己要的。宿主原样转发，不解读。
     RuntimeTopic {
         machine: RuntimeKey,
         topic: String,
@@ -339,6 +340,8 @@ pub enum HostEvent {
     LayoutsChanged,
     /// 页登记变了（见 [`register_pages`]）：首页可能换了，正开着的页可能撤下了。
     PagesChanged,
+    /// 要订的运行时话题变了（见 [`register_topics`]）：宿主按新的并集增减订阅。
+    TopicsChanged,
     /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
     CommandsChanged,
     /// 界面语言换了（读 [`locale`]）：窗口已经重画，存在视图状态里的字（建好的菜单、

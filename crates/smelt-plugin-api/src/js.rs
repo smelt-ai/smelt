@@ -436,6 +436,8 @@ export type HostEvent =
   | { type: "layouts_changed" }
   | { type: "pages_changed" }
   | { type: "commands_changed" }
+  /** 要订的运行时话题变了（有插件 register_topics）。宿主据此增减订阅，插件一般不用管。 */
+  | { type: "topics_changed" }
   /** 界面语言换了（读 locale()）：窗口已经重画，插件存着的字要按新语言重建。 */
   | { type: "locale_changed" }
   /** 这份视图又被打开了一次，args 同 view_args()。只发给这份视图自己的脚本；建好后马上打开、参数没变的那一次不发。 */
@@ -454,6 +456,13 @@ export type TopicMessage =
   | { kind: "snapshot"; payload: unknown }
   | { kind: "lagged" }
   | { kind: "unavailable"; reason: string };
+/**
+ * 替换本插件要订的运行时话题（如 "attention.changed"）。宿主按所有插件要的并集向每台机器订阅，推来的在
+ * next_event 里是 { type: "runtime_topic", machine, topic, message }，所有插件都收得到，按 topic 认自己要的。
+ * 带快照的话题订上时先推一份快照；不带快照的，登记后自己读一次初始状态。运行时不认识的话题那台机器上推一条
+ * unavailable。空数组撤下全部。
+ */
+export function register_topics(topics: string[]): null;
 /**
  * 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份（plugin、open_paths 每条都留）；一台
  * 机器一个话题的快照或积压到了，这个话题之前没取走的就不留了。同时只能有一个在等。
@@ -673,6 +682,7 @@ impl JsPlugin {
         let views = self.clone();
         let view_args = self.clone();
         let menus = self.clone();
+        let topics = self.clone();
         let context_menus = self.clone();
         let guards = self.clone();
         let resolved = self.clone();
@@ -1006,6 +1016,31 @@ impl JsPlugin {
                     Some(RuntimePresence::LeftOver) => "left_over".into(),
                     Some(RuntimePresence::Gone) => "gone".into(),
                 })
+            })
+            .function("register_topics", move |arguments| {
+                topics.may_register("register_topics")?;
+                let list = arguments
+                    .value(0)?
+                    .as_array()
+                    .ok_or_else(|| HostError::new("register_topics：要是话题名的数组"))?
+                    .iter()
+                    .map(|topic| match topic {
+                        HostValue::Str(topic) => Ok(topic.clone()),
+                        other => Err(HostError::new(format!(
+                            "register_topics：话题名要是字符串，收到 {}",
+                            other.describe()
+                        ))),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let owner = topics.0.borrow().id.clone();
+                if owner.is_empty() {
+                    return Err(HostError::new("插件没有来源身份"));
+                }
+                in_app("register_topics", |cx| {
+                    crate::register_topics(&owner, list, cx)
+                })?
+                .map_err(|error| HostError::new(format!("register_topics：{error}")))?;
+                Ok(HostValue::Null)
             })
             .function("register_menu_items", move |arguments| {
                 menus.may_register("register_menu_items")?;
@@ -2258,6 +2293,7 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::LayoutsChanged => HostObject::new().field("type", "layouts_changed"),
         HostEvent::PagesChanged => HostObject::new().field("type", "pages_changed"),
         HostEvent::CommandsChanged => HostObject::new().field("type", "commands_changed"),
+        HostEvent::TopicsChanged => HostObject::new().field("type", "topics_changed"),
         HostEvent::LocaleChanged => HostObject::new().field("type", "locale_changed"),
         HostEvent::Plugin { name, payload } => HostObject::new()
             .field("type", "plugin")

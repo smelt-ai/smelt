@@ -58,6 +58,13 @@ const OPEN_ON_MACHINE: api::Command<MachineMenuContext, ()> =
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
+    if let Err(error) = api::register_topics(
+        OWNER,
+        [api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED],
+        cx,
+    ) {
+        eprintln!("[capabilities] 话题登记失败：{error}");
+    }
     agents::install(cx);
     refresh_auto_providers_once_online(cx);
     api::register_views(
@@ -283,6 +290,7 @@ impl CapabilitiesPage {
             | HostEvent::WindowActivated
             | HostEvent::OverlayChanged
             | HostEvent::SessionsChanged
+            | HostEvent::TopicsChanged
             | HostEvent::NotificationPermissionChanged => {}
             HostEvent::MachinesChanged => {
                 // 在配的那台远程机器已经移除时，回到本机。
