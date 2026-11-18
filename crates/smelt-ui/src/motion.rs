@@ -248,19 +248,12 @@ pub fn ease_snap(t: f32) -> f32 {
     unit_bezier(0.32, 0.72, 0.0, 1.0).sample(t).clamp(0.0, 1.0)
 }
 
-/// `cubic-bezier(.34, 1.3, .64, 1)`。y 可以超过 1，端点仍是 0 和 1。
-///
-/// `Easing::CubicBezier` 走不钳 y 的求解，过冲留得住。驱动透明度或颜色的调用方自己钳。
-pub fn ease_overshoot(t: f32) -> f32 {
-    unit_bezier(0.34, 1.3, 0.64, 1.0).sample(t)
-}
-
 fn unit_bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> gpui_base::Easing {
     gpui_base::Easing::cubic_bezier(x1, y1, x2, y2)
         .expect("内置缓动的控制点是常量，x 在 0..=1 且 y 有限")
 }
 
-/// 气泡从 6px 落到 0。过冲时偏移为负，大约不到 1px。
+/// 气泡从 6px 落到 0。
 pub fn enter_offset_px(eased: f32) -> f32 {
     6.0 * (1.0 - eased)
 }
@@ -934,20 +927,6 @@ mod tests {
             previous = value;
             t += 0.05;
         }
-    }
-
-    #[test]
-    fn ease_overshoot_leaves_the_unit_interval_and_returns() {
-        assert_eq!(ease_overshoot(0.0), 0.0);
-        assert_eq!(ease_overshoot(1.0), 1.0);
-        let mut peak: f32 = 0.0;
-        let mut t = 0.0;
-        while t <= 1.0 {
-            peak = peak.max(ease_overshoot(t));
-            t += 0.05;
-        }
-        assert!(peak > 1.0, "过冲曲线中段必须超过 1");
-        assert!(enter_offset_px(peak) < 0.0);
     }
 
     #[test]

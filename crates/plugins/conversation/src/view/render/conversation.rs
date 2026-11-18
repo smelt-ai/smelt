@@ -58,7 +58,8 @@ fn user_message_bubble(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::D
 }
 
 /// 只包刚发送的那一条。nonce 进元素 id，虚拟列表把行卸掉再装上时，过了时钟就不再播。
-/// Div 没有 scale，用透明度和 6px 下落代替从 0.92 缩放进来。
+/// Div 没有 scale，用透明度和 6px 下落代替从 0.92 缩放进来。曲线和别的入场一样不过冲
+/// （见 docs/ui-design-language.md 第 7 节「动效」）：落过头再弹回只是装饰，交代不了什么。
 fn user_bubble_with_enter<E>(nonce: Option<u64>, index: usize, bubble: E) -> gpui::AnyElement
 where
     E: gpui::Styled + gpui::IntoElement + 'static,
@@ -69,7 +70,7 @@ where
     bubble
         .with_animation(
             format!("acp-user-enter-{nonce}-{index}"),
-            Animation::new(std::time::Duration::from_millis(ENTER_MS)).with_easing(ease_overshoot),
+            Animation::new(std::time::Duration::from_millis(ENTER_MS)).with_easing(ease_snap),
             |bubble, delta| {
                 bubble
                     .opacity(delta.clamp(0.0, 1.0))

@@ -11,6 +11,7 @@
 use super::*;
 use api::model::pi_auth::{PiAuthProvider, PiAuthStatus, PiLoginMethod, PiPromptKind};
 use api::ui::truncated_line::truncated_line;
+use api::ui::{Clipboard, IconAction as _};
 use smelt_plugin_api::ui::kit::TYPE;
 
 /// 内置 Provider 的一行。按钮区只放当下最该点的那一个，其余动作收进「⋯」：
@@ -303,14 +304,11 @@ pub(super) fn login_panel(
                                 .text_color(fg)
                                 .child(user_code.clone()),
                         )
+                        // 复制后换成对勾，看得出已经进了剪贴板，再去浏览器里贴。
                         .child(
-                            Button::new("pi-login-copy-code")
-                                .quiet()
-                                .small()
-                                .label(t!("common.copy"))
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                                }),
+                            Clipboard::new("pi-login-copy-code")
+                                .value(code)
+                                .icon_action(t!("common.copy")),
                         )
                         .child(
                             Button::new("pi-login-open-verification")
@@ -349,15 +347,9 @@ pub(super) fn login_panel(
                                 .on_click(move |_, _, cx| cx.open_url(&open_url)),
                         )
                         .child(
-                            Button::new("pi-login-copy-url")
-                                .quiet()
-                                .small()
-                                .label(t!("auth.copy_link"))
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        copy_url.clone(),
-                                    ));
-                                }),
+                            Clipboard::new("pi-login-copy-url")
+                                .value(copy_url)
+                                .icon_action(t!("auth.copy_link")),
                         ),
                 )
                 .children(view.instructions.clone().map(|instructions| {

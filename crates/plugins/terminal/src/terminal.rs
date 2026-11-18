@@ -931,6 +931,29 @@ pub(crate) fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// 从访达拖进终端的文件：每个路径按 POSIX shell 的规矩引起来，空格隔开，末尾留一个空格，
+/// 接着能打下一个参数（和系统终端一样）。只含安全字符的路径原样放，其余用单引号包，
+/// 路径里的单引号写成 `'\''`。
+pub(crate) fn dropped_paths_text(paths: &[std::path::PathBuf]) -> String {
+    let mut out = String::new();
+    for path in paths {
+        let path = path.to_string_lossy();
+        let safe = !path.is_empty()
+            && path
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
+        if safe {
+            out.push_str(&path);
+        } else {
+            out.push('\'');
+            out.push_str(&path.replace('\'', "'\\''"));
+            out.push('\'');
+        }
+        out.push(' ');
+    }
+    out
+}
+
 /// 终端内搜索的一条命中（可视区坐标，0 基；跨行时只标首行起止列）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchHit {
@@ -3205,11 +3228,27 @@ mod resize_tests {
 
 #[cfg(test)]
 mod paste_encode_tests {
-    use super::encode_paste;
+    use super::{dropped_paths_text, encode_paste};
 
     #[test]
     fn plain_paste_normalizes_newlines_to_cr() {
         assert_eq!(encode_paste("a\nb\r\nc", false), b"a\rb\rc");
+    }
+
+    #[test]
+    fn dropped_paths_are_shell_quoted_and_space_separated() {
+        use std::path::PathBuf;
+        let paths = [
+            PathBuf::from("/tmp/plain-file_1.txt"),
+            PathBuf::from("/Users/me/My Files/a.png"),
+            PathBuf::from("/tmp/it's"),
+            PathBuf::from("/tmp/中文"),
+        ];
+        assert_eq!(
+            dropped_paths_text(&paths),
+            "/tmp/plain-file_1.txt '/Users/me/My Files/a.png' '/tmp/it'\\''s' '/tmp/中文' "
+        );
+        assert_eq!(dropped_paths_text(&[]), "");
     }
 
     #[test]

@@ -28,6 +28,13 @@ pub(crate) const START_CONVERSATION: Command<StartConversation, ()> =
 /// `provider_session_id`，按 `cut` 切。
 pub(crate) const FORK: Command<Fork, ()> = Command::new("smelt.sessions/fork");
 
+// 约定：smelt.sessions 的 PREV_SESSION / NEXT_SESSION，权威定义在
+// crates/plugins/sessions/src/contract.rs。
+/// 按会话列表的顺序切到上一段会话，到头绕回。
+pub(crate) const PREV_SESSION: Command<(), ()> = Command::new("smelt.sessions/prev");
+/// 按会话列表的顺序切到下一段会话，到头绕回。
+pub(crate) const NEXT_SESSION: Command<(), ()> = Command::new("smelt.sessions/next");
+
 /// [`ACTIVATE`] 的参数。
 #[derive(Serialize)]
 pub(crate) struct Activate {

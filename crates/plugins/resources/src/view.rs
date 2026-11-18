@@ -20,10 +20,12 @@ use crate::monitor::{
     MemoryPart, PanelSnapshot, Row, Section, SessionGroup, SortBy, format_bytes, format_cpu,
     process_summary,
 };
-use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
+use smelt_plugin_api::ui::kit::{RADIUS, TYPE, TypeStyled as _};
 
 const CPU_COLUMN: f32 = 64.;
 const MEMORY_COLUMN: f32 = 80.;
+/// 排序列头悬停底色左右多出的宽度。
+const SORT_HEADER_PAD: f32 = 4.;
 
 /// 资源页。
 pub(crate) fn page(
@@ -122,9 +124,16 @@ fn section_view(
     };
     let sort_header = |label: SharedString, by: SortBy, width: f32| {
         let page = page.clone();
+        // 能点就得看得出来：悬停、按下和安静按钮一样铺行的叠层。左右各撑出 4px 放底色，
+        // 再用负外边距收回去，文字仍和下面的数值右对齐。
         div()
             .id(SharedString::from(format!("{}-sort-{label}", section.id_prefix)))
-            .w(px(width))
+            .w(px(width + 2. * SORT_HEADER_PAD))
+            .mx(px(-SORT_HEADER_PAD))
+            .px(px(SORT_HEADER_PAD))
+            .rounded(px(RADIUS.sm))
+            .hover(|d| d.bg(ui_theme::row_hover()))
+            .active(|d| d.bg(ui_theme::row_selected()))
             .text_right()
             .text_color(if sort_by == by { colors.fg } else { colors.muted })
             .when(sort_by == by, |d| d.font_weight(TYPE.ui_medium.weight))

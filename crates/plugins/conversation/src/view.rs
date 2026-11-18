@@ -51,8 +51,8 @@ use smelt_plugin_api::ui::markdown_links::FileLinks;
 use smelt_plugin_api::ui::motion::{
     BASE_MS, COPY_ACK_MS, ENTER_MS, SweepMode, ambient_animation, ambient_application_activated,
     ambient_application_active, ambient_motion_enabled, ambient_spinner, composer_shadows,
-    copy_ack_opacity, ease_overshoot, ease_snap, enter_offset_px, mix_rgba, quiet_dots,
-    running_sweep, unit_transition,
+    copy_ack_opacity, ease_snap, enter_offset_px, mix_rgba, quiet_dots, running_sweep,
+    unit_transition,
 };
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::ui_theme;
@@ -3151,6 +3151,42 @@ impl ConversationView {
         if let Some(input) = &self.input {
             input.update(cx, |s, cx| s.focus(window, cx));
         }
+    }
+
+    /// ⌘↑ / ⌘↓ 落在空的输入框上：没有文首文末可跳，按工作台上同一组快捷键切到上一段 /
+    /// 下一段会话。有草稿（字或图）、焦点不在输入框里时不接，返回 false 交回输入框。
+    ///
+    /// 输入框把这两个键绑成 `MoveToStart` / `MoveToEnd`，比工作台上的绑定深，不在这里接住，
+    /// 切到一段会话、焦点落进它的输入框以后就再也按不动了。
+    pub(crate) fn step_session_from_empty_composer(
+        &self,
+        forward: bool,
+        window: &Window,
+        cx: &mut App,
+    ) -> bool {
+        let Some(input) = &self.input else {
+            return false;
+        };
+        let input = input.read(cx);
+        if !input.focus_handle(cx).is_focused(window)
+            || !input.value().is_empty()
+            || !self.pending_images.is_empty()
+        {
+            return false;
+        }
+        let command = if forward {
+            crate::sessions::NEXT_SESSION
+        } else {
+            crate::sessions::PREV_SESSION
+        };
+        let stepped = command.run(&(), cx);
+        cx.spawn(async move |_| {
+            if let Err(error) = stepped.await {
+                eprintln!("[conversation] 切换会话失败：{error}");
+            }
+        })
+        .detach();
+        true
     }
 
     /// 上一轮没正常结束时，再来一次。输入框里的草稿和图都不受影响。

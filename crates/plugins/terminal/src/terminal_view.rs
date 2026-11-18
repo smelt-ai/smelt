@@ -1088,12 +1088,30 @@ impl Render for TerminalView {
         let search_input = self.search_input.clone();
         let scroll_info = self.terminal.scroll_info();
 
+        // 从访达拖文件进来 = 把引好的路径打进去，跟系统终端一样。只认本机终端：别的机器上
+        // 本机路径没有意义。默认底是透明的，悬停时整块铺选区色，表示「放这里」。
+        let accepts_drop = self.machine == RuntimeKey::Local;
+
         div()
             .relative()
             .track_focus(&self.focus_handle)
             // 见 TerminalTab/TerminalBackTab 上的注释：让 Tab/Shift-Tab 在终端聚焦时
             // 归终端自己处理，别被 Root 的全局焦点跳转吃掉。
             .key_context("Terminal")
+            .when(accepts_drop, |el| {
+                el.drag_over::<ExternalPaths>(|style, _, _, _| {
+                    style.bg(smelt_plugin_api::ui::ui_theme::selection())
+                })
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                    let text = terminal::dropped_paths_text(paths.paths());
+                    if text.is_empty() {
+                        return;
+                    }
+                    this.paste_text(&text, cx);
+                    this.terminal.scroll_to_bottom();
+                    window.focus(&this.focus_handle, cx);
+                }))
+            })
             .size_full()
             // 关键：裁剪溢出 + 允许收缩到 0，否则长行的 min-content 宽度会把
             // 容器越撑越宽，canvas 量到更大宽度 → 列数变多 → 行更长，形成放大循环。

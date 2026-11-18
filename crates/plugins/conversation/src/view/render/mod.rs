@@ -10,6 +10,7 @@ use smelt_plugin_api::ui::truncated_line::truncated_line;
 
 use super::ConversationTranscript;
 use smelt_plugin_api::ui::kit::TYPE;
+use smelt_plugin_api::ui::motion::{EnterFrom, OverlayEnter, overlay_enter};
 
 mod cards;
 mod composer;
@@ -59,9 +60,16 @@ impl Render for ConversationView {
         if !cx.reduce_motion() && !self.pending_image_enter.is_empty() {
             window.request_animation_frame();
         }
+        // 「回到最新」是浮在消息流上的按钮，按浮层入场：淡入、从下面升 4px，减弱动态时直接到位。
+        // 只在它露着时取，收起后状态回收，下次出现从头播。id 带上视图，分屏里几段会话不串。
+        let jump_enter = self.viewing_history.then(|| {
+            let id: gpui::ElementId = ("acp-jump-to-latest-enter", cx.entity_id()).into();
+            overlay_enter(id, EnterFrom::Below, window, cx)
+        });
         self.view(
             composer_focus,
             sweep_presence,
+            jump_enter,
             ambient_motion_enabled(
                 ambient_application_active(cx),
                 window.is_window_active(),
@@ -79,6 +87,7 @@ impl ConversationView {
         &self,
         composer_focus: f32,
         sweep_presence: f32,
+        jump_enter: Option<OverlayEnter>,
         animate_ambient: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -459,7 +468,7 @@ impl ConversationView {
                         .child(prompt_chips),
                 )
         });
-        let jump_to_latest = self.viewing_history.then(|| {
+        let jump_to_latest = jump_enter.map(|enter| {
             div()
                 .flex()
                 .items_center()
@@ -469,19 +478,16 @@ impl ConversationView {
                 .right_0()
                 .justify_center()
                 .child(
-                    Button::new("acp-jump-to-latest")
-                        .floating()
-                        .icon(IconName::ArrowDown)
-                        .label(t!("scroll.latest"))
-                        .on_click(cx.listener(|this, _event, _window, cx| {
-                            this.set_viewing_history(false, cx);
-                            this.list_state.set_follow_mode(FollowMode::Tail);
-                        }))
-                        .with_animation(
-                            "acp-jump-to-latest-enter",
-                            Animation::new(std::time::Duration::from_millis(160)),
-                            |button, delta| button.opacity(delta),
-                        ),
+                    enter.apply(div().relative()).child(
+                        Button::new("acp-jump-to-latest")
+                            .floating()
+                            .icon(IconName::ArrowDown)
+                            .label(t!("scroll.latest"))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.set_viewing_history(false, cx);
+                                this.list_state.set_follow_mode(FollowMode::Tail);
+                            })),
+                    ),
                 )
         });
         let border = ui_theme::hair();
@@ -541,6 +547,22 @@ impl ConversationView {
             .capture_action(cx.listener(
                 |this, _: &gpui_base::input::MoveDown, _window, cx| {
                     if this.move_completion(1, cx) {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            // ⌘↑ / ⌘↓ 在空输入框里切上一段 / 下一段会话（见
+            // `step_session_from_empty_composer`）。同样得在 capture 阶段抢在输入框前面。
+            .capture_action(cx.listener(
+                |this, _: &gpui_base::input::MoveToStart, window, cx| {
+                    if this.step_session_from_empty_composer(false, window, cx) {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_base::input::MoveToEnd, window, cx| {
+                    if this.step_session_from_empty_composer(true, window, cx) {
                         cx.stop_propagation();
                     }
                 },
