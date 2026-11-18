@@ -46,6 +46,7 @@ bun="$("$ROOT/scripts/fetch-bun.sh")"
 "$bun" "$ROOT/agent/scripts/third-party-licenses.ts" > "$work/npm.txt"
 
 bun_version="$(sed -n 's/^BUN_VERSION=//p' "$ROOT/scripts/fetch-bun.sh")"
+bun_revision="$(sed -n 's/^BUN_REVISION=//p' "$ROOT/scripts/fetch-bun.sh")"
 
 mkdir -p "$OUT"
 cp "$ROOT/LICENSE" "$OUT/LICENSE"
@@ -78,7 +79,7 @@ Part 3: Bun runtime compiled into smelt-agent
 Bun ${bun_version}
 License: MIT, with bundled components under their own licenses, including
 JavaScriptCore and WebKit (LGPL-2.1 / BSD).
-Full license: https://github.com/oven-sh/bun/blob/bun-v${bun_version}/LICENSE.md
+Full license: https://github.com/oven-sh/bun/blob/${bun_revision}/LICENSE.md
 WebKit / JavaScriptCore source: https://github.com/oven-sh/WebKit
 EOF
 } > "$OUT/THIRD_PARTY_LICENSES.txt"

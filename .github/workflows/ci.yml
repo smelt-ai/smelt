@@ -320,11 +320,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # 与 scripts/fetch-bun.sh 的 BUN_VERSION 保持一致。
+      # 和打包进 App 的是同一份（版本、哈希在 scripts/fetch-bun.sh）；setup-bun 装不了 npm 上的 canary。
       - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.4"
+        run: dirname "$(../scripts/fetch-bun.sh)" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile

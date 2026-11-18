@@ -155,7 +155,7 @@
 - **鉴权**。macOS 的 codesign 路径不动。Windows 走同一用户 SID：pid 来自管道的 `GetNamedPipeClientProcessId`，exe 来自 `process_executable`，必须 `same_user_as_current`，并且不能是守护自己的 pid。basename 和 `"smelt"` 比的时候去掉一个结尾的 `.exe`、大小写不敏感，不另加一行表，免得 macOS 的 signing-id 列分叉。路径要和守护目录旁边的 `smelt.exe` 相同，或者和 `SMELT_BUNDLE_DIR`（桌面拉起守护时写成 GUI exe 所在目录）旁边的 `smelt.exe` 相同。托管的守护是 `~/.smelt/bin/smeltd.exe`，GUI 在安装目录，只认守护目录的兄弟会把桌面拒掉。不做 Authenticode。
 - **升级**。不交接 fd（`handoff_v2` 已删）。升级先优雅停机：收割子进程、回写未完成回合、WAL checkpoint，最后回执。Unix 回执后在本进程里 `exec` 新版本；Windows 不能 `exec`，拉起新版本当接班进程（`SMELTD_PREDECESSOR_PID` 告诉它前任是谁），接班进程等前任退出、放掉监听再绑定；30 秒还没退就是卡在退出路上，结束它再绑（只认创建时间早于自己的那个 pid，不会误杀复用了 pid 的进程）。不结束的话，旧版本的前任停机时不关 Bun 那条管道的监听，会和接班进程挂在同一个管道名下。终端会话和进行中的回合会中断，历史还在。
 - **守护和 smelt-agent 的位置**。不建符号链接（那要额外权限）。守护复制成 `~/.smelt/bin/smeltd.exe`，smelt-agent 一整套复制进 `~/.smelt/bin/agent\`。正在执行的 exe 换不掉，所以桌面一律先停守护再装（新版桌面起来后等没有进行中的会话再重启守护）。
-- **Bun**。`scripts/fetch-bun.sh` 在 Windows 上取 `bun-windows-x64.zip`（Bun 1.4.4），装成 `bin/bun.exe`（硬链接或复制）。`agent/scripts/build-smelt-agent.sh` 编出 `smelt-agent.exe`。
+- **Bun**。`scripts/fetch-bun.sh` 在 Windows 上从 npm 取 `@oven/bun-windows-x64`（版本见脚本），装成 `bin/bun.exe`（硬链接或复制）。`agent/scripts/build-smelt-agent.sh` 编出 `smelt-agent.exe`。
 - **Shell 和进程**。交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`。没有参数的自动化 Shell 脚本同样走 `cmd.exe /d /c`，不调用 bash。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。ConPTY 不能 `CREATE_SUSPENDED`，shell 起来之后立刻 `attach_running`。PTY 尺寸走 master 的 `resize`，不用 `as_raw_fd`。
 - **发版**。安装程序 `smelt-<版本>-windows-x86_64-setup.exe` 装进安装目录的是 `smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`，外加 Pi 要的 wasm。桌面在自己旁边找这几个 exe。`smelt.com` 是控制台子系统的命令行入口（`smelt-cli.exe` 改名），cmd / PowerShell 敲 `smelt` 先找到它。
 

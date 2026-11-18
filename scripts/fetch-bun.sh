@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# 把钉死的 Bun 1.4.4 放进 target/bundled-bun/<id>/bun。已有且可执行文件哈希相符就复用。
+# 把钉死的 Bun 放进 target/bundled-bun/<id>/bun。已有且可执行文件哈希相符就复用。
+# 从 npm 取 Bun 官方发的 @oven/bun-<平台> 包：正式版和 canary 都有，版本号发出去就不会再变。
+# GitHub 的 canary 标签每天被新构建覆盖，钉不住。
 # 用法：scripts/fetch-bun.sh [darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64]
 # `--managed-only` 只是不走 PATH，和默认行为一样。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUN_VERSION=1.4.4
+# canary：Bun 自报的 Node 版本要 26.12.1 以上，REA 6.8 起才跑得起来（1.4.4 报 26.3.0）。
+# 1.4.4 之后的正式版发出来就换回正式版。
+BUN_VERSION=1.4.4-canary.20261117.1
+# 这个版本对应的提交，第三方许可证清单链到它的 LICENSE.md。
+BUN_REVISION=67d1f55fb37905fca35379daa7a2ca07595c552d
 
 host_id() {
   local os arch
@@ -40,30 +46,30 @@ ID="${ID:-$(host_id)}"
 
 case "$ID" in
   darwin-arm64)
-    ZIP=bun-darwin-aarch64.zip
-    ARCHIVE_SHA=c240d7f0ccb90c263a849fcdb09b7ee62630d921348ed6aafda86b9d577bc510
-    EXE_SHA=0a2237cdcfa0d16ef501d9acca9f0026309ef348bea7393a64e8d1e3609565cc
+    PKG=darwin-aarch64
+    ARCHIVE_SHA=96a926bd444eb97c191faecf1d722bffb0787ed6a92fd7c6c9a1266851e85f8e
+    EXE_SHA=f4dc3ab64a976bf0ef434d3cf0370902ff34dba11ad5b914c33c250c17428823
     ;;
   darwin-x64)
-    ZIP=bun-darwin-x64.zip
-    ARCHIVE_SHA=50a3491f73abc2fe81673171a85762d3bc2cc1680ccecadd983de99adf77977e
-    EXE_SHA=c35307c7d45d65c5a385a58c4a6cb0bb9499e4e626abdee207c177a77ba666ab
+    PKG=darwin-x64
+    ARCHIVE_SHA=97ea5d3338366d8184045b18414c29f9a90f77222fe855116b7f1f7c68612006
+    EXE_SHA=7b6d42af986ac61516351e08296ddd985561dec962f443f086c99017dbd7e8eb
     ;;
   linux-x64)
-    ZIP=bun-linux-x64-baseline.zip
-    ARCHIVE_SHA=e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76
-    EXE_SHA=10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235
+    PKG=linux-x64-baseline
+    ARCHIVE_SHA=82bd54499b6d03dbe02122cd19895b1c24b8043e734f789aed6f74cd2a44a512
+    EXE_SHA=7ffbea5287a829735bea3926a0ca9e09e6e94513ac9e9b668daf399797ccd54f
     ;;
   linux-arm64)
-    ZIP=bun-linux-aarch64.zip
-    ARCHIVE_SHA=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e
-    EXE_SHA=354c2b049c716aca07b2e5cddb887928ac58950675d1258bb6312083917793b6
+    PKG=linux-aarch64
+    ARCHIVE_SHA=eae6c5acb5c57a0ad4faa9daf8c7d0c947defe5fbc3e6fb20366977d57e9efec
+    EXE_SHA=657c4833a441ee3721b44bfb5f293fbafeb43b3089d5c7346127ab4372b59f18
     ;;
   windows-x64)
-    ZIP=bun-windows-x64.zip
-    ARCHIVE_SHA=cd2c0fccc78f3ede1f50ca827a15f063eda13d4d150a3d0674f4f6e323d864a5
-    # 压缩包里是 bun-windows-x64/bun.exe。
-    EXE_SHA=cb1d8e6564e655e49d30cead359750a1cbbd12f42651caa4b62244d7bd93c244
+    PKG=windows-x64
+    ARCHIVE_SHA=07fd69b8b1c78e951148aafd827a3611ff05f35c26262010627d59cd1dc8f118
+    # 包里是 package/bin/bun.exe。
+    EXE_SHA=e54341c155c12956bc7169a8e3de6ccd013319673cf4a95bb4364618375a19e4
     BIN_NAME=bun.exe
     ;;
 esac
@@ -93,14 +99,16 @@ fi
 mkdir -p "$DEST"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-url="https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${ZIP}"
-curl -fsSL --retry 3 -o "$tmp/$ZIP" "$url"
-archive="$(sha256_file "$tmp/$ZIP")"
+TGZ="bun-${PKG}-${BUN_VERSION}.tgz"
+url="https://registry.npmjs.org/@oven/bun-${PKG}/-/${TGZ}"
+curl -fsSL --retry 3 -o "$tmp/$TGZ" "$url"
+archive="$(sha256_file "$tmp/$TGZ")"
 if [[ "$archive" != "$ARCHIVE_SHA" ]]; then
   echo "✗ Bun 压缩包哈希不符：$archive" >&2
   exit 1
 fi
-unzip -q "$tmp/$ZIP" -d "$tmp/out"
+mkdir "$tmp/out"
+tar -xzf "$tmp/$TGZ" -C "$tmp/out"
 found="$(find "$tmp/out" -type f -name "$BIN_NAME" -print -quit)"
 if [[ -z "$found" ]]; then
   echo "✗ 压缩包里没有 $BIN_NAME" >&2
