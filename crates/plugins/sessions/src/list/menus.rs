@@ -92,14 +92,6 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
     let root = project.root.clone();
     let mut menu = Menu::new();
     if !root.is_empty() {
-        let new_session = {
-            let (machine, root) = (machine.clone(), root.clone());
-            MenuItem::new(t!("menu.new_session"))
-                .icon(IconName::Plus)
-                .on_click(move |_, window, cx| {
-                    dialogs::open_new_session(Some(machine.clone()), Some(root.clone()), window, cx)
-                })
-        };
         let repositories = {
             let (machine, root) = (machine.clone(), root.clone());
             MenuItem::new(t!("menu.manage_repositories"))
@@ -116,7 +108,7 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
                     dialogs::open_new_worktree(machine.clone(), root.clone(), window, cx)
                 })
         };
-        menu = menu.item(new_session).item(new_worktree).item(repositories);
+        menu = menu.item(new_worktree).item(repositories);
         let context = ProjectMenuContext {
             machine: machine.clone(),
             path: root.clone(),
@@ -198,14 +190,6 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
 pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Menu {
     let machine = workset.machine.clone();
     let id = workset.id.clone();
-    let new_session = {
-        let (machine, path) = (machine.clone(), workset.path.clone());
-        MenuItem::new(t!("menu.new_session"))
-            .icon(IconName::Plus)
-            .on_click(move |_, window, cx| {
-                dialogs::open_new_session(Some(machine.clone()), Some(path.clone()), window, cx)
-            })
-    };
     let pin = {
         let (machine, id, pinned) = (machine.clone(), id.clone(), workset.pinned);
         MenuItem::new(if pinned {
@@ -275,8 +259,6 @@ pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Me
             })
     };
     Menu::new()
-        .item(new_session)
-        .separator()
         .item(pin)
         .item(rename)
         .separator()

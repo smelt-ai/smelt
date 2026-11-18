@@ -12,20 +12,11 @@ use smelt_plugin_api::RuntimeKey;
 
 pub(crate) use new_session::NewSessionButton;
 
-/// 从命令打开新建会话的菜单（钉在窗口上方，带位置行）。项目行、工作树行的「+」贴着按钮弹，
-/// 用 [`NewSessionButton`]。选好了调 `lifecycle::create_conversation`。
-///
-/// - `machine`：预选的机器；`None` 按眼下活动项目所在的机器，没有就是本机。
-/// - `project`：预选的位置路径（那台机器上的路径）。是项目根就预选那个项目；落在某个工作树
-///   （工作集，`<项目根>/worktrees/<任务名>`）里就预选那个工作树，S1 的工作树行传工作树
-///   路径。目录里还对不上的按项目根用。`None` 按活动项目，再不行取那台机器上第一个项目。
-pub(crate) fn open_new_session(
-    machine: Option<RuntimeKey>,
-    project: Option<String>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    new_session::open(machine, project, window, cx);
+/// 从命令打开新建会话的菜单（钉在窗口上方，带位置行）：预选眼下活动项目，没有就取本机上
+/// 第一个项目。项目行、工作树行的「+」贴着按钮弹，用 [`NewSessionButton`]；行的右键菜单不再
+/// 重复这一项。选好了调 `lifecycle::create_conversation`。
+pub(crate) fn open_new_session(window: &mut Window, cx: &mut App) {
+    new_session::open(window, cx);
 }
 
 /// 打开项目的仓库对话框（纳入、克隆、移除仓库，建工作集）。

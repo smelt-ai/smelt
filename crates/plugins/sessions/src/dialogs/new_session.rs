@@ -62,13 +62,8 @@ const ROW_HEIGHT: f32 = 28.;
 const PADDING: f32 = 4.;
 
 /// 从命令打开：钉在窗口上方，带位置行。
-pub(super) fn open(
-    machine: Option<RuntimeKey>,
-    project: Option<String>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let (machine, root, workset) = initial_location(machine, project, cx);
+pub(super) fn open(window: &mut Window, cx: &mut App) {
+    let (machine, root, workset) = initial_location(None, None, cx);
     let state = cx.new(|cx| NewSession::new(machine, root, workset, Host::Palette, cx));
     let focus = state.read(cx).focus.clone();
     dialog::open(window, cx, move |card, _, _| {

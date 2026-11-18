@@ -54,7 +54,7 @@ pub(crate) fn register(cx: &mut App) {
             api::text!("menu.new_session"),
             None,
             |window, cx| {
-                dialogs::open_new_session(None, None, window, cx);
+                dialogs::open_new_session(window, cx);
                 Handled::ok()
             },
         ),
