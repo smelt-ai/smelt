@@ -606,11 +606,13 @@ fn a_recently_active_conversation_sets_the_next_wake() {
     let (session, _cmd_rx) = direct_session(quiet_state());
     let (slot, _) = acp_sessions.reserve_with("acp-idle-recent", || session);
     let before = crate::event_hub::now_ms();
+    let idle_after = acp_idle::ACP_IDLE_SUSPEND_AFTER.as_millis() as u64;
     let sweep =
         acp_idle::suspend_idle_acp_sessions(&acp_sessions, acp_idle::ACP_IDLE_SUSPEND_AFTER);
     let deadline = sweep.next_deadline_ms.expect("还没闲置够的会话要排上截止");
+    // 会话建好时记的活动早于 `before`，截止落在 `before` 加闲置期前后，差不过一秒。
     assert!(
-        deadline > before + 29 * 60 * 1_000,
+        deadline + 1_000 > before + idle_after && deadline <= before + idle_after,
         "截止是最后活动加闲置期"
     );
     assert!(!sweep.contended);
