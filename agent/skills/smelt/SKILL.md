@@ -1,6 +1,6 @@
 ---
 name: smelt
-description: 用 smelt CLI 操作本机 Smelt：产品智能体、侧栏对话、自动化及其运行记录、MCP 服务器、插件、默认模型、用量和外观设置。用户说新建/修改智能体、开对话、整理对话、建定时任务、看自动化跑得怎样、加 MCP、导入技能、换模型、改主题字体时使用。
+description: 用 smelt CLI 操作本机 Smelt：产品智能体、侧栏对话、自动化及其运行记录、MCP 服务器、默认模型、用量和外观设置；也讲怎么写 Smelt 插件（App 界面插件）。用户说新建/修改智能体、开对话、整理对话、建定时任务、看自动化跑得怎样、加 MCP、换模型、改主题字体、写 Smelt 插件时使用。
 ---
 
 # Smelt 控制面
@@ -14,11 +14,11 @@ description: 用 smelt CLI 操作本机 Smelt：产品智能体、侧栏对话�
 下面这些动作直接生效，执行前先把要做的事讲清楚、等用户同意：
 
 - 删除：`agent delete`、`automation delete`、`conversation delete`（不可恢复）。
-- 全局能力，对所有智能体生效：`mcp add|enable|disable|remove`、`plugin import|remove`、`model default|thinking`。
+- 全局能力，对所有智能体生效：`mcp add|enable|disable|remove`、`model default|thinking`。
 
 ## 智能体
 
-智能体是长期定义（名称、工作方式、插件、MCP、模型），不是正在跑的对话。
+智能体是长期定义（名称、工作方式、技能、MCP、模型），不是正在跑的对话。
 
 ```sh
 smelt agent list
@@ -32,7 +32,7 @@ smelt agent delete <id>
 ```
 
 - `--plugin` / `--mcp` / `--folder` / `--link` 可以重复写多个。update 时是整份替换，写 `""` 清空；只改 prompt 时不要带它们。
-- 插件 id 从 `smelt plugin list` 取，MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
+- `--plugin` 勾的是这个智能体能用的技能和扩展，和下面的 Smelt 插件无关，id 从 `smelt plugin list` 取。MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
 - `--model default` 跟随 Pi 的默认模型。
 - `--memory on|off` 开关这个智能体的长期记忆（默认开）。关掉后不注入、不写入，已有记忆文件保留；正在进行的对话下一轮生效。
 - `chat` 开一场新对话，出现在桌面「对话」栏。带 `--message` 会把第一句话发出去。返回的 `session_id` 是这场对话的 id，后面的操作都用它，不要拿智能体 id 去改标题。
@@ -87,17 +87,13 @@ smelt notify [--title <标题>] <内容>
 
 桌面弹系统通知，并推给在 Smelt 手机端打开了「智能体消息」的手机；人在不在电脑前都推。Pi 对话里用 `notify_user` 工具（会带上会话名，点开推送直接进那段会话），CLI 给脚本和别的智能体用。只在真有事要用户知道时发，别拿来报进度。
 
-## 能力：MCP、插件、模型、用量
+## 能力：MCP、模型、用量
 
 ```sh
 smelt mcp list
 smelt mcp presets
 smelt mcp add <预设id>
 smelt mcp enable|disable|remove <服务器名>
-smelt plugin list
-smelt plugin import --skill <技能目录>
-smelt plugin import --extension <扩展路径>
-smelt plugin remove <id>
 smelt model list
 smelt model default <provider>/<模型id>
 smelt model thinking off|minimal|low|medium|high|xhigh
@@ -106,7 +102,6 @@ smelt quota
 
 - `mcp add` 只能加预设。结果里有 `next` 时（要登录、要装浏览器扩展），照原样转告用户去做；登录要开浏览器，CLI 代办不了。
 - 自定义 MCP 服务器、登录模型账号、填 API key 都在桌面设置的能力库里做，CLI 不提供。
-- `plugin import` 的相对路径按当前目录算。
 - `model default` 只能挑 `model list` 里有的模型，推理强度保持原样。
 - `quota` 看各模型账号的用量。
 
@@ -134,3 +129,26 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
 - `memory.embedding_api_key`：本地服务可不填。
 
 填空字符串清除。没配或服务不可用时，召回退回关键词 + 模型重排。召回重排模型用 `memory.rerank_model_provider` + `memory.rerank_model_id`（Pi 里已登录的模型），都空表示自动挑。
+
+## 写 Smelt 插件
+
+Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui-shell 脚本）写界面，GPUI 原生绘制，在桌面「设置 → 面板插件」里导入、删除、重新加载。CLI 不管它。
+
+```
+hello/
+  gpui-shell.json   {"id": "com.example.hello", "name": "你好", "version": "0.1.0", "entry": "main.js"}
+  main.js           export default class Hello extends View { init(props, cx) {…} render(cx) {…} }
+```
+
+- id 只用小写字母、数字和 `.-_`，导入后就是目录名。
+- 接口以 `gpui-kit.d.ts` 为准，不要凭印象写。Smelt 加载用户插件时会把它生成到插件目录里，里面是 `gpui-kit`、`gpui-base`、`smelt-ui`、`smelt-plugin-api`、`smelt-fs` 等模块的完整声明，各插件拿到的是同一份。动手前先找一份读：`ls ~/.smelt/plugins/*/gpui-kit.d.ts`。一份都没有，就先写个最小的插件请用户导入，导入后它就生成出来了。
+- 示例：https://github.com/smelt-ai/smelt-plugin-demo（按钮、状态、系统通知、主题）。
+- 控件用 `smelt-ui` 的，样子和 Smelt 一致。`smelt-plugin-api` 里有：登记视图、命令、页面、布局、主题、菜单（`register_*`），`await next_event()` 等宿主事件，`next_command()` 接自己登记的命令，`store_query` / `store_execute` 读写插件自己的 SQLite 库，`call(machine, method, params)` 调运行时，`locale()` 取当前语言。
+- `render` 只读内存：读写文件、跑命令、联网都放到事件回调或 `cx.spawn` 里，结果存在视图上，render 只画它。要等变化就 `await next_event()`，不要定时轮询。
+- 插件是可信代码，能读写任意文件、运行任意命令，和 Smelt 本身一样。
+
+装上和调试：
+
+1. 新插件写在用户指定的目录（没指定就放当前项目里），写好后请用户在「设置 → 面板插件 → 导入插件…」选这个目录。导入就是用户同意装上；不要自己往 `~/.smelt/plugins/` 里放新插件。
+2. 导入是把目录复制到 `~/.smelt/plugins/<id>/`，之后改原目录不生效。接着调试就直接改已装的那份（`gpui-kit.d.ts` 也在那里），改完请用户点同一页的「重新加载」，不用重启。
+3. `console.log` 和脚本错误写进 `~/.smelt/app.log`，带 `[plugin]` 标记；加载失败的原因也会直接画在插件视图里。
