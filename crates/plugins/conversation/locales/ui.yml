@@ -349,29 +349,6 @@ fork:
     en: "Fork Conversation"
     zh-CN: "分叉对话"
 group:
-  agents:
-    one:
-      en: "1 agent"
-      zh-CN: "1 个 Agent"
-    other:
-      en: "%{count} agents"
-      zh-CN: "%{count} 个 Agent"
-  agents_working:
-    one:
-      en: "1 agent working"
-      zh-CN: "1 个 Agent 工作中"
-    other:
-      en: "%{count} agents working"
-      zh-CN: "%{count} 个 Agent 工作中"
-  collaborating:
-    en: "Collaborating · %{agents}"
-    zh-CN: "正在协作 · %{agents}"
-  more:
-    en: "and more"
-    zh-CN: "等"
-  some_agents_working:
-    en: "%{active}/%{total} agents working"
-    zh-CN: "%{active}/%{total} 个 Agent 工作中"
   steps:
     en: "Steps"
     zh-CN: "执行过程"
@@ -764,8 +741,12 @@ run:
       en: "Processed %{count} images"
       zh-CN: "处理了 %{count} 张图"
   other:
-    en: "%{kind} ×%{count}"
-    zh-CN: "%{kind} %{count} 次"
+    one:
+      en: "1 other tool call"
+      zh-CN: "其他工具 1 次"
+    other:
+      en: "%{count} other tool calls"
+      zh-CN: "其他工具 %{count} 次"
   read:
     one:
       en: "Read 1 file"
@@ -780,46 +761,6 @@ run:
     other:
       en: "Searched %{count} times"
       zh-CN: "搜索了 %{count} 次"
-running:
-  collaborate:
-    en: "Collaborating"
-    zh-CN: "正在协作"
-  compact:
-    en: "Compacting context"
-    zh-CN: "正在整理上下文"
-  edit:
-    en: "Editing"
-    zh-CN: "正在修改"
-  execute:
-    en: "Running"
-    zh-CN: "正在运行"
-  fetch:
-    en: "Fetching"
-    zh-CN: "正在获取"
-  image:
-    en: "Processing images"
-    zh-CN: "正在处理图片"
-  other:
-    en: "Working"
-    zh-CN: "正在处理"
-  read:
-    en: "Reading"
-    zh-CN: "正在读取"
-  review:
-    en: "Reviewing"
-    zh-CN: "正在审阅"
-  search:
-    en: "Searching"
-    zh-CN: "正在搜索"
-  switch_mode:
-    en: "Switching mode"
-    zh-CN: "正在切换模式"
-  think:
-    en: "Analyzing"
-    zh-CN: "正在分析"
-  wait:
-    en: "Waiting"
-    zh-CN: "正在等待"
 scroll:
   latest:
     en: "Jump to Latest"
@@ -946,98 +887,63 @@ submit:
   unknown:
     en: "Unknown whether it was sent: %{error}. Sending again may duplicate it."
     zh-CN: "发送结果未知：%{error}；再次发送可能重复。"
-summary:
-  collaborate:
+tally:
+  agents:
     one:
-      en: "1 agent"
-      zh-CN: "1 个 Agent"
+      en: "1 subagent"
+      zh-CN: "1 个子智能体"
     other:
-      en: "%{count} agents"
-      zh-CN: "%{count} 个 Agent"
-  compact:
+      en: "%{count} subagents"
+      zh-CN: "%{count} 个子智能体"
+  commands:
     one:
-      en: "Compacted context once"
-      zh-CN: "整理了 1 次上下文"
+      en: "Ran 1 command"
+      zh-CN: "运行 1 条命令"
     other:
-      en: "Compacted context %{count} times"
-      zh-CN: "整理了 %{count} 次上下文"
-  edit:
+      en: "Ran %{count} commands"
+      zh-CN: "运行 %{count} 条命令"
+  edits:
     one:
-      en: "Edited once"
-      zh-CN: "修改了 1 次"
+      en: "Edited 1 file"
+      zh-CN: "改了 1 个文件"
     other:
-      en: "Edited %{count} times"
-      zh-CN: "修改了 %{count} 次"
-  execute:
+      en: "Edited %{count} files"
+      zh-CN: "改了 %{count} 个文件"
+  failed:
     one:
-      en: "Ran once"
-      zh-CN: "运行了 1 次"
+      en: "1 failed"
+      zh-CN: "1 个失败"
     other:
-      en: "Ran %{count} times"
-      zh-CN: "运行了 %{count} 次"
-  fetch:
+      en: "%{count} failed"
+      zh-CN: "%{count} 个失败"
+  fetches:
     one:
-      en: "Fetched once"
-      zh-CN: "获取了 1 次"
+      en: "Opened 1 page"
+      zh-CN: "打开 1 个网页"
     other:
-      en: "Fetched %{count} times"
-      zh-CN: "获取了 %{count} 次"
-  image:
+      en: "Opened %{count} pages"
+      zh-CN: "打开 %{count} 个网页"
+  others:
     one:
-      en: "Processed 1 image"
-      zh-CN: "处理了 1 张图片"
+      en: "1 other tool call"
+      zh-CN: "其他工具 1 次"
     other:
-      en: "Processed %{count} images"
-      zh-CN: "处理了 %{count} 张图片"
-  other:
+      en: "%{count} other tool calls"
+      zh-CN: "其他工具 %{count} 次"
+  reads:
     one:
-      en: "Worked once"
-      zh-CN: "处理了 1 次"
+      en: "Read 1 file"
+      zh-CN: "读取 1 个文件"
     other:
-      en: "Worked %{count} times"
-      zh-CN: "处理了 %{count} 次"
-  read:
-    one:
-      en: "Read once"
-      zh-CN: "读取了 1 次"
-    other:
-      en: "Read %{count} times"
-      zh-CN: "读取了 %{count} 次"
-  review:
-    one:
-      en: "Reviewed once"
-      zh-CN: "审阅了 1 次"
-    other:
-      en: "Reviewed %{count} times"
-      zh-CN: "审阅了 %{count} 次"
-  search:
+      en: "Read %{count} files"
+      zh-CN: "读取 %{count} 个文件"
+  searches:
     one:
       en: "Searched once"
-      zh-CN: "搜索了 1 次"
+      zh-CN: "搜索 1 次"
     other:
       en: "Searched %{count} times"
-      zh-CN: "搜索了 %{count} 次"
-  switch_mode:
-    one:
-      en: "Switched mode once"
-      zh-CN: "切换了 1 次模式"
-    other:
-      en: "Switched mode %{count} times"
-      zh-CN: "切换了 %{count} 次模式"
-  think:
-    one:
-      en: "Analyzed once"
-      zh-CN: "分析了 1 次"
-    other:
-      en: "Analyzed %{count} times"
-      zh-CN: "分析了 %{count} 次"
-  wait:
-    one:
-      en: "Waited once"
-      zh-CN: "等待了 1 次"
-    other:
-      en: "Waited %{count} times"
-      zh-CN: "等待了 %{count} 次"
+      zh-CN: "搜索 %{count} 次"
 task:
   completed:
     en: "Done"
@@ -1109,6 +1015,9 @@ tool:
   pending:
     en: "Pending"
     zh-CN: "待执行"
+  unnamed:
+    en: "Tool"
+    zh-CN: "工具"
 trace:
   debug_unavailable:
     en: "Tool arguments and model calls are unavailable: %{error}"

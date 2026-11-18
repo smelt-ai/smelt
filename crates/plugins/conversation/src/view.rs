@@ -815,7 +815,9 @@ fn sync_changed_rows(list: &ListState, changed_from: usize, old_len: usize, new_
 /// 行高跟着变的那部分外观：是不是最终回答，在过程组里的位置，过程组是否还在进行。
 /// 位置按相对本行记，往前补历史页、下标整体后移时不算变化。耗时、工具计数这类只改
 /// 一行字的字段不算。
-fn row_shape(row: &EntryPresentation, ix: usize) -> (bool, Option<(usize, usize, bool)>) {
+type RowShape = (bool, Option<(usize, usize, bool)>, Option<(usize, usize)>);
+
+fn row_shape(row: &EntryPresentation, ix: usize) -> RowShape {
     (
         row.final_answer,
         row.process_group.map(|group| {
@@ -825,6 +827,8 @@ fn row_shape(row: &EntryPresentation, ix: usize) -> (bool, Option<(usize, usize,
                 group.active,
             )
         }),
+        row.turn_fold
+            .map(|fold| (ix.saturating_sub(fold.first), fold.end.saturating_sub(ix))),
     )
 }
 
@@ -1622,9 +1626,12 @@ pub struct ConversationView {
     /// 过程组里对用户说的中间正文，以及后台任务 / 子智能体状态行的输出共用这份状态；
     /// 只属于当前视图。
     expanded_thoughts: std::collections::HashSet<usize>,
-    /// 手动展开的回合执行过程（key = 该组第一条 entry 的索引）。默认整组收起。
-    /// 展开后工具、思考和对用户说的中间正文都留在时间线上。
+    /// 手动展开的一段过程（key = 该段第一条 entry 的索引）。在跑的段也默认收成一行计数，
+    /// 展开后才是逐条工具。
     expanded_process_groups: std::collections::HashSet<usize>,
+    /// 手动展开的已结束回合（key = 折叠范围第一条 entry 的索引）。默认只剩一行工作摘要，
+    /// 展开后露出过程说明和每段的计数行。
+    expanded_turn_folds: std::collections::HashSet<usize>,
     /// 只武装刚发送的那一条。历史加载和虚拟列表回收不会重播。
     user_enter: Option<UserBubbleEnter>,
     user_enter_nonce: u64,
@@ -1952,6 +1959,7 @@ impl ConversationView {
             subagent_inspector: None,
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_process_groups: std::collections::HashSet::new(),
+            expanded_turn_folds: std::collections::HashSet::new(),
             user_enter: None,
             user_enter_nonce: 0,
             menu_failure: None,
@@ -2854,6 +2862,11 @@ impl ConversationView {
             .collect();
         self.expanded_process_groups = self
             .expanded_process_groups
+            .drain()
+            .map(|entry_ix| entry_ix + page_len)
+            .collect();
+        self.expanded_turn_folds = self
+            .expanded_turn_folds
             .drain()
             .map(|entry_ix| entry_ix + page_len)
             .collect();
@@ -4416,6 +4429,8 @@ impl ConversationView {
         self.expanded_thoughts.retain(|ix| *ix < self.entries.len());
         self.expanded_process_groups
             .retain(|ix| *ix < self.entries.len());
+        self.expanded_turn_folds
+            .retain(|ix| *ix < self.entries.len());
         self.thought_reveals
             .retain(|ix, _| *ix < self.entries.len());
         let entry_len = self.entries.len();
@@ -5575,6 +5590,18 @@ fn is_peer_send_entry(entry: &AcpEntry) -> bool {
     matches!(entry, AcpEntry::ToolCall { peer: Some(_), .. })
 }
 
+/// 收进回合摘要的条目：工具、后台任务行、失败行、过程说明。只有思考的回合不收。
+fn folds_into_turn_summary(entry: &AcpEntry) -> bool {
+    match entry {
+        AcpEntry::ToolCall { .. } | AcpEntry::TaskNote(_) | AcpEntry::TurnFailed { .. } => true,
+        AcpEntry::Assistant {
+            text,
+            thought: false,
+        } => !text.trim().is_empty(),
+        _ => false,
+    }
+}
+
 fn is_collaboration_entry(entry: &AcpEntry) -> bool {
     matches!(
         entry,
@@ -5978,7 +6005,12 @@ fn compact_tool_run_label(kind: ToolKind, count: usize) -> String {
             t!("run.image.one"),
             t!("run.image.other", count = count),
         ),
-        _ => t!("run.other", kind = tool_kind_label(&kind), count = count).into_owned(),
+        // 认不出名字的工具不露英文类别名，统称其他工具。
+        _ => crate::plural(
+            count,
+            t!("run.other.one"),
+            t!("run.other.other", count = count),
+        ),
     }
 }
 
@@ -5986,7 +6018,7 @@ fn compact_tool_run_label(kind: ToolKind, count: usize) -> String {
 pub fn compact_tool_headline(kind: ToolKind, title: &str) -> String {
     let title = title.trim();
     if title.is_empty() {
-        return tool_kind_label(&kind).to_string();
+        return t!("tool.unnamed").into_owned();
     }
     match kind {
         ToolKind::Fetch => t!("headline.fetch", target = compact_fetch_target(title)).into_owned(),
@@ -6473,176 +6505,233 @@ fn render_compact_diff_stats(added: usize, removed: usize) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// 一段过程里各类工具的次数。改动按文件去重；子智能体按派出的个数算；认不出的工具
+/// 都记进 `others`。失败另计，界面上标红。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ToolTally {
+    commands: usize,
+    reads: usize,
+    edited_files: usize,
+    searches: usize,
+    fetches: usize,
+    agents: usize,
+    others: usize,
+    failed: usize,
+}
+
+fn tally_tools(entries: &[AcpEntry], indices: impl IntoIterator<Item = usize>) -> ToolTally {
+    let mut tally = ToolTally::default();
+    let mut edited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for ix in indices {
+        let Some(AcpEntry::ToolCall {
+            title,
+            kind,
+            status,
+            output,
+            subagents,
+            peer,
+            ..
+        }) = entries.get(ix)
+        else {
+            continue;
+        };
+        if peer.is_some() || is_task_completion_tool_title(title) {
+            continue;
+        }
+        let failed = matches!(status, ToolCallStatus::Failed);
+        if failed {
+            tally.failed += 1;
+        }
+        if !subagents.is_empty() {
+            tally.agents += subagents.len();
+            continue;
+        }
+        match kind {
+            ToolKind::Execute => tally.commands += 1,
+            ToolKind::Read => tally.reads += 1,
+            ToolKind::Search => tally.searches += 1,
+            ToolKind::Fetch => tally.fetches += 1,
+            ToolKind::Collaborate => tally.agents += 1,
+            // 失败的修改没改到文件。没有 diff 的修改按标题记一个文件。
+            ToolKind::Edit | ToolKind::Delete | ToolKind::Move if !failed => {
+                let before = edited.len();
+                for part in output {
+                    if let ToolOutputPart::Diff { path, .. } = part {
+                        edited.insert(path.as_str());
+                    }
+                }
+                if edited.len() == before
+                    && !output
+                        .iter()
+                        .any(|part| matches!(part, ToolOutputPart::Diff { .. }))
+                {
+                    edited.insert(title.as_str());
+                }
+            }
+            ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {}
+            _ => tally.others += 1,
+        }
+    }
+    tally.edited_files = edited.len();
+    tally
+}
+
+fn tally_commands(count: usize) -> String {
+    crate::plural(
+        count,
+        t!("tally.commands.one"),
+        t!("tally.commands.other", count = count),
+    )
+}
+
+fn tally_edits(count: usize) -> String {
+    crate::plural(
+        count,
+        t!("tally.edits.one"),
+        t!("tally.edits.other", count = count),
+    )
+}
+
+fn tally_agents(count: usize) -> String {
+    crate::plural(
+        count,
+        t!("tally.agents.one"),
+        t!("tally.agents.other", count = count),
+    )
+}
+
+/// 计数行：一类一句，没出现的不写。失败不在这里，见 `tally_failed_label`。
+fn tally_parts(tally: &ToolTally) -> Vec<String> {
+    let mut parts = Vec::new();
+    if tally.commands > 0 {
+        parts.push(tally_commands(tally.commands));
+    }
+    if tally.reads > 0 {
+        parts.push(crate::plural(
+            tally.reads,
+            t!("tally.reads.one"),
+            t!("tally.reads.other", count = tally.reads),
+        ));
+    }
+    if tally.edited_files > 0 {
+        parts.push(tally_edits(tally.edited_files));
+    }
+    if tally.searches > 0 {
+        parts.push(crate::plural(
+            tally.searches,
+            t!("tally.searches.one"),
+            t!("tally.searches.other", count = tally.searches),
+        ));
+    }
+    if tally.fetches > 0 {
+        parts.push(crate::plural(
+            tally.fetches,
+            t!("tally.fetches.one"),
+            t!("tally.fetches.other", count = tally.fetches),
+        ));
+    }
+    if tally.agents > 0 {
+        parts.push(tally_agents(tally.agents));
+    }
+    if tally.others > 0 {
+        parts.push(crate::plural(
+            tally.others,
+            t!("tally.others.one"),
+            t!("tally.others.other", count = tally.others),
+        ));
+    }
+    parts
+}
+
+fn tally_failed_label(tally: &ToolTally) -> Option<String> {
+    (tally.failed > 0).then(|| {
+        crate::plural(
+            tally.failed,
+            t!("tally.failed.one"),
+            t!("tally.failed.other", count = tally.failed),
+        )
+    })
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ProcessGroupInfo {
     first: usize,
     end: usize,
     /// 过程组所属回合仍在运行；不能借用整个视图的当前回合状态，否则旧组会被误标。
     active: bool,
-    /// 最近一项未结束的普通工具类别，用于“正在读取/搜索/修改”等语义状态。
+    /// 最近一项未结束的普通工具类别。没有时标题换成「正在想」的点。
     active_tool_kind: Option<ToolKind>,
-    /// 被 ACP 服务端投影为 tool_call 的子 agent / 委派操作数量。
-    agents: usize,
-    /// 尚未结束的 agent 操作。折叠执行过程时也必须让协作状态可见。
+    /// 尚未结束的 agent 操作。
     active_agents: usize,
-    /// 同一回合可能被正文拆成多段，只在最后一段显示回合耗时。
+    /// 同一回合可能被正文拆成多段，只在最后一段显示回合耗时；收成摘要的回合由摘要显示。
     show_elapsed: bool,
     /// 该回合从发出 prompt 到 TurnEnded 的耗时。旧会话没有计时。
     elapsed_ms: Option<u64>,
+    tally: ToolTally,
+}
+
+/// 跑完的一轮：提问和回答之间的过程（过程说明、思考、工具）收成一行摘要。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TurnFoldInfo {
+    /// 折叠范围里第一条看得见的 entry，摘要挂在它这一行。
+    first: usize,
+    /// 最终回答的下标，不含。
+    end: usize,
+    elapsed_ms: Option<u64>,
+    tally: ToolTally,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct EntryPresentation {
     final_answer: bool,
     process_group: Option<ProcessGroupInfo>,
+    turn_fold: Option<TurnFoldInfo>,
     show_settled_thought_elapsed: bool,
 }
 
-fn process_group_label(group: ProcessGroupInfo) -> String {
-    if group.active && group.active_agents > 0 {
-        return if group.active_agents == group.agents {
-            crate::plural(
-                group.active_agents,
-                t!("group.agents_working.one"),
-                t!("group.agents_working.other", count = group.active_agents),
-            )
-        } else {
-            t!(
-                "group.some_agents_working",
-                active = group.active_agents,
-                total = group.agents
-            )
-            .into_owned()
-        };
+/// 一段过程的标题：计数行；带回合耗时的那段（没收成摘要的回合）前面加「工作了 X」。
+/// 在跑的段的耗时挂在行尾，不在这里。
+fn process_group_header_label(group: ProcessGroupInfo) -> String {
+    let mut parts = Vec::new();
+    if !group.active
+        && group.show_elapsed
+        && let Some(elapsed) = group.elapsed_ms
+    {
+        parts.push(t!("group.worked_for", elapsed = format_duration(elapsed)).into_owned());
     }
-    if group.active {
-        return if group.agents > 0 && group.active_tool_kind.is_none() {
-            t!(
-                "group.collaborating",
-                agents = crate::plural(
-                    group.agents,
-                    t!("group.agents.one"),
-                    t!("group.agents.other", count = group.agents)
-                )
-            )
-            .into_owned()
-        } else if let Some(kind) = group.active_tool_kind {
-            tool_running_label(kind).to_string()
-        } else {
-            t!("status.thinking").into_owned()
-        };
-    }
-    t!("group.steps").into_owned()
-}
-
-/// 过程组标题：进行中写当前动作；完成后只留 Grok 式「工作了 9s」，点开再看工具。
-fn process_group_header_label(entries: &[AcpEntry], group: ProcessGroupInfo) -> Option<String> {
-    if group.active {
-        return Some(process_group_label(group));
-    }
-    if let Some(elapsed) = group.elapsed_ms {
-        return Some(t!("group.worked_for", elapsed = format_duration(elapsed)).into_owned());
-    }
-    let summary = process_group_tool_summary(entries, group.first, group.end);
-    (!summary.is_empty()).then_some(summary)
-}
-
-fn process_group_tool_summary(entries: &[AcpEntry], first: usize, end: usize) -> String {
-    let mut counts: Vec<(ToolKind, usize)> = Vec::new();
-    for entry in entries.get(first..end).unwrap_or(&[]) {
-        let AcpEntry::ToolCall { kind, title, .. } = entry else {
-            continue;
-        };
-        if is_task_completion_tool_title(title) {
-            continue;
-        }
-        if let Some((_, count)) = counts.iter_mut().find(|(item, _)| *item == *kind) {
-            *count += 1;
-        } else {
-            counts.push((*kind, 1));
-        }
-    }
-    const MAX_KINDS: usize = 3;
-    let extra = counts.len().saturating_sub(MAX_KINDS);
-    let mut parts = counts
-        .iter()
-        .take(MAX_KINDS)
-        .map(|(kind, count)| tool_kind_summary(*kind, *count))
-        .collect::<Vec<_>>();
-    if extra > 0 {
-        parts.push(t!("group.more").into_owned());
+    parts.extend(tally_parts(&group.tally));
+    if parts.is_empty() {
+        parts.push(t!("group.steps").into_owned());
     }
     parts.join(" · ")
 }
 
-fn tool_kind_summary(kind: ToolKind, count: usize) -> String {
-    match kind {
-        ToolKind::Search => crate::plural(
-            count,
-            t!("summary.search.one"),
-            t!("summary.search.other", count = count),
-        ),
-        ToolKind::Read => crate::plural(
-            count,
-            t!("summary.read.one"),
-            t!("summary.read.other", count = count),
-        ),
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => crate::plural(
-            count,
-            t!("summary.edit.one"),
-            t!("summary.edit.other", count = count),
-        ),
-        ToolKind::Execute => crate::plural(
-            count,
-            t!("summary.execute.one"),
-            t!("summary.execute.other", count = count),
-        ),
-        ToolKind::Fetch => crate::plural(
-            count,
-            t!("summary.fetch.one"),
-            t!("summary.fetch.other", count = count),
-        ),
-        ToolKind::Think => crate::plural(
-            count,
-            t!("summary.think.one"),
-            t!("summary.think.other", count = count),
-        ),
-        ToolKind::Collaborate => crate::plural(
-            count,
-            t!("summary.collaborate.one"),
-            t!("summary.collaborate.other", count = count),
-        ),
-        ToolKind::Review => crate::plural(
-            count,
-            t!("summary.review.one"),
-            t!("summary.review.other", count = count),
-        ),
-        ToolKind::Image => crate::plural(
-            count,
-            t!("summary.image.one"),
-            t!("summary.image.other", count = count),
-        ),
-        ToolKind::Compact => crate::plural(
-            count,
-            t!("summary.compact.one"),
-            t!("summary.compact.other", count = count),
-        ),
-        ToolKind::Wait => crate::plural(
-            count,
-            t!("summary.wait.one"),
-            t!("summary.wait.other", count = count),
-        ),
-        ToolKind::SwitchMode => crate::plural(
-            count,
-            t!("summary.switch_mode.one"),
-            t!("summary.switch_mode.other", count = count),
-        ),
-        ToolKind::Other => crate::plural(
-            count,
-            t!("summary.other.one"),
-            t!("summary.other.other", count = count),
-        ),
+/// 回合摘要只挑结果：工作多久、改了几个文件、跑了几条命令、派了几个子智能体。
+/// 这几样都没有时（只读、只搜）退回完整计数。
+fn turn_fold_label(fold: TurnFoldInfo) -> String {
+    let tally = &fold.tally;
+    let mut parts = Vec::new();
+    if let Some(elapsed) = fold.elapsed_ms {
+        parts.push(t!("group.worked_for", elapsed = format_duration(elapsed)).into_owned());
     }
+    let mut key = Vec::new();
+    if tally.edited_files > 0 {
+        key.push(tally_edits(tally.edited_files));
+    }
+    if tally.commands > 0 {
+        key.push(tally_commands(tally.commands));
+    }
+    if tally.agents > 0 {
+        key.push(tally_agents(tally.agents));
+    }
+    if key.is_empty() {
+        key = tally_parts(tally);
+    }
+    parts.extend(key);
+    if parts.is_empty() {
+        parts.push(t!("group.steps").into_owned());
+    }
+    parts.join(" · ")
 }
 
 fn subagent_status_label(status: SubagentStatus) -> SharedString {
@@ -6686,25 +6775,6 @@ fn peer_message_received(kind: PeerMessageKind) -> SharedString {
         PeerMessageKind::Task => t!("peer.received_task"),
         PeerMessageKind::Completion => t!("peer.received_completion"),
         PeerMessageKind::Bounce => t!("peer.received_bounce"),
-    }
-    .into()
-}
-
-fn tool_running_label(kind: ToolKind) -> SharedString {
-    match kind {
-        ToolKind::Read => t!("running.read"),
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => t!("running.edit"),
-        ToolKind::Search => t!("running.search"),
-        ToolKind::Execute => t!("running.execute"),
-        ToolKind::Fetch => t!("running.fetch"),
-        ToolKind::Think => t!("running.think"),
-        ToolKind::SwitchMode => t!("running.switch_mode"),
-        ToolKind::Collaborate => t!("running.collaborate"),
-        ToolKind::Review => t!("running.review"),
-        ToolKind::Image => t!("running.image"),
-        ToolKind::Compact => t!("running.compact"),
-        ToolKind::Wait => t!("running.wait"),
-        ToolKind::Other => t!("running.other"),
     }
     .into()
 }
@@ -6873,6 +6943,43 @@ fn fill_conversation_layout(
         if let Some(final_ix) = final_ix {
             layout[final_ix].final_answer = true;
         }
+        let turn_elapsed_ms = if closed {
+            (0..start)
+                .rev()
+                .find(|ix| is_user_entry(&entries[*ix]))
+                .and_then(|user_index| {
+                    let global_index = entries_offset.saturating_add(user_index);
+                    turn_timings
+                        .iter()
+                        .find(|timing| timing.user_index == global_index)
+                        .and_then(
+                            smelt_plugin_api::model::acp_session::TurnTiming::completed_elapsed_ms,
+                        )
+                })
+        } else {
+            None
+        };
+        // 跑完的一轮：回答之前的过程整段收成一行摘要。只有思考时不收，思考本来就是一行。
+        let turn_fold = final_ix.and_then(|final_ix| {
+            (start..final_ix)
+                .any(|ix| folds_into_turn_summary(&entries[ix]))
+                .then(|| {
+                    let first = (start..final_ix)
+                        .find(|ix| !is_empty_assistant_body(&entries[*ix]))
+                        .unwrap_or(start);
+                    TurnFoldInfo {
+                        first,
+                        end: final_ix,
+                        elapsed_ms: turn_elapsed_ms,
+                        tally: tally_tools(entries, start..final_ix),
+                    }
+                })
+        });
+        if let Some(fold) = turn_fold {
+            for item in &mut layout[fold.first..fold.end] {
+                item.turn_fold = Some(fold);
+            }
+        }
         // 正文和独立事件保持原位可见，不能被前后的工具收进同一个折叠组。
         // 空正文不可见，和手机端一样不打断相邻的过程。
         let mut process_groups: Vec<Vec<usize>> = Vec::new();
@@ -6940,18 +7047,6 @@ fn fill_conversation_layout(
                     } if kind != ToolKind::Collaborate => Some(kind),
                     _ => None,
                 });
-            let agents = process_indices
-                .iter()
-                .filter(|ix| {
-                    matches!(
-                        entries[**ix],
-                        AcpEntry::ToolCall {
-                            kind: ToolKind::Collaborate,
-                            ..
-                        }
-                    )
-                })
-                .count();
             let active_agents = process_indices
                 .iter()
                 .filter(|ix| match &entries[**ix] {
@@ -6970,25 +7065,16 @@ fn fill_conversation_layout(
                 .last()
                 .copied()
                 .map_or(first.saturating_add(1), |ix| ix.saturating_add(1));
-            // 有工具就收成过程组。进行中默认展开成 Grok 那种紧凑时间线；
+            // 有工具就收成一段，默认只露一行计数，在跑的也一样；
             // 没有工具就不要包组，寒暄的思考走进展行，把原文摘要亮出来。
             if tools > 0 {
-                let show_elapsed = group_index + 1 == group_count && !trailing_standalone_thought;
+                let show_elapsed = group_index + 1 == group_count
+                    && !trailing_standalone_thought
+                    && turn_fold.is_none();
                 let elapsed_ms = if !show_elapsed {
                     None
                 } else if closed {
-                    (0..start)
-                        .rev()
-                        .find(|ix| is_user_entry(&entries[*ix]))
-                        .and_then(|user_index| {
-                            let global_index = entries_offset.saturating_add(user_index);
-                            turn_timings
-                                .iter()
-                                .find(|timing| timing.user_index == global_index)
-                                .and_then(
-                                    smelt_plugin_api::model::acp_session::TurnTiming::completed_elapsed_ms,
-                                )
-                        })
+                    turn_elapsed_ms
                 } else {
                     live_elapsed_ms
                 };
@@ -6997,10 +7083,10 @@ fn fill_conversation_layout(
                     end: group_end,
                     active: !closed,
                     active_tool_kind,
-                    agents,
                     active_agents,
                     show_elapsed,
                     elapsed_ms,
+                    tally: tally_tools(entries, process_indices.iter().copied()),
                 };
                 for ix in process_indices {
                     layout[ix].process_group = Some(group);
@@ -7265,27 +7351,6 @@ fn is_active_permission_selection(
                 .iter()
                 .any(|option| option.option_id == option_id)
     })
-}
-
-/// ToolKind → 简短英文标签（跟工具本身在协议里的调用名对齐，比长句子扫得快）。
-fn tool_kind_label(kind: &ToolKind) -> &'static str {
-    match kind {
-        ToolKind::Read => "Read",
-        ToolKind::Edit => "Edit",
-        ToolKind::Delete => "Delete",
-        ToolKind::Move => "Move",
-        ToolKind::Search => "Search",
-        ToolKind::Execute => "Bash",
-        ToolKind::Fetch => "Fetch",
-        ToolKind::Think => "Think",
-        ToolKind::SwitchMode => "Mode",
-        ToolKind::Collaborate => "Agent",
-        ToolKind::Review => "Review",
-        ToolKind::Image => "Image",
-        ToolKind::Compact => "Compact",
-        ToolKind::Wait => "Wait",
-        _ => "Tool",
-    }
 }
 
 /// 工具调用的图标按它做的事挑。思考、评审、整理、切模式是 Agent 自己的步骤，跟思考

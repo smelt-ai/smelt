@@ -305,35 +305,53 @@ impl ConversationView {
                     return div().h(px(0.)).w_full().overflow_hidden().into_any_element();
                 }
                 let final_answer = presentation.final_answer;
+                let turn_fold = presentation.turn_fold;
+                let fold_expanded = turn_fold
+                    .is_some_and(|fold| this.expanded_turn_folds.contains(&fold.first));
+                // 展开的回合摘要挂在折叠范围的第一行上面。
+                let fold_header_here = turn_fold.filter(|fold| fold_expanded && fold.first == i);
                 let process_group = presentation.process_group;
-                let process_expanded = process_group.is_some_and(|group| {
-                    group.active || this.expanded_process_groups.contains(&group.first)
-                });
-                if let Some(group) = process_group
-                    && !process_expanded
-                {
-                    if group.first != i {
+                let process_expanded = process_group
+                    .is_some_and(|group| this.expanded_process_groups.contains(&group.first));
+                let collapsed_header = match (turn_fold, process_group) {
+                    (Some(fold), _) if !fold_expanded => {
+                        Some((fold.first, None))
+                    }
+                    (_, Some(group)) if !process_expanded => Some((group.first, Some(group))),
+                    _ => None,
+                };
+                if let Some((first, group)) = collapsed_header {
+                    if first != i {
                         // 高度必须是 0：空 div 若测出残高，虚拟列表会把回答叠在标题上。
                         return div().h(px(0.)).w_full().overflow_hidden().into_any_element();
                     }
                     // 折叠态只构建摘要，不先渲染一遍随后会被丢弃的首个工具卡。
                     // Read 的大输出或 Edit 的 diff 因此不会在静态重绘时白做解析。
+                    let header = match (group, turn_fold) {
+                        (Some(group), _) => this.render_process_group_header(
+                            group,
+                            false,
+                            animate_ambient,
+                            muted,
+                            cx,
+                        ),
+                        (None, Some(fold)) => this.render_turn_fold_header(fold, false, muted, cx),
+                        (None, None) => div().into_any_element(),
+                    };
                     return div().flex().items_center()
                         .w_full()
                         .justify_center()
                         .px_4()
                         .pb(px(12.))
                         .child(
-                            div()
+                            div().flex().flex_col()
                                 .w_full()
                                 .max_w(ui_theme::conversation_max_width())
-                                .child(this.render_process_group_header(
-                                    group,
-                                    false,
-                                    animate_ambient,
-                                    muted,
-                                    cx,
-                                )),
+                                .gap_1()
+                                .when_some(fold_header_here, |col, fold| {
+                                    col.child(this.render_turn_fold_header(fold, true, muted, cx))
+                                })
+                                .child(header),
                         )
                         .into_any_element();
                 }
@@ -1257,7 +1275,6 @@ impl ConversationView {
                 if let Some(group) = process_group
                     && group.first == i
                     && process_expanded
-                    && !group.active
                 {
                     el = div().flex().flex_col()
                         .w_full()
@@ -1269,6 +1286,14 @@ impl ConversationView {
                             muted,
                             cx,
                         ))
+                        .child(el)
+                        .into_any_element();
+                }
+                if let Some(fold) = fold_header_here {
+                    el = div().flex().flex_col()
+                        .w_full()
+                        .gap_1()
+                        .child(this.render_turn_fold_header(fold, true, muted, cx))
                         .child(el)
                         .into_any_element();
                 }
@@ -1480,63 +1505,78 @@ impl ConversationView {
     ) -> gpui::AnyElement {
         let group_key = group.first;
         let group_end = group.end;
-        let group_label = process_group_header_label(&self.entries, group);
-        let group_accent_u32 = ui_theme::muted();
-        let group_accent = gpui::rgb(group_accent_u32);
-        // 有工具在跑仍用 spinner。只有思考、没有进行中的工具或子 agent 时换成安静的点。
-        let thinking = group.active
-            && group.active_tool_kind.is_none()
-            && group.agents == 0
-            && group.active_agents == 0;
-        div()
-            .flex()
-            .items_center()
-            .id(("acp-process-group", group.first))
-            .debug_selector(move || format!("ACP_PROCESS_GROUP_{}", group.first))
-            .w_full()
-            .h(ui_theme::height::sm())
-            .flex_shrink_0()
-            .gap_1p5()
-            .hover(|row| row.opacity(0.78))
-            .when(group.active && !thinking, |row| {
-                row.child(ambient_spinner(
-                    ("acp-process-group-spinner", group.first),
-                    group_accent.into(),
-                    animate_ambient,
-                ))
-            })
-            .when(thinking, |row| {
-                row.child(quiet_dots(
-                    ("acp-process-think", group.first),
-                    group_accent.into(),
-                    animate_ambient,
-                ))
-            })
-            .when_some(group_label, |row, label| {
-                row.child(
-                    div()
-                        .flex_shrink_0()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(muted)
-                        .child(label),
-                )
-            })
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .type_style(TYPE.text_xsmall)
-                    .text_color(gpui::rgb(ui_theme::faint()))
-                    .child(if expanded { "▾" } else { "▸" }),
-            )
-            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                if !this.expanded_process_groups.remove(&group_key) {
-                    this.expanded_process_groups.insert(group_key);
-                }
-                this.list_state
-                    .remeasure_items(group_key..group_end.min(this.entries.len()));
-                cx.notify();
-            }))
-            .into_any_element()
+        let accent: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
+        // 有工具在跑用 spinner；只在思考、没有进行中的工具或子 agent 时换成安静的点。
+        let thinking = group.active && group.active_tool_kind.is_none() && group.active_agents == 0;
+        let lead = if !group.active {
+            None
+        } else if thinking {
+            Some(quiet_dots(
+                ("acp-process-think", group.first),
+                accent,
+                animate_ambient,
+            ))
+        } else {
+            Some(ambient_spinner(
+                ("acp-process-group-spinner", group.first),
+                accent,
+                animate_ambient,
+            ))
+        };
+        // 在跑的段收起时把本轮耗时挂在行尾；展开后耗时挂在最后一条动作上。
+        let live_elapsed = group
+            .elapsed_ms
+            .filter(|_| group.active && group.show_elapsed && !expanded);
+        summary_row(
+            ("acp-process-group", group.first),
+            lead,
+            process_group_header_label(group),
+            tally_failed_label(&group.tally),
+            expanded,
+            muted,
+        )
+        .debug_selector(move || format!("ACP_PROCESS_GROUP_{}", group.first))
+        .when_some(live_elapsed, |row, elapsed_ms| {
+            row.child(elapsed_suffix(elapsed_ms, muted))
+        })
+        .on_click(cx.listener(move |this, _ev, _window, cx| {
+            if !this.expanded_process_groups.remove(&group_key) {
+                this.expanded_process_groups.insert(group_key);
+            }
+            this.list_state
+                .remeasure_items(group_key..group_end.min(this.entries.len()));
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    fn render_turn_fold_header(
+        &self,
+        fold: TurnFoldInfo,
+        expanded: bool,
+        muted: gpui::Hsla,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let fold_key = fold.first;
+        let fold_end = fold.end;
+        summary_row(
+            ("acp-turn-fold", fold.first),
+            None,
+            turn_fold_label(fold),
+            None,
+            expanded,
+            muted,
+        )
+        .debug_selector(move || format!("ACP_TURN_FOLD_{}", fold.first))
+        .on_click(cx.listener(move |this, _ev, _window, cx| {
+            if !this.expanded_turn_folds.remove(&fold_key) {
+                this.expanded_turn_folds.insert(fold_key);
+            }
+            this.list_state
+                .remeasure_items(fold_key..fold_end.min(this.entries.len()));
+            cx.notify();
+        }))
+        .into_any_element()
     }
 
     fn render_compact_tool_run(
@@ -3266,6 +3306,55 @@ pub(super) fn subagent_status_icon(
         .size(px(13.))
         .text_color(color)
         .into_any_element()
+}
+
+/// 回合摘要和每段计数共用的一行：可选的状态标记、计数句、红色的失败数、展开箭头。
+fn summary_row(
+    id: impl Into<gpui::ElementId>,
+    lead: Option<gpui::AnyElement>,
+    label: String,
+    failed: Option<String>,
+    expanded: bool,
+    muted: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .flex()
+        .items_center()
+        .id(id)
+        .w_full()
+        .h(ui_theme::height::sm())
+        .flex_shrink_0()
+        .gap_1p5()
+        .cursor_pointer()
+        .hover(|row| row.opacity(0.78))
+        .children(lead)
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(truncated_line(label)),
+        )
+        .when_some(failed, |row, failed| {
+            row.child(
+                div()
+                    .flex_shrink_0()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(gpui::rgb(ui_theme::bad()))
+                    .child(format!("· {failed}")),
+            )
+        })
+        .child(
+            Icon::new(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size(px(12.))
+            .flex_shrink_0()
+            .text_color(gpui::rgb(ui_theme::faint())),
+        )
 }
 
 fn elapsed_suffix(elapsed_ms: u64, color: gpui::Hsla) -> gpui::Div {

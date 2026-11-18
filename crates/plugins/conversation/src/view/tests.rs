@@ -3,26 +3,25 @@
 use super::trajectory::runtime_debug_contexts;
 use super::{
     CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, OwnerIdCache,
-    ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction, ViewHistoryIdentity,
-    append_prompt_text, apply_pending_config_selection, background_task_elapsed,
-    background_task_one_line, background_task_summary, build_conversation_layout,
-    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
-    cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
-    compact_tool_headline, compact_tool_run_label, composer_config_section_label,
-    composer_menu_sections, composer_model_label, composer_native_queue_shortcut_hint,
-    composer_next_turn_notice, composer_should_nest_models, composer_usage_breakdown,
-    config_rejection_is_new, config_selection_is_pending, consecutive_compact_tool_run,
-    consume_composer_restore, conversation_input_for_submit, current_turn_has_agent_output,
-    diff_cache_matches_output, diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress,
-    entries_to_fade_in, external_clipboard_image_paths, filter_trajectory_events,
-    format_attached_paths, is_active_permission_selection, is_fresh_conversation_start,
-    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
-    latest_user_message_index, loaded_capabilities_summary, loaded_entries_end,
-    loaded_skills_refresh, memory_changes_summary, memory_changes_to_show, merge_rejected_prompt,
-    merge_snapshot_entries, model_label_with_provider, native_queue_item_kind_label,
-    next_prompt_dispatch_pending, notice_to_show, overlay_model_state, overlay_session_configs,
-    pending_config_choice_names, plan_current_step, prefix_skill_command,
-    process_group_header_label, process_group_label, progress_has_details, progress_summary,
+    RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction, ViewHistoryIdentity, append_prompt_text,
+    apply_pending_config_selection, background_task_elapsed, background_task_one_line,
+    background_task_summary, build_conversation_layout, build_conversation_layout_with_timings,
+    build_markdown_cache, build_tool_image_parts, cached_diff_stats, can_load_older_history,
+    classify_attached_paths, compact_token_count, compact_tool_headline, compact_tool_run_label,
+    composer_config_section_label, composer_menu_sections, composer_model_label,
+    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
+    composer_usage_breakdown, config_rejection_is_new, config_selection_is_pending,
+    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
+    current_turn_has_agent_output, diff_cache_matches_output, diff_stats_for_output,
+    dispatch_elapsed_ms, dispatch_progress, entries_to_fade_in, external_clipboard_image_paths,
+    filter_trajectory_events, format_attached_paths, is_active_permission_selection,
+    is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
+    is_stale_blank_history_id, latest_user_message_index, loaded_capabilities_summary,
+    loaded_entries_end, loaded_skills_refresh, memory_changes_summary, memory_changes_to_show,
+    merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
+    native_queue_item_kind_label, next_prompt_dispatch_pending, notice_to_show,
+    overlay_model_state, overlay_session_configs, pending_config_choice_names, plan_current_step,
+    prefix_skill_command, process_group_header_label, progress_has_details, progress_summary,
     provider_menu_label, provider_retry_label, provider_switch_value,
     reconcile_pending_config_values, refresh_markdown_cache, rows_with_changed_shape,
     running_background_tasks, running_subagents, search_summary_text, selected_provider_group,
@@ -1758,7 +1757,7 @@ fn edit_resend_recognizes_a_latest_image_message() {
 }
 
 #[test]
-fn completed_process_group_appends_elapsed_like_grok() {
+fn completed_turn_folds_its_process_into_one_summary() {
     let entries = vec![
         AcpEntry::User("看看今天的新闻".into()),
         completed_tool("s1", ToolKind::Search, "today news"),
@@ -1775,17 +1774,92 @@ fn completed_process_group_appends_elapsed_like_grok() {
         ended_at_ms: Some(5_000),
     }];
     let layout = build_conversation_layout_with_timings(&entries, false, 0, &timings, None);
-    let group = layout[1].process_group.expect("结束后应收成过程组");
-    assert_eq!(group.elapsed_ms, Some(4_000));
+    let fold = layout[1].turn_fold.expect("跑完的一轮收成摘要");
+    assert_eq!((fold.first, fold.end), (1, 4));
+    for ix in 1..4 {
+        assert_eq!(layout[ix].turn_fold, Some(fold));
+    }
+    assert!(layout[0].turn_fold.is_none());
+    assert!(layout[4].turn_fold.is_none(), "回答留在摘要外面");
+    assert_eq!(fold.elapsed_ms, Some(4_000));
     assert_eq!(
-        process_group_header_label(&entries, group).as_deref(),
-        Some("Worked for 4s")
+        super::turn_fold_label(fold),
+        "Worked for 4s · Searched 3 times"
     );
+    let group = layout[1].process_group.expect("展开后仍按段分");
+    assert!(!group.show_elapsed, "耗时只在摘要上写一次");
 
     let live = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
-    let live_group = live[1].process_group.expect("进行中也应收成过程组");
+    assert!(live[1].turn_fold.is_none(), "在跑的回合不收成摘要");
+    let live_group = live[1].process_group.expect("进行中也应收成一段");
     assert!(live_group.active);
     assert_eq!(live_group.elapsed_ms, Some(6_000));
+}
+
+#[test]
+fn turn_summary_names_edits_commands_and_subagents() {
+    let edit = |id: &str, path: &str, added: &str| {
+        AcpEntry::tool_call(
+            id,
+            "Edit",
+            ToolKind::Edit,
+            ToolCallStatus::Completed,
+            vec![ToolOutputPart::Diff {
+                path: path.into(),
+                old_text: Some(String::new()),
+                new_text: added.into(),
+            }],
+        )
+    };
+    let entries = vec![
+        AcpEntry::User("修一下".into()),
+        completed_tool("r", ToolKind::Read, "a.rs"),
+        edit("e1", "a.rs", "x"),
+        edit("e2", "a.rs", "y"),
+        edit("e3", "b.rs", "z"),
+        AcpEntry::Assistant {
+            text: "先跑测试。".into(),
+            thought: false,
+        },
+        completed_tool("t", ToolKind::Execute, "cargo test"),
+        AcpEntry::ToolCall {
+            id: "agent".into(),
+            title: "Explore".into(),
+            kind: ToolKind::Collaborate,
+            status: ToolCallStatus::Completed,
+            output: Vec::new(),
+            children: Vec::new(),
+            subagents: Vec::new(),
+            peer: None,
+        },
+        AcpEntry::Assistant {
+            text: "修好了。".into(),
+            thought: false,
+        },
+    ];
+    let layout = build_conversation_layout(&entries, false);
+    let fold = layout[1].turn_fold.expect("跑完的一轮收成摘要");
+    assert_eq!((fold.first, fold.end), (1, 8));
+    assert!(layout[5].turn_fold.is_some(), "过程说明也收进摘要");
+    assert_eq!(
+        super::turn_fold_label(fold),
+        "Edited 2 files · Ran 1 command · 1 subagent",
+        "同一文件改几次只算一个；没有计时就不写耗时"
+    );
+}
+
+#[test]
+fn thought_only_turn_is_not_folded() {
+    let entries = vec![
+        AcpEntry::User("你好".into()),
+        thought("打个招呼"),
+        AcpEntry::Assistant {
+            text: "你好！".into(),
+            thought: false,
+        },
+    ];
+    let layout = build_conversation_layout(&entries, false);
+    assert!(layout.iter().all(|row| row.turn_fold.is_none()));
 }
 
 #[test]
@@ -1797,14 +1871,14 @@ fn split_process_groups_show_turn_elapsed_only_once() {
         ended_at_ms: Some(5_000),
     }];
     let completed = build_conversation_layout_with_timings(&entries, false, 0, &timings, None);
-    for ix in [1, 5] {
+    let fold = completed[1].turn_fold.expect("回答之前的过程收成摘要");
+    assert_eq!((fold.first, fold.end, fold.elapsed_ms), (1, 7, Some(4_000)));
+    for ix in [1, 5, 8] {
         let group = completed[ix].process_group.unwrap();
-        assert!(!group.show_elapsed);
+        assert!(!group.show_elapsed, "耗时已经写在摘要上");
         assert_eq!(group.elapsed_ms, None);
     }
-    let last = completed[8].process_group.unwrap();
-    assert!(last.show_elapsed);
-    assert_eq!(last.elapsed_ms, Some(4_000));
+    assert!(completed[8].turn_fold.is_none(), "回答之后的工具不收进摘要");
 
     let mut live = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
     super::patch_live_elapsed(&mut live, 0, Some(7_000));
@@ -1871,7 +1945,8 @@ fn standalone_thought_does_not_duplicate_completed_process_elapsed() {
     let layout = build_conversation_layout(&entries, false);
     assert!(layout[1].process_group.is_none());
     assert!(!layout[1].show_settled_thought_elapsed);
-    assert!(layout[3].process_group.unwrap().show_elapsed);
+    assert!(layout[1].turn_fold.is_some(), "思考和过程一起收进摘要");
+    assert!(!layout[3].process_group.unwrap().show_elapsed);
 }
 
 #[test]
@@ -1903,19 +1978,24 @@ fn empty_body_neither_steals_final_answer_nor_splits_compact_tools() {
 }
 
 #[test]
-fn active_process_group_without_a_running_tool_says_thinking() {
-    let thinking = ProcessGroupInfo {
-        active: true,
-        ..ProcessGroupInfo::default()
-    };
-    assert_eq!(process_group_label(thinking), "Thinking");
-
-    let searching = ProcessGroupInfo {
-        active: true,
-        active_tool_kind: Some(ToolKind::Search),
-        ..ProcessGroupInfo::default()
-    };
-    assert_eq!(process_group_label(searching), "Searching");
+fn unknown_tools_count_as_other_tools_not_an_english_kind() {
+    let entries = vec![
+        AcpEntry::User("做点事".into()),
+        completed_tool("a", ToolKind::Other, "mcp__x__y"),
+        completed_tool("b", ToolKind::Other, "mcp__x__z"),
+        completed_tool("c", ToolKind::Execute, "ls"),
+    ];
+    let layout = build_conversation_layout(&entries, true);
+    let group = layout[1].process_group.unwrap();
+    assert_eq!(
+        process_group_header_label(group),
+        "Ran 1 command · 2 other tool calls"
+    );
+    assert_eq!(
+        compact_tool_run_label(ToolKind::Other, 2),
+        "2 other tool calls"
+    );
+    assert_eq!(compact_tool_headline(ToolKind::Other, " "), "Tool");
 }
 
 #[test]
@@ -2239,15 +2319,12 @@ fn collaboration_tools_are_not_folded_into_process_groups() {
     );
     let live_tools = live[2].process_group.expect("普通工具仍收成过程组");
     assert!(live_tools.active);
-    assert_eq!(live_tools.agents, 0);
+    assert_eq!(live_tools.tally.agents, 0);
 
     let layout = build_conversation_layout(&entries, false);
     assert!(layout[1].process_group.is_none());
     let group = layout[2].process_group.expect("普通工具结束后仍收成过程组");
-    assert_eq!(
-        process_group_header_label(&entries, group).as_deref(),
-        Some("Read once")
-    );
+    assert_eq!(process_group_header_label(group), "Read 1 file");
 }
 
 #[test]
@@ -2283,7 +2360,12 @@ fn completed_process_group_keeps_inner_tool_failures_inside() {
     let layout = build_conversation_layout(&entries, false);
     let group = layout[1].process_group.expect("工具应进入执行过程组");
     assert!(!group.active);
-    assert_eq!(process_group_label(group), "Steps");
+    assert_eq!(process_group_header_label(group), "Ran 2 commands");
+    assert_eq!(
+        super::tally_failed_label(&group.tally).as_deref(),
+        Some("1 failed"),
+        "失败数单独给出，界面上标红"
+    );
 }
 
 #[test]
@@ -3081,7 +3163,7 @@ fn subagent_headline_strips_spawn_prefixes() {
 }
 
 #[test]
-fn completed_process_header_summarizes_tools_in_appearance_order() {
+fn process_header_counts_tools_in_a_fixed_order() {
     let entries = vec![
         AcpEntry::User("看看今天的新闻".into()),
         completed_tool("s1", ToolKind::Search, "today news"),
@@ -3097,8 +3179,9 @@ fn completed_process_header_summarizes_tools_in_appearance_order() {
     let group = layout[1].process_group.expect("结束后应收成过程组");
     assert!(!group.active);
     assert_eq!(
-        process_group_header_label(&entries, group).as_deref(),
-        Some("Searched 3 times · Read once")
+        process_group_header_label(group),
+        "Read 1 file · Searched 3 times",
+        "固定顺序：命令、读取、改动、搜索"
     );
 }
 
@@ -3340,6 +3423,7 @@ fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpu
             },
         );
         view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
+        view.expanded_turn_folds.insert(1);
         view.expanded_process_groups.insert(2);
         view
     });
@@ -3377,7 +3461,7 @@ fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpu
     assert!(read.origin.y >= thought.origin.y + thought.size.height);
 }
 
-/// 折叠过程组后，后台唤醒前后的说明和后台任务状态行仍要实际占据可见的行。
+/// 展开回合摘要、各段仍收着时，后台唤醒前后的说明和后台任务状态行要实际占据可见的行。
 #[gpui::test]
 fn collapsed_background_wakeup_paints_every_body_and_task_note(cx: &mut gpui::TestAppContext) {
     let (view, cx) = open_conversation(
@@ -3386,6 +3470,13 @@ fn collapsed_background_wakeup_paints_every_body_and_task_note(cx: &mut gpui::Te
         background_wakeup_entries(),
         DaemonPhase::Idle,
     );
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.expanded_turn_folds.insert(1);
+            view.list_state.remeasure();
+            cx.notify();
+        })
+    });
     for ix in [2, 3, 4, 7] {
         cx.update(|_window, cx| {
             view.update(cx, |view, cx| {
@@ -3457,6 +3548,14 @@ fn final_answer_changes_actions_not_body_text_size(cx: &mut gpui::TestAppContext
         ],
         DaemonPhase::Idle,
     );
+    // 非最终的那条收在回合摘要里，展开才看得到正文。
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.expanded_turn_folds.extend([1, 4]);
+            view.list_state.remeasure();
+            cx.notify();
+        })
+    });
     let mut heights = Vec::new();
     for ix in [1, 2, 4, 5] {
         cx.update(|_window, cx| {
@@ -3924,6 +4023,10 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
         .iter()
         .find_map(|entry| entry.process_group.map(|group| group.first))
         .expect("tool output belongs to a process group");
+    let fold_ix = layout
+        .iter()
+        .find_map(|entry| entry.turn_fold.map(|fold| fold.first))
+        .expect("finished turn folds its process");
 
     cx.update(init_ui);
     let (_view, cx) = cx.add_window_view(move |_window, cx| {
@@ -3942,6 +4045,7 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
             },
         );
         view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
+        view.expanded_turn_folds.insert(fold_ix);
         view.expanded_process_groups.insert(group_ix);
         view.expanded_tool_cards.insert("log-1".into());
         view.expanded_tools.insert("log-1".into());
@@ -4591,7 +4695,7 @@ fn wheel_between_a_streaming_snapshot_and_the_next_frame_moves_by_its_delta(
     );
 }
 
-/// 上一回合结束后，它的工具行收成一行「执行过程」，其余行高度变成 0。这些行早就
+/// 上一回合结束后，它的过程收成一行摘要，其余行高度变成 0。这些行早就
 /// 滚出了视口，列表里还记着展开时的高度；往回滚时按旧高度换算，内容一顿一顿地
 /// 往回跳，滚不上去。
 #[gpui::test]
@@ -4620,8 +4724,22 @@ fn scrolling_back_over_a_collapsed_turn_moves_by_the_wheel_delta(cx: &mut gpui::
     draw_settled(cx);
     draw_settled(cx);
     assert!(
+        cx.debug_bounds("ACP_TOOL_COMPACT_2").is_none(),
+        "回合进行中，一段默认只露一行计数"
+    );
+    // 用户点开了在跑的这段：工具逐行展开，列表量下的是展开时的高度。
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.expanded_process_groups.insert(1);
+            view.list_state.remeasure();
+            cx.notify();
+        })
+    });
+    draw_settled(cx);
+    draw_settled(cx);
+    assert!(
         cx.debug_bounds("ACP_TOOL_COMPACT_2").is_some(),
-        "回合进行中，工具逐行展开"
+        "展开后工具逐行显示"
     );
 
     let second_prompt = first_turn_len + 1;
@@ -4698,8 +4816,8 @@ fn scrolling_back_over_a_collapsed_turn_moves_by_the_wheel_delta(cx: &mut gpui::
         "第二问要在视口里停留多次比对，实际 {compared} 次"
     );
     assert!(
-        cx.debug_bounds("ACP_PROCESS_GROUP_1").is_some(),
-        "滚到第一回合，看得到收起后的执行过程"
+        cx.debug_bounds("ACP_TURN_FOLD_1").is_some(),
+        "滚到第一回合，看得到收起后的回合摘要"
     );
 }
 
@@ -5087,6 +5205,7 @@ fn long_thought_inside_a_process_group_can_be_expanded(cx: &mut gpui::TestAppCon
             },
         );
         view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
+        view.expanded_turn_folds.insert(1);
         view.expanded_process_groups.insert(2);
         view
     });
