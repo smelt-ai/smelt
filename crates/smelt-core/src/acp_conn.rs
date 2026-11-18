@@ -4373,8 +4373,10 @@ mod runtime_tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let status = inspect_runtime_program("omp", dir.path().to_str().unwrap());
-        assert_eq!(status.version.as_deref(), Some("omp 1.0"));
-        assert_eq!(status.error, None);
+        assert_eq!(
+            (status.version.as_deref(), status.error.as_deref()),
+            (Some("omp 1.0"), None)
+        );
     }
 
     /// 输出超过管道容量时，退出前没人读就会卡在写上，只能等到超时。
