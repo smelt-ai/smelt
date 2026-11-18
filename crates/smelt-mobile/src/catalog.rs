@@ -624,6 +624,7 @@ impl Catalog {
                 &smelt_model::control_api::AutomationRunDetailParams {
                     run_id: run_id.to_string(),
                     include_archived_run: true,
+                    entry_version: smelt_model::acp_chat::ACP_ENTRY_VERSION,
                 },
                 self.shared.timing.call_timeout,
             )

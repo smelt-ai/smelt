@@ -43,7 +43,7 @@ fn shortcuts_page(cx: &App) -> SettingsPage {
     };
 
     // 按命令登记的先后分组，组名是来源给的。
-    let mut groups: Vec<(SharedString, Vec<gpui::AnyElement>)> = Vec::new();
+    let mut groups: Vec<(smelt_plugin_api::Text, Vec<gpui::AnyElement>)> = Vec::new();
     for command in state.bound() {
         let row = editable_row(command, state, os);
         match groups
@@ -71,7 +71,7 @@ fn shortcuts_page(cx: &App) -> SettingsPage {
         .children(
             groups
                 .into_iter()
-                .map(|(title, rows)| Section::new().title(title).children(rows)),
+                .map(|(title, rows)| Section::new().title(title.get()).children(rows)),
         )
         .child(
             Section::new()
@@ -114,7 +114,7 @@ fn editable_row(
     os: gpui::OperatingSystem,
 ) -> gpui::AnyElement {
     let id = command.info.id.clone();
-    let title = command.info.title.clone();
+    let title = command.info.title.get();
     let recording = state.recording.as_ref() == Some(&id);
     let overridden = command.overridden;
     let error = state
@@ -134,7 +134,7 @@ fn editable_row(
             .unwrap_or_else(|_| reassign.keystroke.clone());
         let other = state
             .find(&reassign.other)
-            .map_or(reassign.other.clone(), |other| other.info.title.clone());
+            .map_or(reassign.other.clone(), |other| other.info.title.get());
         Some((
             t!("shortcuts.taken", key = key, other = other).into_owned(),
             ui_theme::bad(),

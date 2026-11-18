@@ -919,9 +919,16 @@ fn session_dto(state: &SessionState) -> SessionStateChanged {
         },
         phase_since_unix_seconds: state.phase_since,
         turn_started_at_unix_seconds: state.turn_started_at,
-        pending_question: state.pending_question.clone(),
+        pending_question: state
+            .pending
+            .as_ref()
+            .and_then(crate::session_state::PendingLine::question),
         pending_request: state.pending_request.clone(),
-        pending_note: state.pending_note.clone(),
+        pending_note: state
+            .pending
+            .as_ref()
+            .and_then(crate::session_state::PendingLine::note)
+            .cloned(),
         completed_delivery_id: state.completed_delivery_id.clone(),
         tokens_used: state.tokens_used,
         branch: state.branch.clone(),

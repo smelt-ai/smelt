@@ -18,6 +18,7 @@ use std::time::Duration;
 use serde::Deserialize as _;
 use smelt_plugin_api::client::protocol::daemon::DaemonOperation;
 use smelt_plugin_api::client::{RuntimeClient, RuntimeStream};
+use smelt_plugin_api::model::acp_chat::ACP_ENTRY_VERSION;
 use smelt_plugin_api::model::acp_session::{
     AcpEndKind, AcpUserAction, ConversationDebug, ConversationSnapshot,
 };
@@ -91,6 +92,7 @@ fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
         "omit_history": true,
         // 调试数据只有 Trajectory 窗口要，它打开时自己用 `acp_debug` 拉。
         "include_debug": false,
+        "entry_version": ACP_ENTRY_VERSION,
         "conversation_binding": &launch.conversation_binding,
     });
     if let Some(prompt) = &launch.pending_agent_preset {
@@ -386,6 +388,7 @@ fn acp_snapshot_request(id: &str, before: usize, limit: usize) -> serde_json::Va
         "before": before,
         "limit": limit,
         "include_debug": false,
+        "entry_version": ACP_ENTRY_VERSION,
     })
 }
 

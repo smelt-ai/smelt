@@ -44,13 +44,12 @@ pub struct PageSource<'a> {
     pub index: Option<&'a str>,
 }
 
-/// 登记过的一页。标题是取的时候那种界面语言下的字，存着它的在
-/// [`HostEvent::LocaleChanged`] 时重取。
+/// 登记过的一页。标题跟着界面语言变，显示时 [`Text::get`]，存着它的不用在换语言时重取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageInfo {
     /// `<来源>/<名字>`。
     pub id: SharedString,
-    pub title: SharedString,
+    pub title: Text,
     pub home: bool,
     pub index: Option<SharedString>,
 }
@@ -58,17 +57,12 @@ pub struct PageInfo {
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
     owner: String,
-    /// 标题在 `title` 里，取的时候按当前语言填进 `info`（[`Entry::info`]）。
     info: PageInfo,
-    title: Text,
 }
 
 impl Entry {
     fn info(&self) -> PageInfo {
-        PageInfo {
-            title: self.title.get(),
-            ..self.info.clone()
-        }
+        self.info.clone()
     }
 }
 
@@ -108,11 +102,10 @@ pub fn register_pages(owner: &str, sources: &[PageSource<'_>], cx: &mut App) -> 
             owner: owner.to_string(),
             info: PageInfo {
                 id,
-                title: SharedString::default(),
+                title: source.title.clone(),
                 home: source.home,
                 index: source.index.map(|index| index.to_string().into()),
             },
-            title: source.title.clone(),
         });
     }
     let pages = &mut cx.default_global::<PageRegistry>().pages;

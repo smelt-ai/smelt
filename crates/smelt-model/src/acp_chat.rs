@@ -123,6 +123,46 @@ pub fn new_session_label(at_ms: i64) -> String {
     t!("entry.new_session", at = at).into_owned()
 }
 
+/// 消息流条目的版本。新客户端在 `acp_open` / `acp_watch` / `acp_snapshot` / 历史分页和
+/// `automation.run.detail` 里带上自己认得的版本（`entry_version`），运行时按它投影：比它新的
+/// 条目换成它认得的形状。没带的是旧客户端，按 1 算。
+///
+/// [`AcpEntry`] 外层带标签、没有兜底值，客户端读到不认识的条目会让整份快照解码失败，所以
+/// 加新种类就要升这个数，并在 [`entry_for_version`] 里给旧版本一个替代形状。
+///
+/// - 1：到 [`AcpEntry::TaskNote`] 为止。
+/// - 2：加 [`AcpEntry::NewSession`]、[`AcpEntry::TurnFailed`]。1 收到的是英文的
+///   [`AcpEntry::Divider`] 和助手正文，和加它们之前一样。
+pub const ACP_ENTRY_VERSION: u32 = 2;
+
+/// 按客户端认得的条目版本投影一条：认得就借用原条目。旧客户端的替代形状按当前语言说，运行时
+/// 不设语言，就是英文。只看顶层：这两种条目只由运行时写在顶层。
+pub fn entry_for_version(entry: &AcpEntry, version: u32) -> Cow<'_, AcpEntry> {
+    if version >= ACP_ENTRY_VERSION {
+        return Cow::Borrowed(entry);
+    }
+    match entry {
+        AcpEntry::NewSession { at_ms } => Cow::Owned(AcpEntry::Divider(new_session_label(*at_ms))),
+        AcpEntry::TurnFailed { detail, hint } => Cow::Owned(AcpEntry::Assistant {
+            text: turn_failed_text(detail, *hint),
+            thought: false,
+        }),
+        _ => Cow::Borrowed(entry),
+    }
+}
+
+/// [`entry_for_version`] 用在一整份条目上，就地换。
+pub fn project_entries_for_version(entries: &mut [AcpEntry], version: u32) {
+    if version >= ACP_ENTRY_VERSION {
+        return;
+    }
+    for entry in entries {
+        if let Cow::Owned(projected) = entry_for_version(entry, version) {
+            *entry = projected;
+        }
+    }
+}
+
 /// Pi 会话里这条自定义消息的类型。重放时认它，避免把结果画成用户或助手的话。
 pub const SMELT_BACKGROUND_TASK_CUSTOM_TYPE: &str = "smelt.background_task";
 /// 后台子智能体交回结果。和后台任务一样是状态，不是用户消息。
@@ -900,6 +940,7 @@ pub fn is_generic_subagent_title(title: &str) -> bool {
         || title.eq_ignore_ascii_case("subagent")
         || title.eq_ignore_ascii_case("task")
         || title.eq_ignore_ascii_case("tool")
+        // 智能体发来的工具标题，不是界面文案：存下来的旧对话里有中文标题。
         || title == "子代理"
         || title == "协作代理"
 }
@@ -1206,6 +1247,34 @@ pub fn completion_summary_text(output: &[ToolOutputPart]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 不认识新条目的旧客户端收到的是它认得的分割线和助手正文，按英文说；认得的原样借用。
+    #[test]
+    fn old_clients_get_entries_they_can_decode() {
+        let failed = AcpEntry::TurnFailed {
+            detail: "boom".into(),
+            hint: None,
+        };
+        assert_eq!(
+            entry_for_version(&failed, 1).into_owned(),
+            AcpEntry::Assistant {
+                text: "⚠️ Turn failed: boom".into(),
+                thought: false,
+            }
+        );
+        let divider = entry_for_version(&AcpEntry::NewSession { at_ms: 0 }, 1).into_owned();
+        assert!(
+            matches!(&divider, AcpEntry::Divider(label) if label.starts_with("New session")),
+            "{divider:?}"
+        );
+        assert!(matches!(
+            entry_for_version(&failed, ACP_ENTRY_VERSION),
+            Cow::Borrowed(_)
+        ));
+        // 旧客户端解得了：外层标签都是 v1 就有的。
+        let json = serde_json::to_value(entry_for_version(&failed, 1)).unwrap();
+        assert!(json.get("Assistant").is_some(), "{json}");
+    }
 
     /// 回合失败和新会话由运行时发种类，客户端说话；比客户端新的建议读成 `Other`，只说原话。
     #[test]

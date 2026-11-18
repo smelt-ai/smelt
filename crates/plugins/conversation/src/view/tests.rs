@@ -496,7 +496,9 @@ fn composer_usage_is_readonly_and_only_warns_when_high() {
     };
     let rows = composer_usage_breakdown(362_502, 1_000_000, None, Some(&buckets), ui_theme::text());
     assert_eq!(
-        rows.iter().map(|row| row.label).collect::<Vec<_>>(),
+        rows.iter()
+            .map(|row| row.label.as_ref())
+            .collect::<Vec<_>>(),
         [
             "System prompt",
             "Tool definitions",

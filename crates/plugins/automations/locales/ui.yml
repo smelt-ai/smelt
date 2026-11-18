@@ -142,7 +142,7 @@ error:
     en: "Enter a time between 00:00 and 23:59"
     zh-CN: "请输入 00:00 到 23:59 之间的时间"
   live_args:
-    en: "Couldn't convert the run's parameters to JSON: {error}"
+    en: "Couldn't convert the run's parameters to JSON: %{error}"
     zh-CN: "现场的参数转不成 JSON：%{error}"
   no_days:
     en: "Choose at least one day"

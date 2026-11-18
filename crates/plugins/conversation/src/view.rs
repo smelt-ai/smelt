@@ -216,7 +216,7 @@ fn compact_token_count(n: u64) -> String {
 #[derive(Debug, Clone, PartialEq)]
 struct UsageBreakdownRow {
     color: u32,
-    label: &'static str,
+    label: Cow<'static, str>,
     tokens: u64,
     percent: f32,
     free: bool,
@@ -243,49 +243,64 @@ fn composer_usage_breakdown(
         return vec![
             usage_row(
                 ui_theme::muted(),
-                "System prompt",
+                t!("usage.row.system_prompt"),
                 aligned.system_prompt,
                 size,
             ),
             // 分项是并列的类别，用分类色，不借状态色。
             usage_row(
                 ui_theme::chart(0),
-                "Tool definitions",
+                t!("usage.row.tool_definitions"),
                 aligned.tools_definition,
                 size,
             ),
-            usage_row(ui_theme::chart(1), "Rules", aligned.rules, size),
-            usage_row(ui_theme::chart(2), "Skills", aligned.skills, size),
+            usage_row(
+                ui_theme::chart(1),
+                t!("usage.row.rules"),
+                aligned.rules,
+                size,
+            ),
+            usage_row(
+                ui_theme::chart(2),
+                t!("usage.row.skills"),
+                aligned.skills,
+                size,
+            ),
             usage_row(
                 ui_theme::chart(3),
-                "MCP & dynamic tools",
+                t!("usage.row.mcp_dynamic"),
                 aligned.mcp_dynamic,
                 size,
             ),
             usage_row(
                 ui_theme::chart(4),
-                "Subagent definitions",
+                t!("usage.row.subagents"),
                 aligned.subagent,
                 size,
             ),
             usage_row(
                 ui_theme::faint(),
-                "Summarized conversation",
+                t!("usage.row.summarized"),
                 aligned.summarized,
                 size,
             ),
             usage_row(
                 conversation_color,
-                "Conversation",
+                t!("usage.row.conversation"),
                 aligned.conversation,
                 size,
             ),
         ];
     }
-    vec![usage_row(conversation_color, "Conversation", used, size)]
+    vec![usage_row(
+        conversation_color,
+        t!("usage.row.conversation"),
+        used,
+        size,
+    )]
 }
 
-fn usage_row(color: u32, label: &'static str, tokens: u64, size: u64) -> UsageBreakdownRow {
+fn usage_row(color: u32, label: Cow<'static, str>, tokens: u64, size: u64) -> UsageBreakdownRow {
     UsageBreakdownRow {
         color,
         label,

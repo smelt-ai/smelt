@@ -206,6 +206,14 @@ pub struct AutomationRunDetailParams {
     pub run_id: String,
     /// 客户端手上的运行缺输出或指令时才要归档那份。
     pub include_archived_run: bool,
+    /// 客户端认得的消息流条目版本（[`crate::acp_chat::ACP_ENTRY_VERSION`]）。旧客户端不带，按 1
+    /// 算，比它新的条目换成它认得的形状。
+    #[serde(default = "first_entry_version")]
+    pub entry_version: u32,
+}
+
+fn first_entry_version() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

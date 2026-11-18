@@ -120,9 +120,8 @@ impl SessionRecord {
             phase_since: now_unix,
             // 崩溃前那一轮已经随进程没了，恢复出来的是历史，不在一轮里。
             turn_started_at: 0,
-            pending_question: None,
+            pending: None,
             pending_request: None,
-            pending_note: None,
             // 投递归崩溃前那个进程，恢复出来的会话没有刚结束的投递。
             completed_delivery_id: None,
             tokens_used: self.tokens_used,
@@ -605,9 +604,10 @@ mod tests {
             phase: Phase::AwaitingApproval,
             phase_since: 100,
             turn_started_at: 0,
-            pending_question: Some("要不要继续".to_string()),
+            pending: Some(crate::session_state::PendingLine::Said(
+                "要不要继续".to_string(),
+            )),
             pending_request: None,
-            pending_note: None,
             completed_delivery_id: None,
             tokens_used: Some(1234),
             branch: Some("feat/ghost".to_string()),
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(state.id, "s1");
         assert_eq!(state.phase, Phase::AwaitingApproval);
         assert!(!state.runtime);
-        assert_eq!(state.pending_question, None);
+        assert_eq!(state.pending, None);
         assert_eq!(state.instance, 0);
         assert_eq!(state.revision, 0);
         assert_eq!(state.agent_token, "");

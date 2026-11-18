@@ -452,7 +452,7 @@ impl ConversationView {
                         }
                         match *section {
                             ComposerMenuSection::Provider => {
-                                menu = menu.label("Provider");
+                                menu = menu.label(t!("config.provider"));
                                 for provider in &provider_groups {
                                     let is_current = current_provider_id.as_deref()
                                         == Some(provider.id.as_str());
@@ -1230,7 +1230,7 @@ impl ConversationView {
                         div()
                             .type_style(TYPE.ui_medium)
                             .text_color(gpui::rgb(ui_theme::muted()))
-                            .child("Context Usage"),
+                            .child(t!("usage.label").into_owned()),
                     )
                     .child(div().flex_1())
                     .child(
@@ -1272,12 +1272,12 @@ impl ConversationView {
             fill,
         );
         panel = panel.child(render_usage_stacked_bar(&legend, size));
-        for row in legend {
+        for (ix, row) in legend.into_iter().enumerate() {
             panel = panel.child(
                 div()
                     .flex()
                     .items_center()
-                    .id((gpui::ElementId::from("acp-usage-row"), row.label))
+                    .id(("acp-usage-row", ix))
                     .w_full()
                     .h(ui_theme::height::md())
                     .px_2()

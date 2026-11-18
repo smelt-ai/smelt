@@ -124,6 +124,9 @@ config:
   model:
     en: "Model"
     zh-CN: "模型"
+  provider:
+    en: "Provider"
+    zh-CN: "Provider"
   next_turn:
     en: "applies next turn"
     zh-CN: "下轮生效"
@@ -1157,3 +1160,28 @@ usage:
   label:
     en: "Context Usage"
     zh-CN: "上下文用量"
+  row:
+    system_prompt:
+      en: "System prompt"
+      zh-CN: "系统提示词"
+    tool_definitions:
+      en: "Tool definitions"
+      zh-CN: "工具定义"
+    rules:
+      en: "Rules"
+      zh-CN: "规则"
+    skills:
+      en: "Skills"
+      zh-CN: "技能"
+    mcp_dynamic:
+      en: "MCP & dynamic tools"
+      zh-CN: "MCP 与动态工具"
+    subagents:
+      en: "Subagent definitions"
+      zh-CN: "子智能体定义"
+    summarized:
+      en: "Summarized conversation"
+      zh-CN: "已摘要的对话"
+    conversation:
+      en: "Conversation"
+      zh-CN: "对话"

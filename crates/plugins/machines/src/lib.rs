@@ -71,7 +71,7 @@ mod tests {
             let add = api::command(contract::ADD_MACHINE.id(), cx).expect("添加远程机器登记上了");
             assert!(add.palette);
             assert!(!add.requires_args);
-            assert_eq!(add.title.as_ref(), "Add Remote Machine");
+            assert_eq!(add.title.get(), "Add Remote Machine");
             assert!(api::command("smelt.machines/remove", cx).is_some());
         });
     }

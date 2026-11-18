@@ -26,7 +26,7 @@ use rust_i18n::t;
 use smelt_plugin_api::ui::IconName;
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 use smelt_plugin_api::{
-    self as api, HostEvent, OpenView, PluginView, RunCommand, ViewHandle, ViewSpec, text,
+    self as api, HostEvent, OpenView, PluginView, RunCommand, Text, ViewHandle, ViewSpec, text,
 };
 
 rust_i18n::i18n!("locales", fallback = "en");
@@ -84,8 +84,6 @@ fn affects_launcher(event: &HostEvent) -> bool {
             | HostEvent::CommandsChanged
             | HostEvent::ViewBadgesChanged
             | HostEvent::ShownViewsChanged
-            // 入口上的名字是视图标题的快照。
-            | HostEvent::LocaleChanged
     )
 }
 
@@ -95,7 +93,7 @@ fn affects_launcher(event: &HostEvent) -> bool {
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
     id: SharedString,
-    title: SharedString,
+    title: Text,
     icon: SharedString,
     /// 挂着角标：有要处理的事。
     attention: bool,
@@ -107,7 +105,7 @@ struct Entry {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct NavState {
     /// 新对话命令的标题（「新对话 · 写作助手」）；命令没登记是 `None`，不出按钮。
-    new_conversation: Option<SharedString>,
+    new_conversation: Option<Text>,
     entries: Vec<Entry>,
 }
 
@@ -203,8 +201,8 @@ impl Render for Nav {
                     .children(
                         self.state
                             .new_conversation
-                            .clone()
-                            .map(new_conversation_button),
+                            .as_ref()
+                            .map(|title| new_conversation_button(title.get())),
                     )
                     .children(self.state.entries.iter().map(entry_row)),
             )
@@ -255,7 +253,7 @@ fn entry_row(entry: &Entry) -> AnyElement {
                 .min_w_0()
                 .type_style(TYPE.ui)
                 .when(selected, |label| label.font_weight(TYPE.ui_medium.weight))
-                .child(truncated_line(entry.title.clone())),
+                .child(truncated_line(entry.title.get())),
         )
         .when(entry.attention, |row| {
             row.child(

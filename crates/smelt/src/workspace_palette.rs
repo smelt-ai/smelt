@@ -69,12 +69,13 @@ fn palette_groups(commands: Vec<CommandInfo>, cx: &App) -> Vec<ComboboxGroup> {
             .find(&command.id)
             .and_then(|bound| bound.key.as_deref())
             .and_then(|spec| Keystroke::parse_with_os(spec, os).ok());
-        let option = ComboboxOption::new(command.id.clone(), command.title)
-            .keywords([command.group.clone(), command.id])
+        let group = command.group.get();
+        let option = ComboboxOption::new(command.id.clone(), command.title.get())
+            .keywords([group.clone(), command.id])
             .keybind(keybind);
-        match groups.iter_mut().find(|(group, _)| *group == command.group) {
+        match groups.iter_mut().find(|(name, _)| *name == group) {
             Some((_, options)) => options.push(option),
-            None => groups.push((command.group, vec![option])),
+            None => groups.push((group, vec![option])),
         }
     }
     groups

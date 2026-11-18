@@ -52,7 +52,7 @@ function currentSessionControl(): SessionControl {
 export type MemoryUsage = { readCount: number; lastReadAtMs: number };
 export type MemoryTrust = "trusted" | "pending";
 /**
- * 来源记录。`reason` 存的是种类，界面按语言说（`smelt-model` 的 `memory_pending_reason_text`）：
+ * 来源记录。`reason` 存的是种类，界面按语言说（`smelt-model` 的 `agent_memory::pending_reason_text`）：
  * `user_present`、`unattended`、`external_content:<工具名, …>`、`unknown_origin`、`edits_pending`、
  * `rule_lacks_user_words`。给模型的话用 `describePendingReason`。
  */

@@ -1,7 +1,7 @@
 // 插件自己的界面文案：英文、简体中文两份，按宿主的 `locale()` 取；当前语言没有的键用
 // 英文。`%{名字}` 是插值。数量用 `tn`：键分 `.one`、`.other` 两条。
 //
-// 表里每个键两种语言都要有、代码里用到的键都要在表里，见 tests/core.test.mjs。
+// 表里每个键两种语言都要有、代码里用到的键都要在表里，见 tests/i18n.test.mjs。
 
 import { locale } from "smelt-plugin-api";
 

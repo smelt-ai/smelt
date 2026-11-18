@@ -154,13 +154,13 @@ pub struct ViewSpec {
 /// 建视图的函数。
 pub type ViewBuilder = Rc<dyn Fn(&mut Window, &mut App) -> Rc<dyn ViewHandle>>;
 
-/// 登记过的一个视图：登记时给的，加上 id。标题是取的时候那种界面语言下的字，存着它的
-/// 在 [`HostEvent::LocaleChanged`] 时重取。
+/// 登记过的一个视图：登记时给的，加上 id。标题跟着界面语言变，显示时 [`Text::get`]，
+/// 存着它的不用在换语言时重取。
 #[derive(Clone)]
 pub struct ViewInfo {
     /// `<来源>/<名字>`。
     pub id: SharedString,
-    pub title: SharedString,
+    pub title: Text,
     pub icon: SharedString,
     pub draws_top_bar: bool,
     pub settings: Option<SettingsEntry>,
@@ -171,18 +171,13 @@ pub struct ViewInfo {
 
 struct Entry {
     owner: String,
-    /// 标题在 `title` 里，`info.title` 不用，取的时候按当前语言填（[`Entry::info`]）。
     info: ViewInfo,
-    title: Text,
     view: Option<Rc<dyn ViewHandle>>,
 }
 
 impl Entry {
     fn info(&self) -> ViewInfo {
-        ViewInfo {
-            title: self.title.get(),
-            ..self.info.clone()
-        }
+        self.info.clone()
     }
 }
 
@@ -202,13 +197,13 @@ pub fn register_views(owner: &str, specs: Vec<ViewSpec>, cx: &mut App) -> Result
     if owner.is_empty() || owner.contains('/') {
         return Err(format!("视图来源「{owner}」不能为空，也不能含 `/`"));
     }
-    let mut infos: Vec<(ViewInfo, Text)> = Vec::with_capacity(specs.len());
+    let mut infos: Vec<ViewInfo> = Vec::with_capacity(specs.len());
     for spec in specs {
         if spec.name.is_empty() || spec.name.contains('/') {
             return Err(format!("视图名「{}」不能为空，也不能含 `/`", spec.name));
         }
         let id: SharedString = format!("{owner}/{}", spec.name).into();
-        if infos.iter().any(|(info, _)| info.id == id) {
+        if infos.iter().any(|info| info.id == id) {
             return Err(format!("视图「{id}」登记了两次"));
         }
         if spec.title.get().trim().is_empty() {
@@ -231,19 +226,16 @@ pub fn register_views(owner: &str, specs: Vec<ViewSpec>, cx: &mut App) -> Result
                 return Err(format!("视图「{id}」填了两次插槽「{slot}」"));
             }
         }
-        infos.push((
-            ViewInfo {
-                id,
-                title: SharedString::default(),
-                icon: spec.icon,
-                draws_top_bar: spec.draws_top_bar,
-                settings: spec.settings,
-                instances: spec.instances,
-                fills: spec.fills,
-                build: spec.build,
-            },
-            spec.title,
-        ));
+        infos.push(ViewInfo {
+            id,
+            title: spec.title,
+            icon: spec.icon,
+            draws_top_bar: spec.draws_top_bar,
+            settings: spec.settings,
+            instances: spec.instances,
+            fills: spec.fills,
+            build: spec.build,
+        });
     }
     let views = &mut cx.default_global::<ViewRegistry>().views;
     let at = views
@@ -259,7 +251,7 @@ pub fn register_views(owner: &str, specs: Vec<ViewSpec>, cx: &mut App) -> Result
     }
     let entries: Vec<Entry> = infos
         .into_iter()
-        .map(|(info, title)| {
+        .map(|info| {
             let view = old
                 .iter_mut()
                 .find(|old| old.info.id == info.id && Rc::ptr_eq(&old.info.build, &info.build))
@@ -267,7 +259,6 @@ pub fn register_views(owner: &str, specs: Vec<ViewSpec>, cx: &mut App) -> Result
             Entry {
                 owner: owner.to_string(),
                 info,
-                title,
                 view,
             }
         })
