@@ -301,7 +301,7 @@ impl AutomationsPage {
             workspace_dir: None,
             trigger: AutomationTrigger::default(),
             action,
-            sinks: vec![AutomationSink::Local],
+            sinks: AutomationNotify::Always.to_sinks(),
         };
         self.open_automation_editor_for(runtime, automation, true, window, cx);
     }
@@ -328,7 +328,7 @@ impl AutomationsPage {
                     .unwrap_or_default(),
                 prompt: Some((template.prompt)().into_owned()),
             },
-            sinks: vec![AutomationSink::Local],
+            sinks: AutomationNotify::Always.to_sinks(),
         };
         self.open_automation_editor_for(runtime, automation, true, window, cx);
     }
@@ -513,7 +513,7 @@ impl AutomationsPage {
                 Some(secret),
             ));
         }
-        let notification = AutomationNotificationPreset::from_sinks(&automation.sinks);
+        let notification = automation.notify();
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(&name, window, {
             move |this, _, event: &InputEvent, window, cx| {
@@ -729,11 +729,11 @@ impl AutomationsPage {
 
     pub(crate) fn set_automation_notification(
         &mut self,
-        preset: AutomationNotificationPreset,
+        notify: AutomationNotify,
         cx: &mut Context<Self>,
     ) {
         if let Some(editor) = self.editor.as_mut() {
-            editor.notification = preset;
+            editor.notification = notify;
         }
         self.touch_schedule_editor(cx);
     }

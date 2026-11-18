@@ -75,14 +75,6 @@ pub(crate) fn automation_run_lines(title: String, detail: String, error: Option<
         })
 }
 
-pub(crate) fn automation_form_row() -> Div {
-    automation_form_shell()
-        .h(ui_theme::height::xl())
-        .px_3()
-        .flex()
-        .items_center()
-}
-
 pub(crate) fn automation_section_label(label: impl Into<SharedString>) -> AnyElement {
     let label: SharedString = label.into();
     div()

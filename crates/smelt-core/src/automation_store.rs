@@ -1867,21 +1867,18 @@ mod tests {
         };
         assert_eq!(
             sinks(&loaded, "app-and-feishu"),
-            vec![AutomationSink::Local]
+            vec![AutomationSink::local()]
         );
         assert!(sinks(&loaded, "feishu-only").is_empty());
         let persisted = persisted_file(temp.path());
         assert_eq!(persisted.schema_version, AUTOMATION_FILE_SCHEMA_VERSION);
         assert_eq!(
             sinks(&persisted, "app-and-feishu"),
-            vec![AutomationSink::Local]
+            vec![AutomationSink::local()]
         );
-        assert!(
-            persisted
-                .automations
-                .iter()
-                .all(crate::automation::Automation::notifies_app)
-        );
+        assert!(persisted.automations.iter().all(|automation| {
+            automation.notify() == crate::automation::AutomationNotify::Always
+        }));
     }
 
     #[cfg(unix)]

@@ -3,8 +3,8 @@
 //! 排程、运行状态归运行时（smeltd 是唯一权威），这里只有编辑器要的目录。
 
 pub(crate) use smelt_plugin_api::model::automation::{
-    Automation, AutomationAction, AutomationSchedule, AutomationSink, AutomationTrigger,
-    EventIngress, WebhookIngress, automation_notifies_app,
+    Automation, AutomationAction, AutomationNotify, AutomationSchedule, AutomationTrigger,
+    EventIngress, WebhookIngress,
 };
 
 use gpui::SharedString;
@@ -110,35 +110,28 @@ impl AutomationTriggerPresetId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AutomationNotificationPreset {
-    App,
-    Off,
+/// 编辑器里通知的三档，从「不通知」到「每次」排。
+pub(crate) const NOTIFY_CHOICES: [AutomationNotify; 3] = [
+    AutomationNotify::Never,
+    AutomationNotify::FailuresOnly,
+    AutomationNotify::Always,
+];
+
+pub(crate) fn notify_label(notify: AutomationNotify) -> SharedString {
+    match notify {
+        AutomationNotify::Never => t!("notification.off"),
+        AutomationNotify::FailuresOnly => t!("notification.failures"),
+        AutomationNotify::Always => t!("notification.always"),
+    }
+    .into()
 }
 
-impl AutomationNotificationPreset {
-    pub const ALL: [Self; 2] = [Self::App, Self::Off];
-
-    pub fn from_sinks(sinks: &[AutomationSink]) -> Self {
-        if automation_notifies_app(sinks) {
-            Self::App
-        } else {
-            Self::Off
-        }
+/// 选中那档下面的一句说明。
+pub(crate) fn notify_hint(notify: AutomationNotify) -> SharedString {
+    match notify {
+        AutomationNotify::Never => t!("notification.off_hint"),
+        AutomationNotify::FailuresOnly => t!("notification.failures_hint"),
+        AutomationNotify::Always => t!("notification.always_hint"),
     }
-
-    pub fn label(self) -> SharedString {
-        match self {
-            Self::App => t!("notification.app"),
-            Self::Off => t!("notification.off"),
-        }
-        .into()
-    }
-
-    pub fn to_sinks(self) -> Vec<AutomationSink> {
-        match self {
-            Self::App => vec![AutomationSink::Local],
-            Self::Off => vec![AutomationSink::Off],
-        }
-    }
+    .into()
 }

@@ -4,14 +4,15 @@
 //! 换成 gpui 的版本。
 
 use smelt_plugin_api::model::automation::{
-    AutomationAction, AutomationRunStatus, AutomationSchedule, AutomationSink, AutomationTrigger,
+    AutomationAction, AutomationNotify, AutomationRunStatus, AutomationSchedule, AutomationTrigger,
     SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_DAY_WED, SCHEDULE_WEEKDAYS_MASK, WebhookIngress,
 };
 use smelt_plugin_api::ui::field::InputEvent;
 
 use crate::kinds::{
-    AutomationActionKindId, AutomationNotificationPreset, AutomationTriggerKindId,
-    AutomationTriggerPresetId, BUILTIN_AUTOMATION_ACTIONS, BUILTIN_AUTOMATION_TRIGGER_PRESETS,
+    AutomationActionKindId, AutomationTriggerKindId, AutomationTriggerPresetId,
+    BUILTIN_AUTOMATION_ACTIONS, BUILTIN_AUTOMATION_TRIGGER_PRESETS, NOTIFY_CHOICES, notify_hint,
+    notify_label,
 };
 
 use crate::editor::{
@@ -55,11 +56,8 @@ fn automation_copy_uses_precise_product_terms() {
     );
     assert_eq!(AutomationTriggerPresetId::Daily.label(), "Daily");
     assert_eq!(AutomationTriggerPresetId::Webhook.label(), "Webhook");
-    assert_eq!(
-        AutomationNotificationPreset::App.label(),
-        "In-App Notification"
-    );
-    assert_eq!(AutomationNotificationPreset::Off.label(), "No Notification");
+    assert_eq!(notify_label(AutomationNotify::Always), "Every Run");
+    assert_eq!(notify_label(AutomationNotify::Never), "No Notification");
 }
 
 #[test]
@@ -431,35 +429,22 @@ fn trigger_presets_cover_hourly_daily_weekly_interval_and_webhook() {
 }
 
 #[test]
-fn notification_preset_only_offers_targets_that_deliver() {
+fn notification_choices_run_from_quiet_to_every_run() {
     assert_eq!(
-        AutomationNotificationPreset::ALL,
+        NOTIFY_CHOICES,
         [
-            AutomationNotificationPreset::App,
-            AutomationNotificationPreset::Off
+            AutomationNotify::Never,
+            AutomationNotify::FailuresOnly,
+            AutomationNotify::Always
         ]
     );
-    assert_eq!(
-        AutomationNotificationPreset::from_sinks(&[]),
-        AutomationNotificationPreset::App
-    );
-    assert_eq!(
-        AutomationNotificationPreset::from_sinks(&[AutomationSink::Local]),
-        AutomationNotificationPreset::App
-    );
-    assert_eq!(
-        AutomationNotificationPreset::from_sinks(&[AutomationSink::Off]),
-        AutomationNotificationPreset::Off
-    );
-    for preset in AutomationNotificationPreset::ALL {
-        assert_eq!(
-            AutomationNotificationPreset::from_sinks(&preset.to_sinks()),
-            preset
-        );
+    for notify in NOTIFY_CHOICES {
+        assert_eq!(AutomationNotify::from_sinks(&notify.to_sinks()), notify);
+        assert!(!notify_label(notify).is_empty());
+        assert!(!notify_hint(notify).is_empty());
     }
     assert_eq!(
-        AutomationNotificationPreset::App.label(),
-        "In-App Notification"
+        notify_label(AutomationNotify::FailuresOnly),
+        "Failures Only"
     );
-    assert_eq!(AutomationNotificationPreset::Off.label(), "No Notification");
 }

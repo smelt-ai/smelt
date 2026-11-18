@@ -128,27 +128,83 @@ impl AutomationAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AutomationSink {
-    Local,
+    /// 跑完在 App 里弹通知。
+    Local {
+        /// 只在没跑成（失败、跳过）时弹。默认不写：线上还是 `{"type": "local"}`，不认识这个
+        /// 字段的旧版本读成「每次都弹」。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        failures_only: bool,
+    },
     /// 明确关闭通知。空 `sinks` 仍表示沿用应用通知（旧数据）。
     Off,
 }
 
 impl AutomationSink {
+    /// 每次跑完都弹通知。
+    pub fn local() -> Self {
+        Self::Local {
+            failures_only: false,
+        }
+    }
+
     pub fn is_off(&self) -> bool {
         matches!(self, Self::Off)
     }
 
     pub fn is_local(&self) -> bool {
-        matches!(self, Self::Local)
+        matches!(self, Self::Local { .. })
     }
 }
 
-/// 空列表沿用应用通知；`Off` 明确关闭。
-pub fn automation_notifies_app(sinks: &[AutomationSink]) -> bool {
-    if sinks.iter().any(AutomationSink::is_off) {
-        false
-    } else {
-        sinks.is_empty() || sinks.iter().any(AutomationSink::is_local)
+/// 一条自动化跑完弹不弹通知。由 `sinks` 推出来，不另存。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutomationNotify {
+    Never,
+    FailuresOnly,
+    Always,
+}
+
+impl AutomationNotify {
+    /// 空列表沿用应用通知（旧数据）；`Off` 明确关闭，盖过别的。
+    pub fn from_sinks(sinks: &[AutomationSink]) -> Self {
+        if sinks.iter().any(AutomationSink::is_off) {
+            return Self::Never;
+        }
+        let mut locals = sinks.iter().filter_map(|sink| match sink {
+            AutomationSink::Local { failures_only } => Some(*failures_only),
+            AutomationSink::Off => None,
+        });
+        match locals.next() {
+            None if sinks.is_empty() => Self::Always,
+            None => Self::Never,
+            // 有一个每次都弹的就每次都弹。
+            Some(failures_only) => {
+                if failures_only && locals.all(|only| only) {
+                    Self::FailuresOnly
+                } else {
+                    Self::Always
+                }
+            }
+        }
+    }
+
+    pub fn to_sinks(self) -> Vec<AutomationSink> {
+        match self {
+            Self::Never => vec![AutomationSink::Off],
+            Self::FailuresOnly => vec![AutomationSink::Local {
+                failures_only: true,
+            }],
+            Self::Always => vec![AutomationSink::local()],
+        }
+    }
+
+    /// 这次运行要不要弹：`failed` 是没跑成（失败、跳过）。
+    pub fn notifies(self, failed: bool) -> bool {
+        match self {
+            Self::Never => false,
+            Self::FailuresOnly => failed,
+            Self::Always => true,
+        }
     }
 }
 
@@ -523,8 +579,8 @@ impl<'de> Deserialize<'de> for Automation {
 }
 
 impl Automation {
-    pub fn notifies_app(&self) -> bool {
-        automation_notifies_app(&self.sinks)
+    pub fn notify(&self) -> AutomationNotify {
+        AutomationNotify::from_sinks(&self.sinks)
     }
 
     pub fn is_ready(&self) -> bool {
@@ -2151,5 +2207,76 @@ mod schedule_tests {
         assert!(automation.is_ready());
         assert!(automation.validate().is_ok());
         assert!(automation.validate_execution_context().is_err());
+    }
+}
+
+#[cfg(test)]
+mod notify_tests {
+    use super::*;
+
+    /// 「仅失败时」加在 `local` 上的字段：每次都弹的线上形状不变，旧版本读到带字段的也认得，
+    /// 只是当成每次都弹。
+    #[test]
+    fn failures_only_is_an_optional_field_old_readers_accept() {
+        assert_eq!(
+            serde_json::to_value(AutomationSink::local()).unwrap(),
+            serde_json::json!({ "type": "local" })
+        );
+        let failures = serde_json::to_value(AutomationSink::Local {
+            failures_only: true,
+        })
+        .unwrap();
+        assert_eq!(
+            failures,
+            serde_json::json!({ "type": "local", "failures_only": true })
+        );
+
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldSink {
+            Local,
+            Off,
+        }
+        assert_eq!(
+            serde_json::from_value::<OldSink>(failures).unwrap(),
+            OldSink::Local
+        );
+        assert_eq!(
+            serde_json::from_value::<AutomationSink>(serde_json::json!({ "type": "local" }))
+                .unwrap(),
+            AutomationSink::local()
+        );
+    }
+
+    #[test]
+    fn notify_reads_sinks_and_round_trips() {
+        use AutomationNotify::*;
+        assert_eq!(
+            AutomationNotify::from_sinks(&[]),
+            Always,
+            "旧数据沿用应用通知"
+        );
+        assert_eq!(
+            AutomationNotify::from_sinks(&[AutomationSink::local(), AutomationSink::Off]),
+            Never,
+            "Off 盖过别的"
+        );
+        assert_eq!(
+            AutomationNotify::from_sinks(&[
+                AutomationSink::Local {
+                    failures_only: true
+                },
+                AutomationSink::local(),
+            ]),
+            Always,
+            "有一个每次都弹就每次都弹"
+        );
+        for notify in [Never, FailuresOnly, Always] {
+            assert_eq!(AutomationNotify::from_sinks(&notify.to_sinks()), notify);
+        }
+        assert!(FailuresOnly.notifies(true));
+        assert!(!FailuresOnly.notifies(false));
+        assert!(Always.notifies(false));
+        assert!(!Never.notifies(true));
     }
 }

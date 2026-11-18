@@ -2,7 +2,7 @@
 
 use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::automation::{
-    Automation, AutomationAction, AutomationSchedule as ModelSchedule, AutomationSink,
+    Automation, AutomationAction, AutomationNotify, AutomationSchedule as ModelSchedule,
     AutomationTrigger, WebhookIngress, new_webhook_secret,
 };
 
@@ -87,7 +87,7 @@ pub(crate) fn draft_of(automation: &Automation) -> AutomationDraft {
             .map(view_schedule)
             .collect(),
         webhook: !automation.trigger.webhooks.is_empty(),
-        notify: automation.notifies_app(),
+        notify: automation.notify() != AutomationNotify::Never,
     }
 }
 
@@ -128,11 +128,13 @@ pub(crate) fn apply_draft(
             secret: Some(secret),
         });
     }
-    automation.sinks = vec![if draft.notify {
-        AutomationSink::Local
-    } else {
-        AutomationSink::Off
-    }];
+    // 手机上只有开关：开着时桌面上设的「仅失败时」留着，不改成每次都弹。
+    let notify = automation.notify();
+    if !draft.notify {
+        automation.sinks = AutomationNotify::Never.to_sinks();
+    } else if notify == AutomationNotify::Never || automation.sinks.is_empty() {
+        automation.sinks = AutomationNotify::Always.to_sinks();
+    }
     automation
 }
 
@@ -218,6 +220,23 @@ mod tests {
         }
     }
 
+    /// 手机上只有开关：开着保存时，桌面上设的「仅失败时」不被改成每次都弹。
+    #[test]
+    fn saving_with_notify_on_keeps_failures_only() {
+        let mut base = apply_draft(None, || "id".into(), &draft());
+        base.sinks = AutomationNotify::FailuresOnly.to_sinks();
+        let on = AutomationDraft {
+            notify: true,
+            ..draft()
+        };
+        let saved = apply_draft(Some(base), || unreachable!(), &on);
+        assert_eq!(saved.notify(), AutomationNotify::FailuresOnly);
+        let fresh = apply_draft(None, || "new".into(), &on);
+        assert_eq!(fresh.notify(), AutomationNotify::Always);
+        let off = apply_draft(Some(saved), || unreachable!(), &draft());
+        assert_eq!(off.notify(), AutomationNotify::Never);
+    }
+
     #[test]
     fn a_new_shell_automation_gets_a_webhook_and_quiet_sinks() {
         let automation = apply_draft(None, || "new-id".into(), &draft());
@@ -231,7 +250,7 @@ mod tests {
         let webhook = &automation.trigger.webhooks[0];
         assert_eq!(webhook.secret.as_deref(), Some(webhook.endpoint.as_str()));
         assert!(!webhook.endpoint.is_empty());
-        assert_eq!(automation.sinks, vec![AutomationSink::Off]);
+        assert_eq!(automation.notify(), AutomationNotify::Never);
         automation.validate().unwrap();
         // 再转回表单，看到的是同一份。
         let mut back = draft_of(&automation);

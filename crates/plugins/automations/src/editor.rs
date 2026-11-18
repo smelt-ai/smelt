@@ -125,7 +125,7 @@ pub(crate) struct AutomationEditor {
     pub(crate) command: Entity<TextareaState>,
     pub(crate) retained_events: Vec<EventIngress>,
     pub(crate) entries: Vec<TriggerEntryEditor>,
-    pub(crate) notification: AutomationNotificationPreset,
+    pub(crate) notification: AutomationNotify,
     pub(crate) draft_revision: u64,
     pub(crate) saving_revision: Option<u64>,
     /// 重新生成地址这类后台提交不让顶栏「运行一次」进入 loading 状态。
@@ -845,45 +845,21 @@ pub(crate) fn render_notification_field(
     _cx: &App,
 ) -> AnyElement {
     let selected = editor.notification;
-    let picker_entity = entity;
-    let button = Button::new("automation-notification")
-        .quiet()
-        .w_full()
-        .dropdown_caret(true);
-    let button = match selected {
-        AutomationNotificationPreset::Off => button.icon(IconName::BellOff),
-        AutomationNotificationPreset::App => button.icon(IconName::Bell),
-    };
-    let picker = automation_form_row().child(
-        MenuTrigger::dropdown(
-            "automation-notification-menu",
-            button.label(selected.label()),
-            move |_, _| {
-                let mut menu = Menu::new();
-                for preset in AutomationNotificationPreset::ALL {
-                    let entity = picker_entity.clone();
-                    menu = menu.item(
-                        MenuItem::new(preset.label())
-                            .icon(notification_preset_icon(preset))
-                            .checked(preset == selected)
-                            .on_click(move |_, _, cx| {
-                                entity.update(cx, |page, cx| {
-                                    page.set_automation_notification(preset, cx);
-                                });
-                            }),
-                    );
-                }
-                menu
-            },
-        )
-        .w_full(),
-    );
+    let picker = Segmented::new("automation-notification")
+        .segments(NOTIFY_CHOICES.iter().map(|notify| notify_label(*notify)))
+        .selected(NOTIFY_CHOICES.iter().position(|notify| *notify == selected))
+        .on_select(move |ix, _, cx| {
+            if let Some(notify) = NOTIFY_CHOICES.get(ix).copied() {
+                entity.update(cx, |page, cx| page.set_automation_notification(notify, cx));
+            }
+        });
     div()
         .flex()
         .flex_col()
         .gap_2()
         .child(automation_section_label(t!("notification.title")))
-        .child(picker)
+        .child(div().flex().child(picker))
+        .child(crate::view::automation_field_hint(notify_hint(selected)))
         .into_any_element()
 }
 
@@ -915,13 +891,6 @@ pub(crate) fn automation_access_note(is_agent: bool) -> SharedString {
         t!("access.shell_note")
     }
     .into()
-}
-
-pub(crate) fn notification_preset_icon(preset: AutomationNotificationPreset) -> IconName {
-    match preset {
-        AutomationNotificationPreset::Off => IconName::BellOff,
-        AutomationNotificationPreset::App => IconName::Bell,
-    }
 }
 
 pub(crate) fn render_webhook_entry(

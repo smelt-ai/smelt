@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use api::model::automation::{AutomationFile, AutomationRunStatus};
+use api::model::automation::{AutomationFile, AutomationNotify, AutomationRunStatus};
 use api::model::automation_projection::{MachineAutomations, decode_automations_payload};
 use api::model::daemon_state::CORE_TOPIC_AUTOMATIONS_CHANGED;
 use api::{HostEvent, NotificationClick, Notify, RuntimeKey, TopicMessage, WithdrawNotification};
@@ -20,8 +20,8 @@ use gpui::{App, BorrowAppContext as _, Global, Task};
 use smelt_plugin_api as api;
 
 use crate::notifications::{
-    AutomationProjectionOrigin, AutomationRunNotification, automation_run_notifications,
-    effective_projection_origin,
+    AutomationProjectionOrigin, AutomationRunNotification, AutomationRunNotificationKind,
+    automation_run_notifications, effective_projection_origin,
 };
 use crate::store::{Delivered, DeliveredStore};
 use crate::{OWNER, VIEW_ID};
@@ -70,7 +70,7 @@ pub(crate) fn automations(cx: &App) -> &AutomationStore {
 pub(crate) struct Outcome {
     /// 要发的：标题已带上机器名。
     pub(crate) notify: Vec<AutomationRunNotification>,
-    /// 跑完了、但这条自动化不通知 App 的运行。
+    /// 跑完了、但按这条自动化的通知设置不弹的运行（不通知，或仅失败时跑成了）。
     pub(crate) silenced: Vec<String>,
     /// 快照里还在的运行：不在的那些发过的通知该撤了。
     pub(crate) runs: HashSet<String>,
@@ -88,11 +88,11 @@ pub(crate) fn apply_snapshot(
     let current = store.machines.entry(machine.clone()).or_default();
     let origin = effective_projection_origin(origin, &current.store_id, &snapshot.store_id);
     let notifications = automation_run_notifications(&current.runs, &snapshot.runs, origin);
-    // 发不发只看这条自动化自己的「通知 App」：那是它的通知开关。
-    let notifies_app = snapshot
+    // 发不发只看这条自动化自己的通知设置。库里找不到它（刚删）时按每次都弹。
+    let notify = snapshot
         .automations
         .iter()
-        .map(|automation| (automation.id.clone(), automation.notifies_app()))
+        .map(|automation| (automation.id.clone(), automation.notify()))
         .collect::<HashMap<_, _>>();
     let runs = snapshot.runs.iter().map(|run| run.id.clone()).collect();
     if !current.replace_snapshot(snapshot) {
@@ -103,10 +103,12 @@ pub(crate) fn apply_snapshot(
         ..Outcome::default()
     };
     for mut notification in notifications {
-        if notifies_app
+        let failed = notification.kind == AutomationRunNotificationKind::Failure;
+        if notify
             .get(&notification.automation_id)
             .copied()
-            .unwrap_or(true)
+            .unwrap_or(AutomationNotify::Always)
+            .notifies(failed)
         {
             if let Some(name) = machine_name {
                 notification.subtitle = format!("{name} · {}", notification.subtitle);
@@ -366,7 +368,7 @@ mod tests {
     fn finished_runs_notify_with_the_remote_machine_name() {
         let machine = RuntimeKey::Remote("rt".to_string());
         let mut store = AutomationStore::default();
-        let auto = automation("a", vec![AutomationSink::Local]);
+        let auto = automation("a", vec![AutomationSink::local()]);
         let first = file(
             1,
             vec![auto.clone()],
@@ -404,7 +406,7 @@ mod tests {
     fn automations_without_app_notification_stay_quiet() {
         let mut store = AutomationStore::default();
         let auto = automation("a", vec![AutomationSink::Off]);
-        assert!(!auto.notifies_app());
+        assert_eq!(auto.notify(), AutomationNotify::Never);
         let running = file(
             1,
             vec![auto.clone()],
@@ -434,6 +436,53 @@ mod tests {
         assert_eq!(outcome.silenced, vec!["r".to_string()]);
         // 失败的那条算进角标。
         assert_eq!(store.failing(), 1);
+    }
+
+    /// 「仅失败时」：跑成了不弹、记成静音；没跑成的照弹。
+    #[test]
+    fn failures_only_notifies_just_the_failed_runs() {
+        let mut store = AutomationStore::default();
+        let auto = automation("a", AutomationNotify::FailuresOnly.to_sinks());
+        let running = file(
+            1,
+            vec![auto.clone()],
+            vec![
+                run("ok", "a", AutomationRunStatus::Running),
+                run("bad", "a", AutomationRunStatus::Running),
+            ],
+        );
+        apply_snapshot(
+            &mut store,
+            &RuntimeKey::Local,
+            running,
+            AutomationProjectionOrigin::InitialSnapshot,
+            None,
+        );
+        let finished = file(
+            2,
+            vec![auto],
+            vec![
+                run("ok", "a", AutomationRunStatus::Completed),
+                run("bad", "a", AutomationRunStatus::Failed),
+            ],
+        );
+        let outcome = apply_snapshot(
+            &mut store,
+            &RuntimeKey::Local,
+            finished,
+            AutomationProjectionOrigin::Incremental,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome
+                .notify
+                .iter()
+                .map(|it| it.run_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bad"]
+        );
+        assert_eq!(outcome.silenced, vec!["ok".to_string()]);
     }
 
     #[test]

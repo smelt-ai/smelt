@@ -291,12 +291,24 @@ missing:
     en: "Trigger"
     zh-CN: "触发器"
 notification:
-  app:
-    en: "In-App Notification"
-    zh-CN: "应用内通知"
+  always:
+    en: "Every Run"
+    zh-CN: "每次"
+  always_hint:
+    en: "Notify after every run."
+    zh-CN: "每次跑完都弹通知。"
+  failures:
+    en: "Failures Only"
+    zh-CN: "仅失败时"
+  failures_hint:
+    en: "Notify only when a run fails or is skipped; click it to open that run."
+    zh-CN: "没跑成（失败或跳过）才弹通知，点开直达这次运行。"
   off:
     en: "No Notification"
     zh-CN: "不通知"
+  off_hint:
+    en: "Runs are only kept in the run history."
+    zh-CN: "只在运行记录里留底。"
   title:
     en: "Notifications"
     zh-CN: "通知"

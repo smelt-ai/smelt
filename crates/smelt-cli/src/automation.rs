@@ -360,7 +360,7 @@ fn new_webhook_secret() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// 空列表沿用应用通知（见 `automation_notifies_app`）。
+/// 空列表沿用应用通知（见 `AutomationNotify::from_sinks`）。打开时已有的「仅失败时」留着。
 fn notify_sinks(mut sinks: Vec<AutomationSink>, notify: Option<bool>) -> Vec<AutomationSink> {
     match notify {
         None => sinks,
@@ -368,7 +368,7 @@ fn notify_sinks(mut sinks: Vec<AutomationSink>, notify: Option<bool>) -> Vec<Aut
         Some(true) => {
             sinks.retain(|sink| !sink.is_off());
             if !sinks.iter().any(AutomationSink::is_local) {
-                sinks.push(AutomationSink::Local);
+                sinks.push(AutomationSink::local());
             }
             sinks
         }
@@ -475,7 +475,7 @@ fn parse_days(value: &str) -> Result<u8, String> {
 mod tests {
     use super::*;
     use crate::args;
-    use smelt_model::automation::WebhookIngress;
+    use smelt_model::automation::{AutomationNotify, WebhookIngress};
 
     fn create(list: &[&str]) -> Result<Automation, String> {
         parse_flags(&args(list)).and_then(create_from)
@@ -674,7 +674,14 @@ mod tests {
         let off = update(&current, &["--notify", "off"]).unwrap();
         assert_eq!(off.sinks, [AutomationSink::Off]);
         let on = update(&off, &["--notify", "on"]).unwrap();
-        assert_eq!(on.sinks, [AutomationSink::Local]);
+        assert_eq!(on.sinks, [AutomationSink::local()]);
+        // 「仅失败时」打开着再 --notify on 不改成每次都弹。
+        let mut failures = on.clone();
+        failures.sinks = AutomationNotify::FailuresOnly.to_sinks();
+        assert_eq!(
+            update(&failures, &["--notify", "on"]).unwrap().notify(),
+            AutomationNotify::FailuresOnly
+        );
         assert_eq!(update(&on, &["--name", "改名"]).unwrap().sinks, on.sinks);
     }
 
