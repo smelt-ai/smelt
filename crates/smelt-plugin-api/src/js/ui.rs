@@ -27,6 +27,8 @@ mod field;
 mod menu;
 #[deny(dead_code)]
 mod view;
+#[deny(dead_code)]
+mod window_bar;
 
 use gpui::{App, ElementId, Entity, IntoElement, Refineable as _, Styled, Window};
 use gpui_shell::{
@@ -50,6 +52,7 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     alert::register(&mut registry)?;
     badge::register(&mut registry)?;
     view::register(&mut registry)?;
+    window_bar::register(&mut registry)?;
     registry.freeze()
 }
 

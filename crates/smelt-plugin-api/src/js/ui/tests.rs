@@ -110,6 +110,7 @@ fn components_hold_only_smelt_controls() {
             "SmeltAlert",
             "SmeltBadge",
             "SmeltViewInstance",
+            "SmeltWindowBar",
         ]
     );
     let states = components
@@ -424,4 +425,72 @@ export default class App extends View {
     click(&mut context, 10., 52.);
     draw(&mut context);
     assert!(live(&mut context).is_empty(), "不画了就放掉");
+}
+
+/// 顶栏跟着视图的 safe area：顶上是标题栏时占一条（下面的按钮被推下去），不是时不占地方；
+/// 找不到的视图也不画。不点在条上：测试窗口不支持拖窗口。
+#[gpui::test]
+fn window_bar_follows_the_views_safe_area(cx: &mut TestAppContext) {
+    use std::rc::Rc;
+
+    cx.update(|cx| {
+        let spec = crate::ViewSpec {
+            name: "top".into(),
+            title: "Top".into(),
+            icon: "icons/bell.svg".into(),
+            draws_top_bar: true,
+            settings: None,
+            instances: false,
+            fills: Vec::new(),
+            build: Rc::new(|_, cx| -> Rc<dyn crate::ViewHandle> {
+                Rc::new(gpui::AppContext::new(cx, |_| Probe {
+                    args: serde_json::Value::Null,
+                }))
+            }),
+        };
+        crate::register_views("probe", vec![spec], cx).unwrap();
+    });
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltButton, SmeltWindowBar } from "smelt-ui";
+export default class App extends View {
+  init() { this.clicks = 0; }
+  render() {
+    let rejected = 0;
+    for (const bad of [() => SmeltWindowBar.new(" "), () => SmeltWindowBar.new(1)]) {
+      try { bad(); } catch (_) { rejected++; }
+    }
+    return div().size_full().flex().flex_col()
+      .child(SmeltWindowBar.new("probe/top").child("bar"))
+      .child(SmeltWindowBar.new("probe/missing").child("never"))
+      .child(SmeltButton.new("hit").label("Hit")
+        .on_click((_event, cx) => { this.clicks++; cx.notify(); }))
+      .child(`rejected: ${rejected}, clicks: ${this.clicks}`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    assert!(tree(&mut context, &view).contains("rejected: 2, clicks: 0"));
+
+    // 还没建、没设 safe area：两条都不占地方，按钮在最上面。
+    click(&mut context, 10., 45.);
+    assert!(tree(&mut context, &view).contains("clicks: 0"));
+    click(&mut context, 10., 10.);
+    assert!(tree(&mut context, &view).contains("clicks: 1"));
+
+    context.update(|window, cx| {
+        let (top, _) = crate::ensure_view("probe/top", window, cx).unwrap();
+        let area = crate::SafeArea {
+            title_bar: true,
+            ..Default::default()
+        };
+        crate::set_safe_area(&top.view(), area, cx);
+    });
+    draw(&mut context);
+    click(&mut context, 10., 45.);
+    assert!(
+        tree(&mut context, &view).contains("clicks: 2"),
+        "按钮被顶栏推下去了"
+    );
 }

@@ -283,8 +283,8 @@ export interface CornerSize { width: number; height: number }
 /**
  * 视图的 safe area：title_bar 是顶上一行是窗口标题栏（34 高，空白处拖窗口），corners 是四角被占的宽高：
  * 上面两个是宿主控件（红黄绿按钮、停靠区开合按钮），下面两个是窗口圆角，都已含离控件的间距。外壳替它画
- * 标题带的视图顶上不是标题栏，JS 视图都是这种，上面两个角总是 0；贴着窗口左下、右下角时下面的角有值。
- * 视图还没建、没摆着时全为 0。变了发 safe_area_changed。
+ * 标题带的视图（没设 draws_top_bar）顶上不是标题栏，上面两个角总是 0；贴着窗口左下、右下角时下面的角有值。
+ * 视图还没建、没摆着、按实例建时全为 0。变了发 safe_area_changed。
  *
  * 一行控件（贴底的一条等）两头的内边距取「这一行碰到的角宽」和 bar_margin 里大的，不相加。
  */
@@ -403,8 +403,7 @@ export function set_quit_guard(name: string | null): null;
 /** 打开文件，交给登记的文件打开者；没有打开者时本机文件用系统文本编辑器打开，远程的 reject。line 从 1 数。 */
 export function open_file(machine: Machine, path: string, line?: number): Promise<null>;
 /**
- * 本插件登记的一个视图（主入口之外的），同 Rust 的 ViewSpec。顶上那条一律由外壳画（draws_top_bar 为 false）：
- * 脚本画不了拖窗口的区域，自己画的话视图单独一组时窗口就拖不动了。
+ * 本插件登记的一个视图（主入口之外的），同 Rust 的 ViewSpec。
  */
 export interface ViewSpec {
   /** 本插件内的名字，不含 "/"；视图 id 是 "<插件 id>/<name>"。"main" 不能用：那是插件主入口的视图。 */
@@ -413,6 +412,12 @@ export interface ViewSpec {
   title: Text;
   /** 入口、标签上的图标，资源路径 "icons/<名字>.svg"（名字同 ViewInfo.icon）；不给用插件的默认图标。 */
   icon?: string | null;
+  /**
+   * 视图自己画顶上那一条：单独一组时外壳不给它画标题带。顶上用 smelt-ui 的 SmeltWindowBar（给它本视图的 id），
+   * 顶上是窗口标题栏时它画拖窗口、给角上控件让位的那条，不是时什么都不画。默认 false：外壳画一条居中写 title
+   * 的标题带。
+   */
+  draws_top_bar?: boolean;
   /**
    * 视图的入口脚本，插件目录里的相对路径，如 "settings.tsx"。每份视图单独加载、挂载一次它，和主入口、
    * 别的视图是各自的脚本实例，不共享内存：要共享的存在插件自己的库里（store_query / store_execute），
@@ -1773,16 +1778,16 @@ fn view_arguments(
                     )));
                 }
             };
-            let instances = match view.get("instances") {
-                None | Some(HostValue::Null) => false,
-                Some(HostValue::Bool(instances)) => *instances,
-                Some(other) => {
-                    return Err(invalid(&format!(
-                        "instances 要是 true / false，收到 {}",
-                        other.describe()
-                    )));
-                }
+            let flag = |name: &str| match view.get(name) {
+                None | Some(HostValue::Null) => Ok(false),
+                Some(HostValue::Bool(flag)) => Ok(*flag),
+                Some(other) => Err(invalid(&format!(
+                    "{name} 要是 true / false，收到 {}",
+                    other.describe()
+                ))),
             };
+            let draws_top_bar = flag("draws_top_bar")?;
+            let instances = flag("instances")?;
             let fills = strings(view.get("fills"), "fills")?;
             // 能不能这样组合（按实例建的不能是设置页、只有按实例建的能填插槽、插槽 id 的
             // 形状）由 `register_views` 统一查，这里不另写一份。
@@ -1796,7 +1801,7 @@ fn view_arguments(
                 name: name.into(),
                 title,
                 icon: icon.unwrap_or_else(|| loader.icon.clone()),
-                draws_top_bar: false,
+                draws_top_bar,
                 instances,
                 settings,
                 fills,
@@ -3045,6 +3050,25 @@ mod tests {
             "icons/terminal.svg"
         );
         assert!(icons(Some(HostValue::Bool(true))).is_err());
+    }
+
+    #[test]
+    fn a_view_can_draw_its_own_top_bar() {
+        let loader = loader(Rc::default());
+        let draws = |flag: Option<HostValue>| {
+            let mut fields = vec![
+                ("name", HostValue::from("v")),
+                ("title", "视图".into()),
+                ("entry", "view.tsx".into()),
+            ];
+            fields.extend(flag.map(|flag| ("draws_top_bar", flag)));
+            let arguments = HostArguments::new([HostValue::Array(vec![object(&fields)])]);
+            view_arguments(&arguments, &loader).map(|specs| specs[0].draws_top_bar)
+        };
+        assert!(!draws(None).unwrap());
+        assert!(!draws(Some(HostValue::Null)).unwrap());
+        assert!(draws(Some(HostValue::Bool(true))).unwrap());
+        assert!(draws(Some("yes".into())).is_err());
     }
 
     #[test]
