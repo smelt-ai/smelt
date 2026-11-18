@@ -815,7 +815,11 @@ fn sync_changed_rows(list: &ListState, changed_from: usize, old_len: usize, new_
 /// 行高跟着变的那部分外观：是不是最终回答，在过程组里的位置，过程组是否还在进行。
 /// 位置按相对本行记，往前补历史页、下标整体后移时不算变化。耗时、工具计数这类只改
 /// 一行字的字段不算。
-type RowShape = (bool, Option<(usize, usize, bool)>, Option<(usize, usize)>);
+type RowShape = (
+    bool,
+    Option<(usize, usize, bool, ToolTally)>,
+    Option<(usize, usize)>,
+);
 
 fn row_shape(row: &EntryPresentation, ix: usize) -> RowShape {
     (
@@ -825,6 +829,8 @@ fn row_shape(row: &EntryPresentation, ix: usize) -> RowShape {
                 ix.saturating_sub(group.first),
                 group.end.saturating_sub(ix),
                 group.active,
+                // 计数和改动标签画在段首那一行，标签多了会折行。
+                group.tally,
             )
         }),
         row.turn_fold
@@ -1632,6 +1638,9 @@ pub struct ConversationView {
     /// 手动展开的已结束回合（key = 折叠范围第一条 entry 的索引）。默认只剩一行工作摘要，
     /// 展开后露出过程说明和每段的计数行。
     expanded_turn_folds: std::collections::HashSet<usize>,
+    /// 点开的改动标签（key = 所在段第一条 entry 的索引 + 文件路径），在原地展开这个文件
+    /// 在本段的改动。
+    expanded_edit_chips: std::collections::HashSet<(usize, String)>,
     /// 只武装刚发送的那一条。历史加载和虚拟列表回收不会重播。
     user_enter: Option<UserBubbleEnter>,
     user_enter_nonce: u64,
@@ -1960,6 +1969,7 @@ impl ConversationView {
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_process_groups: std::collections::HashSet::new(),
             expanded_turn_folds: std::collections::HashSet::new(),
+            expanded_edit_chips: std::collections::HashSet::new(),
             user_enter: None,
             user_enter_nonce: 0,
             menu_failure: None,
@@ -2869,6 +2879,11 @@ impl ConversationView {
             .expanded_turn_folds
             .drain()
             .map(|entry_ix| entry_ix + page_len)
+            .collect();
+        self.expanded_edit_chips = self
+            .expanded_edit_chips
+            .drain()
+            .map(|(entry_ix, path)| (entry_ix + page_len, path))
             .collect();
         self.expanded_tool_runs = self
             .expanded_tool_runs
@@ -4431,6 +4446,8 @@ impl ConversationView {
             .retain(|ix| *ix < self.entries.len());
         self.expanded_turn_folds
             .retain(|ix| *ix < self.entries.len());
+        self.expanded_edit_chips
+            .retain(|(ix, _)| *ix < self.entries.len());
         self.thought_reveals
             .retain(|ix, _| *ix < self.entries.len());
         let entry_len = self.entries.len();
@@ -6517,6 +6534,8 @@ struct ToolTally {
     agents: usize,
     others: usize,
     failed: usize,
+    /// 成功的工具带回的 diff 块数。改动标签按它画，数变了标签那一行要重新量高。
+    diff_parts: usize,
 }
 
 fn tally_tools(entries: &[AcpEntry], indices: impl IntoIterator<Item = usize>) -> ToolTally {
@@ -6546,29 +6565,30 @@ fn tally_tools(entries: &[AcpEntry], indices: impl IntoIterator<Item = usize>) -
             tally.agents += subagents.len();
             continue;
         }
+        // 失败的工具没改到文件。别的类别的工具（打补丁的命令等）带回 diff 也算改了文件。
+        let mut has_diff = false;
+        if !failed {
+            for part in output {
+                if let ToolOutputPart::Diff { path, .. } = part {
+                    edited.insert(path.as_str());
+                    tally.diff_parts += 1;
+                    has_diff = true;
+                }
+            }
+        }
         match kind {
             ToolKind::Execute => tally.commands += 1,
             ToolKind::Read => tally.reads += 1,
             ToolKind::Search => tally.searches += 1,
             ToolKind::Fetch => tally.fetches += 1,
             ToolKind::Collaborate => tally.agents += 1,
-            // 失败的修改没改到文件。没有 diff 的修改按标题记一个文件。
-            ToolKind::Edit | ToolKind::Delete | ToolKind::Move if !failed => {
-                let before = edited.len();
-                for part in output {
-                    if let ToolOutputPart::Diff { path, .. } = part {
-                        edited.insert(path.as_str());
-                    }
-                }
-                if edited.len() == before
-                    && !output
-                        .iter()
-                        .any(|part| matches!(part, ToolOutputPart::Diff { .. }))
-                {
+            // 没有 diff 的修改按标题记一个文件。
+            ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
+                if !failed && !has_diff {
                     edited.insert(title.as_str());
                 }
             }
-            ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {}
+            _ if has_diff => {}
             _ => tally.others += 1,
         }
     }
@@ -6690,8 +6710,8 @@ struct EntryPresentation {
 }
 
 /// 一段过程的标题：计数行；带回合耗时的那段（没收成摘要的回合）前面加「工作了 X」。
-/// 在跑的段的耗时挂在行尾，不在这里。
-fn process_group_header_label(group: ProcessGroupInfo) -> String {
+/// 在跑的段的耗时挂在行尾，不在这里。改了哪些文件已经露成标签时，不再写「改了 N 个文件」。
+fn process_group_header_label(group: ProcessGroupInfo, edits_as_chips: bool) -> String {
     let mut parts = Vec::new();
     if !group.active
         && group.show_elapsed
@@ -6699,11 +6719,104 @@ fn process_group_header_label(group: ProcessGroupInfo) -> String {
     {
         parts.push(t!("group.worked_for", elapsed = format_duration(elapsed)).into_owned());
     }
-    parts.extend(tally_parts(&group.tally));
+    let mut tally = group.tally;
+    if edits_as_chips {
+        tally.edited_files = 0;
+    }
+    parts.extend(tally_parts(&tally));
     if parts.is_empty() {
         parts.push(t!("group.steps").into_owned());
     }
     parts.join(" · ")
+}
+
+/// 一段里超过这么多个文件，标签放不下一行，退回计数句「改了 N 个文件」。
+const MAX_EDIT_CHIPS: usize = 6;
+
+/// 一段里改过的一个文件：本段对它的所有 diff 块合计 +/−（不是净改动），按出现顺序记下
+/// 每一块在哪（entry 下标，第几块输出），点开时按次序排下去。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EditChip {
+    path: String,
+    label: String,
+    added: usize,
+    removed: usize,
+    parts: Vec<(usize, usize)>,
+}
+
+/// 从 diff 缓存汇总一段的改动标签。还没进缓存的 diff 块跳过；失败的工具不算。
+fn segment_edit_chips(
+    entries: &[AcpEntry],
+    diffs: &std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
+    first: usize,
+    end: usize,
+) -> Vec<EditChip> {
+    let mut chips: Vec<EditChip> = Vec::new();
+    for (entry_ix, entry) in entries.iter().enumerate().take(end).skip(first) {
+        let AcpEntry::ToolCall {
+            id, status, output, ..
+        } = entry
+        else {
+            continue;
+        };
+        if matches!(status, ToolCallStatus::Failed) {
+            continue;
+        }
+        let cached = diffs.get(id);
+        for (part_ix, part) in output.iter().enumerate() {
+            let ToolOutputPart::Diff { path, .. } = part else {
+                continue;
+            };
+            let Some(diff) = cached
+                .and_then(|parts| parts.get(part_ix))
+                .and_then(Option::as_ref)
+            else {
+                continue;
+            };
+            let chip = match chips.iter_mut().position(|chip| chip.path == *path) {
+                Some(ix) => &mut chips[ix],
+                None => {
+                    chips.push(EditChip {
+                        path: path.clone(),
+                        label: String::new(),
+                        added: 0,
+                        removed: 0,
+                        parts: Vec::new(),
+                    });
+                    chips.last_mut().expect("刚放进去")
+                }
+            };
+            chip.added += diff.added;
+            chip.removed += diff.removed;
+            chip.parts.push((entry_ix, part_ix));
+        }
+    }
+    label_edit_chips(&mut chips);
+    chips
+}
+
+/// 标签写文件名；同名文件再带上一级目录，免得两个 `mod.rs` 分不清。
+fn label_edit_chips(chips: &mut [EditChip]) {
+    let leaves: Vec<String> = chips
+        .iter()
+        .map(|chip| compact_path_leaf(&chip.path))
+        .collect();
+    for (ix, chip) in chips.iter_mut().enumerate() {
+        let leaf = &leaves[ix];
+        let shared = leaves.iter().filter(|other| *other == leaf).count() > 1;
+        chip.label = if shared {
+            let mut parts = chip
+                .path
+                .rsplit(['/', '\\'])
+                .filter(|part| !part.is_empty());
+            match (parts.next(), parts.next()) {
+                (Some(name), Some(dir)) => format!("{dir}/{name}"),
+                _ => leaf.clone(),
+            }
+        } else {
+            leaf.clone()
+        };
+    }
 }
 
 /// 回合摘要只挑结果：工作多久、改了几个文件、跑了几条命令、派了几个子智能体。

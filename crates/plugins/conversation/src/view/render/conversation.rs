@@ -328,13 +328,9 @@ impl ConversationView {
                     // 折叠态只构建摘要，不先渲染一遍随后会被丢弃的首个工具卡。
                     // Read 的大输出或 Edit 的 diff 因此不会在静态重绘时白做解析。
                     let header = match (group, turn_fold) {
-                        (Some(group), _) => this.render_process_group_header(
-                            group,
-                            false,
-                            animate_ambient,
-                            muted,
-                            cx,
-                        ),
+                        (Some(group), _) => {
+                            this.render_segment_head(group, false, animate_ambient, muted, cx)
+                        }
                         (None, Some(fold)) => this.render_turn_fold_header(fold, false, muted, cx),
                         (None, None) => div().into_any_element(),
                     };
@@ -434,6 +430,12 @@ impl ConversationView {
                     tool_run.as_ref().is_some_and(|run| run.start == i) && elapsed_here.is_some();
                 let row_elapsed = elapsed_here.filter(|_| !run_wraps_elapsed);
                 let run_elapsed = elapsed_here.filter(|_| run_wraps_elapsed);
+                // 段首行要补 diff 缓存（可变借用），得在借出 `entry` 之前画好。
+                let segment_head = process_group
+                    .filter(|group| process_expanded && group.first == i)
+                    .map(|group| {
+                        this.render_segment_head(group, true, animate_ambient, muted, cx)
+                    });
                 let entry = &this.entries[i];
                 let mut el: gpui::AnyElement = match entry {
                     // agent 回显的「中断」标记不是用户说的话，别套成气泡——
@@ -1272,20 +1274,11 @@ impl ConversationView {
                         .child(el)
                         .into_any_element();
                 }
-                if let Some(group) = process_group
-                    && group.first == i
-                    && process_expanded
-                {
+                if let Some(head) = segment_head {
                     el = div().flex().flex_col()
                         .w_full()
                         .gap_1()
-                        .child(this.render_process_group_header(
-                            group,
-                            true,
-                            animate_ambient,
-                            muted,
-                            cx,
-                        ))
+                        .child(head)
                         .child(el)
                         .into_any_element();
                 }
@@ -1495,10 +1488,107 @@ impl ConversationView {
             .into_any_element()
     }
 
+    /// 段首一行：计数行，下面是这段改了哪些文件的标签，点开的标签在原地展开改动。
+    fn render_segment_head(
+        &mut self,
+        group: ProcessGroupInfo,
+        expanded: bool,
+        animate_ambient: bool,
+        muted: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if group.tally.diff_parts > 0 {
+            for ix in group.first..group.end.min(self.entries.len()) {
+                if matches!(
+                    self.entries.get(ix),
+                    Some(AcpEntry::ToolCall { output, .. }) if tool_output_has_diff(output)
+                ) {
+                    self.ensure_diff_cache_for_entry(ix);
+                }
+            }
+        }
+        let chips = if group.tally.diff_parts > 0 {
+            segment_edit_chips(&self.entries, &self.rendered_diffs, group.first, group.end)
+        } else {
+            Vec::new()
+        };
+        let show_chips = !chips.is_empty() && chips.len() <= MAX_EDIT_CHIPS;
+        let edits_as_chips = show_chips && chips.len() == group.tally.edited_files;
+        let header = self.render_process_group_header(
+            group,
+            expanded,
+            edits_as_chips,
+            animate_ambient,
+            muted,
+            cx,
+        );
+        if !show_chips {
+            return header;
+        }
+        let group_key = group.first;
+        let mut col = div().flex().flex_col().w_full().gap_1().child(header);
+        let mut row = div().flex().flex_wrap().w_full().gap_1p5().pb_1();
+        let mut open_chips = Vec::new();
+        for (chip_ix, chip) in chips.iter().enumerate() {
+            let key = (group_key, chip.path.clone());
+            let open = self.expanded_edit_chips.contains(&key);
+            if open {
+                open_chips.push(chip);
+            }
+            row = row.child(
+                render_edit_chip(chip, group_key, open)
+                    .debug_selector(move || format!("ACP_EDIT_CHIP_{group_key}_{chip_ix}"))
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        if !this.expanded_edit_chips.remove(&key) {
+                            this.expanded_edit_chips.insert(key.clone());
+                        }
+                        this.list_state
+                            .remeasure_items(group_key..group_key.saturating_add(1));
+                        cx.notify();
+                    })),
+            );
+        }
+        col = col.child(row);
+        let border: gpui::Hsla = ui_theme::hair().into();
+        for chip in open_chips {
+            let mut block = div().flex().flex_col().w_full().gap_1().pb_2().child(
+                div()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(muted)
+                    .child(truncated_line(chip.path.clone())),
+            );
+            for &(entry_ix, part_ix) in &chip.parts {
+                let Some(AcpEntry::ToolCall { id, .. }) = self.entries.get(entry_ix) else {
+                    continue;
+                };
+                let Some(diff) = self
+                    .rendered_diffs
+                    .get(id)
+                    .and_then(|parts| parts.get(part_ix))
+                    .and_then(Option::as_ref)
+                else {
+                    continue;
+                };
+                block = block.child(render_diff_lines(
+                    &diff.lines,
+                    gpui::ElementId::from((
+                        gpui::ElementId::named_usize("acp-edit-chip-diff", entry_ix),
+                        gpui::SharedString::from(part_ix.to_string()),
+                    )),
+                    border,
+                    muted,
+                ));
+            }
+            col = col.child(block);
+        }
+        col.into_any_element()
+    }
+
     fn render_process_group_header(
         &self,
         group: ProcessGroupInfo,
         expanded: bool,
+        edits_as_chips: bool,
         animate_ambient: bool,
         muted: gpui::Hsla,
         cx: &Context<Self>,
@@ -1530,7 +1620,7 @@ impl ConversationView {
         summary_row(
             ("acp-process-group", group.first),
             lead,
-            process_group_header_label(group),
+            process_group_header_label(group, edits_as_chips),
             tally_failed_label(&group.tally),
             expanded,
             muted,
@@ -3306,6 +3396,50 @@ pub(super) fn subagent_status_icon(
         .size(px(13.))
         .text_color(color)
         .into_any_element()
+}
+
+/// 一个改动标签：文件名、合计 +/−。点开时描边加深、垫一层底色。
+fn render_edit_chip(chip: &EditChip, group_key: usize, open: bool) -> gpui::Stateful<gpui::Div> {
+    let mono = smelt_plugin_api::model::font_config::font_family();
+    div()
+        .flex()
+        .items_center()
+        .id(gpui::ElementId::from((
+            gpui::ElementId::named_usize("acp-edit-chip", group_key),
+            gpui::SharedString::from(chip.path.clone()),
+        )))
+        .flex_shrink_0()
+        .gap_1p5()
+        .px_2()
+        .py(px(1.))
+        .rounded_md()
+        .border_1()
+        .border_color(if open {
+            ui_theme::hair_strong()
+        } else {
+            ui_theme::hair()
+        })
+        .when(open, |chip| chip.bg(ui_theme::row_hover()))
+        .hover(|chip| chip.border_color(ui_theme::hair_strong()))
+        .cursor_pointer()
+        .font_family(mono)
+        .type_style(TYPE.text_xsmall)
+        .text_color(gpui::rgb(ui_theme::text()))
+        .child(chip.label.clone())
+        .when(chip.added > 0, |row| {
+            row.child(
+                div()
+                    .text_color(gpui::rgb(ui_theme::ok()))
+                    .child(format!("+{}", chip.added)),
+            )
+        })
+        .when(chip.removed > 0, |row| {
+            row.child(
+                div()
+                    .text_color(gpui::rgb(ui_theme::bad()))
+                    .child(format!("−{}", chip.removed)),
+            )
+        })
 }
 
 /// 回合摘要和每段计数共用的一行：可选的状态标记、计数句、红色的失败数、展开箭头。

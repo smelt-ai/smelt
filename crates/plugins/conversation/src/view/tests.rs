@@ -1849,6 +1849,84 @@ fn turn_summary_names_edits_commands_and_subagents() {
 }
 
 #[test]
+fn edit_chips_sum_each_file_in_order_and_skip_failures() {
+    let diff_tool = |id: &str, status, paths: &[&str]| {
+        AcpEntry::tool_call(
+            id,
+            "Edit",
+            ToolKind::Edit,
+            status,
+            paths
+                .iter()
+                .map(|path| ToolOutputPart::Diff {
+                    path: (*path).into(),
+                    old_text: Some("a".into()),
+                    new_text: "b".into(),
+                })
+                .collect(),
+        )
+    };
+    let entries = vec![
+        AcpEntry::User("改".into()),
+        diff_tool("e1", ToolCallStatus::Completed, &["src/x/mod.rs"]),
+        completed_tool("r", ToolKind::Read, "a.rs"),
+        diff_tool(
+            "e2",
+            ToolCallStatus::Completed,
+            &["src/y/mod.rs", "src/x/mod.rs"],
+        ),
+        diff_tool("e3", ToolCallStatus::Failed, &["src/z.rs"]),
+    ];
+    let cached = |added, removed| {
+        Some(CachedDiff {
+            lines: std::rc::Rc::new(Vec::new()),
+            added,
+            removed,
+        })
+    };
+    let diffs = std::collections::HashMap::from([
+        ("e1".to_string(), vec![cached(3, 1)]),
+        ("e2".to_string(), vec![cached(2, 0), cached(4, 2)]),
+        ("e3".to_string(), vec![cached(9, 9)]),
+    ]);
+    let chips = super::segment_edit_chips(&entries, &diffs, 1, entries.len());
+    let summary: Vec<_> = chips
+        .iter()
+        .map(|chip| {
+            (
+                chip.label.as_str(),
+                chip.added,
+                chip.removed,
+                chip.parts.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("x/mod.rs", 7, 3, vec![(1, 0), (3, 1)]),
+            ("y/mod.rs", 2, 0, vec![(3, 0)]),
+        ],
+        "同一文件的多次改动合计、按次序记下；同名文件带上目录；失败的不算"
+    );
+
+    let layout = build_conversation_layout(&entries, true);
+    let group = layout[1].process_group.unwrap();
+    assert_eq!(group.tally.edited_files, 2);
+    assert_eq!(group.tally.diff_parts, 3);
+    assert_eq!(group.tally.failed, 1);
+    assert_eq!(
+        process_group_header_label(group, false),
+        "Read 1 file · Edited 2 files"
+    );
+    assert_eq!(
+        process_group_header_label(group, true),
+        "Read 1 file",
+        "文件露成标签时计数行不再重复"
+    );
+}
+
+#[test]
 fn thought_only_turn_is_not_folded() {
     let entries = vec![
         AcpEntry::User("你好".into()),
@@ -1988,7 +2066,7 @@ fn unknown_tools_count_as_other_tools_not_an_english_kind() {
     let layout = build_conversation_layout(&entries, true);
     let group = layout[1].process_group.unwrap();
     assert_eq!(
-        process_group_header_label(group),
+        process_group_header_label(group, false),
         "Ran 1 command · 2 other tool calls"
     );
     assert_eq!(
@@ -2324,7 +2402,7 @@ fn collaboration_tools_are_not_folded_into_process_groups() {
     let layout = build_conversation_layout(&entries, false);
     assert!(layout[1].process_group.is_none());
     let group = layout[2].process_group.expect("普通工具结束后仍收成过程组");
-    assert_eq!(process_group_header_label(group), "Read 1 file");
+    assert_eq!(process_group_header_label(group, false), "Read 1 file");
 }
 
 #[test]
@@ -2360,7 +2438,7 @@ fn completed_process_group_keeps_inner_tool_failures_inside() {
     let layout = build_conversation_layout(&entries, false);
     let group = layout[1].process_group.expect("工具应进入执行过程组");
     assert!(!group.active);
-    assert_eq!(process_group_header_label(group), "Ran 2 commands");
+    assert_eq!(process_group_header_label(group, false), "Ran 2 commands");
     assert_eq!(
         super::tally_failed_label(&group.tally).as_deref(),
         Some("1 failed"),
@@ -3179,7 +3257,7 @@ fn process_header_counts_tools_in_a_fixed_order() {
     let group = layout[1].process_group.expect("结束后应收成过程组");
     assert!(!group.active);
     assert_eq!(
-        process_group_header_label(group),
+        process_group_header_label(group, false),
         "Read 1 file · Searched 3 times",
         "固定顺序：命令、读取、改动、搜索"
     );
@@ -5279,4 +5357,57 @@ fn skill_command_goes_to_the_front_and_replaces_an_existing_one() {
 fn init_ui(cx: &mut gpui::App) {
     gpui_base::init(cx);
     smelt_plugin_api::ui::init(cx);
+}
+
+/// 在跑的段收成一行计数，改过的文件露成标签；点标签在原地展开这个文件的改动。
+#[gpui::test]
+fn clicking_an_edit_chip_opens_its_diff_in_place(cx: &mut gpui::TestAppContext) {
+    let entries = vec![
+        AcpEntry::User("改一下".into()),
+        AcpEntry::tool_call(
+            "edit-1",
+            "Edit src/lib.rs",
+            ToolKind::Edit,
+            ToolCallStatus::Completed,
+            vec![ToolOutputPart::Diff {
+                path: "src/lib.rs".into(),
+                old_text: Some("let a = 1;\n".into()),
+                new_text: "let a = 2;\nlet b = 3;\n".into(),
+            }],
+        ),
+        completed_tool("run-1", ToolKind::Execute, "cargo test"),
+    ];
+    let (view, cx) = open_conversation(cx, "acp-edit-chip", entries, DaemonPhase::Thinking);
+    draw_settled(cx);
+    draw_settled(cx);
+    assert!(
+        cx.debug_bounds("ACP_TOOL_COMPACT_1").is_none(),
+        "在跑的段默认只露计数"
+    );
+    let head_before = view
+        .read_with(cx, |view, _| view.list_state.bounds_for_item(1))
+        .expect("段首行应已绘制");
+    let chip = cx
+        .debug_bounds("ACP_EDIT_CHIP_1_0")
+        .expect("改过的文件露成标签");
+    cx.simulate_click(chip.center(), Default::default());
+    draw_settled(cx);
+    draw_settled(cx);
+    assert!(
+        view.read_with(cx, |view, _| view
+            .expanded_edit_chips
+            .contains(&(1, "src/lib.rs".to_string()))),
+        "点标签记下展开"
+    );
+    assert!(
+        view.read_with(cx, |view, _| !view.expanded_process_groups.contains(&1)),
+        "点标签不展开整段"
+    );
+    let head_after = view
+        .read_with(cx, |view, _| view.list_state.bounds_for_item(1))
+        .expect("段首行应已绘制");
+    assert!(
+        head_after.size.height > head_before.size.height + px(40.),
+        "改动在原地展开，行高跟着变: {head_before:?} -> {head_after:?}"
+    );
 }
