@@ -33,10 +33,10 @@ use super::*;
 /// 没有任何活动这么久之后挂起。
 ///
 /// 唤醒很便宜：拉起 Pi、重放两三百条历史到就绪约 0.1–0.2 秒，用户发消息时察觉不到；而一个
-/// 闲着的 Pi 常驻约 160MB。所以闲置几分钟就收。提示缓存在服务端，跟进程无关；Smelt 默认只在
+/// 闲着的 Pi 常驻约 160MB。所以闲置十分钟就收。提示缓存在服务端，跟进程无关；Smelt 默认只在
 /// 回合进行中续热（`agent/src/cache-warming-default.ts`），挂起不丢缓存。用户在 Pi 设置里
 /// 自己打开空闲续热的，续热会随挂起一起停。
-pub(crate) const ACP_IDLE_SUSPEND_AFTER: Duration = Duration::from_secs(5 * 60);
+pub(crate) const ACP_IDLE_SUSPEND_AFTER: Duration = Duration::from_secs(10 * 60);
 /// 到点该挂起、却抢不到会话生命周期锁或 spawn 闸门时，隔多久再试。锁被占着说明
 /// 有人正在操作这个会话（拉起、重启），这样的操作多半会记一次活动，把截止往后推。
 /// 上限取改成事件驱动之前的扫描周期。
