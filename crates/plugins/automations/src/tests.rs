@@ -21,7 +21,7 @@ use crate::editor::{
 };
 use crate::format::{
     AutomationRowStatus, MissingField, agent_display_name, automation_missing_fields,
-    automation_row_status, automation_row_status_label, automation_save_hint, format_last_run_cell,
+    automation_row_status, automation_row_status_label, automation_save_hint, format_last_run,
     format_next_run_cell, format_relative_since, format_relative_until, schedule_summary,
     trigger_summary,
 };
@@ -154,19 +154,19 @@ fn automation_form_lists_every_missing_field() {
         prompt: prompt.map(str::to_string),
     };
     assert_eq!(
-        automation_missing_fields("", false, false, &agent(None), true),
+        automation_missing_fields("", false, false, &agent(None), true, 0),
         vec![MissingField::Name, MissingField::Trigger]
     );
     assert_eq!(
-        automation_missing_fields("晨报", true, true, &agent(Some("  ")), true),
+        automation_missing_fields("晨报", true, true, &agent(Some("  ")), true, 0),
         vec![MissingField::Prompt]
     );
     assert!(
-        automation_missing_fields("Hook", true, false, &agent(None), true).is_empty(),
+        automation_missing_fields("Hook", true, false, &agent(None), true, 0).is_empty(),
         "webhook / 事件把收到的内容当指令，可以不写"
     );
     assert_eq!(
-        automation_missing_fields("晨报", true, true, &agent(Some("汇总")), false),
+        automation_missing_fields("晨报", true, true, &agent(Some("汇总")), false, 0),
         vec![MissingField::Agent]
     );
     assert_eq!(
@@ -175,10 +175,24 @@ fn automation_form_lists_every_missing_field() {
             true,
             true,
             &AutomationAction::shell("", Vec::new()),
-            false
+            false,
+            0
         ),
         vec![MissingField::Command]
     );
+    assert_eq!(
+        automation_missing_fields(
+            "晨报",
+            true,
+            true,
+            &agent(Some("看「填写仓库路径」")),
+            true,
+            2
+        ),
+        vec![MissingField::Placeholders(2)],
+        "模板的空没填完不能创建"
+    );
+    assert_eq!(MissingField::Placeholders(2).label(), "Template blanks (2)");
 }
 
 #[test]
@@ -382,10 +396,9 @@ fn last_run_cell_reads_status_then_relative_time() {
     assert_eq!(format_relative_since(100, 100 + 400 * 86400), "1 yr ago");
     // 远程机器的时钟可能比本机快，不写成负数。
     assert_eq!(format_relative_since(100 + 3600, 100), "Just now");
-    assert_eq!(format_last_run_cell(None, 100), "—");
     assert_eq!(
-        format_last_run_cell(Some((AutomationRunStatus::Failed, 100)), 100 + 3600),
-        "Failed · 1 h ago"
+        format_last_run(AutomationRunStatus::Failed, 100, 100 + 3600),
+        "Last: Failed · 1 h ago"
     );
 }
 

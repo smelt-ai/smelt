@@ -69,18 +69,18 @@ pub(crate) fn format_relative_since(ts: i64, now: i64) -> String {
     }
 }
 
-pub(crate) fn format_last_run_cell(
-    last: Option<(api::model::automation::AutomationRunStatus, i64)>,
+/// 状态下面那行「上次」：结果和多久前。
+pub(crate) fn format_last_run(
+    status: api::model::automation::AutomationRunStatus,
+    at: i64,
     now: i64,
 ) -> String {
-    match last {
-        Some((status, at)) => format!(
-            "{} · {}",
-            run_status_label(status),
-            format_relative_since(at, now)
-        ),
-        None => "—".to_string(),
-    }
+    t!(
+        "catalog.last_run",
+        status = run_status_label(status),
+        when = format_relative_since(at, now)
+    )
+    .into_owned()
 }
 
 /// 保存前必须填的一项。
@@ -90,6 +90,8 @@ pub(crate) enum MissingField {
     Trigger,
     Agent,
     Prompt,
+    /// 模板指令里还有几处空没填。
+    Placeholders(usize),
     Command,
 }
 
@@ -100,6 +102,7 @@ impl MissingField {
             Self::Trigger => t!("missing.trigger"),
             Self::Agent => t!("missing.agent"),
             Self::Prompt => t!("missing.prompt"),
+            Self::Placeholders(count) => t!("missing.placeholders", count = count),
             Self::Command => t!("missing.command"),
         }
         .into()
@@ -114,6 +117,7 @@ pub(crate) fn automation_missing_fields(
     has_schedule: bool,
     action: &AutomationAction,
     agent_exists: bool,
+    unfilled_placeholders: usize,
 ) -> Vec<MissingField> {
     let mut missing = Vec::new();
     if name.trim().is_empty() {
@@ -133,6 +137,8 @@ pub(crate) fn automation_missing_fields(
                     .is_none_or(|prompt| prompt.trim().is_empty())
             {
                 missing.push(MissingField::Prompt);
+            } else if unfilled_placeholders > 0 {
+                missing.push(MissingField::Placeholders(unfilled_placeholders));
             }
         }
         AutomationAction::Shell { command, .. } => {

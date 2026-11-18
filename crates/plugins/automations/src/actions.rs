@@ -317,6 +317,7 @@ impl AutomationsPage {
             return;
         };
         self.catalog_tab = AutomationCatalogTab::Tasks;
+        let prompt = (template.prompt)().into_owned();
         let automation = Automation {
             id: uuid::Uuid::new_v4().to_string(),
             name: (template.name)().into_owned(),
@@ -326,11 +327,14 @@ impl AutomationsPage {
             action: AutomationAction::Agent {
                 agent_definition_id: Self::ready_automation_agent_id(&runtime, cx)
                     .unwrap_or_default(),
-                prompt: Some((template.prompt)().into_owned()),
+                prompt: Some(prompt.clone()),
             },
             sinks: AutomationNotify::Always.to_sinks(),
         };
         self.open_automation_editor_for(runtime, automation, true, window, cx);
+        if let Some(editor) = self.editor.as_mut() {
+            editor.placeholders = crate::templates::placeholders(&prompt);
+        }
     }
 
     pub(crate) fn create_automation_from_editor(&mut self, cx: &mut Context<Self>) {
@@ -558,6 +562,7 @@ impl AutomationsPage {
             retained_events,
             entries,
             notification,
+            placeholders: Vec::new(),
             draft_revision: 0,
             saving_revision: None,
             quiet_save: false,

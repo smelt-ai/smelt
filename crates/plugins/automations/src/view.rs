@@ -3,6 +3,7 @@
 //! 运行记录留在编辑器左侧。选中一次运行后，右侧是详情；有会话时这块详情就是现场。
 //! 只组 UI，不做 IO。写入在 `actions.rs`。
 use api::ViewInstance;
+use api::ui::Switch;
 
 use crate::peers::agents::VIEW as AGENTS_VIEW;
 use crate::prelude::*;
@@ -61,7 +62,7 @@ impl AutomationsPage {
             .into_any_element()
     }
 
-    /// 页头右侧。新建是「创建」；已保存的是运行、启用和删除。不跟名称输入框挤在一行。
+    /// 页头右侧。新建是「创建」；已保存的是启用开关、运行一次，删除收在 ⋯ 里。
     pub(crate) fn render_automation_editor_actions(
         &self,
         editor: &AutomationEditor,
@@ -89,7 +90,7 @@ impl AutomationsPage {
                 .into_any_element();
         }
 
-        let test_entity = entity.clone();
+        let run_entity = entity.clone();
         let delete_entity = entity.clone();
         let toggle_entity = entity;
         let saving = editor.saving_revision.is_some();
@@ -101,8 +102,49 @@ impl AutomationsPage {
             .unwrap_or(true);
         let delete_id = editor.automation.clone();
         let toggle_id = editor.automation.clone();
+        let state = if enabled {
+            t!("editor.enabled")
+        } else {
+            t!("editor.paused")
+        };
         div()
             .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Switch::new("automation-editor-enabled")
+                            .checked(enabled)
+                            .accessibility_label(t!("editor.enabled"))
+                            .on_change(move |on, _, cx| {
+                                let id = toggle_id.clone();
+                                toggle_entity.update(cx, |page, cx| {
+                                    page.set_automation_enabled(id, on, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .type_style(TYPE.text_xsmall)
+                            .text_color(rgb(ui_theme::muted()))
+                            .child(state.into_owned()),
+                    ),
+            )
+            .child(
+                Button::new("automation-editor-run")
+                    .small()
+                    .icon(IconName::Play)
+                    .label(t!("menu.run_once"))
+                    .loading(header_saving)
+                    .on_click(move |_, _, cx| {
+                        run_entity.update(cx, |page, cx| page.test_automation_editor(cx));
+                    }),
+            )
             .child(MenuTrigger::dropdown(
                 "automation-editor-more-menu",
                 Button::new("automation-editor-more")
@@ -110,30 +152,9 @@ impl AutomationsPage {
                     .icon(IconName::Ellipsis)
                     .accessibility_label(t!("catalog.more")),
                 move |_, _| {
-                    let run_entity = test_entity.clone();
-                    let mut menu = Menu::new().item(
-                        MenuItem::new(t!("menu.run_once"))
-                            .icon(IconName::Play)
-                            .disabled(header_saving)
-                            .on_click(move |_, _, cx| {
-                                run_entity.update(cx, |page, cx| {
-                                    page.test_automation_editor(cx);
-                                });
-                            }),
-                    );
-                    let toggle_entity = toggle_entity.clone();
-                    let toggle_id = toggle_id.clone();
-                    menu = menu.item(automation_enabled_toggle_item(enabled).on_click(
-                        move |_, _, cx| {
-                            let id = toggle_id.clone();
-                            toggle_entity.update(cx, |page, cx| {
-                                page.set_automation_enabled(id, !enabled, cx);
-                            });
-                        },
-                    ));
                     let delete_entity = delete_entity.clone();
                     let delete_id = delete_id.clone();
-                    menu.separator().item(
+                    Menu::new().item(
                         MenuItem::new(t!("menu.delete"))
                             .icon(api::ui::trash_icon())
                             .danger()
@@ -324,14 +345,53 @@ impl AutomationsPage {
                 TextArea::new(&editor.command).aria_label(MissingField::Command.label()),
             )
         };
-        let instruction_label = if is_agent {
-            MissingField::Prompt.label()
-        } else {
-            MissingField::Command.label()
-        };
         let name_field = TextInput::new(&editor.name)
             .aria_label(MissingField::Name.label())
             .w_full();
+
+        // 已保存且开着的，什么时候那一节说下次几时跑；否则说触发怎么配。
+        let now = Local::now().timestamp();
+        let when_hint = automations(cx)
+            .on(&editor.automation.runtime)
+            .filter(|_| !editor.is_new)
+            .and_then(|machine| {
+                let automation = machine.automation(&editor.automation.id)?;
+                automation.enabled.then_some(())?;
+                machine.state_for(&automation.id)?.next_run_at
+            })
+            .map(|at| t!("editor.next_run", when = format_relative_until(at, now)))
+            .unwrap_or_else(|| t!("editor.trigger_hint"));
+        let who = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(action_kind)
+            .when(is_agent, |row| {
+                if no_ready_agents {
+                    // 智能体页由「智能体」插件提供，没装就不给入口。
+                    let machine = editor.automation.runtime.clone();
+                    row.when(api::is_registered(AGENTS_VIEW, cx), |row| {
+                        row.child(
+                            compact_chip("automation-open-agents")
+                                .icon(IconName::Bot)
+                                .label(t!("editor.create_agent"))
+                                .on_click(move |_, _, cx| open_agents_view(&machine, cx)),
+                        )
+                    })
+                } else {
+                    row.child(agent_selector)
+                }
+            });
+        let what = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(instruction)
+            .when(is_agent, |section| {
+                section.child(automation_field_hint(automation_prompt_hint(is_webhook)))
+            })
+            .child(render_automation_access_note(is_agent));
 
         div()
             .id("automation-editor-scroll")
@@ -357,64 +417,19 @@ impl AutomationsPage {
                         name_field,
                     ))
                     .child(automation_editor_section(
-                        MissingField::Trigger.label(),
-                        Some(t!("editor.trigger_hint").into()),
+                        t!("editor.who").into(),
+                        None,
+                        who,
+                    ))
+                    .child(automation_editor_section(
+                        t!("editor.when").into(),
+                        Some(when_hint.into()),
                         trigger_field,
                     ))
                     .child(automation_editor_section(
-                        instruction_label,
+                        t!("editor.what").into(),
                         None,
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                automation_form_shell()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .px_3()
-                                            .py_2()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_3()
-                                            .border_b_1()
-                                            .border_color(ui_theme::hair())
-                                            .child(action_kind)
-                                            .when(is_agent, |toolbar| {
-                                                if no_ready_agents {
-                                                    // 智能体页由「智能体」插件提供，没装就不给入口。
-                                                    let machine = editor.automation.runtime.clone();
-                                                    toolbar.when(
-                                                        api::is_registered(AGENTS_VIEW, cx),
-                                                        |toolbar| {
-                                                            toolbar.child(
-                                                                compact_chip(
-                                                                    "automation-open-agents",
-                                                                )
-                                                                .icon(IconName::Bot)
-                                                                .label(t!("editor.create_agent"))
-                                                                .on_click(move |_, _, cx| {
-                                                                    open_agents_view(&machine, cx);
-                                                                }),
-                                                            )
-                                                        },
-                                                    )
-                                                } else {
-                                                    toolbar.child(agent_selector)
-                                                }
-                                            }),
-                                    )
-                                    .child(instruction),
-                            )
-                            .when(is_agent, |section| {
-                                section.child(automation_field_hint(automation_prompt_hint(
-                                    is_webhook,
-                                )))
-                            })
-                            .child(render_automation_access_note(is_agent)),
+                        what,
                     ))
                     .child(render_notification_field(editor, entity, cx)),
             )

@@ -126,6 +126,9 @@ pub(crate) struct AutomationEditor {
     pub(crate) retained_events: Vec<EventIngress>,
     pub(crate) entries: Vec<TriggerEntryEditor>,
     pub(crate) notification: AutomationNotify,
+    /// 从模板建的：模板指令里留给用户补的空（[`crate::templates::placeholders`]）。原样还在
+    /// 指令里的算没填，填完才能创建。
+    pub(crate) placeholders: Vec<String>,
     pub(crate) draft_revision: u64,
     pub(crate) saving_revision: Option<u64>,
     /// 重新生成地址这类后台提交不让顶栏「运行一次」进入 loading 状态。
@@ -402,12 +405,25 @@ impl AutomationEditor {
             .entries
             .iter()
             .any(|entry| entry.trigger_kind != AutomationTriggerKindId::Webhook);
+        let action = self.action(cx);
+        let unfilled = match &action {
+            AutomationAction::Agent {
+                prompt: Some(prompt),
+                ..
+            } => self
+                .placeholders
+                .iter()
+                .filter(|slot| prompt.contains(slot.as_str()))
+                .count(),
+            _ => 0,
+        };
         automation_missing_fields(
             &self.name.read(cx).value(),
             trigger_from_editor(self, cx).is_ok(),
             has_schedule,
-            &self.action(cx),
+            &action,
             agent_exists,
+            unfilled,
         )
     }
 }

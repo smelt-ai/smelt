@@ -52,7 +52,7 @@ pub(crate) struct AutomationTemplate {
     pub id: &'static str,
     pub name: TemplateText,
     pub description: TemplateText,
-    /// 指令里用方括号（中文是「填写…」）留出要用户补的路径或对象。
+    /// 指令里用方括号（中文是「填写…」）留出要用户补的路径或对象，见 [`placeholders`]。
     pub prompt: TemplateText,
     pub category: AutomationTemplateCategory,
     pub glyph: AutomationTemplateGlyph,
@@ -184,6 +184,27 @@ pub(crate) fn filtered_templates(
         .filter(move |template| filter.is_none_or(|category| template.category == category))
 }
 
+/// 模板指令里留给用户补的空：英文是 `[…]`，中文是「填写…」。按出现顺序，去重。
+/// 只认模板自己的指令：用户写的方括号、引号不算。
+pub(crate) fn placeholders(prompt: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for (open, close) in [("[", "]"), ("「填写", "」")] {
+        let mut rest = prompt;
+        while let Some(start) = rest.find(open) {
+            let Some(len) = rest[start..].find(close) else {
+                break;
+            };
+            let end = start + len + close.len();
+            let slot = &rest[start..end];
+            if !found.iter().any(|it| it == slot) {
+                found.push(slot.to_string());
+            }
+            rest = &rest[end..];
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,7 +219,7 @@ mod tests {
             assert!(!(template.description)().is_empty(), "{}", template.id);
             let prompt = (template.prompt)();
             assert!(
-                prompt.contains('['),
+                !placeholders(&prompt).is_empty(),
                 "{}：运行在空目录里，指令必须留出要读的路径或对象",
                 template.id
             );
@@ -211,6 +232,19 @@ mod tests {
         assert_eq!(BUILTIN.len(), 9);
         assert!(automation_template("morning-brief").is_some());
         assert!(automation_template("missing").is_none());
+    }
+
+    #[test]
+    fn placeholders_are_the_template_slots_in_either_language() {
+        assert_eq!(
+            placeholders("看仓库「填写仓库路径」，再看「填写仓库路径」和「别的」"),
+            vec!["「填写仓库路径」".to_string()]
+        );
+        assert_eq!(
+            placeholders("Read [file path] then [folder path] and [unclosed"),
+            vec!["[file path]".to_string(), "[folder path]".to_string()]
+        );
+        assert!(placeholders("没有空").is_empty());
     }
 
     #[test]

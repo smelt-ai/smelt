@@ -221,10 +221,8 @@ impl AutomationsPage {
         );
         let latest_run = machine.latest_run(&automation.id);
         let latest_run_id = latest_run.map(|run| run.id.clone());
-        let last_run = format_last_run_cell(
-            latest_run.map(|run| (run.status, run.finished_at.unwrap_or(run.created_at))),
-            now,
-        );
+        let last_run = latest_run
+            .map(|run| format_last_run(run.status, run.finished_at.unwrap_or(run.created_at), now));
         let last_run_failed = latest_run
             .is_some_and(|run| run.status == api::model::automation::AutomationRunStatus::Failed);
         let action_summary = match &automation.action {
@@ -308,36 +306,34 @@ impl AutomationsPage {
                 .child(truncated_line(schedule)),
         )
         .child(
-            automation_fixed_col(AUTOMATION_COL_LAST)
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .when(last_run_failed, |cell| {
-                    cell.child(
-                        div()
-                            .flex_shrink_0()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(rgb(ui_theme::bad())),
-                    )
-                })
-                .child(
-                    div()
-                        .min_w_0()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(rgb(ui_theme::muted()))
-                        .overflow_hidden()
-                        .child(truncated_line(last_run)),
-                ),
-        )
-        .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
                 .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(next_run)),
         )
-        .child(automation_fixed_col(AUTOMATION_COL_STATUS).child(automation_status_cell(status)))
+        // 状态下面一行写上次跑的结果，没跑过就只有状态。
+        .child(
+            automation_fixed_col(AUTOMATION_COL_STATUS)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(automation_status_cell(status))
+                .when_some(last_run, |cell, last_run| {
+                    cell.child(
+                        div()
+                            .min_w_0()
+                            .type_style(TYPE.text_xsmall)
+                            .text_color(rgb(if last_run_failed {
+                                ui_theme::bad()
+                            } else {
+                                ui_theme::faint()
+                            }))
+                            .overflow_hidden()
+                            .child(truncated_line(last_run)),
+                    )
+                }),
+        )
         .child(
             div()
                 .flex_shrink_0()
@@ -500,9 +496,8 @@ pub(crate) fn automation_catalog_column() -> Div {
 }
 
 pub(crate) const AUTOMATION_COL_SCHEDULE: f32 = 168.;
-pub(crate) const AUTOMATION_COL_LAST: f32 = 120.;
 pub(crate) const AUTOMATION_COL_NEXT: f32 = 96.;
-pub(crate) const AUTOMATION_COL_STATUS: f32 = 108.;
+pub(crate) const AUTOMATION_COL_STATUS: f32 = 140.;
 pub(crate) const AUTOMATION_COL_MENU: f32 = 32.;
 
 pub(crate) fn automation_fixed_col(width: f32) -> Div {
@@ -531,12 +526,6 @@ pub(crate) fn automation_table_header() -> AnyElement {
                 .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(t!("catalog.col_schedule").into_owned()),
-        )
-        .child(
-            automation_fixed_col(AUTOMATION_COL_LAST)
-                .type_style(TYPE.text_xsmall)
-                .text_color(rgb(ui_theme::faint()))
-                .child(t!("catalog.col_last_run").into_owned()),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)

@@ -44,9 +44,6 @@ automation:
     en: "Untitled Automation"
     zh-CN: "未命名自动化"
 catalog:
-  col_last_run:
-    en: "Last Run"
-    zh-CN: "上次运行"
   col_next_run:
     en: "Next Run"
     zh-CN: "下次运行"
@@ -62,6 +59,9 @@ catalog:
   empty_hint:
     en: "No automations yet. Add one from the templates below."
     zh-CN: "还没有自动化，可从下面的模板添加。"
+  last_run:
+    en: "Last: %{status} · %{when}"
+    zh-CN: "上次%{status} · %{when}"
   loading:
     en: "Loading…"
     zh-CN: "正在读取…"
@@ -122,15 +122,24 @@ editor:
   create_agent:
     en: "Create Agent"
     zh-CN: "创建智能体"
+  enabled:
+    en: "Enabled"
+    zh-CN: "已启用"
   gone:
     en: "This automation no longer exists."
     zh-CN: "这条自动化已经不在了。"
   name_placeholder:
     en: "Give it a name"
     zh-CN: "给它起个名字"
+  next_run:
+    en: "Next run %{when}"
+    zh-CN: "下次 %{when}"
   no_live_view:
     en: "The conversation plugin isn't installed, so the live run isn't visible; below is the saved record."
     zh-CN: "对话插件未安装，看不到运行现场；下面是落库的记录。"
+  paused:
+    en: "Paused"
+    zh-CN: "已暂停"
   prompt_placeholder:
     en: "e.g. Summarize today's progress and list to-dos"
     zh-CN: "例如：汇总今日进展并列出待办事项"
@@ -143,6 +152,15 @@ editor:
   trigger_hint:
     en: "Runs at set times, at intervals, or when the webhook receives a request."
     zh-CN: "到点、按间隔，或收到 webhook 时运行。"
+  what:
+    en: "What to Do"
+    zh-CN: "做什么"
+  when:
+    en: "When"
+    zh-CN: "什么时候"
+  who:
+    en: "Who Does It"
+    zh-CN: "谁来做"
 elapsed:
   hours:
     en: "%{hours}h %{minutes}m"
@@ -269,6 +287,9 @@ meta:
     en: "Workspace"
     zh-CN: "工作区"
 missing:
+  placeholders:
+    en: "Template blanks (%{count})"
+    zh-CN: "模板里还有 %{count} 处要填"
   agent:
     en: "Agent"
     zh-CN: "智能体"
