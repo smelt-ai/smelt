@@ -50,6 +50,9 @@ conversation_end.sign_in.claude:
 conversation_end.sign_in.codex:
   en: "Codex isn't signed in, or the sign-in expired. Run `codex login` in a terminal to sign in, then start a new session"
   zh-CN: Codex 还没登录或登录已失效：在终端运行 `codex login` 完成登录，然后新建会话
+conversation_end.sign_in.antigravity:
+  en: "Antigravity isn't signed in, or the sign-in expired. Run `agy acp --login` in a terminal and sign in with Google (it also works over SSH), then start a new session"
+  zh-CN: Antigravity 还没登录或登录已失效：在终端运行 `agy acp --login` 用 Google 账号登录（SSH 远程也能用），然后新建会话
 conversation_end.sign_in.other:
   en: The agent needs you to sign in first. Sign in with this agent's CLI in a terminal, then start a new session
   zh-CN: agent 要求先登录：在终端里用这个 agent 的 CLI 完成登录，然后新建会话

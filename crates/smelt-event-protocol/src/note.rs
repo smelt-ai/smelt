@@ -129,6 +129,7 @@ pub enum SignInAgent {
     Copilot,
     Claude,
     Codex,
+    Antigravity,
     /// 别的智能体，或比读的一方新的种类。
     #[default]
     #[serde(other)]
@@ -174,6 +175,9 @@ impl ConversationEndReason {
                 SignInAgent::Copilot => t!("conversation_end.sign_in.copilot", locale = locale),
                 SignInAgent::Claude => t!("conversation_end.sign_in.claude", locale = locale),
                 SignInAgent::Codex => t!("conversation_end.sign_in.codex", locale = locale),
+                SignInAgent::Antigravity => {
+                    t!("conversation_end.sign_in.antigravity", locale = locale)
+                }
                 SignInAgent::Other => t!("conversation_end.sign_in.other", locale = locale),
             },
             Self::Other => return None,
@@ -248,6 +252,21 @@ mod tests {
             serde_json::json!({"kind": "sign_in_required", "agent": "copilot"})
         );
         assert!(copilot.text_in("en").unwrap().contains("/login"));
+        let antigravity = ConversationEndReason::SignInRequired {
+            agent: SignInAgent::Antigravity,
+        };
+        assert_eq!(
+            serde_json::to_value(&antigravity).unwrap(),
+            serde_json::json!({"kind": "sign_in_required", "agent": "antigravity"})
+        );
+        for locale in ["en", "zh-CN"] {
+            assert!(
+                antigravity
+                    .text_in(locale)
+                    .unwrap()
+                    .contains("agy acp --login")
+            );
+        }
         assert_eq!(
             serde_json::from_value::<ConversationEndReason>(
                 serde_json::json!({"kind": "sign_in_required", "agent": "later"})

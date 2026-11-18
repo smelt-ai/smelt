@@ -2534,6 +2534,7 @@ fn sign_in_agent(command: &str) -> SignInAgent {
         Some(ConversationAgentKind::Copilot) => SignInAgent::Copilot,
         Some(ConversationAgentKind::Claude) => SignInAgent::Claude,
         Some(ConversationAgentKind::Codex) => SignInAgent::Codex,
+        Some(ConversationAgentKind::Antigravity) => SignInAgent::Antigravity,
         _ => SignInAgent::Other,
     }
 }
@@ -5276,6 +5277,10 @@ mod embedded_adapter_tests {
         assert_eq!(
             sign_in_agent(&ConversationAgentKind::Codex.default_cmd()),
             SignInAgent::Codex
+        );
+        assert_eq!(
+            sign_in_agent(&ConversationAgentKind::Antigravity.default_cmd()),
+            SignInAgent::Antigravity
         );
     }
 }
