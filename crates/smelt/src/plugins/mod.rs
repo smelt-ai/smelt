@@ -15,12 +15,9 @@
 //! 没用上游的 `PluginManager`：它按 manifest 给每个插件新建一份空 Policy，拿不到
 //! 宿主注册的模块。这里只用公开的 `PluginManifest::read` 发现插件。
 //!
-//! 插件从哪来（前面的赢得同名 id，用户装的副本可以盖过自带的）：
-//! 1. `~/.smelt/plugins/`：用户自己装的，也是写插件的地方。设置里的「面板插件」页往这里
-//!    导入、从这里删除（见 `manage`）。目录里文件一变就重挂改动的那个插件（见 `watch`），
-//!    不用重启，也不用点「重新加载」。
-//! 2. App 自带的 `Contents/Resources/plugins/`，只读加载。
-//! 3. debug 构建直接读仓库里的 `plugins/`，同样改完即重挂。
+//! 插件都在 `~/.smelt/plugins/`：用户自己装的，也是写插件的地方。设置里的「面板插件」页往这里
+//! 导入、从这里删除（见 `manage`）。目录里文件一变就重挂改动的那个插件（见 `watch`），不用重启，
+//! 也不用点「重新加载」。App 自带的功能都是 Rust 插件（`crates/plugins`），不随 App 带 JS 插件。
 //!
 //! 命令行 `smelt plugin check|status`（见 `cli`）：不开 App 加载并渲染一次插件；查 App 里
 //! 各插件的加载结果（App 每次挂载后写一份快照，见 `status`）。
@@ -59,7 +56,7 @@ pub(crate) use manage::{import, uninstall, user_plugin_dir};
 use smelt_ui::kit::{TYPE, TypeStyled as _};
 pub(crate) use watch::watch;
 
-/// 用户安装插件的目录（`~/.smelt` 下），也是 App 包里、仓库里放插件的目录名。
+/// 用户安装插件的目录（`~/.smelt` 下）。
 const PLUGIN_DIR: &str = "plugins";
 
 thread_local! {
@@ -82,7 +79,6 @@ struct PluginPanel {
     title: String,
     version: String,
     root: PathBuf,
-    source: PluginSource,
     /// 加载失败的原因。
     error: Option<String>,
 }
@@ -171,27 +167,6 @@ impl PluginView for JsEntryView {
     }
 }
 
-/// 插件从哪个目录加载的。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PluginSource {
-    /// `~/.smelt/plugins/`，用户自己装的，可以删。
-    User,
-    /// App 自带的，跟着 smelt 更新。
-    Bundled,
-    /// 开发构建直接读仓库里的 `plugins/`。release 构建不从仓库加载，没有这一种。
-    #[cfg(debug_assertions)]
-    Repo,
-}
-
-impl PluginSource {
-    /// 加载时要不要往插件目录里写编辑器文件（`gpui-kit.d.ts`、`jsconfig.json` 和依赖
-    /// 链接），让人改脚本时有补全。App 自带的目录不写：那是已签名的 .app 里面，写进去
-    /// 会破坏签名，也没人在那里改脚本。
-    fn editor_files(self) -> bool {
-        !matches!(self, Self::Bundled)
-    }
-}
-
 /// 设置页列出的一个已加载插件。
 #[derive(Clone, Debug)]
 pub(crate) struct InstalledPlugin {
@@ -199,7 +174,6 @@ pub(crate) struct InstalledPlugin {
     pub(crate) name: String,
     pub(crate) version: String,
     pub(crate) root: PathBuf,
-    pub(crate) source: PluginSource,
     /// 加载失败的原因。
     pub(crate) error: Option<String>,
 }
@@ -269,11 +243,7 @@ fn remount(changed: Option<&BTreeSet<PathBuf>>, window: &mut Window, cx: &mut Ap
 /// 挂一个插件、登记它的视图。登记不上返回 `None`；加载失败照样登记，视图里画出原因。
 /// `runtime` 第一次有脚本插件要挂时才建。
 fn mount_one(
-    Found {
-        root,
-        manifest,
-        source,
-    }: Found,
+    Found { root, manifest }: Found,
     theme_error: Option<String>,
     runtime: &mut Option<Result<Rc<ShellRuntime>, String>>,
     window: &mut Window,
@@ -286,7 +256,6 @@ fn mount_one(
             version: manifest.version().to_string(),
             id,
             root,
-            source,
             error: theme_error,
         });
     }
@@ -301,11 +270,8 @@ fn mount_one(
         &id,
         manifest.name(),
         &root,
-        source,
     ));
     let content = runtime.and_then(|runtime| {
-        // 开关挂在运行时上、加载时读，所以每个插件加载前按来源设一次。
-        runtime.set_editor_files(source.editor_files());
         plugin_policy(&id, &plugin)
             .and_then(|policy| {
                 // 加载时解析导入、挂载时视图拿走的都是默认 Policy。
@@ -328,7 +294,6 @@ fn mount_one(
         version: manifest.version().to_string(),
         id,
         root,
-        source,
         error: theme_error.or_else(|| content.as_ref().err().cloned()),
     };
     // 旧登记在挂之前已经撤下，旧视图随之放掉。
@@ -393,7 +358,7 @@ fn unmount(id: &str, cx: &mut App) {
 /// 插件主入口之外的视图怎么建：入口是插件目录里的另一个脚本，每建一份视图单独加载、挂载
 /// 一份，和主入口、别的视图各是一份实例（像浏览器扩展的 options 页）。设置页和别的视图第一次
 /// 露出来时挂；按实例建的等第一次打开、有了参数再挂（`create_view` 建好马上就打开）。
-fn view_loader(id: &str, name: &str, root: &std::path::Path, source: PluginSource) -> ViewLoader {
+fn view_loader(id: &str, name: &str, root: &std::path::Path) -> ViewLoader {
     let (id, name, root) = (id.to_string(), name.to_string(), root.to_path_buf());
     ViewLoader {
         icon: smelt_ui::IconName::Puzzle.path(),
@@ -404,7 +369,7 @@ fn view_loader(id: &str, name: &str, root: &std::path::Path, source: PluginSourc
             let mount: Rc<dyn Fn(serde_json::Value, &mut Window, &mut App) -> Mounted> =
                 Rc::new(move |args, window, cx| {
                     let plugin = JsPlugin::for_view(&id, &name, args);
-                    mount_view_entry(&id, &root, &entry, source, plugin, window, cx)
+                    mount_view_entry(&id, &root, &entry, plugin, window, cx)
                 });
             let (settings, instances) = (view.settings, view.instances);
             Ok(Rc::new(move |window, cx| -> Rc<dyn ViewHandle> {
@@ -443,14 +408,12 @@ fn mount_view_entry(
     id: &str,
     root: &std::path::Path,
     entry: &str,
-    source: PluginSource,
     plugin: JsPlugin,
     window: &mut Window,
     cx: &mut App,
 ) -> Mounted {
     let runtime = runtime(cx)
         .map_err(|error| t!("plugins.runtime_failed", error = format!("{error:#}")).into_owned())?;
-    runtime.set_editor_files(source.editor_files());
     let view = plugin_policy(id, &plugin).and_then(|policy| {
         policy::set_default(policy);
         let application = runtime.load_application(root, entry)?;
@@ -493,7 +456,6 @@ pub(crate) fn shutdown(cx: &mut App) {
 struct Found {
     root: PathBuf,
     manifest: PluginManifest,
-    source: PluginSource,
 }
 
 /// 先于窗口和外观恢复，登记已安装插件的主题；纯主题包不执行脚本。
@@ -542,35 +504,29 @@ fn register_theme_contributions(
     errors
 }
 
-/// 按目录顺序找插件，同名 id 先到先得。坏的 manifest 记一笔就跳过，不执行任何脚本。
+/// 找 `~/.smelt/plugins/` 下的插件，同名 id 先到先得。坏的 manifest 记一笔就跳过，不执行任何脚本。
 fn discover() -> Vec<Found> {
+    let Some(entries) = user_plugin_dir().and_then(|dir| std::fs::read_dir(dir).ok()) else {
+        return Vec::new();
+    };
+    let mut roots: Vec<PathBuf> = entries
+        .flatten()
+        // 点开头的是导入到一半的暂存目录（见 `manage`），不是插件。
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| entry.path())
+        .filter(|path| path.join(MANIFEST_FILE).is_file())
+        .collect();
+    // 目录遍历顺序随文件系统而变；不排序的话 tab 顺序每次启动都可能不同。
+    roots.sort();
     let mut found: Vec<Found> = Vec::new();
-    for (directory, source) in plugin_dirs() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            continue;
-        };
-        let mut roots: Vec<PathBuf> = entries
-            .flatten()
-            // 点开头的是导入到一半的暂存目录（见 `manage`），不是插件。
-            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-            .map(|entry| entry.path())
-            .filter(|path| path.join(MANIFEST_FILE).is_file())
-            .collect();
-        // 目录遍历顺序随文件系统而变；不排序的话 tab 顺序每次启动都可能不同。
-        roots.sort();
-        for root in roots {
-            match PluginManifest::read(&root) {
-                Ok(manifest) => {
-                    if !found.iter().any(|seen| seen.manifest.id() == manifest.id()) {
-                        found.push(Found {
-                            root,
-                            manifest,
-                            source,
-                        });
-                    }
+    for root in roots {
+        match PluginManifest::read(&root) {
+            Ok(manifest) => {
+                if !found.iter().any(|seen| seen.manifest.id() == manifest.id()) {
+                    found.push(Found { root, manifest });
                 }
-                Err(error) => eprintln!("[plugins] {error}"),
             }
+            Err(error) => eprintln!("[plugins] {error}"),
         }
     }
     found
@@ -624,40 +580,6 @@ fn filesystem_roots() -> Vec<PathBuf> {
     }
 }
 
-fn plugin_dirs() -> Vec<(PathBuf, PluginSource)> {
-    let mut dirs = Vec::new();
-    if let Some(user) = user_plugin_dir() {
-        dirs.push((user, PluginSource::User));
-    }
-    if let Some(bundled) = bundled_plugin_dir() {
-        dirs.push((bundled, PluginSource::Bundled));
-    }
-    // 开发期直接加载仓库里的插件，改完脚本重新加载即可，不必先装。
-    #[cfg(debug_assertions)]
-    dirs.push((repo_plugin_dir(), PluginSource::Repo));
-    dirs
-}
-
-/// App 自带插件在 .app 里的位置；不是从 .app 启动（cargo run）时没有。
-fn bundled_plugin_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let macos = exe.parent()?;
-    let contents = macos.parent()?;
-    if macos.file_name()? != "MacOS" || contents.file_name()? != "Contents" {
-        return None;
-    }
-    let dir = contents.join("Resources").join(PLUGIN_DIR);
-    dir.is_dir().then_some(dir)
-}
-
-/// 仓库里的第一方插件。debug 构建直接从这里加载；测试也从这里校验清单。
-#[cfg(any(debug_assertions, test))]
-fn repo_plugin_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(PLUGIN_DIR)
-}
-
 fn with_registry<R>(read: impl FnOnce(&Registry) -> R) -> R {
     REGISTRY.with(|registry| read(&registry.borrow()))
 }
@@ -673,7 +595,6 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
                 name: panel.title.clone(),
                 version: panel.version.clone(),
                 root: panel.root.clone(),
-                source: panel.source,
                 error: panel.error.clone(),
             })
             .collect()
@@ -682,29 +603,21 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MANIFEST_FILE, PluginManifest, repo_plugin_dir};
+    use super::{MANIFEST_FILE, PluginManifest};
 
     #[gpui::test]
-    fn production_runtime_mounts_skills_button_helper(cx: &mut gpui::TestAppContext) {
+    fn production_runtime_mounts_smelt_ui_buttons(cx: &mut gpui::TestAppContext) {
         use gpui::{Modifiers, VisualTestContext, point, px, size};
         use std::ops::Deref;
 
-        let dir = std::env::temp_dir().join(format!("smelt-skills-ui-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("smelt-ui-buttons-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        // ui.js 连同它导入的同目录模块一起拷，拷少了模块解析不到。
-        for (name, source) in [
-            ("ui.js", include_str!("../../../../plugins/skills/ui.js")),
-            (
-                "i18n.js",
-                include_str!("../../../../plugins/skills/i18n.js"),
-            ),
-        ] {
-            std::fs::write(dir.join(name), source).unwrap();
-        }
         std::fs::write(dir.join("main.js"), r#"
 import { View, div } from "gpui-kit";
 import { SmeltBadge, SmeltButton } from "smelt-ui";
-import { button } from "./ui.js";
+function button(id, label, onClick, variant = "quiet") {
+  return SmeltButton.new(id).label(label).small()[variant]().on_click((_event, cx) => onClick(cx));
+}
 export default class App extends View {
   init() { this.picking = true; this.hits = 0; }
   render() {
@@ -729,8 +642,8 @@ export default class App extends View {
         let runtime = cx.update(super::runtime).unwrap();
         runtime.set_editor_files(false);
         // 和正式加载一样带上这个插件的 Policy：`smelt-plugin-api` 等宿主模块挂在它上面。
-        let plugin = smelt_plugin_api::js::JsPlugin::for_plugin("smelt.skills-test", "Skills");
-        super::policy::set_default(super::plugin_policy("smelt.skills-test", &plugin).unwrap());
+        let plugin = smelt_plugin_api::js::JsPlugin::for_plugin("smelt.buttons-test", "Buttons");
+        super::policy::set_default(super::plugin_policy("smelt.buttons-test", &plugin).unwrap());
         let app = runtime.load_application(&dir, "main.js").unwrap();
         let mounted = std::rc::Rc::new(std::cell::RefCell::new(None));
         let slot = mounted.clone();
@@ -825,7 +738,6 @@ export default class App extends View {
         let found = super::Found {
             root: dir.clone(),
             manifest: PluginManifest::read(&dir).unwrap(),
-            source: super::PluginSource::User,
         };
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -878,33 +790,5 @@ export default class App extends View {
             assert!(super::check_view_entry(&dir, entry).is_err(), "{entry}");
         }
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// 仓库里每个插件的清单都要能解析、入口存在、id 不重复。本地 clone 进来的
-    /// 外部仓库（没有 `gpui-shell.json`）不是插件，跳过。
-    #[test]
-    fn repo_plugins_have_valid_manifests() {
-        let dir = repo_plugin_dir();
-        let mut ids = std::collections::BTreeSet::new();
-        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-            let root = entry.path();
-            if !root.join(MANIFEST_FILE).is_file() {
-                continue;
-            }
-            let manifest = PluginManifest::read(&root)
-                .unwrap_or_else(|error| panic!("{}：{error}", root.display()));
-            assert!(
-                root.join(manifest.entry()).is_file(),
-                "{} 缺少入口 {}",
-                root.display(),
-                manifest.entry()
-            );
-            assert!(
-                ids.insert(manifest.id().to_string()),
-                "插件 id 重复：{}",
-                manifest.id()
-            );
-        }
-        assert!(!ids.is_empty(), "{} 下没有插件", dir.display());
     }
 }

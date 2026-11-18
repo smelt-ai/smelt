@@ -7,7 +7,7 @@
 //! `plugins::watch`），这页不用管挂载。
 
 use super::*;
-use crate::plugins::{InstalledPlugin, PluginSource};
+use crate::plugins::InstalledPlugin;
 use rust_i18n::t;
 use smelt_plugin_api::HostEvent;
 use smelt_ui::kit::{TYPE, TypeStyled as _};
@@ -100,12 +100,7 @@ impl PanelPluginsPage {
     /// 把插件挪进回收目录；撤下由工作台盯着目录自己做。
     fn confirm_delete(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.pending_delete = None;
-        let Some(plugin) = self
-            .plugins
-            .iter()
-            .find(|plugin| plugin.id == id && plugin.source == PluginSource::User)
-            .cloned()
-        else {
+        let Some(plugin) = self.plugins.iter().find(|plugin| plugin.id == id).cloned() else {
             self.error = Some(t!("plugins.not_found").into_owned());
             cx.notify();
             return;
@@ -221,8 +216,6 @@ impl PanelPluginsPage {
 
     fn plugin_row(&self, plugin: &InstalledPlugin, pending: bool, cx: &Context<Self>) -> Row {
         let id = plugin.id.clone();
-        let removable = plugin.source == PluginSource::User;
-
         // 清单里的 version 可以不写。
         let mut detail = vec![if plugin.version.is_empty() {
             plugin.id.clone()
@@ -234,24 +227,12 @@ impl PanelPluginsPage {
             )
             .into_owned()
         }];
-        detail.push(match plugin.source {
-            PluginSource::User => {
-                t!("plugins.source_user", path = plugin.root.display()).into_owned()
-            }
-            PluginSource::Bundled => t!("plugins.source_bundled").into_owned(),
-            #[cfg(debug_assertions)]
-            PluginSource::Repo => {
-                t!("plugins.source_repo", path = plugin.root.display()).into_owned()
-            }
-        });
+        detail.push(plugin.root.display().to_string());
         if let Some(error) = &plugin.error {
             detail.push(t!("plugins.load_failed", error = error).into_owned());
         }
 
         let row = Row::new(plugin.name.clone()).description(detail.join("\n"));
-        if !removable {
-            return row;
-        }
         if pending {
             let confirm_id = id.clone();
             row.child(

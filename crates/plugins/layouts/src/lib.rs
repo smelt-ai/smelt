@@ -128,12 +128,7 @@ mod tests {
             assert_eq!(state["right_dock"]["open"], true);
             assert_eq!(
                 views(&state["right_dock"]["panel"]),
-                [
-                    "smelt.files/main",
-                    "smelt.git/main",
-                    "smelt.history/main",
-                    "com.smelt.skills/main"
-                ]
+                ["smelt.files/main", "smelt.git/main", "smelt.history/main"]
             );
             assert!(state["bottom_dock"].is_null());
             let materials = api::layouts(cx)[0].materials;

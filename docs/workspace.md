@@ -18,7 +18,7 @@ cargo run --bin smelt
 > 注：`smelt` 原有的 instincts 蒸馏 CLI（`observe`/`digest`/`merge` 等）已整体移除。
 > 工作区二进制：`smelt`（GUI）、`smeltd`（运行时守护）、`smelt-notify`
 > （`crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App）、`smelt-iroh-connect`（iroh 调试）。
-> 没有独立的 `gateway` 或 `smelt-iroh-host`。随 App 分发的插件在 `plugins/`（gpui-shell 脚本应用）。
+> 没有独立的 `gateway` 或 `smelt-iroh-host`。
 > 成员列表见根目录 `Cargo.toml`。
 
 ---
@@ -43,7 +43,7 @@ cargo run --bin smelt
 工作区是虚拟 workspace，代码全部分布在 `crates/` 下（见根目录 `Cargo.toml` 的成员列表）：
 
 - **`crates/smelt`** —— GUI 主程序（bin 名 `smelt`），宿主：窗口、页和布局、命令和快捷键、
-  设置页的机制和外观、运行时连接、JS 插件运行时（`plugins/`，gpui-shell 脚本应用）。不认识
+  设置页的机制和外观、运行时连接、用户 JS 插件的运行时（`~/.smelt/plugins/`，gpui-shell 脚本应用）。不认识
   具体功能，功能都是 `crates/plugins/*` 下的内置插件，在 `plugin_host::install` 里登记。
 - **`crates/plugins/*`** —— 内置插件，一个 crate 一项功能：会话（`sessions`，会话列表和选中的
   那段会话）、对话（`conversation`）、终端（`terminal`）、智能体（`agents`）、归档、机器、

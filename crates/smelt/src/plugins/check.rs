@@ -20,8 +20,6 @@ use smelt_plugin_api::js::JsPlugin;
 use smelt_plugin_api::{self as api, Machine, RuntimeKey};
 use smelt_runtime_client::RuntimeClient;
 
-use super::PluginSource;
-
 /// 检查 `dir` 里的插件，返回退出码。读清单在开 GPUI 之前做，清单坏了不用起应用。
 pub(super) fn run(dir: &Path) -> i32 {
     let root = match std::fs::canonicalize(dir) {
@@ -91,12 +89,10 @@ fn check(root: &Path, manifest: &PluginManifest, cx: &mut App) -> Result<(), Str
 
     let runtime = super::runtime(cx)
         .map_err(|error| t!("plugins.runtime_failed", error = format!("{error:#}")).into_owned())?;
-    runtime.set_editor_files(true);
     let plugin = JsPlugin::for_plugin(id, manifest.name()).with_view_loader(super::view_loader(
         id,
         manifest.name(),
         root,
-        PluginSource::User,
     ));
     let policy = super::plugin_policy(id, &plugin).map_err(|error| format!("{error:#}"))?;
     // 加载时解析导入、挂载时视图拿走的都是默认 Policy，同 `mount_one`。

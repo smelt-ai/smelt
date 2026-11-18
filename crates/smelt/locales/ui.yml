@@ -481,15 +481,6 @@ plugins:
   settings_failed:
     en: "Couldn't load the settings page: %{error}"
     zh-CN: "设置页加载失败：%{error}"
-  source_bundled:
-    en: "Bundled with Smelt, updated with Smelt"
-    zh-CN: "smelt 自带，跟着 smelt 更新"
-  source_repo:
-    en: "Loaded from the repo in development builds · %{path}"
-    zh-CN: "开发构建从仓库加载 · %{path}"
-  source_user:
-    en: "Installed by you · %{path}"
-    zh-CN: "自己装的 · %{path}"
   target_exists:
     en: "%{path} already exists"
     zh-CN: "%{path} 已经存在"

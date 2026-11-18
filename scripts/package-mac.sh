@@ -205,27 +205,6 @@ if [[ -n "${CI:-}" ]] || command -v cargo-about >/dev/null; then
 else
   echo "⚠ 没装 cargo-about，App 里不带第三方许可证清单；自用可以，对外分发不行（cargo install cargo-about --locked）" >&2
 fi
-# 插件（gpui-shell 脚本应用，见 crates/smelt/src/plugins）：整目录随 App
-# 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell 加载时写编辑器文件的行为，
-# 不会写进已签名的 .app）。
-PLUGINS="$RES/plugins"
-for dir in "$ROOT"/plugins/*/; do
-  # 没有清单的子目录不是插件。
-  [[ -f "${dir}gpui-shell.json" ]] || continue
-  target="$PLUGINS/$(basename "$dir")"
-  mkdir -p "$target"
-  for file in "$dir"*; do
-    case "$(basename "$file")" in
-      # gpui-shell 生成给编辑器用的文件，不是插件内容。
-      gpui-kit.d.ts|jsconfig.json) continue ;;
-      # 测试和它用的宿主模块替身，只在仓库里跑。
-      tests) continue ;;
-    esac
-    cp -R "$file" "$target/"
-  done
-  echo "  … 打包插件：$(basename "$dir")"
-done
-
 # 可选：把当前包在 GitHub Release 上的更新包地址写进 App（release.yml 按 tag 拼好传进来），
 # 刚装好的包才不会把自己当成新版本再下一遍。updater 认这个地址优先于用户状态里记的。
 # 本地打包不设；这时 updater 退回用成功自更新后写入用户状态的 URL。

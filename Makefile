@@ -91,20 +91,13 @@ dist-build: ## 先编 release 再打包（一步到位）
 
 install: $(SMELT_AGENT) ## 原子安装到 /Applications（不打 dmg）：退出 Smelt、停守护、换 App、重新打开
 	@# make build && make install 必须装刚编的二进制；只检查 dist 是否存在会把
-	@# 旧包再装一遍，守护永远跑不到新代码。插件脚本没有 cargo binary，因此同时
-	@# 检查 plugins 的源内容（按 .gitignore 排除编辑器生成文件和本地 clone 的外部仓库）。
+	@# 旧包再装一遍，守护永远跑不到新代码。
 	@# codesign -dv 不打印证书名，Authority= 从 -dvv 才出现。少这一级时已签好的包也会被当成签名不对。
 	@[ -f target/release/$(BIN) ] && [ -f target/release/$(DAEMON) ] \
 		&& [ -f target/release/smelt-notify ] \
 		&& [ -f target/release/smelt-installer ] || { \
 		echo "✗ 缺少 release 产物，先 make build"; exit 1; }
-	@if [ -d dist/Smelt.app/Contents/Resources/plugins ]; then \
-		plugin_sources_changed="$$(git ls-files -co --exclude-standard -- plugins | while read -r f; do \
-			[ "$$f" -nt dist/Smelt.app/Contents/Resources/plugins ] && { echo "$$f"; break; }; done)"; \
-	else \
-		plugin_sources_changed=missing; \
-	fi; \
-	sig_ok=0; \
+	@sig_ok=0; \
 	identity="$${SMELT_CODESIGN_IDENTITY:-Smelt Local Signing}"; \
 	if [ -d dist/Smelt.app ]; then \
 		sig="$$(codesign -dvv dist/Smelt.app 2>&1 || true)"; \
@@ -126,9 +119,8 @@ install: $(SMELT_AGENT) ## 原子安装到 /Applications（不打 dmg）：退�
 		|| [ target/smelt-agent/smelt-agent -nt dist/Smelt.app/Contents/Resources/smelt-agent/smelt-agent ] \
 		|| [ target/smelt-agent/photon_rs_bg.wasm -nt dist/Smelt.app/Contents/Resources/smelt-agent/photon_rs_bg.wasm ] \
 		|| ! diff -rq target/smelt-agent/skills dist/Smelt.app/Contents/Resources/smelt-agent/skills >/dev/null 2>&1 \
-		|| [ -n "$$plugin_sources_changed" ] \
 		|| [ "$$sig_ok" -ne 1 ]; then \
-		echo "· dist 落后于 release、签名不对，或插件脚本有改动，重新打包"; \
+		echo "· dist 落后于 release 或签名不对，重新打包"; \
 		./scripts/package-mac.sh --no-dmg; \
 	fi
 	@# 和在线更新同一条提交：让 Smelt 退出 → 停守护 → 原子交换 App → 打开新版。

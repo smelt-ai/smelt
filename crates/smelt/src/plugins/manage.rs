@@ -315,10 +315,10 @@ mod tests {
     #[test]
     fn uninstall_refuses_anything_outside_the_user_plugin_dir() {
         let scratch = Scratch::new();
-        let bundled = scratch.plugin("bundled/skills", "com.smelt.skills");
+        let elsewhere = scratch.plugin("elsewhere/demo", "com.example.elsewhere");
         let nested = scratch.plugin("plugins/demo/inner", "com.example.inner");
 
-        for root in [bundled, nested] {
+        for root in [elsewhere, nested] {
             let error = uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash"))
                 .unwrap_err();
             assert!(error.contains("Only plugins you installed"), "{error}");

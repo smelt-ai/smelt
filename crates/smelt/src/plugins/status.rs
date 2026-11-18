@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{PluginPanel, PluginSource};
+use super::PluginPanel;
 
 const FILE_NAME: &str = "plugin-status.json";
 
@@ -26,8 +26,6 @@ pub(super) struct Entry {
     pub(super) name: String,
     pub(super) version: String,
     pub(super) path: PathBuf,
-    /// `user`：`~/.smelt/plugins/` 里的；`bundled`：App 自带；`repo`：开发构建读仓库里的。
-    pub(super) source: String,
     /// 加载失败的原因；加载好了是 `None`。
     pub(super) error: Option<String>,
 }
@@ -47,7 +45,6 @@ pub(super) fn publish(panels: &[PluginPanel]) {
                 name: panel.title.clone(),
                 version: panel.version.clone(),
                 path: panel.root.clone(),
-                source: source_name(panel.source).to_string(),
                 error: panel.error.clone(),
             })
             .collect(),
@@ -91,15 +88,6 @@ fn write(path: &std::path::Path, snapshot: &Snapshot) -> std::io::Result<()> {
     })
 }
 
-fn source_name(source: PluginSource) -> &'static str {
-    match source {
-        PluginSource::User => "user",
-        PluginSource::Bundled => "bundled",
-        #[cfg(debug_assertions)]
-        PluginSource::Repo => "repo",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,7 +104,6 @@ mod tests {
                 name: "你好".into(),
                 version: "0.1.0".into(),
                 path: "/tmp/hello".into(),
-                source: "user".into(),
                 error: Some("SyntaxError".into()),
             }],
         };
