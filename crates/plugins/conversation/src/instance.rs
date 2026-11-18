@@ -265,7 +265,7 @@ impl ConversationInstance {
             ConversationViewEvent::ManageCapabilities { by_agent: false } => open_view(
                 sessions::CAPABILITIES_VIEW,
                 api::serde_json::json!({
-                    "tab": "plugins",
+                    "tab": "skills",
                     "machine": api::machine_to_json(&machine),
                 }),
                 cx,

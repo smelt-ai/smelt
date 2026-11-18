@@ -1,7 +1,7 @@
 //! 能力库：给某台机器上的 Pi 配模型与凭据、MCP 服务器、技能与扩展、记忆召回。
 //!
 //! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道，宿主里没有它的类型。登记三个视图
-//! （id 和参数见 [`contract`]）：能力库页本身只放给 Pi 装的东西（技能和扩展、MCP）；模型
+//! （id 和参数见 [`contract`]）：能力库页本身只放给 Pi 装的东西（技能、扩展、MCP）；模型
 //! （Provider、默认模型）和记忆检索是 Pi 怎么跑的偏好，各是设置里的一页。每台机器的菜单里
 //! 也登记一项「能力库」（[`MACHINE_MENU`]），点了打开时带上那台机器。
 //!
@@ -152,7 +152,11 @@ pub fn register(cx: &mut App) {
 }
 
 /// 能力库页：给 Pi 装的东西。
-const LIBRARY_TABS: [CapabilitiesTab; 2] = [CapabilitiesTab::Plugins, CapabilitiesTab::Mcp];
+const LIBRARY_TABS: [CapabilitiesTab; 3] = [
+    CapabilitiesTab::Skills,
+    CapabilitiesTab::Extensions,
+    CapabilitiesTab::Mcp,
+];
 /// 设置 → 模型。
 const MODELS_TABS: [CapabilitiesTab; 1] = [CapabilitiesTab::Models];
 /// 设置 → 记忆。
@@ -220,7 +224,8 @@ fn open_on_machine(args: MachineMenuContext, cx: &mut App) -> Task<Result<(), St
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CapabilitiesTab {
     Models,
-    Plugins,
+    Skills,
+    Extensions,
     Mcp,
     Memory,
 }
@@ -229,7 +234,8 @@ impl CapabilitiesTab {
     fn label(self) -> SharedString {
         match self {
             Self::Models => t!("tab.models"),
-            Self::Plugins => t!("tab.plugins"),
+            Self::Skills => t!("tab.skills"),
+            Self::Extensions => t!("tab.extensions"),
             Self::Mcp => t!("tab.mcp"),
             Self::Memory => t!("tab.memory"),
         }
@@ -240,7 +246,8 @@ impl CapabilitiesTab {
     fn key(self) -> &'static str {
         match self {
             Self::Models => "models",
-            Self::Plugins => "plugins",
+            Self::Skills => "skills",
+            Self::Extensions => "extensions",
             Self::Mcp => "mcp",
             Self::Memory => "memory",
         }
@@ -284,8 +291,12 @@ pub struct CapabilitiesPage {
     /// 那台机器装了远程桌面（运行时 `system.describe` 报的）：浏览器类 MCP 预设在那里接
     /// 远程桌面里的 Chrome。进页面、换机器、重连时问一次，还没问到当没装。
     remote_desktop: bool,
+    /// 「给智能体用」的一次勾选还在改：回来前别的勾选置灰（见 [`agents::set_use`]）。
+    agent_edit_pending: bool,
+    /// 「给智能体用」上一次没改成的原因，就地写在列表上面。
+    agent_edit_error: Option<String>,
     _host_events: Subscription,
-    /// 插件页签上「谁在用」从智能体配置算，它换了就重画。
+    /// 每行的「谁在用」「给智能体用」从智能体配置算，它换了就重画。
     _agent_settings: Subscription,
 }
 
@@ -319,6 +330,8 @@ impl CapabilitiesPage {
             pi_plugin_pending_delete: None,
             pi_plugin_error: None,
             remote_desktop: false,
+            agent_edit_pending: false,
+            agent_edit_error: None,
             _host_events: host_events,
             _agent_settings: agent_settings,
         }

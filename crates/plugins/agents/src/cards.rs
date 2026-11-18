@@ -211,7 +211,7 @@ pub(crate) fn render_agent_plugin_card(
         .tooltip(t!("plugins.manage_tooltip"))
         .on_click(move |_, _, cx| {
             manage_entity.update(cx, |page, cx| {
-                page.open_capabilities("plugins", cx);
+                page.open_capabilities("skills", cx);
             });
         });
 

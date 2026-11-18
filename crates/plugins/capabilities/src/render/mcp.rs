@@ -1,8 +1,9 @@
 //! 能力库「MCP」页签：内置服务器一键添加，`~/.pi/agent/mcp.json` 里的服务器启停、
-//! 登录、移除。排版和模型页签同一套（居中限宽、行内按钮 xsmall）。
+//! 登录、移除，每台写着谁在用、能直接勾给智能体用。排版和模型页签同一套（居中限宽、行内按钮 xsmall）。
 
 use super::models::{Palette, card, section};
 use super::*;
+use crate::agents::Usable;
 use crate::models::PiConfigFileKind;
 use api::model::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
 use api::ui::IconAction as _;
@@ -190,9 +191,13 @@ fn servers_section(
             );
         }
         Ok(_) => {
+            if let Some(error) = super::uses::agent_edit_error(page) {
+                body = body.child(error);
+            }
             let mut list = card(palette);
             for (index, server) in servers.iter().enumerate() {
-                let mut item = row(index, palette).child(server_row(entity, page, server, palette));
+                let mut item =
+                    row(index, palette).child(server_row(entity, page, server, palette, cx));
                 if page.pi_mcp_pending_remove.as_deref() == Some(server.name.as_str()) {
                     item = item.child(confirm_remove(entity, &server.name, palette));
                 }
@@ -216,7 +221,11 @@ fn server_row(
     page: &CapabilitiesPage,
     server: &PiMcpServer,
     palette: Palette,
+    cx: &App,
 ) -> Div {
+    let usable = Usable::Mcp(server.name.clone());
+    let used_by = super::uses::used_by_line(&page.machine, &usable, cx);
+    let uses_button = super::uses::uses_button(entity, page, usable, &server.name, cx);
     let detail = match &server.transport {
         PiMcpTransport::Http { url } => url.clone(),
         PiMcpTransport::Stdio { command, args } => t!(
@@ -324,7 +333,8 @@ fn server_row(
                 .min_w_0()
                 .gap_0p5()
                 .child(badges)
-                .child(row_detail(detail, palette)),
+                .child(row_detail(detail, palette))
+                .children(used_by.map(|line| row_detail(line, palette))),
         )
         .child(
             div()
@@ -332,6 +342,7 @@ fn server_row(
                 .items_center()
                 .flex_none()
                 .gap_1()
+                .children(uses_button)
                 .children(login)
                 .child(toggle)
                 .child(remove),

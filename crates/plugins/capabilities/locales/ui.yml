@@ -508,19 +508,16 @@ plugins:
   installed_description:
     en: "Deleting removes the files from disk and unchecks it in every agent."
     zh-CN: "删除会直接删掉磁盘上的文件，并把所有智能体里对它的勾选一起清掉。"
-  kind:
-    extension:
-      en: "Extension"
-      zh-CN: "扩展"
-    skill:
-      en: "Skill"
-      zh-CN: "技能"
   last_failed:
     en: "Last Action Failed"
     zh-CN: "上一次操作失败"
   none:
-    en: "No skills or extensions installed yet."
-    zh-CN: "还没有装任何技能或扩展。"
+    extension:
+      en: "No extensions installed yet."
+      zh-CN: "还没有装扩展。"
+    skill:
+      en: "No skills installed yet."
+      zh-CN: "还没有装技能。"
   origin:
     en: "Source: %{origin} · %{path}"
     zh-CN: "来源：%{origin} · %{path}"
@@ -530,27 +527,40 @@ plugins:
   rescan:
     en: "Rescan"
     zh-CN: "重新扫描"
-  row_title:
-    en: "%{name} (%{kind})"
-    zh-CN: "%{name}（%{kind}）"
   scan:
     en: "Scanned Folders"
     zh-CN: "扫描目录"
   scan_summary:
-    en: "Found %{skills} skills and %{extensions} extensions."
-    zh-CN: "当前扫到 %{skills} 个技能、%{extensions} 个扩展。"
+    extension:
+      en: "Found %{count} extensions."
+      zh-CN: "当前扫到 %{count} 个扩展。"
+    skill:
+      en: "Found %{count} skills."
+      zh-CN: "当前扫到 %{count} 个技能。"
   sources:
     en: "Sources"
     zh-CN: "来源"
   sources_description:
-    en: "Skills are markdown capability packs; extensions are TypeScript modules that register tools and commands."
-    zh-CN: "技能是 markdown 能力包，扩展是注册工具/命令的 TypeScript 模块。"
+    extension:
+      en: "Extensions are TypeScript modules that register tools and commands."
+      zh-CN: "扩展是注册工具、命令的 TypeScript 模块。"
+    skill:
+      en: "Skills are markdown capability packs. ~/.agents/skills is shared with the other coding agents."
+      zh-CN: "技能是 markdown 能力包。~/.agents/skills 和别的 Coding Agent 共用。"
   summary:
-    en: "%{usable} usable skills and extensions installed. Check the ones an agent needs when creating it; conversations load only the checked ones."
-    zh-CN: "已装 %{usable} 个可用的技能和扩展。创建智能体时勾选需要的，对话只加载勾选项。"
+    extension:
+      en: "%{usable} usable extensions installed. Agents load only the ones checked for them."
+      zh-CN: "已装 %{usable} 个可用的扩展。智能体只加载给它勾上的。"
+    skill:
+      en: "%{usable} usable skills installed. Agents load only the ones checked for them."
+      zh-CN: "已装 %{usable} 个可用的技能。智能体只加载给它勾上的。"
   summary_broken:
-    en: "%{usable} usable skills and extensions installed, plus %{broken} broken entries (usually dead symlinks) that should be deleted."
-    zh-CN: "已装 %{usable} 个可用的技能和扩展，另有 %{broken} 个失效条目（多半是断掉的软链），建议删掉。"
+    extension:
+      en: "%{usable} usable extensions installed, plus %{broken} broken entries (usually dead symlinks) that should be deleted."
+      zh-CN: "已装 %{usable} 个可用的扩展，另有 %{broken} 个失效条目（多半是断掉的软链），建议删掉。"
+    skill:
+      en: "%{usable} usable skills installed, plus %{broken} broken entries (usually dead symlinks) that should be deleted."
+      zh-CN: "已装 %{usable} 个可用的技能，另有 %{broken} 个失效条目（多半是断掉的软链），建议删掉。"
   unused:
     en: "No agent uses it yet."
     zh-CN: "暂时没有智能体勾选它。"
@@ -659,6 +669,9 @@ providers:
     en: "Show Common Only"
     zh-CN: "只看常用"
 tab:
+  extensions:
+    en: "Extensions"
+    zh-CN: "扩展"
   mcp:
     en: "MCP"
     zh-CN: "MCP"
@@ -668,9 +681,22 @@ tab:
   models:
     en: "Models"
     zh-CN: "模型"
-  plugins:
-    en: "Skills & Extensions"
-    zh-CN: "技能和扩展"
+  skills:
+    en: "Skills"
+    zh-CN: "技能"
 title:
   en: "Capabilities"
   zh-CN: "能力库"
+uses:
+  button:
+    en: "Use in Agents"
+    zh-CN: "给智能体用"
+  failed:
+    en: "Couldn't change the agent: %{error}"
+    zh-CN: "没改成智能体的配置：%{error}"
+  no_agents:
+    en: "No agents on this machine yet."
+    zh-CN: "这台机器上还没有智能体。"
+  title:
+    en: "Which agents use it"
+    zh-CN: "给哪些智能体用"

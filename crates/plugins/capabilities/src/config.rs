@@ -91,6 +91,8 @@ impl CapabilitiesPage {
         self.pi_plugin_pending_delete = None;
         self.pi_plugin_error = None;
         self.remote_desktop = false;
+        self.agent_edit_pending = false;
+        self.agent_edit_error = None;
         self.refresh_pi_library(cx);
         self.refresh_remote_desktop(cx);
         self.load_tab(cx);
