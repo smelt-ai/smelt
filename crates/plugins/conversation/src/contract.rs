@@ -23,6 +23,32 @@ pub(crate) const INSERT_TEXT: Command<ConversationText, ()> =
 pub(crate) const AT_LATEST_CHANGED: Event<AtLatest> =
     Event::new("smelt.conversation/at-latest-changed");
 
+/// 消息上的右键菜单。别的插件往这个 id 登记项（`smelt_plugin_api::register_context_menu_items`），
+/// 排在自带的「复制」「分叉」后面；点了执行的命令参数里并进 [`MessageMenuContext`] 的字段。
+pub(crate) const MESSAGE_MENU: &str = "smelt.conversation/message";
+
+/// [`MESSAGE_MENU`] 的上下文：右键的是哪段对话里的哪条消息。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MessageMenuContext {
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    /// 守护会话 id。
+    pub session_id: String,
+    pub role: MessageRole,
+    /// 整条消息的文字（Markdown 原文）。
+    pub text: String,
+    /// 右键时在对话里选中的文字；没选中是 `None`。
+    pub selection: Option<String>,
+}
+
+/// 消息是谁说的。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MessageRole {
+    User,
+    Assistant,
+}
+
 /// [`VIEW`] 的参数。
 ///
 /// 建实例就是有人要看它：工作区目录里的对话按目录里那条接上（守护里还活着就是廉价的
@@ -147,5 +173,27 @@ mod tests {
             payload: serde_json::to_value(&payload).unwrap(),
         };
         assert_eq!(AT_LATEST_CHANGED.parse(&event), Some(payload));
+    }
+
+    /// 菜单上下文是 JS 插件照着读的线上形状。
+    #[test]
+    fn message_menu_context_shape() {
+        let context = MessageMenuContext {
+            machine: RuntimeKey::Local,
+            session_id: "s".into(),
+            role: MessageRole::Assistant,
+            text: "全文".into(),
+            selection: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&context).unwrap(),
+            serde_json::json!({
+                "machine": null,
+                "session_id": "s",
+                "role": "assistant",
+                "text": "全文",
+                "selection": null,
+            })
+        );
     }
 }

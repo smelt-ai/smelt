@@ -9,6 +9,7 @@
 
 mod contract;
 mod instance;
+mod menu;
 mod settings_page;
 mod store;
 mod terminal;
@@ -74,7 +75,7 @@ mod tests {
 
     #[test]
     fn contract_ids_are_under_this_owner() {
-        for id in [contract::VIEW, contract::SEND_TEXT.id()] {
+        for id in [contract::VIEW, contract::SEND_TEXT.id(), contract::MENU] {
             assert_eq!(
                 id.split_once('/').map(|(owner, _)| owner),
                 Some(OWNER),

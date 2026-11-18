@@ -15,7 +15,7 @@ fn owner_part(name: &'static str, owner: &gpui::SharedString, part: usize) -> gp
     gpui::ElementId::from((gpui::ElementId::named_usize(name, part), owner.clone()))
 }
 
-/// 用户气泡外面包一层右键菜单：复制选中的文字，能分叉时再给分叉。
+/// 用户气泡外面包一层右键菜单（[`message_menu`]）：能分叉时给分叉。
 ///
 /// 限宽写在包的这层上：它才是行里的弹性项，气泡铺满它。宽度写在气泡上的话，百分比
 /// 会按这层算，而这层的宽又是按气泡量出来的。最小宽度给 markdown 列表留位置：
@@ -25,21 +25,19 @@ fn user_bubble_with_menu(
     id: impl Into<gpui::ElementId>,
     bubble: gpui::Stateful<gpui::Div>,
     view: Entity<ConversationView>,
-    fork: Option<(usize, SharedString)>,
+    index: usize,
+    fork: Option<SharedString>,
 ) -> MenuTrigger {
     MenuTrigger::context(id, bubble, move |window, cx| {
-        let menu = selected_text_menu(window, cx);
-        let Some((index, label)) = fork.clone() else {
-            return menu;
-        };
-        let view = view.clone();
-        menu.separator().item(
-            MenuItem::new(label.clone())
+        let fork = fork.clone().map(|label| {
+            let view = view.clone();
+            MenuItem::new(label)
                 .icon(IconName::GitBranch)
                 .on_click(move |_event, _window, cx| {
                     view.update(cx, |this, cx| this.fork_from_user_message(index, cx));
-                }),
-        )
+                })
+        });
+        message_menu(&view, index, fork, window, cx)
     })
     .max_w(gpui::relative(0.72))
     .min_w(gpui::px(160.))
@@ -432,7 +430,6 @@ impl ConversationView {
                         let can_edit = this.supports_rewind && !this.has_active_turn();
                         let show_edit = latest_user_message_index == Some(i) && can_edit;
                         let show_fork_edit = latest_user_message_index != Some(i) && can_edit;
-                        let fork_index = show_fork_edit.then_some(i);
                         div().flex().items_center()
                             .w_full()
                             .justify_end()
@@ -466,7 +463,8 @@ impl ConversationView {
                                             cx,
                                         )),
                                     menu_view,
-                                    fork_index.map(|index| (index, t!("fork.here").into())),
+                                    i,
+                                    show_fork_edit.then(|| t!("fork.here").into()),
                                 ),
                             ))
                             .into_any_element()
@@ -499,7 +497,6 @@ impl ConversationView {
                                 ));
                             }
                         }
-                        let fork_index = show_fork_edit.then_some(i);
                         div().flex().items_center()
                             .w_full()
                             .justify_end()
@@ -526,8 +523,8 @@ impl ConversationView {
                                     user_message_bubble(("acp-user-images-message", i))
                                         .child(content.child(image_strip)),
                                     menu_view,
-                                    fork_index
-                                        .map(|index| (index, t!("fork.here_images").into())),
+                                    i,
+                                    show_fork_edit.then(|| t!("fork.here_images").into()),
                                 ),
                             ))
                             .into_any_element()
@@ -616,10 +613,11 @@ impl ConversationView {
                                         ),
                                 )
                             });
+                        let menu_view = view.clone();
                         MenuTrigger::context(
                             ("acp-assistant-message-menu", i),
                             answer,
-                            selected_text_menu,
+                            move |window, cx| message_menu(&menu_view, i, None, window, cx),
                         )
                         .w_full()
                         .min_w_0()
@@ -699,10 +697,11 @@ impl ConversationView {
                                     )),
                             );
                         }
+                        let menu_view = view.clone();
                         MenuTrigger::context(
                             ("acp-completion-message-menu", i),
                             answer,
-                            selected_text_menu,
+                            move |window, cx| message_menu(&menu_view, i, None, window, cx),
                         )
                         .w_full()
                         .min_w_0()

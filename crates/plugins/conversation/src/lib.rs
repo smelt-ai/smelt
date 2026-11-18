@@ -11,6 +11,7 @@ mod acp_client;
 mod agents;
 mod contract;
 mod instance;
+mod menu;
 mod sessions;
 mod view;
 
@@ -71,6 +72,7 @@ mod tests {
             contract::VIEW,
             contract::INSERT_TEXT.id(),
             contract::AT_LATEST_CHANGED.id(),
+            contract::MESSAGE_MENU,
         ] {
             assert_eq!(
                 id.split_once('/').map(|(owner, _)| owner),

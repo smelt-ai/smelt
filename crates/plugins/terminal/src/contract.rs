@@ -19,6 +19,22 @@ pub(crate) const VIEW: &str = "smelt.terminal/terminal";
 /// 把文字打进那格终端的输入，等于粘贴，不替用户回车。那格终端没有开着是失败。
 pub(crate) const SEND_TEXT: Command<TerminalText, ()> = Command::new("smelt.terminal/send-text");
 
+/// 终端的右键菜单。别的插件往这个 id 登记项（`smelt_plugin_api::register_context_menu_items`），
+/// 排在自带的「复制」「粘贴」后面；点了执行的命令参数里并进 [`TerminalMenuContext`] 的字段。
+/// 应用开了鼠标上报（全屏 TUI）时右键交给应用，按住 Shift 才出菜单。
+pub(crate) const MENU: &str = "smelt.terminal/menu";
+
+/// [`MENU`] 的上下文：右键的是哪格终端。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TerminalMenuContext {
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    /// 那格终端的守护会话 id。
+    pub session_id: String,
+    /// 右键时选中的文字；没选中是 `None`。
+    pub selection: Option<String>,
+}
+
 /// [`VIEW`] 的参数。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TerminalArgs {
@@ -57,5 +73,19 @@ mod tests {
                 .unwrap();
         assert_eq!(args.machine, RuntimeKey::Remote("box".into()));
         assert_eq!((args.cwd, args.launch), (None, None));
+    }
+
+    /// 菜单上下文是 JS 插件照着读的线上形状。
+    #[test]
+    fn menu_context_shape() {
+        let context = TerminalMenuContext {
+            machine: RuntimeKey::Remote("box".into()),
+            session_id: "t".into(),
+            selection: Some("ls".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&context).unwrap(),
+            serde_json::json!({ "machine": "box", "session_id": "t", "selection": "ls" })
+        );
     }
 }

@@ -13,6 +13,7 @@ use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::daemon_state::RuntimePresence;
 use smelt_plugin_api::ui::TextInput;
+use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smol::Timer;
 
 use crate::terminal::{self, Terminal};
@@ -499,6 +500,43 @@ impl TerminalView {
             self.recover_input_transport(cx);
         }
         cx.notify();
+    }
+
+    /// 右键菜单：复制选中的文字、粘贴，再是别的插件往 [`crate::contract::MENU`] 登记的项。
+    /// 右键时才建，不在 render 里。
+    fn menu(&self, view: &Entity<Self>, cx: &App) -> Menu {
+        let selection = self
+            .terminal
+            .selection_text()
+            .filter(|text| !text.is_empty());
+        let copy = MenuItem::new(t!("action.copy")).disabled(selection.is_none());
+        let copy = match selection.clone() {
+            Some(text) => copy.on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            }),
+            None => copy,
+        };
+        let paste = MenuItem::new(t!("action.paste")).on_click({
+            let view = view.downgrade();
+            move |_, _, cx| {
+                let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+                    return;
+                };
+                view.update(cx, |this, cx| this.paste_text(&text, cx)).ok();
+            }
+        });
+        let context = crate::contract::TerminalMenuContext {
+            machine: self.machine.clone(),
+            session_id: self.session_id.clone(),
+            selection,
+        };
+        crate::menu::with_plugin_items(
+            Menu::new().item(copy).item(paste),
+            crate::contract::MENU,
+            &self.machine,
+            &context,
+            cx,
+        )
     }
 
     fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -1091,8 +1129,9 @@ impl Render for TerminalView {
         // 从访达拖文件进来 = 把引好的路径打进去，跟系统终端一样。只认本机终端：别的机器上
         // 本机路径没有意义。默认底是透明的，悬停时整块铺选区色，表示「放这里」。
         let accepts_drop = self.machine == RuntimeKey::Local;
+        let menu_view = cx.entity().downgrade();
 
-        div()
+        let root = div()
             .relative()
             .track_focus(&self.focus_handle)
             // 见 TerminalTab/TerminalBackTab 上的注释：让 Tab/Shift-Tab 在终端聚焦时
@@ -1396,8 +1435,8 @@ impl Render for TerminalView {
                     }
                 }),
             )
-            // 右键：TUI 开了鼠标上报时转发给应用（Shift 旁路 → 系统菜单）；
-            // 否则不转发，交给 context_menu（新建任务等）。
+            // 右键：TUI 开了鼠标上报时转发给应用，不出菜单；按住 Shift 旁路，出终端自己的
+            // 右键菜单（见 `menu`）。
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
@@ -1409,6 +1448,7 @@ impl Render for TerminalView {
                         && let Some(cell) = this.cell_in_grid(ev.position, window)
                     {
                         this.terminal.mouse_button(2, true, cell.0, cell.1);
+                        cx.stop_propagation();
                     }
                 }),
             )
@@ -1647,7 +1687,14 @@ impl Render for TerminalView {
                         .text_color(rgb(smelt_plugin_api::ui::ui_theme::muted()))
                         .child(t!("reconnecting", runtime = runtime).into_owned()),
                 )
-            })
+            });
+        MenuTrigger::context("terminal-menu", root, move |_window, cx| {
+            match menu_view.upgrade() {
+                Some(view) => view.read(cx).menu(&view, cx),
+                None => Menu::new(),
+            }
+        })
+        .size_full()
     }
 }
 

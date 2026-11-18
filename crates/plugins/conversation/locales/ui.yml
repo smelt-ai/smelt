@@ -269,6 +269,9 @@ error:
   bad_args:
     en: "Invalid conversation arguments: %{error}"
     zh-CN: "对话的参数不对：%{error}"
+  command_failed:
+    en: "“%{command}” didn't work: %{error}"
+    zh-CN: "「%{command}」没做成：%{error}"
   connect:
     en: "Can't reach smeltd: %{error}"
     zh-CN: "连不上 smeltd：%{error}"
@@ -569,6 +572,10 @@ notice:
   dismiss:
     en: "Dismiss"
     zh-CN: "关闭提示"
+notify:
+  error:
+    en: Error
+    zh-CN: 错误
 outcome:
   failed:
     en: "This turn didn't finish"

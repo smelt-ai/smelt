@@ -1351,16 +1351,38 @@ fn conversation_input_for_submit(
         })
 }
 
-/// 消息上的右键菜单：复制选中的文字。没选中时复制是灰的，不另起一句说明。
-fn selected_text_menu(window: &mut Window, cx: &mut App) -> Menu {
-    let body = task_body_from_selection(gpui_base::TextSelection::selected_text(window, cx));
-    let copy = MenuItem::new(t!("action.copy")).disabled(body.is_none());
-    Menu::new().item(match body {
+/// 第 `index` 条消息上的右键菜单：复制选中的文字，`extra`（如分叉），再是别的插件往
+/// [`crate::contract::MESSAGE_MENU`] 登记的项。没选中时复制是灰的，不另起一句说明。
+///
+/// 右键时才建，消息原文这时从视图里读，render 里不为它克隆。
+fn message_menu(
+    view: &Entity<ConversationView>,
+    index: usize,
+    extra: Option<MenuItem>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Menu {
+    let selection = task_body_from_selection(gpui_base::TextSelection::selected_text(window, cx));
+    let copy = MenuItem::new(t!("action.copy")).disabled(selection.is_none());
+    let mut menu = Menu::new().item(match selection.clone() {
         Some(body) => copy.on_click(move |_event, _window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(body.clone()));
         }),
         None => copy,
-    })
+    });
+    if let Some(extra) = extra {
+        menu = menu.separator().item(extra);
+    }
+    match view.read(cx).message_menu_context(index, selection) {
+        Some(context) => crate::menu::with_plugin_items(
+            menu,
+            crate::contract::MESSAGE_MENU,
+            &context.machine,
+            &context,
+            cx,
+        ),
+        None => menu,
+    }
 }
 
 /// 冷启动占位视图的初始状态：agent 身份、启动规格与恢复来源。把 `placeholder`
@@ -3456,6 +3478,36 @@ impl ConversationView {
             cut,
             prompt,
         });
+    }
+
+    /// 第 `index` 条消息给别的插件的菜单项的上下文，见 [`crate::contract::MESSAGE_MENU`]。
+    /// 不是消息（工具调用、思考、分隔线）是 `None`；完成卡片算智能体说的，文字是它的总结。
+    fn message_menu_context(
+        &self,
+        index: usize,
+        selection: Option<String>,
+    ) -> Option<crate::contract::MessageMenuContext> {
+        use crate::contract::MessageRole;
+        let (role, text) = match self.entries.get(index)? {
+            AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } => {
+                (MessageRole::User, text.clone())
+            }
+            AcpEntry::Assistant {
+                text,
+                thought: false,
+            } => (MessageRole::Assistant, text.clone()),
+            AcpEntry::ToolCall { output, .. } => {
+                (MessageRole::Assistant, completion_summary_text(output))
+            }
+            _ => return None,
+        };
+        Some(crate::contract::MessageMenuContext {
+            machine: self.runtime.key().clone(),
+            session_id: self.sid.clone(),
+            role,
+            text,
+            selection,
+        })
     }
 
     /// provider 侧会话 id（ACP session/new 返回，可用于下次 session/load 恢复）。
