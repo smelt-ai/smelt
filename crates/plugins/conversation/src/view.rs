@@ -1640,7 +1640,8 @@ pub struct ConversationView {
     expanded_thoughts: std::collections::HashSet<usize>,
     /// 手动展开的一段过程（key = 该段第一条 entry 的索引）。在跑的段也默认收成一行计数，
     /// 展开后才是逐条工具。
-    expanded_process_groups: std::collections::HashSet<usize>,
+    /// 点开的段，键是 [`ProcessGroupInfo::expansion_key`]。
+    expanded_process_groups: std::collections::HashSet<(usize, bool)>,
     /// 手动展开的已结束回合（key = 折叠范围第一条 entry 的索引）。默认只剩一行工作摘要，
     /// 展开后露出过程说明和每段的计数行。
     expanded_turn_folds: std::collections::HashSet<usize>,
@@ -3001,7 +3002,7 @@ impl ConversationView {
         self.expanded_process_groups = self
             .expanded_process_groups
             .drain()
-            .map(|entry_ix| entry_ix + page_len)
+            .map(|(entry_ix, active)| (entry_ix + page_len, active))
             .collect();
         self.expanded_turn_folds = self
             .expanded_turn_folds
@@ -4582,7 +4583,7 @@ impl ConversationView {
         self.collapsed_tool_cards.retain(|id| live_ids.contains(id));
         self.expanded_thoughts.retain(|ix| *ix < self.entries.len());
         self.expanded_process_groups
-            .retain(|ix| *ix < self.entries.len());
+            .retain(|(ix, _)| *ix < self.entries.len());
         self.expanded_turn_folds
             .retain(|ix| *ix < self.entries.len());
         self.expanded_edit_chips
@@ -6905,6 +6906,14 @@ struct ProcessGroupInfo {
     tally: ToolTally,
 }
 
+impl ProcessGroupInfo {
+    /// 展开状态认段，也认段处在哪个阶段：在跑时点开看的段，回合跑完就回到收着，
+    /// 和别的跑完的回合一样只露一行。
+    fn expansion_key(self) -> (usize, bool) {
+        (self.first, self.active)
+    }
+}
+
 /// 跑完的一轮：提问和回答之间的过程（过程说明、思考、工具）收成一行摘要。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TurnFoldInfo {
@@ -7290,36 +7299,6 @@ fn fill_conversation_layout(
         } else {
             None
         };
-        // 跑完的一轮：回答之前的过程整段收成一行摘要。只有思考时不收，思考本来就是一行；
-        // 后台子智能体还在跑时也不收，摘要说的是「做完了」，收起来就看不见它还在跑。
-        let turn_fold = final_ix.and_then(|final_ix| {
-            let agent_running = entries[start..final_ix].iter().any(|entry| {
-                matches!(
-                    entry,
-                    AcpEntry::ToolCall { kind, status, children, .. }
-                        if smelt_plugin_api::model::acp_chat::is_active_agent_tool(
-                            *kind, *status, children,
-                        )
-                )
-            });
-            (!agent_running && (start..final_ix).any(|ix| folds_into_turn_summary(&entries[ix])))
-                .then(|| {
-                    let first = (start..final_ix)
-                        .find(|ix| !is_empty_assistant_body(&entries[*ix]))
-                        .unwrap_or(start);
-                    TurnFoldInfo {
-                        first,
-                        end: final_ix,
-                        elapsed_ms: turn_elapsed_ms,
-                        tally: tally_tools(entries, start..final_ix),
-                    }
-                })
-        });
-        if let Some(fold) = turn_fold {
-            for item in &mut layout[fold.first..fold.end] {
-                item.turn_fold = Some(fold);
-            }
-        }
         // 正文和独立事件保持原位可见，不能被前后的工具收进同一个折叠组。
         // 空正文不可见，和手机端一样不打断相邻的过程。
         let mut process_groups: Vec<Vec<usize>> = Vec::new();
@@ -7369,7 +7348,61 @@ fn fill_conversation_layout(
                         .last()
                         .is_none_or(|group| !group.contains(&ix))
             });
-        for (group_index, process_indices) in process_groups.into_iter().enumerate() {
+        // 跑完的一轮：回答之前的过程整段收成一行摘要。只有思考时不收，思考本来就是一行；
+        // 后台子智能体还在跑时也不收，摘要说的是「做完了」，收起来就看不见它还在跑。
+        // 回答之前只有一段、段外没有别的可见行时也不收：这一段自己就是那一行，再套一层
+        // 摘要，展开后就是两行同样的计数。回合耗时改挂在这一段上。
+        let mut sole_segment = None;
+        let turn_fold = final_ix.and_then(|final_ix| {
+            let agent_running = entries[start..final_ix].iter().any(|entry| {
+                matches!(
+                    entry,
+                    AcpEntry::ToolCall { kind, status, children, .. }
+                        if smelt_plugin_api::model::acp_chat::is_active_agent_tool(
+                            *kind, *status, children,
+                        )
+                )
+            });
+            if agent_running || !(start..final_ix).any(|ix| folds_into_turn_summary(&entries[ix])) {
+                return None;
+            }
+            let mut before_answer = process_groups.iter().filter(|group| group[0] < final_ix);
+            if let (Some(group), None) = (before_answer.next(), before_answer.next()) {
+                let span = group[0]..=group[group.len() - 1];
+                if (start..final_ix)
+                    .filter(|ix| !is_empty_assistant_body(&entries[*ix]))
+                    .all(|ix| span.contains(&ix))
+                {
+                    sole_segment = Some(group[0]);
+                    return None;
+                }
+            }
+            let first = (start..final_ix)
+                .find(|ix| !is_empty_assistant_body(&entries[*ix]))
+                .unwrap_or(start);
+            Some(TurnFoldInfo {
+                first,
+                end: final_ix,
+                elapsed_ms: turn_elapsed_ms,
+                tally: tally_tools(entries, start..final_ix),
+            })
+        });
+        if let Some(fold) = turn_fold {
+            for item in &mut layout[fold.first..fold.end] {
+                item.turn_fold = Some(fold);
+            }
+        }
+        // 回合耗时挂在哪一段：回合摘要有了就不挂；独占一轮的那段；否则最后一段。
+        let elapsed_owner = if turn_fold.is_some() {
+            None
+        } else if sole_segment.is_some() {
+            sole_segment
+        } else if trailing_standalone_thought {
+            None
+        } else {
+            process_groups.last().map(|group| group[0])
+        };
+        for process_indices in process_groups {
             let first = process_indices[0];
             let tools = process_indices
                 .iter()
@@ -7382,9 +7415,7 @@ fn fill_conversation_layout(
             // 有工具就收成一段，默认只露一行计数，在跑的也一样；
             // 没有工具就不要包组，寒暄的思考走进展行，把原文摘要亮出来。
             if tools > 0 {
-                let show_elapsed = group_index + 1 == group_count
-                    && !trailing_standalone_thought
-                    && turn_fold.is_none();
+                let show_elapsed = elapsed_owner == Some(first);
                 let elapsed_ms = turn_elapsed_ms.filter(|_| show_elapsed);
                 let group = ProcessGroupInfo {
                     first,

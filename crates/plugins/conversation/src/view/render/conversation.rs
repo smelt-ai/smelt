@@ -309,8 +309,10 @@ impl ConversationView {
                 // 展开的回合摘要挂在折叠范围的第一行上面。
                 let fold_header_here = turn_fold.filter(|fold| fold_expanded && fold.first == i);
                 let process_group = presentation.process_group;
-                let process_expanded = process_group
-                    .is_some_and(|group| this.expanded_process_groups.contains(&group.first));
+                let process_expanded = process_group.is_some_and(|group| {
+                    this.expanded_process_groups
+                        .contains(&group.expansion_key())
+                });
                 let collapsed_header = match (turn_fold, process_group) {
                     (Some(fold), _) if !fold_expanded => {
                         Some((fold.first, None))
@@ -1478,7 +1480,11 @@ impl ConversationView {
                 layout
                     .get(ix)
                     .and_then(|item| item.process_group)
-                    .is_some_and(|group| !self.expanded_process_groups.contains(&group.first))
+                    .is_some_and(|group| {
+                        !self
+                            .expanded_process_groups
+                            .contains(&group.expansion_key())
+                    })
             },
         );
         let lead = match now_state.activity {
@@ -1770,7 +1776,7 @@ impl ConversationView {
                 });
             let tool_id = id.clone();
             let has_content = tool_output_has_content(output) || !children.is_empty();
-            let group_key = group.first;
+            let group_key = group.expansion_key();
             let group_end = group.end;
             rows.push(
                 Button::new(owner_id("acp-segment-agent", &owner))
@@ -1787,7 +1793,7 @@ impl ConversationView {
                             this.expanded_tool_cards.insert(tool_id.clone());
                         }
                         this.list_state
-                            .remeasure_items(group_key..group_end.min(this.entries.len()));
+                            .remeasure_items(group_key.0..group_end.min(this.entries.len()));
                         cx.notify();
                     }))
                     .into_any_element(),
@@ -1804,7 +1810,7 @@ impl ConversationView {
         muted: gpui::Hsla,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
-        let group_key = group.first;
+        let group_key = group.expansion_key();
         let group_end = group.end;
         summary_row(
             ("acp-process-group", group.first),
@@ -1819,7 +1825,7 @@ impl ConversationView {
                 this.expanded_process_groups.insert(group_key);
             }
             this.list_state
-                .remeasure_items(group_key..group_end.min(this.entries.len()));
+                .remeasure_items(group_key.0..group_end.min(this.entries.len()));
             cx.notify();
         }))
         .into_any_element()

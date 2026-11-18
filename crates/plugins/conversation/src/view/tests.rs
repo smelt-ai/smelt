@@ -49,6 +49,9 @@ use smelt_plugin_api::model::agent_kind::{ConversationAgentKind, ConversationLau
 use smelt_plugin_api::model::daemon_state::DaemonPhase;
 use smelt_plugin_api::ui::ui_theme;
 
+#[cfg(target_os = "macos")]
+mod snapshots;
+
 #[test]
 fn cleanshot_external_png_is_treated_as_an_image_attachment() {
     let path = std::path::PathBuf::from(
@@ -1749,6 +1752,10 @@ fn completed_turn_folds_its_process_into_one_summary() {
     let entries = vec![
         AcpEntry::User("看看今天的新闻".into()),
         completed_tool("s1", ToolKind::Search, "today news"),
+        AcpEntry::Assistant {
+            text: "再看看国际和国内".into(),
+            thought: false,
+        },
         completed_tool("s2", ToolKind::Search, "international"),
         completed_tool("s3", ToolKind::Search, "china"),
         AcpEntry::Assistant {
@@ -1763,12 +1770,12 @@ fn completed_turn_folds_its_process_into_one_summary() {
     }];
     let layout = build_conversation_layout_with_timings(&entries, false, 0, &timings);
     let fold = layout[1].turn_fold.expect("跑完的一轮收成摘要");
-    assert_eq!((fold.first, fold.end), (1, 4));
-    for ix in 1..4 {
+    assert_eq!((fold.first, fold.end), (1, 5));
+    for ix in 1..5 {
         assert_eq!(layout[ix].turn_fold, Some(fold));
     }
     assert!(layout[0].turn_fold.is_none());
-    assert!(layout[4].turn_fold.is_none(), "回答留在摘要外面");
+    assert!(layout[5].turn_fold.is_none(), "回答留在摘要外面");
     assert_eq!(fold.elapsed_ms, Some(4_000));
     assert_eq!(
         super::turn_fold_label(fold),
@@ -1785,6 +1792,37 @@ fn completed_turn_folds_its_process_into_one_summary() {
         live_group.elapsed_ms, None,
         "进行中的耗时只在末尾的「现在」里"
     );
+}
+
+/// 回答之前只有一段、段外没有别的可见行：这一段自己就是那一行，不再套一层回合摘要，
+/// 否则展开摘要后紧跟着又是一行同样的计数。回合耗时改挂在这一段上。
+#[test]
+fn a_turn_with_one_segment_is_not_wrapped_in_a_summary() {
+    let entries = vec![
+        AcpEntry::User("看看今天的新闻".into()),
+        thought("先搜一下"),
+        completed_tool("s1", ToolKind::Search, "today news"),
+        completed_tool("s2", ToolKind::Search, "international"),
+        AcpEntry::Assistant {
+            text: "今天是星期二".into(),
+            thought: false,
+        },
+    ];
+    let timings = [TurnTiming {
+        user_index: 0,
+        started_at_ms: 1_000,
+        ended_at_ms: Some(5_000),
+    }];
+    let layout = build_conversation_layout_with_timings(&entries, false, 0, &timings);
+    assert!(layout.iter().all(|row| row.turn_fold.is_none()));
+    let group = layout[1].process_group.expect("思考和工具是一段");
+    assert_eq!((group.first, group.end), (1, 4));
+    assert!(group.show_elapsed);
+    assert_eq!(
+        process_group_header_label(group, false),
+        "Worked for 4s · Searched 2 times"
+    );
+    assert!(layout[4].final_answer);
 }
 
 #[test]
@@ -3591,7 +3629,7 @@ fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpu
         );
         view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
         view.expanded_turn_folds.insert(1);
-        view.expanded_process_groups.insert(2);
+        view.expanded_process_groups.insert((2, false));
         view
     });
     let cx: &mut VisualTestContext = cx;
@@ -4228,10 +4266,6 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
         .iter()
         .find_map(|entry| entry.process_group.map(|group| group.first))
         .expect("tool output belongs to a process group");
-    let fold_ix = layout
-        .iter()
-        .find_map(|entry| entry.turn_fold.map(|fold| fold.first))
-        .expect("finished turn folds its process");
 
     cx.update(init_ui);
     let (_view, cx) = cx.add_window_view(move |_window, cx| {
@@ -4250,8 +4284,7 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
             },
         );
         view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
-        view.expanded_turn_folds.insert(fold_ix);
-        view.expanded_process_groups.insert(group_ix);
+        view.expanded_process_groups.insert((group_ix, false));
         view.expanded_tool_cards.insert("log-1".into());
         view.expanded_tools.insert("log-1".into());
         view
@@ -4319,7 +4352,7 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
             },
         );
         view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
-        view.expanded_process_groups.insert(group_ix);
+        view.expanded_process_groups.insert((group_ix, false));
         view
     });
     let cx: &mut VisualTestContext = cx;
@@ -4881,7 +4914,7 @@ fn scrolling_back_over_a_collapsed_turn_moves_by_the_wheel_delta(cx: &mut gpui::
     // 用户点开了在跑的这段：工具逐行展开，列表量下的是展开时的高度。
     cx.update(|_window, cx| {
         view.update(cx, |view, cx| {
-            view.expanded_process_groups.insert(1);
+            view.expanded_process_groups.insert((1, true));
             view.list_state.remeasure();
             cx.notify();
         })
@@ -4967,8 +5000,8 @@ fn scrolling_back_over_a_collapsed_turn_moves_by_the_wheel_delta(cx: &mut gpui::
         "第二问要在视口里停留多次比对，实际 {compared} 次"
     );
     assert!(
-        cx.debug_bounds("ACP_TURN_FOLD_1").is_some(),
-        "滚到第一回合，看得到收起后的回合摘要"
+        cx.debug_bounds("ACP_PROCESS_GROUP_1").is_some(),
+        "滚到第一回合，看得到收起后的那一段"
     );
 }
 
@@ -5357,7 +5390,7 @@ fn long_thought_inside_a_process_group_can_be_expanded(cx: &mut gpui::TestAppCon
         );
         view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
         view.expanded_turn_folds.insert(1);
-        view.expanded_process_groups.insert(2);
+        view.expanded_process_groups.insert((2, false));
         view
     });
     let cx: &mut VisualTestContext = cx;
@@ -5617,7 +5650,9 @@ fn a_collapsed_segment_lists_its_subagents(cx: &mut gpui::TestAppContext) {
     draw_settled(cx);
     draw_settled(cx);
     assert!(
-        view.read_with(cx, |view, _| view.expanded_process_groups.contains(&1)),
+        view.read_with(cx, |view, _| view
+            .expanded_process_groups
+            .contains(&(1, true))),
         "点子智能体一行展开这段"
     );
     assert!(
@@ -5670,7 +5705,9 @@ fn clicking_an_edit_chip_opens_its_diff_in_place(cx: &mut gpui::TestAppContext) 
         "点标签记下展开"
     );
     assert!(
-        view.read_with(cx, |view, _| !view.expanded_process_groups.contains(&1)),
+        view.read_with(cx, |view, _| !view
+            .expanded_process_groups
+            .contains(&(1, true))),
         "点标签不展开整段"
     );
     let head_after = view
