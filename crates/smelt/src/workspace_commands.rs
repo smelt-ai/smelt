@@ -129,6 +129,7 @@ fn register_with(
                 palette: def.palette,
                 requires_args: false,
                 args: Some(Vec::new()),
+                cli: false,
                 handler: handler(def),
             })
             .chain(typed)

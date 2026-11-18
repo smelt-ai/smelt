@@ -179,6 +179,7 @@ impl<A: DeserializeOwned + 'static, R: Serialize + 'static> Command<A, R> {
             palette: false,
             requires_args: true,
             args: arg_fields::<A>(),
+            cli: false,
             handler: Rc::new(move |args, window, cx| {
                 match serde_json::from_value::<A>(args.clone()) {
                     Ok(args) => handler(args, window, cx),
@@ -298,7 +299,20 @@ pub struct CommandSpec {
     /// 「不认识参数 …；它认的参数：…」。空表是不带参数。`None` 是没声明，不查；带类型的
     /// 命令（[`Command::spec`]）按参数类型自动填（见 [`arg_fields`]）。
     pub args: Option<Vec<String>>,
+    /// 命令行（`smelt app run`）能调，见 [`CommandSpec::callable_from_cli`]。
+    pub cli: bool,
     pub handler: CommandHandler,
+}
+
+impl CommandSpec {
+    /// 让命令行（`smelt app run`，经运行时转给开着的桌面）也能调这条命令。只开给这样的
+    /// 命令：参数都能写成 JSON（要声明 [`Self::args`]），不用人当场操作界面才有结果（不弹
+    /// 选择框等人选），也不替人往对话、终端里打字或改配对、凭据。智能体会照着 `smelt app
+    /// commands` 列出来的去调。
+    pub fn callable_from_cli(mut self) -> Self {
+        self.cli = true;
+        self
+    }
 }
 
 /// 登记过的一条命令。`group`、`title` 跟着界面语言变，显示时 [`Text::get`]，存着它的不用
@@ -316,6 +330,8 @@ pub struct CommandInfo {
     pub requires_args: bool,
     /// 认的参数字段，见 [`CommandSpec::args`]。
     pub args: Option<Vec<String>>,
+    /// 命令行能调，见 [`CommandSpec::callable_from_cli`]。
+    pub cli: bool,
 }
 
 struct Entry {
@@ -376,6 +392,11 @@ pub fn register_commands(
                 "命令「{id}」要带参数才能执行，不能有快捷键，也不能进命令面板"
             ));
         }
+        if spec.cli && spec.args.is_none() {
+            return Err(format!(
+                "命令「{id}」开给命令行调用，要声明认的参数字段（args，不带参数写空表）"
+            ));
+        }
         if let Err(error) = KeyBindingContextPredicate::parse(&spec.context) {
             return Err(format!(
                 "命令「{id}」的 context「{}」写错了：{error}",
@@ -393,6 +414,7 @@ pub fn register_commands(
                 palette: spec.palette,
                 requires_args: spec.requires_args,
                 args: spec.args,
+                cli: spec.cli,
             },
             handler: spec.handler,
         });
@@ -528,6 +550,7 @@ mod tests {
             palette: true,
             requires_args: false,
             args: None,
+            cli: false,
             handler: Rc::new(|_, _, _| Handled::ok()),
         }
     }
@@ -586,6 +609,8 @@ mod tests {
                     requires_args: true,
                     ..spec("b", None)
                 }],
+                // 开给命令行的要说清认哪些参数。
+                vec![spec("b", None).callable_from_cli()],
             ];
             for bad in bad_sets {
                 assert!(register_commands("trader", "交易", bad, cx).is_err());

@@ -64,6 +64,7 @@ fn command(name: &str, title: api::Text, run: impl Fn(&mut App) + 'static) -> Co
         palette: true,
         requires_args: false,
         args: Some(Vec::new()),
+        cli: false,
         handler: Rc::new(move |_, _, cx| {
             run(cx);
             Handled::ok()

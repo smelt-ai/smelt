@@ -937,6 +937,8 @@ pub(super) fn first_party_event_client(kind: FirstPartyClientKind) -> Authentica
                 CORE_CAPABILITY_CONVERSATION_WAKE,
                 // 外观归桌面端，CLI 发来的外观改动只能交给它。
                 CORE_CAPABILITY_APPEARANCE_CONTROL,
+                // 命令登记在桌面端，`smelt app` 转来的命令只能交给它。
+                smelt_event_protocol::CORE_CAPABILITY_APP_COMMAND,
             ],
         ),
     };

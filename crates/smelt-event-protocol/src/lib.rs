@@ -98,6 +98,9 @@ pub const CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED: &str = "appearance.change_requ
 /// 回执。加在 v7 之后、没有升版本，所以不进核心订阅，只放在单独的一条订阅里（同
 /// [`PiConfigChanged`]），不认识该话题的旧运行时只会拒掉那一条。
 pub const CORE_TOPIC_APPEARANCE_APPLY_REQUESTED: &str = "appearance.apply_requested";
+/// 命令行要列出或执行本机 App 登记的命令，载荷 [`AppCommandRequested`]，桌面用
+/// [`AppCommandReceipt`] 回执。和带回执的外观修改一样单独订阅、不进核心订阅，不升版本。
+pub const CORE_TOPIC_APP_COMMAND_REQUESTED: &str = "app.command_requested";
 /// 终端里的程序用 OSC 9 / 99 / 777 发了一条通知。运行时在 PTY 字节流上扫一次，
 /// 会话已有结构化 hook 事件时不发；没人连着时发生的就丢了，不补。
 pub const CORE_TOPIC_TERMINAL_NOTIFICATION: &str = "terminal.notification";
@@ -125,6 +128,8 @@ pub const CORE_CAPABILITY_AUTOMATION_READ: &str = "automation.read";
 pub const CORE_CAPABILITY_CONVERSATION_WAKE: &str = "conversation.wake";
 /// 接收外观修改请求。只有自己持有外观的桌面端该拿：运行时据此判断有没有人能接。
 pub const CORE_CAPABILITY_APPEARANCE_CONTROL: &str = "appearance.control";
+/// 接收命令行转来的 App 命令（列出、执行）。只有登记着命令的本机桌面该拿。
+pub const CORE_CAPABILITY_APP_COMMAND: &str = "app.command";
 
 pub const CORE_SNAPSHOT_SESSIONS: &str = "core.sessions.v1";
 pub const CORE_SNAPSHOT_WORKSPACE: &str = "core.workspace.v1";
@@ -742,6 +747,41 @@ pub struct AppearanceApplyReceipt {
     pub outcome: AppearanceApplyOutcome,
 }
 
+/// 单播给本机桌面的 App 命令请求（独立订阅）；请求 id 用来关联回执。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AppCommandRequested {
+    pub request_id: String,
+    pub request: AppCommandRequest,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AppCommandRequest {
+    /// 列出开给命令行的命令。
+    List,
+    /// 执行一条开给命令行的命令。
+    Run {
+        command: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AppCommandOutcome {
+    /// 做完了。列出时是命令表，执行时是命令交回的值（没有就是 `null`）。
+    Done { value: serde_json::Value },
+    /// 没做成，`message` 是给人看的原因（桌面按自己的语言说）。
+    Failed { message: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AppCommandReceipt {
+    pub request_id: String,
+    pub outcome: AppCommandOutcome,
+}
+
 pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError> {
     fn descriptor(
         topic: &str,
@@ -802,6 +842,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             CORE_CAPABILITY_APPEARANCE_CONTROL,
             None,
             4 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_APP_COMMAND_REQUESTED,
+            CORE_CAPABILITY_APP_COMMAND,
+            None,
+            64 * 1024,
         )?,
         descriptor(
             CORE_TOPIC_PROJECT_CHANGED,
@@ -1144,6 +1190,7 @@ mod tests {
             (CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, None, 1),
             (CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED, None, 1),
             (CORE_TOPIC_APPEARANCE_APPLY_REQUESTED, None, 1),
+            (CORE_TOPIC_APP_COMMAND_REQUESTED, None, 1),
             (CORE_TOPIC_PROJECT_CHANGED, None, 1),
             (CORE_TOPIC_AGENT_MEMORY_CHANGED, None, 1),
             (CORE_TOPIC_PI_CONFIG_CHANGED, None, 1),
@@ -1210,6 +1257,58 @@ mod tests {
             let encoded = serde_json::to_value(&receipt).unwrap();
             assert_eq!(
                 serde_json::from_value::<AppearanceApplyReceipt>(encoded).unwrap(),
+                receipt
+            );
+        }
+    }
+
+    #[test]
+    fn app_command_requests_and_receipts_round_trip() {
+        let request = AppCommandRequested {
+            request_id: "request-1".into(),
+            request: AppCommandRequest::Run {
+                command: "smelt.app/open-view".into(),
+                args: json!({ "view": "hello/main" }),
+            },
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            encoded,
+            json!({
+                "request_id": "request-1",
+                "request": {
+                    "kind": "run",
+                    "command": "smelt.app/open-view",
+                    "args": { "view": "hello/main" },
+                },
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AppCommandRequested>(encoded).unwrap(),
+            request
+        );
+        // 不带参数的执行读成 `null`。
+        assert_eq!(
+            serde_json::from_value::<AppCommandRequest>(json!({ "kind": "run", "command": "a/b" }))
+                .unwrap(),
+            AppCommandRequest::Run {
+                command: "a/b".into(),
+                args: serde_json::Value::Null,
+            }
+        );
+        for outcome in [
+            AppCommandOutcome::Done { value: json!(true) },
+            AppCommandOutcome::Failed {
+                message: "没有这条命令".into(),
+            },
+        ] {
+            let receipt = AppCommandReceipt {
+                request_id: "request-1".into(),
+                outcome,
+            };
+            let encoded = serde_json::to_value(&receipt).unwrap();
+            assert_eq!(
+                serde_json::from_value::<AppCommandReceipt>(encoded).unwrap(),
                 receipt
             );
         }

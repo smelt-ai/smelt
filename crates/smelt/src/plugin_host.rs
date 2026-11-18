@@ -198,10 +198,13 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
     let pages = workspace.clone();
     let shown = workspace.clone();
     vec![
-        api::SHOW_MAIN_WINDOW.spec(
-            api::text!("command.show_main_window"),
-            move |_, window, cx| in_main_window(window, &shown, cx, |_, _, _| ()),
-        ),
+        // 开窗口、开视图、开页面只改人眼前看到的，开给命令行：智能体写完插件能把它亮出来。
+        api::SHOW_MAIN_WINDOW
+            .spec(
+                api::text!("command.show_main_window"),
+                move |_, window, cx| in_main_window(window, &shown, cx, |_, _, _| ()),
+            )
+            .callable_from_cli(),
         api::QUIT_NOW.spec(api::text!("command.quit_now"), |_, _, cx| {
             crate::request_app_quit(cx);
             Ok(())
@@ -278,26 +281,30 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             api::set_view_badge(&args.view, args.label.map(Into::into), cx);
             Ok(())
         }),
-        api::OPEN_VIEW.spec(api::text!("command.open_view"), move |args, window, cx| {
-            let window = main_window(window)?;
-            update_workspace(&views, cx, |workspace, cx| {
-                if api::view(&args.view, cx).is_some_and(|view| view.instances) {
-                    return workspace
-                        .open_instance(&args.view, &args.args, window, cx)
-                        .map(|()| true);
-                }
-                Ok(workspace.open_view(&args.view, args.args, window, cx))
+        api::OPEN_VIEW
+            .spec(api::text!("command.open_view"), move |args, window, cx| {
+                let window = main_window(window)?;
+                update_workspace(&views, cx, |workspace, cx| {
+                    if api::view(&args.view, cx).is_some_and(|view| view.instances) {
+                        return workspace
+                            .open_instance(&args.view, &args.args, window, cx)
+                            .map(|()| true);
+                    }
+                    Ok(workspace.open_view(&args.view, args.args, window, cx))
+                })
             })
-        }),
-        api::OPEN_PAGE.spec(api::text!("command.open_page"), move |args, window, cx| {
-            let window = main_window(window)?;
-            update_workspace(&pages, cx, |workspace, cx| {
-                if api::page(&args.page, cx).is_none() {
-                    return Ok(false);
-                }
-                Ok(workspace.navigate(Some(args.page), window, cx))
+            .callable_from_cli(),
+        api::OPEN_PAGE
+            .spec(api::text!("command.open_page"), move |args, window, cx| {
+                let window = main_window(window)?;
+                update_workspace(&pages, cx, |workspace, cx| {
+                    if api::page(&args.page, cx).is_none() {
+                        return Ok(false);
+                    }
+                    Ok(workspace.navigate(Some(args.page), window, cx))
+                })
             })
-        }),
+            .callable_from_cli(),
         // 远程机器的连接表归宿主（它据此拨号、订阅），插件经这几条命令改，见
         // `smelt_plugin_api::connections`。
         api::ADD_MACHINE.spec_async(api::text!("command.add_machine"), |args, _, cx| {

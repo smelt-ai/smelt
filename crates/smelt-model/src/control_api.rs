@@ -1077,6 +1077,43 @@ pi_calls! {
     /// 一场 Pi 会话会加载哪些技能。
     SessionLoadedSkills => SessionLoadedSkills(crate::agent_definition_store::LoadedSkillsParams)
         -> crate::agent_definition_store::LoadedSkillsResult;
+    /// 本机开着的 Smelt App 里开给命令行调用的命令（`smelt app commands`）。运行时转给
+    /// App，只收本机调用。
+    AppCommandList => AppCommandList(EmptyParams) -> AppCommandListResult;
+    /// 在本机开着的 Smelt App 里执行一条开给命令行的命令，等它做完（`smelt app run`）。
+    AppCommandRun => AppCommandRun(AppCommandRunParams) -> AppCommandRunResult;
+}
+
+/// 一条开给命令行调用的 App 命令。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppCommandInfo {
+    /// `<来源>/<名字>`。
+    pub id: String,
+    /// 给人看的名字，按 App 当前的界面语言。
+    pub title: String,
+    /// 来源给人看的名字。
+    pub group: String,
+    /// 认的参数字段（参数对象顶层的键），空表是不带参数。
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppCommandListResult {
+    pub commands: Vec<AppCommandInfo>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppCommandRunParams {
+    pub command: String,
+    /// 参数对象；不带参数是 `null`。
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppCommandRunResult {
+    /// 命令交回的值，没有就是 `null`。
+    pub result: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

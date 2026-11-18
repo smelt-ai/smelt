@@ -4,12 +4,16 @@
 //! 它们各自去开窗口。这里只拦截明确的控制命令，一律经 smeltd 读写：库只有运行时一个
 //! 写入者，CLI 不绕过它。smeltd 没在跑时直接报错。
 //!
+//! App 里的功能（开视图、开页面等）经 `smelt app` 调插件开给命令行的命令，运行时转给本机
+//! 开着的 App；宿主不认识具体命令。
+//!
 //! 不开放的：配对设备和远程（等于把 shell 交出去）、需要浏览器的登录和凭据、采纳/删除记忆
 //! （运行时只认签过名的桌面，且拒绝智能体会话进程树）、往桌面打字。
 
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod agent;
+mod app;
 mod automation;
 mod conversation;
 mod engine;
@@ -36,9 +40,9 @@ where
         .collect();
     match args.get(1).map(String::as_str) {
         Some(
-            "agent" | "conversation" | "project" | "worktree" | "history" | "automation" | "mcp"
-            | "pi" | "model" | "quota" | "engine" | "hooks" | "settings" | "notify" | "help" | "-h"
-            | "--help" | "--version" | "-V",
+            "agent" | "app" | "conversation" | "project" | "worktree" | "history" | "automation"
+            | "mcp" | "pi" | "model" | "quota" | "engine" | "hooks" | "settings" | "notify"
+            | "help" | "-h" | "--help" | "--version" | "-V",
         ) => Some(run(&args)),
         _ => None,
     }
@@ -69,6 +73,7 @@ fn run(args: &[String]) -> i32 {
         Some("project") => workspace::run_project(rest),
         Some("worktree") => workspace::run_worktree(rest),
         Some("history") => history::run(rest),
+        Some("app") => app::run(rest),
         Some("automation") => automation::run(rest),
         Some("mcp") => pi::run_mcp(rest),
         Some("pi") => pi::run(rest),

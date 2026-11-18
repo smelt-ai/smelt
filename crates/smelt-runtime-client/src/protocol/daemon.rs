@@ -12,6 +12,8 @@ pub enum DaemonOperation {
     Watch,
     EventSubscribe,
     AppearanceReceipt,
+    /// 桌面交回命令行转来的 App 命令的结果。
+    AppCommandReceipt,
     AcpOpen,
     AcpWatch,
     AcpSnapshot,
@@ -94,6 +96,7 @@ mod tests {
             (DaemonOperation::Watch, "watch"),
             (DaemonOperation::EventSubscribe, "event_subscribe"),
             (DaemonOperation::AppearanceReceipt, "appearance_receipt"),
+            (DaemonOperation::AppCommandReceipt, "app_command_receipt"),
             (DaemonOperation::AcpOpen, "acp_open"),
             (DaemonOperation::AcpWatch, "acp_watch"),
             (DaemonOperation::AcpSnapshot, "acp_snapshot"),

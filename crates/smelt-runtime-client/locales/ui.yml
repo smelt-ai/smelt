@@ -320,6 +320,18 @@ reason.repository_clone_failed_kept:
 reason.repository_already_added:
   en: "This repository or folder name is already in the project"
   zh-CN: "该仓库或目录名已添加，请勿重复绑定"
+reason.app_not_open:
+  en: "This needs the Smelt app open on this computer, and it isn't"
+  zh-CN: "要本机开着 Smelt App，现在没开"
+reason.app_ambiguous:
+  en: "More than one Smelt app is open here, so it's unclear which one should handle this"
+  zh-CN: "本机开着不止一个 Smelt App，不知道交给哪一个"
+reason.app_undelivered:
+  en: "Couldn't deliver the request to the Smelt app"
+  zh-CN: "请求没能交到 Smelt App"
+reason.app_outcome_unknown:
+  en: "The Smelt app didn't answer in time, so the result is unknown (it may have run or may still be running)"
+  zh-CN: "没等到 Smelt App 回复，结果未知（可能已经执行，也可能还在执行）"
 reason.agent_not_conversation_ready:
   en: "This agent can't hold a conversation yet: it needs a registered engine (currently Pi)"
   zh-CN: "智能体还不能开对话：需要已注册的产品引擎（目前是 Pi）"

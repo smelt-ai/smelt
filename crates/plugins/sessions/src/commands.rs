@@ -159,6 +159,7 @@ fn shortcut(
         palette: true,
         requires_args: false,
         args: Some(Vec::new()),
+        cli: false,
         handler: Rc::new(
             move |_: &serde_json::Value, window: Option<&mut Window>, cx: &mut App| match window {
                 Some(window) => run(window, cx),

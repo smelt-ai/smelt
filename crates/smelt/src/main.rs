@@ -8,6 +8,7 @@
 // 主题判断在组件库 smelt-ui 里，这里重导出成宿主一直用的模块路径。
 pub(crate) use smelt_ui::ui_theme;
 
+mod app_commands;
 mod bundled_helpers;
 mod daemon_states;
 mod dir_picker;
@@ -741,7 +742,9 @@ fn main() {
         let runtime_events::RuntimeEventReceivers {
             states: daemon_state_rx,
             topics: topic_rx,
+            commands: command_rx,
         } = runtime_events::start(cx);
+        app_commands::serve(command_rx, cx);
         // 单独订阅的话题，原样转给插件。
         cx.spawn(async move |cx| {
             use smelt_client::daemon_state::TopicMessage;

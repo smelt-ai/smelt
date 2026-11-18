@@ -216,12 +216,12 @@ fn check_bindings_against(
         .filter(|id| !id.is_empty())
     {
         if !config.plugins.iter().any(|known| known.id == plugin) {
-            let (key, name) = match plugin.split_once(':') {
-                Some(("extension", name)) => ("agent.no_such_extension", name),
-                Some((_, name)) => ("agent.no_such_skill", name),
-                None => ("agent.no_such_skill", plugin),
-            };
-            return Err(t!(key, name = name).into_owned());
+            return Err(match plugin.split_once(':') {
+                Some(("extension", name)) => t!("agent.no_such_extension", name = name),
+                Some((_, name)) => t!("agent.no_such_skill", name = name),
+                None => t!("agent.no_such_skill", name = plugin),
+            }
+            .into_owned());
         }
     }
     if mcp_servers.iter().any(|name| !name.trim().is_empty()) {

@@ -211,6 +211,8 @@ define_control_methods! {
     ConversationTurnResult => (CONVERSATION_TURN_RESULT_METHOD, "conversation.turn_result"),
     SubagentTranscript => (SUBAGENT_TRANSCRIPT_METHOD, "subagent.transcript"),
     ResourceUsage => (RESOURCE_USAGE_METHOD, "resource.usage"),
+    AppCommandList => (APP_COMMAND_LIST_METHOD, "app.command.list"),
+    AppCommandRun => (APP_COMMAND_RUN_METHOD, "app.command.run"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;

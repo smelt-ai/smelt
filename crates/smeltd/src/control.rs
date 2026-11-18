@@ -622,6 +622,50 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::AppCommandList => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match app_command(
+                principal,
+                event_hub,
+                smelt_event_protocol::AppCommandRequest::List,
+                APP_COMMAND_LIST_WAIT,
+            )
+            .and_then(|value| {
+                serde_json::from_value::<Vec<smelt_core::control_api::AppCommandInfo>>(value)
+                    .map_err(|error| {
+                        ControlError::new(ControlErrorCode::OperationFailed, error.to_string())
+                    })
+            }) {
+                Ok(commands) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::control_api::AppCommandListResult { commands },
+                ),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::AppCommandRun => {
+            let params: smelt_core::control_api::AppCommandRunParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let request = smelt_event_protocol::AppCommandRequest::Run {
+                command: params.command,
+                args: params.args,
+            };
+            match app_command(principal, event_hub, request, APP_COMMAND_RUN_WAIT) {
+                Ok(result) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::control_api::AppCommandRunResult { result },
+                ),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         ControlMethod::ResourceUsage => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,
@@ -1479,10 +1523,65 @@ fn control_error_for_settings(error: SettingsError) -> ControlError {
     }
 }
 
+/// 列命令只是读 App 内存里的注册表。
+const APP_COMMAND_LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+/// 命令可能要等它自己的活干完（开视图、读文件），给足但有上限；命令行那头多等几秒收结果。
+const APP_COMMAND_RUN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 把 App 命令交给本机桌面，等回执。只收本机调用：命令是替坐在这台电脑前的人操作 App，
+/// 配对的远程设备不该借这条路动它。
+fn app_command(
+    principal: &crate::devices::Principal,
+    event_hub: &EventHubHandle,
+    request: smelt_event_protocol::AppCommandRequest,
+    wait: std::time::Duration,
+) -> Result<serde_json::Value, ControlError> {
+    if principal.is_remote() {
+        return Err(ControlError::new(
+            ControlErrorCode::PermissionDenied,
+            "App commands are only accepted from this computer",
+        ));
+    }
+    event_hub
+        .command_requests
+        .dispatch(request)
+        .and_then(|pending| pending.wait(wait))
+        .map_err(control_error_for_app_request)
+}
+
+/// 交给桌面的请求没成，App 命令用的说法。
+fn control_error_for_app_request(error: crate::app_requests::RequestError) -> ControlError {
+    use crate::app_requests::RequestError;
+    match error {
+        RequestError::NoDesktop => ControlError::because(
+            ControlErrorCode::FailedPrecondition,
+            ControlReason::AppNotOpen,
+        ),
+        RequestError::MultipleDesktops => ControlError::because(
+            ControlErrorCode::FailedPrecondition,
+            ControlReason::AppAmbiguous,
+        ),
+        RequestError::DeliveryFailed => ControlError::because(
+            ControlErrorCode::OperationFailed,
+            ControlReason::AppUndelivered,
+        ),
+        RequestError::OutcomeUnknown => ControlError::because(
+            ControlErrorCode::OperationFailed,
+            ControlReason::AppOutcomeUnknown,
+        ),
+        RequestError::Invalid(message) => {
+            ControlError::new(ControlErrorCode::InvalidParams, message)
+        }
+        RequestError::Desktop(message) => {
+            ControlError::new(ControlErrorCode::OperationFailed, message)
+        }
+    }
+}
+
 /// 外观交给桌面没成。没有或认不准桌面是前提不满足（调用方能处理：开桌面、关掉多余的）；
 /// 投递失败、没等到回执是操作失败，后者结果未知。
-fn control_error_for_appearance(error: crate::appearance_requests::RequestError) -> ControlError {
-    use crate::appearance_requests::RequestError;
+fn control_error_for_appearance(error: crate::app_requests::RequestError) -> ControlError {
+    use crate::app_requests::RequestError;
     match error {
         RequestError::NoDesktop => ControlError::because(
             ControlErrorCode::FailedPrecondition,
@@ -1652,7 +1751,7 @@ mod tests {
     /// 找不到唯一的桌面是前提不满足，不是操作失败：调用方据此提示去开桌面。
     #[test]
     fn missing_or_ambiguous_desktop_is_a_failed_precondition() {
-        use crate::appearance_requests::RequestError;
+        use crate::app_requests::RequestError;
         for error in [RequestError::NoDesktop, RequestError::MultipleDesktops] {
             assert_eq!(
                 control_error_for_appearance(error).code,
@@ -1665,6 +1764,30 @@ mod tests {
                 ControlErrorCode::OperationFailed
             );
         }
+    }
+
+    /// App 命令替这台电脑前的人操作 App：配对的远程设备调不了，本机调时没开 App 是前提
+    /// 不满足。
+    #[test]
+    fn app_commands_are_local_only() {
+        let event_hub = super::super::new_event_hub();
+        let remote = crate::devices::Principal::Device("phone".into());
+        let error = app_command(
+            &remote,
+            &event_hub,
+            smelt_event_protocol::AppCommandRequest::List,
+            std::time::Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ControlErrorCode::PermissionDenied);
+        let error = app_command(
+            &crate::devices::Principal::Local,
+            &event_hub,
+            smelt_event_protocol::AppCommandRequest::List,
+            std::time::Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ControlErrorCode::FailedPrecondition);
     }
 
     #[test]

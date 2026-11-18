@@ -1,6 +1,6 @@
 ---
 name: smelt
-description: 用 smelt CLI 操作本机 Smelt：产品智能体及其记忆、侧栏对话（含给别的对话发消息、取回复）、项目和任务工作树、各家 agent 的历史会话、自动化及其运行记录、MCP 服务器、默认模型、用量、agent 命令行工具和提醒钩子、外观设置；也讲怎么写 Smelt 插件（App 界面插件）。用户说新建/修改智能体、开对话、让另一个对话去做事、整理对话、开项目、开/收工作树、翻历史会话、建定时任务、看自动化跑得怎样、加 MCP、换模型、看用量、装 agent 命令行、改主题字体、写 Smelt 插件时使用。
+description: 用 smelt CLI 操作本机 Smelt：产品智能体及其记忆、侧栏对话（含给别的对话发消息、取回复）、项目和任务工作树、各家 agent 的历史会话、自动化及其运行记录、MCP 服务器、默认模型、用量、agent 命令行工具和提醒钩子、外观设置、开着的 App 里插件开放的命令（开视图、开页面）；也讲怎么写 Smelt 插件（App 界面插件）。用户说新建/修改智能体、开对话、让另一个对话去做事、整理对话、开项目、开/收工作树、翻历史会话、建定时任务、看自动化跑得怎样、加 MCP、换模型、看用量、装 agent 命令行、改主题字体、在 App 里打开某个视图或页面、写 Smelt 插件时使用。
 ---
 
 # Smelt 控制面
@@ -18,6 +18,7 @@ description: 用 smelt CLI 操作本机 Smelt：产品智能体及其记忆、�
 - 给别人的对话发消息：`conversation send` 发进去的话那个 agent 会照着做；发给不是你自己开的对话前先确认。
 - 全局能力，对所有智能体生效：`mcp add|enable|disable|remove`、`model default|thinking`。
 - 改这台机器的环境：`engine install`（用 brew 或 npm 装命令行工具）、`hooks install|uninstall`（改各家 agent 的配置文件）。
+- `app run` 一条会改数据的插件命令（看 `app commands` 里它的名字和参数判断；只开视图、页面、窗口的不用问）。
 
 ## 智能体
 
@@ -155,6 +156,19 @@ smelt hooks install|uninstall
 - `engine list` 列各家 agent 命令行工具在这台机器上找没找到（`path` 为空就是没装）、版本和报错；`install` 用 brew 或 npm 装一个，id 和 `agent create --engine` 的一样。
 - 提醒钩子写在各家 agent 自己的配置里，让它们在等你确认、做完时经 `smelt-notify` 提醒 Smelt。`status` 看装没装；装、卸会改那些配置文件。
 
+## App 里的命令
+
+```sh
+smelt app commands
+smelt app run smelt.app/show-main-window
+smelt app run smelt.app/open-view --args '{"view":"com.example.hello/main"}'
+smelt app run smelt.app/open-page --args '{"page":"<页 id>"}'
+```
+
+- 调的是本机开着的 Smelt App 里插件登记的命令，只有插件明确开给命令行的才列得出、调得了。App 没开会报错，不要替用户去开 App。
+- `commands` 列出每条命令的 `id`、`title` 和认的参数字段 `args`（空表就是不带参数）；`run` 把 `--args` 的 JSON 交给它，stdout 是命令交回的值。id 和参数照 `commands` 的写，不要猜。
+- `open-view` 的视图 id 是 `<来源>/<名字>`，插件的主视图是 `<插件 id>/main`；交回 `false` 是没有这个视图。`open-view`、`open-page` 要主窗口开着，没开先 `show-main-window`。
+
 ## 设置
 
 ```sh
@@ -205,5 +219,6 @@ Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui
 3. Smelt 开着时，插件目录里文件一保存就自动重挂这个插件，不用重启（插件视图的状态从头来）。保存一两秒后跑 `smelt plugin status <id>` 确认 App 里挂上了：挂好了退出 0；没挂上或加载失败退出 1，原因在 stderr 和 JSON 的 `error` 里。`smelt plugin status` 不带 id 列全部。
 4. 运行时的 `console.log` 和脚本错误在 `~/.smelt/app.log`，带 `[plugin]` 标记；check 时直接打在 stderr。
 5. 插件运行时自己写的文件放到插件目录外面（比如 `~/.smelt/plugin-data/`），写进插件目录会触发重挂。
-6. 不要用截屏、AppleScript 之类去点 Smelt 的界面，用上面的命令。新插件在哪、怎么打开，check 和 status 过了告诉用户去看。
-7. 删掉插件就是删 `~/.smelt/plugins/<id>/`，App 开着会自动撤下；要清干净再删 `~/.smelt/plugin-data/<id>.sqlite3`。删之前先跟用户确认。
+6. 不要用截屏、AppleScript 之类去点 Smelt 的界面，用上面的命令。check 和 status 过了，用 `smelt app run smelt.app/open-view --args '{"view":"<id>/main"}'` 把它在 App 里打开给用户看。
+7. 插件自己的命令想让智能体也能调（`smelt app run`），登记时加 `cli: true` 并给 `args`（不带参数写 `[]`）。只开给参数能写成 JSON、不用人当场在界面上操作就有结果的命令。
+8. 删掉插件就是删 `~/.smelt/plugins/<id>/`，App 开着会自动撤下；要清干净再删 `~/.smelt/plugin-data/<id>.sqlite3`。删之前先跟用户确认。

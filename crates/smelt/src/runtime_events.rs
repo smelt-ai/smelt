@@ -148,6 +148,8 @@ fn stale_topics<'a>(
 pub(crate) struct RuntimeEventReceivers {
     pub(crate) states: smol::channel::Receiver<RuntimeEvent>,
     pub(crate) topics: smol::channel::Receiver<RuntimeTopicEvent>,
+    /// 命令行转来的 App 命令，只有本机运行时有。
+    pub(crate) commands: smol::channel::Receiver<smelt_event_protocol::AppCommandRequested>,
 }
 
 /// 核心事件和单独话题的发送端，每条订阅线程一份。
@@ -155,6 +157,7 @@ pub(crate) struct RuntimeEventReceivers {
 pub(crate) struct RuntimeEventSenders {
     pub(crate) states: smol::channel::Sender<RuntimeEvent>,
     pub(crate) topics: smol::channel::Sender<RuntimeTopicEvent>,
+    pub(crate) commands: smol::channel::Sender<smelt_event_protocol::AppCommandRequested>,
 }
 
 struct RuntimeSubscriptions {
@@ -325,7 +328,12 @@ impl Global for RuntimeSubscriptions {}
 pub(crate) fn start(cx: &mut App) -> RuntimeEventReceivers {
     let (states, states_rx) = smol::channel::unbounded();
     let (topics, topics_rx) = smol::channel::unbounded();
-    let sender = RuntimeEventSenders { states, topics };
+    let (commands, commands_rx) = smol::channel::unbounded();
+    let sender = RuntimeEventSenders {
+        states,
+        topics,
+        commands,
+    };
     let (status, status_rx) = smol::channel::unbounded::<(RuntimeKey, RuntimeStatus)>();
     cx.spawn(async move |cx| {
         while let Ok((key, status)) = status_rx.recv().await {
@@ -372,11 +380,30 @@ pub(crate) fn start(cx: &mut App) -> RuntimeEventReceivers {
     RuntimeEventReceivers {
         states: states_rx,
         topics: topics_rx,
+        commands: commands_rx,
     }
 }
 
 /// 外观请求单独订阅，不让新话题进入 v7 核心订阅。丢事件时请求方会得到结果未知，
 /// 不重放可能已经执行过的操作。
+/// App 命令请求也单独订阅，理由和外观一样；丢了的请求方得到结果未知。
+fn app_command_event(message: TopicMessage) -> Option<smelt_event_protocol::AppCommandRequested> {
+    match message {
+        TopicMessage::Event { topic, payload }
+            if topic == smelt_event_protocol::CORE_TOPIC_APP_COMMAND_REQUESTED =>
+        {
+            serde_json::from_value(payload)
+                .inspect_err(|error| eprintln!("[runtime-events] App 命令请求载荷无效：{error}"))
+                .ok()
+        }
+        TopicMessage::Lagged => {
+            eprintln!("[runtime-events] App 命令请求订阅积压，丢失的请求不会重放");
+            None
+        }
+        _ => None,
+    }
+}
+
 fn appearance_event(message: TopicMessage) -> Option<DaemonStateEvent> {
     match message {
         TopicMessage::Event { topic, payload }
@@ -678,6 +705,20 @@ pub(crate) fn spawn_subscription(
                         } else {
                             None
                         };
+                        // 命令登记在桌面里，只接本机运行时转来的。
+                        let commands = if runtime.is_local() {
+                            let command_sender = sender.commands.clone();
+                            SeparateSubscription::open(
+                                &runtime,
+                                smelt_event_protocol::CORE_TOPIC_APP_COMMAND_REQUESTED.to_string(),
+                                move |message| match app_command_event(message) {
+                                    Some(request) => command_sender.try_send(request).is_ok(),
+                                    None => true,
+                                },
+                            )
+                        } else {
+                            None
+                        };
                         subscribe_daemon_states_blocking(
                             runtime.client(),
                             runtime.is_local(),
@@ -691,6 +732,9 @@ pub(crate) fn spawn_subscription(
                         }
                         if let Some(appearance) = appearance {
                             appearance.close();
+                        }
+                        if let Some(commands) = commands {
+                            commands.close();
                         }
                         if stop.load(Ordering::Acquire) {
                             return;

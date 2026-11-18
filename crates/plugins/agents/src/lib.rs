@@ -135,6 +135,7 @@ fn register_commands(new_conversation_title: api::Text, cx: &mut App) {
         palette: true,
         requires_args: false,
         args: Some(Vec::new()),
+        cli: false,
         handler: Rc::new(|_, _, cx| new_conversation(cx)),
     }];
     commands.extend(agent_hosts::commands());

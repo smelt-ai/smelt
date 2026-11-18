@@ -60,6 +60,10 @@ help.text:
     Agent engines:
       smelt engine list | install <id>       command-line tools found / install one (brew or npm)
       smelt hooks status | install | uninstall   notification hooks in each agent's config
+
+    The open Smelt app (commands its plugins allow from the command line):
+      smelt app commands                     the commands and the arguments each takes
+      smelt app run <command id> [--args '<JSON>']   e.g. smelt app run smelt.app/open-view --args '{"view":"<plugin id>/<view>"}'
     %{plugins}
     Notifications (shown on the desktop and pushed to phones with "Agent messages" on):
       smelt notify [--title <title>] <message>
@@ -129,6 +133,10 @@ help.text:
     Agent 引擎：
       smelt engine list | install <id>       找到的命令行工具 / 装一个（brew 或 npm）
       smelt hooks status | install | uninstall   写在各家 agent 配置里的提醒钩子
+
+    开着的 Smelt App（插件开给命令行的命令）：
+      smelt app commands                     有哪些命令、各认什么参数
+      smelt app run <命令id> [--args '<JSON>']   如 smelt app run smelt.app/open-view --args '{"view":"<插件id>/<视图>"}'
     %{plugins}
     通知（桌面弹出，并推给在手机端打开了「智能体消息」的手机）：
       smelt notify [--title <标题>] <内容>
@@ -168,6 +176,12 @@ agent.update_empty:
 agent.update_id:
   en: "update can't change the id"
   zh-CN: "update 不能改 id"
+app.bad_args:
+  en: "--args must be JSON: %{error}"
+  zh-CN: "--args 要是 JSON：%{error}"
+app.run_usage:
+  en: "smelt app run <command id> [--args '<JSON>']"
+  zh-CN: "smelt app run <命令id> [--args '<JSON>']"
 automation.action_choice:
   en: "Give either --agent <id> or --shell <command>, not both"
   zh-CN: "需要 --agent <id> 或 --shell <命令>，不能同时有"

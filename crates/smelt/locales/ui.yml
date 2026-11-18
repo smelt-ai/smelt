@@ -12,6 +12,10 @@ action:
   reset:
     en: "Reset"
     zh-CN: "恢复"
+app_command:
+  missing:
+    en: "There's no command \"%{id}\" that can be run from the command line (see `smelt app commands`)"
+    zh-CN: "没有能从命令行执行的命令「%{id}」（见 smelt app commands）"
 appearance:
   apply_failed:
     en: "Couldn't change the appearance: %{error}"

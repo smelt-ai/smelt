@@ -144,6 +144,14 @@ pub enum ControlReason {
     RepositoryCloneFailed { kept: Option<String> },
     /// 这个仓库或名字已经在项目里了。
     RepositoryAlreadyAdded,
+    /// 要本机开着的 Smelt App，眼下没有。
+    AppNotOpen,
+    /// 本机开着不止一个 Smelt App，不知道交给谁。
+    AppAmbiguous,
+    /// 请求没能交到 App。
+    AppUndelivered,
+    /// 交给 App 了，没等到回执。
+    AppOutcomeUnknown,
     /// 比这个客户端新的运行时发来的种类。
     #[serde(other)]
     Other,
@@ -272,6 +280,10 @@ impl ControlReason {
                 t!("reason.repository_clone_failed_kept", path = path)
             }
             Self::RepositoryAlreadyAdded => t!("reason.repository_already_added"),
+            Self::AppNotOpen => t!("reason.app_not_open"),
+            Self::AppAmbiguous => t!("reason.app_ambiguous"),
+            Self::AppUndelivered => t!("reason.app_undelivered"),
+            Self::AppOutcomeUnknown => t!("reason.app_outcome_unknown"),
             Self::Other => return None,
         };
         Some(text.into_owned())

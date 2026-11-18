@@ -105,6 +105,7 @@ pub fn register(cx: &mut App) {
             palette: true,
             requires_args: false,
             args: Some(Vec::new()),
+            cli: false,
             handler: Rc::new(|_, _, cx| {
                 let Some(panel) = built_panel(cx) else {
                     return Handled::Pass;
@@ -123,6 +124,7 @@ pub fn register(cx: &mut App) {
             palette: false,
             requires_args: true,
             args: Some(api::FileLocation::arg_fields()),
+            cli: false,
             handler: Rc::new(|args, _, cx| {
                 if api::FileLocation::from_args(args).is_none() {
                     return Handled::err(t!("error.bad_open_args", args = args).into_owned());

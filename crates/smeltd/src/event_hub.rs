@@ -168,7 +168,8 @@ fn projection_value(projection: &Option<CoreProjectionEvent>) -> (u64, serde_jso
 }
 
 pub(crate) struct DaemonEventHub {
-    pub(crate) appearance_requests: Arc<crate::appearance_requests::AppearanceRequests>,
+    pub(crate) appearance_requests: Arc<crate::app_requests::AppearanceRequests>,
+    pub(crate) command_requests: Arc<crate::app_requests::CommandRequests>,
     hub: Arc<EventHub>,
     projection: Arc<Mutex<ProjectionState>>,
     /// 提醒（见 `crate::attention`）。锁序：投影锁在前，总线的锁在后；快照只拿这一把。
@@ -198,6 +199,7 @@ impl DaemonEventHub {
             .map_err(|error| format!("register core snapshot provider: {error}"))?;
         Ok(Arc::new(Self {
             appearance_requests: Arc::default(),
+            command_requests: Arc::default(),
             hub,
             projection,
             attention,

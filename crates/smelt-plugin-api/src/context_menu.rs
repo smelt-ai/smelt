@@ -252,6 +252,7 @@ mod tests {
             palette: false,
             requires_args: true,
             args: None,
+            cli: false,
             handler: Rc::new(|_, _, _| Handled::ok()),
         };
         register_commands(owner, owner.to_string(), vec![spec], cx).unwrap();
@@ -406,6 +407,7 @@ mod tests {
                 palette: false,
                 requires_args: false,
                 args: Some(fields.iter().map(|field| field.to_string()).collect()),
+                cli: false,
                 handler: Rc::new(|_, _, _| Handled::ok()),
             };
             register_commands(

@@ -116,7 +116,7 @@ mod conversation_delivery;
 mod conversation_image;
 mod desktop;
 mod devices;
-mod appearance_requests;
+mod app_requests;
 mod event_hub;
 mod files_control;
 mod git_control;

@@ -122,6 +122,7 @@ mod tests {
             palette: false,
             requires_args: true,
             args: Some(FileLocation::arg_fields()),
+            cli: false,
             handler: Rc::new(|_, _, _| Handled::ok()),
         }
     }

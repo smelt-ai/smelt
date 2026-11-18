@@ -173,6 +173,11 @@ export interface Command {
    * next_command；不给不查。右键菜单的上下文也只并这里列的字段。
    */
   args?: string[];
+  /**
+   * 命令行（smelt app run）也能调，默认 false。要同时给 args。只开给参数能写成 JSON、不用人当场在界面上
+   * 操作就有结果的命令：智能体会照着 smelt app commands 列出来的去调。
+   */
+  cli?: boolean;
 }
 /** 替换本插件登记的命令。空数组撤下全部；一条不合法整组不登记。执行时由 next_command 取到。 */
 export function register_commands(commands: Command[]): null;
@@ -299,6 +304,8 @@ export interface CommandInfo {
   requires_args: boolean;
   /** 认的参数字段；null 是没声明，不查。 */
   args: string[] | null;
+  /** 命令行（smelt app run）能调。 */
+  cli: boolean;
 }
 /** 所有来源登记的命令，按登记先后。变了发 commands_changed。 */
 export function commands(): CommandInfo[];
@@ -1817,6 +1824,7 @@ fn command_arguments(
             };
             let requires_args = flag("requires_args", false)?;
             let palette = flag("palette", !requires_args)?;
+            let cli = flag("cli", false)?;
             let args = match command.get("args") {
                 None | Some(HostValue::Null) => None,
                 Some(HostValue::Array(fields)) => Some(
@@ -1846,6 +1854,7 @@ fn command_arguments(
                 palette,
                 requires_args,
                 args,
+                cli,
                 handler: Rc::new(move |args, _, cx| {
                     let Some(result) = state
                         .upgrade()
@@ -2212,6 +2221,7 @@ fn command_value(command: &crate::CommandInfo) -> HostValue {
         .field("context", command.context.as_ref())
         .field("palette", command.palette)
         .field("requires_args", command.requires_args)
+        .field("cli", command.cli)
         .field(
             "args",
             command.args.as_ref().map_or(HostValue::Null, |fields| {

@@ -154,32 +154,26 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         DaemonOperation::EventSubscribe => {
             handle_event_subscribe_op(conn, &v, &principal, &event_hub)
         }
-        DaemonOperation::AppearanceReceipt => {
-            let mut conn = conn;
-            let result = (|| {
-                if principal.is_remote() {
-                    return Err(
-                        "Appearance receipts are only accepted from the local desktop".to_string(),
-                    );
-                }
-                let peer = conn.peer_identity()?;
-                authenticate_first_party_desktop(&peer)?;
-                let receipt: smelt_event_protocol::AppearanceApplyReceipt = serde_json::from_value(
-                    v.get("receipt")
-                        .cloned()
-                        .ok_or("missing appearance receipt")?,
-                )
-                .map_err(|error| error.to_string())?;
+        DaemonOperation::AppearanceReceipt => handle_desktop_receipt(
+            conn,
+            &v,
+            &principal,
+            |peer, receipt: smelt_event_protocol::AppearanceApplyReceipt| {
                 event_hub
                     .appearance_requests
-                    .respond(&peer, &receipt.request_id, receipt.outcome)
-            })();
-            let reply = match result {
-                Ok(()) => serde_json::json!({"ok": true}),
-                Err(error) => serde_json::json!({"ok": false, "error": error}),
-            };
-            let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &reply);
-        }
+                    .respond(peer, &receipt.request_id, receipt.outcome)
+            },
+        ),
+        DaemonOperation::AppCommandReceipt => handle_desktop_receipt(
+            conn,
+            &v,
+            &principal,
+            |peer, receipt: smelt_event_protocol::AppCommandReceipt| {
+                event_hub
+                    .command_requests
+                    .respond(peer, &receipt.request_id, receipt.outcome)
+            },
+        ),
         DaemonOperation::AcpOpen => {
             handle_acp_open(conn, reader, &v, sessions, acp_sessions, event_hub)
         }
@@ -227,6 +221,35 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         }
         DaemonOperation::RuntimeUpgrade => crate::runtime_upgrade::handle_runtime_upgrade(conn, &v),
     }
+}
+
+/// 本机桌面交回的回执（外观修改、App 命令）：只收签过名的本机桌面，`respond` 再核对是
+/// 不是收到请求的那个进程。回 `{"ok": true}` 或带原因的 `{"ok": false}`。
+fn handle_desktop_receipt<C, R>(
+    mut conn: C,
+    payload: &serde_json::Value,
+    principal: &Principal,
+    respond: impl FnOnce(&PeerIdentity, R) -> Result<(), String>,
+) where
+    C: ClientSocket + crate::protocol::PeerSource,
+    R: serde::de::DeserializeOwned,
+{
+    let result = (|| {
+        if principal.is_remote() {
+            return Err("Receipts are only accepted from the local desktop".to_string());
+        }
+        let peer = conn.peer_identity()?;
+        authenticate_first_party_desktop(&peer)?;
+        let receipt: R =
+            serde_json::from_value(payload.get("receipt").cloned().ok_or("missing receipt")?)
+                .map_err(|error| error.to_string())?;
+        respond(&peer, receipt)
+    })();
+    let reply = match result {
+        Ok(()) => serde_json::json!({"ok": true}),
+        Err(error) => serde_json::json!({"ok": false, "error": error}),
+    };
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &reply);
 }
 
 /// 控制请求回一个带 request_id 的 PermissionDenied，客户端能看懂；其余 op 直接断开。

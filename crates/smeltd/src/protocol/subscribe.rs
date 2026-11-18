@@ -69,6 +69,30 @@ pub(super) fn write_event_protocol_value<C: ClientSocket>(
     smelt_runtime_client::protocol::write_json_line(conn, &value).map_err(|error| error.to_string())
 }
 
+/// 单播给桌面的请求写成一条不带序号的事件，事件 id、关联 id 都从请求 id 来。
+fn write_unicast<C: ClientSocket>(
+    conn: &mut C,
+    topic: &str,
+    request_id: &str,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let envelope = event_hub::core_envelope(
+        smelt_event_protocol::EventId::new(format!("event-{request_id}")).unwrap(),
+        topic,
+        payload,
+        None,
+        event_hub::now_ms(),
+        smelt_event_protocol::CorrelationId::new(format!("correlation-{request_id}")).unwrap(),
+    );
+    write_event_protocol_value(
+        conn,
+        SubscribeMessage::Event {
+            sequence: None,
+            envelope,
+        },
+    )
+}
+
 pub(super) fn write_event_protocol_error<C: ClientSocket>(
     conn: &mut C,
     error: impl std::fmt::Display,
@@ -89,6 +113,7 @@ pub(crate) enum ConnectionMail {
     ClientError(String),
     Delivery(Delivery),
     AppearanceRequest(smelt_event_protocol::AppearanceApplyRequested),
+    AppCommandRequest(smelt_event_protocol::AppCommandRequested),
 }
 
 pub(crate) struct ConnectionMailbox {
@@ -231,11 +256,15 @@ pub(super) fn handle_event_subscribe_with_peer<C: ClientSocket>(
             .cloned()
             .collect::<BTreeSet<_>>();
         if topics.iter().any(|topic| {
-            topic.as_str() == smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
+            matches!(
+                topic.as_str(),
+                smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
+                    | smelt_event_protocol::CORE_TOPIC_APP_COMMAND_REQUESTED
+            )
         }) && (local_peer.is_none()
             || identity.plugin_id.as_str() != FIRST_PARTY_DESKTOP_PLUGIN_ID)
         {
-            return Err("Only the local desktop handles appearance changes".to_string());
+            return Err("Only the local desktop handles requests sent to the app".to_string());
         }
         if topics.len() != request.subscription.topics.len() {
             return Err("subscription contains duplicate topics".to_string());
@@ -355,14 +384,21 @@ pub(super) fn handle_event_subscribe_with_peer<C: ClientSocket>(
         return;
     };
 
-    // 只登记显式订阅单播外观请求的本机桌面；其他独立订阅不算桌面。
+    // 只登记显式订阅了单播请求话题的本机桌面；其他独立订阅不算桌面。
+    let subscribed = |wanted: &str| {
+        request
+            .subscription
+            .topics
+            .iter()
+            .any(|topic| topic.as_str() == wanted)
+    };
     let appearance_lease = local_peer
-        .filter(|_| {
-            request.subscription.topics.iter().any(|topic| {
-                topic.as_str() == smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
-            })
-        })
+        .clone()
+        .filter(|_| subscribed(smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED))
         .map(|peer| event_hub.appearance_requests.register(peer, &mailbox));
+    let command_lease = local_peer
+        .filter(|_| subscribed(smelt_event_protocol::CORE_TOPIC_APP_COMMAND_REQUESTED))
+        .map(|peer| event_hub.command_requests.register(peer, &mailbox));
 
     'connection: loop {
         let Some(mail) = mailbox.next() else {
@@ -422,23 +458,17 @@ pub(super) fn handle_event_subscribe_with_peer<C: ClientSocket>(
             }
             ConnectionMail::AppearanceRequest(request) => {
                 let id = request.request_id.clone();
-                let envelope = event_hub::core_envelope(
-                    smelt_event_protocol::EventId::new(format!("event-{id}")).unwrap(),
-                    smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED,
-                    serde_json::to_value(request).unwrap(),
-                    None,
-                    event_hub::now_ms(),
-                    smelt_event_protocol::CorrelationId::new(format!("correlation-{id}")).unwrap(),
-                );
-                if write_event_protocol_value(
-                    &mut conn,
-                    SubscribeMessage::Event {
-                        sequence: None,
-                        envelope,
-                    },
-                )
-                .is_err()
-                {
+                let payload = serde_json::to_value(request).unwrap();
+                let topic = smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED;
+                if write_unicast(&mut conn, topic, &id, payload).is_err() {
+                    break;
+                }
+            }
+            ConnectionMail::AppCommandRequest(request) => {
+                let id = request.request_id.clone();
+                let payload = serde_json::to_value(request).unwrap();
+                let topic = smelt_event_protocol::CORE_TOPIC_APP_COMMAND_REQUESTED;
+                if write_unicast(&mut conn, topic, &id, payload).is_err() {
                     break;
                 }
             }
@@ -447,6 +477,7 @@ pub(super) fn handle_event_subscribe_with_peer<C: ClientSocket>(
 
     // 先注销桌面再停信箱：不再把已断开的连接算作桌面，在途请求立即得到“结果未知”。
     drop(appearance_lease);
+    drop(command_lease);
     drop(resume_tx);
     mailbox.stop();
     let _ = conn.shutdown(Shutdown::Both);

@@ -1644,7 +1644,12 @@ mod tests {
     fn subscription_reports_reachability_changes() {
         let (states, _states_rx) = smol::channel::unbounded();
         let (topics, _topics_rx) = smol::channel::unbounded();
-        let events = crate::runtime_events::RuntimeEventSenders { states, topics };
+        let (commands, _commands_rx) = smol::channel::unbounded();
+        let events = crate::runtime_events::RuntimeEventSenders {
+            states,
+            topics,
+            commands,
+        };
         let (status, status_rx) = smol::channel::unbounded();
         let handle = crate::runtime_events::spawn_subscription(
             remote_runtime("rt-test", describe_without("no.such.method")),
@@ -1674,7 +1679,12 @@ mod tests {
         });
         let (states, _states_rx) = smol::channel::unbounded();
         let (topics, _topics_rx) = smol::channel::unbounded();
-        let events = crate::runtime_events::RuntimeEventSenders { states, topics };
+        let (commands, _commands_rx) = smol::channel::unbounded();
+        let events = crate::runtime_events::RuntimeEventSenders {
+            states,
+            topics,
+            commands,
+        };
         let (status, status_rx) = smol::channel::unbounded();
         let handle = crate::runtime_events::spawn_subscription(
             remote_runtime("rt-new", newer),

@@ -235,9 +235,107 @@ fn appearance_request_is_unicast_to_the_authenticated_local_subscription() {
         )
         .unwrap();
     assert!(matches!(pending.wait(Duration::from_secs(1)),
-        Err(crate::appearance_requests::RequestError::Invalid(message)) if message == "未知主题"));
+        Err(crate::app_requests::RequestError::Invalid(message)) if message == "未知主题"));
     client.shutdown(Shutdown::Both).unwrap();
     worker.join().unwrap();
+}
+
+#[test]
+fn app_command_request_is_unicast_to_the_desktop_and_answered_by_receipt() {
+    use smelt_event_protocol::{
+        AppCommandOutcome, AppCommandRequest, AppCommandRequested,
+        CORE_TOPIC_APP_COMMAND_REQUESTED, FirstPartyClientKind,
+    };
+    let event_hub = super::super::new_event_hub();
+    let mut request = request("command-desktop", CORE_TOPIC_SESSION_STATE_CHANGED);
+    request["subscription"]["topics"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(CORE_TOPIC_APP_COMMAND_REQUESTED));
+    let desktop = peer(123, None);
+    let (server, client) = RuntimeStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let worker_hub = Arc::clone(&event_hub);
+    let worker_peer = desktop.clone();
+    let worker = thread::spawn(move || {
+        subscribe::handle_event_subscribe_with_peer(
+            server,
+            Some(&request),
+            Ok(auth::first_party_event_client(
+                FirstPartyClientKind::Desktop,
+            )),
+            Some(worker_peer),
+            &worker_hub,
+        )
+    });
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+    assert!(matches!(
+        read_message(&mut reader),
+        SubscribeMessage::Snapshot { .. }
+    ));
+    // 只订了命令话题，不算外观的桌面。
+    assert_eq!(
+        event_hub
+            .appearance_requests
+            .dispatch(Default::default())
+            .err(),
+        Some(crate::app_requests::RequestError::NoDesktop)
+    );
+    let pending = event_hub
+        .command_requests
+        .dispatch(AppCommandRequest::Run {
+            command: "smelt.app/open-view".into(),
+            args: serde_json::json!({ "view": "hello/main" }),
+        })
+        .unwrap();
+    let SubscribeMessage::Event { envelope, .. } = read_message(&mut reader) else {
+        panic!("expected command request");
+    };
+    assert_eq!(envelope.topic.as_str(), CORE_TOPIC_APP_COMMAND_REQUESTED);
+    let request: AppCommandRequested = serde_json::from_value(envelope.payload).unwrap();
+    assert!(
+        matches!(request.request, AppCommandRequest::Run { ref command, .. }
+        if command == "smelt.app/open-view")
+    );
+    // 回执只认收到请求的那个进程。
+    assert!(
+        event_hub
+            .command_requests
+            .respond(
+                &peer(456, None),
+                &request.request_id,
+                AppCommandOutcome::Done {
+                    value: serde_json::json!(false),
+                },
+            )
+            .is_err()
+    );
+    event_hub
+        .command_requests
+        .respond(
+            &desktop,
+            &request.request_id,
+            AppCommandOutcome::Done {
+                value: serde_json::json!(true),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        pending.wait(Duration::from_secs(1)),
+        Ok(serde_json::json!(true))
+    );
+    // 桌面断开就注销：之后的请求当场报没有桌面。
+    client.shutdown(Shutdown::Both).unwrap();
+    worker.join().unwrap();
+    assert_eq!(
+        event_hub
+            .command_requests
+            .dispatch(AppCommandRequest::List)
+            .err(),
+        Some(crate::app_requests::RequestError::NoDesktop)
+    );
 }
 
 #[test]
@@ -432,6 +530,7 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
             Capability::new(CORE_CAPABILITY_AUTOMATION_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_CONVERSATION_WAKE).unwrap(),
             Capability::new(smelt_event_protocol::CORE_CAPABILITY_APPEARANCE_CONTROL).unwrap(),
+            Capability::new(smelt_event_protocol::CORE_CAPABILITY_APP_COMMAND).unwrap(),
         ])
     );
 
