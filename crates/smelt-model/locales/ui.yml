@@ -219,8 +219,8 @@ mcp_preset.browser_mcp.name:
   en: Agent360 Browser
   zh-CN: Agent360 浏览器
 mcp_preset.browser_mcp.summary:
-  en: "Drives the Chrome you're signed in to: open pages, click and fill forms, take screenshots, and stop to ask you at captchas or two-factor prompts. Install the Agent360 Browser MCP extension first (click \"Install Extension\"). Runs on Smelt's bundled Bun."
-  zh-CN: 操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先安装 Agent360 Browser MCP 扩展（点「安装扩展」）。用 Smelt 自带的 Bun 运行。
+  en: "Drives the Chrome you're signed in to: open pages, click and fill forms, take screenshots, and stop to ask you at captchas or two-factor prompts. Install the Agent360 Browser MCP extension first (click \"Install Extension\")."
+  zh-CN: 操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先安装 Agent360 Browser MCP 扩展（点「安装扩展」）。
 mcp_preset.chrome_devtools.name:
   en: Chrome DevTools
   zh-CN: Chrome 开发调试
@@ -240,11 +240,11 @@ mcp_preset.playwright.name:
   en: Playwright Browser
   zh-CN: Playwright 浏览器
 mcp_preset.playwright.summary:
-  en: "Drives the Chrome you're using through the Playwright extension, keeping your sign-ins: open pages, click and fill forms, read page structure, take screenshots. Install the Playwright extension first (click \"Install Extension\") and confirm the connection in the browser. Runs on Smelt's bundled Bun."
-  zh-CN: 通过 Playwright 扩展操作你正在用的 Chrome，沿用已登录的状态：打开网页、点击填表、读页面结构、截图。需先安装 Playwright 扩展（点「安装扩展」），连接时在浏览器里确认。用 Smelt 自带的 Bun 运行。
+  en: "Drives the Chrome you're using through the Playwright extension, keeping your sign-ins: open pages, click and fill forms, read page structure, take screenshots. Install the Playwright extension first (click \"Install Extension\") and confirm the connection in the browser."
+  zh-CN: 通过 Playwright 扩展操作你正在用的 Chrome，沿用已登录的状态：打开网页、点击填表、读页面结构、截图。需先安装 Playwright 扩展（点「安装扩展」），连接时在浏览器里确认。
 mcp_preset.playwright.summary_remote_desktop:
-  en: "Drives the always-on Chrome in this machine's remote desktop, keeping its sign-ins: open pages, click and fill forms, read page structure, take screenshots. A person takes over in the remote desktop for captchas and payments. Runs on Smelt's bundled Bun."
-  zh-CN: 操作这台机器远程桌面里常驻的 Chrome，沿用里面已登录的状态：打开网页、点击填表、读页面结构、截图；遇到验证码、付款，人在远程桌面里接管。用 Smelt 自带的 Bun 运行。
+  en: "Drives the always-on Chrome in this machine's remote desktop, keeping its sign-ins: open pages, click and fill forms, read page structure, take screenshots. A person takes over in the remote desktop for captchas and payments."
+  zh-CN: 操作这台机器远程桌面里常驻的 Chrome，沿用里面已登录的状态：打开网页、点击填表、读页面结构、截图；遇到验证码、付款，人在远程桌面里接管。
 mcp_preset.rea.name:
   en: REA Reverse Engineering
   zh-CN: REA 逆向分析

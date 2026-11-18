@@ -34,6 +34,9 @@ pub enum PiMcpPresetTransport {
         args: &'static [&'static str],
         env: &'static [(&'static str, &'static str)],
     },
+    /// 编进 smelt-agent 的服务器：`smelt-agent mcp-server <预设 id> <args>`。包和版本由
+    /// `agent/package.json` 钉死，随 smelt-agent 发布，不在运行时下载。
+    SmeltAgent { args: &'static [&'static str] },
 }
 
 /// 预设给人看的名字和说明归哪一条。远程桌面那套名字一样、说明不同。
@@ -129,8 +132,8 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         on_remote_desktop: None,
     },
     // Agent360 Browser MCP（github.com/Agent360dk/browser-mcp）驱动用户已登录的 Chrome，
-    // 另需装它的 Chrome 扩展。和 REA 一样用自带 Bun 的 `bun x --bun`、钉死版本；入口
-    // 不带子命令就是启动 MCP 服务器。服务器名沿用上游自己注册的 `browser-mcp`，用户按上游
+    // 另需装它的 Chrome 扩展。编进 smelt-agent；入口不带子命令就是启动 MCP 服务器，
+    // 所以预设不带参数。服务器名沿用上游自己注册的 `browser-mcp`，用户按上游
     // 文档加过的话会撞名被拒，不会出现两份。40 个工具、四十多 KB schema，直接声明太占
     // 上下文；但截图、点击是一步一步交互的，codemode 脚本不合适，所以用 `deferred`：
     // 按需检索后直接调用。
@@ -138,10 +141,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         id: "browser-mcp",
         text: PiMcpPresetText::BrowserMcp,
         description: "Browser automation in the user's own signed-in Chrome: navigate, click, fill forms, read pages and take screenshots, and ask the user for 2FA codes or CAPTCHAs",
-        transport: PiMcpPresetTransport::Bun {
-            args: &["x", "--bun", "@agent360/browser-mcp@1.31.0"],
-            env: &[],
-        },
+        transport: PiMcpPresetTransport::SmeltAgent { args: &[] },
         exposure: Some("deferred"),
         timeout_secs: None,
         extension_url: Some(
@@ -153,16 +153,14 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     // 远程桌面换接法（见 `on_remote_desktop`）：没有就用 `--extension` 接用户正在用的
     // Chrome，沿用已有的登录状态，需装它的 Chrome 扩展。不加这个参数它会另开一份按项目目录
     // 区分的浏览器配置，换个项目就得重新登录。连接时扩展会弹页面让用户确认；跳过确认要的
-    // token 每人不同，不写进预设。同样走自带 Bun 的 `bun x --bun`、钉死版本（上游文档写的
-    // `@latest` 不能用于持久注册）。服务器名沿用上游示例的 `playwright`。25 个工具、
-    // 二十来 KB schema，和 Agent360 一样是逐步交互的浏览器操作，用 `deferred`。
+    // token 每人不同，不写进预设。同样编进 smelt-agent。服务器名沿用上游示例的 `playwright`。
+    // 25 个工具、二十来 KB schema，和 Agent360 一样是逐步交互的浏览器操作，用 `deferred`。
     PiMcpPreset {
         id: "playwright",
         text: PiMcpPresetText::Playwright,
         description: "Browser automation with Playwright in the user's own signed-in Chrome via the Playwright extension: navigate, click, type, fill forms, read accessibility snapshots, take screenshots and inspect console and network",
-        transport: PiMcpPresetTransport::Bun {
-            args: &["x", "--bun", "@playwright/mcp@0.0.85", "--extension"],
-            env: &[],
+        transport: PiMcpPresetTransport::SmeltAgent {
+            args: &["--extension"],
         },
         exposure: Some("deferred"),
         timeout_secs: None,
@@ -204,15 +202,8 @@ const PLAYWRIGHT_ON_REMOTE_DESKTOP: PiMcpPreset = PiMcpPreset {
     id: "playwright",
     text: PiMcpPresetText::PlaywrightOnRemoteDesktop,
     description: "Browser automation with Playwright in the always-on Chrome on this machine's remote desktop, keeping its signed-in sessions: navigate, click, type, fill forms, read accessibility snapshots and take screenshots. A person can watch and take over the same browser from the remote desktop",
-    transport: PiMcpPresetTransport::Bun {
-        args: &[
-            "x",
-            "--bun",
-            "@playwright/mcp@0.0.85",
-            "--cdp-endpoint",
-            "http://127.0.0.1:9222",
-        ],
-        env: &[],
+    transport: PiMcpPresetTransport::SmeltAgent {
+        args: &["--cdp-endpoint", "http://127.0.0.1:9222"],
     },
     exposure: Some("deferred"),
     timeout_secs: None,
@@ -296,6 +287,18 @@ impl PiMcpPreset {
                     variables.insert(name.into(), Value::String(value.into()));
                 }
                 entry.insert("env".into(), Value::Object(variables));
+            }
+            PiMcpPresetTransport::SmeltAgent { args } => {
+                entry.insert(
+                    "command".into(),
+                    Value::String(crate::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH.into()),
+                );
+                let args = [crate::agent_paths::SMELT_AGENT_MCP_SERVER, self.id]
+                    .into_iter()
+                    .chain(args.iter().copied())
+                    .map(|arg| Value::String(arg.into()))
+                    .collect();
+                entry.insert("args".into(), Value::Array(args));
             }
         }
         entry.insert("description".into(), Value::String(self.description.into()));

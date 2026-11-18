@@ -54,6 +54,26 @@ describe("compiled command router", () => {
 			args: ["--version"],
 		});
 	});
+
+	test("built-in MCP servers take the server id and keep its arguments", () => {
+		expect(
+			parseCompiledCommand(["bun", "/$bunfs/root/smelt-agent", "mcp-server", "playwright", "--extension"]),
+		).toEqual({ kind: "mcp-server", server: "playwright", args: ["--extension"] });
+		expect(parseCompiledCommand(["smelt-agent", "mcp-server", "browser-mcp"])).toEqual({
+			kind: "mcp-server",
+			server: "browser-mcp",
+			args: [],
+		});
+	});
+
+	// 不认识的 id 不能落到 RPC 入口：那样 Pi 会把 MCP 客户端的 JSON-RPC 当会话输入。
+	test("an unknown MCP server is its own error, not an RPC session", () => {
+		expect(parseCompiledCommand(["smelt-agent", "mcp-server", "rea"])).toEqual({
+			kind: "unknown-mcp-server",
+			server: "rea",
+		});
+		expect(parseCompiledCommand(["smelt-agent", "mcp-server"])).toEqual({ kind: "unknown-mcp-server", server: "" });
+	});
 });
 
 describe("daemon protocol", () => {
@@ -79,5 +99,6 @@ describe("daemon protocol", () => {
 		expect(checksDaemonProtocol(parse("gateway"))).toBe(false);
 		expect(checksDaemonProtocol(parse("acp-claude"))).toBe(false);
 		expect(checksDaemonProtocol(parse("acp-codex"))).toBe(false);
+		expect(checksDaemonProtocol(parse("mcp-server", "playwright"))).toBe(false);
 	});
 });

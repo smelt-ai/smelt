@@ -5,7 +5,20 @@ export type CompiledCommand =
 	| { kind: "mcp"; args: string[] }
 	| { kind: "gateway" }
 	| { kind: "acp-claude"; args: string[] }
-	| { kind: "acp-codex"; args: string[] };
+	| { kind: "acp-codex"; args: string[] }
+	| { kind: "mcp-server"; server: McpServerId; args: string[] }
+	| { kind: "unknown-mcp-server"; server: string };
+
+/**
+ * 编进 smelt-agent 的第三方 MCP 服务器：`smelt-agent mcp-server <id> [参数…]`。id 和 Smelt 预设的服务器名
+ * 一致（`smelt_model::pi_mcp`），包和版本由 package.json 钉死。
+ */
+export const MCP_SERVERS = ["browser-mcp", "playwright"] as const;
+export type McpServerId = (typeof MCP_SERVERS)[number];
+
+function isMcpServerId(value: string): value is McpServerId {
+	return (MCP_SERVERS as readonly string[]).includes(value);
+}
 
 /** Windows 上编译产物的虚拟根是 `B:/~BUN/root/`，路径分隔符两种都可能出现。 */
 const WINDOWS_BUNFS = /^[A-Za-z]:[\\/]~BUN[\\/]/;
@@ -49,7 +62,8 @@ export function protocolMismatch(
  * 才校验。`gateway` 是 smelt-agent 自己拉起的同一份二进制，没有版本错配可言；它的环境也按
  * MCP server 的规矩去掉了 SMELT_* 变量，本来就拿不到守护给的版本。
  *
- * ACP 适配器说的是 ACP，不是守护和 Pi 之间的约定。
+ * ACP 适配器说的是 ACP，不是守护和 Pi 之间的约定。MCP 服务器是 Pi 经网关拉起的，环境里同样没有
+ * 守护给的版本。
  */
 export function checksDaemonProtocol(command: CompiledCommand): boolean {
 	return command.kind === "rpc" || command.kind === "auth" || command.kind === "mcp";
@@ -64,5 +78,11 @@ export function parseCompiledCommand(argv: readonly string[]): CompiledCommand {
 	if (head === "gateway" || head === "mcp-gateway") return { kind: "gateway" };
 	if (head === "acp-claude") return { kind: "acp-claude", args: rest };
 	if (head === "acp-codex") return { kind: "acp-codex", args: rest };
+	if (head === "mcp-server") {
+		const [server = "", ...serverArgs] = rest;
+		return isMcpServerId(server)
+			? { kind: "mcp-server", server, args: serverArgs }
+			: { kind: "unknown-mcp-server", server };
+	}
 	return { kind: "rpc", args };
 }

@@ -52,6 +52,77 @@ for (const [subcommand, name] of [
 	}
 }
 
+// 编进来的 MCP 服务器要真的能从 bunfs 里起来、走完 MCP 握手并列出工具。参数照预设写的来；列工具
+// 不需要浏览器或扩展在线。
+async function mcpServerTools(server: string, serverArgs: string[]): Promise<number> {
+	const child = spawn(binary, ["mcp-server", server, ...serverArgs], {
+		cwd: dir,
+		env: { ...process.env, PATH: process.env.PATH ?? "" },
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+	let output = "";
+	child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+		output += chunk;
+	});
+	try {
+		return await new Promise<number>((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error("30 秒内没有列出工具")), 30_000);
+			child.on("error", (error) => reject(error));
+			child.on("exit", (code) => reject(new Error(`提前退出（${code}）`)));
+			createInterface({ input: child.stdout }).on("line", (line) => {
+				let message: { id?: number; result?: { tools?: unknown[] }; error?: unknown };
+				try {
+					message = JSON.parse(line);
+				} catch {
+					return;
+				}
+				if (message.error) {
+					clearTimeout(timer);
+					reject(new Error(JSON.stringify(message.error)));
+				} else if (message.id === 1) {
+					child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+					child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" })}\n`);
+				} else if (message.id === 2) {
+					clearTimeout(timer);
+					resolve(message.result?.tools?.length ?? 0);
+				}
+			});
+			child.stdin.write(
+				`${JSON.stringify({
+					jsonrpc: "2.0",
+					id: 1,
+					method: "initialize",
+					params: {
+						protocolVersion: "2025-06-18",
+						capabilities: {},
+						clientInfo: { name: "smelt-agent-smoke", version: "0" },
+					},
+				})}\n`,
+			);
+		});
+	} catch (error) {
+		throw new Error(`mcp-server ${server}：${error instanceof Error ? error.message : String(error)}\n${output.slice(-2000)}`);
+	} finally {
+		child.removeAllListeners("exit");
+		child.kill("SIGKILL");
+	}
+}
+
+for (const [server, serverArgs] of [
+	["browser-mcp", []],
+	["playwright", ["--extension"]],
+] as const) {
+	try {
+		const tools = await mcpServerTools(server, [...serverArgs]);
+		if (tools === 0) throw new Error(`mcp-server ${server} 没有列出工具`);
+		console.log(`mcp-server ${server}: ${tools} tools`);
+	} catch (error) {
+		console.error(error instanceof Error ? error.message : String(error));
+		rmSync(dir, { recursive: true, force: true });
+		process.exit(1);
+	}
+}
+
 const probe = spawn(binary, [], {
 	cwd: dir,
 	env: { ...process.env, SMELT_AGENT_PROBE_WORKERS: "1", PI_CODING_AGENT_DIR: agentDir },

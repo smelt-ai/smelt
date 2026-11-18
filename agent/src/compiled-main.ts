@@ -1,6 +1,6 @@
 import "./quickjs-embed.ts";
 import pkg from "../package.json" with { type: "json" };
-import { checksDaemonProtocol, parseCompiledCommand, protocolMismatch } from "./compiled-command.ts";
+import { checksDaemonProtocol, MCP_SERVERS, parseCompiledCommand, protocolMismatch } from "./compiled-command.ts";
 
 // 和 agent/scripts/compile-smelt-agent.ts 里改写进 Pi 的路径一致：嵌入文件的根目录分平台。
 const BUNFS_ROOT = process.platform === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/";
@@ -102,12 +102,26 @@ switch (command.kind) {
 		break;
 	case "acp-claude":
 		presentAs(command.args);
-		await import("smelt-adapter-bin:@agentclientprotocol/claude-agent-acp");
+		await import("smelt-bin:@agentclientprotocol/claude-agent-acp");
 		break;
 	case "acp-codex":
 		presentAs(command.args);
-		await import("smelt-adapter-bin:@agentclientprotocol/codex-acp");
+		await import("smelt-bin:@agentclientprotocol/codex-acp");
 		break;
+	case "mcp-server":
+		presentAs(command.args);
+		switch (command.server) {
+			case "browser-mcp":
+				await import("smelt-bin:@agent360/browser-mcp");
+				break;
+			case "playwright":
+				await import("smelt-bin:@playwright/mcp");
+				break;
+		}
+		break;
+	case "unknown-mcp-server":
+		console.error(`smelt-agent mcp-server: unknown server "${command.server}"; built in: ${MCP_SERVERS.join(", ")}`);
+		process.exit(2);
 	case "rpc":
 		await import("./main.ts");
 		break;

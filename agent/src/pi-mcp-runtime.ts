@@ -23,9 +23,9 @@ export const createPiDefaultTransport: McpTransportFactory = (entry, cwd, authPr
 	onThisSmeltAgent(piCreateDefaultTransport(entry, cwd, authProvider));
 
 /**
- * Smelt 的 MCP 预设写的命令（`smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH`），配上
- * `BUN_BE_BUN=1` 把 smelt-agent 当 Bun 用：`smelt-agent x --bun 包@版本`。Bun 编在 smelt-agent 里，
- * 不用另装一份。
+ * Smelt 的 MCP 预设写的命令（`smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH`）：编进来的
+ * 服务器是 `smelt-agent mcp-server <id>`；其余的配上 `BUN_BE_BUN=1` 把 smelt-agent 当 Bun 用：
+ * `smelt-agent x --bun 包@版本`。Bun 编在 smelt-agent 里，不用另装一份。
  */
 export const SMELT_AGENT_LAUNCHER = join(homedir(), ".smelt", "bin", "smelt-agent");
 

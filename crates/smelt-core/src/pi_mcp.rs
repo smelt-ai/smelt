@@ -195,43 +195,91 @@ fn retire_managed_bun_entries_at(agent_dir: &Path) -> Result<(), String> {
     })
 }
 
-/// 预设换了钉的版本，按预设登记过的条目跟着换：不然只有新加的用新版本，已经加过的永远停在
-/// 旧版本。认条目看名字和预设一样、命令是 smelt-agent、参数里有同一个包的别的版本；只换那一个
-/// 参数，用户改过的别的参数、`env` 照旧。没有要改的就不碰文件。守护启动时调，排在
+/// 预设换了跑法，按预设登记过的条目跟着换：不然只有新加的用新的，已经加过的永远停在旧的。
+/// 认条目看名字和预设一样、命令是 smelt-agent、参数里有这个包（`包@版本`）：
+/// - 预设换了钉的版本：只换那一个参数；
+/// - 预设编进了 smelt-agent：`x --bun 包@版本` 换成 `mcp-server <id>`，包后面的参数照旧，
+///   去掉 `BUN_BE_BUN`，随后删掉这些包在 `bun x` 缓存里的旧下载。
+///
+/// 用户改过的别的参数、`env` 照旧；没有要改的就不碰文件。守护启动时调，排在
 /// [`retire_managed_bun_entries`] 后面（旧 Bun 的条目先换成 smelt-agent）。
 pub fn upgrade_preset_pins() {
-    if let Err(error) =
-        upgrade_preset_pins_at(&pi_agent_dir(), smelt_paths::remote_desktop_installed())
+    let agent_dir = pi_agent_dir();
+    if let Err(error) = upgrade_preset_pins_at(&agent_dir, smelt_paths::remote_desktop_installed())
     {
         crate::app_log::error(
             "pi-mcp",
             &format!("升级 mcp.json 里预设的版本失败：{error}"),
         );
+        return;
+    }
+    if let Some(home) = smelt_paths::smelt_home() {
+        remove_bun_x_downloads_of_built_in_packages(&agent_dir, &home.join("cache").join("bun-x"));
     }
 }
 
-fn upgrade_preset_pins_at(agent_dir: &Path, remote_desktop: bool) -> Result<(), String> {
-    // 条目里要换成钉的版本的那个参数的位置。
-    let stale = |name: &str, entry: &Value| -> Option<(usize, &'static str)> {
-        let (package, pinned) = find_preset(name)?
-            .for_machine(remote_desktop)
-            .pinned_package()?;
-        let command = entry.get("command").and_then(Value::as_str)?;
-        if command.trim() != smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH {
-            return None;
+/// 编进 smelt-agent 之前，这些预设用自带 Bun 的 `x --bun 包@版本` 跑：`(预设 id, 包名)`。
+const PACKAGES_BUILT_INTO_SMELT_AGENT: [(&str, &str); 2] = [
+    ("browser-mcp", "@agent360/browser-mcp"),
+    ("playwright", "@playwright/mcp"),
+];
+
+/// 参数里写着 `package@版本` 的那一个的位置。
+fn package_arg(args: &[Value], package: &str) -> Option<usize> {
+    args.iter().position(|arg| {
+        arg.as_str()
+            .and_then(|arg| arg.strip_prefix(package))
+            .is_some_and(|version| version.starts_with('@'))
+    })
+}
+
+/// 按预设登记的条目跟上预设后的样子；不用改返回 `None`。
+fn follow_preset(name: &str, entry: &Value, remote_desktop: bool) -> Option<Value> {
+    let preset = find_preset(name)?.for_machine(remote_desktop);
+    let command = entry.get("command").and_then(Value::as_str)?;
+    if command.trim() != smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH {
+        return None;
+    }
+    let args = entry.get("args").and_then(Value::as_array)?;
+    let mut followed = entry.clone();
+    match preset.transport {
+        PiMcpPresetTransport::Http { .. } => return None,
+        PiMcpPresetTransport::Bun { .. } => {
+            let (package, pinned) = preset.pinned_package()?;
+            let index = package_arg(args, package)?;
+            if args[index] == pinned {
+                return None;
+            }
+            followed["args"][index] = Value::String(pinned.into());
         }
-        let args = entry.get("args").and_then(Value::as_array)?;
-        args.iter()
-            .position(|arg| {
-                arg.as_str().is_some_and(|arg| {
-                    arg != pinned
-                        && arg
-                            .strip_prefix(package)
-                            .is_some_and(|version| version.starts_with('@'))
-                })
-            })
-            .map(|index| (index, pinned))
-    };
+        PiMcpPresetTransport::SmeltAgent { .. } => {
+            let (_, package) = PACKAGES_BUILT_INTO_SMELT_AGENT
+                .iter()
+                .find(|(id, _)| *id == preset.id)?;
+            let index = package_arg(args, package)?;
+            let moved = [smelt_model::agent_paths::SMELT_AGENT_MCP_SERVER, preset.id]
+                .into_iter()
+                .map(|arg| Value::String(arg.into()))
+                .chain(args[index + 1..].iter().cloned())
+                .collect();
+            followed["args"] = Value::Array(moved);
+            let followed = followed.as_object_mut()?;
+            let env_left = followed
+                .get_mut("env")
+                .and_then(Value::as_object_mut)
+                .map(|env| {
+                    env.remove(smelt_model::agent_paths::BUN_BE_BUN.0);
+                    !env.is_empty()
+                });
+            if env_left == Some(false) {
+                followed.remove("env");
+            }
+        }
+    }
+    Some(followed)
+}
+
+fn upgrade_preset_pins_at(agent_dir: &Path, remote_desktop: bool) -> Result<(), String> {
     let Ok(text) = std::fs::read_to_string(agent_dir.join("mcp.json")) else {
         return Ok(());
     };
@@ -243,22 +291,67 @@ fn upgrade_preset_pins_at(agent_dir: &Path, remote_desktop: bool) -> Result<(), 
         .is_some_and(|servers| {
             servers
                 .iter()
-                .any(|(name, entry)| stale(name, entry).is_some())
+                .any(|(name, entry)| follow_preset(name, entry, remote_desktop).is_some())
         });
     if !needs {
         return Ok(());
     }
     edit_servers(agent_dir, |servers| {
         for (name, entry) in servers.iter_mut() {
-            let Some((index, pinned)) = stale(name, entry) else {
-                continue;
-            };
-            if let Some(args) = entry.get_mut("args").and_then(Value::as_array_mut) {
-                args[index] = Value::String(pinned.into());
+            if let Some(followed) = follow_preset(name, entry, remote_desktop) {
+                *entry = followed;
             }
         }
         Ok(())
     })
+}
+
+/// 删掉编进 smelt-agent 的包以前用 `x` 下载的那份（`<cache>/<包名 / 换成 +>@<版本>`，见
+/// `agent/src/pi-mcp-runtime.ts` 的 `bunCacheFor`），一份几十上百兆。`mcp.json` 里还有条目在用
+/// `x` 跑同一个包（用户自己加的）就留着，不然它每次守护启动都得重新下载。
+fn remove_bun_x_downloads_of_built_in_packages(agent_dir: &Path, cache_root: &Path) {
+    let Ok(listing) = std::fs::read_dir(cache_root) else {
+        return;
+    };
+    let doc = std::fs::read_to_string(agent_dir.join("mcp.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let still_downloaded = |package: &str| {
+        doc.as_ref()
+            .and_then(|doc| doc.get("mcpServers"))
+            .and_then(Value::as_object)
+            .is_some_and(|servers| {
+                servers.values().any(|entry| {
+                    entry
+                        .get("args")
+                        .and_then(Value::as_array)
+                        .is_some_and(|args| package_arg(args, package).is_some())
+                })
+            })
+    };
+    let retired: Vec<String> = PACKAGES_BUILT_INTO_SMELT_AGENT
+        .iter()
+        .filter(|(_, package)| !still_downloaded(package))
+        .map(|(_, package)| format!("{}@", package.replacen('/', "+", 1)))
+        .collect();
+    for item in listing.flatten() {
+        let name = item.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !retired
+            .iter()
+            .any(|prefix| name.starts_with(prefix.as_str()))
+        {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(item.path()) {
+            crate::app_log::error(
+                "pi-mcp",
+                &format!("删除 {} 失败：{error}", item.path().display()),
+            );
+        }
+    }
 }
 
 /// `mcp-auth.json` 的键是 `<命名空间>|<URL>`（旧版只有 URL），值里有 `tokens` 才算登录过。
@@ -539,10 +632,6 @@ mod tests {
                     "env": {"BUN_BE_BUN": "1", "GHIDRA_INSTALL_DIR": "/opt/ghidra"},
                     "timeout": 120,
                 },
-                "playwright": {
-                    "command": launcher,
-                    "args": ["x", "--bun", "@playwright/mcp@0.0.70", "--extension", "--mine"],
-                },
                 "browser-mcp": {"command": "npx", "args": ["-y", "@agent360/browser-mcp@1.0.0"]},
                 "mine": {"command": launcher, "args": ["x", "--bun", "rea-agents@6.5.0", "mcp"]},
             },
@@ -554,14 +643,8 @@ mod tests {
 
         let rea_pin = find_preset("rea").unwrap().pinned_package().unwrap().1;
         assert_eq!(rea_pin, "rea-agents@6.9.0");
-        let playwright_pin = find_preset("playwright")
-            .unwrap()
-            .pinned_package()
-            .unwrap()
-            .1;
         let mut expected = doc;
         expected["mcpServers"]["rea"]["args"][2] = rea_pin.into();
-        expected["mcpServers"]["playwright"]["args"][2] = playwright_pin.into();
         assert_eq!(read(&dir), expected);
 
         // 已经是新版本：不再碰文件。
@@ -577,6 +660,140 @@ mod tests {
         assert_eq!(before, after);
     }
 
+    /// 预设编进了 smelt-agent：登记过的条目从 `x --bun 包@版本` 换成 `mcp-server <id>`，包后面的
+    /// 参数和别的 `env` 照旧，`BUN_BE_BUN` 去掉（带着它 smelt-agent 就成了 Bun 命令行）。用户自己的
+    /// 条目不动。
+    #[test]
+    fn presets_built_into_smelt_agent_move_off_bun_x() {
+        let dir = temp_dir();
+        let launcher = smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH;
+        let doc = serde_json::json!({
+            "mcpServers": {
+                "playwright": {
+                    "command": launcher,
+                    "args": ["x", "--bun", "@playwright/mcp@0.0.85", "--extension", "--mine"],
+                    "env": {"BUN_BE_BUN": "1"},
+                    "exposure": "deferred",
+                },
+                "browser-mcp": {
+                    "command": launcher,
+                    "args": ["x", "--bun", "@agent360/browser-mcp@1.30.2"],
+                    "env": {"BUN_BE_BUN": "1", "KEEP": "yes"},
+                },
+                "mine": {"command": launcher, "args": ["x", "--bun", "@playwright/mcp@0.0.85"]},
+            },
+            "settings": {"keep": true},
+        });
+        std::fs::write(dir.join("mcp.json"), doc.to_string()).unwrap();
+
+        upgrade_preset_pins_at(&dir, false).unwrap();
+
+        let mut expected = doc;
+        expected["mcpServers"]["playwright"] = serde_json::json!({
+            "command": launcher,
+            "args": ["mcp-server", "playwright", "--extension", "--mine"],
+            "exposure": "deferred",
+        });
+        expected["mcpServers"]["browser-mcp"] = serde_json::json!({
+            "command": launcher,
+            "args": ["mcp-server", "browser-mcp"],
+            "env": {"KEEP": "yes"},
+        });
+        assert_eq!(read(&dir), expected);
+        assert_eq!(
+            expected["mcpServers"]["playwright"],
+            {
+                let mut fresh = find_preset("playwright").unwrap().config();
+                fresh["args"].as_array_mut().unwrap().push("--mine".into());
+                fresh.as_object_mut().unwrap().remove("description");
+                fresh
+            },
+            "迁移后的条目和新加的预设是同一种写法"
+        );
+
+        // 换过一次就不再碰文件。
+        let before = std::fs::metadata(dir.join("mcp.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        upgrade_preset_pins_at(&dir, false).unwrap();
+        let after = std::fs::metadata(dir.join("mcp.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn remote_desktop_playwright_moves_off_bun_x_with_its_endpoint() {
+        let dir = temp_dir();
+        let launcher = smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH;
+        std::fs::write(
+            dir.join("mcp.json"),
+            serde_json::json!({"mcpServers": {"playwright": {
+                "command": launcher,
+                "args": ["x", "--bun", "@playwright/mcp@0.0.85", "--cdp-endpoint", "http://127.0.0.1:9222"],
+                "env": {"BUN_BE_BUN": "1"},
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+
+        upgrade_preset_pins_at(&dir, true).unwrap();
+
+        assert_eq!(
+            read(&dir)["mcpServers"]["playwright"],
+            serde_json::json!({
+                "command": launcher,
+                "args": ["mcp-server", "playwright", "--cdp-endpoint", "http://127.0.0.1:9222"],
+            })
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 编进 smelt-agent 的包，`bun x` 缓存里的旧下载删掉；还有条目用 `x` 跑它的留着，别的包不碰。
+    #[test]
+    fn bun_x_downloads_of_built_in_packages_are_removed() {
+        let dir = temp_dir();
+        let cache = dir.join("bun-x");
+        for name in [
+            "@playwright+mcp@0.0.85",
+            "@playwright+mcp@0.0.83",
+            "@agent360+browser-mcp@1.31.0",
+            "@playwright+mcp-tools@1.0.0",
+            "rea-agents@6.9.0",
+        ] {
+            std::fs::create_dir_all(cache.join(name).join("node_modules")).unwrap();
+        }
+        std::fs::write(
+            dir.join("mcp.json"),
+            serde_json::json!({"mcpServers": {"mine": {
+                "command": smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH,
+                "args": ["x", "--bun", "@agent360/browser-mcp@1.31.0"],
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+
+        remove_bun_x_downloads_of_built_in_packages(&dir, &cache);
+
+        let mut left: Vec<String> = std::fs::read_dir(&cache)
+            .unwrap()
+            .map(|item| item.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "@agent360+browser-mcp@1.31.0",
+                "@playwright+mcp-tools@1.0.0",
+                "rea-agents@6.9.0"
+            ]
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn bun_presets_name_their_pinned_package() {
         assert_eq!(
@@ -587,11 +804,16 @@ mod tests {
             Some("rea-agents")
         );
         assert_eq!(
-            find_preset("playwright")
+            find_preset("chrome-devtools")
                 .unwrap()
                 .pinned_package()
                 .map(|(package, _)| package),
-            Some("@playwright/mcp")
+            Some("chrome-devtools-mcp")
+        );
+        assert_eq!(
+            find_preset("playwright").unwrap().pinned_package(),
+            None,
+            "编进 smelt-agent 的不在运行时下载，没有钉的包"
         );
         for preset in PI_MCP_PRESETS {
             if let PiMcpPresetTransport::Bun { .. } = preset.for_machine(true).transport {
@@ -647,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_agent360_browser_writes_a_pinned_deferred_stdio_entry() {
+    fn adding_agent360_browser_writes_a_built_in_deferred_stdio_entry() {
         let dir = temp_dir();
         add_pi_mcp_preset_at(&dir, "browser-mcp", false).unwrap();
 
@@ -658,8 +880,12 @@ mod tests {
         );
         assert_eq!(
             browser["args"],
-            serde_json::json!(["x", "--bun", "@agent360/browser-mcp@1.31.0"]),
-            "钉死版本，不带子命令才会启动服务器；--bun 防止转交给系统 node"
+            serde_json::json!(["mcp-server", "browser-mcp"]),
+            "编进 smelt-agent；上游入口不带参数才启动服务器"
+        );
+        assert!(
+            browser.get("env").is_none(),
+            "带 BUN_BE_BUN 就成了 Bun 命令行"
         );
         assert_eq!(browser["exposure"], "deferred");
         assert!(browser.get("url").is_none());
@@ -673,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_playwright_writes_a_pinned_deferred_stdio_entry() {
+    fn adding_playwright_writes_a_built_in_deferred_stdio_entry() {
         let dir = temp_dir();
         add_pi_mcp_preset_at(&dir, "playwright", false).unwrap();
 
@@ -684,9 +910,10 @@ mod tests {
         );
         assert_eq!(
             playwright["args"],
-            serde_json::json!(["x", "--bun", "@playwright/mcp@0.0.85", "--extension"]),
-            "钉死版本，不能用 @latest；--bun 防止转交给系统 node；--extension 接用户已登录的 Chrome"
+            serde_json::json!(["mcp-server", "playwright", "--extension"]),
+            "编进 smelt-agent；--extension 接用户已登录的 Chrome"
         );
+        assert!(playwright.get("env").is_none());
         assert_eq!(playwright["exposure"], "deferred");
         assert!(playwright.get("url").is_none());
         let preset = find_preset("playwright").unwrap();
@@ -713,9 +940,8 @@ mod tests {
         assert_eq!(
             chrome["args"],
             serde_json::json!([
-                "x",
-                "--bun",
-                "@playwright/mcp@0.0.85",
+                "mcp-server",
+                "playwright",
                 "--cdp-endpoint",
                 "http://127.0.0.1:9222"
             ]),
