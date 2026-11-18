@@ -12,8 +12,6 @@ mod action_tests;
 mod automation_command_tests;
 mod autostart_remote_tests;
 #[cfg(unix)]
-mod daemon_executable_tests;
-#[cfg(unix)]
 mod flow_control_tests;
 mod history_rename_tests;
 #[cfg(unix)]

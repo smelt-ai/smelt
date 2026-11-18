@@ -316,9 +316,8 @@ fn unit_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-/// 单元文件内容。`ExecStart` 是启动名 `~/.smelt/bin/smeltd` 本身（指向当前不可变映像
-/// 的软链）。升级时先把启动名拨到新映像，优雅停机后在本进程里 exec 那份映像，systemd
-/// 看到的还是同一个主进程。`Restart=on-failure` 不会在干净退出后续上，所以升级不能只
+/// 单元文件内容。`ExecStart` 是 `~/.smelt/bin/smeltd`。升级时新版本先 rename 盖到这个名字上，
+/// 优雅停机后在本进程里 exec 它，systemd 看到的还是同一个主进程。`Restart=on-failure` 不会在干净退出后续上，所以升级不能只
 /// exit。`KillMode=process`：停服务只停守护本身。
 fn unit_contents(exe: &Path) -> String {
     format!(
@@ -362,68 +361,54 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
 /// 把一份 smeltd 装进 `~/.smelt/bin` 之后的情形。
 #[cfg(target_os = "linux")]
 pub(crate) enum ImageInstall {
-    /// 启动名本来就指向这份映像。
+    /// 装着的就是这一版。
     AlreadyInstalled,
-    /// 运行时没在跑，启动名已经拨过去，下次拉起就是它。
+    /// 运行时没在跑，下次拉起就是新版本。
     Launched,
-    /// 正在跑的运行时已经退出，新映像由接替进程拉起。进行中的回合会中断。
+    /// 正在跑的运行时已经按新版本重新起来。进行中的回合会中断。
     Upgraded,
-    /// 启动名已经拨到新映像，正在跑的运行时却没换过去，还在跑旧版本。2026.1028 之前的
-    /// 守护按 fd 交接换代，新映像不再接交接，它等不到 READY 就回滚，落在这里。
+    /// 新版本已经装好，正在跑的运行时却没换过去，还在跑旧版本。2026.1028 之前的守护按 fd
+    /// 交接换代、2026.1118 之前的只认带指纹的映像名，都会落在这里。
     SwitchFailed(String),
 }
 
-/// 把 `exe` 装进 `~/.smelt/bin`，用和桌面同一套受管布局：发布成不可变映像
-/// `smeltd-<指纹>`，启动名 `smeltd` 是指向它的软链。运行时已经在跑就停掉旧进程并
-/// 拉起这份映像，不等待 agent 空闲。`smeltd install` 和桌面请运行时升级
-/// （[`crate::runtime_upgrade`]）共用这一份。
+/// 把 `exe` 装成 `~/.smelt/bin/smeltd`，包里带着 smelt-agent 就一起装进 `agent/`。运行时
+/// 已经在跑就让它按新版本重新起来，不等 agent 空闲。正在跑的进程握着的是被盖掉的旧文件，
+/// 不受影响。`smeltd install` 和桌面请运行时升级（[`crate::runtime_upgrade`]）共用这一份。
 #[cfg(target_os = "linux")]
 pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
     use smelt_core::daemon_image;
 
     let dir = bin_dir()?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("Couldn't create {}: {error}", dir.display()))?;
-    let launch = dir.join(daemon_image::LAUNCH_NAME);
-    let image = daemon_image::publish_image(&dir, exe)
-        .map_err(|error| format!("Couldn't publish the smeltd image: {error}"))?;
-    // 包里带着 smelt-agent 就一起发布、拨链接，和守护换不换代无关。从 `~/.smelt/bin` 或
-    // 开发目录 install 时旁边没有，交给运行时启动时按自己的版本补（`ensure_smelt_agent`）。
+    // 从开发目录、`~/.smelt/bin` 自己 install 时旁边没有 smelt-agent，交给运行时启动时按
+    // 自己的版本补（`ensure_smelt_agent`）。
     let package = exe.parent().ok_or("smeltd has no parent directory")?;
     if smelt_core::agent_image::bundled(package) {
-        smelt_core::agent_image::publish(&dir, package)
-            .map_err(|error| format!("Couldn't publish smelt-agent: {error}"))?;
+        smelt_core::agent_image::Bundle::read(package)
+            .and_then(|bundle| bundle.install(&dir))
+            .map_err(|error| format!("Couldn't install smelt-agent: {error}"))?;
     }
-    let installed = std::fs::canonicalize(&launch).ok() == std::fs::canonicalize(&image).ok();
+    let changed = daemon_image::install(&dir, exe)
+        .map_err(|error| format!("Couldn't install smeltd: {error}"))?;
+    if !changed {
+        return Ok(ImageInstall::AlreadyInstalled);
+    }
+    let installed = daemon_image::installed_path(&dir);
     let running = smelt_runtime_client::local::local_runtime()
         .describe()
         .is_ok();
-    let outcome = if installed {
-        ImageInstall::AlreadyInstalled
-    } else if running {
-        daemon_image::retarget_launch_after_commit(&image)
-            .map_err(|error| format!("Couldn't set the launch name: {error}"))?;
-        match crate::request_self_upgrade(&image) {
-            crate::SelfUpgradeOutcome::Upgraded => ImageInstall::Upgraded,
-            crate::SelfUpgradeOutcome::Failed(error) => ImageInstall::SwitchFailed(format!(
-                "Couldn't switch the runtime to the new version: {error}"
-            )),
-        }
-    } else {
-        daemon_image::retarget_launch_after_commit(&image)
-            .map_err(|error| format!("Couldn't set the launch name: {error}"))?;
-        ImageInstall::Launched
-    };
-    if let Err(error) = daemon_image::reap_unused_images(&dir) {
-        eprintln!("Couldn't clean up the old image: {error}");
+    if !running {
+        return Ok(ImageInstall::Launched);
     }
-    if let Err(error) = smelt_core::agent_image::reap_unused(&dir) {
-        eprintln!("Couldn't clean up the old smelt-agent: {error}");
-    }
-    Ok(outcome)
+    Ok(match crate::request_self_upgrade(&installed) {
+        crate::SelfUpgradeOutcome::Upgraded => ImageInstall::Upgraded,
+        crate::SelfUpgradeOutcome::Failed(error) => ImageInstall::SwitchFailed(format!(
+            "Couldn't switch the runtime to the new version: {error}"
+        )),
+    })
 }
 
-/// `~/.smelt/bin`：启动名、映像和随运行时一起装的小工具都在这里。
+/// `~/.smelt/bin`：smeltd、smelt-agent 和随运行时一起装的小工具都在这里。
 #[cfg(target_os = "linux")]
 pub(crate) fn bin_dir() -> Result<PathBuf, String> {
     Ok(smelt_paths::smelt_home()
@@ -431,7 +416,7 @@ pub(crate) fn bin_dir() -> Result<PathBuf, String> {
         .join("bin"))
 }
 
-/// 把正在执行的这份 smeltd 装好，返回启动名。
+/// 把正在执行的这份 smeltd 装好，返回装好的路径。
 #[cfg(target_os = "linux")]
 fn install_current_exe() -> Result<PathBuf, String> {
     let exe = std::env::current_exe()
@@ -444,7 +429,7 @@ fn install_current_exe() -> Result<PathBuf, String> {
             )
         }
         ImageInstall::Launched => {}
-        // 安装器是另一个进程，停得了旧运行时：启动名已经拨好，看护（systemd 的
+        // 安装器是另一个进程，停得了旧运行时：新版本已经装在固定的名字上，看护（systemd 的
         // Restart=always，或 smelt-up）按它拉起的就是新版本。守护内部的远程升级
         // （runtime_upgrade）不走这里，那里停掉的是它自己。
         ImageInstall::SwitchFailed(error) => {
@@ -457,7 +442,7 @@ fn install_current_exe() -> Result<PathBuf, String> {
             )
         }
     }
-    Ok(bin_dir()?.join(smelt_core::daemon_image::LAUNCH_NAME))
+    Ok(smelt_core::daemon_image::installed_path(&bin_dir()?))
 }
 
 /// 停机回执之后，运行时还要关 iroh、清会话目录才退出；等它退出的上限。

@@ -1,6 +1,6 @@
 //! 本机 smeltd 的生命周期（设计文档 D3）。
 //!
-//! 拉起、升级、交接和过期探测。Windows 上升级是重启，不交接。
+//! 拉起、换版本和过期探测。换版本一律是停掉、装上、再拉起。
 //! 终端网格、远程会话连接留在 `terminal`。
 
 use rust_i18n::t;
@@ -28,9 +28,8 @@ fn local_runtime() -> smelt_runtime_client::RuntimeClient {
 /// 守护常驻路径：与 `.app` 解耦。装 DMG / 覆盖 App 不会 cp 到正在跑的二进制，
 /// 避免 macOS 对签名文件覆盖时 SIGKILL smeltd → 会话全灭 → 对话被「重新初始化」。
 ///
-/// **硬约束**：正在跑的 smeltd 必须映射 `~/.smelt/bin/` 里的一份映像，绝不能映射
-/// `Smelt.app` 里的那份。否则用户用 Finder 拖 DMG 覆盖 App 时内核会干掉守护。
-/// `smeltd` 这个名字只是指向当前映像的符号链接。
+/// **硬约束**：正在跑的 smeltd 必须是 `~/.smelt/bin/` 里的那份，绝不能是 `Smelt.app` 里的。
+/// 否则用户用 Finder 拖 DMG 覆盖 App 时内核会干掉守护。
 fn managed_daemon_dir() -> std::path::PathBuf {
     smelt_paths::smelt_home()
         .unwrap_or_else(|| std::env::temp_dir().join(".smelt"))
@@ -38,15 +37,11 @@ fn managed_daemon_dir() -> std::path::PathBuf {
 }
 
 pub(crate) fn bundled_daemon_file_name() -> &'static str {
-    if cfg!(windows) {
-        "smeltd.exe"
-    } else {
-        "smeltd"
-    }
+    smelt_sys::daemon_image::file_name()
 }
 
 pub fn managed_daemon_path() -> std::path::PathBuf {
-    smelt_sys::daemon_image::launch_executable(&managed_daemon_dir())
+    smelt_sys::daemon_image::installed_path(&managed_daemon_dir())
 }
 
 /// 路径是否落在某个 `.app` 包内（装 DMG 会被覆盖/删除）。
@@ -55,39 +50,12 @@ fn path_inside_app_bundle(p: &std::path::Path) -> bool {
         .any(|c| c.as_os_str().to_str().is_some_and(|s| s.ends_with(".app")))
 }
 
-/// 规范化路径后比较是否指向同一文件（symlink / 相对路径）。
-fn same_daemon_path(a: &std::path::Path, b: &std::path::Path) -> bool {
-    if a == b {
-        return true;
-    }
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(ca), Ok(cb)) => ca == cb,
-        _ => false,
-    }
-}
-
-/// 进程是否已住在 managed 目录。映像文件名是 `smeltd-<指纹>`，启动名是旁边的链接。
-/// 不能只认文件名 `smeltd`：交接后的进程报的是映像自己的路径。
+/// 进程是否跑在 managed 目录里。从旧布局升上来的守护跑的是旁边的 `smeltd-<指纹>`，也算。
 fn exe_is_managed(exe: &std::path::Path) -> bool {
-    let managed = managed_daemon_path();
-    if same_daemon_path(exe, &managed) {
-        return true;
-    }
     let dir = managed_daemon_dir();
-    if exe.starts_with(&dir) {
-        return true;
-    }
-    // 启动名已经拨走，进程仍报着原来的路径：比 inode。
-    if let (Ok(em), Ok(mm)) = (std::fs::metadata(exe), std::fs::metadata(&managed)) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if em.dev() == mm.dev() && em.ino() == mm.ino() {
-                return true;
-            }
-        }
-    }
-    false
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    exe.parent() == Some(dir.as_path())
 }
 
 /// 等 smeltd 监听 socket 的上限。
@@ -173,108 +141,37 @@ fn same_daemon_binary(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
-/// 这个路径是不是某个活进程的可执行映像。安装方自己没打开它时，命中的就是正在跑的 daemon。
-fn path_is_live_executable(path: &std::path::Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        let Ok(c_path) =
-            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
-        else {
-            return true;
-        };
-        // 第一次只拿缓冲区大小。这个返回值在没人映射时也是正数，不能拿来判断。
-        let hint = unsafe {
-            proc_listpidspath(
-                PROC_ALL_PIDS,
-                0,
-                c_path.as_ptr(),
-                0,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if hint <= 0 {
-            return false;
-        }
-        let mut buf = vec![0u8; hint as usize];
-        let bytes = unsafe {
-            proc_listpidspath(
-                PROC_ALL_PIDS,
-                0,
-                c_path.as_ptr(),
-                0,
-                buf.as_mut_ptr().cast(),
-                hint,
-            )
-        };
-        bytes > 0
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = path;
-        false
-    }
-}
-
-#[cfg(target_os = "macos")]
-const PROC_ALL_PIDS: u32 = 1;
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn proc_listpidspath(
-        ty: u32,
-        typeinfo: u32,
-        path: *const libc::c_char,
-        pathflags: u32,
-        buffer: *mut libc::c_void,
-        buffersize: i32,
-    ) -> i32;
-}
-
-fn reap_managed_daemon_images(dir: &std::path::Path) {
-    if let Err(error) = smelt_sys::daemon_image::reap_unused_images(dir) {
-        eprintln!("[workspace] 回收旧守护映像失败：{error}");
-    }
-}
-
-/// 守护没在跑时发布一份不可变映像，并把启动名拨过去。
-/// 启动名这个目录项仍被进程映射时，只挂 `smeltd.pending`，不拨链接。
-fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+/// 把 App 里的 smeltd 和 smelt-agent 装进 `~/.smelt/bin`。守护必须已经停了：Windows 上换不了
+/// 正在执行的文件，Unix 上换掉的 smelt-agent 会和还在跑的 Pi 对不上。smelt-agent 要读一遍
+/// 约 120MB 算指纹，所以只在要拉起守护时做。
+fn install_bundled(bundled_daemon: &std::path::Path) -> std::io::Result<()> {
     let dir = managed_daemon_dir();
-    std::fs::create_dir_all(&dir)?;
-    let managed = managed_daemon_path();
-    let image = smelt_sys::daemon_image::publish_image(&dir, src)?;
-    let need = !managed.is_file() || !same_daemon_binary(src, &managed);
-    if need {
-        if managed.is_file() && path_is_live_executable(&managed) {
-            smelt_sys::daemon_image::retarget_pending_symlink(&dir, &image)?;
-            eprintln!(
-                "[workspace] {} 仍被进程映射，不改启动名，已挂上 smeltd.pending",
-                managed.display()
-            );
-            reap_managed_daemon_images(&dir);
-            return Ok(managed);
+    if smelt_sys::daemon_image::install(&dir, bundled_daemon)? {
+        eprintln!("[workspace] 已装上守护 {}", bundled_daemon.display());
+    }
+    if let Some(src) = bundled_agent_dir(bundled_daemon) {
+        // smelt-agent 装不上不拦守护：起 Pi 时会报找不到。
+        let installed =
+            smelt_sys::agent_image::Bundle::read(&src).and_then(|bundle| bundle.install(&dir));
+        if let Err(error) = installed {
+            eprintln!("[workspace] 装 smelt-agent 失败：{error}");
         }
-        smelt_sys::daemon_image::retarget_launch_after_commit(&image)?;
-        eprintln!(
-            "[workspace] 已同步守护 {} → {}",
-            src.display(),
-            image.display()
-        );
     }
-    reap_managed_daemon_images(&dir);
-    if managed.is_file() {
-        Ok(managed)
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            t!("daemon.install_failed", path = managed.display()).into_owned(),
-        ))
-    }
+    Ok(())
 }
 
-fn pending_upgrade_exe() -> Option<std::path::PathBuf> {
-    smelt_sys::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
+/// App 里那一整套 smelt-agent。macOS：守护在 `Contents/MacOS`，smelt-agent 在同一个
+/// `Contents` 下的 Resources 里。Windows：几个 exe 在同一目录。开发构建里没有就是 `None`。
+fn bundled_agent_dir(bundled_daemon: &std::path::Path) -> Option<std::path::PathBuf> {
+    let src = if cfg!(windows) {
+        bundled_daemon.parent()?.to_path_buf()
+    } else {
+        bundled_daemon
+            .parent()?
+            .parent()?
+            .join(smelt_sys::agent_image::APP_BUNDLE_DIR)
+    };
+    smelt_sys::agent_image::bundled(&src).then_some(src)
 }
 
 /// 多 pane 同时 connect 时串行化迁移，避免并发 upgrade 踩踏。
@@ -338,18 +235,13 @@ where
     }
 }
 
+/// 守护没在跑（或不响应）时装上 App 里的版本。在跑就不动：落后了由 `workspace_update` 在没有
+/// 进行中的会话时重启，重启后经这里装上新版本。
 fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf> {
-    let bundled = bundled_daemon_path();
     let managed = managed_daemon_path();
-
-    if let Some(bundled) = &bundled {
-        sync_bundled_pi(bundled);
-    }
-    // 无分发物：仅依赖已有 managed（开发机偶发）。
-    let Some(bundled) = bundled else {
+    // 无分发物（开发机偶发）：只能用已有的 managed。
+    let Some(bundled) = bundled_daemon_path() else {
         return if managed.is_file() {
-            // 仍可能需要把「跑在 .app 里」的旧守护迁走
-            let _ = migrate_running_daemon_off_app(&managed);
             Ok(managed)
         } else {
             Err(std::io::Error::new(
@@ -358,110 +250,19 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
             ))
         };
     };
-
     match probe_daemon_detail() {
-        DaemonProbe::NotRunning => {
-            install_managed_daemon_from(&bundled)?;
-            Ok(managed_daemon_path())
-        }
+        DaemonProbe::NotRunning => install_bundled(&bundled)?,
         DaemonProbe::Unresponsive => {
-            // 套接字还在，但读不出 version。先停掉旧进程，再装上 App 里的映像并拉起。
+            // 套接字还在，但读不出 version。停掉旧进程，装上 App 里的版本再拉起。
             restart_daemon();
-            install_managed_daemon_from(&bundled)?;
-            let path = managed_daemon_path();
-            spawn_managed_daemon_and_connect(path.clone()).map_err(|error| {
+            install_bundled(&bundled)?;
+            spawn_managed_daemon_and_connect(managed.clone()).map_err(|error| {
                 std::io::Error::other(t!("daemon.restart_not_ready", error = error).into_owned())
             })?;
-            Ok(path)
         }
-        DaemonProbe::Running {
-            exe_mtime: _,
-            exe_path,
-            ..
-        } => {
-            let on_managed = exe_path
-                .as_ref()
-                .map(|p| exe_is_managed(std::path::Path::new(p)))
-                .unwrap_or(false);
-            let inside_app = exe_path
-                .as_ref()
-                .map(|p| path_inside_app_bundle(std::path::Path::new(p)))
-                .unwrap_or(!on_managed);
-            let content_differs = !managed.is_file() || !same_daemon_binary(&managed, &bundled);
-            if inside_app || !on_managed || content_differs {
-                eprintln!(
-                    "[workspace] 重启守护到 App 内映像（inside_app={inside_app} on_managed={on_managed} content_differs={content_differs} exe={exe_path:?}）"
-                );
-                match upgrade_daemon_exe(Some(&bundled)) {
-                    UpgradeOutcome::Upgraded => Ok(managed_daemon_path()),
-                    _ => Err(std::io::Error::other(t!("daemon.swap_failed").into_owned())),
-                }
-            } else {
-                Ok(managed_daemon_path())
-            }
-        }
+        DaemonProbe::Running { .. } => {}
     }
-}
-
-/// 把 App 里的 smelt-agent 发布到 `~/.smelt/bin` 并拨好 `smelt-agent` 链接，再回收没人用的旧版本。
-/// 和守护版本无关：只换了 Pi 时守护不用交接，之后新起的 Pi 就是新的。要读一遍约
-/// 120MB 算指纹，每个 GUI 进程只做一次。
-fn sync_bundled_pi(bundled_daemon: &std::path::Path) {
-    static SYNCED: AtomicBool = AtomicBool::new(false);
-    if SYNCED.load(Ordering::Relaxed) {
-        return;
-    }
-    // macOS：守护在 `Contents/MacOS`，Pi 在同一个 `Contents` 下的 Resources 里。
-    // Windows：四个 exe 在同一目录，Pi 就在 smeltd.exe 旁边。
-    let src = {
-        #[cfg(windows)]
-        {
-            bundled_daemon.parent().map(std::path::Path::to_path_buf)
-        }
-        #[cfg(not(windows))]
-        {
-            bundled_daemon
-                .parent()
-                .and_then(std::path::Path::parent)
-                .map(|contents| contents.join(smelt_sys::agent_image::APP_BUNDLE_DIR))
-        }
-    };
-    let Some(src) = src else {
-        return;
-    };
-    let dir = managed_daemon_dir();
-    match smelt_sys::agent_image::publish(&dir, &src) {
-        Ok(_) => SYNCED.store(true, Ordering::Relaxed),
-        Err(error) => eprintln!("[workspace] 发布 smelt-agent 失败：{error}"),
-    }
-    if let Err(error) = smelt_sys::agent_image::reap_unused(&dir) {
-        eprintln!("[workspace] 回收旧 smelt-agent 失败：{error}");
-    }
-}
-
-/// 守护已在跑但路径未知/在 App 内时，用已有 managed 文件尝试迁出。
-fn migrate_running_daemon_off_app(managed: &std::path::Path) -> UpgradeOutcome {
-    if !managed.is_file() {
-        return UpgradeOutcome::Failed;
-    }
-    match probe_daemon_detail() {
-        DaemonProbe::Running { exe_path, .. } => {
-            let on_managed = exe_path
-                .as_ref()
-                .map(|p| exe_is_managed(std::path::Path::new(p)))
-                .unwrap_or(false);
-            let inside_app = exe_path
-                .as_ref()
-                .map(|p| path_inside_app_bundle(std::path::Path::new(p)))
-                .unwrap_or(!on_managed);
-            if on_managed && !inside_app {
-                return UpgradeOutcome::Upgraded;
-            }
-            // 停掉正在跑的守护，换成 `~/.smelt/bin` 里的这份映像，再拉起同版本新进程。
-            upgrade_daemon_exe(Some(managed))
-        }
-        DaemonProbe::NotRunning | DaemonProbe::Unresponsive => UpgradeOutcome::Failed,
-    }
+    Ok(managed)
 }
 
 /// 进程内 connect 路径是否已 ensure 过（多 pane 只付一次代价）。
@@ -489,8 +290,7 @@ pub(crate) fn connect_daemon() -> std::io::Result<RuntimeStream> {
     }
 
     // 要拉起了：完整检查一遍，不用进程内缓存。缓存只说明「之前在跑的那个已经核对过」，
-    // 它退出后启动名可能还指着旧映像（新版本只挂在 smeltd.pending），照缓存直接拉起会把
-    // 旧版本又起一遍。没在跑时完整检查会把启动名拨到 App 里的版本。
+    // 它退出后 App 可能已经换了版本，照缓存直接拉起会把旧版本又起一遍。
     let daemon = match ensure_managed_daemon_current() {
         Ok(p) => p,
         Err(e) => {
@@ -529,14 +329,8 @@ fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Resu
         use std::process::Stdio;
         let exe = std::env::current_exe().ok();
         let in_app_bundle = exe.as_ref().is_some_and(|e| path_inside_app_bundle(e));
-        // launch_executable：Unix 是启动名那条符号链接，再 canonicalize 成真正的映像；
-        // Windows 直接是 `smeltd-<指纹>.exe`。不要 exec 一个还会被改掉的名字。
-        let launch = daemon
-            .parent()
-            .map(smelt_sys::daemon_image::launch_executable)
-            .unwrap_or_else(|| daemon.clone());
-        let spawn_at = std::fs::canonicalize(&launch).unwrap_or(launch);
-        let mut cmd = std::process::Command::new(&spawn_at);
+        let spawn_at = &daemon;
+        let mut cmd = std::process::Command::new(spawn_at);
         smelt_paths::export_to(&mut cmd);
         smelt_sys::tty_color::clear_command(&mut cmd);
         cmd.stdin(Stdio::null())
@@ -548,10 +342,9 @@ fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Resu
         if in_app_bundle {
             cmd.env("SMELT_MENUBAR", "1");
         }
-        // 把 spawn 目标的指纹传给子进程：它启动时直接钉死，不用再哈希磁盘——
-        // 关闭“spawn 与守护启动哈希之间磁盘被替换”的竞态窗口（与 handoff 经
-        // SMELTD_DAEMON_FINGERPRINT 传指纹同一机制）。
-        if let Ok(fingerprint) = smelt_sys::daemon_image::content_fingerprint(&spawn_at) {
+        // 把 spawn 目标的指纹传给子进程：它启动时直接钉死，不用再哈希磁盘，也就没有
+        // 「拉起与守护启动哈希之间磁盘被替换」的窗口。
+        if let Ok(fingerprint) = smelt_sys::daemon_image::content_fingerprint(spawn_at) {
             cmd.env("SMELTD_DAEMON_FINGERPRINT", fingerprint);
         }
         let pipe = smelt_sys::ready_pipe::ReadyPipe::attach(&mut cmd);
@@ -743,9 +536,8 @@ pub fn daemon_outdated() -> bool {
 /// outdated 纯判定（可单测）：指纹主键 + 老守护回退。
 ///
 /// 主键是指纹：守护自报启动时钉死的进程指纹，与磁盘期望二进制（bundled 优先，
-/// 其次 managed）的指纹比。内容不同=旧，不受“cp 造成 mtime+1s”误判，也不被
-/// StageDiskOnly 骗（磁盘新了、进程指纹还是老的——之前 `same_daemon_binary(
-/// running_exe_path, bundled)` 比的是两个磁盘新文件，直接误判“不旧”，升级永不触发）。
+/// 其次 managed）的指纹比。内容不同=旧，不受“cp 造成 mtime+1s”误判；也不会因为
+/// 进程跑的那个文件已经被换成新版本而误判不旧。
 fn daemon_outdated_from_probe(
     exe_mtime: u64,
     exe_path: Option<&str>,
@@ -770,8 +562,6 @@ fn daemon_outdated_from_probe(
         return outdated_by_fingerprint(pinned, expected.as_deref());
     }
     // 老守护无指纹：退回旧 heuristic（exe 路径内容比对 + mtime）。
-    // 注意这条在 StageDiskOnly 后会误判“不旧”，但老守护熬过一次升级就换成新
-    // 守护了——一次性窗口，可接受。
     if let (Some(exe), Some(bundled)) = (exe_path, bundled_daemon_path()) {
         let running_exe = std::path::Path::new(exe);
         let path_was_renamed =
@@ -784,7 +574,7 @@ fn daemon_outdated_from_probe(
 }
 
 /// 指纹主键判定（纯函数，可单测）：内容不同=旧。期望文件缺失/读不出→保守不旧，
-/// 避免误报打扰用户；下一轮（或 headless 自升级）再看。
+/// 避免误报打扰用户；下一轮再看。
 fn outdated_by_fingerprint(pinned: &str, expected: Option<&std::path::Path>) -> bool {
     let Some(path) = expected else {
         return false;
@@ -819,8 +609,8 @@ fn file_stamp(path: &std::path::Path) -> std::io::Result<FileStamp> {
     })
 }
 
-/// 期望映像的指纹，按文件身份缓存。落后检查跟着文件变化、窗口激活、本机运行时重连走，
-/// 次数不定；映像几十到几百 MB，文件没变就不重新哈希。
+/// 期望的那份 smeltd 的指纹，按文件身份缓存。落后检查跟着文件变化、窗口激活、本机运行时重连走，
+/// 次数不定；smeltd 几十到几百 MB，文件没变就不重新哈希。
 fn expected_fingerprint(path: &std::path::Path) -> std::io::Result<String> {
     static CACHE: Mutex<Option<(FileStamp, String)>> = Mutex::new(None);
     let stamp = file_stamp(path)?;
@@ -856,104 +646,55 @@ fn is_successor_daemon(before: Option<&DaemonInfo>, now: Option<&DaemonInfo>) ->
     )
 }
 
-/// 把守护换到另一份映像之后的结果。
+/// 把守护换成 App 里的版本之后的结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpgradeOutcome {
-    /// 新进程已经起来，或者本来没跑、直接拉起了目标映像。
+    /// 新进程已经起来，或者本来没跑、直接拉起了新版本。
     Upgraded,
-    /// 映像没发布成功，或者新进程没有接替旧进程。
+    /// 没装上，或者新进程没有接替旧进程。
     Failed,
 }
 
-/// 停掉本机守护并拉起受管目录里的目标映像。进行中的回合会中断，历史还在。
-pub fn upgrade_daemon() -> UpgradeOutcome {
-    upgrade_daemon_exe(pending_upgrade_exe().as_deref())
-}
-
-/// 发布 `new_exe`（或待装映像）到 `~/.smelt/bin`，拨好启动名，停掉旧进程再拉起。
+/// 停掉本机守护，装上 App 里的版本再拉起。进行中的回合会中断，历史还在。
 ///
-/// 不向旧守护发 `upgrade`。旧进程可能还是会做 fd 交接的版本，桌面必须自己停掉它。
-/// `new_exe` 为 `None` 时用 `smeltd.pending`，没有就用 App 里的那份。
-pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
-    let image = match resolve_restart_image(new_exe) {
-        Ok(image) => image,
+/// 不向旧守护发 `upgrade`：旧进程可能还是会做 fd 交接的版本，桌面必须自己停掉它。
+pub fn upgrade_daemon() -> UpgradeOutcome {
+    let Some(bundled) = bundled_daemon_path() else {
+        eprintln!("[workspace] 找不到 App 里的 smeltd");
+        return UpgradeOutcome::Failed;
+    };
+    let _gate = MANAGED_DAEMON_GATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _file_gate = match acquire_managed_daemon_file_lock() {
+        Ok(lock) => lock,
         Err(error) => {
-            eprintln!("[workspace] 准备守护映像失败：{error}");
+            eprintln!("[workspace] 拿不到守护安装锁：{error}");
             return UpgradeOutcome::Failed;
         }
     };
-    if let Err(error) = smelt_sys::daemon_image::retarget_launch_after_commit(&image) {
-        eprintln!("[workspace] 设置启动名失败：{error}");
-        return UpgradeOutcome::Failed;
-    }
     let before = daemon_info();
     let was_up = !matches!(probe_daemon(), DaemonProbe::NotRunning);
     if was_up {
         restart_daemon();
     }
-    if local_runtime()
-        .connect_with_timeout(Duration::from_millis(200))
-        .is_err()
-    {
-        if let Err(error) = spawn_managed_daemon_and_connect(managed_daemon_path()) {
-            eprintln!("[workspace] 拉起新守护失败：{error}");
-            return UpgradeOutcome::Failed;
-        }
+    if let Err(error) = install_bundled(&bundled) {
+        eprintln!("[workspace] 装守护失败：{error}");
+        return UpgradeOutcome::Failed;
+    }
+    if let Err(error) = spawn_managed_daemon_and_connect(managed_daemon_path()) {
+        eprintln!("[workspace] 拉起新守护失败：{error}");
+        return UpgradeOutcome::Failed;
     }
     let running = matches!(probe_daemon(), DaemonProbe::Running { .. });
     let replaced = !was_up || is_successor_daemon(before.as_ref(), daemon_info().as_ref());
     if running && replaced {
-        reap_managed_daemon_images(&managed_daemon_dir());
+        CONNECT_MANAGED_ENSURED.store(true, Ordering::Relaxed);
         UpgradeOutcome::Upgraded
     } else {
-        eprintln!("[workspace] 守护没有换成新映像（was_up={was_up}）");
+        eprintln!("[workspace] 守护没有换成新版本（was_up={was_up}）");
         UpgradeOutcome::Failed
     }
-}
-
-/// 目标已经是受管目录里的不可变映像时直接用它，否则发布一份进去。
-/// 启动名不能指向 `.app` 里面的文件。
-fn resolve_restart_image(new_exe: Option<&std::path::Path>) -> std::io::Result<std::path::PathBuf> {
-    let dir = managed_daemon_dir();
-    std::fs::create_dir_all(&dir)?;
-    let src = match new_exe {
-        Some(path) if path.is_file() => path.to_path_buf(),
-        Some(path) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                t!("daemon.image_missing", path = path.display()).into_owned(),
-            ));
-        }
-        None => pending_upgrade_exe()
-            .filter(|path| path.is_file())
-            .or_else(bundled_daemon_path)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    t!("daemon.no_image").into_owned(),
-                )
-            })?,
-    };
-    if image_already_in_managed_dir(&src, &dir) {
-        return Ok(std::fs::canonicalize(&src).unwrap_or(src));
-    }
-    smelt_sys::daemon_image::publish_image(&dir, &src)
-}
-
-fn image_already_in_managed_dir(path: &std::path::Path, dir: &std::path::Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    if !smelt_sys::daemon_image::is_immutable_image_name(name) {
-        return false;
-    }
-    let Ok(canon) = path.canonicalize() else {
-        return false;
-    };
-    let Ok(dir) = dir.canonicalize() else {
-        return false;
-    };
-    canon.parent() == Some(dir.as_path())
 }
 
 /// 让守护自己退出。**会杀掉它托管的所有 PTY 会话**（进程一死子进程 EOF/SIGHUP），
@@ -1054,31 +795,6 @@ mod successor_daemon_tests {
 }
 
 #[cfg(all(test, unix))]
-mod install_commit_tests {
-    use super::*;
-
-    #[test]
-    fn mapped_executable_is_live_and_a_fresh_file_is_not() {
-        let exe = std::env::current_exe().unwrap();
-        assert!(
-            path_is_live_executable(&exe),
-            "正在跑的测试二进制必须被看成活映像"
-        );
-        let fresh = std::env::temp_dir().join(format!(
-            "smelt-unmapped-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::write(&fresh, b"not-mapped").unwrap();
-        assert!(
-            !path_is_live_executable(&fresh),
-            "没人映射的文件必须允许替换"
-        );
-        std::fs::remove_file(fresh).unwrap();
-    }
-}
-
-#[cfg(all(test, unix))]
 mod outdated_fingerprint_tests {
     use super::*;
 
@@ -1092,9 +808,7 @@ mod outdated_fingerprint_tests {
         path
     }
 
-    /// 核心回归：StageDiskOnly 后磁盘是新的、进程指纹还是老的，必须判旧。
-    /// 之前 `same_daemon_binary(running_exe_path, bundled)` 比的是两个磁盘新文件，
-    /// 误判“不旧”，升级永不触发。
+    /// 核心回归：磁盘是新的、进程指纹还是老的，必须判旧。比两个磁盘文件会误判「不旧」。
     #[test]
     fn staged_disk_with_old_process_is_outdated() {
         let disk_new = fixture(b"new-binary-bytes");
@@ -1108,7 +822,7 @@ mod outdated_fingerprint_tests {
         std::fs::remove_file(disk_old).ok();
     }
 
-    /// 内容一致（仅 cp 造成 mtime 变化）不判旧：handoff 会闪断终端，不能误触。
+    /// 内容一致（仅 cp 造成 mtime 变化）不判旧：重启会打断会话，不能误触。
     #[test]
     fn same_content_is_not_outdated() {
         let disk = fixture(b"same-binary-bytes");

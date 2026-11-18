@@ -2,7 +2,7 @@
 //! [`smelt_runtime_client::protocol::runtime_upgrade`]）。运行时自己从 GitHub Release
 //! 下载那个版本的包，对着同一个 Release 的 SHA256SUMS 校验，和一键安装（`get-smeltd.sh`
 //! 加包里的 `install.sh`）装的是同一份东西：随运行时一起的小工具原子替换进
-//! `~/.smelt/bin`，smeltd 发布成不可变映像后重启。进行中的回合会中断，历史记录还在。
+//! `~/.smelt/bin`，smeltd 装好后重启。进行中的回合会中断，历史记录还在。
 //!
 //! 只升不降：要的版本比自己旧就拒绝。两台不同版本的桌面连同一个运行时时，运行时最终
 //! 跟着较新的那台。系统包和远程桌面的配置要 root，这里不碰，变了仍要重新跑安装脚本。
@@ -78,16 +78,11 @@ fn check_target(requested: &str, current: &str) -> Result<Option<semver::Version
     Ok(Some(target))
 }
 
-/// 守护启动后在后台调一次，见 `linux::ensure_smelt_agent`。只有装在 `~/.smelt/bin` 的映像
-/// 才这样补：开发、测试里直接跑的 smeltd 不去 Release 下载。macOS 上由桌面从 App 里发布。
+/// 守护启动后在后台调一次，见 `linux::ensure_smelt_agent`。只有装在 `~/.smelt/bin` 的 smeltd
+/// 才这样补：开发、测试里直接跑的 smeltd 不去 Release 下载。macOS 上由桌面从 App 里装。
 #[cfg(target_os = "linux")]
 pub(crate) fn ensure_smelt_agent() {
-    let managed = std::env::current_exe().ok().is_some_and(|exe| {
-        exe.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(smelt_core::daemon_image::is_immutable_image_name)
-    });
-    if !managed {
+    if !crate::is_managed_daemon() {
         return;
     }
     let Some(Ok(version)) = smelt_version::RELEASE.map(semver::Version::parse) else {
@@ -281,19 +276,20 @@ mod linux {
     }
 
     /// 同安装脚本的 `put`：先写到旁边再改名盖过去，正在跑的旧版本不受影响。
-    /// Linux 上没有桌面替运行时发布 smelt-agent，运行时自己保证它在位。链接已经指向能执行的
-    /// 一份就不动；缺了（旧版运行时代为升级时还不认识 smelt-agent、文件被删、从没有 smelt-agent
-    /// 的目录 install）就按自己的版本取 Release 包，校验后发布。顺带回收没人用的旧版本。
+    /// Linux 上没有桌面替运行时装 smelt-agent，运行时自己保证它在位。已经有能执行的一份就
+    /// 不动；缺了（旧版运行时代为升级时还不认识 smelt-agent、文件被删、从没有 smelt-agent
+    /// 的目录 install）就按自己的版本取 Release 包，校验后装上。
     pub(super) fn ensure_smelt_agent(version: &semver::Version) -> Result<(), String> {
         let bin = crate::service::bin_dir()?;
-        if smelt_core::agent_image::current(&bin).is_none() {
-            let staging = Staging::new("smelt-agent")?;
-            let package = fetch_package(&staging, version, &super::release_url(version))?;
-            smelt_core::agent_image::publish(&bin, &package)
-                .map_err(|error| format!("Couldn't publish smelt-agent: {error}"))?;
+        if smelt_core::agent_image::current(&bin).is_some() {
+            return Ok(());
         }
-        smelt_core::agent_image::reap_unused(&bin)
-            .map_err(|error| format!("Couldn't clean up the old smelt-agent: {error}"))
+        let staging = Staging::new("smelt-agent")?;
+        let package = fetch_package(&staging, version, &super::release_url(version))?;
+        smelt_core::agent_image::Bundle::read(&package)
+            .and_then(|bundle| bundle.install(&bin))
+            .map(drop)
+            .map_err(|error| format!("Couldn't install smelt-agent: {error}"))
     }
 
     pub(super) fn install_helpers(package: &Path) -> Result<(), String> {

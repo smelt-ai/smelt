@@ -337,8 +337,7 @@ ROOT_COMMAND_DIR=/usr/local/bin
 ROOT_COMMAND_MARKER="由 Smelt 的 install.sh 生成"
 
 # /usr/local/bin/<命令> 的内容。不能用软链接：root 的 ~ 和权限都不对，运行时连不上。root
-# 调用时一定先切用户再执行：那份程序在普通用户目录里，它能改，以 root 执行就等于提权。指向
-# 启动名而不是带指纹的映像，运行时自己升级后还能用。
+# 调用时一定先切用户再执行：那份程序在普通用户目录里，它能改，以 root 执行就等于提权。
 root_command_script() {
   local command="$1" user="$2" uid="$3" home="$4" runtime_dir="$5"
   local env_args="HOME=$(printf %q "$home") USER=$(printf %q "$user") LOGNAME=$(printf %q "$user")"
@@ -648,8 +647,8 @@ user_phase() {
   put 0755 "$HERE/smelt-notify" "$BIN/smelt-notify"
   put 0755 "$HERE/smelt" "$BIN/smelt"
   put 0755 "$HERE/smelt-up" "$BIN/smelt-up"
-  # smelt-agent、wasm、native 留在包目录里。下面的 `smeltd install` 按它们自己的指纹
-  # 发布成 ~/.smelt/bin/smelt-agent-<指纹>/，再把 ~/.smelt/bin/smelt-agent 链接拨过去。
+  # smelt-agent、wasm、native 留在包目录里。下面的 `smeltd install` 把它们装进
+  # ~/.smelt/bin/agent/，~/.smelt/bin/smelt-agent 链接指向那里。
   [[ -x "$HERE/smelt-agent" && -f "$HERE/photon_rs_bg.wasm" ]] || die "包里缺少 smelt-agent 或 photon_rs_bg.wasm"
   # 跨 Agent 消息下线后留下的旧 helper。
   rm -f "$BIN/smelt-agent-mcp"
@@ -662,8 +661,8 @@ user_phase() {
     printf '[Service]\nEnvironment=IS_SANDBOX=1\n' >"$dropin/sandbox.conf"
   fi
 
-  # 发布不可变映像、拨启动名（已经在跑就交接到新版本，会话保留）；有 systemd 时写用户单元
-  # 并启动。
+  # 装成 ~/.smelt/bin/smeltd（已经在跑就重启到新版本，进行中的会话会中断）；有 systemd 时
+  # 写用户单元并启动。
   "$HERE/smeltd" install
   echo "已装到 $BIN"
 

@@ -3888,9 +3888,6 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
     };
     let sess = &slot.value;
     sess.idle.touch();
-    // ACP 控制连接活着：headless 自升级让路。对话可以连着看很久却不再走
-    // desktop 鉴权 / 终端 open，不能靠过期时间戳判断「没人看」。
-    let _viewer = crate::protocol::ViewerLease::acquire();
 
     // 动作循环：一行一个 AcpUserAction 的 JSON，直到客户端断开。
     let mut line = String::new();
@@ -4246,7 +4243,6 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
         drop(lifecycle);
         fd
     };
-    let _viewer = crate::protocol::ViewerLease::acquire();
     let mut scratch = [0u8; 64];
     let _ = reader.read(&mut scratch);
     let _output_gate = slot.value.output_gate.lock();

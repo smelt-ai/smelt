@@ -1,4 +1,4 @@
-//! Pi 跑的是 `~/.smelt/bin/smelt-agent` 指向的那份编译好的 smelt-agent（见 `agent_image`）。
+//! Pi 跑的是装在 `~/.smelt/bin/agent/` 里的那份编译好的 smelt-agent（见 `agent_image`）。
 //! 需要 Bun 的地方（MCP 预设的 `bun x`）也用它：smelt-agent 带上 `BUN_BE_BUN=1` 就是 Bun 命令行，
 //! 不再另外下载 Bun。
 
@@ -74,14 +74,14 @@ pub(crate) fn locate_smelt_agent() -> Result<PathBuf, String> {
     locate_smelt_agent_in(&home.join("bin"))
 }
 
-/// 守护启动后在后台调一次，清掉改名前 smelt-pi 留下的链接和目录（见
-/// `agent_image::reap_legacy`）。只能由守护调：它在跑说明旧守护已经交接走了。
-pub fn reap_legacy_smelt_pi() {
+/// 守护启动时、起任何 Pi 之前调一次：把 `~/.smelt/bin` 里的旧布局迁成固定名字，清掉旧布局和
+/// 装到一半留下的东西（见 `smelt_sys::managed_bin`）。
+pub fn tidy_managed_bin() {
     let Some(home) = smelt_paths::smelt_home() else {
         return;
     };
-    if let Err(error) = crate::agent_image::reap_legacy(&home.join("bin")) {
-        crate::app_log::error("smeltd", &format!("清理旧 smelt-pi 失败：{error}"));
+    if let Err(error) = smelt_sys::managed_bin::tidy(&home.join("bin")) {
+        crate::app_log::error("smeltd", &format!("整理 ~/.smelt/bin 失败：{error}"));
     }
 }
 
@@ -89,7 +89,7 @@ fn locate_smelt_agent_in(bin: &Path) -> Result<PathBuf, String> {
     crate::agent_image::current(bin).ok_or_else(|| {
         format!(
             "Can't find smelt-agent ({}). On the desktop, reopening Smelt installs it from the app; on Linux the runtime adds it for its own version at startup, or rerun the install script.",
-            bin.join(crate::agent_image::LAUNCH_NAME).display()
+            bin.join(crate::agent_image::INSTALL_DIR).display()
         )
     })
 }
@@ -342,31 +342,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn smelt_pi_resolves_through_the_launch_link_to_its_real_path() {
+    fn smelt_agent_is_found_in_the_install_dir() {
         let root = std::env::temp_dir().join(format!(
             "smelt-agent-locate-{}",
             uuid::Uuid::new_v4().simple()
         ));
         let bin = root.join("bin");
         fs::create_dir_all(&bin).unwrap();
-        let error = locate_smelt_agent_in(&bin).expect_err("没发布过必须失败");
+        let error = locate_smelt_agent_in(&bin).expect_err("没装过必须失败");
         assert!(
             error.contains("Can't find smelt-agent"),
             "实际错误：{error}"
         );
 
-        let published = bin.join(format!("smelt-agent-{}", "ab".repeat(32))).join("smelt-agent");
-        executable(&published, b"pi");
-        std::os::unix::fs::symlink(
-            published.strip_prefix(&bin).unwrap(),
-            bin.join("smelt-agent"),
-        )
-        .unwrap();
-        assert_eq!(
-            locate_smelt_agent_in(&bin).unwrap(),
-            fs::canonicalize(&published).unwrap(),
-            "要 exec 解析后的真实路径，链接换了也不影响已经起来的 Pi"
-        );
+        let installed = bin
+            .join(crate::agent_image::INSTALL_DIR)
+            .join("smelt-agent");
+        executable(&installed, b"pi");
+        assert_eq!(locate_smelt_agent_in(&bin).unwrap(), installed);
         fs::remove_dir_all(root).ok();
     }
 

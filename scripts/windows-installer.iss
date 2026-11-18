@@ -82,9 +82,10 @@ Filename: "{app}\smelt.exe"; Description: "{cm:LaunchProgram,Smelt}"; Flags: now
 Filename: "{app}\smelt.exe"; Flags: nowait skipifnotsilent; Check: RelaunchRequested
 
 [UninstallRun]
-; 本机运行时跑的是复制到 %USERPROFILE%\.smelt\bin 的 smeltd-<指纹>.exe，不在安装目录里，卸载
-; 删不到它，得先停掉，不然它和它起的会话一直留在后台。会话进程在它的 Job Object 里，一起退出。
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM smeltd-*"; Flags: runhidden; RunOnceId: "StopSmeltd"
+; 本机运行时跑的是复制到 %USERPROFILE%\.smelt\bin 的 smeltd.exe，不在安装目录里，卸载删不到
+; 它，得先停掉，不然它和它起的会话一直留在后台。会话进程在它的 Job Object 里，一起退出。
+; 2026.1118 之前装成 smeltd-<指纹>.exe，`smeltd*` 两种都认。
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM smeltd*"; Flags: runhidden; RunOnceId: "StopSmeltd"
 
 [Code]
 const

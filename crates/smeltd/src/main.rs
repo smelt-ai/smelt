@@ -27,10 +27,10 @@
 //!   {"op":"version"}                                         → 回 {"version":"..","exe_mtime":123} 后关闭
 //!   {"op":"shutdown"}                                        → 优雅停机（收割子进程、checkpoint 状态库）后
 //!                                                              回 {"ok":true} 再退出，所有会话结束
-//!   {"op":"upgrade"}                                         → 先把启动名拨到本进程钉住的映像，同样优雅停机、
-//!                                                              回执；Unix 随后在本进程 exec，Windows 拉起接班
-//!                                                              进程后退出。不交接 fd，进行中的回合中断
-//!   {"op":"upgrade","exe":"/path/to/smeltd"}                 → 同上，换到指定映像
+//!   {"op":"upgrade"}                                         → 同样优雅停机、回执，再按本进程启动时的路径重新
+//!                                                              起来（那里装的可能已是新版本）：Unix 在本进程
+//!                                                              exec，Windows 拉起接班进程后退出。进行中的回合中断
+//!   {"op":"upgrade","exe":"/path/to/smeltd"}                 → 同上，换成指定的那份
 //!   {"op":"runtime_upgrade","version":"2026.1023.0"}         → 回 {"state":"accepted"}，从 GitHub Release
 //!                                                              下载该版本校验通过后重启守护；见 runtime_upgrade.rs
 //!   {"op":"agent_event","id":"..","event":{...}}             → 回 {"ok":true} 后关闭，归一化 hook 事件
@@ -275,116 +275,44 @@ fn sock_path() -> std::path::PathBuf {
     dir.join("smeltd.sock")
 }
 
-/// 启动时钉住的那份普通文件。升级只 exec 这条路径，不再回头看启动名现在指向谁。
-struct PinnedDaemonImage {
-    path: std::path::PathBuf,
-    /// 钉住时的设备号和 inode。生产路径只 exec `path`；单测用这两个字段确认
-    /// 钉住的是映像文件本身，不是启动名那根链接。
-    #[cfg(unix)]
-    #[cfg_attr(not(test), allow(dead_code))]
-    dev: u64,
-    #[cfg(unix)]
-    #[cfg_attr(not(test), allow(dead_code))]
-    ino: u64,
-}
-
-static PINNED_DAEMON_IMAGE: OnceLock<PinnedDaemonImage> = OnceLock::new();
+/// 本进程按哪条路径重启。从 `~/.smelt/bin` 起的就是那里固定名字的 smeltd（从旧布局升上来的
+/// 守护跑的是 `smeltd-<指纹>`，启动时会被整理掉）；别处起的（开发、测试）就是启动时的
+/// 可执行文件。Linux 上这个文件被 rename 换掉之后 `current_exe()` 会变成 `…/smeltd (deleted)`，
+/// 所以启动时记一次。
+static DAEMON_EXECUTABLE: OnceLock<std::path::PathBuf> = OnceLock::new();
+/// 本进程是不是从 `~/.smelt/bin` 起的。
+static MANAGED_DAEMON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn daemon_executable_path() -> std::io::Result<std::path::PathBuf> {
-    PINNED_DAEMON_IMAGE
+    DAEMON_EXECUTABLE
         .get()
-        .map(|pinned| pinned.path.clone())
-        .ok_or_else(|| std::io::Error::other("没有钉住守护映像"))
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("没有记下守护的可执行文件路径"))
 }
 
-/// 钉住本次 exec 真正映射的普通文件。
-///
-/// `current_exe()` 经常是启动时用的那条路径。若有人从符号链接 `smeltd` 拉起，
-/// 这里只顺着链接读一次，打开目标文件（`O_NOFOLLOW`，不再二次解析）。
-/// 之后启动名被拨到别的映像，也不改变已经钉住的路径。
-fn pin_running_daemon_image() {
-    let Ok(path) = std::env::current_exe() else {
-        eprintln!("smeltd 无法读取当前可执行路径，升级将拒绝换映像");
-        return;
-    };
-    let Some(pinned) = open_mapped_image(&path) else {
-        eprintln!(
-            "smeltd 没有钉住守护映像（{}），升级将拒绝换映像",
-            path.display()
-        );
-        return;
-    };
-    let _ = PINNED_DAEMON_IMAGE.set(pinned);
+#[cfg(target_os = "linux")]
+pub(crate) fn is_managed_daemon() -> bool {
+    MANAGED_DAEMON.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn open_mapped_image(current: &std::path::Path) -> Option<PinnedDaemonImage> {
-    #[cfg(windows)]
-    {
-        // `current_exe()` 在 Windows 上就是正在映射的那份 exe（哈希副本），不是启动名。
-        let path = std::fs::canonicalize(current).ok()?;
-        let meta = std::fs::metadata(&path).ok()?;
-        if !meta.is_file() {
-            return None;
+fn pin_daemon_executable() {
+    let exe = match std::env::current_exe() {
+        Ok(path) => std::fs::canonicalize(&path).unwrap_or(path),
+        Err(error) => {
+            eprintln!("smeltd 无法读取当前可执行路径：{error}");
+            return;
         }
-        return Some(PinnedDaemonImage { path });
-    }
-    #[cfg(unix)]
-    {
-        if let Some(pinned) = open_regular_nofollow(current) {
-            return Some(pinned);
+    };
+    let bin =
+        smelt_paths::smelt_home().and_then(|home| std::fs::canonicalize(home.join("bin")).ok());
+    let pinned = match bin {
+        Some(bin) if exe.parent() == Some(bin.as_path()) => {
+            MANAGED_DAEMON.store(true, std::sync::atomic::Ordering::Relaxed);
+            smelt_core::daemon_image::installed_path(&bin)
         }
-        let target = std::fs::read_link(current).ok()?;
-        let resolved = if target.is_absolute() {
-            target
-        } else {
-            current.parent()?.join(target)
-        };
-        open_regular_nofollow(&resolved)
-    }
-}
-
-#[cfg(unix)]
-fn open_regular_nofollow(path: &std::path::Path) -> Option<PinnedDaemonImage> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.file_type().is_file() {
-        return None;
-    }
-    Some(PinnedDaemonImage {
-        path: path.to_path_buf(),
-        dev: meta.dev(),
-        ino: meta.ino(),
-    })
-}
-
-/// 已经写好、还没切到运行中守护的下一份映像。只认 `smeltd.pending` 这根链接，
-/// 不认会被覆盖的 `smeltd.next`。正在跑的就是这份文件时，不当成候选。
-fn staged_successor_executable(running: &std::path::Path) -> Option<std::path::PathBuf> {
-    let pending = smelt_core::daemon_image::pending_image(running.parent()?)?;
-    (!same_device_inode(running, &pending)).then_some(pending)
-}
-
-fn same_device_inode(left: &std::path::Path, right: &std::path::Path) -> bool {
-    #[cfg(windows)]
-    {
-        matches!(
-            (std::fs::canonicalize(left), std::fs::canonicalize(right)),
-            (Ok(left), Ok(right)) if left == right
-        )
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) else {
-            return false;
-        };
-        left.dev() == right.dev() && left.ino() == right.ino()
-    }
+        _ => exe,
+    };
+    let _ = DAEMON_EXECUTABLE.set(pinned);
 }
 
 /// 进程指纹钉死（启动时调一次）：GUI 拉起时对 spawn 目标的哈希优先；否则对
@@ -2475,9 +2403,8 @@ fn main() {
     // Grok/CI 会给进程打 NO_COLOR=1。必须在任何线程/子进程之前卸掉，否则
     // 交互式 PTY（agy 等）会继承关色开关，整屏只剩默认灰白。
     smelt_core::tty_color::clear_process();
-    // 钉住自己映射的那份文件。钉晚了，启动名若已被拨走，再去解析
-    // `current_exe()` 就会拿到下一份映像。
-    pin_running_daemon_image();
+    // 记下自己的路径。记晚了，那个文件可能已经被新版本换掉。
+    pin_daemon_executable();
     // `smeltd install` / `status` 这类子命令跑完就退出，不起守护。
     if let Some(code) = service::maybe_run(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
@@ -2671,170 +2598,16 @@ fn wait_for_test_owner_exit(owner: i32) {
     while !smelt_core::process_wait::wait_until_exit(owner, Duration::from_secs(3600)) {}
 }
 
-/// headless 自升级第一次检查前让 GUI 先手：GUI 拉起守护后马上会连上来，升级时机归它。
-/// 只在启动时等这一次。
-const HEADLESS_UPGRADE_STARTUP_GRACE: Duration = Duration::from_secs(60);
-/// 升级没做成（交接被拒、读不了新映像）之后隔多久再试：从 60 秒起翻倍，上限 30 分钟。
-// 轮询例外：升级被拒之后没有「可以再试了」的事件；周期 60 秒起翻倍，上限 30 分钟。新映像挂上、最后一个观看连接断开都会立刻再看。
-const HEADLESS_UPGRADE_RETRY_FIRST: Duration = Duration::from_secs(60);
-const HEADLESS_UPGRADE_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
-
-/// 叫醒 headless 自升级线程。容量 1 的通道：连着来的几次合成一次检查。
-static HEADLESS_UPGRADE_WAKE: Mutex<Option<std::sync::mpsc::SyncSender<()>>> = Mutex::new(None);
-
-/// 最后一个观看连接断开时由 [`protocol::ViewerLease`] 调用。线程没起来时什么也不做。
-pub(crate) fn nudge_headless_self_upgrade() {
-    if let Ok(slot) = HEADLESS_UPGRADE_WAKE.lock()
-        && let Some(wake) = slot.as_ref()
-    {
-        let _ = wake.try_send(());
-    }
-}
-
-/// 连续第 `failures` 次（从 0 起）没升成之后隔多久再试。
-fn headless_upgrade_retry_delay(failures: u32) -> Duration {
-    HEADLESS_UPGRADE_RETRY_FIRST
-        .saturating_mul(1u32.checked_shl(failures).unwrap_or(u32::MAX))
-        .min(HEADLESS_UPGRADE_RETRY_MAX)
-}
-
-/// 这条文件事件是不是 `smeltd.pending` 被挂上、改指或拿掉。事件丢了（要重扫）也算，
-/// 宁可多看一眼。
-fn touches_staged_successor(event: &notify::Event) -> bool {
-    let pending = std::ffi::OsStr::new(smelt_core::daemon_image::PENDING_NAME);
-    event.need_rescan()
-        || event
-            .paths
-            .iter()
-            .any(|path| path.file_name() == Some(pending))
-}
-
-/// 盯着守护映像所在的目录，`smeltd.pending` 一变就叫醒自升级线程。盯不上只记日志：
-/// 那样新映像要等下一次「最后一个观看连接断开」才会被看到。
-fn watch_staged_successor(
-    wake: std::sync::mpsc::SyncSender<()>,
-) -> Option<notify::RecommendedWatcher> {
-    use notify::Watcher as _;
-    let dir = daemon_executable_path().ok()?.parent()?.to_path_buf();
-    let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        // 出错多半是事件丢了，看一眼不亏。
-        let relevant = match &event {
-            Ok(event) => touches_staged_successor(event),
-            Err(_) => true,
-        };
-        if relevant {
-            let _ = wake.try_send(());
-        }
-    });
-    let mut watcher = match watcher {
-        Ok(watcher) => watcher,
-        Err(error) => {
-            dlog(&format!("headless 自升级盯不住 {}：{error}", dir.display()));
-            return None;
-        }
-    };
-    if let Err(error) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
-        dlog(&format!("headless 自升级盯不住 {}：{error}", dir.display()));
-        return None;
-    }
-    Some(watcher)
-}
-
-enum HeadlessUpgradeStep {
-    /// 已经交给新映像，本线程到此为止。
-    Upgraded,
-    /// 现在没什么可做：有人在看、没挂新映像、挂的就是自己。等下一次事件。
-    Idle,
-    Failed(String),
-}
-
-fn headless_self_upgrade_once(pinned: &str) -> HeadlessUpgradeStep {
-    // 有人在看就让 GUI 提示并重启，避免无界面地把对话打断。
-    if protocol::viewer_is_present() {
-        return HeadlessUpgradeStep::Idle;
-    }
-    let Ok(current) = daemon_executable_path() else {
-        return HeadlessUpgradeStep::Idle;
-    };
-    let Some(target) = staged_successor_executable(&current) else {
-        return HeadlessUpgradeStep::Idle;
-    };
-    let disk = match smelt_core::daemon_image::content_fingerprint(&target) {
-        Ok(fingerprint) => fingerprint,
-        Err(error) => {
-            return HeadlessUpgradeStep::Failed(format!("Couldn't read the new image: {error}"));
-        }
-    };
-    if disk == pinned {
-        return HeadlessUpgradeStep::Idle;
-    }
-    dlog("headless 自升级：已 stage 新映像且没有观看连接，重启到新映像");
-    match request_self_upgrade(&target) {
-        SelfUpgradeOutcome::Upgraded => HeadlessUpgradeStep::Upgraded,
-        SelfUpgradeOutcome::Failed(reason) => HeadlessUpgradeStep::Failed(reason),
-    }
-}
-
-/// headless 自升级：没人看时，把 `smeltd.pending` 指向的新映像应用到运行中的守护。
-/// 启动后先让 GUI 一分钟，之后只在两件事发生时看：`smeltd.pending` 变了，最后一个
-/// 观看连接断开了。
-/// 门控：
-/// - 指纹未知（None）不升：证明不了自己旧，别乱动。
-/// - 有活着的观看连接就不升：GUI 在，由它提示用户并重启。
-/// - 不等待 agent 空闲。upgrade 会停掉本进程，进行中的回合中断，历史在库里。
-fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
-    let Some(pinned) = daemon_fingerprint else {
-        return;
-    };
-    let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    std::thread::Builder::new()
-        .name("smelt-headless-self-upgrade".into())
-        .spawn(move || {
-            let _watcher = watch_staged_successor(wake_tx.clone());
-            if let Ok(mut slot) = HEADLESS_UPGRADE_WAKE.lock() {
-                *slot = Some(wake_tx);
-            }
-            // 期间到的叫醒留在通道里，让完一起看。
-            std::thread::sleep(HEADLESS_UPGRADE_STARTUP_GRACE);
-            let mut failures = 0u32;
-            loop {
-                let retry = match headless_self_upgrade_once(&pinned) {
-                    HeadlessUpgradeStep::Upgraded => return,
-                    HeadlessUpgradeStep::Idle => {
-                        failures = 0;
-                        None
-                    }
-                    HeadlessUpgradeStep::Failed(reason) => {
-                        let delay = headless_upgrade_retry_delay(failures);
-                        failures = failures.saturating_add(1);
-                        dlog(&format!(
-                            "headless 自升级未完成，{}s 后重试：{reason}",
-                            delay.as_secs()
-                        ));
-                        Some(delay)
-                    }
-                };
-                let woke = match retry {
-                    Some(delay) => wake_rx.recv_timeout(delay),
-                    None => wake_rx
-                        .recv()
-                        .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
-                };
-                if matches!(woke, Err(std::sync::mpsc::RecvTimeoutError::Disconnected)) {
-                    return;
-                }
-            }
-        })
-        .ok();
-}
-
+/// `smeltd install` 请正在跑的运行时换到新装的版本，见 [`request_self_upgrade`]。
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SelfUpgradeOutcome {
     Upgraded,
     Failed(String),
 }
 
-/// 对自己 socket 发一次 upgrade op（纯 IO，可单测判定；socket 交互在调用方）。
+/// 判读 upgrade op 的回执（纯函数，可单测；socket 交互在调用方）。
+#[cfg(any(target_os = "linux", test))]
 fn classify_self_upgrade_reply(reply: &str) -> SelfUpgradeOutcome {
     let value: serde_json::Value = match serde_json::from_str(reply.trim()) {
         Ok(value) => value,
@@ -2851,11 +2624,13 @@ fn classify_self_upgrade_reply(reply: &str) -> SelfUpgradeOutcome {
     SelfUpgradeOutcome::Failed(reason)
 }
 
+/// 向本机正在跑的运行时发一次 upgrade op，让它换到 `target`。
+#[cfg(target_os = "linux")]
 pub(crate) fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
     let sock = match RuntimeStream::connect(sock_path()) {
         Ok(sock) => sock,
         Err(error) => {
-            return SelfUpgradeOutcome::Failed(format!("Couldn't connect to itself: {error}"));
+            return SelfUpgradeOutcome::Failed(format!("Couldn't connect to the runtime: {error}"));
         }
     };
     let _ = sock.set_write_timeout(Some(Duration::from_secs(5)));
@@ -2886,6 +2661,8 @@ fn run_serve_loop(
     daemon_fingerprint: Option<String>,
 ) {
     let exe_mtime = exe_mtime_secs();
+    // 要在起任何 Pi 之前：可能要把旧布局里的 smelt-agent 目录挪到固定名字。
+    smelt_core::managed_runtime::tidy_managed_bin();
     // 第一次启动就把运行时身份落盘，不等第一个客户端来问；失败只记日志，describe 时再试。
     let _ = runtime_identity::runtime_id();
     thread::spawn(|| {
@@ -2893,7 +2670,6 @@ fn run_serve_loop(
         smelt_core::pi_mcp::upgrade_preset_pins();
     });
     thread::spawn(smelt_core::control_skill::remove_legacy_copy);
-    thread::spawn(smelt_core::managed_runtime::reap_legacy_smelt_pi);
     #[cfg(target_os = "linux")]
     thread::spawn(runtime_upgrade::ensure_smelt_agent);
     // 远程访问每次进程启动都是空的，按落盘配置重新拉起。
@@ -2918,10 +2694,6 @@ fn run_serve_loop(
     let _ = SERVER.set(server.clone());
     // 自己起线程，不阻塞 accept 循环。
     autostart_remote_from_config(&remote_state);
-
-    // headless 空闲自升级：没有观看连接时磁盘新了没人触发 upgrade，这里兜底。
-    // GUI 连着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
-    spawn_headless_self_upgrade(server.daemon_fingerprint.clone());
 
     // 闲置会话挂起（见 acp_idle）。冷启动走到这里。
     acp_idle::spawn_acp_idle_reaper(Arc::clone(&server.acp_sessions));
@@ -3004,7 +2776,7 @@ fn action_payload(kind: Option<&str>, text: Option<&str>) -> Result<Vec<u8>, &'s
     }
 }
 
-/// 升级换到哪份映像。可选 `"exe"` 指定不可变映像；没传就是本进程钉住的那份文件。
+/// 升级换到哪份。可选 `"exe"` 指定；没传就是本进程启动时的那条路径，那里装的可能已是新版本。
 fn upgrade_target(req: &serde_json::Value) -> Result<std::path::PathBuf, String> {
     if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         let path = std::path::PathBuf::from(p);
@@ -3014,7 +2786,7 @@ fn upgrade_target(req: &serde_json::Value) -> Result<std::path::PathBuf, String>
         return Ok(path);
     }
     daemon_executable_path()
-        .map_err(|error| format!("Couldn't find the current runtime image: {error}"))
+        .map_err(|error| format!("Couldn't find the runtime's own executable: {error}"))
 }
 
 /// Windows 升级时接班进程从这个变量拿到前任的 pid，等它退出再绑定监听。
@@ -3033,15 +2805,7 @@ fn handle_upgrade<C: ClientSocket>(conn: C, req: &serde_json::Value) {
             return;
         }
     };
-    // 启动名先拨到这份映像。失败就停在当前映像上，不把进程换到一个拨不上的路径。
-    if let Err(error) = smelt_core::daemon_image::retarget_launch_after_commit(&exe) {
-        let _ = smelt_runtime_client::protocol::write_json_line(
-            &mut c,
-            &serde_json::json!({ "ok": false, "err": format!("Couldn't set the launch name: {error}") }),
-        );
-        return;
-    }
-    // 先收割子进程并回执，再换映像：Unix 在本进程里 exec，systemd 看到的还是同一个
+    // 先收割子进程并回执，再换版本：Unix 在本进程里 exec，systemd 看到的还是同一个
     // 主进程；Windows 拉起接班进程后退出。
     protocol::graceful_shutdown(Some(c.into_client_conn()), Some(exe));
 }

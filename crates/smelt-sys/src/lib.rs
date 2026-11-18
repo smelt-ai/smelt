@@ -6,6 +6,7 @@ pub mod block_on;
 pub mod daemon_image;
 pub mod fd_limit;
 pub mod file_lock;
+pub mod managed_bin;
 #[cfg(windows)]
 pub mod named_pipe;
 pub mod process;

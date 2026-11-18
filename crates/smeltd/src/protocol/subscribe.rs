@@ -2,7 +2,7 @@
 
 use super::super::session_catalog::published_session_states;
 use super::super::*;
-use super::{AuthenticatedEventClient, PeerSource, ViewerLease};
+use super::{AuthenticatedEventClient, PeerSource};
 use smelt_event_bus::Delivery;
 use smelt_event_protocol::{
     EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, SubscribeErrorCode,
@@ -297,11 +297,6 @@ pub(super) fn handle_event_subscribe_with_peer<C: ClientSocket>(
     {
         eprintln!("[event-hub] terminal progress replay failed: {error}");
     }
-    // 桌面 subscribe 是 GUI 活着的长连接。headless 自升级必须让路，不能靠
-    // 「最近鉴权过」这种会过期的时间戳。
-    let _desktop_viewer =
-        (identity.plugin_id.as_str() == FIRST_PARTY_DESKTOP_PLUGIN_ID).then(ViewerLease::acquire);
-
     if conn.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT)).is_err() {
         let _ = event_hub
             .runtime()

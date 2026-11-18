@@ -588,9 +588,6 @@ pub(crate) fn handle_open<C: ClientSocket>(
             return;
         }
     };
-    // 终端控制连接活着：headless 自升级让路，交给 GUI 空闲门控。
-    let _viewer = super::auth::ViewerLease::acquire();
-
     // reattach jolt：只挂旗，不定时补枪。
     // 客户端首帧 type-1 resize（含真实 cell 像素）进 `resize_session` 即消费 jolt；
     // 同尺寸无 resize 即无 SIGWINCH（tmux 同款：尺寸没变就不重画，快照本身准确）。
@@ -792,9 +789,6 @@ pub(crate) fn handle_watch<C: ClientSocket>(
         id: id.clone(),
         slot: Arc::clone(&slot),
     });
-    // 旁观连接活着：headless 自升级让路。
-    let _viewer = super::auth::ViewerLease::acquire();
-
     // 几何变化的那一次 SIGWINCH 已在 `begin_remote_viewport` 内打过（仅变才打，
     // 同尺寸续租一次不抖）。watcher 挂载后不再补抖：快照即准确画面，重绘画
     // 面随实时流自然到达。

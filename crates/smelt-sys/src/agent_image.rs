@@ -1,10 +1,11 @@
-//! 编译好的 smelt-agent 发布在 `~/.smelt/bin/smelt-agent-<指纹>/`，同目录的 `smelt-agent` 是指向
-//! 当前那份可执行文件的符号链接。
+//! 编译好的 smelt-agent 一整套（可执行文件、photon wasm、`native/`、内置技能 `skills/`）装在
+//! `~/.smelt/bin/agent/`，名字固定。Unix 上 `~/.smelt/bin/smelt-agent` 是指向
+//! `agent/smelt-agent` 的链接，MCP 预设写的就是这条路径；Windows 上执行不了它，smelt-agent 起
+//! MCP 时换成自己。
 //!
-//! 指纹按 smelt-agent、photon wasm、`native/` 和内置技能 `skills/` 这一整套算，和守护映像无关：只改了 Pi
-//! 也能换上新的一份，不用等守护交接。目录发布后不再改动。守护每次起 Pi 都解析
-//! 链接、exec 解析出来的真实路径，所以拨链接不影响已经在跑的 Pi；旧目录等里面的
-//! smelt-agent 没人映射了再删。
+//! 换版本时守护已经停了，它起的 Pi 也一起收掉了（桌面和更新流程都是先停再装）。Linux 运行时
+//! 自己升级时还在跑：整套先写进同目录的临时目录，再两次 rename 换进来，旧 Pi 握着的文件
+//! 不受影响，随后守护重启把它们收掉。
 
 use std::fs;
 use std::io;
@@ -12,10 +13,13 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::daemon_image::{MappedState, content_fingerprint, probe_image_mapped};
+use crate::daemon_image::content_fingerprint;
 
-/// 启动链接名。目录里的可执行文件在 Windows 上是 `smelt-agent.exe`，见 [`binary_file_name`]。
+/// Unix 上的启动链接名，也是 Unix 上的可执行文件名。Windows 上可执行文件是
+/// `smelt-agent.exe`，见 [`binary_file_name`]。
 pub const LAUNCH_NAME: &str = "smelt-agent";
+/// 装好的一整套所在的目录名。
+pub const INSTALL_DIR: &str = "agent";
 
 pub fn binary_file_name() -> &'static str {
     if cfg!(windows) {
@@ -28,243 +32,91 @@ const WASM_NAME: &str = "photon_rs_bg.wasm";
 const NATIVE_DIR: &str = "native";
 /// 内置技能目录。只在智能体勾选时用 `--skill` 传给 Pi，不在 Pi 的自动发现路径上。
 pub const SKILLS_DIR: &str = "skills";
-const DIR_PREFIX: &str = "smelt-agent-";
 /// App 里这一整套相对 `Contents` 的位置。wasm 不是代码，不能放进只收签名代码的 `Contents/MacOS`。
 pub const APP_BUNDLE_DIR: &str = "Resources/smelt-agent";
+/// 装好的目录里记着这一套的指纹，判断要不要重装时不用再读一遍装好的那份。最后写进临时
+/// 目录、随目录一起 rename 进来，有它就说明这一套是完整装好的。
+const FINGERPRINT_FILE: &str = ".bundle-sha256";
 
-/// 把 `src_dir`（App 的 `Contents/Resources/smelt-agent` 或 Linux 包目录）里的这一整套发布到 `dir`，
-/// 再把 `dir/smelt-agent` 拨过去。同一套内容只发布一次。返回发布出的 smelt-agent。
-pub fn publish(dir: &Path, src_dir: &Path) -> io::Result<PathBuf> {
-    let files = bundle_files(src_dir)?;
-    let fingerprint = bundle_fingerprint(src_dir, &files)?;
-    let name = format!("{DIR_PREFIX}{fingerprint}");
-    let target = dir.join(&name);
-    if fs::symlink_metadata(&target).is_err() {
-        publish_tree(dir, src_dir, &files, &name)?;
-    }
-    retarget(dir, &name)?;
-    Ok(target.join(binary_file_name()))
+/// 一套待装的 smelt-agent（App 里那份、Linux 包里那份）。读的时候算好指纹：要读一遍约 120MB。
+pub struct Bundle {
+    src: PathBuf,
+    /// 相对 `src`、排好序。符号链接一律不跟。
+    files: Vec<PathBuf>,
+    fingerprint: String,
 }
 
-/// `dir/smelt-agent` 现在指向的、能执行的那份，解析成真实路径。链接缺了、指空了都是 `None`。
-/// 拿真实路径去 exec：之后链接拨到新版本，已经起来的 Pi 还在原来的目录里。
-pub fn current(dir: &Path) -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let executable = fs::canonicalize(dir.join(LAUNCH_NAME)).ok()?;
-        let meta = fs::metadata(&executable).ok()?;
-        (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then_some(executable)
-    }
-    #[cfg(windows)]
-    {
-        read_pointer(dir)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = dir;
-        None
-    }
-}
-
-/// `src_dir` 里有没有一整套可以发布的 smelt-agent（不跟符号链接）。
-pub fn bundled(src_dir: &Path) -> bool {
-    fs::symlink_metadata(src_dir.join(binary_file_name())).is_ok_and(|meta| meta.is_file())
-}
-
-/// 删掉启动链接没指向、里面的 smelt-agent 也证明没人映射的旧目录。证明不了就留下。
-pub fn reap_unused(dir: &Path) -> io::Result<()> {
-    reap_unused_with(dir, probe_image_mapped)
-}
-
-fn reap_unused_with(dir: &Path, mut probe: impl FnMut(&Path) -> MappedState) -> io::Result<()> {
-    let current = current_dir_name(dir);
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let mut first_error = None;
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        if !is_published_dir_name(&name) || current.as_deref() == Some(name.as_str()) {
-            continue;
+impl Bundle {
+    /// smelt-agent 和 wasm 必须有，`native/`、`skills/` 可选。
+    pub fn read(src_dir: &Path) -> io::Result<Self> {
+        let mut files = Vec::new();
+        for required in [binary_file_name(), WASM_NAME] {
+            if !fs::symlink_metadata(src_dir.join(required)).is_ok_and(|meta| meta.is_file()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("missing {}", src_dir.join(required).display()),
+                ));
+            }
+            files.push(PathBuf::from(required));
         }
-        let path = entry.path();
-        if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
-            continue;
+        for optional in [NATIVE_DIR, SKILLS_DIR] {
+            let dir = src_dir.join(optional);
+            if fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+                collect_regular_files(src_dir, &dir, &mut files)?;
+            }
         }
-        let binary = path.join(binary_file_name());
-        if fs::symlink_metadata(&binary).is_ok_and(|meta| meta.is_file())
-            && probe(&binary) != MappedState::Unused
-        {
-            continue;
+        files.sort();
+        let mut digest = Sha256::new();
+        for relative in &files {
+            digest.update(relative.to_string_lossy().as_bytes());
+            digest.update([0]);
+            digest.update(content_fingerprint(&src_dir.join(relative))?.as_bytes());
+            digest.update(*b"\n");
         }
-        if let Err(error) = fs::remove_dir_all(&path)
-            && error.kind() != io::ErrorKind::NotFound
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
+        Ok(Self {
+            src: src_dir.to_path_buf(),
+            files,
+            fingerprint: hex::encode(digest.finalize()),
+        })
     }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
+
+    /// `dir` 里装着的就是这一套。
+    pub fn is_installed_in(&self, dir: &Path) -> bool {
+        current(dir).is_some()
+            && fs::read_to_string(dir.join(INSTALL_DIR).join(FINGERPRINT_FILE))
+                .is_ok_and(|text| text.trim() == self.fingerprint)
     }
-}
 
-fn is_published_dir_name(name: &str) -> bool {
-    is_fingerprint_dir_name(name, DIR_PREFIX)
-}
-
-fn is_fingerprint_dir_name(name: &str, prefix: &str) -> bool {
-    name.strip_prefix(prefix).is_some_and(|rest| {
-        rest.len() == 64
-            && rest
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    })
-}
-
-/// 改名前叫 smelt-pi 时留下的启动链接（Windows 上是指针文件）和发布目录。
-const LEGACY_LINKS: [&str; 2] = ["smelt-pi", "smelt-pi.current"];
-const LEGACY_DIR_PREFIX: &str = "smelt-pi-";
-
-fn legacy_binary_file_name() -> &'static str {
-    if cfg!(windows) { "smelt-pi.exe" } else { "smelt-pi" }
-}
-
-/// 清掉改名前（smelt-pi）留下的链接和目录。只能由新守护在启动后调用：App 更新后、守护
-/// 交接前，旧守护还靠 `smelt-pi` 链接起 Pi，桌面发布时清会让它在交接前起不来 Pi。
-/// 旧目录里的 smelt-pi 还被映射着（交接前起的 Pi 还在跑）或证明不了没人用就留下，下次启动再清。
-pub fn reap_legacy(dir: &Path) -> io::Result<()> {
-    reap_legacy_with(dir, probe_image_mapped)
-}
-
-fn reap_legacy_with(dir: &Path, mut probe: impl FnMut(&Path) -> MappedState) -> io::Result<()> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let mut first_error = None;
-    let mut keep_first = |result: io::Result<()>| {
-        if let Err(error) = result
-            && error.kind() != io::ErrorKind::NotFound
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-    };
-    for name in LEGACY_LINKS {
-        let link = dir.join(name);
-        if fs::symlink_metadata(&link).is_ok_and(|meta| !meta.is_dir()) {
-            keep_first(fs::remove_file(&link));
-        }
-    }
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        if !is_fingerprint_dir_name(&name, LEGACY_DIR_PREFIX) {
-            continue;
-        }
-        let path = entry.path();
-        if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
-            continue;
-        }
-        let binary = path.join(legacy_binary_file_name());
-        if fs::symlink_metadata(&binary).is_ok_and(|meta| meta.is_file())
-            && probe(&binary) != MappedState::Unused
-        {
-            continue;
-        }
-        keep_first(fs::remove_dir_all(&path));
-    }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-/// 这一套里的文件，相对 `src_dir`、排好序。smelt-agent 和 wasm 必须有，`native/` 可选。
-/// 符号链接一律不跟。
-fn bundle_files(src_dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    for required in [binary_file_name(), WASM_NAME] {
-        if !fs::symlink_metadata(src_dir.join(required)).is_ok_and(|meta| meta.is_file()) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("missing {}", src_dir.join(required).display()),
+    /// 装进 `dir/agent`，已经是这一套就只补链接。返回装好的可执行文件。
+    pub fn install(&self, dir: &Path) -> io::Result<PathBuf> {
+        if !self.is_installed_in(dir) {
+            fs::create_dir_all(dir)?;
+            let staging = dir.join(format!(
+                ".{INSTALL_DIR}.new-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
             ));
+            let result = self
+                .write_tree(&staging)
+                .and_then(|()| swap_in(dir, &staging));
+            if result.is_err() {
+                let _ = fs::remove_dir_all(&staging);
+            }
+            result?;
         }
-        files.push(PathBuf::from(required));
+        #[cfg(unix)]
+        link(dir)?;
+        Ok(dir.join(INSTALL_DIR).join(binary_file_name()))
     }
-    for optional in [NATIVE_DIR, SKILLS_DIR] {
-        let dir = src_dir.join(optional);
-        if fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
-            collect_regular_files(src_dir, &dir, &mut files)?;
-        }
-    }
-    files.sort();
-    Ok(files)
-}
 
-fn collect_regular_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        let meta = fs::symlink_metadata(&path)?;
-        if meta.is_dir() {
-            collect_regular_files(root, &path, files)?;
-        } else if meta.is_file() {
-            files.push(path.strip_prefix(root).map_err(io::Error::other)?.to_path_buf());
-        }
-    }
-    Ok(())
-}
-
-fn bundle_fingerprint(src_dir: &Path, files: &[PathBuf]) -> io::Result<String> {
-    let mut digest = Sha256::new();
-    for relative in files {
-        digest.update(relative.to_string_lossy().as_bytes());
-        digest.update([0]);
-        digest.update(content_fingerprint(&src_dir.join(relative))?.as_bytes());
-        digest.update(*b"\n");
-    }
-    Ok(hex::encode(digest.finalize()))
-}
-
-/// 先在同目录的私有临时目录里写齐、落盘，再一次 rename 出去。别人抢先发布了同一套
-/// 也算成功。
-fn publish_tree(dir: &Path, src_dir: &Path, files: &[PathBuf], name: &str) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    let staging = dir.join(format!(
-        ".{name}.partial-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    let result = (|| {
-        for relative in files {
+    fn write_tree(&self, staging: &Path) -> io::Result<()> {
+        for relative in &self.files {
             let dest = staging.join(relative);
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(src_dir.join(relative), &dest)?;
-            // Windows 的 FlushFileBuffers 要求写权限。只读打开会返回拒绝访问。
-            #[cfg(windows)]
-            {
-                fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&dest)?
-                    .sync_all()?;
-            }
-            #[cfg(not(windows))]
-            {
-                fs::File::open(&dest)?.sync_all()?;
-            }
+            fs::copy(self.src.join(relative), &dest)?;
+            sync_file(&dest)?;
         }
         #[cfg(unix)]
         {
@@ -274,33 +126,54 @@ fn publish_tree(dir: &Path, src_dir: &Path, files: &[PathBuf], name: &str) -> io
                 fs::Permissions::from_mode(0o755),
             )?;
         }
-        fs::rename(&staging, dir.join(name))
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_dir_all(&staging);
-        if fs::symlink_metadata(dir.join(name)).is_ok_and(|meta| meta.is_dir()) {
-            return Ok(());
+        let stamp = staging.join(FINGERPRINT_FILE);
+        fs::write(&stamp, &self.fingerprint)?;
+        sync_file(&stamp)
+    }
+}
+
+fn sync_file(path: &Path) -> io::Result<()> {
+    // Windows 的 FlushFileBuffers 要求写权限。只读打开会返回拒绝访问。
+    fs::OpenOptions::new()
+        .read(true)
+        .write(cfg!(windows))
+        .open(path)?
+        .sync_all()
+}
+
+/// 把写好的 `staging` 换成 `dir/agent`：旧目录先挪开，新目录改名进来，再删旧目录。新目录
+/// 进不来就把旧的挪回去。旧目录删不掉（Windows 上还有进程占着）就留着，守护下次启动时清。
+fn swap_in(dir: &Path, staging: &Path) -> io::Result<()> {
+    let target = dir.join(INSTALL_DIR);
+    let old = dir.join(format!(
+        ".{INSTALL_DIR}.old-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let moved_old = match fs::rename(&target, &old) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = fs::rename(staging, &target) {
+        if moved_old {
+            let _ = fs::rename(&old, &target);
         }
         return Err(error);
+    }
+    if moved_old {
+        let _ = fs::remove_dir_all(&old);
     }
     Ok(())
 }
 
-/// 原子地把 `dir/smelt-agent` 指向 `<name>/smelt-agent`。链接只写相对路径。
-fn retarget(dir: &Path, name: &str) -> io::Result<()> {
-    let relative = format!("{name}/{}", binary_file_name());
-    #[cfg(unix)]
+/// `dir/smelt-agent` → `agent/smelt-agent`。已经是就不动，否则换一条新链接盖过去
+/// （包括旧布局里指向 `smelt-agent-<指纹>/` 的那条）。
+#[cfg(unix)]
+fn link(dir: &Path) -> io::Result<()> {
+    let target = Path::new(INSTALL_DIR).join(binary_file_name());
     let link = dir.join(LAUNCH_NAME);
-    #[cfg(windows)]
-    let link = dir.join("smelt-agent.current");
-    #[cfg(not(any(unix, windows)))]
-    let link = dir.join(LAUNCH_NAME);
-    #[cfg(unix)]
-    if fs::read_link(&link).is_ok_and(|current| current == Path::new(&relative)) {
-        return Ok(());
-    }
-    #[cfg(windows)]
-    if read_pointer(dir).is_some_and(|path| path.ends_with(Path::new(&relative))) {
+    if fs::read_link(&link).is_ok_and(|current| current == target) {
         return Ok(());
     }
     let tmp = dir.join(format!(
@@ -308,84 +181,50 @@ fn retarget(dir: &Path, name: &str) -> io::Result<()> {
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    let written = (|| {
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(relative, &tmp)
-        }
-        #[cfg(windows)]
-        {
-            fs::write(&tmp, format!("smelt-image-v1\n{relative}\n"))
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = &relative;
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "can't publish smelt-agent on this platform",
-            ))
-        }
-    })();
-    if let Err(error) = written {
+    let result = std::os::unix::fs::symlink(&target, &tmp).and_then(|()| fs::rename(&tmp, &link));
+    if result.is_err() {
         let _ = fs::remove_file(&tmp);
-        return Err(error);
     }
-    if let Err(error) = fs::rename(&tmp, &link) {
-        let _ = fs::remove_file(&tmp);
-        return Err(error);
+    result
+}
+
+fn collect_regular_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            collect_regular_files(root, &path, files)?;
+        } else if meta.is_file() {
+            files.push(
+                path.strip_prefix(root)
+                    .map_err(io::Error::other)?
+                    .to_path_buf(),
+            );
+        }
     }
     Ok(())
 }
 
-fn current_dir_name(dir: &Path) -> Option<String> {
-    #[cfg(unix)]
-    {
-        fs::read_link(dir.join(LAUNCH_NAME))
-            .ok()
-            .and_then(|target| {
-                target
-                    .components()
-                    .next()
-                    .and_then(|first| first.as_os_str().to_str().map(str::to_string))
-            })
-    }
-    #[cfg(windows)]
-    {
-        let text = fs::read_to_string(dir.join("smelt-agent.current")).ok()?;
-        let mut lines = text.lines();
-        if lines.next()? != "smelt-image-v1" {
-            return None;
-        }
-        let rel = lines.next()?;
-        rel.split(['/', '\\']).next().map(str::to_string)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = dir;
-        None
-    }
-}
-
-#[cfg(windows)]
-fn read_pointer(dir: &Path) -> Option<PathBuf> {
-    let text = fs::read_to_string(dir.join("smelt-agent.current")).ok()?;
-    let mut lines = text.lines();
-    if lines.next()? != "smelt-image-v1" {
+/// `dir` 里装好的、能执行的 smelt-agent。没装都是 `None`。
+pub fn current(dir: &Path) -> Option<PathBuf> {
+    let executable = dir.join(INSTALL_DIR).join(binary_file_name());
+    let meta = fs::metadata(&executable).ok()?;
+    if !meta.is_file() {
         return None;
     }
-    let rel = lines.next()?;
-    let mut path = dir.to_path_buf();
-    for part in rel.split(['/', '\\']) {
-        if part.is_empty() || part == "." {
-            continue;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return None;
         }
-        path.push(part);
     }
-    let path = fs::canonicalize(path).ok()?;
-    fs::metadata(&path)
-        .ok()
-        .filter(|meta| meta.is_file())
-        .map(|_| path)
+    Some(executable)
+}
+
+/// `src_dir` 里有没有一整套可以装的 smelt-agent（不跟符号链接）。
+pub fn bundled(src_dir: &Path) -> bool {
+    fs::symlink_metadata(src_dir.join(binary_file_name())).is_ok_and(|meta| meta.is_file())
 }
 
 #[cfg(test)]
@@ -412,157 +251,115 @@ mod tests {
         }
     }
 
-    /// 只改了内置技能也是新的一套：智能体勾选时传的是当前链接后面那份。
-    #[test]
-    fn a_skill_only_change_publishes_a_new_dir() {
-        let root = scratch("skills");
-        let (pkg, bin) = (root.join("pkg"), root.join("bin"));
-        package(&pkg, b"pi-v1", b"wasm", None);
-        fs::create_dir_all(pkg.join("skills/smelt")).unwrap();
-        fs::write(pkg.join("skills/smelt/SKILL.md"), "v1").unwrap();
-        let first = publish(&bin, &pkg).unwrap();
-        let first_dir = first.parent().unwrap();
-        assert_eq!(fs::read_to_string(first_dir.join("skills/smelt/SKILL.md")).unwrap(), "v1");
-
-        fs::write(pkg.join("skills/smelt/SKILL.md"), "v2").unwrap();
-        let second = publish(&bin, &pkg).unwrap();
-        assert_ne!(second, first);
-        let second_dir = second.parent().unwrap();
-        assert_eq!(fs::read_to_string(second_dir.join("skills/smelt/SKILL.md")).unwrap(), "v2");
-        fs::remove_dir_all(root).unwrap();
+    fn install(bin: &Path, pkg: &Path) -> io::Result<PathBuf> {
+        Bundle::read(pkg)?.install(bin)
     }
 
-    /// 复现：守护字节没变、只换了 Pi，旧做法按守护指纹配对，新 Pi 发布不上去。
+    /// 装好的位置固定；换一套就原地换掉，不留旧目录、不留临时目录。
     #[test]
-    fn a_pi_only_change_publishes_a_new_dir_and_moves_the_link() {
-        let root = scratch("pi-only");
+    fn a_new_bundle_replaces_the_installed_one_in_place() {
+        let root = scratch("replace");
         let (pkg, bin) = (root.join("pkg"), root.join("bin"));
         package(&pkg, b"pi-v1", b"wasm", Some(b"native-v1"));
-        let first = publish(&bin, &pkg).unwrap();
-        assert_eq!(current(&bin), Some(fs::canonicalize(&first).unwrap()));
-        let first_dir = first.parent().unwrap().to_path_buf();
-        assert_eq!(fs::read(first_dir.join("native/sub/addon.node")).unwrap(), b"native-v1");
+        let first = install(&bin, &pkg).unwrap();
+        assert_eq!(first, bin.join(INSTALL_DIR).join(binary_file_name()));
+        assert_eq!(current(&bin), Some(first.clone()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = fs::metadata(&first).unwrap().permissions().mode();
             assert_ne!(mode & 0o111, 0, "smelt-agent 必须可执行");
+            assert_eq!(
+                fs::canonicalize(bin.join(LAUNCH_NAME)).unwrap(),
+                fs::canonicalize(&first).unwrap(),
+                "启动链接指向装好的那份"
+            );
         }
 
-        assert_eq!(publish(&bin, &pkg).unwrap(), first, "同一套内容只发布一次");
-
-        // 只改 native：指纹也要变。
         package(&pkg, b"pi-v1", b"wasm", Some(b"native-v2"));
-        let second = publish(&bin, &pkg).unwrap();
-        assert_ne!(second, first);
-        assert_eq!(current(&bin), Some(fs::canonicalize(&second).unwrap()));
-        assert_eq!(fs::read(&first).unwrap(), b"pi-v1", "旧目录原样留着给在跑的 Pi");
+        let second = install(&bin, &pkg).unwrap();
+        assert_eq!(second, first);
+        assert_eq!(
+            fs::read(bin.join(INSTALL_DIR).join("native/sub/addon.node")).unwrap(),
+            b"native-v2"
+        );
+        let names: Vec<String> = fs::read_dir(&bin)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.starts_with('.')),
+            "旧目录和临时目录都要清掉：{names:?}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// 守护起 Pi、Linux 运行时启动时补齐，都看这一个答案：链接缺了、指空了都算没有。
+    /// 只改了内置技能也是新的一套：智能体勾选时传的是装好的那份。
     #[test]
-    fn current_is_the_real_path_behind_a_live_link() {
+    fn a_skill_only_change_is_a_new_bundle() {
+        let root = scratch("skills");
+        let (pkg, bin) = (root.join("pkg"), root.join("bin"));
+        package(&pkg, b"pi-v1", b"wasm", None);
+        fs::create_dir_all(pkg.join("skills/smelt")).unwrap();
+        fs::write(pkg.join("skills/smelt/SKILL.md"), "v1").unwrap();
+        install(&bin, &pkg).unwrap();
+        assert!(Bundle::read(&pkg).unwrap().is_installed_in(&bin));
+
+        fs::write(pkg.join("skills/smelt/SKILL.md"), "v2").unwrap();
+        let bundle = Bundle::read(&pkg).unwrap();
+        assert!(!bundle.is_installed_in(&bin));
+        bundle.install(&bin).unwrap();
+        let skill = bin.join(INSTALL_DIR).join("skills/smelt/SKILL.md");
+        assert_eq!(fs::read_to_string(skill).unwrap(), "v2");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 守护起 Pi、Linux 运行时启动时补齐，都看这一个答案。
+    #[test]
+    fn current_is_none_until_installed() {
         let root = scratch("current");
         let (pkg, bin) = (root.join("pkg"), root.join("bin"));
         fs::create_dir_all(&bin).unwrap();
-        assert!(current(&bin).is_none(), "没发布过");
+        assert!(current(&bin).is_none(), "没装过");
         assert!(!bundled(&pkg));
         package(&pkg, b"pi-v1", b"wasm", None);
         assert!(bundled(&pkg));
-        let published = publish(&bin, &pkg).unwrap();
-        assert_eq!(current(&bin), Some(fs::canonicalize(&published).unwrap()));
-        assert!(!bundled(&bin), "bin 里的 smelt-agent 是链接，不能当成一套包再发布");
-        fs::remove_dir_all(published.parent().unwrap()).unwrap();
-        assert!(current(&bin).is_none(), "链接指空了");
+        let installed = install(&bin, &pkg).unwrap();
+        assert_eq!(current(&bin), Some(installed));
+        assert!(
+            !bundled(&bin),
+            "bin 里的 smelt-agent 是链接，不能当成一套包再装"
+        );
+        fs::remove_dir_all(bin.join(INSTALL_DIR)).unwrap();
+        assert!(current(&bin).is_none(), "目录没了");
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn a_package_without_wasm_is_refused_and_the_link_stays() {
+    fn a_package_without_wasm_is_refused_and_the_installed_one_stays() {
         let root = scratch("no-wasm");
         let (pkg, bin) = (root.join("pkg"), root.join("bin"));
         package(&pkg, b"pi-v1", b"wasm", None);
-        let first = publish(&bin, &pkg).unwrap();
+        let first = install(&bin, &pkg).unwrap();
         fs::write(pkg.join(binary_file_name()), b"pi-v2").unwrap();
         fs::remove_file(pkg.join(WASM_NAME)).unwrap();
-        assert!(publish(&bin, &pkg).is_err());
-        assert_eq!(current(&bin), Some(fs::canonicalize(&first).unwrap()));
+        assert!(install(&bin, &pkg).is_err());
+        assert_eq!(fs::read(&first).unwrap(), b"pi-v1");
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// 没有指纹记录的目录（中途断掉、旧布局迁过来的）不算装好，下次照装。
     #[test]
-    fn reaping_keeps_the_current_and_anything_not_proven_unused() {
-        let root = scratch("reap");
+    fn a_dir_without_the_stamp_is_reinstalled() {
+        let root = scratch("stamp");
         let (pkg, bin) = (root.join("pkg"), root.join("bin"));
-        let mut published = Vec::new();
-        for version in [b"pi-a", b"pi-b", b"pi-c", b"pi-d"] {
-            package(&pkg, version, b"wasm", None);
-            published.push(publish(&bin, &pkg).unwrap());
-        }
-        let [stale, mapped, unknown, live] = published.as_slice() else {
-            unreachable!()
-        };
-        reap_unused_with(&bin, |path| {
-            if path == mapped.as_path() {
-                MappedState::InUse
-            } else if path == unknown.as_path() {
-                MappedState::Unknown
-            } else {
-                MappedState::Unused
-            }
-        })
-        .unwrap();
-        assert!(!stale.exists(), "没人用的旧版本要删");
-        assert!(mapped.is_file(), "还在跑的 Pi 用着的要留");
-        assert!(unknown.is_file(), "证明不了没人用的要留");
-        assert!(live.is_file(), "链接指着的当前版本要留");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    /// 改名前的 smelt-pi：链接和没人用的目录删掉，还在跑的留着；新名字的目录不碰。
-    #[test]
-    fn legacy_smelt_pi_leftovers_are_reaped_but_running_ones_stay() {
-        let root = scratch("legacy");
-        let (pkg, bin) = (root.join("pkg"), root.join("bin"));
-        package(&pkg, b"agent", b"wasm", None);
-        let current_agent = publish(&bin, &pkg).unwrap();
-
-        let legacy_dir = |fill: char| {
-            let dir = bin.join(format!("{LEGACY_DIR_PREFIX}{}", fill.to_string().repeat(64)));
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join(legacy_binary_file_name()), b"old pi").unwrap();
-            dir
-        };
-        let stale = legacy_dir('a');
-        let running = legacy_dir('b');
-        let unknown = legacy_dir('c');
-        for link in LEGACY_LINKS {
-            fs::write(bin.join(link), b"old pointer").unwrap();
-        }
-        // 名字像但不是指纹目录的不碰。
-        let lookalike = bin.join("smelt-pi-notes");
-        fs::create_dir_all(&lookalike).unwrap();
-
-        reap_legacy_with(&bin, |path| {
-            if path.starts_with(&running) {
-                MappedState::InUse
-            } else if path.starts_with(&unknown) {
-                MappedState::Unknown
-            } else {
-                MappedState::Unused
-            }
-        })
-        .unwrap();
-
-        assert!(!stale.exists(), "没人用的旧目录要删");
-        assert!(running.is_dir(), "交接前起的 Pi 还在用，要留");
-        assert!(unknown.is_dir(), "证明不了没人用的要留");
-        for link in LEGACY_LINKS {
-            assert!(fs::symlink_metadata(bin.join(link)).is_err(), "旧链接 {link} 要删");
-        }
-        assert!(lookalike.is_dir());
-        assert_eq!(current(&bin), Some(fs::canonicalize(&current_agent).unwrap()));
+        package(&pkg, b"pi-v1", b"wasm", None);
+        install(&bin, &pkg).unwrap();
+        fs::remove_file(bin.join(INSTALL_DIR).join(FINGERPRINT_FILE)).unwrap();
+        assert!(!Bundle::read(&pkg).unwrap().is_installed_in(&bin));
+        install(&bin, &pkg).unwrap();
+        assert!(Bundle::read(&pkg).unwrap().is_installed_in(&bin));
         fs::remove_dir_all(root).unwrap();
     }
 }

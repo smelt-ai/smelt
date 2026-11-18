@@ -182,15 +182,6 @@ daemon:
   exited:
     en: "smeltd isn't ready (started %{daemon}, but it exited without listening on %{socket}; see ~/.smelt/daemon.log)"
     zh-CN: "smeltd 未就绪（已拉起 %{daemon}，没监听 %{socket} 就退出了，见 ~/.smelt/daemon.log）"
-  image_missing:
-    en: "The image doesn't exist: %{path}"
-    zh-CN: "映像不存在：%{path}"
-  install_failed:
-    en: "Couldn't install smeltd to %{path}"
-    zh-CN: "无法安装 smeltd 到 %{path}"
-  no_image:
-    en: "No smeltd image to switch to"
-    zh-CN: "没有可切换的 smeltd 映像"
   no_ready_signal:
     en: "smeltd isn't ready (started %{daemon}, but got no ready signal: %{error})"
     zh-CN: "smeltd 未就绪（已拉起 %{daemon}，等不到它的就绪信号：%{error}）"
@@ -209,9 +200,6 @@ daemon:
   spawn_failed:
     en: "Couldn't start smeltd (%{path}): %{error}"
     zh-CN: "拉起 smeltd 失败（%{path}）：%{error}"
-  swap_failed:
-    en: "Couldn't stop the old daemon and switch to the image that matches the app"
-    zh-CN: "未能停掉旧守护并换上与 App 一致的映像"
   unavailable:
     en: "smeltd is unavailable: %{error}"
     zh-CN: "smeltd 不可用：%{error}"
