@@ -24,12 +24,20 @@ const OWNER: &str = "smelt.maintenance";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
-    cleanup::register(cx);
     #[cfg(target_os = "macos")]
-    {
-        sync_cli_link_at_startup(cx);
-        page::register(cx);
+    sync_cli_link_at_startup(cx);
+    // 登记按来源整组替换：本插件的页要一次登记，分开登记后一次会顶掉前一次。
+    if let Err(error) = smelt_plugin_api::register_views(OWNER, views(), cx) {
+        eprintln!("[maintenance] 设置页登记失败：{error}");
     }
+}
+
+fn views() -> Vec<smelt_plugin_api::ViewSpec> {
+    vec![
+        cleanup::spec(),
+        #[cfg(target_os = "macos")]
+        page::spec(),
+    ]
 }
 
 /// 启动时在后台把 `~/.smelt/bin/smelt` 拨到这个 App。
@@ -42,4 +50,19 @@ fn sync_cli_link_at_startup(cx: &App) {
             }
         })
         .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    /// 登记按来源整组替换，本插件的页必须在同一组里，少一页它就从设置里消失了。
+    #[test]
+    fn every_page_is_registered_in_one_set() {
+        let names: Vec<String> = super::views()
+            .into_iter()
+            .map(|spec| spec.name.to_string())
+            .collect();
+        assert!(names.contains(&"cleanup".to_string()));
+        #[cfg(target_os = "macos")]
+        assert!(names.contains(&"cli".to_string()));
+    }
 }

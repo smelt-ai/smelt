@@ -12,7 +12,8 @@ use smelt_plugin_api::{self as api, text};
 
 use crate::cli_command::{self, SYSTEM_LINK, SystemCommand};
 
-pub(crate) fn register(cx: &mut App) {
+/// 「命令行」这一页。
+pub(crate) fn spec() -> ViewSpec {
     let keywords = [
         "smelt 命令",
         "CLI",
@@ -21,7 +22,7 @@ pub(crate) fn register(cx: &mut App) {
         "PATH",
         "/usr/local/bin",
     ];
-    let spec = ViewSpec {
+    ViewSpec {
         name: "cli".into(),
         title: text!("page.title"),
         icon: api::ui::IconName::Terminal.path(),
@@ -33,9 +34,6 @@ pub(crate) fn register(cx: &mut App) {
         }),
         fills: Vec::new(),
         build: Rc::new(|_, cx| Rc::new(cx.new(|_| CommandPage::default())) as Rc<dyn ViewHandle>),
-    };
-    if let Err(error) = api::register_views(crate::OWNER, vec![spec], cx) {
-        eprintln!("[maintenance] 设置页登记失败：{error}");
     }
 }
 

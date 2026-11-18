@@ -16,11 +16,12 @@ use smelt_plugin_api::{self as api, text};
 
 use crate::residue::{self, Residue};
 
-pub(crate) fn register(cx: &mut App) {
+/// 「清理残留」这一页。
+pub(crate) fn spec() -> ViewSpec {
     let keywords = [
         "清理", "缓存", "残留", "磁盘", "空间", "~/.smelt", "clean", "cache", "disk", "storage",
     ];
-    let spec = ViewSpec {
+    ViewSpec {
         name: "cleanup".into(),
         title: text!("cleanup.title"),
         icon: api::ui::IconName::Trash.path(),
@@ -32,9 +33,6 @@ pub(crate) fn register(cx: &mut App) {
         }),
         fills: Vec::new(),
         build: Rc::new(|_, cx| Rc::new(cx.new(|_| CleanupPage::default())) as Rc<dyn ViewHandle>),
-    };
-    if let Err(error) = api::register_views(crate::OWNER, vec![spec], cx) {
-        eprintln!("[maintenance] 清理页登记失败：{error}");
     }
 }
 
