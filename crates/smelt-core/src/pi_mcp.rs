@@ -684,7 +684,7 @@ mod tests {
         );
         assert_eq!(
             playwright["args"],
-            serde_json::json!(["x", "--bun", "@playwright/mcp@0.0.83", "--extension"]),
+            serde_json::json!(["x", "--bun", "@playwright/mcp@0.0.85", "--extension"]),
             "钉死版本，不能用 @latest；--bun 防止转交给系统 node；--extension 接用户已登录的 Chrome"
         );
         assert_eq!(playwright["exposure"], "deferred");
@@ -715,7 +715,7 @@ mod tests {
             serde_json::json!([
                 "x",
                 "--bun",
-                "@playwright/mcp@0.0.83",
+                "@playwright/mcp@0.0.85",
                 "--cdp-endpoint",
                 "http://127.0.0.1:9222"
             ]),

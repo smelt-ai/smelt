@@ -161,7 +161,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         text: PiMcpPresetText::Playwright,
         description: "Browser automation with Playwright in the user's own signed-in Chrome via the Playwright extension: navigate, click, type, fill forms, read accessibility snapshots, take screenshots and inspect console and network",
         transport: PiMcpPresetTransport::Bun {
-            args: &["x", "--bun", "@playwright/mcp@0.0.83", "--extension"],
+            args: &["x", "--bun", "@playwright/mcp@0.0.85", "--extension"],
             env: &[],
         },
         exposure: Some("deferred"),
@@ -208,7 +208,7 @@ const PLAYWRIGHT_ON_REMOTE_DESKTOP: PiMcpPreset = PiMcpPreset {
         args: &[
             "x",
             "--bun",
-            "@playwright/mcp@0.0.83",
+            "@playwright/mcp@0.0.85",
             "--cdp-endpoint",
             "http://127.0.0.1:9222",
         ],
