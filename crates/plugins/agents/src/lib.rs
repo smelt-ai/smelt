@@ -219,6 +219,10 @@ pub(crate) struct AgentsPage {
     pub(crate) watched_memories: HashSet<AgentRef>,
     /// 编辑器那台机器上各会话上次是不是停在两步之间，见 [`Self::on_sessions_changed`]。
     session_settled: HashMap<String, bool>,
+    /// 打了还没发出去的名字和指令，见 `save_editor_text`。
+    unsaved_text: HashMap<AgentRef, AgentText>,
+    /// 正在写名字和指令：写完前新打的字只记进 `unsaved_text`。
+    saving_text: bool,
     _host_events: Subscription,
     _window_events: Subscription,
     _automations: Subscription,
@@ -255,6 +259,8 @@ impl AgentsPage {
             picking_for_conversation: false,
             watched_memories: HashSet::new(),
             session_settled: HashMap::new(),
+            unsaved_text: HashMap::new(),
+            saving_text: false,
             _host_events: host_events,
             _window_events: window_events,
             _automations: cx.observe_global::<automations::AgentAutomations>(|_, cx| cx.notify()),

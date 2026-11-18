@@ -21,6 +21,12 @@ impl AgentEditor {
     }
 }
 
+/// 编辑器里打的名字和指令，等着写回定义。
+pub(crate) struct AgentText {
+    pub(crate) name: String,
+    pub(crate) prompt: String,
+}
+
 pub(crate) struct AgentEditor {
     pub(crate) agent: AgentRef,
     pub(crate) name: Entity<InputState>,
@@ -289,22 +295,62 @@ impl AgentsPage {
         editor
     }
 
-    /// 名字和指令边打边存。
+    /// 名字和指令边打边存。一次只发一份：上一份还没写完时只记下最新的字，写完再发，连着打
+    /// 的字合成一次写入，不是每个字一次。
     fn save_editor_text(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_ref() else {
             return;
         };
         let name = editor.name.read(cx).value().to_string();
         let prompt = editor.instructions.read(cx).value().to_string();
-        let id = editor.agent.id.clone();
-        self.edit_agent(
-            &id,
-            move |agent| {
-                agent.name = name;
-                agent.prompt = prompt;
-            },
-            cx,
-        );
+        self.unsaved_text
+            .insert(editor.agent.clone(), AgentText { name, prompt });
+        if !self.saving_text {
+            self.flush_editor_text(cx);
+        }
+    }
+
+    /// 把记下的字发出去，写完再看有没有新的。编辑器关了、换了智能体也照样写完。
+    fn flush_editor_text(&mut self, cx: &mut Context<Self>) {
+        let unsaved = std::mem::take(&mut self.unsaved_text);
+        if unsaved.is_empty() {
+            return;
+        }
+        self.saving_text = true;
+        self.error = None;
+        let writes: Vec<_> = unsaved
+            .into_iter()
+            .map(|(agent, text)| {
+                let id = agent.id;
+                agent_hosts::edit(
+                    &agent.runtime,
+                    move |config| {
+                        if let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == id) {
+                            agent.name = text.name;
+                            agent.prompt = text.prompt;
+                        }
+                    },
+                    cx,
+                )
+            })
+            .collect();
+        cx.spawn(async move |this, cx| {
+            let mut failed = None;
+            for write in writes {
+                if let Err(error) = write.await {
+                    failed = Some(error);
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.saving_text = false;
+                if let Some(error) = failed {
+                    this.error = Some(error);
+                    cx.notify();
+                }
+                this.flush_editor_text(cx);
+            });
+        })
+        .detach();
     }
 
     /// 勾选 / 取消勾选一个 Pi 插件。写回定义后，新开的对话只会加载勾选项。
