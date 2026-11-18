@@ -1127,8 +1127,11 @@ mod tests {
                 clear_directory.keep_resumable_terminals(&HashSet::new());
                 done_tx.send(()).unwrap();
             });
+            // 下面两处上限只防死锁，不是对速度的要求：清理要开库写盘，Windows CI 上一次就要
+            // 好几秒。这里测的是先后顺序。
+            const DEADLOCK_GUARD: Duration = Duration::from_secs(60);
             started_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(DEADLOCK_GUARD)
                 .expect("清理线程未启动");
 
             // 清理必须等同一把目录锁，不能在旧快照提交前先删除文档。
@@ -1141,7 +1144,7 @@ mod tests {
             drop(state);
 
             done_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(DEADLOCK_GUARD)
                 .expect("持久化结束后清理应完成");
             clear.join().unwrap();
             assert!(
