@@ -32,6 +32,23 @@ impl AgentAutomations {
             .map_or(0, |machine| machine.automations_for(&agent.id).len())
     }
 
+    /// 挂着它的自动化的名字，按库里的顺序；没起名的是 `None`。
+    pub(crate) fn names(&self, agent: &AgentRef) -> Vec<Option<String>> {
+        self.machines
+            .get(&agent.runtime)
+            .map_or_else(Vec::new, |machine| {
+                machine
+                    .automations_for(&agent.id)
+                    .into_iter()
+                    .map(|automation| {
+                        Some(automation.name.trim())
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+    }
+
     /// 那台机器推来的一份库；运行时还没有库是 `None`。
     pub(crate) fn apply(&mut self, machine: &RuntimeKey, payload: &api::serde_json::Value) {
         match decode_automations_payload(payload.clone()) {
@@ -148,5 +165,22 @@ mod tests {
         store.retain_machines(&HashSet::from([RuntimeKey::Local]));
         assert_eq!(store.count(&agent(RuntimeKey::Local, "a")), 1);
         assert_eq!(store.count(&agent(remote, "a")), 0);
+    }
+
+    #[test]
+    fn names_follow_the_store_and_leave_blank_ones_unnamed() {
+        let mut store = AgentAutomations::default();
+        let mut file = payload("s", 1, &["a", "b", "a"]);
+        file["data"]["automations"][2]["name"] = json!("  ");
+        store.apply(&RuntimeKey::Local, &file);
+        assert_eq!(
+            store.names(&agent(RuntimeKey::Local, "a")),
+            vec![Some("自动化 0".to_string()), None]
+        );
+        assert!(
+            store
+                .names(&agent(RuntimeKey::Remote("box".into()), "a"))
+                .is_empty()
+        );
     }
 }

@@ -49,6 +49,20 @@ pub(crate) mod agents {
     /// 智能体页，参数 `{"machine": …}` 停在那台机器上。没装就不给去那里的入口。
     pub(crate) const VIEW: &str = "smelt.agents/main";
 
+    // 约定：smelt.agents 的 AGENT_TAB。
+    /// 智能体详情页上多出来的页签（插槽）。每个打开的智能体建一份，参数是
+    /// [`AgentTabArgs`]，第一次 `open` 给；画在详情页正文里，自己负责滚动。
+    pub(crate) const AGENT_TAB: &str = "smelt.agents/agent-tab";
+
+    // 约定：smelt.agents 的 AgentTabArgs。
+    /// [`AGENT_TAB`] 的参数。
+    #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+    pub(crate) struct AgentTabArgs {
+        #[serde(with = "machine_json")]
+        pub(crate) machine: RuntimeKey,
+        pub(crate) agent: String,
+    }
+
     // 约定：smelt.agents 的 AGENT_SETTINGS。
     /// 各台机器眼下的智能体配置，只含收到过推送的机器。之后的变化订
     /// [`AGENT_SETTINGS_CHANGED`]。

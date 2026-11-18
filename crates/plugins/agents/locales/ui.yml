@@ -15,6 +15,22 @@ agent:
   unnamed:
     en: "Untitled"
     zh-CN: "未命名"
+capabilities:
+  empty:
+    en: "No skills, extensions or MCP servers yet. Click “Manage” to add them in Capabilities."
+    zh-CN: "还没有技能、扩展或 MCP 服务器。点「管理」去能力库添加。"
+  manage_tooltip:
+    en: "Import skills and extensions, or add MCP servers, in Capabilities"
+    zh-CN: "去能力库导入技能和扩展、添加 MCP 服务器"
+  rescan:
+    en: "Rescan Skills, Extensions and mcp.json"
+    zh-CN: "重新扫描技能、扩展和 mcp.json"
+  selected:
+    en: "%{count} checked; it can't see anything unchecked. Changes apply to new conversations."
+    zh-CN: "已选 %{count} 项，没勾的它看不到。改动对新开的对话生效。"
+  title:
+    en: "Capabilities"
+    zh-CN: "能力"
 cli:
   checked_hours:
     en: "Checked %{count} h ago"
@@ -153,9 +169,12 @@ default:
     en: "“New Conversation” starts with this agent"
     zh-CN: "「新对话」用这个智能体开"
 delete:
+  automation_name:
+    en: "“%{name}”"
+    zh-CN: "「%{name}」"
   blocked:
-    en: "Delete the %{count} linked automations first"
-    zh-CN: "请先删除关联的 %{count} 条自动化"
+    en: "%{count} automations still use it: %{names}. Change or delete them first."
+    zh-CN: "还有 %{count} 条自动化在用它：%{names}。先改掉或删掉它们。"
   confirm_title:
     en: "Delete this agent?"
     zh-CN: "确定删除这个智能体吗？"
@@ -172,9 +191,15 @@ delete:
   title:
     en: "Delete Agent"
     zh-CN: "删除智能体"
+  name_separator:
+    en: ", "
+    zh-CN: "、"
   tooltip:
     en: "Delete the agent and its memories; existing conversations are kept"
     zh-CN: "删除智能体和它的记忆；已有对话会保留"
+  unnamed_automation:
+    en: "Untitled"
+    zh-CN: "未命名"
 duration:
   days:
     en: "%{days}d"
@@ -199,8 +224,8 @@ editor:
     en: "Cancel"
     zh-CN: "取消"
   draft_note:
-    en: "Becomes the default once a conversation starts; going back discards this agent"
-    zh-CN: "开始对话后设为默认；返回就取消，不保留这个智能体"
+    en: "Becomes the default once a conversation starts; Cancel deletes this agent"
+    zh-CN: "开始对话后设为默认；点取消就删掉这个智能体"
   instructions_placeholder:
     en: "What it handles, how it works, and when it should stop and ask you."
     zh-CN: "它负责什么、怎么做事、什么时候该停下来问你。"
@@ -350,27 +375,9 @@ mcp:
   disabled:
     en: "Disabled in Capabilities; checking it won't connect"
     zh-CN: "已在能力库停用，勾选也不会连接"
-  empty:
-    en: "No MCP servers configured yet. Click “Manage” to add one in Capabilities."
-    zh-CN: "还没有配置 MCP 服务器。点「管理」去能力库添加。"
-  local:
-    en: "Local"
-    zh-CN: "本地"
-  manage_tooltip:
-    en: "Add, sign in to or disable MCP servers in Capabilities"
-    zh-CN: "去能力库添加、登录或停用 MCP 服务器"
   missing:
     en: "This server is no longer in mcp.json"
     zh-CN: "mcp.json 里已经没有这台服务器"
-  reload:
-    en: "Reload mcp.json"
-    zh-CN: "重新读取 mcp.json"
-  remote:
-    en: "Remote"
-    zh-CN: "远程"
-  selected:
-    en: "%{count} checked. Conversations connect only to checked servers; unchecked ones don't start. Changes apply to new conversations."
-    zh-CN: "已勾选 %{count} 个。对话只连勾选的服务器，没勾的不启动。改动对新开的对话生效。"
 memory:
   pending_subtitle:
     en: "%{reason}: %{description}"
@@ -579,9 +586,6 @@ pick:
     en: "Unknown"
     zh-CN: "未知"
 plugins:
-  empty:
-    en: "No skills or extensions installed yet. Click “Manage” to import them in Capabilities."
-    zh-CN: "还没有装任何技能或扩展。点「管理」去能力库导入。"
   kind:
     extension:
       en: "Extension"
@@ -589,21 +593,9 @@ plugins:
     skill:
       en: "Skill"
       zh-CN: "技能"
-  manage_tooltip:
-    en: "Import or delete skills and extensions in Capabilities"
-    zh-CN: "去能力库导入或删除技能和扩展"
   missing:
     en: "No longer found on disk"
     zh-CN: "磁盘上已经找不到了"
-  rescan:
-    en: "Rescan Skill and Extension Folders"
-    zh-CN: "重新扫描技能和扩展目录"
-  selected:
-    en: "%{count} checked. Conversations load only the checked skills and extensions; nothing unchecked is loaded. Changes apply to new conversations."
-    zh-CN: "已勾选 %{count} 个。对话只加载勾选的技能和扩展，没勾的一律不加载。改动对新开的对话生效。"
-  title:
-    en: "Skills & Extensions"
-    zh-CN: "技能和扩展"
 profile:
   add:
     en: "Add Custom Agent"

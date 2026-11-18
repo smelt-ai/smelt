@@ -169,9 +169,7 @@ fn new_conversation(cx: &mut App) -> Handled {
     let open_args = match plan.intent {
         NewConversationIntent::Start(agent) => {
             if let Some(page) = &page {
-                page.update(cx, |page, cx| {
-                    page.discard_uncommitted_draft(Some(&agent), cx)
-                });
+                page.update(cx, |page, _| page.release_conversation_draft());
             }
             let started = start_conversation(agent, cx);
             return Handled::Done(
@@ -210,7 +208,8 @@ pub(crate) struct AgentsPage {
     /// 正在编辑的智能体；`None` 是目录。
     pub(crate) editor: Option<AgentEditor>,
     pub(crate) error: Option<String>,
-    /// 「新对话」时一个智能体都没有，建出来的那个：点「开始对话」前都算草稿，返回就删掉。
+    /// 「新对话」时一个智能体都没有，建出来的那个：点「开始对话」前都算草稿，点「取消」才删掉。
+    /// 离开这页、改去跟别的智能体对话都不删，它留下来当一个普通的智能体。
     pub(crate) conversation_draft: Option<AgentRef>,
     /// 从「新对话」过来、一个智能体都没有：下一个建出来的当草稿。
     pub(crate) arm_conversation_on_create: bool,
@@ -221,7 +220,7 @@ pub(crate) struct AgentsPage {
     /// 编辑器那台机器上各会话上次是不是停在两步之间，见 [`Self::on_sessions_changed`]。
     session_settled: HashMap<String, bool>,
     _host_events: Subscription,
-    _locale: Subscription,
+    _window_events: Subscription,
     _automations: Subscription,
     _agent_hosts: Subscription,
 }
@@ -232,14 +231,21 @@ impl AgentsPage {
         let host_events = cx.subscribe(&events, |this, _, event: &HostEvent, cx| {
             this.on_host_event(event, cx);
         });
-        // 输入框的占位文字存在输入框里，换语言时要重设；这要窗口，所以单独订阅。
-        let locale = cx.subscribe_in(&events, window, |this, _, event: &HostEvent, window, cx| {
-            if matches!(event, HostEvent::LocaleChanged)
-                && let Some(editor) = this.editor.as_ref()
-            {
-                editor.label(window, cx);
-            }
-        });
+        // 要窗口的单独订阅：输入框的占位文字存在输入框里，换语言时要重设；插槽页签的视图
+        // 按窗口建。
+        let window_events = cx.subscribe_in(
+            &events,
+            window,
+            |this, _, event: &HostEvent, window, cx| match event {
+                HostEvent::LocaleChanged => {
+                    if let Some(editor) = this.editor.as_ref() {
+                        editor.label(window, cx);
+                    }
+                }
+                HostEvent::ViewsChanged => this.sync_agent_tabs(window, cx),
+                _ => {}
+            },
+        );
         Self {
             focus_handle: cx.focus_handle(),
             editor: None,
@@ -250,7 +256,7 @@ impl AgentsPage {
             watched_memories: HashSet::new(),
             session_settled: HashMap::new(),
             _host_events: host_events,
-            _locale: locale,
+            _window_events: window_events,
             _automations: cx.observe_global::<automations::AgentAutomations>(|_, cx| cx.notify()),
             _agent_hosts: cx.observe_global::<agent_hosts::AgentHosts>(Self::on_agents_changed),
         }
@@ -275,9 +281,9 @@ impl AgentsPage {
             HostEvent::SessionsChanged => self.on_sessions_changed(cx),
             HostEvent::MachinesChanged => self.on_agents_changed(cx),
             HostEvent::ShownViewsChanged => {
-                // 离开这页就是不要草稿了。
+                // 离开这页不选了；草稿留着，回来还在（只有「取消」删它）。
                 if !api::host(cx).view_shown(VIEW_ID, cx) {
-                    self.discard_uncommitted_draft(None, cx);
+                    self.arm_conversation_on_create = false;
                     self.picking_for_conversation = false;
                 }
             }
@@ -434,7 +440,7 @@ impl PluginView for AgentsPage {
             };
             let agent = AgentRef::new(machine, id.to_string());
             if agent.definition(cx).is_some() {
-                self.discard_uncommitted_draft(Some(&agent), cx);
+                self.release_conversation_draft();
                 self.open_agent(agent, tab, window, cx);
             } else {
                 self.error = Some(t!("error.agent_gone").into_owned());

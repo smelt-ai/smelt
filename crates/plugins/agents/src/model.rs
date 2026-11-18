@@ -63,12 +63,14 @@ pub(crate) fn session_phase_settled(phase: api::model::daemon_state::DaemonPhase
     )
 }
 
-/// 编辑页的两个页签。配置是设一次就不怎么动的东西；记忆是会一直长的数据，单独一页，
-/// 不把插件和 MCP 挤到后面去。
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+/// 编辑页的页签。设置是设一次就不怎么动的东西；记忆是会一直长的数据，单独一页，不把能力
+/// 挤到后面去；中间是别的插件填进 [`crate::contract::AGENT_TAB`] 的页签（如自动化）。
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub(crate) enum AgentEditorTab {
     #[default]
     Config,
+    /// 填进插槽的视图，值是视图 id。
+    Fill(SharedString),
     Memory,
 }
 

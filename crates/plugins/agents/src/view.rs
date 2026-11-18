@@ -106,22 +106,58 @@ impl AgentsPage {
         &self,
         name: &str,
         entity: Entity<AgentsPage>,
+        cx: &App,
     ) -> AnyElement {
         let draft = self.editing_conversation_draft();
         let back_entity = entity.clone();
         let tabs = self.editor.as_ref().map(|editor| {
-            const TABS: [AgentEditorTab; 2] = [AgentEditorTab::Config, AgentEditorTab::Memory];
+            // 设置在前、记忆在后，别的插件填的页签按登记顺序夹在中间。
+            let tabs: Rc<Vec<AgentEditorTab>> = Rc::new(
+                std::iter::once(AgentEditorTab::Config)
+                    .chain(
+                        editor
+                            .fills
+                            .iter()
+                            .map(|fill| AgentEditorTab::Fill(fill.id().clone())),
+                    )
+                    .chain(std::iter::once(AgentEditorTab::Memory))
+                    .collect(),
+            );
             let entity = entity.clone();
             Segmented::new("agent-editor-tabs")
-                .segments(TABS.map(|tab| agent_editor_tab_label(tab, editor)))
-                .selected(TABS.iter().position(|tab| *tab == editor.tab))
+                .segments(
+                    tabs.iter()
+                        .map(|tab| agent_editor_tab_label(tab, editor, cx)),
+                )
+                .selected(tabs.iter().position(|tab| *tab == editor.tab))
                 .on_select(move |ix, _, cx| {
-                    if let Some(tab) = TABS.get(ix).copied() {
+                    if let Some(tab) = tabs.get(ix).cloned() {
                         entity.update(cx, |page, cx| page.select_agent_editor_tab(tab, cx));
                     }
                 })
         });
+        // 草稿是「开始对话」（开了才算建好）；已经建好的随时能开一段新对话。
         let start_entity = entity;
+        let start = if draft {
+            Button::new("agent-draft-start-conversation")
+                .primary()
+                .label(t!("editor.start"))
+                .on_click(move |_, _, cx| {
+                    start_entity.update(cx, |page, cx| page.commit_conversation_draft(cx));
+                })
+        } else {
+            let agent = self.editor.as_ref().map(|editor| editor.agent.clone());
+            Button::new("agent-new-conversation")
+                .primary()
+                .label(t!("new_conversation.title"))
+                .tooltip(t!("new_conversation.tooltip"))
+                .on_click(move |_, _, cx| {
+                    if let Some(agent) = agent.clone() {
+                        start_entity
+                            .update(cx, |page, cx| page.start_agent_conversation(agent, cx));
+                    }
+                })
+        };
         api::ui::page_toolbar()
             .child(product_back_button(
                 "agent-editor-back",
@@ -154,23 +190,12 @@ impl AgentsPage {
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
                                 .overflow_hidden()
-                                .child(truncated_line(
-                                    t!("editor.draft_note"),
-                                )),
+                                .child(truncated_line(t!("editor.draft_note"))),
                         )
                     }),
             )
             .children(tabs)
-            .when(draft, |row| {
-                row.child(
-                    Button::new("agent-draft-start-conversation")
-                        .primary()
-                        .label(t!("editor.start"))
-                        .on_click(move |_, _, cx| {
-                            start_entity.update(cx, |page, cx| page.commit_conversation_draft(cx));
-                        }),
-                )
-            })
+            .child(start)
             .into_any_element()
     }
 
@@ -430,6 +455,18 @@ impl AgentsPage {
             .error
             .clone()
             .or_else(|| agent_hosts::unavailable(&editor.agent.runtime, cx).map(str::to_string));
+        if let AgentEditorTab::Fill(id) = &editor.tab
+            && let Some(fill) = editor.fills.iter().find(|fill| fill.id() == id)
+        {
+            // 填的视图自己排版、自己滚动。
+            return div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .h_full()
+                .child(fill.view())
+                .into_any_element();
+        }
         if editor.tab == AgentEditorTab::Memory {
             // 单独的滚动区：两个页签各记各的滚动位置。
             return div()
@@ -472,49 +509,10 @@ impl AgentsPage {
             .count();
         let instructions_footer = agent_instructions_footer(prompt_chars);
 
-        let conversation_agent = editor.agent.clone();
-        let talk_entity = entity.clone();
-        let talk_button = Button::new("agent-new-conversation")
-            .primary()
-            .small()
-            .label(t!("new_conversation.title"))
-            .tooltip(t!("new_conversation.tooltip"))
-            .on_click(move |_, _, cx| {
-                let agent = conversation_agent.clone();
-                talk_entity.update(cx, |page, cx| page.start_agent_conversation(agent, cx));
-            });
-
-        let delete_entity = entity.clone();
-        let delete_agent = editor.agent.clone();
-        let delete_tooltip = if automation_count == 0 {
-            t!("delete.tooltip").into_owned()
-        } else {
-            t!("delete.blocked", count = automation_count).into_owned()
-        };
-        let delete_button = MenuTrigger::dropdown(
-            "agent-delete-menu",
-            Button::new("agent-delete")
-                .quiet()
-                .small()
-                .icon(IconName::Ellipsis)
-                .accessibility_label(t!("common.more"))
-                .tooltip(delete_tooltip),
-            move |_, _| {
-                let entity = delete_entity.clone();
-                let agent = delete_agent.clone();
-                let disabled = automation_count != 0;
-                Menu::new().item(
-                    MenuItem::new(t!("delete.title"))
-                        .icon(api::ui::trash_icon())
-                        .danger()
-                        .disabled(disabled)
-                        .on_click(move |_, window, cx| {
-                            let agent = agent.clone();
-                            entity
-                                .update(cx, |page, cx| page.start_delete_agent(agent, window, cx));
-                        }),
-                )
-            },
+        let delete_row = render_agent_delete_row(
+            editor.agent.clone(),
+            self.automation_names(&editor.agent, cx),
+            entity.clone(),
         );
 
         div()
@@ -576,16 +574,6 @@ impl AgentsPage {
                                                     )),
                                             ),
                                     ),
-                            )
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .ml_auto()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(talk_button)
-                                    .child(delete_button),
                             ),
                     )
                     .child(
@@ -631,8 +619,8 @@ impl AgentsPage {
                     )
                     .child(render_agent_context_card(&agent, editor, entity.clone()))
                     .child(render_agent_memory_summary(&agent, editor, entity.clone()))
-                    .child(render_agent_plugin_card(&agent, editor, entity.clone(), cx))
-                    .child(render_agent_mcp_card(&agent, editor, entity, cx)),
+                    .child(render_agent_capability_card(&agent, editor, entity, cx))
+                    .child(delete_row),
             )
             .into_any_element()
     }
@@ -647,7 +635,7 @@ impl AgentsPage {
             .and_then(|editor| editor.agent.definition(cx).map(|agent| (agent, editor)));
         let (header, body) = match editing {
             Some((agent, editor)) => (
-                self.render_agent_editor_header(&agent.name, entity.clone()),
+                self.render_agent_editor_header(&agent.name, entity.clone(), cx),
                 self.render_agent_config_panel(agent, editor, entity, cx),
             ),
             None => {

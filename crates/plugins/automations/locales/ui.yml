@@ -17,6 +17,28 @@ agent:
   unnamed:
     en: "Untitled"
     zh-CN: "未命名"
+agent_tab:
+  empty:
+    en: "Nothing scheduled for this agent yet. Create an automation and it runs on its own."
+    zh-CN: "还没有让它做的事。新建一条自动化，到点它自己跑。"
+  enabled:
+    en: "Enabled"
+    zh-CN: "启用"
+  new:
+    en: "New Automation"
+    zh-CN: "新建自动化"
+  next:
+    en: "Next %{when}"
+    zh-CN: "下次 %{when}"
+  paused:
+    en: "Paused"
+    zh-CN: "已暂停"
+  recent:
+    en: "Recent Runs"
+    zh-CN: "最近运行"
+  title:
+    en: "What %{name} Does"
+    zh-CN: "让%{name}做的事"
 automation:
   unnamed:
     en: "Untitled Automation"

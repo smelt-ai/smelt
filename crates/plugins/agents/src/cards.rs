@@ -189,137 +189,61 @@ pub(crate) fn product_page_header(count_label: String, action: AnyElement) -> An
 
 /// 智能体的插件勾选区。只列全局插件（`~/.pi/agent/skills`、`~/.agents/skills`、
 /// `~/.pi/agent/extensions`），因为智能体对话的工作目录是一次性空目录，项目级插件永远扫不到。
-pub(crate) fn render_agent_plugin_card(
-    agent: &AgentDefinition,
-    editor: &AgentEditor,
+/// 设置页签最底下的「删除智能体」。还挂着自动化时按钮置灰，点名是哪几条：删了它们就跑不
+/// 起来。真正拦着的是运行时（删除时判定），这里只是先说清楚。
+pub(crate) fn render_agent_delete_row(
+    agent: AgentRef,
+    automations: Vec<String>,
     entity: Entity<AgentsPage>,
-    cx: &App,
 ) -> AnyElement {
-    let selected = agent.plugins.clone();
-    let selected_count = selected.len();
-
-    let refresh_entity = entity.clone();
-    let refresh_button = compact_chip("agent-plugins-refresh")
-        .icon(IconName::Refresh)
-        .icon_action(t!("plugins.rescan"))
-        .on_click(move |_, _, cx| {
-            refresh_entity.update(cx, |page, cx| page.refresh_agent_plugins(cx));
-        });
-    let manage_entity = entity.clone();
-    let manage_button = compact_chip("agent-plugins-manage")
-        .label(t!("common.manage"))
-        .tooltip(t!("plugins.manage_tooltip"))
-        .on_click(move |_, _, cx| {
-            manage_entity.update(cx, |page, cx| {
-                page.open_capabilities("skills", cx);
-            });
-        });
-
-    // 已勾选但磁盘上已经没有的条目也要露出来，否则用户没法取消它。
-    let mut rows: Vec<AnyElement> = editor
-        .pi_plugins()
-        .iter()
-        .map(|plugin| {
-            agent_plugin_row(
-                AgentPick::Plugin,
-                &agent.id,
-                &plugin.id,
-                &plugin.name,
-                &plugin_kind_label(plugin.kind),
-                &plugin.description,
-                &plugin.origin,
-                plugin.broken.clone(),
-                selected.contains(&plugin.id),
-                entity.clone(),
-            )
-        })
-        .collect();
-    // 目录还没读到时不知道哪些已经没了，先不标。
-    let pending = editor.pi_pending_text();
-    for id in selected.iter().filter(|_| pending.is_none()) {
-        if editor.pi_plugins().iter().any(|plugin| plugin.id == *id) {
-            continue;
-        }
-        let (kind_label, name) = match api::model::pi_plugin_catalog::split_plugin_id(id) {
-            Some((kind, name)) => (plugin_kind_label(kind), name.to_string()),
-            None => (t!("pick.unknown"), id.clone()),
-        };
-        rows.push(agent_plugin_row(
-            AgentPick::Plugin,
-            &agent.id,
-            id,
-            &name,
-            &kind_label,
-            "",
-            "",
-            Some(t!("plugins.missing").into_owned()),
-            true,
-            entity.clone(),
-        ));
-    }
-
-    let body = if rows.is_empty() {
-        div()
-            .px_5()
-            .py_4()
-            .type_style(TYPE.text_xsmall)
-            .text_color(rgb(ui_theme::faint()))
-            .child(pending.unwrap_or_else(|| t!("plugins.empty").into_owned()))
-            .into_any_element()
+    let blocked = !automations.is_empty();
+    let description = if blocked {
+        let names = automations
+            .iter()
+            .map(|name| t!("delete.automation_name", name = name).into_owned())
+            .collect::<Vec<_>>()
+            .join(&t!("delete.name_separator"));
+        t!("delete.blocked", count = automations.len(), names = names).into_owned()
     } else {
-        div()
-            .px_2()
-            .pb_2()
-            .flex()
-            .flex_col()
-            .children(rows)
-            .into_any_element()
+        t!("delete.tooltip").into_owned()
     };
-
     agent_surface_card()
+        .px_5()
+        .py_3()
         .flex()
-        .flex_col()
+        .items_center()
+        .gap_3()
         .child(
             div()
-                .px_5()
-                .pt_4()
-                .pb_2()
+                .flex_1()
+                .min_w_0()
                 .flex()
-                .items_start()
-                .gap_2()
+                .flex_col()
+                .gap_0p5()
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .type_style(TYPE.ui_medium)
-                                .text_color(rgb(ui_theme::text()))
-                                .child(t!("plugins.title").into_owned()),
-                        )
-                        .child(
-                            div()
-                                .type_style(TYPE.text_xsmall)
-                                .text_color(rgb(ui_theme::muted()))
-                                .child(t!("plugins.selected", count = selected_count).into_owned()),
-                        ),
+                        .type_style(TYPE.ui_medium)
+                        .text_color(rgb(ui_theme::text()))
+                        .child(t!("delete.title").into_owned()),
                 )
                 .child(
                     div()
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(refresh_button)
-                        .when(api::is_registered(CAPABILITIES_VIEW, cx), |row| {
-                            row.child(manage_button)
-                        }),
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(rgb(ui_theme::muted()))
+                        .child(description),
                 ),
         )
-        .child(body)
+        .child(
+            Button::new("agent-delete")
+                .danger()
+                .small()
+                .label(t!("common.delete"))
+                .disabled(blocked)
+                .on_click(move |_, window, cx| {
+                    let agent = agent.clone();
+                    entity.update(cx, |page, cx| page.start_delete_agent(agent, window, cx));
+                }),
+        )
         .into_any_element()
 }
 
@@ -501,10 +425,17 @@ pub(crate) fn memory_pending_count(memories: &AgentMemories) -> usize {
         .count()
 }
 
-/// 编辑页页签名。待确认要用户处理，挂在页签上，在配置页也看得到。
-pub(crate) fn agent_editor_tab_label(tab: AgentEditorTab, editor: &AgentEditor) -> String {
+/// 编辑页页签名。待确认要用户处理，挂在页签上，在配置页也看得到。插槽页签用填它的视图的标题；视图刚撤下（还没对账）时用它的 id。
+pub(crate) fn agent_editor_tab_label(
+    tab: &AgentEditorTab,
+    editor: &AgentEditor,
+    cx: &App,
+) -> String {
     match tab {
         AgentEditorTab::Config => t!("tab.config").into_owned(),
+        AgentEditorTab::Fill(id) => api::view(id, cx)
+            .map(|view| view.title.get().to_string())
+            .unwrap_or_else(|| id.to_string()),
         AgentEditorTab::Memory => match memory_pending_count(&editor.memories) {
             0 => t!("memory.title").into_owned(),
             pending => t!("tab.memory_pending", count = pending).into_owned(),
@@ -1150,81 +1081,121 @@ pub(crate) fn agent_context_row(
 }
 
 /// 智能体的 MCP 勾选。服务器在能力库里配置，这里只决定这个智能体连哪几台。
-pub(crate) fn render_agent_mcp_card(
+/// 「能力」卡：技能、扩展、MCP 服务器合成一张单子，勾上的才给它用。行的样子一样，只是写回
+/// 定义的字段不同（插件写 `plugins`，MCP 写 `mcp_servers`）。
+pub(crate) fn render_agent_capability_card(
     agent: &AgentDefinition,
     editor: &AgentEditor,
     entity: Entity<AgentsPage>,
     cx: &App,
 ) -> AnyElement {
-    let selected = agent.mcp_servers.clone();
-    let selected_count = selected.len();
+    let selected_count = agent.plugins.len() + agent.mcp_servers.len();
 
     let refresh_entity = entity.clone();
-    let refresh_button = compact_chip("agent-mcp-refresh")
+    let refresh_button = compact_chip("agent-capabilities-refresh")
         .icon(IconName::Refresh)
-        .icon_action(t!("mcp.reload"))
+        .icon_action(t!("capabilities.rescan"))
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |page, cx| page.refresh_agent_plugins(cx));
         });
     let manage_entity = entity.clone();
-    let manage_button = compact_chip("agent-mcp-manage")
+    let manage_button = compact_chip("agent-capabilities-manage")
         .label(t!("common.manage"))
-        .tooltip(t!("mcp.manage_tooltip"))
+        .icon(IconName::ChevronRight)
+        .tooltip(t!("capabilities.manage_tooltip"))
         .on_click(move |_, _, cx| {
             manage_entity.update(cx, |page, cx| {
-                page.open_capabilities("mcp", cx);
+                page.open_capabilities("skills", cx);
             });
         });
 
     let mut rows: Vec<AnyElement> = editor
-        .pi_mcp_servers()
+        .pi_plugins()
         .iter()
-        .map(|server| {
-            let (kind_label, detail) = match &server.transport {
-                api::model::pi_mcp::PiMcpTransport::Http { url } => (t!("mcp.remote"), url.clone()),
-                api::model::pi_mcp::PiMcpTransport::Stdio { command, args } => {
-                    (t!("mcp.local"), format!("{command} {}", args.join(" ")))
-                }
-                api::model::pi_mcp::PiMcpTransport::Unknown => (t!("pick.unknown"), String::new()),
-            };
-            // 能力库里停用的服务器勾了也不会连：Pi 读到 `enabled: false` 就跳过。
-            let broken = (!server.enabled).then(|| t!("mcp.disabled").into_owned());
+        .map(|plugin| {
             agent_plugin_row(
-                AgentPick::McpServer,
+                AgentPick::Plugin,
                 &agent.id,
-                &server.name,
-                &server.name,
-                &kind_label,
-                server.description.as_deref().unwrap_or(""),
-                &detail,
-                broken,
-                selected.contains(&server.name),
+                &plugin.id,
+                &plugin.name,
+                &plugin_kind_label(plugin.kind),
+                &plugin.description,
+                &plugin.origin,
+                plugin.broken.clone(),
+                agent.plugins.contains(&plugin.id),
                 entity.clone(),
             )
         })
         .collect();
-    // 已勾选但 mcp.json 里已经删掉的也要露出来，否则用户没法取消它。
-    let pending = editor.pi_pending_text();
-    for name in selected.iter().filter(|_| pending.is_none()) {
-        if editor
-            .pi_mcp_servers()
-            .iter()
-            .any(|server| server.name == *name)
-        {
-            continue;
-        }
-        rows.push(agent_plugin_row(
+    rows.extend(editor.pi_mcp_servers().iter().map(|server| {
+        let detail = match &server.transport {
+            api::model::pi_mcp::PiMcpTransport::Http { url } => url.clone(),
+            api::model::pi_mcp::PiMcpTransport::Stdio { command, args } => {
+                format!("{command} {}", args.join(" "))
+            }
+            api::model::pi_mcp::PiMcpTransport::Unknown => String::new(),
+        };
+        // 能力库里停用的服务器勾了也不会连：Pi 读到 `enabled: false` 就跳过。
+        let broken = (!server.enabled).then(|| t!("mcp.disabled").into_owned());
+        agent_plugin_row(
             AgentPick::McpServer,
             &agent.id,
-            name,
-            name,
-            &t!("pick.unknown"),
-            "",
-            "",
-            Some(t!("mcp.missing").into_owned()),
-            true,
+            &server.name,
+            &server.name,
+            "MCP",
+            server.description.as_deref().unwrap_or(""),
+            &detail,
+            broken,
+            agent.mcp_servers.contains(&server.name),
             entity.clone(),
-        ));
+        )
+    }));
+    // 已勾选但磁盘上、mcp.json 里已经没有的也要露出来，否则用户没法取消它。目录还没读到时
+    // 不知道哪些已经没了，先不标。
+    let pending = editor.pi_pending_text();
+    if pending.is_none() {
+        for id in &agent.plugins {
+            if editor.pi_plugins().iter().any(|plugin| plugin.id == *id) {
+                continue;
+            }
+            let (kind_label, name) = match api::model::pi_plugin_catalog::split_plugin_id(id) {
+                Some((kind, name)) => (plugin_kind_label(kind), name.to_string()),
+                None => (t!("pick.unknown"), id.clone()),
+            };
+            rows.push(agent_plugin_row(
+                AgentPick::Plugin,
+                &agent.id,
+                id,
+                &name,
+                &kind_label,
+                "",
+                "",
+                Some(t!("plugins.missing").into_owned()),
+                true,
+                entity.clone(),
+            ));
+        }
+        for name in &agent.mcp_servers {
+            if editor
+                .pi_mcp_servers()
+                .iter()
+                .any(|server| server.name == *name)
+            {
+                continue;
+            }
+            rows.push(agent_plugin_row(
+                AgentPick::McpServer,
+                &agent.id,
+                name,
+                name,
+                "MCP",
+                "",
+                "",
+                Some(t!("mcp.missing").into_owned()),
+                true,
+                entity.clone(),
+            ));
+        }
     }
 
     let body = if rows.is_empty() {
@@ -1233,7 +1204,7 @@ pub(crate) fn render_agent_mcp_card(
             .py_4()
             .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::faint()))
-            .child(pending.unwrap_or_else(|| t!("mcp.empty").into_owned()))
+            .child(pending.unwrap_or_else(|| t!("capabilities.empty").into_owned()))
             .into_any_element()
     } else {
         div()
@@ -1267,13 +1238,16 @@ pub(crate) fn render_agent_mcp_card(
                             div()
                                 .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
-                                .child("MCP"),
+                                .child(t!("capabilities.title").into_owned()),
                         )
                         .child(
                             div()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
-                                .child(t!("mcp.selected", count = selected_count).into_owned()),
+                                .child(
+                                    t!("capabilities.selected", count = selected_count)
+                                        .into_owned(),
+                                ),
                         ),
                 )
                 .child(
@@ -1292,8 +1266,7 @@ pub(crate) fn render_agent_mcp_card(
         .into_any_element()
 }
 
-/// 编辑器里可勾选的两类能力：插件（技能 / 扩展）和 MCP 服务器。行的样子一样，
-/// 只是写回定义的字段不同。
+/// 「能力」卡里一行勾的是哪一类：插件（技能 / 扩展）还是 MCP 服务器。
 #[derive(Clone, Copy)]
 pub(crate) enum AgentPick {
     Plugin,

@@ -7,9 +7,11 @@
 //! - 页面（[`page`]）：视图 id 是 [`VIEW_ID`]，打开参数见 [`page`] 的模块文档。改动一律发给
 //!   自动化所在的那台机器，等它推回来。
 //! - 别的插件（[`peers`]）：运行现场是对话插件的实例视图；引用的智能体读智能体插件的配置，
-//!   在 [`agents`] 留只读缓存。哪个没装，对应的部分就没有，自动化照常可用。
+//!   在 [`agents`] 留只读缓存；往智能体详情页填「自动化」页签（[`agent_tab`]）。哪个没装，
+//!   对应的部分就没有，自动化照常可用。
 
 mod actions;
+mod agent_tab;
 mod agents;
 mod catalog;
 mod editor;
@@ -50,18 +52,21 @@ pub fn register(cx: &mut App) {
     agents::install(cx);
     api::register_views(
         OWNER,
-        vec![ViewSpec {
-            name: "main".into(),
-            title: api::text!("title"),
-            icon: smelt_plugin_api::ui::IconName::Workflow.path(),
-            draws_top_bar: false,
-            instances: false,
-            settings: None,
-            fills: Vec::new(),
-            build: Rc::new(|window, cx| {
-                Rc::new(cx.new(|cx| AutomationsPage::new(window, cx))) as Rc<dyn ViewHandle>
-            }),
-        }],
+        vec![
+            ViewSpec {
+                name: "main".into(),
+                title: api::text!("title"),
+                icon: smelt_plugin_api::ui::IconName::Workflow.path(),
+                draws_top_bar: false,
+                instances: false,
+                settings: None,
+                fills: Vec::new(),
+                build: Rc::new(|window, cx| {
+                    Rc::new(cx.new(|cx| AutomationsPage::new(window, cx))) as Rc<dyn ViewHandle>
+                }),
+            },
+            agent_tab::spec(),
+        ],
         cx,
     )
     .expect("自动化的视图表写错了");

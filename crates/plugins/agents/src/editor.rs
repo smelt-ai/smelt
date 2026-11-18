@@ -39,6 +39,8 @@ pub(crate) struct AgentEditor {
     pub(crate) memory_filter: MemoryFilter,
     /// 记忆页签里展开看全文的那条记忆。只是看，改仍走系统编辑器。
     pub(crate) expanded_memory: Option<(MemoryLayer, String)>,
+    /// 填进 [`crate::contract::AGENT_TAB`] 的视图，这个智能体各建一份，按登记顺序。
+    pub(crate) fills: Vec<api::ViewInstance>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -215,6 +217,7 @@ impl AgentsPage {
             return;
         };
         self.editor = Some(self.build_editor(agent, definition, tab, window, cx));
+        self.sync_agent_tabs(window, cx);
         self.refresh_agent_memories(cx);
         self.refresh_agent_pi_config(cx);
         window.focus(&self.focus_handle, cx);
@@ -279,6 +282,7 @@ impl AgentsPage {
             memory_query,
             memory_filter: MemoryFilter::default(),
             expanded_memory: None,
+            fills: Vec::new(),
             _subscriptions: subscriptions,
         };
         editor.label(window, cx);
@@ -628,6 +632,48 @@ impl AgentsPage {
         .detach();
     }
 
+    /// 编辑器的插槽页签跟上眼下填 [`crate::contract::AGENT_TAB`] 的视图：新填进来的建一份，
+    /// 撤下的放掉，停在撤下的那页就回到设置。打开编辑器和视图表变了时调。
+    pub(crate) fn sync_agent_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let filled: Vec<SharedString> = api::slot_views(crate::contract::AGENT_TAB, cx)
+            .into_iter()
+            .map(|view| view.id)
+            .collect();
+        if editor
+            .fills
+            .iter()
+            .map(api::ViewInstance::id)
+            .eq(filled.iter())
+        {
+            return;
+        }
+        let mut old = std::mem::take(&mut editor.fills);
+        let args = crate::contract::AgentTabArgs {
+            machine: editor.agent.runtime.clone(),
+            agent: editor.agent.id.clone(),
+        };
+        let args = serde_json::to_value(&args).expect("AgentTabArgs 总能转成 JSON");
+        for id in &filled {
+            if let Some(ix) = old.iter().position(|fill| fill.id() == id) {
+                editor.fills.push(old.remove(ix));
+                continue;
+            }
+            match api::create_view(id, &args, window, cx) {
+                Ok(fill) => editor.fills.push(fill),
+                Err(error) => eprintln!("[agents] 建不了详情页签「{id}」：{error}"),
+            }
+        }
+        if let AgentEditorTab::Fill(id) = &editor.tab
+            && !editor.fills.iter().any(|fill| fill.id() == id)
+        {
+            editor.tab = AgentEditorTab::Config;
+        }
+        cx.notify();
+    }
+
     pub(crate) fn select_agent_editor_tab(&mut self, tab: AgentEditorTab, cx: &mut Context<Self>) {
         if let Some(editor) = self.editor.as_mut() {
             editor.tab = tab;
@@ -845,7 +891,7 @@ impl AgentsPage {
             cx.notify();
             return;
         }
-        self.discard_uncommitted_draft(Some(&agent), cx);
+        self.release_conversation_draft();
         self.picking_for_conversation = false;
         set_default_conversation_agent(&agent, cx);
         if start {
@@ -880,21 +926,11 @@ impl AgentsPage {
             .is_some_and(|draft| self.editor.as_ref().map(|editor| &editor.agent) == Some(draft))
     }
 
-    /// `keep` 是这次要留下的智能体。草稿就是它时只清标记，不删除。
-    pub(crate) fn discard_uncommitted_draft(
-        &mut self,
-        keep: Option<&AgentRef>,
-        cx: &mut Context<Self>,
-    ) {
+    /// 改去跟别的智能体对话、打开了别的智能体：草稿不再是草稿，留下来当一个普通的智能体。
+    /// 只有「取消」删它（[`Self::cancel_conversation_draft`]）。
+    pub(crate) fn release_conversation_draft(&mut self) {
         self.arm_conversation_on_create = false;
-        let Some(draft) = self.conversation_draft.as_ref() else {
-            return;
-        };
-        if keep == Some(draft) {
-            self.conversation_draft = None;
-            return;
-        }
-        self.cancel_conversation_draft(cx);
+        self.conversation_draft = None;
     }
 
     /// 草稿不要了：删掉那个智能体，回到目录。
@@ -982,6 +1018,15 @@ impl AgentsPage {
             self.close_editor(cx);
         }
         self.report_failure(task, cx);
+    }
+
+    /// 挂着它的自动化叫什么，删除被挡时点名用；没起名的写「未命名」。
+    pub(crate) fn automation_names(&self, agent: &AgentRef, cx: &App) -> Vec<String> {
+        cx.global::<crate::automations::AgentAutomations>()
+            .names(agent)
+            .into_iter()
+            .map(|name| name.unwrap_or_else(|| t!("delete.unnamed_automation").into_owned()))
+            .collect()
     }
 
     /// 挂着它的自动化有几条，只拿来显示；还没推来时算 0。

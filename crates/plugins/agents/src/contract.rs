@@ -103,3 +103,23 @@ pub(crate) struct Quota {
 pub(crate) struct RefreshQuota {
     pub(crate) target: QuotaTarget,
 }
+
+// ---- 插槽 ----
+
+/// 智能体详情页上多出来的页签（插槽，见 `smelt_plugin_api` 视图注册表的「插槽」）。填它的是
+/// 按实例建的视图，打开一个智能体的详情时每个填的视图建一份，参数是 [`AgentTabArgs`]，第一次
+/// `open` 给，之后不换智能体。每个填的视图一个页签，按登记顺序排在「设置」和「记忆」之间，
+/// 页签名是视图的标题；没人填就只有这两个页签。
+///
+/// 画在详情页正文里，宽度跟设置页签一样（居中的一栏），自己负责滚动。
+pub(crate) const AGENT_TAB: &str = "smelt.agents/agent-tab";
+
+/// [`AGENT_TAB`] 的参数。线上是 `{"machine": null | "<id>", "agent": "<id>"}`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentTabArgs {
+    /// 本机是 `null`。
+    #[serde(with = "smelt_plugin_api::machine_json")]
+    pub(crate) machine: RuntimeKey,
+    /// 那台机器上智能体的 id。
+    pub(crate) agent: String,
+}
