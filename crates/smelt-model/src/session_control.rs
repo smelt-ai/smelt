@@ -100,6 +100,9 @@ pub struct DaemonConversation {
     /// agent 不许用的工具（`session.create` 的 `disallowed_tools`）。只交给这次拉起的 runtime，
     /// 不进工作区目录。
     pub disallowed_tools: Vec<String>,
+    /// 拉起后、第一轮之前要设好的会话选项（权限、模型等），跟桌面开对话定下的一样。
+    /// 交给这次拉起，也记进目录那一条：之后闲置唤醒、桌面接上都以它为准。
+    pub initial_config: Vec<(String, String)>,
 }
 
 impl DaemonConversation {
@@ -112,6 +115,7 @@ impl DaemonConversation {
             "agent": self.option.kind,
             "resume_id": self.resume_id,
             "disallowed_tools": self.disallowed_tools,
+            "initial_config": self.initial_config,
         })
     }
 
@@ -128,6 +132,7 @@ impl DaemonConversation {
                 history_session_id: self.resume_id.clone(),
                 launch: self.option.launch.clone(),
                 agent_definition_id: self.option.agent_definition_id().map(str::to_string),
+                config_values: self.initial_config.clone(),
                 ..WorkspaceAcp::default()
             }),
             ..WorkspaceConversation::default()
@@ -382,6 +387,7 @@ mod daemon_conversation_tests {
             resume_id: Some("r1".to_string()),
             title: None,
             disallowed_tools: Vec::new(),
+            initial_config: vec![("mode".to_string(), "bypassPermissions".to_string())],
         };
         let entry = conversation.directory_entry("conv-1".to_string());
         assert_eq!(entry.id, "conv-1");
@@ -394,6 +400,15 @@ mod daemon_conversation_tests {
         assert_eq!(acp.agent_definition_id.as_deref(), Some("writer"));
         assert_eq!(acp.launch.command, "smelt-pi");
         assert_eq!(acp.session_title, None);
-        assert_eq!(conversation.open_request()["id"], "acp-1");
+        assert_eq!(
+            acp.config_values,
+            vec![("mode".to_string(), "bypassPermissions".to_string())]
+        );
+        let request = conversation.open_request();
+        assert_eq!(request["id"], "acp-1");
+        assert_eq!(
+            request["initial_config"],
+            serde_json::json!([["mode", "bypassPermissions"]])
+        );
     }
 }

@@ -144,6 +144,27 @@ impl AgentHostSettings {
         values
     }
 
+    /// 运行时自己开的一段新对话（`session.create`、手机、Pi 派生）拉起后、第一轮之前要设好的
+    /// 选项，结果跟桌面开对话、对话插件接上后的一样：智能体的对话放开权限、定成它选的模型，
+    /// 别的按这个 agent 记住的选择；裸引擎（含自定义 Agent）只按记住的选择。
+    pub fn new_conversation_config(
+        &self,
+        agent: ConversationAgentKind,
+        agent_definition_id: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let Some(definition_id) = agent_definition_id else {
+            return self.initial_acp_config(agent, &[]);
+        };
+        let mut values = self.initial_agent_conversation_config(agent);
+        if let Some(model) = self
+            .find_agent(definition_id)
+            .and_then(AgentDefinition::model_config_value)
+        {
+            upsert_config_value(&mut values, "model".to_string(), model);
+        }
+        values
+    }
+
     /// 某个 agent 当前生效的完整启动规格：出厂命令 + 用户配的环境变量。要换命令、
     /// 加参数用自定义 Agent（[`AcpProfile`]）。
     ///
@@ -250,6 +271,43 @@ mod tests {
         wire.as_object_mut().unwrap().remove("agent_spaces_root");
         let old: AgentHostSettings = serde_json::from_value(wire).unwrap();
         assert_eq!(old.agent_spaces_root, None);
+    }
+
+    /// 运行时自己开的对话一拉起就按这份设好：智能体的对话不管记住过什么都放开权限、定成它的
+    /// 模型；裸引擎照记住的选择，没记过就不设，用 agent 自己的默认。
+    #[test]
+    fn a_new_conversation_starts_with_what_the_desktop_would_set() {
+        let mut config = settings();
+        config.remember_acp_config_value(ConversationAgentKind::Pi, "mode".into(), "ask".into());
+        config.remember_acp_config_value(ConversationAgentKind::Pi, "codemode".into(), "on".into());
+        config.agents.push(AgentDefinition {
+            id: "dev".into(),
+            engine_kind_id: ConversationAgentKind::Pi.id().into(),
+            model_provider: "Token-X".into(),
+            model_id: "Claude-Opus-5".into(),
+            ..Default::default()
+        });
+        let pair = |id: &str, value: &str| (id.to_string(), value.to_string());
+
+        let agent = config.new_conversation_config(ConversationAgentKind::Pi, Some("dev"));
+        assert!(
+            agent.contains(&pair("mode", "bypassPermissions")),
+            "{agent:?}"
+        );
+        assert!(agent.contains(&pair("codemode", "on")), "{agent:?}");
+        assert!(
+            agent.contains(&pair("model", "Token-X/Claude-Opus-5")),
+            "{agent:?}"
+        );
+        assert!(!agent.contains(&pair("mode", "ask")), "{agent:?}");
+
+        let engine = config.new_conversation_config(ConversationAgentKind::Pi, None);
+        assert!(engine.contains(&pair("mode", "ask")), "{engine:?}");
+        assert!(
+            config
+                .new_conversation_config(ConversationAgentKind::Claude, None)
+                .is_empty()
+        );
     }
 
     #[test]

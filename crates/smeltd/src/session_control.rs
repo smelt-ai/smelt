@@ -386,6 +386,8 @@ fn plan_create(
             Ok(CreatePlan::Acp(DaemonConversation {
                 sid: id,
                 cwd,
+                // 读配置要碰库，建的时候再填（见 `create_session`）。
+                initial_config: Vec::new(),
                 option,
                 resume_id,
                 title,
@@ -429,7 +431,9 @@ pub(crate) fn create_session(
     let session_id = plan.session_id().to_string();
     match plan {
         CreatePlan::Existing(_) => {}
-        CreatePlan::Acp(conversation) => {
+        CreatePlan::Acp(mut conversation) => {
+            conversation.initial_config =
+                smelt_core::session_control::new_conversation_config(&conversation.option);
             super::acp_host::open_daemon_conversation(
                 &conversation,
                 sessions,
