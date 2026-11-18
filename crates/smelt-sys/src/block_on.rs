@@ -25,7 +25,7 @@ where
             .downcast_ref::<&str>()
             .map(|s| s.to_string())
             .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "后台任务内部错误".to_string());
+            .unwrap_or_else(|| "the background task panicked".to_string());
         anyhow::anyhow!("后台任务崩溃（已拦截）：{msg}")
     })
 }

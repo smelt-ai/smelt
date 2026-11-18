@@ -31,7 +31,7 @@ impl RelaySettings {
     /// 接受域名、IP 或完整 URL；省略 scheme 时按生产 relay 补成 HTTPS。
     pub fn parse(address: &str) -> Result<Self> {
         let address = address.trim();
-        anyhow::ensure!(!address.is_empty(), "请先填写 iroh relay 地址");
+        anyhow::ensure!(!address.is_empty(), "Enter an iroh relay address first");
         let normalized = if address.contains("://") {
             address.to_string()
         } else {

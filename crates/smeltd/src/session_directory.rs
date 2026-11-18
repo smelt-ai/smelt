@@ -9,12 +9,14 @@
 //! 对话 id 仍留在内存里给桌面用，只是不再进下次启动的续接名单。桌面会用原来的 id
 //! 重新打开留下的终端，接回原来的对话。
 //! 启动时文档里的条目灌回目录并标 `runtime=false`。
+//! 启动时没读到文档（库打不开、读出错）就不写盘，每次访问补读，读到为止：
+//! 这时内存里缺着上次留下的条目，写下去会把停机留下的续接身份盖掉。
 //!
 //! 身份只走两个口：`upsert`（`broadcast_state`）和 `remove`（`forget_session`）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -120,6 +122,9 @@ impl SessionRecord {
             turn_started_at: 0,
             pending_question: None,
             pending_request: None,
+            pending_note: None,
+            // 投递归崩溃前那个进程，恢复出来的会话没有刚结束的投递。
+            completed_delivery_id: None,
             tokens_used: self.tokens_used,
             branch: self.branch,
             dirty_files: self.dirty_files,
@@ -138,19 +143,21 @@ impl SessionRecord {
     }
 }
 
-fn load_records() -> Vec<SessionRecord> {
+/// 读持久化文档。没有文档是空表；库打不开、读出错是 `Err`，和空表分开：
+/// 读不到不等于没有，调用方据此决定不写盘。
+fn load_records() -> Result<Vec<SessionRecord>, String> {
     let path = session_directory_path();
-    let Ok(store) = smelt_core::sqlite_state::open_sqlite_store(&path) else {
-        return Vec::new();
-    };
-    match store.get_published_session_snapshot() {
-        Ok(Some(snapshot)) => snapshot
+    let store = smelt_core::sqlite_state::open_sqlite_store(&path)?;
+    let snapshot = store
+        .get_published_session_snapshot()
+        .map_err(|error| error.to_string())?;
+    Ok(snapshot.map_or_else(Vec::new, |snapshot| {
+        snapshot
             .sessions
             .into_iter()
             .map(record_from_published)
-            .collect(),
-        Ok(None) | Err(_) => Vec::new(),
-    }
+            .collect()
+    }))
 }
 
 fn persist_records(sessions: &[SessionRecord]) -> bool {
@@ -230,6 +237,44 @@ struct DirectoryState {
     /// 已退休 runtime 实例的最高水位。保留到 daemon 退出，阻止其迟到回调复活条目。
     retired_instances: HashMap<String, u64>,
     last_persist: Option<Instant>,
+    /// 持久化文档读到了。没读到时内存里缺着上次留下的条目，不能写盘。
+    loaded: bool,
+}
+
+impl DirectoryState {
+    /// 还没读到文档就再读一次，返回现在是否已读到。
+    fn ensure_loaded(&mut self) -> bool {
+        if self.loaded {
+            return true;
+        }
+        let Ok(records) = load_records() else {
+            return false;
+        };
+        let recovered = self.absorb(records);
+        crate::dlog(&format!(
+            "会话目录补读到了，恢复 {recovered} 个上次留下的条目"
+        ));
+        true
+    }
+
+    /// 把读到的文档并进内存并标成已读到，返回补进来几条。读到之前起过的会话
+    /// （在 `entries` 里，或已退休留了水位）以内存为准，磁盘上那份是旧的。
+    fn absorb(&mut self, records: Vec<SessionRecord>) -> usize {
+        let now = now_unix();
+        let mut recovered = 0;
+        for record in records {
+            if self.entries.contains_key(&record.id)
+                || self.retired_instances.contains_key(&record.id)
+            {
+                continue;
+            }
+            self.entries
+                .insert(record.id.clone(), record.into_state(now));
+            recovered += 1;
+        }
+        self.loaded = true;
+        recovered
+    }
 }
 
 impl Default for SessionDirectory {
@@ -249,32 +294,44 @@ impl SessionDirectory {
                 entries: HashMap::new(),
                 retired_instances: HashMap::new(),
                 last_persist: None,
+                loaded: true,
             }),
             interval,
         }
     }
 
-    /// 从持久化文档恢复。保留最后相位，统一标 `runtime=false`。缺失 / 损坏 → 空表。
+    /// 从持久化文档恢复。保留最后相位，统一标 `runtime=false`。没有文档 → 空表；
+    /// 读不到 → 空表但不写盘，之后每次访问补读（见 `DirectoryState::ensure_loaded`）。
     pub fn restore_from_disk() -> Self {
-        let now = now_unix();
-        let entries = load_records()
-            .into_iter()
-            .map(|record| (record.id.clone(), record.into_state(now)))
-            .collect();
+        let mut state = DirectoryState {
+            entries: HashMap::new(),
+            retired_instances: HashMap::new(),
+            last_persist: None,
+            loaded: false,
+        };
+        match load_records() {
+            Ok(records) => {
+                state.absorb(records);
+            }
+            Err(error) => crate::dlog(&format!("读取会话目录失败，读到之前不写盘：{error}")),
+        }
         Self {
-            state: Mutex::new(DirectoryState {
-                entries,
-                retired_instances: HashMap::new(),
-                last_persist: None,
-            }),
+            state: Mutex::new(state),
             interval: PERSIST_INTERVAL,
         }
+    }
+
+    /// 拿目录锁；文档还没读到就先补读。
+    fn lock(&self) -> MutexGuard<'_, DirectoryState> {
+        let mut state = self.state.lock().unwrap();
+        state.ensure_loaded();
+        state
     }
 
     /// 状态变化：只接受比当前目录新且未退休的实例/修订，超过节流间隔才落盘。
     /// 返回值表示该状态是否进入目录，供上层与订阅总线保持同一提交结果。
     pub fn upsert(&self, incoming: &SessionState) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock();
         if incoming.instance != 0
             && state
                 .retired_instances
@@ -328,7 +385,7 @@ impl SessionDirectory {
     /// 退休指定 runtime 实例。较新的实例已经占位时，旧实例只能留下水位，不能删除它。
     /// `instance == 0` 只允许清理同样没有代际信息的历史条目。
     pub fn remove_instance(&self, id: &str, instance: u64) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock();
         if instance != 0 {
             let watermark = state.retired_instances.entry(id.to_string()).or_default();
             *watermark = (*watermark).max(instance);
@@ -355,11 +412,15 @@ impl SessionDirectory {
     /// 归档停止 runtime，但保留精确的 provider 对话身份。水位挡住旧实例的迟到 hook，
     /// 无 runtime 的条目也不能被旧 PTY 的退出清理删掉。
     pub(crate) fn suspend_instance(&self, incoming: &SessionState) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap();
-        if state.entries.get(&incoming.id).is_some_and(|current| {
-            current.instance != 0 && current.instance > incoming.instance
-        }) {
-            return Err("终端实例已替换，不能归档旧实例".to_string());
+        let mut state = self.lock();
+        if state
+            .entries
+            .get(&incoming.id)
+            .is_some_and(|current| current.instance != 0 && current.instance > incoming.instance)
+        {
+            return Err(
+                "The terminal instance was replaced; the old one can't be archived".to_string(),
+            );
         }
         if incoming.instance != 0 {
             let watermark = state.retired_instances.entry(incoming.id.clone()).or_default();
@@ -368,8 +429,8 @@ impl SessionDirectory {
         let dormant = SessionRecord::from_state(incoming).into_state(now_unix());
         state.entries.insert(incoming.id.clone(), dormant);
         let records = state.entries.values().map(SessionRecord::from_state).collect::<Vec<_>>();
-        if !persist_records(&records) {
-            return Err("保存归档终端的续接身份失败".to_string());
+        if !state.loaded || !persist_records(&records) {
+            return Err("Couldn't save the archived terminal's resume identity".to_string());
         }
         state.last_persist = Some(Instant::now());
         Ok(())
@@ -377,17 +438,11 @@ impl SessionDirectory {
 
     #[cfg(test)]
     pub fn contains(&self, id: &str) -> bool {
-        self.state.lock().unwrap().entries.contains_key(id)
+        self.lock().entries.contains_key(id)
     }
 
     pub fn snapshot(&self) -> Vec<SessionState> {
-        self.state
-            .lock()
-            .unwrap()
-            .entries
-            .values()
-            .cloned()
-            .collect()
+        self.lock().entries.values().cloned().collect()
     }
 
     fn maybe_persist_locked(&self, state: &mut DirectoryState) {
@@ -403,7 +458,7 @@ impl SessionDirectory {
 
     #[cfg(test)]
     pub fn persist_now(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock();
         self.persist_locked(&mut state);
     }
 
@@ -414,7 +469,11 @@ impl SessionDirectory {
     /// 只改快照，不碰文件本身：`session_directory_path()` 返回的是承载全部用户数据的主库，
     /// 删掉它等于抹掉所有项目与会话组。
     pub(crate) fn keep_resumable_terminals(&self, terminal_ids: &HashSet<String>) {
-        let state = self.state.lock().unwrap();
+        let state = self.lock();
+        if !state.loaded {
+            crate::dlog("会话目录一直没读到，停机不写，库里上次留下的续接名单原样留着");
+            return;
+        }
         let sessions = state
             .entries
             .values()
@@ -453,7 +512,7 @@ impl SessionDirectory {
     /// 重新打开这个终端时怎么接回原来的对话。只看守护停过之后留下的条目
     /// （`runtime=false`）：活着的终端直接 attach，用不到。
     pub(crate) fn resume_launch(&self, id: &str) -> Option<ResumeLaunch> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock();
         state
             .entries
             .get(id)
@@ -462,6 +521,9 @@ impl SessionDirectory {
     }
 
     fn persist_locked(&self, state: &mut DirectoryState) {
+        if !state.loaded {
+            return;
+        }
         let sessions = state
             .entries
             .values()
@@ -505,7 +567,7 @@ mod tests {
         /// `remove_instance`，它带代际水位检查（旧实例不能删掉已占位的新实例）。
         /// 把这个绕过检查的版本摆在 prod 区，容易被后来者当成正规删除入口。
         fn remove(&self, id: &str) -> bool {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.lock();
             let removed = state.entries.remove(id).is_some();
             if removed {
                 self.persist_locked(&mut state);
@@ -545,6 +607,8 @@ mod tests {
             turn_started_at: 0,
             pending_question: Some("要不要继续".to_string()),
             pending_request: None,
+            pending_note: None,
+            completed_delivery_id: None,
             tokens_used: Some(1234),
             branch: Some("feat/ghost".to_string()),
             dirty_files: vec!["a.rs".to_string()],
@@ -575,7 +639,7 @@ mod tests {
                 Some(smelt_store::DATABASE_FILE_NAME)
             );
 
-            let loaded = load_records();
+            let loaded = load_records().unwrap();
             assert_eq!(loaded.len(), 1);
             assert_eq!(loaded[0], record);
             assert_eq!(loaded[0].phase, Phase::AwaitingApproval);
@@ -594,7 +658,7 @@ mod tests {
                 .unwrap()
                 .join("sessions.json");
             std::fs::write(&json_path, r#"{"version":1,"sessions":[{"id":"ghost"}]}"#).unwrap();
-            assert!(load_records().is_empty());
+            assert!(load_records().unwrap().is_empty());
             assert!(json_path.is_file());
         });
     }
@@ -626,10 +690,53 @@ mod tests {
         assert_eq!(state.agent_event_version, Some(1));
     }
 
+    /// 改测试库的版本号。改成比当前支持的新，`Store` 就拒绝打开，模拟库读不到。
+    fn set_store_version(version: u32) {
+        let connection = rusqlite::Connection::open(session_directory_path()).unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+    }
+
+    /// 启动时库读不到：停机不拿缺了条目的内存去写；库能读之后第一次访问就补读，
+    /// 重新打开终端时接回上次留下的对话，之后写盘也带着它。
+    #[test]
+    fn an_unreadable_store_is_not_overwritten_and_is_read_once_it_recovers() {
+        with_test_dir(|| {
+            let directory = SessionDirectory::with_interval(Duration::ZERO);
+            directory.upsert(&sample_state("s1"));
+            directory.keep_resumable_terminals(&HashSet::from(["s1".to_string()]));
+            set_store_version(smelt_store::STORE_SCHEMA_VERSION + 1);
+
+            let restarted = SessionDirectory::restore_from_disk();
+            restarted.keep_resumable_terminals(&HashSet::new());
+            set_store_version(smelt_store::STORE_SCHEMA_VERSION);
+
+            assert_eq!(
+                restarted.resume_launch("s1").map(|resume| resume.run),
+                Some("claude --resume conv-1".to_string()),
+                "库恢复后第一次访问就该补读到停机留下的续接身份"
+            );
+            let mut fresh = sample_state("s2");
+            fresh.conversation_id = Some("conv-2".to_string());
+            restarted.upsert(&fresh);
+            restarted.keep_resumable_terminals(&HashSet::from(["s2".to_string()]));
+
+            let next = SessionDirectory::restore_from_disk();
+            let mut ids: Vec<String> = next.snapshot().into_iter().map(|entry| entry.id).collect();
+            ids.sort();
+            assert_eq!(ids, vec!["s1".to_string(), "s2".to_string()]);
+            assert_eq!(
+                next.resume_launch("s1").map(|resume| resume.run),
+                Some("claude --resume conv-1".to_string())
+            );
+        });
+    }
+
     #[test]
     fn missing_snapshot_loads_empty() {
         with_test_dir(|| {
-            assert!(load_records().is_empty());
+            assert!(load_records().unwrap().is_empty());
         });
     }
 
@@ -1020,8 +1127,11 @@ mod tests {
                 clear_directory.keep_resumable_terminals(&HashSet::new());
                 done_tx.send(()).unwrap();
             });
+            // 下面两处上限只防死锁，不是对速度的要求：清理要开库写盘，Windows CI 上一次就要
+            // 好几秒。这里测的是先后顺序。
+            const DEADLOCK_GUARD: Duration = Duration::from_secs(60);
             started_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(DEADLOCK_GUARD)
                 .expect("清理线程未启动");
 
             // 清理必须等同一把目录锁，不能在旧快照提交前先删除文档。
@@ -1034,7 +1144,7 @@ mod tests {
             drop(state);
 
             done_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(DEADLOCK_GUARD)
                 .expect("持久化结束后清理应完成");
             clear.join().unwrap();
             assert!(

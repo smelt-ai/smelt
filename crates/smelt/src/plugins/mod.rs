@@ -9,9 +9,8 @@
 //! `smelt-plugin-api`（见 `smelt_plugin_api::js`，每个插件一份，模块由此知道是谁在调）和
 //! `smelt-fs`（见 `host_fs`）。gpui-shell 按
 //! 调用所在视图的 Policy 分派宿主函数，所以各插件拿到的是自己那份。挂载时把它设成默认
-//! Policy，视图带着它出生（见 `mount_all`）。插件 manifest 的 `capabilities` 里只认
-//! `network.hosts`：gpui-shell 的网络授权只能逐个列主机名，各插件声明的主机合起来授给
-//! 全部插件。
+//! Policy，视图带着它出生（见 `mount_all`）。插件是可信代码，权限不按 manifest 给，
+//! 一律见 [`unrestricted`]。
 //!
 //! 没用上游的 `PluginManager`：它按 manifest 给每个插件新建一份空 Policy，拿不到
 //! 宿主注册的模块。这里只用公开的 `PluginManifest::read` 发现插件。
@@ -22,31 +21,32 @@
 //! 2. App 自带的 `Contents/Resources/plugins/`，只读加载。
 //! 3. debug 构建直接读仓库里的 `plugins/`，改完脚本重新加载即可。
 //!
-//! 脚本可以从 `"gpui-component"` 导入带皮肤的控件。这些控件的 dialog、sheet、
-//! notification 走组件库的 `Root`，和这扇窗口的根一致。`gpui-shell` 自己的
+//! 脚本从 `"smelt-ui"` 导入 smelt 自己的控件（`smelt_plugin_api::js::ui`），确认框走 smelt-ui
+//! 登记在窗口根（`gpui_base::Root`）上的对话框层（`smelt_ui::init`）。`gpui-shell` 自己的
 //! `window.open_dialog` 要找 `ShellRoot`（窗口第一层，或 `Root` 里面那一层），
-//! 工作台没有包它，这条暂时用不了。
+//! 工作台没有包它，这条用不了。
 
 mod host_fs;
 mod log;
 mod manage;
 mod themes;
 
+use rust_i18n::t;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::Context as _;
 use gpui::*;
-use gpui_component::ActiveTheme as _;
 use gpui_shell::plugin::{MANIFEST_FILE, PluginManifest};
 use gpui_shell::policy::{self, Policy};
 use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
-use smelt_plugin_api::js::{JsPlugin, MAIN_VIEW, SettingsPageLoader};
+use smelt_plugin_api::js::{JsPlugin, MAIN_VIEW, ViewEntry, ViewLoader};
 use smelt_plugin_api::{self as api, PluginView, ViewHandle, ViewSpec};
 
 pub(crate) use log::install as install_log;
 pub(crate) use manage::{import, uninstall, user_plugin_dir};
+use smelt_ui::kit::{TYPE, TypeStyled as _};
 
 /// 用户安装插件的目录（`~/.smelt` 下），也是 App 包里、仓库里放插件的目录名。
 const PLUGIN_DIR: &str = "plugins";
@@ -64,8 +64,6 @@ struct Registry {
     panels: Vec<PluginPanel>,
     /// 已登记主题的插件来源，重载时整批撤下再登记。
     theme_owners: Vec<String>,
-    /// 这一批插件的权限，设置页单独加载时也用它。
-    capabilities: Option<Capabilities>,
 }
 
 struct PluginPanel {
@@ -82,52 +80,84 @@ struct PluginPanel {
 /// 把错误画出来：静默消失的插件最难排查。
 struct JsPluginView {
     content: Result<Entity<ScriptView>, String>,
+    plugin: JsPlugin,
 }
 
 impl Render for JsPluginView {
-    /// 页面底归宿主：整窗一层底，每一组都一样（`workspace_frame::window_surface`、
-    /// `SmeltTabGroup::frame`）。插件只画内容，不画页面底，铺了就把毛玻璃盖住。
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 页面底归宿主：窗口根按地方铺底（`window_backdrop::paint`），组和视图都不铺。插件只画
+    /// 内容，不画页面底，铺了就把毛玻璃盖住。
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let base = div().size_full().min_h_0().flex().flex_col();
         match &self.content {
             Ok(view) => base.child(view.clone()),
             Err(error) => base
                 .p_4()
-                .text_sm()
-                .text_color(cx.theme().danger)
-                .child(format!("插件加载失败：{error}")),
+                .type_style(TYPE.ui)
+                .text_color(rgb(smelt_ui::ui_theme::bad()))
+                .child(t!("plugins.view_failed", error = error)),
         }
     }
 }
 
 impl PluginView for JsPluginView {
-    /// 脚本自己管打开时看什么，宿主不传参数。
-    fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+    /// 参数交给脚本：`view_args()` 换成这次的，`next_event()` 收到 `view_opened`。
+    fn open(&mut self, args: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {
+        self.plugin.opened(args);
+    }
 }
 
-/// 插件的一页设置：第一次打开时单独加载的那份脚本，或加载失败的原因。底色用设置的，
-/// 不另铺。
-struct JsSettingsPage {
-    content: Result<Entity<ScriptView>, String>,
+/// 插件主入口之外的一个视图（设置页、按实例建的、别的）：单独加载的那份入口脚本，或加载
+/// 失败的原因。按实例建的第一次打开时才挂，挂之前什么都不画。
+struct JsEntryView {
+    /// 挂一份入口脚本，参数是挂载前就知道的打开参数。
+    mount: Rc<dyn Fn(serde_json::Value, &mut Window, &mut App) -> Mounted>,
+    content: Option<Mounted>,
+    /// 设置页按设置的宽度摆。
+    settings: bool,
 }
 
-impl Render for JsSettingsPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+/// 挂好的入口脚本和它的身份（打开参数经它交给脚本），或挂不上的原因。
+type Mounted = Result<(Entity<ScriptView>, JsPlugin), String>;
+
+impl Render for JsEntryView {
+    /// 底色归宿主，同 [`JsPluginView`]；设置页的底用设置的。
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let base = div().size_full().min_h_0().flex().flex_col();
+        // 和内置的设置页一样宽（`smelt_ui::SettingsPage` 自己限宽，脚本的页由这里限）。
+        let base = if self.settings {
+            base.max_w(rems(smelt_ui::settings::PAGE_MAX_WIDTH))
+                .mx_auto()
+        } else {
+            base
+        };
         match &self.content {
-            Ok(view) => base.child(view.clone()),
-            Err(error) => base
-                .p_6()
-                .text_sm()
-                .text_color(cx.theme().danger)
-                .child(format!("设置页加载失败：{error}")),
+            None => base,
+            Some(Ok((view, _))) => base.child(view.clone()),
+            Some(Err(error)) => base
+                .p_4()
+                .type_style(TYPE.ui)
+                .text_color(rgb(smelt_ui::ui_theme::bad()))
+                .child(if self.settings {
+                    t!("plugins.settings_failed", error = error)
+                } else {
+                    t!("plugins.view_failed", error = error)
+                }),
         }
     }
 }
 
-impl PluginView for JsSettingsPage {
-    /// 脚本自己管打开时看什么，宿主不传参数。
-    fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+impl PluginView for JsEntryView {
+    /// 还没挂的（按实例建的）带着参数挂上；挂了的把参数交给脚本，同 [`JsPluginView`]。
+    fn open(&mut self, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.content {
+            Some(Ok((_, plugin))) => plugin.opened(args),
+            Some(Err(_)) => {}
+            None => {
+                self.content = Some((self.mount)(args.clone(), window, cx));
+                cx.notify();
+            }
+        }
+    }
 }
 
 /// 插件从哪个目录加载的。
@@ -177,22 +207,17 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
             .extension()
             .is_some_and(|extension| extension == "json")
     });
-    let runtime = needs_scripts
-        .then(|| runtime(cx).map_err(|error| format!("插件运行时启动失败：{error:#}")));
+    let runtime = needs_scripts.then(|| {
+        runtime(cx).map_err(|error| {
+            t!("plugins.runtime_failed", error = format!("{error:#}")).into_owned()
+        })
+    });
     let previous = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().panels));
     // 脚本挂载时自己再登记布局、命令；重载后不再登记的、卸掉的插件的不能留着。事件在
     // 这一轮更新结束才发，工作台看到的是挂完的结果，不会先换走再换回来。
     for panel in &previous {
         unregister_contributions(&panel.id, cx);
     }
-
-    // 视图出生时定下权限，所以每次挂载前按这一批插件的声明重新装一遍。
-    let hosts = found
-        .iter()
-        .flat_map(|plugin| declared_hosts(&plugin.root))
-        .collect::<Vec<_>>();
-    let capabilities = unrestricted().network_hosts(hosts);
-    REGISTRY.with(|registry| registry.borrow_mut().capabilities = Some(capabilities.clone()));
 
     let panels: Vec<PluginPanel> = found
         .into_iter()
@@ -219,12 +244,12 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                 }
                 // 纯主题插件已在上面处理；只有脚本插件需要运行时。
                 let plugin = JsPlugin::for_plugin(&id, manifest.name())
-                    .with_settings_loader(settings_loader(&id, manifest.name(), &root, source));
+                    .with_view_loader(view_loader(&id, manifest.name(), &root, source));
                 let content = match runtime.as_ref().expect("脚本插件需要运行时") {
                     Ok(runtime) => {
                         // 开关挂在运行时上、加载时读，所以每个插件加载前按来源设一次。
                         runtime.set_editor_files(source.editor_files());
-                        plugin_policy(&id, &capabilities, &plugin)
+                        plugin_policy(&id, &plugin)
                             .and_then(|policy| {
                                 // 加载时解析导入、挂载时视图拿走的都是默认 Policy。
                                 policy::set_default(policy);
@@ -256,24 +281,27 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                 // 旧登记在开头已经撤下，旧视图随之放掉。
                 let failed = content.is_err();
                 let view = Rc::new(RefCell::new(Some(content)));
+                let main_plugin = plugin.clone();
                 let spec = ViewSpec {
                     name: MAIN_VIEW.into(),
                     title: panel.title.clone().into(),
-                    icon: gpui_kit_assets::IconName::Puzzle.path(),
-                    per_machine: false,
+                    icon: smelt_ui::IconName::Puzzle.path(),
                     draws_top_bar: false,
+                    instances: false,
                     settings: None,
+                    fills: Vec::new(),
                     build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
                         // 内容在挂载时已经建好；视图只建一次，第二次（登记被替换前不会有）
                         // 给一个说明。
                         let content = view
                             .borrow_mut()
                             .take()
-                            .unwrap_or_else(|| Err("插件视图已经用过，请重新加载插件".into()));
-                        Rc::new(cx.new(|_| JsPluginView { content }))
+                            .unwrap_or_else(|| Err(t!("plugins.view_used").into_owned()));
+                        let plugin = main_plugin.clone();
+                        Rc::new(cx.new(|_| JsPluginView { content, plugin }))
                     }),
                 };
-                // 挂上了就和脚本登记的设置页并成一组；没挂上只登记说明加载失败的那一页。
+                // 挂上了就和脚本登记的视图并成一组；没挂上只登记说明加载失败的那一页。
                 let registered = if failed {
                     api::register_views(&panel.id, vec![spec], cx)
                 } else {
@@ -301,41 +329,51 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     }
 }
 
-/// 插件挂载时登记的东西：布局、页、命令、文件打开者、视图（主入口和设置页）。主题另算（见
+/// 插件挂载时登记的东西：布局、页、命令、文件打开者、视图（主入口和脚本登记的）。主题另算（见
 /// `register_theme_contributions`）。
 fn unregister_contributions(id: &str, cx: &mut App) {
     api::unregister_layouts(id, cx);
     api::unregister_pages(id, cx);
     api::unregister_commands(id, cx);
     api::unregister_file_opener(id, cx);
+    api::unregister_menu_items(id, cx);
+    api::unregister_context_menu_items(id, cx);
+    api::unregister_quit_guard(id, cx);
     api::unregister_views(id, cx);
 }
 
-/// 插件的设置页怎么建：入口是插件目录里的另一个脚本，第一次打开那一页时单独加载、挂载，
-/// 和主入口是两份实例（像浏览器扩展的 options 页）。
-fn settings_loader(
-    id: &str,
-    name: &str,
-    root: &std::path::Path,
-    source: PluginSource,
-) -> SettingsPageLoader {
+/// 插件主入口之外的视图怎么建：入口是插件目录里的另一个脚本，每建一份视图单独加载、挂载
+/// 一份，和主入口、别的视图各是一份实例（像浏览器扩展的 options 页）。设置页和别的视图第一次
+/// 露出来时挂；按实例建的等第一次打开、有了参数再挂（`create_view` 建好马上就打开）。
+fn view_loader(id: &str, name: &str, root: &std::path::Path, source: PluginSource) -> ViewLoader {
     let (id, name, root) = (id.to_string(), name.to_string(), root.to_path_buf());
-    SettingsPageLoader {
-        icon: gpui_kit_assets::IconName::Puzzle.path(),
-        load: Rc::new(move |entry| {
-            check_settings_entry(&root, entry)?;
+    ViewLoader {
+        icon: smelt_ui::IconName::Puzzle.path(),
+        load: Rc::new(move |view: &ViewEntry| {
+            check_view_entry(&root, &view.entry)?;
             let (id, name, root, entry) =
-                (id.clone(), name.clone(), root.clone(), entry.to_string());
+                (id.clone(), name.clone(), root.clone(), view.entry.clone());
+            let mount: Rc<dyn Fn(serde_json::Value, &mut Window, &mut App) -> Mounted> =
+                Rc::new(move |args, window, cx| {
+                    let plugin = JsPlugin::for_view(&id, &name, args);
+                    mount_view_entry(&id, &root, &entry, source, plugin, window, cx)
+                });
+            let (settings, instances) = (view.settings, view.instances);
             Ok(Rc::new(move |window, cx| -> Rc<dyn ViewHandle> {
-                let content = mount_settings_page(&id, &name, &root, &entry, source, window, cx);
-                Rc::new(cx.new(|_| JsSettingsPage { content }))
+                let content = (!instances).then(|| mount(serde_json::Value::Null, window, cx));
+                let mount = mount.clone();
+                Rc::new(cx.new(|_| JsEntryView {
+                    mount,
+                    content,
+                    settings,
+                }))
             }))
         }),
     }
 }
 
-/// 设置页入口要是插件目录里的文件，写相对路径，不能用 `..` 跑出去。
-fn check_settings_entry(root: &std::path::Path, entry: &str) -> Result<(), String> {
+/// 视图入口要是插件目录里的文件，写相对路径，不能用 `..` 跑出去。
+fn check_view_entry(root: &std::path::Path, entry: &str) -> Result<(), String> {
     use std::path::{Component, Path};
     let path = Path::new(entry);
     if entry.is_empty()
@@ -351,23 +389,21 @@ fn check_settings_entry(root: &std::path::Path, entry: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// 加载、挂载插件的一页设置。权限和主入口一样，身份是同一个插件，但不能登记。
-fn mount_settings_page(
+/// 加载、挂载插件的一份视图入口。权限和主入口一样，身份是同一个插件（`plugin` 是
+/// [`JsPlugin::for_view`] 建的），但不能登记。
+fn mount_view_entry(
     id: &str,
-    name: &str,
     root: &std::path::Path,
     entry: &str,
     source: PluginSource,
+    plugin: JsPlugin,
     window: &mut Window,
     cx: &mut App,
-) -> Result<Entity<ScriptView>, String> {
-    let runtime = runtime(cx).map_err(|error| format!("插件运行时启动失败：{error:#}"))?;
-    let capabilities = REGISTRY
-        .with(|registry| registry.borrow().capabilities.clone())
-        .ok_or("插件还没加载")?;
-    let plugin = JsPlugin::for_settings_page(id, name);
+) -> Mounted {
+    let runtime = runtime(cx)
+        .map_err(|error| t!("plugins.runtime_failed", error = format!("{error:#}")).into_owned())?;
     runtime.set_editor_files(source.editor_files());
-    let view = plugin_policy(id, &capabilities, &plugin).and_then(|policy| {
+    let view = plugin_policy(id, &plugin).and_then(|policy| {
         policy::set_default(policy);
         let application = runtime.load_application(root, entry)?;
         runtime.mount_application(&application, window, cx)
@@ -376,19 +412,15 @@ fn mount_settings_page(
     policy::set_default(Policy::new());
     let view = view.map_err(|error| format!("{error:#}"))?;
     plugin.attach(&view, cx);
-    Ok(view)
+    Ok((view, plugin))
 }
 
 /// 一个插件自己的 Policy：权限大家一样，宿主模块里的 `smelt-plugin-api` 是它自己的。
-fn plugin_policy(
-    id: &str,
-    capabilities: &Capabilities,
-    plugin: &JsPlugin,
-) -> anyhow::Result<Policy> {
+fn plugin_policy(id: &str, plugin: &JsPlugin) -> anyhow::Result<Policy> {
     let host_error = |error: gpui_shell::HostError| anyhow::anyhow!(error.message().to_string());
     Policy::new()
         .with_application(id)
-        .with_capabilities(capabilities.clone())
+        .with_capabilities(unrestricted())
         .with_host_module(plugin.module())
         .and_then(|policy| policy.with_host_module(host_fs::fs_module(Rc::new(host_fs::HostFs))))
         .map_err(host_error)
@@ -507,22 +539,19 @@ fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
     if let Some(runtime) = REGISTRY.with(|registry| registry.borrow().runtime.clone()) {
         return Ok(runtime);
     }
-    // 不调 `gpui_shell::init`，也不调 `init_with_components`。后者会再跑一遍目录里
-    // 登记的 `gpui_component::init`，而启动时已经调用过；`gpui_base::init` 重复做会
-    // 重复绑键。样式表首次用到时自会建好。
-    //
-    // 只要组件目录，不用它的开窗口函数：那是给 gpui-shell 自己当应用入口用的。
-    let components =
-        gpui_shell::components::components().context("构建 gpui-component 脚本组件目录")?;
+    // 不调 `gpui_shell::init`：它会再跑一遍 `gpui_base::init`，而启动时已经调用过，重复做会
+    // 重复绑键。样式表首次用到时自会建好；控件要的全局件由启动时的 `smelt_ui::init` 装好。
+    let components = smelt_plugin_api::js::ui::components().context("构建脚本组件目录 smelt-ui")?;
     let runtime = ShellRuntime::new_with_components(cx, components)?;
     REGISTRY.with(|registry| registry.borrow_mut().runtime = Some(runtime.clone()));
     Ok(runtime)
 }
 
 /// 插件是可信代码，和 smelt 自己一样不设限：任意文件、任意命令、剪贴板、全部环境变量。
+/// 这不是安全边界，装别人的插件前要读过它的代码。
 ///
-/// 网络另算：gpui-shell 只认逐个列出的主机名，没有「任意主机」，由调用方补上各插件
-/// 声明的主机（见 `declared_hosts`）。`exit` 不给：
+/// 网络授权不给：gpui-shell 只认逐个列出的主机名，没有「任意主机」，按清单声明逐个授
+/// 又名不副实（插件能跑 `curl`）。所以脚本里的 `fetch` 用不了，要联网经命令执行。`exit` 不给：
 /// 那是请宿主退出，插件不该能关掉 smelt。`localStorage` 不给：那是 JSON 文件，业务数据
 /// 要进 SQLite；插件要存东西就自己写文件。
 fn unrestricted() -> Capabilities {
@@ -535,26 +564,6 @@ fn unrestricted() -> Capabilities {
         .clipboard_write(true)
         // 只能按名字授权，就把启动时有的全部列上。
         .env_variables(std::env::vars_os().filter_map(|(name, _)| name.into_string().ok()))
-}
-
-/// 插件清单里 `capabilities.network.hosts` 声明的主机。只读这一项，其余权限一律放开，
-/// 不看清单。清单坏了发现阶段就已跳过，这里读不出来就当没声明。
-fn declared_hosts(root: &std::path::Path) -> Vec<String> {
-    std::fs::read_to_string(root.join(MANIFEST_FILE))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|manifest| {
-            manifest
-                .pointer("/capabilities/network/hosts")?
-                .as_array()
-                .map(|hosts| {
-                    hosts
-                        .iter()
-                        .filter_map(|host| host.as_str().map(str::to_owned))
-                        .collect()
-                })
-        })
-        .unwrap_or_default()
 }
 
 /// 文件系统的根：Unix 是 `/`，Windows 是每个存在的盘符。
@@ -630,7 +639,133 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MANIFEST_FILE, PluginManifest, declared_hosts, repo_plugin_dir};
+    use super::{MANIFEST_FILE, PluginManifest, repo_plugin_dir};
+
+    #[gpui::test]
+    fn production_runtime_mounts_skills_button_helper(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, VisualTestContext, point, px, size};
+        use std::ops::Deref;
+
+        let dir = std::env::temp_dir().join(format!("smelt-skills-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // ui.js 连同它导入的同目录模块一起拷，拷少了模块解析不到。
+        for (name, source) in [
+            ("ui.js", include_str!("../../../../plugins/skills/ui.js")),
+            (
+                "i18n.js",
+                include_str!("../../../../plugins/skills/i18n.js"),
+            ),
+        ] {
+            std::fs::write(dir.join(name), source).unwrap();
+        }
+        std::fs::write(dir.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { SmeltBadge, SmeltButton } from "smelt-ui";
+import { button } from "./ui.js";
+export default class App extends View {
+  init() { this.picking = true; this.hits = 0; }
+  render() {
+    const hit = cx => { this.hits++; cx.notify(); };
+    return div().size_full()
+      .child(button("ghost", "Ghost", hit).absolute().left(30).top(40).w(180))
+      .child(button("secondary", "Secondary", hit, "secondary").absolute().left(30).top(80).w(180))
+      .child(button("primary", "Primary", hit, "primary").loading(this.picking).absolute().left(30).top(120).w(180))
+      .child(button("danger", "Danger", hit, "danger").absolute().left(30).top(160).w(180))
+      .child(SmeltButton.new("toggle").label("Toggle").absolute().left(30).top(200)
+        .on_click((_event, cx) => { this.picking = false; cx.notify(); }))
+      .child(SmeltBadge.new().child("smelt badge"))
+      .child(`hits: ${this.hits}`);
+  }
+}
+"#).unwrap();
+        // 与 app 启动一样先初始化一次；runtime 不再初始化。
+        cx.update(|cx| {
+            gpui_shell::init(cx);
+            smelt_ui::init(cx);
+        });
+        let runtime = cx.update(super::runtime).unwrap();
+        runtime.set_editor_files(false);
+        // 和正式加载一样带上这个插件的 Policy：`smelt-plugin-api` 等宿主模块挂在它上面。
+        let plugin = smelt_plugin_api::js::JsPlugin::for_plugin("smelt.skills-test", "Skills");
+        super::policy::set_default(super::plugin_policy("smelt.skills-test", &plugin).unwrap());
+        let app = runtime.load_application(&dir, "main.js").unwrap();
+        let mounted = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = mounted.clone();
+        let window = cx.open_window(size(px(500.), px(300.)), move |window, cx| {
+            let view = runtime.mount_application(&app, window, cx).unwrap();
+            *slot.borrow_mut() = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        let view = mounted.borrow().clone().unwrap();
+        let draw = |context: &mut VisualTestContext| {
+            context.run_until_parked();
+            context.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        draw(&mut context);
+        context.update(|window, _| {
+            let scale = window.scale_factor();
+            let quads = window.painted_quads();
+            let secondary: gpui::Background =
+                smelt_ui::ui_theme::palette().button_secondary[0].into();
+            // 主按钮开着 `loading`，加载时底换成 `soft_hover`。
+            let loading: gpui::Background = gpui::rgb(smelt_ui::ui_theme::soft_hover()).into();
+            for (top, height, background) in [
+                (40., 24., None),
+                (80., 24., Some(secondary)),
+                (120., 24., Some(loading)),
+                (160., 24., Some(secondary)),
+            ] {
+                let matching = quads.iter().filter(|quad| {
+                    (quad.bounds.origin.x.0 - 30. * scale).abs() < 1.
+                        && (quad.bounds.origin.y.0 - top * scale).abs() < 1.
+                        && (quad.bounds.size.width.0 - 180. * scale).abs() < 1.
+                        && (quad.bounds.size.height.0 - height * scale).abs() < 1.
+                });
+                if let Some(background) = background {
+                    assert!(
+                        matching
+                            .into_iter()
+                            .any(|quad| quad.background == background),
+                        "top={top}, quads={quads:?}"
+                    );
+                } else {
+                    assert!(
+                        !matching.into_iter().any(|quad| quad
+                            .background
+                            .as_solid()
+                            .is_some_and(|color| color.a > 0.)),
+                        "top={top}, quads={quads:?}"
+                    );
+                }
+            }
+        });
+        context.simulate_click(point(px(40.), px(132.)), Modifiers::default());
+        draw(&mut context);
+        let tree = context.update(|_, cx| view.read(cx).snapshot().unwrap().debug_tree());
+        assert!(
+            tree.contains("hits: 0") && tree.contains("smelt badge"),
+            "{tree}"
+        );
+        for method in [
+            "quiet",
+            "secondary",
+            "primary",
+            "danger",
+            "small",
+            "loading",
+        ] {
+            assert!(tree.contains(&format!(":{method}(registered)")), "{tree}");
+        }
+        context.simulate_click(point(px(40.), px(214.)), Modifiers::default());
+        draw(&mut context);
+        context.simulate_click(point(px(40.), px(132.)), Modifiers::default());
+        draw(&mut context);
+        let tree = context.update(|_, cx| view.read(cx).snapshot().unwrap().debug_tree());
+        assert!(tree.contains("hits: 1"), "{tree}");
+        cx.update(super::shutdown);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[gpui::test]
     fn theme_files_are_registered_reloaded_and_removed(cx: &mut gpui::TestAppContext) {
@@ -643,13 +778,16 @@ mod tests {
         )
         .unwrap();
         let path = dir.join("themes/colors.json");
-        std::fs::write(&path, r##"{"name":"Sample","themes":[{"name":"Sample Dark","mode":"dark","colors":{"background":"#123456"}}]}"##).unwrap();
+        std::fs::write(&path, r##"{"version":1,"name":"Sample","themes":[{"name":"Sample Dark","mode":"dark","colors":{"bg_base":"#123456","text_base":"#fafafa"}}]}"##).unwrap();
         let found = super::Found {
             root: dir.clone(),
             manifest: PluginManifest::read(&dir).unwrap(),
             source: super::PluginSource::User,
         };
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            smelt_ui::init(cx);
+        });
         cx.update(|cx| {
             assert!(
                 super::register_theme_contributions(std::slice::from_ref(&found), cx).is_empty()
@@ -657,7 +795,7 @@ mod tests {
             assert!(smelt_ui::theme_catalog::contains("Sample Dark", cx));
             std::fs::write(
                 &path,
-                r#"{"name":"Sample","themes":[{"name":"Sample Light","mode":"light"}]}"#,
+                r##"{"version":1,"name":"Sample","themes":[{"name":"Sample Light","mode":"light","colors":{"bg_base":"#ffffff","text_base":"#1a1a1a"}}]}"##,
             )
             .unwrap();
             assert!(
@@ -677,15 +815,15 @@ mod tests {
     }
 
     #[test]
-    fn settings_entries_stay_inside_the_plugin_directory() {
+    fn view_entries_stay_inside_the_plugin_directory() {
         let dir =
             std::env::temp_dir().join(format!("smelt-plugin-settings-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("pages")).unwrap();
         std::fs::write(dir.join("pages/settings.tsx"), "").unwrap();
         std::fs::write(dir.join("settings.tsx"), "").unwrap();
-        assert!(super::check_settings_entry(&dir, "settings.tsx").is_ok());
-        assert!(super::check_settings_entry(&dir, "pages/settings.tsx").is_ok());
-        assert!(super::check_settings_entry(&dir, "./settings.tsx").is_ok());
+        assert!(super::check_view_entry(&dir, "settings.tsx").is_ok());
+        assert!(super::check_view_entry(&dir, "pages/settings.tsx").is_ok());
+        assert!(super::check_view_entry(&dir, "./settings.tsx").is_ok());
         for entry in [
             "",
             "missing.tsx",
@@ -694,30 +832,9 @@ mod tests {
             "pages/../settings.tsx",
             "/etc/hosts",
         ] {
-            assert!(super::check_settings_entry(&dir, entry).is_err(), "{entry}");
+            assert!(super::check_view_entry(&dir, entry).is_err(), "{entry}");
         }
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn declared_hosts_come_from_the_manifest() {
-        let dir = std::env::temp_dir().join(format!("smelt-plugin-hosts-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(MANIFEST_FILE),
-            r#"{"id":"com.example.x","name":"X","entry":"main.js",
-                "capabilities":{"network":{"hosts":["api.github.com","example.com"]}}}"#,
-        )
-        .unwrap();
-        assert_eq!(declared_hosts(&dir), ["api.github.com", "example.com"]);
-
-        std::fs::write(
-            dir.join(MANIFEST_FILE),
-            r#"{"id":"com.example.x","name":"X","entry":"main.js"}"#,
-        )
-        .unwrap();
-        assert!(declared_hosts(&dir).is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 仓库里每个插件的清单都要能解析、入口存在、id 不重复。本地 clone 进来的

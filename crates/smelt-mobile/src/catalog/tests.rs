@@ -139,26 +139,24 @@ fn find<'a>(sessions: &'a [SessionSummary], id: &str) -> &'a SessionSummary {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn archives_are_hidden_and_pins_stay_within_their_project() {
+fn archives_are_hidden_and_the_rest_keep_directory_order() {
     let mut state = CatalogState::default();
     let mut archived = conversation("archived", "terminal", Some(("/repo", 0)), 0);
     archived["archived_at"] = json!(20);
-    let mut pinned = conversation("pinned", "acp", Some(("/repo", 0)), 2);
-    pinned["pinned_at"] = json!(10);
     state.apply(
         snapshot(
             Vec::new(),
             Some(parse_directory(one_project_directory(vec![
                 archived,
                 conversation("normal", "terminal", Some(("/repo", 0)), 1),
-                pinned,
+                conversation("later", "acp", Some(("/repo", 0)), 2),
                 conversation("outside", "acp", Some(("/other", 1)), 3),
             ]))),
             None,
         ),
         Instant::now(),
     );
-    assert_eq!(ids_of(&state.summaries()), ["pinned", "normal", "outside"]);
+    assert_eq!(ids_of(&state.summaries()), ["normal", "later", "outside"]);
 }
 
 /// 绑了工作树的会话归工作树所在的项目，带上任务名和分支；项目里先是没绑的会话，再按
@@ -1169,6 +1167,8 @@ fn dto(id: &str, revision: u64, phase: CoreSessionPhase) -> SessionStateChanged 
         turn_started_at_unix_seconds: 1,
         pending_question: None,
         pending_request: None,
+        pending_note: None,
+        completed_delivery_id: None,
         tokens_used: None,
         branch: None,
         dirty_files: Vec::new(),
@@ -1608,7 +1608,7 @@ fn new_session_catalog() -> Value {
         ],
         "sections": {
             "common": [
-                {"key": "terminal:blank", "label": "空白终端", "kind": "terminal",
+                {"key": "terminal:blank", "label": "Shell", "kind": "terminal",
                  "pinned": true, "target": "blankTerminal"}
             ],
             "terminal": [

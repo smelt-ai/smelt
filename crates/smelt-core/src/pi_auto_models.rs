@@ -159,7 +159,7 @@ fn refresh_one(
         // 抽风。写空会让这个 provider 变得一个模型都选不了。
         return AutoRefreshOutcome::Kept {
             provider,
-            reason: "端点没有报告任何模型".to_string(),
+            reason: "the endpoint reported no models".to_string(),
         };
     }
     let count = models.len();

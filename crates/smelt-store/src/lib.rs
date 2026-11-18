@@ -40,16 +40,16 @@ mod snapshots;
 mod workspace;
 
 pub use snapshots::{
-    AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentDefinitionRecord, AgentProfileEnvRecord,
-    AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord, HistoryTitleSnapshot,
-    LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot, MemoryProvenanceRecord,
-    MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord, MemoryUsageRecord, PairedDevice,
-    PublishedSessionRecord, PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota,
-    QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, QuotaProviderPref,
-    RemoteConfigSnapshot, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogVersion,
-    WorkspaceDirectoryCommit, WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord,
-    WorkspaceSnapshot, WorkspaceTerminalRecord, WorkspaceWorksetRecord,
-    WorkspaceWorksetRepositoryRecord,
+    AcpLiveChange, AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentDefinitionRecord,
+    AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
+    HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
+    MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord,
+    MemoryUsageRecord, PairedDevice, PublishedSessionRecord, PublishedSessionSnapshot,
+    PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
+    QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot, TerminalThemeSnapshot,
+    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit,
+    WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
+    WorkspaceTerminalRecord, WorkspaceWorksetRecord, WorkspaceWorksetRepositoryRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -61,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 38;
+pub const STORE_SCHEMA_VERSION: u32 = 39;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -158,6 +158,8 @@ pub struct AutomationRunRecord {
     pub error: Option<String>,
     pub runtime_released_at: Option<i64>,
     pub context_json: Vec<u8>,
+    /// 没成的原因种类代码；旧记录没有。
+    pub error_code: Option<String>,
 }
 
 #[derive(Clone)]
@@ -249,7 +251,8 @@ impl Store {
         imp::create_workspace_conversation(&self.backend, conversation)
     }
 
-    /// 替换一段已有对话。对话已经不在时回 [`StoreError::ConversationNotFound`]。
+    /// 换一段已有对话里的终端格子，别的以库里的为准（见 `workspace::update_conversation`）。
+    /// 对话已经不在时回 [`StoreError::ConversationNotFound`]。
     pub fn update_workspace_conversation(
         &self,
         conversation: &WorkspaceSessionRecord,
@@ -356,16 +359,6 @@ impl Store {
         })
     }
 
-    pub fn set_workspace_conversation_pinned(
-        &self,
-        id: &str,
-        pinned_at: Option<i64>,
-    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
-        imp::write_workspace(&self.backend, |transaction| {
-            crate::workspace::set_conversation_pinned(transaction, id, pinned_at)
-        })
-    }
-
     /// 给一格终端改名，`None` 是清掉。
     pub fn rename_workspace_terminal(
         &self,
@@ -385,6 +378,18 @@ impl Store {
     ) -> Result<WorkspaceDirectoryCommit, StoreError> {
         imp::write_workspace(&self.backend, |transaction| {
             crate::workspace::set_acp_session_title(transaction, sid, title)
+        })
+    }
+
+    /// 守护在跑着的 ACP 会话里看到的状态变了（选了配置、预设或首条消息发出去、回合结束）。
+    /// 只由守护写；没有这段会话时不改。
+    pub fn update_workspace_acp_live(
+        &self,
+        sid: &str,
+        change: AcpLiveChange<'_>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::update_acp_live(transaction, sid, change)
         })
     }
 
@@ -978,7 +983,7 @@ mod imp {
                 })?;
             if busy != 0 || (log != -1 && log != checkpointed) {
                 return Err(std::io::Error::other(format!(
-                    "新库没能把 WAL 写回主文件（busy={busy} log={log} checkpointed={checkpointed}）"
+                    "The new database couldn't checkpoint its WAL into the main file (busy={busy} log={log} checkpointed={checkpointed})"
                 ))
                 .into());
             }
@@ -2109,6 +2114,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 38 {
+            apply_v39(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 37 {
             apply_v38_worksets(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2821,6 +2835,31 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V37_TO_V38)?;
         }
+        apply_v39(transaction)
+    }
+
+    /// v39 删掉运行时目录里运行时自己不据此行动的四列（`schema::V38_TO_V39_DROPPED_COLUMNS`），
+    /// 给自动化运行记录加原因种类、推送登记加语言（`schema::V38_TO_V39_ADDED_COLUMNS`）。已经没有、已经有的
+    /// 列跳过。
+    fn apply_v39(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        for (table, column, declaration) in crate::schema::V38_TO_V39_ADDED_COLUMNS {
+            if !table_columns(transaction, table)?
+                .iter()
+                .any(|existing| existing == column)
+            {
+                transaction.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {declaration};"
+                ))?;
+            }
+        }
+        for (table, column) in crate::schema::V38_TO_V39_DROPPED_COLUMNS {
+            if table_columns(transaction, table)?
+                .iter()
+                .any(|existing| existing == column)
+            {
+                transaction.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))?;
+            }
+        }
         Ok(())
     }
 
@@ -2843,6 +2882,8 @@ mod imp {
             label: "Claude Code",
             workspace_env: Some("CLAUDE_CONFIG_DIR"),
             factory: &[
+                // v0.5.9 的出厂命令，还没加 --bun。
+                "bunx @agentclientprotocol/claude-agent-acp@0.60.0",
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0",
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0",
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
@@ -3393,18 +3434,15 @@ mod imp {
             && v1_schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V1)?)
     }
 
-    const CURRENT_ACP_COLUMNS: [&str; 13] = [
+    const CURRENT_ACP_COLUMNS: [&str; 10] = [
         "session_id",
         "agent",
         "profile_id",
         "history_session_id",
         "launch_command",
-        "refresh_launch_from_settings",
         "pending_prompt",
-        "pending_delivery_id",
         "agent_definition_id",
         "automation_id",
-        "binding_automation_run_id",
         "pending_agent_preset",
         "session_title",
     ];
@@ -3535,7 +3573,6 @@ mod imp {
                     "custom_title",
                     "last_updated_at",
                     "archived_at",
-                    "pinned_at",
                     "workset_id",
                     "closed_workset_root",
                 ],
@@ -5308,7 +5345,6 @@ mod tests {
                     ("mode".to_string(), "bypassPermissions".to_string()),
                 ]
             );
-            assert_eq!(acp.binding_automation_run_id, None);
             assert_eq!(acp.session_title.as_deref(), Some("季度复盘"));
             drop(store);
 
@@ -5802,6 +5838,36 @@ CREATE TABLE published_session (
         );
     }
 
+    /// v0.5.9 的出厂命令（还没加 --bun）也是出厂的，迁移时不转成自定义 Agent。
+    #[test]
+    fn v34_migration_keeps_v059_factory_command_out_of_custom_agents() {
+        let dir = temp_dir("v34-migration-v059");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection.execute_batch(V34_AGENT_COMMAND).unwrap();
+        connection
+            .execute_batch(crate::schema::ENSURE_WORKSPACE_EPOCH)
+            .unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO agent_acp_command(command_key, command) VALUES
+                   ('acp_cmd', 'bunx @agentclientprotocol/claude-agent-acp@0.60.0');",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 34).unwrap();
+        drop(connection);
+
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let profiles: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_profile", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(profiles, 0);
+    }
+
     #[test]
     fn v23_database_drops_deepseek_harness_data() {
         let dir = temp_dir("v23-migration");
@@ -5814,6 +5880,7 @@ CREATE TABLE published_session (
         connection.execute_batch(V30_AGENT_PROFILE).unwrap();
         connection.execute_batch(V28_WORKSPACE_EPOCH).unwrap();
         connection.execute_batch(V27_REMOTE_SESSION_TABLES).unwrap();
+        connection.execute_batch(V38_CONVERSATION_COLUMNS).unwrap();
         connection.execute_batch(V37_WITHOUT_WORKSETS).unwrap();
         connection.execute_batch(V26_PROJECT_ROOT_AND_MENU).unwrap();
         connection
@@ -6245,6 +6312,7 @@ CREATE TABLE published_session (
             output: None,
             error: None,
             runtime_released_at: None,
+            error_code: None,
             context_json: json_bytes(json!({
                 "automation_name": name,
                 "cwd": "/",
@@ -6361,7 +6429,9 @@ CREATE TABLE published_session (
 
         let error = Store::open_or_create(&path).unwrap_err();
         assert!(
-            error.to_string().contains("数据库 schema 5 形状无法识别"),
+            error
+                .to_string()
+                .contains("Database schema 5 has an unrecognized shape"),
             "unexpected error: {error}"
         );
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -6459,8 +6529,8 @@ CREATE TABLE published_session (
         drop(connection);
 
         let error = Store::open_or_create(&path).unwrap_err();
-        assert!(error.to_string().contains("形状无法识别"), "{error}");
-        assert!(error.to_string().contains("以免清空"), "{error}");
+        assert!(error.to_string().contains("unrecognized shape"), "{error}");
+        assert!(error.to_string().contains("isn't wiped"), "{error}");
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         let payload: String = connection
@@ -6501,7 +6571,7 @@ CREATE TABLE published_session (
         drop(connection);
 
         let error = Store::open_or_create(&path).unwrap_err();
-        assert!(error.to_string().contains("形状无法识别"), "{error}");
+        assert!(error.to_string().contains("unrecognized shape"), "{error}");
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         let root: String = connection
@@ -6546,7 +6616,7 @@ CREATE TABLE published_session (
 
             let error = Store::open_or_create(&path).unwrap_err();
             assert!(
-                error.to_string().contains("形状无法识别"),
+                error.to_string().contains("unrecognized shape"),
                 "{table}: {error}"
             );
             let connection = rusqlite::Connection::open(&path).unwrap();
@@ -6611,7 +6681,7 @@ CREATE TABLE published_session (
 
             let error = Store::open_or_create(&path).unwrap_err();
             assert!(
-                error.to_string().contains("形状无法识别"),
+                error.to_string().contains("unrecognized shape"),
                 "{name}: {error}"
             );
             let connection = rusqlite::Connection::open(&path).unwrap();
@@ -6648,7 +6718,7 @@ CREATE TABLE published_session (
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .unwrap();
             let error = imp::migrate_v1_schema(&transaction, &malformed_migration).unwrap_err();
-            assert!(error.to_string().contains("形状无法识别"), "{error}");
+            assert!(error.to_string().contains("unrecognized shape"), "{error}");
         }
 
         assert_eq!(
@@ -6727,6 +6797,16 @@ CREATE TABLE published_session (
         transaction.commit().unwrap();
     }
 
+    /// 最近活动时间由守护按新建那一刻写，不用客户端带来的。比对其余字段时把期望里的换成
+    /// 库里存的那个。
+    fn stamped(
+        mut expected: WorkspaceSessionRecord,
+        stored: &WorkspaceSessionRecord,
+    ) -> WorkspaceSessionRecord {
+        expected.last_updated_at = stored.last_updated_at;
+        expected
+    }
+
     /// 一段终端对话、一段 ACP 对话，各字段都填上。
     fn full_conversations() -> Vec<WorkspaceSessionRecord> {
         vec![
@@ -6735,7 +6815,6 @@ CREATE TABLE published_session (
                 custom_title: Some("terminal group".into()),
                 last_updated_at: 42,
                 archived_at: None,
-                pinned_at: None,
                 workset_id: None,
                 closed_workset_root: None,
                 terminals: vec![
@@ -6761,7 +6840,6 @@ CREATE TABLE published_session (
                 custom_title: Some("agent group".into()),
                 last_updated_at: 84,
                 archived_at: None,
-                pinned_at: None,
                 workset_id: None,
                 closed_workset_root: None,
                 terminals: Vec::new(),
@@ -6773,10 +6851,8 @@ CREATE TABLE published_session (
                     history_session_id: Some("history-1".into()),
                     launch_command: "claude --acp".into(),
                     launch_env: vec![("PROFILE".into(), "work".into())],
-                    refresh_launch_from_settings: true,
                     agent_definition_id: Some("agent-def-1".into()),
                     config_values: vec![("model".into(), "sonnet".into())],
-                    binding_automation_run_id: Some("run-1".into()),
                     pending_agent_preset: Some("先检查正确性和回归风险".into()),
                     session_title: Some("季度复盘".into()),
                     ..WorkspaceAcpRecord::default()
@@ -6819,16 +6895,15 @@ CREATE TABLE published_session (
             )
             .unwrap();
         assert_eq!(profile, "work");
-        let (model, binding): (String, String) = connection
+        let model: String = connection
             .query_row(
-                "SELECT c.value_id, d.binding_automation_run_id
-                 FROM acp_config_value c JOIN acp_detail d USING (session_id)
-                 WHERE c.session_id = 'acp-1' AND c.config_id = 'model'",
+                "SELECT value_id FROM acp_config_value
+                 WHERE session_id = 'acp-1' AND config_id = 'model'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .unwrap();
-        assert_eq!((model.as_str(), binding.as_str()), ("sonnet", "run-1"));
+        assert_eq!(model, "sonnet");
         let old_payload_tables: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema
@@ -6843,7 +6918,12 @@ CREATE TABLE published_session (
         // 标题丢了，同一智能体的多段对话名字全一样。
         let (_, restored) = store.workspace_directory().unwrap();
         assert_eq!(restored.projects, ["/repo"]);
-        assert_eq!(restored.sessions, conversations);
+        let expected: Vec<_> = conversations
+            .iter()
+            .zip(&restored.sessions)
+            .map(|(expected, stored)| stamped(expected.clone(), stored))
+            .collect();
+        assert_eq!(restored.sessions, expected);
         let acp_columns = connection
             .prepare("PRAGMA table_info(acp_detail)")
             .unwrap()
@@ -6859,12 +6939,9 @@ CREATE TABLE published_session (
                 "profile_id",
                 "history_session_id",
                 "launch_command",
-                "refresh_launch_from_settings",
                 "pending_prompt",
-                "pending_delivery_id",
                 "agent_definition_id",
                 "automation_id",
-                "binding_automation_run_id",
                 "pending_agent_preset",
                 "session_title",
             ]
@@ -7008,6 +7085,96 @@ CREATE TABLE published_session (
         );
     }
 
+    /// 新建之后，对话的配置、预设、首条消息、活动时间只由守护按它看到的写：
+    /// 真改了才推进版本，没有这段会话不建行，客户端整段替换带来的旧时间不算数。
+    #[test]
+    fn daemon_owns_live_acp_state_after_creation() {
+        let dir = temp_dir("acp-live");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let mut created = acp_conversation("c1", Some("acp-1"), None);
+        if let Some(acp) = &mut created.acp {
+            acp.config_values = vec![("model".into(), "opus".into())];
+            acp.pending_prompt = Some("先读一遍代码".into());
+            acp.pending_agent_preset = Some("你是审查员".into());
+        }
+        store.create_workspace_conversation(&created).unwrap();
+        let acp = |store: &Store| {
+            store.workspace_directory().unwrap().1.sessions[0]
+                .acp
+                .clone()
+                .unwrap()
+        };
+        let live = |change| store.update_workspace_acp_live("acp-1", change).unwrap();
+
+        assert!(
+            live(AcpLiveChange::ConfigValue {
+                config_id: "model",
+                value_id: "sonnet",
+            })
+            .changed
+        );
+        assert!(
+            live(AcpLiveChange::ConfigValue {
+                config_id: "mode",
+                value_id: "plan",
+            })
+            .changed
+        );
+        assert!(
+            !live(AcpLiveChange::ConfigValue {
+                config_id: "mode",
+                value_id: "plan",
+            })
+            .changed
+        );
+        assert_eq!(
+            acp(&store).config_values,
+            vec![
+                ("model".to_string(), "sonnet".to_string()),
+                ("mode".to_string(), "plan".to_string()),
+            ]
+        );
+
+        assert!(live(AcpLiveChange::AgentPresetConsumed).changed);
+        assert!(!live(AcpLiveChange::AgentPresetConsumed).changed);
+        assert!(live(AcpLiveChange::PendingPromptSent).changed);
+        assert!(!live(AcpLiveChange::PendingPromptSent).changed);
+        assert_eq!(acp(&store).pending_prompt, None);
+        assert_eq!(acp(&store).pending_agent_preset, None);
+
+        // 新建时守护记下当时的时间，客户端带来的不算数。
+        let born = store.workspace_directory().unwrap().1.sessions[0].last_updated_at;
+        assert!(born > 0);
+        assert!(live(AcpLiveChange::TurnEnded { at: born + 50 }).changed);
+        assert!(!live(AcpLiveChange::TurnEnded { at: born + 40 }).changed);
+        // 客户端（含没升级的旧客户端）带着新建时的旧值改对话，改不回去。
+        assert!(
+            !store
+                .update_workspace_conversation(&created)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(
+            store.workspace_directory().unwrap().1.sessions[0].last_updated_at,
+            born + 50,
+            "活动时间只由守护记"
+        );
+        assert_eq!(acp(&store).config_values[0].1, "sonnet");
+        assert_eq!(acp(&store).pending_prompt, None);
+        assert_eq!(acp(&store).pending_agent_preset, None);
+
+        let missing = store
+            .update_workspace_acp_live(
+                "acp-missing",
+                AcpLiveChange::ConfigValue {
+                    config_id: "model",
+                    value_id: "opus",
+                },
+            )
+            .unwrap();
+        assert!(!missing.changed);
+    }
+
     /// 恢复身份是目录的一部分：守护真改了才推进版本，同一个 id 再确认、已经放弃再放弃、
     /// 没有这一行，都不动。
     #[test]
@@ -7078,7 +7245,7 @@ CREATE TABLE published_session (
         store.remember_history_session_id("acp-1", "h1").unwrap();
         assert_eq!(bound("h1").as_deref(), Some("writer"));
 
-        // 先有 provider 身份（从历史续接），后补智能体。
+        // 没有智能体就不记；智能体只在新建时定，客户端改对话补不上。
         let second = with_definition(
             acp_conversation("c2", Some("acp-2"), Some("h2")),
             Some("  "),
@@ -7088,7 +7255,15 @@ CREATE TABLE published_session (
         store
             .update_workspace_conversation(&with_definition(second, Some("coder")))
             .unwrap();
-        assert_eq!(bound("h2").as_deref(), Some("coder"));
+        assert_eq!(bound("h2"), None, "ACP 那段新建之后客户端改不了");
+
+        // 从历史续接：新建时两样都有，当场记上。
+        let resumed = with_definition(
+            acp_conversation("c5", Some("acp-5"), Some("h5")),
+            Some("coder"),
+        );
+        store.create_workspace_conversation(&resumed).unwrap();
+        assert_eq!(bound("h5").as_deref(), Some("coder"));
 
         // 换了智能体续接同一份存档：以对话上现在的为准。
         let third = with_definition(
@@ -7529,7 +7704,6 @@ CREATE TABLE published_session (
             custom_title: None,
             last_updated_at: 1,
             archived_at: None,
-            pinned_at: None,
             workset_id: None,
             closed_workset_root: None,
             terminals: vec![WorkspaceTerminalRecord {
@@ -7553,7 +7727,6 @@ CREATE TABLE published_session (
             custom_title: None,
             last_updated_at: 1,
             archived_at: None,
-            pinned_at: None,
             workset_id: None,
             closed_workset_root: None,
             terminals: Vec::new(),
@@ -7602,26 +7775,12 @@ CREATE TABLE published_session (
     }
 
     #[test]
-    fn archive_and_pin_survive_stale_updates_and_reopening() {
+    fn archive_survives_stale_updates_and_reopening() {
         let dir = temp_dir("directory-archive");
         let path = dir.join(DATABASE_FILE_NAME);
         let store = Store::open_or_create(&path).unwrap();
         let stale = terminal_conversation("c1", "t1", "/repo");
         store.create_workspace_conversation(&stale).unwrap();
-        store
-            .set_workspace_conversation_pinned("c1", Some(10))
-            .unwrap();
-        assert!(
-            !store
-                .set_workspace_conversation_pinned("c1", Some(20))
-                .unwrap()
-                .changed
-        );
-        store.update_workspace_conversation(&stale).unwrap();
-        assert_eq!(
-            store.workspace_directory().unwrap().1.sessions[0].pinned_at,
-            Some(10)
-        );
 
         store
             .set_workspace_conversation_archived("c1", Some(30))
@@ -7633,28 +7792,22 @@ CREATE TABLE published_session (
                 .changed
         );
         store.update_workspace_conversation(&stale).unwrap();
-        assert!(matches!(
-            store.set_workspace_conversation_pinned("c1", Some(50)),
-            Err(StoreError::ConversationArchived { .. })
-        ));
         drop(store);
 
         let store = Store::open(&path).unwrap();
         let archived = &store.workspace_directory().unwrap().1.sessions[0];
         assert_eq!(archived.archived_at, Some(30));
-        assert_eq!(archived.pinned_at, None);
         assert_eq!(archived.terminals, stale.terminals);
         store
             .set_workspace_conversation_archived("c1", None)
             .unwrap();
         let restored = &store.workspace_directory().unwrap().1.sessions[0];
         assert_eq!(restored.archived_at, None);
-        assert_eq!(restored.pinned_at, None);
         assert_eq!(restored.id, "c1");
     }
 
     #[test]
-    fn v33_conversations_gain_empty_archive_and_pin_columns() {
+    fn v33_conversations_gain_an_empty_archive_column() {
         let dir = temp_dir("directory-v33-archive");
         let path = dir.join(DATABASE_FILE_NAME);
         let store = Store::open_or_create(&path).unwrap();
@@ -7667,7 +7820,6 @@ CREATE TABLE published_session (
             .execute_batch(&format!(
                 "{V37_WITHOUT_WORKSETS}
              ALTER TABLE session_group DROP COLUMN archived_at;
-             ALTER TABLE session_group DROP COLUMN pinned_at;
              PRAGMA user_version = 33;"
             ))
             .unwrap();
@@ -7675,7 +7827,6 @@ CREATE TABLE published_session (
         let store = Store::open(&path).unwrap();
         let record = &store.workspace_directory().unwrap().1.sessions[0];
         assert_eq!(record.archived_at, None);
-        assert_eq!(record.pinned_at, None);
         assert_eq!(record.id, "c1");
     }
 
@@ -7726,7 +7877,8 @@ CREATE TABLE published_session (
 
         let (commit, removed) = store.delete_workspace_conversation("c1").unwrap();
         assert!(commit.changed);
-        assert_eq!(removed, Some(conversation.clone()));
+        let removed = removed.expect("删掉的对话要交回来");
+        assert_eq!(removed, stamped(conversation.clone(), &removed));
         assert!(matches!(
             store.update_workspace_conversation(&conversation),
             Err(StoreError::ConversationNotFound { id }) if id == "c1"
@@ -7780,10 +7932,13 @@ CREATE TABLE published_session (
         // 终端改到了；名字不随更新改，只经改名命令写。
         assert_eq!(
             snapshot.sessions[0],
-            WorkspaceSessionRecord {
-                custom_title: None,
-                ..renamed
-            }
+            stamped(
+                WorkspaceSessionRecord {
+                    custom_title: None,
+                    ..renamed
+                },
+                &snapshot.sessions[0],
+            )
         );
         assert_eq!(directory_ids(&store), ["c1", "c2"]);
     }
@@ -8072,6 +8227,87 @@ CREATE TABLE published_session (
         assert!(store.workspace_directory().unwrap().1.worksets.is_empty());
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
     }
+
+    /// v38 的库：会话组和 ACP 明细上的四列删掉（置顶、旧版投递标记、绑定镜像、重拼启动命令
+    /// 的开关），对话本身和别的字段原样留着。四列夹在表中间，照 v38 的建表语句
+    /// 原样造，删完要和新建的库一个形状；升级前留一份 `.bak-v38`。
+    #[test]
+    fn migrates_v38_dropping_conversation_columns() {
+        let dir = temp_dir("migrate-v38-conversation-columns");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let session_group = (
+            "  archived_at INTEGER,\n  workset_id TEXT",
+            "  archived_at INTEGER,\n  pinned_at INTEGER,\n  workset_id TEXT",
+        );
+        let acp_detail = (
+            "  launch_command TEXT NOT NULL,\n  pending_prompt TEXT,\n  \
+             agent_definition_id TEXT,\n  automation_id TEXT,\n  pending_agent_preset TEXT,",
+            "  launch_command TEXT NOT NULL,\n  refresh_launch_from_settings INTEGER NOT NULL \
+             DEFAULT 0\n    CHECK (refresh_launch_from_settings IN (0, 1)),\n  pending_prompt \
+             TEXT,\n  pending_delivery_id TEXT,\n  agent_definition_id TEXT,\n  automation_id \
+             TEXT,\n  binding_automation_run_id TEXT,\n  pending_agent_preset TEXT,",
+        );
+        let schema = crate::schema::CREATE_SCHEMA;
+        assert_eq!(schema.matches(session_group.0).count(), 1);
+        assert_eq!(schema.matches(acp_detail.0).count(), 1);
+        let v38_schema = schema
+            .replace(session_group.0, session_group.1)
+            .replace(acp_detail.0, acp_detail.1);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{v38_schema}
+                 {}
+                 INSERT INTO session_group(
+                   id, position, custom_title, last_updated_at, archived_at, pinned_at
+                 ) VALUES ('c1', 0, '对话', 50, 30, 40);
+                 INSERT INTO session(id, group_id, kind, cwd, position)
+                 VALUES ('acp-1', 'c1', 'acp', '/repo', 0);
+                 INSERT INTO acp_detail(
+                   session_id, agent, launch_command, refresh_launch_from_settings,
+                   pending_prompt, pending_delivery_id, binding_automation_run_id
+                 ) VALUES ('acp-1', 'pi', 'smelt-pi', 1, '先读一遍代码', 'delivery-1', 'run-1');
+                 PRAGMA user_version = 38;",
+                crate::schema::ENSURE_WORKSPACE_EPOCH
+            ))
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&path).unwrap();
+        let restored = &store.workspace_directory().unwrap().1.sessions[0];
+        assert_eq!(restored.id, "c1");
+        assert_eq!(restored.custom_title.as_deref(), Some("对话"));
+        assert_eq!(restored.last_updated_at, 50);
+        assert_eq!(restored.archived_at, Some(30));
+        let acp = restored.acp.as_ref().unwrap();
+        assert_eq!(acp.sid.as_deref(), Some("acp-1"));
+        assert_eq!(acp.launch_command, "smelt-pi");
+        assert_eq!(acp.pending_prompt.as_deref(), Some("先读一遍代码"));
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v38 升上来的库要和新建的库一个形状"
+        );
+        assert!(
+            path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v38"))
+                .exists()
+        );
+    }
+
+    /// v38 及更早还在、v39 删掉的四列。用当前结构的库退回 v26 及更早做夹具时补上：v26 → v27
+    /// 重建会话组和 ACP 明细时要从旧表拷这几列。加在表尾，重建按列名拷，位置不影响。
+    const V38_CONVERSATION_COLUMNS: &str = "
+ALTER TABLE session_group ADD COLUMN pinned_at INTEGER;
+ALTER TABLE acp_detail ADD COLUMN refresh_launch_from_settings INTEGER NOT NULL DEFAULT 0
+  CHECK (refresh_launch_from_settings IN (0, 1));
+ALTER TABLE acp_detail ADD COLUMN pending_delivery_id TEXT;
+ALTER TABLE acp_detail ADD COLUMN binding_automation_run_id TEXT;
+";
 
     /// v37 及更早还没有、v38 加上的项目仓库和工作树。用当前结构的库退回旧版本做夹具时删掉。
     const V37_WITHOUT_WORKSETS: &str = "
@@ -8460,6 +8696,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
                 notify_success: false,
                 payload_version: 1,
                 notify_message: true,
+                locale: None,
                 updated_at_ms: 5,
             }]
         );
@@ -8478,7 +8715,9 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "ALTER TABLE push_registration DROP COLUMN notify_message;
+                "ALTER TABLE push_registration DROP COLUMN locale;
+                 ALTER TABLE push_registration DROP COLUMN notify_message;
+                 ALTER TABLE automation_run DROP COLUMN error_code;
                  INSERT INTO paired_device(endpoint_id, name, paired_at_ms) VALUES ('aa', 'iPhone', 1);
                  INSERT INTO push_registration(device_endpoint_id, handle, relay_url,
                    notify_approval, notify_input, notify_failure, updated_at_ms,
@@ -8513,6 +8752,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             notify_success: false,
             payload_version: 1,
             notify_message: true,
+            locale: None,
             updated_at_ms: 10,
         };
         assert!(
@@ -8536,6 +8776,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             notify_success: true,
             payload_version: 2,
             notify_message: false,
+            locale: Some("zh-CN".to_string()),
             updated_at_ms: 20,
             ..registration.clone()
         };
@@ -8608,6 +8849,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             .execute_batch(&format!(
                 "{V28_WORKSPACE_EPOCH}
                  {V27_REMOTE_SESSION_TABLES}
+                 {V38_CONVERSATION_COLUMNS}
                  {V37_WITHOUT_WORKSETS}
                  {V26_PROJECT_ROOT_AND_MENU}
                  INSERT INTO project(root, position) VALUES ('/repo', 0);
@@ -8796,7 +9038,6 @@ CREATE TABLE worktree_inherit_skip_pattern (
             custom_title: Some("terminal group".into()),
             last_updated_at: 7,
             archived_at: None,
-            pinned_at: None,
             workset_id: None,
             closed_workset_root: None,
             terminals: vec![
@@ -8818,7 +9059,15 @@ CREATE TABLE worktree_inherit_skip_pattern (
             .unwrap();
 
         let (_, restored) = store.workspace_directory().unwrap();
-        assert_eq!(restored.sessions[0], terminals);
+        // 最近活动时间由守护在新建时记，不取客户端带来的 7。
+        assert!(restored.sessions[0].last_updated_at > 7);
+        assert_eq!(
+            restored.sessions[0],
+            WorkspaceSessionRecord {
+                last_updated_at: restored.sessions[0].last_updated_at,
+                ..terminals.clone()
+            }
+        );
         assert_eq!(
             restored.sessions[0]
                 .terminals
@@ -8943,6 +9192,7 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
                 .execute_batch(&format!(
                     "{V28_WORKSPACE_EPOCH}
                  {V27_REMOTE_SESSION_TABLES}
+                     {V38_CONVERSATION_COLUMNS}
                      {V37_WITHOUT_WORKSETS}
                      {V26_PROJECT_ROOT_AND_MENU}
                      {V21_SESSION_TABLES}
@@ -9212,9 +9462,11 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         std::fs::write(&path, []).unwrap();
         let error = Store::open(&path).unwrap_err();
         assert!(
-            error.to_string().contains("未初始化")
-                || error.to_string().contains("拒绝建空库")
-                || error.to_string().contains("打开"),
+            error.to_string().contains("isn't initialized")
+                || error
+                    .to_string()
+                    .contains("refusing to create an empty one")
+                || error.to_string().contains("Couldn't open"),
             "{error}"
         );
         if path.exists() {

@@ -20,13 +20,6 @@ impl PiPluginKind {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Skill => "技能",
-            Self::Extension => "扩展",
-        }
-    }
-
     /// Pi 用来显式加载单个资源的参数名。`--no-skills` 之后 `--skill` 仍然生效，
     /// extension 同理走 `-e`。
     pub fn load_flag(self) -> &'static str {

@@ -197,7 +197,7 @@ pub fn set_custom_title(
     custom_title: Option<&str>,
 ) -> Result<(), String> {
     let Some(path) = store_path() else {
-        return Err("找不到用户目录".into());
+        return Err("can't find the home directory".into());
     };
     let _guard = STORE_LOCK.lock().unwrap();
     set_custom_title_at(&path, agent, profile_id, resume_id, custom_title)

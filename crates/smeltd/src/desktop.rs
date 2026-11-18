@@ -44,7 +44,9 @@ pub(crate) fn handle_desktop_attach<C: ClientSocket>(
                 &mut conn,
                 &DesktopAttachReply {
                     ok: false,
-                    error: Some(format!("这台机器上的远程桌面连不上（{endpoint}）：{error}")),
+                    error: Some(format!(
+                        "Couldn't connect to the remote desktop on this machine ({endpoint}): {error}"
+                    )),
                 },
             );
             return;
@@ -99,7 +101,7 @@ fn connect(endpoint: &str) -> io::Result<TcpStream> {
     let addr = endpoint
         .to_socket_addrs()?
         .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "地址解析不出来"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Couldn't resolve the address"))?;
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
     stream.set_nodelay(true)?;
     Ok(stream)
@@ -112,19 +114,23 @@ pub(crate) fn type_text(text: &str) -> Result<(), String> {
         return Ok(());
     }
     if text.chars().count() > MAX_TYPE_TEXT_CHARS {
-        return Err(format!("一次最多输入 {MAX_TYPE_TEXT_CHARS} 个字"));
+        return Err(format!(
+            "You can type at most {MAX_TYPE_TEXT_CHARS} characters at a time"
+        ));
     }
     let output = type_text_command(&display(), text)
         .output()
         .map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => "这台机器上没有 xdotool，装上才能从这里输入文字".to_string(),
-            _ => format!("输入文字失败：{error}"),
+            io::ErrorKind::NotFound => {
+                "xdotool isn't installed on this machine; install it to type from here".to_string()
+            }
+            _ => format!("Couldn't type the text: {error}"),
         })?;
     if output.status.success() {
         Ok(())
     } else {
         Err(format!(
-            "输入文字失败：{}",
+            "Couldn't type the text: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
@@ -214,7 +220,7 @@ mod tests {
             .unwrap();
         let reply: DesktopAttachReply = serde_json::from_slice(&read_line(&mut client)).unwrap();
         assert!(!reply.ok);
-        assert!(reply.error.unwrap().contains("连不上"));
+        assert!(reply.error.unwrap().contains("Couldn't connect"));
     }
 
     #[test]
@@ -236,6 +242,6 @@ mod tests {
     #[test]
     fn overly_long_text_is_refused_before_running_anything() {
         let text = "字".repeat(MAX_TYPE_TEXT_CHARS + 1);
-        assert!(type_text(&text).unwrap_err().contains("最多"));
+        assert!(type_text(&text).unwrap_err().contains("at most"));
     }
 }

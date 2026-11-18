@@ -1,7 +1,8 @@
 //! 执行过程里一次工具调用的样子：动词句和图标。照对话视图的写法，运行详情和现场读起来一致。
 
 use api::model::acp_chat::ToolKind;
-use gpui_component::{Icon, IconName};
+use api::ui::{Icon, IconName};
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 /// 时间线上单条工具的动词句。
@@ -11,14 +12,14 @@ pub(crate) fn compact_tool_headline(kind: ToolKind, title: &str) -> String {
         return tool_kind_label(kind).to_string();
     }
     match kind {
-        ToolKind::Fetch => format!("打开了 {}", compact_fetch_target(title)),
-        ToolKind::Search => format!("搜索 {title}"),
-        ToolKind::Read => format!("读取了 {}", compact_path_leaf(title)),
-        ToolKind::Edit => format!("修改了 {}", compact_path_leaf(title)),
-        ToolKind::Delete => format!("删除了 {}", compact_path_leaf(title)),
-        ToolKind::Move => format!("移动了 {}", compact_path_leaf(title)),
-        ToolKind::Execute => format!("运行了 {}", compact_command_leaf(title)),
-        ToolKind::Image => format!("处理了 {}", compact_path_leaf(title)),
+        ToolKind::Fetch => t!("tool.fetched", target = compact_fetch_target(title)).into_owned(),
+        ToolKind::Search => t!("tool.searched", target = title).into_owned(),
+        ToolKind::Read => t!("tool.read", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Edit => t!("tool.edited", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Delete => t!("tool.deleted", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Move => t!("tool.moved", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Execute => t!("tool.ran", target = compact_command_leaf(title)).into_owned(),
+        ToolKind::Image => t!("tool.processed", target = compact_path_leaf(title)).into_owned(),
         _ => title.to_string(),
     }
 }
@@ -29,16 +30,16 @@ pub(crate) fn process_icon(kind: &ToolKind) -> Icon {
     match kind {
         ToolKind::Fetch => IconName::Globe.into(),
         ToolKind::Search => IconName::Search.into(),
-        ToolKind::Execute => IconName::SquareTerminal.into(),
+        ToolKind::Execute => IconName::Terminal.into(),
         ToolKind::Read | ToolKind::Move | ToolKind::Image => IconName::File.into(),
-        ToolKind::Edit => Icon::empty().path("smelt-icons/square-pen.svg"),
-        ToolKind::Delete => Icon::empty().path("smelt-icons/trash.svg"),
+        ToolKind::Edit => Icon::new(IconName::SquarePen),
+        ToolKind::Delete => Icon::new(IconName::Trash),
         ToolKind::Collaborate => IconName::Bot.into(),
         ToolKind::Review | ToolKind::Compact | ToolKind::Think | ToolKind::SwitchMode => {
             IconName::Asterisk.into()
         }
-        ToolKind::Wait => Icon::new(gpui_kit_assets::IconName::Clock),
-        ToolKind::Other => Icon::new(gpui_kit_assets::IconName::Wrench),
+        ToolKind::Wait => Icon::new(IconName::Clock),
+        ToolKind::Other => Icon::new(IconName::Wrench),
     }
 }
 
@@ -101,15 +102,15 @@ mod tests {
     fn headlines_name_the_target_not_the_full_path() {
         assert_eq!(
             compact_tool_headline(ToolKind::Read, "/repo/src/lib.rs"),
-            "读取了 lib.rs"
+            "Read lib.rs"
         );
         assert_eq!(
             compact_tool_headline(ToolKind::Fetch, "https://www.example.com/a"),
-            "打开了 example.com/a"
+            "Opened example.com/a"
         );
         assert_eq!(
             compact_tool_headline(ToolKind::Execute, "cargo test\n--all"),
-            "运行了 cargo test"
+            "Ran cargo test"
         );
         assert_eq!(compact_tool_headline(ToolKind::Execute, "  "), "Bash");
     }

@@ -126,6 +126,8 @@ pub struct AcpSessionState {
     /// `phase == Dead` 时给对话页看的原因；活会话为空。
     pub end_reason: String,
     pub end_kind: AcpEndKind,
+    /// 运行时说的结束原因种类；有它时 `end_reason` 只是细节。
+    pub end_code: Option<ConversationEndReason>,
     pub accepted_delivery_ids: BTreeSet<String>,
     pub active_delivery_id: Option<String>,
     pub completed_delivery_id: Option<String>,
@@ -217,6 +219,7 @@ impl Default for AcpSessionState {
             phase: DaemonPhase::Connecting,
             end_reason: String::new(),
             end_kind: AcpEndKind::Unknown,
+            end_code: None,
             accepted_delivery_ids: BTreeSet::new(),
             active_delivery_id: None,
             completed_delivery_id: None,
@@ -282,6 +285,7 @@ impl AcpSessionState {
             phase: DaemonPhase::Dead,
             end_reason: reason,
             end_kind: AcpEndKind::Unknown,
+            end_code: None,
             acp_session_id: None,
             history_session_id: resume_session_id,
             ..Self::default()
@@ -313,6 +317,7 @@ impl AcpSessionState {
             phase,
             end_reason: snap.end_reason,
             end_kind: snap.end_kind,
+            end_code: snap.end_code,
             accepted_delivery_ids: snap.accepted_delivery_ids,
             active_delivery_id: snap.active_delivery_id,
             completed_delivery_id: snap.completed_delivery_id,
@@ -396,6 +401,7 @@ impl AcpSessionState {
             phase,
             end_reason,
             end_kind,
+            end_code,
             accepted_delivery_ids,
             active_delivery_id,
             completed_delivery_id,
@@ -484,6 +490,7 @@ impl AcpSessionState {
         self.phase = phase;
         self.end_reason = end_reason;
         self.end_kind = end_kind;
+        self.end_code = end_code;
         if !envelope_omitted {
             self.accepted_delivery_ids = accepted_delivery_ids;
             self.active_delivery_id = active_delivery_id;
@@ -816,6 +823,7 @@ impl AcpSessionState {
             phase: self.phase,
             end_reason: self.end_reason.clone(),
             end_kind: self.end_kind,
+            end_code: self.end_code.clone(),
             accepted_delivery_ids: if include_envelope {
                 self.accepted_delivery_ids.clone()
             } else {
@@ -948,27 +956,26 @@ impl AcpSessionState {
     }
 }
 
+/// 镜像的选项值：开关项留着 bool，好让再投影时还认得是 / 否；别的用 label 占位。
+fn mirror_elicitation_option(option: ElicitOptionView) -> ElicitOption {
+    ElicitOption {
+        value: option.flag.map_or_else(
+            || ElicitationContentValue::String(option.label.clone()),
+            ElicitationContentValue::Boolean,
+        ),
+        label: option.label,
+    }
+}
+
 /// daemon 镜像只需把 host 快照重新投影给 GUI，不会在本地把字段翻译回 ACP
 /// response。选项值使用 label 占位，避免为只读镜像再引入一套平行字段类型。
 fn mirror_elicitation_field(field: ElicitFieldView) -> ElicitField {
     let kind = match field.kind {
-        ElicitFieldKindView::Select(options) => ElicitFieldKind::Select(
-            options
-                .into_iter()
-                .map(|option| ElicitOption {
-                    value: ElicitationContentValue::String(option.label.clone()),
-                    label: option.label,
-                })
-                .collect(),
-        ),
+        ElicitFieldKindView::Select(options) => {
+            ElicitFieldKind::Select(options.into_iter().map(mirror_elicitation_option).collect())
+        }
         ElicitFieldKindView::MultiSelect(options) => ElicitFieldKind::MultiSelect(
-            options
-                .into_iter()
-                .map(|option| ElicitOption {
-                    value: ElicitationContentValue::String(option.label.clone()),
-                    label: option.label,
-                })
-                .collect(),
+            options.into_iter().map(mirror_elicitation_option).collect(),
         ),
         ElicitFieldKindView::Text { secret } => ElicitFieldKind::Text { secret },
         ElicitFieldKindView::ExternalUrl(url) => ElicitFieldKind::ExternalUrl(url),
@@ -982,6 +989,16 @@ fn mirror_elicitation_field(field: ElicitFieldView) -> ElicitField {
     }
 }
 
+fn elicit_option_view(option: &ElicitOption) -> ElicitOptionView {
+    ElicitOptionView {
+        label: option.label.clone(),
+        flag: match option.value {
+            ElicitationContentValue::Boolean(flag) => Some(flag),
+            _ => None,
+        },
+    }
+}
+
 fn elicit_field_view(f: &ElicitField) -> ElicitFieldView {
     ElicitFieldView {
         key: f.key.clone(),
@@ -989,20 +1006,12 @@ fn elicit_field_view(f: &ElicitField) -> ElicitFieldView {
         required: f.required,
         allow_custom_input: f.allow_custom_input,
         kind: match &f.kind {
-            ElicitFieldKind::Select(opts) => ElicitFieldKindView::Select(
-                opts.iter()
-                    .map(|o| ElicitOptionView {
-                        label: o.label.clone(),
-                    })
-                    .collect(),
-            ),
-            ElicitFieldKind::MultiSelect(opts) => ElicitFieldKindView::MultiSelect(
-                opts.iter()
-                    .map(|o| ElicitOptionView {
-                        label: o.label.clone(),
-                    })
-                    .collect(),
-            ),
+            ElicitFieldKind::Select(opts) => {
+                ElicitFieldKindView::Select(opts.iter().map(elicit_option_view).collect())
+            }
+            ElicitFieldKind::MultiSelect(opts) => {
+                ElicitFieldKindView::MultiSelect(opts.iter().map(elicit_option_view).collect())
+            }
             ElicitFieldKind::Text { secret } => ElicitFieldKindView::Text { secret: *secret },
             ElicitFieldKind::ExternalUrl(url) => ElicitFieldKindView::ExternalUrl(url.clone()),
         },
@@ -1040,9 +1049,9 @@ pub fn recovered_elicitation_answer(state: &AcpSessionState) -> Option<String> {
             return None;
         }
         answers.push(if card.raw_fields.len() == 1 {
-            labels.join("、")
+            labels.join(", ")
         } else {
-            format!("{}：{}", field.title, labels.join("、"))
+            format!("{}: {}", field.title, labels.join(", "))
         });
     }
     Some(answers.join("\n"))
@@ -1052,12 +1061,34 @@ pub fn recovered_elicitation_answer(state: &AcpSessionState) -> Option<String> {
 ///
 /// 不是 ACP 协议事件（那些走 [`apply_event`]），所以 smeltd 的所有权冲突 /
 /// provider 未退出 / 传输断开必须走这里，不能直接写 `phase`。
+///
+/// `msg` 是智能体自己报的原话，没有种类。运行时自己说的原因走 [`force_end_because`]。
 pub fn force_end(state: &mut AcpSessionState, kind: AcpEndKind, msg: impl Into<String>) {
+    end_with(state, kind, None, msg.into());
+}
+
+/// 运行时自己判断的结束：发原因种类，客户端按语言说；`detail` 是底层报错，没有就空。
+pub fn force_end_because(
+    state: &mut AcpSessionState,
+    kind: AcpEndKind,
+    reason: ConversationEndReason,
+    detail: impl Into<String>,
+) {
+    end_with(state, kind, Some(reason), detail.into());
+}
+
+fn end_with(
+    state: &mut AcpSessionState,
+    kind: AcpEndKind,
+    code: Option<ConversationEndReason>,
+    detail: String,
+) {
     state.permissions.clear();
     state.elicitation = None;
     state.phase = DaemonPhase::Dead;
-    state.end_reason = msg.into();
+    state.end_reason = detail;
     state.end_kind = kind;
+    state.end_code = code;
     // 进程没了就不可能还在压缩。结束事件没送到时，这里不清会一直转圈。
     state.compacting = false;
 }
@@ -1090,6 +1121,7 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.phase = DaemonPhase::Connecting;
     state.end_reason.clear();
     state.end_kind = AcpEndKind::Unknown;
+    state.end_code = None;
 }
 
 /// 用户发的一条 prompt（本地立即回显 + 打开等回声窗口），跟旧版 `send_prompt`
@@ -1171,6 +1203,7 @@ pub fn note_prompt_sent_with_delivery(
     state.awaiting_user_echo = true;
     state.phase = DaemonPhase::Thinking;
     state.end_reason.clear();
+    state.end_code = None;
     state.active_delivery_id = delivery_id;
     state.completed_delivery_id = None;
     state.completed_unread = false;
@@ -1231,12 +1264,19 @@ pub fn undo_prompt_sent(
 
 /// 换上一条新的用户提示。id 取毫秒时间且严格大于上一条：进程重启后也不会撞上
 /// 客户端已经关掉的那条。
-pub fn raise_notice(state: &mut AcpSessionState, kind: AcpNoticeKind, text: String) {
+/// `note` 是运行时自己说的提示的种类，`text` 是同一句的英文兜底；智能体的原话没有种类。
+pub fn raise_notice(
+    state: &mut AcpSessionState,
+    kind: AcpNoticeKind,
+    text: String,
+    note: Option<RuntimeNote>,
+) {
     let floor = state.notice.as_ref().map_or(0, |notice| notice.id + 1);
     state.notice = Some(AcpNoticeView {
         id: unix_time_ms().max(floor),
         kind,
         text,
+        note,
     });
 }
 
@@ -1313,7 +1353,7 @@ pub fn resolve_memory_change(
     true
 }
 
-const PROVIDER_STILL_RUNNING_STATUS: &str = "已排队，这一轮结束后再发";
+const PROVIDER_STILL_RUNNING_STATUS: &str = "Queued; sends after this turn";
 
 /// Pi 还在跑，这条消息要等它结束。界面若已经空闲，把转圈拉回来，好接住后续输出。
 /// 用户刚按过停止时不拉回来：停止就是要界面立刻停。
@@ -1564,6 +1604,7 @@ pub fn live_header_from_state(state: &AcpSessionState) -> SessionLive {
         phase: state.phase,
         end_reason: state.end_reason.clone(),
         end_kind: state.end_kind,
+        end_code: state.end_code.clone(),
         acp_session_id: state.acp_session_id.clone(),
         history_session_id: state.history_session_id.clone(),
         session_title: state.resolved_session_title(),

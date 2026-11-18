@@ -519,7 +519,7 @@ mod tests {
         let label = ConversationAgentKind::from_id("claude")
             .map(ConversationAgentKind::short_label)
             .unwrap();
-        let generic = format!("{label} 对话 · smelt");
+        let generic = format!("{label} · smelt");
         assert_eq!(book.names_of("a1"), names(&generic, &generic));
         book.agents.definitions.insert("til".into(), "Til".into());
         assert_eq!(book.names_of("a1"), names("Til", "Til"));

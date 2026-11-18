@@ -4,20 +4,45 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_virtual_list};
+use gpui_base::{StyledExt as _, v_virtual_list};
+use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::client::protocol::files::is_previewable_image;
+use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
+use smelt_plugin_api::ui::scrollbar::{Scrollable, Scrollbar, ScrollbarAxis};
+use smelt_plugin_api::ui::tooltip::Tooltip;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
-use smelt_plugin_api::ui::{Button, IconAction as _, TextInput};
+use smelt_plugin_api::ui::{Button, CodeEditor, Icon, IconAction as _, IconName, TextInput};
 
 use crate::model::{
     FileTreeRow, OpenFile, PreviewKind, SearchState, SearchTreeDir, breadcrumb_segments,
     build_search_tree, file_tree_row_height, file_tree_row_id, name_likely_truncated,
 };
 use crate::{FilesPanel, MAX_TREE_WIDTH, MIN_TREE_WIDTH, TREE_KEY_CONTEXT, ui_theme};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
+
+/// 编辑器右键菜单在剪切、复制、粘贴、全选之后追加的项。打开时按当下有没有选区定可不可用。
+fn editor_menu_items(
+    editor: &Entity<gpui_base::input::EditorState>,
+    panel: WeakEntity<FilesPanel>,
+) -> impl Fn(Menu, &mut Window, &mut App) -> Menu + 'static {
+    let editor = editor.downgrade();
+    move |menu, _, cx| {
+        let has_selection = editor
+            .upgrade()
+            .is_some_and(|editor| editor.read(cx).context_menu_capabilities().has_selection());
+        let panel = panel.clone();
+        menu.item(
+            MenuItem::new(t!("send.selection_menu"))
+                .disabled(!has_selection)
+                .on_click(move |_, _, cx| {
+                    panel
+                        .update(cx, |panel, cx| panel.send_open_file_selection(cx))
+                        .ok();
+                }),
+        )
+    }
+}
 
 fn placeholder_view(text: &str, muted: Hsla) -> Div {
     div()
@@ -30,8 +55,7 @@ fn placeholder_view(text: &str, muted: Hsla) -> Div {
         .px_4()
         .child(
             div()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .text_center()
                 .text_color(muted)
                 .child(text.to_string()),
@@ -64,7 +88,7 @@ impl FilesPanel {
             self.file_tree(tree_w, window, cx)
         };
         let local = self.tree_runtime() == RuntimeKey::Local;
-        let search_box = h_flex()
+        let search_box = div().flex().items_center()
             .gap_1()
             .px_2()
             .py(px(6.))
@@ -79,7 +103,7 @@ impl FilesPanel {
                         .small()
                         .flex_shrink_0()
                         .icon(IconName::Plus)
-                        .icon_action("把目录加到文件树")
+                        .icon_action(t!("pin.add"))
                         .on_click(cx.listener(|this, _, _, cx| this.pick_pinned_roots(cx))),
                 )
             });
@@ -154,18 +178,17 @@ impl FilesPanel {
 
     /// 保留命中文件的目录层级；点文件跳到内容命中的那一行。
     fn search_results_view(&self, state: &SearchState, cx: &mut Context<Self>) -> AnyElement {
-        let (muted, fg, hover) = {
-            let theme = cx.theme();
-            (theme.muted_foreground, theme.foreground, theme.accent)
-        };
+        let muted: Hsla = rgb(ui_theme::muted()).into();
+        let fg: Hsla = rgb(ui_theme::text()).into();
+        let hover: Hsla = ui_theme::row_hover().into();
         let status = if !state.done {
-            "搜索中…".to_string()
+            t!("search.running").into_owned()
         } else if state.hits.is_empty() {
-            "无匹配".to_string()
+            t!("search.none").into_owned()
         } else if state.truncated {
-            format!("命中 {}+ 项（已截断）", state.hits.len())
+            t!("search.hits_truncated", count = state.hits.len()).into_owned()
         } else {
-            format!("命中 {} 项", state.hits.len())
+            t!("search.hits", count = state.hits.len()).into_owned()
         };
         let tree = build_search_tree(&state.hits);
         let context = SearchTreeContext {
@@ -186,22 +209,20 @@ impl FilesPanel {
                 div()
                     .px_2()
                     .py_1()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(muted)
                     .child(status),
             )
             .child(
-                div()
-                    .id("search-results-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .pb_1()
-                    .track_scroll(&self.search_scroll)
-                    .vertical_scrollbar(&self.search_scroll)
-                    .children(rows),
+                Scrollable::new(
+                    "search-results-list",
+                    div().flex().flex_col().pb_1().children(rows),
+                    &self.search_scroll,
+                    ScrollbarAxis::Vertical,
+                )
+                .vertical_label(t!("search.scrollbar"))
+                .flex_1()
+                .min_h_0(),
             )
             .into_any_element()
     }
@@ -210,17 +231,16 @@ impl FilesPanel {
 
     /// 单根时根隐式展开、不画根标题行；多根时每个根一行可收起的标题，子项缩进一级。
     fn file_tree(&self, panel_w: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
         let colors = RowColors {
-            muted: theme.muted_foreground,
-            fg: theme.foreground,
-            hover: theme.accent,
-            active_bg: theme.border,
-            accent: theme.primary,
+            muted: rgb(ui_theme::muted()).into(),
+            fg: rgb(ui_theme::text()).into(),
+            hover: ui_theme::row_hover().into(),
+            active_bg: ui_theme::row_selected().into(),
+            accent: rgb(ui_theme::ink()).into(),
         };
         let roots = self.tree_roots();
         if roots.is_empty() {
-            return placeholder_view("无项目目录", colors.muted).into_any_element();
+            return placeholder_view(&t!("tree.no_project"), colors.muted).into_any_element();
         }
         let runtime = self.tree_runtime();
         let cached = |root: &str| {
@@ -229,7 +249,7 @@ impl FilesPanel {
                 .is_some_and(|cache| cache.contains_key(root))
         };
         if roots.len() == 1 && !cached(&roots[0]) {
-            return placeholder_view("加载中…", colors.muted).into_any_element();
+            return placeholder_view(&t!("loading"), colors.muted).into_any_element();
         }
         let rows = Rc::new(self.tree_rows(cx));
         let row_h = px(file_tree_row_height(f32::from(window.rem_size())));
@@ -282,7 +302,7 @@ impl FilesPanel {
                 window.focus(&focus, cx);
             })
             .child(list)
-            .vertical_scrollbar(&self.tree_scroll)
+            .child(Scrollbar::vertical(&self.tree_scroll).id("file-tree-scrollbar"))
             .into_any_element()
     }
 
@@ -290,23 +310,21 @@ impl FilesPanel {
 
     /// 路径栏（有打开的文件时）和内容体。
     fn file_content_parts(&self, cx: &mut Context<Self>) -> (Option<AnyElement>, AnyElement) {
-        let muted = cx.theme().muted_foreground;
+        let muted: Hsla = rgb(ui_theme::muted()).into();
         match &self.open_file {
-            None => (None, placeholder_view("文件", muted).into_any_element()),
+            None => (
+                None,
+                placeholder_view(&t!("title"), muted).into_any_element(),
+            ),
             Some(of) => (Some(self.file_header(of, cx)), self.file_body(of, cx)),
         }
     }
 
     fn file_header(&self, of: &OpenFile, cx: &mut Context<Self>) -> AnyElement {
-        let (muted, fg, border, warning) = {
-            let theme = cx.theme();
-            (
-                theme.muted_foreground,
-                theme.foreground,
-                theme.border,
-                theme.warning,
-            )
-        };
+        let muted: Hsla = rgb(ui_theme::muted()).into();
+        let fg: Hsla = rgb(ui_theme::text()).into();
+        let border: Hsla = ui_theme::hair().into();
+        let warning: Hsla = rgb(ui_theme::need()).into();
         // 面包屑：项目名 > 中间目录 > 文件名。光看文件名分不清是哪个项目、哪层目录下的，
         // 多根时尤其如此。只有树那台机器上的文件对得上根。
         let roots = if of.runtime == self.tree_runtime() {
@@ -322,9 +340,10 @@ impl FilesPanel {
         let last = segs.len().saturating_sub(1);
         let on_tree_machine = of.runtime == self.tree_runtime();
         let view = cx.entity();
-        let breadcrumb = h_flex()
-            .id("file-breadcrumb")
+        let breadcrumb = div()
+            .flex()
             .items_center()
+            .id("file-breadcrumb")
             .gap_1()
             .min_w_0()
             .children(segs.iter().enumerate().flat_map(|(ix, seg)| {
@@ -340,11 +359,10 @@ impl FilesPanel {
                     .rounded_md()
                     .flex()
                     .items_center()
-                    .text_size(px(14.))
-                    .line_height(relative(1.2))
-                    .when(is_last, |el| el.text_color(fg).font_semibold())
+                    .type_style(TYPE.ui)
+                    .when(is_last, |el| el.text_color(fg).font_weight(TYPE.ui_medium.weight))
                     .when(!is_last, |el| el.text_color(muted))
-                    .hover(move |el| el.bg(border).text_color(fg))
+                    .hover(move |el| el.bg(ui_theme::row_hover()).text_color(fg))
                     .child(seg.label.clone())
                     // 别的机器上的文件在树里定位不到。
                     .when(on_tree_machine, |el| {
@@ -357,7 +375,7 @@ impl FilesPanel {
                 let sep = (!is_last).then(|| {
                     div()
                         .flex_shrink_0()
-                        .text_size(px(14.))
+                        .type_style(TYPE.ui)
                         .text_color(muted)
                         .child(">")
                 });
@@ -365,8 +383,7 @@ impl FilesPanel {
                     .chain(sep.map(IntoElement::into_any_element))
             }));
         let tree_open = self.tree_open;
-        h_flex()
-            .items_center()
+        div().flex().items_center()
             .justify_between()
             .gap_2()
             .px_3()
@@ -374,8 +391,7 @@ impl FilesPanel {
             .border_b_1()
             .border_color(border)
             .child(
-                h_flex()
-                    .items_center()
+                div().flex().items_center()
                     .gap_2()
                     .min_w_0()
                     .flex_1()
@@ -387,7 +403,7 @@ impl FilesPanel {
                     .children(
                         of.save_error
                             .clone()
-                            .map(|message| div().text_xs().text_color(warning).child(message)),
+                            .map(|message| div().type_style(TYPE.text_xsmall).text_color(warning).child(message)),
                     ),
             )
             // 浏览器只能打开这台电脑上的文件。
@@ -399,7 +415,7 @@ impl FilesPanel {
                             .quiet()
                             .small()
                             .flex_shrink_0()
-                            .label("浏览器打开")
+                            .label(t!("browser.open"))
                             .on_click(cx.listener(|this, _, _, cx| this.open_file_in_browser(cx))),
                     )
                 },
@@ -410,7 +426,11 @@ impl FilesPanel {
                         .quiet()
                         .small()
                         .flex_shrink_0()
-                        .label(if preview { "查看原始码" } else { "查看预览" })
+                        .label(if preview {
+                            t!("preview.show_source")
+                        } else {
+                            t!("preview.show_preview")
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.set_file_preview(!preview, window, cx)
                         })),
@@ -427,9 +447,9 @@ impl FilesPanel {
                         IconName::PanelLeft
                     })
                     .icon_action(if tree_open {
-                        "收起文件树"
+                        t!("tree.collapse")
                     } else {
-                        "展开文件树"
+                        t!("tree.expand")
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx))),
             )
@@ -437,7 +457,7 @@ impl FilesPanel {
     }
 
     fn file_body(&self, of: &OpenFile, cx: &mut Context<Self>) -> AnyElement {
-        let fg = cx.theme().foreground;
+        let fg: Hsla = rgb(ui_theme::text()).into();
         let preview = of.preview && PreviewKind::for_path(&of.path).is_some();
         // 图片过大、读不出来时没有字节，落到编辑器分支显示原因。
         if let Some(image) = of.image.as_ref() {
@@ -473,7 +493,7 @@ impl FilesPanel {
                 .overflow_x_scroll()
                 .overflow_y_scroll()
                 .p_3()
-                .child(div().text_sm().text_color(fg).child(
+                .child(div().type_style(TYPE.ui).text_color(fg).child(
                     smelt_plugin_api::ui::markdown_mermaid::markdown_view(
                         "md-preview-body",
                         of.preview_source.clone(),
@@ -485,32 +505,9 @@ impl FilesPanel {
             .flex_1()
             .min_h_0()
             .child(
-                // 菜单在编辑器自己的右键回调里建，那时编辑器正在 update：这里不能读它，
-                // 不然重入借用直接崩。剪切、复制、发送执行时各自判空。
-                gpui_component::input::Editor::new(&of.editor)
-                    .h_full()
-                    // 编辑器自带行号栏，去掉 Input 预设的横向内边距。
-                    .px_0()
-                    .context_menu(move |menu, _, cx| {
-                        let has_paste = cx.read_from_clipboard().is_some();
-                        menu.menu("剪切", Box::new(gpui_component::input::Cut))
-                            .menu("复制", Box::new(gpui_component::input::Copy))
-                            .menu_with_disabled(
-                                "粘贴",
-                                !has_paste,
-                                Box::new(gpui_component::input::Paste),
-                            )
-                            .separator()
-                            .menu("全选", Box::new(gpui_component::input::SelectAll))
-                            .separator()
-                            .menu(
-                                "发送选中内容到会话",
-                                Box::new(smelt_plugin_api::RunCommand::new(format!(
-                                    "{}/send-selection",
-                                    crate::OWNER
-                                ))),
-                            )
-                    }),
+                CodeEditor::new(&of.editor)
+                    .aria_label(of.path.clone())
+                    .context_menu(editor_menu_items(&of.editor, cx.entity().downgrade())),
             )
             .into_any_element()
     }
@@ -641,7 +638,7 @@ fn search_tree_rows(
                 .pl(px(8. + depth as f32 * 16.))
                 .pr_2()
                 .py(px(2.))
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(context.fg)
                 .child(
                     Icon::new(IconName::ChevronDown)
@@ -684,7 +681,7 @@ fn search_tree_rows(
                 .pl(px(8. + depth as f32 * 16. + 14.))
                 .pr_2()
                 .py(px(2.))
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(context.fg)
                 .hover(move |row| row.bg(hover))
                 .child(
@@ -766,7 +763,7 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
         .h(paint.row_h)
         .flex()
         .items_center()
-        .text_sm()
+        .type_style(TYPE.ui)
         // 点行也把焦点交给树，方向键接着用。
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             window.focus(&focus, cx);
@@ -777,7 +774,7 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
             .pl(px(8.0 + *depth as f32 * 14.0))
             .pr_2()
             .text_color(muted)
-            .child("加载中…")
+            .child(t!("loading").into_owned())
             .into_any_element(),
         FileTreeRow::RootHeader { path, open, pinned } => {
             let name = path
@@ -817,17 +814,15 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
             if !*pinned {
                 return header.into_any_element();
             }
-            header
-                .context_menu(move |menu, _, _| {
-                    let view = menu_view.clone();
-                    let root = menu_root.clone();
-                    menu.item(
-                        PopupMenuItem::new("从文件树移除").on_click(move |_, _, cx| {
-                            view.update(cx, |this, cx| this.unpin_root(&root, cx));
-                        }),
-                    )
-                })
-                .into_any_element()
+            let menu_id = (ElementId::from("root-menu"), path.clone());
+            MenuTrigger::context(menu_id, header, move |_, _| {
+                let view = menu_view.clone();
+                let root = menu_root.clone();
+                Menu::new().item(MenuItem::new(t!("pin.remove")).on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.unpin_root(&root, cx));
+                }))
+            })
+            .into_any_element()
         }
         FileTreeRow::Entry {
             depth,
@@ -859,7 +854,8 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
             let menu_path = path.clone();
             let is_dir = *is_dir;
             let local = paint.local;
-            base.gap_1()
+            let row = base
+                .gap_1()
                 .pl(indent)
                 .pr_2()
                 .overflow_hidden()
@@ -879,43 +875,6 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
                         }
                     });
                 })
-                .context_menu(move |menu, _, _| {
-                    let send = (menu_view.clone(), menu_path.clone());
-                    let copy = menu_path.clone();
-                    let finder = menu_path.clone();
-                    let delete = (menu_view.clone(), menu_path.clone());
-                    menu.item(PopupMenuItem::new("发送到会话").on_click(move |_, _, cx| {
-                        send.0
-                            .update(cx, |this, cx| this.send_path_to_session(&send.1, cx));
-                    }))
-                    .item(
-                        PopupMenuItem::new("复制文件路径").on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                        }),
-                    )
-                    .when(local, |menu| {
-                        menu.item(
-                            PopupMenuItem::new(if cfg!(target_os = "macos") {
-                                "在 Finder 中显示"
-                            } else {
-                                "在文件管理器中显示"
-                            })
-                            .on_click(move |_, _, _| FilesPanel::reveal_path_in_finder(&finder)),
-                        )
-                    })
-                    .item(
-                        PopupMenuItem::new(if is_dir {
-                            "删除文件夹"
-                        } else {
-                            "删除文件"
-                        })
-                        .on_click(move |_, window, cx| {
-                            delete.0.update(cx, |this, cx| {
-                                this.start_delete(delete.1.clone(), is_dir, window, cx)
-                            });
-                        }),
-                    )
-                })
                 .child(arrow)
                 .child(type_icon)
                 .child(
@@ -934,12 +893,53 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
                 .children(git_mark.map(|mark| {
                     div()
                         .flex_none()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_bold()
                         .text_color(git_mark_color(mark))
                         .child(mark.to_string())
-                }))
-                .into_any_element()
+                }));
+            let menu_id = (ElementId::from("file-menu"), path.clone());
+            MenuTrigger::context(menu_id, row, move |_, _| {
+                let send = (menu_view.clone(), menu_path.clone());
+                let copy = menu_path.clone();
+                let finder = menu_path.clone();
+                let delete = (menu_view.clone(), menu_path.clone());
+                let mut menu = Menu::new()
+                    .item(
+                        MenuItem::new(t!("send.path_menu")).on_click(move |_, _, cx| {
+                            send.0
+                                .update(cx, |this, cx| this.send_path_to_session(&send.1, cx));
+                        }),
+                    )
+                    .item(MenuItem::new(t!("copy_path")).on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                    }));
+                if local {
+                    menu = menu.item(
+                        MenuItem::new(if cfg!(target_os = "macos") {
+                            t!("reveal.finder")
+                        } else {
+                            t!("reveal.file_manager")
+                        })
+                        .on_click(move |_, _, _| FilesPanel::reveal_path_in_finder(&finder)),
+                    );
+                }
+                menu.separator().item(
+                    MenuItem::new(if is_dir {
+                        t!("delete.folder_menu")
+                    } else {
+                        t!("delete.file_menu")
+                    })
+                    .icon(smelt_plugin_api::ui::trash_icon())
+                    .danger()
+                    .on_click(move |_, window, cx| {
+                        delete.0.update(cx, |this, cx| {
+                            this.start_delete(delete.1.clone(), is_dir, window, cx)
+                        });
+                    }),
+                )
+            })
+            .into_any_element()
         }
     }
 }

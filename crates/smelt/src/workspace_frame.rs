@@ -1,23 +1,41 @@
-//! 工作区三栏共用的卡片框架与顶栏样式。
+//! 主窗口的框架：标题栏、窗口底、拖窗口区和宿主页的标题行。
 
 use gpui::*;
-use gpui_component::TitleBar;
+use smelt_ui::window_bar::{
+    Adapt, NATIVE_TITLEBAR, SafeArea, TOP_BAR_HEIGHT, TRAFFIC_LIGHTS_ORIGIN, TRAFFIC_LIGHTS_WIDTH,
+    WINDOW_CORNER_INSET, with_window_drag,
+};
 
-/// 工作区自绘顶栏与 gpui-component TitleBar 共用同一高度契约。
-pub(crate) const TOP_BAR_HEIGHT: Pixels = gpui_component::TITLE_BAR_HEIGHT;
-
-/// Windows 主窗口用系统标题栏：拖动、贴边分屏、最小化 / 最大化 / 关闭都交给系统。
-/// 透明标题栏下这些都得应用自己画，而 GPUI 在 Windows 上没有 `start_window_move`。
-/// 自绘顶栏照常留在系统标题栏下面，只是不再当拖动区，客户区里也没有交通灯。
-pub(crate) const NATIVE_TITLEBAR: bool = cfg!(windows);
-
-/// 客户区里有没有交通灯要让位。macOS 全屏时隐藏，用系统标题栏时根本不在客户区。
-pub(crate) fn traffic_lights_visible(window: &Window) -> bool {
-    !NATIVE_TITLEBAR && !window.is_fullscreen()
+/// 窗口自己占掉的角，跟着窗口进出全屏变。宿主控件（停靠区开合按钮）另算，见
+/// `workspace_shell::ShellView`。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct WindowCorners {
+    /// 客户区里红黄绿按钮要让的宽度。macOS 全屏时隐藏，用系统标题栏时根本不在客户区，都是 0。
+    pub(crate) lights: Pixels,
+    /// 下面两个角让给窗口圆角的宽高。只有 macOS 窗口化时有：全屏没有圆角；别的平台的圆角
+    /// 比标准边距还小，不用另让。
+    pub(crate) rounded: Pixels,
 }
 
-/// 主窗口透明标题栏配置。调用方传入内容外壳的顶部内边距，原生交通灯应跟随
-/// 自绘顶栏一起下移；横向位置维持 Smelt 左侧 18px 的视觉基准。
+impl WindowCorners {
+    pub(crate) fn of(window: &Window) -> Self {
+        let windowed = !window.is_fullscreen();
+        Self {
+            lights: if !NATIVE_TITLEBAR && windowed {
+                TRAFFIC_LIGHTS_WIDTH
+            } else {
+                px(0.)
+            },
+            rounded: if cfg!(target_os = "macos") && windowed {
+                WINDOW_CORNER_INSET
+            } else {
+                px(0.)
+            },
+        }
+    }
+}
+
+/// 主窗口透明标题栏配置。调用方传入内容外壳的顶部内边距，原生交通灯跟着自绘顶栏一起下移。
 /// 用系统标题栏的平台只给窗口标题。
 pub(crate) fn titlebar_options(shell_padding: Pixels) -> TitlebarOptions {
     if NATIVE_TITLEBAR {
@@ -27,95 +45,33 @@ pub(crate) fn titlebar_options(shell_padding: Pixels) -> TitlebarOptions {
             traffic_light_position: None,
         };
     }
-    let mut options = TitleBar::title_bar_options();
-    if let Some(position) = options.traffic_light_position.as_mut() {
-        position.x = px(18.);
-        position.y += shell_padding;
+    TitlebarOptions {
+        title: None,
+        appears_transparent: true,
+        traffic_light_position: Some(point(
+            TRAFFIC_LIGHTS_ORIGIN.x,
+            TRAFFIC_LIGHTS_ORIGIN.y + shell_padding,
+        )),
     }
-    options
 }
 
 /// 主工作台的窗口选项。顶栏是自绘的：空白处拖动、双击缩放都由
-/// [`with_window_drag`] 交给 `start_window_move` / `titlebar_double_click`。
+/// `smelt_ui::window_bar::with_window_drag` 交给 `start_window_move` / `titlebar_double_click`。
 ///
 /// `app_owns_titlebar_drag` 必须一起打开。否则 AppKit 仍把这 34px 当成系统
 /// 标题栏，macOS 27 会把单击扣住等双击判定，页签和顶栏按钮经常点不下去。
 /// 设置、会话追踪用系统标题栏，继续让 AppKit 拖，不要套这份选项。
-pub(crate) fn workspace_window_options(
-    shell_padding: Pixels,
-    material: crate::window_backdrop::WindowMaterial,
-) -> WindowOptions {
+pub(crate) fn workspace_window_options(shell_padding: Pixels) -> WindowOptions {
     WindowOptions {
         titlebar: Some(titlebar_options(shell_padding)),
-        window_background: crate::window_backdrop::window_background(material),
+        window_background: crate::window_backdrop::window_background(),
         app_owns_titlebar_drag: !NATIVE_TITLEBAR,
         ..Default::default()
     }
 }
 
-/// 会话栏、舞台和工具栏共用的外壳。Grok Bot 分栏是贴边矩形，不是浮在壳里的圆角卡。
-pub(crate) fn card(surface: Hsla) -> Div {
-    div()
-        .size_full()
-        .flex()
-        .relative()
-        .overflow_hidden()
-        .bg(surface)
-}
-
-/// 整扇窗口的底：有窗口材质（`window_backdrop`）时什么都不铺，毛玻璃就是底；没有时铺一层
-/// `bg`。全窗口只有这一处管底，页签栏和各个视图（自带的、插件的）都不铺页面底，铺了就把
-/// 材质盖住。
-pub(crate) fn window_surface() -> Hsla {
-    if crate::window_backdrop::available() {
-        gpui::transparent_black()
-    } else {
-        rgb(crate::ui_theme::bg()).into()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TitlebarMouseAction {
-    MoveWindow,
-    DoubleClick,
-}
-
-fn titlebar_mouse_action(click_count: usize) -> TitlebarMouseAction {
-    if click_count == 2 {
-        TitlebarMouseAction::DoubleClick
-    } else {
-        TitlebarMouseAction::MoveWindow
-    }
-}
-
-fn titlebar_mouse_down(event: &MouseDownEvent, window: &mut Window, cx: &mut App) {
-    // 拖窗口的那一下停在标题区。胶囊和侧栏安全条都浮在内容上，不能再落到终端或消息。
-    cx.stop_propagation();
-    // 按在顶栏里的控件上：按钮按下时、可聚焦的元素拿焦点时都会 `prevent_default`，子元素
-    // 先收到这一下。这时不拖窗口：一进 AppKit 的拖动循环，松手就到不了控件，点不下去。
-    if window.default_prevented() {
-        return;
-    }
-    match titlebar_mouse_action(event.click_count) {
-        TitlebarMouseAction::MoveWindow => window.start_window_move(),
-        TitlebarMouseAction::DoubleClick => window.titlebar_double_click(),
-    }
-}
-
-/// 卡片头和标题胶囊共用的拖窗口。单击移动，双击缩放，并拦住这一下。
-///
-/// 用系统标题栏时原样返回：拖动归系统标题栏。Windows 会把客户区里的 `Drag` 区域
-/// 当成标题栏，叠在上面的按钮反而点不到。
-pub(crate) fn with_window_drag<E: InteractiveElement>(el: E) -> E {
-    if NATIVE_TITLEBAR {
-        return el;
-    }
-    el.window_control_area(WindowControlArea::Drag)
-        .on_mouse_down(MouseButton::Left, titlebar_mouse_down)
-}
-
 /// 整扇窗口的背景图层（挂在窗口根上，见 `Workspace::render`）：铺满容器，按比例裁切。
-/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，底下的材质（没材质时是 `bg`）透出。
+/// `opacity` 是图片的不透明度——图片做低透明度装饰层，叠在窗口底（`window_backdrop::paint`）上。
 /// 透明度为 0 时不读文件。栅格图只画降采样预览，不把原图交给 `img()`。
 pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div {
     let layer = div().absolute().inset_0();
@@ -139,62 +95,50 @@ pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div 
 /// 它就是 [`TOP_BAR_HEIGHT`] 高的标题栏，放不下按钮和分段控件，那些放进页面自己的工具行
 /// （`smelt_ui::page_toolbar`）。
 ///
-/// `left_guard` 见 `Workspace::chrome_left_guard_of`。贴着窗口顶（`Some`）时和红黄绿按钮、
-/// 侧栏顶上那条同一行，左侧让出给的宽度，空白处拖窗口；在标签条下面（`None`）时顶上那条
-/// 归标签条，这里只是一条常规内边距的头。底边是发丝。
-pub(crate) fn page_chrome(left_guard: Option<Pixels>, right_inset: Pixels) -> Div {
+/// `area` 是这个视图的 safe area（`smelt_plugin_api::safe_area`）。顶上是标题栏时两头给角上的
+/// 控件让位，空白处拖窗口；不是（在标签条下面）时顶上那条归标签条，这里只是一条常规内边距的
+/// 头。底边是发丝。
+pub(crate) fn page_chrome(area: &SafeArea) -> Div {
+    let insets = area.top_row().insets(Adapt::Horizontal);
     let header = div()
         .w_full()
         .flex_shrink_0()
-        .pl(px(20.))
-        .pr(right_inset + px(20.))
+        .pl(insets.left + px(20.))
+        .pr(insets.right + px(20.))
         .border_b_1()
         .border_color(crate::ui_theme::hair())
         .flex()
         .items_center();
-    match left_guard {
-        Some(left) => with_window_drag(header.min_h(TOP_BAR_HEIGHT).pl(left + px(20.))),
-        None => header.py(px(8.)),
+    if area.title_bar {
+        with_window_drag(header.min_h(TOP_BAR_HEIGHT))
+    } else {
+        header.py(px(8.))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TitlebarMouseAction, titlebar_mouse_action, workspace_window_options};
+    use super::workspace_window_options;
     use gpui::px;
-
-    #[test]
-    fn plain_titlebar_region_moves_or_double_clicks() {
-        assert_eq!(titlebar_mouse_action(1), TitlebarMouseAction::MoveWindow);
-        assert_eq!(titlebar_mouse_action(2), TitlebarMouseAction::DoubleClick);
-    }
 
     #[cfg(not(windows))]
     #[test]
-    fn native_traffic_lights_follow_the_shared_titlebar_geometry() {
-        use super::titlebar_options;
-        use gpui_component::TitleBar;
+    fn native_traffic_lights_follow_the_top_bar() {
+        use super::{TRAFFIC_LIGHTS_ORIGIN, titlebar_options};
 
-        let component_position = TitleBar::title_bar_options()
-            .traffic_light_position
-            .expect("gpui-component 的 macOS TitleBar 应声明交通灯位置");
-
-        let flush_position = titlebar_options(px(0.))
+        let flush = titlebar_options(px(0.))
             .traffic_light_position
             .expect("Smelt 透明标题栏应声明交通灯位置");
-        assert_eq!(flush_position.x, px(18.));
-        assert_eq!(
-            flush_position.y, component_position.y,
-            "内容贴顶时必须复用与 34px TitleBar 匹配的原生纵向位置"
-        );
+        assert_eq!(flush, TRAFFIC_LIGHTS_ORIGIN, "内容贴顶时交通灯在顶栏里居中");
 
         let inset = px(10.);
-        let inset_position = titlebar_options(inset)
+        let moved = titlebar_options(inset)
             .traffic_light_position
             .expect("Smelt 透明标题栏应声明交通灯位置");
+        assert_eq!(moved.x, TRAFFIC_LIGHTS_ORIGIN.x);
         assert_eq!(
-            inset_position.y,
-            component_position.y + inset,
+            moved.y,
+            TRAFFIC_LIGHTS_ORIGIN.y + inset,
             "外壳顶部内边距变化时，交通灯必须随自绘顶栏一起移动"
         );
     }
@@ -202,10 +146,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_uses_the_system_titlebar() {
-        let options = workspace_window_options(
-            px(0.),
-            crate::window_backdrop::WindowMaterial::platform_default(),
-        );
+        let options = workspace_window_options(px(0.));
         assert!(!options.app_owns_titlebar_drag, "拖动归系统标题栏");
         let titlebar = options.titlebar.expect("主窗口要给系统标题栏一个标题");
         assert!(
@@ -217,10 +158,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn self_drawn_titlebar_owns_its_drag() {
-        let options = workspace_window_options(
-            px(0.),
-            crate::window_backdrop::WindowMaterial::platform_default(),
-        );
+        let options = workspace_window_options(px(0.));
         assert!(
             options.app_owns_titlebar_drag,
             "自绘顶栏必须声明应用拥有拖动，否则 AppKit 扣住标题栏里的单击"

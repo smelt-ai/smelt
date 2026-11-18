@@ -11,7 +11,7 @@ use smelt_core::workspace_catalog::{self, DirectoryChange, DirectoryError};
 use smelt_core::workspace_directory::{
     WorkspaceConversation, WorkspaceDirectory, WorkspaceRenameParams, WorkspaceRevision,
 };
-use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlReason};
 use smelt_store::Store;
 
 use super::{AcpSessions, EventHubHandle, Sessions, dlog};
@@ -32,7 +32,9 @@ impl WorkspaceDirectoryReader {
 
     /// 守护还没起好（没有服务状态）时用：读不到目录。
     pub(crate) fn unavailable() -> Self {
-        Self(Arc::new(|| Err("工作区目录还没就绪".to_string())))
+        Self(Arc::new(|| {
+            Err("The workspace directory isn't ready yet".to_string())
+        }))
     }
 
     #[cfg(test)]
@@ -78,14 +80,45 @@ pub(crate) fn create_conversation(
     Ok(publish(&change, event_hub))
 }
 
+/// 改一条对话。终端格从对话里拿掉就是不要它了：先收掉那几格的进程再改目录，和
+/// [`delete_conversation`] 一样收不掉就报错、目录不动。调用方只管改目录，不另发结束会话。
 pub(crate) fn update_conversation(
     store: &Store,
     conversation: &WorkspaceConversation,
+    sessions: &Sessions,
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceRevision, ControlError> {
+    let directory = workspace_catalog::directory_on(store).map_err(control_error)?;
+    if let Some(before) = directory
+        .conversations
+        .iter()
+        .find(|existing| existing.id == conversation.id)
+    {
+        for removed in removed_terminals(before, conversation) {
+            super::kill_terminal_session(removed, sessions, event_hub)
+                .map_err(|message| ControlError::new(ControlErrorCode::OperationFailed, message))?;
+        }
+    }
     let change =
         workspace_catalog::update_conversation_on(store, conversation).map_err(control_error)?;
     Ok(publish(&change, event_hub))
+}
+
+/// `before` 里有、`after` 里没有的终端会话 id。
+fn removed_terminals<'a>(
+    before: &'a WorkspaceConversation,
+    after: &WorkspaceConversation,
+) -> impl Iterator<Item = &'a str> {
+    let kept: Vec<&str> = after
+        .terminals
+        .iter()
+        .filter_map(|terminal| terminal.id.as_deref())
+        .collect();
+    before
+        .terminals
+        .iter()
+        .filter_map(|terminal| terminal.id.as_deref())
+        .filter(move |id| !kept.contains(id))
 }
 
 /// 先收会话再删目录：收不掉（provider 没能退出）就报错、目录留着，用户还能再关一次。
@@ -164,16 +197,18 @@ pub(crate) fn archive_conversation(
         .conversations
         .iter()
         .find(|c| c.id == id)
-        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "对话不存在"))?;
+        .ok_or_else(|| {
+            ControlError::because(ControlErrorCode::NotFound, ControlReason::ConversationGone)
+        })?;
     if archived {
         if conversation.acp.as_ref().is_some_and(|acp| {
             is_background_acp_session_id(&acp.sid)
                 || automations.lock().unwrap().is_run_session(&acp.sid)
                 || acp.automation_id.is_some()
         }) {
-            return Err(ControlError::new(
+            return Err(ControlError::because(
                 ControlErrorCode::FailedPrecondition,
-                "自动化运行的会话由运行时管理，不能归档",
+                ControlReason::AutomationSessionNotArchivable,
             ));
         }
         for terminal in conversation
@@ -191,17 +226,6 @@ pub(crate) fn archive_conversation(
     }
     let change =
         workspace_catalog::archive_conversation_on(store, id, archived).map_err(control_error)?;
-    Ok(publish(&change, event_hub))
-}
-
-pub(crate) fn pin_conversation(
-    store: &Store,
-    id: &str,
-    pinned: bool,
-    event_hub: &EventHubHandle,
-) -> Result<WorkspaceRevision, ControlError> {
-    let change =
-        workspace_catalog::pin_conversation_on(store, id.trim(), pinned).map_err(control_error)?;
     Ok(publish(&change, event_hub))
 }
 
@@ -233,29 +257,15 @@ pub(crate) fn enter_conversation(
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceConversation, ControlError> {
     let directory = workspace_catalog::directory_on(store).map_err(control_error)?;
-    let session_ids = session_ids(&conversation);
-    if let Some(existing) = directory
-        .conversations
-        .into_iter()
-        .find(|existing| session_ids_of(existing).any(|id| session_ids.contains(&id)))
-    {
+    if let Some(existing) = directory.conversations.into_iter().find(|existing| {
+        existing
+            .session_ids()
+            .any(|id| conversation.session_ids().any(|own| own == id))
+    }) {
         return Ok(existing);
     }
     create_conversation(store, &conversation, event_hub)?;
     Ok(conversation)
-}
-
-fn session_ids(conversation: &WorkspaceConversation) -> Vec<String> {
-    session_ids_of(conversation).collect()
-}
-
-fn session_ids_of(conversation: &WorkspaceConversation) -> impl Iterator<Item = String> + '_ {
-    conversation.acp.iter().map(|acp| acp.sid.clone()).chain(
-        conversation
-            .terminals
-            .iter()
-            .filter_map(|terminal| terminal.id.clone()),
-    )
 }
 
 /// `session.delete` 删掉的会话从目录里摘掉，改了就推（见 [`workspace_catalog::forget_session_on`]）。
@@ -333,6 +343,24 @@ pub(crate) fn remember_acp_session_title(
             publish(&change, event_hub);
         }
         Err(error) => dlog(&format!("记下对话 {sid} 的标题失败：{}", error.message)),
+    }
+}
+
+/// 在跑着的 ACP 会话里，冷启动续上要用的状态变了（选了配置、预设或首条消息发出去、
+/// 回合结束）：写进目录，改了就推。这些在新建之后只由守护写，客户端不再回写。
+pub(crate) fn remember_acp_live(
+    sid: &str,
+    change: smelt_store::AcpLiveChange<'_>,
+    event_hub: &EventHubHandle,
+) {
+    let result = default_store().and_then(|store| {
+        workspace_catalog::update_acp_live_on(&store, sid, change).map_err(control_error)
+    });
+    match result {
+        Ok(change) => {
+            publish(&change, event_hub);
+        }
+        Err(error) => dlog(&format!("记下对话 {sid} 的在跑状态失败：{}", error.message)),
     }
 }
 

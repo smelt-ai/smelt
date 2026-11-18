@@ -14,7 +14,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use image::{DynamicImage, GenericImageView as _, ImageFormat};
 use smelt_core::control_api::{ConversationImageParams, ConversationImageResult};
-use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlReason};
 
 use super::{AcpSessions, EventHubHandle};
 use crate::acp_host::{HistoryReadError, read_history_page};
@@ -48,10 +48,7 @@ pub(crate) fn conversation_image(
 }
 
 fn image_gone() -> ControlError {
-    ControlError::new(
-        ControlErrorCode::NotFound,
-        "这张图已不在对话里（条目被回退或压缩改写过）",
-    )
+    ControlError::because(ControlErrorCode::NotFound, ControlReason::ImageGone)
 }
 
 /// 在第 `entry` 条（全局下标）的图片里找摘要对得上的那张。
@@ -73,7 +70,7 @@ fn find_image(
     )
     .map_err(|error| match error {
         HistoryReadError::SessionMissing => {
-            ControlError::new(ControlErrorCode::NotFound, "对话不存在或已结束")
+            ControlError::because(ControlErrorCode::NotFound, ControlReason::ConversationGone)
         }
         HistoryReadError::Failed(error) => {
             ControlError::new(ControlErrorCode::OperationFailed, error)
@@ -111,9 +108,11 @@ fn render(
     }
     let rendered = match max_edge {
         Some(edge) => thumbnail(&original.data_b64, edge).ok_or_else(|| {
-            ControlError::new(
+            ControlError::because(
                 ControlErrorCode::OperationFailed,
-                format!("{} 解不开，出不了缩略图", original.mime),
+                ControlReason::ImageUndecodable {
+                    mime: original.mime.clone(),
+                },
             )
         })?,
         // 解不开的格式（比如 HEIC）原样给，客户端也许自己会解。

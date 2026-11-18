@@ -473,7 +473,7 @@ fn replay_commit_marks_a_trailing_open_turn_interrupted() {
             assert_eq!(*status, ToolCallStatus::Failed);
             assert!(output.iter().any(|part| matches!(
                 part,
-                ToolOutputPart::Text(text) if text.contains("中断")
+                ToolOutputPart::Text(text) if text.contains("Interrupted")
             )));
         }
         other => panic!("未完成工具应留在末尾，实际 {other:?}"),
@@ -687,7 +687,7 @@ fn ready_fresh_replaces_id_and_preserves_legacy_history_with_divider() {
     assert!(s.status_line.is_none());
     assert_eq!(s.entries.len(), 2);
     assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old"));
-    assert!(matches!(s.entries[1], AcpEntry::Divider(_)));
+    assert!(matches!(s.entries[1], AcpEntry::NewSession { .. }));
 }
 
 #[test]
@@ -1181,10 +1181,10 @@ fn missing_turn_outcome_is_not_success() {
     assert!(!AcpTurnOutcome::Refused.is_success());
     assert!(!AcpTurnOutcome::Interrupted.is_success());
     assert_eq!(
-        AcpTurnOutcome::Interrupted.failure_message(),
-        Some("本轮回复已中断，重启后可继续")
+        AcpTurnOutcome::Interrupted.failure(),
+        Some(TurnFailure::Interrupted)
     );
-    assert_eq!(AcpTurnOutcome::Cancelled.failure_message(), None);
+    assert_eq!(AcpTurnOutcome::Cancelled.failure(), None);
 }
 
 #[test]
@@ -1398,7 +1398,7 @@ fn cancelled_turn_finishes_its_unfinished_tools() {
             status: ToolCallStatus::Failed,
             output,
             ..
-        } if matches!(output.last(), Some(ToolOutputPart::Text(text)) if text == "已因用户停止而取消")
+        } if matches!(output.last(), Some(ToolOutputPart::Text(text)) if text == "Cancelled because the turn was stopped")
     ));
 }
 
@@ -1667,7 +1667,7 @@ fn a_bare_permission_names_its_target_from_the_earlier_tool_call() {
     assert_eq!(s.permissions.len(), 1);
     assert_eq!(
         s.permissions[0].question,
-        "Fetch URL：https://example.com/docs"
+        "Fetch URL: https://example.com/docs"
     );
 }
 
@@ -1923,20 +1923,33 @@ fn notice_is_not_startup_status_and_clears_when_the_user_starts_a_turn() {
     s.phase = DaemonPhase::Idle;
     let outcome = apply_event(
         &mut s,
-        ConversationEvent::Notice("压缩上下文失败：busy".into()),
+        ConversationEvent::RuntimeNotice(RuntimeNote::CompactFailed {
+            detail: "busy".into(),
+        }),
     );
     assert!(outcome.envelope_changed, "提示在信封里，这一帧必须带上");
     let snap = s.to_snapshot(false);
     assert_eq!(snap.status_line, None);
     let first = snap.notice.expect("提示要进快照");
-    assert_eq!(first.text, "压缩上下文失败：busy");
+    assert_eq!(
+        first.note,
+        Some(RuntimeNote::CompactFailed {
+            detail: "busy".into()
+        })
+    );
+    assert_eq!(
+        first.text, "Couldn't compact the context: busy",
+        "旧客户端读 text，运行时按英文写兜底"
+    );
 
+    // 智能体自己的原话没有种类，原样显示。
     apply_event(
         &mut s,
-        ConversationEvent::Notice("Pi Extension：boom".into()),
+        ConversationEvent::Notice("MCP servers need attention".into()),
     );
     let second = s.notice.clone().unwrap();
-    assert_eq!(second.text, "Pi Extension：boom");
+    assert_eq!(second.note, None);
+    assert_eq!(second.display_text(), "MCP servers need attention");
     assert!(
         second.id > first.id,
         "客户端关掉旧提示不能连新提示一起藏起来"
@@ -1952,7 +1965,9 @@ fn notice_is_not_startup_status_and_clears_when_the_user_starts_a_turn() {
 
     apply_event(
         &mut s,
-        ConversationEvent::Notice("停止后台任务失败：gone".into()),
+        ConversationEvent::RuntimeNotice(RuntimeNote::StopTaskFailed {
+            detail: "gone".into(),
+        }),
     );
     reset_for_restart(&mut s);
     assert_eq!(s.notice, None);
@@ -1970,7 +1985,7 @@ fn hosted_mirror_keeps_queue_and_notice_through_envelope_omitted_frames() {
     }];
     apply_event(
         &mut host,
-        ConversationEvent::Notice("插入消息失败：x".into()),
+        ConversationEvent::RuntimeNotice(RuntimeNote::SteerFailed { detail: "x".into() }),
     );
 
     let mut mirror = fresh_state();
@@ -2234,8 +2249,8 @@ fn background_notice_is_a_status_line_and_not_a_user_turn() {
     match state.entries.last() {
         Some(AcpEntry::TaskNote(saved)) => {
             assert_eq!(saved, &note);
-            assert!(saved.summary().contains("退出码 1"));
-            assert!(saved.summary().contains("失败"));
+            assert!(saved.summary().contains("exit code 1"));
+            assert!(saved.summary().contains("failed"));
         }
         other => panic!("结束说明必须是状态行，不能是用户气泡：{other:?}"),
     }
@@ -2269,17 +2284,17 @@ fn turn_failed_keeps_session_alive_and_shows_reason() {
     assert_eq!(s.turn_outcome, Some(AcpTurnOutcome::Failed));
     let last = s.entries.last().expect("失败原因必须留在消息流里");
     match last {
-        AcpEntry::Assistant { text, thought } => {
-            assert!(!thought, "失败原因不能藏进思考块（默认折叠就等于没显示）");
-            assert!(
-                text.contains("no API key"),
-                "错误原文必须原样带给用户：{text}"
+        // 单独一条：不能藏进思考块（默认折叠就等于没显示），也不能混进助手的回答。
+        AcpEntry::TurnFailed { detail, .. } => {
+            assert_eq!(
+                detail, "llm-deepseek: no API key",
+                "错误原文必须原样带给用户"
             );
         }
         other => panic!("失败原因没落进消息流：{other:?}"),
     }
     // 失败要能作为提醒冒出来，不能静默。
-    assert!(s.turn_outcome.unwrap().failure_message().is_some());
+    assert!(s.turn_outcome.unwrap().failure().is_some());
 }
 
 /// 失败的回合不能把「等回合结束」的闸门永久卡住——下一条 prompt 要能发。
@@ -2331,6 +2346,21 @@ fn fatal_ends_session_and_keeps_reason() {
     assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old"));
     assert_eq!(s.phase, DaemonPhase::Dead);
     assert_eq!(s.end_reason, message);
+    assert_eq!(s.end_kind, AcpEndKind::ProviderFailed);
+    assert_eq!(s.end_code, None, "连接自己报的错没有种类，原话就是原因");
+}
+
+/// 驱动线程 panic：原因归「驱动异常退出」，panic 原话当细节。
+#[test]
+fn driver_crash_ends_with_its_reason() {
+    let mut s = fresh_state();
+    apply_event(
+        &mut s,
+        ConversationEvent::DriverCrashed("index out of bounds".into()),
+    );
+    assert_eq!(s.phase, DaemonPhase::Dead);
+    assert_eq!(s.end_code, Some(ConversationEndReason::DriverCrashed));
+    assert_eq!(s.end_reason, "index out of bounds");
     assert_eq!(s.end_kind, AcpEndKind::ProviderFailed);
 }
 
@@ -2409,7 +2439,8 @@ fn history_missing_marks_restore_failure_without_erasing_identity() {
 
     assert_eq!(s.history_session_id.as_deref(), Some("missing-history"));
     assert_eq!(s.phase, DaemonPhase::Dead);
-    assert_eq!(s.end_reason, "旧会话记录不存在，无法恢复");
+    assert_eq!(s.end_code, Some(ConversationEndReason::HistoryMissing));
+    assert_eq!(s.end_reason, "");
 }
 
 #[test]
@@ -2788,7 +2819,7 @@ fn recovered_elicitation_answer_appends_custom_text() {
     });
     assert_eq!(
         recovered_elicitation_answer(&s),
-        Some("A、外加一句".to_string())
+        Some("A, 外加一句".to_string())
     );
     // 只写自定义答案、不点选项：回答就是那段自定义文本。
     s.elicitation.as_mut().unwrap().chosen.clear();
@@ -2863,7 +2894,7 @@ fn unfinished_multiselect_ask_user_question_joins_chosen_labels() {
     assert!(!choose_elicitation(&mut state, 0, 1));
     assert_eq!(
         recovered_elicitation_answer(&state).as_deref(),
-        Some("Gitea Issue、Bark")
+        Some("Gitea Issue, Bark")
     );
 }
 
@@ -3124,25 +3155,26 @@ fn provider_gone_mid_compaction_stops_compacting() {
 fn config_rejection_is_a_kinded_notice_not_a_status() {
     let mut s = fresh_state();
     s.phase = DaemonPhase::Idle;
-    apply_event(
-        &mut s,
-        ConversationEvent::ConfigRejected("更新会话配置失败：timeout".into()),
-    );
+    let rejected = || {
+        ConversationEvent::ConfigRejected(RuntimeNote::ConfigUpdateFailed {
+            detail: "timeout".into(),
+        })
+    };
+    apply_event(&mut s, rejected());
     assert_eq!(s.status_line, None);
     let first = s.notice.clone().expect("失败要进提示");
     assert_eq!(first.kind, AcpNoticeKind::ConfigRejected);
-    assert_eq!(first.text, "更新会话配置失败：timeout");
+    assert_eq!(first.text, "Couldn't update the session setting: timeout");
 
-    apply_event(
-        &mut s,
-        ConversationEvent::ConfigRejected("更新会话配置失败：timeout".into()),
-    );
+    apply_event(&mut s, rejected());
     let second = s.notice.clone().unwrap();
     assert!(second.id > first.id);
 
     apply_event(
         &mut s,
-        ConversationEvent::Notice("Pi Extension：boom".into()),
+        ConversationEvent::RuntimeNotice(RuntimeNote::ExtensionFailed {
+            detail: "boom".into(),
+        }),
     );
     assert_eq!(s.notice.unwrap().kind, AcpNoticeKind::Info);
 }

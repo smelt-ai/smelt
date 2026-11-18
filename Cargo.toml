@@ -30,19 +30,29 @@ members = [
     "crates/smelt-git",
     "crates/smeltd",
     "crates/smelt-ui",
-    "crates/smelt-app-state",
-    "crates/smelt-acp-view",
     "crates/smelt-plugin-api",
     "crates/plugins/agents",
+    "crates/plugins/archive",
     "crates/plugins/automations",
+    "crates/plugins/buddies",
     "crates/plugins/capabilities",
+    "crates/plugins/conversation",
+    "crates/plugins/desktop",
     "crates/plugins/files",
     "crates/plugins/git",
     "crates/plugins/history",
+    "crates/plugins/ide",
+    "crates/plugins/language",
+    "crates/plugins/launcher",
     "crates/plugins/layouts",
+    "crates/plugins/machines",
+    "crates/plugins/maintenance",
     "crates/plugins/notifications",
     "crates/plugins/resources",
+    "crates/plugins/sessions",
+    "crates/plugins/terminal",
     "crates/plugins/themes",
+    "crates/plugins/updater",
     "crates/smelt",
     "crates/smelt-iroh",
     "crates/smelt-mobile", # package 名是 smelt_mobile（cargokit 要求，见其 Cargo.toml）
@@ -65,6 +75,8 @@ publish = false
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
+# 界面文案（docs/i18n.md）：插件、组件库、宿主各自带 locales/ui.yml。和 gpui-kit 同一套。
+rust-i18n = "4.2"
 
 [patch.crates-io]
 # gpui-kit 0.8.1（611b55e331170ca375214d580b6c5409db858f83）起，gpui-shell 直接依赖
@@ -90,10 +102,6 @@ redundant_clone = "warn"
 # 正确性闸门：空 dbg/todo 不应进主线。存量 style 警告不在这里 deny，避免一次清不完。
 dbg_macro = "deny"
 todo = "deny"
-# 手型光标只留给链接。路径是 gpui-pre 0.3.11 里 `Styled` 上由
-# `cursor_style_methods!` 生成的方法（`gpui/src/styled.rs`，模块 `gpui::styled`）。
-# macOS CI 不跑 clippy，真正挡住调用点的是 scripts/lint-pointer.sh。
-disallowed_methods = "deny"
 
 # proc-macro 和 build script 只在构建机上用，不发布，不用 strip。
 # rustc 1.97 在 macOS 上用 `rust-objcopy --strip-debug` 实现默认的 strip=debuginfo，处理后的

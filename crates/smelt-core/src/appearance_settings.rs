@@ -34,7 +34,9 @@ fn reject_mixed_patch(patch: &SettingsPatch) -> Result<(), SettingsError> {
         .keys()
         .any(|key| !crate::memory_settings::is_memory_key(key));
     if has_memory && has_other {
-        return Err(SettingsError::Invalid("外观和记忆设置请分两次提交".into()));
+        return Err(SettingsError::Invalid(
+            "Submit appearance and memory settings separately".into(),
+        ));
     }
     Ok(())
 }
@@ -49,7 +51,9 @@ type SplitPatch = (
 /// 打不开报成别的错。
 fn check_patch(patch: SettingsPatch) -> Result<SplitPatch, SettingsError> {
     if patch.settings.is_empty() {
-        return Err(SettingsError::Invalid("没有要更新的设置".into()));
+        return Err(SettingsError::Invalid(
+            "There are no settings to update".into(),
+        ));
     }
     reject_mixed_patch(&patch)?;
     let (memory, appearance): SplitPatch = patch
@@ -141,7 +145,9 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(matches!(error, SettingsError::Invalid(ref message) if message.contains("分两次")));
+        assert!(
+            matches!(error, SettingsError::Invalid(ref message) if message.contains("separately"))
+        );
         assert_eq!(
             get_settings_on(&store).unwrap().settings[crate::memory_settings::EMBEDDING_MODEL],
             ""
@@ -162,7 +168,9 @@ mod tests {
             ]),
         })
         .unwrap_err();
-        assert!(matches!(error, SettingsError::Invalid(ref message) if message.contains("分两次")));
+        assert!(
+            matches!(error, SettingsError::Invalid(ref message) if message.contains("separately"))
+        );
     }
 
     /// 外观形状不对同样在开库之前报出来，不被库打不开盖住。
@@ -173,7 +181,7 @@ mod tests {
         })
         .unwrap_err();
         assert!(
-            matches!(error, SettingsError::Invalid(ref message) if message.contains("dark 或 light")),
+            matches!(error, SettingsError::Invalid(ref message) if message.contains("dark or light")),
             "{error:?}"
         );
     }

@@ -1,0 +1,7 @@
+本目录下的差异视图移植自 GPUI Kit
+（https://github.com/longbridge/gpui-kit，crates/component/src/diff/），
+改成读 smelt 的主题、用 smelt-ui 的语法高亮和按钮，文案改为中文。
+
+Copyright 2024 - 2026 Longbridge <https://longbridge.com>
+Licensed under the Apache License, Version 2.0.
+http://www.apache.org/licenses/LICENSE-2.0

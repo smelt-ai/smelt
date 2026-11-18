@@ -1024,6 +1024,7 @@ fn push_on() -> Desired {
         success: true,
         payload_version: smelt_model::remote_config::PUSH_PAYLOAD_VERSION,
         message: true,
+        locale: None,
     })
 }
 

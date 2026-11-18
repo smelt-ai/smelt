@@ -11,15 +11,16 @@
 //! 选中底上，要换成按选中底配过的那档，不然选中的那行反而最难读。名字不要再按选中、悬停
 //! 换字色。
 //!
-//! 不套 gpui-component 的 `ListItem`：它自带内边距、字号和勾选槽，悬停/选中直接铺主题
+//! 不套组件库的 `ListItem`：它自带内边距、字号和勾选槽，悬停/选中直接铺主题
 //! 的 `list_hover` / `list_active` 实色，压在毛玻璃上不透，也不按材质保底。
 
 use gpui::{
     AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
-    RenderOnce, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
+    RenderOnce, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px,
 };
-use gpui_component::{Disableable, Selectable, StyledExt as _};
+use gpui_base::{Disableable, Selectable, StyledExt as _};
 
+use crate::kit::RADIUS;
 use crate::ui_theme;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -119,6 +120,7 @@ impl RenderOnce for ListRow {
         // 调用点在行上写的字色盖得过它。最后盖箭头，调用点写了别的光标画出来也是箭头。
         let row = base
             .text_color(gpui::rgb(ui_theme::text()))
+            .rounded(px(RADIUS.md))
             .refine_style(&style)
             .cursor_default();
         // 选中只换底。字重留给调用点加在名字上，免得时间这类附属信息也跟着加粗。
@@ -126,7 +128,12 @@ impl RenderOnce for ListRow {
         let row = if disabled || selected {
             row
         } else {
-            row.hover(move |row| row.bg(hover))
+            let row = row.hover(move |row| row.bg(hover));
+            if on_click.is_some() {
+                row.active(move |row| row.bg(selected_fill))
+            } else {
+                row
+            }
         };
         let row = if disabled {
             row

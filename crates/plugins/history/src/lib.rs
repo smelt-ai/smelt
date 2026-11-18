@@ -20,18 +20,23 @@ use api::model::agent_kind::{ConversationAgentKind, HistorySourceKind};
 use api::model::daemon_state::CORE_TOPIC_HISTORY_CHANGED;
 use api::model::session_history::{SessionDetail, SessionSummary};
 use api::serde_json;
-use api::sessions::{self, Handoff, Resume};
 use gpui::*;
-use gpui_component::WindowExt;
-use gpui_component::input::{InputEvent, InputState};
+use rust_i18n::t;
+use smelt_plugin_api::ui::field::{InputEvent, InputState};
 use smelt_plugin_api::{
     self as api, HostEvent, PluginView, Project, RuntimeKey, TopicMessage, ViewHandle, ViewSpec,
+    text,
 };
 
+mod agents;
 mod model;
 mod render;
+mod sessions;
 
 use model::*;
+use sessions::{Handoff, Resume};
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 const OWNER: &str = "smelt.history";
 const VIEW_ID: &str = "smelt.history/main";
@@ -43,15 +48,17 @@ const PREFETCH_MAX_AGE: Duration = Duration::from_secs(60);
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
+    agents::install(cx);
     api::register_views(
         OWNER,
         vec![ViewSpec {
             name: "main".into(),
-            title: "历史".into(),
-            icon: gpui_kit_assets::IconName::Clock.path(),
-            per_machine: false,
+            title: text!("view.title"),
+            icon: api::ui::IconName::Clock.path(),
             draws_top_bar: false,
+            instances: false,
             settings: None,
+            fills: Vec::new(),
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| HistoryPage::new(window, cx))) as Rc<dyn ViewHandle>
             }),
@@ -118,11 +125,20 @@ pub struct HistoryPage {
 
 impl HistoryPage {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("搜索名称或原始标题…"));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder(t!("search")));
         let events = api::events(cx);
         let subscriptions = vec![
-            cx.subscribe(&events, |this, _, event: &HostEvent, cx| {
+            cx.subscribe_in(&events, window, |this, _, event: &HostEvent, window, cx| {
+                if matches!(event, HostEvent::LocaleChanged) {
+                    this.relabel(window, cx);
+                }
                 this.on_host_event(event, cx);
+            }),
+            // 智能体配置换了：智能体 space 的引擎、来源标签都可能变。
+            cx.observe_global::<agents::AgentSettingsCache>(|this, cx| {
+                this.sync_project(cx);
+                this.refresh(cx);
+                cx.notify();
             }),
             // 过滤在内存里做，键入只要重画。
             cx.subscribe(&filter, |_, _, event: &InputEvent, cx| {
@@ -163,9 +179,7 @@ impl HistoryPage {
                 }
             }
             HostEvent::ActiveContextChanged if api::active_context(cx).project == self.project => {}
-            HostEvent::ActiveContextChanged
-            | HostEvent::AgentSettingsChanged
-            | HostEvent::MachinesChanged => {
+            HostEvent::ActiveContextChanged | HostEvent::MachinesChanged => {
                 self.sync_project(cx);
                 self.refresh(cx);
                 cx.notify();
@@ -184,22 +198,23 @@ impl HistoryPage {
         }
     }
 
+    /// 换了语言：搜索框的占位字、列表行上算好的字按新语言重来。
+    fn relabel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.update(cx, |filter, cx| {
+            filter.set_placeholder(t!("search"), window, cx);
+        });
+        for list in self.lists.values_mut() {
+            list.snapshot.relabel();
+        }
+        cx.notify();
+    }
+
     /// 重读当前项目和它是不是智能体的 space。换了项目，右边的详情清掉。
     fn sync_project(&mut self, cx: &mut Context<Self>) {
-        let host = api::host(cx);
         let project = api::active_context(cx).project;
-        self.engine = project.as_ref().and_then(|project| {
-            let home = host
-                .machines(cx)
-                .into_iter()
-                .find(|machine| machine.key == project.machine)
-                .and_then(|machine| machine.smelt_home);
-            space_engine(
-                project,
-                home.as_deref(),
-                host.agent_settings(&project.machine, cx),
-            )
-        });
+        self.engine = project
+            .as_ref()
+            .and_then(|project| space_engine(project, agents::settings_on(&project.machine, cx)));
         if self.project != project {
             self.project = project;
             self.close_detail();
@@ -250,8 +265,7 @@ impl HistoryPage {
         };
         let current = self.source();
         let tabs = {
-            let host = api::host(cx);
-            let settings = host.agent_settings(&project.machine, cx);
+            let settings = agents::settings_on(&project.machine, cx);
             source_tabs(
                 self.engine,
                 settings.into_iter().flat_map(|settings| &settings.profiles),
@@ -430,10 +444,7 @@ impl HistoryPage {
         let Some(list) = self.lists.get(&key) else {
             return HashMap::new();
         };
-        known_bindings(
-            &list.bindings,
-            api::host(cx).agent_settings(&project.machine, cx),
-        )
+        known_bindings(&list.bindings, agents::settings_on(&project.machine, cx))
     }
 
     /// 迁移：读出源会话，写成交接说明，交给目标 agent 起一段新会话。存档可能有几 MB，
@@ -447,8 +458,7 @@ impl HistoryPage {
             return;
         };
         let profile_label = profile_id.as_deref().and_then(|id| {
-            api::host(cx)
-                .agent_settings(&project.machine, cx)?
+            agents::settings_on(&project.machine, cx)?
                 .find_profile(id)
                 .map(|profile| profile.label.clone())
         });
@@ -458,7 +468,6 @@ impl HistoryPage {
             title: session.title.clone(),
             cwd: project.root.clone(),
         };
-        let resume_id = session.resume_id.clone();
         let path = session.path.clone();
         let call = load_detail(&project.machine, agent, &path, cx);
         cx.spawn(async move |_, cx| {
@@ -468,10 +477,10 @@ impl HistoryPage {
                     Ok(Some(detail)) => detail,
                     // 存档被删、换了格式：明说读不出来，别开一段空会话让人猜。
                     Ok(None) => {
-                        return notify_error(&format!("读不出这条历史会话，迁移取消：{path}"), cx);
+                        return notify_error(&t!("handoff.unreadable", path = path), cx);
                     }
                     Err(error) => {
-                        return notify_error(&format!("读取历史会话失败，迁移取消：{error}"), cx);
+                        return notify_error(&t!("handoff.read_failed", error = error), cx);
                     }
                 };
                 let args = Handoff {
@@ -480,7 +489,6 @@ impl HistoryPage {
                     agent: target.agent.id().to_string(),
                     profile_id: target.profile_id.clone(),
                     prompt: handoff_prompt(&source, &detail, &target),
-                    source_session_id: resume_id,
                 };
                 report_failure(sessions::HANDOFF.run(&args, cx), cx);
             });
@@ -502,7 +510,7 @@ impl HistoryPage {
         let enter = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.submit_rename(cx);
-                window.close_dialog(cx);
+                api::ui::dialog::close(window, cx);
             }
         });
         self.renaming = Some(Renaming {
@@ -514,7 +522,7 @@ impl HistoryPage {
         let page = cx.entity();
         let dialog_input = input.clone();
         let on_close = page.clone();
-        api::ui::dialog::Confirm::new("重命名", "重命名", move |_, cx| {
+        api::ui::dialog::Confirm::new(t!("rename"), t!("rename"), move |_, cx| {
             page.update(cx, |page, cx| page.submit_rename(cx));
             true
         })
@@ -580,24 +588,20 @@ impl HistoryPage {
             resume_id: session.resume_id.clone(),
             path: session.path.clone(),
         };
-        let description = format!(
-            "将永久删除 {} 的「{}」及其本地对话记录，此操作不可撤销。",
-            agent.short_label(),
-            session.title
+        let description = t!(
+            "delete.description",
+            agent = agent.short_label(),
+            title = session.title
         );
         let title = session.title.clone();
         let page = cx.entity();
         let machine = project.machine.clone();
-        api::ui::dialog::Confirm::new(
-            "确定删除这条历史会话吗？",
-            "删除",
-            move |_, cx| {
-                page.update(cx, |page, cx| {
-                    page.delete(&machine, params.clone(), title.clone(), cx);
-                });
-                true
-            },
-        )
+        api::ui::dialog::Confirm::new(t!("delete.confirm"), t!("delete.action"), move |_, cx| {
+            page.update(cx, |page, cx| {
+                page.delete(&machine, params.clone(), title.clone(), cx);
+            });
+            true
+        })
         .danger()
         .description(description)
         .open(window, cx);
@@ -623,8 +627,8 @@ impl HistoryPage {
         cx.spawn(async move |_, cx| {
             let result = call.await;
             cx.update(|cx| match result {
-                Ok(_) => notify("完成", &format!("已删除历史会话「{title}」"), cx),
-                Err(error) => notify_error(&format!("删除历史会话失败：{error}"), cx),
+                Ok(_) => notify(&t!("notify.done"), &t!("delete.done", title = title), cx),
+                Err(error) => notify_error(&t!("delete.failed", error = error), cx),
             });
         })
         .detach();
@@ -645,7 +649,7 @@ impl PluginView for HistoryPage {
 fn set_title(target: TitleTarget, title: Option<String>, cx: &App) {
     let client = api::host(cx).client(&target.machine, cx);
     let rename = cx.background_spawn(async move {
-        let client = client.ok_or_else(|| api::MACHINE_REMOVED.to_string())?;
+        let client = client.ok_or_else(api::machine_removed)?;
         api::session_ops::rename_history_title(
             &client,
             target.agent,
@@ -657,7 +661,7 @@ fn set_title(target: TitleTarget, title: Option<String>, cx: &App) {
     });
     cx.spawn(async move |cx| {
         if let Err(error) = rename.await {
-            cx.update(|cx| notify_error(&format!("改名失败：{error}"), cx));
+            cx.update(|cx| notify_error(&t!("rename_failed", error = error), cx));
         }
     })
     .detach();
@@ -690,7 +694,7 @@ fn report_failure(ran: Task<Result<(), String>>, cx: &mut App) {
 
 fn notify_error(message: &str, cx: &mut App) {
     eprintln!("[history] {message}");
-    notify("错误", message, cx);
+    notify(&t!("notify.error"), message, cx);
 }
 
 fn notify(subtitle: &str, body: &str, cx: &mut App) {

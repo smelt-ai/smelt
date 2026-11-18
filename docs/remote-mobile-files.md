@@ -221,7 +221,7 @@ FRB 没开 freezed，带数据的 enum 生成不了 Dart 的 sealed class。文�
 | 做法 | 代表 | 说明 |
 |---|---|---|
 | 服务端高亮，客户端只画 | GitHub（网页和 App 的文件视图）、GitLab | 文件在服务端，高亮结果随内容下发；客户端零解析成本，各端一致 |
-| Tree-sitter 增量解析 | Zed、Helix、Neovim、GitHub 代码导航；本仓库桌面（gpui-component） | 精度最好、支持增量编辑；代价是每种语言一份 C 解析器，体积大 |
+| Tree-sitter 增量解析 | Zed、Helix、Neovim、GitHub 代码导航；本仓库桌面（smelt-ui 的 `syntax`） | 精度最好、支持增量编辑；代价是每种语言一份 C 解析器，体积大 |
 | TextMate / Sublime 语法 | VS Code、Shiki、Sublime、bat（syntect） | 正则逐行解析，语言覆盖最广、配色生态最全；只读展示足够准确 |
 | highlight.js 类正则 | highlight.js、Flutter 的 `flutter_highlight` / `re_highlight` | 实现简单，精度最低，大文件慢 |
 

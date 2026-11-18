@@ -20,12 +20,14 @@ describe("login presets", () => {
 		const answer = presets.answer(enterprise);
 		expect(answer?.value).toBe("");
 		expect(answer?.reason).toContain("github.com");
+		expect(answer?.note).toBe("answered_github_dot_com");
 	});
 
 	test("a GUI host takes the browser branch without asking", () => {
 		// The rule is provider-independent: any flow offering a `browser`
 		// option gets it, because the host can open the URL itself.
 		expect(new LoginPresets("openai-codex", true).answer(method)?.value).toBe("browser");
+		expect(new LoginPresets("openai-codex", true).answer(method)?.note).toBe("answered_browser");
 		expect(new LoginPresets("whatever-else", true).answer(method)?.value).toBe("browser");
 	});
 

@@ -3,6 +3,7 @@
 //! 导入是把一个插件目录复制进来，之后和原目录无关。删除是挪进回收目录，不直接抹掉。
 //! 两者都只改磁盘；改完由调用方 `mount_all` 重新加载。都是阻塞 IO，放后台线程调。
 
+use rust_i18n::t;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -26,58 +27,56 @@ fn trash_dir() -> Option<PathBuf> {
 
 /// 把 `source` 目录里的插件复制进用户插件目录。返回插件名。
 pub(crate) fn import(source: &Path) -> Result<String, String> {
-    let plugins = user_plugin_dir().ok_or("找不到 smelt 数据目录")?;
+    let plugins = user_plugin_dir().ok_or_else(|| t!("plugins.no_data_dir").into_owned())?;
     import_into(source, &plugins).map(|manifest| manifest.name().to_string())
 }
 
 /// 把用户插件目录里的 `root` 挪进回收目录。
 pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
-    let plugins = user_plugin_dir().ok_or("找不到 smelt 数据目录")?;
-    let trash = trash_dir().ok_or("找不到 smelt 数据目录")?;
+    let plugins = user_plugin_dir().ok_or_else(|| t!("plugins.no_data_dir").into_owned())?;
+    let trash = trash_dir().ok_or_else(|| t!("plugins.no_data_dir").into_owned())?;
     uninstall_into(root, &plugins, &trash).map(|_| ())
 }
 
 fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> {
     let manifest = PluginManifest::read(source).map_err(|error| {
         if source.join(MANIFEST_FILE).is_file() {
-            format!("插件清单有问题：{error}")
+            t!("plugins.bad_manifest", error = error).into_owned()
         } else {
-            format!("这个目录里没有 {MANIFEST_FILE}，不是 smelt 插件")
+            t!("plugins.no_manifest", file = MANIFEST_FILE).into_owned()
         }
     })?;
     if !source.join(manifest.entry()).is_file() {
-        return Err(format!("插件入口 {} 不存在", manifest.entry()));
+        return Err(t!("plugins.no_entry", entry = manifest.entry()).into_owned());
     }
 
-    fs::create_dir_all(plugins).map_err(|error| format!("创建插件目录失败：{error}"))?;
+    fs::create_dir_all(plugins)
+        .map_err(|error| t!("plugins.create_dir_failed", error = error).into_owned())?;
     let canonical_plugins = fs::canonicalize(plugins).map_err(|error| error.to_string())?;
     let canonical_source = fs::canonicalize(source).map_err(|error| error.to_string())?;
     if canonical_source.starts_with(&canonical_plugins) {
-        return Err("这个插件已经在插件目录里了".to_string());
+        return Err(t!("plugins.already_inside").into_owned());
     }
     if let Some(existing) = installed_root(plugins, manifest.id()) {
-        return Err(format!(
-            "已经装了 id 相同的插件（{}），先删掉它再导入",
-            existing.display()
-        ));
+        return Err(t!("plugins.duplicate_id", path = existing.display()).into_owned());
     }
 
     // id 只含小写字母、数字和 `.-_`，不以点开头，直接当目录名。
     let target = plugins.join(manifest.id());
     if fs::symlink_metadata(&target).is_ok() {
-        return Err(format!("{} 已经存在", target.display()));
+        return Err(t!("plugins.target_exists", path = target.display()).into_owned());
     }
     // 先复制到点开头的暂存目录（发现插件时跳过它），完整了再一次改名到位：
     // 复制到一半失败或重新加载，都不会出现一个半截的插件。
     let staging = plugins.join(format!(".importing-{}", manifest.id()));
     if fs::symlink_metadata(&staging).is_ok() {
         fs::remove_dir_all(&staging)
-            .map_err(|error| format!("清理上次没导完的目录失败：{error}"))?;
+            .map_err(|error| t!("plugins.cleanup_failed", error = error).into_owned())?;
     }
     let copied = copy_tree(source, &staging, true).and_then(|()| fs::rename(&staging, &target));
     if let Err(error) = copied {
         let _ = fs::remove_dir_all(&staging);
-        return Err(format!("复制插件失败：{error}"));
+        return Err(t!("plugins.copy_failed", error = error).into_owned());
     }
     Ok(manifest)
 }
@@ -121,21 +120,23 @@ fn copy_tree(from: &Path, to: &Path, root: bool) -> io::Result<()> {
 fn uninstall_into(root: &Path, plugins: &Path, trash: &Path) -> Result<PathBuf, String> {
     // 只认用户插件目录的直接子项：App 自带的、仓库里的插件都不能从这里删。
     if root.parent() != Some(plugins) {
-        return Err("只能删除自己装的插件".to_string());
+        return Err(t!("plugins.only_user").into_owned());
     }
     let name = root
         .file_name()
-        .ok_or("插件路径不对")?
+        .ok_or_else(|| t!("plugins.bad_path").into_owned())?
         .to_string_lossy()
         .into_owned();
-    fs::create_dir_all(trash).map_err(|error| format!("创建回收目录失败：{error}"))?;
+    fs::create_dir_all(trash)
+        .map_err(|error| t!("plugins.trash_failed", error = error).into_owned())?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis())
         .unwrap_or_default();
     let target = trash.join(format!("{name}-{stamp}"));
     // 改名作用于路径本身：手动放进来的软链只挪走链接，链接指向的目录原样不动。
-    fs::rename(root, &target).map_err(|error| format!("删除失败：{error}"))?;
+    fs::rename(root, &target)
+        .map_err(|error| t!("plugins.delete_failed", error = error).into_owned())?;
     Ok(target)
 }
 
@@ -256,9 +257,9 @@ mod tests {
         let plugins = scratch.path("plugins");
 
         let missing = import_into(&scratch.path("src/empty"), &plugins).unwrap_err();
-        assert!(missing.contains("不是 smelt 插件"), "{missing}");
+        assert!(missing.contains("isn't a Smelt plugin"), "{missing}");
         let broken = import_into(&scratch.path("src/broken"), &plugins).unwrap_err();
-        assert!(broken.contains("清单有问题"), "{broken}");
+        assert!(broken.contains("manifest has a problem"), "{broken}");
         let no_entry = import_into(&scratch.path("src/no-entry"), &plugins).unwrap_err();
         assert!(no_entry.contains("main.js"), "{no_entry}");
     }
@@ -280,7 +281,7 @@ mod tests {
         let installed = scratch.plugin("plugins/demo", "com.example.demo");
 
         let error = import_into(&installed, &scratch.path("plugins")).unwrap_err();
-        assert!(error.contains("已经在插件目录里"), "{error}");
+        assert!(error.contains("already in the plugin folder"), "{error}");
     }
 
     #[test]
@@ -320,7 +321,7 @@ mod tests {
         for root in [bundled, nested] {
             let error = uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash"))
                 .unwrap_err();
-            assert!(error.contains("只能删除"), "{error}");
+            assert!(error.contains("Only plugins you installed"), "{error}");
             assert!(root.join(MANIFEST_FILE).is_file());
         }
     }

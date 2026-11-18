@@ -1,6 +1,7 @@
 //! 页面里共用的小块：卡片、表单框、分段。
 
 use crate::prelude::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 内容卡：12px 圆角加发丝描边。智能体空状态、自动化表和表单共用。
 pub(crate) fn content_card_style<E: Styled>(element: E) -> E {
@@ -20,16 +21,17 @@ pub(crate) fn agent_surface_card() -> Div {
 }
 
 pub(crate) fn render_agent_error(error: String) -> AnyElement {
-    gpui_component::alert::Alert::error("agent-error", error).into_any_element()
+    api::ui::Alert::error("agent-error", error).into_any_element()
 }
 
-pub(crate) fn framed_automation_textarea(textarea: Textarea) -> AnyElement {
+/// 嵌在表单卡里的多行框：外框是卡片，文本框自己不再画。
+pub(crate) fn framed_automation_textarea(textarea: TextArea) -> AnyElement {
     div()
         .w_full()
         .px_3()
         .py_3()
         .min_h(px(120.))
-        .child(textarea.appearance(false))
+        .child(textarea.bare())
         .into_any_element()
 }
 
@@ -51,14 +53,13 @@ pub(crate) fn automation_run_lines(title: String, detail: String, error: Option<
         .gap_1()
         .child(
             div()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .overflow_hidden()
                 .child(truncated_line(title)),
         )
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(detail)),
@@ -66,7 +67,7 @@ pub(crate) fn automation_run_lines(title: String, detail: String, error: Option<
         .when_some(error, |column, error| {
             column.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::bad()))
                     .overflow_hidden()
                     .child(truncated_line(error)),
@@ -82,10 +83,10 @@ pub(crate) fn automation_form_row() -> Div {
         .items_center()
 }
 
-pub(crate) fn automation_section_label(label: &'static str) -> AnyElement {
+pub(crate) fn automation_section_label(label: impl Into<SharedString>) -> AnyElement {
+    let label: SharedString = label.into();
     div()
-        .text_sm()
-        .font_medium()
+        .type_style(TYPE.ui_medium)
         .text_color(rgb(ui_theme::text()))
         .child(label)
         .into_any_element()

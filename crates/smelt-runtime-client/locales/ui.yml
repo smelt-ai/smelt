@@ -1,0 +1,361 @@
+_version: 2
+reason.unknown_agent:
+  en: "Unknown agent: %{agent}"
+  zh-CN: 未知的 agent：%{agent}
+reason.agent_workspace_unavailable:
+  en: Couldn't create the agent workspace
+  zh-CN: 无法创建智能体工作区
+reason.memory_dir_unavailable:
+  en: Couldn't create the memory folder
+  zh-CN: 无法创建记忆目录
+reason.archive_with_target_worktree:
+  en: A target worktree can't be given when archiving
+  zh-CN: 归档时不能指定目标工作树
+reason.appearance_no_desktop:
+  en: Appearance belongs to the desktop app on this Mac, and no desktop is open to apply the change
+  zh-CN: 外观属于本机桌面客户端，现在没有可接收修改的本机桌面
+reason.appearance_many_desktops:
+  en: More than one desktop is open here, so it's unclear which one should change the appearance
+  zh-CN: 有多个本机桌面，无法确定由哪一个修改外观
+reason.appearance_undelivered:
+  en: Couldn't deliver the appearance change to the desktop
+  zh-CN: 外观请求无法投递到桌面
+reason.appearance_outcome_unknown:
+  en: The desktop didn't confirm the change, so the result is unknown (it may have applied or may apply later)
+  zh-CN: 没有收到桌面回执，修改结果未知（可能已生效或稍后生效）
+reason.automation_not_found:
+  en: "There's no automation %{id}"
+  zh-CN: "自动化不存在: %{id}"
+reason.image_gone:
+  en: This image is no longer in the conversation (the entry was rolled back or compacted)
+  zh-CN: 这张图已不在对话里（条目被回退或压缩改写过）
+reason.image_undecodable:
+  en: Couldn't decode the %{mime} image to make a thumbnail
+  zh-CN: "%{mime} 解不开，出不了缩略图"
+reason.conversation_gone:
+  en: The conversation doesn't exist or has ended
+  zh-CN: 对话不存在或已结束
+reason.remote_access_off:
+  en: Remote access isn't turned on
+  zh-CN: 远程访问没有开启
+reason.pair_from_remote_only:
+  en: Pairing can only be started from a remote device
+  zh-CN: 配对只能从远程设备发起
+reason.pair_code_invalid:
+  en: The pairing code is invalid or has expired
+  zh-CN: 配对码无效或已过期
+reason.push_from_paired_only:
+  en: Only a paired remote device can register for push notifications
+  zh-CN: 推送只能由已配对的远程设备登记
+reason.device_unpaired:
+  en: This device is no longer paired
+  zh-CN: 这台设备已不在配对列表里
+reason.not_subagent_id:
+  en: "Not a subagent id: %{id}"
+  zh-CN: 不是子智能体 id：%{id}
+reason.no_smelt_home:
+  en: Couldn't find the Smelt home folder, so the subagent session can't be read
+  zh-CN: 找不到 Smelt 主目录，读不到子会话
+reason.subagent_transcript_gone:
+  en: This subagent's session is gone (it hasn't started writing yet, or was deleted with the conversation)
+  zh-CN: 这个子智能体的子会话不在了（还没开始写，或已随对话删除）
+reason.subagent_transcript_unreadable:
+  en: "Couldn't read the subagent session: %{error}"
+  zh-CN: 读不了子会话：%{error}
+reason.repository_name_invalid:
+  en: "The repository name is empty or repeated: %{name}"
+  zh-CN: 仓库名称为空或重复：%{name}
+reason.repository_not_in_project:
+  en: "The project has no repository named %{name}"
+  zh-CN: 项目没有配置仓库：%{name}
+reason.worktree_not_found:
+  en: The worktree doesn't exist
+  zh-CN: 工作树不存在
+reason.worktree_has_sessions:
+  en: The worktree still has sessions. Close and delete them before renaming it
+  zh-CN: 工作树仍绑定会话；先关闭并删除这些会话再重命名
+reason.worktree_has_open_sessions:
+  en: The worktree still has sessions that aren't archived. Close or archive them first
+  zh-CN: 工作树仍绑定未归档会话；请先关闭或归档这些会话
+reason.worktree_record_not_deleted:
+  en: "The Git worktree was closed, but its record couldn't be deleted: %{error}"
+  zh-CN: Git worktree 已关闭，但删除工作树记录失败：%{error}
+reason.automation_session_not_archivable:
+  en: Sessions run by automations are managed by the runtime and can't be archived
+  zh-CN: 自动化运行的会话由运行时管理，不能归档
+reason.unknown_launch_item:
+  en: "Unknown launch item: %{key}"
+  zh-CN: 未知的启动项：%{key}
+reason.unknown_agent_option:
+  en: "Unknown agent option: %{id}"
+  zh-CN: 未知的 agent 选项：%{id}
+reason.project_not_in_workspace:
+  en: "The workspace has no project %{project}"
+  zh-CN: 工作区里没有这个项目：%{project}
+reason.worktree_not_in_project:
+  en: "The project %{project} has no worktree %{worktree}"
+  zh-CN: 项目 %{project} 里没有这个工作树：%{worktree}
+reason.directory_missing:
+  en: "The folder doesn't exist: %{path}"
+  zh-CN: 目录不存在：%{path}
+reason.automation_session_not_deletable:
+  en: Sessions run by automations are managed by the runtime and can't be deleted
+  zh-CN: 自动化运行的会话由运行时管理，不能删除
+reason.session_not_found:
+  en: "There's no session %{id}"
+  zh-CN: 会话不存在：%{id}
+reason.device_not_paired:
+  en: This device isn't paired yet
+  zh-CN: 这台设备还没有配对
+reason.git_changed_since_viewed:
+  en: "%{path} changed after you looked at it, so nothing was discarded. Refresh and confirm again."
+  zh-CN: "%{path} 在你查看之后又变了，没有丢弃。请刷新后再确认一次。"
+reason.git_no_remote:
+  en: "The repository has no remote to push to"
+  zh-CN: "仓库没有配置任何远端，无法推送"
+reason.git_push_target_ambiguous:
+  en: "Branch “%{branch}” has no upstream and there are several remotes (%{remotes}). Run git push -u <remote> %{branch} to choose where it goes."
+  zh-CN: "分支「%{branch}」还没有上游，且有多个远端（%{remotes}），请先执行 git push -u <远端> %{branch} 指定推送目标"
+reason.git_merge_failed:
+  en: "%{detail}\n(Any conflicted files are left in the working tree: resolve them, git add, then git commit. To give up this merge, run git merge --abort.)"
+  zh-CN: "%{detail}\n（冲突文件已留在工作区，解决后 git add 再 git commit；想放弃这次合并用 git merge --abort）"
+reason.worktree_no_repository:
+  en: "Choose at least one repository"
+  zh-CN: "至少选择一个参与仓库"
+reason.worktree_target_exists:
+  en: "Something already exists where the worktree would go: %{path}"
+  zh-CN: "工作树目标已存在：%{path}"
+reason.worktree_branch_checked_out:
+  en: "Branch %{branch} of %{repository} is already checked out at %{path}"
+  zh-CN: "仓库 %{repository} 的分支 %{branch} 已在 %{path} 检出"
+reason.worktree_repository_dirty:
+  en: "%{repository} has uncommitted changes or untracked files, so the worktree wasn't closed"
+  zh-CN: "仓库 %{repository} 有未提交改动或未跟踪文件，已阻止关闭工作树"
+reason.worktree_branch_unmerged:
+  en: "Branch %{branch} of %{repository} has changes that aren't in %{base} yet, so the worktree wasn't closed"
+  zh-CN: "仓库 %{repository} 的分支 %{branch} 还有改动没进 %{base}，已阻止关闭工作树"
+reason.worktree_merge_unconfirmed:
+  en: "Couldn't confirm whether branch %{branch} of %{repository} is merged into %{base} (merging it conflicts), so the worktree wasn't closed"
+  zh-CN: "无法确认仓库 %{repository} 的分支 %{branch} 是否已合进 %{base}（合进去有冲突），已阻止关闭工作树"
+reason.worktree_rename_dirty:
+  en: "%{repository} has uncommitted changes, so the worktree wasn't renamed"
+  zh-CN: "仓库 %{repository} 有未提交改动，已阻止重命名"
+reason.worktree_branch_changed:
+  en: "The current branch of %{repository} changed, so the rename was cancelled"
+  zh-CN: "仓库 %{repository} 当前分支已变化，已取消重命名"
+reason.worktree_no_remote:
+  en: "%{repository} has no Git remote, so its upstream default branch can't be determined"
+  zh-CN: "仓库 %{repository} 没有配置 Git 远端，无法确定上游默认分支"
+reason.worktree_no_upstream:
+  en: "%{repository} has no usable upstream default branch (check the remote HEAD or the current branch's upstream)"
+  zh-CN: "仓库 %{repository} 没有可用的上游默认分支（检查远端 HEAD 或当前分支 upstream）"
+automation.no_agent:
+  en: Choose a configured agent
+  zh-CN: 请选择已配置的智能体
+automation.no_shell_command:
+  en: Enter the shell command to run
+  zh-CN: 请填写要执行的 Shell 命令
+automation.no_webhook_token:
+  en: The external trigger has no receiving token
+  zh-CN: 外部触发缺少接收令牌
+automation.no_trigger:
+  en: Add at least one trigger
+  zh-CN: 请至少添加一条触发条件
+automation.no_id:
+  en: The automation has no id
+  zh-CN: 自动化缺少 id
+automation.no_name:
+  en: Enter a name for the automation
+  zh-CN: 请填写自动化名称
+automation.workspace_not_ready:
+  en: The automation's Smelt workspace isn't ready yet
+  zh-CN: 自动化的 Smelt 工作区尚未就绪
+automation.workspace_missing:
+  en: "The automation's Smelt workspace doesn't exist or isn't a folder: %{path}"
+  zh-CN: 自动化的 Smelt 工作区不存在或不是目录：%{path}
+automation.no_instruction:
+  en: Scheduled triggers bring no outside content, so enter an instruction
+  zh-CN: 定时触发不会带入外部内容，请填写指令
+automation.no_days:
+  en: Choose at least one day
+  zh-CN: 请至少选择一天
+automation.time_out_of_range:
+  en: Enter a time between 00:00 and 23:59
+  zh-CN: 请输入 00:00 到 23:59 之间的时间
+automation.minutes_out_of_range:
+  en: The interval must be 1 to 1440 minutes
+  zh-CN: 执行间隔需为 1 到 1440 分钟
+automation.hours_out_of_range:
+  en: The interval must be 1 to 168 hours
+  zh-CN: 执行间隔需为 1 到 168 小时
+automation.end_before_start:
+  en: The end time must be later than the start time
+  zh-CN: 结束时间需晚于开始时间
+automation.nothing_to_send:
+  en: This run has nothing to send; add an instruction to the automation
+  zh-CN: 这次运行没有可发送的内容，请在自动化里填写指令
+automation.not_found:
+  en: The automation doesn't exist
+  zh-CN: 自动化不存在
+automation.run_not_found:
+  en: The run doesn't exist
+  zh-CN: 运行记录不存在
+automation.already_running:
+  en: "The automation is already running (run %{run})"
+  zh-CN: 自动化已有运行中的 Run：%{run}
+automation.delete_while_running:
+  en: The automation is running and can't be deleted right now
+  zh-CN: 自动化正在运行，暂时不能删除
+automation.delete_while_cleaning_up:
+  en: The automation's last run is still being cleaned up; delete it in a moment
+  zh-CN: 自动化运行现场正在清理，请稍后再删除
+automation.event_topic_missing:
+  en: Enter an event topic
+  zh-CN: 请填写事件主题
+automation.event_topic_too_long:
+  en: The event topic is too long
+  zh-CN: 事件主题过长
+automation.event_topic_malformed:
+  en: "The event topic must be a lowercase dotted name, such as lark.message.received"
+  zh-CN: 事件主题须为小写点分名，例如 lark.message.received
+automation.event_id_missing:
+  en: Enter an event_id
+  zh-CN: 请填写 event_id
+automation.event_id_too_long:
+  en: The event_id is too long
+  zh-CN: event_id 过长
+automation.event_id_invalid:
+  en: The event_id contains characters that aren't allowed
+  zh-CN: event_id 含非法字符
+automation.event_filter_not_object:
+  en: "The event filter must be a JSON object, such as {\"chat_id\":\"oc_123\"}"
+  zh-CN: "事件过滤须为 JSON 对象，例如 {\"chat_id\":\"oc_123\"}"
+automation_run.with_detail:
+  en: "%{reason}: %{detail}"
+  zh-CN: "%{reason}：%{detail}"
+automation_run.other:
+  en: The run failed
+  zh-CN: 运行失败
+automation_run.previous_run_active:
+  en: The previous run was still going, so this one was skipped
+  zh-CN: 上一条 Run 仍在执行，本次已跳过
+automation_run.workspace_missing:
+  en: The automation's Smelt workspace doesn't exist or isn't a folder
+  zh-CN: 自动化的 Smelt 工作区不存在或不是目录
+automation_run.automation_invalid:
+  en: The automation's settings aren't valid; open it and save again
+  zh-CN: 自动化的配置不完整，打开它重新保存
+automation_run.agent_unavailable:
+  en: The agent can't be used
+  zh-CN: 智能体用不了
+automation_run.session_missing:
+  en: The run has no agent session; the result is unknown
+  zh-CN: Run 缺少 ACP 会话，结果未知
+automation_run.session_lost_on_restart:
+  en: The agent session was lost when the runtime restarted; the result is unknown and the run wasn't replayed
+  zh-CN: 运行时重启后 ACP 会话已丢失，结果未知，未自动重放
+automation_run.session_conflict:
+  en: The agent session belongs to another run
+  zh-CN: 自动化的 ACP 会话已属于其他 Run
+automation_run.restart_during_delivery:
+  en: The runtime restarted while delivering; the result is unknown and the run wasn't replayed
+  zh-CN: 运行时重启发生在投递边界，结果未知，未自动重放
+automation_run.context_not_saved:
+  en: Couldn't save the agent's run context
+  zh-CN: 保存智能体执行上下文失败
+automation_run.engine_changed:
+  en: The agent's engine no longer matches this run
+  zh-CN: 智能体执行引擎与 Run 快照不一致
+automation_run.start_failed:
+  en: The agent couldn't start
+  zh-CN: ACP runtime 启动失败
+automation_run.delivery_failed:
+  en: Delivering to the agent kept failing
+  zh-CN: 自动化投递多次尝试后失败
+automation_run.exited_before_delivery:
+  en: The agent exited before delivery
+  zh-CN: ACP runtime 在投递前退出
+automation_run.session_lost:
+  en: The agent session was lost; the result is unknown and the run wasn't replayed
+  zh-CN: ACP 会话已丢失，结果未知，未自动重放
+automation_run.agent_exited:
+  en: The agent exited
+  zh-CN: ACP runtime 已退出
+automation_run.turn_failed:
+  en: The turn didn't finish normally
+  zh-CN: 回合未正常完成
+automation_run.turn_without_outcome:
+  en: The turn ended without a result
+  zh-CN: ACP 回合结束但没有结果状态
+automation_run.not_shell_action:
+  en: This isn't a runnable shell action
+  zh-CN: 不是可执行的 Shell 动作
+automation_run.command_start_failed:
+  en: The command couldn't start
+  zh-CN: 命令启动失败
+automation_run.command_wait_failed:
+  en: Waiting for the command failed
+  zh-CN: 命令等待失败
+automation_run.command_failed:
+  en: The command failed
+  zh-CN: 命令执行失败
+reason.repository_not_git:
+  en: "Choose the root folder of an existing Git repository, not a plain folder"
+  zh-CN: "请选择已有 Git 仓库的根目录，而不是普通文件夹"
+reason.repository_not_root:
+  en: "Choose the repository's root folder: %{root}"
+  zh-CN: "请选择 Git 仓库根目录：%{root}"
+reason.repository_name_taken:
+  en: "That folder name is already taken; choose another name: %{path}"
+  zh-CN: "目录名已被占用，请修改名称：%{path}"
+reason.repository_url_invalid:
+  en: "Enter a valid Git URL"
+  zh-CN: "请填写有效的 Git URL"
+reason.repository_clone_failed:
+  en: "Git clone failed. Check the URL, your network and your SSH or credential setup."
+  zh-CN: "Git 克隆失败，请检查 URL、网络和 SSH/凭据配置"
+reason.repository_clone_failed_kept:
+  en: "Git clone failed. Check the URL, your network and your SSH or credential setup. The clone folder %{path} was kept; use another name or check that folder before retrying."
+  zh-CN: "Git 克隆失败，请检查 URL、网络和 SSH/凭据配置；已保留克隆目录 %{path}，重试请换名称或先检查该目录"
+reason.repository_already_added:
+  en: "This repository or folder name is already in the project"
+  zh-CN: "该仓库或目录名已添加，请勿重复绑定"
+reason.agent_not_conversation_ready:
+  en: "This agent can't hold a conversation yet: it needs a registered engine (currently Pi)"
+  zh-CN: "智能体还不能开对话：需要已注册的产品引擎（目前是 Pi）"
+compat.runtime_outdated:
+  en: "Runtime %{version} is too old; update the runtime (%{reason})"
+  zh-CN: 运行时 %{version} 较旧，需要升级运行时（%{reason}）
+compat.client_outdated:
+  en: "Runtime %{version} is newer; update this app (%{reason})"
+  zh-CN: 运行时 %{version} 较新，需要升级客户端（%{reason}）
+compat.control_too_old:
+  en: "control protocol v%{ours}, the runtime needs at least v%{min}"
+  zh-CN: 控制协议 v%{ours}，运行时至少要 v%{min}
+compat.control_too_new:
+  en: "control protocol v%{max}, this app needs v%{ours}"
+  zh-CN: 控制协议 v%{max}，客户端要 v%{ours}
+compat.events_undeclared:
+  en: the runtime doesn't declare an event protocol version
+  zh-CN: 没有声明事件协议版本
+compat.events_too_old:
+  en: "event protocol v%{version}, this app needs at least v%{min}"
+  zh-CN: 事件协议 v%{version}，客户端至少要 v%{min}
+compat.events_too_new:
+  en: "event protocol v%{version}, this app only knows up to v%{max}"
+  zh-CN: 事件协议 v%{version}，客户端只认到 v%{max}
+desktop.unreachable:
+  en: "Couldn't connect to the runtime: %{error}"
+  zh-CN: 连不上运行时：%{error}
+desktop.no_reply:
+  en: The runtime didn't respond
+  zh-CN: 运行时没回应
+desktop.unsupported:
+  en: The runtime doesn't support remote desktop; update it
+  zh-CN: 运行时不支持远程桌面，需要升级
+desktop.refused:
+  en: The runtime refused
+  zh-CN: 运行时拒绝了
+diff.no_changes:
+  en: (no changes)
+  zh-CN: （无差异）

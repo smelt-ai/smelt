@@ -20,33 +20,45 @@ use std::time::Instant;
 use api::client::protocol::control::EmptyParams;
 use api::model::control_api::ResourceUsage;
 use api::process_usage::ProcessSampler;
-use api::sessions::{self, Activate};
+use api::ui::IconName;
 use api::{HostEvent, PluginView, RuntimeKey, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, IntoElement, Render, SharedString, Subscription, Task,
     WeakEntity, Window,
 };
-use gpui_component::{IconName, IconNamed as _};
-use smelt_plugin_api as api;
+use smelt_plugin_api::{self as api, text};
 
 use monitor::{
     CALL_TIMEOUT, DesktopSample, INTERVAL, PRIME_DELAY, PanelSnapshot, ResourceMonitor,
     RuntimeResults, SortBy,
 };
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.resources";
 /// 登记的那一页，`<来源>/<名字>`。
 const PAGE: &str = "smelt.resources/main";
 
+// 约定：smelt.sessions 的 ACTIVATE，权威定义在 crates/plugins/sessions/src/contract.rs。
+const ACTIVATE: api::Command<Activate, ()> = api::Command::new("smelt.sessions/activate");
+
+/// [`ACTIVATE`] 的参数：哪台机器上的哪段守护会话。
+#[derive(serde::Serialize)]
+struct Activate {
+    #[serde(with = "api::machine_json")]
+    machine: RuntimeKey,
+    session_id: String,
+}
+
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
     let spec = ViewSpec {
         name: "main".into(),
-        title: "资源占用".into(),
+        title: text!("page.title"),
         icon: IconName::MemoryStick.path(),
-        per_machine: false,
         draws_top_bar: false,
+        instances: false,
         settings: Some(SettingsEntry {
             group: SettingsGroup::System,
             keywords: [
@@ -60,11 +72,17 @@ pub fn register(cx: &mut App) {
                 "慢",
                 "活动监视器",
                 "GPUI",
+                "resources",
+                "performance",
+                "memory",
+                "slow",
+                "Activity Monitor",
             ]
             .into_iter()
             .map(SharedString::from)
             .collect(),
         }),
+        fills: Vec::new(),
         build: Rc::new(|_, cx| Rc::new(cx.new(ResourcesPage::new)) as Rc<dyn ViewHandle>),
     };
     if let Err(error) = api::register_views(OWNER, vec![spec], cx) {
@@ -149,13 +167,12 @@ impl PluginView for ResourcesPage {
 
 impl Render for ResourcesPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let page = view::page(
+        view::page(
             cx.entity(),
             self.snapshot.clone(),
             self.sort,
             self.expanded.clone(),
-        );
-        api::settings_pane("resources-settings", page)
+        )
     }
 }
 
@@ -165,8 +182,14 @@ fn shown(cx: &App) -> bool {
 }
 
 /// 从设置里的这一页跳到那段会话。
-pub(crate) fn jump_to_session(session_id: String, cx: &mut App) {
-    let task = sessions::ACTIVATE.run(&Activate { session_id }, cx);
+pub(crate) fn jump_to_session(machine: RuntimeKey, session_id: String, cx: &mut App) {
+    let task = ACTIVATE.run(
+        &Activate {
+            machine,
+            session_id,
+        },
+        cx,
+    );
     cx.spawn(async move |_| {
         if let Err(error) = task.await {
             eprintln!("[resources] 跳到会话失败：{error}");

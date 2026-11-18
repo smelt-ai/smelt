@@ -65,14 +65,15 @@ pub(super) fn serve_dispatch(
     let Some(tool_call_id) = text_field(request, "toolCallId") else {
         let _ = write_line(
             &mut stream,
-            &serde_json::json!({"ok": false, "error": "缺少 toolCallId"}).to_string(),
+            &serde_json::json!({"ok": false, "error": "toolCallId is missing"}).to_string(),
         );
         return;
     };
     let Ok((mut wake, poke_tx)) = wake_pair() else {
         let _ = write_line(
             &mut stream,
-            &serde_json::json!({"ok": false, "error": "无法登记子智能体派发"}).to_string(),
+            &serde_json::json!({"ok": false, "error": "couldn't register the subagent dispatch"})
+                .to_string(),
         );
         return;
     };
@@ -87,14 +88,15 @@ pub(super) fn serve_dispatch(
             drop(state);
             let _ = write_line(
                 &mut stream,
-                &serde_json::json!({"ok": false, "error": "这次工具调用已经派发过"}).to_string(),
+                &serde_json::json!({"ok": false, "error": "this tool call was already dispatched"})
+                    .to_string(),
             );
             return;
         }
         state.dispatches.push(LiveDispatch {
             tool_call_id: tool_call_id.clone(),
             owner: owner.clone(),
-            title: text_field(request, "title").unwrap_or_else(|| "子智能体".to_string()),
+            title: text_field(request, "title").unwrap_or_else(|| "Subagent".to_string()),
             background: request
                 .get("background")
                 .and_then(serde_json::Value::as_bool)
@@ -187,7 +189,7 @@ fn start_subagent(
             .find(|dispatch| dispatch.tool_call_id == tool_call_id)
             .map(|dispatch| dispatch.background)
         else {
-            return serde_json::json!({"op": "started", "ref": reference, "error": "派发已经结束"});
+            return serde_json::json!({"op": "started", "ref": reference, "error": "the dispatch has already ended"});
         };
         prune_finished(&mut state);
         state.subagents.push(LiveSubagent {
@@ -195,7 +197,7 @@ fn start_subagent(
                 id: id.clone(),
                 tool_call_id: tool_call_id.to_string(),
                 parent_session_id: text_field(message, "parentSessionId").unwrap_or_default(),
-                title: text_field(message, "title").unwrap_or_else(|| "子智能体".to_string()),
+                title: text_field(message, "title").unwrap_or_else(|| "Subagent".to_string()),
                 agent: text_field(message, "agent").unwrap_or_default(),
                 model: text_field(message, "model"),
                 background,
@@ -229,16 +231,18 @@ fn next_subagent_id() -> String {
 
 /// 建好子会话目录（0700），返回这个子智能体的子会话文件路径。文件由子进程自己写。
 fn prepare_session_file(id: &str) -> Result<std::path::PathBuf, String> {
-    let dir = smelt_model::agent_paths::subagent_sessions_dir()
-        .ok_or_else(|| "找不到 Smelt 主目录，无法保存子会话".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|error| format!("无法创建子会话目录：{error}"))?;
+    let dir = smelt_model::agent_paths::subagent_sessions_dir().ok_or_else(|| {
+        "can't find the Smelt home directory to save the subagent session".to_string()
+    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("couldn't create the subagent session directory: {error}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
     smelt_model::agent_paths::subagent_session_file_in(&dir, id)
-        .ok_or_else(|| format!("子智能体 id 不能当文件名：{id}"))
+        .ok_or_else(|| format!("the subagent id can't be a file name: {id}"))
 }
 
 fn record_progress(inner: &Inner, tool_call_id: &str, message: &serde_json::Value) {
@@ -388,7 +392,7 @@ pub(super) fn request_stop(inner: &Inner, id: &str) -> Result<(), String> {
         .subagents
         .iter_mut()
         .find(|subagent| subagent.view.id == id && subagent.owner.is_empty())
-        .ok_or_else(|| format!("没有子智能体 {id}"))?;
+        .ok_or_else(|| format!("no subagent {id}"))?;
     if !subagent.view.status.is_running() {
         return Ok(());
     }

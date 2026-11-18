@@ -1,0 +1,103 @@
+# 界面图标清单：名字  Phosphor 来源  [粗细，默认 bold]  [mirror 左右翻转]
+# 来源写 fa:<名字> 的取 Font Awesome Free 的 brands（Phosphor 画走样的品牌标志），不带粗细。
+# 产物由 scripts/vendor-icons.py 生成；改了这里跑一遍脚本，再同步 src/icon.rs 的 IconName 表。
+
+# 基本操作
+plus                plus
+minus               minus
+close               x
+check               check
+search              magnifying-glass
+copy                copy
+ellipsis            dots-three
+loader              circle-notch
+refresh             arrow-clockwise
+restore             arrow-counter-clockwise
+undo                arrow-u-up-left
+pencil              pencil-simple
+square-pen          note-pencil
+trash               trash
+replace             swap
+case-sensitive      text-aa
+
+# 方向
+chevron-down        caret-down
+chevron-left        caret-left
+chevron-right       caret-right
+chevrons-up-down    caret-up-down
+arrow-up            arrow-up
+arrow-down          arrow-down
+arrow-right         arrow-right
+external-link       arrow-square-out
+
+# 状态
+info                info
+warning             warning
+circle-alert        warning-circle
+circle-x            x-circle
+circle-check        check-circle
+clock               clock
+calendar            calendar-blank
+bell                bell
+bell-off            bell-slash
+pin                 push-pin
+pin-off             push-pin-slash
+star                star
+star-fill           star            fill
+eye                 eye
+eye-off             eye-slash
+play                play
+pause               pause
+stop                stop
+asterisk            asterisk
+sparkles            sparkle
+
+# 对象
+terminal            terminal-window
+bot                 robot
+message-square      chat
+messages-square     chats
+inbox               tray
+archive             archive
+file                file
+folder              folder
+folder-open         folder-open
+folder-plus         folder-plus
+folder-tree         tree-view
+repositories        folders
+git-branch          git-branch
+book-open           book-open
+globe               globe-simple
+puzzle              puzzle-piece
+settings            gear-six
+sliders-horizontal  sliders-horizontal
+wrench              wrench
+workflow            flow-arrow
+webhook             webhooks-logo
+inspector           path
+palette             palette
+keyboard            keyboard
+languages           translate
+sun                 sun
+coffee              coffee
+gauge               gauge
+cpu                 cpu
+memory-stick        memory
+
+# 窗口与布局
+app-window          app-window
+layout-dashboard    layout
+layout-grid         squares-four
+panel-left          sidebar-simple
+panel-right         sidebar-simple  mirror
+panel-left-filled   sidebar-simple  fill
+panel-right-filled  sidebar-simple  fill    mirror
+maximize            corners-out
+minimize            corners-in
+
+# 机器
+monitor             monitor
+laptop              laptop
+apple               apple-logo      fill
+linux               fa:linux
+windows             windows-logo    fill

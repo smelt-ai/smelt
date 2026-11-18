@@ -1,125 +1,137 @@
 //! 持久化边界的错误类型。
 //!
-//! 库路径不再返回 `String`：调用方可以按种类分支，而不是 `contains("不存在")`。
+//! 库路径不再返回 `String`：调用方可以按种类分支，而不是比对报错原话。
 
 use std::path::PathBuf;
 
 /// `smelt-store` 的失败原因。
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("数据库不存在: {path}")]
+    #[error("The database doesn't exist: {path}")]
     MissingDatabase { path: PathBuf },
 
-    #[error("主库缺失但留下 WAL/SHM sidecar（{path}），拒绝建空库以免丢失未 checkpoint 的数据")]
+    #[error(
+        "The database is missing but its WAL/SHM sidecars remain ({path}); refusing to create an empty one so un-checkpointed data isn't lost"
+    )]
     OrphanSidecars { path: PathBuf },
 
-    #[error("数据库已存在，拒绝覆盖: {path}")]
+    #[error("The database already exists; refusing to overwrite it: {path}")]
     AlreadyExists { path: PathBuf },
 
-    #[error("数据库路径不是普通文件: {path}")]
+    #[error("The database path isn't a regular file: {path}")]
     NotRegularFile { path: PathBuf },
 
-    #[error("打开 {path} 失败: {source}")]
+    #[error("Couldn't open {path}: {source}")]
     OpenFailed {
         path: PathBuf,
         #[source]
         source: OpenSource,
     },
 
-    #[error("数据库连接锁已损坏: {path}")]
+    #[error("The database connection lock is poisoned: {path}")]
     ConnectionPoisoned { path: PathBuf },
 
-    #[error("数据库 schema {observed} 新于当前支持的 {supported}，拒绝打开")]
+    #[error(
+        "Database schema {observed} is newer than the supported {supported}; refusing to open it"
+    )]
     SchemaTooNew { observed: u32, supported: u32 },
 
-    #[error("数据库 schema {version} 形状无法识别，拒绝打开以免清空已有数据")]
+    #[error(
+        "Database schema {version} has an unrecognized shape; refusing to open it so existing data isn't wiped"
+    )]
     SchemaUnrecognized { version: u32 },
 
-    #[error("无法启用 WAL，SQLite 返回 journal_mode={mode}")]
+    #[error("Couldn't enable WAL; SQLite returned journal_mode={mode}")]
     WalNotEnabled { mode: String },
 
-    #[error("{label} 不能为空")]
+    #[error("{label} can't be empty")]
     EmptyName { label: String },
 
-    #[error("{label} 不能包含 NUL")]
+    #[error("{label} can't contain NUL")]
     NameContainsNul { label: String },
 
-    #[error("智能体定义的 id 不能在更新中修改: {from} -> {to}")]
+    #[error("{label} is repeated")]
+    Duplicate { label: String },
+
+    #[error("{label} isn't UTF-8")]
+    NotUtf8 { label: String },
+
+    #[error("An agent definition's id can't change in an update: {from} -> {to}")]
     AgentDefinitionIdChanged { from: String, to: String },
 
-    #[error("重复的自动化 id: {id}")]
+    #[error("Duplicate automation id: {id}")]
     DuplicateAutomationId { id: String },
 
-    #[error("重复的 Run id: {id}")]
+    #[error("Duplicate run id: {id}")]
     DuplicateRunId { id: String },
 
-    #[error("delivery_attempts 不能为负")]
+    #[error("delivery_attempts can't be negative")]
     NegativeDeliveryAttempts,
 
-    #[error("KV scope {scope} 的根节点不是 object")]
+    #[error("The root of KV scope {scope} isn't an object")]
     KvRootNotObject { scope: String },
 
-    #[error("KV {path} 是二进制值，不能还原为结构化值")]
+    #[error("KV {path} is a binary value and can't be restored as a structured value")]
     KvBlobNotStructured { path: String },
 
-    #[error("未知 KV value_type: {value_type}")]
+    #[error("Unknown KV value_type: {value_type}")]
     UnknownKvValueType { value_type: String },
 
-    #[error("对话缺少 id")]
+    #[error("The conversation has no id")]
     ConversationMissingId,
 
-    #[error("对话 {id} 里既没有终端也不是 ACP 对话")]
+    #[error("Conversation {id} has no terminals and isn't an ACP conversation")]
     EmptyConversation { id: String },
 
-    #[error("工作区里没有这段对话：{id}")]
+    #[error("The workspace has no conversation {id}")]
     ConversationNotFound { id: String },
 
-    #[error("对话已归档，请先恢复：{id}")]
+    #[error("The conversation is archived; restore it first: {id}")]
     ConversationArchived { id: String },
 
-    #[error("ACP 对话 {id} 缺少会话 id")]
+    #[error("ACP conversation {id} has no session id")]
     AcpConversationMissingSid { id: String },
 
-    #[error("会话 id 已被别的对话占用：{id}")]
+    #[error("The session id is already used by another conversation: {id}")]
     DuplicateSessionId { id: String },
 
-    #[error("项目根目录不能为空")]
+    #[error("The project root can't be empty")]
     EmptyProjectRoot,
 
-    #[error("工作树不存在：{id}")]
+    #[error("The worktree doesn't exist: {id}")]
     WorkspaceWorksetNotFound { id: String },
 
-    #[error("工作树仍绑定会话，不能删除：{id}")]
+    #[error("The worktree still has sessions and can't be deleted: {id}")]
     WorkspaceWorksetInUse { id: String },
 
-    #[error("工作树 id 已用于不同内容：{id}")]
+    #[error("The worktree id is already used for something else: {id}")]
     WorkspaceWorksetConflict { id: String },
 
-    #[error("原工作树已关闭，请选择或重新创建工作树后恢复：{id}")]
+    #[error("The original worktree was closed; pick or recreate a worktree, then restore: {id}")]
     ClosedWorksetRestoreRequired { id: String },
 
-    #[error("无法恢复归档会话：{message}")]
+    #[error("Couldn't restore the archived session: {message}")]
     InvalidWorksetRestore { message: String },
 
-    #[error("会话 {id} 的工作目录不属于绑定的工作树")]
+    #[error("Session {id}'s working directory isn't inside its worktree")]
     WorksetCwdOutside { id: String },
 
-    #[error("KV 数字 {path} 无效: {source}")]
+    #[error("KV number {path} is invalid: {source}")]
     InvalidKvNumber {
         path: String,
         #[source]
         source: serde_json::Error,
     },
 
-    #[error("当前移动端构建未启用 SQLite store")]
+    #[error("This mobile build doesn't include the SQLite store")]
     SqliteDisabledOnMobile,
 
     #[error(
-        "数据库未初始化（空文件或空 schema），拒绝建空库。若这是主库丢失后的残留，请从备份恢复。"
+        "The database isn't initialized (empty file or empty schema); refusing to create an empty one. If this is left over from a lost database, restore it from a backup."
     )]
     UninitializedDatabase,
 
-    #[error("事务已中止")]
+    #[error("The transaction was aborted")]
     TransactionAborted,
 
     #[error(transparent)]
@@ -156,6 +168,18 @@ impl StoreError {
 
     pub(crate) fn empty_name(label: impl Into<String>) -> Self {
         Self::EmptyName {
+            label: label.into(),
+        }
+    }
+
+    pub(crate) fn duplicate(label: impl Into<String>) -> Self {
+        Self::Duplicate {
+            label: label.into(),
+        }
+    }
+
+    pub(crate) fn not_utf8(label: impl Into<String>) -> Self {
+        Self::NotUtf8 {
             label: label.into(),
         }
     }

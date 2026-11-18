@@ -1,4 +1,5 @@
-//! 插件携带的 gpui-kit 主题文件。只在插件发现、导入或重新加载时读盘。
+//! 插件携带的主题文件（smelt 主题格式，见 `docs/ui-design-language.md` 第 2 节）。只在插件
+//! 发现、导入或重新加载时读盘。
 
 use std::path::{Path, PathBuf};
 
@@ -77,22 +78,18 @@ mod tests {
         std::fs::create_dir(&themes).unwrap();
         std::fs::write(
             themes.join("b.json"),
-            r#"{"name":"B","themes":[{"name":"B Light","mode":"light"}]}"#,
+            r##"{"version":1,"name":"B","themes":[{"name":"B Light","mode":"light","colors":{"bg_base":"#ffffff","text_base":"#1a1a18"}}]}"##,
         )
         .unwrap();
         std::fs::write(
             themes.join("a.json"),
-            r#"{"name":"A","themes":[{"name":"A Dark","mode":"dark"}]}"#,
+            r##"{"version":1,"name":"A","themes":[{"name":"A Dark","mode":"dark","colors":{"bg_base":"#101010","text_base":"#fafafa"}}]}"##,
         )
         .unwrap();
         let sets = read(dir.path(), "themes/a.json").unwrap();
         let names = sets
             .iter()
-            .map(|json| {
-                serde_json::from_str::<gpui_component::ThemeSet>(json)
-                    .unwrap()
-                    .name
-            })
+            .map(|json| serde_json::from_str::<serde_json::Value>(json).unwrap()["name"].clone())
             .collect::<Vec<_>>();
         assert_eq!(names, ["A", "B"]);
     }
@@ -104,7 +101,7 @@ mod tests {
         std::fs::create_dir(&themes).unwrap();
         std::fs::write(
             themes.join("a.json"),
-            r#"{"name":"A","themes":[{"name":"A Dark","mode":"dark"}]}"#,
+            r##"{"version":1,"name":"A","themes":[{"name":"A Dark","mode":"dark","colors":{"bg_base":"#101010","text_base":"#fafafa"}}]}"##,
         )
         .unwrap();
         std::fs::write(themes.join("broken.json"), "{").unwrap();

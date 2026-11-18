@@ -921,6 +921,8 @@ fn session_dto(state: &SessionState) -> SessionStateChanged {
         turn_started_at_unix_seconds: state.turn_started_at,
         pending_question: state.pending_question.clone(),
         pending_request: state.pending_request.clone(),
+        pending_note: state.pending_note.clone(),
+        completed_delivery_id: state.completed_delivery_id.clone(),
         tokens_used: state.tokens_used,
         branch: state.branch.clone(),
         dirty_files: state.dirty_files.clone(),
@@ -1017,6 +1019,7 @@ mod tests {
             session_id: None,
             provider_session_id: None,
             output: Some("blob".into()),
+            error_code: None,
             error: None,
             runtime_released_at: Some(2),
         });

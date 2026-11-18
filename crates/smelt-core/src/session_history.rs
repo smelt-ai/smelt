@@ -1531,10 +1531,10 @@ pub(crate) fn read_pi_session_branch(
     session_id: &str,
 ) -> Result<PiSessionBranch, String> {
     if session_id.is_empty() {
-        return Err("会话 id 为空".to_string());
+        return Err("the session id is empty".to_string());
     }
     let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) else {
-        return Err("没有工作目录，无法定位 Pi 会话文件".to_string());
+        return Err("no working directory, so the Pi session file can't be found".to_string());
     };
     let dir = pi_sessions_dir_for(&LocalFs, agent_dir, session_dir).join(pi_session_cwd_dir(cwd));
     let mut files = Vec::new();
@@ -1548,10 +1548,10 @@ pub(crate) fn read_pi_session_branch(
         })
         .collect::<Vec<_>>();
     match matches.len() {
-        0 => Err(format!("在 {} 找不到会话 {session_id}", dir.display())),
+        0 => Err(format!("session {session_id} isn't in {}", dir.display())),
         1 => parse_pi_session_file(&matches.remove(0), session_id),
         _ => Err(format!(
-            "会话 {session_id} 在 {} 匹配到多份文件",
+            "session {session_id} matched several files in {}",
             dir.display()
         )),
     }
@@ -1559,17 +1559,24 @@ pub(crate) fn read_pi_session_branch(
 
 fn parse_pi_session_file(path: &Path, session_id: &str) -> Result<PiSessionBranch, String> {
     let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
+        .map_err(|error| format!("couldn't read {}: {error}", path.display()))?;
     let header = text
         .lines()
         .next()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .ok_or_else(|| format!("{} 没有会话头", path.display()))?;
-    let header: Value = serde_json::from_str(header)
-        .map_err(|error| format!("{} 的会话头无法解析：{error}", path.display()))?;
+        .ok_or_else(|| format!("{} has no session header", path.display()))?;
+    let header: Value = serde_json::from_str(header).map_err(|error| {
+        format!(
+            "couldn't parse the session header of {}: {error}",
+            path.display()
+        )
+    })?;
     if header.get("type").and_then(Value::as_str) != Some("session") {
-        return Err(format!("{} 的第一行不是 session 头", path.display()));
+        return Err(format!(
+            "the first line of {} isn't a session header",
+            path.display()
+        ));
     }
     let id = header
         .get("id")
@@ -1578,7 +1585,7 @@ fn parse_pi_session_file(path: &Path, session_id: &str) -> Result<PiSessionBranc
         .unwrap_or("");
     if id != session_id {
         return Err(format!(
-            "{} 的会话头 id 是 {id}，不是 {session_id}",
+            "the session header id of {} is {id}, not {session_id}",
             path.display()
         ));
     }

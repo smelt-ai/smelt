@@ -45,21 +45,30 @@ fn spawn_helper(
         .stderr(std::process::Stdio::piped());
     command
         .spawn()
-        .map_err(|error| format!("启动 Pi 凭据助手失败：{error}"))
+        .map_err(|error| format!("couldn't start the Pi credential helper: {error}"))
 }
 
-/// 收尾一个已经结束/要结束的子进程，把 stderr 拼成人能看的错误。
-fn failure_reason(child: &mut std::process::Child) -> String {
+/// 收尾一个已经结束/要结束的子进程：它没报结果就退出了，种类带上 stderr 的最后几行。
+fn helper_exited(child: &mut std::process::Child) -> PiLoginNote {
     let mut stderr = String::new();
     if let Some(mut pipe) = child.stderr.take() {
         use std::io::Read;
         let _ = pipe.read_to_string(&mut stderr);
     }
     let stderr = stderr.trim();
-    if stderr.is_empty() {
-        "Pi 凭据助手没有输出结果".to_string()
-    } else {
-        stderr.lines().rev().take(3).collect::<Vec<_>>().join("；")
+    PiLoginNote::HelperExited {
+        detail: (!stderr.is_empty())
+            .then(|| stderr.lines().rev().take(3).collect::<Vec<_>>().join("; ")),
+    }
+}
+
+/// 运行时按英文说的同一句，给日志和不认识种类的客户端。
+fn helper_exited_message(note: &PiLoginNote) -> String {
+    match note {
+        PiLoginNote::HelperExited {
+            detail: Some(detail),
+        } => format!("the Pi credential helper exited without a result: {detail}"),
+        _ => "the Pi credential helper exited without a result".to_string(),
     }
 }
 
@@ -73,7 +82,10 @@ fn run_once<T>(
     pick: impl Fn(PiLoginEvent) -> Option<T>,
 ) -> Result<T, String> {
     let mut child = spawn_auth_process(args, status)?;
-    let stdout = child.stdout.take().ok_or("Pi 凭据助手没有 stdout")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("the Pi credential helper has no stdout")?;
     // 看门狗单独一条线程：超时判断不能挂在「收到一行输出」上——真正会卡死的
     // 情形恰恰是子进程一声不吭（网络吊住、等一个永远不来的回调），
     // 那时读循环停在 read 上，永远走不到超时检查。
@@ -122,7 +134,7 @@ fn run_once<T>(
     let mut failure = None;
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         match parse_login_event(&line) {
-            Some(PiLoginEvent::Error { message }) => failure = Some(message),
+            Some(PiLoginEvent::Error { message, .. }) => failure = Some(message),
             Some(event) => {
                 if let Some(picked) = pick(event) {
                     result = Some(picked);
@@ -144,12 +156,15 @@ fn run_once<T>(
     };
     let _ = child.wait();
     if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err(format!("Pi 凭据助手超时（{}）", args.join(" ")));
+        return Err(format!(
+            "the Pi credential helper timed out ({})",
+            args.join(" ")
+        ));
     }
     match (result, failure) {
         (Some(result), _) => Ok(result),
         (None, Some(message)) => Err(message),
-        (None, None) => Err(failure_reason(&mut child)),
+        (None, None) => Err(helper_exited_message(&helper_exited(&mut child))),
     }
 }
 
@@ -210,8 +225,9 @@ fn pump_login_events(reader: impl BufRead, mut emit: impl FnMut(PiLoginEvent) ->
             continue;
         };
         let event = match event {
-            PiLoginEvent::Error { message } => PiLoginEvent::Error {
+            PiLoginEvent::Error { message, note } => PiLoginEvent::Error {
                 message: smelt_model::redact::redact_secrets(&message),
+                note,
             },
             event => event,
         };
@@ -281,7 +297,10 @@ impl PiLoginSession {
         ),
         String,
     > {
-        let stdout = child.stdout.take().ok_or("Pi 凭据助手没有 stdout")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("the Pi credential helper has no stdout")?;
         let stdin = child.stdin.take();
         let (sender, receiver) = futures::channel::mpsc::unbounded();
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -297,11 +316,14 @@ impl PiLoginSession {
                 sender.unbounded_send(event).is_ok()
             });
             if !settled && !cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                let reason = child_handle
+                let note = child_handle
                     .lock()
-                    .map(|mut child| failure_reason(&mut child))
-                    .unwrap_or_else(|_| "Pi 凭据助手异常退出".to_string());
-                let _ = sender.unbounded_send(PiLoginEvent::Error { message: reason });
+                    .map(|mut child| helper_exited(&mut child))
+                    .unwrap_or(PiLoginNote::HelperExited { detail: None });
+                let _ = sender.unbounded_send(PiLoginEvent::Error {
+                    message: helper_exited_message(&note),
+                    note: Some(note),
+                });
             }
             if let Ok(mut child) = child_handle.lock() {
                 let _ = child.kill();
@@ -393,7 +415,8 @@ mod tests {
         assert_eq!(
             events,
             vec![PiLoginEvent::Error {
-                message: "token endpoint https://auth.example.com/token?client_secret=*** returned {\"access_token\":\"***\"}".into()
+                message: "token endpoint https://auth.example.com/token?client_secret=*** returned {\"access_token\":\"***\"}".into(),
+                note: None,
             }]
         );
     }
@@ -501,6 +524,7 @@ mod tests {
             Some(PiLoginEvent::AuthUrl {
                 url: "https://claude.ai/oauth".into(),
                 instructions: Some("paste the code".into()),
+                note: None,
             })
         );
         assert_eq!(
@@ -517,6 +541,7 @@ mod tests {
                     label: "Browser login".into(),
                     description: Some("default".into()),
                 }],
+                note: None,
             })
         );
         assert_eq!(
@@ -567,7 +592,7 @@ mod tests {
     #[test]
     fn a_malformed_protocol_line_surfaces_instead_of_vanishing() {
         let event = parse_login_event(r#"{"event":"device_code","userCode":"ABC"}"#);
-        let Some(PiLoginEvent::Error { message }) = event else {
+        let Some(PiLoginEvent::Error { message, .. }) = event else {
             panic!("协议不匹配应当变成错误：{event:?}");
         };
         assert!(
@@ -576,12 +601,41 @@ mod tests {
         );
     }
 
+    /// 登录助手自己说的话带种类：客户端按语言说，不认识的种类读成 `Other` 改说 `message`。
+    #[test]
+    fn helper_notes_ride_along_and_newer_kinds_read_as_other() {
+        assert_eq!(
+            parse_login_event(
+                r#"{"event":"progress","message":"The callback didn't accept that address (HTTP 400).","note":{"kind":"callback_rejected","status":400}}"#
+            ),
+            Some(PiLoginEvent::Progress {
+                message: "The callback didn't accept that address (HTTP 400).".into(),
+                note: Some(PiLoginNote::CallbackRejected { status: 400 }),
+            })
+        );
+        let Some(PiLoginEvent::Progress { message, note }) = parse_login_event(
+            r#"{"event":"progress","message":"fallback","note":{"kind":"from_the_future","x":1}}"#,
+        ) else {
+            panic!("新种类不该让事件读不出来");
+        };
+        assert_eq!(note, Some(PiLoginNote::Other));
+        assert_eq!(login_text(message, note.as_ref()), "fallback");
+        assert_eq!(
+            login_text(
+                "fallback".into(),
+                Some(&PiLoginNote::LoginFailed { code: 3 })
+            ),
+            "Sign-in failed (exit code 3)"
+        );
+    }
+
     #[test]
     fn protocol_lines_become_events() {
         assert_eq!(
             parse_login_event(r#"{"event":"progress","message":"换取令牌…"}"#),
             Some(PiLoginEvent::Progress {
-                message: "换取令牌…".into()
+                message: "换取令牌…".into(),
+                note: None,
             })
         );
         assert_eq!(
@@ -594,6 +648,7 @@ mod tests {
                 message: "贴 code".into(),
                 placeholder: Some("http://localhost:53692/callback".into()),
                 options: Vec::new(),
+                note: None,
             })
         );
         assert_eq!(

@@ -835,7 +835,7 @@ fn attach_without_a_runtime_is_fatal() {
     assert_eq!(
         recorder.events(),
         vec![TerminalUpdate::Error {
-            message: NO_RUNTIME.to_string(),
+            message: rust_i18n::t!("error.not_connected").into_owned(),
             fatal: true,
         }]
     );
@@ -874,7 +874,7 @@ fn attach_while_connecting_fails_when_the_connection_stops() {
     assert_eq!(
         recorder.events(),
         vec![TerminalUpdate::Error {
-            message: NO_RUNTIME.to_string(),
+            message: rust_i18n::t!("error.not_connected").into_owned(),
             fatal: true,
         }]
     );

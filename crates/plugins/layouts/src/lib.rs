@@ -5,7 +5,9 @@
 //! 布局在宿主启动时最先登记，所以它就是出厂布局。
 
 use gpui::App;
-use smelt_plugin_api::{self as api, LayoutSource, PageSource};
+use smelt_plugin_api::{self as api, LayoutMaterials, LayoutSource, Material, PageSource, text};
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// 登记页和布局用的来源名，id 是 `smelt.layouts/<名字>`。卸下时用它。
 pub const OWNER: &str = "smelt.layouts";
@@ -13,26 +15,38 @@ pub const OWNER: &str = "smelt.layouts";
 /// 工作台这一页的 id。
 pub const WORKBENCH: &str = "smelt.layouts/workbench";
 
-/// 随程序带的页：工作台，启动时进的就是它。中间是出口，默认放会话舞台。
-pub static PAGES: &[PageSource<'static>] = &[PageSource {
-    name: "workbench",
-    title: "工作台",
-    home: true,
-    index: Some("smelt.sessions/stage"),
-}];
+/// 随程序带的页：工作台，启动时进的就是它。中间是出口，默认放选中的那段会话。
+fn pages() -> [PageSource<'static>; 1] {
+    [PageSource {
+        name: "workbench",
+        title: text!("page.workbench"),
+        home: true,
+        // 约定：smelt.sessions 的会话视图（`SESSION`）。
+        index: Some("smelt.sessions/session"),
+    }]
+}
 
 /// 随程序带的布局。来源从 `smelt` 改成 `smelt.layouts` 时 id 跟着变了，旧存档对不上就不装。
-pub static LAYOUTS: &[LayoutSource<'static>] = &[LayoutSource {
-    page: WORKBENCH,
-    name: "standard",
-    title: "默认",
-    state: include_str!("../layouts/standard.json"),
-}];
+fn layouts() -> [LayoutSource<'static>; 1] {
+    [LayoutSource {
+        page: WORKBENCH,
+        name: "standard",
+        title: text!("layout.standard"),
+        state: include_str!("../layouts/standard.json"),
+        // 左边的导航透侧栏材质；右边的文件那组是常看的内容，和中间一样铺实色。
+        materials: LayoutMaterials {
+            left: Some(Material::Sidebar),
+            right: None,
+            bottom: None,
+            center: None,
+        },
+    }]
+}
 
 /// 宿主启动时调一次，在建工作台之前。再调一次是整组替换，结果相同。
 pub fn register(cx: &mut App) {
-    api::register_pages(OWNER, PAGES, cx).expect("内置页不合法");
-    api::register_layouts(OWNER, LAYOUTS, cx).expect("内置布局文件不合法");
+    api::register_pages(OWNER, &pages(), cx).expect("内置页不合法");
+    api::register_layouts(OWNER, &layouts(), cx).expect("内置布局文件不合法");
 }
 
 /// 卸下这页和这批布局。正开着这页时宿主换到别处。
@@ -57,7 +71,8 @@ mod tests {
         children.iter().flat_map(views).collect()
     }
 
-    /// 会话列表在左停靠区、文件那组在右停靠区，都开着；出口在中间，默认放舞台。
+    /// 左停靠区是一摞，从上到下：新对话和入口、会话列表、底下一条左边设置右边额度；文件
+    /// 那组在右停靠区，都开着；出口在中间，默认放舞台。
     #[gpui::test]
     fn the_default_layout_puts_the_side_views_in_open_side_docks(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -81,10 +96,34 @@ mod tests {
             assert_eq!(views(&state["center"]), [api::OUTLET_VIEW]);
             assert_eq!(
                 api::home_page(cx).and_then(|page| page.index).as_deref(),
-                Some("smelt.sessions/stage")
+                Some("smelt.sessions/session")
             );
             assert_eq!(state["left_dock"]["open"], true);
-            assert_eq!(views(&state["left_dock"]["panel"]), ["smelt.sessions/list"]);
+            let left = api::layout("smelt.layouts/standard", cx)
+                .and_then(|state| state.left_dock)
+                .expect("有左停靠区");
+            let side = &left.panel().children;
+            assert_eq!(side.len(), 1, "侧栏整个是一摞");
+            let stack = api::Stack::of(&side[0]).expect("是一摞").expect("写得对");
+            assert_eq!(
+                stack.views(),
+                [
+                    "smelt.launcher/nav",
+                    "smelt.sessions/list",
+                    "smelt.launcher/settings",
+                    "smelt.agents/quota"
+                ]
+            );
+            // 上下排：列表吃剩下的高度，入口和底下那条按内容定高。底下那条里设置按钮按内容
+            // 定宽，额度吃剩下的宽度、窄了在里面折行。
+            assert_eq!(stack.axis, api::StackAxis::Vertical);
+            let fits: Vec<bool> = stack.items.iter().map(|item| item.fit).collect();
+            assert_eq!(fits, [true, false, true]);
+            let api::StackContent::Stack(bottom) = &stack.items[2].content else {
+                panic!("底下那条是横排的一摞");
+            };
+            assert_eq!(bottom.axis, api::StackAxis::Horizontal);
+            assert!(bottom.items[0].fit && !bottom.items[1].fit);
             assert_eq!(state["right_dock"]["open"], true);
             assert_eq!(
                 views(&state["right_dock"]["panel"]),
@@ -96,6 +135,9 @@ mod tests {
                 ]
             );
             assert!(state["bottom_dock"].is_null());
+            let materials = api::layouts(cx)[0].materials;
+            assert_eq!(materials.left, Some(Material::Sidebar));
+            assert_eq!((materials.right, materials.center), (None, None));
             unregister(cx);
             assert!(api::layouts(cx).is_empty());
             assert!(api::pages(cx).is_empty());

@@ -1,0 +1,406 @@
+_version: 2
+config.permission_mode.name:
+  en: Permission mode
+  zh-CN: 权限模式
+config.permission_mode.description:
+  en: How writes, commands and custom tools get approved
+  zh-CN: 写入、执行命令和自定义工具的审批策略
+config.permission_mode.ask:
+  en: Ask each time
+  zh-CN: 逐次审批
+config.permission_mode.full:
+  en: Full access
+  zh-CN: 完全访问
+config.thinking_level.name:
+  en: Reasoning effort
+  zh-CN: 推理强度
+config.thinking_level.description:
+  en: The thinking level for Pi's current model
+  zh-CN: Pi 当前模型使用的 thinking level
+config.thinking_level.off:
+  en: "Off"
+  zh-CN: 关闭
+config.thinking_level.minimal:
+  en: Minimal
+  zh-CN: 极简
+config.thinking_level.low:
+  en: Low
+  zh-CN: 低
+config.thinking_level.medium:
+  en: Medium
+  zh-CN: 中
+config.thinking_level.high:
+  en: High
+  zh-CN: 高
+config.thinking_level.xhigh:
+  en: Very high
+  zh-CN: 很高
+config.thinking_level.max:
+  en: Max
+  zh-CN: 最高
+config.codemode.name:
+  en: Script tools
+  zh-CN: 脚本工具
+config.codemode.description:
+  en: The model writes scripts that call other tools. Takes effect next turn.
+  zh-CN: 模型写脚本调用其它工具，下一轮生效
+choice.yes:
+  en: "Yes"
+  zh-CN: 是
+choice.no:
+  en: "No"
+  zh-CN: 否
+choice.on:
+  en: "On"
+  zh-CN: 开
+choice.off:
+  en: "Off"
+  zh-CN: 关
+note.mid_turn_input_unsupported:
+  en: This agent can't take messages while it's working
+  zh-CN: 当前智能体不支持运行中插入消息
+note.queue_unsupported:
+  en: This agent doesn't have a message queue
+  zh-CN: 当前智能体不支持原生消息队列
+note.compact_unsupported:
+  en: This agent can't compact its context
+  zh-CN: 当前智能体不支持压缩上下文
+note.rewind_unsupported:
+  en: This agent can't rewind messages
+  zh-CN: 当前智能体不支持回退消息
+note.reload_unsupported:
+  en: /reload isn't supported here, so it wasn't sent to the model
+  zh-CN: 当前协议不支持 /reload，不会发给模型
+note.shake_while_busy:
+  en: A turn is running; try /shake after it finishes
+  zh-CN: 回合进行中，结束后再 /shake
+note.peer_message_dropped:
+  en: The session host wasn't ready, so a message from another conversation was dropped
+  zh-CN: 会话宿主还没就绪，丢掉了一条别的对话发来的消息
+note.steer_failed:
+  en: "Couldn't insert the message: %{detail}"
+  zh-CN: "插入消息失败：%{detail}"
+note.follow_up_failed:
+  en: "Couldn't queue the follow-up: %{detail}"
+  zh-CN: "排队后续消息失败：%{detail}"
+note.clear_queue_failed:
+  en: "Couldn't clear the queue: %{detail}"
+  zh-CN: "清空队列失败：%{detail}"
+note.compact_failed:
+  en: "Couldn't compact the context: %{detail}"
+  zh-CN: "压缩上下文失败：%{detail}"
+note.stop_task_failed:
+  en: "Couldn't stop the background task: %{detail}"
+  zh-CN: "停止后台任务失败：%{detail}"
+note.stop_subagent_failed:
+  en: "Couldn't stop the subagent: %{detail}"
+  zh-CN: "停止子智能体失败：%{detail}"
+note.rewind_while_busy:
+  en: Couldn't rewind while the turn is running; stop it first
+  zh-CN: 回退失败：回合还在运行，请先停止
+note.rewind_in_progress:
+  en: Couldn't rewind; another rewind is already in progress
+  zh-CN: 回退失败：已有一次回退在进行中
+note.rewind_target_missing:
+  en: Couldn't rewind; the agent's branch doesn't have this message (it may have been compacted or belong to another branch)
+  zh-CN: 回退失败：agent 分支上找不到这条消息（可能已被压缩或属于另一条分支）
+note.rewind_cancelled:
+  en: The rewind was cancelled by an extension
+  zh-CN: 回退被扩展取消
+note.rewind_failed:
+  en: "Couldn't rewind: %{detail}"
+  zh-CN: "回退失败：%{detail}"
+note.extension_failed:
+  en: A Pi extension failed
+  zh-CN: Pi Extension 执行失败
+note.extension_failed_with_detail:
+  en: "Pi extension: %{detail}"
+  zh-CN: "Pi Extension：%{detail}"
+note.config_update_failed:
+  en: "Couldn't update the session setting: %{detail}"
+  zh-CN: "更新会话配置失败：%{detail}"
+note.config_not_boolean:
+  en: "Couldn't update the session setting: Pi setting `%{config}` doesn't take on/off"
+  zh-CN: "更新会话配置失败：Pi 配置 `%{config}` 不接受布尔值"
+note.config_value_unsupported:
+  en: "Couldn't update the session setting: Pi doesn't support `%{config}` = `%{value}`"
+  zh-CN: "更新会话配置失败：Pi 不支持会话配置 `%{config}` = `%{value}`"
+note.no_script_tools:
+  en: "Couldn't update the session setting: this Pi has no script tools"
+  zh-CN: 更新会话配置失败：当前 Pi 没有脚本工具
+note.invalid_model_value:
+  en: "Couldn't update the session setting: the Pi model value isn't valid"
+  zh-CN: 更新会话配置失败：Pi 模型值格式无效
+note.script_tools_not_applied:
+  en: "Couldn't update the session setting: script tools didn't take effect on the next turn"
+  zh-CN: 更新会话配置失败：脚本工具没有在下一轮生效
+entry.new_session:
+  en: "New session · the agent doesn't remember anything above · %{at}"
+  zh-CN: "新会话 · agent 不记得以上内容 · %{at}"
+entry.turn_failed:
+  en: ⚠️ Turn failed
+  zh-CN: ⚠️ 回合失败
+entry.turn_failed_with_detail:
+  en: "⚠️ Turn failed: %{detail}"
+  zh-CN: "⚠️ 回合失败：%{detail}"
+turn_hint.no_api_key:
+  en: "No API key yet. In Settings → Agents → Custom Agents, create an agent based on this one, put your keys in Environment as KEY=value, one per line (e.g. OPENAI_API_KEY=sk-...), then start a new conversation with it."
+  zh-CN: "还没配 API key：在「设置 → Agent → 自定义 Agent」新建一个基于这个 agent 的 Agent，在「环境变量」里按 KEY=值 每行一条填好（比如 OPENAI_API_KEY=sk-...），再用它新建对话。"
+turn_hint.api_key_rejected:
+  en: "The server rejected the API key. Check this agent's Environment in Settings → Agents → Custom Agents, and make sure no spaces or quotes were pasted along with it."
+  zh-CN: "API key 被服务端拒绝了：到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」核对一遍，注意别把前后空格或引号一起粘进去。"
+turn_hint.connection_refused:
+  en: "Couldn't reach the model service. If you set a custom base URL (such as OPENAI_BASE_URL), check the address and port in this agent's Environment under Settings → Agents → Custom Agents, and that this machine can reach it."
+  zh-CN: "连不上模型服务：如果配了自定义 base URL（如 OPENAI_BASE_URL），到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」确认地址和端口，以及本机能否访问。"
+turn_hint.rate_limited:
+  en: "The server is rate limiting requests. Wait a moment before sending again; if it keeps happening, check your account's quota."
+  zh-CN: 被服务端限流了，等一会儿再发；持续出现就要看账号配额。
+diff.unchanged_lines:
+  en: "... %{count} unchanged lines ..."
+  zh-CN: "... 省略 %{count} 行未修改内容 ..."
+new_session.section.conversation:
+  en: Conversation
+  zh-CN: 对话
+new_session.section.favorites:
+  en: Favorites
+  zh-CN: 常用
+new_session.section.terminal:
+  en: Terminal
+  zh-CN: 终端
+peer.received.bounce:
+  en: "%{from} didn't get your message"
+  zh-CN: "%{from} 没收到你的消息"
+peer.received.completion:
+  en: "%{from} handed back a result"
+  zh-CN: "%{from} 交回结果"
+peer.received.message:
+  en: "%{from} sent a message"
+  zh-CN: "%{from} 发来消息"
+peer.received.task:
+  en: "%{from} sent a task"
+  zh-CN: "%{from} 发来任务"
+task_note.background_task:
+  en: Background task %{id}
+  zh-CN: 后台任务 %{id}
+task_note.ended:
+  en: "%{who} ended: %{status}"
+  zh-CN: "%{who} 已结束，状态 %{status}"
+task_note.ended_with_code:
+  en: "%{who} ended: %{status}, exit code %{code}"
+  zh-CN: "%{who} 已结束，状态 %{status}，退出码 %{code}"
+task_note.message:
+  en: Message %{id}
+  zh-CN: 消息 %{id}
+task_note.status.completed:
+  en: done
+  zh-CN: 完成
+task_note.status.failed:
+  en: failed
+  zh-CN: 失败
+task_note.status.running:
+  en: running
+  zh-CN: 进行中
+task_note.status.stopped:
+  en: stopped
+  zh-CN: 已停止
+task_note.status.timed_out:
+  en: timed out
+  zh-CN: 超时
+task_note.subagent:
+  en: Subagent %{id}
+  zh-CN: 子智能体 %{id}
+task_note.subagents:
+  en: "%{count} subagents"
+  zh-CN: "%{count} 个子智能体"
+task_note.titled:
+  en: "%{who} (%{title})"
+  zh-CN: "%{who}（%{title}）"
+mcp_preset.browser_mcp.name:
+  en: Agent360 Browser
+  zh-CN: Agent360 浏览器
+mcp_preset.browser_mcp.summary:
+  en: "Drives the Chrome you're signed in to: open pages, click and fill forms, take screenshots, and stop to ask you at captchas or two-factor prompts. Install the Agent360 Browser MCP extension first (click \"Install Extension\"). Runs on Smelt's bundled Bun."
+  zh-CN: 操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先安装 Agent360 Browser MCP 扩展（点「安装扩展」）。用 Smelt 自带的 Bun 运行。
+mcp_preset.chrome_devtools.name:
+  en: Chrome DevTools
+  zh-CN: Chrome 开发调试
+mcp_preset.chrome_devtools.summary:
+  en: "Inspect Chrome's network, console, performance and memory. Needs Chrome 144 or later with remote debugging turned on and allowed at chrome://inspect/#remote-debugging. Tries Smelt's bundled Bun (upstream doesn't support Bun)."
+  zh-CN: 检查 Chrome 的网络、控制台、性能和内存。需 Chrome 144 以上，在 chrome://inspect/#remote-debugging 开启远程调试并授权。尝试用 Smelt 自带 Bun 运行（上游不支持 Bun）。
+mcp_preset.chrome_devtools.summary_remote_desktop:
+  en: "Inspect the network, console, performance and memory of the remote desktop's Chrome. Tries Smelt's bundled Bun (upstream doesn't support Bun)."
+  zh-CN: 检查远程桌面 Chrome 的网络、控制台、性能和内存。尝试用 Smelt 自带 Bun 运行（上游不支持 Bun）。
+mcp_preset.figma.name:
+  en: Figma
+  zh-CN: Figma
+mcp_preset.figma.summary:
+  en: Read Figma designs, components and variables, and generate code from them. Sign in with your Figma account in the browser.
+  zh-CN: 读取 Figma 设计稿、组件和变量，按设计生成代码。用 Figma 账号在浏览器里授权。
+mcp_preset.playwright.name:
+  en: Playwright Browser
+  zh-CN: Playwright 浏览器
+mcp_preset.playwright.summary:
+  en: "Drives the Chrome you're using through the Playwright extension, keeping your sign-ins: open pages, click and fill forms, read page structure, take screenshots. Install the Playwright extension first (click \"Install Extension\") and confirm the connection in the browser. Runs on Smelt's bundled Bun."
+  zh-CN: 通过 Playwright 扩展操作你正在用的 Chrome，沿用已登录的状态：打开网页、点击填表、读页面结构、截图。需先安装 Playwright 扩展（点「安装扩展」），连接时在浏览器里确认。用 Smelt 自带的 Bun 运行。
+mcp_preset.playwright.summary_remote_desktop:
+  en: "Drives the always-on Chrome in this machine's remote desktop, keeping its sign-ins: open pages, click and fill forms, read page structure, take screenshots. A person takes over in the remote desktop for captchas and payments. Runs on Smelt's bundled Bun."
+  zh-CN: 操作这台机器远程桌面里常驻的 Chrome，沿用里面已登录的状态：打开网页、点击填表、读页面结构、截图；遇到验证码、付款，人在远程桌面里接管。用 Smelt 自带的 Bun 运行。
+mcp_preset.rea.name:
+  en: REA Reverse Engineering
+  zh-CN: REA 逆向分析
+mcp_preset.rea.summary:
+  en: "Takes apart apps, binaries, web pages and packet captures on this machine and explains, with evidence, how a feature works. Runs on Smelt's bundled Bun; no Node needed."
+  zh-CN: 在本机拆解应用、二进制、网页和抓包，带证据讲清某个功能是怎么实现的。用 Smelt 自带的 Bun 运行，不用装 Node。
+agent.unknown_engine:
+  en: "Agent `%{name}` uses an unknown engine `%{engine}`"
+  zh-CN: "智能体 `%{name}` 使用了未知执行引擎 `%{engine}`"
+custom_agent.command_required:
+  en: "Custom agent \"%{name}\" needs a launch command"
+  zh-CN: "自定义 Agent「%{name}」还没填启动命令"
+custom_agent.data_dir_in_env:
+  en: "Data directory goes in the \"Data directory\" field, not as `%{var}` in the environment variables"
+  zh-CN: "`%{var}` 请填在「数据目录」里，不要写在环境变量中"
+custom_agent.data_dir_unsupported:
+  en: "%{agent} doesn't support a custom data directory"
+  zh-CN: "%{agent} 不支持自定义数据目录"
+custom_agent.env_not_allowed:
+  en: "Environment variable `%{name}` can't be set here"
+  zh-CN: "环境变量 `%{name}` 不能在这里设置"
+custom_agent.name_required:
+  en: A custom agent needs a name
+  zh-CN: 自定义 Agent 需要一个名字
+custom_agent.unknown_kind:
+  en: "Custom agent \"%{name}\" uses an unknown type `%{kind}`"
+  zh-CN: "自定义 Agent「%{name}」使用了未知类型 `%{kind}`"
+env.duplicate:
+  en: "Line %{line} defines `%{name}` again"
+  zh-CN: "第 %{line} 行重复定义了 `%{name}`"
+env.invalid_name:
+  en: "Line %{line} has an invalid variable name `%{name}` (letters, digits and underscores only, not starting with a digit)"
+  zh-CN: "第 %{line} 行的变量名不合法：`%{name}`（只能是字母、数字、下划线，且不以数字开头）"
+env.launch_only:
+  en: "`%{name}` on line %{line} can only come from the environment Smelt was started in: it decides how processes start, where code loads from or how the network is reached. Changing it here would stop the agent from starting, with an error that doesn't point back here"
+  zh-CN: "第 %{line} 行的 `%{name}` 只能由启动 smelt 的环境提供：它决定进程怎么起、代码从哪加载或怎么连网络，在这里改会让 agent 起不来且报错指不到这里"
+env.missing_equals:
+  en: "Line %{line} is missing `=`: %{text}"
+  zh-CN: "第 %{line} 行缺少 `=`：%{text}"
+pi_model.base_url_invalid:
+  en: The API URL must be a full HTTP(S) URL
+  zh-CN: API 地址必须是完整的 HTTP(S) URL
+pi_model.base_url_required:
+  en: Enter the API URL first
+  zh-CN: 请先填写 API 地址
+pi_model.base_url_scheme:
+  en: "The API URL must start with http:// or https://: %{url}"
+  zh-CN: "API 地址需要以 http:// 或 https:// 开头：%{url}"
+pi_model.provider_id_invalid:
+  en: "Provider ID \"%{id}\" is invalid: it must start with a letter and contain only letters, digits and hyphens"
+  zh-CN: "Provider ID「%{id}」无效：须以字母开头，只能含字母、数字和短连字符"
+pi_model.provider_id_required:
+  en: Enter a Provider ID
+  zh-CN: 请填写 Provider ID
+project.unnamed:
+  en: Project
+  zh-CN: 项目
+settings.not_integer:
+  en: "%{key} must be an integer"
+  zh-CN: "%{key} 必须是整数"
+settings.not_string:
+  en: "%{key} must be a string"
+  zh-CN: "%{key} 必须是字符串"
+settings.out_of_range:
+  en: "%{key} must be between %{min} and %{max}"
+  zh-CN: "%{key} 必须在 %{min} 和 %{max} 之间"
+settings.theme_mode_invalid:
+  en: "%{key} must be dark or light"
+  zh-CN: "%{key} 只能是 dark 或 light"
+settings.theme_mode_unknown:
+  en: "Theme %{name} is neither dark nor light: %{mode}"
+  zh-CN: "主题 %{name} 的明暗不是 dark 或 light：%{mode}"
+settings.theme_name_invalid:
+  en: "%{key} must be a theme name"
+  zh-CN: "%{key} 必须是主题名"
+settings.unknown_key:
+  en: "Unknown setting: %{key}"
+  zh-CN: "未知设置：%{key}"
+settings.unknown_theme:
+  en: "Unknown theme: %{name}"
+  zh-CN: "未知主题：%{name}"
+pi_login.paste_callback:
+  en: "If the browser can't open the 127.0.0.1 page after you authorize (for example when you authorize on a phone or another computer), paste the full address from its address bar here"
+  zh-CN: 授权后浏览器打不开 127.0.0.1 的页面时（比如在手机或另一台电脑上授权），把地址栏里的完整地址粘贴到这里
+pi_login.sign_in_in_browser:
+  en: Sign in and approve access in the browser, then come back here.
+  zh-CN: 在浏览器里登录并同意授权，完成后回到这里。
+pi_login.callback_received:
+  en: Got the address, finishing sign-in…
+  zh-CN: 已收到地址，正在完成登录…
+pi_login.callback_rejected:
+  en: "The callback didn't accept that address (HTTP %{status}). Authorize again, then paste the new address."
+  zh-CN: 回调没有接受这个地址（HTTP %{status}），请重新授权后再粘贴
+pi_login.callback_failed:
+  en: "Couldn't pass the address to the callback: %{error}"
+  zh-CN: "转交回调失败：%{error}"
+pi_login.no_redirect:
+  en: "The authorization link has no callback address, so it can't be passed along. Authorize in a browser on this machine."
+  zh-CN: 授权链接里没有回调地址，没法转交，请在这台机器的浏览器里授权
+pi_login.not_full_address:
+  en: "That isn't a full address. Copy the whole thing from the browser's address bar (it starts with http://)."
+  zh-CN: 这不是完整的地址，请从浏览器地址栏整段复制（以 http:// 开头）
+pi_login.wrong_callback:
+  en: "That isn't this sign-in's callback address; it should start with %{expected}"
+  zh-CN: 这不是这次登录的回调地址，应以 %{expected} 开头
+pi_login.no_authorization_result:
+  en: "The address has no authorization result (code). Approve on the authorization page first, then copy it."
+  zh-CN: 地址里没有授权结果（code），请在授权页点完同意后再复制
+pi_login.login_failed:
+  en: "Sign-in failed (exit code %{code})"
+  zh-CN: 登录失败（退出码 %{code}）
+pi_login.answered_github_dot_com:
+  en: "Answered “%{question}” for you: left the GitHub Enterprise domain blank to sign in to github.com"
+  zh-CN: 已代答「%{question}」：GitHub 企业版域名留空，按 github.com 登录
+pi_login.answered_browser:
+  en: "Answered “%{question}” for you: sign in with the browser"
+  zh-CN: 已代答「%{question}」：用浏览器完成登录
+pi_login.helper_exited:
+  en: The Pi credential helper exited without a result
+  zh-CN: Pi 凭据助手没有输出结果就退出了
+pi_login.helper_exited_with:
+  en: "The Pi credential helper exited without a result: %{detail}"
+  zh-CN: "Pi 凭据助手没有输出结果就退出了：%{detail}"
+memory.pending.external_content:
+  en: "Written in a turn that read outside content (%{sources})"
+  zh-CN: 写入的那一轮读取了外部内容（%{sources}）
+memory.pending.unattended:
+  en: Written by an unattended run (automation)
+  zh-CN: 无人值守的运行（自动化）写入
+memory.pending.unknown_origin:
+  en: Couldn't confirm where this memory originally came from
+  zh-CN: 无法确认这条记忆原先的来源
+memory.pending.edits_pending:
+  en: Edited a memory that was still pending
+  zh-CN: 修改的是一条待确认的记忆
+memory.pending.rule_lacks_user_words:
+  en: A user or feedback rule must quote the user's own words, so text from web pages or repositories doesn't become a standing rule
+  zh-CN: user / feedback 规则正文须包含用户原话，避免把网页或仓库里的文字写成常驻规则
+memory.pending.no_provenance:
+  en: No record of where it came from; adopt it to use it
+  zh-CN: 无来源记录，需用户采纳后生效
+memory.pending.modified_outside:
+  en: The file changed outside Smelt after it was recorded; adopt it again
+  zh-CN: 文件在记录来源后被外部修改，需重新采纳
+memory.pending.legacy_backfill:
+  en: "Upgrade migration: memory that existed before the upgrade"
+  zh-CN: 升级迁移：升级前已有的记忆
+quota.window.primary:
+  en: Primary
+  zh-CN: 主
+quota.window.secondary:
+  en: Secondary
+  zh-CN: 次
+quota.window.period:
+  en: Quota
+  zh-CN: 额度
+quota.window.month:
+  en: Month
+  zh-CN: 月

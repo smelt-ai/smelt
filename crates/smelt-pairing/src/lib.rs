@@ -27,20 +27,43 @@ pub struct Pairing {
     pub relay_url: Option<String>,
 }
 
+/// 配对串解析不了的原因。按种类给，界面按自己的语言说；`Display` 是英文，给命令行和日志。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairingError {
+    /// 不是 `smelt+iroh://` 开头。
+    NotPairing,
+    /// 没有 endpoint id。
+    MissingEndpoint,
+    /// 没有配对码。
+    MissingCode,
+}
+
+impl std::fmt::Display for PairingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotPairing => write!(f, "not a {PAIRING_SCHEME} pairing link"),
+            Self::MissingEndpoint => f.write_str("the pairing link has no endpoint id"),
+            Self::MissingCode => f.write_str("the pairing link has no pairing code"),
+        }
+    }
+}
+
+impl std::error::Error for PairingError {}
+
 /// 解析配对串。
 ///
 /// 不用 `url::Url` 整体解析：`smelt+iroh` 是自定义 scheme，通用 URL 解析器对非标准
 /// scheme 的 authority 处理各家不一。这里手动剥 scheme 和 host，query 用标准解析。
-pub fn parse_pairing_uri(uri: &str) -> Result<Pairing, String> {
+pub fn parse_pairing_uri(uri: &str) -> Result<Pairing, PairingError> {
     let prefix = format!("{PAIRING_SCHEME}://");
     let rest = uri
         .trim()
         .strip_prefix(&prefix)
-        .ok_or_else(|| format!("不是 {PAIRING_SCHEME} 配对串"))?;
+        .ok_or(PairingError::NotPairing)?;
     let (host, query) = rest.split_once('?').unwrap_or((rest, ""));
     let endpoint_id = host.trim_end_matches('/');
     if endpoint_id.is_empty() {
-        return Err("配对串缺少 endpoint id".to_string());
+        return Err(PairingError::MissingEndpoint);
     }
     let mut code = None;
     let mut relay_url = None;
@@ -51,7 +74,7 @@ pub fn parse_pairing_uri(uri: &str) -> Result<Pairing, String> {
             _ => {}
         }
     }
-    let code = code.ok_or_else(|| "配对串缺少配对码".to_string())?;
+    let code = code.ok_or(PairingError::MissingCode)?;
     Ok(Pairing {
         endpoint_id: endpoint_id.to_string(),
         code,
@@ -86,9 +109,18 @@ mod tests {
 
     #[test]
     fn rejects_other_schemes_and_missing_parts() {
-        assert!(parse_pairing_uri("https://example.com/?code=c").is_err());
-        assert!(parse_pairing_uri("smelt+iroh://abc123/").is_err());
-        assert!(parse_pairing_uri("smelt+iroh:///?code=c").is_err());
+        assert_eq!(
+            parse_pairing_uri("https://example.com/?code=c"),
+            Err(PairingError::NotPairing)
+        );
+        assert_eq!(
+            parse_pairing_uri("smelt+iroh://abc123/"),
+            Err(PairingError::MissingCode)
+        );
+        assert_eq!(
+            parse_pairing_uri("smelt+iroh:///?code=c"),
+            Err(PairingError::MissingEndpoint)
+        );
     }
 
     #[test]

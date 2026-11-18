@@ -2,9 +2,9 @@ use chrono::{TimeZone, Timelike, Utc};
 use chrono_tz::America::New_York;
 use smelt_core::automation::{
     Automation, AutomationAction, AutomationCommand, AutomationFile, AutomationInboundEvent,
-    AutomationRun, AutomationRunContext, AutomationRunSource, AutomationRunStatus,
-    AutomationSchedule, AutomationTrigger, apply_automation_command, claim_due_automations,
-    event_run_id, publish_automation_event,
+    AutomationProblem, AutomationRun, AutomationRunContext, AutomationRunFailure,
+    AutomationRunSource, AutomationRunStatus, AutomationSchedule, AutomationTrigger,
+    apply_automation_command, claim_due_automations, event_run_id, publish_automation_event,
 };
 
 fn existing_workspace() -> String {
@@ -71,7 +71,7 @@ fn scheduled_agent_automation_requires_an_instruction() {
             now,
         )
         .unwrap_err();
-        assert!(error.contains("指令"), "{error}");
+        assert_eq!(error, AutomationProblem::NoInstruction);
     }
     assert!(file.automations.is_empty());
 
@@ -113,7 +113,7 @@ fn manual_run_without_instruction_or_payload_is_rejected() {
     )
     .unwrap_err();
 
-    assert!(error.contains("指令"), "{error}");
+    assert_eq!(error, AutomationProblem::NothingToSend);
     assert!(file.runs.is_empty());
 }
 
@@ -139,13 +139,8 @@ fn stored_schedule_without_instruction_fails_instead_of_sending_an_empty_prompt(
         .find(|run| run.automation_id == "legacy")
         .expect("到点的计划要留下一条失败记录");
     assert_eq!(run.status, AutomationRunStatus::Failed);
-    assert!(
-        run.error
-            .as_deref()
-            .is_some_and(|error| error.contains("指令")),
-        "{:?}",
-        run.error
-    );
+    assert_eq!(run.error_code, Some(AutomationRunFailure::NothingToSend));
+    assert_eq!(run.error, None);
     assert!(run.runtime_released_at.is_some());
 }
 
@@ -175,13 +170,9 @@ fn event_without_payload_cannot_drive_an_automation_without_instruction() {
 
     assert_eq!(published.runs.len(), 1);
     assert_eq!(published.runs[0].status, AutomationRunStatus::Failed);
-    assert!(
-        published.runs[0]
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("指令")),
-        "{:?}",
-        published.runs[0].error
+    assert_eq!(
+        published.runs[0].error_code,
+        Some(AutomationRunFailure::NothingToSend)
     );
 }
 
@@ -729,7 +720,6 @@ fn multiple_schedules_use_the_earliest_next_slot() {
         AutomationSchedule::Daily { hour: 9, minute: 0 },
         AutomationSchedule::EveryHours { hours: 2 },
     ]);
-    assert_eq!(trigger.summary(), "每天 09:00；每隔 2 小时");
     assert_eq!(
         trigger.next_after(now).unwrap(),
         Utc.with_ymd_and_hms(2026, 9, 4, 9, 0, 0).unwrap()
@@ -809,10 +799,6 @@ fn during_window_aligns_to_session_hours_on_weekdays() {
     assert_eq!(
         schedule.next_after(saturday).format("%F %H:%M").to_string(),
         "2026-09-07 09:30"
-    );
-    assert_eq!(
-        schedule.summary(),
-        "每周一、二、三、四、五 09:30–15:00 · 每隔 15 分钟"
     );
 }
 
@@ -1254,20 +1240,19 @@ fn event_topic_rejects_unqualified_names() {
 #[test]
 fn webhook_validation_uses_product_copy() {
     let trigger = AutomationTrigger::webhook("", None);
-    assert_eq!(trigger.validate().unwrap_err(), "外部触发缺少接收令牌");
-    assert!(!trigger.validate().unwrap_err().contains("Webhook"));
+    assert_eq!(
+        trigger.validate().unwrap_err(),
+        AutomationProblem::NoWebhookToken
+    );
 }
 
 #[test]
 fn empty_trigger_uses_trigger_condition_copy() {
     let trigger = AutomationTrigger::default();
-    assert_eq!(trigger.kind_label(), "未配置触发条件");
-    assert_eq!(trigger.summary(), "未配置触发条件");
-    assert_eq!(trigger.validate().unwrap_err(), "请至少添加一条触发条件");
-
-    let mixed = AutomationTrigger::schedule(AutomationSchedule::daily_morning())
-        .with_webhook_secret("tok_mixed");
-    assert_eq!(mixed.kind_label(), "多种触发条件");
+    assert_eq!(
+        trigger.validate().unwrap_err(),
+        AutomationProblem::NoTrigger
+    );
 }
 
 #[test]
@@ -1279,7 +1264,6 @@ fn schedule_and_webhook_can_share_one_automation() {
     })
     .with_webhook_secret("tok_both");
     assert!(trigger.validate().is_ok());
-    assert_eq!(trigger.summary(), "每天 09:30；外部触发");
     assert_eq!(
         trigger.next_after(now).unwrap().format("%H:%M").to_string(),
         "09:30"
@@ -1341,7 +1325,6 @@ fn one_automation_can_have_two_webhook_addresses() {
         ..AutomationTrigger::default()
     };
     assert!(trigger.validate().is_ok());
-    assert_eq!(trigger.summary(), "外部触发；外部触发");
     assert!(trigger.matches_webhook_token("tok_a"));
     assert!(trigger.matches_webhook_token("tok_b"));
     assert!(!trigger.matches_webhook_token("tok_c"));
@@ -1424,6 +1407,7 @@ fn live_projection_keeps_catalog_fields_and_drops_run_bodies() {
         session_id: Some("acp-1".into()),
         provider_session_id: None,
         output: Some("x".repeat(16 * 1024)),
+        error_code: None,
         error: Some("failed".into()),
         runtime_released_at: Some(2),
     });

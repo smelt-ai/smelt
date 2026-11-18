@@ -1365,26 +1365,23 @@ pub fn parse_env_lines(text: &str) -> Result<BTreeMap<String, String>, String> {
         }
         let number = index + 1;
         let Some((name, value)) = line.split_once('=') else {
-            return Err(format!("第 {number} 行缺少 `=`：{line}"));
+            return Err(
+                rust_i18n::t!("env.missing_equals", line = number, text = line).into_owned(),
+            );
         };
         let name = name.trim();
         if !is_env_name(name) {
-            return Err(format!(
-                "第 {number} 行的变量名不合法：`{name}`（只能是字母、数字、下划线，且不以数字开头）"
-            ));
+            return Err(rust_i18n::t!("env.invalid_name", line = number, name = name).into_owned());
         }
         if LAUNCH_ONLY_ENV.contains(&name) {
-            return Err(format!(
-                "第 {number} 行的 `{name}` 只能由启动 smelt 的环境提供：它决定进程怎么起、\
-                 代码从哪加载或怎么连网络，在这里改会让 agent 起不来且报错指不到这里"
-            ));
+            return Err(rust_i18n::t!("env.launch_only", line = number, name = name).into_owned());
         }
         // 值只去掉首尾空白：粘贴 key 时常带一个尾随空格，而带空格的值本身应当保留。
         if env
             .insert(name.to_string(), value.trim().to_string())
             .is_some()
         {
-            return Err(format!("第 {number} 行重复定义了 `{name}`"));
+            return Err(rust_i18n::t!("env.duplicate", line = number, name = name).into_owned());
         }
     }
     Ok(env)
@@ -1432,10 +1429,12 @@ impl AcpProfile {
 
     fn required_kind(&self) -> Result<ConversationAgentKind, String> {
         self.kind().ok_or_else(|| {
-            format!(
-                "自定义 Agent「{}」使用了未知类型 `{}`",
-                self.label, self.kind_id
+            rust_i18n::t!(
+                "custom_agent.unknown_kind",
+                name = self.label,
+                kind = self.kind_id
             )
+            .into_owned()
         })
     }
 
@@ -1456,20 +1455,25 @@ impl AcpProfile {
     pub fn validate(&self) -> Result<ConversationAgentKind, String> {
         let kind = self.required_kind()?;
         if self.label.trim().is_empty() {
-            return Err("自定义 Agent 需要一个名字".into());
+            return Err(rust_i18n::t!("custom_agent.name_required").into_owned());
         }
         if kind == ConversationAgentKind::Custom && self.command.trim().is_empty() {
-            return Err(format!("自定义 Agent「{}」还没填启动命令", self.label));
+            return Err(
+                rust_i18n::t!("custom_agent.command_required", name = self.label).into_owned(),
+            );
         }
         if !self.workspace_dir.trim().is_empty() && self.workspace_env_var().is_none() {
-            return Err(format!("{} 不支持自定义数据目录", kind.label()));
+            return Err(
+                rust_i18n::t!("custom_agent.data_dir_unsupported", agent = kind.label())
+                    .into_owned(),
+            );
         }
         // 数据目录决定历史从哪读，只能有「数据目录」一栏这一个来源；写在环境变量里
         // agent 会写到那个目录，历史页却还读默认目录。
         if let Some(var) = self.workspace_env_var()
             && self.env.contains_key(var)
         {
-            return Err(format!("`{var}` 请填在「数据目录」里，不要写在环境变量中"));
+            return Err(rust_i18n::t!("custom_agent.data_dir_in_env", var = var).into_owned());
         }
         // 设置页解析时已拦过，这里再拦一次经 CLI / 控制 API 写进来的配置。
         if let Some(name) = self
@@ -1477,7 +1481,7 @@ impl AcpProfile {
             .keys()
             .find(|name| LAUNCH_ONLY_ENV.contains(&name.as_str()) || !is_env_name(name))
         {
-            return Err(format!("环境变量 `{name}` 不能在这里设置"));
+            return Err(rust_i18n::t!("custom_agent.env_not_allowed", name = name).into_owned());
         }
         Ok(kind)
     }
@@ -1726,7 +1730,7 @@ mod tests {
             .and_then(|crates| crates.parent())
             .expect("repo root");
         let bundles = [
-            repo.join("crates/smelt/assets/icons"),
+            repo.join("crates/smelt-ui/assets/icons"),
             repo.join("mobile/assets/agent-icons"),
         ];
 
@@ -2273,7 +2277,7 @@ mod tests {
         let error = profile("custom")
             .validate()
             .expect_err("通用 ACP 必须填命令");
-        assert!(error.contains("启动命令"), "{error}");
+        assert!(error.contains("command"), "{error}");
 
         let error = AcpProfile {
             workspace_dir: "~/.kiro-2".to_string(),
@@ -2281,7 +2285,7 @@ mod tests {
         }
         .validate()
         .expect_err("Kiro 没有数据目录变量");
-        assert!(error.contains("数据目录"), "{error}");
+        assert!(error.contains("data directory"), "{error}");
 
         let error = AcpProfile {
             label: "  ".to_string(),
@@ -2289,7 +2293,7 @@ mod tests {
         }
         .validate()
         .expect_err("名字不能空");
-        assert!(error.contains("名字"), "{error}");
+        assert!(error.contains("name"), "{error}");
 
         // 数据目录只能有「数据目录」一个来源，否则 agent 写一处、历史页读另一处。
         let error = AcpProfile {
@@ -2298,7 +2302,7 @@ mod tests {
         }
         .validate()
         .expect_err("数据目录变量不能写在环境变量里");
-        assert!(error.contains("数据目录"), "{error}");
+        assert!(error.contains("Data directory"), "{error}");
 
         // 设置页之外（CLI / 控制 API）写进来的启动专用变量也要拦。
         let error = AcpProfile {
@@ -2372,7 +2376,7 @@ mod env_lines_tests {
     #[test]
     fn rejects_a_line_without_an_equals() {
         let error = parse_env_lines("DEEPSEEK_API_KEY sk-abc").expect_err("必须报错");
-        assert!(error.contains("第 1 行"), "错误要指出行号：{error}");
+        assert!(error.contains("Line 1"), "错误要指出行号：{error}");
     }
 
     #[test]

@@ -105,12 +105,14 @@
 mod acp_host;
 mod acp_idle;
 mod acp_registry;
+mod acp_supervise;
 mod agent_memory_control;
 mod agent_notify;
 mod attention;
 mod automation_runtime;
 mod client_conn;
 mod control;
+mod conversation_delivery;
 mod conversation_image;
 mod desktop;
 mod devices;
@@ -239,7 +241,7 @@ pub(crate) struct DaemonStopping;
 
 impl std::fmt::Display for DaemonStopping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("守护正在停机")
+        f.write_str("The runtime is shutting down")
     }
 }
 
@@ -1183,12 +1185,14 @@ fn suspend_terminal_identity(
         .remove_session(&state.id, state.instance)
         .map_err(|error| error.to_string())?
     {
-        return Err("终端实例已替换，不能归档旧实例".to_string());
+        return Err(
+            "The terminal instance was replaced; the old one can't be archived".to_string(),
+        );
     }
     session_branch::forget(&state.id);
     session_names::forget(&state.id);
     with_session_directory(|directory| directory.suspend_instance(state))
-        .unwrap_or_else(|| Err("终端身份目录尚未初始化".to_string()))
+        .unwrap_or_else(|| Err("The terminal identity directory isn't ready yet".to_string()))
 }
 
 /// Remote ownership is a small catalog, so each change publishes a complete replacement. This
@@ -1286,7 +1290,8 @@ fn handle_automation_command<C: ClientSocket>(
                 owner.run_once(automation_id, chrono::Local::now())
             }
             command => owner.apply(command, chrono::Local::now()),
-        }?;
+        }
+        .map_err(|error| error.to_string())?;
         if applied.changed
             && let Err(error) =
                 event_hub.publish_automations(&webhook::annotate_snapshot(applied.snapshot.clone()))
@@ -1327,7 +1332,9 @@ fn handle_event_publish<C: ClientSocket>(
         let event: AutomationInboundEvent =
             serde_json::from_value(event).map_err(|error| format!("invalid event: {error}"))?;
         let mut owner = automations.lock().unwrap();
-        let applied = owner.publish_event(event, chrono::Local::now())?;
+        let applied = owner
+            .publish_event(event, chrono::Local::now())
+            .map_err(|error| error.to_string())?;
         if applied.changed
             && let Err(error) =
                 event_hub.publish_automations(&webhook::annotate_snapshot(applied.snapshot.clone()))
@@ -2754,7 +2761,9 @@ fn headless_self_upgrade_once(pinned: &str) -> HeadlessUpgradeStep {
     };
     let disk = match smelt_core::daemon_image::content_fingerprint(&target) {
         Ok(fingerprint) => fingerprint,
-        Err(error) => return HeadlessUpgradeStep::Failed(format!("读不了新映像：{error}")),
+        Err(error) => {
+            return HeadlessUpgradeStep::Failed(format!("Couldn't read the new image: {error}"));
+        }
     };
     if disk == pinned {
         return HeadlessUpgradeStep::Idle;
@@ -2829,7 +2838,7 @@ pub(crate) enum SelfUpgradeOutcome {
 fn classify_self_upgrade_reply(reply: &str) -> SelfUpgradeOutcome {
     let value: serde_json::Value = match serde_json::from_str(reply.trim()) {
         Ok(value) => value,
-        Err(_) => return SelfUpgradeOutcome::Failed(format!("回包非 JSON：{reply:?}")),
+        Err(_) => return SelfUpgradeOutcome::Failed(format!("The reply isn't JSON: {reply:?}")),
     };
     if value["ok"].as_bool() == Some(true) {
         return SelfUpgradeOutcome::Upgraded;
@@ -2845,7 +2854,9 @@ fn classify_self_upgrade_reply(reply: &str) -> SelfUpgradeOutcome {
 pub(crate) fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
     let sock = match RuntimeStream::connect(sock_path()) {
         Ok(sock) => sock,
-        Err(error) => return SelfUpgradeOutcome::Failed(format!("连自己失败：{error}")),
+        Err(error) => {
+            return SelfUpgradeOutcome::Failed(format!("Couldn't connect to itself: {error}"));
+        }
     };
     let _ = sock.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = sock.set_read_timeout(Some(Duration::from_secs(30)));
@@ -2854,11 +2865,11 @@ pub(crate) fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutco
         &mut sock,
         &serde_json::json!({ "op": "upgrade", "exe": target.to_string_lossy() }),
     ) {
-        return SelfUpgradeOutcome::Failed(format!("发 upgrade 失败：{error}"));
+        return SelfUpgradeOutcome::Failed(format!("Couldn't send upgrade: {error}"));
     }
     let mut reply = String::new();
     if let Err(error) = BufReader::new(&sock).read_line(&mut reply) {
-        return SelfUpgradeOutcome::Failed(format!("读回包失败：{error}"));
+        return SelfUpgradeOutcome::Failed(format!("Couldn't read the reply: {error}"));
     }
     classify_self_upgrade_reply(&reply)
 }
@@ -2983,13 +2994,13 @@ fn action_payload(kind: Option<&str>, text: Option<&str>) -> Result<Vec<u8>, &'s
             // 空 reply 若退化成单独 `\r` 就和 approve 一样——误点会当成批准。
             let t = text.unwrap_or("");
             if t.is_empty() {
-                return Err("需要非空 text");
+                return Err("text can't be empty");
             }
             let mut bytes = t.as_bytes().to_vec();
             bytes.push(b'\r');
             Ok(bytes)
         }
-        _ => Err("未知 kind"),
+        _ => Err("unknown kind"),
     }
 }
 
@@ -2998,11 +3009,12 @@ fn upgrade_target(req: &serde_json::Value) -> Result<std::path::PathBuf, String>
     if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         let path = std::path::PathBuf::from(p);
         if !path.is_file() {
-            return Err(format!("exe 不存在：{}", path.display()));
+            return Err(format!("exe doesn't exist: {}", path.display()));
         }
         return Ok(path);
     }
-    daemon_executable_path().map_err(|error| format!("找不到当前守护映像：{error}"))
+    daemon_executable_path()
+        .map_err(|error| format!("Couldn't find the current runtime image: {error}"))
 }
 
 /// Windows 升级时接班进程从这个变量拿到前任的 pid，等它退出再绑定监听。
@@ -3025,7 +3037,7 @@ fn handle_upgrade<C: ClientSocket>(conn: C, req: &serde_json::Value) {
     if let Err(error) = smelt_core::daemon_image::retarget_launch_after_commit(&exe) {
         let _ = smelt_runtime_client::protocol::write_json_line(
             &mut c,
-            &serde_json::json!({ "ok": false, "err": format!("设置启动名失败：{error}") }),
+            &serde_json::json!({ "ok": false, "err": format!("Couldn't set the launch name: {error}") }),
         );
         return;
     }
@@ -3129,7 +3141,7 @@ fn sync_pi_status_extension_at(path: &std::path::Path) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("无效的 Pi 状态扩展路径：{}", path.display()),
+            format!("Invalid Pi status extension path: {}", path.display()),
         )
     })?;
     std::fs::create_dir_all(parent)?;

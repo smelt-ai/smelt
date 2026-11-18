@@ -6,7 +6,10 @@ use gpui::{Action, KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
 use smelt_plugin_api::{self as api, RunCommand};
 
 use crate::keymap::{Overrides, app_key_bindings, bind_commands};
-use crate::{DismissWorkspace, SidebarOpen, workspace_commands};
+use crate::{DismissWorkspace, workspace_commands};
+
+// 站在 Input 上的键，模拟编辑器更深的 Replace / Escape。
+gpui::actions!(key_binding_tests, [Deeper]);
 
 fn keymap() -> Keymap {
     let bindings = TestAppContext::single().update(|cx| {
@@ -15,11 +18,9 @@ fn keymap() -> Keymap {
         app_key_bindings(&bound, cx)
     });
     let mut keymap = Keymap::new(bindings);
-    // 用 SidebarOpen 站在 Input 上，模拟编辑器更深的 Outdent / Replace / Escape。
     keymap.add_bindings([
-        KeyBinding::new("cmd-[", SidebarOpen, Some("Input")),
-        KeyBinding::new("cmd-shift-f", SidebarOpen, Some("Input")),
-        KeyBinding::new("escape", SidebarOpen, Some("Input")),
+        KeyBinding::new("cmd-shift-f", Deeper, Some("Input")),
+        KeyBinding::new("escape", Deeper, Some("Input")),
     ]);
     keymap
 }
@@ -79,18 +80,14 @@ fn workspace_chords_stay_shallower_than_terminal_and_input() {
         "不能从 Workspace 抢走终端的回车"
     );
 
-    let cycle = matched("cmd-[", &["Workspace", "Input"]);
-    assert!(cycle[0].action().as_any().is::<SidebarOpen>());
+    let hud = matched("cmd-shift-f", &["Workspace", "Input"]);
+    assert!(hud[0].action().as_any().is::<Deeper>());
     assert!(
-        cycle
-            .iter()
-            .any(|binding| command_of(binding).as_deref() == Some("smelt.stage/prev-pane"))
+        hud.iter()
+            .any(|binding| command_of(binding).as_deref() == Some("smelt.app/debug-hud"))
     );
 
-    let hud = matched("cmd-shift-f", &["Workspace", "Input"]);
-    assert!(hud[0].action().as_any().is::<SidebarOpen>());
-
-    assert!(first_is::<SidebarOpen>("escape", &["Workspace", "Input"]));
+    assert!(first_is::<Deeper>("escape", &["Workspace", "Input"]));
     assert!(first_is::<DismissWorkspace>(
         "escape",
         &["Workspace", "Terminal"]
@@ -98,40 +95,11 @@ fn workspace_chords_stay_shallower_than_terminal_and_input() {
 }
 
 #[test]
-fn session_and_split_chords_carry_their_commands() {
-    assert_eq!(
-        first_command("cmd-1", &["Workspace"]).as_deref(),
-        Some("smelt.sessions/activate-1")
-    );
-    assert_eq!(
-        first_command("cmd-9", &["Workspace"]).as_deref(),
-        Some("smelt.sessions/activate-9")
-    );
-    assert_eq!(
-        first_command("cmd-d", &["Workspace"]).as_deref(),
-        Some("smelt.stage/split-right")
-    );
-    assert_eq!(
-        first_command("shift-cmd-d", &["Workspace"]).as_deref(),
-        Some("smelt.stage/split-down")
-    );
-    assert_eq!(
-        first_command("cmd-w", &["Workspace", "Terminal"]).as_deref(),
-        Some("smelt.stage/close-pane")
-    );
-}
-
-#[test]
 fn workspace_chords_are_not_bound_at_the_root_context() {
     for spec in [
         "cmd-k",
         "cmd-q",
-        "cmd-[",
-        "cmd-]",
-        "cmd-1",
-        "cmd-d",
-        "shift-cmd-d",
-        "cmd-w",
+        "cmd-,",
         "cmd-s",
         "cmd-shift-f",
         "escape",

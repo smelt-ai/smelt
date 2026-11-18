@@ -27,8 +27,8 @@ cargo run --bin smelt
 
 | 层 | 选型 | 说明 |
 |----|------|------|
-| GUI 框架 | **GPUI**（`gpui-pre` 0.3.11）+ `longbridge/gpui-kit` | GPU 加速、Metal 渲染 |
-| 组件库 | **gpui-component**（`longbridge/gpui-kit`，不再用 zzfn fork） | Dock/补全/主题等，与 GPUI 同一套修订 |
+| GUI 框架 | **GPUI**（`gpui-pre` 0.3.12）+ `longbridge/gpui-kit` | GPU 加速、Metal 渲染 |
+| 组件库 | **smelt-ui**（`crates/smelt-ui`，建在 gpui-base 的原语上） | 按钮、菜单、对话框、输入框、差异视图、代码编辑器、语法高亮、主题等全是自己的，不依赖 gpui-component，见 `docs/ui-design-language.md` |
 | 终端后端 | **portable-pty** `0.9`（在 `smeltd`） | Unix 起 `$SHELL`；Windows 起 `COMSPEC` 或 `cmd.exe`（ConPTY）并拿到 PTY |
 | 终端状态机 | **alacritty_terminal** `0.26` | ANSI 解析 + 网格模型 + 滚动缓冲 |
 | 定时器 | **smol** `2` | 驱动网格定时快照重绘 |
@@ -42,9 +42,14 @@ cargo run --bin smelt
 
 工作区是虚拟 workspace，代码全部分布在 `crates/` 下（见根目录 `Cargo.toml` 的成员列表）：
 
-- **`crates/smelt`** —— GUI 主程序（bin 名 `smelt`）：窗口 / 会话列表 / 标签分屏 /
-  文件树 / Git 面板 / 插件（`plugins/`，gpui-shell 脚本应用）等。`terminal.rs` 是内嵌终端前端
-  （连 smeltd 拿字节流 + alacritty 状态机 + 颜色解析），`terminal_view.rs` 是单个终端视图
+- **`crates/smelt`** —— GUI 主程序（bin 名 `smelt`），宿主：窗口、页和布局、命令和快捷键、
+  设置页的机制和外观、运行时连接、JS 插件运行时（`plugins/`，gpui-shell 脚本应用）。不认识
+  具体功能，功能都是 `crates/plugins/*` 下的内置插件，在 `plugin_host::install` 里登记。
+- **`crates/plugins/*`** —— 内置插件，一个 crate 一项功能：会话（`sessions`，会话列表和选中的
+  那段会话）、对话（`conversation`）、终端（`terminal`）、智能体（`agents`）、归档、机器、
+  自动化、文件、变更、历史等。只依赖 `smelt-plugin-api`。
+- **`crates/plugins/terminal`**（`smelt-terminal`）—— 内置插件「终端」：`terminal.rs` 是内嵌终端
+  前端（连 smeltd 拿字节流 + alacritty 状态机 + 颜色解析），`terminal_view.rs` 是单个终端视图
   （渲染/输入/IME/选区/滚动/resize）。PTY 与 shell 在 `smeltd`。
 - **`crates/smelt-model`** —— 桌面、守护、手机共用的类型：Control API、会话状态、事件订阅解码。
   不许引 GPUI，要能编进 iOS / Android。
@@ -53,7 +58,8 @@ cargo run --bin smelt
   主库入口（`sqlite_state.rs`，关系表在 `smelt-store`）。`daemon_state` 和 `agent_status`
   的定义在 `smelt-model`，这里只再导出。
 - **`crates/smelt-client`** / **`crates/smelt-client-store`** —— 桌面客户端。后者是
-  `~/.smelt/client.sqlite3`（外观、侧栏顺序、每段对话的界面状态和分屏布局、连过哪些运行时）。`SCHEMA_VERSION = 11`。
+  `~/.smelt/client.sqlite3`（外观、快捷键、各页布局和首页出口、连过哪些运行时、更新状态）。
+  功能的界面状态（置顶、排序等）归各插件自己的存储。`SCHEMA_VERSION = 15`。
 - **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（本机 socket 与 iroh）。Windows 上本机连接走当前用户的命名管道，Rust 客户端和 Bun / Pi 连同一条；`pair()` 是进程内的内存流（`stream/windows.rs`、`stream/memory.rs`）。不用 AF_UNIX。
 - **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `smelt-notify`）：
   终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、设备配对。远程不再经过网关进程。
@@ -62,9 +68,7 @@ cargo run --bin smelt
 - **`crates/smelt-git`** —— 独立的 Git 领域层（多仓库发现/状态解析/diff/写操作、项目仓库接入与多仓库 worktree 生命周期，不含 UI）。
 - **`crates/smelt-event-bus`** —— 系统内部进程间事件总线（EventHub）。
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
-- **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
-- **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的界面组件（`ui_theme`/`markdown_mermaid`/按钮、列表行等），不碰客户端库和运行时。
-- **`crates/smelt-app-state`** —— 桌面进程里跨功能共享的状态（GPUI Global）：守护上报的会话状态、关注事件、provider 账户状态、各机器智能体宿主配置。
+- **`crates/smelt-ui`** —— 宿主和插件共用的界面组件（`ui_theme`/`markdown_mermaid`/按钮、列表行等），不碰客户端库和运行时。
 - **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 40，按字段建表，没有通用 kv）。工作区目录（项目、项目仓库、工作集、对话）只由运行时写：客户端发 `workspace.conversation.*` / `workspace.project.*` / `workspace.workset.*` 单条命令，经 `workspace.changed` 收整份目录。
 - **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
 - **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。
@@ -80,10 +84,11 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 
 - 外层是页：一次显示一页，每页一块 `DockArea`、自己的布局。启动进首页（工作台），设置是
   另一页。换页记来路，页里的「返回」退回来的那页；来路只在内存里，重启回首页。
-- 内层是出口：工作台中间一栏是出口（`smelt/outlet`），默认显示会话舞台。打开一个哪页都
-  没摆的视图（智能体、自动化、远程桌面、插件页面），它放进出口，不换页、不记来路；点侧栏
-  的会话，出口换回舞台。首页出口里放着什么随界面状态存进 `workspace_ui.route`。
-- `Cmd+W` 不管路由，只关看得见的会话或分屏。
+- 内层是出口：工作台中间一栏是出口（`smelt/outlet`），默认显示页登记的默认内容（工作台是
+  会话插件的 `smelt.sessions/session`）。打开一个哪页都没摆的视图（智能体、自动化、远程桌面、
+  插件页面），它放进出口，不换页、不记来路。首页出口里放着什么随界面状态存进
+  `workspace_ui.outlet`。
+- `Cmd+W` 不管路由，由会话插件关看得见的会话或分屏。
 
 默认布局里会话列表在左停靠区，文件、变更、历史、技能在右停靠区。窗口左上角（交通灯右边）和右上角的按钮收起、展开这两个停靠区，没有快捷键；聚焦侧栏时左停靠区收着会先展开。
 
@@ -157,8 +162,8 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 推出来的：对话上同时有 provider 身份和智能体，写入那次就记进 `history_agent_binding`，
 客户端不另发调用。agent 自己写新存档、记下新归属都没有推送：历史页露出来、换来源、
 换项目时超过 10 秒才重读，也可以手动刷新，不在后台定时扫。
-实现是内置插件 `crates/plugins/history`，续接、迁移经宿主命令 `smelt.sessions/*`
-（`crates/smelt/src/session_commands.rs`）开会话。
+实现是内置插件 `crates/plugins/history`，续接、迁移经会话插件的命令 `smelt.sessions/*`
+（`crates/plugins/sessions/src/contract.rs`）开会话。
 
 ### 终端能力
 - **内嵌真终端**：能跑交互式程序与全屏 TUI（`claude`、`htop`、`vim` 等）
@@ -364,7 +369,7 @@ smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea�
 
 `smelt agent …`、`smelt automation …`、`smelt settings …` 经本机 smeltd 的 Control API 读写，内置的 `smelt` 技能靠它。运行时给智能体子进程的 PATH 最前面是 `~/.smelt/bin`（`crates/smelt-core/src/login_env.rs`），三个平台的智能体都能直接敲 `smelt`：
 
-- macOS：GUI 的 `smelt` 自己就是命令行。桌面每次启动把 `~/.smelt/bin/smelt` 拨成指向当前 App 的软链接。终端里要用，在设置「维护 → 命令行」点「安装」，放 `/usr/local/bin/smelt` → `~/.smelt/bin/smelt`，目录写不进去时弹管理员授权框（`crates/smelt/src/settings/cli_command.rs`）。
+- macOS：GUI 的 `smelt` 自己就是命令行。桌面每次启动把 `~/.smelt/bin/smelt` 拨成指向当前 App 的软链接。终端里要用，在设置「维护 → 命令行」点「安装」，放 `/usr/local/bin/smelt` → `~/.smelt/bin/smelt`，目录写不进去时弹管理员授权框（维护插件的 `crates/plugins/maintenance/src/cli_command.rs`）。
 - Linux：运行时包里的 `smelt` 装进 `~/.smelt/bin`，远程升级时随其它小工具一起换；终端里的命令由 `install.sh` 链好。
 - Windows：安装程序的「把 smelt 命令加入 PATH」把安装目录加进用户 PATH，敲 `smelt` 找到 `smelt.com`。
 
@@ -374,7 +379,7 @@ smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea�
 
 ### 终端 Dock
 
-`Cmd+D` / `Cmd+Shift+D` 仍是左右或上下分屏。同一格还可以叠几个终端（标签组）。运行时只记一段对话里有哪些终端、按什么顺序（`session.position`，运行时库 schema v22 起没有 `layout_node`）；怎么分屏是每台设备自己的界面状态，存在客户端库的 `conversation_route.dock_layout`（带版本号的 JSON，见 `crates/smelt/src/conversation_layout.rs`），和工具面板、打开的文件等放在一起。
+`Cmd+D` / `Cmd+Shift+D` 仍是左右或上下分屏。同一格还可以叠几个终端（标签组）。运行时只记一段对话里有哪些终端、按什么顺序（`session.position`，运行时库 schema v22 起没有 `layout_node`）；怎么分屏是每台设备自己的界面状态，归会话插件，存在它自己库的 `session_layout` 表（分屏是带版本号的 JSON，见 `crates/plugins/sessions/src/split_layout.rs`）。
 
 ### 闲置挂起
 

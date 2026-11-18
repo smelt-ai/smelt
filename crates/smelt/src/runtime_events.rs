@@ -15,37 +15,36 @@
 //! （[`probe_remotes`]）叫醒连不上的再探一次。
 //!
 //! 订阅线程是远程运行时连通性的唯一来源：每次探测的结果、订阅断开，都报回 [`RuntimeHub`]，
-//! 侧栏的「离线」跟着它走，不是只在启动时探一次。
+//! 插件看到的「离线」跟着它走，不是只在启动时探一次。
 //!
 //! 运行时比桌面旧时先请它升到桌面的版本（设计文档 D7，见 [`upgrade_then_probe`]），升完
 //! 再探；每条订阅线程只请一次，升了还对不上就照常标不兼容，不反复请，人点「重新连接」
 //! 才再请一次。人也可以随时点「升级运行时」（[`upgrade_remote`]）：连得上就请，不管兼不兼容。
 //!
-//! 别处要读运行时的（工作区目录、配置、额度、终端重连），用 [`wait_online`] 等这里探到
-//! 在线再读，不各自拨号重试。
-//!
 //! 不进核心订阅的话题（见 `smelt_event_protocol` 模块文档）每一轮在核心订阅之前分别
 //! 订阅，核心订阅断了就关掉，下一轮重开。运行时不认识某个话题时只拒绝那条单独订阅，
 //! 核心订阅和其他话题不受影响。本机外观回执请求也走独立订阅。
 
+use rust_i18n::t;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gpui::{App, AsyncApp, Global, Subscription};
+use gpui::{App, Global, Subscription};
 
 use crate::runtimes::{IncompatibleFix, Runtime, RuntimeHub, RuntimeKey, RuntimeStatus};
-use crate::terminal::DaemonStateEvent;
-use smelt_client::daemon_state::{TopicMessage, TopicSubscription, TopicSubscriptionCloser};
+use smelt_client::daemon_state::{
+    DaemonStateEvent, TopicMessage, TopicSubscription, TopicSubscriptionCloser,
+    daemon_reconnect_backoff, subscribe_daemon_states_blocking,
+};
 
 pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
 /// 单独订阅收到的：哪台运行时、哪条订阅的话题。
 pub(crate) type RuntimeTopicEvent = (RuntimeKey, &'static str, TopicMessage);
 
 /// 单独订的话题，各占一条订阅：后加的话题旧运行时不认，会拒掉整条订阅，不能连累别的。
-/// 宿主不解读这些话题，原样转给插件（`HostEvent::RuntimeTopic`）；只有智能体配置例外，
-/// 宿主起会话要用，收进它自己的缓存（`AgentHosts`），插件从那里读。
+/// 宿主不解读这些话题，原样转给插件（`HostEvent::RuntimeTopic`）。
 pub(crate) const SEPARATE_TOPICS: &[&str] = &[
     smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED,
     smelt_client::daemon_state::CORE_TOPIC_HISTORY_CHANGED,
@@ -159,7 +158,9 @@ pub(crate) fn upgrade_remote(key: &RuntimeKey, cx: &mut App) {
     crate::runtimes::set_upgrade_note(key, None, cx);
     let _ = status_tx.try_send((
         key.clone(),
-        RuntimeStatus::Upgrading(format!("正在升级到 v{DESKTOP_VERSION}")),
+        RuntimeStatus::Upgrading(
+            t!("upgrade.upgrading_to", version = DESKTOP_VERSION).into_owned(),
+        ),
     ));
     let key = key.clone();
     cx.spawn(async move |cx| {
@@ -176,18 +177,24 @@ pub(crate) fn upgrade_remote(key: &RuntimeKey, cx: &mut App) {
             .await;
         let note = match outcome {
             PushUpgrade::Restarting => None,
-            PushUpgrade::Current => Some(format!("已经是 v{DESKTOP_VERSION}，没有可升的")),
-            PushUpgrade::Staged(reason) => Some(format!("新版本已装好，{reason}")),
-            PushUpgrade::Unsupported => Some(format!(
-                "这台运行时太旧，不会自动升级，到那台机器上执行一次：{}",
-                crate::runtimes::manual_upgrade_command()
-            )),
-            PushUpgrade::Failed(error) => Some(format!("升级失败：{error}")),
+            PushUpgrade::Current => {
+                Some(t!("upgrade.current", version = DESKTOP_VERSION).into_owned())
+            }
+            PushUpgrade::Staged(reason) => Some(t!("upgrade.staged", reason = reason).into_owned()),
+            PushUpgrade::Unsupported => Some(
+                t!(
+                    "upgrade.unsupported",
+                    command = crate::runtimes::manual_upgrade_command()
+                )
+                .into_owned(),
+            ),
+            PushUpgrade::Failed(error) => Some(t!("upgrade.failed", error = error).into_owned()),
         };
         let restarting = note.is_none();
         let _ = status_tx.try_send((
             key.clone(),
-            status.unwrap_or_else(|| RuntimeStatus::Upgrading("正在重启".to_string())),
+            status
+                .unwrap_or_else(|| RuntimeStatus::Upgrading(t!("upgrade.restarting").into_owned())),
         ));
         cx.update(|cx| {
             crate::runtimes::set_upgrade_note(&key, note, cx);
@@ -213,39 +220,6 @@ pub(crate) fn probe_remotes(cx: &App) {
                 handle.wake(Wake::Probe);
             }
         }
-    }
-}
-
-/// 读运行时之前等它在线。连通性由订阅线程探、记在 [`RuntimeHub`] 上，这里只看着它：在线
-/// 了才往下走，等的时候自己不拨号，远程机器关着也只有订阅线程按它的节奏去探。
-///
-/// `failures` 是这次之前已经连着失败了几次：不是 0 就先退避一会儿再看在不在线，在线却
-/// 失败（刚断线订阅还没察觉、运行时那边出错、会话又断了）时不会对着它连环重试。运行时被
-/// 移除了（远程机器删掉了）或应用要退出了返回 `false`，调用方就此停下。
-pub(crate) async fn wait_online(key: &RuntimeKey, failures: u32, cx: &AsyncApp) -> bool {
-    if let Some(previous) = failures.checked_sub(1) {
-        // 轮询例外：运行时在线、上一次却没成，没有「可以再试了」的事件可等；离线时不走这里，
-        // 退避完回去等在线；周期 250ms 起翻倍，上限 8s。
-        cx.background_executor()
-            .timer(crate::terminal::daemon_reconnect_backoff(previous))
-            .await;
-    }
-    let key = key.clone();
-    let ready = move |cx: &App| online_or_removed(&key, cx);
-    smelt_ui::global_wait::wait_for_global::<RuntimeHub, bool>(cx, ready)
-        .await
-        .unwrap_or(false)
-}
-
-/// 在线是 `Some(true)`，移除了是 `Some(false)`；还没探过、离线、版本对不上、升级中都是
-/// `None`，接着等。
-fn online_or_removed(key: &RuntimeKey, cx: &App) -> Option<bool> {
-    if crate::runtimes::runtime_online(key, cx) {
-        Some(true)
-    } else if crate::runtimes::client(key, cx).is_none() {
-        Some(false)
-    } else {
-        None
     }
 }
 
@@ -328,8 +302,8 @@ fn unavailable_reason(error: &smelt_client::daemon_state::DaemonEventClientError
         DaemonEventClientError::Server {
             code: smelt_event_protocol::SubscribeErrorCode::Rejected,
             ..
-        } => "这台机器的运行时版本较旧，升级运行时后可用".to_string(),
-        error => format!("运行时的推送出错：{error}"),
+        } => t!("runtime.events_rejected").into_owned(),
+        error => t!("runtime.events_failed", error = error).into_owned(),
     }
 }
 
@@ -429,7 +403,7 @@ impl SeparateSubscription {
                     }
                     // 轮询例外：只有这条订阅断了时，对端能再连不会通知我们；周期 250ms 起
                     // 翻倍，上限 8s。关掉时由 Condvar 立刻叫醒。
-                    let pause = crate::terminal::daemon_reconnect_backoff(attempt);
+                    let pause = daemon_reconnect_backoff(attempt);
                     attempt = attempt.saturating_add(1);
                     let state = shared.lock();
                     let (state, _) = shared
@@ -525,11 +499,12 @@ pub(crate) fn spawn_subscription(
                         // 请不动它：说清到哪儿去更新，不发注定失败的升级请求。
                         status = RuntimeStatus::Incompatible {
                             version,
-                            detail: format!(
-                                "{detail}。这台运行时随那台机器上的 Smelt 一起更新，不能远程升级：\
-                                 到那台机器上把 Smelt 更新到 v{}",
-                                crate::runtimes::DESKTOP_VERSION
-                            ),
+                            detail: t!(
+                                "upgrade.update_smelt_there",
+                                detail = detail,
+                                version = crate::runtimes::DESKTOP_VERSION
+                            )
+                            .into_owned(),
                             fix,
                         };
                     } else if !upgrade_requested && smelt_version::RELEASE.is_some() {
@@ -553,7 +528,7 @@ pub(crate) fn spawn_subscription(
                         let pause = if runtime.is_local() {
                             // 轮询例外：本机守护拉不起来时没有「现在能起了」的事件，探一次就是
                             // 再拉一次；周期 250ms 起翻倍，上限 8s。
-                            crate::terminal::daemon_reconnect_backoff(reconnect_attempt)
+                            daemon_reconnect_backoff(reconnect_attempt)
                         } else {
                             remote_offline_backoff(reconnect_attempt)
                         };
@@ -592,7 +567,7 @@ pub(crate) fn spawn_subscription(
                         } else {
                             None
                         };
-                        crate::terminal::subscribe_daemon_states_blocking(
+                        subscribe_daemon_states_blocking(
                             runtime.client(),
                             runtime.is_local(),
                             |event| {
@@ -613,7 +588,7 @@ pub(crate) fn spawn_subscription(
                         // 是退出了的话，下一轮探测会把它拉起来。
                         let _ = status_tx.try_send((
                             key.clone(),
-                            RuntimeStatus::Offline("连接断开".to_string()),
+                            RuntimeStatus::Offline(t!("runtime.disconnected").into_owned()),
                         ));
                         let _ = sender
                             .states
@@ -625,7 +600,7 @@ pub(crate) fn spawn_subscription(
                         }
                         // 轮询例外：订阅断了，对端重新能连时不会通知我们，只能隔一会儿再探；
                         // 周期 250ms 起翻倍，上限 8s（再探仍连不上就转到上面离线的退避）。
-                        let pause = crate::terminal::daemon_reconnect_backoff(reconnect_attempt);
+                        let pause = daemon_reconnect_backoff(reconnect_attempt);
                         reconnect_attempt = reconnect_attempt.saturating_add(1);
                         pause
                     }
@@ -668,13 +643,13 @@ fn upgrade_local_then_probe(
 
     let _ = status_tx.try_send((
         runtime.key().clone(),
-        RuntimeStatus::Upgrading("正在重启本机运行时".to_string()),
+        RuntimeStatus::Upgrading(t!("upgrade.restarting_local").into_owned()),
     ));
     match crate::local_daemon::upgrade_daemon() {
         UpgradeOutcome::Upgraded => crate::runtimes::local_status(runtime.client()),
         UpgradeOutcome::Failed => RuntimeStatus::Incompatible {
             version: version.to_string(),
-            detail: format!("{detail}。本机运行时没有换成当前版本，可在设置里重启守护进程"),
+            detail: t!("upgrade.local_failed", detail = detail).into_owned(),
             fix,
         },
     }
@@ -697,10 +672,10 @@ fn upgrade_then_probe(
     };
     let still_incompatible = |note: String| RuntimeStatus::Incompatible {
         version: version.to_string(),
-        detail: format!("{detail}。{note}"),
+        detail: t!("upgrade.detail_note", detail = detail, note = note).into_owned(),
         fix: IncompatibleFix::UpgradeRuntime,
     };
-    report(format!("正在升级到 v{DESKTOP_VERSION}"));
+    report(t!("upgrade.upgrading_to", version = DESKTOP_VERSION).into_owned());
     match push_upgrade(runtime.client()) {
         PushUpgrade::Restarting => {}
         // 老运行时正忙时会先装好、等空闲再换。
@@ -708,18 +683,21 @@ fn upgrade_then_probe(
             return still_incompatible(reason);
         }
         PushUpgrade::Current => {
-            return still_incompatible(format!(
-                "运行时已经是 v{DESKTOP_VERSION}，仍对不上：这个桌面多半是还没发布的开发构建"
-            ));
+            return still_incompatible(
+                t!("upgrade.still_mismatched_dev", version = DESKTOP_VERSION).into_owned(),
+            );
         }
         PushUpgrade::Unsupported => {
-            return still_incompatible(format!(
-                "这台运行时太旧，不会自动升级，到那台机器上执行一次：{}",
-                crate::runtimes::manual_upgrade_command()
-            ));
+            return still_incompatible(
+                t!(
+                    "upgrade.unsupported",
+                    command = crate::runtimes::manual_upgrade_command()
+                )
+                .into_owned(),
+            );
         }
         PushUpgrade::Failed(error) => {
-            return still_incompatible(format!("自动升级失败：{error}"));
+            return still_incompatible(t!("upgrade.auto_failed", error = error).into_owned());
         }
     }
     // 重启时旧进程连同 iroh 端点一起退出，新进程重新上线要几秒。
@@ -741,9 +719,12 @@ fn upgrade_then_probe(
                     fix,
                 } => RuntimeStatus::Incompatible {
                     version,
-                    detail: format!(
-                        "{detail}。请它升到 v{DESKTOP_VERSION} 后仍对不上，详见那台机器的 ~/.smelt/daemon.log"
-                    ),
+                    detail: t!(
+                        "upgrade.still_mismatched",
+                        detail = detail,
+                        version = DESKTOP_VERSION
+                    )
+                    .into_owned(),
                     fix,
                 },
                 status => status,

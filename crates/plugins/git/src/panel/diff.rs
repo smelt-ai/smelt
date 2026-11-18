@@ -1,4 +1,5 @@
-//! 变更栏正文用 gpui-component 的 Diff。日志页的单文件提交 diff 也用它，见 `git_log_view`。
+//! 变更栏正文用 smelt-ui 的差异视图（`ui::diff::Diff`）。日志页的单文件提交 diff 也用它，
+//! 见 `git_log_view`。
 //!
 //! 文件列表、暂存范围、丢弃确认留在面板里。块操作没有 hunk 头槽位，
 //! 挂在该块第一行的注释下面。当前文件名由 Diff 钉在视口顶上。
@@ -10,8 +11,9 @@
 use std::rc::Rc;
 
 use super::*;
-use gpui_component::button::Toggle;
-use gpui_component::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide};
+use rust_i18n::t;
+use smelt_plugin_api::ui::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide};
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 块操作挂在哪一行。优先新文件侧的行号，纯删除才退回旧文件侧。
 ///
@@ -44,7 +46,8 @@ pub(crate) fn diff_feedback_text(
     } else {
         (end, start)
     };
-    let mut msg = format!("对 {path} 的这几行有反馈：\n");
+    let mut msg = t!("comment.feedback_header", path = path).into_owned();
+    msg.push('\n');
     if start == end {
         msg.push_str(&format!("L{start}\n"));
     } else {
@@ -67,7 +70,7 @@ pub(crate) fn diff_feedback_text(
 /// 删除文件的展示路径是旧路径，重命名则是新路径。状态栏点的是 porcelain 路径，
 /// 可能是其中任意一侧。对不上就返回 `None`，调用方不要拿标题行的文本去滚。
 pub(crate) fn diff_scroll_target<'a>(
-    files: &'a [gpui_component::diff::DiffFile],
+    files: &'a [smelt_plugin_api::ui::diff::DiffFile],
     requested: &str,
 ) -> Option<&'a str> {
     files.iter().find_map(|file| {
@@ -85,7 +88,7 @@ pub(crate) fn diff_scroll_target<'a>(
 
 /// 画工具条和批注需要的那一份快照。行和块是 `Rc`，装补丁时克隆指针即可。
 struct DiffChrome {
-    view: Entity<gpui_component::diff::DiffState>,
+    view: Entity<smelt_plugin_api::ui::diff::DiffState>,
     name: String,
     aggregate: bool,
     root: ProjectRef,
@@ -96,7 +99,7 @@ struct DiffChrome {
     ops: HunkOps,
     split: bool,
     comment_range: Option<DiffLineRange>,
-    comment_input: Option<Entity<gpui_component::input::TextareaState>>,
+    comment_input: Option<Entity<smelt_plugin_api::ui::field::TextareaState>>,
 }
 
 /// 变更栏 diff 正文。GitPanel 持有它，它只弱引用 GitPanel，避免互相留住。
@@ -145,7 +148,7 @@ pub(crate) fn aggregate_diff_ready_for_file(
 pub(crate) fn diff_parse_failure(patch: &str, message: &str) -> String {
     let trimmed = patch.trim();
     if trimmed.is_empty() {
-        return "（无差异）".into();
+        return t!("diff.empty").into_owned();
     }
     let looks_like_diff = trimmed.lines().any(|line| {
         line.starts_with("diff ") || line.starts_with("--- ") || line.starts_with("@@")
@@ -162,22 +165,21 @@ impl GitPanel {
     ///
     /// 这里不能 `read` DiffState。render 期间读到的实体，之后每次 `notify`
     /// 都会把整个 GitPanel 标脏，右侧文件列表就跟着 diff 的高亮和滚动重排。
-    pub(crate) fn git_diff_pane(&self, empty_hint: &str, cx: &mut Context<Self>) -> Div {
-        let muted = cx.theme().muted_foreground;
+    pub(crate) fn git_diff_pane(&self, empty_hint: &str) -> Div {
         let Some(diff) = self.git_diff.as_ref() else {
-            return placeholder_view(empty_hint, muted);
+            return placeholder_view(empty_hint);
         };
         if diff.patch.is_none() {
-            return placeholder_view("正在读取…", muted);
+            return placeholder_view(&t!("diff.loading"));
         }
         if let Some(err) = self.diff_parse_error.as_deref() {
-            return diff_status_note(err, muted);
+            return diff_status_note(err);
         }
         if self.diff_view.is_none() {
-            return placeholder_view("（无差异）", muted);
+            return placeholder_view(&t!("diff.empty"));
         }
         let Some(body) = self.diff_body.clone() else {
-            return placeholder_view("（无差异）", muted);
+            return placeholder_view(&t!("diff.empty"));
         };
         div()
             .flex_1()
@@ -248,19 +250,17 @@ impl GitPanel {
 
 impl GitDiffBody {
     fn render_chrome(&self, cx: &mut Context<Self>) -> Div {
-        let (muted, border) = {
-            let theme = cx.theme();
-            (theme.muted_foreground, theme.border)
-        };
+        let muted: Hsla = rgb(crate::ui_theme::muted()).into();
+        let border = crate::ui_theme::hair();
         let Some(chrome) = self.chrome.as_ref() else {
-            return placeholder_view("（无差异）", muted);
+            return placeholder_view(&t!("diff.empty"));
         };
         let view = chrome.view.clone();
         let (file_path, all_collapsed) = {
             let state = view.read(cx);
             let files = state.files();
             if files.is_empty() {
-                return placeholder_view("（无差异）", muted);
+                return placeholder_view(&t!("diff.empty"));
             }
             let all_collapsed = !files.is_empty()
                 && files
@@ -269,7 +269,12 @@ impl GitDiffBody {
             let file_path = (files.len() == 1).then(|| files[0].path().clone());
             (file_path, all_collapsed)
         };
-        let name = chrome.name.clone();
+        // 聚合的「全部更改」没有文件名，按当前语言现取。
+        let name = if chrome.aggregate {
+            t!("diff.all_changes").into_owned()
+        } else {
+            chrome.name.clone()
+        };
         let host = self.host.clone();
         let ops = chrome.ops;
         let annotations = diff_annotations(
@@ -287,7 +292,7 @@ impl GitDiffBody {
                 .quiet()
                 .small()
                 .flex_none()
-                .label("在文件里打开")
+                .label(t!("diff.open_in_file"))
                 .on_click(move |_ev, _window, cx| {
                     open_file(file_machine.clone(), full_path.clone(), cx);
                 })
@@ -299,9 +304,9 @@ impl GitDiffBody {
                 .small()
                 .flex_none()
                 .label(if all_collapsed {
-                    "全部展开"
+                    t!("diff.expand_all")
                 } else {
-                    "全部收起"
+                    t!("diff.collapse_all")
                 })
                 .on_click(move |_ev, _window, cx| {
                     let Some(host) = host.upgrade() else {
@@ -311,13 +316,14 @@ impl GitDiffBody {
                 })
         });
         // 并排是开关：按下是并排，抬起是统一。
-        let toggle = Toggle::new("diff-split-toggle")
-            .xsmall()
+        let toggle = Button::new("diff-split-toggle")
+            .quiet()
+            .small()
             .flex_none()
-            .px_2()
-            .label("并排")
-            .checked(chrome.split)
-            .tooltip("并排对照新旧两侧；关掉是统一视图")
+            .label(t!("diff.split"))
+            .toggled(chrome.split)
+            .selected(chrome.split)
+            .tooltip(t!("diff.split_tooltip"))
             .on_click({
                 let host = host.clone();
                 move |_, _window, cx| {
@@ -338,7 +344,7 @@ impl GitDiffBody {
             .min_h_0()
             .flex()
             .flex_col()
-            .text_sm()
+            .type_style(TYPE.ui)
             .child(
                 div()
                     .w_full()
@@ -347,7 +353,7 @@ impl GitDiffBody {
                     .gap_2()
                     .px_3()
                     .py_1()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(muted)
                     .border_b_1()
                     .border_color(border)
@@ -364,7 +370,7 @@ impl GitDiffBody {
                     .min_w_0()
                     .px_3()
                     .py_1()
-                    .text_sm()
+                    .type_style(TYPE.ui)
                     .text_color(muted)
                     .border_b_1()
                     .border_color(border)
@@ -420,15 +426,15 @@ impl GitDiffBody {
     }
 }
 
-fn diff_status_note(text: &str, muted: Hsla) -> Div {
+fn diff_status_note(text: &str) -> Div {
     div()
         .flex_1()
         .min_h_0()
         .overflow_hidden()
         .p_4()
-        .text_sm()
+        .type_style(TYPE.ui)
         .whitespace_normal()
-        .text_color(muted)
+        .text_color(rgb(crate::ui_theme::muted()))
         .child(text.to_string())
 }
 
@@ -436,9 +442,9 @@ fn comment_range_label(range: &DiffLineRange) -> String {
     let start = range.start().min(range.end());
     let end = range.start().max(range.end());
     if start == end {
-        format!("对第 L{start} 行发表评论")
+        t!("comment.range_one", line = start).into_owned()
     } else {
-        format!("对第 L{start} 行至第 L{end} 行发表评论")
+        t!("comment.range", start = start, end = end).into_owned()
     }
 }
 
@@ -476,7 +482,7 @@ fn diff_annotations(
 }
 
 fn diff_header_suffix(
-    file: &gpui_component::diff::DiffFile,
+    file: &smelt_plugin_api::ui::diff::DiffFile,
     ops: HunkOps,
     stage_path: Option<String>,
     root: &ProjectRef,
@@ -485,8 +491,8 @@ fn diff_header_suffix(
     let mut row = div().flex().items_center().gap_2();
     if let Some(path) = stage_path {
         let label = match ops {
-            HunkOps::StageDiscard => Some("暂存"),
-            HunkOps::Unstage => Some("取消暂存"),
+            HunkOps::StageDiscard => Some(t!("stage.stage")),
+            HunkOps::Unstage => Some(t!("stage.unstage")),
             HunkOps::None => None,
         };
         if let Some(label) = label {
@@ -519,7 +525,7 @@ fn diff_header_suffix(
             Button::new((ElementId::from("diff-open-header"), rel.clone()))
                 .quiet()
                 .small()
-                .label("打开")
+                .label(t!("diff.open"))
                 .on_click(move |_ev, _window, cx| {
                     open_file(runtime.clone(), full.clone(), cx);
                 }),
@@ -549,7 +555,7 @@ fn render_diff_annotation(
     ops: HunkOps,
     root: ProjectRef,
     comment_label: Option<String>,
-    input: Option<Entity<gpui_component::input::TextareaState>>,
+    input: Option<Entity<smelt_plugin_api::ui::field::TextareaState>>,
     host: WeakEntity<GitPanel>,
     cx: &mut App,
 ) -> AnyElement {
@@ -561,7 +567,7 @@ fn render_diff_annotation(
             let Some(label) = comment_label else {
                 return div().into_any_element();
             };
-            diff_comment_composer(label, input, host, cx).into_any_element()
+            diff_comment_composer(label, input, host).into_any_element()
         }
         _ => div().into_any_element(),
     }
@@ -574,9 +580,10 @@ fn hunk_ops_row(
     host: WeakEntity<GitPanel>,
     _cx: &App,
 ) -> Div {
-    let quiet =
-        |id: &'static str, label: &'static str| Button::new((id, idx)).quiet().small().label(label);
-    let danger = |id: &'static str, label: &'static str| {
+    let quiet = |id: &'static str, label: std::borrow::Cow<'static, str>| {
+        Button::new((id, idx)).quiet().small().label(label)
+    };
+    let danger = |id: &'static str, label: std::borrow::Cow<'static, str>| {
         Button::new((id, idx)).danger_quiet().small().label(label)
     };
     let row = div().flex().items_center().gap_2();
@@ -586,7 +593,7 @@ fn hunk_ops_row(
             let (stage_host, stage_root) = (host.clone(), root.clone());
             let (discard_host, discard_root) = (host, root);
             row.child(
-                quiet("hunk-stage", "暂存块").on_click(move |_ev, _window, cx| {
+                quiet("hunk-stage", t!("hunk.stage")).on_click(move |_ev, _window, cx| {
                     let Some(host) = stage_host.upgrade() else {
                         return;
                     };
@@ -595,7 +602,7 @@ fn hunk_ops_row(
                 }),
             )
             .child(
-                danger("hunk-discard", "丢弃块").on_click(move |_ev, window, cx| {
+                danger("hunk-discard", t!("hunk.discard")).on_click(move |_ev, window, cx| {
                     let Some(host) = discard_host.upgrade() else {
                         return;
                     };
@@ -604,7 +611,7 @@ fn hunk_ops_row(
                 }),
             )
         }
-        HunkOps::Unstage => row.child(quiet("hunk-unstage", "取消暂存块").on_click(
+        HunkOps::Unstage => row.child(quiet("hunk-unstage", t!("hunk.unstage")).on_click(
             move |_ev, _window, cx| {
                 let Some(host) = host.upgrade() else {
                     return;
@@ -618,23 +625,24 @@ fn hunk_ops_row(
 
 fn diff_comment_composer(
     range_label: String,
-    input: Option<Entity<gpui_component::input::TextareaState>>,
+    input: Option<Entity<smelt_plugin_api::ui::field::TextareaState>>,
     host: WeakEntity<GitPanel>,
-    cx: &mut App,
 ) -> Div {
-    let (muted, border) = {
-        let theme = cx.theme();
-        (theme.muted_foreground, theme.border)
-    };
+    let muted: Hsla = rgb(crate::ui_theme::muted()).into();
+    let border = crate::ui_theme::hair();
     let clear_host = host.clone();
-    v_flex()
+    div()
+        .flex()
+        .flex_col()
         .gap_3()
         .child(
-            h_flex()
+            div()
+                .flex()
                 .items_center()
                 .justify_between()
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
                         .items_center()
                         .gap_2()
                         .child(
@@ -648,12 +656,16 @@ fn diff_comment_composer(
                                 .bg(rgb(crate::ui_theme::soft()))
                                 .child(Icon::new(IconName::Bot).size(px(15.))),
                         )
-                        .child(div().text_sm().font_semibold().child("本机留言")),
+                        .child(
+                            div()
+                                .type_style(TYPE.ui_medium)
+                                .child(t!("comment.title").into_owned()),
+                        ),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(muted)
                         .child(range_label),
                 ),
@@ -664,13 +676,15 @@ fn diff_comment_composer(
                 .child(smelt_plugin_api::ui::TextArea::new(&state))
         }))
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .justify_end()
                 .gap_2()
                 .child(
                     Button::new("diff-comment-cancel")
                         .small()
-                        .label("取消")
+                        .label(t!("comment.cancel"))
                         .on_click(move |_ev, window, cx| {
                             let Some(host) = clear_host.upgrade() else {
                                 return;
@@ -680,14 +694,17 @@ fn diff_comment_composer(
                             });
                         }),
                 )
-                .child(Button::new("diff-send").small().label("发送评论").on_click(
-                    move |_ev, window, cx| {
-                        let Some(host) = host.upgrade() else {
-                            return;
-                        };
-                        host.update(cx, |this, cx| this.send_diff_comments(window, cx));
-                    },
-                )),
+                .child(
+                    Button::new("diff-send")
+                        .small()
+                        .label(t!("comment.send"))
+                        .on_click(move |_ev, window, cx| {
+                            let Some(host) = host.upgrade() else {
+                                return;
+                            };
+                            host.update(cx, |this, cx| this.send_diff_comments(window, cx));
+                        }),
+                ),
         )
         .border_color(border)
 }

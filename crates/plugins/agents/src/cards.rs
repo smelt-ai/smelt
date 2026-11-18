@@ -1,11 +1,12 @@
 //! 页面上的卡片、表单件和页头。
 
 use super::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) fn render_identity_name(input: &Entity<InputState>) -> AnyElement {
     TextInput::new(input)
         .small()
-        .aria_label("智能体名称")
+        .aria_label(t!("agent.name_label"))
         .w_full()
         .font_semibold()
         .into_any_element()
@@ -33,13 +34,12 @@ pub(crate) fn agent_surface_card() -> Div {
 }
 
 pub(crate) fn render_agent_error(error: String) -> AnyElement {
-    gpui_component::alert::Alert::error("agent-error", error).into_any_element()
+    api::ui::Alert::error("agent-error", error).into_any_element()
 }
 
 pub(crate) fn render_engine_mark(kind: Option<ConversationAgentKind>, size: f32) -> Icon {
     match kind {
-        Some(kind) => Icon::empty()
-            .path(kind.icon_asset())
+        Some(kind) => Icon::path(kind.icon_asset())
             .size(px(size))
             .text_color(rgb(ui_theme::muted())),
         None => Icon::new(IconName::Bot)
@@ -56,24 +56,26 @@ pub(crate) fn render_agent_engine_control(
 ) -> AnyElement {
     let icon = render_engine_mark(kind, 12.);
     if agent_engine_kinds().len() > 1 {
-        Button::new("agent-engine")
+        let trigger = Button::new("agent-engine")
             .quiet()
             .small()
-            .icon(icon)
-            .label(label)
-            .tooltip("执行这个智能体的运行时。后续 skill 和插件会挂在这个引擎上。")
-            .dropdown_menu(move |mut menu, _, _| {
-                for kind in agent_engine_kinds() {
-                    let entity = entity.clone();
-                    let id = agent_id.clone();
-                    menu = menu.item(PopupMenuItem::new(kind.label()).on_click(move |_, _, cx| {
-                        let id = id.clone();
-                        entity.update(cx, |page, cx| page.set_agent_engine(id, kind, cx));
-                    }));
-                }
-                menu
-            })
-            .into_any_element()
+            .accessibility_label(label.clone())
+            .child(icon)
+            .child(div().min_w_0().text_ellipsis().child(label))
+            .tooltip(t!("engine.tooltip"));
+        MenuTrigger::dropdown("agent-engine-menu", trigger, move |_, _| {
+            let mut menu = Menu::new();
+            for kind in agent_engine_kinds() {
+                let entity = entity.clone();
+                let id = agent_id.clone();
+                menu = menu.item(MenuItem::new(kind.label()).on_click(move |_, _, cx| {
+                    let id = id.clone();
+                    entity.update(cx, |page, cx| page.set_agent_engine(id, kind, cx));
+                }));
+            }
+            menu
+        })
+        .into_any_element()
     } else {
         render_engine_chip(label, kind)
     }
@@ -87,85 +89,70 @@ pub(crate) fn render_agent_model_control(
 ) -> AnyElement {
     let inherit = model_provider.trim().is_empty() || model_id.trim().is_empty();
     let label = if inherit {
-        "跟随 Pi 默认".to_string()
+        t!("model.inherit").into_owned()
     } else {
         format!("{model_provider} / {model_id}")
     };
-    Button::new("agent-model")
+    let trigger = Button::new("agent-model")
         .quiet()
         .small()
         .label(label)
-        .tooltip("这个智能体的新对话和自动化用这套模型。对话里仍可再改。")
-        .dropdown_menu(move |mut menu, window, cx| {
-            let inherit_entity = entity.clone();
-            let inherit_id = agent.id.clone();
-            menu = menu.item(
-                PopupMenuItem::new("跟随 Pi 默认")
-                    .checked(inherit)
-                    .on_click(move |_, _, cx| {
-                        let id = inherit_id.clone();
-                        inherit_entity.update(cx, |page, cx| {
-                            page.set_agent_model(id, String::new(), String::new(), cx);
-                        });
-                    }),
-            );
-            // 模型在智能体那台机器上跑，可选的也是那台机器的：取编辑器读到的那份。
-            let groups = entity
-                .read(cx)
-                .editor
-                .as_ref()
-                .filter(|editor| editor.agent == agent)
-                .map(|editor| editor.pi_model_choice_groups().to_vec())
-                .unwrap_or_default();
-            if !groups.is_empty() {
-                menu = menu.separator();
-            }
-            for group in groups {
+        .tooltip(t!("model.tooltip"));
+    MenuTrigger::dropdown("agent-model-menu", trigger, move |_, cx| {
+        let inherit_entity = entity.clone();
+        let inherit_id = agent.id.clone();
+        let mut menu = Menu::new().item(
+            MenuItem::new(t!("model.inherit"))
+                .checked(inherit)
+                .on_click(move |_, _, cx| {
+                    let id = inherit_id.clone();
+                    inherit_entity.update(cx, |page, cx| {
+                        page.set_agent_model(id, String::new(), String::new(), cx);
+                    });
+                }),
+        );
+        // 模型在智能体那台机器上跑，可选的也是那台机器的：取编辑器读到的那份。
+        let groups = entity
+            .read(cx)
+            .editor
+            .as_ref()
+            .filter(|editor| editor.agent == agent)
+            .map(|editor| editor.pi_model_choice_groups().to_vec())
+            .unwrap_or_default();
+        if !groups.is_empty() {
+            menu = menu.separator();
+        }
+        for group in groups {
+            // 这一层没有再嵌套。模型一多就超出窗口，在二级里滚。
+            let mut sub = Menu::new();
+            for choice in &group.models {
+                let checked = choice.provider == model_provider && choice.id == model_id;
                 let item_entity = entity.clone();
                 let item_id = agent.id.clone();
-                let current_provider = model_provider.clone();
-                let current_model = model_id.clone();
-                let models = group.models;
-                menu = menu.submenu(
-                    group.provider_name.clone(),
-                    window,
-                    cx,
-                    move |mut sub, _, _| {
-                        for choice in &models {
-                            let checked =
-                                choice.provider == current_provider && choice.id == current_model;
-                            let item_entity = item_entity.clone();
-                            let item_id = item_id.clone();
-                            let provider = choice.provider.clone();
-                            let model = choice.id.clone();
-                            sub = sub.item(
-                                PopupMenuItem::new(choice.short_label().to_string())
-                                    .checked(checked)
-                                    .on_click(move |_, _, cx| {
-                                        let id = item_id.clone();
-                                        let provider = provider.clone();
-                                        let model = model.clone();
-                                        item_entity.update(cx, |page, cx| {
-                                            page.set_agent_model(id, provider, model, cx);
-                                        });
-                                    }),
-                            );
-                        }
-                        // 这一层没有再嵌套。模型一多就超出窗口，在二级里滚。
-                        sub.scrollable(true)
-                    },
+                let provider = choice.provider.clone();
+                let model = choice.id.clone();
+                sub = sub.item(
+                    MenuItem::new(choice.short_label().to_string())
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let id = item_id.clone();
+                            let provider = provider.clone();
+                            let model = model.clone();
+                            item_entity.update(cx, |page, cx| {
+                                page.set_agent_model(id, provider, model, cx);
+                            });
+                        }),
                 );
             }
-            menu
-        })
-        .into_any_element()
+            menu = menu.item(MenuItem::new(group.provider_name.clone()).submenu(sub));
+        }
+        menu
+    })
+    .into_any_element()
 }
 
 pub(crate) fn render_engine_chip(label: String, kind: Option<ConversationAgentKind>) -> AnyElement {
-    Tag::secondary()
-        .rounded_full()
-        .flex_none()
-        .gap_1()
+    Badge::new()
         .child(render_engine_mark(kind, 12.))
         .child(label)
         .into_any_element()
@@ -174,7 +161,7 @@ pub(crate) fn render_engine_chip(label: String, kind: Option<ConversationAgentKi
 /// 页头前缘的返回。可见的只有符号，悬停提示是控件名。它只退一层，侧栏标题负责回根页。
 pub(crate) fn product_back_button(
     id: &'static str,
-    tooltip: &'static str,
+    tooltip: impl Into<SharedString>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     Button::new(id)
@@ -186,20 +173,15 @@ pub(crate) fn product_back_button(
 
 /// 目录的工具行：和自动化的同一条高度。左边是有几个（页名在外壳画的标题带或标签上，
 /// 这里不再写一遍），右边是新建按钮。
-pub(crate) fn product_page_header(
-    noun: &'static str,
-    count: usize,
-    count_unit: &'static str,
-    action: AnyElement,
-) -> AnyElement {
+pub(crate) fn product_page_header(count_label: String, action: AnyElement) -> AnyElement {
     api::ui::page_toolbar()
         .justify_between()
         .gap_3()
         .child(
             div()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
-                .child(format!("{count} {count_unit}{noun}")),
+                .child(count_label),
         )
         .child(action)
         .into_any_element()
@@ -218,17 +200,15 @@ pub(crate) fn render_agent_plugin_card(
 
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-plugins-refresh")
-        .icon(gpui_component::Icon::new(
-            gpui_kit_assets::IconName::RefreshCw,
-        ))
-        .icon_action("重新扫描插件目录")
+        .icon(IconName::Refresh)
+        .icon_action(t!("plugins.rescan"))
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |page, cx| page.refresh_agent_plugins(cx));
         });
     let manage_entity = entity.clone();
     let manage_button = compact_chip("agent-plugins-manage")
-        .label("管理")
-        .tooltip("去能力库导入或删除插件")
+        .label(t!("common.manage"))
+        .tooltip(t!("plugins.manage_tooltip"))
         .on_click(move |_, _, cx| {
             manage_entity.update(cx, |page, cx| {
                 page.open_capabilities("plugins", cx);
@@ -245,13 +225,12 @@ pub(crate) fn render_agent_plugin_card(
                 &agent.id,
                 &plugin.id,
                 &plugin.name,
-                plugin.kind.label(),
+                &plugin_kind_label(plugin.kind),
                 &plugin.description,
                 &plugin.origin,
                 plugin.broken.clone(),
                 selected.contains(&plugin.id),
                 entity.clone(),
-                cx,
             )
         })
         .collect();
@@ -262,21 +241,20 @@ pub(crate) fn render_agent_plugin_card(
             continue;
         }
         let (kind_label, name) = match api::model::pi_plugin_catalog::split_plugin_id(id) {
-            Some((kind, name)) => (kind.label(), name.to_string()),
-            None => ("未知", id.clone()),
+            Some((kind, name)) => (plugin_kind_label(kind), name.to_string()),
+            None => (t!("pick.unknown"), id.clone()),
         };
         rows.push(agent_plugin_row(
             AgentPick::Plugin,
             &agent.id,
             id,
             &name,
-            kind_label,
+            &kind_label,
             "",
             "",
-            Some("磁盘上已经找不到了".to_string()),
+            Some(t!("plugins.missing").into_owned()),
             true,
             entity.clone(),
-            cx,
         ));
     }
 
@@ -284,11 +262,9 @@ pub(crate) fn render_agent_plugin_card(
         div()
             .px_5()
             .py_4()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::faint()))
-            .child(pending.unwrap_or_else(|| {
-                "还没有装任何插件。点「管理」去能力库导入技能或扩展。".to_string()
-            }))
+            .child(pending.unwrap_or_else(|| t!("plugins.empty").into_owned()))
             .into_any_element()
     } else {
         div()
@@ -320,18 +296,15 @@ pub(crate) fn render_agent_plugin_card(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
-                                .child("技能"),
+                                .child(t!("plugins.title").into_owned()),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
-                                .child(format!(
-                                    "已勾选 {selected_count} 个。对话只加载勾选的技能和扩展，没勾的一律不加载。改动对新开的对话生效。"
-                                )),
+                                .child(t!("plugins.selected", count = selected_count).into_owned()),
                         ),
                 )
                 .child(
@@ -361,17 +334,17 @@ pub(crate) fn render_agent_context_card(
     // 工作目录按那台机器的主目录算，本机算不出远程机器上的路径。
     let space_root = match editor.agent.runtime {
         RuntimeKey::Local => api::model::agent_paths::agent_space_root(&agent.id)
-            .map(|path| format!("工作目录 {}", path.to_string_lossy()))
-            .unwrap_or_else(|| "工作目录".to_string()),
-        RuntimeKey::Remote(_) => "工作目录在那台机器上".to_string(),
+            .map(|path| t!("context.workspace_path", path = path.to_string_lossy()).into_owned())
+            .unwrap_or_else(|| t!("context.workspace").into_owned()),
+        RuntimeKey::Remote(_) => t!("context.workspace_remote").into_owned(),
     };
 
     let pick_agent = agent.id.clone();
     let pick_entity = entity.clone();
     let add_folder = compact_chip("agent-context-add-folder")
         .icon(IconName::Plus)
-        .label("目录")
-        .tooltip("绑定一个本地目录")
+        .label(t!("context.folder"))
+        .tooltip(t!("context.folder_tooltip"))
         .on_click(move |_, _, cx| {
             let agent_id = pick_agent.clone();
             pick_entity.update(cx, |page, cx| page.pick_agent_context_folders(agent_id, cx));
@@ -381,7 +354,7 @@ pub(crate) fn render_agent_context_card(
     let link_entity = entity.clone();
     let add_link = compact_chip("agent-context-add-link")
         .icon(IconName::Plus)
-        .label("链接")
+        .label(t!("context.link"))
         .on_click(move |_, window, cx| {
             let agent_id = link_agent.clone();
             link_entity.update(cx, |page, cx| {
@@ -394,7 +367,7 @@ pub(crate) fn render_agent_context_card(
         rows.push(agent_context_row(
             &agent.id,
             folder,
-            "目录",
+            &t!("context.folder"),
             true,
             entity.clone(),
         ));
@@ -403,7 +376,7 @@ pub(crate) fn render_agent_context_card(
         rows.push(agent_context_row(
             &agent.id,
             link,
-            "链接",
+            &t!("context.link"),
             false,
             entity.clone(),
         ));
@@ -413,9 +386,9 @@ pub(crate) fn render_agent_context_card(
         div()
             .px_5()
             .py_4()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::faint()))
-            .child("还没绑定任何上下文。绑定后智能体就知道去哪儿找素材。")
+            .child(t!("context.empty").into_owned())
             .into_any_element()
     } else {
         div()
@@ -447,16 +420,15 @@ pub(crate) fn render_agent_context_card(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
-                                .child("绑定的上下文"),
+                                .child(t!("context.title").into_owned()),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
-                                .child("目录和链接会写进 system prompt。改动对新开的对话生效。"),
+                                .child(t!("context.description").into_owned()),
                         ),
                 )
                 .child(
@@ -471,26 +443,27 @@ pub(crate) fn render_agent_context_card(
         )
         .child(body)
         .child(
-            div()
-                .px_3()
-                .pb_2()
-                .child(
-                    TextInput::new(&editor.context_link)
-                        .small()
-                        .aria_label("上下文链接")
-                        .w_full(),
-                ),
+            div().px_3().pb_2().child(
+                TextInput::new(&editor.context_link)
+                    .small()
+                    .aria_label(t!("context.link_label"))
+                    .w_full(),
+            ),
         )
         .child(
             div()
                 .px_5()
                 .pb_3()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
-                .child(format!(
-                    "{space_root}，同一智能体的所有对话共用它。工作目录和绑定目录下的 {} 会自动作为技能加载。",
-                    api::model::pi_plugin_catalog::WORKSPACE_SKILL_DIRS.join(" / ")
-                )),
+                .child(
+                    t!(
+                        "context.workspace_note",
+                        workspace = space_root,
+                        dirs = api::model::pi_plugin_catalog::WORKSPACE_SKILL_DIRS.join(" / ")
+                    )
+                    .into_owned(),
+                ),
         )
         .into_any_element()
 }
@@ -504,11 +477,11 @@ pub(crate) fn agent_memory_switch(
     let agent_id = agent.id.clone();
     Switch::new(id)
         .checked(memory_enabled)
-        .accessibility_label("记忆")
+        .accessibility_label(t!("memory.title").into_owned())
         .tooltip(if memory_enabled {
-            "关闭后不再注入和写入记忆，已有记忆保留"
+            t!("memory.switch_off_tooltip")
         } else {
-            "打开后在对话和自动化里使用记忆"
+            t!("memory.switch_on_tooltip")
         })
         .on_change(move |enabled, _, cx| {
             let agent_id = agent_id.clone();
@@ -531,10 +504,10 @@ pub(crate) fn memory_pending_count(memories: &AgentMemories) -> usize {
 /// 编辑页页签名。待确认要用户处理，挂在页签上，在配置页也看得到。
 pub(crate) fn agent_editor_tab_label(tab: AgentEditorTab, editor: &AgentEditor) -> String {
     match tab {
-        AgentEditorTab::Config => "配置".to_string(),
+        AgentEditorTab::Config => t!("tab.config").into_owned(),
         AgentEditorTab::Memory => match memory_pending_count(&editor.memories) {
-            0 => "记忆".to_string(),
-            pending => format!("记忆 · {pending} 待确认"),
+            0 => t!("memory.title").into_owned(),
+            pending => t!("tab.memory_pending", count = pending).into_owned(),
         },
     }
 }
@@ -549,9 +522,9 @@ pub(crate) fn render_agent_memory_summary(
     let pending = memory_pending_count(&editor.memories);
     let manage_entity = entity.clone();
     let manage = compact_chip("agent-memory-manage")
-        .label("管理")
+        .label(t!("common.manage"))
         .icon(IconName::ChevronRight)
-        .tooltip("查看、搜索和删除记忆")
+        .tooltip(t!("memory.manage_tooltip"))
         .on_click(move |_, _, cx| {
             manage_entity.update(cx, |page, cx| {
                 page.select_agent_editor_tab(AgentEditorTab::Memory, cx)
@@ -566,10 +539,9 @@ pub(crate) fn render_agent_memory_summary(
         .child(
             div()
                 .flex_shrink_0()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .text_color(rgb(ui_theme::text()))
-                .child("记忆"),
+                .child(t!("memory.title").into_owned()),
         )
         .child(agent_memory_switch(
             "agent-memory-enabled-summary",
@@ -583,7 +555,7 @@ pub(crate) fn render_agent_memory_summary(
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .child(
                     div()
                         .min_w_0()
@@ -595,7 +567,7 @@ pub(crate) fn render_agent_memory_summary(
                                 editor.memories.user.entries.len(),
                             )
                         } else {
-                            "已关闭：不注入、不写入，已有记忆保留".to_string()
+                            t!("memory.off_summary").into_owned()
                         })),
                 )
                 .when(pending > 0, |row| {
@@ -603,7 +575,7 @@ pub(crate) fn render_agent_memory_summary(
                         div()
                             .flex_shrink_0()
                             .text_color(rgb(ui_theme::bad()))
-                            .child(format!("{pending} 条待确认")),
+                            .child(t!("memory.pending_count", count = pending).into_owned()),
                     )
                 }),
         )
@@ -622,10 +594,8 @@ pub(crate) fn render_agent_memory_card(
     let memory_enabled = agent.memory_enabled;
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-memory-refresh")
-        .icon(gpui_component::Icon::new(
-            gpui_kit_assets::IconName::RefreshCw,
-        ))
-        .icon_action("重新读取记忆")
+        .icon(IconName::Refresh)
+        .icon_action(t!("memory.reload"))
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |page, cx| page.refresh_agent_memories(cx));
         });
@@ -667,18 +637,20 @@ pub(crate) fn render_agent_memory_card(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
-                                .child("记忆"),
+                                .child(t!("memory.title").into_owned()),
                         )
-                        .child(div().text_xs().text_color(rgb(ui_theme::muted())).child(
-                            if memory_enabled {
-                                "智能体在对话和自动化里记下的长期信息。改动从下一轮对话起生效。"
-                            } else {
-                                "记忆已关闭：不注入、不写入。下面的记忆保留着，重新打开后照常使用。"
-                            },
-                        )),
+                        .child(
+                            div()
+                                .type_style(TYPE.text_xsmall)
+                                .text_color(rgb(ui_theme::muted()))
+                                .child(SharedString::from(if memory_enabled {
+                                    t!("memory.description")
+                                } else {
+                                    t!("memory.description_off")
+                                })),
+                        ),
                 )
                 .child(
                     div()
@@ -687,7 +659,11 @@ pub(crate) fn render_agent_memory_card(
                         .items_center()
                         .gap_2()
                         .child(refresh_button)
-                        .child(agent_memory_switch("agent-memory-enabled", agent, entity.clone())),
+                        .child(agent_memory_switch(
+                            "agent-memory-enabled",
+                            agent,
+                            entity.clone(),
+                        )),
                 ),
         )
         .child(
@@ -710,8 +686,8 @@ pub(crate) fn render_agent_memory_card(
             &agent.id,
             AgentMemorySection {
                 layer: MemoryLayer::Agent,
-                title: "这个智能体",
-                empty_hint: "还没有记忆。用户纠正它或让它记住什么时，它会自己写下来。",
+                title: t!("memory.agent_title"),
+                empty_hint: t!("memory.agent_empty"),
                 listing: &editor.memories.agent,
                 query: &query,
                 filter,
@@ -724,8 +700,8 @@ pub(crate) fn render_agent_memory_card(
             &agent.id,
             AgentMemorySection {
                 layer: MemoryLayer::User,
-                title: "全局（所有智能体共享）",
-                empty_hint: "还没有全局记忆。这里只放你本人的情况和你纠正过的做法。",
+                title: t!("memory.user_title"),
+                empty_hint: t!("memory.user_empty"),
                 listing: &editor.memories.user,
                 query: &query,
                 filter,
@@ -739,8 +715,8 @@ pub(crate) fn render_agent_memory_card(
 
 pub(crate) struct AgentMemorySection<'a> {
     layer: MemoryLayer,
-    title: &'static str,
-    empty_hint: &'static str,
+    title: std::borrow::Cow<'static, str>,
+    empty_hint: std::borrow::Cow<'static, str>,
     listing: &'a api::model::agent_memory::MemoryListing,
     query: &'a str,
     filter: MemoryFilter,
@@ -771,7 +747,7 @@ pub(crate) fn agent_memory_section(
     let folder_entity = entity.clone();
     let open_folder = compact_chip(format!("agent-memory-folder-{layer_key}"))
         .icon(IconName::FolderOpen)
-        .icon_action("打开记忆文件夹")
+        .icon_action(t!("memory.open_folder"))
         .on_click(move |_, _, cx| {
             let agent_id = folder_agent.clone();
             folder_entity.update(cx, |page, cx| {
@@ -793,13 +769,15 @@ pub(crate) fn agent_memory_section(
         div()
             .px_3()
             .py_1p5()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::faint()))
-            .child(if narrowed && !listing.entries.is_empty() {
-                "没有匹配的记忆"
-            } else {
-                empty_hint
-            })
+            .child(SharedString::from(
+                if narrowed && !listing.entries.is_empty() {
+                    t!("memory.no_match")
+                } else {
+                    empty_hint
+                },
+            ))
             .into_any_element()
     } else {
         div().flex().flex_col().children(rows).into_any_element()
@@ -820,10 +798,13 @@ pub(crate) fn agent_memory_section(
                 .child(
                     div()
                         .flex_1()
-                        .text_xs()
-                        .font_medium()
+                        .type_style(TYPE.text_xsmall_medium)
                         .text_color(rgb(ui_theme::muted()))
-                        .child(memory_section_title(title, listing, narrowed.then_some(shown))),
+                        .child(memory_section_title(
+                            &title,
+                            listing,
+                            narrowed.then_some(shown),
+                        )),
                 )
                 .child(open_folder),
         )
@@ -832,12 +813,15 @@ pub(crate) fn agent_memory_section(
                 div()
                     .px_3()
                     .py_1()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::bad()))
-                    .child(format!(
-                        "规则类记忆正文超过 {}KB 常驻上限，启动时只会注入一部分。请合并或删掉过时的规则。",
-                        api::model::agent_memory::CORE_MEMORY_MAX_BYTES / 1000,
-                    )),
+                    .child(
+                        t!(
+                            "memory.over_budget",
+                            kb = api::model::agent_memory::CORE_MEMORY_MAX_BYTES / 1000
+                        )
+                        .into_owned(),
+                    ),
             )
         })
         .child(body)
@@ -851,8 +835,8 @@ pub(crate) fn memory_section_title(
 ) -> String {
     let total = listing.entries.len();
     let count = match shown {
-        Some(shown) => format!("{shown} / {total} 条"),
-        None => format!("{total} 条"),
+        Some(shown) => t!("memory.count_shown", shown = shown, total = total),
+        None => t!("memory.count", total = total),
     };
     let pending = listing
         .entries
@@ -862,17 +846,34 @@ pub(crate) fn memory_section_title(
     if pending == 0 {
         format!("{title} · {count}")
     } else {
-        format!("{title} · {count}，{pending} 条待确认")
+        t!(
+            "memory.section_pending",
+            title = title,
+            count = count,
+            pending = pending
+        )
+        .into_owned()
     }
 }
 
-pub(crate) fn memory_kind_label(kind: Option<&str>) -> &'static str {
+pub(crate) fn memory_kind_label(kind: Option<&str>) -> SharedString {
     match kind {
-        Some("user") => "关于你",
-        Some("feedback") => "做法",
-        Some("project") => "事实",
-        Some("reference") => "资源",
-        _ => "格式有误",
+        Some("user") => t!("memory.kind.user"),
+        Some("feedback") => t!("memory.kind.feedback"),
+        Some("project") => t!("memory.kind.project"),
+        Some("reference") => t!("memory.kind.reference"),
+        _ => t!("memory.kind.invalid"),
+    }
+    .into()
+}
+
+/// 技能还是扩展，给人看的名字。
+pub(crate) fn plugin_kind_label(
+    kind: api::model::pi_plugin_catalog::PiPluginKind,
+) -> std::borrow::Cow<'static, str> {
+    match kind {
+        api::model::pi_plugin_catalog::PiPluginKind::Skill => t!("plugins.kind.skill"),
+        api::model::pi_plugin_catalog::PiPluginKind::Extension => t!("plugins.kind.extension"),
     }
 }
 
@@ -881,12 +882,18 @@ pub(crate) fn memory_usage_label(
     entry: &api::model::agent_memory::MemoryEntry,
 ) -> Option<(String, bool)> {
     if entry.pending_reason.is_some() {
-        return Some(("待确认".to_string(), true));
+        return Some((t!("memory.filter.pending").into_owned(), true));
     }
     if entry.stale {
-        return Some(("长期未用".to_string(), true));
+        return Some((t!("memory.stale").into_owned(), true));
     }
-    (entry.read_count > 0).then(|| (format!("用过 {} 次", entry.read_count), false))
+    (entry.read_count > 0).then(|| {
+        let used = match entry.read_count {
+            1 => t!("memory.used.one").into_owned(),
+            count => t!("memory.used.other", count = count).into_owned(),
+        };
+        (used, false)
+    })
 }
 
 pub(crate) fn agent_memory_row(
@@ -904,9 +911,14 @@ pub(crate) fn agent_memory_row(
     let remove_agent = agent_id.to_string();
     let remove_file = entry.file_name.clone();
     let remove_name = entry.name.clone();
-    let subtitle = match &entry.pending_reason {
+    let subtitle = match entry.pending_reason_text() {
         // 待确认时把原因放在描述前面，用户采纳前能看到它为什么没生效。
-        Some(reason) => format!("{reason}：{}", entry.description),
+        Some(reason) => t!(
+            "memory.pending_subtitle",
+            reason = reason,
+            description = entry.description
+        )
+        .into_owned(),
         None if entry.description.is_empty() => entry.file_name.clone(),
         None => entry.description.clone(),
     };
@@ -924,7 +936,7 @@ pub(crate) fn agent_memory_row(
             div()
                 .flex_shrink_0()
                 .w(px(44.))
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(memory_kind_label(entry.kind.as_deref())),
         )
@@ -962,7 +974,7 @@ pub(crate) fn agent_memory_row(
                         .child(
                             div()
                                 .min_w_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::text()))
                                 .overflow_hidden()
                                 .child(truncated_line(entry.name.clone())),
@@ -971,7 +983,7 @@ pub(crate) fn agent_memory_row(
                 .child(
                     // 待确认时前面挂着原因，一行放不下就把描述挤没了；给两行再省略。
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
                         .text_ellipsis()
                         .line_clamp(2)
@@ -982,7 +994,7 @@ pub(crate) fn agent_memory_row(
             row.child(
                 div()
                     .flex_shrink_0()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(if stale {
                         ui_theme::bad()
                     } else {
@@ -994,7 +1006,7 @@ pub(crate) fn agent_memory_row(
         .child(
             compact_chip(format!("agent-memory-open-{layer_key}-{}", entry.file_name))
                 .icon(IconName::ExternalLink)
-                .icon_action("用文本编辑器打开")
+                .icon_action(t!("memory.open_in_editor"))
                 .on_click(move |_, _, cx| {
                     let path = open_path.clone();
                     open_entity.update(cx, |page, cx| page.open_agent_memory_file(path, cx));
@@ -1007,8 +1019,8 @@ pub(crate) fn agent_memory_row(
                     entry.file_name
                 ))
                 .icon(IconName::Check)
-                .accessibility_label("采纳")
-                .tooltip("采纳：之后的对话会用到这条记忆")
+                .accessibility_label(t!("memory.accept"))
+                .tooltip(t!("memory.accept_tooltip"))
                 .on_click(move |_, _, cx| {
                     let agent_id = approve_agent.clone();
                     let file_name = approve_file.clone();
@@ -1024,7 +1036,7 @@ pub(crate) fn agent_memory_row(
                 entry.file_name
             ))
             .icon(IconName::Close)
-            .icon_action("删除这条记忆")
+            .icon_action(t!("memory.delete_tooltip"))
             .on_click(move |_, window, cx| {
                 let target = MemoryDeleteTarget {
                     agent_id: remove_agent.clone(),
@@ -1053,7 +1065,7 @@ pub(crate) fn agent_memory_body(id: String, body: &str) -> AnyElement {
         vec![
             div()
                 .text_color(rgb(ui_theme::faint()))
-                .child("（正文为空）")
+                .child(t!("memory.empty_body").into_owned())
                 .into_any_element(),
         ]
     } else {
@@ -1077,7 +1089,7 @@ pub(crate) fn agent_memory_body(id: String, body: &str) -> AnyElement {
         .overflow_y_scroll()
         .rounded(px(6.))
         .bg(rgb(ui_theme::side()))
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::muted()))
         .children(lines)
         .into_any_element()
@@ -1101,7 +1113,7 @@ pub(crate) fn agent_context_row(
         .child(
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(kind_label.to_string()),
         )
@@ -1109,18 +1121,18 @@ pub(crate) fn agent_context_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::text()))
                 .overflow_hidden()
                 .child(truncated_line(value.to_string())),
         )
         .child(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
-                .icon(api::ui::trash_icon())
+                .icon(IconName::Trash)
                 .icon_action(if is_folder {
-                    "解除这个目录的绑定"
+                    t!("context.unbind_folder")
                 } else {
-                    "移除这个链接"
+                    t!("context.remove_link")
                 })
                 .on_click(move |_, _, cx| {
                     let agent_id = remove_agent.clone();
@@ -1149,17 +1161,15 @@ pub(crate) fn render_agent_mcp_card(
 
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-mcp-refresh")
-        .icon(gpui_component::Icon::new(
-            gpui_kit_assets::IconName::RefreshCw,
-        ))
-        .icon_action("重新读取 mcp.json")
+        .icon(IconName::Refresh)
+        .icon_action(t!("mcp.reload"))
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |page, cx| page.refresh_agent_plugins(cx));
         });
     let manage_entity = entity.clone();
     let manage_button = compact_chip("agent-mcp-manage")
-        .label("管理")
-        .tooltip("去能力库添加、登录或停用 MCP 服务器")
+        .label(t!("common.manage"))
+        .tooltip(t!("mcp.manage_tooltip"))
         .on_click(move |_, _, cx| {
             manage_entity.update(cx, |page, cx| {
                 page.open_capabilities("mcp", cx);
@@ -1171,26 +1181,25 @@ pub(crate) fn render_agent_mcp_card(
         .iter()
         .map(|server| {
             let (kind_label, detail) = match &server.transport {
-                api::model::pi_mcp::PiMcpTransport::Http { url } => ("远程", url.clone()),
+                api::model::pi_mcp::PiMcpTransport::Http { url } => (t!("mcp.remote"), url.clone()),
                 api::model::pi_mcp::PiMcpTransport::Stdio { command, args } => {
-                    ("本地", format!("{command} {}", args.join(" ")))
+                    (t!("mcp.local"), format!("{command} {}", args.join(" ")))
                 }
-                api::model::pi_mcp::PiMcpTransport::Unknown => ("未知", String::new()),
+                api::model::pi_mcp::PiMcpTransport::Unknown => (t!("pick.unknown"), String::new()),
             };
             // 能力库里停用的服务器勾了也不会连：Pi 读到 `enabled: false` 就跳过。
-            let broken = (!server.enabled).then(|| "已在能力库停用，勾选也不会连接".to_string());
+            let broken = (!server.enabled).then(|| t!("mcp.disabled").into_owned());
             agent_plugin_row(
                 AgentPick::McpServer,
                 &agent.id,
                 &server.name,
                 &server.name,
-                kind_label,
+                &kind_label,
                 server.description.as_deref().unwrap_or(""),
                 &detail,
                 broken,
                 selected.contains(&server.name),
                 entity.clone(),
-                cx,
             )
         })
         .collect();
@@ -1209,36 +1218,32 @@ pub(crate) fn render_agent_mcp_card(
             &agent.id,
             name,
             name,
-            "未知",
+            &t!("pick.unknown"),
             "",
             "",
-            Some("mcp.json 里已经没有这台服务器".to_string()),
+            Some(t!("mcp.missing").into_owned()),
             true,
             entity.clone(),
-            cx,
         ));
     }
 
-    let body =
-        if rows.is_empty() {
-            div()
-                .px_5()
-                .py_4()
-                .text_xs()
-                .text_color(rgb(ui_theme::faint()))
-                .child(pending.unwrap_or_else(|| {
-                    "还没有配置 MCP 服务器。点「管理」去能力库添加。".to_string()
-                }))
-                .into_any_element()
-        } else {
-            div()
-                .px_2()
-                .pb_2()
-                .flex()
-                .flex_col()
-                .children(rows)
-                .into_any_element()
-        };
+    let body = if rows.is_empty() {
+        div()
+            .px_5()
+            .py_4()
+            .type_style(TYPE.text_xsmall)
+            .text_color(rgb(ui_theme::faint()))
+            .child(pending.unwrap_or_else(|| t!("mcp.empty").into_owned()))
+            .into_any_element()
+    } else {
+        div()
+            .px_2()
+            .pb_2()
+            .flex()
+            .flex_col()
+            .children(rows)
+            .into_any_element()
+    };
 
     agent_surface_card()
         .flex()
@@ -1260,18 +1265,15 @@ pub(crate) fn render_agent_mcp_card(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_medium()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
                                 .child("MCP"),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
-                                .child(format!(
-                                    "已勾选 {selected_count} 个。对话只连勾选的服务器，没勾的不启动。改动对新开的对话生效。"
-                                )),
+                                .child(t!("mcp.selected", count = selected_count).into_owned()),
                         ),
                 )
                 .child(
@@ -1310,7 +1312,6 @@ pub(crate) fn agent_plugin_row(
     broken: Option<String>,
     checked: bool,
     entity: Entity<AgentsPage>,
-    cx: &App,
 ) -> AnyElement {
     let toggle_agent = agent_id.to_string();
     let toggle_plugin = plugin_id.to_string();
@@ -1323,7 +1324,7 @@ pub(crate) fn agent_plugin_row(
     let subtitle_color = if usable {
         rgb(ui_theme::faint())
     } else {
-        cx.theme().danger.into()
+        rgb(ui_theme::bad())
     };
 
     div()
@@ -1363,7 +1364,7 @@ pub(crate) fn agent_plugin_row(
                         .gap_2()
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::text()))
                                 .child(name.to_string()),
                         )
@@ -1372,14 +1373,14 @@ pub(crate) fn agent_plugin_row(
                                 .px_1p5()
                                 .rounded(px(4.))
                                 .bg(rgb(ui_theme::bg()))
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::faint()))
                                 .child(kind_label.to_string()),
                         ),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .overflow_hidden()
                         .text_color(subtitle_color)
                         .child(truncated_line(subtitle)),

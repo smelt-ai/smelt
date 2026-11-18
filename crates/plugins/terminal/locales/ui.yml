@@ -1,0 +1,73 @@
+_version: 2
+title:
+  en: Terminal
+  zh-CN: 终端
+connecting:
+  en: Connecting to terminal…
+  zh-CN: 正在连接终端…
+retry:
+  en: Retry
+  zh-CN: 重试
+reconnecting:
+  en: Lost connection to “%{runtime}”. Reconnecting… Input typed meanwhile will be sent once it's back.
+  zh-CN: 与「%{runtime}」的连接已断开，正在重连…期间的输入会在恢复后发出
+command:
+  send_text:
+    en: Type into Terminal
+    zh-CN: 打进终端
+settings:
+  display:
+    en: Display
+    zh-CN: 显示
+  font_size:
+    en: Font size
+    zh-CN: 字号
+  smaller:
+    en: Decrease terminal font size
+    zh-CN: 终端字号减小
+  larger:
+    en: Increase terminal font size
+    zh-CN: 终端字号增大
+search:
+  placeholder:
+    en: Find in terminal…
+    zh-CN: 在终端中查找…
+  none:
+    en: No results
+    zh-CN: 无结果
+notify:
+  error:
+    en: Error
+    zh-CN: 错误
+input:
+  overflow:
+    en: Too much input was waiting while the terminal reconnected; the unsent part was cancelled
+    zh-CN: 终端重连期间待发送的输入过多，未发送部分已取消
+  session_ended:
+    en: The terminal session ended; unsent input was cancelled
+    zh-CN: 终端会话已结束，未发送的输入已取消
+  reopened:
+    en: The runtime restarted and the terminal was reopened; unsent input was cancelled
+    zh-CN: 运行时重启过，终端已重新打开，未发送的输入已取消
+error:
+  connect:
+    en: "Couldn't connect to the terminal: %{error}"
+    zh-CN: 连不上终端：%{error}
+  bad_args:
+    en: "Wrong terminal arguments: %{error}"
+    zh-CN: 终端的参数不对：%{error}
+  not_open:
+    en: Terminal “%{session}” isn't open
+    zh-CN: 终端「%{session}」没有开着
+  reattach:
+    en: Couldn't reattach the terminal
+    zh-CN: 终端重新附着失败
+  daemon_stuck:
+    en: The daemon is shutting down and didn't exit within %{seconds}s
+    zh-CN: 守护正在停机，%{seconds}s 内没有退出
+  daemon_restarting:
+    en: The daemon is shutting down and its replacement hasn't started yet
+    zh-CN: 守护正在停机，接班的守护还没起来
+  handshake_closed:
+    en: The daemon disconnected without answering the handshake
+    zh-CN: 守护没回握手就断开了

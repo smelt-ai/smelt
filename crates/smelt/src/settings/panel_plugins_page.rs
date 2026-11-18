@@ -1,0 +1,363 @@
+//! 设置页：面板插件（gpui-shell 插件，每个是工作台布局里的一个视图）。宿主自己的页，和插件
+//! 的设置页一样是登记的视图（见 [`super::view_specs`]）。
+//!
+//! 列出眼下加载的插件，导入、删除自己装的插件，重新加载全部插件。App 自带的插件跟着
+//! smelt 更新，不能删；用户装一个同 id 的副本就能盖过它。和能力库里的「智能体插件」（Pi 的
+//! 技能与扩展）是两回事：这些插件跑在 smelt 界面里，只在本机。改磁盘放后台线程；改完在
+//! 工作台窗口里重新挂载全部插件，不用重启。
+
+use super::*;
+use crate::plugins::{InstalledPlugin, PluginSource};
+use rust_i18n::t;
+use smelt_plugin_api::HostEvent;
+use smelt_ui::kit::{TYPE, TypeStyled as _};
+use smelt_ui::{SettingsPage, SettingsRow as Row, SettingsSection as Section};
+
+/// 示例插件仓库，照着它写自己的插件。
+const DEMO_URL: &str = "https://github.com/smelt-ai/smelt-plugin-demo";
+
+pub(super) struct PanelPluginsPage {
+    /// 眼下加载的插件，建这页时和插件登记变了时重读（只读内存）。
+    plugins: Vec<InstalledPlugin>,
+    /// 用户插件目录，导入的插件复制进这里。
+    user_dir: Option<std::path::PathBuf>,
+    /// 正在等二次确认删除的插件 id。
+    pending_delete: Option<String>,
+    /// 导入、删除、打开目录的最近一次错误。
+    error: Option<String>,
+    /// 正在复制或删除，按钮先禁用。
+    busy: bool,
+    _views: Subscription,
+}
+
+impl PanelPluginsPage {
+    pub(super) fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            plugins: crate::plugins::installed(),
+            user_dir: crate::plugins::user_plugin_dir(),
+            pending_delete: None,
+            error: None,
+            busy: false,
+            // 重新加载后插件的视图登记跟着变，列表随之重读。
+            _views: cx.subscribe(&smelt_plugin_api::events(cx), |this, _, event, cx| {
+                if matches!(event, HostEvent::ViewsChanged) {
+                    this.refresh(cx);
+                }
+            }),
+        }
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.plugins = crate::plugins::installed();
+        cx.notify();
+    }
+
+    /// 选一个插件目录，复制进用户插件目录，然后重新加载。
+    fn import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(t!("plugins.import_prompt").into_owned().into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(source) = paths.into_iter().next() else {
+                return;
+            };
+            if !matches!(this.update(cx, |this, cx| this.begin_change(cx)), Ok(true)) {
+                return;
+            }
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::plugins::import(&source) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_change(
+                    result.map(|name| t!("plugins.imported", name = name).into_owned()),
+                    window,
+                    cx,
+                )
+            });
+        })
+        .detach();
+    }
+
+    /// 点一下删除只是进入待确认状态；再点一次才删。
+    fn request_delete(&mut self, id: String, cx: &mut Context<Self>) {
+        self.error = None;
+        self.pending_delete = Some(id);
+        cx.notify();
+    }
+
+    fn cancel_delete(&mut self, cx: &mut Context<Self>) {
+        self.pending_delete = None;
+        cx.notify();
+    }
+
+    /// 把插件挪进回收目录，然后重新加载。
+    fn confirm_delete(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_delete = None;
+        let Some(plugin) = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id && plugin.source == PluginSource::User)
+            .cloned()
+        else {
+            self.error = Some(t!("plugins.not_found").into_owned());
+            cx.notify();
+            return;
+        };
+        if !self.begin_change(cx) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let root = plugin.root.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::plugins::uninstall(&root) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_change(
+                    result.map(|()| t!("plugins.deleted", name = plugin.name).into_owned()),
+                    window,
+                    cx,
+                )
+            });
+        })
+        .detach();
+    }
+
+    /// 在系统文件管理器里打开用户插件目录，没有就先建出来。
+    fn open_dir(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            return;
+        };
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            self.error = Some(t!("plugins.create_dir_failed", error = error).into_owned());
+            cx.notify();
+            return;
+        }
+        cx.open_with_system(&dir);
+    }
+
+    /// 重新读盘、重新挂载全部插件。插件作者改完脚本点它，不用重启。这页摆在工作台窗口里，
+    /// `window` 就是挂载要用的那个；推到这一轮更新之后做，挂载时不占着这页。
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let page = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            // 视图登记变了由工作台自己跟（重装布局、对路由），见 `subscribe_host_events`。
+            crate::plugins::mount_all(window, cx);
+            // 加载出错不一定改登记，列表在这里再读一次。
+            let _ = page.update(cx, |page, cx| page.refresh(cx));
+        });
+    }
+
+    /// 返回能不能开始：同一时刻只做一件。
+    fn begin_change(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.busy {
+            return false;
+        }
+        self.busy = true;
+        self.error = None;
+        cx.notify();
+        true
+    }
+
+    fn finish_change(
+        &mut self,
+        result: Result<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.busy = false;
+        match result {
+            Ok(message) => {
+                crate::status_item::notify_success(message);
+                self.reload(window, cx);
+            }
+            Err(error) => self.error = Some(error),
+        }
+        cx.notify();
+    }
+
+    /// 页面的主体：已装的插件。导入、打开目录、重新加载是对这张列表的操作，放在它的第一格。
+    fn list_section(&self, cx: &Context<Self>) -> Section {
+        let title = match self.plugins.len() {
+            0 => t!("plugins.installed").into_owned(),
+            count => t!("plugins.installed_count", count = count).into_owned(),
+        };
+        let section = Section::new()
+            .title(title)
+            .description(t!("plugins.list_hint"))
+            .child(self.toolbar_cell(cx));
+        if self.plugins.is_empty() {
+            return section.child(
+                div()
+                    .type_style(TYPE.ui)
+                    .text_color(rgb(crate::ui_theme::muted()))
+                    .child(t!("plugins.empty")),
+            );
+        }
+        section.children(self.plugins.iter().map(|plugin| {
+            let pending = self.pending_delete.as_deref() == Some(plugin.id.as_str());
+            self.plugin_row(plugin, pending, cx)
+        }))
+    }
+
+    /// 列表第一格：左边说明导入会做什么，右边三个操作，导入是唯一的主按钮；下面一句警告。
+    fn toolbar_cell(&self, cx: &Context<Self>) -> Div {
+        let user_dir = self
+            .user_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default();
+        let busy = self.busy;
+        let row = Row::new(t!("plugins.import"))
+            .description(t!("plugins.import_hint", dir = user_dir))
+            .child(
+                Button::new("reload-panel-plugins")
+                    .quiet()
+                    .small()
+                    .label(t!("plugins.reload"))
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
+            )
+            .child(
+                Button::new("open-panel-plugin-dir")
+                    .quiet()
+                    .small()
+                    .label(t!("plugins.open_dir"))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_dir(cx))),
+            )
+            .child(
+                Button::new("import-panel-plugin")
+                    .small()
+                    .label(t!("plugins.import_button"))
+                    .loading(busy)
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
+            );
+        // 用警告色：导入别人的插件等于给它整台机器的权限。
+        let warning = div()
+            .type_style(TYPE.text_xsmall)
+            .text_color(rgb(crate::ui_theme::need()))
+            .child(SharedString::from(t!("plugins.trust_warning")));
+        div().flex().flex_col().gap_2().child(row).child(warning)
+    }
+
+    fn plugin_row(&self, plugin: &InstalledPlugin, pending: bool, cx: &Context<Self>) -> Row {
+        let id = plugin.id.clone();
+        let removable = plugin.source == PluginSource::User;
+
+        // 清单里的 version 可以不写。
+        let mut detail = vec![if plugin.version.is_empty() {
+            plugin.id.clone()
+        } else {
+            t!(
+                "plugins.id_version",
+                id = plugin.id,
+                version = plugin.version
+            )
+            .into_owned()
+        }];
+        detail.push(match plugin.source {
+            PluginSource::User => {
+                t!("plugins.source_user", path = plugin.root.display()).into_owned()
+            }
+            PluginSource::Bundled => t!("plugins.source_bundled").into_owned(),
+            #[cfg(debug_assertions)]
+            PluginSource::Repo => {
+                t!("plugins.source_repo", path = plugin.root.display()).into_owned()
+            }
+        });
+        if let Some(error) = &plugin.error {
+            detail.push(t!("plugins.load_failed", error = error).into_owned());
+        }
+
+        let row = Row::new(plugin.name.clone()).description(detail.join("\n"));
+        if !removable {
+            return row;
+        }
+        if pending {
+            let confirm_id = id.clone();
+            row.child(
+                Button::new(format!("confirm-delete-panel-plugin-{id}"))
+                    .danger()
+                    .small()
+                    .label(t!("plugins.confirm_delete"))
+                    .disabled(self.busy)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_delete(confirm_id.clone(), window, cx)
+                    })),
+            )
+            .child(
+                Button::new(format!("cancel-delete-panel-plugin-{id}"))
+                    .quiet()
+                    .small()
+                    .label(t!("action.cancel"))
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_delete(cx))),
+            )
+        } else {
+            row.child(
+                Button::new(format!("delete-panel-plugin-{id}"))
+                    .quiet()
+                    .small()
+                    .label(t!("plugins.delete"))
+                    .disabled(self.busy)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.request_delete(id.clone(), cx)),
+                    ),
+            )
+        }
+    }
+}
+
+impl Render for PanelPluginsPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        SettingsPage::new("settings-page:panel-plugins")
+            .children(self.error.clone().map(|error| {
+                Section::new().title(t!("plugins.last_failed")).child(
+                    div()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(rgb(crate::ui_theme::bad()))
+                        .child(error),
+                )
+            }))
+            .child(self.list_section(cx))
+            .child(authoring_section())
+    }
+}
+
+impl smelt_plugin_api::PluginView for PanelPluginsPage {
+    fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+}
+
+/// 给插件作者看的：示例和日志。放在最后，不跟装插件的人抢位置。
+fn authoring_section() -> Section {
+    Section::new().title(t!("plugins.write")).child(
+        Row::new(t!("plugins.examples"))
+            .description(t!("plugins.write_hint"))
+            .child(
+                Button::new("open-panel-plugin-log")
+                    .quiet()
+                    .small()
+                    .label(t!("plugins.open_log"))
+                    .on_click(|_, _, _| {
+                        let opened = smelt_sys::app_log::log_path()
+                            .ok_or_else(|| t!("plugins.no_log").into_owned())
+                            .and_then(|path| crate::system_open::open_in_system_text_editor(&path));
+                        if let Err(error) = opened {
+                            crate::status_item::notify_error(error);
+                        }
+                    }),
+            )
+            .child(
+                smelt_ui::Link::new("open-panel-plugin-demo", DEMO_URL)
+                    .type_style(TYPE.ui)
+                    .child(t!("plugins.examples_link")),
+            ),
+    )
+}

@@ -10,7 +10,7 @@
  *
  * 用法：bun agent/scripts/compile-smelt-agent.ts <outfile> <bun-target>
  */
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const outfile = process.argv[2];
 const compileTarget = process.argv[3];
@@ -64,6 +64,31 @@ const workerPaths: BunPlugin = {
 };
 
 const root = join(import.meta.dir, "..");
+
+/**
+ * `compiled-main.ts` 用 `smelt-adapter-bin:<包名>` 引入 ACP 适配器的命令行入口，这里按包自己
+ * 在 package.json 里声明的 `bin` 找到那个文件。`bin` 和 `./package.json` 都是包对外的约定；
+ * `dist/` 下的路径不是——claude-agent-acp 0.103 起 exports 就不再放行它。
+ */
+const ADAPTER_BIN = "smelt-adapter-bin:";
+const adapterBins: BunPlugin = {
+	name: "smelt-adapter-bins",
+	setup(build) {
+		build.onResolve({ filter: /^smelt-adapter-bin:/ }, async (args) => {
+			const name = args.path.slice(ADAPTER_BIN.length);
+			const manifestPath = Bun.resolveSync(`${name}/package.json`, root);
+			const manifest = await Bun.file(manifestPath).json();
+			// 单个入口可以直接写成字符串；写成表时取和包名（去掉作用域）同名的那条。
+			const command = name.slice(name.lastIndexOf("/") + 1);
+			const entry: unknown = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.[command];
+			if (typeof entry !== "string") {
+				throw new Error(`${name} 的 package.json 没有声明同名的 bin`);
+			}
+			return { path: join(dirname(manifestPath), entry) };
+		});
+	},
+};
+
 const result = await Bun.build({
 	entrypoints: [
 		join(root, "src/compiled-main.ts"),
@@ -74,7 +99,7 @@ const result = await Bun.build({
 	format: "esm",
 	bytecode: true,
 	splitting: true,
-	plugins: [workerPaths],
+	plugins: [workerPaths, adapterBins],
 	compile: {
 		outfile,
 		target: compileTarget,

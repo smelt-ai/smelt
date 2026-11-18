@@ -43,10 +43,29 @@ export interface PromptOption {
 	description?: string;
 }
 
+/**
+ * What the helper itself is saying, as a kind the host words in the viewer's language
+ * (`PiLoginNote` in `smelt-model`). `message` / `instructions` on the same event carry the
+ * English sentence for hosts that don't know the kind. Pi's and providers' own words have none.
+ */
+export type LoginNote =
+	| { kind: "paste_callback" }
+	| { kind: "sign_in_in_browser" }
+	| { kind: "callback_received" }
+	| { kind: "callback_rejected"; status: number }
+	| { kind: "callback_failed"; error: string }
+	| { kind: "no_redirect" }
+	| { kind: "not_full_address" }
+	| { kind: "wrong_callback"; expected: string }
+	| { kind: "no_authorization_result" }
+	| { kind: "login_failed"; code: number }
+	| { kind: "answered_github_dot_com"; question: string }
+	| { kind: "answered_browser"; question: string };
+
 export type HostEvent =
 	| { event: "providers"; providers: AuthProviderSummary[] }
 	| { event: "models"; models: AuthModelSummary[] }
-	| { event: "auth_url"; url: string; instructions?: string }
+	| { event: "auth_url"; url: string; instructions?: string; note?: LoginNote }
 	| {
 			event: "device_code";
 			userCode: string;
@@ -55,7 +74,7 @@ export type HostEvent =
 			expiresInSeconds?: number;
 	  }
 	| { event: "info"; message: string; links?: { url: string; label?: string }[] }
-	| { event: "progress"; message: string }
+	| { event: "progress"; message: string; note?: LoginNote }
 	| {
 			event: "prompt";
 			id: string;
@@ -63,11 +82,12 @@ export type HostEvent =
 			message: string;
 			placeholder?: string;
 			options?: PromptOption[];
+			note?: LoginNote;
 	  }
 	/** The flow stopped waiting for this prompt (a racing callback won). */
 	| { event: "prompt_done"; id: string }
 	| { event: "done" }
-	| { event: "error"; message: string };
+	| { event: "error"; message: string; note?: LoginNote };
 
 export type HostCommand =
 	| { command: "prompt_response"; id: string; value: string }

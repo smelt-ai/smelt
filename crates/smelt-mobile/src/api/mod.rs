@@ -23,5 +23,10 @@ pub fn init_app() {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Debug),
     );
+    // Flutter 的界面语言跟随系统；Rust 这边说的话（运行时报错的原因）也按系统语言来。
+    let locale = sys_locale::get_locale().map_or(smelt_model::locale::FALLBACK_LOCALE, |tag| {
+        smelt_model::locale::supported_locale(&tag)
+    });
+    rust_i18n::set_locale(locale);
     log::info!("smelt-mobile initialized");
 }

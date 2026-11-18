@@ -96,7 +96,7 @@ fn add_watches(watcher: &SharedWatcher, root: &str, targets: Vec<(PathBuf, Recur
 
 pub(crate) fn watch(root: &str, event_hub: &EventHubHandle) -> Result<(), String> {
     if !Path::new(root).is_dir() {
-        return Err(format!("不是目录：{root}"));
+        return Err(format!("Not a directory: {root}"));
     }
     let mut watches = watches().lock().map_err(|error| error.to_string())?;
     if watches.contains_key(root) {
@@ -122,14 +122,14 @@ pub(crate) fn watch(root: &str, event_hub: &EventHubHandle) -> Result<(), String
         }
         let _ = dirty_tx.try_send(());
     })
-    .map_err(|error| format!("监听 {root} 失败：{error}"))?;
+    .map_err(|error| format!("Couldn't watch {root}: {error}"))?;
     let watcher: SharedWatcher = Arc::new(Mutex::new(watcher));
     if cfg!(target_os = "macos") {
         watcher
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .watch(Path::new(root), RecursiveMode::Recursive)
-            .map_err(|error| format!("监听 {root} 失败：{error}"))?;
+            .map_err(|error| format!("Couldn't watch {root}: {error}"))?;
     } else {
         add_watches(&watcher, root, watch_targets(Path::new(root)));
         let watcher = Arc::clone(&watcher);
@@ -141,7 +141,7 @@ pub(crate) fn watch(root: &str, event_hub: &EventHubHandle) -> Result<(), String
                     add_watches(&watcher, &root, watch_targets(&dir));
                 }
             })
-            .map_err(|error| format!("启动监听线程失败：{error}"))?;
+            .map_err(|error| format!("Couldn't start the watcher thread: {error}"))?;
     }
     watches.insert(root.to_string(), watcher);
     spawn_notifier(root, dirty_rx, event_hub)
@@ -166,7 +166,7 @@ fn spawn_notifier(
                 }
             }
         })
-        .map_err(|error| format!("启动监听线程失败：{error}"))?;
+        .map_err(|error| format!("Couldn't start the watcher thread: {error}"))?;
     Ok(())
 }
 

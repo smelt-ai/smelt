@@ -1,6 +1,6 @@
 # 本地状态存储
 
-Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。启动时会删掉已经没有读写路径的旧 JSON（`workspace.json`、`appearance.json`、`launch.json`、`collab.json`、`llm.json`、`pet.json` 等），见 `crates/smelt/src/storage_cleanup.rs`。
+Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。启动时会删掉已经没有读写路径的旧 JSON（`workspace.json`、`appearance.json`、`launch.json`、`collab.json`、`llm.json`、`pet.json` 等），见维护插件的 `crates/plugins/maintenance/src/residue.rs`。
 
 ## 运行时库
 
@@ -37,19 +37,16 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ~/.smelt/client.sqlite3
 ```
 
-只属于这台桌面，`SCHEMA_VERSION = 12`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。v4 → v5：`runtime_connection` 增加 `os`。v5 → v6：侧栏顺序从运行时搬到客户端，新建 `sidebar_project_order` / `sidebar_conversation_order`；升级后第一次按运行时目录的先后排，之后按这台桌面自己拖出来的顺序。v6 → v7：新建 `key_binding`，存用户改过的快捷键。v7 → v8：`workspace_ui` 增加 `archive_expanded`。v8 → v9：整个工作台换成一块 Dock，`workspace_ui` 去掉侧栏宽度和开合，`appearance` 增加 `layout_id`，`conversation_route` 去掉舞台覆盖页和工具面板的开合、页签、宽度，新建 `workspace_layout_state`。v9 → v10：快捷键改绑命令，`key_binding.action_id` 改名 `command`，旧动作名换成对应的命令 id（如 `command_palette` → `smelt.palette/toggle`），早已下线的动作名那几行删掉。v10 → v11：对话界面状态只留终端的分屏和当前终端，`conversation_route` 去掉文件树、Git 页的列，删掉 `conversation_route_path`。v11 → v12：删掉 `notify_prefs`，通知开关归通知插件，存在它自己的库里；旧值不搬，插件的开关默认都开。
+只属于这台桌面，`SCHEMA_VERSION = 15`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。v4 → v5：`runtime_connection` 增加 `os`。v5 → v6：侧栏顺序从运行时搬到客户端，新建 `sidebar_project_order` / `sidebar_conversation_order`；升级后第一次按运行时目录的先后排，之后按这台桌面自己拖出来的顺序。v6 → v7：新建 `key_binding`，存用户改过的快捷键。v7 → v8：`workspace_ui` 增加 `archive_expanded`。v8 → v9：整个工作台换成一块 Dock，`workspace_ui` 去掉侧栏宽度和开合，`appearance` 增加 `layout_id`，`conversation_route` 去掉舞台覆盖页和工具面板的开合、页签、宽度，新建 `workspace_layout_state`。v9 → v10：快捷键改绑命令，`key_binding.action_id` 改名 `command`，旧动作名换成对应的命令 id（如 `command_palette` → `smelt.palette/toggle`），早已下线的动作名那几行删掉。v10 → v11：对话界面状态只留终端的分屏和当前终端，`conversation_route` 去掉文件树、Git 页的列，删掉 `conversation_route_path`。v11 → v12：删掉 `notify_prefs`，通知开关归通知插件，存在它自己的库里；旧值不搬，插件的开关默认都开。v12 → v13：新建 `pinned_workset`。v13 → v14：`workspace_ui` 去掉 `selected_agent_id`，选中哪个智能体归智能体插件。v14 → v15：会话列表、分屏归会话插件，删掉 `pinned_project`、`pinned_workset`、`collapsed_project`、`collapsed_agent`、`conversation_route`、`sidebar_project_order`、`sidebar_conversation_order` 和 `workspace_ui` 里的会话列和 `archive_expanded`，`route` 改名 `outlet`；终端字号归终端插件，`appearance` 去掉 `font_px` 和没人读的 `bg_color`、`opacity`、`blur`，`glass_style` 改名 `material`；`runtime_connection` 去掉 `smelt_home`，智能体 space 的根改由运行时随智能体配置推来（`agent_spaces_root`）；`smelt.stage/*` 分屏键搬到 `smelt.sessions/*`。旧数据不搬，插件从默认开始。
 
 | 表 | 内容 |
 | --- | --- |
-| `appearance` | 主题、界面字号、终端字体、背景、透明度、玻璃，选的布局（`layout_id`，空是没选过，用第一个登记的布局；选的布局暂时没登记时照样留着） |
+| `appearance` | 主题、界面字号和字体、终端字体、背景图和它的不透明度、材质，选的布局（`layout_id`，空是没选过，用第一个登记的布局；选的布局暂时没登记时照样留着） |
 | `update_settings` / `update_state` / `staged_update` / `installer_attempt` | 这台 App 的更新 |
 | `key_binding` | 用户改过的快捷键：命令 id（`<来源>/<名字>`）→ 按键，按键为空是用户清掉了。没有行的命令用出厂键位；命令还没登记（插件没加载）的行照样留着 |
-| `workspace_ui` | 当前路由、归档分段展开 |
-| `workspace_layout_state` | 每份布局被用户拖成的样子：gpui-base 的 `DockAreaState` 原文。版本对得上就用，布局文件后来改了也照用；要回到布局文件就删掉这份存档 |
-| `collapsed_project` / `pinned_project` / `collapsed_agent` | 按 `runtime_id` 记住折叠和置顶 |
-| `sidebar_project_order` / `sidebar_conversation_order` | 按 `runtime_id` 记住侧栏里项目、对话从上到下的顺序。每台设备各记各的，运行时目录里只有新建的先后 |
-| `conversation_route` | 某个运行时上某段对话的终端分屏布局（带版本号的 JSON）、当前终端 |
-| `runtime_connection` | 这台桌面连过哪些运行时（endpoint、relay、名字、`smelt_home`） |
+| `workspace_ui` | 主窗口当前出口（停在哪一页） |
+| `workspace_layout_state` | 每份布局被用户拖成的样子：gpui-base 的 `DockAreaState` 原文。版本对得上、摆的视图和摞（`smelt/stack`）跟布局文件一样就用，只是拖动、换组、改大小的照用；布局文件增减了视图或改了摞，存档过时不用；要回到布局文件就删掉这份存档 |
+| `runtime_connection` | 这台桌面连过哪些运行时（endpoint、relay、名字、所在系统 `os`） |
 | `runtime_migration` | 客户端数据迁出运行时库的标记 |
 
 从旧版本迁移前，旧库整份留成 `client.sqlite3.bak-v<旧版本>`。

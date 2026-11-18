@@ -189,7 +189,7 @@ pub fn set_modified(path: &std::path::Path, when: std::time::SystemTime) -> std:
         let _ = (path, when);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "这个平台不能改修改时间",
+            "can't change modification times on this platform",
         ))
     }
 }

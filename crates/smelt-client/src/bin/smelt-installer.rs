@@ -10,11 +10,11 @@ fn argument(args: &[String], name: &str) -> anyhow::Result<String> {
     let index = args
         .iter()
         .position(|arg| arg == name)
-        .ok_or_else(|| anyhow::anyhow!("缺少参数 {name}"))?;
+        .ok_or_else(|| anyhow::anyhow!("missing argument {name}"))?;
     args.get(index + 1)
         .filter(|value| !value.starts_with("--"))
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("参数 {name} 缺少值"))
+        .ok_or_else(|| anyhow::anyhow!("argument {name} has no value"))
 }
 
 #[cfg(target_os = "macos")]
@@ -28,7 +28,7 @@ fn run() -> anyhow::Result<()> {
     let update_id = argument(&args, "--update-id")?;
     let attempt_id = argument(&args, "--attempt-id")?;
     if args.len() != 4 {
-        anyhow::bail!("用法：smelt-installer --update-id <id> --attempt-id <id>");
+        anyhow::bail!("usage: smelt-installer --update-id <id> --attempt-id <id>");
     }
     smelt_client::updater::run_installer(&update_id, &attempt_id)
 }
@@ -42,7 +42,7 @@ fn run_local(args: &[String]) -> anyhow::Result<()> {
     let target = match args.len() {
         2 => "/Applications/Smelt.app".to_string(),
         4 => argument(args, "--target")?,
-        _ => anyhow::bail!("用法：smelt-installer --local-app <Smelt.app> [--target <Smelt.app>]"),
+        _ => anyhow::bail!("usage: smelt-installer --local-app <Smelt.app> [--target <Smelt.app>]"),
     };
     let target_path = Path::new(&target);
     let id = smelt_client::updater::stage_local_app(Path::new(&source), target_path)?;
@@ -69,7 +69,7 @@ fn run_local(args: &[String]) -> anyhow::Result<()> {
         Ok(child) => child,
         Err(error) => {
             let _ = smelt_client::updater::discard_local_app(target_path, &id);
-            return Err(anyhow::anyhow!("启动安装进程失败：{error}"));
+            return Err(anyhow::anyhow!("couldn't start the installer: {error}"));
         }
     };
     eprintln!("· 等 Smelt 退出…");
@@ -78,9 +78,9 @@ fn run_local(args: &[String]) -> anyhow::Result<()> {
         let log = smelt_sys::app_log::log_path()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "app.log".to_string());
-        anyhow::bail!("安装没有完成（{status}），原因见 {log}");
+        anyhow::bail!("the install didn't finish ({status}); see {log}");
     }
-    println!("✅ 已安装 {target}");
+    println!("✅ installed {target}");
     Ok(())
 }
 
@@ -89,7 +89,7 @@ fn run_commit_local(args: &[String]) -> anyhow::Result<()> {
     let id = argument(args, "--commit-local-app")?;
     let target = argument(args, "--target")?;
     if args.len() != 4 {
-        anyhow::bail!("用法：smelt-installer --commit-local-app <id> --target <Smelt.app>");
+        anyhow::bail!("usage: smelt-installer --commit-local-app <id> --target <Smelt.app>");
     }
     smelt_client::updater::commit_local_app(std::path::Path::new(&target), &id)
 }
@@ -97,7 +97,7 @@ fn run_commit_local(args: &[String]) -> anyhow::Result<()> {
 // 更新器只替换 macOS 的 .app 包，别的平台没有可装的东西。
 #[cfg(not(target_os = "macos"))]
 fn run() -> anyhow::Result<()> {
-    anyhow::bail!("smelt-installer 只用于 macOS 桌面更新")
+    anyhow::bail!("smelt-installer is only for macOS desktop updates")
 }
 
 fn main() {

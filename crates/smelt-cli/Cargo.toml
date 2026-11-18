@@ -19,3 +19,6 @@ smelt-version = { path = "../smelt-version" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
+# 运行时报错的原因（ControlReason）按系统语言说；当前语言是 rust-i18n 的全局值。
+rust-i18n.workspace = true
+sys-locale = "0.3"

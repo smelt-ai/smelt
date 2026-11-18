@@ -7,6 +7,9 @@ pub(crate) use smelt_plugin_api::model::automation::{
     EventIngress, WebhookIngress, automation_notifies_app,
 };
 
+use gpui::SharedString;
+use rust_i18n::t;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutomationTriggerKindId {
     Calendar,
@@ -24,10 +27,10 @@ pub(crate) const BUILTIN_AUTOMATION_ACTIONS: &[AutomationActionKindId] =
     &[AutomationActionKindId::Agent, AutomationActionKindId::Shell];
 
 impl AutomationActionKindId {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> SharedString {
         match self {
-            Self::Agent => "智能体",
-            Self::Shell => "Shell",
+            Self::Agent => t!("action.agent").into(),
+            Self::Shell => "Shell".into(),
         }
     }
 
@@ -58,24 +61,26 @@ pub(crate) const BUILTIN_AUTOMATION_TRIGGER_PRESETS: &[AutomationTriggerPresetId
 ];
 
 impl AutomationTriggerPresetId {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> SharedString {
         match self {
-            Self::Hourly => "每小时",
-            Self::Daily => "每天",
-            Self::Weekly => "每周",
-            Self::Interval => "间隔",
-            Self::Webhook => "Webhook",
+            Self::Hourly => t!("trigger_preset.hourly"),
+            Self::Daily => t!("trigger_preset.daily"),
+            Self::Weekly => t!("trigger_preset.weekly"),
+            Self::Interval => t!("trigger_preset.interval"),
+            Self::Webhook => "Webhook".into(),
         }
+        .into()
     }
 
-    pub fn hint(self) -> &'static str {
+    pub fn hint(self) -> SharedString {
         match self {
-            Self::Hourly => "按选定间隔每小时",
-            Self::Daily => "每天在选定的时间",
-            Self::Weekly => "每周在选定的一天",
-            Self::Interval => "按固定间隔执行，可限制星期和时段",
-            Self::Webhook => "当此 webhook 收到请求时",
+            Self::Hourly => t!("trigger_preset.hourly_hint"),
+            Self::Daily => t!("trigger_preset.daily_hint"),
+            Self::Weekly => t!("trigger_preset.weekly_hint"),
+            Self::Interval => t!("trigger_preset.interval_hint"),
+            Self::Webhook => t!("trigger_preset.webhook_hint"),
         }
+        .into()
     }
 
     pub fn is_advanced(self) -> bool {
@@ -122,11 +127,12 @@ impl AutomationNotificationPreset {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> SharedString {
         match self {
-            Self::App => "应用内通知",
-            Self::Off => "不通知",
+            Self::App => t!("notification.app"),
+            Self::Off => t!("notification.off"),
         }
+        .into()
     }
 
     pub fn to_sinks(self) -> Vec<AutomationSink> {

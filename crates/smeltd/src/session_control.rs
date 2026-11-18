@@ -4,9 +4,6 @@
 //! 写进工作区目录，桌面、手机都按目录看到它。这里只负责把客户端的意图解析成要起的
 //! 会话：用哪个 agent、开在哪个目录、会话 id 是什么、重试是不是同一个会话。
 
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-
 use smelt_core::acp_conn::AcpRuntimeDiagnostics;
 use smelt_core::automation_store::AutomationStore;
 use smelt_core::control_api::{
@@ -21,7 +18,7 @@ use smelt_core::session_control::{
 use smelt_core::workspace_directory::{
     WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
 };
-use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlReason};
 
 use super::{AcpSessions, EventHubHandle, Sessions, WorkspaceDirectoryReader};
 
@@ -29,67 +26,25 @@ use super::{AcpSessions, EventHubHandle, Sessions, WorkspaceDirectoryReader};
 const REMOTE_TERMINAL_COLS: u16 = 100;
 const REMOTE_TERMINAL_ROWS: u16 = 32;
 
-/// CLI 探测要对每家跑一次 `--version`，不能每次打开新建菜单都来一遍；同一台机器上
-/// 装没装 CLI 不会在几分钟内反复变化，过期后再探一次即可。
-const RUNTIME_DIAGNOSTICS_TTL: Duration = Duration::from_secs(120);
-
-/// 最近一次 CLI 探测的结果。`agent.cli.inspect` / `agent.cli.install` 每次都现探并写回
-/// 这里，新建目录读缓存——设置页刚装完的 CLI 立刻出现在新建菜单里。
-struct DiagnosticsCache {
-    latest: Mutex<Option<(Instant, AcpRuntimeDiagnostics)>>,
-}
-
-impl DiagnosticsCache {
-    const fn new() -> Self {
-        Self {
-            latest: Mutex::new(None),
-        }
-    }
-
-    /// 没过期就用缓存，否则现探。探测时不持锁：它要起一串进程，别让并发的请求排队等锁。
-    fn get_or_probe(
-        &self,
-        now: Instant,
-        probe: impl FnOnce() -> AcpRuntimeDiagnostics,
-    ) -> AcpRuntimeDiagnostics {
-        if let Some((checked_at, diagnostics)) = self
-            .latest
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            && now.saturating_duration_since(*checked_at) < RUNTIME_DIAGNOSTICS_TTL
-        {
-            return diagnostics.clone();
-        }
-        let diagnostics = probe();
-        self.store(Instant::now(), diagnostics.clone());
-        diagnostics
-    }
-
-    fn store(&self, checked_at: Instant, diagnostics: AcpRuntimeDiagnostics) {
-        *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some((checked_at, diagnostics));
-    }
-}
-
-static RUNTIME_DIAGNOSTICS: DiagnosticsCache = DiagnosticsCache::new();
-
-/// 现探一次 CLI 并刷新缓存。设置页要的是此刻的真实状态，不读缓存。
-pub(crate) fn inspect_runtime() -> AcpRuntimeDiagnostics {
-    let diagnostics = smelt_core::acp_conn::inspect_acp_runtime();
-    RUNTIME_DIAGNOSTICS.store(Instant::now(), diagnostics.clone());
-    diagnostics
-}
-
+/// 每次打开新建菜单都现查：只在 PATH 里找各家 CLI，不起进程，设置页刚装好的 CLI
+/// 下次打开就在。
 pub(crate) fn new_session_catalog() -> NewSessionCatalogResult {
-    let diagnostics =
-        RUNTIME_DIAGNOSTICS.get_or_probe(Instant::now(), smelt_core::acp_conn::inspect_acp_runtime);
-    catalog_with(&diagnostics)
+    catalog_with(&smelt_core::acp_conn::locate_acp_runtime())
 }
 
 fn catalog_with(diagnostics: &AcpRuntimeDiagnostics) -> NewSessionCatalogResult {
     let agents = smelt_core::new_session::stored_conversation_options();
     let sections = smelt_core::new_session::stored_new_session_sections(&agents, Some(diagnostics));
-    NewSessionCatalogResult { agents, sections }
+    let restrictable_agent_ids = agents
+        .iter()
+        .filter(|option| smelt_core::acp_conn::supports_disallowed_tools(&option.launch))
+        .map(|option| option.id.clone())
+        .collect();
+    NewSessionCatalogResult {
+        agents,
+        sections,
+        restrictable_agent_ids,
+    }
 }
 
 pub(crate) fn agent_bindings() -> SessionAgentBindingsResult {
@@ -156,8 +111,14 @@ impl DaemonTerminal {
 /// 自己的目录决定。没给 key 时按 `kind`，默认是对话。
 fn resolve_target(params: &SessionCreateParams) -> Result<CreateTarget, ControlError> {
     if let Some(key) = non_empty(params.launch_key.as_deref()) {
-        let action = smelt_core::new_session::find_stored_action(key)
-            .ok_or_else(|| error(ControlErrorCode::NotFound, format!("未知的启动项：{key}")))?;
+        let action = smelt_core::new_session::find_stored_action(key).ok_or_else(|| {
+            ControlError::because(
+                ControlErrorCode::NotFound,
+                ControlReason::UnknownLaunchItem {
+                    key: key.to_string(),
+                },
+            )
+        })?;
         return match action.target {
             NewSessionTarget::Conversation {
                 agent_option_id, ..
@@ -181,7 +142,7 @@ fn resolve_target(params: &SessionCreateParams) -> Result<CreateTarget, ControlE
             let id = non_empty(params.agent_option_id.as_deref()).ok_or_else(|| {
                 error(
                     ControlErrorCode::InvalidParams,
-                    "新建对话需要 agent_option_id",
+                    "A new conversation needs agent_option_id",
                 )
             })?;
             find_option(id).map(CreateTarget::Acp)
@@ -191,9 +152,9 @@ fn resolve_target(params: &SessionCreateParams) -> Result<CreateTarget, ControlE
 
 fn find_option(id: &str) -> Result<AcpAgentOption, ControlError> {
     smelt_core::session_control::find_agent_option(id).ok_or_else(|| {
-        error(
+        ControlError::because(
             ControlErrorCode::NotFound,
-            format!("未知的 agent 选项：{id}"),
+            ControlReason::UnknownAgentOption { id: id.to_string() },
         )
     })
 }
@@ -210,7 +171,7 @@ fn session_id(prefix: &str, request_id: Option<&str>) -> Result<String, ControlE
         return Ok(format!("{prefix}-{}", uuid::Uuid::new_v4()));
     };
     let request_id = uuid::Uuid::parse_str(request_id)
-        .map_err(|_| error(ControlErrorCode::InvalidParams, "request_id 必须是 UUID"))?;
+        .map_err(|_| error(ControlErrorCode::InvalidParams, "request_id must be a UUID"))?;
     Ok(format!("{prefix}-{}", request_id.simple()))
 }
 
@@ -224,9 +185,11 @@ fn require_project<'a>(
         .find(|root| *root == project_root)
         .map(String::as_str)
         .ok_or_else(|| {
-            error(
+            ControlError::because(
                 ControlErrorCode::FailedPrecondition,
-                format!("工作区里没有这个项目：{project_root}"),
+                ControlReason::ProjectNotInWorkspace {
+                    project: project_root.to_string(),
+                },
             )
         })
 }
@@ -254,9 +217,12 @@ fn project_cwd(
                 .into_owned()
         })
         .ok_or_else(|| {
-            error(
+            ControlError::because(
                 ControlErrorCode::FailedPrecondition,
-                format!("项目 {root} 里没有这个工作树：{workset_id}"),
+                ControlReason::WorktreeNotInProject {
+                    project: root.to_string(),
+                    worktree: workset_id.to_string(),
+                },
             )
         })
 }
@@ -273,20 +239,69 @@ fn resolve_acp_cwd(
         let definition_id = option.agent_definition_id().ok_or_else(|| {
             error(
                 ControlErrorCode::InvalidParams,
-                "新建对话需要 project_root（只有智能体对话可以不带项目）",
+                "A new conversation needs project_root (only agent conversations can go without a project)",
             )
         })?;
         return smelt_core::agent_definition_store::ensure_agent_space(definition_id)
             .map(|dir| dir.to_string_lossy().into_owned())
-            .ok_or_else(|| error(ControlErrorCode::OperationFailed, "无法创建智能体工作区"));
+            .ok_or_else(|| {
+                ControlError::because(
+                    ControlErrorCode::OperationFailed,
+                    ControlReason::AgentWorkspaceUnavailable,
+                )
+            });
     }
     project_cwd(directory, project_root, workset_id)
+}
+
+/// 调用方直接给的对话目录：绝对路径、已经存在。
+fn explicit_cwd(cwd: &str) -> Result<String, ControlError> {
+    let path = std::path::Path::new(cwd);
+    if !path.is_absolute() {
+        return Err(error(
+            ControlErrorCode::InvalidParams,
+            format!("cwd must be an absolute path: {cwd}"),
+        ));
+    }
+    if !path.is_dir() {
+        return Err(ControlError::because(
+            ControlErrorCode::FailedPrecondition,
+            ControlReason::DirectoryMissing {
+                path: cwd.to_string(),
+            },
+        ));
+    }
+    Ok(cwd.to_string())
+}
+
+/// 工具限制只交给能机械执行它的 agent。做不到的直接拒绝，不让对话不受限地跑起来。
+fn disallowed_tools(
+    rules: Vec<String>,
+    option: &AcpAgentOption,
+) -> Result<Vec<String>, ControlError> {
+    let rules = rules
+        .into_iter()
+        .map(|rule| rule.trim().to_string())
+        .collect::<Vec<_>>();
+    if rules.iter().any(String::is_empty) {
+        return Err(error(
+            ControlErrorCode::InvalidParams,
+            "disallowed_tools has an empty rule",
+        ));
+    }
+    if !rules.is_empty() && !smelt_core::acp_conn::supports_disallowed_tools(&option.launch) {
+        return Err(error(
+            ControlErrorCode::InvalidParams,
+            format!("{} doesn't support tool restrictions", option.label),
+        ));
+    }
+    Ok(rules)
 }
 
 fn already_bound(message: &str) -> ControlError {
     error(
         ControlErrorCode::Conflict,
-        format!("request_id 已用于{message}"),
+        format!("request_id is already used by {message}"),
     )
 }
 
@@ -303,6 +318,13 @@ fn plan_create(
     let workset_id = non_empty(params.workset_id.as_deref());
     match target {
         CreateTarget::Terminal { launch, label } => {
+            if params.cwd.is_some() || params.title.is_some() || !params.disallowed_tools.is_empty()
+            {
+                return Err(error(
+                    ControlErrorCode::InvalidParams,
+                    "cwd, title and disallowed_tools only apply to conversations",
+                ));
+            }
             let cwd = project_cwd(directory, project_root, workset_id)?;
             let id = session_id("term", params.request_id.as_deref())?;
             if let Some(conversation) = conversation_of(directory, &id) {
@@ -310,14 +332,14 @@ fn plan_create(
                     .terminals
                     .iter()
                     .find(|terminal| terminal.id.as_deref() == Some(id.as_str()))
-                    .ok_or_else(|| already_bound("另一种会话"))?;
+                    .ok_or_else(|| already_bound("a session of another kind"))?;
                 if terminal.cwd.as_deref() != Some(cwd.as_str()) {
-                    return Err(already_bound("另一个项目的会话"));
+                    return Err(already_bound("a session in another project"));
                 }
                 return Ok(CreatePlan::Existing(id));
             }
             if runtime_taken(&id) {
-                return Err(already_bound("一个本地会话"));
+                return Err(already_bound("a local session"));
             }
             Ok(CreatePlan::Terminal(DaemonTerminal {
                 id,
@@ -327,32 +349,47 @@ fn plan_create(
             }))
         }
         CreateTarget::Acp(option) => {
-            let cwd = resolve_acp_cwd(project_root, workset_id, &option, directory)?;
+            let cwd = match non_empty(params.cwd.as_deref()) {
+                Some(cwd) => {
+                    if !project_root.is_empty() || workset_id.is_some() {
+                        return Err(error(
+                            ControlErrorCode::InvalidParams,
+                            "Give only one of cwd, project_root and workset_id",
+                        ));
+                    }
+                    explicit_cwd(cwd)?
+                }
+                None => resolve_acp_cwd(project_root, workset_id, &option, directory)?,
+            };
+            let disallowed_tools = disallowed_tools(params.disallowed_tools, &option)?;
+            let title = non_empty(params.title.as_deref()).map(str::to_string);
             let resume_id = non_empty(params.resume_id.as_deref()).map(str::to_string);
             let id = session_id("acp", params.request_id.as_deref())?;
             if let Some(conversation) = conversation_of(directory, &id) {
                 let acp = conversation
                     .acp
                     .as_ref()
-                    .ok_or_else(|| already_bound("另一种会话"))?;
+                    .ok_or_else(|| already_bound("a session of another kind"))?;
                 if acp.cwd.as_deref() != Some(cwd.as_str())
                     || acp.agent != option.kind
                     || acp.profile_id.as_deref() != option.profile_id()
                     || acp.agent_definition_id.as_deref() != option.agent_definition_id()
                     || acp.history_session_id != resume_id
                 {
-                    return Err(already_bound("参数不同的另一次新建"));
+                    return Err(already_bound("another create with different parameters"));
                 }
                 return Ok(CreatePlan::Existing(id));
             }
             if runtime_taken(&id) {
-                return Err(already_bound("一个本地会话"));
+                return Err(already_bound("a local session"));
             }
             Ok(CreatePlan::Acp(DaemonConversation {
                 sid: id,
                 cwd,
                 option,
                 resume_id,
+                title,
+                disallowed_tools,
             }))
         }
     }
@@ -450,7 +487,10 @@ fn open_daemon_terminal(
         let _ = super::kill_terminal_session(&terminal.id, sessions, event_hub);
         return Err(error(
             ControlErrorCode::OperationFailed,
-            format!("终端没能写进工作区目录：{}", failure.message),
+            format!(
+                "Couldn't add the terminal to the workspace directory: {}",
+                failure.message
+            ),
         ));
     }
     Ok(())
@@ -488,19 +528,24 @@ pub(crate) fn delete_session(
     if id.is_empty() {
         return Err(error(
             ControlErrorCode::InvalidParams,
-            "session_id 不能为空",
+            "session_id can't be empty",
         ));
     }
     // Run 的会话归运行时管（claim / 投递 / 对账 / 回收）。从旁边删掉执行现场等于把
     // 自动化的账本抽走，所以直接拒绝，而不是删一半再让自动化发现会话没了。
     if is_background_acp_session_id(id) || automations.lock().unwrap().is_run_session(id) {
-        return Err(error(
+        return Err(ControlError::because(
             ControlErrorCode::FailedPrecondition,
-            "自动化运行的会话由运行时管理，不能删除",
+            ControlReason::AutomationSessionNotDeletable,
         ));
     }
-    let kind = session_delete_kind(id, sessions, acp_sessions, workspace_directory)
-        .ok_or_else(|| error(ControlErrorCode::NotFound, format!("会话不存在：{id}")))?;
+    let kind =
+        session_delete_kind(id, sessions, acp_sessions, workspace_directory).ok_or_else(|| {
+            ControlError::because(
+                ControlErrorCode::NotFound,
+                ControlReason::SessionNotFound { id: id.to_string() },
+            )
+        })?;
     match kind {
         SessionDeleteKind::Terminal => super::kill_terminal_session(id, sessions, event_hub),
         SessionDeleteKind::Acp => super::kill_acp_session(id, acp_sessions, event_hub),
@@ -518,8 +563,6 @@ pub(crate) fn delete_session(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
     use smelt_core::acp_conn::RuntimeExecutable;
     use smelt_core::agent_kind::{
         ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind,
@@ -742,6 +785,101 @@ mod tests {
         assert_eq!(missing.err().unwrap().code, ControlErrorCode::InvalidParams);
     }
 
+    /// 给了 `cwd` 就开在那里，不要求是工作区里的项目；名字记成用户起的名字，工具限制带给
+    /// 运行时、不进目录。
+    #[test]
+    fn an_explicit_cwd_opens_the_conversation_there() {
+        let directory = directory_with_projects(&["/repo"]);
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let params = SessionCreateParams {
+            cwd: Some(dir.clone()),
+            title: Some(" PR #240 Review ".into()),
+            disallowed_tools: vec!["Edit".into(), " Bash(git push:*) ".into()],
+            ..acp_params("", REQUEST)
+        };
+        let Ok(CreatePlan::Acp(conversation)) = plan_acp(params, &directory) else {
+            panic!("应规划成对话");
+        };
+        assert_eq!(conversation.cwd, dir);
+        assert_eq!(conversation.disallowed_tools, ["Edit", "Bash(git push:*)"]);
+        assert_eq!(
+            conversation.open_request()["disallowed_tools"],
+            serde_json::json!(["Edit", "Bash(git push:*)"])
+        );
+        let entry = conversation.directory_entry("conv-1".into());
+        assert_eq!(entry.custom_title.as_deref(), Some("PR #240 Review"));
+    }
+
+    #[test]
+    fn an_explicit_cwd_must_be_an_existing_absolute_directory_without_a_project() {
+        let directory = directory_with_projects(&["/repo"]);
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let with = |project: &str, cwd: &str| SessionCreateParams {
+            cwd: Some(cwd.into()),
+            ..acp_params(project, REQUEST)
+        };
+        let code = |params| plan_acp(params, &directory).err().unwrap().code;
+        assert_eq!(code(with("/repo", &dir)), ControlErrorCode::InvalidParams);
+        assert_eq!(
+            code(with("", "relative/dir")),
+            ControlErrorCode::InvalidParams
+        );
+        // 绝对但不存在的目录。从临时目录拼，Windows 上才带盘符、算绝对路径。
+        let missing = std::env::temp_dir().join("smelt-definitely-not-here");
+        assert_eq!(
+            code(with("", &missing.to_string_lossy())),
+            ControlErrorCode::FailedPrecondition
+        );
+    }
+
+    /// 限制不了工具的 agent 不能带着限制开：宁可报错，也不让它不受限地跑。
+    #[test]
+    fn tool_restrictions_need_an_agent_that_enforces_them() {
+        let directory = directory_with_projects(&["/repo"]);
+        let restricted = || SessionCreateParams {
+            disallowed_tools: vec!["Edit".into()],
+            ..acp_params("/repo", REQUEST)
+        };
+        let codex = AcpAgentOption {
+            id: "codex".into(),
+            kind: "codex".into(),
+            label: "Codex".into(),
+            launch: ConversationLaunchSpec::from_command("codex-acp"),
+            ..claude_option()
+        };
+        let plan = plan_create(restricted(), CreateTarget::Acp(codex), &directory, |_| {
+            false
+        });
+        assert_eq!(plan.err().unwrap().code, ControlErrorCode::InvalidParams);
+
+        let empty_rule = SessionCreateParams {
+            disallowed_tools: vec![" ".into()],
+            ..acp_params("/repo", REQUEST)
+        };
+        assert_eq!(
+            plan_acp(empty_rule, &directory).err().unwrap().code,
+            ControlErrorCode::InvalidParams
+        );
+        assert!(matches!(
+            plan_acp(restricted(), &directory),
+            Ok(CreatePlan::Acp(_))
+        ));
+
+        let terminal = plan_create(
+            SessionCreateParams {
+                kind: Some(SessionCreateKind::Terminal),
+                ..restricted()
+            },
+            blank_terminal(),
+            &directory,
+            |_| false,
+        );
+        assert_eq!(
+            terminal.err().unwrap().code,
+            ControlErrorCode::InvalidParams
+        );
+    }
+
     /// 终端开在项目里，带着首条命令和它在启动项里的名字；进目录时这两样都记上，守护
     /// 重启后桌面按它们恢复。
     #[test]
@@ -821,22 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_are_probed_once_per_ttl() {
-        let cache = DiagnosticsCache::new();
-        let probes = Cell::new(0);
-        let probe = || {
-            probes.set(probes.get() + 1);
-            AcpRuntimeDiagnostics::default()
-        };
-        let start = Instant::now();
-        cache.get_or_probe(start, probe);
-        cache.get_or_probe(start + Duration::from_secs(60), probe);
-        assert_eq!(probes.get(), 1);
-        cache.get_or_probe(Instant::now() + RUNTIME_DIAGNOSTICS_TTL, probe);
-        assert_eq!(probes.get(), 2);
-    }
-
-    #[test]
     fn catalog_lists_agent_options_and_grouped_actions() {
         let mut diagnostics = AcpRuntimeDiagnostics::default();
         diagnostics.record_terminal(
@@ -858,6 +980,11 @@ mod tests {
             .expect("裸引擎选项应在目录里");
         assert_eq!(claude["kind"], "claude");
         assert!(claude.get("launch").is_none(), "启动规格不出线");
+        let restrictable = value["restrictable_agent_ids"].as_array().unwrap();
+        assert!(
+            restrictable.contains(&claude["id"]),
+            "Claude 能执行工具限制，要列在 restrictable_agent_ids 里"
+        );
         for section in ["common", "terminal", "conversation"] {
             assert!(value["sections"][section].is_array(), "缺分组 {section}");
         }

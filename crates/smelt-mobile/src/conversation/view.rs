@@ -7,8 +7,8 @@ use smelt_model::acp_chat::{
 };
 use smelt_model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_model::acp_session::{
-    ApprovalDetailsView, ConversationSnapshot, ElicitFieldKindView, PendingElicitation,
-    PendingPermission, PermissionOptionKindView, PlanEntryStatusView,
+    ApprovalDetailsView, ConversationSnapshot, ElicitFieldKindView, ElicitOptionView,
+    PendingElicitation, PendingPermission, PermissionOptionKindView, PlanEntryStatusView,
 };
 use smelt_model::daemon_state::DaemonPhase;
 
@@ -43,7 +43,7 @@ pub(crate) fn conversation_view(
         compacting: snapshot.compacting,
         notice: snapshot.notice.as_ref().map(|notice| ConversationNotice {
             id: to_i64_u64(notice.id),
-            text: notice.text.clone(),
+            text: notice.display_text(),
         }),
         memory_changes: snapshot
             .memory_changes
@@ -72,7 +72,7 @@ pub(crate) fn conversation_view(
                     })
                     .collect(),
             }),
-        end_reason: snapshot.end_reason.clone(),
+        end_reason: snapshot.end_text(),
         session_title: snapshot.session_title.clone(),
         turn_started_at_ms: snapshot.turn_started_at_ms.map(to_i64_u64),
         last_turn_duration_ms: snapshot
@@ -232,9 +232,14 @@ pub(crate) fn conversation_entry(index: i64, entry: &AcpEntry) -> ConversationEn
                 )
             }
         }
-        AcpEntry::Divider(label) => ConversationEntry {
-            text: label.clone(),
+        AcpEntry::Divider(_) | AcpEntry::NewSession { .. } => ConversationEntry {
+            text: entry.divider_label().unwrap_or_default(),
             ..blank_entry(index, EntryKind::Divider)
+        },
+        // 回合失败按助手正文画：原话加下一步，按手机的语言说。
+        AcpEntry::TurnFailed { detail, hint } => ConversationEntry {
+            text: acp_chat::turn_failed_text(detail, *hint),
+            ..blank_entry(index, EntryKind::Assistant)
         },
         AcpEntry::TaskNote(note) => ConversationEntry {
             text: note.summary(),
@@ -431,13 +436,19 @@ pub(crate) fn elicitation(pending: &PendingElicitation) -> Elicitation {
             let (kind, options, secret, url) = match &field.kind {
                 ElicitFieldKindView::Select(options) => (
                     ElicitationFieldKind::Select,
-                    options.iter().map(|option| option.label.clone()).collect(),
+                    options
+                        .iter()
+                        .map(ElicitOptionView::display_label)
+                        .collect(),
                     false,
                     None,
                 ),
                 ElicitFieldKindView::MultiSelect(options) => (
                     ElicitationFieldKind::MultiSelect,
-                    options.iter().map(|option| option.label.clone()).collect(),
+                    options
+                        .iter()
+                        .map(ElicitOptionView::display_label)
+                        .collect(),
                     false,
                     None,
                 ),
@@ -581,15 +592,15 @@ fn model_selector(model: &ModelState) -> ModelSelector {
 fn config_option(config: &SessionConfigState) -> ConfigOption {
     ConfigOption {
         config_id: config.config_id.clone(),
-        name: config.name.clone(),
-        description: config.description.clone(),
-        current_name: config.current_name.clone(),
+        name: config.display_name(),
+        description: config.display_description(),
+        current_name: config.current_label(),
         options: config
             .options
             .iter()
             .map(|(value, name)| ChoiceOption {
                 value: value.clone(),
-                name: name.clone(),
+                name: config.option_label(value, name),
                 selected: name == &config.current_name,
             })
             .collect(),
@@ -711,7 +722,7 @@ mod tests {
         let note = view.entries[6].task_note.as_ref().unwrap();
         assert_eq!(note.kind, TaskNoteKind::Subagent);
         assert_eq!(note.exit_code, Some(1));
-        assert!(view.entries[6].text.contains("子智能体"));
+        assert!(view.entries[6].text.contains("Subagent"));
         assert_eq!(view.entries[7].text, "全部完成");
 
         // 空白正文不算最终回答，往前找到完成信号。

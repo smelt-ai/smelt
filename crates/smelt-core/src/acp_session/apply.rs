@@ -8,12 +8,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use agent_client_protocol::v1::schema::{Plan, SessionId, StopReason, ToolCall, ToolCallUpdate};
 
 use super::{
-    AcpEndKind, AcpNoticeKind, AcpSessionState, AcpTurnOutcome, LiveElicitation, LivePermission,
+    AcpEndKind, AcpNoticeKind, AcpSessionState, AcpTurnOutcome, ConversationEndReason,
+    LiveElicitation, LivePermission,
 };
 use crate::acp_chat::AcpEntry;
 use crate::acp_conn::{
-    ConversationEvent, ConversationRestoreFailure, ElicitField, ElicitationResponder, PromptImage,
-    ReadyKind,
+    ConversationEvent, ConversationRestoreFailure, ElicitField, ElicitationResponder, FailedTurn,
+    PromptImage, ReadyKind,
 };
 use crate::daemon_state::DaemonPhase;
 
@@ -91,9 +92,8 @@ pub fn queue_composer_restore(
     state.composer_restore_images = images;
 }
 
-/// `apply_event` 的旁路效果——旧版直接在 GPUI `Context` 上做（`cx.notify()`/
-/// `cx.emit(Changed)`/推 `PendingAgentNotifs`），归约函数本身不该管这些，
-/// 交给调用方（smeltd）根据这份结果自己决定广播/落盘/要不要弹通知。
+/// `apply_event` 的旁路效果：归约函数本身不广播、不落盘，交给调用方（smeltd）
+/// 根据这份结果自己决定。要不要提醒由 smeltd 按相位变化判断。
 #[derive(Default)]
 pub struct ApplyOutcome {
     /// 值得持久化（entries 有实质变化，排除逐块流式增量）。
@@ -107,10 +107,6 @@ pub struct ApplyOutcome {
     /// 命令、配置、计划、队列、计时等会话信封变了。正文流式帧为 false，
     /// 调用方省略信封，接收方保留上一份。
     pub envelope_changed: bool,
-    /// 相位刚变成需要人处理 → (标题, 正文, is_approval)，调用方决定要不要弹
-    /// 通知（GUI 按各类 Agent 通知开关决定；这个决定权不下放到
-    /// smeltd，因为那是纯 GUI 展示偏好，smeltd 不该知道）。
-    pub notify: Option<(String, String, bool)>,
 }
 
 /// 还挂着没人处理的卡片时对应的相位。审批优先于选择题，跟 `Ready` 分支里
@@ -200,10 +196,18 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             }
         }
         ConversationEvent::StartupProgress(msg) => state.status_line = Some(msg),
-        ConversationEvent::Notice(msg) => super::raise_notice(state, AcpNoticeKind::Info, msg),
-        ConversationEvent::ConfigRejected(msg) => {
-            super::raise_notice(state, AcpNoticeKind::ConfigRejected, msg)
+        ConversationEvent::Notice(msg) => {
+            super::raise_notice(state, AcpNoticeKind::Info, msg, None)
         }
+        ConversationEvent::RuntimeNotice(note) => {
+            super::raise_notice(state, AcpNoticeKind::Info, note.fallback_text(), Some(note))
+        }
+        ConversationEvent::ConfigRejected(note) => super::raise_notice(
+            state,
+            AcpNoticeKind::ConfigRejected,
+            note.fallback_text(),
+            Some(note),
+        ),
         ConversationEvent::ProviderRetry(retry) => state.provider_retry = retry,
         ConversationEvent::SessionTitle(title) => state.protocol_title = title,
         ConversationEvent::HistoryReplayStarted => {
@@ -302,7 +306,6 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             };
             apply_permission(
                 state,
-                &mut outcome,
                 LivePermission {
                     id: uuid::Uuid::new_v4().simple().to_string(),
                     question,
@@ -319,14 +322,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             fields,
             responder,
             raw_request_line,
-        } => apply_elicitation(
-            state,
-            &mut outcome,
-            message,
-            fields,
-            responder,
-            raw_request_line,
-        ),
+        } => apply_elicitation(state, message, fields, responder, raw_request_line),
         ConversationEvent::BackgroundNotice(note) => {
             // 状态行不是一轮对话。相位、回合序号和用户回显都保持原样。
             outcome.entries_offset =
@@ -341,7 +337,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             skip_persist = true;
         }
         ConversationEvent::TurnEnded(reason) => outcome.entries_offset = finish_turn(state, reason),
-        ConversationEvent::TurnFailed(msg) => apply_turn_failed(state, &mut outcome, msg),
+        ConversationEvent::TurnFailed(failed) => apply_turn_failed(state, &mut outcome, failed),
         ConversationEvent::Rewound { truncate_from, .. } => {
             apply_rewound(state, &mut outcome, truncate_from)
         }
@@ -349,6 +345,18 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             apply_provider_session_id_changed(state, session_id)
         }
         ConversationEvent::Fatal(msg) => super::force_end(state, AcpEndKind::ProviderFailed, msg),
+        ConversationEvent::SignInRequired { agent, detail } => super::force_end_because(
+            state,
+            AcpEndKind::ProviderFailed,
+            ConversationEndReason::SignInRequired { agent },
+            detail,
+        ),
+        ConversationEvent::DriverCrashed(message) => super::force_end_because(
+            state,
+            AcpEndKind::ProviderFailed,
+            ConversationEndReason::DriverCrashed,
+            message,
+        ),
     }
 
     outcome.should_persist = !skip_persist;
@@ -433,6 +441,7 @@ fn is_streaming_event(ev: &ConversationEvent) -> bool {
             | ConversationEvent::Compaction { .. }
             | ConversationEvent::ProviderRetry(_)
             | ConversationEvent::Notice(_)
+            | ConversationEvent::RuntimeNotice(_)
             | ConversationEvent::ConfigRejected(_)
             | ConversationEvent::PromptQueue { .. }
             | ConversationEvent::ComposerRestore { .. }
@@ -446,6 +455,7 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
             | ConversationEvent::UserImage(_)
             | ConversationEvent::StartupProgress(_)
             | ConversationEvent::Notice(_)
+            | ConversationEvent::RuntimeNotice(_)
             | ConversationEvent::ConfigRejected(_)
             | ConversationEvent::AvailableCommands(_)
             | ConversationEvent::Usage { .. }
@@ -489,7 +499,21 @@ fn apply_history_replay_started(state: &mut AcpSessionState, outcome: &mut Apply
 
 fn apply_restore_failed(state: &mut AcpSessionState, failure: ConversationRestoreFailure) {
     state.abandon_replay_scratch();
-    super::force_end(state, AcpEndKind::RestoreFailed, failure.to_string());
+    let (reason, detail) = match failure {
+        ConversationRestoreFailure::HistoryMissing => {
+            (ConversationEndReason::HistoryMissing, String::new())
+        }
+        ConversationRestoreFailure::UnsupportedLoad => {
+            (ConversationEndReason::RestoreUnsupported, String::new())
+        }
+        ConversationRestoreFailure::SignInRequired { agent, detail } => {
+            (ConversationEndReason::SignInRequired { agent }, detail)
+        }
+        ConversationRestoreFailure::Failed(message) => {
+            (ConversationEndReason::RestoreFailed, message)
+        }
+    };
+    super::force_end_because(state, AcpEndKind::RestoreFailed, reason, detail);
 }
 
 fn apply_user_chunk(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, text: String) {
@@ -565,10 +589,9 @@ fn apply_ready(
         ReadyKind::ResumedKeepHistory => {}
         ReadyKind::Fresh if !state.entries.is_empty() && !has_active_turn => {
             outcome.entries_offset = Some(state.entries.len());
-            state.entries.push(AcpEntry::Divider(format!(
-                "新会话 · agent 不记得以上内容 · {}",
-                chrono::Local::now().format("%m-%d %H:%M")
-            )));
+            state.entries.push(AcpEntry::NewSession {
+                at_ms: chrono::Utc::now().timestamp_millis(),
+            });
         }
         ReadyKind::Fresh => {}
     }
@@ -679,6 +702,7 @@ fn apply_provider_turn_started(state: &mut AcpSessionState, outcome: &mut ApplyO
     state.cancel_requested = false;
     resume_running(state);
     state.end_reason.clear();
+    state.end_code = None;
     state.active_delivery_id = None;
     state.completed_unread = false;
     state.turn_outcome = None;
@@ -1093,24 +1117,17 @@ fn apply_plan(state: &mut AcpSessionState, plan: Plan) {
     }
 }
 
-fn apply_permission(
-    state: &mut AcpSessionState,
-    outcome: &mut ApplyOutcome,
-    permission: LivePermission,
-) {
+fn apply_permission(state: &mut AcpSessionState, permission: LivePermission) {
     if should_ignore_late_interactive_request(state, Some(&permission.tool_call_id)) {
         // responder 在此 drop → Cancelled，避免旧审批挂到下一回合。
         return;
     }
-    let question = permission.question.clone();
     state.permissions.push(permission);
     state.phase = DaemonPhase::AwaitingApproval;
-    outcome.notify = Some(("等你批准".to_string(), question, true));
 }
 
 fn apply_elicitation(
     state: &mut AcpSessionState,
-    outcome: &mut ApplyOutcome,
     message: String,
     fields: Vec<ElicitField>,
     responder: ElicitationResponder,
@@ -1122,7 +1139,7 @@ fn apply_elicitation(
     }
     state.elicitation = Some(LiveElicitation {
         id: uuid::Uuid::new_v4().simple().to_string(),
-        message: message.clone(),
+        message,
         raw_fields: fields,
         chosen: Default::default(),
         text_values: Default::default(),
@@ -1131,13 +1148,15 @@ fn apply_elicitation(
         raw_request_line,
     });
     state.phase = DaemonPhase::WaitingForUser;
-    outcome.notify = Some(("等你选择".to_string(), message, false));
 }
 
-fn apply_turn_failed(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, msg: String) {
-    // 错误文本当成 assistant 正文落进消息流：它本来就是 agent 说的话，
-    // 复用同一条渲染路径就不用给每个前端加一种新 entry。
-    let offset = push_agent_text(state, format!("⚠️ 回合失败：{msg}"));
+fn apply_turn_failed(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, failed: FailedTurn) {
+    // 单独一条，不并进助手正文：它是状态，各端按语言说，不当回答复制、不进交接。
+    let offset = Some(state.entries.len());
+    state.entries.push(AcpEntry::TurnFailed {
+        detail: failed.detail,
+        hint: failed.hint,
+    });
     let tool_offset = finish_turn_with(state, AcpTurnOutcome::Failed);
     outcome.entries_offset = match (offset, tool_offset) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -1251,7 +1270,7 @@ fn cancelled_tool_output(
     mut output: Vec<crate::acp_chat::ToolOutputPart>,
 ) -> Vec<crate::acp_chat::ToolOutputPart> {
     output.push(crate::acp_chat::ToolOutputPart::Text(
-        "已因用户停止而取消".to_string(),
+        "Cancelled because the turn was stopped".to_string(),
     ));
     output
 }
@@ -1301,6 +1320,7 @@ fn finish_interrupted_turn(state: &mut AcpSessionState) {
     state.elicitation = None;
     state.phase = DaemonPhase::Idle;
     state.end_reason.clear();
+    state.end_code = None;
     state.provider_retry = None;
     state.completed_delivery_id = state.active_delivery_id.take();
     state.completed_unread = true;
@@ -1339,7 +1359,7 @@ fn finish_interrupted_entry(entry: &mut AcpEntry) -> bool {
     if is_unfinished_tool_status(*status) {
         *status = crate::acp_chat::ToolCallStatus::Failed;
         output.push(crate::acp_chat::ToolOutputPart::Text(
-            "服务重启，工具已中断".to_string(),
+            "Interrupted because the runtime restarted".to_string(),
         ));
         changed = true;
     }
@@ -1429,10 +1449,6 @@ fn append_agent_text(entries: &mut Vec<AcpEntry>, text: String, thought: bool) {
         }) if *th == thought => t.push_str(&text),
         _ => entries.push(AcpEntry::Assistant { text, thought }),
     }
-}
-
-fn push_agent_text(state: &mut AcpSessionState, text: String) -> Option<usize> {
-    push_agent_text_inner(state, text, false, None)
 }
 
 fn push_tool_entry(
@@ -1546,6 +1562,7 @@ fn finish_turn_with(state: &mut AcpSessionState, outcome: AcpTurnOutcome) -> Opt
     state.elicitation = None;
     state.phase = DaemonPhase::Idle;
     state.end_reason.clear();
+    state.end_code = None;
     // 回合结束，重试也就结束了。Provider 漏发重试结束时不能一直挂着。
     state.provider_retry = None;
     state.completed_delivery_id = state.active_delivery_id.take();

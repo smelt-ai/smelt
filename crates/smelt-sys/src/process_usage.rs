@@ -285,11 +285,14 @@ mod tests {
         assert!(before.heap > 0 && before.heap + before.graphics <= before.total);
         let block = vec![1u8; 64 << 20];
         let after = own_memory().expect("macOS 一定有");
+        // 两次取样之间别处会放掉些零碎内存（同进程里还有别的测试线程），只要求看出这块的
+        // 大头，不卡到字节。
+        let grown = (64 << 20) - (4 << 20);
+        assert!(after.heap >= before.heap + grown, "{before:?} -> {after:?}");
         assert!(
-            after.heap >= before.heap + (64 << 20),
+            after.total >= before.total + grown,
             "{before:?} -> {after:?}"
         );
-        assert!(after.total >= before.total + (64 << 20), "{before:?} -> {after:?}");
         drop(block);
     }
 

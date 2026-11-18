@@ -441,7 +441,7 @@ describe("smelt-memory extension", () => {
 			);
 		}
 		const { notices } = await createRunner();
-		expect(notices.some((notice) => notice.includes("记忆超出注入上限"))).toBe(true);
+		expect(notices.some((notice) => notice.includes("over the injection limit"))).toBe(true);
 	});
 
 	test("the first turn after start or compaction carries recalled facts as a hidden message", async () => {
@@ -549,7 +549,7 @@ describe("smelt-memory extension", () => {
 			expect(host.provenance.agent.get("before-search.md")?.trust).toBe("trusted");
 			expect(host.provenance.agent.get("after-search.md")).toMatchObject({
 				trust: "pending",
-				reason: expect.stringContaining("web_search"),
+				reason: "external_content:web_search",
 			});
 			expect(JSON.stringify(result?.content)).toContain("待确认");
 			expect(notices.filter((notice) => notice.startsWith("记忆："))).toEqual([]);
@@ -607,7 +607,7 @@ describe("smelt-memory extension", () => {
 			await writeMemory(runner, agent, "from-automation", "w1");
 			expect(host.provenance.agent.get("from-automation.md")).toMatchObject({
 				trust: "pending",
-				reason: expect.stringContaining("自动化"),
+				reason: "unattended",
 			});
 		});
 
@@ -788,7 +788,7 @@ describe("smelt-memory extension", () => {
 			await toolResult(runner, "w-v", "write", { path, content });
 			expect(host.provenance.agent.get("english-release.md")).toMatchObject({
 				trust: "pending",
-				reason: expect.stringContaining("用户原话"),
+				reason: "rule_lacks_user_words",
 			});
 		});
 
@@ -962,7 +962,7 @@ describe("smelt-memory extension", () => {
 
 			expect(JSON.stringify((await run("这个版本怎么上线？")).content)).toContain("先发测试环境");
 			await run("上线步骤");
-			const skipped = notices.filter((notice) => notice.includes("算不出向量"));
+			const skipped = notices.filter((notice) => notice.includes("couldn't be embedded"));
 			expect(skipped).toHaveLength(1);
 			expect(skipped[0]).toContain("kanban");
 		});
@@ -986,8 +986,8 @@ describe("smelt-memory extension", () => {
 			} as never);
 
 			expect(JSON.stringify(result.content)).toContain("每周二");
-			expect(notices.filter((notice) => notice.includes("向量检索不可用"))).toHaveLength(1);
-			expect(notices.find((notice) => notice.includes("向量检索不可用"))).toContain("503");
+			expect(notices.filter((notice) => notice.includes("Vector search isn't available"))).toHaveLength(1);
+			expect(notices.find((notice) => notice.includes("Vector search isn't available"))).toContain("503");
 		});
 	});
 

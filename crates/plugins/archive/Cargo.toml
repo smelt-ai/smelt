@@ -1,0 +1,22 @@
+# 内置插件「归档」：各机器上已归档的对话，按机器、项目分组，恢复或彻底删除。
+# 只依赖插件接口，宿主里没有它的类型。
+[package]
+name = "smelt-archive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+# 归档时间按本地时区显示。
+chrono = "0.4"
+# 照抄会话插件的约定（命令参数）要按同样的 JSON 形状发。
+serde = { version = "1", features = ["derive"] }
+# 界面文案（locales/ui.yml，见 docs/i18n.md）。
+rust-i18n.workspace = true

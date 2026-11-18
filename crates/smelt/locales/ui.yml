@@ -1,0 +1,773 @@
+_version: 2
+action:
+  cancel:
+    en: "Cancel"
+    zh-CN: "取消"
+  clear:
+    en: "Clear"
+    zh-CN: "清除"
+  never_mind:
+    en: "Never Mind"
+    zh-CN: "算了"
+  reset:
+    en: "Reset"
+    zh-CN: "恢复"
+appearance:
+  apply_failed:
+    en: "Couldn't change the appearance: %{error}"
+    zh-CN: "外观修改失败：%{error}"
+  background:
+    en: "Background"
+    zh-CN: "背景"
+  change_image:
+    en: "Change…"
+    zh-CN: "更换…"
+  choose_image:
+    en: "Choose Image…"
+    zh-CN: "选择图片…"
+  choose_image_prompt:
+    en: "Choose a Background Image"
+    zh-CN: "选择背景图片"
+  code:
+    en: "Code"
+    zh-CN: "代码"
+  code_font:
+    en: "Code Font"
+    zh-CN: "代码字体"
+  code_font_hint:
+    en: "Shared by the terminal, diffs and code blocks. Pick a monospaced font; missing glyphs fall back to the bundled Maple Mono NF"
+    zh-CN: "终端、diff 和代码块共用，建议选等宽；缺字时回落内嵌的 Maple Mono NF"
+  default_font:
+    en: "Default (%{name})"
+    zh-CN: "默认（%{name}）"
+  glass:
+    en: "Glass Tint"
+    zh-CN: "毛玻璃底色"
+  glass_hint:
+    en: "How solid the theme color is behind translucent areas (like the sidebar): 100% is opaque, lower is more see-through"
+    zh-CN: "布局里透明的地方（如左侧栏）主题底色铺多实：100% 不透，越低越透"
+  image:
+    en: "Background Image"
+    zh-CN: "背景图片"
+  image_hint:
+    en: "Fills the whole window, above the base color and below the content"
+    zh-CN: "铺满整个窗口，叠在底色上、内容下面"
+  image_opacity:
+    en: "Background Image Opacity"
+    zh-CN: "背景图透明度"
+  image_opacity_hint:
+    en: "Default 15%, at most 30% so text stays readable"
+    zh-CN: "默认 15%，最高 30%，免得压坏文字"
+  interface:
+    en: "Interface"
+    zh-CN: "界面"
+  layout:
+    en: "Layout"
+    zh-CN: "布局"
+  layout_hint:
+    en: "How the views are arranged in the workbench. Plugins can bring their own layouts"
+    zh-CN: "工作台里各个视图怎么摆；插件可以带自己的布局"
+  layout_none_hint:
+    en: "All views sit in one group in the middle. Install a plugin with layouts to switch here"
+    zh-CN: "所有视图摆在中间一组；装了带布局的插件后可以在这里换"
+  no_layouts:
+    en: "No layouts available"
+    zh-CN: "没有可选的布局"
+  reset_layout:
+    en: "Reset Layout"
+    zh-CN: "恢复布局"
+  reset_layout_hint:
+    en: "Discard dragged, split and collapsed changes and go back to this layout as shipped"
+    zh-CN: "扔掉拖动、拆分、收起过的样子，回到这份布局本来的样子"
+  theme:
+    en: "Theme"
+    zh-CN: "主题"
+  theme_hint:
+    en: "Changes the interface and terminal colors together; light or dark follows the theme"
+    zh-CN: "界面和终端配色一起换，明暗跟着主题走"
+  ui_font:
+    en: "Interface Font"
+    zh-CN: "界面字体"
+  ui_font_size:
+    en: "Interface Font Size"
+    zh-CN: "界面字号"
+  ui_font_size_hint:
+    en: "Default 16px"
+    zh-CN: "默认 16px"
+command:
+  add_machine:
+    en: "Add Remote Machine"
+    zh-CN: "添加远程机器"
+  debug_hud:
+    en: "Toggle Debug Panel"
+    zh-CN: "切换调试面板"
+  group:
+    app:
+      en: "App"
+      zh-CN: "应用"
+  notify:
+    en: "Send System Notification"
+    zh-CN: "发送系统通知"
+  open_in_file_manager:
+    en: "Open in File Manager"
+    zh-CN: "用文件管理器打开"
+  open_in_text_editor:
+    en: "Open in Text Editor"
+    zh-CN: "用系统文本编辑器打开"
+  open_notification_settings:
+    en: "Open System Notification Settings"
+    zh-CN: "打开系统通知设置"
+  open_page:
+    en: "Open Page"
+    zh-CN: "打开页"
+  open_settings:
+    en: "Open Settings"
+    zh-CN: "打开设置"
+  open_view:
+    en: "Open View"
+    zh-CN: "打开视图"
+  palette:
+    en: "Open Command Palette"
+    zh-CN: "打开命令面板"
+  pick_paths:
+    en: "Choose Paths"
+    zh-CN: "选择路径"
+  quit:
+    en: "Quit Smelt"
+    zh-CN: "退出 Smelt"
+  quit_now:
+    en: "Quit Now"
+    zh-CN: "直接退出"
+  reconnect_machine:
+    en: "Reconnect Remote Machine"
+    zh-CN: "重新连接远程机器"
+  refresh_connections:
+    en: "Refresh Remote Connection Status"
+    zh-CN: "刷新远程连接状态"
+  remove_machine:
+    en: "Remove Remote Machine"
+    zh-CN: "移除远程机器"
+  rename_machine:
+    en: "Rename Remote Machine"
+    zh-CN: "重命名远程机器"
+  request_notification_permission:
+    en: "Request Notification Permission"
+    zh-CN: "请求系统通知授权"
+  set_dock_badge:
+    en: "Set Dock Badge"
+    zh-CN: "设置 Dock 角标"
+  set_machine_relay:
+    en: "Change Remote Machine Relay"
+    zh-CN: "改远程机器的中继"
+  set_status_menu:
+    en: "Set Menu Bar Menu"
+    zh-CN: "设置菜单栏菜单"
+  set_view_badge:
+    en: "Set View Badge"
+    zh-CN: "设视图角标"
+  show_main_window:
+    en: "Show Main Window"
+    zh-CN: "显示主窗口"
+  upgrade_machine:
+    en: "Upgrade Remote Machine Runtime"
+    zh-CN: "升级远程机器的运行时"
+  withdraw_notification:
+    en: "Withdraw System Notification"
+    zh-CN: "撤回系统通知"
+daemon:
+  exited:
+    en: "smeltd isn't ready (started %{daemon}, but it exited without listening on %{socket}; see ~/.smelt/daemon.log)"
+    zh-CN: "smeltd 未就绪（已拉起 %{daemon}，没监听 %{socket} 就退出了，见 ~/.smelt/daemon.log）"
+  image_missing:
+    en: "The image doesn't exist: %{path}"
+    zh-CN: "映像不存在：%{path}"
+  install_failed:
+    en: "Couldn't install smeltd to %{path}"
+    zh-CN: "无法安装 smeltd 到 %{path}"
+  no_image:
+    en: "No smeltd image to switch to"
+    zh-CN: "没有可切换的 smeltd 映像"
+  no_ready_signal:
+    en: "smeltd isn't ready (started %{daemon}, but got no ready signal: %{error})"
+    zh-CN: "smeltd 未就绪（已拉起 %{daemon}，等不到它的就绪信号：%{error}）"
+  not_found:
+    en: "Couldn't find smeltd (neither in the app bundle nor in ~/.smelt/bin)"
+    zh-CN: "找不到 smeltd（App 包与 ~/.smelt/bin 皆无）"
+  not_listening:
+    en: "smeltd isn't ready (started %{daemon}, but it didn't listen on %{socket} within %{secs}s)"
+    zh-CN: "smeltd 未就绪（已拉起 %{daemon}，%{secs}s 内未监听 %{socket}）"
+  not_ready:
+    en: "smeltd isn't ready: %{why}"
+    zh-CN: "smeltd 未就绪：%{why}"
+  restart_not_ready:
+    en: "The old daemon didn't respond and still isn't ready after a restart: %{error}"
+    zh-CN: "旧守护无响应，重启后仍未就绪：%{error}"
+  spawn_failed:
+    en: "Couldn't start smeltd (%{path}): %{error}"
+    zh-CN: "拉起 smeltd 失败（%{path}）：%{error}"
+  swap_failed:
+    en: "Couldn't stop the old daemon and switch to the image that matches the app"
+    zh-CN: "未能停掉旧守护并换上与 App 一致的映像"
+  unavailable:
+    en: "smeltd is unavailable: %{error}"
+    zh-CN: "smeltd 不可用：%{error}"
+dock:
+  collapse_left:
+    en: "Collapse Left Sidebar"
+    zh-CN: "收起左侧"
+  collapse_right:
+    en: "Collapse Right Sidebar"
+    zh-CN: "收起右侧"
+  expand_left:
+    en: "Expand Left Sidebar"
+    zh-CN: "展开左侧"
+  expand_right:
+    en: "Expand Right Sidebar"
+    zh-CN: "展开右侧"
+error:
+  cannot_upgrade:
+    en: "This machine can't be upgraded remotely right now"
+    zh-CN: "这台机器现在不能远程升级"
+  empty_name:
+    en: "The name can't be empty"
+    zh-CN: "名字不能是空的"
+  empty_notification_id:
+    en: "The notification ID can't be empty"
+    zh-CN: "通知 id 不能是空的"
+  local_not_remote:
+    en: "This Mac isn't a remote machine"
+    zh-CN: "本机不是远程机器"
+  main_window:
+    en: "Couldn't open the main window: %{error}"
+    zh-CN: "主窗口开不了：%{error}"
+  save_failed:
+    en: "Couldn't save: %{error}"
+    zh-CN: "保存失败：%{error}"
+layout:
+  load_failed:
+    en: "Couldn't load the layout: %{error}"
+    zh-CN: "布局没装上：%{error}"
+  no_outlet:
+    en: "There's no outlet for the view \"%{id}\""
+    zh-CN: "没有能放视图「%{id}」的出口"
+  reset_failed:
+    en: "Couldn't reset the layout: %{error}"
+    zh-CN: "恢复布局失败：%{error}"
+menu:
+  help:
+    en: "Help"
+    zh-CN: "帮助"
+  quit:
+    en: "Quit Smelt"
+    zh-CN: "退出 Smelt"
+  settings:
+    en: "Settings…"
+    zh-CN: "设置…"
+notify:
+  done:
+    en: "Done"
+    zh-CN: "完成"
+  error:
+    en: "Error"
+    zh-CN: "错误"
+  permission_unknown:
+    en: "Can't read the notification permission right now"
+    zh-CN: "暂时读不到授权状态"
+open:
+  file_manager:
+    en: "the file manager"
+    zh-CN: "文件管理器"
+  no_dir:
+    en: "The project folder doesn't exist or can't be accessed: %{path}"
+    zh-CN: "项目目录不存在或不可访问：%{path}"
+  no_file:
+    en: "The file doesn't exist or can't be accessed: %{path}"
+    zh-CN: "配置文件不存在或不可访问：%{path}"
+  no_file_manager:
+    en: "Opening the file manager isn't supported on this platform"
+    zh-CN: "当前平台不支持打开文件管理器"
+  no_text_editor:
+    en: "Opening a text editor isn't supported on this platform"
+    zh-CN: "当前平台不支持打开文本编辑器"
+  spawn_failed:
+    en: "Couldn't start %{application}: %{error}"
+    zh-CN: "启动 %{application} 失败：%{error}"
+  text_editor:
+    en: "the text editor"
+    zh-CN: "系统文本编辑器"
+pair:
+  default_device_name:
+    en: "Smelt Desktop"
+    zh-CN: "Smelt 桌面"
+  describe_failed:
+    en: "Paired, but couldn't read the runtime's info: %{error}"
+    zh-CN: "配对成功，但读取运行时信息失败：%{error}"
+  empty:
+    en: "Paste that machine's pairing code first"
+    zh-CN: "先粘贴那台机器的配对串"
+  failed:
+    en: "Pairing failed: %{error}"
+    zh-CN: "配对失败：%{error}"
+  missing_code:
+    en: "The pairing link has no pairing code"
+    zh-CN: "配对串缺少配对码"
+  missing_endpoint:
+    en: "The pairing link has no endpoint id"
+    zh-CN: "配对串缺少 endpoint id"
+  not_pairing_link:
+    en: "That isn't a Smelt pairing link"
+    zh-CN: "不是 Smelt 的配对串"
+  save_failed:
+    en: "Couldn't save the runtime: %{error}"
+    zh-CN: "保存运行时失败：%{error}"
+  too_old:
+    en: "This runtime is too old and has no runtime_id. Upgrade it first"
+    zh-CN: "这个运行时太旧，没有 runtime_id，先升级它"
+pane:
+  restore:
+    en: "Restore"
+    zh-CN: "还原"
+  zoom:
+    en: "Zoom"
+    zh-CN: "放大"
+picker:
+  confirm_current:
+    en: "%{action} Current Folder"
+    zh-CN: "%{action}当前目录"
+  confirm_selected:
+    en: "%{action} Selection"
+    zh-CN: "%{action}所选项"
+  deselect:
+    en: "Deselect"
+    zh-CN: "取消选择"
+  empty:
+    en: "No subfolders here"
+    zh-CN: "这里没有子目录"
+  home:
+    en: "Home"
+    zh-CN: "主目录"
+  loading:
+    en: "Loading…"
+    zh-CN: "正在读取…"
+  non_utf8:
+    en: "Some paths aren't UTF-8 and were skipped"
+    zh-CN: "有路径不是 UTF-8，没法用，已跳过"
+  select:
+    en: "Select"
+    zh-CN: "选择"
+  selected:
+    one:
+      en: "1 folder selected"
+      zh-CN: "已选 1 个目录"
+    other:
+      en: "%{count} folders selected"
+      zh-CN: "已选 %{count} 个目录"
+  system_failed:
+    en: "Couldn't open the system file chooser: %{error}"
+    zh-CN: "打不开系统选择框：%{error}"
+  title:
+    en: "%{title} (%{machine})"
+    zh-CN: "%{title}（%{machine}）"
+  up:
+    en: "Parent Folder"
+    zh-CN: "上一级"
+plugins:
+  already_inside:
+    en: "This plugin is already in the plugin folder"
+    zh-CN: "这个插件已经在插件目录里了"
+  bad_manifest:
+    en: "The plugin manifest has a problem: %{error}"
+    zh-CN: "插件清单有问题：%{error}"
+  bad_path:
+    en: "The plugin path is invalid"
+    zh-CN: "插件路径不对"
+  cleanup_failed:
+    en: "Couldn't clean up the folder from an unfinished import: %{error}"
+    zh-CN: "清理上次没导完的目录失败：%{error}"
+  confirm_delete:
+    en: "Confirm Delete"
+    zh-CN: "确认删除"
+  copy_failed:
+    en: "Couldn't copy the plugin: %{error}"
+    zh-CN: "复制插件失败：%{error}"
+  create_dir_failed:
+    en: "Couldn't create the plugin folder: %{error}"
+    zh-CN: "创建插件目录失败：%{error}"
+  delete:
+    en: "Delete…"
+    zh-CN: "删除…"
+  delete_failed:
+    en: "Couldn't delete: %{error}"
+    zh-CN: "删除失败：%{error}"
+  deleted:
+    en: "Deleted \"%{name}\"; the original files are in the trash folder"
+    zh-CN: "已删除「%{name}」，原文件在回收目录里"
+  duplicate_id:
+    en: "A plugin with the same ID is already installed (%{path}). Delete it before importing"
+    zh-CN: "已经装了 id 相同的插件（%{path}），先删掉它再导入"
+  empty:
+    en: "No plugins yet."
+    zh-CN: "还没有插件。"
+  examples:
+    en: "Examples and Tutorials"
+    zh-CN: "示例和教程"
+  examples_link:
+    en: "Examples and Tutorials ↗"
+    zh-CN: "示例和教程 ↗"
+  id_version:
+    en: "%{id} · version %{version}"
+    zh-CN: "%{id} · 版本 %{version}"
+  import:
+    en: "Import"
+    zh-CN: "导入"
+  import_button:
+    en: "Import Plugin…"
+    zh-CN: "导入插件…"
+  import_hint:
+    en: "Pick a folder containing gpui-shell.json to copy into %{dir}. After editing a script, click Reload; no restart needed."
+    zh-CN: "选一个含 gpui-shell.json 的目录，复制进 %{dir}；改了脚本点「重新加载」，不用重启。"
+  import_prompt:
+    en: "Import Plugin"
+    zh-CN: "导入插件"
+  imported:
+    en: "Imported \"%{name}\""
+    zh-CN: "已导入「%{name}」"
+  installed:
+    en: "Installed Plugins"
+    zh-CN: "已装插件"
+  installed_count:
+    en: "%{count} Installed"
+    zh-CN: "已装 %{count} 个"
+  last_failed:
+    en: "Last Action Failed"
+    zh-CN: "上一次操作失败"
+  list_hint:
+    en: "Each plugin is a view: placed in the workbench layout it's a panel; otherwise it opens in the main area."
+    zh-CN: "每个插件是一个视图：摆进工作台布局的是面板，没摆进去的打开时显示在主区域。"
+  load_failed:
+    en: "Failed to load: %{error}"
+    zh-CN: "加载失败：%{error}"
+  no_data_dir:
+    en: "Couldn't find the Smelt data folder"
+    zh-CN: "找不到 smelt 数据目录"
+  no_entry:
+    en: "The plugin entry %{entry} doesn't exist"
+    zh-CN: "插件入口 %{entry} 不存在"
+  no_log:
+    en: "Couldn't find the log file"
+    zh-CN: "找不到日志文件"
+  no_manifest:
+    en: "This folder has no %{file}, so it isn't a Smelt plugin"
+    zh-CN: "这个目录里没有 %{MANIFEST_FILE}，不是 smelt 插件"
+  not_found:
+    en: "Couldn't find this plugin; it may have been deleted"
+    zh-CN: "找不到这个插件，可能已经删掉了"
+  only_user:
+    en: "Only plugins you installed can be deleted"
+    zh-CN: "只能删除自己装的插件"
+  open_dir:
+    en: "Open Plugin Folder"
+    zh-CN: "打开插件目录"
+  open_log:
+    en: "Open Log"
+    zh-CN: "打开日志"
+  reload:
+    en: "Reload"
+    zh-CN: "重新加载"
+  runtime_failed:
+    en: "Couldn't start the plugin runtime: %{error}"
+    zh-CN: "插件运行时启动失败：%{error}"
+  settings_failed:
+    en: "Couldn't load the settings page: %{error}"
+    zh-CN: "设置页加载失败：%{error}"
+  source_bundled:
+    en: "Bundled with Smelt, updated with Smelt"
+    zh-CN: "smelt 自带，跟着 smelt 更新"
+  source_repo:
+    en: "Loaded from the repo in development builds · %{path}"
+    zh-CN: "开发构建从仓库加载 · %{path}"
+  source_user:
+    en: "Installed by you · %{path}"
+    zh-CN: "自己装的 · %{path}"
+  target_exists:
+    en: "%{path} already exists"
+    zh-CN: "%{path} 已经存在"
+  trash_failed:
+    en: "Couldn't create the trash folder: %{error}"
+    zh-CN: "创建回收目录失败：%{error}"
+  trust_warning:
+    en: "Plugins can read and write any file and run any command, just like Smelt. Only import ones you trust. Deleted plugins move to ~/.smelt/trash/plugins so you can get them back."
+    zh-CN: "插件和 Smelt 一样能读写任意文件、运行任意命令，只导入你信任的。删除的插件挪进 ~/.smelt/trash/plugins，需要时能找回。"
+  view_failed:
+    en: "Couldn't load the plugin: %{error}"
+    zh-CN: "插件加载失败：%{error}"
+  view_used:
+    en: "This plugin view was already used. Reload the plugin"
+    zh-CN: "插件视图已经用过，请重新加载插件"
+  write:
+    en: "Write Your Own Plugin"
+    zh-CN: "自己写插件"
+  write_hint:
+    en: "gpui-shell scripts: JavaScript describes the interface and GPUI draws it natively. console.log output and script errors go to the log, tagged [plugin]."
+    zh-CN: "gpui-shell 脚本：JavaScript 描述界面，GPUI 原生绘制。console.log 和脚本错误写进日志，带 [plugin] 标记。"
+quit:
+  body:
+    en: "Background sessions keep running; the current connections will be closed."
+    zh-CN: "后台会话将继续运行，当前连接会断开。"
+  quit:
+    en: "Quit"
+    zh-CN: "退出"
+  quitting:
+    en: "Quitting…"
+    zh-CN: "正在退出…"
+  title:
+    en: "Quit Smelt?"
+    zh-CN: "退出 Smelt？"
+record:
+  needs_cmd:
+    en: "Include ⌘: ⌃ and ⌥ combinations are left to the terminal and input fields"
+    zh-CN: "要带 ⌘：⌃ 和 ⌥ 组合留给终端和输入框"
+  reserved:
+    en: "%{key} is reserved for %{what}"
+    zh-CN: "%{key} 留给%{what}"
+  taken:
+    en: "%{key} is already used by another feature (%{action})"
+    zh-CN: "%{key} 已被别的功能占用（%{action}）"
+relay:
+  lost:
+    en: "No reply from that machine (%{error}), and it couldn't be reached over the new relay either (%{confirm_error})"
+    zh-CN: "没收到那台机器的回复（%{error}），按新中继也没连上它（%{confirm_error}）"
+  read_failed:
+    en: "Couldn't read that machine's remote settings: %{error}"
+    zh-CN: "读不到那台机器的远程配置：%{error}"
+  rejected:
+    en: "That machine didn't apply the change: %{error}"
+    zh-CN: "那台机器没改成：%{error}"
+  save_failed:
+    en: "Couldn't save the relay: %{error}"
+    zh-CN: "保存中继失败：%{error}"
+reserved:
+  copy:
+    en: "Copy"
+    zh-CN: "复制"
+  cut:
+    en: "Cut"
+    zh-CN: "剪切"
+  hide:
+    en: "the system's \"Hide App\""
+    zh-CN: "系统的「隐藏应用」"
+  hide_others:
+    en: "the system's \"Hide Others\""
+    zh-CN: "系统的「隐藏其他应用」"
+  minimize:
+    en: "the system's \"Minimize\""
+    zh-CN: "系统的「最小化」"
+  paste:
+    en: "Paste"
+    zh-CN: "粘贴"
+  redo:
+    en: "Redo"
+    zh-CN: "重做"
+  select_all:
+    en: "Select All"
+    zh-CN: "全选"
+  terminal_search:
+    en: "Search in Terminal"
+    zh-CN: "终端内搜索"
+  undo:
+    en: "Undo"
+    zh-CN: "撤销"
+runtime:
+  bad_config:
+    en: "The runtime configuration is invalid"
+    zh-CN: "运行时配置无效"
+  bad_endpoint:
+    en: "The runtime's endpoint ID is invalid: %{id}"
+    zh-CN: "运行时的 endpoint id 不合法：%{id}"
+  bad_relay:
+    en: "The relay address is invalid: %{error}"
+    zh-CN: "relay 地址不合法：%{error}"
+  disconnected:
+    en: "Disconnected"
+    zh-CN: "连接断开"
+  events_failed:
+    en: "The runtime's event stream failed: %{error}"
+    zh-CN: "运行时的推送出错：%{error}"
+  events_rejected:
+    en: "This machine's runtime is older; available after upgrading the runtime"
+    zh-CN: "这台机器的运行时版本较旧，升级运行时后可用"
+  identity_failed:
+    en: "Couldn't read this device's identity: %{error}"
+    zh-CN: "读取本机设备身份失败：%{error}"
+  incompatible:
+    en: "Incompatible version"
+    zh-CN: "版本不兼容"
+  iroh_failed:
+    en: "Couldn't start iroh: %{error}"
+    zh-CN: "起不了 iroh：%{error}"
+  load_failed:
+    en: "Couldn't read the machine list: %{error}"
+    zh-CN: "读取机器列表失败：%{error}"
+  local:
+    en: "This Mac"
+    zh-CN: "本机"
+  offline:
+    en: "Offline"
+    zh-CN: "离线"
+  remove_failed:
+    en: "Couldn't remove the runtime: %{error}"
+    zh-CN: "移除运行时失败：%{error}"
+  removed:
+    en: "This machine has been removed"
+    zh-CN: "这台机器已经移除了"
+  upgrading:
+    en: "Upgrading"
+    zh-CN: "升级中"
+settings:
+  back:
+    en: "Back to App"
+    zh-CN: "返回应用"
+  group:
+    agents:
+      en: "Agents & Remote"
+      zh-CN: "Agent 与远程"
+    general:
+      en: "General"
+      zh-CN: "通用"
+    plugins:
+      en: "Plugins"
+      zh-CN: "插件"
+    system:
+      en: "System"
+      zh-CN: "系统"
+  nav:
+    en: "Settings Navigation"
+    zh-CN: "设置导航"
+  page:
+    appearance:
+      en: "Appearance"
+      zh-CN: "外观"
+    panel_plugins:
+      en: "Panel Plugins"
+      zh-CN: "面板插件"
+    shortcuts:
+      en: "Shortcuts"
+      zh-CN: "快捷键"
+  page_gone:
+    en: "This page was removed: the plugin that registered it was uninstalled or failed to reload."
+    zh-CN: "这一页已经撤下了：登记它的插件卸载了，或重新加载时出错。"
+  results:
+    none:
+      en: "No matching settings. Try a shorter keyword"
+      zh-CN: "没有找到相关设置，试试更短的关键词"
+    one:
+      en: "1 matching page"
+      zh-CN: "1 个相关页面"
+    other:
+      en: "%{count} matching pages"
+      zh-CN: "%{count} 个相关页面"
+  search:
+    en: "Search settings, features or commands"
+    zh-CN: "搜索设置、功能或命令"
+  title:
+    en: "Settings"
+    zh-CN: "设置"
+shortcuts:
+  change:
+    en: "Change the shortcut for \"%{title}\""
+    zh-CN: "修改「%{title}」的快捷键"
+  close_or_back:
+    en: "Close Preview or Go Back"
+    zh-CN: "关闭预览或返回"
+  hint:
+    en: "Click a keycap to record a new shortcut: Esc cancels, ⌫ clears it. Include ⌘ or use an F key."
+    zh-CN: "点键帽录新的快捷键：Esc 取消，⌫ 清掉不用。要带 ⌘，或者用 F 键。"
+  press:
+    en: "Press a new shortcut…"
+    zh-CN: "按下新快捷键…"
+  reassign:
+    en: "Reassign"
+    zh-CN: "改绑"
+  recording_note:
+    en: "If nothing happens, the system or another app may already use this key, such as a global shortcut"
+    zh-CN: "按了没反应的话，这个键可能被系统或别的应用占用了，比如飞书的全局快捷键"
+  reset:
+    en: "Reset to Default"
+    zh-CN: "恢复默认"
+  taken:
+    en: "%{key} is already the shortcut for \"%{other}\". Reassigning leaves \"%{other}\" without a shortcut"
+    zh-CN: "%{key} 已经是「%{other}」的快捷键。改绑后「%{other}」就没有快捷键了"
+  terminal_complete:
+    en: "Terminal Completion / Reverse Completion"
+    zh-CN: "终端补全 / 反向补全"
+  terminal_search:
+    en: "Search in Terminal"
+    zh-CN: "终端内搜索"
+  unset:
+    en: "Not set"
+    zh-CN: "未设置"
+  view_keys:
+    en: "Keys Inside Views"
+    zh-CN: "视图里的按键"
+upgrade:
+  auto_failed:
+    en: "Automatic upgrade failed: %{error}"
+    zh-CN: "自动升级失败：%{error}"
+  bad_reply:
+    en: "Couldn't understand the runtime's reply: %{reply}"
+    zh-CN: "看不懂运行时的回复：%{reply}"
+  connect_failed:
+    en: "Couldn't connect to the runtime: %{error}"
+    zh-CN: "连不上运行时：%{error}"
+  current:
+    en: "Already on v%{version}; nothing to upgrade"
+    zh-CN: "已经是 v%{version}，没有可升的"
+  detail_note:
+    en: "%{detail}. %{note}"
+    zh-CN: "%{detail}。%{note}"
+  dev_build:
+    en: "This is a development build with no matching release to upgrade to. Use a released Smelt to upgrade this runtime"
+    zh-CN: "这是开发构建，没有对应的发版可升：用发布的 Smelt 来升级这台运行时"
+  failed:
+    en: "Upgrade failed: %{error}"
+    zh-CN: "升级失败：%{error}"
+  local_failed:
+    en: "%{detail}. The local runtime wasn't replaced with the current version; you can restart the daemon in Settings"
+    zh-CN: "%{detail}。本机运行时没有换成当前版本，可在设置里重启守护进程"
+  read_failed:
+    en: "Couldn't read the runtime's reply: %{error}"
+    zh-CN: "读不到运行时的回复：%{error}"
+  restarting:
+    en: "Restarting"
+    zh-CN: "正在重启"
+  restarting_local:
+    en: "Restarting the local runtime"
+    zh-CN: "正在重启本机运行时"
+  send_failed:
+    en: "Couldn't send the upgrade request: %{error}"
+    zh-CN: "发不出升级请求：%{error}"
+  staged:
+    en: "The new version is installed. %{reason}"
+    zh-CN: "新版本已装好，%{reason}"
+  still_mismatched:
+    en: "%{detail}. It still doesn't match after upgrading to v%{version}; see ~/.smelt/daemon.log on that machine"
+    zh-CN: "%{detail}。请它升到 v%{version} 后仍对不上，详见那台机器的 ~/.smelt/daemon.log"
+  still_mismatched_dev:
+    en: "The runtime is already v%{version} but still doesn't match: this desktop is probably an unreleased development build"
+    zh-CN: "运行时已经是 v%{version}，仍对不上：这个桌面多半是还没发布的开发构建"
+  timeout:
+    en: "Timed out waiting for the runtime to upgrade: %{error}"
+    zh-CN: "等运行时升级超时：%{error}"
+  unsupported:
+    en: "This runtime is too old to upgrade automatically. Run this once on that machine: %{command}"
+    zh-CN: "这台运行时太旧，不会自动升级，到那台机器上执行一次：%{command}"
+  update_smelt_there:
+    en: "%{detail}. This runtime updates together with Smelt on that machine and can't be upgraded remotely: update Smelt there to v%{version}"
+    zh-CN: "%{detail}。这台运行时随那台机器上的 Smelt 一起更新，不能远程升级：到那台机器上把 Smelt 更新到 v%{version}"
+  upgrading_to:
+    en: "Upgrading to v%{version}"
+    zh-CN: "正在升级到 v%{version}"
+view:
+  outlet:
+    en: "Content"
+    zh-CN: "内容"

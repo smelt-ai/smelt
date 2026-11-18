@@ -107,6 +107,9 @@ pub struct PushRegisterParams {
     /// 智能体主动发的消息。正文原样显示，哪一版 App 都认，旧版手机不带就是推。
     #[serde(default = "default_push_message")]
     pub message: bool,
+    /// 手机的界面语言（如 `zh-CN`），推送里运行时自己说的话按它说。旧版手机不带，按英文说。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
 }
 
 fn legacy_push_payload_version() -> u32 {

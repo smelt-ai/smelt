@@ -179,6 +179,7 @@ mod tests {
             success: true,
             payload_version: smelt_model::remote_config::PUSH_PAYLOAD_VERSION,
             message: true,
+            locale: None,
         })
     }
 

@@ -99,7 +99,7 @@ export function smeltMcpExtension(selection: ReadonlySet<string>) {
 		try {
 			document = JSON.parse(readFileSync(configPath, "utf8"));
 		} catch (error) {
-			problems.push(`读取 mcp.json 失败：${errorMessage(error)}`);
+			problems.push(`couldn't read mcp.json: ${errorMessage(error)}`);
 		}
 		for (const [name, config] of selectMcpServers(document, selection)) {
 			try {
@@ -110,7 +110,7 @@ export function smeltMcpExtension(selection: ReadonlySet<string>) {
 		}
 		if (problems.length > 0) {
 			pi.on("session_start", (_event, ctx) => {
-				ctx.ui.notify(`MCP：${problems.join("；")}`, "warning");
+				ctx.ui.notify(`MCP: ${problems.join("; ")}`, "warning");
 			});
 		}
 	};

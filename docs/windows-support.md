@@ -13,7 +13,7 @@
 
 - `smelt` 桌面端在 Windows 10 1803 及以上（x86_64）编过、跑起来，通过 iroh 连已配对的 Linux / macOS 运行时，对话、终端、文件树、Git 面板、远程桌面照常用。
 - Windows 原生 CI 检查，发版产出 zip 便携包。
-- 窗口材质（`window_backdrop.rs`）：Windows 11 22H2（build 22621）起用 GPUI 的 `MicaBackdrop`，整窗拿 Mica 做底，窗口的深色标记跟 smelt 的主题；更早的版本主窗口不透明、铺主题底色，不退到 Acrylic（`Blurred`），拖窗口会卡。
+- 窗口材质（`window_backdrop.rs`）：Windows 11 22H2（build 22621）起用 GPUI 的 `MicaBackdrop`，整窗拿 Mica 做底，布局声明了材质的地方透出它、别处铺实色（系统背景材质只能整窗一种，侧栏、窗口底两种用途在 Windows 上分不出来），窗口的深色标记跟 smelt 的主题；更早的版本主窗口不透明、铺主题底色，不退到 Acrylic（`Blurred`），拖窗口会卡。
 
 不做：
 
@@ -94,7 +94,7 @@
 1. **本机运行时在所有桌面平台上都有**：Windows 也跑 smeltd 之后，`local_runtime_supported()` 恒为真，已删除。
 2. **`Runtime::local()` 直接返回 `Runtime`**。过渡期它返回过 `Option<Runtime>`，用来逼出每个调用点的处理；三个桌面平台都有本机之后，`None` 分支全部是死代码，一并删掉。
 3. **空间合一**：`local` 和 `remote_spaces` 合成 `spaces: Vec<RuntimeSpace>`，有本机时本机在前，`space()` 等去掉本机特判。那 14 处 `self.local` 原本为本机冷启动恢复而设，逐个确认原意后改成读会话所属运行时的空间，改之前要确认远程空间的恢复语义一致。
-4. **smeltd 生命周期独立成模块**：`terminal.rs` 里上面那段挪到 `local_daemon.rs`。现在是 `cfg(any(unix, windows))`，`runtimes::connect_terminal` 在本机分支调它。Windows 用 `spawn_detached`、`ExclusiveFile`、`pid_is_alive`，升级不交接。
+4. **smeltd 生命周期独立成模块**：`terminal.rs` 里上面那段挪到 `local_daemon.rs`。现在是 `cfg(any(unix, windows))`，`runtimes::connector` 在本机分支调它。Windows 用 `spawn_detached`、`ExclusiveFile`、`pid_is_alive`，升级不交接。
 5. **只认本机的功能**按下表处理：
 
 | 功能 | 位置 | 没有本机运行时时 |

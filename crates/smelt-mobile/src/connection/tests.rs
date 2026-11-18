@@ -418,7 +418,7 @@ fn connect_to_an_older_runtime_stops_and_asks_to_upgrade_it() {
 
     assert_eq!(refused.error.kind, SmeltErrorKind::RuntimeOutdated);
     assert!(
-        refused.error.message.contains("需要升级运行时"),
+        refused.error.message.contains("update the runtime"),
         "{}",
         refused.error.message
     );
@@ -438,7 +438,7 @@ fn connect_to_a_newer_runtime_stops_and_asks_to_upgrade_the_app() {
 
     assert_eq!(refused.error.kind, SmeltErrorKind::AppOutdated);
     assert!(
-        refused.error.message.contains("需要升级客户端"),
+        refused.error.message.contains("update this app"),
         "{}",
         refused.error.message
     );

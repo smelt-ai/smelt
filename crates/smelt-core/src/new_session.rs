@@ -75,8 +75,8 @@ pub fn stored_new_session_sections(
 }
 
 /// 按 key 找一条启动动作。客户端只回传 key，命令永远在这台机器上解析——别让远程
-/// 设备决定跑什么进程。探测状态不参与解析：目录里还在的启动项就能起，免得探测缓存
-/// 过期让刚点下的那一行变成「未知启动项」。
+/// 设备决定跑什么进程。探测状态不参与解析：目录里还在的启动项就能起，免得打开菜单后
+/// CLI 被挪走，让刚点下的那一行变成「未知启动项」。
 pub fn find_stored_action(key: &str) -> Option<NewSessionAction> {
     let actions = new_session_actions(
         &stored_conversation_options(),
@@ -163,9 +163,9 @@ mod tests {
         assert_eq!(
             labels(&actions),
             vec![
-                "Claude Code · 终端".to_string(),
-                "空白终端 · 终端".to_string(),
-                "Claude Code · 对话".to_string(),
+                "Claude Code · Terminal".to_string(),
+                "Shell · Terminal".to_string(),
+                "Claude Code · Conversation".to_string(),
             ]
         );
         assert_ne!(actions[0].key, actions[2].key);
@@ -195,7 +195,7 @@ mod tests {
                 .iter()
                 .map(|action| action.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Claude Code", "Antigravity", "我的脚本", "空白终端"]
+            vec!["Claude Code", "Antigravity", "我的脚本", "Shell"]
         );
     }
 
@@ -312,7 +312,7 @@ mod tests {
                 .iter()
                 .map(|action| action.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Claude Code", "我的脚本", "空白终端", "Claude Code"]
+            vec!["Claude Code", "我的脚本", "Shell", "Claude Code"]
         );
     }
 

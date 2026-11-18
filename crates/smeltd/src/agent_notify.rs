@@ -16,7 +16,7 @@ use super::*;
 const MESSAGE_LIMIT_CHARS: usize = 2_000;
 const TITLE_LIMIT_CHARS: usize = 80;
 /// 智能体没给标题、也不是自动化运行时，桌面通知的标题。
-const DEFAULT_TITLE: &str = "智能体消息";
+const DEFAULT_TITLE: &str = "Agent message";
 
 /// 发出去的情况，回给调用方。
 #[derive(Debug, PartialEq, Eq)]
@@ -31,14 +31,18 @@ pub(crate) struct Sent {
 fn parse(title: Option<&str>, message: Option<&str>) -> Result<(Option<String>, String), String> {
     let message = message.map(str::trim).unwrap_or_default();
     if message.is_empty() {
-        return Err("通知内容是空的".to_string());
+        return Err("The notification is empty".to_string());
     }
     if message.chars().count() > MESSAGE_LIMIT_CHARS {
-        return Err(format!("通知内容太长，最多 {MESSAGE_LIMIT_CHARS} 个字符"));
+        return Err(format!(
+            "The notification is too long (max {MESSAGE_LIMIT_CHARS} characters)"
+        ));
     }
     let title = title.map(str::trim).filter(|title| !title.is_empty());
     if title.is_some_and(|title| title.chars().count() > TITLE_LIMIT_CHARS) {
-        return Err(format!("标题太长，最多 {TITLE_LIMIT_CHARS} 个字符"));
+        return Err(format!(
+            "The title is too long (max {TITLE_LIMIT_CHARS} characters)"
+        ));
     }
     Ok((title.map(str::to_string), message.to_string()))
 }

@@ -51,7 +51,27 @@ function currentSessionControl(): SessionControl {
 
 export type MemoryUsage = { readCount: number; lastReadAtMs: number };
 export type MemoryTrust = "trusted" | "pending";
+/**
+ * 来源记录。`reason` 存的是种类，界面按语言说（`smelt-model` 的 `memory_pending_reason_text`）：
+ * `user_present`、`unattended`、`external_content:<工具名, …>`、`unknown_origin`、`edits_pending`、
+ * `rule_lacks_user_words`。给模型的话用 `describePendingReason`。
+ */
 export type MemoryProvenance = { trust: MemoryTrust; reason: string };
+
+const PENDING_REASON_TEXT: Record<string, string> = {
+	unattended: "无人值守的运行（自动化）写入",
+	unknown_origin: "无法确认这条记忆原先的来源",
+	edits_pending: "修改的是一条待确认的记忆",
+	rule_lacks_user_words:
+		"user / feedback 规则正文须包含用户原话中至少一段（中文不少于 8 字，纯英文不少于 18 个非空白字符），避免把网页或仓库里的文字写成常驻规则",
+};
+
+/** 把种类说成给模型看的话。 */
+export function describePendingReason(reason: string): string {
+	const sources = reason.startsWith("external_content:") ? reason.slice("external_content:".length) : undefined;
+	if (sources !== undefined) return `写入的那一轮读取了外部内容（${sources}）`;
+	return PENDING_REASON_TEXT[reason] ?? reason;
+}
 
 export type MemoryHostMeta = {
 	/** 智能体当前是否开着记忆。会话启动后用户可能在配置页关掉。 */

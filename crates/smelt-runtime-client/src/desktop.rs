@@ -7,6 +7,7 @@
 //! 这个口本机任何程序、浏览器里任何网页都连得到，所以 WebSocket 必须带上启动时生成的
 //! 令牌，且来源必须是这个口自己的页面。
 
+use rust_i18n::t;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -179,7 +180,7 @@ fn bridge(stream: TcpStream, shared: &Shared) {
         if token_ok && origin_ok {
             Ok(response)
         } else {
-            let mut refused = ErrorResponse::new(Some("拒绝".into()));
+            let mut refused = ErrorResponse::new(Some("Forbidden".into()));
             *refused.status_mut() = tungstenite::http::StatusCode::FORBIDDEN;
             Err(refused)
         }
@@ -210,12 +211,12 @@ fn bridge(stream: TcpStream, shared: &Shared) {
 fn attach(client: &RuntimeClient, timeout: Duration) -> Result<RuntimeStream, String> {
     let mut stream = client
         .connect_with_timeout(timeout)
-        .map_err(|error| format!("连不上运行时：{error}"))?;
+        .map_err(|error| t!("desktop.unreachable", error = error).into_owned())?;
     write_json_line(
         &mut stream,
         &serde_json::json!({ "op": DaemonOperation::DesktopAttach }),
     )
-    .map_err(|error| format!("连不上运行时：{error}"))?;
+    .map_err(|error| t!("desktop.unreachable", error = error).into_owned())?;
     // 逐字节读回复行：后面紧跟着 RFB 字节，带缓冲读会把它们一起吞掉。
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
@@ -223,19 +224,21 @@ fn attach(client: &RuntimeClient, timeout: Duration) -> Result<RuntimeStream, St
         match stream.read(&mut byte) {
             Ok(1) if byte[0] == b'\n' => break,
             Ok(1) if line.len() < 64 * 1024 => line.push(byte[0]),
-            _ => return Err("运行时没回应".to_string()),
+            _ => return Err(t!("desktop.no_reply").into_owned()),
         }
     }
     let reply: DesktopAttachReply =
-        serde_json::from_slice(&line).map_err(|_| "运行时不支持远程桌面，需要升级".to_string())?;
+        serde_json::from_slice(&line).map_err(|_| t!("desktop.unsupported").into_owned())?;
     if reply.ok {
         stream
             .set_read_timeout(None)
             .and_then(|()| stream.set_write_timeout(None))
-            .map_err(|error| format!("连不上运行时：{error}"))?;
+            .map_err(|error| t!("desktop.unreachable", error = error).into_owned())?;
         Ok(stream)
     } else {
-        Err(reply.error.unwrap_or_else(|| "运行时拒绝了".to_string()))
+        Err(reply
+            .error
+            .unwrap_or_else(|| t!("desktop.refused").into_owned()))
     }
 }
 

@@ -149,7 +149,7 @@ const parameters = Type.Object({
 function askUserQuestionTool() {
 	return defineTool({
 		name: SMELT_ELICITATION_TOOL_NAME,
-		label: "提问",
+		label: "Ask",
 		description:
 			"向用户展示选择题并等待点选。需要用户在几个明确选项里做决定时必须用这个工具，不要改口用纯文本追问。多选题把 multiSelect 设为 true。",
 		parameters,

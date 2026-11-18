@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
 
+use rust_i18n::t;
 use smelt_model::control_api::{PushRegister, PushUnregister};
 use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode, EmptyParams};
 
@@ -330,7 +331,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 fn not_initialized() -> SmeltError {
     error(
         SmeltErrorKind::Other,
-        "还没有初始化设备身份（先调 init_client）",
+        "the device identity isn't initialized (call init_client first)",
     )
 }
 
@@ -373,14 +374,19 @@ impl Fleet {
             return Err(error(
                 SmeltErrorKind::Other,
                 format!(
-                    "设备身份已从 {} 加载，不能换成 {}",
+                    "the device identity was already loaded from {}; it can't switch to {}",
                     env.data_dir.display(),
                     data_dir.display()
                 ),
             ));
         }
-        let secret = smelt_iroh::load_or_create_secret(&data_dir.join(SECRET_FILE))
-            .map_err(|e| error(SmeltErrorKind::Other, format!("读取设备身份失败：{e:#}")))?;
+        let secret =
+            smelt_iroh::load_or_create_secret(&data_dir.join(SECRET_FILE)).map_err(|e| {
+                error(
+                    SmeltErrorKind::Other,
+                    t!("error.identity_unreadable", error = format!("{e:#}")),
+                )
+            })?;
         let device_id = secret.public().to_string();
         log::info!("设备身份：{device_id}");
         let store = Store::open(&data_dir.join(crate::store::DATABASE_FILE))?;
@@ -702,7 +708,10 @@ impl Shared {
         let relays: Vec<Option<String>> = records.iter().map(|r| r.relay_url.clone()).collect();
         env.transport.configure(&relays)?;
         if self.env.set(env).is_err() {
-            return Err(error(SmeltErrorKind::Other, "设备身份已经初始化过"));
+            return Err(error(
+                SmeltErrorKind::Other,
+                "the device identity is already initialized",
+            ));
         }
         let env = self.env()?;
         let nodes: Vec<Arc<Node>> = records

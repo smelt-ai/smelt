@@ -12,14 +12,15 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::*;
-use gpui_base::{ResizablePanelGroup, ResizeHandleRenderer, ResizeHandleState};
-use gpui_component::{StyledExt as _, VirtualListScrollHandle};
-use gpui_component::resizable::ResizableState;
+use gpui_base::VirtualListScrollHandle;
+use rust_i18n::t;
+use smelt_plugin_api::ui::resizable::ResizableState;
 use smelt_plugin_api::{
     self as api, CommandSpec, Handled, Host, HostEvent, PluginView, RuntimeKey, ViewHandle,
-    ViewSpec,
+    ViewSpec, text,
 };
 
+mod contract;
 mod log;
 mod log_view;
 mod panel;
@@ -31,6 +32,9 @@ use panel::{
 };
 
 pub(crate) use api::ui::ui_theme;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 const VIEW_ID: &str = "smelt.git/main";
 /// 命令的来源。和搬出宿主之前一样，用户改过的快捷键还对得上。
@@ -42,11 +46,12 @@ pub fn register(cx: &mut App) {
         OWNER,
         vec![ViewSpec {
             name: "main".into(),
-            title: "变更".into(),
-            icon: gpui_kit_assets::IconName::GitBranch.path(),
-            per_machine: false,
+            title: text!("title"),
+            icon: smelt_plugin_api::ui::IconName::GitBranch.path(),
             draws_top_bar: false,
+            instances: false,
             settings: None,
+            fills: Vec::new(),
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| GitPanel::new(window, cx))) as Rc<dyn ViewHandle>
             }),
@@ -55,22 +60,62 @@ pub fn register(cx: &mut App) {
     )
     .expect("变更的视图表写错了");
     let commands = vec![
-        jump_hunk_command("prev-hunk", "上一个差异", "shift-f7", false),
-        jump_hunk_command("next-hunk", "下一个差异", "f7", true),
+        jump_hunk_command("prev-hunk", text!("command.prev_hunk"), "shift-f7", false),
+        jump_hunk_command("next-hunk", text!("command.next_hunk"), "f7", true),
+        open_pull_request_command(),
     ];
-    api::register_commands(OWNER, "改动", commands, cx).expect("变更的命令表写错了");
+    api::register_commands(OWNER, text!("title"), commands, cx).expect("变更的命令表写错了");
+}
+
+/// [`contract::OPEN_PULL_REQUEST`]：会话列表的工作树菜单按仓库调它。仓库信息问那台机器的
+/// 运行时，拼好链接用浏览器打开。
+fn open_pull_request_command() -> CommandSpec {
+    CommandSpec {
+        name: contract::OPEN_PULL_REQUEST
+            .id()
+            .strip_prefix("smelt.git/")
+            .expect("命令 id 带来源")
+            .into(),
+        title: text!("command.open_pull_request"),
+        key: None,
+        context: "Workspace".into(),
+        palette: false,
+        requires_args: true,
+        args: api::arg_fields::<contract::OpenPullRequest>(),
+        handler: Rc::new(|args, _, cx| {
+            let target: contract::OpenPullRequest = match api::serde_json::from_value(args.clone())
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    return Handled::err(t!("error.pull_request_args", error = error).into_owned());
+                }
+            };
+            let info = api::call::<smelt_plugin_api::client::protocol::git::GitRepoInfoCall>(
+                &target.machine,
+                smelt_plugin_api::client::protocol::git::GitRootParams { root: target.root },
+                api::CALL_TIMEOUT,
+                cx,
+            );
+            Handled::Done(cx.spawn(async move |cx| {
+                let url = panel::ops::pull_request_link(info.await)?;
+                cx.update(|cx| cx.open_url(&url));
+                Ok(api::serde_json::Value::Null)
+            }))
+        }),
+    }
 }
 
 /// F7 / Shift+F7 跳到下一块 / 上一块改动。只在焦点在「改动」页里时生效：焦点在终端里，
 /// 这两个键该交给终端。
-fn jump_hunk_command(name: &str, title: &str, key: &str, forward: bool) -> CommandSpec {
+fn jump_hunk_command(name: &str, title: api::Text, key: &str, forward: bool) -> CommandSpec {
     CommandSpec {
         name: name.into(),
-        title: title.into(),
+        title,
         key: Some(key.into()),
         context: CHANGES_KEY_CONTEXT.into(),
         palette: true,
         requires_args: false,
+        args: Some(Vec::new()),
         handler: Rc::new(move |_, _, cx| {
             let Some(panel) = built_panel(cx) else {
                 return Handled::Pass;
@@ -129,7 +174,7 @@ mod rt {
 
     use smelt_plugin_api::client::RuntimeClient;
     use smelt_plugin_api::client::protocol::control::{ControlCall, ControlClientError};
-    use smelt_plugin_api::{MACHINE_REMOVED, RuntimeKey};
+    use smelt_plugin_api::{RuntimeKey, machine_removed};
 
     pub(crate) use smelt_plugin_api::call_error_text as error_text;
 
@@ -139,7 +184,7 @@ mod rt {
     pub(crate) fn target(key: &RuntimeKey, cx: &gpui::App) -> Result<RuntimeClient, String> {
         smelt_plugin_api::host(cx)
             .client(key, cx)
-            .ok_or_else(|| MACHINE_REMOVED.to_string())
+            .ok_or_else(machine_removed)
     }
 
     pub(crate) fn call_on<C: ControlCall>(
@@ -165,7 +210,7 @@ pub(crate) fn mono_font() -> String {
 pub(crate) fn notify_error(message: &str, cx: &mut App) {
     eprintln!("[git] {message}");
     let notify = api::Notify {
-        subtitle: "错误".to_string(),
+        subtitle: t!("notify.error").into_owned(),
         body: message.to_string(),
         ..Default::default()
     };
@@ -190,7 +235,7 @@ pub(crate) fn reveal_in_finder(path: &str) {
 }
 
 /// 居中的空状态 / 加载中。
-pub(crate) fn placeholder_view(text: &str, muted: Hsla) -> Div {
+pub(crate) fn placeholder_view(text: &str) -> Div {
     div()
         .flex_1()
         .min_w_0()
@@ -201,38 +246,11 @@ pub(crate) fn placeholder_view(text: &str, muted: Hsla) -> Div {
         .px_4()
         .child(
             div()
-                .text_sm()
-                .font_medium()
+                .type_style(TYPE.ui_medium)
                 .text_center()
-                .text_color(muted)
+                .text_color(rgb(ui_theme::muted()))
                 .child(text.to_string()),
         )
-}
-
-/// 左右拆分（日志页的提交列表和详情），分隔条是和侧栏同一根发丝。
-///
-/// 组件库悬停时只在中间亮一小段药丸；这里整根从 `hair` 亮到 `faint`。命中和
-/// 拖拽仍由组件库负责。
-pub(crate) fn h_resizable(id: impl Into<ElementId>) -> ResizablePanelGroup {
-    gpui_base::h_resizable(id).with_handle_appearance(hairline_handle())
-}
-
-/// 拖拽一两像素后指针就离开命中带，组件库自己的 hover 会灭；颜色跟
-/// [`ResizeHandleState`] 走，按下和拖拽也保持亮着。
-fn hairline_handle() -> ResizeHandleRenderer {
-    Rc::new(|handle, _, _| {
-        let color = if handle.state() == ResizeHandleState::Idle {
-            ui_theme::hair()
-        } else {
-            rgb(ui_theme::faint())
-        };
-        let line = div().flex_none().bg(color);
-        let line = match handle.axis() {
-            Axis::Horizontal => line.w(px(1.)).h_full(),
-            Axis::Vertical => line.h(px(1.)).w_full(),
-        };
-        Some(line.into_any_element())
-    })
 }
 
 /// 改动页右边那列（改动树 + 提交框）的宽度范围。
@@ -260,9 +278,9 @@ struct ProjectGitUi {
     diff_comment_open: bool,
     git_collapsed_diff_files: HashSet<String>,
     diff_split: bool,
-    diff_view: Option<Entity<gpui_component::diff::DiffState>>,
+    diff_view: Option<Entity<smelt_plugin_api::ui::diff::DiffState>>,
     diff_view_patch: String,
-    diff_comment_range: Option<gpui_component::diff::DiffLineRange>,
+    diff_comment_range: Option<smelt_plugin_api::ui::diff::DiffLineRange>,
     diff_view_sub: Option<Subscription>,
     diff_parse_error: Option<String>,
     git_tree_collapsed: HashSet<String>,
@@ -288,11 +306,11 @@ pub(crate) struct GitPanel {
     git_collapsed_diff_files: HashSet<String>,
     diff_split: bool,
     /// 变更栏正文。补丁原文没变时不调用 `set_files`，滚动和折叠才留得住。
-    diff_view: Option<Entity<gpui_component::diff::DiffState>>,
+    diff_view: Option<Entity<smelt_plugin_api::ui::diff::DiffState>>,
     /// 当前装进 `diff_view` 的补丁原文。
     diff_view_patch: String,
     /// 评论卡锚在这个源码范围的末行。
-    diff_comment_range: Option<gpui_component::diff::DiffLineRange>,
+    diff_comment_range: Option<smelt_plugin_api::ui::diff::DiffLineRange>,
     _diff_view_sub: Option<Subscription>,
     /// `DiffFile::parse` 失败时的说明。git 报错、只有子模块这类非 diff 文本走这里。
     diff_parse_error: Option<String>,
@@ -305,10 +323,10 @@ pub(crate) struct GitPanel {
     diff_gen: u64,
     git_log: log::GitLogState,
     git_log_resize: Entity<ResizableState>,
-    diff_comment_input: Option<Entity<gpui_component::input::TextareaState>>,
+    diff_comment_input: Option<Entity<smelt_plugin_api::ui::field::TextareaState>>,
     diff_body: Option<Entity<GitDiffBody>>,
     /// 每个仓库一个提交框：提交信息属于仓库。
-    commit_msg_inputs: HashMap<ProjectRef, Entity<gpui_component::input::TextareaState>>,
+    commit_msg_inputs: HashMap<ProjectRef, Entity<smelt_plugin_api::ui::field::TextareaState>>,
     commit_errors: HashMap<ProjectRef, String>,
     git_list_scroll: VirtualListScrollHandle,
     /// 改动页右边那列的宽度，和拖它的分隔条时按下的位置。
@@ -345,10 +363,13 @@ pub(crate) struct GitPanel {
 }
 
 impl GitPanel {
-    fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let host = api::host(cx);
         let events = api::events(cx);
-        let _events = cx.subscribe(&events, |this, _, event: &HostEvent, cx| {
+        let _events = cx.subscribe_in(&events, window, |this, _, event: &HostEvent, window, cx| {
+            if matches!(event, HostEvent::LocaleChanged) {
+                this.relabel_inputs(window, cx);
+            }
             this.on_host_event(event, cx);
         });
         let project = api::active_context(cx).project.map(|project| ProjectRef {
@@ -414,6 +435,25 @@ impl GitPanel {
         // 排到这一轮之后再取。
         panel.schedule_visible_refresh(cx);
         panel
+    }
+
+    /// 换了语言：已经建好的输入框换占位文字，打了一半的内容不动。
+    fn relabel_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (repo, input) in &self.commit_msg_inputs {
+            let branch = self
+                .git_status
+                .get(repo)
+                .map(|cached| cached.value.branch.clone())
+                .unwrap_or_default();
+            input.update(cx, |input, cx| {
+                input.set_placeholder(panel::ops::commit_placeholder(&branch), window, cx);
+            });
+        }
+        if let Some(input) = &self.diff_comment_input {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(t!("comment.placeholder"), window, cx);
+            });
+        }
     }
 
     fn on_host_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {
@@ -518,19 +558,17 @@ impl GitPanel {
     }
 
     /// 把一次刷新排到这一轮之后。同一轮里多次调用合并成一次；刷新要窗口（建输入框），
-    /// 在主窗口里跑。
+    /// 在视图自己所在的窗口里跑。
     pub(crate) fn schedule_visible_refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_scheduled {
             return;
         }
-        let Some(window) = self.host.main_window(cx) else {
-            return;
-        };
         self.refresh_scheduled = true;
         let view = cx.weak_entity();
+        let entity_id = cx.entity_id();
         cx.defer(move |cx| {
             let refreshed = cx
-                .update_window(window, |_, window, cx| {
+                .with_window(entity_id, |window, cx| {
                     view.update(cx, |this, cx| this.refresh(window, cx)).is_ok()
                 })
                 .unwrap_or(false);
@@ -730,9 +768,6 @@ impl Render for GitPanel {
             .child(self.git_narrow_panel(window, cx))
     }
 }
-
-#[cfg(test)]
-mod split_tests;
 
 #[cfg(test)]
 mod autofetch_tests {

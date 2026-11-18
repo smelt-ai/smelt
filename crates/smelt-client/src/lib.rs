@@ -1,11 +1,9 @@
-//! 桌面客户端访问运行时的部分：状态订阅连接、ACP 会话客户端、会话和自动化操作。
+//! 桌面客户端访问运行时的部分：状态订阅连接、会话和自动化操作。
 //! 只走协议，不碰运行时的库。
 
-pub mod acp_client;
 pub mod daemon_state;
 pub mod daemon_stop;
 pub mod runtime;
-pub mod session_kill;
 pub mod session_ops;
 // 桌面的在线更新：macOS 换 .app 包，Windows 拉起安装程序。
 #[cfg(any(target_os = "macos", windows))]

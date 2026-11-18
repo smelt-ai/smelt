@@ -3,15 +3,16 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use api::RuntimeKey;
 use api::model::control_api::{ProcessEntry, ProcessUsage};
+use api::ui::chart::AreaChart;
 use api::ui::truncated_line::truncated_line;
 use api::ui::ui_theme;
-use api::ui::{Button, IconAction as _, ListRow};
+use api::ui::{Button, Icon, IconAction as _, IconName, ListRow, SettingsPage, SettingsSection};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::chart::AreaChart;
-use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
-use gpui_component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
+use gpui_base::StyledExt as _;
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 use crate::ResourcesPage;
@@ -19,6 +20,7 @@ use crate::monitor::{
     MemoryPart, PanelSnapshot, Row, Section, SessionGroup, SortBy, format_bytes, format_cpu,
     process_summary,
 };
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 const CPU_COLUMN: f32 = 64.;
 const MEMORY_COLUMN: f32 = 80.;
@@ -29,52 +31,43 @@ pub(crate) fn page(
     snapshot: Rc<PanelSnapshot>,
     sort: SortBy,
     expanded: Rc<HashSet<SharedString>>,
-) -> SettingPage {
-    // 它是监视器不是设置：总量卡片标题旁写刷新频率，口径说明放到卡片底部。页名在设置的
-    // 工具栏里，组件库的页头不画。
-    let summary = snapshot.clone();
-    let mut setting_page = SettingPage::new("资源占用").resettable(false).group(
-        SettingGroup::new()
-            .title("本机合计")
-            .description("停在这一页时每 2 秒刷新")
-            .item(SettingItem::render(move |_, _, cx: &mut App| {
-                summary_view(&summary, cx)
-            })),
-    );
-    for ix in 0..snapshot.sections.len() {
-        let snapshot = snapshot.clone();
-        let expanded = expanded.clone();
-        let page = page.clone();
-        setting_page = setting_page.group(
-            SettingGroup::new()
-                .title(snapshot.sections[ix].name.clone())
-                .item(SettingItem::render(move |_, _, cx: &mut App| {
-                    section_view(&snapshot.sections[ix], sort, &expanded, &page, cx)
-                })),
-        );
-    }
-    setting_page
+) -> SettingsPage {
+    // 它是监视器不是设置：总量卡片标题旁写刷新频率，口径说明放到卡片底部。
+    SettingsPage::new("resources-settings")
+        .child(
+            SettingsSection::new()
+                .title(t!("summary.title"))
+                .description(t!("summary.refresh"))
+                .child(summary_view(&snapshot)),
+        )
+        .children(snapshot.sections.iter().map(|section| {
+            SettingsSection::new()
+                .title(section.name.clone())
+                .child(section_view(section, sort, &expanded, &page))
+        }))
 }
 
 /// 本机合计、占比和最近两分钟的内存曲线。
-fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
-    let theme = cx.theme();
+fn summary_view(snapshot: &PanelSnapshot) -> AnyElement {
     let Some(local) = snapshot.local else {
         return div()
-            .text_sm()
-            .text_color(theme.muted_foreground)
-            .child("读取中…")
+            .type_style(TYPE.ui)
+            .text_color(rgb(ui_theme::muted()))
+            .child(t!("loading").to_string())
             .into_any_element();
     };
     let share = snapshot.total_memory.map(|total| {
-        format!(
-            "占本机 {} 内存的 {:.0}%",
-            format_bytes(total),
-            local.memory_bytes as f64 * 100. / total as f64
+        t!(
+            "summary.share",
+            total = format_bytes(total),
+            percent = format!("{:.0}", local.memory_bytes as f64 * 100. / total as f64)
         )
+        .into_owned()
     });
-    let mut view = v_flex().w_full().gap_2().child(
-        h_flex()
+    let mut view = div().flex().flex_col().w_full().gap_2().child(
+        div()
+            .flex()
+            .items_center()
             .gap_3()
             .items_baseline()
             .font_features(ui_theme::tabular_figures())
@@ -82,44 +75,37 @@ fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
                 div()
                     .text_2xl()
                     .font_semibold()
-                    .text_color(theme.foreground)
+                    .text_color(rgb(ui_theme::text()))
                     .child(format_bytes(local.memory_bytes)),
             )
             .child(
                 div()
-                    .text_sm()
-                    .text_color(theme.foreground)
+                    .type_style(TYPE.ui)
+                    .text_color(rgb(ui_theme::text()))
                     .child(format!("CPU {}", format_cpu(local.cpu_percent))),
             )
             .children(share.map(|share| {
                 div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
+                    .type_style(TYPE.ui)
+                    .text_color(rgb(ui_theme::muted()))
                     .child(share)
             })),
     );
     if snapshot.chart.len() > 1 {
         let peak = snapshot.chart.iter().copied().fold(0., f64::max);
         view = view.child(
-            div().h(px(96.)).w_full().child(
-                AreaChart::new(snapshot.chart.clone().into_iter().enumerate())
-                    .id("settings-resources-chart")
-                    .x(|(ix, _)| ix.to_string())
-                    .y(|(_, bytes)| *bytes)
-                    .linear()
-                    .x_axis(false)
-                    .y_axis(false)
-                    .grid(false)
-                    .y_domain(0., peak * 1.2)
-                    .interactive(false)
-                    .appear(false),
-            ),
+            div()
+                .h(px(96.))
+                .w_full()
+                .child(AreaChart::new(snapshot.chart.iter().copied()).max(peak * 1.2)),
         );
     }
-    view.child(div().text_xs().text_color(theme.muted_foreground).child(
-        "含 Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
-                 包括智能体起的命令；CPU 按单核计，多核可超过 100%。",
-    ))
+    view.child(
+        div()
+            .type_style(TYPE.text_xsmall)
+            .text_color(rgb(ui_theme::muted()))
+            .child(t!("chart.note").into_owned()),
+    )
     .into_any_element()
 }
 
@@ -129,21 +115,19 @@ fn section_view(
     sort_by: SortBy,
     open: &HashSet<SharedString>,
     page: &Entity<ResourcesPage>,
-    cx: &App,
 ) -> AnyElement {
-    let theme = cx.theme();
     let colors = RowColors {
-        fg: theme.foreground,
-        muted: theme.muted_foreground,
+        fg: rgb(ui_theme::text()).into(),
+        muted: rgb(ui_theme::muted()).into(),
     };
-    let sort_header = |label: &'static str, by: SortBy, width: f32| {
+    let sort_header = |label: SharedString, by: SortBy, width: f32| {
         let page = page.clone();
         div()
             .id(SharedString::from(format!("{}-sort-{label}", section.id_prefix)))
             .w(px(width))
             .text_right()
             .text_color(if sort_by == by { colors.fg } else { colors.muted })
-            .when(sort_by == by, |d| d.font_medium())
+            .when(sort_by == by, |d| d.font_weight(TYPE.ui_medium.weight))
             .on_click(move |_ev, _window, cx| {
                 page.update(cx, |page, cx| page.set_sort(by, cx));
             })
@@ -154,20 +138,33 @@ fn section_view(
                 label.to_string()
             })
     };
-    let mut table = v_flex().w_full().child(
-        h_flex()
+    let mut table = div().flex().flex_col().w_full().child(
+        div()
+            .flex()
+            .items_center()
             .px_2()
             .pb_1()
             .gap_3()
-            .text_xs()
+            .type_style(TYPE.text_xsmall)
             .child(div().w(px(DISCLOSURE_COLUMN)))
-            .child(div().flex_1().text_color(colors.muted).child("名称"))
-            .child(sort_header("CPU", SortBy::Cpu, CPU_COLUMN))
-            .child(sort_header("内存", SortBy::Memory, MEMORY_COLUMN)),
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(colors.muted)
+                    .child(t!("column.name").to_string()),
+            )
+            .child(sort_header("CPU".into(), SortBy::Cpu, CPU_COLUMN))
+            .child(sort_header(
+                t!("column.memory").into(),
+                SortBy::Memory,
+                MEMORY_COLUMN,
+            )),
     );
     if let Some(note) = &section.note {
         table = table.child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .px_2()
                 .py_1()
                 .gap_3()
@@ -176,7 +173,7 @@ fn section_view(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(colors.muted)
                         .child(note.clone()),
                 ),
@@ -195,25 +192,33 @@ fn section_view(
             None => format!("{}-others-{ix}", section.id_prefix),
         });
         let is_open = open.contains(&id);
-        table = table.child(session_row(id, group, is_open, page, colors));
+        table = table.child(session_row(
+            id,
+            &section.machine,
+            group,
+            is_open,
+            page,
+            colors,
+        ));
     }
     if let Some(total) = section.total {
         table = table.child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .mt_1()
                 .px_2()
                 .pt_1()
                 .gap_3()
                 .border_t_1()
-                .border_color(theme.border)
+                .border_color(ui_theme::hair())
                 .child(div().w(px(DISCLOSURE_COLUMN)))
                 .child(
                     div()
                         .flex_1()
-                        .text_sm()
-                        .font_medium()
+                        .type_style(TYPE.ui_medium)
                         .text_color(colors.fg)
-                        .child("合计"),
+                        .child(t!("column.total").to_string()),
                 )
                 .child(usage_columns(total, colors.fg)),
         );
@@ -232,10 +237,12 @@ struct RowColors {
 
 /// 一行右边的两列数字。
 fn usage_columns(usage: ProcessUsage, color: Hsla) -> Div {
-    h_flex()
+    div()
+        .flex()
+        .items_center()
         .flex_none()
         .font_features(ui_theme::tabular_figures())
-        .text_sm()
+        .type_style(TYPE.ui)
         .text_color(color)
         .child(
             div()
@@ -252,20 +259,22 @@ fn usage_columns(usage: ProcessUsage, color: Hsla) -> Div {
 }
 
 fn row_label(label: String, detail: Option<String>, colors: RowColors) -> Div {
-    v_flex()
+    div()
+        .flex()
+        .flex_col()
         .flex_1()
         .min_w_0()
         .child(
             div()
                 .overflow_hidden()
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(colors.fg)
                 .child(truncated_line(label)),
         )
         .children(detail.map(|detail| {
             div()
                 .overflow_hidden()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(colors.muted)
                 .child(truncated_line(detail))
         }))
@@ -281,11 +290,12 @@ fn fixed_row(
 ) -> AnyElement {
     let label = row_label(row.label.clone(), row.detail.clone(), colors);
     if row.parts.is_empty() {
-        return h_flex()
+        return div()
+            .flex()
+            .items_center()
             .px_2()
             .py_1()
             .gap_3()
-            .items_center()
             .child(div().w(px(DISCLOSURE_COLUMN)))
             .child(label)
             .child(usage_columns(row.usage, colors.fg))
@@ -305,31 +315,39 @@ fn fixed_row(
     if !is_open {
         return head.into_any_element();
     }
-    let body = v_flex()
+    let body = div().flex().flex_col()
         // 和名字对齐：行内边距之后是箭头列，再隔一个列间距。
         .pl(px(DISCLOSURE_COLUMN + 12.))
         .pb_1()
         .children(row.parts.iter().map(|part| memory_part_row(part, colors)));
-    v_flex().child(head).child(body).into_any_element()
+    div()
+        .flex()
+        .flex_col()
+        .child(head)
+        .child(body)
+        .into_any_element()
 }
 
 /// 明细里的一块内存：名字、它装的是什么，只有内存一列。
 fn memory_part_row(part: &MemoryPart, colors: RowColors) -> impl IntoElement + use<> {
-    h_flex()
+    div()
+        .flex()
+        .items_center()
         .px_2()
         .py(px(3.))
         .gap_3()
-        .items_center()
         .child(row_label(
-            part.label.to_string(),
-            Some(part.detail.to_string()),
+            part.label.clone(),
+            Some(part.detail.clone()),
             colors,
         ))
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .flex_none()
                 .font_features(ui_theme::tabular_figures())
-                .text_sm()
+                .type_style(TYPE.ui)
                 .text_color(colors.muted)
                 .child(div().w(px(CPU_COLUMN)))
                 .child(
@@ -368,6 +386,7 @@ fn disclosure(is_open: bool, colors: RowColors) -> impl IntoElement + use<> {
 /// 一行会话。点整行展开或收起它的进程；右边的按钮跳回主窗口的这个会话。
 fn session_row(
     id: SharedString,
+    machine: &RuntimeKey,
     group: &SessionGroup,
     is_open: bool,
     page: &Entity<ResourcesPage>,
@@ -376,9 +395,10 @@ fn session_row(
     let summary = process_summary(group.usage.process_count, &group.processes);
     let detail = match group.jump {
         Some(_) => summary,
-        None => format!("自动化、子智能体或别的客户端开的 · {summary}"),
+        None => t!("others.detail", summary = summary).into_owned(),
     };
     let jump = group.jump.clone().map(|session_id| {
+        let machine = machine.clone();
         // 按下就截住：不然这一下也会落到外面那一行上，顺手把它展开了。
         div()
             .flex_none()
@@ -388,8 +408,10 @@ fn session_row(
                     .quiet()
                     .small()
                     .icon(IconName::ExternalLink)
-                    .icon_action("跳到会话")
-                    .on_click(move |_, _, cx| crate::jump_to_session(session_id.clone(), cx)),
+                    .icon_action(t!("jump"))
+                    .on_click(move |_, _, cx| {
+                        crate::jump_to_session(machine.clone(), session_id.clone(), cx)
+                    }),
             )
     });
     let head = ListRow::new(ElementId::from(id.clone()))
@@ -407,7 +429,7 @@ fn session_row(
     if !is_open {
         return head.into_any_element();
     }
-    let mut body = v_flex()
+    let mut body = div().flex().flex_col()
         // 和会话名对齐：行内边距之后是箭头列，再隔一个列间距。
         .pl(px(DISCLOSURE_COLUMN + 12.))
         .pb_1()
@@ -418,41 +440,55 @@ fn session_row(
             div()
                 .px_2()
                 .py_1()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(colors.muted)
-                .child(format!("另有 {unlisted} 个占用更小的进程没列出")),
+                .child(if unlisted == 1 {
+                    t!("unlisted.one").into_owned()
+                } else {
+                    t!("unlisted.other", count = unlisted).into_owned()
+                }),
         );
     }
-    v_flex().child(head).child(body).into_any_element()
+    div()
+        .flex()
+        .flex_col()
+        .child(head)
+        .child(body)
+        .into_any_element()
 }
 
 /// 明细里的一个进程：名字和 pid，下面一行是命令行。
 fn process_row(process: &ProcessEntry, colors: RowColors) -> impl IntoElement + use<> {
     let command = (!process.command.is_empty()).then(|| process.command.clone());
-    h_flex()
+    div()
+        .flex()
+        .items_center()
         .px_2()
         .py(px(3.))
         .gap_3()
-        .items_center()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_w_0()
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
+                        .items_center()
                         .gap_2()
                         .items_baseline()
                         .child(
                             div()
                                 .overflow_hidden()
-                                .text_sm()
+                                .type_style(TYPE.ui)
                                 .text_color(colors.fg)
                                 .child(truncated_line(process.name.clone())),
                         )
                         .child(
                             div()
                                 .flex_none()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .font_features(ui_theme::tabular_figures())
                                 .text_color(colors.muted)
                                 .child(format!("pid {}", process.pid)),
@@ -461,7 +497,7 @@ fn process_row(process: &ProcessEntry, colors: RowColors) -> impl IntoElement + 
                 .children(command.map(|command| {
                     div()
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(api::model::font_config::font_family())
                         .text_color(colors.muted)
                         .child(truncated_line(command))

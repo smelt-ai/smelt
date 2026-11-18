@@ -76,10 +76,11 @@ impl Router {
             .retain(|page, _| *page == current || usable(page));
     }
 
-    /// 视图登记变了：出口里放着的视图不能再放了（撤下了）就放回默认内容。变了返回 `true`。
-    pub(crate) fn retain_views(&mut self, keep: impl Fn(&str) -> bool) -> bool {
+    /// 视图登记变了：哪页出口里放着的视图不能再放了（撤下了，按实例建的那份放掉了）就放回
+    /// 默认内容。变了返回 `true`。
+    pub(crate) fn retain_views(&mut self, keep: impl Fn(&PageKey, &str) -> bool) -> bool {
         let before = self.outlets.len();
-        self.outlets.retain(|_, view| keep(view));
+        self.outlets.retain(|page, view| keep(page, view));
         self.outlets.len() != before
     }
 }
@@ -160,9 +161,14 @@ mod tests {
         assert_eq!(router.pop_back(), Some(page("work")));
         assert_eq!(router.pop_back(), None);
 
-        assert!(router.retain_views(|view| view != "a/main"));
+        // 同一个视图放在两页，可以只放掉一页里的（按实例建的那份放掉了）。
+        router.set_outlet(&page("other"), Some("a/main".into()));
+        assert!(router.retain_views(|at, _| *at != page("other")));
+        assert_eq!(router.outlet(&page("work")), Some("a/main"));
+        assert_eq!(router.outlet(&page("other")), None);
+        assert!(router.retain_views(|_, view| view != "a/main"));
         assert_eq!(router.outlet(&page("work")), None);
-        assert!(!router.retain_views(|_| true));
+        assert!(!router.retain_views(|_, _| true));
     }
 
     #[test]

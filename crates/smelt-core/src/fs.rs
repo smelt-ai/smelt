@@ -205,7 +205,7 @@ impl MemFs {
     fn not_found(path: &Path) -> io::Error {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("{} 不存在", path.display()),
+            format!("{} doesn't exist", path.display()),
         )
     }
 }
@@ -217,7 +217,7 @@ impl FileSystem for MemFs {
             Some(Some(contents)) => Ok(contents.clone()),
             Some(None) => Err(io::Error::new(
                 io::ErrorKind::IsADirectory,
-                format!("{} 是目录", path.display()),
+                format!("{} is a directory", path.display()),
             )),
             None => Err(Self::not_found(path)),
         }
@@ -228,7 +228,7 @@ impl FileSystem for MemFs {
         if matches!(inner.get(path), Some(None)) {
             return Err(io::Error::new(
                 io::ErrorKind::IsADirectory,
-                format!("{} 是目录", path.display()),
+                format!("{} is a directory", path.display()),
             ));
         }
         inner.insert(path.to_path_buf(), Some(contents.to_string()));
@@ -266,7 +266,7 @@ impl FileSystem for MemFs {
             }
             Some(None) => Err(io::Error::new(
                 io::ErrorKind::IsADirectory,
-                format!("{} 是目录", path.display()),
+                format!("{} is a directory", path.display()),
             )),
             None => Err(Self::not_found(path)),
         }
@@ -290,14 +290,14 @@ impl FileSystem for MemFs {
         {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("父目录 {} 不存在", parent.display()),
+                format!("the parent directory {} doesn't exist", parent.display()),
             ));
         }
         // 检查目标是否已存在
         if inner.contains_key(path) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                format!("{} 已存在", path.display()),
+                format!("{} already exists", path.display()),
             ));
         }
         inner.insert(path.to_path_buf(), None);
@@ -314,7 +314,7 @@ impl FileSystem for MemFs {
                 Some(Some(_)) => {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
-                        format!("{} 已是文件", ancestor.display()),
+                        format!("{} is already a file", ancestor.display()),
                     ));
                 }
                 Some(None) => {}
@@ -359,7 +359,7 @@ impl FileSystem for MemFs {
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::IsADirectory,
-                    format!("{} 是目录，不能复制", from.display()),
+                    format!("{} is a directory and can't be copied", from.display()),
                 )
             })?;
         drop(inner);

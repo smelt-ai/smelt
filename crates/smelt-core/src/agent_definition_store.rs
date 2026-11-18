@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::agent_definition::AgentDefinition;
+use crate::agent_host::AgentHostSettings;
 use crate::agent_kind::{
     ConversationAgentKind, ConversationLaunchSpec, PI_MCP_COMPANION_EXTENSIONS,
-    SMELT_AGENT_INSTRUCTIONS_ENV, SMELT_AGENT_MCP_SERVERS_ENV, SMELT_AGENT_MEMORY_DIR_ENV,
-    SMELT_AGENT_MODEL_ID_ENV, SMELT_AGENT_MODEL_PROVIDER_ENV, SMELT_AGENT_PLUGIN_ARGS_ENV,
-    SMELT_AGENT_UNATTENDED_ENV, SMELT_USER_MEMORY_DIR_ENV,
+    SMELT_AGENT_INSTRUCTIONS_ENV, SMELT_AGENT_LAUNCH_IDENTITY_ENVS, SMELT_AGENT_MCP_SERVERS_ENV,
+    SMELT_AGENT_MEMORY_DIR_ENV, SMELT_AGENT_MODEL_ID_ENV, SMELT_AGENT_MODEL_PROVIDER_ENV,
+    SMELT_AGENT_PLUGIN_ARGS_ENV, SMELT_AGENT_UNATTENDED_ENV, SMELT_USER_MEMORY_DIR_ENV,
 };
 use crate::automation::AutomationAction;
 use crate::sqlite_state;
@@ -78,7 +79,7 @@ pub fn load_agent_execution_definition(
     agent_definition_id: &str,
 ) -> Result<AgentExecutionDefinition, String> {
     let Some(config) = load_agent_ui_projection()? else {
-        return Err("智能体配置不存在".to_string());
+        return Err("The agent configuration doesn't exist".to_string());
     };
     resolve_agent_execution_definition(config, agent_definition_id)
 }
@@ -129,7 +130,6 @@ fn session_agent_definition_ids(
                 custom_title: None,
                 last_updated_at: 0,
                 archived_at: None,
-                pinned_at: None,
                 workset_id: None,
                 closed_workset_root: None,
                 terminals: Vec::new(),
@@ -153,16 +153,16 @@ fn resolve_agent_execution_definition(
         .agents
         .into_iter()
         .find(|definition| definition.id == agent_definition_id)
-        .ok_or_else(|| format!("智能体不存在: {agent_definition_id}"))?;
+        .ok_or_else(|| format!("The agent doesn't exist: {agent_definition_id}"))?;
     if !definition.is_ready() {
-        return Err("智能体定义不完整".to_string());
+        return Err("The agent definition is incomplete".to_string());
     }
     let kind = definition
         .engine_kind()
-        .ok_or_else(|| format!("不支持的智能体执行引擎: {}", definition.engine_kind_id))?;
+        .ok_or_else(|| format!("Unsupported agent engine: {}", definition.engine_kind_id))?;
     if kind != ConversationAgentKind::Pi {
         return Err(format!(
-            "自动化当前只支持 Pi 智能体，不能运行 {}",
+            "Automations only support Pi agents for now and can't run {}",
             kind.label()
         ));
     }
@@ -187,7 +187,25 @@ pub fn prepare_launch(params: LaunchPrepareParams) -> LaunchPrepareResult {
             .into_iter()
             .find(|agent| agent.id == id)
     });
-    let launch = if prep.restore {
+    // 重新开始要读设置；读不到就按恢复处理（客户端重新开始时 `restore` 填的是 true），
+    // 沿用原来的规格。
+    let restart = prep.restart.as_ref().and_then(|restart| {
+        crate::agent_host::load()
+            .inspect_err(|error| {
+                eprintln!("[agent] 重新开始读取设置失败，沿用原来的启动规格: {error}")
+            })
+            .ok()
+            .map(|settings| (restart, settings))
+    });
+    let launch = if let Some((restart, settings)) = restart {
+        restart_launch(
+            launch,
+            restart,
+            &settings,
+            prep.agent_definition_id.as_deref(),
+            definition.as_ref(),
+        )
+    } else if prep.restore {
         let mut launch = repair_agent_definition_launch(launch, definition.as_ref());
         // 记忆目录由智能体 id 决定，升级前保存的会话也能补上。
         attach_agent_memory_dirs(&mut launch, prep.agent_definition_id.as_deref());
@@ -202,6 +220,73 @@ pub fn prepare_launch(params: LaunchPrepareParams) -> LaunchPrepareResult {
         launch,
         skills,
         mcp_servers,
+    }
+}
+
+/// 重新开始：按运行时当前的设置和智能体定义重拼整份启动规格。设置里改过的命令、环境
+/// 变量、自定义 Agent，智能体卡片上改过的指令、插件、MCP、模型都在这时生效。会话身份
+/// （会话 id、工作目录、续接的 agent 会话）不在规格里，由调用方沿用。
+///
+/// 拼不出来的部分沿用原来的，不退成出厂规格：
+/// - 自定义 Agent 已删除、或这台运行时不认识这个引擎：整份沿用。
+/// - 智能体定义已删除：命令和普通变量按当前设置，智能体身份变量和模型沿用，不让会话
+///   退化成裸引擎（见 [`SMELT_AGENT_LAUNCH_IDENTITY_ENVS`]）。
+/// - 自动化的运行：指令是建 Run 时的快照，无人值守标记由自动化加上，都不随定义刷新。
+pub fn restart_launch(
+    previous: ConversationLaunchSpec,
+    restart: &LaunchRestart,
+    settings: &AgentHostSettings,
+    agent_definition_id: Option<&str>,
+    definition: Option<&AgentDefinition>,
+) -> ConversationLaunchSpec {
+    let base = match restart.profile_id.as_deref() {
+        Some(profile_id) => settings
+            .find_profile(profile_id)
+            .and_then(|profile| settings.profile_launch_spec(profile).ok()),
+        None => ConversationAgentKind::from_id(&restart.engine_kind)
+            .map(|kind| settings.acp_launch_for(kind)),
+    };
+    let Some(base) = base else {
+        return previous;
+    };
+    let mut launch = if agent_definition_id.is_some() && definition.is_none() {
+        let mut launch = base;
+        copy_env(
+            &previous,
+            &mut launch,
+            SMELT_AGENT_LAUNCH_IDENTITY_ENVS
+                .into_iter()
+                .chain([SMELT_AGENT_MODEL_PROVIDER_ENV, SMELT_AGENT_MODEL_ID_ENV]),
+        );
+        launch
+    } else {
+        prepare_agent_definition_launch(base, definition)
+    };
+    if previous.env.contains_key(SMELT_AGENT_UNATTENDED_ENV) {
+        copy_env(
+            &previous,
+            &mut launch,
+            [SMELT_AGENT_UNATTENDED_ENV, SMELT_AGENT_INSTRUCTIONS_ENV],
+        );
+    }
+    launch
+}
+
+/// 这几个变量照搬 `from` 的：有就覆盖，没有就删掉。
+fn copy_env<'a>(
+    from: &ConversationLaunchSpec,
+    to: &mut ConversationLaunchSpec,
+    names: impl IntoIterator<Item = &'a str>,
+) {
+    for name in names {
+        match from.env.get(name) {
+            Some(value) => {
+                to.env.insert(name.to_string(), value.clone());
+            }
+            None => {
+                to.env.remove(name);
+            }
+        }
     }
 }
 
@@ -501,7 +586,7 @@ pub fn get_agent_definition_on(
     list_agent_definitions_on(store)?
         .into_iter()
         .find(|agent| agent.id == id)
-        .ok_or_else(|| AgentDefinitionError::NotFound(format!("智能体不存在: {id}")))
+        .ok_or_else(|| AgentDefinitionError::NotFound(format!("The agent doesn't exist: {id}")))
 }
 
 pub fn create_agent_definition_on(
@@ -521,7 +606,7 @@ pub fn create_agent_definition_on(
                 .any(|agent| agent.id == id)
             {
                 return Err(AgentDefinitionError::Conflict(format!(
-                    "智能体已存在: {id}"
+                    "The agent already exists: {id}"
                 )));
             }
             id.to_string()
@@ -604,7 +689,7 @@ fn modify_agent_definition_on(
             Ok::<(), AgentDefinitionError>(())
         })?
         .map(agent_from_record)
-        .ok_or_else(|| AgentDefinitionError::NotFound(format!("智能体不存在: {id}")))
+        .ok_or_else(|| AgentDefinitionError::NotFound(format!("The agent doesn't exist: {id}")))
 }
 
 /// 三方合并：只把 `before → after` 之间真正被改过的字段落到库里当前的行上，
@@ -660,7 +745,7 @@ pub fn delete_agent_definition_on(
     let using = automations_using_agent(store, &id)?;
     if using != 0 {
         return Err(AgentDefinitionError::FailedPrecondition(format!(
-            "请先删除该智能体关联的 {using} 条自动化"
+            "Delete the {using} automation(s) that use this agent first"
         )));
     }
     let deleted = store
@@ -668,7 +753,7 @@ pub fn delete_agent_definition_on(
         .map_err(|error| AgentDefinitionError::Store(error.to_string()))?;
     if !deleted {
         return Err(AgentDefinitionError::NotFound(format!(
-            "智能体不存在: {id}"
+            "The agent doesn't exist: {id}"
         )));
     }
     // 记忆属于智能体本身，定义没了就一起删。space 里其余的是工作产物，不动。
@@ -802,7 +887,9 @@ fn default_store() -> Result<smelt_store::Store, AgentDefinitionError> {
 fn require_id(id: &str) -> Result<String, AgentDefinitionError> {
     let id = id.trim();
     if id.is_empty() {
-        return Err(AgentDefinitionError::Invalid("智能体 id 不能为空".into()));
+        return Err(AgentDefinitionError::Invalid(
+            "The agent id can't be empty".into(),
+        ));
     }
     Ok(id.to_string())
 }
@@ -817,7 +904,7 @@ fn normalize_engine_kind(engine_kind_id: Option<&str>) -> Result<String, AgentDe
         .is_none_or(|kind| kind == ConversationAgentKind::Custom)
     {
         return Err(AgentDefinitionError::Invalid(format!(
-            "不支持的智能体执行引擎: {engine_kind_id}"
+            "Unsupported agent engine: {engine_kind_id}"
         )));
     }
     Ok(engine_kind_id.to_string())
@@ -1277,7 +1364,7 @@ mod tests {
 
         let error = resolve_agent_execution_definition(config, "codex-agent").unwrap_err();
 
-        assert!(error.contains("只支持 Pi"));
+        assert!(error.contains("only support Pi"));
     }
 
     #[test]
@@ -1390,6 +1477,218 @@ mod tests {
         attach_agent_memory_dirs(&mut launch, None);
         assert_eq!(launch.env.get(SMELT_AGENT_MEMORY_DIR_ENV), None);
         assert_eq!(launch.env.get(SMELT_USER_MEMORY_DIR_ENV), None);
+    }
+
+    fn restart_of(engine: ConversationAgentKind, profile_id: Option<&str>) -> LaunchRestart {
+        LaunchRestart {
+            engine_kind: engine.id().to_string(),
+            profile_id: profile_id.map(str::to_string),
+        }
+    }
+
+    fn claude_profile(
+        id: &str,
+        kind_id: &str,
+        workspace_dir: &str,
+    ) -> crate::agent_kind::AcpProfile {
+        crate::agent_kind::AcpProfile {
+            id: id.into(),
+            kind_id: kind_id.into(),
+            label: "Quant".into(),
+            command: String::new(),
+            env: Default::default(),
+            workspace_dir: workspace_dir.into(),
+        }
+    }
+
+    #[test]
+    fn restart_picks_up_the_current_custom_agent_settings() {
+        let previous = ConversationLaunchSpec::from_command("claude --old")
+            .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/old");
+        let mut settings = AgentHostSettings::fresh();
+        settings.profiles.push(claude_profile(
+            "quant",
+            "claude",
+            "~/Claude Workspaces/new quant",
+        ));
+
+        let launch = restart_launch(
+            previous,
+            &restart_of(ConversationAgentKind::Claude, Some("quant")),
+            &settings,
+            None,
+            None,
+        );
+
+        assert_eq!(launch.command, ConversationAgentKind::Claude.default_cmd());
+        assert_eq!(
+            launch.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("~/Claude Workspaces/new quant")
+        );
+    }
+
+    /// 自定义 Agent 删了、引擎这台运行时不认识：拼不出来就整份沿用，不退成出厂规格。
+    #[test]
+    fn restart_keeps_the_previous_launch_when_it_cannot_be_rebuilt() {
+        let previous = ConversationLaunchSpec::from_command("claude --persisted")
+            .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant");
+        let mut settings = AgentHostSettings::fresh();
+        settings
+            .profiles
+            .push(claude_profile("future", "future-agent", ""));
+
+        for restart in [
+            restart_of(ConversationAgentKind::Claude, Some("deleted")),
+            restart_of(ConversationAgentKind::Claude, Some("future")),
+            LaunchRestart {
+                engine_kind: "future-agent".into(),
+                profile_id: None,
+            },
+        ] {
+            let launch = restart_launch(previous.clone(), &restart, &settings, None, None);
+            assert_eq!(launch, previous, "{restart:?}");
+        }
+    }
+
+    #[test]
+    fn restart_refreshes_a_plain_conversation_from_current_settings() {
+        let previous = ConversationLaunchSpec::from_command("claude --stale")
+            .with_env(SMELT_AGENT_MEMORY_DIR_ENV, "/stale/memory");
+        let settings = AgentHostSettings::fresh();
+
+        let launch = restart_launch(
+            previous,
+            &restart_of(ConversationAgentKind::Claude, None),
+            &settings,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            launch,
+            settings.acp_launch_for(ConversationAgentKind::Claude)
+        );
+    }
+
+    /// 重新开始就是为了让卡片上改过的指令、插件、MCP、模型生效。
+    #[test]
+    fn restart_rebuilds_a_product_agent_from_its_current_definition() {
+        let previous = ConversationLaunchSpec::from_command("smelt-pi-agent --stale")
+            .with_env(SMELT_AGENT_INSTRUCTIONS_ENV, "old instructions")
+            .with_env(SMELT_AGENT_MCP_SERVERS_ENV, "[\"old\"]");
+        let mut definition = definition_with_context(&[], &[]);
+        definition.mcp_servers = vec!["rea".into()];
+        definition.model_provider = "Token-X".into();
+        definition.model_id = "Claude-Opus-5".into();
+        let settings = AgentHostSettings::fresh();
+
+        let launch = restart_launch(
+            previous,
+            &restart_of(ConversationAgentKind::Pi, None),
+            &settings,
+            Some(&definition.id),
+            Some(&definition),
+        );
+
+        assert_eq!(
+            launch.command,
+            settings.acp_launch_for(ConversationAgentKind::Pi).command
+        );
+        assert_eq!(
+            launch.env.get(SMELT_AGENT_INSTRUCTIONS_ENV),
+            Some(&build_agent_instructions(&definition))
+        );
+        assert_eq!(
+            launch
+                .env
+                .get(SMELT_AGENT_MCP_SERVERS_ENV)
+                .map(String::as_str),
+            Some("[\"rea\"]")
+        );
+        assert!(launch.env.contains_key(SMELT_AGENT_PLUGIN_ARGS_ENV));
+        assert_eq!(
+            launch.env.get(SMELT_AGENT_MODEL_ID_ENV).map(String::as_str),
+            Some("Claude-Opus-5")
+        );
+        assert_eq!(launch.env.get(SMELT_AGENT_UNATTENDED_ENV), None);
+    }
+
+    /// 定义删了也不能退化成裸 Pi：身份变量和模型沿用，命令按当前设置。
+    #[test]
+    fn restart_keeps_the_identity_of_a_deleted_product_agent() {
+        let previous = ConversationLaunchSpec::from_command("smelt-pi-agent --stale")
+            .with_env(SMELT_AGENT_INSTRUCTIONS_ENV, "Review carefully")
+            .with_env(SMELT_AGENT_PLUGIN_ARGS_ENV, "[\"--no-extensions\"]")
+            .with_env(SMELT_AGENT_MCP_SERVERS_ENV, "[\"rea\"]")
+            .with_env(
+                SMELT_AGENT_MEMORY_DIR_ENV,
+                "/home/me/.smelt/agents/a/memory",
+            )
+            .with_env(SMELT_AGENT_MODEL_ID_ENV, "Claude-Opus-5");
+        let settings = AgentHostSettings::fresh();
+
+        let launch = restart_launch(
+            previous.clone(),
+            &restart_of(ConversationAgentKind::Pi, None),
+            &settings,
+            Some("deleted-agent"),
+            None,
+        );
+
+        assert_eq!(
+            launch.command,
+            settings.acp_launch_for(ConversationAgentKind::Pi).command
+        );
+        for name in [
+            SMELT_AGENT_INSTRUCTIONS_ENV,
+            SMELT_AGENT_PLUGIN_ARGS_ENV,
+            SMELT_AGENT_MCP_SERVERS_ENV,
+            SMELT_AGENT_MEMORY_DIR_ENV,
+            SMELT_AGENT_MODEL_ID_ENV,
+        ] {
+            assert_eq!(launch.env.get(name), previous.env.get(name), "{name}");
+        }
+    }
+
+    /// 自动化的运行带的是建 Run 时的指令快照，重新开始也不能把它换成当前对话指令、
+    /// 更不能丢掉无人值守标记让它写的记忆直接生效。
+    #[test]
+    fn restart_of_an_automation_run_keeps_its_instructions_and_unattended_marker() {
+        let previous = ConversationLaunchSpec::from_command("smelt-pi-agent")
+            .with_env(SMELT_AGENT_INSTRUCTIONS_ENV, "run snapshot")
+            .with_env(SMELT_AGENT_UNATTENDED_ENV, "1");
+        let mut definition = definition_with_context(&[], &[]);
+        definition.mcp_servers = vec!["rea".into()];
+
+        let launch = restart_launch(
+            previous,
+            &restart_of(ConversationAgentKind::Pi, None),
+            &AgentHostSettings::fresh(),
+            Some(&definition.id),
+            Some(&definition),
+        );
+
+        assert_eq!(
+            launch
+                .env
+                .get(SMELT_AGENT_INSTRUCTIONS_ENV)
+                .map(String::as_str),
+            Some("run snapshot")
+        );
+        assert_eq!(
+            launch
+                .env
+                .get(SMELT_AGENT_UNATTENDED_ENV)
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            launch
+                .env
+                .get(SMELT_AGENT_MCP_SERVERS_ENV)
+                .map(String::as_str),
+            Some("[\"rea\"]")
+        );
     }
 
     #[test]

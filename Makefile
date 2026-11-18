@@ -22,7 +22,6 @@ fmt-check: ## 检查代码格式
 	cargo fmt --check
 
 lint: ## 运行 Clippy 静态检查（正确性 lint 由 workspace.lints deny）
-	./scripts/lint-pointer.sh
 	./scripts/lint-crate-deps.sh
 	cargo clippy --workspace --all-targets
 

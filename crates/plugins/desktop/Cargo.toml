@@ -1,0 +1,27 @@
+# 内置插件「远程桌面」：运行时那台机器的整块屏幕，能看能接管。画面是 noVNC 跑在原生网页
+# 视图里，经运行时客户端的本机转发口连到那台机器的 VNC。只依赖插件接口和 gpui 组件库，
+# 宿主里没有它的类型。
+[package]
+name = "smelt-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+# 原生网页视图。gpui-webview 和组件库同一个 rev，一起升级；crates.io 上的 gpui-wry 是它
+# 改名前的旧名字，钉死了 gpui-pre 版本，会卡住升级。不开 gpui-fast：跟着 gpui-kit 用默认的
+# gpui-pre，代价是网页视图盖住同一块区域里的 GPUI 弹层。wry 必须和它用同一份。
+gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+wry = { package = "lb-wry", version = "0.53.3" }
+# 页面消息从网页视图的回调线程送回 UI 线程；要打到远端的文字排队逐段发。
+smol = "2"
+# 照抄别的插件的约定（命令参数、菜单上下文）要按同样的 JSON 形状收发。
+serde = { version = "1", features = ["derive"] }
+# 界面文案（locales/ui.yml，见 docs/i18n.md）。
+rust-i18n.workspace = true

@@ -69,7 +69,7 @@ fn action_rejected_and_no_bytes_written_when_agent_busy() {
     let resp = call_action(&sessions, "c", "approve");
     assert_eq!(resp["ok"], false);
     assert!(
-        resp["err"].as_str().unwrap().contains("不是在等你"),
+        resp["err"].as_str().unwrap().contains("isn't waiting"),
         "resp={resp}"
     );
 

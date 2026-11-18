@@ -44,7 +44,7 @@ pub fn pi_settings_summary_at(agent_dir: &Path) -> Result<PiSettingsSummary, Str
     }
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(e) => return Err(format!("读取 {} 失败：{e}", path.display())),
+        Err(e) => return Err(format!("couldn't read {}: {e}", path.display())),
     };
     if raw.trim().is_empty() {
         return Ok(PiSettingsSummary {
@@ -52,8 +52,8 @@ pub fn pi_settings_summary_at(agent_dir: &Path) -> Result<PiSettingsSummary, Str
             default_model: None,
         });
     }
-    let val: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("解析 {} 失败：{e}", path.display()))?;
+    let val: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("couldn't parse {}: {e}", path.display()))?;
     let provider = val
         .get("defaultProvider")
         .and_then(|v| v.as_str())
@@ -217,7 +217,7 @@ pub fn load_pi_model_settings_at(agent_dir: &Path) -> Result<PiModelSettings, St
 
     let settings_json: serde_json::Value = if settings_path.is_file() {
         let raw = std::fs::read_to_string(&settings_path)
-            .map_err(|e| format!("读取 {} 失败：{e}", settings_path.display()))?;
+            .map_err(|e| format!("couldn't read {}: {e}", settings_path.display()))?;
         serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(Default::default()))
     } else {
         serde_json::Value::Object(Default::default())
@@ -225,7 +225,7 @@ pub fn load_pi_model_settings_at(agent_dir: &Path) -> Result<PiModelSettings, St
 
     let auth_json: serde_json::Value = if auth_path.is_file() {
         let raw = std::fs::read_to_string(&auth_path)
-            .map_err(|e| format!("读取 {} 失败：{e}", auth_path.display()))?;
+            .map_err(|e| format!("couldn't read {}: {e}", auth_path.display()))?;
         serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(Default::default()))
     } else {
         serde_json::Value::Object(Default::default())
@@ -233,7 +233,7 @@ pub fn load_pi_model_settings_at(agent_dir: &Path) -> Result<PiModelSettings, St
 
     let models_json: serde_json::Value = if models_path.is_file() {
         let raw = std::fs::read_to_string(&models_path)
-            .map_err(|e| format!("读取 {} 失败：{e}", models_path.display()))?;
+            .map_err(|e| format!("couldn't read {}: {e}", models_path.display()))?;
         serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(Default::default()))
     } else {
         serde_json::Value::Object(Default::default())
@@ -376,8 +376,8 @@ pub fn load_pi_model_settings_at(agent_dir: &Path) -> Result<PiModelSettings, St
 pub(crate) fn read_or_create_json(path: &Path) -> Result<serde_json::Value, String> {
     if path.is_file() {
         let raw = std::fs::read_to_string(path)
-            .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-        serde_json::from_str(&raw).map_err(|e| format!("解析 {} 失败：{e}", path.display()))
+            .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+        serde_json::from_str(&raw).map_err(|e| format!("couldn't parse {}: {e}", path.display()))
     } else {
         Ok(serde_json::Value::Object(Default::default()))
     }
@@ -399,10 +399,10 @@ pub(crate) fn write_json_file(
     let path = path.as_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建目录 {} 失败：{e}", parent.display()))?;
+            .map_err(|e| format!("couldn't create the directory {}: {e}", parent.display()))?;
     }
     let content =
-        serde_json::to_string_pretty(value).map_err(|e| format!("序列化 JSON 失败：{e}"))?;
+        serde_json::to_string_pretty(value).map_err(|e| format!("couldn't serialize JSON: {e}"))?;
     #[cfg(unix)]
     let mode = target_file_mode(path, secure)?;
     #[cfg(not(unix))]
@@ -419,22 +419,42 @@ pub(crate) fn write_json_file(
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
-        let mut file = options
-            .open(&tmp_path)
-            .map_err(|e| format!("创建临时文件 {} 失败：{e}", tmp_path.display()))?;
+        let mut file = options.open(&tmp_path).map_err(|e| {
+            format!(
+                "couldn't create the temporary file {}: {e}",
+                tmp_path.display()
+            )
+        })?;
         // 建文件的权限受 umask 影响，这里再显式设一次，才能原样还原用户给的权限。
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             file.set_permissions(std::fs::Permissions::from_mode(mode))
-                .map_err(|e| format!("设置临时文件 {} 的权限失败：{e}", tmp_path.display()))?;
+                .map_err(|e| {
+                    format!(
+                        "couldn't set permissions on the temporary file {}: {e}",
+                        tmp_path.display()
+                    )
+                })?;
         }
-        file.write_all(content.as_bytes())
-            .map_err(|e| format!("写入临时文件 {} 失败：{e}", tmp_path.display()))?;
-        file.flush()
-            .map_err(|e| format!("刷新临时文件 {} 失败：{e}", tmp_path.display()))?;
-        file.sync_all()
-            .map_err(|e| format!("同步临时文件 {} 失败：{e}", tmp_path.display()))
+        file.write_all(content.as_bytes()).map_err(|e| {
+            format!(
+                "couldn't write the temporary file {}: {e}",
+                tmp_path.display()
+            )
+        })?;
+        file.flush().map_err(|e| {
+            format!(
+                "couldn't flush the temporary file {}: {e}",
+                tmp_path.display()
+            )
+        })?;
+        file.sync_all().map_err(|e| {
+            format!(
+                "couldn't sync the temporary file {}: {e}",
+                tmp_path.display()
+            )
+        })
     };
     if let Err(error) = write_tmp() {
         let _ = std::fs::remove_file(&tmp_path);
@@ -442,7 +462,7 @@ pub(crate) fn write_json_file(
     }
     if let Err(error) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(format!("覆盖写入 {} 失败：{error}", path.display()));
+        return Err(format!("couldn't overwrite {}: {error}", path.display()));
     }
     Ok(())
 }
@@ -456,7 +476,7 @@ fn resolve_symlinks(path: &Path) -> Result<PathBuf, String> {
         match std::fs::symlink_metadata(&current) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 let target = std::fs::read_link(&current)
-                    .map_err(|e| format!("读取符号链接 {} 失败：{e}", current.display()))?;
+                    .map_err(|e| format!("couldn't read the symlink {}: {e}", current.display()))?;
                 // 相对目标相对链接所在目录；绝对目标 `join` 后就是它本身。
                 current = match current.parent() {
                     Some(parent) => parent.join(target),
@@ -466,7 +486,10 @@ fn resolve_symlinks(path: &Path) -> Result<PathBuf, String> {
             _ => return Ok(current),
         }
     }
-    Err(format!("{} 的符号链接层数过多", path.display()))
+    Err(format!(
+        "{} has too many levels of symlinks",
+        path.display()
+    ))
 }
 
 /// 写出去的文件该有的权限位。
@@ -479,7 +502,10 @@ fn target_file_mode(path: &Path, secure: bool) -> Result<u32, String> {
     match std::fs::metadata(path) {
         Ok(meta) => Ok(meta.permissions().mode() & 0o777),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0o600),
-        Err(error) => Err(format!("读取 {} 的权限失败：{error}", path.display())),
+        Err(error) => Err(format!(
+            "couldn't read the permissions of {}: {error}",
+            path.display()
+        )),
     }
 }
 
@@ -496,8 +522,12 @@ struct AuthFileLock {
 impl AuthFileLock {
     fn acquire(auth_path: &Path, wait: std::time::Duration) -> Result<Self, String> {
         if let Some(parent) = auth_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("创建目录 {} 失败：{error}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "couldn't create the directory {}: {error}",
+                    parent.display()
+                )
+            })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
@@ -516,7 +546,10 @@ impl AuthFileLock {
                     }
                     let now = std::time::Instant::now();
                     if now >= deadline {
-                        return Err("auth.json 正被其它进程写入，请稍后再试".to_string());
+                        return Err(
+                            "auth.json is being written by another process; try again shortly"
+                                .to_string(),
+                        );
                     }
                     let until_give_up = deadline.saturating_duration_since(now);
                     let until_stale =
@@ -529,7 +562,7 @@ impl AuthFileLock {
                     wait_for_dir_delete(&path, slice);
                 }
                 Err(error) => {
-                    return Err(format!("无法锁定 {}：{error}", auth_path.display()));
+                    return Err(format!("couldn't lock {}: {error}", auth_path.display()));
                 }
             }
         }
@@ -788,7 +821,7 @@ fn update_auth_json(
     let _lock = AuthFileLock::acquire(auth_path, AUTH_LOCK_WAIT)?;
     let mut auth = read_or_create_json(auth_path)?;
     let Some(obj) = auth.as_object_mut() else {
-        return Err(format!("{} 不是 JSON 对象", auth_path.display()));
+        return Err(format!("{} isn't a JSON object", auth_path.display()));
     };
     let before = obj.clone();
     mutate(obj);
@@ -974,7 +1007,7 @@ pub fn save_pi_custom_provider_replacing_at(
     let settings_path = agent_dir.join("settings.json");
     let new_id = provider.id.trim();
     if new_id.is_empty() {
-        return Err("Provider ID 不能为空".to_string());
+        return Err("The provider ID can't be empty".to_string());
     }
     let previous_id = previous_id
         .map(str::trim)
@@ -1216,7 +1249,7 @@ pub fn replace_pi_provider_models_at(
         .get_mut("providers")
         .and_then(|providers| providers.get_mut(provider_id))
         .and_then(serde_json::Value::as_object_mut)
-        .ok_or_else(|| format!("{provider_id} 不在 {} 中", models_path.display()))?;
+        .ok_or_else(|| format!("{provider_id} isn't in {}", models_path.display()))?;
     let items: Vec<serde_json::Value> = models
         .iter()
         .map(|model| {
@@ -1500,7 +1533,7 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("a fresh Pi lock must not be stolen"),
         };
-        assert!(error.contains("正被"));
+        assert!(error.contains("being written"));
         assert!(lock_path.is_dir());
 
         let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(31);

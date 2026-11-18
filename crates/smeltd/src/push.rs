@@ -3,7 +3,8 @@
 //! 推什么由 `crate::attention` 定（和桌面、手机读的同一份提醒）：等批准、等输入、失败、完成
 //! 四种响一下时推，待办处理掉、会话删掉时撤（[`apply`]）。每台手机按自己登记的类型过滤
 //! （`push_registration` 表）。推送带会话名、项目名和一行摘要，摘要就是会话状态里的
-//! `pending_question`（桌面通知、手机会话列表读的同一份）。
+//! `pending_question`（桌面通知、手机会话列表读的同一份）；其中运行时自己说的话
+//! （`pending_note`）按每台手机登记的语言说。
 //!
 //! 提醒一产生就进内存 outbox。发之前看人在不在这台 Mac 前（`crate::presence`）：
 //! - 不在：立刻发。
@@ -27,6 +28,7 @@ use std::time::{Duration, Instant};
 use crate::presence::Presence;
 use smelt_core::daemon_state::DaemonSessionState;
 use smelt_core::remote_config::PUSH_PAYLOAD_VERSION;
+use smelt_event_protocol::SessionNote;
 use smelt_push::{
     DETAIL_MAX_CHARS, MESSAGE_MAX_CHARS, PushKind, RELAY_SEND_PATH, SUBTITLE_MAX_CHARS,
     SendRequest, TITLE_MAX_CHARS, excerpt,
@@ -94,6 +96,7 @@ pub(crate) fn send_message(
         title: title.and_then(|title| excerpt(title, TITLE_MAX_CHARS)),
         subtitle: subtitle.and_then(|subtitle| excerpt(subtitle, SUBTITLE_MAX_CHARS)),
         detail: excerpt(body, MESSAGE_MAX_CHARS),
+        note: None,
     };
     shared.apply(vec![Command::Message {
         session_id: session_id.to_string(),
@@ -129,6 +132,8 @@ pub(crate) struct Content {
     subtitle: Option<String>,
     /// 一行摘要：等批准的命令、等回复的问题、失败原因、最后一条回复的开头。
     detail: Option<String>,
+    /// 摘要是运行时自己说的话时，它的种类：发给每台手机时按它登记的语言重说。
+    note: Option<SessionNote>,
 }
 
 impl Content {
@@ -146,15 +151,17 @@ impl Content {
             .as_deref()
             .and_then(|cwd| Path::new(cwd).file_name())
             .and_then(|name| excerpt(&name.to_string_lossy(), SUBTITLE_MAX_CHARS));
-        let detail = state
-            .phase_is_authoritative()
+        let authoritative = state.phase_is_authoritative();
+        let detail = authoritative
             .then_some(state.pending_question.as_deref())
             .flatten()
             .and_then(|question| excerpt(question, DETAIL_MAX_CHARS));
+        let note = authoritative.then(|| state.pending_note.clone()).flatten();
         Self {
             title,
             subtitle,
             detail,
+            note,
         }
     }
 }
@@ -173,6 +180,8 @@ struct Target {
     /// `smelt_core::remote_config::PUSH_PAYLOAD_VERSION`）。旧 App 只发类型，不然它会把
     /// 认不得的 loc-key 原样显示出来。
     rich: bool,
+    /// 手机登记的界面语言；旧版 App 没报，按英文说。
+    locale: Option<String>,
 }
 
 /// 一条待推的提醒。
@@ -522,8 +531,11 @@ fn send_request(job: &Job, target: &Target, runtime_id: &str) -> SendRequest {
         subtitle: job.content.subtitle.clone(),
         detail: job
             .content
-            .detail
-            .clone()
+            .note
+            .as_ref()
+            .and_then(|note| note.text_in(target.locale.as_deref().unwrap_or("en")))
+            .and_then(|text| excerpt(&text, DETAIL_MAX_CHARS))
+            .or_else(|| job.content.detail.clone())
             .filter(|_| target.rich || job.kind == PushKind::Message),
     }
 }
@@ -624,6 +636,7 @@ fn registered_targets(kind: PushKind) -> Result<Vec<Target>, String> {
             handle: registration.handle,
             relay_url: registration.relay_url,
             rich: registration.payload_version >= PUSH_PAYLOAD_VERSION,
+            locale: registration.locale,
         })
         .collect())
 }
@@ -657,6 +670,7 @@ mod tests {
                 title: Some("修推送".into()),
                 subtitle: Some("smelt".into()),
                 detail: Some("rm -rf build".into()),
+                note: None,
             }
         );
     }
@@ -687,6 +701,7 @@ mod tests {
             handle: format!("handle-{device}"),
             relay_url: "https://push.example.test".into(),
             rich: true,
+            locale: None,
         }
     }
 
@@ -699,6 +714,7 @@ mod tests {
             title: Some("修推送".into()),
             subtitle: Some("smelt".into()),
             detail: Some("rm -rf build".into()),
+            note: None,
         };
         outbox.notify("a".into(), PushKind::Approval, content, start);
         let job = outbox.take_due(start).pop().unwrap();
@@ -712,6 +728,33 @@ mod tests {
         let legacy = send_request(&job, &legacy, "runtime");
         assert_eq!(legacy.detail, None);
         assert_eq!(legacy.title.as_deref(), Some("修推送"));
+    }
+
+    /// 运行时自己说的摘要按每台手机登记的语言说；没报语言的旧 App 拿到英文。
+    #[test]
+    fn notes_are_said_in_each_phone_language() {
+        let mut failed = state("a", DaemonPhase::Failed);
+        failed.pending_question = Some("Hit this turn's token limit".into());
+        failed.pending_note = Some(SessionNote::TurnFailed {
+            outcome: smelt_event_protocol::TurnFailure::MaxTokens,
+        });
+        let mut outbox = Outbox::default();
+        let start = Instant::now();
+        outbox.notify("a".into(), PushKind::Failure, Content::of(&failed), start);
+        let job = outbox.take_due(start).pop().unwrap();
+
+        let mut chinese = target("zh");
+        chinese.locale = Some("zh-CN".into());
+        assert_eq!(
+            send_request(&job, &chinese, "runtime").detail.as_deref(),
+            Some("已达到本轮最大令牌数")
+        );
+        assert_eq!(
+            send_request(&job, &target("old"), "runtime")
+                .detail
+                .as_deref(),
+            Some("Hit this turn's token limit")
+        );
     }
 
     #[test]
@@ -773,6 +816,7 @@ mod tests {
             title: Some("巡检".into()),
             subtitle: None,
             detail: Some("3 台机器磁盘告警".into()),
+            note: None,
         };
         outbox.message("a".into(), content, start);
         let job = outbox.take_due(start).pop().unwrap();

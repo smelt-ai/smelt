@@ -83,6 +83,23 @@ pub struct WorkspaceDirectoryCommit {
     pub changed: bool,
 }
 
+/// 守护在跑着的对话里看到的、冷启动续上要用的状态变了。客户端只在新建时带初值，之后
+/// 这些只由守护写（它是看得见这些变化的那一方）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcpLiveChange<'a> {
+    /// 对话选了一项配置（模型、模式等）。同一项只留最新的值，新的一项排在最后。
+    ConfigValue {
+        config_id: &'a str,
+        value_id: &'a str,
+    },
+    /// 待用的智能体预设随第一条消息发出去了。
+    AgentPresetConsumed,
+    /// 新建时带的首条消息发出去了。
+    PendingPromptSent,
+    /// 一个回合结束了：对话的最近活动时间记成 `at`（unix 秒）。
+    TurnEnded { at: i64 },
+}
+
 /// 一段对话：侧栏里的一条。里面有哪些终端、是不是一段 ACP 对话归运行时；终端怎么分屏、
 /// 当前看的是哪个，是每台设备自己的界面状态，归客户端（设计文档 D1）。
 #[derive(Clone, Debug, PartialEq)]
@@ -92,7 +109,6 @@ pub struct WorkspaceSessionRecord {
     pub custom_title: Option<String>,
     pub last_updated_at: i64,
     pub archived_at: Option<i64>,
-    pub pinned_at: Option<i64>,
     pub workset_id: Option<String>,
     pub closed_workset_root: Option<String>,
     /// 这段对话里的终端，按客户端给的顺序。
@@ -120,15 +136,11 @@ pub struct WorkspaceAcpRecord {
     pub launch_command: String,
     /// 启动环境变量，按名字排序。
     pub launch_env: Vec<(String, String)>,
-    pub refresh_launch_from_settings: bool,
     pub pending_prompt: Option<String>,
-    pub pending_delivery_id: Option<String>,
     pub agent_definition_id: Option<String>,
     pub automation_id: Option<String>,
     /// 最后生效的 provider 配置：`(config_id, value_id)`，按设置顺序。
     pub config_values: Vec<(String, String)>,
-    /// 绑定到自动化 Run 时是它的 id；普通对话为 `None`。
-    pub binding_automation_run_id: Option<String>,
     pub pending_agent_preset: Option<String>,
     pub session_title: Option<String>,
 }
@@ -360,6 +372,8 @@ pub struct PushRegistration {
     pub payload_version: u32,
     /// 智能体主动发的消息。
     pub notify_message: bool,
+    /// 手机登记时的界面语言（如 `zh-CN`），推送里运行时自己说的话按它说。旧版 App 不报。
+    pub locale: Option<String>,
     pub updated_at_ms: i64,
 }
 

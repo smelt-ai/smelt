@@ -25,6 +25,7 @@ use std::net::Shutdown;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
+use rust_i18n::t;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use smelt_runtime_client::protocol::control::{ControlClientError, EmptyParams, SystemDescribe};
@@ -152,7 +153,7 @@ impl HubInner {
         self.attachments().get(session_id).cloned().ok_or_else(|| {
             error(
                 SmeltErrorKind::Other,
-                format!("没有附着终端会话 {session_id}"),
+                format!("terminal session {session_id} isn't attached"),
             )
         })
     }
@@ -176,11 +177,11 @@ impl HubInner {
             match attachment.generation() {
                 // 连接停下（未配对、被忘记、主动断开、连不上）：终端跟着停。
                 Some(_) if event.state == ConnectionState::Disconnected => {
-                    attachment.fail(RUNTIME_GONE);
+                    attachment.fail(&t!("terminal.connection_stopped"));
                 }
                 // 还在等首次连上的附着：连不上就收尾，连上了就去附着。
                 None if event.state == ConnectionState::Disconnected => {
-                    attachment.fail(NO_RUNTIME);
+                    attachment.fail(&t!("error.not_connected"));
                 }
                 None if event.state == ConnectionState::Connected => attachment.retry_now(),
                 // 同一台机器重新连过：旧一代链路上的附着连接掐掉，新一代连上后在新连接上重新附着。
@@ -207,7 +208,7 @@ impl HubInner {
                 }
                 None if attachment.generation().is_none() => match self.connection() {
                     ConnectionState::Disconnected => {
-                        attachment.fail(NO_RUNTIME);
+                        attachment.fail(&t!("error.not_connected"));
                         return None;
                     }
                     // 刚取完连接就连上了：再取一次。
@@ -244,7 +245,7 @@ impl HubInner {
                     if attached {
                         attachment.close();
                     } else {
-                        attachment.fail("终端会话不存在或已结束");
+                        attachment.fail(&t!("terminal.missing"));
                     }
                     break;
                 }
@@ -256,7 +257,8 @@ impl HubInner {
                     attached = true;
                     failures = 1;
                     if let Some(reason) = reason {
-                        attachment.notify_error(format!("终端连接断开：{reason}"));
+                        attachment
+                            .notify_error(t!("terminal.dropped", reason = reason).into_owned());
                     }
                 }
                 Attempt::Failed(reason) => {
@@ -279,18 +281,22 @@ impl HubInner {
     fn attempt(&self, attachment: &Attachment, client: &RuntimeClient) -> Attempt {
         let stream = match client.connect() {
             Ok(stream) => stream,
-            Err(error) => return Attempt::Failed(format!("连不上运行时：{error}")),
+            Err(error) => {
+                return Attempt::Failed(t!("error.unreachable", error = error).into_owned());
+            }
         };
         let configured = stream
             .set_read_timeout(Some(self.timing.header_timeout))
             .and_then(|()| stream.set_write_timeout(Some(self.timing.write_timeout)));
         if let Err(error) = configured {
-            return Attempt::Failed(format!("终端连接不可用：{error}"));
+            return Attempt::Failed(t!("terminal.unusable", error = error).into_owned());
         }
         let scrollback_lines = match attachment.start(&stream) {
             Ok(Some(lines)) => lines,
             Ok(None) => return Attempt::Stopped,
-            Err(error) => return Attempt::Failed(format!("终端附着请求没发出去：{error}")),
+            Err(error) => {
+                return Attempt::Failed(t!("terminal.attach_unsent", error = error).into_owned());
+            }
         };
         let outcome = self.read_stream(attachment, client, stream, scrollback_lines);
         attachment.finish();
@@ -318,19 +324,23 @@ impl HubInner {
                 return if reachable(client, self.timing.probe_timeout) {
                     Attempt::NoSession
                 } else {
-                    Attempt::Failed("连不上运行时".to_string())
+                    Attempt::Failed(t!("error.unreachable_plain").into_owned())
                 };
             }
             Err(HeaderError::Io(error)) => {
-                return Attempt::Failed(format!("等终端头失败：{error}"));
+                return Attempt::Failed(t!("terminal.header_failed", error = error).into_owned());
             }
             Err(HeaderError::Invalid(message)) => return Attempt::Fatal(message),
         };
         if header.replay_len > MAX_REPLAY_BYTES {
-            return Attempt::Fatal(format!(
-                "终端关键帧太大（{} 字节），超过 {} 字节上限",
-                header.replay_len, MAX_REPLAY_BYTES
-            ));
+            return Attempt::Fatal(
+                t!(
+                    "terminal.keyframe_too_large",
+                    size = header.replay_len,
+                    limit = MAX_REPLAY_BYTES
+                )
+                .into_owned(),
+            );
         }
         let ready = TerminalUpdate::Ready {
             cols: header.cols,
@@ -349,7 +359,9 @@ impl HubInner {
         while remaining > 0 {
             let want = remaining.min(CHUNK_BYTES);
             match read_some(&mut reader, &mut buf[..want]) {
-                Ok(0) => return Attempt::Dropped(Some("关键帧没传完".to_string())),
+                Ok(0) => {
+                    return Attempt::Dropped(Some(t!("terminal.keyframe_incomplete").into_owned()));
+                }
                 Ok(n) => {
                     remaining -= n;
                     if !attachment.emit(TerminalUpdate::Data(buf[..n].to_vec())) {
@@ -390,17 +402,14 @@ impl HubInner {
                     &chunk,
                     self.timing.input_timeout,
                 ),
-                None => Err(RUNTIME_GONE.to_string()),
+                None => Err(t!("terminal.connection_stopped").into_owned()),
             };
             if let Err(message) = result {
-                attachment.input_failed(format!("终端输入没有发出：{message}"));
+                attachment.input_failed(t!("terminal.input_unsent", error = message).into_owned());
             }
         }
     }
 }
-
-const NO_RUNTIME: &str = "还没有连上这台机器";
-const RUNTIME_GONE: &str = "和这台机器的连接已停止，终端已停止";
 
 impl TerminalHub {
     pub(crate) fn new(source: Arc<dyn RuntimeSource>, timing: Timing) -> Self {
@@ -431,7 +440,10 @@ impl TerminalHub {
         emit: Emit,
     ) -> Result<(), SmeltError> {
         if session_id.is_empty() {
-            return Err(error(SmeltErrorKind::Other, "终端会话 id 为空"));
+            return Err(error(
+                SmeltErrorKind::Other,
+                "the terminal session id is empty",
+            ));
         }
         let geometry = normalize(geometry)?;
         let attachment = Arc::new(Attachment {
@@ -477,7 +489,7 @@ impl TerminalHub {
             self.inner.forget(&attachment);
             return Err(error(
                 SmeltErrorKind::Other,
-                format!("起不了终端线程：{spawn_error}"),
+                t!("error.thread_failed", error = spawn_error),
             ));
         }
         Ok(())
@@ -501,7 +513,7 @@ impl TerminalHub {
         if attachment.queue_input(&data) {
             Ok(())
         } else {
-            Err(error(SmeltErrorKind::Other, "终端已断开"))
+            Err(error(SmeltErrorKind::Other, t!("terminal.disconnected")))
         }
     }
 
@@ -784,7 +796,10 @@ fn stop_locked(state: &mut State) {
 
 fn normalize(geometry: TerminalGeometry) -> Result<TerminalGeometry, SmeltError> {
     if geometry.cols == 0 || geometry.rows == 0 {
-        return Err(error(SmeltErrorKind::Other, "终端行列必须大于 0"));
+        return Err(error(
+            SmeltErrorKind::Other,
+            "terminal rows and columns must be greater than 0",
+        ));
     }
     Ok(TerminalGeometry {
         cols: geometry.cols.min(MAX_COLS),
@@ -859,17 +874,17 @@ fn read_header(reader: &mut BufReader<RuntimeStream>) -> Result<Option<WatchHead
     }
     if line.last() != Some(&b'\n') {
         return Err(if line.len() as u64 >= MAX_HEADER_BYTES {
-            HeaderError::Invalid("运行时回的终端头太长".to_string())
+            HeaderError::Invalid(t!("terminal.header_too_long").into_owned())
         } else {
             HeaderError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "终端头没读完连接就断了",
+                t!("terminal.header_incomplete").into_owned(),
             ))
         });
     }
     serde_json::from_slice(&line)
         .map(Some)
-        .map_err(|e| HeaderError::Invalid(format!("运行时回的终端头不对：{e}")))
+        .map_err(|e| HeaderError::Invalid(t!("terminal.header_invalid", error = e).into_owned()))
 }
 
 fn read_some(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
@@ -920,11 +935,10 @@ fn send_input(
         return Ok(());
     }
     // 终端 op 的失败字段叫 `err`，不是 `error`。
-    Err(response
-        .get("err")
-        .and_then(Value::as_str)
-        .unwrap_or("运行时拒绝了终端输入")
-        .to_string())
+    Err(response.get("err").and_then(Value::as_str).map_or_else(
+        || t!("terminal.input_rejected").into_owned(),
+        str::to_string,
+    ))
 }
 
 #[cfg(test)]

@@ -41,7 +41,7 @@ export function protocolMismatch(
 ): string | undefined {
 	const wanted = env[SMELT_PROTOCOL_ENV];
 	if (wanted === String(own)) return undefined;
-	return `smelt-agent 的协议是 ${own}，守护要的是 ${wanted ?? "（没给）"}。重新打开 Smelt，让守护换到同一版本。`;
+	return `smelt-agent speaks protocol ${own}, but the runtime wants ${wanted ?? "(none given)"}. Reopen Smelt so the runtime switches to the same version.`;
 }
 
 /**

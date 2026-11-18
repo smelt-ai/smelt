@@ -1,6 +1,7 @@
 //! `smelt automation …`：自动化的增删改查、手动运行和运行记录。
 
 use crate::{control, fail, flag_value, id_arg, json_id, on_off, respond, usage};
+use rust_i18n::t;
 use smelt_model::automation::{
     Automation, AutomationAction, AutomationCommand, AutomationRun, AutomationSchedule,
     AutomationSink, AutomationTrigger, EventIngress, SCHEDULE_ALL_DAYS_MASK, SCHEDULE_DAY_FRI,
@@ -12,9 +13,6 @@ use smelt_model::control_api::{
     AutomationRunDetailParams,
 };
 use smelt_runtime_client::protocol::control::EmptyParams;
-
-const TRIGGER_FLAGS: &str =
-    "--every-minutes、--every-hours、--daily、--weekly、--during、--webhook 或 --event";
 
 pub(crate) fn run(args: &[String]) -> i32 {
     let rest = args.get(1..).unwrap_or_default();
@@ -87,7 +85,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
             })),
             None => usage("smelt automation run-log <run_id>"),
         },
-        Some(command) => usage(&format!("未知子命令: {command}")),
+        Some(command) => usage(&t!("unknown_subcommand", command = command)),
         None => usage(
             "smelt automation list|get|create|update|enable|disable|run|cancel|delete|runs|run-log",
         ),
@@ -148,15 +146,17 @@ fn parse_runs_args(args: &[String]) -> Result<(Option<String>, usize), String> {
                     .parse::<usize>()
                     .ok()
                     .filter(|limit| *limit > 0)
-                    .ok_or("--limit 必须是正整数")?;
+                    .ok_or_else(|| t!("automation.positive", flag = "--limit").into_owned())?;
                 index += 2;
             }
-            flag if flag.starts_with('-') => return Err(format!("未知参数: {flag}")),
+            flag if flag.starts_with('-') => {
+                return Err(t!("unknown_argument", arg = flag).into_owned());
+            }
             id if automation_id.is_none() => {
                 automation_id = Some(id.to_string());
                 index += 1;
             }
-            extra => return Err(format!("多余参数: {extra}")),
+            extra => return Err(t!("extra_argument", arg = extra).into_owned()),
         }
     }
     Ok((automation_id, limit))
@@ -200,7 +200,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             continue;
         }
         if !flag.starts_with('-') {
-            return Err(format!("多余参数: {flag}"));
+            return Err(t!("extra_argument", arg = flag).into_owned());
         }
         let value = flag_value(args, index)?;
         match flag {
@@ -225,7 +225,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--event" => {
                 let topic = value.trim();
                 if topic.is_empty() {
-                    return Err("--event 需要主题".into());
+                    return Err(t!("automation.event_topic_missing").into_owned());
                 }
                 flags.events.push(EventIngress {
                     topic: topic.to_string(),
@@ -234,29 +234,30 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             }
             "--event-filter" => {
                 let Some(event) = flags.events.last_mut() else {
-                    return Err("--event-filter 要跟在 --event 后面".into());
+                    return Err(t!("automation.event_filter_order").into_owned());
                 };
-                event.filter = validate_event_filter(Some(&value))?;
+                event.filter =
+                    validate_event_filter(Some(&value)).map_err(|problem| problem.to_string())?;
             }
             "--notify" => flags.notify = Some(on_off(flag, &value)?),
-            other => return Err(format!("未知参数: {other}")),
+            other => return Err(t!("unknown_argument", arg = other).into_owned()),
         }
         index += 2;
     }
     for schedule in &flags.schedules {
-        schedule.validate()?;
+        schedule.validate().map_err(|problem| problem.to_string())?;
     }
     Ok(flags)
 }
 
 fn create_from(flags: Flags) -> Result<Automation, String> {
     if flags.no_schedule || flags.no_webhook || flags.no_event {
-        return Err("--no-schedule / --no-webhook / --no-event 只用于 update".into());
+        return Err(t!("automation.removal_flags_update_only").into_owned());
     }
     let name = flags
         .name
         .filter(|name| !name.trim().is_empty())
-        .ok_or("需要 --name")?;
+        .ok_or_else(|| t!("automation.name_missing").into_owned())?;
     let action = automation_action(flags.agent, flags.shell, flags.prompt)?;
     let mut trigger = AutomationTrigger {
         schedules: flags.schedules,
@@ -267,7 +268,7 @@ fn create_from(flags: Flags) -> Result<Automation, String> {
         trigger = trigger.with_webhook_secret(new_webhook_secret());
     }
     if is_untriggered(&trigger) {
-        return Err(format!("需要至少一种触发条件：{TRIGGER_FLAGS}"));
+        return Err(t!("automation.trigger_missing").into_owned());
     }
     Ok(Automation {
         id: uuid::Uuid::new_v4().to_string(),
@@ -284,7 +285,7 @@ fn create_from(flags: Flags) -> Result<Automation, String> {
 /// `--webhook` 已经有了就保留原来的地址（换令牌等于让对方的调用全部失效）。
 fn apply_update(mut automation: Automation, flags: Flags) -> Result<Automation, String> {
     if !flags.touched {
-        return Err("smelt automation update <id> 需要至少一个字段".into());
+        return Err(t!("automation.update_empty").into_owned());
     }
     if let Some(name) = flags.name.filter(|name| !name.trim().is_empty()) {
         automation.name = name;
@@ -301,19 +302,34 @@ fn apply_update(mut automation: Automation, flags: Flags) -> Result<Automation, 
         match &mut automation.action {
             AutomationAction::Agent { prompt: slot, .. } => *slot = Some(prompt),
             AutomationAction::Shell { .. } => {
-                return Err("这条自动化是 Shell 动作，不能改 --prompt".into());
+                return Err(t!("automation.shell_prompt").into_owned());
             }
         }
     }
 
     if flags.no_schedule && !flags.schedules.is_empty() {
-        return Err("不能同时给定时和 --no-schedule".into());
+        return Err(t!(
+            "automation.conflict",
+            given = "--every-minutes/--every-hours/--daily/--weekly/--during",
+            removal = "--no-schedule"
+        )
+        .into_owned());
     }
     if flags.no_webhook && flags.webhook {
-        return Err("不能同时给 --webhook 和 --no-webhook".into());
+        return Err(t!(
+            "automation.conflict",
+            given = "--webhook",
+            removal = "--no-webhook"
+        )
+        .into_owned());
     }
     if flags.no_event && !flags.events.is_empty() {
-        return Err("不能同时给 --event 和 --no-event".into());
+        return Err(t!(
+            "automation.conflict",
+            given = "--event",
+            removal = "--no-event"
+        )
+        .into_owned());
     }
     let trigger = &mut automation.trigger;
     if flags.no_schedule || !flags.schedules.is_empty() {
@@ -328,7 +344,7 @@ fn apply_update(mut automation: Automation, flags: Flags) -> Result<Automation, 
         trigger.events = flags.events;
     }
     if is_untriggered(trigger) {
-        return Err(format!("改完就没有触发条件了，至少留一种：{TRIGGER_FLAGS}"));
+        return Err(t!("automation.trigger_all_removed").into_owned());
     }
 
     automation.sinks = notify_sinks(std::mem::take(&mut automation.sinks), flags.notify);
@@ -366,7 +382,7 @@ fn automation_action(
     match (agent, shell) {
         (Some(agent_id), None) => Ok(AutomationAction::agent(agent_id, prompt)),
         (None, Some(command)) => Ok(AutomationAction::shell(command, Vec::new())),
-        _ => Err("需要 --agent <id> 或 --shell <命令>，不能同时有".into()),
+        _ => Err(t!("automation.action_choice").into_owned()),
     }
 }
 
@@ -375,16 +391,16 @@ fn positive(flag: &str, value: &str) -> Result<u32, String> {
         .parse::<u32>()
         .ok()
         .filter(|value| *value > 0)
-        .ok_or_else(|| format!("{flag} 必须是正整数"))
+        .ok_or_else(|| t!("automation.positive", flag = flag).into_owned())
 }
 
 fn parse_clock(value: &str) -> Result<(u8, u8), String> {
-    let invalid = || format!("时间格式为 HH:MM，收到 {value}");
+    let invalid = || t!("automation.clock_format", value = value).into_owned();
     let (hour, minute) = value.trim().split_once(':').ok_or_else(invalid)?;
     let hour = hour.parse::<u8>().map_err(|_| invalid())?;
     let minute = minute.parse::<u8>().map_err(|_| invalid())?;
     if hour > 23 || minute > 59 {
-        return Err("时间必须在 00:00 到 23:59".into());
+        return Err(t!("automation.clock_range").into_owned());
     }
     Ok((hour, minute))
 }
@@ -393,7 +409,7 @@ fn parse_clock(value: &str) -> Result<(u8, u8), String> {
 fn parse_weekly(value: &str) -> Result<AutomationSchedule, String> {
     let (days, clock) = value
         .split_once('@')
-        .ok_or("--weekly 格式为 <星期>@HH:MM，例如 mon,wed,fri@09:30")?;
+        .ok_or_else(|| t!("automation.weekly_format").into_owned())?;
     let (hour, minute) = parse_clock(clock)?;
     Ok(AutomationSchedule::Weekly {
         days: parse_days(days)?,
@@ -404,20 +420,19 @@ fn parse_weekly(value: &str) -> Result<AutomationSchedule, String> {
 
 /// `30@09:00-18:00` 或 `30@09:00-18:00@weekdays`：时段内每 30 分钟一次，不写星期就是每天。
 fn parse_during(value: &str) -> Result<AutomationSchedule, String> {
-    const FORMAT: &str =
-        "--during 格式为 <分钟>@HH:MM-HH:MM[@<星期>]，例如 30@09:00-18:00@weekdays";
+    let format = || t!("automation.during_format").into_owned();
     let mut parts = value.splitn(3, '@');
     let minutes = parts.next().unwrap_or_default();
-    let window = parts.next().ok_or(FORMAT)?;
+    let window = parts.next().ok_or_else(format)?;
     let days = match parts.next() {
         Some(days) => parse_days(days)?,
         None => SCHEDULE_ALL_DAYS_MASK,
     };
-    let (start, end) = window.split_once('-').ok_or(FORMAT)?;
+    let (start, end) = window.split_once('-').ok_or_else(format)?;
     let (start_hour, start_minute) = parse_clock(start)?;
     let (end_hour, end_minute) = parse_clock(end)?;
     Ok(AutomationSchedule::During {
-        minutes: positive("--during 的分钟", minutes)?,
+        minutes: positive("--during", minutes)?,
         days,
         start_hour,
         start_minute,
@@ -445,14 +460,12 @@ fn parse_days(value: &str) -> Result<u8, String> {
             "weekend" => SCHEDULE_DAY_SAT | SCHEDULE_DAY_SUN,
             "everyday" => SCHEDULE_ALL_DAYS_MASK,
             other => {
-                return Err(format!(
-                    "不认识的星期：{other}（用 mon…sun、weekdays、weekend、everyday，逗号分隔）"
-                ));
+                return Err(t!("automation.unknown_day", day = other).into_owned());
             }
         };
     }
     if days == 0 {
-        return Err("至少写一天".into());
+        return Err(t!("automation.no_days").into_owned());
     }
     Ok(days)
 }
@@ -733,6 +746,7 @@ mod tests {
             session_id: None,
             provider_session_id: None,
             output: None,
+            error_code: None,
             error: None,
             runtime_released_at: None,
         };

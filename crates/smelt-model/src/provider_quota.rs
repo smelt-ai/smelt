@@ -12,7 +12,7 @@ pub enum ProviderQuotaData {
 }
 
 impl ProviderQuotaData {
-    /// 侧栏额度行和模型菜单括号共用的短文本：通常是已用百分比。
+    /// 额度那一条和模型菜单括号共用的短文本：通常是已用百分比。
     ///
     /// 两处必须是同一个口径，否则同一个账户在两个地方显示出不同的数字。
     pub fn short_text(&self) -> String {
@@ -47,7 +47,7 @@ impl ProviderQuotaData {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderQuotaWindow {
-    /// 短显示名，例如 `5h`、`7d`。
+    /// 窗口时长，例如 `5h`、`7d`；服务端没给时长时是种类，显示用 [`Self::display_label`]。
     pub label: String,
     /// 当前窗口已使用百分比。
     pub used_percent: f64,
@@ -60,6 +60,22 @@ pub struct ProviderQuotaWindow {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderQuota {
     pub windows: Vec<ProviderQuotaWindow>,
+}
+
+impl ProviderQuotaWindow {
+    /// 给人看的窗口名：时长（`5h`、`7d`）原样，服务端没给时长时运行时写的种类
+    /// （`primary`、`secondary`、`period`、`month`）按当前语言说。
+    pub fn display_label(&self) -> String {
+        use rust_i18n::t;
+        let text = match self.label.as_str() {
+            "primary" => t!("quota.window.primary"),
+            "secondary" => t!("quota.window.secondary"),
+            "period" => t!("quota.window.period"),
+            "month" => t!("quota.window.month"),
+            other => return other.to_string(),
+        };
+        text.into_owned()
+    }
 }
 
 /// 查询结果总是有检查时间，即使 provider 返回未知格式或没有本地凭据；这样

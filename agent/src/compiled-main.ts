@@ -102,11 +102,11 @@ switch (command.kind) {
 		break;
 	case "acp-claude":
 		presentAs(command.args);
-		await import("@agentclientprotocol/claude-agent-acp/dist/index.js");
+		await import("smelt-adapter-bin:@agentclientprotocol/claude-agent-acp");
 		break;
 	case "acp-codex":
 		presentAs(command.args);
-		await import("@agentclientprotocol/codex-acp/dist/index.js");
+		await import("smelt-adapter-bin:@agentclientprotocol/codex-acp");
 		break;
 	case "rpc":
 		await import("./main.ts");

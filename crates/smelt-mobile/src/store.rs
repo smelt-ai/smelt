@@ -9,6 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rust_i18n::t;
 
 use crate::api::conversation::ImageInput;
 use crate::api::draft::MessageDraft;
@@ -240,7 +241,7 @@ impl Store {
     pub(crate) fn rename(&self, runtime_id: &str, name: &str) -> Result<(), SmeltError> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(error(SmeltErrorKind::Other, "名字不能为空"));
+            return Err(error(SmeltErrorKind::Other, t!("error.name_empty")));
         }
         self.update_one(
             "UPDATE runtime SET name = ?2 WHERE runtime_id = ?1",
@@ -253,7 +254,7 @@ impl Store {
         if accent >= ACCENT_COUNT {
             return Err(error(
                 SmeltErrorKind::Other,
-                format!("标签色序号要在 0..{ACCENT_COUNT} 之间"),
+                format!("the accent index must be in 0..{ACCENT_COUNT}"),
             ));
         }
         self.update_one(
@@ -450,10 +451,14 @@ fn migrate(conn: &mut Connection, steps: &[&str]) -> rusqlite::Result<()> {
     if version > steps.len() {
         return Err(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
-            Some(format!(
-                "本机数据库版本 {version} 比这个 App 认识的 {} 新，先升级 App",
-                steps.len()
-            )),
+            Some(
+                t!(
+                    "store.version_ahead",
+                    version = version,
+                    known = steps.len()
+                )
+                .into_owned(),
+            ),
         ));
     }
     for (index, step) in steps.iter().enumerate().skip(version) {
@@ -623,12 +628,12 @@ fn delete_draft_rows(
 pub(crate) fn unknown_runtime(runtime_id: &str) -> SmeltError {
     error(
         SmeltErrorKind::Other,
-        format!("没有登记这台机器：{runtime_id}"),
+        t!("error.machine_unknown", id = runtime_id),
     )
 }
 
 fn db_error(failure: rusqlite::Error) -> SmeltError {
-    error(SmeltErrorKind::Other, format!("本机数据库出错：{failure}"))
+    error(SmeltErrorKind::Other, t!("error.database", error = failure))
 }
 
 pub(crate) fn now_ms() -> i64 {

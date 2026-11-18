@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::SharedString;
+use rust_i18n::t;
 use smelt_plugin_api::client::protocol::history::{HistoryDetail, HistorySession};
 use smelt_plugin_api::model::agent_host::AgentHostSettings;
 use smelt_plugin_api::model::agent_kind::{AcpProfile, ConversationAgentKind, HistorySourceKind};
-use smelt_plugin_api::model::agent_paths::agent_definition_id_for_space_in;
 use smelt_plugin_api::model::chrono::{self, DateTime};
 use smelt_plugin_api::model::session_handoff::{HandoffContext, HandoffPeer, build_handoff_prompt};
 use smelt_plugin_api::model::session_history::{
@@ -31,11 +31,12 @@ pub(crate) fn format_count(n: u64) -> String {
 /// 有明显跨度（超过 1 分钟）才标耗时。只有一条消息时只显示时间点。
 pub(crate) fn session_when(s: &SessionSummary) -> String {
     match (s.started_at, s.last_active_at) {
-        (Some(start), Some(last)) if (last - start).num_minutes() >= 1 => format!(
-            "{} · 跑了 {} 分钟",
-            last.with_timezone(&chrono::Local).format("%m-%d %H:%M"),
-            (last - start).num_minutes()
-        ),
+        (Some(start), Some(last)) if (last - start).num_minutes() >= 1 => t!(
+            "row.when_ran",
+            time = last.with_timezone(&chrono::Local).format("%m-%d %H:%M"),
+            minutes = (last - start).num_minutes()
+        )
+        .into_owned(),
         (_, Some(last)) => last
             .with_timezone(&chrono::Local)
             .format("%m-%d %H:%M")
@@ -81,6 +82,11 @@ impl ListSnapshot {
             row_text: Rc::new(sessions.iter().map(row_labels).collect()),
             sessions: Rc::new(sessions),
         }
+    }
+
+    /// 换了语言：行上的字重算。
+    pub(crate) fn relabel(&mut self) {
+        self.row_text = Rc::new(self.sessions.iter().map(row_labels).collect());
     }
 }
 
@@ -203,13 +209,12 @@ pub(crate) fn tabs_with_sessions(
 }
 
 /// 项目是某个智能体的 space 时，那个智能体的引擎：历史只看这一家。
+/// space 在哪按那台运行时推来的配置认；配置还没到时不算。
 pub(crate) fn space_engine(
     project: &Project,
-    smelt_home: Option<&str>,
     settings: Option<&AgentHostSettings>,
 ) -> Option<ConversationAgentKind> {
-    let id = agent_definition_id_for_space_in(smelt_home?, &project.root)?;
-    settings?.find_agent(&id)?.engine_kind()
+    settings?.agent_for_space(&project.root)?.engine_kind()
 }
 
 /// 智能体 space 里的历史，或项目里绑过智能体定义的那几条，都按智能体续接。
@@ -217,11 +222,11 @@ pub(crate) fn is_agent_session(in_agent_space: bool, bound_definition: Option<&s
     in_agent_space || bound_definition.is_some()
 }
 
-pub(crate) fn continue_label(is_agent_session: bool) -> &'static str {
+pub(crate) fn continue_label(is_agent_session: bool) -> String {
     if is_agent_session {
-        "继续对话"
+        t!("menu.continue_agent").into_owned()
     } else {
-        "ACP 继续"
+        t!("menu.continue_acp").into_owned()
     }
 }
 
@@ -415,7 +420,7 @@ mod tests {
         });
         assert_eq!(summary.title, "改过的");
         assert_eq!(summary.agent_title, "原始");
-        assert!(session_when(&summary).contains("跑了 2 分钟"));
+        assert!(session_when(&summary).contains("ran 2 min"));
     }
 
     #[test]
@@ -467,27 +472,27 @@ mod tests {
     }
 
     #[test]
-    fn space_engine_needs_a_known_agent_under_that_machines_home() {
+    fn space_engine_needs_a_known_agent_under_that_machines_spaces_root() {
         let mut settings = settings_with_writer();
+        settings.agent_spaces_root = Some("/home/u/.smelt/agents".into());
         let project = Project {
             machine: RuntimeKey::Remote("box".into()),
             root: "/home/u/.smelt/agents/writer".into(),
         };
         assert_eq!(
-            space_engine(&project, Some("/home/u/.smelt"), Some(&settings)),
+            space_engine(&project, Some(&settings)),
             Some(ConversationAgentKind::Pi)
         );
-        // 不在主目录下、主目录不知道、定义已经删了，都不算 space。
-        assert_eq!(
-            space_engine(&project, Some("/other"), Some(&settings)),
-            None
-        );
-        assert_eq!(space_engine(&project, None, Some(&settings)), None);
+        // 配置还没到、运行时没报 space 根、不在根下、定义已经删了，都不算 space。
+        assert_eq!(space_engine(&project, None), None);
+        let mut unreported = settings.clone();
+        unreported.agent_spaces_root = None;
+        assert_eq!(space_engine(&project, Some(&unreported)), None);
+        let mut elsewhere = settings.clone();
+        elsewhere.agent_spaces_root = Some("/other/agents".into());
+        assert_eq!(space_engine(&project, Some(&elsewhere)), None);
         settings.agents.clear();
-        assert_eq!(
-            space_engine(&project, Some("/home/u/.smelt"), Some(&settings)),
-            None
-        );
+        assert_eq!(space_engine(&project, Some(&settings)), None);
     }
 
     #[test]
@@ -495,8 +500,8 @@ mod tests {
         assert!(!is_agent_session(false, None));
         assert!(is_agent_session(false, Some("writer")));
         assert!(is_agent_session(true, None));
-        assert_eq!(continue_label(false), "ACP 继续");
-        assert_eq!(continue_label(true), "继续对话");
+        assert_eq!(continue_label(false), "Continue via ACP");
+        assert_eq!(continue_label(true), "Continue Conversation");
     }
 
     #[test]

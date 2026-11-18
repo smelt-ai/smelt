@@ -197,7 +197,7 @@ fn bundle_files(src_dir: &Path) -> io::Result<Vec<PathBuf>> {
         if !fs::symlink_metadata(src_dir.join(required)).is_ok_and(|meta| meta.is_file()) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("缺少 {}", src_dir.join(required).display()),
+                format!("missing {}", src_dir.join(required).display()),
             ));
         }
         files.push(PathBuf::from(required));
@@ -320,7 +320,10 @@ fn retarget(dir: &Path, name: &str) -> io::Result<()> {
         #[cfg(not(any(unix, windows)))]
         {
             let _ = &relative;
-            Err(io::Error::new(io::ErrorKind::Unsupported, "不能发布 smelt-agent"))
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "can't publish smelt-agent on this platform",
+            ))
         }
     })();
     if let Err(error) = written {

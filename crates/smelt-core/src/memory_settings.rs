@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 /// `settings get` 不回显密钥本身，只说明设没设。
-const API_KEY_SET: &str = "已设置";
+const API_KEY_SET: &str = "set";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EmbeddingSettings {
@@ -94,9 +94,11 @@ fn apply_to_record(
         && !text.is_empty()
         && !(text.starts_with("http://") || text.starts_with("https://"))
     {
-        return Err(format!("{key} 必须是 http:// 或 https:// 开头的地址"));
+        return Err(format!(
+            "{key} must be an address that starts with http:// or https://"
+        ));
     }
-    let slot = field(record, key).ok_or_else(|| format!("未知的记忆设置：{key}"))?;
+    let slot = field(record, key).ok_or_else(|| format!("unknown memory setting: {key}"))?;
     *slot = text;
     Ok(())
 }
@@ -146,16 +148,16 @@ pub struct EmbeddingProbe {
 }
 
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const PROBE_INPUT: &str = "Smelt 记忆向量检索连接测试";
+const PROBE_INPUT: &str = "Smelt memory vector search connection test";
 
 /// 用给定配置真发一次 `/embeddings` 请求，确认服务可用。错误说成人话：HTTP 状态和响应开头、
 /// 连不上、超时、返回格式不对。设置页的「测试连接」用它，测的是表单里还没保存的值。
 pub async fn probe(settings: &EmbeddingSettings) -> Result<EmbeddingProbe, String> {
     if !(settings.base_url.starts_with("http://") || settings.base_url.starts_with("https://")) {
-        return Err("服务地址必须是 http:// 或 https:// 开头".into());
+        return Err("The service address must start with http:// or https://".into());
     }
     if settings.model.is_empty() {
-        return Err("还没填模型".into());
+        return Err("No model yet".into());
     }
     let url = format!("{}/embeddings", settings.base_url.trim_end_matches('/'));
     let mut builder = reqwest::Client::builder().timeout(PROBE_TIMEOUT);
@@ -174,36 +176,42 @@ pub async fn probe(settings: &EmbeddingSettings) -> Result<EmbeddingProbe, Strin
     let started = std::time::Instant::now();
     let response = request.send().await.map_err(|error| {
         if error.is_timeout() {
-            format!("请求超时（{} 秒）：{url}", PROBE_TIMEOUT.as_secs())
+            format!("Request timed out ({}s): {url}", PROBE_TIMEOUT.as_secs())
         } else if error.is_connect() {
-            format!("连不上 {url}：服务没启动或地址不对")
+            format!("Can't reach {url}: the service isn't running or the address is wrong")
         } else {
-            format!("请求失败：{error}")
+            format!("Request failed: {error}")
         }
     })?;
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|error| format!("读取响应失败：{error}"))?;
+        .map_err(|error| format!("Couldn't read the response: {error}"))?;
     let elapsed_ms = started.elapsed().as_millis();
     if !status.is_success() {
         let snippet: String = body.chars().take(200).collect();
         let hint = match status.as_u16() {
-            401 | 403 => "（API Key 不对或没填）",
-            404 => "（地址不对：应填到 /v1 这一级，不含 /embeddings）",
-            502..=504 => "（网关或代理报错：服务可能没启动，或代理连不上它）",
+            401 | 403 => " (the API key is wrong or missing)",
+            404 => " (wrong address: it should end at /v1, without /embeddings)",
+            502..=504 => {
+                " (gateway or proxy error: the service may not be running, or the proxy can't reach it)"
+            }
             _ => "",
         };
-        return Err(format!("服务返回 {status}{hint}：{snippet}"));
+        return Err(format!("The service returned {status}{hint}: {snippet}"));
     }
-    let value: Value = serde_json::from_str(&body)
-        .map_err(|_| "返回的不是 JSON，可能不是 OpenAI 兼容的 /embeddings 接口".to_string())?;
+    let value: Value = serde_json::from_str(&body).map_err(|_| {
+        "The response isn't JSON; this may not be an OpenAI-compatible /embeddings endpoint"
+            .to_string()
+    })?;
     let dimensions = value["data"][0]["embedding"]
         .as_array()
         .map(Vec::len)
         .filter(|len| *len > 0)
-        .ok_or("返回里没有向量（data[0].embedding），可能不是向量模型")?;
+        .ok_or(
+            "The response has no vector (data[0].embedding); this may not be an embedding model",
+        )?;
     Ok(EmbeddingProbe {
         dimensions,
         elapsed_ms,
@@ -254,7 +262,7 @@ mod tests {
         assert_eq!(settings.base_url, "http://localhost:11434/v1");
         assert_eq!(settings.api_key, "sk-secret");
         let shown = to_map(&settings, None);
-        assert_eq!(shown[EMBEDDING_API_KEY], "已设置");
+        assert_eq!(shown[EMBEDDING_API_KEY], "set");
         assert!(!serde_json::to_string(&shown).unwrap().contains("sk-secret"));
 
         apply_on(&store, EMBEDDING_MODEL, &Value::from("")).unwrap();
@@ -312,13 +320,13 @@ mod tests {
             r#"{"error":"bad key"}"#,
         )));
         assert!(
-            unauthorized.contains("401") && unauthorized.contains("API Key"),
+            unauthorized.contains("401") && unauthorized.contains("API key"),
             "{unauthorized}"
         );
         let not_found = run(settings(serve_once("404 Not Found", "")));
         assert!(not_found.contains("/v1"), "{not_found}");
         let chat_model = run(settings(serve_once("200 OK", r#"{"data":[]}"#)));
-        assert!(chat_model.contains("没有向量"), "{chat_model}");
+        assert!(chat_model.contains("no vector"), "{chat_model}");
         let refused = {
             let port = std::net::TcpListener::bind("127.0.0.1:0")
                 .unwrap()
@@ -327,7 +335,7 @@ mod tests {
                 .port();
             run(settings(format!("http://127.0.0.1:{port}/v1")))
         };
-        assert!(refused.contains("连不上"), "{refused}");
+        assert!(refused.contains("Can't reach"), "{refused}");
         assert!(run(settings("localhost:11434".into())).contains("http://"));
     }
 

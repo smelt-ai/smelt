@@ -19,7 +19,9 @@ pub enum LaunchError {
 impl std::fmt::Display for LaunchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict => f.write_str("启动项已在别处被修改，已刷新为最新的"),
+            Self::Conflict => {
+                f.write_str("The launch items were changed elsewhere and have been refreshed")
+            }
             Self::Store(message) => f.write_str(message),
         }
     }

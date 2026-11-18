@@ -8,13 +8,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::*;
-use gpui_component::input::{EditorState, InputEvent, Position};
+use gpui_base::input::{EditorState, InputEvent};
+use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::client::protocol::control::{ControlClientError, ControlErrorCode};
 use smelt_plugin_api::client::protocol::files::{
     FileContent, FileOpenCall, FileOpenResult, FilePathParams, FileSaveCall, FileSaveParams,
     is_previewable_image,
 };
+use smelt_plugin_api::ui::code_editor::reveal_line;
 use smelt_plugin_api::ui::dialog::Confirm;
 
 use crate::html_preview::HtmlPreview;
@@ -145,10 +147,7 @@ impl FilesPanel {
             // 就是这个文件：不重读（会丢掉改动），只跳行。
             if let Some(line) = line {
                 let editor = current.editor.clone();
-                editor.update(cx, |state, cx| {
-                    let line0 = line.saturating_sub(1) as u32;
-                    state.set_cursor_position(Position::new(line0, 0), window, cx);
-                });
+                editor.update(cx, |state, cx| reveal_line(state, line, window, cx));
             }
             return;
         }
@@ -184,8 +183,8 @@ impl FilesPanel {
         let close_panel = panel.clone();
         let discard_target = target.clone();
         Confirm::new(
-            format!("「{current}」有未保存的改动"),
-            "保存并切换",
+            t!("switch.title", name = current),
+            t!("switch.save"),
             move |_, cx| {
                 panel.update(cx, |this, cx| {
                     this.pending_switch_after_save = Some((current_id, target.clone()));
@@ -194,10 +193,8 @@ impl FilesPanel {
                 true
             },
         )
-        .description(format!(
-            "要切换到「{target_name}」了，这些改动还没保存，要怎么处理？"
-        ))
-        .alternative("不保存，直接切换", move |window, cx| {
+        .description(t!("switch.description", name = target_name))
+        .alternative(t!("switch.discard"), move |window, cx| {
             discard_panel.update(cx, |this, cx| {
                 this.open_file_now(discard_target.clone(), line, window, cx);
             });
@@ -225,12 +222,14 @@ impl FilesPanel {
         let id = self.next_file_id;
         let preview_kind = PreviewKind::for_path(&path);
         let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
+            let mut editor = EditorState::new(window, cx)
                 .language(editor_language_for_path(&path))
                 .line_number(true)
                 .searchable(true)
                 // 代码换行会破坏缩进对齐，超长行横向滚动。
-                .soft_wrap(false)
+                .soft_wrap(false);
+            editor.set_highlighter_factory(smelt_plugin_api::ui::syntax::highlighter_factory(), cx);
+            editor
         });
         let style = self.path_style(&runtime, cx);
         let client = target(&runtime, cx);
@@ -284,8 +283,7 @@ impl FilesPanel {
                         editor.update(cx, |state, cx| {
                             state.set_value(text.clone(), window, cx);
                             if let Some(line) = goto_line {
-                                let line0 = line.saturating_sub(1) as u32;
-                                state.set_cursor_position(Position::new(line0, 0), window, cx);
+                                reveal_line(state, line, window, cx);
                             }
                         });
                         of.saved_content = Rc::new(text.clone());
@@ -305,19 +303,22 @@ impl FilesPanel {
                             of.image = Some(Arc::new(gpui::Image::from_bytes(format, data.0)));
                             None
                         }
-                        None => Some("（无法预览这种图片格式）".to_string()),
+                        None => Some(t!("unreadable.image").into_owned()),
                     },
                     Ok(FileOpenResult {
                         content: FileContent::Binary,
-                    }) => Some("（无法以文本方式读取：可能是二进制文件）".to_string()),
+                    }) => Some(t!("unreadable.binary").into_owned()),
                     Ok(FileOpenResult {
                         content: FileContent::TooLarge { size, limit },
-                    }) => Some(format!(
-                        "（文件过大：{:.1} MB，查看上限 {} MB）",
-                        size as f64 / (1024.0 * 1024.0),
-                        limit / (1024 * 1024)
-                    )),
-                    Err(error) => Some(format!("（无法读取：{error}）")),
+                    }) => Some(
+                        t!(
+                            "unreadable.too_large",
+                            size = format!("{:.1}", size as f64 / (1024.0 * 1024.0)),
+                            limit = limit / (1024 * 1024)
+                        )
+                        .into_owned(),
+                    ),
+                    Err(error) => Some(t!("unreadable.error", error = error).into_owned()),
                 };
                 if let Some(placeholder) = unreadable {
                     editor.update(cx, |state, cx| state.set_value(placeholder, window, cx));
@@ -340,7 +341,7 @@ impl FilesPanel {
             return;
         }
         if !of.readable {
-            of.save_error = Some("此文件未能正常读取为文本，不支持保存".to_string());
+            of.save_error = Some(t!("save.unreadable").into_owned());
             self.pending_switch_after_save = None;
             cx.notify();
             return;
@@ -354,9 +355,7 @@ impl FilesPanel {
         } else {
             of.saved_version.clone()
         };
-        let Some(window) = self.host.main_window(cx) else {
-            return;
-        };
+        let entity_id = cx.entity_id();
         cx.spawn(async move |this, cx| {
             let text = content.clone();
             let outcome = cx
@@ -382,38 +381,38 @@ impl FilesPanel {
                     }
                 })
                 .await;
-            let _ = cx.update_window(window, |_, window, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    let switch_target = this
-                        .pending_switch_after_save
-                        .take_if(|(from, _)| *from == id)
-                        .map(|(_, target)| target);
-                    let Some(of) = this.open_file_with_id(id) else {
-                        return;
-                    };
-                    match outcome {
-                        SaveOutcome::Saved(version) => {
-                            of.saved_content = Rc::new(content);
-                            of.saved_version = Some(version);
-                            of.save_error = None;
-                            of.conflict_pending = false;
-                            if let Some(target) = switch_target
-                                && this.open_file.as_ref().is_some_and(|of| of.id == id)
-                            {
-                                this.open_file_now(target, None, window, cx);
+            cx.update(|cx| {
+                cx.with_window(entity_id, |window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        let switch_target = this
+                            .pending_switch_after_save
+                            .take_if(|(from, _)| *from == id)
+                            .map(|(_, target)| target);
+                        let Some(of) = this.open_file_with_id(id) else {
+                            return;
+                        };
+                        match outcome {
+                            SaveOutcome::Saved(version) => {
+                                of.saved_content = Rc::new(content);
+                                of.saved_version = Some(version);
+                                of.save_error = None;
+                                of.conflict_pending = false;
+                                if let Some(target) = switch_target
+                                    && this.open_file.as_ref().is_some_and(|of| of.id == id)
+                                {
+                                    this.open_file_now(target, None, window, cx);
+                                }
+                            }
+                            SaveOutcome::Conflict => {
+                                of.conflict_pending = true;
+                                of.save_error = Some(t!("save.conflict").into_owned());
+                            }
+                            SaveOutcome::Error(error) => {
+                                of.save_error = Some(t!("save.failed", error = error).into_owned());
                             }
                         }
-                        SaveOutcome::Conflict => {
-                            of.conflict_pending = true;
-                            of.save_error = Some(
-                                "文件已被外部修改；再按一次 ⌘S 会强制覆盖磁盘上的改动".to_string(),
-                            );
-                        }
-                        SaveOutcome::Error(error) => {
-                            of.save_error = Some(format!("保存失败：{error}"));
-                        }
-                    }
-                    cx.notify();
+                        cx.notify();
+                    });
                 });
             });
         })
@@ -446,9 +445,7 @@ impl FilesPanel {
     }
 
     pub(crate) fn reload_open_file(&mut self, cx: &mut Context<Self>) {
-        let Some(window) = self.host.main_window(cx) else {
-            return;
-        };
+        let entity_id = cx.entity_id();
         let Some(of) = self.open_file.as_mut() else {
             return;
         };
@@ -466,34 +463,36 @@ impl FilesPanel {
                     call_on::<FileOpenCall>(&client, FilePathParams { path }, RUNTIME_CALL_TIMEOUT)
                 })
                 .await;
-            let _ = cx.update_window(window, |_, window, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    let Some(of) = this.open_file_with_id(id) else {
-                        return;
-                    };
-                    of.reload_inflight = false;
-                    let again = std::mem::take(&mut of.reload_again);
-                    if let Ok(FileOpenResult {
-                        content: FileContent::Text { text, version },
-                    }) = read
-                        && of.saved_version.as_deref() != Some(version.as_str())
-                    {
-                        if of.dirty(cx) {
-                            of.save_error =
-                                Some("这个文件已在别处被改过；保存时会提示冲突".to_string());
-                        } else {
-                            of.editor
-                                .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
-                            of.saved_content = Rc::new(text.clone());
-                            of.saved_version = Some(version);
-                            of.preview_source = text.into();
-                            of.sync_html_preview(cx);
+            cx.update(|cx| {
+                cx.with_window(entity_id, |window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        let Some(of) = this.open_file_with_id(id) else {
+                            return;
+                        };
+                        of.reload_inflight = false;
+                        let again = std::mem::take(&mut of.reload_again);
+                        if let Ok(FileOpenResult {
+                            content: FileContent::Text { text, version },
+                        }) = read
+                            && of.saved_version.as_deref() != Some(version.as_str())
+                        {
+                            if of.dirty(cx) {
+                                of.save_error = Some(t!("save.changed_elsewhere").into_owned());
+                            } else {
+                                of.editor.update(cx, |state, cx| {
+                                    state.set_value(text.clone(), window, cx)
+                                });
+                                of.saved_content = Rc::new(text.clone());
+                                of.saved_version = Some(version);
+                                of.preview_source = text.into();
+                                of.sync_html_preview(cx);
+                            }
+                            cx.notify();
                         }
-                        cx.notify();
-                    }
-                    if again && this.open_file.as_ref().is_some_and(|of| of.id == id) {
-                        this.reload_open_file(cx);
-                    }
+                        if again && this.open_file.as_ref().is_some_and(|of| of.id == id) {
+                            this.reload_open_file(cx);
+                        }
+                    });
                 });
             });
         })
@@ -512,7 +511,7 @@ impl FilesPanel {
         match url::Url::from_file_path(&of.path) {
             Ok(url) => cx.open_url(url.as_str()),
             Err(()) => {
-                of.save_error = Some("这个路径转不成文件地址，打不开浏览器".to_string());
+                of.save_error = Some(t!("browser.bad_path").into_owned());
                 cx.notify();
             }
         }
@@ -535,7 +534,7 @@ impl FilesPanel {
             .filter(|project| project.runtime == of.runtime)
             .and_then(|project| style.strip_prefix(&of.path, &project.root))
             .unwrap_or_else(|| of.path.clone());
-        let message = format!("{rel} 里选中的这段：\n```\n{selected}\n```\n");
+        let message = t!("send.selection", path = rel, selected = selected).into_owned();
         self.send_to_session(message, cx);
     }
 }

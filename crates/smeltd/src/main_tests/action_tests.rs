@@ -22,10 +22,13 @@ fn reply_appends_enter_after_text() {
 
 #[test]
 fn reply_without_text_is_rejected() {
-    assert_eq!(action_payload(Some("reply"), None), Err("需要非空 text"));
+    assert_eq!(
+        action_payload(Some("reply"), None),
+        Err("text can't be empty")
+    );
     assert_eq!(
         action_payload(Some("reply"), Some("")),
-        Err("需要非空 text")
+        Err("text can't be empty")
     );
 }
 
@@ -33,7 +36,7 @@ fn reply_without_text_is_rejected() {
 fn unknown_kind_returns_err() {
     assert_eq!(
         action_payload(Some("do_a_barrel_roll"), None),
-        Err("未知 kind")
+        Err("unknown kind")
     );
-    assert_eq!(action_payload(None, None), Err("未知 kind"));
+    assert_eq!(action_payload(None, None), Err("unknown kind"));
 }

@@ -81,10 +81,18 @@ pub(crate) struct SessionState {
     pub(crate) turn_started_at: u64,
     /// 在问什么——远程遥控的命脉，Phase 6 的 action 门闩靠它判断能不能安全写入。
     pub(crate) pending_question: Option<String>,
+    /// `pending_question` 里运行时自己说的那句的种类和参数，各端按语言说；智能体的原话没有。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_note: Option<smelt_event_protocol::SessionNote>,
     /// 对话会话正在等的那个请求的身份（`permission:<请求 id>` / `elicitation:<卡片 id>`），
     /// 客户端靠它分辨「还是不是同一个请求」。终端会话没有。只属于这个进程里的运行时，不落盘。
     #[serde(skip)]
     pub(crate) pending_request: Option<String>,
+    /// 最近结束的那轮对应的外部投递（`conversation.prompt` 的 `delivery_id`）；用户自己
+    /// 说的那轮是 `None`。订阅方看到自己的 id 就去 `conversation.turn_result` 取结果。
+    /// 只属于这个进程里的运行时，不落盘。
+    #[serde(skip)]
+    pub(crate) completed_delivery_id: Option<String>,
     /// 累计花费口径（各轮 cache_read 都加了），**不是**上下文占用，不能当余量分母。
     /// 见 session_history::SessionSummary.total_tokens；目前没接，先占位。
     pub(crate) tokens_used: Option<u64>,
@@ -161,6 +169,8 @@ impl Default for SessionState {
             turn_started_at: 0,
             pending_question: None,
             pending_request: None,
+            pending_note: None,
+            completed_delivery_id: None,
             tokens_used: None,
             branch: None,
             dirty_files: Vec::new(),

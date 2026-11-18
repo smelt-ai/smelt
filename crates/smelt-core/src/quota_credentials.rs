@@ -48,7 +48,7 @@ pub(crate) struct KeychainBusy;
 
 impl fmt::Display for KeychainBusy {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("正在等待钥匙串授权")
+        formatter.write_str("waiting for Keychain authorization")
     }
 }
 
@@ -69,7 +69,7 @@ impl KeychainLookup {
     pub(crate) fn blocked_error(&self) -> Option<anyhow::Error> {
         match self {
             Self::Denied => Some(anyhow::anyhow!(
-                "钥匙串访问被拒绝或不可用，已停止自动读取；在设置里手动重试后恢复"
+                "Keychain access was denied or is unavailable, so automatic reads stopped; retry in Settings to resume"
             )),
             Self::Busy => Some(KeychainBusy.into()),
             Self::Token(_) | Self::NotFound => None,

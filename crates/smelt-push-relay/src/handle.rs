@@ -27,10 +27,10 @@ impl HandleKey {
     pub fn from_base64(text: &str) -> Result<Self, String> {
         let bytes = STANDARD
             .decode(text.trim())
-            .map_err(|error| format!("句柄密钥不是 base64：{error}"))?;
+            .map_err(|error| format!("the handle key isn't base64: {error}"))?;
         Aes256Gcm::new_from_slice(&bytes)
             .map(Self)
-            .map_err(|_| format!("句柄密钥要 32 字节，现在是 {} 字节", bytes.len()))
+            .map_err(|_| format!("the handle key must be 32 bytes, got {} bytes", bytes.len()))
     }
 
     pub fn seal(&self, device: &Device) -> String {

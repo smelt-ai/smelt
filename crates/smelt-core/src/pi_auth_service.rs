@@ -132,7 +132,7 @@ pub fn events(params: LoginEventsParams) -> Result<LoginEventsResult, String> {
     loop {
         let login = entries
             .get_mut(&params.login_id)
-            .ok_or_else(|| "这次登录已经结束或被取消".to_string())?;
+            .ok_or_else(|| "This sign-in already ended or was cancelled".to_string())?;
         login.last_poll = Instant::now();
         if login.events.len() > params.after || login.finished {
             let events = login
@@ -166,7 +166,7 @@ pub fn answer(params: LoginAnswerParams) -> Result<(), String> {
     let session = entries
         .get(&params.login_id)
         .and_then(|login| login.session.as_ref())
-        .ok_or_else(|| "这次登录已经结束或被取消".to_string())?;
+        .ok_or_else(|| "This sign-in already ended or was cancelled".to_string())?;
     session.answer(&params.prompt_id, &params.value);
     Ok(())
 }
@@ -205,6 +205,7 @@ mod tests {
                 message: "粘贴 code".into(),
                 placeholder: None,
                 options: Vec::new(),
+                note: None,
             },
             PiLoginEvent::Done,
         ];

@@ -442,7 +442,7 @@ fn attach_only_open_does_not_create_a_missing_session() {
     BufReader::new(client).read_line(&mut line).unwrap();
     let response: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(response["ok"], false);
-    assert!(response["err"].as_str().unwrap().contains("不存在"));
+    assert!(response["err"].as_str().unwrap().contains("No such"));
     assert_eq!(sessions.len(), 0);
 }
 

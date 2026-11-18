@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use super::daemon::DaemonOperation;
+pub use super::reason::ControlReason;
 
 /// 控制协议版本。加方法、删方法都不升它：客户端不看方法清单，运行时缺某个方法，用到时调到
 /// MethodNotFound 就报运行时较旧，只是那一项功能用不了。改已有方法的参数或结果才升，同时抬
@@ -134,12 +135,12 @@ define_control_methods! {
     WorkspaceConversationUpdate => (WORKSPACE_CONVERSATION_UPDATE_METHOD, "workspace.conversation.update"),
     WorkspaceConversationDelete => (WORKSPACE_CONVERSATION_DELETE_METHOD, "workspace.conversation.delete"),
     WorkspaceConversationArchive => (WORKSPACE_CONVERSATION_ARCHIVE_METHOD, "workspace.conversation.archive"),
-    WorkspaceConversationPin => (WORKSPACE_CONVERSATION_PIN_METHOD, "workspace.conversation.pin"),
     WorkspaceProjectOpen => (WORKSPACE_PROJECT_OPEN_METHOD, "workspace.project.open"),
     WorkspaceProjectClose => (WORKSPACE_PROJECT_CLOSE_METHOD, "workspace.project.close"),
     WorkspaceProjectRepositoryAction => (WORKSPACE_PROJECT_REPOSITORY_ACTION_METHOD, "workspace.project.repository.action"),
     WorkspaceWorksetCreate => (WORKSPACE_WORKSET_CREATE_METHOD, "workspace.workset.create_with_branch"),
     WorkspaceWorksetRename => (WORKSPACE_WORKSET_RENAME_METHOD, "workspace.workset.rename_preserving_branch"),
+    WorkspaceWorksetInspect => (WORKSPACE_WORKSET_INSPECT_METHOD, "workspace.workset.inspect"),
     WorkspaceWorksetFinish => (WORKSPACE_WORKSET_FINISH_METHOD, "workspace.workset.finish"),
     WorkspaceDirectoryGet => (WORKSPACE_DIRECTORY_GET_METHOD, "workspace.directory"),
     WorkspaceRename => (WORKSPACE_RENAME_METHOD, "workspace.rename"),
@@ -206,6 +207,8 @@ define_control_methods! {
     SessionDelete => (SESSION_DELETE_METHOD, "session.delete"),
     SessionAgentBindings => (SESSION_AGENT_BINDINGS_METHOD, "session.agent_bindings"),
     ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
+    ConversationPrompt => (CONVERSATION_PROMPT_METHOD, "conversation.prompt"),
+    ConversationTurnResult => (CONVERSATION_TURN_RESULT_METHOD, "conversation.turn_result"),
     SubagentTranscript => (SUBAGENT_TRANSCRIPT_METHOD, "subagent.transcript"),
     ResourceUsage => (RESOURCE_USAGE_METHOD, "resource.usage"),
 }
@@ -330,9 +333,13 @@ pub struct ControlVersionRange {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControlError {
     pub code: ControlErrorCode,
+    /// 运行时按自己的默认语言（英文）说的一句话。给人看用 [`ControlError::text`]。
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_versions: Option<ControlVersionRange>,
+    /// 报错的种类和参数，客户端按自己的语言说。老运行时不发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ControlReason>,
 }
 
 impl ControlError {
@@ -341,7 +348,26 @@ impl ControlError {
             code,
             message: message.into(),
             supported_versions: None,
+            reason: None,
         }
+    }
+
+    /// 带种类的报错：`message` 是同一句话按运行时的默认语言说的。
+    pub fn because(code: ControlErrorCode, reason: ControlReason) -> Self {
+        Self {
+            code,
+            message: reason.text().unwrap_or_default(),
+            supported_versions: None,
+            reason: Some(reason),
+        }
+    }
+
+    /// 给人看的一句话：认得的种类按当前语言说，否则用运行时给的原话。
+    pub fn text(&self) -> String {
+        self.reason
+            .as_ref()
+            .and_then(ControlReason::text)
+            .unwrap_or_else(|| self.message.clone())
     }
 
     pub fn unsupported_version(requested: u16, min_supported: u16, max_supported: u16) -> Self {
@@ -354,6 +380,7 @@ impl ControlError {
                 min_supported_version: min_supported,
                 max_supported_version: max_supported,
             }),
+            reason: None,
         }
     }
 }
@@ -454,7 +481,7 @@ impl fmt::Display for ControlClientError {
         match self {
             Self::InvalidRequest(message) => write!(f, "invalid control request: {message}"),
             Self::InvalidResponse(message) => write!(f, "invalid control response: {message}"),
-            Self::Protocol(error) => write!(f, "control {:?}: {}", error.code, error.message),
+            Self::Protocol(error) => write!(f, "control {:?}: {}", error.code, error.text()),
             Self::Transport(message) => write!(f, "control transport: {message}"),
         }
     }
@@ -482,18 +509,28 @@ pub fn encode_request_with_version<C: ControlCall>(
     request_id: &str,
     params: &C::Params,
 ) -> Result<Value, ControlClientError> {
+    let params = serde_json::to_value(params)
+        .map_err(|error| ControlClientError::InvalidRequest(error.to_string()))?;
+    encode_method_request(control_version, request_id, C::METHOD, params)
+}
+
+/// 按方法构造请求，参数已经是 JSON：调用方在运行时才知道调哪个方法（脚本插件）时用。
+pub fn encode_method_request(
+    control_version: u16,
+    request_id: &str,
+    method: ControlMethod,
+    params: Value,
+) -> Result<Value, ControlClientError> {
     if !valid_request_id(request_id) {
         return Err(ControlClientError::InvalidRequest(format!(
             "request_id must contain 1..={MAX_CONTROL_REQUEST_ID_BYTES} non-control bytes"
         )));
     }
-    let params = serde_json::to_value(params)
-        .map_err(|error| ControlClientError::InvalidRequest(error.to_string()))?;
     Ok(serde_json::json!({
         "op": DaemonOperation::Control,
         "control_version": control_version,
         "request_id": request_id,
-        "method": C::METHOD.as_str(),
+        "method": method.as_str(),
         "params": params,
     }))
 }
@@ -590,7 +627,18 @@ pub fn decode_response_with_version<C: ControlCall>(
     expected_request_id: &str,
     value: Value,
 ) -> Result<C::Result, ControlClientError> {
-    let response: ControlResponse<C::Result> = serde_json::from_value(value)
+    let result = decode_method_response(expected_control_version, expected_request_id, value)?;
+    serde_json::from_value(result)
+        .map_err(|error| ControlClientError::InvalidResponse(error.to_string()))
+}
+
+/// 解回包，结果留成 JSON，形状由调用方认（见 [`encode_method_request`]）。
+pub fn decode_method_response(
+    expected_control_version: u16,
+    expected_request_id: &str,
+    value: Value,
+) -> Result<Value, ControlClientError> {
+    let response: ControlResponse<Value> = serde_json::from_value(value)
         .map_err(|error| ControlClientError::InvalidResponse(error.to_string()))?;
     if response.request_id != expected_request_id {
         return Err(ControlClientError::InvalidResponse(format!(
@@ -634,6 +682,35 @@ mod tests {
                 "params": {},
             })
         );
+    }
+
+    #[test]
+    fn calls_by_method_name_match_typed_calls_on_the_wire() {
+        let typed = encode_request::<SystemDescribe>("request-1", &EmptyParams::default())
+            .expect("request should serialize");
+        let by_name = encode_method_request(
+            CONTROL_API_VERSION,
+            "request-1",
+            ControlMethod::SystemDescribe,
+            serde_json::json!({}),
+        )
+        .expect("request should serialize");
+        assert_eq!(by_name, typed);
+
+        let ok = serde_json::json!({
+            "control_version": CONTROL_API_VERSION,
+            "request_id": "request-1",
+            "status": "ok",
+            "result": { "anything": [1, 2] },
+        });
+        assert_eq!(
+            decode_method_response(CONTROL_API_VERSION, "request-1", ok.clone()).unwrap(),
+            serde_json::json!({ "anything": [1, 2] })
+        );
+        assert!(matches!(
+            decode_method_response(CONTROL_API_VERSION, "request-2", ok),
+            Err(ControlClientError::InvalidResponse(_))
+        ));
     }
 
     #[test]

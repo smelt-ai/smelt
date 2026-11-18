@@ -127,6 +127,91 @@ pub struct SessionConfigState {
     /// `Some` 表示这是布尔开关；`None` 表示 select。旧快照缺这个字段按 select 读。
     #[serde(default)]
     pub boolean: Option<bool>,
+    /// 运行时自己写的配置项（Pi 的权限、推理强度、脚本工具）：名字、说明、选项由各端按语言说，
+    /// 上面的字是英文兜底。智能体自己声明的没有它，原样显示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smelt: Option<SmeltConfig>,
+}
+
+/// 运行时自己写的配置项是哪一种。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmeltConfig {
+    /// 权限模式，值是 `default` / `bypassPermissions`。
+    PermissionMode,
+    /// 推理强度，值是 Pi 的 thinking level。
+    ThinkingLevel,
+    /// 脚本工具，值是 `on` / `off`。
+    ScriptTools,
+    /// 比读的一方新的种类，原样显示。
+    #[serde(other)]
+    Other,
+}
+
+impl SessionConfigState {
+    /// 是不是只有开、关两项的开关（ACP 的 boolean 配置，或脚本工具）。
+    pub fn is_switch(&self) -> bool {
+        self.boolean.is_some() || self.smelt == Some(SmeltConfig::ScriptTools)
+    }
+
+    /// 给人看的配置名。
+    pub fn display_name(&self) -> String {
+        use rust_i18n::t;
+        match self.smelt {
+            Some(SmeltConfig::PermissionMode) => t!("config.permission_mode.name").into_owned(),
+            Some(SmeltConfig::ThinkingLevel) => t!("config.thinking_level.name").into_owned(),
+            Some(SmeltConfig::ScriptTools) => t!("config.codemode.name").into_owned(),
+            Some(SmeltConfig::Other) | None => self.name.clone(),
+        }
+    }
+
+    /// 给人看的配置说明。
+    pub fn display_description(&self) -> Option<String> {
+        use rust_i18n::t;
+        let text = match self.smelt {
+            Some(SmeltConfig::PermissionMode) => t!("config.permission_mode.description"),
+            Some(SmeltConfig::ThinkingLevel) => t!("config.thinking_level.description"),
+            Some(SmeltConfig::ScriptTools) => t!("config.codemode.description"),
+            Some(SmeltConfig::Other) | None => return self.description.clone(),
+        };
+        Some(text.into_owned())
+    }
+
+    /// 给人看的选项名：开关说开 / 关，运行时写的配置项按值说，别的原样给 `name`。
+    /// 认选项仍用 `options` 里的原名，这里只管显示。
+    pub fn option_label(&self, value: &str, name: &str) -> String {
+        use rust_i18n::t;
+        let text = match (self.smelt, value) {
+            (_, "true") if self.boolean.is_some() => t!("choice.on"),
+            (_, "false") if self.boolean.is_some() => t!("choice.off"),
+            (Some(SmeltConfig::ScriptTools), "on") => t!("choice.on"),
+            (Some(SmeltConfig::ScriptTools), "off") => t!("choice.off"),
+            (Some(SmeltConfig::PermissionMode), "default") => t!("config.permission_mode.ask"),
+            (Some(SmeltConfig::PermissionMode), "bypassPermissions") => {
+                t!("config.permission_mode.full")
+            }
+            (Some(SmeltConfig::ThinkingLevel), "off") => t!("config.thinking_level.off"),
+            (Some(SmeltConfig::ThinkingLevel), "minimal") => t!("config.thinking_level.minimal"),
+            (Some(SmeltConfig::ThinkingLevel), "low") => t!("config.thinking_level.low"),
+            (Some(SmeltConfig::ThinkingLevel), "medium") => t!("config.thinking_level.medium"),
+            (Some(SmeltConfig::ThinkingLevel), "high") => t!("config.thinking_level.high"),
+            (Some(SmeltConfig::ThinkingLevel), "xhigh") => t!("config.thinking_level.xhigh"),
+            (Some(SmeltConfig::ThinkingLevel), "max") => t!("config.thinking_level.max"),
+            _ => return name.to_string(),
+        };
+        text.into_owned()
+    }
+
+    /// 当前选中项给人看的名字。
+    pub fn current_label(&self) -> String {
+        self.options
+            .iter()
+            .find(|(_, name)| name == &self.current_name)
+            .map_or_else(
+                || self.current_name.clone(),
+                |(value, name)| self.option_label(value, name),
+            )
+    }
 }
 
 /// 写入 `session/set_config_option` 的值。select 走值 id，开关走 bool。

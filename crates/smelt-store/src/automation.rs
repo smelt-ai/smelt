@@ -69,7 +69,8 @@ pub(crate) fn read_automation_snapshot(
         let mut statement = connection.prepare(
             "SELECT id, automation_id, source, status, created_at, scheduled_for, started_at,
                         delivery_attempt_at, delivery_attempts, finished_at, session_id,
-                        provider_session_id, output, error, runtime_released_at, context_json
+                        provider_session_id, output, error, runtime_released_at, context_json,
+                        error_code
                  FROM automation_run ORDER BY created_at, id",
         )?;
         let rows = statement.query_map([], |row| {
@@ -90,6 +91,7 @@ pub(crate) fn read_automation_snapshot(
                 error: row.get(13)?,
                 runtime_released_at: row.get(14)?,
                 context_json: row.get(15)?,
+                error_code: row.get(16)?,
             })
         })?;
         for row in rows {
@@ -154,8 +156,10 @@ pub(crate) fn write_automation_snapshot(
             "INSERT INTO automation_run(
                    id, automation_id, source, status, created_at, scheduled_for, started_at,
                    delivery_attempt_at, delivery_attempts, finished_at, session_id,
-                   provider_session_id, output, error, runtime_released_at, context_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                   provider_session_id, output, error, runtime_released_at, context_json,
+                   error_code
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                   ?17)
                  ON CONFLICT(id) DO UPDATE SET
                    automation_id = excluded.automation_id,
                    source = excluded.source,
@@ -171,7 +175,8 @@ pub(crate) fn write_automation_snapshot(
                    output = excluded.output,
                    error = excluded.error,
                    runtime_released_at = excluded.runtime_released_at,
-                   context_json = excluded.context_json",
+                   context_json = excluded.context_json,
+                   error_code = excluded.error_code",
             params![
                 run.id,
                 run.automation_id,
@@ -189,6 +194,7 @@ pub(crate) fn write_automation_snapshot(
                 run.error.as_deref(),
                 run.runtime_released_at,
                 &run.context_json,
+                run.error_code.as_deref(),
             ],
         )?;
     }

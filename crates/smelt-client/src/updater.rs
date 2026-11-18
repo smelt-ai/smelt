@@ -56,13 +56,6 @@ pub enum UpdateChannel {
 impl UpdateChannel {
     pub const ALL: [Self; 2] = [Self::Dev, Self::Prod];
 
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Dev => "内测版",
-            Self::Prod => "生产版",
-        }
-    }
-
     /// 填进更新清单地址 `{channel}` 的名字，和存盘的写法一致。
     const fn slug(self) -> &'static str {
         match self {
@@ -115,7 +108,7 @@ pub enum UpdateStatus {
     Failed(UpdateFailure),
 }
 
-/// 更新链路中面向用户的失败类别。
+/// 更新链路中面向用户的失败类别。给人看的字由界面按类别翻（更新插件）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateFailure {
     Check,
@@ -127,32 +120,6 @@ pub enum UpdateFailure {
     /// Windows 上不是安装程序装的（开发构建、拷出来的 exe）：没有能覆盖的安装，不检查、
     /// 不下载。
     NotInstalled,
-}
-
-impl UpdateFailure {
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::Check => "检查更新失败",
-            Self::Download => "下载更新失败",
-            Self::Recovery => "恢复更新失败",
-            Self::Location => "需要先移到「应用程序」",
-            Self::NotInstalled => "这个 Smelt 不能自动更新",
-        }
-    }
-
-    pub const fn detail(self) -> &'static str {
-        match self {
-            Self::Check => "暂时无法连接更新服务，请检查网络后重试。",
-            Self::Download => "更新包下载或准备失败，请检查网络和可用存储空间后重试。",
-            Self::Recovery => "上次更新事务尚未恢复，请重试；现有安装不会被覆盖。",
-            Self::Location => {
-                "Smelt 没放进「应用程序」就打开了，macOS 让它在只读位置运行，更新装不上。移过去后会自动重新打开，后台会话不受影响。"
-            }
-            Self::NotInstalled => {
-                "它不是安装程序装的（比如开发构建）。去下载页下载安装程序装好后，就能在这里更新。"
-            }
-        }
-    }
 }
 
 impl UpdateStatus {
@@ -328,7 +295,12 @@ async fn fetch_candidate(channel: UpdateChannel) -> anyhow::Result<UpdateCandida
         .await?
         .into_iter()
         .next()
-        .with_context(|| format!("没有已传好更新包的{}", channel.label()))
+        .with_context(|| {
+            format!(
+                "the {} channel has no release with an uploaded package",
+                channel.slug()
+            )
+        })
 }
 
 /// 手动下载页。生产版直接落到最新正式版；内测版看列表（最新的可能是预发布）。打包时
@@ -358,10 +330,10 @@ struct UpdateManifest {
 async fn fetch_manifest(manifest_url: &str) -> anyhow::Result<UpdateCandidate> {
     let body = fetch_metadata(manifest_url, "application/json").await?;
     let manifest: UpdateManifest = serde_json::from_slice(&body)
-        .with_context(|| format!("{manifest_url} 不是有效的更新清单"))?;
+        .with_context(|| format!("{manifest_url} isn't a valid update manifest"))?;
     let download_url = manifest.url.trim().to_string();
     if download_url.is_empty() {
-        anyhow::bail!("{manifest_url} 缺少 url");
+        anyhow::bail!("{manifest_url} has no url");
     }
     validate_download_url(&download_url)?;
 
@@ -398,13 +370,13 @@ fn release_label_from_url(download_url: &str) -> String {
         })
         .map(|value| value.trim_end_matches(".zip").to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "更新包".to_string())
+        .unwrap_or_else(|| "update".to_string())
 }
 
 async fn fetch_github_releases(channel: UpdateChannel) -> anyhow::Result<Vec<UpdateCandidate>> {
     let body = fetch_metadata(RELEASES_API, "application/vnd.github+json").await?;
     let releases: Vec<GithubRelease> =
-        serde_json::from_slice(&body).context("GitHub 发布列表格式不对")?;
+        serde_json::from_slice(&body).context("the GitHub release list is malformed")?;
     let candidates = pick_releases(&releases, channel, platform::update_asset);
     for candidate in &candidates {
         validate_download_url(&candidate.url)?;
@@ -438,9 +410,9 @@ fn pick_releases(
 
 fn validate_download_url(download_url: &str) -> anyhow::Result<()> {
     let parsed = url::Url::parse(download_url)
-        .map_err(|error| anyhow::anyhow!("更新 url 无效：{download_url}（{error}）"))?;
+        .map_err(|error| anyhow::anyhow!("invalid update url: {download_url} ({error})"))?;
     if parsed.scheme() != "https" {
-        anyhow::bail!("更新 url 必须使用 HTTPS：{download_url}");
+        anyhow::bail!("the update url must use HTTPS: {download_url}");
     }
     Ok(())
 }
@@ -467,15 +439,15 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
         .read_timeout(READ_TIMEOUT)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
-                attempt.error("更新地址跳转次数过多")
+                attempt.error("the update URL redirected too many times")
             } else if attempt.url().scheme() != "https" {
-                attempt.error("更新地址跳转到了非 HTTPS 地址")
+                attempt.error("the update URL redirected to a non-HTTPS address")
             } else {
                 attempt.follow()
             }
         }))
         .build()
-        .context("创建更新用的 HTTP 客户端失败")
+        .context("couldn't create the HTTP client for updates")
 }
 
 /// 取一个小响应（清单、发布列表、校验和）：整个请求限时，响应限大小。
@@ -493,13 +465,13 @@ async fn fetch_metadata(url: &str, accept: &str) -> anyhow::Result<Vec<u8>> {
         .content_length()
         .is_some_and(|len| len > MAX_METADATA_BYTES)
     {
-        anyhow::bail!("{url} 的响应过大");
+        anyhow::bail!("the response from {url} is too large");
     }
     let mut body = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
         body.extend_from_slice(&chunk);
         if body.len() as u64 > MAX_METADATA_BYTES {
-            anyhow::bail!("{url} 的响应过大");
+            anyhow::bail!("the response from {url} is too large");
         }
     }
     Ok(body)
@@ -517,20 +489,20 @@ async fn open_package_download(url: &str, kind: &str) -> anyhow::Result<reqwest:
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
     {
-        anyhow::bail!("更新地址返回了 HTML，不是{kind}：{url}");
+        anyhow::bail!("the update URL returned HTML, not the {kind}: {url}");
     }
     if resp
         .content_length()
         .is_some_and(|len| len > MAX_PACKAGE_BYTES)
     {
-        anyhow::bail!("更新包大小超出上限：{url}");
+        anyhow::bail!("the update package exceeds the size limit: {url}");
     }
     Ok(resp)
 }
 
 fn ensure_package_size(received: u64) -> anyhow::Result<()> {
     if received > MAX_PACKAGE_BYTES {
-        anyhow::bail!("更新包超出大小上限，已停止下载");
+        anyhow::bail!("the update package exceeded the size limit; download stopped");
     }
     Ok(())
 }
@@ -560,8 +532,8 @@ pub fn shutdown_local_daemon() -> bool {
 mod tests {
     use super::{
         CheckOutcome, GithubAsset, GithubRelease, InstalledRelease, UpdateCandidate, UpdateChannel,
-        UpdateFailure, UpdateManifest, decide_check_outcome, manifest_url, manifest_version_text,
-        pick_releases, release_label_from_url, validate_download_url,
+        UpdateManifest, decide_check_outcome, manifest_url, manifest_version_text, pick_releases,
+        release_label_from_url, validate_download_url,
     };
 
     fn candidate(url: &str) -> UpdateCandidate {
@@ -702,21 +674,6 @@ mod tests {
             Some("0".into())
         );
         assert_eq!(release_label_from_url(&manifest.url), "35039");
-    }
-
-    #[test]
-    fn update_failure_messages_stay_user_facing() {
-        assert_eq!(UpdateFailure::Check.title(), "检查更新失败");
-        assert_eq!(
-            UpdateFailure::Check.detail(),
-            "暂时无法连接更新服务，请检查网络后重试。"
-        );
-        assert_eq!(UpdateFailure::Download.title(), "下载更新失败");
-        assert_eq!(UpdateFailure::Recovery.title(), "恢复更新失败");
-        assert!(
-            !UpdateFailure::Check.detail().contains("http"),
-            "设置页不应展示底层请求 URL"
-        );
     }
 
     #[test]

@@ -3,35 +3,27 @@
 use super::*;
 use crate::memory::{MemorySettingsForm, rerank_model_label};
 use api::model::memory_settings::RerankModel;
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-
-const DESCRIPTION: &str = "按问题把相关的记忆附到对话里。关键词检索总是开着；重排模型和向量检索都可选，不可用时自动退回。";
+use smelt_plugin_api::ui::kit::TYPE;
 
 /// 配的是能力库眼下选中的那台机器。
 pub(super) fn pi_memory_page(
     entity: Entity<CapabilitiesPage>,
     page: &CapabilitiesPage,
-) -> SettingPage {
-    let rerank_runtime = page.machine.clone();
-    let form_runtime = page.machine.clone();
-    SettingPage::new("记忆 · 召回")
-        .description(DESCRIPTION)
-        .default_open(true)
-        .group(
-            SettingGroup::new()
-                .title("重排模型")
-                .item(SettingItem::render(move |_, window, cx: &mut App| {
-                    let form = memory_form(&rerank_runtime, window, cx);
-                    render_rerank_model(entity.clone(), form, cx)
-                })),
+    window: &mut Window,
+    cx: &mut App,
+) -> SettingsPage {
+    let form = memory_form(&page.machine, window, cx);
+    SettingsPage::new("capabilities-pane:memory")
+        .child(page_intro(t!("memory.description")))
+        .child(
+            SettingsSection::new()
+                .title(t!("memory.rerank_title"))
+                .child(render_rerank_model(entity, form.clone(), cx)),
         )
-        .group(
-            SettingGroup::new()
-                .title("向量检索服务（可选）")
-                .item(SettingItem::render(move |_, window, cx: &mut App| {
-                    let form = memory_form(&form_runtime, window, cx);
-                    render_form(form, cx)
-                })),
+        .child(
+            SettingsSection::new()
+                .title(t!("memory.vector_title"))
+                .child(render_form(form, cx)),
         )
 }
 
@@ -57,87 +49,73 @@ fn render_rerank_model(
     form: Entity<MemorySettingsForm>,
     cx: &mut App,
 ) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
+    let muted = rgb(ui_theme::muted());
     let current = form.read(cx).rerank_model.clone();
     let label = rerank_model_label(current.as_ref());
-    let picker = Button::new("pi-memory-rerank-model")
-        .small()
-        .label(label)
-        .dropdown_menu(move |mut menu, window, cx| {
-            let auto_form = form.clone();
-            menu = menu.item(
-                PopupMenuItem::new(rerank_model_label(None))
-                    .checked(current.is_none())
-                    .on_click(move |_, _, cx| {
-                        auto_form.update(cx, |form, cx| form.set_rerank_model(None, cx));
-                    }),
-            );
-            // 重排在那台机器的运行时上跑，模型也从那台机器的里选。表单按机器分开，和页面
-            // 在配的是同一台。
-            let groups = page.read(cx).pi_model_choice_groups();
-            if !groups.is_empty() {
-                menu = menu.separator();
-            }
-            for group in groups {
-                let group_form = form.clone();
-                let current = current.clone();
-                let models = group.models;
-                menu = menu.submenu(
-                    group.provider_name.clone(),
-                    window,
-                    cx,
-                    move |mut sub, _, _| {
-                        for choice in &models {
-                            let checked = current.as_ref().is_some_and(|model| {
-                                model.provider == choice.provider && model.id == choice.id
-                            });
-                            let item_form = group_form.clone();
-                            let model = RerankModel {
-                                provider: choice.provider.clone(),
-                                id: choice.id.clone(),
-                            };
-                            sub = sub.item(
-                                PopupMenuItem::new(choice.short_label().to_string())
-                                    .checked(checked)
-                                    .on_click(move |_, _, cx| {
-                                        let model = model.clone();
-                                        item_form.update(cx, |form, cx| {
-                                            form.set_rerank_model(Some(model), cx)
-                                        });
-                                    }),
-                            );
-                        }
-                        sub.scrollable(true)
-                    },
+    let trigger = Button::new("pi-memory-rerank-model").small().label(label);
+    let picker = MenuTrigger::dropdown("pi-memory-rerank-model-menu", trigger, move |_, cx| {
+        let auto_form = form.clone();
+        let mut menu = Menu::new().item(
+            MenuItem::new(rerank_model_label(None))
+                .checked(current.is_none())
+                .on_click(move |_, _, cx| {
+                    auto_form.update(cx, |form, cx| form.set_rerank_model(None, cx));
+                }),
+        );
+        // 重排在那台机器的运行时上跑，模型也从那台机器的里选。表单按机器分开，和页面
+        // 在配的是同一台。
+        let groups = page.read(cx).pi_model_choice_groups();
+        if !groups.is_empty() {
+            menu = menu.separator();
+        }
+        for group in groups {
+            let mut sub = Menu::new();
+            for choice in &group.models {
+                let checked = current.as_ref().is_some_and(|model| {
+                    model.provider == choice.provider && model.id == choice.id
+                });
+                let item_form = form.clone();
+                let model = RerankModel {
+                    provider: choice.provider.clone(),
+                    id: choice.id.clone(),
+                };
+                sub = sub.item(
+                    MenuItem::new(choice.short_label().to_string())
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let model = model.clone();
+                            item_form.update(cx, |form, cx| form.set_rerank_model(Some(model), cx));
+                        }),
                 );
             }
-            menu
-        });
-    v_flex()
+            menu = menu.item(MenuItem::new(group.provider_name.clone()).submenu(sub));
+        }
+        menu
+    });
+    div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_2()
         .child(picker)
-        .child(div().text_xs().text_color(muted).child(
-            "会话第一轮、压缩之后和 memory_search 时，用它从候选里挑相关的记忆。选小而快的模型即可；\
-             指定的模型不可用时这一轮只用检索结果，不会换成别的模型。推理自动压到最低档。",
-        ))
+        .child(
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(t!("memory.rerank_description").into_owned()),
+        )
         .into_any_element()
 }
 
 fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
-    let (fg, muted, danger, success) = {
-        let theme = cx.theme();
-        (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.danger,
-            theme.success,
-        )
-    };
+    let fg = rgb(ui_theme::text());
+    let muted = rgb(ui_theme::muted());
+    let danger = rgb(ui_theme::bad());
+    let success = rgb(ui_theme::ok());
     let state = form.read(cx);
     let status = state.status_line();
     let error = state.error.clone();
-    let notice = state.notice;
+    let notice = state.notice.clone();
     let api_key_set = state.api_key_set();
     let testing = state.testing;
     let test_result = state.test_result.clone();
@@ -147,11 +125,18 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
         state.api_key.clone(),
     );
 
-    let field = |label: &'static str, input: &Entity<InputState>| {
-        v_flex()
+    let field = |label: std::borrow::Cow<'static, str>, input: &Entity<InputState>| {
+        div()
+            .flex()
+            .flex_col()
             .w_full()
             .gap_1()
-            .child(div().text_xs().text_color(fg).child(label))
+            .child(
+                div()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(fg)
+                    .child(SharedString::from(label)),
+            )
             .child(TextInput::new(input))
     };
 
@@ -160,19 +145,20 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
     let clear_key_form = form.clone();
     let clear_all_form = form.clone();
 
-    let mut actions = h_flex()
-        .gap_2()
+    let mut actions = div()
+        .flex()
         .items_center()
+        .gap_2()
         .child(
             Button::new("test-pi-memory")
                 .small()
                 .label(if testing {
-                    "测试中…"
+                    t!("memory.testing")
                 } else {
-                    "测试连接"
+                    t!("memory.test")
                 })
                 .disabled(testing)
-                .tooltip("用上面填的值发一次请求，确认服务可用（不必先保存）")
+                .tooltip(t!("memory.test_tooltip"))
                 .on_click(move |_, window, cx| {
                     test_form.update(cx, |form, cx| form.test(window, cx));
                 }),
@@ -181,7 +167,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
             Button::new("save-pi-memory")
                 .primary()
                 .small()
-                .label("保存")
+                .label(t!("common.save"))
                 .on_click(move |_, window, cx| {
                     save_form.update(cx, |form, cx| form.save(window, cx));
                 }),
@@ -191,7 +177,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
             Button::new("clear-pi-memory-key")
                 .quiet()
                 .small()
-                .label("清除密钥")
+                .label(t!("memory.clear_key"))
                 .on_click(move |_, window, cx| {
                     clear_key_form.update(cx, |form, cx| form.clear_api_key(window, cx));
                 }),
@@ -201,45 +187,64 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
         Button::new("clear-pi-memory")
             .quiet()
             .small()
-            .label("清空配置")
+            .label(t!("memory.clear_all"))
             .on_click(move |_, window, cx| {
                 clear_all_form.update(cx, |form, cx| form.clear_all(window, cx));
             }),
     );
     if let Some(notice) = notice {
-        actions = actions.child(div().text_xs().text_color(muted).child(notice));
+        actions = actions.child(
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(SharedString::from(notice)),
+        );
     }
 
-    let mut content = v_flex()
+    let mut content = div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_3()
-        .child(div().text_xs().text_color(muted).child(
-            "填一个 OpenAI 兼容的 /embeddings 服务（含 Ollama 等本地服务，如 http://localhost:11434/v1）。\
-             没配或服务不可用时，只用关键词 + 模型重排。",
-        ))
-        .child(div().text_sm().text_color(fg).child(status))
-        .child(field("服务地址", &base_url))
-        .child(field("模型", &model))
-        .child(field("API Key（可选）", &api_key))
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(muted)
-                .child("API Key 留空表示保持不变；已存的密钥不会显示。"),
+                .child(t!("memory.form_description").into_owned()),
+        )
+        .child(div().type_style(TYPE.ui).text_color(fg).child(status))
+        .child(field(t!("memory.base_url"), &base_url))
+        .child(field(t!("memory.model"), &model))
+        .child(field(t!("memory.api_key"), &api_key))
+        .child(
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(t!("memory.key_hint").into_owned()),
         );
     if let Some(error) = error {
-        content = content.child(div().text_xs().text_color(danger).child(error));
+        content = content.child(
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(danger)
+                .child(error),
+        );
     }
     match test_result {
         Some(Ok(message)) => {
-            content = content.child(div().text_xs().text_color(success).child(message));
+            content = content.child(
+                div()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(success)
+                    .child(message),
+            );
         }
         Some(Err(message)) => {
             content = content.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(danger)
-                    .child(format!("测试失败：{message}")),
+                    .child(t!("memory.test_failed", message = message).into_owned()),
             );
         }
         None => {}

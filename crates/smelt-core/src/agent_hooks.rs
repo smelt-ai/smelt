@@ -274,7 +274,7 @@ fn write_text_atomic(path: &std::path::Path, out: &str) -> Result<(), String> {
     };
     let parent = target
         .parent()
-        .ok_or_else(|| format!("{} 没有父目录", target.display()))?;
+        .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -306,7 +306,7 @@ fn install_hook_file(
     let notify = smelt_notify_path();
     if !notify.is_file() {
         return Err(format!(
-            "找不到 {}，请先编译安装 smelt-notify",
+            "Can't find {}; build and install smelt-notify first",
             notify.display()
         ));
     }
@@ -315,7 +315,8 @@ fn install_hook_file(
     }
     let mut root = if path.is_file() {
         let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&raw).map_err(|e| format!("{} 不是有效 JSON：{e}", path.display()))?
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("{} isn't valid JSON: {e}", path.display()))?
     } else {
         serde_json::json!({})
     };
@@ -324,19 +325,19 @@ fn install_hook_file(
     }
     let hooks = root
         .as_object_mut()
-        .ok_or_else(|| format!("{} 根不是对象", path.display()))?
+        .ok_or_else(|| format!("the root of {} isn't an object", path.display()))?
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}));
     let hooks = hooks
         .as_object_mut()
-        .ok_or_else(|| "hooks 不是对象".to_string())?;
+        .ok_or_else(|| "hooks isn't an object".to_string())?;
     for event in events {
         let command = provider_hook_command(provider, event);
         let groups = hooks
             .entry(*event)
             .or_insert_with(|| serde_json::json!([]))
             .as_array_mut()
-            .ok_or_else(|| format!("hooks.{event} 不是数组"))?;
+            .ok_or_else(|| format!("hooks.{event} isn't an array"))?;
         groups.retain_mut(|group| {
             let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
                 return true;
@@ -535,12 +536,12 @@ fn remove_smelt_antigravity_handlers(definition: &mut serde_json::Map<String, se
 pub(crate) fn merge_antigravity_hooks(root: &mut serde_json::Value) -> Result<(), String> {
     let root = root
         .as_object_mut()
-        .ok_or_else(|| "Antigravity hooks 文件根不是对象".to_string())?;
+        .ok_or_else(|| "the root of the Antigravity hooks file isn't an object".to_string())?;
     let definition = root
         .entry(ANTIGRAVITY_HOOK_NAME)
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| format!("Antigravity hook {ANTIGRAVITY_HOOK_NAME} 不是对象"))?;
+        .ok_or_else(|| format!("Antigravity hook {ANTIGRAVITY_HOOK_NAME} isn't an object"))?;
     remove_smelt_antigravity_handlers(definition);
     definition.insert("enabled".into(), serde_json::json!(true));
 
@@ -555,7 +556,7 @@ pub(crate) fn merge_antigravity_hooks(root: &mut serde_json::Value) -> Result<()
             .entry(*event)
             .or_insert_with(|| serde_json::json!([]))
             .as_array_mut()
-            .ok_or_else(|| format!("{ANTIGRAVITY_HOOK_NAME}.{event} 不是数组"))?;
+            .ok_or_else(|| format!("{ANTIGRAVITY_HOOK_NAME}.{event} isn't an array"))?;
         if *event == "PostToolUse" {
             handlers.push(serde_json::json!({
                 "matcher": "",
@@ -575,7 +576,7 @@ fn install_antigravity_hooks_at(path: &std::path::Path) -> Result<(), String> {
     let mut root = if path.is_file() {
         let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
         serde_json::from_str(&raw)
-            .map_err(|error| format!("{} 不是有效 JSON：{error}", path.display()))?
+            .map_err(|error| format!("{} isn't valid JSON: {error}", path.display()))?
     } else {
         serde_json::json!({})
     };
@@ -587,11 +588,11 @@ pub fn install_antigravity_hooks() -> Result<(), String> {
     let notify = smelt_notify_path();
     if !notify.is_file() {
         return Err(format!(
-            "找不到 {}，请先编译安装 smelt-notify",
+            "Can't find {}; build and install smelt-notify first",
             notify.display()
         ));
     }
-    let path = antigravity_hooks_path().ok_or_else(|| "无 home 目录".to_string())?;
+    let path = antigravity_hooks_path().ok_or_else(|| "no home directory".to_string())?;
     install_antigravity_hooks_at(&path)
 }
 
@@ -601,7 +602,7 @@ pub(crate) fn uninstall_antigravity_hooks_at(path: &std::path::Path) -> Result<(
     }
     let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut root: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|error| format!("{} 不是有效 JSON：{error}", path.display()))?;
+        .map_err(|error| format!("{} isn't valid JSON: {error}", path.display()))?;
     let Some(root_object) = root.as_object_mut() else {
         return Ok(());
     };
@@ -626,11 +627,11 @@ pub fn uninstall_antigravity_hooks() -> Result<(), String> {
 }
 
 pub fn install_copilot_hooks() -> Result<(), String> {
-    let path = copilot_hooks_path().ok_or_else(|| "无 home 目录".to_string())?;
+    let path = copilot_hooks_path().ok_or_else(|| "no home directory".to_string())?;
     let notify = smelt_notify_path();
     if !notify.is_file() {
         return Err(format!(
-            "找不到 {}，请先编译安装 smelt-notify",
+            "Can't find {}; build and install smelt-notify first",
             notify.display()
         ));
     }
@@ -639,19 +640,19 @@ pub fn install_copilot_hooks() -> Result<(), String> {
     }
     let mut root = if path.is_file() {
         serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("{} 不是有效 JSON：{e}", path.display()))?
+            .map_err(|e| format!("{} isn't valid JSON: {e}", path.display()))?
     } else {
         serde_json::json!({})
     };
     let root_obj = root
         .as_object_mut()
-        .ok_or_else(|| "hooks 文件根不是对象".to_string())?;
+        .ok_or_else(|| "the root of the hooks file isn't an object".to_string())?;
     root_obj.insert("version".into(), serde_json::json!(1));
     let hooks = root_obj
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| "hooks 不是对象".to_string())?;
+        .ok_or_else(|| "hooks isn't an object".to_string())?;
     for event in COPILOT_LEGACY_HOOK_EVENTS {
         let Some(handlers) = hooks.get_mut(*event).and_then(|v| v.as_array_mut()) else {
             continue;
@@ -672,7 +673,7 @@ pub fn install_copilot_hooks() -> Result<(), String> {
             .entry(*event)
             .or_insert_with(|| serde_json::json!([]))
             .as_array_mut()
-            .ok_or_else(|| format!("hooks.{event} 不是数组"))?;
+            .ok_or_else(|| format!("hooks.{event} isn't an array"))?;
         handlers.retain(|handler| {
             !handler
                 .get("bash")
@@ -685,16 +686,19 @@ pub fn install_copilot_hooks() -> Result<(), String> {
 }
 
 pub fn install_codex_hooks() -> Result<(), String> {
-    let path = codex_hooks_path().ok_or_else(|| "无 home 目录".to_string())?;
+    let path = codex_hooks_path().ok_or_else(|| "no home directory".to_string())?;
     install_hook_file(path.clone(), CODEX_HOOK_EVENTS, "codex", false)?;
     let commands = CODEX_HOOK_EVENTS
         .iter()
         .map(|event| provider_hook_command("codex", event))
         .collect::<Vec<_>>();
-    let cwd = std::env::current_dir().map_err(|error| format!("读取当前目录失败：{error}"))?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| format!("couldn't read the current directory: {error}"))?;
     crate::codex_app_server::grant_codex_hook_trust(&path, &cwd, &commands)
         .map(|_| ())
-        .map_err(|error| format!("Codex hooks 已安装，但自动信任失败：{error}"))
+        .map_err(|error| {
+            format!("Codex hooks are installed, but trusting them automatically failed: {error}")
+        })
 }
 
 pub fn uninstall_copilot_hooks() -> Result<(), String> {
@@ -747,8 +751,8 @@ pub fn claude_hooks_installed() -> bool {
 /// `StopCancelled` 只写给 Grok，并从已有的 Claude settings 里清掉。旧版本把它
 /// 和 Claude 事件写在同一张表里，Claude Code 会因此每次启动弹出 Settings Warning。
 pub fn install_claude_hooks() -> Result<(), String> {
-    let claude = claude_settings_path().ok_or_else(|| "无 home 目录".to_string())?;
-    let grok = grok_hooks_path().ok_or_else(|| "无 home 目录".to_string())?;
+    let claude = claude_settings_path().ok_or_else(|| "no home directory".to_string())?;
+    let grok = grok_hooks_path().ok_or_else(|| "no home directory".to_string())?;
     install_hook_file(claude.clone(), CLAUDE_HOOK_EVENTS, "claude", false)?;
     uninstall_hook_file(Some(claude), GROK_ONLY_HOOK_EVENTS)?;
     install_hook_file(grok.clone(), CLAUDE_HOOK_EVENTS, "grok", false)?;
@@ -770,7 +774,7 @@ fn read_json_or_empty(path: &std::path::Path, provider: &str) -> Result<serde_js
     let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&raw).map_err(|error| {
         format!(
-            "{} 的 {provider} 配置不是有效 JSON：{error}",
+            "the {provider} config in {} isn't valid JSON: {error}",
             path.display()
         )
     })
@@ -820,19 +824,19 @@ fn merge_cursor_hooks(root: &mut serde_json::Value) -> Result<(), String> {
     remove_cursor_hooks(root);
     let root = root
         .as_object_mut()
-        .ok_or_else(|| "Cursor hooks 文件根不是对象".to_string())?;
+        .ok_or_else(|| "the root of the Cursor hooks file isn't an object".to_string())?;
     root.insert("version".into(), serde_json::json!(1));
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| "Cursor hooks 不是对象".to_string())?;
+        .ok_or_else(|| "Cursor hooks isn't an object".to_string())?;
     for event in CURSOR_HOOK_EVENTS {
         let handlers = hooks
             .entry(*event)
             .or_insert_with(|| serde_json::json!([]))
             .as_array_mut()
-            .ok_or_else(|| format!("Cursor hooks.{event} 不是数组"))?;
+            .ok_or_else(|| format!("Cursor hooks.{event} isn't an array"))?;
         handlers.push(serde_json::json!({
             "command": provider_hook_command("cursor", event),
             "timeout": 3,
@@ -863,11 +867,11 @@ fn install_cursor_hooks() -> Result<(), String> {
     let notify = smelt_notify_path();
     if !notify.is_file() {
         return Err(format!(
-            "找不到 {}，请先编译安装 smelt-notify",
+            "Can't find {}; build and install smelt-notify first",
             notify.display()
         ));
     }
-    let path = cursor_hooks_path().ok_or_else(|| "无 home 目录".to_string())?;
+    let path = cursor_hooks_path().ok_or_else(|| "no home directory".to_string())?;
     let mut root = read_json_or_empty(&path, "Cursor")?;
     merge_cursor_hooks(&mut root)?;
     write_json_atomic(&path, &root)
@@ -919,17 +923,17 @@ fn merge_kiro_hooks(root: &mut serde_json::Value) -> Result<(), String> {
     remove_kiro_hooks(root);
     let root = root
         .as_object_mut()
-        .ok_or_else(|| "Kiro hooks 文件根不是对象".to_string())?;
+        .ok_or_else(|| "the root of the Kiro hooks file isn't an object".to_string())?;
     root.insert("version".into(), serde_json::json!("v1"));
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
-        .ok_or_else(|| "Kiro hooks 不是数组".to_string())?;
+        .ok_or_else(|| "Kiro hooks isn't an array".to_string())?;
     for event in KIRO_HOOK_EVENTS {
         hooks.push(serde_json::json!({
             "name": format!("Smelt status · {event}"),
-            "description": "向 Smelt 上报 agent 状态；不参与工具权限决策",
+            "description": "Reports agent status to Smelt; takes no part in tool permission decisions",
             "trigger": event,
             "action": {
                 "type": "command",
@@ -964,11 +968,11 @@ fn install_kiro_hooks() -> Result<(), String> {
     let notify = smelt_notify_path();
     if !notify.is_file() {
         return Err(format!(
-            "找不到 {}，请先编译安装 smelt-notify",
+            "Can't find {}; build and install smelt-notify first",
             notify.display()
         ));
     }
-    let path = kiro_hooks_path().ok_or_else(|| "无 home 目录".to_string())?;
+    let path = kiro_hooks_path().ok_or_else(|| "no home directory".to_string())?;
     let mut root = read_json_or_empty(&path, "Kiro")?;
     merge_kiro_hooks(&mut root)?;
     write_json_atomic(&path, &root)
@@ -1266,7 +1270,7 @@ export const SmeltNotifications = async () => ({
           question.questions?.[0]?.header ??
           question.text ??
           question.title ??
-          "OpenCode 等待你的输入";
+          "OpenCode is waiting for your input";
         await forward("Notification", {
           session_id: sessionID,
           notification_type: "elicitation_dialog",
@@ -1308,7 +1312,7 @@ fn install_opencode_plugin_at(
         let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
         if !source.starts_with(OPENCODE_PLUGIN_MARKER) {
             return Err(format!(
-                "{} 已存在且不是 Smelt 管理的插件，请先改名后重试",
+                "{} already exists and isn't a plugin Smelt manages; rename it and try again",
                 path.display()
             ));
         }
@@ -1320,11 +1324,11 @@ fn install_opencode_plugin() -> Result<(), String> {
     let notify = smelt_notify_path();
     if !notify.is_file() {
         return Err(format!(
-            "找不到 {}，请先编译安装 smelt-notify",
+            "Can't find {}; build and install smelt-notify first",
             notify.display()
         ));
     }
-    let path = opencode_plugin_path().ok_or_else(|| "无 home/config 目录".to_string())?;
+    let path = opencode_plugin_path().ok_or_else(|| "no home/config directory".to_string())?;
     install_opencode_plugin_at(&path, &notify)
 }
 
@@ -1419,7 +1423,7 @@ fn run_all_hook_operations(kind: HookOperationKind) -> Result<(), String> {
 pub fn install_agent_hooks() -> Result<(), String> {
     if !smelt_notify_available() {
         return Err(format!(
-            "{} 不存在，运行时没有装好，请重新安装",
+            "{} doesn't exist; the runtime isn't installed correctly, reinstall it",
             smelt_notify_path().display()
         ));
     }

@@ -182,10 +182,10 @@ fn normalize_hook_event_for_provider(
                 .filter(|error| !error.is_empty());
             let progress = describe_antigravity_progress(hook);
             if let Some(error) = error {
-                let tool = hook_tool_name(hook).unwrap_or("工具");
+                let tool = hook_tool_name(hook).unwrap_or("A tool");
                 Some((
                     AgentEventKind::ToolFailed,
-                    Some(format!("⚠ {tool} 执行失败：{}", truncate_chars(error, 60))),
+                    Some(format!("⚠ {tool} failed: {}", truncate_chars(error, 60))),
                 ))
             } else {
                 Some((AgentEventKind::ToolFinished, progress))
@@ -196,18 +196,18 @@ fn normalize_hook_event_for_provider(
         // 下一步），但 question 带上失败标记——不然「刚才那个工具是不是炸了」在
         // UI 上完全看不出来，跟正常跑完长得一样。
         "PostToolUseFailure" | "postToolUseFailure" => {
-            let tool = hook_tool_name(hook).unwrap_or("工具");
+            let tool = hook_tool_name(hook).unwrap_or("A tool");
             let err = first_present_str(hook, &["error", "error_message", "tool_error", "reason"]);
             let q = match err {
-                Some(e) => format!("⚠ {tool} 执行失败：{}", truncate_chars(e, 60)),
-                None => format!("⚠ {tool} 执行失败"),
+                Some(e) => format!("⚠ {tool} failed: {}", truncate_chars(e, 60)),
+                None => format!("⚠ {tool} failed"),
             };
             Some((AgentEventKind::ToolFailed, Some(q)))
         }
         // 独立的权限请求事件（比 Notification 更明确），见官方 hooks 文档。
         "PermissionRequest" | "permissionRequest" if provider != "copilot" => {
             let tool = hook_tool_name(hook).unwrap_or("");
-            let q = format!("请求执行 {tool}");
+            let q = format!("Wants to run {tool}");
             Some((AgentEventKind::ApprovalRequested, Some(q)))
         }
         // Copilot 在自身权限引擎作出 allow/deny/ask 决定前就发送此事件；只有后续
@@ -243,8 +243,8 @@ fn normalize_hook_event_for_provider(
         "SubagentStart" | "subagentStart" => {
             let name = first_present_str(hook, &["agent_type", "subagent_type"]);
             let q = match name {
-                Some(n) => format!("子任务：{n}"),
-                None => "运行子任务".to_string(),
+                Some(n) => format!("Subtask: {n}"),
+                None => "Running a subtask".to_string(),
             };
             Some((AgentEventKind::SubagentStarted, Some(q)))
         }
@@ -261,7 +261,11 @@ fn normalize_hook_event_for_provider(
                 0 => (AgentEventKind::TurnSucceeded, None),
                 n => (
                     AgentEventKind::ToolFinished,
-                    Some(format!("后台还有 {n} 个子任务在跑")),
+                    Some(if n == 1 {
+                        "1 subtask still running in the background".to_string()
+                    } else {
+                        format!("{n} subtasks still running in the background")
+                    }),
                 ),
             })
         }
@@ -272,16 +276,18 @@ fn normalize_hook_event_for_provider(
         "StopFailure" => {
             let reason = first_present_str(hook, &["error", "error_type", "reason"]);
             let q = match reason {
-                Some(r) => format!("⚠ 因错误中断：{r}"),
-                None => "⚠ 因错误中断".to_string(),
+                Some(r) => format!("⚠ Interrupted by an error: {r}"),
+                None => "⚠ Interrupted by an error".to_string(),
             };
             Some((AgentEventKind::TurnFailed, Some(q)))
         }
         "ErrorOccurred" | "errorOccurred" => {
             let reason = first_present_str(hook, &["message", "error", "reason"]);
             let message = Some(match reason {
-                Some(reason) => format!("⚠ 因错误中断：{}", truncate_chars(reason, 60)),
-                None => "⚠ 因错误中断".to_string(),
+                Some(reason) => {
+                    format!("⚠ Interrupted by an error: {}", truncate_chars(reason, 60))
+                }
+                None => "⚠ Interrupted by an error".to_string(),
             });
             if hook["recoverable"].as_bool() == Some(true) {
                 Some((AgentEventKind::ToolFailed, message))
@@ -416,7 +422,7 @@ fn describe_codex_user_input(hook: &serde_json::Value) -> String {
         })
         .filter(|text| !text.trim().is_empty())
         .map(|text| truncate_chars(text.trim(), 80))
-        .unwrap_or_else(|| "Codex 等待你的输入".to_string())
+        .unwrap_or_else(|| "Codex is waiting for your input".to_string())
 }
 
 fn hook_tool_name(hook: &serde_json::Value) -> Option<&str> {
@@ -429,13 +435,13 @@ fn hook_tool_name(hook: &serde_json::Value) -> Option<&str> {
 fn describe_invocation(hook: &serde_json::Value) -> Option<String> {
     hook["invocationNum"]
         .as_u64()
-        .map(|number| format!("第 {} 次模型调用", number + 1))
+        .map(|number| format!("Model call {}", number + 1))
 }
 
 fn describe_antigravity_progress(hook: &serde_json::Value) -> Option<String> {
     let detail = describe_tool_call(hook)?;
     Some(match hook["stepIdx"].as_u64() {
-        Some(step) => format!("第 {} 步 · {detail}", step + 1),
+        Some(step) => format!("Step {} · {detail}", step + 1),
         None => detail,
     })
 }
@@ -446,7 +452,7 @@ fn normalize_antigravity_stop(
     if hook["fullyIdle"].as_bool() == Some(false) {
         return Some((
             AgentEventKind::ToolFinished,
-            Some("后台任务仍在运行".to_string()),
+            Some("Background tasks are still running".to_string()),
         ));
     }
     let error = hook["error"]
@@ -466,11 +472,11 @@ fn normalize_antigravity_stop(
             || reason.contains("abort")
     });
     if error.is_some() || reason_is_failure {
-        let detail = error.or(reason).unwrap_or("未知错误");
+        let detail = error.or(reason).unwrap_or("unknown error");
         Some((
             AgentEventKind::TurnFailed,
             Some(format!(
-                "⚠ Antigravity 已停止：{}",
+                "⚠ Antigravity stopped: {}",
                 truncate_chars(detail, 60)
             )),
         ))
@@ -623,8 +629,8 @@ fn normalize_cursor_stop(hook: &serde_json::Value) -> Option<(AgentEventKind, Op
     }
 
     let detail = first_present_str(hook, &["error", "error_message", "message", "reason"])
-        .map(|detail| format!("⚠ Cursor 回合失败：{}", truncate_chars(detail, 60)))
-        .unwrap_or_else(|| "⚠ Cursor 回合失败".to_string());
+        .map(|detail| format!("⚠ Cursor turn failed: {}", truncate_chars(detail, 60)))
+        .unwrap_or_else(|| "⚠ Cursor turn failed".to_string());
     Some((AgentEventKind::TurnFailed, Some(detail)))
 }
 
@@ -895,7 +901,7 @@ mod tests {
         let hook = json!({ "hook_event_name": "PermissionRequest", "tool_name": "Bash" });
         let (kind, q) = map_hook_event(&hook).unwrap();
         assert_eq!(kind, AgentEventKind::ApprovalRequested);
-        assert_eq!(q.as_deref(), Some("请求执行 Bash"));
+        assert_eq!(q.as_deref(), Some("Wants to run Bash"));
     }
 
     #[test]
@@ -911,7 +917,7 @@ mod tests {
             map_hook_event_for_provider(&hook, "codex"),
             Some((
                 AgentEventKind::ApprovalRequested,
-                Some("请求执行 Bash".to_string())
+                Some("Wants to run Bash".to_string())
             ))
         );
     }
@@ -971,7 +977,7 @@ mod tests {
             map_hook_event_for_provider(&missing, "codex"),
             Some((
                 AgentEventKind::InputRequested,
-                Some("Codex 等待你的输入".to_string())
+                Some("Codex is waiting for your input".to_string())
             ))
         );
     }
@@ -1311,7 +1317,7 @@ mod tests {
         let event = normalize_hook_event_for_provider(&hook, "cursor").unwrap();
         assert_eq!(event.kind, AgentEventKind::SubagentStarted);
         assert_eq!(event.agent_id.as_deref(), Some("cursor-conversation"));
-        assert_eq!(event.message.as_deref(), Some("子任务：explore"));
+        assert_eq!(event.message.as_deref(), Some("Subtask: explore"));
     }
 
     #[test]
@@ -1323,7 +1329,7 @@ mod tests {
         });
         let event = normalize_hook_event_for_provider(&hook, "antigravity").unwrap();
         assert_eq!(event.kind, AgentEventKind::PromptSubmitted);
-        assert_eq!(event.message.as_deref(), Some("第 1 次模型调用"));
+        assert_eq!(event.message.as_deref(), Some("Model call 1"));
         assert_eq!(event.agent_id.as_deref(), Some("conversation-1"));
     }
 
@@ -1344,7 +1350,7 @@ mod tests {
         assert_eq!(event.tool_name.as_deref(), Some("run_command"));
         assert_eq!(event.tool_use_id.as_deref(), Some("4"));
         assert_eq!(event.agent_id.as_deref(), Some("conversation-2"));
-        assert_eq!(event.message.as_deref(), Some("第 5 步 · Bash: cargo test"));
+        assert_eq!(event.message.as_deref(), Some("Step 5 · Bash: cargo test"));
     }
 
     #[test]
@@ -1359,7 +1365,7 @@ mod tests {
             map_hook_event_for_provider(&hook, "antigravity"),
             Some((
                 AgentEventKind::ToolFailed,
-                Some("⚠ run_command 执行失败：exit status 1".to_string())
+                Some("⚠ run_command failed: exit status 1".to_string())
             ))
         );
     }
@@ -1389,7 +1395,7 @@ mod tests {
             ),
             Some((
                 AgentEventKind::ToolFinished,
-                Some("后台任务仍在运行".to_string())
+                Some("Background tasks are still running".to_string())
             ))
         );
         assert_eq!(
@@ -1404,7 +1410,7 @@ mod tests {
             ),
             Some((
                 AgentEventKind::TurnFailed,
-                Some("⚠ Antigravity 已停止：rate limited".to_string())
+                Some("⚠ Antigravity stopped: rate limited".to_string())
             ))
         );
         assert_eq!(
@@ -1418,7 +1424,7 @@ mod tests {
             ),
             Some((
                 AgentEventKind::ToolFinished,
-                Some("后台任务仍在运行".to_string())
+                Some("Background tasks are still running".to_string())
             )),
             "Antigravity 小写 stop 也必须看 fullyIdle"
         );
@@ -1439,7 +1445,7 @@ mod tests {
             ])),
             Some((
                 AgentEventKind::ToolFinished,
-                Some("后台还有 3 个子任务在跑".to_string())
+                Some("3 subtasks still running in the background".to_string())
             ))
         );
         assert_eq!(
@@ -1474,7 +1480,7 @@ mod tests {
             ),
             Some((
                 AgentEventKind::ToolFinished,
-                Some("后台还有 1 个子任务在跑".to_string())
+                Some("1 subtask still running in the background".to_string())
             )),
             "Grok 的快照字段是驼峰"
         );
@@ -1706,7 +1712,7 @@ mod tests {
             map_hook_event(&hook),
             Some((
                 AgentEventKind::SubagentStarted,
-                Some("子任务：Explore".to_string())
+                Some("Subtask: Explore".to_string())
             ))
         );
     }
@@ -1718,7 +1724,7 @@ mod tests {
             map_hook_event_for_provider(&hook, "copilot"),
             Some((
                 AgentEventKind::SubagentStarted,
-                Some("子任务：Explore".to_string())
+                Some("Subtask: Explore".to_string())
             ))
         );
     }
@@ -1730,7 +1736,7 @@ mod tests {
             map_hook_event_for_provider(&hook, "copilot"),
             Some((
                 AgentEventKind::TurnFailed,
-                Some("⚠ 因错误中断：rate limited".to_string())
+                Some("⚠ Interrupted by an error: rate limited".to_string())
             ))
         );
     }
@@ -1760,7 +1766,7 @@ mod tests {
             map_hook_event(&hook),
             Some((
                 AgentEventKind::SubagentStarted,
-                Some("运行子任务".to_string())
+                Some("Running a subtask".to_string())
             ))
         );
     }
@@ -1783,7 +1789,7 @@ mod tests {
         });
         let (kind, q) = map_hook_event(&hook).unwrap();
         assert_eq!(kind, AgentEventKind::ToolFailed);
-        assert_eq!(q.as_deref(), Some("⚠ Bash 执行失败：command not found"));
+        assert_eq!(q.as_deref(), Some("⚠ Bash failed: command not found"));
     }
 
     /// 官方字段名没有精确文档，宽容读取：这里故意不给 `error`，只给
@@ -1796,7 +1802,7 @@ mod tests {
             "tool_error": "permission denied",
         });
         let (_, q) = map_hook_event(&hook).unwrap();
-        assert_eq!(q.as_deref(), Some("⚠ Write 执行失败：permission denied"));
+        assert_eq!(q.as_deref(), Some("⚠ Write failed: permission denied"));
     }
 
     /// 一个错误字段都拿不到也不能整条不上报——「失败」这个事实来自
@@ -1806,7 +1812,7 @@ mod tests {
         let hook = json!({ "hook_event_name": "PostToolUseFailure", "tool_name": "Bash" });
         let (kind, q) = map_hook_event(&hook).unwrap();
         assert_eq!(kind, AgentEventKind::ToolFailed);
-        assert_eq!(q.as_deref(), Some("⚠ Bash 执行失败"));
+        assert_eq!(q.as_deref(), Some("⚠ Bash failed"));
     }
 
     #[test]
@@ -1814,7 +1820,7 @@ mod tests {
         let hook = json!({ "hook_event_name": "StopFailure", "error_type": "rate_limit" });
         let (kind, q) = map_hook_event(&hook).unwrap();
         assert_eq!(kind, AgentEventKind::TurnFailed);
-        assert_eq!(q.as_deref(), Some("⚠ 因错误中断：rate_limit"));
+        assert_eq!(q.as_deref(), Some("⚠ Interrupted by an error: rate_limit"));
         // 失败与正常 Stop 必须是不同 phase，不能只靠文案区分。
         assert_ne!(
             map_hook_event(&hook),
@@ -1826,6 +1832,6 @@ mod tests {
     fn stop_failure_without_reason_still_flags_error() {
         let hook = json!({ "hook_event_name": "StopFailure" });
         let (_, q) = map_hook_event(&hook).unwrap();
-        assert_eq!(q.as_deref(), Some("⚠ 因错误中断"));
+        assert_eq!(q.as_deref(), Some("⚠ Interrupted by an error"));
     }
 }

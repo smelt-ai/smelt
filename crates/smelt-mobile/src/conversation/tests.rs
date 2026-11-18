@@ -463,8 +463,12 @@ fn full_and_delta_frames_restore_the_view() {
     next["phase"] = "thinking".into();
     next["status_line"] = "正在写".into();
     next["compacting"] = true.into();
-    next["notice"] =
-        json!({"id": 7, "kind": "config_rejected", "text": "更新会话配置失败：timeout"});
+    next["notice"] = json!({
+        "id": 7,
+        "kind": "config_rejected",
+        "text": "Couldn't update the session setting: timeout",
+        "note": {"kind": "config_update_failed", "detail": "timeout"},
+    });
     watcher.delta(next);
     let event = events.snapshot_where("增量帧", |event| texts(event).len() == 3);
     assert_eq!(texts(&event), ["你好", "第一句，第二句", "新的一条"]);
@@ -477,7 +481,10 @@ fn full_and_delta_frames_restore_the_view() {
     assert!(view.compacting);
     let notice = view.notice.expect("提示要投影给手机");
     assert_eq!(notice.id, 7);
-    assert_eq!(notice.text, "更新会话配置失败：timeout");
+    assert_eq!(
+        notice.text, "Couldn't update the session setting: timeout",
+        "有种类按当前语言说（测试里是英文）"
+    );
     assert!(runtime.actions().is_empty(), "镜像对得上不该要整段帧");
 }
 

@@ -267,17 +267,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<string>macosx</string>
 	<key>DTPlatformName</key>
 	<string>macosx</string>
-	<key>CFBundleURLTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleURLName</key>
-			<string>${BUNDLE_ID}.file</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>smelt-file</string>
-			</array>
-		</dict>
-	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>NSLocalNetworkUsageDescription</key>

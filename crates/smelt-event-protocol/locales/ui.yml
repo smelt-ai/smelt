@@ -1,0 +1,85 @@
+_version: 2
+conversation_end.with_detail:
+  en: "%{reason}: %{detail}"
+  zh-CN: "%{reason}：%{detail}"
+conversation_end.connection_lost:
+  en: The connection dropped unexpectedly
+  zh-CN: 连接意外中断
+conversation_end.reconnect_exhausted:
+  en: The connection kept dropping; gave up after %{attempts} automatic reconnects
+  zh-CN: 连接接连中断，自动重连了 %{attempts} 次都没撑住
+conversation_end.reconnect_failed:
+  en: Automatic reconnect failed
+  zh-CN: 自动重连失败
+conversation_end.previous_agent_still_running:
+  en: The previous agent process didn't exit
+  zh-CN: 旧的智能体进程未能退出
+conversation_end.driver_crashed:
+  en: The conversation stopped unexpectedly
+  zh-CN: 会话驱动异常退出
+conversation_end.deleted:
+  en: This conversation was deleted
+  zh-CN: 会话已被删除
+conversation_end.session_in_use:
+  en: The agent session is already used by another conversation
+  zh-CN: 智能体会话已被另一条对话占用
+conversation_end.history_missing:
+  en: The earlier session no longer exists, so it can't be restored
+  zh-CN: 旧会话记录不存在，无法恢复
+conversation_end.restore_unsupported:
+  en: This agent can't load earlier sessions, so the history can't be restored
+  zh-CN: 智能体不支持加载旧会话，无法恢复历史对话
+conversation_end.restore_failed:
+  en: Couldn't restore the conversation
+  zh-CN: 恢复对话失败
+conversation_end.invalid_open_request:
+  en: The request to open the conversation wasn't valid
+  zh-CN: 无效的对话打开请求
+conversation_end.archived:
+  en: This conversation is archived; restore it first
+  zh-CN: 对话已归档，请先恢复
+conversation_end.open_failed:
+  en: Couldn't open the conversation
+  zh-CN: 对话没能打开
+conversation_end.sign_in.copilot:
+  en: "GitHub Copilot isn't signed in, or the sign-in expired. Run `copilot` in a terminal, enter `/login` to sign in with GitHub (the account needs a Copilot subscription), then start a new session"
+  zh-CN: GitHub Copilot 还没登录或登录已失效：在终端运行 `copilot`，输入 `/login` 完成 GitHub 登录（账号需要有 Copilot 订阅），然后新建会话
+conversation_end.sign_in.claude:
+  en: "Claude Code isn't signed in, or the sign-in expired. Run `claude` in a terminal and enter `/login` to sign in, then start a new session"
+  zh-CN: Claude Code 还没登录或登录已失效：在终端运行 `claude`，输入 `/login` 完成登录，然后新建会话
+conversation_end.sign_in.codex:
+  en: "Codex isn't signed in, or the sign-in expired. Run `codex login` in a terminal to sign in, then start a new session"
+  zh-CN: Codex 还没登录或登录已失效：在终端运行 `codex login` 完成登录，然后新建会话
+conversation_end.sign_in.other:
+  en: The agent needs you to sign in first. Sign in with this agent's CLI in a terminal, then start a new session
+  zh-CN: agent 要求先登录：在终端里用这个 agent 的 CLI 完成登录，然后新建会话
+turn_failure.interrupted:
+  en: The reply was interrupted; restart to continue
+  zh-CN: 本轮回复已中断，重启后可继续
+turn_failure.max_tokens:
+  en: Hit this turn's token limit
+  zh-CN: 已达到本轮最大令牌数
+turn_failure.max_turn_requests:
+  en: Hit this turn's request limit
+  zh-CN: 已达到本轮最大请求数
+turn_failure.refused:
+  en: The agent refused to continue
+  zh-CN: Agent 拒绝继续处理
+turn_failure.failed:
+  en: The turn didn't finish normally
+  zh-CN: 回合未正常完成
+attention.approval:
+  en: Waiting for approval
+  zh-CN: 等你批准
+attention.input:
+  en: Waiting for your reply
+  zh-CN: 等你输入
+attention.success:
+  en: Done
+  zh-CN: 已完成
+attention.failure:
+  en: Failed
+  zh-CN: 失败
+attention.unnamed_session:
+  en: Session %{id}
+  zh-CN: 会话 %{id}

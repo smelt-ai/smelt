@@ -9,23 +9,36 @@
 
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AnyWindowHandle, App, AppContext, Entity, EventEmitter, Global, Task, Window};
+use gpui::{AnyWindowHandle, App, AppContext, Entity, EventEmitter, Global, Task};
 use serde::{Deserialize, Serialize};
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, ControlErrorCode};
 
 pub use serde_json;
-pub use smelt_client::runtime::RuntimeKey;
+// 一台机器的运行时：哪台 + 连它守护的客户端。
+pub use smelt_client::runtime::{Runtime, RuntimeKey};
 // 发给运行时的短请求（守护协议），如改历史会话的名字。
 pub use smelt_client::session_ops;
 // 插件自己的库：每个来源一个 SQLite 文件，表由插件自己建、自己迁移。
 pub use smelt_client_store::{PluginStore, plugin_store, rusqlite};
 pub use smelt_model as model;
+// 本机数据目录（`~/.smelt`）在哪。
+pub use smelt_paths as paths;
 pub use smelt_runtime_client as client;
 // 量进程的 CPU 和内存（桌面进程自己在这里量，会话的由运行时报）。
 pub use smelt_sys::process_usage;
+// 应用日志（`app.log`）和在后台线程里跑一个要 tokio 的 future。
+pub use smelt_sys::{app_log, block_on};
+// 这个构建的版本号。
+pub use smelt_version;
+// 桌面的在线更新（macOS 换 .app 包，Windows 拉起安装程序），和 macOS 上 App 放的位置。
+#[cfg(target_os = "macos")]
+pub use smelt_client::app_location;
+#[cfg(any(target_os = "macos", windows))]
+pub use smelt_client::updater;
 pub use smelt_ui as ui;
 // 主题目录：内置主题和第三方主题按来源登记、卸下，同一套接口（见 smelt_ui::theme_catalog）。
 pub use smelt_ui::theme_catalog::{
@@ -33,12 +46,22 @@ pub use smelt_ui::theme_catalog::{
     swatch as theme_swatch, themes,
 };
 
+// 接口库自己的界面文案（docs/i18n.md）。
+rust_i18n::i18n!("locales", fallback = "en");
+
 mod command;
+mod connections;
 mod context;
+mod context_menu;
+mod event;
 mod file;
 mod layout;
+mod locale;
+mod menu;
+mod online;
 mod page;
-pub mod sessions;
+mod quit;
+mod safe_area;
 mod settings;
 mod view;
 
@@ -46,24 +69,43 @@ mod view;
 pub mod js;
 
 pub use command::{
-    Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, NO_MAIN_WINDOW,
-    RunCommand, command, commands, invoke, register_commands, run, unregister_commands,
+    Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, RunCommand,
+    arg_fields, command, commands, invoke, no_main_window, register_commands, run,
+    unregister_commands,
+};
+pub use connections::{
+    ADD_MACHINE, AddMachine, AddedMachine, Connection, ConnectionLink, ConnectionState,
+    Connections, LinkRoute, MachineTarget, RECONNECT_MACHINE, REFRESH_CONNECTIONS, REMOVE_MACHINE,
+    RENAME_MACHINE, RenameMachine, SET_MACHINE_RELAY, SetMachineRelay, UPGRADE_MACHINE,
 };
 pub use context::{ActiveContext, ViewedSession, active_context, set_active_context};
+pub use context_menu::{
+    ContextMenuAction, ContextMenuItem, context_menu_args, context_menu_items,
+    observe_context_menu_items, register_context_menu_items, unregister_context_menu_items,
+};
+pub use event::Event;
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use layout::{
-    DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
-    register_layouts, unregister_layouts,
+    DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutMaterials, LayoutSource, Material, PanelInfo,
+    PanelState, STACK_PANEL, Stack, StackAxis, StackContent, StackItem, layout, layout_stacks,
+    layouts, parse_layout, register_layouts, unregister_layouts,
 };
+pub use locale::{
+    FALLBACK_LOCALE, LOCALES, Text, locale, set_locale, supported_locale, system_locale,
+};
+pub use menu::{MenuEntry, MenuSlot, menu_items, register_menu_items, unregister_menu_items};
+pub use online::wait_online;
 pub use page::{
     OPEN_PAGE, OUTLET_VIEW, OpenPage, PageInfo, PageSource, home_page, page, pages, register_pages,
     unregister_pages,
 };
-pub use settings::{SettingsEntry, SettingsGroup, settings_pane};
+pub use quit::{QUIT_NOW, QuitGuard, quit_guarded, register_quit_guard, unregister_quit_guard};
+pub use safe_area::{Adapt, SafeArea, safe_area, set_safe_area};
+pub use settings::{SettingsEntry, SettingsGroup};
 pub use view::{
     OPEN_VIEW, OpenView, PluginView, SET_VIEW_BADGE, ViewBadge, ViewBuilder, ViewHandle, ViewInfo,
-    ViewSpec, built_view, ensure_view, is_registered, register_views, set_view_badge,
-    unregister_views, view, view_badge, views,
+    ViewInstance, ViewSpec, built_view, create_view, ensure_view, is_registered, register_views,
+    set_view_badge, slot_views, unregister_views, view, view_badge, views,
 };
 
 /// 桌面挂着的一台机器。
@@ -73,11 +115,6 @@ pub struct Machine {
     pub name: String,
     /// 眼下用不了的原因（离线、版本不对），给人看的短语；能用是 `None`。
     pub unavailable: Option<String>,
-    /// 装了远程桌面、眼下连着。
-    pub has_desktop: bool,
-    /// 那台机器的 `SMELT_HOME`，按那台机器的路径写。远程机器还没连上过（或运行时太旧
-    /// 不报）是 `None`。智能体的 space 在它下面。
-    pub smelt_home: Option<String>,
 }
 
 /// 一个项目：在哪台机器上、根目录（那台机器上的路径）。
@@ -254,156 +291,6 @@ pub struct OpenInFileManager {
     pub path: PathBuf,
 }
 
-/// 改一台机器的智能体配置（[`Host::agent_settings`]），给 JS 插件用；Rust 插件用
-/// [`edit_agent_settings`]。`before` 是改之前读到的那份，`after` 是改成的那份；那台机器的
-/// 运行时按两者的差别合并，只写真正改了的字段，这期间别处改的其它字段不会被盖掉。改完由
-/// 运行时推回来（发 [`HostEvent::AgentSettingsChanged`]），宿主不先改本地。
-pub const EDIT_AGENT_SETTINGS: Command<AgentSettingsEdit, ()> =
-    Command::new("smelt.app/edit-agent-settings");
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentSettingsEdit {
-    #[serde(with = "machine_json")]
-    pub machine: RuntimeKey,
-    pub before: model::agent_host::AgentHostSettings,
-    pub after: model::agent_host::AgentHostSettings,
-}
-
-/// 发一次智能体配置修改的上限。运行时那边一次合并写库，正常是毫秒级。
-pub const AGENT_SETTINGS_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// 把 `edit` 发给那台机器的运行时，见 [`EDIT_AGENT_SETTINGS`]。返回运行时合并后的那份。
-pub fn send_agent_settings_edit(
-    edit: AgentSettingsEdit,
-    cx: &App,
-) -> Task<Result<model::agent_host::AgentHostSettings, String>> {
-    call::<model::control_api::AgentHostApplyEdit>(
-        &edit.machine,
-        model::agent_host::AgentHostEdit {
-            before: edit.before,
-            after: edit.after,
-        },
-        AGENT_SETTINGS_TIMEOUT,
-        cx,
-    )
-}
-
-/// 改那台机器的智能体配置：在 [`Host::agent_settings`] 那份上调 `f`，把改动发给它的运行时
-/// （见 [`EDIT_AGENT_SETTINGS`]）。改完由运行时推回来，这里不先改本地；配置还没收到、
-/// 给不了时报错，`f` 什么都没改时不发。
-///
-/// 每台机器一条队列，一次只发一份，轮到时才调 `f`：连着调几次就按调用的顺序都改上，后一份
-/// 看得到前一份的结果。前一份改完时推送可能还没到，所以接着改的以运行时回的那份为底。
-pub fn edit_agent_settings(
-    machine: &RuntimeKey,
-    f: impl FnOnce(&mut model::agent_host::AgentHostSettings) + 'static,
-    cx: &mut App,
-) -> Task<Result<(), String>> {
-    let (done, result) = futures_channel::oneshot::channel();
-    let edits = cx.default_global::<AgentSettingsEdits>();
-    let idle = !edits.0.contains_key(machine);
-    edits
-        .0
-        .entry(machine.clone())
-        .or_default()
-        .push_back(AgentSettingsEditJob {
-            edit: Box::new(f),
-            done,
-        });
-    if idle {
-        let machine = machine.clone();
-        cx.spawn(async move |cx| {
-            let mut last = None;
-            while let Some((job, before)) =
-                cx.update(|cx| next_agent_settings_edit(&machine, last.take(), cx))
-            {
-                let _ = job.done.send(
-                    apply_agent_settings_edit(&machine, job.edit, before, &mut last, cx).await,
-                );
-            }
-        })
-        .detach();
-    }
-    cx.spawn(async move |_| {
-        result
-            .await
-            .unwrap_or_else(|_| Err("智能体配置没有改完".to_string()))
-    })
-}
-
-/// 每台机器等着发的配置修改。有队列就是那台机器正在发，排空了就拿掉。
-#[derive(Default)]
-struct AgentSettingsEdits(
-    std::collections::BTreeMap<RuntimeKey, std::collections::VecDeque<AgentSettingsEditJob>>,
-);
-
-impl Global for AgentSettingsEdits {}
-
-type AgentSettingsChange = Box<dyn FnOnce(&mut model::agent_host::AgentHostSettings)>;
-
-struct AgentSettingsEditJob {
-    edit: AgentSettingsChange,
-    done: futures_channel::oneshot::Sender<Result<(), String>>,
-}
-
-/// 取那台机器的下一份修改和它的底稿：`last` 是上一份改完运行时回的，没有就用眼下收到的
-/// 那份。队列空了就拿掉它，返回 `None`。
-fn next_agent_settings_edit(
-    machine: &RuntimeKey,
-    last: Option<model::agent_host::AgentHostSettings>,
-    cx: &mut App,
-) -> Option<(
-    AgentSettingsEditJob,
-    Result<model::agent_host::AgentHostSettings, String>,
-)> {
-    let edits = cx.global_mut::<AgentSettingsEdits>();
-    let Some(job) = edits.0.get_mut(machine).and_then(|queue| queue.pop_front()) else {
-        edits.0.remove(machine);
-        return None;
-    };
-    let before = match last {
-        Some(last) => Ok(last),
-        None => host(cx)
-            .agent_settings(machine, cx)
-            .cloned()
-            .ok_or_else(|| {
-                host(cx)
-                    .agent_settings_unavailable(machine, cx)
-                    .unwrap_or_else(|| "这台机器的智能体配置还没收到，稍后再改".to_string())
-            }),
-    };
-    Some((job, before))
-}
-
-/// 在 `before` 上改，发出去；改上了把运行时回的那份记进 `last`。
-async fn apply_agent_settings_edit(
-    machine: &RuntimeKey,
-    edit: AgentSettingsChange,
-    before: Result<model::agent_host::AgentHostSettings, String>,
-    last: &mut Option<model::agent_host::AgentHostSettings>,
-    cx: &mut gpui::AsyncApp,
-) -> Result<(), String> {
-    let before = before?;
-    let mut after = before.clone();
-    edit(&mut after);
-    if after == before {
-        *last = Some(before);
-        return Ok(());
-    }
-    let sent = cx.update(|cx| {
-        send_agent_settings_edit(
-            AgentSettingsEdit {
-                machine: machine.clone(),
-                before,
-                after,
-            },
-            cx,
-        )
-    });
-    *last = Some(sent.await?);
-    Ok(())
-}
-
 /// 宿主转给插件的事。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
@@ -427,22 +314,25 @@ pub enum HostEvent {
     OverlayChanged,
     /// 挂着的机器变了：加了、移除了、改了名或连接状态。
     MachinesChanged,
-    /// 活动上下文变了：当前项目或舞台上露着的会话（读 [`active_context`]）。
+    /// 活动上下文变了：当前项目或露着的会话（读 [`active_context`]）。
     ActiveContextChanged,
     /// 有机器的会话状态或工作区目录变了（读 [`Host::session_states`]、
     /// [`Host::workspace_directory`]）。
     SessionsChanged,
     /// 系统通知的授权变了（读 [`Host::notification_permission`]）。
     NotificationPermissionChanged,
-    /// 某台机器的智能体配置变了（读 [`Host::agent_settings`]）。
-    AgentSettingsChanged,
     /// 看得见的视图变了：有的露出来、有的被挡住或收起，设置换了页、开了或关了（读
     /// [`Host::view_shown`]）。
     ShownViewsChanged,
+    /// 摆在页的布局里的视图变了：页、布局登记变了，或外观里换了布局（读
+    /// [`Host::view_laid_out`]）。
+    LaidOutViewsChanged,
     /// 视图登记变了：加了、替换了或撤下了，设置页也算（见 [`register_views`]）。
     ViewsChanged,
     /// 有视图的角标变了（读 [`view_badge`]）。
     ViewBadgesChanged,
+    /// 有视图的 safe area 变了（读 [`safe_area`]）：变了的视图已经重画，摆着子视图的据此重分。
+    SafeAreaChanged,
     /// 主题登记变了：宿主应重新应用当前主题并更新设置页。
     ThemesChanged,
     /// 布局登记变了（见 [`register_layouts`]）：选的布局可能刚登记上或撤下了。
@@ -451,6 +341,21 @@ pub enum HostEvent {
     PagesChanged,
     /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
     CommandsChanged,
+    /// 界面语言换了（读 [`locale`]）：窗口已经重画，存在视图状态里的字（建好的菜单、
+    /// 列表行、取过的 [`views`] 这些登记快照）要重建。
+    LocaleChanged,
+    /// 插件发的事件（见 [`Event`]）：`name` 是 `<来源>/<名字>`，载荷的形状由发的插件定，用
+    /// [`Event::parse`] 认。
+    Plugin {
+        name: gpui::SharedString,
+        payload: serde_json::Value,
+    },
+    /// 要在那台机器上打开这些路径：拖到 Dock 图标上的、Finder 里「用 Smelt 打开」的。路径
+    /// 是那台机器上的绝对路径，可能是目录也可能是文件。谁认谁开，宿主自己不开。
+    OpenPaths {
+        machine: RuntimeKey,
+        paths: Vec<String>,
+    },
 }
 
 /// 一条运行时话题推来的东西。载荷的形状见协议里那个话题的类型。
@@ -480,22 +385,26 @@ pub trait Host: 'static {
     fn machines(&self, cx: &App) -> Vec<Machine>;
     /// 那台机器的运行时客户端；机器已经移除是 `None`。
     fn client(&self, machine: &RuntimeKey, cx: &App) -> Option<RuntimeClient>;
-    /// 那台机器的智能体配置：自定义 Agent（profile）、智能体定义、环境变量。运行时推来的
-    /// 那一份，各处都读它；还没收到、给不了是 `None`。只读，改用 [`edit_agent_settings`]；
-    /// 变了发 [`HostEvent::AgentSettingsChanged`]。
-    fn agent_settings<'a>(
-        &self,
-        machine: &RuntimeKey,
-        cx: &'a App,
-    ) -> Option<&'a model::agent_host::AgentHostSettings>;
-    /// 那台机器给不了智能体配置的原因（运行时太旧等），给人看；收到了、还没收到是 `None`。
-    /// 变了发 [`HostEvent::AgentSettingsChanged`]。
-    fn agent_settings_unavailable(&self, machine: &RuntimeKey, cx: &App) -> Option<String>;
-    /// 那个视图此刻看得见：摆在布局里且所在组显示着它，或在舞台上开成了当前页；设置页
-    /// 是设置开着、停在这一页。视图
-    /// 被挡住、切走后还活着，要靠它知道自己露没露着，看不见时不做只为显示的事（采样、刷新）。
+    /// 开到那台机器运行时的长连接（终端、对话的字节流）用的连接器：在主线程上要，带去后台
+    /// 线程连，每次 `connect` 新开一条、阻塞。本机守护没在跑时由它拉起；远程的经 iroh 拨号，
+    /// 连不上就是连不上，调用方按断线处理（[`wait_online`] 等它回来再连）。短请求用
+    /// [`Host::client`]。机器已经移除是 `None`。
+    fn connector(&self, machine: &RuntimeKey, cx: &App) -> Option<Arc<dyn client::Connector>>;
+    /// 那台机器此刻在线：最近一次探测连得上、版本对得上。本机守护重启、升级的那一会儿也
+    /// 不在线。变了发 [`HostEvent::MachinesChanged`]；要等它在线用 [`wait_online`]。
+    fn machine_online(&self, machine: &RuntimeKey, cx: &App) -> bool;
+    /// 远程机器的连接表：配对了哪些、各自连得怎样。只读内存；改用 [`ADD_MACHINE`]、
+    /// [`REMOVE_MACHINE`] 这些命令。变了发 [`HostEvent::MachinesChanged`]。
+    fn connections(&self, cx: &App) -> Connections;
+    /// 那个视图此刻看得见：摆在布局里且所在组显示着它，或开在页的出口里；设置页是设置
+    /// 开着、停在这一页。视图被挡住、切走后还活着，要靠它知道自己露没露着，看不见时不做
+    /// 只为显示的事（采样、刷新）。
     /// 变了发 [`HostEvent::ShownViewsChanged`]。
     fn view_shown(&self, id: &str, cx: &App) -> bool;
+    /// 那个视图摆在某一页眼下装的布局里（哪页都算，不管露没露着）。没摆的视图打开时放进
+    /// 出口；启动器之类的入口据此列出要靠它们才打得开的视图。只看登记和选的布局，用户在
+    /// Dock 里拖动不增减视图。变了发 [`HostEvent::LaidOutViewsChanged`]。
+    fn view_laid_out(&self, id: &str, cx: &App) -> bool;
     /// 主窗口（工作台那扇）；还没开或已经关了是 `None`。命令在这里执行（见 [`run`]）。
     fn main_window(&self, cx: &App) -> Option<AnyWindowHandle>;
     /// 主窗口此刻在前台、人在用。回到前台发 [`HostEvent::WindowActivated`]；去后台不发，
@@ -504,7 +413,7 @@ pub trait Host: 'static {
     fn window_active(&self, cx: &App) -> bool;
     /// 主窗口里宿主自己的遮罩层（确认框、命令面板、大图预览）开着。原生子视图（网页视图）
     /// 贴在窗口上、盖得住这些层，开着时要让开；开关时发 [`HostEvent::OverlayChanged`]。
-    /// 插件自己用 `open_dialog` 开的对话框不算在内，用 `Window::has_active_dialog` 看。
+    /// 插件自己开的对话框不算在内，用 [`ui::dialog::is_open`] 看。
     fn overlay_open(&self, cx: &App) -> bool;
     /// 那台机器上的路径怎么切（`/` 还是 `\`）。远程机器还没连上过时按 POSIX。
     fn path_style(&self, machine: &RuntimeKey, cx: &App) -> model::runtime_path::PathStyle;
@@ -515,6 +424,15 @@ pub trait Host: 'static {
         machine: &RuntimeKey,
         cx: &App,
     ) -> Vec<model::daemon_state::DaemonSessionState>;
+    /// 那台机器当前这一轮会话快照里，这个会话的运行时还在不在；订阅还没就绪、判断不了是
+    /// `None`。断线重连前先问它：没了就不再接，只剩身份的按原 id 重新打开。变了发
+    /// [`HostEvent::SessionsChanged`]。
+    fn session_presence(
+        &self,
+        machine: &RuntimeKey,
+        session_id: &str,
+        cx: &App,
+    ) -> Option<model::daemon_state::RuntimePresence>;
     /// 那台机器的工作区目录：开着的项目和对话，是会话的名册（会话状态里没有的对话是还没
     /// 起过）。还没收到是 `None`。变了发 [`HostEvent::SessionsChanged`]。
     fn workspace_directory(
@@ -525,37 +443,6 @@ pub trait Host: 'static {
     /// 系统通知的授权。应用回到前台时重查；变了发
     /// [`HostEvent::NotificationPermissionChanged`]。
     fn notification_permission(&self, cx: &App) -> NotificationPermission;
-    /// 宿主的对话视图，接上守护里正在跑的那段对话，嵌进插件自己的页面（如自动化运行的
-    /// 现场）。对话的显示、输入、权限确认、重连都归宿主；它不进侧栏和工作区目录。守护里
-    /// 已经没有这段会话就接不上，先用 [`Host::session_states`] 看。只给 Rust 插件。
-    fn embed_conversation(
-        &self,
-        request: EmbedConversation,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Result<EmbeddedConversation, String>;
-}
-
-/// 要嵌哪段对话，见 [`Host::embed_conversation`]。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EmbedConversation {
-    pub machine: RuntimeKey,
-    /// 守护会话 id。
-    pub session_id: String,
-    /// 跑这段对话的 agent（`ConversationAgentKind::id`）。
-    pub agent: String,
-    pub cwd: String,
-    /// 这段对话是谁起的（自动化运行等），对话里据此显示来历。
-    pub binding: model::conversation::ConversationBinding,
-    /// 接上之前占位处显示的话，如「正在打开运行现场…」。
-    pub reason: String,
-}
-
-/// 嵌着的对话。留着它视图才跟宿主连着；扔掉就断开（会话本身不受影响）。
-pub struct EmbeddedConversation {
-    pub view: gpui::AnyView,
-    pub session_id: String,
-    pub _subscription: gpui::Subscription,
 }
 
 struct HostGlobal {
@@ -582,6 +469,12 @@ pub fn host(cx: &App) -> Rc<dyn Host> {
 /// 订阅 [`HostEvent`] 用的实体。
 pub fn events(cx: &App) -> Entity<HostEvents> {
     cx.global::<HostGlobal>().events.clone()
+}
+
+/// [`events`]，宿主还没装（测试里）是 `None`。
+#[cfg(feature = "js")]
+pub(crate) fn try_events(cx: &App) -> Option<Entity<HostEvents>> {
+    Some(cx.try_global::<HostGlobal>()?.events.clone())
 }
 
 /// 宿主发一条事件给所有订阅的插件。宿主还没装（测试里）就没人订阅，什么都不做。
@@ -617,8 +510,10 @@ pub fn unregister_themes(owner: &str, cx: &mut App) -> Vec<gpui::SharedString> {
 /// 一次运行时调用的默认上限。大仓库的 status、搜索也该在这个时间里回来。
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// 目标机器已经从这台桌面移除时报的话。
-pub const MACHINE_REMOVED: &str = "这台机器已经移除";
+/// 目标机器已经从这台桌面移除时报的话，按当前语言。
+pub fn machine_removed() -> String {
+    rust_i18n::t!("machine_removed").into_owned()
+}
 
 /// 在后台发一次控制调用给那台机器。客户端在主线程取好再带去后台：一次调用是一次 socket
 /// 往返（远程的还要过 iroh），不能卡住界面。失败给的是可以直接显示的原因。
@@ -635,7 +530,7 @@ where
 {
     let client = host(cx).client(machine, cx);
     cx.background_executor().spawn(async move {
-        let client = client.ok_or_else(|| MACHINE_REMOVED.to_string())?;
+        let client = client.ok_or_else(machine_removed)?;
         client.call::<C>(&params, timeout).map_err(call_error_text)
     })
 }
@@ -645,9 +540,9 @@ pub fn call_error_text(error: ControlClientError) -> String {
     match error {
         // 应用刚更新、守护还没换到新版时会这样：守护要等空闲才升级。
         ControlClientError::Protocol(error) if error.code == ControlErrorCode::MethodNotFound => {
-            "正在运行的 smeltd 版本较旧，还不支持这个操作；升级守护进程后重试".to_string()
+            rust_i18n::t!("daemon_outdated").into_owned()
         }
-        ControlClientError::Protocol(error) => error.message,
+        ControlClientError::Protocol(error) => error.text(),
         other => other.to_string(),
     }
 }
@@ -716,8 +611,8 @@ mod tests {
                         png: vec![1, 2],
                         color: 0x112233,
                     }),
-                    command: "smelt.sessions/activate".into(),
-                    args: serde_json::json!({ "session_id": "s" }),
+                    command: "example/activate".into(),
+                    args: serde_json::json!({ "machine": null, "session_id": "s" }),
                 },
                 StatusMenuItem::Separator,
             ],
@@ -767,162 +662,5 @@ mod tests {
         let bare = serde_json::json!({ "machine": null, "title": "选择", "confirm": "导入" });
         let request: PathRequest = serde_json::from_value(bare).unwrap();
         assert!(!request.files && !request.multiple);
-    }
-
-    /// 只有智能体配置的宿主：推来的配置记在全局上，客户端连着一个假运行时。
-    struct SettingsHost(FakeRuntime);
-
-    struct FakeSettings(model::agent_host::AgentHostSettings);
-
-    impl Global for FakeSettings {}
-
-    /// 假运行时：`agent.host.apply_edit` 记下收到的修改，把 `after` 存成它的配置并回给客户端；
-    /// 不推送，看得出客户端有没有先改本地。
-    #[derive(Clone, Default)]
-    struct FakeRuntime {
-        edits: std::sync::Arc<std::sync::Mutex<Vec<model::agent_host::AgentHostEdit>>>,
-    }
-
-    impl FakeRuntime {
-        fn edits(&self) -> Vec<model::agent_host::AgentHostEdit> {
-            self.edits.lock().unwrap().clone()
-        }
-
-        /// 每次连接给出一对 socket，另一端在新线程里答一条控制请求。
-        fn client(&self) -> RuntimeClient {
-            use smelt_runtime_client::protocol::control::ControlResponse;
-            use std::io::{BufRead as _, Write as _};
-
-            let fake = self.clone();
-            RuntimeClient::new(move || {
-                let (client, server) = smelt_runtime_client::RuntimeStream::pair()?;
-                let fake = fake.clone();
-                std::thread::spawn(move || {
-                    let mut line = String::new();
-                    std::io::BufReader::new(server.try_clone().unwrap())
-                        .read_line(&mut line)
-                        .unwrap();
-                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-                    assert_eq!(request["method"], "agent.host.apply_edit");
-                    let request_id = request["request_id"].as_str().unwrap().to_string();
-                    let edit: model::agent_host::AgentHostEdit =
-                        serde_json::from_value(request["params"].clone()).unwrap();
-                    let after = edit.after.clone();
-                    fake.edits.lock().unwrap().push(edit);
-                    let response =
-                        serde_json::to_value(ControlResponse::ok(request_id, after)).unwrap();
-                    writeln!(&server, "{response}").unwrap();
-                });
-                Ok(client)
-            })
-        }
-    }
-
-    impl Host for SettingsHost {
-        fn machines(&self, _: &App) -> Vec<Machine> {
-            Vec::new()
-        }
-        fn client(&self, _: &RuntimeKey, _: &App) -> Option<RuntimeClient> {
-            Some(self.0.client())
-        }
-        fn agent_settings<'a>(
-            &self,
-            _: &RuntimeKey,
-            cx: &'a App,
-        ) -> Option<&'a model::agent_host::AgentHostSettings> {
-            Some(&cx.global::<FakeSettings>().0)
-        }
-        fn agent_settings_unavailable(&self, _: &RuntimeKey, _: &App) -> Option<String> {
-            None
-        }
-        fn view_shown(&self, _: &str, _: &App) -> bool {
-            false
-        }
-        fn main_window(&self, _: &App) -> Option<AnyWindowHandle> {
-            None
-        }
-        fn window_active(&self, _: &App) -> bool {
-            false
-        }
-        fn overlay_open(&self, _: &App) -> bool {
-            false
-        }
-        fn path_style(&self, _: &RuntimeKey, _: &App) -> model::runtime_path::PathStyle {
-            model::runtime_path::PathStyle::Posix
-        }
-        fn session_states(
-            &self,
-            _: &RuntimeKey,
-            _: &App,
-        ) -> Vec<model::daemon_state::DaemonSessionState> {
-            Vec::new()
-        }
-        fn workspace_directory(
-            &self,
-            _: &RuntimeKey,
-            _: &App,
-        ) -> Option<model::workspace_directory::WorkspaceDirectory> {
-            None
-        }
-        fn notification_permission(&self, _: &App) -> NotificationPermission {
-            NotificationPermission::Checking
-        }
-        fn embed_conversation(
-            &self,
-            _: EmbedConversation,
-            _: &mut Window,
-            _: &mut App,
-        ) -> Result<EmbeddedConversation, String> {
-            Err("没有对话".to_string())
-        }
-    }
-
-    /// 同一拍里连着改两次：按顺序都发出去，第二份以运行时回的第一份为底（推送还没到也看得到
-    /// 第一份的结果），本地那份一直不动，等运行时推回来。
-    #[gpui::test]
-    fn edits_in_one_tick_all_apply_in_order(cx: &mut gpui::TestAppContext) {
-        let runtime = FakeRuntime::default();
-        let fresh = model::agent_host::AgentHostSettings::fresh();
-        let (first, second) = cx.update(|cx| {
-            cx.set_global(FakeSettings(fresh.clone()));
-            install(SettingsHost(runtime.clone()), cx);
-            let first = edit_agent_settings(
-                &RuntimeKey::Local,
-                |settings| settings.default_conversation_agent = Some("a".to_string()),
-                cx,
-            );
-            let second = edit_agent_settings(
-                &RuntimeKey::Local,
-                |settings| {
-                    assert_eq!(settings.default_conversation_agent.as_deref(), Some("a"));
-                    settings.hooks_enabled = false;
-                },
-                cx,
-            );
-            (first, second)
-        });
-        cx.run_until_parked();
-        assert_eq!(cx.foreground_executor().block_test(first), Ok(()));
-        assert_eq!(cx.foreground_executor().block_test(second), Ok(()));
-        let edits = runtime.edits();
-        assert_eq!(edits.len(), 2);
-        assert_eq!(edits[0].before, fresh);
-        assert_eq!(edits[1].before, edits[0].after);
-        assert!(!edits[1].after.hooks_enabled);
-        cx.update(|cx| assert_eq!(cx.global::<FakeSettings>().0, fresh, "本地不先改"));
-    }
-
-    /// 什么都没改的不发。
-    #[gpui::test]
-    fn an_edit_that_changes_nothing_is_not_sent(cx: &mut gpui::TestAppContext) {
-        let runtime = FakeRuntime::default();
-        let unchanged = cx.update(|cx| {
-            cx.set_global(FakeSettings(model::agent_host::AgentHostSettings::fresh()));
-            install(SettingsHost(runtime.clone()), cx);
-            edit_agent_settings(&RuntimeKey::Local, |_| {}, cx)
-        });
-        cx.run_until_parked();
-        assert_eq!(cx.foreground_executor().block_test(unchanged), Ok(()));
-        assert!(runtime.edits().is_empty());
     }
 }

@@ -57,7 +57,7 @@ impl AcpStatusEvidence {
         let outcome = if matches!(self.phase, DaemonPhase::Idle)
             && self
                 .turn_outcome
-                .is_some_and(|outcome| outcome.failure_message().is_some())
+                .is_some_and(|outcome| outcome.failure().is_some())
         {
             AgentStatus::NeedsYou
         } else {

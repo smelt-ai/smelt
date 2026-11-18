@@ -6,8 +6,8 @@
 //! [`HostEvent::RuntimeTopic`]，正在配那台机器就重读。
 
 use super::*;
-use api::client::RuntimeClient;
-use api::client::protocol::control::{ControlCall, EmptyParams};
+use api::client::protocol::control::{ControlCall, EmptyParams, SystemDescribe};
+use api::client::{DEFAULT_REQUEST_TIMEOUT, RuntimeClient};
 use api::model::control_api::PiConfigGet;
 use api::model::pi_mcp::PiMcpServer;
 use api::model::pi_model_settings::{PiModelChoiceGroup, PiModelSettings, PiSettingsSummary};
@@ -36,8 +36,8 @@ impl CapabilitiesPage {
             .error
             .clone()
             .unwrap_or_else(|| match self.machine {
-                RuntimeKey::Local => "正在读取 Pi 配置…".to_string(),
-                RuntimeKey::Remote(_) => "正在读取这台机器的 Pi 配置…".to_string(),
+                RuntimeKey::Local => t!("config.loading").into_owned(),
+                RuntimeKey::Remote(_) => t!("config.loading_remote").into_owned(),
             })
     }
 
@@ -90,7 +90,9 @@ impl CapabilitiesPage {
         self.pi_model_editor_error = None;
         self.pi_plugin_pending_delete = None;
         self.pi_plugin_error = None;
+        self.remote_desktop = false;
         self.refresh_pi_library(cx);
+        self.refresh_remote_desktop(cx);
         if self.tab == CapabilitiesTab::Models {
             self.refresh_pi_auth_providers(cx);
         }
@@ -101,7 +103,7 @@ impl CapabilitiesPage {
     pub(crate) fn pi_library_client(&self, cx: &App) -> Result<RuntimeClient, String> {
         api::host(cx)
             .client(&self.machine, cx)
-            .ok_or_else(|| api::MACHINE_REMOVED.to_string())
+            .ok_or_else(api::machine_removed)
     }
 
     /// 换上运行时给的新快照。修改回带的快照比之前发出、还没回来的读取都新。
@@ -204,10 +206,27 @@ impl CapabilitiesPage {
     }
 
     /// 那台机器装了远程桌面：浏览器类 MCP 预设在那里接远程桌面里的 Chrome。
-    pub(crate) fn pi_mcp_remote_desktop(&self, cx: &App) -> bool {
-        api::host(cx)
-            .machines(cx)
-            .iter()
-            .any(|machine| machine.key == self.machine && machine.has_desktop)
+    pub(crate) fn pi_mcp_remote_desktop(&self) -> bool {
+        self.remote_desktop
+    }
+
+    /// 问那台机器装没装远程桌面（运行时 `system.describe` 报的 `desktop`），和运行时添加
+    /// 预设时按的是同一个判断。问不到（离线）留着原来的。
+    pub(crate) fn refresh_remote_desktop(&mut self, cx: &mut Context<Self>) {
+        self.run_pi_call::<SystemDescribe>(
+            EmptyParams::default(),
+            DEFAULT_REQUEST_TIMEOUT,
+            cx,
+            |this, result, cx| {
+                let Ok(described) = result else {
+                    return;
+                };
+                let remote_desktop = described.daemon.desktop == Some(true);
+                if this.remote_desktop != remote_desktop {
+                    this.remote_desktop = remote_desktop;
+                    cx.notify();
+                }
+            },
+        );
     }
 }

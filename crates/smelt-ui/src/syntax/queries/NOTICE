@@ -1,0 +1,7 @@
+本目录下的 tree-sitter 查询文件（*.scm）取自 GPUI Kit
+（https://github.com/longbridge/gpui-kit，crates/component/src/highlighter/languages/），
+多数又源自各语言的 tree-sitter 语法仓库。
+
+Copyright 2024 - 2026 Longbridge <https://longbridge.com>
+Licensed under the Apache License, Version 2.0.
+http://www.apache.org/licenses/LICENSE-2.0

@@ -4,7 +4,7 @@
 //! 按恢复会话时同一套规则读成对话条目。只认宿主分的 id 格式，拿它拼路径不会越出目录。
 
 use smelt_core::control_api::{SubagentTranscriptParams, SubagentTranscriptResult};
-use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlReason};
 
 const PAGE_DEFAULT: u32 = 200;
 const PAGE_MAX: u32 = 1000;
@@ -14,29 +14,31 @@ pub(crate) fn subagent_transcript(
 ) -> Result<SubagentTranscriptResult, ControlError> {
     let id = params.subagent_id.trim();
     if !smelt_core::subagent_sessions::is_subagent_id(id) {
-        return Err(ControlError::new(
+        return Err(ControlError::because(
             ControlErrorCode::InvalidParams,
-            format!("不是子智能体 id：{id}"),
+            ControlReason::NotSubagentId { id: id.to_string() },
         ));
     }
     let file = smelt_core::subagent_sessions::session_file(id).ok_or_else(|| {
-        ControlError::new(
+        ControlError::because(
             ControlErrorCode::OperationFailed,
-            "找不到 Smelt 主目录，读不到子会话",
+            ControlReason::NoSmeltHome,
         )
     })?;
     let text = match std::fs::read_to_string(&file) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ControlError::new(
+            return Err(ControlError::because(
                 ControlErrorCode::NotFound,
-                "这个子智能体的子会话不在了（还没开始写，或已随对话删除）",
+                ControlReason::SubagentTranscriptGone,
             ));
         }
         Err(error) => {
-            return Err(ControlError::new(
+            return Err(ControlError::because(
                 ControlErrorCode::OperationFailed,
-                format!("读不了子会话：{error}"),
+                ControlReason::SubagentTranscriptUnreadable {
+                    error: error.to_string(),
+                },
             ));
         }
     };

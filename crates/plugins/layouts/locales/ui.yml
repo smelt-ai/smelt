@@ -1,0 +1,7 @@
+_version: 2
+page.workbench:
+  en: Workbench
+  zh-CN: 工作台
+layout.standard:
+  en: Default
+  zh-CN: 默认

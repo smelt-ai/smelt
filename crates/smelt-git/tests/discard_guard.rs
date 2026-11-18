@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use smelt_git::{discard_all, discard_file, load_git_status, run_git};
+use smelt_runtime_client::protocol::reason::ControlReason;
 
 /// 造一个仓库：`a.txt` 提交为 `one\n`。返回 (临时目录守卫, 仓库根)。
 fn committed_repo() -> (tempfile::TempDir, String) {
@@ -35,7 +36,12 @@ fn discard_file_refuses_tracked_file_rewritten_after_view() {
     // 用户看完列表之后，agent 又往同一个文件里写了东西。
     std::fs::write(Path::new(&root).join("a.txt"), "agent\n").unwrap();
     let err = discard_file(&root, &seen).expect_err("内容变了必须拒绝");
-    assert!(err.contains("a.txt") && err.contains("刷新"), "{err}");
+    assert_eq!(
+        err.reason(),
+        Some(&ControlReason::GitChangedSinceViewed {
+            path: "a.txt".into()
+        })
+    );
     assert_eq!(read(&root, "a.txt"), "agent\n", "被拒绝时一个字节都不能动");
 
     // 刷新后看到的是新内容，再丢就照常执行。
@@ -93,7 +99,12 @@ fn discard_all_refuses_when_new_untracked_file_appeared_after_view() {
     // 用户从没见过的新文件：`git clean -fd` 会把它连根删掉。
     std::fs::write(Path::new(&root).join("agent.txt"), "fresh\n").unwrap();
     let err = discard_all(&root, &seen).expect_err("多出没见过的文件必须拒绝");
-    assert!(err.contains("agent.txt") && err.contains("刷新"), "{err}");
+    assert_eq!(
+        err.reason(),
+        Some(&ControlReason::GitChangedSinceViewed {
+            path: "agent.txt".into()
+        })
+    );
     assert_eq!(read(&root, "agent.txt"), "fresh\n");
     assert_eq!(read(&root, "a.txt"), "user\n", "被拒绝时已跟踪文件也不能动");
 }

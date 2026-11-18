@@ -2,13 +2,14 @@
 //!
 //! 运行时是唯一的写入方。客户端用单条命令改它（`workspace.conversation.*`、
 //! `workspace.project.*`），经 `workspace.changed` 收整份投影，订阅首帧就带着当前这份。
-//! 对话归档、置顶跨客户端共享；侧栏手动序、折叠和项目固定、终端分屏、当前看哪个，
-//! 是每台客户端自己的界面状态，不在这里。
+//! 对话归档跨客户端共享；置顶、侧栏手动序、折叠、终端分屏、当前看哪个，是客户端界面上
+//! 的功能数据，归会话插件自己存，不在这里。
 
 use serde::{Deserialize, Serialize};
 
 use crate::agent_kind::ConversationLaunchSpec;
-use crate::conversation::ConversationBinding;
+use crate::agent_status::AgentStatus;
+use crate::daemon_state::DaemonSessionState;
 use crate::runtime_path::PathStyle;
 
 /// 整份目录。`revision` 每次有改动加一，只在同一个 `epoch` 里能比，见 [`WorkspaceRevision`]。
@@ -95,15 +96,12 @@ pub struct WorkspaceConversation {
     pub id: String,
     #[serde(default)]
     pub custom_title: Option<String>,
-    /// 最近一次内容变化的 unix 秒。
+    /// 最近一轮结束的 unix 秒。只由守护在回合结束时写，客户端带来的值不算数（新建时填 0）。
     #[serde(default)]
     pub last_updated_at: i64,
     /// 只由运行时的归档命令修改，整段更新不能覆盖。
     #[serde(default)]
     pub archived_at: Option<i64>,
-    /// 项目组内置顶；归档时清除。
-    #[serde(default)]
-    pub pinned_at: Option<i64>,
     /// 新会话创建时绑定的工作集；旧会话保持未绑定。
     #[serde(default)]
     pub workset_id: Option<String>,
@@ -115,6 +113,53 @@ pub struct WorkspaceConversation {
     pub terminals: Vec<WorkspaceTerminal>,
     #[serde(default)]
     pub acp: Option<WorkspaceAcp>,
+}
+
+impl WorkspaceConversation {
+    /// 这段对话里的守护会话 id：ACP 对话是它的会话，终端是每一格（还没起过、没有 id 的
+    /// 不算）。
+    pub fn session_ids(&self) -> impl Iterator<Item = &str> {
+        self.acp
+            .as_ref()
+            .map(|acp| acp.sid.as_str())
+            .into_iter()
+            .chain(
+                self.terminals
+                    .iter()
+                    .filter_map(|terminal| terminal.id.as_deref()),
+            )
+    }
+
+    /// 跟哪个智能体的对话（智能体定义 id）。自动化运行的、不是跟智能体开的是 `None`。
+    pub fn agent_definition(&self) -> Option<&str> {
+        let acp = self.acp.as_ref()?;
+        if acp.automation_id.is_some() {
+            return None;
+        }
+        acp.agent_definition_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
+    /// `states` 里属于这段对话的那些。
+    pub fn states_in<'a>(
+        &'a self,
+        states: &'a [DaemonSessionState],
+    ) -> impl Iterator<Item = &'a DaemonSessionState> {
+        states
+            .iter()
+            .filter(|state| self.session_ids().any(|id| id == state.id))
+    }
+
+    /// 对话的状态：各格里最要紧的那个（要你 > 运行中 > 空闲），只看守护推来的。机器连不上
+    /// 是另一回事，不折算进这里。
+    pub fn status(&self, states: &[DaemonSessionState]) -> AgentStatus {
+        AgentStatus::highest(
+            self.states_in(states)
+                .filter_map(AgentStatus::from_daemon_state),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,17 +191,11 @@ pub struct WorkspaceAcp {
     #[serde(default)]
     pub history_session_id: Option<String>,
     pub launch: ConversationLaunchSpec,
-    #[serde(default)]
-    pub refresh_launch_from_settings: bool,
-    #[serde(default)]
-    pub conversation_binding: ConversationBinding,
     /// 最后生效的 provider 配置：`(config_id, value_id)`，按设置顺序。
     #[serde(default)]
     pub config_values: Vec<(String, String)>,
     #[serde(default)]
     pub pending_prompt: Option<String>,
-    #[serde(default)]
-    pub pending_delivery_id: Option<String>,
     #[serde(default)]
     pub pending_agent_preset: Option<String>,
     #[serde(default)]
@@ -178,12 +217,6 @@ pub struct WorkspaceConversationArchiveParams {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_workset_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceConversationPinParams {
-    pub conversation_id: String,
-    pub pinned: bool,
 }
 
 /// `workspace.rename` 的参数。带 `terminal_id` 是给这段对话里的这一格终端改名，不带是给
@@ -234,6 +267,57 @@ pub struct WorkspaceWorksetRenameParams {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorksetFinishParams {
     pub workset_id: String,
+    /// 判断不了分支是否已合并（合进基线有冲突）的仓库也照关。有未提交改动、确实没合并的
+    /// 仍然拦下。用户在确认框里看过 [`WorkspaceWorksetInspectResult`] 再决定。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_unconfirmed_merge: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetInspectParams {
+    pub workset_id: String,
+}
+
+/// 工作树分支上的改动进没进基线。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceWorksetMerge {
+    Merged,
+    /// 确实还有改动没进基线。
+    Unmerged,
+    /// 判断不了：合进基线有冲突，常见于 squash 合并之后基线又改过同一处。
+    Unconfirmed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetRepositoryState {
+    pub name: String,
+    /// 有未提交的改动或未跟踪的文件。
+    pub dirty: bool,
+    /// 本地还有工作树分支时它的合并情况；分支已经不在了是空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<WorkspaceWorksetMerge>,
+}
+
+/// 关闭工作树前的检查：先 fetch 各仓库的基线，再看每个仓库干不干净、分支合没合进去。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetInspectResult {
+    pub repositories: Vec<WorkspaceWorksetRepositoryState>,
+    /// fetch 失败的说明；这时合并情况按本地已有的远端分支算。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refresh_failures: Vec<String>,
+}
+
+impl WorkspaceWorksetInspectResult {
+    /// 每个仓库都干净、分支都已合并（或已经不在），可以直接关。
+    pub fn ready_to_finish(&self) -> bool {
+        self.repositories.iter().all(|repository| {
+            !repository.dirty
+                && repository
+                    .merge
+                    .is_none_or(|merge| merge == WorkspaceWorksetMerge::Merged)
+        })
+    }
 }
 
 /// 新建工作树的回执。目录版本平铺在顶层，和以前只回 `WorkspaceRevision` 时同一个形状。
@@ -292,6 +376,13 @@ impl WorkspaceDirectory {
             revision: self.revision,
         }
     }
+
+    /// 守护会话 id 属于哪段对话。
+    pub fn conversation_of_session(&self, session_id: &str) -> Option<&WorkspaceConversation> {
+        self.conversations
+            .iter()
+            .find(|conversation| conversation.session_ids().any(|id| id == session_id))
+    }
 }
 
 /// cwd 归属哪个项目根：cwd 就是根、或落在根之下（必须是完整路径段，`/a/bc` 不算
@@ -311,9 +402,12 @@ pub fn project_root_of<'a>(style: PathStyle, roots: &'a [String], cwd: &str) -> 
         .max_by_key(|root| root.len())
 }
 
-/// 项目显示名：目录末段。根目录这类没有末段的叫「项目」。
+/// 项目显示名：目录末段。根目录这类没有末段的按当前语言叫「项目」。
 pub fn project_name(style: PathStyle, root: &str) -> String {
-    style.file_name(root).unwrap_or("项目").to_string()
+    match style.file_name(root) {
+        Some(name) => name.to_string(),
+        None => rust_i18n::t!("project.unnamed").into_owned(),
+    }
 }
 
 /// 一组项目在同一个列表里的显示名：末段重名的逐步往前补父目录段（`dev · smelt`），
@@ -439,6 +533,92 @@ mod workset_tests {
 }
 
 #[cfg(test)]
+mod conversation_tests {
+    use super::{WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal};
+    use crate::agent_status::AgentStatus;
+    use crate::daemon_state::{DaemonPhase, DaemonSessionState};
+
+    fn terminals(id: &str, terminals: &[Option<&str>]) -> WorkspaceConversation {
+        WorkspaceConversation {
+            id: id.into(),
+            terminals: terminals
+                .iter()
+                .map(|terminal| WorkspaceTerminal {
+                    id: terminal.map(Into::into),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn state(id: &str, phase: DaemonPhase) -> DaemonSessionState {
+        DaemonSessionState {
+            id: id.into(),
+            phase,
+            turn_events: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sessions_of_a_conversation_and_back() {
+        let acp = WorkspaceConversation {
+            id: "c2".into(),
+            acp: Some(WorkspaceAcp {
+                sid: "a1".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let directory = WorkspaceDirectory {
+            conversations: vec![terminals("c1", &[Some("t1"), None, Some("t2")]), acp],
+            ..Default::default()
+        };
+        assert_eq!(
+            directory.conversations[0].session_ids().collect::<Vec<_>>(),
+            ["t1", "t2"],
+            "没起过的终端不算"
+        );
+        let of = |id| directory.conversation_of_session(id).map(|c| c.id.as_str());
+        assert_eq!(of("t2"), Some("c1"));
+        assert_eq!(of("a1"), Some("c2"));
+        assert_eq!(of("nope"), None);
+    }
+
+    #[test]
+    fn agent_definition_skips_automation_runs() {
+        let mut conversation = WorkspaceConversation {
+            acp: Some(WorkspaceAcp {
+                agent_definition_id: Some(" writer ".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(conversation.agent_definition(), Some("writer"));
+        conversation.acp.as_mut().unwrap().automation_id = Some("daily".into());
+        assert_eq!(conversation.agent_definition(), None);
+        conversation.acp.as_mut().unwrap().agent_definition_id = Some(" ".into());
+        conversation.acp.as_mut().unwrap().automation_id = None;
+        assert_eq!(conversation.agent_definition(), None);
+        assert_eq!(terminals("t", &[]).agent_definition(), None);
+    }
+
+    #[test]
+    fn status_is_the_most_urgent_pane() {
+        let conversation = terminals("c", &[Some("t1"), Some("t2")]);
+        let states = [
+            state("t1", DaemonPhase::Thinking),
+            state("t2", DaemonPhase::AwaitingApproval),
+            state("other", DaemonPhase::Failed),
+        ];
+        assert_eq!(conversation.states_in(&states).count(), 2);
+        assert_eq!(conversation.status(&states), AgentStatus::NeedsYou);
+        assert_eq!(conversation.status(&[]), AgentStatus::Idle);
+    }
+}
+
+#[cfg(test)]
 mod revision_tests {
     use super::WorkspaceRevision;
 
@@ -483,8 +663,8 @@ mod project_tests {
             project_name(PathStyle::Windows, r"C:\Users\w\code\xunxian-reverse"),
             "xunxian-reverse"
         );
-        assert_eq!(project_name(PathStyle::Posix, "/"), "项目");
-        assert_eq!(project_name(PathStyle::Windows, r"C:\"), "项目");
+        assert_eq!(project_name(PathStyle::Posix, "/"), "Project");
+        assert_eq!(project_name(PathStyle::Windows, r"C:\"), "Project");
     }
 
     /// Windows 项目重名时同样往前补父目录段，段之间用 `\` 连。

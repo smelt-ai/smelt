@@ -175,7 +175,7 @@ pub struct GitLogState {
     /// `hash\0path`，用来区分「同一份补丁文本但是另一个文件」。
     pub detail_view_key: String,
     /// 日志 diff 正文。和变更栏的 `DiffState` 分开。
-    pub detail_view: Option<gpui::Entity<gpui_component::diff::DiffState>>,
+    pub detail_view: Option<gpui::Entity<smelt_plugin_api::ui::diff::DiffState>>,
     /// 正文的缓存视图。渲染提交列表时不读 `detail_view`。
     pub detail_body: Option<gpui::Entity<crate::log_view::GitLogDiffBody>>,
     /// 已加载的仓库根，切项目时用来判断要不要重拉。
@@ -216,6 +216,7 @@ pub const LOG_LIMIT: usize = 500;
 use crate::panel::git_call;
 use crate::{GitPanel, ProjectRef};
 use gpui::{AppContext, Context};
+use rust_i18n::t;
 
 impl GitPanel {
     /// 进「日志」页时确保数据在（换了仓库也重拉）。可见数据刷新调用，必须便宜：
@@ -334,10 +335,9 @@ impl GitPanel {
                             )
                         })
                         .map(|result| result.text)
-                        .unwrap_or_else(|err| format!("无法执行 git show：{err}"));
-                    let files = gpui_component::diff::DiffFile::parse(&text).map_err(|err| {
-                        crate::panel::diff_parse_failure(&text, &err.to_string())
-                    });
+                        .unwrap_or_else(|err| t!("log.show_failed", error = err).into_owned());
+                    let files = smelt_plugin_api::ui::diff::DiffFile::parse(&text)
+                        .map_err(|err| crate::panel::diff_parse_failure(&text, &err.to_string()));
                     (text, files)
                 })
                 .await;
@@ -367,7 +367,7 @@ impl GitPanel {
         hash: &str,
         path: &str,
         patch: String,
-        files: Result<Vec<gpui_component::diff::DiffFile>, String>,
+        files: Result<Vec<smelt_plugin_api::ui::diff::DiffFile>, String>,
         cx: &mut Context<Self>,
     ) {
         let key = format!("{hash}\0{path}");
@@ -401,7 +401,7 @@ impl GitPanel {
                 view.update(cx, |state, cx| state.set_files(files, cx));
             } else {
                 self.git_log.detail_view =
-                    Some(cx.new(|cx| gpui_component::diff::DiffState::new(files, cx)));
+                    Some(cx.new(|cx| smelt_plugin_api::ui::diff::DiffState::new(files, cx)));
             }
         }
         self.sync_log_diff_body(cx);

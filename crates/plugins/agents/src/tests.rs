@@ -11,8 +11,8 @@ use smelt_plugin_api::model::agent_definition::AgentDefinition;
 use smelt_plugin_api::model::agent_host::AgentHostSettings;
 
 use super::model::{
-    MemoryFilter, agent_catalog_monogram, memory_summary_text, new_conversation_title,
-    remove_agent, session_phase_settled, visible_memories,
+    MemoryFilter, agent_catalog_monogram, memory_summary_text, new_conversation_label,
+    new_conversation_title, remove_agent, session_phase_settled, visible_memories,
 };
 
 fn memory(name: &str, kind: Option<&str>) -> MemoryEntry {
@@ -88,9 +88,9 @@ fn memory_search_and_filter_narrow_the_list_together() {
 /// 配置页那一行摘要：条数固定一行，待确认单独提醒，没有就不提。
 #[test]
 fn memory_summary_is_one_line_of_counts() {
-    assert_eq!(memory_summary_text(0, 0), "还没有记忆");
-    assert_eq!(memory_summary_text(8, 4), "这个智能体 8 条 · 全局 4 条");
-    assert_eq!(memory_summary_text(0, 3), "这个智能体 0 条 · 全局 3 条");
+    assert_eq!(memory_summary_text(0, 0), "No memories yet");
+    assert_eq!(memory_summary_text(8, 4), "This agent: 8 · Global: 4");
+    assert_eq!(memory_summary_text(0, 3), "This agent: 0 · Global: 3");
 }
 
 /// 记忆卡片在会话停下时重扫：模型还在想、工具还在跑时，元数据可能还没落库。
@@ -121,7 +121,7 @@ fn catalog_monogram_keeps_two_characters_when_they_identify_the_agent() {
     assert_eq!(agent_catalog_monogram("日志与磁盘清理智能体"), "日志");
     assert_eq!(agent_catalog_monogram("Pi 智能体 3"), "Pi");
     assert_eq!(agent_catalog_monogram("A"), "A");
-    assert_eq!(agent_catalog_monogram("   "), "智");
+    assert_eq!(agent_catalog_monogram("   "), "A");
 }
 
 mod agent_definition_ui_tests {
@@ -150,8 +150,8 @@ mod agent_definition_ui_tests {
 
     #[test]
     fn unnamed_agent_falls_back_to_placeholder() {
-        assert_eq!(agent_display_name(""), "未命名");
-        assert_eq!(agent_display_name("   "), "未命名");
+        assert_eq!(agent_display_name(""), "Untitled");
+        assert_eq!(agent_display_name("   "), "Untitled");
         assert_eq!(agent_display_name(" 量化交易 "), "量化交易");
     }
 
@@ -164,7 +164,7 @@ mod agent_definition_ui_tests {
         );
         assert_eq!(
             agent_conversation_start_error(&definition("量化交易", "规则", "unknown")),
-            Some("请选择一个可用的执行引擎")
+            Some("Choose an available engine".to_string())
         );
         assert_eq!(
             agent_conversation_start_error(&definition(
@@ -193,36 +193,43 @@ mod agent_definition_ui_tests {
     fn instructions_footer_includes_count_only_when_written() {
         assert_eq!(
             agent_instructions_footer(0),
-            "会作为系统提示词带进每次对话和自动化。"
+            "Sent as the system prompt with every conversation and automation."
         );
         assert_eq!(
             agent_instructions_footer(48),
-            "48 字 · 会作为系统提示词带进每次对话和自动化"
+            "48 characters · sent as the system prompt with every conversation and automation"
         );
     }
 
     #[test]
     fn usage_summary_omits_zero_counts_and_joins_the_rest() {
-        assert_eq!(agent_usage_summary(0, 0), "还没有对话");
-        assert_eq!(agent_usage_summary(2, 0), "2 段对话");
-        assert_eq!(agent_usage_summary(0, 1), "1 条自动化");
-        assert_eq!(agent_usage_summary(2, 1), "2 段对话 · 1 条自动化");
+        assert_eq!(agent_usage_summary(0, 0), "No conversations yet");
+        assert_eq!(agent_usage_summary(2, 0), "2 conversations");
+        assert_eq!(agent_usage_summary(0, 1), "1 automation");
+        assert_eq!(agent_usage_summary(2, 1), "2 conversations · 1 automation");
     }
 }
 
 /// 「新对话」命令的标题带上默认智能体，侧栏按钮、命令面板、菜单看到的都是它。
 #[test]
 fn new_conversation_title_names_the_default_agent() {
-    assert_eq!(new_conversation_title(None), "新对话");
+    assert_eq!(new_conversation_label(None), "New Conversation");
     assert_eq!(
-        new_conversation_title(Some("写作助手")),
-        "新对话 · 写作助手"
+        new_conversation_label(Some("写作助手")),
+        "New Conversation · 写作助手"
     );
     assert_eq!(
-        new_conversation_title(Some("  写作助手 ")),
-        "新对话 · 写作助手"
+        new_conversation_label(Some("  写作助手 ")),
+        "New Conversation · 写作助手"
     );
-    assert_eq!(new_conversation_title(Some("  ")), "新对话 · 未命名");
+    assert_eq!(
+        new_conversation_label(Some("  ")),
+        "New Conversation · Untitled"
+    );
+    assert_eq!(
+        new_conversation_title(Some("写作助手")).to_string(),
+        "New Conversation · 写作助手"
+    );
 }
 
 /// 删智能体和清掉指向它的默认在同一份修改里：运行时拒了删除，默认也跟着不动。

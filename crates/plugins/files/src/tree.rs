@@ -9,13 +9,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::*;
+use rust_i18n::t;
 use smelt_plugin_api::client::protocol::files::{
     ProjectDeleteEntryCall, ProjectDirParams, ProjectPathParams, ProjectRootParams,
     ProjectSearchCall, ProjectSearchParams, ProjectTreeCall, ProjectWatchCall,
 };
 use smelt_plugin_api::client::protocol::git::{GitRootParams, GitStatusCall};
 use smelt_plugin_api::ui::dialog::Confirm;
-use smelt_plugin_api::{self as api, PathRequest, RuntimeKey, sessions};
+use smelt_plugin_api::{self as api, PathRequest, RuntimeKey};
 
 use crate::model::{
     DirCache, DirListing, FileTreeRow, GitMarks, SearchHit, SearchState, TreeRoots,
@@ -23,6 +24,16 @@ use crate::model::{
 };
 use crate::rt::{RUNTIME_CALL_TIMEOUT, call_on, error_text, target};
 use crate::{FilesPanel, ProjectRef, TreeActivate, TreeDown, TreeLeft, TreeRight, TreeUp};
+
+// 约定：smelt.sessions 的 SEND_TEXT，权威定义在 crates/plugins/sessions/src/contract.rs。
+/// 把文字交给当前会话（终端打进输入、对话填进输入框），不替用户发出。
+const SEND_TEXT: api::Command<SendText, ()> = api::Command::new("smelt.sessions/send-text");
+
+/// [`SEND_TEXT`] 的参数。
+#[derive(serde::Serialize)]
+struct SendText {
+    text: String,
+}
 
 impl FilesPanel {
     /// 树里挂出来的根，都在 [`Self::tree_runtime`] 那台机器上：当前项目在最前，后面是钉住
@@ -405,8 +416,8 @@ impl FilesPanel {
         let picked = api::PICK_PATHS.run(
             &PathRequest {
                 machine: RuntimeKey::Local,
-                title: "选择要加到文件树的目录".into(),
-                confirm: "加入".into(),
+                title: t!("pin.pick_title").into_owned(),
+                confirm: t!("pin.pick_confirm").into_owned(),
                 files: false,
                 multiple: true,
             },
@@ -671,10 +682,12 @@ impl FilesPanel {
     }
 
     pub(crate) fn send_to_session(&self, text: String, cx: &mut App) {
-        let sent = sessions::SEND_TEXT.run(&sessions::SendText { text }, cx);
+        let sent = SEND_TEXT.run(&SendText { text }, cx);
         cx.spawn(async move |cx| {
             if let Err(error) = sent.await {
-                cx.update(|cx| crate::notify_error(format!("发送到会话失败：{error}"), cx));
+                cx.update(|cx| {
+                    crate::notify_error(t!("send.failed", error = error).into_owned(), cx)
+                });
             }
         })
         .detach();
@@ -692,18 +705,18 @@ impl FilesPanel {
         let label = style.file_name(&path).unwrap_or(&path).to_string();
         let (title, description) = if is_dir {
             (
-                "确定删除这个文件夹吗？",
-                format!("将永久删除「{label}」及其全部内容，此操作不可撤销。"),
+                t!("delete.folder_confirm"),
+                t!("delete.folder_description", name = label),
             )
         } else {
             (
-                "确定删除这个文件吗？",
-                format!("将永久删除「{label}」，此操作不可撤销。"),
+                t!("delete.file_confirm"),
+                t!("delete.file_description", name = label),
             )
         };
         let panel = cx.entity();
         let close_panel = panel.clone();
-        Confirm::new(title, "删除", move |_, cx| {
+        Confirm::new(title, t!("delete.action"), move |_, cx| {
             panel.update(cx, |this, cx| this.perform_delete(path.clone(), is_dir, cx));
             true
         })
@@ -725,7 +738,7 @@ impl FilesPanel {
         let client = match target(&entry.runtime, cx) {
             Ok(client) => client,
             Err(error) => {
-                self.report_background_error(format!("删除失败：{error}"), cx);
+                self.report_background_error(t!("delete.failed", error = error).into_owned(), cx);
                 return;
             }
         };
@@ -747,7 +760,10 @@ impl FilesPanel {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(_) => this.forget_deleted_entry(entry, is_dir, cx),
                 Err(error) => {
-                    this.report_background_error(format!("删除失败：{}", error_text(error)), cx);
+                    this.report_background_error(
+                        t!("delete.failed", error = error_text(error)).into_owned(),
+                        cx,
+                    );
                     cx.notify();
                 }
             });

@@ -166,7 +166,7 @@ fn retire_managed_bun_entries_at(agent_dir: &Path) -> Result<(), String> {
         return Ok(());
     };
     let doc: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("{} 不是合法 JSON：{error}", path.display()))?;
+        .map_err(|error| format!("{} isn't valid JSON: {error}", path.display()))?;
     let needs = doc
         .get("mcpServers")
         .and_then(Value::as_object)
@@ -235,8 +235,8 @@ fn upgrade_preset_pins_at(agent_dir: &Path, remote_desktop: bool) -> Result<(), 
     let Ok(text) = std::fs::read_to_string(agent_dir.join("mcp.json")) else {
         return Ok(());
     };
-    let doc: Value =
-        serde_json::from_str(&text).map_err(|error| format!("mcp.json 不是合法 JSON：{error}"))?;
+    let doc: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("mcp.json isn't valid JSON: {error}"))?;
     let needs = doc
         .get("mcpServers")
         .and_then(Value::as_object)
@@ -293,11 +293,11 @@ pub fn add_pi_mcp_preset_at(
     remote_desktop: bool,
 ) -> Result<(), String> {
     let preset = find_preset(id)
-        .ok_or_else(|| format!("没有内置的 MCP 服务器 {id}"))?
+        .ok_or_else(|| format!("there's no built-in MCP server {id}"))?
         .for_machine(remote_desktop);
     edit_servers(agent_dir, |servers| {
         if servers.contains_key(preset.id) {
-            return Err(format!("mcp.json 里已经有名为 {} 的服务器", preset.id));
+            return Err(format!("mcp.json already has a server named {}", preset.id));
         }
         servers.insert(preset.id.into(), preset.config());
         Ok(())
@@ -318,7 +318,7 @@ pub fn set_pi_mcp_server_enabled_at(
         let entry = servers
             .get_mut(name)
             .and_then(Value::as_object_mut)
-            .ok_or_else(|| format!("mcp.json 里没有服务器 {name}"))?;
+            .ok_or_else(|| format!("mcp.json has no server {name}"))?;
         if enabled {
             entry.remove("enabled");
         } else {
@@ -337,7 +337,7 @@ pub fn remove_pi_mcp_server_at(agent_dir: &Path, name: &str) -> Result<(), Strin
         servers
             .remove(name)
             .map(|_| ())
-            .ok_or_else(|| format!("mcp.json 里没有服务器 {name}"))
+            .ok_or_else(|| format!("mcp.json has no server {name}"))
     })
 }
 
@@ -357,12 +357,12 @@ fn edit_servers(
     let mut doc = read_or_create_json(&path)?;
     let root = doc
         .as_object_mut()
-        .ok_or_else(|| format!("{} 的顶层不是对象", path.display()))?;
+        .ok_or_else(|| format!("the top level of {} isn't an object", path.display()))?;
     let servers = root
         .entry("mcpServers")
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
-        .ok_or_else(|| format!("{} 里的 mcpServers 不是对象", path.display()))?;
+        .ok_or_else(|| format!("mcpServers in {} isn't an object", path.display()))?;
     edit(servers)?;
     write_json_file(&path, &doc, false)
 }

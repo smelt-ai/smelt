@@ -20,12 +20,13 @@ use api::model::memory_settings::{
     RerankModel,
 };
 use api::serde_json::Value;
-use gpui::{AppContext, Context, Entity, Window};
-use gpui_component::input::InputState;
+use std::borrow::Cow;
+
+use gpui::{AppContext, Context, Entity, Subscription, Window};
+use rust_i18n::t;
+use smelt_plugin_api::ui::field::InputState;
 use smelt_plugin_api::{self as api, RuntimeKey};
 
-const KEY_SET_PLACEHOLDER: &str = "已设置";
-const KEY_EMPTY_PLACEHOLDER: &str = "可选，本地服务一般不需要";
 /// 连接测试要等对方的嵌入服务，运行时那边自己限 10 秒，这里多留一点余量。
 const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -84,28 +85,35 @@ pub(crate) struct MemorySettingsForm {
     /// 还在向运行时读当前配置。
     loading: bool,
     pub error: Option<String>,
-    pub notice: Option<&'static str>,
+    pub notice: Option<Cow<'static, str>>,
     /// 用户指定的重排模型；`None` 表示自动挑。
     pub rerank_model: Option<RerankModel>,
     /// 正在跑连接测试。
     pub testing: bool,
     /// 上一次连接测试的结果：成功时是一句"可用：…"，失败时是原因。
     pub test_result: Option<Result<String, String>>,
+    /// 换了语言要换输入框的占位文字。
+    _locale: Subscription,
 }
 
 impl MemorySettingsForm {
     pub fn new(runtime: &RuntimeKey, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let client = api::host(cx)
             .client(runtime, cx)
-            .ok_or_else(|| api::MACHINE_REMOVED.to_string());
-        let base_url =
-            cx.new(|cx| InputState::new(window, cx).placeholder("如 http://localhost:11434/v1"));
-        let model = cx.new(|cx| InputState::new(window, cx).placeholder("如 bge-m3"));
-        let api_key = cx.new(|cx| {
-            InputState::new(window, cx)
-                .masked(true)
-                .placeholder(KEY_EMPTY_PLACEHOLDER)
-        });
+            .ok_or_else(api::machine_removed);
+        let base_url = cx.new(|cx| InputState::new(window, cx));
+        let model = cx.new(|cx| InputState::new(window, cx));
+        let api_key = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let events = api::events(cx);
+        let locale = cx.subscribe_in(
+            &events,
+            window,
+            |form, _, event: &api::HostEvent, window, cx| {
+                if matches!(event, api::HostEvent::LocaleChanged) {
+                    form.label(window, cx);
+                }
+            },
+        );
         let load = send::<SettingsGet>(&client, EmptyParams::default(), api::CALL_TIMEOUT);
         cx.spawn_in(window, async move |this, cx| {
             let loaded = cx.background_spawn(load).await;
@@ -115,7 +123,7 @@ impl MemorySettingsForm {
             });
         })
         .detach();
-        Self {
+        let form = Self {
             client,
             base_url,
             model,
@@ -127,7 +135,23 @@ impl MemorySettingsForm {
             rerank_model: None,
             testing: false,
             test_result: None,
-        }
+            _locale: locale,
+        };
+        form.label(window, cx);
+        form
+    }
+
+    /// 输入框的占位文字：建好时、换语言时都从这里取。密钥框的随「设没设」变，存完也会再取。
+    fn label(&self, window: &mut Window, cx: &mut gpui::App) {
+        let key = key_placeholder(&self.saved);
+        self.base_url.update(cx, |input, cx| {
+            input.set_placeholder(t!("memory.base_url_placeholder"), window, cx)
+        });
+        self.model.update(cx, |input, cx| {
+            input.set_placeholder(t!("memory.model_placeholder"), window, cx)
+        });
+        self.api_key
+            .update(cx, |input, cx| input.set_placeholder(key, window, cx));
     }
 
     /// 选重排模型：点了立刻提交。两项都空表示改回自动。表单里没保存的输入不动。
@@ -147,7 +171,7 @@ impl MemorySettingsForm {
                         form.saved = saved;
                         form.rerank_model = rerank;
                         form.error = None;
-                        form.notice = Some("已更新重排模型");
+                        form.notice = Some(t!("memory.rerank_updated"));
                     }
                     Err(error) => {
                         form.error = Some(error);
@@ -187,10 +211,12 @@ impl MemorySettingsForm {
             let _ = this.update(cx, |form, cx| {
                 form.testing = false;
                 form.test_result = Some(outcome.map(|probe| {
-                    format!(
-                        "可用：向量维度 {}，耗时 {} ms",
-                        probe.dimensions, probe.elapsed_ms
+                    t!(
+                        "memory.test_ok",
+                        dimensions = probe.dimensions,
+                        ms = probe.elapsed_ms
                     )
+                    .into_owned()
                 }));
                 cx.notify();
             });
@@ -204,7 +230,7 @@ impl MemorySettingsForm {
 
     pub fn status_line(&self) -> String {
         if self.loading {
-            return "正在读取…".to_string();
+            return t!("memory.loading").into_owned();
         }
         status_line(&self.saved)
     }
@@ -214,7 +240,7 @@ impl MemorySettingsForm {
         let model = self.model.read(cx).value().to_string();
         let api_key = self.api_key.read(cx).value().to_string();
         match save_patch(&base_url, &model, &api_key) {
-            Ok(patch) => self.submit(patch, "已保存", window, cx),
+            Ok(patch) => self.submit(patch, t!("memory.saved"), window, cx),
             Err(error) => {
                 self.error = Some(error);
                 self.notice = None;
@@ -226,7 +252,7 @@ impl MemorySettingsForm {
     pub fn clear_api_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.submit(
             vec![(EMBEDDING_API_KEY, String::new())],
-            "已清除密钥",
+            t!("memory.key_cleared"),
             window,
             cx,
         );
@@ -239,7 +265,7 @@ impl MemorySettingsForm {
                 (EMBEDDING_MODEL, String::new()),
                 (EMBEDDING_API_KEY, String::new()),
             ],
-            "已清空配置",
+            t!("memory.cleared"),
             window,
             cx,
         );
@@ -248,7 +274,7 @@ impl MemorySettingsForm {
     fn submit(
         &mut self,
         patch: Vec<(&'static str, String)>,
-        notice: &'static str,
+        notice: Cow<'static, str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -268,7 +294,7 @@ impl MemorySettingsForm {
     fn apply_result(
         &mut self,
         result: Result<SettingsResult, String>,
-        notice: Option<&'static str>,
+        notice: Option<Cow<'static, str>>,
         refill_inputs: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -322,19 +348,24 @@ where
     }
 }
 
-fn key_placeholder(saved: &SavedMemory) -> &'static str {
+fn key_placeholder(saved: &SavedMemory) -> Cow<'static, str> {
     if saved.api_key_set {
-        KEY_SET_PLACEHOLDER
+        t!("memory.key_set")
     } else {
-        KEY_EMPTY_PLACEHOLDER
+        t!("memory.key_empty")
     }
 }
 
 fn status_line(saved: &SavedMemory) -> String {
     if saved.is_configured() {
-        format!("已配置：{} @ {}", saved.model, saved.base_url)
+        t!(
+            "memory.status_configured",
+            model = saved.model,
+            url = saved.base_url
+        )
+        .into_owned()
     } else {
-        "未配置：只用关键词 + 模型重排".to_string()
+        t!("memory.status_unconfigured").into_owned()
     }
 }
 
@@ -351,7 +382,7 @@ fn save_patch(
     let model = model.trim();
     let api_key = api_key.trim();
     if base_url.is_empty() != model.is_empty() {
-        return Err("服务地址和模型需要同时填写；都留空表示不用向量检索".to_string());
+        return Err(t!("memory.need_both").into_owned());
     }
     let mut patch = vec![
         (EMBEDDING_BASE_URL, base_url.to_string()),
@@ -368,7 +399,7 @@ fn test_params(base_url: &str, model: &str, api_key: &str) -> Result<MemoryTestP
     let base_url = base_url.trim();
     let model = model.trim();
     if base_url.is_empty() || model.is_empty() {
-        return Err("填好服务地址和模型再测试".to_string());
+        return Err(t!("memory.need_both_to_test").into_owned());
     }
     let api_key = api_key.trim();
     Ok(MemoryTestParams {
@@ -382,7 +413,7 @@ fn test_params(base_url: &str, model: &str, api_key: &str) -> Result<MemoryTestP
 pub(crate) fn rerank_model_label(model: Option<&RerankModel>) -> String {
     match model {
         Some(model) => format!("{} / {}", model.provider, model.id),
-        None => "自动（当前对话所用提供方里最便宜的）".to_string(),
+        None => t!("memory.rerank_auto").into_owned(),
     }
 }
 
@@ -393,13 +424,14 @@ mod tests {
     #[test]
     fn status_line_needs_both_url_and_model() {
         let mut settings = SavedMemory::default();
-        assert_eq!(status_line(&settings), "未配置：只用关键词 + 模型重排");
+        let unconfigured = "Not set up: keyword search + model reranking only";
+        assert_eq!(status_line(&settings), unconfigured);
         settings.base_url = "http://localhost:11434/v1".into();
-        assert_eq!(status_line(&settings), "未配置：只用关键词 + 模型重排");
+        assert_eq!(status_line(&settings), unconfigured);
         settings.model = "bge-m3".into();
         assert_eq!(
             status_line(&settings),
-            "已配置：bge-m3 @ http://localhost:11434/v1"
+            "Set up: bge-m3 @ http://localhost:11434/v1"
         );
     }
 
@@ -443,7 +475,7 @@ mod tests {
             settings: BTreeMap::from([
                 (EMBEDDING_BASE_URL.to_string(), Value::from("http://x/v1")),
                 (EMBEDDING_MODEL.to_string(), Value::from("bge-m3")),
-                (EMBEDDING_API_KEY.to_string(), Value::from("已设置")),
+                (EMBEDDING_API_KEY.to_string(), Value::from("set")),
                 (RERANK_MODEL_PROVIDER.to_string(), Value::from("")),
                 (RERANK_MODEL_ID.to_string(), Value::from("")),
             ]),
@@ -456,7 +488,7 @@ mod tests {
 
     #[test]
     fn rerank_model_label_says_auto_when_unset() {
-        assert!(rerank_model_label(None).starts_with("自动"));
+        assert!(rerank_model_label(None).starts_with("Automatic"));
         let model = RerankModel {
             provider: "github-copilot".into(),
             id: "gpt-6-luna".into(),

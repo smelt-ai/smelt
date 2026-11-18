@@ -7,9 +7,8 @@ use serde_json::{Map, Value};
 pub struct PiMcpPreset {
     /// 写进 `mcpServers` 的服务器名，也是工具名前缀 `mcp__<id>__`。
     pub id: &'static str,
-    pub name: &'static str,
-    /// 给人看的一句话。
-    pub summary: &'static str,
+    /// 给人看的名字和一句话，按界面语言说（[`Self::name`]、[`Self::summary`]）。
+    pub text: PiMcpPresetText,
     /// 写进配置的 `description`：Pi 把它放进系统提示，模型据此判断何时用这组工具。
     pub description: &'static str,
     pub transport: PiMcpPresetTransport,
@@ -37,6 +36,56 @@ pub enum PiMcpPresetTransport {
     },
 }
 
+/// 预设给人看的名字和说明归哪一条。远程桌面那套名字一样、说明不同。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiMcpPresetText {
+    Figma,
+    Rea,
+    BrowserMcp,
+    Playwright,
+    ChromeDevtools,
+    PlaywrightOnRemoteDesktop,
+    ChromeDevtoolsOnRemoteDesktop,
+}
+
+impl PiMcpPreset {
+    /// 按当前界面语言说的名字。
+    pub fn name(&self) -> String {
+        use PiMcpPresetText as T;
+        match self.text {
+            T::Figma => rust_i18n::t!("mcp_preset.figma.name"),
+            T::Rea => rust_i18n::t!("mcp_preset.rea.name"),
+            T::BrowserMcp => rust_i18n::t!("mcp_preset.browser_mcp.name"),
+            T::Playwright | T::PlaywrightOnRemoteDesktop => {
+                rust_i18n::t!("mcp_preset.playwright.name")
+            }
+            T::ChromeDevtools | T::ChromeDevtoolsOnRemoteDesktop => {
+                rust_i18n::t!("mcp_preset.chrome_devtools.name")
+            }
+        }
+        .into_owned()
+    }
+
+    /// 按当前界面语言说的一句话说明。
+    pub fn summary(&self) -> String {
+        use PiMcpPresetText as T;
+        match self.text {
+            T::Figma => rust_i18n::t!("mcp_preset.figma.summary"),
+            T::Rea => rust_i18n::t!("mcp_preset.rea.summary"),
+            T::BrowserMcp => rust_i18n::t!("mcp_preset.browser_mcp.summary"),
+            T::Playwright => rust_i18n::t!("mcp_preset.playwright.summary"),
+            T::ChromeDevtools => rust_i18n::t!("mcp_preset.chrome_devtools.summary"),
+            T::PlaywrightOnRemoteDesktop => {
+                rust_i18n::t!("mcp_preset.playwright.summary_remote_desktop")
+            }
+            T::ChromeDevtoolsOnRemoteDesktop => {
+                rust_i18n::t!("mcp_preset.chrome_devtools.summary_remote_desktop")
+            }
+        }
+        .into_owned()
+    }
+}
+
 impl PiMcpPresetTransport {
     pub fn needs_sign_in(&self) -> bool {
         matches!(self, Self::Http { .. })
@@ -48,8 +97,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     // 工具不多且常用，直接声明给模型（`direct`）。
     PiMcpPreset {
         id: "figma",
-        name: "Figma",
-        summary: "读取 Figma 设计稿、组件和变量，按设计生成代码。用 Figma 账号在浏览器里授权。",
+        text: PiMcpPresetText::Figma,
         description: "Figma designs: read frames, components, variables and screenshots from Figma links, and generate code that matches the design",
         transport: PiMcpPresetTransport::Http {
             url: "https://mcp.figma.com/mcp",
@@ -68,8 +116,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     // 留在默认的 codemode 里按需发现。分析可能跑很久，超时放宽到它给 Kimi Code 配的 120 秒。
     PiMcpPreset {
         id: "rea",
-        name: "REA 逆向分析",
-        summary: "在本机拆解应用、二进制、网页和抓包，带证据讲清某个功能是怎么实现的。用 Smelt 自带的 Bun 运行，不用装 Node。",
+        text: PiMcpPresetText::Rea,
         description: "REA (Reverse Engineer Anything): local, evidence-backed reverse engineering of desktop apps, binaries, Electron/JavaScript bundles, websites and traffic captures",
         transport: PiMcpPresetTransport::Bun {
             // 6.8+ 要求的 Node 兼容版本高于当前内置 Bun；待上游兼容后再升级。
@@ -89,8 +136,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     // 按需检索后直接调用。
     PiMcpPreset {
         id: "browser-mcp",
-        name: "Agent360 浏览器",
-        summary: "操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先安装 Agent360 Browser MCP 扩展（点「安装扩展」）。用 Smelt 自带的 Bun 运行。",
+        text: PiMcpPresetText::BrowserMcp,
         description: "Browser automation in the user's own signed-in Chrome: navigate, click, fill forms, read pages and take screenshots, and ask the user for 2FA codes or CAPTCHAs",
         transport: PiMcpPresetTransport::Bun {
             args: &["x", "--bun", "@agent360/browser-mcp@1.30.2"],
@@ -112,8 +158,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     // 二十来 KB schema，和 Agent360 一样是逐步交互的浏览器操作，用 `deferred`。
     PiMcpPreset {
         id: "playwright",
-        name: "Playwright 浏览器",
-        summary: "通过 Playwright 扩展操作你正在用的 Chrome，沿用已登录的状态：打开网页、点击填表、读页面结构、截图。需先安装 Playwright 扩展（点「安装扩展」），连接时在浏览器里确认。用 Smelt 自带的 Bun 运行。",
+        text: PiMcpPresetText::Playwright,
         description: "Browser automation with Playwright in the user's own signed-in Chrome via the Playwright extension: navigate, click, type, fill forms, read accessibility snapshots, take screenshots and inspect console and network",
         transport: PiMcpPresetTransport::Bun {
             args: &["x", "--bun", "@playwright/mcp@0.0.83", "--extension"],
@@ -131,8 +176,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     // 关闭统计、CrUX 查询和周期更新检查；工具较多且逐步交互，按需声明。
     PiMcpPreset {
         id: "chrome-devtools",
-        name: "Chrome 开发调试",
-        summary: "检查 Chrome 的网络、控制台、性能和内存。需 Chrome 144 以上，在 chrome://inspect/#remote-debugging 开启远程调试并授权。尝试用 Smelt 自带 Bun 运行（上游不支持 Bun）。",
+        text: PiMcpPresetText::ChromeDevtools,
         description: "Chrome DevTools: inspect network requests and console messages, analyze page performance and memory, and automate or debug pages in the user's running Chrome",
         transport: PiMcpPresetTransport::Bun {
             args: &[
@@ -158,8 +202,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
 // 浏览器，遇到验证码、付款随时接管。`install.sh --with-desktop` 装好桌面后自动加上。
 const PLAYWRIGHT_ON_REMOTE_DESKTOP: PiMcpPreset = PiMcpPreset {
     id: "playwright",
-    name: "Playwright 浏览器",
-    summary: "操作这台机器远程桌面里常驻的 Chrome，沿用里面已登录的状态：打开网页、点击填表、读页面结构、截图；遇到验证码、付款，人在远程桌面里接管。用 Smelt 自带的 Bun 运行。",
+    text: PiMcpPresetText::PlaywrightOnRemoteDesktop,
     description: "Browser automation with Playwright in the always-on Chrome on this machine's remote desktop, keeping its signed-in sessions: navigate, click, type, fill forms, read accessibility snapshots and take screenshots. A person can watch and take over the same browser from the remote desktop",
     transport: PiMcpPresetTransport::Bun {
         args: &[
@@ -179,8 +222,7 @@ const PLAYWRIGHT_ON_REMOTE_DESKTOP: PiMcpPreset = PiMcpPreset {
 
 const CHROME_DEVTOOLS_ON_REMOTE_DESKTOP: PiMcpPreset = PiMcpPreset {
     id: "chrome-devtools",
-    name: "Chrome 开发调试",
-    summary: "检查远程桌面 Chrome 的网络、控制台、性能和内存。尝试用 Smelt 自带 Bun 运行（上游不支持 Bun）。",
+    text: PiMcpPresetText::ChromeDevtoolsOnRemoteDesktop,
     description: "Chrome DevTools: inspect network requests and console messages, analyze page performance and memory, and automate or debug pages in the remote desktop Chrome",
     transport: PiMcpPresetTransport::Bun {
         args: &[

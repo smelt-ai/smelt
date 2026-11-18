@@ -7,6 +7,7 @@ use crate::models::PiConfigFileKind;
 use api::model::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
 use api::ui::IconAction as _;
 use api::ui::truncated_line::truncated_line;
+use smelt_plugin_api::ui::kit::TYPE;
 
 const PAGE_MAX_WIDTH: f32 = 760.;
 
@@ -15,14 +16,16 @@ pub(super) fn pi_mcp_page(
     page: &CapabilitiesPage,
     cx: &App,
 ) -> AnyElement {
-    let palette = Palette::new(cx);
+    let palette = Palette::new();
     let servers: &[PiMcpServer] = page.pi_mcp_servers().map(Vec::as_slice).unwrap_or_default();
     div()
         .id("pi-mcp-page")
         .size_full()
         .overflow_y_scroll()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .w_full()
                 .max_w(px(PAGE_MAX_WIDTH))
                 .mx_auto()
@@ -32,7 +35,7 @@ pub(super) fn pi_mcp_page(
                 .child(presets_section(
                     &entity,
                     servers,
-                    page.pi_mcp_remote_desktop(cx),
+                    page.pi_mcp_remote_desktop(),
                     palette,
                 ))
                 .child(servers_section(&entity, page, servers, palette, cx))
@@ -42,7 +45,7 @@ pub(super) fn pi_mcp_page(
 }
 
 fn row(index: usize, palette: Palette) -> Div {
-    let row = v_flex().w_full().px_4().py_3().gap_2();
+    let row = div().flex().flex_col().w_full().px_4().py_3().gap_2();
     if index > 0 {
         row.border_t_1().border_color(palette.border)
     } else {
@@ -53,7 +56,7 @@ fn row(index: usize, palette: Palette) -> Div {
 fn row_title(text: impl Into<SharedString>, palette: Palette) -> Div {
     div()
         .overflow_hidden()
-        .text_sm()
+        .type_style(TYPE.ui)
         .text_color(palette.fg)
         .child(truncated_line(text))
 }
@@ -61,7 +64,7 @@ fn row_title(text: impl Into<SharedString>, palette: Palette) -> Div {
 fn row_detail(text: impl Into<SharedString>, palette: Palette) -> Div {
     div()
         .overflow_hidden()
-        .text_xs()
+        .type_style(TYPE.text_xsmall)
         .text_color(palette.muted)
         .child(truncated_line(text))
 }
@@ -79,7 +82,7 @@ fn presets_section(
         let added = servers.iter().any(|server| server.name == preset.id);
         list = list.child(row(index, palette).child(preset_row(entity, preset, added, palette)));
     }
-    section("内置", None, list, palette)
+    section(t!("mcp.builtin"), None, list, palette)
 }
 
 fn preset_row(
@@ -89,21 +92,19 @@ fn preset_row(
     palette: Palette,
 ) -> Div {
     let action = if added {
-        Tag::secondary()
-            .rounded_full()
-            .flex_none()
-            .child("已添加")
+        Badge::new()
+            .child(t!("mcp.added").into_owned())
             .into_any_element()
     } else {
         let entity = entity.clone();
         // 点完会换成上面的「已添加」胶囊，按钮用同高的胶囊占同一个位置，各行右侧轮廓一致。
         Button::new(format!("pi-mcp-add-{}", preset.id))
             .small()
-            .label("添加")
+            .label(t!("mcp.add"))
             .tooltip(if preset.transport.needs_sign_in() {
-                "写入 ~/.pi/agent/mcp.json，之后点「登录」授权"
+                t!("mcp.add_tooltip_sign_in")
             } else {
-                "写入 ~/.pi/agent/mcp.json，新开的对话里就能用"
+                t!("mcp.add_tooltip")
             })
             .on_click(move |_, _, cx| {
                 entity.update(cx, |workspace, cx| {
@@ -117,33 +118,37 @@ fn preset_row(
         Button::new(format!("pi-mcp-extension-{}", preset.id))
             .quiet()
             .small()
-            .label("安装扩展")
-            .tooltip("打开 Chrome 应用商店里的扩展页")
+            .label(t!("mcp.install_extension"))
+            .tooltip(t!("mcp.install_extension_tooltip"))
             .on_click(move |_, _, cx| cx.open_url(url))
     });
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .justify_between()
         .gap_3()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_w_0()
                 .gap_0p5()
-                .child(row_title(preset.name, palette))
+                .child(row_title(preset.name(), palette))
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(palette.muted)
-                        .child(preset.summary),
+                        .child(preset.summary()),
                 ),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .flex_none()
                 .gap_1()
-                .items_center()
                 .children(install)
                 .child(action),
         )
@@ -156,31 +161,31 @@ fn servers_section(
     palette: Palette,
     cx: &App,
 ) -> Div {
-    let mut body = v_flex().w_full().gap_2();
+    let mut body = div().flex().flex_col().w_full().gap_2();
     if let Some(error) = &page.pi_mcp_error {
         body = body.child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.danger)
-                .child(format!("操作失败：{error}")),
+                .child(t!("common.action_failed", error = error).into_owned()),
         );
     }
     match page.pi_mcp_servers() {
         Err(error) => {
             body = body.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(palette.danger)
-                    .child(format!("无法读取 mcp.json：{error}")),
+                    .child(t!("mcp.read_failed", error = error).into_owned()),
             );
         }
         Ok(_) if servers.is_empty() => {
             body = body.child(
                 card(palette).px_4().py_3().child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(palette.muted)
-                        .child("还没有 MCP 服务器。添加上面的内置服务器，或直接编辑 mcp.json。"),
+                        .child(t!("mcp.empty").into_owned()),
                 ),
             );
         }
@@ -203,7 +208,7 @@ fn servers_section(
             body = body.child(list);
         }
     }
-    section("已配置", None, body, palette)
+    section(t!("mcp.configured"), None, body, palette)
 }
 
 fn server_row(
@@ -214,10 +219,13 @@ fn server_row(
 ) -> Div {
     let detail = match &server.transport {
         PiMcpTransport::Http { url } => url.clone(),
-        PiMcpTransport::Stdio { command, args } => {
-            format!("本地命令 · {command} {}", args.join(" "))
-        }
-        PiMcpTransport::Unknown => "缺少 url 或 command".to_string(),
+        PiMcpTransport::Stdio { command, args } => t!(
+            "mcp.local_command",
+            command = command,
+            args = args.join(" ")
+        )
+        .into_owned(),
+        PiMcpTransport::Unknown => t!("mcp.missing_transport").into_owned(),
     };
     // 结束了（失败）的登录面板还留着看原因，不再挡按钮：点「登录」就是重试。
     let running_login = page
@@ -229,14 +237,19 @@ fn server_row(
     let any_login = running_login.is_some();
     let removing = page.pi_mcp_pending_remove.is_some();
 
-    let mut badges = h_flex()
-        .gap_2()
+    let mut badges = div()
+        .flex()
         .items_center()
+        .gap_2()
         .child(row_title(server.name.clone(), palette));
     if !server.enabled {
-        badges = badges.child(Tag::secondary().rounded_full().flex_none().child("已停用"));
+        badges = badges.child(Badge::new().child(t!("mcp.disabled").into_owned()));
     } else if server.signed_in {
-        badges = badges.child(Tag::success().rounded_full().flex_none().child("已登录"));
+        badges = badges.child(
+            Badge::new()
+                .ok()
+                .child(t!("auth.status.oauth").into_owned()),
+        );
     }
 
     let login = (server.is_http() && server.enabled).then(|| {
@@ -245,13 +258,13 @@ fn server_row(
         Button::new(format!("pi-mcp-login-{}", server.name))
             .small()
             .label(if logging_in {
-                "等待授权…"
+                t!("mcp.waiting")
             } else if server.signed_in {
-                "重新登录"
+                t!("auth.sign_in_again")
             } else {
-                "登录"
+                t!("auth.sign_in")
             })
-            .tooltip("用浏览器授权；不需要登录的服务器会直接提示已连接")
+            .tooltip(t!("mcp.sign_in_tooltip"))
             .disabled(any_login)
             .on_click(move |_, window, cx| {
                 let name = name.clone();
@@ -267,7 +280,11 @@ fn server_row(
         Button::new(format!("pi-mcp-toggle-{}", server.name))
             .quiet()
             .small()
-            .label(if enable { "启用" } else { "停用" })
+            .label(if enable {
+                t!("mcp.enable")
+            } else {
+                t!("mcp.disable")
+            })
             .disabled(logging_in)
             .on_click(move |_, _, cx| {
                 let name = name.clone();
@@ -282,8 +299,8 @@ fn server_row(
         Button::new(format!("pi-mcp-remove-{}", server.name))
             .quiet()
             .small()
-            .icon(api::ui::trash_icon())
-            .icon_action("从 mcp.json 移除")
+            .icon(IconName::Trash)
+            .icon_action(t!("mcp.remove_tooltip"))
             .disabled(logging_in || removing)
             .on_click(move |_, _, cx| {
                 let name = name.clone();
@@ -293,13 +310,16 @@ fn server_row(
             })
     };
 
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .justify_between()
         .gap_3()
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_w_0()
                 .gap_0p5()
@@ -307,10 +327,11 @@ fn server_row(
                 .child(row_detail(detail, palette)),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .flex_none()
                 .gap_1()
-                .items_center()
                 .children(login)
                 .child(toggle)
                 .child(remove),
@@ -321,25 +342,29 @@ fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palett
     let confirm_entity = entity.clone();
     let cancel_entity = entity.clone();
     let confirm_name = name.to_string();
-    h_flex()
-        .w_full()
+    div()
+        .flex()
         .items_center()
+        .w_full()
         .justify_between()
         .gap_3()
         .child(
-            div().text_xs().text_color(palette.muted).child(
-                "从 mcp.json 删掉这一项。登录凭据保留，重新添加同名同地址的服务器不用再登录。",
-            ),
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(palette.muted)
+                .child(t!("mcp.remove_body").into_owned()),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
+                .items_center()
                 .flex_none()
                 .gap_1()
                 .child(
                     Button::new("pi-mcp-remove-cancel")
                         .quiet()
                         .small()
-                        .label("取消")
+                        .label(t!("common.cancel"))
                         .on_click(move |_, _, cx| {
                             cancel_entity
                                 .update(cx, |workspace, cx| workspace.cancel_pi_mcp_remove(cx));
@@ -349,7 +374,7 @@ fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palett
                     Button::new("pi-mcp-remove-confirm")
                         .danger()
                         .small()
-                        .label("移除")
+                        .label(t!("mcp.remove"))
                         .on_click(move |_, _, cx| {
                             let name = confirm_name.clone();
                             confirm_entity.update(cx, |workspace, cx| {
@@ -363,24 +388,27 @@ fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palett
 /// 原生文件入口，以及「改了要怎样才生效」的提示：Pi 只在会话启动时读 mcp.json。
 fn footer(entity: &Entity<CapabilitiesPage>, mcp_path: &str, palette: Palette) -> Div {
     let open_entity = entity.clone();
-    v_flex()
+    div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_2()
         .pt_3()
         .border_t_1()
         .border_color(palette.border)
         .child(
-            h_flex()
-                .w_full()
+            div()
+                .flex()
                 .items_center()
+                .w_full()
                 .gap_1()
                 .child(
                     div()
                         .flex_none()
                         .mr_2()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(palette.muted)
-                        .child("原生配置文件"),
+                        .child(t!("config.native_files").into_owned()),
                 )
                 .child(
                     Button::new("pi-edit-mcp-file")
@@ -397,10 +425,8 @@ fn footer(entity: &Entity<CapabilitiesPage>, mcp_path: &str, palette: Palette) -
         )
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
-                .child(
-                    "普通 Pi 对话连所有启用的服务器；智能体只连在它的详情页里勾选的。改动对新开的对话生效，已经开着的对话发 /reload 重新加载。",
-                ),
+                .child(t!("mcp.footer").into_owned()),
         )
 }

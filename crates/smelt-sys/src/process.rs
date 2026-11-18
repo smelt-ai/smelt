@@ -43,7 +43,7 @@ pub fn terminate_pid(pid: u32) -> io::Result<()> {
     }
     #[cfg(unix)]
     {
-        let pid = i32::try_from(pid).map_err(|_| io::Error::other("pid 超出范围"))?;
+        let pid = i32::try_from(pid).map_err(|_| io::Error::other("pid out of range"))?;
         if pid <= 0 {
             return Ok(());
         }
@@ -65,7 +65,7 @@ pub fn terminate_pid(pid: u32) -> io::Result<()> {
     {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "这个平台不能结束进程",
+            "can't kill processes on this platform",
         ))
     }
 }
@@ -117,7 +117,10 @@ impl ProcessTree {
         }
         #[cfg(not(any(unix, windows)))]
         {
-            Err(io::Error::new(io::ErrorKind::Unsupported, "不能结束进程树"))
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "can't kill a process tree on this platform",
+            ))
         }
     }
 
@@ -140,7 +143,10 @@ impl ProcessTree {
         }
         #[cfg(not(any(unix, windows)))]
         {
-            Err(io::Error::new(io::ErrorKind::Unsupported, "不能结束进程树"))
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "can't kill a process tree on this platform",
+            ))
         }
     }
 
@@ -173,7 +179,7 @@ impl ProcessTree {
             let _ = (command, no_window);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "这个平台没有进程树",
+                "process trees aren't available on this platform",
             ))
         }
     }
@@ -199,7 +205,7 @@ pub fn signal_tree(pid: u32, signal: TreeSignal) -> io::Result<()> {
             TreeSignal::Interrupt => libc::SIGTERM,
             TreeSignal::Kill => libc::SIGKILL,
         };
-        let pid = i32::try_from(pid).map_err(|_| io::Error::other("pid 超出范围"))?;
+        let pid = i32::try_from(pid).map_err(|_| io::Error::other("pid out of range"))?;
         if unsafe { libc::kill(-pid, signo) } == 0 {
             return Ok(());
         }
@@ -218,7 +224,10 @@ pub fn signal_tree(pid: u32, signal: TreeSignal) -> io::Result<()> {
     #[cfg(not(any(unix, windows)))]
     {
         let _ = signal;
-        Err(io::Error::new(io::ErrorKind::Unsupported, "不能结束进程树"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "can't kill a process tree on this platform",
+        ))
     }
 }
 
@@ -295,7 +304,7 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
         let _ = command;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "这个平台不能脱离启动进程",
+            "can't detach from the launching process on this platform",
         ))
     }
 }
@@ -505,7 +514,9 @@ mod windows {
         entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
         let mut resumed = false;
         if unsafe { Thread32First(snapshot, &mut entry) } == 0 {
-            return Err(io::Error::other("挂起的进程没有可恢复的线程"));
+            return Err(io::Error::other(
+                "the suspended process has no thread to resume",
+            ));
         }
         loop {
             if entry.th32OwnerProcessID == pid {
@@ -527,7 +538,9 @@ mod windows {
         if resumed {
             Ok(())
         } else {
-            Err(io::Error::other("挂起的进程没有可恢复的线程"))
+            Err(io::Error::other(
+                "the suspended process has no thread to resume",
+            ))
         }
     }
 
@@ -603,11 +616,13 @@ mod windows {
         let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
         let sid = user.User.Sid;
         if sid.is_null() {
-            return Err(io::Error::other("进程令牌没有用户 SID"));
+            return Err(io::Error::other("the process token has no user SID"));
         }
         let len = unsafe { GetLengthSid(sid) } as usize;
         if len == 0 {
-            return Err(io::Error::other("进程令牌的用户 SID 长度为 0"));
+            return Err(io::Error::other(
+                "the process token's user SID has length 0",
+            ));
         }
         let mut bytes = vec![0u8; len];
         unsafe {

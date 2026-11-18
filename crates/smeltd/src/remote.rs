@@ -519,7 +519,7 @@ pub(crate) fn apply_remote_config(state: &RemoteState, config: &RemoteConfig) {
         "" => Ok(None),
         address => smelt_iroh::RelaySettings::parse(address)
             .map(Some)
-            .map_err(|error| format!("iroh relay 配置无效：{error:#}")),
+            .map_err(|error| format!("Invalid iroh relay config: {error:#}")),
     };
     let mut guard = state.lock().unwrap();
     if guard.stopping {
@@ -656,7 +656,7 @@ fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpo
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(runtime) => runtime,
             Err(error) => {
-                let _ = ready_tx.send(Err(format!("起不了 tokio runtime：{error}")));
+                let _ = ready_tx.send(Err(format!("Couldn't start the tokio runtime: {error}")));
                 return;
             }
         };
@@ -666,7 +666,7 @@ fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpo
             {
                 Ok(secret) => secret,
                 Err(error) => {
-                    let _ = ready_tx.send(Err(format!("iroh 密钥不可用：{error:#}")));
+                    let _ = ready_tx.send(Err(format!("The iroh key isn't available: {error:#}")));
                     return;
                 }
             };
@@ -731,7 +731,7 @@ fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpo
         Ok(Err(error)) => Err(error),
         Err(_) => {
             let _ = shutdown_tx.send(());
-            Err("iroh endpoint 绑定超时（30s）".to_string())
+            Err("Timed out binding the iroh endpoint (30s)".to_string())
         }
     }
 }

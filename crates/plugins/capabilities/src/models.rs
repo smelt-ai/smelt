@@ -12,39 +12,19 @@ impl CapabilitiesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (
-        Entity<gpui_component::input::InputState>,
-        Entity<gpui_component::input::InputState>,
-        Entity<gpui_component::input::InputState>,
-        Entity<gpui_component::input::InputState>,
+        Entity<InputState>,
+        Entity<InputState>,
+        Entity<InputState>,
+        Entity<InputState>,
     ) {
-        use gpui_component::input::InputState;
-
-        let id = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("例如 gpt-5-mini")
-                .default_value(id)
-        });
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("显示名称（可选）")
-                .default_value(name)
-        });
-        let context_window = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("上下文长度（可选）")
-                .default_value(context_window)
-        });
-        let max_tokens = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("最大输出（可选）")
-                .default_value(max_tokens)
-        });
+        let id = cx.new(|cx| InputState::new(window, cx).default_value(id));
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        let context_window = cx.new(|cx| InputState::new(window, cx).default_value(context_window));
+        let max_tokens = cx.new(|cx| InputState::new(window, cx).default_value(max_tokens));
         (id, name, context_window, max_tokens)
     }
 
     pub fn edit_pi_model_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_component::input::InputState;
-
         self.pi_model_editor_error = None;
         let settings = match self.pi_model_settings().cloned() {
             Ok(settings) => settings,
@@ -57,38 +37,23 @@ impl CapabilitiesPage {
         };
         self.pi_custom_provider_editor = None;
 
-        let provider = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("提供方，如 deepseek / anthropic")
-                .default_value(settings.default_model.provider)
-        });
-        let model = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("模型 ID，如 deepseek-chat")
-                .default_value(settings.default_model.model)
-        });
-        let base_url = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("留空使用官方默认端点")
-                .default_value(settings.default_model.base_url)
-        });
-        let api_key = cx.new(|cx| {
-            InputState::new(window, cx).masked(true).placeholder(
-                if settings.credential_configured {
-                    "已配置；输入新值以覆盖"
-                } else {
-                    "输入 API key"
-                },
-            )
-        });
-        self.pi_model_editor = Some(PiModelEditor {
+        let provider =
+            cx.new(|cx| InputState::new(window, cx).default_value(settings.default_model.provider));
+        let model =
+            cx.new(|cx| InputState::new(window, cx).default_value(settings.default_model.model));
+        let base_url =
+            cx.new(|cx| InputState::new(window, cx).default_value(settings.default_model.base_url));
+        let api_key = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let editor = PiModelEditor {
             provider,
             model,
             base_url,
             api_key,
             thinking_level: settings.default_model.thinking_level,
             credential_configured: settings.credential_configured,
-        });
+        };
+        editor.label(window, cx);
+        self.pi_model_editor = Some(editor);
         cx.notify();
     }
 
@@ -119,12 +84,12 @@ impl CapabilitiesPage {
         };
         let provider = editor.provider.read(cx).value().trim().to_string();
         if provider.is_empty() {
-            notify_error("提供方不能为空", cx);
+            notify_error(t!("model_editor.provider_required"), cx);
             return;
         }
         let model = editor.model.read(cx).value().trim().to_string();
         if model.is_empty() {
-            notify_error("模型 ID 不能为空", cx);
+            notify_error(t!("model_editor.model_required"), cx);
             return;
         }
         let base_url = editor.base_url.read(cx).value().trim().to_string();
@@ -136,7 +101,7 @@ impl CapabilitiesPage {
         }
         let api_key = editor.api_key.read(cx).value().to_string();
         if api_key.is_empty() && !editor.credential_configured {
-            notify_error("请输入 API key", cx);
+            notify_error(t!("model_editor.key_required"), cx);
             return;
         }
 
@@ -159,7 +124,7 @@ impl CapabilitiesPage {
                     this.pi_model_editor = None;
                     this.pi_model_editor_error = None;
                     this.adopt_pi_config(config, cx);
-                    notify_success("Pi 模型配置已保存", cx);
+                    notify_success(t!("model_editor.saved"), cx);
                 }
                 Err(error) => this.reject_pi_model_edit(error, cx),
             },
@@ -185,12 +150,14 @@ impl CapabilitiesPage {
             window,
             cx,
         );
-        PiCustomModelEditor {
+        let editor = PiCustomModelEditor {
             id,
             name,
             context_window,
             max_tokens,
-        }
+        };
+        editor.label(window, cx);
+        editor
     }
 
     pub fn edit_pi_custom_provider(
@@ -199,8 +166,6 @@ impl CapabilitiesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use gpui_component::input::InputState;
-
         let settings = match self.pi_model_settings().cloned() {
             Ok(settings) => settings,
             Err(error) => {
@@ -230,33 +195,11 @@ impl CapabilitiesPage {
             .as_ref()
             .map(|provider| provider.base_url.clone())
             .unwrap_or_default();
-        let id = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("例如 acme-gateway")
-                .default_value(provider_value)
-        });
-        let display_name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("可选，默认用 Provider ID")
-                .default_value(display_name_value)
-        });
-        let api_key = cx.new(|cx| {
-            InputState::new(window, cx).masked(true).placeholder(
-                if existing
-                    .as_ref()
-                    .is_some_and(|provider| provider.credential_configured)
-                {
-                    "已配置；输入新值以覆盖"
-                } else {
-                    "API key（可留空）"
-                },
-            )
-        });
-        let base_url = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("https://gateway.example/v1")
-                .default_value(base_url_value)
-        });
+        let id = cx.new(|cx| InputState::new(window, cx).default_value(provider_value));
+        let display_name =
+            cx.new(|cx| InputState::new(window, cx).default_value(display_name_value));
+        let api_key = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let base_url = cx.new(|cx| InputState::new(window, cx).default_value(base_url_value));
         // 标记为「自动」的 provider 打开时不回填模型行：配置里那份是我们刷进去的，
         // 回填等于让用户一保存就把它变回手工维护。留空即代表「继续自动」。
         let auto = previous_id.as_deref().is_some_and(|id| {
@@ -282,7 +225,7 @@ impl CapabilitiesPage {
         }
         self.pi_model_editor = None;
         self.pi_model_editor_error = None;
-        self.pi_custom_provider_editor = Some(PiCustomProviderEditor {
+        let editor = PiCustomProviderEditor {
             previous_id,
             id,
             display_name,
@@ -298,7 +241,9 @@ impl CapabilitiesPage {
             credential_configured: existing
                 .as_ref()
                 .is_some_and(|provider| provider.credential_configured),
-        });
+        };
+        editor.label(window, cx);
+        self.pi_custom_provider_editor = Some(editor);
         cx.notify();
     }
 
@@ -452,7 +397,7 @@ impl CapabilitiesPage {
 
         let base_url = editor.base_url.read(cx).value().trim().to_string();
         if base_url.is_empty() {
-            self.reject_pi_model_edit("请填写 API 地址", cx);
+            self.reject_pi_model_edit(t!("provider.base_url_required"), cx);
             return;
         }
         if let Err(error) = api::model::pi_model_settings::validate_api_base_url(&base_url) {
@@ -493,7 +438,10 @@ impl CapabilitiesPage {
         let from_endpoint = models.is_empty();
         if from_endpoint {
             if let Err(error) = api::model::pi_model_discovery::models_endpoint(&base_url) {
-                self.fail_pi_discovery(format!("{error}；或手动填写至少一个模型"), cx);
+                self.fail_pi_discovery(
+                    t!("provider.discovery_failed", error = error).into_owned(),
+                    cx,
+                );
                 return;
             }
             if let Some(editor) = self.pi_custom_provider_editor.as_mut() {
@@ -525,9 +473,9 @@ impl CapabilitiesPage {
                     this.adopt_pi_config(saved.config, cx);
                     notify_success(
                         if saved.auto {
-                            format!("自定义 Provider {id} 已保存，模型目录将在每次启动时刷新")
+                            t!("provider.saved_auto", id = id)
                         } else {
-                            format!("自定义 Provider {id} 已保存")
+                            t!("provider.saved", id = id)
                         },
                         cx,
                     );
@@ -553,7 +501,7 @@ impl CapabilitiesPage {
             move |this, result, cx| match result {
                 Ok(config) => {
                     this.adopt_pi_config(config, cx);
-                    notify_success(format!("已移除自定义 Provider {provider_id}"), cx);
+                    notify_success(t!("provider.removed", provider_id = provider_id), cx);
                 }
                 Err(error) => notify_error(error, cx),
             },
@@ -576,10 +524,7 @@ impl CapabilitiesPage {
                 .find(|machine| machine.key == self.machine)
                 .map(|machine| machine.name)
                 .unwrap_or_default();
-            notify_error(
-                format!("配置文件在「{name}」上，这台电脑打不开。可以在那台机器的终端里改。"),
-                cx,
-            );
+            notify_error(t!("config.remote_file", name = name), cx);
             return;
         }
         let file = match file_kind {
@@ -605,9 +550,7 @@ impl CapabilitiesPage {
                 cx.spawn(async move |_, cx| {
                     let message = opened.await;
                     cx.update(|cx| match message {
-                        Ok(()) => {
-                            notify_success(format!("已在系统文本编辑器打开 {}", path.display()), cx)
-                        }
+                        Ok(()) => notify_success(t!("config.opened", path = path.display()), cx),
                         Err(error) => notify_error(error, cx),
                     })
                 })
@@ -672,8 +615,8 @@ impl CapabilitiesPage {
 
         let request = api::PathRequest {
             machine: self.machine.clone(),
-            title: "选择要导入的插件".to_string(),
-            confirm: "导入".to_string(),
+            title: t!("plugins.import_title").into_owned(),
+            confirm: t!("plugins.import_confirm").into_owned(),
             // 扩展可以是单个文件，技能是目录。
             files: kind == PiPluginKind::Extension,
             multiple: false,

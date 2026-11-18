@@ -1,357 +1,98 @@
 //! 设置的信息架构：左侧按分组列出各页，每页一个独立内容页。
 //!
-//! gpui-component 的 `Settings` 在 `groups.len() > 1` 时会画二级菜单，但点击只是
-//! 滚动到分组，右侧仍是整页。这里把每一页做成独立 `SettingsSection`，由壳层只渲染
-//! 当前这一页；页内再用 `SettingGroup` 分节。
+//! 每一页是一个带 `settings` 的视图（宿主自己的外观、快捷键、面板插件也是，见
+//! [`super::view_specs`]），导航只按登记的视图列，不认识具体哪一页。页内用 smelt-ui 的
+//! `SettingsSection`（分组卡片）分节。
 
 use gpui::SharedString;
-use gpui_component::{Icon, IconName};
+use rust_i18n::t;
 use smelt_plugin_api::{SettingsGroup, ViewInfo};
-
-/// 设置当前选中的内容页。深链接（检查更新、外观、机器、资源）也走这里。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum SettingsSection {
-    /// 主题、字号与字体、布局、背景。
-    #[default]
-    Appearance,
-    Shortcuts,
-    PanelPlugins,
-    /// 本机 Agent CLI、Hooks 接入、启动项、对话命令与多工作区。都只作用于本机运行时。
-    Agents,
-    /// 连到其他机器的运行时，以及让配对过的设备连进这台机器。
-    Remote,
-    /// 后台服务、终端里的 smelt 命令（macOS）、旧版本残留。
-    Maintenance,
-    /// 版本、应用更新（macOS、Windows）、帮助与反馈。
-    About,
-    /// 插件登记的页（带 `settings` 的视图，见 `smelt_plugin_api::register_views`），带视图 id。
-    Plugin(SharedString),
-}
-
-impl SettingsSection {
-    pub fn appearance() -> Self {
-        Self::Appearance
-    }
-
-    /// 检查更新的深链接。
-    #[cfg(any(target_os = "macos", windows))]
-    pub fn app_update() -> Self {
-        Self::About
-    }
-
-    pub fn element_key(&self) -> SharedString {
-        match self {
-            Self::Appearance => "appearance".into(),
-            Self::Shortcuts => "shortcuts".into(),
-            Self::PanelPlugins => "panel-plugins".into(),
-            Self::Agents => "agents".into(),
-            Self::Remote => "remote".into(),
-            Self::Maintenance => "maintenance".into(),
-            Self::About => "about".into(),
-            Self::Plugin(id) => format!("plugin:{id}").into(),
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct SettingsNavLeaf {
     pub title: String,
-    pub icon: Icon,
-    pub section: SettingsSection,
+    /// 图标的 svg 路径，登记视图时给的。
+    pub icon: SharedString,
+    /// 这一页的视图 id。
+    pub id: SharedString,
     pub keywords: Vec<String>,
 }
 
 #[derive(Clone)]
 pub struct SettingsNavCategory {
-    pub title: &'static str,
+    /// 此刻语言下的组名。导航在视图登记变了、换了语言时重建。
+    pub title: SharedString,
     pub keywords: &'static [&'static str],
     pub children: Vec<SettingsNavLeaf>,
 }
 
-/// 设置侧栏：宿主的三组，每组一行小标题加若干页；插件的页按它挑的组排在宿主的页后面，
-/// 挑「插件」组的单独成一组放在最后。`views` 是登记过的全部视图，只取设置页。
+/// 设置侧栏：四组（通用、Agent 与远程、系统、插件），每组一行小标题加若干页。组内宿主自己
+/// 的页在前，插件的页按登记先后排在后面；一页都没有的组不露。`views` 是登记过的全部视图，
+/// 只取设置页。
 pub fn settings_nav(views: &[ViewInfo]) -> Vec<SettingsNavCategory> {
-    let mut nav = host_nav();
-    let mut plugins = SettingsNavCategory {
-        title: "插件",
-        keywords: &["扩展", "plugin"],
-        children: Vec::new(),
-    };
-    for view in views {
+    let mut nav = vec![
+        // 关键词两种语言都写上（含另一种语言的组名），用哪种语言搜都找得到。
+        category(
+            t!("settings.group.general"),
+            &["通用", "常规", "偏好设置", "general", "preferences"],
+        ),
+        category(
+            t!("settings.group.agents"),
+            &["Agent 与远程", "运行时", "agents", "remote", "runtime"],
+        ),
+        category(t!("settings.group.system"), &["系统", "system"]),
+        category(
+            t!("settings.group.plugins"),
+            &["插件", "扩展", "plugin", "plugins", "extensions"],
+        ),
+    ];
+    // 宿主的页比插件晚登记（插件在开主窗口前装好），排序时不看登记先后。
+    let host = |view: &&ViewInfo| super::is_host_view(&view.id);
+    let ordered = views
+        .iter()
+        .filter(host)
+        .chain(views.iter().filter(|view| !host(view)));
+    for view in ordered {
         let Some(page) = &view.settings else {
             continue;
         };
-        let leaf = SettingsNavLeaf {
+        let index = match page.group {
+            SettingsGroup::General => 0,
+            SettingsGroup::Agents => 1,
+            SettingsGroup::System => 2,
+            SettingsGroup::Plugins => 3,
+        };
+        nav[index].children.push(SettingsNavLeaf {
             title: view.title.to_string(),
-            icon: Icon::empty().path(view.icon.clone()),
-            section: SettingsSection::Plugin(view.id.clone()),
+            icon: view.icon.clone(),
+            id: view.id.clone(),
             keywords: page.keywords.iter().map(ToString::to_string).collect(),
-        };
-        let category = match page.group {
-            SettingsGroup::General => &mut nav[0],
-            SettingsGroup::Agents => &mut nav[1],
-            SettingsGroup::System => &mut nav[2],
-            SettingsGroup::Plugins => &mut plugins,
-        };
-        category.children.push(leaf);
+        });
     }
-    if !plugins.children.is_empty() {
-        nav.push(plugins);
-    }
+    nav.retain(|category| !category.children.is_empty());
     nav
 }
 
-/// 宿主自己的页：通用、Agent 与远程、系统三组，次序和 [`settings_nav`] 里按组放插件页对应。
-fn host_nav() -> Vec<SettingsNavCategory> {
-    vec![
-        SettingsNavCategory {
-            title: "通用",
-            keywords: &["常规", "偏好设置"],
-            children: vec![
-                leaf(
-                    "外观",
-                    IconName::Palette,
-                    SettingsSection::Appearance,
-                    &[
-                        "主题",
-                        "颜色模式",
-                        "深色",
-                        "暗色",
-                        "夜间",
-                        "浅色",
-                        "亮色",
-                        "配色",
-                        "Default",
-                        "Ayu",
-                        "Catppuccin",
-                        "界面字号",
-                        "UI 字号",
-                        "界面字体",
-                        "字体大小",
-                        "调整字号",
-                        "缩放",
-                        "terminal",
-                        "终端",
-                        "终端字号",
-                        "代码字体",
-                        "等宽字体",
-                        "字体",
-                        "背景",
-                        "背景图",
-                        "背景图片",
-                        "壁纸",
-                        "透明",
-                        "透明度",
-                        "背景透明",
-                        "材质",
-                        "毛玻璃",
-                        "模糊",
-                    ],
-                ),
-                leaf(
-                    "快捷键",
-                    Icon::new(gpui_kit_assets::IconName::Keyboard),
-                    SettingsSection::Shortcuts,
-                    &[
-                        "键盘快捷键",
-                        "键盘",
-                        "按键",
-                        "组合键",
-                        "shortcut",
-                        "keymap",
-                        "cmd",
-                        "command",
-                    ],
-                ),
-                leaf(
-                    "面板插件",
-                    Icon::new(gpui_kit_assets::IconName::Puzzle),
-                    SettingsSection::PanelPlugins,
-                    &[
-                        "插件",
-                        "plugin",
-                        "扩展",
-                        "面板",
-                        "布局",
-                        "导入插件",
-                        "安装插件",
-                        "删除插件",
-                        "卸载插件",
-                        "重新加载",
-                        "gpui-shell",
-                    ],
-                ),
-            ],
-        },
-        SettingsNavCategory {
-            title: "Agent 与远程",
-            keywords: &["运行时"],
-            children: vec![
-                leaf(
-                    "Agent",
-                    IconName::Bot,
-                    SettingsSection::Agents,
-                    &[
-                        "智能体",
-                        "额度",
-                        "钥匙串",
-                        "AI",
-                        "会话",
-                        "运行环境",
-                        "cli",
-                        "安装",
-                        "版本",
-                        "检测",
-                        "路径",
-                        "claude",
-                        "codex",
-                        "copilot",
-                        "grok",
-                        "cursor",
-                        "opencode",
-                        "kiro",
-                        "pi",
-                        "hook",
-                        "hooks",
-                        "Agent Hooks",
-                        "通知接入",
-                        "权限接入",
-                        "配置文件",
-                        "快捷启动项",
-                        "启动",
-                        "launch",
-                        "命令",
-                        "+",
-                        "加号",
-                        "新建菜单",
-                        "项目菜单",
-                        "Agent 对话",
-                        "adapter",
-                        "适配器",
-                        "workspace",
-                        "工作区",
-                        "多工作区",
-                        "config dir",
-                        "启动命令",
-                        "参数",
-                    ],
-                ),
-                leaf(
-                    "远程",
-                    IconName::Globe,
-                    SettingsSection::Remote,
-                    &[
-                        "多机器",
-                        "机器",
-                        "远程机器",
-                        "添加机器",
-                        "添加远程机器",
-                        "其他运行时",
-                        "配对串",
-                        "smeltd pair",
-                        "离线",
-                        "版本不兼容",
-                        "远程访问",
-                        "开启远程",
-                        "Relay 地址",
-                        "允许远程写入",
-                        "手机",
-                        "移动端",
-                        "配对",
-                        "二维码",
-                        "token",
-                        "iroh",
-                        "relay",
-                        "分享",
-                        "只读",
-                        "写入",
-                    ],
-                ),
-            ],
-        },
-        SettingsNavCategory {
-            title: "系统",
-            keywords: &[],
-            children: vec![
-                leaf(
-                    "维护",
-                    Icon::new(gpui_kit_assets::IconName::Wrench),
-                    SettingsSection::Maintenance,
-                    &[
-                        "smeltd",
-                        "守护进程",
-                        "守护",
-                        "后台",
-                        "服务",
-                        "后台服务",
-                        "进程",
-                        "重启",
-                        "重启守护进程",
-                        "重启以升级",
-                        "会话服务",
-                        "卡死",
-                        "残留数据清理",
-                        "清理",
-                        "残留",
-                        "存储",
-                        "空间",
-                        "缓存",
-                        "清缓存",
-                        "磁盘",
-                        "旧数据",
-                        "~/.smelt",
-                        "高级",
-                        "命令行",
-                        "CLI",
-                        "终端命令",
-                        "PATH",
-                    ],
-                ),
-                leaf(
-                    "关于",
-                    IconName::Info,
-                    SettingsSection::About,
-                    &[
-                        "软件版本",
-                        "应用版本",
-                        "版本",
-                        "更新",
-                        "检查更新",
-                        "更新通道",
-                        "自动下载安装",
-                        "升级",
-                        "下载",
-                        "通道",
-                        "生产版",
-                        "内测版",
-                        "自动更新",
-                        "帮助",
-                        "帮助文档",
-                        "文档",
-                        "反馈",
-                        "反馈问题",
-                        "日志",
-                        "源码",
-                        "GitHub",
-                    ],
-                ),
-            ],
-        },
-    ]
+fn category(
+    title: std::borrow::Cow<'static, str>,
+    keywords: &'static [&'static str],
+) -> SettingsNavCategory {
+    SettingsNavCategory {
+        title: title.into(),
+        keywords,
+        children: Vec::new(),
+    }
 }
 
-fn leaf(
-    title: &str,
-    icon: impl Into<Icon>,
-    section: SettingsSection,
-    keywords: &[&str],
-) -> SettingsNavLeaf {
-    SettingsNavLeaf {
-        title: title.to_string(),
-        icon: icon.into(),
-        section,
-        keywords: keywords.iter().map(|word| (*word).to_string()).collect(),
-    }
+/// 停在哪一页：选过的那页还在导航里就是它，不然是导航里的第一页；一页都没有是 `None`。
+pub fn resolve_page<'a>(
+    nav: &'a [SettingsNavCategory],
+    chosen: Option<&str>,
+) -> Option<&'a SettingsNavLeaf> {
+    let leaves = || nav.iter().flat_map(|category| category.children.iter());
+    chosen
+        .and_then(|chosen| leaves().find(|leaf| leaf.id.as_ref() == chosen))
+        .or_else(|| leaves().next())
 }
 
 /// 按标题和关键词过滤侧栏。空查询返回完整树。
@@ -372,7 +113,7 @@ pub fn filter_settings_nav(nav: &[SettingsNavCategory], query: &str) -> Vec<Sett
                         .chain(child.keywords.iter().map(String::as_str));
                     category_hit
                         || matches_query(
-                            std::iter::once(category.title)
+                            std::iter::once(category.title.as_ref())
                                 .chain(category.keywords.iter().copied())
                                 .chain(child_values.clone()),
                             &terms,
@@ -393,7 +134,7 @@ pub fn filter_settings_nav(nav: &[SettingsNavCategory], query: &str) -> Vec<Sett
 
 fn category_matches_exact(category: &SettingsNavCategory, query: &str) -> bool {
     let query = query.trim().to_lowercase();
-    std::iter::once(category.title)
+    std::iter::once(category.title.as_ref())
         .chain(category.keywords.iter().copied())
         .any(|value| value.to_lowercase() == query)
 }
@@ -447,12 +188,12 @@ mod tests {
     use super::*;
 
     fn titles(nav: &[SettingsNavCategory]) -> Vec<&str> {
-        nav.iter().map(|category| category.title).collect()
+        nav.iter().map(|category| category.title.as_ref()).collect()
     }
 
     fn child_titles(nav: &[SettingsNavCategory], title: &str) -> Vec<String> {
         nav.iter()
-            .find(|category| category.title == title)
+            .find(|category| category.title.as_ref() == title)
             .map(|category| {
                 category
                     .children
@@ -463,76 +204,12 @@ mod tests {
             .unwrap_or_default()
     }
 
-    fn matching_sections(nav: &[SettingsNavCategory], query: &str) -> Vec<SettingsSection> {
+    fn matching_pages(nav: &[SettingsNavCategory], query: &str) -> Vec<SharedString> {
         filter_settings_nav(nav, query)
             .into_iter()
             .flat_map(|category| category.children)
-            .map(|child| child.section)
+            .map(|child| child.id)
             .collect()
-    }
-
-    #[test]
-    fn nav_is_two_groups_of_pages() {
-        let nav = settings_nav(&[]);
-        assert_eq!(titles(&nav), ["通用", "Agent 与远程", "系统"]);
-        assert_eq!(child_titles(&nav, "通用"), ["外观", "快捷键", "面板插件"]);
-        assert_eq!(child_titles(&nav, "Agent 与远程"), ["Agent", "远程"]);
-        assert_eq!(child_titles(&nav, "系统"), ["维护", "关于"]);
-        let sections = nav
-            .iter()
-            .flat_map(|category| category.children.iter())
-            .map(|child| child.section.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            sections,
-            [
-                SettingsSection::Appearance,
-                SettingsSection::Shortcuts,
-                SettingsSection::PanelPlugins,
-                SettingsSection::Agents,
-                SettingsSection::Remote,
-                SettingsSection::Maintenance,
-                SettingsSection::About,
-            ]
-        );
-    }
-
-    #[test]
-    fn search_keeps_only_matching_pages_under_their_group() {
-        let nav = settings_nav(&[]);
-        let filtered = filter_settings_nav(&nav, "守护");
-        assert_eq!(titles(&filtered), ["系统"]);
-        assert_eq!(child_titles(&filtered, "系统"), ["维护"]);
-
-        let by_group = filter_settings_nav(&nav, "通用");
-        assert_eq!(child_titles(&by_group, "通用").len(), 3);
-    }
-
-    #[test]
-    fn search_understands_user_tasks_and_multiple_terms() {
-        let nav = settings_nav(&[]);
-        assert_eq!(
-            matching_sections(&nav, "后台服务"),
-            [SettingsSection::Maintenance]
-        );
-
-        for (query, expected) in [
-            ("Relay 地址", SettingsSection::Remote),
-            ("添加机器", SettingsSection::Remote),
-            ("导入插件", SettingsSection::PanelPlugins),
-            ("自动下载安装", SettingsSection::About),
-            ("清缓存", SettingsSection::Maintenance),
-            ("终端字号", SettingsSection::Appearance),
-            ("壁纸", SettingsSection::Appearance),
-            ("背景图", SettingsSection::Appearance),
-            ("hook", SettingsSection::Agents),
-            ("快捷启动项", SettingsSection::Agents),
-            ("config dir", SettingsSection::Agents),
-            ("反馈问题", SettingsSection::About),
-            ("帮助文档", SettingsSection::About),
-        ] {
-            assert_eq!(matching_sections(&nav, query), [expected], "query: {query}");
-        }
     }
 
     fn view(id: &str, title: &str, settings: Option<smelt_plugin_api::SettingsEntry>) -> ViewInfo {
@@ -540,8 +217,9 @@ mod tests {
             id: id.to_string().into(),
             title: title.to_string().into(),
             icon: "icons/bell.svg".into(),
-            per_machine: false,
             draws_top_bar: false,
+            instances: false,
+            fills: Vec::new(),
             settings,
             build: std::rc::Rc::new(|_, _| unreachable!("侧栏不建页")),
         }
@@ -559,43 +237,102 @@ mod tests {
         )
     }
 
+    /// 宿主自己的三页，和 [`super::super::view_specs`] 登记的是同一份。
+    fn host_pages() -> Vec<ViewInfo> {
+        super::super::HOST_PAGES
+            .iter()
+            .map(|page| {
+                view(
+                    &format!("{}/{}", crate::host_views::HOST_OWNER, page.name),
+                    &(page.title)().get(),
+                    Some(page.entry()),
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn plugin_pages_go_after_the_host_pages_of_their_group() {
-        let pages = [
+    fn without_plugins_only_the_host_pages_show() {
+        let nav = settings_nav(&host_pages());
+        assert_eq!(titles(&nav), ["General"]);
+        assert_eq!(
+            child_titles(&nav, "General"),
+            ["Appearance", "Shortcuts", "Panel Plugins"]
+        );
+        assert!(settings_nav(&[]).is_empty(), "没有设置页就没有分组");
+    }
+
+    #[test]
+    fn search_keeps_only_matching_pages_under_their_group() {
+        let mut views = host_pages();
+        views.push(plugin_page(
+            "machines/remote",
+            "远程",
+            SettingsGroup::Agents,
+            &["relay"],
+        ));
+        let nav = settings_nav(&views);
+        let filtered = filter_settings_nav(&nav, "relay");
+        assert_eq!(titles(&filtered), ["Agents & Remote"]);
+        assert_eq!(child_titles(&filtered, "Agents & Remote"), ["远程"]);
+
+        // 组名用哪种语言搜都行。
+        for query in ["通用", "General"] {
+            let by_group = filter_settings_nav(&nav, query);
+            assert_eq!(child_titles(&by_group, "General").len(), 3);
+        }
+    }
+
+    #[test]
+    fn search_understands_user_tasks_and_multiple_terms() {
+        let nav = settings_nav(&host_pages());
+        for (query, expected) in [
+            ("导入插件", "smelt/panel-plugins"),
+            ("等宽字体", "smelt/appearance"),
+            ("壁纸", "smelt/appearance"),
+            ("背景图", "smelt/appearance"),
+            ("cmd keymap", "smelt/shortcuts"),
+        ] {
+            assert_eq!(matching_pages(&nav, query), [expected], "query: {query}");
+        }
+    }
+
+    #[test]
+    fn host_pages_go_first_and_plugin_pages_follow_in_their_group() {
+        // 插件比宿主先登记，宿主的页照样排在组里最前面。
+        let mut pages = vec![
             plugin_page("notify/main", "提醒", SettingsGroup::General, &["系统通知"]),
             plugin_page("trader/prefs", "行情", SettingsGroup::Plugins, &["股票"]),
             // 不是设置页的视图不进设置。
             view("trader/main", "交易", None),
             plugin_page("probe/disk", "磁盘", SettingsGroup::System, &[]),
         ];
+        pages.extend(host_pages());
         let nav = settings_nav(&pages);
-        assert_eq!(titles(&nav), ["通用", "Agent 与远程", "系统", "插件"]);
+        assert_eq!(titles(&nav), ["General", "System", "Plugins"]);
         assert_eq!(
-            child_titles(&nav, "通用"),
-            ["外观", "快捷键", "面板插件", "提醒"]
+            child_titles(&nav, "General"),
+            ["Appearance", "Shortcuts", "Panel Plugins", "提醒"]
         );
-        assert_eq!(child_titles(&nav, "系统"), ["维护", "关于", "磁盘"]);
-        assert_eq!(child_titles(&nav, "插件"), ["行情"]);
-        // 没有挑「插件」组的页就没有这一组。
-        assert_eq!(
-            titles(&settings_nav(&pages[..1])),
-            ["通用", "Agent 与远程", "系统"]
-        );
+        assert_eq!(child_titles(&nav, "System"), ["磁盘"]);
+        assert_eq!(child_titles(&nav, "Plugins"), ["行情"]);
+        // 一页都没有的组不露。
+        assert_eq!(titles(&settings_nav(&pages[..1])), ["General"]);
 
-        assert_eq!(
-            matching_sections(&nav, "股票"),
-            [SettingsSection::Plugin("trader/prefs".into())]
-        );
+        assert_eq!(matching_pages(&nav, "股票"), ["trader/prefs"]);
     }
 
     #[test]
-    fn element_keys_are_unique() {
-        let keys = settings_nav(&[])
-            .into_iter()
-            .flat_map(|category| category.children)
-            .map(|child| child.section.element_key())
-            .collect::<Vec<_>>();
-        let unique = keys.iter().collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique.len(), keys.len(), "{keys:?}");
+    fn the_chosen_page_falls_back_to_the_first_one() {
+        let nav = settings_nav(&host_pages());
+        let page = |chosen| resolve_page(&nav, chosen).map(|leaf| leaf.id.to_string());
+        assert_eq!(
+            page(Some("smelt/shortcuts")).as_deref(),
+            Some("smelt/shortcuts")
+        );
+        // 没选过、选的那页撤下了，都停在第一页。
+        assert_eq!(page(None).as_deref(), Some("smelt/appearance"));
+        assert_eq!(page(Some("gone/page")).as_deref(), Some("smelt/appearance"));
+        assert!(resolve_page(&[], None).is_none());
     }
 }

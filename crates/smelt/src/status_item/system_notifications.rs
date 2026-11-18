@@ -642,11 +642,11 @@ pub fn withdraw_plugin_notification(id: &str) {
 }
 
 pub fn notify_error(message: impl AsRef<str>) {
-    deliver_app_notification("错误", message.as_ref());
+    deliver_app_notification(&rust_i18n::t!("notify.error"), message.as_ref());
 }
 
 pub fn notify_success(message: impl AsRef<str>) {
-    deliver_app_notification("完成", message.as_ref());
+    deliver_app_notification(&rust_i18n::t!("notify.done"), message.as_ref());
 }
 
 /// 还没问过用户时请系统问一次（设置页上的按钮），不等第一条通知。问过了什么都不做。
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn plugin_notifications_replace_by_id_and_withdraw() {
         let mut queue = NotificationQueue::default();
-        let click = Some(r#"{"command":"smelt.sessions/activate","args":{}}"#.to_string());
+        let click = Some(r#"{"command":"example/open","args":{}}"#.to_string());
         queue.enqueue_plugin("smelt-notifications/s1", "完成", "第一条", None);
         queue.enqueue_plugin("smelt-notifications/s1", "完成", "第二条", click.clone());
         let ready = queue.take_ready();
@@ -795,7 +795,10 @@ mod tests {
             apps.iter()
                 .any(|request| request.subtitle == "完成" && request.body == "已保存")
         );
-        assert!(apps.iter().all(|request| request.thread_identifier == "app"));
+        assert!(
+            apps.iter()
+                .all(|request| request.thread_identifier == "app")
+        );
 
         queue.remove_plugin("session-1");
         assert!(

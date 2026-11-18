@@ -12,8 +12,9 @@
 use std::rc::{Rc, Weak};
 
 use gpui::*;
-use gpui_component::{ActiveTheme as _, WindowExt as _};
 use gpui_webview::{WebView, WebViewHandle};
+use rust_i18n::t;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) struct HtmlPreview {
     webview: Option<Entity<WebView>>,
@@ -43,7 +44,7 @@ impl HtmlPreview {
                 return Self {
                     webview: None,
                     hide_native: None,
-                    error: Some(format!("网页视图起不来：{error}").into()),
+                    error: Some(t!("preview.webview_failed", error = error).into()),
                     loaded: None,
                     _open_links: None,
                 };
@@ -76,7 +77,7 @@ impl HtmlPreview {
             return;
         };
         if let Err(error) = webview.read(cx).raw().load_html(html) {
-            self.error = Some(format!("页面载入失败：{error}").into());
+            self.error = Some(t!("preview.load_failed", error = error).into());
         } else {
             self.error = None;
             self.loaded = Some(html.clone());
@@ -93,14 +94,16 @@ impl Render for HtmlPreview {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
+                .type_style(TYPE.ui)
+                .text_color(rgb(crate::ui_theme::muted()))
                 .child(error.clone());
         }
         let (Some(webview), Some(hide_native)) = (&self.webview, &self.hide_native) else {
             return surface;
         };
-        if window.has_active_dialog(cx) {
+        // 原生网页视图盖得住任何 GPUI 画的层：开着对话框时让开。宿主、Rust 插件和 JS 插件的
+        // 对话框都在 smelt 的对话框层。
+        if smelt_plugin_api::ui::dialog::is_open(window, cx) {
             return surface;
         }
         surface.child(webview.clone()).child(HideWhenNotPainted {

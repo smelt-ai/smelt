@@ -27,6 +27,7 @@ use std::net::Shutdown;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
+use rust_i18n::t;
 use serde_json::{Value, json};
 use smelt_model::automation::AutomationRun;
 use smelt_model::control_api::{
@@ -337,7 +338,7 @@ impl Catalog {
         self.shared
             .source
             .current()
-            .ok_or_else(|| error(SmeltErrorKind::Offline, "还没有连上这台机器"))
+            .ok_or_else(|| error(SmeltErrorKind::Offline, t!("error.not_connected")))
     }
 
     /// 这台机器的路径规则（看它报的系统）。还没等到快照时等一会儿；连不上就按 POSIX。
@@ -452,7 +453,7 @@ impl Catalog {
     pub(crate) fn open_project(&self, root: &str) -> Result<WorkspaceProject, SmeltError> {
         let root = root.trim();
         if root.is_empty() {
-            return Err(error(SmeltErrorKind::Other, "缺少要打开的目录"));
+            return Err(error(SmeltErrorKind::Other, "missing the folder to open"));
         }
         let runtime = self.runtime()?;
         let revision = runtime
@@ -485,7 +486,12 @@ impl Catalog {
             .projects()
             .into_iter()
             .find(|project| projection::same_dir(style, &project.root, root))
-            .ok_or_else(|| error(SmeltErrorKind::Other, format!("运行时的项目里没有 {root}")))
+            .ok_or_else(|| {
+                error(
+                    SmeltErrorKind::Other,
+                    t!("error.project_missing", root = root),
+                )
+            })
     }
 
     pub(crate) fn automation_catalog(&self) -> Result<AutomationCatalog, SmeltError> {
@@ -562,7 +568,7 @@ impl Catalog {
         // 运行时会再校验一遍；先在这里挡住，错误说法和桌面一致。
         automation
             .validate_for_save()
-            .map_err(|message| error(SmeltErrorKind::Other, message))?;
+            .map_err(|problem| error(SmeltErrorKind::Other, problem.to_string()))?;
         runtime
             .client
             .call::<AutomationUpsertCall>(&automation, self.shared.timing.call_timeout)
@@ -633,9 +639,7 @@ impl Catalog {
                     .flat_map(|file| file.runs.iter())
                     .find(|run| run.id == run_id)
                     .cloned()
-                    .ok_or_else(|| {
-                        error(SmeltErrorKind::Other, "这次运行的记录已经没有了")
-                    })?
+                    .ok_or_else(|| error(SmeltErrorKind::Other, t!("error.run_gone")))?
             }
         };
         Ok(crate::api::automations::AutomationRunDetail {
@@ -732,7 +736,7 @@ impl Catalog {
             .ok_or_else(|| {
                 error(
                     SmeltErrorKind::Other,
-                    format!("运行时上没有这个智能体选项：{agent_option_id}"),
+                    t!("error.agent_option_missing", id = agent_option_id),
                 )
             })
     }
@@ -788,7 +792,10 @@ impl Catalog {
     ) -> Result<HistoryRenameResult, SmeltError> {
         let resume_id = resume_id.trim();
         if resume_id.is_empty() {
-            return Err(error(SmeltErrorKind::Other, "缺少要改名的历史会话"));
+            return Err(error(
+                SmeltErrorKind::Other,
+                "missing the history session to rename",
+            ));
         }
         let custom_title = title
             .map(str::trim)
@@ -812,7 +819,7 @@ impl Catalog {
             let message = response
                 .get("error")
                 .and_then(Value::as_str)
-                .unwrap_or("改名失败");
+                .map_or_else(|| t!("error.rename_failed").into_owned(), str::to_string);
             return Err(error(SmeltErrorKind::Other, message));
         }
         let display = self
@@ -849,6 +856,9 @@ impl Catalog {
                 SessionKind::Terminal => SessionCreateKind::Terminal,
             }),
             request_id: nonempty(params.request_id),
+            cwd: None,
+            title: None,
+            disallowed_tools: Vec::new(),
         };
         runtime
             .client
@@ -1243,24 +1253,22 @@ impl Shared {
 }
 
 fn not_synced() -> SmeltError {
-    error(
-        SmeltErrorKind::Offline,
-        "还没拿到运行时的会话目录，稍后再试",
-    )
+    error(SmeltErrorKind::Offline, t!("error.not_synced"))
 }
 
 /// Control 调用失败归类。
 pub(crate) fn control_error(call_error: ControlClientError) -> SmeltError {
     match call_error {
-        ControlClientError::Transport(message) => {
-            error(SmeltErrorKind::Offline, format!("连不上运行时：{message}"))
-        }
+        ControlClientError::Transport(message) => error(
+            SmeltErrorKind::Offline,
+            t!("error.unreachable", error = message),
+        ),
         ControlClientError::Protocol(protocol_error) => {
             let kind = match protocol_error.code {
                 ControlErrorCode::PermissionDenied => SmeltErrorKind::Unpaired,
                 _ => outdated_kind(&protocol_error).unwrap_or(SmeltErrorKind::Other),
             };
-            error(kind, protocol_error.message)
+            error(kind, protocol_error.text())
         }
         ControlClientError::InvalidRequest(message)
         | ControlClientError::InvalidResponse(message) => error(SmeltErrorKind::Other, message),
@@ -1270,12 +1278,13 @@ pub(crate) fn control_error(call_error: ControlClientError) -> SmeltError {
 /// 首帧 op 失败归类。运行时不认识的 op 会读完请求直接断开。
 fn request_error(request_error: RequestError) -> SmeltError {
     match request_error {
-        RequestError::Transport(io_error) => {
-            error(SmeltErrorKind::Offline, format!("连不上运行时：{io_error}"))
-        }
+        RequestError::Transport(io_error) => error(
+            SmeltErrorKind::Offline,
+            t!("error.unreachable", error = io_error),
+        ),
         RequestError::Closed => error(
             SmeltErrorKind::RuntimeOutdated,
-            "运行时不支持这个操作，先升级它",
+            t!("error.runtime_unsupported"),
         ),
         RequestError::InvalidResponse(message) => error(SmeltErrorKind::Other, message),
     }

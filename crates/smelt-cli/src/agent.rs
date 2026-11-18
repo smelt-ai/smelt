@@ -1,6 +1,7 @@
 //! `smelt agent …`：产品智能体定义。
 
 use crate::{control, fail, flag_value, id_arg, json_id, on_off, print_ok, respond, usage};
+use rust_i18n::t;
 use smelt_model::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};
 use smelt_model::control_api::{
     AgentDefinitionCreateCall, AgentDefinitionDelete, AgentDefinitionGet, AgentDefinitionIdParams,
@@ -46,14 +47,14 @@ pub(crate) fn run(args: &[String]) -> i32 {
         },
         Some("chat") => {
             let Some(id) = id_arg(rest) else {
-                return usage("smelt agent chat <id> [--message <第一句话>]");
+                return usage(&t!("agent.chat_usage"));
             };
             match message_flag(&rest[1..]) {
                 Ok(message) => chat(id, message),
                 Err(message) => usage(&message),
             }
         }
-        Some(command) => usage(&format!("未知子命令: {command}")),
+        Some(command) => usage(&t!("unknown_subcommand", command = command)),
         None => usage("smelt agent list|get|create|update|delete|chat"),
     }
 }
@@ -117,32 +118,28 @@ fn check_bindings_against(
         .filter(|id| !id.is_empty())
     {
         if !config.plugins.iter().any(|known| known.id == plugin) {
-            return Err(format!("没有这个插件：{plugin}（smelt plugin list 查看）"));
+            return Err(t!("agent.no_such_plugin", plugin = plugin).into_owned());
         }
     }
     if mcp_servers.iter().any(|name| !name.trim().is_empty()) {
         let servers = config
             .mcp_servers
             .as_ref()
-            .map_err(|error| format!("读不到 MCP 配置：{error}"))?;
+            .map_err(|error| t!("mcp_config_unreadable", error = error).into_owned())?;
         for name in mcp_servers
             .iter()
             .map(|name| name.trim())
             .filter(|name| !name.is_empty())
         {
             if !servers.iter().any(|server| server.name == name) {
-                return Err(format!(
-                    "没有这个 MCP 服务器：{name}（smelt mcp list 查看）"
-                ));
+                return Err(t!("agent.no_such_mcp_server", name = name).into_owned());
             }
         }
     }
     if let Some((provider, model)) = model
         && !crate::pi::has_model(config, provider, model)
     {
-        return Err(format!(
-            "没有这个模型：{provider}/{model}（smelt model list 查看）"
-        ));
+        return Err(t!("no_such_model", provider = provider, model = model).into_owned());
     }
     Ok(())
 }
@@ -162,9 +159,10 @@ fn chat(id: &str, message: Option<String>) -> i32 {
             &input,
             &[],
         ) {
-            return fail(&format!(
-                "对话已开（session_id {}），但第一句话没发出去：{error}",
-                created.session_id
+            return fail(&t!(
+                "agent.first_message_failed",
+                session_id = created.session_id,
+                error = error
             ));
         }
     }
@@ -175,8 +173,8 @@ fn message_flag(args: &[String]) -> Result<Option<String>, String> {
     match args {
         [] => Ok(None),
         [flag, text] if flag == "--message" && !text.trim().is_empty() => Ok(Some(text.clone())),
-        [flag, ..] if flag == "--message" => Err("--message 需要一句话".into()),
-        [other, ..] => Err(format!("未知参数: {other}")),
+        [flag, ..] if flag == "--message" => Err(t!("agent.message_missing").into_owned()),
+        [other, ..] => Err(t!("unknown_argument", arg = other).into_owned()),
     }
 }
 
@@ -184,7 +182,7 @@ fn create_input(flags: Flags) -> Result<AgentDefinitionCreate, String> {
     let name = flags
         .name
         .filter(|name| !name.is_empty())
-        .ok_or_else(|| "smelt agent create --name <名称>".to_string())?;
+        .ok_or_else(|| t!("agent.create_usage").into_owned())?;
     // `--model default` 就是不写。
     let (model_provider, model_id) = match flags.model {
         Some((provider, model)) if !provider.is_empty() => (Some(provider), Some(model)),
@@ -207,7 +205,7 @@ fn create_input(flags: Flags) -> Result<AgentDefinitionCreate, String> {
 
 fn patch_input(flags: Flags) -> Result<AgentDefinitionPatch, String> {
     if flags.id.is_some() {
-        return Err("update 不能改 id".into());
+        return Err(t!("agent.update_id").into_owned());
     }
     let (model_provider, model_id) = flags.model.unzip();
     let patch = AgentDefinitionPatch {
@@ -223,7 +221,7 @@ fn patch_input(flags: Flags) -> Result<AgentDefinitionPatch, String> {
         memory_enabled: flags.memory_enabled,
     };
     if patch == AgentDefinitionPatch::default() {
-        return Err("smelt agent update <id> 需要至少一个字段".into());
+        return Err(t!("agent.update_empty").into_owned());
     }
     Ok(patch)
 }
@@ -250,7 +248,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
     while index < args.len() {
         let arg = args[index].as_str();
         if !arg.starts_with('-') {
-            return Err(format!("多余参数: {arg}"));
+            return Err(t!("extra_argument", arg = arg).into_owned());
         }
         let value = flag_value(args, index)?;
         let push = |list: &mut Option<Vec<String>>, value: String| {
@@ -267,7 +265,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--folder" => push(&mut flags.folders, value),
             "--link" => push(&mut flags.links, value),
             "--model" => flags.model = Some(parse_model(&value)?),
-            other => return Err(format!("未知参数: {other}")),
+            other => return Err(t!("unknown_argument", arg = other).into_owned()),
         }
         index += 2;
     }
@@ -284,7 +282,7 @@ fn parse_model(value: &str) -> Result<(String, String), String> {
         Some((provider, model)) if !provider.trim().is_empty() && !model.trim().is_empty() => {
             Ok((provider.trim().to_string(), model.trim().to_string()))
         }
-        _ => Err("--model 格式为 <provider>/<模型id>，或 default 跟随默认模型".into()),
+        _ => Err(t!("agent.model_format").into_owned()),
     }
 }
 

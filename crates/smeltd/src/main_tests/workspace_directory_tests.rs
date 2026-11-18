@@ -7,7 +7,7 @@ use smelt_core::workspace_directory::{
     WorkspaceProjectRepositoryAction as RepositoryAction, WorkspaceProjectRepositoryActionParams,
 };
 use smelt_event_protocol::{CORE_SNAPSHOT_WORKSPACE, CoreProjectionEvent, SnapshotKind};
-use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlReason};
 
 fn init_repository(path: &std::path::Path) {
     std::fs::create_dir_all(path).unwrap();
@@ -156,7 +156,7 @@ fn discovering_repository_links_does_not_claim_or_delete_user_links() {
         &event_hub,
     )
     .unwrap_err();
-    assert!(error.message.contains("重复"));
+    assert_eq!(error.reason, Some(ControlReason::RepositoryAlreadyAdded));
     let directory = crate::workset_control::repository_action(
         &temp.store,
         WorkspaceProjectRepositoryActionParams {
@@ -224,6 +224,17 @@ fn terminal_conversation() -> WorkspaceConversation {
     }
 }
 
+/// 新建时的活动时间由运行时打上，不用客户端给的：期望值换成目录里那条的时间。
+fn stamped(
+    conversation: &WorkspaceConversation,
+    published: &WorkspaceDirectory,
+) -> WorkspaceConversation {
+    WorkspaceConversation {
+        last_updated_at: published.conversations[0].last_updated_at,
+        ..conversation.clone()
+    }
+}
+
 fn delete(
     store: &smelt_store::Store,
     id: &str,
@@ -245,7 +256,6 @@ fn archiving_preserves_the_record_and_restoring_publishes_it_again() {
     let event_hub = new_event_hub();
     let conversation = terminal_conversation();
     workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
-    workspace_directory::pin_conversation(&temp.store, &conversation.id, true, &event_hub).unwrap();
     for archived in [true, false] {
         workspace_directory::archive_conversation(
             &temp.store,
@@ -261,7 +271,6 @@ fn archiving_preserves_the_record_and_restoring_publishes_it_again() {
         assert_eq!(directory.conversations.len(), 1);
         let stored = &directory.conversations[0];
         assert_eq!(stored.archived_at.is_some(), archived);
-        assert_eq!(stored.pinned_at, None);
         assert_eq!(stored.terminals, conversation.terminals);
     }
 }
@@ -299,11 +308,15 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
         &temp.store,
         smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
             workset_id: "workset-1".into(),
+            ..Default::default()
         },
         &event_hub,
     )
     .unwrap_err();
-    assert!(active_error.message.contains("未归档会话"));
+    assert_eq!(
+        active_error.reason,
+        Some(ControlReason::WorktreeHasOpenSessions)
+    );
     temp.store
         .set_workspace_conversation_archived(&conversation.id, Some(1))
         .unwrap();
@@ -318,11 +331,12 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
         &event_hub,
     )
     .unwrap_err();
-    assert!(missing_root.message.contains("工作树"));
+    assert!(missing_root.message.contains("worktree"));
     crate::workset_control::finish(
         &temp.store,
         smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
             workset_id: "workset-1".into(),
+            ..Default::default()
         },
         &event_hub,
     )
@@ -348,7 +362,7 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
         &event_hub,
     )
     .unwrap_err();
-    assert!(error.message.contains("工作树"));
+    assert!(error.message.contains("worktree"));
     assert!(
         workspace_catalog::directory_on(&temp.store)
             .unwrap()
@@ -363,7 +377,10 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
             .to_string_lossy()
             .into_owned(),
     );
-    assert!(workspace_directory::update_conversation(&temp.store, &stale, &event_hub).is_err());
+    assert!(
+        workspace_directory::update_conversation(&temp.store, &stale, &new_sessions(), &event_hub)
+            .is_err()
+    );
     assert_eq!(
         workspace_catalog::directory_on(&temp.store)
             .unwrap()
@@ -436,6 +453,7 @@ fn restoring_closed_workset_archive_rebinds_to_selected_workset() {
         &temp.store,
         smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
             workset_id: "old".into(),
+            ..Default::default()
         },
         &event_hub,
     )
@@ -480,8 +498,12 @@ fn restoring_closed_workset_archive_rebinds_to_selected_workset() {
         Some("provider-history")
     );
     assert_eq!(restored_acp.sid, "acp-session");
-    let stale_update =
-        workspace_directory::update_conversation(&temp.store, &conversation, &event_hub);
+    let stale_update = workspace_directory::update_conversation(
+        &temp.store,
+        &conversation,
+        &new_sessions(),
+        &event_hub,
+    );
     assert!(
         stale_update.is_err(),
         "旧客户端不能把恢复后的会话改回失效目录"
@@ -554,7 +576,10 @@ fn directory_commands_publish_the_changed_directory() {
         workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
     let published = published_directory(&event_hub).expect("新建之后推过目录");
     assert_eq!(published.revision, created.revision);
-    assert_eq!(published.conversations, std::slice::from_ref(&conversation));
+    assert_eq!(
+        published.conversations,
+        [stamped(&conversation, &published)]
+    );
 
     let deleted = delete(&temp.store, &conversation.id, &event_hub).unwrap();
     let published = published_directory(&event_hub).expect("关掉之后推过目录");
@@ -562,8 +587,13 @@ fn directory_commands_publish_the_changed_directory() {
     assert!(published.revision > created.revision);
     assert!(published.conversations.is_empty());
 
-    let late = workspace_directory::update_conversation(&temp.store, &conversation, &event_hub)
-        .unwrap_err();
+    let late = workspace_directory::update_conversation(
+        &temp.store,
+        &conversation,
+        &new_sessions(),
+        &event_hub,
+    )
+    .unwrap_err();
     assert_eq!(late.code, ControlErrorCode::NotFound);
 }
 
@@ -674,7 +704,7 @@ fn a_subscriber_gets_the_directory_the_daemon_could_not_read_at_startup() {
         let store = temp.store.clone();
         WorkspaceDirectoryReader::from_fn(move || {
             if !readable.load(Ordering::Acquire) {
-                return Err("数据库 schema 33 形状无法识别".to_string());
+                return Err("Database schema 33 has an unrecognized shape".to_string());
             }
             smelt_core::workspace_catalog::directory_on(&store).map_err(|error| error.to_string())
         })
@@ -688,7 +718,10 @@ fn a_subscriber_gets_the_directory_the_daemon_could_not_read_at_startup() {
 
     readable.store(true, Ordering::Release);
     let published = published_directory(&event_hub).expect("库好了，新订阅拿到目录");
-    assert_eq!(published.conversations, std::slice::from_ref(&conversation));
+    assert_eq!(
+        published.conversations,
+        [stamped(&conversation, &published)]
+    );
 }
 
 fn run_git(root: &std::path::Path, args: &[&str]) {
@@ -894,7 +927,7 @@ fn a_failing_setup_script_keeps_the_workset_and_reports_its_output() {
     assert_eq!(created.setup.len(), 1);
     let setup = &created.setup[0];
     assert!(!setup.success);
-    for expected in ["installing", "npm ERR! offline", "退出码 3"] {
+    for expected in ["installing", "npm ERR! offline", "exited with code 3"] {
         assert!(setup.output.contains(expected), "{}", setup.output);
     }
     assert!(worktree.exists());

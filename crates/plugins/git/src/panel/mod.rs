@@ -11,13 +11,14 @@ use std::time::Instant;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement};
-use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
-use gpui_component::resizable::resizable_panel;
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::*;
-pub(crate) use smelt_plugin_api::ui::Button;
+use gpui_base::{StyledExt as _, v_virtual_list};
+use rust_i18n::t;
+pub(crate) use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
+use smelt_plugin_api::ui::resizable::{h_resizable, resizable_panel};
+use smelt_plugin_api::ui::scrollbar::Scrollbar;
+pub(crate) use smelt_plugin_api::ui::{Button, Icon, IconName};
 
-use crate::{GitPanel, GitTab, ProjectRef, h_resizable, placeholder_view};
+use crate::{GitPanel, GitTab, ProjectRef, placeholder_view};
 use smelt_plugin_api::client::RuntimeClient;
 use smelt_plugin_api::client::protocol::control::ControlCall;
 use smelt_plugin_api::client::protocol::git::*;
@@ -30,10 +31,11 @@ use smelt_plugin_api::ui::truncated_line::truncated_line;
 
 mod diff;
 pub(crate) use diff::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 #[cfg(test)]
 mod tests;
 mod view;
-mod ops;
+pub(crate) mod ops;
 
 // ===================== 运行时调用 =====================
 
@@ -195,7 +197,7 @@ enum NarrowGitRow {
     /// 跟 VS Code 一样——提交信息属于仓库，放在面板底部会让人看不出在往哪提交。
     CommitBox {
         root: Rc<str>,
-        input: Entity<gpui_component::input::TextareaState>,
+        input: Entity<smelt_plugin_api::ui::field::TextareaState>,
         has_text: bool,
         /// 这个仓库有没有已暂存的改动。
         ///
@@ -317,7 +319,27 @@ fn git_status_response_action(
 
 const GIT_STATUS_MAX_AUTO_RETRIES: u8 = 3;
 
-/// 窄版变更列表为空时的占位文案。
+/// 窄版变更列表为空时显示哪种占位。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EmptyList {
+    Clean,
+    Loading,
+    Failed,
+    Retrying,
+}
+
+impl EmptyList {
+    pub(crate) fn text(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Clean => t!("changes.clean"),
+            Self::Loading => t!("changes.loading"),
+            Self::Failed => t!("changes.failed"),
+            Self::Retrying => t!("changes.retrying"),
+        }
+    }
+}
+
+/// 窄版变更列表为空时的占位。
 ///
 /// 已经拿到一份成功的空快照时，即使后台还在刷新，也显示「工作区干净」——否则
 /// 文件事件把 inflight 钉住时，干净工作区会永远停在「正在读取改动」。
@@ -326,22 +348,22 @@ pub(crate) fn git_empty_list_message(
     status: Option<&GitStatusData>,
     refreshing: bool,
     failure_count: u8,
-) -> &'static str {
+) -> EmptyList {
     if status.is_some_and(|status| status.ok && status.files.is_empty()) {
-        return "工作区干净";
+        return EmptyList::Clean;
     }
     if refreshing {
         if failure_count > 0 {
-            "Git 状态读取失败，正在重试…"
+            EmptyList::Retrying
         } else {
-            "正在读取更改…"
+            EmptyList::Loading
         }
     } else if failure_count > 0 {
-        "Git 状态读取失败"
+        EmptyList::Failed
     } else if status.is_none() {
-        "正在读取更改…"
+        EmptyList::Loading
     } else {
-        "工作区干净"
+        EmptyList::Clean
     }
 }
 
@@ -553,26 +575,26 @@ pub(crate) enum GitWrite {
 
 impl GitWrite {
     /// 同步芯片上的「…中」。
-    pub(crate) fn chip(self) -> &'static str {
+    pub(crate) fn chip(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Commit => "提交中…",
-            Self::CommitAndPush => "提交并推送中…",
-            Self::Push => "推送中…",
-            Self::Fetch => "获取中…",
-            Self::Pull => "拉取中…",
-            Self::Stash => "储藏中…",
-            Self::StashPop => "恢复储藏中…",
-            Self::Checkout => "切换分支中…",
-            Self::Merge => "合并中…",
-            Self::DeleteBranch => "删除分支中…",
-            Self::DeleteRemoteBranch => "删除远端分支中…",
-            Self::DiscardFile => "丢弃文件中…",
-            Self::DiscardChanges => "丢弃更改中…",
-            Self::Stage | Self::IndexFile => "暂存中…",
-            Self::Unstage => "取消暂存中…",
-            Self::StageHunk => "暂存块中…",
-            Self::UnstageHunk => "撤出暂存块中…",
-            Self::DiscardHunk => "丢弃块中…",
+            Self::Commit => t!("busy.commit"),
+            Self::CommitAndPush => t!("busy.commit_and_push"),
+            Self::Push => t!("busy.push"),
+            Self::Fetch => t!("busy.fetch"),
+            Self::Pull => t!("busy.pull"),
+            Self::Stash => t!("busy.stash"),
+            Self::StashPop => t!("busy.stash_pop"),
+            Self::Checkout => t!("busy.checkout"),
+            Self::Merge => t!("busy.merge"),
+            Self::DeleteBranch => t!("busy.delete_branch"),
+            Self::DeleteRemoteBranch => t!("busy.delete_remote_branch"),
+            Self::DiscardFile => t!("busy.discard_file"),
+            Self::DiscardChanges => t!("busy.discard_changes"),
+            Self::Stage | Self::IndexFile => t!("busy.stage"),
+            Self::Unstage => t!("busy.unstage"),
+            Self::StageHunk => t!("busy.stage_hunk"),
+            Self::UnstageHunk => t!("busy.unstage_hunk"),
+            Self::DiscardHunk => t!("busy.discard_hunk"),
         }
     }
 }
@@ -622,17 +644,21 @@ fn stage_toggle_button(id: ElementId, staged: bool) -> Button {
         } else {
             IconName::Plus
         })
-        .icon_action(if staged { "取消暂存" } else { "暂存" })
+        .icon_action(if staged {
+            t!("stage.unstage")
+        } else {
+            t!("stage.stage")
+        })
 }
 
 /// 提交并推送按钮的文案。
 ///
 /// 只有这次操作自己就是提交或推送时才换成进行中。其它写入按钮不可点，
 /// 进行中的名字由这个仓库的同步芯片显示。
-pub(crate) fn commit_button_label(op: Option<GitWrite>) -> &'static str {
+pub(crate) fn commit_button_label(op: Option<GitWrite>) -> std::borrow::Cow<'static, str> {
     match op {
         Some(op @ (GitWrite::Commit | GitWrite::CommitAndPush | GitWrite::Push)) => op.chip(),
-        _ => "提交并推送",
+        _ => t!("commit.commit_and_push"),
     }
 }
 
@@ -679,16 +705,15 @@ fn render_narrow_git_row(
             } else {
                 "⋯".to_string()
             };
-            h_flex()
+            div().flex().items_center()
                 .id(git_repo_id("git-repo", root))
                 .h(px(NARROW_GIT_ROW_H))
-                .items_center()
                 .gap_1()
                 .mx_1()
                 .pl_1()
                 .pr(px(2.))
                 .rounded(ui_theme::row_radius())
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .when(*active, |d| d.bg(rgb(ui_theme::soft())))
                 .hover(|d| d.bg(rgb(ui_theme::soft())))
                 // 折叠箭头：未初始化的仓库没有内容可折，留空位保持对齐。
@@ -702,7 +727,11 @@ fn render_narrow_git_row(
                         } else {
                             IconName::ChevronDown
                         })
-                        .icon_action(if *collapsed { "展开仓库" } else { "收起仓库" })
+                        .icon_action(if *collapsed {
+                            t!("repo.expand")
+                        } else {
+                            t!("repo.collapse")
+                        })
                         .on_click(move |_ev, _window, cx| {
                             let root = root_toggle.clone();
                             ws_toggle.update(cx, |workspace, cx| {
@@ -738,43 +767,43 @@ fn render_narrow_git_row(
                         .flex_shrink_0()
                         .max_w(px(96.))
                         .overflow_hidden()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
                         .child(truncated_line(branch.clone()))
                         .tooltip({
                             let b = branch.clone();
                             move |window, cx| {
-                                gpui_component::tooltip::Tooltip::new(b.clone())
+                                smelt_plugin_api::ui::tooltip::Tooltip::new(b.clone())
                                     .build(window, cx)
                             }
                         }),
                 )
                 // 仓库自己的操作入口：获取/拉取/暂存/丢弃都作用于这一个仓库，
                 // 而不是“当前项目”——多仓工作区里后者根本不是一个明确的对象。
-                .child(
+                .child(MenuTrigger::dropdown(
+                    git_repo_id("git-repo-ops-menu", root),
                     Button::new(git_repo_id("git-repo-ops", root))
-                            .quiet()
-                            .small()
-                            .label(sync_label)
-                            .font_family(crate::mono_font())
-                            .text_color(rgb(if ahead + behind > 0 {
-                                ui_theme::ok()
-                            } else {
-                                ui_theme::faint()
-                            }))
-                        .dropdown_menu(move |menu, _window, _cx| {
-                            git_ops_menu_items(
-                                menu,
-                                ws_ops.clone(),
-                                root_ops.clone(),
-                                ahead,
-                                behind,
-                                stash_n,
-                                has_changes,
-                                upstream,
-                            )
-                        }),
-                )
+                        .quiet()
+                        .small()
+                        .label(sync_label)
+                        .font_family(crate::mono_font())
+                        .text_color(rgb(if ahead + behind > 0 {
+                            ui_theme::ok()
+                        } else {
+                            ui_theme::faint()
+                        })),
+                    move |_window, _cx| {
+                        git_ops_menu_items(
+                            ws_ops.clone(),
+                            root_ops.clone(),
+                            ahead,
+                            behind,
+                            stash_n,
+                            has_changes,
+                            upstream,
+                        )
+                    },
+                ))
                 .on_click(move |_ev, _window, cx| {
                     let root = root_pick.clone();
                     ws_pick.update(cx, |workspace, cx| {
@@ -806,14 +835,14 @@ fn render_narrow_git_row(
             let ws_push = ws.clone();
             let root_push = at(root);
             let commit_label = commit_button_label(git_write);
-            v_flex()
+            div().flex().flex_col()
                 .gap_1p5()
                 .pl(px(12. + *depth as f32 * NARROW_GIT_INDENT))
                 .pr_2()
                 .py_1()
                 .child(smelt_plugin_api::ui::TextArea::new(input).h(px(*input_h)))
                 .child(
-                    h_flex()
+                    div().flex().items_center()
                         .gap_1p5()
                         .child(
                             Button::new(git_repo_id("git-commit-push", root))
@@ -835,7 +864,7 @@ fn render_narrow_git_row(
                             Button::new(git_repo_id("git-commit-only", root))
                                 .quiet()
                                 .small()
-                                .label("仅提交")
+                                .label(t!("commit.commit_only"))
                                 .disabled(!can_commit)
                                 .on_click(move |_ev, window, cx| {
                                     let root = root_target.clone();
@@ -865,9 +894,9 @@ fn render_narrow_git_row(
                 .when(has_text && !has_staged, |col| {
                     col.child(
                         div()
-                            .text_xs()
+                            .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::faint()))
-                            .child("先暂存要提交的更改"),
+                            .child(t!("commit.stage_first").into_owned()),
                     )
                 })
                 // 失败原因贴在按钮正下方：用户的视线本来就在这里，不用去翻通知中心。
@@ -881,7 +910,7 @@ fn render_narrow_git_row(
                         .py_1()
                         .rounded(ui_theme::row_radius())
                         .bg(rgb(ui_theme::surface()))
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(crate::mono_font())
                         .text_color(rgb(ui_theme::bad()))
                         .child(err)
@@ -905,8 +934,7 @@ fn render_narrow_git_row(
                 .items_center()
                 .pl(px(12. + *depth as f32 * NARROW_GIT_INDENT))
                 .pr_3()
-                .text_xs()
-                .font_semibold()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::faint()))
                 .child(
                     div()
@@ -987,7 +1015,7 @@ fn render_narrow_git_row(
                         .rounded(ui_theme::row_radius())
                         .pl(indent)
                         .pr_3()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(crate::mono_font())
                         .text_color(rgb(ui_theme::muted()))
                         .hover(|d| d.bg(rgb(ui_theme::soft())))
@@ -1081,7 +1109,7 @@ fn render_narrow_git_row(
                         .rounded(ui_theme::row_radius())
                         .pl(indent)
                         .pr_3()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .font_family(crate::mono_font())
                         .hover(|d| d.bg(rgb(ui_theme::soft())))
                         // 子模块指针：改的不是文件内容，而是"父仓记录子仓的哪个 commit"。
@@ -1090,7 +1118,7 @@ fn render_narrow_git_row(
                             line.child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(rgb(ui_theme::faint()))
                                     .child(repo_kind_glyph(
                                         RepoKind::Submodule,
@@ -1109,9 +1137,9 @@ fn render_narrow_git_row(
                             line.child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(rgb(ui_theme::faint()))
-                                    .child("子模块指针"),
+                                    .child(t!("file.submodule").into_owned()),
                             )
                         })
                         .child(stage_action)
@@ -1126,34 +1154,17 @@ fn render_narrow_git_row(
                             });
                         });
 
-                    row_el
-                        .context_menu(move |menu, _window, _cx| {
-                            let ws_discard = ws_menu.clone();
-                            let root_discard = root_menu.clone();
-                            let path_discard = path_menu.clone();
-                            let ws_diff = ws_menu.clone();
-                            let root_diff = root_menu.clone();
-                            let path_diff = path_menu.clone();
-                            menu.item(
-                                PopupMenuItem::new(if untracked {
-                                    "删除文件"
-                                } else {
-                                    "丢弃更改"
-                                })
-                                .on_click(
-                                    move |_ev, window, cx| {
-                                        ws_discard.update(cx, |workspace, cx| {
-                                            workspace.start_discard_file(
-                                                root_discard.clone(),
-                                                path_discard.clone(),
-                                                window,
-                                                cx,
-                                            )
-                                        });
-                                    },
-                                ),
-                            )
-                            .item(PopupMenuItem::new("打开单文件 Diff").on_click(
+                    let menu_id = git_scoped_id("git-file-menu", key, root, &row.path);
+                    MenuTrigger::context(menu_id, row_el, move |_, _| {
+                        let ws_discard = ws_menu.clone();
+                        let root_discard = root_menu.clone();
+                        let path_discard = path_menu.clone();
+                        let ws_diff = ws_menu.clone();
+                        let root_diff = root_menu.clone();
+                        let path_diff = path_menu.clone();
+                        let path_copy = file_path_copy.clone();
+                        let mut menu = Menu::new()
+                            .item(MenuItem::new(t!("file.open_diff")).on_click(
                                 move |_ev, _window, cx| {
                                     ws_diff.update(cx, |workspace, cx| {
                                         workspace.open_diff(
@@ -1165,22 +1176,43 @@ fn render_narrow_git_row(
                                     });
                                 },
                             ))
-                            .separator()
-                            .item(PopupMenuItem::new("复制文件路径").on_click({
-                                let path = file_path_copy.clone();
+                            .item(MenuItem::new(t!("file.copy_path")).on_click(
                                 move |_ev, _window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
-                                }
-                            }))
-                            // 远程机器上的路径在本机 Finder 里没有。
-                            .when(local, |menu| {
-                                menu.item(PopupMenuItem::new("在 Finder 中显示").on_click({
-                                    let path = file_path_finder.clone();
-                                    move |_ev, _window, _cx| crate::reveal_in_finder(&path)
-                                }))
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        path_copy.clone(),
+                                    ));
+                                },
+                            ));
+                        // 远程机器上的路径在本机 Finder 里没有。
+                        if local {
+                            let path = file_path_finder.clone();
+                            menu =
+                                menu.item(MenuItem::new(t!("file.reveal")).on_click(
+                                    move |_ev, _window, _cx| crate::reveal_in_finder(&path),
+                                ));
+                        }
+                        // 丢弃收不回来，放最后、单独一组。
+                        menu.separator().item(
+                            MenuItem::new(if untracked {
+                                t!("discard.file_untracked_ok")
+                            } else {
+                                t!("discard.file_ok")
                             })
-                        })
-                        .into_any_element()
+                            .icon(smelt_plugin_api::ui::trash_icon())
+                            .danger()
+                            .on_click(move |_ev, window, cx| {
+                                ws_discard.update(cx, |workspace, cx| {
+                                    workspace.start_discard_file(
+                                        root_discard.clone(),
+                                        path_discard.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            }),
+                        )
+                    })
+                    .into_any_element()
                 }
             }
         }
@@ -1200,7 +1232,6 @@ fn render_narrow_git_row(
 /// stash 叫「储藏」不叫「暂存」：暂存已经是 staging area 的名字，两个概念
 /// 撞在一起时用户分不清「暂存改动」到底进的是索引还是 stash 栈。
 fn git_ops_menu_items(
-    mut menu: gpui_component::menu::PopupMenu,
     ws: Entity<GitPanel>,
     root: ProjectRef,
     ahead: u32,
@@ -1208,17 +1239,17 @@ fn git_ops_menu_items(
     stash_n: u32,
     has_changes: bool,
     upstream: bool,
-) -> gpui_component::menu::PopupMenu {
+) -> Menu {
     /// 菜单项统一入口：先认仓库，再干活。
     fn item(
         ws: &Entity<GitPanel>,
         root: &ProjectRef,
         label: impl Into<gpui::SharedString>,
         run: fn(&mut GitPanel, &mut Context<GitPanel>),
-    ) -> PopupMenuItem {
+    ) -> MenuItem {
         let ws = ws.clone();
         let root = root.clone();
-        PopupMenuItem::new(label).on_click(move |_ev, _window, cx| {
+        MenuItem::new(label).on_click(move |_ev, _window, cx| {
             let root = root.clone();
             ws.update(cx, |w, cx| {
                 w.set_active_git_repo(root, cx);
@@ -1227,58 +1258,65 @@ fn git_ops_menu_items(
         })
     }
 
+    let mut menu = Menu::new();
     // 推送排在最前：本地攒了提交却没有任何改动时，仓库在列表里只剩这一行，
     // 这个菜单就是它唯一的出口。
     if ahead > 0 {
-        menu = menu.item(item(&ws, &root, format!("推送 ↑{ahead}"), |w, cx| {
+        menu = menu.item(item(&ws, &root, t!("ops.push", ahead = ahead), |w, cx| {
             w.push_only(cx)
         }));
     }
     // 已推送完的分支才能开 PR：还有没推的提交时，网页上看到的不是最新的。
     if ahead == 0 && upstream {
-        menu = menu.item(item(&ws, &root, "在浏览器中创建 PR", |w, cx| {
-            w.open_pull_request(cx)
-        }));
+        menu = menu.item(item(
+            &ws,
+            &root,
+            t!("command.open_pull_request"),
+            |w, cx| w.open_pull_request(cx),
+        ));
     }
     menu = menu
-        .item(item(&ws, &root, "获取", |w, cx| w.git_fetch(cx)))
+        .item(item(&ws, &root, t!("ops.fetch"), |w, cx| w.git_fetch(cx)))
         .item(item(
             &ws,
             &root,
             if behind > 0 {
-                format!("拉取 ↓{behind}")
+                t!("ops.pull_behind", behind = behind)
             } else {
-                "拉取".to_string()
+                t!("ops.pull")
             },
             |w, cx| w.git_pull(cx),
         ));
     if has_changes {
-        menu = menu.separator().item(item(&ws, &root, "储藏更改", |w, cx| {
-            w.git_stash_push(cx)
-        }));
+        menu = menu
+            .separator()
+            .item(item(&ws, &root, t!("ops.stash"), |w, cx| {
+                w.git_stash_push(cx)
+            }));
     }
     if stash_n > 0 {
         menu = menu.item(item(
             &ws,
             &root,
-            format!("恢复储藏 ({stash_n})"),
+            t!("ops.stash_pop", count = stash_n),
             |w, cx| w.git_stash_pop(cx),
         ));
     }
     if has_changes {
         let ws_discard = ws;
         let root_discard = root;
-        menu = menu
-            .separator()
-            .item(
-                PopupMenuItem::new("丢弃全部更改").on_click(move |_ev, window, cx| {
+        menu = menu.separator().item(
+            MenuItem::new(t!("discard.all_menu"))
+                .icon(smelt_plugin_api::ui::trash_icon())
+                .danger()
+                .on_click(move |_ev, window, cx| {
                     let root = root_discard.clone();
                     ws_discard.update(cx, |w, cx| {
                         w.set_active_git_repo(root.clone(), cx);
                         w.start_discard_all(root, window, cx);
                     });
                 }),
-            );
+        );
     }
     menu
 }

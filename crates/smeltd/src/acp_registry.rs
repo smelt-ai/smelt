@@ -59,11 +59,11 @@ pub(crate) enum ResumeAcquireError {
 impl std::fmt::Display for ResumeAcquireError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SessionMissing => formatter.write_str("Smelt ACP session 不存在"),
+            Self::SessionMissing => formatter.write_str("The Smelt ACP session doesn't exist"),
             Self::Owned { resume_id, owner } => {
                 write!(
                     formatter,
-                    "provider session {resume_id} 已被会话 {owner} 占用"
+                    "Provider session {resume_id} is held by session {owner}"
                 )
             }
         }

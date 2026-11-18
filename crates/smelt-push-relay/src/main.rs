@@ -31,7 +31,7 @@ use crate::handle::{Device, HandleKey};
 use crate::limit::RateLimiter;
 
 #[derive(Parser)]
-#[command(about = "Smelt 推送中继：替 smeltd 把推送转给 APNs")]
+#[command(about = "Smelt push relay: forwards smeltd's pushes to APNs")]
 struct Args {
     /// 监听地址。HTTPS 交给前面的反向代理。
     #[arg(long, env = "SMELT_PUSH_LISTEN", default_value = "127.0.0.1:8787")]
@@ -75,7 +75,8 @@ async fn main() {
 
 async fn run(args: Args) -> Result<(), String> {
     let read = |path: &PathBuf| {
-        std::fs::read_to_string(path).map_err(|error| format!("读不了 {}：{error}", path.display()))
+        std::fs::read_to_string(path)
+            .map_err(|error| format!("couldn't read {}: {error}", path.display()))
     };
     let state = AppState {
         apns: Apns::new(&read(&args.apns_key)?, args.apns_key_id, args.team_id)?,
@@ -90,15 +91,15 @@ async fn run(args: Args) -> Result<(), String> {
     };
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
-        .map_err(|error| format!("监听 {} 失败：{error}", args.listen))?;
+        .map_err(|error| format!("couldn't listen on {}: {error}", args.listen))?;
     eprintln!(
-        "smelt-push-relay 监听 {}，允许的 topic：{:?}",
+        "smelt-push-relay listening on {}, allowed topics: {:?}",
         args.listen, state.topics
     );
     axum::serve(listener, router(Arc::new(state)))
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|error| format!("服务退出：{error}"))
+        .map_err(|error| format!("the server exited: {error}"))
 }
 
 fn router(state: Arc<AppState>) -> Router {
@@ -114,10 +115,13 @@ async fn register(
     Json(request): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, (StatusCode, &'static str)> {
     if !smelt_push::valid_device_token(&request.device_token) {
-        return Err((StatusCode::BAD_REQUEST, "device_token 不是十六进制令牌"));
+        return Err((StatusCode::BAD_REQUEST, "device_token isn't a hex token"));
     }
     if !state.topics.contains(&request.topic) {
-        return Err((StatusCode::BAD_REQUEST, "这个中继不给该 App 推送"));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "this relay doesn't push for that app",
+        ));
     }
     let handle = state.handles.seal(&Device {
         token: request.device_token.to_ascii_lowercase(),
@@ -133,33 +137,42 @@ async fn send(
 ) -> (StatusCode, &'static str) {
     let Some(device) = state.handles.open(&request.handle) else {
         // 不是这个中继发的，或中继换过句柄密钥：手机要重新登记。
-        return (StatusCode::GONE, "句柄已失效");
+        return (StatusCode::GONE, "the handle is no longer valid");
     };
     if !state.topics.contains(&device.topic) {
-        return (StatusCode::GONE, "这个中继已不再给该 App 推送");
+        return (StatusCode::GONE, "this relay no longer pushes for that app");
     }
     if request.collapse_id.is_empty()
         || request.collapse_id.len() > 64
         || !is_uuid(&request.apns_id)
     {
-        return (StatusCode::BAD_REQUEST, "collapse_id 或 apns_id 格式不对");
+        return (
+            StatusCode::BAD_REQUEST,
+            "collapse_id or apns_id is malformed",
+        );
     }
     if !request.text_within_limits() {
-        return (StatusCode::BAD_REQUEST, "标题、副标题或摘要太长");
+        return (
+            StatusCode::BAD_REQUEST,
+            "the title, subtitle or summary is too long",
+        );
     }
     if !state.limiter.allow(&device.token, Instant::now()) {
-        return (StatusCode::TOO_MANY_REQUESTS, "这台手机的推送太频繁");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many pushes for this phone",
+        );
     }
     match state.apns.send(&device, &request).await {
         Outcome::Delivered => (StatusCode::OK, "ok"),
-        Outcome::Unregistered => (StatusCode::GONE, "令牌已失效"),
+        Outcome::Unregistered => (StatusCode::GONE, "the token is no longer valid"),
         Outcome::BadRequest(reason) => {
             eprintln!("APNs 拒收：{reason}");
-            (StatusCode::BAD_REQUEST, "APNs 拒收")
+            (StatusCode::BAD_REQUEST, "APNs rejected it")
         }
         Outcome::Retry(reason) => {
             eprintln!("APNs 暂时不可用：{reason}");
-            (StatusCode::BAD_GATEWAY, "APNs 暂时不可用")
+            (StatusCode::BAD_GATEWAY, "APNs is temporarily unavailable")
         }
     }
 }

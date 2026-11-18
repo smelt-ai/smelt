@@ -2,6 +2,7 @@
 //! 模型。都是运行时那台机器上的全局配置，对所有智能体生效。
 
 use crate::{control, flag_value, id_arg, respond, usage};
+use rust_i18n::t;
 use smelt_model::control_api::{
     PiConfigGet, PiMcpAddPreset, PiMcpRemove, PiMcpSetEnabled, PiModelsSaveDefault,
     PiModelsSetThinkingLevel, PiPluginsImport, PiPluginsRemove,
@@ -29,7 +30,7 @@ pub(crate) fn run_mcp(args: &[String]) -> i32 {
         Some("presets") => respond(Ok(presets_json())),
         Some("add") => match id_arg(rest) {
             Some(id) => respond(add_preset(id)),
-            None => usage("smelt mcp add <预设id>（smelt mcp presets 查看）"),
+            None => usage(&t!("mcp.add_usage")),
         },
         Some(verb @ ("enable" | "disable")) => match id_arg(rest) {
             Some(name) => respond(
@@ -39,7 +40,7 @@ pub(crate) fn run_mcp(args: &[String]) -> i32 {
                 })
                 .and_then(mcp_json),
             ),
-            None => usage("smelt mcp enable|disable <服务器名>"),
+            None => usage(&t!("mcp.toggle_usage")),
         },
         Some("remove") => match id_arg(rest) {
             Some(name) => respond(
@@ -48,9 +49,9 @@ pub(crate) fn run_mcp(args: &[String]) -> i32 {
                 })
                 .and_then(mcp_json),
             ),
-            None => usage("smelt mcp remove <服务器名>"),
+            None => usage(&t!("mcp.remove_usage")),
         },
-        Some(command) => usage(&format!("未知子命令: {command}")),
+        Some(command) => usage(&t!("unknown_subcommand", command = command)),
         None => usage("smelt mcp list|presets|add|enable|disable|remove"),
     }
 }
@@ -58,7 +59,7 @@ pub(crate) fn run_mcp(args: &[String]) -> i32 {
 fn mcp_json(config: PiConfig) -> Result<serde_json::Value, String> {
     let servers = config
         .mcp_servers
-        .map_err(|error| format!("读不到 MCP 配置：{error}"))?;
+        .map_err(|error| t!("mcp_config_unreadable", error = error).into_owned())?;
     Ok(serde_json::json!({ "servers": servers }))
 }
 
@@ -68,8 +69,8 @@ fn presets_json() -> serde_json::Value {
         .map(|preset| {
             serde_json::json!({
                 "id": preset.id,
-                "name": preset.name,
-                "summary": preset.summary,
+                "name": preset.name(),
+                "summary": preset.summary(),
                 "needs_sign_in": preset.transport.needs_sign_in(),
                 "extension_url": preset.extension_url,
             })
@@ -81,14 +82,13 @@ fn presets_json() -> serde_json::Value {
 /// 要登录的服务器加上以后还连不上，得让用户去设置里点「登录」（要开浏览器授权），
 /// 命令行不代办。
 fn add_preset(id: &str) -> Result<serde_json::Value, String> {
-    let preset =
-        find_preset(id).ok_or_else(|| format!("没有这个预设：{id}（smelt mcp presets 查看）"))?;
+    let preset = find_preset(id).ok_or_else(|| t!("mcp.no_such_preset", id = id).into_owned())?;
     let mut result =
         control::<PiMcpAddPreset>(McpPresetParams { id: id.to_string() }).and_then(mcp_json)?;
     if preset.transport.needs_sign_in() {
-        result["next"] = "需要用户在 Smelt 设置的能力库里登录这个服务器".into();
+        result["next"] = t!("mcp.next_sign_in").into_owned().into();
     } else if let Some(url) = preset.extension_url {
-        result["next"] = format!("需要用户在 Chrome 里装扩展：{url}").into();
+        result["next"] = t!("mcp.next_extension", url = url).into_owned().into();
     }
     Ok(result)
 }
@@ -107,7 +107,7 @@ pub(crate) fn run_plugin(args: &[String]) -> i32 {
             ),
             None => usage("smelt plugin remove <id>"),
         },
-        Some(command) => usage(&format!("未知子命令: {command}")),
+        Some(command) => usage(&t!("unknown_subcommand", command = command)),
         None => usage("smelt plugin list|import|remove"),
     }
 }
@@ -133,18 +133,18 @@ fn plugins_json(config: PiConfig) -> serde_json::Value {
 
 /// 运行时在本机，相对路径按当前目录补全（运行时的工作目录不是这里）。
 fn parse_import(args: &[String]) -> Result<ImportPluginParams, String> {
-    const USAGE: &str = "smelt plugin import --skill <目录> | --extension <路径>";
+    let usage_text = || t!("plugin.import_usage").into_owned();
     let kind = match args.first().map(String::as_str) {
         Some("--skill") => PiPluginKind::Skill,
         Some("--extension") => PiPluginKind::Extension,
-        _ => return Err(USAGE.into()),
+        _ => return Err(usage_text()),
     };
     if args.len() != 2 {
-        return Err(USAGE.into());
+        return Err(usage_text());
     }
     let source = flag_value(args, 0)?;
-    let source =
-        std::path::absolute(&source).map_err(|error| format!("路径无效：{source}：{error}"))?;
+    let source = std::path::absolute(&source)
+        .map_err(|error| t!("plugin.invalid_path", path = source, error = error).into_owned())?;
     Ok(ImportPluginParams {
         kind,
         source: source.to_string_lossy().into_owned(),
@@ -157,7 +157,7 @@ pub(crate) fn run_model(args: &[String]) -> i32 {
         Some("list") => respond(config().and_then(models_json)),
         Some("default") => match id_arg(rest) {
             Some(model) => respond(set_default(model)),
-            None => usage("smelt model default <provider>/<模型id>（smelt model list 查看）"),
+            None => usage(&t!("model.default_usage")),
         },
         Some("thinking") => match id_arg(rest) {
             Some(level) if THINKING_LEVELS.contains(&level) => respond(
@@ -171,7 +171,7 @@ pub(crate) fn run_model(args: &[String]) -> i32 {
                 THINKING_LEVELS.join("|")
             )),
         },
-        Some(command) => usage(&format!("未知子命令: {command}")),
+        Some(command) => usage(&t!("unknown_subcommand", command = command)),
         None => usage("smelt model list|default|thinking"),
     }
 }
@@ -180,7 +180,7 @@ pub(crate) fn run_model(args: &[String]) -> i32 {
 fn models_json(config: PiConfig) -> Result<serde_json::Value, String> {
     let summary = config
         .settings_summary
-        .map_err(|error| format!("读不到 Pi 设置：{error}"))?;
+        .map_err(|error| t!("model.settings_unreadable", error = error).into_owned())?;
     Ok(serde_json::json!({
         "default": summary.default_model,
         "models": config.model_choice_groups,
@@ -201,12 +201,10 @@ fn set_default(value: &str) -> Result<serde_json::Value, String> {
     let (provider, model) = value
         .split_once('/')
         .filter(|(provider, model)| !provider.is_empty() && !model.is_empty())
-        .ok_or("格式为 <provider>/<模型id>")?;
+        .ok_or_else(|| t!("model.format").into_owned())?;
     let current = config()?;
     if !has_model(&current, provider, model) {
-        return Err(format!(
-            "没有这个模型：{provider}/{model}（smelt model list 查看）"
-        ));
+        return Err(t!("no_such_model", provider = provider, model = model).into_owned());
     }
     let thinking_level = current
         .settings_summary

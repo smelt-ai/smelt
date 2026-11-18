@@ -943,7 +943,7 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
     assert!(matches!(
         cmd_rx.try_recv().unwrap(),
         smelt_core::acp_conn::ConversationCommand::Prompt { text, images }
-            if text.contains("当前智能体不支持图片输入") && images.is_empty()
+            if text.contains("doesn't take images") && images.is_empty()
     ));
 }
 
@@ -1446,7 +1446,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
         assert!(matches!(state.phase, DaemonPhase::Thinking));
         assert_eq!(
             state.status_line.as_deref(),
-            Some("已排队，这一轮结束后再发")
+            Some("Queued; sends after this turn")
         );
     }
     // 「Pi 还在跑」不是用户没说过：气泡留在原地，不撤也不重写。
@@ -1470,9 +1470,13 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
     // 重发的是同一条，消息流里永远只能有一个气泡。
     assert_eq!(user_bubbles(&slot.value, "再问一句"), 1);
     assert!(
-        !slot.value.reduced.lock().entries().iter().any(
-            |entry| matches!(entry, AcpEntry::Assistant { text, .. } if text.contains("回合失败"))
-        ),
+        !slot
+            .value
+            .reduced
+            .lock()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, AcpEntry::TurnFailed { .. })),
         "拒绝不能写成回合失败"
     );
 }
@@ -1555,7 +1559,7 @@ fn pi_prompt_is_echoed_without_waiting_for_pi_to_accept() {
     }
     assert!(slot.value.unaccepted_prompt.lock().is_some());
 
-    slot.value.reduced.lock().status_line = Some("已排队，这一轮结束后再发".to_string());
+    slot.value.reduced.lock().status_line = Some("Queued; sends after this turn".to_string());
     assert!(accept_unaccepted_prompt(&slot.value));
     let state = slot.value.reduced.lock();
     // 收下只是确认：不能再写第二个气泡。
@@ -2816,7 +2820,7 @@ fn missing_acp_snapshot_reports_that_the_session_is_gone() {
         .read_line(&mut line)
         .expect("会话不存在时必须回一行错误，不能沉默");
     let response: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(response["error"], "ACP 会话不存在");
+    assert_eq!(response["error"], "The ACP session doesn't exist");
     assert!(response.get("snapshot").is_none());
 }
 
@@ -2912,6 +2916,115 @@ fn watch_without_debug_never_streams_the_debug_sidecars() {
     drop(lines);
     drop(client);
     watch.join().unwrap();
+}
+
+#[test]
+fn open_without_debug_never_streams_the_debug_sidecars() {
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-open-lean", || {
+        make_acp_session_value("acp-open-lean", reduced_with_debug_sidecars())
+    });
+    let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: false,
+        supports_compaction: false,
+        supports_native_queue: false,
+        supports_rewind: false,
+    });
+
+    let (server, client) = RuntimeStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let reader = BufReader::new(server.try_clone().unwrap());
+    let sessions_for_open = Arc::clone(&acp_sessions);
+    let worker = thread::spawn(move || {
+        handle_acp_open(
+            server,
+            reader,
+            &serde_json::json!({
+                "id": "acp-open-lean",
+                "launch": {"command": "/must/not/be/launched"},
+                "omit_history": true,
+                "include_debug": false,
+            }),
+            new_sessions(),
+            sessions_for_open,
+            new_event_hub(),
+        );
+    });
+
+    let mut lines = BufReader::new(client.try_clone().unwrap());
+    let mut initial = String::new();
+    lines.read_line(&mut initial).unwrap();
+    let initial: serde_json::Value = serde_json::from_str(&initial).unwrap();
+    assert!(initial["snapshot"].get("runtime_debug").is_none());
+    assert!(initial["snapshot"].get("tool_debug").is_none());
+
+    // 工具参数表变了：会话链路照样只带正文，整张表留给 `acp_debug` 按需取。
+    slot.value.reduced.lock().tool_debug_generation = 2;
+    push_acp_snapshot_with_runtime_debug_for_test(&slot.value);
+    let mut changed = String::new();
+    lines.read_line(&mut changed).unwrap();
+    let changed: serde_json::Value = serde_json::from_str(&changed).unwrap();
+    assert!(changed["snapshot"].get("runtime_debug").is_none());
+    assert!(changed["snapshot"].get("tool_debug").is_none());
+
+    drop(lines);
+    drop(client);
+    worker.join().unwrap();
+}
+
+#[test]
+fn acp_debug_returns_the_full_debug_tables() {
+    let acp_sessions = new_test_acp_sessions();
+    acp_sessions.reserve_with("acp-debug", || {
+        make_acp_session_value("acp-debug", reduced_with_debug_sidecars())
+    });
+    let (server, client) = RuntimeStream::pair().unwrap();
+
+    handle_acp_debug(
+        server,
+        &serde_json::json!({"id": "acp-debug"}),
+        &acp_sessions,
+    );
+
+    let mut line = String::new();
+    BufReader::new(client).read_line(&mut line).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert!(response["debug"]["tool_debug"].get("tool-1").is_some());
+    // 调试视图要的是完整请求体，不是去掉正文的账本。
+    assert_eq!(
+        response["debug"]["runtime_debug"]["modelCalls"][0]["payload"]["messages"][0]["content"],
+        "huge"
+    );
+}
+
+#[test]
+fn acp_debug_on_a_missing_session_reports_an_error() {
+    let acp_sessions = new_test_acp_sessions();
+    let (server, client) = RuntimeStream::pair().unwrap();
+
+    handle_acp_debug(
+        server,
+        &serde_json::json!({"id": "acp-nope"}),
+        &acp_sessions,
+    );
+
+    let mut line = String::new();
+    BufReader::new(client)
+        .read_line(&mut line)
+        .expect("会话不存在时必须回一行错误，不能沉默");
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"], "The ACP session doesn't exist");
+    assert!(response.get("debug").is_none());
 }
 
 #[test]
@@ -3163,9 +3276,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
     let entries = frame["snapshot"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1, "这一帧应只带收尾时写下的那条：{line}");
     assert!(
-        entries[0]
-            .to_string()
-            .contains("回合失败：499 status code (no body)"),
+        entries[0]["TurnFailed"]["detail"] == "499 status code (no body)",
         "收尾时写下的报错必须随这一帧送到窗口：{line}"
     );
 }
@@ -3233,7 +3344,10 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
     assert_eq!(frame["snapshot"]["entries_total"], 4);
     let entries = frame["snapshot"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1, "镜像这一帧应只带收尾时写下的那条：{line}");
-    assert!(entries[0].to_string().contains("回合失败"), "{line}");
+    assert_eq!(
+        entries[0]["TurnFailed"]["detail"], "499 status code (no body)",
+        "{line}"
+    );
 }
 
 #[test]
@@ -3689,7 +3803,7 @@ fn upgrade_rejects_a_missing_binary_without_waiting_for_idle() {
         response["err"]
             .as_str()
             .unwrap_or_default()
-            .contains("不存在")
+            .contains("doesn't exist")
     );
 }
 
@@ -3802,8 +3916,15 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
     completed.turn_outcome = Some(AcpTurnOutcome::MaxTokens);
     assert_eq!(compute_acp_daemon_phase(&completed), Phase::Failed);
     assert_eq!(
+        acp_pending_note(&completed),
+        Some(smelt_core::acp_session::SessionNote::TurnFailed {
+            outcome: smelt_core::acp_session::TurnFailure::MaxTokens,
+        })
+    );
+    assert_eq!(
         acp_pending_question(&completed).as_deref(),
-        Some("已达到本轮最大令牌数")
+        Some("Hit this turn's token limit"),
+        "旧客户端读的整句是运行时按英文说的"
     );
 
     let mut ended = AcpSessionState::default();
@@ -4013,7 +4134,69 @@ fn acp_open_invalid_request_still_returns_ended_snapshot() {
         snapshot.end_kind,
         smelt_core::acp_session::AcpEndKind::ProviderFailed
     );
-    assert!(!snapshot.end_reason.is_empty());
+    assert_eq!(
+        snapshot.end_code,
+        Some(smelt_core::acp_session::ConversationEndReason::InvalidOpenRequest)
+    );
+}
+
+/// 打开请求带了首条消息或初始配置，回的第一帧要确认收到；旧守护不会带这个字段，客户端
+/// 据此把首条消息放回输入框。被拒的请求也照样确认，免得把拒绝误报成运行时太旧。
+#[test]
+fn acp_open_first_frame_acknowledges_initial_prompt_and_config() {
+    let first_frame = |request: serde_json::Value| {
+        let (server, client) = RuntimeStream::pair().unwrap();
+        let reader = BufReader::new(server.try_clone().unwrap());
+        let acp_sessions = new_test_acp_sessions();
+        let worker = thread::spawn(move || {
+            handle_acp_open(
+                server,
+                reader,
+                &request,
+                new_sessions(),
+                acp_sessions,
+                new_event_hub(),
+            );
+        });
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        drop(reader);
+        drop(client);
+        worker.join().unwrap();
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()
+    };
+    let launch = serde_json::json!({"command": "/definitely/not/a/real/binary-xyz"});
+
+    let with_prompt = first_frame(serde_json::json!({
+        "id": "acp-initial-prompt",
+        "launch": launch,
+        "initial_prompt": {"text": "先读一遍代码"}
+    }));
+    assert_eq!(with_prompt["initial_ack"], true);
+    assert!(with_prompt.get("snapshot").is_some());
+
+    let with_config = first_frame(serde_json::json!({
+        "id": "acp-initial-config",
+        "launch": launch,
+        "initial_config": [["model", "deepseek/flash"]]
+    }));
+    assert_eq!(with_config["initial_ack"], true);
+
+    let plain = first_frame(serde_json::json!({
+        "id": "acp-plain",
+        "launch": launch
+    }));
+    assert!(plain.get("initial_ack").is_none());
+
+    let rejected = first_frame(serde_json::json!({
+        "op": "acp_open",
+        "initial_prompt": {"text": "先读一遍代码"}
+    }));
+    let rejected_snapshot: smelt_core::acp_session::ConversationSnapshot =
+        serde_json::from_value(rejected["snapshot"].clone()).unwrap();
+    assert_eq!(rejected_snapshot.phase, DaemonPhase::Dead);
+    assert_eq!(rejected["initial_ack"], true);
 }
 
 #[test]
@@ -4080,6 +4263,67 @@ fn blank_resume_id_is_treated_as_a_new_session() {
             None
         ),
         None
+    );
+}
+
+#[test]
+fn open_request_carries_initial_config_and_prompt() {
+    let req = parse_acp_open_request(&serde_json::json!({
+        "id": "acp-initial",
+        "launch": {"command": "pi"},
+        "initial_config": [["model", "deepseek/flash"], ["mode", "bypassPermissions"]],
+        "initial_prompt": {
+            "text": "先读一遍代码",
+            "images": [{"mime": "image/png", "data_b64": "AAAA"}]
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        req.initial_config,
+        vec![
+            ("model".to_string(), "deepseek/flash".to_string()),
+            ("mode".to_string(), "bypassPermissions".to_string()),
+        ]
+    );
+    let prompt = req.initial_prompt.expect("首条消息");
+    assert_eq!(prompt.text, "先读一遍代码");
+    assert_eq!(prompt.images.len(), 1);
+
+    // 旧客户端不带这两项；空白首条消息等于没有。
+    let old = parse_acp_open_request(&serde_json::json!({
+        "id": "acp-old-client",
+        "launch": {"command": "pi"}
+    }))
+    .unwrap();
+    assert!(old.initial_config.is_empty());
+    assert!(old.initial_prompt.is_none());
+    let blank = parse_acp_open_request(&serde_json::json!({
+        "id": "acp-blank-initial",
+        "launch": {"command": "pi"},
+        "initial_prompt": {"text": "   "}
+    }))
+    .unwrap();
+    assert!(blank.initial_prompt.is_none());
+}
+
+#[test]
+fn a_pending_initial_prompt_reports_thinking_instead_of_idle() {
+    assert_eq!(
+        acp_phase_with_initial_prompt(Phase::Idle, true),
+        Phase::Thinking
+    );
+    assert_eq!(
+        acp_phase_with_initial_prompt(Phase::Idle, false),
+        Phase::Idle
+    );
+    assert_eq!(
+        acp_phase_with_initial_prompt(Phase::Connecting, true),
+        Phase::Connecting,
+        "还在建连就照实报建连"
+    );
+    assert_eq!(
+        acp_phase_with_initial_prompt(Phase::Failed, true),
+        Phase::Failed
     );
 }
 
@@ -4341,9 +4585,9 @@ fn retry_rewinds_the_failed_turn_and_resends_its_message_once() {
         text: "分析一下".into(),
         images: vec![image],
     });
-    reduced.entries_mut().push(AcpEntry::Assistant {
-        text: "⚠️ 回合失败：模型不支持".into(),
-        thought: false,
+    reduced.entries_mut().push(AcpEntry::TurnFailed {
+        detail: "模型不支持".into(),
+        hint: None,
     });
     let session = make_acp_session("acp-retry", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
@@ -4426,10 +4670,10 @@ fn retry_rewinds_the_failed_turn_and_resends_its_message_once() {
         "重试过的消息只留一条，失败的那一轮已截掉"
     );
     assert!(
-        !reduced.entries().iter().any(|entry| matches!(
-            entry,
-            AcpEntry::Assistant { text, .. } if text.contains("回合失败")
-        )),
+        !reduced
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, AcpEntry::TurnFailed { .. })),
         "失败的回答跟着截掉"
     );
 }

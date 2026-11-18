@@ -207,11 +207,11 @@ fn csops_string(
 #[cfg(target_os = "macos")]
 fn parse_csops_blob(buf: &[u8]) -> Result<Option<String>, String> {
     if buf.len() < 8 {
-        return Err("csops 返回不足 8 字节".to_string());
+        return Err("csops returned fewer than 8 bytes".to_string());
     }
     let len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
     if len > buf.len() {
-        return Err(format!("csops 返回长度 {len} 越过缓冲区"));
+        return Err(format!("csops returned length {len}, past the buffer"));
     }
     if len <= 9 {
         return Ok(None);
@@ -221,7 +221,8 @@ fn parse_csops_blob(buf: &[u8]) -> Result<Option<String>, String> {
         .iter()
         .position(|&byte| byte == 0)
         .unwrap_or(data.len());
-    let text = std::str::from_utf8(&data[..end]).map_err(|_| "csops 返回非 UTF-8".to_string())?;
+    let text =
+        std::str::from_utf8(&data[..end]).map_err(|_| "csops returned non-UTF-8".to_string())?;
     if text.is_empty() {
         Ok(None)
     } else {

@@ -43,6 +43,11 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-oni
 # Logging
 log = "0.4"
 
+# 运行时报错的原因（smelt-runtime-client 的 ControlReason）按界面语言说：启动时按系统
+# 语言设 rust-i18n 的当前语言，和 Flutter 的 l10n 一样跟随系统。
+rust-i18n.workspace = true
+sys-locale = "0.3"
+
 # Android 上 log crate 没有默认后端，不接一个的话 log::info! 全部静默丢弃，
 # 而 logcat 是排查真机问题的唯一手段。Apple 侧不需要（暂时也没接），所以按
 # target 条件依赖，避免给 iOS 构建平白拉进 JNI 相关的代码。

@@ -16,11 +16,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use gpui::*;
-use gpui_component::VirtualListScrollHandle;
-use gpui_component::input::{InputEvent, InputState};
+use gpui_base::VirtualListScrollHandle;
+use rust_i18n::t;
+use smelt_plugin_api::ui::field::{InputEvent, InputState};
 use smelt_plugin_api::{
     self as api, CommandSpec, Handled, Host, HostEvent, PluginView, RuntimeKey, ViewHandle,
-    ViewSpec,
+    ViewSpec, text,
 };
 
 mod editor;
@@ -36,6 +37,8 @@ use model::{DirCache, FileRef, GitMarks, OpenFile, SearchState};
 use store::{FilesStore, SavedProject};
 
 pub(crate) use api::ui::ui_theme;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 const VIEW_ID: &str = "smelt.files/main";
 /// 命令的来源，也是本插件库的名字。和搬出宿主之前一样，用户改过的快捷键还对得上。
@@ -71,11 +74,12 @@ pub fn register(cx: &mut App) {
         OWNER,
         vec![ViewSpec {
             name: "main".into(),
-            title: "文件".into(),
-            icon: gpui_kit_assets::IconName::FolderTree.path(),
-            per_machine: false,
+            title: text!("title"),
+            icon: api::ui::IconName::FolderTree.path(),
             draws_top_bar: false,
+            instances: false,
             settings: None,
+            fills: Vec::new(),
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| FilesPanel::new(window, cx))) as Rc<dyn ViewHandle>
             }),
@@ -95,11 +99,12 @@ pub fn register(cx: &mut App) {
     let commands = vec![
         CommandSpec {
             name: "save".into(),
-            title: "保存当前文件".into(),
+            title: text!("command.save"),
             key: Some("cmd-s".into()),
             context: FILES_KEY_CONTEXT.into(),
             palette: true,
             requires_args: false,
+            args: Some(Vec::new()),
             handler: Rc::new(|_, _, cx| {
                 let Some(panel) = built_panel(cx) else {
                     return Handled::Pass;
@@ -112,14 +117,15 @@ pub fn register(cx: &mut App) {
         // 「打开文件」都经它进来。参数是 `FileLocation::to_args`，交给视图的 `open`。
         CommandSpec {
             name: "open".into(),
-            title: "打开文件".into(),
+            title: text!("command.open"),
             key: None,
             context: "Workspace".into(),
             palette: false,
             requires_args: true,
+            args: Some(api::FileLocation::arg_fields()),
             handler: Rc::new(|args, _, cx| {
                 if api::FileLocation::from_args(args).is_none() {
-                    return Handled::err(format!("打开文件的参数不对：{args}"));
+                    return Handled::err(t!("error.bad_open_args", args = args).into_owned());
                 }
                 let opened = api::OPEN_VIEW.run(
                     &api::OpenView {
@@ -130,28 +136,12 @@ pub fn register(cx: &mut App) {
                 );
                 Handled::Done(cx.spawn(async move |_| match opened.await? {
                     true => Ok(api::serde_json::Value::Null),
-                    false => Err("文件视图没登记上".to_string()),
+                    false => Err(t!("error.no_view").into_owned()),
                 }))
             }),
         },
-        // 编辑器右键菜单里的那一项，见 `send_open_file_selection`。
-        CommandSpec {
-            name: "send-selection".into(),
-            title: "发送选中内容到会话".into(),
-            key: None,
-            context: FILES_KEY_CONTEXT.into(),
-            palette: false,
-            requires_args: false,
-            handler: Rc::new(|_, _, cx| {
-                let Some(panel) = built_panel(cx) else {
-                    return Handled::Pass;
-                };
-                panel.update(cx, |panel, cx| panel.send_open_file_selection(cx));
-                Handled::ok()
-            }),
-        },
     ];
-    api::register_commands(OWNER, "文件", commands, cx).expect("文件的命令表写错了");
+    api::register_commands(OWNER, text!("title"), commands, cx).expect("文件的命令表写错了");
     api::register_file_opener(OWNER, "open", cx);
 }
 
@@ -178,7 +168,7 @@ mod rt {
 
     use smelt_plugin_api::client::RuntimeClient;
     use smelt_plugin_api::client::protocol::control::{ControlCall, ControlClientError};
-    use smelt_plugin_api::{MACHINE_REMOVED, RuntimeKey};
+    use smelt_plugin_api::{RuntimeKey, machine_removed};
 
     pub(crate) use smelt_plugin_api::call_error_text as error_text;
 
@@ -187,7 +177,7 @@ mod rt {
     pub(crate) fn target(key: &RuntimeKey, cx: &gpui::App) -> Result<RuntimeClient, String> {
         smelt_plugin_api::host(cx)
             .client(key, cx)
-            .ok_or_else(|| MACHINE_REMOVED.to_string())
+            .ok_or_else(machine_removed)
     }
 
     pub(crate) fn call_on<C: ControlCall>(
@@ -275,10 +265,15 @@ impl FilesPanel {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let host = api::host(cx);
         let events = api::events(cx);
-        let _events = cx.subscribe(&events, |this, _, event: &HostEvent, cx| {
+        let _events = cx.subscribe_in(&events, window, |this, _, event: &HostEvent, window, cx| {
+            if matches!(event, HostEvent::LocaleChanged) {
+                this.filter.update(cx, |filter, cx| {
+                    filter.set_placeholder(t!("search.placeholder"), window, cx);
+                });
+            }
             this.on_host_event(event, cx);
         });
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件名 / 内容…"));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder(t!("search.placeholder")));
         let _filter_sub = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.schedule_visible_refresh(cx);
@@ -488,19 +483,17 @@ impl FilesPanel {
     }
 
     /// 把一次刷新排到这一轮之后。同一轮里多次调用合并成一次；刷新要窗口（打开文件要建
-    /// 编辑器），在主窗口里跑。
+    /// 编辑器），在视图自己所在的窗口里跑。
     pub(crate) fn schedule_visible_refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_scheduled {
             return;
         }
-        let Some(window) = self.host.main_window(cx) else {
-            return;
-        };
         self.refresh_scheduled = true;
         let view = cx.weak_entity();
+        let entity_id = cx.entity_id();
         cx.defer(move |cx| {
             let refreshed = cx
-                .update_window(window, |_, window, cx| {
+                .with_window(entity_id, |window, cx| {
                     view.update(cx, |this, cx| this.refresh(window, cx)).is_ok()
                 })
                 .unwrap_or(false);
@@ -583,7 +576,7 @@ impl Render for FilesPanel {
 pub(crate) fn notify_error(message: String, cx: &mut App) {
     eprintln!("[files] {message}");
     let notify = api::Notify {
-        subtitle: "错误".to_string(),
+        subtitle: t!("notify.error").to_string(),
         body: message,
         ..Default::default()
     };

@@ -1,6 +1,7 @@
 //! 智能体页面：目录、编辑页和各种菜单。
 
 use super::*;
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 impl AgentsPage {
     pub(crate) fn render_agents_header(
@@ -18,7 +19,7 @@ impl AgentsPage {
                 let (runtime, kind) = (runtime.clone(), *kind);
                 Button::new("agents-add")
                     .icon(IconName::Plus)
-                    .label("新建智能体")
+                    .label(t!("agent.new"))
                     .on_click(move |_, window, cx| {
                         let runtime = runtime.clone();
                         add_entity
@@ -26,18 +27,21 @@ impl AgentsPage {
                     })
                     .into_any_element()
             }
-            _ => Button::new("agents-add")
-                .icon(IconName::Plus)
-                .label("新建智能体")
-                .dropdown_menu(move |menu, _, cx| {
-                    fill_create_agent_menu(menu, add_entity.clone(), cx)
-                })
-                .into_any_element(),
+            _ => MenuTrigger::dropdown(
+                "agents-add-menu",
+                Button::new("agents-add")
+                    .icon(IconName::Plus)
+                    .label(t!("agent.new")),
+                move |_, cx| fill_create_agent_menu(Menu::new(), add_entity.clone(), cx),
+            )
+            .into_any_element(),
+        };
+        let count_label = match count {
+            1 => t!("page.count.one").into_owned(),
+            count => t!("page.count.other", count = count).into_owned(),
         };
         product_page_header(
-            "智能体",
-            count,
-            "个",
+            count_label,
             div()
                 .flex()
                 .items_center()
@@ -61,36 +65,40 @@ impl AgentsPage {
         }
         let (label, current, start) = match plan.intent {
             NewConversationIntent::Start(agent) => (
-                format!(
-                    "默认：{}",
-                    agent_display_name(plan.default_name.as_deref().unwrap_or_default())
-                ),
+                t!(
+                    "default.current",
+                    name = agent_display_name(plan.default_name.as_deref().unwrap_or_default())
+                )
+                .into_owned(),
                 Some(agent),
                 false,
             ),
             NewConversationIntent::PickAgent | NewConversationIntent::CreateAgent => (
-                "选默认智能体".to_string(),
+                t!("default.pick").into_owned(),
                 None,
                 self.picking_for_conversation,
             ),
         };
         let ready = plan.ready;
         Some(
-            Button::new("agents-default-picker")
-                .quiet()
-                .label(label)
-                .tooltip("「新对话」用这个智能体开")
-                .dropdown_menu(move |menu, _, cx| {
+            MenuTrigger::dropdown(
+                "agents-default-picker-menu",
+                Button::new("agents-default-picker")
+                    .quiet()
+                    .label(label)
+                    .tooltip(t!("default.tooltip")),
+                move |_, cx| {
                     fill_conversation_agent_menu(
-                        menu,
+                        Menu::new(),
                         ready.clone(),
                         current.clone(),
                         start,
                         entity.clone(),
                         cx,
                     )
-                })
-                .into_any_element(),
+                },
+            )
+            .into_any_element(),
         )
     }
 
@@ -98,7 +106,6 @@ impl AgentsPage {
         &self,
         name: &str,
         entity: Entity<AgentsPage>,
-        cx: &App,
     ) -> AnyElement {
         let draft = self.editing_conversation_draft();
         let back_entity = entity.clone();
@@ -118,7 +125,7 @@ impl AgentsPage {
         api::ui::page_toolbar()
             .child(product_back_button(
                 "agent-editor-back",
-                if draft { "取消" } else { "返回" },
+                if draft { t!("editor.cancel") } else { t!("editor.back") },
                 move |_, _, cx| {
                     back_entity.update(cx, |page, cx| page.close_agent_settings(cx));
                 },
@@ -135,8 +142,7 @@ impl AgentsPage {
                     .child(
                         div()
                             .min_w_0()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(rgb(ui_theme::text()))
                             .overflow_hidden()
                             .child(truncated_line(agent_display_name(name))),
@@ -145,11 +151,11 @@ impl AgentsPage {
                         row.child(
                             div()
                                 .min_w_0()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
                                 .overflow_hidden()
                                 .child(truncated_line(
-                                    "开始对话后设为默认；返回就取消，不保留这个智能体",
+                                    t!("editor.draft_note"),
                                 )),
                         )
                     }),
@@ -159,7 +165,7 @@ impl AgentsPage {
                 row.child(
                     Button::new("agent-draft-start-conversation")
                         .primary()
-                        .label("开始对话")
+                        .label(t!("editor.start"))
                         .on_click(move |_, _, cx| {
                             start_entity.update(cx, |page, cx| page.commit_conversation_draft(cx));
                         }),
@@ -176,10 +182,13 @@ impl AgentsPage {
     ) -> AnyElement {
         // 只有一台机器时不分组，跟没挂远程机器时一样。
         let grouped = groups.len() > 1;
+        // 哪台机器给不了配置写在它自己的分组标题里；不分组时没有标题，才放到页顶。
         let error = self.error.clone().or_else(|| {
             groups
-                .iter()
-                .find_map(|group| api::host(cx).agent_settings_unavailable(&group.runtime, cx))
+                .first()
+                .filter(|_| !grouped)
+                .and_then(|group| agent_hosts::unavailable(&group.runtime, cx))
+                .map(str::to_string)
         });
         div()
             .id("agent-catalog-scroll")
@@ -241,7 +250,8 @@ impl AgentsPage {
         let menu_talk_agent = agent_ref.clone();
         let menu_delete_entity = open_entity.clone();
         let menu_delete_agent = agent_ref;
-        content_card_style(ListRow::new(row_id))
+        let menu_id = SharedString::from(format!("{row_id}-menu"));
+        let row = content_card_style(ListRow::new(row_id))
             .w_full()
             .px_4()
             .py_3()
@@ -266,8 +276,7 @@ impl AgentsPage {
                                 div()
                                     .min_w_0()
                                     .flex_1()
-                                    .text_sm()
-                                    .font_semibold()
+                                    .type_style(TYPE.ui_medium)
                                     .text_color(rgb(ui_theme::text()))
                                     .overflow_hidden()
                                     .child(truncated_line(name.clone())),
@@ -283,7 +292,7 @@ impl AgentsPage {
                     .when_some(summary, |column, summary| {
                         column.child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .line_height(px(18.))
                                 .text_color(rgb(ui_theme::muted()))
                                 .child(summary),
@@ -296,32 +305,34 @@ impl AgentsPage {
                 open_entity.update(cx, |page, cx| {
                     page.open_agent(agent, AgentEditorTab::default(), window, cx)
                 });
-            })
-            .context_menu(move |menu, _, _| {
-                let talk_entity = menu_talk_entity.clone();
-                let talk_agent = menu_talk_agent.clone();
-                let delete_entity = menu_delete_entity.clone();
-                let delete_agent = menu_delete_agent.clone();
-                menu.item(PopupMenuItem::new("新对话").on_click(move |_, _, cx| {
-                    let agent = talk_agent.clone();
-                    talk_entity.update(cx, |page, cx| {
-                        page.start_agent_conversation(agent, cx)
-                    });
-                }))
+            });
+        MenuTrigger::context(menu_id, row, move |_, _| {
+            let talk_entity = menu_talk_entity.clone();
+            let talk_agent = menu_talk_agent.clone();
+            let delete_entity = menu_delete_entity.clone();
+            let delete_agent = menu_delete_agent.clone();
+            Menu::new()
+                .item(
+                    MenuItem::new(t!("new_conversation.title")).on_click(move |_, _, cx| {
+                        let agent = talk_agent.clone();
+                        talk_entity.update(cx, |page, cx| page.start_agent_conversation(agent, cx));
+                    }),
+                )
                 .separator()
                 .item(
-                    PopupMenuItem::new("删除智能体")
+                    MenuItem::new(t!("delete.title"))
                         .icon(api::ui::trash_icon())
+                        .danger()
                         .disabled(automation_count != 0)
                         .on_click(move |_, window, cx| {
                             let agent = delete_agent.clone();
-                            delete_entity.update(cx, |page, cx| {
-                                page.start_delete_agent(agent, window, cx)
-                            });
+                            delete_entity
+                                .update(cx, |page, cx| page.start_delete_agent(agent, window, cx));
                         }),
                 )
-            })
-            .into_any_element()
+        })
+        .w_full()
+        .into_any_element()
     }
 
     pub(crate) fn render_agents_empty(&self, entity: Entity<AgentsPage>, cx: &App) -> AnyElement {
@@ -359,25 +370,27 @@ impl AgentsPage {
                                     .text_lg()
                                     .font_semibold()
                                     .text_color(rgb(ui_theme::text()))
-                                    .child("还没有智能体"),
+                                    .child(t!("empty.title").into_owned()),
                             )
                             .child(
                                 div()
-                                    .text_sm()
+                                    .type_style(TYPE.ui)
                                     .text_color(rgb(ui_theme::muted()))
                                     .text_center()
-                                    .child(if self.arm_conversation_on_create {
-                                        "创建一个可复用的智能体。开始对话后会用它开场，并设为默认。返回则不保留。"
-                                    } else {
-                                        "写下一个可复用的智能体。对话会带着它的工作方式开始。"
-                                    }),
+                                    .child(SharedString::from(
+                                        if self.arm_conversation_on_create {
+                                            t!("empty.description_arm")
+                                        } else {
+                                            t!("empty.description")
+                                        },
+                                    )),
                             ),
                     )
                     .child({
                         let button = Button::new("agents-empty-add")
                             .small()
                             .icon(IconName::Plus)
-                            .label("新建智能体");
+                            .label(t!("agent.new"));
                         // 挂了不止一台机器时先选建在哪台机器上。
                         match machines.as_slice() {
                             [runtime] => {
@@ -391,11 +404,14 @@ impl AgentsPage {
                                     })
                                     .into_any_element()
                             }
-                            _ => button
-                                .dropdown_menu(move |menu, _, cx| {
-                                    fill_create_agent_menu(menu, entity.clone(), cx)
-                                })
-                                .into_any_element(),
+                            _ => MenuTrigger::dropdown(
+                                "agents-empty-add-menu",
+                                button,
+                                move |_, cx| {
+                                    fill_create_agent_menu(Menu::new(), entity.clone(), cx)
+                                },
+                            )
+                            .into_any_element(),
                         }
                     }),
             )
@@ -413,7 +429,7 @@ impl AgentsPage {
         let error = self
             .error
             .clone()
-            .or_else(|| api::host(cx).agent_settings_unavailable(&editor.agent.runtime, cx));
+            .or_else(|| agent_hosts::unavailable(&editor.agent.runtime, cx).map(str::to_string));
         if editor.tab == AgentEditorTab::Memory {
             // 单独的滚动区：两个页签各记各的滚动位置。
             return div()
@@ -461,8 +477,8 @@ impl AgentsPage {
         let talk_button = Button::new("agent-new-conversation")
             .primary()
             .small()
-            .label("新对话")
-            .tooltip("新开一段对话")
+            .label(t!("new_conversation.title"))
+            .tooltip(t!("new_conversation.tooltip"))
             .on_click(move |_, _, cx| {
                 let agent = conversation_agent.clone();
                 talk_entity.update(cx, |page, cx| page.start_agent_conversation(agent, cx));
@@ -471,23 +487,26 @@ impl AgentsPage {
         let delete_entity = entity.clone();
         let delete_agent = editor.agent.clone();
         let delete_tooltip = if automation_count == 0 {
-            "删除智能体和它的记忆；已有对话会保留".to_string()
+            t!("delete.tooltip").into_owned()
         } else {
-            format!("请先删除关联的 {automation_count} 条自动化")
+            t!("delete.blocked", count = automation_count).into_owned()
         };
-        let delete_button = Button::new("agent-delete")
-            .quiet()
-            .small()
-            .icon(IconName::Ellipsis)
-            .accessibility_label("更多操作")
-            .tooltip(delete_tooltip)
-            .dropdown_menu(move |menu, _, _| {
+        let delete_button = MenuTrigger::dropdown(
+            "agent-delete-menu",
+            Button::new("agent-delete")
+                .quiet()
+                .small()
+                .icon(IconName::Ellipsis)
+                .accessibility_label(t!("common.more"))
+                .tooltip(delete_tooltip),
+            move |_, _| {
                 let entity = delete_entity.clone();
                 let agent = delete_agent.clone();
                 let disabled = automation_count != 0;
-                menu.item(
-                    PopupMenuItem::new("删除智能体")
+                Menu::new().item(
+                    MenuItem::new(t!("delete.title"))
                         .icon(api::ui::trash_icon())
+                        .danger()
                         .disabled(disabled)
                         .on_click(move |_, window, cx| {
                             let agent = agent.clone();
@@ -495,7 +514,8 @@ impl AgentsPage {
                                 .update(cx, |page, cx| page.start_delete_agent(agent, window, cx));
                         }),
                 )
-            });
+            },
+        );
 
         div()
             .id("agent-config-scroll")
@@ -531,9 +551,12 @@ impl AgentsPage {
                                             .items_center()
                                             .gap_2()
                                             .child(render_engine_mark(engine_kind, 18.))
-                                            .child(div().flex_1().min_w_0().child(
-                                                render_identity_name(&editor.name),
-                                            )),
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(render_identity_name(&editor.name)),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -545,7 +568,7 @@ impl AgentsPage {
                                             .child(model_control)
                                             .child(
                                                 div()
-                                                    .text_xs()
+                                                    .type_style(TYPE.text_xsmall)
                                                     .text_color(rgb(ui_theme::faint()))
                                                     .child(agent_usage_summary(
                                                         agent_conversation_count(&editor.agent, cx),
@@ -579,15 +602,15 @@ impl AgentsPage {
                                     .gap_1()
                                     .child(
                                         div()
-                                            .text_sm()
-                                            .font_medium()
+                                            .type_style(TYPE.ui_medium)
                                             .text_color(rgb(ui_theme::text()))
-                                            .child("工作方式"),
+                                            .child(t!("instructions.title").into_owned()),
                                     )
                                     .child(
-                                        div().text_xs().text_color(rgb(ui_theme::muted())).child(
-                                            "长期规则。对话和自动化都会带上，不会当成第一条消息。",
-                                        ),
+                                        div()
+                                            .type_style(TYPE.text_xsmall)
+                                            .text_color(rgb(ui_theme::muted()))
+                                            .child(t!("instructions.description").into_owned()),
                                     ),
                             )
                             .child(
@@ -601,7 +624,7 @@ impl AgentsPage {
                                     .px_5()
                                     .pt_1()
                                     .pb_3()
-                                    .text_xs()
+                                    .type_style(TYPE.text_xsmall)
                                     .text_color(rgb(ui_theme::faint()))
                                     .child(instructions_footer),
                             ),
@@ -624,7 +647,7 @@ impl AgentsPage {
             .and_then(|editor| editor.agent.definition(cx).map(|agent| (agent, editor)));
         let (header, body) = match editing {
             Some((agent, editor)) => (
-                self.render_agent_editor_header(&agent.name, entity.clone(), cx),
+                self.render_agent_editor_header(&agent.name, entity.clone()),
                 self.render_agent_config_panel(agent, editor, entity, cx),
             ),
             None => {
@@ -674,13 +697,13 @@ pub(crate) fn agent_monogram(name: &str, size: f32, on_card: bool) -> Div {
 
 /// 能开对话的智能体。挂了不止一台机器时按机器分段，段头是机器名。
 pub(crate) fn fill_conversation_agent_menu(
-    mut menu: PopupMenu,
+    mut menu: Menu,
     ready: Vec<ConversationAgentPick>,
     current: Option<AgentRef>,
     start: bool,
     entity: Entity<AgentsPage>,
     cx: &App,
-) -> PopupMenu {
+) -> Menu {
     let grouped = ready
         .iter()
         .any(|pick| pick.agent.runtime != RuntimeKey::Local);
@@ -690,14 +713,14 @@ pub(crate) fn fill_conversation_agent_menu(
             if section.is_some() {
                 menu = menu.separator();
             }
-            menu = menu.item(PopupMenuItem::label(machine_name(&pick.agent.runtime, cx)));
+            menu = menu.label(machine_name(&pick.agent.runtime, cx));
             section = Some(pick.agent.runtime.clone());
         }
         let entity = entity.clone();
         let checked = !start && current.as_ref() == Some(&pick.agent);
         let agent = pick.agent;
         menu = menu.item(
-            PopupMenuItem::new(agent_display_name(&pick.name))
+            MenuItem::new(agent_display_name(&pick.name))
                 .checked(checked)
                 .on_click(move |_, _, cx| {
                     let agent = agent.clone();
@@ -720,11 +743,7 @@ pub(crate) fn agent_creation_machines(cx: &App) -> Vec<RuntimeKey> {
 }
 
 /// 「新建智能体」菜单：不止一台机器时按机器分段，每段列可选的引擎。
-pub(crate) fn fill_create_agent_menu(
-    mut menu: PopupMenu,
-    entity: Entity<AgentsPage>,
-    cx: &App,
-) -> PopupMenu {
+pub(crate) fn fill_create_agent_menu(mut menu: Menu, entity: Entity<AgentsPage>, cx: &App) -> Menu {
     let machines = agent_creation_machines(cx);
     let grouped = machines.len() > 1;
     for (ix, runtime) in machines.into_iter().enumerate() {
@@ -732,19 +751,17 @@ pub(crate) fn fill_create_agent_menu(
             if ix > 0 {
                 menu = menu.separator();
             }
-            menu = menu.item(PopupMenuItem::label(machine_name(&runtime, cx)));
+            menu = menu.label(machine_name(&runtime, cx));
         }
         for kind in agent_engine_kinds() {
             let entity = entity.clone();
             let runtime = runtime.clone();
-            menu = menu.item(
-                PopupMenuItem::new(kind.label())
-                    .icon(IconName::Bot)
-                    .on_click(move |_, window, cx| {
-                        let runtime = runtime.clone();
-                        entity.update(cx, |page, cx| page.create_agent(runtime, kind, window, cx));
-                    }),
-            );
+            menu = menu.item(MenuItem::new(kind.label()).icon(IconName::Bot).on_click(
+                move |_, window, cx| {
+                    let runtime = runtime.clone();
+                    entity.update(cx, |page, cx| page.create_agent(runtime, kind, window, cx));
+                },
+            ));
         }
     }
     menu
@@ -770,9 +787,10 @@ pub(crate) fn agent_machine_groups(cx: &App) -> Vec<AgentMachineGroup> {
     }
     keys.into_iter()
         .map(|runtime| {
-            let loaded = api::host(cx).agent_settings(&runtime, cx).is_some();
+            let loaded = agent_hosts::settings(&runtime, cx).is_some();
             let status = machine_unavailable(&runtime, cx)
-                .or_else(|| (!loaded).then(|| "正在读取…".to_string()));
+                .or_else(|| agent_hosts::unavailable(&runtime, cx).map(str::to_string))
+                .or_else(|| (!loaded).then(|| t!("common.loading").into_owned()));
             AgentMachineGroup {
                 agents: agents_on(&runtime, cx),
                 runtime,
@@ -790,23 +808,22 @@ pub(crate) fn render_agent_machine_header(group: &AgentMachineGroup, cx: &App) -
         .gap_2()
         .child(
             div()
-                .text_xs()
-                .font_medium()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::muted()))
                 .child(machine_name(&group.runtime, cx)),
         )
         .children(group.status.clone().map(|status| {
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(status)
         }))
         .when(group.status.is_none() && group.agents.is_empty(), |row| {
             row.child(
                 div()
-                    .text_xs()
+                    .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::faint()))
-                    .child("还没有智能体"),
+                    .child(t!("empty.title").into_owned()),
             )
         })
         .into_any_element()

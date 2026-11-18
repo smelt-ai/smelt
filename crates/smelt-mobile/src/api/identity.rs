@@ -59,7 +59,7 @@ pub fn pair(uri: String, device_name: String) -> Result<RuntimeRecord, SmeltErro
 
 fn parse(uri: &str) -> Result<smelt_pairing::Pairing, SmeltError> {
     let pairing = smelt_pairing::parse_pairing_uri(uri)
-        .map_err(|message| error(SmeltErrorKind::InvalidPairing, message))?;
+        .map_err(|why| error(SmeltErrorKind::InvalidPairing, why.to_string()))?;
     crate::iroh_dialer::validate(&pairing.endpoint_id, pairing.relay_url.as_deref())?;
     Ok(pairing)
 }

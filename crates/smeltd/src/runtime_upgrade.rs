@@ -19,7 +19,7 @@ pub(crate) fn handle_runtime_upgrade<C: ClientSocket>(mut conn: C, request: &ser
     let reply = match serde_json::from_value::<RuntimeUpgradeRequest>(request.clone()) {
         Ok(request) => upgrade(&mut conn, &request.version),
         Err(error) => RuntimeUpgradeReply::Failed {
-            error: format!("请求不合法：{error}"),
+            error: format!("Invalid request: {error}"),
         },
     };
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &reply);
@@ -33,7 +33,7 @@ fn upgrade<C: ClientSocket>(conn: &mut C, version: &str) -> RuntimeUpgradeReply 
     };
     if IN_PROGRESS.swap(true, Ordering::AcqRel) {
         return RuntimeUpgradeReply::Failed {
-            error: "已经在升级了，等它结束".to_string(),
+            error: "An upgrade is already running; wait for it to finish".to_string(),
         };
     }
     struct Done;
@@ -58,14 +58,18 @@ fn upgrade<C: ClientSocket>(conn: &mut C, version: &str) -> RuntimeUpgradeReply 
 /// 被要求升到 `2026.1027.0-rc.1`）。这时下载那个 Release 其实是退回去，当成已经是这个版本。
 fn check_target(requested: &str, current: &str) -> Result<Option<semver::Version>, String> {
     let target = semver::Version::parse(requested.trim())
-        .map_err(|error| format!("版本号不合法（{requested}）：{error}"))?;
+        .map_err(|error| format!("Invalid version ({requested}): {error}"))?;
     if !target.build.is_empty() {
-        return Err(format!("v{target} 不是发版的版本号，没有对应的 Release"));
+        return Err(format!(
+            "v{target} isn't a release version, so there's no Release for it"
+        ));
     }
     if let Ok(current) = semver::Version::parse(current) {
         match target.cmp_precedence(&current) {
             std::cmp::Ordering::Less => {
-                return Err(format!("只升不降：运行时 v{current} 比要的 v{target} 新"));
+                return Err(format!(
+                    "Upgrades only: the runtime's v{current} is newer than the requested v{target}"
+                ));
             }
             std::cmp::Ordering::Equal if !current.build.is_empty() => return Ok(None),
             _ => {}
@@ -97,7 +101,7 @@ pub(crate) fn ensure_smelt_agent() {
 #[cfg(not(target_os = "linux"))]
 fn install_release(_version: &semver::Version) -> RuntimeUpgradeReply {
     RuntimeUpgradeReply::Failed {
-        error: "这台运行时随这台机器上的 Smelt 一起更新，不能远程升级：到这台机器上更新 Smelt"
+        error: "This runtime updates with Smelt on its machine and can't be upgraded remotely; update Smelt on that machine"
             .to_string(),
     }
 }
@@ -116,7 +120,8 @@ fn install_release(version: &semver::Version) -> RuntimeUpgradeReply {
         Ok(ImageInstall::AlreadyInstalled | ImageInstall::Upgraded) => RuntimeUpgradeReply::Current,
         // 问自己没问着，当成没在跑：启动名已拨到新版，下次拉起就是它。
         Ok(ImageInstall::Launched) => RuntimeUpgradeReply::Staged {
-            reason: "新版本已装好，运行时下次重启时换过去".to_string(),
+            reason: "The new version is installed; the runtime switches to it on its next restart"
+                .to_string(),
         },
         // 换代请求发给的是自己：失败就是新映像起不来，原样报失败，不能像安装器那样停掉旧进程。
         Ok(ImageInstall::SwitchFailed(error)) | Err(error) => RuntimeUpgradeReply::Failed { error },
@@ -157,12 +162,12 @@ mod linux {
     impl Staging {
         pub(super) fn new(purpose: &str) -> Result<Self, String> {
             let dir = smelt_paths::smelt_home()
-                .ok_or_else(|| "找不到 $HOME".to_string())?
+                .ok_or_else(|| "Couldn't find $HOME".to_string())?
                 .join("staging")
                 .join(purpose);
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir)
-                .map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
+                .map_err(|error| format!("Couldn't create {}: {error}", dir.display()))?;
             Ok(Self(dir))
         }
     }
@@ -184,26 +189,26 @@ mod linux {
         let archive_name = format!("{name}.tar.gz");
         let sums_path = staging.0.join("SHA256SUMS");
         download(&format!("{base}/SHA256SUMS"), &sums_path).map_err(|error| {
-            format!("取不到 v{version} 的校验和清单（GitHub 上可能没有这个版本）：{error}")
+            format!("Couldn't get the checksums for v{version} (GitHub may not have this version): {error}")
         })?;
-        let sums =
-            fs::read_to_string(&sums_path).map_err(|error| format!("读校验和清单失败：{error}"))?;
+        let sums = fs::read_to_string(&sums_path)
+            .map_err(|error| format!("Couldn't read the checksums: {error}"))?;
         let expected = smelt_version::checksum_for(&sums, &archive_name)
             .ok_or_else(|| {
                 format!(
-                    "v{version} 没有这台机器（linux-{}）的包",
+                    "v{version} has no package for this machine (linux-{})",
                     std::env::consts::ARCH
                 )
             })?
             .to_string();
         let archive = staging.0.join(&archive_name);
         download(&format!("{base}/{archive_name}"), &archive)
-            .map_err(|error| format!("下载 {archive_name} 失败：{error}"))?;
+            .map_err(|error| format!("Couldn't download {archive_name}: {error}"))?;
         let actual = smelt_core::daemon_image::content_fingerprint(&archive)
-            .map_err(|error| format!("读取下载的包失败：{error}"))?;
+            .map_err(|error| format!("Couldn't read the downloaded package: {error}"))?;
         if actual != expected {
             return Err(format!(
-                "{archive_name} 校验失败（期望 {expected}，实际 {actual}）"
+                "{archive_name} failed its checksum (expected {expected}, got {actual})"
             ));
         }
         let output = Command::new("tar")
@@ -212,10 +217,10 @@ mod linux {
             .arg("-C")
             .arg(&staging.0)
             .output()
-            .map_err(|error| format!("无法执行 tar：{error}"))?;
+            .map_err(|error| format!("Couldn't run tar: {error}"))?;
         if !output.status.success() {
             return Err(format!(
-                "解包失败：{}",
+                "Couldn't unpack: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
@@ -223,7 +228,7 @@ mod linux {
         verify_smeltd(&package.join("smeltd"), version)?;
         for helper in HELPERS {
             if !package.join(helper).is_file() {
-                return Err(format!("包里缺少 {helper}"));
+                return Err(format!("The package is missing {helper}"));
             }
         }
         Ok(package)
@@ -242,7 +247,7 @@ mod linux {
         smelt_core::login_env::apply_login_environment(&mut command, []);
         let output = command
             .output()
-            .map_err(|error| format!("无法执行 curl：{error}"))?;
+            .map_err(|error| format!("Couldn't run curl: {error}"))?;
         if output.status.success() {
             Ok(())
         } else {
@@ -256,12 +261,12 @@ mod linux {
         let output = Command::new(smeltd)
             .arg("--version")
             .output()
-            .map_err(|error| format!("新版 smeltd 在这台机器上跑不起来：{error}"))?;
+            .map_err(|error| format!("The new smeltd doesn't run on this machine: {error}"))?;
         let printed = String::from_utf8_lossy(&output.stdout);
         let expected = format!("smeltd {version}");
         if !output.status.success() || printed.trim() != expected {
             return Err(format!(
-                "新版 smeltd 在这台机器上跑不起来（{}）",
+                "The new smeltd doesn't run on this machine ({})",
                 [
                     printed.trim(),
                     String::from_utf8_lossy(&output.stderr).trim()
@@ -285,16 +290,16 @@ mod linux {
             let staging = Staging::new("smelt-agent")?;
             let package = fetch_package(&staging, version, &super::release_url(version))?;
             smelt_core::agent_image::publish(&bin, &package)
-                .map_err(|error| format!("发布 smelt-agent 失败：{error}"))?;
+                .map_err(|error| format!("Couldn't publish smelt-agent: {error}"))?;
         }
         smelt_core::agent_image::reap_unused(&bin)
-            .map_err(|error| format!("回收旧 smelt-agent 失败：{error}"))
+            .map_err(|error| format!("Couldn't clean up the old smelt-agent: {error}"))
     }
 
     pub(super) fn install_helpers(package: &Path) -> Result<(), String> {
         let bin = crate::service::bin_dir()?;
         fs::create_dir_all(&bin)
-            .map_err(|error| format!("创建 {} 失败：{error}", bin.display()))?;
+            .map_err(|error| format!("Couldn't create {}: {error}", bin.display()))?;
         for helper in HELPERS {
             let to = bin.join(helper);
             let temporary = bin.join(format!(".{helper}.new-{}", std::process::id()));
@@ -303,7 +308,7 @@ mod linux {
                 .and_then(|()| fs::rename(&temporary, &to));
             if let Err(error) = result {
                 let _ = fs::remove_file(&temporary);
-                return Err(format!("装 {} 失败：{error}", to.display()));
+                return Err(format!("Couldn't install {}: {error}", to.display()));
             }
         }
         Ok(())
@@ -335,7 +340,7 @@ mod linux {
             fs::create_dir_all(&staging.0).unwrap();
             let error = fetch_package(&staging, &version, &format!("file://{}", release.display()))
                 .unwrap_err();
-            assert!(error.contains("校验失败"), "{error}");
+            assert!(error.contains("failed its checksum"), "{error}");
             drop(staging);
             let _ = fs::remove_dir_all(release);
         }
@@ -347,7 +352,7 @@ mod linux {
             let version = semver::Version::parse("9.9.9").unwrap();
             let error =
                 fetch_package(&staging, &version, "file:///nonexistent-smelt-release").unwrap_err();
-            assert!(error.contains("没有这个版本"), "{error}");
+            assert!(error.contains("may not have this version"), "{error}");
         }
 
         impl Staging {
@@ -372,7 +377,7 @@ mod tests {
         assert!(check_target("0.9.0", "0.9.0-rc.2").is_ok());
         assert!(check_target("0.9.0-rc.3", "0.9.0-rc.2").is_ok());
         let error = check_target("0.8.9", "0.9.0").unwrap_err();
-        assert!(error.contains("只升不降"), "{error}");
+        assert!(error.contains("Upgrades only"), "{error}");
         assert!(check_target("0.9.0-rc.1", "0.9.0").is_err());
     }
 
@@ -399,7 +404,7 @@ mod tests {
         ));
         assert!(check_target("2026.1026.0", "2026.1027.0-rc.1+g32c3172").is_err());
         let error = check_target("2026.1027.0-rc.1+g32c3172", "2026.1026.0").unwrap_err();
-        assert!(error.contains("不是发版"), "{error}");
+        assert!(error.contains("isn't a release version"), "{error}");
     }
 
     /// 出自同一次发版、只是 tag 之后多了提交的运行时，不能被「升」回那个 Release。

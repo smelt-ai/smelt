@@ -1,0 +1,275 @@
+_version: 2
+help.text:
+  en: |
+    smelt %{version}
+
+    Usage (stdout is JSON; smeltd must be running):
+    %{gui}
+    Agents (saved definitions, not running conversations):
+      smelt agent list | get <id> | delete <id>
+      smelt agent create --name <name> [options]
+      smelt agent update <id> [options]       list options replace the whole list; pass "" to clear
+          --prompt <how to work>  --engine <id>  --memory on|off
+          --plugin <id>...  --mcp <server name>...  --folder <path>...  --link <url>...
+          --model <provider>/<model id> | --model default
+      smelt agent chat <id> [--message <first message>]   start a conversation from it
+
+    Conversations:
+      smelt conversation list [--agent <agent id>] [--archived]
+      smelt conversation rename <id> --title <title>
+      smelt conversation archive|unarchive|delete <id>
+
+    Automations:
+      smelt automation list | get <id>
+      smelt automation create --name <name> (--agent <agent id> [--prompt <instructions>] | --shell <command>) <trigger>... [--notify on|off]
+      smelt automation update <id> [--name ...] [--agent ...] [--prompt ...] [--shell ...] [<trigger>...] [--notify on|off]
+          Triggers (can be combined):
+          --every-minutes N  --every-hours N  --daily HH:MM
+          --weekly mon,wed,fri@HH:MM          --during 30@09:00-18:00[@weekdays]
+          --webhook  --event <topic> [--event-filter '{"field":"value"}']
+          On update: any schedule replaces all schedules, same for --event; --webhook keeps an existing URL;
+          --no-schedule / --no-webhook / --no-event remove that kind
+      smelt automation enable|disable|run|delete <id>
+      smelt automation runs [<id>] [--limit N]     recent runs
+      smelt automation run-log <run_id>            output and transcript of one run
+      smelt automation cancel <run_id>
+
+    Capabilities (apply to every agent):
+      smelt mcp list | presets | add <preset id> | enable|disable|remove <server name>
+      smelt plugin list | import --skill|--extension <path> | remove <id>
+      smelt model list | default <provider>/<model id> | thinking off|minimal|low|medium|high|xhigh
+      smelt quota
+
+    Notifications (shown on the desktop and pushed to phones with "Agent messages" on):
+      smelt notify [--title <title>] <message>
+
+    Settings:
+      smelt settings get
+      smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
+      smelt settings set appearance.theme="Ayu Dark"
+      smelt settings set memory.embedding_base_url=http://localhost:11434/v1 memory.embedding_model=bge-m3
+  zh-CN: |
+    smelt %{version}
+
+    用法（stdout 为 JSON，都需要 smeltd 在跑）：
+    %{gui}
+    智能体（长期定义，不是正在跑的对话）：
+      smelt agent list | get <id> | delete <id>
+      smelt agent create --name <名称> [选项]
+      smelt agent update <id> [选项]          列表类选项整份替换，写 "" 清空
+          --prompt <工作方式>  --engine <id>  --memory on|off
+          --plugin <id>...  --mcp <服务器名>...  --folder <路径>...  --link <地址>...
+          --model <provider>/<模型id> | --model default
+      smelt agent chat <id> [--message <第一句话>]   用该定义开一场对话
+
+    对话：
+      smelt conversation list [--agent <智能体id>] [--archived]
+      smelt conversation rename <id> --title <标题>
+      smelt conversation archive|unarchive|delete <id>
+
+    自动化：
+      smelt automation list | get <id>
+      smelt automation create --name <名称> (--agent <智能体id> [--prompt <指令>] | --shell <命令>) <触发>... [--notify on|off]
+      smelt automation update <id> [--name ...] [--agent ...] [--prompt ...] [--shell ...] [<触发>...] [--notify on|off]
+          触发（可以组合）：
+          --every-minutes N  --every-hours N  --daily HH:MM
+          --weekly mon,wed,fri@HH:MM          --during 30@09:00-18:00[@weekdays]
+          --webhook  --event <主题> [--event-filter '{"字段":"值"}']
+          update 时：给了定时就整组换掉定时，--event 同理，--webhook 已有就保留原地址；
+          --no-schedule / --no-webhook / --no-event 去掉那一类
+      smelt automation enable|disable|run|delete <id>
+      smelt automation runs [<id>] [--limit N]     最近的运行
+      smelt automation run-log <run_id>            一次运行的输出和对话记录
+      smelt automation cancel <run_id>
+
+    能力（对所有智能体生效）：
+      smelt mcp list | presets | add <预设id> | enable|disable|remove <服务器名>
+      smelt plugin list | import --skill|--extension <路径> | remove <id>
+      smelt model list | default <provider>/<模型id> | thinking off|minimal|low|medium|high|xhigh
+      smelt quota
+
+    通知（桌面弹出，并推给在手机端打开了「智能体消息」的手机）：
+      smelt notify [--title <标题>] <内容>
+
+    设置：
+      smelt settings get
+      smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
+      smelt settings set appearance.theme="Ayu Dark"
+      smelt settings set memory.embedding_base_url=http://localhost:11434/v1 memory.embedding_model=bge-m3
+agent.chat_usage:
+  en: "smelt agent chat <id> [--message <first message>]"
+  zh-CN: "smelt agent chat <id> [--message <第一句话>]"
+agent.create_usage:
+  en: "smelt agent create --name <name>"
+  zh-CN: "smelt agent create --name <名称>"
+agent.first_message_failed:
+  en: "The conversation is open (session_id %{session_id}), but the first message wasn't sent: %{error}"
+  zh-CN: "对话已开（session_id %{session_id}），但第一句话没发出去：%{error}"
+agent.message_missing:
+  en: "--message needs a message"
+  zh-CN: "--message 需要一句话"
+agent.model_format:
+  en: "--model takes <provider>/<model id>, or default to follow the default model"
+  zh-CN: "--model 格式为 <provider>/<模型id>，或 default 跟随默认模型"
+agent.no_such_mcp_server:
+  en: "No such MCP server: %{name} (see smelt mcp list)"
+  zh-CN: "没有这个 MCP 服务器：%{name}（smelt mcp list 查看）"
+agent.no_such_plugin:
+  en: "No such plugin: %{plugin} (see smelt plugin list)"
+  zh-CN: "没有这个插件：%{plugin}（smelt plugin list 查看）"
+agent.update_empty:
+  en: "smelt agent update <id> needs at least one field"
+  zh-CN: "smelt agent update <id> 需要至少一个字段"
+agent.update_id:
+  en: "update can't change the id"
+  zh-CN: "update 不能改 id"
+automation.action_choice:
+  en: "Give either --agent <id> or --shell <command>, not both"
+  zh-CN: "需要 --agent <id> 或 --shell <命令>，不能同时有"
+automation.clock_format:
+  en: "Time must be HH:MM, got %{value}"
+  zh-CN: "时间格式为 HH:MM，收到 %{value}"
+automation.clock_range:
+  en: "Time must be between 00:00 and 23:59"
+  zh-CN: "时间必须在 00:00 到 23:59"
+automation.conflict:
+  en: "%{given} and %{removal} can't be given together"
+  zh-CN: "不能同时给 %{given} 和 %{removal}"
+automation.during_format:
+  en: "--during takes <minutes>@HH:MM-HH:MM[@<days>], e.g. 30@09:00-18:00@weekdays"
+  zh-CN: "--during 格式为 <分钟>@HH:MM-HH:MM[@<星期>]，例如 30@09:00-18:00@weekdays"
+automation.event_filter_order:
+  en: "--event-filter must follow --event"
+  zh-CN: "--event-filter 要跟在 --event 后面"
+automation.event_topic_missing:
+  en: "--event needs a topic"
+  zh-CN: "--event 需要主题"
+automation.name_missing:
+  en: "--name is required"
+  zh-CN: "需要 --name"
+automation.no_days:
+  en: "List at least one day"
+  zh-CN: "至少写一天"
+automation.positive:
+  en: "%{flag} must be a positive integer"
+  zh-CN: "%{flag} 必须是正整数"
+automation.removal_flags_update_only:
+  en: "--no-schedule / --no-webhook / --no-event only work with update"
+  zh-CN: "--no-schedule / --no-webhook / --no-event 只用于 update"
+automation.shell_prompt:
+  en: "This automation runs a shell command; --prompt can't be changed"
+  zh-CN: "这条自动化是 Shell 动作，不能改 --prompt"
+automation.trigger_all_removed:
+  en: "That would leave no trigger; keep at least one: --every-minutes, --every-hours, --daily, --weekly, --during, --webhook or --event"
+  zh-CN: "改完就没有触发条件了，至少留一种：--every-minutes、--every-hours、--daily、--weekly、--during、--webhook 或 --event"
+automation.trigger_missing:
+  en: "At least one trigger is required: --every-minutes, --every-hours, --daily, --weekly, --during, --webhook or --event"
+  zh-CN: "需要至少一种触发条件：--every-minutes、--every-hours、--daily、--weekly、--during、--webhook 或 --event"
+automation.unknown_day:
+  en: "Unknown day: %{day} (use mon…sun, weekdays, weekend or everyday, comma-separated)"
+  zh-CN: "不认识的星期：%{day}（用 mon…sun、weekdays、weekend、everyday，逗号分隔）"
+automation.update_empty:
+  en: "smelt automation update <id> needs at least one field"
+  zh-CN: "smelt automation update <id> 需要至少一个字段"
+automation.weekly_format:
+  en: "--weekly takes <days>@HH:MM, e.g. mon,wed,fri@09:30"
+  zh-CN: "--weekly 格式为 <星期>@HH:MM，例如 mon,wed,fri@09:30"
+control.settings_invalid_response:
+  en: "smeltd sent an invalid response; whether the settings changed is unknown: %{error}"
+  zh-CN: "smeltd 的响应无效，设置修改结果未知：%{error}"
+control.settings_transport:
+  en: "Couldn't talk to smeltd; if the request went out, the settings change may or may not have been applied: %{error}"
+  zh-CN: "与 smeltd 通信失败；如果请求已送出，设置修改结果可能未知：%{error}"
+control.unreachable:
+  en: "Can't reach smeltd (it needs to be running): %{error}"
+  zh-CN: "连不上 smeltd（需要它在运行）：%{error}"
+conversation.not_found:
+  en: "No such conversation: %{id} (see smelt conversation list)"
+  zh-CN: "没有这段对话：%{id}（smelt conversation list 查看）"
+conversation.rename_usage:
+  en: "smelt conversation rename <id> --title <title>"
+  zh-CN: "smelt conversation rename <id> --title <标题>"
+conversation.terminal_rename:
+  en: "Terminal conversations can't be renamed from the command line"
+  zh-CN: "终端对话不能用命令行改名"
+conversation.title_missing:
+  en: "--title needs a title"
+  zh-CN: "--title 需要标题"
+extra_argument:
+  en: "Unexpected argument: %{arg}"
+  zh-CN: "多余参数：%{arg}"
+flag.on_off:
+  en: "%{flag} must be on or off, got %{value}"
+  zh-CN: "%{flag} 只能是 on 或 off，收到 %{value}"
+flag.value_missing:
+  en: "%{flag} needs a value"
+  zh-CN: "%{flag} 需要一个值"
+help.gui:
+  en: "Open the app"
+  zh-CN: "启动图形界面"
+mcp.add_usage:
+  en: "smelt mcp add <preset id> (see smelt mcp presets)"
+  zh-CN: "smelt mcp add <预设id>（smelt mcp presets 查看）"
+mcp.next_extension:
+  en: "The user needs to install the Chrome extension: %{url}"
+  zh-CN: "需要用户在 Chrome 里装扩展：%{url}"
+mcp.next_sign_in:
+  en: "The user needs to sign in to this server in the capabilities page of Smelt settings"
+  zh-CN: "需要用户在 Smelt 设置的能力库里登录这个服务器"
+mcp.no_such_preset:
+  en: "No such preset: %{id} (see smelt mcp presets)"
+  zh-CN: "没有这个预设：%{id}（smelt mcp presets 查看）"
+mcp.remove_usage:
+  en: "smelt mcp remove <server name>"
+  zh-CN: "smelt mcp remove <服务器名>"
+mcp.toggle_usage:
+  en: "smelt mcp enable|disable <server name>"
+  zh-CN: "smelt mcp enable|disable <服务器名>"
+mcp_config_unreadable:
+  en: "Couldn't read the MCP configuration: %{error}"
+  zh-CN: "读不到 MCP 配置：%{error}"
+model.default_usage:
+  en: "smelt model default <provider>/<model id> (see smelt model list)"
+  zh-CN: "smelt model default <provider>/<模型id>（smelt model list 查看）"
+model.format:
+  en: "The format is <provider>/<model id>"
+  zh-CN: "格式为 <provider>/<模型id>"
+model.settings_unreadable:
+  en: "Couldn't read Pi settings: %{error}"
+  zh-CN: "读不到 Pi 设置：%{error}"
+no_such_model:
+  en: "No such model: %{provider}/%{model} (see smelt model list)"
+  zh-CN: "没有这个模型：%{provider}/%{model}（smelt model list 查看）"
+notify.title_missing:
+  en: "--title needs a title"
+  zh-CN: "--title 后面要跟标题"
+notify.usage:
+  en: "smelt notify [--title <title>] <message>"
+  zh-CN: "smelt notify [--title <标题>] <内容>"
+plugin.import_usage:
+  en: "smelt plugin import --skill <directory> | --extension <path>"
+  zh-CN: "smelt plugin import --skill <目录> | --extension <路径>"
+plugin.invalid_path:
+  en: "Invalid path: %{path}: %{error}"
+  zh-CN: "路径无效：%{path}：%{error}"
+settings.not_key_value:
+  en: "Settings must be key=value: %{arg}"
+  zh-CN: "设置项必须是 key=value：%{arg}"
+unknown_argument:
+  en: "Unknown argument: %{arg}"
+  zh-CN: "未知参数：%{arg}"
+unknown_subcommand:
+  en: "Unknown subcommand: %{command}"
+  zh-CN: "未知子命令：%{command}"
+usage_hint:
+  en: "See smelt --help for usage"
+  zh-CN: "用法见 smelt --help"
+main.exe_dir_missing:
+  en: "Couldn't find the directory this program is in: %{error}"
+  zh-CN: "找不到自己所在的目录：%{error}"
+main.gui_launch_failed:
+  en: "Couldn't start %{path}: %{error}"
+  zh-CN: "启动 %{path} 失败：%{error}"
+main.unknown_command:
+  en: "Unknown command: %{command}"
+  zh-CN: "未知命令：%{command}"

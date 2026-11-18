@@ -6,6 +6,7 @@ use crate::prelude::*;
 use crate::templates::{
     AutomationTemplate, AutomationTemplateCategory, AutomationTemplateGlyph, filtered_templates,
 };
+use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) const CATALOG_MAX_WIDTH: f32 = 960.;
 pub(crate) const TEMPLATE_COLUMNS: usize = 3;
@@ -16,10 +17,8 @@ impl AutomationsPage {
         entity: Entity<AutomationsPage>,
         cx: &App,
     ) -> AnyElement {
-        const TABS: [(AutomationCatalogTab, &str); 2] = [
-            (AutomationCatalogTab::Tasks, "自动化"),
-            (AutomationCatalogTab::Runs, "运行"),
-        ];
+        const TABS: [AutomationCatalogTab; 2] =
+            [AutomationCatalogTab::Tasks, AutomationCatalogTab::Runs];
         let current = self.catalog_tab;
         let tab_entity = entity.clone();
         let add_entity = entity;
@@ -28,10 +27,13 @@ impl AutomationsPage {
             .gap_3()
             .child(
                 Segmented::new("automations-tabs")
-                    .segments(TABS.map(|(_, label)| label))
-                    .selected(TABS.iter().position(|(tab, _)| *tab == current))
+                    .segments(TABS.map(|tab| match tab {
+                        AutomationCatalogTab::Tasks => SharedString::from(t!("title")),
+                        AutomationCatalogTab::Runs => SharedString::from(t!("catalog.runs")),
+                    }))
+                    .selected(TABS.iter().position(|tab| *tab == current))
                     .on_select(move |ix, _, cx| {
-                        if let Some((tab, _)) = TABS.get(ix).copied() {
+                        if let Some(tab) = TABS.get(ix).copied() {
                             tab_entity.update(cx, |page, cx| {
                                 page.set_automation_catalog_tab(tab, cx);
                             });
@@ -39,9 +41,10 @@ impl AutomationsPage {
                     }),
             )
             .child(machine_picking_button(
+                "automations-add-menu",
                 Button::new("automations-add")
                     .icon(IconName::Plus)
-                    .label("新建自动化"),
+                    .label(t!("catalog.new")),
                 add_entity,
                 |page, runtime, window, cx| page.add_automation(runtime, window, cx),
                 cx,
@@ -100,9 +103,9 @@ impl AutomationsPage {
             .when(empty, |column| {
                 column.child(
                     div()
-                        .text_sm()
+                        .type_style(TYPE.ui)
                         .text_color(rgb(ui_theme::muted()))
-                        .child("还没有自动化，可从下面的模板添加。"),
+                        .child(t!("catalog.empty_hint").into_owned()),
                 )
             })
             .child(self.render_automation_templates(entity, cx))
@@ -136,9 +139,9 @@ impl AutomationsPage {
                     .justify_center()
                     .child(
                         div()
-                            .text_sm()
+                            .type_style(TYPE.ui)
                             .text_color(rgb(ui_theme::muted()))
-                            .child("暂无运行记录"),
+                            .child(t!("catalog.no_runs").into_owned()),
                     )
                     .into_any_element()
             } else {
@@ -228,7 +231,7 @@ impl AutomationsPage {
             AutomationAction::Agent { .. } => agent
                 .as_ref()
                 .map(|agent| agent.name.clone())
-                .unwrap_or_else(|| "智能体已删除".to_string()),
+                .unwrap_or_else(|| t!("row_status.agent_missing").into_owned()),
             AutomationAction::Shell { command, .. } => {
                 let line = compact_instructions(command);
                 if line.is_empty() {
@@ -239,11 +242,11 @@ impl AutomationsPage {
             }
         };
         let display_name = if automation.name.trim().is_empty() {
-            "未命名自动化".to_string()
+            t!("automation.unnamed").into_owned()
         } else {
             automation.name.clone()
         };
-        let schedule = automation.trigger.summary();
+        let schedule = trigger_summary(&automation.trigger);
         let open_id = target.clone();
         let open_entity = entity.clone();
         let menu = render_automation_row_menu(
@@ -273,10 +276,7 @@ impl AutomationsPage {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(neutral_icon_mark(
-                    Icon::new(gpui_kit_assets::IconName::Workflow),
-                    28.,
-                ))
+                .child(neutral_icon_mark(Icon::new(IconName::Workflow), 28.))
                 .child(
                     div()
                         .flex_1()
@@ -286,15 +286,14 @@ impl AutomationsPage {
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
-                                .font_semibold()
+                                .type_style(TYPE.ui_medium)
                                 .text_color(rgb(ui_theme::text()))
                                 .overflow_hidden()
                                 .child(truncated_line(display_name)),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::faint()))
                                 .overflow_hidden()
                                 .child(truncated_line(action_summary)),
@@ -303,7 +302,7 @@ impl AutomationsPage {
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_SCHEDULE)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(schedule)),
@@ -325,7 +324,7 @@ impl AutomationsPage {
                 .child(
                     div()
                         .min_w_0()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::muted()))
                         .overflow_hidden()
                         .child(truncated_line(last_run)),
@@ -333,7 +332,7 @@ impl AutomationsPage {
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .overflow_hidden()
                 .child(truncated_line(next_run)),
@@ -364,14 +363,14 @@ impl AutomationsPage {
         let source = run_source_label(run.source);
         let status = run_status_label(run.status);
         let name = if run.context.automation_name.trim().is_empty() {
-            "未命名自动化".to_string()
+            t!("automation.unnamed").into_owned()
         } else {
             run.context.automation_name.clone()
         };
         let error = run
-            .error
-            .as_deref()
+            .error_text()
             .filter(|_| run.status == api::model::automation::AutomationRunStatus::Failed)
+            .as_deref()
             .map(compact_instructions);
         let open_entity = entity;
         let run_id = run.id.clone();
@@ -430,10 +429,9 @@ impl AutomationsPage {
                     .gap_3()
                     .child(
                         div()
-                            .text_sm()
-                            .font_medium()
+                            .type_style(TYPE.ui_medium)
                             .text_color(rgb(ui_theme::text()))
-                            .child("模板"),
+                            .child(t!("catalog.templates").into_owned()),
                     )
                     .child(self.render_template_filters(entity.clone())),
             )
@@ -443,17 +441,18 @@ impl AutomationsPage {
 
     pub(crate) fn render_template_filters(&self, entity: Entity<AutomationsPage>) -> AnyElement {
         let selected = self.template_filter;
-        let mut filters = vec![(None, "全部")];
+        let mut filters: Vec<(Option<AutomationTemplateCategory>, SharedString)> =
+            vec![(None, t!("template.all").into())];
         filters.extend(
             AutomationTemplateCategory::ALL
                 .into_iter()
                 .map(|category| (Some(category), category.label())),
         );
         Segmented::new("automation-template-filters")
-            .segments(filters.iter().map(|(_, label)| *label))
+            .segments(filters.iter().map(|(_, label)| label.clone()))
             .selected(filters.iter().position(|(filter, _)| *filter == selected))
             .on_select(move |ix, _, cx| {
-                if let Some((filter, _)) = filters.get(ix).copied() {
+                if let Some(filter) = filters.get(ix).map(|(filter, _)| *filter) {
                     entity.update(cx, |page, cx| {
                         page.set_automation_template_filter(filter, cx);
                     });
@@ -523,33 +522,33 @@ pub(crate) fn automation_table_header() -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
-                .child("自动化"),
+                .child(t!("title").into_owned()),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_SCHEDULE)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
-                .child("日程"),
+                .child(t!("catalog.col_schedule").into_owned()),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_LAST)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
-                .child("上次运行"),
+                .child(t!("catalog.col_last_run").into_owned()),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
-                .child("下次运行"),
+                .child(t!("catalog.col_next_run").into_owned()),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_STATUS)
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
-                .child("状态"),
+                .child(t!("catalog.col_status").into_owned()),
         )
         .child(automation_fixed_col(AUTOMATION_COL_MENU))
         .into_any_element()
@@ -572,78 +571,86 @@ pub(crate) fn render_automation_row_menu(
     let view_entity = entity.clone();
     let delete_entity = entity.clone();
     let cancel_entity = entity;
-    Button::new(format!(
-        "automation-row-more-{}-{}",
-        runtime_element_key(&target.runtime),
-        target.id
-    ))
-    .quiet()
-    .small()
-    .icon(IconName::Ellipsis)
-    .accessibility_label("更多操作")
-    .dropdown_menu(move |mut menu, _, _| {
-        if let Some(active_run_id) = cancel_run_id.clone() {
-            let entity = cancel_entity.clone();
-            let runtime = runtime.clone();
-            menu = menu.item(PopupMenuItem::new("停止").icon(IconName::Close).on_click(
-                move |_, _, cx| {
-                    let run_id = active_run_id.clone();
-                    entity.update(cx, |page, cx| {
-                        page.cancel_automation_run(&runtime, run_id, cx);
-                    });
-                },
-            ));
-        } else {
-            let entity = run_entity.clone();
-            let id = run_id.clone();
+    let key = format!("{}-{}", runtime_element_key(&target.runtime), target.id);
+    let trigger = Button::new(format!("automation-row-more-{key}"))
+        .quiet()
+        .small()
+        .icon(IconName::Ellipsis)
+        .accessibility_label(t!("catalog.more"));
+    MenuTrigger::dropdown(
+        format!("automation-row-more-menu-{key}"),
+        trigger,
+        move |_, _| {
+            let mut menu = Menu::new();
+            if let Some(active_run_id) = cancel_run_id.clone() {
+                let entity = cancel_entity.clone();
+                let runtime = runtime.clone();
+                menu = menu.item(
+                    MenuItem::new(t!("menu.stop"))
+                        .icon(IconName::Close)
+                        .danger()
+                        .on_click(move |_, _, cx| {
+                            let run_id = active_run_id.clone();
+                            entity.update(cx, |page, cx| {
+                                page.cancel_automation_run(&runtime, run_id, cx);
+                            });
+                        }),
+                );
+            } else {
+                let entity = run_entity.clone();
+                let id = run_id.clone();
+                menu = menu.item(
+                    MenuItem::new(t!("menu.run_once"))
+                        .icon(IconName::Play)
+                        .disabled(!can_run)
+                        .on_click(move |_, _, cx| {
+                            let id = id.clone();
+                            entity.update(cx, |page, cx| {
+                                page.run_automation_once(id, cx);
+                            });
+                        }),
+                );
+            }
+            if let Some(latest_run_id) = latest_run_id.clone() {
+                let entity = view_entity.clone();
+                let runtime = runtime.clone();
+                menu = menu.item(
+                    MenuItem::new(t!("menu.view_runs"))
+                        .icon(IconName::Eye)
+                        .on_click(move |_, window, cx| {
+                            let run_id = latest_run_id.clone();
+                            let runtime = runtime.clone();
+                            entity.update(cx, |page, cx| {
+                                page.open_catalog_automation_run(runtime, run_id, window, cx);
+                            });
+                        }),
+                );
+            }
+            let toggle_entity = toggle_entity.clone();
+            let toggle_id = toggle_id.clone();
             menu = menu.item(
-                PopupMenuItem::new("运行一次")
-                    .icon(IconName::Play)
-                    .disabled(!can_run)
-                    .on_click(move |_, _, cx| {
-                        let id = id.clone();
-                        entity.update(cx, |page, cx| {
-                            page.run_automation_once(id, cx);
-                        });
-                    }),
-            );
-        }
-        if let Some(latest_run_id) = latest_run_id.clone() {
-            let entity = view_entity.clone();
-            let runtime = runtime.clone();
-            menu = menu.item(PopupMenuItem::new("查看运行").icon(IconName::Eye).on_click(
-                move |_, window, cx| {
-                    let run_id = latest_run_id.clone();
-                    let runtime = runtime.clone();
-                    entity.update(cx, |page, cx| {
-                        page.open_catalog_automation_run(runtime, run_id, window, cx);
-                    });
-                },
-            ));
-        }
-        let toggle_entity = toggle_entity.clone();
-        let toggle_id = toggle_id.clone();
-        menu = menu.item(
-            automation_enabled_toggle_item(enabled).on_click(move |_, _, cx| {
-                let id = toggle_id.clone();
-                toggle_entity.update(cx, |page, cx| {
-                    page.set_automation_enabled(id, !enabled, cx);
-                });
-            }),
-        );
-        let delete_entity = delete_entity.clone();
-        let delete_id = delete_id.clone();
-        menu.item(
-            PopupMenuItem::new("删除自动化")
-                .icon(api::ui::trash_icon())
-                .on_click(move |_, window, cx| {
-                    let id = delete_id.clone();
-                    delete_entity.update(cx, |page, cx| {
-                        page.start_delete_automation(id, window, cx);
+                automation_enabled_toggle_item(enabled).on_click(move |_, _, cx| {
+                    let id = toggle_id.clone();
+                    toggle_entity.update(cx, |page, cx| {
+                        page.set_automation_enabled(id, !enabled, cx);
                     });
                 }),
-        )
-    })
+            );
+            let delete_entity = delete_entity.clone();
+            let delete_id = delete_id.clone();
+            menu.separator().item(
+                MenuItem::new(t!("menu.delete"))
+                    .icon(api::ui::trash_icon())
+                    .danger()
+                    .on_click(move |_, window, cx| {
+                        let id = delete_id.clone();
+                        delete_entity.update(cx, |page, cx| {
+                            page.start_delete_automation(id, window, cx);
+                        });
+                    }),
+            )
+        },
+    )
     .into_any_element()
 }
 
@@ -671,10 +678,11 @@ pub(crate) fn render_template_card(
                 .gap_2()
                 .child(neutral_icon_mark(template_icon(template.glyph), 32.))
                 .child(machine_picking_button(
+                    SharedString::from(format!("automation-template-add-menu-{id}")),
                     Button::new(format!("automation-template-add-{id}"))
                         .quiet()
                         .small()
-                        .label("添加"),
+                        .label(t!("template.add")),
                     add_entity,
                     move |page, runtime, window, cx| {
                         page.add_automation_from_template(runtime, id, window, cx)
@@ -690,16 +698,15 @@ pub(crate) fn render_template_card(
                 .gap_1()
                 .child(
                     div()
-                        .text_sm()
-                        .font_semibold()
+                        .type_style(TYPE.ui_medium)
                         .text_color(rgb(ui_theme::text()))
-                        .child(template.name),
+                        .child(SharedString::from((template.name)())),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::muted()))
-                        .child(template.description),
+                        .child(SharedString::from((template.description)())),
                 ),
         )
         .child(
@@ -714,9 +721,9 @@ pub(crate) fn render_template_card(
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
-                        .child(template.schedule.summary()),
+                        .child(schedule_summary(&template.schedule)),
                 ),
         )
         .into_any_element()
@@ -750,6 +757,7 @@ pub(crate) fn automation_creation_machines(cx: &App) -> Vec<RuntimeKey> {
 
 /// 「在某台机器上新建」的按钮：只有一台机器时直接建，多台时点开先选机器。
 pub(crate) fn machine_picking_button(
+    menu_id: impl Into<ElementId>,
     button: Button,
     entity: Entity<AutomationsPage>,
     action: impl Fn(&mut AutomationsPage, RuntimeKey, &mut Window, &mut Context<AutomationsPage>)
@@ -772,25 +780,21 @@ pub(crate) fn machine_picking_button(
         .iter()
         .map(|runtime| (runtime.clone(), machine_name(runtime, cx)))
         .collect::<Vec<_>>();
-    button
-        .dropdown_caret(true)
-        .dropdown_menu(move |mut menu, _, _| {
-            menu = menu.item(PopupMenuItem::label("建在哪台机器上"));
-            for (runtime, name) in &names {
-                let entity = entity.clone();
+    MenuTrigger::dropdown(menu_id, button.dropdown_caret(true), move |_, _| {
+        let mut menu = Menu::new().label(t!("catalog.machine_menu"));
+        for (runtime, name) in &names {
+            let entity = entity.clone();
+            let runtime = runtime.clone();
+            let action = action.clone();
+            menu = menu.item(MenuItem::new(name.clone()).on_click(move |_, window, cx| {
                 let runtime = runtime.clone();
                 let action = action.clone();
-                menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
-                    move |_, window, cx| {
-                        let runtime = runtime.clone();
-                        let action = action.clone();
-                        entity.update(cx, |page, cx| action(page, runtime, window, cx));
-                    },
-                ));
-            }
-            menu
-        })
-        .into_any_element()
+                entity.update(cx, |page, cx| action(page, runtime, window, cx));
+            }));
+        }
+        menu
+    })
+    .into_any_element()
 }
 
 /// 自动化列表里的一台机器。
@@ -815,12 +819,12 @@ pub(crate) fn automation_machine_groups(cx: &App) -> Vec<AutomationMachineGroup>
                 .or_else(|| {
                     machine
                         .and_then(|machine| machine.store_error.clone())
-                        .map(|error| format!("自动化存储不可用：{error}"))
+                        .map(|error| t!("error.store_unavailable", error = error).into_owned())
                 })
                 .or_else(|| {
                     machine
                         .is_none_or(|machine| machine.store_id.is_empty())
-                        .then(|| "正在读取…".to_string())
+                        .then(|| t!("catalog.loading").into_owned())
                 });
             AutomationMachineGroup {
                 automations: machine
@@ -843,14 +847,13 @@ pub(crate) fn render_automation_machine_header(
         .gap_2()
         .child(
             div()
-                .text_xs()
-                .font_medium()
+                .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::muted()))
                 .child(machine_name(&group.runtime, cx)),
         )
         .children(group.status.clone().map(|status| {
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
                 .child(status)
         }))
@@ -859,9 +862,9 @@ pub(crate) fn render_automation_machine_header(
             |row| {
                 row.child(
                     div()
-                        .text_xs()
+                        .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
-                        .child("还没有自动化"),
+                        .child(t!("catalog.empty").into_owned()),
                 )
             },
         )
@@ -884,7 +887,7 @@ pub(crate) fn automation_status_cell(status: AutomationRowStatus) -> AnyElement 
         .children(dot.map(|color| div().size(px(6.)).rounded_full().bg(rgb(color))))
         .child(
             div()
-                .text_xs()
+                .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
                 .child(automation_row_status_label(status)),
         )
@@ -901,6 +904,6 @@ pub(crate) fn template_icon(glyph: AutomationTemplateGlyph) -> IconName {
         AutomationTemplateGlyph::Globe => IconName::Globe,
         AutomationTemplateGlyph::BookOpen => IconName::BookOpen,
         AutomationTemplateGlyph::LayoutDashboard => IconName::LayoutDashboard,
-        AutomationTemplateGlyph::TriangleAlert => IconName::TriangleAlert,
+        AutomationTemplateGlyph::TriangleAlert => IconName::Warning,
     }
 }

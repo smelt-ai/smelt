@@ -202,15 +202,18 @@ export function subagentSessionArgs(sessionFile: string | undefined): string[] {
   return sessionFile ? ["--session", sessionFile] : ["--no-session"];
 }
 
-/** 一个子智能体在界面上叫什么：标签、智能体名，都没有就是任务的第一行。 */
+/** 一个子智能体在界面上叫什么：标签、智能体名，都没有就是任务的第一行；全空留空，界面给泛称。 */
 export function subagentTitle(spec: Pick<AgentSpec, "label" | "agent" | "task">): string {
   const named = spec.label?.trim() || spec.agent?.trim();
   if (named) return named;
   const firstLine = spec.task.trim().split("\n")[0] ?? "";
-  return firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine || "子智能体";
+  return firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine;
 }
 
-/** 一次派发在界面上叫什么。 */
+/**
+ * 一次派发在界面上叫什么。多项的并行 / 串联组不起标题：标题由运行时写死、存进对话，
+ * 界面按子智能体个数用自己的语言说。没名字的也留空，界面给泛称。
+ */
 export function dispatchTitle(params: {
   task?: string;
   label?: string;
@@ -218,8 +221,12 @@ export function dispatchTitle(params: {
   tasks?: ReadonlyArray<unknown>;
   chain?: ReadonlyArray<unknown>;
 }): string {
-  if (params.tasks?.length) return `${params.tasks.length} 个并行任务`;
-  if (params.chain?.length) return `${params.chain.length} 步串联`;
+  const group = params.tasks?.length ? params.tasks : params.chain;
+  if (group?.length) {
+    if (group.length > 1) return "";
+    const only = (group[0] ?? {}) as Partial<AgentSpec>;
+    return subagentTitle({ task: only.task ?? "", label: only.label, agent: only.agent });
+  }
   return subagentTitle({ task: params.task ?? "", label: params.label, agent: params.agent });
 }
 

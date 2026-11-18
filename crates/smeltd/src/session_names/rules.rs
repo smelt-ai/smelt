@@ -25,7 +25,7 @@ pub(super) fn display_title(
     }
     nonempty(fallback)
         .map(str::to_string)
-        .unwrap_or_else(|| "终端".to_string())
+        .unwrap_or_else(|| "Terminal".to_string())
 }
 
 /// 终端会话（一段对话里的一组终端）显示名的来源。名字取自一格「代表格」：第一格，
@@ -64,7 +64,7 @@ impl TerminalTitle<'_> {
     }
 }
 
-/// 一段 ACP 对话的名字：用户改的名 > 会话名 > 自定义智能体自己的名字 > 「智能体 对话 · 目录」。
+/// 一段 ACP 对话的名字：用户改的名 > 会话名 > 自定义智能体自己的名字 > 「智能体 · 目录」（不带词，免得运行时替人选语言）。
 ///
 /// `session_name` 是运行时已经决定的会话名（提供方标题或首条请求兜底）。`dir` 是工作目录
 /// 的末段，按运行时这台机器的系统切好。
@@ -80,8 +80,8 @@ pub(super) fn acp_conversation_name(
         .or_else(|| nonempty(definition_name))
         .map(str::to_string)
         .unwrap_or_else(|| match nonempty(dir) {
-            Some(dir) => format!("{agent_label} 对话 · {dir}"),
-            None => format!("{agent_label} 对话"),
+            Some(dir) => format!("{agent_label} · {dir}"),
+            None => agent_label.to_string(),
         })
 }
 
@@ -194,7 +194,7 @@ mod tests {
             );
             assert_eq!(
                 acp_conversation_name(None, None, None, agent, Some("smelt")),
-                format!("{agent} 对话 · smelt")
+                format!("{agent} · smelt")
             );
         }
     }
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(name(Some("改过"), Some("会话"), Some("Til")), "改过");
         assert_eq!(name(Some("  "), Some("会话"), Some("Til")), "会话");
         assert_eq!(name(None, None, Some("Til")), "Til");
-        assert_eq!(name(None, Some(" "), None), "Claude 对话 · smelt");
+        assert_eq!(name(None, Some(" "), None), "Claude · smelt");
     }
 
     #[test]
