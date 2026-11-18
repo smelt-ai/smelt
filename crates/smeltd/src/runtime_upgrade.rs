@@ -78,18 +78,18 @@ fn check_target(requested: &str, current: &str) -> Result<Option<semver::Version
     Ok(Some(target))
 }
 
-/// 守护启动后在后台调一次，见 `linux::ensure_smelt_agent`。只有装在 `~/.smelt/bin` 的 smeltd
+/// 守护启动后在后台调一次，见 `linux::complete_install`。只有装在 `~/.smelt/bin` 的 smeltd
 /// 才这样补：开发、测试里直接跑的 smeltd 不去 Release 下载。macOS 上由桌面从 App 里装。
 #[cfg(target_os = "linux")]
-pub(crate) fn ensure_smelt_agent() {
+pub(crate) fn complete_install() {
     if !crate::is_managed_daemon() {
         return;
     }
     let Some(Ok(version)) = smelt_version::RELEASE.map(semver::Version::parse) else {
         return;
     };
-    if let Err(error) = linux::ensure_smelt_agent(&version) {
-        smelt_core::app_log::error("smeltd", &format!("补齐 smelt-agent 失败：{error}"));
+    if let Err(error) = linux::complete_install(&version) {
+        smelt_core::app_log::error("smeltd", &format!("补齐运行时包里的程序失败：{error}"));
     }
 }
 
@@ -275,28 +275,69 @@ mod linux {
         Ok(())
     }
 
-    /// 同安装脚本的 `put`：先写到旁边再改名盖过去，正在跑的旧版本不受影响。
-    /// Linux 上没有桌面替运行时装 smelt-agent，运行时自己保证它在位。已经有能执行的一份就
-    /// 不动；缺了（旧版运行时代为升级时还不认识 smelt-agent、文件被删、从没有 smelt-agent
-    /// 的目录 install）就按自己的版本取 Release 包，校验后装上。
-    pub(super) fn ensure_smelt_agent(version: &semver::Version) -> Result<(), String> {
+    /// Linux 上没有桌面替运行时装东西，运行时自己保证包里的程序（[`HELPERS`]、smelt-agent）
+    /// 都在 `~/.smelt/bin`。在线升级时复制小工具的是升级前的旧进程，照的是它自己那份
+    /// [`HELPERS`]，新版多出来的它不认识（v2026.1104.0 及以前没有 `smelt`）；再加上文件被删、
+    /// 从开发目录 install 时旁边没有 smelt-agent。缺了就按自己的版本取 Release 包，校验后
+    /// 补上缺的那几样；都在就不下载。
+    pub(super) fn complete_install(version: &semver::Version) -> Result<(), String> {
         let bin = crate::service::bin_dir()?;
-        if smelt_core::agent_image::current(&bin).is_some() {
+        let missing = Missing::in_bin(&bin);
+        if missing.is_empty() {
             return Ok(());
         }
-        let staging = Staging::new("smelt-agent")?;
+        let staging = Staging::new("complete-install")?;
         let package = fetch_package(&staging, version, &super::release_url(version))?;
-        smelt_core::agent_image::Bundle::read(&package)
-            .and_then(|bundle| bundle.install(&bin))
-            .map(drop)
-            .map_err(|error| format!("Couldn't install smelt-agent: {error}"))
+        missing.install(&bin, &package)
+    }
+
+    /// `~/.smelt/bin` 里少了包里的哪些程序。
+    #[derive(Debug, PartialEq)]
+    struct Missing {
+        helpers: Vec<&'static str>,
+        agent: bool,
+    }
+
+    impl Missing {
+        fn in_bin(bin: &Path) -> Self {
+            Self {
+                helpers: HELPERS
+                    .into_iter()
+                    .filter(|helper| !is_executable(&bin.join(helper)))
+                    .collect(),
+                agent: smelt_core::agent_image::current(bin).is_none(),
+            }
+        }
+
+        fn is_empty(&self) -> bool {
+            self.helpers.is_empty() && !self.agent
+        }
+
+        fn install(&self, bin: &Path, package: &Path) -> Result<(), String> {
+            copy_helpers(bin, package, &self.helpers)?;
+            if self.agent {
+                smelt_core::agent_image::Bundle::read(package)
+                    .and_then(|bundle| bundle.install(bin))
+                    .map_err(|error| format!("Couldn't install smelt-agent: {error}"))?;
+            }
+            Ok(())
+        }
+    }
+
+    fn is_executable(path: &Path) -> bool {
+        fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
     }
 
     pub(super) fn install_helpers(package: &Path) -> Result<(), String> {
-        let bin = crate::service::bin_dir()?;
-        fs::create_dir_all(&bin)
+        copy_helpers(&crate::service::bin_dir()?, package, &HELPERS)
+    }
+
+    /// 同安装脚本的 `put`：先写到旁边再改名盖过去，正在跑的旧版本不受影响。
+    fn copy_helpers(bin: &Path, package: &Path, helpers: &[&str]) -> Result<(), String> {
+        fs::create_dir_all(bin)
             .map_err(|error| format!("Couldn't create {}: {error}", bin.display()))?;
-        for helper in HELPERS {
+        for helper in helpers {
             let to = bin.join(helper);
             let temporary = bin.join(format!(".{helper}.new-{}", std::process::id()));
             let result = fs::copy(package.join(helper), &temporary)
@@ -313,6 +354,7 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
 
         /// 下载回来的包和清单对不上就停，不解包、不装。
         #[test]
@@ -339,6 +381,48 @@ mod linux {
             assert!(error.contains("failed its checksum"), "{error}");
             drop(staging);
             let _ = fs::remove_dir_all(release);
+        }
+
+        /// 旧版运行时代为升级时照它自己的清单只复制了 smelt-notify、smelt-up：新版启动时
+        /// 认出缺 `smelt`，从包里补上，已经在的不算缺。
+        #[test]
+        fn helpers_an_older_upgrader_skipped_are_filled_in() {
+            let root = Staging::new_in_temp();
+            let package = root.0.join("package");
+            let bin = root.0.join("bin");
+            fs::create_dir_all(&package).unwrap();
+            for helper in HELPERS {
+                fs::write(package.join(helper), helper).unwrap();
+            }
+            copy_helpers(&bin, &package, &["smelt-notify", "smelt-up"]).unwrap();
+            fs::create_dir_all(bin.join(smelt_core::agent_image::INSTALL_DIR)).unwrap();
+            let agent = bin
+                .join(smelt_core::agent_image::INSTALL_DIR)
+                .join(smelt_core::agent_image::binary_file_name());
+            fs::write(&agent, "").unwrap();
+            fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let missing = Missing::in_bin(&bin);
+            assert_eq!(
+                missing,
+                Missing {
+                    helpers: vec!["smelt"],
+                    agent: false,
+                }
+            );
+            missing.install(&bin, &package).unwrap();
+            assert!(is_executable(&bin.join("smelt")));
+            assert!(Missing::in_bin(&bin).is_empty());
+        }
+
+        /// 没有执行权限的不算装好。
+        #[test]
+        fn a_helper_without_exec_permission_counts_as_missing() {
+            let root = Staging::new_in_temp();
+            fs::write(root.0.join("smelt"), "").unwrap();
+            fs::set_permissions(root.0.join("smelt"), fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(!is_executable(&root.0.join("smelt")));
+            assert!(Missing::in_bin(&root.0).helpers.contains(&"smelt"));
         }
 
         /// Release 里没有这个版本：说清楚，而不是只甩一句 curl 的报错。

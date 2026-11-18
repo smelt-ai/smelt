@@ -381,7 +381,7 @@ pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
 
     let dir = bin_dir()?;
     // 从开发目录、`~/.smelt/bin` 自己 install 时旁边没有 smelt-agent，交给运行时启动时按
-    // 自己的版本补（`ensure_smelt_agent`）。
+    // 自己的版本补（`runtime_upgrade::complete_install`）。
     let package = exe.parent().ok_or("smeltd has no parent directory")?;
     if smelt_core::agent_image::bundled(package) {
         smelt_core::agent_image::Bundle::read(package)
