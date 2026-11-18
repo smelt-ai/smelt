@@ -143,23 +143,25 @@ impl Buddy {
     }
 
     /// 戴着的要画的几层，从里到外：脸上、脖子上、头顶，每件先主料（乘色）再点缀。都和身子同框，
-    /// 跟着身子压扁、转身；一件的主料、点缀按同一张挪（`guide`），转身时不会错开。
+    /// 跟着身子压扁、转身；一件的主料、点缀按同一张挪（`guide`），转身时不会错开。抬头低头时
+    /// 脸上的跟着五官挪，头顶的在球顶上、挪得少，脖子上的在脸下面、反着挪一点。
     fn wearing(self) -> impl Iterator<Item = Facing> {
-        let on = |table: &'static [Wearable], worn: Worn| (&table[worn.item], worn.color);
+        let on = |table: &'static [Wearable], worn: Worn, nod| (&table[worn.item], worn.color, nod);
         [
-            self.face.map(|worn| on(&sprites::FACES, worn)),
-            self.neck.map(|worn| on(&sprites::NECKS, worn)),
-            Some(on(&sprites::HEADS, self.head)),
+            self.face.map(|worn| on(&sprites::FACES, worn, 1.)),
+            self.neck.map(|worn| on(&sprites::NECKS, worn, -0.25)),
+            Some(on(&sprites::HEADS, self.head, 0.35)),
         ]
         .into_iter()
         .flatten()
-        .flat_map(|(wearable, color)| {
+        .flat_map(|(wearable, color, nod)| {
             let guide = wearable.base.or(wearable.trim);
             let layer = move |first, tint| Facing {
                 first,
                 tint,
                 at: (0., 0.),
                 guide,
+                nod,
             };
             let base = wearable.base.map(|first| layer(first, Tint::Wear(color)));
             let trim = wearable.trim.map(|first| layer(first, Tint::None));
@@ -167,25 +169,35 @@ impl Buddy {
         })
     }
 
-    /// 跟着身子转身的几层，从下往上：身子、腮红、眼睛（跟着 `look` 往哪看挪）、嘴、戴的。
+    /// 跟着身子转身的几层，从下往上：身子、腮红、眼睛（跟着 `look` 往哪看挪，眨一只眼的那只
+    /// 闭上）、嘴、戴的。
     fn turning(self, look: &Look) -> Vec<Facing> {
-        let [left_eye, right_eye] = look.eyes.sprites();
+        let mut eyes = look.eyes.sprites();
+        if let Some(side) = look.wink {
+            eyes[side] = moves::Eyes::Shut.sprites()[side];
+        }
+        let [left_eye, right_eye] = eyes;
         let mouth = look.mouth.sprite();
         let feature = |first, at| Facing {
             first,
             tint: Tint::None,
             at,
             guide: Some(first),
+            nod: 1.,
         };
         let mut layers = vec![
-            // 身子差不多是圆的，转过去轮廓不怎么变，不挪。
+            // 身子差不多是圆的，转过去、抬头低头轮廓都不怎么变，不挪。
             Facing {
                 first: sprites::BODY,
                 tint: self.skin(),
                 at: (0., 0.),
                 guide: None,
+                nod: 0.,
             },
-            feature(sprites::BLUSH, (0., 0.)),
+            Facing {
+                nod: 0.9,
+                ..feature(sprites::BLUSH, (0., 0.))
+            },
             feature(left_eye, look.gaze),
             feature(right_eye, look.gaze),
             feature(mouth, (0., 0.)),
@@ -197,13 +209,57 @@ impl Buddy {
 
 /// 跟着身子转身的一层：哪组零件（每个朝向一张，第一张是 `first`）、乘什么色、另外挪多少（pt）。
 /// 转身夹在两个朝向之间时，按 `guide` 那组零件在两个朝向里的重心差挪过去（[`Facing::draw`]）；
-/// 没有的不挪。
+/// 没有的不挪。抬头低头（[`Look::pitch`]）时往上下挪 `nod` 倍的 [`PITCH`]。
 #[derive(Clone, Copy)]
 struct Facing {
     first: usize,
     tint: Tint,
     at: (f32, f32),
     guide: Option<usize>,
+    nod: f32,
+}
+
+/// 抬头（`pitch` 为 1）时五官往上挪多少（pt），低头（-1）往下。团子身子是圆的，抬头低头轮廓
+/// 不怎么变，变的是脸在球面上的位置。
+const PITCH: f32 = 2.5;
+
+/// 身上的东西怎么落到画布上：随身子压扁、鼓气、离地、左右晃，再绕脚底歪（[`Look::tilt`]）。
+struct OnBody {
+    feet: (f32, f32),
+    scale: (f32, f32),
+    tilt: f32,
+    pitch: f32,
+}
+
+impl OnBody {
+    fn new(look: &Look) -> Self {
+        let grow = 1. + look.swell;
+        Self {
+            feet: (sprites::FEET.0 + look.sway, sprites::FEET.1 - look.lift),
+            scale: ((1. + look.squash) * grow, (1. - look.squash) * grow),
+            tilt: look.tilt,
+            pitch: look.pitch,
+        }
+    }
+
+    /// 身上的点（相对脚底）落到画布上哪。
+    fn point(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        let (x, y) = rotated((x * self.scale.0, y * self.scale.1), self.tilt);
+        (self.feet.0 + x, self.feet.1 + y)
+    }
+
+    /// 不跟着歪的（摆在身前的电脑）：只随压扁、离地、晃。
+    fn upright(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        (
+            self.feet.0 + x * self.scale.0,
+            self.feet.1 + y * self.scale.1,
+        )
+    }
+
+    /// 和身子同框的一张（锚点在脚底）叠上去，另外挪 `at`。
+    fn layer(&self, canvas: &mut Canvas, paint: Paint, at: (f32, f32)) {
+        canvas.layer_tilted(paint, self.point(at), self.scale, self.tilt, 1.);
+    }
 }
 
 impl Facing {
@@ -215,15 +271,7 @@ impl Facing {
     /// 画第 `facing` 个朝向的那张，往第 `other` 个朝向里它的位置挪 `toward`（0 到 1）。转身时
     /// 两个朝向各画一张、互相往对方挪，再按转到哪混起来（[`Canvas::blend`]）：五官两张落在
     /// 同一处，只是渐变，不会一只眼睛看着有两个影子。
-    fn draw(
-        self,
-        canvas: &mut Canvas,
-        facing: usize,
-        other: usize,
-        toward: f32,
-        on_body: impl Fn((f32, f32)) -> (f32, f32),
-        squash: (f32, f32),
-    ) {
+    fn draw(self, canvas: &mut Canvas, facing: usize, other: usize, toward: f32, body: &OnBody) {
         let shift = self
             .guide
             .filter(|_| toward > 0.)
@@ -231,8 +279,11 @@ impl Facing {
             .map_or((0., 0.), |(from, to)| {
                 ((to.0 - from.0) * toward, (to.1 - from.1) * toward)
             });
-        let at = (self.at.0 + shift.0, self.at.1 + shift.1);
-        canvas.layer(self.at(facing), on_body(at), squash, 1.);
+        let at = (
+            self.at.0 + shift.0,
+            self.at.1 + shift.1 - body.pitch * self.nod * PITCH,
+        );
+        body.layer(canvas, self.at(facing), at);
     }
 }
 
@@ -345,10 +396,7 @@ fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
     const SAME: (f32, f32) = (1., 1.);
     let mut canvas = Canvas::new();
     let (fx, fy) = sprites::FEET;
-    let squash = (1. + look.squash, 1. - look.squash);
-    // 身上的点（相对脚底）落到画布上：随身子压扁、离地、左右晃。
-    let on_body =
-        |(x, y): (f32, f32)| (fx + look.sway + x * squash.0, fy - look.lift + y * squash.1);
+    let body = OnBody::new(look);
     let on_ground = |(x, y): (f32, f32)| (fx + x, fy + y);
 
     let shadow = 1. - (look.lift / 16.).min(0.5);
@@ -372,11 +420,11 @@ fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
     }
     let arms = [0, 1].map(|side| {
         let (at, behind) = shoulder(look.turn, side);
-        let angle = foreshortened(look.arms[side], look.turn);
+        let angle = foreshortened(look.arms[side], look.turn) + look.tilt;
         (
             Arm {
                 side,
-                shoulder: on_body(at),
+                shoulder: body.point(at),
                 angle,
             },
             behind,
@@ -392,7 +440,7 @@ fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
     let (from, to, toward) = between(look.turn);
     let draw = |canvas: &mut Canvas, facing, other, toward| {
         for layer in &layers {
-            layer.draw(canvas, facing, other, toward, on_body, squash);
+            layer.draw(canvas, facing, other, toward, &body);
         }
     };
     if toward < NEAR {
@@ -407,7 +455,7 @@ fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
     }
     if let Some(moves::Front::Laptop(lines)) = look.front {
         let laptop = Paint::plain(sprites::LAPTOP + lines);
-        canvas.layer(laptop, on_body(sprites::LAPTOP_AT), SAME, 1.);
+        canvas.layer(laptop, body.upright(sprites::LAPTOP_AT), SAME, 1.);
     }
 
     if let Some((kart, (index, angle))) = kart {
@@ -429,7 +477,7 @@ fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
     for effect in &look.fx {
         let scale = (effect.scale, effect.scale);
         let paint = Paint::plain(effect.sprite);
-        canvas.layer(paint, on_body(effect.at), scale, effect.alpha);
+        canvas.layer(paint, body.point(effect.at), scale, effect.alpha);
     }
     canvas.finish()
 }
@@ -460,7 +508,7 @@ impl Arm {
             }
             _ => {
                 if let Some(prop) = buddy.role().prop() {
-                    let (index, _) = turned(look.prop);
+                    let (index, _) = turned(look.prop + look.tilt);
                     let held = Paint::turned(prop.first, index, Tint::None);
                     canvas.layer(held, hand, (1., 1.), 1.);
                 }
@@ -646,6 +694,61 @@ mod tests {
     }
 
     #[test]
+    fn the_body_swells_and_tilts_about_the_feet() {
+        let mut look = Look::rest(Role::Fixer, 0);
+        look.turn = 0.;
+        look.tilt = 90.;
+        look.swell = 0.1;
+        let body = OnBody::new(&look);
+        let (fx, fy) = sprites::FEET;
+        // 脚底不动；脚底正上方 10pt 的点鼓大一成、顺时针歪 90° 到右边 11pt。
+        let feet = body.point((0., 0.));
+        assert!((feet.0 - fx).abs() < 1e-4 && (feet.1 - fy).abs() < 1e-4);
+        let (x, y) = body.point((0., -10.));
+        assert!(
+            (x - (fx + 11.)).abs() < 1e-3 && (y - fy).abs() < 1e-3,
+            "{x} {y}"
+        );
+        // 身前的电脑跟着鼓，不跟着歪。
+        let (x, y) = body.upright((0., -10.));
+        assert!((x - fx).abs() < 1e-4 && (y - (fy - 11.)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn looking_up_moves_the_face_not_the_body() {
+        let buddy = Buddy::of("pitch");
+        let mut look = Look::rest(buddy.role(), 0);
+        look.pitch = 1.;
+        let layers = buddy.turning(&look);
+        let body = layers
+            .iter()
+            .find(|layer| layer.first == sprites::BODY)
+            .unwrap();
+        let eye = layers
+            .iter()
+            .find(|layer| layer.first == look.eyes.sprites()[0])
+            .unwrap();
+        assert_eq!(body.nod, 0.);
+        assert_eq!(eye.nod, 1.);
+    }
+
+    #[test]
+    fn a_wink_shuts_one_eye() {
+        let buddy = Buddy::of("wink");
+        let mut look = Look::rest(buddy.role(), 0);
+        look.eyes = moves::Eyes::Open;
+        look.wink = Some(1);
+        let firsts: Vec<_> = buddy
+            .turning(&look)
+            .iter()
+            .map(|layer| layer.first)
+            .collect();
+        assert!(firsts.contains(&sprites::EYE_OPEN_L));
+        assert!(firsts.contains(&sprites::EYE_SHUT_R));
+        assert!(!firsts.contains(&sprites::EYE_OPEN_R));
+    }
+
+    #[test]
     fn shoulders_go_behind_when_turned_away() {
         // 正面两条胳膊都在身子前面；转到右边（右肩往后转）右胳膊在后面、左胳膊在前面。
         assert!(!shoulder(0., 0).1 && !shoulder(0., 1).1);
@@ -661,8 +764,12 @@ mod tests {
             sprites::BLUSH,
             sprites::EYE_OPEN_L,
             sprites::EYE_OPEN_R,
+            sprites::EYE_SLEEPY_L,
+            sprites::EYE_WIDE_R,
             sprites::MOUTH_SMILE,
             sprites::MOUTH_OPEN,
+            sprites::MOUTH_O,
+            sprites::MOUTH_YAWN,
         ];
         for first in groups {
             for facing in 0..sprites::FACINGS {

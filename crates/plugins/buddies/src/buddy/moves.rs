@@ -7,10 +7,13 @@
 //! 不同的小人动起来不一样：每个小人有一份固定的性格（[`Temper`]），定节奏快慢、团子有多弹、
 //! 多爱东张西望、欢呼时的招牌动作。动作照着手绘动画的几条老规矩现算：起跳前先蹲（预备）、
 //! 腾空时拉长、落地压扁再按阻尼弹簧回弹几下（[`jiggle`]）；转身时眼睛先过去、身子跟上。
+//! 干活间隙偶尔来一下谁都会的小动作（[`Fidget`]）：打哈欠、叹气、打喷嚏、点头、歪头、挠头、
+//! 打瞌睡、眨一只眼、伸懒腰。
 //!
 //! 角度都是画面里的，正上方 0°、顺时针。胳膊 180° 是垂直往下，右胳膊小于 180° 往外、左胳膊
 //! 大于 180° 往外。道具 0° 是朝上。转身（[`Look::turn`]）是绕竖轴的，0 是正面，往画面右边
-//! 转为正。
+//! 转为正；歪（[`Look::tilt`]）是整个身子在画面里绕脚底转；抬头低头（[`Look::pitch`]）是五官在
+//! 脸上往上下挪。
 
 use std::f32::consts::{PI, TAU};
 use std::ops::Range;
@@ -20,7 +23,7 @@ use super::{foreshortened, rotated, shoulder, toward, turned};
 
 /// 每个小人都可能用到的零件（眼睛、嘴、身前的物件、特效），预先解。
 pub(super) const SHARED: [Range<usize>; 2] = [
-    sprites::EYE_OPEN_L..sprites::MOUTH_OPEN + sprites::FACINGS,
+    sprites::EYE_OPEN_L..sprites::MOUTH_YAWN + sprites::FACINGS,
     sprites::LAPTOP..sprites::KART_FRONT,
 ];
 
@@ -270,6 +273,10 @@ pub(super) enum Eyes {
     /// 笑眯成两道弯。
     Happy,
     Shut,
+    /// 困：眼皮耷拉下来。
+    Sleepy,
+    /// 瞪大：吓一跳、惊讶。
+    Wide,
 }
 
 impl Eyes {
@@ -279,6 +286,8 @@ impl Eyes {
             Self::Open => [sprites::EYE_OPEN_L, sprites::EYE_OPEN_R],
             Self::Happy => [sprites::EYE_HAPPY_L, sprites::EYE_HAPPY_R],
             Self::Shut => [sprites::EYE_SHUT_L, sprites::EYE_SHUT_R],
+            Self::Sleepy => [sprites::EYE_SLEEPY_L, sprites::EYE_SLEEPY_R],
+            Self::Wide => [sprites::EYE_WIDE_L, sprites::EYE_WIDE_R],
         }
     }
 }
@@ -288,6 +297,10 @@ pub(super) enum Mouth {
     Smile,
     Flat,
     Open,
+    /// 撅着的小圆嘴：吹气、叹气、「哦」。
+    Pucker,
+    /// 张大：打哈欠。
+    Yawn,
 }
 
 impl Mouth {
@@ -297,6 +310,8 @@ impl Mouth {
             Self::Smile => sprites::MOUTH_SMILE,
             Self::Flat => sprites::MOUTH_FLAT,
             Self::Open => sprites::MOUTH_OPEN,
+            Self::Pucker => sprites::MOUTH_O,
+            Self::Yawn => sprites::MOUTH_YAWN,
         }
     }
 }
@@ -335,6 +350,12 @@ pub(super) struct Look {
     pub(super) lift: f32,
     /// 压扁多少：正的变矮变宽，负的拉高变窄。
     pub(super) squash: f32,
+    /// 鼓多少：吸气、鼓气时整个大一圈（正的），泄气时小一点（负的）。
+    pub(super) swell: f32,
+    /// 整个身子在画面里绕脚底歪多少度（顺时针为正）：歪头、身子左右倾。
+    pub(super) tilt: f32,
+    /// 抬头（正，到 1）还是低头（负，到 -1）：五官在脸上往上下挪。
+    pub(super) pitch: f32,
     /// 身子左右挪多少。
     pub(super) sway: f32,
     /// 转身转到多少度。
@@ -344,6 +365,8 @@ pub(super) struct Look {
     /// 右手道具的角度。
     pub(super) prop: f32,
     pub(super) eyes: Eyes,
+    /// 眨着哪只眼（0 左、1 右），那只闭上。
+    pub(super) wink: Option<usize>,
     /// 眼睛往哪挪（往哪看）。
     pub(super) gaze: (f32, f32),
     pub(super) mouth: Mouth,
@@ -496,6 +519,9 @@ impl Look {
         Self {
             lift: 0.,
             squash: 0.,
+            swell: 0.,
+            tilt: 0.,
+            pitch: 0.,
             sway: 0.,
             turn: 0.,
             arms: [
@@ -504,6 +530,7 @@ impl Look {
             ],
             prop: prop + dice.range(-10., 10.),
             eyes: if mood < 0.15 { Eyes::Happy } else { Eyes::Open },
+            wink: None,
             gaze: (dice.range(-0.7, 0.7), dice.range(-0.4, 0.3)),
             mouth: if mood > 0.8 {
                 Mouth::Flat
@@ -581,8 +608,8 @@ fn beat_len(role: Role, temper: Temper) -> f32 {
     role.beat() * temper.pace.stretch()
 }
 
-/// 干活。`t` 是从开始干起的秒数。每拍挑一个动作（[`choose`]）：这一行的几个动作，或者转过去
-/// 东张西望一下（多常见看性格和职业）。
+/// 干活。`t` 是从开始干起的秒数。每拍挑一个动作（[`choose`]）：这一行的几个动作，转过去
+/// 东张西望一下（多常见看性格和职业），或者来个谁都会的小动作（[`Fidget`]）。
 pub(super) fn work(role: Role, temper: Temper, seed: u64, t: f32) -> Look {
     let mut look = Look::rest(role, seed);
     look.mouth = Mouth::Smile;
@@ -597,8 +624,12 @@ pub(super) fn work(role: Role, temper: Temper, seed: u64, t: f32) -> Look {
     let own = role.moves();
     let mut weights = own.to_vec();
     weights.push(role.glances(temper.curiosity));
+    weights.push(FIDGETS);
     match choose(seed, beat, &weights) {
         glance if glance == own.len() => look_around(&mut look, p, beat_len, salt, temper),
+        fidget if fidget == own.len() + 1 => {
+            fidget_once(role, temper, &mut look, p, beat_len, salt)
+        }
         choice => perform(role, temper, &mut look, choice, t, p, salt),
     }
     blink(&mut look, p, beat_len, salt);
@@ -671,19 +702,25 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                     let [l, r] = keystrokes(p, len, salt);
                     look.arms = [left + 8. * k * l, right - 8. * k * r];
                     look.gaze = (0., 0.6);
+                    // 低着头盯屏幕。
+                    look.pitch = -0.25 * ease;
                 }
                 1 => {
                     // 想：手抬到下巴，眼睛往上瞟，头顶一个个冒点。
                     let a = arch(p);
                     look.arms[1] = lerp(right, 320., a);
                     look.gaze = (0.6 * side * a, -0.9 * a);
+                    look.pitch = 0.4 * a;
+                    look.tilt = 6. * side * a;
                     look.mouth = Mouth::Flat;
                     thinking_dots(look, p);
                 }
                 _ => {
-                    // 有主意了：头顶亮个灯泡，手指着它。
+                    // 有主意了：吸口气、抬头，头顶亮个灯泡，手指着它。
                     let a = arch(p);
                     look.arms[1] = lerp(right, 20., a);
+                    look.pitch = 0.3 * a;
+                    look.swell = 0.04 * a;
                     bulb(look, p);
                 }
             }
@@ -719,6 +756,7 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 look.arms[1] = lerp(right, 70., a);
                 look.prop = lerp(prop, -10., a);
                 look.gaze = (0.8 * a, -0.6 * a);
+                look.pitch = 0.35 * a;
                 if a > 0.8 {
                     let tip = look.tip(Role::Fixer.prop().unwrap());
                     look.fx(sprites::FX_STAR, tip, 0.5 + 0.5 * within(a, 0.8, 1.), 1.);
@@ -735,11 +773,16 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 look.turn = 25. * k * take.lean * s;
             }
             _ => {
-                // 凑到眼前看。
+                // 凑到眼前看：往前探（低头、离镜头近一点显得大），看清了瞪大眼。
                 let a = smooth(arch(p) * 1.4);
                 look.arms[1] = lerp(right, 40., a);
                 look.prop = lerp(prop, -30., a);
+                look.pitch = -0.4 * a;
+                look.swell = 0.05 * a;
                 look.mouth = if a > 0.7 { Mouth::Open } else { Mouth::Flat };
+                if a > 0.7 {
+                    look.eyes = Eyes::Wide;
+                }
             }
         },
         Role::Writer => {
@@ -749,6 +792,7 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                     look.prop = prop + 8. * k * swing(p, 6. + 2. * extra);
                     look.arms[1] = right + 4. * k * swing(p, 3. + extra);
                     look.gaze = (-0.7, 0.4);
+                    look.pitch = -0.3 * ease;
                 }
                 1 => {
                     // 笔抵着下巴想。
@@ -756,6 +800,8 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                     look.arms[1] = lerp(right, 320., a);
                     look.prop = lerp(prop, 340., a);
                     look.gaze = (0.6 * side * a, -0.8 * a);
+                    look.pitch = 0.35 * a;
+                    look.tilt = -6. * side * a;
                     look.mouth = Mouth::Flat;
                     thinking_dots(look, p);
                 }
@@ -783,6 +829,7 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 look.arms[1] = lerp(right, 30., a);
                 look.prop = lerp(prop, -10., a);
                 look.gaze = (0.8 * a, -a);
+                look.pitch = 0.45 * a;
                 look.mouth = if a > 0.6 { Mouth::Open } else { Mouth::Smile };
                 if a > 0.85 {
                     let tip = look.tip(Role::Chemist.prop().unwrap());
@@ -805,6 +852,9 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                     Eyes::Open
                 };
                 look.mouth = Mouth::Flat;
+                // 被烟呛得往后一仰、歪开。
+                look.pitch = 0.4 * arch(puff);
+                look.tilt = -5. * side * arch(puff);
             }
         },
         Role::Gardener => {
@@ -815,15 +865,18 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                     look.prop = prop + 45. * k * a;
                     look.arms[1] = lerp(right, 135., a);
                     look.gaze = (1., 0.6);
+                    look.pitch = -0.4 * a;
                     if a > 0.6 {
                         let tip = look.tip(Role::Gardener.prop().unwrap());
                         look.stream(sprites::FX_DROP, tip, (0.5, 2.), 6., 3, p * 2., p, salt);
                     }
                 }
                 _ => {
-                    // 看着苗乐，冒个爱心。
+                    // 看着苗乐，歪着头，冒个爱心。
                     look.gaze = (1., 0.6);
                     look.eyes = Eyes::Happy;
+                    look.pitch = -0.3 * ease;
+                    look.tilt = 6. * arch(p);
                     let rise = within(p, 0.25, 0.95);
                     if rise > 0. {
                         let at = add(sprites::SPROUT_AT, (0., -6. - 6. * rise));
@@ -854,6 +907,8 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 let a = arch(p);
                 look.arms = [lerp(left, 340., a), lerp(right, 20., a)];
                 look.lift = 3. * k * a;
+                look.pitch = 0.4 * a;
+                look.swell = 0.04 * a;
                 look.eyes = Eyes::Happy;
                 look.mouth = Mouth::Open;
                 look.stream(
@@ -872,6 +927,7 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 let a = arch(p);
                 look.arms[1] = lerp(right, 110., a);
                 look.prop = lerp(prop, 90., a);
+                look.pitch = -0.4 * a;
                 look.eyes = if a > 0.4 { Eyes::Happy } else { Eyes::Open };
                 look.mouth = Mouth::Flat;
             }
@@ -885,16 +941,19 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 look.sway = 0.8 * k * s;
                 look.turn = LEAN * take.lean * look.sway;
                 look.gaze = (-0.6, 0.6);
+                look.pitch = -0.2 * ease;
                 let tip = look.tip(Role::Sweeper.prop().unwrap());
                 look.stream(sprites::FX_PUFF, tip, (-3., -3.), 0., 2, p, p, salt);
             }
             _ => {
-                // 拄着扫帚歇口气。
+                // 拄着扫帚歇口气：吸一口、仰头，再呼出去。
                 let a = arch(p);
                 look.prop = lerp(prop, 195., a);
                 look.arms[1] = lerp(right, 150., a);
                 look.sway = -0.5 * k * a;
                 look.turn = LEAN * take.lean * look.sway;
+                look.swell = 0.05 * arch(within(p, 0.1, 0.6)) - 0.03 * arch(within(p, 0.5, 0.95));
+                look.pitch = 0.25 * a;
                 look.eyes = if a > 0.3 { Eyes::Happy } else { Eyes::Open };
             }
         },
@@ -1101,6 +1160,251 @@ fn look_around(look: &mut Look, p: f32, len: f32, salt: u64, temper: Temper) {
     look.mouth = Mouth::Flat;
 }
 
+/// 干活时来个小动作的权重（和 [`Role::moves`]、东张西望放在一起挑）。
+const FIDGETS: u32 = 2;
+
+/// 干活间隙偶尔来一下、谁都会的小动作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Fidget {
+    /// 打哈欠：仰头吸气、张大嘴、闭眼，伸一伸。
+    Yawn,
+    /// 叹气：吸气鼓起来，再泄气，呼出一团气。
+    Sigh,
+    /// 打喷嚏：仰头憋着，猛地往前一喷。
+    Sneeze,
+    /// 点头：嗯嗯两三下。
+    Nod,
+    /// 歪头：按弹簧歪过去，愣一会儿，回正。
+    Tilt,
+    /// 挠头：抬起一只手挠两下，头歪向那边。
+    Scratch,
+    /// 打瞌睡：眼皮耷拉、头一点一点往下沉，冒 Z；猛地惊醒。
+    Doze,
+    /// 眨一只眼。
+    Wink,
+    /// 伸懒腰：两手举高、拉长，左右晃一晃。
+    Stretch,
+}
+
+impl Fidget {
+    const ALL: [Self; 9] = [
+        Self::Yawn,
+        Self::Sigh,
+        Self::Sneeze,
+        Self::Nod,
+        Self::Tilt,
+        Self::Scratch,
+        Self::Doze,
+        Self::Wink,
+        Self::Stretch,
+    ];
+
+    /// 多常来：节奏慢的爱犯困；赛车手两手搭着方向盘，不伸懒腰、不挠头；写手两手都占着，不挠头。
+    fn weight(self, role: Role, temper: Temper) -> u32 {
+        let drowsy = match temper.pace {
+            Pace::Calm => 2,
+            Pace::Steady => 1,
+            Pace::Brisk => 0,
+        };
+        let hands_free = role != Role::Racer;
+        match self {
+            Self::Yawn => 1 + drowsy,
+            Self::Sigh | Self::Nod | Self::Tilt => 2,
+            Self::Sneeze | Self::Wink => 1,
+            Self::Scratch => u32::from(hands_free && role != Role::Writer) * 2,
+            Self::Doze => drowsy,
+            Self::Stretch => u32::from(hands_free) * 2,
+        }
+    }
+}
+
+/// 起来、停住、再落回去：`p` 在 `rise` 那一段里从 0 平滑到 1，在 `fall` 那一段里平滑回 0。
+fn hold(p: f32, rise: (f32, f32), fall: (f32, f32)) -> f32 {
+    smooth(within(p, rise.0, rise.1)) * (1. - smooth(within(p, fall.0, fall.1)))
+}
+
+/// 这一拍来一个小动作（按权重挑，[`Fidget::weight`]）。`p` 是这一拍走到哪，`len` 是一拍几秒。
+/// 都从站姿起、回到站姿。
+fn fidget_once(role: Role, temper: Temper, look: &mut Look, p: f32, len: f32, salt: u64) {
+    let mut dice = Dice::new(salt ^ 0xf1d6);
+    let weights = Fidget::ALL.map(|fidget| fidget.weight(role, temper));
+    let fidget = Fidget::ALL[dice.pick(&weights)];
+    let side = if dice.unit() < 0.5 { -1. } else { 1. };
+    let extra = dice.below(2) as f32;
+    let [left, right] = look.arms;
+    let hands = look.kart.is_none();
+    match fidget {
+        Fidget::Yawn => {
+            let a = hold(p, (0.05, 0.35), (0.65, 0.9));
+            look.swell = 0.05 * a;
+            look.pitch = 0.6 * a;
+            look.squash -= 0.05 * a;
+            look.tilt = 5. * side * a;
+            if hands {
+                look.arms = [lerp(left, 330., 0.8 * a), lerp(right, 30., 0.8 * a)];
+            }
+            look.mouth = if a > 0.3 { Mouth::Yawn } else { Mouth::Flat };
+            look.eyes = if a > 0.6 {
+                Eyes::Shut
+            } else if a > 0.15 || p > 0.6 {
+                Eyes::Sleepy
+            } else {
+                Eyes::Open
+            };
+        }
+        Fidget::Sigh => {
+            let inhale = smooth(within(p, 0.05, 0.4));
+            let exhale = smooth(within(p, 0.45, 0.75));
+            let back = 1. - smooth(within(p, 0.8, 0.98));
+            look.swell = lerp(0.07 * inhale, -0.03, exhale) * back;
+            look.pitch = lerp(0.3 * inhale, -0.4, exhale) * back;
+            look.eyes = if (0.1..0.8).contains(&p) {
+                Eyes::Shut
+            } else {
+                Eyes::Open
+            };
+            look.mouth = if (0.45..0.8).contains(&p) {
+                Mouth::Pucker
+            } else {
+                Mouth::Flat
+            };
+            // 呼出的一团气从嘴边飘出身子外面，落在身上看不出来。
+            let age = within(p, 0.45, 0.85);
+            if age > 0. && age < 1. {
+                let at = add(sprites::MOUTH, (side * (9. + 7. * age), -1. - 3. * age));
+                look.fx(sprites::FX_PUFF, at, 0.5 + 0.5 * age, 0.9 * (1. - age));
+            }
+        }
+        Fidget::Sneeze => {
+            const SNAP: f32 = 0.45;
+            let settle = 1. - smooth(within(p, 0.88, 1.));
+            if p < SNAP {
+                // 酝酿：仰头、吸气、眯眼、张嘴。
+                let build = smooth(within(p, 0.05, 0.42));
+                look.pitch = 0.7 * build;
+                look.swell = 0.05 * build;
+                look.squash -= 0.04 * build;
+                look.eyes = if build > 0.3 { Eyes::Shut } else { Eyes::Open };
+                look.mouth = if build > 0.5 {
+                    Mouth::Open
+                } else {
+                    Mouth::Flat
+                };
+            } else {
+                // 猛地往前一喷，身子一震，再慢慢回来；喷完愣一下。
+                let since = (p - SNAP) * len;
+                look.pitch = -0.9 * (-since * 4.).exp() * settle;
+                look.swell = -0.03 * (-since * 6.).exp() * settle;
+                look.squash += 0.08 * (-since * 8.).exp() * settle;
+                look.eyes = if p < 0.55 {
+                    Eyes::Shut
+                } else if p < 0.72 {
+                    Eyes::Wide
+                } else {
+                    Eyes::Open
+                };
+                look.mouth = if p < 0.55 { Mouth::Open } else { Mouth::Flat };
+                // 往两边喷出去，飞出身子外面。
+                let age = within(p, SNAP, 0.8);
+                if age < 1. {
+                    for k in [-1., 1.] {
+                        let at = add(sprites::MOUTH, (k * (8. + 8. * age), 1. - 2. * age));
+                        look.fx(sprites::FX_PUFF, at, 0.4 + 0.5 * age, 1. - age);
+                    }
+                }
+            }
+        }
+        Fidget::Nod => {
+            let q = within(p, 0.1, 0.9);
+            let nod = 0.5 - 0.5 * (TAU * (2. + extra) * q).cos();
+            look.pitch = -0.7 * nod;
+            look.squash += 0.03 * nod;
+            look.eyes = Eyes::Happy;
+            look.mouth = Mouth::Smile;
+        }
+        Fidget::Tilt => {
+            let targets = [(0.1 * len, side * 14.), (0.65 * len, 0.)];
+            let settle = 1. - smooth(within(p, 0.88, 1.));
+            look.tilt = follow(temper.spring, &targets, p * len) * settle;
+            let a = (look.tilt / 14.).abs().min(1.);
+            look.gaze = (0.5 * side * a, -0.3 * a);
+            look.pitch = 0.15 * a;
+            look.mouth = if a > 0.5 { Mouth::Pucker } else { Mouth::Flat };
+        }
+        Fidget::Scratch => {
+            let up = hold(p, (0.05, 0.25), (0.75, 0.95));
+            let scratch = 7. * (TAU * 4.5 * p * len).sin() * up;
+            look.arms[0] = lerp(left, 350., up) + scratch;
+            look.tilt = -7. * up;
+            look.eyes = if up > 0.5 { Eyes::Happy } else { Eyes::Open };
+            look.mouth = Mouth::Flat;
+        }
+        Fidget::Doze => doze(look, p, len),
+        Fidget::Wink => {
+            if (0.3..0.62).contains(&p) {
+                look.wink = Some(usize::from(side > 0.));
+                look.mouth = Mouth::Open;
+            }
+            look.tilt = 6. * side * hold(p, (0.2, 0.35), (0.6, 0.8));
+            // 眨的那只眼外眼角上闪一下（眼睛在嘴两边偏上，脸朝画面左偏）。
+            let sparkle = arch(within(p, 0.32, 0.6));
+            if sparkle > 0. {
+                let corner = if side > 0. { (7.5, -6.5) } else { (-8.5, -6.5) };
+                let at = add(sprites::MOUTH, corner);
+                look.fx(sprites::FX_STAR, at, 0.35 + 0.25 * sparkle, sparkle);
+            }
+        }
+        Fidget::Stretch => {
+            let up = hold(p, (0.05, 0.35), (0.65, 0.92));
+            look.arms = [lerp(left, 345., up), lerp(right, 15., up)];
+            look.squash -= 0.11 * up;
+            look.lift = 1. * up;
+            look.pitch = 0.3 * up;
+            look.tilt = 8. * side * swing(within(p, 0.3, 0.7), 1.) * up;
+            look.eyes = if up > 0.4 { Eyes::Happy } else { Eyes::Open };
+            look.mouth = if up > 0.5 {
+                Mouth::Pucker
+            } else {
+                Mouth::Smile
+            };
+        }
+    }
+}
+
+/// 打瞌睡：眼皮慢慢耷拉、头一点一点往下沉，头顶冒 Z；猛地一点头惊醒，瞪大眼，再回过神来。
+fn doze(look: &mut Look, p: f32, len: f32) {
+    const WAKE: f32 = 0.72;
+    let settle = 1. - smooth(within(p, 0.9, 1.));
+    if p < WAKE {
+        let sink = smooth(within(p, 0.05, 0.7));
+        let bob = 0.12 * (TAU * 1.3 * p * len).sin();
+        look.pitch = (-0.8 + bob) * sink;
+        look.squash += 0.03 * sink;
+        look.eyes = if sink > 0.45 {
+            Eyes::Shut
+        } else if sink > 0.1 {
+            Eyes::Sleepy
+        } else {
+            Eyes::Open
+        };
+        let shown = within(sink, 0.3, 0.6);
+        for k in 0..2 {
+            let age = (p * 1.6 + k as f32 / 2.).fract();
+            let at = add(OVERHEAD, (5. + 3. * age, 3. - 7. * age));
+            if shown > 0. {
+                look.fx(sprites::FX_Z, at, 0.6 + 0.5 * age, (1. - age) * shown);
+            }
+        }
+    } else {
+        let since = (p - WAKE) * len;
+        let snapped = (-since * 14.).exp();
+        let pitch = -0.8 * snapped + 0.25 * (-since * 5.).exp() * (since * 14.).sin();
+        look.pitch = pitch * settle;
+        look.lift = 1.2 * arch(within(p, WAKE, 0.82));
+        look.eyes = if p < 0.86 { Eyes::Wide } else { Eyes::Open };
+    }
+}
+
 /// 一拍里打字的两只手各按下去多少（0 到 1）。一秒敲七下，大体左右轮流、偶尔同一只手连敲，
 /// 每下早晚、轻重随机一点；每下按下快（几十毫秒）、抬起慢。拍子两头不敲，接上站姿。
 fn keystrokes(p: f32, len: f32, salt: u64) -> [f32; 2] {
@@ -1187,11 +1491,21 @@ pub(super) fn call(role: Role, temper: Temper, seed: u64, t: f32) -> Look {
     let mut dice = Dice::new(salt);
     look.arms[0] = 330. + 20. * swing(p, 2.);
     let bang = add(OVERHEAD, (9., 4.));
-    match dice.pick(&[3, 2]) {
+    match dice.pick(&[3, 2, 2]) {
         0 => hop(&mut look, p, BEAT, 5., temper.spring),
-        _ => {
+        1 => {
             look.sway = 1.2 * swing(p, 4.) * arch(p);
             look.turn = LEAN * look.sway;
+            look.tilt = 4. * swing(p, 4.) * arch(p);
+        }
+        _ => {
+            // 踮脚、抻着脖子往外看：抬头、鼓起来一点，歪头。
+            let a = arch(p);
+            look.lift = 1.5 * a;
+            look.pitch = 0.5 * a;
+            look.swell = 0.04 * a;
+            look.tilt = 8. * swing(p, 1.);
+            look.eyes = Eyes::Wide;
         }
     }
     look.fx(
@@ -1318,6 +1632,17 @@ pub(super) fn greet(role: Role, seed: u64, t: f32) -> Look {
         Eyes::Open
     };
     look.mouth = if up > 0.5 { Mouth::Open } else { Mouth::Smile };
+    // 有的小人打招呼时眨一只眼、歪一下头。
+    let mut dice = Dice::new(seed ^ 0x9e7);
+    if dice.unit() < 0.4 {
+        let side = dice.below(2);
+        let tilt = if side == 1 { 7. } else { -7. };
+        look.tilt = tilt * arch(within(p, 0.1, 0.9));
+        if p > 0.25 && p < 0.7 {
+            look.eyes = Eyes::Open;
+            look.wink = Some(side);
+        }
+    }
     look
 }
 
@@ -1389,6 +1714,13 @@ mod tests {
             assert!(value.is_finite());
         }
         assert!(look.squash.abs() < 0.3);
+        for value in [look.swell, look.tilt, look.pitch] {
+            assert!(value.is_finite());
+        }
+        assert!(look.swell.abs() < 0.12, "{}", look.swell);
+        assert!(look.tilt.abs() <= 25., "{}", look.tilt);
+        assert!(look.pitch.abs() <= 1., "{}", look.pitch);
+        assert!(look.wink.is_none_or(|side| side < 2));
         for fx in &look.fx {
             assert!(fx.sprite < sprites::SPRITES.len());
             assert!(fx.alpha.is_finite() && fx.scale > 0.);
@@ -1617,6 +1949,50 @@ mod tests {
         assert!(curves.len() > 30, "只有 {} 种", curves.len());
         let flat = curves.iter().flatten();
         assert!(flat.clone().any(|&turn| turn > 30) && flat.clone().any(|&turn| turn < -30));
+    }
+
+    #[test]
+    fn fidgets_show_up_and_end_at_the_stance() {
+        // 干活几百拍里各种小动作都来过（赛车手、写手不来手占着的那几样），每个都回到站姿。
+        for role in [Role::Fixer, Role::Racer] {
+            let temper = TEMPERS[0];
+            let mut seen = std::collections::HashSet::new();
+            for beat in 0..600 {
+                let mut dice = Dice::new(salt(11, beat) ^ 0xf1d6);
+                let weights = Fidget::ALL.map(|fidget| fidget.weight(role, temper));
+                seen.insert(Fidget::ALL[dice.pick(&weights)]);
+                for edge in [0.001, 0.999] {
+                    let mut look = Look::rest(role, 11);
+                    let rest = look.clone();
+                    fidget_once(role, temper, &mut look, edge, 1.5, salt(11, beat));
+                    assert!(look.pitch.abs() < 0.05 && look.tilt.abs() < 1., "{look:?}");
+                    assert!(look.swell.abs() < 0.01 && look.lift.abs() < 0.05);
+                    assert!((look.arms[0] - rest.arms[0]).abs() < 2.);
+                    assert!((look.arms[1] - rest.arms[1]).abs() < 2.);
+                }
+            }
+            let expected = Fidget::ALL
+                .iter()
+                .filter(|f| f.weight(role, temper) > 0)
+                .count();
+            assert_eq!(seen.len(), expected, "{role:?}: {seen:?}");
+        }
+        assert_eq!(Fidget::Stretch.weight(Role::Racer, TEMPERS[0]), 0);
+        assert_eq!(Fidget::Doze.weight(Role::Fixer, TEMPERS[2]), 0);
+    }
+
+    #[test]
+    fn some_buddies_wink_when_greeting() {
+        let winks = (0..40)
+            .filter(|seed| greet(Role::Coder, *seed, GREET / 2.).wink.is_some())
+            .count();
+        assert!((5..35).contains(&winks), "{winks}");
+        for seed in 0..40 {
+            for p in [0., 1.] {
+                let look = greet(Role::Coder, seed, GREET * p);
+                assert!(look.wink.is_none() && look.tilt.abs() < 0.5);
+            }
+        }
     }
 
     #[test]

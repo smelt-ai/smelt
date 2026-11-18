@@ -16,14 +16,14 @@ gpui 转不了彩色图，会转的零件（胳膊、手里的道具、方向盘
   腮红    身子当遮挡（holdout）只留露出来的部分，框和锚点跟身子一样，叠在身子上。每个朝向一张。
   胳膊    中性灰的小鳍，KEYS 个朝向，锚点在肩。
   道具    每样 KEYS 个朝向，锚点在握的地方。
-  脸      眼睛（睁、笑眯、闭，左右各一）、嘴（笑、平、张），每个朝向一张，和腮红一样拿身子当
+  脸      眼睛（睁、笑眯、闭、困、瞪大，左右各一）、嘴（笑、平、张、撅、张大），每个朝向一张，和腮红一样拿身子当
           遮挡，转到背面的被挡掉。
   戴的    头顶（帽子、头发、花）、脸上（眼镜、墨镜）、脖子（领结、围巾）各一组，按种子各自落。
           可换色的主料和固定色的点缀分两张渲（base、trim），插件给主料乘色再叠上点缀。都拿
           身子当遮挡，框和锚点跟身子一样，跟着身子压扁、转身。
   身前的  码农的电脑、写手的本子，各按亮着几行出 5 张。
   卡丁车  赛车手的：车头、车尾各按左右倾（-30° 到 30°）出 7 张，方向盘 KEYS 个朝向。
-  特效    火星、泡泡、水滴、音符、灰、点、感叹号、灯泡、星星、爱心、速度线、彩纸、嫩芽。
+  特效    火星、泡泡、水滴、音符、灰、点、感叹号、灯泡、星星、爱心、速度线、Z、彩纸、嫩芽。
 
 运行（要装 Blender，`brew install --cask blender`）：
 
@@ -31,7 +31,7 @@ gpui 转不了彩色图，会转的零件（胳膊、手里的道具、方向盘
       -- target/buddies
 
 输出 <目录>/sprites/<序号>.png、sprites.json（每张的名字、大小、锚点，按成图像素）和 rig.json
-（脚底在画布上的位置、每个朝向的肩、头顶上方、身前物件、道具尖端相对脚底或握点的位置）。渲图是成图的两倍，
+（脚底在画布上的位置、每个朝向的肩、头顶上方、正面的嘴、身前物件、道具尖端相对脚底或握点的位置）。渲图是成图的两倍，
 打包时缩下去。
 
 场景约定：Blender 的 z 朝上，小人面朝 -y 再往右转一点（YAW），脚底在原点；正交镜头从前上方看，
@@ -474,6 +474,20 @@ def eye(root, kind, side):
     elif kind == "happy":
         points = [(t * 0.07, -0.006, -0.025 + 0.05 * (1 - t * t)) for t in (-1, -0.5, 0, 0.5, 1)]
         tube(points, 0.02, ink, holder)
+    elif kind == "sleepy":
+        # 困：眼皮耷拉下来盖住上半，只露下半个眼珠。眼皮是一道往上拱的弧、外眼角往下垂，
+        # 平的或者内眼角低的看着像不耐烦、生气。
+        sphere((0, 0.012, -0.012), (0.074, 0.03, 0.094), ink, holder, keep=lambda v: v.z <= 0.05)
+        shine = glow((1, 1, 1), 3.0)
+        sphere((0.025, -0.02, -0.045), (0.018, 0.006, 0.016), shine, holder)
+        lid = [(t * 0.074, -0.008, -0.008 + 0.014 * (1 - t * t) - 0.012 * t * side) for t in (-1, -0.5, 0, 0.5, 1)]
+        tube(lid, 0.016, ink, holder)
+    elif kind == "wide":
+        # 吓一跳、惊讶：眼珠更大更圆，亮点也大。
+        sphere((0, 0.012, 0), (0.088, 0.03, 0.108), ink, holder)
+        shine = glow((1, 1, 1), 3.0)
+        sphere((0.03, -0.02, 0.045), (0.032, 0.009, 0.034), shine, holder)
+        sphere((-0.032, -0.017, -0.045), (0.016, 0.006, 0.016), shine, holder)
     else:  # "shut"：眨眼
         tube([(-0.065, -0.006, -0.012), (0.065, -0.006, -0.012)], 0.018, ink, holder)
 
@@ -486,6 +500,12 @@ def mouth(root, kind):
         tube(points, 0.009, ink, root)
     elif kind == "flat":
         tube([(-0.03, y - 0.005, z), (0.03, y - 0.005, z)], 0.009, ink, root)
+    elif kind == "o":
+        # 撅着的小圆嘴：吹气、叹气、「哦」。
+        sphere((0, y + 0.006, z - 0.004), (0.017, 0.012, 0.02), clay(oklch(0.42, 0.12, 20), rough=0.4), root)
+    elif kind == "yawn":
+        # 张大：打哈欠、吓一跳。
+        sphere((0, y + 0.008, z - 0.016), (0.05, 0.016, 0.07), clay(oklch(0.42, 0.12, 20), rough=0.4), root)
     else:  # "open"
         sphere((0, y + 0.006, z - 0.006), (0.03, 0.012, 0.03), clay(oklch(0.42, 0.12, 20), rough=0.4), root)
 
@@ -833,6 +853,15 @@ def fx_bang(root):
     sphere((0, 0, -0.1), (0.045, 0.045, 0.045), red, holder)
 
 
+def fx_z(root):
+    """打瞌睡冒的 Z：上下两横，中间一撇。"""
+    blue = clay(oklch(0.72, 0.09, 250), rough=0.5)
+    holder = empty(FX_AT, root)
+    box((0, 0, 0.07), (0.13, 0.03, 0.03), blue, holder, bevel=0.01)
+    box((0, 0, -0.07), (0.13, 0.03, 0.03), blue, holder, bevel=0.01)
+    box((0, 0, 0), (0.17, 0.03, 0.03), blue, holder, bevel=0.01, rot=rad(0, 47, 0))
+
+
 def fx_bulb(root, lit):
     holder = empty(FX_AT, root)
     shell = glow((1.0, 0.86, 0.35), 4.0) if lit else glass((0.95, 0.95, 0.9))
@@ -978,7 +1007,7 @@ EFFECTS = {
     "spark": fx_spark, "bubble": fx_bubble, "drop": fx_drop, "note": fx_note, "puff": fx_puff,
     "dot": fx_dot, "dot-lit": fx_dot_lit, "bang": fx_bang, "star": fx_star, "heart": fx_heart,
     "bulb": lambda root: fx_bulb(root, False), "bulb-lit": lambda root: fx_bulb(root, True),
-    "speed": fx_speed,
+    "speed": fx_speed, "z": fx_z,
 }
 KEYS = 8  # 会转的零件渲几个关键朝向，均分一圈
 STEP = 360 // KEYS
@@ -1002,12 +1031,12 @@ def jobs():
                 build(hand)
             yield f"prop/{name}/{k:02}", grip, k * STEP, make, True
     # 眼睛、嘴、戴的都拿身子当遮挡，框和锚点跟身子一样，转过去被身子挡住的渲成透明。
-    for kind in ("open", "happy", "shut"):
+    for kind in ("open", "happy", "shut", "sleepy", "wide"):
         for side, name in ((-1, "l"), (1, "r")):
             for k, degrees in turns:
                 build = masked(lambda root, kind=kind, side=side: eye(root, kind, side))
                 yield f"eye/{kind}-{name}/{k}", feet, 0, facing(degrees, build), False
-    for kind in ("smile", "flat", "open"):
+    for kind in ("smile", "flat", "open", "o", "yawn"):
         for k, degrees in turns:
             build = masked(lambda root, kind=kind: mouth(root, kind))
             yield f"mouth/{kind}/{k}", feet, 0, facing(degrees, build), False
@@ -1060,6 +1089,7 @@ def rig():
                       for k in range(FACINGS)],
         "arm_len": round(ARM_LEN * PPU, 2),
         "overhead": on_screen(placed((0, 0, TOP + 0.3))),
+        "mouth": on_screen(placed(MOUTH)),
         "laptop_at": on_screen(placed(LAPTOP_AT)),
         "notepad_at": on_screen(placed(NOTEPAD_FROM_HAND)),
         "sprout_at": on_screen(placed(SPROUT_AT)),

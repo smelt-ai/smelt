@@ -133,8 +133,25 @@ impl Canvas {
 
     /// 叠一张零件：锚点放到 `at`，按 `scale` 缩放，再乘透明度 `alpha`。
     pub(super) fn layer(&mut self, paint: Paint, at: (f32, f32), scale: (f32, f32), alpha: f32) {
+        self.layer_tilted(paint, at, scale, 0., alpha);
+    }
+
+    /// 和 [`Canvas::layer`] 一样，再绕锚点在画面里顺时针转 `degrees`（先缩放再转）。歪头、身子
+    /// 左右倾时用：叠的时候反着转回零件里双线性取，不用先另转一张。
+    pub(super) fn layer_tilted(
+        &mut self,
+        paint: Paint,
+        at: (f32, f32),
+        scale: (f32, f32),
+        degrees: f32,
+        alpha: f32,
+    ) {
         let alpha = alpha.clamp(0., 1.);
         if alpha == 0. || scale.0 <= 0. || scale.1 <= 0. {
+            return;
+        }
+        if degrees.abs() > 0.01 {
+            self.rotated(paint, at, scale, degrees, alpha);
             return;
         }
         let source = paint.pixels();
@@ -151,6 +168,57 @@ impl Canvas {
             let v = (y as f32 + 0.5 - top) / scale.1;
             for x in columns.clone() {
                 let u = (x as f32 + 0.5 - left) / scale.0;
+                let color = sample(&source, u, v);
+                if color[3] == 0. {
+                    continue;
+                }
+                let pixel = &mut self.pixels[y * SIDE + x];
+                let keep = 1. - color[3] * alpha / 255.;
+                for (out, value) in pixel.iter_mut().zip(color) {
+                    *out = value * alpha + *out * keep;
+                }
+            }
+        }
+    }
+
+    /// 转着叠：成图上每个像素反着转、反着缩放回零件里取。
+    fn rotated(
+        &mut self,
+        paint: Paint,
+        at: (f32, f32),
+        scale: (f32, f32),
+        degrees: f32,
+        alpha: f32,
+    ) {
+        let source = paint.pixels();
+        let (ax, ay) = SPRITES[paint.sprite].anchor;
+        let (ax, ay) = (ax * PX, ay * PX);
+        let (cx, cy) = ((at.0 + MARGIN) * PX, (at.1 + MARGIN) * PX);
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let (width, height) = source.dimensions();
+        // 零件四个角转过去落在哪，取外接框。
+        let corners = [
+            (0., 0.),
+            (width as f32, 0.),
+            (0., height as f32),
+            (width as f32, height as f32),
+        ]
+        .map(|(x, y)| {
+            let (dx, dy) = ((x - ax) * scale.0, (y - ay) * scale.1);
+            (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+        });
+        let fold = |pick: fn(&(f32, f32)) -> f32| {
+            let values = corners.iter().map(pick);
+            let low = values.clone().fold(f32::INFINITY, f32::min);
+            (low, values.fold(f32::NEG_INFINITY, f32::max))
+        };
+        let (left, right) = fold(|corner| corner.0);
+        let (top, bottom) = fold(|corner| corner.1);
+        for y in covered(top, bottom) {
+            for x in covered(left, right) {
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let u = (dx * cos + dy * sin) / scale.0 + ax;
+                let v = (-dx * sin + dy * cos) / scale.1 + ay;
                 let color = sample(&source, u, v);
                 if color[3] == 0. {
                     continue;
@@ -409,6 +477,28 @@ mod tests {
         let (x, y) = (sprites::FEET.0 + MARGIN, sprites::FEET.1 - 8. + MARGIN);
         let middle = mixed.pixels[(y * PX) as usize * SIDE + (x * PX) as usize];
         assert!(middle[3] > 254., "{middle:?}");
+    }
+
+    #[test]
+    fn a_tilted_layer_turns_about_its_anchor() {
+        // 转 90°：锚点不动，原来锚点正上方的东西转到右边。
+        let paint = Paint::plain(sprites::BODY);
+        let mut straight = Canvas::new();
+        straight.layer(paint, sprites::FEET, (1., 1.), 1.);
+        let mut tilted = Canvas::new();
+        tilted.layer_tilted(paint, sprites::FEET, (1., 1.), 90., 1.);
+        let at = |canvas: &Canvas, (x, y): (f32, f32)| {
+            let (x, y) = ((x + MARGIN) * PX, (y + MARGIN) * PX);
+            canvas.pixels[y as usize * SIDE + x as usize][3]
+        };
+        let (fx, fy) = sprites::FEET;
+        assert!(at(&straight, (fx, fy - 8.)) > 250.);
+        assert!(at(&tilted, (fx + 8., fy)) > 250.);
+        assert!(at(&tilted, (fx, fy - 20.)) < 5.);
+        // 转得很小也走转的路，和不转的差不多。
+        let mut nudged = Canvas::new();
+        nudged.layer_tilted(paint, sprites::FEET, (1., 1.), 0.5, 1.);
+        assert!((at(&nudged, (fx, fy - 8.)) - at(&straight, (fx, fy - 8.))).abs() < 1.);
     }
 
     #[test]
