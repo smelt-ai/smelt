@@ -14,11 +14,26 @@ help.text:
           --folder <path>...  --link <url>...
           --model <provider>/<model id> | --model default
       smelt agent chat <id> [--message <first message>]   start a conversation from it
+      smelt agent memory <id>                 its memory and the shared user memory (approve/delete on the desktop)
 
     Conversations:
       smelt conversation list [--agent <agent id>] [--archived]
+      smelt conversation send <id> --message <message>   queue a turn, returns delivery_id
+      smelt conversation result <id> <delivery_id>       pending | finished (with the reply) | unknown
       smelt conversation rename <id> --title <title>
       smelt conversation archive|unarchive|delete <id>
+
+    Projects and worktrees:
+      smelt project list | open <path> | close <path>
+      smelt worktree list [--project <path>]
+      smelt worktree create <project> --task <task name> [--repo <name>...] [--branch <branch>] [--prefix <branch prefix>]
+      smelt worktree inspect <id>            before finishing: clean? merged?
+      smelt worktree finish <id> [--allow-unconfirmed-merge]
+
+    History (each agent's own saved sessions, per project directory):
+      smelt history list --agent <id> [--cwd <dir>] [--profile <id>]
+      smelt history get <path> --agent <id>
+      smelt history delete <resume_id> --agent <id> [--cwd <dir>] [--profile <id>]
 
     Automations:
       smelt automation list | get <id>
@@ -40,7 +55,11 @@ help.text:
       smelt pi skill list | import <directory> | remove <name>
       smelt pi extension list | import <path> | remove <name>
       smelt model list | default <provider>/<model id> | thinking off|minimal|low|medium|high|xhigh
-      smelt quota
+      smelt quota | quota refresh [<account id>] | quota settings | quota enable|disable <account id>
+
+    Agent engines:
+      smelt engine list | install <id>       command-line tools found / install one (brew or npm)
+      smelt hooks status | install | uninstall   notification hooks in each agent's config
     %{plugins}
     Notifications (shown on the desktop and pushed to phones with "Agent messages" on):
       smelt notify [--title <title>] <message>
@@ -64,11 +83,26 @@ help.text:
           --folder <路径>...  --link <地址>...
           --model <provider>/<模型id> | --model default
       smelt agent chat <id> [--message <第一句话>]   用该定义开一场对话
+      smelt agent memory <id>                 它的记忆和共享的用户记忆（采纳、删除在桌面上）
 
     对话：
       smelt conversation list [--agent <智能体id>] [--archived]
+      smelt conversation send <id> --message <内容>     排进一轮，返回 delivery_id
+      smelt conversation result <id> <delivery_id>      pending | finished（带回复）| unknown
       smelt conversation rename <id> --title <标题>
       smelt conversation archive|unarchive|delete <id>
+
+    项目和工作树：
+      smelt project list | open <路径> | close <路径>
+      smelt worktree list [--project <路径>]
+      smelt worktree create <项目> --task <任务名> [--repo <仓库名>...] [--branch <分支>] [--prefix <分支前缀>]
+      smelt worktree inspect <id>            收工前看：干不干净、合没合
+      smelt worktree finish <id> [--allow-unconfirmed-merge]
+
+    历史（各家 agent 自己存的会话，按项目目录）：
+      smelt history list --agent <id> [--cwd <目录>] [--profile <id>]
+      smelt history get <存档路径> --agent <id>
+      smelt history delete <resume_id> --agent <id> [--cwd <目录>] [--profile <id>]
 
     自动化：
       smelt automation list | get <id>
@@ -90,7 +124,11 @@ help.text:
       smelt pi skill list | import <目录> | remove <名字>
       smelt pi extension list | import <路径> | remove <名字>
       smelt model list | default <provider>/<模型id> | thinking off|minimal|low|medium|high|xhigh
-      smelt quota
+      smelt quota | quota refresh [<账户id>] | quota settings | quota enable|disable <账户id>
+
+    Agent 引擎：
+      smelt engine list | install <id>       找到的命令行工具 / 装一个（brew 或 npm）
+      smelt hooks status | install | uninstall   写在各家 agent 配置里的提醒钩子
     %{plugins}
     通知（桌面弹出，并推给在手机端打开了「智能体消息」的手机）：
       smelt notify [--title <标题>] <内容>
@@ -199,6 +237,12 @@ conversation.rename_usage:
 conversation.terminal_rename:
   en: "Terminal conversations can't be renamed from the command line"
   zh-CN: "终端对话不能用命令行改名"
+conversation.send_usage:
+  en: "smelt conversation send <id> --message <message>"
+  zh-CN: "smelt conversation send <id> --message <内容>"
+conversation.terminal_send:
+  en: "That's a terminal, not an agent conversation; there is nothing to send a message to"
+  zh-CN: "这是终端，不是智能体对话，发不了消息"
 conversation.title_missing:
   en: "--title needs a title"
   zh-CN: "--title 需要标题"
@@ -217,6 +261,15 @@ help.gui:
 help.plugins:
   en: "\nSmelt plugins (the app's own UI plugins, written in ~/.smelt/plugins/<id>/; no smeltd needed):\n  smelt plugin check <dir>      load and render once without the app; exits 1 on errors\n  smelt plugin status [<id>]    what the running app loaded and why a plugin failed\n"
   zh-CN: "\nSmelt 插件（App 自己的界面插件，写在 ~/.smelt/plugins/<id>/；不需要 smeltd）：\n  smelt plugin check <目录>     不开 App 加载并渲染一次，有错退出码 1\n  smelt plugin status [<id>]    开着的 App 加载了哪些插件、失败的原因\n"
+history.not_found:
+  en: "No history %{id} under %{cwd} (see smelt history list)"
+  zh-CN: "%{cwd} 下没有历史 %{id}（smelt history list 查看）"
+history.unknown_agent:
+  en: "Unknown history source: %{agent} (known: %{known})"
+  zh-CN: "不认识的历史来源：%{agent}（可用：%{known}）"
+history.usage:
+  en: "smelt history list|get <path>|delete <resume_id> --agent <id> [--cwd <dir>] [--profile <id>]"
+  zh-CN: "smelt history list|get <存档路径>|delete <resume_id> --agent <id> [--cwd <目录>] [--profile <id>]"
 mcp.add_usage:
   en: "smelt mcp add <preset id> (see smelt mcp presets)"
   zh-CN: "smelt mcp add <预设id>（smelt mcp presets 查看）"
@@ -259,6 +312,15 @@ notify.usage:
 pi.invalid_path:
   en: "Invalid path: %{path}: %{error}"
   zh-CN: "路径无效：%{path}：%{error}"
+project.not_a_directory:
+  en: "Not a directory: %{path}"
+  zh-CN: "不是目录：%{path}"
+project.not_open:
+  en: "%{path} isn't an open project (see smelt project list)"
+  zh-CN: "%{path} 不是已打开的项目（smelt project list 查看）"
+quota.unknown_target:
+  en: "Unknown account: %{id} (ids are in smelt quota settings)"
+  zh-CN: "不认识的账户：%{id}（smelt quota settings 里有 id）"
 settings.not_key_value:
   en: "Settings must be key=value: %{arg}"
   zh-CN: "设置项必须是 key=value：%{arg}"
@@ -271,6 +333,15 @@ unknown_subcommand:
 usage_hint:
   en: "See smelt --help for usage"
   zh-CN: "用法见 smelt --help"
+worktree.create_usage:
+  en: "smelt worktree create <project> --task <task name> [--repo <name>...] [--branch <branch>] [--prefix <branch prefix>]"
+  zh-CN: "smelt worktree create <项目> --task <任务名> [--repo <仓库名>...] [--branch <分支>] [--prefix <分支前缀>]"
+worktree.no_repositories:
+  en: "This project has no git repository: the project root and repos/<name> are checked"
+  zh-CN: "这个项目里没有 git 仓库：会看项目根目录和 repos/<名字>"
+worktree.no_such_repository:
+  en: "The project has no repository %{name} (has: %{available})"
+  zh-CN: "项目里没有仓库 %{name}（有：%{available}）"
 main.exe_dir_missing:
   en: "Couldn't find the directory this program is in: %{error}"
   zh-CN: "找不到自己所在的目录：%{error}"

@@ -5,7 +5,7 @@ use rust_i18n::t;
 use smelt_model::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};
 use smelt_model::control_api::{
     AgentDefinitionCreateCall, AgentDefinitionDelete, AgentDefinitionGet, AgentDefinitionIdParams,
-    AgentDefinitionList, AgentDefinitionUpdateCall, AgentDefinitionUpdateParams,
+    AgentDefinitionList, AgentDefinitionUpdateCall, AgentDefinitionUpdateParams, AgentMemoryList,
     ConversationCreateForAgent, PiConfigGet,
 };
 use smelt_model::pi_plugin_catalog::PiPluginKind;
@@ -48,6 +48,13 @@ pub(crate) fn run(args: &[String]) -> i32 {
             ),
             None => usage("smelt agent delete <id>"),
         },
+        // 只读。采纳、删除要用户在桌面上点：运行时拒绝智能体会话里发来的这两种请求。
+        Some("memory") => match id_arg(rest) {
+            Some(id) => respond(control::<AgentMemoryList>(AgentDefinitionIdParams {
+                id: id.to_string(),
+            })),
+            None => usage("smelt agent memory <id>"),
+        },
         Some("chat") => {
             let Some(id) = id_arg(rest) else {
                 return usage(&t!("agent.chat_usage"));
@@ -58,7 +65,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
             }
         }
         Some(command) => usage(&t!("unknown_subcommand", command = command)),
-        None => usage("smelt agent list|get|create|update|delete|chat"),
+        None => usage("smelt agent list|get|create|update|delete|chat|memory"),
     }
 }
 

@@ -1,6 +1,6 @@
 ---
 name: smelt
-description: 用 smelt CLI 操作本机 Smelt：产品智能体、侧栏对话、自动化及其运行记录、MCP 服务器、默认模型、用量和外观设置；也讲怎么写 Smelt 插件（App 界面插件）。用户说新建/修改智能体、开对话、整理对话、建定时任务、看自动化跑得怎样、加 MCP、换模型、改主题字体、写 Smelt 插件时使用。
+description: 用 smelt CLI 操作本机 Smelt：产品智能体及其记忆、侧栏对话（含给别的对话发消息、取回复）、项目和任务工作树、各家 agent 的历史会话、自动化及其运行记录、MCP 服务器、默认模型、用量、agent 命令行工具和提醒钩子、外观设置；也讲怎么写 Smelt 插件（App 界面插件）。用户说新建/修改智能体、开对话、让另一个对话去做事、整理对话、开项目、开/收工作树、翻历史会话、建定时任务、看自动化跑得怎样、加 MCP、换模型、看用量、装 agent 命令行、改主题字体、写 Smelt 插件时使用。
 ---
 
 # Smelt 控制面
@@ -13,8 +13,11 @@ description: 用 smelt CLI 操作本机 Smelt：产品智能体、侧栏对话�
 
 下面这些动作直接生效，执行前先把要做的事讲清楚、等用户同意：
 
-- 删除：`agent delete`、`automation delete`、`conversation delete`（不可恢复）。
+- 删除：`agent delete`、`automation delete`、`conversation delete`、`history delete`（不可恢复）。
+- 收工作树：`worktree finish`（删掉 worktree 目录；`--allow-unconfirmed-merge` 更要先问）。
+- 给别人的对话发消息：`conversation send` 发进去的话那个 agent 会照着做；发给不是你自己开的对话前先确认。
 - 全局能力，对所有智能体生效：`mcp add|enable|disable|remove`、`model default|thinking`。
+- 改这台机器的环境：`engine install`（用 brew 或 npm 装命令行工具）、`hooks install|uninstall`（改各家 agent 的配置文件）。
 
 ## 智能体
 
@@ -28,6 +31,7 @@ smelt agent update <id> --prompt "新的工作方式"
 smelt agent update <id> --memory off
 smelt agent update <id> --model default
 smelt agent chat <id> --message "第一句话"
+smelt agent memory <id>
 smelt agent delete <id>
 ```
 
@@ -36,19 +40,50 @@ smelt agent delete <id>
 - `--model default` 跟随 Pi 的默认模型。
 - `--memory on|off` 开关这个智能体的长期记忆（默认开）。关掉后不注入、不写入，已有记忆文件保留；正在进行的对话下一轮生效。
 - `chat` 开一场新对话，出现在桌面「对话」栏。带 `--message` 会把第一句话发出去。返回的 `session_id` 是这场对话的 id，后面的操作都用它，不要拿智能体 id 去改标题。
+- `memory` 列这个智能体的记忆和所有智能体共享的用户记忆，`pending_reason` 非空的是待用户确认的。采纳、删除只能用户在桌面设置里点，运行时拒绝从智能体会话里来的这类请求，不要想办法绕。
 
 ## 对话
 
 ```sh
 smelt conversation list [--agent <智能体id>] [--archived]
+smelt conversation send <id> --message "要它做的事"
+smelt conversation result <id> <delivery_id>
 smelt conversation rename <id> --title "新标题"
 smelt conversation archive|unarchive <id>
 smelt conversation delete <id>
 ```
 
-`<id>` 写 list 里的 `id` 或 `session_id` 都行。默认不列已归档的。
+- `<id>` 写 list 里的 `id` 或 `session_id` 都行。默认不列已归档的。终端（`terminal: true`）发不了消息。
+- `send` 把话排进那段对话（它正在跑就排在这一轮后面，挂起的先唤醒），立刻返回 `delivery_id`，不等它做完。之后用 `result` 取：`pending` 是还没轮到或还在做；`finished` 带 `outcome` 和这一轮最后一段回复 `text`；`unknown` 是运行时不认识这次投递（重启过）。还在 `pending` 就先做别的，过一阵再查，不要连着刷。
+- 发进去的话在桌面上看得到，用户也能插话。要一段新对话去做事，先 `agent chat` 开一场再 `send`。
+- 在 Pi 对话里也可以用 Pi 自带的 `session_list` / `session_read` / `session_send` / `session_spawn` 工具。
 
-给另一场对话发消息、读它的内容、开同项目的新 Pi 对话，用 Pi 自带的 `session_list` / `session_read` / `session_send` / `session_spawn` 工具，不走 CLI。
+## 项目和工作树
+
+```sh
+smelt project list
+smelt project open <路径>
+smelt project close <路径>
+smelt worktree list [--project <路径>]
+smelt worktree create <项目路径> --task <任务名> [--repo <仓库名>...] [--branch <分支>] [--prefix <分支前缀>]
+smelt worktree inspect <id>
+smelt worktree finish <id> [--allow-unconfirmed-merge]
+```
+
+- 项目就是侧栏里的一个目录。`open` 加进侧栏，`close` 从侧栏拿掉，都不动磁盘上的文件，项目下的对话也留着。
+- 工作树是在项目的 git 仓库上为一个任务开的一组 worktree，放在 `<项目>/worktrees/<任务名>`，分支默认 `feat/<任务名>`。仓库认项目根目录和 `repos/<名字>` 下的，`--repo` 不写就全用；仓库要有远端。结果里的 `path` 是任务目录，在里面干活；`setup` 列出跑过的初始化脚本（`<仓库>/.smelt/worktree-setup`）。
+- 收工先 `inspect`：每个仓库 `dirty`（有没有未提交的改动）和 `merge`（分支合没合进基线）。有未提交改动或确实没合并的，`finish` 会拦下，先把情况告诉用户；判断不了合没合时才考虑 `--allow-unconfirmed-merge`，要用户点头。`finish` 后 `retained_branches` 是留下没删的分支。
+
+## 历史会话
+
+```sh
+smelt history list --agent claude [--cwd <项目目录>]
+smelt history get <path> --agent claude
+smelt history delete <resume_id> --agent claude [--cwd <项目目录>]
+```
+
+- 各家 agent 自己存在本机的会话存档，按项目目录分。`--agent` 是 `claude`、`codex`、`copilot`、`grok`、`cursor`、`opencode`、`kiro`、`pi`、`antigravity`；`--cwd` 不写是当前目录；自定义 agent 的历史加 `--profile <id>`。
+- `list` 最近活跃的在前，`get` 用 list 里的 `path` 读整段对话（很长时只挑要的看）。
 
 ## 自动化
 
@@ -98,12 +133,27 @@ smelt model list
 smelt model default <provider>/<模型id>
 smelt model thinking off|minimal|low|medium|high|xhigh
 smelt quota
+smelt quota refresh [<账户id>]
+smelt quota settings
+smelt quota enable|disable <账户id>
 ```
 
 - `mcp add` 只能加预设。结果里有 `next` 时（要登录、要装浏览器扩展），照原样转告用户去做；登录要开浏览器，CLI 代办不了。
 - 自定义 MCP 服务器、登录模型账号、填 API key 都在桌面设置的能力库里做，CLI 不提供。
 - `model default` 只能挑 `model list` 里有的模型，推理强度保持原样。
-- `quota` 看各模型账号的用量。
+- `quota` 看缓存里各账户的用量，`quota refresh` 现查一轮（每家一次网络请求）。账户 id 在 `quota settings` 里：`claude`、`codex` 这样，Pi 底下的是 `pi:<provider>`。点名刷新一家时 macOS 可能弹钥匙串授权框，提前告诉用户。`disable` 后不再读它的凭据、不再查。
+
+## Agent 命令行和提醒钩子
+
+```sh
+smelt engine list
+smelt engine install <id>
+smelt hooks status
+smelt hooks install|uninstall
+```
+
+- `engine list` 列各家 agent 命令行工具在这台机器上找没找到（`path` 为空就是没装）、版本和报错；`install` 用 brew 或 npm 装一个，id 和 `agent create --engine` 的一样。
+- 提醒钩子写在各家 agent 自己的配置里，让它们在等你确认、做完时经 `smelt-notify` 提醒 Smelt。`status` 看装没装；装、卸会改那些配置文件。
 
 ## 设置
 

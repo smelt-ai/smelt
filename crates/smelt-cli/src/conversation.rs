@@ -1,13 +1,17 @@
 //! `smelt conversation …`：侧栏里的对话。
 //!
 //! 对话有两个 id：工作区目录里的对话 id，和智能体对话的会话 id（`agent chat` 返回的
-//! `session_id`）。这里两个都认，按需要换成对应的那个。往对话里发消息、读对话内容用
-//! Pi 自带的 `session_send` / `session_read`，不在命令行重复一份。
+//! `session_id`）。这里两个都认，按需要换成对应的那个。
+//!
+//! `send` 把一句话作为一次外部投递发进对话（正在跑就排在这一轮后面），立刻返回投递 id；
+//! 这一轮的结果之后用 `result` 按 id 取，命令行不替调用方守着等。
 
-use crate::{control, flag_value, id_arg, respond, usage};
+use crate::{control, control_within, flag_value, id_arg, respond, usage};
 use rust_i18n::t;
 use smelt_model::control_api::{
-    WorkspaceConversationArchive, WorkspaceConversationDelete, WorkspaceDirectoryGet,
+    ConversationPrompt, ConversationPromptParams, ConversationTurnResult,
+    ConversationTurnResultParams, WorkspaceConversationArchive, WorkspaceConversationDelete,
+    WorkspaceDirectoryGet,
 };
 use smelt_model::workspace_directory::{
     WorkspaceConversation, WorkspaceConversationArchiveParams, WorkspaceConversationIdParams,
@@ -30,6 +34,19 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 Err(message) => usage(&message),
             }
         }
+        Some("send") => {
+            let Some(id) = id_arg(rest) else {
+                return usage(&t!("conversation.send_usage"));
+            };
+            match message_flag(&rest[1..]) {
+                Ok(text) => respond(send(id, text)),
+                Err(message) => usage(&message),
+            }
+        }
+        Some("result") => match rest {
+            [id, delivery_id] => respond(turn_result(id, delivery_id)),
+            _ => usage("smelt conversation result <id> <delivery_id>"),
+        },
         Some(verb @ ("archive" | "unarchive" | "delete")) => {
             let Some(id) = id_arg(rest) else {
                 return usage(&format!("smelt conversation {verb} <id>"));
@@ -37,7 +54,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
             respond(change(verb, id))
         }
         Some(command) => usage(&t!("unknown_subcommand", command = command)),
-        None => usage("smelt conversation list|rename|archive|unarchive|delete"),
+        None => usage("smelt conversation list|send|result|rename|archive|unarchive|delete"),
     }
 }
 
@@ -146,6 +163,52 @@ fn rename(id: &str, title: &str) -> Result<serde_json::Value, String> {
     serde_json::to_value(renamed).map_err(|error| error.to_string())
 }
 
+/// 智能体对话的会话 id。终端没有，发不了话。
+fn session_id(id: &str) -> Result<String, String> {
+    let conversations = directory()?;
+    let conversation = find(&conversations, id)?;
+    conversation
+        .acp
+        .as_ref()
+        .map(|acp| acp.sid.clone())
+        .ok_or_else(|| t!("conversation.terminal_send").into_owned())
+}
+
+/// 挂起的对话要先唤醒、等它续上历史，运行时最多等两分钟；多留一点给往返。
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
+
+fn send(id: &str, text: String) -> Result<serde_json::Value, String> {
+    let session_id = session_id(id)?;
+    let delivery_id = uuid::Uuid::new_v4().to_string();
+    control_within::<ConversationPrompt>(
+        ConversationPromptParams {
+            session_id: session_id.clone(),
+            delivery_id: delivery_id.clone(),
+            text,
+            disallowed_tools: Vec::new(),
+        },
+        SEND_TIMEOUT,
+    )?;
+    Ok(serde_json::json!({ "session_id": session_id, "delivery_id": delivery_id }))
+}
+
+fn turn_result(id: &str, delivery_id: &str) -> Result<serde_json::Value, String> {
+    let status = control::<ConversationTurnResult>(ConversationTurnResultParams {
+        session_id: session_id(id)?,
+        delivery_id: delivery_id.to_string(),
+    })?;
+    serde_json::to_value(status).map_err(|error| error.to_string())
+}
+
+fn message_flag(args: &[String]) -> Result<String, String> {
+    match args {
+        [flag, text] if flag == "--message" && !text.trim().is_empty() => Ok(text.clone()),
+        [flag, ..] if flag == "--message" => Err(t!("agent.message_missing").into_owned()),
+        [other, ..] => Err(t!("unknown_argument", arg = other).into_owned()),
+        [] => Err(t!("conversation.send_usage").into_owned()),
+    }
+}
+
 fn change(verb: &str, id: &str) -> Result<serde_json::Value, String> {
     let conversations = directory()?;
     let conversation_id = find(&conversations, id)?.id.clone();
@@ -227,5 +290,14 @@ mod tests {
             ["old", "c", "a"]
         );
         assert!(parse_list_args(&args(&["--agent"])).is_err());
+    }
+
+    #[test]
+    fn send_takes_exactly_one_message() {
+        assert_eq!(message_flag(&args(&["--message", "hi"])).unwrap(), "hi");
+        assert!(message_flag(&args(&["--message", " "])).is_err());
+        assert!(message_flag(&args(&["--message"])).is_err());
+        assert!(message_flag(&args(&["hi"])).is_err());
+        assert!(message_flag(&args(&[])).is_err());
     }
 }

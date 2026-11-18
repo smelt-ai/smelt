@@ -4,21 +4,22 @@
 //! 它们各自去开窗口。这里只拦截明确的控制命令，一律经 smeltd 读写：库只有运行时一个
 //! 写入者，CLI 不绕过它。smeltd 没在跑时直接报错。
 //!
-//! 不开放的：配对设备和远程（等于把 shell 交出去）、需要浏览器的登录、采纳/删除记忆
-//! （运行时对智能体进程树拒绝）、钩子和往桌面打字。
+//! 不开放的：配对设备和远程（等于把 shell 交出去）、需要浏览器的登录和凭据、采纳/删除记忆
+//! （运行时只认签过名的桌面，且拒绝智能体会话进程树）、往桌面打字。
 
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod agent;
 mod automation;
 mod conversation;
+mod engine;
+mod history;
 mod pi;
+mod workspace;
 
 use rust_i18n::t;
 use smelt_model::appearance_settings::SettingsPatch;
-use smelt_model::control_api::{
-    NotifySend, NotifySendParams, QuotaGet, SettingsGet, SettingsUpdate,
-};
+use smelt_model::control_api::{NotifySend, NotifySendParams, SettingsGet, SettingsUpdate};
 use smelt_runtime_client::protocol::control::{
     ControlCall, ControlClientError, ControlMethod, EmptyParams,
 };
@@ -35,8 +36,9 @@ where
         .collect();
     match args.get(1).map(String::as_str) {
         Some(
-            "agent" | "conversation" | "automation" | "mcp" | "pi" | "model" | "quota" | "settings"
-            | "notify" | "help" | "-h" | "--help" | "--version" | "-V",
+            "agent" | "conversation" | "project" | "worktree" | "history" | "automation" | "mcp"
+            | "pi" | "model" | "quota" | "engine" | "hooks" | "settings" | "notify" | "help" | "-h"
+            | "--help" | "--version" | "-V",
         ) => Some(run(&args)),
         _ => None,
     }
@@ -64,11 +66,16 @@ fn run(args: &[String]) -> i32 {
         }
         Some("agent") => agent::run(rest),
         Some("conversation") => conversation::run(rest),
+        Some("project") => workspace::run_project(rest),
+        Some("worktree") => workspace::run_worktree(rest),
+        Some("history") => history::run(rest),
         Some("automation") => automation::run(rest),
         Some("mcp") => pi::run_mcp(rest),
         Some("pi") => pi::run(rest),
         Some("model") => pi::run_model(rest),
-        Some("quota") => respond(control::<QuotaGet>(EmptyParams::default())),
+        Some("quota") => engine::run_quota(rest),
+        Some("engine") => engine::run(rest),
+        Some("hooks") => engine::run_hooks(rest),
         Some("settings") => run_settings(rest),
         Some("notify") => match parse_notify(rest) {
             Ok(params) => respond(control::<NotifySend>(params)),
@@ -128,8 +135,16 @@ fn parse_notify(args: &[String]) -> Result<NotifySendParams, String> {
 
 /// 一次 Control API 调用。smeltd 没在跑时给出能看懂的原因。
 fn control<C: ControlCall>(params: C::Params) -> Result<C::Result, String> {
+    control_within::<C>(params, std::time::Duration::from_secs(10))
+}
+
+/// 同 [`control`]，给要等网络、git 或包管理器的慢调用一个更长的上限。
+fn control_within<C: ControlCall>(
+    params: C::Params,
+    timeout: std::time::Duration,
+) -> Result<C::Result, String> {
     smelt_client::daemon_state::local_runtime()
-        .call::<C>(&params, std::time::Duration::from_secs(10))
+        .call::<C>(&params, timeout)
         .map_err(|error| match error {
             ControlClientError::Protocol(error) => error.text(),
             ControlClientError::Transport(message)
@@ -186,6 +201,15 @@ fn id_arg(args: &[String]) -> Option<&str> {
     args.first()
         .map(String::as_str)
         .filter(|id| !id.trim().is_empty() && !id.starts_with("--"))
+}
+
+/// 命令行给的路径换成绝对路径：在的话解开软链，和桌面选目录得到的写法一致。
+fn absolute(path: &str) -> Result<String, String> {
+    let path = std::path::Path::new(path);
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| error.to_string())
 }
 
 /// `--flag value` 里的 value。
