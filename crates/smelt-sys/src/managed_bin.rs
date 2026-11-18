@@ -162,6 +162,9 @@ fn is_leftover(name: &str) -> bool {
         "smelt-agent.current",
         "smelt-pi",
         "smelt-pi.current",
+        // 跨 Agent 消息下线后的 MCP helper。
+        "smelt-agent-mcp",
+        "smelt-agent-mcp.next",
     ];
     // Windows 上没有扩展名的 `smeltd` 是旧的指针文件；Unix 上它就是守护本身。
     let windows_pointer = cfg!(windows) && name == daemon_image::LAUNCH_NAME;
@@ -218,6 +221,7 @@ mod tests {
         fs::create_dir_all(bin.join(format!(".smelt-agent-{}.partial-1-x", fp('e')))).unwrap();
         fs::write(bin.join("smelt-notify"), b"helper").unwrap();
         fs::create_dir_all(bin.join("smelt-agent-notes")).unwrap();
+        fs::write(bin.join("smelt-agent-mcp"), b"retired helper").unwrap();
 
         tidy(&bin).unwrap();
 

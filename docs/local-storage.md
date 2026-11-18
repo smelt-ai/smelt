@@ -1,6 +1,6 @@
 # 本地状态存储
 
-Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。启动时会删掉已经没有读写路径的旧 JSON（`workspace.json`、`appearance.json`、`launch.json`、`collab.json`、`llm.json`、`pet.json` 等），见维护插件的 `crates/plugins/maintenance/src/residue.rs`。
+Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。`~/.smelt` 顶层放什么在 `smelt_paths::DECLARED_ENTRIES` 里登记，新加的文件或目录要先登记；没登记的（旧 JSON、迁库备份 `*.bak-v*`、下线功能的目录）都是历史残留，设置「系统 → 清理残留」列出来，确认后删掉（维护插件 `crates/plugins/maintenance/src/residue.rs`）。插件的数据一律放 `plugin-data/<插件 id>…`，不另占顶层。
 
 ## 运行时库
 
@@ -29,7 +29,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 
 嵌套配置可以放在 JSON 列里（例如自动化的 trigger）。那是列，不是一份 `*.json` 活文件。
 
-旧的 `~/.smelt/smelt.db` 属于已经下线的 instincts，启动清理会删掉，迁移不读它。
+旧的 `~/.smelt/smelt.db` 属于已经下线的 instincts，没登记，算历史残留，迁移不读它。
 
 ## 客户端库
 

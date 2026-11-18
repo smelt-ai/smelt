@@ -30,6 +30,76 @@ pub fn smelt_home() -> Option<PathBuf> {
     )
 }
 
+/// `~/.smelt` 顶层登记过的条目：名字和谁在读写。
+///
+/// 设置里的「清理残留」只留这里的条目，别的一律当历史残留删掉。所以**往 `~/.smelt` 顶层
+/// 新放任何文件或目录都要在这里登记**，不然用户一清理就没了。条目里面的东西归各自主人管，
+/// 这里只看顶层。插件的数据一律放 `plugin-data/<插件 id>…`，不另占顶层。
+pub const DECLARED_ENTRIES: &[&str] = &[
+    // 运行时主库（smelt-store）。
+    "smelt.sqlite3",
+    // 客户端库（smelt-client-store），也存自更新状态。
+    "client.sqlite3",
+    // 应用日志和它轮转出来的上一代（smelt-sys `app_log`）。
+    "app.log",
+    "app.log.1",
+    // 守护自身的生命周期日志、本机连接口（smeltd）。
+    "daemon.log",
+    "smeltd.sock",
+    // 运行时和客户端各自的 iroh 身份（smelt-iroh）。
+    "iroh-secret",
+    "client-iroh-secret",
+    // 自更新的锁（smelt-client `updater`）和安装器的临时目录。
+    "update.lock",
+    "app-launch-gate.lock",
+    "app-runtime.lock",
+    "installer",
+    // 托管的可执行文件：smeltd、smelt-agent、smelt 命令等。
+    "bin",
+    // 进程间的运行状态：插件挂载快照、MCP 网关（agent `mcp-gateway-client.ts`）。
+    "run",
+    // `smelt-agent x` 的 Bun 下载缓存（agent `pi-mcp-runtime.ts`）。
+    "cache",
+    // 运行时升级下载、解包的临时目录（smeltd `runtime_upgrade`）。
+    "staging",
+    // 给 Pi 装的状态扩展（smeltd）。
+    "integrations",
+    // 智能体的 space、记忆、子智能体子会话（smelt-model `agent_paths`）。
+    "agents",
+    "memory",
+    "subagents",
+    // 新对话、自动化的托管工作目录。
+    "workspaces",
+    // 旧位置的技能，技能列表还在扫（smelt-core `skill_home`）。
+    "skills",
+    // 删掉的插件和技能先挪到这里。
+    "trash",
+    // 用户插件和每个插件自己的数据。
+    "plugins",
+    "plugin-data",
+    // Linux 远程桌面（`install.sh --with-desktop`）。
+    "desktop",
+    // 本机自签名身份的备份（`scripts/setup-codesign-identity.sh`），删了就找不回密码。
+    "codesign",
+    // Finder 自己放的，不归我们管。
+    ".DS_Store",
+];
+
+/// SQLite 在主库旁边放的伴生文件。
+const SQLITE_COMPANIONS: &[&str] = &["-wal", "-shm", "-journal"];
+
+/// `~/.smelt` 顶层的这个名字登记过没有（见 [`DECLARED_ENTRIES`]）。登记的 SQLite 库连同
+/// 它的 `-wal`、`-shm`、`-journal` 都算。
+pub fn is_declared_entry(name: &str) -> bool {
+    DECLARED_ENTRIES.iter().any(|entry| {
+        name == *entry
+            || entry.ends_with(".sqlite3")
+                && name
+                    .strip_prefix(entry)
+                    .is_some_and(|suffix| SQLITE_COMPANIONS.contains(&suffix))
+    })
+}
+
 /// 装没装远程桌面：`install.sh --with-desktop` 会把虚拟屏幕的启动脚本放进
 /// `~/.smelt/desktop/bin`。只认 Linux，macOS 上的本机运行时没有这套。
 pub fn remote_desktop_installed() -> bool {
@@ -186,6 +256,18 @@ pub fn export_to(command: &mut std::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_databases_cover_their_sqlite_companions_only() {
+        assert!(is_declared_entry("smelt.sqlite3"));
+        assert!(is_declared_entry("smelt.sqlite3-wal"));
+        assert!(is_declared_entry("client.sqlite3-shm"));
+        assert!(!is_declared_entry("smelt.sqlite3.bak-v38"));
+        assert!(!is_declared_entry("smelt.sqlite3-wal.old"));
+        assert!(!is_declared_entry("app.log-wal"), "只有库才有伴生文件");
+        assert!(is_declared_entry("bin"));
+        assert!(!is_declared_entry("models"));
+    }
 
     #[test]
     fn explicit_override_wins_over_sandbox_and_home() {

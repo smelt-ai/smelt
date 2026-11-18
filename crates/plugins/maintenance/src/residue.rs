@@ -1,160 +1,115 @@
-//! 启动时删掉 `~/.smelt` 下的历史残留文件。
+//! `~/.smelt` 下的历史残留：顶层没登记过的条目（[`paths::DECLARED_ENTRIES`]）。
 //!
-//! 几处已知的残留来源（都是 schema/实现换过之后，老文件没人再读写了）：
-//! - `smelt.db`、根目录调试文件和 `*.bak`：instincts 下线后的库、崩溃备份、临时诊断。
-//! - `llm.json`、`selection.json`、`config.toml`、`global.md`、`projects/`：已经没有读取路径的旧功能残留。
-//! - `migration-backups/`：迁库曾把 JSON 另存一份；成功导入后不再需要。
-//! - 空的 `skills/.staging`：功能还在，目录空了就是壳。
-//! - `mermaid_cache/`：旧版 mermaid 磁盘缓存，渲染已改为只走内存。
-//! - `handoffs/`：已废弃的交接底稿目录。
-//! - `automation-runs/`：自动化对话曾旁路成 JSON 文件，现只走 SQLite。
-//!
-//! 更早版本在 `~/.smelt/worktrees/` 下的检出里可能还有没提交的改动，不删，留给用户自己处理
-//! （现在的工作树在项目目录下的 `worktrees/`，和这里无关）。
-//!
-//! 这里全是阻塞的文件 IO，只在后台线程上调。
+//! 只看顶层，条目里面归各自的主人管。不跟软链接走：顶层的软链接只删链接本身，大小也只算
+//! 链接。全是阻塞的文件 IO，只在后台线程上调。
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use smelt_plugin_api::paths::smelt_home;
+use smelt_plugin_api::paths;
 
-/// 启动时回收已经没有任何读写路径的废弃文件。
-///
-/// 包含 instincts 旧库、根目录调试/备份文件和已迁走的 JSON。
-pub(crate) fn remove_obsolete_files_at_startup() -> usize {
-    let Some(home) = smelt_home() else {
+/// 一项残留。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Residue {
+    pub path: PathBuf,
+    /// 顶层的名字，目录带个 `/`。
+    pub label: String,
+    pub bytes: u64,
+}
+
+/// 列出 `~/.smelt` 顶层没登记的条目，大的在前。
+pub(crate) fn scan() -> io::Result<Vec<Residue>> {
+    let home = paths::smelt_home()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "couldn't find $HOME"))?;
+    match scan_in(&home) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        result => result,
+    }
+}
+
+/// 删掉这几项；返回删不掉的和原因。不是 `~/.smelt` 顶层残留的路径一律不碰。
+pub(crate) fn remove(paths: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    let Some(home) = paths::smelt_home() else {
+        return Vec::new();
+    };
+    remove_in(&home, paths)
+}
+
+fn scan_in(home: &Path) -> io::Result<Vec<Residue>> {
+    let mut residue = Vec::new();
+    for entry in fs::read_dir(home)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_str().is_some_and(paths::is_declared_entry) {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        let name = name.to_string_lossy();
+        residue.push(Residue {
+            label: if is_dir {
+                format!("{name}/")
+            } else {
+                name.into_owned()
+            },
+            bytes: size_of(&path),
+            path,
+        });
+    }
+    residue.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.label.cmp(&b.label)));
+    Ok(residue)
+}
+
+/// 占的字节数。目录逐层加，不跟软链接；读不到的算 0。
+fn size_of(path: &Path) -> u64 {
+    let Ok(meta) = fs::symlink_metadata(path) else {
         return 0;
     };
-    let mut removed = remove_files(&obsolete_home_files(&home));
-    removed += remove_dirs(&obsolete_home_dirs(&home));
-    removed
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    fs::read_dir(path)
+        .map(|entries| entries.flatten().map(|entry| size_of(&entry.path())).sum())
+        .unwrap_or(0)
 }
 
-fn remove_dirs(paths: &[PathBuf]) -> usize {
-    paths
-        .iter()
-        .filter(|path| fs::remove_dir_all(path).is_ok())
-        .count()
-}
-
-fn remove_files(paths: &[PathBuf]) -> usize {
-    paths
-        .iter()
-        .filter(|path| fs::remove_file(path).is_ok())
-        .count()
-}
-
-fn obsolete_home_files(home: &Path) -> Vec<PathBuf> {
-    let mut files = vec![
-        home.join("smelt.db"),
-        home.join("smelt.db-wal"),
-        home.join("smelt.db-shm"),
-        home.join("gui-debug.txt"),
-        home.join("scratch-diag.txt"),
-        home.join("selection.log"),
-        home.join("selection.json"),
-        home.join("llm.json"),
-        home.join("workspace.json"),
-        home.join("appearance.json"),
-        home.join("launch.json"),
-        home.join("agent_ui.json"),
-        home.join("collab.json"),
-        home.join("update-settings.json"),
-        home.join("update-state.json"),
-        home.join("terminal-theme.json"),
-        home.join("quota-cache.json"),
-        home.join("handoff.json"),
-        home.join("worktree-inherit.json"),
-        home.join("session_metadata.json"),
-        home.join("workspace_menu.json"),
-        home.join("dsh-auto-models.json"),
-        home.join("pi-auto-models.json"),
-        home.join("automations.json"),
-        home.join("remote_acp_sessions.json"),
-        home.join("remote_terminal_sessions.json"),
-        home.join("sessions.json"),
-        home.join("config.toml"),
-        home.join("global.md"),
-        home.join("smelt-bridge.log"),
-        home.join("app.log.1"),
-        home.join("bin").join("smeltd.install.lock"),
-        // 跨 Agent 消息下线后的 MCP helper。
-        home.join("bin").join("smelt-agent-mcp"),
-        home.join("bin").join("smelt-agent-mcp.next"),
-    ];
-    if let Ok(entries) = fs::read_dir(home.join("bin")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name.starts_with("smeltd.install.") {
-                files.push(path);
-            }
+fn remove_in(home: &Path, targets: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    let mut failures = Vec::new();
+    for path in targets {
+        let is_residue = path.parent() == Some(home)
+            && path
+                .file_name()
+                .is_some_and(|name| !name.to_str().is_some_and(paths::is_declared_entry));
+        if !is_residue {
+            continue;
+        }
+        if let Err(error) = remove_entry(path) {
+            failures.push((path.clone(), error.to_string()));
         }
     }
-    if let Ok(entries) = fs::read_dir(home) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name.ends_with(".bak") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    files.dedup();
-    files.retain(|path| path.is_file());
-    files
+    failures
 }
 
-fn obsolete_home_dirs(home: &Path) -> Vec<PathBuf> {
-    let always = [
-        home.join("projects"),
-        home.join("migration-backups"),
-        home.join("mermaid_cache"),
-        home.join("handoffs"),
-        home.join("tasks"),
-        home.join("automation-runs"),
-    ];
-    let empty_shells = [home.join("skills").join(".staging")];
-    always
-        .into_iter()
-        .filter(|path| path.is_dir())
-        .chain(
-            empty_shells
-                .into_iter()
-                .filter(|path| path.is_dir() && dir_is_effectively_empty(path)),
-        )
-        .collect()
-}
-
-fn dir_is_effectively_empty(path: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(path) else {
-        return false;
+fn remove_entry(path: &Path) -> io::Result<()> {
+    let result = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(error) => Err(error),
     };
-    entries.flatten().all(|entry| {
-        entry.file_name() == ".DS_Store" && entry.file_type().is_ok_and(|kind| kind.is_file())
-    })
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn obsolete_home_files_include_instincts_db_and_backups() {
+    fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "smelt-obsolete-home-{}-{}",
+            "smelt-residue-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -162,46 +117,87 @@ mod tests {
                 .unwrap_or_default(),
         ));
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("smelt.db"), []).unwrap();
-        fs::write(dir.join("gui-debug.txt"), "debug").unwrap();
-        fs::write(dir.join("llm.json"), "{}").unwrap();
-        fs::write(dir.join("workspace.json.empty-after-crash.bak"), "{}").unwrap();
-        fs::write(dir.join("workspace.json"), "{}").unwrap();
-        fs::write(dir.join("appearance.json"), "{}").unwrap();
-        fs::write(dir.join("launch.json"), "{}").unwrap();
-        fs::write(dir.join("agent_ui.json"), "{}").unwrap();
-        fs::write(dir.join("handoff.json"), "{}").unwrap();
-        fs::write(dir.join("smelt.sqlite3"), []).unwrap();
-        fs::create_dir_all(dir.join("migration-backups")).unwrap();
-        fs::create_dir_all(dir.join("projects")).unwrap();
-        fs::create_dir_all(dir.join("mermaid_cache")).unwrap();
-        fs::create_dir_all(dir.join("handoffs")).unwrap();
-        fs::create_dir_all(dir.join("tasks")).unwrap();
-        fs::create_dir_all(dir.join("automation-runs")).unwrap();
-        fs::create_dir_all(dir.join("skills").join(".staging")).unwrap();
-        fs::create_dir_all(dir.join("skills").join("keep")).unwrap();
-        fs::write(dir.join("skills").join("keep").join("SKILL.md"), "keep").unwrap();
+        dir
+    }
 
-        let files = obsolete_home_files(&dir);
-        assert!(files.contains(&dir.join("smelt.db")));
-        assert!(files.contains(&dir.join("gui-debug.txt")));
-        assert!(files.contains(&dir.join("llm.json")));
-        assert!(files.contains(&dir.join("workspace.json.empty-after-crash.bak")));
-        assert!(files.contains(&dir.join("workspace.json")));
-        assert!(files.contains(&dir.join("appearance.json")));
-        assert!(files.contains(&dir.join("launch.json")));
-        assert!(files.contains(&dir.join("agent_ui.json")));
-        assert!(files.contains(&dir.join("handoff.json")));
-        assert!(!files.contains(&dir.join("smelt.sqlite3")));
-        let dirs = obsolete_home_dirs(&dir);
-        assert!(dirs.contains(&dir.join("migration-backups")));
-        assert!(dirs.contains(&dir.join("projects")));
-        assert!(dirs.contains(&dir.join("mermaid_cache")));
-        assert!(dirs.contains(&dir.join("handoffs")));
-        assert!(dirs.contains(&dir.join("tasks")));
-        assert!(dirs.contains(&dir.join("automation-runs")));
-        assert!(dirs.contains(&dir.join("skills").join(".staging")));
-        assert!(!dirs.contains(&dir.join("skills").join("keep")));
-        let _ = fs::remove_dir_all(dir);
+    fn labels(residue: &[Residue]) -> Vec<&str> {
+        residue.iter().map(|item| item.label.as_str()).collect()
+    }
+
+    #[test]
+    fn only_undeclared_top_level_entries_are_residue_biggest_first() {
+        let home = scratch("scan");
+        fs::write(home.join("smelt.sqlite3"), [0; 8]).unwrap();
+        fs::write(home.join("smelt.sqlite3-wal"), [0; 8]).unwrap();
+        fs::create_dir_all(home.join("bin")).unwrap();
+        fs::write(home.join("bin").join("old-binary"), [0; 64]).unwrap();
+        fs::write(home.join("smelt.sqlite3.bak-v38"), [0; 4]).unwrap();
+        fs::create_dir_all(home.join("models").join("nested")).unwrap();
+        fs::write(home.join("models").join("nested").join("m.gguf"), [0; 32]).unwrap();
+
+        let residue = scan_in(&home).unwrap();
+
+        assert_eq!(labels(&residue), ["models/", "smelt.sqlite3.bak-v38"]);
+        assert_eq!(residue[0].bytes, 32, "目录逐层加起来");
+        assert_eq!(residue[1].bytes, 4);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_neither_followed_for_size_nor_on_removal() {
+        let home = scratch("link-home");
+        let outside = scratch("link-outside");
+        fs::write(outside.join("precious"), [0; 1024]).unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("linked")).unwrap();
+
+        let residue = scan_in(&home).unwrap();
+        assert_eq!(labels(&residue), ["linked"]);
+        assert!(residue[0].bytes < 1024);
+
+        assert!(remove_in(&home, &[home.join("linked")]).is_empty());
+        assert!(!home.join("linked").exists());
+        assert!(
+            outside.join("precious").is_file(),
+            "链接指向的东西不能跟着删"
+        );
+        let _ = fs::remove_dir_all(home);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn removal_deletes_residue_but_refuses_declared_or_foreign_paths() {
+        let home = scratch("remove");
+        let elsewhere = scratch("remove-elsewhere");
+        fs::create_dir_all(home.join("models").join("nested")).unwrap();
+        fs::write(home.join("models").join("nested").join("m.gguf"), "x").unwrap();
+        fs::write(home.join("smelt.db"), "x").unwrap();
+        fs::write(home.join("smelt.sqlite3"), "keep").unwrap();
+        fs::create_dir_all(home.join("plugins").join("p")).unwrap();
+        fs::write(elsewhere.join("models"), "keep").unwrap();
+
+        let failures = remove_in(
+            &home,
+            &[
+                home.join("models"),
+                home.join("smelt.db"),
+                home.join("gone-already"),
+                home.join("smelt.sqlite3"),
+                home.join("plugins").join("p"),
+                elsewhere.join("models"),
+            ],
+        );
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(!home.join("models").exists());
+        assert!(!home.join("smelt.db").exists());
+        assert!(home.join("smelt.sqlite3").is_file());
+        assert!(
+            home.join("plugins").join("p").is_dir(),
+            "条目里面不归这里管"
+        );
+        assert!(elsewhere.join("models").is_file());
+        let _ = fs::remove_dir_all(home);
+        let _ = fs::remove_dir_all(elsewhere);
     }
 }
