@@ -160,7 +160,6 @@ fn fold_icon(ix: usize, folded: bool) -> gpui::AnyElement {
         .items_center()
         .justify_center()
         .rounded(px(3.))
-        .cursor_pointer()
         .text_color(if folded {
             rgb(ui_theme::muted())
         } else {
