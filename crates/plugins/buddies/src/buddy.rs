@@ -9,14 +9,17 @@
 //! 由 [`Stage`] 按状态和露着的会话的变化定。
 //!
 //! 零件怎么上色、转角度、叠成一帧见 [`paint`]。数据变化时 [`Buddy::prepare`] 把这个小人要的
-//! 零件画好；每帧只叠，样子没变的帧不重叠（[`Portrait`]）。
+//! 零件画好；每帧只叠，样子没变的帧不重叠（[`Portrait`]）。头顶挂着的部分（天线、毛线帽的球、
+//! 芽）跟着身子慢半拍地晃，要接着上一帧算，状态放在 [`Portrait`] 里（[`swing`]）。
 
 mod moves;
 mod paint;
 mod sprites;
 mod stage;
+mod swing;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
     AnyElement, App, IntoElement as _, ObjectFit, RenderImage, Styled as _, StyledImage as _,
@@ -35,12 +38,43 @@ pub(super) struct Sprite {
     anchor: (f32, f32),
 }
 
-/// 一件戴的东西：可换色的主料（中性灰，乘色）和固定色的点缀各是哪张，至少有一张。两张的
-/// 大小、锚点一样，叠着画。`eyes` 是占不占眼睛（护目镜、眼镜），占眼睛的一个小人只戴一件。
+/// 一件戴的东西：可换色的主料（中性灰，乘色）和固定色的点缀各是哪张。两张的大小、锚点一样，
+/// 叠着画。`eyes` 是占不占眼睛（护目镜、眼镜），占眼睛的一个小人只戴一件。头顶会晃的部分另
+/// 记在 `dangle`；整件都晃的（天线、芽）主料、点缀都没有。
 pub(super) struct Wearable {
     base: Option<usize>,
     trim: Option<usize>,
     eyes: bool,
+    dangle: Option<Dangle>,
+}
+
+/// 一件戴的东西上挂着、会晃的部分：主料、点缀各是哪组（和 [`Wearable`] 的一样，每个朝向一张、
+/// 和身子同框），每个朝向挂点在哪（相对脚底，pt）。画的时候绕挂点转（[`swing`]）。
+pub(super) struct Dangle {
+    base: Option<usize>,
+    trim: Option<usize>,
+    pivots: [(f32, f32); sprites::FACINGS],
+}
+
+impl Dangle {
+    /// 身子转到 `turn` 时挂点在哪，和静止时挂着的部分的重心离挂点多远（都相对脚底，pt）。
+    fn at(&self, turn: f32) -> ((f32, f32), (f32, f32)) {
+        let (from, to, toward) = between(turn);
+        let mix =
+            |a: (f32, f32), b: (f32, f32)| (a.0 + (b.0 - a.0) * toward, a.1 + (b.1 - a.1) * toward);
+        // 两个朝向各算一份再插，转身时不跳。
+        let reach = |facing: usize| {
+            let pivot = self.pivots[facing];
+            self.base
+                .or(self.trim)
+                .and_then(|first| centroid(first + facing))
+                .map_or((0., -1.), |center| (center.0 - pivot.0, center.1 - pivot.1))
+        };
+        (
+            mix(self.pivots[from], self.pivots[to]),
+            mix(reach(from), reach(to)),
+        )
+    }
 }
 
 /// 一个小人。
@@ -128,7 +162,7 @@ impl Buddy {
         for facing in 0..sprites::FACINGS {
             paints.push(Paint::tinted(sprites::BODY + facing, self.skin()));
             paints.push(Paint::plain(sprites::BLUSH + facing));
-            paints.extend(self.wearing().map(|worn| worn.at(facing)));
+            paints.extend(self.wearing(0.).map(|worn| worn.at(facing)));
         }
         paints.extend((0..TURNS).map(|turn| Paint::turned(sprites::ARM, turn, self.skin())));
         if let Some(first) = self.role.held() {
@@ -142,10 +176,16 @@ impl Buddy {
         paints
     }
 
-    /// 戴着的要画的几层，从里到外：脸上、脖子上、头顶，每件先主料（乘色）再点缀。都和身子同框，
-    /// 跟着身子压扁、转身；一件的主料、点缀按同一张挪（`guide`），转身时不会错开。抬头低头时
-    /// 脸上的跟着五官挪，头顶的在球顶上、挪得少，脖子上的在脸下面、反着挪一点。
-    fn wearing(self) -> impl Iterator<Item = Facing> {
+    /// 头顶戴的那件上挂着、会晃的部分。
+    fn dangle(self) -> Option<&'static Dangle> {
+        sprites::HEADS[self.head.item].dangle.as_ref()
+    }
+
+    /// 戴着的要画的几层，从里到外：脸上、脖子上、头顶，每件先主料（乘色）再点缀，最后是头顶
+    /// 挂着的部分（绕挂点偏 `swing` 度）。都和身子同框，跟着身子压扁、转身；一件的主料、点缀按
+    /// 同一张挪（`guide`），转身时不会错开。抬头低头时脸上的跟着五官挪，头顶的在球顶上、挪得
+    /// 少，脖子上的在脸下面、反着挪一点。
+    fn wearing(self, swing: f32) -> impl Iterator<Item = Facing> {
         let on = |table: &'static [Wearable], worn: Worn, nod| (&table[worn.item], worn.color, nod);
         [
             self.face.map(|worn| on(&sprites::FACES, worn, 1.)),
@@ -154,7 +194,7 @@ impl Buddy {
         ]
         .into_iter()
         .flatten()
-        .flat_map(|(wearable, color, nod)| {
+        .flat_map(move |(wearable, color, nod)| {
             let guide = wearable.base.or(wearable.trim);
             let layer = move |first, tint| Facing {
                 first,
@@ -162,16 +202,36 @@ impl Buddy {
                 at: (0., 0.),
                 guide,
                 nod,
+                hinge: None,
             };
             let base = wearable.base.map(|first| layer(first, Tint::Wear(color)));
             let trim = wearable.trim.map(|first| layer(first, Tint::None));
-            base.into_iter().chain(trim)
+            let hung = wearable
+                .dangle
+                .as_ref()
+                .into_iter()
+                .flat_map(move |dangle| {
+                    let guide = dangle.base.or(dangle.trim);
+                    let hinge = Some(Hinge {
+                        pivots: &dangle.pivots,
+                        angle: swing,
+                    });
+                    let layer = move |first, tint| Facing {
+                        guide,
+                        hinge,
+                        ..layer(first, tint)
+                    };
+                    let base = dangle.base.map(|first| layer(first, Tint::Wear(color)));
+                    base.into_iter()
+                        .chain(dangle.trim.map(|first| layer(first, Tint::None)))
+                });
+            base.into_iter().chain(trim).chain(hung)
         })
     }
 
     /// 跟着身子转身的几层，从下往上：身子、腮红、眼睛（跟着 `look` 往哪看挪，眨一只眼的那只
-    /// 闭上）、嘴、戴的。
-    fn turning(self, look: &Look) -> Vec<Facing> {
+    /// 闭上）、嘴、戴的（头顶挂着的部分偏 `swing` 度）。
+    fn turning(self, look: &Look, swing: f32) -> Vec<Facing> {
         let mut eyes = look.eyes.sprites();
         if let Some(side) = look.wink {
             eyes[side] = moves::Eyes::Shut.sprites()[side];
@@ -184,6 +244,7 @@ impl Buddy {
             at,
             guide: Some(first),
             nod: 1.,
+            hinge: None,
         };
         let mut layers = vec![
             // 身子差不多是圆的，转过去、抬头低头轮廓都不怎么变，不挪。
@@ -193,6 +254,7 @@ impl Buddy {
                 at: (0., 0.),
                 guide: None,
                 nod: 0.,
+                hinge: None,
             },
             Facing {
                 nod: 0.9,
@@ -202,14 +264,15 @@ impl Buddy {
             feature(right_eye, look.gaze),
             feature(mouth, (0., 0.)),
         ];
-        layers.extend(self.wearing());
+        layers.extend(self.wearing(swing));
         layers
     }
 }
 
 /// 跟着身子转身的一层：哪组零件（每个朝向一张，第一张是 `first`）、乘什么色、另外挪多少（pt）。
 /// 转身夹在两个朝向之间时，按 `guide` 那组零件在两个朝向里的重心差挪过去（[`Facing::draw`]）；
-/// 没有的不挪。抬头低头（[`Look::pitch`]）时往上下挪 `nod` 倍的 [`PITCH`]。
+/// 没有的不挪。抬头低头（[`Look::pitch`]）时往上下挪 `nod` 倍的 [`PITCH`]。挂着晃的部分
+/// （`hinge`）再绕挂点转。
 #[derive(Clone, Copy)]
 struct Facing {
     first: usize,
@@ -217,6 +280,14 @@ struct Facing {
     at: (f32, f32),
     guide: Option<usize>,
     nod: f32,
+    hinge: Option<Hinge>,
+}
+
+/// 挂着晃的一层绕哪转（每个朝向的挂点，相对脚底，pt）、偏了多少度（画面里顺时针为正）。
+#[derive(Clone, Copy)]
+struct Hinge {
+    pivots: &'static [(f32, f32); sprites::FACINGS],
+    angle: f32,
 }
 
 /// 抬头（`pitch` 为 1）时五官往上挪多少（pt），低头（-1）往下。团子身子是圆的，抬头低头轮廓
@@ -258,7 +329,12 @@ impl OnBody {
 
     /// 和身子同框的一张（锚点在脚底）叠上去，另外挪 `at`。
     fn layer(&self, canvas: &mut Canvas, paint: Paint, at: (f32, f32)) {
-        canvas.layer_tilted(paint, self.point(at), self.scale, self.tilt, 1.);
+        self.layer_turned(canvas, paint, at, 0.);
+    }
+
+    /// 和 [`OnBody::layer`] 一样，再多转 `degrees`（挂着晃的部分）。
+    fn layer_turned(&self, canvas: &mut Canvas, paint: Paint, at: (f32, f32), degrees: f32) {
+        canvas.layer_tilted(paint, self.point(at), self.scale, self.tilt + degrees, 1.);
     }
 }
 
@@ -283,7 +359,21 @@ impl Facing {
             self.at.0 + shift.0,
             self.at.1 + shift.1 - body.pitch * self.nod * PITCH,
         );
-        body.layer(canvas, self.at(facing), at);
+        match self.hinge {
+            // 零件的锚点在脚底：绕挂点转 `angle`，锚点跟着挪到挂点加上转过的「挂点到锚点」。
+            Some(hinge) if hinge.angle.abs() > 0.05 => {
+                let pivot = hinge.pivots[facing];
+                let pivot = (pivot.0 + at.0, pivot.1 + at.1);
+                let (x, y) = rotated((at.0 - pivot.0, at.1 - pivot.1), hinge.angle);
+                body.layer_turned(
+                    canvas,
+                    self.at(facing),
+                    (pivot.0 + x, pivot.1 + y),
+                    hinge.angle,
+                );
+            }
+            _ => body.layer(canvas, self.at(facing), at),
+        }
     }
 }
 
@@ -353,46 +443,68 @@ fn toward(degrees: f32) -> (f32, f32) {
 pub(crate) const CANVAS: f32 = sprites::CANVAS;
 
 /// 一个小人头像在画的那一帧。样子没变就接着用；变了另叠一张，旧的从 gpui 的贴图里删掉，不然
-/// 动起来每帧一张，贴图越攒越多。
+/// 动起来每帧一张，贴图越攒越多。头顶挂着的部分晃到哪要接着上一帧算（[`swing::Swing`]）。
 #[derive(Default)]
 pub(crate) struct Portrait {
-    shown: Option<(Buddy, Look, Arc<RenderImage>)>,
+    shown: Option<(Buddy, Look, f32, Arc<RenderImage>)>,
+    swing: swing::Swing,
 }
 
 impl Portrait {
-    /// 画 `buddy` 摆着 `look` 的样子：盖住 [`CANVAS`] 见方的画布，四周伸出去 [`MARGIN`]（举起来
-    /// 的道具、头顶的特效），外面不裁。
-    fn show(&mut self, buddy: Buddy, look: Look, window: &mut Window) -> AnyElement {
+    /// 画 `buddy` 在 `now` 摆着 `look` 的样子：盖住 [`CANVAS`] 见方的画布，四周伸出去
+    /// [`MARGIN`]（举起来的道具、头顶的特效），外面不裁。`moving` 为假（定格）时挂着的部分
+    /// 不晃。另返回挂着的部分还在不在晃，在晃就还要下一帧。
+    fn show(
+        &mut self,
+        buddy: Buddy,
+        look: Look,
+        now: Instant,
+        moving: bool,
+        window: &mut Window,
+    ) -> (AnyElement, bool) {
+        let (swing, swinging) = if moving {
+            self.swing.step(buddy, &look, now)
+        } else {
+            self.swing = swing::Swing::default();
+            (0., false)
+        };
         let image = match &self.shown {
-            Some((shown, seen, image)) if *shown == buddy && *seen == look => image.clone(),
+            Some((shown, seen, angle, image))
+                if *shown == buddy && *seen == look && *angle == swing =>
+            {
+                image.clone()
+            }
             _ => {
-                let image = figure(buddy, &look);
-                if let Some((_, _, stale)) = self.shown.replace((buddy, look, image.clone())) {
+                let image = figure(buddy, &look, swing);
+                let shown = (buddy, look, swing, image.clone());
+                if let Some((_, _, _, stale)) = self.shown.replace(shown) {
                     window.drop_image(stale).ok();
                 }
                 image
             }
         };
-        img(image)
+        let image = img(image)
             .object_fit(ObjectFit::Fill)
             .absolute()
             .left(px(-MARGIN))
             .top(px(-MARGIN))
             .size(px(CANVAS + 2. * MARGIN))
-            .into_any_element()
+            .into_any_element();
+        (image, swinging)
     }
 
     /// 头像关掉时调：画着的那张从各个窗口的贴图里删掉。
     pub(crate) fn release(&mut self, cx: &mut App) {
-        if let Some((_, _, image)) = self.shown.take() {
+        if let Some((_, _, _, image)) = self.shown.take() {
             cx.drop_image(image, None);
         }
     }
 }
 
 /// 叠一帧：`look` 里的零件按锚点叠在 [`CANVAS`] 见方的画布上，先叠的在下面。转身时身子、
-/// 脸、戴的取夹着的两个朝向混起来（[`Facing::draw`]）；转到身子后面的胳膊垫在身子底下。
-fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
+/// 脸、戴的取夹着的两个朝向混起来（[`Facing::draw`]）；转到身子后面的胳膊垫在身子底下。头顶
+/// 挂着的部分绕挂点偏 `swing` 度。
+fn figure(buddy: Buddy, look: &Look, swing: f32) -> Arc<RenderImage> {
     const SAME: (f32, f32) = (1., 1.);
     let mut canvas = Canvas::new();
     let (fx, fy) = sprites::FEET;
@@ -436,7 +548,7 @@ fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
     // 腮红单独渲，叠在乘过色的身子上，不跟着身子色变。眼睛、嘴、戴的都和身子同框。差一点就
     // 到某个朝向时只画那一个，省得每帧多叠两张。
     const NEAR: f32 = 0.02;
-    let layers = buddy.turning(look);
+    let layers = buddy.turning(look, swing);
     let (from, to, toward) = between(look.turn);
     let draw = |canvas: &mut Canvas, facing, other, toward| {
         for layer in &layers {
@@ -636,12 +748,22 @@ mod tests {
             &sprites::NECKS[..],
         ] {
             for wearable in table {
-                let parts: Vec<_> = wearable.base.iter().chain(&wearable.trim).collect();
-                assert!(!parts.is_empty());
-                for part in &parts[1..] {
-                    let (a, b) = (*parts[0], **part);
-                    assert_eq!((size(a), SPRITES[a].anchor), (size(b), SPRITES[b].anchor));
+                // 不晃的主料、点缀同框，晃的那两张同框；整件至少有一张。
+                let hung = wearable.dangle.as_ref();
+                let groups = [
+                    (wearable.base, wearable.trim),
+                    hung.map_or((None, None), |dangle| (dangle.base, dangle.trim)),
+                ];
+                let mut any = false;
+                for (base, trim) in groups {
+                    let parts: Vec<_> = base.into_iter().chain(trim).collect();
+                    any |= !parts.is_empty();
+                    for part in parts.iter().skip(1) {
+                        let (a, b) = (parts[0], *part);
+                        assert_eq!((size(a), SPRITES[a].anchor), (size(b), SPRITES[b].anchor));
+                    }
                 }
+                assert!(any);
             }
         }
     }
@@ -719,7 +841,7 @@ mod tests {
         let buddy = Buddy::of("pitch");
         let mut look = Look::rest(buddy.role(), 0);
         look.pitch = 1.;
-        let layers = buddy.turning(&look);
+        let layers = buddy.turning(&look, 0.);
         let body = layers
             .iter()
             .find(|layer| layer.first == sprites::BODY)
@@ -739,7 +861,7 @@ mod tests {
         look.eyes = moves::Eyes::Open;
         look.wink = Some(1);
         let firsts: Vec<_> = buddy
-            .turning(&look)
+            .turning(&look, 0.)
             .iter()
             .map(|layer| layer.first)
             .collect();
