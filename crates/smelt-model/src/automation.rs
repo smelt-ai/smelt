@@ -489,7 +489,8 @@ pub struct Automation {
     pub id: String,
     pub name: String,
     pub enabled: bool,
-    /// Daemon-managed workspace assigned from the stable automation id.
+    /// 在哪个目录里跑。用户选的原样用；没选（`None`）或是托管目录（见
+    /// [`is_managed_workspace`]）时由运行时按 id 分配，换了智能体也跟着换。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_dir: Option<String>,
     pub trigger: AutomationTrigger,
@@ -578,9 +579,45 @@ impl<'de> Deserialize<'de> for Automation {
     }
 }
 
+/// 运行时给自动化分配的托管目录的名字：按 id 算的固定哈希，放在某个 `automations/` 下。
+pub fn managed_workspace_name(automation_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    let mut digest = Sha256::new();
+    digest.update(b"smelt.automation-workspace.v1\0");
+    digest.update((automation_id.len() as u64).to_be_bytes());
+    digest.update(automation_id.as_bytes());
+    digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut name, byte| {
+            let _ = write!(name, "{byte:02x}");
+            name
+        })
+}
+
+/// `path` 是不是运行时给这条自动化分配的托管目录（不管在哪个根下）。
+pub fn is_managed_workspace(path: &str, automation_id: &str) -> bool {
+    let path = std::path::Path::new(path);
+    path.file_name()
+        .is_some_and(|name| name.to_str() == Some(&managed_workspace_name(automation_id)))
+        && path
+            .parent()
+            .and_then(std::path::Path::file_name)
+            .is_some_and(|parent| parent == "automations")
+}
+
 impl Automation {
     pub fn notify(&self) -> AutomationNotify {
         AutomationNotify::from_sinks(&self.sinks)
+    }
+
+    /// 用户自己选的工作目录；没选、用的是托管目录时是 `None`。
+    pub fn custom_workspace(&self) -> Option<&str> {
+        self.workspace_dir
+            .as_deref()
+            .filter(|dir| !dir.trim().is_empty() && !is_managed_workspace(dir, &self.id))
     }
 
     pub fn is_ready(&self) -> bool {
@@ -2207,6 +2244,55 @@ mod schedule_tests {
         assert!(automation.is_ready());
         assert!(automation.validate().is_ok());
         assert!(automation.validate_execution_context().is_err());
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    fn with_dir(dir: Option<&str>) -> Automation {
+        Automation {
+            id: "automation-1".into(),
+            name: "日报".into(),
+            enabled: true,
+            workspace_dir: dir.map(str::to_owned),
+            trigger: AutomationTrigger::default(),
+            action: AutomationAction::shell("true", Vec::new()),
+            sinks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn managed_dirs_under_any_root_are_not_custom() {
+        let name = managed_workspace_name("automation-1");
+        assert_eq!(name.len(), 64);
+        for root in [
+            "/h/.smelt/workspaces/automations",
+            "/h/.smelt/agents/a/automations",
+        ] {
+            let dir = format!("{root}/{name}");
+            assert!(is_managed_workspace(&dir, "automation-1"));
+            assert_eq!(with_dir(Some(&dir)).custom_workspace(), None);
+        }
+        assert!(!is_managed_workspace(
+            &format!("/h/x/{name}"),
+            "automation-1"
+        ));
+        assert!(!is_managed_workspace(
+            &format!("/h/.smelt/workspaces/automations/{name}"),
+            "automation-2"
+        ));
+    }
+
+    #[test]
+    fn a_chosen_dir_is_custom() {
+        assert_eq!(with_dir(None).custom_workspace(), None);
+        assert_eq!(with_dir(Some(" ")).custom_workspace(), None);
+        assert_eq!(
+            with_dir(Some("/work/repo")).custom_workspace(),
+            Some("/work/repo")
+        );
     }
 }
 

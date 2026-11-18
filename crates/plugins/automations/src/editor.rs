@@ -126,6 +126,9 @@ pub(crate) struct AutomationEditor {
     pub(crate) retained_events: Vec<EventIngress>,
     pub(crate) entries: Vec<TriggerEntryEditor>,
     pub(crate) notification: AutomationNotify,
+    /// 在哪个目录里跑：运行时给的托管目录，或用户选的。保存时原样带回去，运行时据此
+    /// 认出是不是托管的（`Automation::custom_workspace`）。
+    pub(crate) workspace_dir: Option<String>,
     /// 从模板建的：模板指令里留给用户补的空（[`crate::templates::placeholders`]）。原样还在
     /// 指令里的算没填，填完才能创建。
     pub(crate) placeholders: Vec<String>,
@@ -876,6 +879,69 @@ pub(crate) fn render_notification_field(
         .child(automation_section_label(t!("notification.title")))
         .child(div().flex().child(picker))
         .child(crate::view::automation_field_hint(notify_hint(selected)))
+        .into_any_element()
+}
+
+/// 在哪做：默认目录说清是哪儿；选了文件夹就显示路径，能改回默认。
+pub(crate) fn render_workspace_field(
+    editor: &AutomationEditor,
+    is_agent: bool,
+    entity: Entity<AutomationsPage>,
+) -> AnyElement {
+    let custom = editor.workspace_dir.as_deref().filter(|dir| {
+        !dir.trim().is_empty()
+            && !api::model::automation::is_managed_workspace(dir, &editor.automation.id)
+    });
+    let current = div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .type_style(TYPE.text_small)
+        .text_color(rgb(if custom.is_some() {
+            ui_theme::text()
+        } else {
+            ui_theme::muted()
+        }))
+        .child(SharedString::from(custom.map_or_else(
+            || t!("workspace.default").into_owned(),
+            str::to_owned,
+        )));
+    let choose = Button::new("automation-workspace-choose")
+        .small()
+        .label(t!("workspace.choose"))
+        .on_click({
+            let entity = entity.clone();
+            move |_, _, cx| entity.update(cx, |page, cx| page.pick_automation_workspace(cx))
+        });
+    let reset = custom.is_some().then(|| {
+        Button::new("automation-workspace-reset")
+            .small()
+            .quiet()
+            .label(t!("workspace.reset"))
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |page, cx| page.set_automation_workspace(None, cx))
+            })
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(current)
+                .child(choose)
+                .children(reset),
+        )
+        .when(custom.is_none(), |field| {
+            field.child(crate::view::automation_field_hint(if is_agent {
+                t!("workspace.default_agent").into()
+            } else {
+                t!("workspace.default_shell").into()
+            }))
+        })
         .into_any_element()
 }
 

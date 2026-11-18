@@ -24,7 +24,9 @@
   （裁掉了运行输出、触发载荷和指令快照，正文用 `run_detail` 取），附带这台机器的 `webhook_base_url`。
 - 定义 `Automation`（`crates/smelt-model/src/automation.rs`）：`id`（客户端生成）、`name`、`enabled`、
   `trigger{schedules, webhooks, events}`（至少一条）、`action`（`Agent{agent_definition_id, prompt}` 或
-  `Shell{command, args}`）、`sinks`；`workspace_dir` 由运行时分配。调度规则五种：每天、每周（星期位掩码）、
+  `Shell{command, args}`）、`sinks`；`workspace_dir` 是用户选的目录，原样用（不在就拒绝保存、运行失败）；没选或是托管目录
+  （按 id 算的固定名字，见 `is_managed_workspace`）时由运行时分配：智能体的在它 space 下的
+  `automations/`，Shell 的在 `~/.smelt/workspaces/automations`，换了智能体跟着换。调度规则五种：每天、每周（星期位掩码）、
   每 N 分钟、每 N 小时、时段内按间隔。没有 cron。
 - **upsert 是整对象覆盖，没有版本检查**；webhook 令牌下发时换成 `<redacted>`，upsert 时按位置换回真令牌。
 

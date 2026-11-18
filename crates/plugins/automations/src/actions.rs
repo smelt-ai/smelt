@@ -562,6 +562,7 @@ impl AutomationsPage {
             retained_events,
             entries,
             notification,
+            workspace_dir: automation.workspace_dir.clone(),
             placeholders: Vec::new(),
             draft_revision: 0,
             saving_revision: None,
@@ -743,6 +744,55 @@ impl AutomationsPage {
         self.touch_schedule_editor(cx);
     }
 
+    pub(crate) fn set_automation_workspace(&mut self, dir: Option<String>, cx: &mut Context<Self>) {
+        if let Some(editor) = self.editor.as_mut() {
+            editor.workspace_dir = dir;
+        }
+        self.touch_schedule_editor(cx);
+    }
+
+    /// 在自动化所在那台机器上选目录。
+    pub(crate) fn pick_automation_workspace(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_ref() else {
+            return;
+        };
+        let request = api::PathRequest {
+            machine: editor.automation.runtime.clone(),
+            title: t!("workspace.pick_title").into_owned(),
+            confirm: t!("workspace.pick_confirm").into_owned(),
+            files: false,
+            multiple: false,
+        };
+        let instance_id = editor.instance_id;
+        let picked = api::PICK_PATHS.run(&request, cx);
+        cx.spawn(async move |page, cx| {
+            let dir = match picked.await {
+                Ok(paths) => paths.and_then(|paths| paths.into_iter().next()),
+                Err(error) => {
+                    page.update(cx, |page, cx| {
+                        if let Some(editor) = page.editor.as_mut() {
+                            editor.error = Some(error);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let Some(dir) = dir else {
+                return;
+            };
+            page.update(cx, |page, cx| {
+                // 选的时候切到了别的自动化，就不往新开的那条里写。
+                if page.editor.as_ref().map(|editor| editor.instance_id) == Some(instance_id) {
+                    page.set_automation_workspace(Some(dir), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// 已创建的自动化改动后自动保存；新建的只记修改，等用户点「创建」。
     pub(crate) fn touch_schedule_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_mut() else {
@@ -879,7 +929,7 @@ impl AutomationsPage {
             id: target.id.clone(),
             name: editor.name.read(cx).value().trim().to_string(),
             enabled,
-            workspace_dir: None,
+            workspace_dir: editor.workspace_dir.clone(),
             trigger,
             action: editor.action(cx),
             sinks: editor.notification.to_sinks(),

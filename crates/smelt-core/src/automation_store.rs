@@ -17,7 +17,6 @@ use crate::automation::{
 };
 use crate::automation_transcript::save_run_transcript_on;
 use chrono::{DateTime, Duration, Local, Offset, TimeZone};
-use sha2::{Digest, Sha256};
 
 const AUTOMATION_DOCUMENT: &str = "automations.json";
 
@@ -863,18 +862,12 @@ impl AutomationOwner {
     }
 }
 
-const AUTOMATION_WORKSPACE_HASH_DOMAIN: &[u8] = b"smelt.automation-workspace.v1\0";
-
 fn automation_workspace_path(root: &Path, automation_id: &str) -> PathBuf {
-    let mut digest = Sha256::new();
-    digest.update(AUTOMATION_WORKSPACE_HASH_DOMAIN);
-    digest.update((automation_id.len() as u64).to_be_bytes());
-    digest.update(automation_id.as_bytes());
-    let encoded = hex::encode(digest.finalize());
-    root.join(encoded)
+    root.join(crate::automation::managed_workspace_name(automation_id))
 }
 
-/// 自动化工作目录的两个根，都从存储所在的 smelt home 推出来。
+/// 自动化托管工作目录的两个根，都从存储所在的 smelt home 推出来。用户自己选了目录的
+/// 不归这里管（[`Automation::custom_workspace`]），原样用，不建也不改权限。
 ///
 /// 智能体自动化跑在它的 space 下的 `automations/` 里，每条一个子目录：能读到它在
 /// 对话里攒下的东西，又不会和别的自动化互相覆盖。Shell 没有智能体，留在托管目录；
@@ -1005,14 +998,16 @@ fn assign_managed_workspaces(
     }
     let workspaces = automation_ids
         .iter()
-        .map(|automation_id| {
+        .filter_map(|automation_id| {
             let automation = file
                 .automations
                 .iter()
                 .find(|automation| automation.id == automation_id.as_str())
                 .expect("managed workspace ids were filtered against this file");
-            ensure_automation_workspace(roots, automation)
-                .map(|workspace| (automation_id, workspace))
+            (automation.custom_workspace().is_none()).then(|| {
+                ensure_automation_workspace(roots, automation)
+                    .map(|workspace| (automation_id, workspace))
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     for (automation_id, workspace) in workspaces {
@@ -1035,7 +1030,9 @@ fn assign_upsert_workspace(
         return Ok(());
     };
     automation.validate()?;
-    automation.workspace_dir = Some(ensure_automation_workspace(roots, automation)?);
+    if automation.custom_workspace().is_none() {
+        automation.workspace_dir = Some(ensure_automation_workspace(roots, automation)?);
+    }
     Ok(())
 }
 
@@ -1637,8 +1634,17 @@ mod tests {
         );
         assert!(!missing_workspace.exists());
 
+        // 换智能体前的托管目录（客户端原样带回来的）认得出是托管的，换成现在这位的。
+        let stale = automation_workspace_path(
+            &temp
+                .path()
+                .join("agents")
+                .join("old-agent")
+                .join("automations"),
+            "automation-1",
+        );
         let mut definition = automation();
-        definition.workspace_dir = Some("/outside/client-controlled".to_string());
+        definition.workspace_dir = stale.to_str().map(str::to_owned);
 
         owner
             .apply(
@@ -1660,7 +1666,7 @@ mod tests {
             workspace,
             automation_workspace_path(&workspace_root, "automation-1")
         );
-        assert!(!workspace.to_string_lossy().contains("client-controlled"));
+        assert!(!stale.exists());
 
         std::fs::remove_dir_all(&workspace).unwrap();
         let applied = owner
@@ -1720,6 +1726,7 @@ mod tests {
             true,
         );
         let mut definition = automation();
+        definition.workspace_dir = None;
         definition.action = crate::automation::AutomationAction::shell("true", Vec::new());
 
         owner
@@ -1787,42 +1794,80 @@ mod tests {
     }
 
     #[test]
-    fn startup_replaces_a_legacy_workspace_with_the_managed_path() {
+    fn a_chosen_workspace_is_kept_as_is() {
         let temp = tempfile::tempdir().unwrap();
         let store_path = temp.path().join("automations.json");
-        let workspace_root = temp
-            .path()
-            .join("agents")
-            .join("agent-1")
-            .join("automations");
-        let mut file = AutomationFile {
-            timezone_fingerprint: "UTC".to_string(),
-            ..Default::default()
-        };
-        let mut definition = automation();
-        definition.workspace_dir = Some("/legacy/project".to_string());
-        file.automations.push(definition);
-        seed_snapshot(temp.path(), &file);
-
-        let owner = AutomationOwner::load_from_paths(
+        let chosen = temp.path().join("repo");
+        std::fs::create_dir_all(&chosen).unwrap();
+        let chosen = chosen.to_str().unwrap().to_string();
+        let mut owner = AutomationOwner::load_from_paths(
             Some(store_path.clone()),
             Utc::now(),
             "UTC".to_string(),
             true,
         );
-
-        let expected = automation_workspace_path(&workspace_root, "automation-1");
+        let mut definition = automation();
+        definition.workspace_dir = Some(chosen.clone());
+        owner
+            .apply(
+                AutomationCommand::Upsert {
+                    automation: Box::new(definition.clone()),
+                },
+                Utc::now(),
+            )
+            .unwrap();
         assert_eq!(
             owner.snapshot().automations[0].workspace_dir.as_deref(),
-            expected.to_str()
+            Some(chosen.as_str())
         );
-        assert!(expected.is_dir());
-        assert!(!store_path.exists());
-        let persisted = persisted_file(temp.path());
+        // 托管目录没建出来。
+        assert!(!temp.path().join("agents").exists());
+
+        // 重启照样用它。
+        let owner =
+            AutomationOwner::load_from_paths(Some(store_path), Utc::now(), "UTC".to_string(), true);
         assert_eq!(
-            persisted.automations[0].workspace_dir.as_deref(),
-            expected.to_str()
+            owner.snapshot().automations[0].workspace_dir.as_deref(),
+            Some(chosen.as_str())
         );
+
+        // 选的目录不在了：保存时就报出来。
+        let mut owner = owner;
+        definition.workspace_dir = Some(temp.path().join("gone").to_string_lossy().into_owned());
+        assert!(
+            owner
+                .apply(
+                    AutomationCommand::Upsert {
+                        automation: Box::new(definition.clone()),
+                    },
+                    Utc::now(),
+                )
+                .is_err()
+        );
+
+        // 改回默认就用托管目录。
+        definition.workspace_dir = None;
+        owner
+            .apply(
+                AutomationCommand::Upsert {
+                    automation: Box::new(definition),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        let managed = automation_workspace_path(
+            &temp
+                .path()
+                .join("agents")
+                .join("agent-1")
+                .join("automations"),
+            "automation-1",
+        );
+        assert_eq!(
+            owner.snapshot().automations[0].workspace_dir.as_deref(),
+            managed.to_str()
+        );
+        assert!(managed.is_dir());
     }
 
     #[test]
@@ -1907,7 +1952,10 @@ mod tests {
         let error = owner
             .apply(
                 AutomationCommand::Upsert {
-                    automation: Box::new(automation()),
+                    automation: Box::new(Automation {
+                        workspace_dir: None,
+                        ..automation()
+                    }),
                 },
                 Utc::now(),
             )

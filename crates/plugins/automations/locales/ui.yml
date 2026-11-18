@@ -1,11 +1,11 @@
 _version: 2
 access:
   agent_note:
-    en: "Runs won't stop to wait for your approval and can read and write local files and run commands. It runs in the agent's own space and can read files it gathered in conversations and its bound folders; your projects aren't included automatically, so name the repository path in the instructions."
-    zh-CN: "运行时不会停下来等你批准，可以读写本机文件、执行命令。在智能体自己的空间里运行，能读到它在对话里攒下的文件和绑定的目录；你的项目不会自动带上，要处理的仓库请在指令里写明路径。"
+    en: "Runs won't stop to wait for your approval and can read and write local files and run commands."
+    zh-CN: "运行时不会停下来等你批准，可以读写本机文件、执行命令。"
   shell_note:
-    en: "Runs won't stop to wait for your approval. Commands run as you and can read and write local files. Each run happens in this automation's own folder."
-    zh-CN: "运行时不会停下来等你批准，命令以你的身份执行，可以读写本机文件。每次都在这条自动化自己的目录里执行。"
+    en: "Runs won't stop to wait for your approval. Commands run as you and can read and write local files."
+    zh-CN: "运行时不会停下来等你批准，命令以你的身份执行，可以读写本机文件。"
   title:
     en: "Unattended · Full Access"
     zh-CN: "无人值守 · 完全访问"
@@ -158,6 +158,9 @@ editor:
   when:
     en: "When"
     zh-CN: "什么时候"
+  where:
+    en: "Where"
+    zh-CN: "在哪做"
   who:
     en: "Who Does It"
     zh-CN: "谁来做"
@@ -849,3 +852,25 @@ weekday:
   wed:
     en: "Wed"
     zh-CN: "三"
+workspace:
+  choose:
+    en: "Choose Folder…"
+    zh-CN: "选择文件夹…"
+  default:
+    en: "Default folder"
+    zh-CN: "默认目录"
+  default_agent:
+    en: "The agent's own space: it can read files it gathered in conversations and its bound folders."
+    zh-CN: "智能体自己的空间，能读到它在对话里攒下的文件和绑定的目录。"
+  default_shell:
+    en: "This automation's own folder."
+    zh-CN: "这条自动化自己的目录。"
+  pick_confirm:
+    en: "Choose"
+    zh-CN: "选择"
+  pick_title:
+    en: "Choose Where the Automation Runs"
+    zh-CN: "选择自动化在哪个目录里运行"
+  reset:
+    en: "Use Default"
+    zh-CN: "用默认目录"

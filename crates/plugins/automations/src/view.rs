@@ -431,6 +431,11 @@ impl AutomationsPage {
                         None,
                         what,
                     ))
+                    .child(automation_editor_section(
+                        t!("editor.where").into(),
+                        None,
+                        crate::editor::render_workspace_field(editor, is_agent, entity.clone()),
+                    ))
                     .child(render_notification_field(editor, entity, cx)),
             )
             .into_any_element()
