@@ -402,12 +402,17 @@ export function register_context_menu_items(menu: string, items: ContextMenuItem
 export function set_quit_guard(name: string | null): null;
 /** 打开文件，交给登记的文件打开者；没有打开者时本机文件用系统文本编辑器打开，远程的 reject。line 从 1 数。 */
 export function open_file(machine: Machine, path: string, line?: number): Promise<null>;
-/** 本插件登记的一个视图（主入口之外的），同 Rust 的 ViewSpec。图标一律用插件的默认图标。 */
+/**
+ * 本插件登记的一个视图（主入口之外的），同 Rust 的 ViewSpec。顶上那条一律由外壳画（draws_top_bar 为 false）：
+ * 脚本画不了拖窗口的区域，自己画的话视图单独一组时窗口就拖不动了。
+ */
 export interface ViewSpec {
   /** 本插件内的名字，不含 "/"；视图 id 是 "<插件 id>/<name>"。"main" 不能用：那是插件主入口的视图。 */
   name: string;
   /** 入口、侧栏上的名字。 */
   title: Text;
+  /** 入口、标签上的图标，资源路径 "icons/<名字>.svg"（名字同 ViewInfo.icon）；不给用插件的默认图标。 */
+  icon?: string | null;
   /**
    * 视图的入口脚本，插件目录里的相对路径，如 "settings.tsx"。每份视图单独加载、挂载一次它，和主入口、
    * 别的视图是各自的脚本实例，不共享内存：要共享的存在插件自己的库里（store_query / store_execute），
@@ -512,7 +517,7 @@ struct CommandCall {
 /// 宿主怎么把插件目录里的一个入口建成视图（见 `register_views`）。
 #[derive(Clone)]
 pub struct ViewLoader {
-    /// JS 插件登记的视图一律用这个图标。
+    /// 脚本登记视图时没给图标、和插件主入口的视图用这个图标。
     pub icon: SharedString,
     /// 校验入口（插件目录里的相对路径），给出建视图的函数。
     pub load: LoadView,
@@ -1734,6 +1739,7 @@ fn view_arguments(
                 .map_err(|error| invalid(&error))?
                 .ok_or_else(|| invalid(&format!("「{name}」要有 title")))?;
             let entry = text("entry")?.ok_or_else(|| invalid(&format!("「{name}」要有 entry")))?;
+            let icon = text("icon")?.map(SharedString::from);
             let settings = match view.get("settings") {
                 None | Some(HostValue::Null) => None,
                 Some(settings @ HostValue::Object(_)) => {
@@ -1789,7 +1795,7 @@ fn view_arguments(
             Ok(ViewSpec {
                 name: name.into(),
                 title,
-                icon: loader.icon.clone(),
+                icon: icon.unwrap_or_else(|| loader.icon.clone()),
                 draws_top_bar: false,
                 instances,
                 settings,
@@ -3017,6 +3023,28 @@ mod tests {
             .map(|entry| (entry.settings, entry.instances))
             .collect();
         assert_eq!(kinds, [(true, false), (false, true)]);
+    }
+
+    #[test]
+    fn a_view_can_bring_its_own_icon() {
+        let loader = loader(Rc::default());
+        let icons = |icon: Option<HostValue>| {
+            let mut fields = vec![
+                ("name", HostValue::from("v")),
+                ("title", "视图".into()),
+                ("entry", "view.tsx".into()),
+            ];
+            fields.extend(icon.map(|icon| ("icon", icon)));
+            let arguments = HostArguments::new([HostValue::Array(vec![object(&fields)])]);
+            view_arguments(&arguments, &loader).map(|specs| specs[0].icon.clone())
+        };
+        assert_eq!(icons(None).unwrap(), "icons/puzzle.svg");
+        assert_eq!(icons(Some(HostValue::Null)).unwrap(), "icons/puzzle.svg");
+        assert_eq!(
+            icons(Some("icons/terminal.svg".into())).unwrap(),
+            "icons/terminal.svg"
+        );
+        assert!(icons(Some(HostValue::Bool(true))).is_err());
     }
 
     #[test]
