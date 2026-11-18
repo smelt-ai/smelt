@@ -129,7 +129,15 @@ def main():
             base = f"Some({ident(group + '/base')})" if item["base"] else "None"
             trim = f"Some({ident(group + '/trim')})" if item["trim"] else "None"
             eyes = "true" if item["eyes"] else "false"
-            rows.append(f"    Wearable {{ base: {base}, trim: {trim}, eyes: {eyes} }}, // {item['name']}")
+            dangle = "None"
+            if item.get("dangle"):
+                hung = group + "/dangle"
+                parts = {part: f"Some({ident(hung + '/' + part)})" if item["dangle"][part] else "None"
+                         for part in ("base", "trim")}
+                pivots = ", ".join(f"({x / SCALE}, {y / SCALE})" for x, y in rig["dangles"][item["name"]])
+                dangle = (f"Some(Dangle {{ base: {parts['base']}, trim: {parts['trim']}, "
+                          f"pivots: [{pivots}] }})")
+            rows.append(f"    Wearable {{ base: {base}, trim: {trim}, eyes: {eyes}, dangle: {dangle} }}, // {item['name']}")
         return f"pub(super) static {ident(kind)}S: [Wearable; {len(items)}] = [\n" + "\n".join(rows) + "\n];\n"
 
     places = []
@@ -138,6 +146,8 @@ def main():
             pairs = ", ".join("[" + ", ".join("(" + ", ".join(f"{v / SCALE}" for v in point) + ")" for point in pair)
                               + "]" for pair in value)
             places.append(f"pub(super) const SHOULDERS: [[(f32, f32, f32); 2]; {len(value)}] = [{pairs}];")
+        elif key == "dangles":
+            continue  # 写进戴的那张表（`wearing`）。
         elif key == "canvas":
             places.append(f"pub(super) const CANVAS: f32 = {value / SCALE};")
         elif isinstance(value, list):
@@ -151,7 +161,7 @@ def main():
     with open(RUST, "w") as f:
         f.write(
             "// 由 scripts/buddies_pack.py 生成，别手改：改 buddies_render.py 重渲再打包。\n\n"
-            "use super::{Sprite, Wearable};\n\n"
+            "use super::{Dangle, Sprite, Wearable};\n\n"
             "pub(super) const BLOB: &[u8] = include_bytes!(\"../../assets/buddies.bin\");\n\n"
             f"/// 会转的零件每组几个关键朝向（每 {360 // spec['keys']}° 一张，从 0° 起）。\n"
             f"pub(super) const KEYS: usize = {spec['keys']};\n"
@@ -163,7 +173,7 @@ def main():
             + "/// 戴上糊成一片（见 `buddies_pack.py` 的 `clashes`）。\n"
             + f"pub(super) const WEAR_FOR_BODY: [u16; {len(spec['colors'])}] = "
             + "[" + ", ".join(f"0b{allowed(body):0{len(spec['wear_colors'])}b}" for body in spec["colors"]) + "];\n"
-            + "\n/// 戴的东西，头顶、脸上、脖子各一张表：可换色的主料、固定色的点缀各是哪张。\n"
+            + "\n/// 戴的东西，头顶、脸上、脖子各一张表：可换色的主料、固定色的点缀各是哪张，头顶会晃的部分和它每个朝向的挂点。\n"
             + "".join(wearing(kind, spec["wear"][kind]) for kind in ("head", "face", "neck"))
             + "\n"
             "/// 每组第一张的编号。\n"

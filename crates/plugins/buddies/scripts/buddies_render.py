@@ -16,14 +16,15 @@ gpui 转不了彩色图，会转的零件（胳膊、手里的道具、方向盘
   腮红    身子当遮挡（holdout）只留露出来的部分，框和锚点跟身子一样，叠在身子上。每个朝向一张。
   胳膊    中性灰的小鳍，KEYS 个朝向，锚点在肩。
   道具    每样 KEYS 个朝向，锚点在握的地方。
-  脸      眼睛（睁、笑眯、闭，左右各一）、嘴（笑、平、张），每个朝向一张，和腮红一样拿身子当
+  脸      眼睛（睁、笑眯、闭、困、瞪大，左右各一）、嘴（笑、平、张、撅、张大），每个朝向一张，和腮红一样拿身子当
           遮挡，转到背面的被挡掉。
   戴的    头顶（帽子、头发、花）、脸上（眼镜、墨镜）、脖子（领结、围巾）各一组，按种子各自落。
           可换色的主料和固定色的点缀分两张渲（base、trim），插件给主料乘色再叠上点缀。都拿
-          身子当遮挡，框和锚点跟身子一样，跟着身子压扁、转身。
+          身子当遮挡，框和锚点跟身子一样，跟着身子压扁、转身。头顶挂着、会晃的部分（天线、
+          毛线帽的球、芽，见 DANGLES）另渲一组（dangle），整件的其余部分当遮挡；插件绕挂点转着画。
   身前的  码农的电脑、写手的本子，各按亮着几行出 5 张。
   卡丁车  赛车手的：车头、车尾各按左右倾（-30° 到 30°）出 7 张，方向盘 KEYS 个朝向。
-  特效    火星、泡泡、水滴、音符、灰、点、感叹号、灯泡、星星、爱心、速度线、彩纸、嫩芽。
+  特效    火星、泡泡、水滴、音符、灰、点、感叹号、灯泡、星星、爱心、速度线、Z、彩纸、嫩芽。
 
 运行（要装 Blender，`brew install --cask blender`）：
 
@@ -31,7 +32,8 @@ gpui 转不了彩色图，会转的零件（胳膊、手里的道具、方向盘
       -- target/buddies
 
 输出 <目录>/sprites/<序号>.png、sprites.json（每张的名字、大小、锚点，按成图像素）和 rig.json
-（脚底在画布上的位置、每个朝向的肩、头顶上方、身前物件、道具尖端相对脚底或握点的位置）。渲图是成图的两倍，
+（脚底在画布上的位置、每个朝向的肩、头顶上方、正面的嘴、会晃的部分每个朝向的挂点、身前物件、
+道具尖端相对脚底或握点的位置）。渲图是成图的两倍，
 打包时缩下去。
 
 场景约定：Blender 的 z 朝上，小人面朝 -y 再往右转一点（YAW），脚底在原点；正交镜头从前上方看，
@@ -474,6 +476,20 @@ def eye(root, kind, side):
     elif kind == "happy":
         points = [(t * 0.07, -0.006, -0.025 + 0.05 * (1 - t * t)) for t in (-1, -0.5, 0, 0.5, 1)]
         tube(points, 0.02, ink, holder)
+    elif kind == "sleepy":
+        # 困：眼皮耷拉下来盖住上半，只露下半个眼珠。眼皮是一道往上拱的弧、外眼角往下垂，
+        # 平的或者内眼角低的看着像不耐烦、生气。
+        sphere((0, 0.012, -0.012), (0.074, 0.03, 0.094), ink, holder, keep=lambda v: v.z <= 0.05)
+        shine = glow((1, 1, 1), 3.0)
+        sphere((0.025, -0.02, -0.045), (0.018, 0.006, 0.016), shine, holder)
+        lid = [(t * 0.074, -0.008, -0.008 + 0.014 * (1 - t * t) - 0.012 * t * side) for t in (-1, -0.5, 0, 0.5, 1)]
+        tube(lid, 0.016, ink, holder)
+    elif kind == "wide":
+        # 吓一跳、惊讶：眼珠更大更圆，亮点也大。
+        sphere((0, 0.012, 0), (0.088, 0.03, 0.108), ink, holder)
+        shine = glow((1, 1, 1), 3.0)
+        sphere((0.03, -0.02, 0.045), (0.032, 0.009, 0.034), shine, holder)
+        sphere((-0.032, -0.017, -0.045), (0.016, 0.006, 0.016), shine, holder)
     else:  # "shut"：眨眼
         tube([(-0.065, -0.006, -0.012), (0.065, -0.006, -0.012)], 0.018, ink, holder)
 
@@ -486,6 +502,12 @@ def mouth(root, kind):
         tube(points, 0.009, ink, root)
     elif kind == "flat":
         tube([(-0.03, y - 0.005, z), (0.03, y - 0.005, z)], 0.009, ink, root)
+    elif kind == "o":
+        # 撅着的小圆嘴：吹气、叹气、「哦」。
+        sphere((0, y + 0.006, z - 0.004), (0.017, 0.012, 0.02), clay(oklch(0.42, 0.12, 20), rough=0.4), root)
+    elif kind == "yawn":
+        # 张大：打哈欠、吓一跳。
+        sphere((0, y + 0.008, z - 0.016), (0.05, 0.016, 0.07), clay(oklch(0.42, 0.12, 20), rough=0.4), root)
     else:  # "open"
         sphere((0, y + 0.006, z - 0.006), (0.03, 0.012, 0.03), clay(oklch(0.42, 0.12, 20), rough=0.4), root)
 
@@ -506,13 +528,29 @@ CREAM = oklch(0.96, 0.02, 90)
 DARK = oklch(0.32, 0.02, 250)
 
 
+def hinge(root):
+    """会晃的部分搭在它底下（见 DANGLES）。"""
+    holder = empty((0, 0, 0), root)
+    holder["dangle"] = True
+    return holder
+
+
+def hung(obj):
+    """`obj` 是不是搭在 `hinge` 底下。"""
+    while obj is not None:
+        if obj.get("dangle"):
+            return True
+        obj = obj.parent
+    return False
+
+
 def beanie(root):
     knit = wear(rough=0.95, grain=0.4, sheen=0.6)
     shell(0.025, 0.45, knit, root)
     z = CZ + rim(0.45) * (UT + 0.025)
     a, b = ring(z)
     torus((0, 0, z), 1.0, 0.05, knit, root, scale=(a + 0.03, b + 0.03, 1))
-    sphere((0, 0, TOP + 0.07), (0.08, 0.08, 0.08), trim(clay(CREAM, rough=1.0, sheen=1.0)), root)
+    sphere((0, 0, TOP + 0.07), (0.08, 0.08, 0.08), trim(clay(CREAM, rough=1.0, sheen=1.0)), hinge(root))
 
 
 def cap(root):
@@ -589,9 +627,10 @@ def slick_hair(root):
 def sprig(root):
     """头顶冒出一棵两片叶子的小芽。"""
     green = trim(clay(oklch(0.7, 0.14, 140), rough=0.5))
-    tube([(0, 0, TOP - 0.02), (0.01, 0, TOP + 0.09)], 0.012, green, root)
+    stem = hinge(root)
+    tube([(0, 0, TOP - 0.02), (0.01, 0, TOP + 0.09)], 0.012, green, stem)
     for side in (-1, 1):
-        sphere((side * 0.07, 0, TOP + 0.11), (0.08, 0.03, 0.04), green, root, rot=rad(0, side * -25, 0))
+        sphere((side * 0.07, 0, TOP + 0.11), (0.08, 0.03, 0.04), green, stem, rot=rad(0, side * -25, 0))
 
 
 def flower(root):
@@ -614,9 +653,10 @@ def headphones(root):
 
 
 def antenna(root):
+    stalk = hinge(root)
     tube([(0.02, 0.02, TOP - 0.02), (0.03, 0.02, TOP + 0.12), (0.08, 0.01, TOP + 0.2)], 0.012,
-         trim(clay(DARK, rough=0.6)), root)
-    sphere((0.08, 0.01, TOP + 0.22), (0.045, 0.045, 0.045), wear(rough=0.3, coat=0.6), root)
+         trim(clay(DARK, rough=0.6)), stalk)
+    sphere((0.08, 0.01, TOP + 0.22), (0.045, 0.045, 0.045), wear(rough=0.3, coat=0.6), stalk)
 
 
 def chef_hat(root):
@@ -833,6 +873,15 @@ def fx_bang(root):
     sphere((0, 0, -0.1), (0.045, 0.045, 0.045), red, holder)
 
 
+def fx_z(root):
+    """打瞌睡冒的 Z：上下两横，中间一撇。"""
+    blue = clay(oklch(0.72, 0.09, 250), rough=0.5)
+    holder = empty(FX_AT, root)
+    box((0, 0, 0.07), (0.13, 0.03, 0.03), blue, holder, bevel=0.01)
+    box((0, 0, -0.07), (0.13, 0.03, 0.03), blue, holder, bevel=0.01)
+    box((0, 0, 0), (0.17, 0.03, 0.03), blue, holder, bevel=0.01, rot=rad(0, 47, 0))
+
+
 def fx_bulb(root, lit):
     holder = empty(FX_AT, root)
     shell = glow((1.0, 0.86, 0.35), 4.0) if lit else glass((0.95, 0.95, 0.9))
@@ -943,17 +992,26 @@ def fx_speed(root):
 # ---- 零件清单 ----
 
 # 戴的清单：名字 → (搭法, 有没有可换色的主料, 有没有固定色的点缀, 占不占眼睛)。顺序就是插件里的
-# 编号。占眼睛的（护目镜、眼镜）一个小人只戴一件。
+# 编号。占眼睛的（护目镜、眼镜）一个小人只戴一件。主料、点缀只算不晃的部分，整件都晃的（天线、
+# 芽）两样都没有，晃的部分记在 DANGLES。
 HEADS = {
-    "beanie": (beanie, True, True, False), "cap": (cap, True, False, False),
+    "beanie": (beanie, True, False, False), "cap": (cap, True, False, False),
     "fedora": (fedora, True, True, False), "beret": (beret, True, False, False),
     "goggles": (goggles, True, True, True), "straw": (straw_hat, True, True, False),
     "bandana": (bandana, True, True, False), "helmet": (helmet, True, True, False),
-    "slick": (slick_hair, False, True, False), "sprig": (sprig, False, True, False),
+    "slick": (slick_hair, False, True, False), "sprig": (sprig, False, False, False),
     "flower": (flower, True, True, False), "headphones": (headphones, True, True, False),
-    "antenna": (antenna, True, True, False), "chef": (chef_hat, False, True, False),
+    "antenna": (antenna, False, False, False), "chef": (chef_hat, False, True, False),
     "bow": (bow, True, False, False),
 }
+# 头顶会晃的部分（搭在 `hinge` 底下的）：名字 → (挂点（角色坐标）, 有没有主料, 有没有点缀)。
+# 插件按身子的动作绕挂点转着画，慢半拍、再弹几下。别在一侧的花、帽子上的小柄是卡住的，不晃。
+DANGLES = {
+    "beanie": ((0, 0, TOP + 0.01), False, True),
+    "sprig": ((0, 0, TOP - 0.02), False, True),
+    "antenna": ((0.02, 0.02, TOP - 0.02), True, True),
+}
+
 FACES = {
     "glasses": (round_glasses, True, False, True), "sunglasses": (sunglasses, True, True, True),
 }
@@ -978,7 +1036,7 @@ EFFECTS = {
     "spark": fx_spark, "bubble": fx_bubble, "drop": fx_drop, "note": fx_note, "puff": fx_puff,
     "dot": fx_dot, "dot-lit": fx_dot_lit, "bang": fx_bang, "star": fx_star, "heart": fx_heart,
     "bulb": lambda root: fx_bulb(root, False), "bulb-lit": lambda root: fx_bulb(root, True),
-    "speed": fx_speed,
+    "speed": fx_speed, "z": fx_z,
 }
 KEYS = 8  # 会转的零件渲几个关键朝向，均分一圈
 STEP = 360 // KEYS
@@ -1002,12 +1060,12 @@ def jobs():
                 build(hand)
             yield f"prop/{name}/{k:02}", grip, k * STEP, make, True
     # 眼睛、嘴、戴的都拿身子当遮挡，框和锚点跟身子一样，转过去被身子挡住的渲成透明。
-    for kind in ("open", "happy", "shut"):
+    for kind in ("open", "happy", "shut", "sleepy", "wide"):
         for side, name in ((-1, "l"), (1, "r")):
             for k, degrees in turns:
                 build = masked(lambda root, kind=kind, side=side: eye(root, kind, side))
                 yield f"eye/{kind}-{name}/{k}", feet, 0, facing(degrees, build), False
-    for kind in ("smile", "flat", "open"):
+    for kind in ("smile", "flat", "open", "o", "yawn"):
         for k, degrees in turns:
             build = masked(lambda root, kind=kind: mouth(root, kind))
             yield f"mouth/{kind}/{k}", feet, 0, facing(degrees, build), False
@@ -1017,6 +1075,12 @@ def jobs():
             for part in [p for p, has in (("base", base), ("trim", top)) if has]:
                 for k, degrees in turns:
                     yield f"{kind}/{name}/{part}/{k}", feet, 0, facing(degrees, masked(build)), False
+    # 会晃的部分：名字里带 /dangle/，main 按它把整件不晃的部分换成遮挡。
+    for name, (_, base, top) in DANGLES.items():
+        build = HEADS[name][0]
+        for part in [p for p, has in (("base", base), ("trim", top)) if has]:
+            for k, degrees in turns:
+                yield f"head/{name}/dangle/{part}/{k}", feet, 0, facing(degrees, masked(build)), False
     for lines in range(5):
         def make_laptop(p, lines=lines):
             laptop(empty(LAPTOP_HAND, character(p)), lines)
@@ -1060,6 +1124,9 @@ def rig():
                       for k in range(FACINGS)],
         "arm_len": round(ARM_LEN * PPU, 2),
         "overhead": on_screen(placed((0, 0, TOP + 0.3))),
+        "mouth": on_screen(placed(MOUTH)),
+        "dangles": {name: [on_screen(turned_to(pivot, k * 360 / FACINGS)) for k in range(FACINGS)]
+                    for name, (pivot, _, _) in DANGLES.items()},
         "laptop_at": on_screen(placed(LAPTOP_AT)),
         "notepad_at": on_screen(placed(NOTEPAD_FROM_HAND)),
         "sprout_at": on_screen(placed(SPROUT_AT)),
@@ -1180,6 +1247,16 @@ def main():
         scene.view_settings.exposure = EXPOSURE - HEADROOM if tinted(name) else EXPOSURE
         holder = spun(pivot, angle) if angle else empty()
         build(holder)
+        # 会晃的部分：渲 dangle 那组时整件的其余部分当遮挡，渲别的时不渲它（插件另叠）。
+        dangling = "/dangle/" in name
+        for obj in CHAR.objects:
+            if obj.type not in ("MESH", "CURVE") or hung(obj) == dangling:
+                continue
+            if dangling:
+                for slot in obj.material_slots:
+                    slot.material = holdout()
+            else:
+                obj.hide_render = True
         group = name.rsplit("/", 1)[0] if square else name
         if square:
             # 一组转着的共用一个方框，边长按离锚点最远的那一点，转到哪都装得下。
@@ -1201,7 +1278,9 @@ def main():
     with open(os.path.join(out, "sprites.json"), "w") as f:
         json.dump({"colors": [{"name": name, "rgb": oklch(*lch), "oklch": lch} for name, lch in COLORS],
                    "wear_colors": [{"name": name, "rgb": oklch(*lch), "oklch": lch} for name, lch in WEAR_COLORS],
-                   "wear": {kind: [{"name": name, "base": base, "trim": top, "eyes": eyes}
+                   "wear": {kind: [{"name": name, "base": base, "trim": top, "eyes": eyes,
+                                    "dangle": ({"base": DANGLES[name][1], "trim": DANGLES[name][2]}
+                                               if kind == "head" and name in DANGLES else None)}
                                    for name, (_, base, top, eyes) in items.items()]
                             for kind, items in (("head", HEADS), ("face", FACES), ("neck", NECKS))},
                    "neutral": NEUTRAL, "headroom": HEADROOM, "keys": KEYS, "facings": FACINGS,

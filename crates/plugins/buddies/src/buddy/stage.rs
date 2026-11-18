@@ -187,7 +187,7 @@ impl Stage {
         }
     }
 
-    /// 画 `key` 那段会话的小人，和还要不要下一帧。
+    /// 画 `key` 那段会话的小人，和还要不要下一帧（演着，或者头顶挂着的还在晃）。
     pub(crate) fn draw(
         &self,
         key: &ConversationKey,
@@ -198,7 +198,8 @@ impl Stage {
         window: &mut Window,
     ) -> (AnyElement, bool) {
         let (look, animating) = self.look(key, buddy, now, moving);
-        (portrait.show(buddy, look, window), animating)
+        let (figure, swinging) = portrait.show(buddy, look, now, moving, window);
+        (figure, animating || swinging)
     }
 
     /// `key` 那段会话此刻的样子，和还要不要下一帧。`moving` 为假（看不见、减弱动态效果）
