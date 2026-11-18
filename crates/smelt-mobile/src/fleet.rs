@@ -108,6 +108,9 @@ pub(crate) struct Node {
     /// 状态不能盖掉新节点的。
     serial: u64,
     pub hub: Arc<ConnectionHub>,
+    /// 同步请求和忘记时的取消登记不能并发；只在不持有 registry/view 时等待此锁。
+    /// 请求超时后运行时仍可能处理它，客户端串行化不能保证这种情况下的远端顺序。
+    push_sync: Mutex<()>,
     pub catalog: Catalog,
     pub agents: Agents,
     pub files: Files,
@@ -197,6 +200,7 @@ impl Node {
             target,
             serial,
             hub,
+            push_sync: Mutex::new(()),
         }
     }
 
@@ -572,9 +576,21 @@ impl Fleet {
             .iter()
             .find(|record| record.runtime_id == runtime_id)
             .map(|record| record.endpoint_id.clone());
-        shared.unregister_push_before_forget(runtime_id);
-        if !env.store.delete_runtime(runtime_id)? {
-            return Err(crate::store::unknown_runtime(runtime_id));
+        lock(&shared.view).push.begin_forget(runtime_id);
+        if let Ok(node) = shared.node(runtime_id) {
+            let _push_sync = lock(&node.push_sync);
+            shared.unregister_push_before_forget(&node);
+        }
+        let deleted = env.store.delete_runtime(runtime_id);
+        if !matches!(&deleted, Ok(true)) {
+            let job = lock(&shared.view).push.cancel_forget(runtime_id);
+            if let Some(job) = job {
+                shared.spawn_push_sync(job);
+            }
+            return match deleted {
+                Err(failure) => Err(failure),
+                _ => Err(crate::store::unknown_runtime(runtime_id)),
+            };
         }
         shared.remove_node(runtime_id);
         // 节点已停（对话不再写缓存）之后再删缓存。
@@ -949,7 +965,8 @@ impl Shared {
         let Ok(node) = self.node(&job.runtime_id) else {
             return SyncResult::Failed;
         };
-        if node.serial != job.serial {
+        let _push_sync = lock(&node.push_sync);
+        if node.serial != job.serial || !lock(&self.view).push.can_send(job) {
             return SyncResult::Failed;
         }
         let Some(current) = node.hub.current() else {
@@ -983,23 +1000,20 @@ impl Shared {
 
     /// 忘记一台机器之前，它还连着就先取消推送登记；连不上的要到那台机器上撤销这台手机。
     /// 调用方持有 `ops`。
-    fn unregister_push_before_forget(&self, runtime_id: &str) {
-        let connected = {
+    fn unregister_push_before_forget(&self, node: &Node) {
+        let runtime_id = &node.runtime_id;
+        let should_unregister = {
             let view = lock(&self.view);
-            matches!(view.push.desired(), Desired::On(_))
+            view.push.supported(runtime_id) != Some(false)
                 && view
                     .statuses
                     .get(runtime_id)
                     .is_some_and(|(_, status)| status.state == ConnectionState::Connected)
         };
-        if !connected {
+        if !should_unregister {
             return;
         }
-        let Some(current) = self
-            .node(runtime_id)
-            .ok()
-            .and_then(|node| node.hub.current())
-        else {
+        let Some(current) = node.hub.current() else {
             return;
         };
         if let Err(call_error) = current

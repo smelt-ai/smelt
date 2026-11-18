@@ -38,6 +38,8 @@ pub(crate) struct SyncJob {
     pub runtime_id: String,
     /// 节点序号：节点被替换后，旧节点的同步结果作废。
     pub serial: u64,
+    /// 发起时的同步代号；重连或开始忘记后，旧请求的结果作废。
+    pub connection: u64,
     pub version: u64,
     pub desired: Desired,
 }
@@ -56,6 +58,8 @@ pub(crate) enum SyncResult {
 struct NodeState {
     serial: u64,
     connected: bool,
+    connection: u64,
+    forgetting: bool,
     /// 已经同步到运行时的设置版本。
     synced: Option<u64>,
     in_flight: bool,
@@ -101,7 +105,12 @@ impl PushState {
         let newly = connected && !node.connected;
         node.connected = connected;
         if newly {
+            node.connection += 1;
             node.synced = None;
+            // 重连的运行时可能已升级，不再沿用旧连接的不支持结论。
+            if node.supported == Some(false) {
+                node.supported = None;
+            }
         }
         self.claim(runtime_id)
     }
@@ -113,6 +122,9 @@ impl PushState {
             return None;
         }
         node.in_flight = false;
+        if node.forgetting || node.connection != job.connection {
+            return self.claim(&job.runtime_id);
+        }
         match result {
             SyncResult::Done => {
                 node.synced = Some(job.version);
@@ -135,8 +147,39 @@ impl PushState {
         self.nodes.remove(runtime_id);
     }
 
-    pub(crate) fn desired(&self) -> &Desired {
-        &self.desired
+    /// 忘记期间禁止派发请求；失败时重新同步，不能假定运行时上的登记没变。
+    pub(crate) fn begin_forget(&mut self, runtime_id: &str) {
+        if let Some(node) = self.nodes.get_mut(runtime_id) {
+            node.forgetting = true;
+            // 即使忘记失败，仍在途的旧请求也不能覆盖恢复后的同步。
+            node.connection += 1;
+            node.synced = None;
+        }
+    }
+
+    pub(crate) fn cancel_forget(&mut self, runtime_id: &str) -> Option<SyncJob> {
+        if let Some(node) = self.nodes.get_mut(runtime_id) {
+            node.forgetting = false;
+        }
+        self.claim(runtime_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_forgetting(&self, runtime_id: &str) -> bool {
+        self.nodes
+            .get(runtime_id)
+            .is_some_and(|node| node.forgetting)
+    }
+
+    /// 必须在节点的推送请求锁内检查，和忘记前的取消登记串行。
+    pub(crate) fn can_send(&self, job: &SyncJob) -> bool {
+        self.nodes.get(&job.runtime_id).is_some_and(|node| {
+            node.serial == job.serial
+                && node.connection == job.connection
+                && node.connected
+                && node.in_flight
+                && !node.forgetting
+        })
     }
 
     pub(crate) fn supported(&self, runtime_id: &str) -> Option<bool> {
@@ -148,7 +191,8 @@ impl PushState {
             return None;
         }
         let node = self.nodes.get_mut(runtime_id)?;
-        if !node.connected || node.in_flight || node.synced == Some(self.version) {
+        if !node.connected || node.forgetting || node.in_flight || node.synced == Some(self.version)
+        {
             return None;
         }
         // 问过不支持的运行时，只在重新连上（`synced` 清空）时再问一次。
@@ -159,6 +203,7 @@ impl PushState {
         Some(SyncJob {
             runtime_id: runtime_id.to_string(),
             serial: node.serial,
+            connection: node.connection,
             version: self.version,
             desired: self.desired.clone(),
         })
@@ -208,6 +253,53 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_during_a_sync_discards_old_connection_results() {
+        for result in [
+            SyncResult::Done,
+            SyncResult::Failed,
+            SyncResult::Unsupported,
+        ] {
+            let mut state = PushState::default();
+            state.set(on());
+            let old = state.on_connection("a", 1, true).unwrap();
+            state.on_connection("a", 1, false);
+            assert_eq!(state.on_connection("a", 1, true), None);
+            let next = state.finish(&old, result).expect("重连必须重新同步");
+            assert_eq!(next.desired, on());
+            assert_eq!(state.supported("a"), None, "旧连接的结果不能更新能力");
+            assert_eq!(state.finish(&next, SyncResult::Done), None);
+        }
+    }
+
+    #[test]
+    fn forgetting_blocks_jobs_and_connection_events_until_cancelled() {
+        let mut state = PushState::default();
+        state.set(on());
+        let job = state.on_connection("a", 1, true).unwrap();
+        state.begin_forget("a");
+        assert!(!state.can_send(&job));
+        state.on_connection("a", 1, false);
+        assert_eq!(state.on_connection("a", 1, true), None);
+        assert_eq!(state.finish(&job, SyncResult::Done), None);
+        let next = state.cancel_forget("a").expect("忘记失败后恢复同步");
+        assert_eq!(next.desired, on());
+    }
+
+    #[test]
+    fn failed_forget_discards_a_sync_result_that_finishes_after_cancellation() {
+        let mut state = PushState::default();
+        state.set(on());
+        let old = state.on_connection("a", 1, true).unwrap();
+        state.begin_forget("a");
+        assert_eq!(state.cancel_forget("a"), None, "旧同步还在途");
+        let next = state
+            .finish(&old, SyncResult::Done)
+            .expect("忘记失败后必须重新同步，即使旧请求晚于取消完成");
+        assert_eq!(next.desired, on());
+        assert_eq!(state.finish(&next, SyncResult::Done), None);
+    }
+
+    #[test]
     fn a_change_during_a_sync_runs_after_it() {
         let mut state = PushState::default();
         state.set(on());
@@ -228,6 +320,7 @@ mod tests {
         assert!(state.set(Desired::Off).is_empty(), "不支持的不再打");
         state.on_connection("a", 1, false);
         assert!(state.on_connection("a", 1, true).is_some());
+        assert_eq!(state.supported("a"), None, "新连接可能已经升级");
     }
 
     #[test]
