@@ -514,6 +514,39 @@ fn pairing_a_new_runtime_keeps_the_others_connected() {
 }
 
 #[test]
+fn paired_node_is_registered_before_connected_status_is_published() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let h = harness(&[], &[&a]);
+    h.store.record_pairing(&a.info(None), 0).unwrap();
+    h.fleet
+        .shared
+        .reload_records(h.fleet.shared.env().unwrap())
+        .unwrap();
+    h.fleet.set_push(push_on());
+
+    let registered = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&registered);
+    let shared = Arc::downgrade(&h.fleet.shared);
+    h.fleet.subscribe(Box::new(move |view| {
+        if view.runtimes.iter().any(|runtime| {
+            runtime.record.runtime_id == "ra" && runtime.status.state == ConnectionState::Connected
+        }) {
+            let shared = shared.upgrade().unwrap();
+            let registry = shared.registry.try_lock().unwrap();
+            seen.lock().unwrap().push(registry.nodes.contains_key("ra"));
+            return false;
+        }
+        true
+    }));
+
+    h.pair(&a, None).unwrap();
+    assert_eq!(*registered.lock().unwrap(), [true]);
+    wait_until("配对后登记推送", || {
+        push_calls(&a) == ["push.register"] && h.push_supported("ra") == Some(true)
+    });
+}
+
+#[test]
 fn pairing_a_known_endpoint_updates_the_entry_and_keeps_the_node() {
     let a = FakeRuntime::new("ra", "mac-a");
     let h = harness(&[(&a, None)], &[]);

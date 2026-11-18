@@ -765,6 +765,28 @@ impl Shared {
         lock(&self.view)
             .statuses
             .insert(runtime_id.clone(), (serial, idle_status()));
+        {
+            let mut registry = lock(&self.registry);
+            let pass_weak = Arc::downgrade(self);
+            let pass_id = runtime_id.clone();
+            node.catalog.subscribe(Box::new(move |event| {
+                let Some(shared) = pass_weak.upgrade() else {
+                    return false;
+                };
+                if let Some(list) = &event.sessions {
+                    shared.pass.update(&pass_id, list.clone());
+                }
+                true
+            }));
+            registry
+                .catalog_sinks
+                .retain(|sink| sink.alive.load(Ordering::Acquire));
+            for sink in &registry.catalog_sinks {
+                attach_catalog_sink(&node, sink);
+            }
+            // subscribe 会立即推送当前连接状态；同步线程必须先能找到节点。
+            registry.nodes.insert(runtime_id.clone(), Arc::clone(&node));
+        }
         let weak = Arc::downgrade(self);
         let status_id = runtime_id.clone();
         node.hub.subscribe(Box::new(move |_generation, event| {
@@ -795,25 +817,6 @@ impl Shared {
             }
         }));
 
-        let mut registry = lock(&self.registry);
-        let pass_weak = Arc::downgrade(self);
-        let pass_id = runtime_id.clone();
-        node.catalog.subscribe(Box::new(move |event| {
-            let Some(shared) = pass_weak.upgrade() else {
-                return false;
-            };
-            if let Some(list) = &event.sessions {
-                shared.pass.update(&pass_id, list.clone());
-            }
-            true
-        }));
-        registry
-            .catalog_sinks
-            .retain(|sink| sink.alive.load(Ordering::Acquire));
-        for sink in &registry.catalog_sinks {
-            attach_catalog_sink(&node, sink);
-        }
-        registry.nodes.insert(runtime_id, Arc::clone(&node));
         node
     }
 
