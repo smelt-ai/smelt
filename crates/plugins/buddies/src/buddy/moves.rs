@@ -206,6 +206,16 @@ impl Spring {
         }
     }
 
+    /// 转身时追目标的弹簧：频率（Hz）、阻尼比。比落地回弹的慢、阻尼大：整个身子转过去，
+    /// 紧实的干脆停住，软糯的转过头一点再荡回来。
+    fn turning(self) -> (f32, f32) {
+        match self {
+            Self::Firm => (2.2, 0.85),
+            Self::Soft => (1.8, 0.65),
+            Self::Wobbly => (1.5, 0.5),
+        }
+    }
+
     /// 干活时喘气起伏多大。
     fn breath(self) -> f32 {
         match self {
@@ -447,6 +457,31 @@ fn jiggle(spring: Spring, since: f32) -> f32 {
     give * (-damping * omega * since).exp() * (damped * since).cos()
 }
 
+/// 按性格的转身弹簧追目标：目标从 0 起，在 `at` 秒跳到 `target`，一段段接着跳；返回 `t` 秒时
+/// 转到哪。弹簧是线性的，整段就是每一跳的阶跃响应
+/// `1 − e^(−ζωτ)·(cos ω_d τ + ζ/√(1−ζ²)·sin ω_d τ)` 乘跳的幅度叠起来，按时间现算、不用记
+/// 上一帧在哪：起步慢、中间快、到了减速，软的转过头再荡回来。
+fn follow(spring: Spring, targets: &[(f32, f32)], t: f32) -> f32 {
+    let (hz, damping) = spring.turning();
+    let omega = TAU * hz;
+    let damped = omega * (1. - damping * damping).sqrt();
+    let mut from = 0.;
+    let mut now = 0.;
+    for &(at, target) in targets {
+        let since = t - at;
+        if since > 0. {
+            let decay = (-damping * omega * since).exp();
+            let (sin, cos) = (damped * since).sin_cos();
+            now += (target - from) * (1. - decay * (cos + damping * omega / damped * sin));
+        }
+        from = target;
+    }
+    now
+}
+
+/// 晃到一边时顺势往那边侧身多少度（每 pt 的晃）：只平移看着像被推着走。
+const LEAN: f32 = 18.;
+
 /// 头顶上方（相对脚底）。
 const OVERHEAD: (f32, f32) = sprites::OVERHEAD;
 
@@ -556,8 +591,8 @@ pub(super) fn work(role: Role, temper: Temper, seed: u64, t: f32) -> Look {
     let beat = (t / beat_len) as u64;
     let p = (t / beat_len).fract();
     let salt = salt(seed, beat);
-    // 干活时一直有点起伏，像在喘气；多大、多快看性格。
-    look.squash = temper.spring.breath() * swing(t / (0.9 * temper.pace.stretch()), 1.);
+    // 干活时一直有点起伏，像在呼吸（两秒多一次）；多大、多快看性格。
+    look.squash = temper.spring.breath() * swing(t / (2.2 * temper.pace.stretch()), 1.);
     progress(role, &mut look, t);
     let own = role.moves();
     let mut weights = own.to_vec();
@@ -569,7 +604,7 @@ pub(super) fn work(role: Role, temper: Temper, seed: u64, t: f32) -> Look {
             } else {
                 1.
             };
-            look_around(&mut look, p, side, temper.curiosity.reach());
+            look_around(&mut look, p, beat_len, side, temper);
         }
         choice => perform(role, temper, &mut look, choice, t, p, salt),
     }
@@ -597,8 +632,9 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
         Role::Coder => {
             match choice {
                 0 => {
-                    // 打字：两只手交替点。
-                    look.arms = [left - 10. * swing(p, 7.), right + 10. * swing(p + 0.07, 7.)];
+                    // 打字：一下一下往下敲（往垂直方向点），两只手大体轮流。
+                    let [l, r] = keystrokes(p, beat_len(role, temper), salt);
+                    look.arms = [left + 8. * l, right - 8. * r];
                     look.gaze = (0., 0.6);
                 }
                 1 => {
@@ -628,14 +664,17 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 look.stream(sprites::FX_SPARK, tip, (3., -4.), 10., 3, p, p, salt);
             }
             1 => {
-                // 敲：一下一下往下砸，砸到底蹦火星。
-                let hit = (3. * PI * p).sin().abs();
-                look.arms[1] = right - 40. * hit;
-                look.prop = prop - 20. * hit;
+                // 敲三下：慢慢举起，加速砸下，砸中停一下；砸中那一刻身子一震、火星迸出来。
+                const HITS: f32 = 3.;
+                let hit = (p * HITS) as u64;
+                let (raised, impact) = hammer((p * HITS).fract());
+                look.arms[1] = right - 40. * raised;
+                look.prop = prop - 20. * raised;
                 look.gaze = (0.6, 0.3);
-                if hit < 0.35 {
+                if impact > 0. {
+                    look.squash += 0.05 * (1. - impact).powi(3);
                     let tip = look.tip(Role::Fixer.prop().unwrap());
-                    look.stream(sprites::FX_SPARK, tip, (2., -5.), 12., 2, p * 3., p, salt);
+                    sparks(look, tip, impact, salt ^ hit);
                 }
             }
             _ => {
@@ -652,11 +691,12 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
         },
         Role::Detective => match choice {
             0 => {
-                // 扫一遍：放大镜左右移，眼睛跟着。
+                // 扫一遍：放大镜左右移，眼睛跟着，身子也跟着侧过去一点。
                 let s = swing(p, 1.);
                 look.arms[1] = right + 30. * s;
                 look.prop = prop + 20. * s;
                 look.gaze = (0.9 * s, 0.3);
+                look.turn = 25. * s;
             }
             _ => {
                 // 凑到眼前看。
@@ -768,6 +808,7 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 look.prop = lerp(prop, 20. + 25. * swing(p + 0.1, 2.), ease);
                 look.arms[0] = left + 10. * swing(p, 2.);
                 look.sway = 0.6 * swing(p, 1.);
+                look.turn = LEAN * look.sway;
                 let tip = look.tip(Role::Conductor.prop().unwrap());
                 look.stream(sprites::FX_NOTE, tip, (4., -8.), 0., 2, p, p, salt);
             }
@@ -805,6 +846,7 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 look.prop = prop + 12. * s;
                 look.arms[1] = right + 10. * s;
                 look.sway = 0.8 * s;
+                look.turn = LEAN * look.sway;
                 look.gaze = (-0.6, 0.6);
                 let tip = look.tip(Role::Sweeper.prop().unwrap());
                 look.stream(sprites::FX_PUFF, tip, (-3., -3.), 0., 2, p, p, salt);
@@ -815,6 +857,7 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
                 look.prop = lerp(prop, 195., a);
                 look.arms[1] = lerp(right, 150., a);
                 look.sway = -0.5 * a;
+                look.turn = LEAN * look.sway;
                 look.eyes = if a > 0.3 { Eyes::Happy } else { Eyes::Open };
             }
         },
@@ -825,8 +868,6 @@ fn perform(role: Role, temper: Temper, look: &mut Look, choice: usize, t: f32, p
 /// 开卡丁车：每拍过一个弯、一段 S 弯、甩一个漂移，或者在直道上伏低冲。两边的速度线一直在
 /// 往后飘，冲刺时更浓。
 fn drive(look: &mut Look, choice: usize, t: f32, p: f32, salt: u64) {
-    // 发动机一直在抖。
-    look.lift = 0.3 * (t * 40.).sin().abs();
     let side = if Dice::new(salt).unit() < 0.5 {
         -1.
     } else {
@@ -879,6 +920,9 @@ fn drive(look: &mut Look, choice: usize, t: f32, p: f32, salt: u64) {
             };
         }
     }
+    // 车过路面一起一伏，冲刺时多颠两下。按时间走，不按拍子，换动作时不断。
+    look.lift = 0.4 * (0.5 - 0.5 * (TAU * 1.3 * t).cos())
+        + 0.3 * rush * (0.5 - 0.5 * (TAU * 3.1 * t).cos());
     let wheel = steer * turn;
     look.kart = Some(Kart {
         lean: -tilt * turn,
@@ -942,8 +986,10 @@ fn bulb(look: &mut Look, p: f32) {
     }
 }
 
-/// 蹦一下：先蹲（预备），蹦起来时拉长，落地压扁再回弹（[`jiggle`]），到 `p` = 1 正好停稳。
-/// `len` 是 `p` 走完 0 到 1 要几秒，`height` 是最高离地多少。
+/// 蹦一下：先蹲（预备），蹦起来走抛物线，越快拉得越长（起跳、落地前最长，最高点不拉），
+/// 胳膊跟不上身子（往上时坠着、往下时飘起来）；落地压扁再回弹（[`jiggle`]），到 `p` = 1
+/// 正好停稳。`len` 是 `p` 走完 0 到 1 要几秒，`height` 是最高离地多少。坐在车里的手搭着
+/// 方向盘，不甩。
 fn hop(look: &mut Look, p: f32, len: f32, height: f32, spring: Spring) {
     const TAKE_OFF: f32 = 0.15;
     const LAND: f32 = 0.6;
@@ -951,8 +997,16 @@ fn hop(look: &mut Look, p: f32, len: f32, height: f32, spring: Spring) {
         look.squash = 0.12 * arch(p / TAKE_OFF);
     } else if p < LAND {
         let air = within(p, TAKE_OFF, LAND);
-        look.lift = height * arch(air);
-        look.squash = -0.06 * arch(air);
+        look.lift = height * 4. * air * (1. - air);
+        // 往上为正，-1 到 1。
+        let speed = 1. - 2. * air;
+        look.squash = -0.07 * speed.abs() * smooth(air / 0.1);
+        if look.kart.is_none() {
+            // 往垂直向下（180°）拖：左胳膊在 180° 以上、右胳膊在以下，同一个量一边减一边加。
+            let drag = 12. * speed * arch(air);
+            look.arms[0] -= drag;
+            look.arms[1] += drag;
+        }
     } else {
         let settle = 1. - smooth(within(p, 0.85, 1.));
         look.squash = jiggle(spring, (p - LAND) * len) * settle;
@@ -964,24 +1018,82 @@ fn airborne(p: f32) -> f32 {
     within(p, 0.15, 0.6)
 }
 
-/// 转过去看看：往一边转、停一下、转到另一边、回正。眼睛比身子先过去一点。
-fn look_around(look: &mut Look, p: f32, side: f32, reach: f32) {
-    let facing = |p: f32| {
-        if p < 0.12 {
-            0.
-        } else if p < 0.45 {
-            side
-        } else if p < 0.55 {
-            0.
-        } else if p < 0.88 {
-            -side
-        } else {
-            0.
-        }
-    };
-    look.turn = reach * facing(p);
-    look.gaze = (0.9 * facing(p + 0.06), 0.);
+/// 转过去看看：往一边转、看一会儿、转到另一边、回正。眼睛一跳先过去（扫视是瞬间的），身子
+/// 按性格的弹簧跟上（[`follow`]）；拍末尾收住，接上下一拍的正面。`len` 是一拍几秒。
+fn look_around(look: &mut Look, p: f32, len: f32, side: f32, temper: Temper) {
+    const MARKS: [(f32, f32); 3] = [(0.06, 1.), (0.36, -0.8), (0.6, 0.)];
+    let reach = temper.curiosity.reach();
+    let targets = MARKS.map(|(at, toward)| (at * len, side * reach * toward));
+    let settle = 1. - smooth(within(p, 0.88, 1.));
+    look.turn = follow(temper.spring, &targets, p * len) * settle;
+    let glance = MARKS
+        .iter()
+        .rev()
+        .find(|(at, _)| p + 0.04 >= *at)
+        .map_or(0., |(_, toward)| side * toward);
+    look.gaze = (0.9 * glance, 0.);
     look.mouth = Mouth::Flat;
+}
+
+/// 一拍里打字的两只手各按下去多少（0 到 1）。一秒敲七下，大体左右轮流、偶尔同一只手连敲，
+/// 每下早晚、轻重随机一点；每下按下快（几十毫秒）、抬起慢。拍子两头不敲，接上站姿。
+fn keystrokes(p: f32, len: f32, salt: u64) -> [f32; 2] {
+    const PER_SECOND: f32 = 7.;
+    const DOWN: f32 = 0.04;
+    const UP: f32 = 0.09;
+    let count = (PER_SECOND * len) as usize;
+    let mut dice = Dice::new(salt ^ 0x7e5);
+    let mut hand = dice.below(2);
+    let mut pressed = [0_f32; 2];
+    let now = p * len;
+    for k in 0..count {
+        // 先把这一下的随机数都掷完，掷的次数不随时间变。
+        let at = (k as f32 + 0.5 + dice.range(-0.3, 0.3)) / count as f32;
+        let strength = dice.range(0.6, 1.);
+        if dice.unit() < 0.75 {
+            hand = 1 - hand;
+        }
+        if !(0.08..0.92).contains(&at) {
+            continue;
+        }
+        let since = now - at * len;
+        let press = if since < 0. {
+            0.
+        } else if since < DOWN {
+            since / DOWN
+        } else {
+            (-(since - DOWN) / UP).exp()
+        };
+        pressed[hand] = pressed[hand].max(strength * press);
+    }
+    pressed.map(|press| press * ramp(p))
+}
+
+/// 敲一下（`c` 是这一下走到哪，0 到 1）：举多高（0 到 1），砸中后过了多久（0 是没砸中，砸中后
+/// 从 0 往 1 走）。举起来慢、越举越慢，砸下去快、越砸越快，砸中停一会儿再举。
+fn hammer(c: f32) -> (f32, f32) {
+    const RAISE: f32 = 0.55;
+    const STRIKE: f32 = 0.7;
+    if c < RAISE {
+        let x = c / RAISE;
+        (1. - (1. - x) * (1. - x), 0.)
+    } else if c < STRIKE {
+        let x = within(c, RAISE, STRIKE);
+        (1. - x * x, 0.)
+    } else {
+        (0., within(c, STRIKE, 1.).max(f32::EPSILON))
+    }
+}
+
+/// 砸中迸出的几颗火星：从 `at` 往上、往两边飞，带一点下坠，`age`（0 到 1）走完淡掉。
+fn sparks(look: &mut Look, at: (f32, f32), age: f32, salt: u64) {
+    for k in 0..3 {
+        let mut dice = Dice::new(salt ^ (k << 8) ^ 0x5a4);
+        let fly = (dice.range(-5., 5.), dice.range(-7., -3.));
+        let x = at.0 + fly.0 * age;
+        let y = at.1 + fly.1 * age + 8. * age * age;
+        look.fx(sprites::FX_SPARK, (x, y), 0.9 - 0.3 * age, 1. - age);
+    }
 }
 
 /// 每拍可能眨一下眼，眨在哪随机。笑眯着不眨。
@@ -1011,7 +1123,10 @@ pub(super) fn call(role: Role, temper: Temper, seed: u64, t: f32) -> Look {
     let bang = add(OVERHEAD, (9., 4.));
     match dice.pick(&[3, 2]) {
         0 => hop(&mut look, p, BEAT, 5., temper.spring),
-        _ => look.sway = 1.2 * swing(p, 4.) * arch(p),
+        _ => {
+            look.sway = 1.2 * swing(p, 4.) * arch(p);
+            look.turn = LEAN * look.sway;
+        }
     }
     look.fx(
         sprites::FX_BANG,
@@ -1084,9 +1199,22 @@ fn flourish(look: &mut Look, role: Role, temper: Temper, p: f32) {
     };
     match flourish {
         Flourish::Spin => {
+            // 空中转一整圈（smootherstep：起转、收转都缓），落地时还带着劲，转过头一点再荡
+            // 回来（软的荡得多）。
+            const LEN: f32 = 0.75 * CHEER;
             let q = within(p, 0., 0.75);
-            hop(look, q, 0.75 * CHEER, 7., spring);
-            look.turn = (360. * smooth(airborne(q))).rem_euclid(360.);
+            hop(look, q, LEN, 7., spring);
+            let air = airborne(q);
+            let spun = air * air * air * (air * (6. * air - 15.) + 10.);
+            let (hz, damping) = spring.turning();
+            let omega = TAU * hz;
+            let since = (q - 0.6).max(0.) * LEN;
+            let past = 40.
+                * (1. - damping)
+                * (-damping * omega * since).exp()
+                * (omega * (1. - damping * damping).sqrt() * since).sin();
+            let settle = 1. - smooth(within(p, 0.8, 0.95));
+            look.turn = (360. * spun + past * settle).rem_euclid(360.);
         }
         Flourish::Bounce => {
             if p < 0.35 {
@@ -1097,13 +1225,13 @@ fn flourish(look: &mut Look, role: Role, temper: Temper, p: f32) {
         }
         Flourish::Wiggle => {
             hop(look, within(p, 0., 0.5), 0.5 * CHEER, 3., spring);
-            // 蹦完扭三下：左、右、左，每下侧过去一格，身子跟着往那边挪。
-            let w = within(p, 0.45, 0.9);
-            if w > 0. && w < 1. {
-                let side = swing(w, 1.5).signum();
-                look.turn = -45. * side;
-                look.sway = -1.2 * swing(w, 1.5);
-            }
+            // 蹦完扭三下：左、右、左，每下按弹簧侧过去，身子顺势往那边挪；最后回正。
+            const FROM: f32 = 0.45;
+            const TARGETS: [(f32, f32); 4] = [(0., -40.), (0.22, 40.), (0.44, -30.), (0.64, 0.)];
+            let since = (p - FROM) * CHEER;
+            let settle = 1. - smooth(within(p, 0.9, 1.));
+            look.turn = follow(spring, &TARGETS, since) * settle;
+            look.sway = 1.2 * look.turn / 40.;
         }
     }
 }
@@ -1321,13 +1449,13 @@ mod tests {
         assert_ne!(looks[0], looks[1]);
         assert_ne!(looks[1], looks[2]);
         assert_ne!(looks[0], looks[2]);
-        // 转圈的转过背面，扭的只侧过去。
+        // 转圈的转过背面，扭的只侧过去（弹簧转过头一点也到不了正侧面）。
         assert!(
             looks[0]
                 .iter()
                 .any(|(_, turn, _)| (turn - 180.).abs() < 30.)
         );
-        assert!(looks[2].iter().all(|(_, turn, _)| turn.abs() <= 45.));
+        assert!(looks[2].iter().all(|(_, turn, _)| turn.abs() < 60.));
     }
 
     #[test]

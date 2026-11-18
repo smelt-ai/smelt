@@ -164,6 +164,19 @@ impl Canvas {
         }
     }
 
+    /// 把另外叠好的两张按 `mix` 混成一张（0 全是 `a`、1 全是 `b`），整张叠上来。转身夹在两个
+    /// 朝向之间时用：两张各自不透明的地方混出来还是不透明；各画半透明叠上来，中间会透底。
+    pub(super) fn blend(&mut self, a: &Canvas, b: &Canvas, mix: f32) {
+        for ((out, a), b) in self.pixels.iter_mut().zip(&a.pixels).zip(&b.pixels) {
+            let color: [f32; 4] =
+                std::array::from_fn(|channel| a[channel] + (b[channel] - a[channel]) * mix);
+            let keep = 1. - color[3] / 255.;
+            for (out, value) in out.iter_mut().zip(color) {
+                *out = value + *out * keep;
+            }
+        }
+    }
+
     /// 叠好的整张，gpui 按 BGRA、不预乘的取。
     pub(super) fn finish(self) -> Arc<RenderImage> {
         let pixels = RgbaImage::from_fn(SIDE as u32, SIDE as u32, |x, y| {
@@ -176,6 +189,28 @@ impl Canvas {
         });
         Arc::new(RenderImage::new(vec![Frame::new(pixels)]))
     }
+}
+
+/// 第 `sprite` 张零件画出来的东西的重心（按不透明度加权）离锚点多远（pt），全透明的没有。
+/// 转身夹在两个朝向之间时，五官、戴的按两个朝向里重心的差挪过去。算过的留着。
+pub(super) fn centroid(sprite: usize) -> Option<(f32, f32)> {
+    thread_local! {
+        static CENTROIDS: RefCell<HashMap<usize, Option<(f32, f32)>>> = RefCell::default();
+    }
+    CENTROIDS.with_borrow_mut(|known| {
+        *known.entry(sprite).or_insert_with(|| {
+            let pixels = Paint::plain(sprite).pixels();
+            let (mut weight, mut x, mut y) = (0., 0., 0.);
+            for (px, py, pixel) in pixels.enumerate_pixels() {
+                let alpha = f32::from(pixel.0[3]);
+                weight += alpha;
+                x += alpha * (px as f32 + 0.5);
+                y += alpha * (py as f32 + 0.5);
+            }
+            let (ax, ay) = SPRITES[sprite].anchor;
+            (weight > 0.).then(|| (x / weight / PX - ax, y / weight / PX - ay))
+        })
+    })
 }
 
 /// 从 `from` 到 `to`（像素，可以是小数）沾到的成图像素，出了成图的不算。
@@ -360,6 +395,29 @@ mod tests {
             let got = at(x, y);
             assert!((0..4).all(|channel| (got[channel] - mean(channel)).abs() < 0.01));
         }
+    }
+
+    #[test]
+    fn blending_two_opaque_layers_stays_opaque() {
+        let body = Paint::plain(sprites::BODY);
+        let (mut a, mut b) = (Canvas::new(), Canvas::new());
+        a.layer(body, sprites::FEET, (1., 1.), 1.);
+        b.layer(body, (sprites::FEET.0 + 0.5, sprites::FEET.1), (1., 1.), 1.);
+        let mut mixed = Canvas::new();
+        mixed.blend(&a, &b, 0.5);
+        // 身子中间（脚底往上 8pt）。
+        let (x, y) = (sprites::FEET.0 + MARGIN, sprites::FEET.1 - 8. + MARGIN);
+        let middle = mixed.pixels[(y * PX) as usize * SIDE + (x * PX) as usize];
+        assert!(middle[3] > 254., "{middle:?}");
+    }
+
+    #[test]
+    fn centroids_sit_where_the_part_is() {
+        // 正面的左眼在锚点（脚底）左上方，右眼在右上方；背面看不见眼睛。
+        let (lx, ly) = centroid(sprites::EYE_OPEN_L).unwrap();
+        let (rx, _) = centroid(sprites::EYE_OPEN_R).unwrap();
+        assert!(lx < rx && ly < 0., "{lx} {rx} {ly}");
+        assert_eq!(centroid(sprites::EYE_OPEN_L + sprites::FACINGS / 2), None);
     }
 
     #[test]

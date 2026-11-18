@@ -26,7 +26,7 @@ use gpui::{
 pub(crate) use stage::Stage;
 
 use moves::{Dice, Look, Role, Temper};
-use paint::{Canvas, MARGIN, Paint, TURN, TURNS, Tint};
+use paint::{Canvas, MARGIN, Paint, TURN, TURNS, Tint, centroid};
 
 /// 包里一张零件：在 [`sprites::BLOB`] 里的位置，锚点离左上角多远（pt）。多大看解出来的图。
 pub(super) struct Sprite {
@@ -128,7 +128,7 @@ impl Buddy {
         for facing in 0..sprites::FACINGS {
             paints.push(Paint::tinted(sprites::BODY + facing, self.skin()));
             paints.push(Paint::plain(sprites::BLUSH + facing));
-            paints.extend(self.wearing(facing));
+            paints.extend(self.wearing().map(|worn| worn.at(facing)));
         }
         paints.extend((0..TURNS).map(|turn| Paint::turned(sprites::ARM, turn, self.skin())));
         if let Some(first) = self.role.held() {
@@ -142,9 +142,9 @@ impl Buddy {
         paints
     }
 
-    /// 朝着第 `facing` 个朝向时戴着的要画的图，从里到外：脸上、脖子上、头顶，每件先主料（乘色）
-    /// 再点缀。都和身子同框，跟着身子压扁。
-    fn wearing(self, facing: usize) -> impl Iterator<Item = Paint> {
+    /// 戴着的要画的几层，从里到外：脸上、脖子上、头顶，每件先主料（乘色）再点缀。都和身子同框，
+    /// 跟着身子压扁、转身；一件的主料、点缀按同一张挪（`guide`），转身时不会错开。
+    fn wearing(self) -> impl Iterator<Item = Facing> {
         let on = |table: &'static [Wearable], worn: Worn| (&table[worn.item], worn.color);
         [
             self.face.map(|worn| on(&sprites::FACES, worn)),
@@ -153,13 +153,86 @@ impl Buddy {
         ]
         .into_iter()
         .flatten()
-        .flat_map(move |(wearable, color)| {
-            let base = wearable
-                .base
-                .map(|sprite| Paint::tinted(sprite + facing, Tint::Wear(color)));
-            let trim = wearable.trim.map(|sprite| Paint::plain(sprite + facing));
+        .flat_map(|(wearable, color)| {
+            let guide = wearable.base.or(wearable.trim);
+            let layer = move |first, tint| Facing {
+                first,
+                tint,
+                at: (0., 0.),
+                guide,
+            };
+            let base = wearable.base.map(|first| layer(first, Tint::Wear(color)));
+            let trim = wearable.trim.map(|first| layer(first, Tint::None));
             base.into_iter().chain(trim)
         })
+    }
+
+    /// 跟着身子转身的几层，从下往上：身子、腮红、眼睛（跟着 `look` 往哪看挪）、嘴、戴的。
+    fn turning(self, look: &Look) -> Vec<Facing> {
+        let [left_eye, right_eye] = look.eyes.sprites();
+        let mouth = look.mouth.sprite();
+        let feature = |first, at| Facing {
+            first,
+            tint: Tint::None,
+            at,
+            guide: Some(first),
+        };
+        let mut layers = vec![
+            // 身子差不多是圆的，转过去轮廓不怎么变，不挪。
+            Facing {
+                first: sprites::BODY,
+                tint: self.skin(),
+                at: (0., 0.),
+                guide: None,
+            },
+            feature(sprites::BLUSH, (0., 0.)),
+            feature(left_eye, look.gaze),
+            feature(right_eye, look.gaze),
+            feature(mouth, (0., 0.)),
+        ];
+        layers.extend(self.wearing());
+        layers
+    }
+}
+
+/// 跟着身子转身的一层：哪组零件（每个朝向一张，第一张是 `first`）、乘什么色、另外挪多少（pt）。
+/// 转身夹在两个朝向之间时，按 `guide` 那组零件在两个朝向里的重心差挪过去（[`Facing::draw`]）；
+/// 没有的不挪。
+#[derive(Clone, Copy)]
+struct Facing {
+    first: usize,
+    tint: Tint,
+    at: (f32, f32),
+    guide: Option<usize>,
+}
+
+impl Facing {
+    /// 第 `facing` 个朝向的那张。
+    fn at(self, facing: usize) -> Paint {
+        Paint::tinted(self.first + facing, self.tint)
+    }
+
+    /// 画第 `facing` 个朝向的那张，往第 `other` 个朝向里它的位置挪 `toward`（0 到 1）。转身时
+    /// 两个朝向各画一张、互相往对方挪，再按转到哪混起来（[`Canvas::blend`]）：五官两张落在
+    /// 同一处，只是渐变，不会一只眼睛看着有两个影子。
+    fn draw(
+        self,
+        canvas: &mut Canvas,
+        facing: usize,
+        other: usize,
+        toward: f32,
+        on_body: impl Fn((f32, f32)) -> (f32, f32),
+        squash: (f32, f32),
+    ) {
+        let shift = self
+            .guide
+            .filter(|_| toward > 0.)
+            .and_then(|first| Some((centroid(first + facing)?, centroid(first + other)?)))
+            .map_or((0., 0.), |(from, to)| {
+                ((to.0 - from.0) * toward, (to.1 - from.1) * toward)
+            });
+        let at = (self.at.0 + shift.0, self.at.1 + shift.1);
+        canvas.layer(self.at(facing), on_body(at), squash, 1.);
     }
 }
 
@@ -175,35 +248,31 @@ fn turned(degrees: f32) -> (usize, f32) {
     (index, index as f32 * TURN)
 }
 
-/// 转身转到 `degrees`，最接近的是第几个朝向（每 360 / [`sprites::FACINGS`] 度一张），和它
-/// 实际的角度。
-fn faced(degrees: f32) -> (usize, f32) {
-    const FACINGS: f32 = sprites::FACINGS as f32;
-    let index = (degrees / 360. * FACINGS).round().rem_euclid(FACINGS) as usize % sprites::FACINGS;
-    (index, index as f32 * 360. / FACINGS)
+/// 转身转到 `degrees` 夹在哪两个朝向之间（每 360 / [`sprites::FACINGS`] 度一张）：前一个、
+/// 后一个，往后一个走了多少（0 到 1）。
+fn between(degrees: f32) -> (usize, usize, f32) {
+    const FACINGS: usize = sprites::FACINGS;
+    let step = degrees.rem_euclid(360.) / 360. * FACINGS as f32;
+    let index = step.floor() as usize % FACINGS;
+    (index, (index + 1) % FACINGS, step.fract())
 }
 
-/// 转身转到 `turn` 时左（`side` 0）、右（1）肩在哪（相对脚底），转没转到身子后面。
+/// 转身转到 `turn` 时左（`side` 0）、右（1）肩在哪（相对脚底），转没转到身子后面。夹在两个
+/// 朝向之间时按转到哪插。
 fn shoulder(turn: f32, side: usize) -> ((f32, f32), bool) {
     // 离镜头比身子中轴远这么多（pt）才算在后面：正面时肩在身子两边，随视角差一点点不算。
     const BEHIND: f32 = 2.;
-    let (x, y, depth) = sprites::SHOULDERS[faced(turn).0][side];
-    ((x, y), depth > BEHIND)
+    let (from, to, toward) = between(turn);
+    let (a, b) = (sprites::SHOULDERS[from][side], sprites::SHOULDERS[to][side]);
+    let mix = |a: f32, b: f32| a + (b - a) * toward;
+    ((mix(a.0, b.0), mix(a.1, b.1)), mix(a.2, b.2) > BEHIND)
 }
 
 /// 胳膊在身子上朝 `angle`（正面看的画面角度），身子转到 `turn` 时在画面里朝哪：伸向两边的
-/// 那一份随转身按余弦缩短，上下的不变，侧过身时胳膊看着垂在身侧，转到背面左右反过来。
-/// 胳膊只有画面里转的零件，缩没了会朝哪都不对，至少留 `LEAST`；正侧面时（余弦近 0、符号
-/// 是舍入出来的）按正的算。
+/// 那一份随转身按余弦缩短，上下的不变，侧过身时胳膊看着垂在身侧，转到背面左右反过来，中间
+/// 是连着的。
 fn foreshortened(angle: f32, turn: f32) -> f32 {
-    const LEAST: f32 = 0.35;
-    let (_, facing) = faced(turn);
-    let squeeze = facing.to_radians().cos();
-    let squeeze = if squeeze.abs() < LEAST {
-        LEAST
-    } else {
-        squeeze
-    };
+    let squeeze = turn.to_radians().cos();
     let (sin, cos) = angle.to_radians().sin_cos();
     (sin * squeeze).atan2(cos).to_degrees()
 }
@@ -271,7 +340,7 @@ impl Portrait {
 }
 
 /// 叠一帧：`look` 里的零件按锚点叠在 [`CANVAS`] 见方的画布上，先叠的在下面。转身时身子、
-/// 脸、戴的取最近的朝向；转到身子后面的胳膊垫在身子底下。
+/// 脸、戴的取夹着的两个朝向混起来（[`Facing::draw`]）；转到身子后面的胳膊垫在身子底下。
 fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
     const SAME: (f32, f32) = (1., 1.);
     let mut canvas = Canvas::new();
@@ -281,7 +350,6 @@ fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
     let on_body =
         |(x, y): (f32, f32)| (fx + look.sway + x * squash.0, fy - look.lift + y * squash.1);
     let on_ground = |(x, y): (f32, f32)| (fx + x, fy + y);
-    let (facing, _) = faced(look.turn);
 
     let shadow = 1. - (look.lift / 16.).min(0.5);
     // 车比人宽，影子拉宽些。
@@ -317,24 +385,25 @@ fn figure(buddy: Buddy, look: &Look) -> Arc<RenderImage> {
     for (arm, _) in arms.iter().filter(|(_, behind)| *behind) {
         arm.draw(&mut canvas, buddy, look);
     }
-    // 腮红单独渲，叠在乘过色的身子上，不跟着身子色变。眼睛、嘴、戴的都和身子同框。
-    let (lx, ly) = look.gaze;
-    let [left_eye, right_eye] = look.eyes.sprites();
-    let on_face = [
-        (
-            Paint::tinted(sprites::BODY + facing, buddy.skin()),
-            (0., 0.),
-        ),
-        (Paint::plain(sprites::BLUSH + facing), (0., 0.)),
-        (Paint::plain(left_eye + facing), (lx, ly)),
-        (Paint::plain(right_eye + facing), (lx, ly)),
-        (Paint::plain(look.mouth.sprite() + facing), (0., 0.)),
-    ];
-    for (paint, at) in on_face {
-        canvas.layer(paint, on_body(at), squash, 1.);
-    }
-    for paint in buddy.wearing(facing) {
-        canvas.layer(paint, on_body((0., 0.)), squash, 1.);
+    // 腮红单独渲，叠在乘过色的身子上，不跟着身子色变。眼睛、嘴、戴的都和身子同框。差一点就
+    // 到某个朝向时只画那一个，省得每帧多叠两张。
+    const NEAR: f32 = 0.02;
+    let layers = buddy.turning(look);
+    let (from, to, toward) = between(look.turn);
+    let draw = |canvas: &mut Canvas, facing, other, toward| {
+        for layer in &layers {
+            layer.draw(canvas, facing, other, toward, on_body, squash);
+        }
+    };
+    if toward < NEAR {
+        draw(&mut canvas, from, to, 0.);
+    } else if toward > 1. - NEAR {
+        draw(&mut canvas, to, from, 0.);
+    } else {
+        let (mut before, mut after) = (Canvas::new(), Canvas::new());
+        draw(&mut before, from, to, toward);
+        draw(&mut after, to, from, 1. - toward);
+        canvas.blend(&before, &after, toward);
     }
     if let Some(moves::Front::Laptop(lines)) = look.front {
         let laptop = Paint::plain(sprites::LAPTOP + lines);
@@ -539,12 +608,14 @@ mod tests {
     }
 
     #[test]
-    fn faced_picks_the_nearest_facing() {
-        assert_eq!(faced(0.), (0, 0.));
-        assert_eq!(faced(30.), (1, 45.));
-        assert_eq!(faced(-45.), (7, 315.));
-        assert_eq!(faced(360.), (0, 0.));
-        assert_eq!(faced(190.), (4, 180.));
+    fn between_finds_the_two_facings_around_a_turn() {
+        const STEP: f32 = 360. / sprites::FACINGS as f32;
+        const LAST: usize = sprites::FACINGS - 1;
+        assert_eq!(between(0.), (0, 1, 0.));
+        assert_eq!(between(STEP * 1.25), (1, 2, 0.25));
+        assert_eq!(between(-STEP / 2.), (LAST, 0, 0.5));
+        assert_eq!(between(360.), (0, 1, 0.));
+        assert_eq!(between(-1.).0, LAST);
     }
 
     #[test]
@@ -557,10 +628,20 @@ mod tests {
         // 背面左右反过来，上下不变。
         assert!(close(foreshortened(150., 180.), 210.));
         assert!(close(foreshortened(0., 180.), 0.));
-        // 侧过身：伸向外边的胳膊收向垂直，往哪边侧都一样。
-        for turn in [90., 270., -90.] {
+        // 侧过身：伸向外边的胳膊收向垂直，往哪边侧都一样；正侧面垂直。
+        for turn in [70., 290., -70.] {
             let side = foreshortened(120., turn);
             assert!(side > 140. && side < 180., "{turn}: {side}");
+        }
+        assert!(close(foreshortened(120., 90.), 180.));
+        // 转身是连着的：每转 1° 胳膊在画面里转得不多。
+        for turn in 0..360 {
+            let (a, b) = (
+                foreshortened(120., turn as f32),
+                foreshortened(120., turn as f32 + 1.),
+            );
+            let step = (a - b).rem_euclid(360.).min((b - a).rem_euclid(360.));
+            assert!(step < 3., "{turn}: {a} → {b}");
         }
     }
 

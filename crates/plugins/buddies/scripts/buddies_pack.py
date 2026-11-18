@@ -172,7 +172,7 @@ def main():
             "/// 朝上时尖端相对握点；`NOTEPAD_AT` 相对左手；`ARM_LEN` 是肩到手。`SHOULDERS` 是每个朝向\n"
             "/// 左、右肩的位置和比身子中轴离镜头远多少（正的在身子后面）。\n"
             + "\n".join(places) + "\n\n"
-            f"pub(super) const SPRITES: [Sprite; {len(rows)}] = [\n" + "\n".join(rows) + "\n];\n")
+            f"pub(super) static SPRITES: [Sprite; {len(rows)}] = [\n" + "\n".join(rows) + "\n];\n")
     # 按仓库的 rustfmt 排一遍，生成的和手排的一样（rustfmt 跟着 Rust 工具链装）。
     config = os.path.join(HERE, "..", "..", "..", "..", "rustfmt.toml")
     subprocess.run(["rustfmt", "--edition", "2024", "--config-path", config, RUST], check=True)

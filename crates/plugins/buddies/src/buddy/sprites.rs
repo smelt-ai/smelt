@@ -6,8 +6,8 @@ pub(super) const BLOB: &[u8] = include_bytes!("../../assets/buddies.bin");
 
 /// 会转的零件每组几个关键朝向（每 45° 一张，从 0° 起）。
 pub(super) const KEYS: usize = 8;
-/// 跟着身子转身的零件每组几个朝向（每 45° 一张，0 是正面，往画面右边转为正）。
-pub(super) const FACINGS: usize = 8;
+/// 跟着身子转身的零件每组几个朝向（每 22° 一张，0 是正面，往画面右边转为正）。
+pub(super) const FACINGS: usize = 16;
 /// 身子色乘到中性灰的身子、胳膊上的系数（线性 RGB，乘完超过 1 的截断）。顺序：rose、salmon、apricot、lemon、lime、green、mint、aqua、sky、periwinkle、lilac、orchid。
 pub(super) const BODY_TINTS: [[f32; 3]; 12] = [
     [8.3377, 4.3517, 5.3374],
@@ -145,89 +145,97 @@ pub(super) static NECKS: [Wearable; 2] = [
 
 /// 每组第一张的编号。
 pub(super) const BODY: usize = 0;
-pub(super) const BLUSH: usize = 8;
-pub(super) const ARM: usize = 16;
-pub(super) const PROP_WRENCH: usize = 24;
-pub(super) const PROP_MAGNIFIER: usize = 32;
-pub(super) const PROP_PENCIL: usize = 40;
-pub(super) const PROP_FLASK: usize = 48;
-pub(super) const PROP_CAN: usize = 56;
-pub(super) const PROP_BATON: usize = 64;
-pub(super) const PROP_BROOM: usize = 72;
-pub(super) const EYE_OPEN_L: usize = 80;
-pub(super) const EYE_OPEN_R: usize = 88;
-pub(super) const EYE_HAPPY_L: usize = 96;
-pub(super) const EYE_HAPPY_R: usize = 104;
-pub(super) const EYE_SHUT_L: usize = 112;
-pub(super) const EYE_SHUT_R: usize = 120;
-pub(super) const MOUTH_SMILE: usize = 128;
-pub(super) const MOUTH_FLAT: usize = 136;
-pub(super) const MOUTH_OPEN: usize = 144;
-pub(super) const HEAD_BEANIE_BASE: usize = 152;
-pub(super) const HEAD_BEANIE_TRIM: usize = 160;
-pub(super) const HEAD_CAP_BASE: usize = 168;
-pub(super) const HEAD_FEDORA_BASE: usize = 176;
-pub(super) const HEAD_FEDORA_TRIM: usize = 184;
-pub(super) const HEAD_BERET_BASE: usize = 192;
-pub(super) const HEAD_GOGGLES_BASE: usize = 200;
-pub(super) const HEAD_GOGGLES_TRIM: usize = 208;
-pub(super) const HEAD_STRAW_BASE: usize = 216;
-pub(super) const HEAD_STRAW_TRIM: usize = 224;
-pub(super) const HEAD_BANDANA_BASE: usize = 232;
-pub(super) const HEAD_BANDANA_TRIM: usize = 240;
-pub(super) const HEAD_HELMET_BASE: usize = 248;
-pub(super) const HEAD_HELMET_TRIM: usize = 256;
-pub(super) const HEAD_SLICK_TRIM: usize = 264;
-pub(super) const HEAD_SPRIG_TRIM: usize = 272;
-pub(super) const HEAD_FLOWER_BASE: usize = 280;
-pub(super) const HEAD_FLOWER_TRIM: usize = 288;
-pub(super) const HEAD_HEADPHONES_BASE: usize = 296;
-pub(super) const HEAD_HEADPHONES_TRIM: usize = 304;
-pub(super) const HEAD_ANTENNA_BASE: usize = 312;
-pub(super) const HEAD_ANTENNA_TRIM: usize = 320;
-pub(super) const HEAD_CHEF_TRIM: usize = 328;
-pub(super) const HEAD_BOW_BASE: usize = 336;
-pub(super) const FACE_GLASSES_BASE: usize = 344;
-pub(super) const FACE_SUNGLASSES_BASE: usize = 352;
-pub(super) const FACE_SUNGLASSES_TRIM: usize = 360;
-pub(super) const NECK_BOW_TIE_BASE: usize = 368;
-pub(super) const NECK_SCARF_BASE: usize = 376;
-pub(super) const LAPTOP: usize = 384;
-pub(super) const NOTEPAD: usize = 389;
-pub(super) const FX_SPARK: usize = 394;
-pub(super) const FX_BUBBLE: usize = 395;
-pub(super) const FX_DROP: usize = 396;
-pub(super) const FX_NOTE: usize = 397;
-pub(super) const FX_PUFF: usize = 398;
-pub(super) const FX_DOT: usize = 399;
-pub(super) const FX_DOT_LIT: usize = 400;
-pub(super) const FX_BANG: usize = 401;
-pub(super) const FX_STAR: usize = 402;
-pub(super) const FX_HEART: usize = 403;
-pub(super) const FX_BULB: usize = 404;
-pub(super) const FX_BULB_LIT: usize = 405;
-pub(super) const FX_SPEED: usize = 406;
-pub(super) const CONFETTI: usize = 407;
-pub(super) const SPROUT: usize = 411;
-pub(super) const KART_FRONT: usize = 416;
-pub(super) const KART_BACK: usize = 423;
-pub(super) const WHEEL: usize = 430;
-pub(super) const SHADOW: usize = 438;
+pub(super) const BLUSH: usize = 16;
+pub(super) const ARM: usize = 32;
+pub(super) const PROP_WRENCH: usize = 40;
+pub(super) const PROP_MAGNIFIER: usize = 48;
+pub(super) const PROP_PENCIL: usize = 56;
+pub(super) const PROP_FLASK: usize = 64;
+pub(super) const PROP_CAN: usize = 72;
+pub(super) const PROP_BATON: usize = 80;
+pub(super) const PROP_BROOM: usize = 88;
+pub(super) const EYE_OPEN_L: usize = 96;
+pub(super) const EYE_OPEN_R: usize = 112;
+pub(super) const EYE_HAPPY_L: usize = 128;
+pub(super) const EYE_HAPPY_R: usize = 144;
+pub(super) const EYE_SHUT_L: usize = 160;
+pub(super) const EYE_SHUT_R: usize = 176;
+pub(super) const MOUTH_SMILE: usize = 192;
+pub(super) const MOUTH_FLAT: usize = 208;
+pub(super) const MOUTH_OPEN: usize = 224;
+pub(super) const HEAD_BEANIE_BASE: usize = 240;
+pub(super) const HEAD_BEANIE_TRIM: usize = 256;
+pub(super) const HEAD_CAP_BASE: usize = 272;
+pub(super) const HEAD_FEDORA_BASE: usize = 288;
+pub(super) const HEAD_FEDORA_TRIM: usize = 304;
+pub(super) const HEAD_BERET_BASE: usize = 320;
+pub(super) const HEAD_GOGGLES_BASE: usize = 336;
+pub(super) const HEAD_GOGGLES_TRIM: usize = 352;
+pub(super) const HEAD_STRAW_BASE: usize = 368;
+pub(super) const HEAD_STRAW_TRIM: usize = 384;
+pub(super) const HEAD_BANDANA_BASE: usize = 400;
+pub(super) const HEAD_BANDANA_TRIM: usize = 416;
+pub(super) const HEAD_HELMET_BASE: usize = 432;
+pub(super) const HEAD_HELMET_TRIM: usize = 448;
+pub(super) const HEAD_SLICK_TRIM: usize = 464;
+pub(super) const HEAD_SPRIG_TRIM: usize = 480;
+pub(super) const HEAD_FLOWER_BASE: usize = 496;
+pub(super) const HEAD_FLOWER_TRIM: usize = 512;
+pub(super) const HEAD_HEADPHONES_BASE: usize = 528;
+pub(super) const HEAD_HEADPHONES_TRIM: usize = 544;
+pub(super) const HEAD_ANTENNA_BASE: usize = 560;
+pub(super) const HEAD_ANTENNA_TRIM: usize = 576;
+pub(super) const HEAD_CHEF_TRIM: usize = 592;
+pub(super) const HEAD_BOW_BASE: usize = 608;
+pub(super) const FACE_GLASSES_BASE: usize = 624;
+pub(super) const FACE_SUNGLASSES_BASE: usize = 640;
+pub(super) const FACE_SUNGLASSES_TRIM: usize = 656;
+pub(super) const NECK_BOW_TIE_BASE: usize = 672;
+pub(super) const NECK_SCARF_BASE: usize = 688;
+pub(super) const LAPTOP: usize = 704;
+pub(super) const NOTEPAD: usize = 709;
+pub(super) const FX_SPARK: usize = 714;
+pub(super) const FX_BUBBLE: usize = 715;
+pub(super) const FX_DROP: usize = 716;
+pub(super) const FX_NOTE: usize = 717;
+pub(super) const FX_PUFF: usize = 718;
+pub(super) const FX_DOT: usize = 719;
+pub(super) const FX_DOT_LIT: usize = 720;
+pub(super) const FX_BANG: usize = 721;
+pub(super) const FX_STAR: usize = 722;
+pub(super) const FX_HEART: usize = 723;
+pub(super) const FX_BULB: usize = 724;
+pub(super) const FX_BULB_LIT: usize = 725;
+pub(super) const FX_SPEED: usize = 726;
+pub(super) const CONFETTI: usize = 727;
+pub(super) const SPROUT: usize = 731;
+pub(super) const KART_FRONT: usize = 736;
+pub(super) const KART_BACK: usize = 743;
+pub(super) const WHEEL: usize = 750;
+pub(super) const SHADOW: usize = 758;
 
 /// 拼装用的位置（pt）。`FEET` 是脚底在画布上的位置；身上各处相对脚底；`TIP_*` 是道具
 /// 朝上时尖端相对握点；`NOTEPAD_AT` 相对左手；`ARM_LEN` 是肩到手。`SHOULDERS` 是每个朝向
 /// 左、右肩的位置和比身子中轴离镜头远多少（正的在身子后面）。
 pub(super) const CANVAS: f32 = 36.0;
 pub(super) const FEET: (f32, f32) = (18.0, 28.605);
-pub(super) const SHOULDERS: [[(f32, f32, f32); 2]; 8] = [
+pub(super) const SHOULDERS: [[(f32, f32, f32); 2]; 16] = [
     [(-11.06, -9.76, 0.275), (9.9, -8.305, -4.745)],
+    [(-10.325, -8.575, -3.815), (11.035, -9.465, -0.745)],
     [(-8.02, -7.56, -7.32), (10.495, -10.655, 3.365)],
+    [(-4.495, -6.865, -9.71), (8.355, -11.7, 6.965)],
     [(-0.285, -6.6, -10.62), (4.94, -12.44, 9.505)],
+    [(3.97, -6.805, -9.92), (0.775, -12.755, 10.6)],
     [(7.62, -7.445, -7.705), (-3.505, -12.605, 10.08)],
+    [(10.11, -8.43, -4.315), (-7.255, -12.01, 8.025)],
     [(11.06, -9.6, -0.275), (-9.9, -11.055, 4.745)],
+    [(10.325, -10.785, 3.815), (-11.035, -9.9, 0.745)],
     [(8.02, -11.805, 7.32), (-10.495, -8.705, -3.365)],
+    [(4.495, -12.495, 9.71), (-8.355, -7.66, -6.965)],
     [(0.285, -12.76, 10.62), (-4.94, -6.925, -9.505)],
+    [(-3.97, -12.555, 9.92), (-0.775, -6.605, -10.6)],
     [(-7.62, -11.915, 7.705), (3.505, -6.76, -10.08)],
+    [(-10.11, -10.935, 4.315), (7.255, -7.355, -8.025)],
 ];
 pub(super) const ARM_LEN: f32 = 4.8;
 pub(super) const OVERHEAD: (f32, f32) = (0.0, -29.045);
@@ -245,7 +253,7 @@ pub(super) const TIP_CAN: (f32, f32) = (6.87, 2.23);
 pub(super) const TIP_BATON: (f32, f32) = (0.0, -10.835);
 pub(super) const TIP_BROOM: (f32, f32) = (0.0, -15.675);
 
-pub(super) const SPRITES: [Sprite; 439] = [
+pub(super) static SPRITES: [Sprite; 759] = [
     Sprite {
         start: 0,
         len: 1594,
@@ -253,2191 +261,3791 @@ pub(super) const SPRITES: [Sprite; 439] = [
     },
     Sprite {
         start: 1594,
+        len: 1532,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 3126,
         len: 1526,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 3120,
+        start: 4652,
+        len: 1530,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 6182,
         len: 1482,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 4602,
+        start: 7664,
+        len: 1430,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 9094,
         len: 1532,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 6134,
+        start: 10626,
+        len: 1376,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 12002,
         len: 1310,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 7444,
+        start: 13312,
+        len: 1320,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 14632,
         len: 1390,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 8834,
+        start: 16022,
+        len: 1414,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 17436,
         len: 1342,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 10176,
+        start: 18778,
+        len: 1366,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 20144,
         len: 1536,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 11712,
+        start: 21680,
+        len: 1534,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 23214,
         len: 538,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 12250,
+        start: 23752,
+        len: 500,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 24252,
         len: 562,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 12812,
+        start: 24814,
+        len: 446,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 25260,
         len: 310,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 13122,
+        start: 25570,
+        len: 274,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 25844,
         len: 282,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 13404,
+        start: 26126,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 26220,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 13498,
+        start: 26314,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 26408,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 13592,
+        start: 26502,
+        len: 198,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 26700,
         len: 272,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 13864,
+        start: 26972,
+        len: 286,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 27258,
         len: 420,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 14284,
+        start: 27678,
+        len: 502,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 28180,
         len: 536,
         anchor: (6.72, 6.72),
     },
     Sprite {
-        start: 14820,
+        start: 28716,
         len: 462,
         anchor: (6.72, 6.72),
     },
     Sprite {
-        start: 15282,
+        start: 29178,
         len: 538,
         anchor: (6.72, 6.72),
     },
     Sprite {
-        start: 15820,
+        start: 29716,
         len: 500,
         anchor: (6.72, 6.72),
     },
     Sprite {
-        start: 16320,
+        start: 30216,
         len: 524,
         anchor: (6.72, 6.72),
     },
     Sprite {
-        start: 16844,
+        start: 30740,
         len: 496,
         anchor: (6.72, 6.72),
     },
     Sprite {
-        start: 17340,
+        start: 31236,
         len: 504,
         anchor: (6.72, 6.72),
     },
     Sprite {
-        start: 17844,
+        start: 31740,
         len: 486,
         anchor: (6.72, 6.72),
     },
     Sprite {
-        start: 18330,
+        start: 32226,
         len: 888,
         anchor: (14.555, 14.555),
     },
     Sprite {
-        start: 19218,
+        start: 33114,
         len: 1002,
         anchor: (14.555, 14.555),
     },
     Sprite {
-        start: 20220,
+        start: 34116,
         len: 876,
         anchor: (14.555, 14.555),
     },
     Sprite {
-        start: 21096,
+        start: 34992,
         len: 1054,
         anchor: (14.555, 14.555),
     },
     Sprite {
-        start: 22150,
+        start: 36046,
         len: 938,
         anchor: (14.555, 14.555),
     },
     Sprite {
-        start: 23088,
+        start: 36984,
         len: 1054,
         anchor: (14.555, 14.555),
     },
     Sprite {
-        start: 24142,
+        start: 38038,
         len: 824,
         anchor: (14.555, 14.555),
     },
     Sprite {
-        start: 24966,
+        start: 38862,
         len: 1020,
         anchor: (14.555, 14.555),
     },
     Sprite {
-        start: 25986,
+        start: 39882,
         len: 958,
         anchor: (14.615, 14.615),
     },
     Sprite {
-        start: 26944,
+        start: 40840,
         len: 1106,
         anchor: (14.615, 14.615),
     },
     Sprite {
-        start: 28050,
+        start: 41946,
         len: 1010,
         anchor: (14.615, 14.615),
     },
     Sprite {
-        start: 29060,
+        start: 42956,
         len: 1094,
         anchor: (14.615, 14.615),
     },
     Sprite {
-        start: 30154,
+        start: 44050,
         len: 1026,
         anchor: (14.615, 14.615),
     },
     Sprite {
-        start: 31180,
+        start: 45076,
         len: 1088,
         anchor: (14.615, 14.615),
     },
     Sprite {
-        start: 32268,
+        start: 46164,
         len: 944,
         anchor: (14.615, 14.615),
     },
     Sprite {
-        start: 33212,
+        start: 47108,
         len: 1094,
         anchor: (14.615, 14.615),
     },
     Sprite {
-        start: 34306,
+        start: 48202,
         len: 734,
         anchor: (10.055, 10.055),
     },
     Sprite {
-        start: 35040,
+        start: 48936,
         len: 740,
         anchor: (10.055, 10.055),
     },
     Sprite {
-        start: 35780,
+        start: 49676,
         len: 730,
         anchor: (10.055, 10.055),
     },
     Sprite {
-        start: 36510,
+        start: 50406,
         len: 664,
         anchor: (10.055, 10.055),
     },
     Sprite {
-        start: 37174,
+        start: 51070,
         len: 754,
         anchor: (10.055, 10.055),
     },
     Sprite {
-        start: 37928,
+        start: 51824,
         len: 718,
         anchor: (10.055, 10.055),
     },
     Sprite {
-        start: 38646,
+        start: 52542,
         len: 680,
         anchor: (10.055, 10.055),
     },
     Sprite {
-        start: 39326,
+        start: 53222,
         len: 632,
         anchor: (10.055, 10.055),
     },
     Sprite {
-        start: 39958,
+        start: 53854,
         len: 766,
         anchor: (11.22, 11.22),
     },
     Sprite {
-        start: 40724,
+        start: 54620,
         len: 778,
         anchor: (11.22, 11.22),
     },
     Sprite {
-        start: 41502,
+        start: 55398,
         len: 712,
         anchor: (11.22, 11.22),
     },
     Sprite {
-        start: 42214,
+        start: 56110,
         len: 774,
         anchor: (11.22, 11.22),
     },
     Sprite {
-        start: 42988,
+        start: 56884,
         len: 736,
         anchor: (11.22, 11.22),
     },
     Sprite {
-        start: 43724,
-        len: 744,
+        start: 57620,
+        len: 752,
         anchor: (11.22, 11.22),
     },
     Sprite {
-        start: 44468,
+        start: 58372,
         len: 812,
         anchor: (11.22, 11.22),
     },
     Sprite {
-        start: 45280,
+        start: 59184,
         len: 808,
         anchor: (11.22, 11.22),
     },
     Sprite {
-        start: 46088,
+        start: 59992,
         len: 998,
         anchor: (9.045, 9.045),
     },
     Sprite {
-        start: 47086,
+        start: 60990,
         len: 970,
         anchor: (9.045, 9.045),
     },
     Sprite {
-        start: 48056,
+        start: 61960,
         len: 910,
         anchor: (9.045, 9.045),
     },
     Sprite {
-        start: 48966,
+        start: 62870,
         len: 996,
         anchor: (9.045, 9.045),
     },
     Sprite {
-        start: 49962,
+        start: 63866,
         len: 964,
         anchor: (9.045, 9.045),
     },
     Sprite {
-        start: 50926,
+        start: 64830,
         len: 964,
         anchor: (9.045, 9.045),
     },
     Sprite {
-        start: 51890,
+        start: 65794,
         len: 1022,
         anchor: (9.045, 9.045),
     },
     Sprite {
-        start: 52912,
+        start: 66816,
         len: 990,
         anchor: (9.045, 9.045),
     },
     Sprite {
-        start: 53902,
+        start: 67806,
         len: 416,
         anchor: (11.675, 11.675),
     },
     Sprite {
-        start: 54318,
+        start: 68222,
         len: 492,
         anchor: (11.675, 11.675),
     },
     Sprite {
-        start: 54810,
+        start: 68714,
         len: 394,
         anchor: (11.675, 11.675),
     },
     Sprite {
-        start: 55204,
+        start: 69108,
         len: 544,
         anchor: (11.675, 11.675),
     },
     Sprite {
-        start: 55748,
+        start: 69652,
         len: 426,
         anchor: (11.675, 11.675),
     },
     Sprite {
-        start: 56174,
+        start: 70078,
         len: 576,
         anchor: (11.675, 11.675),
     },
     Sprite {
-        start: 56750,
+        start: 70654,
         len: 406,
         anchor: (11.675, 11.675),
     },
     Sprite {
-        start: 57156,
+        start: 71060,
         len: 494,
         anchor: (11.675, 11.675),
     },
     Sprite {
-        start: 57650,
+        start: 71554,
         len: 882,
         anchor: (17.465, 17.465),
     },
     Sprite {
-        start: 58532,
+        start: 72436,
         len: 1172,
         anchor: (17.465, 17.465),
     },
     Sprite {
-        start: 59704,
+        start: 73608,
         len: 828,
         anchor: (17.465, 17.465),
     },
     Sprite {
-        start: 60532,
+        start: 74436,
         len: 1170,
         anchor: (17.465, 17.465),
     },
     Sprite {
-        start: 61702,
+        start: 75606,
         len: 854,
         anchor: (17.465, 17.465),
     },
     Sprite {
-        start: 62556,
+        start: 76460,
         len: 1198,
         anchor: (17.465, 17.465),
     },
     Sprite {
-        start: 63754,
+        start: 77658,
         len: 806,
         anchor: (17.465, 17.465),
     },
     Sprite {
-        start: 64560,
+        start: 78464,
         len: 1144,
         anchor: (17.465, 17.465),
     },
     Sprite {
-        start: 65704,
+        start: 79608,
         len: 414,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 66118,
+        start: 80022,
+        len: 404,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 80426,
         len: 398,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 66516,
+        start: 80824,
+        len: 380,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 81204,
         len: 408,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 66924,
+        start: 81612,
+        len: 308,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 81920,
         len: 278,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 67202,
+        start: 82198,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 82292,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 67296,
+        start: 82386,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 82480,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 67390,
+        start: 82574,
+        len: 94,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 82668,
         len: 92,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 67482,
+        start: 82760,
+        len: 258,
+        anchor: (12.05, 23.225),
+    },
+    Sprite {
+        start: 83018,
         len: 274,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 67756,
+        start: 83292,
+        len: 342,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 83634,
         len: 398,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 68154,
+        start: 84032,
+        len: 394,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 84426,
         len: 388,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 68542,
+        start: 84814,
+        len: 366,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 85180,
         len: 256,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 68798,
+        start: 85436,
+        len: 92,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 85528,
         len: 94,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 68892,
+        start: 85622,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 85716,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 68986,
+        start: 85810,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 85904,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 69080,
+        start: 85998,
+        len: 232,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 86230,
         len: 332,
         anchor: (12.085, 23.22),
     },
     Sprite {
-        start: 69412,
+        start: 86562,
+        len: 378,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 86940,
         len: 394,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 69806,
+        start: 87334,
+        len: 418,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 87752,
         len: 322,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 70128,
+        start: 88074,
+        len: 294,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 88368,
         len: 324,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 70452,
+        start: 88692,
+        len: 298,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 88990,
         len: 268,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 70720,
+        start: 89258,
+        len: 238,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 89496,
         len: 290,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 71010,
+        start: 89786,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 89880,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 71104,
+        start: 89974,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 90068,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 71198,
+        start: 90162,
+        len: 94,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 90256,
         len: 92,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 71290,
+        start: 90348,
+        len: 216,
+        anchor: (12.165, 23.225),
+    },
+    Sprite {
+        start: 90564,
         len: 224,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 71514,
+        start: 90788,
+        len: 284,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 91072,
         len: 320,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 71834,
+        start: 91392,
+        len: 330,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 91722,
         len: 270,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 72104,
+        start: 91992,
+        len: 248,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 92240,
         len: 224,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 72328,
+        start: 92464,
+        len: 92,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 92556,
         len: 94,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 72422,
+        start: 92650,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 92744,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 72516,
+        start: 92838,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 92932,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 72610,
+        start: 93026,
+        len: 246,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 93272,
         len: 238,
         anchor: (12.22, 23.22),
     },
     Sprite {
-        start: 72848,
+        start: 93510,
+        len: 288,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 93798,
         len: 306,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 73154,
+        start: 94104,
+        len: 344,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 94448,
         len: 218,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 73372,
+        start: 94666,
+        len: 270,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 94936,
         len: 238,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 73610,
+        start: 95174,
+        len: 254,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 95428,
         len: 268,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 73878,
+        start: 95696,
+        len: 216,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 95912,
         len: 232,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 74110,
+        start: 96144,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 96238,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 74204,
+        start: 96332,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 96426,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 74298,
+        start: 96520,
+        len: 94,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 96614,
         len: 92,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 74390,
+        start: 96706,
+        len: 206,
+        anchor: (12.095, 23.225),
+    },
+    Sprite {
+        start: 96912,
         len: 214,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 74604,
+        start: 97126,
+        len: 262,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 97388,
         len: 240,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 74844,
+        start: 97628,
+        len: 238,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 97866,
         len: 232,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 75076,
+        start: 98098,
+        len: 242,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 98340,
         len: 184,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 75260,
+        start: 98524,
+        len: 92,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 98616,
         len: 94,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 75354,
+        start: 98710,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 98804,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 75448,
+        start: 98898,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 98992,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 75542,
+        start: 99086,
+        len: 184,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 99270,
         len: 200,
         anchor: (12.16, 23.22),
     },
     Sprite {
-        start: 75742,
+        start: 99470,
+        len: 244,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 99714,
         len: 222,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 75964,
+        start: 99936,
+        len: 264,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 100200,
         len: 172,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 76136,
+        start: 100372,
+        len: 180,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 100552,
         len: 190,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 76326,
+        start: 100742,
+        len: 164,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 100906,
         len: 160,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 76486,
+        start: 101066,
+        len: 148,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 101214,
         len: 94,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 76580,
+        start: 101308,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 101402,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 76674,
+        start: 101496,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 101590,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 76768,
+        start: 101684,
+        len: 94,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 101778,
         len: 158,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 76926,
+        start: 101936,
+        len: 216,
+        anchor: (11.84, 23.225),
+    },
+    Sprite {
+        start: 102152,
         len: 186,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 77112,
+        start: 102338,
+        len: 176,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 102514,
         len: 202,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 77314,
+        start: 102716,
+        len: 168,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 102884,
         len: 170,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 77484,
+        start: 103054,
+        len: 184,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 103238,
         len: 200,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 77684,
+        start: 103438,
+        len: 198,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 103636,
         len: 94,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 77778,
+        start: 103730,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 103824,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 77872,
+        start: 103918,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 104012,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 77966,
+        start: 104106,
+        len: 94,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 104200,
         len: 136,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 78102,
+        start: 104336,
+        len: 206,
+        anchor: (11.835, 23.225),
+    },
+    Sprite {
+        start: 104542,
         len: 188,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 78290,
+        start: 104730,
+        len: 180,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 104910,
         len: 260,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 78550,
+        start: 105170,
+        len: 254,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 105424,
         len: 226,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 78776,
+        start: 105650,
+        len: 260,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 105910,
         len: 232,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 79008,
+        start: 106142,
+        len: 108,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 106250,
         len: 94,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 79102,
+        start: 106344,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 106438,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 79196,
+        start: 106532,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 106626,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 79290,
+        start: 106720,
+        len: 94,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 106814,
         len: 92,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 79382,
+        start: 106906,
+        len: 224,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 107130,
         len: 272,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 79654,
+        start: 107402,
+        len: 212,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 107614,
         len: 1224,
         anchor: (12.675, 26.38),
     },
     Sprite {
-        start: 80878,
+        start: 108838,
+        len: 1212,
+        anchor: (12.71, 26.38),
+    },
+    Sprite {
+        start: 110050,
         len: 1186,
         anchor: (12.435, 26.38),
     },
     Sprite {
-        start: 82064,
+        start: 111236,
+        len: 1166,
+        anchor: (11.98, 26.38),
+    },
+    Sprite {
+        start: 112402,
         len: 1018,
         anchor: (11.615, 26.38),
     },
     Sprite {
-        start: 83082,
+        start: 113420,
+        len: 1038,
+        anchor: (11.565, 26.38),
+    },
+    Sprite {
+        start: 114458,
         len: 1100,
         anchor: (11.875, 26.38),
     },
     Sprite {
-        start: 84182,
+        start: 115558,
+        len: 1132,
+        anchor: (12.335, 26.38),
+    },
+    Sprite {
+        start: 116690,
         len: 1138,
         anchor: (12.675, 26.38),
     },
     Sprite {
-        start: 85320,
+        start: 117828,
+        len: 1196,
+        anchor: (12.71, 26.38),
+    },
+    Sprite {
+        start: 119024,
         len: 1170,
         anchor: (12.435, 26.38),
     },
     Sprite {
-        start: 86490,
+        start: 120194,
+        len: 1100,
+        anchor: (12.465, 26.38),
+    },
+    Sprite {
+        start: 121294,
         len: 1120,
         anchor: (11.985, 26.38),
     },
     Sprite {
-        start: 87610,
+        start: 122414,
+        len: 1134,
+        anchor: (11.65, 26.38),
+    },
+    Sprite {
+        start: 123548,
         len: 1080,
         anchor: (12.485, 26.38),
     },
     Sprite {
-        start: 88690,
+        start: 124628,
+        len: 1130,
+        anchor: (12.335, 26.38),
+    },
+    Sprite {
+        start: 125758,
         len: 340,
         anchor: (12.675, 26.38),
     },
     Sprite {
-        start: 89030,
+        start: 126098,
+        len: 384,
+        anchor: (12.71, 26.38),
+    },
+    Sprite {
+        start: 126482,
         len: 310,
         anchor: (12.435, 26.38),
     },
     Sprite {
-        start: 89340,
+        start: 126792,
+        len: 308,
+        anchor: (11.98, 26.38),
+    },
+    Sprite {
+        start: 127100,
         len: 314,
         anchor: (11.615, 26.38),
     },
     Sprite {
-        start: 89654,
+        start: 127414,
+        len: 354,
+        anchor: (11.565, 26.38),
+    },
+    Sprite {
+        start: 127768,
         len: 362,
         anchor: (11.875, 26.38),
     },
     Sprite {
-        start: 90016,
+        start: 128130,
+        len: 336,
+        anchor: (12.335, 26.38),
+    },
+    Sprite {
+        start: 128466,
         len: 292,
         anchor: (12.675, 26.38),
     },
     Sprite {
-        start: 90308,
+        start: 128758,
+        len: 302,
+        anchor: (12.71, 26.38),
+    },
+    Sprite {
+        start: 129060,
         len: 308,
         anchor: (12.435, 26.38),
     },
     Sprite {
-        start: 90616,
+        start: 129368,
+        len: 316,
+        anchor: (12.465, 26.38),
+    },
+    Sprite {
+        start: 129684,
         len: 346,
         anchor: (11.985, 26.38),
     },
     Sprite {
-        start: 90962,
+        start: 130030,
+        len: 304,
+        anchor: (11.65, 26.38),
+    },
+    Sprite {
+        start: 130334,
         len: 328,
         anchor: (12.485, 26.38),
     },
     Sprite {
-        start: 91290,
+        start: 130662,
+        len: 328,
+        anchor: (12.335, 26.38),
+    },
+    Sprite {
+        start: 130990,
         len: 998,
         anchor: (12.675, 23.925),
     },
     Sprite {
-        start: 92288,
+        start: 131988,
+        len: 964,
+        anchor: (12.71, 23.925),
+    },
+    Sprite {
+        start: 132952,
         len: 1040,
         anchor: (12.435, 23.925),
     },
     Sprite {
-        start: 93328,
+        start: 133992,
+        len: 992,
+        anchor: (11.98, 23.925),
+    },
+    Sprite {
+        start: 134984,
         len: 1074,
         anchor: (11.615, 23.925),
     },
     Sprite {
-        start: 94402,
+        start: 136058,
+        len: 1032,
+        anchor: (11.565, 23.925),
+    },
+    Sprite {
+        start: 137090,
         len: 1016,
         anchor: (11.875, 23.925),
     },
     Sprite {
-        start: 95418,
+        start: 138106,
+        len: 990,
+        anchor: (12.335, 23.925),
+    },
+    Sprite {
+        start: 139096,
         len: 870,
         anchor: (12.675, 23.925),
     },
     Sprite {
-        start: 96288,
+        start: 139966,
+        len: 896,
+        anchor: (12.71, 23.925),
+    },
+    Sprite {
+        start: 140862,
         len: 958,
         anchor: (12.435, 23.925),
     },
     Sprite {
-        start: 97246,
+        start: 141820,
+        len: 1044,
+        anchor: (14.47, 23.925),
+    },
+    Sprite {
+        start: 142864,
         len: 954,
         anchor: (15.77, 23.925),
     },
     Sprite {
-        start: 98200,
+        start: 143818,
+        len: 1062,
+        anchor: (15.91, 23.925),
+    },
+    Sprite {
+        start: 144880,
         len: 1060,
         anchor: (14.905, 23.925),
     },
     Sprite {
-        start: 99260,
+        start: 145940,
+        len: 998,
+        anchor: (12.62, 23.925),
+    },
+    Sprite {
+        start: 146938,
         len: 1284,
         anchor: (12.675, 27.07),
     },
     Sprite {
-        start: 100544,
+        start: 148222,
+        len: 1266,
+        anchor: (12.71, 27.06),
+    },
+    Sprite {
+        start: 149488,
         len: 1240,
         anchor: (12.435, 27.105),
     },
     Sprite {
-        start: 101784,
+        start: 150728,
+        len: 1260,
+        anchor: (11.98, 27.175),
+    },
+    Sprite {
+        start: 151988,
         len: 1238,
         anchor: (11.615, 27.225),
     },
     Sprite {
-        start: 103022,
+        start: 153226,
+        len: 1264,
+        anchor: (11.565, 27.235),
+    },
+    Sprite {
+        start: 154490,
         len: 1250,
         anchor: (11.875, 27.195),
     },
     Sprite {
-        start: 104272,
+        start: 155740,
+        len: 1266,
+        anchor: (12.335, 27.12),
+    },
+    Sprite {
+        start: 157006,
         len: 1312,
         anchor: (12.675, 27.07),
     },
     Sprite {
-        start: 105584,
+        start: 158318,
+        len: 1218,
+        anchor: (12.71, 27.06),
+    },
+    Sprite {
+        start: 159536,
         len: 1314,
         anchor: (12.435, 27.105),
     },
     Sprite {
-        start: 106898,
+        start: 160850,
+        len: 1236,
+        anchor: (12.465, 27.175),
+    },
+    Sprite {
+        start: 162086,
         len: 1216,
         anchor: (11.985, 27.225),
     },
     Sprite {
-        start: 108114,
+        start: 163302,
+        len: 1250,
+        anchor: (11.65, 27.235),
+    },
+    Sprite {
+        start: 164552,
         len: 1244,
         anchor: (12.485, 27.195),
     },
     Sprite {
-        start: 109358,
+        start: 165796,
+        len: 1246,
+        anchor: (12.335, 27.12),
+    },
+    Sprite {
+        start: 167042,
         len: 578,
         anchor: (12.675, 27.07),
     },
     Sprite {
-        start: 109936,
+        start: 167620,
+        len: 556,
+        anchor: (12.71, 27.06),
+    },
+    Sprite {
+        start: 168176,
         len: 544,
         anchor: (12.435, 27.105),
     },
     Sprite {
-        start: 110480,
+        start: 168720,
+        len: 500,
+        anchor: (11.98, 27.175),
+    },
+    Sprite {
+        start: 169220,
         len: 534,
         anchor: (11.615, 27.225),
     },
     Sprite {
-        start: 111014,
+        start: 169754,
+        len: 506,
+        anchor: (11.565, 27.235),
+    },
+    Sprite {
+        start: 170260,
         len: 530,
         anchor: (11.875, 27.195),
     },
     Sprite {
-        start: 111544,
+        start: 170790,
+        len: 522,
+        anchor: (12.335, 27.12),
+    },
+    Sprite {
+        start: 171312,
         len: 590,
         anchor: (12.675, 27.07),
     },
     Sprite {
-        start: 112134,
+        start: 171902,
+        len: 544,
+        anchor: (12.71, 27.06),
+    },
+    Sprite {
+        start: 172446,
         len: 528,
         anchor: (12.435, 27.105),
     },
     Sprite {
-        start: 112662,
+        start: 172974,
+        len: 500,
+        anchor: (12.465, 27.175),
+    },
+    Sprite {
+        start: 173474,
         len: 510,
         anchor: (11.985, 27.225),
     },
     Sprite {
-        start: 113172,
+        start: 173984,
+        len: 520,
+        anchor: (11.65, 27.235),
+    },
+    Sprite {
+        start: 174504,
         len: 468,
         anchor: (12.485, 27.195),
     },
     Sprite {
-        start: 113640,
+        start: 174972,
+        len: 550,
+        anchor: (12.335, 27.12),
+    },
+    Sprite {
+        start: 175522,
         len: 906,
         anchor: (12.675, 26.335),
     },
     Sprite {
-        start: 114546,
+        start: 176428,
+        len: 764,
+        anchor: (12.71, 25.925),
+    },
+    Sprite {
+        start: 177192,
         len: 804,
         anchor: (12.435, 25.475),
     },
     Sprite {
-        start: 115350,
+        start: 177996,
+        len: 782,
+        anchor: (11.98, 25.565),
+    },
+    Sprite {
+        start: 178778,
         len: 746,
         anchor: (11.615, 25.56),
     },
     Sprite {
-        start: 116096,
+        start: 179524,
+        len: 752,
+        anchor: (11.565, 25.505),
+    },
+    Sprite {
+        start: 180276,
         len: 778,
         anchor: (11.875, 25.435),
     },
     Sprite {
-        start: 116874,
+        start: 181054,
+        len: 802,
+        anchor: (12.335, 25.29),
+    },
+    Sprite {
+        start: 181856,
         len: 758,
         anchor: (12.675, 25.56),
     },
     Sprite {
-        start: 117632,
+        start: 182614,
+        len: 858,
+        anchor: (12.71, 25.985),
+    },
+    Sprite {
+        start: 183472,
         len: 864,
         anchor: (12.435, 26.375),
     },
     Sprite {
-        start: 118496,
+        start: 184336,
+        len: 902,
+        anchor: (12.465, 26.675),
+    },
+    Sprite {
+        start: 185238,
         len: 836,
         anchor: (11.985, 26.88),
     },
     Sprite {
-        start: 119332,
+        start: 186074,
+        len: 814,
+        anchor: (11.65, 26.945),
+    },
+    Sprite {
+        start: 186888,
         len: 926,
         anchor: (12.485, 26.87),
     },
     Sprite {
-        start: 120258,
+        start: 187814,
+        len: 812,
+        anchor: (12.335, 26.665),
+    },
+    Sprite {
+        start: 188626,
         len: 830,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 121088,
+        start: 189456,
+        len: 788,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 190244,
         len: 820,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 121908,
+        start: 191064,
+        len: 652,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 191716,
         len: 542,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 122450,
+        start: 192258,
+        len: 478,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 192736,
         len: 426,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 122876,
+        start: 193162,
+        len: 314,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 193476,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 122970,
+        start: 193570,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 193664,
         len: 324,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 123294,
+        start: 193988,
+        len: 404,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 194392,
         len: 432,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 123726,
+        start: 194824,
+        len: 450,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 195274,
         len: 606,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 124332,
+        start: 195880,
+        len: 746,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 196626,
         len: 1192,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 125524,
+        start: 197818,
+        len: 1146,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 198964,
         len: 1142,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 126666,
+        start: 200106,
+        len: 1072,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 201178,
         len: 960,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 127626,
+        start: 202138,
+        len: 962,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 203100,
         len: 902,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 128528,
+        start: 204002,
+        len: 986,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 204988,
         len: 986,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 129514,
+        start: 205974,
+        len: 954,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 206928,
         len: 1000,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 130514,
+        start: 207928,
+        len: 956,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 208884,
         len: 930,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 131444,
+        start: 209814,
+        len: 940,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 210754,
         len: 1042,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 132486,
+        start: 211796,
+        len: 1118,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 212914,
         len: 732,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 133218,
+        start: 213646,
+        len: 752,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 214398,
         len: 772,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 133990,
+        start: 215170,
+        len: 748,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 215918,
         len: 786,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 134776,
+        start: 216704,
+        len: 816,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 217520,
         len: 778,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 135554,
+        start: 218298,
+        len: 766,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 219064,
         len: 748,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 136302,
+        start: 219812,
+        len: 748,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 220560,
         len: 750,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 137052,
+        start: 221310,
+        len: 760,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 222070,
         len: 778,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 137830,
+        start: 222848,
+        len: 794,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 223642,
         len: 810,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 138640,
+        start: 224452,
+        len: 778,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 225230,
         len: 1434,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 140074,
+        start: 226664,
+        len: 1462,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 228126,
         len: 1464,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 141538,
+        start: 229590,
+        len: 1456,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 231046,
         len: 1436,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 142974,
+        start: 232482,
+        len: 1482,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 233964,
         len: 1458,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 144432,
+        start: 235422,
+        len: 1498,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 236920,
         len: 1464,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 145896,
+        start: 238384,
+        len: 1424,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 239808,
         len: 1466,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 147362,
+        start: 241274,
+        len: 1458,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 242732,
         len: 1454,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 148816,
+        start: 244186,
+        len: 1476,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 245662,
         len: 1462,
         anchor: (14.605, 25.56),
     },
     Sprite {
-        start: 150278,
+        start: 247124,
+        len: 1456,
+        anchor: (14.64, 25.57),
+    },
+    Sprite {
+        start: 248580,
         len: 1150,
         anchor: (12.675, 23.595),
     },
     Sprite {
-        start: 151428,
+        start: 249730,
+        len: 1058,
+        anchor: (12.71, 23.59),
+    },
+    Sprite {
+        start: 250788,
         len: 1044,
         anchor: (12.435, 23.61),
     },
     Sprite {
-        start: 152472,
+        start: 251832,
+        len: 1016,
+        anchor: (12.165, 23.635),
+    },
+    Sprite {
+        start: 252848,
         len: 1032,
         anchor: (11.805, 23.65),
     },
     Sprite {
-        start: 153504,
+        start: 253880,
+        len: 1096,
+        anchor: (11.755, 23.655),
+    },
+    Sprite {
+        start: 254976,
         len: 1138,
         anchor: (12.815, 23.64),
     },
     Sprite {
-        start: 154642,
+        start: 256114,
+        len: 1158,
+        anchor: (13.745, 23.615),
+    },
+    Sprite {
+        start: 257272,
         len: 1154,
         anchor: (12.86, 23.595),
     },
     Sprite {
-        start: 155796,
+        start: 258426,
+        len: 1204,
+        anchor: (12.71, 23.59),
+    },
+    Sprite {
+        start: 259630,
         len: 1140,
         anchor: (12.435, 23.61),
     },
     Sprite {
-        start: 156936,
+        start: 260770,
+        len: 1166,
+        anchor: (12.465, 23.635),
+    },
+    Sprite {
+        start: 261936,
         len: 1098,
         anchor: (11.985, 23.65),
     },
     Sprite {
-        start: 158034,
+        start: 263034,
+        len: 1116,
+        anchor: (11.65, 23.655),
+    },
+    Sprite {
+        start: 264150,
         len: 1110,
         anchor: (12.485, 23.64),
     },
     Sprite {
-        start: 159144,
+        start: 265260,
+        len: 1128,
+        anchor: (12.335, 23.615),
+    },
+    Sprite {
+        start: 266388,
         len: 402,
         anchor: (12.675, 23.595),
     },
     Sprite {
-        start: 159546,
+        start: 266790,
+        len: 376,
+        anchor: (12.71, 23.59),
+    },
+    Sprite {
+        start: 267166,
         len: 344,
         anchor: (12.435, 23.61),
     },
     Sprite {
-        start: 159890,
+        start: 267510,
+        len: 320,
+        anchor: (12.165, 23.635),
+    },
+    Sprite {
+        start: 267830,
         len: 302,
         anchor: (11.805, 23.65),
     },
     Sprite {
-        start: 160192,
+        start: 268132,
+        len: 208,
+        anchor: (11.755, 23.655),
+    },
+    Sprite {
+        start: 268340,
         len: 190,
         anchor: (12.815, 23.64),
     },
     Sprite {
-        start: 160382,
+        start: 268530,
+        len: 94,
+        anchor: (13.745, 23.615),
+    },
+    Sprite {
+        start: 268624,
         len: 94,
         anchor: (12.86, 23.595),
     },
     Sprite {
-        start: 160476,
+        start: 268718,
+        len: 94,
+        anchor: (12.71, 23.59),
+    },
+    Sprite {
+        start: 268812,
         len: 148,
         anchor: (12.435, 23.61),
     },
     Sprite {
-        start: 160624,
+        start: 268960,
+        len: 198,
+        anchor: (12.465, 23.635),
+    },
+    Sprite {
+        start: 269158,
         len: 192,
         anchor: (11.985, 23.65),
     },
     Sprite {
-        start: 160816,
+        start: 269350,
+        len: 244,
+        anchor: (11.65, 23.655),
+    },
+    Sprite {
+        start: 269594,
         len: 324,
         anchor: (12.485, 23.64),
     },
     Sprite {
-        start: 161140,
+        start: 269918,
+        len: 396,
+        anchor: (12.335, 23.615),
+    },
+    Sprite {
+        start: 270314,
         len: 1270,
         anchor: (13.24, 24.29),
     },
     Sprite {
-        start: 162410,
+        start: 271584,
+        len: 1308,
+        anchor: (13.275, 24.3),
+    },
+    Sprite {
+        start: 272892,
         len: 1248,
         anchor: (13.025, 24.215),
     },
     Sprite {
-        start: 163658,
+        start: 274140,
+        len: 1190,
+        anchor: (12.685, 24.16),
+    },
+    Sprite {
+        start: 275330,
         len: 1186,
         anchor: (12.32, 24.18),
     },
     Sprite {
-        start: 164844,
+        start: 276516,
+        len: 1270,
+        anchor: (12.315, 24.18),
+    },
+    Sprite {
+        start: 277786,
         len: 1426,
         anchor: (12.58, 24.165),
     },
     Sprite {
-        start: 166270,
+        start: 279212,
+        len: 1564,
+        anchor: (12.93, 24.185),
+    },
+    Sprite {
+        start: 280776,
         len: 1600,
         anchor: (13.24, 24.29),
     },
     Sprite {
-        start: 167870,
+        start: 282376,
+        len: 1610,
+        anchor: (13.275, 24.3),
+    },
+    Sprite {
+        start: 283986,
         len: 1598,
         anchor: (13.025, 24.215),
     },
     Sprite {
-        start: 169468,
+        start: 285584,
+        len: 1500,
+        anchor: (12.87, 24.16),
+    },
+    Sprite {
+        start: 287084,
         len: 1448,
         anchor: (12.9, 24.18),
     },
     Sprite {
-        start: 170916,
+        start: 288532,
+        len: 1258,
+        anchor: (12.955, 24.18),
+    },
+    Sprite {
+        start: 289790,
         len: 1218,
         anchor: (12.97, 24.165),
     },
     Sprite {
-        start: 172134,
+        start: 291008,
+        len: 1238,
+        anchor: (12.93, 24.185),
+    },
+    Sprite {
+        start: 292246,
         len: 1626,
         anchor: (13.24, 24.29),
     },
     Sprite {
-        start: 173760,
+        start: 293872,
+        len: 1674,
+        anchor: (13.275, 24.3),
+    },
+    Sprite {
+        start: 295546,
         len: 1612,
         anchor: (13.025, 24.215),
     },
     Sprite {
-        start: 175372,
+        start: 297158,
+        len: 1610,
+        anchor: (12.685, 24.16),
+    },
+    Sprite {
+        start: 298768,
         len: 1588,
         anchor: (12.32, 24.18),
     },
     Sprite {
-        start: 176960,
+        start: 300356,
+        len: 1576,
+        anchor: (12.315, 24.18),
+    },
+    Sprite {
+        start: 301932,
         len: 1604,
         anchor: (12.58, 24.165),
     },
     Sprite {
-        start: 178564,
+        start: 303536,
+        len: 1532,
+        anchor: (12.93, 24.185),
+    },
+    Sprite {
+        start: 305068,
         len: 1426,
         anchor: (13.24, 24.29),
     },
     Sprite {
-        start: 179990,
+        start: 306494,
+        len: 1384,
+        anchor: (13.275, 24.3),
+    },
+    Sprite {
+        start: 307878,
         len: 1516,
         anchor: (13.025, 24.215),
     },
     Sprite {
-        start: 181506,
+        start: 309394,
+        len: 1600,
+        anchor: (12.87, 24.16),
+    },
+    Sprite {
+        start: 310994,
         len: 1604,
         anchor: (12.9, 24.18),
     },
     Sprite {
-        start: 183110,
+        start: 312598,
+        len: 1582,
+        anchor: (12.955, 24.18),
+    },
+    Sprite {
+        start: 314180,
         len: 1502,
         anchor: (12.97, 24.165),
     },
     Sprite {
-        start: 184612,
+        start: 315682,
+        len: 1540,
+        anchor: (12.93, 24.185),
+    },
+    Sprite {
+        start: 317222,
         len: 716,
         anchor: (12.675, 23.45),
     },
     Sprite {
-        start: 185328,
+        start: 317938,
+        len: 786,
+        anchor: (12.71, 23.45),
+    },
+    Sprite {
+        start: 318724,
         len: 774,
         anchor: (12.435, 23.465),
     },
     Sprite {
-        start: 186102,
+        start: 319498,
+        len: 792,
+        anchor: (11.98, 23.49),
+    },
+    Sprite {
+        start: 320290,
         len: 796,
         anchor: (11.615, 23.975),
     },
     Sprite {
-        start: 186898,
+        start: 321086,
+        len: 870,
+        anchor: (11.565, 24.725),
+    },
+    Sprite {
+        start: 321956,
         len: 850,
         anchor: (11.875, 25.23),
     },
     Sprite {
-        start: 187748,
+        start: 322806,
+        len: 846,
+        anchor: (12.335, 25.47),
+    },
+    Sprite {
+        start: 323652,
         len: 812,
         anchor: (12.675, 25.365),
     },
     Sprite {
-        start: 188560,
+        start: 324464,
+        len: 878,
+        anchor: (12.71, 24.985),
+    },
+    Sprite {
+        start: 325342,
         len: 756,
         anchor: (12.435, 24.4),
     },
     Sprite {
-        start: 189316,
+        start: 326098,
+        len: 746,
+        anchor: (12.465, 23.665),
+    },
+    Sprite {
+        start: 326844,
         len: 778,
         anchor: (11.985, 23.51),
     },
     Sprite {
-        start: 190094,
+        start: 327622,
+        len: 744,
+        anchor: (11.65, 23.51),
+    },
+    Sprite {
+        start: 328366,
         len: 662,
         anchor: (12.485, 23.495),
     },
     Sprite {
-        start: 190756,
+        start: 329028,
+        len: 714,
+        anchor: (12.335, 23.47),
+    },
+    Sprite {
+        start: 329742,
         len: 498,
         anchor: (12.675, 26.715),
     },
     Sprite {
-        start: 191254,
+        start: 330240,
+        len: 520,
+        anchor: (12.71, 26.65),
+    },
+    Sprite {
+        start: 330760,
         len: 516,
         anchor: (12.435, 26.915),
     },
     Sprite {
-        start: 191770,
+        start: 331276,
+        len: 460,
+        anchor: (11.98, 27.145),
+    },
+    Sprite {
+        start: 331736,
         len: 408,
         anchor: (11.615, 27.285),
     },
     Sprite {
-        start: 192178,
+        start: 332144,
+        len: 402,
+        anchor: (11.565, 27.3),
+    },
+    Sprite {
+        start: 332546,
         len: 434,
         anchor: (11.875, 27.19),
     },
     Sprite {
-        start: 192612,
+        start: 332980,
+        len: 504,
+        anchor: (12.335, 26.975),
+    },
+    Sprite {
+        start: 333484,
         len: 514,
         anchor: (12.675, 26.715),
     },
     Sprite {
-        start: 193126,
+        start: 333998,
+        len: 514,
+        anchor: (12.71, 26.65),
+    },
+    Sprite {
+        start: 334512,
         len: 524,
         anchor: (12.435, 26.915),
     },
     Sprite {
-        start: 193650,
+        start: 335036,
+        len: 446,
+        anchor: (12.465, 27.145),
+    },
+    Sprite {
+        start: 335482,
         len: 410,
         anchor: (11.985, 27.285),
     },
     Sprite {
-        start: 194060,
+        start: 335892,
+        len: 410,
+        anchor: (11.65, 27.3),
+    },
+    Sprite {
+        start: 336302,
         len: 438,
         anchor: (12.485, 27.19),
     },
     Sprite {
-        start: 194498,
+        start: 336740,
+        len: 510,
+        anchor: (12.335, 26.975),
+    },
+    Sprite {
+        start: 337250,
         len: 588,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 195086,
+        start: 337838,
+        len: 518,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 338356,
         len: 476,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 195562,
+        start: 338832,
+        len: 396,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 339228,
         len: 406,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 195968,
+        start: 339634,
+        len: 304,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 339938,
         len: 138,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 196106,
+        start: 340076,
+        len: 178,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 340254,
         len: 378,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 196484,
+        start: 340632,
+        len: 372,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 341004,
         len: 448,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 196932,
+        start: 341452,
+        len: 428,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 341880,
         len: 518,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 197450,
+        start: 342398,
+        len: 592,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 342990,
         len: 642,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 198092,
+        start: 343632,
+        len: 608,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 344240,
         len: 374,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 198466,
+        start: 344614,
+        len: 358,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 344972,
         len: 318,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 198784,
+        start: 345290,
+        len: 288,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 345578,
         len: 92,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 198876,
+        start: 345670,
+        len: 92,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 345762,
         len: 94,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 198970,
+        start: 345856,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 345950,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 199064,
+        start: 346044,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 346138,
         len: 302,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 199366,
+        start: 346440,
+        len: 342,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 346782,
         len: 388,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 199754,
+        start: 347170,
+        len: 378,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 347548,
         len: 390,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 200144,
+        start: 347938,
+        len: 404,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 348342,
         len: 682,
         anchor: (15.46, 23.53),
     },
     Sprite {
-        start: 200826,
+        start: 349024,
+        len: 722,
+        anchor: (15.625, 23.5),
+    },
+    Sprite {
+        start: 349746,
         len: 742,
         anchor: (14.475, 23.635),
     },
     Sprite {
-        start: 201568,
+        start: 350488,
+        len: 482,
+        anchor: (11.98, 23.875),
+    },
+    Sprite {
+        start: 350970,
         len: 538,
         anchor: (11.615, 24.055),
     },
     Sprite {
-        start: 202106,
+        start: 351508,
+        len: 560,
+        anchor: (11.565, 24.075),
+    },
+    Sprite {
+        start: 352068,
         len: 548,
         anchor: (11.875, 23.92),
     },
     Sprite {
-        start: 202654,
+        start: 352616,
+        len: 676,
+        anchor: (13.905, 23.705),
+    },
+    Sprite {
+        start: 353292,
         len: 672,
         anchor: (15.46, 23.53),
     },
     Sprite {
-        start: 203326,
+        start: 353964,
+        len: 726,
+        anchor: (15.625, 23.5),
+    },
+    Sprite {
+        start: 354690,
         len: 738,
         anchor: (14.475, 23.635),
     },
     Sprite {
-        start: 204064,
+        start: 355428,
+        len: 568,
+        anchor: (12.465, 23.875),
+    },
+    Sprite {
+        start: 355996,
         len: 520,
         anchor: (11.985, 24.055),
     },
     Sprite {
-        start: 204584,
+        start: 356516,
+        len: 500,
+        anchor: (11.65, 24.075),
+    },
+    Sprite {
+        start: 357016,
         len: 556,
         anchor: (12.485, 23.92),
     },
     Sprite {
-        start: 205140,
+        start: 357572,
+        len: 714,
+        anchor: (13.905, 23.705),
+    },
+    Sprite {
+        start: 358286,
         len: 1378,
         anchor: (15.46, 23.53),
     },
     Sprite {
-        start: 206518,
+        start: 359664,
+        len: 1432,
+        anchor: (15.625, 23.5),
+    },
+    Sprite {
+        start: 361096,
         len: 1390,
         anchor: (14.475, 23.635),
     },
     Sprite {
-        start: 207908,
+        start: 362486,
+        len: 1156,
+        anchor: (11.98, 23.875),
+    },
+    Sprite {
+        start: 363642,
         len: 900,
         anchor: (11.615, 24.055),
     },
     Sprite {
-        start: 208808,
+        start: 364542,
+        len: 794,
+        anchor: (11.565, 24.075),
+    },
+    Sprite {
+        start: 365336,
         len: 1054,
         anchor: (11.875, 23.92),
     },
     Sprite {
-        start: 209862,
+        start: 366390,
+        len: 1416,
+        anchor: (13.905, 23.705),
+    },
+    Sprite {
+        start: 367806,
         len: 1406,
         anchor: (15.46, 23.53),
     },
     Sprite {
-        start: 211268,
+        start: 369212,
+        len: 1388,
+        anchor: (15.625, 23.5),
+    },
+    Sprite {
+        start: 370600,
         len: 1422,
         anchor: (14.475, 23.635),
     },
     Sprite {
-        start: 212690,
+        start: 372022,
+        len: 1154,
+        anchor: (12.465, 23.875),
+    },
+    Sprite {
+        start: 373176,
         len: 954,
         anchor: (11.985, 24.055),
     },
     Sprite {
-        start: 213644,
+        start: 374130,
+        len: 834,
+        anchor: (11.65, 24.075),
+    },
+    Sprite {
+        start: 374964,
         len: 1066,
         anchor: (12.485, 23.92),
     },
     Sprite {
-        start: 214710,
+        start: 376030,
+        len: 1378,
+        anchor: (13.905, 23.705),
+    },
+    Sprite {
+        start: 377408,
         len: 292,
         anchor: (12.675, 28.935),
     },
     Sprite {
-        start: 215002,
+        start: 377700,
+        len: 290,
+        anchor: (12.71, 29.145),
+    },
+    Sprite {
+        start: 377990,
         len: 272,
         anchor: (12.435, 29.33),
     },
     Sprite {
-        start: 215274,
+        start: 378262,
+        len: 260,
+        anchor: (11.98, 29.47),
+    },
+    Sprite {
+        start: 378522,
         len: 274,
         anchor: (11.615, 29.535),
     },
     Sprite {
-        start: 215548,
+        start: 378796,
+        len: 254,
+        anchor: (11.565, 29.52),
+    },
+    Sprite {
+        start: 379050,
         len: 252,
         anchor: (11.875, 29.425),
     },
     Sprite {
-        start: 215800,
+        start: 379302,
+        len: 268,
+        anchor: (12.335, 29.265),
+    },
+    Sprite {
+        start: 379570,
         len: 246,
         anchor: (12.675, 29.065),
     },
     Sprite {
-        start: 216046,
+        start: 379816,
+        len: 242,
+        anchor: (12.71, 28.855),
+    },
+    Sprite {
+        start: 380058,
         len: 272,
         anchor: (12.435, 28.665),
     },
     Sprite {
-        start: 216318,
+        start: 380330,
+        len: 266,
+        anchor: (12.465, 28.53),
+    },
+    Sprite {
+        start: 380596,
         len: 250,
         anchor: (11.985, 28.465),
     },
     Sprite {
-        start: 216568,
+        start: 380846,
+        len: 236,
+        anchor: (11.65, 28.48),
+    },
+    Sprite {
+        start: 381082,
         len: 256,
         anchor: (12.485, 28.575),
     },
     Sprite {
-        start: 216824,
+        start: 381338,
+        len: 278,
+        anchor: (12.335, 28.735),
+    },
+    Sprite {
+        start: 381616,
         len: 318,
         anchor: (12.675, 28.935),
     },
     Sprite {
-        start: 217142,
+        start: 381934,
+        len: 344,
+        anchor: (12.71, 29.145),
+    },
+    Sprite {
+        start: 382278,
         len: 374,
         anchor: (12.435, 29.33),
     },
     Sprite {
-        start: 217516,
+        start: 382652,
+        len: 302,
+        anchor: (11.98, 29.47),
+    },
+    Sprite {
+        start: 382954,
         len: 346,
         anchor: (11.615, 29.535),
     },
     Sprite {
-        start: 217862,
+        start: 383300,
+        len: 236,
+        anchor: (11.565, 29.52),
+    },
+    Sprite {
+        start: 383536,
         len: 278,
         anchor: (11.875, 29.425),
     },
     Sprite {
-        start: 218140,
+        start: 383814,
+        len: 300,
+        anchor: (12.335, 29.265),
+    },
+    Sprite {
+        start: 384114,
         len: 336,
         anchor: (12.675, 29.065),
     },
     Sprite {
-        start: 218476,
+        start: 384450,
+        len: 346,
+        anchor: (12.71, 28.855),
+    },
+    Sprite {
+        start: 384796,
         len: 292,
         anchor: (12.435, 28.665),
     },
     Sprite {
-        start: 218768,
+        start: 385088,
+        len: 304,
+        anchor: (12.465, 28.53),
+    },
+    Sprite {
+        start: 385392,
         len: 266,
         anchor: (11.985, 28.465),
     },
     Sprite {
-        start: 219034,
+        start: 385658,
+        len: 260,
+        anchor: (11.65, 28.48),
+    },
+    Sprite {
+        start: 385918,
         len: 294,
         anchor: (12.485, 28.575),
     },
     Sprite {
-        start: 219328,
+        start: 386212,
+        len: 318,
+        anchor: (12.335, 28.735),
+    },
+    Sprite {
+        start: 386530,
         len: 804,
         anchor: (12.675, 29.32),
     },
     Sprite {
-        start: 220132,
+        start: 387334,
+        len: 710,
+        anchor: (12.71, 29.33),
+    },
+    Sprite {
+        start: 388044,
         len: 638,
         anchor: (12.435, 29.26),
     },
     Sprite {
-        start: 220770,
+        start: 388682,
+        len: 642,
+        anchor: (11.98, 29.5),
+    },
+    Sprite {
+        start: 389324,
         len: 710,
         anchor: (11.615, 29.645),
     },
     Sprite {
-        start: 221480,
+        start: 390034,
+        len: 616,
+        anchor: (11.565, 29.66),
+    },
+    Sprite {
+        start: 390650,
         len: 630,
         anchor: (11.875, 29.55),
     },
     Sprite {
-        start: 222110,
+        start: 391280,
+        len: 660,
+        anchor: (12.335, 29.32),
+    },
+    Sprite {
+        start: 391940,
         len: 792,
         anchor: (12.675, 29.32),
     },
     Sprite {
-        start: 222902,
+        start: 392732,
+        len: 710,
+        anchor: (12.71, 29.33),
+    },
+    Sprite {
+        start: 393442,
         len: 680,
         anchor: (12.435, 29.26),
     },
     Sprite {
-        start: 223582,
+        start: 394122,
+        len: 586,
+        anchor: (12.465, 29.5),
+    },
+    Sprite {
+        start: 394708,
         len: 616,
         anchor: (11.985, 29.645),
     },
     Sprite {
-        start: 224198,
+        start: 395324,
+        len: 734,
+        anchor: (11.65, 29.66),
+    },
+    Sprite {
+        start: 396058,
         len: 646,
         anchor: (12.485, 29.55),
     },
     Sprite {
-        start: 224844,
+        start: 396704,
+        len: 632,
+        anchor: (12.335, 29.32),
+    },
+    Sprite {
+        start: 397336,
         len: 580,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 225424,
+        start: 397916,
+        len: 496,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 398412,
         len: 422,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 225846,
+        start: 398834,
+        len: 346,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 399180,
         len: 368,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 226214,
+        start: 399548,
+        len: 298,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 399846,
         len: 94,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 226308,
+        start: 399940,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 400034,
         len: 326,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 226634,
+        start: 400360,
+        len: 362,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 400722,
         len: 400,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 227034,
+        start: 401122,
+        len: 380,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 401502,
         len: 420,
         anchor: (11.985, 23.22),
     },
     Sprite {
-        start: 227454,
+        start: 401922,
+        len: 500,
+        anchor: (11.65, 23.225),
+    },
+    Sprite {
+        start: 402422,
         len: 532,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 227986,
+        start: 402954,
+        len: 492,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 403446,
         len: 1096,
         anchor: (12.85, 23.165),
     },
     Sprite {
-        start: 229082,
+        start: 404542,
+        len: 1122,
+        anchor: (13.02, 23.16),
+    },
+    Sprite {
+        start: 405664,
         len: 1030,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 230112,
+        start: 406694,
+        len: 916,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 407610,
         len: 716,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 230828,
+        start: 408326,
+        len: 626,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 408952,
         len: 478,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 231306,
+        start: 409430,
+        len: 380,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 409810,
         len: 288,
         anchor: (12.775, 23.165),
     },
     Sprite {
-        start: 231594,
+        start: 410098,
+        len: 280,
+        anchor: (13.07, 23.16),
+    },
+    Sprite {
+        start: 410378,
         len: 242,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 231836,
+        start: 410620,
+        len: 438,
+        anchor: (13.6, 23.205),
+    },
+    Sprite {
+        start: 411058,
         len: 472,
         anchor: (12.99, 23.22),
     },
     Sprite {
-        start: 232308,
+        start: 411530,
+        len: 616,
+        anchor: (13.025, 23.225),
+    },
+    Sprite {
+        start: 412146,
         len: 882,
         anchor: (13.63, 23.21),
     },
     Sprite {
-        start: 233190,
+        start: 413028,
+        len: 976,
+        anchor: (12.76, 23.185),
+    },
+    Sprite {
+        start: 414004,
         len: 1082,
         anchor: (12.85, 23.165),
     },
     Sprite {
-        start: 234272,
+        start: 415086,
+        len: 1132,
+        anchor: (13.02, 23.16),
+    },
+    Sprite {
+        start: 416218,
         len: 1052,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 235324,
+        start: 417270,
+        len: 906,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 418176,
         len: 718,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 236042,
+        start: 418894,
+        len: 594,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 419488,
         len: 470,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 236512,
+        start: 419958,
+        len: 380,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 420338,
         len: 288,
         anchor: (12.775, 23.165),
     },
     Sprite {
-        start: 236800,
+        start: 420626,
+        len: 280,
+        anchor: (13.07, 23.16),
+    },
+    Sprite {
+        start: 420906,
         len: 242,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 237042,
+        start: 421148,
+        len: 448,
+        anchor: (13.6, 23.205),
+    },
+    Sprite {
+        start: 421596,
         len: 472,
         anchor: (12.99, 23.22),
     },
     Sprite {
-        start: 237514,
+        start: 422068,
+        len: 642,
+        anchor: (13.025, 23.225),
+    },
+    Sprite {
+        start: 422710,
         len: 854,
         anchor: (13.63, 23.21),
     },
     Sprite {
-        start: 238368,
+        start: 423564,
+        len: 972,
+        anchor: (12.76, 23.185),
+    },
+    Sprite {
+        start: 424536,
         len: 508,
         anchor: (12.85, 23.165),
     },
     Sprite {
-        start: 238876,
+        start: 425044,
+        len: 558,
+        anchor: (13.02, 23.16),
+    },
+    Sprite {
+        start: 425602,
         len: 580,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 239456,
+        start: 426182,
+        len: 566,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 426748,
         len: 388,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 239844,
+        start: 427136,
+        len: 384,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 427520,
         len: 248,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 240092,
+        start: 427768,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 427862,
         len: 94,
         anchor: (12.775, 23.165),
     },
     Sprite {
-        start: 240186,
+        start: 427956,
+        len: 94,
+        anchor: (13.07, 23.16),
+    },
+    Sprite {
+        start: 428050,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 240280,
+        start: 428144,
+        len: 200,
+        anchor: (13.6, 23.205),
+    },
+    Sprite {
+        start: 428344,
         len: 128,
         anchor: (12.99, 23.22),
     },
     Sprite {
-        start: 240408,
+        start: 428472,
+        len: 372,
+        anchor: (13.025, 23.225),
+    },
+    Sprite {
+        start: 428844,
         len: 444,
         anchor: (13.63, 23.21),
     },
     Sprite {
-        start: 240852,
+        start: 429288,
+        len: 536,
+        anchor: (12.76, 23.185),
+    },
+    Sprite {
+        start: 429824,
         len: 442,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 241294,
+        start: 430266,
+        len: 448,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 430714,
         len: 468,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 241762,
+        start: 431182,
+        len: 468,
+        anchor: (11.98, 23.205),
+    },
+    Sprite {
+        start: 431650,
         len: 370,
         anchor: (11.615, 23.22),
     },
     Sprite {
-        start: 242132,
+        start: 432020,
+        len: 300,
+        anchor: (11.565, 23.225),
+    },
+    Sprite {
+        start: 432320,
         len: 280,
         anchor: (11.875, 23.21),
     },
     Sprite {
-        start: 242412,
+        start: 432600,
+        len: 94,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 432694,
         len: 94,
         anchor: (12.675, 23.165),
     },
     Sprite {
-        start: 242506,
+        start: 432788,
+        len: 94,
+        anchor: (12.71, 23.16),
+    },
+    Sprite {
+        start: 432882,
         len: 94,
         anchor: (12.435, 23.18),
     },
     Sprite {
-        start: 242600,
+        start: 432976,
+        len: 186,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 433162,
         len: 272,
         anchor: (12.7, 23.22),
     },
     Sprite {
-        start: 242872,
+        start: 433434,
+        len: 354,
+        anchor: (12.6, 23.225),
+    },
+    Sprite {
+        start: 433788,
         len: 412,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 243284,
+        start: 434200,
+        len: 466,
+        anchor: (12.335, 23.185),
+    },
+    Sprite {
+        start: 434666,
         len: 964,
         anchor: (12.92, 23.165),
     },
     Sprite {
-        start: 244248,
+        start: 435630,
+        len: 954,
+        anchor: (12.96, 23.16),
+    },
+    Sprite {
+        start: 436584,
         len: 930,
         anchor: (12.7, 23.18),
     },
     Sprite {
-        start: 245178,
+        start: 437514,
+        len: 952,
+        anchor: (12.265, 23.205),
+    },
+    Sprite {
+        start: 438466,
         len: 914,
         anchor: (11.92, 23.22),
     },
     Sprite {
-        start: 246092,
+        start: 439380,
+        len: 902,
+        anchor: (11.87, 23.225),
+    },
+    Sprite {
+        start: 440282,
         len: 930,
         anchor: (12.165, 23.21),
     },
     Sprite {
-        start: 247022,
+        start: 441212,
+        len: 860,
+        anchor: (12.6, 23.185),
+    },
+    Sprite {
+        start: 442072,
         len: 848,
         anchor: (12.92, 23.165),
     },
     Sprite {
-        start: 247870,
+        start: 442920,
+        len: 874,
+        anchor: (12.96, 23.16),
+    },
+    Sprite {
+        start: 443794,
         len: 884,
         anchor: (12.7, 23.18),
     },
     Sprite {
-        start: 248754,
+        start: 444678,
+        len: 940,
+        anchor: (12.465, 23.205),
+    },
+    Sprite {
+        start: 445618,
         len: 998,
         anchor: (12.265, 23.22),
     },
     Sprite {
-        start: 249752,
+        start: 446616,
+        len: 984,
+        anchor: (11.87, 23.225),
+    },
+    Sprite {
+        start: 447600,
         len: 1062,
         anchor: (12.485, 23.21),
     },
     Sprite {
-        start: 250814,
+        start: 448662,
+        len: 962,
+        anchor: (12.6, 23.185),
+    },
+    Sprite {
+        start: 449624,
         len: 706,
         anchor: (5.485, 7.68),
     },
     Sprite {
-        start: 251520,
+        start: 450330,
         len: 734,
         anchor: (5.485, 7.68),
     },
     Sprite {
-        start: 252254,
+        start: 451064,
         len: 744,
         anchor: (5.485, 7.68),
     },
     Sprite {
-        start: 252998,
+        start: 451808,
         len: 762,
         anchor: (5.485, 7.68),
     },
     Sprite {
-        start: 253760,
+        start: 452570,
         len: 790,
         anchor: (5.485, 7.68),
     },
     Sprite {
-        start: 254550,
+        start: 453360,
         len: 402,
         anchor: (3.665, 4.61),
     },
     Sprite {
-        start: 254952,
+        start: 453762,
         len: 416,
         anchor: (3.665, 4.61),
     },
     Sprite {
-        start: 255368,
+        start: 454178,
         len: 416,
         anchor: (3.665, 4.61),
     },
     Sprite {
-        start: 255784,
+        start: 454594,
         len: 430,
         anchor: (3.665, 4.61),
     },
     Sprite {
-        start: 256214,
+        start: 455024,
         len: 434,
         anchor: (3.665, 4.61),
     },
     Sprite {
-        start: 256648,
+        start: 455458,
         len: 172,
         anchor: (1.44, 1.44),
     },
     Sprite {
-        start: 256820,
+        start: 455630,
         len: 252,
         anchor: (2.16, 2.16),
     },
     Sprite {
-        start: 257072,
+        start: 455882,
         len: 214,
         anchor: (1.56, 1.895),
     },
     Sprite {
-        start: 257286,
+        start: 456096,
         len: 406,
         anchor: (1.955, 5.54),
     },
     Sprite {
-        start: 257692,
+        start: 456502,
         len: 296,
         anchor: (2.64, 2.415),
     },
     Sprite {
-        start: 257988,
+        start: 456798,
         len: 240,
         anchor: (1.8, 1.8),
     },
     Sprite {
-        start: 258228,
+        start: 457038,
         len: 230,
         anchor: (1.8, 1.8),
     },
     Sprite {
-        start: 258458,
+        start: 457268,
         len: 382,
         anchor: (1.8, 4.475),
     },
     Sprite {
-        start: 258840,
+        start: 457650,
         len: 342,
         anchor: (2.875, 2.955),
     },
     Sprite {
-        start: 259182,
+        start: 457992,
         len: 350,
         anchor: (2.95, 2.77),
     },
     Sprite {
-        start: 259532,
+        start: 458342,
         len: 364,
         anchor: (2.88, 4.025),
     },
     Sprite {
-        start: 259896,
-        len: 362,
+        start: 458706,
+        len: 364,
         anchor: (2.88, 4.025),
     },
     Sprite {
-        start: 260258,
+        start: 459070,
         len: 298,
         anchor: (1.145, 4.41),
     },
     Sprite {
-        start: 260556,
+        start: 459368,
         len: 244,
         anchor: (1.7, 1.635),
     },
     Sprite {
-        start: 260800,
+        start: 459612,
         len: 252,
         anchor: (1.58, 1.665),
     },
     Sprite {
-        start: 261052,
+        start: 459864,
         len: 210,
         anchor: (1.29, 1.615),
     },
     Sprite {
-        start: 261262,
+        start: 460074,
         len: 196,
         anchor: (1.445, 1.69),
     },
     Sprite {
-        start: 261458,
+        start: 460270,
         len: 294,
         anchor: (2.415, 2.79),
     },
     Sprite {
-        start: 261752,
+        start: 460564,
         len: 320,
         anchor: (2.815, 4.325),
     },
     Sprite {
-        start: 262072,
+        start: 460884,
         len: 374,
         anchor: (3.21, 5.865),
     },
     Sprite {
-        start: 262446,
+        start: 461258,
         len: 418,
         anchor: (3.61, 7.405),
     },
     Sprite {
-        start: 262864,
+        start: 461676,
         len: 644,
         anchor: (4.015, 9.905),
     },
     Sprite {
-        start: 263508,
+        start: 462320,
         len: 1806,
         anchor: (17.48, 17.48),
     },
     Sprite {
-        start: 265314,
+        start: 464126,
         len: 1720,
         anchor: (17.48, 17.48),
     },
     Sprite {
-        start: 267034,
+        start: 465846,
         len: 1580,
         anchor: (17.48, 17.48),
     },
     Sprite {
-        start: 268614,
+        start: 467426,
         len: 1588,
         anchor: (17.48, 17.48),
     },
     Sprite {
-        start: 270202,
+        start: 469014,
         len: 1614,
         anchor: (17.48, 17.48),
     },
     Sprite {
-        start: 271816,
+        start: 470628,
         len: 1720,
         anchor: (17.48, 17.48),
     },
     Sprite {
-        start: 273536,
+        start: 472348,
         len: 1716,
         anchor: (17.48, 17.48),
     },
     Sprite {
-        start: 275252,
+        start: 474064,
         len: 3126,
         anchor: (24.145, 24.145),
     },
     Sprite {
-        start: 278378,
+        start: 477190,
         len: 3142,
         anchor: (24.145, 24.145),
     },
     Sprite {
-        start: 281520,
+        start: 480332,
         len: 2946,
         anchor: (24.145, 24.145),
     },
     Sprite {
-        start: 284466,
+        start: 483278,
         len: 2874,
         anchor: (24.145, 24.145),
     },
     Sprite {
-        start: 287340,
+        start: 486152,
         len: 3114,
         anchor: (24.145, 24.145),
     },
     Sprite {
-        start: 290454,
+        start: 489266,
         len: 3088,
         anchor: (24.145, 24.145),
     },
     Sprite {
-        start: 293542,
+        start: 492354,
         len: 3116,
         anchor: (24.145, 24.145),
     },
     Sprite {
-        start: 296658,
+        start: 495470,
         len: 632,
         anchor: (4.27, 4.27),
     },
     Sprite {
-        start: 297290,
+        start: 496102,
         len: 664,
         anchor: (4.27, 4.27),
     },
     Sprite {
-        start: 297954,
+        start: 496766,
         len: 678,
         anchor: (4.27, 4.27),
     },
     Sprite {
-        start: 298632,
+        start: 497444,
         len: 688,
         anchor: (4.27, 4.27),
     },
     Sprite {
-        start: 299320,
+        start: 498132,
         len: 658,
         anchor: (4.27, 4.27),
     },
     Sprite {
-        start: 299978,
+        start: 498790,
         len: 646,
         anchor: (4.27, 4.27),
     },
     Sprite {
-        start: 300624,
+        start: 499436,
         len: 676,
         anchor: (4.27, 4.27),
     },
     Sprite {
-        start: 301300,
+        start: 500112,
         len: 636,
         anchor: (4.27, 4.27),
     },
     Sprite {
-        start: 301936,
+        start: 500748,
         len: 282,
         anchor: (11.0, 3.5),
     },
