@@ -535,7 +535,7 @@ mod tests {
             "mcpServers": {
                 "rea": {
                     "command": launcher,
-                    "args": ["x", "--bun", "rea-agents@6.9.0", "mcp"],
+                    "args": ["x", "--bun", "rea-agents@6.7.0", "mcp"],
                     "env": {"BUN_BE_BUN": "1", "GHIDRA_INSTALL_DIR": "/opt/ghidra"},
                     "timeout": 120,
                 },
@@ -553,7 +553,7 @@ mod tests {
         upgrade_preset_pins_at(&dir, false).unwrap();
 
         let rea_pin = find_preset("rea").unwrap().pinned_package().unwrap().1;
-        assert_eq!(rea_pin, "rea-agents@6.7.0");
+        assert_eq!(rea_pin, "rea-agents@6.9.0");
         let playwright_pin = find_preset("playwright")
             .unwrap()
             .pinned_package()
@@ -616,7 +616,7 @@ mod tests {
         );
         assert_eq!(
             rea["args"],
-            serde_json::json!(["x", "--bun", "rea-agents@6.7.0", "mcp"]),
+            serde_json::json!(["x", "--bun", "rea-agents@6.9.0", "mcp"]),
             "持久注册必须钉死版本，不能用 @latest；--bun 防止转交给系统 node"
         );
         assert_eq!(
@@ -638,7 +638,7 @@ mod tests {
                 args: vec![
                     "x".into(),
                     "--bun".into(),
-                    "rea-agents@6.7.0".into(),
+                    "rea-agents@6.9.0".into(),
                     "mcp".into(),
                 ],
             }

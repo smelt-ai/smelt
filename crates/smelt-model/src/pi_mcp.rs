@@ -112,15 +112,15 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     // runner（`bun x`），不要求用户装 Node、也不全局安装：包只进 Smelt 自己按版本分开的缓存
     // （`~/.smelt/cache/bun-x/<包@版本>`，见 `agent/src/pi-mcp-runtime.ts`），不碰用户的 `~/.bun`。
     // `--bun` 必不可少：rea 的入口脚本是 node shebang，不加 Bun 会转交给系统 node。
-    // 持久注册必须钉死版本号。207 个工具、3MB 多的 schema，绝不能直接声明给模型，
+    // 持久注册必须钉死版本号。255 个工具、5MB 的 schema，绝不能直接声明给模型，
     // 留在默认的 codemode 里按需发现。分析可能跑很久，超时放宽到它给 Kimi Code 配的 120 秒。
     PiMcpPreset {
         id: "rea",
         text: PiMcpPresetText::Rea,
         description: "REA (Reverse Engineer Anything): local, evidence-backed reverse engineering of desktop apps, binaries, Electron/JavaScript bundles, websites and traffic captures",
         transport: PiMcpPresetTransport::Bun {
-            // 6.8+ 要求的 Node 兼容版本高于当前内置 Bun；待上游兼容后再升级。
-            args: &["x", "--bun", "rea-agents@6.7.0", "mcp"],
+            // 6.8 起要求 Node 26.12.1 以上，内置 Bun 要自报这个版本才跑得起来。
+            args: &["x", "--bun", "rea-agents@6.9.0", "mcp"],
             env: &[],
         },
         exposure: None,
