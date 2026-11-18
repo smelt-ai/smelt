@@ -874,6 +874,74 @@ pub fn strip_code_fence(text: &str) -> &str {
     body.trim_end_matches('\n')
 }
 
+/// 提问导航里的一问：提问压成一行，加上这一问最后一段回答的开头。对话页左侧的导航条
+/// 用它画刻度和悬停预览；没加载到客户端的那一截由运行时按同一个函数算好发过来。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptIndexItem {
+    /// 提问在整段对话里的条目序号（不是客户端已加载那一截里的下标）。
+    pub entry_ix: usize,
+    /// 提问的字，换行和连续空白压成一个空格，过长截断。
+    pub prompt: String,
+    /// 提问带了几张图。
+    #[serde(default)]
+    pub images: usize,
+    /// 这一问最后一段回答的开头，同样压成一行；还没回答时为空。
+    #[serde(default)]
+    pub answer: String,
+}
+
+/// 预览只放得下两三行，摘要截到这么多字就够。
+const PROMPT_INDEX_PROMPT_CHARS: usize = 200;
+const PROMPT_INDEX_ANSWER_CHARS: usize = 160;
+
+/// 一段条目里的每一问。`offset` 是 `entries[0]` 在整段对话里的序号。中断标记不是提问。
+pub fn prompt_index(entries: &[AcpEntry], offset: usize) -> Vec<PromptIndexItem> {
+    let mut items: Vec<PromptIndexItem> = Vec::new();
+    for (ix, entry) in entries.iter().enumerate() {
+        let (text, images) = match entry {
+            AcpEntry::User(text) if !is_interrupt_marker(text) => (text.as_str(), 0),
+            AcpEntry::UserWithImages { text, images } => (text.as_str(), images.len()),
+            AcpEntry::Assistant {
+                text,
+                thought: false,
+            } => {
+                if let Some(item) = items.last_mut()
+                    && !text.trim().is_empty()
+                {
+                    item.answer = one_line_clipped(text, PROMPT_INDEX_ANSWER_CHARS);
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        items.push(PromptIndexItem {
+            entry_ix: offset + ix,
+            prompt: one_line_clipped(text, PROMPT_INDEX_PROMPT_CHARS),
+            images,
+            answer: String::new(),
+        });
+    }
+    items
+}
+
+fn one_line_clipped(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (count, word) in text.split_whitespace().enumerate() {
+        if count > 0 {
+            out.push(' ');
+        }
+        out.push_str(word);
+        if out.chars().count() > max_chars {
+            break;
+        }
+    }
+    if out.chars().count() > max_chars {
+        out = out.chars().take(max_chars).collect();
+        out.push('…');
+    }
+    out
+}
+
 /// agent 回显的「用户中断」标记——它走的是 UserMessageChunk 通道，但不是用户
 /// 打的字，UI 得把它渲染成状态提示而不是消息气泡。
 pub fn is_interrupt_marker(text: &str) -> bool {
@@ -1247,6 +1315,63 @@ pub fn completion_summary_text(output: &[ToolOutputPart]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_index_lists_each_prompt_with_the_start_of_its_last_answer() {
+        let entries = vec![
+            AcpEntry::Assistant {
+                text: "开场白".into(),
+                thought: false,
+            },
+            AcpEntry::User("修一下\n  登录页".into()),
+            AcpEntry::Assistant {
+                text: "先看看".into(),
+                thought: false,
+            },
+            AcpEntry::Assistant {
+                text: "想一想".into(),
+                thought: true,
+            },
+            AcpEntry::Assistant {
+                text: "改好了，\n登录页不再闪".into(),
+                thought: false,
+            },
+            AcpEntry::User("[Request interrupted by user]".into()),
+            AcpEntry::UserWithImages {
+                text: String::new(),
+                images: vec![AcpImage::new("image/png", "")],
+            },
+        ];
+        let items = prompt_index(&entries, 40);
+        assert_eq!(
+            items,
+            vec![
+                PromptIndexItem {
+                    entry_ix: 41,
+                    prompt: "修一下 登录页".into(),
+                    images: 0,
+                    answer: "改好了， 登录页不再闪".into(),
+                },
+                PromptIndexItem {
+                    entry_ix: 46,
+                    prompt: String::new(),
+                    images: 1,
+                    answer: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn prompt_index_clips_long_text_to_one_short_line() {
+        let long = "字".repeat(500);
+        let items = prompt_index(&[AcpEntry::User(long)], 0);
+        assert_eq!(
+            items[0].prompt.chars().count(),
+            PROMPT_INDEX_PROMPT_CHARS + 1
+        );
+        assert!(items[0].prompt.ends_with('…'));
+    }
 
     /// 不认识新条目的旧客户端收到的是它认得的分割线和助手正文，按英文说；认得的原样借用。
     #[test]

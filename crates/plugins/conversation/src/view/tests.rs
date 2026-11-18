@@ -5429,6 +5429,101 @@ fn init_ui(cx: &mut gpui::App) {
 }
 
 /// 在跑的段收成一行计数，改过的文件露成标签；点标签在原地展开这个文件的改动。
+/// 左侧提问导航：没加载的那一截用运行时给的索引，已加载的现算；当前读到的那问加长，
+/// 指上去出预览，点已加载的直接滚过去，点没加载的先往前翻页。窄了就不画。
+#[gpui::test]
+fn the_prompt_rail_lists_every_prompt_and_jumps_to_it(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = open_conversation(
+        cx,
+        "acp-prompt-rail",
+        vec![
+            AcpEntry::User("第二问".into()),
+            AcpEntry::Assistant {
+                text: "第二答".into(),
+                thought: false,
+            },
+            AcpEntry::User("[Request interrupted by user]".into()),
+            AcpEntry::User("第三问".into()),
+            AcpEntry::Assistant {
+                text: "第三答".into(),
+                thought: false,
+            },
+        ],
+        DaemonPhase::Idle,
+    );
+    cx.simulate_resize(gpui::size(px(1400.), px(900.)));
+    view.update(cx, |view, cx| {
+        view.loaded_entries_offset = 10;
+        view.entries_total = 15;
+        view.prompt_index_before = Some(10);
+        view.prompt_index = vec![smelt_plugin_api::model::acp_chat::PromptIndexItem {
+            entry_ix: 4,
+            prompt: "第一问".into(),
+            images: 0,
+            answer: "第一答".into(),
+        }];
+        cx.notify();
+    });
+    draw_settled(cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.prompt_rail_entries()),
+        [4, 10, 13],
+        "中断标记不算一问"
+    );
+    assert!(cx.debug_bounds("ACP_PROMPT_RAIL").is_some());
+    assert!(cx.debug_bounds("ACP_PROMPT_TICK_3").is_none());
+
+    let tick = cx.debug_bounds("ACP_PROMPT_TICK_2").expect("每问一条刻度");
+    cx.simulate_mouse_move(tick.center(), None, gpui::Modifiers::default());
+    draw_settled(cx);
+    let hovered = view.read_with(cx, |view, _| view.prompt_rail_hover.clone());
+    assert_eq!(
+        hovered.map(|item| (item.entry_ix, item.prompt, item.answer)),
+        Some((13, "第三问".into(), "第三答".into()))
+    );
+    assert!(cx.debug_bounds("ACP_PROMPT_PEEK").is_some());
+
+    cx.simulate_click(tick.center(), gpui::Modifiers::default());
+    assert_eq!(view.read_with(cx, |view, _| view.revealed_prompt), Some(3));
+
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.jump_to_prompt(4, cx);
+            assert_eq!(view.pending_prompt_jump, Some(4), "没加载的先记下");
+            assert!(view.history_loading, "并往前翻页");
+        })
+    });
+
+    // 前面那页回来了：翻到了那一问就滚过去，不再接着翻。
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.history_loading = false;
+            let page = (0..10)
+                .map(|ix| {
+                    if ix == 4 {
+                        AcpEntry::User("第一问".into())
+                    } else {
+                        AcpEntry::Assistant {
+                            text: format!("第 {ix} 条"),
+                            thought: false,
+                        }
+                    }
+                })
+                .collect();
+            view.prepend_history_page(tail_snapshot(0, 0, page, DaemonPhase::Idle), cx);
+            view.continue_prompt_jump(cx);
+            assert_eq!(view.loaded_entries_offset, 0);
+            assert_eq!(view.pending_prompt_jump, None);
+            assert_eq!(view.revealed_prompt, Some(4));
+            assert!(!view.history_loading);
+        })
+    });
+
+    cx.simulate_resize(gpui::size(px(700.), px(900.)));
+    draw_settled(cx);
+    assert!(cx.debug_bounds("ACP_PROMPT_RAIL").is_none(), "放不下就不画");
+}
+
 /// 授权请求长在输入框顶上、和输入框连成一体；选项一列菜单，点了就回给 agent。
 #[gpui::test]
 fn the_permission_tray_sits_inside_the_composer(cx: &mut gpui::TestAppContext) {

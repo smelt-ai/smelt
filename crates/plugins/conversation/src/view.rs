@@ -57,6 +57,7 @@ use smelt_plugin_api::ui::motion::{
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::ui_theme;
 
+use smelt_plugin_api::model::acp_chat::PromptIndexItem;
 /// 消息流数据模型（AcpEntry/ToolOutputPart/ToolKind/ToolCallStatus）与 diff/
 /// markdown 围栏这批纯逻辑现在都活在 `smelt_plugin_api::model::acp_chat`——不依赖 GPUI 也不
 /// 依赖 agent_client_protocol，未来 web/mobile 端渲染同一份对话时不用重新实现
@@ -1720,6 +1721,15 @@ pub struct ConversationView {
     /// 从舞台胶囊跳回的提问（entries 索引）。它头上临时让出标题胶囊的高度，
     /// 不必靠前一条回答的高度定位。
     revealed_prompt: Option<usize>,
+    /// 提问导航里还没加载到的那一截（`loaded_entries_offset` 之前）的每一问，运行时算好
+    /// 发来的只读缓存。已加载的那一截每次从 `entries` 现算，不存第二份。
+    prompt_index: Vec<PromptIndexItem>,
+    /// 问运行时要的是哪一条之前的提问；`None` 是还没问过。
+    prompt_index_before: Option<usize>,
+    /// 指针停在哪一问的刻度上，预览卡片画它。
+    prompt_rail_hover: Option<PromptIndexItem>,
+    /// 点了还没加载到的那一问（全局条目下标）：往前翻页，翻到了再滚过去。
+    pending_prompt_jump: Option<usize>,
     /// 「强制重启」请求正在路上：用于阻止「停止」按钮重复触发。跟
     /// `DaemonPhase::Connecting` 不是一回事——那是新进程握手阶段，这个是"旧进程
     /// 还没确认死透"的过渡态，两者可能重叠（发出 acp_restart 到收到新一份
@@ -2009,6 +2019,10 @@ impl ConversationView {
             awaiting_initial_history_snapshot: true,
             viewing_history: false,
             revealed_prompt: None,
+            prompt_index: Vec::new(),
+            prompt_index_before: None,
+            prompt_rail_hover: None,
+            pending_prompt_jump: None,
             restarting: false,
             cancel_requested_at: None,
             restart_error: None,
@@ -2806,19 +2820,27 @@ impl ConversationView {
         self.history_loading = true;
         let sid = self.sid.clone();
         let before = self.loaded_entries_offset;
+        // 要跳到前面很远的一问时一次多翻一些，少几个来回；运行时一页最多给 500 条。
+        let limit = self
+            .pending_prompt_jump
+            .map_or(ACP_HISTORY_PAGE_LIMIT, |target| {
+                (before.saturating_sub(target) + ACP_HISTORY_PAGE_LIMIT).min(500)
+            });
         let runtime = self.runtime.client().clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { load_acp_history(&runtime, &sid, before, ACP_HISTORY_PAGE_LIMIT) },
-                )
+                .spawn(async move { load_acp_history(&runtime, &sid, before, limit) })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.history_loading = false;
                 match result {
-                    Ok(snapshot) => view.prepend_history_page(snapshot, cx),
+                    Ok(snapshot) => {
+                        view.prepend_history_page(snapshot, cx);
+                        view.continue_prompt_jump(cx);
+                    }
                     Err(error) => {
+                        view.pending_prompt_jump = None;
                         view.history_error =
                             Some(t!("error.history_unreadable", error = error).into_owned());
                         eprintln!("[workspace] ACP 历史分页失败：{error}");
@@ -2827,6 +2849,118 @@ impl ConversationView {
             });
         })
         .detach();
+    }
+
+    /// 向运行时要还没加载到的那一截的每一问。旧运行时没有这个方法时导航只画已加载的那一截。
+    fn load_prompt_index(&mut self, cx: &mut Context<Self>) {
+        let before = self.loaded_entries_offset;
+        self.prompt_index_before = Some(before);
+        let params = smelt_plugin_api::model::control_api::ConversationPromptIndexParams {
+            session_id: self.sid.clone(),
+            before: Some(before as u64),
+        };
+        let runtime = self.runtime.client().clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    runtime.call::<smelt_plugin_api::model::control_api::ConversationPromptIndex>(
+                        &params,
+                        PROMPT_INDEX_TIMEOUT,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.prompt_index_before != Some(before) {
+                    return;
+                }
+                match result {
+                    Ok(result) => {
+                        view.prompt_index = result.prompts;
+                        cx.notify();
+                    }
+                    Err(error) => eprintln!("[workspace] 读提问导航失败：{error}"),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 每一问在整段对话里的条目下标，按先后排。没加载的那一截用运行时给的，已加载的现算。
+    pub(super) fn prompt_rail_entries(&self) -> Vec<usize> {
+        let offset = self.loaded_entries_offset;
+        self.prompt_index
+            .iter()
+            .map(|item| item.entry_ix)
+            .take_while(|ix| *ix < offset)
+            .chain(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| is_prompt_entry(entry))
+                    .map(|(ix, _)| offset + ix),
+            )
+            .collect()
+    }
+
+    /// 预览卡片上的那一问。已加载的从 `entries` 现算这一问到下一问之间。
+    fn prompt_rail_item(&self, entry_ix: usize) -> Option<PromptIndexItem> {
+        let offset = self.loaded_entries_offset;
+        let Some(local) = entry_ix.checked_sub(offset) else {
+            return self
+                .prompt_index
+                .iter()
+                .find(|item| item.entry_ix == entry_ix)
+                .cloned();
+        };
+        let end = self.entries[local + 1..]
+            .iter()
+            .position(is_prompt_entry)
+            .map_or(self.entries.len(), |next| local + 1 + next);
+        smelt_plugin_api::model::acp_chat::prompt_index(self.entries.get(local..end)?, entry_ix)
+            .into_iter()
+            .next()
+    }
+
+    pub(super) fn hover_prompt_tick(
+        &mut self,
+        entry_ix: usize,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if hovered {
+            self.prompt_rail_hover = self.prompt_rail_item(entry_ix);
+        } else if self
+            .prompt_rail_hover
+            .as_ref()
+            .is_some_and(|item| item.entry_ix == entry_ix)
+        {
+            self.prompt_rail_hover = None;
+        } else {
+            return;
+        }
+        cx.notify();
+    }
+
+    /// 跳到第 `entry_ix` 问（全局条目下标）。没加载到的先往前翻页。
+    pub(super) fn jump_to_prompt(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
+        self.pending_prompt_jump = Some(entry_ix);
+        self.continue_prompt_jump(cx);
+    }
+
+    fn continue_prompt_jump(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.pending_prompt_jump else {
+            return;
+        };
+        match target.checked_sub(self.loaded_entries_offset) {
+            Some(local) if local < self.entries.len() => {
+                self.pending_prompt_jump = None;
+                self.reveal_prompt(local, cx);
+            }
+            Some(_) => self.pending_prompt_jump = None,
+            None if self.loaded_entries_offset > 0 => self.load_older_history(cx),
+            None => self.pending_prompt_jump = None,
+        }
     }
 
     fn prepend_history_page(&mut self, snapshot: ConversationSnapshot, cx: &mut Context<Self>) {
@@ -4243,6 +4377,17 @@ impl ConversationView {
             self.history_backfill_started = true;
             self.load_older_history(cx);
         }
+        // 回退、压缩改写过前面的历史时整段变短，前面那截的提问要重新问。
+        if self
+            .prompt_index_before
+            .is_some_and(|before| before > self.entries_total)
+        {
+            self.prompt_index.clear();
+            self.prompt_index_before = None;
+        }
+        if self.loaded_entries_offset > 0 && self.prompt_index_before.is_none() {
+            self.load_prompt_index(cx);
+        }
         let snapshot_phase = snap.phase;
         let snapshot_has_entries = snap.entries_total > 0;
         self.phase = snap.phase;
@@ -4806,6 +4951,11 @@ impl ConversationView {
         let Some(ix) = self.pinned_prompt_ix() else {
             return;
         };
+        self.reveal_prompt(ix, cx);
+    }
+
+    /// 把第 `ix` 条（已加载那一截里的下标）提问滚到顶上，头上让出标题胶囊的高度。
+    fn reveal_prompt(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(previous) = self.revealed_prompt.replace(ix) {
             self.list_state.remeasure_items(previous..previous + 1);
         }
@@ -4822,10 +4972,8 @@ impl ConversationView {
             .enumerate()
             .rev()
             .find_map(|(ix, entry)| {
-                (is_user_entry(entry)
-                    && !matches!(entry, AcpEntry::User(text) if is_interrupt_marker(text))
-                    && self.list_state.item_is_above_viewport(ix) == Some(true))
-                .then_some(ix)
+                (is_prompt_entry(entry) && self.list_state.item_is_above_viewport(ix) == Some(true))
+                    .then_some(ix)
             })
     }
 
@@ -5565,6 +5713,11 @@ fn cached_diff_stats(parts: Option<&[Option<CachedDiff>]>) -> Option<(usize, usi
 
 fn is_user_entry(entry: &AcpEntry) -> bool {
     matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
+}
+
+/// 提问导航里算一问的：用户发的消息，中断标记不算。和运行时的 `prompt_index` 同一个口径。
+fn is_prompt_entry(entry: &AcpEntry) -> bool {
+    is_user_entry(entry) && !matches!(entry, AcpEntry::User(text) if is_interrupt_marker(text))
 }
 
 /// 吸顶只有一行：换行和连续空白压成单个空格，纯图片提问说几张图。
@@ -6965,6 +7118,8 @@ const RUNTIME_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 /// 读一页子会话：一个文件解析一遍，远程运行时还要走一趟网络。
 const SUBAGENT_TRANSCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// 挂起的对话要先唤醒、重放完历史才能答，比普通读多给些时间。
+const PROMPT_INDEX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct LoadedSkillsSnapshot {
     launch: ConversationLaunchSpec,

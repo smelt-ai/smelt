@@ -1060,6 +1060,9 @@ pi_calls! {
     /// 取对话里一张没有内联的图（`acp_watch` / `acp_snapshot` 带 `image_refs` 时帧里只有
     /// 引用）。条目被回退或压缩改写过、摘要对不上时回 `not_found`。
     ConversationImage => ConversationImage(ConversationImageParams) -> ConversationImageResult;
+    /// 对话里的每一问（提问一行加回答开头），给提问导航用。挂起的对话先唤醒，和往上翻页一样。
+    ConversationPromptIndex => ConversationPromptIndex(ConversationPromptIndexParams)
+        -> ConversationPromptIndexResult;
     /// 以一次外部投递的身份往对话里发一轮话（插件驱动对话用）。正在跑就排在这一轮后面，
     /// 不插进去。挂起的对话先唤醒。
     ConversationPrompt => ConversationPrompt(ConversationPromptParams) -> EmptyParams;
@@ -1248,6 +1251,20 @@ pub struct ConversationImageParams {
 pub struct ConversationImageResult {
     pub mime: String,
     pub data_b64: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationPromptIndexParams {
+    pub session_id: String,
+    /// 只要这一条（全局条目下标）之前的提问。客户端已加载的那一截自己算，只问前面没加载的。
+    /// 不给就是整段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationPromptIndexResult {
+    pub prompts: Vec<crate::acp_chat::PromptIndexItem>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

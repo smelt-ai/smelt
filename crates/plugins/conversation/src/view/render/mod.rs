@@ -16,6 +16,7 @@ mod cards;
 mod composer;
 mod conversation;
 mod memory;
+mod prompt_rail;
 mod subagents;
 
 impl Render for ConversationView {
@@ -651,6 +652,7 @@ impl ConversationView {
                     .min_h_0()
                     .w_full()
                     .child(list)
+                    .children(self.render_prompt_rail(cx))
                     .children((!self.entries.is_empty()).then(|| {
                         Scrollbar::vertical(&self.list_state)
                             .id("acp-message-scrollbar")

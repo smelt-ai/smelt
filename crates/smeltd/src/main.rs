@@ -114,6 +114,7 @@ mod client_conn;
 mod control;
 mod conversation_delivery;
 mod conversation_image;
+mod conversation_prompt_index;
 mod desktop;
 mod devices;
 mod app_requests;

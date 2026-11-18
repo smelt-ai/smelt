@@ -17,6 +17,7 @@ mod history_rename_tests;
 #[cfg(unix)]
 mod input_integration_tests;
 mod input_payload_tests;
+mod prompt_index_tests;
 #[cfg(unix)]
 mod remote_reattach_tests;
 #[cfg(unix)]
