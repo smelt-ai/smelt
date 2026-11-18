@@ -11,6 +11,8 @@
 //!   只读缓存。
 //! - 选中哪段会话或哪个项目：只在内存里（[`Sessions::selection`]），选中的会话另存一份进库，
 //!   下次启动恢复。
+//! - 列表里哪一行上的操作刚失败了：只在内存里（[`Sessions::failures`]），是这次运行里刚发生
+//!   的事，不是数据。
 //! - 建好的会话（视图实例、分屏）：归会话视图（`session_view::SessionView`），它在窗口里建、
 //!   在窗口里扔，不放在这里。选中会话眼下那一格由它推来一份只读缓存
 //!   （[`Sessions::active_pane`]）。
@@ -98,6 +100,34 @@ pub(crate) struct Sessions {
     /// `project_matches`）。空是不搜。只在内存里，不存库：关了 app 就清空。只经
     /// [`Self::set_project_filter`] 改。
     pub(crate) project_filter: String,
+    /// 在列表里某一行上发起、失败了的操作，画在那一行上（`list::rows` 的 `failure_mark`）。
+    /// 同一行再发起操作时先清掉（[`crate::report_row_failure`]），点那个标记也清掉。只经
+    /// [`Self::set_failure`] 改。
+    pub(crate) failures: Rc<HashMap<FailTarget, Failure>>,
+}
+
+/// 列表里能挂失败的一行。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum FailTarget {
+    Conversation(ConversationKey),
+    Project { machine: RuntimeKey, root: String },
+    Workset(WorksetKey),
+}
+
+/// 一行上失败的操作：做的是什么（「关闭会话」这类动宾短语）、为什么没做成。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Failure {
+    pub(crate) what: SharedString,
+    pub(crate) error: SharedString,
+}
+
+impl Failure {
+    /// 悬停在标记上看到的话。
+    pub(crate) fn message(&self) -> SharedString {
+        t!("error.failed", what = self.what, error = self.error)
+            .into_owned()
+            .into()
+    }
 }
 
 struct SessionsGlobal(Entity<Sessions>);
@@ -135,6 +165,7 @@ impl Sessions {
                 unread: Unread::default(),
                 avatar,
                 project_filter: String::new(),
+                failures: Rc::default(),
             };
             sessions.sidebar = Rc::new(Sidebar::build(&sessions, cx));
             sessions
@@ -151,6 +182,24 @@ impl Sessions {
     /// 重算侧栏并通知重画。只在事件里调（目录、会话状态、机器变了，置顶这些改了）。
     pub(crate) fn rebuild_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar = Rc::new(Sidebar::build(self, cx));
+        cx.notify();
+    }
+
+    /// 给一行挂上或摘掉失败。没变就不通知。
+    pub(crate) fn set_failure(
+        &mut self,
+        target: FailTarget,
+        failure: Option<Failure>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.failures.get(&target) == failure.as_ref() {
+            return;
+        }
+        let failures = Rc::make_mut(&mut self.failures);
+        match failure {
+            Some(failure) => failures.insert(target, failure),
+            None => failures.remove(&target),
+        };
         cx.notify();
     }
 

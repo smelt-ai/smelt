@@ -45,6 +45,9 @@ action:
   rename_workset:
     en: "rename the worktree"
     zh-CN: "重命名工作树"
+  run_command:
+    en: "run “%{command}”"
+    zh-CN: "执行「%{command}」"
   save_favorites:
     en: "save favorites"
     zh-CN: "保存常用项"
@@ -710,9 +713,6 @@ view:
     en: "Session"
     zh-CN: "会话"
 workset:
-  cannot_finish:
-    en: "Worktree “%{task}” can't be closed yet:\n%{lines}"
-    zh-CN: "工作树「%{task}」还不能关闭：\n%{lines}"
   dirty:
     en: "has uncommitted changes"
     zh-CN: "有未提交的改动"

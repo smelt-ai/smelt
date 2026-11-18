@@ -46,8 +46,10 @@ use smelt_plugin_api::{self as api, HostEvent, RuntimeKey};
 
 use super::agents::conversation_acp;
 use super::repositories::{self, Mode};
+use crate::model::FailTarget;
 use crate::peers::agents::{AGENT_SETTINGS, AGENT_SETTINGS_CHANGED, AgentSettingsState};
 use crate::peers::conversation::ConversationStart;
+use crate::worksets::WorksetKey;
 use crate::{contract, lifecycle};
 
 /// 菜单宽度。从命令打开的那张顶上多一行「机器 · 项目 / 工作树」，宽一些。
@@ -259,13 +261,15 @@ struct Launch {
     machine: RuntimeKey,
     conversation: WorkspaceConversation,
     start: Option<ConversationStart>,
+    /// 建在哪一行底下（工作树或项目）：没建成，原因挂在那一行上。
+    under: FailTarget,
 }
 
 impl Launch {
     fn run(self, cx: &mut App) {
         let created =
             lifecycle::create_conversation(self.machine, self.conversation, self.start, cx);
-        crate::report_failure(t!("action.new_session"), created, cx);
+        crate::report_row_failure(self.under, t!("action.new_session"), created, cx);
     }
 }
 
@@ -624,6 +628,16 @@ impl NewSession {
         let Some(root) = self.root.clone() else {
             return self.fail(t!("new.choose_project"), cx);
         };
+        let under = match &self.workset {
+            Some(id) => FailTarget::Workset(WorksetKey {
+                machine: self.machine.clone(),
+                id: id.clone(),
+            }),
+            None => FailTarget::Project {
+                machine: self.machine.clone(),
+                root: root.clone(),
+            },
+        };
         let cwd = match &self.workset {
             None => root,
             Some(id) => {
@@ -687,6 +701,7 @@ impl NewSession {
             machine: self.machine.clone(),
             conversation,
             start,
+            under,
         })
     }
 }

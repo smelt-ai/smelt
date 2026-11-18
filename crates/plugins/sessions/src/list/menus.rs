@@ -16,7 +16,7 @@ use super::view::{ListView, RenameTarget};
 use super::{ProjectGroup, SessionRow, Sidebar, WorksetGroup};
 use crate::contract::{self, MachineMenuContext, ProjectMenuContext};
 use crate::dialogs;
-use crate::model::{Sessions, SidebarGrouping};
+use crate::model::{FailTarget, Sessions, SidebarGrouping};
 use crate::worksets::WorksetKey;
 
 /// 会话行的菜单。
@@ -113,7 +113,12 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
             machine: machine.clone(),
             path: root.clone(),
         };
-        let plugin_items = plugin_items(contract::PROJECT_MENU, &machine, &context, cx);
+        let target = FailTarget::Project {
+            machine: machine.clone(),
+            root: root.clone(),
+        };
+        let plugin_items =
+            plugin_items(contract::PROJECT_MENU, &machine, &context, Some(target), cx);
         if !plugin_items.is_empty() {
             menu = menu.separator();
             for item in plugin_items {
@@ -218,20 +223,23 @@ pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Me
             })
     };
     let pull_request = {
-        let open = |machine: RuntimeKey, root: String| {
+        let key = WorksetKey {
+            machine: machine.clone(),
+            id: id.clone(),
+        };
+        let open = |root: String| {
+            let key = key.clone();
             move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
-                actions::open_pull_request(machine.clone(), root.clone(), cx)
+                actions::open_pull_request(key.clone(), root.clone(), cx)
             }
         };
         let item = MenuItem::new(t!("menu.create_pr")).icon(IconName::ExternalLink);
         match workset.repositories.as_slice() {
             [] => item.disabled(true),
-            [(_, root)] => item.on_click(open(machine.clone(), root.clone())),
+            [(_, root)] => item.on_click(open(root.clone())),
             repositories => {
                 item.submenu(repositories.iter().fold(Menu::new(), |menu, (name, root)| {
-                    menu.item(
-                        MenuItem::new(name.clone()).on_click(open(machine.clone(), root.clone())),
-                    )
+                    menu.item(MenuItem::new(name.clone()).on_click(open(root.clone())))
                 }))
             }
         }
@@ -365,7 +373,8 @@ pub(super) fn machine_menu(machine: &RuntimeKey, cx: &App) -> Option<Menu> {
     let context = MachineMenuContext {
         machine: machine.clone(),
     };
-    let items = plugin_items(contract::MACHINE_MENU, machine, &context, cx);
+    // 机器标题只在按机器分组时才有，失败没有稳定的行可挂。
+    let items = plugin_items(contract::MACHINE_MENU, machine, &context, None, cx);
     if items.is_empty() {
         return None;
     }
@@ -377,11 +386,13 @@ pub(super) fn has_machine_menu(machine: &RuntimeKey, cx: &App) -> bool {
     !api::context_menu_items(contract::MACHINE_MENU, machine, cx).is_empty()
 }
 
-/// 别的插件往 `menu` 里登记的项，按这台机器筛过。
+/// 别的插件往 `menu` 里登记的项，按这台机器筛过。命令失败挂在 `target` 那一行上，没有就发
+/// 系统通知。
 fn plugin_items(
     menu: &str,
     machine: &RuntimeKey,
     context: &impl serde::Serialize,
+    target: Option<FailTarget>,
     cx: &App,
 ) -> Vec<MenuItem> {
     let context = match serde_json::to_value(context) {
@@ -393,12 +404,17 @@ fn plugin_items(
     };
     api::context_menu_items(menu, machine, cx)
         .into_iter()
-        .map(|item| plugin_item(item, &context, cx))
+        .map(|item| plugin_item(item, &context, &target, cx))
         .collect()
 }
 
 /// 一项登记的菜单项。有彩色图标（如应用自己的图标）画它，没有画线性图标。
-fn plugin_item(item: ContextMenuItem, context: &serde_json::Value, cx: &App) -> MenuItem {
+fn plugin_item(
+    item: ContextMenuItem,
+    context: &serde_json::Value,
+    target: &Option<FailTarget>,
+    cx: &App,
+) -> MenuItem {
     let mut entry = MenuItem::new(item.label.get());
     if let Some(icon) = item.icon {
         entry = entry.icon_path(icon);
@@ -409,20 +425,33 @@ fn plugin_item(item: ContextMenuItem, context: &serde_json::Value, cx: &App) -> 
     match item.action {
         ContextMenuAction::Run { command, args } => {
             let args = api::context_menu_args(&command, &args, context, cx);
-            entry.on_click(move |_, _, cx| run_plugin_command(&command, args.clone(), cx))
+            let target = target.clone();
+            entry.on_click(move |_, _, cx| {
+                run_plugin_command(&command, args.clone(), target.clone(), cx)
+            })
         }
         ContextMenuAction::Submenu(items) => entry.submenu(
             items
                 .into_iter()
-                .map(|item| plugin_item(item, context, cx))
+                .map(|item| plugin_item(item, context, target, cx))
                 .fold(Menu::new(), Menu::item),
         ),
     }
 }
 
-fn run_plugin_command(command: &str, args: serde_json::Value, cx: &mut App) {
+fn run_plugin_command(
+    command: &str,
+    args: serde_json::Value,
+    target: Option<FailTarget>,
+    cx: &mut App,
+) {
     let command: SharedString = command.to_string().into();
     let ran = api::run(&command, args, cx);
+    if let Some(target) = target {
+        let what = t!("action.run_command", command = command);
+        crate::report_row_failure(target, what, ran, cx);
+        return;
+    }
     cx.spawn(async move |cx| {
         if let Err(error) = ran.await {
             cx.update(|cx| {

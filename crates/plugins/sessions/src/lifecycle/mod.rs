@@ -40,7 +40,7 @@ use smelt_plugin_api::model::workspace_directory::{
 use smelt_plugin_api::{self as api, ActiveContext, HostEvent, RuntimeKey, ViewedSession};
 
 use crate::contract::{self, SessionArgs, SessionAt};
-use crate::model::{self, ConversationKey, Placement, Selection, Sessions};
+use crate::model::{self, ConversationKey, FailTarget, Placement, Selection, Sessions};
 use crate::peers::agents::{
     AGENT_SETTINGS, AGENT_SETTINGS_CHANGED, AgentSettingsState, MachineAgentSettings,
 };
@@ -504,7 +504,8 @@ pub(crate) fn create_conversation(
                     },
                     cx,
                 );
-                report_failure(t!("action.open_session"), opened, cx);
+                let target = FailTarget::Conversation(key.clone());
+                crate::report_row_failure(target, t!("action.open_session"), opened, cx);
                 Ok(key)
             }
             Err(error) => {

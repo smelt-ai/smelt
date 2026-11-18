@@ -30,7 +30,8 @@ use super::rows::{self, ProjectDrag, RowCtx, SessionDrag};
 use super::session_flip;
 use crate::contract::ListArgs;
 use crate::contract::{SESSION_AVATAR, SessionAvatarArgs};
-use crate::model::{ConversationKey, Sessions};
+use crate::model::{ConversationKey, FailTarget, Sessions};
+use crate::worksets::WorksetKey;
 
 /// 建会话列表视图（视图 [`crate::contract::LIST`]，`register` 登记）。只建一份。
 pub(crate) fn build_view(window: &mut Window, cx: &mut App) -> Rc<dyn ViewHandle> {
@@ -211,6 +212,7 @@ impl ListView {
         match rename.target {
             // 清空是不要自己起的名字，回到运行时算的名字。
             RenameTarget::Conversation(key) => {
+                let target = FailTarget::Conversation(key.clone());
                 let params = WorkspaceRenameParams {
                     conversation_id: key.id,
                     terminal_id: None,
@@ -218,20 +220,24 @@ impl ListView {
                 };
                 let renamed =
                     api::call::<WorkspaceRename>(&key.machine, params, api::CALL_TIMEOUT, cx);
-                crate::report_failure(t!("action.rename"), renamed, cx);
+                crate::report_row_failure(target, t!("action.rename"), renamed, cx);
             }
             // 工作树一定要有名字。
             RenameTarget::Workset { machine, id } => {
                 if value.is_empty() {
                     return;
                 }
+                let target = FailTarget::Workset(WorksetKey {
+                    machine: machine.clone(),
+                    id: id.clone(),
+                });
                 let params = WorkspaceWorksetRenameParams {
                     workset_id: id,
                     task: value,
                 };
                 let renamed =
                     api::call::<WorkspaceWorksetRename>(&machine, params, api::CALL_TIMEOUT, cx);
-                crate::report_failure(t!("action.rename_workset"), renamed, cx);
+                crate::report_row_failure(target, t!("action.rename_workset"), renamed, cx);
             }
         }
     }
@@ -483,6 +489,7 @@ impl Render for ListView {
             motion,
             avatars: self.avatar_views.clone(),
             anchors: self.anchors.clone(),
+            failures: sessions.failures.clone(),
         };
         let rows = div()
             .flex()

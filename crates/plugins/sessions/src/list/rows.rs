@@ -41,8 +41,10 @@ use super::{
 };
 use crate::dialogs;
 use crate::lifecycle;
-use crate::model::{ConversationKey, Fold, ProjectKey, Selection, Sessions, SidebarGrouping};
-use crate::worksets::MergeSummary;
+use crate::model::{
+    ConversationKey, FailTarget, Failure, Fold, ProjectKey, Selection, Sessions, SidebarGrouping,
+};
+use crate::worksets::{MergeSummary, WorksetKey};
 use smelt_plugin_api::ui::kit::{RADIUS, TYPE, TypeStyled as _, elevation};
 
 /// 每缩一级多少。
@@ -79,6 +81,8 @@ pub(super) struct RowCtx {
     /// 给会话行、组、「对话」标题挂上 key（滑动身份），记下它们画在哪：可视区外的提示、
     /// 选中后滚过去用。
     pub(super) anchors: ScrollAnchors,
+    /// 哪些行上的操作刚失败了（[`Sessions::failures`]）。
+    pub(super) failures: Rc<HashMap<FailTarget, Failure>>,
 }
 
 /// 整个列表从上到下：「对话」「项目」两段，标题吸顶（滚过了停在列表顶上，下一段来了被
@@ -731,6 +735,14 @@ fn project_row(
         collapsible.then_some((fold, project.collapsed)),
     );
     let row = project_face(row, lead, project, &ctx.sidebar, selected)
+        .children(failure_mark(
+            ctx,
+            &id,
+            FailTarget::Project {
+                machine: machine.clone(),
+                root: root.clone(),
+            },
+        ))
         .when_some(hint, |row, before| row.child(drop_line(before)))
         // 点名字选中项目（主区显示项目页）；折叠只靠行首的箭头。
         .on_click({
@@ -1029,6 +1041,14 @@ fn workset_row(
             )
             .revealed_on_hover("group-row"),
         )
+        .children(failure_mark(
+            ctx,
+            &id,
+            FailTarget::Workset(WorksetKey {
+                machine: machine.clone(),
+                id: workset_id.clone(),
+            }),
+        ))
         // 工作树没有自己的页：点一下就是开合（改名走菜单，免得双击先开合一次）。
         .on_click(move |_, _, cx| {
             if collapsible {
@@ -1148,6 +1168,11 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
         .mx_2()
         .when_some(wash_alpha, |item, alpha| item.child(wash(alpha)));
     let item = session_face(item, row, &look, &ctx.sidebar, renaming, Some(close))
+        .children(failure_mark(
+            ctx,
+            &id,
+            FailTarget::Conversation(key.clone()),
+        ))
         .tooltip({
             let tooltip = row.tooltip.clone();
             move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)
@@ -1163,7 +1188,8 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
                 } else {
                     // 出口里可能正放着别的页（归档这些）：打开会话视图，露出来再选中。
                     let opened = lifecycle::open_conversation(key.clone(), cx);
-                    crate::report_failure(t!("action.open_session"), opened, cx);
+                    let target = FailTarget::Conversation(key.clone());
+                    crate::report_row_failure(target, t!("action.open_session"), opened, cx);
                 }
             }
         })
@@ -1566,6 +1592,31 @@ fn trailing(meta: Meta, close: Option<Button>) -> impl IntoElement {
 }
 
 // ---- 共用的小件 ----
+
+/// 这一行上刚失败的操作：行尾一个 `bad` 色的叹号，悬停看为什么，点一下收起（同一行再做
+/// 一次也会收起）。没失败是 `None`。按下不往行上传，免得收起时先选中、打开了这一行。
+fn failure_mark(ctx: &RowCtx, id: &str, target: FailTarget) -> Option<AnyElement> {
+    let failure = ctx.failures.get(&target)?;
+    Some(
+        div()
+            .flex_shrink_0()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new(eid(format!("failure:{id}")))
+                    .danger_quiet()
+                    .small()
+                    .icon(IconName::CircleAlert)
+                    .icon_action(failure.message())
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let target = target.clone();
+                        Sessions::global(cx)
+                            .update(cx, |sessions, cx| sessions.set_failure(target, None, cx));
+                    }),
+            )
+            .into_any_element(),
+    )
+}
 
 /// 行首那一格。
 fn lead_box() -> gpui::Div {

@@ -17,7 +17,7 @@ use smelt_plugin_api::{self as api, RuntimeKey};
 use super::{
     GroupKey, Sidebar, merge_project_order, move_near, move_to_pin_boundary, splice_group,
 };
-use crate::model::{ConversationKey, Pin, ProjectKey, Sessions};
+use crate::model::{ConversationKey, FailTarget, Pin, ProjectKey, Sessions};
 use crate::worksets::{self, MergeSummary, WorksetKey};
 use crate::{contract, lifecycle, peers};
 
@@ -170,7 +170,8 @@ pub(super) fn close_session(
 ) {
     let close = move |cx: &mut App| {
         let closed = lifecycle::close_conversation(key.clone(), cx);
-        crate::report_failure(t!("action.close_session"), closed, cx);
+        let target = FailTarget::Conversation(key.clone());
+        crate::report_row_failure(target, t!("action.close_session"), closed, cx);
     };
     if status == AgentStatus::Idle {
         close(cx);
@@ -199,7 +200,8 @@ pub(super) fn archive_session(
 ) {
     let archive = move |cx: &mut App| {
         let archived = lifecycle::archive_conversation(key.clone(), cx);
-        crate::report_failure(t!("action.archive_session"), archived, cx);
+        let target = FailTarget::Conversation(key.clone());
+        crate::report_row_failure(target, t!("action.archive_session"), archived, cx);
     };
     if status == AgentStatus::Idle {
         archive(cx);
@@ -228,7 +230,11 @@ pub(super) fn close_project(
 ) {
     let close = move |cx: &mut App| {
         let closed = lifecycle::close_project(machine.clone(), root.clone(), cx);
-        crate::report_failure(t!("action.close_project"), closed, cx);
+        let target = FailTarget::Project {
+            machine: machine.clone(),
+            root: root.clone(),
+        };
+        crate::report_row_failure(target, t!("action.close_project"), closed, cx);
     };
     if sessions == 0 {
         close(cx);
@@ -266,6 +272,7 @@ pub(super) fn finish_workset(
         machine: machine.clone(),
         id: id.clone(),
     };
+    crate::clear_row_failure(FailTarget::Workset(key.clone()), cx);
     let inspected = worksets::inspect(key, cx);
     cx.spawn(async move |cx| {
         let inspected = inspected.await;
@@ -296,6 +303,10 @@ fn confirm_finish(
         ),
         Err(_) => (MergeSummary::Unknown, String::new()),
     };
+    let workset = FailTarget::Workset(WorksetKey {
+        machine: machine.clone(),
+        id: id.clone(),
+    });
     let finish = move |allow_unconfirmed_merge: bool| {
         move |_: &mut Window, cx: &mut App| {
             finish_now(machine.clone(), id.clone(), allow_unconfirmed_merge, cx);
@@ -303,8 +314,9 @@ fn confirm_finish(
         }
     };
     match summary {
+        // 有未提交的改动、确实没合并：关不了，原因挂在工作树那一行上。
         MergeSummary::Pending => {
-            crate::notify_error(&t!("workset.cannot_finish", task = task, lines = lines), cx);
+            crate::fail_row(workset, t!("action.finish_workset"), lines, cx);
         }
         MergeSummary::Unconfirmed => {
             Confirm::new(
@@ -338,6 +350,10 @@ fn confirm_finish(
 }
 
 fn finish_now(machine: RuntimeKey, id: String, allow_unconfirmed_merge: bool, cx: &mut App) {
+    let target = FailTarget::Workset(WorksetKey {
+        machine: machine.clone(),
+        id: id.clone(),
+    });
     let params = WorkspaceWorksetFinishParams {
         workset_id: id,
         allow_unconfirmed_merge,
@@ -374,55 +390,27 @@ fn finish_now(machine: RuntimeKey, id: String, allow_unconfirmed_merge: bool, cx
                 cx.update(|cx| api::NOTIFY.run(&notify, cx).detach());
             }
         }
-        Err(error) => cx.update(|cx| {
-            crate::notify_error(
-                &t!(
-                    "error.failed",
-                    what = t!("action.finish_workset"),
-                    error = error
-                ),
-                cx,
-            )
-        }),
+        Err(error) => {
+            cx.update(|cx| crate::fail_row(target, t!("action.finish_workset"), error, cx))
+        }
     })
     .detach();
 }
 
-/// 菜单里的「检查合并状态」：马上问一次，结果画在工作树行上；查失败了说一声。
+/// 菜单里的「检查合并状态」：马上问一次，结果画在工作树行上；查失败了也挂在那一行上。
 pub(super) fn check_workset(key: WorksetKey, cx: &mut App) {
+    let target = FailTarget::Workset(key.clone());
     let checked = worksets::inspect(key, cx);
-    cx.spawn(async move |cx| {
-        if let Err(error) = checked.await {
-            cx.update(|cx| {
-                crate::notify_error(
-                    &t!(
-                        "error.failed",
-                        what = t!("action.check_merge"),
-                        error = error
-                    ),
-                    cx,
-                )
-            });
-        }
-    })
-    .detach();
+    crate::report_row_failure(target, t!("action.check_merge"), checked, cx);
 }
 
 /// 工作树里某个仓库的新建 PR 页，交给变更插件开（它认得远端是哪家托管）。
-pub(super) fn open_pull_request(machine: RuntimeKey, root: String, cx: &mut App) {
+pub(super) fn open_pull_request(workset: WorksetKey, root: String, cx: &mut App) {
+    let machine = workset.machine.clone();
     let opened =
         peers::git::OPEN_PULL_REQUEST.run(&peers::git::OpenPullRequest { machine, root }, cx);
-    cx.spawn(async move |cx| {
-        if let Err(error) = opened.await {
-            cx.update(|cx| {
-                crate::notify_error(
-                    &t!("error.failed", what = t!("action.create_pr"), error = error),
-                    cx,
-                )
-            });
-        }
-    })
-    .detach();
+    let target = FailTarget::Workset(workset);
+    crate::report_row_failure(target, t!("action.create_pr"), opened, cx);
 }
 
 // ---- 打开项目 ----

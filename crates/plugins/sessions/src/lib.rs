@@ -80,7 +80,9 @@
 //!   （S5 的 `NEW_SESSION`）、`open_project_repositories`（S1 的行按钮和菜单）。
 //! - S5 `commands`：`register`（`register`）。
 //!
-//! 出错给人看：[`notify_error`]、[`report_failure`]。
+//! 出错给人看：跟某段会话、项目、工作树有关的，挂在列表的那一行上（[`report_row_failure`]、
+//! [`fail_row`]，不管是行上、菜单还是快捷键发起的）；找不到那一行的（添加项目、拖放、
+//! 别的插件调过来的）才发系统通知（[`notify_error`]、[`report_failure`]）。
 //!
 //! # 约束
 //!
@@ -158,7 +160,8 @@ fn view_name(id: &'static str) -> &'static str {
     id.split_once('/').map_or(id, |(_, name)| name)
 }
 
-/// 出错给人看：记日志，发一条系统通知。
+/// 出错给人看：记日志，发一条系统通知。只给找不到落点的失败用（快捷键、拖放、别的插件调
+/// 过来的命令）；列表里某一行发起的走 [`report_row_failure`]。
 pub(crate) fn notify_error(message: &str, cx: &mut App) {
     eprintln!("[sessions] {message}");
     let notify = api::Notify {
@@ -167,6 +170,48 @@ pub(crate) fn notify_error(message: &str, cx: &mut App) {
         ..Default::default()
     };
     api::NOTIFY.run(&notify, cx).detach();
+}
+
+/// 列表里某一行发起的操作：先摘掉这一行上次的失败（这是新的一次），等它做完，失败了挂在
+/// 那一行上，不发系统通知——人就在看这一行。
+pub(crate) fn report_row_failure<T: 'static>(
+    target: model::FailTarget,
+    what: Cow<'static, str>,
+    ran: Task<Result<T, String>>,
+    cx: &mut App,
+) {
+    clear_row_failure(target.clone(), cx);
+    cx.spawn(async move |cx| {
+        if let Err(error) = ran.await {
+            cx.update(|cx| fail_row(target, what, error, cx));
+        }
+    })
+    .detach();
+}
+
+/// 把一次失败挂到列表的那一行上（记日志，不发系统通知）。
+pub(crate) fn fail_row(
+    target: model::FailTarget,
+    what: Cow<'static, str>,
+    error: String,
+    cx: &mut App,
+) {
+    eprintln!(
+        "[sessions] {}",
+        t!("error.failed", what = what, error = error)
+    );
+    let failure = model::Failure {
+        what: what.into_owned().into(),
+        error: error.into(),
+    };
+    model::Sessions::global(cx).update(cx, |sessions, cx| {
+        sessions.set_failure(target, Some(failure), cx)
+    });
+}
+
+/// 这一行又发起了一次操作：上次的失败不再算数。
+pub(crate) fn clear_row_failure(target: model::FailTarget, cx: &mut App) {
+    model::Sessions::global(cx).update(cx, |sessions, cx| sessions.set_failure(target, None, cx));
 }
 
 /// 等一件事做完，失败了按 `what`（「关会话」这类）报给人看。

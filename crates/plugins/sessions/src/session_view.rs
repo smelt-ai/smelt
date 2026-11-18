@@ -29,12 +29,12 @@ use smelt_plugin_api::model::workspace_directory::{
 use smelt_plugin_api::ui::dialog::Confirm;
 use smelt_plugin_api::ui::kit::RADIUS;
 use smelt_plugin_api::ui::window_bar::window_bar;
-use smelt_plugin_api::ui::{Button, Icon, IconName, ui_theme};
+use smelt_plugin_api::ui::{Alert, Button, Icon, IconName, ui_theme};
 use smelt_plugin_api::{self as api, Command, HostEvent, PluginView, RuntimeKey, ViewHandle};
 
 use crate::contract::{self, SessionArgs, SessionAt};
 use crate::lifecycle;
-use crate::model::{self, ConversationKey, Located, Sessions};
+use crate::model::{self, ConversationKey, FailTarget, Located, Sessions};
 use crate::split::{Split, SplitEvent};
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
@@ -73,6 +73,7 @@ pub(crate) fn build_view(window: &mut Window, cx: &mut App) -> Rc<dyn ViewHandle
         SessionView {
             focus: cx.focus_handle(),
             offer_add_machine: offers_add_machine(cx),
+            add_machine_error: None,
             live: HashMap::new(),
             waiting: None,
             _subscriptions: vec![
@@ -112,15 +113,14 @@ pub(crate) fn split_pane(axis: Axis, _window: &mut Window, cx: &mut App) -> Resu
     split.update(cx, |split, _| {
         split.expect_pane(session_id.clone(), beside.map(|pane| pane.session_id), axis)
     });
+    let target = FailTarget::Conversation(key.clone());
+    crate::clear_row_failure(target.clone(), cx);
     let updated = lifecycle::update_conversation(key.machine.clone(), conversation, cx);
     cx.spawn(async move |cx| {
         if let Err(error) = updated.await {
             cx.update(|cx| {
                 split.update(cx, |split, _| split.forget_pane(&session_id));
-                crate::notify_error(
-                    &t!("error.failed", what = t!("action.split"), error = error),
-                    cx,
-                );
+                crate::fail_row(target, t!("action.split"), error, cx);
             });
         }
     })
@@ -158,11 +158,9 @@ pub(crate) fn close_pane(window: &mut Window, cx: &mut App) -> Result<(), String
             window,
             cx,
             move |cx| {
-                crate::report_failure(
-                    t!("action.close_session"),
-                    lifecycle::close_conversation(key, cx),
-                    cx,
-                )
+                let target = FailTarget::Conversation(key.clone());
+                let closed = lifecycle::close_conversation(key, cx);
+                crate::report_row_failure(target, t!("action.close_session"), closed, cx)
             },
         );
         return Ok(());
@@ -188,19 +186,10 @@ pub(crate) fn close_pane(window: &mut Window, cx: &mut App) -> Result<(), String
 /// 从目录里删掉一格终端。守护改目录前先收掉它的进程（收不掉就报错、目录不动），格子
 /// 随目录推回来拿掉。按眼下的目录删，确认框开着的时候目录可能又变了。
 fn close_terminal(key: ConversationKey, session_id: String, cx: &mut App) {
+    let target = FailTarget::Conversation(key.clone());
     let mut conversation = match directory_entry(&key, cx) {
         Ok(conversation) => conversation,
-        Err(error) => {
-            crate::notify_error(
-                &t!(
-                    "error.failed",
-                    what = t!("action.close_pane"),
-                    error = error
-                ),
-                cx,
-            );
-            return;
-        }
+        Err(error) => return crate::fail_row(target, t!("action.close_pane"), error, cx),
     };
     let before = conversation.terminals.len();
     conversation
@@ -209,11 +198,8 @@ fn close_terminal(key: ConversationKey, session_id: String, cx: &mut App) {
     if conversation.terminals.len() == before {
         return;
     }
-    crate::report_failure(
-        t!("action.close_pane"),
-        lifecycle::update_conversation(key.machine, conversation, cx),
-        cx,
-    );
+    let updated = lifecycle::update_conversation(key.machine, conversation, cx);
+    crate::report_row_failure(target, t!("action.close_pane"), updated, cx);
 }
 
 /// `ask` 为真先弹确认（正在跑的这一轮会被终止），否则直接 `run`。
@@ -279,6 +265,8 @@ pub(crate) struct SessionView {
     /// 空状态给「添加远程机器」，见 [`offers_add_machine`]。命令登记、机器表变了重算，
     /// render 只读它。
     offer_add_machine: bool,
+    /// 上次点「添加远程机器」没打开的原因，画在按钮下面；再点一次先清掉。
+    add_machine_error: Option<SharedString>,
     /// 建好的会话，见 [`LiveSession`]。
     live: HashMap<ConversationKey, LiveSession>,
     /// 还在等目录推到的那次打开（带 `after` 的）。同一时刻只有一个，后来的打开盖掉它；
@@ -288,6 +276,28 @@ pub(crate) struct SessionView {
 }
 
 impl SessionView {
+    /// 空页上的「添加远程机器」：打开远程机器插件那一页，没打开的原因画在按钮下面。
+    fn add_machine(&mut self, cx: &mut Context<Self>) {
+        self.add_machine_error = None;
+        cx.notify();
+        let added = ADD_MACHINE.run(&(), cx);
+        cx.spawn(async move |view, cx| {
+            if let Err(error) = added.await {
+                let message = t!(
+                    "error.failed",
+                    what = t!("action.add_machine"),
+                    error = error
+                );
+                view.update(cx, |view, cx| {
+                    view.add_machine_error = Some(message.into_owned().into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     fn split(&self, cx: &App) -> Option<Entity<Split>> {
         let key = Sessions::global(cx).read(cx).selection.session()?;
         Some(self.live.get(key)?.split.clone())
@@ -484,7 +494,11 @@ impl Render for SessionView {
                         .when(area.title_bar, |this| {
                             this.child(window_bar("sessions-empty-bar", &area))
                         })
-                        .child(empty_state(self.offer_add_machine))
+                        .child(empty_state(
+                            self.offer_add_machine,
+                            self.add_machine_error.clone(),
+                            cx,
+                        ))
                 }
             })
     }
@@ -504,7 +518,11 @@ fn should_offer_add_machine(registered: bool, remotes: usize) -> bool {
 }
 
 /// 没有选中的会话。顶上是窗口标题栏时由调用方先画那一条。
-fn empty_state(add_machine: bool) -> impl IntoElement {
+fn empty_state(
+    add_machine: bool,
+    error: Option<SharedString>,
+    cx: &mut Context<SessionView>,
+) -> impl IntoElement {
     let empty = div()
         .m_auto()
         .p_6()
@@ -545,10 +563,14 @@ fn empty_state(add_machine: bool) -> impl IntoElement {
                     .primary()
                     .label(t!("empty.add_machine"))
                     .mt_2()
-                    .on_click(|_, _, cx| {
-                        let added = ADD_MACHINE.run(&(), cx);
-                        crate::report_failure(t!("action.add_machine"), added, cx);
-                    }),
+                    .on_click(cx.listener(|view, _, _, cx| view.add_machine(cx))),
+            )
+        })
+        .when_some(error, |empty, error| {
+            empty.child(
+                div()
+                    .mt_2()
+                    .child(Alert::error("empty-add-machine-error", error)),
             )
         });
     div().flex_1().min_h_0().flex().child(empty)
