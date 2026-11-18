@@ -103,6 +103,12 @@ pub fn detail(agent: &str, path: &str) -> Result<Option<HistoryDetail>, HistoryE
 /// 项目下别的记录（分叉、回退出来的）不再引用的子智能体子会话。
 pub fn delete(params: &HistoryDeleteParams) -> Result<(), HistoryError> {
     let kind = source(&params.agent)?;
+    if !kind.history_deletable() {
+        return Err(HistoryError::Io(format!(
+            "{} past sessions can't be deleted here",
+            kind.label()
+        )));
+    }
     let profile_id = params.profile_id.as_deref();
     let sessions = crate::session_control::list_history_for(
         kind,

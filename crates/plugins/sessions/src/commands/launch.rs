@@ -590,7 +590,7 @@ mod tests {
         assert!(acp.config_values.is_empty());
 
         let terminal_only = Resume {
-            agent: HistorySourceKind::TerminalOnly(TerminalAgentKind::Antigravity)
+            agent: HistorySourceKind::TerminalOnly(TerminalAgentKind::Crush)
                 .id()
                 .into(),
             ..resume_args("/repo", None)
@@ -671,8 +671,8 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_only_agent_resumes_with_its_own_program() {
-        let antigravity = HistorySourceKind::TerminalOnly(TerminalAgentKind::Antigravity);
+    fn an_agent_resumes_with_its_own_program() {
+        let antigravity: HistorySourceKind = ConversationAgentKind::Antigravity.into();
         let line =
             cli_resume_line(PathStyle::Posix, &[], antigravity, "c1", &BTreeMap::new()).unwrap();
         assert!(line.ends_with("--conversation 'c1'"), "{line}");

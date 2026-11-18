@@ -325,6 +325,33 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         engine_owns_model_defaults: false,
     },
     ConversationAgentDescriptor {
+        id: "antigravity",
+        label: "Antigravity",
+        short_label: "Antigravity",
+        accepts_images: true,
+        default_cmd: default_acp_antigravity_cmd,
+        previous_default_cmds: &[],
+        default_env: &[],
+        homebrew_cask: Some("antigravity-cli"),
+        npm_package: None,
+        homebrew_formula: None,
+        install_with_bun: false,
+        // 推理档位是 ACP session config `thought_level`（low/medium/high）。全权限
+        // 不走 mode：它的 `auto` 仍会在不可逆操作前问，只有启动参数才是全免审批。
+        task_params: TaskAgentParams {
+            thinking_key: Some("thought_level"),
+            fast_mode_key: None,
+            full_access_mode: None,
+        },
+        cli_resume: Some(CliResumeSyntax::ConversationFlag),
+        task_cli: TaskCliPatch::Append {
+            full_access: "--dangerously-skip-permissions",
+            full_access_aliases: &[],
+            thinking_flag: None,
+        },
+        engine_owns_model_defaults: false,
+    },
+    ConversationAgentDescriptor {
         id: "cursor",
         label: "Cursor Agent",
         short_label: "Cursor",
@@ -504,6 +531,7 @@ pub enum ConversationAgentKind {
     Copilot,
     Codex,
     Grok,
+    Antigravity,
     Cursor,
     OpenCode,
     Kiro,
@@ -516,11 +544,12 @@ pub enum ConversationAgentKind {
 impl ConversationAgentKind {
     /// 内置 agent，新建菜单 / 设置页的排列顺序。不含 [`Self::Custom`]：凡是
     /// 「每一家都检测 / 安装 / 配一条命令」的地方都只该遍历内置的这些。
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Claude,
         Self::Copilot,
         Self::Codex,
         Self::Grok,
+        Self::Antigravity,
         Self::Cursor,
         Self::OpenCode,
         Self::Kiro,
@@ -638,7 +667,7 @@ impl ConversationAgentKind {
 
     /// 能否注册为一个本机无人值守 ACP runtime。
     ///
-    /// 本机有对应 CLI 就可报。Antigravity 只有 TUI、不在这张 ACP 表里。
+    /// 本机有对应 CLI 就可报。
     pub fn supports_headless_runtime(self) -> bool {
         self.terminal().is_some()
     }
@@ -658,18 +687,22 @@ impl ConversationAgentKind {
     }
 
     /// 从任意命令字符串宽松猜 agent 种类（忽略大小写、不认参数位置）。为保持
-    /// 旧存档兼容，普通长度的标识仍使用包含匹配；短标识（Pi、omp）使用边界匹配。
-    /// 这样 `pi-acp` 仍能识别 Pi，`api-key` 或 `copilot` 却不会误分类。按 `ALL`
-    /// 顺序取第一个命中；同时出现多家关键字这种边缘情况谁在前谁赢。
+    /// 旧存档兼容，普通长度的标识仍使用包含匹配；短标识（Pi、omp、agy）使用边界匹配。
+    /// 这样 `pi-acp` 仍能识别 Pi，`api-key` 或 `copilot` 却不会误分类。id 和 CLI
+    /// 程序名都认：Antigravity 的命令是 `agy`，不含 id。按 `ALL` 顺序取第一个命中；
+    /// 同时出现多家关键字这种边缘情况谁在前谁赢。
     pub fn from_command_loose(cmd: &str) -> Option<Self> {
         let c = cmd.to_ascii_lowercase();
         // Oh My Pi 的安装路径和包名含 `pi`，不能先被 Pi 的短标识截走。
         if command_contains_identifier(&c, "omp") || c.contains("oh-my-pi") {
             return Some(Self::OhMyPi);
         }
-        Self::ALL
-            .into_iter()
-            .find(|kind| command_contains_identifier(&c, kind.id()))
+        Self::ALL.into_iter().find(|kind| {
+            command_contains_identifier(&c, kind.id())
+                || kind
+                    .terminal()
+                    .is_some_and(|terminal| command_contains_identifier(&c, terminal.cli_program()))
+        })
     }
 }
 
@@ -713,12 +746,6 @@ pub struct TerminalAgentDescriptor {
     pub previous_quick_terminal_cmds: &'static [&'static str],
     /// 进程级结构化状态桥。与 cross-agent MCP 是两项独立能力。
     pub status_bridge: TerminalStatusBridge,
-    /// 这个 CLI 自己的历史续接语法。
-    ///
-    /// 只给**没有 ACP 对应项**的纯终端 agent 用（如 Antigravity）；两表都有的
-    /// agent 一律以 `ConversationAgentDescriptor::cli_resume` 为准，避免同一事实在
-    /// 两处各写一份、改一处忘一处。`None` = 没有可用的终端续接语法。
-    pub terminal_only_cli_resume: Option<CliResumeSyntax>,
 }
 
 /// 终端 agent 注册表。顺序 = 快捷终端菜单的出厂排列顺序，且必须与
@@ -732,7 +759,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         quick_terminal_cmd: "claude --dangerously-skip-permissions",
         previous_quick_terminal_cmds: &[],
         status_bridge: TerminalStatusBridge::None,
-        terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
         id: "copilot",
@@ -742,7 +768,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         quick_terminal_cmd: "copilot --allow-all",
         previous_quick_terminal_cmds: &[],
         status_bridge: TerminalStatusBridge::None,
-        terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
         id: "codex",
@@ -757,7 +782,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
             "-c 'tui.terminal_title=[\"thread-title\"]'"
         )],
         status_bridge: TerminalStatusBridge::None,
-        terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
         id: "grok",
@@ -767,7 +791,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         quick_terminal_cmd: "grok --always-approve",
         previous_quick_terminal_cmds: &["grok"],
         status_bridge: TerminalStatusBridge::None,
-        terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
         id: "antigravity",
@@ -777,9 +800,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         quick_terminal_cmd: "agy --dangerously-skip-permissions",
         previous_quick_terminal_cmds: &["agy"],
         status_bridge: TerminalStatusBridge::None,
-        // `agy --conversation <id>` 续接历史会话（实测 `agy --help`）。
-        // Antigravity 没有 ACP 表项，终端续接语法只能登记在这里。
-        terminal_only_cli_resume: Some(CliResumeSyntax::ConversationFlag),
     },
     TerminalAgentDescriptor {
         id: "cursor",
@@ -789,7 +809,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         quick_terminal_cmd: "cursor-agent --force",
         previous_quick_terminal_cmds: &[],
         status_bridge: TerminalStatusBridge::None,
-        terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
         id: "opencode",
@@ -799,7 +818,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         quick_terminal_cmd: "opencode --auto",
         previous_quick_terminal_cmds: &[],
         status_bridge: TerminalStatusBridge::None,
-        terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
         id: "kiro",
@@ -814,7 +832,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
             "kiro-cli chat --trust-all-tools",
         ],
         status_bridge: TerminalStatusBridge::None,
-        terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
         id: "pi",
@@ -826,7 +843,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         quick_terminal_cmd: "pi --approve",
         previous_quick_terminal_cmds: &["pi"],
         status_bridge: TerminalStatusBridge::PiExtension,
-        terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
         id: "omp",
@@ -836,7 +852,6 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         quick_terminal_cmd: "omp --yolo",
         previous_quick_terminal_cmds: &[],
         status_bridge: TerminalStatusBridge::None,
-        terminal_only_cli_resume: None,
     },
     TerminalAgentDescriptor {
         id: "crush",
@@ -849,12 +864,11 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         quick_terminal_cmd: "crush --yolo",
         previous_quick_terminal_cmds: &[],
         status_bridge: TerminalStatusBridge::None,
-        terminal_only_cli_resume: None,
     },
 ];
 
-/// 内嵌终端能直接启动的 agent CLI。这个集合可以比 ACP 多：Antigravity 当前只有
-/// `agy` TUI 与 hooks，没有 ACP stdio 服务，因此绝不能放进 `ConversationAgentKind::ALL`。
+/// 内嵌终端能直接启动的 agent CLI。这个集合可以比 ACP 多：Crush 只有 TUI，没有 ACP
+/// stdio 服务，因此绝不能放进 `ConversationAgentKind::ALL`。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TerminalAgentKind {
     Claude,
@@ -919,13 +933,10 @@ impl TerminalAgentKind {
         self.descriptor().status_bridge
     }
 
-    /// 这个 CLI 的历史续接语法。两表都有的 agent 以 ACP 表为准（单一事实来源），
-    /// 只有纯终端 agent 才用终端表自己那份。
+    /// 这个 CLI 的历史续接语法，登记在 ACP 表里。纯终端 agent 没有可续接的历史，
+    /// 返回 None。
     pub fn cli_resume_syntax(self) -> Option<CliResumeSyntax> {
-        match self.acp() {
-            Some(acp) => acp.cli_resume_syntax(),
-            None => self.descriptor().terminal_only_cli_resume,
-        }
+        self.acp()?.cli_resume_syntax()
     }
 
     /// 若命令逐字命中 Smelt 发布过的旧快捷终端默认值，返回当前默认值。
@@ -966,7 +977,7 @@ impl TerminalAgentKind {
     /// 这个终端 CLI 在 ACP 表里的对应项，两张表按 `id` 对齐。历史存档按
     /// `ConversationAgentKind` 分命名空间，终端会话要对上自己的历史就得先过这一步。
     ///
-    /// 与 [`ConversationAgentKind::terminal`] 对称，返回 `Option` 同样是实话：Antigravity
+    /// 与 [`ConversationAgentKind::terminal`] 对称，返回 `Option` 同样是实话：Crush
     /// 只有 TUI，没有 ACP 侧的历史命名空间。
     pub fn acp(self) -> Option<ConversationAgentKind> {
         ConversationAgentKind::from_id(self.id())
@@ -976,7 +987,7 @@ impl TerminalAgentKind {
 impl ConversationAgentKind {
     /// 这家 ACP agent 在终端表里的对应项，两张表按 `id` 对齐。
     ///
-    /// **返回 Option 是实话**：两张表本来就不是同一个集合，Antigravity 只有 TUI
+    /// **返回 Option 是实话**：两张表本来就不是同一个集合，Crush 只有 TUI
     /// 没有 ACP。只有 ACP 的 agent 若用 `unwrap_or(Claude)` 之类兜底，会被静默
     /// 当成 Claude，「在终端里继续」会去起一个根本无关的 CLI。所以这里由调用方
     /// 显式处理「没有终端对应项」。
@@ -985,7 +996,7 @@ impl ConversationAgentKind {
     }
 }
 
-/// 从启动命令认 agent 的 id：先查对话表，再查终端表（Antigravity 等只有终端）。认不出
+/// 从启动命令认 agent 的 id：先查对话表，再查终端表（Crush 等只有终端）。认不出
 /// 是 `None`。桌面菜单栏、手机会话列表给没有 hook 身份的终端认 agent 用。
 pub fn agent_id_from_launch(launch: &str) -> Option<&'static str> {
     ConversationAgentKind::from_command_loose(launch)
@@ -996,9 +1007,8 @@ pub fn agent_id_from_launch(launch: &str) -> Option<&'static str> {
 /// 历史页能列出的「会话来源」。能不能读历史取决于是否有对应的 transcript
 /// 解析器，与是否支持 ACP 是两件独立的事。
 ///
-/// 之前历史 tab 直接按 `ConversationAgentKind::ALL` 枚举，等于把「可接 ACP」
-/// 当成了「可读历史」的同义词。Antigravity 只有 `agy` TUI，却实打实把会话写在
-/// `~/.gemini/antigravity-cli/` 下，那个等号一成立它就永远进不了历史页。
+/// 两个集合各管各的：Oh My Pi 有 ACP 却没有解析器；只有 TUI 的 agent 只要
+/// transcript 落盘、写了解析器，也能进历史页。
 ///
 /// 注意这里的能力是**不对称**的，别按「来源都一样」去写调用方：
 /// - 读列表 / 读详情：全部来源都支持（否则不会出现在这个枚举里）。
@@ -1022,11 +1032,11 @@ impl HistorySourceKind {
         Self::Conversation(ConversationAgentKind::Copilot),
         Self::Conversation(ConversationAgentKind::Codex),
         Self::Conversation(ConversationAgentKind::Grok),
+        Self::Conversation(ConversationAgentKind::Antigravity),
         Self::Conversation(ConversationAgentKind::Cursor),
         Self::Conversation(ConversationAgentKind::OpenCode),
         Self::Conversation(ConversationAgentKind::Kiro),
         Self::Conversation(ConversationAgentKind::Pi),
-        Self::TerminalOnly(TerminalAgentKind::Antigravity),
     ];
 
     /// 存档 / 缓存 key 用的稳定标识。两张表按 `id` 对齐，所以这里不需要再分支加前缀。
@@ -1079,6 +1089,13 @@ impl HistorySourceKind {
     /// 在终端里续接这一条历史的语法。`None` = 没有可用的 CLI 续接路径。
     pub fn cli_resume_syntax(self) -> Option<CliResumeSyntax> {
         self.terminal()?.cli_resume_syntax()
+    }
+
+    /// 能不能从历史页删掉一条记录。删除只删列表里那份存档；Antigravity 的会话在
+    /// 总索引库（`conversation_summaries.db`）和正文库两处，`agy` 可能正开着索引库，
+    /// 只删正文会把索引留成死链，所以不给删，而不是给一个半对的删除。
+    pub fn history_deletable(self) -> bool {
+        self != Self::Conversation(ConversationAgentKind::Antigravity)
     }
 }
 
@@ -1152,11 +1169,6 @@ mod history_source_tests {
         let omp = HistorySourceKind::from(ConversationAgentKind::OhMyPi);
         assert_eq!(omp.id(), "omp");
         assert!(!HistorySourceKind::ALL.contains(&omp));
-        assert!(
-            HistorySourceKind::ALL.contains(&HistorySourceKind::TerminalOnly(
-                TerminalAgentKind::Antigravity
-            ))
-        );
     }
 
     #[test]
@@ -1188,34 +1200,34 @@ mod history_source_tests {
         );
     }
 
-    /// Antigravity 的终端续接语法实测自 `agy --help`。
+    /// Antigravity 的终端续接语法实测自 `agy --help`。`agy acp` 的会话 id 和 TUI 的
+    /// `--conversation` 是同一套（都落在 `~/.gemini/antigravity-cli/conversations/`），
+    /// 所以终端身份、ACP 身份、历史来源是同一个。
     #[test]
-    fn antigravity_resumes_with_conversation_flag() {
-        let source = HistorySourceKind::TerminalOnly(TerminalAgentKind::Antigravity);
+    fn antigravity_is_one_agent_across_acp_terminal_and_history() {
+        let kind = ConversationAgentKind::Antigravity;
+        assert_eq!(kind.terminal(), Some(TerminalAgentKind::Antigravity));
         assert_eq!(
-            source.cli_resume_syntax(),
+            HistorySourceKind::from(TerminalAgentKind::Antigravity),
+            HistorySourceKind::Conversation(kind)
+        );
+        assert!(HistorySourceKind::ALL.contains(&kind.into()));
+        assert!(!HistorySourceKind::from(kind).history_deletable());
+        assert_eq!(
+            TerminalAgentKind::Antigravity.cli_resume_syntax(),
             Some(CliResumeSyntax::ConversationFlag)
         );
         assert_eq!(
             CliResumeSyntax::ConversationFlag.suffix("'abc'"),
             "--conversation 'abc'"
         );
-    }
-
-    /// 两表都有的 agent 以 ACP 表为唯一事实来源，终端表不得再写一份。
-    #[test]
-    fn dual_table_agents_take_resume_syntax_from_acp() {
-        for terminal in TerminalAgentKind::ALL {
-            if let Some(acp) = terminal.acp() {
-                assert_eq!(terminal.cli_resume_syntax(), acp.cli_resume_syntax());
-                assert_eq!(
-                    terminal.descriptor().terminal_only_cli_resume,
-                    None,
-                    "{} 同时在两表里，不该在终端表里重复登记续接语法",
-                    terminal.id()
-                );
-            }
-        }
+        assert_eq!(kind.default_cmd(), "agy acp --dangerously-skip-permissions");
+        assert_eq!(
+            ConversationAgentKind::from_command_loose("/Users/u/.local/bin/agy acp"),
+            Some(kind)
+        );
+        assert_eq!(ConversationAgentKind::from_command_loose("stagy acp"), None);
+        assert_eq!(agent_id_from_launch("agy acp"), Some("antigravity"));
     }
 }
 
@@ -1262,6 +1274,16 @@ pub fn default_acp_grok_cmd() -> String {
     // 注意它 `promptCapabilities.image = false`——是唯一不收图的，粘贴图片
     // 对 Grok 会话没用。
     "grok agent --always-approve stdio".to_string()
+}
+
+pub fn default_acp_antigravity_cmd() -> String {
+    // Antigravity CLI 自带 ACP：`agy acp`（1.5.0 起，官方文档「Other editors (ACP)」）。
+    // 实测 1.5.10：协议版本 1，`loadSession`、session list/resume/close 都有，收图；
+    // 会话 id 与 TUI 的 `--conversation` 同一套。模型、推理档位（`thought_level`）、
+    // 模式都是标准 session config。没登录时请求回 -32000，`agy acp --login` 或先在
+    // 终端里跑一次 `agy` 登录。`--dangerously-skip-permissions` 与快捷终端全权限对齐，
+    // 它的 `auto` 模式在不可逆操作前仍会问，代替不了这个参数。
+    "agy acp --dangerously-skip-permissions".to_string()
 }
 
 pub fn default_acp_cursor_cmd() -> String {
@@ -1710,7 +1732,16 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi", "omp"
+                "claude",
+                "copilot",
+                "codex",
+                "grok",
+                "antigravity",
+                "cursor",
+                "opencode",
+                "kiro",
+                "pi",
+                "omp"
             ]
         );
     }
@@ -1785,7 +1816,16 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi", "omp"
+                "claude",
+                "copilot",
+                "codex",
+                "grok",
+                "antigravity",
+                "cursor",
+                "opencode",
+                "kiro",
+                "pi",
+                "omp"
             ]
         );
     }

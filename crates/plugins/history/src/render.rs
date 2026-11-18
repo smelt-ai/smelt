@@ -459,9 +459,8 @@ fn session_row(
 }
 
 /// 一行的右键菜单。这个来源能干什么由它自己的能力决定：
-/// - ACP 续接、迁移要 ACP 身份，纯终端来源（Antigravity）没有，只能起它的 CLI。
-/// - 删除：Antigravity 的历史同时在总索引库和正文库两处，`agy` 可能正开着；只删一半会
-///   把索引弄成死链，所以不给删，而不是给一个半对的删除。
+/// - ACP 续接、迁移要 ACP 身份，纯终端来源没有，只能起它的 CLI。
+/// - 删除看 [`HistorySourceKind::history_deletable`]。
 ///
 /// 删除放最后、单独一组：手顺着往下滑不会先碰到它。
 fn row_menu(row: &RowActions, cx: &App) -> Menu {
@@ -526,7 +525,7 @@ fn row_menu(row: &RowActions, cx: &App) -> Menu {
             cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
         }),
     );
-    if row.agent.acp().is_some() {
+    if row.agent.history_deletable() {
         let it = row.clone();
         menu = menu.separator().item(
             MenuItem::new(t!("delete.action"))

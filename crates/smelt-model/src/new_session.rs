@@ -26,7 +26,7 @@ pub struct LaunchEntry {
 }
 
 /// 出厂默认启动项：从 `TerminalAgentKind::ALL` 派生。终端能力与 ACP 能力分开
-/// 维护，避免 Antigravity 这类只有 TUI/hooks 的客户端误出现在原生对话菜单里。
+/// 维护，避免 Crush 这类只有 TUI 的客户端误出现在原生对话菜单里。
 pub fn default_launch_entries() -> Vec<LaunchEntry> {
     TerminalAgentKind::ALL
         .into_iter()

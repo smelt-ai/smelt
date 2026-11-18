@@ -154,9 +154,10 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 - 股票、飞书监听与输出目标属于后续 Smelt capability/plugin 层，不写进 Pi 引擎或智能体核心。
 
 ### 历史会话页
-按来源列出当前项目下各家 agent 的本地历史（`HistorySourceKind`：九家结构化 agent，
-外加只有 TUI 的 Antigravity）。左列表 + 右详情还原对话；有 ACP 身份的来源可
-「ACP 继续」/「CLI/TUI 继续」，Antigravity 没有 ACP 身份，只能起 CLI。存档的扫描、解析、
+按来源列出当前项目下各家 agent 的本地历史（`HistorySourceKind`，登记了 transcript
+解析器的来源才有）。左列表 + 右详情还原对话；有 ACP 身份的来源可
+「ACP 继续」/「CLI/TUI 继续」，纯终端来源只能起 CLI。Antigravity 的历史在索引库和正文库
+两处，历史页不给删。存档的扫描、解析、
 改名、删除在项目所在那台机器的运行时；改名、删除后运行时推 `history.changed`，
 列表跟着重读。会话归属（存档由哪个智能体开，「继续」时按它起）是运行时库从对话细节
 推出来的：对话上同时有 provider 身份和智能体，写入那次就记进 `history_agent_binding`，
@@ -232,9 +233,9 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > 项目行「+」里选）：**Claude Code**（`@agentclientprotocol/claude-agent-acp`，
 > 自动使用本机 `claude` CLI）、**GitHub Copilot**（CLI 自带 `copilot --acp`）、
 > **Codex**（经 `@agentclientprotocol/codex-acp` 标准 ACP 通道）、**Grok**（CLI 自带
-> `grok agent stdio`，凭据 `~/.grok/auth.json`）、**Cursor** / **OpenCode** /
-> **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-agent` 跑 Pi 官方
-> JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。终端通道另有 **Antigravity** 与 **Crush**
+> `grok agent stdio`，凭据 `~/.grok/auth.json`）、**Antigravity**（CLI 自带 `agy acp`）、
+> **Cursor** / **OpenCode** / **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-agent` 跑 Pi 官方
+> JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。终端通道另有 **Crush**
 > （`settings::TerminalAgentKind`）。
 > 各条启动命令在设置 →「Agent」→「高级」里改。provider 支持历史恢复时，
 > 「重新开始」是协议级续接而非摆样子的新对话（Pi 使用自身 session id）。

@@ -338,7 +338,6 @@ pub(crate) fn known_bindings(
 mod tests {
     use super::*;
     use smelt_plugin_api::model::agent_definition::AgentDefinition;
-    use smelt_plugin_api::model::agent_kind::TerminalAgentKind;
     use smelt_plugin_api::model::session_handoff::HandoffTurn;
 
     fn summary(title: &str, custom: Option<&str>, agent_title: &str) -> SessionSummary {
@@ -424,16 +423,10 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_project_lists_every_source_including_terminal_only() {
+    fn ordinary_project_lists_every_source() {
         let tabs = source_tabs(None, []);
         assert_eq!(tabs.len(), HistorySourceKind::ALL.len());
         assert!(tabs.iter().all(|tab| tab.profile_id.is_none()));
-        // 只有 TUI 的 agent 也要有：能不能读历史和有没有 ACP 无关。
-        assert!(
-            tabs.iter()
-                .any(|tab| tab.kind
-                    == HistorySourceKind::TerminalOnly(TerminalAgentKind::Antigravity))
-        );
     }
 
     #[test]

@@ -12,7 +12,7 @@
 
 pub use smelt_model::session_history::*;
 
-use crate::agent_kind::{ConversationAgentKind, HistorySourceKind, TerminalAgentKind};
+use crate::agent_kind::{ConversationAgentKind, HistorySourceKind};
 use crate::fs::{FileSystem, LocalFs};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -81,6 +81,12 @@ pub(crate) static SESSION_HISTORY_PROVIDERS: &[SessionHistoryProvider] = &[
         list_sessions: list_grok_sessions,
         load_detail: load_grok_session_detail,
     },
+    // TUI 和 `agy acp` 写的是同一份 `~/.gemini/antigravity-cli/`。
+    SessionHistoryProvider {
+        agent: HistorySourceKind::Conversation(ConversationAgentKind::Antigravity),
+        list_sessions: list_antigravity_sessions,
+        load_detail: load_antigravity_session_detail,
+    },
     SessionHistoryProvider {
         agent: HistorySourceKind::Conversation(ConversationAgentKind::Cursor),
         list_sessions: list_cursor_sessions,
@@ -100,12 +106,6 @@ pub(crate) static SESSION_HISTORY_PROVIDERS: &[SessionHistoryProvider] = &[
         agent: HistorySourceKind::Conversation(ConversationAgentKind::Pi),
         list_sessions: list_pi_sessions,
         load_detail: load_pi_session_detail,
-    },
-    // 只有 TUI、没有 ACP，但会话实打实落在 `~/.gemini/antigravity-cli/`。
-    SessionHistoryProvider {
-        agent: HistorySourceKind::TerminalOnly(TerminalAgentKind::Antigravity),
-        list_sessions: list_antigravity_sessions,
-        load_detail: load_antigravity_session_detail,
     },
 ];
 
@@ -1995,18 +1995,24 @@ mod tests {
         }
     }
 
-    /// Antigravity 只有 TUI，它必须能读历史、但不能被当成 ACP 对象。
-    /// 这条测试钉住本次解耦的核心诉求：两个能力互相独立。
+    /// 每个登记的历史来源都要有解析器，反过来也一样：两张表说的是同一个集合。
     #[test]
-    fn terminal_only_source_reads_history_but_has_no_acp() {
-        let source = HistorySourceKind::TerminalOnly(TerminalAgentKind::Antigravity);
-        assert!(
-            HistorySourceKind::ALL.contains(&source),
-            "应已登记为历史来源"
+    fn every_history_source_has_exactly_one_provider() {
+        for source in HistorySourceKind::ALL {
+            assert_eq!(
+                SESSION_HISTORY_PROVIDERS
+                    .iter()
+                    .filter(|provider| provider.agent == source)
+                    .count(),
+                1,
+                "{}",
+                source.id()
+            );
+        }
+        assert_eq!(
+            SESSION_HISTORY_PROVIDERS.len(),
+            HistorySourceKind::ALL.len()
         );
-        assert_eq!(source.acp(), None, "没有 ACP，不能当迁移目标");
-        assert_eq!(source.terminal(), Some(TerminalAgentKind::Antigravity));
-        assert_eq!(source.id(), "antigravity");
     }
 
     #[test]
