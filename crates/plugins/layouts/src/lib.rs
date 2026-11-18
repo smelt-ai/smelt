@@ -111,11 +111,12 @@ mod tests {
                     "smelt.launcher/nav",
                     "smelt.sessions/list",
                     "smelt.launcher/settings",
+                    "smelt.archive/button",
                     "smelt.agents/quota"
                 ]
             );
-            // 上下排：列表吃剩下的高度，入口和底下那条按内容定高。底下那条里设置按钮按内容
-            // 定宽，额度吃剩下的宽度、窄了在里面折行。
+            // 上下排：列表吃剩下的高度，入口和底下那条按内容定高。底下那条里设置、归档按钮
+            // 按内容定宽，额度吃剩下的宽度、窄了在里面折行。
             assert_eq!(stack.axis, api::StackAxis::Vertical);
             let fits: Vec<bool> = stack.items.iter().map(|item| item.fit).collect();
             assert_eq!(fits, [true, false, true]);
@@ -123,7 +124,7 @@ mod tests {
                 panic!("底下那条是横排的一摞");
             };
             assert_eq!(bottom.axis, api::StackAxis::Horizontal);
-            assert!(bottom.items[0].fit && !bottom.items[1].fit);
+            assert!(bottom.items[0].fit && bottom.items[1].fit && !bottom.items[2].fit);
             assert_eq!(state["right_dock"]["open"], true);
             assert_eq!(
                 views(&state["right_dock"]["panel"]),

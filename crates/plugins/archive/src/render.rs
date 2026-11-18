@@ -1,94 +1,143 @@
-//! 归档页的画法：机器一节、项目一组、对话一行。只读视图上算好的分组。
+//! 归档按钮和它的弹出卡片：机器一节（挂着几台机器才分）、项目一组、对话一行。只读视图上
+//! 算好的分组。
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use rust_i18n::t;
+use smelt_plugin_api as api;
 use smelt_plugin_api::RuntimeKey;
-use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
+use smelt_plugin_api::ui::popover::{Popover, PopoverState};
 use smelt_plugin_api::ui::truncated_line::truncated_line;
-use smelt_plugin_api::ui::{
-    Button, Icon, IconAction, IconName, ListRow, Radio, trash_icon, ui_theme,
-};
+use smelt_plugin_api::ui::{Button, Icon, IconAction, IconName, ListRow, Radio, ui_theme};
 
-use crate::ArchivePage;
+use crate::Archive;
 use crate::model::{ArchivedRow, MachineGroup, ProjectGroup};
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
+/// 卡片宽度：侧栏底下往上弹，标题和悬停露出的两个按钮放得下。
+const POPOVER_WIDTH: f32 = 320.;
+/// 卡片里列表的最高高度，多了在里面滚。
+const LIST_MAX_HEIGHT: f32 = 420.;
 /// 悬停一行才露出恢复、删除按钮。
 const ROW_GROUP: &str = "archive-row";
 
-impl Render for ArchivePage {
+impl Render for Archive {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let bar = div().h_full().flex().items_center();
         if self.machines.is_empty() {
-            return div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .child(placeholder(t!("empty")))
-                .into_any_element();
+            return bar;
         }
-        let page = cx.entity();
-        let sections = self
-            .machines
-            .iter()
-            .map(|machine| self.machine_section(machine, &page))
-            .collect::<Vec<_>>();
-        div()
-            .id("archive-scroll")
-            .size_full()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .px(px(20.))
-                    .py_3()
-                    .gap_4()
-                    .children(sections),
-            )
-            .into_any_element()
+        // 贴着窗口下面的角时给窗口圆角让位。
+        let insets = api::safe_area(cx.entity_id(), cx).bar_insets();
+        let archive = cx.entity();
+        bar.pl(insets.left).pr(insets.right).child(
+            Popover::new("archive-popover")
+                .anchor(Anchor::BottomLeft)
+                .w(px(POPOVER_WIDTH))
+                .p_1()
+                .trigger(
+                    Button::new("archive-button")
+                        .quiet()
+                        .icon(IconName::Archive)
+                        .icon_action(t!("title")),
+                )
+                .content(move |_, _, cx| {
+                    let popover = cx.entity().downgrade();
+                    archive.read(cx).card(&archive, popover)
+                }),
+        )
     }
 }
 
-impl ArchivePage {
-    fn machine_section(&self, machine: &MachineGroup, page: &Entity<Self>) -> AnyElement {
-        let count: usize = machine.projects.iter().map(|p| p.rows.len()).sum();
-        let header = div()
+impl Archive {
+    /// 卡片内容：标题，下面是能滚的列表。
+    fn card(&self, archive: &Entity<Self>, popover: WeakEntity<PopoverState>) -> AnyElement {
+        // 只有一台机器有归档时不画机器那一层。
+        let by_machine = self.machines.len() > 1;
+        let count: usize = self
+            .machines
+            .iter()
+            .flat_map(|machine| &machine.projects)
+            .map(|project| project.rows.len())
+            .sum();
+        div()
             .flex()
-            .items_center()
-            .gap_2()
+            .flex_col()
+            .w_full()
             .child(
                 div()
-                    .type_style(TYPE.ui_medium)
-                    .text_color(rgb(ui_theme::text()))
-                    .child(machine.name.clone()),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .pt_1()
+                    .pb_1p5()
+                    .child(
+                        div()
+                            .type_style(TYPE.ui_medium)
+                            .text_color(rgb(ui_theme::text()))
+                            .child(t!("title").into_owned()),
+                    )
+                    .child(
+                        div()
+                            .type_style(TYPE.text_xsmall)
+                            .text_color(rgb(ui_theme::muted()))
+                            .child(count.to_string()),
+                    ),
             )
             .child(
                 div()
-                    .type_style(TYPE.text_xsmall)
-                    .text_color(rgb(ui_theme::muted()))
-                    .child(count.to_string()),
+                    .id("archive-scroll")
+                    .max_h(px(LIST_MAX_HEIGHT))
+                    .overflow_y_scroll()
+                    .child(div().flex().flex_col().w_full().gap_2().children(
+                        self.machines.iter().map(|machine| {
+                            self.machine_section(machine, by_machine, archive, &popover)
+                        }),
+                    )),
             )
-            .when_some(machine.unavailable.clone(), |row, reason| {
-                row.child(
+            .into_any_element()
+    }
+
+    fn machine_section(
+        &self,
+        machine: &MachineGroup,
+        by_machine: bool,
+        archive: &Entity<Self>,
+        popover: &WeakEntity<PopoverState>,
+    ) -> AnyElement {
+        let header = by_machine.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .child(
                     div()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(rgb(ui_theme::faint()))
-                        .child(reason),
+                        .type_style(TYPE.text_xsmall_medium)
+                        .text_color(rgb(ui_theme::text()))
+                        .child(machine.name.clone()),
                 )
-            });
+                .when_some(machine.unavailable.clone(), |row, reason| {
+                    row.child(
+                        div()
+                            .type_style(TYPE.text_xsmall)
+                            .text_color(rgb(ui_theme::faint()))
+                            .child(reason),
+                    )
+                })
+        });
         div()
             .flex()
             .flex_col()
             .w_full()
             .gap_2()
-            .child(header)
+            .children(header)
             .children(
                 machine
                     .projects
                     .iter()
-                    .map(|project| self.project_group(&machine.machine, project, page)),
+                    .map(|project| self.project_group(&machine.machine, project, archive, popover)),
             )
             .into_any_element()
     }
@@ -97,7 +146,8 @@ impl ArchivePage {
         &self,
         machine: &RuntimeKey,
         project: &ProjectGroup,
-        page: &Entity<Self>,
+        archive: &Entity<Self>,
+        popover: &WeakEntity<PopoverState>,
     ) -> AnyElement {
         let header = div()
             .id(SharedString::from(format!(
@@ -121,11 +171,22 @@ impl ArchivePage {
             .w_full()
             .gap(px(1.))
             .child(header)
-            .children(project.rows.iter().map(|row| self.row(machine, row, page)))
+            .children(
+                project
+                    .rows
+                    .iter()
+                    .map(|row| self.row(machine, row, archive, popover)),
+            )
             .into_any_element()
     }
 
-    fn row(&self, machine: &RuntimeKey, row: &ArchivedRow, page: &Entity<Self>) -> AnyElement {
+    fn row(
+        &self,
+        machine: &RuntimeKey,
+        row: &ArchivedRow,
+        archive: &Entity<Self>,
+        popover: &WeakEntity<PopoverState>,
+    ) -> AnyElement {
         let key = format!("archive-{machine:?}-{}", row.id);
         let busy = self.is_busy(machine, &row.id);
         let icon = if row.is_conversation {
@@ -133,24 +194,38 @@ impl ArchivePage {
         } else {
             Icon::new(IconName::Terminal)
         };
+        // 恢复、删除前先收起卡片：恢复了要跳到那段会话，要确认的对话框也不该压在卡片上。
         let restore = {
-            let (page, machine, row) = (page.clone(), machine.clone(), row.clone());
-            move |window: &mut Window, cx: &mut App| {
-                page.update(cx, |page, cx| {
-                    page.request_restore(&machine, &row, window, cx)
+            let (archive, popover, machine, row) = (
+                archive.clone(),
+                popover.clone(),
+                machine.clone(),
+                row.clone(),
+            );
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
+                let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
+                archive.update(cx, |archive, cx| {
+                    archive.request_restore(&machine, &row, window, cx)
                 });
             }
         };
         let delete = {
-            let (page, machine, row) = (page.clone(), machine.clone(), row.clone());
-            move |window: &mut Window, cx: &mut App| {
-                page.update(cx, |page, cx| {
-                    page.confirm_delete(&machine, &row, window, cx)
+            let (archive, popover, machine, row) = (
+                archive.clone(),
+                popover.clone(),
+                machine.clone(),
+                row.clone(),
+            );
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
+                let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
+                archive.update(cx, |archive, cx| {
+                    archive.confirm_delete(&machine, &row, window, cx)
                 });
             }
         };
-        let (menu_restore, menu_delete) = (restore.clone(), delete.clone());
-        let row = ListRow::new(SharedString::from(key.clone()))
+        ListRow::new(SharedString::from(key.clone()))
             .group(ROW_GROUP)
             .w_full()
             .px_2()
@@ -199,10 +274,7 @@ impl ArchivePage {
                             .icon(IconName::Restore)
                             .icon_action(t!("action.restore"))
                             .disabled(busy)
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                restore(window, cx);
-                            }),
+                            .on_click(restore),
                     )
                     .child(
                         Button::new(SharedString::from(format!("{key}-delete")))
@@ -210,41 +282,16 @@ impl ArchivePage {
                             .icon(IconName::Trash)
                             .icon_action(t!("action.delete"))
                             .disabled(busy)
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                delete(window, cx);
-                            }),
+                            .on_click(delete),
                     ),
-            );
-        MenuTrigger::context(
-            SharedString::from(format!("{key}-menu")),
-            row,
-            move |_, _| {
-                let (restore, delete) = (menu_restore.clone(), menu_delete.clone());
-                Menu::new()
-                    .item(
-                        MenuItem::new(t!("action.restore"))
-                            .disabled(busy)
-                            .on_click(move |_, window, cx| restore(window, cx)),
-                    )
-                    .separator()
-                    .item(
-                        MenuItem::new(t!("action.delete"))
-                            .icon(trash_icon())
-                            .danger()
-                            .disabled(busy)
-                            .on_click(move |_, window, cx| delete(window, cx)),
-                    )
-            },
-        )
-        .w_full()
-        .into_any_element()
+            )
+            .into_any_element()
     }
 }
 
 /// 选工作树对话框的正文：同一项目下还在的工作树，单选。没有就说清楚去哪建。
 pub(crate) fn workset_choices(
-    page: &Entity<ArchivePage>,
+    archive: &Entity<Archive>,
     candidates: &[(String, String)],
     cx: &App,
 ) -> AnyElement {
@@ -255,7 +302,7 @@ pub(crate) fn workset_choices(
             .child(t!("restore.no_worksets").to_string())
             .into_any_element();
     }
-    let picked = page.read(cx).picked_workset.clone();
+    let picked = archive.read(cx).picked_workset.clone();
     div()
         .flex()
         .flex_col()
@@ -264,30 +311,17 @@ pub(crate) fn workset_choices(
         .max_h(px(240.))
         .overflow_y_scroll()
         .children(candidates.iter().map(|(id, label)| {
-            let page = page.clone();
+            let archive = archive.clone();
             let workset = id.clone();
             Radio::new(SharedString::from(format!("archive-workset-{id}")))
                 .label(label.clone())
                 .checked(picked.as_deref() == Some(id.as_str()))
                 .on_select(move |window, cx| {
-                    page.update(cx, |page, _| page.picked_workset = Some(workset.clone()));
+                    archive.update(cx, |archive, _| {
+                        archive.picked_workset = Some(workset.clone())
+                    });
                     window.refresh();
                 })
         }))
         .into_any_element()
-}
-
-fn placeholder(text: impl Into<SharedString>) -> Div {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .px_4()
-        .child(
-            div()
-                .type_style(TYPE.ui)
-                .text_color(rgb(ui_theme::muted()))
-                .child(text.into()),
-        )
 }

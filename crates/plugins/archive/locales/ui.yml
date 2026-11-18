@@ -3,9 +3,9 @@ view:
   title:
     en: Archive
     zh-CN: 归档
-empty:
-  en: No archived conversations
-  zh-CN: 没有归档的对话
+title:
+  en: Archived Conversations
+  zh-CN: 已归档的对话
 action:
   restore:
     en: Restore
