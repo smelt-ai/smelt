@@ -55,6 +55,8 @@ pub(crate) use watched::Watched;
 //     显示时用 Control 方法 `conversation.image` 按需取；输入框还原图片
 //     （`composer_restore_images`）不发。整段帧和增量帧都按这个投影，这条连接的
 //     发送方镜像记的也是替换后的条目。出帧不解码图片，摘要按图片实例缓存。
+//     都可带 `"entry_version"`：客户端认得的消息流条目版本（`ACP_ENTRY_VERSION`），没带按 1
+//     算。比它新的条目按 `entry_for_version` 换成它认得的形状，整段帧、增量帧、历史分页都一样。
 //     `acp_watch` 其余首帧参数：`history_session_id` + `known_entries` +
 //     `snapshot_revision` 三者都对得上时从 `known_entries` 接着发，否则按
 //     `tail_limit` 只发末尾几条，都没给就从头发。
@@ -666,15 +668,19 @@ pub(crate) fn acp_pending_note(
     }
 }
 
-/// 「待处理」那一行的整句。有 [`acp_pending_note`] 时是它按运行时的语言（英文）说的同一句，
-/// 给不认识 `pending_note` 的旧客户端兜底；新客户端优先说 `pending_note`。
-pub(crate) fn acp_pending_question(
+/// 「待处理」那一行：运行时自己要说的话（[`acp_pending_note`]），或者原话。
+pub(crate) fn acp_pending_line(
     reduced: &smelt_core::acp_session::AcpSessionState,
-) -> Option<String> {
+) -> Option<crate::session_state::PendingLine> {
+    use crate::session_state::PendingLine;
+    acp_pending_note(reduced)
+        .map(PendingLine::Note)
+        .or_else(|| PendingLine::said(acp_pending_said(reduced)))
+}
+
+/// 「待处理」那一行里的原话：智能体报的结束原因、最后一句回复、审批问题、选择题。
+fn acp_pending_said(reduced: &smelt_core::acp_session::AcpSessionState) -> Option<String> {
     use smelt_core::daemon_state::DaemonPhase;
-    if let Some(note) = acp_pending_note(reduced) {
-        return note.text();
-    }
     if reduced.phase == DaemonPhase::Dead {
         let reason = reduced.end_reason.trim();
         if !reason.is_empty() {
@@ -716,7 +722,7 @@ fn last_reply_line(entries: &[smelt_core::acp_chat::AcpEntry]) -> Option<String>
         })
 }
 
-/// 正在等的那个请求的身份，跟 [`acp_pending_question`] 取同一个：先审批，再选择题。
+/// 正在等的那个请求的身份，跟 [`acp_pending_line`] 取同一个：先审批，再选择题。
 pub(crate) fn acp_pending_request(
     reduced: &smelt_core::acp_session::AcpSessionState,
 ) -> Option<String> {
@@ -805,7 +811,7 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
     persist_confirmed_history_id(sess, subscribers);
     // 先看守护还欠不欠首条消息，再锁归约状态：两把锁不同时持。
     let initial_prompt_pending = sess.after_ready.lock().prompt_pending();
-    let (phase, pending_question, pending_note, pending_request, title, completed_delivery_id) = {
+    let (phase, pending, pending_request, title, completed_delivery_id) = {
         let reduced = sess.reduced.lock();
         if crate::acp_idle::acp_ready_outcome(&reduced) == Some(Ok(())) {
             sess.reconnect.lock().usable(Instant::now());
@@ -816,8 +822,7 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
                 compute_acp_daemon_phase(&reduced),
                 initial_prompt_pending,
             ),
-            acp_pending_question(&reduced),
-            acp_pending_note(&reduced),
+            acp_pending_line(&reduced),
             acp_pending_request(&reduced),
             reduced.resolved_session_title(),
             reduced.completed_delivery_id.clone(),
@@ -834,8 +839,7 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
         let was_in_turn = st.phase.in_turn();
         let phase_changed = commit_session_phase(&mut st, PhaseSource::AcpProjection, phase);
         turn_ended = phase_changed && was_in_turn && !st.phase.in_turn();
-        let question_changed =
-            st.pending_question != pending_question || st.pending_note != pending_note;
+        let question_changed = st.pending != pending;
         let request_changed = st.pending_request != pending_request;
         let delivery_changed = st.completed_delivery_id != completed_delivery_id;
         title_changed = st.title != title;
@@ -848,8 +852,7 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
             None
         } else {
             if question_changed {
-                st.pending_question = pending_question;
-                st.pending_note = pending_note;
+                st.pending = pending;
             }
             st.pending_request = pending_request;
             st.completed_delivery_id = completed_delivery_id;
@@ -1164,6 +1167,8 @@ pub(crate) struct SnapshotProjection {
     pub debug: bool,
     /// 大图只发引用（见文件头 `image_refs`）。整段帧和增量帧都按它投影。
     pub image_refs: bool,
+    /// 对方认得的消息流条目版本（见文件头 `entry_version`）。整段帧和增量帧都按它投影。
+    pub entry_version: u32,
 }
 
 #[cfg(test)]
@@ -1172,6 +1177,7 @@ impl SnapshotProjection {
         history: true,
         debug: true,
         image_refs: false,
+        entry_version: smelt_core::acp_chat::ACP_ENTRY_VERSION,
     };
 }
 
@@ -1189,6 +1195,14 @@ fn prepare_image_refs(
     for entry in &entries[local_start..local_end] {
         smelt_core::acp_chat::prepare_image_refs(entry);
     }
+}
+
+/// 对方认得的条目版本比运行时旧时，把快照里它不认得的条目换掉。快照里的条目已经是副本，就地改。
+pub(crate) fn apply_entry_version(
+    snapshot: &mut smelt_core::acp_session::ConversationSnapshot,
+    version: u32,
+) {
+    smelt_core::acp_chat::project_entries_for_version(&mut snapshot.entries, version);
 }
 
 /// 要图片引用的连接：快照里的大图换成引用，输入框还原图片不发（只有桌面输入框用）。
@@ -1420,6 +1434,7 @@ pub(crate) fn encode_acp_snapshot(
         history: include_history,
         debug: include_debug,
         image_refs,
+        entry_version,
     } = projection;
     let (mirror, full) = match frame_kind {
         SnapshotFrameKind::Full(mirror) => (mirror, true),
@@ -1467,10 +1482,19 @@ pub(crate) fn encode_acp_snapshot(
                 window_end,
                 history_len.min(from),
                 |index, entry| {
-                    if image_refs {
+                    let entry = if image_refs {
                         smelt_core::acp_chat::entry_with_image_refs(entry, index as u64)
                     } else {
                         std::borrow::Cow::Borrowed(entry)
+                    };
+                    match entry {
+                        std::borrow::Cow::Borrowed(entry) => {
+                            smelt_core::acp_chat::entry_for_version(entry, entry_version)
+                        }
+                        std::borrow::Cow::Owned(entry) => std::borrow::Cow::Owned(
+                            smelt_core::acp_chat::entry_for_version(&entry, entry_version)
+                                .into_owned(),
+                        ),
                     }
                 },
             );
@@ -1530,6 +1554,7 @@ pub(crate) fn encode_acp_snapshot(
         // 整段帧的条目在上面已经算好摘要，这里只是就地替换副本。增量帧这里没有条目。
         apply_image_refs(&mut snap);
     }
+    apply_entry_version(&mut snap, entry_version);
     let provider_pid = acp_agent_pid(sess);
     let frame = serde_json::to_value(smelt_core::acp_session::AcpSnapshotFrame {
         live: &live,
@@ -3763,6 +3788,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
     let initial_ack = open_request_carries_initial(v);
     // 链路要不要带调试数据是这条连接的事，不进会话的打开参数。
     let include_debug = request_includes_debug(v);
+    let entry_version = request_entry_version(v);
     let id = req.id.clone();
     let mut slot = match ensure_acp_session(&req, &sessions, &acp_sessions, &subscribers) {
         Ok(slot) => slot,
@@ -3823,6 +3849,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
             snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
             drop(reduced);
             set_conversation_snapshot(sess, &mut snapshot);
+            apply_entry_version(&mut snapshot, entry_version);
             let provider_pid = acp_agent_pid(sess);
             let (initial, mirror) = full_frame(
                 &serde_json::to_value(smelt_core::acp_session::AcpSnapshotFrame {
@@ -3845,6 +3872,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
                     history: !req.omit_history,
                     debug: include_debug,
                     image_refs: false,
+                    entry_version,
                 },
             ) else {
                 return;
@@ -4135,6 +4163,7 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
     }
     let include_debug = request_includes_debug(v);
     let image_refs = request_image_refs(v);
+    let entry_version = request_entry_version(v);
     // 旁观不唤醒挂起的 runtime：镜像够看。
     let slot = match conversation_slot(&id, &acp_sessions, workspace_directory, subscribers) {
         Ok(slot) => slot,
@@ -4192,6 +4221,7 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
         }
         snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
         set_conversation_snapshot(sess, &mut snapshot);
+        apply_entry_version(&mut snapshot, entry_version);
         let (initial, mirror) = full_frame(&serde_json::json!({ "snapshot": snapshot }));
         let Ok(attachment) = acp_snapshot_link_for_slot(
             &slot,
@@ -4205,6 +4235,7 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
                 history: true,
                 debug: include_debug,
                 image_refs,
+                entry_version,
             },
         ) else {
             return;
@@ -4303,6 +4334,13 @@ fn request_image_refs(request: &serde_json::Value) -> bool {
     request["image_refs"].as_bool().unwrap_or(false)
 }
 
+/// 请求没写的是加 `entry_version` 之前的客户端，只认得第 1 版条目。
+fn request_entry_version(request: &serde_json::Value) -> u32 {
+    request["entry_version"]
+        .as_u64()
+        .map_or(1, |version| version.min(u64::from(u32::MAX)) as u32)
+}
+
 fn omit_debug_sidecars(snapshot: &mut smelt_core::acp_session::ConversationSnapshot) {
     snapshot.tool_debug = None;
     snapshot.runtime_debug = None;
@@ -4352,6 +4390,7 @@ pub(crate) fn handle_acp_snapshot<C: ClientSocket>(
         // 一次性的分页，摘要在副本上（锁外）算，不回填到镜像里的原条目上。
         apply_image_refs(&mut snapshot);
     }
+    apply_entry_version(&mut snapshot, request_entry_version(v));
     let _ = smelt_runtime_client::protocol::write_json_line(
         &mut conn,
         &serde_json::json!({ "snapshot": snapshot }),

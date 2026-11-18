@@ -3855,6 +3855,7 @@ fn recognize_collaboration_title(
         "subagentactivity",
     ]
     .contains(&normalized.as_str());
+    // 智能体发来的工具标题，不是界面文案：有的智能体给中文标题。
     let descriptive =
         normalized.contains("subagent") || title.contains("子代理") || title.contains("协作代理");
     (explicit_name || descriptive).then_some(crate::acp_chat::ToolKind::Collaborate)

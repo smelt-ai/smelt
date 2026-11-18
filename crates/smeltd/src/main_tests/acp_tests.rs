@@ -3255,6 +3255,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
                 history: false,
                 debug: true,
                 image_refs: false,
+                entry_version: smelt_core::acp_chat::ACP_ENTRY_VERSION,
             },
         )
         .unwrap(),
@@ -3279,6 +3280,55 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
         entries[0]["TurnFailed"]["detail"] == "499 status code (no body)",
         "收尾时写下的报错必须随这一帧送到窗口：{line}"
     );
+}
+
+/// 不带 `entry_version` 的旧客户端不认得 `TurnFailed`：发给它的是英文的助手正文，
+/// 外层标签是它认得的。
+#[test]
+fn old_clients_get_turn_failures_as_assistant_text() {
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-old-client", || {
+        make_acp_session_value("acp-old-client", AcpSessionState::default())
+    });
+    {
+        let mut reduced = slot.value.reduced.lock();
+        reduced.entries_mut().push(AcpEntry::User("A".into()));
+        reduced.phase = DaemonPhase::Thinking;
+        reduced.turn_started_at_ms = Some(1);
+    }
+    let (server, client) = RuntimeStream::pair().unwrap();
+    slot.value.out.lock().clients.push(
+        acp_snapshot_link_for_slot(
+            &slot,
+            server,
+            Vec::new(),
+            nothing_sent(),
+            0,
+            "acp-old-client",
+            "acp-client",
+            SnapshotProjection {
+                history: true,
+                debug: false,
+                image_refs: false,
+                entry_version: 1,
+            },
+        )
+        .unwrap(),
+    );
+
+    let outcome = smelt_core::acp_session::apply_event(
+        &mut slot.value.reduced.lock(),
+        smelt_core::acp_conn::ConversationEvent::TurnFailed("boom".into()),
+    );
+    push_acp_snapshot_since(&slot.value, false, outcome.entries_offset);
+
+    let mut line = String::new();
+    BufReader::new(client).read_line(&mut line).unwrap();
+    let frame = decode_frame(&mut nothing_sent(), &line);
+    let entries = frame["snapshot"]["entries"].as_array().unwrap();
+    let last = entries.last().unwrap();
+    assert!(last.get("TurnFailed").is_none(), "{line}");
+    assert_eq!(last["Assistant"]["text"], "⚠️ Turn failed: boom", "{line}");
 }
 
 #[test]
@@ -3318,6 +3368,7 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
                 history: false,
                 debug: true,
                 image_refs: false,
+                entry_version: smelt_core::acp_chat::ACP_ENTRY_VERSION,
             },
         )
         .unwrap(),
@@ -3390,6 +3441,7 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
                 history: false,
                 debug: true,
                 image_refs: false,
+                entry_version: smelt_core::acp_chat::ACP_ENTRY_VERSION,
             },
         )
         .unwrap(),
@@ -3922,7 +3974,7 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
         })
     );
     assert_eq!(
-        acp_pending_question(&completed).as_deref(),
+        wire_pending_question(&completed).as_deref(),
         Some("Hit this turn's token limit"),
         "旧客户端读的整句是运行时按英文说的"
     );
@@ -3943,9 +3995,14 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
         });
     assert_eq!(compute_acp_daemon_phase(&ended), Phase::Failed);
     assert_eq!(
-        acp_pending_question(&ended).as_deref(),
+        wire_pending_question(&ended).as_deref(),
         Some("连接意外中断")
     );
+}
+
+/// 线上的 `pending_question`：原话，或运行时那句按英文说。
+fn wire_pending_question(reduced: &AcpSessionState) -> Option<String> {
+    acp_pending_line(reduced).and_then(|line| line.question())
 }
 
 #[test]
@@ -3965,7 +4022,7 @@ fn pending_question_on_success_is_the_last_reply_of_the_turn() {
         AcpEntry::User("修一下推送".into()),
     ]);
     assert_eq!(
-        acp_pending_question(&s),
+        wire_pending_question(&s),
         None,
         "这一轮还没有正文，不拿上一轮的"
     );
@@ -3995,13 +4052,13 @@ fn pending_question_on_success_is_the_last_reply_of_the_turn() {
         },
     ]);
     assert_eq!(
-        acp_pending_question(&s).as_deref(),
+        wire_pending_question(&s).as_deref(),
         Some("改好了： - 推送不再延迟"),
         "最后一段正文压成一行，跳过思考"
     );
 
     s.turn_outcome = Some(AcpTurnOutcome::Cancelled);
-    assert_eq!(acp_pending_question(&s), None, "取消不算完成");
+    assert_eq!(wire_pending_question(&s), None, "取消不算完成");
 }
 
 #[test]
@@ -4009,7 +4066,7 @@ fn pending_question_prefers_permission_over_elicitation() {
     use smelt_core::acp_session::LivePermission;
 
     let mut s = AcpSessionState::default();
-    assert_eq!(acp_pending_question(&s), None);
+    assert_eq!(wire_pending_question(&s), None);
 
     s.permissions.push(LivePermission {
         id: "p1".into(),
@@ -4021,7 +4078,7 @@ fn pending_question_prefers_permission_over_elicitation() {
         raw_request_line: None,
     });
     assert_eq!(
-        acp_pending_question(&s).as_deref(),
+        wire_pending_question(&s).as_deref(),
         Some("要不要覆盖这个文件？")
     );
 }

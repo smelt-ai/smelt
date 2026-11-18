@@ -458,7 +458,7 @@ plugins:
     zh-CN: "找不到日志文件"
   no_manifest:
     en: "This folder has no %{file}, so it isn't a Smelt plugin"
-    zh-CN: "这个目录里没有 %{MANIFEST_FILE}，不是 smelt 插件"
+    zh-CN: "这个目录里没有 %{file}，不是 smelt 插件"
   not_found:
     en: "Couldn't find this plugin; it may have been deleted"
     zh-CN: "找不到这个插件，可能已经删掉了"

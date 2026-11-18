@@ -225,33 +225,28 @@ pub struct LayoutSource<'a> {
     pub materials: LayoutMaterials,
 }
 
-/// 登记过的一份布局。标题是取的时候那种界面语言下的字，存着它的在
-/// [`HostEvent::LocaleChanged`] 时重取。
+/// 登记过的一份布局。标题跟着界面语言变，显示时 [`Text::get`]，存着它的不用在换语言时
+/// 重取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutInfo {
     /// `<来源>/<名字>`。
     pub id: SharedString,
     /// 给哪一页。
     pub page: SharedString,
-    pub title: SharedString,
+    pub title: Text,
     pub materials: LayoutMaterials,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
     owner: String,
-    /// 标题在 `title` 里，取的时候按当前语言填进 `info`（[`Entry::info`]）。
     info: LayoutInfo,
-    title: Text,
     state: DockAreaState,
 }
 
 impl Entry {
     fn info(&self) -> LayoutInfo {
-        LayoutInfo {
-            title: self.title.get(),
-            ..self.info.clone()
-        }
+        self.info.clone()
     }
 }
 
@@ -297,10 +292,9 @@ pub fn register_layouts(
             info: LayoutInfo {
                 id,
                 page: source.page.to_string().into(),
-                title: SharedString::default(),
+                title: source.title.clone(),
                 materials: source.materials,
             },
-            title: source.title.clone(),
             state,
         });
     }

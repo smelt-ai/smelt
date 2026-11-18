@@ -235,7 +235,7 @@ error:
     en: "%{what}: %{error}"
     zh-CN: "%{what}：%{error}"
   discard_failed:
-    en: "Couldn't cancel creating it; the agent still exists: {error}"
+    en: "Couldn't cancel creating it; the agent still exists: %{error}"
     zh-CN: "取消新建失败，这个智能体还在：%{error}"
   edit_incomplete:
     en: "The agent settings edit didn't finish"
@@ -253,10 +253,10 @@ error:
     en: "This machine's agent settings haven't arrived yet; try again shortly"
     zh-CN: "这台机器的智能体配置还没收到，稍后再改"
   settings_unreadable:
-    en: "Couldn't read the agent settings: {error}"
+    en: "Couldn't read the agent settings: %{error}"
     zh-CN: "智能体配置解不开：%{error}"
   workspace_failed:
-    en: "Couldn't create the agent workspace: {error}"
+    en: "Couldn't create the agent workspace: %{error}"
     zh-CN: "无法创建智能体工作区：%{error}"
 hooks:
   connected:
@@ -462,7 +462,7 @@ memory:
       en: "About you"
       zh-CN: "关于你"
   load_failed:
-    en: "Couldn't read memories: {error}"
+    en: "Couldn't read memories: %{error}"
     zh-CN: "读取记忆失败：%{error}"
   manage_tooltip:
     en: "View, search and delete memories"
@@ -569,7 +569,7 @@ page:
       zh-CN: "%{count} 个智能体"
 pi:
   load_failed:
-    en: "Couldn't read Pi settings on this machine: {error}"
+    en: "Couldn't read Pi settings on this machine: %{error}"
     zh-CN: "读取这台机器的 Pi 配置失败：%{error}"
   loading:
     en: "Reading Pi settings on this machine…"

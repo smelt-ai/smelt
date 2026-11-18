@@ -1190,7 +1190,7 @@ fn custom_provider_form(
                             div()
                                 .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
-                                .child("Provider ID"),
+                                .child(t!("provider.id").into_owned()),
                         )
                         .child(TextInput::new(&editor.id))
                         .child(

@@ -1898,7 +1898,11 @@ fn a_finished_run_reads_its_archived_record_and_transcript() {
     let detail = catalog.automation_run_detail("r-1").unwrap();
     assert_eq!(
         runtime.controls("automation.run_detail"),
-        [json!({"run_id": "r-1", "include_archived_run": true})]
+        [json!({
+            "run_id": "r-1",
+            "include_archived_run": true,
+            "entry_version": smelt_model::acp_chat::ACP_ENTRY_VERSION,
+        })]
     );
     assert_eq!(detail.run.id, "r-1");
     assert_eq!(detail.automation_id, "a1");

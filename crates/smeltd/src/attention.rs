@@ -299,8 +299,13 @@ fn phase_item(state: &DaemonSessionState) -> Option<AttentionItem> {
     {
         return None;
     }
-    let message = state
-        .detail_line()
+    let detail = state.detail_line();
+    // `note` 只跟着从「待处理」那一行来的正文走：正文换成会话名时它说的就不是这一句了。
+    let note = detail
+        .is_some()
+        .then(|| state.pending_note.clone())
+        .flatten();
+    let message = detail
         .or_else(|| state.conversation_name.clone())
         .or_else(|| state.title.clone())
         .unwrap_or_else(|| smelt_event_protocol::unnamed_session(&state.id));
@@ -309,7 +314,7 @@ fn phase_item(state: &DaemonSessionState) -> Option<AttentionItem> {
         title: kind.label().unwrap_or_default(),
         kind,
         message,
-        note: state.pending_note.clone(),
+        note,
     })
 }
 

@@ -744,10 +744,16 @@ fn dispatch_control(
                         .include_archived_run
                         .then(|| smelt_core::automation_store::load_run(&params.run_id))
                         .flatten(),
-                    transcript: smelt_core::automation_transcript::load_run_transcript(
-                        &params.run_id,
-                    )
-                    .unwrap_or_default(),
+                    transcript: {
+                        let mut transcript =
+                            smelt_core::automation_transcript::load_run_transcript(&params.run_id)
+                                .unwrap_or_default();
+                        smelt_core::acp_chat::project_entries_for_version(
+                            &mut transcript,
+                            params.entry_version,
+                        );
+                        transcript
+                    },
                 },
             )
         }

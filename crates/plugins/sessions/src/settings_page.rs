@@ -69,7 +69,7 @@ impl Render for SessionsSettings {
         };
         let options = filled
             .into_iter()
-            .map(|view| (AvatarChoice::View(view.id.to_string()), view.title))
+            .map(|view| (AvatarChoice::View(view.id.to_string()), view.title.get()))
             .chain([(AvatarChoice::Icon, t!("settings.avatar_icon").into())]);
         let select = Select::new("session-avatar")
             .options(options)

@@ -9,6 +9,7 @@
 
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
+use smelt_event_protocol::TurnFailure;
 
 /// 一种报错原因。新增种类只往后加；客户端不认识的种类读成 [`ControlReason::Other`]，
 /// 改说 `message`。
@@ -447,8 +448,16 @@ pub enum AutomationRunFailure {
     SessionLost,
     /// 智能体退出了（细节是退出原因）。
     AgentExited,
-    /// 这一轮没有正常完成（细节是原因）。
+    /// 这一轮没有正常完成，没有更具体的原因。
     TurnFailed,
+    /// 这一轮的回复中途断了。
+    TurnInterrupted,
+    /// 用完了这一轮的最大令牌数。
+    TurnMaxTokens,
+    /// 用完了这一轮的最大请求数。
+    TurnMaxTurnRequests,
+    /// 智能体拒绝继续。
+    TurnRefused,
     /// 这一轮结束了但没有结果。
     TurnWithoutOutcome,
     /// 不是能执行的 Shell 动作。
@@ -486,6 +495,12 @@ impl AutomationRunFailure {
             Self::SessionLost => t!("automation_run.session_lost"),
             Self::AgentExited => t!("automation_run.agent_exited"),
             Self::TurnFailed => t!("automation_run.turn_failed"),
+            Self::TurnInterrupted => return Some(TurnFailure::Interrupted.text()),
+            Self::TurnMaxTokens => return Some(TurnFailure::MaxTokens.text()),
+            Self::TurnMaxTurnRequests => {
+                return Some(TurnFailure::MaxTurnRequests.text());
+            }
+            Self::TurnRefused => return Some(TurnFailure::Refused.text()),
             Self::TurnWithoutOutcome => t!("automation_run.turn_without_outcome"),
             Self::NotShellAction => t!("automation_run.not_shell_action"),
             Self::CommandStartFailed => t!("automation_run.command_start_failed"),
@@ -506,6 +521,17 @@ impl AutomationRunFailure {
             (Some(text), None) => text,
             (None, Some(detail)) => detail.to_string(),
             (None, None) => t!("automation_run.other").into_owned(),
+        }
+    }
+
+    /// 这一轮没完成的原因记成哪种运行失败。
+    pub fn for_turn(failure: TurnFailure) -> Self {
+        match failure {
+            TurnFailure::Interrupted => Self::TurnInterrupted,
+            TurnFailure::MaxTokens => Self::TurnMaxTokens,
+            TurnFailure::MaxTurnRequests => Self::TurnMaxTurnRequests,
+            TurnFailure::Refused => Self::TurnRefused,
+            TurnFailure::Failed | TurnFailure::Other => Self::TurnFailed,
         }
     }
 

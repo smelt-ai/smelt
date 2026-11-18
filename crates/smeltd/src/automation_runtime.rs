@@ -581,11 +581,10 @@ impl Driver {
                     completed: reduced.completed_delivery_id.as_deref() == Some(run.id.as_str()),
                     outcome: reduced.turn_outcome,
                     output: crate::acp_host::last_turn_reply(reduced.entries()),
-                    error: Some(smelt_core::acp_session::end_text(
-                        reduced.end_code.as_ref(),
-                        &reduced.end_reason,
-                    ))
-                    .filter(|reason| !reason.is_empty()),
+                    // 只存细节：智能体的原话，或运行时说的结束原因底下的报错。
+                    error: Some(reduced.end_reason.trim())
+                        .filter(|detail| !detail.is_empty())
+                        .map(str::to_string),
                     provider_session_id: reduced
                         .history_session_id
                         .clone()
@@ -642,8 +641,11 @@ impl Driver {
             Some(AcpTurnOutcome::Cancelled) => (AutomationRunStatus::Cancelled, None, None),
             Some(outcome) => (
                 AutomationRunStatus::Failed,
-                Some(AutomationRunFailure::TurnFailed),
-                outcome.failure().map(|failure| failure.text()),
+                Some(outcome.failure().map_or(
+                    AutomationRunFailure::TurnFailed,
+                    AutomationRunFailure::for_turn,
+                )),
+                None,
             ),
             None => (
                 AutomationRunStatus::Failed,

@@ -82,6 +82,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
             Some(run_id) => respond(control::<AutomationRunDetail>(AutomationRunDetailParams {
                 run_id: run_id.to_string(),
                 include_archived_run: true,
+                entry_version: smelt_model::acp_chat::ACP_ENTRY_VERSION,
             })),
             None => usage("smelt automation run-log <run_id>"),
         },

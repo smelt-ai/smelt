@@ -67,7 +67,7 @@ pub(crate) fn conversation_view(
                         name: entry.name.clone(),
                         description: entry.description.clone(),
                         created: entry.created,
-                        pending_reason: entry.pending_reason.clone(),
+                        pending_reason: entry.pending_reason_text(),
                         body: entry.body.clone(),
                     })
                     .collect(),

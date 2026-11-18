@@ -301,15 +301,15 @@ pub struct CommandSpec {
     pub handler: CommandHandler,
 }
 
-/// 登记过的一条命令。`group`、`title` 是取的时候那种界面语言下的字，存着它的在
-/// [`HostEvent::LocaleChanged`] 时重取。
+/// 登记过的一条命令。`group`、`title` 跟着界面语言变，显示时 [`Text::get`]，存着它的不用
+/// 在换语言时重取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandInfo {
     /// `<来源>/<名字>`。
     pub id: SharedString,
     /// 来源给人看的名字，快捷键设置按它分组。
-    pub group: SharedString,
-    pub title: SharedString,
+    pub group: Text,
+    pub title: Text,
     pub key: Option<SharedString>,
     pub context: SharedString,
     pub palette: bool,
@@ -320,20 +320,13 @@ pub struct CommandInfo {
 
 struct Entry {
     owner: String,
-    /// 给人看的两项在 `group`、`title` 里，取的时候按当前语言填进 `info`（[`Entry::info`]）。
     info: CommandInfo,
-    group: Text,
-    title: Text,
     handler: CommandHandler,
 }
 
 impl Entry {
     fn info(&self) -> CommandInfo {
-        CommandInfo {
-            group: self.group.get(),
-            title: self.title.get(),
-            ..self.info.clone()
-        }
+        self.info.clone()
     }
 }
 
@@ -393,16 +386,14 @@ pub fn register_commands(
             owner: owner.to_string(),
             info: CommandInfo {
                 id,
-                group: SharedString::default(),
-                title: SharedString::default(),
+                group: group.clone(),
+                title: spec.title,
                 key: spec.key.map(Into::into),
                 context: spec.context.into(),
                 palette: spec.palette,
                 requires_args: spec.requires_args,
                 args: spec.args,
             },
-            group: group.clone(),
-            title: spec.title,
             handler: spec.handler,
         });
     }
@@ -559,7 +550,7 @@ mod tests {
             register_commands("smelt.app", "应用", vec![spec("docs", None)], cx).unwrap();
             assert_eq!(ids(cx), ["smelt.app/docs", "trader/a", "trader/b"]);
             let info = command("trader/b", cx).unwrap();
-            assert_eq!(info.group.as_ref(), "交易");
+            assert_eq!(info.group.get(), "交易");
             assert_eq!(command("smelt.app/quit", cx), None);
             unregister_commands("trader", cx);
             assert_eq!(ids(cx), ["smelt.app/docs"]);

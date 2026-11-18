@@ -37,9 +37,10 @@ fn recovered_state(id: &str) -> SessionState {
         phase: Phase::AwaitingApproval,
         phase_since: 100,
         turn_started_at: 0,
-        pending_question: Some("要不要继续".to_string()),
+        pending: Some(crate::session_state::PendingLine::Said(
+            "要不要继续".to_string(),
+        )),
         pending_request: None,
-        pending_note: None,
         completed_delivery_id: None,
         tokens_used: Some(42),
         branch: Some("feat/ghost".to_string()),
@@ -139,7 +140,7 @@ fn crash_recovery_restores_disconnected_sessions() {
         assert_eq!(snap[0].tokens_used, Some(42));
         assert_eq!(snap[0].branch.as_deref(), Some("feat/ghost"));
         assert_eq!(snap[0].dirty_files, vec!["a.rs".to_string()]);
-        assert_eq!(snap[0].pending_question, None);
+        assert_eq!(snap[0].pending, None);
         assert_eq!(snap[0].agent_token, "");
         assert!(snap[0].active_blocker.is_none());
     });
@@ -498,7 +499,7 @@ fn reopened_terminal_without_hooks_keeps_resume_identity_across_another_restart(
         let mut previous = recovered_state("resume-term");
         previous.launch = Some(launch.clone());
         previous.provider = Some("antigravity".to_string());
-        previous.pending_question = None;
+        previous.pending = None;
         previous.active_blocker = None;
         let directory = SessionDirectory::new();
         directory.upsert(&previous);

@@ -787,7 +787,7 @@ impl JsPlugin {
                         .map(|page| {
                             HostObject::new()
                                 .field("id", page.id.as_ref())
-                                .field("title", page.title.as_ref())
+                                .field("title", page.title.get().as_ref())
                                 .field("home", page.home)
                                 .field("index", optional_text(page.index.as_deref()))
                                 .into()
@@ -2097,7 +2097,7 @@ fn view_value(view: &crate::ViewInfo) -> HostValue {
     });
     HostObject::new()
         .field("id", view.id.as_ref())
-        .field("title", view.title.as_ref())
+        .field("title", view.title.get().as_ref())
         .field("icon", view.icon.as_ref())
         .field("draws_top_bar", view.draws_top_bar)
         .field("instances", view.instances)
@@ -2117,8 +2117,8 @@ fn view_value(view: &crate::ViewInfo) -> HostValue {
 fn command_value(command: &crate::CommandInfo) -> HostValue {
     HostObject::new()
         .field("id", command.id.as_ref())
-        .field("group", command.group.as_ref())
-        .field("title", command.title.as_ref())
+        .field("group", command.group.get().as_ref())
+        .field("title", command.title.get().as_ref())
         .field("key", optional_text(command.key.as_deref()))
         .field("context", command.context.as_ref())
         .field("palette", command.palette)

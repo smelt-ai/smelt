@@ -293,7 +293,7 @@ fn pick_bg_image(cx: &mut App) {
 fn layout_section(workspace: WeakEntity<Workspace>, cx: &App) -> Section {
     let options: Vec<(SharedString, SharedString)> = crate::workspace_layout::home_layouts(cx)
         .into_iter()
-        .map(|layout| (layout.id, layout.title))
+        .map(|layout| (layout.id, layout.title.get()))
         .collect();
     let section = Section::new().title(t!("appearance.layout"));
     if options.is_empty() {

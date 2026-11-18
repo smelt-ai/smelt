@@ -594,6 +594,9 @@ provider:
   fetch_models:
     en: "Fetch Model List"
     zh-CN: "获取模型列表"
+  id:
+    en: "Provider ID"
+    zh-CN: "Provider ID"
   id_hint:
     en: "Starts with a letter; may contain letters, digits and hyphens"
     zh-CN: "字母开头，可含字母、数字和短连字符"

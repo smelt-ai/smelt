@@ -126,6 +126,7 @@ impl AutomationsPage {
             api::model::control_api::AutomationRunDetailParams {
                 run_id: run.id.clone(),
                 include_archived_run: need_archive,
+                entry_version: api::model::acp_chat::ACP_ENTRY_VERSION,
             },
             api::CALL_TIMEOUT,
             cx,

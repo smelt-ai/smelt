@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
-use smelt_model::acp_chat::AcpImage;
+use smelt_model::acp_chat::{ACP_ENTRY_VERSION, AcpImage};
 use smelt_model::acp_session::{AcpUserAction, ConversationSnapshot};
 use smelt_model::acp_wire::{FrameDelta, FrameMirror};
 use smelt_model::control_api::{ConversationImage, ConversationImageParams};
@@ -1141,6 +1141,7 @@ fn watch_request(session_id: &str, known: Option<&ConversationSnapshot>) -> Valu
         "id": session_id,
         "include_debug": false,
         "image_refs": true,
+        "entry_version": ACP_ENTRY_VERSION,
         "tail_limit": PAGE_LIMIT,
     });
     if let Some(snapshot) = known {
@@ -1258,6 +1259,7 @@ fn history_page(
         "limit": limit,
         "include_debug": false,
         "image_refs": true,
+        "entry_version": ACP_ENTRY_VERSION,
     });
     let mut response = client
         .request(&request, SNAPSHOT_TIMEOUT)

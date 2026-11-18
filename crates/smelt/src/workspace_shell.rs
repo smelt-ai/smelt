@@ -78,7 +78,7 @@ fn panel_name(id: &str) -> &'static str {
 /// 还是那一份，不丢状态。
 pub(crate) struct ViewPanel {
     id: &'static str,
-    title: SharedString,
+    title: api::Text,
     view: Rc<dyn ViewHandle>,
     /// 布局里它的 `info.panel`，原样写回存档。
     info: Value,
@@ -96,15 +96,15 @@ pub(crate) struct ViewPanel {
 #[derive(Clone, Debug, PartialEq)]
 struct OutletContent {
     id: SharedString,
-    title: SharedString,
+    title: api::Text,
     draws_top_bar: bool,
 }
 
 impl ViewPanel {
     fn shown_title(&self) -> SharedString {
         match &self.content {
-            Some(content) => content.title.clone(),
-            None => self.title.clone(),
+            Some(content) => content.title.get(),
+            None => self.title.get(),
         }
     }
 
@@ -261,7 +261,7 @@ pub(crate) struct StackPanel {
 enum StackNode {
     View {
         id: String,
-        title: SharedString,
+        title: api::Text,
         view: Rc<dyn ViewHandle>,
     },
     Stack {
@@ -307,7 +307,7 @@ impl StackNode {
 
     fn titles(&self, out: &mut Vec<SharedString>) {
         match self {
-            StackNode::View { title, .. } => out.push(title.clone()),
+            StackNode::View { title, .. } => out.push(title.get()),
             StackNode::Stack { items, .. } => items.iter().for_each(|(node, _)| node.titles(out)),
         }
     }
