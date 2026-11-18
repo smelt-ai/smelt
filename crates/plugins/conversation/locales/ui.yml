@@ -19,6 +19,16 @@ approval:
   cwd:
     en: "Working directory: %{path}"
     zh-CN: "工作目录：%{path}"
+  kind:
+    command:
+      en: "Run a command"
+      zh-CN: "要运行命令"
+    file_change:
+      en: "Change files"
+      zh-CN: "要修改文件"
+    permissions:
+      en: "Grant permissions"
+      zh-CN: "要更多权限"
   remaining:
     en: "%{count} pending"
     zh-CN: "%{count} 项待处理"
@@ -609,6 +619,9 @@ outcome:
   refused:
     en: "The agent refused to continue"
     zh-CN: "Agent 拒绝继续处理"
+  turn_failed:
+    en: "Turn failed"
+    zh-CN: "这一轮失败了"
 peer:
   failed:
     en: "Failed: %{error}"

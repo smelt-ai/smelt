@@ -599,7 +599,9 @@ fn title_island(
         Some(model) if !model.is_empty() => format!("{title} · {model}"),
         _ => title.clone(),
     };
-    let island = match conversation.pinned_prompt() {
+    let pinned = conversation.pinned_prompt();
+    let content_under = pinned.is_some();
+    let island = match pinned {
         Some(prompt) => {
             let view = view.clone();
             island_shell("conversation-pinned-prompt", PROMPT_ISLAND_MAX_WIDTH, tip)
@@ -647,17 +649,32 @@ fn title_island(
                 })
             }),
     };
+    // 吸顶时正文从胶囊底下滚过：顶上一条从窗口底那层渐隐到透明，字滚到胶囊边上先淡掉，
+    // 不和胶囊叠在一起。用宿主铺窗口底的同一层（有材质时是半透的），不拿实色盖住材质。
+    // 只是一层底色，不接事件，滚轮和拖窗口照样落到下面。
+    let fade = ui_theme::glass_fill();
     div()
         .absolute()
-        .top(px(ui_theme::CHROME_ISLAND_TOP_PX))
+        .top_0()
         .left_0()
         .right_0()
-        .h(px(ui_theme::CHROME_ISLAND_HEIGHT_PX))
+        .h(px(ui_theme::CHROME_ISLAND_BAND_PX + PINNED_FADE_TAIL_PX))
+        .pt(px(ui_theme::CHROME_ISLAND_TOP_PX))
         .flex()
-        .items_center()
+        .items_start()
         .justify_center()
+        .when(content_under, |band| {
+            band.bg(gpui::linear_gradient(
+                180.,
+                gpui::linear_color_stop(fade, 0.55),
+                gpui::linear_color_stop(gpui::Rgba { a: 0., ..fade }, 1.),
+            ))
+        })
         .child(island)
 }
+
+/// 吸顶胶囊下面渐隐带再往下伸的长度。
+const PINNED_FADE_TAIL_PX: f32 = 20.;
 
 fn island_shell(id: &'static str, max_width: f32, tip: String) -> Stateful<gpui::Div> {
     div()

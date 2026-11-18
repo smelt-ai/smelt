@@ -225,6 +225,7 @@ impl ConversationView {
         composer_focus: f32,
         sweep_presence: f32,
         animate_ambient: bool,
+        permission_tray: Option<gpui::AnyElement>,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
         if matches!(
@@ -234,7 +235,7 @@ impl ConversationView {
             // 自动化 Run 没有输入框；有进程或子智能体在跑时，入口单独占底部一行。
             let chip = self.render_background_task_chip(cx);
             let subagent_chip = self.render_subagent_chip(cx);
-            if chip.is_none() && subagent_chip.is_none() {
+            if chip.is_none() && subagent_chip.is_none() && permission_tray.is_none() {
                 return None;
             }
             return Some(
@@ -248,6 +249,18 @@ impl ConversationView {
                     .items_center()
                     .children(self.render_background_task_popover(cx))
                     .children(self.render_subagent_popover(cx))
+                    // 没有输入框时授权请求自成一块，样子和长在输入框顶上时一样。
+                    .children(permission_tray.map(|tray| {
+                        div()
+                            .w_full()
+                            .max_w(ui_theme::conversation_max_width())
+                            .mb_2()
+                            .rounded(ui_theme::composer_radius())
+                            .border_1()
+                            .border_color(ui_theme::hair())
+                            .bg(gpui::rgb(ui_theme::surface()))
+                            .child(tray)
+                    }))
                     .child(
                         div()
                             .flex()
@@ -634,6 +647,7 @@ impl ConversationView {
                 .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
                     this.attach_picked_paths(paths.paths().to_vec(), window, cx);
                 }))
+                .children(permission_tray)
                 .child(
                     div()
                         .id("acp-composer-input")

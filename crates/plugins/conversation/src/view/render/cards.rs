@@ -33,247 +33,199 @@ where
 }
 
 impl ConversationView {
-    pub(super) fn render_approval_ui(
+    /// 权限请求长在输入框顶上，和输入框连成一体：一个琥珀色小圆点说「等你」，
+    /// 要做的事，再是一列选项。选项是 agent 给的、长短不定，排成菜单行比并排按钮稳；
+    /// 主选项默认选中，⌘⏎ 直接确认。
+    pub(super) fn render_permission_tray(
         &self,
         animate_ambient: bool,
         cx: &Context<Self>,
-    ) -> (Option<gpui::AnyElement>, Option<gpui::AnyElement>) {
+    ) -> Option<gpui::AnyElement> {
+        let pending = self.permissions.first()?;
         let muted: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
-        let active_permission = self.permissions.first();
-        let permission_is_submitting = self.permission_submitting.is_some();
-        let permission_buttons = |card: &PendingPermission| {
-            if permission_is_submitting {
-                return div()
-                    .flex()
-                    .items_center()
-                    .w_full()
+        let mono = smelt_plugin_api::model::font_config::font_family();
+        let remaining = self.permissions.len();
+        let title = match &pending.details {
+            ApprovalDetailsView::Command { .. } => t!("approval.kind.command"),
+            ApprovalDetailsView::FileChange { .. } => t!("approval.kind.file_change"),
+            ApprovalDetailsView::Permissions { .. } => t!("approval.kind.permissions"),
+            ApprovalDetailsView::Generic => t!("approval.title"),
+        };
+        let note = |text: String| {
+            div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(text)
+        };
+        let details = match &pending.details {
+            ApprovalDetailsView::Command {
+                command,
+                cwd,
+                reason,
+            } => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded(px(6.))
+                        .bg(ui_theme::overlay(0x0c))
+                        .whitespace_normal()
+                        .type_style(TYPE.text_xsmall)
+                        .font_family(mono.clone())
+                        .text_color(gpui::rgb(ui_theme::text()))
+                        .child(command.clone()),
+                )
+                .children(reason.clone().map(note))
+                .children(cwd.as_ref().map(|cwd| {
+                    note(t!("approval.cwd", path = cwd).into_owned()).font_family(mono.clone())
+                })),
+            ApprovalDetailsView::FileChange { reason, grant_root } => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(note(
+                    reason.clone().unwrap_or_else(|| pending.question.clone()),
+                ))
+                .children(grant_root.as_ref().map(|root| {
+                    note(t!("approval.root", path = root).into_owned()).font_family(mono.clone())
+                })),
+            ApprovalDetailsView::Permissions { summary } => div().child(note(summary.clone())),
+            ApprovalDetailsView::Generic => div().child(note(pending.question.clone())),
+        };
+        let header = div()
+            .flex()
+            .items_center()
+            .w_full()
+            .gap_2()
+            .type_style(TYPE.text_small)
+            .child(
+                div()
+                    .size(px(7.))
+                    .mx(px(3.5))
                     .flex_shrink_0()
-                    .h(ui_theme::height::lg())
-                    .gap_2()
-                    .type_style(TYPE.ui)
+                    .rounded_full()
+                    .bg(gpui::rgb(ui_theme::need())),
+            )
+            .child(
+                div()
+                    .type_style(TYPE.text_small_medium)
+                    .text_color(gpui::rgb(ui_theme::text()))
+                    .child(title.into_owned()),
+            )
+            .child(
+                div()
                     .text_color(muted)
-                    .child(ambient_spinner(
-                        "acp-permission-submit-spinner",
-                        muted,
-                        animate_ambient,
-                    ))
-                    .child(t!("status.working").into_owned())
-                    .into_any_element();
-            }
-            let tool_call_id = card.tool_call_id.clone();
-            let primary_ix = card.options.iter().position(|o| {
+                    .child(t!("now.waiting").into_owned()),
+            )
+            .child(div().flex_1())
+            .when(remaining > 1, |row| {
+                row.child(
+                    div()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(muted)
+                        .child(t!("approval.remaining", count = remaining).into_owned()),
+                )
+            });
+        let options = if self.permission_submitting.is_some() {
+            div()
+                .flex()
+                .items_center()
+                .h(px(30.))
+                .px_2()
+                .gap_2()
+                .type_style(TYPE.text_small)
+                .text_color(muted)
+                .child(ambient_spinner(
+                    "acp-permission-submit-spinner",
+                    muted,
+                    animate_ambient,
+                ))
+                .child(t!("status.working").into_owned())
+        } else {
+            let primary_ix = pending.options.iter().position(|option| {
                 matches!(
-                    o.kind,
+                    option.kind,
                     PermissionOptionKindView::AllowOnce | PermissionOptionKindView::AllowAlways
                 )
             });
-            // `flex_wrap` 在这个固定于 composer 上方的纵向卡片里会漏算换行后的
-            // 高度，导致第二行画到卡片外。每个操作独占一行，既保证卡片测量正确，
-            // 也让长选项名称不会挤压或遮住其它操作。
-            let mut buttons = div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .min_w_0()
-                .flex_shrink_0()
-                .gap_2();
-            if let Some(pix) = primary_ix {
-                let name = card.options[pix].name.clone();
-                let option_id = card.options[pix].option_id.clone();
-                let tool_call_id = tool_call_id.clone();
-                buttons = buttons.child(
-                    div().flex().items_center().w_full().min_w_0().child(
-                        Button::new((gpui::ElementId::from("acp-perm-primary"), option_id.clone()))
-                            .primary()
-                            .label(format!("{name} ⌘⏎"))
-                            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                this.pick_permission(&tool_call_id, &option_id, cx);
-                            })),
-                    ),
+            let mut options = div().flex().flex_col().w_full().gap_0p5();
+            for (ix, option) in pending.options.iter().enumerate() {
+                let primary = Some(ix) == primary_ix;
+                let tool_call_id = pending.tool_call_id.clone();
+                let option_id = option.option_id.clone();
+                options = options.child(
+                    ListRow::new((gpui::ElementId::from("acp-perm-option"), option_id.clone()))
+                        .debug_selector(move || format!("ACP_PERMISSION_OPTION_{ix}"))
+                        .flex()
+                        .items_center()
+                        .w_full()
+                        .h(px(30.))
+                        .px_2()
+                        .gap_2p5()
+                        .type_style(TYPE.text_small)
+                        .selected(primary)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(truncated_line(option.name.clone())),
+                        )
+                        .when(primary, |row| {
+                            row.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .type_style(TYPE.text_xsmall)
+                                    .text_color(muted)
+                                    .child("⌘⏎"),
+                            )
+                        })
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.pick_permission(&tool_call_id, &option_id, cx);
+                        })),
                 );
             }
-            for (ix, opt) in card.options.iter().enumerate() {
-                if Some(ix) == primary_ix {
-                    continue;
-                }
-                // 拒绝不毁东西，和其它选项一样是次要按钮；红色留给删除、停止这类不可逆的。
-                let option_id = opt.option_id.clone();
-                let tool_call_id = tool_call_id.clone();
-                let button =
-                    Button::new((gpui::ElementId::from("acp-perm-opt"), option_id.clone()));
-                let button = button.label(opt.name.clone()).on_click(cx.listener(
-                    move |this, _ev, _window, cx| {
-                        this.pick_permission(&tool_call_id, &option_id, cx);
-                    },
-                ));
-                buttons =
-                    buttons.child(div().flex().items_center().w_full().min_w_0().child(button));
-            }
-            buttons.into_any_element()
+            options
         };
-        let permission = active_permission.map(|pending| {
-            let remaining = self.permissions.len();
-            let details = match &pending.details {
-                ApprovalDetailsView::Command {
-                    command,
-                    cwd,
-                    reason,
-                } => div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .min_w_0()
-                    .gap_1()
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_normal()
-                            .type_style(TYPE.ui)
-                            .font_family(smelt_plugin_api::model::font_config::font_family())
-                            .text_color(gpui::rgb(ui_theme::muted()))
-                            .child(command.clone()),
-                    )
-                    .children(reason.as_ref().map(|reason| {
-                        div()
-                            .type_style(TYPE.text_xsmall)
-                            .text_color(muted)
-                            .child(reason.clone())
-                    }))
-                    .children(cwd.as_ref().map(|cwd| {
-                        div()
-                            .type_style(TYPE.text_xsmall)
-                            .font_family(smelt_plugin_api::model::font_config::font_family())
-                            .text_color(muted)
-                            .child(SharedString::from(t!("approval.cwd", path = cwd)))
-                    }))
-                    .into_any_element(),
-                ApprovalDetailsView::FileChange { reason, grant_root } => div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .type_style(TYPE.ui)
-                            .text_color(gpui::rgb(ui_theme::muted()))
-                            .child(reason.clone().unwrap_or_else(|| pending.question.clone())),
-                    )
-                    .children(grant_root.as_ref().map(|root| {
-                        div()
-                            .type_style(TYPE.text_xsmall)
-                            .font_family(smelt_plugin_api::model::font_config::font_family())
-                            .text_color(muted)
-                            .child(SharedString::from(t!("approval.root", path = root)))
-                    }))
-                    .into_any_element(),
-                ApprovalDetailsView::Permissions { summary } => div()
-                    .type_style(TYPE.ui)
-                    .text_color(gpui::rgb(ui_theme::muted()))
-                    .child(summary.clone())
-                    .into_any_element(),
-                ApprovalDetailsView::Generic => div()
-                    .type_style(TYPE.ui)
-                    .text_color(gpui::rgb(ui_theme::muted()))
-                    .child(pending.question.clone())
-                    .into_any_element(),
-            };
-            let details = div()
-                .flex()
-                .flex_col()
-                .id("acp-permission-details")
-                .w_full()
-                .min_w_0()
-                .max_h(px(176.))
-                .overflow_y_scroll()
-                .flex_shrink_0()
-                .child(details);
-            let permission_ping = animate_ambient.then(|| {
-                ambient_animation(
-                    "acp-permission-ping",
-                    std::time::Duration::from_millis(1600),
-                    true,
-                    |delta| {
-                        let scale = 1.0 + delta * 1.6;
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded_full()
-                            .bg(gpui::rgb(ui_theme::need()))
-                            .opacity((1.0 - delta).max(0.0) * 0.7)
-                            .size(px(8. * scale))
-                    },
-                )
-            });
+        Some(
             div()
                 .flex()
                 .flex_col()
                 .w_full()
-                .items_center()
-                .px_4()
+                .min_w_0()
+                .px_3p5()
                 .pt_3()
-                .pb_3()
-                .flex_shrink_0()
+                .pb_2p5()
+                .gap_2()
+                .border_b_1()
+                .border_color(ui_theme::hair())
+                .debug_selector(|| "ACP_PERMISSION_TRAY".into())
+                .child(header)
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
+                        .id("acp-permission-details")
+                        .pl(px(18.))
                         .w_full()
                         .min_w_0()
-                        .flex_shrink_0()
-                        .max_w(ui_theme::conversation_max_width())
-                        .p_4()
-                        .gap_3()
-                        .rounded(ui_theme::card_radius())
-                        .border_1()
-                        .border_color(gpui::rgb(ui_theme::need()))
-                        .bg(ui_theme::tint(ui_theme::need(), 0x0c))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    // 需要批准的点缀一个扩散的 ping 环——跟系统级
-                                    // 通知红点常见的那种脉冲一样，比静止圆点更有
-                                    // 「这里正等你」的紧迫感，而不是容易被忽略的
-                                    // 一个死圆点。
-                                    div().relative().size_2().children(permission_ping).child(
-                                        div()
-                                            .absolute()
-                                            .inset_0()
-                                            .size_2()
-                                            .rounded_full()
-                                            .bg(gpui::rgb(ui_theme::need())),
-                                    ),
-                                )
-                                .child(
-                                    div()
-                                        .type_style(TYPE.ui_medium)
-                                        .child(t!("approval.title").into_owned()),
-                                )
-                                .child(div().flex_1())
-                                .when(remaining > 1, |row| {
-                                    row.child(
-                                        div()
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded_full()
-                                            .bg(ui_theme::overlay(0x18))
-                                            .type_style(TYPE.text_xsmall)
-                                            .text_color(muted)
-                                            .child(SharedString::from(t!(
-                                                "approval.remaining",
-                                                count = remaining
-                                            ))),
-                                    )
-                                }),
-                        )
-                        .child(details)
-                        .child(permission_buttons(pending)),
+                        .max_h(px(176.))
+                        .overflow_y_scroll()
+                        .child(details),
                 )
-                .into_any_element()
-        });
+                .child(div().pl(px(10.)).w_full().child(options))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_elicitation_card(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let muted: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
         // 选择题跟审批卡同一套居中栏；描边走 Grok 强调蓝，不走警告黄。
         // 单字段单选点击即提交；多选是勾选列表，选齐后亮「提交」。
         let elicitation = self.elicitation.as_ref().map(|card| {
@@ -510,6 +462,6 @@ impl ConversationView {
                 .flex_shrink_0()
                 .child(inner)
         });
-        (permission, elicitation.map(|el| el.into_any_element()))
+        elicitation.map(|el| el.into_any_element())
     }
 }

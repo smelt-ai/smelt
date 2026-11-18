@@ -5429,6 +5429,66 @@ fn init_ui(cx: &mut gpui::App) {
 }
 
 /// 在跑的段收成一行计数，改过的文件露成标签；点标签在原地展开这个文件的改动。
+/// 授权请求长在输入框顶上、和输入框连成一体；选项一列菜单，点了就回给 agent。
+#[gpui::test]
+fn the_permission_tray_sits_inside_the_composer(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = open_conversation(
+        cx,
+        "acp-permission-tray",
+        vec![
+            AcpEntry::User("跑测试".into()),
+            AcpEntry::tool_call(
+                "run-1",
+                "cargo test",
+                ToolKind::Execute,
+                ToolCallStatus::Pending,
+                Vec::new(),
+            ),
+        ],
+        DaemonPhase::AwaitingApproval,
+    );
+    cx.update(|window, cx| view.update(cx, |view, cx| view.init_input(window, cx)));
+    view.update(cx, |view, cx| {
+        view.permissions = vec![PendingPermission {
+            id: "p1".into(),
+            question: "cargo test".into(),
+            tool_call_id: "run-1".into(),
+            options: vec![
+                PermissionOptionView {
+                    option_id: "allow".into(),
+                    name: "Allow once".into(),
+                    kind: PermissionOptionKindView::AllowOnce,
+                },
+                PermissionOptionView {
+                    option_id: "reject".into(),
+                    name: "Reject".into(),
+                    kind: PermissionOptionKindView::RejectOnce,
+                },
+            ],
+            details: ApprovalDetailsView::Command {
+                command: "cargo test -j 2".into(),
+                cwd: None,
+                reason: None,
+            },
+        }];
+        cx.notify();
+    });
+    draw_settled(cx);
+    let composer = cx.debug_bounds("ACP_COMPOSER").expect("输入框应已绘制");
+    let tray = cx
+        .debug_bounds("ACP_PERMISSION_TRAY")
+        .expect("授权请求应已绘制");
+    assert!(
+        composer.contains(&tray.origin) && tray.top() == composer.top() + px(1.),
+        "授权请求在输入框里面、贴着顶边: {tray:?} in {composer:?}"
+    );
+    assert!(cx.debug_bounds("ACP_PERMISSION_OPTION_0").is_some());
+    let reject = cx
+        .debug_bounds("ACP_PERMISSION_OPTION_1")
+        .expect("每个选项一行");
+    assert!(reject.top() > tray.top(), "选项排成一列");
+}
+
 /// 收起的段把派出的子智能体一个一行列在计数行下面；点一行展开这段、打开它的卡片。
 #[gpui::test]
 fn a_collapsed_segment_lists_its_subagents(cx: &mut gpui::TestAppContext) {

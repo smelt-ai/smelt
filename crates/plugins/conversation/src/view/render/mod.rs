@@ -514,8 +514,15 @@ impl ConversationView {
                 .flex_1()
                 .min_h(gpui::px(0.)),
         );
-        let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
-        let input_row = self.render_composer(composer_focus, sweep_presence, animate_ambient, cx);
+        let elicitation = self.render_elicitation_card(cx);
+        let permission_tray = self.render_permission_tray(animate_ambient, cx);
+        let input_row = self.render_composer(
+            composer_focus,
+            sweep_presence,
+            animate_ambient,
+            permission_tray,
+            cx,
+        );
         let conversation = div().flex().flex_col()
             .size_full()
             .flex_1()
@@ -654,7 +661,6 @@ impl ConversationView {
                     .children(starting_placeholder)
                     .children(ended_placeholder),
             )
-            .children(permission)
             .children(elicitation)
             .children(self.render_memory_changes(cx))
             .children(self.visible_notice().map(|notice| {

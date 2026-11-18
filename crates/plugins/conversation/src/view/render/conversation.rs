@@ -1192,15 +1192,7 @@ impl ConversationView {
                         }
                     }
                     AcpEntry::TurnFailed { detail, hint } => {
-                        // 回合失败是状态，不是助手的回答：单独一块原话加下一步，可以选中复制。
-                        let text = smelt_plugin_api::model::acp_chat::turn_failed_text(detail, *hint);
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .type_style(TYPE.body)
-                            .text_color(gpui::rgb(ui_theme::text()))
-                            .child(plain_text_view(("acp-turn-failed", i), &text))
-                            .into_any_element()
+                        render_turn_failed(i, detail, *hint, muted)
                     }
                     AcpEntry::Divider(_) | AcpEntry::NewSession { .. } => labeled_divider(
                         entry.divider_label().unwrap_or_default().into(),
@@ -1361,44 +1353,62 @@ impl ConversationView {
             .into_any_element()
     }
 
+    /// 这一轮没正常结束：末尾一行说明，下面一个小按钮重试或继续。错误是这一轮历史的一部分，
+    /// 只有图标带颜色，不铺底色。失败原话已经作为一条记录画在正上方时，这里只留按钮。
     fn render_turn_outcome_card(
         &self,
         entry_ix: usize,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let (message, action) = turn_outcome_card(self.turn_outcome, self.supports_rewind)?;
+        let outcome = self.turn_outcome?;
+        let (message, action) = turn_outcome_card(Some(outcome), self.supports_rewind)?;
+        let failure_shown = matches!(
+            self.entries.get(entry_ix),
+            Some(AcpEntry::TurnFailed { .. })
+        );
+        if failure_shown && action.is_none() {
+            return None;
+        }
+        let problem = matches!(outcome, AcpTurnOutcome::Failed | AcpTurnOutcome::Refused);
+        let action = action.map(|action| {
+            let label = match action {
+                TurnOutcomeAction::Retry => t!("action.retry"),
+                TurnOutcomeAction::Continue => t!("prompt.continue"),
+            };
+            div().pl(px(22.)).child(
+                Button::new(("acp-turn-outcome-action", entry_ix))
+                    .small()
+                    .primary()
+                    .label(label)
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.rerun_last_turn(action, window, cx);
+                    })),
+            )
+        });
         Some(
             div()
                 .flex()
-                .items_center()
+                .flex_col()
                 .id(("acp-turn-outcome", entry_ix))
+                .debug_selector(move || format!("ACP_TURN_OUTCOME_{entry_ix}"))
                 .w_full()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .rounded(ui_theme::card_radius())
-                .border_1()
-                .border_color(ui_theme::hair())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .type_style(TYPE.ui)
-                        .text_color(gpui::rgb(ui_theme::need()))
-                        .child(message),
-                )
-                .children(action.map(|action| {
-                    let label = match action {
-                        TurnOutcomeAction::Retry => t!("action.retry"),
-                        TurnOutcomeAction::Continue => t!("prompt.continue"),
-                    };
-                    Button::new(("acp-turn-outcome-action", entry_ix))
-                        .small()
-                        .label(label)
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.rerun_last_turn(action, window, cx);
-                        }))
-                }))
+                .gap_1()
+                .when(!failure_shown, |col| {
+                    col.child(outcome_line(
+                        if problem {
+                            IconName::CircleAlert
+                        } else {
+                            IconName::Info
+                        },
+                        if problem {
+                            ui_theme::bad()
+                        } else {
+                            ui_theme::need()
+                        },
+                        message.to_string(),
+                    ))
+                })
+                .children(action)
                 .into_any_element(),
         )
     }
@@ -3603,6 +3613,73 @@ fn render_edit_chip(chip: &EditChip, group_key: usize, open: bool) -> gpui::Stat
 }
 
 /// 回合摘要和每段计数共用的一行：可选的状态标记、计数句、红色的失败数、展开箭头。
+/// 结局的一行：带色的图标，后面是中等字重的说明。
+fn outcome_line(icon: IconName, color: u32, text: String) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .w_full()
+        .min_h(px(28.))
+        .gap_2()
+        .child(
+            Icon::new(icon)
+                .size(px(14.))
+                .flex_shrink_0()
+                .text_color(gpui::rgb(color)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .type_style(TYPE.text_small_medium)
+                .text_color(gpui::rgb(ui_theme::text()))
+                .child(text),
+        )
+}
+
+/// 回合失败是状态，不是助手的回答：一行红图标说失败了，下面是原话和下一步，原话可以选中复制。
+fn render_turn_failed(
+    entry_ix: usize,
+    detail: &str,
+    hint: Option<smelt_plugin_api::model::acp_chat::TurnHint>,
+    muted: gpui::Hsla,
+) -> gpui::AnyElement {
+    let detail = detail.trim();
+    let hint = hint.and_then(smelt_plugin_api::model::acp_chat::TurnHint::text);
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .gap_0p5()
+        .debug_selector(move || format!("ACP_TURN_FAILED_{entry_ix}"))
+        .child(outcome_line(
+            IconName::CircleAlert,
+            ui_theme::bad(),
+            t!("outcome.turn_failed").into_owned(),
+        ))
+        .when(!detail.is_empty(), |col| {
+            col.child(
+                div()
+                    .pl(px(22.))
+                    .w_full()
+                    .min_w_0()
+                    .type_style(TYPE.text_small)
+                    .text_color(muted)
+                    .child(plain_text_view(("acp-turn-failed", entry_ix), detail)),
+            )
+        })
+        .children(hint.map(|hint| {
+            div()
+                .pl(px(22.))
+                .w_full()
+                .min_w_0()
+                .type_style(TYPE.text_small)
+                .text_color(gpui::rgb(ui_theme::text()))
+                .child(plain_text_view(("acp-turn-failed-hint", entry_ix), &hint))
+        }))
+        .into_any_element()
+}
+
 fn summary_row(
     id: impl Into<gpui::ElementId>,
     label: String,
