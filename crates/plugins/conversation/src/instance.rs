@@ -76,8 +76,11 @@ struct ConversationInstance {
 enum State {
     /// 等 `open` 给参数。
     Idle,
-    /// 工作区目录里还没有这一条，等它推到。
+    /// 目录还没收到，或调用方刚把这一条写进目录、还没推到。
     Waiting,
+    /// 目录收到了，里面没有这一条：对话被删掉了，或调用方拿着一个旧 id。之后目录里又有了
+    /// 照样接上（调用方刚建、目录推送还在路上）。
+    Missing,
     Live(Entity<ConversationView>),
     /// 接不上：参数不对、机器移除了。给人看的原因。
     Failed(SharedString),
@@ -112,7 +115,14 @@ impl ConversationInstance {
                 .map(|acp| directory_view(runtime, &args, acp, args.start.clone(), window, cx)),
         };
         let Some(view) = view else {
-            self.state = State::Waiting;
+            let received = api::host(cx)
+                .workspace_directory(&args.machine, cx)
+                .is_some();
+            self.state = if received && args.start.is_none() {
+                State::Missing
+            } else {
+                State::Waiting
+            };
             cx.notify();
             return;
         };
@@ -133,7 +143,7 @@ impl ConversationInstance {
     fn on_host_event(&mut self, event: &HostEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             HostEvent::SessionsChanged | HostEvent::MachinesChanged => {
-                if matches!(self.state, State::Waiting) {
+                if matches!(self.state, State::Waiting | State::Missing) {
                     self.connect(window, cx);
                 } else {
                     self.refresh_title(cx);
@@ -333,12 +343,15 @@ impl Render for ConversationInstance {
                     .child(view.clone())
                     .children(island)
             }
-            State::Idle | State::Waiting => {
-                let text = self
-                    .args
-                    .as_ref()
-                    .and_then(|args| args.placeholder.clone())
-                    .unwrap_or_else(|| t!("status.opening").into_owned());
+            State::Idle | State::Waiting | State::Missing => {
+                let text = if matches!(self.state, State::Missing) {
+                    t!("status.missing").into_owned()
+                } else {
+                    self.args
+                        .as_ref()
+                        .and_then(|args| args.placeholder.clone())
+                        .unwrap_or_else(|| t!("status.opening").into_owned())
+                };
                 shell
                     .flex()
                     .items_center()

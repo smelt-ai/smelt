@@ -844,6 +844,9 @@ status:
   opening:
     en: "Opening conversation…"
     zh-CN: "正在打开对话…"
+  missing:
+    en: "This conversation no longer exists. It may have been deleted."
+    zh-CN: "这段对话已经不在了，可能被删掉了"
   restoring:
     en: "Restoring the last conversation…"
     zh-CN: "正在恢复上次的对话…"
