@@ -35,8 +35,6 @@ ignore-build-dependencies = true
 ignore-dev-dependencies = true
 # 本仓库自己的 crate（publish = false）不算第三方。
 private = { ignore = true }
-# 只用本地源码里的许可证文件，不去 clearlydefined.io 查。
-no-clearly-defined = true
 # 这几个 crate 的许可证文件 cargo-about 认不准，用它内置的修正。
 workarounds = ["chrono", "ring", "rustls", "wasmtime"]
 EOF
