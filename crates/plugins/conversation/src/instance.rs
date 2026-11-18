@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, Global, MouseButton, SharedString, Stateful,
-    Subscription, Task, WeakEntity, Window, div, px, rgb,
+    App, Context, Entity, FocusHandle, Global, MouseButton, SharedString, Stateful, Subscription,
+    Task, WeakEntity, Window, div, px, rgb,
 };
 use smelt_plugin_api::model::agent_kind::ConversationAgentKind;
 use smelt_plugin_api::model::control_api::{
@@ -131,7 +131,7 @@ impl ConversationInstance {
             cx.observe(&view, |_, _, cx| cx.notify()),
         ];
         if self.focus_handle.is_focused(window) {
-            window.focus(&view.read(cx).focus_handle(cx), cx);
+            window.focus(&view.read(cx).focus_target(cx), cx);
         }
         track(&args.machine, &args.session_id, &view, cx);
         self.state = State::Live(view);
@@ -319,7 +319,7 @@ impl PluginView for ConversationInstance {
 
     fn focus_target(&self, cx: &App) -> Option<FocusHandle> {
         Some(match &self.state {
-            State::Live(view) => view.read(cx).focus_handle(cx),
+            State::Live(view) => view.read(cx).focus_target(cx),
             _ => self.focus_handle.clone(),
         })
     }

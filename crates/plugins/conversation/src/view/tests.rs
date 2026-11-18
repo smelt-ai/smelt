@@ -3484,6 +3484,39 @@ fn final_answer_changes_actions_not_body_text_size(cx: &mut gpui::TestAppContext
     );
 }
 
+/// 摆对话的一方聚焦这段对话（新建、切过来）时，键盘焦点落进输入框，能直接打字。
+#[gpui::test]
+fn focusing_the_conversation_lands_in_the_composer(cx: &mut gpui::TestAppContext) {
+    use gpui::Focusable as _;
+
+    cx.update(init_ui);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = super::ConversationView::placeholder(
+            cx,
+            super::ConversationOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
+                agent: ConversationAgentKind::Claude,
+                launch: ConversationLaunchSpec::from_command("true"),
+                profile_id: None,
+                cwd: None,
+                reason: "composer focus".into(),
+                resume_session_id: None,
+                saved_sid: Some("acp-composer-focus".into()),
+            },
+        );
+        view.phase = DaemonPhase::Idle;
+        view.init_input(window, cx);
+        view
+    });
+    cx.update(|window, cx| {
+        let target = view.read(cx).focus_target(cx);
+        window.focus(&target, cx);
+        let input = view.read(cx).input.clone().expect("输入框应该建好");
+        assert!(input.focus_handle(cx).is_focused(window));
+    });
+}
+
 /// 访达里的图片拖到输入框上：收进待发缩略图，跟「+」选图一样。落在输入框外不收。
 #[gpui::test]
 fn image_dropped_on_the_composer_is_attached(cx: &mut gpui::TestAppContext) {

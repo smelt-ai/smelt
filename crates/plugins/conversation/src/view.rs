@@ -3169,6 +3169,13 @@ impl ConversationView {
         true
     }
 
+    /// 聚焦这段对话时键盘焦点该落在哪：输入框。还没建输入框时落在视图自己身上。
+    pub fn focus_target(&self, cx: &App) -> FocusHandle {
+        self.input
+            .as_ref()
+            .map_or_else(|| self.focus_handle.clone(), |input| input.focus_handle(cx))
+    }
+
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         if let Some(input) = &self.input {
             input.update(cx, |s, cx| s.focus(window, cx));
