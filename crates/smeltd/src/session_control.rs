@@ -824,8 +824,10 @@ mod tests {
             code(with("", "relative/dir")),
             ControlErrorCode::InvalidParams
         );
+        // 绝对但不存在的目录。从临时目录拼，Windows 上才带盘符、算绝对路径。
+        let missing = std::env::temp_dir().join("smelt-definitely-not-here");
         assert_eq!(
-            code(with("", "/definitely/not/here/smelt")),
+            code(with("", &missing.to_string_lossy())),
             ControlErrorCode::FailedPrecondition
         );
     }

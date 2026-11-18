@@ -131,6 +131,7 @@ jobs:
       #
       # 用 nextest 而不是 cargo test：每个测试一个独立进程。不少测试碰进程级状态
       # （环境变量、子进程、进程组、信号），同一个进程里跑会互相串味。
+      # --no-fail-fast：一条挂了也把其余的跑完，一轮就看到全部失败，不用一条条修了再跑。
 
       # 插件只依赖 smelt-plugin-api、能力 crate 不依赖插件（AGENTS.md「crate 按两条轴分」）。
       # 只读 cargo metadata，几秒钟，放在编译之前。
@@ -150,7 +151,7 @@ jobs:
       #   的，与被测逻辑无关。修好后把它从下面的表达式里去掉。
       - name: Run tests
         run: |
-          cargo nextest run --workspace -E '
+          cargo nextest run --workspace --no-fail-fast -E '
             not test(damage_gate_tests)
             and not test(short_ordered_list_bubble_does_not_collapse_below_min_width)
           '
@@ -184,7 +185,7 @@ jobs:
       # 本机运行时这条链在 Windows 上换了实现，单测在这里真跑一遍。编译错误也在这一步报，
       # 不再单独 cargo check：check 只出元数据，测试还得从头再编一遍，白花 8 分钟。
       - name: Run tests
-        run: cargo nextest run -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client -p smelt-cli -p smelt-store -p smelt-git -p smelt-core -p smeltd -p smelt
+        run: cargo nextest run --no-fail-fast -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client -p smelt-cli -p smelt-store -p smelt-git -p smelt-core -p smeltd -p smelt
 
   mobile:
     needs: changes
