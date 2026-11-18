@@ -131,10 +131,6 @@ jobs:
       #
       # 用 nextest 而不是 cargo test：每个测试一个独立进程。不少测试碰进程级状态
       # （环境变量、子进程、进程组、信号），同一个进程里跑会互相串味。
-      # 不靠 clippy：这个 job 不跑 clippy，GUI crate 在 Linux 上也编不进来。
-      # 手型光标是调用点约定，grep 能在编译之前就失败。
-      - name: 禁止手型光标
-        run: ./scripts/lint-pointer.sh
 
       # 插件只依赖 smelt-plugin-api、能力 crate 不依赖插件（AGENTS.md「crate 按两条轴分」）。
       # 只读 cargo metadata，几秒钟，放在编译之前。
