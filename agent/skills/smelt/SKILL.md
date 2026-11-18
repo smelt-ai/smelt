@@ -132,23 +132,23 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
 
 ## 写 Smelt 插件
 
-Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui-shell 脚本）写界面，GPUI 原生绘制，在桌面「设置 → 面板插件」里导入、删除、重新加载。CLI 不管它。
+Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui-shell 脚本）写界面，GPUI 原生绘制。用户插件都在 `~/.smelt/plugins/<id>/`，在桌面「设置 → 面板插件」里重新加载、删除。CLI 不管它。
 
 ```
-hello/
+~/.smelt/plugins/com.example.hello/
   gpui-shell.json   {"id": "com.example.hello", "name": "你好", "version": "0.1.0", "entry": "main.js"}
   main.js           export default class Hello extends View { init(props, cx) {…} render(cx) {…} }
 ```
 
-- id 只用小写字母、数字和 `.-_`，导入后就是目录名。
-- 接口以 `gpui-kit.d.ts` 为准，不要凭印象写。Smelt 加载用户插件时会把它生成到插件目录里，里面是 `gpui-kit`、`gpui-base`、`smelt-ui`、`smelt-plugin-api`、`smelt-fs` 等模块的完整声明，各插件拿到的是同一份。动手前先找一份读：`ls ~/.smelt/plugins/*/gpui-kit.d.ts`。一份都没有，就先写个最小的插件请用户导入，导入后它就生成出来了。
+- id 只用小写字母、数字和 `.-_`，目录名就用 id。
+- 接口以 `gpui-kit.d.ts` 为准，不要凭印象写。Smelt 加载用户插件时会把它生成到插件目录里，里面是 `gpui-kit`、`gpui-base`、`smelt-ui`、`smelt-plugin-api`、`smelt-fs` 等模块的完整声明，各插件拿到的是同一份。动手前先找一份读：`ls ~/.smelt/plugins/*/gpui-kit.d.ts`。一份都没有，就先写好最小的清单和入口，请用户重新加载一次，它就生成出来了。
 - 示例：https://github.com/smelt-ai/smelt-plugin-demo（按钮、状态、系统通知、主题）。
 - 控件用 `smelt-ui` 的，样子和 Smelt 一致。`smelt-plugin-api` 里有：登记视图、命令、页面、布局、主题、菜单（`register_*`），`await next_event()` 等宿主事件，`next_command()` 接自己登记的命令，`store_query` / `store_execute` 读写插件自己的 SQLite 库，`call(machine, method, params)` 调运行时，`locale()` 取当前语言。
 - `render` 只读内存：读写文件、跑命令、联网都放到事件回调或 `cx.spawn` 里，结果存在视图上，render 只画它。要等变化就 `await next_event()`，不要定时轮询。
 - 插件是可信代码，能读写任意文件、运行任意命令，和 Smelt 本身一样。
 
-装上和调试：
+写和调试：
 
-1. 新插件写在用户指定的目录（没指定就放当前项目里），写好后请用户在「设置 → 面板插件 → 导入插件…」选这个目录。导入就是用户同意装上；不要自己往 `~/.smelt/plugins/` 里放新插件。
-2. 导入是把目录复制到 `~/.smelt/plugins/<id>/`，之后改原目录不生效。接着调试就直接改已装的那份（`gpui-kit.d.ts` 也在那里），改完请用户点同一页的「重新加载」，不用重启。
+1. 直接在 `~/.smelt/plugins/<id>/` 里写和改，这是插件本身，不是要保护的库或配置。写之前看一眼目录在不在，已有的是别的插件就换个 id。
+2. 写完、改完请用户在「设置 → 面板插件」点「重新加载」，新插件就出现在列表里，不用重启。重新加载会重挂全部插件，插件视图里的状态从头来。
 3. `console.log` 和脚本错误写进 `~/.smelt/app.log`，带 `[plugin]` 标记；加载失败的原因也会直接画在插件视图里。
