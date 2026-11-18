@@ -575,9 +575,6 @@ now:
   image:
     en: "Processing %{target}"
     zh-CN: "正在处理 %{target}"
-  more_agents:
-    en: "%{count} more running"
-    zh-CN: "还有 %{count} 个在跑"
   move:
     en: "Moving %{target}"
     zh-CN: "正在移动 %{target}"

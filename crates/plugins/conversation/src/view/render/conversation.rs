@@ -326,7 +326,7 @@ impl ConversationView {
                     // Read 的大输出或 Edit 的 diff 因此不会在静态重绘时白做解析。
                     let header = match (group, turn_fold) {
                         (Some(group), _) => {
-                            this.render_segment_head(group, false, muted, cx)
+                            this.render_segment_head(group, false, animate_ambient, muted, cx)
                         }
                         (None, Some(fold)) => this.render_turn_fold_header(fold, false, muted, cx),
                         (None, None) => div().into_any_element(),
@@ -418,7 +418,7 @@ impl ConversationView {
                 let segment_head = process_group
                     .filter(|group| process_expanded && group.first == i)
                     .map(|group| {
-                        this.render_segment_head(group, true, muted, cx)
+                        this.render_segment_head(group, true, animate_ambient, muted, cx)
                     });
                 let entry = &this.entries[i];
                 let mut el: gpui::AnyElement = match entry {
@@ -1420,7 +1420,7 @@ impl ConversationView {
         }
         Some(match self.provider_retry.as_ref() {
             Some(retry) => self.render_provider_retry(retry, entry_ix, animate_ambient),
-            None => self.render_now_tail(entry_ix, layout, animate_ambient, cx),
+            None => self.render_now_tail(entry_ix, layout, animate_ambient),
         })
     }
 
@@ -1456,18 +1456,16 @@ impl ConversationView {
         }
     }
 
-    /// 「现在」：这一轮正在做什么、跑了多久，还有哪些子智能体在跑。
-    /// 进行中的状态只在这里说一次，段落和工具行不再各挂一份转圈和耗时。
+    /// 「现在」：这一轮正在做什么、跑了多久。进行中的状态只在这里说一次，
+    /// 段落和工具行不再各挂一份转圈和耗时；子智能体列在派出它们的那段里。
     fn render_now_tail(
         &self,
         entry_ix: usize,
         layout: &[EntryPresentation],
         animate_ambient: bool,
-        cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let muted: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
         let faint = gpui::rgb(ui_theme::faint());
-        let now = now_unix_ms();
         let now_state = now_state(
             &self.entries,
             &self.subagents,
@@ -1531,61 +1529,6 @@ impl ConversationView {
                     .child(truncated_line(excerpt)),
             );
         }
-        for (row_ix, agent) in now_state.agents.iter().take(MAX_NOW_AGENTS).enumerate() {
-            let label = match agent.activity.as_deref() {
-                Some(activity) => format!("{} · {activity}", agent.title),
-                None => agent.title.clone(),
-            };
-            let elapsed = agent
-                .started_at_ms
-                .map(|started| now.saturating_sub(started));
-            let mut row = div()
-                .flex()
-                .items_center()
-                .id(("acp-now-agent", row_ix))
-                .debug_selector(move || format!("ACP_NOW_AGENT_{row_ix}"))
-                .pl(px(19.))
-                .w_full()
-                .min_h(ui_theme::height::xxs())
-                .gap_1p5()
-                .type_style(TYPE.text_xsmall)
-                .text_color(muted)
-                .child(
-                    Icon::new(IconName::Bot)
-                        .size(px(12.))
-                        .flex_shrink_0()
-                        .text_color(faint),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(truncated_line(label)),
-                )
-                .when_some(elapsed, |row, elapsed_ms| {
-                    row.child(elapsed_suffix(elapsed_ms, muted))
-                });
-            if let Some(id) = agent.session_id.clone() {
-                let title = agent.title.clone();
-                row = row
-                    .cursor_pointer()
-                    .hover(|row| row.opacity(0.78))
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.open_subagent_inspector(id.clone(), title.clone(), cx);
-                    }));
-            }
-            col = col.child(row);
-        }
-        let more = now_state.agents.len().saturating_sub(MAX_NOW_AGENTS);
-        if more > 0 {
-            col = col.child(
-                div()
-                    .pl(px(19.))
-                    .type_style(TYPE.text_xsmall)
-                    .text_color(faint)
-                    .child(t!("now.more_agents", count = more).into_owned()),
-            );
-        }
         col.font_features(ui_theme::tabular_figures())
             .into_any_element()
     }
@@ -1595,6 +1538,7 @@ impl ConversationView {
         &mut self,
         group: ProcessGroupInfo,
         expanded: bool,
+        animate_ambient: bool,
         muted: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -1616,11 +1560,32 @@ impl ConversationView {
         let show_chips = !chips.is_empty() && chips.len() <= MAX_EDIT_CHIPS;
         let edits_as_chips = show_chips && chips.len() == group.tally.edited_files;
         let header = self.render_process_group_header(group, expanded, edits_as_chips, muted, cx);
-        if !show_chips {
+        // 展开后子智能体就是段里的卡片，收起时才在计数行下面一个一行列出来。
+        let agents = if expanded || group.tally.agents == 0 {
+            Vec::new()
+        } else {
+            self.render_segment_agents(group, animate_ambient, muted, cx)
+        };
+        if !show_chips && agents.is_empty() {
             return header;
         }
-        let group_key = group.first;
         let mut col = div().flex().flex_col().w_full().gap_1().child(header);
+        if show_chips {
+            col = self.render_segment_chips(col, group, &chips, muted, cx);
+        }
+        col.children(agents).into_any_element()
+    }
+
+    /// 段里改过的文件一个一个标签；点开的标签在下面原地展开这段对它的改动。
+    fn render_segment_chips(
+        &self,
+        mut col: gpui::Div,
+        group: ProcessGroupInfo,
+        chips: &[EditChip],
+        muted: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let group_key = group.first;
         let mut row = div().flex().flex_wrap().w_full().gap_1p5().pb_1();
         let mut open_chips = Vec::new();
         for (chip_ix, chip) in chips.iter().enumerate() {
@@ -1675,7 +1640,156 @@ impl ConversationView {
             }
             col = col.child(block);
         }
-        col.into_any_element()
+        col
+    }
+
+    /// 段里派出的子智能体，一个一行。Pi 的点开看它的过程；别的 agent 的子任务没有单独会话，
+    /// 点开就展开这段、打开它的卡片。
+    fn render_segment_agents(
+        &self,
+        group: ProcessGroupInfo,
+        animate_ambient: bool,
+        muted: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let now = now_unix_ms();
+        let mut rows = Vec::new();
+        for ix in group.first..group.end.min(self.entries.len()) {
+            let Some(AcpEntry::ToolCall {
+                id,
+                title,
+                kind,
+                status,
+                output,
+                children,
+                subagents,
+                peer,
+            }) = self.entries.get(ix)
+            else {
+                continue;
+            };
+            if peer.is_some() {
+                continue;
+            }
+            let owner = super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id);
+            if !subagents.is_empty() {
+                let dispatch_running =
+                    matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending);
+                for (run_ix, run) in subagents.iter().enumerate() {
+                    let run_status = subagent_status(run, &self.subagents, dispatch_running);
+                    rows.push(self.render_subagent_run_row(
+                        &owner,
+                        run_ix,
+                        run,
+                        title,
+                        run_status,
+                        animate_ambient,
+                        muted,
+                        now,
+                        cx,
+                    ));
+                }
+                continue;
+            }
+            if *kind != ToolKind::Collaborate {
+                continue;
+            }
+            let running = matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending)
+                || smelt_plugin_api::model::acp_chat::has_unfinished_tool_call(children);
+            let run_status = if running {
+                SubagentStatus::Running
+            } else if matches!(status, ToolCallStatus::Failed) {
+                SubagentStatus::Failed
+            } else {
+                SubagentStatus::Completed
+            };
+            let name = match smelt_plugin_api::model::acp_chat::subagent_card_title(title, children)
+            {
+                SubagentCardTitle::Count(count) => crate::plural(
+                    count,
+                    t!("subagent.roster.one"),
+                    t!("subagent.roster.other", count = count),
+                ),
+                SubagentCardTitle::Named(name) if name.is_empty() => {
+                    t!("subagent.generic").into_owned()
+                }
+                SubagentCardTitle::Named(name) => name,
+            };
+            let detail = if running {
+                children.iter().rev().find_map(|child| match child {
+                    AcpEntry::ToolCall { kind, title, .. } => {
+                        Some(compact_tool_headline(*kind, title))
+                    }
+                    _ => None,
+                })
+            } else {
+                (run_status == SubagentStatus::Failed).then(|| t!("tool.failed").into_owned())
+            };
+            let red = gpui::rgb(ui_theme::bad());
+            let faint = gpui::rgb(ui_theme::faint());
+            let row = div()
+                .flex()
+                .items_center()
+                .w_full()
+                .min_h(px(22.))
+                .gap_2()
+                .pl(px(22.))
+                .child(subagent_status_icon(
+                    run_status,
+                    owner_id("acp-segment-agent-spin", &owner),
+                    animate_ambient,
+                    muted,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(muted)
+                        .child(truncated_line(name.clone())),
+                )
+                .when_some(detail, |row, detail| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .max_w(px(280.))
+                            .overflow_hidden()
+                            .type_style(TYPE.text_xsmall)
+                            .text_color(if run_status == SubagentStatus::Failed {
+                                red
+                            } else {
+                                faint
+                            })
+                            .child(truncated_line(detail)),
+                    )
+                });
+            let tool_id = id.clone();
+            let has_content = tool_output_has_content(output) || !children.is_empty();
+            let group_key = group.first;
+            let group_end = group.end;
+            rows.push(
+                Button::new(owner_id("acp-segment-agent", &owner))
+                    .quiet()
+                    .w_full()
+                    .justify_start()
+                    .accessibility_label(name)
+                    .debug_selector(move || format!("ACP_SEGMENT_AGENT_{ix}"))
+                    .child(row)
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.expanded_process_groups.insert(group_key);
+                        if has_content {
+                            this.collapsed_tool_cards.remove(&tool_id);
+                            this.expanded_tool_cards.insert(tool_id.clone());
+                        }
+                        this.list_state
+                            .remeasure_items(group_key..group_end.min(this.entries.len()));
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        rows
     }
 
     fn render_process_group_header(

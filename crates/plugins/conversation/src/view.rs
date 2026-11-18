@@ -5613,16 +5613,6 @@ fn folds_into_turn_summary(entry: &AcpEntry) -> bool {
     }
 }
 
-fn is_collaboration_entry(entry: &AcpEntry) -> bool {
-    matches!(
-        entry,
-        AcpEntry::ToolCall {
-            kind: ToolKind::Collaborate,
-            ..
-        }
-    )
-}
-
 /// 模型的思考摘要标题经常整行套 `**像这样**`/`__这样__`；折叠预览是纯文本
 /// `div`，不走 markdown 渲染，裸露的星号看着像漏渲染的格式错误。只在整行
 /// 前后都包着同一种标记时才剥掉，避免误伤正文里本来就有的单个星号。
@@ -5836,9 +5826,6 @@ fn live_elapsed_ms(turn_started_at_ms: Option<u64>) -> Option<u64> {
     turn_started_at_ms.and_then(|started| now_unix_ms().checked_sub(started))
 }
 
-/// 「现在」最多列几个在跑的子智能体，再多的合成一行「还有 N 个」。
-const MAX_NOW_AGENTS: usize = 3;
-
 /// 这一轮此刻在做什么。
 #[derive(Debug, PartialEq, Eq)]
 enum NowActivity {
@@ -5854,20 +5841,12 @@ enum NowActivity {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct NowAgent {
-    title: String,
-    activity: Option<String>,
-    started_at_ms: Option<u64>,
-    /// Pi 子智能体的会话 id，点开看它的过程。别的 agent 的子任务没有单独会话。
-    session_id: Option<String>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
 struct NowState {
     activity: NowActivity,
     /// 在想、而最新那段思考收在折叠的段里看不见时，露一句摘要。
     thought_excerpt: Option<String>,
-    agents: Vec<NowAgent>,
+    /// 这一轮还在跑的子智能体。它们各自列在派出它们的那段里，这里只计数。
+    running_agents: usize,
 }
 
 /// 从本轮条目和宿主报的子智能体算出「现在」。`hidden(ix)` 说这一行是否收在折叠的段里。
@@ -5883,7 +5862,7 @@ fn now_state(
         matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending)
     };
     let mut running_tool = None;
-    let mut agents = Vec::new();
+    let mut running_agents = 0;
     let mut turn_tool_ids = std::collections::HashSet::new();
     for entry in turn {
         let AcpEntry::ToolCall {
@@ -5903,45 +5882,18 @@ fn now_state(
             if running(status)
                 || smelt_plugin_api::model::acp_chat::has_unfinished_tool_call(children)
             {
-                let name = smelt_plugin_api::model::acp_chat::subagent_visible_title(title);
-                let activity = children.iter().rev().find_map(|child| match child {
-                    AcpEntry::ToolCall { kind, title, .. } => {
-                        Some(compact_tool_headline(*kind, title))
-                    }
-                    _ => None,
-                });
-                agents.push(NowAgent {
-                    title: if name.is_empty() {
-                        t!("subagent.generic").into_owned()
-                    } else {
-                        name
-                    },
-                    activity,
-                    started_at_ms: None,
-                    session_id: None,
-                });
+                running_agents += 1;
             }
         } else if subagents.is_empty() && running(status) {
             running_tool = Some((*kind, title.clone()));
         }
     }
-    let mut pi_agents: Vec<&SubagentView> = live_subagents
+    running_agents += live_subagents
         .iter()
         .filter(|view| {
             view.status.is_running() && turn_tool_ids.contains(view.tool_call_id.as_str())
         })
-        .collect();
-    pi_agents.sort_by_key(|view| view.started_at_ms);
-    agents.extend(pi_agents.into_iter().map(|view| NowAgent {
-        title: if view.title.trim().is_empty() {
-            t!("subagent.generic").into_owned()
-        } else {
-            view.title.clone()
-        },
-        activity: view.last_activity.clone(),
-        started_at_ms: Some(view.started_at_ms),
-        session_id: Some(view.id.clone()),
-    }));
+        .count();
     let latest = turn
         .iter()
         .enumerate()
@@ -5954,7 +5906,7 @@ fn now_state(
         NowActivity::Waiting
     } else if let Some((kind, title)) = running_tool {
         NowActivity::Tool(kind, title)
-    } else if !agents.is_empty() {
+    } else if running_agents > 0 {
         NowActivity::Agents
     } else if matches!(
         latest,
@@ -5980,7 +5932,7 @@ fn now_state(
     NowState {
         activity,
         thought_excerpt,
-        agents,
+        running_agents,
     }
 }
 
@@ -5989,9 +5941,9 @@ fn now_activity_label(state: &NowState) -> String {
         NowActivity::Waiting => t!("now.waiting").into_owned(),
         NowActivity::Tool(kind, title) => now_tool_label(*kind, title),
         NowActivity::Agents => crate::plural(
-            state.agents.len(),
+            state.running_agents,
             t!("now.agents.one"),
-            t!("now.agents.other", count = state.agents.len()),
+            t!("now.agents.other", count = state.running_agents),
         ),
         NowActivity::Answering => t!("now.answering").into_owned(),
         NowActivity::Thinking => t!("status.thinking").into_owned(),
@@ -6833,7 +6785,13 @@ fn process_group_header_label(group: ProcessGroupInfo, edits_as_chips: bool) -> 
     if edits_as_chips {
         tally.edited_files = 0;
     }
-    parts.extend(tally_parts(&tally));
+    // 子智能体在计数行下面逐个列出（展开后是卡片），计数里不再重复；只剩它们时拿它当标题。
+    let agents = std::mem::take(&mut tally.agents);
+    let mut counts = tally_parts(&tally);
+    if counts.is_empty() && agents > 0 {
+        counts.push(tally_agents(agents));
+    }
+    parts.extend(counts);
     if parts.is_empty() {
         parts.push(t!("group.steps").into_owned());
     }
@@ -7177,10 +7135,19 @@ fn fill_conversation_layout(
         } else {
             None
         };
-        // 跑完的一轮：回答之前的过程整段收成一行摘要。只有思考时不收，思考本来就是一行。
+        // 跑完的一轮：回答之前的过程整段收成一行摘要。只有思考时不收，思考本来就是一行；
+        // 后台子智能体还在跑时也不收，摘要说的是「做完了」，收起来就看不见它还在跑。
         let turn_fold = final_ix.and_then(|final_ix| {
-            (start..final_ix)
-                .any(|ix| folds_into_turn_summary(&entries[ix]))
+            let agent_running = entries[start..final_ix].iter().any(|entry| {
+                matches!(
+                    entry,
+                    AcpEntry::ToolCall { kind, status, children, .. }
+                        if smelt_plugin_api::model::acp_chat::is_active_agent_tool(
+                            *kind, *status, children,
+                        )
+                )
+            });
+            (!agent_running && (start..final_ix).any(|ix| folds_into_turn_summary(&entries[ix])))
                 .then(|| {
                     let first = (start..final_ix)
                         .find(|ix| !is_empty_assistant_body(&entries[*ix]))
@@ -7208,7 +7175,6 @@ fn fill_conversation_layout(
             }
             if matches!(entries[ix], AcpEntry::Assistant { thought: false, .. })
                 || is_completion_entry(&entries[ix])
-                || is_collaboration_entry(&entries[ix])
                 || is_peer_send_entry(&entries[ix])
                 || matches!(
                     entries[ix],

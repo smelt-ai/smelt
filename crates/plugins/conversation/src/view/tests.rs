@@ -2133,7 +2133,7 @@ fn now_shows_a_thought_excerpt_only_when_the_thought_is_folded_away() {
 }
 
 #[test]
-fn now_lists_this_turns_running_subagents() {
+fn now_counts_this_turns_running_subagents() {
     let dispatch = AcpEntry::ToolCall {
         id: "call-1".into(),
         title: "审计".into(),
@@ -2159,15 +2159,7 @@ fn now_lists_this_turns_running_subagents() {
         "派发本身不算在跑的工具"
     );
     assert_eq!(super::now_activity_label(&state), "Waiting for a subagent");
-    assert_eq!(
-        state.agents,
-        vec![super::NowAgent {
-            title: "审计".into(),
-            activity: Some("bash rg".into()),
-            started_at_ms: Some(1_000),
-            session_id: Some("sa-1".into()),
-        }]
-    );
+    assert_eq!(state.running_agents, 1, "跑完的和上一轮派的不算");
 }
 
 #[test]
@@ -2454,7 +2446,7 @@ fn plan_summary_surfaces_the_current_step_in_collapsed_mode() {
 }
 
 #[test]
-fn collaboration_tools_are_not_folded_into_process_groups() {
+fn collaboration_tools_join_their_segment_as_rows() {
     let entries = vec![
         AcpEntry::User("并行检查".into()),
         AcpEntry::ToolCall {
@@ -2480,18 +2472,23 @@ fn collaboration_tools_are_not_folded_into_process_groups() {
     ];
 
     let live = build_conversation_layout(&entries, true);
-    assert!(
-        live[1].process_group.is_none(),
-        "子代理是独立卡片，不收进执行过程组"
+    let group = live[1].process_group.expect("子智能体和前后的工具同在一段");
+    assert_eq!(live[2].process_group, Some(group));
+    assert!(group.active);
+    assert_eq!(group.tally.agents, 1);
+    assert_eq!(
+        process_group_header_label(group, false),
+        "Read 1 file",
+        "子智能体在计数行下面逐个列出，计数里不再重复"
     );
-    let live_tools = live[2].process_group.expect("普通工具仍收成过程组");
-    assert!(live_tools.active);
-    assert_eq!(live_tools.tally.agents, 0);
 
-    let layout = build_conversation_layout(&entries, false);
-    assert!(layout[1].process_group.is_none());
-    let group = layout[2].process_group.expect("普通工具结束后仍收成过程组");
-    assert_eq!(process_group_header_label(group, false), "Read 1 file");
+    let alone = build_conversation_layout(&entries[..2], true);
+    let group = alone[1].process_group.expect("只派了子智能体也是一段");
+    assert_eq!(
+        process_group_header_label(group, false),
+        "1 subagent",
+        "只剩子智能体时拿它当标题"
+    );
 }
 
 #[test]
@@ -2562,10 +2559,11 @@ fn previous_turn_subagent_does_not_join_the_next_process_group() {
     ];
 
     let layout = build_conversation_layout(&entries, true);
-    assert!(
-        layout[1].process_group.is_none(),
-        "上一回合的子代理不能并进当前执行过程"
-    );
+    let old = layout[1]
+        .process_group
+        .expect("上一回合的子智能体在它那一回合的段里");
+    assert!(!old.active, "上一回合的段不算在跑");
+    assert_eq!(old.end, 2, "上一回合的子代理不能并进当前执行过程");
     assert!(layout[4].process_group.is_none());
 }
 
@@ -2600,9 +2598,11 @@ fn idle_last_turn_keeps_background_agent_working() {
     ];
     let layout = build_conversation_layout(&entries, false);
     assert!(
-        layout[1].process_group.is_none(),
-        "子代理完成后仍是独立卡片，不收进执行过程组"
+        layout[1].turn_fold.is_none(),
+        "后台子智能体还在跑，这一轮不收成摘要"
     );
+    let group = layout[1].process_group.expect("子智能体在它那一段里");
+    assert_eq!(group.tally.agents, 1);
 }
 
 #[test]
@@ -5429,6 +5429,48 @@ fn init_ui(cx: &mut gpui::App) {
 }
 
 /// 在跑的段收成一行计数，改过的文件露成标签；点标签在原地展开这个文件的改动。
+/// 收起的段把派出的子智能体一个一行列在计数行下面；点一行展开这段、打开它的卡片。
+#[gpui::test]
+fn a_collapsed_segment_lists_its_subagents(cx: &mut gpui::TestAppContext) {
+    let mut agent = AcpEntry::tool_call(
+        "agent-1",
+        "Explore callers",
+        ToolKind::Collaborate,
+        ToolCallStatus::InProgress,
+        Vec::new(),
+    );
+    let AcpEntry::ToolCall { children, .. } = &mut agent else {
+        panic!("agent");
+    };
+    children.push(completed_tool("child-read", ToolKind::Read, "src/lib.rs"));
+    let entries = vec![
+        AcpEntry::User("查调用方".into()),
+        completed_tool("read-1", ToolKind::Read, "README.md"),
+        agent,
+    ];
+    let (view, cx) = open_conversation(cx, "acp-segment-agents", entries, DaemonPhase::Thinking);
+    draw_settled(cx);
+    draw_settled(cx);
+    let row = cx
+        .debug_bounds("ACP_SEGMENT_AGENT_2")
+        .expect("收起的段里列出子智能体");
+    cx.simulate_click(row.center(), Default::default());
+    draw_settled(cx);
+    draw_settled(cx);
+    assert!(
+        view.read_with(cx, |view, _| view.expanded_process_groups.contains(&1)),
+        "点子智能体一行展开这段"
+    );
+    assert!(
+        view.read_with(cx, |view, _| view.expanded_tool_cards.contains("agent-1")),
+        "并打开它的卡片"
+    );
+    assert!(
+        cx.debug_bounds("ACP_SEGMENT_AGENT_2").is_none(),
+        "展开后子智能体就是段里的卡片，不再列一行"
+    );
+}
+
 #[gpui::test]
 fn clicking_an_edit_chip_opens_its_diff_in_place(cx: &mut gpui::TestAppContext) {
     let entries = vec![
