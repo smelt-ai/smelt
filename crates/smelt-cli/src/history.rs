@@ -139,9 +139,15 @@ mod tests {
             Query {
                 agent: "claude".into(),
                 profile_id: None,
-                cwd: "/".into(),
+                // Windows 上是当前盘的根，如 `D:\`。
+                cwd: crate::absolute("/").unwrap(),
                 target: Some("abc".into()),
             }
+        );
+        assert!(
+            !query.cwd.starts_with(r"\\?\"),
+            "不能是 Windows 的 verbatim 路径：{}",
+            query.cwd
         );
         // 位置参数在前也行。
         let query = parse(&args(&["abc", "--agent", "pi", "--cwd", "/"])).unwrap();

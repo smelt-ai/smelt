@@ -19,6 +19,8 @@ smelt-version = { path = "../smelt-version" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
+# Windows 上 canonicalize 给的是 `\\?\D:\…`，dunce 换回桌面、历史记录用的 `D:\…`。
+dunce = "1"
 # 运行时报错的原因（ControlReason）按系统语言说；当前语言是 rust-i18n 的全局值。
 rust-i18n.workspace = true
 sys-locale = "0.3"

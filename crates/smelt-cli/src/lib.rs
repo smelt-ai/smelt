@@ -211,7 +211,7 @@ fn id_arg(args: &[String]) -> Option<&str> {
 /// 命令行给的路径换成绝对路径：在的话解开软链，和桌面选目录得到的写法一致。
 fn absolute(path: &str) -> Result<String, String> {
     let path = std::path::Path::new(path);
-    std::fs::canonicalize(path)
+    dunce::canonicalize(path)
         .or_else(|_| std::path::absolute(path))
         .map(|path| path.to_string_lossy().into_owned())
         .map_err(|error| error.to_string())

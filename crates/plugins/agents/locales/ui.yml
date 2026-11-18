@@ -103,9 +103,6 @@ common:
   manage:
     en: "Manage"
     zh-CN: "管理"
-  more:
-    en: "More Actions"
-    zh-CN: "更多操作"
   retry:
     en: "Retry"
     zh-CN: "重试"

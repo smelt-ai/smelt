@@ -10868,6 +10868,7 @@ dependencies = [
 name = "smelt-cli"
 version = "0.0.0"
 dependencies = [
+ "dunce",
  "rust-i18n",
  "serde",
  "serde_json",
