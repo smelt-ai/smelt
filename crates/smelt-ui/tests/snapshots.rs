@@ -130,6 +130,11 @@ const SNAPSHOTS: &[Snapshot] = &[
         setup: menu_submenu,
     },
     Snapshot {
+        name: "menu-long",
+        size: (420., 300.),
+        setup: menu_long,
+    },
+    Snapshot {
         name: "menu-context",
         size: (420., 300.),
         setup: context_menu,
@@ -1145,6 +1150,35 @@ fn menu_submenu(window: &mut Window, cx: &mut App) -> Draw {
         let _ = window.draw(cx);
     });
     Box::new(|_, _| dropdown_page())
+}
+
+/// 项数超过面板最高高度（窗口高的一半）：行高不变，面板里滚动，不把每行挤扁。
+fn menu_long(window: &mut Window, cx: &mut App) -> Draw {
+    use smelt_ui::menu::{Menu, MenuItem, MenuTrigger};
+
+    window.defer(cx, |window, cx| {
+        let _ = window.draw(cx);
+        press(
+            gpui::point(px(44.), px(38.)),
+            gpui::MouseButton::Left,
+            window,
+            cx,
+        );
+    });
+    Box::new(|_, _| {
+        div()
+            .flex()
+            .child(MenuTrigger::dropdown(
+                "menu-long",
+                Button::new("menu-long-trigger").label("模型").small(),
+                |_, _| {
+                    (1..=20).fold(Menu::new().label("模型"), |menu, ix| {
+                        menu.item(MenuItem::new(format!("Model-{ix}")).checked(ix == 2))
+                    })
+                },
+            ))
+            .into_any_element()
+    })
 }
 
 /// 右键菜单：在靠下的地方按右键，下面放不下，菜单翻到按下处的上面。键盘停在最后一项

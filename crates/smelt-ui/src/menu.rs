@@ -25,7 +25,8 @@ use crate::ui_theme;
 
 gpui::actions!(smelt_menu, [Up, Down, Left, Right, Activate, Dismiss]);
 const MENU_CONTEXT: &str = "SmeltMenu";
-/// 紧凑菜单的行高（命令行、分组标题同高）和面板内边距。
+/// 紧凑菜单的行高（命令行、分组标题同高）和面板内边距。面板是限高的纵向 flex，行一律
+/// 不收缩：项多时面板滚动，不能把行挤到只剩字高。
 const ROW_HEIGHT: f32 = 28.;
 const SURFACE_PADDING: f32 = 4.;
 
@@ -653,6 +654,7 @@ fn render_menu(
             Entry::Separator if index + 1 < menu.entries.len() => rows.push(
                 div()
                     .h(px(1.))
+                    .flex_shrink_0()
                     .my(px(2.))
                     .mx(px(-SURFACE_PADDING))
                     .bg(ui_theme::hair())
@@ -663,6 +665,7 @@ fn render_menu(
                 TYPE.small_medium
                     .apply(div())
                     .h(px(ROW_HEIGHT))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .px(px(12.))
@@ -705,6 +708,7 @@ fn render_menu(
                         })
                     })
                     .h(px(ROW_HEIGHT))
+                    .flex_shrink_0()
                     .pl(px(12.))
                     .pr(px(6.))
                     .rounded(px(RADIUS.sm))
