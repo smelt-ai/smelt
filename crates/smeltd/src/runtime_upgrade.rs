@@ -354,7 +354,6 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::os::unix::fs::PermissionsExt as _;
 
         /// 下载回来的包和清单对不上就停，不解包、不装。
         #[test]
