@@ -42,14 +42,8 @@ const SETTINGS: &str = "smelt.app/settings";
 // 约定：smelt.agents 的 NEW_CONVERSATION，权威定义在 crates/plugins/agents/src/contract.rs。
 const NEW_CONVERSATION: &str = "smelt.agents/new-conversation";
 
-/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
-pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
-    id: OWNER,
-    register,
-};
-
 /// 宿主启动时调一次。
-fn register(cx: &mut App) {
+pub fn register(cx: &mut App) {
     api::register_views(
         OWNER,
         vec![

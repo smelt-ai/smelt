@@ -58,14 +58,8 @@ struct Catalog {
 
 impl Global for Catalog {}
 
-/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
-pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
-    id: OWNER,
-    register,
-};
-
 /// 宿主启动时调一次。
-fn register(cx: &mut App) {
+pub fn register(cx: &mut App) {
     cx.set_global(Catalog::default());
     api::register_commands(
         OWNER,

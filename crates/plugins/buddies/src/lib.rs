@@ -29,14 +29,8 @@ pub const OWNER: &str = "smelt.buddies";
 /// 小人的图标。
 const ICON: &str = api::ui::IconName::Sparkles.asset_path();
 
-/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
-pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
-    id: OWNER,
-    register,
-};
-
 /// 宿主启动时调一次。
-fn register(cx: &mut gpui::App) {
+pub fn register(cx: &mut gpui::App) {
     cast::install(cx);
     if let Err(error) = api::register_views(OWNER, vec![avatar::spec()], cx) {
         eprintln!("[buddies] 视图登记失败：{error}");

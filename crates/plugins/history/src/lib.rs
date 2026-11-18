@@ -46,14 +46,8 @@ const CURRENT_MAX_AGE: Duration = Duration::from_secs(10);
 /// 没选中的来源只决定标签显不显示，放慢：Codex 的列表要把所有项目的会话扫一遍。
 const PREFETCH_MAX_AGE: Duration = Duration::from_secs(60);
 
-/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
-pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
-    id: OWNER,
-    register,
-};
-
 /// 宿主启动时调一次。
-fn register(cx: &mut App) {
+pub fn register(cx: &mut App) {
     if let Err(error) = api::register_topics(
         OWNER,
         [api::model::daemon_state::CORE_TOPIC_HISTORY_CHANGED],

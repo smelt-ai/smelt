@@ -700,8 +700,7 @@ fn main() {
         // 主题先登记再恢复外观，插件主题在首帧前即可生效。
         // 界面语言先按系统的首选语言定；语言插件登记时换成用户在设置里选的。
         smelt_plugin_api::set_locale(smelt_plugin_api::system_locale(), cx);
-        // 内置主题在外观落地前登记，所以不和别的内置插件一起（见 `plugin_host::install`）。
-        plugins::register_builtins(&[smelt_themes::PLUGIN], cx);
+        smelt_themes::register(cx);
         plugins::register_initial_themes(cx);
         let appearance = load_appearance();
         cx.set_global(appearance.clone());

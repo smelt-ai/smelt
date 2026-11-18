@@ -40,14 +40,8 @@ const VIEW_ID: &str = "smelt.git/main";
 /// 命令的来源。和搬出宿主之前一样，用户改过的快捷键还对得上。
 const OWNER: &str = "smelt.git";
 
-/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
-pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
-    id: OWNER,
-    register,
-};
-
 /// 宿主启动时调一次。
-fn register(cx: &mut App) {
+pub fn register(cx: &mut App) {
     api::register_views(
         OWNER,
         vec![ViewSpec {

@@ -110,19 +110,6 @@ pub use view::{
     set_view_badge, slot_views, unregister_views, view, view_badge, views,
 };
 
-/// 编译进 App 的一个内置插件，每个插件 crate 给出一份（`PLUGIN`），宿主启动时按它登记。
-///
-/// 用户装了同 id 的插件时宿主不登记内置的，由那个插件接手这个 id：别的插件照约定调的命令、
-/// 布局摆的视图都落到它那里。所以内置插件登记的一切（视图、命令、菜单项、话题……）都要用
-/// `id` 当来源。换不换在启动时定，装上、删掉替换它的插件都要重启才生效。
-#[derive(Clone, Copy)]
-pub struct BuiltinPlugin {
-    /// 插件 id，也是它登记东西用的来源。
-    pub id: &'static str,
-    /// 登记视图、命令这些，装上插件自己的订阅。启动时调一次。
-    pub register: fn(&mut App),
-}
-
 /// 桌面挂着的一台机器。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Machine {

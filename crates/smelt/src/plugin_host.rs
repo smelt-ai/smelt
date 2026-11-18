@@ -383,34 +383,29 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
         api::emit(HostEvent::SessionsChanged, cx)
     })
     .detach();
-    crate::plugins::register_builtins(
-        &[
-            // 语言最先：用户选的界面语言在别的插件建东西之前换上。
-            smelt_language::PLUGIN,
-            // 会话插件起来就要用终端、对话的视图和智能体配置，这三个排在它前面。
-            smelt_terminal::PLUGIN,
-            smelt_conversation::PLUGIN,
-            smelt_agents::PLUGIN,
-            smelt_sessions::PLUGIN,
-            smelt_archive::PLUGIN,
-            smelt_automations::PLUGIN,
-            smelt_buddies::PLUGIN,
-            smelt_capabilities::PLUGIN,
-            smelt_desktop::PLUGIN,
-            smelt_files_ui::PLUGIN,
-            smelt_git_ui::PLUGIN,
-            smelt_history::PLUGIN,
-            smelt_ide::PLUGIN,
-            smelt_launcher::PLUGIN,
-            smelt_layouts::PLUGIN,
-            smelt_machines::PLUGIN,
-            smelt_maintenance::PLUGIN,
-            smelt_notifications::PLUGIN,
-            smelt_resources::PLUGIN,
-            smelt_updater_ui::PLUGIN,
-        ],
-        cx,
-    );
+    // 语言最先：用户选的界面语言在别的插件建东西之前换上。
+    smelt_language::register(cx);
+    // 会话插件起来就要用终端、对话的视图和智能体配置，这三个排在它前面。
+    smelt_terminal::register(cx);
+    smelt_conversation::register(cx);
+    smelt_agents::register(cx);
+    smelt_sessions::register(cx);
+    smelt_archive::register(cx);
+    smelt_automations::register(cx);
+    smelt_buddies::register(cx);
+    smelt_capabilities::register(cx);
+    smelt_desktop::register(cx);
+    smelt_files_ui::register(cx);
+    smelt_git_ui::register(cx);
+    smelt_history::register(cx);
+    smelt_ide::register(cx);
+    smelt_launcher::register(cx);
+    smelt_layouts::register(cx);
+    smelt_machines::register(cx);
+    smelt_maintenance::register(cx);
+    smelt_notifications::register(cx);
+    smelt_resources::register(cx);
+    smelt_updater_ui::register(cx);
 }
 
 /// 此刻看得见的视图。摆视图的地方各报各的：主窗口报开着的那页里露着的视图（含出口里

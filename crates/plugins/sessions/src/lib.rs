@@ -121,14 +121,8 @@ rust_i18n::i18n!("locales", fallback = "en");
 /// 来源 id，也是本插件库的名字。
 pub const OWNER: &str = "smelt.sessions";
 
-/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
-pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
-    id: OWNER,
-    register,
-};
-
 /// 宿主启动时调一次，排在终端、对话插件之后（它们的视图先登记上，建会话时不用等）。
-fn register(cx: &mut App) {
+pub fn register(cx: &mut App) {
     let sessions = model::Sessions::install(cx);
     lifecycle::install(&sessions, cx);
 

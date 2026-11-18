@@ -34,15 +34,9 @@ pub static THEME_FILES: &[&str] = &[
     include_str!("../themes/twilight.json"),
 ];
 
-/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
-pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
-    id: OWNER,
-    register,
-};
-
 /// 宿主启动时调一次：按设置装上主题之前。
 /// 再调一次是整组替换，结果相同。
-fn register(cx: &mut App) {
+pub fn register(cx: &mut App) {
     api::register_theme_sets(OWNER, THEME_FILES, cx).expect("内置主题文件不合法或与已有主题重名");
 }
 

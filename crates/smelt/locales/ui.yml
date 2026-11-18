@@ -418,9 +418,6 @@ plugins:
   deleted:
     en: "Deleted \"%{name}\"; the original files are in the trash folder"
     zh-CN: "已删除「%{name}」，原文件在回收目录里"
-  deleted_builtin_back:
-    en: "Deleted \"%{name}\"; the original files are in the trash folder. Restart Smelt to get the built-in one back"
-    zh-CN: "已删除「%{name}」，原文件在回收目录里。重启 Smelt 后用回内置的"
   duplicate_id:
     en: "A plugin with the same ID is already installed (%{path}). Delete it before importing"
     zh-CN: "已经装了 id 相同的插件（%{path}），先删掉它再导入"
@@ -496,12 +493,6 @@ plugins:
   settings_failed:
     en: "Couldn't load the settings page: %{error}"
     zh-CN: "设置页加载失败：%{error}"
-  replaces_builtin:
-    en: "Replaces the built-in plugin with the same ID"
-    zh-CN: "替换了同 id 的内置插件"
-  waits_for_restart:
-    en: "Has the same ID as the built-in plugin %{id}; restart Smelt to replace it"
-    zh-CN: "和内置插件 %{id} 同 id，重启 Smelt 后替换它"
   source_bundled:
     en: "Bundled with Smelt, updated with Smelt"
     zh-CN: "smelt 自带，跟着 smelt 更新"

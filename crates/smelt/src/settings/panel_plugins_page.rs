@@ -2,13 +2,12 @@
 //! 的设置页一样是登记的视图（见 [`super::view_specs`]）。
 //!
 //! 列出眼下加载的插件，导入、删除自己装的插件。App 自带的插件跟着 smelt 更新，不能删；用户
-//! 装一个同 id 的副本就能盖过它，内置（Rust）插件也一样，只是要重启才换（见
-//! `plugins::register_builtins`）。和能力库里 Pi 的技能与扩展是两回事：这些插件跑在 smelt 界面
+//! 装一个同 id 的副本就能盖过它。和能力库里 Pi 的技能与扩展是两回事：这些插件跑在 smelt 界面
 //! 里，只在本机。改磁盘放后台线程；插件目录一变，工作台自己重挂改动的插件（见
 //! `plugins::watch`），这页不用管挂载。
 
 use super::*;
-use crate::plugins::{InstalledPlugin, PluginSource, Takeover};
+use crate::plugins::{InstalledPlugin, PluginSource};
 use rust_i18n::t;
 use smelt_plugin_api::HostEvent;
 use smelt_ui::kit::{TYPE, TypeStyled as _};
@@ -120,14 +119,11 @@ impl PanelPluginsPage {
                 .background_executor()
                 .spawn(async move { crate::plugins::uninstall(&root) })
                 .await;
-            // 它替换着内置插件的，删了这个 id 就没人接，要重启才用回内置的。
-            let message = if plugin.takeover == Some(Takeover::Replaced) {
-                t!("plugins.deleted_builtin_back", name = plugin.name)
-            } else {
-                t!("plugins.deleted", name = plugin.name)
-            };
             let _ = this.update(cx, |this, cx| {
-                this.finish_change(result.map(|()| message.into_owned()), cx)
+                this.finish_change(
+                    result.map(|()| t!("plugins.deleted", name = plugin.name).into_owned()),
+                    cx,
+                )
             });
         })
         .detach();
@@ -248,13 +244,6 @@ impl PanelPluginsPage {
                 t!("plugins.source_repo", path = plugin.root.display()).into_owned()
             }
         });
-        match plugin.takeover {
-            Some(Takeover::Replaced) => detail.push(t!("plugins.replaces_builtin").into_owned()),
-            Some(Takeover::AfterRestart) => {
-                detail.push(t!("plugins.waits_for_restart", id = plugin.id).into_owned())
-            }
-            None => {}
-        }
         if let Some(error) = &plugin.error {
             detail.push(t!("plugins.load_failed", error = error).into_owned());
         }
