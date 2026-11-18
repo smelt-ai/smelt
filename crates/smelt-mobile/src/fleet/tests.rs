@@ -107,6 +107,8 @@ struct FakeRuntime {
     push_calls: Mutex<Vec<(String, Value)>>,
     /// 测试中暂停一次 register，模拟请求在运行时处理途中。
     register_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    /// 测试中暂停一次 unregister，保持忘记中的节点仍然存在。
+    unregister_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
 impl FakeRuntime {
@@ -124,6 +126,7 @@ impl FakeRuntime {
             push_methods: AtomicBool::new(true),
             push_calls: Mutex::new(Vec::new()),
             register_gate: Mutex::new(None),
+            unregister_gate: Mutex::new(None),
         })
     }
 
@@ -242,12 +245,14 @@ impl FakeRuntime {
             Some(method @ ("push.register" | "push.unregister"))
                 if self.push_methods.load(Ordering::SeqCst) =>
             {
-                if method == "push.register" {
-                    let gate = self.register_gate.lock().unwrap().take();
-                    if let Some((entered, release)) = gate {
-                        let _ = entered.send(());
-                        let _ = release.recv();
-                    }
+                let gate = if method == "push.register" {
+                    self.register_gate.lock().unwrap().take()
+                } else {
+                    self.unregister_gate.lock().unwrap().take()
+                };
+                if let Some((entered, release)) = gate {
+                    let _ = entered.send(());
+                    let _ = release.recv();
                 }
                 self.push_calls
                     .lock()
@@ -594,6 +599,7 @@ fn re_pairing_a_reinstalled_runtime_drops_the_old_cache() {
         push_methods: AtomicBool::new(true),
         push_calls: Mutex::new(Vec::new()),
         register_gate: Mutex::new(None),
+        unregister_gate: Mutex::new(None),
     });
     {
         let mut runtimes = h.transport.runtimes.lock().unwrap();
@@ -1175,6 +1181,8 @@ fn forgetting_skips_a_queued_register() {
     h.wait_state("ra", ConnectionState::Connected);
     let node = h.fleet.node("ra").unwrap();
     let guard = lock(&node.push_sync);
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    *lock(&node.sync_push_lock_probe) = Some(waiting_tx);
     let job = lock(&h.fleet.shared.view)
         .push
         .set(push_on())
@@ -1182,14 +1190,20 @@ fn forgetting_skips_a_queued_register() {
         .unwrap();
     std::thread::scope(|scope| {
         let sync = scope.spawn(|| h.fleet.shared.sync_push(&job));
-        let forget = scope.spawn(|| h.fleet.forget("ra"));
-        wait_until("开始忘记", || {
-            lock(&h.fleet.shared.view).push.is_forgetting("ra")
-        });
+        waiting_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        lock(&h.fleet.shared.view).push.begin_forget("ra");
         drop(guard);
         assert_eq!(sync.join().unwrap(), SyncResult::Failed);
-        forget.join().unwrap().unwrap();
     });
+    assert!(h.fleet.node("ra").is_ok(), "节点还在注册表里");
+    assert!(push_calls(&a).is_empty(), "不能发出已经领取的登记请求");
+    assert_eq!(
+        lock(&h.fleet.shared.view)
+            .push
+            .finish(&job, SyncResult::Failed),
+        None
+    );
+    h.fleet.forget("ra").unwrap();
     assert_eq!(push_calls(&a), ["push.unregister"]);
 }
 
@@ -1210,6 +1224,12 @@ fn forgetting_waits_for_in_flight_register_and_suppresses_followup() {
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     *a.register_gate.lock().unwrap() = Some((entered_tx, release_rx));
+    let (unregister_entered_tx, unregister_entered_rx) = std::sync::mpsc::channel();
+    let (unregister_release_tx, unregister_release_rx) = std::sync::mpsc::channel();
+    *a.unregister_gate.lock().unwrap() = Some((unregister_entered_tx, unregister_release_rx));
+    let node = h.fleet.node("ra").unwrap();
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    *lock(&node.forget_push_lock_probe) = Some(waiting_tx);
     let job = lock(&h.fleet.shared.view)
         .push
         .set(push_on())
@@ -1217,19 +1237,28 @@ fn forgetting_waits_for_in_flight_register_and_suppresses_followup() {
         .unwrap();
 
     std::thread::scope(|scope| {
+        // 故障时离开作用域会关闭通道，避免服务端门闩卡住线程。
+        let release_tx = release_tx;
+        let unregister_release_tx = unregister_release_tx;
         let sync = scope.spawn(|| {
             let result = h.fleet.shared.sync_push(&job);
-            lock(&h.fleet.shared.view).push.finish(&job, result)
+            let next = lock(&h.fleet.shared.view).push.finish(&job, result);
+            (result, next)
         });
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let forget = scope.spawn(|| h.fleet.forget("ra"));
-        wait_until("开始忘记", || {
-            lock(&h.fleet.shared.view).push.is_forgetting("ra")
-        });
+        waiting_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(lock(&h.fleet.shared.view).push.is_forgetting("ra"));
         h.fleet.set_push(Desired::Off);
         h.fleet.set_push(push_on());
         release_tx.send(()).unwrap();
-        assert_eq!(sync.join().unwrap(), None);
+        unregister_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(h.fleet.node("ra").is_ok());
+        assert_eq!(sync.join().unwrap(), (SyncResult::Done, None));
+        assert!(lock(&h.fleet.shared.view).push.set(Desired::Off).is_empty());
+        unregister_release_tx.send(()).unwrap();
         forget.join().unwrap().unwrap();
     });
     assert_eq!(push_calls(&a), ["push.register", "push.unregister"]);

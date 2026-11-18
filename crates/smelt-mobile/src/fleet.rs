@@ -111,6 +111,10 @@ pub(crate) struct Node {
     /// 同步请求和忘记时的取消登记不能并发；只在不持有 registry/view 时等待此锁。
     /// 请求超时后运行时仍可能处理它，客户端串行化不能保证这种情况下的远端顺序。
     push_sync: Mutex<()>,
+    #[cfg(test)]
+    forget_push_lock_probe: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    #[cfg(test)]
+    sync_push_lock_probe: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     pub catalog: Catalog,
     pub agents: Agents,
     pub files: Files,
@@ -201,7 +205,42 @@ impl Node {
             serial,
             hub,
             push_sync: Mutex::new(()),
+            #[cfg(test)]
+            forget_push_lock_probe: Mutex::new(None),
+            #[cfg(test)]
+            sync_push_lock_probe: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    fn lock_push_with_probe(
+        &self,
+        probe: &Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    ) -> MutexGuard<'_, ()> {
+        if let Some(probe) = lock(probe).take() {
+            match self.push_sync.try_lock() {
+                Ok(guard) => return guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => return error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let _ = probe.send(());
+                }
+            }
+        }
+        lock(&self.push_sync)
+    }
+
+    fn lock_push_for_forget(&self) -> MutexGuard<'_, ()> {
+        #[cfg(test)]
+        return self.lock_push_with_probe(&self.forget_push_lock_probe);
+        #[cfg(not(test))]
+        lock(&self.push_sync)
+    }
+
+    fn lock_push_for_sync(&self) -> MutexGuard<'_, ()> {
+        #[cfg(test)]
+        return self.lock_push_with_probe(&self.sync_push_lock_probe);
+        #[cfg(not(test))]
+        lock(&self.push_sync)
     }
 
     /// 撤掉这台机器：会话目录不再推事件，对话订阅停下且不再写缓存，断开连接（终端随之以
@@ -578,7 +617,7 @@ impl Fleet {
             .map(|record| record.endpoint_id.clone());
         lock(&shared.view).push.begin_forget(runtime_id);
         if let Ok(node) = shared.node(runtime_id) {
-            let _push_sync = lock(&node.push_sync);
+            let _push_sync = node.lock_push_for_forget();
             shared.unregister_push_before_forget(&node);
         }
         let deleted = env.store.delete_runtime(runtime_id);
@@ -968,7 +1007,7 @@ impl Shared {
         let Ok(node) = self.node(&job.runtime_id) else {
             return SyncResult::Failed;
         };
-        let _push_sync = lock(&node.push_sync);
+        let _push_sync = node.lock_push_for_sync();
         if node.serial != job.serial || !lock(&self.view).push.can_send(job) {
             return SyncResult::Failed;
         }
