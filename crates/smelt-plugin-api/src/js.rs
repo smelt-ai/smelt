@@ -14,6 +14,8 @@
 //! 插件摆在哪不由插件定，这里没有登记位置的函数；插件可以登记整份布局，用不用由用户在
 //! 设置里选（见 `docs/app-plugins.md`）。
 
+#[cfg(test)]
+mod parity;
 pub mod ui;
 
 use std::cell::RefCell;
@@ -100,6 +102,14 @@ export function window_active(): boolean;
 export function overlay_open(): boolean;
 /** 现在的界面语言代码（"en"、"zh-CN"）。换了发 locale_changed：插件自己画的字按新语言重画。 */
 export function locale(): string;
+/** App 带的界面语言：code 是语言代码，name 是这种语言自己的叫法（"简体中文"）。 */
+export function locales(): { code: string; name: string }[];
+/** 系统的首选语言，归到 locales() 里的一个；读不到是 "en"。 */
+export function system_locale(): string;
+/** 换界面语言。不认识的代码归到最接近的带的语言；和现在一样什么都不做。换了发 locale_changed，所有窗口重画。 */
+export function set_locale(locale: string): null;
+/** 这个构建的版本号：version 总有；release 是正式发版的版本号，开发构建为 null。 */
+export function app_version(): { version: string; release: string | null };
 /**
  * 给人看、跟着界面语言变的字：一个字符串（不翻译），或一张「语言代码 → 字」的表，如
  * { en: "Skills", "zh-CN": "技能" }。宿主按当前语言取，没有用 en，再没有用第一项。
@@ -276,6 +286,8 @@ export function safe_area(view: string): {
 };
 /** 所有来源登记的页（形状同 register_pages，id 是 "<来源>/<名字>"），按登记先后。变了发 pages_changed。 */
 export function pages(): { id: string; title: string; home: boolean; index: string | null }[];
+/** 登记的布局（见 register_layouts）：id 是 "<来源>/<名字>"，page 是给哪一页。变了发 layouts_changed。 */
+export function layouts(): { id: string; page: string; title: string }[];
 /** 登记了的一条命令（见 commands）。key 是登记时给的出厂快捷键（用户可能在设置里改了），没有为 null；group 是来源给人看的名字。 */
 export interface CommandInfo {
   id: string;
@@ -438,6 +450,8 @@ export type HostEvent =
   | { type: "commands_changed" }
   /** 要订的运行时话题变了（有插件 register_topics）。宿主据此增减订阅，插件一般不用管。 */
   | { type: "topics_changed" }
+  /** 右键菜单里登记的项变了（有插件 register_context_menu_items）：自己画着的菜单按 context_menu_items 重建。 */
+  | { type: "context_menu_items_changed" }
   /** 界面语言换了（读 locale()）：窗口已经重画，插件存着的字要按新语言重建。 */
   | { type: "locale_changed" }
   /** 这份视图又被打开了一次，args 同 view_args()。只发给这份视图自己的脚本；建好后马上打开、参数没变的那一次不发。 */
@@ -744,6 +758,31 @@ impl JsPlugin {
                 Ok(in_app("overlay_open", |cx| crate::host(cx).overlay_open(cx))?.into())
             })
             .function("locale", |_arguments| Ok(crate::locale().as_ref().into()))
+            .function("locales", |_| {
+                Ok(HostValue::Array(
+                    crate::LOCALES
+                        .iter()
+                        .map(|(code, name)| {
+                            HostObject::new()
+                                .field("code", *code)
+                                .field("name", *name)
+                                .into()
+                        })
+                        .collect(),
+                ))
+            })
+            .function("system_locale", |_| Ok(crate::system_locale().into()))
+            .function("set_locale", |arguments| {
+                let locale = arguments.string(0)?.to_string();
+                in_app("set_locale", |cx| crate::set_locale(&locale, cx))?;
+                Ok(HostValue::Null)
+            })
+            .function("app_version", |_| {
+                Ok(HostObject::new()
+                    .field("version", crate::smelt_version::VERSION)
+                    .field("release", optional_text(crate::smelt_version::RELEASE))
+                    .into())
+            })
             .function("set_active_context", |arguments| {
                 let context = active_context_argument(arguments.value(0)?)?;
                 in_app("set_active_context", |cx| {
@@ -800,6 +839,21 @@ impl JsPlugin {
                                 .field("title", page.title.get().as_ref())
                                 .field("home", page.home)
                                 .field("index", optional_text(page.index.as_deref()))
+                                .into()
+                        })
+                        .collect(),
+                ))
+            })
+            .function("layouts", |_| {
+                let layouts = in_app("layouts", |cx| crate::layouts(cx))?;
+                Ok(HostValue::Array(
+                    layouts
+                        .iter()
+                        .map(|layout| {
+                            HostObject::new()
+                                .field("id", layout.id.as_ref())
+                                .field("page", layout.page.as_ref())
+                                .field("title", layout.title.get().as_ref())
                                 .into()
                         })
                         .collect(),
@@ -2294,6 +2348,9 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::PagesChanged => HostObject::new().field("type", "pages_changed"),
         HostEvent::CommandsChanged => HostObject::new().field("type", "commands_changed"),
         HostEvent::TopicsChanged => HostObject::new().field("type", "topics_changed"),
+        HostEvent::ContextMenuItemsChanged => {
+            HostObject::new().field("type", "context_menu_items_changed")
+        }
         HostEvent::LocaleChanged => HostObject::new().field("type", "locale_changed"),
         HostEvent::Plugin { name, payload } => HostObject::new()
             .field("type", "plugin")
@@ -2372,6 +2429,71 @@ mod tests {
             .call("session_states", &HostArguments::new([HostValue::Null]))
             .unwrap_err();
         assert!(outside_script.message().contains("只能在视图"));
+    }
+
+    #[test]
+    fn locale_and_version_queries_need_no_app() {
+        let module = JsPlugin::new().module();
+        let locales = module.call("locales", &HostArguments::default()).unwrap();
+        let HostValue::Array(locales) = locales else {
+            panic!("locales 要是数组：{locales:?}");
+        };
+        assert_eq!(locales.len(), crate::LOCALES.len());
+        let system = module
+            .call("system_locale", &HostArguments::default())
+            .unwrap();
+        assert!(
+            crate::LOCALES
+                .iter()
+                .any(|(code, _)| HostValue::from(*code) == system)
+        );
+        let version = module
+            .call("app_version", &HostArguments::default())
+            .unwrap();
+        let HostValue::Object(version) = version else {
+            panic!("app_version 要是对象：{version:?}");
+        };
+        let field = |name: &str| {
+            version
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            field("version"),
+            Some(HostValue::from(crate::smelt_version::VERSION))
+        );
+        assert!(field("release").is_some());
+    }
+
+    #[test]
+    fn locale_and_topic_changes_check_their_arguments_before_entering_app() {
+        let module = JsPlugin::for_plugin("example", "示例").module();
+        assert!(
+            module
+                .call("set_locale", &HostArguments::new([HostValue::Null]))
+                .is_err()
+        );
+        for topics in [
+            HostValue::Null,
+            HostValue::Array(vec![HostValue::Number(1.0)]),
+        ] {
+            let error = module
+                .call("register_topics", &HostArguments::new([topics]))
+                .unwrap_err();
+            assert!(
+                !error.message().contains("只能在视图"),
+                "{}",
+                error.message()
+            );
+        }
+        let error = module
+            .call(
+                "register_topics",
+                &HostArguments::new([HostValue::Array(vec!["x.changed".into()])]),
+            )
+            .unwrap_err();
+        assert!(error.message().contains("只能在视图"));
     }
 
     #[test]

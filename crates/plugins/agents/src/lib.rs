@@ -294,6 +294,7 @@ impl AgentsPage {
             | HostEvent::PagesChanged
             | HostEvent::CommandsChanged
             | HostEvent::TopicsChanged
+            | HostEvent::ContextMenuItemsChanged
             | HostEvent::LocaleChanged
             | HostEvent::Plugin { .. }
             | HostEvent::OpenPaths { .. } => {}

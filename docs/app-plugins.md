@@ -186,7 +186,9 @@ JS 插件的宿主模块也叫 `smelt-plugin-api`，是 Rust 那份接口的薄�
 - 每个插件一份自己的 gpui-shell Policy，宿主函数知道是哪个插件在调。
 - 事件用 `await next_event()` 取；每个插件一条队列，同样的事件只留一份。
 - 每个 JS 插件挂载时登记成一个视图，和 Rust 视图一样由布局摆放。
-- 终态里 Rust 和 JS 两边能拿到的东西一样。现在 JS 还缺视图自己的图标和自己画顶栏。在自己的界面里嵌别的插件按实例建的视图已有 `SmeltViewInstance`（2026-11-17）。
+- Rust 和 JS 两边能拿到的东西一样：Rust 只是内置插件的实现语言，不因此多拿宿主能力。`smelt-plugin-api` 根上给插件的每一样都登记在 `src/js/parity.rs` 的表里，写明 JS 那边是同名函数、换了名字的函数、别的形式（命令、组件、gpui-shell 自带的模块），还是只有 Rust 有（写明为什么）、只有宿主用；JS 模块的函数和 `export function` 声明也要对得上。加接口不填这张表，测试不过。再导出的库（`client`、`model`、`rusqlite` 这些）不是宿主服务，JS 用 `call`、`store_query`、gpui-shell 的 fetch / fs / exec 做同样的事。
+- 现在只有 Rust 有的：`connector`（原生字节流）、`built_view`（取自己建好的视图实体）、`set_safe_area`（给自己摆的子视图分让位），和更新插件替换 App 包用的 `updater`。JS 还缺视图自己的图标和自己画顶栏。
+- 2026-11-18 补上：`register_topics`、`locales` / `system_locale` / `set_locale`、`app_version`、`layouts`；右键菜单项变了改发 `context_menu_items_changed` 事件（删掉只有 Rust 能用、也没人用的 `observe_context_menu_items`）。在自己的界面里嵌别的插件按实例建的视图已有 `SmeltViewInstance`（2026-11-17）。
 - 2026-11-18 补上：一个插件登记多个视图（`register_views`，替掉只能登记设置页的 `register_settings_pages`）、按实例建、填插槽、收打开参数（`view_args`、`view_opened`）。
 - 2026-11-16 补上：应用菜单（`register_menu_items`）、右键菜单项（`register_context_menu_items`）、退出守卫（`set_quit_guard`：设着时退出一律交给那条命令，脚本答不了同步的「接不接手」，接手后要退出调 `smelt.app/quit-now`）、按实例建的视图（`run("smelt.app/open-view", {view, args})` 放进出口）、`machine_online`、`wait_online`、`session_presence`。
 - 2026-11-17 补上：调运行时控制接口（`call(machine, method, params?, timeout_ms?)`，方法名按线上名字认，不认识的当场报错）、读注册表（`machines`、`views`、`view_badge`、`pages`、`commands`、`command`）、画自己的右键菜单时取别人放进来的项（`context_menu_items`，参数已并上下文）、发布活动上下文（`set_active_context`）、命令交回结果（`next_command` 带 `id`，脚本用 `resolve_command` / `reject_command` 交回，插件卸下时没交回的算失败）。

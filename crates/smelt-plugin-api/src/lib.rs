@@ -82,7 +82,7 @@ pub use connections::{
 pub use context::{ActiveContext, ViewedSession, active_context, set_active_context};
 pub use context_menu::{
     ContextMenuAction, ContextMenuItem, context_menu_args, context_menu_items,
-    observe_context_menu_items, register_context_menu_items, unregister_context_menu_items,
+    register_context_menu_items, unregister_context_menu_items,
 };
 pub use event::Event;
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
@@ -342,6 +342,9 @@ pub enum HostEvent {
     PagesChanged,
     /// 要订的运行时话题变了（见 [`register_topics`]）：宿主按新的并集增减订阅。
     TopicsChanged,
+    /// 右键菜单里登记的项变了（见 [`register_context_menu_items`]）：开着的菜单按
+    /// [`context_menu_items`] 原地重建。
+    ContextMenuItemsChanged,
     /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
     CommandsChanged,
     /// 界面语言换了（读 [`locale`]）：窗口已经重画，存在视图状态里的字（建好的菜单、

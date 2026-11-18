@@ -8,13 +8,13 @@
 //! [`context_menu_args`]）。执行照常进命令队列，失败由宿主报。
 //!
 //! 按（来源，菜单）整组登记，再登记是整组替换：插件探测完、图标读到了，就把整组再登记
-//! 一次；变了画菜单的一方把开着的菜单原地重建（见 [`observe_context_menu_items`]）。
+//! 一次；变了发 [`HostEvent::ContextMenuItemsChanged`]，画菜单的一方把开着的菜单原地重建。
 
 use std::sync::Arc;
 
-use gpui::{App, Global, SharedString, Subscription};
+use gpui::{App, Global, SharedString};
 
-use crate::{RuntimeKey, Text};
+use crate::{HostEvent, RuntimeKey, Text};
 
 /// 菜单里的一项。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +99,7 @@ pub fn register_context_menu_items(
             items,
         }),
     }
+    crate::emit(HostEvent::ContextMenuItemsChanged, cx);
     Ok(())
 }
 
@@ -113,6 +114,7 @@ pub fn unregister_context_menu_items(owner: &str, cx: &mut App) {
     cx.global_mut::<ContextMenuItems>()
         .0
         .retain(|entry| entry.owner != owner);
+    crate::emit(HostEvent::ContextMenuItemsChanged, cx);
 }
 
 fn validate(items: &[ContextMenuItem]) -> Result<(), String> {
@@ -206,11 +208,6 @@ pub fn context_menu_args(
         return serde_json::Value::Null;
     }
     serde_json::Value::Object(merged)
-}
-
-/// 登记的菜单项变了就调 `f`（哪个菜单的都算）。留着返回的订阅才一直收得到。
-pub fn observe_context_menu_items(cx: &mut App, f: impl FnMut(&mut App) + 'static) -> Subscription {
-    cx.observe_global::<ContextMenuItems>(f)
 }
 
 #[cfg(test)]
@@ -355,13 +352,15 @@ mod tests {
         });
     }
 
+    /// 只有真变了才动登记表：事件（[`HostEvent::ContextMenuItemsChanged`]）和改表在同一处发，
+    /// 测试里没装宿主收不到事件，看表有没有被改。
     #[gpui::test]
     fn only_real_changes_reach_observers(cx: &mut gpui::TestAppContext) {
         let changes = Rc::new(Cell::new(0));
         let _subscription = cx.update(|cx| {
             register_command("ide", cx);
             let seen = changes.clone();
-            observe_context_menu_items(cx, move |_| seen.set(seen.get() + 1))
+            cx.observe_global::<ContextMenuItems>(move |_| seen.set(seen.get() + 1))
         });
         cx.update(|cx| {
             register_context_menu_items("ide", MENU, vec![run("ide", "Zed")], cx).unwrap()

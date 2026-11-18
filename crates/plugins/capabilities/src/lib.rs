@@ -291,6 +291,7 @@ impl CapabilitiesPage {
             | HostEvent::OverlayChanged
             | HostEvent::SessionsChanged
             | HostEvent::TopicsChanged
+            | HostEvent::ContextMenuItemsChanged
             | HostEvent::NotificationPermissionChanged => {}
             HostEvent::MachinesChanged => {
                 // 在配的那台远程机器已经移除时，回到本机。
