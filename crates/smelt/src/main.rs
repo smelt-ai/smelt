@@ -233,6 +233,8 @@ struct Workspace {
     _local_runtime_sub: Option<Subscription>,
     /// 盯着 App 里的 smeltd 所在目录：重编译、覆盖安装后查一次守护是否落后。
     _daemon_binary_watcher: Option<notify::RecommendedWatcher>,
+    /// 盯着插件目录：文件一变就重挂改动的插件（见 `plugins::watch`）。
+    _plugin_watcher: Option<notify::RecommendedWatcher>,
     /// 守护落后，但有会话在跑没重启：等会话都停下来再查一次。
     daemon_restart_waiting_idle: bool,
     /// 根节点自己的焦点句柄：有的页面自身没有可聚焦的元素，切过去后如果谁都不 focus，
@@ -252,6 +254,7 @@ impl Workspace {
         workspace_commands::register(cx.weak_entity(), cx);
         // 面板插件在进首页之前挂好：布局和出口按视图 id 摆，注册表里没有的摆不上。
         plugins::mount_all(window, cx);
+        let plugin_watcher = plugins::watch(window, cx);
 
         let mut ws = Self {
             pages: Vec::new(),
@@ -287,6 +290,7 @@ impl Workspace {
             local_runtime_seen_online: false,
             _local_runtime_sub: None,
             _daemon_binary_watcher: None,
+            _plugin_watcher: plugin_watcher,
             daemon_restart_waiting_idle: false,
             focus_handle: cx.focus_handle(),
             host_dialogs: Vec::new(),
@@ -601,7 +605,11 @@ fn open_workspace_window(cx: &mut App) -> MainWindow {
 }
 
 fn main() {
-    if let Some(code) = smelt_cli::maybe_run(std::env::args()) {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = plugins::maybe_run_cli(&args) {
+        std::process::exit(code);
+    }
+    if let Some(code) = smelt_cli::maybe_run(&args) {
         std::process::exit(code);
     }
     // 整个 GUI 生命周期持共享 lease。installer 只有等所有 GUI 退出并拿到独占 lease

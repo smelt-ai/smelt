@@ -29,6 +29,14 @@ pub(crate) fn install() {
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
+/// `smelt plugin check` 用：同样的事件写到 stderr，跑 check 的人当场看得见脚本的输出和错误。
+pub(super) fn install_stderr() {
+    let subscriber = tracing_subscriber::registry().with(AppLog::new(|scope, level, message| {
+        eprintln!("[{scope}] {level} {message}");
+    }));
+    let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
 /// 把要的 tracing 事件交给 `write(来源, 级别, 正文)`。
 struct AppLog<W> {
     write: W,

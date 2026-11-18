@@ -36,10 +36,11 @@ help.text:
 
     Capabilities (apply to every agent):
       smelt mcp list | presets | add <preset id> | enable|disable|remove <server name>
-      smelt plugin list | import --skill|--extension <path> | remove <id>
+      smelt pi skill list | import <directory> | remove <name>
+      smelt pi extension list | import <path> | remove <name>
       smelt model list | default <provider>/<model id> | thinking off|minimal|low|medium|high|xhigh
       smelt quota
-
+    %{plugins}
     Notifications (shown on the desktop and pushed to phones with "Agent messages" on):
       smelt notify [--title <title>] <message>
 
@@ -84,10 +85,11 @@ help.text:
 
     能力（对所有智能体生效）：
       smelt mcp list | presets | add <预设id> | enable|disable|remove <服务器名>
-      smelt plugin list | import --skill|--extension <路径> | remove <id>
+      smelt pi skill list | import <目录> | remove <名字>
+      smelt pi extension list | import <路径> | remove <名字>
       smelt model list | default <provider>/<模型id> | thinking off|minimal|low|medium|high|xhigh
       smelt quota
-
+    %{plugins}
     通知（桌面弹出，并推给在手机端打开了「智能体消息」的手机）：
       smelt notify [--title <标题>] <内容>
 
@@ -115,8 +117,8 @@ agent.no_such_mcp_server:
   en: "No such MCP server: %{name} (see smelt mcp list)"
   zh-CN: "没有这个 MCP 服务器：%{name}（smelt mcp list 查看）"
 agent.no_such_plugin:
-  en: "No such plugin: %{plugin} (see smelt plugin list)"
-  zh-CN: "没有这个插件：%{plugin}（smelt plugin list 查看）"
+  en: "No such plugin: %{plugin} (see smelt pi skill list / smelt pi extension list)"
+  zh-CN: "没有这个插件：%{plugin}（smelt pi skill list、smelt pi extension list 查看）"
 agent.update_empty:
   en: "smelt agent update <id> needs at least one field"
   zh-CN: "smelt agent update <id> 需要至少一个字段"
@@ -207,6 +209,9 @@ flag.value_missing:
 help.gui:
   en: "Open the app"
   zh-CN: "启动图形界面"
+help.plugins:
+  en: "\nSmelt plugins (the app's own UI plugins, written in ~/.smelt/plugins/<id>/; no smeltd needed):\n  smelt plugin check <dir>      load and render once without the app; exits 1 on errors\n  smelt plugin status [<id>]    what the running app loaded and why a plugin failed\n"
+  zh-CN: "\nSmelt 插件（App 自己的界面插件，写在 ~/.smelt/plugins/<id>/；不需要 smeltd）：\n  smelt plugin check <目录>     不开 App 加载并渲染一次，有错退出码 1\n  smelt plugin status [<id>]    开着的 App 加载了哪些插件、失败的原因\n"
 mcp.add_usage:
   en: "smelt mcp add <preset id> (see smelt mcp presets)"
   zh-CN: "smelt mcp add <预设id>（smelt mcp presets 查看）"
@@ -246,10 +251,7 @@ notify.title_missing:
 notify.usage:
   en: "smelt notify [--title <title>] <message>"
   zh-CN: "smelt notify [--title <标题>] <内容>"
-plugin.import_usage:
-  en: "smelt plugin import --skill <directory> | --extension <path>"
-  zh-CN: "smelt plugin import --skill <目录> | --extension <路径>"
-plugin.invalid_path:
+pi.invalid_path:
   en: "Invalid path: %{path}: %{error}"
   zh-CN: "路径无效：%{path}：%{error}"
 settings.not_key_value:

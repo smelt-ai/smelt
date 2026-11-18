@@ -35,8 +35,8 @@ where
         .collect();
     match args.get(1).map(String::as_str) {
         Some(
-            "agent" | "conversation" | "automation" | "mcp" | "plugin" | "model" | "quota"
-            | "settings" | "notify" | "help" | "-h" | "--help" | "--version" | "-V",
+            "agent" | "conversation" | "automation" | "mcp" | "pi" | "model" | "quota" | "settings"
+            | "notify" | "help" | "-h" | "--help" | "--version" | "-V",
         ) => Some(run(&args)),
         _ => None,
     }
@@ -66,7 +66,7 @@ fn run(args: &[String]) -> i32 {
         Some("conversation") => conversation::run(rest),
         Some("automation") => automation::run(rest),
         Some("mcp") => pi::run_mcp(rest),
-        Some("plugin") => pi::run_plugin(rest),
+        Some("pi") => pi::run(rest),
         Some("model") => pi::run_model(rest),
         Some("quota") => respond(control::<QuotaGet>(EmptyParams::default())),
         Some("settings") => run_settings(rest),
@@ -80,14 +80,23 @@ fn run(args: &[String]) -> i32 {
 
 /// Linux 上只有运行时、没有图形界面，不列「启动图形界面」那一行。
 pub fn print_help() {
-    let gui = if cfg!(target_os = "linux") {
-        String::new()
+    // Linux 上的 `smelt` 不带界面，也就没有开 App 和 Smelt 插件这两组命令。
+    let (gui, plugins) = if cfg!(target_os = "linux") {
+        (String::new(), String::new())
     } else {
-        format!("  smelt                         {}\n", t!("help.gui"))
+        (
+            format!("  smelt                         {}\n", t!("help.gui")),
+            t!("help.plugins").into_owned(),
+        )
     };
     eprint!(
         "{}",
-        t!("help.text", version = smelt_version::VERSION, gui = gui)
+        t!(
+            "help.text",
+            version = smelt_version::VERSION,
+            gui = gui,
+            plugins = plugins
+        )
     );
 }
 
@@ -244,16 +253,17 @@ mod tests {
 
     #[test]
     fn unknown_subcommands_fail_without_touching_smeltd() {
-        for group in [
-            "agent",
-            "conversation",
-            "automation",
-            "mcp",
-            "plugin",
-            "model",
-        ] {
+        for group in ["agent", "conversation", "automation", "mcp", "pi", "model"] {
             assert_eq!(maybe_run(["smelt", group, "nope"]), Some(2), "{group}");
         }
+        assert_eq!(maybe_run(["smelt", "pi", "skill", "nope"]), Some(2));
+        assert_eq!(maybe_run(["smelt", "pi", "extension", "nope"]), Some(2));
+    }
+
+    #[test]
+    fn smelt_plugins_are_left_to_the_desktop_app() {
+        // `smelt plugin` 是 Smelt 自己的界面插件，由桌面程序处理；Pi 的技能和扩展在 `smelt pi`。
+        assert_eq!(maybe_run(["smelt", "plugin", "status"]), None);
     }
 
     #[test]

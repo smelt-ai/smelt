@@ -32,7 +32,7 @@ smelt agent delete <id>
 ```
 
 - `--plugin` / `--mcp` / `--folder` / `--link` 可以重复写多个。update 时是整份替换，写 `""` 清空；只改 prompt 时不要带它们。
-- `--plugin` 勾的是这个智能体能用的技能和扩展，和下面的 Smelt 插件无关，id 从 `smelt plugin list` 取。MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
+- `--plugin` 勾的是这个智能体能用的 Pi 技能和扩展，和下面的 Smelt 插件无关，id 从 `smelt pi skill list`、`smelt pi extension list` 取。MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
 - `--model default` 跟随 Pi 的默认模型。
 - `--memory on|off` 开关这个智能体的长期记忆（默认开）。关掉后不注入、不写入，已有记忆文件保留；正在进行的对话下一轮生效。
 - `chat` 开一场新对话，出现在桌面「对话」栏。带 `--message` 会把第一句话发出去。返回的 `session_id` 是这场对话的 id，后面的操作都用它，不要拿智能体 id 去改标题。
@@ -132,7 +132,7 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
 
 ## 写 Smelt 插件
 
-Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui-shell 脚本）写界面，GPUI 原生绘制。用户插件都在 `~/.smelt/plugins/<id>/`，在桌面「设置 → 面板插件」里重新加载、删除。CLI 不管它。
+Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui-shell 脚本）写界面，GPUI 原生绘制。用户插件都在 `~/.smelt/plugins/<id>/`。用户问「会不会写 Smelt 插件」说的是这个，不是 Pi 的技能和扩展。下面的 `smelt plugin` 命令不需要 smeltd；Linux 上的 `smelt` 不带界面，没有这组命令。
 
 ```
 ~/.smelt/plugins/com.example.hello/
@@ -140,15 +140,20 @@ Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui
   main.js           export default class Hello extends View { init(props, cx) {…} render(cx) {…} }
 ```
 
-- id 只用小写字母、数字和 `.-_`，目录名就用 id。
-- 接口以 `gpui-kit.d.ts` 为准，不要凭印象写。Smelt 加载用户插件时会把它生成到插件目录里，里面是 `gpui-kit`、`gpui-base`、`smelt-ui`、`smelt-plugin-api`、`smelt-fs` 等模块的完整声明，各插件拿到的是同一份。动手前先找一份读：`ls ~/.smelt/plugins/*/gpui-kit.d.ts`。一份都没有，就先写好最小的清单和入口，请用户重新加载一次，它就生成出来了。
+- id 只用小写字母、数字和 `.-_`，目录名就用 id。写之前看一眼 `~/.smelt/plugins/<id>/` 在不在，已有的是别的插件就换个 id。
+- 插件能加的：视图（面板）、页、命令、菜单项、布局、主题。改不了 Smelt 自己界面的画法（比如给整个窗口加背景图），用户要的东西超出这些就直说，不要硬凑。
+- 接口以 `gpui-kit.d.ts` 为准，不要凭印象写。它是 `gpui-kit`、`gpui-base`、`smelt-ui`、`smelt-plugin-api`、`smelt-fs` 等模块的完整声明，各插件拿到的是同一份：第一次 `smelt plugin check` 或 Smelt 加载后会生成到插件目录里，也可以先读别的插件目录里的（`ls ~/.smelt/plugins/*/gpui-kit.d.ts`）。文件很大，按模块名和函数名搜，不要整份读。
 - 示例：https://github.com/smelt-ai/smelt-plugin-demo（按钮、状态、系统通知、主题）。
-- 控件用 `smelt-ui` 的，样子和 Smelt 一致。`smelt-plugin-api` 里有：登记视图、命令、页面、布局、主题、菜单（`register_*`），`await next_event()` 等宿主事件，`next_command()` 接自己登记的命令，`store_query` / `store_execute` 读写插件自己的 SQLite 库，`call(machine, method, params)` 调运行时，`locale()` 取当前语言。
+- 控件用 `smelt-ui` 的，样子和 Smelt 一致。`smelt-plugin-api` 里有：登记视图、命令、页面、布局、主题、菜单（`register_*`），`await next_event()` 等宿主事件，`next_command()` 接自己登记的命令，`store_query` / `store_execute` 读写插件自己的 SQLite 库（在 `~/.smelt/plugin-data/<id>.sqlite3`），`call(machine, method, params)` 调运行时，`locale()` 取当前语言。
 - `render` 只读内存：读写文件、跑命令、联网都放到事件回调或 `cx.spawn` 里，结果存在视图上，render 只画它。要等变化就 `await next_event()`，不要定时轮询。
 - 插件是可信代码，能读写任意文件、运行任意命令，和 Smelt 本身一样。
 
 写和调试：
 
-1. 直接在 `~/.smelt/plugins/<id>/` 里写和改，这是插件本身，不是要保护的库或配置。写之前看一眼目录在不在，已有的是别的插件就换个 id。
-2. 写完、改完请用户在「设置 → 面板插件」点「重新加载」，新插件就出现在列表里，不用重启。重新加载会重挂全部插件，插件视图里的状态从头来。
-3. `console.log` 和脚本错误写进 `~/.smelt/app.log`，带 `[plugin]` 标记；加载失败的原因也会直接画在插件视图里。
+1. 直接在 `~/.smelt/plugins/<id>/` 里写和改，这就是装好的插件，不用导入。不要写在当前工作目录再让用户去「导入插件」。
+2. 每改一轮跑 `smelt plugin check ~/.smelt/plugins/<id>`：不开 App 加载并渲染一次，过了退出 0、stdout 是 JSON；没过退出 1，stderr 是带文件行列的错误。查得出语法错误、导入不存在的名字、`init` 和第一次 `render` 里的错、样式方法写错；查不出布局好不好看、点了之后的交互和异步状态。check 不过不算写完。
+3. Smelt 开着时，插件目录里文件一保存就自动重挂这个插件，不用重启、不用点重新加载（插件视图的状态从头来）。保存一两秒后跑 `smelt plugin status <id>` 确认 App 里挂上了：挂好了退出 0；没挂上或加载失败退出 1，原因在 stderr 和 JSON 的 `error` 里。`smelt plugin status` 不带 id 列全部。
+4. 运行时的 `console.log` 和脚本错误在 `~/.smelt/app.log`，带 `[plugin]` 标记；check 时直接打在 stderr。
+5. 插件运行时自己写的文件放到插件目录外面（比如 `~/.smelt/plugin-data/`），写进插件目录会触发重挂。
+6. 不要用截屏、AppleScript 之类去点 Smelt 的界面，用上面的命令。新插件在哪、怎么打开，check 和 status 过了告诉用户去看。
+7. 删掉插件就是删 `~/.smelt/plugins/<id>/`，App 开着会自动撤下；要清干净再删 `~/.smelt/plugin-data/<id>.sqlite3`。删之前先跟用户确认。

@@ -378,6 +378,18 @@ plugins:
   bad_manifest:
     en: "The plugin manifest has a problem: %{error}"
     zh-CN: "插件清单有问题：%{error}"
+  cli_app_not_running:
+    en: "No running Smelt has reported its plugins: Smelt isn't open, or it's a version from before this command. smelt plugin check <dir> checks a plugin without the app"
+    zh-CN: "没有开着的 Smelt 报过插件状态：Smelt 没开，或者开的是没有这个命令的旧版本。不开 App 也可以用 smelt plugin check <目录> 检查插件"
+  cli_no_dir:
+    en: "Can't open the plugin folder %{path}: %{error}"
+    zh-CN: "打不开插件目录 %{path}：%{error}"
+  cli_not_loaded:
+    en: "Smelt hasn't loaded a plugin with id %{id}. Check that its folder is in ~/.smelt/plugins/ and that gpui-shell.json has this id"
+    zh-CN: "Smelt 没有加载 id 为 %{id} 的插件。看看它的目录在不在 ~/.smelt/plugins/ 里、gpui-shell.json 里的 id 对不对"
+  cli_usage:
+    en: "Usage: smelt plugin check <dir> | status [<id>]"
+    zh-CN: "用法：smelt plugin check <目录> | status [<id>]"
   bad_path:
     en: "The plugin path is invalid"
     zh-CN: "插件路径不对"
@@ -424,8 +436,8 @@ plugins:
     en: "Import Plugin…"
     zh-CN: "导入插件…"
   import_hint:
-    en: "Pick a folder containing gpui-shell.json to copy into %{dir}. After editing a script, click Reload; no restart needed."
-    zh-CN: "选一个含 gpui-shell.json 的目录，复制进 %{dir}；改了脚本点「重新加载」，不用重启。"
+    en: "Pick a folder containing gpui-shell.json to copy into %{dir}. Plugins in %{dir} reload as soon as a file is saved."
+    zh-CN: "选一个含 gpui-shell.json 的目录，复制进 %{dir}。%{dir} 里的插件改完一保存就重新加载。"
   import_prompt:
     en: "Import Plugin"
     zh-CN: "导入插件"
