@@ -30,8 +30,14 @@ pub const OWNER: &str = "smelt.terminal";
 /// 终端的图标：实例视图和设置页共用。
 const ICON: &str = api::ui::IconName::Terminal.asset_path();
 
+/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
+pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
+    id: OWNER,
+    register,
+};
+
 /// 宿主启动时调一次。
-pub fn register(cx: &mut App) {
+fn register(cx: &mut App) {
     let store = Rc::new(store::TerminalStore::open());
     terminal_view::set_font_px(store.font_px());
 

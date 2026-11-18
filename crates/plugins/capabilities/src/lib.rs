@@ -57,8 +57,14 @@ struct MachineMenuContext {
 const OPEN_ON_MACHINE: api::Command<MachineMenuContext, ()> =
     api::Command::new("smelt.capabilities/open-on-machine");
 
+/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
+pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
+    id: OWNER,
+    register,
+};
+
 /// 宿主启动时调一次。
-pub fn register(cx: &mut App) {
+fn register(cx: &mut App) {
     if let Err(error) = api::register_topics(
         OWNER,
         [api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED],

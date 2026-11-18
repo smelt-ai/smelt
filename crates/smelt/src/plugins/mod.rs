@@ -75,6 +75,10 @@ struct Registry {
     panels: Vec<PluginPanel>,
     /// 已登记主题文件的插件来源，重载时整批撤下再登记。
     theme_owners: Vec<String>,
+    /// 启动时登记了的内置插件（见 `register_builtins`）。
+    builtins: Vec<&'static str>,
+    /// 启动时由插件目录里同 id 的插件接手、没登记的内置插件。
+    replaced: Vec<&'static str>,
 }
 
 struct PluginPanel {
@@ -85,6 +89,8 @@ struct PluginPanel {
     source: PluginSource,
     /// 加载失败的原因。
     error: Option<String>,
+    /// 和登记着的内置插件同 id，是启动后才装上的：没挂，重启后由它替换内置的。
+    waits_for_restart: bool,
 }
 
 /// 一个插件的视图：脚本画的内容，或者加载失败的原因。加载失败也照样登记、照样摆着，
@@ -202,6 +208,51 @@ pub(crate) struct InstalledPlugin {
     pub(crate) source: PluginSource,
     /// 加载失败的原因。
     pub(crate) error: Option<String>,
+    /// 它和哪种内置插件同 id。
+    pub(crate) takeover: Option<Takeover>,
+}
+
+/// 插件和一个内置插件同 id 时，谁在用这个 id。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Takeover {
+    /// 启动时就在，内置的没登记，由它接手。
+    Replaced,
+    /// 启动后才装上，内置的还登记着：它没挂，重启后替换内置的。
+    AfterRestart,
+}
+
+/// 登记内置插件。插件目录里有同 id 的插件时不登记内置的，由那个插件接手这个 id（它照常
+/// 挂载，见 `mount_all`）：用户装的插件盖过内置的，和盖过随 App 带的是同一条规则。
+///
+/// 启动时调。之后装上、删掉同 id 的插件都等重启才换：内置插件装上的订阅、全局卸不干净，
+/// 运行中换会两份并存或者少一块。
+pub(crate) fn register_builtins(builtins: &[api::BuiltinPlugin], cx: &mut App) {
+    let claimed: BTreeSet<String> = discover()
+        .iter()
+        .map(|plugin| plugin.manifest.id().to_string())
+        .collect();
+    register_unclaimed(builtins, &claimed, cx);
+}
+
+/// 登记 `claimed` 里没有的内置插件，有的记成被接手。
+fn register_unclaimed(builtins: &[api::BuiltinPlugin], claimed: &BTreeSet<String>, cx: &mut App) {
+    for builtin in builtins {
+        if claimed.contains(builtin.id) {
+            eprintln!(
+                "[plugins] {} 由插件目录里同 id 的插件接手，内置的不登记",
+                builtin.id
+            );
+            REGISTRY.with(|registry| registry.borrow_mut().replaced.push(builtin.id));
+            continue;
+        }
+        (builtin.register)(cx);
+        REGISTRY.with(|registry| registry.borrow_mut().builtins.push(builtin.id));
+    }
+}
+
+/// 这个 id 是登记着的内置插件。
+fn builtin_registered(id: &str) -> bool {
+    with_registry(|registry| registry.builtins.contains(&id))
 }
 
 /// 发现并挂载全部插件，每个登记成一个视图。读盘、执行脚本，只在事件里调用，不在 render 里。
@@ -222,12 +273,19 @@ pub(crate) fn reload_changed(changed: &BTreeSet<PathBuf>, window: &mut Window, c
 
 /// `changed` 是 `None` 时全部重挂。
 fn remount(changed: Option<&BTreeSet<PathBuf>>, window: &mut Window, cx: &mut App) {
-    let found = discover();
+    // 和登记着的内置插件同 id 的是启动后才装上的，这次不挂、不登记主题，等重启替换内置的。
+    let (found, waiting): (Vec<Found>, Vec<Found>) = discover()
+        .into_iter()
+        .partition(|plugin| !builtin_registered(plugin.manifest.id()));
     let mut theme_errors = register_theme_contributions(&found, cx);
     let previous = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().panels));
     // 没变的插件原样留着：根目录和 id 都对得上、目录里没有文件变过。
     let mut kept = std::collections::HashMap::new();
     for panel in previous {
+        // 没挂过，什么都不用撤；按它的 id 撤会把内置插件的登记撤掉。
+        if panel.waits_for_restart {
+            continue;
+        }
         let unchanged = changed.is_some_and(|changed| !changed.contains(&panel.root))
             && found
                 .iter()
@@ -242,7 +300,7 @@ fn remount(changed: Option<&BTreeSet<PathBuf>>, window: &mut Window, cx: &mut Ap
     }
 
     let mut runtime_slot = None;
-    let panels: Vec<PluginPanel> = found
+    let mut panels: Vec<PluginPanel> = found
         .into_iter()
         .filter_map(|plugin| {
             if let Some(panel) = kept.remove(&plugin.root) {
@@ -252,6 +310,15 @@ fn remount(changed: Option<&BTreeSet<PathBuf>>, window: &mut Window, cx: &mut Ap
             mount_one(plugin, theme_error, &mut runtime_slot, window, cx)
         })
         .collect();
+    panels.extend(waiting.into_iter().map(|plugin| PluginPanel {
+        title: plugin.manifest.name().to_string(),
+        version: plugin.manifest.version().to_string(),
+        id: plugin.manifest.id().to_string(),
+        root: plugin.root,
+        source: plugin.source,
+        error: None,
+        waits_for_restart: true,
+    }));
     // 默认 Policy 不留最后那个插件的：之后再有脚本在视图外跑，什么都不给。
     policy::set_default(Policy::new());
 
@@ -288,6 +355,7 @@ fn mount_one(
             root,
             source,
             error: theme_error,
+            waits_for_restart: false,
         });
     }
     let runtime = runtime
@@ -330,6 +398,7 @@ fn mount_one(
         root,
         source,
         error: theme_error.or_else(|| content.as_ref().err().cloned()),
+        waits_for_restart: false,
     };
     // 旧登记在挂之前已经撤下，旧视图随之放掉。
     let failed = content.is_err();
@@ -675,6 +744,13 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
                 root: panel.root.clone(),
                 source: panel.source,
                 error: panel.error.clone(),
+                takeover: if panel.waits_for_restart {
+                    Some(Takeover::AfterRestart)
+                } else if registry.replaced.contains(&panel.id.as_str()) {
+                    Some(Takeover::Replaced)
+                } else {
+                    None
+                },
             })
             .collect()
     })
@@ -683,6 +759,34 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
 #[cfg(test)]
 mod tests {
     use super::{MANIFEST_FILE, PluginManifest, repo_plugin_dir};
+
+    #[gpui::test]
+    fn a_plugin_with_the_same_id_takes_over_a_builtin(cx: &mut gpui::TestAppContext) {
+        struct Kept;
+        impl gpui::Global for Kept {}
+        struct Replaced;
+        impl gpui::Global for Replaced {}
+        let builtins = [
+            smelt_plugin_api::BuiltinPlugin {
+                id: "test.kept",
+                register: |cx| cx.set_global(Kept),
+            },
+            smelt_plugin_api::BuiltinPlugin {
+                id: "test.replaced",
+                register: |cx| cx.set_global(Replaced),
+            },
+        ];
+        let claimed = ["test.replaced".to_string()].into();
+        cx.update(|cx| {
+            super::register_unclaimed(&builtins, &claimed, cx);
+            assert!(cx.has_global::<Kept>());
+            assert!(!cx.has_global::<Replaced>());
+        });
+        assert!(super::builtin_registered("test.kept"));
+        // 被接手的 id 不算登记着：同 id 的插件照常挂，不当成等重启的。
+        assert!(!super::builtin_registered("test.replaced"));
+        super::with_registry(|registry| assert_eq!(registry.replaced, ["test.replaced"]));
+    }
 
     #[gpui::test]
     fn production_runtime_mounts_skills_button_helper(cx: &mut gpui::TestAppContext) {

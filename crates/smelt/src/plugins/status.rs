@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 
 use super::{PluginPanel, PluginSource};
@@ -48,7 +49,11 @@ pub(super) fn publish(panels: &[PluginPanel]) {
                 version: panel.version.clone(),
                 path: panel.root.clone(),
                 source: source_name(panel.source).to_string(),
-                error: panel.error.clone(),
+                error: panel.error.clone().or_else(|| {
+                    panel
+                        .waits_for_restart
+                        .then(|| t!("plugins.waits_for_restart", id = panel.id).into_owned())
+                }),
             })
             .collect(),
     };

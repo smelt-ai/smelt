@@ -47,8 +47,14 @@ fn effective(choice: Option<&'static str>) -> &'static str {
     choice.unwrap_or_else(api::system_locale)
 }
 
+/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
+pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
+    id: OWNER,
+    register,
+};
+
 /// 宿主启动时调一次，越早越好：在这之前登记的字也跟着语言变，但首帧之前换上不闪。
-pub fn register(cx: &mut App) {
+fn register(cx: &mut App) {
     let store = LanguageStore::open();
     let current = store.choice();
     api::set_locale(effective(current), cx);

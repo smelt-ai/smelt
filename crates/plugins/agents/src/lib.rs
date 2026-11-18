@@ -67,8 +67,14 @@ const VIEW_ID: &str = contract::VIEW;
 // 约定：smelt.capabilities 的 VIEW，权威定义在 crates/plugins/capabilities/src/contract.rs。
 const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
 
+/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
+pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
+    id: OWNER,
+    register,
+};
+
 /// 宿主启动时调一次。
-pub fn register(cx: &mut App) {
+fn register(cx: &mut App) {
     if let Err(error) = api::register_topics(
         OWNER,
         [

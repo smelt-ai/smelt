@@ -3,8 +3,8 @@
 #   1. 插件（crates/plugins/*）在本仓库里只依赖 smelt-plugin-api，不依赖宿主、别的插件或
 #      其它本仓库 crate；第三方库不管。
 #   2. 只有组装插件的应用 smelt 能依赖插件，能力 crate 不认识任何功能。
-#   3. 应用 smelt 依赖插件只为组装：源码里点名插件只能是调它的 `register`，不写插件的视图、
-#      命令、布局 id（插件 `OWNER` 开头的字符串）。删掉任何一个插件，宿主只少一行登记。
+#   3. 应用 smelt 依赖插件只为组装：源码里点名插件只能是取它的 `PLUGIN` 去登记，不写插件的
+#      视图、命令、布局 id（插件 `OWNER` 开头的字符串）。删掉任何一个插件，宿主只少一行登记。
 # 只读 cargo metadata 和源码，不编译。
 set -euo pipefail
 
@@ -29,7 +29,7 @@ violations="$(
   ' | sort -u
 )"
 
-# 3. 宿主源码里的插件：插件 crate 只许调 `register`，插件来源（`const OWNER`）不许出现在
+# 3. 宿主源码里的插件：插件 crate 只许取 `PLUGIN`，插件来源（`const OWNER`）不许出现在
 #    字符串里。
 host_src="$root/crates/smelt/src"
 host_violations=""
@@ -37,9 +37,9 @@ for manifest in "$root"/crates/plugins/*/Cargo.toml; do
   dir="$(dirname "$manifest")"
   crate="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1 | tr - _)"
   owner="$(grep -rhoE 'const OWNER: &str = "[^"]+"' "$dir/src" | head -1 | sed -E 's/.*"([^"]+)"/\1/' || true)"
-  uses="$(grep -rnE "(^|[^a-z0-9_])${crate}::" "$host_src" --include='*.rs' | grep -vE "(^|[^a-z0-9_])${crate}::register\(" || true)"
+  uses="$(grep -rnE "(^|[^a-z0-9_])${crate}::" "$host_src" --include='*.rs' | grep -vE "(^|[^a-z0-9_])${crate}::PLUGIN([^A-Za-z0-9_]|$)" || true)"
   if [ -n "$uses" ]; then
-    host_violations+="宿主点名了插件 ${crate} 的内部（只能调它的 register）："$'\n'"${uses}"$'\n'
+    host_violations+="宿主点名了插件 ${crate} 的内部（只能取它的 PLUGIN）："$'\n'"${uses}"$'\n'
   fi
   if [ -n "$owner" ]; then
     ids="$(grep -rnF "\"${owner}/" "$host_src" --include='*.rs' || true)"

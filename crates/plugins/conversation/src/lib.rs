@@ -35,8 +35,14 @@ pub const OWNER: &str = "smelt.conversation";
 /// 对话的图标（侧栏「对话」里每段对话也是它）。
 const ICON: &str = api::ui::IconName::MessageSquare.asset_path();
 
+/// 内置插件的入口：宿主启动时按它登记（见 [`smelt_plugin_api::BuiltinPlugin`]）。
+pub const PLUGIN: smelt_plugin_api::BuiltinPlugin = smelt_plugin_api::BuiltinPlugin {
+    id: OWNER,
+    register,
+};
+
 /// 宿主启动时调一次。
-pub fn register(cx: &mut gpui::App) {
+fn register(cx: &mut gpui::App) {
     if let Err(error) = api::register_topics(
         OWNER,
         [api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED],
