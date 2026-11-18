@@ -129,7 +129,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
 }
 
 /// 目录里的 id 是 `<类别>:<名字>`；命令行写名字或整个 id 都行。
-fn catalog_id(kind: PiPluginKind, name: &str) -> String {
+pub(crate) fn catalog_id(kind: PiPluginKind, name: &str) -> String {
     let prefix = format!("{}:", kind.as_str());
     if name.starts_with(&prefix) {
         name.to_string()
@@ -138,7 +138,7 @@ fn catalog_id(kind: PiPluginKind, name: &str) -> String {
     }
 }
 
-/// 只列这一类。`id` 就是给智能体 `--plugin` 用的那个。
+/// 只列这一类。智能体的 `--skill` / `--extension` 写 `name` 或 `id` 都行。
 fn catalog_json(config: PiConfig, kind: PiPluginKind) -> serde_json::Value {
     let items: Vec<_> = config
         .plugins

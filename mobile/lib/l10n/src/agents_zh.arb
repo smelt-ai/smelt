@@ -14,7 +14,7 @@
   "agentsEngine": "执行引擎：{engine}",
   "agentsPrompt": "长期指令",
   "agentsNoPrompt": "没有设置长期指令。",
-  "agentsPlugins": "插件",
+  "agentsPlugins": "技能和扩展",
   "agentsContext": "上下文",
   "agentsEdit": "编辑",
   "agentsMemories": "记忆",

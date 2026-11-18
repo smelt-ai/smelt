@@ -483,9 +483,6 @@ plugins:
   open_log:
     en: "Open Log"
     zh-CN: "打开日志"
-  reload:
-    en: "Reload"
-    zh-CN: "重新加载"
   runtime_failed:
     en: "Couldn't start the plugin runtime: %{error}"
     zh-CN: "插件运行时启动失败：%{error}"

@@ -160,15 +160,15 @@ delete:
     en: "Delete this agent?"
     zh-CN: "确定删除这个智能体吗？"
   message:
-    en: "This deletes the agent “%{name}” and its instructions and plugin settings. This can't be undone."
-    zh-CN: "将删除智能体「%{name}」和它的指令、插件设置。此操作不可撤销。"
+    en: "This deletes the agent “%{name}” and its instructions, skills and extensions. This can't be undone."
+    zh-CN: "将删除智能体「%{name}」和它的指令、技能和扩展设置。此操作不可撤销。"
   message_kept:
     one:
-      en: "This deletes the agent “%{name}” and its instructions and plugin settings. Its 1 existing conversation is kept. This can't be undone."
-      zh-CN: "将删除智能体「%{name}」和它的指令、插件设置。已有的 1 段对话会保留。此操作不可撤销。"
+      en: "This deletes the agent “%{name}” and its instructions, skills and extensions. Its 1 existing conversation is kept. This can't be undone."
+      zh-CN: "将删除智能体「%{name}」和它的指令、技能和扩展设置。已有的 1 段对话会保留。此操作不可撤销。"
     other:
-      en: "This deletes the agent “%{name}” and its instructions and plugin settings. Its %{count} existing conversations are kept. This can't be undone."
-      zh-CN: "将删除智能体「%{name}」和它的指令、插件设置。已有的 %{count} 段对话会保留。此操作不可撤销。"
+      en: "This deletes the agent “%{name}” and its instructions, skills and extensions. Its %{count} existing conversations are kept. This can't be undone."
+      zh-CN: "将删除智能体「%{name}」和它的指令、技能和扩展设置。已有的 %{count} 段对话会保留。此操作不可撤销。"
   title:
     en: "Delete Agent"
     zh-CN: "删除智能体"
@@ -222,8 +222,8 @@ empty:
     zh-CN: "还没有智能体"
 engine:
   tooltip:
-    en: "The runtime that runs this agent. Skills and plugins attach to this engine."
-    zh-CN: "执行这个智能体的运行时。后续 skill 和插件会挂在这个引擎上。"
+    en: "The runtime that runs this agent. Its skills and extensions attach to this engine."
+    zh-CN: "执行这个智能体的运行时。技能和扩展挂在这个引擎上。"
 error:
   agent_gone:
     en: "The agent no longer exists"
@@ -580,8 +580,8 @@ pick:
     zh-CN: "未知"
 plugins:
   empty:
-    en: "No plugins installed yet. Click “Manage” to import skills or extensions in Capabilities."
-    zh-CN: "还没有装任何插件。点「管理」去能力库导入技能或扩展。"
+    en: "No skills or extensions installed yet. Click “Manage” to import them in Capabilities."
+    zh-CN: "还没有装任何技能或扩展。点「管理」去能力库导入。"
   kind:
     extension:
       en: "Extension"
@@ -590,20 +590,20 @@ plugins:
       en: "Skill"
       zh-CN: "技能"
   manage_tooltip:
-    en: "Import or delete plugins in Capabilities"
-    zh-CN: "去能力库导入或删除插件"
+    en: "Import or delete skills and extensions in Capabilities"
+    zh-CN: "去能力库导入或删除技能和扩展"
   missing:
     en: "No longer found on disk"
     zh-CN: "磁盘上已经找不到了"
   rescan:
-    en: "Rescan Plugin Folders"
-    zh-CN: "重新扫描插件目录"
+    en: "Rescan Skill and Extension Folders"
+    zh-CN: "重新扫描技能和扩展目录"
   selected:
     en: "%{count} checked. Conversations load only the checked skills and extensions; nothing unchecked is loaded. Changes apply to new conversations."
     zh-CN: "已勾选 %{count} 个。对话只加载勾选的技能和扩展，没勾的一律不加载。改动对新开的对话生效。"
   title:
-    en: "Skills"
-    zh-CN: "技能"
+    en: "Skills & Extensions"
+    zh-CN: "技能和扩展"
 profile:
   add:
     en: "Add Custom Agent"

@@ -491,8 +491,8 @@ plugins:
     en: "Import"
     zh-CN: "导入"
   import_description:
-    en: "Copy a local skill folder (with SKILL.md) or an extension file into the global plugin folder; the original stays put."
-    zh-CN: "把本地的技能目录（含 SKILL.md）或扩展文件拷进全局插件目录，原目录不动。"
+    en: "Copy a local skill folder (with SKILL.md) or an extension file into Pi's global folders; the original stays put."
+    zh-CN: "把本地的技能目录（含 SKILL.md）或扩展文件拷进 Pi 的全局目录，原目录不动。"
   import_extension:
     en: "Import Extension"
     zh-CN: "导入扩展"
@@ -500,13 +500,13 @@ plugins:
     en: "Import Skill Folder"
     zh-CN: "导入技能目录"
   import_title:
-    en: "Choose a Plugin to Import"
-    zh-CN: "选择要导入的插件"
+    en: "Choose a Skill or Extension to Import"
+    zh-CN: "选择要导入的技能或扩展"
   installed:
     en: "Installed"
     zh-CN: "已安装"
   installed_description:
-    en: "Deleting removes the files from disk and unchecks the plugin in every agent."
+    en: "Deleting removes the files from disk and unchecks it in every agent."
     zh-CN: "删除会直接删掉磁盘上的文件，并把所有智能体里对它的勾选一起清掉。"
   kind:
     extension:
@@ -519,8 +519,8 @@ plugins:
     en: "Last Action Failed"
     zh-CN: "上一次操作失败"
   none:
-    en: "No plugins installed yet."
-    zh-CN: "还没有装任何插件。"
+    en: "No skills or extensions installed yet."
+    zh-CN: "还没有装任何技能或扩展。"
   origin:
     en: "Source: %{origin} · %{path}"
     zh-CN: "来源：%{origin} · %{path}"
@@ -540,17 +540,17 @@ plugins:
     en: "Found %{skills} skills and %{extensions} extensions."
     zh-CN: "当前扫到 %{skills} 个技能、%{extensions} 个扩展。"
   sources:
-    en: "Plugin Sources"
-    zh-CN: "插件来源"
+    en: "Sources"
+    zh-CN: "来源"
   sources_description:
     en: "Skills are markdown capability packs; extensions are TypeScript modules that register tools and commands."
     zh-CN: "技能是 markdown 能力包，扩展是注册工具/命令的 TypeScript 模块。"
   summary:
-    en: "%{usable} usable plugins installed. Check the ones an agent needs when creating it; conversations load only the checked ones."
-    zh-CN: "已装 %{usable} 个可用插件。创建智能体时勾选需要的插件，对话只加载勾选项。"
+    en: "%{usable} usable skills and extensions installed. Check the ones an agent needs when creating it; conversations load only the checked ones."
+    zh-CN: "已装 %{usable} 个可用的技能和扩展。创建智能体时勾选需要的，对话只加载勾选项。"
   summary_broken:
-    en: "%{usable} usable plugins installed, plus %{broken} broken entries (usually dead symlinks) that should be deleted."
-    zh-CN: "已装 %{usable} 个可用插件，另有 %{broken} 个失效条目（多半是断掉的软链），建议删掉。"
+    en: "%{usable} usable skills and extensions installed, plus %{broken} broken entries (usually dead symlinks) that should be deleted."
+    zh-CN: "已装 %{usable} 个可用的技能和扩展，另有 %{broken} 个失效条目（多半是断掉的软链），建议删掉。"
   unused:
     en: "No agent uses it yet."
     zh-CN: "暂时没有智能体勾选它。"
@@ -669,8 +669,8 @@ tab:
     en: "Models"
     zh-CN: "模型"
   plugins:
-    en: "Plugins"
-    zh-CN: "插件"
+    en: "Skills & Extensions"
+    zh-CN: "技能和扩展"
 title:
   en: "Capabilities"
   zh-CN: "能力库"

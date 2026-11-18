@@ -8,9 +8,10 @@ help.text:
     Agents (saved definitions, not running conversations):
       smelt agent list | get <id> | delete <id>
       smelt agent create --name <name> [options]
-      smelt agent update <id> [options]       list options replace the whole list; pass "" to clear
+      smelt agent update <id> [options]       list options replace the whole list (skills and extensions separately); pass "" to clear
           --prompt <how to work>  --engine <id>  --memory on|off
-          --plugin <id>...  --mcp <server name>...  --folder <path>...  --link <url>...
+          --skill <name>...  --extension <name>...  --mcp <server name>...
+          --folder <path>...  --link <url>...
           --model <provider>/<model id> | --model default
       smelt agent chat <id> [--message <first message>]   start a conversation from it
 
@@ -57,9 +58,10 @@ help.text:
     智能体（长期定义，不是正在跑的对话）：
       smelt agent list | get <id> | delete <id>
       smelt agent create --name <名称> [选项]
-      smelt agent update <id> [选项]          列表类选项整份替换，写 "" 清空
+      smelt agent update <id> [选项]          列表类选项整份替换（技能、扩展各算一份），写 "" 清空
           --prompt <工作方式>  --engine <id>  --memory on|off
-          --plugin <id>...  --mcp <服务器名>...  --folder <路径>...  --link <地址>...
+          --skill <名字>...  --extension <名字>...  --mcp <服务器名>...
+          --folder <路径>...  --link <地址>...
           --model <provider>/<模型id> | --model default
       smelt agent chat <id> [--message <第一句话>]   用该定义开一场对话
 
@@ -116,9 +118,12 @@ agent.model_format:
 agent.no_such_mcp_server:
   en: "No such MCP server: %{name} (see smelt mcp list)"
   zh-CN: "没有这个 MCP 服务器：%{name}（smelt mcp list 查看）"
-agent.no_such_plugin:
-  en: "No such plugin: %{plugin} (see smelt pi skill list / smelt pi extension list)"
-  zh-CN: "没有这个插件：%{plugin}（smelt pi skill list、smelt pi extension list 查看）"
+agent.no_such_extension:
+  en: "No such Pi extension: %{name} (see smelt pi extension list)"
+  zh-CN: "没有这个 Pi 扩展：%{name}（smelt pi extension list 查看）"
+agent.no_such_skill:
+  en: "No such Pi skill: %{name} (see smelt pi skill list)"
+  zh-CN: "没有这个 Pi 技能：%{name}（smelt pi skill list 查看）"
 agent.update_empty:
   en: "smelt agent update <id> needs at least one field"
   zh-CN: "smelt agent update <id> 需要至少一个字段"

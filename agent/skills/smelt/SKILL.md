@@ -23,7 +23,7 @@ description: 用 smelt CLI 操作本机 Smelt：产品智能体、侧栏对话�
 ```sh
 smelt agent list
 smelt agent get <id>
-smelt agent create --name "名称" --prompt "长期工作方式" --plugin skill:xxx --mcp figma --model anthropic/claude-opus-5-5
+smelt agent create --name "名称" --prompt "长期工作方式" --skill xxx --extension yyy --mcp figma --model anthropic/claude-opus-5-5
 smelt agent update <id> --prompt "新的工作方式"
 smelt agent update <id> --memory off
 smelt agent update <id> --model default
@@ -31,8 +31,8 @@ smelt agent chat <id> --message "第一句话"
 smelt agent delete <id>
 ```
 
-- `--plugin` / `--mcp` / `--folder` / `--link` 可以重复写多个。update 时是整份替换，写 `""` 清空；只改 prompt 时不要带它们。
-- `--plugin` 勾的是这个智能体能用的 Pi 技能和扩展，和下面的 Smelt 插件无关，id 从 `smelt pi skill list`、`smelt pi extension list` 取。MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
+- `--skill` / `--extension` / `--mcp` / `--folder` / `--link` 可以重复写多个。update 时按类整份替换（技能、扩展各算一份，只写了技能就不动扩展），写 `""` 清空那一类；只改 prompt 时不要带它们。
+- `--skill` / `--extension` 勾的是这个智能体能用的 Pi 技能和扩展，和下面的 Smelt 插件无关，名字从 `smelt pi skill list`、`smelt pi extension list` 取。MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
 - `--model default` 跟随 Pi 的默认模型。
 - `--memory on|off` 开关这个智能体的长期记忆（默认开）。关掉后不注入、不写入，已有记忆文件保留；正在进行的对话下一轮生效。
 - `chat` 开一场新对话，出现在桌面「对话」栏。带 `--message` 会把第一句话发出去。返回的 `session_id` 是这场对话的 id，后面的操作都用它，不要拿智能体 id 去改标题。
@@ -152,7 +152,7 @@ Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui
 
 1. 直接在 `~/.smelt/plugins/<id>/` 里写和改，这就是装好的插件，不用导入。不要写在当前工作目录再让用户去「导入插件」。
 2. 每改一轮跑 `smelt plugin check ~/.smelt/plugins/<id>`：不开 App 加载并渲染一次，过了退出 0、stdout 是 JSON；没过退出 1，stderr 是带文件行列的错误。查得出语法错误、导入不存在的名字、`init` 和第一次 `render` 里的错、样式方法写错；查不出布局好不好看、点了之后的交互和异步状态。check 不过不算写完。
-3. Smelt 开着时，插件目录里文件一保存就自动重挂这个插件，不用重启、不用点重新加载（插件视图的状态从头来）。保存一两秒后跑 `smelt plugin status <id>` 确认 App 里挂上了：挂好了退出 0；没挂上或加载失败退出 1，原因在 stderr 和 JSON 的 `error` 里。`smelt plugin status` 不带 id 列全部。
+3. Smelt 开着时，插件目录里文件一保存就自动重挂这个插件，不用重启（插件视图的状态从头来）。保存一两秒后跑 `smelt plugin status <id>` 确认 App 里挂上了：挂好了退出 0；没挂上或加载失败退出 1，原因在 stderr 和 JSON 的 `error` 里。`smelt plugin status` 不带 id 列全部。
 4. 运行时的 `console.log` 和脚本错误在 `~/.smelt/app.log`，带 `[plugin]` 标记；check 时直接打在 stderr。
 5. 插件运行时自己写的文件放到插件目录外面（比如 `~/.smelt/plugin-data/`），写进插件目录会触发重挂。
 6. 不要用截屏、AppleScript 之类去点 Smelt 的界面，用上面的命令。新插件在哪、怎么打开，check 和 status 过了告诉用户去看。

@@ -154,7 +154,7 @@ abstract class L10n {
   /// No description provided for @agentEditPluginsNone.
   ///
   /// In en, this message translates to:
-  /// **'No plugins on this machine.'**
+  /// **'No skills or extensions on this machine.'**
   String get agentEditPluginsNone;
 
   /// No description provided for @agentEditMissing.
@@ -184,7 +184,7 @@ abstract class L10n {
   /// No description provided for @agentEditChoicesFailed.
   ///
   /// In en, this message translates to:
-  /// **'Couldn\'t read this machine\'s capability library, so models, plugins and MCP may be incomplete: {message}'**
+  /// **'Couldn\'t read this machine\'s capability library, so models, skills, extensions and MCP may be incomplete: {message}'**
   String agentEditChoicesFailed(String message);
 
   /// No description provided for @agentEditFolders.
@@ -484,7 +484,7 @@ abstract class L10n {
   /// No description provided for @agentsPlugins.
   ///
   /// In en, this message translates to:
-  /// **'Plugins'**
+  /// **'Skills & Extensions'**
   String get agentsPlugins;
 
   /// No description provided for @agentsContext.

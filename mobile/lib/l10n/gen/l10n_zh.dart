@@ -38,7 +38,7 @@ class L10nZh extends L10n {
   }
 
   @override
-  String get agentEditPluginsNone => '这台机器上没有插件。';
+  String get agentEditPluginsNone => '这台机器上没有技能或扩展。';
 
   @override
   String get agentEditMissing => '这台机器上已经没有了';
@@ -54,7 +54,7 @@ class L10nZh extends L10n {
 
   @override
   String agentEditChoicesFailed(String message) {
-    return '这台机器的能力库没读到，模型、插件、MCP 可能列不全：$message';
+    return '这台机器的能力库没读到，模型、技能和扩展、MCP 可能列不全：$message';
   }
 
   @override
@@ -235,7 +235,7 @@ class L10nZh extends L10n {
   String get agentsNoPrompt => '没有设置长期指令。';
 
   @override
-  String get agentsPlugins => '插件';
+  String get agentsPlugins => '技能和扩展';
 
   @override
   String get agentsContext => '上下文';

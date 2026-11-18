@@ -1,5 +1,5 @@
 //! 插件携带的主题文件（smelt 主题格式，见 `docs/ui-design-language.md` 第 2 节）。只在插件
-//! 发现、导入或重新加载时读盘。
+//! 挂载、重挂时读盘。
 
 use std::path::{Path, PathBuf};
 

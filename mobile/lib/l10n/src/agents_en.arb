@@ -18,7 +18,7 @@
   "@agentsEngine": {"placeholders": {"engine": {"type": "String"}}},
   "agentsPrompt": "Standing instructions",
   "agentsNoPrompt": "No standing instructions.",
-  "agentsPlugins": "Plugins",
+  "agentsPlugins": "Skills & Extensions",
   "agentsContext": "Context",
   "agentsEdit": "Edit",
   "agentsMemories": "Memories",

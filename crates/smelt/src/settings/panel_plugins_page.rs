@@ -1,10 +1,10 @@
 //! 设置页：面板插件（gpui-shell 插件，每个是工作台布局里的一个视图）。宿主自己的页，和插件
 //! 的设置页一样是登记的视图（见 [`super::view_specs`]）。
 //!
-//! 列出眼下加载的插件，导入、删除自己装的插件，重新加载全部插件。App 自带的插件跟着
-//! smelt 更新，不能删；用户装一个同 id 的副本就能盖过它。和能力库里的「智能体插件」（Pi 的
-//! 技能与扩展）是两回事：这些插件跑在 smelt 界面里，只在本机。改磁盘放后台线程；改完在
-//! 工作台窗口里重新挂载全部插件，不用重启。
+//! 列出眼下加载的插件，导入、删除自己装的插件。App 自带的插件跟着 smelt 更新，不能删；用户
+//! 装一个同 id 的副本就能盖过它。和能力库里 Pi 的技能与扩展是两回事：这些插件跑在 smelt 界面
+//! 里，只在本机。改磁盘放后台线程；插件目录一变，工作台自己重挂改动的插件（见
+//! `plugins::watch`），这页不用管挂载。
 
 use super::*;
 use crate::plugins::{InstalledPlugin, PluginSource};
@@ -38,9 +38,10 @@ impl PanelPluginsPage {
             pending_delete: None,
             error: None,
             busy: false,
-            // 重新加载后插件的视图登记跟着变，列表随之重读。
+            // 插件重挂后重读列表。每次挂载完都发主题变了（只有主题的插件没有视图，不发视图
+            // 变了），加载失败也发，所以两个都听。
             _views: cx.subscribe(&smelt_plugin_api::events(cx), |this, _, event, cx| {
-                if matches!(event, HostEvent::ViewsChanged) {
+                if matches!(event, HostEvent::ViewsChanged | HostEvent::ThemesChanged) {
                     this.refresh(cx);
                 }
             }),
@@ -52,7 +53,7 @@ impl PanelPluginsPage {
         cx.notify();
     }
 
-    /// 选一个插件目录，复制进用户插件目录，然后重新加载。
+    /// 选一个插件目录，复制进用户插件目录；挂载由工作台盯着目录自己做。
     fn import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -74,10 +75,9 @@ impl PanelPluginsPage {
                 .background_executor()
                 .spawn(async move { crate::plugins::import(&source) })
                 .await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update(cx, |this, cx| {
                 this.finish_change(
                     result.map(|name| t!("plugins.imported", name = name).into_owned()),
-                    window,
                     cx,
                 )
             });
@@ -97,7 +97,7 @@ impl PanelPluginsPage {
         cx.notify();
     }
 
-    /// 把插件挪进回收目录，然后重新加载。
+    /// 把插件挪进回收目录；撤下由工作台盯着目录自己做。
     fn confirm_delete(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.pending_delete = None;
         let Some(plugin) = self
@@ -119,10 +119,9 @@ impl PanelPluginsPage {
                 .background_executor()
                 .spawn(async move { crate::plugins::uninstall(&root) })
                 .await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update(cx, |this, cx| {
                 this.finish_change(
                     result.map(|()| t!("plugins.deleted", name = plugin.name).into_owned()),
-                    window,
                     cx,
                 )
             });
@@ -143,18 +142,6 @@ impl PanelPluginsPage {
         cx.open_with_system(&dir);
     }
 
-    /// 重新读盘、重新挂载全部插件。插件作者改完脚本点它，不用重启。这页摆在工作台窗口里，
-    /// `window` 就是挂载要用的那个；推到这一轮更新之后做，挂载时不占着这页。
-    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let page = cx.weak_entity();
-        window.defer(cx, move |window, cx| {
-            // 视图登记变了由工作台自己跟（重装布局、对路由），见 `subscribe_host_events`。
-            crate::plugins::mount_all(window, cx);
-            // 加载出错不一定改登记，列表在这里再读一次。
-            let _ = page.update(cx, |page, cx| page.refresh(cx));
-        });
-    }
-
     /// 返回能不能开始：同一时刻只做一件。
     fn begin_change(&mut self, cx: &mut Context<Self>) -> bool {
         if self.busy {
@@ -166,24 +153,16 @@ impl PanelPluginsPage {
         true
     }
 
-    fn finish_change(
-        &mut self,
-        result: Result<String, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_change(&mut self, result: Result<String, String>, cx: &mut Context<Self>) {
         self.busy = false;
         match result {
-            Ok(message) => {
-                crate::status_item::notify_success(message);
-                self.reload(window, cx);
-            }
+            Ok(message) => crate::status_item::notify_success(message),
             Err(error) => self.error = Some(error),
         }
         cx.notify();
     }
 
-    /// 页面的主体：已装的插件。导入、打开目录、重新加载是对这张列表的操作，放在它的第一格。
+    /// 页面的主体：已装的插件。导入、打开目录是对这张列表的操作，放在它的第一格。
     fn list_section(&self, cx: &Context<Self>) -> Section {
         let title = match self.plugins.len() {
             0 => t!("plugins.installed").into_owned(),
@@ -207,7 +186,7 @@ impl PanelPluginsPage {
         }))
     }
 
-    /// 列表第一格：左边说明导入会做什么，右边三个操作，导入是唯一的主按钮；下面一句警告。
+    /// 列表第一格：左边说明导入会做什么，右边两个操作，导入是主按钮；下面一句警告。
     fn toolbar_cell(&self, cx: &Context<Self>) -> Div {
         let user_dir = self
             .user_dir
@@ -217,14 +196,6 @@ impl PanelPluginsPage {
         let busy = self.busy;
         let row = Row::new(t!("plugins.import"))
             .description(t!("plugins.import_hint", dir = user_dir))
-            .child(
-                Button::new("reload-panel-plugins")
-                    .quiet()
-                    .small()
-                    .label(t!("plugins.reload"))
-                    .disabled(busy)
-                    .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
-            )
             .child(
                 Button::new("open-panel-plugin-dir")
                     .quiet()

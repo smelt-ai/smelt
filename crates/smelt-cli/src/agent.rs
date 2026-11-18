@@ -8,20 +8,23 @@ use smelt_model::control_api::{
     AgentDefinitionList, AgentDefinitionUpdateCall, AgentDefinitionUpdateParams,
     ConversationCreateForAgent, PiConfigGet,
 };
+use smelt_model::pi_plugin_catalog::PiPluginKind;
 use smelt_model::pi_service::PiConfig;
 use smelt_runtime_client::protocol::control::EmptyParams;
 
 pub(crate) fn run(args: &[String]) -> i32 {
     let rest = args.get(1..).unwrap_or_default();
     match args.first().map(String::as_str) {
-        Some("list") => respond(
-            control::<AgentDefinitionList>(EmptyParams::default())
-                .map(|result| serde_json::json!({ "agents": result.agents })),
-        ),
+        Some("list") => respond(control::<AgentDefinitionList>(EmptyParams::default()).map(
+            |result| {
+                let agents: Vec<_> = result.agents.into_iter().map(to_json).collect();
+                serde_json::json!({ "agents": agents })
+            },
+        )),
         Some("get") => match id_arg(rest) {
             Some(id) => respond(
                 control::<AgentDefinitionGet>(AgentDefinitionIdParams { id: id.to_string() })
-                    .map(|result| result.agent),
+                    .map(|result| to_json(result.agent)),
             ),
             None => usage("smelt agent get <id>"),
         },
@@ -66,13 +69,25 @@ fn create(flags: Flags) -> Result<serde_json::Value, String> {
 }
 
 fn update(id: &str, flags: Flags) -> Result<serde_json::Value, String> {
-    let patch = patch_input(flags)?;
+    // 只对这次写了的查有没有；照抄过来的另一类是原先就绑着的，不因为目录里没了就改不动。
+    let given: Vec<String> = [
+        (PiPluginKind::Skill, &flags.skills),
+        (PiPluginKind::Extension, &flags.extensions),
+    ]
+    .into_iter()
+    .flat_map(|(kind, names)| catalog_ids(kind, names.as_deref().unwrap_or_default()))
+    .collect();
+    // 只写了一类时，另一类照旧，得先知道现在绑着哪些。
+    let patch = patch_input(flags, || {
+        control::<AgentDefinitionGet>(AgentDefinitionIdParams { id: id.to_string() })
+            .map(|result| result.agent.plugins)
+    })?;
     let model = match (&patch.model_provider, &patch.model_id) {
         (Some(provider), Some(model)) if !provider.is_empty() => Some((provider, model)),
         _ => None,
     };
     check_bindings(
-        patch.plugins.as_deref().unwrap_or_default(),
+        &given,
         patch.mcp_servers.as_deref().unwrap_or_default(),
         model,
     )?;
@@ -83,15 +98,91 @@ fn update(id: &str, flags: Flags) -> Result<serde_json::Value, String> {
     .map(|result| to_json(result.agent))
 }
 
+/// 智能体定义转 JSON。绑着的 Pi 技能和扩展在定义里是一份 `plugins`（`<类别>:<名字>`），
+/// 输出拆成 `skills` 和 `extensions` 两份名字，和 `--skill` / `--extension` 对得上。
 fn to_json(value: impl serde::Serialize) -> serde_json::Value {
-    serde_json::to_value(value).unwrap_or_default()
+    let mut value = serde_json::to_value(value).unwrap_or_default();
+    if let Some(object) = value.as_object_mut()
+        && let Some(serde_json::Value::Array(ids)) = object.remove("plugins")
+    {
+        let ids: Vec<String> = ids
+            .into_iter()
+            .filter_map(|id| id.as_str().map(str::to_string))
+            .collect();
+        for kind in [PiPluginKind::Skill, PiPluginKind::Extension] {
+            let prefix = format!("{}:", kind.as_str());
+            let names: Vec<&str> = ids
+                .iter()
+                .filter_map(|id| id.strip_prefix(&prefix))
+                .collect();
+            object.insert(kind_key(kind).to_string(), names.into());
+        }
+    }
+    value
+}
+
+fn kind_key(kind: PiPluginKind) -> &'static str {
+    match kind {
+        PiPluginKind::Skill => "skills",
+        PiPluginKind::Extension => "extensions",
+    }
+}
+
+fn kind_of(id: &str) -> Option<PiPluginKind> {
+    [PiPluginKind::Skill, PiPluginKind::Extension]
+        .into_iter()
+        .find(|kind| id.starts_with(&format!("{}:", kind.as_str())))
+}
+
+/// `--skill` / `--extension` 写的名字转成目录 id；写 `""` 是清空那一类，不留空项。
+fn catalog_ids(kind: PiPluginKind, names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(|name| crate::pi::catalog_id(kind, name))
+        .collect()
+}
+
+/// 改后绑着的技能和扩展。两类各自整份替换：写了哪类换哪类，没写的那类从 `current` 照抄；
+/// 都没写是 `None`（不动），这时不去读 `current`。
+fn merged_bindings(
+    skills: Option<&[String]>,
+    extensions: Option<&[String]>,
+    current: impl FnOnce() -> Result<Vec<String>, String>,
+) -> Result<Option<Vec<String>>, String> {
+    let given = [
+        (PiPluginKind::Skill, skills),
+        (PiPluginKind::Extension, extensions),
+    ];
+    if given.iter().all(|(_, names)| names.is_none()) {
+        return Ok(None);
+    }
+    let current = if given.iter().all(|(_, names)| names.is_some()) {
+        Vec::new()
+    } else {
+        current()?
+    };
+    let mut ids = Vec::new();
+    for (kind, names) in given {
+        match names {
+            Some(names) => ids.extend(catalog_ids(kind, names)),
+            None => ids.extend(
+                current
+                    .iter()
+                    .filter(|id| kind_of(id) == Some(kind))
+                    .cloned(),
+            ),
+        }
+    }
+    Ok(Some(ids))
 }
 
 fn model_of(input: &AgentDefinitionCreate) -> Option<(&String, &String)> {
     input.model_provider.as_ref().zip(input.model_id.as_ref())
 }
 
-/// 绑定的插件、MCP 服务器、模型必须是运行时那台机器上有的。写错的 id 运行时照存，
+/// 绑定的技能和扩展、MCP 服务器、模型必须是运行时那台机器上有的。写错的 id 运行时照存，
 /// 对话里就悄悄少了这项能力，所以在这里先对一遍。都没写时不去问运行时。
 fn check_bindings(
     plugins: &[String],
@@ -118,7 +209,12 @@ fn check_bindings_against(
         .filter(|id| !id.is_empty())
     {
         if !config.plugins.iter().any(|known| known.id == plugin) {
-            return Err(t!("agent.no_such_plugin", plugin = plugin).into_owned());
+            let (key, name) = match plugin.split_once(':') {
+                Some(("extension", name)) => ("agent.no_such_extension", name),
+                Some((_, name)) => ("agent.no_such_skill", name),
+                None => ("agent.no_such_skill", plugin),
+            };
+            return Err(t!(key, name = name).into_owned());
         }
     }
     if mcp_servers.iter().any(|name| !name.trim().is_empty()) {
@@ -193,7 +289,10 @@ fn create_input(flags: Flags) -> Result<AgentDefinitionCreate, String> {
         name,
         prompt: flags.prompt.unwrap_or_default(),
         engine_kind_id: flags.engine_kind_id,
-        plugins: flags.plugins.unwrap_or_default(),
+        plugins: merged_bindings(flags.skills.as_deref(), flags.extensions.as_deref(), || {
+            Ok(Vec::new())
+        })?
+        .unwrap_or_default(),
         mcp_servers: flags.mcp_servers.unwrap_or_default(),
         context_folders: flags.folders.unwrap_or_default(),
         context_links: flags.links.unwrap_or_default(),
@@ -203,7 +302,11 @@ fn create_input(flags: Flags) -> Result<AgentDefinitionCreate, String> {
     })
 }
 
-fn patch_input(flags: Flags) -> Result<AgentDefinitionPatch, String> {
+/// `current` 读这个智能体现在绑着的技能和扩展，只写了其中一类时才调。
+fn patch_input(
+    flags: Flags,
+    current: impl FnOnce() -> Result<Vec<String>, String>,
+) -> Result<AgentDefinitionPatch, String> {
     if flags.id.is_some() {
         return Err(t!("agent.update_id").into_owned());
     }
@@ -212,7 +315,11 @@ fn patch_input(flags: Flags) -> Result<AgentDefinitionPatch, String> {
         name: flags.name,
         prompt: flags.prompt,
         engine_kind_id: flags.engine_kind_id,
-        plugins: flags.plugins,
+        plugins: merged_bindings(
+            flags.skills.as_deref(),
+            flags.extensions.as_deref(),
+            current,
+        )?,
         mcp_servers: flags.mcp_servers,
         context_folders: flags.folders,
         context_links: flags.links,
@@ -232,8 +339,9 @@ struct Flags {
     name: Option<String>,
     prompt: Option<String>,
     engine_kind_id: Option<String>,
-    /// 列表类选项写了就是整份替换（`None` 是没写）。
-    plugins: Option<Vec<String>>,
+    /// 列表类选项写了就是整份替换（`None` 是没写）。技能和扩展各算一份。
+    skills: Option<Vec<String>>,
+    extensions: Option<Vec<String>>,
     mcp_servers: Option<Vec<String>>,
     folders: Option<Vec<String>>,
     links: Option<Vec<String>>,
@@ -260,7 +368,8 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--prompt" => flags.prompt = Some(value),
             "--engine" => flags.engine_kind_id = Some(value),
             "--memory" => flags.memory_enabled = Some(on_off(arg, &value)?),
-            "--plugin" => push(&mut flags.plugins, value),
+            "--skill" => push(&mut flags.skills, value),
+            "--extension" => push(&mut flags.extensions, value),
             "--mcp" => push(&mut flags.mcp_servers, value),
             "--folder" => push(&mut flags.folders, value),
             "--link" => push(&mut flags.links, value),
@@ -293,7 +402,7 @@ mod tests {
 
     #[test]
     fn memory_flag_turns_agent_memory_on_or_off() {
-        let patch = |list: &[&str]| patch_input(parse_flags(&args(list))?);
+        let patch = |list: &[&str]| patch_input(parse_flags(&args(list))?, no_current);
         let create = |list: &[&str]| create_input(parse_flags(&args(list))?);
         assert_eq!(
             patch(&["--memory", "off"]).unwrap().memory_enabled,
@@ -313,12 +422,44 @@ mod tests {
         assert!(patch(&["--memory", "maybe"]).is_err());
     }
 
+    /// 两类都写了或都没写时用不到现在绑着的。
+    fn no_current() -> Result<Vec<String>, String> {
+        panic!("不该去读现在绑着的技能和扩展")
+    }
+
+    #[test]
+    fn writing_one_kind_keeps_the_other() {
+        let current = || Ok(vec!["skill:old".to_string(), "extension:keep".to_string()]);
+        let flags = parse_flags(&args(&["--skill", "new"])).unwrap();
+        assert_eq!(
+            patch_input(flags, current).unwrap().plugins.unwrap(),
+            ["skill:new", "extension:keep"]
+        );
+        let cleared = parse_flags(&args(&["--extension", ""])).unwrap();
+        assert_eq!(
+            patch_input(cleared, current).unwrap().plugins.unwrap(),
+            ["skill:old"]
+        );
+        let untouched = parse_flags(&args(&["--prompt", "x"])).unwrap();
+        assert_eq!(patch_input(untouched, no_current).unwrap().plugins, None);
+    }
+
+    #[test]
+    fn output_splits_bindings_into_skills_and_extensions() {
+        let json = to_json(serde_json::json!({
+            "id": "a",
+            "plugins": ["skill:writer", "extension:git", "skill:review"],
+        }));
+        assert_eq!(json["skills"], serde_json::json!(["writer", "review"]));
+        assert_eq!(json["extensions"], serde_json::json!(["git"]));
+        assert!(json.get("plugins").is_none());
+    }
+
     #[test]
     fn create_requires_a_name() {
         assert!(create_input(parse_flags(&[]).unwrap()).is_err());
         let created =
-            create_input(parse_flags(&args(&["--name", "写作", "--plugin", "skill:a"])).unwrap())
-                .unwrap();
+            create_input(parse_flags(&args(&["--name", "写作", "--skill", "a"])).unwrap()).unwrap();
         assert_eq!(created.name, "写作");
         assert_eq!(created.plugins, ["skill:a"]);
     }
@@ -327,14 +468,29 @@ mod tests {
     fn update_treats_repeated_list_flags_as_a_replace() {
         let patch = patch_input(
             parse_flags(&args(&[
-                "--plugin", "skill:a", "--plugin", "skill:b", "--mcp", "figma",
+                "--skill",
+                "a",
+                "--skill",
+                "skill:b",
+                "--extension",
+                "e",
+                "--mcp",
+                "figma",
             ]))
             .unwrap(),
+            no_current,
         )
         .unwrap();
         assert_eq!(
             patch.plugins.as_deref(),
-            Some([String::from("skill:a"), String::from("skill:b")].as_slice())
+            Some(
+                [
+                    String::from("skill:a"),
+                    String::from("skill:b"),
+                    String::from("extension:e")
+                ]
+                .as_slice()
+            )
         );
         assert_eq!(
             patch.mcp_servers.as_deref(),
@@ -342,7 +498,7 @@ mod tests {
         );
         assert_eq!(patch.context_folders, None, "没写的列表不动");
 
-        let cleared = patch_input(parse_flags(&args(&["--mcp", ""])).unwrap()).unwrap();
+        let cleared = patch_input(parse_flags(&args(&["--mcp", ""])).unwrap(), no_current).unwrap();
         assert_eq!(
             cleared.mcp_servers.as_deref(),
             Some([String::new()].as_slice()),
@@ -352,13 +508,19 @@ mod tests {
 
     #[test]
     fn model_flag_picks_a_model_or_follows_the_default() {
-        let patch =
-            patch_input(parse_flags(&args(&["--model", "openrouter/anthropic/claude"])).unwrap())
-                .unwrap();
+        let patch = patch_input(
+            parse_flags(&args(&["--model", "openrouter/anthropic/claude"])).unwrap(),
+            no_current,
+        )
+        .unwrap();
         assert_eq!(patch.model_provider.as_deref(), Some("openrouter"));
         assert_eq!(patch.model_id.as_deref(), Some("anthropic/claude"));
 
-        let reset = patch_input(parse_flags(&args(&["--model", "default"])).unwrap()).unwrap();
+        let reset = patch_input(
+            parse_flags(&args(&["--model", "default"])).unwrap(),
+            no_current,
+        )
+        .unwrap();
         assert_eq!(reset.model_provider.as_deref(), Some(""));
         assert_eq!(reset.model_id.as_deref(), Some(""));
 
