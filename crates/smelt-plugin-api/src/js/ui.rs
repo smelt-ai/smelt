@@ -26,6 +26,8 @@ mod field;
 #[deny(dead_code)]
 mod menu;
 #[deny(dead_code)]
+mod sortable;
+#[deny(dead_code)]
 mod view;
 #[deny(dead_code)]
 mod window_bar;
@@ -53,6 +55,7 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     badge::register(&mut registry)?;
     view::register(&mut registry)?;
     window_bar::register(&mut registry)?;
+    sortable::register(&mut registry)?;
     registry.freeze()
 }
 

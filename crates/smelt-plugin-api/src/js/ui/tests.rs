@@ -111,6 +111,7 @@ fn components_hold_only_smelt_controls() {
             "SmeltBadge",
             "SmeltViewInstance",
             "SmeltWindowBar",
+            "SmeltSortableList",
         ]
     );
     let states = components
@@ -492,5 +493,87 @@ export default class App extends View {
     assert!(
         tree(&mut context, &view).contains("clicks: 2"),
         "按钮被顶栏推下去了"
+    );
+}
+
+/// 按住一行拖到 `to_y` 松手。先挪一点让拖动开始，再挪到落点，落点才算上。
+fn drag(context: &mut VisualTestContext, from_y: f32, to_y: f32) {
+    use gpui::MouseButton;
+
+    let (from, to) = (point(px(10.), px(from_y)), point(px(10.), px(to_y)));
+    context.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    draw(context);
+    context.simulate_mouse_move(
+        point(px(10.), px(from_y + 4.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    draw(context);
+    context.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+    draw(context);
+    context.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+    draw(context);
+}
+
+/// 拖一行松在别的行上就回调挪到哪；松回原处、松在列表外不回调。
+#[gpui::test]
+fn sortable_list_reports_where_a_row_moved(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltSortableList } from "smelt-ui";
+export default class App extends View {
+  init() { this.items = ["a", "b", "c"]; this.calls = []; }
+  render() {
+    let rejected = 0;
+    for (const bad of [() => SmeltSortableList.new(""), () => SmeltSortableList.new("l").on_reorder(1)]) {
+      try { bad(); } catch (_) { rejected++; }
+    }
+    return div().size_full().flex().flex_col()
+      .child(SmeltSortableList.new("list").w(200)
+        .on_reorder((from, to, cx) => {
+          const [item] = this.items.splice(from, 1);
+          this.items.splice(to, 0, item);
+          this.calls.push(`${from}>${to}`);
+          cx.notify();
+        })
+        .children(this.items.map((item) => div().h(30).child(`row ${item}`))))
+      .child(`rejected: ${rejected}; order: ${this.items.join(",")}; calls: ${this.calls.join(" ")}`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    let state = |context: &mut VisualTestContext| {
+        let tree = tree(context, &view);
+        let start = tree.find("rejected:").expect("状态行");
+        // 调试树里的文字带引号。
+        let line = tree[start..].lines().next().unwrap();
+        line.trim_end_matches('"').to_string()
+    };
+    assert!(state(&mut context).starts_with("rejected: 2; order: a,b,c; calls: "));
+
+    // 第一行拖到第三行的下半：挪到最后。
+    drag(&mut context, 15., 80.);
+    assert!(
+        state(&mut context).contains("order: b,c,a; calls: 0>2"),
+        "{}",
+        state(&mut context)
+    );
+
+    // 最后一行拖到第一行的上半：挪到最前。
+    drag(&mut context, 75., 5.);
+    assert!(
+        state(&mut context).contains("order: a,b,c; calls: 0>2 2>0"),
+        "{}",
+        state(&mut context)
+    );
+
+    // 松回原处、松在列表外：不回调。
+    drag(&mut context, 45., 50.);
+    drag(&mut context, 45., 300.);
+    assert!(
+        state(&mut context).ends_with("calls: 0>2 2>0"),
+        "{}",
+        state(&mut context)
     );
 }
