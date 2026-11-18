@@ -768,56 +768,6 @@ retry:
   waiting:
     en: "Model request failed; retry %{attempt} in %{seconds}s"
     zh-CN: "模型请求出错，%{seconds} 秒后第 %{attempt} 次重试"
-run:
-  edit:
-    one:
-      en: "Edited 1 file"
-      zh-CN: "修改了 1 个文件"
-    other:
-      en: "Edited %{count} files"
-      zh-CN: "修改了 %{count} 个文件"
-  execute:
-    one:
-      en: "Ran 1 command"
-      zh-CN: "运行了 1 条命令"
-    other:
-      en: "Ran %{count} commands"
-      zh-CN: "运行了 %{count} 条命令"
-  fetch:
-    one:
-      en: "Opened 1 page"
-      zh-CN: "打开了 1 个页面"
-    other:
-      en: "Opened %{count} pages"
-      zh-CN: "打开了 %{count} 个页面"
-  image:
-    one:
-      en: "Processed 1 image"
-      zh-CN: "处理了 1 张图"
-    other:
-      en: "Processed %{count} images"
-      zh-CN: "处理了 %{count} 张图"
-  other:
-    one:
-      en: "1 other tool call"
-      zh-CN: "其他工具 1 次"
-    other:
-      en: "%{count} other tool calls"
-      zh-CN: "其他工具 %{count} 次"
-  read:
-    one:
-      en: "Read 1 file"
-      zh-CN: "读取了 1 个文件"
-    other:
-      en: "Read %{count} files"
-      zh-CN: "读取了 %{count} 个文件"
-  search:
-    one:
-      en: "Searched once"
-      zh-CN: "搜索了 1 次"
-    other:
-      en: "Searched %{count} times"
-      zh-CN: "搜索了 %{count} 次"
 scroll:
   latest:
     en: "Jump to Latest"

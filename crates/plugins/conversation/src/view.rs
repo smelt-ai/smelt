@@ -1665,9 +1665,6 @@ pub struct ConversationView {
     entry_enters: std::collections::HashMap<usize, std::time::Instant>,
     /// 上次结算时 entries 的长度。只有超出这条线的才算新条目。
     entries_settled_len: usize,
-    /// 同类紧凑工具合并行是否撑开（key = 该段第一条 entry 的索引）。
-    /// 分组本身仍内联展开；单条工具的输出走 popover，不占时间线高度。
-    expanded_tool_runs: std::collections::HashSet<usize>,
     /// 模型状态：当前名 + 可切换的候选（协议给什么显示什么）；None = agent
     /// 没上报过，UI 就不显示模型胶囊，不拿适配器包名冒充。
     model: Option<ModelState>,
@@ -1995,7 +1992,6 @@ impl ConversationView {
             thought_reveals: std::collections::HashMap::new(),
             entry_enters: std::collections::HashMap::new(),
             entries_settled_len: 0,
-            expanded_tool_runs: std::collections::HashSet::new(),
             model: None,
             config_options: Vec::new(),
             pending_config_values: Vec::new(),
@@ -3013,11 +3009,6 @@ impl ConversationView {
             .expanded_edit_chips
             .drain()
             .map(|(entry_ix, path)| (entry_ix + page_len, path))
-            .collect();
-        self.expanded_tool_runs = self
-            .expanded_tool_runs
-            .drain()
-            .map(|entry_ix| entry_ix + page_len)
             .collect();
         self.revealed_prompt = self.revealed_prompt.map(|entry_ix| entry_ix + page_len);
         if let Some(enter) = self.user_enter.as_mut() {
@@ -4852,19 +4843,6 @@ impl ConversationView {
         cx.notify();
     }
 
-    fn tool_run_is_open(&self, start: usize) -> bool {
-        self.expanded_tool_runs.contains(&start)
-    }
-
-    fn toggle_tool_run(&mut self, start: usize, cx: &mut Context<Self>) {
-        if !self.expanded_tool_runs.remove(&start) {
-            self.expanded_tool_runs.insert(start);
-        }
-        self.list_state
-            .remeasure_items(start..start.saturating_add(1));
-        cx.notify();
-    }
-
     /// 选择题点选：动作发给 smeltd（真正的选中/提交状态机在服务端跑，见
     /// `smelt_plugin_api::model::acp_session::choose_elicitation`），下一份快照回来就带着
     /// 更新后的 `chosen`——本地 socket 往返够快，不用做乐观本地更新，免得
@@ -6125,130 +6103,6 @@ fn now_tool_label(kind: ToolKind, title: &str) -> String {
 
 fn is_empty_assistant_body(entry: &AcpEntry) -> bool {
     matches!(entry, AcpEntry::Assistant { text, thought: false } if text.trim().is_empty())
-}
-
-fn previous_visible_process_index(
-    entries: &[AcpEntry],
-    index: usize,
-    first: usize,
-) -> Option<usize> {
-    (first..index)
-        .rev()
-        .find(|ix| !is_empty_assistant_body(&entries[*ix]))
-}
-
-fn next_visible_process_index(entries: &[AcpEntry], index: usize, end: usize) -> Option<usize> {
-    (index + 1..end).find(|ix| !is_empty_assistant_body(&entries[*ix]))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CompactToolRun {
-    kind: ToolKind,
-    start: usize,
-    indices: Vec<usize>,
-}
-
-fn groupable_process_tool_kind(
-    entry: &AcpEntry,
-    pending_tool_id: Option<&str>,
-) -> Option<ToolKind> {
-    match entry {
-        AcpEntry::ToolCall {
-            id,
-            kind,
-            status,
-            title,
-            children,
-            peer: None,
-            ..
-        } if *kind != ToolKind::Collaborate
-            && !is_task_completion_tool_title(title)
-            && children.is_empty() =>
-        {
-            let pending = pending_tool_id == Some(id.as_str());
-            // 只合并成功的同类工具。失败单独占一行，避免被收进「读取了 N 个文件」里看不见。
-            (!pending && matches!(status, ToolCallStatus::Completed)).then_some(*kind)
-        }
-        _ => None,
-    }
-}
-
-/// 展开的过程组里，连续同一种已完成工具收成 Grok 式「搜索了 3 次」。
-/// 思考和对用户说的中间正文都会打断合并，避免把思考夹进合成的工具段里。
-/// 单次调用仍走原来的紧凑行，不额外套一层。
-fn consecutive_compact_tool_run(
-    entries: &[AcpEntry],
-    index: usize,
-    first: usize,
-    end: usize,
-    pending_tool_id: Option<&str>,
-) -> Option<CompactToolRun> {
-    if index < first || index >= end || index >= entries.len() {
-        return None;
-    }
-    let kind = groupable_process_tool_kind(&entries[index], pending_tool_id)?;
-    let mut start = index;
-    while let Some(prev) = previous_visible_process_index(entries, start, first) {
-        if groupable_process_tool_kind(&entries[prev], pending_tool_id) != Some(kind) {
-            break;
-        }
-        start = prev;
-    }
-    let mut indices = vec![start];
-    let mut cursor = start;
-    while let Some(next) = next_visible_process_index(entries, cursor, end) {
-        if groupable_process_tool_kind(&entries[next], pending_tool_id) != Some(kind) {
-            break;
-        }
-        indices.push(next);
-        cursor = next;
-    }
-    (indices.len() >= 2).then_some(CompactToolRun {
-        kind,
-        start,
-        indices,
-    })
-}
-
-fn compact_tool_run_label(kind: ToolKind, count: usize) -> String {
-    match kind {
-        ToolKind::Search => crate::plural(
-            count,
-            t!("run.search.one"),
-            t!("run.search.other", count = count),
-        ),
-        ToolKind::Read => crate::plural(
-            count,
-            t!("run.read.one"),
-            t!("run.read.other", count = count),
-        ),
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => crate::plural(
-            count,
-            t!("run.edit.one"),
-            t!("run.edit.other", count = count),
-        ),
-        ToolKind::Execute => crate::plural(
-            count,
-            t!("run.execute.one"),
-            t!("run.execute.other", count = count),
-        ),
-        ToolKind::Fetch => crate::plural(
-            count,
-            t!("run.fetch.one"),
-            t!("run.fetch.other", count = count),
-        ),
-        ToolKind::Image => crate::plural(
-            count,
-            t!("run.image.one"),
-            t!("run.image.other", count = count),
-        ),
-        // 认不出名字的工具不露英文类别名，统称其他工具。
-        _ => crate::plural(
-            count,
-            t!("run.other.one"),
-            t!("run.other.other", count = count),
-        ),
-    }
 }
 
 /// 时间线上单条工具的动词句，对齐 Grok「Opened page / Searched web for」。

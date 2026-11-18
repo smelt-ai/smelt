@@ -381,41 +381,6 @@ impl ConversationView {
                     this.ensure_diff_cache_for_entry(i);
                 }
                 this.ensure_tool_image_cache_for_entry(i);
-                let tool_run = process_expanded
-                    .then_some(process_group)
-                    .flatten()
-                    .and_then(|group| {
-                        consecutive_compact_tool_run(
-                            &this.entries,
-                            i,
-                            group.first,
-                            group.end,
-                            active_permission_tool_id.as_deref(),
-                        )
-                    });
-                if let Some(run) = tool_run.as_ref()
-                    && i != run.start
-                    && let Some(AcpEntry::ToolCall {
-                        id,
-                        status,
-                        output,
-                        children,
-                        ..
-                    }) = this.entries.get(i)
-                {
-                    let has_pending_permission =
-                        active_permission_tool_id.as_deref() == Some(id.as_str());
-                    let card_expanded = this.tool_card_is_expanded(
-                        id,
-                        tool_output_has_content(output) || !children.is_empty(),
-                        tool_has_live_children(children),
-                    );
-                    if !card_expanded
-                        && tool_uses_compact_process_row(*status, has_pending_permission)
-                    {
-                        return this.tail_only_row(i, &conversation_layout, animate_ambient, cx);
-                    }
-                }
                 // 段首行要补 diff 缓存（可变借用），得在借出 `entry` 之前画好。
                 let segment_head = process_group
                     .filter(|group| process_expanded && group.first == i)
@@ -764,14 +729,9 @@ impl ConversationView {
 
                         // 已完成工具在展开的过程组里占绝大多数。提前返回紧凑行，
                         // 只保留必要的 diff 统计，不构建随后会被丢弃的完整卡片。
-                        // 连续同类工具由外层收成「搜索了 N 次」，起点占位给合并行。
                         // 发给别的 Pi 对话的一条不是工具卡片，是居中的事件行。
                         if let Some(send) = peer.as_ref() {
                             this.render_peer_send(i, &owner, send, *status, muted, cx)
-                        } else if compact_in_process
-                            && tool_run.as_ref().is_some_and(|run| run.start == i)
-                        {
-                            div().w_full().into_any_element()
                         } else if compact_in_process {
                             let can_expand = has_expandable_content;
                             let headline = compact_tool_headline(*kind, title);
@@ -806,6 +766,7 @@ impl ConversationView {
                                 )
                                 .child(
                                     div()
+                                        .debug_selector(move || format!("ACP_TOOL_LABEL_{i}"))
                                         .flex_1()
                                         .min_w_0()
                                         .overflow_hidden()
@@ -1196,36 +1157,6 @@ impl ConversationView {
                         muted,
                     ),
                 };
-                if let Some(run) = tool_run.as_ref()
-                    && run.start == i
-                {
-                    let start_has_card = match this.entries.get(i) {
-                        Some(AcpEntry::ToolCall {
-                            id,
-                            status,
-                            output,
-                            children,
-                            ..
-                        }) => {
-                            let pending =
-                                active_permission_tool_id.as_deref() == Some(id.as_str());
-                            this.tool_card_is_expanded(
-                                id,
-                                tool_output_has_content(output) || !children.is_empty(),
-                                tool_has_live_children(children),
-                            ) || !tool_uses_compact_process_row(*status, pending)
-                        }
-                        _ => true,
-                    };
-                    let mut col = div().flex().flex_col()
-                        .w_full()
-                        .gap_1()
-                        .child(this.render_compact_tool_run(run, muted, cx));
-                    if start_has_card {
-                        col = col.child(el);
-                    }
-                    el = col.into_any_element();
-                }
                 let in_process_timeline = process_expanded && process_group.is_some();
                 if in_process_timeline {
                     el = div()
@@ -1857,132 +1788,6 @@ impl ConversationView {
             cx.notify();
         }))
         .into_any_element()
-    }
-
-    fn render_compact_tool_run(
-        &self,
-        run: &CompactToolRun,
-        muted: gpui::Hsla,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
-        let start = run.start;
-        let open = self.tool_run_is_open(start);
-        let count = run.indices.len();
-        let faint = gpui::rgb(ui_theme::faint());
-        let owner_cache = &self.layout_cache;
-        let run_owner = run
-            .indices
-            .iter()
-            .find_map(|&ix| match self.entries.get(ix) {
-                Some(AcpEntry::ToolCall { id, .. }) => Some(super::super::lookup_owner(
-                    &owner_cache.borrow().owner_ids,
-                    id,
-                )),
-                _ => None,
-            })
-            .unwrap_or_else(|| gpui::SharedString::from(start.to_string()));
-        let run_label = compact_tool_run_label(run.kind, count);
-        let header = div()
-            .flex()
-            .items_center()
-            .id(owner_id("acp-tool-run", &run_owner))
-            .role(gpui::Role::Button)
-            .aria_label(run_label.clone())
-            .debug_selector(move || format!("ACP_TOOL_RUN_{start}"))
-            .group(EXPAND_ICON_GROUP)
-            .w_full()
-            .min_h(px(22.))
-            .gap_2()
-            .child(expandable_lead_icon(
-                process_timeline_icon(&run.kind),
-                open,
-                muted,
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .type_style(TYPE.text_xsmall)
-                    .text_color(muted)
-                    .child(truncated_line(run_label)),
-            )
-            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                this.toggle_tool_run(start, cx);
-            }));
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .id(owner_id("acp-tool-run-box", &run_owner))
-            .w_full()
-            .child(header);
-        if open {
-            for &ix in &run.indices {
-                let Some((tool_owner, can_expand, title)) =
-                    self.entries.get(ix).and_then(|entry| {
-                        let AcpEntry::ToolCall {
-                            id,
-                            title,
-                            output,
-                            children,
-                            ..
-                        } = entry
-                        else {
-                            return None;
-                        };
-                        Some((
-                            super::super::lookup_owner(&owner_cache.borrow().owner_ids, id),
-                            tool_output_has_content(output) || !children.is_empty(),
-                            title.clone(),
-                        ))
-                    })
-                else {
-                    continue;
-                };
-                let headline = compact_tool_headline(run.kind, &title);
-                let row = div()
-                    .flex()
-                    .items_center()
-                    .id(owner_id("acp-tool-run-item", &tool_owner))
-                    .debug_selector(move || format!("ACP_TOOL_RUN_ITEM_{ix}"))
-                    .w_full()
-                    .min_h(px(20.))
-                    .pl_5()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(faint)
-                            .when(can_expand, |icon| {
-                                icon.group_hover(PEEK_ROW_GROUP, |s| {
-                                    s.text_color(gpui::rgb(ui_theme::text()))
-                                })
-                            })
-                            .child(process_timeline_icon(&run.kind).size(px(13.))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .type_style(TYPE.text_xsmall)
-                            .text_color(faint)
-                            .when(can_expand, |label| {
-                                label.group_hover(PEEK_ROW_GROUP, |s| {
-                                    s.text_color(gpui::rgb(ui_theme::text()))
-                                })
-                            })
-                            .child(truncated_line(headline.clone())),
-                    );
-                col = col.child(if can_expand {
-                    self.tool_output_popover(ix, muted, PeekTrigger::new(row, headline), cx)
-                        .into_any_element()
-                } else {
-                    row.into_any_element()
-                });
-            }
-        }
-        col.into_any_element()
     }
 
     /// 发给别的 Pi 对话的一条：居中一行「已发任务给 B」，起新对话的是「新建对话 C 并交代任务」。
@@ -2915,28 +2720,13 @@ impl ConversationView {
         .disabled(!interactive)
         .when(in_process && interactive, |row| row.group(EXPAND_ICON_GROUP))
         .child(if in_process {
-            // 过程组里的行不另加尾部箭头，和工具行一样：指上去时左侧图标换成箭头。
-            let thought = matches!(entry, AcpEntry::Assistant { thought: true, .. });
-            let circle = || {
-                div()
-                    .size(px(8.))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(muted)
-                    .into_any_element()
-            };
-            if thought && interactive {
-                expandable_lead_icon(IconName::Asterisk, expanded, muted)
-            } else if thought {
-                Icon::new(IconName::Asterisk)
-                    .size(px(13.))
-                    .text_color(muted)
-                    .into_any_element()
-            } else if interactive {
-                expandable_lead(circle(), expanded, muted)
+            // 段里的思考是工具之间的旁注，不是一步动作：图标那一列空着，字和工具名对齐、
+            // 颜色浅一档。能点开的指上去时空列里出箭头，和工具行一样。
+            let blank = div().size(px(13.)).flex_shrink_0().into_any_element();
+            if interactive {
+                expandable_lead(blank, expanded, muted)
             } else {
-                circle()
+                blank
             }
         } else {
             div()
@@ -2949,11 +2739,16 @@ impl ConversationView {
         .child(
             // 摘要常是中英混排，GPUI 的 `.truncate()` 会把省略号裁掉，见 `truncated_line`。
             div()
+                .debug_selector(move || format!("ACP_PROGRESS_TEXT_{entry_ix}"))
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
                 .type_style(TYPE.text_xsmall)
-                .text_color(muted)
+                .text_color(if in_process {
+                    gpui::rgb(ui_theme::faint()).into()
+                } else {
+                    muted
+                })
                 .child(truncated_line(preview.clone())),
         )
         .when_some(settled, |row, elapsed_ms| {

@@ -7,30 +7,30 @@ use super::{
     apply_pending_config_selection, background_task_elapsed, background_task_one_line,
     background_task_summary, build_conversation_layout, build_conversation_layout_with_timings,
     build_markdown_cache, build_tool_image_parts, cached_diff_stats, can_load_older_history,
-    classify_attached_paths, compact_token_count, compact_tool_headline, compact_tool_run_label,
+    classify_attached_paths, compact_token_count, compact_tool_headline,
     composer_config_section_label, composer_menu_sections, composer_model_label,
     composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
     composer_usage_breakdown, config_rejection_is_new, config_selection_is_pending,
-    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
-    diff_cache_matches_output, diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress,
-    entries_to_fade_in, external_clipboard_image_paths, filter_trajectory_events,
-    format_attached_paths, is_active_permission_selection, is_fresh_conversation_start,
-    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
-    latest_user_message_index, loaded_capabilities_summary, loaded_entries_end,
-    loaded_skills_refresh, memory_changes_summary, memory_changes_to_show, merge_rejected_prompt,
-    merge_snapshot_entries, model_label_with_provider, native_queue_item_kind_label,
-    next_prompt_dispatch_pending, notice_to_show, overlay_model_state, overlay_session_configs,
-    pending_config_choice_names, plan_current_step, prefix_skill_command,
-    process_group_header_label, progress_has_details, progress_summary, provider_menu_label,
-    provider_retry_label, provider_switch_value, reconcile_pending_config_values,
-    refresh_markdown_cache, rows_with_changed_shape, running_background_tasks, running_subagents,
-    search_summary_text, selected_provider_group, session_trajectory_events,
-    settled_thought_elapsed, settled_thought_label, should_apply_snapshot_revision,
-    should_cancel_for_immediate_prompt, should_clear_history_session_id_after_snapshot,
-    should_seed_restored_height_hints, subagent_elapsed_ms, subagent_run_title, subagent_status,
-    task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
-    tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
-    turn_outcome_card, usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
+    consume_composer_restore, conversation_input_for_submit, diff_cache_matches_output,
+    diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress, entries_to_fade_in,
+    external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
+    is_active_permission_selection, is_fresh_conversation_start, is_match_count_line,
+    is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
+    loaded_capabilities_summary, loaded_entries_end, loaded_skills_refresh, memory_changes_summary,
+    memory_changes_to_show, merge_rejected_prompt, merge_snapshot_entries,
+    model_label_with_provider, native_queue_item_kind_label, next_prompt_dispatch_pending,
+    notice_to_show, overlay_model_state, overlay_session_configs, pending_config_choice_names,
+    plan_current_step, prefix_skill_command, process_group_header_label, progress_has_details,
+    progress_summary, provider_menu_label, provider_retry_label, provider_switch_value,
+    reconcile_pending_config_values, refresh_markdown_cache, rows_with_changed_shape,
+    running_background_tasks, running_subagents, search_summary_text, selected_provider_group,
+    session_trajectory_events, settled_thought_elapsed, settled_thought_label,
+    should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
+    should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
+    subagent_elapsed_ms, subagent_run_title, subagent_status, task_body_from_selection,
+    tool_card_default_expanded, tool_image_cache_matches_output, tool_output_has_content,
+    tool_result_summary, tool_uses_compact_process_row, trajectory_counts, turn_outcome_card,
+    usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
     view_history_identity,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
@@ -2043,7 +2043,7 @@ fn standalone_thought_does_not_duplicate_completed_process_elapsed() {
 }
 
 #[test]
-fn empty_body_neither_steals_final_answer_nor_splits_compact_tools() {
+fn empty_body_neither_steals_final_answer_nor_splits_a_segment() {
     let entries = vec![
         AcpEntry::User("检查".into()),
         completed_tool("one", ToolKind::Read, "a.rs"),
@@ -2066,8 +2066,6 @@ fn empty_body_neither_steals_final_answer_nor_splits_compact_tools() {
     assert!(!layout[5].final_answer);
     let group = layout[1].process_group.unwrap();
     assert_eq!(layout[3].process_group, Some(group));
-    let run = consecutive_compact_tool_run(&entries, 1, group.first, group.end, None).unwrap();
-    assert_eq!(run.indices, vec![1, 3]);
 }
 
 #[test]
@@ -2083,10 +2081,6 @@ fn unknown_tools_count_as_other_tools_not_an_english_kind() {
     assert_eq!(
         process_group_header_label(group, false),
         "Ran 1 command · 2 other tool calls"
-    );
-    assert_eq!(
-        compact_tool_run_label(ToolKind::Other, 2),
-        "2 other tool calls"
     );
     assert_eq!(compact_tool_headline(ToolKind::Other, " "), "Tool");
 }
@@ -3051,128 +3045,11 @@ fn tool_trajectory_omits_debug_fields_when_no_sidecar_was_reported() {
     assert!(!tool.source.contains("provider_debug"));
 }
 
-#[test]
-fn consecutive_same_kind_tools_collapse_into_one_run() {
-    let entries = vec![
-        AcpEntry::User("查一下".into()),
-        completed_tool("s1", ToolKind::Search, "icon"),
-        completed_tool("s2", ToolKind::Search, "graph"),
-        completed_tool("s3", ToolKind::Search, "terminal"),
-        completed_tool("r1", ToolKind::Read, "main.rs"),
-    ];
-    let run = consecutive_compact_tool_run(&entries, 2, 1, 5, None).unwrap();
-    assert_eq!(run.kind, ToolKind::Search);
-    assert_eq!(run.start, 1);
-    assert_eq!(run.indices, vec![1, 2, 3]);
-    assert_eq!(
-        compact_tool_run_label(run.kind, run.indices.len()),
-        "Searched 3 times"
-    );
-    assert!(consecutive_compact_tool_run(&entries, 4, 1, 5, None).is_none());
-}
-
 fn thought(text: &str) -> AcpEntry {
     AcpEntry::Assistant {
         text: text.into(),
         thought: true,
     }
-}
-
-#[test]
-fn thoughts_break_compact_tool_runs() {
-    let entries = vec![
-        AcpEntry::User("看实现".into()),
-        completed_tool("r1", ToolKind::Read, "acp_view.rs"),
-        thought("There's already format_duration"),
-        completed_tool("r2", ToolKind::Read, "mod.rs"),
-        thought("Sidecar timings on session snapshot is cleaner"),
-        completed_tool("r3", ToolKind::Read, "apply.rs"),
-        completed_tool("r4", ToolKind::Read, "tests.rs"),
-        completed_tool("b1", ToolKind::Execute, "rg ProcessGroupInfo"),
-    ];
-    assert!(consecutive_compact_tool_run(&entries, 1, 1, 8, None).is_none());
-    assert!(consecutive_compact_tool_run(&entries, 3, 1, 8, None).is_none());
-    let run = consecutive_compact_tool_run(&entries, 5, 1, 8, None).unwrap();
-    assert_eq!(run.kind, ToolKind::Read);
-    assert_eq!(run.start, 5);
-    assert_eq!(run.indices, vec![5, 6]);
-    assert_eq!(
-        compact_tool_run_label(run.kind, run.indices.len()),
-        "Read 2 files"
-    );
-    assert!(consecutive_compact_tool_run(&entries, 7, 1, 8, None).is_none());
-}
-
-#[test]
-fn failed_tools_do_not_join_compact_runs() {
-    let entries = vec![
-        completed_tool("r1", ToolKind::Read, "a.rs"),
-        AcpEntry::ToolCall {
-            id: "r2".into(),
-            title: "b.rs".into(),
-            kind: ToolKind::Read,
-            status: ToolCallStatus::Failed,
-            output: vec![ToolOutputPart::Text("boom".into())],
-            children: Vec::new(),
-            subagents: Vec::new(),
-            peer: None,
-        },
-        completed_tool("r3", ToolKind::Read, "c.rs"),
-        completed_tool("r4", ToolKind::Read, "d.rs"),
-    ];
-    assert!(consecutive_compact_tool_run(&entries, 0, 0, 4, None).is_none());
-    assert!(consecutive_compact_tool_run(&entries, 1, 0, 4, None).is_none());
-    let run = consecutive_compact_tool_run(&entries, 2, 0, 4, None).unwrap();
-    assert_eq!(run.start, 2);
-    assert_eq!(run.indices, vec![2, 3]);
-}
-
-#[test]
-fn spoken_progress_still_breaks_tool_runs() {
-    let entries = vec![
-        completed_tool("r1", ToolKind::Read, "a.rs"),
-        AcpEntry::Assistant {
-            text: "可以。我先看过程组有没有起止时间。".into(),
-            thought: false,
-        },
-        completed_tool("r2", ToolKind::Read, "b.rs"),
-        completed_tool("r3", ToolKind::Read, "c.rs"),
-    ];
-    assert!(consecutive_compact_tool_run(&entries, 0, 0, 4, None).is_none());
-    let run = consecutive_compact_tool_run(&entries, 2, 0, 4, None).unwrap();
-    assert_eq!(run.start, 2);
-    assert_eq!(run.indices, vec![2, 3]);
-}
-
-#[test]
-fn compact_tool_run_breaks_on_kind_change_or_progress() {
-    let entries = vec![
-        completed_tool("s1", ToolKind::Search, "a"),
-        completed_tool("r1", ToolKind::Read, "b.rs"),
-        completed_tool("s2", ToolKind::Search, "c"),
-        AcpEntry::ToolCall {
-            id: "s3".into(),
-            title: "d".into(),
-            kind: ToolKind::Search,
-            status: ToolCallStatus::InProgress,
-            output: Vec::new(),
-            children: Vec::new(),
-            subagents: Vec::new(),
-            peer: None,
-        },
-        completed_tool("s4", ToolKind::Search, "e"),
-        completed_tool("s5", ToolKind::Search, "f"),
-    ];
-    assert!(consecutive_compact_tool_run(&entries, 0, 0, 6, None).is_none());
-    assert!(consecutive_compact_tool_run(&entries, 2, 0, 6, None).is_none());
-    let run = consecutive_compact_tool_run(&entries, 5, 0, 6, None).unwrap();
-    assert_eq!(run.start, 4);
-    assert_eq!(run.indices, vec![4, 5]);
-    assert_eq!(compact_tool_run_label(ToolKind::Read, 2), "Read 2 files");
-    assert_eq!(
-        compact_tool_run_label(ToolKind::Execute, 3),
-        "Ran 3 commands"
-    );
 }
 
 #[test]
@@ -3607,6 +3484,7 @@ fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpu
             subagents: Vec::new(),
             peer: None,
         },
+        completed_tool("read-2", ToolKind::Read, "crates/smelt-acp-view/src/mod.rs"),
         AcpEntry::Assistant {
             text: "已经改好过程组展示".into(),
             thought: false,
@@ -3667,6 +3545,20 @@ fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpu
     assert_eq!(
         tool.origin.x, read.origin.x,
         "能预览输出的行（搜索）和不能预览的行（读文件）左边缘对齐"
+    );
+    let next_read = cx
+        .debug_bounds("ACP_TOOL_COMPACT_5")
+        .expect("段标题已经汇总过，展开后相邻的同类工具也各占一行");
+    assert!(next_read.origin.y >= read.origin.y + read.size.height);
+    let thought_text = cx
+        .debug_bounds("ACP_PROGRESS_TEXT_3")
+        .expect("thought preview text should paint");
+    let tool_text = cx
+        .debug_bounds("ACP_TOOL_LABEL_2")
+        .expect("tool label should paint");
+    assert_eq!(
+        thought_text.origin.x, tool_text.origin.x,
+        "思考是旁注：图标列空着，字和工具名对齐"
     );
 }
 
