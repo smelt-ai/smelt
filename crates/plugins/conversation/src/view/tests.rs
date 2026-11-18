@@ -12,27 +12,26 @@ use super::{
     composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
     composer_usage_breakdown, config_rejection_is_new, config_selection_is_pending,
     consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
-    current_turn_has_agent_output, diff_cache_matches_output, diff_stats_for_output,
-    dispatch_elapsed_ms, dispatch_progress, entries_to_fade_in, external_clipboard_image_paths,
-    filter_trajectory_events, format_attached_paths, is_active_permission_selection,
-    is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
-    is_stale_blank_history_id, latest_user_message_index, loaded_capabilities_summary,
-    loaded_entries_end, loaded_skills_refresh, memory_changes_summary, memory_changes_to_show,
-    merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
-    native_queue_item_kind_label, next_prompt_dispatch_pending, notice_to_show,
-    overlay_model_state, overlay_session_configs, pending_config_choice_names, plan_current_step,
-    prefix_skill_command, process_group_header_label, progress_has_details, progress_summary,
-    provider_menu_label, provider_retry_label, provider_switch_value,
-    reconcile_pending_config_values, refresh_markdown_cache, rows_with_changed_shape,
-    running_background_tasks, running_subagents, search_summary_text, selected_provider_group,
-    session_trajectory_events, settled_thought_elapsed, settled_thought_label,
-    should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
-    should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
-    subagent_elapsed_ms, subagent_run_title, subagent_status, task_body_from_selection,
-    tool_card_default_expanded, tool_image_cache_matches_output, tool_output_has_content,
-    tool_result_summary, tool_uses_compact_process_row, trajectory_counts, turn_outcome_card,
-    usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
-    view_history_identity, working_status_label,
+    diff_cache_matches_output, diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress,
+    entries_to_fade_in, external_clipboard_image_paths, filter_trajectory_events,
+    format_attached_paths, is_active_permission_selection, is_fresh_conversation_start,
+    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
+    latest_user_message_index, loaded_capabilities_summary, loaded_entries_end,
+    loaded_skills_refresh, memory_changes_summary, memory_changes_to_show, merge_rejected_prompt,
+    merge_snapshot_entries, model_label_with_provider, native_queue_item_kind_label,
+    next_prompt_dispatch_pending, notice_to_show, overlay_model_state, overlay_session_configs,
+    pending_config_choice_names, plan_current_step, prefix_skill_command,
+    process_group_header_label, progress_has_details, progress_summary, provider_menu_label,
+    provider_retry_label, provider_switch_value, reconcile_pending_config_values,
+    refresh_markdown_cache, rows_with_changed_shape, running_background_tasks, running_subagents,
+    search_summary_text, selected_provider_group, session_trajectory_events,
+    settled_thought_elapsed, settled_thought_label, should_apply_snapshot_revision,
+    should_cancel_for_immediate_prompt, should_clear_history_session_id_after_snapshot,
+    should_seed_restored_height_hints, subagent_elapsed_ms, subagent_run_title, subagent_status,
+    task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
+    tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
+    turn_outcome_card, usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
+    view_history_identity,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
 use smelt_plugin_api::model::acp_chat::{
@@ -1641,7 +1640,7 @@ fn incremental_open_turn_layout_matches_full_rebuild() {
     });
     let from = super::layout_recompute_start(&entries, entries.len() - 1);
     assert!(from >= 3, "已结束回合不应重算，起点={from}");
-    super::refresh_conversation_layout_from(&mut layout, &entries, from, true, 0, &[], None);
+    super::refresh_conversation_layout_from(&mut layout, &entries, from, true, 0, &[]);
     assert_eq!(layout, build_conversation_layout(&entries, true));
     assert!(
         layout[4].process_group.is_none(),
@@ -1693,14 +1692,7 @@ fn thought_only_turn_is_not_an_execution_record() {
 }
 
 #[test]
-fn live_thoughts_count_as_agent_output() {
-    assert!(!current_turn_has_agent_output(&[
-        AcpEntry::User("你好".into()),
-        AcpEntry::Assistant {
-            text: " ".into(),
-            thought: false,
-        },
-    ]));
+fn live_thoughts_stay_out_of_process_groups() {
     let entries = vec![
         AcpEntry::User("你会啥技能".into()),
         AcpEntry::Assistant {
@@ -1713,10 +1705,6 @@ fn live_thoughts_count_as_agent_output() {
             thought: true,
         },
     ];
-    assert!(current_turn_has_agent_output(&entries));
-    assert!(!current_turn_has_agent_output(&[AcpEntry::User(
-        "你会啥技能".into()
-    )]));
     let layout = build_conversation_layout(&entries, true);
     assert!(layout[1].process_group.is_none());
     assert!(layout[2].process_group.is_none());
@@ -1773,7 +1761,7 @@ fn completed_turn_folds_its_process_into_one_summary() {
         started_at_ms: 1_000,
         ended_at_ms: Some(5_000),
     }];
-    let layout = build_conversation_layout_with_timings(&entries, false, 0, &timings, None);
+    let layout = build_conversation_layout_with_timings(&entries, false, 0, &timings);
     let fold = layout[1].turn_fold.expect("跑完的一轮收成摘要");
     assert_eq!((fold.first, fold.end), (1, 4));
     for ix in 1..4 {
@@ -1789,11 +1777,14 @@ fn completed_turn_folds_its_process_into_one_summary() {
     let group = layout[1].process_group.expect("展开后仍按段分");
     assert!(!group.show_elapsed, "耗时只在摘要上写一次");
 
-    let live = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
+    let live = build_conversation_layout_with_timings(&entries, true, 0, &[]);
     assert!(live[1].turn_fold.is_none(), "在跑的回合不收成摘要");
     let live_group = live[1].process_group.expect("进行中也应收成一段");
     assert!(live_group.active);
-    assert_eq!(live_group.elapsed_ms, Some(6_000));
+    assert_eq!(
+        live_group.elapsed_ms, None,
+        "进行中的耗时只在末尾的「现在」里"
+    );
 }
 
 #[test]
@@ -1948,7 +1939,7 @@ fn split_process_groups_show_turn_elapsed_only_once() {
         started_at_ms: 1_000,
         ended_at_ms: Some(5_000),
     }];
-    let completed = build_conversation_layout_with_timings(&entries, false, 0, &timings, None);
+    let completed = build_conversation_layout_with_timings(&entries, false, 0, &timings);
     let fold = completed[1].turn_fold.expect("回答之前的过程收成摘要");
     assert_eq!((fold.first, fold.end, fold.elapsed_ms), (1, 7, Some(4_000)));
     for ix in [1, 5, 8] {
@@ -1958,26 +1949,19 @@ fn split_process_groups_show_turn_elapsed_only_once() {
     }
     assert!(completed[8].turn_fold.is_none(), "回答之后的工具不收进摘要");
 
-    let mut live = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
-    super::patch_live_elapsed(&mut live, 0, Some(7_000));
+    let live = build_conversation_layout_with_timings(&entries, true, 0, &[]);
     for ix in [1, 5] {
         let group = live[ix].process_group.unwrap();
+        assert!(!group.show_elapsed);
         assert_eq!(group.elapsed_ms, None);
-        assert_eq!(
-            super::row_live_elapsed(true, ix, &entries, Some(group), Some(7_000), None),
-            None
-        );
     }
     let last = live[8].process_group.unwrap();
-    assert_eq!(last.elapsed_ms, Some(7_000));
-    assert_eq!(
-        super::row_live_elapsed(true, 8, &entries, Some(last), Some(7_000), None),
-        Some(7_000)
-    );
+    assert!(last.show_elapsed, "最后一段是正在跑的那段");
+    assert_eq!(last.elapsed_ms, None, "进行中的耗时只在末尾的「现在」里");
 }
 
 #[test]
-fn trailing_thought_is_the_only_live_elapsed_anchor() {
+fn a_trailing_thought_ends_the_running_segment() {
     let entries = vec![
         AcpEntry::User("检查".into()),
         completed_tool("read", ToolKind::Read, "a.rs"),
@@ -1991,17 +1975,10 @@ fn trailing_thought_is_the_only_live_elapsed_anchor() {
             thought: false,
         },
     ];
-    let layout = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
+    let layout = build_conversation_layout_with_timings(&entries, true, 0, &[]);
     let group = layout[1].process_group.unwrap();
     assert!(!group.show_elapsed);
-    assert_eq!(
-        super::row_live_elapsed(true, 1, &entries, Some(group), Some(6_000), None),
-        None
-    );
-    assert_eq!(
-        super::row_live_elapsed(true, 3, &entries, None, Some(6_000), None),
-        Some(6_000)
-    );
+    assert!(layout[3].process_group.is_none());
     assert!(!layout[3].show_settled_thought_elapsed);
 }
 
@@ -2077,8 +2054,120 @@ fn unknown_tools_count_as_other_tools_not_an_english_kind() {
 }
 
 #[test]
-fn working_status_names_the_wait() {
-    assert_eq!(working_status_label("6s"), "Thinking · 6s");
+fn now_names_the_running_tool_in_the_present_tense() {
+    let running = |kind: ToolKind, title: &str| AcpEntry::ToolCall {
+        id: "now-1".into(),
+        title: title.into(),
+        kind,
+        status: ToolCallStatus::InProgress,
+        output: Vec::new(),
+        children: Vec::new(),
+        subagents: Vec::new(),
+        peer: None,
+    };
+    let entries = vec![
+        AcpEntry::User("跑测试".into()),
+        completed_tool("read", ToolKind::Read, "src/lib.rs"),
+        running(ToolKind::Execute, "cargo test\n--all"),
+    ];
+    let state = super::now_state(&entries, &[], false, |_| true);
+    assert_eq!(
+        state.activity,
+        super::NowActivity::Tool(ToolKind::Execute, "cargo test\n--all".into())
+    );
+    assert_eq!(super::now_activity_label(&state), "Running cargo test");
+    assert_eq!(state.thought_excerpt, None, "在跑工具时不露思考摘要");
+    assert_eq!(
+        super::now_tool_label(ToolKind::Read, "crates/a/Cargo.toml"),
+        "Reading Cargo.toml"
+    );
+    assert_eq!(
+        super::now_tool_label(ToolKind::Other, " "),
+        "Running a tool"
+    );
+
+    let waiting = super::now_state(&entries, &[], true, |_| true);
+    assert_eq!(waiting.activity, super::NowActivity::Waiting);
+    assert_eq!(
+        super::now_activity_label(&waiting),
+        "Waiting for you to confirm"
+    );
+
+    let previous_turn = vec![
+        AcpEntry::User("上一轮".into()),
+        running(ToolKind::Execute, "sleep 100"),
+        AcpEntry::User("这一轮".into()),
+    ];
+    assert_eq!(
+        super::now_state(&previous_turn, &[], false, |_| true).activity,
+        super::NowActivity::Thinking,
+        "上一轮没收尾的工具不算这一轮在做的事"
+    );
+}
+
+#[test]
+fn now_shows_a_thought_excerpt_only_when_the_thought_is_folded_away() {
+    let entries = vec![
+        AcpEntry::User("看看".into()),
+        completed_tool("read", ToolKind::Read, "a.rs"),
+        thought("先看调用方"),
+        AcpEntry::Assistant {
+            text: " ".into(),
+            thought: false,
+        },
+    ];
+    let hidden = super::now_state(&entries, &[], false, |ix| ix == 2);
+    assert_eq!(hidden.activity, super::NowActivity::Thinking);
+    assert_eq!(hidden.thought_excerpt.as_deref(), Some("先看调用方"));
+    let visible = super::now_state(&entries, &[], false, |_| false);
+    assert_eq!(visible.thought_excerpt, None, "看得见的思考不再抄一遍");
+
+    let mut answering = entries.clone();
+    answering.push(AcpEntry::Assistant {
+        text: "结论是".into(),
+        thought: false,
+    });
+    let state = super::now_state(&answering, &[], false, |_| true);
+    assert_eq!(state.activity, super::NowActivity::Answering);
+    assert_eq!(state.thought_excerpt, None);
+}
+
+#[test]
+fn now_lists_this_turns_running_subagents() {
+    let dispatch = AcpEntry::ToolCall {
+        id: "call-1".into(),
+        title: "审计".into(),
+        kind: ToolKind::Other,
+        status: ToolCallStatus::InProgress,
+        output: Vec::new(),
+        children: Vec::new(),
+        subagents: vec![dispatched("sa-1", SubagentStatus::Running)],
+        peer: None,
+    };
+    let entries = vec![AcpEntry::User("审一下".into()), dispatch];
+    let mut other_turn = subagent_view("sa-9", SubagentStatus::Running);
+    other_turn.tool_call_id = "call-old".into();
+    let live = [
+        subagent_view("sa-1", SubagentStatus::Running),
+        subagent_view("sa-2", SubagentStatus::Completed),
+        other_turn,
+    ];
+    let state = super::now_state(&entries, &live, false, |_| true);
+    assert_eq!(
+        state.activity,
+        super::NowActivity::Agents,
+        "派发本身不算在跑的工具"
+    );
+    assert_eq!(super::now_activity_label(&state), "Waiting for a subagent");
+    assert_eq!(
+        state.agents,
+        vec![super::NowAgent {
+            title: "审计".into(),
+            activity: Some("bash rg".into()),
+            started_at_ms: Some(1_000),
+            session_id: Some("sa-1".into()),
+        }]
+    );
 }
 
 #[test]
@@ -3584,7 +3673,7 @@ fn collapsed_background_wakeup_paints_every_body_and_task_note(cx: &mut gpui::Te
 }
 
 #[gpui::test]
-fn empty_streaming_body_keeps_working_status_visible(cx: &mut gpui::TestAppContext) {
+fn empty_streaming_body_keeps_the_now_tail_visible(cx: &mut gpui::TestAppContext) {
     let (_view, cx) = open_conversation(
         cx,
         "acp-empty-streaming-body",
@@ -3598,7 +3687,41 @@ fn empty_streaming_body_keeps_working_status_visible(cx: &mut gpui::TestAppConte
         DaemonPhase::Thinking,
     );
     draw_settled(cx);
-    assert!(cx.debug_bounds("ACP_WORKING_1").is_some());
+    assert!(cx.debug_bounds("ACP_NOW_1").is_some());
+}
+
+/// 在跑的段收着时，最后一条藏在段里高度为 0；「现在」照样挂在它这一行上露出来。
+#[gpui::test]
+fn the_now_tail_shows_under_a_collapsed_running_segment(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = open_conversation(
+        cx,
+        "acp-now-collapsed-segment",
+        vec![
+            AcpEntry::User("跑一下测试".into()),
+            completed_tool("read", ToolKind::Read, "src/lib.rs"),
+            AcpEntry::ToolCall {
+                id: "run".into(),
+                title: "cargo test".into(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::InProgress,
+                output: Vec::new(),
+                children: Vec::new(),
+                subagents: Vec::new(),
+                peer: None,
+            },
+        ],
+        DaemonPhase::Thinking,
+    );
+    draw_settled(cx);
+    assert!(cx.debug_bounds("ACP_PROCESS_GROUP_1").is_some());
+    assert!(
+        cx.debug_bounds("ACP_NOW_2").is_some(),
+        "收起的段里最后一条也要挂上「现在」"
+    );
+    let tail_row = view
+        .read_with(cx, |view, _| view.list_state.bounds_for_item(2))
+        .expect("最后一行应已绘制");
+    assert!(tail_row.size.height > px(0.));
 }
 
 /// 最终回答多一排操作按钮，但相同正文的字号和行高不应因此不同。
@@ -4430,60 +4553,6 @@ fn background_task_popover_closes_when_the_last_task_finishes(cx: &mut gpui::Tes
     assert!(
         !view.read_with(cx, |view, _| view.background_tasks_open),
         "任务都结束后弹层要收起，下一个任务开始时不能自己弹出来"
-    );
-}
-
-#[test]
-fn live_elapsed_hangs_on_the_current_action_row() {
-    let entries = vec![
-        AcpEntry::User("查一下".into()),
-        completed_tool("s1", ToolKind::Search, "icon"),
-        completed_tool("s2", ToolKind::Search, "graph"),
-        AcpEntry::ToolCall {
-            id: "read-1".into(),
-            title: "main.rs".into(),
-            kind: ToolKind::Read,
-            status: ToolCallStatus::InProgress,
-            output: Vec::new(),
-            children: Vec::new(),
-            subagents: Vec::new(),
-            peer: None,
-        },
-    ];
-    let layout = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
-    let group = layout[1].process_group.expect("进行中的工具要收成过程组");
-    assert_eq!(super::live_elapsed_anchor(&entries, group, None), 3);
-    assert_eq!(
-        super::row_live_elapsed(true, 3, &entries, Some(group), group.elapsed_ms, None),
-        Some(6_000)
-    );
-    assert_eq!(
-        super::row_live_elapsed(true, 1, &entries, Some(group), group.elapsed_ms, None),
-        None
-    );
-
-    let thought = vec![
-        AcpEntry::User("想一下".into()),
-        AcpEntry::Assistant {
-            text: "先看调用方".into(),
-            thought: true,
-        },
-    ];
-    assert_eq!(
-        super::row_live_elapsed(true, 1, &thought, None, Some(20_000), None),
-        Some(20_000)
-    );
-    let answer = vec![
-        AcpEntry::User("写下来".into()),
-        AcpEntry::Assistant {
-            text: "结论是这样".into(),
-            thought: false,
-        },
-    ];
-    assert_eq!(
-        super::row_live_elapsed(true, 1, &answer, None, Some(20_000), None),
-        None,
-        "正文自己在往外长，不再另挂一行耗时"
     );
 }
 

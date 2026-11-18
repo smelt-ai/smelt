@@ -205,7 +205,6 @@ struct SubagentCard<'a> {
     animate_ambient: bool,
     muted: gpui::Hsla,
     border: gpui::Hsla,
-    live_elapsed: Option<u64>,
 }
 
 impl ConversationView {
@@ -270,7 +269,6 @@ impl ConversationView {
         clear_capsule: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
-        let current_turn_active = self.has_active_turn();
         let conversation_layout = self.conversation_layout();
         // 虚拟列表把行高缓存到重新测量。高度还在变的思考详情和入场气泡，
         // 不在布局前标脏的话，动画只改样式、行高不动。
@@ -322,18 +320,18 @@ impl ConversationView {
                 };
                 if let Some((first, group)) = collapsed_header {
                     if first != i {
-                        // 高度必须是 0：空 div 若测出残高，虚拟列表会把回答叠在标题上。
-                        return div().h(px(0.)).w_full().overflow_hidden().into_any_element();
+                        return this.tail_only_row(i, &conversation_layout, animate_ambient, cx);
                     }
                     // 折叠态只构建摘要，不先渲染一遍随后会被丢弃的首个工具卡。
                     // Read 的大输出或 Edit 的 diff 因此不会在静态重绘时白做解析。
                     let header = match (group, turn_fold) {
                         (Some(group), _) => {
-                            this.render_segment_head(group, false, animate_ambient, muted, cx)
+                            this.render_segment_head(group, false, muted, cx)
                         }
                         (None, Some(fold)) => this.render_turn_fold_header(fold, false, muted, cx),
                         (None, None) => div().into_any_element(),
                     };
+                    let tail = this.render_turn_tail(i, &conversation_layout, animate_ambient, cx);
                     return div().flex().items_center()
                         .w_full()
                         .justify_center()
@@ -347,7 +345,8 @@ impl ConversationView {
                                 .when_some(fold_header_here, |col, fold| {
                                     col.child(this.render_turn_fold_header(fold, true, muted, cx))
                                 })
-                                .child(header),
+                                .child(header)
+                                .when_some(tail, |col, tail| col.child(div().pt_2().child(tail))),
                         )
                         .into_any_element();
                 }
@@ -412,29 +411,14 @@ impl ConversationView {
                     if !card_expanded
                         && tool_uses_compact_process_row(*status, has_pending_permission)
                     {
-                        return div().into_any_element();
+                        return this.tail_only_row(i, &conversation_layout, animate_ambient, cx);
                     }
                 }
-                let elapsed_here = row_live_elapsed(
-                    current_turn_active,
-                    i,
-                    &this.entries,
-                    process_group,
-                    process_group
-                        .filter(|group| group.active)
-                        .and_then(|group| group.elapsed_ms)
-                        .or_else(|| live_elapsed_ms(this.turn_started_at_ms)),
-                    active_permission_tool_id.as_deref(),
-                );
-                let run_wraps_elapsed =
-                    tool_run.as_ref().is_some_and(|run| run.start == i) && elapsed_here.is_some();
-                let row_elapsed = elapsed_here.filter(|_| !run_wraps_elapsed);
-                let run_elapsed = elapsed_here.filter(|_| run_wraps_elapsed);
                 // 段首行要补 diff 缓存（可变借用），得在借出 `entry` 之前画好。
                 let segment_head = process_group
                     .filter(|group| process_expanded && group.first == i)
                     .map(|group| {
-                        this.render_segment_head(group, true, animate_ambient, muted, cx)
+                        this.render_segment_head(group, true, muted, cx)
                     });
                 let entry = &this.entries[i];
                 let mut el: gpui::AnyElement = match entry {
@@ -555,9 +539,8 @@ impl ConversationView {
                     AcpEntry::Assistant { text, thought: false } if text.trim().is_empty() => {
                         div().h(px(0.)).w_full().overflow_hidden().into_any_element()
                     }
-                    AcpEntry::Assistant { text, thought: true }
-                        if process_group.is_some() && text.trim().is_empty() =>
-                    {
+                    // 还没写出字的思考不占行，「正在想」由末尾的「现在」说。
+                    AcpEntry::Assistant { text, thought: true } if text.trim().is_empty() => {
                         div().h(px(0.)).w_full().overflow_hidden().into_any_element()
                     }
                     AcpEntry::Assistant { text, thought: true } if process_group.is_some() => this
@@ -568,8 +551,6 @@ impl ConversationView {
                             true,
                             false,
                             muted,
-                            row_elapsed,
-                            animate_ambient,
                             cx,
                         ),
                     AcpEntry::Assistant {
@@ -582,8 +563,6 @@ impl ConversationView {
                         false,
                         presentation.show_settled_thought_elapsed,
                         muted,
-                        row_elapsed,
-                        animate_ambient,
                         cx,
                     ),
                     AcpEntry::Assistant {
@@ -858,9 +837,6 @@ impl ConversationView {
                                         .child(summary),
                                 );
                             }
-                            if let Some(elapsed_ms) = row_elapsed {
-                                row = row.child(elapsed_suffix(elapsed_ms, muted));
-                            }
                             if can_expand {
                                 this.tool_output_popover(
                                     i,
@@ -895,7 +871,6 @@ impl ConversationView {
                                     animate_ambient,
                                     muted,
                                     border,
-                                    live_elapsed: row_elapsed,
                                 },
                                 cx,
                             )
@@ -998,10 +973,7 @@ impl ConversationView {
                                     .text_color(ink)
                                     .child(truncated_line(compact_tool_headline(*kind, title))),
                             )
-                            .child(header_right)
-                            .when_some(row_elapsed, |header, elapsed_ms| {
-                                header.child(elapsed_suffix(elapsed_ms, muted))
-                            });
+                            .child(header_right);
                         card = card.child(header);
                         if card_expanded {
                             for (part_ix, part) in output.iter().enumerate() {
@@ -1260,7 +1232,7 @@ impl ConversationView {
                     let mut col = div().flex().flex_col()
                         .w_full()
                         .gap_1()
-                        .child(this.render_compact_tool_run(run, muted, run_elapsed, cx));
+                        .child(this.render_compact_tool_run(run, muted, cx));
                     if start_has_card {
                         col = col.child(el);
                     }
@@ -1290,41 +1262,13 @@ impl ConversationView {
                         .child(el)
                         .into_any_element();
                 }
-                if current_turn_active
-                    && i + 1 == this.entries.len()
-                    && (is_user_entry(entry) || empty_body)
-                    && !current_turn_has_agent_output(&this.entries)
-                    && this.provider_retry.is_none()
-                {
+                if let Some(tail) = this.render_turn_tail(i, &conversation_layout, animate_ambient, cx) {
                     el = div().flex().flex_col()
                         .w_full()
                         .gap_3()
                         .child(el)
-                        .child(this.render_working_status(
-                            live_elapsed_ms(this.turn_started_at_ms),
-                            i,
-                            animate_ambient,
-                        ))
+                        .child(tail)
                         .into_any_element();
-                }
-                // 对话末尾：在跑时说明正在自动重试；跑完了没正常结束就给一张卡，
-                // 能直接重试或继续。都挂在最后一条上，不另占一行虚拟项。
-                if i + 1 == this.entries.len() {
-                    let tail = if current_turn_active {
-                        this.provider_retry
-                            .as_ref()
-                            .map(|retry| this.render_provider_retry(retry, i, animate_ambient))
-                    } else {
-                        this.render_turn_outcome_card(i, cx)
-                    };
-                    if let Some(tail) = tail {
-                        el = div().flex().flex_col()
-                            .w_full()
-                            .gap_3()
-                            .child(el)
-                            .child(tail)
-                            .into_any_element();
-                    }
                 }
                 // `gpui::list` 不像 flex 容器那样处理 `gap`；间距必须属于
                 // 虚拟项本身，否则测得的高度不包含消息间的留白。
@@ -1459,32 +1403,190 @@ impl ConversationView {
         )
     }
 
-    fn render_working_status(
+    /// 对话末尾挂的东西，只挂在最后一行上，不另占虚拟项：在跑时是「现在」，
+    /// 自动重试时换成重试说明；跑完了没正常结束给一张能重试或继续的卡。
+    fn render_turn_tail(
         &self,
-        elapsed_ms: Option<u64>,
         entry_ix: usize,
+        layout: &[EntryPresentation],
         animate_ambient: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if entry_ix + 1 != self.entries.len() {
+            return None;
+        }
+        if !self.has_active_turn() {
+            return self.render_turn_outcome_card(entry_ix, cx);
+        }
+        Some(match self.provider_retry.as_ref() {
+            Some(retry) => self.render_provider_retry(retry, entry_ix, animate_ambient),
+            None => self.render_now_tail(entry_ix, layout, animate_ambient, cx),
+        })
+    }
+
+    /// 收起的行高度为 0；它要是最后一行，就只画末尾挂的东西。
+    fn tail_only_row(
+        &self,
+        entry_ix: usize,
+        layout: &[EntryPresentation],
+        animate_ambient: bool,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let elapsed = elapsed_ms
-            .map(format_duration)
-            .unwrap_or_else(|| "0s".to_string());
-        let mark: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
-        div()
+        match self.render_turn_tail(entry_ix, layout, animate_ambient, cx) {
+            Some(tail) => div()
+                .flex()
+                .items_center()
+                .w_full()
+                .justify_center()
+                .px_4()
+                .pb(px(12.))
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(ui_theme::conversation_max_width())
+                        .child(tail),
+                )
+                .into_any_element(),
+            // 高度必须是 0：空 div 若测出残高，虚拟列表会把回答叠在标题上。
+            None => div()
+                .h(px(0.))
+                .w_full()
+                .overflow_hidden()
+                .into_any_element(),
+        }
+    }
+
+    /// 「现在」：这一轮正在做什么、跑了多久，还有哪些子智能体在跑。
+    /// 进行中的状态只在这里说一次，段落和工具行不再各挂一份转圈和耗时。
+    fn render_now_tail(
+        &self,
+        entry_ix: usize,
+        layout: &[EntryPresentation],
+        animate_ambient: bool,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let muted: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
+        let faint = gpui::rgb(ui_theme::faint());
+        let now = now_unix_ms();
+        let now_state = now_state(
+            &self.entries,
+            &self.subagents,
+            !self.permissions.is_empty(),
+            |ix| {
+                layout
+                    .get(ix)
+                    .and_then(|item| item.process_group)
+                    .is_some_and(|group| !self.expanded_process_groups.contains(&group.first))
+            },
+        );
+        let lead = match now_state.activity {
+            NowActivity::Waiting => div()
+                .size(px(6.))
+                .mx(px(3.5))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(gpui::rgb(ui_theme::need()))
+                .into_any_element(),
+            NowActivity::Thinking | NowActivity::Answering => {
+                quiet_dots(("acp-now-dots", entry_ix), muted, animate_ambient)
+            }
+            _ => ambient_spinner(("acp-now-spinner", entry_ix), muted, animate_ambient),
+        };
+        let line = div()
             .flex()
             .items_center()
-            .id(("acp-working", entry_ix))
-            .debug_selector(move || format!("ACP_WORKING_{entry_ix}"))
-            .h(ui_theme::height::xxs())
+            .w_full()
+            .min_h(ui_theme::height::xxs())
             .gap_1p5()
             .type_style(TYPE.text_xsmall)
-            .font_features(ui_theme::tabular_figures())
-            .text_color(gpui::rgb(ui_theme::muted()))
-            .child(quiet_dots(
-                ("acp-working-dots", entry_ix),
-                mark,
-                animate_ambient,
-            ))
-            .child(working_status_label(&elapsed))
+            .text_color(muted)
+            .child(lead)
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(truncated_line(now_activity_label(&now_state))),
+            )
+            .when_some(
+                live_elapsed_ms(self.turn_started_at_ms),
+                |line, elapsed_ms| line.child(elapsed_suffix(elapsed_ms, muted)),
+            );
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .id(("acp-now", entry_ix))
+            .debug_selector(move || format!("ACP_NOW_{entry_ix}"))
+            .w_full()
+            .gap_0p5()
+            .child(line);
+        if let Some(excerpt) = now_state.thought_excerpt {
+            col = col.child(
+                div()
+                    .pl(px(19.))
+                    .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(faint)
+                    .child(truncated_line(excerpt)),
+            );
+        }
+        for (row_ix, agent) in now_state.agents.iter().take(MAX_NOW_AGENTS).enumerate() {
+            let label = match agent.activity.as_deref() {
+                Some(activity) => format!("{} · {activity}", agent.title),
+                None => agent.title.clone(),
+            };
+            let elapsed = agent
+                .started_at_ms
+                .map(|started| now.saturating_sub(started));
+            let mut row = div()
+                .flex()
+                .items_center()
+                .id(("acp-now-agent", row_ix))
+                .debug_selector(move || format!("ACP_NOW_AGENT_{row_ix}"))
+                .pl(px(19.))
+                .w_full()
+                .min_h(ui_theme::height::xxs())
+                .gap_1p5()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(
+                    Icon::new(IconName::Bot)
+                        .size(px(12.))
+                        .flex_shrink_0()
+                        .text_color(faint),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(truncated_line(label)),
+                )
+                .when_some(elapsed, |row, elapsed_ms| {
+                    row.child(elapsed_suffix(elapsed_ms, muted))
+                });
+            if let Some(id) = agent.session_id.clone() {
+                let title = agent.title.clone();
+                row = row
+                    .cursor_pointer()
+                    .hover(|row| row.opacity(0.78))
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.open_subagent_inspector(id.clone(), title.clone(), cx);
+                    }));
+            }
+            col = col.child(row);
+        }
+        let more = now_state.agents.len().saturating_sub(MAX_NOW_AGENTS);
+        if more > 0 {
+            col = col.child(
+                div()
+                    .pl(px(19.))
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(faint)
+                    .child(t!("now.more_agents", count = more).into_owned()),
+            );
+        }
+        col.font_features(ui_theme::tabular_figures())
             .into_any_element()
     }
 
@@ -1493,7 +1595,6 @@ impl ConversationView {
         &mut self,
         group: ProcessGroupInfo,
         expanded: bool,
-        animate_ambient: bool,
         muted: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -1514,14 +1615,7 @@ impl ConversationView {
         };
         let show_chips = !chips.is_empty() && chips.len() <= MAX_EDIT_CHIPS;
         let edits_as_chips = show_chips && chips.len() == group.tally.edited_files;
-        let header = self.render_process_group_header(
-            group,
-            expanded,
-            edits_as_chips,
-            animate_ambient,
-            muted,
-            cx,
-        );
+        let header = self.render_process_group_header(group, expanded, edits_as_chips, muted, cx);
         if !show_chips {
             return header;
         }
@@ -1589,46 +1683,19 @@ impl ConversationView {
         group: ProcessGroupInfo,
         expanded: bool,
         edits_as_chips: bool,
-        animate_ambient: bool,
         muted: gpui::Hsla,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let group_key = group.first;
         let group_end = group.end;
-        let accent: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
-        // 有工具在跑用 spinner；只在思考、没有进行中的工具或子 agent 时换成安静的点。
-        let thinking = group.active && group.active_tool_kind.is_none() && group.active_agents == 0;
-        let lead = if !group.active {
-            None
-        } else if thinking {
-            Some(quiet_dots(
-                ("acp-process-think", group.first),
-                accent,
-                animate_ambient,
-            ))
-        } else {
-            Some(ambient_spinner(
-                ("acp-process-group-spinner", group.first),
-                accent,
-                animate_ambient,
-            ))
-        };
-        // 在跑的段收起时把本轮耗时挂在行尾；展开后耗时挂在最后一条动作上。
-        let live_elapsed = group
-            .elapsed_ms
-            .filter(|_| group.active && group.show_elapsed && !expanded);
         summary_row(
             ("acp-process-group", group.first),
-            lead,
             process_group_header_label(group, edits_as_chips),
             tally_failed_label(&group.tally),
             expanded,
             muted,
         )
         .debug_selector(move || format!("ACP_PROCESS_GROUP_{}", group.first))
-        .when_some(live_elapsed, |row, elapsed_ms| {
-            row.child(elapsed_suffix(elapsed_ms, muted))
-        })
         .on_click(cx.listener(move |this, _ev, _window, cx| {
             if !this.expanded_process_groups.remove(&group_key) {
                 this.expanded_process_groups.insert(group_key);
@@ -1651,7 +1718,6 @@ impl ConversationView {
         let fold_end = fold.end;
         summary_row(
             ("acp-turn-fold", fold.first),
-            None,
             turn_fold_label(fold),
             None,
             expanded,
@@ -1673,7 +1739,6 @@ impl ConversationView {
         &self,
         run: &CompactToolRun,
         muted: gpui::Hsla,
-        live_elapsed: Option<u64>,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let start = run.start;
@@ -1718,9 +1783,6 @@ impl ConversationView {
                     .text_color(muted)
                     .child(truncated_line(run_label)),
             )
-            .when_some(live_elapsed, |header, elapsed_ms| {
-                header.child(elapsed_suffix(elapsed_ms, muted))
-            })
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.toggle_tool_run(start, cx);
             }));
@@ -2060,7 +2122,6 @@ impl ConversationView {
             animate_ambient,
             muted,
             border,
-            live_elapsed,
         } = card;
         let faint = gpui::rgb(ui_theme::faint());
         let red = gpui::rgb(ui_theme::bad());
@@ -2167,11 +2228,7 @@ impl ConversationView {
         } else {
             div().into_any_element()
         };
-        header = header
-            .child(status_el)
-            .when_some(live_elapsed, |header, elapsed_ms| {
-                header.child(elapsed_suffix(elapsed_ms, muted))
-            });
+        header = header.child(status_el);
         let mut card = div()
             .flex()
             .flex_col()
@@ -2707,21 +2764,17 @@ impl ConversationView {
         in_process: bool,
         show_settled_elapsed: bool,
         muted: gpui::Hsla,
-        live_elapsed: Option<u64>,
-        animate_ambient: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded_thoughts.contains(&entry_ix);
-        let mut preview = progress_summary(text);
-        if !in_process && preview.is_empty() && live_elapsed.is_some() {
-            preview = t!("status.thinking").into_owned();
-        }
+        let preview = progress_summary(text);
         let has_details = progress_has_details(text);
         // `in_process` 是「在过程组里」，不是「还在跑」：过程组里的思考和中间说明跑完也
         // 一直在组里，摘要只有一行，长文必须能点开，否则后半段永远看不到。
         // 悬停底和点击同一条件，避免看起来不能点却还能点。
         let interactive = has_details;
-        let settled = if show_settled_elapsed && live_elapsed.is_none() {
+        // 回合没结束时没有完成耗时，进行中的耗时在末尾的「现在」里。
+        let settled = if show_settled_elapsed {
             settled_thought_elapsed(
                 &self.entries,
                 entry_ix,
@@ -2760,9 +2813,7 @@ impl ConversationView {
                     .border_color(muted)
                     .into_any_element()
             };
-            if thought && live_elapsed.is_some() {
-                quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
-            } else if thought && interactive {
+            if thought && interactive {
                 expandable_lead_icon(IconName::Asterisk, expanded, muted)
             } else if thought {
                 Icon::new(IconName::Asterisk)
@@ -2774,8 +2825,6 @@ impl ConversationView {
             } else {
                 circle()
             }
-        } else if live_elapsed.is_some() {
-            quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
         } else {
             div()
                 .flex_shrink_0()
@@ -2794,9 +2843,6 @@ impl ConversationView {
                 .text_color(muted)
                 .child(truncated_line(preview.clone())),
         )
-        .when_some(live_elapsed, |row, elapsed_ms| {
-            row.child(elapsed_suffix(elapsed_ms, muted))
-        })
         .when_some(settled, |row, elapsed_ms| {
             row.child(
                 div()
@@ -3445,7 +3491,6 @@ fn render_edit_chip(chip: &EditChip, group_key: usize, open: bool) -> gpui::Stat
 /// 回合摘要和每段计数共用的一行：可选的状态标记、计数句、红色的失败数、展开箭头。
 fn summary_row(
     id: impl Into<gpui::ElementId>,
-    lead: Option<gpui::AnyElement>,
     label: String,
     failed: Option<String>,
     expanded: bool,
@@ -3461,7 +3506,6 @@ fn summary_row(
         .gap_1p5()
         .cursor_pointer()
         .hover(|row| row.opacity(0.78))
-        .children(lead)
         .child(
             div()
                 .min_w_0()

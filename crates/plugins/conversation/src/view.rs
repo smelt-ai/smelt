@@ -122,10 +122,6 @@ fn user_bubble_enter_ready(latest_user_index: Option<usize>, len_at_arm: usize) 
     latest_user_index.is_some_and(|latest| latest >= len_at_arm)
 }
 
-fn working_status_label(elapsed: &str) -> String {
-    t!("status.thinking_for", elapsed = elapsed).into_owned()
-}
-
 fn settled_thought_label(elapsed_ms: u64) -> String {
     t!("status.thought_for", elapsed = format_duration(elapsed_ms)).into_owned()
 }
@@ -800,10 +796,19 @@ struct RetainedText {
 /// 不能整段 `splice`：被换掉的行会变成没有高度的新行，下一帧量完之前总高度都缺
 /// 这一截。这期间到来的滚轮事件按缩水的总高夹住滚动位置，视口一下跳到很上面。
 /// 重新量高留着上一帧的高度当估计，滚动锚点也原样保留在这一行里。
+///
+/// 对话末尾的「现在」、重试说明挂在最后一行上。条数一变，旧的最后一行卸下它们、
+/// 新的最后一行挂上，两头都得重新量；滚在上面看历史时这一行不在视口里，不会自己重量。
 fn sync_changed_rows(list: &ListState, changed_from: usize, old_len: usize, new_len: usize) {
     let kept_end = old_len.min(new_len);
-    if changed_from < kept_end {
-        list.remeasure_items(changed_from..kept_end);
+    let tail_moved = old_len != new_len && kept_end > 0;
+    let remeasure_from = if tail_moved {
+        changed_from.min(kept_end - 1)
+    } else {
+        changed_from
+    };
+    if remeasure_from < kept_end {
+        list.remeasure_items(remeasure_from..kept_end);
     }
     if new_len > old_len {
         list.splice(old_len..old_len, new_len - old_len);
@@ -2238,11 +2243,10 @@ impl ConversationView {
     }
 
     /// 消息列表每帧都要布局，但已结束回合的分组不会因为尾部 token 改变。
-    /// 只重算脏下标所在的回合；进行中的耗时只改这一组的 elapsed。
+    /// 只重算脏下标所在的回合。进行中的耗时不进布局，由末尾的「现在」块现取。
     fn conversation_layout(&self) -> std::rc::Rc<Vec<EntryPresentation>> {
         let mut cache = self.layout_cache.borrow_mut();
         let turn_active = self.has_active_turn();
-        let live = live_elapsed_ms(self.turn_started_at_ms);
         let len = self.entries.len();
         let timings_len = self.turn_timings.len();
         let loaded = self.loaded_entries_offset;
@@ -2262,13 +2266,6 @@ impl ConversationView {
                         || cache.tail_start != tail
                     {
                         Some(tail.min(cache.tail_start))
-                    } else if cache.live_elapsed_ms != live {
-                        let entries = std::rc::Rc::make_mut(&mut cache.entries);
-                        patch_live_elapsed(entries, tail, live);
-                        cache.live_elapsed_ms = live;
-                        cache.tail_start = tail;
-                        cache.turn_active = turn_active;
-                        return cache.entries.clone();
                     } else {
                         return cache.entries.clone();
                     }
@@ -2288,7 +2285,6 @@ impl ConversationView {
                         turn_active,
                         loaded,
                         &self.turn_timings,
-                        live,
                     )),
                 );
                 cache.owner_ids.refresh(&self.entries, 0);
@@ -2305,7 +2301,6 @@ impl ConversationView {
                     turn_active,
                     loaded,
                     &self.turn_timings,
-                    live,
                 );
                 cache.owner_ids.refresh(&self.entries, from);
                 (previous, previous_offset + kept, from)
@@ -2326,7 +2321,6 @@ impl ConversationView {
         cache.turn_active = turn_active;
         cache.loaded_offset = loaded;
         cache.timings_len = timings_len;
-        cache.live_elapsed_ms = live;
         cache.entries.clone()
     }
 
@@ -5842,65 +5836,185 @@ fn live_elapsed_ms(turn_started_at_ms: Option<u64>) -> Option<u64> {
     turn_started_at_ms.and_then(|started| now_unix_ms().checked_sub(started))
 }
 
-/// 过程组里最后一条看得见的动作。空思考行跳过；连在一起的同类工具挂到合并行上。
-fn live_elapsed_anchor(
-    entries: &[AcpEntry],
-    group: ProcessGroupInfo,
-    pending_tool_id: Option<&str>,
-) -> usize {
-    let mut index = group.end.saturating_sub(1).max(group.first);
-    while index > group.first {
-        let empty = matches!(
-            entries.get(index),
-            Some(AcpEntry::Assistant { text, .. }) if text.trim().is_empty()
-        );
-        if !empty {
-            break;
-        }
-        index -= 1;
-    }
-    consecutive_compact_tool_run(entries, index, group.first, group.end, pending_tool_id)
-        .map(|run| run.start)
-        .unwrap_or(index)
+/// 「现在」最多列几个在跑的子智能体，再多的合成一行「还有 N 个」。
+const MAX_NOW_AGENTS: usize = 3;
+
+/// 这一轮此刻在做什么。
+#[derive(Debug, PartialEq, Eq)]
+enum NowActivity {
+    /// 有权限请求等用户点。
+    Waiting,
+    /// 最近一个还在跑的工具（子智能体之外）。
+    Tool(ToolKind, String),
+    /// 只剩子智能体在跑，主线在等它们。
+    Agents,
+    /// 最新一段是正文，正在往外写。
+    Answering,
+    Thinking,
 }
 
-/// 这一行要不要带上本轮耗时。有动作就挂在动作上；只有思考摘要或还在跑的工具时才挂。
-fn row_live_elapsed(
-    turn_active: bool,
-    index: usize,
+#[derive(Debug, PartialEq, Eq)]
+struct NowAgent {
+    title: String,
+    activity: Option<String>,
+    started_at_ms: Option<u64>,
+    /// Pi 子智能体的会话 id，点开看它的过程。别的 agent 的子任务没有单独会话。
+    session_id: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NowState {
+    activity: NowActivity,
+    /// 在想、而最新那段思考收在折叠的段里看不见时，露一句摘要。
+    thought_excerpt: Option<String>,
+    agents: Vec<NowAgent>,
+}
+
+/// 从本轮条目和宿主报的子智能体算出「现在」。`hidden(ix)` 说这一行是否收在折叠的段里。
+fn now_state(
     entries: &[AcpEntry],
-    group: Option<ProcessGroupInfo>,
-    elapsed_ms: Option<u64>,
-    pending_tool_id: Option<&str>,
-) -> Option<u64> {
-    if !turn_active {
-        return None;
-    }
-    let anchor = if let Some(group) = group.filter(|group| group.active && group.show_elapsed) {
-        live_elapsed_anchor(entries, group, pending_tool_id)
-    } else if group.is_none()
-        && entries
-            .get(index.saturating_add(1)..)
-            .is_some_and(|tail| tail.iter().all(is_empty_assistant_body))
-        && matches!(
-            entries.get(index),
-            Some(AcpEntry::Assistant { thought: true, .. } | AcpEntry::ToolCall { .. })
-        )
-    {
-        index
-    } else {
-        return None;
+    live_subagents: &[SubagentView],
+    waiting: bool,
+    hidden: impl Fn(usize) -> bool,
+) -> NowState {
+    let turn_start = latest_user_message_index(entries).map_or(0, |ix| ix + 1);
+    let turn = entries.get(turn_start..).unwrap_or_default();
+    let running = |status: &ToolCallStatus| {
+        matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending)
     };
-    (index == anchor).then_some(elapsed_ms).flatten()
+    let mut running_tool = None;
+    let mut agents = Vec::new();
+    let mut turn_tool_ids = std::collections::HashSet::new();
+    for entry in turn {
+        let AcpEntry::ToolCall {
+            id,
+            kind,
+            title,
+            status,
+            children,
+            subagents,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        turn_tool_ids.insert(id.as_str());
+        if *kind == ToolKind::Collaborate {
+            if running(status)
+                || smelt_plugin_api::model::acp_chat::has_unfinished_tool_call(children)
+            {
+                let name = smelt_plugin_api::model::acp_chat::subagent_visible_title(title);
+                let activity = children.iter().rev().find_map(|child| match child {
+                    AcpEntry::ToolCall { kind, title, .. } => {
+                        Some(compact_tool_headline(*kind, title))
+                    }
+                    _ => None,
+                });
+                agents.push(NowAgent {
+                    title: if name.is_empty() {
+                        t!("subagent.generic").into_owned()
+                    } else {
+                        name
+                    },
+                    activity,
+                    started_at_ms: None,
+                    session_id: None,
+                });
+            }
+        } else if subagents.is_empty() && running(status) {
+            running_tool = Some((*kind, title.clone()));
+        }
+    }
+    let mut pi_agents: Vec<&SubagentView> = live_subagents
+        .iter()
+        .filter(|view| {
+            view.status.is_running() && turn_tool_ids.contains(view.tool_call_id.as_str())
+        })
+        .collect();
+    pi_agents.sort_by_key(|view| view.started_at_ms);
+    agents.extend(pi_agents.into_iter().map(|view| NowAgent {
+        title: if view.title.trim().is_empty() {
+            t!("subagent.generic").into_owned()
+        } else {
+            view.title.clone()
+        },
+        activity: view.last_activity.clone(),
+        started_at_ms: Some(view.started_at_ms),
+        session_id: Some(view.id.clone()),
+    }));
+    let latest = turn
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, entry)| match entry {
+            AcpEntry::Assistant { text, .. } => !text.trim().is_empty(),
+            _ => true,
+        });
+    let activity = if waiting {
+        NowActivity::Waiting
+    } else if let Some((kind, title)) = running_tool {
+        NowActivity::Tool(kind, title)
+    } else if !agents.is_empty() {
+        NowActivity::Agents
+    } else if matches!(
+        latest,
+        Some((_, AcpEntry::Assistant { thought: false, .. }))
+    ) {
+        NowActivity::Answering
+    } else {
+        NowActivity::Thinking
+    };
+    let thought_excerpt = if activity == NowActivity::Thinking {
+        latest
+            .and_then(|(offset, entry)| match entry {
+                AcpEntry::Assistant {
+                    text,
+                    thought: true,
+                } if hidden(turn_start + offset) => Some(progress_summary(text)),
+                _ => None,
+            })
+            .filter(|excerpt| !excerpt.is_empty())
+    } else {
+        None
+    };
+    NowState {
+        activity,
+        thought_excerpt,
+        agents,
+    }
 }
 
-/// 本轮用户消息之后是否已经有思考/工具/正文。没有时才单独画一行「正在想」。
-fn current_turn_has_agent_output(entries: &[AcpEntry]) -> bool {
-    entries
-        .iter()
-        .rev()
-        .take_while(|entry| !is_user_entry(entry))
-        .any(|entry| !entry.is_divider() && !is_empty_assistant_body(entry))
+fn now_activity_label(state: &NowState) -> String {
+    match &state.activity {
+        NowActivity::Waiting => t!("now.waiting").into_owned(),
+        NowActivity::Tool(kind, title) => now_tool_label(*kind, title),
+        NowActivity::Agents => crate::plural(
+            state.agents.len(),
+            t!("now.agents.one"),
+            t!("now.agents.other", count = state.agents.len()),
+        ),
+        NowActivity::Answering => t!("now.answering").into_owned(),
+        NowActivity::Thinking => t!("status.thinking").into_owned(),
+    }
+}
+
+/// 正在跑的工具的进行时说法，对象取法和时间线上的动词句一致。
+fn now_tool_label(kind: ToolKind, title: &str) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        return t!("now.tool_unnamed").into_owned();
+    }
+    match kind {
+        ToolKind::Fetch => t!("now.fetch", target = compact_fetch_target(title)).into_owned(),
+        ToolKind::Search => t!("now.search", query = title).into_owned(),
+        ToolKind::Read => t!("now.read", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Edit => t!("now.edit", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Delete => t!("now.delete", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Move => t!("now.move", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Execute => t!("now.execute", target = compact_command_leaf(title)).into_owned(),
+        ToolKind::Image => t!("now.image", target = compact_path_leaf(title)).into_owned(),
+        _ => t!("now.tool", target = title).into_owned(),
+    }
 }
 
 fn is_empty_assistant_body(entry: &AcpEntry) -> bool {
@@ -6679,10 +6793,6 @@ struct ProcessGroupInfo {
     end: usize,
     /// 过程组所属回合仍在运行；不能借用整个视图的当前回合状态，否则旧组会被误标。
     active: bool,
-    /// 最近一项未结束的普通工具类别。没有时标题换成「正在想」的点。
-    active_tool_kind: Option<ToolKind>,
-    /// 尚未结束的 agent 操作。
-    active_agents: usize,
     /// 同一回合可能被正文拆成多段，只在最后一段显示回合耗时；收成摘要的回合由摘要显示。
     show_elapsed: bool,
     /// 该回合从发出 prompt 到 TurnEnded 的耗时。旧会话没有计时。
@@ -6974,7 +7084,7 @@ fn build_conversation_layout(
     entries: &[AcpEntry],
     current_turn_active: bool,
 ) -> Vec<EntryPresentation> {
-    build_conversation_layout_with_timings(entries, current_turn_active, 0, &[], None)
+    build_conversation_layout_with_timings(entries, current_turn_active, 0, &[])
 }
 
 fn build_conversation_layout_with_timings(
@@ -6982,7 +7092,6 @@ fn build_conversation_layout_with_timings(
     current_turn_active: bool,
     entries_offset: usize,
     turn_timings: &[smelt_plugin_api::model::acp_session::TurnTiming],
-    live_elapsed_ms: Option<u64>,
 ) -> Vec<EntryPresentation> {
     let mut layout = vec![EntryPresentation::default(); entries.len()];
     fill_conversation_layout(
@@ -6992,7 +7101,6 @@ fn build_conversation_layout_with_timings(
         current_turn_active,
         entries_offset,
         turn_timings,
-        live_elapsed_ms,
     );
     layout
 }
@@ -7005,7 +7113,6 @@ fn refresh_conversation_layout_from(
     current_turn_active: bool,
     entries_offset: usize,
     turn_timings: &[smelt_plugin_api::model::acp_session::TurnTiming],
-    live_elapsed_ms: Option<u64>,
 ) {
     let from = from.min(entries.len());
     layout.truncate(entries.len());
@@ -7022,7 +7129,6 @@ fn refresh_conversation_layout_from(
         current_turn_active,
         entries_offset,
         turn_timings,
-        live_elapsed_ms,
     );
 }
 
@@ -7033,7 +7139,6 @@ fn fill_conversation_layout(
     current_turn_active: bool,
     entries_offset: usize,
     turn_timings: &[smelt_plugin_api::model::acp_session::TurnTiming],
-    live_elapsed_ms: Option<u64>,
 ) {
     while start < entries.len() {
         if is_user_entry(&entries[start]) || entries[start].is_divider() {
@@ -7149,31 +7254,6 @@ fn fill_conversation_layout(
                 .iter()
                 .filter(|ix| matches!(entries[**ix], AcpEntry::ToolCall { .. }))
                 .count();
-            let active_tool_kind = process_indices
-                .iter()
-                .rev()
-                .find_map(|ix| match entries[*ix] {
-                    AcpEntry::ToolCall {
-                        kind,
-                        status: ToolCallStatus::Pending | ToolCallStatus::InProgress,
-                        ..
-                    } if kind != ToolKind::Collaborate => Some(kind),
-                    _ => None,
-                });
-            let active_agents = process_indices
-                .iter()
-                .filter(|ix| match &entries[**ix] {
-                    AcpEntry::ToolCall {
-                        kind,
-                        status,
-                        children,
-                        ..
-                    } => smelt_plugin_api::model::acp_chat::is_active_agent_tool(
-                        *kind, *status, children,
-                    ),
-                    _ => false,
-                })
-                .count();
             let group_end = process_indices
                 .last()
                 .copied()
@@ -7184,19 +7264,11 @@ fn fill_conversation_layout(
                 let show_elapsed = group_index + 1 == group_count
                     && !trailing_standalone_thought
                     && turn_fold.is_none();
-                let elapsed_ms = if !show_elapsed {
-                    None
-                } else if closed {
-                    turn_elapsed_ms
-                } else {
-                    live_elapsed_ms
-                };
+                let elapsed_ms = turn_elapsed_ms.filter(|_| show_elapsed);
                 let group = ProcessGroupInfo {
                     first,
                     end: group_end,
                     active: !closed,
-                    active_tool_kind,
-                    active_agents,
                     show_elapsed,
                     elapsed_ms,
                     tally: tally_tools(entries, process_indices.iter().copied()),
@@ -7236,18 +7308,6 @@ fn layout_recompute_start(entries: &[AcpEntry], dirty: usize) -> usize {
         return conversation_segment_start(entries, dirty - 1);
     }
     conversation_segment_start(entries, dirty)
-}
-
-fn patch_live_elapsed(layout: &mut [EntryPresentation], from: usize, live_elapsed_ms: Option<u64>) {
-    let from = from.min(layout.len());
-    for item in &mut layout[from..] {
-        if let Some(group) = item.process_group.as_mut()
-            && group.active
-            && group.show_elapsed
-        {
-            group.elapsed_ms = live_elapsed_ms;
-        }
-    }
 }
 
 /// 工具 id、任务 id 在条目写入后不变。元素键每帧重建，文本留在这里。
@@ -7335,8 +7395,7 @@ struct ConversationLayoutCache {
     turn_active: bool,
     loaded_offset: usize,
     timings_len: usize,
-    live_elapsed_ms: Option<u64>,
-    /// `None` 表示缓存和当前 entries 一致。`Some(usize::MAX)` 只可能改相位或耗时。
+    /// `None` 表示缓存和当前 entries 一致。`Some(usize::MAX)` 只可能改了相位。
     dirty_from: Option<usize>,
 }
 
@@ -7350,7 +7409,6 @@ impl Default for ConversationLayoutCache {
             turn_active: false,
             loaded_offset: 0,
             timings_len: 0,
-            live_elapsed_ms: None,
             dirty_from: Some(0),
         }
     }

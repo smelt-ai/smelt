@@ -549,6 +549,53 @@ notice:
   dismiss:
     en: "Dismiss"
     zh-CN: "关闭提示"
+now:
+  agents:
+    one:
+      en: "Waiting for a subagent"
+      zh-CN: "等子智能体做完"
+    other:
+      en: "Waiting for %{count} subagents"
+      zh-CN: "等 %{count} 个子智能体做完"
+  answering:
+    en: "Writing the answer"
+    zh-CN: "正在写回答"
+  delete:
+    en: "Deleting %{target}"
+    zh-CN: "正在删除 %{target}"
+  edit:
+    en: "Editing %{target}"
+    zh-CN: "正在修改 %{target}"
+  execute:
+    en: "Running %{target}"
+    zh-CN: "正在运行 %{target}"
+  fetch:
+    en: "Opening %{target}"
+    zh-CN: "正在打开 %{target}"
+  image:
+    en: "Processing %{target}"
+    zh-CN: "正在处理 %{target}"
+  more_agents:
+    en: "%{count} more running"
+    zh-CN: "还有 %{count} 个在跑"
+  move:
+    en: "Moving %{target}"
+    zh-CN: "正在移动 %{target}"
+  read:
+    en: "Reading %{target}"
+    zh-CN: "正在读取 %{target}"
+  search:
+    en: "Searching %{query}"
+    zh-CN: "正在搜索 %{query}"
+  tool:
+    en: "Running %{target}"
+    zh-CN: "正在调用 %{target}"
+  tool_unnamed:
+    en: "Running a tool"
+    zh-CN: "正在调用工具"
+  waiting:
+    en: "Waiting for you to confirm"
+    zh-CN: "等你确认"
 outcome:
   failed:
     en: "This turn didn't finish"
@@ -797,9 +844,6 @@ status:
   thinking:
     en: "Thinking"
     zh-CN: "正在想"
-  thinking_for:
-    en: "Thinking · %{elapsed}"
-    zh-CN: "正在想 · %{elapsed}"
   thought_for:
     en: "Thought for %{elapsed}"
     zh-CN: "想了 %{elapsed}"
