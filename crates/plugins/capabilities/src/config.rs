@@ -93,9 +93,7 @@ impl CapabilitiesPage {
         self.remote_desktop = false;
         self.refresh_pi_library(cx);
         self.refresh_remote_desktop(cx);
-        if self.tab == CapabilitiesTab::Models {
-            self.refresh_pi_auth_providers(cx);
-        }
+        self.load_tab(cx);
         cx.notify();
     }
 

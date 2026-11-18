@@ -8,7 +8,7 @@ use serde::Serialize;
 use smelt_plugin_api::model::acp_conn::AcpForkCut;
 use smelt_plugin_api::{Command, RuntimeKey, machine_json};
 
-/// 能力库页。参数 `{"tab": "models" | "plugins" | "mcp" | "memory", "machine": …}`。
+/// 能力库页。参数 `{"tab": "plugins" | "mcp", "machine": …}`。
 pub(crate) const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
 
 // 约定：smelt.sessions 的 ACTIVATE，权威定义在 crates/plugins/sessions/src/contract.rs。

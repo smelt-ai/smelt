@@ -1,12 +1,13 @@
 //! 能力库：给某台机器上的 Pi 配模型与凭据、MCP 服务器、技能与扩展、记忆召回。
 //!
-//! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道，宿主里没有它的类型。视图 id 是
-//! `smelt.capabilities/main`，打开时的参数：`{"tab": "models" | "plugins" | "mcp" | "memory",
-//! "machine": …}`（机器的写法见 [`api::machine_to_json`]），都可以不给。每台机器的菜单里也
-//! 登记一项「能力库」（[`MACHINE_MENU`]），点了打开时带上那台机器。
+//! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道，宿主里没有它的类型。登记三个视图
+//! （id 和参数见 [`contract`]）：能力库页本身只放给 Pi 装的东西（技能和扩展、MCP）；模型
+//! （Provider、默认模型）和记忆检索是 Pi 怎么跑的偏好，各是设置里的一页。每台机器的菜单里
+//! 也登记一项「能力库」（[`MACHINE_MENU`]），点了打开时带上那台机器。
 //!
-//! 状态全在 [`CapabilitiesPage`] 上：在配哪台机器、那台机器的 Pi 配置快照、各表单。
-//! 页面一直留着，离开再回来表单还在；每次打开重读快照。
+//! 三个视图是同一个 [`CapabilitiesPage`]，各自只露自己那几个页签。状态在页面上：在配哪台
+//! 机器、那台机器的 Pi 配置快照（运行时那份的只读缓存）、各表单。页面一直留着，离开再回来
+//! 表单还在；每次打开重读快照。
 
 use std::rc::Rc;
 
@@ -21,7 +22,7 @@ use gpui_base::StyledExt as _;
 use rust_i18n::t;
 use smelt_plugin_api::{
     self as api, ContextMenuAction, ContextMenuItem, HostEvent, PluginView, RuntimeKey,
-    TopicMessage, ViewHandle, ViewSpec,
+    SettingsEntry, SettingsGroup, TopicMessage, ViewHandle, ViewSpec,
 };
 
 mod agents;
@@ -69,18 +70,59 @@ pub fn register(cx: &mut App) {
     refresh_auto_providers_once_online(cx);
     api::register_views(
         OWNER,
-        vec![ViewSpec {
-            name: "main".into(),
-            title: api::text!("title"),
-            icon: IconName::LayoutDashboard.path(),
-            draws_top_bar: false,
-            instances: false,
-            settings: None,
-            fills: Vec::new(),
-            build: Rc::new(|window, cx| {
-                Rc::new(cx.new(|cx| CapabilitiesPage::new(window, cx))) as Rc<dyn ViewHandle>
-            }),
-        }],
+        vec![
+            page_spec(
+                "main",
+                api::text!("title"),
+                IconName::LayoutDashboard,
+                None,
+                &LIBRARY_TABS,
+            ),
+            page_spec(
+                "models",
+                api::text!("tab.models"),
+                IconName::Sparkles,
+                Some(SettingsEntry {
+                    group: SettingsGroup::Agents,
+                    keywords: [
+                        "模型",
+                        "默认模型",
+                        "服务商",
+                        "provider",
+                        "api key",
+                        "登录",
+                        "订阅",
+                        "思考",
+                        "thinking",
+                        "pi",
+                    ]
+                    .map(SharedString::new_static)
+                    .to_vec(),
+                }),
+                &MODELS_TABS,
+            ),
+            page_spec(
+                "memory",
+                api::text!("tab.memory"),
+                IconName::BookOpen,
+                Some(SettingsEntry {
+                    group: SettingsGroup::Agents,
+                    keywords: [
+                        "记忆",
+                        "检索",
+                        "向量",
+                        "嵌入",
+                        "embedding",
+                        "重排",
+                        "rerank",
+                        "memory",
+                    ]
+                    .map(SharedString::new_static)
+                    .to_vec(),
+                }),
+                &MEMORY_TABS,
+            ),
+        ],
         cx,
     )
     .expect("能力库的视图表写错了");
@@ -107,6 +149,35 @@ pub fn register(cx: &mut App) {
     };
     api::register_context_menu_items(OWNER, MACHINE_MENU, vec![item], cx)
         .expect("能力库的菜单项写错了");
+}
+
+/// 能力库页：给 Pi 装的东西。
+const LIBRARY_TABS: [CapabilitiesTab; 2] = [CapabilitiesTab::Plugins, CapabilitiesTab::Mcp];
+/// 设置 → 模型。
+const MODELS_TABS: [CapabilitiesTab; 1] = [CapabilitiesTab::Models];
+/// 设置 → 记忆。
+const MEMORY_TABS: [CapabilitiesTab; 1] = [CapabilitiesTab::Memory];
+
+/// 一个视图：同一个页面，只露 `tabs` 这几个页签。`settings` 给了就是设置里的一页。
+fn page_spec(
+    name: &'static str,
+    title: api::Text,
+    icon: IconName,
+    settings: Option<SettingsEntry>,
+    tabs: &'static [CapabilitiesTab],
+) -> ViewSpec {
+    ViewSpec {
+        name: name.into(),
+        title,
+        icon: icon.path(),
+        draws_top_bar: false,
+        instances: false,
+        settings,
+        fills: Vec::new(),
+        build: Rc::new(move |window, cx| {
+            Rc::new(cx.new(|cx| CapabilitiesPage::new(tabs, window, cx))) as Rc<dyn ViewHandle>
+        }),
+    }
 }
 
 /// 本机运行时第一次连上时，请它照端点刷新 Pi 里标记为「自动」的自定义 provider 的模型目录。
@@ -145,10 +216,9 @@ fn open_on_machine(args: MachineMenuContext, cx: &mut App) -> Task<Result<(), St
     })
 }
 
-/// 页面里平级的几个页签。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// 页面里平级的几个页签；每个视图只露其中几个（[`LIBRARY_TABS`] 等）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CapabilitiesTab {
-    #[default]
     Models,
     Plugins,
     Mcp,
@@ -156,8 +226,6 @@ enum CapabilitiesTab {
 }
 
 impl CapabilitiesTab {
-    const ALL: [Self; 4] = [Self::Models, Self::Plugins, Self::Mcp, Self::Memory];
-
     fn label(self) -> SharedString {
         match self {
             Self::Models => t!("tab.models"),
@@ -177,13 +245,11 @@ impl CapabilitiesTab {
             Self::Memory => "memory",
         }
     }
-
-    fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|tab| tab.key() == key)
-    }
 }
 
 pub struct CapabilitiesPage {
+    /// 这个视图露哪几个页签，第一个是默认的。
+    tabs: &'static [CapabilitiesTab],
     /// 在配哪台机器。
     machine: RuntimeKey,
     /// 换一次机器加一：换之前发出去、还没回来的调用作废，免得上一台的结果落到这一台。
@@ -224,7 +290,7 @@ pub struct CapabilitiesPage {
 }
 
 impl CapabilitiesPage {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(tabs: &'static [CapabilitiesTab], window: &mut Window, cx: &mut Context<Self>) -> Self {
         let events = api::events(cx);
         let host_events =
             cx.subscribe_in(&events, window, |this, _, event: &HostEvent, window, cx| {
@@ -235,9 +301,10 @@ impl CapabilitiesPage {
             });
         let agent_settings = cx.observe_global::<agents::AgentSettingsCache>(|_, cx| cx.notify());
         Self {
+            tabs,
             machine: RuntimeKey::Local,
             epoch: 0,
-            tab: CapabilitiesTab::default(),
+            tab: tabs[0],
             pi_config: PiConfigSlot::default(),
             pi_model_editor: None,
             pi_custom_provider_editor: None,
@@ -381,12 +448,9 @@ impl CapabilitiesPage {
 
 impl PluginView for CapabilitiesPage {
     fn open(&mut self, args: &serde_json::Value, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = args
-            .get("tab")
-            .and_then(serde_json::Value::as_str)
-            .and_then(CapabilitiesTab::from_key)
-        {
-            self.tab = tab;
+        let key = args.get("tab").and_then(serde_json::Value::as_str);
+        if let Some(tab) = self.tabs.iter().find(|tab| Some(tab.key()) == key) {
+            self.tab = *tab;
         }
         let mut machine = args
             .get("machine")
@@ -409,27 +473,33 @@ impl Render for CapabilitiesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = api::host(cx);
         let entity = cx.entity();
-        let tabs = Segmented::new("capabilities-tabs")
-            .segments(CapabilitiesTab::ALL.map(|tab| tab.label()))
-            .selected(CapabilitiesTab::ALL.iter().position(|tab| *tab == self.tab))
-            .on_select(move |ix, _, cx| {
-                if let Some(tab) = CapabilitiesTab::ALL.get(ix).copied() {
-                    entity.update(cx, |page, cx| page.select_tab(tab, cx));
-                }
-            });
+        let all = self.tabs;
+        // 只有一个页签（设置里那两页）时不画页签条。
+        let tabs = (all.len() > 1).then(|| {
+            Segmented::new("capabilities-tabs")
+                .segments(all.iter().map(|tab| tab.label()))
+                .selected(all.iter().position(|tab| *tab == self.tab))
+                .on_select(move |ix, _, cx| {
+                    if let Some(tab) = all.get(ix).copied() {
+                        entity.update(cx, |page, cx| page.select_tab(tab, cx));
+                    }
+                })
+        });
         // 挂了别的机器，才需要选在配哪台。
         let several_machines = host.machines(cx).len() > 1;
-        // 页名在外壳画的标题带（或标签）上，这一行不再写一遍。
-        let header = api::ui::page_toolbar()
-            .gap_3()
-            .child(tabs)
-            .when(several_machines, |header| {
-                header
-                    .child(div().flex_1())
-                    .child(self.render_machine_picker(cx))
-            });
+        // 页名在外壳画的标题带（或标签、设置的工具栏）上，这一行不再写一遍。
+        let header = (tabs.is_some() || several_machines).then(|| {
+            api::ui::page_toolbar()
+                .gap_3()
+                .children(tabs)
+                .when(several_machines, |header| {
+                    header
+                        .child(div().flex_1())
+                        .child(self.render_machine_picker(cx))
+                })
+        });
 
-        div().flex().flex_col().size_full().child(header).child(
+        div().flex().flex_col().size_full().children(header).child(
             div()
                 .flex_1()
                 .min_w_0()
