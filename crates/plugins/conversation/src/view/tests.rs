@@ -1539,44 +1539,12 @@ fn assistant_bodies_split_process_groups_in_active_and_completed_turns() {
         assert!(!layout[1].final_answer);
         assert!(!layout[4].final_answer);
         assert_eq!(layout[7].final_answer, !active);
-        for ix in [2, 5] {
-            assert!(
-                layout[ix].process_group.is_none(),
-                "思考也是过程说明，留在段外，active={active}"
-            );
-        }
-        for (first, end) in [(3, 4), (6, 7)] {
-            let group = layout[first].process_group.expect("工具应归入过程组");
+        for (first, end) in [(2, 4), (5, 7)] {
+            let group = layout[first].process_group.expect("思考和工具应归入过程组");
             assert_eq!((group.first, group.end), (first, end));
+            assert_eq!(layout[first + 1].process_group, Some(group));
         }
     }
-}
-
-/// 只用思考讲过程的 agent：每段思考同样把工具切开，不会整轮并成一段。
-#[test]
-fn thoughts_split_segments_like_bodies() {
-    let entries = vec![
-        AcpEntry::User("查一下".into()),
-        thought("先看入口"),
-        completed_tool("run-1", ToolKind::Execute, "ls"),
-        completed_tool("read-1", ToolKind::Read, "a.rs"),
-        thought("再看调用方"),
-        AcpEntry::Assistant {
-            text: String::new(),
-            thought: true,
-        },
-        completed_tool("read-2", ToolKind::Read, "b.rs"),
-        thought("还要核对测试"),
-    ];
-    let layout = build_conversation_layout(&entries, true);
-    for ix in [1, 4, 7] {
-        assert!(layout[ix].process_group.is_none(), "思考 {ix} 必须可见");
-    }
-    let first = layout[2].process_group.expect("前两个工具是一段");
-    assert_eq!((first.first, first.end), (2, 4));
-    assert_eq!(layout[3].process_group, Some(first));
-    let second = layout[6].process_group.expect("没写出字的思考不切段");
-    assert_eq!((second.first, second.end), (6, 7));
 }
 
 fn background_wakeup_entries() -> Vec<AcpEntry> {
@@ -1616,16 +1584,16 @@ fn background_wakeup_keeps_all_bodies_and_the_task_note_visible() {
     let entries = background_wakeup_entries();
     for active in [true, false] {
         let layout = build_conversation_layout(&entries, active);
-        for ix in [2, 3, 4, 5, 7] {
+        for ix in [2, 3, 4, 7] {
             assert!(
                 layout[ix].process_group.is_none(),
-                "正文、思考或状态行 {ix} 必须可见，active={active}"
+                "正文或状态行 {ix} 必须可见，active={active}"
             );
         }
         assert!(!layout[2].final_answer);
         assert!(!layout[4].final_answer);
         assert_eq!(layout[7].final_answer, !active);
-        for (first, end) in [(1, 2), (6, 7), (8, 9)] {
+        for (first, end) in [(1, 2), (5, 7), (8, 9)] {
             let group = layout[first].process_group.expect("工具应归入过程组");
             assert_eq!((group.first, group.end), (first, end));
             for ix in first..end {
@@ -1974,7 +1942,7 @@ fn split_process_groups_show_turn_elapsed_only_once() {
     let completed = build_conversation_layout_with_timings(&entries, false, 0, &timings);
     let fold = completed[1].turn_fold.expect("回答之前的过程收成摘要");
     assert_eq!((fold.first, fold.end, fold.elapsed_ms), (1, 7, Some(4_000)));
-    for ix in [1, 6, 8] {
+    for ix in [1, 5, 8] {
         let group = completed[ix].process_group.unwrap();
         assert!(!group.show_elapsed, "耗时已经写在摘要上");
         assert_eq!(group.elapsed_ms, None);
@@ -1982,7 +1950,7 @@ fn split_process_groups_show_turn_elapsed_only_once() {
     assert!(completed[8].turn_fold.is_none(), "回答之后的工具不收进摘要");
 
     let live = build_conversation_layout_with_timings(&entries, true, 0, &[]);
-    for ix in [1, 6] {
+    for ix in [1, 5] {
         let group = live[ix].process_group.unwrap();
         assert!(!group.show_elapsed);
         assert_eq!(group.elapsed_ms, None);
@@ -2102,12 +2070,13 @@ fn now_names_the_running_tool_in_the_present_tense() {
         completed_tool("read", ToolKind::Read, "src/lib.rs"),
         running(ToolKind::Execute, "cargo test\n--all"),
     ];
-    let state = super::now_state(&entries, &[], false);
+    let state = super::now_state(&entries, &[], false, |_| true);
     assert_eq!(
         state.activity,
         super::NowActivity::Tool(ToolKind::Execute, "cargo test\n--all".into())
     );
     assert_eq!(super::now_activity_label(&state), "Running cargo test");
+    assert_eq!(state.thought_excerpt, None, "在跑工具时不露思考摘要");
     assert_eq!(
         super::now_tool_label(ToolKind::Read, "crates/a/Cargo.toml"),
         "Reading Cargo.toml"
@@ -2117,7 +2086,7 @@ fn now_names_the_running_tool_in_the_present_tense() {
         "Running a tool"
     );
 
-    let waiting = super::now_state(&entries, &[], true);
+    let waiting = super::now_state(&entries, &[], true, |_| true);
     assert_eq!(waiting.activity, super::NowActivity::Waiting);
     assert_eq!(
         super::now_activity_label(&waiting),
@@ -2130,10 +2099,37 @@ fn now_names_the_running_tool_in_the_present_tense() {
         AcpEntry::User("这一轮".into()),
     ];
     assert_eq!(
-        super::now_state(&previous_turn, &[], false).activity,
+        super::now_state(&previous_turn, &[], false, |_| true).activity,
         super::NowActivity::Thinking,
         "上一轮没收尾的工具不算这一轮在做的事"
     );
+}
+
+#[test]
+fn now_shows_a_thought_excerpt_only_when_the_thought_is_folded_away() {
+    let entries = vec![
+        AcpEntry::User("看看".into()),
+        completed_tool("read", ToolKind::Read, "a.rs"),
+        thought("先看调用方"),
+        AcpEntry::Assistant {
+            text: " ".into(),
+            thought: false,
+        },
+    ];
+    let hidden = super::now_state(&entries, &[], false, |ix| ix == 2);
+    assert_eq!(hidden.activity, super::NowActivity::Thinking);
+    assert_eq!(hidden.thought_excerpt.as_deref(), Some("先看调用方"));
+    let visible = super::now_state(&entries, &[], false, |_| false);
+    assert_eq!(visible.thought_excerpt, None, "看得见的思考不再抄一遍");
+
+    let mut answering = entries.clone();
+    answering.push(AcpEntry::Assistant {
+        text: "结论是".into(),
+        thought: false,
+    });
+    let state = super::now_state(&answering, &[], false, |_| true);
+    assert_eq!(state.activity, super::NowActivity::Answering);
+    assert_eq!(state.thought_excerpt, None);
 }
 
 #[test]
@@ -2156,7 +2152,7 @@ fn now_counts_this_turns_running_subagents() {
         subagent_view("sa-2", SubagentStatus::Completed),
         other_turn,
     ];
-    let state = super::now_state(&entries, &live, false);
+    let state = super::now_state(&entries, &live, false, |_| true);
     assert_eq!(
         state.activity,
         super::NowActivity::Agents,
@@ -3596,7 +3592,6 @@ fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpu
         view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
         view.expanded_turn_folds.insert(1);
         view.expanded_process_groups.insert(2);
-        view.expanded_process_groups.insert(4);
         view
     });
     let cx: &mut VisualTestContext = cx;
@@ -3620,10 +3615,7 @@ fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpu
         .expect("completed tool should paint as a compact timeline row");
     let thought = cx
         .debug_bounds("ACP_PROGRESS_3")
-        .expect("思考是两段之间的过程说明");
-    let next_header = cx
-        .debug_bounds("ACP_PROCESS_GROUP_4")
-        .expect("思考之后另起一段");
+        .expect("thought content should paint on the timeline");
     let read = cx
         .debug_bounds("ACP_TOOL_COMPACT_4")
         .expect("later read should stay a compact row");
@@ -3633,8 +3625,7 @@ fn expanded_process_paints_thought_and_tools_after_the_visible_body(cx: &mut gpu
     assert!(header.origin.y >= body.origin.y + body.size.height);
     assert!(tool.origin.y >= header.origin.y + header.size.height);
     assert!(thought.origin.y >= tool.origin.y + tool.size.height);
-    assert!(next_header.origin.y >= thought.origin.y + thought.size.height);
-    assert!(read.origin.y >= next_header.origin.y + next_header.size.height);
+    assert!(read.origin.y >= thought.origin.y + thought.size.height);
     assert_eq!(
         tool.origin.x, read.origin.x,
         "能预览输出的行（搜索）和不能预览的行（读文件）左边缘对齐"

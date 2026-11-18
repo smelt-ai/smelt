@@ -5996,12 +5996,19 @@ enum NowActivity {
 #[derive(Debug, PartialEq, Eq)]
 struct NowState {
     activity: NowActivity,
+    /// 在想、而最新那段思考收在折叠的段里看不见时，露一句摘要。
+    thought_excerpt: Option<String>,
     /// 这一轮还在跑的子智能体。它们各自列在派出它们的那段里，这里只计数。
     running_agents: usize,
 }
 
-/// 从本轮条目和宿主报的子智能体算出「现在」。思考是时间线上的过程说明，这里不再抄一遍。
-fn now_state(entries: &[AcpEntry], live_subagents: &[SubagentView], waiting: bool) -> NowState {
+/// 从本轮条目和宿主报的子智能体算出「现在」。`hidden(ix)` 说这一行是否收在折叠的段里。
+fn now_state(
+    entries: &[AcpEntry],
+    live_subagents: &[SubagentView],
+    waiting: bool,
+    hidden: impl Fn(usize) -> bool,
+) -> NowState {
     let turn_start = latest_user_message_index(entries).map_or(0, |ix| ix + 1);
     let turn = entries.get(turn_start..).unwrap_or_default();
     let running = |status: &ToolCallStatus| {
@@ -6040,23 +6047,44 @@ fn now_state(entries: &[AcpEntry], live_subagents: &[SubagentView], waiting: boo
             view.status.is_running() && turn_tool_ids.contains(view.tool_call_id.as_str())
         })
         .count();
-    let latest = turn.iter().rev().find(|entry| match entry {
-        AcpEntry::Assistant { text, .. } => !text.trim().is_empty(),
-        _ => true,
-    });
+    let latest = turn
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, entry)| match entry {
+            AcpEntry::Assistant { text, .. } => !text.trim().is_empty(),
+            _ => true,
+        });
     let activity = if waiting {
         NowActivity::Waiting
     } else if let Some((kind, title)) = running_tool {
         NowActivity::Tool(kind, title)
     } else if running_agents > 0 {
         NowActivity::Agents
-    } else if matches!(latest, Some(AcpEntry::Assistant { thought: false, .. })) {
+    } else if matches!(
+        latest,
+        Some((_, AcpEntry::Assistant { thought: false, .. }))
+    ) {
         NowActivity::Answering
     } else {
         NowActivity::Thinking
     };
+    let thought_excerpt = if activity == NowActivity::Thinking {
+        latest
+            .and_then(|(offset, entry)| match entry {
+                AcpEntry::Assistant {
+                    text,
+                    thought: true,
+                } if hidden(turn_start + offset) => Some(progress_summary(text)),
+                _ => None,
+            })
+            .filter(|excerpt| !excerpt.is_empty())
+    } else {
+        None
+    };
     NowState {
         activity,
+        thought_excerpt,
         running_agents,
     }
 }
@@ -6094,9 +6122,8 @@ fn now_tool_label(kind: ToolKind, title: &str) -> String {
     }
 }
 
-/// 还没写出字的正文或思考：不占行，也不算过程说明。
 fn is_empty_assistant_body(entry: &AcpEntry) -> bool {
-    matches!(entry, AcpEntry::Assistant { text, .. } if text.trim().is_empty())
+    matches!(entry, AcpEntry::Assistant { text, thought: false } if text.trim().is_empty())
 }
 
 fn previous_visible_process_index(
@@ -7293,16 +7320,15 @@ fn fill_conversation_layout(
                 item.turn_fold = Some(fold);
             }
         }
-        // 过程说明（正文和思考）和独立事件保持原位可见，把前后的工具切成段，段里
-        // 只剩工具。思考也算说明：有的 agent 只用思考讲自己在做什么，同一句话放进
-        // 正文还是思考各家切法不稳定，分段不能看这一位。空正文不可见，不打断相邻的过程。
+        // 正文和独立事件保持原位可见，不能被前后的工具收进同一个折叠组。
+        // 空正文不可见，和手机端一样不打断相邻的过程。
         let mut process_groups: Vec<Vec<usize>> = Vec::new();
         let mut process_indices = Vec::new();
         for ix in start..end {
             if is_empty_assistant_body(&entries[ix]) {
                 continue;
             }
-            if matches!(entries[ix], AcpEntry::Assistant { .. })
+            if matches!(entries[ix], AcpEntry::Assistant { thought: false, .. })
                 || is_completion_entry(&entries[ix])
                 || is_peer_send_entry(&entries[ix])
                 || matches!(

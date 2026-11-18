@@ -320,7 +320,7 @@ impl ConversationView {
                 };
                 if let Some((first, group)) = collapsed_header {
                     if first != i {
-                        return this.tail_only_row(i, animate_ambient, cx);
+                        return this.tail_only_row(i, &conversation_layout, animate_ambient, cx);
                     }
                     // 折叠态只构建摘要，不先渲染一遍随后会被丢弃的首个工具卡。
                     // Read 的大输出或 Edit 的 diff 因此不会在静态重绘时白做解析。
@@ -331,7 +331,7 @@ impl ConversationView {
                         (None, Some(fold)) => this.render_turn_fold_header(fold, false, muted, cx),
                         (None, None) => div().into_any_element(),
                     };
-                    let tail = this.render_turn_tail(i, animate_ambient, cx);
+                    let tail = this.render_turn_tail(i, &conversation_layout, animate_ambient, cx);
                     return div().flex().items_center()
                         .w_full()
                         .justify_center()
@@ -411,7 +411,7 @@ impl ConversationView {
                     if !card_expanded
                         && tool_uses_compact_process_row(*status, has_pending_permission)
                     {
-                        return this.tail_only_row(i, animate_ambient, cx);
+                        return this.tail_only_row(i, &conversation_layout, animate_ambient, cx);
                     }
                 }
                 // 段首行要补 diff 缓存（可变借用），得在借出 `entry` 之前画好。
@@ -535,10 +535,24 @@ impl ConversationView {
                             ))
                             .into_any_element()
                     }
-                    // 还没写出字的正文和思考不占行，「正在想」由末尾的「现在」说。
-                    AcpEntry::Assistant { text, .. } if text.trim().is_empty() => {
+                    // 过程组只收思考和工具，普通正文始终以完整 Markdown 显示。
+                    AcpEntry::Assistant { text, thought: false } if text.trim().is_empty() => {
                         div().h(px(0.)).w_full().overflow_hidden().into_any_element()
                     }
+                    // 还没写出字的思考不占行，「正在想」由末尾的「现在」说。
+                    AcpEntry::Assistant { text, thought: true } if text.trim().is_empty() => {
+                        div().h(px(0.)).w_full().overflow_hidden().into_any_element()
+                    }
+                    AcpEntry::Assistant { text, thought: true } if process_group.is_some() => this
+                        .render_progress_entry(
+                            i,
+                            entry,
+                            text,
+                            true,
+                            false,
+                            muted,
+                            cx,
+                        ),
                     AcpEntry::Assistant {
                         text,
                         thought: true,
@@ -546,6 +560,7 @@ impl ConversationView {
                         i,
                         entry,
                         text,
+                        false,
                         presentation.show_settled_thought_elapsed,
                         muted,
                         cx,
@@ -1233,7 +1248,7 @@ impl ConversationView {
                         .child(el)
                         .into_any_element();
                 }
-                if let Some(tail) = this.render_turn_tail(i, animate_ambient, cx) {
+                if let Some(tail) = this.render_turn_tail(i, &conversation_layout, animate_ambient, cx) {
                     el = div().flex().flex_col()
                         .w_full()
                         .gap_3()
@@ -1397,6 +1412,7 @@ impl ConversationView {
     fn render_turn_tail(
         &self,
         entry_ix: usize,
+        layout: &[EntryPresentation],
         animate_ambient: bool,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
@@ -1408,7 +1424,7 @@ impl ConversationView {
         }
         Some(match self.provider_retry.as_ref() {
             Some(retry) => self.render_provider_retry(retry, entry_ix, animate_ambient),
-            None => self.render_now_tail(entry_ix, animate_ambient),
+            None => self.render_now_tail(entry_ix, layout, animate_ambient),
         })
     }
 
@@ -1416,10 +1432,11 @@ impl ConversationView {
     fn tail_only_row(
         &self,
         entry_ix: usize,
+        layout: &[EntryPresentation],
         animate_ambient: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        match self.render_turn_tail(entry_ix, animate_ambient, cx) {
+        match self.render_turn_tail(entry_ix, layout, animate_ambient, cx) {
             Some(tail) => div()
                 .flex()
                 .items_center()
@@ -1445,9 +1462,25 @@ impl ConversationView {
 
     /// 「现在」：这一轮正在做什么、跑了多久。进行中的状态只在这里说一次，
     /// 段落和工具行不再各挂一份转圈和耗时；子智能体列在派出它们的那段里。
-    fn render_now_tail(&self, entry_ix: usize, animate_ambient: bool) -> gpui::AnyElement {
+    fn render_now_tail(
+        &self,
+        entry_ix: usize,
+        layout: &[EntryPresentation],
+        animate_ambient: bool,
+    ) -> gpui::AnyElement {
         let muted: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
-        let now_state = now_state(&self.entries, &self.subagents, !self.permissions.is_empty());
+        let faint = gpui::rgb(ui_theme::faint());
+        let now_state = now_state(
+            &self.entries,
+            &self.subagents,
+            !self.permissions.is_empty(),
+            |ix| {
+                layout
+                    .get(ix)
+                    .and_then(|item| item.process_group)
+                    .is_some_and(|group| !self.expanded_process_groups.contains(&group.first))
+            },
+        );
         let lead = match now_state.activity {
             NowActivity::Waiting => div()
                 .size(px(6.))
@@ -1461,11 +1494,9 @@ impl ConversationView {
             }
             _ => ambient_spinner(("acp-now-spinner", entry_ix), muted, animate_ambient),
         };
-        div()
+        let line = div()
             .flex()
             .items_center()
-            .id(("acp-now", entry_ix))
-            .debug_selector(move || format!("ACP_NOW_{entry_ix}"))
             .w_full()
             .min_h(ui_theme::height::xxs())
             .gap_1p5()
@@ -1481,8 +1512,28 @@ impl ConversationView {
             .when_some(
                 live_elapsed_ms(self.turn_started_at_ms),
                 |line, elapsed_ms| line.child(elapsed_suffix(elapsed_ms, muted)),
-            )
-            .font_features(ui_theme::tabular_figures())
+            );
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .id(("acp-now", entry_ix))
+            .debug_selector(move || format!("ACP_NOW_{entry_ix}"))
+            .w_full()
+            .gap_0p5()
+            .child(line);
+        if let Some(excerpt) = now_state.thought_excerpt {
+            col = col.child(
+                div()
+                    .pl(px(19.))
+                    .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(faint)
+                    .child(truncated_line(excerpt)),
+            );
+        }
+        col.font_features(ui_theme::tabular_figures())
             .into_any_element()
     }
 
@@ -2817,15 +2868,18 @@ impl ConversationView {
         entry_ix: usize,
         entry: &AcpEntry,
         text: &str,
+        in_process: bool,
         show_settled_elapsed: bool,
         muted: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded_thoughts.contains(&entry_ix);
         let preview = progress_summary(text);
-        // 摘要只有一行，长文必须能点开，否则后半段永远看不到。
+        let has_details = progress_has_details(text);
+        // `in_process` 是「在过程组里」，不是「还在跑」：过程组里的思考和中间说明跑完也
+        // 一直在组里，摘要只有一行，长文必须能点开，否则后半段永远看不到。
         // 悬停底和点击同一条件，避免看起来不能点却还能点。
-        let interactive = progress_has_details(text);
+        let interactive = has_details;
         // 回合没结束时没有完成耗时，进行中的耗时在末尾的「现在」里。
         let settled = if show_settled_elapsed {
             settled_thought_elapsed(
@@ -2837,53 +2891,87 @@ impl ConversationView {
         } else {
             None
         };
-        let mut row = ListRow::new(("acp-analysis-toggle", entry_ix))
-            .debug_selector(move || format!("ACP_PROGRESS_{entry_ix}"))
-            .h_flex()
-            .w_full()
-            .min_w_0()
-            .min_h(px(26.))
-            .px_2()
-            .rounded_md()
-            .gap_2()
-            .disabled(!interactive)
-            .child(
+        let mut row = ListRow::new((
+            if in_process {
+                "acp-progress-toggle"
+            } else {
+                "acp-analysis-toggle"
+            },
+            entry_ix,
+        ))
+        .debug_selector(move || format!("ACP_PROGRESS_{entry_ix}"))
+        .h_flex()
+        .w_full()
+        .min_w_0()
+        .min_h(px(if in_process { 22. } else { 26. }))
+        .when(!in_process, |row| row.px_2().rounded_md())
+        .gap_2()
+        .disabled(!interactive)
+        .when(in_process && interactive, |row| row.group(EXPAND_ICON_GROUP))
+        .child(if in_process {
+            // 过程组里的行不另加尾部箭头，和工具行一样：指上去时左侧图标换成箭头。
+            let thought = matches!(entry, AcpEntry::Assistant { thought: true, .. });
+            let circle = || {
+                div()
+                    .size(px(8.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(muted)
+                    .into_any_element()
+            };
+            if thought && interactive {
+                expandable_lead_icon(IconName::Asterisk, expanded, muted)
+            } else if thought {
+                Icon::new(IconName::Asterisk)
+                    .size(px(13.))
+                    .text_color(muted)
+                    .into_any_element()
+            } else if interactive {
+                expandable_lead(circle(), expanded, muted)
+            } else {
+                circle()
+            }
+        } else {
+            div()
+                .flex_shrink_0()
+                .type_style(TYPE.text_xsmall_medium)
+                .text_color(muted)
+                .child(t!("thought.summary").into_owned())
+                .into_any_element()
+        })
+        .child(
+            // 摘要常是中英混排，GPUI 的 `.truncate()` 会把省略号裁掉，见 `truncated_line`。
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(truncated_line(preview.clone())),
+        )
+        .when_some(settled, |row, elapsed_ms| {
+            row.child(
                 div()
                     .flex_shrink_0()
-                    .type_style(TYPE.text_xsmall_medium)
-                    .text_color(muted)
-                    .child(t!("thought.summary").into_owned()),
-            )
-            .child(
-                // 摘要常是中英混排，GPUI 的 `.truncate()` 会把省略号裁掉，见 `truncated_line`。
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
                     .type_style(TYPE.text_xsmall)
                     .text_color(muted)
-                    .child(truncated_line(preview.clone())),
+                    .child(settled_thought_label(elapsed_ms)),
             )
-            .when_some(settled, |row, elapsed_ms| {
-                row.child(
-                    div()
-                        .flex_shrink_0()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(muted)
-                        .child(settled_thought_label(elapsed_ms)),
-                )
-            });
+        });
         if interactive {
             row = row
                 .role(gpui::Role::Button)
                 .aria_label(preview)
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(muted)
-                        .child(if expanded { "▾" } else { "▸" }),
-                )
+                .when(!in_process, |row| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .type_style(TYPE.text_xsmall)
+                            .text_color(muted)
+                            .child(if expanded { "▾" } else { "▸" }),
+                    )
+                })
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     let open = if this.expanded_thoughts.remove(&entry_ix) {
                         false
@@ -2905,17 +2993,21 @@ impl ConversationView {
         }
         let reveal = self.thought_reveal_progress(entry_ix);
         let mut col = div().flex().flex_col().w_full().min_w_0().child(row);
-        if interactive && (reveal.is_some() || expanded) {
+        if has_details && (reveal.is_some() || expanded) {
             let details = div()
                 .min_w_0()
-                .pl(px(8.))
+                .pl(px(if in_process { 24. } else { 8. }))
                 .pr_2()
                 .pt_2()
                 .pb_2()
                 .type_style(TYPE.text_xsmall)
                 .text_color(muted)
                 .child(self.retained_markdown(
-                    "acp-analysis-md",
+                    if in_process {
+                        "acp-progress-md"
+                    } else {
+                        "acp-analysis-md"
+                    },
                     entry_ix,
                     0,
                     cached_entry_markdown(&self.rendered_markdown, entry_ix, entry),
