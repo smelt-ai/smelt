@@ -108,6 +108,13 @@ pub(crate) struct Node {
     /// 状态不能盖掉新节点的。
     serial: u64,
     pub hub: Arc<ConnectionHub>,
+    /// 同步请求和忘记时的取消登记不能并发；只在不持有 registry/view 时等待此锁。
+    /// 请求超时后运行时仍可能处理它，客户端串行化不能保证这种情况下的远端顺序。
+    push_sync: Mutex<()>,
+    #[cfg(test)]
+    forget_push_lock_probe: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    #[cfg(test)]
+    sync_push_lock_probe: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     pub catalog: Catalog,
     pub agents: Agents,
     pub files: Files,
@@ -197,7 +204,43 @@ impl Node {
             target,
             serial,
             hub,
+            push_sync: Mutex::new(()),
+            #[cfg(test)]
+            forget_push_lock_probe: Mutex::new(None),
+            #[cfg(test)]
+            sync_push_lock_probe: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    fn lock_push_with_probe(
+        &self,
+        probe: &Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    ) -> MutexGuard<'_, ()> {
+        if let Some(probe) = lock(probe).take() {
+            match self.push_sync.try_lock() {
+                Ok(guard) => return guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => return error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let _ = probe.send(());
+                }
+            }
+        }
+        lock(&self.push_sync)
+    }
+
+    fn lock_push_for_forget(&self) -> MutexGuard<'_, ()> {
+        #[cfg(test)]
+        return self.lock_push_with_probe(&self.forget_push_lock_probe);
+        #[cfg(not(test))]
+        lock(&self.push_sync)
+    }
+
+    fn lock_push_for_sync(&self) -> MutexGuard<'_, ()> {
+        #[cfg(test)]
+        return self.lock_push_with_probe(&self.sync_push_lock_probe);
+        #[cfg(not(test))]
+        lock(&self.push_sync)
     }
 
     /// 撤掉这台机器：会话目录不再推事件，对话订阅停下且不再写缓存，断开连接（终端随之以
@@ -572,9 +615,21 @@ impl Fleet {
             .iter()
             .find(|record| record.runtime_id == runtime_id)
             .map(|record| record.endpoint_id.clone());
-        shared.unregister_push_before_forget(runtime_id);
-        if !env.store.delete_runtime(runtime_id)? {
-            return Err(crate::store::unknown_runtime(runtime_id));
+        lock(&shared.view).push.begin_forget(runtime_id);
+        if let Ok(node) = shared.node(runtime_id) {
+            let _push_sync = node.lock_push_for_forget();
+            shared.unregister_push_before_forget(&node);
+        }
+        let deleted = env.store.delete_runtime(runtime_id);
+        if !matches!(&deleted, Ok(true)) {
+            let job = lock(&shared.view).push.cancel_forget(runtime_id);
+            if let Some(job) = job {
+                shared.spawn_push_sync(job);
+            }
+            return match deleted {
+                Err(failure) => Err(failure),
+                _ => Err(crate::store::unknown_runtime(runtime_id)),
+            };
         }
         shared.remove_node(runtime_id);
         // 节点已停（对话不再写缓存）之后再删缓存。
@@ -749,6 +804,28 @@ impl Shared {
         lock(&self.view)
             .statuses
             .insert(runtime_id.clone(), (serial, idle_status()));
+        {
+            let mut registry = lock(&self.registry);
+            let pass_weak = Arc::downgrade(self);
+            let pass_id = runtime_id.clone();
+            node.catalog.subscribe(Box::new(move |event| {
+                let Some(shared) = pass_weak.upgrade() else {
+                    return false;
+                };
+                if let Some(list) = &event.sessions {
+                    shared.pass.update(&pass_id, list.clone());
+                }
+                true
+            }));
+            registry
+                .catalog_sinks
+                .retain(|sink| sink.alive.load(Ordering::Acquire));
+            for sink in &registry.catalog_sinks {
+                attach_catalog_sink(&node, sink);
+            }
+            // subscribe 会立即推送当前连接状态；同步线程必须先能找到节点。
+            registry.nodes.insert(runtime_id.clone(), Arc::clone(&node));
+        }
         let weak = Arc::downgrade(self);
         let status_id = runtime_id.clone();
         node.hub.subscribe(Box::new(move |_generation, event| {
@@ -779,25 +856,6 @@ impl Shared {
             }
         }));
 
-        let mut registry = lock(&self.registry);
-        let pass_weak = Arc::downgrade(self);
-        let pass_id = runtime_id.clone();
-        node.catalog.subscribe(Box::new(move |event| {
-            let Some(shared) = pass_weak.upgrade() else {
-                return false;
-            };
-            if let Some(list) = &event.sessions {
-                shared.pass.update(&pass_id, list.clone());
-            }
-            true
-        }));
-        registry
-            .catalog_sinks
-            .retain(|sink| sink.alive.load(Ordering::Acquire));
-        for sink in &registry.catalog_sinks {
-            attach_catalog_sink(&node, sink);
-        }
-        registry.nodes.insert(runtime_id, Arc::clone(&node));
         node
     }
 
@@ -949,7 +1007,8 @@ impl Shared {
         let Ok(node) = self.node(&job.runtime_id) else {
             return SyncResult::Failed;
         };
-        if node.serial != job.serial {
+        let _push_sync = node.lock_push_for_sync();
+        if node.serial != job.serial || !lock(&self.view).push.can_send(job) {
             return SyncResult::Failed;
         }
         let Some(current) = node.hub.current() else {
@@ -983,23 +1042,20 @@ impl Shared {
 
     /// 忘记一台机器之前，它还连着就先取消推送登记；连不上的要到那台机器上撤销这台手机。
     /// 调用方持有 `ops`。
-    fn unregister_push_before_forget(&self, runtime_id: &str) {
-        let connected = {
+    fn unregister_push_before_forget(&self, node: &Node) {
+        let runtime_id = &node.runtime_id;
+        let should_unregister = {
             let view = lock(&self.view);
-            matches!(view.push.desired(), Desired::On(_))
+            view.push.supported(runtime_id) != Some(false)
                 && view
                     .statuses
                     .get(runtime_id)
                     .is_some_and(|(_, status)| status.state == ConnectionState::Connected)
         };
-        if !connected {
+        if !should_unregister {
             return;
         }
-        let Some(current) = self
-            .node(runtime_id)
-            .ok()
-            .and_then(|node| node.hub.current())
-        else {
+        let Some(current) = node.hub.current() else {
             return;
         };
         if let Err(call_error) = current

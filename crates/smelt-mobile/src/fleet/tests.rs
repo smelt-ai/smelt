@@ -105,6 +105,10 @@ struct FakeRuntime {
     push_methods: AtomicBool,
     /// 收到的 `push.*` 调用：方法名和参数。
     push_calls: Mutex<Vec<(String, Value)>>,
+    /// 测试中暂停一次 register，模拟请求在运行时处理途中。
+    register_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    /// 测试中暂停一次 unregister，保持忘记中的节点仍然存在。
+    unregister_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
 impl FakeRuntime {
@@ -121,6 +125,8 @@ impl FakeRuntime {
             watchers: Mutex::new(Vec::new()),
             push_methods: AtomicBool::new(true),
             push_calls: Mutex::new(Vec::new()),
+            register_gate: Mutex::new(None),
+            unregister_gate: Mutex::new(None),
         })
     }
 
@@ -239,6 +245,15 @@ impl FakeRuntime {
             Some(method @ ("push.register" | "push.unregister"))
                 if self.push_methods.load(Ordering::SeqCst) =>
             {
+                let gate = if method == "push.register" {
+                    self.register_gate.lock().unwrap().take()
+                } else {
+                    self.unregister_gate.lock().unwrap().take()
+                };
+                if let Some((entered, release)) = gate {
+                    let _ = entered.send(());
+                    let _ = release.recv();
+                }
                 self.push_calls
                     .lock()
                     .unwrap()
@@ -360,6 +375,14 @@ fn harness(
     registered: &[(&Arc<FakeRuntime>, Option<&str>)],
     others: &[&Arc<FakeRuntime>],
 ) -> Harness {
+    harness_with_timings(registered, others, FAST)
+}
+
+fn harness_with_timings(
+    registered: &[(&Arc<FakeRuntime>, Option<&str>)],
+    others: &[&Arc<FakeRuntime>],
+    timings: Timings,
+) -> Harness {
     let store = Arc::new(Store::in_memory());
     let cache = Arc::new(Cache::in_memory());
     let mut all: Vec<&Arc<FakeRuntime>> = registered.iter().map(|(runtime, _)| *runtime).collect();
@@ -371,7 +394,7 @@ fn harness(
             .record_pairing(&runtime.info(*relay), i as i64)
             .unwrap();
     }
-    let fleet = Fleet::new(FAST);
+    let fleet = Fleet::new(timings);
     let views = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&views);
     fleet.subscribe(Box::new(move |view| {
@@ -496,6 +519,39 @@ fn pairing_a_new_runtime_keeps_the_others_connected() {
 }
 
 #[test]
+fn paired_node_is_registered_before_connected_status_is_published() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let h = harness(&[], &[&a]);
+    h.store.record_pairing(&a.info(None), 0).unwrap();
+    h.fleet
+        .shared
+        .reload_records(h.fleet.shared.env().unwrap())
+        .unwrap();
+    h.fleet.set_push(push_on());
+
+    let registered = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&registered);
+    let shared = Arc::downgrade(&h.fleet.shared);
+    h.fleet.subscribe(Box::new(move |view| {
+        if view.runtimes.iter().any(|runtime| {
+            runtime.record.runtime_id == "ra" && runtime.status.state == ConnectionState::Connected
+        }) {
+            let shared = shared.upgrade().unwrap();
+            let registry = shared.registry.try_lock().unwrap();
+            seen.lock().unwrap().push(registry.nodes.contains_key("ra"));
+            return false;
+        }
+        true
+    }));
+
+    h.pair(&a, None).unwrap();
+    assert_eq!(*registered.lock().unwrap(), [true]);
+    wait_until("配对后登记推送", || {
+        push_calls(&a) == ["push.register"] && h.push_supported("ra") == Some(true)
+    });
+}
+
+#[test]
 fn pairing_a_known_endpoint_updates_the_entry_and_keeps_the_node() {
     let a = FakeRuntime::new("ra", "mac-a");
     let h = harness(&[(&a, None)], &[]);
@@ -542,6 +598,8 @@ fn re_pairing_a_reinstalled_runtime_drops_the_old_cache() {
         watchers: Mutex::new(Vec::new()),
         push_methods: AtomicBool::new(true),
         push_calls: Mutex::new(Vec::new()),
+        register_gate: Mutex::new(None),
+        unregister_gate: Mutex::new(None),
     });
     {
         let mut runtimes = h.transport.runtimes.lock().unwrap();
@@ -1092,6 +1150,118 @@ fn old_runtimes_report_push_unsupported() {
     wait_until("ra 不支持推送", || {
         h.push_supported("ra") == Some(false)
     });
+}
+
+#[test]
+fn forgetting_with_unknown_push_settings_still_unregisters() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let h = harness(&[(&a, None)], &[]);
+    h.wait_state("ra", ConnectionState::Connected);
+    h.fleet.forget("ra").unwrap();
+    assert_eq!(push_calls(&a), ["push.unregister"]);
+}
+
+#[test]
+fn forgetting_with_push_off_still_unregisters() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let h = harness(&[(&a, None)], &[]);
+    h.wait_state("ra", ConnectionState::Connected);
+    h.fleet.set_push(Desired::Off);
+    wait_until("取消推送同步完成", || {
+        h.push_supported("ra") == Some(true)
+    });
+    h.fleet.forget("ra").unwrap();
+    assert_eq!(push_calls(&a), ["push.unregister", "push.unregister"]);
+}
+
+#[test]
+fn forgetting_skips_a_queued_register() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let h = harness(&[(&a, None)], &[]);
+    h.wait_state("ra", ConnectionState::Connected);
+    let node = h.fleet.node("ra").unwrap();
+    let guard = lock(&node.push_sync);
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    *lock(&node.sync_push_lock_probe) = Some(waiting_tx);
+    let job = lock(&h.fleet.shared.view)
+        .push
+        .set(push_on())
+        .pop()
+        .unwrap();
+    std::thread::scope(|scope| {
+        let sync = scope.spawn(|| h.fleet.shared.sync_push(&job));
+        waiting_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        lock(&h.fleet.shared.view).push.begin_forget("ra");
+        drop(guard);
+        assert_eq!(sync.join().unwrap(), SyncResult::Failed);
+    });
+    assert!(h.fleet.node("ra").is_ok(), "节点还在注册表里");
+    assert!(push_calls(&a).is_empty(), "不能发出已经领取的登记请求");
+    assert_eq!(
+        lock(&h.fleet.shared.view)
+            .push
+            .finish(&job, SyncResult::Failed),
+        None
+    );
+    h.fleet.forget("ra").unwrap();
+    assert_eq!(push_calls(&a), ["push.unregister"]);
+}
+
+#[test]
+fn forgetting_waits_for_in_flight_register_and_suppresses_followup() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let h = harness_with_timings(
+        &[(&a, None)],
+        &[],
+        Timings {
+            push: crate::push::Timing {
+                call_timeout: Duration::from_secs(30),
+            },
+            ..FAST
+        },
+    );
+    h.wait_state("ra", ConnectionState::Connected);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *a.register_gate.lock().unwrap() = Some((entered_tx, release_rx));
+    let (unregister_entered_tx, unregister_entered_rx) = std::sync::mpsc::channel();
+    let (unregister_release_tx, unregister_release_rx) = std::sync::mpsc::channel();
+    *a.unregister_gate.lock().unwrap() = Some((unregister_entered_tx, unregister_release_rx));
+    let node = h.fleet.node("ra").unwrap();
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    *lock(&node.forget_push_lock_probe) = Some(waiting_tx);
+    let job = lock(&h.fleet.shared.view)
+        .push
+        .set(push_on())
+        .pop()
+        .unwrap();
+
+    std::thread::scope(|scope| {
+        // 故障时离开作用域会关闭通道，避免服务端门闩卡住线程。
+        let release_tx = release_tx;
+        let unregister_release_tx = unregister_release_tx;
+        let sync = scope.spawn(|| {
+            let result = h.fleet.shared.sync_push(&job);
+            let next = lock(&h.fleet.shared.view).push.finish(&job, result);
+            (result, next)
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let forget = scope.spawn(|| h.fleet.forget("ra"));
+        waiting_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(lock(&h.fleet.shared.view).push.is_forgetting("ra"));
+        h.fleet.set_push(Desired::Off);
+        h.fleet.set_push(push_on());
+        release_tx.send(()).unwrap();
+        unregister_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(h.fleet.node("ra").is_ok());
+        assert_eq!(sync.join().unwrap(), (SyncResult::Done, None));
+        assert!(lock(&h.fleet.shared.view).push.set(Desired::Off).is_empty());
+        unregister_release_tx.send(()).unwrap();
+        forget.join().unwrap().unwrap();
+    });
+    assert_eq!(push_calls(&a), ["push.register", "push.unregister"]);
 }
 
 /// 忘记一台连着的机器前先取消它上面的推送登记。
