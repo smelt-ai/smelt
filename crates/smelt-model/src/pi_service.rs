@@ -119,6 +119,13 @@ pub struct PluginIdParams {
     pub id: String,
 }
 
+/// 同名几份里以哪份为准。`path` 是运行时那台机器上的路径，必须是这个技能的一份。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdoptPluginParams {
+    pub id: String,
+    pub path: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportPluginParams {
     pub kind: PiPluginKind,

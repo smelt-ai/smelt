@@ -168,6 +168,7 @@ define_control_methods! {
     PiMcpLoginStart => (PI_MCP_LOGIN_START_METHOD, "pi.mcp.login_start"),
     PiPluginsRemove => (PI_PLUGINS_REMOVE_METHOD, "pi.plugins.remove"),
     PiPluginsImport => (PI_PLUGINS_IMPORT_METHOD, "pi.plugins.import"),
+    PiPluginsAdopt => (PI_PLUGINS_ADOPT_METHOD, "pi.plugins.adopt"),
     PiAuthProviders => (PI_AUTH_PROVIDERS_METHOD, "pi.auth.providers"),
     PiAuthModels => (PI_AUTH_MODELS_METHOD, "pi.auth.models"),
     PiAuthLogout => (PI_AUTH_LOGOUT_METHOD, "pi.auth.logout"),

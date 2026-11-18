@@ -2,8 +2,11 @@
 //!
 //! 管「装了什么、还在不在、谁在用」；每行能直接勾给哪些智能体用（[`uses`]），智能体编辑器
 //! 里也能勾，改的是同一份配置。
-//! 只列全局目录和随 smelt-agent 发布的内置技能：智能体对话的工作目录是一次性空目录，
+//! 只列用户级目录和随 smelt-agent 发布的内置技能：智能体对话的工作目录是一次性空目录，
 //! 项目级插件永远扫不到。内置技能跟着运行时更新，不能删。
+//!
+//! 技能以 `~/.agents/skills` 为准（运行时那边见 `smelt_core::skill_home`）：放在旧位置的
+//! 一键移过去，同名几份的挑一份为准，别的进回收目录。
 
 use super::uses::{self};
 use super::*;
@@ -77,15 +80,17 @@ fn overview_section(
 
     let import_entity = entity.clone();
     let refresh_entity = entity;
-    let (found, import_label, sources) = match kind {
+    let (found, import_label, import_description, sources) = match kind {
         PiPluginKind::Skill => (
             t!("plugins.scan_summary.skill", count = count),
             t!("plugins.import_skill"),
+            t!("plugins.import_description.skill"),
             t!("plugins.sources_description.skill"),
         ),
         PiPluginKind::Extension => (
             t!("plugins.scan_summary.extension", count = count),
             t!("plugins.import_extension"),
+            t!("plugins.import_description.extension"),
             t!("plugins.sources_description.extension"),
         ),
     };
@@ -104,7 +109,7 @@ fn overview_section(
                 }),
         );
     let import = SettingsRow::new(t!("plugins.import_confirm"))
-        .description(t!("plugins.import_description"))
+        .description(import_description)
         .child(
             Button::new("import-pi-plugin")
                 .small()
@@ -157,6 +162,59 @@ fn list_section(
         }))
 }
 
+/// 旧位置的「移到通用目录」，或同名几份时「以哪份为准」的菜单。都不是就没有。
+fn adopt_button(entity: &Entity<CapabilitiesPage>, plugin: &PiPlugin) -> Option<AnyElement> {
+    if plugin.kind != PiPluginKind::Skill || plugin.builtin {
+        return None;
+    }
+    let id = plugin.id.clone();
+    if plugin.duplicates.is_empty() {
+        if !plugin.legacy_location {
+            return None;
+        }
+        let entity = entity.clone();
+        let path = plugin.path.display().to_string();
+        return Some(
+            Button::new(format!("adopt-pi-plugin-{id}"))
+                .small()
+                .label(t!("plugins.move"))
+                .on_click(move |_, _, cx| {
+                    let (id, path) = (id.clone(), path.clone());
+                    entity.update(cx, |page, cx| page.adopt_pi_plugin(id, path, cx));
+                })
+                .into_any_element(),
+        );
+    }
+    let copies: Vec<String> = std::iter::once(&plugin.path)
+        .chain(plugin.duplicates.iter())
+        .map(|path| path.display().to_string())
+        .collect();
+    let entity = entity.clone();
+    let menu_id = format!("adopt-pi-plugin-{id}");
+    Some(
+        MenuTrigger::dropdown(
+            SharedString::from(format!("{menu_id}-menu")),
+            Button::new(SharedString::from(menu_id))
+                .small()
+                .label(t!("plugins.pick_copy"))
+                .dropdown_caret(true),
+            move |_, _| {
+                let mut menu = Menu::new();
+                for path in &copies {
+                    let entity = entity.clone();
+                    let (id, path) = (id.clone(), path.clone());
+                    menu = menu.item(MenuItem::new(path.clone()).on_click(move |_, _, cx| {
+                        let (id, path) = (id.clone(), path.clone());
+                        entity.update(cx, |page, cx| page.adopt_pi_plugin(id, path, cx));
+                    }));
+                }
+                menu
+            },
+        )
+        .into_any_element(),
+    )
+}
+
 fn plugin_row(
     entity: &Entity<CapabilitiesPage>,
     page: &CapabilitiesPage,
@@ -193,10 +251,17 @@ fn plugin_row(
     if let Some(reason) = &broken {
         detail.push(t!("plugins.broken", reason = reason).into_owned());
     }
+    if plugin.legacy_location && plugin.duplicates.is_empty() {
+        detail.push(t!("plugins.legacy").into_owned());
+    }
+    if !plugin.duplicates.is_empty() {
+        detail.push(t!("plugins.duplicates", count = plugin.duplicates.len()).into_owned());
+    }
     detail.extend(used_by);
 
     let row = SettingsRow::new(title)
         .description(detail.join("\n"))
+        .children(adopt_button(&entity, plugin))
         .children(uses_button);
     // 内置的跟着运行时更新，不能删。
     if builtin {

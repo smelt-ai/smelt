@@ -50,6 +50,7 @@ fn changes_config(method: ControlMethod) -> bool {
             | ControlMethod::PiMcpRemove
             | ControlMethod::PiPluginsRemove
             | ControlMethod::PiPluginsImport
+            | ControlMethod::PiPluginsAdopt
             | ControlMethod::PiAuthLogout
     )
 }
@@ -66,7 +67,10 @@ fn run(
     event_hub: &EventHubHandle,
 ) -> Result<serde_json::Value, ControlError> {
     match method {
-        ControlMethod::PiConfigGet => call::<PiConfigGet>(params, |_| Ok(pi_service::config())),
+        ControlMethod::PiConfigGet => call::<PiConfigGet>(params, |_| {
+            pi_service::sync_skill_bridges();
+            Ok(pi_service::config())
+        }),
         ControlMethod::PiConfigEnsureFile => {
             call::<PiConfigEnsureFile>(params, pi_service::ensure_config_file)
         }
@@ -114,6 +118,7 @@ fn run(
         ControlMethod::PiPluginsImport => {
             mutate::<PiPluginsImport>(params, pi_service::import_plugin)
         }
+        ControlMethod::PiPluginsAdopt => mutate::<PiPluginsAdopt>(params, pi_service::adopt_plugin),
         ControlMethod::PiAuthProviders => {
             call::<PiAuthProviders>(params, |_| pi_auth_service::providers())
         }

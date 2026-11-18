@@ -487,12 +487,19 @@ plugins:
   confirm_delete:
     en: "Confirm Delete"
     zh-CN: "确认删除"
+  duplicates:
+    en: "%{count} more copies with the same name; pick one to keep."
+    zh-CN: "同名还有 %{count} 份，挑一份为准，其余移进回收目录。"
   import_confirm:
     en: "Import"
     zh-CN: "导入"
   import_description:
-    en: "Copy a local skill folder (with SKILL.md) or an extension file into Pi's global folders; the original stays put."
-    zh-CN: "把本地的技能目录（含 SKILL.md）或扩展文件拷进 Pi 的全局目录，原目录不动。"
+    extension:
+      en: "Copy an extension file or folder into Pi's extension folder. One with the same name is replaced and moved to the trash."
+      zh-CN: "把扩展文件或目录拷进 Pi 的扩展目录。已有同名的会被换下，移进回收目录。"
+    skill:
+      en: "Copy a skill folder (with SKILL.md) into ~/.agents/skills, where Claude Code and other agents can read it too. One with the same name is replaced and moved to the trash."
+      zh-CN: "把技能目录（含 SKILL.md）拷进 ~/.agents/skills，Claude Code 等别的 agent 也读得到。已有同名的会被换下，移进回收目录。"
   import_extension:
     en: "Import Extension"
     zh-CN: "导入扩展"
@@ -506,11 +513,17 @@ plugins:
     en: "Installed"
     zh-CN: "已安装"
   installed_description:
-    en: "Deleting removes the files from disk and unchecks it in every agent."
-    zh-CN: "删除会直接删掉磁盘上的文件，并把所有智能体里对它的勾选一起清掉。"
+    en: "Deleting moves the files to ~/.smelt/trash and unchecks it in every agent."
+    zh-CN: "删除会把文件移进 ~/.smelt/trash，并清掉所有智能体里对它的勾选。"
   last_failed:
     en: "Last Action Failed"
     zh-CN: "上一次操作失败"
+  legacy:
+    en: "In an old location: only Smelt agents can read it."
+    zh-CN: "在旧位置，只有 Smelt 的智能体读得到。"
+  move:
+    en: "Move to ~/.agents/skills"
+    zh-CN: "移到 ~/.agents/skills"
   none:
     extension:
       en: "No extensions installed yet."
@@ -524,6 +537,9 @@ plugins:
   origin_builtin:
     en: "Source: built into %{origin}, updated with it"
     zh-CN: "来源：%{origin} 内置，跟着 Smelt 更新"
+  pick_copy:
+    en: "Keep…"
+    zh-CN: "以哪份为准"
   rescan:
     en: "Rescan"
     zh-CN: "重新扫描"

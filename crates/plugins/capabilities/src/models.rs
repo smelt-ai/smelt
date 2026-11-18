@@ -638,6 +638,18 @@ impl CapabilitiesPage {
         .detach();
     }
 
+    /// 以 `path` 那份为准：同名的别的副本进回收目录，它不在 `~/.agents/skills` 就移过去。
+    /// 只有一份的旧位置技能也走这里，就是移到通用目录。
+    pub(super) fn adopt_pi_plugin(&mut self, id: String, path: String, cx: &mut Context<Self>) {
+        self.pi_plugin_error = None;
+        self.run_pi_mutation::<api::model::control_api::PiPluginsAdopt>(
+            api::model::pi_service::AdoptPluginParams { id, path },
+            cx,
+            |this, error, _| this.pi_plugin_error = Some(error),
+        );
+        cx.notify();
+    }
+
     fn import_pi_plugin_from(
         &mut self,
         kind: api::model::pi_plugin_catalog::PiPluginKind,

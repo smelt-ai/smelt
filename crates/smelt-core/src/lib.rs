@@ -72,6 +72,7 @@ pub mod session_control;
 pub use smelt_model::session_handoff;
 pub mod session_history;
 pub mod session_metadata;
+pub mod skill_home;
 pub use smelt_model::session_title;
 pub mod sqlite_state;
 pub mod subagent_sessions;

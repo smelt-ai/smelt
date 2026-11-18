@@ -220,6 +220,7 @@ fn dispatch_control(
         | ControlMethod::PiMcpLoginStart
         | ControlMethod::PiPluginsRemove
         | ControlMethod::PiPluginsImport
+        | ControlMethod::PiPluginsAdopt
         | ControlMethod::PiAuthProviders
         | ControlMethod::PiAuthModels
         | ControlMethod::PiAuthLogout

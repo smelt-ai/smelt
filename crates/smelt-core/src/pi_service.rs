@@ -229,6 +229,35 @@ pub fn remove_plugin(params: PluginIdParams) -> Result<(), String> {
     crate::pi_plugin_catalog::remove_plugin(&plugin)
 }
 
+/// 同名几份里以 `path` 那份为准：别的进回收目录，它不在通用目录就移过去（见
+/// [`crate::skill_home::SkillHome::adopt`]）。只有一份时就是把旧位置的移到通用目录。
+/// id 不变，智能体的勾选不用动。
+pub fn adopt_plugin(params: AdoptPluginParams) -> Result<(), String> {
+    let plugin = crate::pi_plugin_catalog::discover_plugins()
+        .into_iter()
+        .find(|plugin| {
+            plugin.id == params.id && plugin.kind == crate::pi_plugin_catalog::PiPluginKind::Skill
+        })
+        .ok_or_else(|| format!("The skill doesn't exist: {}", params.id))?;
+    let home = crate::skill_home::SkillHome::current()
+        .ok_or_else(|| "can't find the home directory".to_string())?;
+    home.adopt(
+        std::path::Path::new(&params.path),
+        &crate::skill_home::copies(&plugin),
+    )
+    .map(|_| ())
+}
+
+/// 给 Claude Code 补齐指回 `~/.agents/skills` 的链接。读配置时顺带做：用户在 smelt 之外
+/// 装的技能，下次打开能力库就补上。失败只记日志，不挡读配置。
+pub fn sync_skill_bridges() {
+    if let Some(home) = crate::skill_home::SkillHome::current()
+        && let Err(error) = home.sync_bridges()
+    {
+        eprintln!("[pi] 给 Claude Code 补技能链接失败：{error}");
+    }
+}
+
 pub fn import_plugin(params: ImportPluginParams) -> Result<(), String> {
     crate::pi_plugin_catalog::import_plugin(params.kind, std::path::Path::new(&params.source))
         .map(|_| ())
@@ -291,6 +320,8 @@ mod tests {
                 origin: "~/.pi/agent/skills".into(),
                 broken: None,
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             }],
             model_choice_groups: Vec::new(),
             auto_provider_ids: vec!["gateway".into()],

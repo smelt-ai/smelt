@@ -943,6 +943,8 @@ pi_calls! {
         -> crate::pi_auth_service::LoginIdParams;
     PiPluginsRemove => PiPluginsRemove(crate::pi_service::PluginIdParams) -> crate::pi_service::PiConfig;
     PiPluginsImport => PiPluginsImport(crate::pi_service::ImportPluginParams) -> crate::pi_service::PiConfig;
+    /// 同名几份里以一份为准，或把旧位置的技能移到 `~/.agents/skills`。
+    PiPluginsAdopt => PiPluginsAdopt(crate::pi_service::AdoptPluginParams) -> crate::pi_service::PiConfig;
     /// 内置 provider 及其凭据现状（起一次凭据助手子进程）。
     PiAuthProviders => PiAuthProviders(EmptyParams) -> crate::pi_auth_service::ProvidersResult;
     /// 某个 provider 当前凭据能用的模型。

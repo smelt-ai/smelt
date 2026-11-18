@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::agent_kind::{ConversationLaunchSpec, SMELT_AGENT_PLUGIN_ARGS_ENV};
+use crate::skill_home::SkillHome;
 
 /// 把工作区自带的技能目录换成 Pi 的显式加载参数。
 ///
@@ -45,12 +46,24 @@ pub fn workspace_skill_args(roots: &[PathBuf]) -> Vec<String> {
     args
 }
 
-/// 扫描全部全局位置。同一份插件被多处引用（例如 `~/.pi/agent/skills` 下的软链
-/// 指向 `~/.agents/skills`）时按真实路径去重，只保留先发现的那个。
+/// 扫描全部全局位置。技能以通用目录 `~/.agents/skills` 为准，旧位置照扫；同名的合成一条，
+/// 别的副本记在 `duplicates` 里（见 [`SkillHome::merge`]）。同一份被多处引用（软链）时按
+/// 真实路径去重，只保留先发现的那个。
 pub fn discover_plugins() -> Vec<PiPlugin> {
     let mut plugins = Vec::new();
-    for root in global_skill_roots() {
-        collect_skills(&root, &mut plugins);
+    match SkillHome::current() {
+        Some(home) => {
+            let mut skills = Vec::new();
+            for root in home.roots() {
+                collect_skills(root, &mut skills);
+            }
+            plugins.extend(home.merge(skills));
+        }
+        None => {
+            for root in global_skill_roots() {
+                collect_skills(&root, &mut plugins);
+            }
+        }
     }
     collect_extensions(&global_extension_root(), &mut plugins);
     dedupe(plugins)
@@ -127,6 +140,8 @@ fn collect_skills(root: &Path, out: &mut Vec<PiPlugin>) {
                 origin: origin.clone(),
                 broken: Some("the link target doesn't exist".to_string()),
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             });
             continue;
         }
@@ -145,6 +160,8 @@ fn collect_skills(root: &Path, out: &mut Vec<PiPlugin>) {
                 origin: origin.clone(),
                 broken: None,
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             });
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
             // Pi 只把带合法 frontmatter 的根 md 当技能，没有 description 的忽略。
@@ -165,6 +182,8 @@ fn collect_skills(root: &Path, out: &mut Vec<PiPlugin>) {
                 origin: origin.clone(),
                 broken: None,
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             });
         }
     }
@@ -196,6 +215,8 @@ fn collect_extensions(root: &Path, out: &mut Vec<PiPlugin>) {
                 origin: origin.clone(),
                 broken: Some("the link target doesn't exist".to_string()),
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             });
             continue;
         }
@@ -225,6 +246,8 @@ fn collect_extensions(root: &Path, out: &mut Vec<PiPlugin>) {
             origin: origin.clone(),
             broken: None,
             builtin: false,
+            legacy_location: false,
+            duplicates: Vec::new(),
         });
     }
 }
@@ -367,22 +390,12 @@ fn strip_quotes(value: &str) -> String {
     value.to_string()
 }
 
-/// 从本地路径导入一个插件到 Pi 的全局目录。返回新插件的 id。
+/// 从本地路径导入一个插件：技能装进通用目录 `~/.agents/skills`，扩展装进 Pi 的扩展目录。
+/// 已有同名的整个换掉，旧的进回收目录（见 [`SkillHome::install`]）。返回新插件的 id。
 pub fn import_plugin(kind: PiPluginKind, source: &Path) -> Result<String, String> {
     if !source.exists() {
         return Err(format!("the path doesn't exist: {}", source.display()));
     }
-    let target_root = match kind {
-        PiPluginKind::Skill => crate::pi_model_settings::pi_agent_dir().join("skills"),
-        PiPluginKind::Extension => global_extension_root(),
-    };
-    std::fs::create_dir_all(&target_root)
-        .map_err(|error| format!("couldn't create the directory: {error}"))?;
-
-    let name = source
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .ok_or_else(|| "can't determine the plugin name".to_string())?;
     match kind {
         PiPluginKind::Skill => {
             if !source.is_dir() {
@@ -404,55 +417,32 @@ pub fn import_plugin(kind: PiPluginKind, source: &Path) -> Result<String, String
             }
         }
     }
-
-    let target = target_root.join(&name);
-    if target.exists() {
-        return Err(format!("A plugin with this name already exists: {name}"));
-    }
-    if source.is_dir() {
-        copy_dir(source, &target)?;
-    } else {
-        std::fs::copy(source, &target).map_err(|error| format!("copy failed: {error}"))?;
-    }
-    let name = if kind == PiPluginKind::Extension && target.is_file() {
-        target
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or(name)
-    } else {
-        name
+    let home = SkillHome::current().ok_or_else(|| "can't find the home directory".to_string())?;
+    let root = match kind {
+        PiPluginKind::Skill => home.shared.clone(),
+        PiPluginKind::Extension => global_extension_root(),
     };
+    let target = home.install(&root, source)?;
+    if kind == PiPluginKind::Skill {
+        home.sync_bridges()?;
+    }
+    let name = if target.is_file() {
+        target.file_stem()
+    } else {
+        target.file_name()
+    }
+    .map(|name| name.to_string_lossy().into_owned())
+    .ok_or_else(|| "can't determine the plugin name".to_string())?;
     Ok(plugin_id(kind, &name))
 }
 
-fn copy_dir(source: &Path, target: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(target)
-        .map_err(|error| format!("couldn't create the directory: {error}"))?;
-    let entries = std::fs::read_dir(source)
-        .map_err(|error| format!("couldn't read the directory: {error}"))?;
-    for entry in entries.flatten() {
-        let from = entry.path();
-        let to = target.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to).map_err(|error| format!("copy failed: {error}"))?;
-        }
+/// 删掉一个插件的全部副本：本体进回收目录，指着它的链接一起清掉。调用方先做二次确认。
+pub fn remove_plugin(plugin: &PiPlugin) -> Result<(), String> {
+    let home = SkillHome::current().ok_or_else(|| "can't find the home directory".to_string())?;
+    for copy in crate::skill_home::copies(plugin) {
+        home.remove(&copy)?;
     }
     Ok(())
-}
-
-/// 删除插件实体。删的是用户 `~/.pi` 下的真实文件，调用方必须先做二次确认。
-pub fn remove_plugin(plugin: &PiPlugin) -> Result<(), String> {
-    let path = &plugin.path;
-    // 断链的 `is_dir()` 为 false，用 symlink_metadata 才能识别并删掉链接本身。
-    let meta = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("couldn't read {}: {error}", path.display()))?;
-    if meta.file_type().is_symlink() || meta.is_file() {
-        std::fs::remove_file(path).map_err(|error| format!("delete failed: {error}"))
-    } else {
-        std::fs::remove_dir_all(path).map_err(|error| format!("delete failed: {error}"))
-    }
 }
 
 /// 这场 Pi 会话会加载哪些技能。推断自启动参数，不是 agent 运行时回执。
@@ -542,6 +532,8 @@ fn skills_at_load_path(path: &Path) -> Vec<PiPlugin> {
             origin: display_path(path.parent().unwrap_or(path)),
             broken: None,
             builtin: false,
+            legacy_location: false,
+            duplicates: Vec::new(),
         });
         return out;
     }
@@ -701,6 +693,8 @@ mod tests {
                 origin: String::new(),
                 broken: None,
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             },
             PiPlugin {
                 id: "skill:b".into(),
@@ -711,6 +705,8 @@ mod tests {
                 origin: String::new(),
                 broken: None,
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             },
             PiPlugin {
                 id: "extension:e".into(),
@@ -721,6 +717,8 @@ mod tests {
                 origin: String::new(),
                 broken: None,
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             },
         ];
 
@@ -756,6 +754,8 @@ mod tests {
             origin: String::new(),
             broken: Some("the link target doesn't exist".into()),
             builtin: false,
+            legacy_location: false,
+            duplicates: Vec::new(),
         }];
         let args = launch_args_for_selection(
             &["skill:gone".to_string(), "skill:never".to_string()],

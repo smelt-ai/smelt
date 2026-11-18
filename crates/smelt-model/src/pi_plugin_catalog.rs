@@ -63,6 +63,13 @@ pub struct PiPlugin {
     /// 随 smelt-agent 发布的内置技能。跟着运行时更新，不能删。
     #[serde(default)]
     pub builtin: bool,
+    /// 技能放在旧位置（`~/.pi/agent/skills`、`~/.smelt/skills`）：只有这里的智能体用得上，
+    /// Claude Code 等别的 agent 读不到。可以移到通用目录 `~/.agents/skills`。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_location: bool,
+    /// 同名的另几份（各自独立的副本，不是指向它的链接）。用哪份要用户挑，其余进回收目录。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicates: Vec<PathBuf>,
 }
 
 impl PiPlugin {
@@ -87,10 +94,11 @@ pub fn split_plugin_id(id: &str) -> Option<(PiPluginKind, &str)> {
 
 /// Pi 的全局 skill 目录。两个位置都是官方发现路径，`--no-skills` 会一起关掉。
 pub fn global_skill_roots() -> Vec<PathBuf> {
-    let mut roots = vec![crate::pi_model_settings::pi_agent_dir().join("skills")];
+    let mut roots = Vec::new();
     if let Some(home) = dirs::home_dir() {
         roots.push(home.join(".agents").join("skills"));
     }
+    roots.push(crate::pi_model_settings::pi_agent_dir().join("skills"));
     roots
 }
 

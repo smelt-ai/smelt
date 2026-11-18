@@ -176,6 +176,8 @@ fn pi_config_with(
                 origin: "user".into(),
                 broken: None,
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             },
             PiPlugin {
                 id: "extension:gone".into(),
@@ -186,6 +188,8 @@ fn pi_config_with(
                 origin: "user".into(),
                 broken: Some("软链断了".into()),
                 builtin: false,
+                legacy_location: false,
+                duplicates: Vec::new(),
             },
         ],
         model_choice_groups: group_pi_model_choices(vec![

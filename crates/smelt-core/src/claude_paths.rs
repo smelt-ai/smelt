@@ -23,6 +23,11 @@ pub fn projects_root(override_dir: Option<&str>) -> PathBuf {
     claude_home(override_dir).join("projects")
 }
 
+/// 默认解析下的 Claude Code 配置目录（通常是 `~/.claude`）。
+pub fn config_home() -> PathBuf {
+    claude_home(None)
+}
+
 fn claude_home(override_dir: Option<&str>) -> PathBuf {
     if let Some(dir) = override_dir {
         return PathBuf::from(dir);
