@@ -33,6 +33,10 @@
 - **render 只读内存，不做 IO**：GPUI 视图每次重绘都整段重跑 render，侧栏一个 spinner 就让工作台每秒重绘多次。render（含它调用的 `render_*`、页面构建函数）里不读写 SQLite、不读文件、不起进程、不整份克隆大的全局状态；这些放到选中、数据变化等事件里做（耗时的放后台），结果缓存在视图状态上，render 只取缓存。debug 构建下 `Workspace::render` 期间读写客户端库会在 stderr 报出调用栈（`smelt_client_store::render_guard`），看到就修，不要忽略。
 - **等待一律事件驱动**：等某件事发生时，阻塞在真正的事件上：进程退出（kqueue / pidfd / 进程句柄，见 `smelt_sys::process_wait`）、Condvar、channel、socket / 管道可读、文件变化通知、已有的推送与全局状态订阅。不写「sleep 一会儿再查」的循环、每 N 秒醒一次的常驻定时器、拿短超时反复醒来代替等待、「重试到 X 出现为止」和忙等。空闲时（没有会话在跑、窗口在后台）smelt 和 smeltd 不应有周期唤醒。超时只能当事件等待的上限；失败后的重试要退避、有上限，能等到恢复事件（重新上线、Nudge 等）就由事件提前叫醒。确实没有事件可等的（等远端服务、第三方库的心跳等），在定时器旁边写一行注释：`// 轮询例外：<为什么不能用事件>；周期 <N>，上限 <M>。`
 
+## 界面
+
+- **避免多余的次要标签和说明，让布局传达信息**：分组、对齐、间距、层级、位置已经说明白的，不再加小标题、副标题、解释性小字、重复的徽标或占位提示。删掉一行字用户照样看得懂，就删掉；说明只留给布局表达不了、不看就会误操作的地方。每多一行次要文字都在和主内容抢注意力。
+
 ## 流程
 
 - **构建和测试自己跑**：改完自己编译、跑相关测试，读错误自己修，不要把命令丢给用户等回报。只跑改动涉及的 crate：`cargo check -j 2 -p <crate>`、`cargo test -j 2 -p <crate>`，几个 crate 一批。不要一次跑整个 workspace，也不要 `-j 4` 以上，会被 OOM 杀掉（退出码 137）。判断通过看 `test result` 里的 passed 数，不只看退出码：包名拼错或过滤写错时会全部 filtered out，却照样 exit 0。cargo 共用一把 target 锁，只能串行跑。改了 smelt-ui 组件的样子，跑 `cargo test -p smelt-ui --test snapshots`（`SMELT_SNAPSHOT=<名字>` 只画名字含它的那组），读 `target/tmp/snapshots/smelt-ui/` 下深浅两套 PNG 核对；新组件或新状态顺手在 `tests/snapshots.rs` 里加上。
