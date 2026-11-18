@@ -167,8 +167,8 @@
 - **查**。认 Release 里的 `smelt-<版本>-windows-x86_64-setup.exe`，同一个 Release 还要有 `SHA256SUMS`，而且清单里已经有它（发版流水线等所有产物到齐才重写清单）；最新的还没齐就退到上一个，最多看三个。是不是新版比的是发版号：只有比装着的新才装，切回生产通道或退到比装着的旧时都不装回去（旧版读不了新版升级过的客户端库）。版本号认不出的候选跳过，所以更新清单要给出能解析的版本号。
 - **下**。下到 `%LOCALAPPDATA%\Smelt\update`，边下边算 SHA-256，对上清单才算下好；同一版本下过就不再下。不记持久化事务：下好的安装程序只在这次运行里等着装，重启后重新检查。启动时删掉已经装上的那个版本的安装程序和日志。
 - **装**。拉起前再校验一遍，再用 `spawn_detached` 拉起 `setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /WAITPID=<桌面 pid> /LOG=<日志> [/RELAUNCH=<桌面 exe>]`，脱离桌面的 Job，桌面随即退出。安装程序在 `InitializeSetup` 里等桌面进程退出（上限 2 分钟，超时这次不装），之后才查 `AppMutex`、换文件（Inno 源码里这两步就是这个顺序）。给了 `/RELAUNCH` 时，装好由 `[Run]` 打开新版；没装成（超时、文件被占用、又有 Smelt 开着）由 `DeinitializeSetup` 把原来那个打开。下次启动在 app.log 里记一笔，指向留下的安装日志。
-- **退出时装**。Quit 动作和关掉主窗口（Windows 上关主窗口就是退出，不走 Quit）都会装待装的更新，不重新打开。
-- **守护不停**。smeltd、smelt-agent、smelt-notify 跑的都是 `~/.smelt/bin` 里的副本，不占安装目录，换文件不用停守护，会话不断，也就不用像 macOS 那样先确认。新版桌面起来后照「守护落后就在空闲时重启」换守护。安装目录里还可能被占着的是 `smelt.com`（终端里开着的命令行），交给 Inno 的 Restart Manager 关。
+- **停守护**。和 macOS 一样：装更新时停掉本机守护，有会话在跑先确认，新版桌面起来时拉起新版守护。
+- **退出时装**。Quit 动作和关掉主窗口（Windows 上关主窗口就是退出，不走 Quit）都会装待装的更新，不重新打开。Quit 有会话在跑时先确认；关主窗口没处确认，有会话在跑就这次不装。安装目录里还可能被占着的是 `smelt.com`（终端里开着的命令行），交给 Inno 的 Restart Manager 关。
 
 ## 已定
 

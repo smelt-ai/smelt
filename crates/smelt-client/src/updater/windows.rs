@@ -2,9 +2,6 @@
 //! 应用时拉起它静默覆盖安装，桌面随即退出。安装程序先等桌面进程退出再换文件，装完（或
 //! 没装成）重新打开 Smelt（`scripts/windows-installer.iss` 的 `/WAITPID`、`/RELAUNCH`）。
 //!
-//! 本机守护不用停：smeltd、smelt-agent、smelt-notify 跑的都是 `~/.smelt/bin` 里的副本，
-//! 不占安装目录。新版桌面起来后照「守护落后就在空闲时重启」的老规矩换守护，会话不断。
-//!
 //! 换文件、出错回滚是安装程序的事，这里不记持久化事务：下好的安装程序只在这次运行里
 //! 等着装，重启后重新检查；同一个版本已经下好、校验过就不再下一遍。
 
@@ -14,9 +11,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-
-/// 应用更新要不要先停掉本机守护。见模块说明。
-pub const INSTALL_STOPS_LOCAL_DAEMON: bool = false;
 
 /// Inno Setup 放在安装目录里的卸载程序。有它才说明这个 exe 是安装程序装的。
 const UNINSTALLER: &str = "unins000.exe";

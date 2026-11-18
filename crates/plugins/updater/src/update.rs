@@ -541,19 +541,14 @@ impl Updater {
                         "updater",
                         &format!("installer 已接管更新 {version}（{ticket}），等待 GUI 退出"),
                     );
-                    // 安装程序已经起来了。macOS 先停掉旧守护再退出：换文件时不能还被旧进程
-                    // 占着。没起来不走这里。
-                    if updater::INSTALL_STOPS_LOCAL_DAEMON {
-                        let stopped = cx
-                            .background_executor()
-                            .spawn(async { updater::shutdown_local_daemon() })
-                            .await;
-                        if !stopped {
-                            api::app_log::error(
-                                "updater",
-                                "退出前没能确认旧守护已退出，安装器换包前会再停一次",
-                            );
-                        }
+                    // 安装程序已经起来了，先停掉旧守护再退出：新版桌面起来时拉起的就是新版
+                    // 守护，不留新桌面配旧守护的一段。没起来不走这里。
+                    let stopped = cx
+                        .background_executor()
+                        .spawn(async { updater::shutdown_local_daemon() })
+                        .await;
+                    if !stopped {
+                        api::app_log::error("updater", "退出前没能确认旧守护已退出");
                     }
                     cx.update(quit_now);
                 }
@@ -584,8 +579,7 @@ impl Updater {
     }
 }
 
-/// 设置页「立即重启更新」：没有进行中的会话、或者装更新不停守护（Windows），直接装；否则
-/// 先确认。
+/// 设置页「立即重启更新」：装更新会停掉本机守护。没有进行中的会话就直接装，否则先确认。
 pub(crate) fn begin_ready_update_install(window: &mut Window, cx: &mut App) {
     let Some(entity) = updater(cx) else {
         return;
@@ -595,7 +589,7 @@ pub(crate) fn begin_ready_update_install(window: &mut Window, cx: &mut App) {
         return;
     }
     let names = local_busy_work_names(cx);
-    if updater::INSTALL_STOPS_LOCAL_DAEMON && !names.is_empty() {
+    if !names.is_empty() {
         Confirm::new(
             t!("confirm.restart_title"),
             t!("confirm.restart"),
@@ -625,10 +619,10 @@ fn quit_guard(cx: &mut App) -> bool {
     if status.ready_update().is_none() {
         return false;
     }
-    // 退出时装更新会换包，macOS 还会停掉守护。没有进行中的会话、或者不停守护，就直接走；
-    // 否则先确认。宿主正在处理退出，确认框排到这之后再弹。
+    // 退出时装更新会停掉守护。没有进行中的会话就直接走，否则先确认。宿主正在处理退出，
+    // 确认框排到这之后再弹。
     let names = local_busy_work_names(cx);
-    if !updater::INSTALL_STOPS_LOCAL_DAEMON || names.is_empty() {
+    if names.is_empty() {
         install_ready_update(Trigger::Quit, cx);
         return true;
     }
@@ -664,8 +658,8 @@ fn install_ready_update(trigger: Trigger, cx: &mut App) {
     }
 }
 
-/// 关掉主窗口时还有待装的更新就拉起安装程序，不重新打开。进程马上要没了，这里同步拉起；
-/// Windows 换文件不用停守护（见 `updater::INSTALL_STOPS_LOCAL_DAEMON`）。
+/// 关掉主窗口时还有待装的更新就拉起安装程序、停掉守护，不重新打开。进程马上要没了，这里
+/// 同步做。关窗口没有地方弹确认：有会话在跑就不装，不在用户不知情时打断它们，下次再装。
 #[cfg(windows)]
 fn install_ready_update_on_exit(cx: &mut App) {
     let Some(entity) = updater(cx) else {
@@ -678,11 +672,23 @@ fn install_ready_update_on_exit(cx: &mut App) {
     let Some(update) = this.status.ready_update() else {
         return;
     };
-    match updater::launch_installer(update, false) {
-        Ok(ticket) => api::app_log::info(
+    if !local_busy_work_names(cx).is_empty() {
+        api::app_log::info(
             "updater",
-            &format!("退出时拉起安装程序装 {}（{ticket}）", update.version),
-        ),
+            &format!("还有会话在跑，{} 下次再装", update.version),
+        );
+        return;
+    }
+    match updater::launch_installer(update, false) {
+        Ok(ticket) => {
+            api::app_log::info(
+                "updater",
+                &format!("退出时拉起安装程序装 {}（{ticket}）", update.version),
+            );
+            if !updater::shutdown_local_daemon() {
+                api::app_log::error("updater", "退出前没能确认旧守护已退出");
+            }
+        }
         Err(error) => api::app_log::error(
             "updater",
             &format!(
