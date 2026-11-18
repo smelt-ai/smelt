@@ -139,7 +139,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         text: PiMcpPresetText::BrowserMcp,
         description: "Browser automation in the user's own signed-in Chrome: navigate, click, fill forms, read pages and take screenshots, and ask the user for 2FA codes or CAPTCHAs",
         transport: PiMcpPresetTransport::Bun {
-            args: &["x", "--bun", "@agent360/browser-mcp@1.30.2"],
+            args: &["x", "--bun", "@agent360/browser-mcp@1.31.0"],
             env: &[],
         },
         exposure: Some("deferred"),

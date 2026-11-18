@@ -658,7 +658,7 @@ mod tests {
         );
         assert_eq!(
             browser["args"],
-            serde_json::json!(["x", "--bun", "@agent360/browser-mcp@1.30.2"]),
+            serde_json::json!(["x", "--bun", "@agent360/browser-mcp@1.31.0"]),
             "钉死版本，不带子命令才会启动服务器；--bun 防止转交给系统 node"
         );
         assert_eq!(browser["exposure"], "deferred");
