@@ -13,6 +13,7 @@
 //! 工作区组合键绑在 `Workspace` 或更具体、但仍浅于 Terminal / Input 的 context 上。
 //! `None` 与最内层同深度，后注册会抢走输入框的键，不用。
 
+use rust_i18n::t;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -46,17 +47,19 @@ pub(crate) struct Bound {
 /// 不让绑的键：终端在自己的按键监听里处理、不在键表里的（应用键先于终端派发，绑上去终端
 /// 就收不到了），通用的编辑键，以及 macOS 自己用的。⌘Space、⌘Tab 这类系统直接截走的键
 /// 根本到不了应用，录不到，不用列。
-const RESERVED_KEYS: &[(&str, &str)] = &[
-    ("cmd-c", "复制"),
-    ("cmd-v", "粘贴"),
-    ("cmd-x", "剪切"),
-    ("cmd-a", "全选"),
-    ("cmd-z", "撤销"),
-    ("cmd-shift-z", "重做"),
-    ("cmd-f", "终端内搜索"),
-    ("cmd-h", "系统的「隐藏应用」"),
-    ("cmd-alt-h", "系统的「隐藏其他应用」"),
-    ("cmd-m", "系统的「最小化」"),
+/// 每条带一个取「留给谁」的函数：录键被拒时说给人听，跟着界面语言。
+type ReservedFor = fn() -> std::borrow::Cow<'static, str>;
+const RESERVED_KEYS: &[(&str, ReservedFor)] = &[
+    ("cmd-c", || t!("reserved.copy")),
+    ("cmd-v", || t!("reserved.paste")),
+    ("cmd-x", || t!("reserved.cut")),
+    ("cmd-a", || t!("reserved.select_all")),
+    ("cmd-z", || t!("reserved.undo")),
+    ("cmd-shift-z", || t!("reserved.redo")),
+    ("cmd-f", || t!("reserved.terminal_search")),
+    ("cmd-h", || t!("reserved.hide")),
+    ("cmd-alt-h", || t!("reserved.hide_others")),
+    ("cmd-m", || t!("reserved.minimize")),
 ];
 
 /// 出厂键要带 ⌘（或者是 F 键），不能是保留键：应用键先于终端和输入框派发。
@@ -195,12 +198,13 @@ fn app_menus(cx: &App) -> Vec<Menu> {
             .iter()
             .filter(|entry| entry.slot == slot)
             .map(|entry| {
-                MenuItem::action(entry.title.clone(), RunCommand::new(entry.command.clone()))
+                MenuItem::action(entry.title.get(), RunCommand::new(entry.command.clone()))
             })
             .collect()
     };
-    let command =
-        |title: &'static str, id: &'static str| MenuItem::action(title, RunCommand::new(id));
+    let command = |title: std::borrow::Cow<'static, str>, id: &'static str| {
+        MenuItem::action(SharedString::from(title), RunCommand::new(id))
+    };
     let app_items = plugin_items(api::MenuSlot::App);
     let mut app_menu =
         vec![MenuItem::action(format!("v{}", smelt_version::VERSION), NoAction).disabled(true)];
@@ -210,14 +214,14 @@ fn app_menus(cx: &App) -> Vec<Menu> {
     }
     app_menu.extend([
         MenuItem::Separator,
-        command("设置…", "smelt.app/settings"),
+        command(t!("menu.settings"), "smelt.app/settings"),
         MenuItem::Separator,
-        command("退出 Smelt", "smelt.app/quit"),
+        command(t!("menu.quit"), "smelt.app/quit"),
     ]);
     let mut menus = vec![Menu::new("Smelt").items(app_menu)];
     let help_items = plugin_items(api::MenuSlot::Help);
     if !help_items.is_empty() {
-        menus.push(Menu::new("帮助").items(help_items));
+        menus.push(Menu::new(SharedString::from(t!("menu.help"))).items(help_items));
     }
     menus
 }
@@ -268,7 +272,8 @@ pub(crate) fn init(cx: &mut App) {
     install(cx);
     let events = api::events(cx);
     cx.subscribe(&events, |_, event, cx| {
-        if matches!(event, HostEvent::CommandsChanged) {
+        // 菜单栏上的字（命令、插件菜单项的标题）跟着界面语言变，换了语言重设一次。
+        if matches!(event, HostEvent::CommandsChanged | HostEvent::LocaleChanged) {
             install(cx);
         }
     })
@@ -393,7 +398,7 @@ fn apply_saved(
         Err(error) => {
             eprintln!("[keymap] 保存快捷键 {failed} 失败：{error}");
             cx.update_global::<KeymapState, _>(|state, _| {
-                state.error = Some((failed, format!("保存失败：{error}")));
+                state.error = Some((failed, t!("error.save_failed", error = error).into_owned()));
             });
         }
     }
@@ -519,7 +524,7 @@ fn recorded<'a>(
     }
     // 应用键先于终端和输入框派发：⌃ / ⌥ 组合会抢走 shell 和 readline 的键。
     if !modifiers.platform && !is_function_key(&keystroke.key) {
-        return Recorded::Rejected("要带 ⌘：⌃ 和 ⌥ 组合留给终端和输入框".to_string());
+        return Recorded::Rejected(t!("record.needs_cmd").into_owned());
     }
     let keystroke = Keystroke {
         modifiers: *modifiers,
@@ -530,10 +535,14 @@ fn recorded<'a>(
         .iter()
         .find(|(reserved, _)| same_key(reserved, &keystroke, os))
     {
-        return Recorded::Rejected(format!(
-            "{} 留给{what}",
-            smelt_ui::keybind::label(&keystroke, os)
-        ));
+        return Recorded::Rejected(
+            t!(
+                "record.reserved",
+                key = smelt_ui::keybind::label(&keystroke, os),
+                what = what()
+            )
+            .into_owned(),
+        );
     }
     if let Some(other) = bound.iter().find(|other| {
         other.info.id.as_ref() != id
@@ -561,11 +570,14 @@ fn recorded<'a>(
                 && only.inner().key == keystroke.key)
     });
     if let Some(binding) = taken {
-        return Recorded::Rejected(format!(
-            "{} 已被别的功能占用（{}）",
-            smelt_ui::keybind::label(&keystroke, os),
-            binding.action().name()
-        ));
+        return Recorded::Rejected(
+            t!(
+                "record.taken",
+                key = smelt_ui::keybind::label(&keystroke, os),
+                action = binding.action().name()
+            )
+            .into_owned(),
+        );
     }
     Recorded::Set(Some(keystroke.unparse(os)))
 }

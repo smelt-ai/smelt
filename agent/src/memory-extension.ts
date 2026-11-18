@@ -23,6 +23,7 @@ import {
 	validateMemoryContent,
 } from "./memory-files.ts";
 import {
+	describePendingReason,
 	fetchMemoryMeta,
 	type MemoryHostMeta,
 	type MemoryProvenance,
@@ -126,7 +127,7 @@ export function ruleContentMatchesUserPrompt(content: string, userPrompt: string
 
 function ruleBodyLacksUserWords(content: string, userPrompt: string | undefined): string | undefined {
 	if (ruleContentMatchesUserPrompt(content, userPrompt)) return undefined;
-	return "user / feedback 规则正文须包含用户原话中至少一段（中文不少于 8 字，纯英文不少于 18 个非空白字符），避免把网页或仓库里的文字写成常驻规则";
+	return "rule_lacks_user_words";
 }
 
 function isActualBuiltin(name: string, sourceInfo: SourceInfo | undefined): boolean {
@@ -354,7 +355,7 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		}
 		if (warnedTruncation) return;
 		warnedTruncation = true;
-		notify("记忆超出注入上限，部分未加载。请在智能体的记忆卡片里删掉过时的条目。", "warning");
+		notify("Memory is over the injection limit, so some of it wasn't loaded. Delete outdated entries in the agent's memory card.", "warning");
 	}
 
 	async function provenanceFor(
@@ -363,18 +364,18 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		toolName: "write" | "edit",
 		content: string | undefined,
 	): Promise<MemoryProvenance> {
-		if (memoryRunIsUnattended()) return { trust: "pending", reason: "无人值守的运行（自动化）写入" };
+		if (memoryRunIsUnattended()) return { trust: "pending", reason: "unattended" };
 		if (turnTaint.size > 0) {
-			return { trust: "pending", reason: `写入的那一轮读取了外部内容（${[...turnTaint].join("、")}）` };
+			return { trust: "pending", reason: `external_content:${[...turnTaint].join(", ")}` };
 		}
 		let trust: MemoryProvenance["trust"] = "trusted";
-		let reason = "用户在场时写入";
+		let reason = "user_present";
 		if (toolName === "edit") {
 			// edit 只改一部分，其余内容仍是待确认时写的，保持待确认；拿不到列表时也按待确认。
 			const meta = await currentMeta();
-			if (!meta) return { trust: "pending", reason: "无法确认这条记忆原先的来源" };
+			if (!meta) return { trust: "pending", reason: "unknown_origin" };
 			if (meta.pending[layer].has(fileName)) {
-				return { trust: "pending", reason: "修改的是一条待确认的记忆" };
+				return { trust: "pending", reason: "edits_pending" };
 			}
 		}
 		if (content !== undefined) {
@@ -395,7 +396,7 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 				const label = `${meta.rerankModel.provider}/${meta.rerankModel.id}`;
 				if (!model && warnedRerankModel !== label) {
 					warnedRerankModel = label;
-					context.ui.notify(`设置里指定的重排模型 ${label} 不可用（没登录或已下线），召回只用检索结果`, "warning");
+					context.ui.notify(`The rerank model set in Settings, ${label}, isn't available (not signed in or retired); recall uses search results only`, "warning");
 				}
 			} else {
 				model = pickRecallModel(available, context.model);
@@ -479,7 +480,7 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 				if (fresh.length > 0) {
 					for (const entry of fresh) warnedUnembeddable.add(entry.fileName);
 					context.ui.notify(
-						`有 ${fresh.length} 条记忆算不出向量（${fresh.map((entry) => entry.name).join("、")}），向量检索时跳过；关键词检索不受影响`,
+						`${fresh.length} memory item(s) couldn't be embedded (${fresh.map((entry) => entry.name).join(", ")}); vector search skips them, keyword search is unaffected`,
 						"warning",
 					);
 				}
@@ -487,7 +488,7 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 				if (!warnedEmbedding) {
 					warnedEmbedding = true;
 					const reason = error instanceof Error ? error.message : String(error);
-					context.ui.notify(`向量检索不可用（${reason}），已退回关键词检索`, "warning");
+					context.ui.notify(`Vector search isn't available (${reason}); fell back to keyword search`, "warning");
 				}
 			}
 		}
@@ -761,7 +762,7 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		if (write.previous !== undefined && write.provenance.trust !== "trusted" && !write.alreadyPending) {
 			return restore(write)
 				? errorResult(
-						`不能用不可信的写入覆盖已有的可信记忆，这次修改已撤销（${write.provenance.reason}）`,
+						`不能用不可信的写入覆盖已有的可信记忆，这次修改已撤销（${describePendingReason(write.provenance.reason)}）`,
 					)
 				: errorResult(
 						`不能用不可信的写入覆盖已有的可信记忆，且恢复原文件失败，请手动检查 ${write.absolutePath}`,
@@ -794,7 +795,7 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 				...(content as Array<{ type: "text"; text: string }>),
 				{
 					type: "text" as const,
-					text: `这条记忆已暂存为待确认（${write.provenance.reason}），不会生效，直到用户采纳（对话输入框上方的记忆卡片、或智能体的记忆页里都能采纳）。请在回复里告诉用户。`,
+					text: `这条记忆已暂存为待确认（${describePendingReason(write.provenance.reason)}），不会生效，直到用户采纳（对话输入框上方的记忆卡片、或智能体的记忆页里都能采纳）。请在回复里告诉用户。`,
 				},
 			],
 		};

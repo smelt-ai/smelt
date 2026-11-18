@@ -4,6 +4,7 @@
 //! 已有列表等自带视口的组件应将 `Scrollbar` 放在视口的外层兄弟位置，
 //! 并使用默认的句柄视口，不能将条放进滚动内容中。
 
+use rust_i18n::t;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -53,8 +54,8 @@ where
             element,
             axis: axis.into(),
             scroll_handle: scroll_handle.clone(),
-            vertical_label: "垂直滚动条".into(),
-            horizontal_label: "水平滚动条".into(),
+            vertical_label: t!("scrollbar.vertical").into(),
+            horizontal_label: t!("scrollbar.horizontal").into(),
         }
     }
 

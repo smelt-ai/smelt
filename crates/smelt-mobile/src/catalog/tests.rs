@@ -1167,6 +1167,8 @@ fn dto(id: &str, revision: u64, phase: CoreSessionPhase) -> SessionStateChanged 
         turn_started_at_unix_seconds: 1,
         pending_question: None,
         pending_request: None,
+        pending_note: None,
+        completed_delivery_id: None,
         tokens_used: None,
         branch: None,
         dirty_files: Vec::new(),
@@ -1606,7 +1608,7 @@ fn new_session_catalog() -> Value {
         ],
         "sections": {
             "common": [
-                {"key": "terminal:blank", "label": "空白终端", "kind": "terminal",
+                {"key": "terminal:blank", "label": "Shell", "kind": "terminal",
                  "pinned": true, "target": "blankTerminal"}
             ],
             "terminal": [

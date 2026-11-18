@@ -13,11 +13,9 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
-gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 # 分屏的尺寸手柄、弹层和列表里的上下选择动作。
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
-# 视图、行上的图标。
-gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 后台任务里的 channel。
@@ -26,9 +24,9 @@ smol = "2"
 uuid = { version = "1", features = ["v4"] }
 # 列表行上的「今天 / 昨天」和时刻。
 chrono = "0.4"
-# 解行首小人的零件（编进来的 WebP）交给 gpui 画。版本跟 gpui 用的同一个，帧类型才对得上。
-image = { version = "0.25", default-features = false, features = ["webp"] }
+# 界面文案（locales/ui.yml，见 docs/i18n.md）。
+rust-i18n.workspace = true
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 tempfile = "3"

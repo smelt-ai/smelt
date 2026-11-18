@@ -9,6 +9,7 @@
 //!
 //! fetch 走网络，所以同一棵树同时只问一次，间隔也有下限。
 
+use rust_i18n::t;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -87,19 +88,24 @@ pub(crate) fn describe(result: &WorkspaceWorksetInspectResult) -> Vec<String> {
         .iter()
         .map(|repository| {
             let state = if repository.dirty {
-                "有未提交的改动"
+                t!("workset.dirty")
             } else {
                 match repository.merge {
-                    Some(WorkspaceWorksetMerge::Merged) | None => "已合并",
-                    Some(WorkspaceWorksetMerge::Unmerged) => "还有改动没合进去",
-                    Some(WorkspaceWorksetMerge::Unconfirmed) => "无法确认是否已合并",
+                    Some(WorkspaceWorksetMerge::Merged) | None => t!("workset.merged"),
+                    Some(WorkspaceWorksetMerge::Unmerged) => t!("workset.unmerged"),
+                    Some(WorkspaceWorksetMerge::Unconfirmed) => t!("workset.unconfirmed"),
                 }
             };
-            format!("{}：{state}", repository.name)
+            t!(
+                "workset.repository_state",
+                name = repository.name,
+                state = state
+            )
+            .into_owned()
         })
         .collect();
     if !result.refresh_failures.is_empty() {
-        lines.push("没能刷新远端，按本地已有的远端分支判断".to_string());
+        lines.push(t!("workset.refresh_failed").into_owned());
     }
     lines
 }

@@ -12,8 +12,9 @@ use api::ui::{IconName, Link};
 use api::ui::{Segmented, Switch};
 #[cfg(any(target_os = "macos", windows))]
 use api::updater::{self, UpdateFailure, UpdateStatus};
-use api::{PluginView, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
+use api::{PluginView, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec, text};
 use gpui::*;
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 #[cfg(any(target_os = "macos", windows))]
@@ -24,7 +25,7 @@ use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 pub(crate) fn register(cx: &mut App) {
     let spec = ViewSpec {
         name: "about".into(),
-        title: "关于".into(),
+        title: text!("about.title"),
         icon: IconName::Info.path(),
         draws_top_bar: false,
         instances: false,
@@ -52,11 +53,26 @@ pub(crate) fn register(cx: &mut App) {
                 "日志",
                 "源码",
                 "GitHub",
+                "about",
+                "version",
+                "update",
+                "check for updates",
+                "update channel",
+                "beta",
+                "auto update",
+                "download",
+                "help",
+                "docs",
+                "feedback",
+                "report issue",
+                "log",
+                "source code",
             ]
             .into_iter()
             .map(SharedString::from)
             .collect(),
         }),
+        fills: Vec::new(),
         build: Rc::new(|_, cx| Rc::new(cx.new(AboutPage::new)) as Rc<dyn ViewHandle>),
     };
     if let Err(error) = api::register_views(OWNER, vec![spec], cx) {
@@ -108,7 +124,11 @@ impl Render for AboutPage {
 #[cfg(any(target_os = "macos", windows))]
 fn header_section(channel: Option<updater::UpdateChannel>) -> SettingsSection {
     let version = match channel {
-        Some(channel) => format!("v{} · {}", api::smelt_version::VERSION, channel.label()),
+        Some(channel) => format!(
+            "v{} · {}",
+            api::smelt_version::VERSION,
+            channel_label(channel)
+        ),
         None => format!("v{}", api::smelt_version::VERSION),
     };
     header(version)
@@ -139,6 +159,38 @@ fn header(version: String) -> SettingsSection {
                     .child(version),
             ),
     )
+}
+
+/// 更新通道给人看的名字。
+#[cfg(any(target_os = "macos", windows))]
+fn channel_label(channel: updater::UpdateChannel) -> SharedString {
+    match channel {
+        updater::UpdateChannel::Dev => t!("channel.dev").into(),
+        updater::UpdateChannel::Prod => t!("channel.prod").into(),
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn failure_title(failure: UpdateFailure) -> std::borrow::Cow<'static, str> {
+    match failure {
+        UpdateFailure::Check => t!("failure.check"),
+        UpdateFailure::Download => t!("failure.download"),
+        UpdateFailure::Recovery => t!("failure.recovery"),
+        UpdateFailure::Location => t!("failure.location"),
+        UpdateFailure::NotInstalled => t!("failure.not_installed"),
+    }
+}
+
+/// 失败的说明。只讲该怎么办，不带底层请求的地址。
+#[cfg(any(target_os = "macos", windows))]
+fn failure_detail(failure: UpdateFailure) -> std::borrow::Cow<'static, str> {
+    match failure {
+        UpdateFailure::Check => t!("failure.check_detail"),
+        UpdateFailure::Download => t!("failure.download_detail"),
+        UpdateFailure::Recovery => t!("failure.recovery_detail"),
+        UpdateFailure::Location => t!("failure.location_detail"),
+        UpdateFailure::NotInstalled => t!("failure.not_installed_detail"),
+    }
 }
 
 /// 画更新那一节要的，render 时从更新状态里抄一份。
@@ -188,25 +240,26 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
     let mb = |b: u64| b as f64 / 1024.0 / 1024.0;
     let (status_title, status_detail, status_rgb) = match &status {
         UpdateStatus::Idle => (
-            "尚未检查更新".to_string(),
-            format!("点击“检查更新”获取{}的最新安装包", channel.label()),
+            t!("status.idle"),
+            t!("status.idle_detail", channel = channel_label(channel)),
             None,
         ),
         UpdateStatus::Checking => (
-            "正在检查更新".to_string(),
-            format!("正在获取{}的最新版本信息…", channel.label()),
+            t!("status.checking"),
+            t!("status.checking_detail", channel = channel_label(channel)),
             Some(api::ui::ui_theme::run()),
         ),
         UpdateStatus::UpToDate => (
-            "当前已是最新".to_string(),
-            format!("{}暂无可用更新", channel.label()),
+            t!("status.up_to_date"),
+            t!("status.up_to_date_detail", channel = channel_label(channel)),
             Some(api::ui::ui_theme::ok()),
         ),
         UpdateStatus::Available { version, .. } => (
-            "发现新版本".to_string(),
-            format!(
-                "{}已发布 {version}，点击“下载并更新”获取安装包",
-                channel.label()
+            t!("status.available"),
+            t!(
+                "status.available_detail",
+                channel = channel_label(channel),
+                version = version
             ),
             Some(api::ui::ui_theme::run()),
         ),
@@ -216,54 +269,50 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
             total,
         } => {
             let detail = match total {
-                Some(total) if *total > 0 => format!(
-                    "正在下载更新包 {version}… {:.0}%（{:.1} / {:.1} MB）",
-                    *received as f64 / *total as f64 * 100.0,
-                    mb(*received),
-                    mb(*total),
+                Some(total) if *total > 0 => t!(
+                    "status.downloading_progress",
+                    version = version,
+                    percent = format!("{:.0}", *received as f64 / *total as f64 * 100.0),
+                    received = format!("{:.1}", mb(*received)),
+                    total = format!("{:.1}", mb(*total)),
                 ),
-                _ => format!(
-                    "正在下载更新包 {version}…（已下载 {:.1} MB）",
-                    mb(*received)
+                _ => t!(
+                    "status.downloading_bytes",
+                    version = version,
+                    received = format!("{:.1}", mb(*received)),
                 ),
             };
             (
-                "正在下载更新".to_string(),
+                t!("status.downloading"),
                 detail,
                 Some(api::ui::ui_theme::run()),
             )
         }
         UpdateStatus::Installing { version } => (
-            "正在准备更新".to_string(),
-            format!("正在校验并准备更新包 {version}…"),
+            t!("status.installing"),
+            t!("status.installing_detail", version = version),
             Some(api::ui::ui_theme::run()),
         ),
         UpdateStatus::Applying { version } => (
-            "正在启动更新安装器".to_string(),
-            format!("正在为更新包 {version} 启动安装程序；启动成功后 App 才会退出"),
+            t!("status.applying"),
+            t!("status.applying_detail", version = version),
             Some(api::ui::ui_theme::run()),
         ),
         UpdateStatus::ReadyToInstall(update) => (
-            "更新已准备就绪".to_string(),
-            format!(
-                "更新包 {} 已下载完成，点击“立即重启更新”生效",
-                update.version
-            ),
+            t!("status.ready"),
+            t!("status.ready_detail", version = update.version),
             Some(api::ui::ui_theme::ok()),
         ),
         UpdateStatus::InstallFailed(update) => (
-            "安装更新失败".to_string(),
-            format!(
-                "更新包 {} 仍已安全保留；可直接重试，或检查是否已有替代版本",
-                update.version
-            ),
+            t!("status.install_failed"),
+            t!("status.install_failed_detail", version = update.version),
             Some(api::ui::ui_theme::bad()),
         ),
         UpdateStatus::Failed(failure) => (
-            failure.title().to_string(),
+            failure_title(*failure),
             match (failure, &move_app_error) {
-                (UpdateFailure::Location, Some(error)) => error.to_string(),
-                _ => failure.detail().to_string(),
+                (UpdateFailure::Location, Some(error)) => error.to_string().into(),
+                _ => failure_detail(*failure),
             },
             Some(api::ui::ui_theme::bad()),
         ),
@@ -292,21 +341,21 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
     let can_request_check = can_check || status.can_retry_recovery();
     let ready = status.ready_update().is_some();
 
-    let check_label: &'static str = match &status {
-        UpdateStatus::Checking => "检查中…",
-        UpdateStatus::Downloading { .. } => "下载中…",
-        UpdateStatus::Installing { .. } => "准备中…",
-        UpdateStatus::Applying { .. } => "正在退出…",
-        UpdateStatus::ReadyToInstall(_) | UpdateStatus::InstallFailed(_) => "检查新版本",
-        UpdateStatus::Failed(UpdateFailure::Recovery) => "重试恢复",
-        _ => "检查更新",
+    let check_label = match &status {
+        UpdateStatus::Checking => t!("check.checking"),
+        UpdateStatus::Downloading { .. } => t!("check.downloading"),
+        UpdateStatus::Installing { .. } => t!("check.installing"),
+        UpdateStatus::Applying { .. } => t!("check.quitting"),
+        UpdateStatus::ReadyToInstall(_) | UpdateStatus::InstallFailed(_) => t!("check.again"),
+        UpdateStatus::Failed(UpdateFailure::Recovery) => t!("check.retry_recovery"),
+        _ => t!("check.idle"),
     };
 
     // 用分段控件让当前通道一眼可见；切换通道会立即检查，进行中的更新则锁定选择，
     // 避免下载源和状态提示在中途发生错配。
     let channel_entity = entity.clone();
     let channel_selector = Segmented::new("update-channel")
-        .segments(updater::UpdateChannel::ALL.map(|option| option.label()))
+        .segments(updater::UpdateChannel::ALL.map(channel_label))
         .selected(
             updater::UpdateChannel::ALL
                 .iter()
@@ -340,7 +389,7 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
                 Button::new("download-update")
                     .primary()
                     .small()
-                    .label("下载并更新")
+                    .label(t!("action.download"))
                     .on_click(move |_, _, cx: &mut App| {
                         let candidate = candidate.clone();
                         download_entity.update(cx, |this, cx| {
@@ -357,9 +406,9 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
             .primary()
             .small()
             .label(if matches!(&status, UpdateStatus::InstallFailed(_)) {
-                "重试重启更新"
+                t!("action.retry_restart")
             } else {
-                "立即重启更新"
+                t!("action.restart")
             })
             .on_click(|_, window, cx: &mut App| {
                 update::begin_ready_update_install(window, cx);
@@ -374,9 +423,9 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
             .primary()
             .small()
             .label(if moving_app {
-                "正在移动…"
+                t!("move.moving")
             } else {
-                "移到「应用程序」并重新打开"
+                t!("action.move")
             })
             .disabled(moving_app)
             .on_click(move |_, _, cx: &mut App| {
@@ -397,14 +446,14 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
         .map(|page| {
             Button::new("manual-download-update")
                 .small()
-                .label("去下载页")
+                .label(t!("action.manual_download"))
                 .on_click(move |_, _, cx: &mut App| cx.open_url(&page))
         });
 
     let auto_entity = entity.clone();
     let auto_install_switch = Switch::new("auto-install-update")
         .checked(auto_install)
-        .accessibility_label("自动下载安装")
+        .accessibility_label(t!("auto_install.label"))
         .on_change(move |checked, _, cx: &mut App| {
             auto_entity.update(cx, |this, cx| this.set_auto_install(checked, cx));
         });
@@ -448,7 +497,7 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
                                 .whitespace_nowrap()
                                 .type_style(TYPE.ui_medium)
                                 .text_color(status_color)
-                                .child(status_title),
+                                .child(SharedString::from(status_title)),
                         ),
                 )
                 .child(action_row),
@@ -459,21 +508,21 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
                 .pl(px(15.))
                 .type_style(TYPE.text_xsmall)
                 .text_color(muted)
-                .child(status_detail),
+                .child(SharedString::from(status_detail)),
         )
         .children(progress_bar.map(|progress| div().w_full().pt_1().child(progress)));
 
     SettingsSection::new()
-        .title("更新")
+        .title(t!("section.update"))
         .child(status_cell)
         .child(
-            SettingsRow::new("更新通道")
-                .description("生产版接收正式发布；内测版接收测试构建")
+            SettingsRow::new(t!("channel.label"))
+                .description(t!("channel.description"))
                 .child(channel_selector),
         )
         .child(
-            SettingsRow::new("自动下载安装")
-                .description("发现新版本后在后台下载；关闭后仅提示")
+            SettingsRow::new(t!("auto_install.label"))
+                .description(t!("auto_install.description"))
                 .child(auto_install_switch),
         )
 }
@@ -481,33 +530,33 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
 /// 帮助文档、反馈、源码。三个平台都有：Windows、Linux 没有菜单栏，帮助和反馈只能从这里进。
 fn help_section() -> SettingsSection {
     SettingsSection::new()
-        .title("帮助与反馈")
+        .title(t!("section.help"))
         .child(
-            SettingsRow::new("使用文档").child(
+            SettingsRow::new(t!("help.docs_row")).child(
                 Link::new("settings-help-link", DOCS_URL)
                     .type_style(TYPE.ui)
-                    .child("帮助文档 ↗"),
+                    .child(format!("{} ↗", t!("docs"))),
             ),
         )
         .child(
-            SettingsRow::new("反馈问题")
-                .description("先打开日志，再把它拖进反馈页")
+            SettingsRow::new(t!("report_issue"))
+                .description(t!("help.report_description"))
                 .child(
                     Button::new("settings-open-log-link")
                         .quiet()
                         .small()
-                        .label("打开日志")
+                        .label(t!("help.open_log"))
                         .on_click(|_, _, cx: &mut App| reveal_app_log(cx)),
                 )
                 // 链接只管打开网页，不顺手做别的；找日志是旁边那个按钮。
                 .child(
                     Link::new("settings-report-issue-link", FEEDBACK_URL)
                         .type_style(TYPE.ui)
-                        .child("反馈问题 ↗"),
+                        .child(format!("{} ↗", t!("report_issue"))),
                 ),
         )
         .child(
-            SettingsRow::new("源码").child(
+            SettingsRow::new(t!("help.source")).child(
                 Link::new("settings-github-link", SOURCE_URL)
                     .type_style(TYPE.ui)
                     .child("GitHub ↗"),

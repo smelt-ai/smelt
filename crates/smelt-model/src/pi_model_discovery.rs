@@ -8,10 +8,10 @@
 pub fn models_endpoint(base_url: &str) -> Result<String, String> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
-        return Err("请先填写 API 地址".to_string());
+        return Err(rust_i18n::t!("pi_model.base_url_required").into_owned());
     }
     if !base.starts_with("http://") && !base.starts_with("https://") {
-        return Err(format!("API 地址需要以 http:// 或 https:// 开头：{base}"));
+        return Err(rust_i18n::t!("pi_model.base_url_scheme", url = base).into_owned());
     }
     if base.ends_with("/models") {
         return Ok(base.to_string());

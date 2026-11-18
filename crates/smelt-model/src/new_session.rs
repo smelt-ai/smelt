@@ -4,8 +4,15 @@ use crate::acp_conn::AcpRuntimeDiagnostics;
 use crate::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 use crate::session_control::AcpAgentOption;
 
-/// 分组标题。顺序与 [`NewSessionSections::into_array`] 一致。
-pub const SECTION_LABELS: [&str; 3] = ["常用", "终端", "对话"];
+/// 分组标题，按当前界面语言说。下标顺序与 [`NewSessionSections::into_array`] 一致。
+pub fn section_label(index: usize) -> String {
+    match index {
+        0 => rust_i18n::t!("new_session.section.favorites"),
+        1 => rust_i18n::t!("new_session.section.terminal"),
+        _ => rust_i18n::t!("new_session.section.conversation"),
+    }
+    .into_owned()
+}
 
 /// 项目行「+」下拉菜单里的一条可配置启动项：显示名 + shell 启动命令。
 /// `provider` 标识这条启动项属于哪个 agent 协议族（如 "claude"/"codex"），
@@ -77,11 +84,13 @@ pub enum NewSessionActionKind {
 }
 
 impl NewSessionActionKind {
-    pub fn label(self) -> &'static str {
+    /// 按当前界面语言说的种类名。
+    pub fn label(self) -> String {
         match self {
-            Self::Conversation => "对话",
-            Self::Terminal => "终端",
+            Self::Conversation => rust_i18n::t!("new_session.section.conversation"),
+            Self::Terminal => rust_i18n::t!("new_session.section.terminal"),
         }
+        .into_owned()
     }
 }
 
@@ -194,7 +203,7 @@ pub fn terminal_key(entry: &LaunchEntry) -> String {
 /// 空白终端也是一个明确的启动预设，可以和其它终端一样 Pin。
 pub const BLANK_TERMINAL_KEY: &str = "terminal:blank";
 
-pub const BLANK_TERMINAL_LABEL: &str = "空白终端";
+pub const BLANK_TERMINAL_LABEL: &str = "Shell";
 
 fn entry_kind(entry: &LaunchEntry) -> Option<TerminalAgentKind> {
     entry

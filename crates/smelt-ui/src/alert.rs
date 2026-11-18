@@ -49,7 +49,7 @@ impl RenderOnce for Alert {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let (color, icon) = match self.tone {
             Tone::Error => (ui_theme::bad(), IconName::CircleAlert),
-            Tone::Need => (ui_theme::need(), IconName::TriangleAlert),
+            Tone::Need => (ui_theme::need(), IconName::Warning),
         };
         let fill = ui_theme::flatten(ui_theme::tint(color, 0x1a), ui_theme::bg());
         let mark = ui_theme::legible(color, fill, 3.);

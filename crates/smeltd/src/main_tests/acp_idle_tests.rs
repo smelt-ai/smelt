@@ -246,6 +246,7 @@ fn select(
             .map(|(value, name)| (value.to_string(), name.to_string()))
             .collect(),
         boolean: None,
+        smelt: None,
     }
 }
 
@@ -253,7 +254,10 @@ fn mode(current: &str) -> smelt_core::acp_conn::SessionConfigState {
     select(
         "mode",
         current,
-        &[("default", "逐次审批"), ("bypassPermissions", "完全访问")],
+        &[
+            ("default", "Ask each time"),
+            ("bypassPermissions", "Full access"),
+        ],
     )
 }
 
@@ -261,7 +265,7 @@ fn thinking(current: &str) -> smelt_core::acp_conn::SessionConfigState {
     select(
         "thought_level",
         current,
-        &[("medium", "中"), ("high", "高")],
+        &[("medium", "Medium"), ("high", "High")],
     )
 }
 
@@ -272,11 +276,15 @@ fn switch(id: &str, on: bool) -> smelt_core::acp_conn::SessionConfigState {
     }
 }
 
-/// 挂起前用户调过的一组配置：换了模型、开了完全访问、推理拉到高、开了开关。
+/// 挂起前用户调过的一组配置：换了模型、开了Full access、推理拉到高、开了开关。
 fn tuned_state() -> AcpSessionState {
     quiet_with(|state| {
         state.model = Some(pi_model("deepseek/flash"));
-        state.config_options = vec![mode("完全访问"), thinking("高"), switch("codemode", true)];
+        state.config_options = vec![
+            mode("Full access"),
+            thinking("High"),
+            switch("codemode", true),
+        ];
     })
 }
 
@@ -284,7 +292,11 @@ fn tuned_state() -> AcpSessionState {
 fn fresh_defaults() -> AcpSessionState {
     quiet_with(|state| {
         state.model = Some(pi_model("openai/gpt-5"));
-        state.config_options = vec![mode("逐次审批"), thinking("中"), switch("codemode", false)];
+        state.config_options = vec![
+            mode("Ask each time"),
+            thinking("Medium"),
+            switch("codemode", false),
+        ];
     })
 }
 
@@ -341,8 +353,8 @@ fn settings_the_new_runtime_no_longer_offers_are_skipped() {
         state.model = Some(model);
         // 推理强度只剩 medium，codemode 整项没了。
         state.config_options = vec![
-            mode("逐次审批"),
-            select("thought_level", "中", &[("medium", "中")]),
+            mode("Ask each time"),
+            select("thought_level", "Medium", &[("medium", "Medium")]),
         ];
     });
     assert!(
@@ -416,7 +428,7 @@ fn initial_config_naming_the_agents_own_model_id_switches_the_model_first() {
         model.config_id = "claude_model".into();
         state.model = Some(model);
         state.config_options = vec![
-            mode("逐次审批"),
+            mode("Ask each time"),
             select(
                 "claude_model",
                 "openai/gpt-5",
@@ -483,8 +495,11 @@ fn restore_waits_for_the_model_before_writing_other_settings() {
     );
     expect(next(), "thought_level", ConfigValue::Select("high".into()));
     expect(next(), "codemode", ConfigValue::Boolean(true));
-    session.reduced.lock().config_options =
-        vec![mode("完全访问"), thinking("高"), switch("codemode", true)];
+    session.reduced.lock().config_options = vec![
+        mode("Full access"),
+        thinking("High"),
+        switch("codemode", true),
+    ];
     restoring.join().unwrap();
 }
 
@@ -493,7 +508,7 @@ fn a_rejected_restore_does_not_hold_the_user_action() {
     let saved = acp_idle::SuspendedConfig::capture(&tuned_state());
     let (session, _cmd_rx) = direct_session(quiet_with(|state| {
         state.model = Some(pi_model("deepseek/flash"));
-        state.config_options = vec![mode("逐次审批")];
+        state.config_options = vec![mode("Ask each time")];
     }));
     let session = Arc::new(session);
     let subscribers = new_event_hub();
@@ -506,7 +521,11 @@ fn a_rejected_restore_does_not_hold_the_user_action() {
     std::thread::sleep(Duration::from_millis(200));
     smelt_core::acp_session::apply_event(
         &mut session.reduced.lock(),
-        smelt_core::acp_conn::ConversationEvent::ConfigRejected("更新会话配置失败：不行".into()),
+        smelt_core::acp_conn::ConversationEvent::ConfigRejected(
+            smelt_core::acp_session::RuntimeNote::ConfigUpdateFailed {
+                detail: "nope".into(),
+            },
+        ),
     );
     let started = std::time::Instant::now();
     restoring.join().unwrap();

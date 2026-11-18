@@ -2,6 +2,7 @@
 //! 都是登记的视图（宿主自己的也是），这里只按 [`SettingsSelection`] 取来摆上，不认识哪一页。
 
 use super::*;
+use rust_i18n::t;
 use smelt_plugin_api::HostEvent;
 use smelt_ui::kit::{TYPE, TypeStyled as _};
 
@@ -19,7 +20,8 @@ impl SettingsContentView {
                 &smelt_plugin_api::events(cx),
                 window,
                 |this: &mut Self, _, event: &HostEvent, window, cx| {
-                    if matches!(event, HostEvent::ViewsChanged) {
+                    // 换了语言，停着那页的标题跟着变。
+                    if matches!(event, HostEvent::ViewsChanged | HostEvent::LocaleChanged) {
                         this.sync(window, cx);
                     }
                 },
@@ -85,7 +87,7 @@ impl Render for SettingsContentView {
                 .p_6()
                 .type_style(TYPE.ui)
                 .text_color(rgb(crate::ui_theme::muted()))
-                .child("这一页已经撤下了：登记它的插件卸载了，或重新加载时出错。")
+                .child(t!("settings.page_gone"))
                 .into_any_element(),
         };
         div()

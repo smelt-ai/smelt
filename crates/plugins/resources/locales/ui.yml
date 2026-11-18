@@ -1,0 +1,104 @@
+_version: 2
+page:
+  title:
+    en: Resource Usage
+    zh-CN: 资源占用
+loading:
+  en: Loading…
+  zh-CN: 读取中…
+summary:
+  title:
+    en: This Mac Total
+    zh-CN: 本机合计
+  refresh:
+    en: Refreshes every 2 seconds while this page is open
+    zh-CN: 停在这一页时每 2 秒刷新
+  share:
+    en: "%{percent}% of this machine's %{total} memory"
+    zh-CN: 占本机 %{total} 内存的 %{percent}%
+column:
+  name:
+    en: Name
+    zh-CN: 名称
+  memory:
+    en: Memory
+    zh-CN: 内存
+  total:
+    en: Total
+    zh-CN: 合计
+row:
+  desktop:
+    en: Smelt app
+    zh-CN: Smelt 界面
+  desktop_detail:
+    en: GPUI main process
+    zh-CN: GPUI 主进程
+  daemon:
+    en: smeltd background service
+    zh-CN: smeltd 后台服务
+memory:
+  graphics:
+    en: Frame buffers and textures
+    zh-CN: 画面缓冲与纹理
+  graphics_detail:
+    en: Used for GPU drawing; bigger windows use more
+    zh-CN: GPU 绘制用，窗口越大占得越多
+  heap:
+    en: App data
+    zh-CN: 程序数据
+  heap_detail:
+    en: Session content, text layout caches and so on — the part of the heap in use
+    zh-CN: 会话内容、文字排版缓存等，堆上正在用的部分
+  other:
+    en: Other
+    zh-CN: 其它
+  other_detail:
+    en: System library data, thread stacks, free pages in the heap
+    zh-CN: 系统库的数据、线程栈、堆里空着的页
+others:
+  one:
+    en: 1 session outside the sidebar
+    zh-CN: 侧栏之外的 1 个会话
+  other:
+    en: "%{count} sessions outside the sidebar"
+    zh-CN: 侧栏之外的 %{count} 个会话
+  detail:
+    en: Opened by automations, subagents or other clients · %{summary}
+    zh-CN: 自动化、子智能体或别的客户端开的 · %{summary}
+processes:
+  one:
+    en: 1 process
+    zh-CN: 1 个进程
+  other:
+    en: "%{count} processes"
+    zh-CN: "%{count} 个进程"
+  separator:
+    en: ", "
+    zh-CN: 、
+  and_more:
+    en: "%{names}, …"
+    zh-CN: "%{names} 等"
+  named:
+    en: "%{processes}: %{names}"
+    zh-CN: "%{processes}：%{names}"
+unlisted:
+  one:
+    en: 1 smaller process not listed
+    zh-CN: 另有 1 个占用更小的进程没列出
+  other:
+    en: "%{count} smaller processes not listed"
+    zh-CN: 另有 %{count} 个占用更小的进程没列出
+fallback:
+  conversation:
+    en: Conversation
+    zh-CN: 对话
+  terminal:
+    en: Terminal
+    zh-CN: 终端
+jump:
+  en: Go to Session
+  zh-CN: 跳到会话
+chart:
+  note:
+    en: "Includes the Smelt UI, background services and local sessions; the chart covers up to two minutes. Sessions count their whole process tree, including commands the agent starts. CPU is per core, so multi-core use can exceed 100%."
+    zh-CN: "含 Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，包括智能体起的命令；CPU 按单核计，多核可超过 100%。"

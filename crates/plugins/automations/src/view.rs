@@ -15,7 +15,7 @@ impl AutomationsPage {
         title: impl Into<SharedString>,
         subtitle: Option<(SharedString, u32)>,
         trailing: Option<AnyElement>,
-        back_tooltip: &'static str,
+        back_tooltip: Cow<'static, str>,
         entity: Entity<AutomationsPage>,
     ) -> AnyElement {
         let back_entity = entity;
@@ -77,7 +77,7 @@ impl AutomationsPage {
                 .child(
                     Button::new("automation-create")
                         .primary()
-                        .label("创建")
+                        .label(t!("editor.create"))
                         .loading(saving)
                         .disabled(!missing.is_empty())
                         .on_click(move |_, _, cx| {
@@ -108,11 +108,11 @@ impl AutomationsPage {
                 Button::new("automation-editor-more")
                     .quiet()
                     .icon(IconName::Ellipsis)
-                    .accessibility_label("更多操作"),
+                    .accessibility_label(t!("catalog.more")),
                 move |_, _| {
                     let run_entity = test_entity.clone();
                     let mut menu = Menu::new().item(
-                        MenuItem::new("运行一次")
+                        MenuItem::new(t!("menu.run_once"))
                             .icon(IconName::Play)
                             .disabled(header_saving)
                             .on_click(move |_, _, cx| {
@@ -134,7 +134,7 @@ impl AutomationsPage {
                     let delete_entity = delete_entity.clone();
                     let delete_id = delete_id.clone();
                     menu.separator().item(
-                        MenuItem::new("删除自动化")
+                        MenuItem::new(t!("menu.delete"))
                             .icon(api::ui::trash_icon())
                             .danger()
                             .on_click(move |_, window, cx| {
@@ -168,9 +168,9 @@ impl AutomationsPage {
                 let source = run_source_label(run.source);
                 let status = run_status_label(run.status);
                 let error = run
-                    .error
-                    .as_deref()
+                    .error_text()
                     .filter(|_| run.status == api::model::automation::AutomationRunStatus::Failed)
+                    .as_deref()
                     .map(compact_instructions);
                 let open_entity = entity.clone();
                 let run_id = run.id.clone();
@@ -227,7 +227,7 @@ impl AutomationsPage {
                         .py_2()
                         .rounded(ui_theme::row_radius())
                         // 字色跟着行走，选中时换成选中字色（见 `ListRow`）。
-                        .child(div().type_style(TYPE.ui_medium).child("设置"))
+                        .child(div().type_style(TYPE.ui_medium).child(t!("editor.settings").into_owned()))
                         .on_click(move |_, _, cx| {
                             task_entity
                                 .update(cx, |page, cx| page.show_automation_task(cx));
@@ -241,7 +241,7 @@ impl AutomationsPage {
                     .pb_1()
                     .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::faint()))
-                    .child("运行记录"),
+                    .child(t!("editor.runs").into_owned()),
             )
             .children(rows)
             .into_any_element()
@@ -266,7 +266,7 @@ impl AutomationsPage {
         let current_agent_name = current_agent
             .as_ref()
             .map(|agent| agent.name.clone())
-            .unwrap_or_else(|| "选择智能体".to_string());
+            .unwrap_or_else(|| t!("editor.choose_agent").into_owned());
         let no_ready_agents = ready_agents.is_empty();
         let agent_entity = entity.clone();
         let agent_button = Button::new("automation-agent")
@@ -316,12 +316,22 @@ impl AutomationsPage {
             .iter()
             .any(|entry| entry.trigger_kind == AutomationTriggerKindId::Webhook);
         let instruction = if is_agent {
-            framed_automation_textarea(TextArea::new(&editor.prompt).aria_label("指令"))
+            framed_automation_textarea(
+                TextArea::new(&editor.prompt).aria_label(MissingField::Prompt.label()),
+            )
         } else {
-            framed_automation_textarea(TextArea::new(&editor.command).aria_label("命令"))
+            framed_automation_textarea(
+                TextArea::new(&editor.command).aria_label(MissingField::Command.label()),
+            )
         };
-        let instruction_label = if is_agent { "指令" } else { "命令" };
-        let name_field = TextInput::new(&editor.name).aria_label("名称").w_full();
+        let instruction_label = if is_agent {
+            MissingField::Prompt.label()
+        } else {
+            MissingField::Command.label()
+        };
+        let name_field = TextInput::new(&editor.name)
+            .aria_label(MissingField::Name.label())
+            .w_full();
 
         div()
             .id("automation-editor-scroll")
@@ -341,10 +351,14 @@ impl AutomationsPage {
                     .flex_col()
                     .gap_5()
                     .children(editor.error.clone().map(render_agent_error))
-                    .child(automation_editor_section("名称", None, name_field))
                     .child(automation_editor_section(
-                        "触发器",
-                        Some("到点、按间隔，或收到 webhook 时运行。"),
+                        MissingField::Name.label(),
+                        None,
+                        name_field,
+                    ))
+                    .child(automation_editor_section(
+                        MissingField::Trigger.label(),
+                        Some(t!("editor.trigger_hint").into()),
                         trigger_field,
                     ))
                     .child(automation_editor_section(
@@ -381,7 +395,7 @@ impl AutomationsPage {
                                                                     "automation-open-agents",
                                                                 )
                                                                 .icon(IconName::Bot)
-                                                                .label("创建智能体")
+                                                                .label(t!("editor.create_agent"))
                                                                 .on_click(move |_, _, cx| {
                                                                     open_agents_view(&machine, cx);
                                                                 }),
@@ -453,7 +467,7 @@ impl AutomationsPage {
                                 .danger_quiet()
                                 .small()
                                 .icon(IconName::Close)
-                                .label("停止")
+                                .label(t!("menu.stop"))
                                 .on_click(move |_, _, cx| {
                                     let run_id = run_id.clone();
                                     let Some(runtime) = cancel_runtime.clone() else {
@@ -476,7 +490,7 @@ impl AutomationsPage {
                         .border_color(ui_theme::hair())
                         .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::muted()))
-                        .child("对话插件未安装，看不到运行现场；下面是落库的记录。"),
+                        .child(t!("editor.no_live_view").into_owned()),
                 )
             })
             .child(match live_view {
@@ -558,12 +572,12 @@ impl AutomationsPage {
             .filter(|editor| editor.automation == automation)
             .map(|editor| {
                 if editor.is_new {
-                    "新建自动化".to_string()
+                    t!("catalog.new").into_owned()
                 } else {
                     let trimmed = editor.name.read(cx).value();
                     let trimmed = trimmed.trim();
                     if trimmed.is_empty() {
-                        "未命名自动化".to_string()
+                        t!("automation.unnamed").into_owned()
                     } else {
                         trimmed.to_string()
                     }
@@ -581,7 +595,7 @@ impl AutomationsPage {
                     .map(|run| run.context.automation_name.clone())
                     .filter(|name| !name.trim().is_empty())
             })
-            .unwrap_or_else(|| "未命名自动化".to_string());
+            .unwrap_or_else(|| t!("automation.unnamed").into_owned());
         let discarding_draft = self
             .editor
             .as_ref()
@@ -608,7 +622,11 @@ impl AutomationsPage {
             title,
             subtitle,
             header_actions,
-            if discarding_draft { "取消" } else { "返回" },
+            if discarding_draft {
+                t!("editor.cancel")
+            } else {
+                t!("editor.back")
+            },
             entity.clone(),
         );
         let body = if runs.is_empty() {
@@ -624,7 +642,7 @@ impl AutomationsPage {
                     .p_5()
                     .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
-                    .child("这条自动化已经不在了。")
+                    .child(t!("editor.gone").into_owned())
                     .into_any_element()
             }
         } else {
@@ -643,7 +661,7 @@ impl AutomationsPage {
                     .p_5()
                     .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
-                    .child("选择一次运行。")
+                    .child(t!("editor.choose_run").into_owned())
                     .into_any_element()
             };
             div()
@@ -668,7 +686,7 @@ impl AutomationsPage {
     }
 }
 
-pub(crate) fn automation_field_hint(text: &'static str) -> AnyElement {
+pub(crate) fn automation_field_hint(text: SharedString) -> AnyElement {
     div()
         .type_style(TYPE.text_xsmall)
         .text_color(rgb(ui_theme::faint()))
@@ -677,8 +695,8 @@ pub(crate) fn automation_field_hint(text: &'static str) -> AnyElement {
 }
 
 pub(crate) fn automation_editor_section(
-    label: &'static str,
-    hint: Option<&'static str>,
+    label: SharedString,
+    hint: Option<SharedString>,
     body: impl IntoElement,
 ) -> AnyElement {
     div()

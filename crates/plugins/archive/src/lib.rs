@@ -18,13 +18,18 @@ use api::model::workspace_directory::{
 };
 use api::serde_json;
 use gpui::*;
-use smelt_plugin_api::{self as api, HostEvent, PluginView, RuntimeKey, ViewHandle, ViewSpec};
+use rust_i18n::t;
+use smelt_plugin_api::{
+    self as api, HostEvent, PluginView, RuntimeKey, ViewHandle, ViewSpec, text,
+};
 
 mod model;
 mod render;
 mod sessions;
 
 use model::{ArchivedRow, ClosedWorkset, MachineGroup};
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 const OWNER: &str = "smelt.archive";
 const VIEW_ID: &str = "smelt.archive/main";
@@ -35,11 +40,12 @@ pub fn register(cx: &mut App) {
         OWNER,
         vec![ViewSpec {
             name: "main".into(),
-            title: "归档".into(),
+            title: text!("view.title"),
             icon: api::ui::IconName::Archive.path(),
             draws_top_bar: false,
             instances: false,
             settings: None,
+            fills: Vec::new(),
             build: Rc::new(|_, cx| Rc::new(cx.new(ArchivePage::new)) as Rc<dyn ViewHandle>),
         }],
         cx,
@@ -90,7 +96,8 @@ impl ArchivePage {
                     self.rebuild(cx);
                 }
             }
-            HostEvent::SessionsChanged | HostEvent::MachinesChanged => {
+            // 行上的标题、时间是按当时的语言算好的。
+            HostEvent::SessionsChanged | HostEvent::MachinesChanged | HostEvent::LocaleChanged => {
                 self.stale = true;
                 if self.shown {
                     self.rebuild(cx);
@@ -163,17 +170,20 @@ impl ArchivePage {
         let machine = machine.clone();
         let row = row.clone();
         let candidates = closed.candidates.clone();
-        api::ui::dialog::Confirm::new("原工作树已关闭", "恢复", move |_, cx| {
-            let Some(workset) = confirm_page.read(cx).picked_workset.clone() else {
-                return false;
-            };
-            confirm_page.update(cx, |page, cx| page.restore(&machine, &row, Some(workset), cx));
-            true
-        })
-        .description(format!(
-            "原目录：{}。恢复后终端和智能体的工作目录改为所选工作树的根目录；能否续接取决于智能体。",
-            closed.old_root
-        ))
+        api::ui::dialog::Confirm::new(
+            t!("restore.closed_title"),
+            t!("action.restore"),
+            move |_, cx| {
+                let Some(workset) = confirm_page.read(cx).picked_workset.clone() else {
+                    return false;
+                };
+                confirm_page.update(cx, |page, cx| {
+                    page.restore(&machine, &row, Some(workset), cx)
+                });
+                true
+            },
+        )
+        .description(t!("restore.closed_description", root = closed.old_root))
         .body(move |_, cx| render::workset_choices(&page, &candidates, cx))
         .on_close(move |_, cx| {
             close_page.update(cx, |page, _| page.picked_workset = None);
@@ -221,7 +231,9 @@ impl ArchivePage {
                             report_failure(sessions::ACTIVATE.run(&activate, cx), cx);
                         }
                     }
-                    Err(error) => notify_error(&format!("恢复「{title}」失败：{error}"), cx),
+                    Err(error) => {
+                        notify_error(&t!("restore.failed", title = title, error = error), cx)
+                    }
                 }
             })
             .ok();
@@ -240,15 +252,12 @@ impl ArchivePage {
         let page = cx.entity();
         let machine = machine.clone();
         let target = row.clone();
-        api::ui::dialog::Confirm::new("确定彻底删除这段归档对话吗？", "彻底删除", move |_, cx| {
+        api::ui::dialog::Confirm::new(t!("delete.confirm"), t!("action.delete"), move |_, cx| {
             page.update(cx, |page, cx| page.delete(&machine, &target, cx));
             true
         })
         .danger()
-        .description(format!(
-            "「{}」的 Smelt 归档记录和续接身份将被永久删除，无法再恢复。不会删除项目文件，也不会删除 Claude、Codex 等工具自己保存的历史。",
-            row.title
-        ))
+        .description(t!("delete.description", title = row.title))
         .open(window, cx);
     }
 
@@ -269,7 +278,7 @@ impl ArchivePage {
                 this.busy.remove(&key);
                 cx.notify();
                 if let Err(error) = result {
-                    notify_error(&format!("删除「{title}」失败：{error}"), cx);
+                    notify_error(&t!("delete.failed", title = title, error = error), cx);
                 }
             })
             .ok();
@@ -301,7 +310,7 @@ fn report_failure(ran: Task<Result<(), String>>, cx: &mut App) {
 fn notify_error(message: &str, cx: &mut App) {
     eprintln!("[archive] {message}");
     let notify = api::Notify {
-        subtitle: "错误".to_string(),
+        subtitle: t!("notify.error").to_string(),
         body: message.to_string(),
         ..Default::default()
     };

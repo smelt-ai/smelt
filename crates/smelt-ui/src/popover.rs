@@ -2,8 +2,8 @@
 //!
 //! 行为（开关、焦点进出、Esc、点外面关、Enter / 空格开关）用 gpui-base 的 `Popover`，关掉后
 //! 焦点回到触发点。这里只给外观：`surface` 底、1px 细边、`md` 投影、
-//! 6 圆角、12 内边距、宽 200~320，离触发点 4px。设计上打开时直接出现、关时
-//! 淡出；gpui-base 关掉就卸下内容，淡出做不了。
+//! 6 圆角、12 内边距、宽 200~320，离触发点 4px。打开时从触发点那侧淡入
+//! （[`crate::motion::overlay_enter`]）；gpui-base 关掉就卸下内容，出场淡出做不了。
 //!
 //! `Styled` 改的是浮层卡片（宽、内边距）；触发点外框（参与外面排版、浮层对齐它）用
 //! [`Popover::trigger_style`]。悬停出现的详情用 [`crate::hover_card::HoverCard`]。
@@ -17,6 +17,7 @@ use gpui_base::{Selectable, StyledExt as _};
 pub use gpui_base::PopoverState;
 
 use crate::kit::{RADIUS, elevation};
+use crate::motion::{EnterFrom, overlay_enter};
 use crate::ui_theme;
 
 /// 浮层离触发点的距离。
@@ -62,14 +63,19 @@ type ContentBuilder =
 #[derive(IntoElement)]
 pub struct Popover {
     base: gpui_base::Popover,
+    id: ElementId,
+    anchor: Anchor,
     style: StyleRefinement,
     content: Option<ContentBuilder>,
 }
 
 impl Popover {
     pub fn new(id: impl Into<ElementId>) -> Self {
+        let id = id.into();
         Self {
-            base: gpui_base::Popover::new(id).offset(px(GAP)),
+            base: gpui_base::Popover::new(id.clone()).offset(px(GAP)),
+            id,
+            anchor: Anchor::TopLeft,
             style: StyleRefinement::default(),
             content: None,
         }
@@ -77,7 +83,7 @@ impl Popover {
 
     /// 卡片的哪个角对着触发点，默认 [`Anchor::TopLeft`]。
     pub fn anchor(mut self, anchor: Anchor) -> Self {
-        self.base = self.base.anchor(anchor);
+        self.anchor = anchor;
         self
     }
 
@@ -130,14 +136,17 @@ impl Styled for Popover {
 
 impl RenderOnce for Popover {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let base = self.base.anchor(self.anchor);
         let Some(content) = self.content else {
-            return self.base;
+            return base;
         };
         let style = self.style;
-        self.base.content(move |state, window, cx| {
-            surface()
-                .rounded(px(RADIUS.md))
-                .p(px(PADDING))
+        let id = self.id;
+        let from = EnterFrom::anchored(self.anchor);
+        base.content(move |state, window, cx| {
+            let enter = overlay_enter((id, "enter"), from, window, cx);
+            enter
+                .apply(surface().rounded(px(RADIUS.md)).p(px(PADDING)))
                 .refine_style(&style)
                 .child(content(state, window, cx))
         })

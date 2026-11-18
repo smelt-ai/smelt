@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{App, Context, SharedString, Window, div, px, rgb};
+use rust_i18n::t;
 use smelt_plugin_api::ui::{Button, SettingsPage, SettingsRow, SettingsSection, ui_theme};
 use smelt_plugin_api::{
     self as api, PluginView, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec,
@@ -16,17 +17,18 @@ use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 pub(crate) fn spec(store: Rc<TerminalStore>) -> ViewSpec {
     ViewSpec {
         name: "settings".into(),
-        title: "终端".into(),
+        title: api::text!("title"),
         icon: crate::ICON.into(),
         draws_top_bar: false,
         instances: false,
         settings: Some(SettingsEntry {
             group: SettingsGroup::General,
-            keywords: ["terminal", "字号", "字体大小", "font size"]
+            keywords: ["terminal", "终端", "字号", "字体大小", "font size"]
                 .into_iter()
                 .map(SharedString::from)
                 .collect(),
         }),
+        fills: Vec::new(),
         build: Rc::new(move |_, cx| {
             let store = store.clone();
             Rc::new(cx.new(|_| TerminalSettings { store })) as Rc<dyn ViewHandle>
@@ -58,13 +60,13 @@ impl Render for TerminalSettings {
         let current = font_px() as u32;
         let smaller = self.store.clone();
         let larger = self.store.clone();
-        let size = SettingsRow::new("字号")
+        let size = SettingsRow::new(t!("settings.font_size"))
             .description(format!("{MIN_FONT_PX}–{MAX_FONT_PX}px"))
             .child(
                 Button::new("terminal-font-smaller")
                     .small()
                     .label("−")
-                    .accessibility_label("终端字号减小")
+                    .accessibility_label(t!("settings.smaller"))
                     .disabled(current <= MIN_FONT_PX)
                     .on_click(move |_, _, cx| {
                         change_font_px(&smaller, current.saturating_sub(1), cx)
@@ -83,11 +85,14 @@ impl Render for TerminalSettings {
                 Button::new("terminal-font-larger")
                     .small()
                     .label("+")
-                    .accessibility_label("终端字号增大")
+                    .accessibility_label(t!("settings.larger"))
                     .disabled(current >= MAX_FONT_PX)
                     .on_click(move |_, _, cx| change_font_px(&larger, current + 1, cx)),
             );
-        SettingsPage::new("terminal-settings")
-            .child(SettingsSection::new().title("显示").child(size))
+        SettingsPage::new("terminal-settings").child(
+            SettingsSection::new()
+                .title(t!("settings.display"))
+                .child(size),
+        )
     }
 }

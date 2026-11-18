@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
-gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }

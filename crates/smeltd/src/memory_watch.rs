@@ -29,9 +29,9 @@ fn watches() -> &'static Mutex<Watches> {
 /// 关注 `agent_id` 读的两层记忆。幂等。
 pub(crate) fn watch(agent_id: &str, event_hub: &EventHubHandle) -> Result<(), String> {
     let agent_dir = smelt_core::agent_definition_store::agent_memory_dir(agent_id)
-        .ok_or_else(|| format!("智能体 id 不能当目录名：{agent_id}"))?;
+        .ok_or_else(|| format!("The agent id can't be used as a directory name: {agent_id}"))?;
     let user_dir = smelt_core::agent_definition_store::user_memory_dir()
-        .ok_or_else(|| "找不到用户全局记忆目录".to_string())?;
+        .ok_or_else(|| "Couldn't find the user's global memory directory".to_string())?;
     watch_layer(Some(agent_id.to_string()), &agent_dir, event_hub)?;
     watch_layer(None, &user_dir, event_hub)
 }
@@ -45,8 +45,12 @@ fn watch_layer(
     if watches.contains_key(&layer) {
         return Ok(());
     }
-    std::fs::create_dir_all(dir)
-        .map_err(|error| format!("无法创建记忆目录 {}：{error}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|error| {
+        format!(
+            "Couldn't create the memory directory {}: {error}",
+            dir.display()
+        )
+    })?;
     // 容量 1：一批事件只需要一次唤醒，不在队列里堆积。
     let (dirty_tx, dirty_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -54,10 +58,10 @@ fn watch_layer(
             let _ = dirty_tx.try_send(());
         }
     })
-    .map_err(|error| format!("监听 {} 失败：{error}", dir.display()))?;
+    .map_err(|error| format!("Couldn't watch {}: {error}", dir.display()))?;
     watcher
         .watch(dir, RecursiveMode::Recursive)
-        .map_err(|error| format!("监听 {} 失败：{error}", dir.display()))?;
+        .map_err(|error| format!("Couldn't watch {}: {error}", dir.display()))?;
     watches.insert(layer.clone(), watcher);
     let hub = Arc::clone(event_hub);
     std::thread::Builder::new()
@@ -71,6 +75,6 @@ fn watch_layer(
                 }
             }
         })
-        .map_err(|error| format!("启动监听线程失败：{error}"))?;
+        .map_err(|error| format!("Couldn't start the watcher thread: {error}"))?;
     Ok(())
 }

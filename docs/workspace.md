@@ -27,7 +27,7 @@ cargo run --bin smelt
 
 | 层 | 选型 | 说明 |
 |----|------|------|
-| GUI 框架 | **GPUI**（`gpui-pre` 0.3.11）+ `longbridge/gpui-kit` | GPU 加速、Metal 渲染 |
+| GUI 框架 | **GPUI**（`gpui-pre` 0.3.12）+ `longbridge/gpui-kit` | GPU 加速、Metal 渲染 |
 | 组件库 | **smelt-ui**（`crates/smelt-ui`，建在 gpui-base 的原语上） | 按钮、菜单、对话框、输入框、差异视图、代码编辑器、语法高亮、主题等全是自己的，不依赖 gpui-component，见 `docs/ui-design-language.md` |
 | 终端后端 | **portable-pty** `0.9`（在 `smeltd`） | Unix 起 `$SHELL`；Windows 起 `COMSPEC` 或 `cmd.exe`（ConPTY）并拿到 PTY |
 | 终端状态机 | **alacritty_terminal** `0.26` | ANSI 解析 + 网格模型 + 滚动缓冲 |

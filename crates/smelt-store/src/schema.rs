@@ -369,7 +369,8 @@ CREATE TABLE automation_run (
   output TEXT,
   error TEXT,
   runtime_released_at INTEGER,
-  context_json BLOB NOT NULL
+  context_json BLOB NOT NULL,
+  error_code TEXT
 );
 CREATE INDEX automation_run_automation_created_idx
   ON automation_run(automation_id, created_at);
@@ -478,7 +479,8 @@ CREATE TABLE push_registration (
   updated_at_ms INTEGER NOT NULL,
   notify_success INTEGER NOT NULL DEFAULT 0 CHECK (notify_success IN (0, 1)),
   payload_version INTEGER NOT NULL DEFAULT 1 CHECK (payload_version >= 1),
-  notify_message INTEGER NOT NULL DEFAULT 1 CHECK (notify_message IN (0, 1))
+  notify_message INTEGER NOT NULL DEFAULT 1 CHECK (notify_message IN (0, 1)),
+  locale TEXT
 ) WITHOUT ROWID;
 CREATE TABLE runtime_identity (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1887,6 +1889,15 @@ ALTER TABLE session_group ADD COLUMN closed_workset_root TEXT;
 ///
 /// 这几列没有约束牵连别的列、也没有索引，SQLite 的 DROP COLUMN 能删，删完的建表语句去掉空白后
 /// 和 `CREATE_SCHEMA` 一致。逐列判断，已经没有的跳过（用当前结构造的夹具）。
+/// v39 还给 `automation_run` 加了 `error_code`：运行没成的原因种类（`AutomationRunFailure`
+/// 的代码），客户端按语言说；`error` 改成只存细节。旧记录这一列是 NULL，`error` 是整句。
+/// 还给 `push_registration` 加了 `locale`：手机登记时的界面语言，推送摘要按它说；旧登记是
+/// NULL，按英文说，手机下次登记时补上。
+pub const V38_TO_V39_ADDED_COLUMNS: [(&str, &str, &str); 2] = [
+    ("automation_run", "error_code", "TEXT"),
+    ("push_registration", "locale", "TEXT"),
+];
+
 pub const V38_TO_V39_DROPPED_COLUMNS: [(&str, &str); 4] = [
     ("session_group", "pinned_at"),
     ("acp_detail", "refresh_launch_from_settings"),

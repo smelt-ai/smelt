@@ -1,0 +1,52 @@
+_version: 2
+view:
+  title:
+    en: Archive
+    zh-CN: 归档
+empty:
+  en: No archived conversations
+  zh-CN: 没有归档的对话
+action:
+  restore:
+    en: Restore
+    zh-CN: 恢复
+  delete:
+    en: Delete Permanently
+    zh-CN: 彻底删除
+row:
+  untitled:
+    en: Untitled conversation
+    zh-CN: 未命名对话
+  terminal:
+    en: Terminal
+    zh-CN: 终端
+  archived_at:
+    en: Archived %{time}
+    zh-CN: 归档于 %{time}
+restore:
+  closed_title:
+    en: The original worktree is closed
+    zh-CN: 原工作树已关闭
+  closed_description:
+    en: "Original folder: %{root}. After restoring, the terminal and agent will work in the root of the worktree you pick; whether the conversation can resume depends on the agent."
+    zh-CN: 原目录：%{root}。恢复后终端和智能体的工作目录改为所选工作树的根目录；能否续接取决于智能体。
+  no_worksets:
+    en: This project has no worktrees available. Create one for the project in the session list, then come back to restore.
+    zh-CN: 这个项目下没有可用的工作树。先在会话列表里给项目新建一个工作树，再回来恢复。
+  failed:
+    en: "Couldn't restore “%{title}”: %{error}"
+    zh-CN: 恢复「%{title}」失败：%{error}
+delete:
+  confirm:
+    en: Permanently delete this archived conversation?
+    zh-CN: 确定彻底删除这段归档对话吗？
+  description:
+    en: Smelt's archive record and resume identity for “%{title}” will be permanently deleted and can't be restored. Project files are not deleted, and neither is the history that tools like Claude and Codex keep themselves.
+    zh-CN: 「%{title}」的 Smelt 归档记录和续接身份将被永久删除，无法再恢复。不会删除项目文件，也不会删除 Claude、Codex 等工具自己保存的历史。
+  failed:
+    en: "Couldn't delete “%{title}”: %{error}"
+    zh-CN: 删除「%{title}」失败：%{error}
+notify:
+  error:
+    en: Error
+    zh-CN: 错误

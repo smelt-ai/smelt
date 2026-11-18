@@ -1,3 +1,4 @@
+use rust_i18n::t;
 use smelt_plugin_api as api;
 use std::collections::HashMap;
 
@@ -55,19 +56,18 @@ pub(crate) fn automation_run_notifications(
     current
         .iter()
         .filter_map(|run| {
-            let (kind, state_label, fallback) = match run.status {
+            let (kind, fallback) = match run.status {
                 AutomationRunStatus::Completed => (
                     AutomationRunNotificationKind::Success,
-                    "已完成",
-                    "运行已完成",
+                    t!("notify.run_completed_body"),
                 ),
-                AutomationRunStatus::Failed => {
-                    (AutomationRunNotificationKind::Failure, "失败", "运行失败")
-                }
+                AutomationRunStatus::Failed => (
+                    AutomationRunNotificationKind::Failure,
+                    t!("notify.run_failed_body"),
+                ),
                 AutomationRunStatus::Skipped => (
                     AutomationRunNotificationKind::Failure,
-                    "已跳过",
-                    "本次运行已跳过",
+                    t!("notify.run_skipped_body"),
                 ),
                 AutomationRunStatus::Starting
                 | AutomationRunStatus::Queued
@@ -84,21 +84,27 @@ pub(crate) fn automation_run_notifications(
                 return None;
             }
             let detail = match run.status {
-                AutomationRunStatus::Completed => run.output.as_deref(),
-                AutomationRunStatus::Failed | AutomationRunStatus::Skipped => run.error.as_deref(),
+                AutomationRunStatus::Completed => run.output.clone(),
+                AutomationRunStatus::Failed | AutomationRunStatus::Skipped => run.error_text(),
                 _ => None,
             }
+            .as_deref()
             .and_then(notification_excerpt)
-            .unwrap_or_else(|| fallback.to_string());
+            .unwrap_or_else(|| fallback.into_owned());
             Some(AutomationRunNotification {
                 automation_id: run.automation_id.clone(),
                 run_id: run.id.clone(),
                 kind,
-                subtitle: format!(
-                    "自动化{state_label} · {}",
-                    run.context.automation_name.trim()
-                ),
-                body: format!("{} · {detail}", run.source.label()),
+                subtitle: {
+                    let name = run.context.automation_name.trim();
+                    match run.status {
+                        AutomationRunStatus::Completed => t!("notify.run_completed", name = name),
+                        AutomationRunStatus::Failed => t!("notify.run_failed", name = name),
+                        _ => t!("notify.run_skipped", name = name),
+                    }
+                    .into_owned()
+                },
+                body: format!("{} · {detail}", crate::format::run_source_label(run.source)),
             })
         })
         .collect()
@@ -152,6 +158,7 @@ mod tests {
             session_id: None,
             provider_session_id: None,
             output: None,
+            error_code: None,
             error: None,
             runtime_released_at: None,
         }
@@ -286,7 +293,7 @@ mod tests {
     fn skipped_runs_notify_as_failures_but_user_cancellations_stay_quiet() {
         let mut skipped = run(AutomationRunStatus::Skipped);
         skipped.finished_at = Some(12);
-        skipped.error = Some("上一条 Run 仍在执行，本次计划已跳过".into());
+        skipped.error_code = Some(api::model::automation::AutomationRunFailure::PreviousRunActive);
         let notifications =
             automation_run_notifications(&[], &[skipped], AutomationProjectionOrigin::Incremental);
         assert_eq!(notifications.len(), 1);
@@ -294,6 +301,7 @@ mod tests {
             notifications[0].kind,
             AutomationRunNotificationKind::Failure
         );
+        assert!(notifications[0].body.contains("previous run"));
 
         assert!(
             automation_run_notifications(

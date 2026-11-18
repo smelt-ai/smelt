@@ -70,7 +70,7 @@ pub(crate) fn managed_pi_diagnostic() -> Result<(PathBuf, bool), String> {
 }
 
 pub(crate) fn locate_smelt_agent() -> Result<PathBuf, String> {
-    let home = smelt_paths::smelt_home().ok_or("找不到 home 目录")?;
+    let home = smelt_paths::smelt_home().ok_or("can't find the home directory")?;
     locate_smelt_agent_in(&home.join("bin"))
 }
 
@@ -88,7 +88,7 @@ pub fn reap_legacy_smelt_pi() {
 fn locate_smelt_agent_in(bin: &Path) -> Result<PathBuf, String> {
     crate::agent_image::current(bin).ok_or_else(|| {
         format!(
-            "找不到 smelt-agent（{}）。桌面重新打开 Smelt 会从 App 里装上；Linux 上运行时启动时会按自己的版本补上，或重新运行安装脚本。",
+            "Can't find smelt-agent ({}). On the desktop, reopening Smelt installs it from the app; on Linux the runtime adds it for its own version at startup, or rerun the install script.",
             bin.join(crate::agent_image::LAUNCH_NAME).display()
         )
     })
@@ -104,7 +104,7 @@ fn require_photon_wasm(executable: &Path) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "smelt-agent 旁边缺少 photon_rs_bg.wasm（{}）",
+            "photon_rs_bg.wasm is missing next to smelt-agent ({})",
             wasm.display()
         ))
     }
@@ -350,7 +350,10 @@ mod tests {
         let bin = root.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let error = locate_smelt_agent_in(&bin).expect_err("没发布过必须失败");
-        assert!(error.contains("找不到 smelt-agent"), "实际错误：{error}");
+        assert!(
+            error.contains("Can't find smelt-agent"),
+            "实际错误：{error}"
+        );
 
         let published = bin.join(format!("smelt-agent-{}", "ab".repeat(32))).join("smelt-agent");
         executable(&published, b"pi");

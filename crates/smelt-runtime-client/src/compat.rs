@@ -10,6 +10,8 @@
 
 use std::fmt;
 
+use rust_i18n::t;
+
 use smelt_event_protocol::{EVENT_BUS_PROTOCOL_VERSION, MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION};
 
 use crate::protocol::control::{CONTROL_API_VERSION, SystemDescribeResult};
@@ -33,16 +35,16 @@ pub struct Incompatibility {
 impl fmt::Display for Incompatibility {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.outdated {
-            Outdated::Runtime => write!(
-                f,
-                "运行时 {} 较旧，需要升级运行时（{}）",
-                self.runtime_version, self.reason
-            ),
-            Outdated::Client => write!(
-                f,
-                "运行时 {} 较新，需要升级客户端（{}）",
-                self.runtime_version, self.reason
-            ),
+            Outdated::Runtime => f.write_str(&t!(
+                "compat.runtime_outdated",
+                version = self.runtime_version,
+                reason = self.reason
+            )),
+            Outdated::Client => f.write_str(&t!(
+                "compat.client_outdated",
+                version = self.runtime_version,
+                reason = self.reason
+            )),
         }
     }
 }
@@ -79,34 +81,52 @@ fn with_runtime_version(
 fn check_control(described: &SystemDescribeResult) -> Result<(), (Outdated, String)> {
     let control = &described.control;
     if CONTROL_API_VERSION < control.min_supported_version {
-        return Err(client(format!(
-            "控制协议 v{CONTROL_API_VERSION}，运行时至少要 v{}",
-            control.min_supported_version
-        )));
+        return Err(client(
+            t!(
+                "compat.control_too_old",
+                ours = CONTROL_API_VERSION,
+                min = control.min_supported_version
+            )
+            .into_owned(),
+        ));
     }
     if CONTROL_API_VERSION > control.max_supported_version {
-        return Err(runtime(format!(
-            "控制协议 v{}，客户端要 v{CONTROL_API_VERSION}",
-            control.max_supported_version
-        )));
+        return Err(runtime(
+            t!(
+                "compat.control_too_new",
+                max = control.max_supported_version,
+                ours = CONTROL_API_VERSION
+            )
+            .into_owned(),
+        ));
     }
     Ok(())
 }
 
 fn event_versions(described: &SystemDescribeResult) -> Result<(), (Outdated, String)> {
     let Some(events) = &described.events else {
-        return Err(runtime("没有声明事件协议版本".to_string()));
+        return Err(runtime(t!("compat.events_undeclared").into_owned()));
     };
     let version = events.protocol_version;
     if version < MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION {
-        return Err(runtime(format!(
-            "事件协议 v{version}，客户端至少要 v{MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION}"
-        )));
+        return Err(runtime(
+            t!(
+                "compat.events_too_old",
+                version = version,
+                min = MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION
+            )
+            .into_owned(),
+        ));
     }
     if version > EVENT_BUS_PROTOCOL_VERSION {
-        return Err(client(format!(
-            "事件协议 v{version}，客户端只认到 v{EVENT_BUS_PROTOCOL_VERSION}"
-        )));
+        return Err(client(
+            t!(
+                "compat.events_too_new",
+                version = version,
+                max = EVENT_BUS_PROTOCOL_VERSION
+            )
+            .into_owned(),
+        ));
     }
     Ok(())
 }
@@ -245,12 +265,12 @@ mod tests {
     }
 
     #[test]
-    fn message_names_the_side_to_upgrade_in_chinese() {
+    fn message_names_the_side_to_upgrade() {
         let mut described = current();
         described.events = None;
         assert_eq!(
             check(&described).unwrap_err().to_string(),
-            "运行时 test 较旧，需要升级运行时（没有声明事件协议版本）"
+            "Runtime test is too old; update the runtime (the runtime doesn't declare an event protocol version)"
         );
     }
 
@@ -285,7 +305,7 @@ mod tests {
             MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION - 1;
         let error = check_events(&older).unwrap_err();
         assert_eq!(error.outdated, Outdated::Runtime);
-        assert!(error.reason.contains("事件协议"), "{}", error.reason);
+        assert!(error.reason.contains("event protocol"), "{}", error.reason);
 
         let mut newer = current();
         newer.events.as_mut().unwrap().protocol_version = EVENT_BUS_PROTOCOL_VERSION + 1;

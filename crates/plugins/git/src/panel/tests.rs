@@ -7,13 +7,13 @@ use super::RepoSet;
 use super::ops::apply_collapsed_files;
 use super::{Cached, GIT_DISCOVERY_MIN_INTERVAL, git_discovery_wait, needs_fetch};
 use super::{
-    DiffScope, GitDiff, GitStatusData, GitStatusResponseAction, GitWrite, PendingGitIndexOp,
-    aggregate_diff_ready_for_file, build_git_tree, clear_confirmed_git_index_ops,
-    commit_button_label, diff_feedback_text, diff_parse_failure, diff_scroll_target,
-    full_file_path, git_empty_list_message, git_index_op_in_flight, git_status_response_action,
-    git_status_retry_delay, hunk_line_anchor, parse_diff, parse_diff_with_file_headers,
-    release_git_write, repo_needs_attention, reserve_git_write, resolve_git_write_target,
-    should_close_aggregate_diff, split_staged_and_changed,
+    DiffScope, EmptyList, GitDiff, GitStatusData, GitStatusResponseAction, GitWrite,
+    PendingGitIndexOp, aggregate_diff_ready_for_file, build_git_tree,
+    clear_confirmed_git_index_ops, commit_button_label, diff_feedback_text, diff_parse_failure,
+    diff_scroll_target, full_file_path, git_empty_list_message, git_index_op_in_flight,
+    git_status_response_action, git_status_retry_delay, hunk_line_anchor, parse_diff,
+    parse_diff_with_file_headers, release_git_write, repo_needs_attention, reserve_git_write,
+    resolve_git_write_target, should_close_aggregate_diff, split_staged_and_changed,
 };
 use smelt_plugin_api::client::protocol::git::{DiffKind, DiscoveredRepo, RepoKind};
 
@@ -48,7 +48,7 @@ fn sample_status(
 
 #[test]
 fn aggregate_diff_has_no_full_worktree_file() {
-    assert!(full_file_path("/repo", "全部更改", true).is_none());
+    assert!(full_file_path("/repo", "", true).is_none());
     assert_eq!(
         full_file_path("/repo", "src/main.rs", false).as_deref(),
         Some("/repo/src/main.rs")
@@ -91,7 +91,7 @@ fn empty_successful_status_is_clean_even_while_refreshing() {
     let clean = sample_status("main", Some("origin/main"), 0, 0, 0, 0);
     assert_eq!(
         git_empty_list_message(Some(&clean), true, 0),
-        "工作区干净",
+        EmptyList::Clean,
         "已有成功空快照时不能因为 inflight 一直显示正在读取"
     );
     assert!(should_close_aggregate_diff(Some(&clean), true));
@@ -103,7 +103,7 @@ fn failed_empty_status_is_not_treated_as_clean() {
     assert!(!failed.ok);
     assert_eq!(
         git_empty_list_message(Some(&failed), true, 1),
-        "Git 状态读取失败，正在重试…"
+        EmptyList::Retrying
     );
     assert!(
         !should_close_aggregate_diff(Some(&failed), true),
@@ -113,8 +113,8 @@ fn failed_empty_status_is_not_treated_as_clean() {
 
 #[test]
 fn missing_status_shows_loading_until_the_first_snapshot() {
-    assert_eq!(git_empty_list_message(None, true, 0), "正在读取更改…");
-    assert_eq!(git_empty_list_message(None, false, 0), "正在读取更改…");
+    assert_eq!(git_empty_list_message(None, true, 0), EmptyList::Loading);
+    assert_eq!(git_empty_list_message(None, false, 0), EmptyList::Loading);
     assert!(!should_close_aggregate_diff(None, true));
 }
 
@@ -165,7 +165,7 @@ fn stale_aggregate_is_not_ready_for_a_missing_navigation_target() {
     };
     let diff = GitDiff {
         root: repo.clone(),
-        path: "全部更改".into(),
+        path: String::new(),
         aggregate: true,
         worktree_file: None,
         lines: std::rc::Rc::new(parsed.lines),
@@ -314,12 +314,12 @@ fn hunk_anchor_prefers_the_modified_side() {
 #[test]
 fn diff_feedback_names_the_file_and_keeps_the_selection() {
     assert_eq!(
-        diff_feedback_text("src/a.rs", 8, 3, "hello", "看这里"),
-        "对 src/a.rs 的这几行有反馈：\nL3-L8\nhello\n\n看这里\n"
+        diff_feedback_text("src/a.rs", 8, 3, "hello", "look here"),
+        "Feedback on these lines of src/a.rs:\nL3-L8\nhello\n\nlook here\n"
     );
     assert_eq!(
         diff_feedback_text("src/a.rs", 3, 3, "hello\n", ""),
-        "对 src/a.rs 的这几行有反馈：\nL3\nhello\n",
+        "Feedback on these lines of src/a.rs:\nL3\nhello\n",
         "已有换行不再补；空评论不另起一段"
     );
 }
@@ -354,7 +354,7 @@ rename to new name.rs
 /// 空补丁是「无差异」。不像 diff 的原文原样显示，像 diff 但解析失败才用解析器的说明。
 #[test]
 fn diff_parse_failure_keeps_non_diff_text() {
-    assert_eq!(diff_parse_failure("  \n", "ignored"), "（无差异）");
+    assert_eq!(diff_parse_failure("  \n", "ignored"), "(No differences)");
     assert_eq!(
         diff_parse_failure("fatal: not a git repository", "parser"),
         "fatal: not a git repository"
@@ -411,15 +411,18 @@ fn repo_set(repos: Vec<DiscoveredRepo>) -> RepoSet {
 
 #[test]
 fn commit_button_names_only_its_own_operation() {
-    assert_eq!(commit_button_label(None), "提交并推送");
-    assert_eq!(commit_button_label(Some(GitWrite::Commit)), "提交中…");
+    assert_eq!(commit_button_label(None), "Commit & Push");
+    assert_eq!(commit_button_label(Some(GitWrite::Commit)), "Committing…");
     assert_eq!(
         commit_button_label(Some(GitWrite::CommitAndPush)),
-        "提交并推送中…"
+        "Committing & pushing…"
     );
-    assert_eq!(commit_button_label(Some(GitWrite::Push)), "推送中…");
-    assert_eq!(commit_button_label(Some(GitWrite::Fetch)), "提交并推送");
-    assert_eq!(commit_button_label(Some(GitWrite::Checkout)), "提交并推送");
+    assert_eq!(commit_button_label(Some(GitWrite::Push)), "Pushing…");
+    assert_eq!(commit_button_label(Some(GitWrite::Fetch)), "Commit & Push");
+    assert_eq!(
+        commit_button_label(Some(GitWrite::Checkout)),
+        "Commit & Push"
+    );
 }
 
 /// `index.lock` 属于一个仓库。占用 A 不得挡住 B，释放也只认当初占进去的那个操作。
@@ -669,28 +672,28 @@ fn pull_request_link_explains_why_it_cannot_open_a_page() {
                 upstream_branch: None,
                 ..pushed.clone()
             },
-            "还没推送",
+            "hasn't been pushed",
         ),
         (
             RepoInfo {
                 default_branch: None,
                 ..pushed.clone()
             },
-            "默认分支",
+            "default branch",
         ),
         (
             RepoInfo {
                 upstream_branch: Some("main".into()),
                 ..pushed.clone()
             },
-            "当前就在默认分支 main",
+            "already on the default branch main",
         ),
         (
             RepoInfo {
                 remote_url: Some("git@git.corp:o/r.git".into()),
                 ..pushed.clone()
             },
-            "认不出远端",
+            "Can't tell",
         ),
     ];
     for (info, reason) in cases {
@@ -699,6 +702,6 @@ fn pull_request_link_explains_why_it_cannot_open_a_page() {
     }
     assert_eq!(
         pull_request_link(Ok(GitRepoInfoResult { info: None })),
-        Err("不是 Git 仓库".to_string())
+        Err("Not a Git repository".to_string())
     );
 }

@@ -3,6 +3,8 @@
  * approving it in a browser on another device.
  */
 
+import type { LoginNote } from "./auth-protocol.ts";
+
 /** Where Pi's loopback callback of this sign-in listens, taken from its authorization URL. */
 export function redirectUriOf(authorizationUrl: string): URL | undefined {
 	try {
@@ -24,20 +26,39 @@ export function redirectUriOf(authorizationUrl: string): URL | undefined {
  * Only this sign-in's redirect URI is accepted: anything else would make the helper fetch an
  * arbitrary URL the user pasted.
  */
-export function callbackTarget(authorizationUrl: string, pasted: string): { url: URL } | { error: string } {
+export function callbackTarget(
+	authorizationUrl: string,
+	pasted: string,
+): { url: URL } | { error: string; note: LoginNote } {
 	const redirect = redirectUriOf(authorizationUrl);
-	if (!redirect) return { error: "授权链接里没有回调地址，没法转交，请在这台机器的浏览器里授权" };
+	if (!redirect) {
+		return {
+			error:
+				"The authorization link has no callback address, so it can't be passed along. Authorize in a browser on this machine.",
+			note: { kind: "no_redirect" },
+		};
+	}
 	let url: URL;
 	try {
 		url = new URL(pasted.trim());
 	} catch {
-		return { error: "这不是完整的地址，请从浏览器地址栏整段复制（以 http:// 开头）" };
+		return {
+			error: "That isn't a full address. Copy the whole thing from the browser's address bar (it starts with http://).",
+			note: { kind: "not_full_address" },
+		};
 	}
 	if (url.origin !== redirect.origin || url.pathname !== redirect.pathname) {
-		return { error: `这不是这次登录的回调地址，应以 ${redirect.origin}${redirect.pathname} 开头` };
+		const expected = `${redirect.origin}${redirect.pathname}`;
+		return {
+			error: `That isn't this sign-in's callback address; it should start with ${expected}`,
+			note: { kind: "wrong_callback", expected },
+		};
 	}
 	if (!url.searchParams.has("code") && !url.searchParams.has("error")) {
-		return { error: "地址里没有授权结果（code），请在授权页点完同意后再复制" };
+		return {
+			error: "The address has no authorization result (code). Approve on the authorization page first, then copy it.",
+			note: { kind: "no_authorization_result" },
+		};
 	}
 	return { url };
 }

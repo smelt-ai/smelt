@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::acp_chat::is_interrupt_marker;
 use smelt_plugin_api::model::agent_kind::HistorySourceKind;
@@ -86,7 +87,7 @@ impl Render for HistoryPage {
                 .flex()
                 .flex_col()
                 .size_full()
-                .child(placeholder("当前没有活动项目", muted));
+                .child(placeholder(t!("empty.no_project"), muted));
         };
         let (agent, profile_id) = self.source();
         let settings = crate::agents::settings_on(&project.machine, cx);
@@ -138,9 +139,9 @@ impl Render for HistoryPage {
         });
 
         let list_body = match current {
-            None => placeholder("加载中…", muted).into_any_element(),
+            None => placeholder(t!("empty.loading"), muted).into_any_element(),
             Some(list) if list.snapshot.sessions.is_empty() => {
-                placeholder("这个项目还没有本地保存的历史会话", muted).into_any_element()
+                placeholder(t!("empty.no_history"), muted).into_any_element()
             }
             Some(list) => {
                 let query = self.filter.read(cx).value().trim().to_lowercase();
@@ -158,7 +159,7 @@ impl Render for HistoryPage {
                         .collect(),
                 );
                 if visible.is_empty() {
-                    placeholder("没有匹配的历史会话", muted).into_any_element()
+                    placeholder(t!("empty.no_match"), muted).into_any_element()
                 } else {
                     let in_agent_space = self.engine.is_some();
                     let page = cx.entity();
@@ -224,16 +225,19 @@ impl Render for HistoryPage {
                         .child(truncated_line(session.title.clone())),
                 )
                 .child(meta(session_when(session), muted))
-                .child(meta(format!("{} 条消息", session.message_count), muted))
+                .child(meta(
+                    t!("row.messages", count = session.message_count).into_owned(),
+                    muted,
+                ))
                 .when(session.total_tokens > 0, |row| {
                     row.child(meta(format_count(session.total_tokens), muted))
                 })
         });
 
         let turns_body = match opened {
-            None => placeholder("← 选择一个历史会话查看内容", muted).into_any_element(),
+            None => placeholder(t!("empty.pick"), muted).into_any_element(),
             Some(opened) if opened.detail.turns.is_empty() => {
-                placeholder("这份会话没有可展示的对话内容", muted).into_any_element()
+                placeholder(t!("empty.no_turns"), muted).into_any_element()
             }
             Some(opened) => {
                 let detail = opened.detail.clone();
@@ -364,8 +368,8 @@ impl HistoryPage {
                 Button::new("history-refresh")
                     .quiet()
                     .small()
-                    .icon(IconName::RefreshCw)
-                    .tooltip("刷新")
+                    .icon(IconName::Refresh)
+                    .tooltip(t!("refresh"))
                     .on_click(move |_, _, cx| {
                         page.update(cx, |page, cx| page.refresh_now(cx));
                     }),
@@ -475,10 +479,12 @@ fn row_menu(row: &RowActions, cx: &App) -> Menu {
     // 上下文全都带不上。
     if !row.is_agent {
         let it = row.clone();
-        menu = menu.item(MenuItem::new("CLI/TUI 继续").on_click(move |_, _, cx| {
-            it.page
-                .update(cx, |page, cx| page.resume(&it.session, true, cx));
-        }));
+        menu = menu.item(
+            MenuItem::new(t!("menu.continue_cli")).on_click(move |_, _, cx| {
+                it.page
+                    .update(cx, |page, cx| page.resume(&it.session, true, cx));
+            }),
+        );
         // 「继续」是同一家接着聊；迁移是把内容重述给另一家，收进子菜单。没有可迁的去处就
         // 不给这一项，免得点开是空的。
         if let Some(source) = row.agent.acp() {
@@ -495,31 +501,35 @@ fn row_menu(row: &RowActions, cx: &App) -> Menu {
                                 .update(cx, |page, cx| page.hand_off(&it.session, target, cx));
                         }));
                 }
-                menu = menu.item(MenuItem::new("迁移到").submenu(handoff));
+                menu = menu.item(MenuItem::new(t!("menu.hand_off")).submenu(handoff));
             }
         }
     }
     let it = row.clone();
     menu = menu
         .separator()
-        .item(MenuItem::new("重命名").on_click(move |_, window, cx| {
+        .item(MenuItem::new(t!("rename")).on_click(move |_, window, cx| {
             it.page
                 .update(cx, |page, cx| page.start_rename(&it.session, window, cx));
         }));
     if row.session.custom_title.is_some() {
         let it = row.clone();
-        menu = menu.item(MenuItem::new("恢复默认名称").on_click(move |_, _, cx| {
-            it.page.read(cx).reset_title(&it.session, cx);
-        }));
+        menu = menu.item(
+            MenuItem::new(t!("menu.reset_title")).on_click(move |_, _, cx| {
+                it.page.read(cx).reset_title(&it.session, cx);
+            }),
+        );
     }
     let path = row.session.path.clone();
-    menu = menu.item(MenuItem::new("复制文件路径").on_click(move |_, _, cx| {
-        cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
-    }));
+    menu = menu.item(
+        MenuItem::new(t!("menu.copy_path")).on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
+        }),
+    );
     if row.agent.acp().is_some() {
         let it = row.clone();
         menu = menu.separator().item(
-            MenuItem::new("删除")
+            MenuItem::new(t!("delete.action"))
                 .icon(smelt_plugin_api::ui::trash_icon())
                 .danger()
                 .on_click(move |_, window, cx| {
@@ -545,7 +555,7 @@ fn history_turn(turn: &Turn, body: TextView, muted: Hsla, fg: Hsla, border: Hsla
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(muted)
-                    .child("已中断"),
+                    .child(t!("interrupted").to_string()),
             )
             .child(div().flex_1().h(px(1.)).bg(border))
             .into_any_element();
@@ -622,7 +632,7 @@ fn meta(text: impl Into<SharedString>, muted: Hsla) -> Div {
         .child(text.into())
 }
 
-fn placeholder(text: &'static str, muted: Hsla) -> Div {
+fn placeholder(text: impl Into<SharedString>, muted: Hsla) -> Div {
     div()
         .flex_1()
         .min_w_0()
@@ -636,6 +646,6 @@ fn placeholder(text: &'static str, muted: Hsla) -> Div {
                 .type_style(TYPE.ui_medium)
                 .text_center()
                 .text_color(muted)
-                .child(text),
+                .child(text.into()),
         )
 }

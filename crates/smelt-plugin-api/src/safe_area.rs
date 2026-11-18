@@ -1,9 +1,11 @@
-//! 视图的 safe area（[`SafeArea`]）：视图顶上是不是窗口标题栏、哪几个角被宿主控件占着。
+//! 视图的 safe area（[`SafeArea`]）：视图顶上是不是窗口标题栏、哪几个角被占着（上面两个是
+//! 宿主控件，下面两个是窗口圆角）。
 //!
 //! 谁摆视图谁给它设：宿主给页里直接摆的视图设，自己摆子视图的（分屏、容器）按子视图碰到
 //! 哪几条边把自己的那份分下去（[`SafeArea::child`]）再设给子视图。视图在 render 里问自己的
 //! （`safe_area(cx.entity_id(), cx)`），按 [`SafeArea::insets`] 让开，顶上是标题栏时画
-//! `ui::window_bar::window_bar`。
+//! `ui::window_bar::window_bar`；自己就是一行控件的（贴底的一条）两头按
+//! [`SafeArea::bar_insets`] 排。
 
 use std::collections::HashMap;
 

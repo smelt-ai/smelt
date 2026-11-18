@@ -64,9 +64,9 @@ pub(super) fn forward(
 ) {
     let reply = if !request_owner(request).is_empty() {
         let error = if op == "notify" {
-            "子智能体不能直接通知用户，把结果交回父会话"
+            "Subagents can't notify the user directly; hand the result back to the parent conversation"
         } else {
-            "子智能体不能和别的对话通信"
+            "Subagents can't message other conversations"
         };
         serde_json::json!({"ok": false, "error": error})
     } else {
@@ -80,10 +80,14 @@ pub(super) fn forward(
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(op, &body)))
                 {
                     Ok(reply) => reply,
-                    Err(_) => serde_json::json!({"ok": false, "error": "处理这次请求时出了问题"}),
+                    Err(_) => {
+                        serde_json::json!({"ok": false, "error": "Something went wrong handling this request"})
+                    }
                 }
             }
-            None => serde_json::json!({"ok": false, "error": "这个对话不能和别的对话通信"}),
+            None => {
+                serde_json::json!({"ok": false, "error": "This conversation can't message other conversations"})
+            }
         }
     };
     let _ = stream.write_all(reply.to_string().as_bytes());

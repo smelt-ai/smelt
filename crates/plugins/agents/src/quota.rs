@@ -67,8 +67,8 @@ pub(crate) fn install(cx: &mut App) {
 /// 对外的命令，和插件别的命令一起登记（同一来源的命令一次整组登记）。
 pub(crate) fn commands() -> Vec<CommandSpec> {
     vec![
-        contract::QUOTA.spec("账户额度", |(), _, cx| Ok(snapshot(cx))),
-        contract::REFRESH_QUOTA.spec("刷新账户额度", |args: RefreshQuota, _, cx| {
+        contract::QUOTA.spec(api::text!("quota.title"), |(), _, cx| Ok(snapshot(cx))),
+        contract::REFRESH_QUOTA.spec(api::text!("quota.refresh"), |args: RefreshQuota, _, cx| {
             request_refresh(args.target, cx);
             Ok(())
         }),

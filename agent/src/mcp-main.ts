@@ -49,7 +49,7 @@ function deliver(url: URL): Promise<number> {
 			resolve(response.statusCode ?? 0);
 		});
 		request.on("error", reject);
-		request.setTimeout(15_000, () => request.destroy(new Error("回调没有响应")));
+		request.setTimeout(15_000, () => request.destroy(new Error("the callback didn't respond")));
 	});
 }
 
@@ -68,8 +68,10 @@ async function hostLogin(args: string[]): Promise<number> {
 			event: "prompt",
 			id: String(++promptId),
 			promptType: "manual_code",
-			message: "授权后浏览器打不开 127.0.0.1 的页面时（比如在手机或另一台电脑上授权），把地址栏里的完整地址粘贴到这里",
+			message:
+				"If the browser can't open the 127.0.0.1 page after you authorize (for example when you authorize on a phone or another computer), paste the full address from its address bar here",
 			placeholder: "http://127.0.0.1:…/callback?code=…&state=…",
+			note: { kind: "paste_callback" },
 		});
 	};
 	const withdraw = () => {
@@ -83,19 +85,28 @@ async function hostLogin(args: string[]): Promise<number> {
 		if (!authorizationUrl) return;
 		const target = callbackTarget(authorizationUrl, value);
 		if ("error" in target) {
-			emit({ event: "progress", message: target.error });
+			emit({ event: "progress", message: target.error, note: target.note });
 			ask();
 			return;
 		}
-		emit({ event: "progress", message: "已收到地址，正在完成登录…" });
+		emit({ event: "progress", message: "Got the address, finishing sign-in…", note: { kind: "callback_received" } });
 		try {
 			const status = await deliver(target.url);
 			if (status >= 400) {
-				emit({ event: "progress", message: `回调没有接受这个地址（HTTP ${status}），请重新授权后再粘贴` });
+				emit({
+					event: "progress",
+					message: `The callback didn't accept that address (HTTP ${status}). Authorize again, then paste the new address.`,
+					note: { kind: "callback_rejected", status },
+				});
 				ask();
 			}
 		} catch (error) {
-			emit({ event: "progress", message: `转交回调失败：${error instanceof Error ? error.message : String(error)}` });
+			const detail = error instanceof Error ? error.message : String(error);
+			emit({
+				event: "progress",
+				message: `Couldn't pass the address to the callback: ${detail}`,
+				note: { kind: "callback_failed", error: detail },
+			});
 			ask();
 		}
 	};
@@ -122,7 +133,12 @@ async function hostLogin(args: string[]): Promise<number> {
 		agentDir,
 		openUrl: (url) => {
 			authorizationUrl = url;
-			emit({ event: "auth_url", url, instructions: "在浏览器里登录并同意授权，完成后回到这里。" });
+			emit({
+				event: "auth_url",
+				url,
+				instructions: "Sign in and approve access in the browser, then come back here.",
+				note: { kind: "sign_in_in_browser" },
+			});
 			ask();
 		},
 		log: (line) => {
@@ -138,7 +154,12 @@ async function hostLogin(args: string[]): Promise<number> {
 	if (code === 0) {
 		emit({ event: "done" });
 	} else {
-		emit({ event: "error", message: errors.join("\n") || lastLog || `登录失败（退出码 ${code}）` });
+		const message = errors.join("\n") || lastLog;
+		emit(
+			message
+				? { event: "error", message }
+				: { event: "error", message: `Sign-in failed (exit code ${code})`, note: { kind: "login_failed", code } },
+		);
 	}
 	return code;
 }

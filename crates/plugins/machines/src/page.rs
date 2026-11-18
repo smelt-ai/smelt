@@ -31,8 +31,9 @@ use gpui::{
     AnyElement, App, Context, Div, Entity, Image, ImageFormat, SharedString, Subscription, Task,
     WeakEntity, Window, div, img, px, rgb,
 };
-use smelt_plugin_api as api;
+use rust_i18n::t;
 use smelt_plugin_api::ui::field::{InputEvent, InputState};
+use smelt_plugin_api::{self as api, text};
 
 use crate::OWNER;
 use crate::contract::{ADD_MACHINE, VIEW};
@@ -46,8 +47,8 @@ const _: () = assert!(api::CALL_TIMEOUT.as_secs() > REMOTE_STATUS_WAIT_MAX.as_se
 pub(crate) fn register(cx: &mut App) {
     let spec = ViewSpec {
         name: "remote".into(),
-        title: "远程".into(),
-        icon: "icons/globe.svg".into(),
+        title: text!("page.title"),
+        icon: api::ui::IconName::Globe.path(),
         draws_top_bar: false,
         instances: false,
         settings: Some(SettingsEntry {
@@ -74,11 +75,23 @@ pub(crate) fn register(cx: &mut App) {
                 "iroh",
                 "relay",
                 "中继",
+                "remote",
+                "machines",
+                "remote machine",
+                "add machine",
+                "pairing",
+                "offline",
+                "incompatible",
+                "remote access",
+                "phone",
+                "mobile",
+                "QR code",
             ]
             .into_iter()
             .map(SharedString::from)
             .collect(),
         }),
+        fills: Vec::new(),
         build: Rc::new(|window, cx| {
             let page = cx.new(|cx| RemotePage::new(window, cx));
             page.update(cx, |page, cx| page.refresh(cx));
@@ -94,7 +107,7 @@ pub(crate) fn register(cx: &mut App) {
 pub(crate) fn add_machine_command() -> api::CommandSpec {
     api::CommandSpec {
         name: ADD_MACHINE.name().to_string(),
-        title: "添加远程机器".to_string(),
+        title: text!("command.add"),
         key: None,
         context: "Workspace".to_string(),
         palette: true,
@@ -110,7 +123,7 @@ pub(crate) fn add_machine_command() -> api::CommandSpec {
             );
             api::Handled::Done(cx.spawn(async move |_| match opened.await? {
                 true => Ok(api::serde_json::Value::Null),
-                false => Err("设置「远程」页打不开".to_string()),
+                false => Err(t!("error.page_unavailable").into_owned()),
             }))
         }),
     }
@@ -335,7 +348,7 @@ impl RemotePage {
 
     fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         let Some(mut config) = self.config.clone() else {
-            self.error = Some("还没读到远程配置，稍后再改".to_string());
+            self.error = Some(t!("error.config_not_loaded").into_owned());
             cx.notify();
             return;
         };
@@ -345,7 +358,7 @@ impl RemotePage {
 
     fn set_relay(&mut self, relay: &str, cx: &mut Context<Self>) {
         let Some(mut config) = self.config.clone() else {
-            self.error = Some("还没读到远程配置，稍后再改".to_string());
+            self.error = Some(t!("error.config_not_loaded").into_owned());
             cx.notify();
             return;
         };
@@ -373,7 +386,7 @@ impl RemotePage {
                 .background_executor()
                 .spawn(async move {
                     let _guard = gate.lock().await;
-                    let client = client.ok_or_else(|| api::MACHINE_REMOVED.to_string())?;
+                    let client = client.ok_or_else(api::machine_removed)?;
                     client
                         .call::<RemoteConfigSet>(&config, api::CALL_TIMEOUT)
                         .map_err(api::call_error_text)
@@ -383,7 +396,7 @@ impl RemotePage {
                 match result {
                     Ok(status) => page.set_status(status, cx),
                     Err(error) => {
-                        page.error = Some(format!("保存远程配置失败：{error}"));
+                        page.error = Some(t!("error.save_config", error = error).into_owned());
                         page.load_config(cx);
                     }
                 }
@@ -423,7 +436,9 @@ impl RemotePage {
                 page.generating_offer = false;
                 match result {
                     Ok(offer) => page.offer = Some(offer),
-                    Err(error) => page.error = Some(format!("生成配对串失败：{error}")),
+                    Err(error) => {
+                        page.error = Some(t!("error.pairing", error = error).into_owned())
+                    }
                 }
                 cx.notify();
             });
@@ -438,7 +453,7 @@ impl RemotePage {
             let result = revoked.await;
             let _ = page.update(cx, |page, cx| {
                 if let Err(error) = result {
-                    page.error = Some(format!("撤销失败：{error}"));
+                    page.error = Some(t!("error.revoke", error = error).into_owned());
                     cx.notify();
                 }
                 page.refresh_devices(cx);
@@ -454,7 +469,7 @@ impl RemotePage {
         }
         let pairing_uri = self.pairing_input.read(cx).value().trim().to_string();
         if pairing_uri.is_empty() {
-            self.add_error = Some("先粘贴那台机器的配对串".to_string());
+            self.add_error = Some(t!("add.empty").into_owned());
             cx.notify();
             return;
         }
@@ -526,19 +541,24 @@ impl RemotePage {
         let add_machine = column()
             .w_full()
             .gap_2()
-            .child(
-                SettingsRow::new("添加机器").description(
-                    "粘贴那台机器的配对串：在它上面执行 smeltd pair，或在它的「让其他设备连进来」里生成。",
-                ),
-            )
+            .child(SettingsRow::new(t!("add.title")).description(t!("add.description")))
             .child(
                 row()
                     .gap_2()
-                    .child(div().flex_1().min_w_0().child(TextInput::new(&self.pairing_input)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(TextInput::new(&self.pairing_input)),
+                    )
                     .child(
                         Button::new("add-machine")
                             .small()
-                            .label(if adding { "正在配对…" } else { "添加" })
+                            .label(if adding {
+                                t!("add.adding")
+                            } else {
+                                t!("add.action")
+                            })
                             .loading(adding)
                             .disabled(adding)
                             .on_click(move |_, window, cx| {
@@ -553,8 +573,8 @@ impl RemotePage {
                     .child(error)
             }));
         SettingsSection::new()
-            .title("连到其他机器")
-            .description("在别的机器上开项目、跑会话。")
+            .title(t!("outgoing.title"))
+            .description(t!("outgoing.description"))
             .child(machine_list(connections))
             .child(add_machine)
     }
@@ -569,11 +589,11 @@ impl RemotePage {
         let toggle = page.clone();
         let pair = page.clone();
         SettingsSection::new()
-            .title("让其他设备连进来")
-            .description("配对过的电脑和手机可以经 iroh 连这台机器：能直连就直连，连不上走 relay。")
+            .title(t!("incoming.title"))
+            .description(t!("incoming.description"))
             .child(
-                SettingsRow::new("远程访问")
-                    .description("电池供电时不阻止休眠，只有电脑醒着才能连。")
+                SettingsRow::new(t!("access.title"))
+                    .description(t!("access.description"))
                     .child(
                         row().gap_1p5().child(dot(6., status_color)).child(
                             div()
@@ -588,21 +608,23 @@ impl RemotePage {
                         Switch::new("remote-access-enabled")
                             .checked(enabled)
                             .disabled(!loaded)
-                            .accessibility_label("远程访问")
+                            .accessibility_label(t!("access.title"))
                             .on_change(move |checked, _, cx| {
                                 let _ = toggle.update(cx, |page, cx| page.set_enabled(checked, cx));
                             }),
                     ),
             )
             .child(
-                SettingsRow::new("已配对的设备")
-                    .description("配对一台设备，就是把你在这台机器上的 shell 权限交给它。")
+                SettingsRow::new(t!("devices.title"))
+                    .description(t!("pairing.warning"))
                     .child(
                         Button::new("begin-pairing")
                             .small()
-                            .label("配对新设备…")
+                            .label(t!("pairing.begin"))
                             .disabled(!running)
-                            .when(!running, |button| button.tooltip("先开启远程访问"))
+                            .when(!running, |button| {
+                                button.tooltip(t!("pairing.needs_access"))
+                            })
                             .on_click(move |_, window, cx| {
                                 let _ = pair.update(cx, |page, cx| page.begin_pairing(cx));
                                 open_pairing_dialog(pair.clone(), window, cx);
@@ -611,15 +633,13 @@ impl RemotePage {
             )
             .child(device_list(&self.devices, self.error.clone(), page))
             .child(
-                SettingsRow::new("自建 relay")
-                    .description(
-                        "留空用 n0 的公共 relay；填了域名、IP 或 URL 就只用它，省略协议时用 https://。",
-                    )
+                SettingsRow::new(t!("relay.custom"))
+                    .description(t!("relay.custom_description"))
                     .child(
                         div().w(px(220.)).child(
                             TextInput::new(&self.relay_input)
                                 .disabled(!loaded)
-                                .aria_label("自建 relay"),
+                                .aria_label(t!("relay.custom")),
                         ),
                     ),
             )
@@ -644,7 +664,7 @@ fn machine_list(connections: &Connections) -> AnyElement {
                 div()
                     .type_style(TYPE.ui)
                     .text_color(muted)
-                    .child("还没有连到其他机器。"),
+                    .child(t!("outgoing.empty").into_owned()),
             );
         }
         return list.into_any_element();
@@ -689,21 +709,21 @@ fn machine_list(connections: &Connections) -> AnyElement {
                     line.child(
                         Button::new(("upgrade-machine", index))
                             .small()
-                            .label("升级")
-                            .tooltip(format!("请这台机器升到 v{version}"))
+                            .label(t!("upgrade.action"))
+                            .tooltip(t!("upgrade.tooltip", version = version))
                             .on_click(move |_, _, cx| {
                                 let target = MachineTarget {
                                     machine: upgrade.clone(),
                                 };
                                 let upgraded = api::UPGRADE_MACHINE.run(&target, cx);
-                                report_failure("升级运行时失败", upgraded, cx);
+                                report_failure(t!("upgrade.failed").into_owned(), upgraded, cx);
                             }),
                     )
                 })
                 .child(
                     Button::new(("remove-machine", index))
                         .small()
-                        .label("移除")
+                        .label(t!("remove.action"))
                         .on_click(move |_, window, cx| {
                             confirm_remove(machine.clone(), name.clone(), window, cx)
                         }),
@@ -732,7 +752,7 @@ fn device_list(
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(muted)
-                    .child("还没有配对过设备。"),
+                    .child(t!("devices.empty").into_owned()),
             )
             .into_any_element();
     }
@@ -776,7 +796,7 @@ fn device_list(
                 .child(
                     Button::new(("revoke-device", index))
                         .small()
-                        .label("撤销")
+                        .label(t!("devices.revoke"))
                         .on_click(move |_, _, cx| {
                             let endpoint_id = endpoint_id.clone();
                             let _ = page.update(cx, |page, cx| page.revoke(endpoint_id, cx));
@@ -808,11 +828,11 @@ fn pairing_dialog(card: dialog::Card, page: &WeakEntity<RemotePage>, cx: &App) -
         })
         .unwrap_or_default();
     let muted = rgb(ui_theme::muted());
-    let mut body = dialog::content("配对新设备", None).child(
+    let mut body = dialog::content(t!("pairing.title"), None).child(
         div()
             .type_style(TYPE.ui)
             .text_color(rgb(ui_theme::need()))
-            .child("配对一台设备，就是把你在这台机器上的 shell 权限交给它。"),
+            .child(t!("pairing.warning").into_owned()),
     );
     if let Some(error) = error {
         body = body.child(
@@ -823,11 +843,16 @@ fn pairing_dialog(card: dialog::Card, page: &WeakEntity<RemotePage>, cx: &App) -
         );
     }
     body = match offer {
-        None => body.child(div().type_style(TYPE.ui).text_color(muted).child(if generating {
-            "正在生成配对串…"
-        } else {
-            "还没有配对串。"
-        })),
+        None => body.child(
+            div()
+                .type_style(TYPE.ui)
+                .text_color(muted)
+                .child(if generating {
+                    t!("pairing.generating").into_owned()
+                } else {
+                    t!("pairing.none").into_owned()
+                }),
+        ),
         Some(offer) => body.child(
             row()
                 .items_start()
@@ -846,9 +871,12 @@ fn pairing_dialog(card: dialog::Card, page: &WeakEntity<RemotePage>, cx: &App) -
                         .flex_1()
                         .min_w(px(0.))
                         .gap_2()
-                        .child(div().type_style(TYPE.ui).text_color(rgb(ui_theme::text())).child(
-                            "手机扫码；或复制配对串，在另一台电脑的「连到其他机器」里粘贴。",
-                        ))
+                        .child(
+                            div()
+                                .type_style(TYPE.ui)
+                                .text_color(rgb(ui_theme::text()))
+                                .child(t!("pairing.instructions").into_owned()),
+                        )
                         .child(
                             row()
                                 .gap_1()
@@ -865,15 +893,15 @@ fn pairing_dialog(card: dialog::Card, page: &WeakEntity<RemotePage>, cx: &App) -
                                 .child(
                                     Clipboard::new("copy-pairing-uri")
                                         .value(offer.uri)
-                                        .tooltip("复制配对串")
-                                        .accessibility_label("复制配对串"),
+                                        .tooltip(t!("pairing.copy"))
+                                        .accessibility_label(t!("pairing.copy")),
                                 ),
                         )
                         .child(
                             div()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
-                                .child("只能用一次，10 分钟内有效。"),
+                                .child(t!("pairing.expiry").into_owned()),
                         ),
                 ),
         ),
@@ -886,18 +914,21 @@ fn pairing_dialog(card: dialog::Card, page: &WeakEntity<RemotePage>, cx: &App) -
                 Button::new("regenerate-pairing")
                     .quiet()
                     .small()
-                    .label("换一个配对串")
+                    .label(t!("pairing.regenerate"))
                     .disabled(generating)
                     .on_click(move |_, _, cx| {
                         let _ = regenerate.update(cx, |page, cx| page.begin_pairing(cx));
                     }),
             )
-            .child(Button::new("close-pairing").small().label("完成").on_click(
-                move |_, window, cx| {
-                    dialog::close(window, cx);
-                    let _ = done.update(cx, |page, cx| page.refresh_devices(cx));
-                },
-            )),
+            .child(
+                Button::new("close-pairing")
+                    .small()
+                    .label(t!("pairing.done"))
+                    .on_click(move |_, window, cx| {
+                        dialog::close(window, cx);
+                        let _ = done.update(cx, |page, cx| page.refresh_devices(cx));
+                    }),
+            ),
     )
 }
 

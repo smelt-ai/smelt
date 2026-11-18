@@ -25,8 +25,8 @@ use gpui::{
     KeyBinding, ParentElement, Render, Styled, Window, div, px, rgb, size,
 };
 use gpui_base::{Root, StyledExt as _};
-use gpui_kit_assets::IconName;
 use smelt_model::theme_index::{DEFAULT_DARK, DEFAULT_LIGHT};
+use smelt_ui::IconName;
 use smelt_ui::code_editor::{CodeEditor, EditorState};
 use smelt_ui::field::{InputState, TextareaState};
 use smelt_ui::kit::{ControlSize, TYPE, TypeStyled as _};
@@ -39,22 +39,6 @@ gpui::actions!(tooltip_snapshot, [Save, Sequence]);
 
 /// 每帧把整页画出来。闭包里可以引用 `setup` 时建好的实体（输入框状态等）。
 type Draw = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
-
-/// 和应用一样：smelt 自带的图标（`smelt_ui::assets`），再加 gpui-kit 的全套图标。
-struct SnapshotAssets;
-
-impl gpui::AssetSource for SnapshotAssets {
-    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        if let Some(bytes) = smelt_ui::assets::load(path) {
-            return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
-        }
-        gpui_kit_assets::AllAssets.load(path)
-    }
-
-    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
-        gpui_kit_assets::AllAssets.list(path)
-    }
-}
 
 struct Snapshot {
     name: &'static str,
@@ -119,6 +103,11 @@ const SNAPSHOTS: &[Snapshot] = &[
         name: "code_editor",
         size: (640., 340.),
         setup: code_editor,
+    },
+    Snapshot {
+        name: "code_editor-reveal",
+        size: (640., 340.),
+        setup: code_editor_reveal,
     },
     Snapshot {
         name: "diff",
@@ -231,9 +220,24 @@ const SNAPSHOTS: &[Snapshot] = &[
         setup: icons,
     },
     Snapshot {
+        name: "icon-set",
+        size: (640., 460.),
+        setup: icon_set,
+    },
+    Snapshot {
         name: "window-bar",
-        size: (560., 260.),
+        size: (560., 320.),
         setup: window_bars,
+    },
+    Snapshot {
+        name: "sticky",
+        size: (620., 260.),
+        setup: sticky_sections,
+    },
+    Snapshot {
+        name: "sticky-reveal",
+        size: (620., 260.),
+        setup: sticky_reveal,
     },
     Snapshot {
         name: "dock",
@@ -323,7 +327,7 @@ fn snapshots() {
 fn render(snapshot: &Snapshot, theme: &str, path: &Path) {
     let mut cx = HeadlessAppContext::with_platform(
         Arc::new(gpui_apple::AppleTextSystem::new()),
-        Arc::new(SnapshotAssets),
+        Arc::new(smelt_ui::assets::Assets),
         || {
             Ok(Some(Box::new(
                 gpui_apple::metal_renderer::MetalHeadlessRenderer::new()?,
@@ -400,6 +404,26 @@ fn page(rows: Vec<AnyElement>) -> AnyElement {
         .gap_5()
         .children(rows)
         .into_any_element()
+}
+
+/// 收进来的全部界面图标，16、14、12 三档字号各一组，看粗细和在小号下糊不糊。
+fn icon_set(_: &mut Window, _: &mut App) -> Draw {
+    Box::new(|_, _| {
+        page(
+            [16., 14., 12.]
+                .map(|size| {
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_3()
+                        .text_size(px(size))
+                        .text_color(rgb(ui_theme::text()))
+                        .children(IconName::ALL.iter().map(|icon| smelt_ui::Icon::new(*icon)))
+                        .into_any_element()
+                })
+                .into(),
+        )
+    })
 }
 
 fn clipboards(_: &mut Window, _: &mut App) -> Draw {
@@ -625,11 +649,11 @@ fn buttons(_: &mut Window, _: &mut App) -> Draw {
                         .icon_action("回到最新")
                         .into_any_element(),
                     Button::new("asset-icon")
-                        .icon(gpui_kit_assets::IconName::Plus)
+                        .icon(smelt_ui::IconName::Plus)
                         .icon_action("资源图标")
                         .into_any_element(),
                     Button::new("path-icon")
-                        .icon_path(gpui_kit_assets::IconName::Plus.path())
+                        .icon_path(smelt_ui::IconName::Plus.path())
                         .icon_action("自定义图标")
                         .into_any_element(),
                     // 纯图标主按钮走 submit 那组色（输入框的发送钮）。
@@ -851,6 +875,161 @@ fn list_rows(_: &mut Window, _: &mut App) -> Draw {
     })
 }
 
+/// 吸顶区段：三栏同一份列表滚到不同位置。左边没滚，中间「对话」的标题停在顶上、滚上去
+/// 的行在标题下沿被裁掉，右边「对话」快滚完了、标题被「项目」顶走一截。
+fn sticky_sections(_: &mut Window, _: &mut App) -> Draw {
+    use gpui::{ScrollHandle, point};
+    use smelt_ui::StickySection;
+    use smelt_ui::scrollbar::{Scrollable, ScrollbarAxis};
+
+    let handles: Vec<ScrollHandle> = [0., 60., 180.]
+        .into_iter()
+        .map(|offset| {
+            let handle = ScrollHandle::new();
+            handle.set_offset(point(px(0.), px(-offset)));
+            handle
+        })
+        .collect();
+    Box::new(move |_, _| {
+        let header = |label: &'static str| {
+            div()
+                .h(px(24.))
+                .px_2()
+                .flex()
+                .items_center()
+                .type_style(TYPE.text_xsmall_medium)
+                .text_color(rgb(ui_theme::muted()))
+                .child(label)
+        };
+        let body = |name: &'static str, count: usize| {
+            div().flex().flex_col().children((1..=count).map(move |n| {
+                div()
+                    .h(px(28.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .type_style(TYPE.ui)
+                    .child(format!("{name} {n}"))
+            }))
+        };
+        let column = |index: usize, handle: &ScrollHandle| {
+            let content = div()
+                .flex()
+                .flex_col()
+                .child(StickySection::new(header("对话"), body("对话", 6)))
+                .child(StickySection::new(header("项目"), body("会话", 10)));
+            div()
+                .w(px(180.))
+                .h(px(200.))
+                .flex()
+                .flex_col()
+                .border_1()
+                .border_color(ui_theme::hair())
+                .child(Scrollable::new(
+                    ElementId::Name(format!("sticky-{index}").into()),
+                    content,
+                    handle,
+                    ScrollbarAxis::Vertical,
+                ))
+        };
+        div()
+            .flex()
+            .gap_4()
+            .children(
+                handles
+                    .iter()
+                    .enumerate()
+                    .map(|(index, handle)| column(index, handle)),
+            )
+            .into_any_element()
+    })
+}
+
+/// 吸顶区段里滚到某一项（`ScrollAnchors::reveal`），要滚到的那行涂了底色。左边从顶上跳到
+/// 远处的「会话 8」：滚到标题以下那段的中间。中间原本滚到 60，「对话 2」压在停住的「对话」
+/// 标题底下：上沿滚到标题下沿。右边「对话 4」本来就看得见：不动。
+fn sticky_reveal(_: &mut Window, _: &mut App) -> Draw {
+    use gpui::{ScrollHandle, point};
+    use smelt_ui::StickySection;
+    use smelt_ui::scroll_anchors::ScrollAnchors;
+    use smelt_ui::scrollbar::{Scrollable, ScrollbarAxis};
+
+    let panels: Vec<(ScrollHandle, ScrollAnchors, &'static str)> =
+        [(0., "会话 8"), (60., "对话 2"), (0., "对话 4")]
+            .into_iter()
+            .map(|(offset, target)| {
+                let handle = ScrollHandle::new();
+                handle.set_offset(point(px(0.), px(-offset)));
+                let anchors = ScrollAnchors::new(&handle);
+                anchors.reveal(Some(target.into()));
+                (handle, anchors, target)
+            })
+            .collect();
+    Box::new(move |_, _| {
+        let header = |label: &'static str| {
+            div()
+                .h(px(24.))
+                .px_2()
+                .flex()
+                .items_center()
+                .type_style(TYPE.text_xsmall_medium)
+                .text_color(rgb(ui_theme::muted()))
+                .child(label)
+        };
+        let body = |anchors: &ScrollAnchors, target: &str, name: &str, count: usize| {
+            div().flex().flex_col().children((1..=count).map(|n| {
+                let label = format!("{name} {n}");
+                let row = div()
+                    .h(px(28.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .type_style(TYPE.ui)
+                    .when(label == target, |row| row.bg(ui_theme::selection()))
+                    .child(label.clone());
+                anchors.anchor(label, row)
+            }))
+        };
+        let column =
+            |index: usize, (handle, anchors, target): &(ScrollHandle, ScrollAnchors, &str)| {
+                let sections = div()
+                    .flex()
+                    .flex_col()
+                    .child(StickySection::new(
+                        header("对话"),
+                        body(anchors, target, "对话", 6),
+                    ))
+                    .child(StickySection::new(
+                        header("项目"),
+                        body(anchors, target, "会话", 10),
+                    ));
+                div()
+                    .w(px(180.))
+                    .h(px(200.))
+                    .flex()
+                    .flex_col()
+                    .border_1()
+                    .border_color(ui_theme::hair())
+                    .child(Scrollable::new(
+                        ElementId::Name(format!("sticky-reveal-{index}").into()),
+                        div().flex().flex_col().child(anchors.root(sections)),
+                        handle,
+                        ScrollbarAxis::Vertical,
+                    ))
+            };
+        div()
+            .flex()
+            .gap_4()
+            .children(
+                panels
+                    .iter()
+                    .enumerate()
+                    .map(|(index, panel)| column(index, panel)),
+            )
+            .into_any_element()
+    })
+}
+
 fn dialogs(window: &mut Window, cx: &mut App) -> Draw {
     // 对话框画在窗口根的对话框层上，根这时还没建好：等这一轮建完再开。
     window.defer(cx, |window, cx| {
@@ -900,14 +1079,12 @@ fn sample_menu() -> smelt_ui::menu::Menu {
                     .item(MenuItem::new("个人").checked(false))
                     .separator()
                     .item(MenuItem::new("新建分组…"))
-                    .item(
-                        MenuItem::new("用 Pi 打开")
-                            .icon(IconName::SquareTerminal)
-                            .image(std::sync::Arc::new(gpui::Image::from_bytes(
-                                gpui::ImageFormat::Png,
-                                include_bytes!("../../../assets/agent-pi.png").to_vec(),
-                            ))),
-                    ),
+                    .item(MenuItem::new("用 Pi 打开").icon(IconName::Terminal).image(
+                        std::sync::Arc::new(gpui::Image::from_bytes(
+                            gpui::ImageFormat::Png,
+                            include_bytes!("../../../assets/agent-pi.png").to_vec(),
+                        )),
+                    )),
             ),
         )
         .separator()
@@ -1066,7 +1243,7 @@ fn fields(window: &mut Window, cx: &mut App) -> Draw {
                     TextInput::new(&search)
                         .prefix(
                             gpui::svg()
-                                .path(gpui_kit_assets::IconName::Search.path())
+                                .path(smelt_ui::IconName::Search.path())
                                 .size_4()
                                 .flex_shrink_0()
                                 .text_color(rgb(ui_theme::muted())),
@@ -1117,6 +1294,35 @@ fn code_editor(window: &mut Window, cx: &mut App) -> Draw {
     state.update(cx, |state, cx| {
         state.open_search(true, cx);
         state.set_search_query("value", true, cx);
+    });
+    Box::new(move |_, _| {
+        div()
+            .h(px(290.))
+            .rounded(px(8.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(ui_theme::hair())
+            .child(CodeEditor::new(&state))
+            .into_any_element()
+    })
+}
+
+/// 代码编辑器跳行：还没画过就灌进 200 行并跳到第 120 行，图上第 120 行在当前行、上面留
+/// 五行（115 起）。对话里的文件链接带行号打开文件就是这个时机，排版还没跟上新内容。
+fn code_editor_reveal(window: &mut Window, cx: &mut App) -> Draw {
+    smelt_model::font_config::set_font_family("Menlo");
+    let source: String = (1..=200)
+        .map(|n| format!("let line_{n} = {n};\n"))
+        .collect();
+    let state = cx.new(|cx| {
+        let mut state = EditorState::new(window, cx)
+            .language("rust")
+            .line_number(true)
+            .soft_wrap(false);
+        state.set_highlighter_factory(smelt_ui::syntax::highlighter_factory(), cx);
+        state.set_value(source, window, cx);
+        smelt_ui::code_editor::reveal_line(&mut state, 120, window, cx);
+        state
     });
     Box::new(move |_, _| {
         div()
@@ -1730,9 +1936,7 @@ fn icons(_: &mut Window, _: &mut App) -> Draw {
                         .size_4()
                         .text_color(rgb(ui_theme::ok()))
                         .into_any_element(),
-                    Icon::path("smelt-icons/trash.svg")
-                        .size_4()
-                        .into_any_element(),
+                    Icon::new(IconName::Trash).size_4().into_any_element(),
                     Icon::new(IconName::ChevronRight)
                         .size_4()
                         .rotate(gpui::radians(std::f32::consts::FRAC_PI_2))
@@ -1745,7 +1949,10 @@ fn icons(_: &mut Window, _: &mut App) -> Draw {
 
 fn window_bars(_: &mut Window, _: &mut App) -> Draw {
     use gpui::{Corners, size};
-    use smelt_ui::window_bar::{SafeArea, TOP_BAR_HEIGHT, window_bar};
+    use smelt_ui::window_bar::{
+        BAR_MARGIN, SafeArea, TOP_BAR_HEIGHT, TRAFFIC_LIGHTS_WIDTH, WINDOW_CORNER_INSET,
+        WINDOW_EDGE_MARGIN, window_bar,
+    };
     // 一块视图的顶：角上被宿主控件占的地方画成淡底，看顶带让得对不对。
     fn stage(id: &'static str, area: SafeArea, title: &'static str) -> AnyElement {
         let corner = |width: gpui::Pixels| {
@@ -1780,14 +1987,62 @@ fn window_bars(_: &mut Window, _: &mut App) -> Draw {
             )
             .into_any_element()
     }
+    // 贴底的一条（侧栏底下的设置）：整个视图就是一行，按下面的角让。
+    fn bottom_row(area: SafeArea, title: &'static str) -> AnyElement {
+        let insets = area.bar_insets();
+        let corner = |width: gpui::Pixels| {
+            div()
+                .absolute()
+                .bottom_0()
+                .w(width)
+                .h(width)
+                .bg(rgb(ui_theme::soft()))
+        };
+        div()
+            .relative()
+            .w_full()
+            .h(TOP_BAR_HEIGHT)
+            .border_1()
+            .border_color(ui_theme::hair())
+            .child(corner(area.corners.bottom_left.width).left_0())
+            .child(corner(area.corners.bottom_right.width).right_0())
+            .child(
+                div()
+                    .size_full()
+                    .pl(insets.left)
+                    .pr(insets.right)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        Button::new("settings")
+                            .quiet()
+                            .icon(IconName::Settings)
+                            .label(title),
+                    )
+                    .child(Button::new("more").quiet().small().icon(IconName::Maximize)),
+            )
+            .into_any_element()
+    }
     Box::new(|_, _| {
+        // 和外壳给的一样：左上是红黄绿 + 左开合按钮 + 间距，右上和它对称。
+        let toggle = px(20.);
         let lights = SafeArea {
             title_bar: true,
             corners: Corners {
-                top_left: size(px(112.), TOP_BAR_HEIGHT),
-                top_right: size(px(32.), TOP_BAR_HEIGHT),
+                top_left: size(TRAFFIC_LIGHTS_WIDTH + toggle + BAR_MARGIN, TOP_BAR_HEIGHT),
+                top_right: size(WINDOW_EDGE_MARGIN + toggle + BAR_MARGIN, TOP_BAR_HEIGHT),
                 ..Default::default()
             },
+        };
+        let rounded = size(WINDOW_CORNER_INSET, WINDOW_CORNER_INSET);
+        let bottom = SafeArea {
+            corners: Corners {
+                bottom_left: rounded,
+                bottom_right: rounded,
+                ..Default::default()
+            },
+            ..Default::default()
         };
         let fullscreen = SafeArea {
             title_bar: true,
@@ -1806,6 +2061,8 @@ fn window_bars(_: &mut Window, _: &mut App) -> Draw {
                 }),
                 "横排左边那格",
             ),
+            bottom_row(bottom, "贴左右下角"),
+            bottom_row(SafeArea::default(), "不贴角"),
         ])
     })
 }

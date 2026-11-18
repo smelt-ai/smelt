@@ -69,7 +69,7 @@ fn builtin_skills_in(dir: &Path) -> Vec<PiPlugin> {
     collect_skills(dir, &mut skills);
     for skill in &mut skills {
         skill.builtin = true;
-        skill.origin = "Smelt 内置".to_string();
+        skill.origin = "Smelt".to_string();
     }
     skills
 }
@@ -125,7 +125,7 @@ fn collect_skills(root: &Path, out: &mut Vec<PiPlugin>) {
                 description: String::new(),
                 path,
                 origin: origin.clone(),
-                broken: Some("链接目标不存在".to_string()),
+                broken: Some("the link target doesn't exist".to_string()),
                 builtin: false,
             });
             continue;
@@ -194,7 +194,7 @@ fn collect_extensions(root: &Path, out: &mut Vec<PiPlugin>) {
                 description: String::new(),
                 path,
                 origin: origin.clone(),
-                broken: Some("链接目标不存在".to_string()),
+                broken: Some("the link target doesn't exist".to_string()),
                 builtin: false,
             });
             continue;
@@ -370,25 +370,26 @@ fn strip_quotes(value: &str) -> String {
 /// 从本地路径导入一个插件到 Pi 的全局目录。返回新插件的 id。
 pub fn import_plugin(kind: PiPluginKind, source: &Path) -> Result<String, String> {
     if !source.exists() {
-        return Err(format!("路径不存在：{}", source.display()));
+        return Err(format!("the path doesn't exist: {}", source.display()));
     }
     let target_root = match kind {
         PiPluginKind::Skill => crate::pi_model_settings::pi_agent_dir().join("skills"),
         PiPluginKind::Extension => global_extension_root(),
     };
-    std::fs::create_dir_all(&target_root).map_err(|error| format!("创建目录失败：{error}"))?;
+    std::fs::create_dir_all(&target_root)
+        .map_err(|error| format!("couldn't create the directory: {error}"))?;
 
     let name = source
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .ok_or_else(|| "无法确定插件名".to_string())?;
+        .ok_or_else(|| "can't determine the plugin name".to_string())?;
     match kind {
         PiPluginKind::Skill => {
             if !source.is_dir() {
-                return Err("技能必须是包含 SKILL.md 的目录".to_string());
+                return Err("A skill must be a directory that contains SKILL.md".to_string());
             }
             if !source.join("SKILL.md").is_file() {
-                return Err("目录里没有 SKILL.md，不是合法技能".to_string());
+                return Err("The directory has no SKILL.md, so it isn't a valid skill".to_string());
             }
         }
         PiPluginKind::Extension => {
@@ -396,19 +397,22 @@ pub fn import_plugin(kind: PiPluginKind, source: &Path) -> Result<String, String
                 && source.extension().and_then(|ext| ext.to_str()) == Some("ts"))
                 || (source.is_dir() && source.join("index.ts").is_file());
             if !ok {
-                return Err("扩展必须是 .ts 文件或包含 index.ts 的目录".to_string());
+                return Err(
+                    "An extension must be a .ts file or a directory that contains index.ts"
+                        .to_string(),
+                );
             }
         }
     }
 
     let target = target_root.join(&name);
     if target.exists() {
-        return Err(format!("已存在同名插件：{name}"));
+        return Err(format!("A plugin with this name already exists: {name}"));
     }
     if source.is_dir() {
         copy_dir(source, &target)?;
     } else {
-        std::fs::copy(source, &target).map_err(|error| format!("拷贝失败：{error}"))?;
+        std::fs::copy(source, &target).map_err(|error| format!("copy failed: {error}"))?;
     }
     let name = if kind == PiPluginKind::Extension && target.is_file() {
         target
@@ -422,15 +426,17 @@ pub fn import_plugin(kind: PiPluginKind, source: &Path) -> Result<String, String
 }
 
 fn copy_dir(source: &Path, target: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(target).map_err(|error| format!("创建目录失败：{error}"))?;
-    let entries = std::fs::read_dir(source).map_err(|error| format!("读取目录失败：{error}"))?;
+    std::fs::create_dir_all(target)
+        .map_err(|error| format!("couldn't create the directory: {error}"))?;
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("couldn't read the directory: {error}"))?;
     for entry in entries.flatten() {
         let from = entry.path();
         let to = target.join(entry.file_name());
         if from.is_dir() {
             copy_dir(&from, &to)?;
         } else {
-            std::fs::copy(&from, &to).map_err(|error| format!("拷贝失败：{error}"))?;
+            std::fs::copy(&from, &to).map_err(|error| format!("copy failed: {error}"))?;
         }
     }
     Ok(())
@@ -441,11 +447,11 @@ pub fn remove_plugin(plugin: &PiPlugin) -> Result<(), String> {
     let path = &plugin.path;
     // 断链的 `is_dir()` 为 false，用 symlink_metadata 才能识别并删掉链接本身。
     let meta = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
+        .map_err(|error| format!("couldn't read {}: {error}", path.display()))?;
     if meta.file_type().is_symlink() || meta.is_file() {
-        std::fs::remove_file(path).map_err(|error| format!("删除失败：{error}"))
+        std::fs::remove_file(path).map_err(|error| format!("delete failed: {error}"))
     } else {
-        std::fs::remove_dir_all(path).map_err(|error| format!("删除失败：{error}"))
+        std::fs::remove_dir_all(path).map_err(|error| format!("delete failed: {error}"))
     }
 }
 
@@ -748,7 +754,7 @@ mod tests {
             description: String::new(),
             path: PathBuf::from("/skills/gone"),
             origin: String::new(),
-            broken: Some("链接目标不存在".into()),
+            broken: Some("the link target doesn't exist".into()),
             builtin: false,
         }];
         let args = launch_args_for_selection(

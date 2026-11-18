@@ -4,8 +4,8 @@
 //! 跟着 `HostEvent::MachinesChanged` 整组重登：重新连接只给连不上、版本对不上的，升级
 //! 只给能远程升级的，都看宿主给的连接表。没有定时器。
 
-use api::ui::TextInput;
 use api::ui::dialog::Confirm;
+use api::ui::{IconName, TextInput};
 use api::{
     Connection, ContextMenuAction, ContextMenuItem, MachineTarget, RenameMachine, RuntimeKey,
     SetMachineRelay,
@@ -14,8 +14,9 @@ use gpui::{
     App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
     Subscription, Task, Window, div, rgb,
 };
-use smelt_plugin_api as api;
+use rust_i18n::t;
 use smelt_plugin_api::ui::field::{InputEvent, InputState};
+use smelt_plugin_api::{self as api, text};
 
 use crate::OWNER;
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
@@ -43,29 +44,29 @@ const REMOVE: api::Command<MachineMenuContext, ()> = api::Command::new("smelt.ma
 /// 菜单项点了执行的那几条命令，和本插件别的命令一起登记（见 `crate::register_commands`）。
 pub(crate) fn commands() -> Vec<api::CommandSpec> {
     vec![
-        RECONNECT.spec_async("重新连接机器", |args, _, cx| {
+        RECONNECT.spec_async(text!("command.reconnect"), |args, _, cx| {
             let target = MachineTarget {
                 machine: args.machine,
             };
             api::RECONNECT_MACHINE.run(&target, cx)
         }),
-        UPGRADE.spec_async("升级机器的运行时", |args, _, cx| {
+        UPGRADE.spec_async(text!("command.upgrade"), |args, _, cx| {
             let target = MachineTarget {
                 machine: args.machine,
             };
             api::UPGRADE_MACHINE.run(&target, cx)
         }),
-        RENAME.spec("重命名机器", |args, window, cx| {
+        RENAME.spec(text!("command.rename"), |args, window, cx| {
             let (connection, window) = dialog_target(&args.machine, window, cx)?;
             rename(connection, window, cx);
             Ok(())
         }),
-        EDIT_RELAY.spec("改机器的中继", |args, window, cx| {
+        EDIT_RELAY.spec(text!("command.edit_relay"), |args, window, cx| {
             let (connection, window) = dialog_target(&args.machine, window, cx)?;
             edit_relay(connection, window, cx);
             Ok(())
         }),
-        REMOVE.spec("移除机器", |args, window, cx| {
+        REMOVE.spec(text!("command.remove"), |args, window, cx| {
             let (connection, window) = dialog_target(&args.machine, window, cx)?;
             confirm_remove(connection.machine, connection.name, window, cx);
             Ok(())
@@ -79,8 +80,8 @@ fn dialog_target<'w>(
     window: Option<&'w mut Window>,
     cx: &App,
 ) -> Result<(Connection, &'w mut Window), String> {
-    let window = window.ok_or_else(|| "主窗口没开".to_string())?;
-    let connection = connection(machine, cx).ok_or_else(|| api::MACHINE_REMOVED.to_string())?;
+    let window = window.ok_or_else(|| t!("error.no_window").into_owned())?;
+    let connection = connection(machine, cx).ok_or_else(api::machine_removed)?;
     Ok((connection, window))
 }
 
@@ -106,10 +107,10 @@ pub(crate) fn publish(cx: &mut App) {
 }
 
 fn machine_items(connection: Connection) -> Vec<ContextMenuItem> {
-    let item = |label: &'static str, icon: &'static str, command: &str| ContextMenuItem {
-        label: label.into(),
+    let item = |label: api::Text, icon: IconName, command: &str| ContextMenuItem {
+        label,
         image: None,
-        icon: Some(icon.into()),
+        icon: Some(icon.path()),
         machine: Some(connection.machine.clone()),
         action: ContextMenuAction::Run {
             command: command.to_string(),
@@ -119,23 +120,27 @@ fn machine_items(connection: Connection) -> Vec<ContextMenuItem> {
     let mut items = Vec::new();
     // 连不上、版本对不上时不必等退避：立刻再试。
     if connection.can_reconnect {
-        items.push(item("重新连接", "icons/refresh-cw.svg", RECONNECT.id()));
+        items.push(item(
+            text!("menu.reconnect"),
+            IconName::Refresh,
+            RECONNECT.id(),
+        ));
     }
     // 连得上就能升，不管兼不兼容：升到这个桌面的版本。
     if connection.can_upgrade {
-        items.push(item("升级运行时", "icons/arrow-up.svg", UPGRADE.id()));
+        items.push(item(text!("menu.upgrade"), IconName::ArrowUp, UPGRADE.id()));
     }
-    items.push(item("重命名…", "smelt-icons/square-pen.svg", RENAME.id()));
-    items.push(item("中继…", "icons/globe.svg", EDIT_RELAY.id()));
-    items.push(item("移除…", "smelt-icons/trash.svg", REMOVE.id()));
+    items.push(item(text!("menu.rename"), IconName::SquarePen, RENAME.id()));
+    items.push(item(text!("menu.relay"), IconName::Globe, EDIT_RELAY.id()));
+    items.push(item(text!("menu.remove"), IconName::Trash, REMOVE.id()));
     items
 }
 
 /// 命令在后台跑完，没成就发通知。
-pub(crate) fn report_failure(what: &'static str, task: Task<Result<(), String>>, cx: &mut App) {
+pub(crate) fn report_failure(what: String, task: Task<Result<(), String>>, cx: &mut App) {
     cx.spawn(async move |cx| {
         if let Err(error) = task.await {
-            cx.update(|cx| notify_failure(what, error, cx));
+            cx.update(|cx| notify_failure(&what, error, cx));
         }
     })
     .detach();
@@ -154,18 +159,16 @@ pub(crate) fn notify_failure(what: &str, error: String, cx: &mut App) {
 
 /// 移除前问一句。设置「远程」页的「移除」也走这里。
 pub(crate) fn confirm_remove(machine: RuntimeKey, name: String, window: &mut Window, cx: &mut App) {
-    Confirm::new("确定移除这台机器吗？", "移除", move |_, cx| {
+    Confirm::new(t!("remove.title"), t!("remove.action"), move |_, cx| {
         let target = MachineTarget {
             machine: machine.clone(),
         };
         let removed = api::REMOVE_MACHINE.run(&target, cx);
-        report_failure("移除机器失败", removed, cx);
+        report_failure(t!("remove.failed").into_owned(), removed, cx);
         true
     })
     .danger()
-    .description(format!(
-        "这台电脑不再连「{name}」，侧栏里它的项目和会话会一起移走。那台机器上的会话照常运行，重新配对后还能回来。"
-    ))
+    .description(t!("remove.description", name = name))
     .open(window, cx);
 }
 
@@ -174,11 +177,11 @@ fn rename(connection: Connection, window: &mut Window, cx: &mut App) {
     let form = cx.new(|cx| RenameForm::new(connection, window, cx));
     let input = form.read(cx).input.clone();
     let body = input.clone();
-    Confirm::new("重命名机器", "重命名", move |_, cx| {
+    Confirm::new(t!("rename.title"), t!("rename.action"), move |_, cx| {
         form.update(cx, |form, cx| form.submit(cx));
         true
     })
-    .description("侧栏和设置里显示这个名字，只在这台电脑上生效。")
+    .description(t!("rename.description"))
     .body(move |_, _| TextInput::new(&body).into_any_element())
     .open(window, cx);
     focus_input(input, window, cx);
@@ -238,7 +241,7 @@ impl RenameForm {
             },
             cx,
         );
-        report_failure("重命名机器失败", renamed, cx);
+        report_failure(t!("rename.failed").into_owned(), renamed, cx);
     }
 }
 
@@ -247,16 +250,16 @@ impl RenameForm {
 fn edit_relay(connection: Connection, window: &mut Window, cx: &mut App) {
     let online = matches!(connection.state, api::ConnectionState::Online { .. });
     let hint = if online {
-        "那台机器会改用这个中继，这台电脑也跟着改。填自建 iroh relay 的域名、IP 或 URL；留空用 n0 的公共 relay。"
+        t!("relay.hint_online")
     } else {
-        "那台机器现在连不上，只改这台电脑这边：那台机器要已经用 smeltd relay 改成同一个。"
+        t!("relay.hint_offline")
     };
-    let title = format!("{} 的中继", connection.name);
+    let title = t!("relay.title", name = connection.name);
     let form = cx.new(|cx| RelayForm::new(connection, window, cx));
     let save = form.clone();
     let body = form.clone();
     let closed = form.clone();
-    Confirm::new(title, "保存", move |window, cx| {
+    Confirm::new(title, t!("relay.save"), move |window, cx| {
         save.update(cx, |form, cx| form.save(window, cx));
         // 等那台机器回话，改成了由 [`RelayForm::save`] 关。
         false
@@ -282,7 +285,7 @@ impl RelayForm {
     fn new(connection: Connection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("留空用 n0 的公共 relay")
+                .placeholder(t!("relay.placeholder"))
                 .default_value(connection.relay.clone().unwrap_or_default())
         });
         let enter = cx.subscribe_in(&input, window, |form, _, event: &InputEvent, window, cx| {
@@ -338,7 +341,9 @@ impl RelayForm {
                         .update(cx, |_, window, cx| api::ui::dialog::close(window, cx));
                 }
                 Ok(()) => {}
-                Err(error) if !shown => cx.update(|cx| notify_failure("改中继失败", error, cx)),
+                Err(error) if !shown => {
+                    cx.update(|cx| notify_failure(&t!("relay.failed"), error, cx))
+                }
                 Err(_) => {}
             }
         })
@@ -359,7 +364,7 @@ impl Render for RelayForm {
                 div()
                     .type_style(TYPE.ui)
                     .text_color(muted)
-                    .child("正在保存…")
+                    .child(t!("relay.saving").into_owned())
             }))
             .children(
                 self.error

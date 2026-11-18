@@ -4,6 +4,7 @@
 //! 消息列表、审批卡、输入栏分别在 sibling 模块。
 
 use super::*;
+use rust_i18n::t;
 use smelt_plugin_api::model::daemon_state::DaemonPhase;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 
@@ -188,28 +189,33 @@ impl ConversationView {
                                 div()
                                     .type_style(TYPE.ui)
                                     .text_color(gpui::rgb(ui_theme::bad()))
-                                    .child("会话已结束"),
+                                    .child(t!("ended.title").into_owned()),
                             )
                             .child(div().flex_1())
                             .child(
                                 Button::new("acp-restart")
                                     .primary()
-                                    .label("重新开始")
+                                    .label(t!("ended.restart"))
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.restart(window, cx);
                                     })),
                             ),
                     )
-                    .when(!self.end_reason.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .pl_6()
-                                .type_style(TYPE.text_xsmall)
-                                .text_color(muted)
-                                .font_family(smelt_plugin_api::model::font_config::font_family())
-                                .child(self.end_reason.clone()),
-                        )
-                    })
+                    .when_some(
+                        Some(self.end_text()).filter(|text| !text.is_empty()),
+                        |d, text| {
+                            d.child(
+                                div()
+                                    .pl_6()
+                                    .type_style(TYPE.text_xsmall)
+                                    .text_color(muted)
+                                    .font_family(
+                                        smelt_plugin_api::model::font_config::font_family(),
+                                    )
+                                    .child(text),
+                            )
+                        },
+                    )
                     .into_any_element(),
             ),
             _ => None,
@@ -275,20 +281,18 @@ impl ConversationView {
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
                                 .text_center()
-                                .child("可以先在下方输入，连接完成后会自动发送"),
+                                .child(t!("starting.type_ahead").into_owned()),
                         ),
                 )
         });
         let ended_placeholder = show_ended_placeholder.then(|| {
-            let message = if self.end_reason.trim().is_empty() {
-                "与 smeltd 的连接已断开".to_string()
-            } else {
-                self.end_reason.clone()
-            };
+            let message = Some(self.end_text())
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| t!("error.disconnected").into_owned());
             let action_label = if self.history_session_id.is_some() {
-                "恢复会话"
+                t!("ended.resume")
             } else {
-                "新建会话"
+                t!("ended.new")
             };
             div()
                 .flex()
@@ -332,7 +336,7 @@ impl ConversationView {
                                 .font_semibold()
                                 .text_color(gpui::rgb(ui_theme::text()))
                                 .text_center()
-                                .child("会话已结束"),
+                                .child(t!("ended.title").into_owned()),
                         )
                         .child(
                             div()
@@ -355,36 +359,28 @@ impl ConversationView {
             let workspace_label = self.cwd.as_deref().and_then(|cwd| {
                 let path = std::path::Path::new(cwd);
                 if smelt_plugin_api::model::agent_paths::is_workbench_conversation_workspace(path) {
-                    return Some("工作台".to_string());
+                    return Some(t!("empty.workbench").into_owned());
                 }
                 // cwd 是运行时那台机器上的路径，不能用本机的 `Path::file_name` 切：Mac 上
                 // 看 Windows 运行时的 `C:\a\b` 会整串当成名字。只取末段显示，和
                 // `compact_path_leaf` 一样两种分隔符都认。
                 cwd.rsplit(['/', '\\'])
                     .find(|name| !name.is_empty())
-                    .map(|name| format!("当前工作区 · {name}"))
+                    .map(|name| t!("empty.workspace", name = name).into_owned())
             });
             let quick_prompts = [
                 (
-                    "了解这个项目",
-                    "梳理结构、入口和运行方式",
-                    "请快速梳理这个项目的结构、关键入口和运行方式。",
+                    "understand",
+                    t!("quick.understand.title"),
+                    t!("quick.understand.prompt"),
                 ),
                 (
-                    "检查当前改动",
-                    "概述变更并指出潜在风险",
-                    "请检查当前工作区的改动，概述内容并指出潜在风险。",
+                    "review",
+                    t!("quick.review.title"),
+                    t!("quick.review.prompt"),
                 ),
-                (
-                    "定位一个问题",
-                    "先补充现象，再一起排查",
-                    "请帮我定位这个问题：",
-                ),
-                (
-                    "补充测试",
-                    "先给出方案，再实现验证",
-                    "请为当前相关模块补充测试，并先说明测试方案。",
-                ),
+                ("debug", t!("quick.debug.title"), t!("quick.debug.prompt")),
+                ("test", t!("quick.test.title"), t!("quick.test.prompt")),
             ];
             // Grok 空状态是「大标题 + 一排安静的胶囊」，不是带编号的功能卡片墙。
             let mut prompt_chips = div()
@@ -394,10 +390,10 @@ impl ConversationView {
                 .justify_center()
                 .gap_2()
                 .flex_wrap();
-            for (title, _detail, prompt) in quick_prompts {
-                let prompt = prompt.to_string();
+            for (id, title, prompt) in quick_prompts {
+                let prompt = prompt.into_owned();
                 prompt_chips = prompt_chips.child(
-                    Button::new((gpui::ElementId::from("acp-empty-prompt"), title))
+                    Button::new((gpui::ElementId::from("acp-empty-prompt"), id))
                         .label(title)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.insert_prompt_text(&prompt, window, cx);
@@ -438,7 +434,7 @@ impl ConversationView {
                                 .type_style(TYPE.ui)
                                 .text_color(muted)
                                 .text_center()
-                                .child("想让它做什么？"),
+                                .child(t!("composer.placeholder").into_owned()),
                         )
                         .children(workspace_label.map(|label| {
                             div()
@@ -476,7 +472,7 @@ impl ConversationView {
                     Button::new("acp-jump-to-latest")
                         .floating()
                         .icon(IconName::ArrowDown)
-                        .label("回到最新")
+                        .label(t!("scroll.latest"))
                         .on_click(cx.listener(|this, _event, _window, cx| {
                             this.set_viewing_history(false, cx);
                             this.list_state.set_follow_mode(FollowMode::Tail);
@@ -650,12 +646,12 @@ impl ConversationView {
                     .bg(ui_theme::tint(ui_theme::need(), 0x14))
                     .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::need()))
-                    .child(div().flex_1().min_w(px(0.)).child(notice.text.clone()))
+                    .child(div().flex_1().min_w(px(0.)).child(notice.display_text()))
                     .child(
                         Button::new(("acp-notice-dismiss", id as usize))
                             .dismiss()
                             .icon(IconName::Close)
-                            .icon_action("关闭提示")
+                            .icon_action(t!("notice.dismiss"))
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 this.dismissed_notice_id = Some(id);
                                 cx.notify();

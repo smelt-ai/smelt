@@ -6,9 +6,9 @@
 //! 不用页签。
 
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, RenderOnce, StatefulInteractiveElement, StyleRefinement, Styled, Window,
-    prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, BoxShadow, ClickEvent, ElementId, InteractiveElement, Interactivity,
+    IntoElement, ParentElement, RenderOnce, StatefulInteractiveElement, StyleRefinement, Styled,
+    Window, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::StyledExt as _;
 
@@ -134,6 +134,17 @@ impl RenderOnce for Tab {
                     this.hover(|style| style.bg(ui_theme::row_hover()))
                 }
             })
+            // 页签条是一个 Tab 停留点，左右键在页签间移（gpui-base 的 `Tabs`）。键盘焦点画在
+            // 边内：页签条套在横向滚动区里，画在外面会被裁掉。
+            .focus_visible(|style| style.shadow(focus_ring()))
             .refine_style(&custom)
     }
+}
+
+fn focus_ring() -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(0.), ui_theme::focus().into())
+            .spread_radius(px(2.))
+            .inset(),
+    ]
 }

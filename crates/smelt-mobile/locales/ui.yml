@@ -1,0 +1,153 @@
+_version: 2
+error:
+  not_connected:
+    en: Not connected to this machine yet
+    zh-CN: 还没有连上这台机器
+  unreachable:
+    en: "Can't reach the runtime: %{error}"
+    zh-CN: "连不上运行时：%{error}"
+  unreachable_plain:
+    en: Can't reach the runtime
+    zh-CN: 连不上运行时
+  connection_dropped:
+    en: The connection to the runtime dropped
+    zh-CN: 到运行时的连接断了
+  superseded:
+    en: Switched to another connection request
+    zh-CN: 已切换到别的连接请求
+  runtime_too_old:
+    en: This runtime is too old (it has no runtime_id). Update it first.
+    zh-CN: 这个运行时太旧，没有 runtime_id，先升级它
+  runtime_unsupported:
+    en: The runtime doesn't support this. Update it first.
+    zh-CN: 运行时不支持这个操作，先升级它
+  not_synced:
+    en: The runtime's session list hasn't arrived yet. Try again shortly.
+    zh-CN: 还没拿到运行时的会话目录，稍后再试
+  thread_failed:
+    en: "Couldn't start a background thread: %{error}"
+    zh-CN: "起不了后台线程：%{error}"
+  no_response:
+    en: The runtime didn't answer this request (the session doesn't exist or the runtime doesn't support it)
+    zh-CN: 运行时没有回应这个请求（会话不存在或运行时版本不支持）
+  not_performed:
+    en: The runtime didn't carry out this action
+    zh-CN: 运行时没有执行这个操作
+  session_missing:
+    en: The session doesn't exist
+    zh-CN: 会话不存在
+  conversation_unavailable:
+    en: The runtime can't connect to this conversation
+    zh-CN: 运行时接不上这段对话
+  snapshot_invalid:
+    en: "The history snapshot is invalid: %{error}"
+    zh-CN: "历史快照内容无效：%{error}"
+  image_invalid:
+    en: "The image data is invalid: %{error}"
+    zh-CN: "图片数据无效：%{error}"
+  project_missing:
+    en: "The runtime has no project at %{root}"
+    zh-CN: "运行时的项目里没有 %{root}"
+  run_gone:
+    en: This run's record is gone
+    zh-CN: 这次运行的记录已经没有了
+  agent_option_missing:
+    en: "The runtime has no agent option %{id}"
+    zh-CN: "运行时上没有这个智能体选项：%{id}"
+  rename_failed:
+    en: Renaming failed
+    zh-CN: 改名失败
+  name_empty:
+    en: The name can't be empty
+    zh-CN: 名字不能为空
+  machine_unknown:
+    en: "This machine isn't registered: %{id}"
+    zh-CN: "没有登记这台机器：%{id}"
+  database:
+    en: "Local database error: %{error}"
+    zh-CN: "本机数据库出错：%{error}"
+  identity_unreadable:
+    en: "Couldn't read the device identity: %{error}"
+    zh-CN: "读取设备身份失败：%{error}"
+  iroh_failed:
+    en: "Couldn't start the network connection (iroh): %{error}"
+    zh-CN: "起不了网络连接（iroh）：%{error}"
+  endpoint_invalid:
+    en: "The runtime's endpoint id isn't valid: %{id}"
+    zh-CN: "运行时的 endpoint id 不合法：%{id}"
+subscription:
+  unsendable:
+    en: "Couldn't send the subscription request: %{error}"
+    zh-CN: "订阅请求发不出去：%{error}"
+  unusable:
+    en: "The subscription connection is unusable: %{error}"
+    zh-CN: "订阅连接不可用：%{error}"
+  closed:
+    en: The runtime closed the subscription
+    zh-CN: 运行时关闭了订阅
+  dropped:
+    en: "The subscription connection dropped: %{error}"
+    zh-CN: "订阅连接断开：%{error}"
+send:
+  empty:
+    en: The message is empty
+    zh-CN: 消息是空的
+  interrupted:
+    en: "Sending was interrupted; the runtime may or may not have received it: %{error}"
+    zh-CN: "发送中断，不确定运行时是否收到：%{error}"
+  unconfirmed:
+    en: "No confirmation from the runtime: %{error}"
+    zh-CN: "没等到运行时确认：%{error}"
+  dropped_unconfirmed:
+    en: The runtime disconnected without confirming
+    zh-CN: 运行时没有确认就断开了
+  confirmation_unreadable:
+    en: "Couldn't understand the runtime's confirmation: %{error}"
+    zh-CN: "运行时的确认读不懂：%{error}"
+store:
+  version_ahead:
+    en: "The local database is version %{version}, newer than the %{known} this app understands. Update the app."
+    zh-CN: "本机数据库版本 %{version} 比这个 App 认识的 %{known} 新，先升级 App"
+terminal:
+  missing:
+    en: The terminal session doesn't exist or has ended
+    zh-CN: 终端会话不存在或已结束
+  dropped:
+    en: "The terminal connection dropped: %{reason}"
+    zh-CN: "终端连接断开：%{reason}"
+  unusable:
+    en: "The terminal connection is unusable: %{error}"
+    zh-CN: "终端连接不可用：%{error}"
+  attach_unsent:
+    en: "The terminal attach request wasn't sent: %{error}"
+    zh-CN: "终端附着请求没发出去：%{error}"
+  header_failed:
+    en: "Waiting for the terminal header failed: %{error}"
+    zh-CN: "等终端头失败：%{error}"
+  keyframe_too_large:
+    en: "The terminal keyframe is too large (%{size} bytes, over the %{limit}-byte limit)"
+    zh-CN: "终端关键帧太大（%{size} 字节），超过 %{limit} 字节上限"
+  keyframe_incomplete:
+    en: The terminal keyframe didn't arrive in full
+    zh-CN: 关键帧没传完
+  input_unsent:
+    en: "Terminal input wasn't sent: %{error}"
+    zh-CN: "终端输入没有发出：%{error}"
+  connection_stopped:
+    en: The connection to this machine stopped, so the terminal stopped
+    zh-CN: 和这台机器的连接已停止，终端已停止
+  disconnected:
+    en: The terminal is disconnected
+    zh-CN: 终端已断开
+  header_too_long:
+    en: The runtime's terminal header is too long
+    zh-CN: 运行时回的终端头太长
+  header_incomplete:
+    en: The connection dropped before the terminal header was read
+    zh-CN: 终端头没读完连接就断了
+  header_invalid:
+    en: "The runtime's terminal header is invalid: %{error}"
+    zh-CN: "运行时回的终端头不对：%{error}"
+  input_rejected:
+    en: The runtime rejected the terminal input
+    zh-CN: 运行时拒绝了终端输入

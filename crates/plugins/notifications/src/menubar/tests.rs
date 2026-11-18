@@ -81,7 +81,11 @@ fn title_matches_the_compact_attention_and_running_format() {
     assert_eq!(status_title(0, 660), "660");
     assert_eq!(status_title(5, 660), "5@·660");
     assert_eq!(status_tooltip(0, 0), "smelt");
-    assert_eq!(status_tooltip(5, 660), "5 个会话需要关注，660 个会话运行中");
+    assert_eq!(
+        status_tooltip(5, 660),
+        "5 sessions need attention, 660 sessions running"
+    );
+    assert_eq!(status_tooltip(1, 0), "1 session needs attention");
 }
 
 #[test]
@@ -124,7 +128,7 @@ fn terminal_status_name_and_agent() {
     reported.get_mut("a").unwrap().provider = Some("codex".into());
     let row = conversation_row(&RuntimeKey::Local, &single, &reported, None).unwrap();
     // 运行时还没推名字来：通用名。
-    assert_eq!(row.title, "终端");
+    assert_eq!(row.title, "Terminal");
     // 没有启动命令就认 hook 报的。
     assert_eq!(row.agent.as_deref(), Some("codex"));
 }
@@ -135,7 +139,7 @@ fn conversation_name_comes_from_the_runtime() {
     let row = conversation_row(&RuntimeKey::Local, &conversation, &HashMap::new(), None).unwrap();
     assert_eq!(row.ids, vec!["s".to_string()]);
     assert_eq!(row.agent.as_deref(), Some("claude"));
-    assert_eq!(row.title, "对话");
+    assert_eq!(row.title, "Conversation");
 
     let mut live = states(&[("s", DaemonPhase::AwaitingApproval)]);
     live.get_mut("s").unwrap().conversation_name = Some("运行时报的名字".into());
@@ -165,7 +169,7 @@ fn menu_lists_active_and_raised_sessions_needing_you_first() {
         .collect();
     assert_eq!(
         labels,
-        vec!["等批准 — 需要你", "在跑 — 运行中", "没看 — 未读"]
+        vec!["等批准 — Needs you", "在跑 — Running", "没看 — Unread"]
     );
     assert_eq!(
         menu.entries[0].color,

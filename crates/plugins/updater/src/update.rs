@@ -19,15 +19,12 @@ use gpui::prelude::*;
 use gpui::{App, AsyncApp, Context, Entity, Global, Window};
 #[cfg(target_os = "macos")]
 use gpui::{SharedString, div, rgb};
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 use crate::store::{Prefs, UpdaterStore};
 use crate::{ABOUT_VIEW, OWNER};
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
-
-/// 装更新会停掉后台服务时，确认框里讲后果的那句。
-const UPDATE_SENTENCE: &str =
-    "更新将重启后台守护进程，正在进行的对话本轮回复会被中断（历史记录已保存，重启后可继续对话）";
 
 /// 确认框里最多列出几个会话的名字。
 const NAME_LIMIT: usize = 8;
@@ -85,9 +82,17 @@ pub(crate) fn register(cx: &mut App) {
     cx.set_global(UpdaterGlobal(entity.clone()));
     // 有新版本（查到、在下、待装）就在「关于」页上挂角标；宿主据此在侧栏「设置」和设置
     // 导航里那一页标红点。
-    cx.observe(&entity, |entity, cx| {
-        let badge = entity.read(cx).update_available().then(|| "新".into());
-        api::set_view_badge(ABOUT_VIEW, badge, cx);
+    cx.observe(&entity, |entity, cx| refresh_badge(&entity, cx))
+        .detach();
+    // 角标上的字跟语言走。
+    let badge_owner = entity.downgrade();
+    let events = api::events(cx);
+    cx.subscribe(&events, move |_, event: &api::HostEvent, cx| {
+        if matches!(event, api::HostEvent::LocaleChanged)
+            && let Some(entity) = badge_owner.upgrade()
+        {
+            refresh_badge(&entity, cx);
+        }
     })
     .detach();
     api::register_quit_guard(OWNER, Rc::new(quit_guard), cx);
@@ -216,7 +221,8 @@ impl Updater {
                     );
                     let _ = this.update(cx, |this, cx| {
                         this.moving_app = false;
-                        this.move_app_error = Some(format!("没移成：{error:#}").into());
+                        this.move_app_error =
+                            Some(t!("move.failed", error = format!("{error:#}")).into());
                         cx.notify();
                         cx.refresh_windows();
                     });
@@ -306,7 +312,7 @@ impl Updater {
                     Err(error) => {
                         api::app_log::error(
                             "updater",
-                            &format!("检查{}更新失败：{error:#}", channel.label()),
+                            &format!("检查 {channel:?} 更新失败：{error:#}"),
                         );
                         this.status = if let Some((status, _)) = staged {
                             status
@@ -590,10 +596,14 @@ pub(crate) fn begin_ready_update_install(window: &mut Window, cx: &mut App) {
     }
     let names = local_busy_work_names(cx);
     if updater::INSTALL_STOPS_LOCAL_DAEMON && !names.is_empty() {
-        Confirm::new("重启以完成更新？", "重启并更新", |_, cx| {
-            install_ready_update(Trigger::User, cx);
-            true
-        })
+        Confirm::new(
+            t!("confirm.restart_title"),
+            t!("confirm.restart"),
+            |_, cx| {
+                install_ready_update(Trigger::User, cx);
+                true
+            },
+        )
         .danger()
         .description(stop_prompt_body(&names))
         .open(window, cx);
@@ -625,7 +635,7 @@ fn quit_guard(cx: &mut App) -> bool {
     let body = stop_prompt_body(&names);
     cx.defer(move |cx| {
         open_confirm(cx, move |window, cx| {
-            Confirm::new("退出并安装更新？", "退出并更新", |_, cx| {
+            Confirm::new(t!("confirm.quit_title"), t!("confirm.quit"), |_, cx| {
                 install_ready_update(Trigger::Quit, cx);
                 true
             })
@@ -692,19 +702,17 @@ fn offer_move_app(cx: &mut App) {
     };
     let description = match entity.read(cx).location_issue {
         None => return,
-        Some(api::app_location::LocationIssue::ReadOnly) => {
-            "Smelt 正从只读位置（比如安装盘映像）运行，自动更新装不上。移过去后会自动重新打开，后台会话不受影响。"
-        }
+        Some(api::app_location::LocationIssue::ReadOnly) => t!("move.read_only").into_owned(),
         Some(api::app_location::LocationIssue::Translocated) => {
-            "Smelt 没放进「应用程序」就打开了，macOS 让它在一个临时的只读位置运行，自动更新因此装不上。移过去后会自动重新打开，后台会话不受影响。"
+            t!("move.translocated").into_owned()
         }
     };
     open_confirm(cx, move |window, cx| {
         let mover = entity.clone();
         let state = entity.clone();
         Confirm::new(
-            "把 Smelt 移到「应用程序」？",
-            "移过去并重新打开",
+            t!("move.confirm_title"),
+            t!("move.confirm"),
             move |_, cx| {
                 mover.update(cx, |this, cx| this.move_app_to_applications(cx));
                 // 框留着：移好了 App 会退出，没移成在框里写原因。
@@ -715,7 +723,7 @@ fn offer_move_app(cx: &mut App) {
         .body(move |_, cx| {
             let this = state.read(cx);
             let (text, color) = match (&this.move_app_error, this.moving_app) {
-                (_, true) => ("正在移动…".into(), ui_theme::muted()),
+                (_, true) => (t!("move.moving").into(), ui_theme::muted()),
                 (Some(error), false) => (error.clone(), ui_theme::bad()),
                 (None, false) => (SharedString::default(), ui_theme::muted()),
             };
@@ -780,19 +788,30 @@ fn busy_work_names(states: &[DaemonSessionState]) -> Vec<String> {
 
 /// 停守护装更新的确认框正文：后果，再列出会被打断的会话。
 fn stop_prompt_body(names: &[String]) -> String {
-    let mut body = UPDATE_SENTENCE.to_string();
+    let mut body = t!("stop.sentence").into_owned();
     if !names.is_empty() {
         let shown = names.len().min(NAME_LIMIT);
-        let mut listed = names[..shown].join("、");
+        let mut listed = names[..shown].join(&*t!("stop.separator"));
         if names.len() > shown {
-            listed.push_str(&format!(" 等 {} 个", names.len()));
+            listed.push_str(&t!("stop.and_more", count = names.len()));
         }
-        body.push_str(&format!(
-            "\n当前有 {} 个会话正在进行：{listed}。",
-            names.len()
-        ));
+        body.push('\n');
+        body.push_str(&if names.len() == 1 {
+            t!("stop.busy.one", names = listed)
+        } else {
+            t!("stop.busy.other", count = names.len(), names = listed)
+        });
     }
     body
+}
+
+/// 有新版本就在「关于」页挂角标，没有就摘掉。
+fn refresh_badge(entity: &Entity<Updater>, cx: &mut App) {
+    let badge = entity
+        .read(cx)
+        .update_available()
+        .then(|| t!("badge").into());
+    api::set_view_badge(ABOUT_VIEW, badge, cx);
 }
 
 #[cfg(test)]
@@ -824,7 +843,7 @@ mod tests {
         ];
         let names = busy_work_names(&states);
         assert!(names.is_empty());
-        assert_eq!(stop_prompt_body(&names), UPDATE_SENTENCE);
+        assert_eq!(stop_prompt_body(&names), t!("stop.sentence"));
     }
 
     #[test]
@@ -845,9 +864,9 @@ mod tests {
         let names = busy_work_names(&states);
         assert_eq!(names[..3], ["写文档", "b", "c"]);
         let body = stop_prompt_body(&names);
-        assert!(body.starts_with(UPDATE_SENTENCE));
-        assert!(body.contains(&format!("当前有 {} 个会话正在进行", names.len())));
-        assert!(body.contains(&format!("等 {} 个", names.len())));
+        assert!(body.starts_with(&*t!("stop.sentence")));
+        assert!(body.contains(&format!("{} sessions are in progress", names.len())));
+        assert!(body.contains(&format!("{} in all", names.len())));
         assert!(!body.contains("会话6"));
     }
 }

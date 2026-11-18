@@ -13,7 +13,7 @@
 
 - `smelt` 桌面端在 Windows 10 1803 及以上（x86_64）编过、跑起来，通过 iroh 连已配对的 Linux / macOS 运行时，对话、终端、文件树、Git 面板、远程桌面照常用。
 - Windows 原生 CI 检查，发版产出 zip 便携包。
-- 窗口材质（`window_backdrop.rs`）：Windows 11 22H2（build 22621）起用 GPUI 的 `MicaBackdrop`，整窗拿 Mica 做底，窗口的深色标记跟 smelt 的主题；更早的版本主窗口不透明、铺主题底色，不退到 Acrylic（`Blurred`），拖窗口会卡。
+- 窗口材质（`window_backdrop.rs`）：Windows 11 22H2（build 22621）起用 GPUI 的 `MicaBackdrop`，整窗拿 Mica 做底，布局声明了材质的地方透出它、别处铺实色（系统背景材质只能整窗一种，侧栏、窗口底两种用途在 Windows 上分不出来），窗口的深色标记跟 smelt 的主题；更早的版本主窗口不透明、铺主题底色，不退到 Acrylic（`Blurred`），拖窗口会卡。
 
 不做：
 

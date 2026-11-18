@@ -360,7 +360,7 @@ fn reserved_and_fixed_keys_are_refused() {
     }
     assert!(matches!(
         judge(PALETTE, "cmd-c", &none),
-        Recorded::Rejected(reason) if reason.contains("复制")
+        Recorded::Rejected(reason) if reason.contains("Copy")
     ));
 
     let component = KeyBinding::new("cmd-shift-x", DismissWorkspace, Some("Input"));

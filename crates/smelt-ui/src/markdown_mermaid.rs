@@ -32,6 +32,7 @@
 //! 内存缓存：GPUI 是即时模式 UI，`BlockNode` 的渲染函数每帧 paint 都会重新调用，
 //! 同一张图只渲一次，否则滚动会变成每帧重算。不落盘——这是派生图，不是状态。
 
+use rust_i18n::t;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
@@ -566,7 +567,7 @@ impl Render for MermaidPreview {
                         crate::Button::new("mermaid-preview-zoom-out")
                             .quiet()
                             .small()
-                            .label("缩小")
+                            .label(t!("mermaid.zoom_out"))
                             .debug_selector(|| "MERMAID_PREVIEW_ZOOM_OUT".to_string())
                             .disabled(scale.is_some_and(|scale| scale <= MIN_PREVIEW_SCALE))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -578,7 +579,7 @@ impl Render for MermaidPreview {
                         crate::Button::new("mermaid-preview-zoom-in")
                             .quiet()
                             .small()
-                            .label("放大")
+                            .label(t!("mermaid.zoom_in"))
                             .debug_selector(|| "MERMAID_PREVIEW_ZOOM_IN".to_string())
                             .disabled(scale.is_some_and(|scale| scale >= MAX_PREVIEW_SCALE))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -590,7 +591,7 @@ impl Render for MermaidPreview {
                         crate::Button::new("mermaid-preview-zoom-fit")
                             .quiet()
                             .small()
-                            .label("适合窗口")
+                            .label(t!("mermaid.fit"))
                             .debug_selector(|| "MERMAID_PREVIEW_ZOOM_FIT".to_string())
                             .disabled(self.zoom == PreviewZoom::Fit)
                             .on_click(cx.listener(|this, _, _, cx| this.zoom_fit(cx))),
@@ -625,7 +626,7 @@ fn open_mermaid_preview(image: Arc<MermaidImage>, window: &mut Window, cx: &mut 
         // 对话框会把宽高夹在窗口减去边距以内，这里只表达「尽量大」，不替它算边距。
         let viewport = window.viewport_size();
         card.w(viewport.width).h(viewport.height).child(
-            crate::dialog::content("Mermaid 图表", None)
+            crate::dialog::content(t!("mermaid.title"), None)
                 .flex_1()
                 .min_h_0()
                 .child(preview.clone()),
@@ -1185,7 +1186,7 @@ fn svg_request() -> SvgRequest {
 fn render_svg(source: &str, colors: DiagramColors) -> Result<String, String> {
     match std::panic::catch_unwind(|| render_svg_inner(source, colors)) {
         Ok(result) => result,
-        Err(_) => Err("渲染中断".into()),
+        Err(_) => Err(t!("mermaid.panicked").into_owned()),
     }
 }
 
@@ -1199,8 +1200,8 @@ fn render_svg_inner(source: &str, colors: DiagramColors) -> Result<String, Strin
         .map_err(|err| err.to_string())?;
     match output {
         RenderOutput::Svg(Some(svg)) => Ok(strip_negative_stroke_width(svg.svg())),
-        RenderOutput::Svg(None) => Err("源码里没有 mermaid 图".into()),
-        _ => Err("渲染结果不是 SVG".into()),
+        RenderOutput::Svg(None) => Err(t!("mermaid.no_diagram").into_owned()),
+        _ => Err(t!("mermaid.not_svg").into_owned()),
     }
 }
 
@@ -1286,7 +1287,7 @@ fn mermaid_result_element(result: MermaidRender, digest: &str, source: &str) -> 
             .child(
                 div()
                     .text_color(rgb(ui_theme::need()))
-                    .child(format!("⚠ mermaid 渲染失败：{msg}")),
+                    .child(t!("mermaid.failed", msg = msg).into_owned()),
             )
             .child(
                 div()
@@ -1399,7 +1400,7 @@ fn code_block_corner(
         .child(
             crate::Clipboard::new("copy")
                 .value(code_block.code())
-                .icon_action("复制代码"),
+                .icon_action(t!("action.copy_code")),
         )
         .into_any_element()
 }
@@ -1416,8 +1417,8 @@ fn markdown_view_with_selection(
 }
 
 /// 对话消息（ACP 对话、会话历史）的 Markdown，解析状态由调用方持有。原始 HTML 按
-/// 原文显示，见 `markdown_literal_html` 模块；文件链接点击时按 `links` 解析，见
-/// [`crate::markdown_links`]。
+/// 原文显示，见 [`chat_markdown_extensions`]；文件链接点击时按 `links` 解析，悬停提示
+/// 点下去打开的是哪个文件或网址，见 [`crate::markdown_links`]。
 ///
 /// `TextView::markdown` 把解析结果挂在元素上，元素有一帧没画就丢掉。虚拟列表里的行
 /// 滚出渲染范围再回来，超过 4KB 的正文要先以空内容等后台重新解析，行高跟着跳。
@@ -1431,6 +1432,7 @@ pub fn chat_markdown_view(
         chat_markdown_extensions(),
     )
     .on_link_click(crate::markdown_links::link_opener(links))
+    .link_tooltip(crate::markdown_links::link_tooltip(links))
 }
 
 /// 围栏代码块按围栏写的语言上色，配色是当前主题的 `syntax` 段（见 [`crate::syntax`]）。
@@ -1460,14 +1462,13 @@ fn shared_markdown_extensions() -> &'static MarkdownExtensions {
 }
 
 /// [`shared_markdown_extensions`] 再加上原始 HTML 按原文显示。同样只建一次。
+///
+/// 对话里的尖括号多半是随手写的类型参数、组件名或贴进来的片段，不是要渲染的页面；当
+/// HTML 解释的话，不认识的标签会让整段内容消失。解析时就不认 HTML（`<b>` 也一样），
+/// 代码块、行内代码本来就不受影响，`<https://…>` 这种自动链接不是 HTML，照样是链接。
 fn chat_markdown_extensions() -> &'static MarkdownExtensions {
     static EXTENSIONS: OnceLock<MarkdownExtensions> = OnceLock::new();
-    EXTENSIONS.get_or_init(|| {
-        shared_markdown_extensions()
-            .clone()
-            .plugin(crate::markdown_literal_html::LiteralInlineHtml)
-            .plugin(crate::markdown_literal_html::LiteralBlockHtml)
-    })
+    EXTENSIONS.get_or_init(|| shared_markdown_extensions().clone().raw_html(false))
 }
 
 #[cfg(test)]
@@ -1511,8 +1512,9 @@ mod tests {
             gpui_base::init(cx);
             crate::init(cx);
         });
-        let source = "前 <section class=\"card\">内容</section> 和 <panel>\n\n\
+        let source = "前 <section class=\"card\">内容</section> 和 <panel> 还有 <b>粗</b>\n\n\
                       <div>\n块里的字\n</div>\n\n\
+                      <details>\n**要点**\n\n\
                       1. 步骤\n   - 子项\n\n     ```rust\n     let v: Vec<String> = vec![];\n     ```\n";
         let (root, cx) = cx.add_window_view(|_window, cx| ChatMarkdownRoot {
             state: cx.new(|cx| TextViewState::markdown(source, cx)),
@@ -1535,7 +1537,16 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("<panel>"), "{text}");
-        assert!(text.contains("<div>\n块里的字\n</div>"), "{text}");
+        assert!(text.contains("<b>粗</b>"), "{text}");
+        assert!(text.contains("<div>"), "{text}");
+        assert!(text.contains("块里的字"), "{text}");
+        assert!(text.contains("</div>"), "{text}");
+        // HTML 行后面紧跟的 Markdown 照常解析，不被当成 HTML 块的原文。
+        assert!(text.contains("<details>"), "{text}");
+        assert!(
+            text.contains("要点") && !text.contains("**要点**"),
+            "{text}"
+        );
         assert!(text.contains("let v: Vec<String> = vec![];"), "{text}");
         assert!(!text.contains('\\'), "{text}");
     }
@@ -1969,7 +1980,7 @@ mod tests {
         );
     }
 
-    /// gpui-pre 0.3.11 栅格化 SVG 用的就是 usvg 0.46。这里用同一份 crate 解析，
+    /// gpui-pre 0.3.12 栅格化 SVG 用的就是 usvg 0.46。这里用同一份 crate 解析，
     /// 确认 `resvg_safe` 的输出不会被这版 usvg 拒掉。
     fn assert_gpui_usvg_parses(name: &str, svg: &str) {
         let options = usvg::Options::default();

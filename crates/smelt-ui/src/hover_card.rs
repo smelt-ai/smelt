@@ -2,7 +2,8 @@
 //! 内容要另有点开或展开的路，键盘也够得着。
 //!
 //! 行为（开关延时、指针移进卡片不收）用 gpui-base 的 `HoverCard`。外观：
-//! 和 [`crate::popover::Popover`] 同一块浮层底，8 圆角、4 内边距，离触发点 4px。
+//! 和 [`crate::popover::Popover`] 同一块浮层底，8 圆角、4 内边距，离触发点 4px，同样从触发点
+//! 那侧淡入。
 //! `Styled` 改的是浮层卡片。
 
 use gpui::{
@@ -12,6 +13,7 @@ use gpui::{
 use gpui_base::StyledExt as _;
 
 use crate::kit::RADIUS;
+use crate::motion::{EnterFrom, overlay_enter};
 use crate::popover::{GAP, surface};
 
 /// 卡片内边距。
@@ -21,6 +23,7 @@ const PADDING: f32 = 4.;
 #[derive(IntoElement)]
 pub struct HoverCard {
     base: gpui_base::HoverCard,
+    id: ElementId,
     anchor: Anchor,
     style: StyleRefinement,
     children: Vec<AnyElement>,
@@ -28,8 +31,10 @@ pub struct HoverCard {
 
 impl HoverCard {
     pub fn new(id: impl Into<ElementId>) -> Self {
+        let id = id.into();
         Self {
-            base: gpui_base::HoverCard::new(id),
+            base: gpui_base::HoverCard::new(id.clone()),
+            id,
             anchor: Anchor::TopCenter,
             style: StyleRefinement::default(),
             children: Vec::new(),
@@ -71,23 +76,27 @@ impl RenderOnce for HoverCard {
         let anchor = self.anchor;
         let style = self.style;
         let children = self.children;
-        // gpui-base 的悬停卡片不留间距，卡片朝外推开 4px。
-        let below = matches!(
-            anchor,
-            Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight
-        );
-        self.base.anchor(anchor).content(move |_, _, _| {
+        let id = self.id;
+        let from = EnterFrom::anchored(anchor);
+        self.base.anchor(anchor).content(move |_, window, cx| {
+            let enter = overlay_enter((id, "enter"), from, window, cx);
             surface()
                 .id("smelt-hover-card")
                 .occlude()
                 .rounded(px(RADIUS.lg))
                 .p(px(PADDING))
-                .map(|card| {
-                    if below {
-                        card.top(px(GAP))
-                    } else {
-                        card.bottom(px(GAP))
+                .opacity(enter.opacity)
+                // gpui-base 的悬停卡片不留间距，卡片朝外推开 4px；入场偏移叠在这上面。
+                .map(|card| match anchor {
+                    Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => {
+                        card.top(px(GAP) + enter.dy)
                     }
+                    Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => {
+                        card.bottom(px(GAP) - enter.dy)
+                    }
+                    // 左边中点对着触发点：卡片在右边，往右推开；反过来往左。
+                    Anchor::LeftCenter => card.left(px(GAP)),
+                    Anchor::RightCenter => card.right(px(GAP)),
                 })
                 .refine_style(&style)
                 .children(children)

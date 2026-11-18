@@ -70,7 +70,7 @@ fn permission_from_status(
             return Permission::Unavailable(
                 status
                     .last_error
-                    .unwrap_or_else(|| "暂时读不到授权状态".to_string()),
+                    .unwrap_or_else(|| rust_i18n::t!("notify.permission_unknown").into_owned()),
             );
         }
         (_, Some(last_read)) => last_read,
@@ -366,10 +366,10 @@ mod imp {
     pub fn deliver_plugin_notification(_notify: &smelt_plugin_api::Notify) {}
     pub fn withdraw_plugin_notification(_id: &str) {}
     pub fn notify_error(message: impl AsRef<str>) {
-        deliver_app_notification("错误", message.as_ref());
+        deliver_app_notification(&rust_i18n::t!("notify.error"), message.as_ref());
     }
     pub fn notify_success(message: impl AsRef<str>) {
-        deliver_app_notification("完成", message.as_ref());
+        deliver_app_notification(&rust_i18n::t!("notify.done"), message.as_ref());
     }
     pub fn refresh_system_notification_authorization() {}
     pub fn request_system_notification_authorization() {}

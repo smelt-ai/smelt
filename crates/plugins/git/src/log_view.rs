@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use rust_i18n::t;
 use smelt_plugin_api::ui::Badge;
 pub(crate) use smelt_plugin_api::ui::Button;
 use smelt_plugin_api::ui::diff::Diff;
@@ -252,16 +253,16 @@ pub fn git_log_view(
     let ws = cx.entity();
 
     let Some(root) = root else {
-        return placeholder_view("当前会话没有工作目录");
+        return placeholder_view(&t!("log.no_directory"));
     };
 
     if state.commits.is_empty() {
         let hint = if state.loading {
-            "正在读取提交历史…"
+            t!("log.loading")
         } else {
-            "没有提交记录"
+            t!("log.empty")
         };
-        return placeholder_view(hint);
+        return placeholder_view(&hint);
     }
 
     let rows = state.graph.clone();
@@ -341,7 +342,7 @@ pub fn git_log_view(
                 .child(
                     Button::new("git-log-reload")
                         .small()
-                        .label("刷新")
+                        .label(t!("log.reload"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(root) = this.git_log.loaded_root.clone() {
                                 this.reload_git_log(root, cx);
@@ -356,14 +357,19 @@ pub fn git_log_view(
 /// 生效的范围显示出来，不然用户不知道自己在看哪一段历史。
 fn filter_summary(state: &GitLogState, head: Option<&str>) -> String {
     let scope = match &state.scope {
-        LogScope::Head => match head {
-            Some(b) => format!("当前分支（{b}）"),
-            None => "当前分支".into(),
-        },
-        LogScope::All => "全部分支".into(),
+        LogScope::Head => head_label(head),
+        LogScope::All => t!("log.all_branches").into_owned(),
         LogScope::Branch(b) => b.clone(),
     };
-    format!("{scope} · 最近 {} 条", state.commits.len())
+    t!("log.summary", scope = scope, count = state.commits.len()).into_owned()
+}
+
+/// 「当前分支」那一项的名字，知道分支名就带上。
+fn head_label(head: Option<&str>) -> String {
+    match head {
+        Some(branch) => t!("log.head_named", branch = branch).into_owned(),
+        None => t!("log.head").into_owned(),
+    }
 }
 
 /// Unix 秒 → `MM-DD HH:MM`。跨年时补上年份，免得把去年的提交看成今天的。
@@ -389,10 +395,10 @@ pub fn commit_detail_pane(
     let muted: Hsla = rgb(ui_theme::muted()).into();
     let fg: Hsla = rgb(ui_theme::text()).into();
     let Some(sel) = state.selected.as_ref() else {
-        return placeholder_view("选择要查看更改的提交");
+        return placeholder_view(&t!("log.pick_commit"));
     };
     let Some(c) = state.commits.iter().find(|c| &c.hash == sel) else {
-        return placeholder_view("选择要查看更改的提交");
+        return placeholder_view(&t!("log.pick_commit"));
     };
 
     div().flex().flex_col()
@@ -444,7 +450,7 @@ pub fn commit_detail_pane(
                 .w_full()
                 .min_w_0()
                 .child(if state.detail_loading {
-                    placeholder_view("正在读取这次提交的更改…")
+                    placeholder_view(&t!("log.loading_commit"))
                 } else {
                     commit_diff_list(root, state, cx)
                 }),
@@ -506,7 +512,7 @@ fn commit_diff_list(
     let muted: Hsla = rgb(ui_theme::muted()).into();
     let fg: Hsla = rgb(ui_theme::text()).into();
     if state.detail_files.is_empty() {
-        return placeholder_view("这次提交没有文件更改");
+        return placeholder_view(&t!("log.no_files"));
     }
     let ws = cx.entity();
     let files = state.detail_files.clone();
@@ -565,9 +571,9 @@ fn commit_diff_list(
 
     // 不在这里 read DiffState。提交列表和这份正文不在同一次重绘里。
     let diff = if sel_file.is_none() {
-        placeholder_view("选择一个文件查看这次提交的更改").into_any_element()
+        placeholder_view(&t!("log.pick_file")).into_any_element()
     } else if !patch_ready {
-        placeholder_view("正在读取…").into_any_element()
+        placeholder_view(&t!("log.loading_file")).into_any_element()
     } else if let Some(err) = detail_error {
         div()
             .flex_1()
@@ -580,7 +586,7 @@ fn commit_diff_list(
             .child(err)
             .into_any_element()
     } else if !has_diff_view {
-        placeholder_view("（无差异）").into_any_element()
+        placeholder_view(&t!("log.no_diff")).into_any_element()
     } else if let Some(body) = detail_body {
         div()
             .flex_1()
@@ -589,7 +595,7 @@ fn commit_diff_list(
             .child(body.cached(StyleRefinement::default().size_full()))
             .into_any_element()
     } else {
-        placeholder_view("（无差异）").into_any_element()
+        placeholder_view(&t!("log.no_diff")).into_any_element()
     };
 
     div()
@@ -651,7 +657,7 @@ pub fn branch_tree(
             .child(div().min_w_0().overflow_hidden().text_color(fg).child(truncated_line(label)))
     };
 
-    let group = |title: &'static str,
+    let group = |title: SharedString,
                  names: Vec<String>,
                  scope: LogScope,
                  head: Option<String>,
@@ -737,26 +743,28 @@ pub fn branch_tree(
                     let (ws_mg, r_mg, n_mg) = (ws3.clone(), r3.clone(), name.clone());
                     let (ws_del, r_del, n_del) = (ws3.clone(), r3.clone(), name.clone());
                     Menu::new()
-                        .item(MenuItem::new("签出").on_click(move |_ev, _window, cx| {
-                            let r = r_co.clone();
-                            // 远程分支要用短名（去掉 `<remote>/` 前缀）走 git 内建 DWIM
-                            // 自动建跟踪分支；直接传 `origin/xxx` 全名会变成 detached
-                            // HEAD。Git 页的分支下拉早就这么处理了，这里别再踩一遍。
-                            let n = if remote {
-                                n_co.split_once('/')
-                                    .map(|(_, b)| b.to_string())
-                                    .unwrap_or_else(|| n_co.clone())
-                            } else {
-                                n_co.clone()
-                            };
-                            ws_co.update(cx, |this, cx| {
-                                if let Some(r) = r {
-                                    this.checkout_branch(r, n, cx);
-                                }
-                            });
-                        }))
-                        .item(
-                            MenuItem::new("合并到当前分支").on_click(move |_ev, _window, cx| {
+                        .item(MenuItem::new(t!("branch.checkout")).on_click(
+                            move |_ev, _window, cx| {
+                                let r = r_co.clone();
+                                // 远程分支要用短名（去掉 `<remote>/` 前缀）走 git 内建 DWIM
+                                // 自动建跟踪分支；直接传 `origin/xxx` 全名会变成 detached
+                                // HEAD。Git 页的分支下拉早就这么处理了，这里别再踩一遍。
+                                let n = if remote {
+                                    n_co.split_once('/')
+                                        .map(|(_, b)| b.to_string())
+                                        .unwrap_or_else(|| n_co.clone())
+                                } else {
+                                    n_co.clone()
+                                };
+                                ws_co.update(cx, |this, cx| {
+                                    if let Some(r) = r {
+                                        this.checkout_branch(r, n, cx);
+                                    }
+                                });
+                            },
+                        ))
+                        .item(MenuItem::new(t!("branch.merge")).on_click(
+                            move |_ev, _window, cx| {
                                 let (r, n) = (r_mg.clone(), n_mg.clone());
                                 ws_mg.update(cx, |this, cx| {
                                     if let Some(r) = r {
@@ -768,9 +776,9 @@ pub fn branch_tree(
                         .separator()
                         .item(
                             MenuItem::new(if remote {
-                                "删除远端分支…"
+                                t!("branch.delete_remote")
                             } else {
-                                "删除分支…"
+                                t!("branch.delete")
                             })
                             .icon(smelt_plugin_api::ui::trash_icon())
                             .danger()
@@ -788,10 +796,7 @@ pub fn branch_tree(
             }))
     };
 
-    let head_label = match head_branch.as_deref() {
-        Some(b) => format!("当前分支（{b}）"),
-        None => "当前分支".to_string(),
-    };
+    let head_label = head_label(head_branch.as_deref());
     div()
         .flex()
         .flex_col()
@@ -809,14 +814,14 @@ pub fn branch_tree(
         ))
         .child(fixed(
             "git-log-all-branches",
-            "全部分支".into(),
+            t!("log.all_branches").into(),
             LogScope::All,
             *scope == LogScope::All,
             ws.clone(),
             root.clone(),
         ))
         .child(group(
-            "本地",
+            t!("branch.local").into(),
             local,
             scope.clone(),
             head_branch.clone(),
@@ -825,7 +830,7 @@ pub fn branch_tree(
             false,
         ))
         .child(group(
-            "远程",
+            t!("branch.remote").into(),
             remote,
             scope.clone(),
             head_branch,

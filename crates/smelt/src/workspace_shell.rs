@@ -12,6 +12,7 @@
 //!   按钮、拖动重排。
 //! - 读 Dock：[`ShellView`] 是摆着什么、看得见什么的快照，工作台缓存一份给 render 读。
 
+use rust_i18n::t;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -21,20 +22,24 @@ use gpui::{
     AnyElement, App, AppContext as _, Axis, Context, Div, Edges, Entity, EventEmitter, FocusHandle,
     Focusable, Pixels, SharedString, Subscription, Window, div, prelude::*, px, rgb, size,
 };
-use gpui_base::ResizeHandleContext;
 use gpui_base::dock::{
     DockArea, DockAreaRenderer, DockAreaState, DockContext, DockPlacement, DragPanel,
     DropIndicator, NodeId, PaneNode, PaneRef, Panel, PanelEvent, PanelId, PanelInfo, PanelState,
     PanelView, TabGroupContext, TabGroupRenderer,
 };
+use gpui_base::{ElementExt as _, ResizeHandleContext};
 use serde_json::Value;
 use smelt_plugin_api::{self as api, ViewHandle};
 pub(crate) use smelt_ui::Button;
 use smelt_ui::dock::{DockEdges, TabLabel, tab_strip};
-use smelt_ui::window_bar::{Adapt, SafeArea, TOP_BAR_HEIGHT, with_window_drag};
+use smelt_ui::window_bar::{
+    BAR_MARGIN, SafeArea, TOP_BAR_HEIGHT, WINDOW_EDGE_MARGIN, with_window_drag,
+};
 use smelt_ui::{Badge, IconAction as _, IconName, ui_theme};
 
 use crate::Workspace;
+use crate::window_backdrop::SharedRegions;
+use crate::workspace_frame::WindowCorners;
 use smelt_ui::kit::{TYPE, TypeStyled as _};
 
 /// Dock 的四个区域，按画的先后。
@@ -45,8 +50,9 @@ const PLACEMENTS: [DockPlacement; 4] = [
     DockPlacement::Bottom,
 ];
 
-/// 左右停靠区开合按钮占的宽度。
-const DOCK_TOGGLE_WIDTH: f32 = 32.;
+/// 左右停靠区开合按钮的宽度：小号图标按钮的边长。离窗口边、离内容的距离另算（见
+/// [`ShellView::leading_inset`]）。
+const DOCK_TOGGLE_WIDTH: f32 = 20.;
 
 // ---- 面板 ----
 
@@ -625,8 +631,9 @@ pub(crate) struct ShellView {
     /// 此刻看得见的视图：所在组显示着的那个（显示着一摞就是摞里的每一个），没被另一组的
     /// 放大挡住，也不在收起的 dock 里。
     pub(crate) shown: HashSet<String>,
-    /// 看得见、所在组既没有标签条也没有标题带、又贴着窗口上沿的视图的 safe area：它自己的
-    /// 顶上就是窗口顶，拖窗口、标题这些归它自己画，占着窗口角的还要给角上的控件让位。不在
+    /// 看得见的视图的 safe area。所在组既没有标签条也没有标题带、又贴着窗口上沿的：它自己的
+    /// 顶上就是窗口顶，拖窗口、标题这些归它自己画，占着窗口上面的角还要给角上的控件让位。
+    /// 贴着窗口左下、右下角的：那个角让给窗口圆角，有没有标签条都一样（标签条在顶上）。不在
     /// 这里的全为 0。
     areas: HashMap<String, SafeArea>,
     /// 显示着的组的 safe area：贴着窗口上沿（或放大着）的组顶上是标题栏，贴着窗口左上、右上
@@ -641,9 +648,9 @@ pub(crate) struct ShellView {
     /// 上面几项说的是 Dock 里的面板，出口里的视图要按出口查（[`Self::panel_of`]）；
     /// 只有 `shown` 把它也算进去。
     pub(crate) outlet: Option<String>,
-    /// 红黄绿按钮占的宽度：全屏、Windows 下是 0。窗口进出全屏时工作台更新它（见
-    /// `Workspace::traffic_lights`）。
-    pub(crate) lights: Pixels,
+    /// 窗口自己占掉的角：红黄绿按钮（全屏、Windows 下是 0）、窗口圆角。窗口进出全屏时工作台
+    /// 更新它（见 `Workspace::window_corners`）。
+    corners: WindowCorners,
 }
 
 impl ShellView {
@@ -671,16 +678,21 @@ impl ShellView {
         self.groups.get(&node).copied().unwrap_or_default()
     }
 
-    /// 只看这页的 Dock。`lights` 是红黄绿按钮此刻占的宽度。
-    pub(crate) fn of(area: &DockArea, lights: Pixels, cx: &App) -> Self {
+    /// 只看这页的 Dock。`corners` 是窗口自己此刻占掉的角。
+    pub(crate) fn of(area: &DockArea, corners: WindowCorners, cx: &App) -> Self {
         let zoomed = area.zoomed_group();
         let toggle = |placement| {
             (zoomed.is_none() && area.is_dock_collapsible(placement))
                 .then(|| area.is_dock_open(placement))
         };
         let (top_left, top_right) = (top_left_of(area), top_right_of(area));
+        let (bottom_left, bottom_right) = (
+            bottom_corner_of(area, DockPlacement::Left),
+            bottom_corner_of(area, DockPlacement::Right),
+        );
+        let rounded = size(corners.rounded, corners.rounded);
         let mut view = Self {
-            lights,
+            corners,
             left_dock: toggle(DockPlacement::Left),
             right_dock: toggle(DockPlacement::Right),
             ..Self::default()
@@ -735,10 +747,15 @@ impl ShellView {
                     }
                     view.groups.insert(node.id(), group);
                 }
-                // 有标签条、标题带的组顶上归它们，里面的视图在它们下面，什么都不用让。
+                // 有标签条、标题带的组顶上归它们，里面的视图在它们下面，上面什么都不用让。
                 let bare = visible.len() == 1 && !has_title_band(displayed, cx);
-                if !bare {
-                    group = SafeArea::default();
+                let mut shown = if bare { group } else { SafeArea::default() };
+                // 下面两个角是窗口圆角，标签条在顶上碰不到，都归显示着的视图。
+                if bottom_left == Some(node.id()) {
+                    shown.corners.bottom_left = rounded;
+                }
+                if bottom_right == Some(node.id()) {
+                    shown.corners.bottom_right = rounded;
                 }
                 let mut show = |id: &str, area: SafeArea| {
                     if area != SafeArea::default() {
@@ -747,27 +764,33 @@ impl ShellView {
                     view.shown.insert(id.to_string());
                 };
                 match stack_of(displayed) {
-                    Some(stack) => stack.read(cx).areas(group, &mut show),
-                    None => show(displayed.panel_name(cx), group),
+                    Some(stack) => stack.read(cx).areas(shown, &mut show),
+                    None => show(displayed.panel_name(cx), shown),
                 }
             });
         }
         view
     }
 
-    /// 贴左上角的组开头让出的宽度：红黄绿按钮，再加左侧开合按钮。
-    fn leading_inset(&self) -> Pixels {
-        self.lights
-            + match self.left_dock {
-                Some(_) => px(DOCK_TOGGLE_WIDTH),
-                None => px(0.),
-            }
+    /// 左开合按钮离 Dock 左边多远：红黄绿后面；没有红黄绿（全屏、Windows）时和右边的对称，
+    /// 离窗口边 [`WINDOW_EDGE_MARGIN`]。
+    fn left_toggle_x(&self) -> Pixels {
+        self.corners.lights.max(WINDOW_EDGE_MARGIN)
     }
 
-    /// 贴右上角的组末尾让出的宽度：右侧开合按钮。
+    /// 贴左上角的组开头让出的宽度，量到内容开始的地方：红黄绿按钮，再加左开合按钮和它后面的
+    /// 间距。
+    fn leading_inset(&self) -> Pixels {
+        match self.left_dock {
+            Some(_) => self.left_toggle_x() + px(DOCK_TOGGLE_WIDTH) + BAR_MARGIN,
+            None => self.corners.lights,
+        }
+    }
+
+    /// 贴右上角的组末尾让出的宽度，和左边对称：离窗口边的距离、右开合按钮、和内容的间距。
     fn trailing_inset(&self) -> Pixels {
         match self.right_dock {
-            Some(_) => px(DOCK_TOGGLE_WIDTH),
+            Some(_) => WINDOW_EDGE_MARGIN + px(DOCK_TOGGLE_WIDTH) + BAR_MARGIN,
             None => px(0.),
         }
     }
@@ -799,7 +822,7 @@ fn top_left_of(area: &DockArea) -> Option<NodeId> {
     }
     open_root(area, DockPlacement::Left)
         .or(open_root(area, DockPlacement::Center))
-        .and_then(top_left_group)
+        .and_then(|root| corner_group(root, false, false))
 }
 
 /// 贴着窗口右上角的组。放大时是放大的那组；不然右 dock 开着从它找，否则从中间找。
@@ -809,7 +832,24 @@ fn top_right_of(area: &DockArea) -> Option<NodeId> {
     }
     open_root(area, DockPlacement::Right)
         .or(open_root(area, DockPlacement::Center))
-        .and_then(top_right_group)
+        .and_then(|root| corner_group(root, true, false))
+}
+
+/// 贴着窗口左下（`side` 是左）、右下角的组。放大时是放大的那组；不然那一侧的停靠区开着从它
+/// 找（左右停靠区占满整个高）。收起着时角在中间那一列的底上：有下停靠区从它找，它收起着就
+/// 只剩一条标签条，组里的视图看不见，不给；没有下停靠区从中间找。
+fn bottom_corner_of(area: &DockArea, side: DockPlacement) -> Option<NodeId> {
+    if let Some(node) = area.zoomed_group() {
+        return Some(node);
+    }
+    let root = match open_root(area, side) {
+        Some(root) => Some(root),
+        None if area.layout(DockPlacement::Bottom).is_some() => {
+            open_root(area, DockPlacement::Bottom)
+        }
+        None => open_root(area, DockPlacement::Center),
+    };
+    root.and_then(|root| corner_group(root, side == DockPlacement::Right, true))
 }
 
 /// 区域的树根。收起的停靠区不算。
@@ -820,22 +860,22 @@ fn open_root(area: &DockArea, placement: DockPlacement) -> Option<&PaneNode> {
         .map(|tree| tree.root())
 }
 
-fn top_left_group(node: &PaneNode) -> Option<NodeId> {
+/// 树里贴着某个角的组：横排按 `right` 取最右或最左一个，竖排按 `bottom` 取最下或最上一个。
+fn corner_group(node: &PaneNode, right: bool, bottom: bool) -> Option<NodeId> {
     match node.kind() {
         PaneRef::Tabs { .. } => Some(node.id()),
-        PaneRef::Split { children, .. } => children.first().and_then(top_left_group),
-    }
-}
-
-/// 横排取最右一个，竖排取最上一个。
-fn top_right_group(node: &PaneNode) -> Option<NodeId> {
-    match node.kind() {
-        PaneRef::Tabs { .. } => Some(node.id()),
-        PaneRef::Split { axis, children, .. } => match axis {
-            Axis::Horizontal => children.last(),
-            Axis::Vertical => children.first(),
+        PaneRef::Split { axis, children, .. } => {
+            let last = match axis {
+                Axis::Horizontal => right,
+                Axis::Vertical => bottom,
+            };
+            let child = if last {
+                children.last()
+            } else {
+                children.first()
+            };
+            child.and_then(|child| corner_group(child, right, bottom))
         }
-        .and_then(top_right_group),
     }
 }
 
@@ -847,6 +887,7 @@ fn top_right_group(node: &PaneNode) -> Option<NodeId> {
 /// 里都不画。
 pub(crate) fn new_area(
     workspace: gpui::WeakEntity<Workspace>,
+    regions: SharedRegions,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<DockArea> {
@@ -854,6 +895,7 @@ pub(crate) fn new_area(
         let renderer = SmeltDockRenderer {
             workspace,
             edges: DockEdges::new(cx.weak_entity()),
+            regions,
         };
         DockArea::new(
             "smelt-shell",
@@ -865,11 +907,24 @@ pub(crate) fn new_area(
     })
 }
 
-/// 外层 Dock 的画法。区域、分栏、中间的框用 gpui-base 的光框：底只由窗口铺一层
-/// （`workspace_frame::window_surface`），栏与栏之间靠分隔条那根 `hair` 分开。
+/// 外层 Dock 的画法。区域、分栏、中间的框用 gpui-base 的光框：底只由窗口根按地方铺
+/// （`window_backdrop::paint`），栏与栏之间靠分隔条那根 `hair` 分开。各停靠区和中间那一列
+/// 排好后把位置记进 `regions`，窗口根按布局说的材质铺底。
 struct SmeltDockRenderer {
     workspace: gpui::WeakEntity<Workspace>,
     edges: DockEdges,
+    regions: SharedRegions,
+}
+
+impl SmeltDockRenderer {
+    /// 排好后把这块地方的位置记下来。
+    fn record(
+        &self,
+        placement: DockPlacement,
+    ) -> impl FnOnce(gpui::Bounds<Pixels>, &mut Window, &mut App) + 'static {
+        let regions = self.regions.clone();
+        move |bounds, _, _| regions.borrow_mut().record(placement, bounds)
+    }
 }
 
 impl DockAreaRenderer for SmeltDockRenderer {
@@ -889,7 +944,19 @@ impl DockAreaRenderer for SmeltDockRenderer {
         _: &mut Window,
         _: &mut App,
     ) -> AnyElement {
-        self.edges.render(dock, content)
+        div()
+            .relative()
+            .size_full()
+            .child(self.edges.render(dock, content))
+            .on_prepaint(self.record(dock.placement()))
+            .into_any_element()
+    }
+
+    fn center_frame(&self, _: &mut Window, _: &mut App) -> gpui::Stateful<Div> {
+        div()
+            .id("dock-area-center")
+            .relative()
+            .on_prepaint(self.record(DockPlacement::Center))
     }
 
     /// Dock 自己的注册表是空的，每个面板都走到这里，按面板名去视图注册表里取。
@@ -977,7 +1044,7 @@ fn render_title_band(
     _: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let insets = area.insets(Adapt::Horizontal);
+    let insets = area.top_bar_insets();
     let label = tab_label(&group.panels()[ix], cx);
     let droppable = group.is_droppable();
     let target = group.clone();
@@ -1026,12 +1093,12 @@ fn render_tabs(
     area: &SafeArea,
     cx: &mut App,
 ) -> AnyElement {
-    let insets = area.insets(Adapt::Horizontal);
+    let insets = area.top_bar_insets();
     let tabs = visible
         .into_iter()
         .map(|ix| (ix, tab_label(&group.panels()[ix], cx)))
         .collect();
-    let lead = div().w(insets.left + px(8.)).h_full().flex_none();
+    let lead = div().w(insets.left).h_full().flex_none();
     div()
         .flex()
         .items_center()
@@ -1066,7 +1133,6 @@ fn zoom_button(group: &TabGroupContext, cx: &App) -> Option<AnyElement> {
     Some(
         div()
             .flex_none()
-            .px_1()
             // 在拖窗口的条上：按下先拦住，不让它变成拖窗口。
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
@@ -1080,7 +1146,11 @@ fn zoom_button(group: &TabGroupContext, cx: &App) -> Option<AnyElement> {
                     } else {
                         IconName::Maximize
                     })
-                    .icon_action(if zoomed { "还原" } else { "放大" })
+                    .icon_action(if zoomed {
+                        t!("pane.restore")
+                    } else {
+                        t!("pane.zoom")
+                    })
                     .on_click(move |_, window, cx| group.toggle_zoom(window, cx)),
             )
             .into_any_element(),
@@ -1094,15 +1164,17 @@ impl Workspace {
     /// 位置。按停靠区给，不认里面摆的是什么视图：布局把什么放进左右停靠区，什么就能收起。
     /// 停靠区收起后宽度是 0，什么都画不出来，重新打开只能靠这里。
     ///
-    /// 贴着这两个角的组按它的 safe area 给按钮让了位（[`ShellView::group_area`]）。`inset`
-    /// 是 Dock 外面那圈内边距。
+    /// 左右对称：右边的离窗口边 [`WINDOW_EDGE_MARGIN`]，和红黄绿离左边一样；左边的在红黄绿
+    /// 后面，没有红黄绿时也离窗口边这么远。贴着这两个角的组按它的 safe area 给按钮让了位
+    /// （[`ShellView::group_area`]）。`inset` 是 Dock 外面那圈内边距。
     pub(crate) fn render_dock_toggles(&self, inset: Pixels) -> Vec<AnyElement> {
         let left = self.shell_view.left_dock.map(|open| {
             dock_toggle(DockPlacement::Left, open, self.shell_dock().clone())
-                .left(inset + self.shell_view.lights)
+                .left(inset + self.shell_view.left_toggle_x())
         });
         let right = self.shell_view.right_dock.map(|open| {
-            dock_toggle(DockPlacement::Right, open, self.shell_dock().clone()).right(inset)
+            dock_toggle(DockPlacement::Right, open, self.shell_dock().clone())
+                .right(inset + WINDOW_EDGE_MARGIN)
         });
         [left, right]
             .into_iter()
@@ -1115,16 +1187,16 @@ impl Workspace {
 /// 一个停靠区的开合按钮。横向位置由调用方给。
 fn dock_toggle(placement: DockPlacement, open: bool, area: Entity<DockArea>) -> Div {
     let (id, label) = match (placement, open) {
-        (DockPlacement::Left, true) => ("dock-toggle-left", "收起左侧"),
-        (DockPlacement::Left, false) => ("dock-toggle-left", "展开左侧"),
-        (_, true) => ("dock-toggle-right", "收起右侧"),
-        (_, false) => ("dock-toggle-right", "展开右侧"),
+        (DockPlacement::Left, true) => ("dock-toggle-left", t!("dock.collapse_left")),
+        (DockPlacement::Left, false) => ("dock-toggle-left", t!("dock.expand_left")),
+        (_, true) => ("dock-toggle-right", t!("dock.collapse_right")),
+        (_, false) => ("dock-toggle-right", t!("dock.expand_right")),
     };
     let button = Button::new(id).quiet().small();
     let button = match (placement, open) {
-        (DockPlacement::Left, true) => button.icon_path("smelt-icons/panel-left-filled.svg"),
+        (DockPlacement::Left, true) => button.icon(IconName::PanelLeftFilled),
         (DockPlacement::Left, false) => button.icon(IconName::PanelLeft),
-        (_, true) => button.icon_path("smelt-icons/panel-right-filled.svg"),
+        (_, true) => button.icon(IconName::PanelRightFilled),
         (_, false) => button.icon(IconName::PanelRight),
     };
     div()

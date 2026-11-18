@@ -501,12 +501,15 @@ fn delete_reports_why_the_runtime_refused() {
     let runtime = FakeRuntime::new();
     runtime.fail(
         "agent.definition.delete",
-        "请先删除该智能体关联的 2 条自动化",
+        "Delete the 2 automation(s) that use this agent first",
     );
 
     let refused = connected(&runtime).delete("quant").unwrap_err();
 
-    assert_eq!(refused.message, "请先删除该智能体关联的 2 条自动化");
+    assert_eq!(
+        refused.message,
+        "Delete the 2 automation(s) that use this agent first"
+    );
     assert_eq!(
         runtime.params("agent.definition.delete"),
         [json!({"id": "quant"})]

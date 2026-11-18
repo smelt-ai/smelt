@@ -514,7 +514,7 @@ impl RuntimeConnector {
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                "这条链路已经关掉",
+                "this link is already closed",
             ));
         }
         if let Some(conn) = slot.as_ref()
@@ -528,7 +528,12 @@ impl RuntimeConnector {
             .connect(self.target.clone(), RUNTIME_ALPN);
         let conn = tokio::time::timeout(DIAL_TIMEOUT, dial)
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "连不上运行时（超时）"))?
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "couldn't reach the runtime (timed out)",
+                )
+            })?
             .map_err(|error| io::Error::new(io::ErrorKind::ConnectionRefused, error))?;
         *slot = Some(conn.clone());
         Ok(conn)

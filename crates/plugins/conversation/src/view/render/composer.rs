@@ -1,6 +1,7 @@
 //! ACP 输入栏：补全、模型选择、发送。
 
 use super::*;
+use rust_i18n::t;
 use smelt_plugin_api::model::daemon_state::DaemonPhase;
 use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::popover::PopoverState;
@@ -45,7 +46,7 @@ fn capabilities_panel(
                 .py_3()
                 .type_style(TYPE.ui)
                 .text_color(gpui::rgb(ui_theme::muted()))
-                .child("这场对话没有加载技能或 MCP"),
+                .child(t!("capabilities.none_here").into_owned()),
         );
     } else {
         let skill_rows = skills.iter().map(|skill| {
@@ -83,7 +84,10 @@ fn capabilities_panel(
                 .id("acp-capabilities-list")
                 .max_h(px(360.))
                 .overflow_y_scroll()
-                .child(capability_group_header("技能", skills.len()))
+                .child(capability_group_header(
+                    t!("capabilities.skills_title"),
+                    skills.len(),
+                ))
                 .children(skill_rows)
                 .when(skills.is_empty(), |list| list.child(capability_none()))
                 .child(capability_separator())
@@ -93,9 +97,9 @@ fn capabilities_panel(
         );
     }
     let (source, action) = if by_agent {
-        ("按智能体的勾选加载", "在智能体里修改")
+        (t!("capabilities.by_agent"), t!("capabilities.edit_agent"))
     } else {
-        ("按 Pi 的自动发现加载", "在能力库里管理")
+        (t!("capabilities.by_pi"), t!("capabilities.manage_library"))
     };
     panel.child(capability_separator()).child(
         div()
@@ -127,7 +131,8 @@ fn capabilities_panel(
     )
 }
 
-fn capability_group_header(title: &'static str, count: usize) -> impl IntoElement {
+fn capability_group_header(title: impl Into<SharedString>, count: usize) -> impl IntoElement {
+    let title = title.into();
     div()
         .flex()
         .items_center()
@@ -189,7 +194,7 @@ fn capability_none() -> impl IntoElement {
         .pb_1()
         .type_style(TYPE.text_xsmall)
         .text_color(gpui::rgb(ui_theme::muted()))
-        .child("没有")
+        .child(t!("capabilities.empty").into_owned())
 }
 
 fn capability_separator() -> impl IntoElement {
@@ -368,7 +373,7 @@ impl ConversationView {
                     .border_color(ui_theme::hair())
                     .type_style(TYPE.text_xsmall)
                     .text_color(muted)
-                    .child("↑↓ 选择   Enter/Tab 插入   Esc 关闭"),
+                    .child(t!("completion.hint").into_owned()),
             )
         });
 
@@ -521,7 +526,7 @@ impl ConversationView {
                                     menu
                                 };
                                 let model_section = composer_config_section_label(
-                                    "模型",
+                                    &t!("config.model"),
                                     model_config_id.as_deref().is_some_and(|id| {
                                         config_selection_is_pending(&pending_config_values, id)
                                     }),
@@ -538,7 +543,7 @@ impl ConversationView {
                             ComposerMenuSection::Config(config_ix) => {
                                 let config = &extra_configs[config_ix];
                                 menu = menu.label(composer_config_section_label(
-                                    &config.name,
+                                    &config.display_name(),
                                     config_selection_is_pending(
                                         &pending_config_values,
                                         &config.config_id,
@@ -551,7 +556,7 @@ impl ConversationView {
                                     let config_id = config.config_id.clone();
                                     let this = this.clone();
                                     menu = menu.item(
-                                        MenuItem::new(name.clone())
+                                        MenuItem::new(config.option_label(&value, name))
                                             .checked(is_cur)
                                             .on_click(move |_ev, _window, cx| {
                                                 this.update(cx, |v, view_cx| {
@@ -693,7 +698,7 @@ impl ConversationView {
                             let preview: String = text.chars().take(60).collect();
                             let preview = if text.trim().is_empty() {
                                 // 只有图的插话，文字是空串。
-                                "[图片]".to_string()
+                                t!("queue.image_only").into_owned()
                             } else if text.chars().count() > 60 {
                                 format!("{preview}…")
                             } else {
@@ -724,9 +729,9 @@ impl ConversationView {
                                     )
                                     .when(immediate_action_available, |row| {
                                         let immediate_label = if immediate_cancels_turn {
-                                            "立即发送（停止当前回答）"
+                                            t!("queue.send_now_stop")
                                         } else {
-                                            "立即发送"
+                                            t!("queue.send_now")
                                         };
                                         row.child(
                                             Button::new("acp-native-queue-immediate")
@@ -736,9 +741,9 @@ impl ConversationView {
                                                 // 会先停掉当前回答，和其它「停止」一样用危险·安静。
                                                 .when(immediate_cancels_turn, |b| b.danger_quiet())
                                                 .tooltip(if immediate_cancels_turn {
-                                                    "停止当前回答后，立即发送这条消息"
+                                                    t!("queue.send_now_stop_hint")
                                                 } else {
-                                                    "立即发送这条消息"
+                                                    t!("queue.send_now_hint")
                                                 })
                                                 .on_click(cx.listener(
                                                     move |this, _ev, _window, cx| {
@@ -756,7 +761,7 @@ impl ConversationView {
                                 Button::new("acp-native-queue-clear")
                                     .quiet()
                                     .small()
-                                    .label("撤回排队")
+                                    .label(t!("queue.withdraw_all"))
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
                                         this.clear_native_queue(cx);
                                     })),
@@ -773,7 +778,7 @@ impl ConversationView {
                         let id = item.id;
                         let preview: String = item.text.chars().take(60).collect();
                         let preview = if item.text.trim().is_empty() {
-                            "[图片]".to_string()
+                            t!("queue.image_only").into_owned()
                         } else if item.text.chars().count() > 60 {
                             format!("{preview}…")
                         } else {
@@ -782,7 +787,15 @@ impl ConversationView {
                         let img_suffix = if item.image_count == 0 || item.text.trim().is_empty() {
                             String::new()
                         } else {
-                            format!("（含 {} 张图）", item.image_count)
+                            t!(
+                                "queue.with_images",
+                                images = crate::plural(
+                                    item.image_count,
+                                    t!("images.count.one"),
+                                    t!("images.count.other", count = item.image_count)
+                                )
+                            )
+                            .into_owned()
                         };
                         strip = strip.child(
                             div().flex().items_center()
@@ -805,15 +818,18 @@ impl ConversationView {
                                         .min_w(px(0.))
                                         .type_style(TYPE.text_xsmall)
                                         .text_color(gpui::rgb(ui_theme::muted()))
-                                        .child(format!("排队中 · {preview}{img_suffix}")),
+                                        .child(SharedString::from(t!(
+                                            "queue.pending",
+                                            preview = format!("{preview}{img_suffix}")
+                                        ))),
                                 )
                                 .when(item.withdrawable, |row| {
                                     row.child(
                                         Button::new(("acp-pending-prompt-withdraw", id as usize))
                                             .quiet()
                                             .small()
-                                            .label("撤回")
-                                            .tooltip("撤回这条，放回输入框")
+                                            .label(t!("queue.withdraw"))
+                                            .tooltip(t!("queue.withdraw_hint"))
                                             .on_click(cx.listener(
                                                 move |this, _ev, _window, cx| {
                                                     this.withdraw_pending_prompt(id, cx);
@@ -861,10 +877,14 @@ impl ConversationView {
                                             .overflow_hidden()
                                             .type_style(TYPE.text_xsmall)
                                             .text_color(muted)
-                                            .child(truncated_line(format!(
-                                                "〈{from}〉{} · 还没送到，手上的工具调用做完就送进来",
-                                                message.kind.received()
-                                            ))),
+                                            .child(truncated_line(
+                                                t!(
+                                                    "inbox.pending",
+                                                    from = from,
+                                                    action = peer_message_received(message.kind)
+                                                )
+                                                .into_owned(),
+                                            )),
                                     ),
                             );
                         }
@@ -912,7 +932,7 @@ impl ConversationView {
                             div()
                                 .id(("acp-pending-img", image_key))
                                 .role(gpui::Role::Button)
-                                .aria_label("预览图片")
+                                .aria_label(t!("images.preview"))
                                 .relative()
                                 .hover(|d| d.opacity(0.88))
                                 .border_1()
@@ -933,7 +953,7 @@ impl ConversationView {
                                     div()
                                         .id(("acp-pending-img-remove", image_key))
                                         .role(gpui::Role::Button)
-                                        .aria_label("移除图片")
+                                        .aria_label(t!("images.remove"))
                                         .absolute()
                                         .top(px(4.))
                                         .right(px(4.))
@@ -1002,7 +1022,7 @@ impl ConversationView {
                                         .quiet()
                                         .small()
                                         .icon(IconName::Inspector)
-                                        .icon_action("会话追踪")
+                                        .icon_action(t!("trace.open"))
                                         .on_click(cx.listener(|this, _ev, _window, cx| {
                                             this.open_trajectory_window(cx);
                                         })),
@@ -1020,9 +1040,9 @@ impl ConversationView {
                                         .id("acp-usage")
                                         .role(gpui::Role::Button)
                                         .aria_label(if compacting {
-                                            "压缩中"
+                                            t!("usage.compacting_label")
                                         } else {
-                                            "上下文用量"
+                                            t!("usage.label")
                                         })
                                         .debug_selector(|| "ACP_USAGE_RING".into())
                                         .flex_shrink_0()
@@ -1050,7 +1070,7 @@ impl ConversationView {
                                         chip = chip.tooltip(move |window, cx| {
                                             if compacting {
                                                 return smelt_plugin_api::ui::tooltip::Tooltip::new(
-                                                    "压缩中…",
+                                                    t!("usage.compacting"),
                                                 )
                                                 .build(window, cx);
                                             }
@@ -1074,13 +1094,17 @@ impl ConversationView {
                                 .flex_shrink_0()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::bad()))
-                                .child(format!("重启失败：{err}"))
+                                .child(SharedString::from(t!(
+                                    "error.failed",
+                                    what = t!("action.restart"),
+                                    error = err
+                                )))
                         }))
                         .child(
                             Button::new("acp-attach")
                                 .quiet()
                                 .icon(IconName::Plus)
-                                .icon_action("添加文件")
+                                .icon_action(t!("attach.add"))
                                 .on_click(cx.listener(|this, _ev, window, cx| {
                                     this.pick_composer_files(window, cx);
                                 })),
@@ -1089,17 +1113,17 @@ impl ConversationView {
                         .when(self.is_visibly_running(), |row| {
                             let in_cancel = self.cancel_requested_at.is_some() || self.restarting;
                             let label = if self.restarting {
-                                "正在重启"
+                                t!("stop.restarting")
                             } else if in_cancel {
-                                "强制停止"
+                                t!("stop.force")
                             } else {
-                                "停止"
+                                t!("stop.stop")
                             };
                             row.child(
                                 // 停止占的是发送的位置，同一个主操作。
                                 Button::new("acp-stop")
                                     .primary()
-                                    .icon(IconName::Square)
+                                    .icon(IconName::Stop)
                                     .icon_action(label)
                                     .on_click(
                                         cx.listener(|this, _ev, _window, cx| this.on_stop_button_click(cx)),
@@ -1115,7 +1139,7 @@ impl ConversationView {
                                     .primary()
                                     .disabled(!can_send)
                                     .icon(IconName::ArrowUp)
-                                    .icon_action("发送")
+                                    .icon_action(t!("action.send"))
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.submit_input(window, false, cx);
                                     })),
@@ -1213,7 +1237,7 @@ impl ConversationView {
                         Button::new("acp-usage-close")
                             .dismiss()
                             .icon(IconName::Close)
-                            .icon_action("关闭")
+                            .icon_action(t!("action.close"))
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.usage_popover_open = false;
                                 cx.notify();
@@ -1305,14 +1329,14 @@ impl ConversationView {
                             div()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::need()))
-                                .child("压缩中…"),
+                                .child(SharedString::from(t!("usage.compacting"))),
                         ),
                 )
             } else {
                 div().flex().items_center().w_full().justify_end().child(
                     Button::new("acp-usage-compact")
                         .small()
-                        .label("压缩上下文")
+                        .label(t!("usage.compact"))
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             this.compact_context(cx);
                         })),
@@ -1418,7 +1442,7 @@ impl ConversationView {
                                 .flex_shrink_0()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::run()))
-                                .child(task.status.label()),
+                                .child(background_task_status_label(task.status)),
                         )
                         .child(
                             div()
@@ -1449,7 +1473,7 @@ impl ConversationView {
                                 .flex_shrink_0()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(gpui::rgb(ui_theme::muted()))
-                                .child("正在停止…")
+                                .child(SharedString::from(t!("task.stopping")))
                                 .into_any_element()
                         } else {
                             Button::new((
@@ -1458,7 +1482,7 @@ impl ConversationView {
                             ))
                             .danger_quiet()
                             .small()
-                            .label("停止")
+                            .label(t!("stop.stop"))
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 // 不要顺带展开或收起这一行的输出。
                                 cx.stop_propagation();
@@ -1526,14 +1550,14 @@ impl ConversationView {
                         div()
                             .type_style(TYPE.ui_medium)
                             .text_color(gpui::rgb(ui_theme::muted()))
-                            .child("后台任务"),
+                            .child(t!("task.title").into_owned()),
                     )
                     .child(div().flex_1())
                     .child(
                         Button::new("acp-background-task-close")
                             .dismiss()
                             .icon(IconName::Close)
-                            .icon_action("关闭")
+                            .icon_action(t!("action.close"))
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.background_tasks_open = false;
                                 cx.notify();

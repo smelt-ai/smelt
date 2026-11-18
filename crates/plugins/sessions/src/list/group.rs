@@ -2,6 +2,8 @@
 //! 行里取出来重新分，不动项目里的手动顺序，也不存库。
 
 use chrono::{DateTime, Local, TimeZone as _};
+use gpui::SharedString;
+use rust_i18n::t;
 use smelt_plugin_api::model::agent_status::AgentStatus;
 
 use crate::model::SidebarGrouping;
@@ -31,16 +33,17 @@ const BY_TIME: [Bucket; 4] = [
 
 impl Bucket {
     /// 组的标题。
-    pub(super) fn label(self) -> &'static str {
+    pub(super) fn label(self) -> SharedString {
         match self {
-            Bucket::NeedsYou => "需要你",
-            Bucket::Running => "运行中",
-            Bucket::Idle => "空闲",
-            Bucket::Today => "今天",
-            Bucket::Yesterday => "昨天",
-            Bucket::Week => "7 天内",
-            Bucket::Earlier => "更早",
+            Bucket::NeedsYou => t!("bucket.needs_you"),
+            Bucket::Running => t!("bucket.running"),
+            Bucket::Idle => t!("bucket.idle"),
+            Bucket::Today => t!("bucket.today"),
+            Bucket::Yesterday => t!("bucket.yesterday"),
+            Bucket::Week => t!("bucket.week"),
+            Bucket::Earlier => t!("bucket.earlier"),
         }
+        .into()
     }
 
     fn of_status(status: AgentStatus) -> Self {
@@ -120,7 +123,7 @@ mod tests {
         groups.iter().flat_map(|(_, ixs)| ixs.clone()).collect()
     }
 
-    fn labels(groups: &[(Bucket, Vec<usize>)]) -> Vec<&'static str> {
+    fn labels(groups: &[(Bucket, Vec<usize>)]) -> Vec<SharedString> {
         groups.iter().map(|(bucket, _)| bucket.label()).collect()
     }
 
@@ -147,7 +150,7 @@ mod tests {
         use AgentStatus::*;
         let rows = [(Idle, 0), (Running, 0), (NeedsYou, 0), (Idle, 0)];
         let groups = buckets(SidebarGrouping::Status, &rows, now());
-        assert_eq!(labels(&groups), ["需要你", "运行中", "空闲"]);
+        assert_eq!(labels(&groups), ["Needs You", "Running", "Idle"]);
         assert_eq!(flatten(&groups), [2, 1, 0, 3]);
     }
 
@@ -169,7 +172,10 @@ mod tests {
     fn last_updated_grouping_uses_calendar_buckets_and_recent_order() {
         let rows = [0, 2, 1, 8].map(|days| (AgentStatus::Idle, noon_days_ago(days)));
         let groups = buckets(SidebarGrouping::LastUpdated, &rows, now());
-        assert_eq!(labels(&groups), ["今天", "昨天", "7 天内", "更早"]);
+        assert_eq!(
+            labels(&groups),
+            ["Today", "Yesterday", "Last 7 Days", "Earlier"]
+        );
         assert_eq!(flatten(&groups), [0, 2, 1, 3]);
     }
 

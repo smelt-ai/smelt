@@ -2,7 +2,10 @@
 //! 只列出来。改键的规则见 `crate::keymap`。宿主自己的页，和插件的设置页一样是登记的视图
 //! （见 [`super::view_specs`]）。
 
+use std::borrow::Cow;
+
 use super::*;
+use rust_i18n::t;
 use smelt_ui::kit::{TYPE, TypeStyled as _};
 use smelt_ui::{Keybind, SettingsPage, SettingsSection as Section};
 
@@ -35,7 +38,7 @@ impl smelt_plugin_api::PluginView for ShortcutsPage {
 fn shortcuts_page(cx: &App) -> SettingsPage {
     let state = cx.global::<KeymapState>();
     let os = cx.platform_info().os;
-    let fixed = |label: &'static str, keys: &[&'static str]| {
+    let fixed = |label: Cow<'static, str>, keys: &[&'static str]| {
         row(label, keys.iter().copied().map(fixed_key).collect())
     };
 
@@ -52,9 +55,9 @@ fn shortcuts_page(cx: &App) -> SettingsPage {
         }
     }
     let view_keys = vec![
-        fixed("终端内搜索", &["cmd-f"]),
-        fixed("关闭预览或返回", &["escape"]),
-        fixed("终端补全 / 反向补全", &["tab", "shift-tab"]),
+        fixed(t!("shortcuts.terminal_search"), &["cmd-f"]),
+        fixed(t!("shortcuts.close_or_back"), &["escape"]),
+        fixed(t!("shortcuts.terminal_complete"), &["tab", "shift-tab"]),
     ];
 
     SettingsPage::new("settings-page:shortcuts")
@@ -63,18 +66,22 @@ fn shortcuts_page(cx: &App) -> SettingsPage {
                 .px_4()
                 .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
-                .child("点键帽录新的快捷键：Esc 取消，⌫ 清掉不用。要带 ⌘，或者用 F 键。"),
+                .child(t!("shortcuts.hint")),
         )
         .children(
             groups
                 .into_iter()
                 .map(|(title, rows)| Section::new().title(title).children(rows)),
         )
-        .child(Section::new().title("视图里的按键").children(view_keys))
+        .child(
+            Section::new()
+                .title(t!("shortcuts.view_keys"))
+                .children(view_keys),
+        )
 }
 
 /// 只列出来、改不了的一行。
-fn row(label: &'static str, keys: Vec<gpui::AnyElement>) -> gpui::AnyElement {
+fn row(label: Cow<'static, str>, keys: Vec<gpui::AnyElement>) -> gpui::AnyElement {
     div()
         .flex()
         .w_full()
@@ -86,7 +93,7 @@ fn row(label: &'static str, keys: Vec<gpui::AnyElement>) -> gpui::AnyElement {
             div()
                 .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::text()))
-                .child(label),
+                .child(SharedString::from(label)),
         )
         .child(
             div()
@@ -118,7 +125,7 @@ fn editable_row(
     let reassign = state.reassign.as_ref().filter(|reassign| reassign.id == id);
     let note: Option<(String, u32)> = if recording {
         Some((
-            "按了没反应的话，这个键可能被系统或别的应用占用了，比如飞书的全局快捷键".to_string(),
+            t!("shortcuts.recording_note").into_owned(),
             ui_theme::muted(),
         ))
     } else if let Some(reassign) = reassign {
@@ -129,7 +136,7 @@ fn editable_row(
             .find(&reassign.other)
             .map_or(reassign.other.clone(), |other| other.info.title.clone());
         Some((
-            format!("{key} 已经是「{other}」的快捷键。改绑后「{other}」就没有快捷键了"),
+            t!("shortcuts.taken", key = key, other = other).into_owned(),
             ui_theme::bad(),
         ))
     } else {
@@ -138,7 +145,7 @@ fn editable_row(
     let reassigning = reassign.is_some();
 
     let key: gpui::AnyElement = if recording {
-        keycap_text("按下新快捷键…", ui_theme::focus())
+        keycap_text(t!("shortcuts.press"), ui_theme::focus())
     } else {
         match command
             .key
@@ -146,13 +153,13 @@ fn editable_row(
             .and_then(|spec| gpui::Keystroke::parse_with_os(spec, os).ok())
         {
             Some(stroke) => Keybind::new([stroke]).into_any_element(),
-            None => keycap_text("未设置", ui_theme::hair()),
+            None => keycap_text(t!("shortcuts.unset"), ui_theme::hair()),
         }
     };
     let key = div()
         .id(format!("shortcut-key-{id}"))
         .role(gpui::Role::Button)
-        .aria_label(format!("修改「{title}」的快捷键"))
+        .aria_label(t!("shortcuts.change", title = title).into_owned())
         .rounded_md()
         .hover(|style| style.opacity(0.8))
         .child(key)
@@ -204,13 +211,13 @@ fn editable_row(
                         Button::new(format!("shortcut-reassign-cancel-{id}"))
                             .quiet()
                             .small()
-                            .label("算了")
+                            .label(t!("action.never_mind"))
                             .on_click(|_, _, cx| keymap::cancel_reassign(cx)),
                     )
                     .child(
                         Button::new(format!("shortcut-reassign-{id}"))
                             .small()
-                            .label("改绑")
+                            .label(t!("shortcuts.reassign"))
                             .on_click(|_, _, cx| keymap::confirm_reassign(cx)),
                     )
                 })
@@ -219,7 +226,7 @@ fn editable_row(
                         Button::new(format!("shortcut-reset-{id}"))
                             .quiet()
                             .small()
-                            .label("恢复默认")
+                            .label(t!("shortcuts.reset"))
                             .on_click(move |_, _, cx| keymap::reset(id.clone(), cx)),
                     )
                 })

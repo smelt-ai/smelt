@@ -249,10 +249,12 @@ fn bounce_of(letter: &Letter) -> Option<Letter> {
         letter.to_title.as_str()
     };
     let head = if letter.spawned {
-        format!("新对话〈{title}〉没建成，交给它的任务没送出去：{reason}")
+        format!(
+            "The new conversation \"{title}\" wasn't created, so its task wasn't sent: {reason}"
+        )
     } else {
         format!(
-            "你发给〈{title}〉的{}（{}）没送到：{reason}",
+            "Your {} to \"{title}\" ({}) wasn't delivered: {reason}",
             letter.delivery.kind.label(),
             letter.delivery.id
         )
@@ -266,7 +268,7 @@ fn bounce_of(letter: &Letter) -> Option<Letter> {
             hops: 0,
             reply_to: Some(letter.delivery.id.clone()),
             text: format!(
-                "{head}\n\n原文开头：{}",
+                "{head}\n\nIt began: {}",
                 truncate_chars(&letter.delivery.text, BOUNCE_EXCERPT_CHARS)
             ),
         },
@@ -339,7 +341,7 @@ impl Courier {
         let sess = &slot.value;
         if delivery.kind != PeerMessageKind::Bounce && !source_bypasses && bypasses_approval(sess) {
             return Err(
-                "对方是「完全访问」，你是「逐次审批」，不能给它发消息（permission）".to_string(),
+                "The other conversation has full access and you ask for approval each time, so you can't message it (permission)".to_string(),
             );
         }
         // 先记下交给哪一代 runtime 再写：快照可能比这边改状态先回来。中途换了 runtime
@@ -404,10 +406,16 @@ pub(crate) fn bind_peer_handler(
             subscribers: subscribers.clone(),
         };
         let Some(slot) = source_slot.upgrade() else {
-            return rejected("not_found", "发出请求的对话已经换掉了");
+            return rejected(
+                "not_found",
+                "The conversation that sent the request was replaced",
+            );
         };
         if !acp_sessions.is_current(&session_id, &slot) {
-            return rejected("not_found", "发出请求的对话已经换掉了");
+            return rejected(
+                "not_found",
+                "The conversation that sent the request was replaced",
+            );
         }
         match op {
             "session_list" => list(&session_id, &acp_sessions, body),
@@ -424,7 +432,7 @@ pub(crate) fn bind_peer_handler(
                 &courier.subscribers,
                 body,
             ),
-            _ => rejected("invalid", format!("不认识的操作 {op}")),
+            _ => rejected("invalid", format!("Unknown operation {op}")),
         }
     })
 }
@@ -550,7 +558,9 @@ fn lookup_peer(id: &str, acp_sessions: &AcpSessions) -> Option<Peer> {
 fn not_found(id: &str) -> serde_json::Value {
     rejected(
         "not_found",
-        format!("没有这个 Pi 对话，或它已经停了：{id}。用 session_list 查可以发消息的对话"),
+        format!(
+            "No such Pi conversation, or it has stopped: {id}. Use session_list to find conversations you can message"
+        ),
     )
 }
 
@@ -582,7 +592,7 @@ pub(crate) fn title_of(id: &str, sess: &AcpSession) -> String {
         .as_deref()
         .and_then(|cwd| std::path::Path::new(cwd).file_name())
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "未命名对话".to_string())
+        .unwrap_or_else(|| "Untitled conversation".to_string())
 }
 
 fn state_of(sess: &AcpSession) -> &'static str {
@@ -677,9 +687,10 @@ fn read(
     acp_sessions: &AcpSessions,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, serde_json::Value> {
-    let id = text_field(body, "sessionId").ok_or_else(|| rejected("invalid", "缺少 sessionId"))?;
+    let id =
+        text_field(body, "sessionId").ok_or_else(|| rejected("invalid", "missing sessionId"))?;
     if id == source_id {
-        return Err(rejected("self", "这是你自己的对话"));
+        return Err(rejected("self", "That's your own conversation"));
     }
     let limit = body
         .get("limit")
@@ -692,7 +703,7 @@ fn read(
         if lookup_peer(&id, acp_sessions).is_some() {
             return Err(rejected(
                 "not_running",
-                "这段对话还没打开，读不到它的回复。要它干活就用 session_send，发消息会把它打开",
+                "This conversation isn't open, so its replies can't be read. Use session_send to give it work; sending a message opens it",
             ));
         }
         return Err(not_found(&id));
@@ -766,17 +777,18 @@ fn send(
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, serde_json::Value> {
     let call =
-        text_field(body, "toolCallId").ok_or_else(|| rejected("invalid", "缺少 toolCallId"))?;
-    let to = text_field(body, "to").ok_or_else(|| rejected("invalid", "缺少 to"))?;
-    let text = text_field(body, "text").ok_or_else(|| rejected("invalid", "消息是空的"))?;
+        text_field(body, "toolCallId").ok_or_else(|| rejected("invalid", "missing toolCallId"))?;
+    let to = text_field(body, "to").ok_or_else(|| rejected("invalid", "missing to"))?;
+    let text =
+        text_field(body, "text").ok_or_else(|| rejected("invalid", "The message is empty"))?;
     if text.chars().count() > TEXT_LIMIT_CHARS {
         return Err(rejected(
             "invalid",
-            format!("消息太长，最多 {TEXT_LIMIT_CHARS} 个字符"),
+            format!("The message is too long (max {TEXT_LIMIT_CHARS} characters)"),
         ));
     }
     if to == source_id {
-        return Err(rejected("self", "不能给自己发消息"));
+        return Err(rejected("self", "You can't message yourself"));
     }
     let id = message_id(source_id, &call);
     if let Some(reply) = replay_reply(&id) {
@@ -794,7 +806,7 @@ fn send(
         return Err(with_target(
             rejected(
                 "permission",
-                "对方是「完全访问」，你是「逐次审批」，不能给它发消息",
+                "The other conversation has full access and you ask for approval each time, so you can't message it",
             ),
             &to,
             &target.title,
@@ -805,7 +817,7 @@ fn send(
         return Err(with_target(
             rejected(
                 "hops_exhausted",
-                "这条消息链转发次数用完了：用户在这个对话里说话之前，发给哪个对话都会被拒，不要重试。要对方知道的事告诉用户",
+                "This message chain is out of hops: until the user speaks in this conversation, every send will be rejected, so don't retry. Tell the user what the other conversation needs to know",
             ),
             &to,
             &target.title,
@@ -831,13 +843,16 @@ fn send(
     match courier.post(letter, Some(INBOX_LIMIT)) {
         Accepted::New => {}
         Accepted::Replay => {
-            return replay_reply(&id).ok_or_else(|| rejected("invalid", "这条消息刚被清掉"));
+            return replay_reply(&id)
+                .ok_or_else(|| rejected("invalid", "This message was just cleared"));
         }
         Accepted::InboxFull => {
             return Err(with_target(
                 rejected(
                     "inbox_full",
-                    format!("对方还有 {INBOX_LIMIT} 条消息没收，等它处理完再发"),
+                    format!(
+                        "The other conversation has {INBOX_LIMIT} unread messages; wait until it catches up"
+                    ),
                 ),
                 &to,
                 &target.title,
@@ -858,14 +873,14 @@ fn spawn(
     use smelt_core::agent_kind::ConversationAgentKind;
 
     let call =
-        text_field(body, "toolCallId").ok_or_else(|| rejected("invalid", "缺少 toolCallId"))?;
-    let title = text_field(body, "title").ok_or_else(|| rejected("invalid", "缺少 title"))?;
+        text_field(body, "toolCallId").ok_or_else(|| rejected("invalid", "missing toolCallId"))?;
+    let title = text_field(body, "title").ok_or_else(|| rejected("invalid", "missing title"))?;
     let title = truncate_chars(&title, TITLE_LIMIT_CHARS);
-    let task = text_field(body, "task").ok_or_else(|| rejected("invalid", "任务是空的"))?;
+    let task = text_field(body, "task").ok_or_else(|| rejected("invalid", "The task is empty"))?;
     if task.chars().count() > TEXT_LIMIT_CHARS {
         return Err(rejected(
             "invalid",
-            format!("任务太长，最多 {TEXT_LIMIT_CHARS} 个字符"),
+            format!("The task is too long (max {TEXT_LIMIT_CHARS} characters)"),
         ));
     }
     let id = spawned_id(source_id, &call);
@@ -884,18 +899,18 @@ fn spawn(
     }
     let server = SERVER
         .get()
-        .ok_or_else(|| rejected("invalid", "这个进程里不能起新对话"))?;
+        .ok_or_else(|| rejected("invalid", "This process can't start new conversations"))?;
     if was_spawned(source_id) {
         return Err(rejected(
             "spawn_limit",
-            "别的对话起的对话不能再起新对话。要人手就用 session_send 交给已有的对话",
+            "A conversation started by another one can't start new conversations. To get help, use session_send to hand work to an existing conversation",
         ));
     }
     let budget = chain_budget(source_id);
     if budget == 0 {
         return Err(rejected(
             "hops_exhausted",
-            "这条消息链转发次数用完了：用户在这个对话里说话之前，不能再起新对话，不要重试。要做的事告诉用户",
+            "This message chain is out of hops: until the user speaks in this conversation, you can't start new conversations, so don't retry. Tell the user what needs doing",
         ));
     }
 
@@ -904,11 +919,11 @@ fn spawn(
         .launch_spec
         .lock()
         .clone()
-        .ok_or_else(|| rejected("invalid", "找不到这个对话的启动规格"))?;
+        .ok_or_else(|| rejected("invalid", "Couldn't find this conversation's launch spec"))?;
     let cwd = source
         .cwd
         .clone()
-        .ok_or_else(|| rejected("invalid", "这个对话没有工作目录"))?;
+        .ok_or_else(|| rejected("invalid", "This conversation has no working directory"))?;
     let ephemeral_env = source.ephemeral_env.lock().clone();
     // 新对话跟发起方同一个 profile、同一个智能体：照抄发起方在工作区目录里的那一条。
     let source_entry = workspace_directory().read().ok().and_then(|directory| {
@@ -929,7 +944,9 @@ fn spawn(
         if children.len() >= SPAWN_LIMIT {
             return Err(rejected(
                 "spawn_limit",
-                format!("你起的对话已经有 {SPAWN_LIMIT} 个还开着，先用 session_send 交给它们"),
+                format!(
+                    "You already have {SPAWN_LIMIT} conversations you started still open; use session_send to hand work to them first"
+                ),
             ));
         }
         children.push(id.clone());
@@ -986,6 +1003,7 @@ fn spawn(
         omit_history: false,
         initial_config: Vec::new(),
         initial_prompt: None,
+        disallowed_tools: Vec::new(),
     };
     let reply = accepted_reply(&message, &id, &title, hops);
     let source_slot = Arc::clone(source_slot);
@@ -1038,14 +1056,14 @@ fn build_spawned(
         &courier.acp_sessions,
         &courier.subscribers,
     )
-    .map_err(|error| format!("起不来新对话：{error}"))?;
+    .map_err(|error| format!("Couldn't start the new conversation: {error}"))?;
     let configured = crate::acp_idle::copy_session_config(
         source,
         &request.id,
         &slot.value,
         &courier.subscribers,
     )
-    .map_err(|error| format!("没等到它就绪：{error}"))
+    .map_err(|error| format!("It didn't become ready: {error}"))
     .and_then(|()| {
         apply_acp_user_action(
             &slot.value,
@@ -1054,7 +1072,7 @@ fn build_spawned(
             },
             &courier.subscribers,
         )
-        .map_err(|error| format!("改不了标题：{error}"))
+        .map_err(|error| format!("Couldn't set the title: {error}"))
     })
     .and_then(|()| {
         crate::workspace_directory::default_store()
@@ -1062,7 +1080,12 @@ fn build_spawned(
                 crate::workspace_directory::enter_conversation(&store, entry, &courier.subscribers)
             })
             .map(|_| ())
-            .map_err(|error| format!("写不进工作区目录：{}", error.message))
+            .map_err(|error| {
+                format!(
+                    "Couldn't add it to the workspace directory: {}",
+                    error.message
+                )
+            })
     });
     if let Err(reason) = configured {
         if let Err(error) = kill_acp_session(

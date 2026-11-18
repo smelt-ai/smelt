@@ -26,10 +26,14 @@ export interface PresetPrompt {
 	options?: readonly { id: string; label: string; description?: string }[];
 }
 
+/** Which auto-answer this was; the host words it in the viewer's language (`LoginNote`). */
+export type PresetNote = "answered_github_dot_com" | "answered_browser";
+
 export interface PresetAnswer {
 	value: string;
-	/** Shown to the user so an auto-answered step is visible, not silent. */
+	/** Shown to the user so an auto-answered step is visible, not silent. English fallback for `note`. */
 	reason: string;
+	note: PresetNote;
 }
 
 interface ProviderPreset {
@@ -44,6 +48,7 @@ interface ProviderPreset {
 	/** For `select`, the option id to pick; for `text`, the literal answer. */
 	value: string;
 	reason: string;
+	note: PresetNote;
 }
 
 const PROVIDER_PRESETS: Record<string, readonly ProviderPreset[]> = {
@@ -52,7 +57,8 @@ const PROVIDER_PRESETS: Record<string, readonly ProviderPreset[]> = {
 			type: "text",
 			messageIncludes: "GitHub Enterprise",
 			value: "",
-			reason: "GitHub 企业版域名留空，按 github.com 登录",
+			reason: "left the GitHub Enterprise domain blank to sign in to github.com",
+			note: "answered_github_dot_com",
 		},
 	],
 };
@@ -66,7 +72,7 @@ const GENERIC_RULES: readonly ((prompt: PresetPrompt) => PresetAnswer | undefine
 	(prompt) => {
 		if (prompt.type !== "select") return undefined;
 		const option = prompt.options?.find((candidate) => BROWSER_OPTION_IDS.has(candidate.id));
-		return option && { value: option.id, reason: "用浏览器完成登录" };
+		return option && { value: option.id, reason: "sign in with the browser", note: "answered_browser" };
 	},
 ];
 
@@ -102,7 +108,7 @@ export class LoginPresets {
 			return undefined;
 		}
 		this.index += 1;
-		return { value: preset.value, reason: preset.reason };
+		return { value: preset.value, reason: preset.reason, note: preset.note };
 	}
 }
 

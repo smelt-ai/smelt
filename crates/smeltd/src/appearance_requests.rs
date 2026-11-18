@@ -67,7 +67,9 @@ impl AppearanceRequests {
             settings,
         };
         if serde_json::to_vec(&request).map_or(true, |bytes| bytes.len() > 4 * 1024) {
-            return Err(RequestError::Invalid("外观请求过大".into()));
+            return Err(RequestError::Invalid(
+                "The appearance request is too large".into(),
+            ));
         }
         let mut state = self.state.lock().unwrap();
         let (owner, mailbox) = match state.desktops.len() {
@@ -101,10 +103,16 @@ impl AppearanceRequests {
         result: AppearanceApplyOutcome,
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
-        let (owner, _) = state.pending.get(id).ok_or("请求已结束或不存在")?;
-        let (expected, _) = state.desktops.get(owner).ok_or("桌面连接已断开")?;
+        let (owner, _) = state
+            .pending
+            .get(id)
+            .ok_or("The request has ended or doesn't exist")?;
+        let (expected, _) = state
+            .desktops
+            .get(owner)
+            .ok_or("The desktop disconnected")?;
         if !same_process(expected, peer) {
-            return Err("回执不是请求对应的桌面进程".into());
+            return Err("The receipt didn't come from the desktop that got the request".into());
         }
         let (_, sender) = state.pending.remove(id).unwrap();
         let result = match result {

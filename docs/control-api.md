@@ -143,12 +143,26 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 |---|---|
 | 远程与设备 | `remote.config.get` / `remote.config.set` / `remote.status` / `remote.status.wait`（状态和 `known` 不同就回，最多挂 20 秒）；`device.pair_begin` / `device.pair` / `device.list` / `device.revoke` |
 | 提醒与通知 | `attention.mark_read`（`{session_id}`：清这个会话的未读，等批准、等输入、失败这类要处理的不清；变化经 `attention.changed` 推给各端）；`notify.send`（`smelt notify`）；`push.register` / `push.unregister` |
-| 会话生命周期 | `new_session.catalog`、`session.create`、`session.delete`（删完进程顺带把它从工作区目录摘掉：终端摘这一格，最后一格或 ACP 会话删整段对话）、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`subagent.transcript` |
+| 会话生命周期 | `new_session.catalog`、`session.create`（对话可带 `cwd`、`title`、`disallowed_tools`，见下面「插件驱动对话」）、`session.delete`（删完进程顺带把它从工作区目录摘掉：终端摘这一格，最后一格或 ACP 会话删整段对话）、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`conversation.prompt` / `conversation.turn_result`、`subagent.transcript` |
 | 工作区与文件 | `workspace.conversation.create` / `update` / `delete`、`workspace.project.open` / `close`、`workspace.rename`（改名的唯一入口，名字写在哪由运行时定，在跑的对话同步给 agent）、`workspace.directory`（只读整份目录；目录只经前面几条单条改动写，改了就推 `workspace.changed` 整份目录；关对话时运行时顺带收掉它的终端和 ACP 会话）；`workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty`。会话目录的当前分支不用查：运行时监听 HEAD，写在会话状态的 `branch` 里推送 |
 | 智能体记忆 | 见下面的 `agent.memory.*` 表。另有 `memory.test_embedding` |
 | Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`（`pi.plugins.remove`、`pi.mcp.remove` 同时清掉这台机器上各智能体对它的勾选；改了配置的调用成功后运行时推 `pi_config.changed`，这个话题只在单独的一条订阅里，见 `smelt-event-protocol` 模块文档）；`quota.get` / `quota.refresh` / `quota.settings.get` / `quota.set_enabled` |
 | 其它 | `resource.usage`（守护进程和各会话进程树的 CPU、内存）、`agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`history.*`（`history.delete` 和守护命令 `history_rename` 成功后运行时推 `history.changed`，同 `pi_config.changed` 单独一条订阅；agent 自己写进存档的新会话不推）、`desktop.type_text`、`automation.run_detail` |
+
+### 插件驱动对话
+
+插件起一段对话、以投递的身份往里发话、按投递 id 取那一轮的结果。对话是普通对话：进工作区
+目录、在侧栏里，人照样能看、能插话。设计见 `docs/plugin-driven-conversations.md`。
+
+| method | 说明 |
+|---|---|
+| `session.create` | 对话多三个可选参数。`cwd`：开在这个目录（绝对路径、已存在），和 `project_root` / `workset_id` 二选一。`title`：记成用户起的名字。`disallowed_tools`：agent 不许用的工具，Claude 权限规则写法（`Edit`、`Bash(git push:*)`），由 Claude 自己的权限引擎执行、任何权限模式下都生效；别的 agent 给了回 `invalid_params`；哪些选项能带看 `new_session.catalog` 的 `restrictable_agent_ids`。限制只属于这次拉起的运行时，不落盘 |
+| `conversation.prompt` | `{session_id, delivery_id, text, disallowed_tools}`。正在跑就排在这一轮后面，不插进去；挂起的先唤醒、等就绪。同一个 `delivery_id` 再发不会再执行。`disallowed_tools` 必须和运行时现在的完全一样，否则 `failed_precondition`（运行时重启后续上的对话不带限制）。会话不在运行时里是 `not_found` |
+| `conversation.turn_result` | `{session_id, delivery_id}` → `{"status": "pending"}`、`{"status": "finished", "outcome", "text"}` 或 `{"status": "unknown"}`（没投过、运行时重启过）。`outcome` 同 ACP 回合结果（`succeeded` / `cancelled` / `interrupted` / `max_tokens` / `max_turn_requests` / `refused` / `failed`），`text` 是这一轮最后一段助手正文。只在内存里，每段对话留最近 32 条 |
+
+一轮结束时会话状态的 `completed_delivery_id` 变成它的投递 id（用户自己说的那轮是空），
+结果在推这条状态之前就记好了，订阅方看到自己的 id 去取即可。
 
 ### `agent.memory.*`
 

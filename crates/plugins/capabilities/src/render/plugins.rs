@@ -22,23 +22,23 @@ pub(super) fn pi_plugin_page(
     let usable = plugins.iter().filter(|plugin| plugin.is_usable()).count();
     let broken = plugins.len() - usable;
     let summary = if broken == 0 {
-        format!("已装 {usable} 个可用插件。创建智能体时勾选需要的插件，对话只加载勾选项。")
+        t!("plugins.summary", usable = usable).into_owned()
     } else {
-        format!(
-            "已装 {usable} 个可用插件，另有 {broken} 个失效条目（多半是断掉的软链），建议删掉。"
-        )
+        t!("plugins.summary_broken", usable = usable, broken = broken).into_owned()
     };
 
     SettingsPage::new("capabilities-pane:plugins")
         .child(page_intro(summary))
         .child(overview_section(entity.clone(), &plugins))
         .children(page.pi_plugin_error.clone().map(|error| {
-            SettingsSection::new().title("上一次操作失败").child(
-                div()
-                    .type_style(TYPE.text_xsmall)
-                    .text_color(rgb(ui_theme::bad()))
-                    .child(error),
-            )
+            SettingsSection::new()
+                .title(t!("plugins.last_failed"))
+                .child(
+                    div()
+                        .type_style(TYPE.text_xsmall)
+                        .text_color(rgb(ui_theme::bad()))
+                        .child(error),
+                )
         }))
         .child(list_section(
             entity,
@@ -68,16 +68,21 @@ fn overview_section(entity: Entity<CapabilitiesPage>, plugins: &[PiPlugin]) -> S
     let extension_entity = entity.clone();
     let refresh_entity = entity;
     // 目录路径长，列在说明里，不挤到行右边。
-    let scan = SettingsRow::new("扫描目录").description(format!(
-        "当前扫到 {skill_count} 个技能、{extension_count} 个扩展。\n{}",
+    let scan = SettingsRow::new(t!("plugins.scan")).description(format!(
+        "{}\n{}",
+        t!(
+            "plugins.scan_summary",
+            skills = skill_count,
+            extensions = extension_count
+        ),
         roots.join("\n")
     ));
-    let import = SettingsRow::new("导入")
-        .description("把本地的技能目录（含 SKILL.md）或扩展文件拷进全局插件目录，原目录不动。")
+    let import = SettingsRow::new(t!("plugins.import_confirm"))
+        .description(t!("plugins.import_description"))
         .child(
             Button::new("import-pi-skill")
                 .small()
-                .label("导入技能目录")
+                .label(t!("plugins.import_skill"))
                 .on_click(move |_, _, cx| {
                     skill_entity.update(cx, |workspace, cx| {
                         workspace.import_pi_plugin(PiPluginKind::Skill, cx);
@@ -87,7 +92,7 @@ fn overview_section(entity: Entity<CapabilitiesPage>, plugins: &[PiPlugin]) -> S
         .child(
             Button::new("import-pi-extension")
                 .small()
-                .label("导入扩展")
+                .label(t!("plugins.import_extension"))
                 .on_click(move |_, _, cx| {
                     extension_entity.update(cx, |workspace, cx| {
                         workspace.import_pi_plugin(PiPluginKind::Extension, cx);
@@ -98,7 +103,7 @@ fn overview_section(entity: Entity<CapabilitiesPage>, plugins: &[PiPlugin]) -> S
             Button::new("refresh-pi-plugins")
                 .quiet()
                 .small()
-                .label("重新扫描")
+                .label(t!("plugins.rescan"))
                 .on_click(move |_, _, cx| {
                     refresh_entity.update(cx, |workspace, cx| {
                         workspace.refresh_pi_plugins(cx);
@@ -106,8 +111,8 @@ fn overview_section(entity: Entity<CapabilitiesPage>, plugins: &[PiPlugin]) -> S
                 }),
         );
     SettingsSection::new()
-        .title("插件来源")
-        .description("技能是 markdown 能力包，扩展是注册工具/命令的 TypeScript 模块。")
+        .title(t!("plugins.sources"))
+        .description(t!("plugins.sources_description"))
         .child(scan)
         .child(import)
 }
@@ -136,17 +141,17 @@ fn list_section(
     users: &HashMap<String, Vec<String>>,
 ) -> SettingsSection {
     if plugins.is_empty() {
-        return SettingsSection::new().title("已安装").child(
+        return SettingsSection::new().title(t!("plugins.installed")).child(
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
-                .child("还没有装任何插件。"),
+                .child(t!("plugins.none").into_owned()),
         );
     }
 
     SettingsSection::new()
-        .title("已安装")
-        .description("删除会直接删掉磁盘上的文件，并把所有智能体里对它的勾选一起清掉。")
+        .title(t!("plugins.installed"))
+        .description(t!("plugins.installed_description"))
         .children(plugins.iter().map(|plugin| {
             plugin_row(
                 entity.clone(),
@@ -165,30 +170,34 @@ fn plugin_row(
 ) -> SettingsRow {
     let id = plugin.id.clone();
     let name = plugin.name.clone();
-    let kind_label = plugin.kind.label();
+    let kind_label = match plugin.kind {
+        PiPluginKind::Skill => t!("plugins.kind.skill"),
+        PiPluginKind::Extension => t!("plugins.kind.extension"),
+    };
     let origin = plugin.origin.clone();
     let path = plugin.path.display().to_string();
     let broken = plugin.broken.clone();
     let description = plugin.description.clone();
     let builtin = plugin.builtin;
 
-    let title = format!("{name}（{kind_label}）");
+    let title = t!("plugins.row_title", name = name, kind = kind_label).into_owned();
     let mut detail = Vec::new();
     if !description.is_empty() {
         detail.push(description);
     }
     if builtin {
-        detail.push(format!("来源：{origin}，跟着 Smelt 更新"));
+        detail.push(t!("plugins.origin_builtin", origin = origin).into_owned());
     } else {
-        detail.push(format!("来源：{origin} · {path}"));
+        detail.push(t!("plugins.origin", origin = origin, path = path).into_owned());
     }
     if let Some(reason) = &broken {
-        detail.push(format!("失效：{reason}"));
+        detail.push(t!("plugins.broken", reason = reason).into_owned());
     }
     if users.is_empty() {
-        detail.push("暂时没有智能体勾选它。".to_string());
+        detail.push(t!("plugins.unused").into_owned());
     } else {
-        detail.push(format!("正在被 {} 使用。", users.join("、")));
+        let separator = t!("plugins.user_separator");
+        detail.push(t!("plugins.used_by", names = users.join(separator.as_ref())).into_owned());
     }
 
     let row = SettingsRow::new(title).description(detail.join("\n"));
@@ -203,7 +212,7 @@ fn plugin_row(
             Button::new(format!("confirm-delete-pi-plugin-{id}"))
                 .danger()
                 .small()
-                .label("确认删除")
+                .label(t!("plugins.confirm_delete"))
                 .on_click(move |_, _, cx| {
                     let id = id.clone();
                     confirm_entity.update(cx, |workspace, cx| {
@@ -215,7 +224,7 @@ fn plugin_row(
             Button::new(format!("cancel-delete-pi-plugin-{}", plugin.id))
                 .quiet()
                 .small()
-                .label("取消")
+                .label(t!("common.cancel"))
                 .on_click(move |_, _, cx| {
                     cancel_entity.update(cx, |workspace, cx| {
                         workspace.cancel_pi_plugin_delete(cx);
@@ -227,7 +236,7 @@ fn plugin_row(
             Button::new(format!("delete-pi-plugin-{id}"))
                 .quiet()
                 .small()
-                .label("删除")
+                .label(t!("common.delete"))
                 .on_click(move |_, _, cx| {
                     let id = id.clone();
                     entity.update(cx, |workspace, cx| {

@@ -2,6 +2,7 @@
 //! 拖进来）。菜单和行上的按钮都调这里。要确认的（会话还在跑、项目里还有会话、关工作树）在
 //! 这里先问。
 
+use rust_i18n::t;
 use std::path::PathBuf;
 
 use gpui::{App, SharedString, Window};
@@ -169,18 +170,22 @@ pub(super) fn close_session(
 ) {
     let close = move |cx: &mut App| {
         let closed = lifecycle::close_conversation(key.clone(), cx);
-        crate::report_failure("关闭会话", closed, cx);
+        crate::report_failure(t!("action.close_session"), closed, cx);
     };
     if status == AgentStatus::Idle {
         close(cx);
         return;
     }
-    Confirm::new(format!("关闭「{title}」？"), "关闭", move |_, cx| {
-        close(cx);
-        true
-    })
+    Confirm::new(
+        t!("close.title", title = title),
+        t!("close.confirm"),
+        move |_, cx| {
+            close(cx);
+            true
+        },
+    )
     .danger()
-    .description("它还没停下，关掉会结束里面在跑的程序。")
+    .description(t!("close.running_hint"))
     .open(window, cx);
 }
 
@@ -194,17 +199,21 @@ pub(super) fn archive_session(
 ) {
     let archive = move |cx: &mut App| {
         let archived = lifecycle::archive_conversation(key.clone(), cx);
-        crate::report_failure("归档会话", archived, cx);
+        crate::report_failure(t!("action.archive_session"), archived, cx);
     };
     if status == AgentStatus::Idle {
         archive(cx);
         return;
     }
-    Confirm::new(format!("归档「{title}」？"), "归档", move |_, cx| {
-        archive(cx);
-        true
-    })
-    .description("它还没停下，归档会结束里面在跑的程序。")
+    Confirm::new(
+        t!("archive.title", title = title),
+        t!("archive.confirm"),
+        move |_, cx| {
+            archive(cx);
+            true
+        },
+    )
+    .description(t!("archive.running_hint"))
     .open(window, cx);
 }
 
@@ -219,22 +228,26 @@ pub(super) fn close_project(
 ) {
     let close = move |cx: &mut App| {
         let closed = lifecycle::close_project(machine.clone(), root.clone(), cx);
-        crate::report_failure("关闭项目", closed, cx);
+        crate::report_failure(t!("action.close_project"), closed, cx);
     };
     if sessions == 0 {
         close(cx);
         return;
     }
     Confirm::new(
-        format!("关闭项目「{name}」？"),
-        "关闭",
+        t!("close_project.title", name = name),
+        t!("close.confirm"),
         move |_, cx| {
             close(cx);
             true
         },
     )
     .danger()
-    .description(format!("会一起关掉里面的 {sessions} 个会话。"))
+    .description(if sessions == 1 {
+        t!("close_project.sessions.one")
+    } else {
+        t!("close_project.sessions.other", count = sessions)
+    })
     .open(window, cx);
 }
 
@@ -260,7 +273,7 @@ pub(super) fn finish_workset(
             confirm_finish(machine, id, task, inspected, window, cx)
         });
         if shown.is_err() {
-            cx.update(|cx| crate::notify_error("关闭工作树：窗口已经关了", cx));
+            cx.update(|cx| crate::notify_error(&t!("workset.window_closed"), cx));
         }
     })
     .detach();
@@ -274,7 +287,7 @@ fn confirm_finish(
     window: &mut Window,
     cx: &mut App,
 ) {
-    const MOVES: &str = "会移除工作树的目录；里面的会话回到项目里。";
+    let moves = t!("workset.finish_moves");
     // 查不了（运行时还没有这条命令、Git 登记对不上……）：照旧问一句，关的时候运行时会再查。
     let (summary, lines) = match &inspected {
         Ok(result) => (
@@ -291,31 +304,35 @@ fn confirm_finish(
     };
     match summary {
         MergeSummary::Pending => {
-            crate::notify_error(&format!("工作树「{task}」还不能关闭：\n{lines}"), cx);
+            crate::notify_error(&t!("workset.cannot_finish", task = task, lines = lines), cx);
         }
         MergeSummary::Unconfirmed => {
             Confirm::new(
-                format!("仍然关闭工作树「{task}」？"),
-                "仍然关闭",
+                t!("workset.finish_anyway_title", task = task),
+                t!("workset.finish_anyway"),
                 finish(true),
             )
             .danger()
             .description(format!(
-                "{lines}\n\n判断不了的仓库，常见于 squash 合并之后基线又改过同一处。确认改动都已经\
-                     合进去了再关：工作树建的分支会被删掉。{MOVES}"
+                "{lines}\n\n{} {moves}",
+                t!("workset.unconfirmed_hint")
             ))
             .open(window, cx);
         }
         MergeSummary::Merged | MergeSummary::Unknown => {
             let description = if lines.is_empty() {
-                MOVES.to_string()
+                moves.into_owned()
             } else {
-                format!("{lines}\n\n{MOVES}")
+                format!("{lines}\n\n{moves}")
             };
-            Confirm::new(format!("关闭工作树「{task}」？"), "关闭", finish(false))
-                .danger()
-                .description(description)
-                .open(window, cx);
+            Confirm::new(
+                t!("workset.finish_title", task = task),
+                t!("close.confirm"),
+                finish(false),
+            )
+            .danger()
+            .description(description)
+            .open(window, cx);
         }
     }
 }
@@ -331,27 +348,42 @@ fn finish_now(machine: RuntimeKey, id: String, allow_unconfirmed_merge: bool, cx
         Ok(result) => {
             let mut notes = Vec::new();
             if !result.retained_branches.is_empty() {
-                notes.push(format!(
-                    "留下了分支：{}",
-                    result.retained_branches.join("、")
-                ));
+                notes.push(
+                    t!(
+                        "workset.retained_branches",
+                        branches = result.retained_branches.join(&*t!("list.separator"))
+                    )
+                    .into_owned(),
+                );
             }
             if !result.leftover_entries.is_empty() {
-                notes.push(format!(
-                    "这些没删掉：{}",
-                    result.leftover_entries.join("、")
-                ));
+                notes.push(
+                    t!(
+                        "workset.leftover_entries",
+                        entries = result.leftover_entries.join(&*t!("list.separator"))
+                    )
+                    .into_owned(),
+                );
             }
             if !notes.is_empty() {
                 let notify = api::Notify {
-                    subtitle: "工作树已关闭".to_string(),
+                    subtitle: t!("workset.finished").into_owned(),
                     body: notes.join("\n"),
                     ..Default::default()
                 };
                 cx.update(|cx| api::NOTIFY.run(&notify, cx).detach());
             }
         }
-        Err(error) => cx.update(|cx| crate::notify_error(&format!("关闭工作树失败：{error}"), cx)),
+        Err(error) => cx.update(|cx| {
+            crate::notify_error(
+                &t!(
+                    "error.failed",
+                    what = t!("action.finish_workset"),
+                    error = error
+                ),
+                cx,
+            )
+        }),
     })
     .detach();
 }
@@ -361,7 +393,16 @@ pub(super) fn check_workset(key: WorksetKey, cx: &mut App) {
     let checked = worksets::inspect(key, cx);
     cx.spawn(async move |cx| {
         if let Err(error) = checked.await {
-            cx.update(|cx| crate::notify_error(&format!("检查合并状态失败：{error}"), cx));
+            cx.update(|cx| {
+                crate::notify_error(
+                    &t!(
+                        "error.failed",
+                        what = t!("action.check_merge"),
+                        error = error
+                    ),
+                    cx,
+                )
+            });
         }
     })
     .detach();
@@ -373,7 +414,12 @@ pub(super) fn open_pull_request(machine: RuntimeKey, root: String, cx: &mut App)
         peers::git::OPEN_PULL_REQUEST.run(&peers::git::OpenPullRequest { machine, root }, cx);
     cx.spawn(async move |cx| {
         if let Err(error) = opened.await {
-            cx.update(|cx| crate::notify_error(&format!("创建 PR：{error}"), cx));
+            cx.update(|cx| {
+                crate::notify_error(
+                    &t!("error.failed", what = t!("action.create_pr"), error = error),
+                    cx,
+                )
+            });
         }
     })
     .detach();
@@ -386,7 +432,7 @@ pub(super) fn open_pull_request(machine: RuntimeKey, root: String, cx: &mut App)
 pub(super) fn open_project(machine: RuntimeKey, cx: &mut App) {
     if matches!(machine, RuntimeKey::Local) {
         let opened = contract::OPEN_PROJECT.run(&(), cx);
-        crate::report_failure("添加项目", opened, cx);
+        crate::report_failure(t!("action.add_project"), opened, cx);
     } else {
         pick_project(machine, cx);
     }
@@ -397,8 +443,8 @@ fn pick_project(machine: RuntimeKey, cx: &mut App) {
     let picked = api::PICK_PATHS.run(
         &api::PathRequest {
             machine: machine.clone(),
-            title: "打开项目".to_string(),
-            confirm: "打开".to_string(),
+            title: t!("pick.title").into_owned(),
+            confirm: t!("pick.confirm").into_owned(),
             files: false,
             multiple: false,
         },
@@ -409,7 +455,16 @@ fn pick_project(machine: RuntimeKey, cx: &mut App) {
             Ok(Some(paths)) => paths.into_iter().next(),
             Ok(None) => None,
             Err(error) => {
-                cx.update(|cx| crate::notify_error(&format!("打开项目：{error}"), cx));
+                cx.update(|cx| {
+                    crate::notify_error(
+                        &t!(
+                            "error.failed",
+                            what = t!("action.open_project"),
+                            error = error
+                        ),
+                        cx,
+                    )
+                });
                 None
             }
         };
@@ -418,7 +473,7 @@ fn pick_project(machine: RuntimeKey, cx: &mut App) {
         };
         cx.update(|cx| {
             let opened = lifecycle::open_project(machine, root, cx);
-            crate::report_failure("添加项目", opened, cx);
+            crate::report_failure(t!("action.add_project"), opened, cx);
         });
     })
     .detach();
@@ -451,12 +506,12 @@ pub(super) fn open_dropped_paths(paths: Vec<PathBuf>, cx: &mut App) {
         let roots = roots.await;
         cx.update(|cx| {
             if roots.is_empty() {
-                crate::notify_error("拖入的路径无法作为项目目录打开", cx);
+                crate::notify_error(&t!("error.drop_not_folder"), cx);
                 return;
             }
             for root in roots {
                 let opened = lifecycle::open_project(RuntimeKey::Local, root, cx);
-                crate::report_failure("添加项目", opened, cx);
+                crate::report_failure(t!("action.add_project"), opened, cx);
             }
         });
     })

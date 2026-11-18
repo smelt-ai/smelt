@@ -64,9 +64,16 @@ pub struct DaemonSessionState {
     /// hook 上报的问句 / 当前工具名（PreToolUse 时 question 常是 tool_name）。
     #[serde(default)]
     pub pending_question: Option<String>,
+    /// `pending_question` 里运行时自己说的那句的种类，给人看用 [`Self::pending_text`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_note: Option<smelt_event_protocol::SessionNote>,
     /// 对话会话正在等的那个审批或选择题的身份，变了就是换了一个请求。终端会话没有。
     #[serde(default)]
     pub pending_request: Option<String>,
+    /// 最近结束的那轮对应的外部投递（`conversation.prompt` 的 `delivery_id`）；用户自己说的
+    /// 那轮是 None。投递方看到自己的 id 就去 `conversation.turn_result` 取结果。
+    #[serde(default)]
+    pub completed_delivery_id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
     /// 这段对话的展示名，运行时算好（见 `SessionStateChanged::conversation_name`）。侧栏
@@ -149,6 +156,8 @@ impl Default for DaemonSessionState {
             phase: DaemonPhase::default(),
             pending_question: None,
             pending_request: None,
+            pending_note: None,
+            completed_delivery_id: None,
             title: None,
             conversation_name: None,
             name: None,
@@ -172,21 +181,6 @@ impl Default for DaemonSessionState {
 }
 
 impl DaemonSessionState {
-    /// 结构面板用：phase 中文标签。
-    pub fn phase_label(&self) -> &'static str {
-        match self.effective_phase() {
-            DaemonPhase::Connecting => "启动中",
-            DaemonPhase::Thinking => "思考中",
-            DaemonPhase::ExecutingTool => "执行工具",
-            DaemonPhase::AwaitingApproval => "等你批准",
-            DaemonPhase::WaitingForUser => "等你输入",
-            DaemonPhase::Succeeded => "已完成",
-            DaemonPhase::Failed => "失败",
-            DaemonPhase::Idle => "空闲",
-            DaemonPhase::Dead => "已结束",
-        }
-    }
-
     /// 本进程是否仍持有可 attach 的运行时。幽灵会话为 false。
     pub fn has_runtime(&self) -> bool {
         self.runtime
@@ -236,12 +230,21 @@ impl DaemonSessionState {
         })
     }
 
+    /// 「待处理」那一行给人看的话：运行时自己说的按当前语言说，智能体的原话原样给。
+    pub fn pending_text(&self) -> Option<String> {
+        self.pending_note
+            .as_ref()
+            .and_then(smelt_event_protocol::SessionNote::text)
+            .or_else(|| self.pending_question.clone())
+    }
+
     /// 结构面板副文案：工具名或审批问句。
     pub fn detail_line(&self) -> Option<String> {
         if !self.phase_is_authoritative() {
             return None;
         }
-        let q = self.pending_question.as_deref()?.trim();
+        let q = self.pending_text()?;
+        let q = q.trim();
         if q.is_empty() {
             return None;
         }

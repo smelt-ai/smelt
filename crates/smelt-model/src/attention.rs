@@ -234,11 +234,12 @@ pub fn item_for_daemon_transition(
         return None;
     }
 
-    let kind = match state.phase {
-        DaemonPhase::AwaitingApproval => AttentionKind::Approval,
-        DaemonPhase::WaitingForUser => AttentionKind::Input,
-        DaemonPhase::Succeeded => AttentionKind::Success,
-        DaemonPhase::Failed => AttentionKind::Failure,
+    use smelt_event_protocol::AttentionKind as Wire;
+    let (kind, wire) = match state.phase {
+        DaemonPhase::AwaitingApproval => (AttentionKind::Approval, Wire::Approval),
+        DaemonPhase::WaitingForUser => (AttentionKind::Input, Wire::Input),
+        DaemonPhase::Succeeded => (AttentionKind::Success, Wire::Success),
+        DaemonPhase::Failed => (AttentionKind::Failure, Wire::Failure),
         DaemonPhase::Thinking
         | DaemonPhase::ExecutingTool
         | DaemonPhase::Connecting
@@ -248,11 +249,12 @@ pub fn item_for_daemon_transition(
     let message = state
         .detail_line()
         .or_else(|| state.title.clone())
-        .unwrap_or_else(|| format!("会话 {}", &state.id[..8.min(state.id.len())]));
+        .unwrap_or_else(|| smelt_event_protocol::unnamed_session(&state.id));
+    let title = wire.label().unwrap_or_default();
 
     Some(AttentionItem {
         session_id: state.id.clone(),
-        title: state.phase_label().to_string(),
+        title,
         message,
         kind,
     })
@@ -362,7 +364,7 @@ mod tests {
         let success = state(DaemonPhase::Succeeded);
         let item = item_for_daemon_transition(Some(&thinking), &success).unwrap();
         assert_eq!(item.kind, AttentionKind::Success);
-        assert_eq!(item.message, "会话 session-");
+        assert_eq!(item.message, "Session session-");
         assert!(!item.kind.requires_action());
 
         let mut failure = state(DaemonPhase::Failed);

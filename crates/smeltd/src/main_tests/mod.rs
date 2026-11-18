@@ -87,6 +87,8 @@ fn make_acp_session_value(
         after_ready: SessionLock::new(Default::default()),
         after_ready_gate: SessionLock::new(()),
         reconnect: SessionLock::new(Default::default()),
+        disallowed_tools: SessionLock::new(Vec::new()),
+        delivery_results: SessionLock::new(VecDeque::new()),
     }
 }
 

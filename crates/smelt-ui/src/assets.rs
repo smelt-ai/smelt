@@ -1,12 +1,20 @@
-//! smelt 自带的 svg 图标，资源路径带 `smelt-icons/` 前缀：gpui-kit 图标集里没有的那几枚
-//! （智能体身份、git 分支、机器系统、停靠区开合等）。组件、插件按路径取用；应用的资源
-//! 加载先问这里，再问 gpui-kit 的全套图标。
+//! 应用的 svg 资源，两种路径：
 //!
-//! 智能体身份图标按稳定的存档 id 起名（`agent-<id>.svg`），路径由
-//! `smelt_model::agent_kind` 的 `icon_path` 拼，这里按同一个名字登记。第三方图标的出处
-//! 见 `assets/icons/THIRD_PARTY_NOTICES.md`。
+//! - `icons/<名字>.svg`：界面图标，见 [`IconName`]。插件（包括 JS 插件）按这个路径取，只有收进
+//!   来的那些，没收的那一格空着。
+//! - `smelt-icons/agent-<id>.svg`：智能体身份图标，路径由 `smelt_model::agent_kind` 的
+//!   `icon_path` 拼，这里按同一个名字登记。都是第三方品牌资源，出处见
+//!   `assets/icons/THIRD_PARTY_NOTICES.md`。
+//!
+//! 应用和离屏快照都把 [`Assets`] 交给 GPUI 当资源表。
 
-/// 这些图标的资源路径前缀。
+use std::borrow::Cow;
+
+use gpui::SharedString;
+
+use crate::IconName;
+
+/// 智能体图标的资源路径前缀。
 pub const PREFIX: &str = "smelt-icons/";
 
 macro_rules! icons {
@@ -15,7 +23,7 @@ macro_rules! icons {
     };
 }
 
-const ICONS: &[(&str, &[u8])] = icons![
+const AGENT_ICONS: &[(&str, &[u8])] = icons![
     "agent-antigravity.svg",
     "agent-claude.svg",
     "agent-codex.svg",
@@ -28,29 +36,47 @@ const ICONS: &[(&str, &[u8])] = icons![
     "agent-omp.svg",
     "agent-opencode.svg",
     "agent-pi.svg",
-    "git-branch.svg",
-    "machine-linux.svg",
-    "machine-windows.svg",
-    "monitor.svg",
-    // 停靠区开合按钮的展开态：分隔线外侧加实心色块。gpui-kit 的 panel-left / panel-right
-    // 只有一根细线，18px 下开合两态分不清。
-    "panel-left-filled.svg",
-    "panel-right-filled.svg",
-    "square-pen.svg",
-    "trash.svg",
 ];
 
-/// 资源路径对应的图标字节；不是这里的图标返回 `None`。
+/// 资源路径对应的字节；不是这里的资源返回 `None`。
 pub fn load(path: &str) -> Option<&'static [u8]> {
+    if let Some(icon) = IconName::from_asset_path(path) {
+        return Some(icon.svg());
+    }
     let name = path.strip_prefix(PREFIX)?;
-    ICONS
+    AGENT_ICONS
         .iter()
         .find(|(icon, _)| *icon == name)
         .map(|(_, bytes)| *bytes)
 }
 
+/// 所有资源路径。
+fn paths() -> impl Iterator<Item = SharedString> {
+    let icons = IconName::ALL
+        .iter()
+        .map(|icon| SharedString::new_static(icon.asset_path()));
+    let agents = AGENT_ICONS
+        .iter()
+        .map(|(name, _)| SharedString::from(format!("{PREFIX}{name}")));
+    icons.chain(agents)
+}
+
+/// 交给 GPUI 的资源表。
+pub struct Assets;
+
+impl gpui::AssetSource for Assets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        Ok(load(path).map(Cow::Borrowed))
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(paths().filter(|asset| asset.starts_with(path)).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use gpui::AssetSource as _;
     use smelt_model::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 
     use super::*;
@@ -73,10 +99,25 @@ mod tests {
     }
 
     #[test]
+    fn every_listed_path_loads() {
+        let listed = Assets.list("").unwrap();
+        assert_eq!(listed.len(), IconName::ALL.len() + AGENT_ICONS.len());
+        for path in &listed {
+            assert!(
+                Assets.load(path).unwrap().is_some(),
+                "{path} 列出来了却取不到"
+            );
+        }
+        assert!(Assets.list("icons/").unwrap().len() == IconName::ALL.len());
+    }
+
+    #[test]
     fn unknown_paths_are_not_claimed() {
         assert!(load("smelt-icons/agent-nope.svg").is_none());
+        assert!(load("icons/nope.svg").is_none());
         assert!(load("trash.svg").is_none());
-        assert!(load("icons/trash.svg").is_none());
-        assert!(load("smelt-icons/trash.svg").is_some());
+        assert!(load("smelt-icons/trash.svg").is_none());
+        assert!(load("icons/trash.svg").is_some());
+        assert!(load("smelt-icons/agent-claude.svg").is_some());
     }
 }

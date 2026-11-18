@@ -17,10 +17,13 @@ use std::sync::Arc;
 use api::ui::IconName;
 use api::{ContextMenuAction, ContextMenuItem, HostEvent, RuntimeKey};
 use gpui::{App, Global, Priority, Task};
+use rust_i18n::t;
 use serde::Deserialize;
-use smelt_plugin_api as api;
+use smelt_plugin_api::{self as api, text};
 
 use detect::InstalledIde;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.ide";
@@ -60,8 +63,8 @@ pub fn register(cx: &mut App) {
     cx.set_global(Catalog::default());
     api::register_commands(
         OWNER,
-        "用其他应用打开",
-        vec![OPEN_WITH.spec_async("用其他应用打开", |args, _, cx| open_with(args, cx))],
+        text!("open_with"),
+        vec![OPEN_WITH.spec_async(text!("open_with"), |args, _, cx| open_with(args, cx))],
         cx,
     )
     .expect("用其他应用打开的命令表写错了");
@@ -83,7 +86,7 @@ fn open_with(args: OpenWith, cx: &mut App) -> Task<Result<(), String>> {
     }
     let catalog = cx.global::<Catalog>();
     let Some(ide) = catalog.ides.iter().find(|ide| ide.label == args.app) else {
-        return Task::ready(Err(format!("没找到 {}，可能已经卸载了", args.app)));
+        return Task::ready(Err(t!("error.app_missing", app = args.app).into_owned()));
     };
     Task::ready(detect::open_in(ide, Path::new(&args.path)))
 }
@@ -120,14 +123,7 @@ fn publish(cx: &mut App) {
     let mut apps: Vec<ContextMenuItem> = catalog
         .ides
         .iter()
-        .map(|ide| {
-            app_item(
-                ide.label,
-                ide.icon.clone(),
-                IconName::SquareTerminal,
-                ide.label,
-            )
-        })
+        .map(|ide| app_item(ide.label, ide.icon.clone(), IconName::Terminal, ide.label))
         .collect();
     apps.push(app_item(
         detect::file_manager_label(),
@@ -136,7 +132,7 @@ fn publish(cx: &mut App) {
         FILE_MANAGER,
     ));
     let group = ContextMenuItem {
-        label: "用其他应用打开".into(),
+        label: text!("open_with"),
         image: None,
         icon: Some(IconName::ExternalLink.path()),
         // 应用都装在这台电脑上，远程项目的目录不在这里。
@@ -149,7 +145,7 @@ fn publish(cx: &mut App) {
 
 /// 子菜单里的一个应用：有自己的彩色图标就画它，没有画 `fallback`。
 fn app_item(
-    label: &'static str,
+    label: impl Into<api::Text>,
     image: Option<Arc<gpui::Image>>,
     fallback: IconName,
     app: &str,

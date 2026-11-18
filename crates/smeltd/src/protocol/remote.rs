@@ -13,7 +13,7 @@ pub(super) fn handle_conversation_rename<C: ClientSocket>(
     let title = v["title"].as_str().unwrap_or_default().trim();
     let result = (|| -> Result<smelt_core::session_control::AgentConversationSummary, String> {
         if title.is_empty() {
-            return Err("对话标题不能为空".to_string());
+            return Err("The conversation title can't be empty".to_string());
         }
         let store = crate::workspace_directory::default_store().map_err(|error| error.message)?;
         let directory = smelt_core::workspace_catalog::directory_on(&store)
@@ -22,7 +22,7 @@ pub(super) fn handle_conversation_rename<C: ClientSocket>(
             .conversations
             .into_iter()
             .find_map(|conversation| conversation.acp.filter(|acp| acp.sid == id))
-            .ok_or_else(|| format!("对话不存在：{id}"))?;
+            .ok_or_else(|| format!("No such conversation: {id}"))?;
         crate::workspace_directory::rename_acp_conversation(
             &store,
             id,

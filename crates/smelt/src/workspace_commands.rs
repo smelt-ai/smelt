@@ -18,7 +18,8 @@ type Run = fn(&mut Workspace, &serde_json::Value, &mut Window, &mut Context<Work
 pub(crate) struct Def {
     pub(crate) owner: &'static str,
     pub(crate) name: &'static str,
-    pub(crate) title: &'static str,
+    /// 跟着语言变的标题。常量里放不下 `Text`，放个取它的函数。
+    pub(crate) title: fn() -> api::Text,
     pub(crate) key: Option<&'static str>,
     pub(crate) context: &'static str,
     pub(crate) palette: bool,
@@ -26,12 +27,15 @@ pub(crate) struct Def {
 }
 
 /// 来源 → 快捷键设置里的分组名，顺序就是登记顺序。
-pub(crate) const OWNERS: &[(&str, &str)] = &[("smelt.app", "应用"), ("smelt.palette", "应用")];
+pub(crate) const OWNERS: &[(&str, fn() -> api::Text)] = &[
+    ("smelt.app", || api::text!("command.group.app")),
+    ("smelt.palette", || api::text!("command.group.app")),
+];
 
 const fn def(
     owner: &'static str,
     name: &'static str,
-    title: &'static str,
+    title: fn() -> api::Text,
     key: Option<&'static str>,
     run: Run,
 ) -> Def {
@@ -57,7 +61,7 @@ pub(crate) const COMMANDS: &[Def] = &[
     def(
         "smelt.app",
         "settings",
-        "打开设置",
+        || api::text!("command.open_settings"),
         Some("cmd-,"),
         |this, _, window, cx| {
             this.open_settings(window, cx);
@@ -67,7 +71,7 @@ pub(crate) const COMMANDS: &[Def] = &[
     def(
         "smelt.app",
         "quit",
-        "退出 Smelt",
+        || api::text!("command.quit"),
         Some("cmd-q"),
         |this, _, _, cx| {
             this.request_quit(cx);
@@ -78,7 +82,7 @@ pub(crate) const COMMANDS: &[Def] = &[
     hidden(def(
         "smelt.app",
         "debug-hud",
-        "切换调试面板",
+        || api::text!("command.debug_hud"),
         Some("cmd-shift-f"),
         |this, _, _, cx| {
             this.debug_hud = !this.debug_hud;
@@ -89,7 +93,7 @@ pub(crate) const COMMANDS: &[Def] = &[
     hidden(def(
         "smelt.palette",
         "toggle",
-        "打开命令面板",
+        || api::text!("command.palette"),
         Some("cmd-k"),
         |this, _, window, cx| {
             if this.palette.is_some() {
@@ -119,7 +123,7 @@ fn register_with(
             .filter(|def| def.owner == *owner)
             .map(|def| CommandSpec {
                 name: def.name.to_string(),
-                title: def.title.to_string(),
+                title: (def.title)(),
                 key: def.key.map(str::to_string),
                 context: def.context.to_string(),
                 palette: def.palette,
@@ -129,7 +133,7 @@ fn register_with(
             })
             .chain(typed)
             .collect();
-        if let Err(error) = api::register_commands(owner, group, specs, cx) {
+        if let Err(error) = api::register_commands(owner, group(), specs, cx) {
             debug_assert!(false, "自带命令 {owner} 登记失败：{error}");
             eprintln!("[commands] 自带命令 {owner} 登记失败：{error}");
         }
@@ -137,7 +141,7 @@ fn register_with(
 }
 
 /// 工作台建好时登记。工作台没了的话命令什么都不做，按键交给下一条绑定；自带命令都要
-/// 主窗口，没开时交回 [`api::NO_MAIN_WINDOW`]。
+/// 主窗口，没开时交回 [`api::no_main_window`]。
 pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
     let typed: WorkspaceRef = {
         let workspace = workspace.clone();
@@ -150,7 +154,7 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
             Rc::new(
                 move |args: &serde_json::Value, window: Option<&mut Window>, cx: &mut App| {
                     let Some(window) = window else {
-                        return Handled::err(api::NO_MAIN_WINDOW);
+                        return Handled::err(api::no_main_window());
                     };
                     workspace
                         .update(cx, |this, cx| run(this, args, window, cx))

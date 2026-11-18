@@ -372,6 +372,8 @@ pub struct PushRegistration {
     pub payload_version: u32,
     /// 智能体主动发的消息。
     pub notify_message: bool,
+    /// 手机登记时的界面语言（如 `zh-CN`），推送里运行时自己说的话按它说。旧版 App 不报。
+    pub locale: Option<String>,
     pub updated_at_ms: i64,
 }
 

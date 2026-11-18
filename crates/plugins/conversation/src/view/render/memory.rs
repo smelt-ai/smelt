@@ -2,6 +2,7 @@
 
 use super::*;
 use gpui::SharedString;
+use rust_i18n::t;
 use smelt_plugin_api::model::acp_session::MemoryChangeView;
 use smelt_plugin_api::model::control_api::AgentMemoryLayer;
 use smelt_plugin_api::ui::kit::TYPE;
@@ -46,8 +47,8 @@ impl ConversationView {
                 Button::new("acp-memory-open-page")
                     .quiet()
                     .small()
-                    .label("记忆页")
-                    .tooltip("去这个智能体的记忆页，管理全部记忆")
+                    .label(t!("memory.page"))
+                    .tooltip(t!("memory.page_hint"))
                     .on_click(cx.listener(move |_this, _ev, _window, cx| {
                         cx.emit(ConversationViewEvent::OpenAgentMemory {
                             agent_id: agent_id.clone(),
@@ -58,7 +59,7 @@ impl ConversationView {
                 Button::new("acp-memory-dismiss")
                     .dismiss()
                     .icon(IconName::Close)
-                    .icon_action("收起记忆卡片")
+                    .icon_action(t!("memory.collapse"))
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         this.dismiss_memory_changes(cx);
                     })),
@@ -118,23 +119,32 @@ impl ConversationView {
 
         let mut badges = div().flex().items_center().flex_shrink_0().gap_1();
         badges = badges.child(memory_badge(
-            if entry.created { "新" } else { "改" },
+            if entry.created {
+                t!("memory.badge_new")
+            } else {
+                t!("memory.badge_changed")
+            },
             ui_theme::muted(),
         ));
         if entry.layer == AgentMemoryLayer::User {
             // 全局记忆所有智能体共用，删除时影响面不同，标出来。
-            badges = badges.child(memory_badge("全局", ui_theme::run()));
+            badges = badges.child(memory_badge(t!("memory.badge_global"), ui_theme::run()));
         }
         badges = badges.child(if pending {
-            memory_badge("待确认", ui_theme::need())
+            memory_badge(t!("memory.badge_pending"), ui_theme::need())
         } else {
-            memory_badge("已生效", ui_theme::ok())
+            memory_badge(t!("memory.badge_active"), ui_theme::ok())
         });
 
-        let subtitle = match &entry.pending_reason {
+        let subtitle = match entry.pending_reason_text() {
             // 待确认时把原因放前面：用户采纳前要知道它为什么没生效。
-            Some(reason) if entry.description.is_empty() => reason.clone(),
-            Some(reason) => format!("{reason}：{}", entry.description),
+            Some(reason) if entry.description.is_empty() => reason,
+            Some(reason) => t!(
+                "memory.pending_subtitle",
+                reason = reason,
+                description = entry.description
+            )
+            .into_owned(),
             None => entry.description.clone(),
         };
 
@@ -199,7 +209,7 @@ impl ConversationView {
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(faint)
-                    .child("处理中…"),
+                    .child(t!("status.working").into_owned()),
             );
         } else {
             if pending {
@@ -208,9 +218,9 @@ impl ConversationView {
                     Button::new(SharedString::from(format!("acp-memory-approve-{row_id}")))
                         .primary()
                         .small()
-                        .label("采纳")
+                        .label(t!("memory.approve_button"))
                         .disabled(any_busy)
-                        .tooltip("采纳：之后的对话会用到这条记忆")
+                        .tooltip(t!("memory.approve_hint"))
                         .on_click(cx.listener(move |this, _ev, _window, cx| {
                             this.request_memory_action(
                                 approve_key.clone(),
@@ -225,15 +235,15 @@ impl ConversationView {
                 .small()
                 .disabled(any_busy);
             let delete = if armed {
-                delete.danger().label("确认删除").tooltip(
+                delete.danger().label(t!("memory.confirm_delete")).tooltip(
                     if entry.layer == AgentMemoryLayer::User {
-                        "全局记忆删了会从所有智能体里消失"
+                        t!("memory.delete_global_hint")
                     } else {
-                        "删了就没了"
+                        t!("memory.delete_hint")
                     },
                 )
             } else {
-                delete.danger_quiet().label("删除")
+                delete.danger_quiet().label(t!("memory.delete_button"))
             };
             actions = actions.child(delete.on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.request_memory_action(delete_key.clone(), MemoryActionKind::Delete, cx);
@@ -274,7 +284,7 @@ impl ConversationView {
                         .whitespace_normal()
                         .text_color(gpui::rgb(ui_theme::muted()))
                         .child(if entry.body.is_empty() {
-                            "（正文为空）".to_string()
+                            t!("memory.empty_body").into_owned()
                         } else {
                             entry.body.clone()
                         }),
@@ -285,7 +295,8 @@ impl ConversationView {
 }
 
 /// 行里的小标签：底色是字色叠一层淡色。
-fn memory_badge(label: &'static str, color: u32) -> gpui::Div {
+fn memory_badge(label: impl Into<SharedString>, color: u32) -> gpui::Div {
+    let label = label.into();
     div()
         .flex_shrink_0()
         .px_1()

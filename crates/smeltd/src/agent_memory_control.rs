@@ -142,11 +142,11 @@ fn reject_record_write(
 ) -> Option<&'static str> {
     use smelt_core::control_api::AgentMemoryTrust;
     if existing_trusted && trust == AgentMemoryTrust::Pending {
-        return Some("不能把已可信的记忆降级为待确认");
+        return Some("A trusted memory can't be downgraded to pending");
     }
     let overwrote = client_overwrote || has_existing;
     if trust == AgentMemoryTrust::Trusted && overwrote && !recent_read {
-        return Some("覆盖已有记忆前必须先在本会话读取");
+        return Some("Read the existing memory in this session before overwriting it");
     }
     None
 }
@@ -346,11 +346,11 @@ mod tests {
     fn record_write_refuses_a_downgrade_and_scopes_the_recent_read() {
         assert_eq!(
             reject_record_write(false, true, true, AgentMemoryTrust::Pending, true),
-            Some("不能把已可信的记忆降级为待确认")
+            Some("A trusted memory can't be downgraded to pending")
         );
         assert_eq!(
             reject_record_write(true, true, true, AgentMemoryTrust::Trusted, false),
-            Some("覆盖已有记忆前必须先在本会话读取")
+            Some("Read the existing memory in this session before overwriting it")
         );
         assert!(
             reject_record_write(false, false, true, AgentMemoryTrust::Trusted, false).is_some(),

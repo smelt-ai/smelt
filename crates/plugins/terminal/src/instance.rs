@@ -9,9 +9,10 @@ use gpui::prelude::*;
 use gpui::{
     App, Context, Entity, FocusHandle, Global, SharedString, Task, WeakEntity, Window, div, rgb,
 };
+use rust_i18n::t;
 use smelt_plugin_api::ui::Button;
 use smelt_plugin_api::ui::ui_theme;
-use smelt_plugin_api::{self as api, PluginView, RuntimeKey, ViewHandle, ViewSpec};
+use smelt_plugin_api::{self as api, PluginView, RuntimeKey, ViewHandle, ViewSpec, text};
 
 use crate::contract::{TerminalArgs, TerminalText, VIEW};
 use crate::terminal::Terminal;
@@ -23,12 +24,13 @@ pub(crate) fn spec() -> ViewSpec {
     ViewSpec {
         // 来源内的名字，跟 `Command::name` 一样从约定里的 id 取。
         name: VIEW.split_once('/').map_or(VIEW, |(_, name)| name).into(),
-        title: "终端".into(),
+        title: text!("title"),
         icon: crate::ICON.into(),
         // 一格终端只画网格，标题、状态由摆它的一方画。
         draws_top_bar: false,
         instances: true,
         settings: None,
+        fills: Vec::new(),
         build: Rc::new(|_, cx| Rc::new(cx.new(TerminalInstance::new)) as Rc<dyn ViewHandle>),
     }
 }
@@ -74,7 +76,7 @@ impl TerminalInstance {
         self.connecting = Some(cx.spawn_in(window, async move |this, cx| {
             if !api::wait_online(&args.machine, 0, cx).await {
                 let _ = this.update(cx, |this, cx| {
-                    this.state = State::Failed(api::MACHINE_REMOVED.into());
+                    this.state = State::Failed(api::machine_removed().into());
                     cx.notify();
                 });
                 return;
@@ -85,7 +87,7 @@ impl TerminalInstance {
             };
             let Some(connector) = connector else {
                 let _ = this.update(cx, |this, cx| {
-                    this.state = State::Failed(api::MACHINE_REMOVED.into());
+                    this.state = State::Failed(api::machine_removed().into());
                     cx.notify();
                 });
                 return;
@@ -126,7 +128,7 @@ impl TerminalInstance {
                     }
                     Err(error) => {
                         eprintln!("[terminal] 连不上终端会话 {}：{error:#}", args.session_id);
-                        this.state = State::Failed(format!("连不上终端：{error}").into());
+                        this.state = State::Failed(t!("error.connect", error = error).into());
                     }
                 }
                 cx.notify();
@@ -146,7 +148,7 @@ impl PluginView for TerminalInstance {
                 self.connect(window, cx);
             }
             Err(error) => {
-                self.state = State::Failed(format!("终端的参数不对：{error}").into());
+                self.state = State::Failed(t!("error.bad_args", error = error).into());
                 cx.notify();
             }
         }
@@ -171,7 +173,7 @@ impl Render for TerminalInstance {
                 .justify_center()
                 .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
-                .child("正在连接终端…"),
+                .child(t!("connecting").into_owned()),
             State::Failed(message) => shell
                 .flex()
                 .flex_col()
@@ -188,7 +190,7 @@ impl Render for TerminalInstance {
                     this.child(
                         Button::new("terminal-retry")
                             .small()
-                            .label("重试")
+                            .label(t!("retry"))
                             .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
                     )
                 }),
@@ -220,7 +222,7 @@ pub(crate) fn send_text(text: TerminalText, cx: &mut App) -> Result<(), String> 
             .find_map(|(_, _, view)| view.upgrade())
     });
     let Some(view) = view else {
-        return Err(format!("终端「{}」没有开着", text.session_id));
+        return Err(t!("error.not_open", session = text.session_id).into_owned());
     };
     view.update(cx, |view, cx| view.send_text(&text.text, cx));
     Ok(())

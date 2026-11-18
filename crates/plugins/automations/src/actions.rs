@@ -111,7 +111,7 @@ impl AutomationsPage {
             cx,
         );
         let Some(run) = run else {
-            self.error = Some("找不到对应的运行记录".to_string());
+            self.error = Some(t!("error.run_not_found").into_owned());
             cx.notify();
             return;
         };
@@ -143,7 +143,7 @@ impl AutomationsPage {
             .and_then(ConversationAgentKind::from_id)
         else {
             self.live = None;
-            self.error = Some("无法识别该运行使用的智能体引擎".to_string());
+            self.error = Some(t!("error.unknown_engine").into_owned());
             cx.notify();
             return;
         };
@@ -158,7 +158,7 @@ impl AutomationsPage {
                     run_id: run.id,
                 },
             }),
-            placeholder: Some("正在打开自动化运行现场…".to_string()),
+            placeholder: Some(t!("run.opening").into_owned()),
         };
         match LiveRun::start(args, window, cx) {
             Ok(live) => {
@@ -319,14 +319,14 @@ impl AutomationsPage {
         self.catalog_tab = AutomationCatalogTab::Tasks;
         let automation = Automation {
             id: uuid::Uuid::new_v4().to_string(),
-            name: template.name.to_string(),
+            name: (template.name)().into_owned(),
             enabled: true,
             workspace_dir: None,
             trigger: AutomationTrigger::schedule(template.schedule),
             action: AutomationAction::Agent {
                 agent_definition_id: Self::ready_automation_agent_id(&runtime, cx)
                     .unwrap_or_default(),
-                prompt: Some(template.prompt.to_string()),
+                prompt: Some((template.prompt)().into_owned()),
             },
             sinks: vec![AutomationSink::Local],
         };
@@ -353,26 +353,22 @@ impl AutomationsPage {
             return;
         };
         let name = if automation.name.trim().is_empty() {
-            "未命名自动化".to_string()
+            t!("automation.unnamed").into_owned()
         } else {
             automation.name.clone()
         };
         let runs = machine.runs_for(&target.id).len();
-        let description = if runs == 0 {
-            format!("「{name}」会被删除，此操作不可撤销。")
-        } else {
-            format!("「{name}」和它的 {runs} 条运行记录会被删除，此操作不可撤销。")
+        let description = match runs {
+            0 => t!("delete.message", name = name),
+            1 => t!("delete.message_runs.one", name = name),
+            runs => t!("delete.message_runs.other", name = name, count = runs),
         };
         let page = cx.entity().downgrade();
-        api::ui::dialog::Confirm::new(
-            "确定删除这条自动化吗？",
-            "删除",
-            move |_, cx| {
-                let target = target.clone();
-                let _ = page.update(cx, |page, cx| page.delete_automation(target, cx));
-                true
-            },
-        )
+        api::ui::dialog::Confirm::new(t!("delete.title"), t!("delete.confirm"), move |_, cx| {
+            let target = target.clone();
+            let _ = page.update(cx, |page, cx| page.delete_automation(target, cx));
+            true
+        })
         .danger()
         .description(description)
         .open(window, cx);
@@ -477,21 +473,15 @@ impl AutomationsPage {
                 .join(" "),
             AutomationAction::Agent { .. } => String::new(),
         };
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("给它起个名字")
-                .default_value(automation.name.clone())
-        });
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(automation.name.clone()));
         let prompt = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
-                .placeholder("例如：汇总今日进展并列出待办事项")
                 .default_value(automation.prompt().unwrap_or_default().to_string())
         });
         let command = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 8)
-                .placeholder("例如：curl -fsS https://example.com/health")
                 .default_value(command_default)
         });
         let retained_events = automation.trigger.events.clone();
@@ -575,6 +565,9 @@ impl AutomationsPage {
             flash: None,
             _subscriptions: subscriptions,
         });
+        if let Some(editor) = self.editor.as_ref() {
+            editor.label(window, cx);
+        }
         let name_input = self
             .editor
             .as_ref()
@@ -798,7 +791,7 @@ impl AutomationsPage {
                 editor.draft_revision = editor.draft_revision.wrapping_add(1);
                 editor.error = None;
             }
-            self.persist_automation_editor(flash_id.map(|id| (id, "已重新生成 ✓")), cx);
+            self.persist_automation_editor(flash_id.map(|id| (id, FlashLabel::Regenerated)), cx);
         } else {
             self.touch_schedule_editor(cx);
         }
@@ -848,7 +841,7 @@ impl AutomationsPage {
 
     pub(crate) fn persist_automation_editor(
         &mut self,
-        flash: Option<(String, &'static str)>,
+        flash: Option<(String, FlashLabel)>,
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = self.editor.as_ref() else {
@@ -919,13 +912,12 @@ impl AutomationsPage {
                         }) {
                             editor.saving_revision = None;
                             if !current_store {
-                                editor.error =
-                                    Some("自动化服务已切换，请在当前版本重新保存".to_string());
+                                editor.error = Some(t!("error.service_switched").into_owned());
                                 false
                             } else {
                                 editor.is_new = false;
                                 if let Some(name) = &created_name {
-                                    notify_once(format!("已创建自动化「{name}」"), cx);
+                                    notify_once(t!("notify.created", name = name).into_owned(), cx);
                                 }
                                 if let Some((flash_id, flash_label)) = flash {
                                     flashed = Some((flash_id, flash_label));
@@ -969,7 +961,7 @@ impl AutomationsPage {
     pub(crate) fn flash_editor_button(
         &mut self,
         id: String,
-        label: &'static str,
+        label: FlashLabel,
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = self.editor.as_mut() else {

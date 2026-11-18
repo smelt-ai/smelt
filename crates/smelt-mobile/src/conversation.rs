@@ -24,6 +24,8 @@ mod merge;
 pub(crate) mod view;
 
 use std::collections::HashMap;
+
+use rust_i18n::t;
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -185,7 +187,7 @@ impl Conversations {
                 state
                     .stop_reason
                     .clone()
-                    .unwrap_or_else(|| "没有连接这台机器".to_string())
+                    .unwrap_or_else(|| t!("error.not_connected").into_owned())
             })
         };
         if let Some(reason) = stopped {
@@ -210,7 +212,7 @@ impl Conversations {
             watch.stop();
             watch.emit(message_event(
                 ConversationEventKind::Error,
-                format!("起不了订阅线程：{spawn_error}"),
+                t!("error.thread_failed", error = spawn_error).into_owned(),
             ));
         }
     }
@@ -249,7 +251,7 @@ impl Conversations {
         self.source
             .current()
             .map(|runtime| runtime.client)
-            .ok_or_else(|| error(SmeltErrorKind::Offline, "没有连接这台机器"))
+            .ok_or_else(|| error(SmeltErrorKind::Offline, t!("error.not_connected")))
     }
 
     pub(crate) fn load_older(&self, session_id: &str) -> Result<bool, SmeltError> {
@@ -332,16 +334,16 @@ impl Conversations {
         images: Vec<ImageInput>,
     ) -> Result<(), SendMessageError> {
         if request_id.trim().is_empty() {
-            return Err(send_error(SendFailureKind::Rejected, "缺少请求 id"));
+            return Err(send_error(SendFailureKind::Rejected, "missing request id"));
         }
         if text.trim().is_empty() && images.is_empty() {
-            return Err(send_error(SendFailureKind::Rejected, "消息是空的"));
+            return Err(send_error(SendFailureKind::Rejected, t!("send.empty")));
         }
         let client = self
             .source
             .current()
             .map(|runtime| runtime.client)
-            .ok_or_else(|| send_error(SendFailureKind::Rejected, "没有连接这台机器"))?;
+            .ok_or_else(|| send_error(SendFailureKind::Rejected, t!("error.not_connected")))?;
         // submission_id 用客户端的请求 id：重发同一份草稿时运行时能认出是同一次提交。
         let input = ConversationInput {
             submission_id: request_id.to_string(),
@@ -492,8 +494,12 @@ impl Conversations {
         digest: String,
         max_edge: Option<u32>,
     ) -> Result<ImageData, SmeltError> {
-        let entry = u64::try_from(entry)
-            .map_err(|_| error(SmeltErrorKind::Other, "图片引用的条目下标无效"))?;
+        let entry = u64::try_from(entry).map_err(|_| {
+            error(
+                SmeltErrorKind::Other,
+                "invalid entry index in the image reference",
+            )
+        })?;
         let client = self.client()?;
         let image = client
             .call::<ConversationImage>(
@@ -508,7 +514,7 @@ impl Conversations {
             .map_err(control_error)?;
         let bytes = BASE64
             .decode(image.data_b64.as_bytes())
-            .map_err(|e| error(SmeltErrorKind::Other, format!("图片数据无效：{e}")))?;
+            .map_err(|e| error(SmeltErrorKind::Other, t!("error.image_invalid", error = e)))?;
         Ok(ImageData {
             mime: image.mime,
             bytes,
@@ -916,11 +922,11 @@ impl Watch {
         };
         let mut stream = match client.connect() {
             Ok(stream) => stream,
-            Err(e) => return closed(format!("连不上运行时：{e}")),
+            Err(e) => return closed(t!("error.unreachable", error = e).into_owned()),
         };
         // 这条连接上只写这一行。之后既不写也不半关闭写方向，见文件头。
         if let Err(e) = write_json_line(&mut stream, request) {
-            return closed(format!("订阅请求发不出去：{e}"));
+            return closed(t!("subscription.unsendable", error = e).into_owned());
         }
         {
             let mut state = self.lock();
@@ -933,7 +939,7 @@ impl Watch {
             }
             match stream.try_clone() {
                 Ok(handle) => state.conn = Some(handle),
-                Err(e) => return closed(format!("订阅连接不可用：{e}")),
+                Err(e) => return closed(t!("subscription.unusable", error = e).into_owned()),
             }
         }
         let end = self.read_frames(client, stream);
@@ -950,8 +956,8 @@ impl Watch {
         loop {
             line.clear();
             let closed = match reader.read_until(b'\n', &mut line) {
-                Ok(0) => Some("运行时关闭了订阅".to_string()),
-                Err(e) => Some(format!("订阅连接断开：{e}")),
+                Ok(0) => Some(t!("subscription.closed").into_owned()),
+                Err(e) => Some(t!("subscription.dropped", error = e).into_owned()),
                 Ok(_) => None,
             };
             if let Some(message) = closed {
@@ -1156,8 +1162,10 @@ fn unavailable_reason(value: &Value) -> Option<String> {
         unavailable
             .get("reason")
             .and_then(Value::as_str)
-            .unwrap_or("运行时接不上这段对话")
-            .to_string(),
+            .map_or_else(
+                || t!("error.conversation_unavailable").into_owned(),
+                str::to_string,
+            ),
     )
 }
 
@@ -1255,8 +1263,12 @@ fn history_page(
         .request(&request, SNAPSHOT_TIMEOUT)
         .map_err(request_error)?;
     if let Some(snapshot) = response.get_mut("snapshot").map(Value::take) {
-        let mut snapshot: ConversationSnapshot = serde_json::from_value(snapshot)
-            .map_err(|e| error(SmeltErrorKind::Other, format!("历史快照内容无效：{e}")))?;
+        let mut snapshot: ConversationSnapshot = serde_json::from_value(snapshot).map_err(|e| {
+            error(
+                SmeltErrorKind::Other,
+                t!("error.snapshot_invalid", error = e),
+            )
+        })?;
         merge::normalize(&mut snapshot);
         return Ok(snapshot);
     }
@@ -1266,7 +1278,7 @@ fn history_page(
             .get("error")
             .and_then(Value::as_str)
             .filter(|message| !message.is_empty())
-            .unwrap_or("会话不存在"),
+            .map_or_else(|| t!("error.session_missing").into_owned(), str::to_string),
     ))
 }
 
@@ -1295,27 +1307,30 @@ fn ok_response(response: &Value) -> Result<(), SmeltError> {
         response
             .get("error")
             .and_then(Value::as_str)
-            .unwrap_or("运行时没有执行这个操作"),
+            .map_or_else(|| t!("error.not_performed").into_owned(), str::to_string),
     ))
 }
 
 /// 发送：连接建不起来时请求没发出去，可以放心重发；写出之后的任何失败都可能已经送达。
 fn submit(client: &RuntimeClient, request: &Value) -> Result<(), SendMessageError> {
     let unknown = |message: String| send_error(SendFailureKind::Unknown, message);
-    let mut stream = client
-        .connect_with_timeout(SUBMIT_TIMEOUT)
-        .map_err(|e| send_error(SendFailureKind::Rejected, format!("连不上运行时：{e}")))?;
+    let mut stream = client.connect_with_timeout(SUBMIT_TIMEOUT).map_err(|e| {
+        send_error(
+            SendFailureKind::Rejected,
+            t!("error.unreachable", error = e),
+        )
+    })?;
     write_json_line(&mut stream, request)
-        .map_err(|e| unknown(format!("发送中断，不确定运行时是否收到：{e}")))?;
+        .map_err(|e| unknown(t!("send.interrupted", error = e).into_owned()))?;
     let mut line = String::new();
     BufReader::new(stream)
         .read_line(&mut line)
-        .map_err(|e| unknown(format!("没等到运行时确认：{e}")))?;
+        .map_err(|e| unknown(t!("send.unconfirmed", error = e).into_owned()))?;
     if line.trim().is_empty() {
-        return Err(unknown("运行时没有确认就断开了".to_string()));
+        return Err(unknown(t!("send.dropped_unconfirmed").into_owned()));
     }
     let response: Value = serde_json::from_str(line.trim())
-        .map_err(|e| unknown(format!("运行时的确认读不懂：{e}")))?;
+        .map_err(|e| unknown(t!("send.confirmation_unreadable", error = e).into_owned()))?;
     parse_conversation_submit_response(response).map_err(|failure| SendMessageError {
         kind: match failure.kind {
             ConversationSubmitErrorKind::Rejected => SendFailureKind::Rejected,
@@ -1334,26 +1349,26 @@ fn send_error(kind: SendFailureKind, message: impl Into<String>) -> SendMessageE
 
 fn request_error(failure: RequestError) -> SmeltError {
     match failure {
-        RequestError::Transport(e) => error(SmeltErrorKind::Offline, format!("连不上运行时：{e}")),
-        RequestError::Closed => error(
-            SmeltErrorKind::Other,
-            "运行时没有回应这个请求（会话不存在或运行时版本不支持）",
-        ),
+        RequestError::Transport(e) => {
+            error(SmeltErrorKind::Offline, t!("error.unreachable", error = e))
+        }
+        RequestError::Closed => error(SmeltErrorKind::Other, t!("error.no_response")),
         RequestError::InvalidResponse(message) => error(SmeltErrorKind::Other, message),
     }
 }
 
 fn control_error(failure: ControlClientError) -> SmeltError {
     match failure {
-        ControlClientError::Transport(message) => {
-            error(SmeltErrorKind::Offline, format!("连不上运行时：{message}"))
-        }
+        ControlClientError::Transport(message) => error(
+            SmeltErrorKind::Offline,
+            t!("error.unreachable", error = message),
+        ),
         ControlClientError::Protocol(failure) => {
             let kind = match failure.code {
                 ControlErrorCode::PermissionDenied => SmeltErrorKind::Unpaired,
                 _ => outdated_kind(&failure).unwrap_or(SmeltErrorKind::Other),
             };
-            error(kind, failure.message)
+            error(kind, failure.text())
         }
         ControlClientError::InvalidRequest(message)
         | ControlClientError::InvalidResponse(message) => error(SmeltErrorKind::Other, message),

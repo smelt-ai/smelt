@@ -12,6 +12,7 @@ use api::ui::{Button, Icon, IconAction as _, IconName, ListRow, SettingsPage, Se
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_base::StyledExt as _;
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 use crate::ResourcesPage;
@@ -35,8 +36,8 @@ pub(crate) fn page(
     SettingsPage::new("resources-settings")
         .child(
             SettingsSection::new()
-                .title("本机合计")
-                .description("停在这一页时每 2 秒刷新")
+                .title(t!("summary.title"))
+                .description(t!("summary.refresh"))
                 .child(summary_view(&snapshot)),
         )
         .children(snapshot.sections.iter().map(|section| {
@@ -52,15 +53,16 @@ fn summary_view(snapshot: &PanelSnapshot) -> AnyElement {
         return div()
             .type_style(TYPE.ui)
             .text_color(rgb(ui_theme::muted()))
-            .child("读取中…")
+            .child(t!("loading").to_string())
             .into_any_element();
     };
     let share = snapshot.total_memory.map(|total| {
-        format!(
-            "占本机 {} 内存的 {:.0}%",
-            format_bytes(total),
-            local.memory_bytes as f64 * 100. / total as f64
+        t!(
+            "summary.share",
+            total = format_bytes(total),
+            percent = format!("{:.0}", local.memory_bytes as f64 * 100. / total as f64)
         )
+        .into_owned()
     });
     let mut view = div().flex().flex_col().w_full().gap_2().child(
         div()
@@ -102,10 +104,7 @@ fn summary_view(snapshot: &PanelSnapshot) -> AnyElement {
         div()
             .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::muted()))
-            .child(
-                "含 Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
-                 包括智能体起的命令；CPU 按单核计，多核可超过 100%。",
-            ),
+            .child(t!("chart.note").into_owned()),
     )
     .into_any_element()
 }
@@ -121,7 +120,7 @@ fn section_view(
         fg: rgb(ui_theme::text()).into(),
         muted: rgb(ui_theme::muted()).into(),
     };
-    let sort_header = |label: &'static str, by: SortBy, width: f32| {
+    let sort_header = |label: SharedString, by: SortBy, width: f32| {
         let page = page.clone();
         div()
             .id(SharedString::from(format!("{}-sort-{label}", section.id_prefix)))
@@ -148,9 +147,18 @@ fn section_view(
             .gap_3()
             .type_style(TYPE.text_xsmall)
             .child(div().w(px(DISCLOSURE_COLUMN)))
-            .child(div().flex_1().text_color(colors.muted).child("名称"))
-            .child(sort_header("CPU", SortBy::Cpu, CPU_COLUMN))
-            .child(sort_header("内存", SortBy::Memory, MEMORY_COLUMN)),
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(colors.muted)
+                    .child(t!("column.name").to_string()),
+            )
+            .child(sort_header("CPU".into(), SortBy::Cpu, CPU_COLUMN))
+            .child(sort_header(
+                t!("column.memory").into(),
+                SortBy::Memory,
+                MEMORY_COLUMN,
+            )),
     );
     if let Some(note) = &section.note {
         table = table.child(
@@ -210,7 +218,7 @@ fn section_view(
                         .flex_1()
                         .type_style(TYPE.ui_medium)
                         .text_color(colors.fg)
-                        .child("合计"),
+                        .child(t!("column.total").to_string()),
                 )
                 .child(usage_columns(total, colors.fg)),
         );
@@ -329,8 +337,8 @@ fn memory_part_row(part: &MemoryPart, colors: RowColors) -> impl IntoElement + u
         .py(px(3.))
         .gap_3()
         .child(row_label(
-            part.label.to_string(),
-            Some(part.detail.to_string()),
+            part.label.clone(),
+            Some(part.detail.clone()),
             colors,
         ))
         .child(
@@ -387,7 +395,7 @@ fn session_row(
     let summary = process_summary(group.usage.process_count, &group.processes);
     let detail = match group.jump {
         Some(_) => summary,
-        None => format!("自动化、子智能体或别的客户端开的 · {summary}"),
+        None => t!("others.detail", summary = summary).into_owned(),
     };
     let jump = group.jump.clone().map(|session_id| {
         let machine = machine.clone();
@@ -400,7 +408,7 @@ fn session_row(
                     .quiet()
                     .small()
                     .icon(IconName::ExternalLink)
-                    .icon_action("跳到会话")
+                    .icon_action(t!("jump"))
                     .on_click(move |_, _, cx| {
                         crate::jump_to_session(machine.clone(), session_id.clone(), cx)
                     }),
@@ -434,7 +442,11 @@ fn session_row(
                 .py_1()
                 .type_style(TYPE.text_xsmall)
                 .text_color(colors.muted)
-                .child(format!("另有 {unlisted} 个占用更小的进程没列出")),
+                .child(if unlisted == 1 {
+                    t!("unlisted.one").into_owned()
+                } else {
+                    t!("unlisted.other", count = unlisted).into_owned()
+                }),
         );
     }
     div()

@@ -75,7 +75,7 @@ fn matching_hook_trust_listings(
         matched.iter().map(|hook| hook.command.as_str()).collect();
     if matched.len() != expected.len() || commands != expected {
         return Err(format!(
-            "Codex hooks/list 只匹配到 {}/{} 个 Smelt hooks",
+            "Codex hooks/list matched only {}/{} Smelt hooks",
             matched.len(),
             expected.len()
         ));
@@ -92,7 +92,7 @@ pub fn grant_codex_hook_trust(
     expected_commands: &[String],
 ) -> Result<usize, String> {
     if expected_commands.is_empty() {
-        return Err("没有待信任的 Codex hooks".into());
+        return Err("no Codex hooks to trust".into());
     }
     let mut command = Command::new(resolve_program("codex"));
     command
@@ -107,11 +107,17 @@ pub fn grant_codex_hook_trust(
     }
     let mut child = command
         .spawn()
-        .map_err(|error| format!("启动 Codex app-server 信任会话失败：{error}"))?;
+        .map_err(|error| format!("couldn't start the Codex app-server trust session: {error}"))?;
     let result = (|| {
-        let stdin = child.stdin.take().ok_or("Codex app-server 没有 stdin")?;
-        let stdout = child.stdout.take().ok_or("Codex app-server 没有 stdout")?;
-        let stderr = child.stderr.take().ok_or("Codex app-server 没有 stderr")?;
+        let stdin = child.stdin.take().ok_or("Codex app-server has no stdin")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("Codex app-server has no stdout")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("Codex app-server has no stderr")?;
         std::thread::spawn(move || for _ in BufReader::new(stderr).lines() {});
         let writer = Arc::new(Mutex::new(stdin));
         let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
@@ -132,20 +138,20 @@ pub fn grant_codex_hook_trust(
                 }
             }),
         ) {
-            return Err("写入 Codex app-server initialize 失败".into());
+            return Err("couldn't write Codex app-server initialize".into());
         }
         wait_response(&line_rx, 1)?;
         if !send(
             &writer,
             serde_json::json!({"method":"initialized","params":{}}),
         ) {
-            return Err("写入 Codex app-server initialized 失败".into());
+            return Err("couldn't write Codex app-server initialized".into());
         }
         if !send(
             &writer,
             serde_json::json!({"id":2,"method":"hooks/list","params":{"cwds":[cwd]}}),
         ) {
-            return Err("写入 Codex app-server hooks/list 失败".into());
+            return Err("couldn't write Codex app-server hooks/list".into());
         }
         let before = wait_response(&line_rx, 2)?;
         let matched = matching_hook_trust_listings(&before, hooks_path, expected_commands)?;
@@ -174,7 +180,7 @@ pub fn grant_codex_hook_trust(
                     }
                 }),
             ) {
-                return Err("写入 Codex app-server config/batchWrite 失败".into());
+                return Err("couldn't write Codex app-server config/batchWrite".into());
             }
             wait_response(&line_rx, 3)?;
         }
@@ -183,12 +189,14 @@ pub fn grant_codex_hook_trust(
             &writer,
             serde_json::json!({"id":verify_id,"method":"hooks/list","params":{"cwds":[cwd]}}),
         ) {
-            return Err("写入 Codex app-server hooks/list 复核请求失败".into());
+            return Err("couldn't write the Codex app-server hooks/list recheck".into());
         }
         let after = wait_response(&line_rx, verify_id)?;
         let verified = matching_hook_trust_listings(&after, hooks_path, expected_commands)?;
         if verified.iter().any(|hook| hook.trust_status != "trusted") {
-            return Err("Codex hooks/list 复核后仍有 Smelt hook 未信任".into());
+            return Err(
+                "after the recheck, Codex hooks/list still has untrusted Smelt hooks".into(),
+            );
         }
         Ok(needing_trust.len())
     })();
@@ -204,7 +212,7 @@ fn wait_response(
     loop {
         let line = lines
             .recv_timeout(Duration::from_secs(20))
-            .map_err(|_| format!("等待 Codex app-server 响应 {id} 超时"))?;
+            .map_err(|_| format!("timed out waiting for Codex app-server reply {id}"))?;
         let value: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
         if value.get("id").and_then(|v| v.as_i64()) == Some(id) {
             if value.get("error").is_some() {

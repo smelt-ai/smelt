@@ -28,6 +28,12 @@ use serde::{Deserialize, Serialize};
 
 use std::{fmt, str::FromStr};
 
+// 运行时自己说的话的文案（note.rs，见 docs/i18n.md）。
+rust_i18n::i18n!("locales", fallback = "en");
+
+mod note;
+pub use note::{ConversationEndReason, SessionNote, SignInAgent, TurnFailure};
+
 /// v2：跨 Agent 消息下线，持久投递随之删掉（它是唯一的使用者）：订阅不再声明 `delivery`、
 /// 不带 `cursor`，没有 ack / nack 和 `cursor` 消息，`SessionStateChanged` 去掉 `agent_mcp`。
 /// 载荷都是 `deny_unknown_fields`，新旧两边谁也解不了谁，所以整条事件协议升版，在订阅
@@ -472,10 +478,19 @@ pub struct SessionStateChanged {
     #[serde(rename = "turn_started_at", default)]
     pub turn_started_at_unix_seconds: u64,
     pub pending_question: Option<String>,
+    /// `pending_question` 是运行时自己说的话时，它的种类和参数，客户端按自己的语言说
+    /// （[`SessionNote::text`]）；此时 `pending_question` 是运行时按英文说的同一句，给旧客户端
+    /// 兜底。智能体的原话没有。旧运行时不报。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_note: Option<SessionNote>,
     /// 对话会话正在等的那个请求的身份：`permission:<请求 id>` 或
     /// `elicitation:<卡片 id>`。变了就是换了一个请求；终端会话没有。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_request: Option<String>,
+    /// 最近结束的那轮对应的外部投递（`conversation.prompt` 的 `delivery_id`）；用户自己说的
+    /// 那轮是 None。投递方看到自己的 id 就去 `conversation.turn_result` 取结果。旧运行时不报。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_delivery_id: Option<String>,
     pub tokens_used: Option<u64>,
     /// 会话目录所在仓库的当前分支，运行时监听 HEAD 维护，切了分支会再推一次。不是 git
     /// 仓库、仓库还没有提交是 None，分离头指针是 `HEAD`。旧运行时不报。
@@ -577,20 +592,60 @@ pub enum AttentionKind {
 }
 
 impl AttentionKind {
+    /// 按当前语言说的种类名；终端通知、响铃这些用来源给的标题，没有自己的名字。
+    pub fn label(&self) -> Option<String> {
+        let label = match self {
+            Self::Approval => rust_i18n::t!("attention.approval"),
+            Self::Input => rust_i18n::t!("attention.input"),
+            Self::Success => rust_i18n::t!("attention.success"),
+            Self::Failure => rust_i18n::t!("attention.failure"),
+            Self::Bell | Self::Notice | Self::Unknown => return None,
+        };
+        Some(label.into_owned())
+    }
+}
+
+/// 没有名字的会话在提醒里怎么称呼：按当前语言说「会话」加 id 的开头。
+pub fn unnamed_session(id: &str) -> String {
+    let short = id.get(..8).unwrap_or(id);
+    rust_i18n::t!("attention.unnamed_session", id = short).into_owned()
+}
+
+impl AttentionKind {
     /// 等用户处理的事：等批准、等输入、失败。看过也不算完，会话往下走了才算。
     pub fn requires_action(self) -> bool {
         matches!(self, Self::Approval | Self::Input | Self::Failure)
     }
 }
 
-/// 一条提醒。
+/// 一条提醒。给人看用 [`AttentionItem::title_text`]、[`AttentionItem::message_text`]。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttentionItem {
     pub kind: AttentionKind,
-    /// 短标题：相位名（「等待批准」）、智能体给的标题、「终端通知」。
+    /// 短标题：等批准、等输入、完成、失败这几种是运行时按英文说的种类名（客户端按种类自己说），
+    /// 其余是来源给的标题（终端通知的标题、智能体的名字）。
     pub title: String,
-    /// 一行内容：等批准的命令、等回答的问题、失败原因、通知正文。
+    /// 一行内容：等批准的命令、等回答的问题、失败原因、通知正文。有 `note` 时是它按英文说的
+    /// 同一句，给旧客户端兜底。
     pub message: String,
+    /// `message` 是运行时自己说的话时，它的种类和参数。旧运行时不报。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<SessionNote>,
+}
+
+impl AttentionItem {
+    /// 按当前语言说的标题：种类有自己的名字就用它，否则是来源给的标题。
+    pub fn title_text(&self) -> String {
+        self.kind.label().unwrap_or_else(|| self.title.clone())
+    }
+
+    /// 按当前语言说的内容：运行时自己说的话按种类说，其余原样。
+    pub fn message_text(&self) -> String {
+        self.note
+            .as_ref()
+            .and_then(SessionNote::text)
+            .unwrap_or_else(|| self.message.clone())
+    }
 }
 
 /// 一段会话此刻的提醒。两样都没有的会话不在快照里。
@@ -1035,6 +1090,7 @@ mod tests {
         assert_eq!(state.conversation_id, None);
         assert_eq!(state.custom_title, None);
         assert_eq!(state.pending_request, None);
+        assert_eq!(state.completed_delivery_id, None);
     }
 
     #[test]

@@ -3,6 +3,24 @@
 
 use super::*;
 
+impl AgentEditor {
+    /// 输入框的占位文字。建的时候和换语言时各设一次。
+    pub(crate) fn label(&self, window: &mut Window, cx: &mut App) {
+        self.name.update(cx, |input, cx| {
+            input.set_placeholder(t!("editor.name_placeholder"), window, cx)
+        });
+        self.instructions.update(cx, |input, cx| {
+            input.set_placeholder(t!("editor.instructions_placeholder"), window, cx)
+        });
+        self.context_link.update(cx, |input, cx| {
+            input.set_placeholder(t!("context.link_placeholder"), window, cx)
+        });
+        self.memory_query.update(cx, |input, cx| {
+            input.set_placeholder(t!("memory.search_placeholder"), window, cx)
+        });
+    }
+}
+
 pub(crate) struct AgentEditor {
     pub(crate) agent: AgentRef,
     pub(crate) name: Entity<InputState>,
@@ -64,7 +82,7 @@ impl AgentEditor {
             self.pi
                 .error
                 .clone()
-                .unwrap_or_else(|| "正在读取这台机器的 Pi 配置…".to_string()),
+                .unwrap_or_else(|| t!("pi.loading").into_owned()),
         )
     }
 }
@@ -134,10 +152,16 @@ impl AgentsPage {
     ) {
         let id = uuid::Uuid::new_v4().to_string();
         let existing = agents_on(&runtime, cx).len();
+        // 名字是用户的数据，建的时候按当时的语言定下，之后不跟着换。
         let name = if existing == 0 {
-            format!("{} 智能体", kind.short_label())
+            t!("agent.default_name", kind = kind.short_label()).into_owned()
         } else {
-            format!("{} 智能体 {}", kind.short_label(), existing + 1)
+            t!(
+                "agent.default_name_numbered",
+                kind = kind.short_label(),
+                number = existing + 1
+            )
+            .into_owned()
         };
         let agent = AgentRef::new(runtime.clone(), id.clone());
         let task = agent_hosts::edit(
@@ -205,21 +229,14 @@ impl AgentsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AgentEditor {
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("给它起个名字")
-                .default_value(definition.name)
-        });
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(definition.name));
         let instructions = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(8, 18)
-                .placeholder("它负责什么、怎么做事、什么时候该停下来问你。")
                 .default_value(definition.prompt)
         });
-        let context_link =
-            cx.new(|cx| InputState::new(window, cx).placeholder("粘贴一个参考链接，回车添加"));
-        let memory_query =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索名称、描述或正文"));
+        let context_link = cx.new(|cx| InputState::new(window, cx));
+        let memory_query = cx.new(|cx| InputState::new(window, cx));
 
         let link_agent = agent.id.clone();
         let subscriptions = vec![
@@ -251,7 +268,7 @@ impl AgentsPage {
                 }
             }),
         ];
-        AgentEditor {
+        let editor = AgentEditor {
             agent,
             name,
             instructions,
@@ -263,7 +280,9 @@ impl AgentsPage {
             memory_filter: MemoryFilter::default(),
             expanded_memory: None,
             _subscriptions: subscriptions,
-        }
+        };
+        editor.label(window, cx);
+        editor
     }
 
     /// 名字和指令边打边存。
@@ -338,8 +357,8 @@ impl AgentsPage {
         let picked = api::PICK_PATHS.run(
             &api::PathRequest {
                 machine: runtime,
-                title: "选择要绑定的目录".to_string(),
-                confirm: "绑定".to_string(),
+                title: t!("context.pick_title").into_owned(),
+                confirm: t!("context.pick_confirm").into_owned(),
                 files: false,
                 multiple: true,
             },
@@ -501,24 +520,25 @@ impl AgentsPage {
         );
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ =
-                this.update(cx, |this, cx| {
-                    let Some(editor) = this.editor.as_mut().filter(|editor| {
-                        editor.agent == agent && editor.pi.generation == generation
-                    }) else {
-                        return;
-                    };
-                    match result {
-                        Ok(config) => {
-                            editor.pi.config = Some(config);
-                            editor.pi.error = None;
-                        }
-                        Err(error) => {
-                            editor.pi.error = Some(format!("读取这台机器的 Pi 配置失败：{error}"));
-                        }
+            let _ = this.update(cx, |this, cx| {
+                let Some(editor) = this
+                    .editor
+                    .as_mut()
+                    .filter(|editor| editor.agent == agent && editor.pi.generation == generation)
+                else {
+                    return;
+                };
+                match result {
+                    Ok(config) => {
+                        editor.pi.config = Some(config);
+                        editor.pi.error = None;
                     }
-                    cx.notify();
-                });
+                    Err(error) => {
+                        editor.pi.error = Some(t!("pi.load_failed", error = error).into_owned());
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -568,7 +588,7 @@ impl AgentsPage {
                             }
                         }
                         Err(error) => {
-                            this.error = Some(format!("读取记忆失败：{error}"));
+                            this.error = Some(t!("memory.load_failed", error = error).into_owned());
                             cx.notify();
                         }
                     }
@@ -581,7 +601,7 @@ impl AgentsPage {
     fn submit_memory_change<C>(
         &mut self,
         params: C::Params,
-        failure: &'static str,
+        failure: std::borrow::Cow<'static, str>,
         cx: &mut Context<Self>,
     ) where
         C: api::client::protocol::control::ControlCall + 'static,
@@ -599,7 +619,9 @@ impl AgentsPage {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.error = result.err().map(|error| format!("{failure}：{error}"));
+                this.error = result
+                    .err()
+                    .map(|error| t!("error.detail", what = failure, error = error).into_owned());
                 this.refresh_agent_memories(cx);
             });
         })
@@ -649,7 +671,7 @@ impl AgentsPage {
             .as_ref()
             .is_some_and(|editor| editor.agent.runtime != RuntimeKey::Local)
         {
-            self.error = Some("记忆文件在那台机器上，这台电脑打不开；可以展开直接查看".to_string());
+            self.error = Some(t!("memory.remote_file").into_owned());
             cx.notify();
             return;
         }
@@ -673,8 +695,7 @@ impl AgentsPage {
         };
         // 目录在运行时那台机器上：让运行时建好并给出路径，只有本机运行时打得开。
         if runtime != RuntimeKey::Local {
-            self.error =
-                Some("记忆目录在那台机器上，这台电脑打不开；可以在下面直接查看记忆".to_string());
+            self.error = Some(t!("memory.remote_folder").into_owned());
             cx.notify();
             return;
         }
@@ -715,22 +736,22 @@ impl AgentsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let scope = match target.layer {
-            MemoryLayer::Agent => "这个智能体之后不会再用到它。",
-            MemoryLayer::User => "这是全局记忆，所有智能体之后都不会再用到它。",
+        let message = match target.layer {
+            MemoryLayer::Agent => t!("memory.delete_message_agent", name = target.name),
+            MemoryLayer::User => t!("memory.delete_message_user", name = target.name),
         };
-        let message = format!(
-            "将删除记忆「{}」和它的使用记录。{scope}此操作不可撤销。",
-            target.name
-        );
         let page = cx.entity();
         let target = Rc::new(RefCell::new(Some(target)));
-        api::ui::dialog::Confirm::new("确定删除这条记忆吗？", "删除", move |_, cx| {
-            if let Some(target) = target.borrow_mut().take() {
-                page.update(cx, |page, cx| page.delete_agent_memory(target, cx));
-            }
-            true
-        })
+        api::ui::dialog::Confirm::new(
+            t!("memory.delete_title"),
+            t!("common.delete"),
+            move |_, cx| {
+                if let Some(target) = target.borrow_mut().take() {
+                    page.update(cx, |page, cx| page.delete_agent_memory(target, cx));
+                }
+                true
+            },
+        )
         .danger()
         .description(message)
         .open(window, cx);
@@ -750,7 +771,7 @@ impl AgentsPage {
                 layer: target.layer.wire(),
                 file_name: target.file_name,
             },
-            "删除记忆失败",
+            t!("memory.delete_failed"),
             cx,
         );
     }
@@ -775,7 +796,7 @@ impl AgentsPage {
                 layer: layer.wire(),
                 file_name,
             },
-            "采纳记忆失败",
+            t!("memory.accept_failed"),
             cx,
         );
     }
@@ -820,7 +841,7 @@ impl AgentsPage {
             if is_default_conversation_agent(&agent, cx) {
                 clear_default_conversation_agent(&agent.runtime, cx);
             }
-            self.error = Some("这个智能体不能用来开对话".to_string());
+            self.error = Some(t!("error.cannot_start").into_owned());
             cx.notify();
             return;
         }
@@ -842,7 +863,7 @@ impl AgentsPage {
             .definition(cx)
             .is_some_and(|definition| definition.is_conversation_ready());
         if !ready {
-            self.error = Some("这个智能体还不能开始对话".to_string());
+            self.error = Some(t!("error.not_ready").into_owned());
             cx.notify();
             return;
         }
@@ -898,7 +919,7 @@ impl AgentsPage {
         cx.spawn(async move |this, cx| {
             if let Err(error) = task.await {
                 let _ = this.update(cx, |this, cx| {
-                    this.error = Some(format!("取消新建失败，这个智能体还在：{error}"));
+                    this.error = Some(t!("error.discard_failed", error = error).into_owned());
                     cx.notify();
                 });
             }
@@ -921,16 +942,15 @@ impl AgentsPage {
             return;
         };
         let conversations = agent_conversation_count(&agent, cx);
-        let kept = if conversations == 0 {
-            String::new()
-        } else {
-            format!("已有的 {conversations} 段对话会保留。")
+        let message = match conversations {
+            0 => t!("delete.message", name = name),
+            1 => t!("delete.message_kept.one", name = name),
+            count => t!("delete.message_kept.other", name = name, count = count),
         };
-        let message = format!("将删除智能体「{name}」和它的指令、插件设置。{kept}此操作不可撤销。");
         let page = cx.entity();
         api::ui::dialog::Confirm::new(
-            "确定删除这个智能体吗？",
-            "删除",
+            t!("delete.confirm_title"),
+            t!("common.delete"),
             move |_, cx| {
                 let agent = agent.clone();
                 page.update(cx, |page, cx| page.delete_agent(agent, cx));
@@ -1018,10 +1038,10 @@ struct StartConversation {
 /// 目录由那台机器的运行时建好并给出路径；起对话（引擎、模型、启动命令）归宿主。
 pub(crate) fn start_conversation(agent: AgentRef, cx: &mut App) -> Task<Result<(), String>> {
     let Some(definition) = agent.definition(cx) else {
-        return Task::ready(Err("智能体已经不存在".to_string()));
+        return Task::ready(Err(t!("error.agent_gone").into_owned()));
     };
     if let Some(reason) = agent_conversation_start_error(&definition) {
-        return Task::ready(Err(reason.to_string()));
+        return Task::ready(Err(reason));
     }
     let space = api::call::<api::model::control_api::AgentSpaceEnsure>(
         &agent.runtime,
@@ -1034,7 +1054,7 @@ pub(crate) fn start_conversation(agent: AgentRef, cx: &mut App) -> Task<Result<(
     cx.spawn(async move |cx| {
         let space = space
             .await
-            .map_err(|error| format!("无法创建智能体工作区：{error}"))?;
+            .map_err(|error| t!("error.workspace_failed", error = error).into_owned())?;
         cx.update(|cx| {
             START_CONVERSATION.run(
                 &StartConversation {

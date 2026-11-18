@@ -146,6 +146,6 @@ fn lock_file(file: &File, mode: LockMode, blocking: bool) -> io::Result<()> {
 fn lock_file(_file: &File, _mode: LockMode, _blocking: bool) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "这个平台没有文件锁",
+        "file locks aren't available on this platform",
     ))
 }

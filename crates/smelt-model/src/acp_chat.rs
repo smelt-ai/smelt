@@ -9,6 +9,7 @@
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 
 /// 消息流里的一条。由 agent 会话历史重放，也可随 smeltd 热升级快照交接。
@@ -46,10 +47,80 @@ pub enum AcpEntry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer: Option<PeerSend>,
     },
-    /// 「重新开始」在旧对话和新对话之间插的分割线（不清空历史，只做标记）。
+    /// 旧运行时在旧对话和新对话之间插的分割线，整句是它写好的。现在的运行时发
+    /// [`AcpEntry::NewSession`]。
     Divider(String),
+    /// 运行时开了新会话、智能体不记得以上内容时插的分割线（不清空历史，只做标记）。
+    /// `at_ms` 是开新会话的时刻（Unix 毫秒），客户端按自己的时区和语言说。
+    NewSession {
+        at_ms: i64,
+    },
+    /// 回合失败。`detail` 是智能体或底层报的原话（可能为空），`hint` 是运行时认出来的下一步。
+    /// 是状态，不是智能体说的话：不进交接、不当最后的回答。
+    TurnFailed {
+        detail: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<TurnHint>,
+    },
     /// 后台任务或后台子智能体结束。这是状态，不是用户说的话，不能回退，也不能当会话标题。
     TaskNote(TaskNote),
+}
+
+/// 回合失败时运行时认得出、能给出下一步的情况。只放确定能给出动作的：猜错了会把人支到错的地方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnHint {
+    /// 没配 API key。
+    NoApiKey,
+    /// API key 被服务端拒绝。
+    ApiKeyRejected,
+    /// 连不上模型服务。
+    ConnectionRefused,
+    /// 被服务端限流。
+    RateLimited,
+    /// 比读的一方新的种类。
+    #[serde(other)]
+    Other,
+}
+
+impl TurnHint {
+    /// 按当前界面语言说下一步；[`TurnHint::Other`] 没有自己的话，给 `None`。
+    pub fn text(self) -> Option<String> {
+        let text = match self {
+            Self::NoApiKey => t!("turn_hint.no_api_key"),
+            Self::ApiKeyRejected => t!("turn_hint.api_key_rejected"),
+            Self::ConnectionRefused => t!("turn_hint.connection_refused"),
+            Self::RateLimited => t!("turn_hint.rate_limited"),
+            Self::Other => return None,
+        };
+        Some(text.into_owned())
+    }
+}
+
+/// 回合失败那一条按当前界面语言说成的话：原话接在后面，认出来的下一步另起一段。
+pub fn turn_failed_text(detail: &str, hint: Option<TurnHint>) -> String {
+    let detail = detail.trim();
+    let head = if detail.is_empty() {
+        t!("entry.turn_failed")
+    } else {
+        t!("entry.turn_failed_with_detail", detail = detail)
+    };
+    match hint.and_then(TurnHint::text) {
+        Some(hint) => format!("{head}\n\n{hint}"),
+        None => head.into_owned(),
+    }
+}
+
+/// 新会话分割线上的字，时间按本机时区说。
+pub fn new_session_label(at_ms: i64) -> String {
+    let at = chrono::DateTime::from_timestamp_millis(at_ms)
+        .map(|at| {
+            at.with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default();
+    t!("entry.new_session", at = at).into_owned()
 }
 
 /// Pi 会话里这条自定义消息的类型。重放时认它，避免把结果画成用户或助手的话。
@@ -232,33 +303,39 @@ impl TaskNote {
             } else {
                 &peer.source_title
             };
-            return format!("{from} {}", peer.kind.received());
+            return peer.kind.received(from);
         }
         let status = match self.status.as_str() {
-            "completed" => "完成",
-            "failed" => "失败",
-            "timed_out" => "超时",
-            "stopped" => "已停止",
-            "running" => "进行中",
-            other => other,
+            "completed" => t!("task_note.status.completed"),
+            "failed" => t!("task_note.status.failed"),
+            "timed_out" => t!("task_note.status.timed_out"),
+            "stopped" => t!("task_note.status.stopped"),
+            "running" => t!("task_note.status.running"),
+            other => Cow::Owned(other.to_string()),
         };
-        let code = self
-            .exit_code
-            .map(|code| format!("，退出码 {code}"))
-            .unwrap_or_default();
         // 子智能体派发的 `id` 是派发它的工具调用 id，只给程序对卡片用；人看的是子智能体自己的 id。
         let who = match (self.kind, self.runs.as_slice()) {
-            (TaskNoteKind::BackgroundTask, _) => format!("后台任务 {}", self.id),
-            (TaskNoteKind::Subagent, [run]) => format!("子智能体 {}", run.id),
-            (TaskNoteKind::Subagent, []) => format!("子智能体 {}", self.id),
-            (TaskNoteKind::Subagent, runs) => format!("{} 个子智能体", runs.len()),
-            (TaskNoteKind::PeerMessage, _) => format!("消息 {}", self.id),
+            (TaskNoteKind::BackgroundTask, _) => t!("task_note.background_task", id = self.id),
+            (TaskNoteKind::Subagent, [run]) => t!("task_note.subagent", id = run.id),
+            (TaskNoteKind::Subagent, []) => t!("task_note.subagent", id = self.id),
+            (TaskNoteKind::Subagent, runs) => t!("task_note.subagents", count = runs.len()),
+            (TaskNoteKind::PeerMessage, _) => t!("task_note.message", id = self.id),
         };
-        if self.title.is_empty() {
-            format!("{who} 已结束，状态 {status}{code}")
+        let who = if self.title.is_empty() {
+            who
         } else {
-            format!("{who}（{}）已结束，状态 {status}{code}", self.title)
+            t!("task_note.titled", who = who, title = self.title)
+        };
+        match self.exit_code {
+            Some(code) => t!(
+                "task_note.ended_with_code",
+                who = who,
+                status = status,
+                code = code
+            ),
+            None => t!("task_note.ended", who = who, status = status),
         }
+        .into_owned()
     }
 }
 
@@ -528,6 +605,20 @@ pub enum ToolOutputPart {
 }
 
 impl AcpEntry {
+    /// 是不是分割线：旧运行时的整句，或新会话。回合在这里断开。
+    pub fn is_divider(&self) -> bool {
+        matches!(self, Self::Divider(_) | Self::NewSession { .. })
+    }
+
+    /// 分割线上的字；不是分割线给 `None`。
+    pub fn divider_label(&self) -> Option<String> {
+        match self {
+            Self::Divider(label) => Some(label.clone()),
+            Self::NewSession { at_ms } => Some(new_session_label(*at_ms)),
+            _ => None,
+        }
+    }
+
     pub fn tool_call(
         id: impl Into<String>,
         title: impl Into<String>,
@@ -709,7 +800,7 @@ pub fn compact_diff_lines(lines: &[DiffLine], context: usize) -> Vec<DiffLine> {
         if start > previous_end {
             out.push(DiffLine {
                 tag: DiffLineTag::Context,
-                text: format!("... 省略 {} 行未修改内容 ...", start - previous_end),
+                text: t!("diff.unchanged_lines", count = start - previous_end).into_owned(),
                 no_newline: false,
             });
         }
@@ -719,7 +810,7 @@ pub fn compact_diff_lines(lines: &[DiffLine], context: usize) -> Vec<DiffLine> {
     if previous_end < lines.len() {
         out.push(DiffLine {
             tag: DiffLineTag::Context,
-            text: format!("... 省略 {} 行未修改内容 ...", lines.len() - previous_end),
+            text: t!("diff.unchanged_lines", count = lines.len() - previous_end).into_owned(),
             no_newline: false,
         });
     }
@@ -815,9 +906,9 @@ pub fn is_generic_subagent_title(title: &str) -> bool {
 
 /// 子代理卡片标题：展示工作内容，而不是工具名。
 ///
-/// 优先 `label` / 短描述 / 任务首行，再退到预设名或并行/串联摘要。已经是具体标题的
+/// 优先 `label` / 短描述 / 任务首行，再退到预设名。已经是具体标题的
 /// （如 Codex 的 `Start subagent explorer`）只剥启动前缀，不拿参数覆盖。
-/// 并行/串联组只保留计数（「4 个并行」），名单留给卡片里的子行，避免标题把孩子焊一遍。
+/// 多项的并行/串联组不起标题，留泛称，卡片按名单数人数，名单留给卡片里的子行。
 pub fn subagent_display_title(title: &str, args: Option<&serde_json::Value>) -> String {
     let stripped = strip_subagent_prefix(title);
     let derived = args.and_then(subagent_title_from_args);
@@ -843,26 +934,48 @@ pub fn is_subagent_roster(children: &[AcpEntry]) -> bool {
     roster_children(children).count() >= 2
 }
 
+/// 子代理卡片的主标题。文案由界面按语言拼。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubagentCardTitle {
+    /// 并行名单，写成「N 个子代理」。
+    Count(usize),
+    /// 工作名；可能为空，界面自己给个泛称。
+    Named(String),
+}
+
 /// 卡片主标题。组头用计数，不用把孩子名字用间隔符焊在一起；旧快照里已经焊好的标题
 /// 在展示时拆掉。单独一条子代理仍用它自己的工作名。
-pub fn subagent_card_title(title: &str, children: &[AcpEntry]) -> String {
+pub fn subagent_card_title(title: &str, children: &[AcpEntry]) -> SubagentCardTitle {
     let headline = subagent_visible_title(title);
     let titles = roster_titles(children);
     if titles.len() >= 2 {
         if headline.is_empty() || title_duplicates_roster(&headline, &titles) {
-            return format!("{} 个子代理", titles.len());
+            return SubagentCardTitle::Count(titles.len());
         }
-        return headline;
+        return SubagentCardTitle::Named(headline);
     }
     if headline.is_empty() && titles.len() == 1 {
-        return titles[0].clone();
+        return SubagentCardTitle::Named(titles[0].clone());
     }
-    headline
+    SubagentCardTitle::Named(headline)
+}
+
+/// 组头右侧的进度。文案由界面按语言拼。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubagentProgress {
+    /// 不写进度：名单正常结束（留给完成勾），或单代理还在跑。
+    None,
+    /// 并行名单跑着：`done/total`。
+    Running { done: usize, total: usize },
+    /// 并行名单结束，有几个失败了。
+    Failed(usize),
+    /// 单代理轨迹结束，做了几步。
+    Steps(usize),
 }
 
 /// 组头右侧的进度。并行名单跑着时是 `2/4`；结束后不写分数（留给完成勾）。
 /// 单代理轨迹结束后才用「N 步」提示工作量。
-pub fn subagent_progress_text(status: ToolCallStatus, children: &[AcpEntry]) -> String {
+pub fn subagent_progress(status: ToolCallStatus, children: &[AcpEntry]) -> SubagentProgress {
     let roster: Vec<&AcpEntry> = roster_children(children).collect();
     let running = matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress)
         || has_unfinished_tool_call(children);
@@ -874,9 +987,9 @@ pub fn subagent_progress_text(status: ToolCallStatus, children: &[AcpEntry]) -> 
             .count();
         if !running {
             return if failed > 0 {
-                format!("{failed} 个失败")
+                SubagentProgress::Failed(failed)
             } else {
-                String::new()
+                SubagentProgress::None
             };
         }
         let done = roster
@@ -884,19 +997,22 @@ pub fn subagent_progress_text(status: ToolCallStatus, children: &[AcpEntry]) -> 
             .copied()
             .filter(|entry| agent_settled(entry))
             .count();
-        return format!("{done}/{}", roster.len());
+        return SubagentProgress::Running {
+            done,
+            total: roster.len(),
+        };
     }
     if running {
-        return String::new();
+        return SubagentProgress::None;
     }
     let steps = children
         .iter()
         .filter(|child| matches!(child, AcpEntry::ToolCall { .. }))
         .count();
     if steps > 0 {
-        format!("{steps} 步")
+        SubagentProgress::Steps(steps)
     } else {
-        String::new()
+        SubagentProgress::None
     }
 }
 
@@ -935,8 +1051,7 @@ pub fn subagent_title_from_args(args: &serde_json::Value) -> Option<String> {
     ) {
         return Some(agent.to_string());
     }
-    grouped_subagent_title(args, "tasks", "并行")
-        .or_else(|| grouped_subagent_title(args, "chain", "串联"))
+    single_subagent_title(args, "tasks").or_else(|| single_subagent_title(args, "chain"))
 }
 
 fn strip_subagent_prefix(title: &str) -> &str {
@@ -957,15 +1072,13 @@ fn strip_subagent_prefix(title: &str) -> &str {
     title
 }
 
-fn grouped_subagent_title(args: &serde_json::Value, key: &str, kind: &str) -> Option<String> {
-    let items = args
-        .get(key)?
-        .as_array()
-        .filter(|items| !items.is_empty())?;
-    if items.len() == 1 {
-        return subagent_title_from_args(&items[0]).or_else(|| Some(kind.to_string()));
+/// 并行 / 串联组里只有一项时用那一项的标题。多项不起标题：这个标题存进对话、由运行时算，
+/// 写死哪种语言都不对；卡片按名单自己数（[`SubagentCardTitle::Count`]），界面按语言说。
+fn single_subagent_title(args: &serde_json::Value, key: &str) -> Option<String> {
+    match args.get(key)?.as_array()?.as_slice() {
+        [only] => subagent_title_from_args(only),
+        _ => None,
     }
-    Some(format!("{} 个{}", items.len(), kind))
 }
 
 fn roster_children(children: &[AcpEntry]) -> impl Iterator<Item = &AcpEntry> {
@@ -1094,6 +1207,46 @@ pub fn completion_summary_text(output: &[ToolOutputPart]) -> String {
 mod tests {
     use super::*;
 
+    /// 回合失败和新会话由运行时发种类，客户端说话；比客户端新的建议读成 `Other`，只说原话。
+    #[test]
+    fn runtime_entries_are_worded_by_the_client() {
+        assert_eq!(turn_failed_text("  ", None), "⚠️ Turn failed");
+        assert_eq!(
+            turn_failed_text("boom", Some(TurnHint::Other)),
+            "⚠️ Turn failed: boom"
+        );
+        let text = turn_failed_text("no api key", Some(TurnHint::NoApiKey));
+        assert!(
+            text.starts_with("⚠️ Turn failed: no api key\n\nNo API key yet"),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::from_str::<TurnHint>("\"quota_exceeded\"").unwrap(),
+            TurnHint::Other
+        );
+
+        let failed = AcpEntry::TurnFailed {
+            detail: "boom".into(),
+            hint: None,
+        };
+        let json = serde_json::to_value(&failed).unwrap();
+        assert_eq!(json, serde_json::json!({"TurnFailed": {"detail": "boom"}}));
+        assert_eq!(serde_json::from_value::<AcpEntry>(json).unwrap(), failed);
+
+        let fresh = AcpEntry::NewSession { at_ms: 0 };
+        assert!(fresh.is_divider());
+        assert!(AcpEntry::Divider("旧运行时写好的".into()).is_divider());
+        assert!(!failed.is_divider());
+        let label = fresh.divider_label().unwrap();
+        assert!(label.starts_with("New session · "), "{label}");
+        assert_eq!(
+            AcpEntry::Divider("旧运行时写好的".into())
+                .divider_label()
+                .as_deref(),
+            Some("旧运行时写好的")
+        );
+    }
+
     /// 子智能体的结果走自定义消息，重放时要还原成状态行，不能变成用户气泡。
     #[test]
     fn subagent_result_custom_message_becomes_a_task_note() {
@@ -1104,7 +1257,7 @@ mod tests {
         });
         let note = task_note_from_pi_custom(&message).unwrap();
         assert_eq!(note.kind, TaskNoteKind::Subagent);
-        assert_eq!(note.summary(), "子智能体 sub-1（迁移）已结束，状态 失败");
+        assert_eq!(note.summary(), "Subagent sub-1 (迁移) ended: failed");
         assert_eq!(note.output_tail, "出错了");
 
         let old_snapshot: TaskNote = serde_json::from_value(serde_json::json!({
@@ -1119,7 +1272,7 @@ mod tests {
         });
         assert_eq!(
             task_note_from_pi_custom(&stopped).unwrap().summary(),
-            "子智能体 bg-1 已结束，状态 已停止",
+            "Subagent bg-1 ended: stopped",
             "被叫停的子智能体和宿主一样记停止，不写成失败"
         );
 
@@ -1151,7 +1304,7 @@ mod tests {
         let peer = note.peer.as_ref().unwrap();
         assert_eq!(peer.source_session_id, "acp-a");
         assert_eq!(peer.kind, crate::acp_session::PeerMessageKind::Task);
-        assert_eq!(note.summary(), "修登录 发来任务");
+        assert_eq!(note.summary(), "修登录 sent a task");
 
         let untitled = serde_json::json!({
             "customType": SMELT_PEER_MESSAGE_CUSTOM_TYPE,
@@ -1159,7 +1312,7 @@ mod tests {
         });
         assert_eq!(
             task_note_from_pi_custom(&untitled).unwrap().summary(),
-            "acp-b 交回结果"
+            "acp-b handed back a result"
         );
 
         let bounce = serde_json::json!({
@@ -1171,7 +1324,7 @@ mod tests {
             note.peer.as_ref().unwrap().kind,
             crate::acp_session::PeerMessageKind::Bounce
         );
-        assert_eq!(note.summary(), "部署 没收到你的消息");
+        assert_eq!(note.summary(), "部署 didn't get your message");
     }
 
     /// 退信只由主 daemon 写：工具参数里写 `bounce` 也只是普通消息。
@@ -1239,7 +1392,7 @@ mod tests {
         assert_eq!(note.id, "toolu_01Vc", "卡片按派发的工具调用对上");
         assert_eq!(
             note.summary(),
-            "子智能体 sa-e8fd14d08fd4（仓库概览）已结束，状态 完成"
+            "Subagent sa-e8fd14d08fd4 (仓库概览) ended: done"
         );
 
         let parallel = serde_json::json!({
@@ -1254,10 +1407,7 @@ mod tests {
         });
         let note = task_note_from_pi_custom(&parallel).unwrap();
         assert_eq!(note.runs.len(), 2);
-        assert_eq!(
-            note.summary(),
-            "2 个子智能体（2 个并行任务）已结束，状态 失败"
-        );
+        assert_eq!(note.summary(), "2 subagents (2 个并行任务) ended: failed");
     }
 
     #[test]
@@ -1502,7 +1652,11 @@ mod tests {
 
         assert!(compact.len() < 12);
         assert!(compact.iter().any(|line| line.text == "changed"));
-        assert!(compact.iter().any(|line| line.text.contains("省略")));
+        assert!(
+            compact
+                .iter()
+                .any(|line| line.text.contains("unchanged lines"))
+        );
         assert_eq!(
             compact
                 .iter()
@@ -1643,7 +1797,8 @@ mod tests {
                 "subagent",
                 Some(&serde_json::json!({"tasks": [{"label": "UI"}, {"label": "RPC"}]}))
             ),
-            "2 个并行"
+            "subagent",
+            "多项的组留泛称，卡片自己数人数"
         );
         assert_eq!(
             subagent_display_title(
@@ -1653,8 +1808,16 @@ mod tests {
             "UI"
         );
         assert_eq!(
-            subagent_display_title("subagent", Some(&serde_json::json!({"chain": [{}, {}]}))),
-            "2 个串联"
+            subagent_display_title(
+                "subagent",
+                Some(&serde_json::json!({"chain": [{"label": "拆"}, {}]}))
+            ),
+            "subagent"
+        );
+        assert_eq!(
+            subagent_display_title("subagent", Some(&serde_json::json!({"chain": [{}]}))),
+            "subagent",
+            "唯一一项没名字也不编"
         );
         assert_eq!(subagent_display_title("subagent", None), "subagent");
         assert!(is_generic_subagent_title("Task"));
@@ -1675,13 +1838,26 @@ mod tests {
         ];
         let welded = "smeltd 遗留审查 · 核心存储审查 · GUI 遗留审查 · 依赖与全局结构审查";
         assert!(is_subagent_roster(&children));
-        assert_eq!(subagent_card_title(welded, &children), "4 个子代理");
-        assert_eq!(subagent_card_title("4 个并行", &children), "4 个并行");
-        assert_eq!(subagent_card_title("全面审查", &children), "全面审查");
-        assert_eq!(subagent_card_title("subagent", &children), "4 个子代理");
+        let named = |name: &str| SubagentCardTitle::Named(name.to_string());
         assert_eq!(
-            subagent_progress_text(ToolCallStatus::InProgress, &children),
-            "0/4"
+            subagent_card_title(welded, &children),
+            SubagentCardTitle::Count(4)
+        );
+        assert_eq!(
+            subagent_card_title("4 个并行", &children),
+            named("4 个并行")
+        );
+        assert_eq!(
+            subagent_card_title("全面审查", &children),
+            named("全面审查")
+        );
+        assert_eq!(
+            subagent_card_title("subagent", &children),
+            SubagentCardTitle::Count(4)
+        );
+        assert_eq!(
+            subagent_progress(ToolCallStatus::InProgress, &children),
+            SubagentProgress::Running { done: 0, total: 4 }
         );
     }
 
@@ -1694,23 +1870,26 @@ mod tests {
             collab("d", "存储", ToolCallStatus::Pending),
         ];
         assert_eq!(
-            subagent_progress_text(ToolCallStatus::InProgress, &children),
-            "2/4"
+            subagent_progress(ToolCallStatus::InProgress, &children),
+            SubagentProgress::Running { done: 2, total: 4 }
         );
 
         let done = vec![
             collab("a", "UI", ToolCallStatus::Completed),
             collab("b", "RPC", ToolCallStatus::Completed),
         ];
-        assert_eq!(subagent_progress_text(ToolCallStatus::Completed, &done), "");
+        assert_eq!(
+            subagent_progress(ToolCallStatus::Completed, &done),
+            SubagentProgress::None
+        );
 
         let failed = vec![
             collab("a", "UI", ToolCallStatus::Completed),
             collab("b", "RPC", ToolCallStatus::Failed),
         ];
         assert_eq!(
-            subagent_progress_text(ToolCallStatus::Completed, &failed),
-            "1 个失败"
+            subagent_progress(ToolCallStatus::Completed, &failed),
+            SubagentProgress::Failed(1)
         );
     }
 
@@ -1737,25 +1916,31 @@ mod tests {
             *children = reads;
         }
         assert!(!is_subagent_roster(parent_children(&parent)));
-        assert_eq!(subagent_card_title("Task", parent_children(&parent)), "");
+        assert_eq!(
+            subagent_card_title("Task", parent_children(&parent)),
+            SubagentCardTitle::Named(String::new())
+        );
         assert_eq!(
             subagent_card_title("查登录", parent_children(&parent)),
-            "查登录"
+            SubagentCardTitle::Named("查登录".to_string())
         );
         assert_eq!(
-            subagent_progress_text(ToolCallStatus::Completed, parent_children(&parent)),
-            "2 步"
+            subagent_progress(ToolCallStatus::Completed, parent_children(&parent)),
+            SubagentProgress::Steps(2)
         );
         assert_eq!(
-            subagent_progress_text(ToolCallStatus::InProgress, parent_children(&parent)),
-            ""
+            subagent_progress(ToolCallStatus::InProgress, parent_children(&parent)),
+            SubagentProgress::None
         );
     }
 
     #[test]
     fn subagent_generic_parent_adopts_the_only_child_name() {
         let children = vec![collab("a", "查登录", ToolCallStatus::InProgress)];
-        assert_eq!(subagent_card_title("subagent", &children), "查登录");
+        assert_eq!(
+            subagent_card_title("subagent", &children),
+            SubagentCardTitle::Named("查登录".to_string())
+        );
         assert!(!is_subagent_roster(&children));
     }
 

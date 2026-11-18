@@ -139,7 +139,7 @@ impl Subprocess for LocalSubprocess {
             let mut si = child
                 .stdin
                 .take()
-                .ok_or_else(|| io::Error::other("无法打开子进程 stdin"))?;
+                .ok_or_else(|| io::Error::other("couldn't open the child process's stdin"))?;
             si.write_all(stdin)?;
         } // si 在这里 drop → 子进程收到 EOF
         let out = child.wait_with_output()?;

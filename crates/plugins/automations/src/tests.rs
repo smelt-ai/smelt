@@ -5,7 +5,7 @@
 
 use smelt_plugin_api::model::automation::{
     AutomationAction, AutomationRunStatus, AutomationSchedule, AutomationSink, AutomationTrigger,
-    SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_WEEKDAYS_MASK,
+    SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_DAY_WED, SCHEDULE_WEEKDAYS_MASK, WebhookIngress,
 };
 use smelt_plugin_api::ui::field::InputEvent;
 
@@ -19,9 +19,10 @@ use crate::editor::{
     identity_name_should_finish_edit, interval_title, schedule_from_values, webhook_curl_example,
 };
 use crate::format::{
-    AutomationRowStatus, agent_display_name, automation_missing_fields, automation_row_status,
-    automation_row_status_label, automation_save_hint, format_last_run_cell, format_next_run_cell,
-    format_relative_since, format_relative_until,
+    AutomationRowStatus, MissingField, agent_display_name, automation_missing_fields,
+    automation_row_status, automation_row_status_label, automation_save_hint, format_last_run_cell,
+    format_next_run_cell, format_relative_since, format_relative_until, schedule_summary,
+    trigger_summary,
 };
 
 #[test]
@@ -38,7 +39,7 @@ fn clock_editor_accepts_partial_valid_values_without_accepting_impossible_times(
 fn webhook_curl_example_is_a_single_copyable_command() {
     let curl = webhook_curl_example("http://127.0.0.1:17827/hooks/tok");
     assert!(curl.starts_with("curl -sS -X POST http://127.0.0.1:17827/hooks/tok "));
-    assert!(curl.contains(r#"{"text":"你好"}"#));
+    assert!(curl.contains(r#"{"text":"Hello"}"#));
     assert!(!curl.contains('\n'));
 }
 
@@ -46,25 +47,106 @@ fn webhook_curl_example_is_a_single_copyable_command() {
 fn automation_copy_uses_precise_product_terms() {
     assert_eq!(
         automation_prompt_hint(false),
-        "每次运行时发送给智能体。长期指令请在智能体设置中配置。"
+        "Sent to the agent on every run. Set standing instructions in the agent's settings."
     );
     assert_eq!(
         automation_prompt_hint(true),
-        "收到的请求内容会附在指令后面；想放到指定位置，用 {{payload}} 或字段变量（如 {{text}}）。留空时直接发送请求内容。长期指令请在智能体设置中配置。"
+        "The request body is appended to the instructions; to place it elsewhere, use {{payload}} or a field variable (such as {{text}}). Leave empty to send the request body as is. Set standing instructions in the agent's settings."
     );
-    assert_eq!(AutomationTriggerPresetId::Daily.label(), "每天");
+    assert_eq!(AutomationTriggerPresetId::Daily.label(), "Daily");
     assert_eq!(AutomationTriggerPresetId::Webhook.label(), "Webhook");
-    assert_eq!(AutomationNotificationPreset::App.label(), "应用内通知");
-    assert_eq!(AutomationNotificationPreset::Off.label(), "不通知");
+    assert_eq!(
+        AutomationNotificationPreset::App.label(),
+        "In-App Notification"
+    );
+    assert_eq!(AutomationNotificationPreset::Off.label(), "No Notification");
+}
+
+#[test]
+fn schedule_summaries_read_naturally() {
+    assert_eq!(
+        schedule_summary(&AutomationSchedule::Weekly {
+            days: SCHEDULE_WEEKDAYS_MASK,
+            hour: 9,
+            minute: 35,
+        }),
+        "Every Mon, Tue, Wed, Thu, Fri · 09:35"
+    );
+    assert_eq!(
+        schedule_summary(&AutomationSchedule::Daily { hour: 9, minute: 0 }),
+        "Daily 09:00"
+    );
+    assert_eq!(
+        schedule_summary(&AutomationSchedule::EveryMinutes { minutes: 15 }),
+        "Every 15 min"
+    );
+    assert_eq!(
+        schedule_summary(&AutomationSchedule::EveryHours { hours: 1 }),
+        "Every 1 h"
+    );
+    assert_eq!(
+        schedule_summary(&AutomationSchedule::During {
+            minutes: 15,
+            days: SCHEDULE_WEEKDAYS_MASK,
+            start_hour: 9,
+            start_minute: 30,
+            end_hour: 15,
+            end_minute: 0,
+        }),
+        "Every Mon, Tue, Wed, Thu, Fri 09:30–15:00 · every 15 min"
+    );
+    assert_eq!(
+        schedule_summary(&AutomationSchedule::Weekly {
+            days: SCHEDULE_DAY_MON | SCHEDULE_DAY_WED | SCHEDULE_DAY_FRI,
+            hour: 9,
+            minute: 35,
+        }),
+        "Every Mon, Wed, Fri · 09:35"
+    );
+}
+
+/// 触发的摘要逐条列出，外部触发不带令牌。
+#[test]
+fn trigger_summary_lists_every_trigger_without_the_token() {
+    assert_eq!(
+        trigger_summary(&AutomationTrigger::webhook_with_secret(
+            "tok_should_not_leak"
+        )),
+        "External Trigger"
+    );
+    let both =
+        AutomationTrigger::schedule(AutomationSchedule::daily_morning()).with_webhook_secret("tok");
+    assert_eq!(trigger_summary(&both), "Daily 09:00; External Trigger");
+    let two_hooks = AutomationTrigger {
+        webhooks: vec![
+            WebhookIngress {
+                endpoint: "a".into(),
+                secret: Some("a".into()),
+            },
+            WebhookIngress {
+                endpoint: "b".into(),
+                secret: Some("b".into()),
+            },
+        ],
+        ..AutomationTrigger::default()
+    };
+    assert_eq!(
+        trigger_summary(&two_hooks),
+        "External Trigger; External Trigger"
+    );
+    assert_eq!(
+        trigger_summary(&AutomationTrigger::default()),
+        "No trigger set up"
+    );
 }
 
 #[test]
 fn interval_title_names_the_actual_interval() {
-    assert_eq!(interval_title(IntervalUnit::Hours, "1"), "每小时");
-    assert_eq!(interval_title(IntervalUnit::Hours, " 6 "), "每隔 6 小时");
-    assert_eq!(interval_title(IntervalUnit::Minutes, "15"), "每隔 15 分钟");
-    assert_eq!(interval_title(IntervalUnit::Hours, ""), "间隔");
-    assert_eq!(interval_title(IntervalUnit::Minutes, "  "), "间隔");
+    assert_eq!(interval_title(IntervalUnit::Hours, "1"), "Hourly");
+    assert_eq!(interval_title(IntervalUnit::Hours, " 6 "), "Every 6 h");
+    assert_eq!(interval_title(IntervalUnit::Minutes, "15"), "Every 15 min");
+    assert_eq!(interval_title(IntervalUnit::Hours, ""), "Interval");
+    assert_eq!(interval_title(IntervalUnit::Minutes, "  "), "Interval");
 }
 
 #[test]
@@ -75,11 +157,11 @@ fn automation_form_lists_every_missing_field() {
     };
     assert_eq!(
         automation_missing_fields("", false, false, &agent(None), true),
-        vec!["名称", "触发器"]
+        vec![MissingField::Name, MissingField::Trigger]
     );
     assert_eq!(
         automation_missing_fields("晨报", true, true, &agent(Some("  ")), true),
-        vec!["指令"]
+        vec![MissingField::Prompt]
     );
     assert!(
         automation_missing_fields("Hook", true, false, &agent(None), true).is_empty(),
@@ -87,7 +169,7 @@ fn automation_form_lists_every_missing_field() {
     );
     assert_eq!(
         automation_missing_fields("晨报", true, true, &agent(Some("汇总")), false),
-        vec!["智能体"]
+        vec![MissingField::Agent]
     );
     assert_eq!(
         automation_missing_fields(
@@ -97,7 +179,7 @@ fn automation_form_lists_every_missing_field() {
             &AutomationAction::shell("", Vec::new()),
             false
         ),
-        vec!["命令"]
+        vec![MissingField::Command]
     );
 }
 
@@ -105,12 +187,12 @@ fn automation_form_lists_every_missing_field() {
 fn save_hint_names_what_is_missing_and_how_saving_works() {
     assert_eq!(automation_save_hint(&[], true), None);
     assert_eq!(
-        automation_save_hint(&["名称", "触发器"], true).as_deref(),
-        Some("还差：名称、触发器")
+        automation_save_hint(&[MissingField::Name, MissingField::Trigger], true).as_deref(),
+        Some("Still needed: Name, Trigger")
     );
     assert_eq!(
-        automation_save_hint(&["指令"], false).as_deref(),
-        Some("还差：指令，补齐后自动保存")
+        automation_save_hint(&[MissingField::Prompt], false).as_deref(),
+        Some("Still needed: Instructions. Saves automatically once complete")
     );
 }
 
@@ -225,14 +307,14 @@ fn interval_with_weekday_window_maps_to_during() {
     assert!(window("09:30", "").is_err());
     assert_eq!(
         window("11:30", "09:30").unwrap_err(),
-        "结束时间需晚于开始时间"
+        "The end time must be later than the start time"
     );
 }
 
 #[test]
 fn unnamed_agent_falls_back_to_placeholder() {
-    assert_eq!(agent_display_name(""), "未命名");
-    assert_eq!(agent_display_name("   "), "未命名");
+    assert_eq!(agent_display_name(""), "Untitled");
+    assert_eq!(agent_display_name("   "), "Untitled");
     assert_eq!(agent_display_name(" 量化交易 "), "量化交易");
 }
 
@@ -271,44 +353,41 @@ fn automation_row_status_prefers_faults_then_running_then_enabled() {
     );
     assert_eq!(
         automation_row_status_label(AutomationRowStatus::Active),
-        "已启用"
+        "Enabled"
     );
     assert_eq!(
         automation_row_status_label(AutomationRowStatus::Paused),
-        "已暂停"
+        "Paused"
     );
 }
 
 #[test]
 fn next_run_cell_uses_relative_time_and_dash_when_paused() {
-    assert_eq!(format_relative_until(100, 100), "即将运行");
-    assert_eq!(format_relative_until(100, 160), "即将运行");
-    assert_eq!(format_relative_until(100 + 3 * 60, 100), "3 分钟后");
-    assert_eq!(format_relative_until(100 + 15 * 3600, 100), "15 小时后");
-    assert_eq!(format_relative_until(100 + 2 * 86400, 100), "2 天后");
-    assert_eq!(
-        format_next_run_cell(Some(100 + 3600), true, 100),
-        "1 小时后"
-    );
+    assert_eq!(format_relative_until(100, 100), "Running soon");
+    assert_eq!(format_relative_until(100, 160), "Running soon");
+    assert_eq!(format_relative_until(100 + 3 * 60, 100), "in 3 min");
+    assert_eq!(format_relative_until(100 + 15 * 3600, 100), "in 15 h");
+    assert_eq!(format_relative_until(100 + 2 * 86400, 100), "in 2 d");
+    assert_eq!(format_next_run_cell(Some(100 + 3600), true, 100), "in 1 h");
     assert_eq!(format_next_run_cell(Some(100 + 3600), false, 100), "—");
     assert_eq!(format_next_run_cell(None, true, 100), "—");
 }
 
 #[test]
 fn last_run_cell_reads_status_then_relative_time() {
-    assert_eq!(format_relative_since(100, 100), "刚刚");
-    assert_eq!(format_relative_since(100, 130), "刚刚");
-    assert_eq!(format_relative_since(100, 100 + 3 * 60), "3 分钟前");
-    assert_eq!(format_relative_since(100, 100 + 5 * 3600), "5 小时前");
-    assert_eq!(format_relative_since(100, 100 + 2 * 86400), "2 天前");
-    assert_eq!(format_relative_since(100, 100 + 40 * 86400), "1 个月前");
-    assert_eq!(format_relative_since(100, 100 + 400 * 86400), "1 年前");
+    assert_eq!(format_relative_since(100, 100), "Just now");
+    assert_eq!(format_relative_since(100, 130), "Just now");
+    assert_eq!(format_relative_since(100, 100 + 3 * 60), "3 min ago");
+    assert_eq!(format_relative_since(100, 100 + 5 * 3600), "5 h ago");
+    assert_eq!(format_relative_since(100, 100 + 2 * 86400), "2 d ago");
+    assert_eq!(format_relative_since(100, 100 + 40 * 86400), "1 mo ago");
+    assert_eq!(format_relative_since(100, 100 + 400 * 86400), "1 yr ago");
     // 远程机器的时钟可能比本机快，不写成负数。
-    assert_eq!(format_relative_since(100 + 3600, 100), "刚刚");
+    assert_eq!(format_relative_since(100 + 3600, 100), "Just now");
     assert_eq!(format_last_run_cell(None, 100), "—");
     assert_eq!(
         format_last_run_cell(Some((AutomationRunStatus::Failed, 100)), 100 + 3600),
-        "失败 · 1 小时前"
+        "Failed · 1 h ago"
     );
 }
 
@@ -318,7 +397,7 @@ fn builtin_action_catalog_covers_agent_and_shell() {
         BUILTIN_AUTOMATION_ACTIONS,
         &[AutomationActionKindId::Agent, AutomationActionKindId::Shell,]
     );
-    assert_eq!(AutomationActionKindId::Agent.label(), "智能体");
+    assert_eq!(AutomationActionKindId::Agent.label(), "Agent");
     assert_eq!(AutomationActionKindId::Shell.label(), "Shell");
 }
 
@@ -334,10 +413,10 @@ fn trigger_presets_cover_hourly_daily_weekly_interval_and_webhook() {
             AutomationTriggerPresetId::Webhook,
         ]
     );
-    assert_eq!(AutomationTriggerPresetId::Daily.label(), "每天");
+    assert_eq!(AutomationTriggerPresetId::Daily.label(), "Daily");
     assert_eq!(
         AutomationTriggerPresetId::Webhook.hint(),
-        "当此 webhook 收到请求时"
+        "When this webhook receives a request"
     );
     assert!(AutomationTriggerPresetId::Webhook.is_advanced());
     assert!(!AutomationTriggerPresetId::Daily.is_advanced());
@@ -378,6 +457,9 @@ fn notification_preset_only_offers_targets_that_deliver() {
             preset
         );
     }
-    assert_eq!(AutomationNotificationPreset::App.label(), "应用内通知");
-    assert_eq!(AutomationNotificationPreset::Off.label(), "不通知");
+    assert_eq!(
+        AutomationNotificationPreset::App.label(),
+        "In-App Notification"
+    );
+    assert_eq!(AutomationNotificationPreset::Off.label(), "No Notification");
 }

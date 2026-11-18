@@ -10,6 +10,7 @@
 //! 自带读文件的工具，给一段路径它们一定会用；ResourceLink 各家支持程度没实测过，
 //! 赌不起「引了没反应」。等有实测再升级。
 
+use rust_i18n::t;
 use std::ops::Range;
 
 /// 一条补全候选。
@@ -90,16 +91,16 @@ pub fn candidates(
         Kind::Slash => {
             // These Smelt commands are handled locally rather than sent as prompts.
             let builtins = [
-                ("shake", "纯规则 0-token 无损修剪历史冗余与思考链"),
-                ("handoff", "生成结构化交接报告并压缩上下文"),
-                ("compact", "压缩历史对话上下文"),
+                ("shake", t!("slash.shake")),
+                ("handoff", t!("slash.handoff")),
+                ("compact", t!("slash.compact")),
             ];
             let mut matches: Vec<(String, String)> = commands
                 .iter()
                 .filter(|(name, _)| !name.eq_ignore_ascii_case("clear"))
                 .cloned()
                 .collect();
-            matches.push(("clear".to_string(), "新建一条独立对话".to_string()));
+            matches.push(("clear".to_string(), t!("slash.clear").into_owned()));
             for (name, desc) in builtins {
                 if !matches.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
                     matches.push((name.to_string(), desc.to_string()));
@@ -262,23 +263,24 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "/clear");
         assert_eq!(items[0].insert, "/clear ");
-        assert_eq!(items[0].hint, "新建一条独立对话");
+        assert_eq!(items[0].hint, "Start a separate new conversation");
 
         let slash_all = candidates(&detect_trigger("/").unwrap(), &[], &[]);
         assert!(
             slash_all
                 .iter()
-                .any(|item| item.label == "/shake" && item.hint.contains("无损修剪"))
+                .any(|item| item.label == "/shake" && item.hint.contains("Losslessly trim"))
         );
         assert!(
             slash_all
                 .iter()
-                .any(|item| item.label == "/handoff" && item.hint.contains("交接报告"))
+                .any(|item| item.label == "/handoff" && item.hint.contains("handoff report"))
         );
         assert!(
             slash_all
                 .iter()
-                .any(|item| item.label == "/compact" && item.hint.contains("压缩历史对话"))
+                .any(|item| item.label == "/compact"
+                    && item.hint.contains("Compact the conversation"))
         );
 
         // agent 若也提供同名命令，本地说明优先，且不重复出现。
@@ -297,7 +299,7 @@ mod tests {
                 .find(|item| item.label == "/clear")
                 .unwrap()
                 .hint,
-            "新建一条独立对话"
+            "Start a separate new conversation"
         );
         assert_eq!(
             items.iter().filter(|item| item.label == "/shake").count(),

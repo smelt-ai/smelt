@@ -1,5 +1,6 @@
 //! 会话插件自己的库（`~/.smelt/plugin-data/smelt.sessions.sqlite3`）：侧栏的置顶、手动顺序、
-//! 折叠，每段会话的分屏布局，和上次选中的会话。都是这台桌面自己的界面状态，运行时不存。
+//! 折叠，每段会话的分屏布局，上次选中的会话，和行首头像用哪个。都是这台桌面自己的界面状态
+//! 和偏好，运行时不存。
 //!
 //! 侧栏那部分启动时整份读一次（[`SessionsStore::sidebar`]），之后内存里那份是缓存，改的时候
 //! 同一个事件里写库（见 `model::Sessions::set_pinned` 等）。分屏布局在建会话视图时按需读。
@@ -16,9 +17,10 @@ use smelt_plugin_api::rusqlite::{self, OptionalExtension as _, Transaction, para
 use smelt_plugin_api::{PluginStore, RuntimeKey};
 
 use crate::OWNER;
-use crate::model::{ConversationKey, Fold, KnownIds, Pin, ProjectKey, SidebarUi};
+use crate::model::{AvatarChoice, ConversationKey, Fold, KnownIds, Pin, ProjectKey, SidebarUi};
 
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE pinned_conversation (
         machine TEXT NOT NULL,
         conversation_id TEXT NOT NULL,
@@ -74,7 +76,14 @@ const MIGRATIONS: &[&str] = &["
         machine TEXT NOT NULL,
         conversation_id TEXT NOT NULL
     );
-"];
+",
+    "
+    CREATE TABLE avatar_choice (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        view_id TEXT
+    );
+",
+];
 
 /// 按对话 id 记的表：目录里没了这段对话就清掉。
 const CONVERSATION_TABLES: [&str; 3] = [
@@ -362,6 +371,49 @@ impl SessionsStore {
         });
     }
 
+    /// 行首头像用哪个。没有那一行是没选过，`view_id` 是空的是不要头像。
+    pub(crate) fn avatar_choice(&self) -> AvatarChoice {
+        let Some(store) = &self.store else {
+            return AvatarChoice::Unset;
+        };
+        let read = store.read(|db| {
+            db.query_row(
+                "SELECT view_id FROM avatar_choice WHERE id = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+        });
+        match read {
+            Ok(None) => AvatarChoice::Unset,
+            Ok(Some(None)) => AvatarChoice::Icon,
+            Ok(Some(Some(view))) => AvatarChoice::View(view),
+            Err(error) => {
+                eprintln!("[sessions] 读行首头像的选择失败：{error}");
+                AvatarChoice::Unset
+            }
+        }
+    }
+
+    pub(crate) fn save_avatar_choice(&self, choice: &AvatarChoice) {
+        self.write("行首头像", |tx| {
+            let view = match choice {
+                AvatarChoice::Unset => {
+                    tx.execute("DELETE FROM avatar_choice", [])?;
+                    return Ok(());
+                }
+                AvatarChoice::Icon => None,
+                AvatarChoice::View(view) => Some(view.as_str()),
+            };
+            tx.execute(
+                "INSERT INTO avatar_choice (id, view_id) VALUES (1, ?1)
+                 ON CONFLICT (id) DO UPDATE SET view_id = excluded.view_id",
+                params![view],
+            )?;
+            Ok(())
+        });
+    }
+
     /// 清掉那台机器上目录里已经没有的东西留下的行。`known` 是那台机器整份目录里还在的
     /// （见 `model::known_ids`）；目录还没收到时不要调。
     pub(crate) fn prune(&self, machine: &RuntimeKey, known: &KnownIds) {
@@ -635,6 +687,21 @@ mod tests {
         assert_eq!(store.selection(), Some(key(RuntimeKey::Local, "d")));
         store.save_selection(None);
         assert_eq!(store.selection(), None);
+    }
+
+    #[test]
+    fn avatar_choice_round_trips() {
+        let (_dir, store) = store();
+        assert_eq!(store.avatar_choice(), AvatarChoice::Unset);
+        for choice in [
+            AvatarChoice::View("someone.avatars/avatar".into()),
+            AvatarChoice::Icon,
+            AvatarChoice::View("smelt.buddies/avatar".into()),
+            AvatarChoice::Unset,
+        ] {
+            store.save_avatar_choice(&choice);
+            assert_eq!(store.avatar_choice(), choice);
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! 先给结论（错误、运行结果），执行过程和元数据默认折起。落库内容在后台读：换
 //! 运行或运行状态推进时排一次，render 只读内存。工作台随动画逐帧重绘，读库、
 //! 反序列化放进 render 会把整个窗口拖卡。
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use api::model::acp_chat::{AcpEntry, DiffLineTag, ToolCallStatus, ToolOutputPart};
@@ -179,7 +180,7 @@ impl AutomationsPage {
             return div()
                 .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::faint()))
-                .child("正在读取运行记录…")
+                .child(t!("run.loading").into_owned())
                 .into_any_element();
         };
         let process_meta = transcript_summary(&detail.transcript);
@@ -191,12 +192,12 @@ impl AutomationsPage {
             .flex_col()
             .gap_5()
             .child(run_summary_line(run))
-            .children(run.error.clone().map(run_error_card))
+            .children(run.error_text().map(run_error_card))
             .child(run_result_section(run, detail))
             .when(!detail.transcript.is_empty(), |column| {
                 column.child(run_detail_disclosure(
                     BLOCK_PROCESS,
-                    "执行过程",
+                    t!("run.process"),
                     Some(process_meta),
                     detail,
                     &entity,
@@ -205,7 +206,7 @@ impl AutomationsPage {
             })
             .child(run_detail_disclosure(
                 BLOCK_INPUT,
-                "本次输入",
+                t!("run.input"),
                 None,
                 detail,
                 &entity,
@@ -215,7 +216,7 @@ impl AutomationsPage {
                         .prompt
                         .clone()
                         .filter(|prompt| !prompt.trim().is_empty())
-                        .unwrap_or_else(|| "（无）".to_string());
+                        .unwrap_or_else(|| t!("run.none").into_owned());
                     detail_card(markdown_mermaid::markdown_view(
                         format!("automation-run-prompt-{}", run.id),
                         prompt,
@@ -225,7 +226,7 @@ impl AutomationsPage {
             .children(detail.instructions.clone().map(|instructions| {
                 run_detail_disclosure(
                     BLOCK_INSTRUCTIONS,
-                    "智能体指令快照",
+                    t!("run.instructions"),
                     None,
                     detail,
                     &entity,
@@ -239,7 +240,7 @@ impl AutomationsPage {
             }))
             .child(run_detail_disclosure(
                 BLOCK_META,
-                "运行信息",
+                t!("run.info"),
                 None,
                 detail,
                 &entity,
@@ -280,10 +281,16 @@ pub(crate) fn run_summary_line(run: &AutomationRun) -> AnyElement {
         .agent_definition_name
         .as_deref()
         .map(agent_display_name)
-        .unwrap_or_else(|| "未知智能体".to_string());
+        .unwrap_or_else(|| t!("meta.unknown_agent").into_owned());
     let mut parts = vec![format_unix_local(run.started_at.unwrap_or(run.created_at))];
     if let (Some(started_at), Some(finished_at)) = (run.started_at, run.finished_at) {
-        parts.push(format!("用时 {}", format_elapsed(finished_at - started_at)));
+        parts.push(
+            t!(
+                "run.elapsed",
+                elapsed = format_elapsed(finished_at - started_at)
+            )
+            .into_owned(),
+        );
     }
     div()
         .flex()
@@ -332,7 +339,7 @@ pub(crate) fn run_error_card(error: String) -> AnyElement {
                     div()
                         .type_style(TYPE.ui_medium)
                         .text_color(rgb(red))
-                        .child("运行失败"),
+                        .child(t!("notify.run_failed_body").into_owned()),
                 )
                 .child(
                     div()
@@ -351,13 +358,13 @@ pub(crate) fn run_result_section(run: &AutomationRun, detail: &AutomationRunDeta
             output,
         )),
         None => {
-            let hint = if run.status.is_active() {
-                "还在运行，结束后结果显示在这里。"
-            } else if run.error.is_some() {
-                "没有产出结果。"
+            let hint = SharedString::from(if run.status.is_active() {
+                t!("run.result_pending")
+            } else if run.error_code.is_some() || run.error.is_some() {
+                t!("run.result_none")
             } else {
-                "这次运行没有给出最终回复。"
-            };
+                t!("run.result_no_reply")
+            });
             div()
                 .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::faint()))
@@ -374,7 +381,7 @@ pub(crate) fn run_result_section(run: &AutomationRun, detail: &AutomationRunDeta
             div()
                 .type_style(TYPE.ui_medium)
                 .text_color(rgb(ui_theme::text()))
-                .child("运行结果"),
+                .child(t!("run.result").into_owned()),
         )
         .child(body)
         .into_any_element()
@@ -393,7 +400,7 @@ pub(crate) fn detail_card(body: impl IntoElement) -> AnyElement {
 /// 可折叠区块：标题行常驻，正文只在展开时才构建，折着的区块不花渲染成本。
 pub(crate) fn run_detail_disclosure(
     key: &'static str,
-    title: &'static str,
+    title: Cow<'static, str>,
     meta: Option<String>,
     detail: &AutomationRunDetail,
     entity: &Entity<AutomationsPage>,
@@ -420,7 +427,7 @@ pub(crate) fn run_detail_disclosure(
                     div()
                         .type_style(TYPE.ui_medium)
                         .text_color(rgb(ui_theme::text()))
-                        .child(title),
+                        .child(SharedString::from(title)),
                 )
                 .children(meta.map(|meta| {
                     div()
@@ -466,9 +473,11 @@ pub(crate) fn transcript_summary(entries: &[AcpEntry]) -> String {
     let (mut tools, mut failed) = (0, 0);
     count(entries, &mut tools, &mut failed);
     match (tools, failed) {
-        (0, _) => format!("{} 条消息", entries.len()),
-        (tools, 0) => format!("{tools} 次工具调用"),
-        (tools, failed) => format!("{tools} 次工具调用 · {failed} 次失败"),
+        (0, _) if entries.len() == 1 => t!("run.messages.one").into_owned(),
+        (0, _) => t!("run.messages.other", count = entries.len()).into_owned(),
+        (1, 0) => t!("run.tool_calls.one").into_owned(),
+        (tools, 0) => t!("run.tool_calls.other", count = tools).into_owned(),
+        (tools, failed) => t!("run.tool_calls_failed", count = tools, failed = failed).into_owned(),
     }
 }
 
@@ -493,7 +502,7 @@ pub(crate) fn render_transcript(
                 .py_1()
                 .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
-                .child("最终回复，见上方运行结果")
+                .child(t!("run.final_reply").into_owned())
                 .into_any_element(),
             AcpEntry::Assistant {
                 text,
@@ -523,7 +532,7 @@ pub(crate) fn render_transcript(
                 transcript_step(
                     &key,
                     process_icon(&api::model::acp_chat::ToolKind::Think),
-                    format!("思考  {preview}"),
+                    t!("run.thinking", preview = preview).into_owned(),
                     None,
                     detail,
                     entity,
@@ -584,22 +593,50 @@ pub(crate) fn render_transcript(
                     }),
                 )
             }
-            AcpEntry::Divider(label) => div()
-                .py_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().flex_1().h(px(1.)).bg(ui_theme::hair()))
-                .when(!label.trim().is_empty(), |row| {
-                    row.child(
-                        div()
-                            .type_style(TYPE.text_xsmall)
-                            .text_color(rgb(ui_theme::faint()))
-                            .child(label.trim().to_string()),
-                    )
+            AcpEntry::TurnFailed {
+                detail: failure,
+                hint,
+            } => {
+                // 第一行当标题（「回合失败：原话」），下一步建议放进展开内容。
+                let text = api::model::acp_chat::turn_failed_text(failure, *hint);
+                let (headline, rest) = text
+                    .split_once('\n')
+                    .map_or((text.as_str(), ""), |(headline, rest)| {
+                        (headline, rest.trim())
+                    });
+                let rest = rest.to_string();
+                let output_id = format!("automation-run-failure-{}-{key}", detail.run_id());
+                transcript_step(
+                    &key,
+                    IconName::Warning,
+                    headline.to_string(),
+                    Some(StepFlag::Failed),
+                    detail,
+                    entity,
+                    (!rest.is_empty()).then_some(move || {
+                        tool_output_view(output_id, &[ToolOutputPart::Text(rest)])
+                    }),
+                )
+            }
+            AcpEntry::Divider(_) | AcpEntry::NewSession { .. } => {
+                let label = entry.divider_label().unwrap_or_default();
+                div()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .child(div().flex_1().h(px(1.)).bg(ui_theme::hair()))
-                })
-                .into_any_element(),
+                    .when(!label.trim().is_empty(), |row| {
+                        row.child(
+                            div()
+                                .type_style(TYPE.text_xsmall)
+                                .text_color(rgb(ui_theme::faint()))
+                                .child(label.trim().to_string()),
+                        )
+                        .child(div().flex_1().h(px(1.)).bg(ui_theme::hair()))
+                    })
+                    .into_any_element()
+            }
             AcpEntry::TaskNote(note) => {
                 let tail = note.output_tail.trim_end();
                 let output_id = format!("automation-run-note-{}-{key}", detail.run_id());
@@ -627,7 +664,7 @@ pub(crate) fn transcript_user(key: &str, run_id: &str, text: &str, images: usize
         if !body.is_empty() {
             body.push_str("\n\n");
         }
-        body.push_str(&format!("*（{images} 张图片，未写入存档）*"));
+        body.push_str(&t!("run.images_not_saved", count = images));
     }
     div()
         .py_1()
@@ -638,7 +675,7 @@ pub(crate) fn transcript_user(key: &str, run_id: &str, text: &str, images: usize
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::faint()))
-                .child("输入"),
+                .child(t!("run.user_input").into_owned()),
         )
         .child(detail_card(markdown_mermaid::markdown_view(
             format!("automation-run-user-{run_id}-{key}"),
@@ -655,11 +692,12 @@ pub(crate) enum StepFlag {
 }
 
 impl StepFlag {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> SharedString {
         match self {
-            Self::Failed => "失败",
-            Self::Unfinished => "未完成",
+            Self::Failed => t!("run_status.failed"),
+            Self::Unfinished => t!("run.unfinished"),
         }
+        .into()
     }
 
     pub(crate) fn color(self) -> u32 {
@@ -762,10 +800,10 @@ pub(crate) fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyEleme
                     blocks.push(fenced_block("", output));
                 }
                 if *truncated {
-                    blocks.push("*输出在运行时已截断*".to_string());
+                    blocks.push(format!("*{}*", t!("run.output_truncated")));
                 }
                 if let Some(code) = exit_code.filter(|code| *code != 0) {
-                    blocks.push(format!("*退出码 {code}*"));
+                    blocks.push(format!("*{}*", t!("run.exit_code", code = code)));
                 }
             }
             ToolOutputPart::Diff {
@@ -793,7 +831,10 @@ pub(crate) fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyEleme
                 blocks.push(fenced_block("diff", body.trim_end()));
             }
             ToolOutputPart::Image(image) => {
-                blocks.push(format!("*图片 {}，未写入存档*", image.mime));
+                blocks.push(format!(
+                    "*{}*",
+                    t!("run.image_not_saved", mime = image.mime)
+                ));
             }
         }
     }
@@ -801,7 +842,7 @@ pub(crate) fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyEleme
         return div()
             .type_style(TYPE.text_xsmall)
             .text_color(rgb(ui_theme::faint()))
-            .child("（无输出）")
+            .child(t!("run.no_output").into_owned())
             .into_any_element();
     }
     div()
@@ -822,8 +863,8 @@ pub(crate) fn fenced_block(lang: &str, body: &str) -> String {
             .collect::<Vec<_>>()
             .join("\n");
         clipped.push_str(&format!(
-            "\n…（还有 {} 行未显示）",
-            total - TOOL_OUTPUT_MAX_LINES
+            "\n{}",
+            t!("run.lines_hidden", count = total - TOOL_OUTPUT_MAX_LINES)
         ));
         clipped
     } else {
@@ -842,52 +883,56 @@ pub(crate) fn fenced_block(lang: &str, body: &str) -> String {
 }
 
 pub(crate) fn run_metadata(run: &AutomationRun) -> AnyElement {
-    let mut rows = vec![
-        ("来源", run_source_label(run.source).to_string()),
+    let mut rows: Vec<(Cow<'static, str>, String)> = vec![
+        (t!("meta.source"), run_source_label(run.source).to_string()),
         (
-            "智能体",
+            t!("meta.agent"),
             format!(
                 "{} · {}",
                 run.context
                     .agent_definition_name
                     .as_deref()
                     .map(agent_display_name)
-                    .unwrap_or_else(|| "未知智能体".to_string()),
-                run.context.engine_kind_id.as_deref().unwrap_or("未知引擎")
+                    .unwrap_or_else(|| t!("meta.unknown_agent").into_owned()),
+                run.context
+                    .engine_kind_id
+                    .clone()
+                    .unwrap_or_else(|| t!("meta.unknown_engine").into_owned())
             ),
         ),
-        ("工作区", run.context.cwd.clone()),
-        ("创建", format_unix_local(run.created_at)),
+        (t!("meta.workspace"), run.context.cwd.clone()),
+        (t!("meta.created"), format_unix_local(run.created_at)),
     ];
     if let Some(scheduled_for) = run.scheduled_for {
-        rows.push(("计划", format_unix_local(scheduled_for)));
+        rows.push((t!("meta.scheduled"), format_unix_local(scheduled_for)));
     }
     if let Some(delivery_attempt_at) = run.delivery_attempt_at {
         rows.push((
-            "投递",
-            format!(
-                "{} · 共 {} 次",
-                format_unix_local(delivery_attempt_at),
-                run.delivery_attempts
-            ),
+            t!("meta.delivered"),
+            t!(
+                "meta.delivered_value",
+                time = format_unix_local(delivery_attempt_at),
+                count = run.delivery_attempts
+            )
+            .into_owned(),
         ));
     }
     if let Some(started_at) = run.started_at {
-        rows.push(("开始", format_unix_local(started_at)));
+        rows.push((t!("meta.started"), format_unix_local(started_at)));
     }
     if let Some(finished_at) = run.finished_at {
-        rows.push(("结束", format_unix_local(finished_at)));
+        rows.push((t!("meta.finished"), format_unix_local(finished_at)));
     }
-    rows.push(("Run ID", run.id.clone()));
-    rows.push(("Automation ID", run.automation_id.clone()));
+    rows.push(("Run ID".into(), run.id.clone()));
+    rows.push(("Automation ID".into(), run.automation_id.clone()));
     if let Some(definition_id) = run.context.action.agent_definition_id() {
-        rows.push(("智能体定义 ID", definition_id.to_string()));
+        rows.push((t!("meta.agent_definition_id"), definition_id.to_string()));
     }
     if let Some(session_id) = run.session_id.clone() {
-        rows.push(("ACP 会话", session_id));
+        rows.push((t!("meta.acp_session"), session_id));
     }
     if let Some(provider_session_id) = run.provider_session_id.clone() {
-        rows.push(("Provider 会话", provider_session_id));
+        rows.push((t!("meta.provider_session"), provider_session_id));
     }
     content_card()
         .w_full()
@@ -906,7 +951,7 @@ pub(crate) fn run_metadata(run: &AutomationRun) -> AnyElement {
                         .w(px(96.))
                         .flex_shrink_0()
                         .text_color(rgb(ui_theme::faint()))
-                        .child(label),
+                        .child(SharedString::from(label)),
                 )
                 .child(
                     div()
@@ -922,9 +967,19 @@ pub(crate) fn run_metadata(run: &AutomationRun) -> AnyElement {
 pub(crate) fn format_elapsed(seconds: i64) -> String {
     let seconds = seconds.max(0);
     match seconds {
-        0..60 => format!("{seconds} 秒"),
-        60..3600 => format!("{} 分 {} 秒", seconds / 60, seconds % 60),
-        _ => format!("{} 小时 {} 分", seconds / 3600, seconds % 3600 / 60),
+        0..60 => t!("elapsed.seconds", seconds = seconds).into_owned(),
+        60..3600 => t!(
+            "elapsed.minutes",
+            minutes = seconds / 60,
+            seconds = seconds % 60
+        )
+        .into_owned(),
+        _ => t!(
+            "elapsed.hours",
+            hours = seconds / 3600,
+            minutes = seconds % 3600 / 60
+        )
+        .into_owned(),
     }
 }
 
@@ -958,7 +1013,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let block = fenced_block("", &body);
-        assert!(block.contains("还有 5 行未显示"));
+        assert!(block.contains("5 more lines not shown"));
         assert!(!block.contains(&format!("\n{}\n", TOOL_OUTPUT_MAX_LINES + 1)));
     }
 
@@ -1000,8 +1055,8 @@ mod tests {
 
     #[test]
     fn elapsed_reads_in_natural_units() {
-        assert_eq!(format_elapsed(42), "42 秒");
-        assert_eq!(format_elapsed(125), "2 分 5 秒");
-        assert_eq!(format_elapsed(3720), "1 小时 2 分");
+        assert_eq!(format_elapsed(42), "42s");
+        assert_eq!(format_elapsed(125), "2m 5s");
+        assert_eq!(format_elapsed(3720), "1h 2m");
     }
 }

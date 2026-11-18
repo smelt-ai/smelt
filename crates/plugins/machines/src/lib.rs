@@ -22,6 +22,8 @@ use contract::VIEW;
 use gpui::App;
 use smelt_plugin_api as api;
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.machines";
 
@@ -45,7 +47,7 @@ pub fn register(cx: &mut App) {
 fn register_commands(cx: &mut App) {
     let mut specs = menu::commands();
     specs.push(page::add_machine_command());
-    if let Err(error) = api::register_commands(OWNER, "远程机器", specs, cx) {
+    if let Err(error) = api::register_commands(OWNER, api::text!("commands"), specs, cx) {
         api::app_log::warn("machines", &format!("远程机器的命令登记失败：{error}"));
     }
 }
@@ -69,7 +71,7 @@ mod tests {
             let add = api::command(contract::ADD_MACHINE.id(), cx).expect("添加远程机器登记上了");
             assert!(add.palette);
             assert!(!add.requires_args);
-            assert_eq!(add.title.as_ref(), "添加远程机器");
+            assert_eq!(add.title.as_ref(), "Add Remote Machine");
             assert!(api::command("smelt.machines/remove", cx).is_some());
         });
     }

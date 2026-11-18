@@ -12,7 +12,8 @@ use api::client::DEFAULT_REQUEST_TIMEOUT;
 use api::client::protocol::control::{EmptyParams, SystemDescribe};
 use api::{ContextMenuAction, ContextMenuItem, HostEvent, RuntimeKey};
 use gpui::{App, Global, Task};
-use smelt_plugin_api as api;
+use rust_i18n::t;
+use smelt_plugin_api::{self as api, text};
 
 use crate::{ICON, OWNER, VIEW};
 
@@ -53,8 +54,8 @@ pub(crate) fn register(cx: &mut App) {
     cx.set_global(Machines::default());
     api::register_commands(
         OWNER,
-        "远程桌面",
-        vec![OPEN.spec_async("打开远程桌面", |args, _, cx| open(args, cx))],
+        text!("title"),
+        vec![OPEN.spec_async(text!("command.open"), |args, _, cx| open(args, cx))],
         cx,
     )
     .expect("远程桌面的命令表写错了");
@@ -78,7 +79,7 @@ fn open(args: MachineMenuContext, cx: &mut App) -> Task<Result<(), String>> {
     );
     cx.spawn(async move |_| match opened.await? {
         true => Ok(()),
-        false => Err("没有能放远程桌面的地方".to_string()),
+        false => Err(t!("error.no_place").into_owned()),
     })
 }
 
@@ -154,7 +155,7 @@ fn publish(cx: &mut App) {
             )
         })
         .map(|machine| ContextMenuItem {
-            label: "远程桌面".into(),
+            label: text!("title"),
             image: None,
             icon: Some(ICON.into()),
             machine: Some(machine.key),

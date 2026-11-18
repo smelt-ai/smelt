@@ -36,6 +36,8 @@ use smelt_plugin_api::{self as api, ViewHandle, ViewSpec};
 
 use page::AutomationsPage;
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 /// 本插件的来源 id：库文件名、通知 id 都用它。
 pub(crate) const OWNER: &str = "smelt.automations";
 
@@ -50,11 +52,12 @@ pub fn register(cx: &mut App) {
         OWNER,
         vec![ViewSpec {
             name: "main".into(),
-            title: "自动化".into(),
+            title: api::text!("title"),
             icon: smelt_plugin_api::ui::IconName::Workflow.path(),
             draws_top_bar: false,
             instances: false,
             settings: None,
+            fills: Vec::new(),
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| AutomationsPage::new(window, cx))) as Rc<dyn ViewHandle>
             }),

@@ -5,6 +5,7 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_base::{StyledExt as _, v_virtual_list};
+use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::client::protocol::files::is_previewable_image;
 use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
@@ -32,7 +33,7 @@ fn editor_menu_items(
             .is_some_and(|editor| editor.read(cx).context_menu_capabilities().has_selection());
         let panel = panel.clone();
         menu.item(
-            MenuItem::new("发送选中内容到会话")
+            MenuItem::new(t!("send.selection_menu"))
                 .disabled(!has_selection)
                 .on_click(move |_, _, cx| {
                     panel
@@ -102,7 +103,7 @@ impl FilesPanel {
                         .small()
                         .flex_shrink_0()
                         .icon(IconName::Plus)
-                        .icon_action("把目录加到文件树")
+                        .icon_action(t!("pin.add"))
                         .on_click(cx.listener(|this, _, _, cx| this.pick_pinned_roots(cx))),
                 )
             });
@@ -181,13 +182,13 @@ impl FilesPanel {
         let fg: Hsla = rgb(ui_theme::text()).into();
         let hover: Hsla = ui_theme::row_hover().into();
         let status = if !state.done {
-            "搜索中…".to_string()
+            t!("search.running").into_owned()
         } else if state.hits.is_empty() {
-            "无匹配".to_string()
+            t!("search.none").into_owned()
         } else if state.truncated {
-            format!("命中 {}+ 项（已截断）", state.hits.len())
+            t!("search.hits_truncated", count = state.hits.len()).into_owned()
         } else {
-            format!("命中 {} 项", state.hits.len())
+            t!("search.hits", count = state.hits.len()).into_owned()
         };
         let tree = build_search_tree(&state.hits);
         let context = SearchTreeContext {
@@ -219,7 +220,7 @@ impl FilesPanel {
                     &self.search_scroll,
                     ScrollbarAxis::Vertical,
                 )
-                .vertical_label("搜索结果滚动条")
+                .vertical_label(t!("search.scrollbar"))
                 .flex_1()
                 .min_h_0(),
             )
@@ -239,7 +240,7 @@ impl FilesPanel {
         };
         let roots = self.tree_roots();
         if roots.is_empty() {
-            return placeholder_view("无项目目录", colors.muted).into_any_element();
+            return placeholder_view(&t!("tree.no_project"), colors.muted).into_any_element();
         }
         let runtime = self.tree_runtime();
         let cached = |root: &str| {
@@ -248,7 +249,7 @@ impl FilesPanel {
                 .is_some_and(|cache| cache.contains_key(root))
         };
         if roots.len() == 1 && !cached(&roots[0]) {
-            return placeholder_view("加载中…", colors.muted).into_any_element();
+            return placeholder_view(&t!("loading"), colors.muted).into_any_element();
         }
         let rows = Rc::new(self.tree_rows(cx));
         let row_h = px(file_tree_row_height(f32::from(window.rem_size())));
@@ -311,7 +312,10 @@ impl FilesPanel {
     fn file_content_parts(&self, cx: &mut Context<Self>) -> (Option<AnyElement>, AnyElement) {
         let muted: Hsla = rgb(ui_theme::muted()).into();
         match &self.open_file {
-            None => (None, placeholder_view("文件", muted).into_any_element()),
+            None => (
+                None,
+                placeholder_view(&t!("title"), muted).into_any_element(),
+            ),
             Some(of) => (Some(self.file_header(of, cx)), self.file_body(of, cx)),
         }
     }
@@ -411,7 +415,7 @@ impl FilesPanel {
                             .quiet()
                             .small()
                             .flex_shrink_0()
-                            .label("浏览器打开")
+                            .label(t!("browser.open"))
                             .on_click(cx.listener(|this, _, _, cx| this.open_file_in_browser(cx))),
                     )
                 },
@@ -422,7 +426,11 @@ impl FilesPanel {
                         .quiet()
                         .small()
                         .flex_shrink_0()
-                        .label(if preview { "查看原始码" } else { "查看预览" })
+                        .label(if preview {
+                            t!("preview.show_source")
+                        } else {
+                            t!("preview.show_preview")
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.set_file_preview(!preview, window, cx)
                         })),
@@ -439,9 +447,9 @@ impl FilesPanel {
                         IconName::PanelLeft
                     })
                     .icon_action(if tree_open {
-                        "收起文件树"
+                        t!("tree.collapse")
                     } else {
-                        "展开文件树"
+                        t!("tree.expand")
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx))),
             )
@@ -766,7 +774,7 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
             .pl(px(8.0 + *depth as f32 * 14.0))
             .pr_2()
             .text_color(muted)
-            .child("加载中…")
+            .child(t!("loading").into_owned())
             .into_any_element(),
         FileTreeRow::RootHeader { path, open, pinned } => {
             let name = path
@@ -810,7 +818,7 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
             MenuTrigger::context(menu_id, header, move |_, _| {
                 let view = menu_view.clone();
                 let root = menu_root.clone();
-                Menu::new().item(MenuItem::new("从文件树移除").on_click(move |_, _, cx| {
+                Menu::new().item(MenuItem::new(t!("pin.remove")).on_click(move |_, _, cx| {
                     view.update(cx, |this, cx| this.unpin_root(&root, cx));
                 }))
             })
@@ -897,28 +905,30 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
                 let finder = menu_path.clone();
                 let delete = (menu_view.clone(), menu_path.clone());
                 let mut menu = Menu::new()
-                    .item(MenuItem::new("发送到会话").on_click(move |_, _, cx| {
-                        send.0
-                            .update(cx, |this, cx| this.send_path_to_session(&send.1, cx));
-                    }))
-                    .item(MenuItem::new("复制文件路径").on_click(move |_, _, cx| {
+                    .item(
+                        MenuItem::new(t!("send.path_menu")).on_click(move |_, _, cx| {
+                            send.0
+                                .update(cx, |this, cx| this.send_path_to_session(&send.1, cx));
+                        }),
+                    )
+                    .item(MenuItem::new(t!("copy_path")).on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
                     }));
                 if local {
                     menu = menu.item(
                         MenuItem::new(if cfg!(target_os = "macos") {
-                            "在 Finder 中显示"
+                            t!("reveal.finder")
                         } else {
-                            "在文件管理器中显示"
+                            t!("reveal.file_manager")
                         })
                         .on_click(move |_, _, _| FilesPanel::reveal_path_in_finder(&finder)),
                     );
                 }
                 menu.separator().item(
                     MenuItem::new(if is_dir {
-                        "删除文件夹"
+                        t!("delete.folder_menu")
                     } else {
-                        "删除文件"
+                        t!("delete.file_menu")
                     })
                     .icon(smelt_plugin_api::ui::trash_icon())
                     .danger()

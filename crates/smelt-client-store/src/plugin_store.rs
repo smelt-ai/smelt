@@ -24,8 +24,9 @@ impl PluginStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, ClientStoreError> {
         let path = path.into();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| ClientStoreError(format!("创建 {}：{error}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|error| {
+                ClientStoreError(format!("couldn't create {}: {error}", parent.display()))
+            })?;
         }
         let connection = Connection::open(&path)
             .map_err(|error| ClientStoreError(format!("{}：{error}", path.display())))?;
@@ -74,11 +75,14 @@ impl PluginStore {
         let mut connection = self.connection.lock().unwrap_or_else(|e| e.into_inner());
         let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let current = usize::try_from(current).map_err(|_| {
-            ClientStoreError(format!("{}：版本号 {current} 不对", self.path.display()))
+            ClientStoreError(format!(
+                "{}: invalid version {current}",
+                self.path.display()
+            ))
         })?;
         if current > steps.len() {
             return Err(ClientStoreError(format!(
-                "{} 是版本 {current}，比这个插件新（它只认到 {}）",
+                "{} is version {current}, newer than this plugin (it only knows up to {})",
                 self.path.display(),
                 steps.len()
             )));
@@ -87,7 +91,7 @@ impl PluginStore {
             let transaction = connection.transaction()?;
             transaction.execute_batch(step).map_err(|error| {
                 ClientStoreError(format!(
-                    "{}：迁到版本 {} 失败：{error}",
+                    "{}: migrating to version {} failed: {error}",
                     self.path.display(),
                     version + 1
                 ))
@@ -111,7 +115,8 @@ pub fn plugin_store(owner: &str) -> Result<Arc<PluginStore>, ClientStoreError> {
     if let Some(store) = stores.get(owner) {
         return Ok(store.clone());
     }
-    let home = smelt_paths::smelt_home().ok_or_else(|| ClientStoreError("找不到用户目录".into()))?;
+    let home = smelt_paths::smelt_home()
+        .ok_or_else(|| ClientStoreError("couldn't find the home directory".into()))?;
     let store = Arc::new(PluginStore::open(plugin_store_path(&home, owner))?);
     stores.insert(owner.to_string(), store.clone());
     Ok(store)
@@ -125,7 +130,7 @@ fn validate_owner(owner: &str) -> Result<(), ClientStoreError> {
     let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
     if owner.is_empty() || owner.starts_with('.') || !owner.chars().all(allowed) {
         return Err(ClientStoreError(format!(
-            "插件来源「{owner}」不能当库文件名：只能用字母、数字和 . _ -，不能以 . 开头"
+            "Plugin owner `{owner}` can't be a database file name: use only letters, digits and . _ -, and don't start with ."
         )));
     }
     Ok(())
@@ -173,7 +178,7 @@ mod tests {
         let (store, dir) = temp_store();
         store.migrate(&STEPS).unwrap();
         let error = store.migrate(&STEPS[..1]).unwrap_err().to_string();
-        assert!(error.contains("比这个插件新"), "{error}");
+        assert!(error.contains("newer than this plugin"), "{error}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

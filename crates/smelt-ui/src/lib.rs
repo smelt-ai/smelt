@@ -30,7 +30,6 @@ pub mod kit;
 pub mod link;
 pub mod list_row;
 pub mod markdown_links;
-mod markdown_literal_html;
 pub mod markdown_mermaid;
 pub mod menu;
 pub mod motion;
@@ -38,11 +37,13 @@ pub mod page_toolbar;
 pub mod popover;
 pub mod progress;
 pub mod resizable;
+pub mod scroll_anchors;
 pub mod scrollbar;
 pub mod segmented;
 pub mod select;
 pub mod settings;
 pub mod slider;
+pub mod sticky;
 pub mod switch;
 pub mod syntax;
 pub mod tabs;
@@ -71,10 +72,14 @@ pub use link::Link;
 pub use list_row::ListRow;
 pub use page_toolbar::page_toolbar;
 pub use progress::Progress;
+pub use scroll_anchors::{Placement, ScrollAnchors};
 pub use segmented::{Segment, Segmented};
 pub use select::Select;
 pub use settings::{SettingsPage, SettingsRow, SettingsSection};
+pub use sticky::StickySection;
 pub use switch::Switch;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// 装上本库的全局件：界面字体 Inter、菜单、下拉、可搜索列表和差异视图的键位、窗口对话框层、
 /// 编辑器的语言服务（见 [`syntax`]）。应用启动时、`gpui_base::init` 之后、开窗口之前调一次。
@@ -90,7 +95,7 @@ pub fn init(cx: &mut gpui::App) {
     syntax::editing::init(cx);
 }
 
-/// 删除/移除统一用这枚 Lucide trash-2（`kit::GLYPHS.trash`）。
-pub fn trash_icon() -> kit::Glyph {
+/// 删除/移除统一用这枚（`kit::GLYPHS.trash`）。
+pub fn trash_icon() -> IconName {
     kit::GLYPHS.trash
 }

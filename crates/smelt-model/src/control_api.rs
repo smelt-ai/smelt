@@ -789,6 +789,32 @@ mod tests {
     }
 
     #[test]
+    fn conversation_turn_status_is_tagged_by_status() {
+        let finished = ConversationTurnStatus::Finished {
+            outcome: crate::acp_session::AcpTurnOutcome::Succeeded,
+            text: "done".into(),
+        };
+        let wire =
+            serde_json::json!({"status": "finished", "outcome": "succeeded", "text": "done"});
+        assert_eq!(serde_json::to_value(&finished).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<ConversationTurnStatus>(wire).unwrap(),
+            finished
+        );
+        assert_eq!(
+            serde_json::to_value(ConversationTurnStatus::Pending).unwrap(),
+            serde_json::json!({"status": "pending"})
+        );
+        let prompt = serde_json::from_value::<ConversationPromptParams>(serde_json::json!({
+            "session_id": "acp-1",
+            "delivery_id": "d1",
+            "text": "hi",
+        }))
+        .unwrap();
+        assert!(prompt.disallowed_tools.is_empty());
+    }
+
+    #[test]
     fn new_session_catalog_decodes_on_the_client() {
         let wire = serde_json::json!({
             "control_version": CONTROL_API_VERSION,
@@ -806,7 +832,7 @@ mod tests {
                         {"key": "terminal:claude:claude", "label": "Claude Code", "kind": "terminal",
                          "pinned": false, "target": "terminal", "command": "claude",
                          "provider": "claude"},
-                        {"key": "terminal:blank", "label": "空白终端", "kind": "terminal",
+                        {"key": "terminal:blank", "label": "Shell", "kind": "terminal",
                          "pinned": true, "target": "blankTerminal"}
                     ],
                     "conversation": [
@@ -968,7 +994,7 @@ pi_calls! {
     ConversationCreateForAgent => ConversationCreateForAgent(AgentDefinitionIdParams)
         -> crate::session_control::CreatedAgentConversation;
     /// 新建会话的选择目录：可开对话的 agent 选项，和按「常用 / 终端 / 对话」分好组的
-    /// 启动动作（含 Pin）。CLI 装没装按运行时的探测缓存过滤。
+    /// 启动动作（含 Pin）。CLI 装没装由运行时每次现查 PATH 过滤。
     NewSessionCatalog => NewSessionCatalog(EmptyParams) -> NewSessionCatalogResult;
     /// 在运行时上新建一个会话（对话或终端）。起好之后写进工作区目录，桌面、手机都按目录看到它。
     SessionCreate => SessionCreate(SessionCreateParams) -> SessionCreateResult;
@@ -1024,6 +1050,12 @@ pi_calls! {
     /// 取对话里一张没有内联的图（`acp_watch` / `acp_snapshot` 带 `image_refs` 时帧里只有
     /// 引用）。条目被回退或压缩改写过、摘要对不上时回 `not_found`。
     ConversationImage => ConversationImage(ConversationImageParams) -> ConversationImageResult;
+    /// 以一次外部投递的身份往对话里发一轮话（插件驱动对话用）。正在跑就排在这一轮后面，
+    /// 不插进去。挂起的对话先唤醒。
+    ConversationPrompt => ConversationPrompt(ConversationPromptParams) -> EmptyParams;
+    /// 按投递 id 取那一轮的结果。只在运行时内存里，每段对话留最近的若干条。
+    ConversationTurnResult => ConversationTurnResult(ConversationTurnResultParams)
+        -> ConversationTurnStatus;
     /// 读一个 Pi 子智能体的子会话（`~/.smelt/subagents/<id>.jsonl`），按对话条目给出，
     /// 默认是最后一页。子智能体还在跑时文件随时在长，再读一次就是新的。
     SubagentTranscript => SubagentTranscript(SubagentTranscriptParams) -> SubagentTranscriptResult;
@@ -1045,6 +1077,10 @@ pub struct NewSessionCatalogResult {
     /// 历史列表等地方要靠它把 option id 还原成引擎和 profile。
     pub agents: Vec<crate::session_control::AcpAgentOption>,
     pub sections: crate::new_session::NewSessionSections,
+    /// `agents` 里能机械执行工具限制的选项 id。`session.create`、`conversation.prompt` 带
+    /// `disallowed_tools` 时只能用这些选项，别的会被拒。启动规格不出线，调用方只能从这里知道。
+    #[serde(default)]
+    pub restrictable_agent_ids: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1057,10 +1093,22 @@ pub enum SessionCreateKind {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCreateParams {
-    /// 必须是工作区菜单里的项目。对话可以留空：选项属于产品智能体时开在智能体自己的
-    /// space，否则报错。
+    /// 必须是工作区菜单里的项目。对话可以留空：给了 `cwd` 就开在那里；选项属于产品智能体时
+    /// 开在智能体自己的 space；否则报错。
     #[serde(default)]
     pub project_root: String,
+    /// 对话开在这个目录（绝对路径，必须已存在），不经项目菜单：插件自己管的工作树就开在
+    /// 这里。和 `project_root` 二选一，终端不认。落在某个工作树的任务目录里时照样绑到那棵树。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// 对话的名字，记成用户起的名字。只对对话有效。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// agent 不许用的工具，Claude 权限规则的写法（`Edit`、`Bash(git push:*)`），由 agent 自己的
+    /// 权限引擎执行，任何权限模式下都生效。只有 Claude 支持，别的 agent 给了就报错。限制只属于
+    /// 这次拉起的运行时，不落盘：运行时重启后续上的对话不带限制（见 `conversation.prompt`）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallowed_tools: Vec<String>,
     /// 开在项目里的哪棵任务工作树（目录里 `worksets[].id`，必须属于 `project_root`）。
     /// 给了就开在它的任务目录（`worktrees/<任务>`），会话绑到这棵树上。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1098,6 +1146,42 @@ pub struct SessionIdParams {
 pub struct SessionAgentBindingsResult {
     /// 会话 id → 智能体定义 id。
     pub bindings: std::collections::BTreeMap<String, String>,
+}
+
+/// `conversation.prompt`：以一次外部投递的身份往对话里发一轮话。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationPromptParams {
+    pub session_id: String,
+    /// 投递方给这一轮起的 id，在这段对话里唯一。同一个 id 再发不会再执行一次；这一轮结束后
+    /// 会话状态的 `completed_delivery_id` 就是它，结果用 `conversation.turn_result` 按它取。
+    pub delivery_id: String,
+    pub text: String,
+    /// 投递方认定这段对话带着的工具限制（`session.create` 时给的）。必须和运行时现在的完全
+    /// 一样，否则回 `failed_precondition`：运行时重启后续上的对话不带限制，不能往里发无人
+    /// 值守的话。没要求限制就给空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallowed_tools: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationTurnResultParams {
+    pub session_id: String,
+    pub delivery_id: String,
+}
+
+/// 一次外部投递那一轮现在怎样。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConversationTurnStatus {
+    /// 收下了，这一轮还没结束（可能还排在别的回合后面）。
+    Pending,
+    /// 这一轮结束了。`text` 是这一轮最后一段助手正文，没有就是空串。
+    Finished {
+        outcome: crate::acp_session::AcpTurnOutcome,
+        text: String,
+    },
+    /// 运行时不认识这次投递：没投过，或者运行时重启过、结果没了。
+    Unknown,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -11,7 +11,8 @@ use api::{
 };
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, SharedString, Window, div, px, rgb};
-use smelt_plugin_api as api;
+use rust_i18n::t;
+use smelt_plugin_api::{self as api, text};
 
 use crate::store::Prefs;
 use crate::{OWNER, Plugin};
@@ -20,7 +21,7 @@ use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 pub(crate) fn register(plugin: Rc<RefCell<Plugin>>, cx: &mut App) {
     let spec = ViewSpec {
         name: "main".into(),
-        title: "通知".into(),
+        title: text!("page.title"),
         icon: IconName::Bell.path(),
         draws_top_bar: false,
         instances: false,
@@ -39,11 +40,14 @@ pub(crate) fn register(plugin: Rc<RefCell<Plugin>>, cx: &mut App) {
                 "批准",
                 "响铃",
                 "bell",
+                "approval",
+                "alert",
             ]
             .into_iter()
             .map(SharedString::from)
             .collect(),
         }),
+        fills: Vec::new(),
         build: Rc::new(move |_, cx| {
             let plugin = plugin.clone();
             Rc::new(cx.new(|cx| NotifySettings::new(plugin, cx))) as Rc<dyn ViewHandle>
@@ -78,13 +82,14 @@ impl PluginView for NotifySettings {
 impl Render for NotifySettings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let prefs = self.plugin.borrow().prefs;
-        let switch = |label: &'static str,
-                      description: Option<&'static str>,
+        let switch = |id: &'static str,
+                      label: SharedString,
+                      description: Option<SharedString>,
                       get: fn(&Prefs) -> bool,
                       set: fn(&mut Prefs, bool)| {
             let write = self.plugin.clone();
-            let row = SettingsRow::new(label).child(
-                Switch::new(label)
+            let row = SettingsRow::new(label.clone()).child(
+                Switch::new(id)
                     .checked(get(&prefs))
                     .accessibility_label(label)
                     .on_change(move |value, window, _| {
@@ -104,43 +109,52 @@ impl Render for NotifySettings {
         SettingsPage::new("notifications-settings")
             .child(
                 SettingsSection::new()
-                    .title("系统通知")
+                    .title(t!("section.system"))
                     .child(permission_status(cx)),
             )
             .child(
                 SettingsSection::new()
-                    .title("Agent 什么时候叫你")
+                    .title(t!("section.agent"))
                     .child(switch(
-                        "等待批准",
+                        "approval",
+                        t!("prefs.approval").into(),
                         None,
                         |p| p.approval,
                         |p, v| p.approval = v,
                     ))
                     .child(switch(
-                        "等待输入",
-                        Some("提问或等你继续时"),
+                        "input",
+                        t!("prefs.input").into(),
+                        Some(t!("prefs.input_description").into()),
                         |p| p.input,
                         |p, v| p.input = v,
                     ))
                     .child(switch(
-                        "任务完成",
+                        "success",
+                        t!("prefs.success").into(),
                         None,
                         |p| p.success,
                         |p, v| p.success = v,
                     ))
                     .child(switch(
-                        "任务失败",
+                        "failure",
+                        t!("prefs.failure").into(),
                         None,
                         |p| p.failure,
                         |p, v| p.failure = v,
                     )),
             )
-            .child(SettingsSection::new().title("终端").child(switch(
-                "响铃",
-                Some("终端输出 BEL 时提醒"),
-                |p| p.bell,
-                |p, v| p.bell = v,
-            )))
+            .child(
+                SettingsSection::new()
+                    .title(t!("section.terminal"))
+                    .child(switch(
+                        "bell",
+                        t!("prefs.bell").into(),
+                        Some(t!("prefs.bell_description").into()),
+                        |p| p.bell,
+                        |p, v| p.bell = v,
+                    )),
+            )
     }
 }
 
@@ -150,13 +164,13 @@ fn permission_status(cx: &mut App) -> AnyElement {
     let permission = api::host(cx).notification_permission(cx);
     let Some(line) = permission_line(&permission) else {
         let text = match permission {
-            NotificationPermission::Unsupported => "这个系统上没有通知",
-            _ => "正在读取…",
+            NotificationPermission::Unsupported => t!("permission.unsupported"),
+            _ => t!("permission.checking"),
         };
         return div()
             .type_style(TYPE.ui)
             .text_color(rgb(ui_theme::muted()))
-            .child(text)
+            .child(text.into_owned())
             .into_any_element();
     };
     let color = rgb(match line.severity {
@@ -169,12 +183,12 @@ fn permission_status(cx: &mut App) -> AnyElement {
         let (id, label, command) = match fix {
             Fix::Request => (
                 "request-notification-permission",
-                "请求授权",
+                t!("permission.request"),
                 api::REQUEST_NOTIFICATION_PERMISSION,
             ),
             Fix::OpenSettings => (
                 "open-system-notification-settings",
-                "打开系统设置 ↗",
+                t!("permission.open_settings"),
                 api::OPEN_NOTIFICATION_SETTINGS,
             ),
         };
@@ -185,7 +199,7 @@ fn permission_status(cx: &mut App) -> AnyElement {
                 let task = command.run(&(), cx);
                 cx.spawn(async move |_| {
                     if let Err(error) = task.await {
-                        eprintln!("[notifications] {label}失败：{error}");
+                        eprintln!("[notifications] {id} 失败：{error}");
                     }
                 })
                 .detach();
@@ -235,8 +249,8 @@ enum Fix {
 /// 「系统通知」那一行。声音关了不算问题：那是用户自己选的安静，提醒照样到；横幅和角标关了，
 /// 人就看不见提醒。
 fn permission_line(permission: &NotificationPermission) -> Option<PermissionLine> {
-    let line = |text: &str, severity, fix| PermissionLine {
-        text: text.to_string(),
+    let line = |text: std::borrow::Cow<'_, str>, severity, fix| PermissionLine {
+        text: text.into_owned(),
         severity,
         fix,
     };
@@ -244,36 +258,40 @@ fn permission_line(permission: &NotificationPermission) -> Option<PermissionLine
         NotificationPermission::Checking | NotificationPermission::Unsupported => None,
         NotificationPermission::Granted { banners, badge, .. } => match (banners, badge) {
             (true, true) => Some(line(
-                "系统通知已允许",
+                t!("permission.granted"),
                 Severity::Ok,
                 Some(Fix::OpenSettings),
             )),
             (false, true) => Some(line(
-                "提醒样式是「无」，只进通知中心，不弹横幅",
+                t!("permission.no_banners"),
                 Severity::Warning,
                 Some(Fix::OpenSettings),
             )),
             (true, false) => Some(line(
-                "Dock 角标被系统关了，看不到未读数",
+                t!("permission.no_badge"),
                 Severity::Warning,
                 Some(Fix::OpenSettings),
             )),
             (false, false) => Some(line(
-                "不弹横幅，Dock 也不显示未读数",
+                t!("permission.no_banners_or_badge"),
                 Severity::Warning,
                 Some(Fix::OpenSettings),
             )),
         },
-        NotificationPermission::NotRequested => {
-            Some(line("尚未请求系统授权", Severity::Info, Some(Fix::Request)))
-        }
+        NotificationPermission::NotRequested => Some(line(
+            t!("permission.not_requested"),
+            Severity::Info,
+            Some(Fix::Request),
+        )),
         NotificationPermission::Denied => Some(line(
-            "已被系统禁止",
+            t!("permission.denied"),
             Severity::Error,
             Some(Fix::OpenSettings),
         )),
         // 系统报错：回到应用时宿主会重查。
-        NotificationPermission::Unavailable(reason) => Some(line(reason, Severity::Error, None)),
+        NotificationPermission::Unavailable(reason) => {
+            Some(line(reason.into(), Severity::Error, None))
+        }
     }
 }
 
@@ -315,7 +333,7 @@ mod tests {
             permission_line(&granted(true, false))
                 .unwrap()
                 .text
-                .contains("角标")
+                .contains("badge")
         );
         assert_eq!(
             permission_line(&NotificationPermission::Denied)

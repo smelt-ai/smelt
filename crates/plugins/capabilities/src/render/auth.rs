@@ -24,9 +24,9 @@ pub(super) fn builtin_provider_row(
 ) -> Div {
     let configured = provider.status.configured();
     let status_text = match provider.status {
-        PiAuthStatus::Oauth => "已登录",
-        PiAuthStatus::ApiKey => "API key",
-        PiAuthStatus::None => "未配置",
+        PiAuthStatus::Oauth => t!("auth.status.oauth"),
+        PiAuthStatus::ApiKey => t!("auth.status.api_key"),
+        PiAuthStatus::None => t!("auth.status.none"),
     };
     // 凭据来源要说清楚：一个来自环境变量的 key 和一个存在 auth.json 里的 key，
     // 排查起来是两回事，而「注销」只动得了后者。
@@ -55,8 +55,8 @@ pub(super) fn builtin_provider_row(
             Button::new(format!("pi-auth-models-{}", provider.id))
                 .quiet()
                 .small()
-                .label("选模型")
-                .tooltip("列出这个 Provider 现在能用的模型，挑一个设为默认")
+                .label(t!("auth.choose_model"))
+                .tooltip(t!("auth.choose_model_tooltip"))
                 .on_click(move |_, _, cx| {
                     let (id, name) = (id.clone(), name.clone());
                     pick_entity.update(cx, |workspace, cx| {
@@ -68,8 +68,8 @@ pub(super) fn builtin_provider_row(
         Some(
             Button::new(format!("pi-auth-oauth-{}", provider.id))
                 .small()
-                .label("登录")
-                .tooltip("在浏览器里完成授权；只有一个正确答案的步骤会自动跳过")
+                .label(t!("auth.sign_in"))
+                .tooltip(t!("auth.sign_in_tooltip"))
                 .disabled(login_busy)
                 .on_click(login(PiLoginMethod::OAuth, false)),
         )
@@ -77,7 +77,7 @@ pub(super) fn builtin_provider_row(
         Some(
             Button::new(format!("pi-auth-key-{}", provider.id))
                 .small()
-                .label("填 API key")
+                .label(t!("auth.enter_api_key"))
                 .disabled(login_busy)
                 .on_click(login(PiLoginMethod::ApiKey, true)),
         )
@@ -95,9 +95,9 @@ pub(super) fn builtin_provider_row(
     let api_key = (provider.supports_api_key && (configured || provider.supports_oauth))
         .then(|| login(PiLoginMethod::ApiKey, true));
     let api_key_label = if provider.status == PiAuthStatus::ApiKey {
-        "更换 API key"
+        t!("auth.change_api_key")
     } else {
-        "改用 API key"
+        t!("auth.use_api_key")
     };
     let logout = configured.then(|| {
         let entity = entity.clone();
@@ -118,7 +118,7 @@ pub(super) fn builtin_provider_row(
             .quiet()
             .small()
             .icon(IconName::Ellipsis)
-            .accessibility_label("更多操作");
+            .accessibility_label(t!("auth.more_actions"));
         MenuTrigger::dropdown(
             SharedString::from(format!("pi-auth-more-menu-{}", provider.id)),
             trigger,
@@ -126,28 +126,28 @@ pub(super) fn builtin_provider_row(
                 let mut menu = Menu::new();
                 if let Some(handler) = reauth.clone() {
                     menu = menu.item(
-                        MenuItem::new("重新登录")
+                        MenuItem::new(t!("auth.sign_in_again"))
                             .disabled(login_busy)
                             .on_click(move |event, window, cx| (*handler)(event, window, cx)),
                     );
                 }
                 if let Some(handler) = manual_oauth.clone() {
                     menu = menu.item(
-                        MenuItem::new("逐项登录（企业版域名、登录方式等）")
+                        MenuItem::new(t!("auth.sign_in_step_by_step"))
                             .disabled(login_busy)
                             .on_click(move |event, window, cx| (*handler)(event, window, cx)),
                     );
                 }
                 if let Some(handler) = api_key.clone() {
                     menu = menu.item(
-                        MenuItem::new(api_key_label)
+                        MenuItem::new(api_key_label.clone())
                             .disabled(login_busy)
                             .on_click(move |event, window, cx| (*handler)(event, window, cx)),
                     );
                 }
                 if let Some(handler) = logout.clone() {
                     menu = menu.separator().item(
-                        MenuItem::new("注销")
+                        MenuItem::new(t!("auth.sign_out"))
                             .disabled(login_busy)
                             .on_click(move |event, window, cx| (*handler)(event, window, cx)),
                     );
@@ -182,8 +182,16 @@ pub(super) fn builtin_provider_row(
                                 .text_color(palette.fg)
                                 .child(truncated_line(provider.name.clone())),
                         )
-                        .children(provider.subscription.then(|| Badge::new().child("订阅")))
-                        .children(is_default.then(|| Badge::new().accent().child("默认"))),
+                        .children(
+                            provider
+                                .subscription
+                                .then(|| Badge::new().child(t!("badge.subscription").into_owned())),
+                        )
+                        .children(is_default.then(|| {
+                            Badge::new()
+                                .accent()
+                                .child(t!("badge.default").into_owned())
+                        })),
                 )
                 .child(
                     div()
@@ -232,7 +240,7 @@ pub(super) fn login_panel(
                     div()
                         .type_style(TYPE.ui_medium)
                         .text_color(fg)
-                        .child(format!("登录 {}", view.title())),
+                        .child(t!("auth.login_title", name = view.title()).into_owned()),
                 )
                 .child({
                     let cancel_entity = entity.clone();
@@ -240,7 +248,11 @@ pub(super) fn login_panel(
                     Button::new("pi-login-cancel")
                         .quiet()
                         .small()
-                        .label(if finished { "关闭" } else { "取消" })
+                        .label(if finished {
+                            t!("common.close")
+                        } else {
+                            t!("common.cancel")
+                        })
                         .on_click(move |_, _, cx| {
                             cancel_entity.update(cx, |workspace, cx| {
                                 workspace.cancel_pi_login(cx);
@@ -256,7 +268,7 @@ pub(super) fn login_panel(
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(muted)
-                .child("稍后会给出授权链接或验证码，用浏览器完成登录。"),
+                .child(t!("auth.waiting").into_owned()),
         );
     }
 
@@ -273,7 +285,7 @@ pub(super) fn login_panel(
                     div()
                         .type_style(TYPE.text_xsmall)
                         .text_color(muted)
-                        .child("在浏览器里打开验证页，输入下面这串码："),
+                        .child(t!("auth.device_code").into_owned()),
                 )
                 .child(
                     div()
@@ -295,7 +307,7 @@ pub(super) fn login_panel(
                             Button::new("pi-login-copy-code")
                                 .quiet()
                                 .small()
-                                .label("复制")
+                                .label(t!("common.copy"))
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
                                 }),
@@ -303,7 +315,7 @@ pub(super) fn login_panel(
                         .child(
                             Button::new("pi-login-open-verification")
                                 .small()
-                                .label("打开验证页")
+                                .label(t!("auth.open_verification"))
                                 .on_click(move |_, _, cx| cx.open_url(&uri)),
                         ),
                 )
@@ -333,14 +345,14 @@ pub(super) fn login_panel(
                         .child(
                             Button::new("pi-login-open-url")
                                 .small()
-                                .label("在浏览器中打开授权页")
+                                .label(t!("auth.open_authorization"))
                                 .on_click(move |_, _, cx| cx.open_url(&open_url)),
                         )
                         .child(
                             Button::new("pi-login-copy-url")
                                 .quiet()
                                 .small()
-                                .label("复制链接")
+                                .label(t!("auth.copy_link"))
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         copy_url.clone(),
@@ -374,7 +386,7 @@ pub(super) fn login_panel(
                     div()
                         .type_style(TYPE.text_xsmall)
                         .text_color(muted)
-                        .child(format!("示例：{placeholder}"))
+                        .child(t!("auth.example", placeholder = placeholder).into_owned())
                 }))
                 .child(match prompt.kind {
                     PiPromptKind::Select => div()
@@ -416,7 +428,11 @@ pub(super) fn login_panel(
                                 .unwrap_or(true);
                             Button::new("pi-login-submit")
                                 .small()
-                                .label(if empty { "留空提交" } else { "提交" })
+                                .label(if empty {
+                                    t!("auth.submit_empty")
+                                } else {
+                                    t!("auth.submit")
+                                })
                                 .on_click(move |_, window, cx| {
                                     submit_entity.update(cx, |workspace, cx| {
                                         workspace.submit_pi_login_prompt(window, cx);
@@ -444,7 +460,7 @@ pub(super) fn login_panel(
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::bad()))
-                    .child(format!("登录失败：{error}")),
+                    .child(t!("auth.failed", error = error).into_owned()),
             );
         }
         Some(Ok(())) => {
@@ -452,11 +468,11 @@ pub(super) fn login_panel(
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(rgb(api::ui::ui_theme::ok()))
-                    .child(if view.mcp_server().is_some() {
-                        "登录成功，凭据已写入 ~/.pi/agent/mcp-auth.json。"
+                    .child(SharedString::from(if view.mcp_server().is_some() {
+                        t!("auth.done_mcp")
                     } else {
-                        "登录成功，凭据已写入 ~/.pi/agent/auth.json。"
-                    }),
+                        t!("auth.done")
+                    })),
             );
             if let Some(provider_id) = view.provider_id() {
                 panel = panel.child(model_choices(
@@ -499,16 +515,12 @@ fn model_choices(
             .into_any_element()
     };
     let models = match models {
-        None => return hint("正在读取可用模型…".to_string()),
+        None => return hint(t!("auth.models_loading").into_owned()),
         Some(Err(error)) => {
-            return hint(format!(
-                "读不到可用模型（{error}），可在「默认模型配置」里手填。"
-            ));
+            return hint(t!("auth.models_failed", error = error).into_owned());
         }
         Some(Ok(models)) if models.is_empty() => {
-            return hint(
-                "这个 Provider 没有报告可用模型，可在「默认模型配置」里手填。".to_string(),
-            );
+            return hint(t!("auth.models_empty").into_owned());
         }
         Some(Ok(models)) => models,
     };
@@ -517,7 +529,7 @@ fn model_choices(
         div()
             .type_style(TYPE.text_xsmall_medium)
             .text_color(fg)
-            .child("设为默认模型"),
+            .child(t!("auth.set_default_title").into_owned()),
     );
     for model in models.iter().take(VISIBLE_MODELS) {
         let is_current = current_default == Some(model.id.as_str());
@@ -548,13 +560,13 @@ fn model_choices(
                     div()
                         .type_style(TYPE.text_xsmall)
                         .text_color(muted)
-                        .child("当前默认")
+                        .child(t!("auth.current_default").into_owned())
                         .into_any_element()
                 } else {
                     Button::new(format!("pi-set-default-{provider_id}-{}", model.id))
                         .quiet()
                         .small()
-                        .label("设为默认")
+                        .label(t!("auth.set_default"))
                         .on_click(move |_, _window, cx| {
                             let (provider, model_id) = (provider.clone(), model_id.clone());
                             set_entity.update(cx, |workspace, cx| {
@@ -566,12 +578,12 @@ fn model_choices(
         );
     }
     if models.len() > VISIBLE_MODELS {
-        section = section.child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
-            format!(
-                "另有 {} 个模型，可在「默认模型配置」里填写。",
-                models.len() - VISIBLE_MODELS
-            ),
-        ));
+        section = section.child(
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(t!("auth.more_models", count = models.len() - VISIBLE_MODELS).into_owned()),
+        );
     }
     section.into_any_element()
 }
@@ -604,14 +616,14 @@ pub(super) fn model_picker_panel(
                     div()
                         .type_style(TYPE.ui_medium)
                         .text_color(fg)
-                        .child(format!("{} 的可用模型", picker.provider_name)),
+                        .child(t!("auth.picker_title", name = picker.provider_name).into_owned()),
                 )
                 .child({
                     let close_entity = entity.clone();
                     Button::new("pi-model-picker-close")
                         .quiet()
                         .small()
-                        .label("关闭")
+                        .label(t!("common.close"))
                         .on_click(move |_, _, cx| {
                             close_entity.update(cx, |workspace, cx| {
                                 workspace.close_pi_model_picker(cx);

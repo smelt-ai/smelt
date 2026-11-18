@@ -262,7 +262,7 @@ fn mixed_appearance_and_memory_patch_is_rejected_before_desktop_check() {
         panic!("expected a protocol error, got {error}");
     };
     assert_eq!(error.code, ControlErrorCode::InvalidParams);
-    assert!(error.message.contains("分两次"), "{}", error.message);
+    assert!(error.message.contains("separately"), "{}", error.message);
 }
 
 #[test]

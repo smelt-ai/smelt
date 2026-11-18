@@ -174,10 +174,12 @@ impl AgentHostSettings {
         definition: &AgentDefinition,
     ) -> Result<(ConversationAgentKind, ConversationLaunchSpec), String> {
         let agent = definition.engine_kind().ok_or_else(|| {
-            format!(
-                "智能体 `{}` 使用了未知执行引擎 `{}`",
-                definition.name, definition.engine_kind_id
+            rust_i18n::t!(
+                "agent.unknown_engine",
+                name = definition.name,
+                engine = definition.engine_kind_id
             )
+            .into_owned()
         })?;
         Ok((agent, self.acp_launch_for(agent)))
     }

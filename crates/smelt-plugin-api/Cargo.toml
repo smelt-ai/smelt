@@ -26,15 +26,21 @@ smelt-version = { path = "../smelt-version" }
 smelt-ui = { path = "../smelt-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 # 布局的格式（`DockAreaState`）。
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
 futures-channel = "0.3"
-gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", default-features = false, features = ["quickjs"], optional = true }
+# 界面语言：当前语言是 rust-i18n 的全局值，各 crate 的文案共用它（见 src/locale.rs）。
+rust-i18n.workspace = true
+# 读系统的首选语言。
+sys-locale = "0.3"
+gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b", default-features = false, features = ["quickjs"], optional = true }
 
 [features]
 js = ["dep:gpui-shell"]
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 smol = "2"
+# 查各 crate 的文案（tests/catalogs.rs），用 rust-i18n 构建时同一个加载函数。
+rust-i18n-support = { version = "4.2", features = ["codegen"] }

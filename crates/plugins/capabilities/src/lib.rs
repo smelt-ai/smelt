@@ -18,6 +18,7 @@ use api::ui::{Button, IconName, Segmented, SettingsPage, SettingsRow, SettingsSe
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_base::StyledExt as _;
+use rust_i18n::t;
 use smelt_plugin_api::{
     self as api, ContextMenuAction, ContextMenuItem, HostEvent, PluginView, RuntimeKey,
     TopicMessage, ViewHandle, ViewSpec,
@@ -35,6 +36,8 @@ mod state;
 
 use config::PiConfigSlot;
 use state::*;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 const OWNER: &str = "smelt.capabilities";
 
@@ -61,13 +64,14 @@ pub fn register(cx: &mut App) {
         OWNER,
         vec![ViewSpec {
             name: "main".into(),
-            title: "能力库".into(),
+            title: api::text!("title"),
             icon: IconName::LayoutDashboard.path(),
             draws_top_bar: false,
             instances: false,
             settings: None,
-            build: Rc::new(|_window, cx| {
-                Rc::new(cx.new(CapabilitiesPage::new)) as Rc<dyn ViewHandle>
+            fills: Vec::new(),
+            build: Rc::new(|window, cx| {
+                Rc::new(cx.new(|cx| CapabilitiesPage::new(window, cx))) as Rc<dyn ViewHandle>
             }),
         }],
         cx,
@@ -75,9 +79,9 @@ pub fn register(cx: &mut App) {
     .expect("能力库的视图表写错了");
     api::register_commands(
         OWNER,
-        "能力库",
+        api::text!("title"),
         vec![
-            OPEN_ON_MACHINE.spec_async("在这台机器上打开能力库", |args, _, cx| {
+            OPEN_ON_MACHINE.spec_async(api::text!("command.open_on_machine"), |args, _, cx| {
                 open_on_machine(args, cx)
             }),
         ],
@@ -85,7 +89,7 @@ pub fn register(cx: &mut App) {
     )
     .expect("能力库的命令表写错了");
     let item = ContextMenuItem {
-        label: "能力库".into(),
+        label: api::text!("title"),
         image: None,
         icon: Some(IconName::LayoutDashboard.path()),
         machine: None,
@@ -130,7 +134,7 @@ fn open_on_machine(args: MachineMenuContext, cx: &mut App) -> Task<Result<(), St
     );
     cx.spawn(async move |_| match opened.await? {
         true => Ok(()),
-        false => Err("没有能放能力库的地方".to_string()),
+        false => Err(t!("error.no_place").into_owned()),
     })
 }
 
@@ -147,13 +151,14 @@ enum CapabilitiesTab {
 impl CapabilitiesTab {
     const ALL: [Self; 4] = [Self::Models, Self::Plugins, Self::Mcp, Self::Memory];
 
-    fn label(self) -> &'static str {
+    fn label(self) -> SharedString {
         match self {
-            Self::Models => "模型",
-            Self::Plugins => "插件",
-            Self::Mcp => "MCP",
-            Self::Memory => "记忆",
+            Self::Models => t!("tab.models"),
+            Self::Plugins => t!("tab.plugins"),
+            Self::Mcp => t!("tab.mcp"),
+            Self::Memory => t!("tab.memory"),
         }
+        .into()
     }
 
     /// 打开参数里的名字，也拿来拼元素 id。
@@ -212,11 +217,15 @@ pub struct CapabilitiesPage {
 }
 
 impl CapabilitiesPage {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let events = api::events(cx);
-        let host_events = cx.subscribe(&events, |this, _, event: &HostEvent, cx| {
-            this.on_host_event(event, cx);
-        });
+        let host_events =
+            cx.subscribe_in(&events, window, |this, _, event: &HostEvent, window, cx| {
+                if matches!(event, HostEvent::LocaleChanged) {
+                    this.relabel_inputs(window, cx);
+                }
+                this.on_host_event(event, cx);
+            });
         let agent_settings = cx.observe_global::<agents::AgentSettingsCache>(|_, cx| cx.notify());
         Self {
             machine: RuntimeKey::Local,
@@ -238,6 +247,16 @@ impl CapabilitiesPage {
             remote_desktop: false,
             _host_events: host_events,
             _agent_settings: agent_settings,
+        }
+    }
+
+    /// 换了语言：开着的编辑表单换占位文字，填了一半的内容不动。
+    fn relabel_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.pi_model_editor {
+            editor.label(window, cx);
+        }
+        if let Some(editor) = &self.pi_custom_provider_editor {
+            editor.label(window, cx);
         }
     }
 
@@ -282,6 +301,7 @@ impl CapabilitiesPage {
             | HostEvent::LayoutsChanged
             | HostEvent::PagesChanged
             | HostEvent::CommandsChanged
+            | HostEvent::LocaleChanged
             | HostEvent::Plugin { .. }
             | HostEvent::OpenPaths { .. } => {}
         }
@@ -327,7 +347,7 @@ impl CapabilitiesPage {
         let entity = cx.entity();
         let trigger = Button::new("capabilities-runtime")
             .quiet()
-            .label(format!("机器：{current}"))
+            .label(t!("machine_picker", name = current))
             .icon(IconName::ChevronDown);
         MenuTrigger::dropdown("capabilities-runtime-menu", trigger, move |_window, _cx| {
             machines.iter().fold(Menu::new(), |menu, machine| {
@@ -412,11 +432,11 @@ impl Render for CapabilitiesPage {
 }
 
 fn notify_success(message: impl AsRef<str>, cx: &mut App) {
-    notify("完成", message.as_ref(), cx);
+    notify(&t!("notify.done"), message.as_ref(), cx);
 }
 
 fn notify_error(message: impl AsRef<str>, cx: &mut App) {
-    notify("错误", message.as_ref(), cx);
+    notify(&t!("notify.error"), message.as_ref(), cx);
 }
 
 fn notify(subtitle: &str, body: &str, cx: &mut App) {

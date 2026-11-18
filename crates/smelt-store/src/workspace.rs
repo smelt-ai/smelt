@@ -382,12 +382,12 @@ pub(crate) fn restore_conversation_into_workset(
         .ok_or_else(|| StoreError::ConversationNotFound { id: id.into() })?;
     let old_root = conversation.closed_workset_root.as_deref().ok_or_else(|| {
         StoreError::InvalidWorksetRestore {
-            message: "该会话不需要重新选择工作树".into(),
+            message: "the session doesn't need a new worktree".into(),
         }
     })?;
     if conversation.archived_at.is_none() || conversation.workset_id.is_some() {
         return Err(StoreError::InvalidWorksetRestore {
-            message: "会话未处于等待选择工作树的归档状态".into(),
+            message: "the session isn't archived waiting for a worktree".into(),
         });
     }
     let (project_root, target) = validate_restore_workset(transaction, workset_id)?;
@@ -398,12 +398,12 @@ pub(crate) fn restore_conversation_into_workset(
         != Some(project)
     {
         return Err(StoreError::InvalidWorksetRestore {
-            message: "只能选择原项目下的工作树".into(),
+            message: "pick a worktree in the original project".into(),
         });
     }
     let target = target
         .to_str()
-        .ok_or_else(|| StoreError::empty_name("工作树路径"))?;
+        .ok_or_else(|| StoreError::not_utf8("The worktree path"))?;
     transaction.execute(
         "UPDATE session SET cwd = ?2 WHERE group_id = ?1",
         params![id, target],
@@ -434,7 +434,10 @@ fn validate_restore_workset(
         .join(task);
     if !target.is_dir() {
         return Err(StoreError::InvalidWorksetRestore {
-            message: format!("目标工作树目录不存在：{}", target.display()),
+            message: format!(
+                "the target worktree directory doesn't exist: {}",
+                target.display()
+            ),
         });
     }
     let mut repositories = transaction.prepare(
@@ -447,7 +450,9 @@ fn validate_restore_workset(
         let (name, path) = repository?;
         if !std::path::Path::new(&path).is_dir() {
             return Err(StoreError::InvalidWorksetRestore {
-                message: format!("目标工作树的仓库 {name} 目录不存在：{path}"),
+                message: format!(
+                    "the target worktree's repository {name} directory doesn't exist: {path}"
+                ),
             });
         }
     }
@@ -513,10 +518,10 @@ pub(crate) fn set_project_repositories(
             || repository.name.trim().is_empty()
             || repository.root.trim().is_empty()
         {
-            return Err(StoreError::empty_name("项目仓库"));
+            return Err(StoreError::empty_name("A project repository"));
         }
         if !names.insert(repository.name.trim()) || !roots.insert(repository.root.trim()) {
-            return Err(StoreError::empty_name("重复的项目仓库"));
+            return Err(StoreError::duplicate("A project repository"));
         }
     }
     let existing = {
@@ -577,17 +582,17 @@ pub(crate) fn create_workset(
     let task = workset.task.trim();
     let branch = workset.branch.trim();
     for (label, value) in [
-        ("工作树 id", id),
-        ("项目根目录", project_root),
-        ("工作树名称", task),
-        ("工作树分支", branch),
+        ("The worktree id", id),
+        ("The project root", project_root),
+        ("The worktree name", task),
+        ("The worktree branch", branch),
     ] {
         if value.is_empty() {
             return Err(StoreError::empty_name(label));
         }
     }
     if workset.repositories.is_empty() {
-        return Err(StoreError::empty_name("工作树仓库"));
+        return Err(StoreError::empty_name("A worktree repository"));
     }
     let existing = transaction
         .query_row(
@@ -632,13 +637,13 @@ pub(crate) fn create_workset(
             || repository.worktree.trim().is_empty()
             || repository.base_ref.trim().is_empty()
         {
-            return Err(StoreError::empty_name("工作树仓库"));
+            return Err(StoreError::empty_name("A worktree repository"));
         }
         if !names.insert(repository.name.trim())
             || !roots.insert(repository.root.trim())
             || !worktrees.insert(repository.worktree.trim())
         {
-            return Err(StoreError::empty_name("重复的工作树仓库"));
+            return Err(StoreError::duplicate("A worktree repository"));
         }
         transaction.execute(
             "INSERT INTO workset_repository(
@@ -666,7 +671,7 @@ pub(crate) fn rename_workset(
     let task = workset.task.trim();
     let branch = workset.branch.trim();
     if id.is_empty() || task.is_empty() || branch.is_empty() {
-        return Err(StoreError::empty_name("工作树"));
+        return Err(StoreError::empty_name("The worktree"));
     }
     let changed = transaction.execute(
         "UPDATE workset SET task = ?2, branch = ?3 WHERE id = ?1
@@ -724,7 +729,7 @@ pub(crate) fn delete_workset(transaction: &Transaction<'_>, id: &str) -> Result<
             .join(task);
         let task_root = task_root
             .to_str()
-            .ok_or_else(|| StoreError::empty_name("工作树路径"))?;
+            .ok_or_else(|| StoreError::not_utf8("The worktree path"))?;
         transaction.execute(
             "UPDATE session_group SET closed_workset_root = ?2 WHERE workset_id = ?1",
             params![id, task_root],

@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 
 use gpui::*;
 use gpui_base::VirtualListScrollHandle;
+use rust_i18n::t;
 use smelt_plugin_api::ui::resizable::ResizableState;
 use smelt_plugin_api::{
     self as api, CommandSpec, Handled, Host, HostEvent, PluginView, RuntimeKey, ViewHandle,
-    ViewSpec,
+    ViewSpec, text,
 };
 
 mod contract;
@@ -33,6 +34,8 @@ use panel::{
 pub(crate) use api::ui::ui_theme;
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 const VIEW_ID: &str = "smelt.git/main";
 /// 命令的来源。和搬出宿主之前一样，用户改过的快捷键还对得上。
 const OWNER: &str = "smelt.git";
@@ -43,11 +46,12 @@ pub fn register(cx: &mut App) {
         OWNER,
         vec![ViewSpec {
             name: "main".into(),
-            title: "变更".into(),
+            title: text!("title"),
             icon: smelt_plugin_api::ui::IconName::GitBranch.path(),
             draws_top_bar: false,
             instances: false,
             settings: None,
+            fills: Vec::new(),
             build: Rc::new(|window, cx| {
                 Rc::new(cx.new(|cx| GitPanel::new(window, cx))) as Rc<dyn ViewHandle>
             }),
@@ -56,11 +60,11 @@ pub fn register(cx: &mut App) {
     )
     .expect("变更的视图表写错了");
     let commands = vec![
-        jump_hunk_command("prev-hunk", "上一个差异", "shift-f7", false),
-        jump_hunk_command("next-hunk", "下一个差异", "f7", true),
+        jump_hunk_command("prev-hunk", text!("command.prev_hunk"), "shift-f7", false),
+        jump_hunk_command("next-hunk", text!("command.next_hunk"), "f7", true),
         open_pull_request_command(),
     ];
-    api::register_commands(OWNER, "改动", commands, cx).expect("变更的命令表写错了");
+    api::register_commands(OWNER, text!("title"), commands, cx).expect("变更的命令表写错了");
 }
 
 /// [`contract::OPEN_PULL_REQUEST`]：会话列表的工作树菜单按仓库调它。仓库信息问那台机器的
@@ -72,7 +76,7 @@ fn open_pull_request_command() -> CommandSpec {
             .strip_prefix("smelt.git/")
             .expect("命令 id 带来源")
             .into(),
-        title: "在浏览器中创建 PR".into(),
+        title: text!("command.open_pull_request"),
         key: None,
         context: "Workspace".into(),
         palette: false,
@@ -82,7 +86,9 @@ fn open_pull_request_command() -> CommandSpec {
             let target: contract::OpenPullRequest = match api::serde_json::from_value(args.clone())
             {
                 Ok(target) => target,
-                Err(error) => return Handled::err(format!("创建 PR 的参数不对：{error}")),
+                Err(error) => {
+                    return Handled::err(t!("error.pull_request_args", error = error).into_owned());
+                }
             };
             let info = api::call::<smelt_plugin_api::client::protocol::git::GitRepoInfoCall>(
                 &target.machine,
@@ -101,10 +107,10 @@ fn open_pull_request_command() -> CommandSpec {
 
 /// F7 / Shift+F7 跳到下一块 / 上一块改动。只在焦点在「改动」页里时生效：焦点在终端里，
 /// 这两个键该交给终端。
-fn jump_hunk_command(name: &str, title: &str, key: &str, forward: bool) -> CommandSpec {
+fn jump_hunk_command(name: &str, title: api::Text, key: &str, forward: bool) -> CommandSpec {
     CommandSpec {
         name: name.into(),
-        title: title.into(),
+        title,
         key: Some(key.into()),
         context: CHANGES_KEY_CONTEXT.into(),
         palette: true,
@@ -168,7 +174,7 @@ mod rt {
 
     use smelt_plugin_api::client::RuntimeClient;
     use smelt_plugin_api::client::protocol::control::{ControlCall, ControlClientError};
-    use smelt_plugin_api::{MACHINE_REMOVED, RuntimeKey};
+    use smelt_plugin_api::{RuntimeKey, machine_removed};
 
     pub(crate) use smelt_plugin_api::call_error_text as error_text;
 
@@ -178,7 +184,7 @@ mod rt {
     pub(crate) fn target(key: &RuntimeKey, cx: &gpui::App) -> Result<RuntimeClient, String> {
         smelt_plugin_api::host(cx)
             .client(key, cx)
-            .ok_or_else(|| MACHINE_REMOVED.to_string())
+            .ok_or_else(machine_removed)
     }
 
     pub(crate) fn call_on<C: ControlCall>(
@@ -204,7 +210,7 @@ pub(crate) fn mono_font() -> String {
 pub(crate) fn notify_error(message: &str, cx: &mut App) {
     eprintln!("[git] {message}");
     let notify = api::Notify {
-        subtitle: "错误".to_string(),
+        subtitle: t!("notify.error").into_owned(),
         body: message.to_string(),
         ..Default::default()
     };
@@ -357,10 +363,13 @@ pub(crate) struct GitPanel {
 }
 
 impl GitPanel {
-    fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let host = api::host(cx);
         let events = api::events(cx);
-        let _events = cx.subscribe(&events, |this, _, event: &HostEvent, cx| {
+        let _events = cx.subscribe_in(&events, window, |this, _, event: &HostEvent, window, cx| {
+            if matches!(event, HostEvent::LocaleChanged) {
+                this.relabel_inputs(window, cx);
+            }
             this.on_host_event(event, cx);
         });
         let project = api::active_context(cx).project.map(|project| ProjectRef {
@@ -426,6 +435,25 @@ impl GitPanel {
         // 排到这一轮之后再取。
         panel.schedule_visible_refresh(cx);
         panel
+    }
+
+    /// 换了语言：已经建好的输入框换占位文字，打了一半的内容不动。
+    fn relabel_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (repo, input) in &self.commit_msg_inputs {
+            let branch = self
+                .git_status
+                .get(repo)
+                .map(|cached| cached.value.branch.clone())
+                .unwrap_or_default();
+            input.update(cx, |input, cx| {
+                input.set_placeholder(panel::ops::commit_placeholder(&branch), window, cx);
+            });
+        }
+        if let Some(input) = &self.diff_comment_input {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(t!("comment.placeholder"), window, cx);
+            });
+        }
     }
 
     fn on_host_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {

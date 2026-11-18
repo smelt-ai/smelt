@@ -1,6 +1,7 @@
 //! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时来自
 //! 客户端库里登记的连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
 
+use rust_i18n::t;
 use smelt_model::runtime_path::PathStyle;
 use smelt_runtime_client::RuntimeClient;
 
@@ -49,18 +50,15 @@ pub(crate) fn connector(runtime: &Runtime) -> std::sync::Arc<dyn smelt_runtime_c
     std::sync::Arc::new(move || client.connect())
 }
 
-static LOCAL_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// 本机的序列号或主机名；两样都取不到是 `None`，显示时用「本机」（跟着语言）。
+static LOCAL_NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 /// 初始化本机名字：启动时在后台读取硬件序列号，render 只读内存缓存。
 pub(crate) fn init_local_runtime_name(cx: &gpui::App) {
     cx.spawn(async move |cx| {
         let name = cx
             .background_executor()
-            .spawn(async {
-                smelt_sys::hardware_serial()
-                    .or_else(smelt_sys::hostname)
-                    .unwrap_or_else(|| "本机".to_string())
-            })
+            .spawn(async { smelt_sys::hardware_serial().or_else(smelt_sys::hostname) })
             .await;
         let _ = LOCAL_NAME.set(name);
         cx.update(|cx| {
@@ -71,14 +69,17 @@ pub(crate) fn init_local_runtime_name(cx: &gpui::App) {
 }
 
 /// 本机运行时名称：纯读内存缓存，启动未取到时兜底为「本机」。
-pub(crate) fn local_runtime_name() -> &'static str {
-    LOCAL_NAME.get().map(|s| s.as_str()).unwrap_or("本机")
+pub(crate) fn local_runtime_name() -> String {
+    match LOCAL_NAME.get() {
+        Some(Some(name)) => name.clone(),
+        _ => t!("runtime.local").into_owned(),
+    }
 }
 
 /// 给人看的运行时名字：本机优先展示电脑序列号，远程用配对时记下的主机名。
 pub(crate) fn runtime_name(key: &RuntimeKey, cx: &gpui::App) -> String {
     match key {
-        RuntimeKey::Local => local_runtime_name().to_string(),
+        RuntimeKey::Local => local_runtime_name(),
         RuntimeKey::Remote(id) => cx
             .try_global::<RuntimeHub>()
             .and_then(|hub| {
@@ -92,7 +93,7 @@ pub(crate) fn runtime_name(key: &RuntimeKey, cx: &gpui::App) -> String {
 }
 
 /// 远程运行时不能用时给机器标的字（按最近一次探测），能用就是 `None`。本机总能用。
-pub(crate) fn runtime_unavailable_label(key: &RuntimeKey, cx: &gpui::App) -> Option<&'static str> {
+pub(crate) fn runtime_unavailable_label(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
     match key {
         RuntimeKey::Local => None,
         RuntimeKey::Remote(_) => match cx
@@ -105,9 +106,13 @@ pub(crate) fn runtime_unavailable_label(key: &RuntimeKey, cx: &gpui::App) -> Opt
             .map(|remote| &remote.status)
         {
             Some(RuntimeStatus::Online { .. }) => None,
-            Some(RuntimeStatus::Incompatible { .. }) => Some("版本不兼容"),
-            Some(RuntimeStatus::Upgrading(_)) => Some("升级中"),
-            Some(RuntimeStatus::Connecting | RuntimeStatus::Offline(_)) | None => Some("离线"),
+            Some(RuntimeStatus::Incompatible { .. }) => {
+                Some(t!("runtime.incompatible").into_owned())
+            }
+            Some(RuntimeStatus::Upgrading(_)) => Some(t!("runtime.upgrading").into_owned()),
+            Some(RuntimeStatus::Connecting | RuntimeStatus::Offline(_)) | None => {
+                Some(t!("runtime.offline").into_owned())
+            }
         },
     }
 }
@@ -400,9 +405,11 @@ pub(crate) fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohCl
     }
     let secret = smelt_iroh::default_client_secret_path()
         .and_then(|path| smelt_iroh::load_or_create_secret(&path))
-        .map_err(|error| format!("读取本机设备身份失败：{error:#}"))?;
+        .map_err(|error| {
+            t!("runtime.identity_failed", error = format!("{error:#}")).into_owned()
+        })?;
     let client = smelt_iroh::runtime::IrohClient::new(secret, None)
-        .map_err(|error| format!("起不了 iroh：{error:#}"))?;
+        .map_err(|error| t!("runtime.iroh_failed", error = format!("{error:#}")).into_owned())?;
     *slot = Some(std::sync::Arc::clone(&client));
     Ok(client)
 }
@@ -637,9 +644,9 @@ fn remote_client(
     let endpoint: smelt_iroh::EndpointId = connection
         .endpoint_id
         .parse()
-        .map_err(|_| format!("运行时的 endpoint id 不合法：{}", connection.endpoint_id))?;
+        .map_err(|_| t!("runtime.bad_endpoint", id = connection.endpoint_id).into_owned())?;
     let relay = parse_relay(connection.relay_url.as_deref().unwrap_or_default())
-        .map_err(|error| format!("relay 地址不合法：{error}"))?;
+        .map_err(|error| t!("runtime.bad_relay", error = error).into_owned())?;
     let route = RemoteRoute::new(relay);
     let client = RuntimeClient::new(LazyRemoteConnector {
         endpoint,
@@ -712,9 +719,7 @@ const PUSH_UPGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 pub(crate) fn push_upgrade(client: &RuntimeClient) -> PushUpgrade {
     match smelt_version::RELEASE {
         Some(release) => push_upgrade_to(client, release),
-        None => PushUpgrade::Failed(
-            "这是开发构建，没有对应的发版可升：用发布的 Smelt 来升级这台运行时".to_string(),
-        ),
+        None => PushUpgrade::Failed(t!("upgrade.dev_build").into_owned()),
     }
 }
 
@@ -725,14 +730,16 @@ fn push_upgrade_to(client: &RuntimeClient, version: &str) -> PushUpgrade {
 
     let mut stream = match client.connect() {
         Ok(stream) => stream,
-        Err(error) => return PushUpgrade::Failed(format!("连不上运行时：{error}")),
+        Err(error) => {
+            return PushUpgrade::Failed(t!("upgrade.connect_failed", error = error).into_owned());
+        }
     };
     let request = serde_json::json!({
         "op": DaemonOperation::RuntimeUpgrade,
         "version": version,
     });
     if let Err(error) = smelt_runtime_client::protocol::write_json_line(&mut stream, &request) {
-        return PushUpgrade::Failed(format!("发不出升级请求：{error}"));
+        return PushUpgrade::Failed(t!("upgrade.send_failed", error = error).into_owned());
     }
     let _ = stream.set_read_timeout(Some(PUSH_UPGRADE_TIMEOUT));
     let mut reader = std::io::BufReader::new(stream);
@@ -744,16 +751,22 @@ fn push_upgrade_to(client: &RuntimeClient, version: &str) -> PushUpgrade {
             Ok(0) => return PushUpgrade::Unsupported,
             Ok(_) => {}
             Err(error) if accepted => {
-                return PushUpgrade::Failed(format!("等运行时升级超时：{error}"));
+                return PushUpgrade::Failed(t!("upgrade.timeout", error = error).into_owned());
             }
-            Err(error) => return PushUpgrade::Failed(format!("读不到运行时的回复：{error}")),
+            Err(error) => {
+                return PushUpgrade::Failed(t!("upgrade.read_failed", error = error).into_owned());
+            }
         }
         match serde_json::from_str::<RuntimeUpgradeReply>(line.trim()) {
             Ok(RuntimeUpgradeReply::Accepted) => accepted = true,
             Ok(RuntimeUpgradeReply::Current) => return PushUpgrade::Current,
             Ok(RuntimeUpgradeReply::Staged { reason }) => return PushUpgrade::Staged(reason),
             Ok(RuntimeUpgradeReply::Failed { error }) => return PushUpgrade::Failed(error),
-            Err(_) => return PushUpgrade::Failed(format!("看不懂运行时的回复：{}", line.trim())),
+            Err(_) => {
+                return PushUpgrade::Failed(
+                    t!("upgrade.bad_reply", reply = line.trim()).into_owned(),
+                );
+            }
         }
     }
 }
@@ -863,7 +876,7 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
                         runtime: remote_runtime(
                             &connection.runtime_id,
                             RuntimeClient::new(move || {
-                                Err(std::io::Error::other("运行时配置无效"))
+                                Err(std::io::Error::other(t!("runtime.bad_config").into_owned()))
                             }),
                         ),
                         connection,
@@ -875,7 +888,7 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
                 })
                 .collect();
         }
-        Err(error) => hub.load_error = Some(format!("读取机器列表失败：{error}")),
+        Err(error) => hub.load_error = Some(t!("runtime.load_failed", error = error).into_owned()),
     }
     cx.set_global(hub);
     start_link_events(cx);
@@ -1032,7 +1045,7 @@ pub(crate) fn add_runtime(
 ) -> gpui::Task<Result<(RuntimeKey, String), String>> {
     let uri = uri.trim().to_string();
     if uri.is_empty() {
-        return gpui::Task::ready(Err("先粘贴那台机器的配对串".to_string()));
+        return gpui::Task::ready(Err(t!("pair.empty").into_owned()));
     }
     cx.spawn(async move |cx| {
         let remote = cx
@@ -1055,7 +1068,15 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
     use smelt_model::control_api::DevicePair;
     use smelt_model::remote_config::PairParams;
 
-    let pairing = smelt_pairing::parse_pairing_uri(uri)?;
+    let pairing = smelt_pairing::parse_pairing_uri(uri).map_err(|why| {
+        use smelt_pairing::PairingError;
+        match why {
+            PairingError::NotPairing => t!("pair.not_pairing_link"),
+            PairingError::MissingEndpoint => t!("pair.missing_endpoint"),
+            PairingError::MissingCode => t!("pair.missing_code"),
+        }
+        .into_owned()
+    })?;
     let mut connection = smelt_client_store::RuntimeConnection {
         runtime_id: String::new(),
         name: String::new(),
@@ -1072,19 +1093,20 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         .call::<DevicePair>(
             &PairParams {
                 code: pairing.code,
-                name: smelt_sys::hostname().unwrap_or_else(|| "Smelt 桌面".to_string()),
+                name: smelt_sys::hostname()
+                    .unwrap_or_else(|| t!("pair.default_device_name").into_owned()),
             },
             PAIR_TIMEOUT,
         )
-        .map_err(|error| format!("配对失败：{error}"))?;
+        .map_err(|error| t!("pair.failed", error = error).into_owned())?;
     let described = client
         .describe()
-        .map_err(|error| format!("配对成功，但读取运行时信息失败：{error}"))?;
+        .map_err(|error| t!("pair.describe_failed", error = error).into_owned())?;
     connection.runtime_id = described
         .daemon
         .runtime_id
         .clone()
-        .ok_or_else(|| "这个运行时太旧，没有 runtime_id，先升级它".to_string())?;
+        .ok_or_else(|| t!("pair.too_old").into_owned())?;
     connection.name = described
         .daemon
         .hostname
@@ -1093,7 +1115,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
     connection.os = described.daemon.os.clone();
     smelt_client_store::client_store()
         .and_then(|store| store.put_runtime_connection(&connection))
-        .map_err(|error| format!("保存运行时失败：{error}"))?;
+        .map_err(|error| t!("pair.save_failed", error = error).into_owned())?;
     Ok(RemoteRuntime {
         runtime: remote_runtime(&connection.runtime_id, client),
         status: described_status(described),
@@ -1154,7 +1176,7 @@ pub(crate) fn set_runtime_relay(
 
     let key = RuntimeKey::Remote(runtime_id);
     let Some(remote) = remote_of(&key, cx).cloned() else {
-        return gpui::Task::ready(Err("这台机器已经移除了".to_string()));
+        return gpui::Task::ready(Err(t!("runtime.removed").into_owned()));
     };
     let relay = relay.trim().to_string();
     let parsed = match parse_relay(&relay) {
@@ -1174,13 +1196,13 @@ pub(crate) fn set_runtime_relay(
                     let timeout = smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT;
                     let mut config = client
                         .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
-                        .map_err(|error| format!("读不到那台机器的远程配置：{error}"))?;
+                        .map_err(|error| t!("relay.read_failed", error = error).into_owned())?;
                     if config.iroh_relay != relay {
                         config.iroh_relay = relay.clone();
                         match relay_set_reply(client.call::<RemoteConfigSet>(&config, timeout)) {
                             RelaySetReply::Applied => {}
                             RelaySetReply::Rejected(error) => {
-                                return Err(format!("那台机器没改成：{error}"));
+                                return Err(t!("relay.rejected", error = error).into_owned());
                             }
                             // 改没改成以它眼下的配置为准：按新中继连过去问一次。它要重绑
                             // 新中继，拨号由 iroh 的拨号时限兜着，不另外等。
@@ -1189,13 +1211,15 @@ pub(crate) fn set_runtime_relay(
                                 let now = confirm
                                     .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
                                     .map_err(|confirm_error| {
-                                        format!(
-                                            "没收到那台机器的回复（{error}），按新中继也没连上它\
-                                             （{confirm_error}）"
+                                        t!(
+                                            "relay.lost",
+                                            error = error,
+                                            confirm_error = confirm_error
                                         )
+                                        .into_owned()
                                     })?;
                                 if now.iroh_relay != relay {
-                                    return Err(format!("那台机器没改成：{error}"));
+                                    return Err(t!("relay.rejected", error = error).into_owned());
                                 }
                             }
                         }
@@ -1203,7 +1227,7 @@ pub(crate) fn set_runtime_relay(
                 }
                 smelt_client_store::client_store()
                     .and_then(|store| store.put_runtime_connection(&saved))
-                    .map_err(|error| format!("保存中继失败：{error}"))
+                    .map_err(|error| t!("relay.save_failed", error = error).into_owned())
             })
             .await?;
         cx.update(|cx| {
@@ -1261,7 +1285,7 @@ pub(crate) fn remove_runtime(
             .find(|remote| remote.connection.runtime_id == runtime_id)
             .cloned()
     }) else {
-        return gpui::Task::ready(Err(smelt_plugin_api::MACHINE_REMOVED.to_string()));
+        return gpui::Task::ready(Err(smelt_plugin_api::machine_removed()));
     };
     // 在线才顺手请它吊销本机的配对。离线的连不上，拨号要等到超时，不能让移除跟着等；
     // 那台机器上的配对记录留着，要清就在那台机器上撤。
@@ -1275,7 +1299,7 @@ pub(crate) fn remove_runtime(
                     smelt_client_store::client_store()
                         .and_then(|store| store.delete_runtime_connection(&runtime_id))
                         .map(|_| ())
-                        .map_err(|error| format!("移除运行时失败：{error}"))
+                        .map_err(|error| t!("runtime.remove_failed", error = error).into_owned())
                 }
             })
             .await;
@@ -1539,8 +1563,8 @@ mod tests {
         );
         assert_eq!(version, "0.0.1");
         assert!(detail.contains("0.0.1"), "{detail}");
-        assert!(detail.contains("需要升级运行时"), "{detail}");
-        assert!(detail.contains("控制协议"), "{detail}");
+        assert!(detail.contains("update the runtime"), "{detail}");
+        assert!(detail.contains("control protocol"), "{detail}");
     }
 
     /// Windows 上的运行时随那台机器上的 Smelt 一起更新：旧了也不请它远程升级。
@@ -1611,7 +1635,7 @@ mod tests {
             "运行时比桌面新，只升不降，不能请它升级"
         );
         assert_eq!(version, "9.9.9");
-        assert!(detail.contains("需要升级客户端"), "{detail}");
+        assert!(detail.contains("update this app"), "{detail}");
     }
 
     /// 订阅线程把每次探测到的连通性报回来，订阅断开也报：机器的「离线」靠它更新，

@@ -5,7 +5,9 @@
 //! 布局在宿主启动时最先登记，所以它就是出厂布局。
 
 use gpui::App;
-use smelt_plugin_api::{self as api, LayoutSource, PageSource};
+use smelt_plugin_api::{self as api, LayoutMaterials, LayoutSource, Material, PageSource, text};
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// 登记页和布局用的来源名，id 是 `smelt.layouts/<名字>`。卸下时用它。
 pub const OWNER: &str = "smelt.layouts";
@@ -14,26 +16,37 @@ pub const OWNER: &str = "smelt.layouts";
 pub const WORKBENCH: &str = "smelt.layouts/workbench";
 
 /// 随程序带的页：工作台，启动时进的就是它。中间是出口，默认放选中的那段会话。
-pub static PAGES: &[PageSource<'static>] = &[PageSource {
-    name: "workbench",
-    title: "工作台",
-    home: true,
-    // 约定：smelt.sessions 的会话视图（`SESSION`）。
-    index: Some("smelt.sessions/session"),
-}];
+fn pages() -> [PageSource<'static>; 1] {
+    [PageSource {
+        name: "workbench",
+        title: text!("page.workbench"),
+        home: true,
+        // 约定：smelt.sessions 的会话视图（`SESSION`）。
+        index: Some("smelt.sessions/session"),
+    }]
+}
 
 /// 随程序带的布局。来源从 `smelt` 改成 `smelt.layouts` 时 id 跟着变了，旧存档对不上就不装。
-pub static LAYOUTS: &[LayoutSource<'static>] = &[LayoutSource {
-    page: WORKBENCH,
-    name: "standard",
-    title: "默认",
-    state: include_str!("../layouts/standard.json"),
-}];
+fn layouts() -> [LayoutSource<'static>; 1] {
+    [LayoutSource {
+        page: WORKBENCH,
+        name: "standard",
+        title: text!("layout.standard"),
+        state: include_str!("../layouts/standard.json"),
+        // 左边的导航透侧栏材质；右边的文件那组是常看的内容，和中间一样铺实色。
+        materials: LayoutMaterials {
+            left: Some(Material::Sidebar),
+            right: None,
+            bottom: None,
+            center: None,
+        },
+    }]
+}
 
 /// 宿主启动时调一次，在建工作台之前。再调一次是整组替换，结果相同。
 pub fn register(cx: &mut App) {
-    api::register_pages(OWNER, PAGES, cx).expect("内置页不合法");
-    api::register_layouts(OWNER, LAYOUTS, cx).expect("内置布局文件不合法");
+    api::register_pages(OWNER, &pages(), cx).expect("内置页不合法");
+    api::register_layouts(OWNER, &layouts(), cx).expect("内置布局文件不合法");
 }
 
 /// 卸下这页和这批布局。正开着这页时宿主换到别处。
@@ -122,6 +135,9 @@ mod tests {
                 ]
             );
             assert!(state["bottom_dock"].is_null());
+            let materials = api::layouts(cx)[0].materials;
+            assert_eq!(materials.left, Some(Material::Sidebar));
+            assert_eq!((materials.right, materials.center), (None, None));
             unregister(cx);
             assert!(api::layouts(cx).is_empty());
             assert!(api::pages(cx).is_empty());

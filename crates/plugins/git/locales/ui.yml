@@ -1,0 +1,426 @@
+_version: 2
+title:
+  en: Changes
+  zh-CN: 变更
+command:
+  prev_hunk:
+    en: Previous Change
+    zh-CN: 上一个差异
+  next_hunk:
+    en: Next Change
+    zh-CN: 下一个差异
+  open_pull_request:
+    en: Create PR in Browser
+    zh-CN: 在浏览器中创建 PR
+error:
+  pull_request_args:
+    en: "Wrong arguments for creating a PR: %{error}"
+    zh-CN: 创建 PR 的参数不对：%{error}
+notify:
+  error:
+    en: Error
+    zh-CN: 错误
+tab:
+  changes:
+    en: Changes
+    zh-CN: 更改
+  history:
+    en: History
+    zh-CN: 历史
+no_project:
+  title:
+    en: No project
+    zh-CN: 没有项目
+  hint:
+    en: Open a project to see its changes
+    zh-CN: 打开一个项目后再看更改
+scope:
+  all:
+    en: All
+    zh-CN: 全部
+  staged:
+    en: Staged
+    zh-CN: 已暂存
+  unstaged:
+    en: Unstaged
+    zh-CN: 未暂存
+changes:
+  clean:
+    en: Working tree clean
+    zh-CN: 工作区干净
+  loading:
+    en: Reading changes…
+    zh-CN: 正在读取更改…
+  failed:
+    en: Couldn't read Git status
+    zh-CN: Git 状态读取失败
+  retrying:
+    en: Couldn't read Git status, retrying…
+    zh-CN: Git 状态读取失败，正在重试…
+  nothing_to_commit:
+    en: Nothing to commit
+    zh-CN: 没有要提交的更改
+  staged:
+    en: Staged Changes · %{count}
+    zh-CN: 暂存的更改 · %{count}
+  unstaged:
+    en: Changes · %{count}
+    zh-CN: 更改 · %{count}
+  repos_truncated:
+    en: Too many repositories; only some are listed
+    zh-CN: 仓库太多，只列出了一部分
+  pick_file:
+    en: ← Choose a file to see its changes
+    zh-CN: ← 选择文件查看更改
+  no_files:
+    en: No file changes
+    zh-CN: 没有文件更改
+busy:
+  commit:
+    en: Committing…
+    zh-CN: 提交中…
+  commit_and_push:
+    en: Committing & pushing…
+    zh-CN: 提交并推送中…
+  push:
+    en: Pushing…
+    zh-CN: 推送中…
+  fetch:
+    en: Fetching…
+    zh-CN: 获取中…
+  pull:
+    en: Pulling…
+    zh-CN: 拉取中…
+  stash:
+    en: Stashing…
+    zh-CN: 储藏中…
+  stash_pop:
+    en: Restoring stash…
+    zh-CN: 恢复储藏中…
+  checkout:
+    en: Switching branch…
+    zh-CN: 切换分支中…
+  merge:
+    en: Merging…
+    zh-CN: 合并中…
+  delete_branch:
+    en: Deleting branch…
+    zh-CN: 删除分支中…
+  delete_remote_branch:
+    en: Deleting remote branch…
+    zh-CN: 删除远端分支中…
+  discard_file:
+    en: Discarding file…
+    zh-CN: 丢弃文件中…
+  discard_changes:
+    en: Discarding changes…
+    zh-CN: 丢弃更改中…
+  stage:
+    en: Staging…
+    zh-CN: 暂存中…
+  unstage:
+    en: Unstaging…
+    zh-CN: 取消暂存中…
+  stage_hunk:
+    en: Staging hunk…
+    zh-CN: 暂存块中…
+  unstage_hunk:
+    en: Unstaging hunk…
+    zh-CN: 撤出暂存块中…
+  discard_hunk:
+    en: Discarding hunk…
+    zh-CN: 丢弃块中…
+commit:
+  commit_and_push:
+    en: Commit & Push
+    zh-CN: 提交并推送
+  commit_only:
+    en: Commit Only
+    zh-CN: 仅提交
+  stage_first:
+    en: Stage the changes to commit first
+    zh-CN: 先暂存要提交的更改
+  placeholder:
+    en: Commit message (multiple lines allowed)
+    zh-CN: Commit message（可多行）
+  placeholder_branch:
+    en: Message (commit to %{branch})
+    zh-CN: 消息（提交到 %{branch}）
+stage:
+  stage:
+    en: Stage
+    zh-CN: 暂存
+  unstage:
+    en: Unstage
+    zh-CN: 取消暂存
+  stage_failed:
+    en: "Couldn't stage: %{error}"
+    zh-CN: 暂存失败：%{error}
+  unstage_failed:
+    en: "Couldn't unstage: %{error}"
+    zh-CN: 取消暂存失败：%{error}
+repo:
+  expand:
+    en: Expand Repository
+    zh-CN: 展开仓库
+  collapse:
+    en: Collapse Repository
+    zh-CN: 收起仓库
+file:
+  submodule:
+    en: Submodule pointer
+    zh-CN: 子模块指针
+  open_diff:
+    en: Open File Diff
+    zh-CN: 打开单文件 Diff
+  copy_path:
+    en: Copy File Path
+    zh-CN: 复制文件路径
+  reveal:
+    en: Show in Finder
+    zh-CN: 在 Finder 中显示
+ops:
+  push:
+    en: Push ↑%{ahead}
+    zh-CN: 推送 ↑%{ahead}
+  fetch:
+    en: Fetch
+    zh-CN: 获取
+  pull:
+    en: Pull
+    zh-CN: 拉取
+  pull_behind:
+    en: Pull ↓%{behind}
+    zh-CN: 拉取 ↓%{behind}
+  stash:
+    en: Stash Changes
+    zh-CN: 储藏更改
+  stash_pop:
+    en: Restore Stash (%{count})
+    zh-CN: 恢复储藏 (%{count})
+discard:
+  all_menu:
+    en: Discard All Changes
+    zh-CN: 丢弃全部更改
+  all_title:
+    en: Discard all working tree changes?
+    zh-CN: 丢弃工作区全部更改？
+  all_body:
+    en: Tracked files go back to HEAD; unstaged and untracked new files are deleted.
+    zh-CN: 已跟踪文件还原成 HEAD，未暂存 / 未跟踪的新文件会被删除。
+  all_ok:
+    en: Discard All
+    zh-CN: 全部丢弃
+  no_reflog:
+    en: This doesn't go into the reflog and can't be recovered.
+    zh-CN: 不进 reflog，找不回来。
+  file_untracked_title:
+    en: Delete this new file?
+    zh-CN: 确定删除这个新文件吗？
+  file_untracked_body:
+    en: "%{path} was never tracked by git, so deleting it removes it for good."
+    zh-CN: "%{path} 从未被 git 跟踪过，删了就是彻底删除。"
+  file_untracked_ok:
+    en: Delete File
+    zh-CN: 删除文件
+  file_title:
+    en: Discard this file's changes?
+    zh-CN: 确定丢弃这个文件的更改吗？
+  file_body:
+    en: "%{path} goes back to how it is in HEAD, including its staged part."
+    zh-CN: "%{path} 会被还原成 HEAD 的样子，已暂存的部分一并还原。"
+  file_ok:
+    en: Discard Changes
+    zh-CN: 丢弃更改
+  hunk_title:
+    en: Discard this change?
+    zh-CN: 确定丢弃这一块更改吗？
+  hunk_body:
+    en: "Change %{index} in %{path} goes back to how it was before."
+    zh-CN: "%{path} 的第 %{index} 块更改会被还原成更改前的样子。"
+  hunk_warning:
+    en: This edits the working tree file directly, bypassing both the index and the reflog. Once discarded it can't be recovered.
+    zh-CN: 直接改工作区文件，不进暂存区也不进 reflog——丢了就找不回来。
+  hunk_ok:
+    en: Discard Change
+    zh-CN: 丢弃这一块
+  gone:
+    en: "%{path} is no longer in the change list. Refresh and discard again."
+    zh-CN: "%{path} 已不在改动列表里，请刷新后再丢弃。"
+  not_loaded:
+    en: The change list hasn't loaded yet. Refresh and discard again.
+    zh-CN: 改动列表还没加载出来，请刷新后再丢弃。
+hunk:
+  stage:
+    en: Stage Hunk
+    zh-CN: 暂存块
+  unstage:
+    en: Unstage Hunk
+    zh-CN: 取消暂存块
+  discard:
+    en: Discard Hunk
+    zh-CN: 丢弃块
+  apply_failed:
+    en: "Couldn't apply the hunk: %{error}\n(If this file is partly staged, the view mixes staged and unstaged changes and hunks won't line up; unstage the whole file with its checkbox and try again)"
+    zh-CN: "按块操作失败：%{error}\n（这个文件若已部分暂存，当前视图混着暂存与未暂存的改动，按块操作会对不上号；先用勾选框整文件取消暂存再试）"
+  unsupported:
+    en: This diff can't be changed hunk by hunk (submodule / untracked file); use the whole-file checkbox
+    zh-CN: 这个 diff 不支持按块操作（子模块 / 未跟踪文件），请用整文件的勾选框
+diff:
+  all_changes:
+    en: All Changes
+    zh-CN: 全部更改
+  empty:
+    en: (No differences)
+    zh-CN: （无差异）
+  loading:
+    en: Loading…
+    zh-CN: 正在读取…
+  run_failed:
+    en: "Couldn't run git diff: %{error}"
+    zh-CN: 无法执行 git diff：%{error}
+  open_in_file:
+    en: Open in File
+    zh-CN: 在文件里打开
+  open:
+    en: Open
+    zh-CN: 打开
+  expand_all:
+    en: Expand All
+    zh-CN: 全部展开
+  collapse_all:
+    en: Collapse All
+    zh-CN: 全部收起
+  split:
+    en: Side by Side
+    zh-CN: 并排
+  split_tooltip:
+    en: Compare old and new side by side; turn off for the unified view
+    zh-CN: 并排对照新旧两侧；关掉是统一视图
+comment:
+  title:
+    en: Local note
+    zh-CN: 本机留言
+  placeholder:
+    en: Comment on the selected lines; you can edit before sending…
+    zh-CN: 给选中的行写评论，发送前可以再改改…
+  range_one:
+    en: Comment on line L%{line}
+    zh-CN: 对第 L%{line} 行发表评论
+  range:
+    en: Comment on lines L%{start} to L%{end}
+    zh-CN: 对第 L%{start} 行至第 L%{end} 行发表评论
+  cancel:
+    en: Cancel
+    zh-CN: 取消
+  send:
+    en: Send Comment
+    zh-CN: 发送评论
+  feedback_header:
+    en: "Feedback on these lines of %{path}:"
+    zh-CN: 对 %{path} 的这几行有反馈：
+pull_request:
+  not_repo:
+    en: Not a Git repository
+    zh-CN: 不是 Git 仓库
+  not_pushed:
+    en: This branch hasn't been pushed yet; push it before creating a PR
+    zh-CN: 当前分支还没推送到远端，先推送再创建 PR
+  no_default_branch:
+    en: "The remote's default branch is unknown; try git remote set-head <remote> --auto"
+    zh-CN: 不知道远端的默认分支，可以先执行 git remote set-head <远端> --auto
+  on_default_branch:
+    en: You're already on the default branch %{branch}; switch to a feature branch to create a PR
+    zh-CN: 当前就在默认分支 %{branch} 上，切到功能分支再创建 PR
+  no_remote:
+    en: The repository has no remote
+    zh-CN: 仓库没有配置远端
+  unknown_host:
+    en: Can't tell which host the remote %{remote} is on, so no PR link can be made
+    zh-CN: 认不出远端 %{remote} 是哪家代码托管，无法生成 PR 链接
+branch:
+  local:
+    en: Local
+    zh-CN: 本地
+  remote:
+    en: Remote
+    zh-CN: 远程
+  checkout:
+    en: Check Out
+    zh-CN: 签出
+  merge:
+    en: Merge into Current Branch
+    zh-CN: 合并到当前分支
+  delete:
+    en: Delete Branch…
+    zh-CN: 删除分支…
+  delete_remote:
+    en: Delete Remote Branch…
+    zh-CN: 删除远端分支…
+  delete_ok:
+    en: Delete
+    zh-CN: 删除
+  delete_title:
+    en: Delete this branch?
+    zh-CN: 确定删除这个分支吗？
+  delete_body:
+    en: "Only the local ref of %{branch} is deleted; working tree files aren't affected."
+    zh-CN: "%{branch} 只删本地引用，工作区文件不受影响。"
+  delete_warning:
+    en: Git refuses if it has unmerged commits; it won't force-delete.
+    zh-CN: 有未合并的提交时 git 会拒绝删除，不会强删。
+  delete_remote_title:
+    en: Delete this remote branch?
+    zh-CN: 确定删除这个远端分支吗？
+  delete_remote_body:
+    en: "%{branch} is deleted from the remote; others lose it locally after they pull."
+    zh-CN: "%{branch} 会从远端仓库删除，其他人拉取后本地也会跟着消失。"
+  delete_remote_warning:
+    en: This affects every collaborator; make sure nobody is using it.
+    zh-CN: 影响所有协作者，删之前确认没人在用。
+log:
+  no_directory:
+    en: The current session has no working directory
+    zh-CN: 当前会话没有工作目录
+  loading:
+    en: Reading commit history…
+    zh-CN: 正在读取提交历史…
+  empty:
+    en: No commits
+    zh-CN: 没有提交记录
+  reload:
+    en: Refresh
+    zh-CN: 刷新
+  head:
+    en: Current branch
+    zh-CN: 当前分支
+  head_named:
+    en: Current branch (%{branch})
+    zh-CN: 当前分支（%{branch}）
+  all_branches:
+    en: All branches
+    zh-CN: 全部分支
+  summary:
+    en: "%{scope} · latest %{count}"
+    zh-CN: "%{scope} · 最近 %{count} 条"
+  pick_commit:
+    en: Choose a commit to see its changes
+    zh-CN: 选择要查看更改的提交
+  loading_commit:
+    en: Reading this commit's changes…
+    zh-CN: 正在读取这次提交的更改…
+  no_files:
+    en: This commit changes no files
+    zh-CN: 这次提交没有文件更改
+  pick_file:
+    en: Choose a file to see this commit's changes
+    zh-CN: 选择一个文件查看这次提交的更改
+  loading_file:
+    en: Loading…
+    zh-CN: 正在读取…
+  no_diff:
+    en: (No differences)
+    zh-CN: （无差异）
+  show_failed:
+    en: "Couldn't run git show: %{error}"
+    zh-CN: 无法执行 git show：%{error}

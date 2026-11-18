@@ -33,6 +33,20 @@ describe("mcp login redirect", () => {
 		}
 	});
 
+	test("a refusal says which kind it is, so the host can word it", () => {
+		const wrong = callbackTarget(authorizationUrl, "http://127.0.0.1:8080/callback?code=c9");
+		expect("note" in wrong && wrong.note).toEqual({
+			kind: "wrong_callback",
+			expected: "http://127.0.0.1:33909/callback",
+		});
+		const partial = callbackTarget(authorizationUrl, "127.0.0.1:33909/callback?code=c9");
+		expect("note" in partial && partial.note).toEqual({ kind: "not_full_address" });
+		const noResult = callbackTarget(authorizationUrl, "http://127.0.0.1:33909/callback");
+		expect("note" in noResult && noResult.note).toEqual({ kind: "no_authorization_result" });
+		const noRedirect = callbackTarget("https://example.com/authorize", "http://127.0.0.1:33909/callback?code=c9");
+		expect("note" in noRedirect && noRedirect.note).toEqual({ kind: "no_redirect" });
+	});
+
 	test("a partial copy or a page without a result is refused", () => {
 		expect("error" in callbackTarget(authorizationUrl, "127.0.0.1:33909/callback?code=c9")).toBe(true);
 		expect("error" in callbackTarget(authorizationUrl, "http://127.0.0.1:33909/callback")).toBe(true);

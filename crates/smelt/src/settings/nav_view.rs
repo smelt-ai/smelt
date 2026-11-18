@@ -2,6 +2,7 @@
 //! 点一页就停到那一页（[`super::select_page`]）。分组只是一行小标题，不折叠、不缩进。
 
 use super::*;
+use rust_i18n::t;
 use smelt_plugin_api::HostEvent;
 use smelt_ui::kit::{TYPE, TypeStyled as _};
 use smelt_ui::scrollbar::{Scrollable, ScrollbarAxis};
@@ -30,7 +31,7 @@ impl SettingsNavView {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| {
-            smelt_ui::field::InputState::new(window, cx).placeholder("搜索设置、功能或命令")
+            smelt_ui::field::InputState::new(window, cx).placeholder(t!("settings.search"))
         });
         let subscriptions = vec![
             cx.subscribe(&search, |_, _, event, cx| {
@@ -38,16 +39,20 @@ impl SettingsNavView {
                     cx.notify();
                 }
             }),
-            // 设置页登记、撤下了，导航跟着变；设置页挂上、摘掉角标，红点跟着变。
-            cx.subscribe(
+            // 设置页登记、撤下了，导航跟着变；设置页挂上、摘掉角标，红点跟着变；换了语言，
+            // 组名、页名和搜索框的占位跟着变。
+            cx.subscribe_in(
                 &smelt_plugin_api::events(cx),
-                |this: &mut Self, _, event: &HostEvent, cx| {
-                    if matches!(
-                        event,
-                        HostEvent::ViewsChanged | HostEvent::ViewBadgesChanged
-                    ) {
+                window,
+                |this: &mut Self, _, event: &HostEvent, window, cx| match event {
+                    HostEvent::ViewsChanged | HostEvent::ViewBadgesChanged => this.sync(cx),
+                    HostEvent::LocaleChanged => {
+                        this.search.update(cx, |search, cx| {
+                            search.set_placeholder(t!("settings.search"), window, cx)
+                        });
                         this.sync(cx);
                     }
+                    _ => {}
                 },
             ),
             cx.observe_global::<SettingsSelection>(|this, cx| this.sync(cx)),
@@ -80,7 +85,7 @@ impl SettingsNavView {
         let back = nav_row(
             "settings-nav-back",
             IconName::ChevronLeft.path(),
-            "返回应用".into(),
+            t!("settings.back").into(),
             false,
         )
         .on_click(move |_, window, cx| {
@@ -103,11 +108,13 @@ impl SettingsNavView {
                 .px_1()
                 .type_style(TYPE.text_xsmall)
                 .text_color(rgb(crate::ui_theme::muted()))
-                .child(if result_count == 0 {
-                    "没有找到相关设置，试试更短的关键词".to_string()
+                .child(SharedString::from(if result_count == 1 {
+                    t!("settings.results.one")
+                } else if result_count == 0 {
+                    t!("settings.results.none")
                 } else {
-                    format!("{result_count} 个相关页面")
-                }),
+                    t!("settings.results.other", count = result_count)
+                })),
         )
     }
 
@@ -145,7 +152,7 @@ impl SettingsNavView {
                     .items_center()
                     .type_style(TYPE.text_xsmall_medium)
                     .text_color(rgb(crate::ui_theme::muted()))
-                    .child(category.title),
+                    .child(category.title.clone()),
             )
             .children(rows)
     }

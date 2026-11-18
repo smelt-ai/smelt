@@ -51,6 +51,8 @@ use smelt_client::daemon_state::DaemonStateEvent;
 
 use settings::{Appearance, load_appearance};
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 /// 文件事件里有没有名叫 `name` 的文件。
 fn event_touches_file(event: &notify::Event, name: &std::ffi::OsStr) -> bool {
     event
@@ -176,14 +178,17 @@ struct Workspace {
     outlet_instances: HashMap<router::PageKey, smelt_plugin_api::ViewInstance>,
     /// 开着的那页摆着什么、看得见什么的快照。Dock 一变、换页就重算，render 只读它。
     pub(crate) shell_view: workspace_shell::ShellView,
-    /// 红黄绿按钮此刻占的宽度（进出全屏时变），算 [`Self::shell_view`] 用。
-    traffic_lights: Pixels,
+    /// 窗口自己此刻占掉的角（进出全屏时变），算 [`Self::shell_view`] 用。
+    window_corners: workspace_frame::WindowCorners,
     _window_bounds_sub: Option<Subscription>,
     _layout_choice_sub: Option<Subscription>,
     /// 开着的命令面板（⌘K），见 `workspace_palette`。
     palette: Option<smelt_ui::dialog::DialogId>,
-    /// 上次设到窗口上的材质种类和明暗。换材质、换主题、系统换深浅时才再发给系统。
-    applied_backdrop: Option<(window_backdrop::WindowMaterial, bool)>,
+    /// 已经交给系统的窗口材质，没变就不再发（见 `window_backdrop::paint`）。窗口根的铺底在
+    /// paint 里读写它。
+    backdrop: Rc<RefCell<window_backdrop::Backdrop>>,
+    /// 外壳记下的各块地方的位置，窗口根铺底时读（见 `window_backdrop::Regions`）。
+    regions: window_backdrop::SharedRegions,
     /// 上次应用到窗口的界面基准字号（rem_size）。
     applied_ui_font_px: Option<u32>,
     /// 主窗口。没有 Window 的变更用它在本轮更新结束后、绘制前刷新外观。
@@ -218,7 +223,7 @@ struct Workspace {
     _appearance_sub: Option<Subscription>,
     /// 主窗口激活时告诉插件、补查守护是否落后。
     _window_activation_sub: Option<Subscription>,
-    /// 系统换深浅时把窗口材质的深浅设回 smelt 的主题，见 [`Self::sync_window_backdrop`]。
+    /// 系统换深浅时把窗口材质的深浅设回 smelt 的主题。
     _system_appearance_sub: Option<Subscription>,
     /// 本机运行时最近一次是不是在线。从不在线变成在线，就是守护（重新）连上了。
     local_runtime_online: bool,
@@ -255,11 +260,12 @@ impl Workspace {
             saved_outlet: None,
             outlet_instances: HashMap::new(),
             shell_view: Default::default(),
-            traffic_lights: workspace_frame::traffic_lights_width(window),
+            window_corners: workspace_frame::WindowCorners::of(window),
             _window_bounds_sub: None,
             _layout_choice_sub: None,
             palette: None,
-            applied_backdrop: None,
+            backdrop: Rc::default(),
+            regions: Rc::default(),
             applied_ui_font_px: None,
             window_handle: window.window_handle(),
             appearance_sync_scheduled: false,
@@ -298,7 +304,8 @@ impl Workspace {
         cx.on_release(|_, cx| plugin_host::set_window_shown(HashSet::new(), cx))
             .detach();
         // 进首页之前先有一页空的，render 总有 Dock 可画。
-        ws.pages.push(Self::new_page_dock(None, window, cx));
+        ws.pages
+            .push(Self::new_page_dock(None, ws.regions.clone(), window, cx));
         ws._layout_choice_sub = Some(Self::watch_layout_choice(window, cx));
         // 装布局要用 `cx.entity()` 背后的工作台（宿主自己的视图画它），等它建好。
         cx.defer_in(window, |this, window, cx| {
@@ -312,25 +319,27 @@ impl Workspace {
             }
         });
         ws._window_activation_sub = Some(activation);
-        // 进出全屏时红黄绿按钮出现、消失，贴着左上角的视图跟着让位。全屏切换会改窗口大小。
+        // 进出全屏时红黄绿按钮、窗口圆角出现、消失，贴着角的视图跟着让位。全屏切换会改窗口
+        // 大小。
         ws._window_bounds_sub = Some(cx.observe_window_bounds(window, |this, window, cx| {
-            let lights = workspace_frame::traffic_lights_width(window);
-            if lights != this.traffic_lights {
-                this.traffic_lights = lights;
+            let corners = workspace_frame::WindowCorners::of(window);
+            if corners != this.window_corners {
+                this.window_corners = corners;
                 this.sync_shell_view(cx);
             }
         }));
         // Windows 上系统换深浅时，GPUI 先通知这里，再把窗口的深浅标记改回跟系统，Mica 和
         // 系统标题栏就跟主题对不上了。所以等这条系统消息处理完，再按主题设一次。
-        ws._system_appearance_sub =
-            Some(cx.observe_window_appearance(window, |this, window, cx| {
-                this.applied_backdrop = None;
-                cx.spawn_in(window, async move |this, cx| {
-                    this.update_in(cx, |this, window, cx| this.sync_window_backdrop(window, cx))
-                        .ok();
+        ws._system_appearance_sub = Some(cx.observe_window_appearance(window, |_, window, cx| {
+            cx.spawn_in(window, async move |this, cx| {
+                this.update_in(cx, |this, window, _| {
+                    this.backdrop.borrow_mut().invalidate();
+                    window.refresh();
                 })
-                .detach();
-            }));
+                .ok();
+            })
+            .detach();
+        }));
         ws._appearance_sub = Some(
             cx.observe_global_in::<Appearance>(window, |this, _window, cx| {
                 this.schedule_appearance_sync(cx)
@@ -464,11 +473,32 @@ impl Render for Workspace {
         // 帧上只认前台。窗口材质、界面字号在外观变化时刷新。
         self.prepare_frame(window, cx);
 
-        // 整窗只在这里管底，有窗口材质时不铺、拿毛玻璃做底；里面的分栏和视图不铺页面底。
-        // 背景图也在这一层，铺满整扇窗口，压在材质上、所有内容下面。
-        let shell_surface = workspace_frame::window_surface();
+        // 整窗只在这里管底（最先画的那块，见 `window_backdrop::paint`）：布局声明了材质的
+        // 停靠区按底色不透明度透出毛玻璃，别处铺实的主题底色；里面的分栏和视图不铺页面底。
+        // 背景图也在这一层，铺满整扇窗口，叠在底色上、所有内容下面。
         let shell_padding = ui_theme::shell_padding();
         let appearance = cx.global::<Appearance>();
+        let window_floor = {
+            let materials = self.open_page_materials(cx);
+            let bg_opacity = appearance.bg_opacity;
+            let regions = self.regions.clone();
+            let backdrop = self.backdrop.clone();
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    window_backdrop::paint(
+                        bounds,
+                        materials,
+                        &mut regions.borrow_mut(),
+                        bg_opacity,
+                        &mut backdrop.borrow_mut(),
+                        window,
+                    );
+                },
+            )
+            .absolute()
+            .inset_0()
+        };
         let background_image = appearance.bg_image.as_deref().map(|path| {
             workspace_frame::background_image_layer(path, appearance.bg_image_opacity, cx)
         });
@@ -479,7 +509,7 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .size_full()
-            .bg(shell_surface)
+            .child(window_floor)
             .children(background_image)
             .font_family(settings::resolved_ui_font_family(
                 cx.global::<Appearance>(),
@@ -549,10 +579,7 @@ fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
 /// 功能的状态在插件和运行时里，跟正常重启应用效果一致。
 /// 返回值同时留下窗口句柄：主窗口还在不在看它，不看 Workspace 还能不能升级。
 fn open_workspace_window(cx: &mut App) -> MainWindow {
-    let window_options = workspace_frame::workspace_window_options(
-        ui_theme::shell_padding(),
-        cx.global::<Appearance>().material,
-    );
+    let window_options = workspace_frame::workspace_window_options(ui_theme::shell_padding());
     let mut workspace = None;
     let window_handle = cx
         .open_window(window_options, |window, cx| {
@@ -570,25 +597,6 @@ fn open_workspace_window(cx: &mut App) -> MainWindow {
     MainWindow {
         window: window_handle,
         workspace: workspace.expect("回调里一定会设置 workspace"),
-    }
-}
-
-// 资源：smelt 自带的几枚图标（`smelt_ui::assets`），再加 gpui-kit 的全套目录（`AllAssets`，
-// Lucide 全部 + gpui-kit 自己的），不只打包组件
-// 用到的那一百来个：插件（包括用户写的 JS 插件）按 Lucide 名字取图标，只编一部分进来，没编进来
-// 的图标位置就空着。全套 SVG 约 0.7 MB。
-struct SmeltAssets;
-
-impl gpui::AssetSource for SmeltAssets {
-    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        if let Some(bytes) = smelt_ui::assets::load(path) {
-            return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
-        }
-        gpui_kit_assets::AllAssets.load(path)
-    }
-
-    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
-        gpui_kit_assets::AllAssets.list(path)
     }
 }
 
@@ -619,8 +627,8 @@ fn main() {
     // Finder / launchd 启动的 GUI 默认软上限常是 256；在创建窗口、socket 和终端
     // 线程之前先抬高，避免正常多会话也让更新检查等新连接触发 EMFILE。
     smelt_sys::fd_limit::raise_fd_limit();
-    // with_assets 注册图标资源，IconName 的 svg 才能渲染；见上面 SmeltAssets。
-    let app = gpui_platform::application().with_assets(SmeltAssets);
+    // with_assets 注册图标资源，IconName 和智能体图标的 svg 才能渲染（见 smelt_ui::assets）。
+    let app = gpui_platform::application().with_assets(smelt_ui::assets::Assets);
     // Dock / Finder「打开」投递的 file:// URL（拖文件夹到 Dock 图标、右键用 Smelt 打开）。
     // 回调里没有 cx，经 channel 转发；unbounded 会缓存首启动时窗口建好前到达的 URL。
     let (url_tx, url_rx) = smol::channel::unbounded::<Vec<String>>();
@@ -681,6 +689,8 @@ fn main() {
         // 外观设置：读盘设为全局单例。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。
         // 主题先登记再恢复外观，插件主题在首帧前即可生效。
+        // 界面语言先按系统的首选语言定；语言插件登记时换成用户在设置里选的。
+        smelt_plugin_api::set_locale(smelt_plugin_api::system_locale(), cx);
         smelt_themes::register(cx);
         plugins::register_initial_themes(cx);
         let appearance = load_appearance();
@@ -761,7 +771,7 @@ fn main() {
                     if is_local {
                         let result = cx.update(|cx| settings::apply_requested_appearance(settings, cx));
                         if let Err(error) = result {
-                            crate::status_item::notify_error(format!("外观修改失败：{error}"));
+                            crate::status_item::notify_error(rust_i18n::t!("appearance.apply_failed", error = error).into_owned());
                         }
                     }
                     continue;

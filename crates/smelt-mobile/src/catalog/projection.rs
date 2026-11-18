@@ -865,7 +865,7 @@ pub(super) fn run_summary(run: &AutomationRun) -> view::AutomationRunSummary {
         started_at: run.started_at.or(Some(run.created_at)),
         finished_at: run.finished_at,
         session_id: run.session_id.clone(),
-        error: run.error.clone(),
+        error: run.error_text(),
     }
 }
 

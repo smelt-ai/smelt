@@ -46,6 +46,8 @@ impl From<ClientStoreError> for String {
 pub struct AppearanceRecord {
     pub bg_image: Option<String>,
     pub bg_image_opacity: f32,
+    /// 有窗口材质时主题底色铺在材质上的不透明度，0–1。
+    pub bg_opacity: f32,
     pub theme_mode: String,
     pub theme_name: String,
     pub ui_font_px: u32,
@@ -173,12 +175,14 @@ pub(crate) fn write_appearance(
 ) -> Result<(), String> {
     connection
         .execute(
-            "INSERT OR REPLACE INTO appearance (id, bg_image, bg_image_opacity, material,
-               theme_mode, theme_name, ui_font_px, ui_font_family, font_family, layout_id)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO appearance (id, bg_image, bg_image_opacity, bg_opacity,
+               material, theme_mode, theme_name, ui_font_px, ui_font_family, font_family,
+               layout_id)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 record.bg_image,
                 record.bg_image_opacity,
+                record.bg_opacity,
                 record.material,
                 record.theme_mode,
                 record.theme_name,
@@ -293,8 +297,9 @@ impl ClientStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, ClientStoreError> {
         let path = path.into();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| ClientStoreError(format!("创建 {}：{error}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|error| {
+                ClientStoreError(format!("couldn't create {}: {error}", parent.display()))
+            })?;
         }
         let mut connection = Connection::open(&path)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -340,7 +345,7 @@ impl ClientStore {
             connection
                 .query_row(
                     "SELECT bg_image, bg_image_opacity, theme_mode, theme_name, ui_font_px,
-                       ui_font_family, font_family, layout_id, material
+                       ui_font_family, font_family, layout_id, material, bg_opacity
                      FROM appearance WHERE id = 1",
                     [],
                     |row| {
@@ -354,6 +359,7 @@ impl ClientStore {
                             font_family: row.get(6)?,
                             layout_id: row.get(7)?,
                             material: row.get(8)?,
+                            bg_opacity: row.get(9)?,
                         })
                     },
                 )
@@ -686,7 +692,8 @@ pub fn client_store() -> Result<&'static ClientStore, ClientStoreError> {
     static STORE: OnceLock<Result<ClientStore, String>> = OnceLock::new();
     STORE
         .get_or_init(|| {
-            let home = smelt_paths::smelt_home().ok_or_else(|| "找不到用户目录".to_string())?;
+            let home = smelt_paths::smelt_home()
+                .ok_or_else(|| "couldn't find the home directory".to_string())?;
             ClientStore::open(home.join(DATABASE_FILE_NAME)).map_err(String::from)
         })
         .as_ref()

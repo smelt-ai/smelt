@@ -9,6 +9,7 @@ mod tests;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rust_i18n::t;
 use smelt_model::runtime_path::PathStyle;
 use smelt_runtime_client::protocol::files::{
     FileContent, FileOpenCall, FilePathParams, ProjectDirParams, ProjectSearchCall,
@@ -53,7 +54,7 @@ impl Files {
     fn runtime(&self) -> Result<CurrentRuntime, SmeltError> {
         self.source
             .current()
-            .ok_or_else(|| error(SmeltErrorKind::Offline, "还没有连上这台机器"))
+            .ok_or_else(|| error(SmeltErrorKind::Offline, t!("error.not_connected")))
     }
 
     /// 列一层。`style` 是这台机器的路径规则，用来拼子项的绝对路径。

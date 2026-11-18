@@ -174,7 +174,7 @@ pub fn group_pi_model_choices(choices: Vec<PiModelChoice>) -> Vec<PiModelChoiceG
 pub fn validate_api_base_url(base_url: &str) -> Result<(), String> {
     match url::Url::parse(base_url) {
         Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(()),
-        _ => Err("API 地址必须是完整的 HTTP(S) URL".to_string()),
+        _ => Err(rust_i18n::t!("pi_model.base_url_invalid").into_owned()),
     }
 }
 
@@ -184,7 +184,7 @@ pub fn validate_api_base_url(base_url: &str) -> Result<(), String> {
 /// 以及会把 JSON 键弄乱的符号；`Token-X` 这种大小写混写必须能过——用户填的就是这个。
 pub fn validate_custom_provider_id(id: &str) -> Result<(), String> {
     if id.is_empty() {
-        return Err("请填写 Provider ID".to_string());
+        return Err(rust_i18n::t!("pi_model.provider_id_required").into_owned());
     }
     let valid = id.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic())
         && id
@@ -193,8 +193,6 @@ pub fn validate_custom_provider_id(id: &str) -> Result<(), String> {
     if valid {
         Ok(())
     } else {
-        Err(format!(
-            "Provider ID「{id}」无效：须以字母开头，只能含字母、数字和短连字符"
-        ))
+        Err(rust_i18n::t!("pi_model.provider_id_invalid", id = id).into_owned())
     }
 }

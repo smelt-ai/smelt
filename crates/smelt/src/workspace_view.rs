@@ -3,6 +3,7 @@
 //! 只组 UI，什么时候开关见 `host_dialog`。
 
 use gpui::*;
+use rust_i18n::t;
 use smelt_ui::dialog::Card;
 
 use crate::{Workspace, request_app_quit};
@@ -74,9 +75,9 @@ impl Workspace {
         let confirm = Self::modal_primary_button(
             "confirm-quit",
             if self.quit_requested {
-                "正在退出…"
+                t!("quit.quitting")
             } else {
-                "退出"
+                t!("quit.quit")
             },
             |this, _, _, cx| this.confirm_quit(cx),
             cx,
@@ -85,7 +86,7 @@ impl Workspace {
             .child(
                 Self::modal_cancel_button(
                     "cancel-quit",
-                    "取消",
+                    t!("action.cancel"),
                     |this, _, _, cx| {
                         this.show_quit_confirm = false;
                         cx.notify();
@@ -97,8 +98,8 @@ impl Workspace {
             .child(confirm);
         card.w(px(smelt_ui::dialog::CONFIRM_WIDTH))
             .child(smelt_ui::dialog::content(
-                "退出 Smelt？",
-                Some("后台会话将继续运行，当前连接会断开。".into()),
+                t!("quit.title"),
+                Some(t!("quit.body").into_owned().into()),
             ))
             .footer(footer)
     }

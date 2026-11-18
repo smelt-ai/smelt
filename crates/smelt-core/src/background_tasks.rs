@@ -201,7 +201,8 @@ impl BackgroundSupervisor {
             std::process::id(),
             nonce
         ));
-        fs::create_dir_all(&root).map_err(|error| format!("无法创建后台任务目录：{error}"))?;
+        fs::create_dir_all(&root)
+            .map_err(|error| format!("couldn't create the background task directory: {error}"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -235,8 +236,8 @@ impl BackgroundSupervisor {
             threads: Mutex::new(Vec::new()),
             peer_handler,
         });
-        let (accept_wake, accept_poke) =
-            wake_pair().map_err(|error| format!("无法创建后台任务唤醒：{error}"))?;
+        let (accept_wake, accept_poke) = wake_pair()
+            .map_err(|error| format!("couldn't create the background task wake pipe: {error}"))?;
         inner.pokes.lock().unwrap().accept = Some(accept_poke);
         let session_cwd = cwd.unwrap_or_else(|| {
             std::env::current_dir()
@@ -248,11 +249,13 @@ impl BackgroundSupervisor {
         let accept = thread::Builder::new()
             .name("smelt-bg-accept".into())
             .spawn(move || accept_loop(accept_inner, listener, session_cwd, accept_wake))
-            .map_err(|error| format!("无法启动后台任务监听：{error}"))?;
+            .map_err(|error| format!("couldn't start the background task listener: {error}"))?;
         let deadline = thread::Builder::new()
             .name("smelt-bg-deadline".into())
             .spawn(move || deadline_loop(deadline_inner))
-            .map_err(|error| format!("无法启动后台任务期限：{error}"))?;
+            .map_err(|error| {
+                format!("couldn't start the background task deadline thread: {error}")
+            })?;
         inner.threads.lock().unwrap().extend([accept, deadline]);
         Ok(Self { inner })
     }
@@ -621,7 +624,7 @@ fn dispatch(inner: &Arc<Inner>, request: &serde_json::Value, session_cwd: &str) 
         "unwatch" => unwatch_task(inner, request, owner),
         "list" => Ok(reply(list_text(inner, owner), serde_json::json!({}))),
         "end_owner" => end_owner(inner, request, owner),
-        _ => Err("未知的后台任务操作".to_string()),
+        _ => Err("unknown background task operation".to_string()),
     };
     match body {
         Ok(body) => {
@@ -650,7 +653,7 @@ fn start_task(
         .trim()
         .to_string();
     if command.is_empty() {
-        return Err("缺少 command".into());
+        return Err("command is missing".into());
     }
     let cwd = resolve_cwd(
         request.get("cwd").and_then(serde_json::Value::as_str),
@@ -683,7 +686,7 @@ fn start_task(
         >= MAX_TASKS
     {
         return Err(format!(
-            "已经有 {MAX_TASKS} 个后台任务，先停止或等其中一个结束"
+            "There are already {MAX_TASKS} background tasks; stop one or wait for one to finish first"
         ));
     }
     // 已经写到界面和模型的结束任务可以让位。还没写成功的留下，条数不能当成已送达。
@@ -717,9 +720,9 @@ fn start_task(
     let (stdout, stderr) = {
         use std::os::windows::process::CommandExt;
         let (stdout, child_stdout) = smelt_sys::named_pipe::output_pipe()
-            .map_err(|error| format!("无法建立输出管道：{error}"))?;
+            .map_err(|error| format!("couldn't create the output pipe: {error}"))?;
         let (stderr, child_stderr) = smelt_sys::named_pipe::output_pipe()
-            .map_err(|error| format!("无法建立输出管道：{error}"))?;
+            .map_err(|error| format!("couldn't create the output pipe: {error}"))?;
         command_process
             .stdout(Stdio::from(child_stdout))
             .stderr(Stdio::from(child_stderr))
@@ -730,13 +733,15 @@ fn start_task(
     };
     let mut child = command_process
         .spawn()
-        .map_err(|error| format!("无法启动命令：{error}"))?;
+        .map_err(|error| format!("couldn't start the command: {error}"))?;
     // 子进程那端的句柄还在 `Command` 里。不关掉，子进程退出后这边读不到结束。
     drop(command_process);
     #[cfg(windows)]
     if let Err(error) = smelt_sys::process::attach_suspended(child.id()) {
         let _ = child.wait();
-        return Err(format!("无法把命令放进进程树：{error}"));
+        return Err(format!(
+            "couldn't put the command into the process tree: {error}"
+        ));
     }
     #[cfg(unix)]
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
@@ -773,11 +778,11 @@ fn start_task(
             let _ = smelt_sys::process::signal_tree(pgid as u32, TreeSignal::Kill);
             smelt_sys::process::release_tree(pgid as u32);
             forget_task_group(&inner.root, pgid);
-            format!("无法看管后台任务：{error}")
+            format!("couldn't supervise the background task: {error}")
         })?;
     inner.threads.lock().unwrap().push(handle);
     Ok(reply(
-        format!("已在后台启动 {id}：{title}"),
+        format!("Started {id} in the background: {title}"),
         serde_json::json!({"id": id, "status": "running"}),
     ))
 }
@@ -800,10 +805,10 @@ fn create_task_log(root: &Path) -> Result<(String, PathBuf), String> {
         {
             Ok(_) => return Ok((id, log_path)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("无法创建任务日志：{error}")),
+            Err(error) => return Err(format!("couldn't create the task log: {error}")),
         }
     }
-    Err("无法分配不重复的任务 id".to_string())
+    Err("couldn't allocate a unique task id".to_string())
 }
 
 fn output_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<Reply, String> {
@@ -822,7 +827,7 @@ fn output_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Resul
         .tasks
         .iter()
         .find(|task| task.id == id && task.owner == owner)
-        .ok_or_else(|| format!("没有后台任务 {id}"))?;
+        .ok_or_else(|| format!("no background task {id}"))?;
     let page = read_log_page(&task.log_path, offset, limit)?;
     let ended = !is_running(task.status) && page.end;
     let status = task.status;
@@ -831,14 +836,14 @@ fn output_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Resul
         format!(
             "{} {}{}\nnextOffset={} endOfLog={}\n{}",
             task.id,
-            status.label(),
+            status_name(status),
             exit_code
-                .map(|code| format!(" 退出码 {code}"))
+                .map(|code| format!(" exit code {code}"))
                 .unwrap_or_default(),
             page.next_offset,
             ended,
             if page.text.is_empty() {
-                "（还没有输出）".to_string()
+                "(no output yet)".to_string()
             } else {
                 page.text.clone()
             }
@@ -861,18 +866,18 @@ fn stop_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<
         .tasks
         .iter_mut()
         .find(|task| task.id == id && task.owner == owner)
-        .ok_or_else(|| format!("没有后台任务 {id}"))?;
+        .ok_or_else(|| format!("no background task {id}"))?;
     if !is_running(task.status) {
         let status = task.status;
         return Ok(reply(
-            format!("{} 已是{}", task.id, status.label()),
+            format!("{} is already {}", task.id, status_name(status)),
             serde_json::json!({"id": id, "status": status_name(status)}),
         ));
     }
     task.cancel = Some(BackgroundTaskStatus::Stopped);
     interrupt_task(task, TreeSignal::Interrupt);
     Ok(reply(
-        format!("{id} 正在停止"),
+        format!("Stopping {id}"),
         serde_json::json!({"id": id, "status": "stopped"}),
     ))
 }
@@ -896,7 +901,7 @@ fn wait_reply(state: &State, owner: &str, ids: &[String]) -> Result<(bool, Reply
     };
     for id in ids {
         if find(id).is_none() {
-            return Err(format!("没有后台任务 {id}"));
+            return Err(format!("no background task {id}"));
         }
     }
     let done = ids
@@ -909,9 +914,9 @@ fn wait_reply(state: &State, owner: &str, ids: &[String]) -> Result<(bool, Reply
         };
         let code = task
             .exit_code
-            .map(|code| format!(" 退出码 {code}"))
+            .map(|code| format!(" exit code {code}"))
             .unwrap_or_default();
-        lines.push(format!("{} {}{code}", task.id, task.status.label()));
+        lines.push(format!("{} {}{code}", task.id, status_name(task.status)));
     }
     let tasks = serde_json::Value::Array(
         ids.iter()
@@ -943,7 +948,7 @@ fn unwatch_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Resu
             .tasks
             .iter_mut()
             .find(|task| task.id == id && task.owner == owner)
-            .ok_or_else(|| format!("没有后台任务 {id}"))?;
+            .ok_or_else(|| format!("no background task {id}"))?;
         task.watched_by = None;
         if consumed {
             // 工具已经拿到输出。界面和模型都不再送。
@@ -960,7 +965,7 @@ fn unwatch_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Resu
     }
     poke(inner);
     Ok(reply(
-        format!("{id} 已不再由工具观察"),
+        format!("{id} is no longer watched by the tool"),
         serde_json::json!({"id": id}),
     ))
 }
@@ -983,11 +988,11 @@ fn list_text(inner: &Inner, owner: &str) -> String {
         .filter(|task| task.owner == owner)
         .collect();
     if tasks.is_empty() {
-        return "没有后台任务".to_string();
+        return "No background tasks".to_string();
     }
     tasks
         .into_iter()
-        .map(|task| format!("{} {} {}", task.id, task.status.label(), task.title))
+        .map(|task| format!("{} {} {}", task.id, status_name(task.status), task.title))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1822,10 +1827,10 @@ fn bind_control_listener(socket_path: &Path) -> Result<TaskListener, String> {
     #[cfg(unix)]
     {
         let listener = std::os::unix::net::UnixListener::bind(socket_path)
-            .map_err(|error| format!("无法监听后台任务套接字：{error}"))?;
+            .map_err(|error| format!("couldn't listen on the background task socket: {error}"))?;
         listener
             .set_nonblocking(true)
-            .map_err(|error| format!("无法设置后台任务套接字：{error}"))?;
+            .map_err(|error| format!("couldn't configure the background task socket: {error}"))?;
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600));
         Ok(listener)
@@ -1834,9 +1839,9 @@ fn bind_control_listener(socket_path: &Path) -> Result<TaskListener, String> {
     {
         let name = socket_path
             .to_str()
-            .ok_or_else(|| "后台任务管道名不是 Unicode".to_string())?;
+            .ok_or_else(|| "the background task pipe name isn't Unicode".to_string())?;
         smelt_sys::named_pipe::PipeListener::bind(name)
-            .map_err(|error| format!("无法监听后台任务管道：{error}"))
+            .map_err(|error| format!("couldn't listen on the background task pipe: {error}"))
     }
 }
 
@@ -1872,7 +1877,7 @@ pub(crate) fn connect_task_stream(path: &Path) -> std::io::Result<TaskStream> {
         let name = path.to_str().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "后台任务管道名不是 Unicode",
+                "the background task pipe name isn't Unicode",
             )
         })?;
         TaskStream::connect(name)
@@ -2011,15 +2016,16 @@ struct LogPage {
 }
 
 fn read_log_page(path: &Path, offset: u64, limit: u64) -> Result<LogPage, String> {
-    let mut file = File::open(path).map_err(|error| format!("无法读取任务日志：{error}"))?;
+    let mut file =
+        File::open(path).map_err(|error| format!("couldn't read the task log: {error}"))?;
     let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let offset = offset.min(len);
     file.seek(SeekFrom::Start(offset))
-        .map_err(|error| format!("无法读取任务日志：{error}"))?;
+        .map_err(|error| format!("couldn't read the task log: {error}"))?;
     let mut buf = vec![0_u8; limit as usize];
     let read = file
         .read(&mut buf)
-        .map_err(|error| format!("无法读取任务日志：{error}"))?;
+        .map_err(|error| format!("couldn't read the task log: {error}"))?;
     buf.truncate(read);
     buf.truncate(complete_utf8_prefix(&buf));
     let next_offset = offset + buf.len() as u64;
@@ -2113,10 +2119,10 @@ fn end_owner(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|target| !target.is_empty())
-        .ok_or_else(|| "缺少 target".to_string())?
+        .ok_or_else(|| "target is missing".to_string())?
         .to_string();
     if target == owner || !owns(owner, &target) {
-        return Err(format!("不能结束 {target} 的后台任务"));
+        return Err(format!("can't end the background tasks of {target}"));
     }
     let mut stopped = 0;
     {
@@ -2148,7 +2154,7 @@ fn end_owner(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<
         });
     }
     Ok(reply(
-        format!("{target} 已结束，停止了 {stopped} 个后台任务"),
+        format!("{target} ended; stopped {stopped} background task(s)"),
         serde_json::json!({"target": target, "stopped": stopped}),
     ))
 }
@@ -2164,7 +2170,7 @@ fn required_id(request: &serde_json::Value) -> Result<String, String> {
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(ToOwned::to_owned)
-        .ok_or_else(|| "缺少 id".to_string())
+        .ok_or_else(|| "id is missing".to_string())
 }
 
 fn request_ids(request: &serde_json::Value) -> Result<Vec<String>, String> {
@@ -2197,7 +2203,10 @@ fn resolve_cwd(requested: Option<&str>, session_cwd: &str) -> Result<String, Str
         None => PathBuf::from(session_cwd),
     };
     if !path.is_dir() {
-        return Err(format!("工作目录不存在：{}", path.display()));
+        return Err(format!(
+            "the working directory doesn't exist: {}",
+            path.display()
+        ));
     }
     Ok(path.display().to_string())
 }
@@ -3294,7 +3303,10 @@ mod tests {
         assert!(runs.iter().any(|run| run["id"] == second.as_str() && run["status"] == "failed"));
 
         let listed = call(&path, serde_json::json!({"op": "list"}));
-        assert_eq!(listed["text"], "没有后台任务", "子智能体不是后台任务");
+        assert_eq!(
+            listed["text"], "No background tasks",
+            "子智能体不是后台任务"
+        );
     }
 
     /// 前台派发的结果就是工具返回值，宿主不再交一遍。
@@ -3483,7 +3495,7 @@ mod tests {
         );
         assert_eq!(refused["ok"], false);
         assert!(
-            refused["error"].as_str().unwrap().contains("子智能体"),
+            refused["error"].as_str().unwrap().contains("Subagents"),
             "{refused}"
         );
     }
@@ -3535,7 +3547,7 @@ mod tests {
             reply["error"]
                 .as_str()
                 .unwrap()
-                .contains("不能和别的对话通信"),
+                .contains("can't message other conversations"),
             "{reply}"
         );
     }

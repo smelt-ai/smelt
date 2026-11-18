@@ -131,15 +131,17 @@ pub fn wait_child_for(
             let _ = tx.send(child.wait());
         });
     if started.is_err() {
-        return Err(io::Error::other("无法启动进程等待线程"));
+        return Err(io::Error::other("couldn't start the process wait thread"));
     }
     match rx.recv_timeout(grace) {
         Ok(result) => result,
-        Err(RecvTimeoutError::Disconnected) => Err(io::Error::other("进程等待线程在收尸前退出")),
+        Err(RecvTimeoutError::Disconnected) => Err(io::Error::other(
+            "the process wait thread exited before reaping",
+        )),
         Err(RecvTimeoutError::Timeout) => {
             on_timeout(pid);
             rx.recv()
-                .map_err(|_| io::Error::other("进程等待线程在收尸前退出"))?
+                .map_err(|_| io::Error::other("the process wait thread exited before reaping"))?
         }
     }
 }
@@ -166,11 +168,13 @@ pub fn wait_child_stdout(mut child: Child, grace: Duration) -> io::Result<Option
             let _ = tx.send((status, buf));
         });
     if started.is_err() {
-        return Err(io::Error::other("无法启动进程输出线程"));
+        return Err(io::Error::other("couldn't start the process output thread"));
     }
     match rx.recv_timeout(grace) {
         Ok((_status, buf)) => Ok(Some(buf)),
-        Err(RecvTimeoutError::Disconnected) => Err(io::Error::other("进程输出线程在收尸前退出")),
+        Err(RecvTimeoutError::Disconnected) => Err(io::Error::other(
+            "the process output thread exited before reaping",
+        )),
         Err(RecvTimeoutError::Timeout) => {
             let _ = crate::process::terminate_pid(pid);
             let _ = rx.recv();

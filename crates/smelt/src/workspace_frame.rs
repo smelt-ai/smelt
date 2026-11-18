@@ -3,15 +3,35 @@
 use gpui::*;
 use smelt_ui::window_bar::{
     Adapt, NATIVE_TITLEBAR, SafeArea, TOP_BAR_HEIGHT, TRAFFIC_LIGHTS_ORIGIN, TRAFFIC_LIGHTS_WIDTH,
-    with_window_drag,
+    WINDOW_CORNER_INSET, with_window_drag,
 };
 
-/// 客户区里红黄绿按钮要让的宽度。macOS 全屏时隐藏，用系统标题栏时根本不在客户区，都是 0。
-pub(crate) fn traffic_lights_width(window: &Window) -> Pixels {
-    if NATIVE_TITLEBAR || window.is_fullscreen() {
-        px(0.)
-    } else {
-        TRAFFIC_LIGHTS_WIDTH
+/// 窗口自己占掉的角，跟着窗口进出全屏变。宿主控件（停靠区开合按钮）另算，见
+/// `workspace_shell::ShellView`。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct WindowCorners {
+    /// 客户区里红黄绿按钮要让的宽度。macOS 全屏时隐藏，用系统标题栏时根本不在客户区，都是 0。
+    pub(crate) lights: Pixels,
+    /// 下面两个角让给窗口圆角的宽高。只有 macOS 窗口化时有：全屏没有圆角；别的平台的圆角
+    /// 比标准边距还小，不用另让。
+    pub(crate) rounded: Pixels,
+}
+
+impl WindowCorners {
+    pub(crate) fn of(window: &Window) -> Self {
+        let windowed = !window.is_fullscreen();
+        Self {
+            lights: if !NATIVE_TITLEBAR && windowed {
+                TRAFFIC_LIGHTS_WIDTH
+            } else {
+                px(0.)
+            },
+            rounded: if cfg!(target_os = "macos") && windowed {
+                WINDOW_CORNER_INSET
+            } else {
+                px(0.)
+            },
+        }
     }
 }
 
@@ -41,31 +61,17 @@ pub(crate) fn titlebar_options(shell_padding: Pixels) -> TitlebarOptions {
 /// `app_owns_titlebar_drag` 必须一起打开。否则 AppKit 仍把这 34px 当成系统
 /// 标题栏，macOS 27 会把单击扣住等双击判定，页签和顶栏按钮经常点不下去。
 /// 设置、会话追踪用系统标题栏，继续让 AppKit 拖，不要套这份选项。
-pub(crate) fn workspace_window_options(
-    shell_padding: Pixels,
-    material: crate::window_backdrop::WindowMaterial,
-) -> WindowOptions {
+pub(crate) fn workspace_window_options(shell_padding: Pixels) -> WindowOptions {
     WindowOptions {
         titlebar: Some(titlebar_options(shell_padding)),
-        window_background: crate::window_backdrop::window_background(material),
+        window_background: crate::window_backdrop::window_background(),
         app_owns_titlebar_drag: !NATIVE_TITLEBAR,
         ..Default::default()
     }
 }
 
-/// 整扇窗口的底：有窗口材质（`window_backdrop`）时什么都不铺，毛玻璃就是底；没有时铺一层
-/// `bg`。全窗口只有这一处管底，页签栏和各个视图（自带的、插件的）都不铺页面底，铺了就把
-/// 材质盖住。
-pub(crate) fn window_surface() -> Hsla {
-    if crate::window_backdrop::available() {
-        gpui::transparent_black()
-    } else {
-        rgb(crate::ui_theme::bg()).into()
-    }
-}
-
 /// 整扇窗口的背景图层（挂在窗口根上，见 `Workspace::render`）：铺满容器，按比例裁切。
-/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，底下的材质（没材质时是 `bg`）透出。
+/// `opacity` 是图片的不透明度——图片做低透明度装饰层，叠在窗口底（`window_backdrop::paint`）上。
 /// 透明度为 0 时不读文件。栅格图只画降采样预览，不把原图交给 `img()`。
 pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div {
     let layer = div().absolute().inset_0();
@@ -93,7 +99,7 @@ pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div 
 /// 控件让位，空白处拖窗口；不是（在标签条下面）时顶上那条归标签条，这里只是一条常规内边距的
 /// 头。底边是发丝。
 pub(crate) fn page_chrome(area: &SafeArea) -> Div {
-    let insets = area.insets(Adapt::Horizontal);
+    let insets = area.top_row().insets(Adapt::Horizontal);
     let header = div()
         .w_full()
         .flex_shrink_0()
@@ -140,10 +146,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_uses_the_system_titlebar() {
-        let options = workspace_window_options(
-            px(0.),
-            crate::window_backdrop::WindowMaterial::platform_default(),
-        );
+        let options = workspace_window_options(px(0.));
         assert!(!options.app_owns_titlebar_drag, "拖动归系统标题栏");
         let titlebar = options.titlebar.expect("主窗口要给系统标题栏一个标题");
         assert!(
@@ -155,10 +158,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn self_drawn_titlebar_owns_its_drag() {
-        let options = workspace_window_options(
-            px(0.),
-            crate::window_backdrop::WindowMaterial::platform_default(),
-        );
+        let options = workspace_window_options(px(0.));
         assert!(
             options.app_owns_titlebar_drag,
             "自绘顶栏必须声明应用拥有拖动，否则 AppKit 扣住标题栏里的单击"

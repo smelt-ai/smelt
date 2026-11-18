@@ -19,7 +19,7 @@ use gpui::{
 use serde::Serialize;
 use serde::de::{self, DeserializeOwned, Visitor};
 
-use crate::HostEvent;
+use crate::{HostEvent, Text};
 
 /// 快捷键和菜单项绑的 action：执行一条命令。键位和菜单只带 id，`args` 是 `null`；
 /// [`run`] 可以带参数。
@@ -78,12 +78,14 @@ impl Handled {
 }
 
 /// 命令的处理函数。`window` 是主窗口，主窗口没开时是 `None`：用不到窗口的命令（发通知、
-/// 打开文件）照样做，用得到的交回 [`NO_MAIN_WINDOW`]。参数里有登记时没声明的字段，宿主
+/// 打开文件）照样做，用得到的交回 [`no_main_window`]。参数里有登记时没声明的字段，宿主
 /// 不调它，直接交回错误（见 [`CommandSpec::args`]）。出错放进结果交回，不自己报。
 pub type CommandHandler = Rc<dyn Fn(&serde_json::Value, Option<&mut Window>, &mut App) -> Handled>;
 
-/// 命令要主窗口、主窗口却没开时交回的原因。
-pub const NO_MAIN_WINDOW: &str = "主窗口没有打开";
+/// 命令要主窗口、主窗口却没开时交回的原因，按当前语言。
+pub fn no_main_window() -> String {
+    rust_i18n::t!("command.no_main_window").into_owned()
+}
 
 /// 一条带类型的命令：id，以及参数 `A`、结果 `R` 的形状。宿主和插件之间互调时两头都用它，
 /// 参数和结果由编译器查；JS 插件按同样形状的 JSON 调。
@@ -143,7 +145,7 @@ impl<A: DeserializeOwned + 'static, R: Serialize + 'static> Command<A, R> {
     /// 把原因交回调用方，`handler` 不会被调。
     pub fn spec(
         &self,
-        title: impl Into<String>,
+        title: impl Into<Text>,
         handler: impl Fn(A, Option<&mut Window>, &mut App) -> Result<R, String> + 'static,
     ) -> CommandSpec {
         self.spec_with(title, move |args, window, cx| {
@@ -154,7 +156,7 @@ impl<A: DeserializeOwned + 'static, R: Serialize + 'static> Command<A, R> {
     /// 同 [`Self::spec`]，结果要等一会儿才有（比如等人在选择框里选）。
     pub fn spec_async(
         &self,
-        title: impl Into<String>,
+        title: impl Into<Text>,
         handler: impl Fn(A, Option<&mut Window>, &mut App) -> Task<Result<R, String>> + 'static,
     ) -> CommandSpec {
         self.spec_with(title, move |args, window, cx| {
@@ -165,7 +167,7 @@ impl<A: DeserializeOwned + 'static, R: Serialize + 'static> Command<A, R> {
 
     fn spec_with(
         &self,
-        title: impl Into<String>,
+        title: impl Into<Text>,
         handler: impl Fn(A, Option<&mut Window>, &mut App) -> Handled + 'static,
     ) -> CommandSpec {
         let id = self.id;
@@ -279,8 +281,8 @@ fn check_args(info: &CommandInfo, args: &serde_json::Value) -> Result<(), String
 pub struct CommandSpec {
     /// 来源内的名字，不含 `/`，如 `save`。
     pub name: String,
-    /// 给人看的名字，命令面板和快捷键设置里显示。
-    pub title: String,
+    /// 给人看的名字，命令面板和快捷键设置里显示，跟着界面语言变（见 [`crate::Text`]）。
+    pub title: Text,
     /// 出厂快捷键，gpui 写法的单个按键（如 `cmd-shift-p`）。要带 ⌘ 或者是 F 键，保留键
     /// 不能用；不合规的宿主装键表时不装，记日志。
     pub key: Option<String>,
@@ -299,7 +301,8 @@ pub struct CommandSpec {
     pub handler: CommandHandler,
 }
 
-/// 登记过的一条命令。
+/// 登记过的一条命令。`group`、`title` 是取的时候那种界面语言下的字，存着它的在
+/// [`HostEvent::LocaleChanged`] 时重取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandInfo {
     /// `<来源>/<名字>`。
@@ -317,8 +320,21 @@ pub struct CommandInfo {
 
 struct Entry {
     owner: String,
+    /// 给人看的两项在 `group`、`title` 里，取的时候按当前语言填进 `info`（[`Entry::info`]）。
     info: CommandInfo,
+    group: Text,
+    title: Text,
     handler: CommandHandler,
+}
+
+impl Entry {
+    fn info(&self) -> CommandInfo {
+        CommandInfo {
+            group: self.group.get(),
+            title: self.title.get(),
+            ..self.info.clone()
+        }
+    }
 }
 
 #[derive(Default)]
@@ -333,13 +349,14 @@ impl Global for CommandRegistry {}
 /// 给人看的名字。
 pub fn register_commands(
     owner: &str,
-    group: &str,
+    group: impl Into<Text>,
     specs: Vec<CommandSpec>,
     cx: &mut App,
 ) -> Result<(), String> {
     if owner.is_empty() || owner.contains('/') {
         return Err(format!("命令来源「{owner}」不能为空，也不能含 `/`"));
     }
+    let group: Text = group.into();
     let os = cx.platform_info().os;
     let mut entries: Vec<Entry> = Vec::with_capacity(specs.len());
     for spec in specs {
@@ -350,7 +367,7 @@ pub fn register_commands(
         if entries.iter().any(|entry| entry.info.id == id) {
             return Err(format!("命令「{id}」登记了两次"));
         }
-        if spec.title.trim().is_empty() {
+        if spec.title.get().trim().is_empty() {
             return Err(format!("命令「{id}」没有标题"));
         }
         if let Some(key) = &spec.key {
@@ -376,14 +393,16 @@ pub fn register_commands(
             owner: owner.to_string(),
             info: CommandInfo {
                 id,
-                group: group.to_string().into(),
-                title: spec.title.into(),
+                group: SharedString::default(),
+                title: SharedString::default(),
                 key: spec.key.map(Into::into),
                 context: spec.context.into(),
                 palette: spec.palette,
                 requires_args: spec.requires_args,
                 args: spec.args,
             },
+            group: group.clone(),
+            title: spec.title,
             handler: spec.handler,
         });
     }
@@ -420,13 +439,7 @@ pub fn unregister_commands(owner: &str, cx: &mut App) {
 /// 登记过的命令，按登记顺序。只读内存，render 里可以调。
 pub fn commands(cx: &App) -> Vec<CommandInfo> {
     cx.try_global::<CommandRegistry>()
-        .map(|registry| {
-            registry
-                .commands
-                .iter()
-                .map(|entry| entry.info.clone())
-                .collect()
-        })
+        .map(|registry| registry.commands.iter().map(Entry::info).collect())
         .unwrap_or_default()
 }
 
@@ -436,7 +449,7 @@ pub fn command(id: &str, cx: &App) -> Option<CommandInfo> {
         .commands
         .iter()
         .find(|entry| entry.info.id.as_ref() == id)
-        .map(|entry| entry.info.clone())
+        .map(Entry::info)
 }
 
 /// 执行一条命令，`window` 是主窗口（没开时 `None`）。宿主收到 [`RunCommand`] 时调；别处
@@ -482,7 +495,7 @@ fn run_in(
     cx: &mut App,
 ) -> Task<CommandResult> {
     if command(id, cx).is_none() {
-        return Task::ready(Err(format!("没有命令「{id}」")));
+        return Task::ready(Err(rust_i18n::t!("command.missing", id = id).into_owned()));
     }
     let (sender, receiver) = oneshot::channel();
     let id = id.to_string();
@@ -498,7 +511,7 @@ fn run_in(
                 .unwrap_or_else(|| invoke(&id, &args, None, cx))
         });
         let result = match handled {
-            Handled::Pass => Err(format!("命令「{id}」眼下不适用")),
+            Handled::Pass => Err(rust_i18n::t!("command.not_applicable", id = id).into_owned()),
             Handled::Done(task) => task.await,
         };
         let _ = sender.send(result);
@@ -507,7 +520,7 @@ fn run_in(
     cx.spawn(async move |_| {
         receiver
             .await
-            .unwrap_or_else(|_| Err("命令没有执行完".to_string()))
+            .unwrap_or_else(|_| Err(rust_i18n::t!("command.unfinished").into_owned()))
     })
 }
 
@@ -518,7 +531,7 @@ mod tests {
     fn spec(name: &str, key: Option<&str>) -> CommandSpec {
         CommandSpec {
             name: name.to_string(),
-            title: name.to_string(),
+            title: name.to_string().into(),
             key: key.map(str::to_string),
             context: "Workspace".to_string(),
             palette: true,
@@ -570,7 +583,7 @@ mod tests {
                     ..spec("b", None)
                 }],
                 vec![CommandSpec {
-                    title: " ".to_string(),
+                    title: " ".into(),
                     ..spec("b", None)
                 }],
                 // 要参数的命令没法从键、面板执行。
@@ -800,7 +813,7 @@ mod tests {
                         Ok(())
                     }),
                     SHOW.spec("显示", |_, window, _| {
-                        window.ok_or_else(|| NO_MAIN_WINDOW.to_string())?;
+                        window.ok_or_else(no_main_window)?;
                         Ok(())
                     }),
                 ],
@@ -815,7 +828,7 @@ mod tests {
         });
         assert_eq!(note.await, Ok(serde_json::Value::Null));
         assert_eq!(noted.get(), 4);
-        assert_eq!(show.await, Err(NO_MAIN_WINDOW.to_string()));
+        assert_eq!(show.await, Err(no_main_window()));
     }
 
     #[test]

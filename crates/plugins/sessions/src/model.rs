@@ -7,6 +7,8 @@
 //! - 置顶、手动顺序、折叠、分屏布局、上次选中：本插件的库（[`crate::store`]）。
 //!   [`Sessions::ui`] 是侧栏那部分的内存缓存，启动时读一次，改的时候同一事件里写库。
 //!   分组依据、隐藏空项目也在 [`Sessions::ui`] 里，但库里还没有它们的列，暂时只在内存里。
+//! - 哪些格有没看过的提醒：运行时推来的 `attention.changed`，[`Sessions::unread`] 是它的
+//!   只读缓存。
 //! - 选中哪段会话或哪个项目：只在内存里（[`Sessions::selection`]），选中的会话另存一份进库，
 //!   下次启动恢复。
 //! - 建好的会话（视图实例、分屏）：归会话视图（`session_view::SessionView`），它在窗口里建、
@@ -17,12 +19,12 @@
 //! 命令都读它；变了 `cx.notify()`，看它的视图 `observe` 着重画。这里只放数据，不放
 //! 绑着窗口的东西。
 
+use rust_i18n::t;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Context, Entity, Global};
+use gpui::{App, AppContext as _, Context, Entity, Global, SharedString};
 use smelt_plugin_api::RuntimeKey;
-use smelt_plugin_api::model::agent_status::AgentStatus;
 use smelt_plugin_api::model::daemon_state::DaemonSessionState;
 use smelt_plugin_api::model::runtime_path::PathStyle;
 use smelt_plugin_api::model::session_control::is_background_acp_session_id;
@@ -30,9 +32,10 @@ use smelt_plugin_api::model::workspace_directory::{
     WorkspaceConversation, WorkspaceDirectory, WorkspaceRevision, project_root_of,
 };
 
+use crate::attention::Unread;
 use crate::contract::SessionAt;
 use crate::lifecycle;
-use crate::list::{Bucket, Sidebar};
+use crate::list::{BucketKey, Sidebar};
 use crate::peers::conversation::ConversationStart;
 use crate::session_view::Pane;
 use crate::store::SessionsStore;
@@ -84,6 +87,14 @@ pub(crate) struct Sessions {
     /// 各棵工作树上一次问到的合并情况（权威在运行时，这里只是缓存），侧栏按它画状态。只由
     /// [`crate::worksets`] 改。
     pub(crate) workset_checks: HashMap<WorksetKey, WorksetCheck>,
+    /// 哪些格有没看过的提醒（运行时推来的只读缓存），侧栏按它提亮标题。只由 lifecycle 改。
+    pub(crate) unread: Unread,
+    /// 行首头像用哪个（库里那份的缓存）。只经 [`Self::set_avatar`] 改。
+    pub(crate) avatar: AvatarChoice,
+    /// 「项目」标题上搜索框里的字：侧栏只留名字里含它的项目（[`crate::list`] 的
+    /// `project_matches`）。空是不搜。只在内存里，不存库：关了 app 就清空。只经
+    /// [`Self::set_project_filter`] 改。
+    pub(crate) project_filter: String,
 }
 
 struct SessionsGlobal(Entity<Sessions>);
@@ -104,6 +115,7 @@ impl Sessions {
         let selection = store
             .selection()
             .map_or(Selection::None, Selection::Session);
+        let avatar = store.avatar_choice();
         let sessions = cx.new(|cx| {
             let mut sessions = Self {
                 store,
@@ -116,6 +128,9 @@ impl Sessions {
                 agent_names: HashMap::new(),
                 lifecycle: lifecycle::State::default(),
                 workset_checks: HashMap::new(),
+                unread: Unread::default(),
+                avatar,
+                project_filter: String::new(),
             };
             sessions.sidebar = Rc::new(Sidebar::build(&sessions, cx));
             sessions
@@ -132,6 +147,16 @@ impl Sessions {
     /// 重算侧栏并通知重画。只在事件里调（目录、会话状态、机器变了，置顶这些改了）。
     pub(crate) fn rebuild_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar = Rc::new(Sidebar::build(self, cx));
+        cx.notify();
+    }
+
+    /// 换行首头像：写库、通知，列表跟着重建头像。
+    pub(crate) fn set_avatar(&mut self, choice: AvatarChoice, cx: &mut Context<Self>) {
+        if self.avatar == choice {
+            return;
+        }
+        self.store.save_avatar_choice(&choice);
+        self.avatar = choice;
         cx.notify();
     }
 
@@ -204,10 +229,55 @@ impl Sessions {
         self.rebuild_sidebar(cx);
     }
 
+    /// 按名字搜项目（「项目」标题上的搜索框，边打边搜）。空是不搜。
+    pub(crate) fn set_project_filter(&mut self, query: String, cx: &mut Context<Self>) {
+        if self.project_filter == query {
+            return;
+        }
+        self.project_filter = query;
+        self.rebuild_sidebar(cx);
+    }
+
+    /// 让侧栏露出这段会话：展开它所在的「对话」段，按项目分组时展开它的项目和工作集，按
+    /// 状态、时间分组时展开它那一组。从通知、命令这些侧栏外面的地方跳过来时它可能正折着；
+    /// 侧栏里点得到的本来就露着，什么都不改。
+    pub(crate) fn reveal(&mut self, key: &ConversationKey, cx: &mut Context<Self>) {
+        let host = smelt_plugin_api::host(cx);
+        let Some(directory) = host.workspace_directory(&key.machine, cx) else {
+            return;
+        };
+        let Some(conversation) = directory.conversations.iter().find(|c| c.id == key.id) else {
+            return;
+        };
+        let style = host.path_style(&key.machine, cx);
+        let at = placement(style, &directory, conversation);
+        let mut changed = false;
+        // 它在搜索滤掉的项目里：清掉搜索，不然展开了也看不见。
+        if !self.project_filter.is_empty() && !self.sidebar.has_session(key) {
+            self.project_filter.clear();
+            changed = true;
+        }
+        for fold in folds_over(&key.machine, at, self.ui.grouping) {
+            if self.ui.set_collapsed(&fold, false) {
+                self.store.set_collapsed(&fold, false);
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild_sidebar(cx);
+        }
+        if self.ui.by_machine {
+            self.set_machine_collapsed(&key.machine, false, cx);
+        }
+        if let Some(bucket) = self.sidebar.bucket_of(key) {
+            self.set_bucket_collapsed(bucket, false, cx);
+        }
+    }
+
     /// 折起或展开按状态、时间分出来的一组。只改内存（见 [`SidebarUi::collapsed_buckets`]）。
     pub(crate) fn set_bucket_collapsed(
         &mut self,
-        bucket: Bucket,
+        bucket: BucketKey,
         collapsed: bool,
         cx: &mut Context<Self>,
     ) {
@@ -215,6 +285,31 @@ impl Sessions {
             self.ui.collapsed_buckets.insert(bucket)
         } else {
             self.ui.collapsed_buckets.remove(&bucket)
+        };
+        if changed {
+            self.rebuild_sidebar(cx);
+        }
+    }
+
+    /// 打开或关掉「按机器分开」（「筛选与分组」菜单）。只改内存（见 [`SidebarUi::by_machine`]）。
+    pub(crate) fn set_by_machine(&mut self, by_machine: bool, cx: &mut Context<Self>) {
+        if self.ui.by_machine != by_machine {
+            self.ui.by_machine = by_machine;
+            self.rebuild_sidebar(cx);
+        }
+    }
+
+    /// 按机器分开时折起或展开一台机器那片。只改内存（见 [`SidebarUi::collapsed_machines`]）。
+    pub(crate) fn set_machine_collapsed(
+        &mut self,
+        machine: &RuntimeKey,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if collapsed {
+            self.ui.collapsed_machines.insert(machine.clone())
+        } else {
+            self.ui.collapsed_machines.remove(machine)
         };
         if changed {
             self.rebuild_sidebar(cx);
@@ -245,13 +340,17 @@ impl Sessions {
     pub(crate) fn forget_machine(&mut self, machine: &RuntimeKey) {
         self.ui.machines.remove(machine);
         self.ui.project_order.retain(|key| key.machine != *machine);
+        self.ui.collapsed_machines.remove(machine);
+        self.ui
+            .collapsed_buckets
+            .retain(|key| key.machine.as_ref() != Some(machine));
         self.store.forget_machine(machine);
     }
 }
 
 // ---- 侧栏的界面状态 ----
 
-/// 侧栏的置顶、顺序、折叠，所有机器的；再加上「筛选与分组」里选的两样。
+/// 侧栏的置顶、顺序、折叠，所有机器的；再加上「筛选与分组」里选的那几样。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SidebarUi {
     pub(crate) machines: HashMap<RuntimeKey, MachineUi>,
@@ -264,9 +363,14 @@ pub(crate) struct SidebarUi {
     pub(crate) grouping: SidebarGrouping,
     /// 「显示：有会话」：按项目分组时藏起没有会话、也没有工作树的项目（置顶的、选中的照常显示）。
     pub(crate) hide_empty_projects: bool,
-    /// 按状态、时间分组时折起来的组（所有机器的会话一起分）。只在内存里：这些组是现算的，
-    /// 不是库里认得的东西，重启回到全展开。
-    pub(crate) collapsed_buckets: HashSet<Bucket>,
+    /// 按状态、时间分组时折起来的组（不按机器分开时所有机器的会话一起分，分开时各机器各一
+    /// 套）。只在内存里：这些组是现算的，不是库里认得的东西，重启回到全展开。
+    pub(crate) collapsed_buckets: HashSet<BucketKey>,
+    /// 「按机器分开」：挂着远程机器时一台机器一片（只有本机时不起作用）。暂时只在内存里，
+    /// 重启回到不分开。
+    pub(crate) by_machine: bool,
+    /// 按机器分开时折起来的机器。跟着 `by_machine` 只在内存里。
+    pub(crate) collapsed_machines: HashSet<RuntimeKey>,
 }
 
 /// 侧栏「筛选与分组」里的「分组依据」。
@@ -302,6 +406,54 @@ pub(crate) enum Pin {
     Conversation(ConversationKey),
     Project { machine: RuntimeKey, root: String },
     Workset { machine: RuntimeKey, id: String },
+}
+
+/// 盖在一段会话上面、折起来就看不见它的那几层：「对话」段，或者（按项目分组时）它的项目
+/// 和工作集。按状态、时间分组时项目、工作集不画，不算；那时的组见 [`Sidebar::bucket_of`]。
+fn folds_over(machine: &RuntimeKey, placement: Placement, grouping: SidebarGrouping) -> Vec<Fold> {
+    match placement {
+        Placement::Hidden => Vec::new(),
+        Placement::Conversations => vec![Fold::Conversations],
+        Placement::Project { .. } if grouping != SidebarGrouping::Project => Vec::new(),
+        Placement::Project { root, workset } => {
+            let mut folds = vec![Fold::Project {
+                machine: machine.clone(),
+                root,
+            }];
+            folds.extend(workset.map(|id| Fold::Workset {
+                machine: machine.clone(),
+                id,
+            }));
+            folds
+        }
+    }
+}
+
+/// 行首头像用哪个。插槽 [`crate::contract::SESSION_AVATAR`] 只放一个，好几个插件都填时由
+/// 用户选，谁优先这边不猜。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AvatarChoice {
+    /// 没选过：用第一个填进来的（按登记顺序）。
+    #[default]
+    Unset,
+    /// 不要头像，行首画图标。
+    Icon,
+    /// 用这个视图（id）。它没了（插件卸了）按没选过算，选择留着，装回来又是它。
+    View(String),
+}
+
+impl AvatarChoice {
+    /// 在填了插槽的视图（按登记顺序）里定用哪个；`None` 是画图标。
+    pub(crate) fn pick<'a>(&self, filled: &'a [SharedString]) -> Option<&'a SharedString> {
+        match self {
+            Self::Icon => None,
+            Self::View(id) => filled
+                .iter()
+                .find(|view| view.as_ref() == id)
+                .or_else(|| filled.first()),
+            Self::Unset => filled.first(),
+        }
+    }
 }
 
 /// 能折起来的东西。
@@ -541,7 +693,7 @@ pub(crate) fn locate(
         };
     };
     let found = match at {
-        SessionAt::Session { session_id } => conversation_of_session(directory, session_id),
+        SessionAt::Session { session_id } => directory.conversation_of_session(session_id),
         SessionAt::Conversation { conversation_id } => directory
             .conversations
             .iter()
@@ -575,58 +727,14 @@ pub(crate) fn shown_conversation<'a>(
 
 // ---- 从目录和会话状态算的 ----
 
-/// 这段会话里的守护会话 id：对话是它的 ACP 会话，终端是每一格（还没起过、没有 id 的
-/// 不算）。
-pub(crate) fn session_ids(conversation: &WorkspaceConversation) -> impl Iterator<Item = &str> {
-    conversation
-        .acp
-        .as_ref()
-        .map(|acp| acp.sid.as_str())
-        .into_iter()
-        .chain(
-            conversation
-                .terminals
-                .iter()
-                .filter_map(|terminal| terminal.id.as_deref()),
-        )
-}
-
-/// 守护会话 id 属于目录里的哪段会话。
-pub(crate) fn conversation_of_session<'a>(
-    directory: &'a WorkspaceDirectory,
-    session_id: &str,
-) -> Option<&'a WorkspaceConversation> {
-    directory
-        .conversations
-        .iter()
-        .find(|conversation| session_ids(conversation).any(|id| id == session_id))
-}
-
-fn states_of<'a>(
-    conversation: &'a WorkspaceConversation,
-    states: &'a [DaemonSessionState],
-) -> impl Iterator<Item = &'a DaemonSessionState> {
-    states
-        .iter()
-        .filter(|state| session_ids(conversation).any(|id| id == state.id))
-}
-
-/// 会话的状态：各格里最要紧的那个（要你 > 运行中 > 空闲），只看守护推来的。机器连不上
-/// 是另一回事（`Machine::unavailable`），不折算进这里。
-pub(crate) fn status(
-    conversation: &WorkspaceConversation,
-    states: &[DaemonSessionState],
-) -> AgentStatus {
-    AgentStatus::highest(states_of(conversation, states).filter_map(AgentStatus::from_daemon_state))
-}
-
 /// 最近一次动静（unix 秒）：各格最近一次换阶段、开始一轮里最晚的。守护里还没有它的
 /// 是 0。「对话」那一段按它排。
 pub(crate) fn last_activity(
     conversation: &WorkspaceConversation,
     states: &[DaemonSessionState],
 ) -> u64 {
-    states_of(conversation, states)
+    conversation
+        .states_in(states)
         .map(|state| state.phase_since.max(state.turn_started_at))
         .max()
         .unwrap_or(0)
@@ -656,21 +764,9 @@ pub(crate) fn title(conversation: &WorkspaceConversation, states: &[DaemonSessio
         .find(|name| !name.is_empty())
     {
         Some(name) => name.to_string(),
-        None if conversation.acp.is_some() => "对话".to_string(),
-        None => "终端".to_string(),
+        None if conversation.acp.is_some() => t!("kind.conversation").into_owned(),
+        None => t!("kind.terminal").into_owned(),
     }
-}
-
-/// 这段会话是跟哪个智能体的对话（智能体定义 id）。自动化运行的不算。
-pub(crate) fn agent_of(conversation: &WorkspaceConversation) -> Option<&str> {
-    let acp = conversation.acp.as_ref()?;
-    if acp.automation_id.is_some() {
-        return None;
-    }
-    acp.agent_definition_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
 }
 
 /// 这段会话的工作目录：对话的，或第一格终端起的时候的。是起的时候定的，不随终端里
@@ -726,7 +822,7 @@ pub(crate) fn placement(
             workset: None,
         };
     }
-    if agent_of(conversation).is_some() {
+    if conversation.agent_definition().is_some() {
         return Placement::Conversations;
     }
     Placement::Project {
@@ -793,34 +889,27 @@ mod tests {
     }
 
     #[test]
-    fn sessions_of_a_conversation_and_back() {
-        let mut terminals = terminal_session("c1", "t1", "/repo");
-        terminals.terminals.push(WorkspaceTerminal::default());
-        terminals.terminals.push(WorkspaceTerminal {
-            id: Some("t2".into()),
-            ..Default::default()
-        });
-        let directory = WorkspaceDirectory {
-            conversations: vec![terminals, acp_session("c2", "a1", None)],
-            ..Default::default()
-        };
+    fn avatar_choice_picks_among_the_fillers() {
+        let filled: Vec<SharedString> = vec!["a.x/avatar".into(), "b.y/avatar".into()];
+        let picked = |choice: AvatarChoice| choice.pick(&filled).map(|id| id.to_string());
+        assert_eq!(picked(AvatarChoice::Unset).as_deref(), Some("a.x/avatar"));
+        assert_eq!(picked(AvatarChoice::Icon), None);
         assert_eq!(
-            session_ids(&directory.conversations[0]).collect::<Vec<_>>(),
-            ["t1", "t2"]
+            picked(AvatarChoice::View("b.y/avatar".into())).as_deref(),
+            Some("b.y/avatar")
         );
+        // 选的那个卸了按没选过算。
         assert_eq!(
-            conversation_of_session(&directory, "t2").map(|c| c.id.as_str()),
-            Some("c1")
+            picked(AvatarChoice::View("gone/avatar".into())).as_deref(),
+            Some("a.x/avatar")
         );
-        assert_eq!(
-            conversation_of_session(&directory, "a1").map(|c| c.id.as_str()),
-            Some("c2")
-        );
-        assert!(conversation_of_session(&directory, "nope").is_none());
+        // 没人填，怎么选都是图标。
+        assert_eq!(AvatarChoice::Unset.pick(&[]), None);
+        assert_eq!(AvatarChoice::View("b.y/avatar".into()).pick(&[]), None);
     }
 
     #[test]
-    fn status_and_activity_come_from_the_daemon_only() {
+    fn activity_comes_from_the_daemon_only() {
         let mut conversation = terminal_session("c", "t1", "/repo");
         conversation.terminals.push(WorkspaceTerminal {
             id: Some("t2".into()),
@@ -831,22 +920,20 @@ mod tests {
             state("t2", DaemonPhase::AwaitingApproval, 50),
             state("other", DaemonPhase::Failed, 900),
         ];
-        assert_eq!(status(&conversation, &states), AgentStatus::NeedsYou);
         assert_eq!(last_activity(&conversation, &states), 100);
-        assert_eq!(status(&conversation, &[]), AgentStatus::Idle);
         assert_eq!(last_activity(&conversation, &[]), 0);
     }
 
     #[test]
     fn title_prefers_runtime_name_then_custom_then_generic() {
         let mut conversation = acp_session("c", "a1", None);
-        assert_eq!(title(&conversation, &[]), "对话");
+        assert_eq!(title(&conversation, &[]), "Conversation");
         conversation.custom_title = Some("我起的".into());
         assert_eq!(title(&conversation, &[]), "我起的");
         let mut named = state("a1", DaemonPhase::Idle, 0);
         named.conversation_name = Some("运行时的".into());
         assert_eq!(title(&conversation, &[named]), "运行时的");
-        assert_eq!(title(&terminal_session("t", "t1", "/"), &[]), "终端");
+        assert_eq!(title(&terminal_session("t", "t1", "/"), &[]), "Terminal");
     }
 
     #[test]
@@ -1075,5 +1162,47 @@ mod tests {
         let local = &ui.machines[&RuntimeKey::Local];
         assert_eq!(local.pinned_conversations, ["a"]);
         assert!(local.collapsed_worksets.is_empty());
+    }
+
+    #[test]
+    fn folds_over_a_session_follow_its_placement_and_grouping() {
+        let machine = RuntimeKey::Remote("box".into());
+        let in_workset = || Placement::Project {
+            root: "/repo".into(),
+            workset: Some("w".into()),
+        };
+        assert_eq!(
+            folds_over(&machine, in_workset(), SidebarGrouping::Project),
+            [
+                Fold::Project {
+                    machine: machine.clone(),
+                    root: "/repo".into(),
+                },
+                Fold::Workset {
+                    machine: machine.clone(),
+                    id: "w".into(),
+                },
+            ]
+        );
+        let loose = Placement::Project {
+            root: "/repo".into(),
+            workset: None,
+        };
+        assert_eq!(
+            folds_over(&machine, loose, SidebarGrouping::Project),
+            [Fold::Project {
+                machine: machine.clone(),
+                root: "/repo".into(),
+            }]
+        );
+        // 按状态、时间分组时不画项目、工作集，不去改它们存着的折叠。
+        assert!(folds_over(&machine, in_workset(), SidebarGrouping::Status).is_empty());
+        for grouping in [SidebarGrouping::Project, SidebarGrouping::LastUpdated] {
+            assert_eq!(
+                folds_over(&machine, Placement::Conversations, grouping),
+                [Fold::Conversations]
+            );
+            assert!(folds_over(&machine, Placement::Hidden, grouping).is_empty());
+        }
     }
 }

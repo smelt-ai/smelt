@@ -16,11 +16,23 @@ mod view;
 
 use smelt_plugin_api as api;
 
+rust_i18n::i18n!("locales", fallback = "en");
+
+/// 按数量挑单复数的那一句：`one` 是 1 的说法，`other` 是别的。两句都由调用方用字面量键
+/// 取好，键检查才认得出来。
+pub(crate) fn plural(
+    count: usize,
+    one: std::borrow::Cow<'static, str>,
+    other: std::borrow::Cow<'static, str>,
+) -> String {
+    if count == 1 { one } else { other }.into_owned()
+}
+
 /// 来源 id。
 pub const OWNER: &str = "smelt.conversation";
 
-/// 对话的图标（Lucide `message-square`，侧栏「对话」里每段对话也是它）。
-const ICON: &str = "icons/message-square.svg";
+/// 对话的图标（侧栏「对话」里每段对话也是它）。
+const ICON: &str = api::ui::IconName::MessageSquare.asset_path();
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut gpui::App) {
@@ -30,9 +42,9 @@ pub fn register(cx: &mut gpui::App) {
     }
     if let Err(error) = api::register_commands(
         OWNER,
-        "对话",
+        api::text!("title"),
         vec![
-            contract::INSERT_TEXT.spec("填进对话输入框", |text, window, cx| {
+            contract::INSERT_TEXT.spec(api::text!("command.insert_text"), |text, window, cx| {
                 instance::insert_text(text, window, cx)
             }),
         ],

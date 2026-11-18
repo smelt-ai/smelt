@@ -9,6 +9,7 @@
 
 mod launch;
 
+use rust_i18n::t;
 use std::rc::Rc;
 
 use gpui::{App, Axis, ClipboardItem, Task, Window};
@@ -26,7 +27,7 @@ use crate::contract::{
     self, Activate, Fork, Handoff, ListArgs, Resume, SendText, SessionArgs, SessionAt,
     StartConversation,
 };
-use crate::model::{self, ConversationKey, Sessions};
+use crate::model::{ConversationKey, Sessions};
 use crate::peers::agents::AGENT_SETTINGS;
 use crate::peers::conversation::{ConversationFork, ConversationStart, ConversationText};
 use crate::peers::terminal::TerminalText;
@@ -36,44 +37,54 @@ use crate::{dialogs, lifecycle, peers, session_view};
 /// 登记本插件的命令。`register` 里调一次。
 pub(crate) fn register(cx: &mut App) {
     let specs = vec![
-        contract::ACTIVATE.spec_async("跳到会话", activate),
-        contract::START_CONVERSATION.spec_async("开始对话", start_conversation),
-        contract::FORK.spec_async("分叉对话", fork),
-        contract::RESUME.spec_async("续接历史会话", resume),
-        contract::RESUME_IN_TERMINAL.spec_async("在终端里续接历史会话", resume_in_terminal),
-        contract::HANDOFF.spec_async("交接给另一个 agent", handoff),
-        contract::SEND_TEXT.spec_async("往会话里填文字", send_text),
-        shortcut(contract::NEW_SESSION, "新建会话", None, |window, cx| {
-            dialogs::open_new_session(None, None, window, cx);
-            Handled::ok()
-        }),
-        shortcut(contract::OPEN_PROJECT, "打开项目…", None, |_, cx| {
-            open_project(cx)
-        }),
+        contract::ACTIVATE.spec_async(api::text!("command.activate"), activate),
+        contract::START_CONVERSATION
+            .spec_async(api::text!("command.start_conversation"), start_conversation),
+        contract::FORK.spec_async(api::text!("command.fork"), fork),
+        contract::RESUME.spec_async(api::text!("command.resume"), resume),
+        contract::RESUME_IN_TERMINAL
+            .spec_async(api::text!("command.resume_in_terminal"), resume_in_terminal),
+        contract::HANDOFF.spec_async(api::text!("command.handoff"), handoff),
+        contract::SEND_TEXT.spec_async(api::text!("command.send_text"), send_text),
+        shortcut(
+            contract::NEW_SESSION,
+            api::text!("menu.new_session"),
+            None,
+            |window, cx| {
+                dialogs::open_new_session(None, None, window, cx);
+                Handled::ok()
+            },
+        ),
+        shortcut(
+            contract::OPEN_PROJECT,
+            api::text!("command.open_project"),
+            None,
+            |_, cx| open_project(cx),
+        ),
         // ⌘⇧E 跟 VS Code「聚焦资源管理器」一样。
         shortcut(
             contract::FOCUS_LIST,
-            "聚焦侧栏",
+            api::text!("command.focus_list"),
             Some("cmd-shift-e"),
             |_, cx| focus_list(cx),
         ),
         // 绑在 Workspace 上比输入框浅：焦点在输入框里时是文首 / 文末。
         shortcut(
             contract::PREV_SESSION,
-            "上一个会话",
+            api::text!("command.prev_session"),
             Some("cmd-up"),
             |_, cx| step_session(false, cx),
         ),
         shortcut(
             contract::NEXT_SESSION,
-            "下一个会话",
+            api::text!("command.next_session"),
             Some("cmd-down"),
             |_, cx| step_session(true, cx),
         ),
         // 输入框的缩进绑在更深的 context 上，焦点在输入框里时由它接。
         shortcut(
             contract::PREV_PANE,
-            "上一个分屏",
+            api::text!("command.prev_pane"),
             Some("cmd-["),
             |window, cx| {
                 on_pane(window, cx, |window, cx| {
@@ -83,7 +94,7 @@ pub(crate) fn register(cx: &mut App) {
         ),
         shortcut(
             contract::NEXT_PANE,
-            "下一个分屏",
+            api::text!("command.next_pane"),
             Some("cmd-]"),
             |window, cx| {
                 on_pane(window, cx, |window, cx| {
@@ -93,7 +104,7 @@ pub(crate) fn register(cx: &mut App) {
         ),
         shortcut(
             contract::SPLIT_RIGHT,
-            "左右分屏",
+            api::text!("command.split_right"),
             Some("cmd-d"),
             |window, cx| {
                 on_pane(window, cx, |window, cx| {
@@ -103,7 +114,7 @@ pub(crate) fn register(cx: &mut App) {
         ),
         shortcut(
             contract::SPLIT_DOWN,
-            "上下分屏",
+            api::text!("command.split_down"),
             Some("shift-cmd-d"),
             |window, cx| {
                 on_pane(window, cx, |window, cx| {
@@ -113,18 +124,19 @@ pub(crate) fn register(cx: &mut App) {
         ),
         shortcut(
             contract::CLOSE_PANE,
-            "关闭当前分屏或会话",
+            api::text!("command.close_pane"),
             Some("cmd-w"),
             |window, cx| on_pane(window, cx, session_view::close_pane),
         ),
         shortcut(
             contract::COPY_SESSION_ID,
-            "复制会话 ID",
+            api::text!("menu.copy_session_id"),
             None,
             |_, cx| Handled::result(copy_active_session_id(cx)),
         ),
     ];
-    if let Err(error) = api::register_commands(crate::OWNER, "会话", specs, cx) {
+    if let Err(error) = api::register_commands(crate::OWNER, api::text!("view.session"), specs, cx)
+    {
         eprintln!("[sessions] 命令登记失败：{error}");
     }
 }
@@ -132,13 +144,13 @@ pub(crate) fn register(cx: &mut App) {
 /// 不带参数的命令：进命令面板，可以绑键，在主窗口任何地方生效。都要主窗口。
 fn shortcut(
     command: Command<(), ()>,
-    title: &str,
+    title: api::Text,
     key: Option<&str>,
     run: impl Fn(&mut Window, &mut App) -> Handled + 'static,
 ) -> CommandSpec {
     CommandSpec {
         name: command.name().to_string(),
-        title: title.to_string(),
+        title,
         key: key.map(str::to_string),
         context: "Workspace".to_string(),
         palette: true,
@@ -147,7 +159,7 @@ fn shortcut(
         handler: Rc::new(
             move |_: &serde_json::Value, window: Option<&mut Window>, cx: &mut App| match window {
                 Some(window) => run(window, cx),
-                None => Handled::err(api::NO_MAIN_WINDOW),
+                None => Handled::err(api::no_main_window()),
             },
         ),
     }
@@ -191,14 +203,12 @@ fn start_conversation(
 fn fork(args: Fork, _: Option<&mut Window>, cx: &mut App) -> Task<Result<(), String>> {
     let Some(source) = api::host(cx)
         .workspace_directory(&args.machine, cx)
-        .and_then(|directory| {
-            model::conversation_of_session(&directory, &args.session_id).cloned()
-        })
+        .and_then(|directory| directory.conversation_of_session(&args.session_id).cloned())
     else {
-        return Task::ready(Err("找不到要分叉的那段对话".to_string()));
+        return Task::ready(Err(t!("error.fork_source_missing").into_owned()));
     };
     let Some(acp) = source.acp.as_ref().filter(|acp| acp.sid == args.session_id) else {
-        return Task::ready(Err("只有对话能分叉".to_string()));
+        return Task::ready(Err(t!("error.fork_only_conversation").into_owned()));
     };
     let conversation = WorkspaceConversation {
         acp: Some(launch::forked_acp(acp, new_id())),
@@ -219,7 +229,9 @@ fn fork(args: Fork, _: Option<&mut Window>, cx: &mut App) -> Task<Result<(), Str
 fn resume(args: Resume, _: Option<&mut Window>, cx: &mut App) -> Task<Result<(), String>> {
     let Some(kind) = HistorySourceKind::from_id(&args.agent).and_then(HistorySourceKind::acp)
     else {
-        return Task::ready(Err(format!("「{}」不支持 ACP 续接", args.agent)));
+        return Task::ready(Err(
+            t!("error.no_acp_resume", agent = args.agent).into_owned()
+        ));
     };
     let host = api::host(cx);
     let style = host.path_style(&args.machine, cx);
@@ -255,13 +267,14 @@ fn resume_in_terminal(
     cx: &mut App,
 ) -> Task<Result<(), String>> {
     let Some(agent) = HistorySourceKind::from_id(&args.agent) else {
-        return Task::ready(Err(format!("认不出历史来源「{}」", args.agent)));
+        return Task::ready(Err(
+            t!("error.unknown_history_source", source = args.agent).into_owned()
+        ));
     };
     if agent.cli_resume_syntax().is_none() {
-        return Task::ready(Err(format!(
-            "{} 没有能在终端里续接的 CLI",
-            agent.short_label()
-        )));
+        return Task::ready(Err(
+            t!("error.no_cli_resume", agent = agent.short_label()).into_owned()
+        ));
     }
     let entries =
         api::call::<LaunchGet>(&args.machine, EmptyParams::default(), api::CALL_TIMEOUT, cx);
@@ -280,16 +293,18 @@ fn resume_in_terminal(
             let env = match (all, args.profile_id.as_deref()) {
                 (Some(all), Some(profile_id)) => {
                     let settings = launch::settings_of(all, &args.machine)?;
-                    let kind = agent
-                        .acp()
-                        .ok_or_else(|| format!("{} 没有自定义 Agent", agent.short_label()))?;
+                    let kind = agent.acp().ok_or_else(|| {
+                        t!("error.no_custom_agent", agent = agent.short_label()).into_owned()
+                    })?;
                     launch::engine_launch(&settings, kind, Some(profile_id))?.env
                 }
                 _ => Default::default(),
             };
             let style = api::host(cx).path_style(&args.machine, cx);
             let command = launch::cli_resume_line(style, &entries, agent, &args.resume_id, &env)
-                .ok_or_else(|| format!("{} 没有能在终端里续接的 CLI", agent.short_label()))?;
+                .ok_or_else(|| {
+                    t!("error.no_cli_resume", agent = agent.short_label()).into_owned()
+                })?;
             let terminal = WorkspaceTerminal {
                 id: Some(new_id()),
                 cwd: Some(args.cwd.clone()),
@@ -330,7 +345,7 @@ fn handoff(args: Handoff, _: Option<&mut Window>, cx: &mut App) -> Task<Result<(
 /// 把文字填进眼下那一格：终端里等于粘贴，对话里填进输入框，都不替用户发出。
 fn send_text(args: SendText, _: Option<&mut Window>, cx: &mut App) -> Task<Result<(), String>> {
     let Some((key, pane)) = active_pane(cx) else {
-        return Task::ready(Err("没有发出去：还没有打开会话。".to_string()));
+        return Task::ready(Err(t!("error.send_no_session").into_owned()));
     };
     match pane.kind {
         PaneKind::Terminal => peers::terminal::SEND_TEXT.run(
@@ -359,8 +374,8 @@ fn open_project(cx: &mut App) -> Handled {
     let picked = api::PICK_PATHS.run(
         &api::PathRequest {
             machine: RuntimeKey::Local,
-            title: "打开项目".to_string(),
-            confirm: "打开".to_string(),
+            title: t!("pick.title").into_owned(),
+            confirm: t!("pick.confirm").into_owned(),
             files: false,
             multiple: true,
         },
@@ -405,7 +420,7 @@ fn focus_list(cx: &mut App) -> Handled {
         if opened.await? {
             Ok(serde_json::Value::Null)
         } else {
-            Err("会话列表放不下".to_string())
+            Err(t!("error.no_room_list").into_owned())
         }
     }))
 }
@@ -443,7 +458,7 @@ fn on_pane(
 }
 
 fn copy_active_session_id(cx: &mut App) -> Result<(), String> {
-    let (key, pane) = active_pane(cx).ok_or_else(|| "还没有打开会话".to_string())?;
+    let (key, pane) = active_pane(cx).ok_or_else(|| t!("error.no_open_session").into_owned())?;
     copy_session_id(&key.machine, &pane.session_id, cx);
     Ok(())
 }
@@ -529,7 +544,7 @@ fn id_to_copy(
     session_id: &str,
 ) -> String {
     let history = directory
-        .and_then(|directory| model::conversation_of_session(directory, session_id))
+        .and_then(|directory| directory.conversation_of_session(session_id))
         .and_then(|conversation| conversation.acp.as_ref())
         .filter(|acp| acp.sid == session_id)
         .and_then(|acp| acp.history_session_id.as_deref());

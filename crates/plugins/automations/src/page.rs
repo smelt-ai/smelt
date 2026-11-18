@@ -83,6 +83,12 @@ impl AutomationsPage {
                         this.reconcile(window, cx);
                         cx.notify();
                     }
+                    // 输入框的占位文字存在输入框里，换语言时重设。
+                    HostEvent::LocaleChanged => {
+                        if let Some(editor) = this.editor.as_ref() {
+                            editor.label(window, cx);
+                        }
+                    }
                     _ => {}
                 },
             ),
@@ -231,7 +237,7 @@ impl LiveRun {
             return Ok(None);
         }
         let args = api::serde_json::to_value(args)
-            .map_err(|error| format!("现场的参数转不成 JSON：{error}"))?;
+            .map_err(|error| t!("error.live_args", error = error).into_owned())?;
         api::create_view(conversation::VIEW, &args, window, cx).map(Some)
     }
 }
@@ -311,7 +317,7 @@ pub(crate) fn machine_name(machine: &RuntimeKey, cx: &App) -> String {
         .find(|known| known.key == *machine)
         .map_or_else(
             || match machine {
-                RuntimeKey::Local => "本机".to_string(),
+                RuntimeKey::Local => t!("machine.local").into_owned(),
                 RuntimeKey::Remote(id) => id.clone(),
             },
             |known| known.name,
@@ -326,7 +332,7 @@ pub(crate) fn machine_unavailable(machine: &RuntimeKey, cx: &App) -> Option<Stri
         .find(|known| known.key == *machine)
     {
         Some(known) => known.unavailable,
-        None => Some(api::MACHINE_REMOVED.to_string()),
+        None => Some(api::machine_removed()),
     }
 }
 
@@ -337,7 +343,7 @@ pub(crate) fn client_for(
 ) -> Result<api::client::RuntimeClient, String> {
     api::host(cx)
         .client(machine, cx)
-        .ok_or_else(|| api::MACHINE_REMOVED.to_string())
+        .ok_or_else(api::machine_removed)
 }
 
 pub(crate) fn agent_definition<'a>(
@@ -369,7 +375,7 @@ pub(crate) fn open_agents_view(machine: &RuntimeKey, cx: &mut App) {
 pub(crate) fn notify_once(body: String, cx: &mut App) {
     let notify = api::Notify {
         id: None,
-        subtitle: "完成".to_string(),
+        subtitle: t!("notify.done").into_owned(),
         body,
         on_click: None,
     };

@@ -7,6 +7,8 @@
 //!
 //! 文件 IO 全在后台线程上做。内置插件，只经 [`smelt_plugin_api`] 和宿主打交道。
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 #[cfg(target_os = "macos")]
 mod cli_command;
 #[cfg(target_os = "macos")]

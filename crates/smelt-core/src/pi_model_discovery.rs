@@ -31,7 +31,7 @@ async fn fetch_models_body(url: &str, api: &str, api_key: &str) -> Result<String
     let client = reqwest::Client::builder()
         .timeout(DISCOVERY_TIMEOUT)
         .build()
-        .map_err(|error| format!("创建 HTTP 客户端失败：{error}"))?;
+        .map_err(|error| format!("couldn't create the HTTP client: {error}"))?;
     let mut builder = client
         .get(url)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -48,16 +48,16 @@ async fn fetch_models_body(url: &str, api: &str, api_key: &str) -> Result<String
     let response = builder
         .send()
         .await
-        .map_err(|error| format!("请求 {url} 失败：{error}"))?;
+        .map_err(|error| format!("request to {url} failed: {error}"))?;
     let status = response.status();
     if !status.is_success() {
         // 不带响应体：4xx 的 body 常常把 key 的前缀原样回显出来，那会进日志。
-        return Err(format!("端点返回 HTTP {status}"));
+        return Err(format!("the endpoint returned HTTP {status}"));
     }
     response
         .text()
         .await
-        .map_err(|error| format!("读取响应失败：{error}"))
+        .map_err(|error| format!("couldn't read the response: {error}"))
 }
 
 /// 从响应里挑出模型列表。
@@ -65,14 +65,14 @@ async fn fetch_models_body(url: &str, api: &str, api_key: &str) -> Result<String
 /// 三种形状都见过：OpenAI 的 `{data:[...]}`、部分网关的 `{models:[...]}`、还有
 /// 直接给数组的。名字字段各家不一（`display_name`/`name`），都认。
 pub fn parse_models_response(body: &str) -> Result<Vec<DiscoveredModel>, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(body).map_err(|error| format!("解析响应失败：{error}"))?;
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("couldn't parse the response: {error}"))?;
     let items = value
         .get("data")
         .or_else(|| value.get("models"))
         .and_then(serde_json::Value::as_array)
         .or_else(|| value.as_array())
-        .ok_or_else(|| "响应里没有模型列表".to_string())?;
+        .ok_or_else(|| "the response has no model list".to_string())?;
 
     let mut models: Vec<DiscoveredModel> = Vec::new();
     let mut seen = std::collections::HashSet::new();

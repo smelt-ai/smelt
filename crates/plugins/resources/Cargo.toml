@@ -13,9 +13,11 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
-gpui = { package = "gpui-pre", version = "=0.3.11" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
 # 采样循环睡在唤醒信号和间隔之间（见 lib.rs）。
 smol = "2"
 # 照抄别的插件的约定（命令参数、菜单上下文）要按同样的 JSON 形状收发。
 serde = { version = "1", features = ["derive"] }
+# 界面文案（locales/ui.yml，见 docs/i18n.md）。
+rust-i18n.workspace = true

@@ -10,6 +10,9 @@
 //!
 //! 依赖约束：必须能编进 iOS / Android，不许引 GPUI、原生 SQLite 或 `smelt-core`。
 
+// 控制报错原因的文案（protocol::reason，见 docs/i18n.md）。
+rust_i18n::i18n!("locales", fallback = "en");
+
 pub mod client;
 pub mod compat;
 pub mod connector;

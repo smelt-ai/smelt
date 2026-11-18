@@ -18,19 +18,17 @@ smelt-model = { path = "../smelt-model" }
 # 异步里等全局状态到位（global_wait）。
 smol = "2"
 serde_json = "1"
-gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 # 组件的行为（焦点、键盘、无障碍、对话框层、输入框、富文本）都取 gpui-base，外观自己画。
 # 不依赖 gpui-component：它的外观读它自己的 `Theme`，和 smelt 的主题是两个权威。
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
-# 组件的图标用共享图标资源，不依赖 component 的 Icon 外观层。
-gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
 # mermaid 代码块画图，见 markdown_mermaid.rs。版本锁死。
 # 不开 layout-elk：它带进 EPL-2.0 的 merman-elk-layered，分发二进制要随附源码和声明；
 # 默认布局也会从 dagre 换成 ELK（见 markdown_mermaid.rs 文件头）。不走默认 features /
 # complete-svg：那几条还会打开 math（RaTeX）。architecture 图要 cytoscape，所以保留
 # layout-cytoscape。
 merman = { version = "=0.9.2", default-features = false, features = ["all-diagrams", "svg", "layout-cytoscape"] }
-# 类图测宽和单测解析都用 GPUI 同一份 usvg 0.46（gpui-pre 0.3.11 经 resvg 打开
+# 类图测宽和单测解析都用 GPUI 同一份 usvg 0.46（gpui-pre 0.3.12 经 resvg 打开
 # text/system-fonts/memmap-fonts）。gpui 不把 fontdb 公开出去，只能直接依赖这个版本，
 # cargo 会和 gpui 合成同一份。
 usvg = "=0.46.0"
@@ -43,7 +41,7 @@ hex = "0.4"
 # 格式当前调用方不会遇到，不为此扩大解码面。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # 代码语法高亮（syntax/）：文件页的代码编辑器、Markdown 代码块、差异视图共用一套。
-tree-sitter = "0.26.13"
+tree-sitter = "0.27.2"
 # 语法包导出的语言入口类型（`LanguageFn`），tree-sitter 本身不再导出它。
 tree-sitter-language = "0.1"
 # 编辑器的语言服务里 Python 的缩进规则（syntax/editing.rs）。
@@ -54,30 +52,30 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 smallvec = "1"
 tree-sitter-astro-next = "0.1.1"
-tree-sitter-bash = "0.23.3"
+tree-sitter-bash = "0.25.1"
 tree-sitter-c = "0.24.1"
 tree-sitter-c-sharp = "0.23.1"
 tree-sitter-cmake = "0.7.1"
 tree-sitter-cpp = "0.23.4"
-tree-sitter-css = "0.23.2"
+tree-sitter-css = "0.25.0"
 tree-sitter-diff = "0.1.0"
 tree-sitter-elixir = "0.3"
-tree-sitter-embedded-template = "0.23.0"
-tree-sitter-go = "0.23.4"
+tree-sitter-embedded-template = "0.25.0"
+tree-sitter-go = "0.25.0"
 tree-sitter-html = "0.23.2"
 tree-sitter-java = "0.23.5"
-tree-sitter-javascript = "0.23.1"
-tree-sitter-jsdoc = "0.23.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-jsdoc = "0.25.0"
 tree-sitter-json = "0.24.8"
 tree-sitter-kotlin-sg = "0.4.0"
-tree-sitter-lua = "0.4.1"
+tree-sitter-lua = "0.5.0"
 tree-sitter-make = "1.1.1"
 tree-sitter-md = "0.5.1"
-tree-sitter-php = "0.24.2"
-tree-sitter-python = "0.23.6"
+tree-sitter-php = "0.25.1"
+tree-sitter-python = "0.25.0"
 tree-sitter-ruby = "0.23.1"
 tree-sitter-rust = "0.24.0"
-tree-sitter-scala = "0.23.4"
+tree-sitter-scala = "0.26.13"
 tree-sitter-sequel = "0.3.8"
 tree-sitter-svelte-next = "0.1.1"
 tree-sitter-swift = "0.7.0"
@@ -85,11 +83,13 @@ tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.1"
 tree-sitter-zig = "1.1.2"
+# 界面文案（locales/ui.yml，见 docs/i18n.md）。
+rust-i18n.workspace = true
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 # 截断宽度的问题只在真实字形下才有，测试默认的 Noop 字体系统是等宽假字。特性与
 # crates/smelt 里 gpui_platform 开的一致：同一套字体后端，且免装 Metal 工具链。
 # test-support 打开离屏 Metal 渲染（MetalHeadlessRenderer），组件快照用它出图。
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_apple = { package = "gpui-pre-apple", version = "=0.3.11", features = ["font-kit", "runtime_shaders", "test-support"] }
+gpui_apple = { package = "gpui-pre-apple", version = "=0.3.12", features = ["font-kit", "runtime_shaders", "test-support"] }

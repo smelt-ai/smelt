@@ -158,6 +158,8 @@ pub struct AutomationRunRecord {
     pub error: Option<String>,
     pub runtime_released_at: Option<i64>,
     pub context_json: Vec<u8>,
+    /// 没成的原因种类代码；旧记录没有。
+    pub error_code: Option<String>,
 }
 
 #[derive(Clone)]
@@ -981,7 +983,7 @@ mod imp {
                 })?;
             if busy != 0 || (log != -1 && log != checkpointed) {
                 return Err(std::io::Error::other(format!(
-                    "新库没能把 WAL 写回主文件（busy={busy} log={log} checkpointed={checkpointed}）"
+                    "The new database couldn't checkpoint its WAL into the main file (busy={busy} log={log} checkpointed={checkpointed})"
                 ))
                 .into());
             }
@@ -2113,7 +2115,7 @@ mod imp {
             return Ok(());
         }
         if current == 38 {
-            apply_v39_drop_client_columns(&transaction)?;
+            apply_v39(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
             if !schema_matches_current(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -2833,14 +2835,23 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V37_TO_V38)?;
         }
-        apply_v39_drop_client_columns(transaction)
+        apply_v39(transaction)
     }
 
-    /// v39 删掉运行时目录里运行时自己不据此行动的四列，见 `schema::V38_TO_V39_DROPPED_COLUMNS`。
-    /// 已经没有的列跳过。
-    fn apply_v39_drop_client_columns(
-        transaction: &rusqlite::Transaction<'_>,
-    ) -> Result<(), StoreError> {
+    /// v39 删掉运行时目录里运行时自己不据此行动的四列（`schema::V38_TO_V39_DROPPED_COLUMNS`），
+    /// 给自动化运行记录加原因种类、推送登记加语言（`schema::V38_TO_V39_ADDED_COLUMNS`）。已经没有、已经有的
+    /// 列跳过。
+    fn apply_v39(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        for (table, column, declaration) in crate::schema::V38_TO_V39_ADDED_COLUMNS {
+            if !table_columns(transaction, table)?
+                .iter()
+                .any(|existing| existing == column)
+            {
+                transaction.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {declaration};"
+                ))?;
+            }
+        }
         for (table, column) in crate::schema::V38_TO_V39_DROPPED_COLUMNS {
             if table_columns(transaction, table)?
                 .iter()
@@ -2871,6 +2882,8 @@ mod imp {
             label: "Claude Code",
             workspace_env: Some("CLAUDE_CONFIG_DIR"),
             factory: &[
+                // v0.5.9 的出厂命令，还没加 --bun。
+                "bunx @agentclientprotocol/claude-agent-acp@0.60.0",
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0",
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0",
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
@@ -5825,6 +5838,36 @@ CREATE TABLE published_session (
         );
     }
 
+    /// v0.5.9 的出厂命令（还没加 --bun）也是出厂的，迁移时不转成自定义 Agent。
+    #[test]
+    fn v34_migration_keeps_v059_factory_command_out_of_custom_agents() {
+        let dir = temp_dir("v34-migration-v059");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection.execute_batch(V34_AGENT_COMMAND).unwrap();
+        connection
+            .execute_batch(crate::schema::ENSURE_WORKSPACE_EPOCH)
+            .unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO agent_acp_command(command_key, command) VALUES
+                   ('acp_cmd', 'bunx @agentclientprotocol/claude-agent-acp@0.60.0');",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 34).unwrap();
+        drop(connection);
+
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let profiles: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_profile", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(profiles, 0);
+    }
+
     #[test]
     fn v23_database_drops_deepseek_harness_data() {
         let dir = temp_dir("v23-migration");
@@ -6269,6 +6312,7 @@ CREATE TABLE published_session (
             output: None,
             error: None,
             runtime_released_at: None,
+            error_code: None,
             context_json: json_bytes(json!({
                 "automation_name": name,
                 "cwd": "/",
@@ -6385,7 +6429,9 @@ CREATE TABLE published_session (
 
         let error = Store::open_or_create(&path).unwrap_err();
         assert!(
-            error.to_string().contains("数据库 schema 5 形状无法识别"),
+            error
+                .to_string()
+                .contains("Database schema 5 has an unrecognized shape"),
             "unexpected error: {error}"
         );
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -6483,8 +6529,8 @@ CREATE TABLE published_session (
         drop(connection);
 
         let error = Store::open_or_create(&path).unwrap_err();
-        assert!(error.to_string().contains("形状无法识别"), "{error}");
-        assert!(error.to_string().contains("以免清空"), "{error}");
+        assert!(error.to_string().contains("unrecognized shape"), "{error}");
+        assert!(error.to_string().contains("isn't wiped"), "{error}");
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         let payload: String = connection
@@ -6525,7 +6571,7 @@ CREATE TABLE published_session (
         drop(connection);
 
         let error = Store::open_or_create(&path).unwrap_err();
-        assert!(error.to_string().contains("形状无法识别"), "{error}");
+        assert!(error.to_string().contains("unrecognized shape"), "{error}");
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         let root: String = connection
@@ -6570,7 +6616,7 @@ CREATE TABLE published_session (
 
             let error = Store::open_or_create(&path).unwrap_err();
             assert!(
-                error.to_string().contains("形状无法识别"),
+                error.to_string().contains("unrecognized shape"),
                 "{table}: {error}"
             );
             let connection = rusqlite::Connection::open(&path).unwrap();
@@ -6635,7 +6681,7 @@ CREATE TABLE published_session (
 
             let error = Store::open_or_create(&path).unwrap_err();
             assert!(
-                error.to_string().contains("形状无法识别"),
+                error.to_string().contains("unrecognized shape"),
                 "{name}: {error}"
             );
             let connection = rusqlite::Connection::open(&path).unwrap();
@@ -6672,7 +6718,7 @@ CREATE TABLE published_session (
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .unwrap();
             let error = imp::migrate_v1_schema(&transaction, &malformed_migration).unwrap_err();
-            assert!(error.to_string().contains("形状无法识别"), "{error}");
+            assert!(error.to_string().contains("unrecognized shape"), "{error}");
         }
 
         assert_eq!(
@@ -8650,6 +8696,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
                 notify_success: false,
                 payload_version: 1,
                 notify_message: true,
+                locale: None,
                 updated_at_ms: 5,
             }]
         );
@@ -8668,7 +8715,9 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "ALTER TABLE push_registration DROP COLUMN notify_message;
+                "ALTER TABLE push_registration DROP COLUMN locale;
+                 ALTER TABLE push_registration DROP COLUMN notify_message;
+                 ALTER TABLE automation_run DROP COLUMN error_code;
                  INSERT INTO paired_device(endpoint_id, name, paired_at_ms) VALUES ('aa', 'iPhone', 1);
                  INSERT INTO push_registration(device_endpoint_id, handle, relay_url,
                    notify_approval, notify_input, notify_failure, updated_at_ms,
@@ -8703,6 +8752,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             notify_success: false,
             payload_version: 1,
             notify_message: true,
+            locale: None,
             updated_at_ms: 10,
         };
         assert!(
@@ -8726,6 +8776,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             notify_success: true,
             payload_version: 2,
             notify_message: false,
+            locale: Some("zh-CN".to_string()),
             updated_at_ms: 20,
             ..registration.clone()
         };
@@ -9411,9 +9462,11 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         std::fs::write(&path, []).unwrap();
         let error = Store::open(&path).unwrap_err();
         assert!(
-            error.to_string().contains("未初始化")
-                || error.to_string().contains("拒绝建空库")
-                || error.to_string().contains("打开"),
+            error.to_string().contains("isn't initialized")
+                || error
+                    .to_string()
+                    .contains("refusing to create an empty one")
+                || error.to_string().contains("Couldn't open"),
             "{error}"
         );
         if path.exists() {

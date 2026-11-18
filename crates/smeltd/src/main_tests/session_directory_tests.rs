@@ -39,6 +39,8 @@ fn recovered_state(id: &str) -> SessionState {
         turn_started_at: 0,
         pending_question: Some("要不要继续".to_string()),
         pending_request: None,
+        pending_note: None,
+        completed_delivery_id: None,
         tokens_used: Some(42),
         branch: Some("feat/ghost".to_string()),
         dirty_files: vec!["a.rs".to_string()],

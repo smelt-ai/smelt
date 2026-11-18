@@ -13,12 +13,62 @@ pub struct PiModelEditor {
     pub credential_configured: bool,
 }
 
+impl PiModelEditor {
+    /// 占位文字：建好时和换语言时都从这里取。
+    pub fn label(&self, window: &mut Window, cx: &mut App) {
+        set_placeholder(
+            &self.provider,
+            t!("model_editor.provider_placeholder"),
+            window,
+            cx,
+        );
+        set_placeholder(
+            &self.model,
+            t!("model_editor.model_placeholder"),
+            window,
+            cx,
+        );
+        set_placeholder(
+            &self.base_url,
+            t!("model_editor.base_url_placeholder"),
+            window,
+            cx,
+        );
+        let key = if self.credential_configured {
+            t!("editor.key_configured")
+        } else {
+            t!("model_editor.key_placeholder")
+        };
+        set_placeholder(&self.api_key, key, window, cx);
+    }
+}
+
 #[derive(Clone)]
 pub struct PiCustomModelEditor {
     pub id: Entity<InputState>,
     pub name: Entity<InputState>,
     pub context_window: Entity<InputState>,
     pub max_tokens: Entity<InputState>,
+}
+
+impl PiCustomModelEditor {
+    /// 占位文字：建好时和换语言时都从这里取。
+    pub fn label(&self, window: &mut Window, cx: &mut App) {
+        set_placeholder(&self.id, t!("model_row.id_placeholder"), window, cx);
+        set_placeholder(&self.name, t!("model_row.name_placeholder"), window, cx);
+        set_placeholder(
+            &self.context_window,
+            t!("model_row.context_placeholder"),
+            window,
+            cx,
+        );
+        set_placeholder(
+            &self.max_tokens,
+            t!("model_row.max_tokens_placeholder"),
+            window,
+            cx,
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -33,6 +83,39 @@ pub struct PiCustomProviderEditor {
     /// 「获取模型列表」的进度与结果；`None` 表示还没点过。
     pub discovery: Option<ModelDiscoveryState>,
     pub credential_configured: bool,
+}
+
+impl PiCustomProviderEditor {
+    /// 占位文字：建好时和换语言时都从这里取。
+    pub fn label(&self, window: &mut Window, cx: &mut App) {
+        set_placeholder(&self.id, t!("provider.id_placeholder"), window, cx);
+        set_placeholder(
+            &self.display_name,
+            t!("provider.name_placeholder"),
+            window,
+            cx,
+        );
+        set_placeholder(&self.base_url, "https://gateway.example/v1", window, cx);
+        let key = if self.credential_configured {
+            t!("editor.key_configured")
+        } else {
+            t!("provider.key_placeholder")
+        };
+        set_placeholder(&self.api_key, key, window, cx);
+        for model in &self.models {
+            model.label(window, cx);
+        }
+    }
+}
+
+fn set_placeholder(
+    input: &Entity<InputState>,
+    text: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let text = text.into();
+    input.update(cx, |input, cx| input.set_placeholder(text, window, cx));
 }
 
 /// 模型发现的进度：一次直连 HTTP。
@@ -172,31 +255,21 @@ pub(crate) fn render_model_discovery_section(
     };
 
     match state {
-        None if manual_rows == 0 => note(
-            muted,
-            "未列出任何模型：保存时将从 API 地址自动获取，并在每次启动时刷新。\
-             想自己固定一份目录，就在上面添加模型。"
-                .to_string(),
-        )
-        .into_any_element(),
-        None => note(
-            muted,
-            "可以点「获取模型列表」从 API 地址读取该服务提供的模型，不必逐个手填。".to_string(),
-        )
-        .into_any_element(),
+        None if manual_rows == 0 => {
+            note(muted, t!("discovery.auto").into_owned()).into_any_element()
+        }
+        None => note(muted, t!("discovery.hint").into_owned()).into_any_element(),
         Some(ModelDiscoveryState::Loading) => {
-            note(muted, "正在向该端点询问可用模型…".to_string()).into_any_element()
+            note(muted, t!("discovery.loading").into_owned()).into_any_element()
         }
         Some(ModelDiscoveryState::Failed(error)) => note(
             danger_fg,
-            format!("未能读取模型列表：{error}（仍可在下方手动填写）"),
+            t!("discovery.failed", error = error).into_owned(),
         )
         .into_any_element(),
-        Some(ModelDiscoveryState::Ready(models)) if models.is_empty() => note(
-            muted,
-            "该端点没有报告任何模型，请在下方手动填写。".to_string(),
-        )
-        .into_any_element(),
+        Some(ModelDiscoveryState::Ready(models)) if models.is_empty() => {
+            note(muted, t!("discovery.empty").into_owned()).into_any_element()
+        }
         Some(ModelDiscoveryState::Ready(models)) => {
             let total = models.len();
             let buttons = models.into_iter().map(move |model| {
@@ -221,7 +294,7 @@ pub(crate) fn render_model_discovery_section(
                 .gap_1()
                 .child(note(
                     muted,
-                    format!("该端点提供 {total} 个模型，点击添加到下方列表："),
+                    t!("discovery.found", count = total).into_owned(),
                 ))
                 .child(
                     div()

@@ -9,7 +9,7 @@ use smelt_core::{
         WorkspaceWorksetRenameParams, WorkspaceWorksetRepositoryState,
     },
 };
-use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlReason};
 
 use crate::EventHubHandle;
 
@@ -39,11 +39,14 @@ pub(crate) fn repository_action(
             .iter()
             .any(|repo| repo.project_root == params.project_root && repo.name == *name)
         {
-            return Err(repository_error("仓库名已存在，请修改目录名"));
+            return Err(ControlError::because(
+                ControlErrorCode::OperationFailed,
+                ControlReason::RepositoryAlreadyAdded,
+            ));
         }
         Some(
             git::clone_repository(std::path::Path::new(&params.project_root), url, name)
-                .map_err(repository_error)?,
+                .map_err(git_repository_error)?,
         )
     } else {
         None
@@ -86,7 +89,7 @@ pub(crate) fn repository_action(
                 Err(error) => return Err(repository_error(error)),
             }
             for candidate in candidates {
-                let root = git::repository_root(&candidate).map_err(repository_error)?;
+                let root = git::repository_root(&candidate).map_err(git_repository_error)?;
                 let root = path_text(&root)?;
                 if repositories.iter().any(|repo| repo.root == root) {
                     continue;
@@ -94,12 +97,12 @@ pub(crate) fn repository_action(
                 let name = candidate
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .ok_or_else(|| repository_error("仓库名称不是 UTF-8"))?
+                    .ok_or_else(|| repository_error("The repository name isn't UTF-8"))?
                     .to_string();
                 git::validate_name(&name).map_err(repository_error)?;
                 if repositories.iter().any(|repo| repo.name == name) {
                     return Err(repository_error(format!(
-                        "发现同名仓库 {name}，请在管理项目仓库中选择并改名"
+                        "A repository named {name} already exists; pick it in project repositories and rename it"
                     )));
                 }
                 repositories.push(WorkspaceProjectRepository {
@@ -112,10 +115,10 @@ pub(crate) fn repository_action(
             }
         }
         Action::Bind { source, name } => {
-            let root =
-                git::repository_root(std::path::Path::new(&source)).map_err(repository_error)?;
+            let root = git::repository_root(std::path::Path::new(&source))
+                .map_err(git_repository_error)?;
             reject_duplicate(&repositories, &name, &path_text(&root)?)?;
-            let bound = git::bind(&project, &root, &name).map_err(repository_error)?;
+            let bound = git::bind(&project, &root, &name).map_err(git_repository_error)?;
             repositories.push(WorkspaceProjectRepository {
                 project_root: project_root.clone(),
                 name,
@@ -128,12 +131,12 @@ pub(crate) fn repository_action(
         Action::Clone { name, .. } => {
             if repositories.iter().any(|repo| repo.name == name) {
                 return Err(repository_error(
-                    "克隆完成，但仓库名被其它客户端占用；目录已保留，请改名后重新绑定",
+                    "The clone finished, but another client took the repository name; the folder was kept, so rename it and bind it again",
                 ));
             }
             let bound = cloned
                 .take()
-                .ok_or_else(|| repository_error("克隆结果缺失"))?;
+                .ok_or_else(|| repository_error("The clone result is missing"))?;
             repositories.push(WorkspaceProjectRepository {
                 project_root: project_root.clone(),
                 name,
@@ -145,7 +148,7 @@ pub(crate) fn repository_action(
         }
         Action::Remove { name } => {
             let Some(index) = repositories.iter().position(|repo| repo.name == name) else {
-                return Err(repository_error("仓库已不存在"));
+                return Err(repository_error("The repository no longer exists"));
             };
             let repo = &repositories[index];
             let referenced = directory
@@ -162,8 +165,8 @@ pub(crate) fn repository_action(
                 .collect::<Vec<_>>();
             if !referenced.is_empty() {
                 return Err(repository_error(format!(
-                    "仓库仍被工作树引用：{}",
-                    referenced.join("、")
+                    "The repository is still used by worktrees: {}",
+                    referenced.join(", ")
                 )));
             }
             if let Some(link) = &repo.managed_link {
@@ -188,15 +191,15 @@ pub(crate) fn repository_action(
             Ok(change.directory)
         }
         Err(error) => {
-            let mut message = format!("保存项目仓库失败：{error}");
+            let mut message = format!("Couldn't save the project repositories: {error}");
             if let Some(bound) = added {
                 if let Some(link) = bound.managed_link {
                     if let Err(error) = git::remove_link(&project, &link, &bound.root) {
-                        message.push_str(&format!("；软链接回滚失败：{error}"));
+                        message.push_str(&format!("; couldn't roll back the symlink: {error}"));
                     }
                 } else {
                     message.push_str(&format!(
-                        "；仓库文件保留在 {}，可选择该目录重新绑定",
+                        "; the repository files are kept at {}, so you can bind that folder again",
                         bound.root.display()
                     ));
                 }
@@ -205,7 +208,7 @@ pub(crate) fn repository_action(
                 if let Err(error) =
                     git::bind(&project, std::path::Path::new(&repo.root), &repo.name)
                 {
-                    message.push_str(&format!("；恢复软链接失败：{error}"));
+                    message.push_str(&format!("; couldn't restore the symlink: {error}"));
                 }
             }
             Err(repository_error(message))
@@ -216,11 +219,19 @@ pub(crate) fn repository_action(
 fn path_text(path: &std::path::Path) -> Result<String, ControlError> {
     path.to_str()
         .map(str::to_string)
-        .ok_or_else(|| repository_error("路径不是 UTF-8"))
+        .ok_or_else(|| repository_error("The path isn't UTF-8"))
 }
 
 fn repository_error(error: impl std::fmt::Display) -> ControlError {
     ControlError::new(ControlErrorCode::OperationFailed, error.to_string())
+}
+
+/// 绑定、克隆仓库没成：带种类的照种类说。
+fn git_repository_error(error: smelt_git::GitError) -> ControlError {
+    ControlError {
+        reason: error.reason().cloned(),
+        ..ControlError::new(ControlErrorCode::OperationFailed, error.message())
+    }
 }
 
 fn reject_duplicate(
@@ -234,13 +245,16 @@ fn reject_duplicate(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => repo.root == root,
             Err(error) => {
                 return Err(repository_error(format!(
-                    "无法检查已有仓库 {}：{error}",
+                    "Couldn't check the existing repository {}: {error}",
                     repo.root
                 )));
             }
         };
         if repo.name == name || same_root {
-            return Err(repository_error("该仓库或目录名已添加，请勿重复绑定"));
+            return Err(ControlError::because(
+                ControlErrorCode::OperationFailed,
+                ControlReason::RepositoryAlreadyAdded,
+            ));
         }
     }
     Ok(())
@@ -263,9 +277,11 @@ pub(crate) fn create(
         .map(|name| name.trim())
         .map(|name| {
             if name.is_empty() || !selected_names.insert(name.to_string()) {
-                return Err(ControlError::new(
+                return Err(ControlError::because(
                     ControlErrorCode::InvalidParams,
-                    format!("仓库名称为空或重复：{name}"),
+                    ControlReason::RepositoryNameInvalid {
+                        name: name.to_string(),
+                    },
                 ));
             }
             directory
@@ -279,9 +295,11 @@ pub(crate) fn create(
                     root: PathBuf::from(&repository.root),
                 })
                 .ok_or_else(|| {
-                    ControlError::new(
+                    ControlError::because(
                         ControlErrorCode::InvalidParams,
-                        format!("项目没有配置仓库：{name}"),
+                        ControlReason::RepositoryNotInProject {
+                            name: name.to_string(),
+                        },
                     )
                 })
         })
@@ -310,7 +328,7 @@ pub(crate) fn create(
         }
         Err(error) => {
             let rollback = smelt_git::worktree::abort_workset_creation(&workset);
-            let mut message = format!("工作树目录保存失败：{error}");
+            let mut message = format!("Couldn't save the worktree directory: {error}");
             if let Err(rollback) = rollback {
                 message.push_str(&format!("\n{rollback}"));
             }
@@ -334,15 +352,17 @@ pub(crate) fn rename(
         .worksets
         .iter()
         .find(|workset| workset.id == params.workset_id)
-        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "工作树不存在"))?;
+        .ok_or_else(|| {
+            ControlError::because(ControlErrorCode::NotFound, ControlReason::WorktreeNotFound)
+        })?;
     if directory
         .conversations
         .iter()
         .any(|conversation| conversation.workset_id.as_deref() == Some(workset.id.as_str()))
     {
-        return Err(ControlError::new(
+        return Err(ControlError::because(
             ControlErrorCode::FailedPrecondition,
-            "工作树仍绑定会话；先关闭并删除这些会话再重命名",
+            ControlReason::WorktreeHasSessions,
         ));
     }
     let original = git_workset(workset);
@@ -356,9 +376,9 @@ pub(crate) fn rename(
         }
         Err(error) => {
             let rollback = smelt_git::worktree::rename_workset(&renamed, &original.task);
-            let mut message = format!("工作树元数据更新失败：{error}");
+            let mut message = format!("Couldn't update the worktree metadata: {error}");
             if let Err(rollback) = rollback {
-                message.push_str(&format!("\nGit 回滚未完成：{rollback}"));
+                message.push_str(&format!("\nThe Git rollback didn't finish: {rollback}"));
             }
             Err(ControlError::new(
                 ControlErrorCode::OperationFailed,
@@ -379,7 +399,9 @@ pub(crate) fn inspect(
         .worksets
         .iter()
         .find(|workset| workset.id == params.workset_id)
-        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "工作树不存在"))?;
+        .ok_or_else(|| {
+            ControlError::because(ControlErrorCode::NotFound, ControlReason::WorktreeNotFound)
+        })?;
     let workset = git_workset(workset);
     let refresh_failures = smelt_git::worktree::refresh_workset_bases(&workset);
     let repositories = smelt_git::worktree::inspect_workset(&workset)
@@ -422,7 +444,7 @@ pub(crate) fn finish(
                 let mut error = worktree_error(error);
                 if !refresh_failures.is_empty() {
                     error.message = format!(
-                        "{}\n没能刷新远端，按本地已有的远端分支判断：\n{}",
+                        "{}\nCouldn't refresh the remotes, so this used the remote branches already here:\n{}",
                         error.message,
                         refresh_failures.join("\n")
                     );
@@ -431,9 +453,11 @@ pub(crate) fn finish(
             })?;
     let change =
         workspace_catalog::delete_workset_on_locked(store, &workset.id).map_err(|error| {
-            ControlError::new(
+            ControlError::because(
                 ControlErrorCode::OperationFailed,
-                format!("Git worktree 已关闭，但删除工作树记录失败：{error}"),
+                ControlReason::WorktreeRecordNotDeleted {
+                    error: error.to_string(),
+                },
             )
         })?;
     publish_change(&change, event_hub);
@@ -456,13 +480,15 @@ fn closable_workset<'a>(
         .worksets
         .iter()
         .find(|workset| workset.id == id)
-        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "工作树不存在"))?;
+        .ok_or_else(|| {
+            ControlError::because(ControlErrorCode::NotFound, ControlReason::WorktreeNotFound)
+        })?;
     if directory.conversations.iter().any(|conversation| {
         conversation.workset_id.as_deref() == Some(id) && conversation.archived_at.is_none()
     }) {
-        return Err(ControlError::new(
+        return Err(ControlError::because(
             ControlErrorCode::FailedPrecondition,
-            "工作树仍绑定未归档会话；请先关闭或归档这些会话",
+            ControlReason::WorktreeHasOpenSessions,
         ));
     }
     Ok(workset)
@@ -534,5 +560,9 @@ fn directory_error(error: DirectoryError) -> ControlError {
 }
 
 fn worktree_error(error: smelt_git::worktree::WorktreeError) -> ControlError {
-    ControlError::new(ControlErrorCode::OperationFailed, error.to_string())
+    // 带种类的照种类说；`message` 仍是整句加上回滚没做完的细节，给老客户端和日志。
+    ControlError {
+        reason: error.reason().cloned(),
+        ..ControlError::new(ControlErrorCode::OperationFailed, error.to_string())
+    }
 }

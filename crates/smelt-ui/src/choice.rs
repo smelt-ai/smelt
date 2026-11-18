@@ -245,7 +245,7 @@ fn indicator(
     );
     let mark: Option<AnyElement> = checked.then(|| match shape {
         Shape::Square => svg()
-            .path(gpui_kit_assets::IconName::Check.path())
+            .path(crate::IconName::Check.path())
             .flex_shrink_0()
             .size(px(MARK))
             .text_color(colors.mark)

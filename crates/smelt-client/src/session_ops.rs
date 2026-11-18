@@ -129,10 +129,10 @@ pub fn rename_agent_conversation(
     let session_id = session_id.trim();
     let title = title.trim();
     if session_id.is_empty() {
-        return Err("对话 id 不能为空".into());
+        return Err("The conversation id can't be empty".into());
     }
     if title.is_empty() {
-        return Err("对话标题不能为空".into());
+        return Err("The conversation title can't be empty".into());
     }
     let response = runtime.request_ok(
         &serde_json::json!({
@@ -146,7 +146,7 @@ pub fn rename_agent_conversation(
         response
             .get("conversation")
             .cloned()
-            .ok_or_else(|| "smeltd 没有返回改名结果".to_string())?,
+            .ok_or_else(|| "smeltd didn't return the renamed conversation".to_string())?,
     )
     .map_err(|error| error.to_string())
 }

@@ -7,11 +7,15 @@
 //! 别的，选择不改。
 //!
 //! 除了视图，叶子还可以是一摞（[`STACK_PANEL`]）：几个视图按顺序排在一格里，见 [`Stack`]。
+//!
+//! 布局还说各块地方（左、右、下停靠区和中间）垫什么材质（[`LayoutMaterials`]），没说的铺实色。
+//! 材质跟着地方走，不跟视图：把视图拖到别处，透不透看它落在哪。
 
 use gpui::{App, Global, SharedString};
+use gpui_base::dock::DockPlacement;
 use serde::{Deserialize, Serialize};
 
-use crate::HostEvent;
+use crate::{HostEvent, Text};
 
 pub use gpui_base::dock::{DockAreaState, PanelInfo, PanelState};
 
@@ -157,6 +161,55 @@ pub fn parse_layout(text: &str) -> Result<DockAreaState, String> {
     Ok(state)
 }
 
+/// 一块地方垫的系统材质，按这块地方在窗口里的用途说，宿主按平台换成具体的材质：macOS 上
+/// 各块各垫各的，Windows 上整扇窗口只有一种系统材质（Mica），声明了的地方都透它。主题底色按
+/// 外观里的不透明度铺在材质上。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Material {
+    /// 导航侧栏：透得最明显，带桌面的颜色（macOS 的侧栏材质）。
+    Sidebar,
+    /// 窗口底：几乎不透，只隐约带一点桌面的颜色（macOS 的窗口底材质）。检查器、辅助栏这类
+    /// 次要但常看的地方。
+    Window,
+}
+
+impl Material {
+    pub const ALL: [Self; 2] = [Self::Sidebar, Self::Window];
+
+    /// JS 和布局说明里的名字。
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Sidebar => "sidebar",
+            Self::Window => "window",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|material| material.key() == key)
+    }
+}
+
+/// 布局里各块地方垫什么材质。没写的（`None`）不透，铺实的主题底色。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayoutMaterials {
+    pub left: Option<Material>,
+    pub right: Option<Material>,
+    pub bottom: Option<Material>,
+    pub center: Option<Material>,
+}
+
+impl LayoutMaterials {
+    /// 这块地方垫什么。
+    pub fn get(&self, placement: DockPlacement) -> Option<Material> {
+        match placement {
+            DockPlacement::Left => self.left,
+            DockPlacement::Right => self.right,
+            DockPlacement::Bottom => self.bottom,
+            DockPlacement::Center => self.center,
+        }
+    }
+}
+
 /// 登记一份布局要给的东西。
 #[derive(Clone, Debug)]
 pub struct LayoutSource<'a> {
@@ -164,13 +217,16 @@ pub struct LayoutSource<'a> {
     pub page: &'a str,
     /// 来源内的名字，不含 `/`。
     pub name: &'a str,
-    /// 设置里给人看的名字。
-    pub title: &'a str,
+    /// 设置里给人看的名字，跟着界面语言变（见 [`crate::Text`]）。
+    pub title: Text,
     /// `DockAreaState` 的 JSON 原文。
     pub state: &'a str,
+    /// 各块地方垫什么材质。
+    pub materials: LayoutMaterials,
 }
 
-/// 登记过的一份布局。
+/// 登记过的一份布局。标题是取的时候那种界面语言下的字，存着它的在
+/// [`HostEvent::LocaleChanged`] 时重取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutInfo {
     /// `<来源>/<名字>`。
@@ -178,13 +234,25 @@ pub struct LayoutInfo {
     /// 给哪一页。
     pub page: SharedString,
     pub title: SharedString,
+    pub materials: LayoutMaterials,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
     owner: String,
+    /// 标题在 `title` 里，取的时候按当前语言填进 `info`（[`Entry::info`]）。
     info: LayoutInfo,
+    title: Text,
     state: DockAreaState,
+}
+
+impl Entry {
+    fn info(&self) -> LayoutInfo {
+        LayoutInfo {
+            title: self.title.get(),
+            ..self.info.clone()
+        }
+    }
 }
 
 #[derive(Default)]
@@ -229,8 +297,10 @@ pub fn register_layouts(
             info: LayoutInfo {
                 id,
                 page: source.page.to_string().into(),
-                title: source.title.to_string().into(),
+                title: SharedString::default(),
+                materials: source.materials,
             },
+            title: source.title.clone(),
             state,
         });
     }
@@ -270,13 +340,7 @@ pub fn unregister_layouts(owner: &str, cx: &mut App) {
 /// 登记过的布局，按登记顺序。只读内存，render 里可以调。
 pub fn layouts(cx: &App) -> Vec<LayoutInfo> {
     cx.try_global::<LayoutRegistry>()
-        .map(|registry| {
-            registry
-                .layouts
-                .iter()
-                .map(|entry| entry.info.clone())
-                .collect()
-        })
+        .map(|registry| registry.layouts.iter().map(Entry::info).collect())
         .unwrap_or_default()
 }
 
@@ -300,8 +364,9 @@ mod tests {
         LayoutSource {
             page: "smelt/work",
             name,
-            title: name,
+            title: name.to_string().into(),
             state,
+            materials: LayoutMaterials::default(),
         }
     }
 
@@ -320,6 +385,23 @@ mod tests {
             assert_eq!(ids(cx), ["smelt/wide", "trader/a", "trader/b"]);
             assert_eq!(layout("smelt/wide", cx), Some(parse_layout(TWO).unwrap()));
             assert_eq!(layout("smelt/default", cx), None);
+            // 材质跟着登记信息走，不进布局原文。
+            let glass = LayoutMaterials {
+                left: Some(Material::Sidebar),
+                ..LayoutMaterials::default()
+            };
+            register_layouts(
+                "smelt",
+                &[LayoutSource {
+                    materials: glass,
+                    ..source("wide", TWO)
+                }],
+                cx,
+            )
+            .unwrap();
+            assert_eq!(layouts(cx)[0].materials, glass);
+            assert_eq!(glass.get(DockPlacement::Left), Some(Material::Sidebar));
+            assert_eq!(glass.get(DockPlacement::Center), None);
             unregister_layouts("trader", cx);
             assert_eq!(ids(cx), ["smelt/wide"]);
             register_layouts("smelt", &[], cx).unwrap();

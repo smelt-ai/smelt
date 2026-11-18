@@ -79,7 +79,7 @@ pub fn load_agent_execution_definition(
     agent_definition_id: &str,
 ) -> Result<AgentExecutionDefinition, String> {
     let Some(config) = load_agent_ui_projection()? else {
-        return Err("智能体配置不存在".to_string());
+        return Err("The agent configuration doesn't exist".to_string());
     };
     resolve_agent_execution_definition(config, agent_definition_id)
 }
@@ -153,16 +153,16 @@ fn resolve_agent_execution_definition(
         .agents
         .into_iter()
         .find(|definition| definition.id == agent_definition_id)
-        .ok_or_else(|| format!("智能体不存在: {agent_definition_id}"))?;
+        .ok_or_else(|| format!("The agent doesn't exist: {agent_definition_id}"))?;
     if !definition.is_ready() {
-        return Err("智能体定义不完整".to_string());
+        return Err("The agent definition is incomplete".to_string());
     }
     let kind = definition
         .engine_kind()
-        .ok_or_else(|| format!("不支持的智能体执行引擎: {}", definition.engine_kind_id))?;
+        .ok_or_else(|| format!("Unsupported agent engine: {}", definition.engine_kind_id))?;
     if kind != ConversationAgentKind::Pi {
         return Err(format!(
-            "自动化当前只支持 Pi 智能体，不能运行 {}",
+            "Automations only support Pi agents for now and can't run {}",
             kind.label()
         ));
     }
@@ -586,7 +586,7 @@ pub fn get_agent_definition_on(
     list_agent_definitions_on(store)?
         .into_iter()
         .find(|agent| agent.id == id)
-        .ok_or_else(|| AgentDefinitionError::NotFound(format!("智能体不存在: {id}")))
+        .ok_or_else(|| AgentDefinitionError::NotFound(format!("The agent doesn't exist: {id}")))
 }
 
 pub fn create_agent_definition_on(
@@ -606,7 +606,7 @@ pub fn create_agent_definition_on(
                 .any(|agent| agent.id == id)
             {
                 return Err(AgentDefinitionError::Conflict(format!(
-                    "智能体已存在: {id}"
+                    "The agent already exists: {id}"
                 )));
             }
             id.to_string()
@@ -689,7 +689,7 @@ fn modify_agent_definition_on(
             Ok::<(), AgentDefinitionError>(())
         })?
         .map(agent_from_record)
-        .ok_or_else(|| AgentDefinitionError::NotFound(format!("智能体不存在: {id}")))
+        .ok_or_else(|| AgentDefinitionError::NotFound(format!("The agent doesn't exist: {id}")))
 }
 
 /// 三方合并：只把 `before → after` 之间真正被改过的字段落到库里当前的行上，
@@ -745,7 +745,7 @@ pub fn delete_agent_definition_on(
     let using = automations_using_agent(store, &id)?;
     if using != 0 {
         return Err(AgentDefinitionError::FailedPrecondition(format!(
-            "请先删除该智能体关联的 {using} 条自动化"
+            "Delete the {using} automation(s) that use this agent first"
         )));
     }
     let deleted = store
@@ -753,7 +753,7 @@ pub fn delete_agent_definition_on(
         .map_err(|error| AgentDefinitionError::Store(error.to_string()))?;
     if !deleted {
         return Err(AgentDefinitionError::NotFound(format!(
-            "智能体不存在: {id}"
+            "The agent doesn't exist: {id}"
         )));
     }
     // 记忆属于智能体本身，定义没了就一起删。space 里其余的是工作产物，不动。
@@ -887,7 +887,9 @@ fn default_store() -> Result<smelt_store::Store, AgentDefinitionError> {
 fn require_id(id: &str) -> Result<String, AgentDefinitionError> {
     let id = id.trim();
     if id.is_empty() {
-        return Err(AgentDefinitionError::Invalid("智能体 id 不能为空".into()));
+        return Err(AgentDefinitionError::Invalid(
+            "The agent id can't be empty".into(),
+        ));
     }
     Ok(id.to_string())
 }
@@ -902,7 +904,7 @@ fn normalize_engine_kind(engine_kind_id: Option<&str>) -> Result<String, AgentDe
         .is_none_or(|kind| kind == ConversationAgentKind::Custom)
     {
         return Err(AgentDefinitionError::Invalid(format!(
-            "不支持的智能体执行引擎: {engine_kind_id}"
+            "Unsupported agent engine: {engine_kind_id}"
         )));
     }
     Ok(engine_kind_id.to_string())
@@ -1362,7 +1364,7 @@ mod tests {
 
         let error = resolve_agent_execution_definition(config, "codex-agent").unwrap_err();
 
-        assert!(error.contains("只支持 Pi"));
+        assert!(error.contains("only support Pi"));
     }
 
     #[test]

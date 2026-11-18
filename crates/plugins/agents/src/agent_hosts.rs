@@ -13,6 +13,7 @@ use api::model::control_api::{AgentHooksInstall, AgentHostApplyEdit};
 use api::model::daemon_state::CORE_TOPIC_AGENT_HOST_CHANGED;
 use api::{CommandSpec, HostEvent, RuntimeKey, TopicMessage, serde_json};
 use gpui::{App, AsyncApp, Global, Task};
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 use crate::contract::{self, AgentSettingsEdit, AgentSettingsState, MachineAgentSettings};
@@ -71,11 +72,13 @@ pub(crate) fn install(cx: &mut App) {
 /// 对外的命令，和插件别的命令一起登记（同一来源的命令一次整组登记）。
 pub(crate) fn commands() -> Vec<CommandSpec> {
     vec![
-        contract::AGENT_SETTINGS.spec("各台机器的智能体配置", |(), _, cx| {
+        contract::AGENT_SETTINGS.spec(api::text!("command.agent_settings"), |(), _, cx| {
             Ok(snapshot(cx))
         }),
         contract::EDIT_AGENT_SETTINGS
-            .spec_async("改智能体配置", |edit, _, cx| send_edit(edit, cx)),
+            .spec_async(api::text!("command.edit_agent_settings"), |edit, _, cx| {
+                send_edit(edit, cx)
+            }),
     ]
 }
 
@@ -112,7 +115,9 @@ fn receive(machine: &RuntimeKey, message: &TopicMessage, cx: &mut App) {
                 Ok(settings) => MachineAgentHost::Ready(settings),
                 Err(error) => {
                     eprintln!("[agents] {machine:?} 推来的智能体配置解不开：{error}");
-                    MachineAgentHost::Unavailable(format!("智能体配置解不开：{error}"))
+                    MachineAgentHost::Unavailable(
+                        t!("error.settings_unreadable", error = error).into_owned(),
+                    )
                 }
             }
         }
@@ -236,7 +241,7 @@ pub(crate) fn edit(
         result
             .recv()
             .await
-            .unwrap_or_else(|_| Err("智能体配置没有改完".to_string()))
+            .unwrap_or_else(|_| Err(t!("error.edit_incomplete").into_owned()))
     })
 }
 
@@ -271,7 +276,7 @@ fn next_edit(
         None => settings(machine, cx).cloned().ok_or_else(|| {
             unavailable(machine, cx)
                 .map(str::to_string)
-                .unwrap_or_else(|| "这台机器的智能体配置还没收到，稍后再改".to_string())
+                .unwrap_or_else(|| t!("error.settings_not_received").into_owned())
         }),
     };
     Some((job, before))

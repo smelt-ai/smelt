@@ -67,12 +67,12 @@ fn cleanshot_external_png_is_treated_as_an_image_attachment() {
 /// 输入栏能力按钮的提示：只说有的那一类，都没有时明说。
 #[test]
 fn loaded_capabilities_summary_names_only_what_is_loaded() {
-    assert_eq!(loaded_capabilities_summary(0, 0), "没有加载技能或 MCP");
-    assert_eq!(loaded_capabilities_summary(2, 0), "已加载 2 个技能");
-    assert_eq!(loaded_capabilities_summary(0, 1), "已加载 1 个 MCP");
+    assert_eq!(loaded_capabilities_summary(0, 0), "No skills or MCP loaded");
+    assert_eq!(loaded_capabilities_summary(2, 0), "2 skills loaded");
+    assert_eq!(loaded_capabilities_summary(0, 1), "1 MCP server loaded");
     assert_eq!(
         loaded_capabilities_summary(2, 1),
-        "已加载 2 个技能、1 个 MCP"
+        "2 skills and 1 MCP server loaded"
     );
 }
 
@@ -238,6 +238,7 @@ fn mode_config(current: &str) -> SessionConfigState {
             ("ask".into(), "Read-only".into()),
         ],
         boolean: None,
+        smelt: None,
     }
 }
 
@@ -366,7 +367,8 @@ fn config_rejection_is_recognized_by_kind_and_id() {
     let notice = |id, kind| AcpNoticeView {
         id,
         kind,
-        text: "更新会话配置失败：timeout".into(),
+        text: "Couldn't update the session setting: timeout".into(),
+        note: None,
     };
     let rejected = notice(10, AcpNoticeKind::ConfigRejected);
     assert!(config_rejection_is_new(None, Some(&rejected)));
@@ -389,24 +391,27 @@ fn config_rejection_is_recognized_by_kind_and_id() {
 fn next_turn_hint_only_when_pending_and_turn_is_active() {
     assert_eq!(
         composer_config_section_label("Mode", true, true),
-        "Mode · 下轮生效"
+        "Mode · applies next turn"
     );
     assert_eq!(composer_config_section_label("Mode", true, false), "Mode");
     assert_eq!(composer_config_section_label("Mode", false, true), "Mode");
     assert_eq!(
         composer_config_section_label("模型", true, true),
-        "模型 · 下轮生效"
+        "模型 · applies next turn"
     );
 }
 
 #[test]
 fn native_queue_copy_names_current_round_and_after_round() {
     assert_eq!(
-        composer_native_queue_shortcut_hint(),
-        "Enter 插入当前回合 · ⌥Enter 回合后发送"
+        composer_native_queue_shortcut_hint().to_string(),
+        "Enter adds to the current turn · ⌥Enter sends after the turn"
     );
-    assert_eq!(native_queue_item_kind_label(false), "当前回合");
-    assert_eq!(native_queue_item_kind_label(true), "下一回合");
+    assert_eq!(
+        native_queue_item_kind_label(false).to_string(),
+        "Current turn"
+    );
+    assert_eq!(native_queue_item_kind_label(true).to_string(), "Next turn");
 }
 
 #[test]
@@ -437,28 +442,29 @@ fn next_turn_notice_stays_on_the_composer_not_a_toast() {
         config_id: "fast".into(),
         name: "Fast mode".into(),
         description: None,
-        current_name: "关".into(),
-        options: vec![("true".into(), "开".into()), ("false".into(), "关".into())],
+        current_name: "Off".into(),
+        options: vec![("true".into(), "On".into()), ("false".into(), "Off".into())],
         boolean: Some(false),
+        smelt: None,
     };
     let names = pending_config_choice_names(
         &pending,
         &[mode_config("agent"), fast],
         Some(&sample_model("sol")),
     );
-    assert_eq!(names, vec!["Plan".to_string(), "Fast mode 开".to_string()]);
+    assert_eq!(names, vec!["Plan".to_string(), "Fast mode On".to_string()]);
     assert_eq!(
         composer_next_turn_notice(&names, true).as_deref(),
-        Some("Plan、Fast mode 开 · 下轮生效")
+        Some("Plan, Fast mode On · applies next turn")
     );
     assert_eq!(composer_next_turn_notice(&names, false), None);
     assert_eq!(
         composer_next_turn_notice(&["Plan".into()], true).as_deref(),
-        Some("Plan · 下轮生效")
+        Some("Plan · applies next turn")
     );
     assert_eq!(
         composer_next_turn_notice(&["Plan".into(), "Max".into(), "Fast".into()], true).as_deref(),
-        Some("Plan 等 3 项 · 下轮生效")
+        Some("Plan and 2 more · applies next turn")
     );
 }
 
@@ -772,7 +778,7 @@ fn completed_tools_expose_a_compact_result_summary() {
     let read_output = vec![ToolOutputPart::Text("one\ntwo\nthree\n".into())];
     assert_eq!(
         tool_result_summary(ToolKind::Read, ToolCallStatus::Completed, &read_output).as_deref(),
-        Some("3 行")
+        Some("3 lines")
     );
 
     let execute_output = vec![ToolOutputPart::Text(
@@ -785,7 +791,7 @@ fn completed_tools_expose_a_compact_result_summary() {
             &execute_output,
         )
         .as_deref(),
-        Some("2 行输出")
+        Some("2 lines of output")
     );
 
     assert_eq!(
@@ -1016,17 +1022,17 @@ fn starting_status_copy_explains_resume_and_wait() {
     assert_eq!(
         starting_status_copy(None, true, "Claude Code", 12),
         (
-            "正在恢复上次的会话".to_string(),
-            "正在恢复历史消息和工作上下文".to_string(),
-            "已等待 12 秒".to_string(),
+            "Restoring the last session".to_string(),
+            "Restoring the message history and working context".to_string(),
+            "Waited 12s".to_string(),
         )
     );
     assert_eq!(
         starting_status_copy(Some("  正在连接 agent  "), false, "Codex", 1),
         (
-            "正在启动 Codex".to_string(),
+            "Starting Codex".to_string(),
             "正在连接 agent".to_string(),
-            "已等待 1 秒".to_string(),
+            "Waited 1s".to_string(),
         )
     );
 }
@@ -1097,14 +1103,16 @@ fn dismissed_notice_stays_hidden_until_a_new_one_arrives() {
     let first = AcpNoticeView {
         id: 10,
         kind: Default::default(),
-        text: "压缩上下文失败：busy".into(),
+        text: "Couldn't compact the context: busy".into(),
+        note: None,
     };
     assert_eq!(notice_to_show(Some(&first), None), Some(&first));
     assert_eq!(notice_to_show(Some(&first), Some(10)), None);
     let second = AcpNoticeView {
         id: 11,
         kind: Default::default(),
-        text: "Pi Extension：boom".into(),
+        text: "Pi extension: boom".into(),
+        note: None,
     };
     assert_eq!(notice_to_show(Some(&second), Some(10)), Some(&second));
     assert_eq!(notice_to_show(None, None), None);
@@ -1769,7 +1777,7 @@ fn completed_process_group_appends_elapsed_like_grok() {
     assert_eq!(group.elapsed_ms, Some(4_000));
     assert_eq!(
         process_group_header_label(&entries, group).as_deref(),
-        Some("工作了 4s")
+        Some("Worked for 4s")
     );
 
     let live = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
@@ -1898,19 +1906,19 @@ fn active_process_group_without_a_running_tool_says_thinking() {
         active: true,
         ..ProcessGroupInfo::default()
     };
-    assert_eq!(process_group_label(thinking), "正在想");
+    assert_eq!(process_group_label(thinking), "Thinking");
 
     let searching = ProcessGroupInfo {
         active: true,
         active_tool_kind: Some(ToolKind::Search),
         ..ProcessGroupInfo::default()
     };
-    assert_eq!(process_group_label(searching), "正在搜索");
+    assert_eq!(process_group_label(searching), "Searching");
 }
 
 #[test]
 fn working_status_names_the_wait() {
-    assert_eq!(working_status_label("6s"), "正在想 · 6s");
+    assert_eq!(working_status_label("6s"), "Thinking · 6s");
 }
 
 #[test]
@@ -1929,7 +1937,7 @@ fn settled_thought_uses_the_completed_turn() {
     }];
     assert_eq!(settled_thought_elapsed(&entries, 1, 10, &done), Some(3_000));
     assert_eq!(settled_thought_elapsed(&entries, 1, 0, &done), None);
-    assert_eq!(settled_thought_label(3_000), "想了 3s");
+    assert_eq!(settled_thought_label(3_000), "Thought for 3s");
 
     let answer = vec![
         AcpEntry::User("想一下".into()),
@@ -2123,7 +2131,7 @@ fn a_message_from_another_conversation_reads_as_who_sent_what() {
             kind: smelt_plugin_api::model::acp_session::PeerMessageKind::Task,
         }),
     };
-    assert_eq!(note.summary(), "修登录 发来任务");
+    assert_eq!(note.summary(), "修登录 sent a task");
     let entries = vec![AcpEntry::User("在吗".into()), AcpEntry::TaskNote(note)];
     let layout = build_conversation_layout(&entries, false);
     assert!(layout[1].process_group.is_none());
@@ -2236,7 +2244,7 @@ fn collaboration_tools_are_not_folded_into_process_groups() {
     let group = layout[2].process_group.expect("普通工具结束后仍收成过程组");
     assert_eq!(
         process_group_header_label(&entries, group).as_deref(),
-        Some("读取了 1 次")
+        Some("Read once")
     );
 }
 
@@ -2273,7 +2281,7 @@ fn completed_process_group_keeps_inner_tool_failures_inside() {
     let layout = build_conversation_layout(&entries, false);
     let group = layout[1].process_group.expect("工具应进入执行过程组");
     assert!(!group.active);
-    assert_eq!(process_group_label(group), "执行过程");
+    assert_eq!(process_group_label(group), "Steps");
 }
 
 #[test]
@@ -2662,7 +2670,7 @@ fn nested_subagent_entries_are_independent_trajectory_events() {
     assert_eq!(events[3].turn, 1);
     assert_eq!(events[3].depth, 1);
     assert_eq!(events[3].parent_tool_id.as_deref(), Some("sa-1"));
-    assert!(events[3].preview.contains("工具名称: read"));
+    assert!(events[3].preview.contains("Tool name: read"));
     assert!(events[3].source.contains("config.rs"));
     assert_eq!(trajectory_counts(&entries), (1, 2));
 }
@@ -2712,8 +2720,8 @@ fn session_trajectory_events_keep_debug_sources_and_model_thinking() {
     assert_eq!(events[1].text, "你好");
     assert_eq!(events[2].lane, super::TrajectoryLane::Thinking);
     assert_eq!(events[3].lane, super::TrajectoryLane::Tool);
-    assert_eq!(events[3].text, "搜索 icon");
-    assert!(events[3].preview.contains("工具名称: grep"));
+    assert_eq!(events[3].text, "Searched icon");
+    assert!(events[3].preview.contains("Tool name: grep"));
     assert!(events[3].preview.contains("found icon.rs"));
     assert!(events[3].source.contains("IconName"));
     assert!(events[3].source.contains("raw_input"));
@@ -2746,10 +2754,10 @@ fn tool_trajectory_omits_debug_fields_when_no_sidecar_was_reported() {
     let events = session_trajectory_events(&entries, Vec::new(), &Default::default());
     let tool = &events[1];
     assert_eq!(tool.lane, super::TrajectoryLane::Tool);
-    assert!(tool.preview.contains("调用 ID: call-1"));
+    assert!(tool.preview.contains("Call ID: call-1"));
     assert!(tool.preview.contains("真实结果"));
-    assert!(!tool.preview.contains("工具名称:"));
-    assert!(!tool.preview.contains("参数\n"));
+    assert!(!tool.preview.contains("Tool name:"));
+    assert!(!tool.preview.contains("Arguments\n"));
     assert!(!tool.preview.contains("未提供"));
     assert!(!tool.source.contains("provider_debug"));
 }
@@ -2769,7 +2777,7 @@ fn consecutive_same_kind_tools_collapse_into_one_run() {
     assert_eq!(run.indices, vec![1, 2, 3]);
     assert_eq!(
         compact_tool_run_label(run.kind, run.indices.len()),
-        "搜索了 3 次"
+        "Searched 3 times"
     );
     assert!(consecutive_compact_tool_run(&entries, 4, 1, 5, None).is_none());
 }
@@ -2801,7 +2809,7 @@ fn thoughts_break_compact_tool_runs() {
     assert_eq!(run.indices, vec![5, 6]);
     assert_eq!(
         compact_tool_run_label(run.kind, run.indices.len()),
-        "读取了 2 个文件"
+        "Read 2 files"
     );
     assert!(consecutive_compact_tool_run(&entries, 7, 1, 8, None).is_none());
 }
@@ -2871,10 +2879,10 @@ fn compact_tool_run_breaks_on_kind_change_or_progress() {
     let run = consecutive_compact_tool_run(&entries, 5, 0, 6, None).unwrap();
     assert_eq!(run.start, 4);
     assert_eq!(run.indices, vec![4, 5]);
-    assert_eq!(compact_tool_run_label(ToolKind::Read, 2), "读取了 2 个文件");
+    assert_eq!(compact_tool_run_label(ToolKind::Read, 2), "Read 2 files");
     assert_eq!(
         compact_tool_run_label(ToolKind::Execute, 3),
-        "运行了 3 条命令"
+        "Ran 3 commands"
     );
 }
 
@@ -2885,19 +2893,19 @@ fn compact_tool_headlines_use_verbs_like_opened_page() {
             ToolKind::Fetch,
             "https://www.ag-grid.com/vue-data-grid/grouping/"
         ),
-        "打开了 ag-grid.com/vue-data-grid/grouping/"
+        "Opened ag-grid.com/vue-data-grid/grouping/"
     );
     assert_eq!(
         compact_tool_headline(ToolKind::Search, "ag-grid master detail"),
-        "搜索 ag-grid master detail"
+        "Searched ag-grid master detail"
     );
     assert_eq!(
         compact_tool_headline(ToolKind::Read, "crates/smelt/src/main.rs"),
-        "读取了 main.rs"
+        "Read main.rs"
     );
     assert_eq!(
         compact_tool_headline(ToolKind::Execute, "cargo test -p smelt-acp-view"),
-        "运行了 cargo test -p smelt-acp-view"
+        "Ran cargo test -p smelt-acp-view"
     );
 }
 
@@ -2937,7 +2945,7 @@ fn retry_is_offered_only_when_the_agent_can_rewind() {
 
     assert_eq!(
         turn_outcome_card(Some(AcpTurnOutcome::Failed), false),
-        Some(("这一轮没有完成", None))
+        Some((gpui::SharedString::from("This turn didn't finish"), None))
     );
     assert_eq!(
         turn_outcome_card(Some(AcpTurnOutcome::Refused), false).map(|(_, action)| action),
@@ -2961,24 +2969,24 @@ fn provider_retry_label_counts_down_then_reports_the_wait() {
     };
     assert_eq!(
         provider_retry_label(&retry, 10_000),
-        "模型请求出错，5 秒后第 2/3 次重试"
+        "Model request failed; retry 2/3 in 5s"
     );
     assert_eq!(
         provider_retry_label(&retry, 12_500),
-        "模型请求出错，2 秒后第 2/3 次重试"
+        "Model request failed; retry 2/3 in 2s"
     );
     assert_eq!(
         provider_retry_label(&retry, 14_200),
-        "模型请求出错，正在第 2/3 次重试 · 0s"
+        "Model request failed; retry 2/3 in progress · 0s"
     );
     assert_eq!(
         provider_retry_label(&retry, 14_200 + 69_000),
-        "模型请求出错，正在第 2/3 次重试 · 1m 9s"
+        "Model request failed; retry 2/3 in progress · 1m 9s"
     );
     // 本机时钟比守护进程慢：不倒数成负数，按刚开始算。
     assert_eq!(
         provider_retry_label(&retry, 9_000),
-        "模型请求出错，5 秒后第 2/3 次重试"
+        "Model request failed; retry 2/3 in 5s"
     );
     let no_wait = smelt_plugin_api::model::acp_session::ProviderRetryView {
         delay_ms: 0,
@@ -2987,7 +2995,7 @@ fn provider_retry_label_counts_down_then_reports_the_wait() {
     };
     assert_eq!(
         provider_retry_label(&no_wait, 13_000),
-        "模型请求出错，正在第 2 次重试 · 3s"
+        "Model request failed; retry 2 in progress · 3s"
     );
     let unknown_start = smelt_plugin_api::model::acp_session::ProviderRetryView {
         started_at_ms: 0,
@@ -2995,17 +3003,20 @@ fn provider_retry_label_counts_down_then_reports_the_wait() {
     };
     assert_eq!(
         provider_retry_label(&unknown_start, 99_000),
-        "模型请求出错，正在第 2/3 次重试"
+        "Model request failed; retry 2/3 in progress"
     );
 }
 
 #[test]
 fn background_task_elapsed_counts_from_the_start() {
-    assert_eq!(background_task_elapsed(1_000, 193_000), "已运行 3m 12s");
-    assert_eq!(background_task_elapsed(1_000, 1_500), "已运行 0s");
+    assert_eq!(
+        background_task_elapsed(1_000, 193_000),
+        "Running for 3m 12s"
+    );
+    assert_eq!(background_task_elapsed(1_000, 1_500), "Running for 0s");
     assert_eq!(
         background_task_elapsed(5_000, 1_000),
-        "已运行 0s",
+        "Running for 0s",
         "时钟往回拨时不能下溢"
     );
 }
@@ -3026,7 +3037,7 @@ fn background_task_summary_counts_running_tasks() {
         status: BackgroundTaskStatus::Completed,
         ..running.clone()
     };
-    assert_eq!(background_task_summary(1), "1 个后台任务");
+    assert_eq!(background_task_summary(1), "1 background task");
     assert_eq!(
         running_background_tasks(&[running, done.clone()])
             .iter()
@@ -3085,7 +3096,7 @@ fn completed_process_header_summarizes_tools_in_appearance_order() {
     assert!(!group.active);
     assert_eq!(
         process_group_header_label(&entries, group).as_deref(),
-        Some("搜索了 3 次 · 读取了 1 次")
+        Some("Searched 3 times · Read once")
     );
 }
 
@@ -3609,12 +3620,15 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
                 kind: ElicitFieldKindView::MultiSelect(vec![
                     ElicitOptionView {
                         label: "苹果".into(),
+                        flag: None,
                     },
                     ElicitOptionView {
                         label: "香蕉".into(),
+                        flag: None,
                     },
                     ElicitOptionView {
                         label: "橙子".into(),
+                        flag: None,
                     },
                 ]),
             }],
@@ -3687,6 +3701,7 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
                 allow_custom_input: true,
                 kind: ElicitFieldKindView::Select(vec![ElicitOptionView {
                     label: "暂时都不做".into(),
+                    flag: None,
                 }]),
             }],
             chosen: Default::default(),
@@ -4881,7 +4896,7 @@ fn a_failed_background_subagent_is_shown_as_failed() {
     let status = subagent_status(&run, &live, false);
     assert_eq!(status, SubagentStatus::Failed);
     let progress = dispatch_progress(&[status], None);
-    assert_eq!(progress.text, "失败");
+    assert_eq!(progress.text, "Failed");
     assert!(progress.problem);
     assert!(!progress.running);
 }
@@ -4916,17 +4931,20 @@ fn a_dispatch_line_summarizes_its_subagents() {
     use SubagentStatus::*;
     assert_eq!(
         dispatch_progress(&[Running], Some("bash rg")).text,
-        "运行中 · 正在：bash rg"
+        "Running · bash rg"
     );
     let parallel = dispatch_progress(&[Completed, Running, Running], None);
-    assert_eq!(parallel.text, "已完成 1/3");
+    assert_eq!(parallel.text, "1/3 done");
     assert!(parallel.running);
     assert_eq!(
         dispatch_progress(&[Completed, Completed], None).text,
-        "全部完成"
+        "All done"
     );
     let mixed = dispatch_progress(&[Completed, Failed, Interrupted, Stopped], None);
-    assert_eq!(mixed.text, "完成 1/4 · 1 个失败 · 1 个中断 · 1 个已停止");
+    assert_eq!(
+        mixed.text,
+        "1/4 done · 1 failed · 1 interrupted · 1 stopped"
+    );
     assert!(mixed.problem);
     assert!(
         !dispatch_progress(&[Stopped, Completed], None).problem,
@@ -5072,9 +5090,9 @@ fn memory_card_summary_counts_new_updated_and_pending() {
     ];
     assert_eq!(
         memory_changes_summary(&entries),
-        "记忆 · 新记住 2 条 · 更新 1 条 · 1 条待确认"
+        "Memory · 2 new · 1 updated · 1 to confirm"
     );
-    assert_eq!(memory_changes_summary(&entries[2..]), "记忆 · 更新 1 条");
+    assert_eq!(memory_changes_summary(&entries[2..]), "Memory · 1 updated");
 
     let changes = MemoryChangesView {
         id: 7,

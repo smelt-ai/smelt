@@ -1,7 +1,8 @@
 //! 独立菜单。调用方须先初始化 gpui-base，再在应用初始化时调用 [`init`]，并给每个
 //! 触发器稳定且唯一的 ID。下拉触发元素自己负责可聚焦和禁用状态。
 //!
-//! 菜单每次打开时重新构建。输入框的右键菜单由 [`crate::field`] 自己接：点了先把焦点还给输入框再派发动作。
+//! 菜单每次打开时重新构建，根菜单从触发点那侧淡入（[`crate::motion::overlay_enter`]）；子菜单跟着
+//! 指针在各项之间来回换，出来就在原地，不每换一次闪一下。输入框的右键菜单由 [`crate::field`] 自己接：点了先把焦点还给输入框再派发动作。
 
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
@@ -16,16 +17,17 @@ use gpui_base::{
     Align, DeferredPopover, ElementExt as _, GlobalState, Placement, Popup, Positioner,
     StyledExt as _,
 };
-use gpui_kit_assets::IconNamed as _;
 
+use crate::IconNamed;
 use crate::kit::{GLYPHS, RADIUS, TYPE, elevation};
+use crate::motion::{EnterFrom, OverlayEnter, overlay_enter};
 use crate::ui_theme;
 
 gpui::actions!(smelt_menu, [Up, Down, Left, Right, Activate, Dismiss]);
 const MENU_CONTEXT: &str = "SmeltMenu";
 /// 紧凑菜单的行高（命令行、分组标题同高）和面板内边距。
 const ROW_HEIGHT: f32 = 28.;
-const SURFACE_PADDING: f32 = 2.;
+const SURFACE_PADDING: f32 = 4.;
 
 /// 安装菜单的键盘绑定。每个 App 初始化一次。
 pub fn init(cx: &mut App) {
@@ -75,7 +77,7 @@ impl MenuItem {
         }
     }
 
-    pub fn icon(mut self, icon: impl gpui_kit_assets::IconNamed) -> Self {
+    pub fn icon(mut self, icon: impl IconNamed) -> Self {
         self.icon = Some(icon.path());
         self
     }
@@ -577,11 +579,18 @@ impl RenderOnce for MenuTrigger {
                 })
         };
         let content = open.then(|| {
+            // 下拉菜单的 `Popup` 只夹不翻，按锚点就知道从哪边进；右键菜单放不下会翻到上面，只淡入。
+            let from = match kind {
+                TriggerKind::Dropdown(anchor) => EnterFrom::anchored(anchor),
+                TriggerKind::Context => EnterFrom::InPlace,
+            };
+            let enter = overlay_enter((self.id.clone(), "menu-enter"), from, window, cx);
             render_menu(
                 &state,
                 0,
                 window.viewport_size().height,
                 matches!(kind, TriggerKind::Dropdown(_)),
+                enter,
                 cx,
             )
         });
@@ -620,6 +629,7 @@ fn render_menu(
     depth: usize,
     viewport_height: Pixels,
     dropdown: bool,
+    enter: OverlayEnter,
     cx: &App,
 ) -> AnyElement {
     let data = state.read(cx);
@@ -781,7 +791,14 @@ fn render_menu(
                     if let Some(submenu) = &item.submenu {
                         let child_bounds = item.bounds.get();
                         let placement = submenu.placement.clone();
-                        let child = render_menu(state, depth + 1, viewport_height, dropdown, cx);
+                        let child = render_menu(
+                            state,
+                            depth + 1,
+                            viewport_height,
+                            dropdown,
+                            OverlayEnter::SETTLED,
+                            cx,
+                        );
                         row = row.child(
                             deferred(
                                 Positioner::side(child_bounds)
@@ -807,6 +824,8 @@ fn render_menu(
         .debug_selector(move || format!("smelt-menu-{depth}").into())
         .on_prepaint(move |value, _, _| bounds.set(value))
         .relative()
+        .opacity(enter.opacity)
+        .top(enter.dy)
         .occlude()
         .p(px(SURFACE_PADDING))
         .min_w(px(160.))

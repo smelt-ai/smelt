@@ -6,8 +6,8 @@
 //! 链上各层的 render 只读内存。应用不在前台、窗口失焦或系统开了减弱动态效果时，停在静态终态。
 
 use gpui::{
-    AnyElement, App, AsyncApp, Bounds, BoxShadow, Element, ElementId, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Rgba, Styled as _,
+    Anchor, AnyElement, App, AsyncApp, Bounds, BoxShadow, Element, ElementId, GlobalElementId,
+    Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Rgba, Styled,
     Transformation, Window, hsla, percentage, point, px, svg,
 };
 use gpui_base::h_flex;
@@ -223,7 +223,7 @@ pub(crate) fn ambient_loop<E: IntoElement + 'static>(
 pub fn ambient_spinner(id: impl Into<ElementId>, color: Hsla, animate: bool) -> AnyElement {
     ambient_loop(id, Duration::from_millis(800), animate, move |delta| {
         svg()
-            .path(gpui_kit_assets::IconName::Loader.path())
+            .path(crate::IconName::Loader.path())
             .size_3()
             .flex_shrink_0()
             .text_color(color)
@@ -678,6 +678,88 @@ pub fn unit_transition(
     gpui_base::motion::transition(id, target, snap_transition(), window, cx)
 }
 
+/// 浮层入场时离终点的距离：从触发点那一侧挪过来这么多。
+const OVERLAY_ENTER_SHIFT: Pixels = px(4.);
+
+/// 浮层从哪一侧进场。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnterFrom {
+    /// 开在触发点下方：从上面（触发点那侧）落下来。
+    Above,
+    /// 开在触发点上方，或窗口里的对话框：从下面升上来。
+    Below,
+    /// 只淡入、不挪：位置会翻边的（右键菜单）、开在侧边的、贴着指针的提示。
+    InPlace,
+}
+
+impl EnterFrom {
+    /// 按卡片哪个角对着触发点推出从哪边进。gpui-base 的 `Popup` 放不下时只往窗口里夹、
+    /// 不翻边，所以按锚点推出的方向就是实际方向。
+    pub fn anchored(anchor: Anchor) -> Self {
+        match anchor {
+            Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => Self::Above,
+            Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => Self::Below,
+            Anchor::LeftCenter | Anchor::RightCenter => Self::InPlace,
+        }
+    }
+}
+
+/// 浮层入场的一帧：整块的透明度（连投影一起）和竖直方向离终点的偏移。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayEnter {
+    pub opacity: f32,
+    /// 正数往下。用作相对定位的 `top` 偏移，不改排版，也不挪别的元素。
+    pub dy: Pixels,
+}
+
+impl OverlayEnter {
+    /// 到位：不透明、不偏。
+    pub const SETTLED: Self = Self {
+        opacity: 1.,
+        dy: Pixels::ZERO,
+    };
+
+    /// `progress` 是已经缓动过的 0 到 1。
+    pub fn at(progress: f32, from: EnterFrom) -> Self {
+        let progress = progress.clamp(0., 1.);
+        let remaining = OVERLAY_ENTER_SHIFT * (1. - progress);
+        Self {
+            opacity: progress,
+            dy: match from {
+                EnterFrom::Above => -remaining,
+                EnterFrom::Below => remaining,
+                EnterFrom::InPlace => Pixels::ZERO,
+            },
+        }
+    }
+
+    /// 把这一帧落到浮层卡片上。卡片自己已经用 `top` 留间距的，自己合上 `dy`，别用这个。
+    pub fn apply<E: Styled>(self, element: E) -> E {
+        element.opacity(self.opacity).top(self.dy)
+    }
+}
+
+/// 浮层入场：菜单、弹出卡片、悬停卡片、提示、对话框打开时淡入，并从触发点那侧挪 4px 到位，
+/// 交代它从哪来。时长和曲线是 [`crate::kit::MOTION`] 的 `overlay_enter()`。
+///
+/// 浮层每次打开都是新挂上的元素。进度挂在元素状态上，只在连续几帧都画它时留着：关掉那一帧
+/// 没人取，状态就回收了，下次打开从 0 再播；开着时一直取，到位后不再要帧。系统减弱动态效果时
+/// 直接到位。只在浮层开着时调用；`id` 带上浮层自己的 id，同一视图里的几个浮层才不串。
+///
+/// 只做入场。gpui-base 关掉浮层就卸下内容，出场淡出做不了。
+pub fn overlay_enter(
+    id: impl Into<gpui_base::motion::TransitionId>,
+    from: EnterFrom,
+    window: &mut Window,
+    cx: &mut App,
+) -> OverlayEnter {
+    let progress = gpui_base::motion::Presence::new(id, true)
+        .transition(crate::kit::MOTION.overlay_enter())
+        .sample(window, cx)
+        .progress;
+    OverlayEnter::at(progress, from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,5 +1005,89 @@ mod tests {
         assert!(composer_lift_alpha(1.0) > composer_lift_alpha(0.0));
         assert_eq!(composer_ring_alpha(0.0), 0.0);
         assert!((composer_ring_alpha(1.0) - 0.28).abs() < 1e-5);
+    }
+
+    #[test]
+    fn overlay_enter_comes_from_the_trigger_side_and_settles_in_place() {
+        let below_trigger = OverlayEnter::at(0.0, EnterFrom::anchored(gpui::Anchor::TopLeft));
+        assert_eq!(below_trigger.opacity, 0.0);
+        assert!(below_trigger.dy < px(0.), "开在下方的从上面落下来");
+
+        let above_trigger = OverlayEnter::at(0.0, EnterFrom::anchored(gpui::Anchor::BottomRight));
+        assert!(above_trigger.dy > px(0.), "开在上方的从下面升上来");
+
+        let side = OverlayEnter::at(0.0, EnterFrom::anchored(gpui::Anchor::RightCenter));
+        assert_eq!(side.dy, px(0.), "开在侧边的只淡入");
+
+        for from in [EnterFrom::Above, EnterFrom::Below, EnterFrom::InPlace] {
+            assert_eq!(OverlayEnter::at(1.0, from), OverlayEnter::SETTLED);
+        }
+    }
+
+    struct OverlayTestView {
+        open: bool,
+        samples: Rc<RefCell<Vec<OverlayEnter>>>,
+    }
+
+    impl Render for OverlayTestView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if self.open {
+                let enter = overlay_enter("overlay-enter-test", EnterFrom::Above, window, cx);
+                self.samples.borrow_mut().push(enter);
+            }
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn overlay_enter_plays_on_every_open_and_stops_once_settled(cx: &mut TestAppContext) {
+        let samples = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.), px(100.)), {
+            let samples = samples.clone();
+            move |_, _| OverlayTestView {
+                open: true,
+                samples,
+            }
+        });
+        cx.run_until_parked();
+        let last = |samples: &Rc<RefCell<Vec<OverlayEnter>>>| *samples.borrow().last().unwrap();
+        assert_eq!(last(&samples).opacity, 0.0, "刚打开的第一帧从透明起");
+
+        cx.executor().advance_clock(Duration::from_millis(60));
+        let next_frame = |cx: &mut TestAppContext| {
+            let callbacks = window
+                .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+                .unwrap();
+            cx.run_until_parked();
+            callbacks
+        };
+        assert!(next_frame(cx) > 0, "入场中途要下一帧");
+        let mid = last(&samples);
+        assert!(
+            mid.opacity > 0.0 && mid.opacity < 1.0,
+            "中途半透明：{mid:?}"
+        );
+
+        cx.executor().advance_clock(Duration::from_millis(400));
+        next_frame(cx);
+        assert_eq!(last(&samples), OverlayEnter::SETTLED);
+        assert_eq!(next_frame(cx), 0, "到位后不能再要帧");
+
+        // 关上画一帧，状态随之回收；再打开要从头播，而不是直接到位。
+        window
+            .update(cx, |view, _, cx| {
+                view.open = false;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |view, _, cx| {
+                view.open = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(last(&samples).opacity, 0.0, "重新打开要再播一次入场");
     }
 }

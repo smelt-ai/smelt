@@ -1,5 +1,7 @@
 //! 桌面客户端和运行时共用的纯类型与纯函数。见 Cargo.toml 的说明。
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 // 公开类型里有 chrono 的时间（如历史会话的起止时间），用的人按同一份 chrono 处理。
 pub use chrono;
 
@@ -29,6 +31,7 @@ pub mod default_conversation;
 pub mod font_config;
 pub mod kitty_graphics;
 pub mod launch_settings;
+pub mod locale;
 pub mod memory_settings;
 pub mod new_session;
 pub mod osc;

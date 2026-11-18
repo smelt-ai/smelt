@@ -12,6 +12,7 @@ use api::model::daemon_state::DaemonSessionState;
 use api::model::workspace_directory::WorkspaceConversation;
 use api::process_usage::{MemoryBreakdown, ProcessSampler};
 use gpui::App;
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 /// 两轮采样的间隔。
@@ -148,8 +149,8 @@ impl ResourceMonitor {
             && let Some(desktop) = self.desktop
         {
             section.fixed.push(Row {
-                label: "Smelt 界面".to_string(),
-                detail: Some("GPUI 主进程".to_string()),
+                label: t!("row.desktop").into_owned(),
+                detail: Some(t!("row.desktop_detail").into_owned()),
                 usage: desktop,
                 parts: self.desktop_memory.map(memory_parts).unwrap_or_default(),
             });
@@ -161,7 +162,7 @@ impl ResourceMonitor {
                 add(&mut total, runtime_total(result));
                 section.total = Some(total);
                 section.fixed.push(Row {
-                    label: "smeltd 后台服务".to_string(),
+                    label: t!("row.daemon").into_owned(),
                     detail: None,
                     usage: result.daemon,
                     parts: Vec::new(),
@@ -173,7 +174,11 @@ impl ResourceMonitor {
             }
             Some(Err(error)) => section.note = Some(error.clone()),
             None => {
-                section.note = Some(machine.unavailable.unwrap_or_else(|| "读取中…".to_string()));
+                section.note = Some(
+                    machine
+                        .unavailable
+                        .unwrap_or_else(|| t!("loading").into_owned()),
+                );
             }
         }
         section
@@ -264,7 +269,11 @@ fn group_sessions(
         group.absorb(session);
     }
     let others = others.map(|(count, mut group)| {
-        group.title = format!("侧栏之外的 {count} 个会话");
+        group.title = if count == 1 {
+            t!("others.one").into_owned()
+        } else {
+            t!("others.other", count = count).into_owned()
+        };
         group
     });
     (groups.into_iter().map(|(_, group)| group).collect(), others)
@@ -280,8 +289,13 @@ pub(crate) fn process_summary(count: u32, processes: &[ProcessEntry]) -> String 
             None => names.push((process.name.as_str(), 1)),
         }
     }
+    let processes = if count == 1 {
+        t!("processes.one").into_owned()
+    } else {
+        t!("processes.other", count = count).into_owned()
+    };
     if names.is_empty() {
-        return format!("{count} 个进程");
+        return processes;
     }
     let mut listed = names
         .iter()
@@ -291,11 +305,11 @@ pub(crate) fn process_summary(count: u32, processes: &[ProcessEntry]) -> String 
             seen => format!("{name} ×{seen}"),
         })
         .collect::<Vec<_>>()
-        .join("、");
+        .join(&*t!("processes.separator"));
     if names.len() > NAMES {
-        listed.push_str(" 等");
+        listed = t!("processes.and_more", names = listed).into_owned();
     }
-    format!("{count} 个进程：{listed}")
+    t!("processes.named", processes = processes, names = listed).into_owned()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -363,8 +377,8 @@ pub(crate) struct Row {
 
 /// 内存里的一块。
 pub(crate) struct MemoryPart {
-    pub(crate) label: &'static str,
-    pub(crate) detail: &'static str,
+    pub(crate) label: String,
+    pub(crate) detail: String,
     pub(crate) bytes: u64,
 }
 
@@ -372,18 +386,18 @@ pub(crate) struct MemoryPart {
 fn memory_parts(memory: MemoryBreakdown) -> Vec<MemoryPart> {
     vec![
         MemoryPart {
-            label: "画面缓冲与纹理",
-            detail: "GPU 绘制用，窗口越大占得越多",
+            label: t!("memory.graphics").into_owned(),
+            detail: t!("memory.graphics_detail").into_owned(),
             bytes: memory.graphics,
         },
         MemoryPart {
-            label: "程序数据",
-            detail: "会话内容、文字排版缓存等，堆上正在用的部分",
+            label: t!("memory.heap").into_owned(),
+            detail: t!("memory.heap_detail").into_owned(),
             bytes: memory.heap,
         },
         MemoryPart {
-            label: "其它",
-            detail: "系统库的数据、线程栈、堆里空着的页",
+            label: t!("memory.other").into_owned(),
+            detail: t!("memory.other_detail").into_owned(),
             bytes: memory.other(),
         },
     ]
@@ -436,15 +450,15 @@ fn conversation_sessions(
     states: &HashMap<String, DaemonSessionState>,
 ) -> Option<(Vec<String>, String)> {
     // 名字运行时算好了，同一段对话里每一格报的都一样。还没推来（旧运行时）写通用名。
-    let (ids, fallback): (Vec<String>, &str) = match &conversation.acp {
-        Some(acp) => (vec![acp.sid.clone()], "对话"),
+    let (ids, fallback) = match &conversation.acp {
+        Some(acp) => (vec![acp.sid.clone()], t!("fallback.conversation")),
         None => (
             conversation
                 .terminals
                 .iter()
                 .filter_map(|terminal| terminal.id.clone())
                 .collect(),
-            "终端",
+            t!("fallback.terminal"),
         ),
     };
     if ids.is_empty() {
@@ -536,7 +550,7 @@ mod tests {
         assert_eq!(
             others,
             Some(SessionGroup {
-                title: "侧栏之外的 2 个会话".to_string(),
+                title: "2 sessions outside the sidebar".to_string(),
                 usage: usage(5., 50, 2),
                 processes: vec![process("subagent", 30), process("automation", 20)],
                 jump: None,
@@ -553,10 +567,13 @@ mod tests {
             process("rg", 20),
             process("node", 10),
         ];
-        assert_eq!(process_summary(5, &processes), "5 个进程：node ×3、bun、rg");
+        assert_eq!(
+            process_summary(5, &processes),
+            "5 processes: node ×3, bun, rg"
+        );
         let many = ["a", "b", "c", "d", "e"].map(|name| process(name, 1));
-        assert_eq!(process_summary(9, &many), "9 个进程：a、b、c、d 等");
-        assert_eq!(process_summary(3, &[]), "3 个进程");
+        assert_eq!(process_summary(9, &many), "9 processes: a, b, c, d, …");
+        assert_eq!(process_summary(3, &[]), "3 processes");
     }
 
     #[test]
@@ -671,7 +688,7 @@ mod tests {
         assert_eq!(owners.len(), 3);
         assert!(!owners.contains_key("archived"));
         // 还没推名字来：通用名。
-        assert_eq!(owners["acp"], (1, "对话".to_string()));
+        assert_eq!(owners["acp"], (1, "Conversation".to_string()));
         // 哪格报上来都认。
         assert_eq!(owners["a"], (2, "分屏".to_string()));
         assert_eq!(owners["b"], (2, "分屏".to_string()));

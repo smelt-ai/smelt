@@ -32,8 +32,8 @@ pub enum ProjectFileError {
 impl std::fmt::Display for ProjectFileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::OutsideProject(path) => write!(f, "{path} 不在项目内"),
-            Self::Conflict => f.write_str("文件已被外部修改"),
+            Self::OutsideProject(path) => write!(f, "{path} isn't in the project"),
+            Self::Conflict => f.write_str("The file was changed elsewhere"),
             Self::Io(message) => f.write_str(message),
         }
     }
@@ -81,7 +81,7 @@ pub fn delete_entry(root: &str, path: &str) -> Result<(), ProjectFileError> {
     } else {
         std::fs::remove_file(path)
     };
-    result.map_err(|e| ProjectFileError::Io(format!("删除 {path} 失败：{e}")))
+    result.map_err(|e| ProjectFileError::Io(format!("couldn't delete {path}: {e}")))
 }
 
 fn content_version(bytes: &[u8]) -> String {
@@ -353,7 +353,8 @@ pub fn browse_dirs(
 ) -> Result<smelt_runtime_client::protocol::workspace::BrowseDirsResult, ProjectFileError> {
     use smelt_runtime_client::protocol::workspace::{BrowseDirsResult, BrowseEntry};
 
-    let home = dirs::home_dir().ok_or_else(|| ProjectFileError::Io("找不到用户主目录".into()))?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| ProjectFileError::Io("can't find the home directory".into()))?;
     let requested = params
         .path
         .as_deref()
@@ -364,13 +365,16 @@ pub fn browse_dirs(
     // 不用 std::fs::canonicalize：它在 Windows 上返回 `\\?\C:\...`，选中的路径会原样
     // 成为项目根、出现在侧栏。dunce 能去掉这个前缀时就去掉，其它平台等同 std。
     let dir = dunce::canonicalize(&requested).map_err(|error| {
-        ProjectFileError::Io(format!("打不开 {}：{error}", requested.display()))
+        ProjectFileError::Io(format!("couldn't open {}: {error}", requested.display()))
     })?;
     if !dir.is_dir() {
-        return Err(ProjectFileError::Io(format!("不是目录：{}", dir.display())));
+        return Err(ProjectFileError::Io(format!(
+            "not a directory: {}",
+            dir.display()
+        )));
     }
     let mut entries = std::fs::read_dir(&dir)
-        .map_err(|error| ProjectFileError::Io(format!("读不了 {}：{error}", dir.display())))?
+        .map_err(|error| ProjectFileError::Io(format!("couldn't read {}: {error}", dir.display())))?
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();

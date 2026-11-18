@@ -3,6 +3,7 @@
 
 use super::conversation::{render_nested_transcript, subagent_status_icon};
 use super::*;
+use rust_i18n::t;
 use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 
@@ -13,7 +14,11 @@ impl ConversationView {
         if running == 0 {
             return None;
         }
-        let summary = format!("{running} 个子智能体");
+        let summary = crate::plural(
+            running,
+            t!("subagent.summary.one"),
+            t!("subagent.summary.other", count = running),
+        );
         Some(
             Button::new("acp-subagents")
                 .quiet()
@@ -85,7 +90,11 @@ impl ConversationView {
                                 .overflow_hidden()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(faint)
-                                .child(truncated_line(view.last_activity.clone().unwrap_or_else(|| "准备中".into()))),
+                                .child(truncated_line(
+                                    view.last_activity
+                                        .clone()
+                                        .unwrap_or_else(|| t!("subagent.preparing").into_owned()),
+                                )),
                         ),
                 )
                 .child(
@@ -100,7 +109,7 @@ impl ConversationView {
                         .flex_shrink_0()
                         .type_style(TYPE.text_xsmall)
                         .text_color(gpui::rgb(ui_theme::muted()))
-                        .child("正在停止…")
+                        .child(t!("task.stopping").into_owned())
                         .into_any_element()
                 } else {
                     Button::new((
@@ -109,7 +118,7 @@ impl ConversationView {
                     ))
                     .danger_quiet()
                     .small()
-                    .label("停止")
+                    .label(t!("stop.stop"))
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         cx.stop_propagation();
                         this.stop_subagent(stop_id.clone(), cx);
@@ -117,15 +126,18 @@ impl ConversationView {
                     .into_any_element()
                 });
             rows = rows.child(
-                Button::new((gpui::ElementId::from("acp-subagent-popover-row"), id.clone()))
-                    .quiet()
-                    .w_full()
-                    .justify_start()
-                    .accessibility_label(format!("查看子智能体 {title} 的过程"))
-                    .child(row)
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.open_subagent_inspector(id.clone(), title.clone(), cx);
-                    })),
+                Button::new((
+                    gpui::ElementId::from("acp-subagent-popover-row"),
+                    id.clone(),
+                ))
+                .quiet()
+                .w_full()
+                .justify_start()
+                .accessibility_label(t!("subagent.view_process", title = title).into_owned())
+                .child(row)
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    this.open_subagent_inspector(id.clone(), title.clone(), cx);
+                })),
             );
         }
         let panel = div()
@@ -153,14 +165,14 @@ impl ConversationView {
                         div()
                             .type_style(TYPE.ui_medium)
                             .text_color(gpui::rgb(ui_theme::muted()))
-                            .child("子智能体"),
+                            .child(t!("subagent.title").into_owned()),
                     )
                     .child(div().flex_1())
                     .child(
                         Button::new("acp-subagent-stop-all")
                             .danger_quiet()
                             .small()
-                            .label("全部停止")
+                            .label(t!("subagent.stop_all"))
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.stop_all_subagents(cx);
                             })),
@@ -169,7 +181,7 @@ impl ConversationView {
                         Button::new("acp-subagent-popover-close")
                             .dismiss()
                             .icon(IconName::Close)
-                            .icon_action("关闭")
+                            .icon_action(t!("action.close"))
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.subagents_open = false;
                                 cx.notify();
@@ -201,7 +213,7 @@ impl ConversationView {
         let view = self.subagents.iter().find(|view| view.id == inspector.id);
         let status_line = match view {
             Some(view) => {
-                let mut parts = vec![view.status.label().to_string()];
+                let mut parts = vec![subagent_status_label(view.status).to_string()];
                 if let Some(model) = view.model.as_ref().filter(|model| !model.is_empty()) {
                     parts.push(model.clone());
                 }
@@ -214,17 +226,22 @@ impl ConversationView {
             div()
                 .type_style(TYPE.ui)
                 .text_color(gpui::rgb(ui_theme::bad()))
-                .child(format!("读不到这个子智能体的过程：{error}"))
+                .child(SharedString::from(t!(
+                    "subagent.read_failed",
+                    error = error
+                )))
                 .into_any_element()
         } else if inspector.entries.is_empty() {
             div()
                 .type_style(TYPE.ui)
                 .text_color(faint)
-                .child(if inspector.loading || inspector.revision.is_none() {
-                    "正在读取…"
-                } else {
-                    "还没有内容"
-                })
+                .child(SharedString::from(
+                    if inspector.loading || inspector.revision.is_none() {
+                        t!("subagent.loading")
+                    } else {
+                        t!("subagent.empty")
+                    },
+                ))
                 .into_any_element()
         } else {
             render_nested_transcript(&inspector.entries, muted)
@@ -238,13 +255,13 @@ impl ConversationView {
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::muted()))
-                    .child("正在停止…")
+                    .child(t!("task.stopping").into_owned())
                     .into_any_element()
             } else {
                 Button::new("acp-subagent-inspector-stop")
                     .danger_quiet()
                     .small()
-                    .label("停止")
+                    .label(t!("stop.stop"))
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         this.stop_subagent(stop_id.clone(), cx);
                     }))
@@ -294,7 +311,7 @@ impl ConversationView {
                             Button::new("acp-subagent-inspector-close")
                                 .dismiss()
                                 .icon(IconName::Close)
-                                .icon_action("关闭子智能体视图")
+                                .icon_action(t!("subagent.close"))
                                 .on_click(cx.listener(|this, _ev, _window, cx| {
                                     this.close_subagent_inspector(cx);
                                 })),

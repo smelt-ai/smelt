@@ -38,8 +38,8 @@ use crate::push::{self, Content};
 const ALERT_DEDUP: Duration = Duration::from_secs(60);
 
 /// 终端程序发的通知、智能体消息没给标题时用的。
-pub(crate) const NOTICE_TITLE: &str = "终端通知";
-pub(crate) const BELL_TITLE: &str = "终端响铃";
+pub(crate) const NOTICE_TITLE: &str = "Terminal notification";
+pub(crate) const BELL_TITLE: &str = "Terminal bell";
 
 #[derive(Default)]
 pub(crate) struct AttentionLedger {
@@ -147,6 +147,7 @@ impl AttentionLedger {
             kind,
             title: title.to_string(),
             message: message.to_string(),
+            note: None,
         };
         let before = self.attention_of(session_id);
         let mut after = before.clone();
@@ -302,11 +303,13 @@ fn phase_item(state: &DaemonSessionState) -> Option<AttentionItem> {
         .detail_line()
         .or_else(|| state.conversation_name.clone())
         .or_else(|| state.title.clone())
-        .unwrap_or_else(|| format!("会话 {}", &state.id[..8.min(state.id.len())]));
+        .unwrap_or_else(|| smelt_event_protocol::unnamed_session(&state.id));
+    // 标题和运行时自己说的话按英文写给旧客户端；新客户端按 `kind`、`note` 用自己的语言说。
     Some(AttentionItem {
+        title: kind.label().unwrap_or_default(),
         kind,
-        title: state.phase_label().to_string(),
         message,
+        note: state.pending_note.clone(),
     })
 }
 
@@ -340,6 +343,7 @@ mod tests {
             kind,
             title: title.into(),
             message: message.into(),
+            note: None,
         }
     }
 
@@ -379,7 +383,11 @@ mod tests {
         let mut waiting = state("a", DaemonPhase::AwaitingApproval);
         waiting.pending_question = Some("rm -rf build".into());
         let outcome = ledger.observe(waiting, now);
-        let expected = item(AttentionKind::Approval, "等你批准", "⚠ rm -rf build");
+        let expected = item(
+            AttentionKind::Approval,
+            "Waiting for approval",
+            "⚠ rm -rf build",
+        );
         let changed = outcome.changed.unwrap();
         assert_eq!(changed.alert.as_ref(), Some(&expected));
         assert_eq!(changed.session.action.as_ref(), Some(&expected));

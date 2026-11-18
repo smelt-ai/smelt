@@ -7,7 +7,7 @@ use smelt_core::workspace_directory::{
     WorkspaceProjectRepositoryAction as RepositoryAction, WorkspaceProjectRepositoryActionParams,
 };
 use smelt_event_protocol::{CORE_SNAPSHOT_WORKSPACE, CoreProjectionEvent, SnapshotKind};
-use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlReason};
 
 fn init_repository(path: &std::path::Path) {
     std::fs::create_dir_all(path).unwrap();
@@ -156,7 +156,7 @@ fn discovering_repository_links_does_not_claim_or_delete_user_links() {
         &event_hub,
     )
     .unwrap_err();
-    assert!(error.message.contains("重复"));
+    assert_eq!(error.reason, Some(ControlReason::RepositoryAlreadyAdded));
     let directory = crate::workset_control::repository_action(
         &temp.store,
         WorkspaceProjectRepositoryActionParams {
@@ -313,7 +313,10 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
         &event_hub,
     )
     .unwrap_err();
-    assert!(active_error.message.contains("未归档会话"));
+    assert_eq!(
+        active_error.reason,
+        Some(ControlReason::WorktreeHasOpenSessions)
+    );
     temp.store
         .set_workspace_conversation_archived(&conversation.id, Some(1))
         .unwrap();
@@ -328,7 +331,7 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
         &event_hub,
     )
     .unwrap_err();
-    assert!(missing_root.message.contains("工作树"));
+    assert!(missing_root.message.contains("worktree"));
     crate::workset_control::finish(
         &temp.store,
         smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
@@ -359,7 +362,7 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
         &event_hub,
     )
     .unwrap_err();
-    assert!(error.message.contains("工作树"));
+    assert!(error.message.contains("worktree"));
     assert!(
         workspace_catalog::directory_on(&temp.store)
             .unwrap()
@@ -701,7 +704,7 @@ fn a_subscriber_gets_the_directory_the_daemon_could_not_read_at_startup() {
         let store = temp.store.clone();
         WorkspaceDirectoryReader::from_fn(move || {
             if !readable.load(Ordering::Acquire) {
-                return Err("数据库 schema 33 形状无法识别".to_string());
+                return Err("Database schema 33 has an unrecognized shape".to_string());
             }
             smelt_core::workspace_catalog::directory_on(&store).map_err(|error| error.to_string())
         })
@@ -924,7 +927,7 @@ fn a_failing_setup_script_keeps_the_workset_and_reports_its_output() {
     assert_eq!(created.setup.len(), 1);
     let setup = &created.setup[0];
     assert!(!setup.success);
-    for expected in ["installing", "npm ERR! offline", "退出码 3"] {
+    for expected in ["installing", "npm ERR! offline", "exited with code 3"] {
         assert!(setup.output.contains(expected), "{}", setup.output);
     }
     assert!(worktree.exists());

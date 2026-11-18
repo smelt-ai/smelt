@@ -7,7 +7,7 @@ pub(crate) fn list(connection: &Connection) -> Result<Vec<PushRegistration>, Sto
     let mut statement = connection.prepare(
         "SELECT device_endpoint_id, handle, relay_url, notify_approval, notify_input,
                 notify_failure, notify_success, payload_version, updated_at_ms,
-                notify_message
+                notify_message, locale
          FROM push_registration ORDER BY device_endpoint_id",
     )?;
     let rows = statement.query_map([], |row| {
@@ -22,6 +22,7 @@ pub(crate) fn list(connection: &Connection) -> Result<Vec<PushRegistration>, Sto
             payload_version: row.get(7)?,
             updated_at_ms: row.get(8)?,
             notify_message: row.get(9)?,
+            locale: row.get(10)?,
         })
     })?;
     rows.collect::<Result<_, _>>().map_err(StoreError::from)
@@ -46,12 +47,12 @@ pub(crate) fn put(
     transaction.execute(
         "INSERT INTO push_registration (device_endpoint_id, handle, relay_url, notify_approval,
                                         notify_input, notify_failure, notify_success,
-                                        payload_version, updated_at_ms, notify_message)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                        payload_version, updated_at_ms, notify_message, locale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(device_endpoint_id) DO UPDATE SET
            handle = ?2, relay_url = ?3, notify_approval = ?4, notify_input = ?5,
            notify_failure = ?6, notify_success = ?7, payload_version = ?8,
-           updated_at_ms = ?9, notify_message = ?10",
+           updated_at_ms = ?9, notify_message = ?10, locale = ?11",
         params![
             registration.device_endpoint_id,
             registration.handle,
@@ -63,6 +64,7 @@ pub(crate) fn put(
             registration.payload_version,
             registration.updated_at_ms,
             registration.notify_message,
+            registration.locale,
         ],
     )?;
     Ok(true)

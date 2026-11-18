@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::*;
+use rust_i18n::t;
 use smelt_plugin_api::client::protocol::files::{
     ProjectDeleteEntryCall, ProjectDirParams, ProjectPathParams, ProjectRootParams,
     ProjectSearchCall, ProjectSearchParams, ProjectTreeCall, ProjectWatchCall,
@@ -415,8 +416,8 @@ impl FilesPanel {
         let picked = api::PICK_PATHS.run(
             &PathRequest {
                 machine: RuntimeKey::Local,
-                title: "选择要加到文件树的目录".into(),
-                confirm: "加入".into(),
+                title: t!("pin.pick_title").into_owned(),
+                confirm: t!("pin.pick_confirm").into_owned(),
                 files: false,
                 multiple: true,
             },
@@ -684,7 +685,9 @@ impl FilesPanel {
         let sent = SEND_TEXT.run(&SendText { text }, cx);
         cx.spawn(async move |cx| {
             if let Err(error) = sent.await {
-                cx.update(|cx| crate::notify_error(format!("发送到会话失败：{error}"), cx));
+                cx.update(|cx| {
+                    crate::notify_error(t!("send.failed", error = error).into_owned(), cx)
+                });
             }
         })
         .detach();
@@ -702,18 +705,18 @@ impl FilesPanel {
         let label = style.file_name(&path).unwrap_or(&path).to_string();
         let (title, description) = if is_dir {
             (
-                "确定删除这个文件夹吗？",
-                format!("将永久删除「{label}」及其全部内容，此操作不可撤销。"),
+                t!("delete.folder_confirm"),
+                t!("delete.folder_description", name = label),
             )
         } else {
             (
-                "确定删除这个文件吗？",
-                format!("将永久删除「{label}」，此操作不可撤销。"),
+                t!("delete.file_confirm"),
+                t!("delete.file_description", name = label),
             )
         };
         let panel = cx.entity();
         let close_panel = panel.clone();
-        Confirm::new(title, "删除", move |_, cx| {
+        Confirm::new(title, t!("delete.action"), move |_, cx| {
             panel.update(cx, |this, cx| this.perform_delete(path.clone(), is_dir, cx));
             true
         })
@@ -735,7 +738,7 @@ impl FilesPanel {
         let client = match target(&entry.runtime, cx) {
             Ok(client) => client,
             Err(error) => {
-                self.report_background_error(format!("删除失败：{error}"), cx);
+                self.report_background_error(t!("delete.failed", error = error).into_owned(), cx);
                 return;
             }
         };
@@ -757,7 +760,10 @@ impl FilesPanel {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(_) => this.forget_deleted_entry(entry, is_dir, cx),
                 Err(error) => {
-                    this.report_background_error(format!("删除失败：{}", error_text(error)), cx);
+                    this.report_background_error(
+                        t!("delete.failed", error = error_text(error)).into_owned(),
+                        cx,
+                    );
                     cx.notify();
                 }
             });

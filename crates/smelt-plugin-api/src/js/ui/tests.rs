@@ -359,6 +359,7 @@ fn view_instance_follows_its_element(cx: &mut TestAppContext) {
             draws_top_bar: false,
             settings: None,
             instances: true,
+            fills: Vec::new(),
             build: Rc::new(move |_, cx| -> Rc<dyn crate::ViewHandle> {
                 let probe = gpui::AppContext::new(cx, |_| Probe {
                     args: serde_json::Value::Null,

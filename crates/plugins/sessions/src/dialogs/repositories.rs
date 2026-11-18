@@ -4,6 +4,8 @@
 //! 文件系统的活都在项目所在那台机器的运行时上做；这里只发调用，拿回整份目录更新列表。
 //! 写入（克隆、建工作树）可能要几分钟，跑着的时候框关不掉，也不接新的操作。
 
+use rust_i18n::t;
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::time::Duration;
@@ -114,13 +116,14 @@ impl Repositories {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
-        };
-        let task = input("例如 add-search 或 搜索功能", window, cx);
-        let branch = input("留空使用默认分支，或填写完整分支名", window, cx);
-        let name = input("留空使用下方建议名称", window, cx);
-        let url = input("HTTPS 或 SSH Git URL", window, cx);
+        let input =
+            |placeholder: Cow<'static, str>, window: &mut Window, cx: &mut Context<Self>| {
+                cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+            };
+        let task = input(t!("repo.task_placeholder"), window, cx);
+        let branch = input(t!("repo.branch_placeholder"), window, cx);
+        let name = input(t!("repo.name_placeholder"), window, cx);
+        let url = input(t!("repo.url_placeholder"), window, cx);
         let subscriptions = [&task, &branch, &name, &url]
             .into_iter()
             .map(|input| {
@@ -236,8 +239,8 @@ impl Repositories {
         let picked = api::PICK_PATHS.run(
             &api::PathRequest {
                 machine: self.machine.clone(),
-                title: "选择已有 Git 仓库".into(),
-                confirm: "选择".into(),
+                title: t!("repo.choose_title").into_owned(),
+                confirm: t!("repo.choose_confirm").into_owned(),
                 files: false,
                 multiple: false,
             },
@@ -309,7 +312,7 @@ impl Repositories {
             }
             Mode::Bind => {
                 let Some(source) = self.source.clone() else {
-                    self.error = Some("请先选择已有 Git 仓库的根目录".into());
+                    self.error = Some(t!("repo.choose_first").into_owned());
                     cx.notify();
                     return false;
                 };
@@ -330,7 +333,7 @@ impl Repositories {
     fn create_workset(&mut self, cx: &mut Context<Self>) {
         let task = self.task.read(cx).value().trim().to_string();
         if !valid_task(&task) || self.selected.is_empty() {
-            self.error = Some("请填写不含路径分隔符的任务名，并至少选择一个仓库".into());
+            self.error = Some(t!("repo.invalid_task").into_owned());
             cx.notify();
             return;
         }
@@ -351,9 +354,10 @@ impl Repositories {
             // 工作树已经建好，初始化脚本失败不算新建失败：框照常关，失败单独报。
             if let Ok(created) = &result {
                 for setup in created.setup.iter().filter(|setup| !setup.success) {
-                    let message = format!(
-                        "工作树已建好，但仓库 {} 的初始化脚本（.smelt/worktree-setup）失败：\n{}",
-                        setup.repository, setup.output
+                    let message = t!(
+                        "repo.setup_failed",
+                        repository = setup.repository,
+                        output = setup.output
                     );
                     cx.update(|cx| crate::notify_error(&message, cx));
                 }
@@ -449,28 +453,26 @@ impl Render for Repositories {
         let busy = self.busy;
         let mode = self.mode;
         let title = match mode {
-            Mode::Manage => "管理项目仓库",
-            Mode::Create => "新建工作树",
-            Mode::Bind => "添加已有仓库",
-            Mode::Clone => "从 Git URL 克隆",
+            Mode::Manage => t!("repo.title_manage"),
+            Mode::Create => t!("repo.title_create"),
+            Mode::Bind => t!("repo.title_bind"),
+            Mode::Clone => t!("repo.title_clone"),
         };
         let task = self.task.read(cx).value().trim().to_string();
         let task_or_placeholder = if task.is_empty() {
-            "<任务名>".to_string()
+            t!("repo.task_token").into_owned()
         } else {
             task
         };
         let mut content = dialog::content(title, Some(self.project_root.clone().into()));
         if mode == Mode::Create {
             content = content
-                .child(field_label("任务名"))
+                .child(field_label(t!("repo.task")))
                 .child(TextInput::new(&self.task).disabled(busy))
-                .child(hint("支持中文；建议使用与分支名接近的英文名，不含路径分隔符。"))
-                .child(field_label("分支名"))
+                .child(hint(t!("repo.task_hint")))
+                .child(field_label(t!("repo.branch")))
                 .child(TextInput::new(&self.branch).disabled(busy))
-                .child(hint(format!(
-                    "留空使用 feat/{task_or_placeholder}；也可输入完整分支名（如 fix/search）。分支名不能包含空格。"
-                )));
+                .child(hint(t!("repo.branch_hint", task = task_or_placeholder)));
         }
         if matches!(mode, Mode::Manage | Mode::Create) {
             content = content
@@ -493,8 +495,8 @@ impl Render for Repositories {
     }
 }
 
-fn field_label(text: &'static str) -> impl IntoElement {
-    div().type_style(TYPE.ui).child(text)
+fn field_label(text: impl Into<SharedString>) -> impl IntoElement {
+    div().type_style(TYPE.ui).child(text.into())
 }
 
 fn hint(text: impl Into<SharedString>) -> impl IntoElement {
@@ -521,11 +523,11 @@ impl Repositories {
                     .py_4()
                     .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
-                    .child(if busy {
-                        "正在读取项目仓库…"
+                    .child(SharedString::from(if busy {
+                        t!("repo.loading")
                     } else {
-                        "还没有项目仓库。选择已有仓库，或从 Git URL 克隆。"
-                    }),
+                        t!("repo.empty")
+                    })),
             );
         }
         for repo in &self.repositories {
@@ -580,11 +582,11 @@ impl Repositories {
                 .map(|link| format!("{link} → {}", repo.root))
                 .unwrap_or_else(|| repo.root.clone());
             let source_label = if repo.managed_link.is_some() {
-                "外部仓库 · 软链接"
+                t!("repo.source_link")
             } else if repo.root == self.project_root {
-                "项目根仓库"
+                t!("repo.source_root")
             } else {
-                "已有仓库"
+                t!("repo.source_existing")
             };
             let mut detail = div()
                 .flex()
@@ -610,12 +612,12 @@ impl Repositories {
                     Button::new(SharedString::from(format!("repo-remove-{name}")))
                         .quiet()
                         .small()
-                        .label("移除")
+                        .label(t!("repo.remove"))
                         .disabled(busy || !referenced.is_empty())
                         .tooltip(if referenced.is_empty() {
-                            "仅取消关联，不删除真实仓库".to_string()
+                            t!("repo.remove_hint").into_owned()
                         } else {
-                            format!("工作树仍在使用：{referenced}")
+                            t!("repo.in_use", worksets = referenced).into_owned()
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.busy {
@@ -638,7 +640,7 @@ impl Repositories {
             .gap_2()
             .child(
                 Button::new("repo-bind-entry")
-                    .label("选择已有仓库…")
+                    .label(t!("repo.bind_more"))
                     .disabled(busy)
                     .on_click(
                         cx.listener(|this, _, window, cx| this.switch(Mode::Bind, window, cx)),
@@ -646,7 +648,7 @@ impl Repositories {
             )
             .child(
                 Button::new("repo-clone-entry")
-                    .label("从 Git URL 克隆…")
+                    .label(t!("repo.clone_more"))
                     .disabled(busy)
                     .on_click(
                         cx.listener(|this, _, window, cx| this.switch(Mode::Clone, window, cx)),
@@ -655,7 +657,7 @@ impl Repositories {
             .when(self.mode == Mode::Manage, |row| {
                 row.child(
                     Button::new("repo-create-entry")
-                        .label("新建工作树…")
+                        .label(t!("menu.new_workset"))
                         .disabled(busy || self.repositories.is_empty())
                         .on_click(
                             cx.listener(|this, _, window, cx| {
@@ -670,54 +672,55 @@ impl Repositories {
         let busy = self.busy;
         let content = if self.mode == Mode::Bind {
             content
-                .child(div().type_style(TYPE.ui).text_color(rgb(ui_theme::muted())).child(
-                    "选择已有 Git 仓库的根目录。项目外的仓库只在 repos/ 下建软链接，原目录不会移动。",
-                ))
+                .child(
+                    div()
+                        .type_style(TYPE.ui)
+                        .text_color(rgb(ui_theme::muted()))
+                        .child(SharedString::from(t!("repo.bind_hint"))),
+                )
                 .child(
                     div().flex().child(
                         Button::new("repo-choose-folder")
-                            .label("选择文件夹…")
+                            .label(t!("repo.choose_folder"))
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| this.choose_folder(cx))),
                     ),
                 )
                 .child(
-                    div()
-                        .type_style(TYPE.ui)
-                        .child(self.source.clone().unwrap_or_else(|| "尚未选择目录".into())),
+                    div().type_style(TYPE.ui).child(
+                        self.source
+                            .clone()
+                            .unwrap_or_else(|| t!("repo.no_folder").into_owned()),
+                    ),
                 )
         } else {
             content
                 .child(field_label("Git URL"))
                 .child(TextInput::new(&self.url).disabled(busy))
-                .child(hint(
-                    "使用运行时机器上已有的 Git/SSH 凭据；克隆可能需要几分钟。",
-                ))
+                .child(hint(t!("repo.clone_hint")))
         };
         let name = self.repository_name(cx);
         let destination = if self.mode == Mode::Clone {
-            format!("将克隆到：{}/repos/{name}", self.project_root)
+            t!("repo.clone_to", root = self.project_root, name = name)
         } else {
-            format!(
-                "项目内直接绑定；项目外链接到：{}/repos/{name}",
-                self.project_root
-            )
+            t!("repo.bind_to", root = self.project_root, name = name)
         };
         content
-            .child(field_label("仓库名称（可修改）"))
+            .child(field_label(t!("repo.name")))
             .child(TextInput::new(&self.name).disabled(busy))
             .child(
                 div()
                     .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
-                    .child(format!(
-                        "名称：{} · {destination}",
-                        if name.is_empty() {
-                            "<待填写>"
+                    .child(SharedString::from(t!(
+                        "repo.name_line",
+                        name = if name.is_empty() {
+                            t!("repo.name_token").into_owned()
                         } else {
-                            name.as_str()
+                            name.clone()
                         },
-                    )),
+                        destination = destination
+                    ))),
             )
     }
 
@@ -727,9 +730,11 @@ impl Repositories {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().type_style(TYPE.ui).child(format!(
-                "取消关联「{name}」？真实仓库和分支会保留；仅清理 Smelt 自建的软链接。"
-            )))
+            .child(
+                div()
+                    .type_style(TYPE.ui)
+                    .child(SharedString::from(t!("repo.remove_question", name = name))),
+            )
             .child(
                 div()
                     .flex()
@@ -737,7 +742,7 @@ impl Repositories {
                     .child(
                         Button::new("repo-remove-cancel")
                             .quiet()
-                            .label("保留关联")
+                            .label(t!("repo.keep"))
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if !this.busy {
@@ -749,7 +754,7 @@ impl Repositories {
                     .child(
                         Button::new("repo-remove-confirm")
                             .danger()
-                            .label("确认移除")
+                            .label(t!("repo.confirm_remove"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.repository_action(
@@ -768,13 +773,13 @@ fn footer(state: &Entity<Repositories>, cx: &App) -> impl IntoElement {
     let busy = this.busy;
     let mode = this.mode;
     let label = if busy {
-        "正在处理…"
+        t!("repo.busy")
     } else {
         match mode {
-            Mode::Manage => "完成",
-            Mode::Create => "创建工作树",
-            Mode::Bind => "添加仓库",
-            Mode::Clone => "克隆并添加",
+            Mode::Manage => t!("repo.done"),
+            Mode::Create => t!("repo.create"),
+            Mode::Bind => t!("repo.bind"),
+            Mode::Clone => t!("repo.clone"),
         }
     };
     let submit_disabled = busy || (mode == Mode::Create && this.repositories.is_empty());
@@ -786,7 +791,7 @@ fn footer(state: &Entity<Repositories>, cx: &App) -> impl IntoElement {
                 Button::new("repo-form-back")
                     .quiet()
                     .small()
-                    .label("返回")
+                    .label(t!("repo.back"))
                     .disabled(busy)
                     .on_click(move |_, _, cx| back.update(cx, |state, cx| state.go_back(cx))),
             )
@@ -796,7 +801,7 @@ fn footer(state: &Entity<Repositories>, cx: &App) -> impl IntoElement {
                 Button::new("repo-modal-close")
                     .quiet()
                     .small()
-                    .label("关闭")
+                    .label(t!("close.confirm"))
                     .disabled(busy)
                     .on_click(|_, window, cx| dialog::close(window, cx)),
             )

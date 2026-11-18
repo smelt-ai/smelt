@@ -1,0 +1,20 @@
+_version: 2
+open_with:
+  en: Open With
+  zh-CN: 用其他应用打开
+file_manager:
+  en: File Manager
+  zh-CN: 文件管理器
+error:
+  app_missing:
+    en: "%{app} was not found. It may have been uninstalled."
+    zh-CN: 没找到 %{app}，可能已经卸载了
+  no_directory:
+    en: "The project folder doesn't exist or can't be accessed: %{path}"
+    zh-CN: 项目目录不存在或不可访问：%{path}
+  macos_only:
+    en: "%{app} can only be launched on macOS"
+    zh-CN: "%{app} 只能在 macOS 上启动"
+  launch_failed:
+    en: "Couldn't launch %{app}: %{error}"
+    zh-CN: 启动 %{app} 失败：%{error}

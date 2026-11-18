@@ -9,7 +9,9 @@
 //!   [`model::ConversationKey`]（机器 + 目录里的对话 id）。要么是一段 ACP 对话，要么是一组
 //!   终端；模型上统一成「可选的一段对话 + 一个终端分屏」，不分两种会话。
 //! - **格**是会话里的一个守护会话（ACP 对话的 `sid`，或一格终端的 `id`），画出来是终端
-//!   插件、对话插件登记的视图实例（`create_view`，约定照抄在 [`peers`]）。
+//!   插件、对话插件登记的视图实例（`create_view`，约定照抄在 [`peers`]）。列表行首的头像
+//!   是别的插件填进插槽 [`contract::SESSION_AVATAR`] 的视图实例，这边不认识是谁填的，没人填
+//!   时画图标。
 //! - 会话在侧栏哪儿只看目录（[`model::placement`]）：绑了工作集的进工作集，工作目录在
 //!   打开的项目里的进项目，跟智能体的对话进「对话」一段，别的按工作目录自成一组；归档的、
 //!   自动化跑的不进侧栏。不靠工作目录在不在 `~/.smelt` 下猜身份。
@@ -17,7 +19,8 @@
 //! # 状态与权威
 //!
 //! 见 [`model`] 的模块文档。一句话：目录和会话状态是宿主推来的只读缓存，用时现取，不另存；
-//! 插件自己的数据只有置顶、顺序、折叠、分屏、上次选中（[`store`]，插件自己的库），以及
+//! 插件自己的数据只有置顶、顺序、折叠、分屏、上次选中、行首头像用哪个（[`store`]，插件
+//! 自己的库），以及
 //! 只在内存里的选中（[`model::Sessions`]，全局唯一一份）。建好的会话（分屏、视图实例）绑着
 //! 窗口，归会话视图。
 //!
@@ -31,7 +34,7 @@
 //!
 //! | 包 | 文件 | 内容 |
 //! |---|---|---|
-//! | S0 | `lib.rs` `contract.rs` `model.rs` `store.rs` `peers.rs` | 骨架、对外约定、状态、库 |
+//! | S0 | `lib.rs` `contract.rs` `model.rs` `store.rs` `peers.rs` `settings_page.rs` | 骨架、对外约定、状态、库、设置页 |
 //! | S1 | `list/**` | 会话列表视图、侧栏行的计算、项目和机器行的右键菜单 |
 //! | S2 | `session_view.rs` `split.rs` `split_layout.rs` | 会话视图、分屏、分屏存档 |
 //! | S3 | `lifecycle/**` | 跟着目录维护选中、打开会话、目录操作、活动上下文 |
@@ -54,8 +57,8 @@
 //!     `SidebarUi::{machine, is_pinned, is_collapsed}`。
 //!   - `Sessions::rebuild_sidebar(cx)`、`Sessions::prune(machine, style, &directory)`、
 //!     `Sessions::forget_machine(machine)`（S3 调）。
-//!   - 纯函数：`session_ids`、`conversation_of_session`、`status`、`last_activity`、`title`、
-//!     `agent_of`、`cwd_of`、`placement`、`known_ids`、`shown_conversation`、`locate`（会话
+//!   - 纯函数：`last_activity`、`title`、
+//!     `cwd_of`、`placement`、`known_ids`、`shown_conversation`、`locate`（会话
 //!     视图打开时在目录里找，要不要等目录推到）。
 //! - S0 `store`：`SessionsStore::{layout, save_layout}`（S2 读写分屏存档，`SavedLayout`
 //!   里的 JSON 格式归 S2 的 `split_layout`）、`save_selection`（S3）。侧栏那部分只经
@@ -86,10 +89,11 @@
 //! - 等待一律事件驱动：刚写进目录的会话按写目录回的版本等目录推到
 //!   （`HostEvent::SessionsChanged`），冷启动等 `HostEvent::ViewsChanged` 再建实例；不起
 //!   定时器、不轮询重试。
-//! - 要窗口的事（建分屏、给焦点）只在会话视图里做，用的是它自己的窗口，不去找主窗口、不
-//!   挪到下一轮。
+//! - 要窗口的事（建分屏、建行首头像、给焦点）只在会话视图、列表视图里做，用的是它自己的
+//!   窗口，不去找主窗口、不挪到下一轮。
 //! - 界面用 `smelt_plugin_api::ui`（smelt-ui），不用 gpui-component。
 
+mod attention;
 mod commands;
 mod contract;
 mod dialogs;
@@ -98,13 +102,19 @@ mod list;
 mod model;
 mod peers;
 mod session_view;
+mod settings_page;
 mod split;
 mod split_layout;
 mod store;
 mod worksets;
 
+use rust_i18n::t;
+use std::borrow::Cow;
+
 use gpui::{App, Task};
 use smelt_plugin_api as api;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// 来源 id，也是本插件库的名字。
 pub const OWNER: &str = "smelt.sessions";
@@ -117,22 +127,25 @@ pub fn register(cx: &mut App) {
     let views = vec![
         api::ViewSpec {
             name: view_name(contract::LIST).into(),
-            title: "会话列表".into(),
-            icon: gpui_kit_assets::IconName::MessagesSquare.path(),
+            title: api::text!("view.list"),
+            icon: api::ui::IconName::MessagesSquare.path(),
             draws_top_bar: true,
             settings: None,
             instances: false,
+            fills: Vec::new(),
             build: std::rc::Rc::new(list::build_view),
         },
         api::ViewSpec {
             name: view_name(contract::SESSION).into(),
-            title: "会话".into(),
-            icon: gpui_kit_assets::IconName::AppWindow.path(),
+            title: api::text!("view.session"),
+            icon: api::ui::IconName::AppWindow.path(),
             draws_top_bar: true,
             settings: None,
             instances: false,
+            fills: Vec::new(),
             build: std::rc::Rc::new(session_view::build_view),
         },
+        settings_page::spec(),
     ];
     if let Err(error) = api::register_views(OWNER, views, cx) {
         eprintln!("[sessions] 视图登记失败：{error}");
@@ -149,7 +162,7 @@ fn view_name(id: &'static str) -> &'static str {
 pub(crate) fn notify_error(message: &str, cx: &mut App) {
     eprintln!("[sessions] {message}");
     let notify = api::Notify {
-        subtitle: "错误".to_string(),
+        subtitle: t!("error.title").into_owned(),
         body: message.to_string(),
         ..Default::default()
     };
@@ -158,13 +171,13 @@ pub(crate) fn notify_error(message: &str, cx: &mut App) {
 
 /// 等一件事做完，失败了按 `what`（「关会话」这类）报给人看。
 pub(crate) fn report_failure<T: 'static>(
-    what: &'static str,
+    what: Cow<'static, str>,
     ran: Task<Result<T, String>>,
     cx: &mut App,
 ) {
     cx.spawn(async move |cx| {
         if let Err(error) = ran.await {
-            cx.update(|cx| notify_error(&format!("{what}失败：{error}"), cx));
+            cx.update(|cx| notify_error(&t!("error.failed", what = what, error = error), cx));
         }
     })
     .detach();

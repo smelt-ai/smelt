@@ -14,19 +14,24 @@ mod session;
 use std::rc::Rc;
 
 use gpui::*;
-use smelt_plugin_api::{self as api, HostEvent, PluginView, RuntimeKey, ViewHandle, ViewSpec};
+use rust_i18n::t;
+use smelt_plugin_api::{
+    self as api, HostEvent, PluginView, RuntimeKey, ViewHandle, ViewSpec, text,
+};
 
 pub(crate) use api::ui::ui_theme;
 
 use session::{DesktopView, page_toolbar};
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.desktop";
 /// 远程桌面视图的 id，`<来源>/<名字>`。
 pub const VIEW: &str = "smelt.desktop/desktop";
 /// 视图和菜单项的图标。
-const ICON: &str = "smelt-icons/monitor.svg";
+const ICON: &str = smelt_plugin_api::ui::IconName::Monitor.asset_path();
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
@@ -34,12 +39,13 @@ pub fn register(cx: &mut App) {
         OWNER,
         vec![ViewSpec {
             name: "desktop".into(),
-            title: "远程桌面".into(),
+            title: text!("title"),
             icon: ICON.into(),
             // 顶上那条是外壳的标题带，连的哪台机器和「断开」在视图自己的工具行里。
             draws_top_bar: false,
             instances: true,
             settings: None,
+            fills: Vec::new(),
             build: Rc::new(|window, cx| -> Rc<dyn ViewHandle> {
                 Rc::new(cx.new(|cx| DesktopPage::new(window, cx)))
             }),
@@ -160,9 +166,9 @@ impl Render for DesktopPage {
             return view.clone().into_any_element();
         }
         let reason = if self.machine.is_none() {
-            "还没选要连的机器"
+            t!("no_machine").into_owned()
         } else {
-            api::MACHINE_REMOVED
+            api::machine_removed()
         };
         div()
             .size_full()

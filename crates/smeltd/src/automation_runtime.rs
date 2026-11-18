@@ -13,7 +13,9 @@ use smelt_core::acp_session::{AcpTurnOutcome, AcpUserAction};
 use smelt_core::agent_definition_store::{
     AgentExecutionDefinition, load_agent_execution_definition,
 };
-use smelt_core::automation::{AutomationFile, AutomationRun, AutomationRunStatus};
+use smelt_core::automation::{
+    AutomationFile, AutomationRun, AutomationRunFailure, AutomationRunStatus,
+};
 use smelt_core::automation_store::{AutomationStore, local_timezone_fingerprint};
 use smelt_core::conversation::ConversationBinding;
 use smelt_core::daemon_state::DaemonPhase;
@@ -249,7 +251,7 @@ impl Driver {
         for run in runs {
             let Some(session_id) = run.session_id.as_deref() else {
                 if run.status != AutomationRunStatus::Starting {
-                    self.fail_run(&run, "Run 缺少 ACP 会话，结果未知");
+                    self.fail_run(&run, AutomationRunFailure::SessionMissing, None);
                 }
                 continue;
             };
@@ -258,7 +260,7 @@ impl Driver {
                     run.status,
                     AutomationRunStatus::Starting | AutomationRunStatus::Queued
                 ) {
-                    self.fail_run(&run, "daemon 重启后 ACP 会话已丢失，结果未知，未自动重放");
+                    self.fail_run(&run, AutomationRunFailure::SessionLostOnRestart, None);
                 }
                 continue;
             };
@@ -266,7 +268,11 @@ impl Driver {
                 Ok(true) => push_acp_snapshot_since(&slot.value, true, None),
                 Ok(false) => {}
                 Err(error) => {
-                    self.fail_run_without_session_ownership(&run, &error);
+                    self.fail_run_without_session_ownership(
+                        &run,
+                        AutomationRunFailure::SessionConflict,
+                        error,
+                    );
                     continue;
                 }
             }
@@ -284,7 +290,7 @@ impl Driver {
                         provider_id(&slot.value),
                     );
                 } else {
-                    self.fail_run(&run, "daemon 重启发生在投递边界，结果未知，未自动重放");
+                    self.fail_run(&run, AutomationRunFailure::RestartDuringDelivery, None);
                 }
             }
         }
@@ -351,7 +357,11 @@ impl Driver {
 
         for mut run in pending {
             if !std::path::Path::new(&run.context.cwd).is_dir() {
-                self.fail_run(&run, "自动化的 Smelt 工作区不存在或不是目录");
+                self.fail_run(
+                    &run,
+                    AutomationRunFailure::WorkspaceMissing,
+                    Some(run.context.cwd.clone()),
+                );
                 continue;
             }
             let agent_definition_id = match &run.context.action {
@@ -367,7 +377,7 @@ impl Driver {
             let mut execution = match load_agent_execution_definition(&agent_definition_id) {
                 Ok(execution) => execution,
                 Err(error) => {
-                    self.fail_run(&run, &error);
+                    self.fail_run(&run, AutomationRunFailure::AgentUnavailable, Some(error));
                     continue;
                 }
             };
@@ -383,17 +393,17 @@ impl Driver {
                         snapshot.runs.into_iter().find(|bound| bound.id == run.id)
                     }
                     Err(error) => {
-                        self.fail_run(&run, &format!("保存智能体执行上下文失败: {error}"));
+                        self.fail_run(&run, AutomationRunFailure::ContextNotSaved, Some(error));
                         continue;
                     }
                 };
                 let Some(bound) = bound else {
-                    self.fail_run(&run, "保存智能体执行上下文失败: Run 已不在历史里");
+                    self.fail_run(&run, AutomationRunFailure::ContextNotSaved, None);
                     continue;
                 };
                 run.context = bound.context;
             } else if run.context.engine_kind_id.as_deref() != Some(execution.kind.id()) {
-                self.fail_run(&run, "智能体执行引擎与 Run 快照不一致");
+                self.fail_run(&run, AutomationRunFailure::EngineChanged, None);
                 continue;
             }
             if let Some(instructions) = run.context.agent_instructions.as_ref() {
@@ -429,7 +439,11 @@ impl Driver {
                 }
             };
             if let Err(error) = self.create_run_session(&run, &session_id, &execution) {
-                self.fail_run(&run, &format!("ACP runtime 启动失败: {error}"));
+                self.fail_run(
+                    &run,
+                    AutomationRunFailure::StartFailed,
+                    Some(error.to_string()),
+                );
             }
         }
     }
@@ -443,7 +457,7 @@ impl Driver {
         // 运行的会话不进工作区目录（hidden，侧栏不被后台运行刷屏）：它叫什么、开在哪、
         // 用的哪个 agent 都在运行记录里，这里只起 runtime。
         find_agent_option_for(execution.kind, None)
-            .ok_or_else(|| format!("没有可用的 {} ACP 配置", execution.kind.label()))?;
+            .ok_or_else(|| format!("no {} ACP launch configuration", execution.kind.label()))?;
         let request = AcpOpenRequest {
             id: session_id.to_string(),
             cwd: Some(run.context.cwd.clone()),
@@ -459,6 +473,7 @@ impl Driver {
             omit_history: false,
             initial_config: Vec::new(),
             initial_prompt: None,
+            disallowed_tools: Vec::new(),
         };
         ensure_acp_session(&request, &self.sessions, &self.acp_sessions, &self.event_hub)?;
         Ok(())
@@ -480,10 +495,8 @@ impl Driver {
                     &run,
                     AutomationRunStatus::Failed,
                     None,
-                    Some(delivery_failure_message(
-                        run.delivery_attempts,
-                        "投递预算已耗尽",
-                    )),
+                    Some(AutomationRunFailure::DeliveryFailed),
+                    None,
                     run.provider_session_id.clone(),
                 );
                 continue;
@@ -492,7 +505,7 @@ impl Driver {
                 continue;
             }
             let Some(session_id) = run.session_id.as_deref() else {
-                self.fail_run(&run, "排队投递缺少 ACP 会话");
+                self.fail_run(&run, AutomationRunFailure::SessionMissing, None);
                 continue;
             };
             let Some(slot) = self.acp_sessions.get(session_id) else {
@@ -514,7 +527,7 @@ impl Driver {
                 continue;
             }
             if phase == DaemonPhase::Dead {
-                self.fail_run(&run, "ACP runtime 在投递前退出");
+                self.fail_run(&run, AutomationRunFailure::ExitedBeforeDelivery, None);
                 continue;
             }
             if phase != DaemonPhase::Idle
@@ -555,7 +568,7 @@ impl Driver {
                     run.status,
                     AutomationRunStatus::Starting | AutomationRunStatus::Queued
                 ) {
-                    self.fail_run(&run, "ACP 会话已丢失，结果未知，未自动重放");
+                    self.fail_run(&run, AutomationRunFailure::SessionLost, None);
                 }
                 continue;
             };
@@ -567,8 +580,12 @@ impl Driver {
                     active: reduced.active_delivery_id.as_deref() == Some(run.id.as_str()),
                     completed: reduced.completed_delivery_id.as_deref() == Some(run.id.as_str()),
                     outcome: reduced.turn_outcome,
-                    output: completed_turn_output(reduced.entries()),
-                    error: (!reduced.end_reason.is_empty()).then(|| reduced.end_reason.clone()),
+                    output: crate::acp_host::last_turn_reply(reduced.entries()),
+                    error: Some(smelt_core::acp_session::end_text(
+                        reduced.end_code.as_ref(),
+                        &reduced.end_reason,
+                    ))
+                    .filter(|reason| !reason.is_empty()),
                     provider_session_id: reduced
                         .history_session_id
                         .clone()
@@ -586,11 +603,8 @@ impl Driver {
                     &run,
                     AutomationRunStatus::Failed,
                     None,
-                    Some(
-                        projection
-                            .error
-                            .unwrap_or_else(|| "ACP runtime 已退出".to_string()),
-                    ),
+                    Some(AutomationRunFailure::AgentExited),
+                    projection.error,
                     projection.provider_session_id,
                 );
                 continue;
@@ -610,7 +624,7 @@ impl Driver {
                 let result = defer_or_fail_delivery(
                     &mut self.automations.lock().unwrap(),
                     &run.id,
-                    "投递后未收到 ACP 接收确认",
+                    "no delivery acknowledgement from the agent",
                     projection.provider_session_id,
                     Local::now().timestamp(),
                 );
@@ -623,21 +637,18 @@ impl Driver {
     }
 
     fn finish_from_projection(&mut self, run: &AutomationRun, projection: RunProjection) {
-        let (status, error) = match projection.outcome {
-            Some(AcpTurnOutcome::Succeeded) => (AutomationRunStatus::Completed, None),
-            Some(AcpTurnOutcome::Cancelled) => (AutomationRunStatus::Cancelled, None),
+        let (status, error_code, error) = match projection.outcome {
+            Some(AcpTurnOutcome::Succeeded) => (AutomationRunStatus::Completed, None, None),
+            Some(AcpTurnOutcome::Cancelled) => (AutomationRunStatus::Cancelled, None, None),
             Some(outcome) => (
                 AutomationRunStatus::Failed,
-                Some(
-                    outcome
-                        .failure_message()
-                        .unwrap_or("回合未正常完成")
-                        .to_string(),
-                ),
+                Some(AutomationRunFailure::TurnFailed),
+                outcome.failure().map(|failure| failure.text()),
             ),
             None => (
                 AutomationRunStatus::Failed,
-                Some("ACP 回合结束但没有结果状态".to_string()),
+                Some(AutomationRunFailure::TurnWithoutOutcome),
+                None,
             ),
         };
         self.persist_run_transcript(&run.id, &projection.entries);
@@ -645,6 +656,7 @@ impl Driver {
             run,
             status,
             (!projection.output.trim().is_empty()).then_some(projection.output),
+            error_code,
             error,
             projection.provider_session_id,
         );
@@ -689,23 +701,36 @@ impl Driver {
         }
     }
 
-    fn fail_run(&mut self, run: &AutomationRun, error: &str) {
+    /// 记成失败：原因种类给客户端按语言说，细节是底层报错原样。
+    fn fail_run(
+        &mut self,
+        run: &AutomationRun,
+        failure: AutomationRunFailure,
+        detail: Option<String>,
+    ) {
         self.finish_run(
             run,
             AutomationRunStatus::Failed,
             None,
-            Some(error.to_string()),
+            Some(failure),
+            detail,
             None,
         );
     }
 
-    fn fail_run_without_session_ownership(&mut self, run: &AutomationRun, error: &str) {
+    fn fail_run_without_session_ownership(
+        &mut self,
+        run: &AutomationRun,
+        failure: AutomationRunFailure,
+        detail: String,
+    ) {
         let now = Local::now().timestamp();
         let finished = self.automations.lock().unwrap().finish_run(
             &run.id,
             AutomationRunStatus::Failed,
             None,
-            Some(error.to_string()),
+            Some(failure),
+            Some(detail),
             None,
             now,
         );
@@ -732,6 +757,7 @@ impl Driver {
         run: &AutomationRun,
         status: AutomationRunStatus,
         output: Option<String>,
+        error_code: Option<AutomationRunFailure>,
         error: Option<String>,
         provider_session_id: Option<String>,
     ) {
@@ -739,6 +765,7 @@ impl Driver {
             &run.id,
             status,
             output,
+            error_code,
             error,
             provider_session_id,
             Local::now().timestamp(),
@@ -751,7 +778,7 @@ impl Driver {
 
     fn start_shell_run(&mut self, run: AutomationRun) {
         let Some((command, args)) = run.context.action.shell_invocation() else {
-            self.fail_run(&run, "不是可执行的 Shell 动作");
+            self.fail_run(&run, AutomationRunFailure::NotShellAction, None);
             return;
         };
         if !self.shell_inflight.insert(run.id.clone()) {
@@ -794,7 +821,11 @@ impl Driver {
                 Ok(child) => child,
                 Err(error) => {
                     self.shell_inflight.remove(&run.id);
-                    self.fail_run(&run, &format!("命令启动失败: {error}"));
+                    self.fail_run(
+                        &run,
+                        AutomationRunFailure::CommandStartFailed,
+                        Some(error.to_string()),
+                    );
                     return;
                 }
             }
@@ -809,9 +840,7 @@ impl Driver {
         if let Err(error) = std::thread::Builder::new()
             .name("smelt-automation-shell".into())
             .spawn(move || {
-                let result = child
-                    .wait_with_output()
-                    .map_err(|error| format!("命令等待失败: {error}"));
+                let result = child.wait_with_output().map_err(|error| error.to_string());
                 let _ = tx.send(DriverWake::Shell(ShellOutcome { run_id, result }));
             })
         {
@@ -826,7 +855,11 @@ impl Driver {
                 #[cfg(windows)]
                 smelt_sys::process::release_tree(pid as u32);
             }
-            self.fail_run(&run, &format!("无法启动 Shell 执行线程: {error}"));
+            self.fail_run(
+                &run,
+                AutomationRunFailure::CommandStartFailed,
+                Some(error.to_string()),
+            );
         }
     }
 
@@ -925,19 +958,23 @@ impl Driver {
                 } else {
                     Some(stdout)
                 };
-                let error = if output.status.success() {
-                    if stderr.is_empty() {
-                        None
-                    } else {
-                        Some(stderr)
-                    }
+                // 成功了但 stderr 有输出：没有原因种类，stderr 原样当报错。
+                let (error_code, error) = if output.status.success() {
+                    (None, (!stderr.is_empty()).then_some(stderr))
                 } else {
-                    Some(format!("命令退出码: {:?}\n{stderr}", output.status.code()))
+                    let code = output
+                        .status
+                        .code()
+                        .map_or_else(|| "signal".to_string(), |code| code.to_string());
+                    (
+                        Some(AutomationRunFailure::CommandFailed),
+                        Some(format!("exit {code}\n{stderr}").trim_end().to_string()),
+                    )
                 };
-                self.finish_run(&run, status, combined_output, error, None);
+                self.finish_run(&run, status, combined_output, error_code, error, None);
             }
             Err(error) => {
-                self.finish_run(&run, AutomationRunStatus::Failed, None, Some(error), None);
+                self.fail_run(&run, AutomationRunFailure::CommandWaitFailed, Some(error));
             }
         }
     }
@@ -1025,6 +1062,7 @@ fn publish_automation_projection(event_hub: &EventHubHandle, snapshot: &Automati
     }
 }
 
+/// 会话已经绑在别的运行上时，`Err` 是那条运行的 id。
 fn ensure_run_conversation_binding(
     session: &super::AcpSession,
     run_id: &str,
@@ -1038,9 +1076,7 @@ fn ensure_run_conversation_binding(
             });
             Ok(true)
         }
-        Some(ConversationBinding::Automation { run_id: bound }) => {
-            Err(format!("自动化 ACP 会话已属于其他 Run: {bound}"))
-        }
+        Some(ConversationBinding::Automation { run_id: bound }) => Err(bound.clone()),
     }
 }
 
@@ -1067,7 +1103,7 @@ fn dispatch_if_still_queued(
             provider_session_id.clone(),
             Local::now().timestamp(),
         )
-        .map_err(|error| format!("持久化投递边界失败: {error}"))?;
+        .map_err(|error| format!("Couldn't persist the delivery boundary: {error}"))?;
     publish_automation_projection(event_hub, &dispatching);
     let delivery =
         apply_acp_user_action(session, pi_full_access_action(), event_hub).and_then(|_| {
@@ -1096,7 +1132,7 @@ fn dispatch_if_still_queued(
             provider_session_id,
             Local::now().timestamp(),
         )
-        .map_err(|rollback| format!("{error}; 记录投递失败状态失败: {rollback}"))?;
+        .map_err(|rollback| format!("{error}; couldn't record the failed delivery: {rollback}"))?;
         publish_automation_projection(event_hub, &snapshot);
         return Err(error.to_string());
     }
@@ -1119,10 +1155,6 @@ fn delivery_attempts_exhausted(attempts: u32) -> bool {
     attempts >= MAX_DELIVERY_ATTEMPTS
 }
 
-fn delivery_failure_message(attempts: u32, error: &str) -> String {
-    format!("自动化投递在 {attempts} 次尝试后失败: {error}")
-}
-
 fn delivery_retry_is_due(run: &AutomationRun, now: i64) -> bool {
     run.delivery_attempt_at.is_none_or(|attempted| {
         now.saturating_sub(attempted) >= delivery_retry_delay_seconds(run.delivery_attempts)
@@ -1141,38 +1173,21 @@ fn defer_or_fail_delivery(
         .runs
         .into_iter()
         .find(|run| run.id == run_id)
-        .ok_or_else(|| format!("Run 不存在: {run_id}"))?
+        .ok_or_else(|| format!("No such run: {run_id}"))?
         .delivery_attempts;
     if delivery_attempts_exhausted(attempts) {
         owner.finish_run(
             run_id,
             AutomationRunStatus::Failed,
             None,
-            Some(delivery_failure_message(attempts, error)),
+            Some(AutomationRunFailure::DeliveryFailed),
+            Some(error.to_string()),
             provider_session_id,
             now,
         )
     } else {
         owner.defer_run_delivery(run_id, now)
     }
-}
-
-fn completed_turn_output(entries: &[AcpEntry]) -> String {
-    let turn_start = entries
-        .iter()
-        .rposition(|entry| matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }))
-        .unwrap_or(0);
-    entries[turn_start..]
-        .iter()
-        .rev()
-        .find_map(|entry| match entry {
-            AcpEntry::Assistant {
-                text,
-                thought: false,
-            } if !text.trim().is_empty() => Some(text.clone()),
-            _ => None,
-        })
-        .unwrap_or_default()
 }
 
 fn provider_id(session: &super::AcpSession) -> Option<String> {
@@ -1429,7 +1444,10 @@ mod lifecycle_tests {
         let cold_snapshot = cold_store.lock().unwrap().snapshot();
         let cold_run = &cold_snapshot.runs[0];
         assert_eq!(cold_run.status, AutomationRunStatus::Failed);
-        assert!(cold_run.error.as_deref().unwrap().contains("结果未知"));
+        assert_eq!(
+            cold_run.error_code,
+            Some(AutomationRunFailure::RestartDuringDelivery)
+        );
 
         let (mut acknowledged, acknowledged_store, acknowledged_run) = dispatching_fixture(true);
         acknowledged.recover_active_runs();
@@ -1456,13 +1474,11 @@ mod lifecycle_tests {
         conflicting.recover_active_runs();
         let conflict = conflicting_store.lock().unwrap().snapshot();
         assert_eq!(conflict.runs[0].status, AutomationRunStatus::Failed);
-        assert!(
-            conflict.runs[0]
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("其他 Run")
+        assert_eq!(
+            conflict.runs[0].error_code,
+            Some(AutomationRunFailure::SessionConflict)
         );
+        assert_eq!(conflict.runs[0].error.as_deref(), Some("another-run"));
         assert!(conflict.runs[0].runtime_released_at.is_some());
         conflicting.release_terminal_sessions();
         assert!(conflicting.acp_sessions.get("session-1").is_some());
@@ -1508,7 +1524,7 @@ mod lifecycle_tests {
             .unwrap();
         assert_eq!(run.delivery_attempts, MAX_DELIVERY_ATTEMPTS);
         assert_eq!(run.status, AutomationRunStatus::Failed);
-        assert!(run.error.as_deref().unwrap().contains("投递预算已耗尽"));
+        assert_eq!(run.error_code, Some(AutomationRunFailure::DeliveryFailed));
     }
 
     #[test]
@@ -2017,7 +2033,8 @@ mod tests {
         let run = owner.snapshot().runs.into_iter().next().unwrap();
         assert_eq!(run.delivery_attempts, MAX_DELIVERY_ATTEMPTS);
         assert_eq!(run.status, AutomationRunStatus::Failed);
-        assert!(run.error.as_deref().unwrap().contains("5 次尝试后失败"));
+        assert_eq!(run.error_code, Some(AutomationRunFailure::DeliveryFailed));
+        assert_eq!(run.error.as_deref(), Some("provider unavailable"));
     }
 
     #[test]

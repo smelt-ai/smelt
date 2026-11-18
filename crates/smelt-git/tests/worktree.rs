@@ -8,6 +8,7 @@ use smelt_git::worktree::{
     CreateWorkset, MergeState, Repository, create_workset, finish_workset, inspect_workset,
     refresh_workset_bases, rename_workset,
 };
+use smelt_runtime_client::protocol::reason::ControlReason;
 
 fn git(root: &Path, args: &[&str]) -> Output {
     let output = Command::new("git")
@@ -293,8 +294,16 @@ fn finish_accepts_branches_merged_on_the_remote_by_merge_squash_or_rebase() {
         merge_on_remote(project, "api", &workset.branch, how);
 
         // 本地的远端分支还是旧的：不刷新就判成没合并。
-        let stale = finish_workset(&workset, false).unwrap_err().to_string();
-        assert!(stale.contains("还有改动没进 origin/main"), "{how}: {stale}");
+        let stale = finish_workset(&workset, false).unwrap_err();
+        assert_eq!(
+            stale.reason(),
+            Some(&ControlReason::WorktreeBranchUnmerged {
+                repository: "api".into(),
+                branch: workset.branch.clone(),
+                base: "origin/main".into(),
+            }),
+            "{how}: {stale}"
+        );
 
         assert!(refresh_workset_bases(&workset).is_empty(), "{how}");
         finish_workset(&workset, false).unwrap_or_else(|error| panic!("{how}: {error}"));
@@ -345,8 +354,14 @@ fn unconfirmed_merges_block_finishing_unless_allowed() {
     let states = inspect_workset(&workset).unwrap();
     assert_eq!(states[0].merge, Some(MergeState::Unconfirmed));
     assert!(!states[0].dirty);
-    let error = finish_workset(&workset, false).unwrap_err().to_string();
-    assert!(error.contains("无法确认"), "{error}");
+    let error = finish_workset(&workset, false).unwrap_err();
+    assert!(
+        matches!(
+            error.reason(),
+            Some(ControlReason::WorktreeMergeUnconfirmed { .. })
+        ),
+        "{error}"
+    );
 
     fs::write(worktree.join("scratch.txt"), "x").unwrap();
     assert!(inspect_workset(&workset).unwrap()[0].dirty);
@@ -393,7 +408,7 @@ fn refresh_reports_unreachable_remotes_without_failing() {
     let failures = refresh_workset_bases(&workset);
     assert_eq!(failures.len(), 1);
     assert!(
-        failures[0].contains("仓库 api fetch origin 失败"),
+        failures[0].contains("repository api couldn't fetch origin"),
         "{failures:?}"
     );
     finish_workset(&workset, false).unwrap();

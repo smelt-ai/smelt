@@ -16,6 +16,7 @@ use api::model::workspace_directory::WorkspaceConversation;
 use api::ui::ui_theme::agent_status_u32;
 use api::{DockBadge, RuntimeKey, StatusIcon, StatusMenu, StatusMenuItem};
 use gpui::{App, Task};
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 use crate::sessions::{self, Activate};
@@ -177,7 +178,7 @@ fn conversation_row(
         let title = states
             .get(&acp.sid)
             .and_then(|state| state.conversation_name.clone())
-            .unwrap_or_else(|| "对话".to_string());
+            .unwrap_or_else(|| t!("fallback.conversation").into_owned());
         (vec![acp.sid.clone()], title, Some(acp.agent.clone()))
     } else {
         let started: Vec<_> = conversation
@@ -191,7 +192,7 @@ fn conversation_row(
         let title = started
             .iter()
             .find_map(|(id, _)| states.get(id)?.conversation_name.clone())
-            .unwrap_or_else(|| "终端".to_string());
+            .unwrap_or_else(|| t!("fallback.terminal").into_owned());
         // 明确的启动命令优先；裸终端里手动起的 agent 认 hook 报的。
         let agent = first
             .launch_cmd
@@ -264,11 +265,11 @@ fn menu(rows: Vec<Row>, attention: &HashMap<String, bool>) -> Menu {
                 .or_else(|| row.ids.first())?
                 .clone();
             let (shown, text) = if requires_action {
-                (AgentStatus::NeedsYou, "需要你")
+                (AgentStatus::NeedsYou, t!("status.needs_you"))
             } else if status == AgentStatus::Running {
-                (AgentStatus::Running, "运行中")
+                (AgentStatus::Running, t!("status.running"))
             } else {
-                (AgentStatus::Idle, "未读")
+                (AgentStatus::Idle, t!("status.unread"))
             };
             Some((
                 shown,
@@ -313,7 +314,7 @@ impl Menu {
             items.push(StatusMenuItem::Separator);
         }
         items.push(StatusMenuItem::Action {
-            label: "打开 smelt 主窗口".to_string(),
+            label: t!("menu.show_main_window").into_owned(),
             icon: None,
             command: api::SHOW_MAIN_WINDOW.id().to_string(),
             args: api::serde_json::Value::Null,
@@ -346,9 +347,30 @@ fn status_title(attention: usize, running: usize) -> String {
 fn status_tooltip(attention: usize, running: usize) -> String {
     match (attention, running) {
         (0, 0) => "smelt".to_string(),
-        (attention, 0) => format!("{attention} 个会话需要关注"),
-        (0, running) => format!("{running} 个会话运行中"),
-        (attention, running) => format!("{attention} 个会话需要关注，{running} 个会话运行中"),
+        (attention, 0) => attention_text(attention),
+        (0, running) => running_text(running),
+        (attention, running) => t!(
+            "tooltip.both",
+            attention = attention_text(attention),
+            running = running_text(running)
+        )
+        .into_owned(),
+    }
+}
+
+fn attention_text(count: usize) -> String {
+    if count == 1 {
+        t!("tooltip.attention.one").into_owned()
+    } else {
+        t!("tooltip.attention.other", count = count).into_owned()
+    }
+}
+
+fn running_text(count: usize) -> String {
+    if count == 1 {
+        t!("tooltip.running.one").into_owned()
+    } else {
+        t!("tooltip.running.other", count = count).into_owned()
     }
 }
 

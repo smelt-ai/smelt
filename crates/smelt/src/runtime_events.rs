@@ -25,6 +25,7 @@
 //! 订阅，核心订阅断了就关掉，下一轮重开。运行时不认识某个话题时只拒绝那条单独订阅，
 //! 核心订阅和其他话题不受影响。本机外观回执请求也走独立订阅。
 
+use rust_i18n::t;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -157,7 +158,9 @@ pub(crate) fn upgrade_remote(key: &RuntimeKey, cx: &mut App) {
     crate::runtimes::set_upgrade_note(key, None, cx);
     let _ = status_tx.try_send((
         key.clone(),
-        RuntimeStatus::Upgrading(format!("正在升级到 v{DESKTOP_VERSION}")),
+        RuntimeStatus::Upgrading(
+            t!("upgrade.upgrading_to", version = DESKTOP_VERSION).into_owned(),
+        ),
     ));
     let key = key.clone();
     cx.spawn(async move |cx| {
@@ -174,18 +177,24 @@ pub(crate) fn upgrade_remote(key: &RuntimeKey, cx: &mut App) {
             .await;
         let note = match outcome {
             PushUpgrade::Restarting => None,
-            PushUpgrade::Current => Some(format!("已经是 v{DESKTOP_VERSION}，没有可升的")),
-            PushUpgrade::Staged(reason) => Some(format!("新版本已装好，{reason}")),
-            PushUpgrade::Unsupported => Some(format!(
-                "这台运行时太旧，不会自动升级，到那台机器上执行一次：{}",
-                crate::runtimes::manual_upgrade_command()
-            )),
-            PushUpgrade::Failed(error) => Some(format!("升级失败：{error}")),
+            PushUpgrade::Current => {
+                Some(t!("upgrade.current", version = DESKTOP_VERSION).into_owned())
+            }
+            PushUpgrade::Staged(reason) => Some(t!("upgrade.staged", reason = reason).into_owned()),
+            PushUpgrade::Unsupported => Some(
+                t!(
+                    "upgrade.unsupported",
+                    command = crate::runtimes::manual_upgrade_command()
+                )
+                .into_owned(),
+            ),
+            PushUpgrade::Failed(error) => Some(t!("upgrade.failed", error = error).into_owned()),
         };
         let restarting = note.is_none();
         let _ = status_tx.try_send((
             key.clone(),
-            status.unwrap_or_else(|| RuntimeStatus::Upgrading("正在重启".to_string())),
+            status
+                .unwrap_or_else(|| RuntimeStatus::Upgrading(t!("upgrade.restarting").into_owned())),
         ));
         cx.update(|cx| {
             crate::runtimes::set_upgrade_note(&key, note, cx);
@@ -293,8 +302,8 @@ fn unavailable_reason(error: &smelt_client::daemon_state::DaemonEventClientError
         DaemonEventClientError::Server {
             code: smelt_event_protocol::SubscribeErrorCode::Rejected,
             ..
-        } => "这台机器的运行时版本较旧，升级运行时后可用".to_string(),
-        error => format!("运行时的推送出错：{error}"),
+        } => t!("runtime.events_rejected").into_owned(),
+        error => t!("runtime.events_failed", error = error).into_owned(),
     }
 }
 
@@ -490,11 +499,12 @@ pub(crate) fn spawn_subscription(
                         // 请不动它：说清到哪儿去更新，不发注定失败的升级请求。
                         status = RuntimeStatus::Incompatible {
                             version,
-                            detail: format!(
-                                "{detail}。这台运行时随那台机器上的 Smelt 一起更新，不能远程升级：\
-                                 到那台机器上把 Smelt 更新到 v{}",
-                                crate::runtimes::DESKTOP_VERSION
-                            ),
+                            detail: t!(
+                                "upgrade.update_smelt_there",
+                                detail = detail,
+                                version = crate::runtimes::DESKTOP_VERSION
+                            )
+                            .into_owned(),
                             fix,
                         };
                     } else if !upgrade_requested && smelt_version::RELEASE.is_some() {
@@ -578,7 +588,7 @@ pub(crate) fn spawn_subscription(
                         // 是退出了的话，下一轮探测会把它拉起来。
                         let _ = status_tx.try_send((
                             key.clone(),
-                            RuntimeStatus::Offline("连接断开".to_string()),
+                            RuntimeStatus::Offline(t!("runtime.disconnected").into_owned()),
                         ));
                         let _ = sender
                             .states
@@ -633,13 +643,13 @@ fn upgrade_local_then_probe(
 
     let _ = status_tx.try_send((
         runtime.key().clone(),
-        RuntimeStatus::Upgrading("正在重启本机运行时".to_string()),
+        RuntimeStatus::Upgrading(t!("upgrade.restarting_local").into_owned()),
     ));
     match crate::local_daemon::upgrade_daemon() {
         UpgradeOutcome::Upgraded => crate::runtimes::local_status(runtime.client()),
         UpgradeOutcome::Failed => RuntimeStatus::Incompatible {
             version: version.to_string(),
-            detail: format!("{detail}。本机运行时没有换成当前版本，可在设置里重启守护进程"),
+            detail: t!("upgrade.local_failed", detail = detail).into_owned(),
             fix,
         },
     }
@@ -662,10 +672,10 @@ fn upgrade_then_probe(
     };
     let still_incompatible = |note: String| RuntimeStatus::Incompatible {
         version: version.to_string(),
-        detail: format!("{detail}。{note}"),
+        detail: t!("upgrade.detail_note", detail = detail, note = note).into_owned(),
         fix: IncompatibleFix::UpgradeRuntime,
     };
-    report(format!("正在升级到 v{DESKTOP_VERSION}"));
+    report(t!("upgrade.upgrading_to", version = DESKTOP_VERSION).into_owned());
     match push_upgrade(runtime.client()) {
         PushUpgrade::Restarting => {}
         // 老运行时正忙时会先装好、等空闲再换。
@@ -673,18 +683,21 @@ fn upgrade_then_probe(
             return still_incompatible(reason);
         }
         PushUpgrade::Current => {
-            return still_incompatible(format!(
-                "运行时已经是 v{DESKTOP_VERSION}，仍对不上：这个桌面多半是还没发布的开发构建"
-            ));
+            return still_incompatible(
+                t!("upgrade.still_mismatched_dev", version = DESKTOP_VERSION).into_owned(),
+            );
         }
         PushUpgrade::Unsupported => {
-            return still_incompatible(format!(
-                "这台运行时太旧，不会自动升级，到那台机器上执行一次：{}",
-                crate::runtimes::manual_upgrade_command()
-            ));
+            return still_incompatible(
+                t!(
+                    "upgrade.unsupported",
+                    command = crate::runtimes::manual_upgrade_command()
+                )
+                .into_owned(),
+            );
         }
         PushUpgrade::Failed(error) => {
-            return still_incompatible(format!("自动升级失败：{error}"));
+            return still_incompatible(t!("upgrade.auto_failed", error = error).into_owned());
         }
     }
     // 重启时旧进程连同 iroh 端点一起退出，新进程重新上线要几秒。
@@ -706,9 +719,12 @@ fn upgrade_then_probe(
                     fix,
                 } => RuntimeStatus::Incompatible {
                     version,
-                    detail: format!(
-                        "{detail}。请它升到 v{DESKTOP_VERSION} 后仍对不上，详见那台机器的 ~/.smelt/daemon.log"
-                    ),
+                    detail: t!(
+                        "upgrade.still_mismatched",
+                        detail = detail,
+                        version = DESKTOP_VERSION
+                    )
+                    .into_owned(),
                     fix,
                 },
                 status => status,

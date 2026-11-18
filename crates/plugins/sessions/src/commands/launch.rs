@@ -2,6 +2,7 @@
 //! 函数。启动命令、环境变量、要定下的选项都按会话所在那台机器的配置现算：远程机器有自己
 //! 的 CLI 和配置，本机的命令和环境变量（可能含密钥）不能带过去。
 
+use rust_i18n::t;
 use std::collections::BTreeMap;
 
 use smelt_plugin_api::model::agent_definition::agent_engine_kinds;
@@ -34,10 +35,10 @@ pub(super) fn settings_of(
     match state {
         Some(AgentSettingsState::Ready { settings }) => Ok(settings),
         Some(AgentSettingsState::Unavailable { reason }) => {
-            Err(format!("那台机器的智能体配置不可用：{reason}"))
+            Err(t!("error.agent_settings_unavailable", reason = reason).into_owned())
         }
-        Some(AgentSettingsState::Absent) => Err(api::MACHINE_REMOVED.to_string()),
-        None => Err("正在读取那台机器的智能体配置，请稍后再试".to_string()),
+        Some(AgentSettingsState::Absent) => Err(api::machine_removed()),
+        None => Err(t!("error.agent_settings_loading").into_owned()),
     }
 }
 
@@ -54,7 +55,7 @@ pub(super) fn started_acp(
         } => agent_acp(settings, agent_definition_id, cwd, sid),
         StartWith::Engine { agent, profile_id } => {
             let kind = ConversationAgentKind::from_id(agent)
-                .ok_or_else(|| format!("认不出 agent「{agent}」"))?;
+                .ok_or_else(|| t!("error.unknown_agent", agent = agent).into_owned())?;
             engine_acp(settings, kind, profile_id.as_deref(), cwd, sid)
         }
     }
@@ -70,15 +71,12 @@ fn agent_acp(
 ) -> Result<WorkspaceAcp, String> {
     let definition = settings
         .find_agent(definition_id)
-        .ok_or_else(|| "智能体已经不存在".to_string())?;
+        .ok_or_else(|| t!("error.agent_gone").into_owned())?;
     let Some(kind) = definition.engine_kind() else {
-        return Err("请选择一个可用的执行引擎".to_string());
+        return Err(t!("error.choose_engine").into_owned());
     };
     if !agent_engine_kinds().contains(&kind) {
-        return Err(format!(
-            "{} 暂未开放为产品级智能体引擎，请改用 Pi",
-            kind.short_label()
-        ));
+        return Err(t!("error.engine_not_available", engine = kind.short_label()).into_owned());
     }
     let (kind, launch) = settings.resolve_agent(definition)?;
     let mut config_values = agent_config(kind);
@@ -134,19 +132,20 @@ pub(super) fn engine_launch(
 ) -> Result<ConversationLaunchSpec, String> {
     let Some(id) = profile_id else {
         if kind == ConversationAgentKind::Custom {
-            return Err("通用 ACP 要选一个自定义 Agent".to_string());
+            return Err(t!("error.custom_needs_profile").into_owned());
         }
         return Ok(settings.acp_launch_for(kind));
     };
     let profile = settings
         .find_profile(id)
-        .ok_or_else(|| format!("找不到自定义 Agent「{id}」，可能已经删了"))?;
+        .ok_or_else(|| t!("error.profile_missing", id = id).into_owned())?;
     if profile.kind() != Some(kind) {
-        return Err(format!(
-            "自定义 Agent「{}」不是 {} 的",
-            profile.label,
-            kind.short_label()
-        ));
+        return Err(t!(
+            "error.profile_kind_mismatch",
+            profile = profile.label,
+            engine = kind.short_label()
+        )
+        .into_owned());
     }
     settings.profile_launch_spec(profile)
 }
@@ -203,7 +202,7 @@ pub(super) fn resumed_acp(
 ) -> Result<WorkspaceAcp, String> {
     let kind = HistorySourceKind::from_id(&args.agent)
         .and_then(HistorySourceKind::acp)
-        .ok_or_else(|| format!("「{}」不支持 ACP 续接", args.agent))?;
+        .ok_or_else(|| t!("error.no_acp_resume", agent = args.agent).into_owned())?;
     let mut acp = engine_acp(
         settings,
         kind,
@@ -235,7 +234,7 @@ pub(super) fn handoff_acp(
     sid: String,
 ) -> Result<WorkspaceAcp, String> {
     let kind = ConversationAgentKind::from_id(&args.agent)
-        .ok_or_else(|| format!("认不出 agent「{}」，交接取消", args.agent))?;
+        .ok_or_else(|| t!("error.handoff_unknown_agent", agent = args.agent).into_owned())?;
     let mut acp = engine_acp(
         settings,
         kind,
@@ -362,7 +361,7 @@ mod tests {
         let all = vec![ready(RuntimeKey::Local, local.clone())];
         assert_eq!(settings_of(all.clone(), &RuntimeKey::Local).unwrap(), local);
         let remote = settings_of(all, &RuntimeKey::Remote("box".into())).unwrap_err();
-        assert!(remote.contains("正在读取"), "{remote}");
+        assert!(remote.contains("Still reading"), "{remote}");
 
         let unavailable = vec![MachineAgentSettings {
             machine: RuntimeKey::Local,
@@ -417,18 +416,18 @@ mod tests {
         };
         let settings = AgentHostSettings::fresh();
         let error = started_acp(&settings, &gone, "/r".into(), "s".into()).unwrap_err();
-        assert_eq!(error, "智能体已经不存在");
+        assert_eq!(error, "The agent no longer exists");
 
         let writer = StartWith::Agent {
             agent_definition_id: "writer".into(),
         };
         let unknown = with_agent("no-such-engine", ("", ""));
         let error = started_acp(&unknown, &writer, "/r".into(), "s".into()).unwrap_err();
-        assert_eq!(error, "请选择一个可用的执行引擎");
+        assert_eq!(error, "Choose an available engine");
 
         let closed = with_agent(ConversationAgentKind::Claude.id(), ("", ""));
         let error = started_acp(&closed, &writer, "/r".into(), "s".into()).unwrap_err();
-        assert!(error.contains("请改用 Pi"), "{error}");
+        assert!(error.contains("use Pi instead"), "{error}");
     }
 
     #[test]
@@ -471,7 +470,7 @@ mod tests {
             profile_id: Some("gone".into()),
         };
         let error = started_acp(&settings, &missing, "/r".into(), "s".into()).unwrap_err();
-        assert!(error.contains("可能已经删了"), "{error}");
+        assert!(error.contains("may have been deleted"), "{error}");
     }
 
     #[test]

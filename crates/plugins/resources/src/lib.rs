@@ -26,12 +26,14 @@ use gpui::{
     App, AppContext as _, AsyncApp, Context, IntoElement, Render, SharedString, Subscription, Task,
     WeakEntity, Window,
 };
-use smelt_plugin_api as api;
+use smelt_plugin_api::{self as api, text};
 
 use monitor::{
     CALL_TIMEOUT, DesktopSample, INTERVAL, PRIME_DELAY, PanelSnapshot, ResourceMonitor,
     RuntimeResults, SortBy,
 };
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.resources";
@@ -53,7 +55,7 @@ struct Activate {
 pub fn register(cx: &mut App) {
     let spec = ViewSpec {
         name: "main".into(),
-        title: "资源占用".into(),
+        title: text!("page.title"),
         icon: IconName::MemoryStick.path(),
         draws_top_bar: false,
         instances: false,
@@ -70,11 +72,17 @@ pub fn register(cx: &mut App) {
                 "慢",
                 "活动监视器",
                 "GPUI",
+                "resources",
+                "performance",
+                "memory",
+                "slow",
+                "Activity Monitor",
             ]
             .into_iter()
             .map(SharedString::from)
             .collect(),
         }),
+        fills: Vec::new(),
         build: Rc::new(|_, cx| Rc::new(cx.new(ResourcesPage::new)) as Rc<dyn ViewHandle>),
     };
     if let Err(error) = api::register_views(OWNER, vec![spec], cx) {

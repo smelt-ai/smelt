@@ -263,6 +263,8 @@ fn appearance() -> AppearanceRecord {
     AppearanceRecord {
         bg_image: Some("/Users/me/bg.png".to_string()),
         bg_image_opacity: 0.25,
+        // 迁移进来的库拿出厂值，和这里一样，迁移的用例才能拿它比。
+        bg_opacity: 0.8,
         theme_mode: "dark".to_string(),
         theme_name: "Default Dark".to_string(),
         ui_font_px: 16,
@@ -429,6 +431,7 @@ fn v14_drops_the_session_ui_and_moves_the_pane_keys() {
             "ui_font_family",
             "font_family",
             "layout_id",
+            "bg_opacity",
         ]
     );
     drop(connection);
@@ -570,6 +573,26 @@ fn layout_states_are_kept_per_layout() {
     };
     store.put_appearance(&chosen).unwrap();
     assert_eq!(store.appearance().unwrap(), Some(chosen));
+    cleanup(&path);
+}
+
+/// 底色不透明度只收 0–1，越界的写不进去。
+#[test]
+fn bg_opacity_outside_unit_range_is_rejected() {
+    let (store, path) = temp_store();
+    for bg_opacity in [-0.1, 1.5] {
+        let record = AppearanceRecord {
+            bg_opacity,
+            ..appearance()
+        };
+        assert!(store.put_appearance(&record).is_err(), "{bg_opacity}");
+    }
+    let record = AppearanceRecord {
+        bg_opacity: 0.0,
+        ..appearance()
+    };
+    store.put_appearance(&record).unwrap();
+    assert_eq!(store.appearance().unwrap(), Some(record));
     cleanup(&path);
 }
 

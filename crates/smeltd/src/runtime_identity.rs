@@ -37,7 +37,7 @@ pub(crate) fn runtime_id() -> Option<Arc<str>> {
 fn load_or_create(store: &smelt_store::Store) -> Result<String, String> {
     if let Some(id) = store.runtime_id()? {
         if uuid::Uuid::parse_str(&id).is_err() {
-            return Err(format!("运行时身份不是 UUID：{id:?}"));
+            return Err(format!("The runtime identity isn't a UUID: {id:?}"));
         }
         return Ok(id);
     }

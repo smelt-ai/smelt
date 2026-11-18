@@ -5,6 +5,7 @@
 //! 进出归对话框层（[`crate::dialog`]）。卡片顶边钉在窗口上方，结果变多变少时搜索框不跳。
 //! 不记「最近用过」：要持久化，现在没有真实需要。
 
+use rust_i18n::t;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -43,7 +44,7 @@ impl CommandPalette {
     ) -> Self {
         Self {
             groups,
-            placeholder: "输入命令".into(),
+            placeholder: t!("palette.placeholder").into(),
             on_run: Rc::new(on_run),
             on_close: None,
         }

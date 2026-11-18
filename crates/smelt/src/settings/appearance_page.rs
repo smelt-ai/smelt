@@ -1,6 +1,7 @@
 //! 设置页：外观（主题、字号与字体、布局、背景）。宿主自己的页，和插件的设置页一样是登记
 //! 的视图（见 [`super::view_specs`]）。
 
+use rust_i18n::t;
 use std::rc::Rc;
 
 use super::*;
@@ -20,12 +21,11 @@ pub(super) struct AppearancePage {
     /// 弱引用：「恢复布局」要回工作台做。
     workspace: WeakEntity<Workspace>,
     ui_font_size: Entity<SliderState>,
+    bg_opacity: Entity<SliderState>,
     bg_image_opacity: Entity<SliderState>,
-    /// 代码字体的选项：本机装的字体。建这页时枚举一次——mac 上要逐个字体 face 取族名，一次
-    /// 约 50ms，不能每次刷新都算。
-    code_fonts: Options,
-    /// 界面字体的选项：同一份字体，默认那项换成出厂的界面字体。
-    ui_fonts: Options,
+    /// 本机装的字体，代码字体和界面字体共用；「默认（…）」那项在 render 里现取，跟着语言变。
+    /// 建这页时枚举一次——mac 上要逐个字体 face 取族名，一次约 50ms，不能每次刷新都算。
+    fonts: Options,
     /// 主题选择的选项。要解析每款主题的颜色，只在主题目录变了时重算。
     themes: Rc<Vec<ComboboxGroup>>,
     _subscriptions: Vec<Subscription>,
@@ -41,12 +41,19 @@ impl AppearancePage {
                 .step(1.0)
                 .default_value(appearance.ui_font_px as f32)
         });
-        let bg_image_opacity = cx.new(|_| {
+        let bg_opacity = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
                 .max(100.0)
                 .step(1.0)
-                .default_value(appearance.bg_image_opacity.clamp(0.0, 1.0) * 100.0)
+                .default_value(appearance.bg_opacity.clamp(0.0, 1.0) * 100.0)
+        });
+        let bg_image_opacity = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(MAX_BG_IMAGE_OPACITY * 100.0)
+                .step(1.0)
+                .default_value(appearance.bg_image_opacity.clamp(0.0, MAX_BG_IMAGE_OPACITY) * 100.0)
         });
         let subscriptions = vec![
             cx.subscribe(&ui_font_size, |_, _, event: &SliderEvent, cx| {
@@ -59,9 +66,15 @@ impl AppearancePage {
                     cx.refresh_windows();
                 }
             }),
+            // 配色按窗口底算，拖的时候每一档都重装一次主题，松手前就看得到字色跟着变。
+            cx.subscribe(&bg_opacity, |_, _, event: &SliderEvent, cx| {
+                if let Some(value) = slider_value(event) {
+                    set_bg_opacity(value / 100.0, cx);
+                }
+            }),
             cx.subscribe(&bg_image_opacity, |_, _, event: &SliderEvent, cx| {
                 if let Some(value) = slider_value(event) {
-                    let opacity = (value / 100.0).clamp(0.0, 1.0);
+                    let opacity = (value / 100.0).clamp(0.0, MAX_BG_IMAGE_OPACITY);
                     apply_appearance(move |a| a.bg_image_opacity = opacity, cx);
                     cx.refresh_windows();
                 }
@@ -89,25 +102,13 @@ impl AppearancePage {
         let installed = names
             .into_iter()
             .map(|name| (SharedString::from(name.clone()), SharedString::from(name)));
-        let default = |name: &str| {
-            (
-                SharedString::default(),
-                SharedString::from(format!("默认（{name}）")),
-            )
-        };
-        let code_fonts: Vec<_> = std::iter::once(default(font_config::DEFAULT_FONT_FAMILY))
-            .chain(installed)
-            .collect();
-        let ui_fonts = std::iter::once(default(smelt_ui::kit::UI_FONT_FAMILY))
-            .chain(code_fonts.iter().skip(1).cloned())
-            .collect();
 
         Self {
             workspace,
             ui_font_size,
+            bg_opacity,
             bg_image_opacity,
-            code_fonts: Rc::new(code_fonts),
-            ui_fonts: Rc::new(ui_fonts),
+            fonts: Rc::new(installed.collect()),
             themes: Rc::new(theme_options(cx)),
             _subscriptions: subscriptions,
         }
@@ -118,10 +119,10 @@ impl AppearancePage {
         let appearance = cx.global::<Appearance>();
         let size = appearance.ui_font_px;
         Section::new()
-            .title("界面")
+            .title(t!("appearance.interface"))
             .child(
-                Row::new("主题")
-                    .description("界面和终端配色一起换，明暗跟着主题走")
+                Row::new(t!("appearance.theme"))
+                    .description(t!("appearance.theme_hint"))
                     .child(
                         Combobox::new("settings-theme", self.themes.clone())
                             .selected(Some(displayed_theme_name(cx)))
@@ -129,15 +130,15 @@ impl AppearancePage {
                     ),
             )
             .child(
-                Row::new("界面字号")
-                    .description("默认 16px")
+                Row::new(t!("appearance.ui_font_size"))
+                    .description(t!("appearance.ui_font_size_hint"))
                     .child(slider_with_value(&self.ui_font_size, format!("{size}px"))),
             )
             // 值本身写着「默认（Inter）」，不再另配说明。
             .child(
-                Row::new("界面字体").child(
+                Row::new(t!("appearance.ui_font")).child(
                     Select::new("settings-ui-font")
-                        .options(self.ui_fonts.iter().cloned())
+                        .options(font_options(smelt_ui::kit::UI_FONT_FAMILY, &self.fonts))
                         .selected(Some(SharedString::from(
                             appearance.ui_font_family.clone(),
                         )))
@@ -153,12 +154,12 @@ impl AppearancePage {
     /// 代码字体：终端、diff、代码块共用。终端字号在终端插件自己的设置页。
     fn code_font_section(&self, cx: &App) -> Section {
         let current = cx.global::<Appearance>().font_family.clone();
-        Section::new().title("代码").child(
-            Row::new("代码字体")
-                .description("终端、diff 和代码块共用，建议选等宽；缺字时回落内嵌的 Maple Mono NF")
+        Section::new().title(t!("appearance.code")).child(
+            Row::new(t!("appearance.code_font"))
+                .description(t!("appearance.code_font_hint"))
                 .child(
                     Select::new("settings-code-font")
-                        .options(self.code_fonts.iter().cloned())
+                        .options(font_options(font_config::DEFAULT_FONT_FAMILY, &self.fonts))
                         .selected(Some(SharedString::from(current)))
                         .on_change(|name: &SharedString, _, cx| {
                             let name = name.trim().to_string();
@@ -172,10 +173,16 @@ impl AppearancePage {
 
     fn background_section(&self, cx: &App) -> Section {
         let appearance = cx.global::<Appearance>();
-        let mut section = Section::new().title("背景");
-        // 没有材质的机器（Linux、更早的 Windows）不给选。
+        let mut section = Section::new().title(t!("appearance.background"));
+        // 没有材质的机器（Linux、更早的 Windows）窗口不透明，不给调。哪几块透、透哪种材质
+        // 由布局说，这里只调透多少。
         if crate::window_backdrop::available() {
-            section = section.child(material_row(cx));
+            let opacity = (appearance.bg_opacity * 100.0).round() as u32;
+            section = section.child(
+                Row::new(t!("appearance.glass"))
+                    .description(t!("appearance.glass_hint"))
+                    .child(slider_with_value(&self.bg_opacity, format!("{opacity}%"))),
+            );
         }
         // 背景图：没设时只给「选择图片…」；设了才出文件名、「清除」和透明度。
         let name = appearance
@@ -185,8 +192,8 @@ impl AppearancePage {
             .map(str::to_string);
         let has_image = name.is_some();
         section = section.child(
-            Row::new("背景图片")
-                .description("铺满整个窗口，压在毛玻璃上")
+            Row::new(t!("appearance.image"))
+                .description(t!("appearance.image_hint"))
                 .children(name.map(|name| {
                     div()
                         .max_w(px(160.))
@@ -201,9 +208,9 @@ impl AppearancePage {
                     Button::new("pick-img")
                         .small()
                         .label(if has_image {
-                            "更换…"
+                            t!("appearance.change_image")
                         } else {
-                            "选择图片…"
+                            t!("appearance.choose_image")
                         })
                         .on_click(|_, _, cx: &mut App| pick_bg_image(cx)),
                 )
@@ -212,7 +219,7 @@ impl AppearancePage {
                         Button::new("clear-img")
                             .quiet()
                             .small()
-                            .label("清除")
+                            .label(t!("action.clear"))
                             .on_click(|_, _, cx: &mut App| set_bg_image(None, cx)),
                     )
                 }),
@@ -220,8 +227,8 @@ impl AppearancePage {
         if has_image {
             let opacity = (appearance.bg_image_opacity * 100.0).round() as u32;
             section = section.child(
-                Row::new("背景图透明度")
-                    .description("默认 15%，越低越不抢文字")
+                Row::new(t!("appearance.image_opacity"))
+                    .description(t!("appearance.image_opacity_hint"))
                     .child(slider_with_value(
                         &self.bg_image_opacity,
                         format!("{opacity}%"),
@@ -266,7 +273,7 @@ fn pick_bg_image(cx: &mut App) {
         files: true,
         directories: false,
         multiple: false,
-        prompt: Some("选择背景图片".into()),
+        prompt: Some(t!("appearance.choose_image_prompt").into()),
     });
     cx.spawn(async move |cx| {
         if let Ok(Ok(Some(paths))) = paths.await
@@ -288,17 +295,17 @@ fn layout_section(workspace: WeakEntity<Workspace>, cx: &App) -> Section {
         .into_iter()
         .map(|layout| (layout.id, layout.title))
         .collect();
-    let section = Section::new().title("布局");
+    let section = Section::new().title(t!("appearance.layout"));
     if options.is_empty() {
         // 兜底的摆法不存档，没有可恢复的。
         return section.child(
-            Row::new("布局")
-                .description("所有视图摆在中间一组；装了带布局的插件后可以在这里换")
+            Row::new(t!("appearance.layout"))
+                .description(t!("appearance.layout_none_hint"))
                 .child(
                     div()
                         .type_style(TYPE.text_xsmall)
                         .text_color(rgb(crate::ui_theme::muted()))
-                        .child("没有可选的布局"),
+                        .child(t!("appearance.no_layouts")),
                 ),
         );
     }
@@ -307,8 +314,8 @@ fn layout_section(workspace: WeakEntity<Workspace>, cx: &App) -> Section {
         SharedString::from(crate::workspace_layout::effective_home_layout(cx).unwrap_or_default());
     section
         .child(
-            Row::new("布局")
-                .description("工作台里各个视图怎么摆；插件可以带自己的布局")
+            Row::new(t!("appearance.layout"))
+                .description(t!("appearance.layout_hint"))
                 .child(
                     Select::new("settings-layout")
                         .options(options)
@@ -321,12 +328,12 @@ fn layout_section(workspace: WeakEntity<Workspace>, cx: &App) -> Section {
                 ),
         )
         .child(
-            Row::new("恢复布局")
-                .description("扔掉拖动、拆分、收起过的样子，回到这份布局本来的样子")
+            Row::new(t!("appearance.reset_layout"))
+                .description(t!("appearance.reset_layout_hint"))
                 .child(
                     Button::new("restore-layout")
                         .small()
-                        .label("恢复")
+                        .label(t!("action.reset"))
                         .on_click(move |_, _, cx: &mut App| {
                             let _ =
                                 workspace.update(cx, |workspace, cx| workspace.restore_layout(cx));
@@ -350,6 +357,18 @@ fn slider_with_value(slider: &Entity<SliderState>, value: String) -> Div {
                 .text_color(rgb(crate::ui_theme::muted()))
                 .child(value),
         )
+}
+
+/// 字体下拉的选项：打头一项是「默认（出厂字体）」，值为空。
+fn font_options(
+    default: &str,
+    fonts: &Options,
+) -> impl Iterator<Item = (SharedString, SharedString)> {
+    std::iter::once((
+        SharedString::default(),
+        SharedString::from(t!("appearance.default_font", name = default)),
+    ))
+    .chain(fonts.iter().cloned())
 }
 
 /// 主题选择的选项：每个系列一组，系列按目录里第一次出现的先后排（库自带的在前）；每款
@@ -436,22 +455,4 @@ fn theme_dots(swatch: ThemeSwatch) -> Div {
                 .border_color(crate::ui_theme::hair_strong())
         }),
     )
-}
-
-/// 窗口底下垫哪一种系统毛玻璃。选项是这个平台有的材质（只读常量）。
-fn material_row(cx: &App) -> Row {
-    use crate::window_backdrop::WindowMaterial;
-    let options = WindowMaterial::choices()
-        .iter()
-        .map(|material| (material.key(), SharedString::from(material.label())));
-    Row::new("材质")
-        .description("垫在整个窗口下面的系统毛玻璃；模糊程度由系统定，不能调")
-        .child(
-            Select::new("settings-material")
-                .options(options)
-                .selected(Some(cx.global::<Appearance>().material.key()))
-                .on_change(|key: &&'static str, _, cx| {
-                    crate::settings::set_window_material(WindowMaterial::from_key(key), cx);
-                }),
-        )
 }

@@ -9,23 +9,26 @@
 //! - [`view`]：列表视图，行内改名、拖拽、从访达拖进目录的界面状态。
 //! - [`rows`]：各种行怎么画。
 //! - [`menus`]：机器、项目、工作集、会话的菜单，「筛选与分组」菜单，和它们的动作。
+//! - [`offscreen`]：滚到可视区外、要你看一眼的会话，在列表边上浮的提示。
 //!
-//! 项目里的会话按项目（默认）、状态或时间分组；按项目时可以藏起没有会话的项目。所有机器的
-//! 项目排在一份列表里，不按机器分段：机器只是项目的一个属性，远程项目在行上标机器名，机器
-//! 连不上时它的项目变灰、写为什么；机器的菜单和「在哪台机器上打开项目」在「项目」标题上。
-//! 机器多了也不占列表的地方，没有项目的机器不出现在列表里。没有键盘
+//! 项目里的会话按项目（默认）、状态或时间分组；按项目时可以藏起没有会话的项目。默认所有
+//! 机器的项目排在一份列表里：机器只是项目的一个属性，远程项目在行上标机器名，机器连不上时
+//! 它的项目变灰、写为什么；机器的菜单和「在哪台机器上打开项目」在「项目」标题上。挂着远程
+//! 机器时可以打开「按机器分开」：一台机器一片（[`Area`]），机器的标题行带连接状态和菜单，
+//! 片里照常按分组依据排，行上不再标机器名。没有键盘
 //! 上下移动、字母跳转、分段拖动高度、Cmd+1..9、归档区、额度、设置按钮（按 11-16 的决定删了
 //! 或归别的插件）。
 
 mod actions;
-mod buddy;
 mod group;
 mod machine;
 mod menus;
 mod motion;
+mod offscreen;
 mod rows;
 mod view;
 
+use rust_i18n::t;
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Local};
@@ -37,8 +40,7 @@ use smelt_plugin_api::model::runtime_path::PathStyle;
 use smelt_plugin_api::model::workspace_directory::{WorkspaceConversation, WorkspaceDirectory};
 use smelt_plugin_api::{self as api, RuntimeKey};
 
-use buddy::Buddy;
-
+use crate::attention::Unread;
 use crate::model::{
     self, ConversationKey, Fold, Pin, Placement, ProjectKey, Sessions, SidebarGrouping, SidebarUi,
 };
@@ -48,6 +50,7 @@ pub(crate) use group::Bucket;
 pub(crate) use view::build_view;
 
 use machine::MachineLink;
+use offscreen::{Notice, Tally};
 
 /// 侧栏算好的样子：从目录、会话状态、机器表和 [`Sessions::ui`] 现算的行。存在
 /// [`Sessions::sidebar`]，render 只读它；`Sessions::rebuild_sidebar` 重算。选中哪行不在
@@ -58,8 +61,10 @@ pub(crate) struct Sidebar {
     conversations: Option<ConversationsSection>,
     /// 所有机器的项目排成一份：跨机器的手动顺序，置顶的在前。
     projects: Vec<ProjectGroup>,
-    /// 按状态、时间分组时的组，所有机器的会话一起分；按项目时空着，画 [`Self::projects`]。
-    buckets: Vec<BucketGroup>,
+    /// 「项目」标题下的几片，从上到下：不按机器分开时只有一片，按机器分开时一台机器一片。
+    areas: Vec<Area>,
+    /// 按机器分开（[`SidebarUi::by_machine`]，且挂着远程机器）。
+    by_machine: bool,
     /// 机器表里的每台机器（「项目」标题上的机器菜单、「在哪台机器上打开」，还没收到目录的
     /// 机器那一行）。
     machines: Vec<MachineInfo>,
@@ -70,6 +75,11 @@ pub(crate) struct Sidebar {
     grouping: SidebarGrouping,
     /// 按项目分组时藏起没有会话的项目（[`project_visible`]）。
     hide_empty: bool,
+    /// 正按名字搜项目（[`Sessions::project_filter`] 不空）：各片里只有搜到的项目，一个都没有
+    /// 时写「没有匹配的项目」而不是「没有打开的项目」。
+    filtering: bool,
+    /// 列表上要你看一眼的行，从上到下（[`offscreen`]）。
+    notices: Vec<Notice>,
 }
 
 /// 「对话」一段：所有机器上跟智能体的对话，置顶的在前，其余按最近动静排。
@@ -90,9 +100,33 @@ struct MachineInfo {
     received: bool,
 }
 
+/// 「项目」标题下的一片。不按机器分开时只有一片，装着所有机器的项目；按机器分开时一台机器
+/// 一片（机器表里的每台都有，目录还没收到的也有），上面是机器的标题行。
+struct Area {
+    /// 按机器分开时是这片的机器；不分开是 `None`。
+    machine: Option<RuntimeKey>,
+    /// 按机器分开时这片折起来了。
+    collapsed: bool,
+    /// 折起来时标在机器标题上的状态和会话数。
+    status: AgentStatus,
+    sessions: usize,
+    /// 这片的项目，[`Sidebar::projects`] 的下标，从上到下。
+    projects: Vec<usize>,
+    /// 按状态、时间分组时这片的组；按项目时空着，画 [`Self::projects`]。
+    buckets: Vec<BucketGroup>,
+}
+
+/// 按状态、时间分出来的一组是哪组：不按机器分开时所有机器一起分（`machine` 是 `None`），
+/// 分开时各机器各分各的、各折各的。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct BucketKey {
+    pub(crate) machine: Option<RuntimeKey>,
+    pub(crate) bucket: Bucket,
+}
+
 /// 按状态或时间分出来的一组：项目里的会话打散了重新分，每行带上它来自哪个项目。
 struct BucketGroup {
-    bucket: Bucket,
+    key: BucketKey,
     collapsed: bool,
     /// 折起来时标在标题上的状态。
     status: AgentStatus,
@@ -154,16 +188,16 @@ struct SessionRow {
     session_id: Option<String>,
     title: SharedString,
     icon: RowIcon,
-    /// 行首的小人：跟智能体的对话按智能体名认（同一个智能体到哪都是同一个），别的按会话 id。
-    buddy: Buddy,
     status: AgentStatus,
     pinned: bool,
     /// 最近一次动静（unix 秒）；守护里还没有它时用目录里的更新时间。
     activity: u64,
     /// 在跑的这一轮从什么时候开始（unix 秒）；不在一轮里是 0。
     turn_started_at: u64,
+    /// 有一格有没看过的提醒（跑完了、失败了你还没看），运行时记的。
+    unread: bool,
     /// 机器眼下用不了时行尾写的字。
-    unavailable: Option<&'static str>,
+    unavailable: Option<SharedString>,
     /// 悬停的说明：完整标题（窄侧栏里常被截断）。
     tooltip: SharedString,
     /// 不在项目下面画时（「对话」一段、按状态和时间分的组）标在行上的远程机器名；在项目下面
@@ -243,6 +277,7 @@ impl Sidebar {
                     directory,
                     states: &host.session_states(&machine.key, cx),
                     agents: sessions.agent_names.get(&machine.key).unwrap_or(&no_agents),
+                    unread: &sessions.unread,
                     link: &link,
                     remote_name: (!matches!(machine.key, RuntimeKey::Local))
                         .then(|| machine.name.clone().into()),
@@ -263,7 +298,16 @@ impl Sidebar {
             project.machine == key.machine && project.root == key.root
         });
         let projects = pinned_first(projects, |project| project.pinned);
-        let buckets = bucket_groups(&projects, &sessions.ui, now);
+        let by_machine = sessions.ui.by_machine && has_remote(&machines);
+        let filter = sessions.project_filter.as_str();
+        let areas = if by_machine {
+            machines
+                .iter()
+                .map(|machine| area(Some(&machine.key), &projects, &sessions.ui, filter, now))
+                .collect()
+        } else {
+            vec![area(None, &projects, &sessions.ui, filter, now)]
+        };
         let conversations = (!agent_rows.is_empty()).then(|| {
             agent_rows.sort_by(|a: &SessionRow, b| b.activity.cmp(&a.activity));
             let rows = pinned_first(agent_rows, |row| row.pinned);
@@ -276,14 +320,18 @@ impl Sidebar {
         let mut sidebar = Self {
             conversations,
             projects,
-            buckets,
+            areas,
+            by_machine,
             machines,
             conversation_ids,
             order: Vec::new(),
             grouping: sessions.ui.grouping,
             hide_empty: sessions.ui.hide_empty_projects,
+            filtering: !filter.trim().is_empty(),
+            notices: Vec::new(),
         };
         sidebar.order = sidebar.visible_order();
+        sidebar.notices = sidebar.collect_notices();
         sidebar
     }
 
@@ -292,26 +340,57 @@ impl Sidebar {
         &self.order
     }
 
+    /// 按状态、时间分组时这段会话落在哪一组；按项目分组、或不在侧栏里时是 `None`。
+    pub(crate) fn bucket_of(&self, key: &ConversationKey) -> Option<BucketKey> {
+        self.areas
+            .iter()
+            .flat_map(|area| area.buckets.iter())
+            .find(|group| group.rows.iter().any(|row| row.key == *key))
+            .map(|group| group.key.clone())
+    }
+
+    /// 这片的项目，从上到下。
+    fn area_projects<'a>(
+        &'a self,
+        area: &'a Area,
+    ) -> impl Iterator<Item = (usize, &'a ProjectGroup)> {
+        area.projects.iter().map(|ix| (*ix, &self.projects[*ix]))
+    }
+
+    /// 这片里所有的会话行（折起来的也算），只取当前分组用的那一处（按状态、时间分组时在组里，
+    /// 按项目时在项目里）。
+    fn area_rows<'a>(&'a self, area: &'a Area) -> Vec<&'a SessionRow> {
+        if self.grouping != SidebarGrouping::Project {
+            return area.buckets.iter().flat_map(|b| b.rows.iter()).collect();
+        }
+        self.area_projects(area)
+            .flat_map(|(_, project)| project.items.iter())
+            .flat_map(item_rows)
+            .collect()
+    }
+
     fn visible_order(&self) -> Vec<ConversationKey> {
         let mut order = Vec::new();
         if let Some(section) = self.conversations.as_ref().filter(|s| !s.collapsed) {
             order.extend(section.rows.iter().map(|row| row.key.clone()));
         }
-        if self.grouping != SidebarGrouping::Project {
-            for bucket in self.buckets.iter().filter(|b| !b.collapsed) {
-                order.extend(bucket.rows.iter().map(|row| row.key.clone()));
+        for area in self.areas.iter().filter(|area| !area.collapsed) {
+            if self.grouping != SidebarGrouping::Project {
+                for bucket in area.buckets.iter().filter(|b| !b.collapsed) {
+                    order.extend(bucket.rows.iter().map(|row| row.key.clone()));
+                }
+                continue;
             }
-            return order;
-        }
-        // 藏起来的空项目里没有会话，不用另外跳过。
-        for project in self.projects.iter().filter(|p| !p.collapsed) {
-            for item in &project.items {
-                match item {
-                    ProjectItem::Session(row) => order.push(row.key.clone()),
-                    ProjectItem::Workset(workset) if !workset.collapsed => {
-                        order.extend(workset.sessions.iter().map(|row| row.key.clone()))
+            // 藏起来的空项目里没有会话，不用另外跳过。
+            for (_, project) in self.area_projects(area).filter(|(_, p)| !p.collapsed) {
+                for item in &project.items {
+                    match item {
+                        ProjectItem::Session(row) => order.push(row.key.clone()),
+                        ProjectItem::Workset(workset) if !workset.collapsed => {
+                            order.extend(workset.sessions.iter().map(|row| row.key.clone()))
+                        }
+                        ProjectItem::Workset(_) => {}
                     }
-                    ProjectItem::Workset(_) => {}
                 }
             }
         }
@@ -325,21 +404,24 @@ impl Sidebar {
         if let Some(section) = &self.conversations {
             order.extend(section.rows.iter().map(|row| session_flip(&row.key)));
         }
-        if self.grouping != SidebarGrouping::Project {
-            for bucket in &self.buckets {
-                order.push(bucket_flip(bucket.bucket));
-                order.extend(bucket.rows.iter().map(|row| session_flip(&row.key)));
+        for area in &self.areas {
+            order.extend(area.machine.as_ref().map(machine_flip));
+            if self.grouping != SidebarGrouping::Project {
+                for bucket in &area.buckets {
+                    order.push(bucket_flip(&bucket.key));
+                    order.extend(bucket.rows.iter().map(|row| session_flip(&row.key)));
+                }
+                continue;
             }
-            return order;
-        }
-        for project in &self.projects {
-            order.push(project_flip(&project.machine, &project.root));
-            for item in &project.items {
-                match item {
-                    ProjectItem::Session(row) => order.push(session_flip(&row.key)),
-                    ProjectItem::Workset(workset) => {
-                        order.push(workset_flip(&workset.machine, &workset.id));
-                        order.extend(workset.sessions.iter().map(|row| session_flip(&row.key)));
+            for (_, project) in self.area_projects(area) {
+                order.push(project_flip(&project.machine, &project.root));
+                for item in &project.items {
+                    match item {
+                        ProjectItem::Session(row) => order.push(session_flip(&row.key)),
+                        ProjectItem::Workset(workset) => {
+                            order.push(workset_flip(&workset.machine, &workset.id));
+                            order.extend(workset.sessions.iter().map(|row| session_flip(&row.key)));
+                        }
                     }
                 }
             }
@@ -347,33 +429,78 @@ impl Sidebar {
         order
     }
 
+    /// 列表上要你看一眼的行，从上到下：展开着的会话行各算各的，折起来的一组算在标题上。
+    fn collect_notices(&self) -> Vec<Notice> {
+        let mut notices = Vec::new();
+        let mut push = |notice: Option<Notice>| notices.extend(notice);
+        if let Some(section) = &self.conversations {
+            if section.collapsed {
+                push(folded(CONVERSATIONS_KEY.to_string(), &section.rows));
+            } else {
+                section.rows.iter().for_each(|row| push(row.notice()));
+            }
+        }
+        for area in &self.areas {
+            if let Some(machine) = area.machine.as_ref().filter(|_| area.collapsed) {
+                push(folded(machine_flip(machine), self.area_rows(area)));
+                continue;
+            }
+            if self.grouping != SidebarGrouping::Project {
+                for bucket in &area.buckets {
+                    if bucket.collapsed {
+                        push(folded(bucket_flip(&bucket.key), &bucket.rows));
+                    } else {
+                        bucket.rows.iter().for_each(|row| push(row.notice()));
+                    }
+                }
+                continue;
+            }
+            for (_, project) in self.area_projects(area) {
+                if project.collapsed {
+                    let rows = project.items.iter().flat_map(item_rows);
+                    push(folded(project_flip(&project.machine, &project.root), rows));
+                    continue;
+                }
+                for item in &project.items {
+                    match item {
+                        ProjectItem::Session(row) => push(row.notice()),
+                        ProjectItem::Workset(workset) if workset.collapsed => push(folded(
+                            workset_flip(&workset.machine, &workset.id),
+                            &workset.sessions,
+                        )),
+                        ProjectItem::Workset(workset) => {
+                            workset.sessions.iter().for_each(|row| push(row.notice()));
+                        }
+                    }
+                }
+            }
+        }
+        notices
+    }
+
+    /// 要你看一眼的行（[`offscreen`]），去掉正选中的那段会话：人正看着它。
+    fn notices_besides(&self, selected: Option<&ConversationKey>) -> Vec<Notice> {
+        let selected = selected.map(session_flip);
+        self.notices
+            .iter()
+            .filter(|notice| Some(&notice.key) != selected.as_ref())
+            .cloned()
+            .collect()
+    }
+
     /// 侧栏里所有的会话行（折起来的也算）。按状态分组时同一段会话在桶里，按项目分组时在
-    /// 项目里，两处只取当前分组用的那一处。
+    /// 项目里，两处只取当前分组用的那一处（[`Self::area_rows`]）。
     fn session_rows(&self) -> impl Iterator<Item = &SessionRow> {
-        let by_project = self.grouping == SidebarGrouping::Project;
         let conversations = self
             .conversations
             .iter()
             .flat_map(|section| section.rows.iter());
-        let buckets = self
-            .buckets
-            .iter()
-            .filter(move |_| !by_project)
-            .flat_map(|bucket| bucket.rows.iter());
-        let projects = self
-            .projects
-            .iter()
-            .filter(move |_| by_project)
-            .flat_map(|project| project.items.iter())
-            .flat_map(|item| match item {
-                ProjectItem::Session(row) => std::slice::from_ref(row).iter(),
-                ProjectItem::Workset(workset) => workset.sessions.iter(),
-            });
-        conversations.chain(buckets).chain(projects)
+        let areas = self.areas.iter().flat_map(|area| self.area_rows(area));
+        conversations.chain(areas)
     }
 
-    /// 侧栏里有没有这段会话（折起来的也算）。
-    fn has_session(&self, key: &ConversationKey) -> bool {
+    /// 侧栏里有没有这段会话（折起来的也算；搜索滤掉的项目里的不算）。
+    pub(crate) fn has_session(&self, key: &ConversationKey) -> bool {
         self.session_rows().any(|row| row.key == *key)
     }
 
@@ -386,9 +513,7 @@ impl Sidebar {
     }
 
     fn has_remote(&self) -> bool {
-        self.machines
-            .iter()
-            .any(|machine| !matches!(machine.key, RuntimeKey::Local))
+        has_remote(&self.machines)
     }
 
     /// 列表里项目从上到下的身份（拖项目时在它上面挪）。
@@ -439,6 +564,63 @@ impl Sidebar {
     }
 }
 
+/// 机器表里有没有远程机器。
+fn has_remote(machines: &[MachineInfo]) -> bool {
+    machines
+        .iter()
+        .any(|machine| !matches!(machine.key, RuntimeKey::Local))
+}
+
+/// 项目里的一项下面的会话行：一行会话，或工作集里的那些。
+fn item_rows(item: &ProjectItem) -> &[SessionRow] {
+    match item {
+        ProjectItem::Session(row) => std::slice::from_ref(row),
+        ProjectItem::Workset(workset) => &workset.sessions,
+    }
+}
+
+/// 折起来的一组（标题的滑动身份是 `key`）合起来有几段要你看；点胶囊时打开组里第一段要你看
+/// 的（打开时展开这一组）。一段都没有是 `None`。
+fn folded<'a>(key: String, rows: impl IntoIterator<Item = &'a SessionRow>) -> Option<Notice> {
+    let mut tally = Tally::default();
+    let mut first = None;
+    for row in rows {
+        let own = row.tally();
+        if !own.is_empty() && first.is_none() {
+            first = Some(row.key.clone());
+        }
+        tally.add(own);
+    }
+    Some(Notice {
+        key,
+        tally,
+        session: first?,
+    })
+}
+
+impl SessionRow {
+    /// 这一行要你看就是一条提示，点胶囊打开它自己。
+    fn notice(&self) -> Option<Notice> {
+        let tally = self.tally();
+        (!tally.is_empty()).then(|| Notice {
+            key: session_flip(&self.key),
+            tally,
+            session: self.key.clone(),
+        })
+    }
+
+    /// 这一行算不算要你看：需要你处理的，或有没看过的提醒的。
+    fn tally(&self) -> Tally {
+        if self.status == AgentStatus::NeedsYou {
+            Tally { need: 1, unread: 0 }
+        } else if self.unread {
+            Tally { need: 0, unread: 1 }
+        } else {
+            Tally::default()
+        }
+    }
+}
+
 impl ProjectGroup {
     fn key(&self) -> ProjectKey {
         ProjectKey {
@@ -456,6 +638,9 @@ fn machine_id(machine: &RuntimeKey) -> &str {
     }
 }
 
+/// 「对话」一段标题的身份（它不跟着滑，只在折起来时当要盯的行用）。
+const CONVERSATIONS_KEY: &str = "conversations";
+
 fn session_flip(key: &ConversationKey) -> String {
     format!("session:{}:{}", machine_id(&key.machine), key.id)
 }
@@ -468,8 +653,15 @@ fn workset_flip(machine: &RuntimeKey, id: &str) -> String {
     format!("workset:{}:{id}", machine_id(machine))
 }
 
-fn bucket_flip(bucket: Bucket) -> String {
-    format!("bucket:{bucket:?}")
+fn bucket_flip(key: &BucketKey) -> String {
+    match &key.machine {
+        Some(machine) => format!("bucket:{}:{:?}", machine_id(machine), key.bucket),
+        None => format!("bucket:{:?}", key.bucket),
+    }
+}
+
+fn machine_flip(machine: &RuntimeKey) -> String {
+    format!("machine:{}", machine_id(machine))
 }
 
 /// 前后两份身份里都有的那些，先后变了没有。只多了、少了几行（新建、关掉、折起）不算重排：
@@ -490,6 +682,7 @@ struct MachineInput<'a> {
     states: &'a [DaemonSessionState],
     /// 智能体定义 id → 名字。
     agents: &'a HashMap<String, String>,
+    unread: &'a Unread,
     link: &'a MachineLink,
     /// 远程机器的名字，标在项目行和不在项目下面的会话行上；本机是 `None`。
     remote_name: Option<SharedString>,
@@ -599,15 +792,23 @@ fn project_group(
             });
             let merge_lines = match check.and_then(|check| check.last.as_ref()) {
                 Some((_, Ok(result))) => crate::worksets::describe(result),
-                Some((_, Err(error))) => vec![format!("检查合并状态失败：{error}")],
+                Some((_, Err(error))) => vec![
+                    t!(
+                        "error.failed",
+                        what = t!("action.check_merge"),
+                        error = error
+                    )
+                    .into_owned(),
+                ],
                 None => Vec::new(),
             };
-            let mut tooltip = format!(
-                "工作树：{}\n分支：{}\n仓库：{}",
-                workset.task,
-                workset.branch,
-                repositories.join("、")
-            );
+            let mut tooltip = t!(
+                "workset.tooltip",
+                task = workset.task,
+                branch = workset.branch,
+                repositories = repositories.join(&*t!("list.separator"))
+            )
+            .into_owned();
             for line in &merge_lines {
                 tooltip.push('\n');
                 tooltip.push_str(line);
@@ -709,10 +910,11 @@ fn session_row(
         0 => conversation.last_updated_at.max(0) as u64,
         at => at,
     };
-    let status = model::status(conversation, states);
+    let status = conversation.status(states);
     // 只有在跑时行尾才写「这一轮跑了多久」；停下来的格里留着的开始时间不算。
     let turn_started_at = if status == AgentStatus::Running {
-        model::session_ids(conversation)
+        conversation
+            .session_ids()
             .filter_map(|id| states.iter().find(|state| state.id == id))
             .map(|state| state.turn_started_at)
             .max()
@@ -720,35 +922,68 @@ fn session_row(
     } else {
         0
     };
+    let unread = conversation
+        .session_ids()
+        .any(|id| input.unread.contains(input.machine, id));
     let title: SharedString = model::title(conversation, states).into();
     let icon = row_icon(conversation, states, input.agents);
-    let buddy = Buddy::of(match &icon {
-        RowIcon::Agent { name, .. } => name.as_str(),
-        _ => key.id.as_str(),
-    });
-    buddy.prepare();
     SessionRow {
         pinned: ui.is_pinned(&Pin::Conversation(key.clone())),
-        session_id: model::session_ids(conversation).next().map(str::to_string),
+        session_id: conversation.session_ids().next().map(str::to_string),
         key,
         tooltip: title.clone(),
         title,
         icon,
-        buddy,
         status,
         activity,
         turn_started_at,
-        unavailable: input.link.unavailable,
+        unread,
+        unavailable: input.link.unavailable.clone(),
         machine_name: None,
         group,
         origin: None,
     }
 }
 
-/// 按状态、时间分组时的组：所有机器上项目里的会话（含工作树里的）按项目从上到下摊平，带上
-/// 来源（和远程机器名），再分组；组里置顶的在前。按项目分组时是空的。
-fn bucket_groups(
+/// 「项目」标题下的一片：`machine` 是 `None` 时装所有机器的项目，否则只装那台机器的。
+/// `filter` 是搜索框里的字，只装名字搜得到的项目（[`project_matches`]）；按状态、时间分组时
+/// 组里也就只有这些项目的会话。
+fn area(
+    machine: Option<&RuntimeKey>,
     projects: &[ProjectGroup],
+    ui: &SidebarUi,
+    filter: &str,
+    now: DateTime<Local>,
+) -> Area {
+    let members: Vec<usize> = projects
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| machine.is_none_or(|machine| project.machine == *machine))
+        .filter(|(_, project)| project_matches(&project.name, filter))
+        .map(|(ix, _)| ix)
+        .collect();
+    let buckets = bucket_groups(machine, members.iter().map(|ix| &projects[*ix]), ui, now);
+    let rows: Vec<&SessionRow> = members
+        .iter()
+        .flat_map(|ix| projects[*ix].items.iter())
+        .flat_map(item_rows)
+        .collect();
+    Area {
+        collapsed: machine.is_some_and(|machine| ui.collapsed_machines.contains(machine)),
+        machine: machine.cloned(),
+        status: AgentStatus::highest(rows.iter().map(|row| row.status)),
+        sessions: rows.len(),
+        projects: members,
+        buckets,
+    }
+}
+
+/// 按状态、时间分组时的组：`projects` 里的会话（含工作树里的）按项目从上到下摊平，带上来源
+/// 再分组；组里置顶的在前。按项目分组时是空的。`machine` 是这片的机器：不按机器分开
+/// （`None`）时行上还要标远程机器名，分开时机器的标题行已经写了。
+fn bucket_groups<'a>(
+    machine: Option<&RuntimeKey>,
+    projects: impl Iterator<Item = &'a ProjectGroup>,
     ui: &SidebarUi,
     now: DateTime<Local>,
 ) -> Vec<BucketGroup> {
@@ -770,7 +1005,9 @@ fn bucket_groups(
             rows.extend(members.iter().map(|row| {
                 let mut row = row.clone();
                 row.origin = Some(origin(workset));
-                row.machine_name = project.machine_name.clone();
+                if machine.is_none() {
+                    row.machine_name = project.machine_name.clone();
+                }
                 row
             }));
         }
@@ -783,14 +1020,24 @@ fn bucket_groups(
             let members: Vec<SessionRow> =
                 ixs.into_iter().filter_map(|ix| slots[ix].take()).collect();
             let members = pinned_first(members, |row| row.pinned);
-            BucketGroup {
+            let key = BucketKey {
+                machine: machine.cloned(),
                 bucket,
-                collapsed: ui.collapsed_buckets.contains(&bucket),
+            };
+            BucketGroup {
+                collapsed: ui.collapsed_buckets.contains(&key),
+                key,
                 status: AgentStatus::highest(members.iter().map(|row| row.status)),
                 rows: members,
             }
         })
         .collect()
+}
+
+/// 项目名搜不搜得到：去掉两头空白后不分大小写地包含就算；空的什么都搜得到。
+fn project_matches(name: &str, filter: &str) -> bool {
+    let filter = filter.trim();
+    filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase())
 }
 
 /// 按项目分组、「显示：有会话」时这个项目露不露出来：有会话或工作树的、置顶的、选中的照常
@@ -804,7 +1051,7 @@ fn row_icon(
     states: &[DaemonSessionState],
     agents: &HashMap<String, String>,
 ) -> RowIcon {
-    if let Some(id) = model::agent_of(conversation) {
+    if let Some(id) = conversation.agent_definition() {
         let name = agents
             .get(id)
             .filter(|name| !name.is_empty())
@@ -848,13 +1095,13 @@ fn agent_mark(name: &str) -> String {
         .chars()
         .next()
         .map(String::from)
-        .unwrap_or_else(|| "智".to_string())
+        .unwrap_or_else(|| t!("agent.monogram_empty").into_owned())
 }
 
 /// 项目组的名字：根目录的最后一段；没有工作目录的那组叫「未指定目录」。
 fn project_name(style: PathStyle, root: &str) -> String {
     if root.is_empty() {
-        return "未指定目录".to_string();
+        return t!("project.no_folder").into_owned();
     }
     style
         .file_name(root)
@@ -1071,11 +1318,11 @@ mod tests {
             session_id: None,
             title: id.to_string().into(),
             icon: RowIcon::Terminal,
-            buddy: Buddy::of(id),
             status,
             pinned,
             activity: 0,
             turn_started_at: 0,
+            unread: false,
             unavailable: None,
             tooltip: id.to_string().into(),
             machine_name: None,
@@ -1153,8 +1400,44 @@ mod tests {
                 ],
             ),
         ];
+        projects[1].machine = box_machine();
         projects[1].machine_name = Some("box".into());
         projects
+    }
+
+    fn box_machine() -> RuntimeKey {
+        RuntimeKey::Remote("box".to_string())
+    }
+
+    fn bucket_key(bucket: Bucket) -> BucketKey {
+        BucketKey {
+            machine: None,
+            bucket,
+        }
+    }
+
+    /// 按 `ui` 摆好的侧栏：`machines` 为空时不按机器分开，一片装所有项目；否则一台一片。
+    fn laid_out(projects: Vec<ProjectGroup>, machines: &[RuntimeKey], ui: &SidebarUi) -> Sidebar {
+        let now = Local::now();
+        let areas = if machines.is_empty() {
+            vec![area(None, &projects, ui, "", now)]
+        } else {
+            machines
+                .iter()
+                .map(|machine| area(Some(machine), &projects, ui, "", now))
+                .collect()
+        };
+        Sidebar {
+            projects,
+            areas,
+            by_machine: !machines.is_empty(),
+            grouping: ui.grouping,
+            ..Default::default()
+        }
+    }
+
+    fn keys(order: Vec<ConversationKey>) -> Vec<String> {
+        order.into_iter().map(|key| key.id).collect()
     }
 
     #[test]
@@ -1163,10 +1446,10 @@ mod tests {
             grouping: SidebarGrouping::Status,
             ..Default::default()
         };
-        ui.collapsed_buckets.insert(Bucket::Idle);
-        let groups = bucket_groups(&two_projects(), &ui, Local::now());
+        ui.collapsed_buckets.insert(bucket_key(Bucket::Idle));
+        let groups = bucket_groups(None, two_projects().iter(), &ui, Local::now());
 
-        let buckets: Vec<Bucket> = groups.iter().map(|g| g.bucket).collect();
+        let buckets: Vec<Bucket> = groups.iter().map(|g| g.key.bucket).collect();
         assert_eq!(buckets, [Bucket::NeedsYou, Bucket::Idle]);
         assert_eq!(ids(&groups[0].rows), ["r2", "r4"]);
         // 组里置顶的在前。
@@ -1201,24 +1484,9 @@ mod tests {
     #[test]
     fn project_grouping_keeps_project_order() {
         let ui = SidebarUi::default();
-        let projects = two_projects();
-        assert!(bucket_groups(&projects, &ui, Local::now()).is_empty());
-
-        let sidebar = |grouping, buckets| Sidebar {
-            conversations: None,
-            projects: two_projects(),
-            buckets,
-            machines: Vec::new(),
-            conversation_ids: HashMap::new(),
-            order: Vec::new(),
-            grouping,
-            hide_empty: false,
-        };
-        let keys = |order: Vec<ConversationKey>| -> Vec<String> {
-            order.into_iter().map(|key| key.id).collect()
-        };
+        assert!(bucket_groups(None, two_projects().iter(), &ui, Local::now()).is_empty());
         assert_eq!(
-            keys(sidebar(SidebarGrouping::Project, Vec::new()).visible_order()),
+            keys(laid_out(two_projects(), &[], &ui).visible_order()),
             ["r1", "r2", "r3", "r4"]
         );
 
@@ -1227,12 +1495,144 @@ mod tests {
             grouping: SidebarGrouping::Status,
             ..Default::default()
         };
-        ui.collapsed_buckets.insert(Bucket::Idle);
-        let buckets = bucket_groups(&projects, &ui, Local::now());
+        ui.collapsed_buckets.insert(bucket_key(Bucket::Idle));
         assert_eq!(
-            keys(sidebar(SidebarGrouping::Status, buckets).visible_order()),
+            keys(laid_out(two_projects(), &[], &ui).visible_order()),
             ["r2", "r4"]
         );
+    }
+
+    /// 按机器分开：一台一片，片里照常分组；行上不再标机器名；折起来的机器跳过，要你看的算在
+    /// 机器标题上。
+    #[test]
+    fn by_machine_splits_areas_per_machine() {
+        let machines = [box_machine(), RuntimeKey::Local];
+        let ui = SidebarUi::default();
+        let sidebar = laid_out(two_projects(), &machines, &ui);
+        assert_eq!(sidebar.areas[0].projects, [1]);
+        assert_eq!(sidebar.areas[1].projects, [0]);
+        assert_eq!(sidebar.areas[0].status, AgentStatus::NeedsYou);
+        assert_eq!(sidebar.areas[0].sessions, 2);
+        // 片按机器表的顺序，不按项目的顺序。
+        assert_eq!(keys(sidebar.visible_order()), ["r3", "r4", "r1", "r2"]);
+        let flips = sidebar.flip_order();
+        assert_eq!(flips[0], machine_flip(&box_machine()));
+        assert!(flips.contains(&machine_flip(&RuntimeKey::Local)));
+
+        let mut ui = SidebarUi {
+            grouping: SidebarGrouping::Status,
+            ..Default::default()
+        };
+        ui.collapsed_machines.insert(box_machine());
+        // 折起来的组按机器各折各的：折本机的「需要你」不折 box 的。
+        ui.collapsed_buckets.insert(BucketKey {
+            machine: Some(RuntimeKey::Local),
+            bucket: Bucket::NeedsYou,
+        });
+        let sidebar = laid_out(two_projects(), &machines, &ui);
+        assert!(sidebar.areas[0].collapsed);
+        let on_box = &sidebar.areas[0].buckets[0];
+        assert_eq!(on_box.key.machine, Some(box_machine()));
+        assert!(!on_box.collapsed);
+        assert_eq!(on_box.rows[0].machine_name, None);
+        assert_eq!(keys(sidebar.visible_order()), ["r1"]);
+        let notices: Vec<String> = sidebar
+            .collect_notices()
+            .into_iter()
+            .map(|notice| notice.key)
+            .collect();
+        let local_need = bucket_flip(&BucketKey {
+            machine: Some(RuntimeKey::Local),
+            bucket: Bucket::NeedsYou,
+        });
+        assert_eq!(notices, [machine_flip(&box_machine()), local_need]);
+    }
+
+    /// 展开的会话行各算各的，折起来的项目算在标题上；正选中的那段不算。
+    #[test]
+    fn notices_point_at_rows_or_folded_groups() {
+        let mut projects = two_projects();
+        let ProjectItem::Session(r1) = &mut projects[0].items[0] else {
+            panic!("a 的第一项是会话");
+        };
+        r1.unread = true;
+        let mut sidebar = laid_out(projects, &[], &SidebarUi::default());
+        let notices = |sidebar: &Sidebar| -> Vec<(String, Tally)> {
+            sidebar
+                .collect_notices()
+                .into_iter()
+                .map(|notice| (notice.key, notice.tally))
+                .collect()
+        };
+        // 点胶囊打开哪段：会话行是它自己，折起来的一组是组里第一段要你看的。
+        let opens = |sidebar: &Sidebar| -> Vec<String> {
+            sidebar
+                .collect_notices()
+                .iter()
+                .map(|notice| notice.session.id.clone())
+                .collect()
+        };
+        let key = |id: &str| {
+            session_flip(&ConversationKey {
+                machine: RuntimeKey::Local,
+                id: id.to_string(),
+            })
+        };
+        let need = Tally { need: 1, unread: 0 };
+        let unread = Tally { need: 0, unread: 1 };
+        assert_eq!(
+            notices(&sidebar),
+            [(key("r1"), unread), (key("r2"), need), (key("r4"), need)]
+        );
+
+        sidebar.projects[0].collapsed = true;
+        sidebar.notices = sidebar.collect_notices();
+        let a = project_flip(&RuntimeKey::Local, "/a");
+        assert_eq!(
+            notices(&sidebar),
+            [(a.clone(), Tally { need: 1, unread: 1 }), (key("r4"), need)]
+        );
+        assert_eq!(opens(&sidebar), ["r1", "r4"]);
+        let selected = ConversationKey {
+            machine: RuntimeKey::Local,
+            id: "r4".to_string(),
+        };
+        let left: Vec<String> = sidebar
+            .notices_besides(Some(&selected))
+            .into_iter()
+            .map(|notice| notice.key)
+            .collect();
+        assert_eq!(left, [a]);
+    }
+
+    #[test]
+    fn project_search_ignores_case_and_surrounding_spaces() {
+        assert!(project_matches("Smelt-Plugin-Demo", "  plugin "));
+        assert!(project_matches("onoo", ""));
+        assert!(project_matches("onoo", "   "));
+        assert!(!project_matches("onoo", "smelt"));
+    }
+
+    /// 搜索只留名字搜得到的项目，上一段 / 下一段、按状态分的组都跟着只剩它们的会话。
+    #[test]
+    fn project_search_keeps_only_matching_projects() {
+        let now = Local::now();
+        let projects = two_projects();
+        let ui = SidebarUi::default();
+        assert_eq!(area(None, &projects, &ui, "B", now).projects, [1]);
+        assert!(area(None, &projects, &ui, "zzz", now).projects.is_empty());
+
+        let ui = SidebarUi {
+            grouping: SidebarGrouping::Status,
+            ..Default::default()
+        };
+        let found = area(None, &projects, &ui, "b", now);
+        let rows: Vec<&str> = found
+            .buckets
+            .iter()
+            .flat_map(|bucket| bucket.rows.iter().map(|row| row.key.id.as_str()))
+            .collect();
+        assert_eq!(rows, ["r4", "r3"]);
     }
 
     #[test]
@@ -1248,12 +1648,12 @@ mod tests {
     fn agent_marks_take_the_first_character() {
         assert_eq!(agent_mark("写作助手"), "写");
         assert_eq!(agent_mark("  writer"), "w");
-        assert_eq!(agent_mark(""), "智");
+        assert_eq!(agent_mark(""), "A");
     }
 
     #[test]
     fn project_names_use_the_last_segment() {
         assert_eq!(project_name(PathStyle::Posix, "/a/smelt"), "smelt");
-        assert_eq!(project_name(PathStyle::Posix, ""), "未指定目录");
+        assert_eq!(project_name(PathStyle::Posix, ""), "No Folder");
     }
 }

@@ -1241,7 +1241,7 @@ fn daemon_stopping_reply_carries_a_typed_code_and_plain_errors_do_not() {
         serde_json::from_slice(&line).unwrap()
     };
     let stopping = header(terminal_error_reply(
-        "守护正在停机",
+        "The runtime is shutting down",
         Some(TerminalOpenErrorCode::DaemonStopping),
         24,
         80,
@@ -1249,7 +1249,12 @@ fn daemon_stopping_reply_carries_a_typed_code_and_plain_errors_do_not() {
     assert_eq!(stopping["ok"], false);
     assert_eq!(stopping["code"], "daemon_stopping");
     assert_eq!(stopping["replay_len"], 0);
-    let plain = header(terminal_error_reply("终端会话不存在", None, 24, 80));
-    assert_eq!(plain["err"], "终端会话不存在");
+    let plain = header(terminal_error_reply(
+        "The terminal session doesn't exist",
+        None,
+        24,
+        80,
+    ));
+    assert_eq!(plain["err"], "The terminal session doesn't exist");
     assert!(plain.get("code").is_none());
 }

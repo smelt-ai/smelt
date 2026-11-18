@@ -3,16 +3,26 @@
 //! 只组 UI。写缓存、跑 git、改面板字段的方法留在 `ops.rs`，由按钮 listener 调用。
 
 use super::*;
+use rust_i18n::t;
 use smelt_plugin_api::ui::Segmented;
 use smelt_plugin_api::ui::kit::TYPE;
 
 /// 一个会丢东西的操作的确认框写什么。
 pub(super) struct DangerConfirm {
-    pub(super) title: &'static str,
+    pub(super) title: String,
     pub(super) body: String,
     /// 红字的后果说明。
-    pub(super) warning: &'static str,
-    pub(super) ok: &'static str,
+    pub(super) warning: String,
+    pub(super) ok: String,
+}
+
+/// 差异范围给人看的名字。
+fn scope_label(scope: DiffScope) -> std::borrow::Cow<'static, str> {
+    match scope {
+        DiffScope::All => t!("scope.all"),
+        DiffScope::Staged => t!("scope.staged"),
+        DiffScope::Unstaged => t!("scope.unstaged"),
+    }
 }
 
 impl GitPanel {
@@ -38,7 +48,7 @@ impl GitPanel {
             div()
                 .type_style(TYPE.ui)
                 .text_color(rgb(crate::ui_theme::bad()))
-                .child(warning)
+                .child(warning.clone())
                 .into_any_element()
         })
         .on_close(move |_, cx| close_panel.update(cx, |panel, cx| close(panel, cx)))
@@ -50,17 +60,17 @@ impl GitPanel {
         let path = &seen.path;
         if seen.untracked() {
             DangerConfirm {
-                title: "确定删除这个新文件吗？",
-                body: format!("{path} 从未被 git 跟踪过，删了就是彻底删除。"),
-                warning: "不进 reflog，找不回来。",
-                ok: "删除文件",
+                title: t!("discard.file_untracked_title").into_owned(),
+                body: t!("discard.file_untracked_body", path = path).into_owned(),
+                warning: t!("discard.no_reflog").into_owned(),
+                ok: t!("discard.file_untracked_ok").into_owned(),
             }
         } else {
             DangerConfirm {
-                title: "确定丢弃这个文件的更改吗？",
-                body: format!("{path} 会被还原成 HEAD 的样子，已暂存的部分一并还原。"),
-                warning: "不进 reflog，找不回来。",
-                ok: "丢弃更改",
+                title: t!("discard.file_title").into_owned(),
+                body: t!("discard.file_body", path = path).into_owned(),
+                warning: t!("discard.no_reflog").into_owned(),
+                ok: t!("discard.file_ok").into_owned(),
             }
         }
     }
@@ -68,10 +78,10 @@ impl GitPanel {
     /// 「丢弃这一块」。这个操作直接覆写工作区文件，既不进索引也不进 reflog。
     pub(super) fn discard_hunk_confirm(file: &str, idx: usize) -> DangerConfirm {
         DangerConfirm {
-            title: "确定丢弃这一块更改吗？",
-            body: format!("{file} 的第 {} 块更改会被还原成更改前的样子。", idx + 1),
-            warning: "直接改工作区文件，不进暂存区也不进 reflog——丢了就找不回来。",
-            ok: "丢弃这一块",
+            title: t!("discard.hunk_title").into_owned(),
+            body: t!("discard.hunk_body", path = file, index = idx + 1).into_owned(),
+            warning: t!("discard.hunk_warning").into_owned(),
+            ok: t!("discard.hunk_ok").into_owned(),
         }
     }
 
@@ -79,17 +89,17 @@ impl GitPanel {
     pub(super) fn delete_branch_confirm(branch: &str, remote: bool) -> DangerConfirm {
         if remote {
             DangerConfirm {
-                title: "确定删除这个远端分支吗？",
-                body: format!("{branch} 会从远端仓库删除，其他人拉取后本地也会跟着消失。"),
-                warning: "影响所有协作者，删之前确认没人在用。",
-                ok: "删除",
+                title: t!("branch.delete_remote_title").into_owned(),
+                body: t!("branch.delete_remote_body", branch = branch).into_owned(),
+                warning: t!("branch.delete_remote_warning").into_owned(),
+                ok: t!("branch.delete_ok").into_owned(),
             }
         } else {
             DangerConfirm {
-                title: "确定删除这个分支吗？",
-                body: format!("{branch} 只删本地引用，工作区文件不受影响。"),
-                warning: "有未合并的提交时 git 会拒绝删除，不会强删。",
-                ok: "删除",
+                title: t!("branch.delete_title").into_owned(),
+                body: t!("branch.delete_body", branch = branch).into_owned(),
+                warning: t!("branch.delete_warning").into_owned(),
+                ok: t!("branch.delete_ok").into_owned(),
             }
         }
     }
@@ -97,10 +107,10 @@ impl GitPanel {
     /// 「丢弃全部改动」：连未跟踪文件一起删。
     pub(super) fn discard_all_confirm() -> DangerConfirm {
         DangerConfirm {
-            title: "丢弃工作区全部更改？",
-            body: "已跟踪文件还原成 HEAD，未暂存 / 未跟踪的新文件会被删除。".to_string(),
-            warning: "不进 reflog，找不回来。",
-            ok: "全部丢弃",
+            title: t!("discard.all_title").into_owned(),
+            body: t!("discard.all_body").into_owned(),
+            warning: t!("discard.no_reflog").into_owned(),
+            ok: t!("discard.all_ok").into_owned(),
         }
     }
 
@@ -115,7 +125,7 @@ impl GitPanel {
         use crate::ui_theme;
 
         let Some(project) = self.active_project_ref(cx) else {
-            let (title, hint) = ("没有项目", "打开一个项目后再看更改".to_string());
+            let (title, hint) = (t!("no_project.title"), t!("no_project.hint"));
             return div()
                 .flex()
                 .flex_col()
@@ -177,7 +187,7 @@ impl GitPanel {
         // 同步入口 = 把本来就显眼的绿色 ↑N↓M 直接做成可点下拉（带下拉箭头），
         // 替代之前那个不起眼的「⇅」。点开是获取/拉取/暂存/恢复/丢弃全部。
         let sync_label = match busy {
-            Some(op) => op.chip().to_string(),
+            Some(op) => op.chip().into_owned(),
             None => format!("↑{ahead} ↓{behind}"),
         };
         let sync_color = if busy.is_some() {
@@ -223,7 +233,10 @@ impl GitPanel {
         let ws_log_repo = cx.entity();
 
         let view_tabs = Segmented::new("git-view-tabs")
-            .segments(["更改", "历史"])
+            .segments([
+                SharedString::from(t!("tab.changes")),
+                SharedString::from(t!("tab.history")),
+            ])
             .selected(Some(match self.git_tab {
                 GitTab::Changes => 0,
                 GitTab::Log => 1,
@@ -249,14 +262,14 @@ impl GitPanel {
         let scope_button = Button::new("git-diff-scope")
             .quiet()
             .small()
-            .label(self.diff_scope.label())
+            .label(scope_label(self.diff_scope))
             .dropdown_caret(true);
         let scope_control =
             MenuTrigger::dropdown("git-diff-scope-menu", scope_button, move |_window, _cx| {
                 let mut menu = Menu::new();
                 for scope in [DiffScope::All, DiffScope::Staged, DiffScope::Unstaged] {
                     let view = scope_view.clone();
-                    menu = menu.item(MenuItem::new(scope.label()).on_click(
+                    menu = menu.item(MenuItem::new(scope_label(scope)).on_click(
                         move |_event, _window, cx| {
                             view.update(cx, |workspace, cx| {
                                 workspace.set_diff_scope(scope, cx);
@@ -475,7 +488,7 @@ impl GitPanel {
                 append_narrow_git_group(
                     &mut narrow_rows,
                     NarrowGitGroup {
-                        title: format!("暂存的更改 · {}", staged.len()),
+                        title: t!("changes.staged", count = staged.len()).into_owned(),
                         files: &staged,
                         key: "narrow-staged",
                         is_staged_group: true,
@@ -490,7 +503,7 @@ impl GitPanel {
                 append_narrow_git_group(
                     &mut narrow_rows,
                     NarrowGitGroup {
-                        title: format!("更改 · {}", changed.len()),
+                        title: t!("changes.unstaged", count = changed.len()).into_owned(),
                         files: &changed,
                         key: "narrow-changed",
                         is_staged_group: false,
@@ -525,18 +538,14 @@ impl GitPanel {
                         .text_lg()
                         .font_semibold()
                         .text_color(rgb(ui_theme::text()))
-                        .child(if message == "工作区干净" {
-                            "工作区干净"
-                        } else {
-                            message
-                        }),
+                        .child(message.text().into_owned()),
                 )
-                .when(message == "工作区干净", |col| {
+                .when(message == EmptyList::Clean, |col| {
                     col.child(
                         div()
                             .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::faint()))
-                            .child("没有要提交的更改"),
+                            .child(t!("changes.nothing_to_commit").into_owned()),
                     )
                 })
                 .into_any_element()
@@ -607,7 +616,7 @@ impl GitPanel {
                         .py_1()
                         .type_style(TYPE.text_xsmall)
                         .text_color(rgb(ui_theme::faint()))
-                        .child("仓库太多，只列出了一部分"),
+                        .child(t!("changes.repos_truncated").into_owned()),
                 )
                 .into_any_element()
         } else {
@@ -626,7 +635,7 @@ impl GitPanel {
                     .pb_1()
                     .type_style(TYPE.text_xsmall_medium)
                     .text_color(rgb(ui_theme::faint()))
-                    .child("变更"),
+                    .child(t!("title").into_owned()),
             )
             .child(list);
         // 有打开的 diff：内嵌显示（diff 在左占主宽度，改动列表 + commit 框收窄到
@@ -639,11 +648,11 @@ impl GitPanel {
         // 还让人以为预览功能坏了。没有可显示的 diff 就画成空态。
         let changes_body: AnyElement = {
             let empty_hint = if total_changes > 0 {
-                "← 选择文件查看更改"
+                t!("changes.pick_file")
             } else {
-                "没有文件更改"
+                t!("changes.no_files")
             };
-            let diff_pane = self.git_diff_pane(empty_hint);
+            let diff_pane = self.git_diff_pane(&empty_hint);
             div()
                 .flex_1()
                 .relative()

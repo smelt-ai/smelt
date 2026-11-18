@@ -9,6 +9,7 @@ mod tests;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use rust_i18n::t;
 use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};
 use smelt_model::agent_memory::{self as model_memory, MemoryEntry, MemoryListing};
@@ -63,7 +64,7 @@ impl Agents {
     fn runtime(&self) -> Result<CurrentRuntime, SmeltError> {
         self.source
             .current()
-            .ok_or_else(|| error(SmeltErrorKind::Offline, "还没有连上这台机器"))
+            .ok_or_else(|| error(SmeltErrorKind::Offline, t!("error.not_connected")))
     }
 
     pub(crate) fn editor(&self, agent_id: Option<&str>) -> Result<AgentEditor, SmeltError> {
@@ -437,6 +438,7 @@ fn memory_shelf(listing: MemoryListing) -> MemoryShelf {
 }
 
 fn memory_item(entry: MemoryEntry) -> MemoryItem {
+    let pending_reason = entry.pending_reason_text();
     MemoryItem {
         rule: model_memory::is_rule_memory_kind(entry.kind.as_deref()),
         last_used_ms: entry
@@ -446,7 +448,7 @@ fn memory_item(entry: MemoryEntry) -> MemoryItem {
         file_name: entry.file_name,
         name: entry.name,
         description: entry.description,
-        pending_reason: entry.pending_reason,
+        pending_reason,
         stale: entry.stale,
         read_count: entry.read_count,
         body: entry.body,

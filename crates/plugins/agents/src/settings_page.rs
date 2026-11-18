@@ -34,6 +34,7 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, Hsla, SharedString, Subscription, Task, Window, div, px, rgb,
 };
+use rust_i18n::t;
 use smelt_plugin_api as api;
 use smelt_plugin_api::ui::field::{InputEvent, InputState, TextareaState};
 
@@ -51,7 +52,7 @@ pub(crate) fn view_spec() -> ViewSpec {
     ViewSpec {
         // 视图 id 是 `smelt.agents/settings`（[`contract::SETTINGS_VIEW`]）。
         name: "settings".into(),
-        title: "Agent".into(),
+        title: api::text!("settings.title"),
         icon: IconName::Bot.path(),
         draws_top_bar: false,
         instances: false,
@@ -103,6 +104,7 @@ pub(crate) fn view_spec() -> ViewSpec {
             .map(SharedString::from)
             .collect(),
         }),
+        fills: Vec::new(),
         build: Rc::new(|window, cx| {
             Rc::new(cx.new(|cx| AgentSettingsPage::new(window, cx))) as Rc<dyn ViewHandle>
         }),
@@ -180,16 +182,50 @@ struct ProfileRow {
     env_error: Option<String>,
 }
 
+impl LaunchRow {
+    /// 输入框的占位文字。建的时候和换语言时各设一次。
+    fn label_inputs(&self, window: &mut Window, cx: &mut App) {
+        self.label.update(cx, |input, cx| {
+            input.set_placeholder(t!("launch.label_placeholder"), window, cx)
+        });
+        self.command.update(cx, |input, cx| {
+            input.set_placeholder(t!("launch.command_placeholder"), window, cx)
+        });
+    }
+}
+
+impl ProfileRow {
+    /// 输入框的占位文字。建的时候和换语言时各设一次。
+    fn label_inputs(&self, window: &mut Window, cx: &mut App) {
+        let command = match self.profile.kind() {
+            Some(ConversationAgentKind::Custom) | None => t!("profile.command_placeholder"),
+            Some(kind) => t!("profile.command_inherit_placeholder", agent = kind.label()),
+        };
+        self.label.update(cx, |input, cx| {
+            input.set_placeholder(t!("profile.label_placeholder"), window, cx)
+        });
+        self.command
+            .update(cx, |input, cx| input.set_placeholder(command, window, cx));
+        self.env.update(cx, |input, cx| {
+            input.set_placeholder(t!("profile.env_placeholder"), window, cx)
+        });
+        self.dir.update(cx, |input, cx| {
+            input.set_placeholder(t!("profile.dir_placeholder"), window, cx)
+        });
+    }
+}
+
 impl AgentSettingsPage {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![
             cx.subscribe_in(
                 &api::events(cx),
                 window,
-                |this, _, event: &HostEvent, window, cx| {
-                    if matches!(event, HostEvent::ShownViewsChanged) {
-                        this.sync_shown(window, cx);
-                    }
+                |this, _, event: &HostEvent, window, cx| match event {
+                    HostEvent::ShownViewsChanged => this.sync_shown(window, cx),
+                    // 输入框的占位文字存在输入框里，换语言时重设。
+                    HostEvent::LocaleChanged => this.relabel_inputs(window, cx),
+                    _ => {}
                 },
             ),
             cx.observe_global_in::<agent_hosts::AgentHosts>(window, |this, window, cx| {
@@ -211,6 +247,15 @@ impl AgentSettingsPage {
         page.sync_profile_rows(window, cx);
         page.sync_shown(window, cx);
         page
+    }
+
+    fn relabel_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for row in &self.launch.rows {
+            row.label_inputs(window, cx);
+        }
+        for row in self.profiles.iter() {
+            row.label_inputs(window, cx);
+        }
     }
 
     /// 页面露出来时重读只在这里显示的状态：外面手改了 hooks 配置、别的设备改了启动项，重开
@@ -293,20 +338,24 @@ impl AgentSettingsPage {
                     .is_none_or(RuntimeExecutable::is_available);
                 this.cli.install_result = Some(match result {
                     Ok(installer) if available => (
-                        format!(
-                            "{} 已通过 {installer} 安装；请在首次启动时完成登录。",
-                            agent.label()
-                        ),
+                        t!(
+                            "cli.installed",
+                            agent = agent.label(),
+                            installer = installer
+                        )
+                        .into_owned(),
                         false,
                     ),
                     Ok(installer) => (
-                        format!(
-                            "{} 已通过 {installer} 安装，但当前搜索路径未找到 CLI；重启 Smelt 或检查 PATH 后重试检测。",
-                            agent.label()
-                        ),
+                        t!(
+                            "cli.installed_not_found",
+                            agent = agent.label(),
+                            installer = installer
+                        )
+                        .into_owned(),
                         true,
                     ),
-                    Err(error) => (format!("安装失败：{error}"), true),
+                    Err(error) => (t!("cli.install_failed", error = error).into_owned(), true),
                 });
                 if diagnostics.is_some() {
                     this.cli.diagnostics = diagnostics;
@@ -358,9 +407,9 @@ impl AgentSettingsPage {
         self.hooks.busy = true;
         cx.notify();
         let (done, failed) = if enabled {
-            ("Agent hooks 已安装", "安装失败")
+            (t!("hooks.installed"), t!("hooks.install_failed"))
         } else {
-            ("Smelt hooks 已移除", "移除失败")
+            (t!("hooks.removed"), t!("hooks.remove_failed"))
         };
         let changed = if enabled {
             api::call::<AgentHooksInstall>(
@@ -384,11 +433,15 @@ impl AgentSettingsPage {
                 match changed {
                     Ok(status) => {
                         this.hooks.status = Some(status);
-                        notify("完成", done.to_string(), cx);
+                        notify(&t!("notify.done"), done.into_owned(), cx);
                     }
                     Err(error) => {
                         eprintln!("[agents] agent hooks：{error}");
-                        notify("错误", format!("{failed}：{error}"), cx);
+                        notify(
+                            &t!("notify.error"),
+                            t!("error.detail", what = failed, error = error).into_owned(),
+                            cx,
+                        );
                         // 到一半失败时有的 provider 已经改了，重新取一次真实状态。
                         this.refresh_hooks(cx);
                     }
@@ -444,16 +497,9 @@ impl AgentSettingsPage {
         let mut rows = Vec::with_capacity(entries.len());
         let mut subscriptions = Vec::with_capacity(entries.len() * 2);
         for (index, entry) in entries.iter().enumerate() {
-            let label = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("显示名称")
-                    .default_value(entry.label.clone())
-            });
-            let command = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("启动命令，如 claude")
-                    .default_value(entry.command.clone())
-            });
+            let label = cx.new(|cx| InputState::new(window, cx).default_value(entry.label.clone()));
+            let command =
+                cx.new(|cx| InputState::new(window, cx).default_value(entry.command.clone()));
             subscriptions.push(cx.subscribe_in(
                 &label,
                 window,
@@ -490,11 +536,13 @@ impl AgentSettingsPage {
                     }
                 },
             ));
-            rows.push(LaunchRow {
+            let row = LaunchRow {
                 label,
                 command,
                 removable: !launch_entry_is_builtin(entry),
-            });
+            };
+            row.label_inputs(window, cx);
+            rows.push(row);
         }
         self.launch.rows = rows;
         self.launch._subscriptions = subscriptions;
@@ -508,7 +556,11 @@ impl AgentSettingsPage {
         cx: &mut Context<Self>,
     ) {
         let Some(current) = self.launch.entries.clone() else {
-            notify("错误", "正在读取运行时的启动项，请稍后再改".to_string(), cx);
+            notify(
+                &t!("notify.error"),
+                t!("launch.not_loaded").into_owned(),
+                cx,
+            );
             return;
         };
         let mut next = current.clone();
@@ -558,7 +610,11 @@ impl AgentSettingsPage {
                     // 换掉页面上的。
                     Err(error) => {
                         this.launch.pending.clear();
-                        notify("错误", format!("保存启动项失败：{error}"), cx);
+                        notify(
+                            &t!("notify.error"),
+                            t!("launch.save_failed", error = error).into_owned(),
+                            cx,
+                        );
                         this.launch.entries = None;
                         this.load_launch(window, cx);
                     }
@@ -573,7 +629,7 @@ impl AgentSettingsPage {
         self.edit_launch(
             |entries| {
                 entries.push(LaunchEntry {
-                    label: "新启动项".into(),
+                    label: t!("launch.new_entry").into_owned(),
                     command: String::new(),
                     provider: None,
                 });
@@ -633,33 +689,17 @@ impl AgentSettingsPage {
         let mut rows = Vec::with_capacity(profiles.len());
         let mut subscriptions = Vec::new();
         for profile in &profiles {
-            let label = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("名称")
-                    .default_value(profile.label.clone())
-            });
-            let command_placeholder = match profile.kind() {
-                Some(ConversationAgentKind::Custom) | None => {
-                    "ACP 启动命令，如 my-agent --acp".to_string()
-                }
-                Some(kind) => format!("留空沿用 {} 的命令", kind.label()),
-            };
-            let command = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(command_placeholder)
-                    .default_value(profile.command.clone())
-            });
+            let label =
+                cx.new(|cx| InputState::new(window, cx).default_value(profile.label.clone()));
+            let command =
+                cx.new(|cx| InputState::new(window, cx).default_value(profile.command.clone()));
             let env = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(1, 8)
-                    .placeholder("每行一个 KEY=VALUE")
                     .default_value(format_env_lines(&profile.env))
             });
-            let dir = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("留空用默认目录")
-                    .default_value(profile.workspace_dir.clone())
-            });
+            let dir = cx
+                .new(|cx| InputState::new(window, cx).default_value(profile.workspace_dir.clone()));
             subscriptions.push(save_profile_text(&label, &profile.id, cx, |p, value| {
                 p.label = value;
             }));
@@ -694,14 +734,16 @@ impl AgentSettingsPage {
                     }
                 }),
             );
-            rows.push(ProfileRow {
+            let row = ProfileRow {
                 profile: profile.clone(),
                 label,
                 command,
                 env,
                 dir,
                 env_error: None,
-            });
+            };
+            row.label_inputs(window, cx);
+            rows.push(row);
         }
         self.profiles = Rc::new(rows);
         self._profile_subscriptions = subscriptions;
@@ -720,25 +762,20 @@ impl Render for AgentSettingsPage {
         SettingsPage::new("agents-settings")
             .child(
                 SettingsSection::new()
-                    .title("本机 Agent")
+                    .title(t!("settings.local_agents"))
                     .children(self.cli_cells(entity.clone()))
                     .child(self.hooks_cell(entity.clone())),
             )
             .child(
                 SettingsSection::new()
-                    .title("自定义 Agent")
-                    .description(
-                        "接入任意 ACP Agent，或在内置 Agent 上换命令、加环境变量、换数据目录。\
-                         「新建对话」菜单会多一项；基于内置 Agent 的还会出现在历史会话页。",
-                    )
+                    .title(t!("settings.custom_agents"))
+                    .description(t!("profile.section_description"))
                     .children(self.profile_cells(entity.clone())),
             )
             .child(
                 SettingsSection::new()
-                    .title("新建菜单")
-                    .description(
-                        "项目「+」菜单里的启动项。命令在项目目录下执行，可带参数；内置项不能删。",
-                    )
+                    .title(t!("settings.new_menu"))
+                    .description(t!("launch.section_description"))
                     .children(self.launch_cells(entity)),
             )
             .child(quota_section(cx))
@@ -757,10 +794,10 @@ impl AgentSettingsPage {
         let refresh = Button::new("refresh-agent-cli")
             .quiet()
             .small()
-            .icon(IconName::RefreshCw)
+            .icon(IconName::Refresh)
             .loading(refreshing)
             .disabled(busy)
-            .icon_action("刷新运行环境检测")
+            .icon_action(t!("cli.refresh"))
             .on_click(move |_, _, cx| {
                 refresh_page.update(cx, |page, cx| page.refresh_cli(cx));
             });
@@ -783,11 +820,11 @@ impl AgentSettingsPage {
                 div()
                     .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
-                    .child(if refreshing {
-                        "正在检测本机 Agent 与运行时…"
+                    .child(SharedString::from(if refreshing {
+                        t!("cli.detecting")
                     } else {
-                        "尚未取得运行环境状态"
-                    })
+                        t!("cli.no_status")
+                    }))
                     .into_any_element(),
             );
             return cells;
@@ -841,32 +878,29 @@ impl AgentSettingsPage {
                                 .child(provider.label.clone()),
                         )
                         .child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
-                            if provider.installed {
-                                "已接入"
+                            SharedString::from(if provider.installed {
+                                t!("hooks.connected")
                             } else {
-                                "未接入"
-                            },
+                                t!("hooks.not_connected")
+                            }),
                         ))
                 }))
                 .into_any_element(),
             None => div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(muted)
-                .child("正在读取接入状态…")
+                .child(t!("hooks.loading").into_owned())
                 .into_any_element(),
         };
         let uninstall_page = page.clone();
         let install_page = page;
         let row = SettingsRow::new("Hooks")
-            .description(
-                "把 Smelt 的通知接进各家 Agent 的用户级配置，只增删 Smelt 自己的条目；\
-                 不介入工具权限决策，重开会话后生效。",
-            )
+            .description(t!("hooks.description"))
             .child(
                 Button::new("uninstall-agent-hooks")
                     .quiet()
                     .small()
-                    .label("移除")
+                    .label(t!("hooks.remove"))
                     .disabled(busy)
                     .on_click(move |_, _, cx| {
                         uninstall_page.update(cx, |page, cx| page.set_hooks(false, cx));
@@ -876,9 +910,9 @@ impl AgentSettingsPage {
                 Button::new("install-agent-hooks")
                     .small()
                     .label(if installed {
-                        "重新安装"
+                        t!("hooks.reinstall")
                     } else {
-                        "安装 hooks"
+                        t!("hooks.install")
                     })
                     .disabled(busy)
                     .on_click(move |_, _, cx| {
@@ -911,8 +945,8 @@ impl AgentSettingsPage {
         let muted = rgb(ui_theme::muted());
         if self.launch.entries.is_none() {
             let text = match &self.launch.error {
-                Some(error) => format!("读取启动项失败：{error}"),
-                None => "正在读取启动项…".to_string(),
+                Some(error) => t!("launch.load_failed", error = error).into_owned(),
+                None => t!("launch.loading").into_owned(),
             };
             return vec![
                 div()
@@ -941,8 +975,8 @@ impl AgentSettingsPage {
                     .items_center()
                     .type_style(TYPE.text_xsmall)
                     .text_color(muted)
-                    .child(div().w(name_w).flex_none().child("名称"))
-                    .child(div().flex_1().min_w_0().child("命令"))
+                    .child(div().w(name_w).flex_none().child(t!("launch.name_column").into_owned()))
+                    .child(div().flex_1().min_w_0().child(t!("launch.command_column").into_owned()))
                     .child(div().w(delete_w).flex_none()),
             )
             .children(self.launch.rows.iter().enumerate().map(|(index, row)| {
@@ -953,7 +987,7 @@ impl AgentSettingsPage {
                         .quiet()
                         .small()
                         .icon(IconName::Close)
-                        .icon_action("删除启动项")
+                        .icon_action(t!("launch.delete"))
                         .w(delete_w)
                         .flex_none()
                         .on_click(move |_, window, cx| {
@@ -984,7 +1018,7 @@ impl AgentSettingsPage {
         let add = Button::new("add-launch-entry")
             .small()
             .icon(IconName::Plus)
-            .label("添加启动项")
+            .label(t!("launch.add"))
             .on_click(move |_, window, cx| {
                 page.update(cx, |page, cx| page.add_launch_entry(window, cx));
             });
@@ -996,7 +1030,7 @@ impl AgentSettingsPage {
         if let Err(unavailable) = &self.profiles_state {
             let text = unavailable
                 .clone()
-                .unwrap_or_else(|| "正在读取本机的智能体配置…".to_string());
+                .unwrap_or_else(|| t!("profile.loading").into_owned());
             return vec![
                 div()
                     .type_style(TYPE.text_xsmall)
@@ -1008,7 +1042,7 @@ impl AgentSettingsPage {
         let add = Button::new("add-profile")
             .small()
             .icon(IconName::Plus)
-            .label("添加自定义 Agent")
+            .label(t!("profile.add"))
             .on_click(move |_, _, cx| {
                 page.update(cx, |_, cx| add_profile(cx));
             });
@@ -1029,22 +1063,25 @@ fn cli_row(
     page: Entity<AgentSettingsPage>,
 ) -> AnyElement {
     let (status, color) = if !executable.is_available() {
-        ("未安装".to_string(), ui_theme::bad())
+        (t!("cli.not_installed").into_owned(), ui_theme::bad())
     } else if let Some(error) = &executable.error {
-        (format!("检测失败：{error}"), ui_theme::need())
+        (
+            t!("cli.detect_failed", error = error).into_owned(),
+            ui_theme::need(),
+        )
     } else {
         (
             executable
                 .version
                 .clone()
-                .unwrap_or_else(|| "已安装（未返回版本）".to_string()),
+                .unwrap_or_else(|| t!("cli.installed_no_version").into_owned()),
             ui_theme::ok(),
         )
     };
     let path = executable
         .path
         .clone()
-        .unwrap_or_else(|| "未在 Smelt 的 Agent 搜索路径中找到".to_string());
+        .unwrap_or_else(|| t!("cli.not_on_path").into_owned());
     let install = (!executable.is_available()).then(|| {
         let installing_this = installing == Some(agent);
         Button::new(SharedString::from(format!(
@@ -1054,13 +1091,13 @@ fn cli_row(
         .small()
         .icon(IconName::Plus)
         .label(if installing_this {
-            "安装中…"
+            t!("cli.installing")
         } else {
-            "安装"
+            t!("cli.install")
         })
         .loading(installing_this)
         .disabled(busy)
-        .tooltip(format!("安装 {}", agent.label()))
+        .tooltip(t!("cli.install_tooltip", agent = agent.label()))
         .on_click(move |_, _, cx| {
             page.update(cx, |page, cx| page.install_cli(agent, cx));
         })
@@ -1110,7 +1147,7 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
     let key = inputs.label.entity_id();
     let muted = rgb(ui_theme::muted());
     let mono = font_config::font_family();
-    let caption = move |text: &'static str| {
+    let caption = move |text: std::borrow::Cow<'static, str>| {
         div()
             .w(px(72.))
             .flex_none()
@@ -1119,9 +1156,9 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
             .child(text)
     };
     let kind_label = match profile.kind() {
-        Some(ConversationAgentKind::Custom) => "通用 ACP".to_string(),
-        Some(kind) => format!("基于 {}", kind.short_label()),
-        None => format!("未知 ({})", profile.kind_id),
+        Some(ConversationAgentKind::Custom) => t!("profile.kind_generic").into_owned(),
+        Some(kind) => t!("profile.kind_based", agent = kind.short_label()).into_owned(),
+        None => t!("profile.kind_unknown", id = profile.kind_id).into_owned(),
     };
     let kind_id = profile.id.clone();
     let delete_id = profile.id.clone();
@@ -1135,13 +1172,19 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
             MenuItem::new(label).on_click(move |_, _, cx| set_profile_kind(&id, kind, cx))
         };
         let menu = Menu::new()
-            .item(pick(ConversationAgentKind::Custom, "通用 ACP".into()))
+            .item(pick(
+                ConversationAgentKind::Custom,
+                t!("profile.kind_generic").into_owned(),
+            ))
             .separator();
         // `ALL` 不含通用 ACP，上面单列了。
         ConversationAgentKind::ALL
             .into_iter()
             .fold(menu, |menu, kind| {
-                menu.item(pick(kind, format!("基于 {}", kind.label())))
+                menu.item(pick(
+                    kind,
+                    t!("profile.kind_based", agent = kind.label()).into_owned(),
+                ))
             })
     })
     // 宽度落在包住按钮的那层上，按钮铺满它。
@@ -1166,7 +1209,7 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
                         .quiet()
                         .small()
                         .icon(IconName::Close)
-                        .icon_action("删除这个自定义 Agent")
+                        .icon_action(t!("profile.delete"))
                         .w(px(28.))
                         .flex_none()
                         .on_click(move |_, _, cx| remove_profile(&delete_id, cx)),
@@ -1178,7 +1221,7 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
                 .w_full()
                 .gap_2()
                 .items_center()
-                .child(caption("启动命令"))
+                .child(caption(t!("profile.command")))
                 .child(
                     div()
                         .flex_1()
@@ -1191,7 +1234,7 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
                 .w_full()
                 .gap_2()
                 .items_start()
-                .child(caption("环境变量").pt_1())
+                .child(caption(t!("profile.env")).pt_1())
                 .child(div().flex_1().child(TextArea::new(&inputs.env))),
         )
         .when_some(profile.workspace_env_var(), |card, var| {
@@ -1201,7 +1244,7 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
                     .w_full()
                     .gap_2()
                     .items_center()
-                    .child(caption("数据目录"))
+                    .child(caption(t!("profile.dir")))
                     .child(
                         div()
                             .flex_1()
@@ -1236,9 +1279,9 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
 fn quota_section(cx: &App) -> SettingsSection {
     let settings = cx.global::<quota::QuotaSettings>().clone();
     SettingsSection::new()
-        .title("账户额度")
+        .title(t!("quota.title"))
         .children(settings.error.map(|error| {
-            SettingsRow::new("读取失败").child(
+            SettingsRow::new(t!("quota.read_failed")).child(
                 div()
                     .max_w(px(320.))
                     .overflow_hidden()
@@ -1256,21 +1299,20 @@ fn quota_row(provider: QuotaProviderSetting) -> SettingsRow {
     let id = target.id();
     let row = SettingsRow::new(target.display_name());
     let row = if denied {
-        row.description("钥匙串访问被拒绝或不可用，已停止自动读取。点重试会再请求一次授权。")
-            .child(
-                Button::new(SharedString::from(format!("quota-retry-{id}")))
-                    .quiet()
-                    .small()
-                    .label("重试")
-                    .on_click(move |_, _, cx| quota::request_refresh(target, cx)),
-            )
+        row.description(t!("quota.keychain_denied")).child(
+            Button::new(SharedString::from(format!("quota-retry-{id}")))
+                .quiet()
+                .small()
+                .label(t!("common.retry"))
+                .on_click(move |_, _, cx| quota::request_refresh(target, cx)),
+        )
     } else {
         row
     };
     row.child(
         Switch::new(SharedString::from(format!("quota-enabled-{id}")))
             .checked(provider.enabled)
-            .accessibility_label(format!("查询 {} 的额度", target.display_name()))
+            .accessibility_label(t!("quota.enable_label", name = target.display_name()))
             .on_change(move |checked, _, cx| quota::set_enabled(target, checked, cx)),
     )
 }
@@ -1279,14 +1321,14 @@ fn quota_row(provider: QuotaProviderSetting) -> SettingsRow {
 
 fn checked_at_text(checked_at: Option<Instant>) -> String {
     let Some(checked_at) = checked_at else {
-        return "尚未检测".to_string();
+        return t!("cli.never_checked").into_owned();
     };
     let elapsed = checked_at.elapsed().as_secs();
     match elapsed {
-        0..=4 => "刚刚检测".to_string(),
-        5..=59 => format!("{elapsed} 秒前检测"),
-        60..=3599 => format!("{} 分钟前检测", elapsed / 60),
-        _ => format!("{} 小时前检测", elapsed / 3600),
+        0..=4 => t!("cli.checked_now").into_owned(),
+        5..=59 => t!("cli.checked_seconds", count = elapsed).into_owned(),
+        60..=3599 => t!("cli.checked_minutes", count = elapsed / 60).into_owned(),
+        _ => t!("cli.checked_hours", count = elapsed / 3600).into_owned(),
     }
 }
 
@@ -1348,7 +1390,7 @@ fn add_profile(cx: &mut App) {
             settings.profiles.push(AcpProfile {
                 id: uuid::Uuid::new_v4().to_string(),
                 kind_id: ConversationAgentKind::Custom.id().to_string(),
-                label: "新 Agent".into(),
+                label: t!("profile.new").into_owned(),
                 command: String::new(),
                 env: Default::default(),
                 workspace_dir: String::new(),

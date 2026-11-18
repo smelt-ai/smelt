@@ -9,19 +9,21 @@
 //! `search_activation_revision` 加一；搜索栏看着状态，看到加一就把查询词填进输入框、全选、
 //! 拿焦点。查询词、大小写、匹配位置都存在状态的搜索会话里，搜索栏只多留两个输入框。
 
+use rust_i18n::t;
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use gpui::{
     App, AppContext as _, Context, Edges, Entity, Focusable as _, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, RenderOnce, Role, SharedString,
-    StyleRefinement, Styled, Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _,
-    px, relative, rgb,
+    IntoElement, ParentElement as _, Pixels, Rems, Render, RenderOnce, Role, SharedString,
+    StyleRefinement, Styled, Subscription, WeakEntity, Window, div, point,
+    prelude::FluentBuilder as _, px, rems, rgb,
 };
 use gpui_base::StyledExt as _;
 pub use gpui_base::input::EditorState;
 use gpui_base::input::{
     DiagnosticColors, Editor as BaseEditor, Enter, Escape, IndentInline, InputAccessibility,
-    InputEditorStyle, OutdentInline, Replace, Search,
+    InputEditorStyle, OutdentInline, Position, Replace, Search,
 };
 
 use crate::button::Button;
@@ -33,6 +35,8 @@ use crate::{theme_catalog, ui_theme};
 
 /// 行高是字号的倍数：调用方改字号时行跟着变。
 const LINE_HEIGHT: f32 = 1.5;
+/// [`reveal_line`] 跳到的行上面留几行，看得到上下文。
+const REVEAL_CONTEXT_LINES: usize = 5;
 /// 编辑区内边距。左边紧挨行号栏，行号栏自己留了白。
 const PADDING: Edges<Pixels> = Edges {
     top: px(8.),
@@ -86,6 +90,30 @@ impl Styled for CodeEditor {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style
     }
+}
+
+/// 编辑器一行的高度：等宽档字号乘 [`LINE_HEIGHT`]，按 rem 给，跟着界面字号缩放。画编辑器和
+/// [`reveal_line`] 算滚动都用它，两边对得上。
+fn line_height() -> Rems {
+    rems(TYPE.mono.size / 16. * LINE_HEIGHT)
+}
+
+/// 把光标放到第 `line` 行（从 1 数）行首，滚到看得见，上面留几行上下文。
+///
+/// 刚 `set_value` 灌进新内容就跳行也能用。gpui-base 的 `set_cursor_position` 按上一次排版滚动，
+/// 新内容还没排过版：编辑器没画过就不滚，画过的话可滚范围还是旧内容的，被夹回顶部。这里行高
+/// 自己算、不靠排版；滚动交给 `set_scroll_offset`，它等下一次排版按新内容生效、夹进可滚范围。
+pub fn reveal_line(
+    state: &mut EditorState,
+    line: usize,
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    let row = line.saturating_sub(1);
+    state.set_cursor_position(Position::new(row as u32, 0), window, cx);
+    let top_row = row.saturating_sub(REVEAL_CONTEXT_LINES);
+    let line_height = line_height().to_pixels(window.rem_size());
+    state.set_scroll_offset(point(px(0.), -(line_height * top_row as f32)), cx);
 }
 
 /// 编辑器的颜色、高亮样式和折叠箭头，每帧从当前主题取（换主题不用通知编辑器）。
@@ -182,7 +210,7 @@ impl RenderOnce for CodeEditor {
             .relative()
             .size_full()
             .type_style(TYPE.mono)
-            .line_height(relative(LINE_HEIGHT))
+            .line_height(line_height())
             .font_family(smelt_model::font_config::font_family())
             .text_color(rgb(ui_theme::text()))
             .child(BaseEditor::new(&state));
@@ -232,10 +260,11 @@ impl CodeSearch {
         let seed = editor.read(cx).search_session().query.clone();
         let query = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("查找")
+                .placeholder(t!("search.find"))
                 .default_value(seed)
         });
-        let replacement = cx.new(|cx| InputState::new(window, cx).placeholder("替换为"));
+        let replacement =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("search.replace_with")));
         let _subscriptions = [
             cx.subscribe(&query, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -379,7 +408,7 @@ fn match_label(query: &str, current: usize, total: usize) -> SharedString {
     if query.is_empty() {
         SharedString::default()
     } else if total == 0 {
-        "无结果".into()
+        t!("search.no_results").into()
     } else {
         format!("{}/{}", current + 1, total).into()
     }
@@ -402,12 +431,13 @@ impl Render for CodeSearch {
         };
         let replaceable = self.replaceable(cx);
         let replace_open = replace_mode && replaceable;
-        let icon_button = |id: &'static str, icon: IconName, label: &'static str| {
+        let icon_button = |id: &'static str, icon: IconName, label: Cow<'static, str>| {
+            let label = SharedString::from(label);
             Button::new(id)
                 .quiet()
                 .small()
                 .icon(icon)
-                .accessibility_label(label)
+                .accessibility_label(label.clone())
                 .tooltip(label)
         };
 
@@ -418,18 +448,18 @@ impl Render for CodeSearch {
             .child(
                 TextInput::new(&self.query)
                     .small()
-                    .aria_label("查找")
+                    .aria_label(t!("search.find"))
                     .w(px(SEARCH_INPUT_WIDTH)),
             )
             .child(
-                icon_button("case", IconName::CaseSensitive, "区分大小写")
+                icon_button("case", IconName::CaseSensitive, t!("search.match_case"))
                     .selected(!case_insensitive)
                     .toggled(!case_insensitive)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_case(cx))),
             )
             .when(replaceable, |this| {
                 this.child(
-                    icon_button("replace-mode", IconName::Replace, "替换")
+                    icon_button("replace-mode", IconName::Replace, t!("search.replace"))
                         .selected(replace_open)
                         .toggled(replace_open)
                         .on_click(
@@ -438,12 +468,12 @@ impl Render for CodeSearch {
                 )
             })
             .child(
-                icon_button("prev", IconName::ArrowUp, "上一处")
+                icon_button("prev", IconName::ArrowUp, t!("search.previous"))
                     .disabled(!has_matches)
                     .on_click(cx.listener(|this, _, _, cx| this.step(false, cx))),
             )
             .child(
-                icon_button("next", IconName::ArrowDown, "下一处")
+                icon_button("next", IconName::ArrowDown, t!("search.next"))
                     .disabled(!has_matches)
                     .on_click(cx.listener(|this, _, _, cx| this.step(true, cx))),
             )
@@ -466,8 +496,8 @@ impl Render for CodeSearch {
                     .quiet()
                     .small()
                     .icon(GLYPHS.close)
-                    .accessibility_label("关闭搜索")
-                    .tooltip("关闭搜索")
+                    .accessibility_label(t!("search.close"))
+                    .tooltip(t!("search.close"))
                     .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
             );
 
@@ -509,13 +539,13 @@ impl Render for CodeSearch {
                         .child(
                             TextInput::new(&self.replacement)
                                 .small()
-                                .aria_label("替换为")
+                                .aria_label(t!("search.replace_with"))
                                 .w(px(SEARCH_INPUT_WIDTH)),
                         )
                         .child(
                             Button::new("replace-one")
                                 .small()
-                                .label("替换")
+                                .label(t!("search.replace"))
                                 .disabled(!has_matches)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.replace(false, window, cx)
@@ -524,7 +554,7 @@ impl Render for CodeSearch {
                         .child(
                             Button::new("replace-all")
                                 .small()
-                                .label("全部替换")
+                                .label(t!("search.replace_all"))
                                 .disabled(!has_matches)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.replace(true, window, cx)
@@ -543,7 +573,7 @@ mod tests {
     #[test]
     fn match_label_reads_naturally() {
         assert_eq!(match_label("", 0, 0).as_ref(), "");
-        assert_eq!(match_label("foo", 0, 0).as_ref(), "无结果");
+        assert_eq!(match_label("foo", 0, 0).as_ref(), "No results");
         assert_eq!(match_label("foo", 1, 3).as_ref(), "2/3");
     }
 }

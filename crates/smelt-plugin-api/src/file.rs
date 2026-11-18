@@ -3,7 +3,11 @@
 //!
 //! 打开者是插件自己的一条要带参数的命令（[`crate::CommandSpec::requires_args`]），参数是
 //! [`FileLocation::to_args`]。用命令而不是另一种回调，JS 插件也能当打开者（执行照常进它的
-//! 命令队列）。只认最后登记的那一个：用户插件可以借此替换内置的；它撤下了，之前的接着用。
+//! 命令队列）。
+//!
+//! 打开文件只放一个打开者。眼下只有文件插件登记；好几个插件都登记时该由用户在设置里选（扩展点
+//! 的规矩见 `docs/app-plugins.md`「扩展点」），不按登记顺序、内置还是用户装的去猜。等真有第二个
+//! 打开者再补那一项设置，在那之前按最后登记的、命令还在的用。
 
 use gpui::{App, Global, Task};
 
@@ -94,7 +98,9 @@ pub fn open_file(location: FileLocation, cx: &mut App) -> Task<Result<(), String
             },
             cx,
         ),
-        RuntimeKey::Remote(_) => Task::ready(Err("没有能打开远程文件的插件".to_string())),
+        RuntimeKey::Remote(_) => {
+            Task::ready(Err(rust_i18n::t!("no_remote_file_opener").into_owned()))
+        }
     }
 }
 
@@ -110,7 +116,7 @@ mod tests {
     fn opener_spec(name: &str) -> CommandSpec {
         CommandSpec {
             name: name.to_string(),
-            title: name.to_string(),
+            title: name.to_string().into(),
             key: None,
             context: "Workspace".to_string(),
             palette: false,

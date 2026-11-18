@@ -38,7 +38,7 @@ pub(crate) fn dispatch(
         ControlMethod::GitBranchDelete => call::<GitBranchDeleteCall>(params, |p| {
             smelt_git::delete_branch(&p.root, &p.branch, p.remote).map(done)
         }),
-        ControlMethod::GitMerge => call::<GitMergeCall>(params, |p| {
+        ControlMethod::GitMerge => call_git::<GitMergeCall>(params, |p| {
             smelt_git::merge_branch(&p.root, &p.branch).map(done)
         }),
         ControlMethod::GitStage => call::<GitStageCall>(params, |p| {
@@ -47,19 +47,19 @@ pub(crate) fn dispatch(
         ControlMethod::GitUnstage => call::<GitUnstageCall>(params, |p| {
             smelt_git::unstage_paths(&p.root, &p.paths).map(done)
         }),
-        ControlMethod::GitDiscardFile => call::<GitDiscardFileCall>(params, |p| {
+        ControlMethod::GitDiscardFile => call_git::<GitDiscardFileCall>(params, |p| {
             smelt_git::discard_file(&p.root, &p.seen).map(done)
         }),
         ControlMethod::GitApplyPatch => call::<GitApplyPatchCall>(params, |p| {
             smelt_git::apply_patch_action(&p.root, p.action, &p.patch).map(done)
         }),
-        ControlMethod::GitDiscardAll => call::<GitDiscardAllCall>(params, |p| {
+        ControlMethod::GitDiscardAll => call_git::<GitDiscardAllCall>(params, |p| {
             smelt_git::discard_all(&p.root, &p.seen).map(done)
         }),
-        ControlMethod::GitCommit => call::<GitCommitCall>(params, |p| {
+        ControlMethod::GitCommit => call_git::<GitCommitCall>(params, |p| {
             smelt_git::commit_and_maybe_push(&p.root, &p.message, p.push, &p.branch).map(done)
         }),
-        ControlMethod::GitPush => call::<GitPushCall>(params, |p| {
+        ControlMethod::GitPush => call_git::<GitPushCall>(params, |p| {
             smelt_git::push_current(&p.root, &p.branch).map(done)
         }),
         ControlMethod::GitFetch => {
@@ -108,9 +108,19 @@ fn call<C: ControlCall>(
     params: serde_json::Value,
     run: impl FnOnce(C::Params) -> Result<C::Result, String>,
 ) -> Result<serde_json::Value, ControlError> {
+    call_git::<C>(params, |p| run(p).map_err(smelt_git::GitError::from))
+}
+
+/// 失败可能带种类的操作（丢弃、提交推送、合并）。
+fn call_git<C: ControlCall>(
+    params: serde_json::Value,
+    run: impl FnOnce(C::Params) -> Result<C::Result, smelt_git::GitError>,
+) -> Result<serde_json::Value, ControlError> {
     let params = decode_params::<C::Params>(params)?;
-    let result = run(params)
-        .map_err(|message| ControlError::new(ControlErrorCode::OperationFailed, message))?;
+    let result = run(params).map_err(|error| ControlError {
+        reason: error.reason().cloned(),
+        ..ControlError::new(ControlErrorCode::OperationFailed, error.message())
+    })?;
     serde_json::to_value(result)
         .map_err(|error| ControlError::new(ControlErrorCode::Internal, error.to_string()))
 }

@@ -235,7 +235,7 @@ pub(super) fn handle_event_subscribe_with_peer<C: ClientSocket>(
         }) && (local_peer.is_none()
             || identity.plugin_id.as_str() != FIRST_PARTY_DESKTOP_PLUGIN_ID)
         {
-            return Err("外观修改只由本机桌面处理".to_string());
+            return Err("Only the local desktop handles appearance changes".to_string());
         }
         if topics.len() != request.subscription.topics.len() {
             return Err("subscription contains duplicate topics".to_string());

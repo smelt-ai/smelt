@@ -10,6 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use iroh::SecretKey;
+use rust_i18n::t;
 use smelt_iroh::runtime::IrohClient;
 use smelt_iroh::{EndpointId, PathKind, PathStatus, RelaySettings};
 use smelt_runtime_client::{Connector as _, RuntimeClient};
@@ -75,8 +76,12 @@ impl IrohDialer {
             Shape::Preset => None,
             Shape::Relay(relay) => Some(relay),
         };
-        let client = IrohClient::new(self.secret.clone(), relay)
-            .map_err(|e| error(SmeltErrorKind::Other, format!("起不了 iroh：{e:#}")))?;
+        let client = IrohClient::new(self.secret.clone(), relay).map_err(|e| {
+            error(
+                SmeltErrorKind::Other,
+                t!("error.iroh_failed", error = format!("{e:#}")),
+            )
+        })?;
         state.client = Some(Arc::clone(&client));
         Ok(client)
     }
@@ -176,7 +181,7 @@ pub(crate) fn validate(
     let endpoint = endpoint_id.trim().parse::<EndpointId>().map_err(|_| {
         error(
             SmeltErrorKind::InvalidPairing,
-            format!("运行时的 endpoint id 不合法：{endpoint_id}"),
+            t!("error.endpoint_invalid", id = endpoint_id),
         )
     })?;
     let relay = relay_url

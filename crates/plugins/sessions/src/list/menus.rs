@@ -1,10 +1,13 @@
-//! 列表上的菜单：会话、项目、工作树、机器（挂在「项目」标题上），「添加项目」选机器，和
+//! 列表上的菜单：会话、项目、工作树、机器（挂在「项目」标题上，按机器分开时也在机器的标题行上），「添加项目」选机器，和
 //! 「筛选与分组」。项目、机器菜单里还有别的插件登记进来的项
 //! （[`contract::PROJECT_MENU`]、[`contract::MACHINE_MENU`]，如「在 IDE 里打开」、机器的重连、
 //! 改名），点了按登记的命令执行，参数并上菜单的上下文。
 
+use rust_i18n::t;
+use std::borrow::Cow;
+
 use gpui::{App, ClipboardItem, Entity, SharedString};
-use gpui_kit_assets::IconName;
+use smelt_plugin_api::ui::IconName;
 use smelt_plugin_api::ui::menu::{Menu, MenuItem};
 use smelt_plugin_api::{self as api, ContextMenuAction, ContextMenuItem, RuntimeKey};
 
@@ -22,18 +25,22 @@ pub(super) fn session_menu(row: &SessionRow, view: Entity<ListView>) -> Menu {
         let key = row.key.clone();
         let group = row.group.clone();
         let pinned = row.pinned;
-        MenuItem::new(if pinned { "取消置顶" } else { "置顶" })
-            .icon(if pinned {
-                IconName::PinOff
-            } else {
-                IconName::Pin
-            })
-            .on_click(move |_, _, cx| actions::pin_session(&key, &group, !pinned, cx))
+        MenuItem::new(if pinned {
+            t!("menu.unpin")
+        } else {
+            t!("menu.pin")
+        })
+        .icon(if pinned {
+            IconName::PinOff
+        } else {
+            IconName::Pin
+        })
+        .on_click(move |_, _, cx| actions::pin_session(&key, &group, !pinned, cx))
     };
     let rename = {
         let key = row.key.clone();
         let title = row.title.to_string();
-        MenuItem::new("重命名")
+        MenuItem::new(t!("menu.rename"))
             .icon(IconName::Pencil)
             .on_click(move |_, window, cx| {
                 let (key, title) = (key.clone(), title.clone());
@@ -44,7 +51,7 @@ pub(super) fn session_menu(row: &SessionRow, view: Entity<ListView>) -> Menu {
     };
     let archive = {
         let (key, title, status) = (row.key.clone(), row.title.clone(), row.status);
-        MenuItem::new("归档")
+        MenuItem::new(t!("archive.confirm"))
             .icon(IconName::Archive)
             .on_click(move |_, window, cx| {
                 actions::archive_session(key.clone(), title.clone(), status, window, cx)
@@ -52,7 +59,7 @@ pub(super) fn session_menu(row: &SessionRow, view: Entity<ListView>) -> Menu {
     };
     let copy_id = {
         let id = row.session_id.clone();
-        MenuItem::new("复制会话 ID")
+        MenuItem::new(t!("menu.copy_session_id"))
             .icon(IconName::Copy)
             .disabled(id.is_none())
             .on_click(move |_, _, cx| {
@@ -63,7 +70,7 @@ pub(super) fn session_menu(row: &SessionRow, view: Entity<ListView>) -> Menu {
     };
     let close = {
         let (key, title, status) = (row.key.clone(), row.title.clone(), row.status);
-        MenuItem::new("关闭")
+        MenuItem::new(t!("close.confirm"))
             .icon(IconName::Close)
             .on_click(move |_, window, cx| {
                 actions::close_session(key.clone(), title.clone(), status, window, cx)
@@ -87,7 +94,7 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
     if !root.is_empty() {
         let new_session = {
             let (machine, root) = (machine.clone(), root.clone());
-            MenuItem::new("新建会话")
+            MenuItem::new(t!("menu.new_session"))
                 .icon(IconName::Plus)
                 .on_click(move |_, window, cx| {
                     dialogs::open_new_session(Some(machine.clone()), Some(root.clone()), window, cx)
@@ -95,15 +102,15 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
         };
         let repositories = {
             let (machine, root) = (machine.clone(), root.clone());
-            MenuItem::new("管理项目仓库…")
-                .icon(IconName::FolderGit2)
+            MenuItem::new(t!("menu.manage_repositories"))
+                .icon(IconName::Repositories)
                 .on_click(move |_, window, cx| {
                     dialogs::open_project_repositories(machine.clone(), root.clone(), window, cx)
                 })
         };
         let new_worktree = {
             let (machine, root) = (machine.clone(), root.clone());
-            MenuItem::new("新建工作树…")
+            MenuItem::new(t!("menu.new_workset"))
                 .icon(IconName::GitBranch)
                 .on_click(move |_, window, cx| {
                     dialogs::open_new_worktree(machine.clone(), root.clone(), window, cx)
@@ -123,7 +130,7 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
         }
         let copy_path = {
             let root = root.clone();
-            MenuItem::new("复制项目路径")
+            MenuItem::new(t!("menu.copy_project_path"))
                 .icon(IconName::Copy)
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(root.clone()))
@@ -132,7 +139,7 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
         menu = menu.separator().item(copy_path);
         if let Some(branch) = project.branch.clone() {
             menu = menu.item(
-                MenuItem::new("复制分支名")
+                MenuItem::new(t!("menu.copy_branch"))
                     .icon(IconName::GitBranch)
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(branch.to_string()))
@@ -146,26 +153,30 @@ pub(super) fn project_menu(project: &ProjectGroup, cx: &App) -> Menu {
     {
         menu = menu
             .separator()
-            .item(MenuItem::new(format!("机器「{name}」")).submenu(machine_menu));
+            .item(MenuItem::new(t!("menu.machine", name = name)).submenu(machine_menu));
     }
     let pin = {
         let (machine, root, pinned) = (machine.clone(), root.clone(), project.pinned);
-        MenuItem::new(if pinned { "取消置顶" } else { "置顶" })
-            .icon(if pinned {
-                IconName::PinOff
-            } else {
-                IconName::Pin
-            })
-            .on_click(move |_, _, cx| actions::pin_project(&machine, &root, !pinned, cx))
+        MenuItem::new(if pinned {
+            t!("menu.unpin")
+        } else {
+            t!("menu.pin")
+        })
+        .icon(if pinned {
+            IconName::PinOff
+        } else {
+            IconName::Pin
+        })
+        .on_click(move |_, _, cx| actions::pin_project(&machine, &root, !pinned, cx))
     };
     menu = menu.separator().item(pin);
     if !root.is_empty() {
         let (name, sessions) = (project.name.clone(), project.sessions);
         menu = menu.separator().item(
             MenuItem::new(if project.opened {
-                "关闭项目"
+                t!("menu.close_project")
             } else {
-                "关闭这组会话"
+                t!("menu.close_group")
             })
             .icon(IconName::Close)
             .on_click(move |_, window, cx| {
@@ -189,7 +200,7 @@ pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Me
     let id = workset.id.clone();
     let new_session = {
         let (machine, path) = (machine.clone(), workset.path.clone());
-        MenuItem::new("新建会话")
+        MenuItem::new(t!("menu.new_session"))
             .icon(IconName::Plus)
             .on_click(move |_, window, cx| {
                 dialogs::open_new_session(Some(machine.clone()), Some(path.clone()), window, cx)
@@ -197,17 +208,21 @@ pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Me
     };
     let pin = {
         let (machine, id, pinned) = (machine.clone(), id.clone(), workset.pinned);
-        MenuItem::new(if pinned { "取消置顶" } else { "置顶" })
-            .icon(if pinned {
-                IconName::PinOff
-            } else {
-                IconName::Pin
-            })
-            .on_click(move |_, _, cx| actions::pin_workset(&machine, &id, !pinned, cx))
+        MenuItem::new(if pinned {
+            t!("menu.unpin")
+        } else {
+            t!("menu.pin")
+        })
+        .icon(if pinned {
+            IconName::PinOff
+        } else {
+            IconName::Pin
+        })
+        .on_click(move |_, _, cx| actions::pin_workset(&machine, &id, !pinned, cx))
     };
     let rename = {
         let (machine, id, task) = (machine.clone(), id.clone(), workset.task.to_string());
-        MenuItem::new("重命名工作树…")
+        MenuItem::new(t!("menu.rename_workset"))
             .icon(IconName::Pencil)
             .on_click(move |_, window, cx| {
                 let target = RenameTarget::Workset {
@@ -224,7 +239,7 @@ pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Me
                 actions::open_pull_request(machine.clone(), root.clone(), cx)
             }
         };
-        let item = MenuItem::new("在浏览器中创建 PR").icon(IconName::ExternalLink);
+        let item = MenuItem::new(t!("menu.create_pr")).icon(IconName::ExternalLink);
         match workset.repositories.as_slice() {
             [] => item.disabled(true),
             [(_, root)] => item.on_click(open(machine.clone(), root.clone())),
@@ -243,17 +258,17 @@ pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Me
             id: id.clone(),
         };
         MenuItem::new(if workset.checking {
-            "正在检查合并状态…"
+            t!("menu.checking_merge")
         } else {
-            "检查合并状态"
+            t!("menu.check_merge")
         })
-        .icon(IconName::RefreshCw)
+        .icon(IconName::Refresh)
         .disabled(workset.checking)
         .on_click(move |_, _, cx| actions::check_workset(key.clone(), cx))
     };
     let finish = {
         let task = workset.task.clone();
-        MenuItem::new("关闭工作树…")
+        MenuItem::new(t!("menu.finish_workset"))
             .icon(IconName::Close)
             .on_click(move |_, window, cx| {
                 actions::finish_workset(machine.clone(), id.clone(), task.clone(), window, cx)
@@ -270,16 +285,21 @@ pub(super) fn workset_menu(workset: &WorksetGroup, view: Entity<ListView>) -> Me
         .item(finish)
 }
 
-/// 「筛选与分组」：分组依据（项目、状态、时间）和显示哪些项目（全部、有会话），当前的打勾。
-pub(super) fn grouping_menu(grouping: SidebarGrouping, hide_empty: bool) -> Menu {
-    let group = |mode: SidebarGrouping, label: &'static str| {
+/// 「筛选与分组」：分组依据（项目、状态、时间）、显示哪些项目（全部、有会话），挂着远程机器
+/// 时再加「按机器分开」（`by_machine` 为 `None` 时没有这一项）；当前的打勾。
+pub(super) fn grouping_menu(
+    grouping: SidebarGrouping,
+    hide_empty: bool,
+    by_machine: Option<bool>,
+) -> Menu {
+    let group = |mode: SidebarGrouping, label: Cow<'static, str>| {
         MenuItem::new(label)
             .checked(grouping == mode)
             .on_click(move |_, _, cx| {
                 Sessions::global(cx).update(cx, |sessions, cx| sessions.set_grouping(mode, cx))
             })
     };
-    let show = |hide: bool, label: &'static str| {
+    let show = |hide: bool, label: Cow<'static, str>| {
         MenuItem::new(label)
             .checked(hide_empty == hide)
             .on_click(move |_, _, cx| {
@@ -288,15 +308,26 @@ pub(super) fn grouping_menu(grouping: SidebarGrouping, hide_empty: bool) -> Menu
                 })
             })
     };
-    Menu::new()
-        .label("分组依据")
-        .item(group(SidebarGrouping::Project, "项目"))
-        .item(group(SidebarGrouping::Status, "状态"))
-        .item(group(SidebarGrouping::LastUpdated, "时间"))
+    let menu = Menu::new()
+        .label(t!("grouping.title"))
+        .item(group(SidebarGrouping::Project, t!("grouping.project")))
+        .item(group(SidebarGrouping::Status, t!("grouping.status")))
+        .item(group(SidebarGrouping::LastUpdated, t!("grouping.time")))
         .separator()
-        .label("显示")
-        .item(show(false, "全部"))
-        .item(show(true, "有会话"))
+        .label(t!("grouping.show"))
+        .item(show(false, t!("grouping.all")))
+        .item(show(true, t!("grouping.with_sessions")));
+    let Some(by_machine) = by_machine else {
+        return menu;
+    };
+    menu.separator().item(
+        MenuItem::new(t!("grouping.by_machine"))
+            .checked(by_machine)
+            .on_click(move |_, _, cx| {
+                Sessions::global(cx)
+                    .update(cx, |sessions, cx| sessions.set_by_machine(!by_machine, cx))
+            }),
+    )
 }
 
 /// 「项目」标题上的机器菜单。挂着远程机器时每台机器一个子菜单（没有项的不列）；只有本机
@@ -332,7 +363,7 @@ pub(super) fn has_machines_menu(sidebar: &Sidebar, cx: &App) -> bool {
 /// 挂着远程机器时「添加项目」先选在哪台机器上打开。连不上的机器挑不了目录，灰着。
 pub(super) fn open_project_menu(sidebar: &Sidebar) -> Menu {
     sidebar.machines.iter().fold(
-        Menu::new().label("在哪台机器上打开"),
+        Menu::new().label(t!("menu.open_on_machine")),
         |menu, machine| {
             let key = machine.key.clone();
             menu.item(
@@ -386,7 +417,7 @@ fn plugin_items(
 
 /// 一项登记的菜单项。有彩色图标（如应用自己的图标）画它，没有画线性图标。
 fn plugin_item(item: ContextMenuItem, context: &serde_json::Value, cx: &App) -> MenuItem {
-    let mut entry = MenuItem::new(item.label);
+    let mut entry = MenuItem::new(item.label.get());
     if let Some(icon) = item.icon {
         entry = entry.icon_path(icon);
     }
@@ -412,7 +443,12 @@ fn run_plugin_command(command: &str, args: serde_json::Value, cx: &mut App) {
     let ran = api::run(&command, args, cx);
     cx.spawn(async move |cx| {
         if let Err(error) = ran.await {
-            cx.update(|cx| crate::notify_error(&format!("「{command}」没做成：{error}"), cx));
+            cx.update(|cx| {
+                crate::notify_error(
+                    &t!("error.command_failed", command = command, error = error),
+                    cx,
+                )
+            });
         }
     })
     .detach();

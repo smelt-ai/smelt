@@ -2,6 +2,7 @@
 
 use api::model::remote_config::{DeviceInfo, RemoteAccessState};
 use api::{Connection, ConnectionLink, ConnectionState, Connections, LinkRoute};
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 /// 字的轻重。
@@ -16,11 +17,11 @@ pub(crate) enum Tone {
 /// 设置页机器一行下面那行字：在线写版本、平台、走哪条路多慢（慢了标黄），别的写为什么。
 pub(crate) fn machine_status(connection: &Connection) -> (String, Tone) {
     match &connection.state {
-        ConnectionState::Connecting => ("正在连接…".to_string(), Tone::Muted),
+        ConnectionState::Connecting => (t!("machine.connecting").into_owned(), Tone::Muted),
         ConnectionState::Online { version, platform } => {
             let mut text = match platform {
-                Some(platform) => format!("在线 · {version} · {platform}"),
-                None => format!("在线 · {version}"),
+                Some(platform) => format!("{} · {version} · {platform}", t!("online")),
+                None => format!("{} · {version}", t!("online")),
             };
             let mut tone = Tone::Muted;
             if let Some(link) = &connection.link {
@@ -31,19 +32,28 @@ pub(crate) fn machine_status(connection: &Connection) -> (String, Tone) {
             }
             (text, tone)
         }
-        ConnectionState::Offline { error } => (format!("离线：{error}"), Tone::Muted),
-        ConnectionState::Incompatible { detail, .. } => {
-            (format!("版本不兼容：{detail}"), Tone::Muted)
-        }
-        ConnectionState::Upgrading { progress } => (format!("升级中：{progress}"), Tone::Muted),
+        ConnectionState::Offline { error } => (
+            t!("machine.offline", error = error).into_owned(),
+            Tone::Muted,
+        ),
+        ConnectionState::Incompatible { detail, .. } => (
+            t!("machine.incompatible", detail = detail).into_owned(),
+            Tone::Muted,
+        ),
+        ConnectionState::Upgrading { progress } => (
+            t!("machine.upgrading", progress = progress).into_owned(),
+            Tone::Muted,
+        ),
     }
 }
 
 /// 走哪条路、多慢。
 fn link_summary(link: &ConnectionLink) -> String {
     match &link.route {
-        LinkRoute::Direct => format!("直连 · {}ms", link.rtt_ms),
-        LinkRoute::Relay { relay } => format!("中继 {relay} · {}ms", link.rtt_ms),
+        LinkRoute::Direct => t!("link.direct", ms = link.rtt_ms).into_owned(),
+        LinkRoute::Relay { relay } => {
+            t!("link.relay", relay = relay, ms = link.rtt_ms).into_owned()
+        }
         LinkRoute::Other => format!("{}ms", link.rtt_ms),
     }
 }
@@ -67,17 +77,22 @@ pub(crate) fn needs_attention(connections: &Connections) -> bool {
 /// 远程访问开关旁边那行字。
 pub(crate) fn access_status(state: &RemoteAccessState) -> (String, Tone) {
     match state {
-        RemoteAccessState::Off => ("已关闭".to_string(), Tone::Muted),
-        RemoteAccessState::Starting => ("正在开启…".to_string(), Tone::Muted),
+        RemoteAccessState::Off => (t!("access.off").into_owned(), Tone::Muted),
+        RemoteAccessState::Starting => (t!("access.starting").into_owned(), Tone::Muted),
         RemoteAccessState::Running { endpoint_id, relay } => (
-            format!(
-                "已开启 · {} · {}",
-                relay.as_deref().unwrap_or("公共 relay"),
-                short_id(endpoint_id)
-            ),
+            t!(
+                "access.running",
+                relay = relay
+                    .clone()
+                    .unwrap_or_else(|| t!("access.public_relay").into_owned()),
+                id = short_id(endpoint_id)
+            )
+            .into_owned(),
             Tone::Ok,
         ),
-        RemoteAccessState::Failed { error } => (format!("开不起来，正在重试：{error}"), Tone::Bad),
+        RemoteAccessState::Failed { error } => {
+            (t!("access.failed", error = error).into_owned(), Tone::Bad)
+        }
     }
 }
 
@@ -95,19 +110,29 @@ pub(crate) fn short_id(id: &str) -> String {
 /// 设备上次什么时候连过。`now_ms` 是现在的毫秒时间戳。
 pub(crate) fn last_seen_text(device: &DeviceInfo, now_ms: i64) -> String {
     if device.connected {
-        return "在线".to_string();
+        return t!("online").into_owned();
     }
     let Some(at) = device.last_seen_at_ms else {
-        return "还没连过".to_string();
+        return t!("seen.never").into_owned();
     };
     let secs = (now_ms - at).max(0) / 1000;
-    if secs < 3600 {
-        format!("{} 分钟前连过", (secs / 60).max(1))
+    let text = if secs < 3600 {
+        match (secs / 60).max(1) {
+            1 => t!("seen.minutes.one"),
+            count => t!("seen.minutes.other", count = count),
+        }
     } else if secs < 86_400 {
-        format!("{} 小时前连过", secs / 3600)
+        match secs / 3600 {
+            1 => t!("seen.hours.one"),
+            count => t!("seen.hours.other", count = count),
+        }
     } else {
-        format!("{} 天前连过", secs / 86_400)
-    }
+        match secs / 86_400 {
+            1 => t!("seen.days.one"),
+            count => t!("seen.days.other", count = count),
+        }
+    };
+    text.into_owned()
 }
 
 /// 配对串编成二维码 PNG：白底黑块，至少 160 见方。编不了（内容太长）是 `None`。
@@ -168,12 +193,12 @@ mod tests {
     fn online_machines_spell_out_the_link() {
         assert_eq!(
             machine_status(&machine(online(), None)),
-            ("在线 · 2026.1116.0 · linux/x86_64".into(), Tone::Muted)
+            ("Online · 2026.1116.0 · linux/x86_64".into(), Tone::Muted)
         );
         assert_eq!(
             machine_status(&machine(online(), relay(437, true))),
             (
-                "在线 · 2026.1116.0 · linux/x86_64 · 中继 n0 usw1-1 · 437ms".into(),
+                "Online · 2026.1116.0 · linux/x86_64 · relay n0 usw1-1 · 437ms".into(),
                 Tone::Warning
             )
         );
@@ -184,7 +209,7 @@ mod tests {
         });
         assert_eq!(
             machine_status(&machine(online(), direct)).0,
-            "在线 · 2026.1116.0 · linux/x86_64 · 直连 · 12ms"
+            "Online · 2026.1116.0 · linux/x86_64 · direct · 12ms"
         );
         assert_eq!(
             machine_status(&machine(
@@ -194,7 +219,7 @@ mod tests {
                 None
             ))
             .0,
-            "离线：connection refused"
+            "Offline: connection refused"
         );
     }
 
@@ -263,19 +288,19 @@ mod tests {
             connected,
         };
         let now = 10 * 86_400_000;
-        assert_eq!(last_seen_text(&device(true, None), now), "在线");
-        assert_eq!(last_seen_text(&device(false, None), now), "还没连过");
+        assert_eq!(last_seen_text(&device(true, None), now), "Online");
+        assert_eq!(last_seen_text(&device(false, None), now), "Never connected");
         assert_eq!(
             last_seen_text(&device(false, Some(now - 5_000)), now),
-            "1 分钟前连过"
+            "Last seen 1 minute ago"
         );
         assert_eq!(
             last_seen_text(&device(false, Some(now - 2 * 3_600_000)), now),
-            "2 小时前连过"
+            "Last seen 2 hours ago"
         );
         assert_eq!(
             last_seen_text(&device(false, Some(now - 3 * 86_400_000)), now),
-            "3 天前连过"
+            "Last seen 3 days ago"
         );
     }
 

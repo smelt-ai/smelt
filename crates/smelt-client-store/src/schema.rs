@@ -17,6 +17,7 @@ CREATE TABLE appearance (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   bg_image TEXT,
   bg_image_opacity REAL NOT NULL,
+  bg_opacity REAL NOT NULL CHECK (bg_opacity BETWEEN 0 AND 1),
   material TEXT NOT NULL,
   theme_mode TEXT NOT NULL,
   theme_name TEXT NOT NULL,
@@ -285,13 +286,18 @@ UPDATE key_binding SET command = 'smelt.agents/new-conversation'
   WHERE command = 'smelt.sessions/new-conversation';
 ";
 
+/// 迁移进来的库没有底色不透明度，给出厂值（界面的 `DEFAULT_BG_OPACITY`）。
+/// [`MIGRATE_V14_TO_V15`] 里的 `DEFAULT 0.8` 是同一个数。
+const MIGRATED_BG_OPACITY: f32 = 0.8;
+
 /// v15：会话列表、分屏拆成了会话插件，置顶、排序、折叠、选中和分屏布局都存在插件自己的
 /// 库里；终端字号归了终端插件。客户端库里这些表和列删掉，旧数据不搬，插件从默认开始。
 /// `workspace_ui` 只剩宿主自己的页面路由，列名跟宿主的说法改成 `outlet`。
 ///
 /// 外观里早已没人读的 `bg_color`、`opacity`、`blur` 删掉；`glass_style` 存的其实是材质，
-/// 改名 `material`。远程机器的 `smelt_home` 删掉：智能体 space 在哪改由运行时随智能体配置
-/// 推来，客户端不再记。
+/// 改名 `material`。新加 `bg_opacity`：毛玻璃时主题底色铺在材质上的不透明度；旧的
+/// `opacity` 是整扇窗口的不透明度，意思不一样，不搬。远程机器的 `smelt_home` 删掉：智能体
+/// space 在哪改由运行时随智能体配置推来，客户端不再记。
 ///
 /// 分屏命令跟着从 `smelt.stage` 搬到会话插件，名字不变，改过的键搬到新 id 上；新 id 已经
 /// 有记录的（用户在新版里改过）以新的为准。别的 `smelt.stage/*` 和按侧栏顺序跳的
@@ -315,6 +321,8 @@ ALTER TABLE appearance DROP COLUMN bg_color;
 ALTER TABLE appearance DROP COLUMN opacity;
 ALTER TABLE appearance DROP COLUMN blur;
 ALTER TABLE appearance RENAME COLUMN glass_style TO material;
+ALTER TABLE appearance ADD COLUMN bg_opacity REAL NOT NULL DEFAULT 0.8
+  CHECK (bg_opacity BETWEEN 0 AND 1);
 ALTER TABLE runtime_connection DROP COLUMN smelt_home;
 UPDATE OR IGNORE key_binding SET command = CASE command
   WHEN 'smelt.stage/prev-pane' THEN 'smelt.sessions/prev-pane'
@@ -383,7 +391,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
         7..=14 => {}
-        newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
+        newer => return Err(format!("client database version {newer} is newer than this app and isn't recognized")),
     }
     if (1..=7).contains(&version) {
         transaction
@@ -445,11 +453,21 @@ fn backup_before_migration(
     match std::fs::remove_file(&backup) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("删除旧备份 {}：{error}", backup.display())),
+        Err(error) => {
+            return Err(format!(
+                "couldn't delete the old backup {}: {error}",
+                backup.display()
+            ));
+        }
     }
     connection
         .execute("VACUUM INTO ?1", [backup.to_string_lossy()])
-        .map_err(|error| format!("迁移前备份到 {}：{error}", backup.display()))?;
+        .map_err(|error| {
+            format!(
+                "couldn't back up to {} before migrating: {error}",
+                backup.display()
+            )
+        })?;
     Ok(())
 }
 
@@ -605,6 +623,7 @@ mod legacy {
                     font_family: old.font_family,
                     layout_id: None,
                     material: String::new(),
+                    bg_opacity: super::MIGRATED_BG_OPACITY,
                 },
             )?;
         }

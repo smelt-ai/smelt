@@ -232,7 +232,10 @@ impl CapabilitiesPage {
                 let batch = match polled {
                     Ok(batch) => batch,
                     Err(error) => api::model::pi_auth_service::LoginEventsResult {
-                        events: vec![api::model::pi_auth::PiLoginEvent::Error { message: error }],
+                        events: vec![api::model::pi_auth::PiLoginEvent::Error {
+                            message: error,
+                            note: None,
+                        }],
                         finished: true,
                     },
                 };
@@ -271,7 +274,7 @@ impl CapabilitiesPage {
         event: api::model::pi_auth::PiLoginEvent,
         cx: &mut Context<Self>,
     ) -> bool {
-        use api::model::pi_auth::PiLoginEvent;
+        use api::model::pi_auth::{PiLoginEvent, PiLoginNote, login_text};
 
         let Some(view) = self.pi_login.as_mut() else {
             return false;
@@ -280,12 +283,20 @@ impl CapabilitiesPage {
             return false;
         }
         match event {
-            PiLoginEvent::AuthUrl { url, instructions } => {
+            PiLoginEvent::AuthUrl {
+                url,
+                instructions,
+                note,
+            } => {
                 // 登录本来就是「去浏览器点同意」，这一步不该再要一次点击；
                 // 按钮留着，是给自动打开失败或想换浏览器的人用的。
                 cx.open_url(&url);
                 view.auth_url = Some(url);
-                view.instructions = instructions;
+                view.instructions = match (note.as_ref().and_then(PiLoginNote::text), instructions)
+                {
+                    (Some(text), _) => Some(text),
+                    (None, instructions) => instructions,
+                };
             }
             PiLoginEvent::DeviceCode {
                 user_code,
@@ -299,18 +310,21 @@ impl CapabilitiesPage {
                 view.messages.push(message);
                 view.messages.extend(links.into_iter().map(|link| link.url));
             }
-            PiLoginEvent::Progress { message } => view.messages.push(message),
+            PiLoginEvent::Progress { message, note } => {
+                view.messages.push(login_text(message, note.as_ref()))
+            }
             PiLoginEvent::Prompt {
                 id,
                 prompt_type,
                 message,
                 placeholder,
                 options,
+                note,
             } => {
                 view.prompt = Some(PiLoginPrompt {
                     id,
                     kind: prompt_type,
-                    message,
+                    message: login_text(message, note.as_ref()),
                     placeholder,
                     options,
                 });
@@ -335,13 +349,14 @@ impl CapabilitiesPage {
                     // 没有后续可做，面板直接收起；「已登录」标签随刷新的配置出来。
                     PiLoginTarget::Mcp { name } => {
                         self.pi_login = None;
-                        notify_success(format!("MCP 服务器 {name} 已登录"), cx);
+                        notify_success(t!("auth.mcp_signed_in", name = name), cx);
                     }
                 }
             }
             // `parse_login_event` 把它挡在流外了，走不到这里。
             PiLoginEvent::Unknown => {}
-            PiLoginEvent::Error { message } => {
+            PiLoginEvent::Error { message, note } => {
+                let message = login_text(message, note.as_ref());
                 view.prompt = None;
                 // 授权链接和验证码只对这一次登录有效，失败后再点只会撞上关掉的回调。
                 view.auth_url = None;
@@ -477,7 +492,9 @@ impl CapabilitiesPage {
             |this, result, cx| {
                 if let Err(error) = result {
                     match this.pi_login.as_mut() {
-                        Some(view) => view.messages.push(format!("提交失败：{error}")),
+                        Some(view) => view
+                            .messages
+                            .push(t!("auth.submit_failed", error = error).into_owned()),
                         None => this.pi_auth_error = Some(error),
                     }
                     cx.notify();
@@ -525,7 +542,7 @@ impl CapabilitiesPage {
                 Ok(config) => {
                     this.pi_auth_model_picker = None;
                     this.adopt_pi_config(config, cx);
-                    notify_success(format!("已设为默认模型：{label}"), cx);
+                    notify_success(t!("auth.default_set", label = label), cx);
                 }
                 Err(error) => {
                     this.pi_auth_error = Some(error.clone());

@@ -27,7 +27,7 @@ pub fn is_sqlite_state_enabled() -> bool {
 /// 当前进程的默认 SQLite 库。桌面启动启用 SQLite 路由后才可用。
 #[track_caller]
 pub fn default_sqlite_store() -> Result<smelt_store::Store, String> {
-    let root = default_smelt_root().ok_or_else(|| "SQLite state 未启用".to_string())?;
+    let root = default_smelt_root().ok_or_else(|| "SQLite state isn't enabled".to_string())?;
     open_sqlite_store(&root.join(smelt_store::DATABASE_FILE_NAME))
 }
 
@@ -41,7 +41,7 @@ fn default_smelt_root() -> Option<PathBuf> {
 pub fn store_beside_json(path: &Path) -> Result<smelt_store::Store, String> {
     let database = path
         .parent()
-        .ok_or_else(|| format!("{} 没有父目录", path.display()))?
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?
         .join(smelt_store::DATABASE_FILE_NAME);
     open_sqlite_store(&database)
 }

@@ -3,6 +3,7 @@
 //! 运行时执行 git（`smelt-git`），客户端只拿这里的结果做展示，不自己起 git 进程。
 //! 这里不许出现子进程和文件读写：手机端也要编它。
 
+use rust_i18n::t;
 use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
@@ -151,14 +152,6 @@ impl DiffScope {
             Self::All => &["diff", "HEAD", "--"],
             Self::Staged => &["diff", "--staged", "--"],
             Self::Unstaged => &["diff", "--"],
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "全部",
-            Self::Staged => "已暂存",
-            Self::Unstaged => "未暂存",
         }
     }
 }
@@ -418,7 +411,7 @@ fn parse_diff_inner(text: &str, show_file_headers: bool) -> ParsedDiff {
     };
     if text.trim().is_empty() {
         return ParsedDiff {
-            lines: vec![make(None, None, DiffKind::Meta, "（无差异）")],
+            lines: vec![make(None, None, DiffKind::Meta, &t!("diff.no_changes"))],
             header: String::new(),
             hunks: Vec::new(),
         };

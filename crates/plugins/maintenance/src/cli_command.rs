@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rust_i18n::t;
 use smelt_plugin_api::paths::smelt_home;
 
 pub(crate) const SYSTEM_LINK: &str = "/usr/local/bin/smelt";
@@ -43,7 +44,8 @@ fn managed_link() -> Option<PathBuf> {
 /// rename，任何时候去找都有一份能用的。
 pub(crate) fn sync_managed_link() -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
-    let link = managed_link().ok_or_else(|| std::io::Error::other("找不到 $HOME"))?;
+    let link =
+        managed_link().ok_or_else(|| std::io::Error::other(t!("install.no_home").into_owned()))?;
     if std::fs::read_link(&link).is_ok_and(|target| target == exe) {
         return Ok(());
     }
@@ -80,10 +82,10 @@ fn classify(link: &Path, exe: &Path) -> SystemCommand {
 /// 写不进去就弹系统的管理员授权框，要等人点，所以只在后台调。
 pub(crate) fn install() -> Result<(), String> {
     if system_command() == SystemCommand::Taken {
-        return Err(format!("{SYSTEM_LINK} 已经有别的程序，没有覆盖"));
+        return Err(t!("status.taken", link = SYSTEM_LINK).into_owned());
     }
-    sync_managed_link().map_err(|error| format!("放 ~/.smelt/bin/smelt 失败：{error}"))?;
-    let target = managed_link().ok_or("找不到 $HOME")?;
+    sync_managed_link().map_err(|error| t!("install.link_failed", error = error).into_owned())?;
+    let target = managed_link().ok_or_else(|| t!("install.no_home").into_owned())?;
     // /usr/local/bin 归当前用户（装过 Intel 版 Homebrew 的机器常见）时不用提权。
     if link_without_privileges(&target).is_ok() {
         return Ok(());
@@ -115,14 +117,14 @@ fn link_with_administrator(target: &Path) -> Result<(), String> {
     let output = std::process::Command::new("/usr/bin/osascript")
         .args(["-e", &script])
         .output()
-        .map_err(|error| format!("无法执行 osascript：{error}"))?;
+        .map_err(|error| t!("install.osascript_failed", error = error).into_owned())?;
     if output.status.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     // 授权框点了取消。
     if stderr.contains("(-128)") {
-        return Err("已取消授权".to_string());
+        return Err(t!("install.cancelled").into_owned());
     }
     Err(stderr.trim().to_string())
 }

@@ -8,7 +8,13 @@
 //!   子命令时打印用法。
 //! - macOS：GUI 的 `smelt` 自己就是控制台程序、先拦截子命令，不发这一份。
 
+// 和 lib 用同一份文案表（同一个 locales 目录）；当前语言是 rust-i18n 的全局值。
+rust_i18n::i18n!("locales", fallback = "en");
+
+use rust_i18n::t;
+
 fn main() {
+    smelt_cli::use_system_locale();
     if let Some(code) = smelt_cli::maybe_run(std::env::args()) {
         std::process::exit(code);
     }
@@ -21,7 +27,7 @@ fn without_subcommand() -> i32 {
     let gui = match std::env::current_exe() {
         Ok(exe) => exe.with_file_name("smelt.exe"),
         Err(error) => {
-            eprintln!("找不到自己所在的目录：{error}");
+            eprintln!("{}", t!("main.exe_dir_missing", error = error));
             return 1;
         }
     };
@@ -31,7 +37,14 @@ fn without_subcommand() -> i32 {
     {
         Ok(_) => 0,
         Err(error) => {
-            eprintln!("启动 {} 失败：{error}", gui.display());
+            eprintln!(
+                "{}",
+                t!(
+                    "main.gui_launch_failed",
+                    path = gui.display(),
+                    error = error
+                )
+            );
             1
         }
     }
@@ -41,7 +54,7 @@ fn without_subcommand() -> i32 {
 #[cfg(not(windows))]
 fn without_subcommand() -> i32 {
     if let Some(arg) = std::env::args().nth(1) {
-        eprintln!("未知命令：{arg}\n");
+        eprintln!("{}\n", t!("main.unknown_command", command = arg));
     }
     smelt_cli::print_help();
     2

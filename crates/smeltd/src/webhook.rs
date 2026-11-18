@@ -11,8 +11,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{Value, json};
-use smelt_core::automation::DEFAULT_WEBHOOK_PORT;
-use smelt_core::automation_store::AutomationStore;
+use smelt_core::automation::{AutomationProblem, DEFAULT_WEBHOOK_PORT};
+use smelt_core::automation_store::{AutomationError, AutomationStore};
 use tokio::net::TcpListener;
 
 use super::event_hub::EventHubHandle;
@@ -138,22 +138,21 @@ async fn post_hook(
                 })),
             )
         }
-        Err(error) if error.contains("不存在") => cors(
-            StatusCode::NOT_FOUND,
-            Json(json!({ "ok": false, "error": error })),
-        ),
-        Err(error) if error.contains("已暂停") => cors(
-            StatusCode::FORBIDDEN,
-            Json(json!({ "ok": false, "error": error })),
-        ),
-        Err(error) if error.contains("已有运行中") => cors(
-            StatusCode::CONFLICT,
-            Json(json!({ "ok": false, "error": error })),
-        ),
-        Err(error) => cors(
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "error": error })),
-        ),
+        Err(error) => {
+            let status = match &error {
+                AutomationError::UnknownWebhook
+                | AutomationError::Problem(AutomationProblem::NotFound) => StatusCode::NOT_FOUND,
+                AutomationError::Paused => StatusCode::FORBIDDEN,
+                AutomationError::Problem(AutomationProblem::AlreadyRunning { .. }) => {
+                    StatusCode::CONFLICT
+                }
+                AutomationError::Problem(_) | AutomationError::Failed(_) => StatusCode::BAD_REQUEST,
+            };
+            cors(
+                status,
+                Json(json!({ "ok": false, "error": error.to_string() })),
+            )
+        }
     }
 }
 

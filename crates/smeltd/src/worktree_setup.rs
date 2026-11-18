@@ -65,10 +65,11 @@ fn spawn_and_wait(
     task_root: &Path,
     log: &Path,
 ) -> Result<(), String> {
-    let file = std::fs::File::create(log).map_err(|error| format!("无法创建日志文件：{error}"))?;
+    let file = std::fs::File::create(log)
+        .map_err(|error| format!("Couldn't create the log file: {error}"))?;
     let stderr = file
         .try_clone()
-        .map_err(|error| format!("无法创建日志文件：{error}"))?;
+        .map_err(|error| format!("Couldn't create the log file: {error}"))?;
     let (source, task_root) = (source.to_string_lossy(), task_root.to_string_lossy());
     let mut command = Command::new("sh");
     command
@@ -86,18 +87,18 @@ fn spawn_and_wait(
     );
     let child = command
         .spawn()
-        .map_err(|error| format!("无法用 sh 运行 {}：{error}", script.display()))?;
+        .map_err(|error| format!("Couldn't run {} with sh: {error}", script.display()))?;
     let status = smelt_sys::process_wait::wait_child_for(child, SETUP_TIMEOUT, |pid| {
         let _ = smelt_sys::process::terminate_pid(pid);
     })
-    .map_err(|error| format!("等待脚本结束失败：{error}"))?;
+    .map_err(|error| format!("Couldn't wait for the script to finish: {error}"))?;
     if status.success() {
         return Ok(());
     }
     match status.code() {
-        Some(code) => Err(format!("脚本退出码 {code}")),
+        Some(code) => Err(format!("The script exited with code {code}")),
         None => Err(format!(
-            "脚本被终止（超过 {} 分钟会被杀掉）",
+            "The script was killed (scripts are stopped after {} minutes)",
             SETUP_TIMEOUT.as_secs() / 60
         )),
     }

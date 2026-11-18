@@ -5,6 +5,7 @@
 //! 系统选择框只看得到这台桌面，路径对远程没有意义。列目录走 `workspace.browse_dirs`，
 //! 渲染只读 [`DirPickerState`] 里缓存的结果。
 
+use rust_i18n::t;
 use std::collections::BTreeSet;
 
 use gpui::prelude::FluentBuilder;
@@ -180,7 +181,7 @@ impl Workspace {
                     .quiet()
                     .small()
                     .icon(IconName::ArrowUp)
-                    .tooltip("上一级")
+                    .tooltip(t!("picker.up"))
                     .disabled(current.is_none_or(|listing| listing.parent.is_none()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         let parent = this
@@ -198,7 +199,7 @@ impl Workspace {
                 smelt_ui::Button::new("dir-picker-home")
                     .quiet()
                     .small()
-                    .label("主目录")
+                    .label(t!("picker.home"))
                     .on_click(cx.listener(|this, _, _, cx| this.dir_picker_navigate(None, cx))),
             )
             .child(
@@ -220,7 +221,7 @@ impl Workspace {
                 .py_6()
                 .type_style(TYPE.ui)
                 .text_color(muted)
-                .child("正在读取…")
+                .child(t!("picker.loading"))
                 .into_any_element(),
             Some(Err(error)) => div()
                 .py_6()
@@ -232,7 +233,7 @@ impl Workspace {
                 .py_6()
                 .type_style(TYPE.ui)
                 .text_color(muted)
-                .child("这里没有子目录")
+                .child(t!("picker.empty"))
                 .into_any_element(),
             Some(Ok(listing)) => {
                 let rows = listing.entries.iter().enumerate().map(|(ix, entry)| {
@@ -276,7 +277,11 @@ impl Workspace {
                                     } else {
                                         IconName::Plus
                                     })
-                                    .tooltip(if selected { "取消选择" } else { "选择" })
+                                    .tooltip(if selected {
+                                        t!("picker.deselect")
+                                    } else {
+                                        t!("picker.select")
+                                    })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         // 整行点击是进入目录；勾选不能冒泡上去，否则选中的同时就进去了。
                                         cx.stop_propagation();
@@ -313,30 +318,31 @@ impl Workspace {
 
         let request = &picker.pick.request;
         let confirm_label: SharedString = if picker.selected.is_empty() {
-            format!("{}当前目录", request.confirm).into()
+            t!("picker.confirm_current", action = request.confirm).into()
         } else {
-            format!("{}所选项", request.confirm).into()
+            t!("picker.confirm_selected", action = request.confirm).into()
         };
-        let title = format!(
-            "{}（{}）",
-            request.title,
-            crate::runtimes::runtime_name(picker.runtime.key(), cx)
+        let title = t!(
+            "picker.title",
+            title = request.title,
+            machine = crate::runtimes::runtime_name(picker.runtime.key(), cx)
         );
         let content = smelt_ui::dialog::content(title, None)
             .child(toolbar)
             .child(body)
             .when(multiple && !picker.selected.is_empty(), |content| {
-                content.child(
-                    div()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(muted)
-                        .child(format!("已选 {} 个目录", picker.selected.len())),
-                )
+                content.child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
+                    SharedString::from(if picker.selected.len() == 1 {
+                        t!("picker.selected.one")
+                    } else {
+                        t!("picker.selected.other", count = picker.selected.len())
+                    }),
+                ))
             });
         let footer = smelt_ui::dialog::footer()
             .child(Self::modal_cancel_button(
                 "cancel-dir-picker",
-                "取消",
+                t!("action.cancel"),
                 |this, _, _, cx| this.cancel_dir_picker(cx),
                 cx,
             ))
@@ -367,7 +373,9 @@ pub(crate) fn pick_local_paths(
             // 用户取消。
             Ok(Ok(None)) | Err(_) => return None,
             Ok(Err(error)) => {
-                crate::status_item::notify_error(format!("打不开系统选择框：{error}"));
+                crate::status_item::notify_error(
+                    t!("picker.system_failed", error = error).into_owned(),
+                );
                 return None;
             }
         };
@@ -376,7 +384,7 @@ pub(crate) fn pick_local_paths(
             .filter_map(|path| path.to_str().map(str::to_string))
             .collect();
         if chosen.len() < paths.len() {
-            crate::status_item::notify_error("有路径不是 UTF-8，没法用，已跳过".to_string());
+            crate::status_item::notify_error(t!("picker.non_utf8").into_owned());
         }
         (!chosen.is_empty()).then_some(chosen)
     })

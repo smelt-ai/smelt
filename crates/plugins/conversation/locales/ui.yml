@@ -1,0 +1,1159 @@
+_version: 2
+action:
+  close:
+    en: "Close"
+    zh-CN: "关闭"
+  copy:
+    en: "Copy"
+    zh-CN: "复制"
+  restart:
+    en: "restart"
+    zh-CN: "重启"
+  retry:
+    en: "Retry"
+    zh-CN: "重试"
+  send:
+    en: "Send"
+    zh-CN: "发送"
+approval:
+  cwd:
+    en: "Working directory: %{path}"
+    zh-CN: "工作目录：%{path}"
+  remaining:
+    en: "%{count} pending"
+    zh-CN: "%{count} 项待处理"
+  root:
+    en: "Allowed directory: %{path}"
+    zh-CN: "授权目录：%{path}"
+  skip:
+    en: "Skip"
+    zh-CN: "跳过"
+  title:
+    en: "Needs Approval"
+    zh-CN: "需要批准"
+attach:
+  add:
+    en: "Add Files"
+    zh-CN: "添加文件"
+  files:
+    one:
+      en: "1 local file"
+      zh-CN: "1 个本机文件"
+    other:
+      en: "%{count} local files"
+      zh-CN: "%{count} 个本机文件"
+  prompt:
+    en: "Choose files to send"
+    zh-CN: "选择要发送的文件"
+  remote_paths:
+    en: "Remote conversations can only attach images: that machine can't read the paths of %{files}"
+    zh-CN: "远程对话只能附加图片：%{files}的路径在那台机器上读不到"
+capabilities:
+  both:
+    en: "%{skills} and %{mcp} loaded"
+    zh-CN: "已加载 %{skills}、%{mcp}"
+  by_agent:
+    en: "Loaded per the agent's selection"
+    zh-CN: "按智能体的勾选加载"
+  by_pi:
+    en: "Loaded by Pi's auto-discovery"
+    zh-CN: "按 Pi 的自动发现加载"
+  edit_agent:
+    en: "Edit in Agent"
+    zh-CN: "在智能体里修改"
+  empty:
+    en: "None"
+    zh-CN: "没有"
+  loaded:
+    en: "%{items} loaded"
+    zh-CN: "已加载 %{items}"
+  manage_library:
+    en: "Manage in Library"
+    zh-CN: "在能力库里管理"
+  mcp:
+    one:
+      en: "1 MCP server"
+      zh-CN: "1 个 MCP"
+    other:
+      en: "%{count} MCP servers"
+      zh-CN: "%{count} 个 MCP"
+  none:
+    en: "No skills or MCP loaded"
+    zh-CN: "没有加载技能或 MCP"
+  none_here:
+    en: "No skills or MCP loaded in this conversation"
+    zh-CN: "这场对话没有加载技能或 MCP"
+  skills:
+    one:
+      en: "1 skill"
+      zh-CN: "1 个技能"
+    other:
+      en: "%{count} skills"
+      zh-CN: "%{count} 个技能"
+  skills_title:
+    en: "Skills"
+    zh-CN: "技能"
+command:
+  insert_text:
+    en: "Fill Conversation Input"
+    zh-CN: "填进对话输入框"
+completion:
+  default:
+    en: "Task complete"
+    zh-CN: "任务完成"
+  done:
+    en: "Done"
+    zh-CN: "完成"
+  failed:
+    en: "Couldn't finish"
+    zh-CN: "完成失败"
+  hint:
+    en: "↑↓ Select   Enter/Tab Insert   Esc Close"
+    zh-CN: "↑↓ 选择   Enter/Tab 插入   Esc 关闭"
+  in_progress:
+    en: "Finishing"
+    zh-CN: "正在完成"
+  pending:
+    en: "Waiting to finish"
+    zh-CN: "等待完成"
+composer:
+  placeholder:
+    en: "What should it do?"
+    zh-CN: "想让它做什么？"
+config:
+  model:
+    en: "Model"
+    zh-CN: "模型"
+  next_turn:
+    en: "applies next turn"
+    zh-CN: "下轮生效"
+  next_turn_many:
+    en: "%{first} and %{rest} more · applies next turn"
+    zh-CN: "%{first} 等 %{total} 项 · 下轮生效"
+  next_turn_two:
+    en: "%{first}, %{second} · applies next turn"
+    zh-CN: "%{first}、%{second} · 下轮生效"
+copy:
+  all:
+    en: "Copy All"
+    zh-CN: "复制全部"
+  answer:
+    en: "Copy Answer"
+    zh-CN: "复制回答"
+  completion:
+    en: "Copy Completion Summary"
+    zh-CN: "复制完成摘要"
+debug:
+  arguments:
+    en: "Arguments"
+    zh-CN: "参数"
+  call_id:
+    en: "Call ID"
+    zh-CN: "调用 ID"
+  display_title:
+    en: "Display title"
+    zh-CN: "展示标题"
+  invalid:
+    en: "The debug data is invalid"
+    zh-CN: "调试数据内容无效"
+  kind:
+    en: "Kind"
+    zh-CN: "类型"
+  parse_failed:
+    en: "Couldn't parse the debug data"
+    zh-CN: "调试数据解析失败"
+  read_failed:
+    en: "Couldn't read the debug data: %{error}"
+    zh-CN: "读取调试数据失败：%{error}"
+  result:
+    en: "Full result"
+    zh-CN: "完整结果"
+  runtime_too_old:
+    en: "The runtime is too old to provide debug data"
+    zh-CN: "运行时版本太旧，取不到调试数据"
+  send_failed:
+    en: "Couldn't send the debug data request: %{error}"
+    zh-CN: "调试数据请求发送失败：%{error}"
+  status:
+    en: "Status"
+    zh-CN: "状态"
+  tool_name:
+    en: "Tool name"
+    zh-CN: "工具名称"
+diff:
+  no_newline:
+    en: "No newline at end of file"
+    zh-CN: "末尾没有换行"
+dispatch:
+  all_done:
+    en: "All done"
+    zh-CN: "全部完成"
+  completed:
+    en: "%{done}/%{total} done"
+    zh-CN: "完成 %{done}/%{total}"
+  failed:
+    en: "%{count} failed"
+    zh-CN: "%{count} 个失败"
+  interrupted:
+    en: "%{count} interrupted"
+    zh-CN: "%{count} 个中断"
+  progress:
+    en: "%{done}/%{total} done"
+    zh-CN: "已完成 %{done}/%{total}"
+  running_activity:
+    en: "Running · %{activity}"
+    zh-CN: "运行中 · 正在：%{activity}"
+  stopped:
+    en: "%{count} stopped"
+    zh-CN: "%{count} 个已停止"
+divider:
+  interrupted:
+    en: "Interrupted"
+    zh-CN: "已中断"
+edit:
+  resend:
+    en: "Edit and Resend Last Message"
+    zh-CN: "编辑并重发最后一条消息"
+  resend_images:
+    en: "Edit and Resend Last Message (Images Must Be Re-added)"
+    zh-CN: "编辑并重发最后一条消息（图片需重新添加）"
+elicit:
+  custom_answer:
+    en: "Enter your own answer"
+    zh-CN: "输入你自己的答案"
+  multi:
+    en: "Multiple choices allowed"
+    zh-CN: "可多选"
+  multi_title:
+    en: "%{title} (choose any)"
+    zh-CN: "%{title}（可多选）"
+  none_above:
+    en: "None of these? Enter your own answer"
+    zh-CN: "以上都不是？输入自己的答案"
+  open_continue:
+    en: "Open and Continue"
+    zh-CN: "打开并继续"
+  secret:
+    en: "%{title} (secret)"
+    zh-CN: "%{title}（保密）"
+  submit:
+    en: "Submit"
+    zh-CN: "提交"
+  title:
+    en: "Waiting for Your Choice"
+    zh-CN: "等你选择"
+empty:
+  workbench:
+    en: "Workbench"
+    zh-CN: "工作台"
+  workspace:
+    en: "Current workspace · %{name}"
+    zh-CN: "当前工作区 · %{name}"
+ended:
+  new:
+    en: "New Session"
+    zh-CN: "新建会话"
+  restart:
+    en: "Start Over"
+    zh-CN: "重新开始"
+  resume:
+    en: "Resume Session"
+    zh-CN: "恢复会话"
+  title:
+    en: "Session ended"
+    zh-CN: "会话已结束"
+error:
+  bad_args:
+    en: "Invalid conversation arguments: %{error}"
+    zh-CN: "对话的参数不对：%{error}"
+  connect:
+    en: "Can't reach smeltd: %{error}"
+    zh-CN: "连不上 smeltd：%{error}"
+  disconnected:
+    en: "Disconnected from smeltd"
+    zh-CN: "与 smeltd 的连接已断开"
+  duplex:
+    en: "Couldn't open a two-way connection to smeltd"
+    zh-CN: "无法建立 smeltd 双向连接"
+  failed:
+    en: "Couldn't %{what}: %{error}"
+    zh-CN: "%{what}失败：%{error}"
+  first_message_unsupported:
+    en: "This machine's runtime is too old to send a first message with a new conversation. The message was put back in the input. Upgrade the runtime."
+    zh-CN: "这台机器的运行时版本太旧，不支持随新建对话发出首条消息，消息已放回输入框。请升级运行时。"
+  history_invalid:
+    en: "The history snapshot is invalid"
+    zh-CN: "历史快照内容无效"
+  history_parse_failed:
+    en: "Couldn't parse the history snapshot"
+    zh-CN: "历史快照解析失败"
+  history_read_failed:
+    en: "Couldn't read the history: %{error}"
+    zh-CN: "读取历史失败：%{error}"
+  history_send_failed:
+    en: "Couldn't send the history request: %{error}"
+    zh-CN: "读取历史请求发送失败：%{error}"
+  history_unreadable:
+    en: "Couldn't read the history: %{error}"
+    zh-CN: "历史读不出来：%{error}"
+  no_session:
+    en: "The ACP session doesn't exist"
+    zh-CN: "ACP 会话不存在"
+  no_window:
+    en: "The main window isn't open"
+    zh-CN: "主窗口没有打开"
+  not_open:
+    en: "Conversation “%{session}” isn't open"
+    zh-CN: "对话「%{session}」没有开着"
+  open_failed:
+    en: "Couldn't start the session on smeltd"
+    zh-CN: "向 smeltd 发起会话失败"
+  prepare_launch:
+    en: "Couldn't prepare the launch arguments: %{error}"
+    zh-CN: "准备启动参数失败：%{error}"
+  reply_parse_failed:
+    en: "Couldn't parse the reply"
+    zh-CN: "回执解析失败"
+  reply_read_failed:
+    en: "Couldn't read the reply: %{error}"
+    zh-CN: "读回执失败：%{error}"
+  resubscribe_exhausted:
+    en: "The connection to the runtime kept dropping. Click Start Over to try again."
+    zh-CN: "和运行时的连接反复断开，点重新开始再试"
+  restart_failed:
+    en: "Couldn't restart"
+    zh-CN: "重启失败"
+  settings_not_received:
+    en: "That machine's agent settings haven't arrived yet"
+    zh-CN: "那台机器的智能体配置还没收到"
+  snapshot_invalid:
+    en: "Couldn't parse the session snapshot; stopped waiting for startup: %{error}"
+    zh-CN: "会话快照无法解析，启动等待已结束：%{error}"
+  write_failed:
+    en: "Couldn't send the request: %{error}"
+    zh-CN: "写请求失败：%{error}"
+fork:
+  here:
+    en: "Fork and Edit from Here"
+    zh-CN: "从这里分叉并编辑"
+  here_images:
+    en: "Fork and Edit from Here (Images Must Be Re-added)"
+    zh-CN: "从这里分叉并编辑（图片需重新添加）"
+  title:
+    en: "Fork Conversation"
+    zh-CN: "分叉对话"
+group:
+  agents:
+    one:
+      en: "1 agent"
+      zh-CN: "1 个 Agent"
+    other:
+      en: "%{count} agents"
+      zh-CN: "%{count} 个 Agent"
+  agents_working:
+    one:
+      en: "1 agent working"
+      zh-CN: "1 个 Agent 工作中"
+    other:
+      en: "%{count} agents working"
+      zh-CN: "%{count} 个 Agent 工作中"
+  collaborating:
+    en: "Collaborating · %{agents}"
+    zh-CN: "正在协作 · %{agents}"
+  more:
+    en: "and more"
+    zh-CN: "等"
+  some_agents_working:
+    en: "%{active}/%{total} agents working"
+    zh-CN: "%{active}/%{total} 个 Agent 工作中"
+  steps:
+    en: "Steps"
+    zh-CN: "执行过程"
+  worked_for:
+    en: "Worked for %{elapsed}"
+    zh-CN: "工作了 %{elapsed}"
+headline:
+  delete:
+    en: "Deleted %{target}"
+    zh-CN: "删除了 %{target}"
+  edit:
+    en: "Edited %{target}"
+    zh-CN: "修改了 %{target}"
+  execute:
+    en: "Ran %{target}"
+    zh-CN: "运行了 %{target}"
+  fetch:
+    en: "Opened %{target}"
+    zh-CN: "打开了 %{target}"
+  image:
+    en: "Processed %{target}"
+    zh-CN: "处理了 %{target}"
+  move:
+    en: "Moved %{target}"
+    zh-CN: "移动了 %{target}"
+  read:
+    en: "Read %{target}"
+    zh-CN: "读取了 %{target}"
+  search:
+    en: "Searched %{query}"
+    zh-CN: "搜索 %{query}"
+hint:
+  clear_queue_failed:
+    en: "Couldn't clear the queued messages"
+    zh-CN: "无法清空排队消息"
+  compact_failed:
+    en: "Couldn't compact the context"
+    zh-CN: "无法压缩上下文"
+  queue_failed:
+    en: "Couldn't queue the follow-up message"
+    zh-CN: "后续消息未能排队"
+  retry_failed:
+    en: "Couldn't retry this turn"
+    zh-CN: "无法重试这一轮"
+  rewind_failed:
+    en: "Couldn't rewind to this message"
+    zh-CN: "无法回退到这条消息"
+  stop_subagent_failed:
+    en: "Couldn't stop the subagent"
+    zh-CN: "无法停止子智能体"
+  stop_task_failed:
+    en: "Couldn't stop the background task"
+    zh-CN: "无法停止后台任务"
+  unqueue_failed:
+    en: "Couldn't withdraw the queued message"
+    zh-CN: "无法撤回排队消息"
+images:
+  count:
+    one:
+      en: "1 image"
+      zh-CN: "1 张图片"
+    other:
+      en: "%{count} images"
+      zh-CN: "%{count} 张图片"
+  not_forwarded:
+    en: "[This task came with %{images}, but %{agent} doesn't accept images, so they weren't forwarded.]"
+    zh-CN: "[该任务附带 %{images}，但 %{agent} 不支持图片输入，图片未转发。]"
+  partial:
+    en: "Attached %{loaded}; %{failed} couldn't be read"
+    zh-CN: "已附加 %{loaded} 张图片，%{failed} 张读取失败"
+  paste_unsupported:
+    en: "%{agent} doesn't support images; the paste was ignored"
+    zh-CN: "%{agent} 不支持图片，已忽略粘贴"
+  preview:
+    en: "Preview Image"
+    zh-CN: "预览图片"
+  read_failed:
+    en: "Couldn't read the images. Try again."
+    zh-CN: "图片读取失败，请重试"
+  reading:
+    one:
+      en: "Reading 1 image…"
+      zh-CN: "正在读取 1 张图片…"
+    other:
+      en: "Reading %{count} images…"
+      zh-CN: "正在读取 %{count} 张图片…"
+  remove:
+    en: "Remove Image"
+    zh-CN: "移除图片"
+  still_reading:
+    one:
+      en: "Still reading 1 image. Please wait…"
+      zh-CN: "正在读取 1 张图片，请稍候…"
+    other:
+      en: "Still reading %{count} images. Please wait…"
+      zh-CN: "正在读取 %{count} 张图片，请稍候…"
+inbox:
+  pending:
+    en: "〈%{from}〉%{action} · not delivered yet; it arrives once the current tool call finishes"
+    zh-CN: "〈%{from}〉%{action} · 还没送到，手上的工具调用做完就送进来"
+lines:
+  output:
+    one:
+      en: "1 line of output"
+      zh-CN: "1 行输出"
+    other:
+      en: "%{count} lines of output"
+      zh-CN: "%{count} 行输出"
+  plain:
+    one:
+      en: "1 line"
+      zh-CN: "1 行"
+    other:
+      en: "%{count} lines"
+      zh-CN: "%{count} 行"
+  result:
+    one:
+      en: "1 line of results"
+      zh-CN: "1 行结果"
+    other:
+      en: "%{count} lines of results"
+      zh-CN: "%{count} 行结果"
+  total:
+    one:
+      en: "1 line"
+      zh-CN: "共 1 行"
+    other:
+      en: "%{count} lines"
+      zh-CN: "共 %{count} 行"
+memory:
+  pending_subtitle:
+    en: "%{reason}: %{description}"
+    zh-CN: "%{reason}：%{description}"
+  approve:
+    en: "approve"
+    zh-CN: "采纳"
+  approve_button:
+    en: "Approve"
+    zh-CN: "采纳"
+  approve_hint:
+    en: "Approve: later conversations will use this memory"
+    zh-CN: "采纳：之后的对话会用到这条记忆"
+  badge_active:
+    en: "Active"
+    zh-CN: "已生效"
+  badge_changed:
+    en: "Changed"
+    zh-CN: "改"
+  badge_global:
+    en: "Global"
+    zh-CN: "全局"
+  badge_new:
+    en: "New"
+    zh-CN: "新"
+  badge_pending:
+    en: "To Confirm"
+    zh-CN: "待确认"
+  collapse:
+    en: "Collapse Memory Card"
+    zh-CN: "收起记忆卡片"
+  confirm_delete:
+    en: "Confirm Delete"
+    zh-CN: "确认删除"
+  created:
+    en: "%{count} new"
+    zh-CN: "新记住 %{count} 条"
+  delete:
+    en: "delete"
+    zh-CN: "删除"
+  delete_button:
+    en: "Delete"
+    zh-CN: "删除"
+  delete_global_hint:
+    en: "Deleting a global memory removes it from every agent"
+    zh-CN: "全局记忆删了会从所有智能体里消失"
+  delete_hint:
+    en: "This can't be undone"
+    zh-CN: "删了就没了"
+  empty_body:
+    en: "(Empty)"
+    zh-CN: "（正文为空）"
+  page:
+    en: "Memory Page"
+    zh-CN: "记忆页"
+  page_hint:
+    en: "Go to this agent's memory page to manage all memories"
+    zh-CN: "去这个智能体的记忆页，管理全部记忆"
+  pending:
+    en: "%{count} to confirm"
+    zh-CN: "%{count} 条待确认"
+  title:
+    en: "Memory"
+    zh-CN: "记忆"
+  updated:
+    en: "%{count} updated"
+    zh-CN: "更新 %{count} 条"
+notice:
+  dismiss:
+    en: "Dismiss"
+    zh-CN: "关闭提示"
+outcome:
+  failed:
+    en: "This turn didn't finish"
+    zh-CN: "这一轮没有完成"
+  interrupted:
+    en: "The reply was interrupted; it can continue after a restart"
+    zh-CN: "本轮回复已中断，重启后可继续"
+  max_tokens:
+    en: "The reply was too long and got cut off"
+    zh-CN: "回复太长，被截断了"
+  max_turn_requests:
+    en: "Reached the request limit for this turn"
+    zh-CN: "已达到本轮最大请求数"
+  refused:
+    en: "The agent refused to continue"
+    zh-CN: "Agent 拒绝继续处理"
+peer:
+  failed:
+    en: "Failed: %{error}"
+    zh-CN: "失败：%{error}"
+  noun:
+    bounce:
+      en: "a bounce"
+      zh-CN: "退信"
+    completion:
+      en: "a result"
+      zh-CN: "结果"
+    message:
+      en: "a message"
+      zh-CN: "消息"
+    task:
+      en: "a task"
+      zh-CN: "任务"
+  open:
+    en: "Open conversation %{title}"
+    zh-CN: "打开对话 %{title}"
+  received_bounce:
+    en: "didn't receive your message"
+    zh-CN: "没收到你的消息"
+  received_completion:
+    en: "returned a result"
+    zh-CN: "交回结果"
+  received_message:
+    en: "sent a message"
+    zh-CN: "发来消息"
+  received_task:
+    en: "sent a task"
+    zh-CN: "发来任务"
+  send_to:
+    en: "Send to"
+    zh-CN: "发给"
+  sending:
+    en: "Sending %{kind} to"
+    zh-CN: "正在发%{kind}给"
+  sent:
+    en: "Sent %{kind} to"
+    zh-CN: "已发%{kind}给"
+  spawn:
+    en: "New conversation"
+    zh-CN: "新建对话"
+  spawning:
+    en: "Creating conversation"
+    zh-CN: "正在新建对话"
+  with_task:
+    en: "and handed off the task"
+    zh-CN: "并交代任务"
+plan:
+  done:
+    en: "Done"
+    zh-CN: "完成"
+  in_progress:
+    en: "In Progress"
+    zh-CN: "进行中"
+  title:
+    en: "Progress"
+    zh-CN: "任务进度"
+  waiting:
+    en: "Waiting for the next step"
+    zh-CN: "等待下一步"
+prompt:
+  continue:
+    en: "Continue"
+    zh-CN: "继续"
+queue:
+  current_turn:
+    en: "Current turn"
+    zh-CN: "当前回合"
+  image_only:
+    en: "[Image]"
+    zh-CN: "[图片]"
+  next_turn:
+    en: "Next turn"
+    zh-CN: "下一回合"
+  pending:
+    en: "Queued · %{preview}"
+    zh-CN: "排队中 · %{preview}"
+  send_now:
+    en: "Send Now"
+    zh-CN: "立即发送"
+  send_now_hint:
+    en: "Send this message now"
+    zh-CN: "立即发送这条消息"
+  send_now_stop:
+    en: "Send Now (Stop Current Reply)"
+    zh-CN: "立即发送（停止当前回答）"
+  send_now_stop_hint:
+    en: "Stop the current reply and send this message now"
+    zh-CN: "停止当前回答后，立即发送这条消息"
+  shortcut_hint:
+    en: "Enter adds to the current turn · ⌥Enter sends after the turn"
+    zh-CN: "Enter 插入当前回合 · ⌥Enter 回合后发送"
+  with_images:
+    en: " (with %{images})"
+    zh-CN: "（含 %{images}）"
+  withdraw:
+    en: "Withdraw"
+    zh-CN: "撤回"
+  withdraw_all:
+    en: "Withdraw Queue"
+    zh-CN: "撤回排队"
+  withdraw_hint:
+    en: "Withdraw this and put it back in the input"
+    zh-CN: "撤回这条，放回输入框"
+quick:
+  debug:
+    prompt:
+      en: "Help me track down this problem: "
+      zh-CN: "请帮我定位这个问题："
+    title:
+      en: "Track down a problem"
+      zh-CN: "定位一个问题"
+  review:
+    prompt:
+      en: "Review the changes in the current workspace, summarize them, and point out potential risks."
+      zh-CN: "请检查当前工作区的改动，概述内容并指出潜在风险。"
+    title:
+      en: "Review current changes"
+      zh-CN: "检查当前改动"
+  test:
+    prompt:
+      en: "Add tests for the relevant module, and explain the test plan first."
+      zh-CN: "请为当前相关模块补充测试，并先说明测试方案。"
+    title:
+      en: "Add tests"
+      zh-CN: "补充测试"
+  understand:
+    prompt:
+      en: "Give me a quick overview of this project's structure, key entry points, and how to run it."
+      zh-CN: "请快速梳理这个项目的结构、关键入口和运行方式。"
+    title:
+      en: "Understand this project"
+      zh-CN: "了解这个项目"
+retry:
+  running:
+    en: "Model request failed; retry %{attempt} in progress"
+    zh-CN: "模型请求出错，正在第 %{attempt} 次重试"
+  running_for:
+    en: "Model request failed; retry %{attempt} in progress · %{elapsed}"
+    zh-CN: "模型请求出错，正在第 %{attempt} 次重试 · %{elapsed}"
+  waiting:
+    en: "Model request failed; retry %{attempt} in %{seconds}s"
+    zh-CN: "模型请求出错，%{seconds} 秒后第 %{attempt} 次重试"
+run:
+  edit:
+    one:
+      en: "Edited 1 file"
+      zh-CN: "修改了 1 个文件"
+    other:
+      en: "Edited %{count} files"
+      zh-CN: "修改了 %{count} 个文件"
+  execute:
+    one:
+      en: "Ran 1 command"
+      zh-CN: "运行了 1 条命令"
+    other:
+      en: "Ran %{count} commands"
+      zh-CN: "运行了 %{count} 条命令"
+  fetch:
+    one:
+      en: "Opened 1 page"
+      zh-CN: "打开了 1 个页面"
+    other:
+      en: "Opened %{count} pages"
+      zh-CN: "打开了 %{count} 个页面"
+  image:
+    one:
+      en: "Processed 1 image"
+      zh-CN: "处理了 1 张图"
+    other:
+      en: "Processed %{count} images"
+      zh-CN: "处理了 %{count} 张图"
+  other:
+    en: "%{kind} ×%{count}"
+    zh-CN: "%{kind} %{count} 次"
+  read:
+    one:
+      en: "Read 1 file"
+      zh-CN: "读取了 1 个文件"
+    other:
+      en: "Read %{count} files"
+      zh-CN: "读取了 %{count} 个文件"
+  search:
+    one:
+      en: "Searched once"
+      zh-CN: "搜索了 1 次"
+    other:
+      en: "Searched %{count} times"
+      zh-CN: "搜索了 %{count} 次"
+running:
+  collaborate:
+    en: "Collaborating"
+    zh-CN: "正在协作"
+  compact:
+    en: "Compacting context"
+    zh-CN: "正在整理上下文"
+  edit:
+    en: "Editing"
+    zh-CN: "正在修改"
+  execute:
+    en: "Running"
+    zh-CN: "正在运行"
+  fetch:
+    en: "Fetching"
+    zh-CN: "正在获取"
+  image:
+    en: "Processing images"
+    zh-CN: "正在处理图片"
+  other:
+    en: "Working"
+    zh-CN: "正在处理"
+  read:
+    en: "Reading"
+    zh-CN: "正在读取"
+  review:
+    en: "Reviewing"
+    zh-CN: "正在审阅"
+  search:
+    en: "Searching"
+    zh-CN: "正在搜索"
+  switch_mode:
+    en: "Switching mode"
+    zh-CN: "正在切换模式"
+  think:
+    en: "Analyzing"
+    zh-CN: "正在分析"
+  wait:
+    en: "Waiting"
+    zh-CN: "正在等待"
+scroll:
+  latest:
+    en: "Jump to Latest"
+    zh-CN: "回到最新"
+starting:
+  connecting:
+    en: "Connecting to the agent"
+    zh-CN: "正在建立与 agent 的连接"
+  resuming:
+    en: "Restoring the last session"
+    zh-CN: "正在恢复上次的会话"
+  resuming_detail:
+    en: "Restoring the message history and working context"
+    zh-CN: "正在恢复历史消息和工作上下文"
+  title:
+    en: "Starting %{agent}"
+    zh-CN: "正在启动 %{agent}"
+  type_ahead:
+    en: "You can type below now; it sends once connected"
+    zh-CN: "可以先在下方输入，连接完成后会自动发送"
+  waited:
+    en: "Waited %{seconds}s"
+    zh-CN: "已等待 %{seconds} 秒"
+status:
+  opening:
+    en: "Opening conversation…"
+    zh-CN: "正在打开对话…"
+  restoring:
+    en: "Restoring the last conversation…"
+    zh-CN: "正在恢复上次的对话…"
+  thinking:
+    en: "Thinking"
+    zh-CN: "正在想"
+  thinking_for:
+    en: "Thinking · %{elapsed}"
+    zh-CN: "正在想 · %{elapsed}"
+  thought_for:
+    en: "Thought for %{elapsed}"
+    zh-CN: "想了 %{elapsed}"
+  working:
+    en: "Working…"
+    zh-CN: "处理中…"
+stop:
+  force:
+    en: "Force Stop"
+    zh-CN: "强制停止"
+  restarting:
+    en: "Restarting"
+    zh-CN: "正在重启"
+  stop:
+    en: "Stop"
+    zh-CN: "停止"
+subagent:
+  close:
+    en: "Close Subagent View"
+    zh-CN: "关闭子智能体视图"
+  completed:
+    en: "Done"
+    zh-CN: "完成"
+  empty:
+    en: "Nothing yet"
+    zh-CN: "还没有内容"
+  failed:
+    en: "Failed"
+    zh-CN: "失败"
+  generic:
+    en: "Subagent"
+    zh-CN: "子代理"
+  interrupted:
+    en: "Interrupted"
+    zh-CN: "已中断"
+  loading:
+    en: "Loading…"
+    zh-CN: "正在读取…"
+  preparing:
+    en: "Preparing"
+    zh-CN: "准备中"
+  read_failed:
+    en: "Couldn't read this subagent's process: %{error}"
+    zh-CN: "读不到这个子智能体的过程：%{error}"
+  roster:
+    one:
+      en: "1 subagent"
+      zh-CN: "1 个子代理"
+    other:
+      en: "%{count} subagents"
+      zh-CN: "%{count} 个子代理"
+  running:
+    en: "Running"
+    zh-CN: "运行中"
+  steps:
+    one:
+      en: "1 step"
+      zh-CN: "1 步"
+    other:
+      en: "%{count} steps"
+      zh-CN: "%{count} 步"
+  stop_all:
+    en: "Stop All"
+    zh-CN: "全部停止"
+  stopped:
+    en: "Stopped"
+    zh-CN: "已停止"
+  summary:
+    one:
+      en: "1 subagent"
+      zh-CN: "1 个子智能体"
+    other:
+      en: "%{count} subagents"
+      zh-CN: "%{count} 个子智能体"
+  title:
+    en: "Subagents"
+    zh-CN: "子智能体"
+  view_process:
+    en: "View the process of subagent %{title}"
+    zh-CN: "查看子智能体 %{title} 的过程"
+submit:
+  rejected:
+    en: "Not sent: %{error}"
+    zh-CN: "未发送：%{error}"
+  unknown:
+    en: "Unknown whether it was sent: %{error}. Sending again may duplicate it."
+    zh-CN: "发送结果未知：%{error}；再次发送可能重复。"
+summary:
+  collaborate:
+    one:
+      en: "1 agent"
+      zh-CN: "1 个 Agent"
+    other:
+      en: "%{count} agents"
+      zh-CN: "%{count} 个 Agent"
+  compact:
+    one:
+      en: "Compacted context once"
+      zh-CN: "整理了 1 次上下文"
+    other:
+      en: "Compacted context %{count} times"
+      zh-CN: "整理了 %{count} 次上下文"
+  edit:
+    one:
+      en: "Edited once"
+      zh-CN: "修改了 1 次"
+    other:
+      en: "Edited %{count} times"
+      zh-CN: "修改了 %{count} 次"
+  execute:
+    one:
+      en: "Ran once"
+      zh-CN: "运行了 1 次"
+    other:
+      en: "Ran %{count} times"
+      zh-CN: "运行了 %{count} 次"
+  fetch:
+    one:
+      en: "Fetched once"
+      zh-CN: "获取了 1 次"
+    other:
+      en: "Fetched %{count} times"
+      zh-CN: "获取了 %{count} 次"
+  image:
+    one:
+      en: "Processed 1 image"
+      zh-CN: "处理了 1 张图片"
+    other:
+      en: "Processed %{count} images"
+      zh-CN: "处理了 %{count} 张图片"
+  other:
+    one:
+      en: "Worked once"
+      zh-CN: "处理了 1 次"
+    other:
+      en: "Worked %{count} times"
+      zh-CN: "处理了 %{count} 次"
+  read:
+    one:
+      en: "Read once"
+      zh-CN: "读取了 1 次"
+    other:
+      en: "Read %{count} times"
+      zh-CN: "读取了 %{count} 次"
+  review:
+    one:
+      en: "Reviewed once"
+      zh-CN: "审阅了 1 次"
+    other:
+      en: "Reviewed %{count} times"
+      zh-CN: "审阅了 %{count} 次"
+  search:
+    one:
+      en: "Searched once"
+      zh-CN: "搜索了 1 次"
+    other:
+      en: "Searched %{count} times"
+      zh-CN: "搜索了 %{count} 次"
+  switch_mode:
+    one:
+      en: "Switched mode once"
+      zh-CN: "切换了 1 次模式"
+    other:
+      en: "Switched mode %{count} times"
+      zh-CN: "切换了 %{count} 次模式"
+  think:
+    one:
+      en: "Analyzed once"
+      zh-CN: "分析了 1 次"
+    other:
+      en: "Analyzed %{count} times"
+      zh-CN: "分析了 %{count} 次"
+  wait:
+    one:
+      en: "Waited once"
+      zh-CN: "等待了 1 次"
+    other:
+      en: "Waited %{count} times"
+      zh-CN: "等待了 %{count} 次"
+task:
+  completed:
+    en: "Done"
+    zh-CN: "完成"
+  failed:
+    en: "Failed"
+    zh-CN: "失败"
+  running:
+    en: "In Progress"
+    zh-CN: "进行中"
+  running_for:
+    en: "Running for %{elapsed}"
+    zh-CN: "已运行 %{elapsed}"
+  stopped:
+    en: "Stopped"
+    zh-CN: "已停止"
+  stopping:
+    en: "Stopping…"
+    zh-CN: "正在停止…"
+  summary:
+    one:
+      en: "1 background task"
+      zh-CN: "1 个后台任务"
+    other:
+      en: "%{count} background tasks"
+      zh-CN: "%{count} 个后台任务"
+  timed_out:
+    en: "Timed Out"
+    zh-CN: "超时"
+  title:
+    en: "Background Tasks"
+    zh-CN: "后台任务"
+thought:
+  line:
+    en: "Thinking  %{line}"
+    zh-CN: "思考  %{line}"
+  summary:
+    en: "Analysis Summary"
+    zh-CN: "分析摘要"
+title:
+  en: "Conversation"
+  zh-CN: "对话"
+toggle:
+  collapse:
+    en: "Collapse"
+    zh-CN: "收起"
+  collapse_named:
+    en: "Collapse %{name}"
+    zh-CN: "收起 %{name}"
+  expand:
+    en: "Expand"
+    zh-CN: "展开"
+  expand_lines:
+    en: "Show all %{count} lines"
+    zh-CN: "展开全部 %{count} 行"
+  expand_named:
+    en: "Expand %{name}"
+    zh-CN: "展开 %{name}"
+tool:
+  done:
+    en: "Done"
+    zh-CN: "完成"
+  failed:
+    en: "Failed"
+    zh-CN: "失败"
+  in_progress:
+    en: "Running"
+    zh-CN: "执行中"
+  pending:
+    en: "Pending"
+    zh-CN: "待执行"
+trace:
+  debug_unavailable:
+    en: "Tool arguments and model calls are unavailable: %{error}"
+    zh-CN: "工具参数和模型调用取不到：%{error}"
+  lane:
+    assistant:
+      en: "Model output"
+      zh-CN: "模型输出"
+    compaction:
+      en: "Context compaction reported by Pi"
+      zh-CN: "Pi 上报的上下文压缩过程"
+    model_call:
+      en: "Model call · request / response"
+      zh-CN: "模型调用 · 请求 / 响应"
+    request:
+      en: "Pi request assembly config"
+      zh-CN: "Pi 请求组装配置"
+    thinking:
+      en: "Model thinking"
+      zh-CN: "模型思考"
+    tool:
+      en: "Tool call"
+      zh-CN: "工具调用"
+    user:
+      en: "User message"
+      zh-CN: "用户消息"
+  no_events:
+    en: "No session events yet"
+    zh-CN: "还没有会话事件"
+  no_matches:
+    en: "No matching events"
+    zh-CN: "没有匹配的事件"
+  off_timeline:
+    en: "Off timeline"
+    zh-CN: "非时间线"
+  open:
+    en: "Session Trace"
+    zh-CN: "会话追踪"
+  preview:
+    en: "Preview"
+    zh-CN: "预览"
+  raw:
+    en: "Raw"
+    zh-CN: "原始数据"
+usage:
+  compact:
+    en: "Compact Context"
+    zh-CN: "压缩上下文"
+  compacting:
+    en: "Compacting…"
+    zh-CN: "压缩中…"
+  compacting_label:
+    en: "Compacting"
+    zh-CN: "压缩中"
+  label:
+    en: "Context Usage"
+    zh-CN: "上下文用量"

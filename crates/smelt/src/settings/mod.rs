@@ -16,7 +16,7 @@ use smelt_ui::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use smelt_ui::theme_config::ThemeMode;
 
 use crate::Workspace;
-use crate::window_backdrop::WindowMaterial;
+use smelt_model::appearance_settings::MAX_BG_IMAGE_OPACITY;
 
 mod appearance_page;
 mod content_view;
@@ -47,15 +47,21 @@ fn default_bg_image_opacity() -> f32 {
     smelt_model::appearance_settings::DEFAULT_BG_IMAGE_OPACITY
 }
 
+/// 底色不透明度出厂值：主题底色占八成，看得出主题，也透得出毛玻璃。客户端库迁移时给的
+/// 也是这个数（`smelt_client_store` 的 `MIGRATED_BG_OPACITY`）。
+pub const DEFAULT_BG_OPACITY: f32 = 0.8;
+
 /// 窗口外观设置（全局单例；存在客户端库里，见 [`load_appearance`]）。
 #[derive(Clone)]
 pub struct Appearance {
     /// 背景图片绝对路径（None = 无）。
     pub bg_image: Option<String>,
-    /// 背景图片透明度 0–1（0=全透，1=全不透明）。默认低透明度做装饰层，
-    /// 让主题底色透出，避免明亮图片直接铺满破坏可读性（对齐
-    /// WezTerm / Windows Terminal 的 backgroundImageOpacity 惯例）。
+    /// 背景图片的不透明度，0 到 [`MAX_BG_IMAGE_OPACITY`]。图只做装饰，叠在底色上面、所有
+    /// 内容下面；字色不按图配，所以封顶，再亮再暗的图也压不坏字。
     pub bg_image_opacity: f32,
+    /// 有窗口材质时主题底色铺在材质上的不透明度，0–1：1 是主题本色、不透，0 是只剩毛玻璃。
+    /// 没有材质的机器窗口不透明，不看它。
+    pub bg_opacity: f32,
     /// 明暗。跟着 `theme_name` 走，CLI 的 `appearance.theme_mode` 会把主题拨到同一族的另一侧。
     pub theme_mode: ThemeMode,
     /// 主题名，对应注册表里的 `name`，例如 `smelt Dark`、`Ayu Light`。
@@ -71,8 +77,9 @@ pub struct Appearance {
     /// 选的是哪份布局（布局 id）。`None` 是没选过，用第一个登记的布局。选的布局暂时没登记
     /// （插件还没加载、被卸了）时照样留着，不改写成别的。
     pub layout_id: Option<String>,
-    /// 窗口底下垫哪一种系统材质。
-    pub material: WindowMaterial,
+    /// 库里 `appearance.material` 列原样读回、原样写回，没人用：材质改由布局按地方声明
+    /// （`smelt_plugin_api::LayoutMaterials`）。TODO: 表结构确认后连列一起删。
+    pub material: String,
 }
 
 impl Default for Appearance {
@@ -80,13 +87,14 @@ impl Default for Appearance {
         Self {
             bg_image: None,
             bg_image_opacity: default_bg_image_opacity(),
+            bg_opacity: DEFAULT_BG_OPACITY,
             theme_mode: ThemeMode::Dark,
             theme_name: default_theme_name(),
             ui_font_px: DEFAULT_UI_FONT_PX,
             ui_font_family: String::new(),
             font_family: String::new(),
             layout_id: None,
-            material: WindowMaterial::platform_default(),
+            material: String::new(),
         }
     }
 }
@@ -124,8 +132,9 @@ pub fn apply_requested_appearance(
     settings: &std::collections::BTreeMap<String, serde_json::Value>,
     cx: &mut App,
 ) -> Result<(), smelt_model::appearance_settings::SettingsError> {
-    let store = smelt_client_store::client_store()
-        .map_err(|error| smelt_model::appearance_settings::SettingsError::Store(format!("打开客户端库失败：{error}")))?;
+    let store = smelt_client_store::client_store().map_err(|error| {
+        smelt_model::appearance_settings::SettingsError::Store(format!("打开客户端库失败：{error}"))
+    })?;
     apply_requested_appearance_on(settings, store, cx)
 }
 
@@ -139,8 +148,9 @@ fn apply_requested_appearance_on(
     let catalog = registered_theme_entries(cx);
     smelt_model::appearance_settings::apply_patch(&mut snapshot, settings, &catalog)?;
     let next = appearance_from_snapshot(snapshot, current);
-    save_appearance_on(&next, store)
-        .map_err(|error| smelt_model::appearance_settings::SettingsError::Store(format!("保存外观失败：{error}")))?;
+    save_appearance_on(&next, store).map_err(|error| {
+        smelt_model::appearance_settings::SettingsError::Store(format!("保存外观失败：{error}"))
+    })?;
     install_appearance(next, cx);
     Ok(())
 }
@@ -154,17 +164,15 @@ fn install_appearance(appearance: Appearance, cx: &mut App) {
 }
 
 /// 按主题名装上配色。`theme_catalog::apply` 装上自绘色板和 gpui-base 的颜色，终端等插件
-/// 看着当前主题自己跟着切。字色按外观里选的窗口材质配，所以换了材质也要重装一次。
+/// 看着当前主题自己跟着切。配色按窗口底（材质、底色不透明度）算，所以这两样变了也要重装一次。
 /// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`。
 pub fn apply_named_theme(name: &str, cx: &mut App) {
     let appearance = cx.try_global::<Appearance>();
     let requested_dark = appearance
         .map(|appearance| appearance.theme_mode.is_dark())
         .unwrap_or(true);
-    let material = appearance
-        .map(|appearance| appearance.material)
-        .unwrap_or_else(WindowMaterial::platform_default);
-    crate::ui_theme::set_window_material(crate::window_backdrop::text_tone(material));
+    let bg_opacity = appearance.map_or(DEFAULT_BG_OPACITY, |appearance| appearance.bg_opacity);
+    crate::ui_theme::set_window_backdrop(crate::window_backdrop::text_tone(), bg_opacity);
     let applied = smelt_ui::theme_catalog::apply(name, cx)
         || smelt_ui::theme_catalog::apply(
             smelt_model::theme_index::default_for_mode(if requested_dark {
@@ -208,7 +216,8 @@ pub fn load_appearance() -> Appearance {
             },
             Appearance {
                 layout_id: record.layout_id,
-                material: WindowMaterial::from_key(&record.material),
+                material: record.material,
+                bg_opacity: record.bg_opacity.clamp(0.0, 1.0),
                 ..Appearance::default()
             },
         ),
@@ -242,7 +251,8 @@ fn save_appearance_on(
         ui_font_family: snapshot.ui_font_family,
         font_family: snapshot.font_family,
         layout_id: appearance.layout_id.clone(),
-        material: appearance.material.key().to_string(),
+        material: appearance.material.clone(),
+        bg_opacity: appearance.bg_opacity,
     };
     store.put_appearance(&record)
 }
@@ -265,14 +275,14 @@ fn snapshot_from_appearance(
     }
 }
 
-/// 快照只有能脚本改的那些键；别的（选的布局、材质）照抄 `base`。
+/// 快照只有能脚本改的那些键；别的（选的布局、材质、底色不透明度）照抄 `base`。
 fn appearance_from_snapshot(
     snapshot: smelt_model::appearance_settings::AppearanceSnapshot,
     base: Appearance,
 ) -> Appearance {
     Appearance {
         bg_image: snapshot.bg_image,
-        bg_image_opacity: snapshot.bg_image_opacity,
+        bg_image_opacity: snapshot.bg_image_opacity.clamp(0.0, MAX_BG_IMAGE_OPACITY),
         theme_mode: ThemeMode::from_key(&snapshot.theme_mode).unwrap_or_else(default_theme_mode),
         theme_name: if snapshot.theme_name.trim().is_empty() {
             default_theme_name()
@@ -295,10 +305,14 @@ fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
     cx.set_global(edited);
 }
 
-/// 换窗口材质：存进外观，再按新材质重装主题（字色按材质配）。窗口上的材质由工作台在
-/// 外观变化时换（`Workspace::sync_window_backdrop`）。
-pub(crate) fn set_window_material(material: WindowMaterial, cx: &mut App) {
-    apply_appearance(move |a| a.material = material, cx);
+/// 换透的地方的底色不透明度：存进外观，再按新的窗口底重装主题。窗口根下一帧按它铺底。
+pub(crate) fn set_bg_opacity(opacity: f32, cx: &mut App) {
+    let opacity = opacity.clamp(0.0, 1.0);
+    set_window_backdrop(move |a| a.bg_opacity = opacity, cx);
+}
+
+fn set_window_backdrop(edit: impl FnOnce(&mut Appearance), cx: &mut App) {
+    apply_appearance(edit, cx);
     let theme_name = cx.global::<Appearance>().theme_name.clone();
     apply_named_theme(&theme_name, cx);
     cx.refresh_windows();
@@ -339,7 +353,7 @@ const SETTINGS_LAYOUT: &str = r#"{
 pub(crate) fn register_page(cx: &mut App) {
     let page = smelt_plugin_api::PageSource {
         name: "settings",
-        title: "设置",
+        title: smelt_plugin_api::text!("settings.title"),
         home: false,
         index: None,
     };
@@ -350,8 +364,9 @@ pub(crate) fn register_page(cx: &mut App) {
     let layout = smelt_plugin_api::LayoutSource {
         page: SETTINGS_PAGE,
         name: "settings",
-        title: "设置",
+        title: smelt_plugin_api::text!("settings.title"),
         state: SETTINGS_LAYOUT,
+        materials: smelt_plugin_api::LayoutMaterials::default(),
     };
     if let Err(error) =
         smelt_plugin_api::register_layouts(crate::host_views::HOST_OWNER, &[layout], cx)
@@ -363,7 +378,8 @@ pub(crate) fn register_page(cx: &mut App) {
 /// 宿主自己的一页设置：登记成视图时的名字、标题、图标和搜索用的词。
 struct HostPage {
     name: &'static str,
-    title: &'static str,
+    /// 跟着语言变的标题。常量里放不下 `Text`，放个取它的函数。
+    title: fn() -> smelt_plugin_api::Text,
     icon: smelt_ui::IconName,
     keywords: &'static [&'static str],
     build: fn(&WeakEntity<Workspace>, &mut App) -> Rc<dyn ViewHandle>,
@@ -387,9 +403,18 @@ impl HostPage {
 const HOST_PAGES: [HostPage; 3] = [
     HostPage {
         name: "appearance",
-        title: "外观",
+        title: || smelt_plugin_api::text!("settings.page.appearance"),
         icon: smelt_ui::IconName::Palette,
         keywords: &[
+            "外观",
+            "appearance",
+            "theme",
+            "dark",
+            "light",
+            "font",
+            "layout",
+            "background",
+            "wallpaper",
             "主题",
             "颜色模式",
             "深色",
@@ -429,9 +454,10 @@ const HOST_PAGES: [HostPage; 3] = [
     },
     HostPage {
         name: "shortcuts",
-        title: "快捷键",
+        title: || smelt_plugin_api::text!("settings.page.shortcuts"),
         icon: smelt_ui::IconName::Keyboard,
         keywords: &[
+            "快捷键",
             "键盘快捷键",
             "键盘",
             "按键",
@@ -449,11 +475,16 @@ const HOST_PAGES: [HostPage; 3] = [
     },
     HostPage {
         name: "panel-plugins",
-        title: "面板插件",
+        title: || smelt_plugin_api::text!("settings.page.panel_plugins"),
         icon: smelt_ui::IconName::Puzzle,
         keywords: &[
+            "面板插件",
             "插件",
             "plugin",
+            "panel",
+            "import",
+            "install",
+            "reload",
             "扩展",
             "面板",
             "导入插件",
@@ -492,12 +523,13 @@ pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> Vec<ViewSpec> {
     let mut specs = vec![
         ViewSpec {
             name: "settings-nav".into(),
-            title: "设置导航".into(),
-            icon: gpui_kit_assets::IconName::Settings.path(),
+            title: smelt_plugin_api::text!("settings.nav"),
+            icon: smelt_ui::IconName::Settings.path(),
             // 贴着窗口顶，顶上那条（拖窗口、给红黄绿按钮让位、标题）由页头画。
             draws_top_bar: true,
             instances: false,
             settings: None,
+            fills: Vec::new(),
             build: Rc::new(move |window, cx| -> Rc<dyn ViewHandle> {
                 let workspace = nav.clone();
                 Rc::new(cx.new(|cx| nav_view::SettingsNavView::new(workspace, window, cx)))
@@ -505,12 +537,13 @@ pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> Vec<ViewSpec> {
         },
         ViewSpec {
             name: "settings".into(),
-            title: "设置".into(),
-            icon: gpui_kit_assets::IconName::Settings.path(),
+            title: smelt_plugin_api::text!("settings.title"),
+            icon: smelt_ui::IconName::Settings.path(),
             // 贴着窗口顶，顶上那条（拖窗口、关闭按钮）由页头画。
             draws_top_bar: true,
             instances: false,
             settings: None,
+            fills: Vec::new(),
             build: Rc::new(|window, cx| -> Rc<dyn ViewHandle> {
                 Rc::new(cx.new(|cx| content_view::SettingsContentView::new(window, cx)))
             }),
@@ -521,11 +554,12 @@ pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> Vec<ViewSpec> {
         let build = page.build;
         ViewSpec {
             name: page.name.into(),
-            title: page.title.into(),
+            title: (page.title)(),
             icon: page.icon.path(),
             draws_top_bar: false,
             instances: false,
             settings: Some(page.entry()),
+            fills: Vec::new(),
             build: Rc::new(move |_, cx| build(&workspace, cx)),
         }
     }));

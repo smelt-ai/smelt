@@ -5,6 +5,7 @@
 //! `SettingsSection`（分组卡片）分节。
 
 use gpui::SharedString;
+use rust_i18n::t;
 use smelt_plugin_api::{SettingsGroup, ViewInfo};
 
 #[derive(Clone)]
@@ -19,7 +20,8 @@ pub struct SettingsNavLeaf {
 
 #[derive(Clone)]
 pub struct SettingsNavCategory {
-    pub title: &'static str,
+    /// 此刻语言下的组名。导航在视图登记变了、换了语言时重建。
+    pub title: SharedString,
     pub keywords: &'static [&'static str],
     pub children: Vec<SettingsNavLeaf>,
 }
@@ -29,10 +31,20 @@ pub struct SettingsNavCategory {
 /// 只取设置页。
 pub fn settings_nav(views: &[ViewInfo]) -> Vec<SettingsNavCategory> {
     let mut nav = vec![
-        category("通用", &["常规", "偏好设置"]),
-        category("Agent 与远程", &["运行时"]),
-        category("系统", &[]),
-        category("插件", &["扩展", "plugin"]),
+        // 关键词两种语言都写上（含另一种语言的组名），用哪种语言搜都找得到。
+        category(
+            t!("settings.group.general"),
+            &["通用", "常规", "偏好设置", "general", "preferences"],
+        ),
+        category(
+            t!("settings.group.agents"),
+            &["Agent 与远程", "运行时", "agents", "remote", "runtime"],
+        ),
+        category(t!("settings.group.system"), &["系统", "system"]),
+        category(
+            t!("settings.group.plugins"),
+            &["插件", "扩展", "plugin", "plugins", "extensions"],
+        ),
     ];
     // 宿主的页比插件晚登记（插件在开主窗口前装好），排序时不看登记先后。
     let host = |view: &&ViewInfo| super::is_host_view(&view.id);
@@ -61,9 +73,12 @@ pub fn settings_nav(views: &[ViewInfo]) -> Vec<SettingsNavCategory> {
     nav
 }
 
-fn category(title: &'static str, keywords: &'static [&'static str]) -> SettingsNavCategory {
+fn category(
+    title: std::borrow::Cow<'static, str>,
+    keywords: &'static [&'static str],
+) -> SettingsNavCategory {
     SettingsNavCategory {
-        title,
+        title: title.into(),
         keywords,
         children: Vec::new(),
     }
@@ -98,7 +113,7 @@ pub fn filter_settings_nav(nav: &[SettingsNavCategory], query: &str) -> Vec<Sett
                         .chain(child.keywords.iter().map(String::as_str));
                     category_hit
                         || matches_query(
-                            std::iter::once(category.title)
+                            std::iter::once(category.title.as_ref())
                                 .chain(category.keywords.iter().copied())
                                 .chain(child_values.clone()),
                             &terms,
@@ -119,7 +134,7 @@ pub fn filter_settings_nav(nav: &[SettingsNavCategory], query: &str) -> Vec<Sett
 
 fn category_matches_exact(category: &SettingsNavCategory, query: &str) -> bool {
     let query = query.trim().to_lowercase();
-    std::iter::once(category.title)
+    std::iter::once(category.title.as_ref())
         .chain(category.keywords.iter().copied())
         .any(|value| value.to_lowercase() == query)
 }
@@ -173,12 +188,12 @@ mod tests {
     use super::*;
 
     fn titles(nav: &[SettingsNavCategory]) -> Vec<&str> {
-        nav.iter().map(|category| category.title).collect()
+        nav.iter().map(|category| category.title.as_ref()).collect()
     }
 
     fn child_titles(nav: &[SettingsNavCategory], title: &str) -> Vec<String> {
         nav.iter()
-            .find(|category| category.title == title)
+            .find(|category| category.title.as_ref() == title)
             .map(|category| {
                 category
                     .children
@@ -204,6 +219,7 @@ mod tests {
             icon: "icons/bell.svg".into(),
             draws_top_bar: false,
             instances: false,
+            fills: Vec::new(),
             settings,
             build: std::rc::Rc::new(|_, _| unreachable!("侧栏不建页")),
         }
@@ -228,7 +244,7 @@ mod tests {
             .map(|page| {
                 view(
                     &format!("{}/{}", crate::host_views::HOST_OWNER, page.name),
-                    page.title,
+                    &(page.title)().get(),
                     Some(page.entry()),
                 )
             })
@@ -238,8 +254,11 @@ mod tests {
     #[test]
     fn without_plugins_only_the_host_pages_show() {
         let nav = settings_nav(&host_pages());
-        assert_eq!(titles(&nav), ["通用"]);
-        assert_eq!(child_titles(&nav, "通用"), ["外观", "快捷键", "面板插件"]);
+        assert_eq!(titles(&nav), ["General"]);
+        assert_eq!(
+            child_titles(&nav, "General"),
+            ["Appearance", "Shortcuts", "Panel Plugins"]
+        );
         assert!(settings_nav(&[]).is_empty(), "没有设置页就没有分组");
     }
 
@@ -254,11 +273,14 @@ mod tests {
         ));
         let nav = settings_nav(&views);
         let filtered = filter_settings_nav(&nav, "relay");
-        assert_eq!(titles(&filtered), ["Agent 与远程"]);
-        assert_eq!(child_titles(&filtered, "Agent 与远程"), ["远程"]);
+        assert_eq!(titles(&filtered), ["Agents & Remote"]);
+        assert_eq!(child_titles(&filtered, "Agents & Remote"), ["远程"]);
 
-        let by_group = filter_settings_nav(&nav, "通用");
-        assert_eq!(child_titles(&by_group, "通用").len(), 3);
+        // 组名用哪种语言搜都行。
+        for query in ["通用", "General"] {
+            let by_group = filter_settings_nav(&nav, query);
+            assert_eq!(child_titles(&by_group, "General").len(), 3);
+        }
     }
 
     #[test]
@@ -287,15 +309,15 @@ mod tests {
         ];
         pages.extend(host_pages());
         let nav = settings_nav(&pages);
-        assert_eq!(titles(&nav), ["通用", "系统", "插件"]);
+        assert_eq!(titles(&nav), ["General", "System", "Plugins"]);
         assert_eq!(
-            child_titles(&nav, "通用"),
-            ["外观", "快捷键", "面板插件", "提醒"]
+            child_titles(&nav, "General"),
+            ["Appearance", "Shortcuts", "Panel Plugins", "提醒"]
         );
-        assert_eq!(child_titles(&nav, "系统"), ["磁盘"]);
-        assert_eq!(child_titles(&nav, "插件"), ["行情"]);
+        assert_eq!(child_titles(&nav, "System"), ["磁盘"]);
+        assert_eq!(child_titles(&nav, "Plugins"), ["行情"]);
         // 一页都没有的组不露。
-        assert_eq!(titles(&settings_nav(&pages[..1])), ["通用"]);
+        assert_eq!(titles(&settings_nav(&pages[..1])), ["General"]);
 
         assert_eq!(matching_pages(&nav, "股票"), ["trader/prefs"]);
     }

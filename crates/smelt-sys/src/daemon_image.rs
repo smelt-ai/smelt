@@ -103,7 +103,9 @@ pub fn publish_image(dir: &Path, src: &Path) -> io::Result<PathBuf> {
 /// 内容是映像文件名。两边的目标都只写文件名，目录挪走仍然指向旁边的映像。
 pub fn retarget_symlink(dir: &Path, link_name: &str, image: &Path) -> io::Result<()> {
     if is_immutable_image_name(link_name) {
-        return Err(io::Error::other(format!("不能改写映像文件：{link_name}")));
+        return Err(io::Error::other(format!(
+            "refusing to overwrite an image file: {link_name}"
+        )));
     }
     let image_name = image_name_in_dir(dir, image)?;
     let tmp = dir.join(format!(
@@ -126,7 +128,10 @@ pub fn retarget_symlink(dir: &Path, link_name: &str, image: &Path) -> io::Result
         #[cfg(not(any(unix, windows)))]
         {
             let _ = &image_name;
-            Err(io::Error::new(io::ErrorKind::Unsupported, "不能发布启动名"))
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "can't publish the launch name on this platform",
+            ))
         }
     })();
     if let Err(error) = write_tmp {
@@ -177,18 +182,26 @@ pub fn pending_image(dir: &Path) -> Option<PathBuf> {
 /// 交接提交之后把启动名拨到这次 exec 的映像，并拆掉 pending 链接。
 /// 不删除 exec 的那个文件：正在跑的进程还映射着它。
 pub fn retarget_launch_after_commit(executed: &Path) -> io::Result<PathBuf> {
-    let dir = executed
-        .parent()
-        .ok_or_else(|| io::Error::other(format!("可执行文件没有目录：{}", executed.display())))?;
+    let dir = executed.parent().ok_or_else(|| {
+        io::Error::other(format!(
+            "the executable has no directory: {}",
+            executed.display()
+        ))
+    })?;
     let name = executed
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| io::Error::other(format!("可执行文件没有文件名：{}", executed.display())))?;
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "the executable has no file name: {}",
+                executed.display()
+            ))
+        })?;
     let image = if is_immutable_image_name(name) {
         let meta = fs::symlink_metadata(executed)?;
         if !meta.is_file() {
             return Err(io::Error::other(format!(
-                "映像不是普通文件：{}",
+                "the image isn't a regular file: {}",
                 executed.display()
             )));
         }
@@ -209,13 +222,13 @@ fn existing_image(dest: &Path, fingerprint: &str) -> io::Result<Option<PathBuf>>
                 Ok(Some(dest.to_path_buf()))
             } else {
                 Err(io::Error::other(format!(
-                    "映像名与内容不一致，拒绝覆盖：{}",
+                    "the image name doesn't match its contents; refusing to overwrite: {}",
                     dest.display()
                 )))
             }
         }
         Ok(_) => Err(io::Error::other(format!(
-            "映像路径不是普通文件，拒绝覆盖：{}",
+            "the image path isn't a regular file; refusing to overwrite: {}",
             dest.display()
         ))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -270,19 +283,26 @@ fn read_image_pointer(dir: &Path, name: &str) -> Option<PathBuf> {
 fn image_name_in_dir(dir: &Path, image: &Path) -> io::Result<std::ffi::OsString> {
     let name = image
         .file_name()
-        .ok_or_else(|| io::Error::other(format!("映像没有文件名：{}", image.display())))?
+        .ok_or_else(|| {
+            io::Error::other(format!("the image has no file name: {}", image.display()))
+        })?
         .to_os_string();
-    let name_str = name
-        .to_str()
-        .ok_or_else(|| io::Error::other(format!("映像文件名不是文本：{}", image.display())))?;
+    let name_str = name.to_str().ok_or_else(|| {
+        io::Error::other(format!(
+            "the image file name isn't text: {}",
+            image.display()
+        ))
+    })?;
     if !is_immutable_image_name(name_str) {
         return Err(io::Error::other(format!(
-            "只能把链接指向 {IMAGE_PREFIX}<指纹>：{name_str}"
+            "the link can only point to {IMAGE_PREFIX}<fingerprint>: {name_str}"
         )));
     }
     let expected = dir.join(&name);
     if !same_regular_file(image, &expected) {
-        return Err(io::Error::other("映像和启动名必须在同一目录"));
+        return Err(io::Error::other(
+            "the image and the launch name must be in the same directory",
+        ));
     }
     Ok(name)
 }
@@ -653,7 +673,10 @@ mod tests {
         let inode = fs::metadata(&image).unwrap().ino();
 
         let error = publish_image(&dir, &src).expect_err("内容对不上时必须拒绝覆盖");
-        assert!(error.to_string().contains("拒绝覆盖"), "实际错误：{error}");
+        assert!(
+            error.to_string().contains("refusing to overwrite"),
+            "实际错误：{error}"
+        );
         assert_eq!(fs::read(&image).unwrap(), b"not-the-same-bytes");
         #[cfg(unix)]
         assert_eq!(fs::metadata(&image).unwrap().ino(), inode);
@@ -725,7 +748,10 @@ mod tests {
         let image = publish_image(&other, &src).unwrap();
 
         let error = retarget_launch_symlink(&dir, &image).expect_err("不能链到别的目录");
-        assert!(error.to_string().contains("同一目录"), "实际错误：{error}");
+        assert!(
+            error.to_string().contains("same directory"),
+            "实际错误：{error}"
+        );
         fs::remove_dir_all(dir).unwrap();
         fs::remove_dir_all(other).unwrap();
     }

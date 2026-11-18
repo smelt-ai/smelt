@@ -216,6 +216,7 @@ pub const LOG_LIMIT: usize = 500;
 use crate::panel::git_call;
 use crate::{GitPanel, ProjectRef};
 use gpui::{AppContext, Context};
+use rust_i18n::t;
 
 impl GitPanel {
     /// 进「日志」页时确保数据在（换了仓库也重拉）。可见数据刷新调用，必须便宜：
@@ -334,7 +335,7 @@ impl GitPanel {
                             )
                         })
                         .map(|result| result.text)
-                        .unwrap_or_else(|err| format!("无法执行 git show：{err}"));
+                        .unwrap_or_else(|err| t!("log.show_failed", error = err).into_owned());
                     let files = smelt_plugin_api::ui::diff::DiffFile::parse(&text)
                         .map_err(|err| crate::panel::diff_parse_failure(&text, &err.to_string()));
                     (text, files)

@@ -10,6 +10,8 @@ use crate::acp_chat::{AcpEntry, AcpImage as PromptImage};
 use crate::acp_conn::{ModelState, SessionConfigState};
 use crate::daemon_state::DaemonPhase;
 
+pub use smelt_event_protocol::{ConversationEndReason, SessionNote, SignInAgent, TurnFailure};
+
 /// ACP 连接结束的稳定分类。展示文案留在 `end_reason`，控制流只能依据
 /// 这里的结构化原因，避免改文案或本地化后悄悄改变重连/失败语义。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -83,7 +85,173 @@ pub struct AcpNoticeView {
     /// 旧快照没有这个字段，按普通提示读。
     #[serde(default)]
     pub kind: AcpNoticeKind,
+    /// 有 `note` 时是运行时按英文说的同一句，给旧客户端兜底；没有时是智能体自己的原话。
     pub text: String,
+    /// 运行时自己说的提示的种类，客户端按语言说。智能体的原话没有它。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<RuntimeNote>,
+}
+
+impl AcpNoticeView {
+    /// 给人看的那句：有种类按当前语言说，认不出的种类和智能体的原话给 `text`。
+    pub fn display_text(&self) -> String {
+        self.note
+            .as_ref()
+            .and_then(RuntimeNote::text)
+            .unwrap_or_else(|| self.text.clone())
+    }
+}
+
+/// 运行时自己给对话发的一次性提示（不是智能体说的）。`detail` 是底层原话。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeNote {
+    /// 智能体不支持运行中插入消息。
+    MidTurnInputUnsupported,
+    /// 智能体不支持原生消息队列。
+    QueueUnsupported,
+    /// 智能体不支持压缩上下文。
+    CompactUnsupported,
+    /// 智能体不支持回退消息。
+    RewindUnsupported,
+    /// 当前协议不支持 /reload，不会发给模型。
+    ReloadUnsupported,
+    /// 回合进行中，结束后再 /shake。
+    ShakeWhileBusy,
+    /// 会话宿主还没就绪，丢掉了别的对话发来的消息。
+    PeerMessageDropped,
+    SteerFailed {
+        detail: String,
+    },
+    FollowUpFailed {
+        detail: String,
+    },
+    ClearQueueFailed {
+        detail: String,
+    },
+    CompactFailed {
+        detail: String,
+    },
+    StopTaskFailed {
+        detail: String,
+    },
+    StopSubagentFailed {
+        detail: String,
+    },
+    /// 回合还在运行，不能回退。
+    RewindWhileBusy,
+    /// 已有一次回退在进行中。
+    RewindInProgress,
+    /// 智能体的分支上找不到要回退到的消息。
+    RewindTargetMissing,
+    /// Pi 扩展取消了这次回退。
+    RewindCancelled,
+    RewindFailed {
+        detail: String,
+    },
+    /// Pi 扩展报错；`detail` 是扩展的原话，可能为空。
+    ExtensionFailed {
+        detail: String,
+    },
+    /// 智能体没接受这次配置修改。
+    ConfigUpdateFailed {
+        detail: String,
+    },
+    /// 这项配置不是开关。
+    ConfigNotBoolean {
+        config: String,
+    },
+    /// 这项配置不接受这个值。
+    ConfigValueUnsupported {
+        config: String,
+        value: String,
+    },
+    /// 没有脚本工具可开。
+    NoScriptTools,
+    /// 模型值格式不对。
+    InvalidModelValue,
+    /// 脚本工具没有在下一轮生效。
+    ScriptToolsNotApplied,
+    /// 比读的一方新的种类。
+    #[serde(other)]
+    Other,
+}
+
+impl RuntimeNote {
+    /// 按当前界面语言说；[`RuntimeNote::Other`] 没有自己的话，给 `None`。
+    pub fn text(&self) -> Option<String> {
+        self.text_in(&rust_i18n::locale())
+    }
+
+    /// 按指定语言说。运行时用 `en` 填兜底的 `text`。
+    pub fn text_in(&self, locale: &str) -> Option<String> {
+        use rust_i18n::t;
+        let l = locale;
+        let text = match self {
+            Self::MidTurnInputUnsupported => t!("note.mid_turn_input_unsupported", locale = l),
+            Self::QueueUnsupported => t!("note.queue_unsupported", locale = l),
+            Self::CompactUnsupported => t!("note.compact_unsupported", locale = l),
+            Self::RewindUnsupported => t!("note.rewind_unsupported", locale = l),
+            Self::ReloadUnsupported => t!("note.reload_unsupported", locale = l),
+            Self::ShakeWhileBusy => t!("note.shake_while_busy", locale = l),
+            Self::PeerMessageDropped => t!("note.peer_message_dropped", locale = l),
+            Self::SteerFailed { detail } => t!("note.steer_failed", locale = l, detail = detail),
+            Self::FollowUpFailed { detail } => {
+                t!("note.follow_up_failed", locale = l, detail = detail)
+            }
+            Self::ClearQueueFailed { detail } => {
+                t!("note.clear_queue_failed", locale = l, detail = detail)
+            }
+            Self::CompactFailed { detail } => {
+                t!("note.compact_failed", locale = l, detail = detail)
+            }
+            Self::StopTaskFailed { detail } => {
+                t!("note.stop_task_failed", locale = l, detail = detail)
+            }
+            Self::StopSubagentFailed { detail } => {
+                t!("note.stop_subagent_failed", locale = l, detail = detail)
+            }
+            Self::RewindWhileBusy => t!("note.rewind_while_busy", locale = l),
+            Self::RewindInProgress => t!("note.rewind_in_progress", locale = l),
+            Self::RewindTargetMissing => t!("note.rewind_target_missing", locale = l),
+            Self::RewindCancelled => t!("note.rewind_cancelled", locale = l),
+            Self::RewindFailed { detail } => {
+                t!("note.rewind_failed", locale = l, detail = detail)
+            }
+            Self::ExtensionFailed { detail } if detail.trim().is_empty() => {
+                t!("note.extension_failed", locale = l)
+            }
+            Self::ExtensionFailed { detail } => {
+                t!(
+                    "note.extension_failed_with_detail",
+                    locale = l,
+                    detail = detail
+                )
+            }
+            Self::ConfigUpdateFailed { detail } => {
+                t!("note.config_update_failed", locale = l, detail = detail)
+            }
+            Self::ConfigNotBoolean { config } => {
+                t!("note.config_not_boolean", locale = l, config = config)
+            }
+            Self::ConfigValueUnsupported { config, value } => t!(
+                "note.config_value_unsupported",
+                locale = l,
+                config = config,
+                value = value
+            ),
+            Self::NoScriptTools => t!("note.no_script_tools", locale = l),
+            Self::InvalidModelValue => t!("note.invalid_model_value", locale = l),
+            Self::ScriptToolsNotApplied => t!("note.script_tools_not_applied", locale = l),
+            Self::Other => return None,
+        };
+        Some(text.into_owned())
+    }
+
+    /// 运行时填进 `text` 的英文兜底。
+    pub fn fallback_text(&self) -> String {
+        self.text_in("en").unwrap_or_default()
+    }
 }
 
 /// 这一轮里智能体写下或改过的记忆，显示在输入框上方，可以就地查看、采纳、删除。
@@ -111,6 +279,15 @@ pub struct MemoryChangeView {
     pub pending_reason: Option<String>,
     /// 去掉 frontmatter 的正文，展开时看；过长时截断。
     pub body: String,
+}
+
+impl MemoryChangeView {
+    /// 待确认原因给人看的话。
+    pub fn pending_reason_text(&self) -> Option<String> {
+        self.pending_reason
+            .as_deref()
+            .map(crate::agent_memory::pending_reason_text)
+    }
 }
 
 /// 提示的来由。要据此动作的消费方（撤掉没生效的配置勾选、停止等待配置确认）
@@ -161,16 +338,16 @@ impl AcpTurnOutcome {
         matches!(self, Self::Succeeded)
     }
 
-    /// 需要作为失败提醒展示的稳定文案。用户主动取消是正常控制动作，不产生
-    /// “需要处理”角标；其余非成功终点都应明确告诉用户为什么没有正常完成。
-    pub fn failure_message(self) -> Option<&'static str> {
+    /// 要作为失败提醒告诉用户的原因，各端按自己的语言说（[`TurnFailure::text`]）。用户主动
+    /// 取消是正常控制动作，不产生「需要处理」角标；其余非成功终点都有原因。
+    pub fn failure(self) -> Option<TurnFailure> {
         match self {
             Self::Succeeded | Self::Cancelled => None,
-            Self::Interrupted => Some("本轮回复已中断，重启后可继续"),
-            Self::MaxTokens => Some("已达到本轮最大令牌数"),
-            Self::MaxTurnRequests => Some("已达到本轮最大请求数"),
-            Self::Refused => Some("Agent 拒绝继续处理"),
-            Self::Failed => Some("回合未正常完成"),
+            Self::Interrupted => Some(TurnFailure::Interrupted),
+            Self::MaxTokens => Some(TurnFailure::MaxTokens),
+            Self::MaxTurnRequests => Some(TurnFailure::MaxTurnRequests),
+            Self::Refused => Some(TurnFailure::Refused),
+            Self::Failed => Some(TurnFailure::Failed),
         }
     }
 }
@@ -240,7 +417,22 @@ pub enum ApprovalDetailsView {
 /// `submit_elicitation` 收到 `AcpUserAction::ElicitationSubmit` 时才做的事。
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ElicitOptionView {
+    /// 智能体给的选项名；开关字段是运行时补的英文兜底。
     pub label: String,
+    /// 开关字段的这一项是「是」还是「否」，客户端按语言说。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<bool>,
+}
+
+impl ElicitOptionView {
+    /// 给人看的选项名：开关按当前语言说是 / 否，别的原样。
+    pub fn display_label(&self) -> String {
+        match self.flag {
+            Some(true) => rust_i18n::t!("choice.yes").into_owned(),
+            Some(false) => rust_i18n::t!("choice.no").into_owned(),
+            None => self.label.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -351,18 +543,6 @@ pub enum BackgroundTaskStatus {
     TimedOut,
 }
 
-impl BackgroundTaskStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Running => "进行中",
-            Self::Completed => "完成",
-            Self::Failed => "失败",
-            Self::Stopped => "已停止",
-            Self::TimedOut => "超时",
-        }
-    }
-}
-
 /// Pi 子智能体的展示态。一次 `subagent` 工具调用（派发）可以有几个：并行的每一个、
 /// 串联的每一步。会话宿主每次变化都推全量；只覆盖本次宿主生命期，重启后的状态从
 /// 父会话记录里恢复。
@@ -405,16 +585,6 @@ pub enum SubagentStatus {
 }
 
 impl SubagentStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Running => "运行中",
-            Self::Completed => "完成",
-            Self::Failed => "失败",
-            Self::Stopped => "已停止",
-            Self::Interrupted => "已中断",
-        }
-    }
-
     pub fn is_running(self) -> bool {
         matches!(self, Self::Running)
     }
@@ -481,24 +651,25 @@ impl PeerMessageKind {
         }
     }
 
-    /// 发送那一头的名词：「已发任务给」。
+    /// 运行时写给智能体看的名词（退信里「你发的 task 没送到」），英文。
     pub fn label(self) -> &'static str {
         match self {
-            Self::Message => "消息",
-            Self::Task => "任务",
-            Self::Completion => "结果",
-            Self::Bounce => "退信",
+            Self::Message => "message",
+            Self::Task => "task",
+            Self::Completion => "result",
+            Self::Bounce => "bounce",
         }
     }
 
-    /// 收到时事件行里跟在对方名字后面的那半句：「〈A〉发来任务」「〈B〉没收到你的消息」。
-    pub fn received(self) -> &'static str {
+    /// 收到时的事件行，按当前界面语言说：「〈A〉发来任务」「〈B〉没收到你的消息」。
+    pub fn received(self, from: &str) -> String {
         match self {
-            Self::Message => "发来消息",
-            Self::Task => "发来任务",
-            Self::Completion => "交回结果",
-            Self::Bounce => "没收到你的消息",
+            Self::Message => rust_i18n::t!("peer.received.message", from = from),
+            Self::Task => rust_i18n::t!("peer.received.task", from = from),
+            Self::Completion => rust_i18n::t!("peer.received.completion", from = from),
+            Self::Bounce => rust_i18n::t!("peer.received.bounce", from = from),
         }
+        .into_owned()
     }
 }
 
@@ -874,6 +1045,17 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// `acp_debug` 的回包：会话当前的工具参数表和 runtime debug。只有调试视图要，
+/// 由它按需来拉；桌面的会话链路不带（`include_debug: false`），省得每个工具调用都把
+/// 整张表重发一遍。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConversationDebug {
+    #[serde(default)]
+    pub tool_debug: BTreeMap<String, ToolCallDebug>,
+    #[serde(default)]
+    pub runtime_debug: RuntimeDebug,
+}
+
 /// smeltd → GUI 的完整快照：`acp_watch`/`acp_open` 接上时发一份，之后每次
 /// `apply_event` 有实质变化再发一份。entries 使用尾片增量；大体积 runtime debug
 /// sidecar 只在变更帧、显式全量恢复和初始 attach 时携带，避免完整模型历史随每个
@@ -906,10 +1088,13 @@ pub struct ConversationSnapshot {
     pub runtime_debug: Option<RuntimeDebug>,
     /// ACP 当前活动，与守护相位同一套枚举。
     pub phase: DaemonPhase,
-    /// `phase == Dead` 时的展示文案；活会话为空。
+    /// `phase == Dead` 时：有 `end_code` 是底层报错的细节，没有是整句（智能体原话、旧快照）。
+    /// 给人看用 [`ConversationSnapshot::end_text`]。活会话为空。
     pub end_reason: String,
     /// `phase == Dead` 时的机器可读原因；旧快照缺失时为 Unknown。
     pub end_kind: AcpEndKind,
+    /// 运行时说的结束原因种类，客户端按语言说。
+    pub end_code: Option<ConversationEndReason>,
     /// daemon 已经受理过的外部投递 id。重连方可据此重放同一个请求而不重复执行。
     pub accepted_delivery_ids: BTreeSet<String>,
     /// 当前 provider 回合对应的外部投递；普通用户 prompt 为 None。
@@ -1027,6 +1212,21 @@ pub struct ConversationSnapshot {
     pub envelope_omitted: bool,
 }
 
+impl ConversationSnapshot {
+    /// 给人看的结束原因：有种类按当前语言说再接上细节，没有种类原样给 `end_reason`。
+    pub fn end_text(&self) -> String {
+        end_text(self.end_code.as_ref(), &self.end_reason)
+    }
+}
+
+/// 结束原因种类加细节说成一句；没有种类时细节就是整句。
+pub fn end_text(code: Option<&ConversationEndReason>, detail: &str) -> String {
+    match code {
+        Some(code) => code.describe(detail),
+        None => detail.to_string(),
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ConversationSnapshotDe {
     #[serde(default)]
@@ -1049,6 +1249,8 @@ pub struct ConversationSnapshotDe {
     pub end_reason: String,
     #[serde(default)]
     pub end_kind: AcpEndKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_code: Option<ConversationEndReason>,
     #[serde(default)]
     pub accepted_delivery_ids: BTreeSet<String>,
     #[serde(default)]
@@ -1144,6 +1346,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
                 de.end_reason
             },
             end_kind: de.end_kind,
+            end_code: de.end_code,
             accepted_delivery_ids: de.accepted_delivery_ids,
             active_delivery_id: de.active_delivery_id,
             completed_delivery_id: de.completed_delivery_id,
@@ -1208,6 +1411,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             },
             end_reason: snap.end_reason,
             end_kind: snap.end_kind,
+            end_code: snap.end_code,
             accepted_delivery_ids: snap.accepted_delivery_ids,
             active_delivery_id: snap.active_delivery_id,
             completed_delivery_id: snap.completed_delivery_id,
@@ -1497,6 +1701,7 @@ pub struct SessionLive {
     pub phase: DaemonPhase,
     pub end_reason: String,
     pub end_kind: AcpEndKind,
+    pub end_code: Option<ConversationEndReason>,
     pub acp_session_id: Option<String>,
     pub history_session_id: Option<String>,
     pub session_title: Option<String>,
@@ -1513,6 +1718,7 @@ impl SessionLive {
             phase: snap.phase,
             end_reason: snap.end_reason.clone(),
             end_kind: snap.end_kind,
+            end_code: snap.end_code.clone(),
             acp_session_id: snap.acp_session_id.clone(),
             history_session_id: snap.history_session_id.clone(),
             session_title: snap.session_title.clone(),
@@ -1539,10 +1745,14 @@ impl SessionLive {
             .get("end_kind")
             .and_then(|kind| serde_json::from_value(kind.clone()).ok())
             .unwrap_or_default();
+        let end_code = value
+            .get("end_code")
+            .and_then(|code| serde_json::from_value(code.clone()).ok());
         Ok(Self {
             phase: decoded.phase,
             end_reason,
             end_kind,
+            end_code,
             acp_session_id: json_string(value, "acp_session_id"),
             history_session_id: json_string(value, "history_session_id"),
             session_title: json_string(value, "session_title"),
@@ -1567,6 +1777,8 @@ struct SessionLiveDe {
     #[serde(default)]
     end_kind: AcpEndKind,
     #[serde(default)]
+    end_code: Option<ConversationEndReason>,
+    #[serde(default)]
     acp_session_id: Option<String>,
     #[serde(default)]
     history_session_id: Option<String>,
@@ -1586,6 +1798,7 @@ impl From<SessionLiveDe> for SessionLive {
             phase: value.phase,
             end_reason: value.end_reason,
             end_kind: value.end_kind,
+            end_code: value.end_code,
             acp_session_id: value.acp_session_id,
             history_session_id: value.history_session_id,
             session_title: value.session_title,
@@ -1631,10 +1844,15 @@ impl AcpSnapshotFrame<'_> {
 impl serde::Serialize for SessionLive {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("SessionLive", 9)?;
+        let mut state = serializer.serialize_struct("SessionLive", 10)?;
         state.serialize_field("phase", &self.phase)?;
         state.serialize_field("end_reason", &self.end_reason)?;
         state.serialize_field("end_kind", &self.end_kind)?;
+        if let Some(end_code) = &self.end_code {
+            state.serialize_field("end_code", end_code)?;
+        } else {
+            state.skip_field("end_code")?;
+        }
         state.serialize_field("acp_session_id", &self.acp_session_id)?;
         state.serialize_field("history_session_id", &self.history_session_id)?;
         state.serialize_field("session_title", &self.session_title)?;

@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::plugins::{InstalledPlugin, PluginSource};
+use rust_i18n::t;
 use smelt_plugin_api::HostEvent;
 use smelt_ui::kit::{TYPE, TypeStyled as _};
 use smelt_ui::{SettingsPage, SettingsRow as Row, SettingsSection as Section};
@@ -57,7 +58,7 @@ impl PanelPluginsPage {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("导入插件".into()),
+            prompt: Some(t!("plugins.import_prompt").into_owned().into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -74,7 +75,11 @@ impl PanelPluginsPage {
                 .spawn(async move { crate::plugins::import(&source) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.finish_change(result.map(|name| format!("已导入「{name}」")), window, cx)
+                this.finish_change(
+                    result.map(|name| t!("plugins.imported", name = name).into_owned()),
+                    window,
+                    cx,
+                )
             });
         })
         .detach();
@@ -101,7 +106,7 @@ impl PanelPluginsPage {
             .find(|plugin| plugin.id == id && plugin.source == PluginSource::User)
             .cloned()
         else {
-            self.error = Some("找不到这个插件，可能已经删掉了".to_string());
+            self.error = Some(t!("plugins.not_found").into_owned());
             cx.notify();
             return;
         };
@@ -116,7 +121,7 @@ impl PanelPluginsPage {
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.finish_change(
-                    result.map(|()| format!("已删除「{}」，原文件在回收目录里", plugin.name)),
+                    result.map(|()| t!("plugins.deleted", name = plugin.name).into_owned()),
                     window,
                     cx,
                 )
@@ -131,7 +136,7 @@ impl PanelPluginsPage {
             return;
         };
         if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.error = Some(format!("创建插件目录失败：{error}"));
+            self.error = Some(t!("plugins.create_dir_failed", error = error).into_owned());
             cx.notify();
             return;
         }
@@ -181,21 +186,19 @@ impl PanelPluginsPage {
     /// 页面的主体：已装的插件。导入、打开目录、重新加载是对这张列表的操作，放在它的第一格。
     fn list_section(&self, cx: &Context<Self>) -> Section {
         let title = match self.plugins.len() {
-            0 => "已装插件".to_string(),
-            count => format!("已装 {count} 个"),
+            0 => t!("plugins.installed").into_owned(),
+            count => t!("plugins.installed_count", count = count).into_owned(),
         };
         let section = Section::new()
             .title(title)
-            .description(
-                "每个插件是一个视图：摆进工作台布局的是面板，没摆进去的打开时显示在主区域。",
-            )
+            .description(t!("plugins.list_hint"))
             .child(self.toolbar_cell(cx));
         if self.plugins.is_empty() {
             return section.child(
                 div()
                     .type_style(TYPE.ui)
                     .text_color(rgb(crate::ui_theme::muted()))
-                    .child("还没有插件。"),
+                    .child(t!("plugins.empty")),
             );
         }
         section.children(self.plugins.iter().map(|plugin| {
@@ -212,15 +215,13 @@ impl PanelPluginsPage {
             .map(|dir| dir.display().to_string())
             .unwrap_or_default();
         let busy = self.busy;
-        let row = Row::new("导入")
-            .description(format!(
-                "选一个含 gpui-shell.json 的目录，复制进 {user_dir}；改了脚本点「重新加载」，不用重启。"
-            ))
+        let row = Row::new(t!("plugins.import"))
+            .description(t!("plugins.import_hint", dir = user_dir))
             .child(
                 Button::new("reload-panel-plugins")
                     .quiet()
                     .small()
-                    .label("重新加载")
+                    .label(t!("plugins.reload"))
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
             )
@@ -228,13 +229,13 @@ impl PanelPluginsPage {
                 Button::new("open-panel-plugin-dir")
                     .quiet()
                     .small()
-                    .label("打开插件目录")
+                    .label(t!("plugins.open_dir"))
                     .on_click(cx.listener(|this, _, _, cx| this.open_dir(cx))),
             )
             .child(
                 Button::new("import-panel-plugin")
                     .small()
-                    .label("导入插件…")
+                    .label(t!("plugins.import_button"))
                     .loading(busy)
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
@@ -243,10 +244,7 @@ impl PanelPluginsPage {
         let warning = div()
             .type_style(TYPE.text_xsmall)
             .text_color(rgb(crate::ui_theme::need()))
-            .child(
-                "插件和 Smelt 一样能读写任意文件、运行任意命令，只导入你信任的。\
-                 删除的插件挪进 ~/.smelt/trash/plugins，需要时能找回。",
-            );
+            .child(SharedString::from(t!("plugins.trust_warning")));
         div().flex().flex_col().gap_2().child(row).child(warning)
     }
 
@@ -258,16 +256,25 @@ impl PanelPluginsPage {
         let mut detail = vec![if plugin.version.is_empty() {
             plugin.id.clone()
         } else {
-            format!("{} · 版本 {}", plugin.id, plugin.version)
+            t!(
+                "plugins.id_version",
+                id = plugin.id,
+                version = plugin.version
+            )
+            .into_owned()
         }];
         detail.push(match plugin.source {
-            PluginSource::User => format!("自己装的 · {}", plugin.root.display()),
-            PluginSource::Bundled => "smelt 自带，跟着 smelt 更新".to_string(),
+            PluginSource::User => {
+                t!("plugins.source_user", path = plugin.root.display()).into_owned()
+            }
+            PluginSource::Bundled => t!("plugins.source_bundled").into_owned(),
             #[cfg(debug_assertions)]
-            PluginSource::Repo => format!("开发构建从仓库加载 · {}", plugin.root.display()),
+            PluginSource::Repo => {
+                t!("plugins.source_repo", path = plugin.root.display()).into_owned()
+            }
         });
         if let Some(error) = &plugin.error {
-            detail.push(format!("加载失败：{error}"));
+            detail.push(t!("plugins.load_failed", error = error).into_owned());
         }
 
         let row = Row::new(plugin.name.clone()).description(detail.join("\n"));
@@ -280,7 +287,7 @@ impl PanelPluginsPage {
                 Button::new(format!("confirm-delete-panel-plugin-{id}"))
                     .danger()
                     .small()
-                    .label("确认删除")
+                    .label(t!("plugins.confirm_delete"))
                     .disabled(self.busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.confirm_delete(confirm_id.clone(), window, cx)
@@ -290,7 +297,7 @@ impl PanelPluginsPage {
                 Button::new(format!("cancel-delete-panel-plugin-{id}"))
                     .quiet()
                     .small()
-                    .label("取消")
+                    .label(t!("action.cancel"))
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_delete(cx))),
             )
         } else {
@@ -298,7 +305,7 @@ impl PanelPluginsPage {
                 Button::new(format!("delete-panel-plugin-{id}"))
                     .quiet()
                     .small()
-                    .label("删除…")
+                    .label(t!("plugins.delete"))
                     .disabled(self.busy)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.request_delete(id.clone(), cx)),
@@ -312,7 +319,7 @@ impl Render for PanelPluginsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         SettingsPage::new("settings-page:panel-plugins")
             .children(self.error.clone().map(|error| {
-                Section::new().title("上一次操作失败").child(
+                Section::new().title(t!("plugins.last_failed")).child(
                     div()
                         .type_style(TYPE.text_xsmall)
                         .text_color(rgb(crate::ui_theme::bad()))
@@ -330,20 +337,17 @@ impl smelt_plugin_api::PluginView for PanelPluginsPage {
 
 /// 给插件作者看的：示例和日志。放在最后，不跟装插件的人抢位置。
 fn authoring_section() -> Section {
-    Section::new().title("自己写插件").child(
-        Row::new("示例和教程")
-            .description(
-                "gpui-shell 脚本：JavaScript 描述界面，GPUI 原生绘制。console.log 和脚本错误写进日志，\
-                 带 [plugin] 标记。",
-            )
+    Section::new().title(t!("plugins.write")).child(
+        Row::new(t!("plugins.examples"))
+            .description(t!("plugins.write_hint"))
             .child(
                 Button::new("open-panel-plugin-log")
                     .quiet()
                     .small()
-                    .label("打开日志")
+                    .label(t!("plugins.open_log"))
                     .on_click(|_, _, _| {
                         let opened = smelt_sys::app_log::log_path()
-                            .ok_or_else(|| "找不到日志文件".to_string())
+                            .ok_or_else(|| t!("plugins.no_log").into_owned())
                             .and_then(|path| crate::system_open::open_in_system_text_editor(&path));
                         if let Err(error) = opened {
                             crate::status_item::notify_error(error);
@@ -353,7 +357,7 @@ fn authoring_section() -> Section {
             .child(
                 smelt_ui::Link::new("open-panel-plugin-demo", DEMO_URL)
                     .type_style(TYPE.ui)
-                    .child("示例和教程 ↗"),
+                    .child(t!("plugins.examples_link")),
             ),
     )
 }

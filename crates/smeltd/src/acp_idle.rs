@@ -601,12 +601,13 @@ pub(crate) fn copy_session_config(
     Ok(())
 }
 
-fn wait_for_acp_ready(sess: &AcpSession, timeout: Duration) -> Result<(), String> {
+pub(crate) fn wait_for_acp_ready(sess: &AcpSession, timeout: Duration) -> Result<(), String> {
     // `reduced` 每改一次醒一次，超时只是上限。
     let (reduced, _) = sess
         .reduced
         .wait_timeout_while(timeout, |reduced| acp_ready_outcome(reduced).is_none());
-    acp_ready_outcome(&reduced).unwrap_or_else(|| Err("会话恢复超时".to_string()))
+    acp_ready_outcome(&reduced)
+        .unwrap_or_else(|| Err("Timed out restoring the session".to_string()))
 }
 
 /// 恢复有没有结果。`None` 表示还在建连或重放历史。
@@ -616,9 +617,11 @@ pub(crate) fn acp_ready_outcome(
     use smelt_core::daemon_state::DaemonPhase;
     match reduced.phase {
         DaemonPhase::Dead => {
-            let reason = reduced.end_reason.trim();
+            let reason =
+                smelt_core::acp_session::end_text(reduced.end_code.as_ref(), &reduced.end_reason);
+            let reason = reason.trim();
             Some(Err(if reason.is_empty() {
-                "会话恢复失败".to_string()
+                "Couldn't restore the session".to_string()
             } else {
                 reason.to_string()
             }))

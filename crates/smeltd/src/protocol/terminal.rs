@@ -90,7 +90,7 @@ fn stop_terminal_session(
                 }
                 if !s.child.terminate_and_wait(TERMINAL_CHILD_REAP_TIMEOUT) {
                     return Err(format!(
-                        "无法确认终端进程 pid={} 已退出，请重试",
+                        "Couldn't confirm terminal process pid={} exited; try again",
                         s.child.pid()
                     ));
                 }
@@ -146,11 +146,13 @@ pub(super) fn handle_action<C: ClientSocket>(
             // Phase 检查和 PTY 写入必须属于同一个实例租约。
             let phase = sess.state.lock().unwrap().phase;
             if !matches!(phase, Phase::AwaitingApproval | Phase::WaitingForUser) {
-                return Err("agent 现在不是在等你，稍后再试".to_string());
+                return Err(
+                    "The agent isn't waiting for you right now; try again later".to_string()
+                );
             }
             write_session_input(sess, &payload).map_err(|error| error.to_string())
         })
-        .unwrap_or_else(|| Err("会话不存在".to_string()));
+        .unwrap_or_else(|| Err("No such session".to_string()));
     match write_result {
         Ok(()) => {
             // 手机上批准、回复就是看过了。
@@ -182,7 +184,7 @@ pub(super) fn handle_raw_input<C: ClientSocket>(
     let Some(payload) = input_payload(v) else {
         let _ = smelt_runtime_client::protocol::write_json_line(
             &mut c,
-            &serde_json::json!({ "ok": false, "err": "需要非空 data" }),
+            &serde_json::json!({ "ok": false, "err": "data can't be empty" }),
         );
         return;
     };
@@ -190,7 +192,7 @@ pub(super) fn handle_raw_input<C: ClientSocket>(
         .with_live(id, |sess| {
             write_session_input(sess, &payload).map_err(|error| error.to_string())
         })
-        .unwrap_or_else(|| Err("会话不存在".to_string()));
+        .unwrap_or_else(|| Err("No such session".to_string()));
     match write_result {
         Ok(()) => {
             // 手机上批准、回复就是看过了。
@@ -221,7 +223,7 @@ pub(super) fn handle_resize<C: ClientSocket>(conn: C, v: &serde_json::Value, ses
     if cols == 0 || rows == 0 {
         let _ = smelt_runtime_client::protocol::write_json_line(
             &mut c,
-            &serde_json::json!({ "ok": false, "err": "cols/rows 必须 > 0" }),
+            &serde_json::json!({ "ok": false, "err": "cols/rows must be > 0" }),
         );
         return;
     }
@@ -232,7 +234,7 @@ pub(super) fn handle_resize<C: ClientSocket>(conn: C, v: &serde_json::Value, ses
     if resized.is_none() {
         let _ = smelt_runtime_client::protocol::write_json_line(
             &mut c,
-            &serde_json::json!({ "ok": false, "err": "会话不存在" }),
+            &serde_json::json!({ "ok": false, "err": "No such session" }),
         );
         return;
     }
@@ -383,12 +385,16 @@ pub(crate) fn open_terminal_runtime<R>(
     }
     let lifecycle = slot.lifecycle.lock().unwrap();
     if !sessions.is_current(&id, &slot) {
-        return Err("终端会话正在收尾，请重试".to_string().into());
+        return Err("The terminal session is shutting down; try again"
+            .to_string()
+            .into());
     }
 
     let existing = sessions.live_in_slot(&slot);
     if !created && existing.is_none() {
-        return Err("终端会话正在收尾，请重试".to_string().into());
+        return Err("The terminal session is shutting down; try again"
+            .to_string()
+            .into());
     }
     let mut pty_pump = None;
 
@@ -397,7 +403,7 @@ pub(crate) fn open_terminal_runtime<R>(
         Some(s) => s,
         None if !create_if_missing => {
             let _ = sessions.remove_if_same(&id, &slot);
-            return Err("终端会话不存在".to_string().into());
+            return Err("No such terminal session".to_string().into());
         }
         None => {
             let instance = next_session_instance();
@@ -431,7 +437,7 @@ pub(crate) fn open_terminal_runtime<R>(
                         "session",
                         &format!("会话 {id} 启动失败：{error:#}"),
                     );
-                    return Err(format!("终端启动失败：{error:#}").into());
+                    return Err(format!("Couldn't start the terminal: {error:#}").into());
                 }
             };
             smelt_core::app_log::info(
@@ -464,7 +470,9 @@ pub(crate) fn open_terminal_runtime<R>(
                         sess.child.pid()
                     ));
                 }
-                return Err("终端会话创建已取消".to_string().into());
+                return Err("Creating the terminal session was cancelled"
+                    .to_string()
+                    .into());
             }
             let opened_state = {
                 let mut state = sess.state.lock().unwrap();

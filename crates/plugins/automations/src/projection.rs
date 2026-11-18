@@ -339,6 +339,7 @@ mod tests {
             session_id: None,
             provider_session_id: None,
             output: None,
+            error_code: None,
             error: None,
             runtime_released_at: None,
         }

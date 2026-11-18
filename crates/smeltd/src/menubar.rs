@@ -89,7 +89,7 @@ fn target_class() -> Result<&'static Class, String> {
         return Ok(existing);
     }
     let mut decl = ClassDecl::new("SmeltdMenubarTarget", class!(NSObject))
-        .ok_or_else(|| "无法声明 SmeltdMenubarTarget".to_string())?;
+        .ok_or_else(|| "Couldn't declare SmeltdMenubarTarget".to_string())?;
     unsafe {
         decl.add_method(
             sel!(smeltdOpen:),
@@ -120,7 +120,7 @@ unsafe fn nsstring(s: &str) -> *mut Object {
 pub(crate) fn run_event_loop() -> Result<(), String> {
     // class! 宏在类不存在时直接 panic；先用 Class::get 探测。
     if Class::get("NSApplication").is_none() {
-        return Err("NSApplication 不可用（AppKit 未加载）".into());
+        return Err("NSApplication isn't available (AppKit isn't loaded)".into());
     }
     unsafe {
         let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
@@ -155,7 +155,7 @@ pub(crate) fn run_event_loop() -> Result<(), String> {
 
         let open_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
         let open_item: *mut Object = msg_send![open_item,
-            initWithTitle: nsstring("打开 smelt")
+            initWithTitle: nsstring("Open Smelt")
             action: sel!(smeltdOpen:)
             keyEquivalent: nsstring("")];
         let _: () = msg_send![open_item, setTarget: target];
@@ -167,7 +167,7 @@ pub(crate) fn run_event_loop() -> Result<(), String> {
 
         let quit_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
         let quit_item: *mut Object = msg_send![quit_item,
-            initWithTitle: nsstring("退出 smelt（结束所有会话）")
+            initWithTitle: nsstring("Quit Smelt (ends all sessions)")
             action: sel!(smeltdQuit:)
             keyEquivalent: nsstring("")];
         let _: () = msg_send![quit_item, setTarget: target];

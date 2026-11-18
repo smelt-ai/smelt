@@ -25,6 +25,7 @@
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
+use rust_i18n::t;
 use smelt_model::control_api::DevicePair;
 use smelt_model::remote_config::PairParams;
 use smelt_runtime_client::RuntimeClient;
@@ -538,7 +539,7 @@ impl ConnectionHub {
             inner.retire();
             let error = error(
                 SmeltErrorKind::Other,
-                format!("起不了连接线程：{spawn_error}"),
+                t!("error.thread_failed", error = spawn_error),
             );
             inner.publish(event(
                 ConnectionState::Disconnected,
@@ -590,7 +591,10 @@ fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
                         ConnectionState::Reconnecting,
                         Some(&session.target),
                         None,
-                        Some(error(SmeltErrorKind::Offline, "到运行时的连接断了")),
+                        Some(error(
+                            SmeltErrorKind::Offline,
+                            t!("error.connection_dropped"),
+                        )),
                     ));
                     true
                 }
@@ -702,7 +706,7 @@ fn is_terminal(kind: SmeltErrorKind) -> bool {
 }
 
 fn superseded() -> SmeltError {
-    error(SmeltErrorKind::Cancelled, "已切换到别的连接请求")
+    error(SmeltErrorKind::Cancelled, t!("error.superseded"))
 }
 
 fn describe(link: &Link, target: &Target, timeout: Duration) -> Result<RuntimeInfo, SmeltError> {
@@ -726,12 +730,9 @@ fn runtime_info(
         )
     })?;
     let daemon = described.daemon;
-    let runtime_id = daemon.runtime_id.ok_or_else(|| {
-        error(
-            SmeltErrorKind::RuntimeOutdated,
-            "这个运行时太旧，没有 runtime_id，先升级它",
-        )
-    })?;
+    let runtime_id = daemon
+        .runtime_id
+        .ok_or_else(|| error(SmeltErrorKind::RuntimeOutdated, t!("error.runtime_too_old")))?;
     Ok(RuntimeInfo {
         runtime_id,
         hostname: daemon.hostname,
@@ -746,15 +747,16 @@ fn runtime_info(
 /// `device.pair` 是配对码无效或过期。
 fn control_error(error: ControlClientError, denied: SmeltErrorKind) -> SmeltError {
     match error {
-        ControlClientError::Transport(message) => {
-            crate::api::error::error(SmeltErrorKind::Offline, format!("连不上运行时：{message}"))
-        }
+        ControlClientError::Transport(message) => crate::api::error::error(
+            SmeltErrorKind::Offline,
+            t!("error.unreachable", error = message),
+        ),
         ControlClientError::Protocol(error) => {
             let kind = match error.code {
                 ControlErrorCode::PermissionDenied => denied,
                 _ => crate::api::error::outdated_kind(&error).unwrap_or(SmeltErrorKind::Other),
             };
-            crate::api::error::error(kind, error.message)
+            crate::api::error::error(kind, error.text())
         }
         ControlClientError::InvalidRequest(message)
         | ControlClientError::InvalidResponse(message) => {

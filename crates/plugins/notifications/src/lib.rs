@@ -34,6 +34,8 @@ use attention::{Applied, Mirror};
 use sessions::Activate;
 use store::{Delivered, NotifyStore, Prefs};
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 /// 本插件的来源 id：库文件名、设置页、通知 id 都用它。
 pub(crate) const OWNER: &str = "smelt.notifications";
 
@@ -86,7 +88,10 @@ pub fn register(cx: &mut App) {
             }
             refresh_menubar(&on_event, cx);
         }
-        HostEvent::SessionsChanged | HostEvent::CommandsChanged => refresh_menubar(&on_event, cx),
+        // 菜单栏上的字是按当时的语言写好交给系统的。
+        HostEvent::SessionsChanged | HostEvent::CommandsChanged | HostEvent::LocaleChanged => {
+            refresh_menubar(&on_event, cx)
+        }
         HostEvent::ActiveContextChanged | HostEvent::WindowActivated => {
             mark_viewed_read(&on_event, cx);
         }
@@ -133,9 +138,10 @@ fn deliver(
         return;
     }
     let subtitle = match menubar::session_title(machine, &session.session_id, cx) {
-        Some(title) => format!("{} · {title}", alert.title),
-        None => alert.title,
+        Some(title) => format!("{} · {title}", alert.title_text()),
+        None => alert.title_text(),
     };
+    let body = alert.message_text();
     if session.unread.is_none() {
         // 运行时没记未读：没处标已读（自动化运行、命令行发的），发一次性的。
         run_logged(
@@ -144,7 +150,7 @@ fn deliver(
                 &Notify {
                     id: None,
                     subtitle,
-                    body: alert.message,
+                    body,
                     on_click: None,
                 },
                 cx,
@@ -156,7 +162,7 @@ fn deliver(
     let notify = Notify {
         id: Some(notification_id(&key)),
         subtitle,
-        body: alert.message,
+        body,
         on_click: Some(NotificationClick {
             command: sessions::ACTIVATE.id().to_string(),
             args: api::serde_json::to_value(Activate {

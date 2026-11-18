@@ -92,7 +92,7 @@ impl StagedUpdatePhase {
             "preparing" => Self::Preparing,
             "ready" => Self::Ready,
             "applying" => Self::Applying,
-            other => anyhow::bail!("认不出的更新阶段：{other}"),
+            other => anyhow::bail!("unrecognized update phase: {other}"),
         })
     }
 }
@@ -126,7 +126,7 @@ impl StagedUpdate {
     fn new(version: &str, url: &str) -> anyhow::Result<Self> {
         validate_download_url(url)?;
         if version.trim().is_empty() {
-            anyhow::bail!("更新作业缺少版本标识");
+            anyhow::bail!("the update job has no version");
         }
         let id = uuid::Uuid::new_v4().simple().to_string();
         let root = cache_root()?;
@@ -250,7 +250,7 @@ fn open_app_lock_at(dir: &Path, name: &str) -> anyhow::Result<File> {
         .write(true)
         .truncate(false)
         .open(dir.join(name))
-        .with_context(|| format!("打开 App 锁失败：{name}"))
+        .with_context(|| format!("couldn't open the app lock: {name}"))
 }
 
 fn try_flock(file: &File, operation: libc::c_int, context: &str) -> anyhow::Result<bool> {
@@ -266,12 +266,20 @@ fn try_flock(file: &File, operation: libc::c_int, context: &str) -> anyhow::Resu
 
 fn acquire_app_runtime_lease_at(dir: &Path) -> anyhow::Result<AppRuntimeLease> {
     let launch_gate = open_app_lock_at(dir, APP_LAUNCH_GATE_FILE)?;
-    if !try_flock(&launch_gate, libc::LOCK_SH, "获取 App launch gate 失败")? {
-        anyhow::bail!("App 正在由 installer 更新，请稍后重新打开");
+    if !try_flock(
+        &launch_gate,
+        libc::LOCK_SH,
+        "couldn't take the app launch gate",
+    )? {
+        anyhow::bail!("The installer is updating the app; reopen it in a moment");
     }
     let runtime = open_app_lock_at(dir, APP_RUNTIME_LOCK_FILE)?;
-    if !try_flock(&runtime, libc::LOCK_SH, "获取 App runtime 共享锁失败")? {
-        anyhow::bail!("App 正在由 installer 更新，请稍后重新打开");
+    if !try_flock(
+        &runtime,
+        libc::LOCK_SH,
+        "couldn't take the app runtime shared lock",
+    )? {
+        anyhow::bail!("The installer is updating the app; reopen it in a moment");
     }
     // runtime lease 已建立，installer 即使随后拿到 launch gate，也必须等本 GUI 退出。
     drop(launch_gate);
@@ -318,7 +326,7 @@ fn wait_exclusive_flock(
         });
     if started.is_err() {
         return Err(ExclusiveLockWait::Failed(anyhow::anyhow!(
-            "{context}：无法启动等待线程"
+            "{context}: couldn't start the wait thread"
         )));
     }
     match rx.recv_timeout(timeout) {
@@ -328,7 +336,7 @@ fn wait_exclusive_flock(
         )),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ExclusiveLockWait::TimedOut),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ExclusiveLockWait::Failed(
-            anyhow::anyhow!("{context}：等待线程在拿到锁之前退出"),
+            anyhow::anyhow!("{context}: the wait thread exited before taking the lock"),
         )),
     }
 }
@@ -339,27 +347,38 @@ fn acquire_installer_runtime_lease_at(
 ) -> anyhow::Result<AppRuntimeLease> {
     let started = Instant::now();
     let launch_gate = open_app_lock_at(dir, APP_LAUNCH_GATE_FILE)?;
-    let launch_gate =
-        match wait_exclusive_flock(launch_gate, timeout, "获取 App launch gate 独占锁失败") {
-            Ok(file) => file,
-            Err(ExclusiveLockWait::TimedOut) => {
-                anyhow::bail!("等待 App launch gate 超时，未提交 App 更新");
-            }
-            Err(ExclusiveLockWait::Failed(error)) => return Err(error),
-        };
+    let launch_gate = match wait_exclusive_flock(
+        launch_gate,
+        timeout,
+        "couldn't take the app launch gate exclusively",
+    ) {
+        Ok(file) => file,
+        Err(ExclusiveLockWait::TimedOut) => {
+            anyhow::bail!("timed out waiting for the app launch gate; the update wasn't committed");
+        }
+        Err(ExclusiveLockWait::Failed(error)) => return Err(error),
+    };
     // 从这里起新 GUI 无法进入；只需等待已经持有 runtime lease 的 GUI 全部退出。
     let remaining = timeout.saturating_sub(started.elapsed());
     if remaining.is_zero() {
-        anyhow::bail!("等待其它 Smelt GUI 退出超时，未提交 App 更新");
+        anyhow::bail!(
+            "timed out waiting for other Smelt windows to quit; the update wasn't committed"
+        );
     }
     let runtime = open_app_lock_at(dir, APP_RUNTIME_LOCK_FILE)?;
-    match wait_exclusive_flock(runtime, remaining, "获取 App runtime 独占锁失败") {
+    match wait_exclusive_flock(
+        runtime,
+        remaining,
+        "couldn't take the app runtime lock exclusively",
+    ) {
         Ok(runtime) => Ok(AppRuntimeLease {
             _runtime_file: runtime,
             _launch_gate_file: Some(launch_gate),
         }),
         Err(ExclusiveLockWait::TimedOut) => {
-            anyhow::bail!("等待其它 Smelt GUI 退出超时，未提交 App 更新");
+            anyhow::bail!(
+                "timed out waiting for other Smelt windows to quit; the update wasn't committed"
+            );
         }
         Err(ExclusiveLockWait::Failed(error)) => Err(error),
     }
@@ -372,7 +391,7 @@ fn acquire_installer_runtime_lease() -> anyhow::Result<AppRuntimeLease> {
 fn update_dir() -> anyhow::Result<PathBuf> {
     dirs::home_dir()
         .map(|home| home.join(UPDATE_STATE_DIR))
-        .ok_or_else(|| anyhow::anyhow!("找不到用户目录"))
+        .ok_or_else(|| anyhow::anyhow!("couldn't find the home directory"))
 }
 
 fn update_state_path() -> anyhow::Result<PathBuf> {
@@ -403,26 +422,31 @@ fn acquire_update_lock() -> anyhow::Result<UpdateFileLock> {
 fn update_state_store(path: &Path) -> anyhow::Result<smelt_client_store::ClientStore> {
     smelt_client_store::ClientStore::open(path)
         .map_err(anyhow::Error::msg)
-        .with_context(|| format!("打开更新状态库失败：{}", path.display()))
+        .with_context(|| {
+            format!(
+                "couldn't open the update state database: {}",
+                path.display()
+            )
+        })
 }
 
 fn load_update_state_locked(path: &Path) -> anyhow::Result<UpdateState> {
     let store = update_state_store(path)
-        .with_context(|| format!("读取更新状态失败：{}", path.display()))?;
+        .with_context(|| format!("couldn't read the update state: {}", path.display()))?;
     store
         .update_state()
         .map_err(anyhow::Error::msg)
         .and_then(UpdateState::from_record)
-        .with_context(|| format!("读取更新状态失败：{}", path.display()))
+        .with_context(|| format!("couldn't read the update state: {}", path.display()))
 }
 
 fn save_update_state_locked(path: &Path, state: &UpdateState) -> anyhow::Result<()> {
     let store = update_state_store(path)
-        .with_context(|| format!("保存更新状态失败：{}", path.display()))?;
+        .with_context(|| format!("couldn't save the update state: {}", path.display()))?;
     store
         .put_update_state(&state.to_record())
         .map_err(anyhow::Error::msg)
-        .with_context(|| format!("保存更新状态失败：{}", path.display()))
+        .with_context(|| format!("couldn't save the update state: {}", path.display()))
 }
 
 fn same_update(left: &StagedUpdate, right: &StagedUpdate) -> bool {
@@ -439,10 +463,10 @@ fn begin_staged_update_in_state(
     update: &StagedUpdate,
 ) -> anyhow::Result<()> {
     if update.phase != StagedUpdatePhase::Preparing {
-        anyhow::bail!("新更新作业必须从 Preparing 开始");
+        anyhow::bail!("a new update job must start in Preparing");
     }
     if state.staged.is_some() {
-        anyhow::bail!("已有另一条更新作业正在准备或等待安装");
+        anyhow::bail!("another update job is already preparing or waiting to install");
     }
     state.staged = Some(update.clone());
     Ok(())
@@ -453,13 +477,13 @@ fn promote_staged_update_in_state(
     update: &StagedUpdate,
 ) -> anyhow::Result<()> {
     if update.phase != StagedUpdatePhase::Ready || update.fingerprint.is_empty() {
-        anyhow::bail!("只有校验完成的更新作业才能进入 Ready");
+        anyhow::bail!("only a verified update job can become Ready");
     }
     let current = state
         .staged
         .as_ref()
         .filter(|current| same_update(current, update))
-        .ok_or_else(|| anyhow::anyhow!("更新作业已被恢复流程取消或替换"))?;
+        .ok_or_else(|| anyhow::anyhow!("the update job was cancelled or replaced by recovery"))?;
     match current.phase {
         StagedUpdatePhase::Preparing => {
             state.staged = Some(update.clone());
@@ -467,7 +491,7 @@ fn promote_staged_update_in_state(
         }
         StagedUpdatePhase::Ready if current == update => Ok(()),
         StagedUpdatePhase::Ready | StagedUpdatePhase::Applying => {
-            anyhow::bail!("拒绝由迟到的下载回调回退更新事务")
+            anyhow::bail!("refusing to roll back the update from a late download callback")
         }
     }
 }
@@ -490,17 +514,19 @@ fn staged_update_to_replace(
     expected: &StagedUpdate,
 ) -> anyhow::Result<StagedUpdate> {
     if expected.phase != StagedUpdatePhase::Ready {
-        anyhow::bail!("暂存的更新作业不在 Ready 阶段");
+        anyhow::bail!("the staged update job isn't Ready");
     }
     let pending = state
         .staged
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("暂存的更新作业已不存在"))?;
+        .ok_or_else(|| anyhow::anyhow!("the staged update job no longer exists"))?;
     if !same_update(&pending, expected) {
-        anyhow::bail!("待安装更新已被另一条作业替换");
+        anyhow::bail!("the pending update was replaced by another job");
     }
     if pending.phase != StagedUpdatePhase::Ready {
-        anyhow::bail!("待安装更新已进入应用阶段，不能由检查操作作废");
+        anyhow::bail!(
+            "the pending update is already being applied and can't be discarded by a check"
+        );
     }
     Ok(pending)
 }
@@ -573,8 +599,12 @@ pub fn installed_release() -> anyhow::Result<InstalledRelease> {
         Ok(url) => Some(url),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("读取当前发布 URL 失败：{}", bundled_path.display()));
+            return Err(error).with_context(|| {
+                format!(
+                    "couldn't read the current release URL: {}",
+                    bundled_path.display()
+                )
+            });
         }
     };
     let state_url = {
@@ -604,21 +634,32 @@ fn installer_root() -> anyhow::Result<PathBuf> {
 
 fn copy_installer_helper(source: &Path, destination: &Path) -> anyhow::Result<()> {
     let metadata = std::fs::symlink_metadata(source)
-        .with_context(|| format!("安装 helper 不存在：{}", source.display()))?;
+        .with_context(|| format!("the install helper doesn't exist: {}", source.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("安装 helper 必须是普通文件：{}", source.display());
+        anyhow::bail!(
+            "the install helper must be a regular file: {}",
+            source.display()
+        );
     }
     let parent = destination
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("安装 helper 目标缺少父目录"))?;
-    std::fs::create_dir(parent)
-        .with_context(|| format!("创建安装 helper 目录失败：{}", parent.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("the install helper target has no parent directory"))?;
+    std::fs::create_dir(parent).with_context(|| {
+        format!(
+            "couldn't create the install helper directory: {}",
+            parent.display()
+        )
+    })?;
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
-    std::fs::copy(source, destination)
-        .with_context(|| format!("复制安装 helper 失败：{}", destination.display()))?;
+    std::fs::copy(source, destination).with_context(|| {
+        format!(
+            "couldn't copy the install helper: {}",
+            destination.display()
+        )
+    })?;
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o700))?;
@@ -707,12 +748,14 @@ pub fn launch_installer(update: &StagedUpdate, relaunch: bool) -> anyhow::Result
             .staged
             .as_mut()
             .filter(|pending| same_update(pending, update))
-            .ok_or_else(|| anyhow::anyhow!("待安装更新已被另一条更新作业替换"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("the pending update was replaced by another update job")
+            })?;
         if pending.phase != StagedUpdatePhase::Ready {
-            anyhow::bail!("更新事务不在 Ready 阶段");
+            anyhow::bail!("the update transaction isn't Ready");
         }
         if pending.installer_attempt.is_some() {
-            anyhow::bail!("已有 installer 正在等待 GUI 退出");
+            anyhow::bail!("an installer is already waiting for the app to quit");
         }
         pending.installer_failed = false;
         pending.installer_attempt = Some(InstallerAttempt {
@@ -748,8 +791,8 @@ pub fn launch_installer(update: &StagedUpdate, relaunch: bool) -> anyhow::Result
     if let Err(error) = spawned {
         let rollback = clear_installer_attempt(&ticket.update_id, &ticket.attempt_id);
         let _ = std::fs::remove_dir_all(&helper_dir);
-        rollback.context("派生 installer 失败，且撤销 attempt 也失败")?;
-        return Err(error).context("派生 installer 失败");
+        rollback.context("couldn't spawn the installer, and revoking the attempt also failed")?;
+        return Err(error).context("couldn't spawn the installer");
     }
     Ok(ticket)
 }
@@ -760,17 +803,17 @@ fn installer_attempt_from_state(
     attempt_id: &str,
 ) -> anyhow::Result<(StagedUpdate, InstallerAttempt)> {
     if !is_valid_update_id(update_id) || !is_valid_update_id(attempt_id) {
-        anyhow::bail!("installer ticket 非法");
+        anyhow::bail!("invalid installer ticket");
     }
     let pending = state
         .staged
         .filter(|pending| pending.id == update_id && pending.phase == StagedUpdatePhase::Ready)
-        .ok_or_else(|| anyhow::anyhow!("installer 对应的 Ready 更新作业不存在"))?;
+        .ok_or_else(|| anyhow::anyhow!("the installer's Ready update job doesn't exist"))?;
     let attempt = pending
         .installer_attempt
         .clone()
         .filter(|attempt| attempt.id == attempt_id)
-        .ok_or_else(|| anyhow::anyhow!("installer attempt 已被撤销或替换"))?;
+        .ok_or_else(|| anyhow::anyhow!("the installer attempt was revoked or replaced"))?;
     Ok((pending, attempt))
 }
 
@@ -788,9 +831,9 @@ fn relaunch_app(app_bundle: &Path) -> anyhow::Result<()> {
     let status = std::process::Command::new("/usr/bin/open")
         .arg(app_bundle)
         .status()
-        .context("启动新版 Smelt 失败")?;
+        .context("couldn't launch the new Smelt")?;
     if !status.success() {
-        anyhow::bail!("启动新版 Smelt 失败：open exit {status}");
+        anyhow::bail!("couldn't launch the new Smelt: open exit {status}");
     }
     Ok(())
 }
@@ -817,14 +860,18 @@ pub fn run_installer(update_id: &str, attempt_id: &str) -> anyhow::Result<()> {
     let invalidated_by_this_attempt = matches!(outcome, Ok(FinalizeOutcome::Invalidated));
     let result = match outcome {
         Ok(FinalizeOutcome::Installed) => Ok(()),
-        Ok(FinalizeOutcome::Invalidated) => anyhow::bail!("候选 App 最终校验失效"),
-        Ok(FinalizeOutcome::RetryLater) => anyhow::bail!("installer 不支持延后提交"),
+        Ok(FinalizeOutcome::Invalidated) => {
+            anyhow::bail!("the candidate app failed its final check")
+        }
+        Ok(FinalizeOutcome::RetryLater) => {
+            anyhow::bail!("the installer doesn't support deferred commits")
+        }
         Err(error) => Err(error),
     };
     let persistence_result = if result.is_err() {
         Some(
             record_installer_failure(update_id, attempt_id)
-                .context("installer 失败，且持久化失败状态也失败"),
+                .context("the installer failed, and saving the failure also failed"),
         )
     } else {
         None
@@ -844,7 +891,7 @@ pub fn run_installer(update_id: &str, attempt_id: &str) -> anyhow::Result<()> {
     }
     let result = match (result, persistence_result) {
         (Err(install_error), Some(Err(persistence_error))) => Err(install_error).context(format!(
-            "持久化 installer 失败状态也失败：{persistence_error:#}"
+            "saving the installer failure also failed: {persistence_error:#}"
         )),
         (result, _) => result,
     };
@@ -853,7 +900,7 @@ pub fn run_installer(update_id: &str, attempt_id: &str) -> anyhow::Result<()> {
         (Err(install_error), Ok(())) => Err(install_error),
         (Ok(()), Err(relaunch_error)) => Err(relaunch_error),
         (Err(install_error), Err(relaunch_error)) => Err(install_error).context(format!(
-            "安装失败后重新打开 Smelt 也失败：{relaunch_error:#}"
+            "reopening Smelt after the failed install also failed: {relaunch_error:#}"
         )),
     }
 }
@@ -870,7 +917,7 @@ pub fn run_installer(update_id: &str, attempt_id: &str) -> anyhow::Result<()> {
 pub fn stage_local_app(source: &Path, target: &Path) -> anyhow::Result<String> {
     validate_local_app(source)?;
     if target.extension().and_then(|value| value.to_str()) != Some("app") {
-        anyhow::bail!("安装目标不是 .app：{}", target.display());
+        anyhow::bail!("the install target isn't a .app: {}", target.display());
     }
     let id = uuid::Uuid::new_v4().simple().to_string();
     let swap = swap_path(target, &id)?;
@@ -880,7 +927,7 @@ pub fn stage_local_app(source: &Path, target: &Path) -> anyhow::Result<String> {
         let mut state = load_update_state_locked(&state_path)?;
         reject_applying_update(&state)?;
         if !cleanup_registered_app_locked(&state_path, &mut state, target)? {
-            anyhow::bail!("上次换下的旧 App 仍被占用，已停止替换");
+            anyhow::bail!("the app replaced last time is still in use; stopped replacing");
         }
         state.cleanup_app = Some(swap.clone());
         save_update_state_locked(&state_path, &state)?;
@@ -936,14 +983,14 @@ pub fn commit_local_app(target: &Path, id: &str) -> anyhow::Result<()> {
 
 fn validate_local_app(app: &Path) -> anyhow::Result<()> {
     if app.extension().and_then(|value| value.to_str()) != Some("app") || !app.is_dir() {
-        anyhow::bail!("不是 .app 包：{}", app.display());
+        anyhow::bail!("not a .app bundle: {}", app.display());
     }
     if !app.join("Contents/Info.plist").is_file() {
-        anyhow::bail!("App 缺少 Contents/Info.plist：{}", app.display());
+        anyhow::bail!("the app has no Contents/Info.plist: {}", app.display());
     }
     for name in ["smelt", "smeltd", "smelt-notify", INSTALLER_NAME] {
         if !app.join("Contents/MacOS").join(name).is_file() {
-            anyhow::bail!("App 缺少 Contents/MacOS/{name}：{}", app.display());
+            anyhow::bail!("the app has no Contents/MacOS/{name}: {}", app.display());
         }
     }
     Ok(())
@@ -958,7 +1005,7 @@ fn request_running_app_quit() -> anyhow::Result<()> {
         .arg("-e")
         .arg(script)
         .output()
-        .context("运行 osascript 失败")?;
+        .context("couldn't run osascript")?;
     if !output.status.success() {
         anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
@@ -971,7 +1018,9 @@ fn reject_applying_update(state: &UpdateState) -> anyhow::Result<()> {
         .as_ref()
         .is_some_and(|staged| staged.phase == StagedUpdatePhase::Applying)
     {
-        anyhow::bail!("在线更新的交换还没收尾，先打开一次 Smelt 让它恢复");
+        anyhow::bail!(
+            "an online update hasn't finished swapping; open Smelt once to let it recover"
+        );
     }
     Ok(())
 }
@@ -984,7 +1033,9 @@ fn swap_local_app(target: &Path, swap: &Path) -> anyhow::Result<()> {
     let state_path = update_state_path()?;
     let mut state = load_update_state_locked(&state_path)?;
     if state.cleanup_app.as_deref() != Some(swap) {
-        anyhow::bail!("新包副本已被回收（期间打开过 Smelt？），重新运行 make install");
+        anyhow::bail!(
+            "the new package copy was reclaimed (was Smelt opened meanwhile?); rerun make install"
+        );
     }
     reject_applying_update(&state)?;
     if std::fs::symlink_metadata(target).is_ok() {
@@ -993,7 +1044,7 @@ fn swap_local_app(target: &Path, swap: &Path) -> anyhow::Result<()> {
     } else {
         // 还没装过：直接放上去，交换位置空了，登记跟着撤掉。
         std::fs::rename(swap, target)
-            .with_context(|| format!("安装 App 失败：{}", target.display()))?;
+            .with_context(|| format!("couldn't install the app: {}", target.display()))?;
         state.cleanup_app = None;
     }
     drop(runtime_lease);
@@ -1032,17 +1083,17 @@ fn quiesce_app_target_with(
     probe: impl FnOnce() -> anyhow::Result<BundleUseState>,
 ) -> anyhow::Result<()> {
     if !shutdown() {
-        anyhow::bail!("旧守护进程没有退出，已停止替换 App");
+        anyhow::bail!("the old daemon didn't exit; stopped replacing the app");
     }
     if probe()? != BundleUseState::Unused {
-        anyhow::bail!("目标 App 又被进程使用，拒绝替换");
+        anyhow::bail!("the target app is in use again; refusing to replace it");
     }
     Ok(())
 }
 
 fn cache_root() -> anyhow::Result<PathBuf> {
     let dir = dirs::cache_dir()
-        .ok_or_else(|| anyhow::anyhow!("找不到系统缓存目录"))?
+        .ok_or_else(|| anyhow::anyhow!("couldn't find the system cache directory"))?
         .join(BUNDLE_ID)
         .join("update");
     std::fs::create_dir_all(&dir)?;
@@ -1069,7 +1120,7 @@ pub async fn download_and_stage(
     let _ = std::fs::remove_file(&zip_path);
 
     let result = async {
-        let mut resp = open_package_download(url, " ZIP").await?;
+        let mut resp = open_package_download(url, "ZIP").await?;
         let total = resp.content_length();
         on_progress(DownloadProgress::Bytes { received: 0, total });
 
@@ -1093,7 +1144,7 @@ pub async fn download_and_stage(
         let extracted_app = find_app_bundle(&extract_root)?;
         std::fs::rename(&extracted_app, &update.staged_app).map_err(|error| {
             anyhow::anyhow!(
-                "移动新版 .app 失败：{} → {}（{error}）",
+                "couldn't move the new .app: {} → {} ({error})",
                 extracted_app.display(),
                 update.staged_app.display()
             )
@@ -1133,7 +1184,7 @@ fn extract_zip(zip_path: &Path, extract_root: &Path) -> anyhow::Result<()> {
         .arg(extract_root)
         .output()?;
     if !out.status.success() {
-        anyhow::bail!("解压 ZIP 失败：{}", String::from_utf8_lossy(&out.stderr));
+        anyhow::bail!("couldn't unzip: {}", String::from_utf8_lossy(&out.stderr));
     }
     Ok(())
 }
@@ -1152,7 +1203,7 @@ fn find_app_bundle(root: &Path) -> anyhow::Result<PathBuf> {
             }
         }
     }
-    anyhow::bail!("ZIP 中没有找到 .app 包")
+    anyhow::bail!("no .app bundle in the ZIP")
 }
 
 fn validate_staged_update(update: &StagedUpdate, trusted_app: &Path) -> anyhow::Result<String> {
@@ -1160,7 +1211,7 @@ fn validate_staged_update(update: &StagedUpdate, trusted_app: &Path) -> anyhow::
     let staged = registered_staged_path(update)?;
     let fingerprint = validate_app_bundle_against(&staged, trusted_app)?;
     if !update.fingerprint.is_empty() && update.fingerprint != fingerprint {
-        anyhow::bail!("暂存 App 指纹与下载完成时不一致");
+        anyhow::bail!("the staged app's fingerprint doesn't match the download");
     }
     Ok(fingerprint)
 }
@@ -1168,17 +1219,20 @@ fn validate_staged_update(update: &StagedUpdate, trusted_app: &Path) -> anyhow::
 fn validate_staged_metadata(update: &StagedUpdate) -> anyhow::Result<()> {
     validate_download_url(&update.url)?;
     if !is_valid_update_id(&update.id) {
-        anyhow::bail!("更新作业 id 非法");
+        anyhow::bail!("invalid update job id");
     }
     if update.version.trim().is_empty() {
-        anyhow::bail!("更新作业缺少版本标识");
+        anyhow::bail!("the update job has no version");
     }
     Ok(())
 }
 
 fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result<String> {
     if !app.is_dir() || app.extension().and_then(|ext| ext.to_str()) != Some("app") {
-        anyhow::bail!("更新包不是有效的 .app 目录：{}", app.display());
+        anyhow::bail!(
+            "the update package isn't a valid .app directory: {}",
+            app.display()
+        );
     }
     for executable in [
         app.join("Contents/MacOS/smelt"),
@@ -1186,18 +1240,27 @@ fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result
         app.join("Contents/MacOS").join(INSTALLER_NAME),
     ] {
         if !executable.is_file() {
-            anyhow::bail!("更新包缺少必要程序：{}", executable.display());
+            anyhow::bail!(
+                "the update package is missing a required program: {}",
+                executable.display()
+            );
         }
         {
             use std::os::unix::fs::PermissionsExt as _;
             if std::fs::metadata(&executable)?.permissions().mode() & 0o111 == 0 {
-                anyhow::bail!("更新包程序不可执行：{}", executable.display());
+                anyhow::bail!(
+                    "an update package program isn't executable: {}",
+                    executable.display()
+                );
             }
         }
     }
     let info_plist = app.join("Contents/Info.plist");
     if !info_plist.is_file() {
-        anyhow::bail!("更新包缺少 Info.plist：{}", info_plist.display());
+        anyhow::bail!(
+            "the update package has no Info.plist: {}",
+            info_plist.display()
+        );
     }
 
     {
@@ -1208,7 +1271,7 @@ fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result
         if !bundle_id.status.success()
             || String::from_utf8_lossy(&bundle_id.stdout).trim() != BUNDLE_ID
         {
-            anyhow::bail!("更新包 Bundle ID 不匹配");
+            anyhow::bail!("the update package's Bundle ID doesn't match");
         }
         let signature = std::process::Command::new("/usr/bin/codesign")
             .args(["--verify", "--deep", "--strict"])
@@ -1216,7 +1279,7 @@ fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result
             .output()?;
         if !signature.status.success() {
             anyhow::bail!(
-                "更新包签名校验失败：{}",
+                "the update package's signature check failed: {}",
                 String::from_utf8_lossy(&signature.stderr).trim()
             );
         }
@@ -1227,7 +1290,7 @@ fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result
             .arg(app)
             .output()?;
         if !identity.status.success() {
-            anyhow::bail!("更新包签发身份与当前 Smelt 不匹配");
+            anyhow::bail!("the update package's signing identity doesn't match this Smelt");
         }
     }
 
@@ -1239,10 +1302,15 @@ fn designated_requirement(app: &Path) -> anyhow::Result<String> {
         .args(["-d", "-r-"])
         .arg(app)
         .output()
-        .with_context(|| format!("读取 App designated requirement 失败：{}", app.display()))?;
+        .with_context(|| {
+            format!(
+                "couldn't read the app's designated requirement: {}",
+                app.display()
+            )
+        })?;
     if !output.status.success() {
         anyhow::bail!(
-            "读取 App designated requirement 失败：{}",
+            "couldn't read the app's designated requirement: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -1261,7 +1329,7 @@ fn designated_requirement(app: &Path) -> anyhow::Result<String> {
         })
         .map(|requirement| requirement.trim().to_owned())
         .filter(|requirement| !requirement.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("App 缺少 designated requirement：{}", app.display()))
+        .ok_or_else(|| anyhow::anyhow!("the app has no designated requirement: {}", app.display()))
 }
 
 fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
@@ -1312,7 +1380,7 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
                 hasher.update((metadata.permissions().mode() & 0o111).to_le_bytes());
             }
             let mut file = File::open(&path)
-                .with_context(|| format!("读取 App 文件失败：{}", path.display()))?;
+                .with_context(|| format!("couldn't read an app file: {}", path.display()))?;
             loop {
                 let read = file.read(&mut buffer)?;
                 if read == 0 {
@@ -1327,7 +1395,10 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
             hasher.update((target.len() as u64).to_le_bytes());
             hasher.update(target);
         } else {
-            anyhow::bail!("App 包含不支持的文件类型：{}", path.display());
+            anyhow::bail!(
+                "the app contains an unsupported file type: {}",
+                path.display()
+            );
         }
     }
     Ok(format!(
@@ -1345,21 +1416,27 @@ pub(crate) fn current_app_bundle() -> anyhow::Result<PathBuf> {
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent)
-        .ok_or_else(|| anyhow::anyhow!("可执行文件路径层级不足：{}", exe.display()))?
+        .ok_or_else(|| anyhow::anyhow!("the executable path is too shallow: {}", exe.display()))?
         .to_path_buf();
     if bundle.extension().and_then(|e| e.to_str()) != Some("app") {
-        anyhow::bail!("不在 .app 包里运行（{}），跳过自更新", bundle.display());
+        anyhow::bail!(
+            "not running from a .app bundle ({}); skipping self-update",
+            bundle.display()
+        );
     }
     Ok(bundle)
 }
 
 fn swap_path(app_bundle: &Path, update_id: &str) -> anyhow::Result<PathBuf> {
     if !is_valid_update_id(update_id) {
-        anyhow::bail!("更新作业 id 非法");
+        anyhow::bail!("invalid update job id");
     }
-    let parent = app_bundle
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("App 路径没有父目录：{}", app_bundle.display()))?;
+    let parent = app_bundle.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "the app path has no parent directory: {}",
+            app_bundle.display()
+        )
+    })?;
     let stem = app_bundle
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1394,7 +1471,10 @@ fn is_registered_swap_path(app_bundle: &Path, path: &Path) -> bool {
 
 fn remove_registered_swap(app_bundle: &Path, path: &Path) -> anyhow::Result<()> {
     if !is_registered_swap_path(app_bundle, path) {
-        anyhow::bail!("拒绝清理未登记在 App 同目录的路径：{}", path.display());
+        anyhow::bail!(
+            "refusing to clean up a path not registered next to the app: {}",
+            path.display()
+        );
     }
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1426,14 +1506,22 @@ fn registered_staged_path(update: &StagedUpdate) -> anyhow::Result<PathBuf> {
         .file_type()
         .is_symlink()
     {
-        anyhow::bail!("暂存 App 不能是符号链接：{}", update.staged_app.display());
+        anyhow::bail!(
+            "the staged app can't be a symlink: {}",
+            update.staged_app.display()
+        );
     }
-    let staged = update
-        .staged_app
-        .canonicalize()
-        .with_context(|| format!("暂存 App 不存在：{}", update.staged_app.display()))?;
+    let staged = update.staged_app.canonicalize().with_context(|| {
+        format!(
+            "the staged app doesn't exist: {}",
+            update.staged_app.display()
+        )
+    })?;
     if !is_registered_staged_path(&cache, &staged) {
-        anyhow::bail!("暂存 App 不属于更新缓存：{}", staged.display());
+        anyhow::bail!(
+            "the staged app isn't in the update cache: {}",
+            staged.display()
+        );
     }
     Ok(staged)
 }
@@ -1445,7 +1533,7 @@ fn copy_app_bundle(source: &Path, destination: &Path) -> anyhow::Result<()> {
         .output()?;
     if !output.status.success() {
         anyhow::bail!(
-            "复制新版 App 失败：{}",
+            "couldn't copy the new app: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -1459,7 +1547,8 @@ fn swap_app_bundles(left: &Path, right: &Path) -> anyhow::Result<()> {
     let left = CString::new(left.as_os_str().as_bytes())?;
     let right = CString::new(right.as_os_str().as_bytes())?;
     if unsafe { libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("原子交换新旧 App 失败");
+        return Err(std::io::Error::last_os_error())
+            .context("couldn't atomically swap the old and new app");
     }
     Ok(())
 }
@@ -1477,28 +1566,40 @@ fn classify_applying_recovery(
     pending: &StagedUpdate,
     app_bundle: &Path,
 ) -> anyhow::Result<ApplyingRecoveryState> {
-    let swap = pending
-        .swap_app
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Applying 状态缺少交换目录，无法判定安装结果"))?;
+    let swap = pending.swap_app.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("the Applying state has no swap directory; can't tell how the install went")
+    })?;
     let expected_swap = swap_path(app_bundle, &pending.id)?;
     if swap != &expected_swap {
-        anyhow::bail!("Applying 状态包含非法交换路径：{}", swap.display());
+        anyhow::bail!(
+            "the Applying state has an invalid swap path: {}",
+            swap.display()
+        );
     }
 
-    let current_fingerprint = app_fingerprint(app_bundle)
-        .with_context(|| format!("读取当前 App 指纹失败：{}", app_bundle.display()))?;
+    let current_fingerprint = app_fingerprint(app_bundle).with_context(|| {
+        format!(
+            "couldn't read the current app's fingerprint: {}",
+            app_bundle.display()
+        )
+    })?;
     if current_fingerprint == pending.fingerprint {
         return Ok(ApplyingRecoveryState::Installed);
     }
 
-    let swap_fingerprint = app_fingerprint(swap)
-        .with_context(|| format!("读取交换 App 指纹失败：{}", swap.display()))?;
+    let swap_fingerprint = app_fingerprint(swap).with_context(|| {
+        format!(
+            "couldn't read the swapped app's fingerprint: {}",
+            swap.display()
+        )
+    })?;
     if swap_fingerprint == pending.fingerprint {
         return Ok(ApplyingRecoveryState::NotSwapped);
     }
 
-    anyhow::bail!("当前 App 与交换 App 都不匹配待安装指纹，保留现场以避免误删旧版本")
+    anyhow::bail!(
+        "neither the current nor the swapped app matches the pending fingerprint; leaving everything in place so the old version isn't deleted by mistake"
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1523,7 +1624,7 @@ fn classify_bundle_use_output(
     }
     // 原样带上输出：没有它就查不到是哪个进程占着旧 App。
     anyhow::bail!(
-        "无法证明旧 App 已空闲（lsof code={code:?} stdout={:?} stderr={:?}）",
+        "can't confirm the old app is idle (lsof code={code:?} stdout={:?} stderr={:?})",
         lsof_excerpt(stdout),
         lsof_excerpt(stderr)
     )
@@ -1533,7 +1634,7 @@ fn lsof_excerpt(bytes: &[u8]) -> String {
     const LIMIT: usize = 1024;
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(LIMIT)]).into_owned();
     if bytes.len() > LIMIT {
-        format!("{text}…（共 {}B）", bytes.len())
+        format!("{text}… ({} bytes total)", bytes.len())
     } else {
         text
     }
@@ -1546,7 +1647,12 @@ fn bundle_use_state(app: &Path) -> anyhow::Result<BundleUseState> {
         .arg("+D")
         .arg(app)
         .output()
-        .with_context(|| format!("探测 App 是否仍被使用失败：{}", app.display()))?;
+        .with_context(|| {
+            format!(
+                "couldn't check whether the app is still in use: {}",
+                app.display()
+            )
+        })?;
     classify_bundle_use_output(
         output.status.success(),
         output.status.code(),
@@ -1565,13 +1671,16 @@ fn cleanup_registered_app_locked(
         return Ok(true);
     };
     if !is_registered_swap_path(app_bundle, &cleanup) {
-        anyhow::bail!("更新状态包含非法清理路径：{}", cleanup.display());
+        anyhow::bail!(
+            "the update state has an invalid cleanup path: {}",
+            cleanup.display()
+        );
     }
     if bundle_use_state(&cleanup)? == BundleUseState::InUse {
         return Ok(false);
     }
     remove_registered_swap(app_bundle, &cleanup)
-        .with_context(|| format!("清理旧 App 失败：{}", cleanup.display()))?;
+        .with_context(|| format!("couldn't clean up the old app: {}", cleanup.display()))?;
     state.cleanup_app = None;
     save_update_state_locked(state_path, state)?;
     Ok(true)
@@ -1695,7 +1804,7 @@ fn reconcile_update_state_locked(
 
     if let Err(error) = validate_staged_metadata(&pending) {
         if pending.phase == StagedUpdatePhase::Applying {
-            return Err(error).context("Applying 更新元数据无效，保留交换现场等待人工确认");
+            return Err(error).context("the Applying update's metadata is invalid; leaving the swap in place for manual review");
         }
         smelt_sys::app_log::error(
             "updater",
@@ -1740,7 +1849,7 @@ fn reconcile_update_state_locked(
                     return Ok(None);
                 }
                 return Err(error)
-                    .context("Applying 更新缺少可验证的暂存包，保留交换现场以避免误删旧版本");
+                    .context("the Applying update has no verifiable staged package; leaving the swap in place so the old version isn't deleted by mistake");
             }
             smelt_sys::app_log::error(
                 "updater",
@@ -1767,10 +1876,9 @@ fn reconcile_update_state_locked(
             finish_recovered_update_locked(state_path, &mut state, &pending, app_bundle)?;
             return Ok(None);
         }
-        let swap = pending
-            .swap_app
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("NotSwapped 判定后交换目录意外缺失"))?;
+        let swap = pending.swap_app.take().ok_or_else(|| {
+            anyhow::anyhow!("the swap directory disappeared after the NotSwapped check")
+        })?;
         remove_registered_swap(app_bundle, &swap)?;
     }
 
@@ -1794,7 +1902,7 @@ fn finalize_pending_update_for_attempt(
 ) -> anyhow::Result<FinalizeOutcome> {
     let (update, attempt) = load_installer_attempt(update_id, attempt_id)?;
     if attempt.target_app != target_app {
-        anyhow::bail!("installer 目标 App 与持久化 attempt 不一致");
+        anyhow::bail!("the installer's target app doesn't match the saved attempt");
     }
     finalize_pending_update_at(&update, Some(attempt_id), target_app, |_| {
         quiesce_app_target(target_app)?;
@@ -1815,22 +1923,24 @@ fn finalize_pending_update_at(
         .staged
         .clone()
         .filter(|current| same_update(current, update))
-        .ok_or_else(|| anyhow::anyhow!("待安装更新已被另一条更新作业替换"))?;
+        .ok_or_else(|| anyhow::anyhow!("the pending update was replaced by another update job"))?;
     pending.normalize_legacy_metadata();
     if pending.phase != StagedUpdatePhase::Ready {
-        anyhow::bail!("更新事务不在 Ready 阶段，请先执行恢复");
+        anyhow::bail!("the update transaction isn't Ready; run recovery first");
     }
     if let Some(expected_attempt_id) = expected_attempt_id {
         let _attempt = pending
             .installer_attempt
             .as_ref()
             .filter(|attempt| attempt.id == expected_attempt_id && attempt.target_app == app_bundle)
-            .ok_or_else(|| anyhow::anyhow!("installer attempt 已被撤销或替换"))?;
+            .ok_or_else(|| anyhow::anyhow!("the installer attempt was revoked or replaced"))?;
     }
     // 旧 Bundle 可能仍被 managed 迁移前的 smeltd 引用。提交正确性不依赖旧包清理；
     // 无法证明没有进程使用时必须保留，由独立 fail-closed GC 后续处理。
     if state.cleanup_app.is_some() {
-        anyhow::bail!("上一条更新的旧 App 尚未安全回收，拒绝开始新的替换事务");
+        anyhow::bail!(
+            "the previous update's old app hasn't been safely reclaimed; refusing to start a new swap"
+        );
     }
     let fingerprint = match validate_staged_update(&pending, app_bundle) {
         Ok(fingerprint) => fingerprint,
@@ -1844,7 +1954,7 @@ fn finalize_pending_update_at(
         }
     };
     if !pending.fingerprint.is_empty() && pending.fingerprint != fingerprint {
-        anyhow::bail!("暂存 App 指纹与持久化记录不一致");
+        anyhow::bail!("the staged app's fingerprint doesn't match the saved record");
     }
     pending.fingerprint = fingerprint.clone();
     pending.phase = StagedUpdatePhase::Ready;
@@ -1862,12 +1972,13 @@ fn finalize_pending_update_at(
         Ok(fingerprint) => fingerprint,
         Err(error) => {
             let _ = remove_registered_swap(app_bundle, &swap);
-            return Err(error).context("复制到安装目录后的 App 校验失败");
+            return Err(error)
+                .context("the app failed verification after copying to the install directory");
         }
     };
     if copied_fingerprint != fingerprint {
         let _ = remove_registered_swap(app_bundle, &swap);
-        anyhow::bail!("复制到安装目录后的 App 指纹发生变化");
+        anyhow::bail!("the app's fingerprint changed after copying to the install directory");
     }
 
     match prepare(&swap) {
@@ -1898,7 +2009,7 @@ fn finalize_pending_update_at(
             // 磁盘仍是已持久化的 Applying + swap_app。保留候选目录作为恢复证据；
             // 删除它会让下次启动无法判定交换边界。
             return Err(error).context(format!(
-                "App 原子交换失败，且恢复 Ready 状态写入失败；已保留交换现场：{persist_error:#}"
+                "the atomic app swap failed, and restoring the Ready state failed too; left the swap in place: {persist_error:#}"
             ));
         }
         let _ = remove_registered_swap(app_bundle, &swap);
@@ -1912,7 +2023,7 @@ fn finalize_pending_update_at(
     if let Err(commit_error) = save_update_state_locked(&state_path, &state) {
         if let Err(rollback_error) = swap_app_bundles(app_bundle, &swap) {
             return Err(commit_error).context(format!(
-                "更新状态提交失败，且 App 原子回滚也失败：{rollback_error:#}"
+                "committing the update state failed, and the atomic app rollback failed too: {rollback_error:#}"
             ));
         }
         pending.phase = StagedUpdatePhase::Ready;
@@ -1924,7 +2035,7 @@ fn finalize_pending_update_at(
             // 持久状态仍是 Applying，且 App 已回滚。保留 swap 候选，让启动恢复能证明
             // NotSwapped；不能先删现场再留下一个不可解释的 Applying 快照。
             return Err(commit_error).context(format!(
-                "App 已原子回滚，但恢复 Ready 状态写入失败；已保留交换现场：{persist_error:#}"
+                "the app was rolled back atomically, but restoring the Ready state failed; left the swap in place: {persist_error:#}"
             ));
         }
         let _ = remove_registered_swap(app_bundle, &swap);
@@ -2231,7 +2342,7 @@ mod tests {
         let error = classify_bundle_use_output(false, Some(1), &long, b"")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("（共 5000B）"), "{error}");
+        assert!(error.contains("(5000 bytes total)"), "{error}");
         assert!(error.len() < 2000, "输出要截断：{}B", error.len());
     }
 
@@ -2575,7 +2686,7 @@ mod tests {
     fn critical_update_state_write_reports_failure() {
         let path = PathBuf::from("/dev/null/update-state.json");
         let error = save_update_state_locked(&path, &UpdateState::default()).unwrap_err();
-        assert!(error.to_string().contains("保存更新状态失败"));
+        assert!(error.to_string().contains("couldn't save the update state"));
     }
 
     #[test]
@@ -2599,7 +2710,7 @@ mod tests {
         let error = load_update_state_locked(&path)
             .err()
             .expect("认不出的阶段必须报错");
-        assert!(error.to_string().contains("读取更新状态失败"));
+        assert!(error.to_string().contains("couldn't read the update state"));
     }
 
     #[test]
@@ -2646,7 +2757,11 @@ mod tests {
 
         std::fs::write(app.join("Contents/Resources/release"), b"tampered-resource").unwrap();
         let signature_error = super::validate_app_bundle_against(&app, &app).unwrap_err();
-        assert!(signature_error.to_string().contains("签名校验失败"));
+        assert!(
+            signature_error
+                .to_string()
+                .contains("signature check failed")
+        );
 
         let missing_installer = signed_test_app(&root.join("missing-installer"), super::BUNDLE_ID);
         std::fs::remove_file(
@@ -2657,11 +2772,19 @@ mod tests {
         .unwrap();
         let helper_error =
             super::validate_app_bundle_against(&missing_installer, &missing_installer).unwrap_err();
-        assert!(helper_error.to_string().contains("缺少必要程序"));
+        assert!(
+            helper_error
+                .to_string()
+                .contains("missing a required program")
+        );
 
         let wrong_identity = signed_test_app(&root.join("wrong-id"), "com.example.not-smelt");
         let identity_error = super::validate_app_bundle_against(&wrong_identity, &app).unwrap_err();
-        assert!(identity_error.to_string().contains("Bundle ID 不匹配"));
+        assert!(
+            identity_error
+                .to_string()
+                .contains("Bundle ID doesn't match")
+        );
 
         let different_signature =
             signed_test_app(&root.join("different-signature"), super::BUNDLE_ID);
@@ -2678,7 +2801,7 @@ mod tests {
         assert!(output.status.success());
         let signer_error =
             super::validate_app_bundle_against(&different_signature, &app).unwrap_err();
-        assert!(signer_error.to_string().contains("签发身份"));
+        assert!(signer_error.to_string().contains("signing identity"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2774,7 +2897,7 @@ mod tests {
 
         let error = classify_applying_recovery(&pending, &app).unwrap_err();
 
-        assert!(error.to_string().contains("保留现场"));
+        assert!(error.to_string().contains("leaving everything in place"));
         assert!(app.is_dir());
         assert!(swap.is_dir());
         std::fs::remove_dir_all(root).unwrap();
@@ -2802,7 +2925,7 @@ mod tests {
 
         let error = reconcile_update_state_locked(&state_path, state, &app).unwrap_err();
 
-        assert!(error.to_string().contains("保留交换现场"));
+        assert!(error.to_string().contains("the swap in place"));
         assert!(app.is_dir());
         assert!(swap.is_dir());
         std::fs::remove_dir_all(root).unwrap();

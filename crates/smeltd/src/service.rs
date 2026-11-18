@@ -36,7 +36,7 @@ pub(crate) fn maybe_run(args: &[String]) -> Option<i32> {
             0
         }
         other => {
-            eprintln!("smeltd：未知命令 {other}");
+            eprintln!("smeltd: unknown command {other}");
             print_help();
             2
         }
@@ -45,21 +45,21 @@ pub(crate) fn maybe_run(args: &[String]) -> Option<i32> {
 
 fn print_help() {
     println!(
-        "用法：
-  smeltd             以前台方式运行守护（通常由 systemd 或桌面拉起）
-  smeltd install     装成 systemd 用户服务并立即启动（Linux）；没有 systemd 时只装映像
-  smeltd uninstall   停止并移除 systemd 用户服务（Linux）
-  smeltd status      查看本机运行时是否在跑
-  smeltd pair        开启远程访问，打印一次性配对串和二维码
-  smeltd devices     列出已配对设备
+        "Usage:
+  smeltd             Run the runtime in the foreground (usually started by systemd or the desktop)
+  smeltd install     Install and start it as a systemd user service (Linux); without systemd, only install the image
+  smeltd uninstall   Stop and remove the systemd user service (Linux)
+  smeltd status      Show whether the local runtime is running
+  smeltd pair        Turn on remote access and print a one-time pairing string and QR code
+  smeltd devices     List paired devices
   smeltd devices revoke <endpoint-id>
-                     撤销一台设备，立即断开它
-  smeltd relay [<地址>|off]
-                     远程访问用哪个 iroh relay：不带参数看现在的；填自建 relay 的域名、
-                     IP 或 URL 就只用它；off 改回 n0 的公共 relay
+                     Revoke a device and disconnect it right away
+  smeltd relay [<address>|off]
+                     Which iroh relay remote access uses: no argument shows the current one; a
+                     self-hosted relay's domain, IP or URL uses only that; off goes back to n0's public relay
   smeltd mcp add <id>
-                     把内置的 MCP 服务器加进 Pi 的 mcp.json，已经有了就不动
-  smeltd --version   打印版本"
+                     Add a built-in MCP server to Pi's mcp.json; does nothing if it's already there
+  smeltd --version   Print the version"
     );
 }
 
@@ -67,7 +67,7 @@ fn report(result: Result<(), String>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("smeltd：{error}");
+            eprintln!("smeltd: {error}");
             1
         }
     }
@@ -77,24 +77,24 @@ fn status() -> i32 {
     match smelt_runtime_client::local::local_runtime().describe() {
         Ok(described) => {
             let daemon = described.daemon;
-            println!("运行中");
-            println!("  版本：{}", daemon.version);
-            println!("  pid：{}", daemon.pid);
-            println!("  会话：{}", daemon.session_count);
+            println!("Running");
+            println!("  version: {}", daemon.version);
+            println!("  pid: {}", daemon.pid);
+            println!("  sessions: {}", daemon.session_count);
             if let Some(id) = daemon.runtime_id {
-                println!("  运行时 id：{id}");
+                println!("  runtime id: {id}");
             }
             if let (Some(os), Some(arch)) = (daemon.os, daemon.arch) {
-                println!("  平台：{os}/{arch}");
+                println!("  platform: {os}/{arch}");
             }
             println!(
-                "  socket：{}",
+                "  socket: {}",
                 smelt_runtime_client::local::smeltd_sock_path().display()
             );
             0
         }
         Err(error) => {
-            println!("没有在跑（{error}）");
+            println!("Not running ({error})");
             3
         }
     }
@@ -116,7 +116,7 @@ fn call_with_timeout<C: smelt_runtime_client::protocol::control::ControlCall>(
 ) -> Result<C::Result, String> {
     local()
         .call::<C>(params, timeout)
-        .map_err(|error| format!("调用本机运行时失败：{error}"))
+        .map_err(|error| format!("Couldn't call the local runtime: {error}"))
 }
 
 /// 远程访问没开就打开（保留已配的自建 relay），等它真正跑起来。
@@ -135,7 +135,7 @@ fn ensure_remote_running() -> Result<(), String> {
         let mut config = call::<RemoteConfigGet>(&EmptyParams::default())?;
         if !config.enabled {
             config.enabled = true;
-            println!("正在开启远程访问…");
+            println!("Turning on remote access…");
             state = call::<RemoteConfigSet>(&config)?;
         }
     }
@@ -144,10 +144,13 @@ fn ensure_remote_running() -> Result<(), String> {
         match &state {
             RemoteAccessState::Running { .. } => return Ok(()),
             RemoteAccessState::Failed { error } if std::time::Instant::now() >= deadline => {
-                return Err(format!("远程访问起不来：{error}"));
+                return Err(format!("Remote access couldn't start: {error}"));
             }
             _ if std::time::Instant::now() >= deadline => {
-                return Err("等远程访问启动超时（60s），稍后再试".to_string());
+                return Err(
+                    "Timed out waiting for remote access to start (60s); try again later"
+                        .to_string(),
+                );
             }
             _ => {}
         }
@@ -166,7 +169,9 @@ fn pair() -> Result<(), String> {
     ensure_remote_running()?;
     let offer = call::<DevicePairBegin>(&EmptyParams::default())?;
     println!();
-    println!("在 Smelt 桌面「添加运行时」里粘贴下面的配对串，或用手机扫码：");
+    println!(
+        "Paste this pairing string into \"Add runtime\" in Smelt on your desktop, or scan the code with your phone:"
+    );
     println!();
     println!("{}", offer.pairing_uri);
     println!();
@@ -181,8 +186,8 @@ fn pair() -> Result<(), String> {
             .build();
         println!("{image}");
     }
-    println!("配对串只能用一次，10 分钟内有效。");
-    println!("配对一台设备，就是把这台机器上你这个用户的 shell 权限交给它。");
+    println!("The pairing string works once and expires in 10 minutes.");
+    println!("Pairing a device gives it your user's shell access on this machine.");
     Ok(())
 }
 
@@ -195,23 +200,23 @@ fn devices(args: &[String]) -> Result<(), String> {
         [] => {
             let list = call::<DeviceList>(&EmptyParams::default())?;
             if list.devices.is_empty() {
-                println!("还没有配对过设备。用 smeltd pair 配对一台。");
+                println!("No paired devices yet. Use smeltd pair to pair one.");
                 return Ok(());
             }
             for device in list.devices {
                 let seen = if device.connected {
-                    "在线".to_string()
+                    "online".to_string()
                 } else {
                     device
                         .last_seen_at_ms
                         .and_then(chrono::DateTime::from_timestamp_millis)
                         .map(|at| {
                             format!(
-                                "最近连接 {}",
+                                "last seen {}",
                                 at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
                             )
                         })
-                        .unwrap_or_else(|| "还没连过".to_string())
+                        .unwrap_or_else(|| "never connected".to_string())
                 };
                 println!("{}  {}  {}", device.endpoint_id, device.name, seen);
             }
@@ -222,13 +227,13 @@ fn devices(args: &[String]) -> Result<(), String> {
                 endpoint_id: endpoint_id.clone(),
             })?;
             if result.revoked {
-                println!("已撤销 {endpoint_id}");
+                println!("Revoked {endpoint_id}");
                 Ok(())
             } else {
-                Err(format!("没有这台设备：{endpoint_id}"))
+                Err(format!("No such device: {endpoint_id}"))
             }
         }
-        _ => Err("用法：smeltd devices [revoke <endpoint-id>]".to_string()),
+        _ => Err("Usage: smeltd devices [revoke <endpoint-id>]".to_string()),
     }
 }
 
@@ -242,8 +247,8 @@ fn relay(args: &[String]) -> Result<(), String> {
     let relay = match args {
         [] => {
             match config.iroh_relay.trim() {
-                "" => println!("用 n0 的公共 relay"),
-                relay => println!("自建 relay：{relay}"),
+                "" => println!("Using n0's public relay"),
+                relay => println!("Self-hosted relay: {relay}"),
             }
             return Ok(());
         }
@@ -252,19 +257,21 @@ fn relay(args: &[String]) -> Result<(), String> {
             smelt_iroh::RelaySettings::parse(value).map_err(|error| format!("{error:#}"))?;
             value.trim().to_string()
         }
-        _ => return Err("用法：smeltd relay [<地址>|off]".to_string()),
+        _ => return Err("Usage: smeltd relay [<address>|off]".to_string()),
     };
     if config.iroh_relay == relay {
-        println!("没有变化");
+        println!("No change");
         return Ok(());
     }
     config.iroh_relay = relay;
     call::<RemoteConfigSet>(&config)?;
     match config.iroh_relay.as_str() {
-        "" => println!("已改用 n0 的公共 relay"),
-        relay => println!("已改用自建 relay：{relay}"),
+        "" => println!("Switched to n0's public relay"),
+        relay => println!("Switched to self-hosted relay: {relay}"),
     }
-    println!("之后生成的配对串会带上它；已经配对的设备要在桌面上把这台机器的中继改成同一个。");
+    println!(
+        "New pairing strings will include it; for devices already paired, set this machine's relay to the same one on the desktop."
+    );
     Ok(())
 }
 
@@ -279,16 +286,16 @@ fn mcp(args: &[String]) -> Result<(), String> {
         [command, id] if command == "add" => {
             let servers = call::<PiConfigGet>(&EmptyParams::default())?
                 .mcp_servers
-                .map_err(|error| format!("读不了 Pi 的 mcp.json：{error}"))?;
+                .map_err(|error| format!("Couldn't read Pi's mcp.json: {error}"))?;
             if servers.iter().any(|server| server.name == *id) {
-                println!("Pi 的 mcp.json 里已经有 {id}");
+                println!("Pi's mcp.json already has {id}");
                 return Ok(());
             }
             call::<PiMcpAddPreset>(&McpPresetParams { id: id.clone() })?;
-            println!("已把 {id} 加进 Pi 的 mcp.json");
+            println!("Added {id} to Pi's mcp.json");
             Ok(())
         }
-        _ => Err("用法：smeltd mcp add <内置服务器 id>".to_string()),
+        _ => Err("Usage: smeltd mcp add <built-in server id>".to_string()),
     }
 }
 
@@ -304,7 +311,7 @@ fn unit_path() -> Result<PathBuf, String> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
-        .ok_or_else(|| "找不到用户配置目录".to_string())?;
+        .ok_or_else(|| "Couldn't find the user config directory".to_string())?;
     Ok(config.join("systemd/user").join(UNIT_NAME))
 }
 
@@ -340,12 +347,12 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
         .arg("--user")
         .args(args)
         .output()
-        .map_err(|error| format!("无法执行 systemctl：{error}"))?;
+        .map_err(|error| format!("Couldn't run systemctl: {error}"))?;
     if output.status.success() {
         Ok(())
     } else {
         Err(format!(
-            "systemctl --user {} 失败：{}",
+            "systemctl --user {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         ))
@@ -376,16 +383,16 @@ pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
 
     let dir = bin_dir()?;
     std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
+        .map_err(|error| format!("Couldn't create {}: {error}", dir.display()))?;
     let launch = dir.join(daemon_image::LAUNCH_NAME);
     let image = daemon_image::publish_image(&dir, exe)
-        .map_err(|error| format!("发布 smeltd 映像失败：{error}"))?;
+        .map_err(|error| format!("Couldn't publish the smeltd image: {error}"))?;
     // 包里带着 smelt-agent 就一起发布、拨链接，和守护换不换代无关。从 `~/.smelt/bin` 或
     // 开发目录 install 时旁边没有，交给运行时启动时按自己的版本补（`ensure_smelt_agent`）。
-    let package = exe.parent().ok_or("smeltd 没有所在目录")?;
+    let package = exe.parent().ok_or("smeltd has no parent directory")?;
     if smelt_core::agent_image::bundled(package) {
         smelt_core::agent_image::publish(&dir, package)
-            .map_err(|error| format!("发布 smelt-agent 失败：{error}"))?;
+            .map_err(|error| format!("Couldn't publish smelt-agent: {error}"))?;
     }
     let installed = std::fs::canonicalize(&launch).ok() == std::fs::canonicalize(&image).ok();
     let running = smelt_runtime_client::local::local_runtime()
@@ -395,23 +402,23 @@ pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
         ImageInstall::AlreadyInstalled
     } else if running {
         daemon_image::retarget_launch_after_commit(&image)
-            .map_err(|error| format!("设置启动名失败：{error}"))?;
+            .map_err(|error| format!("Couldn't set the launch name: {error}"))?;
         match crate::request_self_upgrade(&image) {
             crate::SelfUpgradeOutcome::Upgraded => ImageInstall::Upgraded,
-            crate::SelfUpgradeOutcome::Failed(error) => {
-                ImageInstall::SwitchFailed(format!("运行时换到新版本失败：{error}"))
-            }
+            crate::SelfUpgradeOutcome::Failed(error) => ImageInstall::SwitchFailed(format!(
+                "Couldn't switch the runtime to the new version: {error}"
+            )),
         }
     } else {
         daemon_image::retarget_launch_after_commit(&image)
-            .map_err(|error| format!("设置启动名失败：{error}"))?;
+            .map_err(|error| format!("Couldn't set the launch name: {error}"))?;
         ImageInstall::Launched
     };
     if let Err(error) = daemon_image::reap_unused_images(&dir) {
-        eprintln!("回收旧映像失败：{error}");
+        eprintln!("Couldn't clean up the old image: {error}");
     }
     if let Err(error) = smelt_core::agent_image::reap_unused(&dir) {
-        eprintln!("回收旧 smelt-agent 失败：{error}");
+        eprintln!("Couldn't clean up the old smelt-agent: {error}");
     }
     Ok(outcome)
 }
@@ -420,28 +427,34 @@ pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
 #[cfg(target_os = "linux")]
 pub(crate) fn bin_dir() -> Result<PathBuf, String> {
     Ok(smelt_paths::smelt_home()
-        .ok_or_else(|| "找不到 $HOME".to_string())?
+        .ok_or_else(|| "Couldn't find $HOME".to_string())?
         .join("bin"))
 }
 
 /// 把正在执行的这份 smeltd 装好，返回启动名。
 #[cfg(target_os = "linux")]
 fn install_current_exe() -> Result<PathBuf, String> {
-    let exe =
-        std::env::current_exe().map_err(|error| format!("找不到 smeltd 自身路径：{error}"))?;
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("Couldn't find smeltd's own path: {error}"))?;
     match install_image(&exe)? {
-        ImageInstall::AlreadyInstalled => println!("这个版本已经装好了"),
+        ImageInstall::AlreadyInstalled => println!("This version is already installed"),
         ImageInstall::Upgraded => {
-            println!("运行时已重启到新版本。进行中的回合会中断，历史记录还在")
+            println!(
+                "The runtime restarted on the new version. Running turns were interrupted; history is kept"
+            )
         }
         ImageInstall::Launched => {}
         // 安装器是另一个进程，停得了旧运行时：启动名已经拨好，看护（systemd 的
         // Restart=always，或 smelt-up）按它拉起的就是新版本。守护内部的远程升级
         // （runtime_upgrade）不走这里，那里停掉的是它自己。
         ImageInstall::SwitchFailed(error) => {
-            println!("{error}；改为停掉旧运行时，由看护按新版本拉起");
+            println!(
+                "{error}; stopping the old runtime instead so the supervisor starts the new version"
+            );
             stop_running_daemon()?;
-            println!("旧运行时已停止，看护会拉起新版本。进行中的回合已中断，历史记录还在")
+            println!(
+                "The old runtime stopped; the supervisor will start the new version. Running turns were interrupted; history is kept"
+            )
         }
     }
     Ok(bin_dir()?.join(smelt_core::daemon_image::LAUNCH_NAME))
@@ -471,25 +484,25 @@ fn stop_daemon(
 
     let pid = runtime
         .describe()
-        .map_err(|error| format!("问不到正在跑的运行时：{error}"))?
+        .map_err(|error| format!("Couldn't reach the running runtime: {error}"))?
         .daemon
         .pid;
-    let pid = i32::try_from(pid).map_err(|_| format!("运行时报的 pid 不对：{pid}"))?;
+    let pid = i32::try_from(pid).map_err(|_| format!("The runtime reported a bad pid: {pid}"))?;
     let mut stream = runtime
         .connect_with_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| format!("连不上正在跑的运行时：{error}"))?;
+        .map_err(|error| format!("Couldn't connect to the running runtime: {error}"))?;
     let _ = stream.set_read_timeout(Some(exit_timeout));
     smelt_runtime_client::protocol::write_json_line(
         &mut stream,
         &serde_json::json!({ "op": DaemonOperation::Shutdown }),
     )
-    .map_err(|error| format!("请运行时停机失败：{error}"))?;
+    .map_err(|error| format!("Couldn't ask the runtime to shut down: {error}"))?;
     // 先回执再清理、退出；读到断开也一样，退没退以进程为准。
     let mut reply = String::new();
     let _ = BufReader::new(&stream).read_line(&mut reply);
     if !smelt_sys::process_wait::wait_until_exit(pid, exit_timeout) {
         return Err(format!(
-            "旧运行时（pid {pid}）{} 秒内没有退出",
+            "The old runtime (pid {pid}) didn't exit within {} seconds",
             exit_timeout.as_secs()
         ));
     }
@@ -501,7 +514,9 @@ fn install() -> Result<(), String> {
     if !systemd_booted() {
         // 没有服务管理器可登记。已经在跑（smelt-up 拉起的）就照常交接到新映像。
         install_current_exe()?;
-        println!("这台机器没有 systemd，没装服务：运行时由 smelt-up 拉起并看着");
+        println!(
+            "This machine has no systemd, so no service was installed; smelt-up starts and watches the runtime"
+        );
         return Ok(());
     }
     // 已经在跑、却不归 systemd 管（手动起的）：收编不进来，装上去也只是两个实例抢锁。
@@ -511,7 +526,7 @@ fn install() -> Result<(), String> {
         && !unit_active()
     {
         return Err(
-            "运行时正在 systemd 之外运行（smeltd status 看 pid）。先停掉它再装；它的会话会随之结束"
+            "The runtime is running outside systemd (see smeltd status for the pid). Stop it before installing; its sessions will end"
                 .to_string(),
         );
     }
@@ -519,16 +534,16 @@ fn install() -> Result<(), String> {
     let unit = unit_path()?;
     if let Some(dir) = unit.parent() {
         std::fs::create_dir_all(dir)
-            .map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
+            .map_err(|error| format!("Couldn't create {}: {error}", dir.display()))?;
     }
     std::fs::write(&unit, unit_contents(&exe))
-        .map_err(|error| format!("写入 {} 失败：{error}", unit.display()))?;
+        .map_err(|error| format!("Couldn't write {}: {error}", unit.display()))?;
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", "--now", UNIT_NAME])?;
-    println!("已安装并启动：{}", unit.display());
+    println!("Installed and started: {}", unit.display());
     if !linger_enabled() {
         println!(
-            "提示：退出登录后 systemd 会停掉用户服务。要让运行时一直在线，执行：\n  loginctl enable-linger {}",
+            "Note: systemd stops user services when you log out. To keep the runtime online, run:\n  loginctl enable-linger {}",
             whoami()
         );
     }
@@ -539,7 +554,7 @@ fn install() -> Result<(), String> {
 fn uninstall() -> Result<(), String> {
     if !systemd_booted() {
         return Err(
-            "这台机器没有 systemd，没有服务可移除；运行时由 smelt-up 看着，停掉它即可".to_string(),
+            "This machine has no systemd, so there's no service to remove; smelt-up watches the runtime, so stop that instead".to_string(),
         );
     }
     let unit = unit_path()?;
@@ -548,10 +563,10 @@ fn uninstall() -> Result<(), String> {
     match std::fs::remove_file(&unit) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("删除 {} 失败：{error}", unit.display())),
+        Err(error) => return Err(format!("Couldn't delete {}: {error}", unit.display())),
     }
     systemctl(&["daemon-reload"])?;
-    println!("已移除 {UNIT_NAME}");
+    println!("Removed {UNIT_NAME}");
     Ok(())
 }
 
@@ -575,12 +590,12 @@ fn linger_enabled() -> bool {
 
 #[cfg(not(target_os = "linux"))]
 fn install() -> Result<(), String> {
-    Err("只有 Linux 上要手动安装服务；macOS 上由 Smelt 桌面拉起守护".to_string())
+    Err("Only Linux needs the service installed by hand; on macOS the Smelt desktop starts the runtime".to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
 fn uninstall() -> Result<(), String> {
-    Err("只有 Linux 上才有 systemd 服务可移除".to_string())
+    Err("Only Linux has a systemd service to remove".to_string())
 }
 
 #[cfg(test)]
@@ -703,7 +718,7 @@ mod tests {
 
         let error = stop_daemon(&runtime, std::time::Duration::from_millis(200)).unwrap_err();
 
-        assert!(error.contains("没有退出"), "{error}");
+        assert!(error.contains("didn't exit"), "{error}");
         if let Some(mut child) = child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();

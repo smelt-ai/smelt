@@ -13,14 +13,13 @@ use gpui::{
     prelude::FluentBuilder as _, px, rems, rgb, svg,
 };
 use gpui_base::{Button as BaseButton, Disableable, GlobalState, Selectable, StyledExt as _};
-use gpui_kit_assets::IconNamed;
 
 pub use crate::kit::ControlSize;
 use crate::kit::{
     RADIUS, TYPE, TextStyle,
     elevation::{self, Elevation},
 };
-use crate::{motion, tooltip::Tooltip, ui_theme};
+use crate::{IconNamed, motion, tooltip::Tooltip, ui_theme};
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type HoverHandler = Box<dyn Fn(&bool, &mut Window, &mut App)>;
@@ -471,7 +470,7 @@ impl InteractiveElement for Button {
 
 impl StatefulInteractiveElement for Button {}
 
-/// 和 gpui-kit-assets 的命名图标一样，在绘制时取继承的文字颜色与大小。
+/// 和 [`crate::Icon`] 一样，在绘制时取继承的文字颜色与大小。
 #[derive(IntoElement)]
 struct ButtonIcon(SharedString);
 
@@ -704,7 +703,7 @@ impl Button {
             .children(children)
             .when(dropdown_caret, |this| {
                 this.child(icon_slot(
-                    gpui_kit_assets::IconName::ChevronDown.path(),
+                    crate::IconName::ChevronDown.path(),
                     metrics.icon,
                     None,
                 ))
@@ -1408,7 +1407,7 @@ mod tests {
         ] {
             let mut cx = HeadlessAppContext::with_platform(
                 Arc::new(gpui_apple::AppleTextSystem::new()),
-                Arc::new(gpui_kit_assets::AllAssets),
+                Arc::new(crate::assets::Assets),
                 || {
                     Ok(Some(Box::new(
                         gpui_apple::metal_renderer::MetalHeadlessRenderer::new()?,
@@ -1498,7 +1497,7 @@ mod tests {
         ] {
             let mut cx = HeadlessAppContext::with_platform(
                 Arc::new(gpui_apple::AppleTextSystem::new()),
-                Arc::new(gpui_kit_assets::AllAssets),
+                Arc::new(crate::assets::Assets),
                 || {
                     Ok(Some(Box::new(
                         gpui_apple::metal_renderer::MetalHeadlessRenderer::new()?,
@@ -1643,7 +1642,7 @@ mod tests {
 
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_apple::AppleTextSystem::new()),
-            Arc::new(gpui_kit_assets::AllAssets),
+            Arc::new(crate::assets::Assets),
             || {
                 Ok(Some(Box::new(
                     gpui_apple::metal_renderer::MetalHeadlessRenderer::new()?,
@@ -1799,10 +1798,10 @@ mod tests {
 
     #[test]
     fn icon_accepts_named_and_custom_assets() {
-        let asset = Button::new("asset").icon(gpui_kit_assets::IconName::Plus);
-        let custom = Button::new("custom").icon_path("smelt-icons/monitor.svg");
-        assert_eq!(asset.icon, Some(gpui_kit_assets::IconName::Plus.path()));
-        assert_eq!(custom.icon.as_deref(), Some("smelt-icons/monitor.svg"));
+        let asset = Button::new("asset").icon(crate::IconName::Plus);
+        let custom = Button::new("custom").icon_path("smelt-icons/agent-claude.svg");
+        assert_eq!(asset.icon, Some(crate::IconName::Plus.path()));
+        assert_eq!(custom.icon.as_deref(), Some("smelt-icons/agent-claude.svg"));
     }
 
     #[test]
@@ -1810,7 +1809,7 @@ mod tests {
         for disabled in [false, true] {
             let mut button = Button::new("b")
                 .quiet()
-                .icon(gpui_kit_assets::IconName::Check)
+                .icon(crate::IconName::Check)
                 .icon_opacity(0.25)
                 .disabled(disabled);
             assert_eq!(button.style().opacity, None);
@@ -2019,11 +2018,7 @@ mod tests {
 
     #[test]
     fn icon_only_means_no_label_and_no_children() {
-        assert!(
-            Button::new("b")
-                .icon(gpui_kit_assets::IconName::Close)
-                .icon_only()
-        );
+        assert!(Button::new("b").icon(crate::IconName::Close).icon_only());
         assert!(!Button::new("b").label("关闭").icon_only());
         assert!(!Button::new("b").child(div()).icon_only());
     }

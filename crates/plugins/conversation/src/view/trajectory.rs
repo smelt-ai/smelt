@@ -4,6 +4,9 @@
 //! Overview 用 sequence 等宽色块（DSH 也有 sequence 模式），账本按 Turn 分组。
 
 use super::*;
+use crate::acp_client::load_acp_debug;
+use rust_i18n::t;
+use smelt_plugin_api::model::acp_session::{ConversationDebug, RuntimeDebug};
 use smelt_plugin_api::ui::field::{InputEvent, InputState};
 use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
@@ -21,25 +24,12 @@ struct TrajectoryCacheKey {
     entries_len: usize,
     loaded_entries_offset: usize,
     entries_total: usize,
-    tool_debug_len: usize,
-    runtime_version: u32,
-    system_prompt_len: usize,
-    runtime_tool_count: usize,
-    model_call_count: usize,
-    last_model_call_sequence: u64,
-    last_response_at_ms: u64,
-    compaction_count: usize,
-    last_compaction_finished_at_ms: u64,
+    /// 每拉回一份调试数据加一。
+    debug_revision: u64,
 }
 
 impl TrajectoryCacheKey {
-    fn for_session(session: &ConversationView) -> Self {
-        let runtime_debug = &session.runtime_debug;
-        let last_call = runtime_debug
-            .model_calls
-            .last()
-            .or(runtime_debug.model_call.as_ref());
-        let last_compaction = runtime_debug.compactions.last();
+    fn for_session(session: &ConversationView, debug_revision: u64) -> Self {
         Self {
             // While a turn is running, assistant/tool updates can arrive per token. The trace
             // reflects the last structural/capture update and is fully refreshed at turn end.
@@ -51,21 +41,20 @@ impl TrajectoryCacheKey {
             entries_len: session.entries.len(),
             loaded_entries_offset: session.loaded_entries_offset,
             entries_total: session.entries_total,
-            tool_debug_len: session.tool_debug.len(),
-            runtime_version: runtime_debug.version,
-            system_prompt_len: runtime_debug.system_prompt.as_ref().map_or(0, String::len),
-            runtime_tool_count: runtime_debug.tools.len(),
-            model_call_count: runtime_debug.model_calls.len(),
-            last_model_call_sequence: last_call.map_or(0, |call| call.sequence),
-            last_response_at_ms: last_call
-                .and_then(|call| call.response_captured_at_ms)
-                .unwrap_or(0),
-            compaction_count: runtime_debug.compactions.len(),
-            last_compaction_finished_at_ms: last_compaction
-                .and_then(|compaction| compaction.finished_at_ms)
-                .unwrap_or(0),
+            debug_revision,
         }
     }
+}
+
+/// 什么时候该重拉调试数据：回合中只看条目增减，回合结束再按修订号补一次，
+/// 和上面重建缓存的节奏一致。
+fn debug_refresh_key(session: &ConversationView) -> (u64, usize) {
+    let revision = if session.has_active_turn() {
+        0
+    } else {
+        session.last_snapshot_revision
+    };
+    (revision, session.entries_total)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -123,6 +112,15 @@ pub(super) struct TrajectoryWindow {
     visible_key: Option<TrajectoryCacheKey>,
     last_query: String,
     inspector_tab: InspectorTab,
+    /// 工具参数表和 runtime debug。会话链路不推它们，窗口自己用 `acp_debug` 拉。
+    debug: ConversationDebug,
+    debug_revision: u64,
+    debug_error: Option<String>,
+    /// 上次发请求时会话的 [`debug_refresh_key`]；变了才重拉。
+    debug_key: Option<(u64, usize)>,
+    debug_loading: bool,
+    /// 请求在途期间会话又变了：回来后再补拉一次。
+    debug_stale: bool,
     _observe: gpui::Subscription,
     _search: gpui::Subscription,
 }
@@ -135,8 +133,13 @@ impl TrajectoryWindow {
                 cx.notify();
             }
         });
-        let _observe = cx.observe(&session, |_, _, cx| cx.notify());
-        Self {
+        let _observe = cx.observe(&session, |this, session, cx| {
+            if this.debug_key != Some(debug_refresh_key(session.read(cx))) {
+                this.request_debug(cx);
+            }
+            cx.notify();
+        });
+        let mut this = Self {
             session,
             event_list: ListState::new(0, ListAlignment::Top, px(600.))
                 .with_uniform_item_height(px(34.)),
@@ -152,9 +155,52 @@ impl TrajectoryWindow {
             visible_key: None,
             last_query: String::new(),
             inspector_tab: InspectorTab::Preview,
+            debug: ConversationDebug::default(),
+            debug_revision: 0,
+            debug_error: None,
+            debug_key: None,
+            debug_loading: false,
+            debug_stale: false,
             _observe,
             _search,
+        };
+        this.request_debug(cx);
+        this
+    }
+
+    /// 后台拉一次调试数据。同时只有一个请求在途，期间的变化记一笔，回来后补拉。
+    fn request_debug(&mut self, cx: &mut Context<Self>) {
+        if self.debug_loading {
+            self.debug_stale = true;
+            return;
         }
+        let session = self.session.read(cx);
+        self.debug_key = Some(debug_refresh_key(session));
+        self.debug_loading = true;
+        let runtime = session.runtime.client().clone();
+        let sid = session.sid.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { load_acp_debug(&runtime, &sid) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.debug_loading = false;
+                match result {
+                    Ok(debug) => {
+                        this.debug = debug;
+                        this.debug_revision += 1;
+                        this.debug_error = None;
+                    }
+                    Err(error) => this.debug_error = Some(error),
+                }
+                if std::mem::take(&mut this.debug_stale) {
+                    this.request_debug(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -172,7 +218,7 @@ impl ConversationView {
         cx.defer(move |cx| {
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("会话追踪".into()),
+                    title: Some(t!("trace.open").into()),
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::centered(size(px(1120.), px(760.)), cx)),
@@ -305,22 +351,18 @@ pub(super) fn runtime_debug_contexts(debug: &RuntimeDebug) -> Vec<TrajectoryCont
     contexts
 }
 
-fn trajectory_contexts(session: &ConversationView) -> Vec<TrajectoryContext> {
-    runtime_debug_contexts(&session.runtime_debug)
-}
-
 impl Render for TrajectoryWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session_entity = self.session.clone();
         let (cache_key, rebuilt_events, rebuilt_stats, live_elapsed) = {
             let session = session_entity.read(cx);
-            let cache_key = TrajectoryCacheKey::for_session(session);
+            let cache_key = TrajectoryCacheKey::for_session(session, self.debug_revision);
             let should_rebuild = self.cached_key != Some(cache_key);
             let rebuilt_events = should_rebuild.then(|| {
                 session_trajectory_events(
                     &session.entries,
-                    trajectory_contexts(session),
-                    &session.tool_debug,
+                    runtime_debug_contexts(&self.debug.runtime_debug),
+                    &self.debug.tool_debug,
                 )
             });
             let rebuilt_stats = should_rebuild.then(|| {
@@ -398,6 +440,18 @@ impl Render for TrajectoryWindow {
                 &self.search,
                 muted,
             ))
+            .children(self.debug_error.as_ref().map(|error| {
+                div()
+                    .flex_shrink_0()
+                    .px_4()
+                    .py_1()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(muted)
+                    .child(SharedString::from(t!(
+                        "trace.debug_unavailable",
+                        error = error
+                    )))
+            }))
             .child(render_sequence_overview(&self.cached_overview, muted))
             .child(
                 div()
@@ -472,7 +526,7 @@ fn render_trajectory_toolbar(
                     div()
                         .type_style(TYPE.ui_medium)
                         .text_color(gpui::rgb(ui_theme::text()))
-                        .child("会话追踪"),
+                        .child(t!("trace.open").into_owned()),
                 ),
         )
         .child(Divider::vertical().h(px(14.)))
@@ -550,11 +604,11 @@ fn render_event_ledger(
                 div()
                     .type_style(TYPE.ui)
                     .text_color(muted)
-                    .child(if all_events_empty {
-                        "还没有会话事件"
+                    .child(SharedString::from(if all_events_empty {
+                        t!("trace.no_events")
                     } else {
-                        "没有匹配的事件"
-                    }),
+                        t!("trace.no_matches")
+                    })),
             )
             .into_any_element();
     }
@@ -742,17 +796,17 @@ fn render_inspector(
     cx: &mut Context<TrajectoryWindow>,
 ) -> gpui::Div {
     let preview = tab == InspectorTab::Preview;
-    let kind_zh = match event.lane {
-        TrajectoryLane::ModelCall => "模型调用 · 请求 / 响应",
-        TrajectoryLane::Compaction => "Pi 上报的上下文压缩过程",
-        TrajectoryLane::Request => "Pi 请求组装配置",
-        TrajectoryLane::User => "用户消息",
-        TrajectoryLane::Assistant => "模型输出",
-        TrajectoryLane::Thinking => "模型思考",
-        TrajectoryLane::Tool => "工具调用",
+    let kind_text = match event.lane {
+        TrajectoryLane::ModelCall => t!("trace.lane.model_call"),
+        TrajectoryLane::Compaction => t!("trace.lane.compaction"),
+        TrajectoryLane::Request => t!("trace.lane.request"),
+        TrajectoryLane::User => t!("trace.lane.user"),
+        TrajectoryLane::Assistant => t!("trace.lane.assistant"),
+        TrajectoryLane::Thinking => t!("trace.lane.thinking"),
+        TrajectoryLane::Tool => t!("trace.lane.tool"),
     };
     let turn_value = if event.turn == 0 {
-        "非时间线".to_string()
+        t!("trace.off_timeline").into_owned()
     } else {
         format!("Turn {}", event.turn)
     };
@@ -808,7 +862,7 @@ fn render_inspector(
                             Button::new("trajectory-inspector-close")
                                 .dismiss()
                                 .icon(IconName::Close)
-                                .icon_action("关闭")
+                                .icon_action(t!("action.close"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.selected = None;
                                     cx.notify();
@@ -826,7 +880,7 @@ fn render_inspector(
                     div()
                         .type_style(TYPE.text_xsmall)
                         .text_color(muted)
-                        .child(kind_zh),
+                        .child(SharedString::from(kind_text)),
                 ),
         )
         .child(
@@ -869,7 +923,7 @@ fn render_inspector(
                 .border_color(ui_theme::hair())
                 .child(
                     Segmented::new("trajectory-inspector-tabs")
-                        .segments(["预览", "原始数据"])
+                        .segments([t!("trace.preview").to_string(), t!("trace.raw").to_string()])
                         .selected(Some(if preview { 0 } else { 1 }))
                         .on_select({
                             let view = cx.entity();

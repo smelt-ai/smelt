@@ -263,7 +263,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn timed_out() -> io::Error {
-    io::Error::new(io::ErrorKind::TimedOut, "进程内流读写超时")
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        "in-process stream read/write timed out",
+    )
 }
 
 fn checked_timeout(timeout: Option<Duration>) -> io::Result<Option<Duration>> {

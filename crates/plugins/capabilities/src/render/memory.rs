@@ -5,8 +5,6 @@ use crate::memory::{MemorySettingsForm, rerank_model_label};
 use api::model::memory_settings::RerankModel;
 use smelt_plugin_api::ui::kit::TYPE;
 
-const DESCRIPTION: &str = "按问题把相关的记忆附到对话里。关键词检索总是开着；重排模型和向量检索都可选，不可用时自动退回。";
-
 /// 配的是能力库眼下选中的那台机器。
 pub(super) fn pi_memory_page(
     entity: Entity<CapabilitiesPage>,
@@ -16,15 +14,15 @@ pub(super) fn pi_memory_page(
 ) -> SettingsPage {
     let form = memory_form(&page.machine, window, cx);
     SettingsPage::new("capabilities-pane:memory")
-        .child(page_intro(DESCRIPTION))
+        .child(page_intro(t!("memory.description")))
         .child(
             SettingsSection::new()
-                .title("重排模型")
+                .title(t!("memory.rerank_title"))
                 .child(render_rerank_model(entity, form.clone(), cx)),
         )
         .child(
             SettingsSection::new()
-                .title("向量检索服务（可选）")
+                .title(t!("memory.vector_title"))
                 .child(render_form(form, cx)),
         )
 }
@@ -94,14 +92,18 @@ fn render_rerank_model(
         }
         menu
     });
-    div().flex().flex_col()
+    div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_2()
         .child(picker)
-        .child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
-            "会话第一轮、压缩之后和 memory_search 时，用它从候选里挑相关的记忆。选小而快的模型即可；\
-             指定的模型不可用时这一轮只用检索结果，不会换成别的模型。推理自动压到最低档。",
-        ))
+        .child(
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(t!("memory.rerank_description").into_owned()),
+        )
         .into_any_element()
 }
 
@@ -113,7 +115,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
     let state = form.read(cx);
     let status = state.status_line();
     let error = state.error.clone();
-    let notice = state.notice;
+    let notice = state.notice.clone();
     let api_key_set = state.api_key_set();
     let testing = state.testing;
     let test_result = state.test_result.clone();
@@ -123,7 +125,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
         state.api_key.clone(),
     );
 
-    let field = |label: &'static str, input: &Entity<InputState>| {
+    let field = |label: std::borrow::Cow<'static, str>, input: &Entity<InputState>| {
         div()
             .flex()
             .flex_col()
@@ -133,7 +135,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(fg)
-                    .child(label),
+                    .child(SharedString::from(label)),
             )
             .child(TextInput::new(input))
     };
@@ -151,12 +153,12 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
             Button::new("test-pi-memory")
                 .small()
                 .label(if testing {
-                    "测试中…"
+                    t!("memory.testing")
                 } else {
-                    "测试连接"
+                    t!("memory.test")
                 })
                 .disabled(testing)
-                .tooltip("用上面填的值发一次请求，确认服务可用（不必先保存）")
+                .tooltip(t!("memory.test_tooltip"))
                 .on_click(move |_, window, cx| {
                     test_form.update(cx, |form, cx| form.test(window, cx));
                 }),
@@ -165,7 +167,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
             Button::new("save-pi-memory")
                 .primary()
                 .small()
-                .label("保存")
+                .label(t!("common.save"))
                 .on_click(move |_, window, cx| {
                     save_form.update(cx, |form, cx| form.save(window, cx));
                 }),
@@ -175,7 +177,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
             Button::new("clear-pi-memory-key")
                 .quiet()
                 .small()
-                .label("清除密钥")
+                .label(t!("memory.clear_key"))
                 .on_click(move |_, window, cx| {
                     clear_key_form.update(cx, |form, cx| form.clear_api_key(window, cx));
                 }),
@@ -185,7 +187,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
         Button::new("clear-pi-memory")
             .quiet()
             .small()
-            .label("清空配置")
+            .label(t!("memory.clear_all"))
             .on_click(move |_, window, cx| {
                 clear_all_form.update(cx, |form, cx| form.clear_all(window, cx));
             }),
@@ -195,26 +197,30 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(muted)
-                .child(notice),
+                .child(SharedString::from(notice)),
         );
     }
 
-    let mut content = div().flex().flex_col()
+    let mut content = div()
+        .flex()
+        .flex_col()
         .w_full()
         .gap_3()
-        .child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
-            "填一个 OpenAI 兼容的 /embeddings 服务（含 Ollama 等本地服务，如 http://localhost:11434/v1）。\
-             没配或服务不可用时，只用关键词 + 模型重排。",
-        ))
-        .child(div().type_style(TYPE.ui).text_color(fg).child(status))
-        .child(field("服务地址", &base_url))
-        .child(field("模型", &model))
-        .child(field("API Key（可选）", &api_key))
         .child(
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(muted)
-                .child("API Key 留空表示保持不变；已存的密钥不会显示。"),
+                .child(t!("memory.form_description").into_owned()),
+        )
+        .child(div().type_style(TYPE.ui).text_color(fg).child(status))
+        .child(field(t!("memory.base_url"), &base_url))
+        .child(field(t!("memory.model"), &model))
+        .child(field(t!("memory.api_key"), &api_key))
+        .child(
+            div()
+                .type_style(TYPE.text_xsmall)
+                .text_color(muted)
+                .child(t!("memory.key_hint").into_owned()),
         );
     if let Some(error) = error {
         content = content.child(
@@ -238,7 +244,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(danger)
-                    .child(format!("测试失败：{message}")),
+                    .child(t!("memory.test_failed", message = message).into_owned()),
             );
         }
         None => {}

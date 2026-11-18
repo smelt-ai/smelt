@@ -24,6 +24,8 @@ use gpui_base::input::{
 };
 pub use gpui_base::input::{InputEvent, InputState, TextareaState};
 use gpui_base::{InputBase, RoleOverride, StyledExt as _};
+use rust_i18n::t;
+use std::borrow::Cow;
 
 use crate::button::{Button, DISABLED_OPACITY};
 use crate::kit::{GLYPHS, RADIUS, TYPE, elevation};
@@ -139,7 +141,7 @@ pub(crate) fn edit_menu<M: InputModeKind>(
         };
         let capabilities = state.read(cx).context_menu_capabilities();
         let focus = state.focus_handle(cx);
-        let item = |label: &'static str, enabled: bool, action: fn() -> Box<dyn Action>| {
+        let item = |label: Cow<'static, str>, enabled: bool, action: fn() -> Box<dyn Action>| {
             let focus = focus.clone();
             MenuItem::new(label)
                 .disabled(!enabled)
@@ -151,11 +153,13 @@ pub(crate) fn edit_menu<M: InputModeKind>(
         let editable = capabilities.is_editable();
         let copyable = capabilities.is_copyable();
         Menu::new()
-            .item(item("剪切", editable && copyable, || Box::new(Cut)))
-            .item(item("复制", copyable, || Box::new(Copy)))
-            .item(item("粘贴", editable, || Box::new(Paste)))
+            .item(item(t!("action.cut"), editable && copyable, || {
+                Box::new(Cut)
+            }))
+            .item(item(t!("action.copy"), copyable, || Box::new(Copy)))
+            .item(item(t!("action.paste"), editable, || Box::new(Paste)))
             .separator()
-            .item(item("全选", true, || Box::new(SelectAll)))
+            .item(item(t!("action.select_all"), true, || Box::new(SelectAll)))
     }
 }
 
@@ -329,7 +333,7 @@ impl RenderOnce for TextInput {
                     .quiet()
                     .small()
                     .icon(GLYPHS.close)
-                    .accessibility_label("清空")
+                    .accessibility_label(t!("action.clear"))
                     .on_click(move |_, window, cx| {
                         state.update(cx, |state, cx| {
                             state.clean(window, cx);

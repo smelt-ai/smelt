@@ -222,10 +222,10 @@ pub fn parse_codex_quota(body: &str) -> anyhow::Result<Option<ProviderQuota>> {
 
     let mut windows = Vec::new();
     if let Some(window) = rate_limit.primary_window {
-        push_codex_window(&mut windows, "主", window);
+        push_codex_window(&mut windows, "primary", window);
     }
     if let Some(window) = rate_limit.secondary_window {
-        push_codex_window(&mut windows, "次", window);
+        push_codex_window(&mut windows, "secondary", window);
     }
     Ok((!windows.is_empty()).then_some(ProviderQuota { windows }))
 }
@@ -362,7 +362,7 @@ fn grok_window_label(config: &GrokCreditsConfig) -> String {
     {
         return format_window_seconds((end - start) / 1000);
     }
-    "额度".to_string()
+    "period".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -430,7 +430,7 @@ fn cursor_window_label(start_ms: Option<u64>, end_ms: Option<u64>) -> String {
     {
         return format_window_seconds((end - start) / 1000);
     }
-    "月".to_string()
+    "month".to_string()
 }
 
 fn deserialize_opt_millis<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -986,7 +986,7 @@ mod tests {
             parse_grok_quota(r#"{"config":{"currentPeriod":{"end":"2026-08-23T00:00:00Z"}}}"#)
                 .unwrap()
                 .unwrap();
-        assert_eq!(quota.windows[0].label, "额度");
+        assert_eq!(quota.windows[0].label, "period");
         assert_eq!(quota.windows[0].used_percent, 0.0);
         assert!(quota.windows[0].resets_at_ms.is_some());
     }
@@ -1059,7 +1059,7 @@ mod tests {
         .unwrap();
         assert_eq!(quota.windows[0].used_percent, 50.0);
         assert_eq!(quota.windows[0].resets_at_ms, Some(1_789_566_331_000));
-        assert_eq!(quota.windows[0].label, "月");
+        assert_eq!(quota.windows[0].label, "month");
     }
 
     #[test]

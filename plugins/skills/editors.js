@@ -17,6 +17,7 @@ import {
   pickSkillDirectory,
 } from "./core.js";
 import { SPACE, MONO, TRASH, button, hint, mono, pretty } from "./ui.js";
+import { t } from "./i18n.js";
 
 /** @typedef {{ home(): string, projectRoot(): string | null, installed(): any[] }} Env */
 
@@ -176,12 +177,12 @@ export function scopeForm(session, cx, changed) {
   const radio = (id, label, checked, pick) =>
     SmeltRadio.new(id).label(label).checked(checked).on_select((cx) => pick(cx));
   return [
-    line("给谁", [
-      radio("scope-kind-universal", "所有 agent（通用）", form.universal, (cx) => {
+    line(t("scope.for"), [
+      radio("scope-kind-universal", t("scope.universal_all"), form.universal, (cx) => {
         session.setUniversal(true);
         changed(cx);
       }),
-      radio("scope-kind-agent", "仅指定 agent", !form.universal, (cx) => {
+      radio("scope-kind-agent", t("scope.specific"), !form.universal, (cx) => {
         session.setUniversal(false);
         changed(cx);
       }),
@@ -196,7 +197,7 @@ export function scopeForm(session, cx, changed) {
             .children(
               choices.map((choice) =>
                 SmeltCheckbox.new(`agent-${choice.label}`)
-                  .label(choice.installed ? choice.label : `${choice.label}（未安装）`)
+                  .label(choice.installed ? choice.label : t("scope.not_installed", { agent: choice.label }))
                   .checked(form.labels.includes(choice.label))
                   .on_change((_checked, cx) => {
                     session.toggleLabel(choice.label);
@@ -205,18 +206,18 @@ export function scopeForm(session, cx, changed) {
               ),
             ),
         ]),
-    line("层级", [
-      radio("scope-level-user", "用户级", !form.project_scope, (cx) => {
+    line(t("scope.level"), [
+      radio("scope-level-user", t("scope.user"), !form.project_scope, (cx) => {
         session.setLevel(false);
         changed(cx);
       }),
       // 没有打开项目时选不了。
       projectRoot
-        ? radio("scope-level-project", `项目级（${pretty(session.env.home(), projectRoot)}）`, form.project_scope, (cx) => {
+        ? radio("scope-level-project", t("scope.project_at", { path: pretty(session.env.home(), projectRoot) }), form.project_scope, (cx) => {
             if (session.setLevel(true)) changed(cx);
             else cx.notify();
           })
-        : SmeltRadio.new("scope-level-project").label("项目级（没有打开项目）").disabled(true),
+        : SmeltRadio.new("scope-level-project").label(t("scope.project_none")).disabled(true),
     ]),
   ];
 }
@@ -226,12 +227,12 @@ export function scopeForm(session, cx, changed) {
 export function planView(session, idle, cx) {
   const colors = cx.theme().colors;
   const plan = session.plan;
-  if (plan === null) return hint("正在计算…", cx);
+  if (plan === null) return hint(t("plan.computing"), cx);
   if (plan.error) return div().text_xs().whitespace_normal().text_color(colors.destructive).child(plan.error);
   if (plan.steps.length === 0) return hint(idle, cx);
   return v_flex()
     .gap(2)
-    .child(hint("将执行", cx))
+    .child(hint(t("plan.title"), cx))
     .children(plan.steps.map((step) => mono(step)));
 }
 
@@ -244,8 +245,8 @@ export function importSource(session, cx, pick) {
   if (session.source === null) {
     return v_flex()
       .gap(SPACE.sm)
-      .child(hint("选一个含 SKILL.md 的目录，整个目录会被复制进来。", cx))
-      .child(h_flex().child(button("pick", "选择目录…", pick, "primary").loading(session.picking)));
+      .child(hint(t("import.source_hint"), cx))
+      .child(h_flex().child(button("pick", t("import.pick"), pick, "primary").loading(session.picking)));
   }
   return v_flex()
     .gap(SPACE.xs)
@@ -267,7 +268,7 @@ export function importSource(session, cx, pick) {
                 .child(pretty(session.env.home(), session.source)),
             ),
         )
-        .child(button("repick", "换一个…", pick, "secondary").loading(session.picking)),
+        .child(button("repick", t("import.repick"), pick, "secondary").loading(session.picking)),
     )
     .when(Boolean(info && info.description), (el) => el.child(hint(info.description, cx)));
 }
@@ -278,13 +279,13 @@ export function importWarnings(session) {
   const info = session.sourceInfo;
   const warnings = [];
   if (session.plan !== null && session.plan.replaces) {
-    warnings.push(SmeltAlert.new("replaces", `已有同名技能，导入会替换它，旧版本移进 ~/${TRASH}。`).need());
+    warnings.push(SmeltAlert.new("replaces", t("import.replaces", { trash: TRASH })).need());
   }
   if (info && info.has_global && session.form.project_scope) {
     warnings.push(
       SmeltAlert.new(
         "global",
-        `用户级已有同名「${info.name}」。装到项目级会在这个项目里盖过它；想更新用户级那份，把层级改成用户级。`,
+        t("import.shadows_user", { name: info.name }),
       ).need(),
     );
   }

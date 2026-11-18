@@ -10,14 +10,16 @@
 //!   那段，同步、扔掉目录里没了的，兑现还在等的打开。
 //! - 分屏眼下那一格换了（`SplitEvent`）：推一份进 `Sessions::active_pane`，发布活动上下文。
 
+use rust_i18n::t;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyView, App, AppContext as _, Axis, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StyleRefinement, Styled as _, Subscription, Window,
-    div, px, rgb,
+    IntoElement, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
+    Subscription, Window, div, px, rgb,
 };
 use gpui_base::StyledExt as _;
 use smelt_plugin_api::model::agent_status::AgentStatus;
@@ -115,7 +117,10 @@ pub(crate) fn split_pane(axis: Axis, _window: &mut Window, cx: &mut App) -> Resu
         if let Err(error) = updated.await {
             cx.update(|cx| {
                 split.update(cx, |split, _| split.forget_pane(&session_id));
-                crate::notify_error(&format!("分屏失败：{error}"), cx);
+                crate::notify_error(
+                    &t!("error.failed", what = t!("action.split"), error = error),
+                    cx,
+                );
             });
         }
     })
@@ -143,16 +148,22 @@ pub(crate) fn close_pane(window: &mut Window, cx: &mut App) -> Result<(), String
     };
     let single = pane.filter(|pane| many && pane.kind == PaneKind::Terminal);
     let Some(pane) = single else {
-        let running = model::status(&conversation, &states) == AgentStatus::Running;
+        let running = conversation.status(&states) == AgentStatus::Running;
         let title = model::title(&conversation, &states);
         confirm_if(
             running,
-            "这个会话还在运行，确定关闭吗？",
-            "关闭会话",
+            t!("close.session_running"),
+            t!("close.session"),
             title,
             window,
             cx,
-            move |cx| crate::report_failure("关会话", lifecycle::close_conversation(key, cx), cx),
+            move |cx| {
+                crate::report_failure(
+                    t!("action.close_session"),
+                    lifecycle::close_conversation(key, cx),
+                    cx,
+                )
+            },
         );
         return Ok(());
     };
@@ -164,8 +175,8 @@ pub(crate) fn close_pane(window: &mut Window, cx: &mut App) -> Result<(), String
     let title = split.read(cx).pane_title(&pane.session_id, cx).to_string();
     confirm_if(
         running,
-        "这个分屏还在运行，确定关闭吗？",
-        "关闭分屏",
+        t!("close.pane_running"),
+        t!("close.pane"),
         title,
         window,
         cx,
@@ -180,7 +191,14 @@ fn close_terminal(key: ConversationKey, session_id: String, cx: &mut App) {
     let mut conversation = match directory_entry(&key, cx) {
         Ok(conversation) => conversation,
         Err(error) => {
-            crate::notify_error(&format!("关分屏失败：{error}"), cx);
+            crate::notify_error(
+                &t!(
+                    "error.failed",
+                    what = t!("action.close_pane"),
+                    error = error
+                ),
+                cx,
+            );
             return;
         }
     };
@@ -192,7 +210,7 @@ fn close_terminal(key: ConversationKey, session_id: String, cx: &mut App) {
         return;
     }
     crate::report_failure(
-        "关分屏",
+        t!("action.close_pane"),
         lifecycle::update_conversation(key.machine, conversation, cx),
         cx,
     );
@@ -201,8 +219,8 @@ fn close_terminal(key: ConversationKey, session_id: String, cx: &mut App) {
 /// `ask` 为真先弹确认（正在跑的这一轮会被终止），否则直接 `run`。
 fn confirm_if(
     ask: bool,
-    question: &'static str,
-    action: &'static str,
+    question: Cow<'static, str>,
+    action: Cow<'static, str>,
     title: String,
     window: &mut Window,
     cx: &mut App,
@@ -220,9 +238,7 @@ fn confirm_if(
         true
     })
     .danger()
-    .description(format!(
-        "「{title}」正在跑的这一轮会被终止，关掉之后找不回来。"
-    ))
+    .description(t!("close.running_description", title = title))
     .open(window, cx);
 }
 
@@ -234,11 +250,11 @@ fn selected(cx: &App) -> Result<(ConversationKey, Entity<Split>), String> {
         .selection
         .session()
         .cloned()
-        .ok_or_else(|| "没有选中的会话".to_string())?;
+        .ok_or_else(|| t!("error.no_selection").into_owned())?;
     let split = api::built_view(contract::SESSION, cx)
         .and_then(|view| view.view().downcast::<SessionView>().ok())
         .and_then(|view| Some(view.read(cx).live.get(&key)?.split.clone()))
-        .ok_or_else(|| "会话还没打开".to_string())?;
+        .ok_or_else(|| t!("error.not_open").into_owned())?;
     Ok((key, split))
 }
 
@@ -252,7 +268,7 @@ fn directory_entry(key: &ConversationKey, cx: &App) -> Result<WorkspaceConversat
                 .into_iter()
                 .find(|conversation| conversation.id == key.id)
         })
-        .ok_or_else(|| "这段会话已经不在目录里了".to_string())
+        .ok_or_else(|| t!("error.not_in_directory").into_owned())
 }
 
 // ---- 视图 ----
@@ -342,7 +358,7 @@ impl SessionView {
             Located::Wait => self.waiting = Some(args),
             Located::Missing => {
                 self.waiting = None;
-                crate::notify_error("要打开的会话已经不在了", cx);
+                crate::notify_error(&t!("error.session_gone"), cx);
             }
         }
     }
@@ -513,21 +529,25 @@ fn empty_state(add_machine: bool) -> impl IntoElement {
                         .text_color(rgb(ui_theme::text())),
                 ),
         )
-        .child(div().font_medium().child("休息一下"))
+        .child(
+            div()
+                .font_medium()
+                .child(SharedString::from(t!("empty.title"))),
+        )
         .child(
             div()
                 .text_color(rgb(ui_theme::muted()))
-                .child("没有打开的会话"),
+                .child(SharedString::from(t!("empty.no_session"))),
         )
         .when(add_machine, |empty| {
             empty.child(
                 Button::new("empty-add-machine")
                     .primary()
-                    .label("添加远程机器")
+                    .label(t!("empty.add_machine"))
                     .mt_2()
                     .on_click(|_, _, cx| {
                         let added = ADD_MACHINE.run(&(), cx);
-                        crate::report_failure("添加远程机器", added, cx);
+                        crate::report_failure(t!("action.add_machine"), added, cx);
                     }),
             )
         });
@@ -557,7 +577,7 @@ impl PluginView for SessionView {
         }
         match serde_json::from_value::<SessionArgs>(args.clone()) {
             Ok(args) => self.reveal(args, window, cx),
-            Err(error) => crate::notify_error(&format!("打开会话：参数不对：{error}"), cx),
+            Err(error) => crate::notify_error(&t!("error.bad_open_args", error = error), cx),
         }
     }
 

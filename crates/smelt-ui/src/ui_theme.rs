@@ -11,7 +11,7 @@
 //! 界面本身是黑白灰：颜色只表示状态（`run` / `need` / `ok` / `bad`）和主操作
 //! （`ink`）。调用点不写裸 `rgb(0x...)`。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{FontFeatures, Pixels, Rgba, px, rgb, rgba};
@@ -122,6 +122,8 @@ struct Installed {
     palette: Palette,
     colors: ThemeColors,
     elevation: Arc<Elevation>,
+    /// 窗口底叠出来的颜色，见 [`backdrop`]。
+    backdrop: u32,
 }
 
 static ACTIVE: RwLock<Option<Installed>> = RwLock::new(None);
@@ -156,17 +158,20 @@ impl MaterialTone {
 /// 「窗口底下没有材质」：两个色各只占低 24 位，打包后不可能撞上。
 const NO_MATERIAL: u64 = u64::MAX;
 
-/// 窗口底下垫的材质（打包的 [`MaterialTone`]）。垫了的话界面上的字压在材质上，不是压在
-/// 主题的 `bg_base` 上，文字色要按材质配（[`fit_text_to_backdrop`]）。
+/// 窗口底下垫的材质（打包的 [`MaterialTone`]）。
 static WINDOW_MATERIAL: AtomicU64 = AtomicU64::new(NO_MATERIAL);
+/// 有材质时主题底色铺在材质上的不透明度（`f32` 的位）。
+static BG_OPACITY: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 
-/// 宿主告诉色板窗口底下垫的是什么材质（`None` 是没有）。之后装的每份主题都按它配字色，
-/// 所以换了材质要重装一次主题。
-pub fn set_window_material(tone: Option<MaterialTone>) {
+/// 宿主告诉色板窗口底透的地方是怎么叠的：底下垫什么材质（`None` 是没有，窗口不透明；几种
+/// 材质时宿主给最不利的那种），主题底色以多大的不透明度（0–1）铺在材质上。界面上的字压在两者叠出来的颜色上（[`text_backdrop`]），
+/// 之后装的每份主题都按它配色，所以这两样变了要重装一次主题。
+pub fn set_window_backdrop(material: Option<MaterialTone>, bg_opacity: f32) {
     WINDOW_MATERIAL.store(
-        tone.map_or(NO_MATERIAL, MaterialTone::pack),
+        material.map_or(NO_MATERIAL, MaterialTone::pack),
         Ordering::Relaxed,
     );
+    BG_OPACITY.store(bg_opacity.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
 }
 
 fn window_material() -> Option<MaterialTone> {
@@ -174,6 +179,38 @@ fn window_material() -> Option<MaterialTone> {
         NO_MATERIAL => None,
         packed => Some(MaterialTone::unpack(packed)),
     }
+}
+
+fn bg_opacity() -> f32 {
+    f32::from_bits(BG_OPACITY.load(Ordering::Relaxed))
+}
+
+/// 窗口底实色的地方铺的那层：不透的主题底色。窗口底只由宿主在窗口根上按地方铺（实色的
+/// 这层、透的地方 [`glass_fill`]），各栏、各视图不再铺页面底。
+pub fn solid_fill() -> Rgba {
+    Rgba {
+        a: 1.0,
+        ..colors().bg_base
+    }
+}
+
+/// 窗口底透的地方（布局声明了材质的停靠区）铺的那层：主题底色按设置的不透明度，透出底下的
+/// 材质。没有材质时和 [`solid_fill`] 一样。
+pub fn glass_fill() -> Rgba {
+    let bg = colors().bg_base;
+    match window_material() {
+        Some(_) => Rgba {
+            a: bg.a * bg_opacity(),
+            ..bg
+        },
+        None => Rgba { a: 1.0, ..bg },
+    }
+}
+
+/// 窗口底透的地方叠出来的颜色：界面上的字、行底、交给组件库和插件的实色都按它配。和
+/// [`glass_fill`] 是同一份算法，读的是同一时刻装上的主题。实色的地方离字更远，对比只会更足。
+pub(crate) fn backdrop() -> u32 {
+    installed(|installed| installed.backdrop)
 }
 
 /// 正文压在窗口底上至少要的对比（WCAG AAA），和次要字拉开层次。
@@ -188,11 +225,23 @@ const ROW_HOVER_MIN_LIGHTNESS: f32 = 5.0;
 /// 也要和悬停拉开一档。主题配得更深的照主题。
 const ROW_SELECTED_MIN_LIGHTNESS: f32 = 15.0;
 
-/// 字实际压着的那层窗口底：有材质时是材质的代表色，不然是主题底色。
-fn text_backdrop(material: Option<MaterialTone>, background: Rgba, dark: bool) -> u32 {
+/// 字实际压着的那层窗口底：有材质时是主题底色按 `opacity` 叠在材质代表色上，不然就是
+/// 主题底色。
+fn text_backdrop(
+    material: Option<MaterialTone>,
+    background: Rgba,
+    opacity: f32,
+    dark: bool,
+) -> u32 {
     match material {
         None => pack(background),
-        Some(tone) => tone.pick(dark),
+        Some(tone) => flatten(
+            Rgba {
+                a: background.a * opacity,
+                ..background
+            },
+            tone.pick(dark),
+        ),
     }
 }
 
@@ -245,15 +294,15 @@ fn legible_toward(fg: u32, backdrop: u32, min: f32, toward: u32) -> u32 {
     mix(fg, toward, enough)
 }
 
-/// 窗口底下有材质时，把直接压在窗口底上的那几档字色和图标色按材质配够对比。主题是按自己
-/// 的 `bg_base` 配色的；毛玻璃时字实际压在材质上，材质一般比深色主题的底亮、比浅色主题的
-/// 底暗，灰字就糊成一片。在装主题这一处改，自绘色板、[`colors`] 和应用交给组件库的字色是同
-/// 一组，不用一处处补。没有材质时什么都不改。
+/// 窗口底下有材质时，把直接压在窗口底上的那几档字色和图标色按实际的窗口底配够对比。主题
+/// 是按自己的 `bg_base` 配色的；毛玻璃时字压在底色和材质叠出来的颜色上，底色铺得越薄越接近
+/// 材质，材质一般比深色主题的底亮、比浅色主题的底暗，灰字就糊成一片。在装主题这一处改，
+/// 自绘色板、[`colors`] 和应用交给组件库的字色是同一组，不用一处处补。没有材质时什么都不改。
 pub(crate) fn fit_text_to_backdrop(colors: &mut ThemeColors, dark: bool) {
     let Some(material) = window_material() else {
         return;
     };
-    let backdrop = text_backdrop(Some(material), colors.bg_base, dark);
+    let backdrop = text_backdrop(Some(material), colors.bg_base, bg_opacity(), dark);
     let fit = |color: &mut Rgba, min: f32| {
         let flat = flatten(*color, backdrop);
         let fitted = legible(flat, backdrop, min);
@@ -282,11 +331,12 @@ pub fn is_light() -> bool {
 /// 主题装上之后，按语义色重填色板。只由 `theme_catalog::apply` 调；`colors` 已经按材质配过
 /// 字色（[`fit_text_to_backdrop`]）。
 pub(crate) fn install_theme(colors: &ThemeColors, elevation: Arc<Elevation>, dark: bool) {
-    let backdrop = text_backdrop(window_material(), colors.bg_base, dark);
+    let backdrop = text_backdrop(window_material(), colors.bg_base, bg_opacity(), dark);
     let installed = Installed {
         palette: palette_from_tokens(colors, backdrop),
         colors: *colors,
         elevation,
+        backdrop,
     };
     install(installed, !dark);
 }
@@ -307,10 +357,12 @@ fn builtin(light: bool) -> Installed {
     };
     let config = theme_catalog::builtin_for_mode(mode);
     let colors = *config.colors();
+    let backdrop = pack(colors.bg_base);
     Installed {
-        palette: palette_from_tokens(&colors, pack(colors.bg_base)),
+        palette: palette_from_tokens(&colors, backdrop),
         colors,
         elevation: config.elevation().clone(),
+        backdrop,
     }
 }
 
@@ -496,7 +548,7 @@ pub(crate) fn flatten(color: Rgba, behind: u32) -> u32 {
     pack(rgb(behind).blend(color))
 }
 
-fn pack(color: Rgba) -> u32 {
+pub(crate) fn pack(color: Rgba) -> u32 {
     let q = |channel: f32| ((channel.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xff;
     (q(color.r) << 16) | (q(color.g) << 8) | q(color.b)
 }
@@ -922,7 +974,7 @@ mod tests {
             .colors();
             let (hover, active) = (flatten(colors.hover, p.bg), flatten(colors.pressed, p.bg));
             for material in std::iter::once(None).chain(TEST_MATERIALS.into_iter().map(Some)) {
-                let backdrop = text_backdrop(material, rgb(p.bg), !light);
+                let backdrop = text_backdrop(material, rgb(p.bg), 0.0, !light);
                 // 装主题时先按同一外观的材质配字色，再由色板计算行底。
                 let (text, muted) = if material.is_some() {
                     (
@@ -1118,7 +1170,7 @@ mod tests {
                     ThemeMode::Light
                 })
                 .colors();
-                let backdrop = text_backdrop(Some(tone), colors.bg_base, dark);
+                let backdrop = text_backdrop(Some(tone), colors.bg_base, 0.0, dark);
                 let fit = |color: &mut Rgba, min: f32| {
                     *color = rgb(legible(flatten(*color, backdrop), backdrop, min))
                 };
@@ -1147,10 +1199,29 @@ mod tests {
         assert!(relative_luminance(darkened) < relative_luminance(0x6b6a65));
     }
 
-    /// 没有材质时字底就是主题底色，弱字和原来一样按主题底色算。
+    /// 没有材质时字底就是主题底色，不管底色不透明度设成多少（窗口不透明）。
     #[test]
     fn without_material_the_backdrop_is_the_theme_background() {
-        assert_eq!(text_backdrop(None, rgb(0x1e1e1d), true), 0x1e1e1d);
+        for opacity in [0.0, 0.5, 1.0] {
+            assert_eq!(text_backdrop(None, rgb(0x1e1e1d), opacity, true), 0x1e1e1d);
+        }
+    }
+
+    /// 有材质时字底是底色叠在材质上：铺满是底色，不铺是材质，中间按比例混。
+    #[test]
+    fn with_material_the_backdrop_blends_theme_background_over_it() {
+        let tone = MaterialTone {
+            dark: 0x404040,
+            light: 0xd0d0d0,
+        };
+        let bg = rgb(0x000000);
+        assert_eq!(text_backdrop(Some(tone), bg, 1.0, true), 0x000000);
+        assert_eq!(text_backdrop(Some(tone), bg, 0.0, true), 0x404040);
+        assert_eq!(text_backdrop(Some(tone), bg, 0.5, true), 0x202020);
+        assert_eq!(
+            text_backdrop(Some(tone), rgb(0xffffff), 0.0, false),
+            0xd0d0d0
+        );
     }
 
     #[test]

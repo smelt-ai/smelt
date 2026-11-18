@@ -6,7 +6,7 @@
 
 use gpui::{App, Global, SharedString};
 
-use crate::HostEvent;
+use crate::{HostEvent, Text};
 
 /// 放进哪个菜单。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,7 +21,8 @@ pub enum MenuSlot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuEntry {
     pub slot: MenuSlot,
-    pub title: SharedString,
+    /// 菜单上的字，跟着界面语言变：宿主在 [`HostEvent::LocaleChanged`] 时重设菜单栏。
+    pub title: Text,
     /// 点了执行的命令 id（`<来源>/<名字>`），不带参数。
     pub command: SharedString,
 }

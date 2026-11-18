@@ -22,6 +22,8 @@ pub use parser::{DiffParseError, DiffParseOptions};
 pub use presentation::DiffInlineUnit;
 pub use state::{DiffEvent, DiffState};
 
+use rust_i18n::t;
+use std::borrow::Cow;
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use gpui::{
@@ -559,8 +561,8 @@ fn render_diff(
     let horizontal = state.horizontal_scroll().clone();
     let has_rows = !rows.is_empty();
     let label = match state.files() {
-        [file] => format!("{} 的差异", file.path()),
-        files => format!("{} 个文件的差异", files.len()),
+        [file] => t!("diff.label_one", path = file.path()).into_owned(),
+        files => t!("diff.label_many", count = files.len()).into_owned(),
     };
     let body = div()
         .id("diff-body")
@@ -989,7 +991,7 @@ fn render_hunk_separator(
                 return div().into_any_element();
             }
             row.h_6()
-                .child(format!("补丁里没有的 {hidden} 行"))
+                .child(SharedString::from(t!("diff.hidden_lines", count = hidden)))
                 .into_any_element()
         }
         DiffHunkSeparator::Simple => row.h_1().into_any_element(),
@@ -1031,14 +1033,14 @@ fn render_fold(
             this.child(
                 expand(("expand-down", pairs.start), FoldExpansion::Down)
                     .icon(IconName::ArrowDown)
-                    .accessibility_label(format!("显示下方 {lines} 行")),
+                    .accessibility_label(t!("diff.show_below", lines = lines).into_owned()),
             )
         })
         .when(partial && pairs.end < hunk.end, |this| {
             this.child(
                 expand(("expand-up", pairs.start), FoldExpansion::Up)
                     .icon(IconName::ArrowUp)
-                    .accessibility_label(format!("显示上方 {lines} 行")),
+                    .accessibility_label(t!("diff.show_above", lines = lines).into_owned()),
             )
         })
         .child(
@@ -1048,8 +1050,8 @@ fn render_fold(
                 } else {
                     IconName::ChevronDown
                 })
-                .label(format!("{} 行没改", pairs.len()))
-                .accessibility_label(format!("展开 {} 行没改的内容", pairs.len())),
+                .label(t!("diff.unchanged", count = pairs.len()))
+                .accessibility_label(t!("diff.expand_unchanged", count = pairs.len())),
         )
         .into_any_element()
 }
@@ -1088,39 +1090,43 @@ fn render_conflict(
         .bg(conflict_tint(Some(part), cx).opacity(0.25));
     if let Some(resolution) = resolution {
         let label = match resolution {
-            DiffConflictResolution::Current => "已采用当前的改动",
-            DiffConflictResolution::Incoming => "已采用传入的改动",
-            _ => "已保留双方的改动",
+            DiffConflictResolution::Current => t!("conflict.took_current"),
+            DiffConflictResolution::Incoming => t!("conflict.took_incoming"),
+            _ => t!("conflict.kept_both"),
         };
         return row
             .bg(cx.theme().muted.opacity(0.35))
-            .child(label.to_string())
-            .child(choose("undo-resolution", "撤销".to_string(), None))
+            .child(SharedString::from(label))
+            .child(choose(
+                "undo-resolution",
+                t!("conflict.undo").into_owned(),
+                None,
+            ))
             .into_any_element();
     }
     let title = match part {
-        ConflictPart::Current => "当前的改动",
-        ConflictPart::Base => "共同祖先",
-        ConflictPart::Incoming => "传入的改动",
+        ConflictPart::Current => t!("conflict.current"),
+        ConflictPart::Base => t!("conflict.base"),
+        ConflictPart::Incoming => t!("conflict.incoming"),
     };
     let label = conflict.label(part).clone();
-    row.child(div().font_medium().child(title.to_string()))
+    row.child(div().font_medium().child(SharedString::from(title)))
         .when(!label.is_empty(), |this| this.child(label))
         .when(part == ConflictPart::Current, |this| {
             this.child(div().flex_1())
                 .child(choose(
                     "accept-current",
-                    "采用当前的".to_string(),
+                    t!("conflict.take_current").into_owned(),
                     Some(DiffConflictResolution::Current),
                 ))
                 .child(choose(
                     "accept-incoming",
-                    "采用传入的".to_string(),
+                    t!("conflict.take_incoming").into_owned(),
                     Some(DiffConflictResolution::Incoming),
                 ))
                 .child(choose(
                     "accept-both",
-                    "两边都留".to_string(),
+                    t!("conflict.keep_both").into_owned(),
                     Some(DiffConflictResolution::Both),
                 ))
         })
@@ -1165,11 +1171,11 @@ fn render_file_header(
         let title_suffix = slot(&code.header.title_suffix, window, cx);
         let suffix = slot(&code.header.suffix, window, cx);
         let status = match document.status() {
-            DiffFileStatus::Added => Some("新文件"),
-            DiffFileStatus::Deleted => Some("已删除"),
-            DiffFileStatus::Renamed => Some("改了名"),
-            DiffFileStatus::Copied => Some("复制来的"),
-            DiffFileStatus::Conflicted => Some("有冲突"),
+            DiffFileStatus::Added => Some(t!("diff.status.added")),
+            DiffFileStatus::Deleted => Some(t!("diff.status.deleted")),
+            DiffFileStatus::Renamed => Some(t!("diff.status.renamed")),
+            DiffFileStatus::Copied => Some(t!("diff.status.copied")),
+            DiffFileStatus::Conflicted => Some(t!("diff.status.conflicted")),
             _ => None,
         };
         let statistics = !document.is_single_column();
@@ -1232,9 +1238,9 @@ fn render_file_header(
                             IconName::ChevronDown
                         })
                         .accessibility_label(if collapsed {
-                            format!("展开 {name}")
+                            t!("diff.expand_file", name = name).into_owned()
                         } else {
-                            format!("收起 {name}")
+                            t!("diff.collapse_file", name = name).into_owned()
                         })
                         .on_click(move |_, _, cx| {
                             state.update(cx, |state, cx| state.toggle_file_collapsed(file, cx))
@@ -1265,13 +1271,13 @@ fn file_annotations(
 /// Summarizes a file without source rows: binary, metadata-only or empty.
 fn render_notice(file: &DiffFile, cx: &App) -> AnyElement {
     let message = if !file.has_changes() {
-        "没有改动"
+        t!("diff.notice.no_changes")
     } else if file.is_binary() {
-        "二进制文件有改动"
+        t!("diff.notice.binary")
     } else if !file.extended_headers().is_empty() {
-        "这份补丁没有文字改动"
+        t!("diff.notice.no_text")
     } else {
-        "空文件"
+        t!("diff.notice.empty")
     };
     v_flex()
         .w_full()
@@ -1333,7 +1339,14 @@ fn render_gutter(
                     .text_color(cx.theme().muted_foreground)
                     .hover(|this| this.text_color(cx.theme().foreground))
                     .role(gpui::accesskit::Role::Button)
-                    .aria_label(format!("选中{}第 {} 行", side_label(side), position.line()))
+                    .aria_label(
+                        t!(
+                            "diff.select_line",
+                            side = side_label(side),
+                            line = position.line()
+                        )
+                        .into_owned(),
+                    )
                     .child(position.line().to_string())
                     .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                         down.update(cx, |state, cx| {
@@ -1357,11 +1370,11 @@ fn render_gutter(
         .into_any_element()
 }
 
-fn side_label(side: DiffSide) -> &'static str {
+fn side_label(side: DiffSide) -> Cow<'static, str> {
     if side == DiffSide::Original {
-        "旧版"
+        t!("diff.side.original")
     } else {
-        "新版"
+        t!("diff.side.modified")
     }
 }
 
@@ -1569,7 +1582,7 @@ fn add_annotation_button(
                     .group_hover("diff-line", |this| this.opacity(1.))
             })
             .role(gpui::accesskit::Role::Button)
-            .aria_label(format!("给第 {} 行加批注", position.line()))
+            .aria_label(t!("diff.comment_line", line = position.line()).into_owned())
             .child(Icon::new(IconName::Plus).size_3())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, window, cx| handler(&range, window, cx))
@@ -1786,16 +1799,24 @@ fn code_line(
                 .role(gpui::accesskit::Role::Label)
                 .aria_label(source_line.text().clone())
                 .aria_description(
-                    format!(
-                        "{}第 {} 行{}",
-                        side_label(text_side),
-                        position.line(),
-                        match (changed, side) {
-                            (false, _) => "",
-                            (true, DiffSide::Original) => "，删除",
-                            (true, _) => "，新增",
-                        }
-                    ),
+                    match (changed, side) {
+                        (false, _) => t!(
+                            "diff.line.plain",
+                            side = side_label(text_side),
+                            line = position.line()
+                        ),
+                        (true, DiffSide::Original) => t!(
+                            "diff.line.deleted",
+                            side = side_label(text_side),
+                            line = position.line()
+                        ),
+                        (true, _) => t!(
+                            "diff.line.added",
+                            side = side_label(text_side),
+                            line = position.line()
+                        ),
+                    }
+                    .into_owned(),
                 )
                 .when_some(code.on_line_click.clone(), |this, handler| {
                     let position = position.clone();
@@ -1834,7 +1855,7 @@ fn line_extras(
     let ending_only = changed && has_line_ending_change(document, side, ix, other_ix);
     if ending.is_empty() || ending_only {
         let label = if ending.is_empty() {
-            "文件末尾没有换行".to_string()
+            t!("diff.no_newline").into_owned()
         } else {
             format!("\\ {}", if ending == "\r\n" { "CRLF" } else { "LF" })
         };

@@ -253,7 +253,7 @@ impl PipeListener {
         if !is_pipe_path(&name) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("命名管道路径必须以 \\\\.\\pipe\\ 开头：{name}"),
+                format!("a named pipe path must start with \\\\.\\pipe\\: {name}"),
             ));
         }
         let pending = create_instance(&name, first)?;
@@ -326,7 +326,10 @@ impl fmt::Debug for PipeListener {
 }
 
 fn stopped() -> io::Error {
-    io::Error::new(io::ErrorKind::ConnectionAborted, "命名管道监听已停止")
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "the named pipe listener stopped",
+    )
 }
 
 /// 一条管道连接。`try_clone` 出来的各份共用同一个句柄和设置，见模块说明。
@@ -414,12 +417,18 @@ impl PipeStream {
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "命名管道正忙"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the named pipe is busy",
+                ));
             }
             let millis = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX - 1).max(1);
             let waited = unsafe { WaitNamedPipeW(wide.as_ptr(), millis) };
             if waited == 0 && std::time::Instant::now() >= deadline {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "命名管道正忙"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the named pipe is busy",
+                ));
             }
         }
     }
@@ -460,7 +469,7 @@ impl PipeStream {
             }
             Shutdown::Write => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "命名管道不能只关写方向",
+                "a named pipe can't shut down only the write side",
             )),
             Shutdown::Both => {
                 self.shared.read_shut.set();
@@ -516,7 +525,7 @@ impl PipeStream {
             return Err(io::Error::last_os_error());
         }
         if pid == 0 {
-            return Err(io::Error::other("命名管道对端没有进程号"));
+            return Err(io::Error::other("the named pipe peer has no process id"));
         }
         Ok(pid)
     }
@@ -911,14 +920,14 @@ fn overlapped_transfer(
     }
     Ok(Transfer::Cancelled(wait_error.unwrap_or_else(|| {
         if matches!(wait, Wait::Poll) {
-            io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据")
+            io::Error::new(io::ErrorKind::WouldBlock, "the named pipe has no data")
         } else {
             io::Error::new(
                 io::ErrorKind::TimedOut,
                 if write {
-                    "命名管道写入超时"
+                    "named pipe write timed out"
                 } else {
-                    "命名管道读取超时"
+                    "named pipe read timed out"
                 },
             )
         }
@@ -930,7 +939,10 @@ fn map_completed_error(error: u32, write: bool) -> io::Result<usize> {
         return Ok(0);
     }
     if error == ERROR_NO_DATA {
-        return Err(io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据"));
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "the named pipe has no data",
+        ));
     }
     Err(io::Error::from_raw_os_error(error as i32))
 }
@@ -1073,7 +1085,7 @@ impl UserOnlySecurity {
         unsafe { CloseHandle(token) };
         let sid = unsafe { (*(token_buf.as_ptr() as *const TOKEN_USER)).User.Sid };
         if sid.is_null() {
-            return Err(io::Error::other("当前进程没有用户 SID"));
+            return Err(io::Error::other("the current process has no user SID"));
         }
 
         let mut acl = vec![0u8; 256];

@@ -6,9 +6,10 @@
 
 use std::time::Duration;
 
-use gpui::{FontWeight, SharedString, Styled, rems};
+use gpui::{FontWeight, Styled, rems};
 use gpui_base::motion::Spring;
-use gpui_kit_assets::{IconName, IconNamed};
+
+use crate::IconName;
 
 /// 界面字体族。随 app 带的静态字面见 [`UI_FONTS`]，由 [`crate::init`] 载入。
 pub const UI_FONT_FAMILY: &str = "Inter";
@@ -167,7 +168,7 @@ pub struct Motion {
 
 impl Motion {
     /// 浮层入场用的定时过渡：浮层每次打开都是新挂上的元素，弹簧首帧就到位，入场只能从 0
-    /// 播一段时间。时长取 overlay 的响应周期。
+    /// 播一段时间。时长取 overlay 的响应周期。组件经 [`crate::motion::overlay_enter`] 取用。
     pub fn overlay_enter(&self) -> gpui_base::motion::Transition {
         gpui_base::motion::Transition::new(OVERLAY_RESPONSE).ease(crate::motion::ease_snap)
     }
@@ -183,51 +184,34 @@ pub const MOTION: Motion = Motion {
 
 /// 组件用到的图标。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Glyph {
-    /// gpui-kit 自带的 Lucide 图标。
-    Asset(IconName),
-    /// 应用资源里的 svg（`smelt-icons/...`）。
-    Path(&'static str),
-}
-
-impl IconNamed for Glyph {
-    fn path(self) -> SharedString {
-        match self {
-            Self::Asset(icon) => icon.path(),
-            Self::Path(path) => SharedString::new_static(path),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Glyphs {
-    pub check: Glyph,
-    pub copy: Glyph,
+    pub check: IconName,
+    pub copy: IconName,
     /// 关闭、清空。
-    pub close: Glyph,
-    pub chevron_down: Glyph,
+    pub close: IconName,
+    pub chevron_down: IconName,
     /// 子菜单。
-    pub chevron_right: Glyph,
-    pub loader: Glyph,
-    /// 删除、移除。gpui-kit 没有垃圾桶：`Delete` 是带 X 的退格键，`CircleX` 是带圈的关。
-    pub trash: Glyph,
-    pub eye: Glyph,
-    pub eye_off: Glyph,
+    pub chevron_right: IconName,
+    pub loader: IconName,
+    /// 删除、移除。
+    pub trash: IconName,
+    pub eye: IconName,
+    pub eye_off: IconName,
     /// 可搜索列表的搜索框。
-    pub search: Glyph,
+    pub search: IconName,
 }
 
 pub const GLYPHS: Glyphs = Glyphs {
-    check: Glyph::Asset(IconName::Check),
-    copy: Glyph::Asset(IconName::Copy),
-    close: Glyph::Asset(IconName::X),
-    chevron_down: Glyph::Asset(IconName::ChevronDown),
-    chevron_right: Glyph::Asset(IconName::ChevronRight),
-    loader: Glyph::Asset(IconName::Loader),
-    trash: Glyph::Path("smelt-icons/trash.svg"),
-    eye: Glyph::Asset(IconName::Eye),
-    eye_off: Glyph::Asset(IconName::EyeOff),
-    search: Glyph::Asset(IconName::Search),
+    check: IconName::Check,
+    copy: IconName::Copy,
+    close: IconName::Close,
+    chevron_down: IconName::ChevronDown,
+    chevron_right: IconName::ChevronRight,
+    loader: IconName::Loader,
+    trash: IconName::Trash,
+    eye: IconName::Eye,
+    eye_off: IconName::EyeOff,
+    search: IconName::Search,
 };
 
 /// 浮起层级：每档是几层投影叠起来，取自当前主题（主题文件的 `elevation` 一节，没写的档按

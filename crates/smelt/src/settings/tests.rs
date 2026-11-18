@@ -30,6 +30,21 @@ mod appearance_tests {
         assert_eq!(back.bg_image.as_deref(), Some("/tmp/bg.png"));
     }
 
+    /// 背景图不透明度封顶：旧设置里存着更高的值，读出来按上限截。
+    #[test]
+    fn bg_image_opacity_is_capped() {
+        let appearance = Appearance {
+            bg_image_opacity: 0.8,
+            ..Appearance::default()
+        };
+        let snapshot = super::snapshot_from_appearance(&appearance);
+        let back = super::appearance_from_snapshot(snapshot, Appearance::default());
+        assert_eq!(
+            back.bg_image_opacity,
+            smelt_model::appearance_settings::MAX_BG_IMAGE_OPACITY
+        );
+    }
+
     #[test]
     fn sibling_themes_are_scoped_by_plugin_owner() {
         use smelt_model::theme_index::{ThemeEntry, sibling_in};

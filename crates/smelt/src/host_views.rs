@@ -33,13 +33,14 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut gpui::App) {
 fn outlet_spec(workspace: WeakEntity<Workspace>) -> ViewSpec {
     ViewSpec {
         name: "outlet".into(),
-        title: "内容".into(),
-        icon: gpui_kit_assets::IconName::AppWindow.path(),
+        title: api::text!("view.outlet"),
+        icon: smelt_ui::IconName::AppWindow.path(),
         // 只管出口空着的时候：里面放了视图，标题和顶上那条归谁画都跟着那个视图（见
         // `workspace_shell::show_in_outlet`）。空着什么都不画。
         draws_top_bar: true,
         instances: false,
         settings: None,
+        fills: Vec::new(),
         build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
             let workspace = workspace.clone();
             Rc::new(cx.new(|cx| OutletView::new(workspace, cx)))

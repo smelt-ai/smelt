@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use super::daemon::DaemonOperation;
+pub use super::reason::ControlReason;
 
 /// 控制协议版本。加方法、删方法都不升它：客户端不看方法清单，运行时缺某个方法，用到时调到
 /// MethodNotFound 就报运行时较旧，只是那一项功能用不了。改已有方法的参数或结果才升，同时抬
@@ -206,6 +207,8 @@ define_control_methods! {
     SessionDelete => (SESSION_DELETE_METHOD, "session.delete"),
     SessionAgentBindings => (SESSION_AGENT_BINDINGS_METHOD, "session.agent_bindings"),
     ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
+    ConversationPrompt => (CONVERSATION_PROMPT_METHOD, "conversation.prompt"),
+    ConversationTurnResult => (CONVERSATION_TURN_RESULT_METHOD, "conversation.turn_result"),
     SubagentTranscript => (SUBAGENT_TRANSCRIPT_METHOD, "subagent.transcript"),
     ResourceUsage => (RESOURCE_USAGE_METHOD, "resource.usage"),
 }
@@ -330,9 +333,13 @@ pub struct ControlVersionRange {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControlError {
     pub code: ControlErrorCode,
+    /// 运行时按自己的默认语言（英文）说的一句话。给人看用 [`ControlError::text`]。
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_versions: Option<ControlVersionRange>,
+    /// 报错的种类和参数，客户端按自己的语言说。老运行时不发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ControlReason>,
 }
 
 impl ControlError {
@@ -341,7 +348,26 @@ impl ControlError {
             code,
             message: message.into(),
             supported_versions: None,
+            reason: None,
         }
+    }
+
+    /// 带种类的报错：`message` 是同一句话按运行时的默认语言说的。
+    pub fn because(code: ControlErrorCode, reason: ControlReason) -> Self {
+        Self {
+            code,
+            message: reason.text().unwrap_or_default(),
+            supported_versions: None,
+            reason: Some(reason),
+        }
+    }
+
+    /// 给人看的一句话：认得的种类按当前语言说，否则用运行时给的原话。
+    pub fn text(&self) -> String {
+        self.reason
+            .as_ref()
+            .and_then(ControlReason::text)
+            .unwrap_or_else(|| self.message.clone())
     }
 
     pub fn unsupported_version(requested: u16, min_supported: u16, max_supported: u16) -> Self {
@@ -354,6 +380,7 @@ impl ControlError {
                 min_supported_version: min_supported,
                 max_supported_version: max_supported,
             }),
+            reason: None,
         }
     }
 }
@@ -454,7 +481,7 @@ impl fmt::Display for ControlClientError {
         match self {
             Self::InvalidRequest(message) => write!(f, "invalid control request: {message}"),
             Self::InvalidResponse(message) => write!(f, "invalid control response: {message}"),
-            Self::Protocol(error) => write!(f, "control {:?}: {}", error.code, error.message),
+            Self::Protocol(error) => write!(f, "control {:?}: {}", error.code, error.text()),
             Self::Transport(message) => write!(f, "control transport: {message}"),
         }
     }

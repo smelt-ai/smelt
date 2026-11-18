@@ -24,6 +24,7 @@ use alacritty_terminal::term::{
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use gpui::RenderImage;
+use rust_i18n::t;
 use smelt_plugin_api::client::protocol::daemon::{DaemonOperation, TerminalOpenErrorCode};
 use smelt_plugin_api::client::{Connector, RuntimeStream};
 use smelt_plugin_api::model::kitty_graphics::{
@@ -1067,7 +1068,10 @@ fn classify_handshake_line(line: &str) -> anyhow::Result<HandshakeLine> {
         if code == Some(TerminalOpenErrorCode::DaemonStopping) {
             return Ok(HandshakeLine::DaemonStopping);
         }
-        anyhow::bail!("{}", v["err"].as_str().unwrap_or("终端重新附着失败"));
+        match v["err"].as_str() {
+            Some(error) => anyhow::bail!("{error}"),
+            None => anyhow::bail!("{}", t!("error.reattach")),
+        }
     }
     Ok(HandshakeLine::Opened(v))
 }
@@ -1085,8 +1089,11 @@ fn wait_daemon_gone(mut reader: BufReader<RuntimeStream>) -> anyhow::Result<()> 
         // 读超时：Unix 报 WouldBlock，Windows 报 TimedOut。
         Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
             anyhow::bail!(
-                "守护正在停机，{}s 内没有退出",
-                DAEMON_STOPPING_WAIT_TIMEOUT.as_secs()
+                "{}",
+                t!(
+                    "error.daemon_stuck",
+                    seconds = DAEMON_STOPPING_WAIT_TIMEOUT.as_secs()
+                )
             )
         }
         // 读到 EOF，或连接被重置：对面都已经走了。
@@ -1186,9 +1193,9 @@ impl Terminal {
                     match handshake(connector.connect()?)? {
                         HandshakeReply::Opened(opened) => opened,
                         HandshakeReply::DaemonStopping(_) => {
-                            anyhow::bail!("守护正在停机，接班的守护还没起来")
+                            anyhow::bail!("{}", t!("error.daemon_restarting"))
                         }
-                        HandshakeReply::Closed => anyhow::bail!("守护没回握手就断开了"),
+                        HandshakeReply::Closed => anyhow::bail!("{}", t!("error.handshake_closed")),
                     }
                 }
             };
@@ -2730,7 +2737,7 @@ mod handshake_timeout_tests {
                 "{}",
                 serde_json::json!({
                     "ok": false,
-                    "err": "终端会话不存在",
+                    "err": "The terminal session doesn't exist",
                     "rows": 24,
                     "cols": 80,
                     "replay_len": 0,
@@ -2743,7 +2750,7 @@ mod handshake_timeout_tests {
             Ok(_) => panic!("attach-only 缺失会话必须失败"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("不存在"));
+        assert!(error.to_string().contains("doesn't exist"));
     }
 
     #[test]
@@ -2798,7 +2805,7 @@ mod handshake_timeout_tests {
         ));
         let stopping = serde_json::json!({
             "ok": false,
-            "err": "守护正在停机",
+            "err": "The runtime is shutting down",
             "code": "daemon_stopping",
             "rows": 24,
             "cols": 80,
@@ -2810,12 +2817,13 @@ mod handshake_timeout_tests {
         ));
         // 不认识的码、没有码：都是普通错误，带守护给的原因。
         for code in [Some("from_the_future"), None] {
-            let mut reply = serde_json::json!({ "ok": false, "err": "终端会话不存在" });
+            let mut reply =
+                serde_json::json!({ "ok": false, "err": "The terminal session doesn't exist" });
             if let Some(code) = code {
                 reply["code"] = serde_json::json!(code);
             }
             let error = classify_handshake_line(&format!("{reply}\n")).unwrap_err();
-            assert!(error.to_string().contains("不存在"), "{code:?}");
+            assert!(error.to_string().contains("doesn't exist"), "{code:?}");
         }
         assert!(matches!(
             classify_handshake_line("{\"rows\":24,\"cols\":80,\"replay_len\":0}\n").unwrap(),
@@ -2837,14 +2845,17 @@ mod handshake_timeout_tests {
                 .unwrap();
             let header = serde_json::json!({
                 "ok": false,
-                "err": "守护正在停机",
+                "err": "The runtime is shutting down",
                 "code": "daemon_stopping",
                 "rows": 24,
                 "cols": 80,
                 "replay_len": 0,
             });
             theirs
-                .write_all(format!("{header}\n\r\n\x1b[31m守护正在停机\x1b[0m\r\n").as_bytes())
+                .write_all(
+                    format!("{header}\n\r\n\x1b[31mThe runtime is shutting down\x1b[0m\r\n")
+                        .as_bytes(),
+                )
                 .unwrap();
             // 模拟旧进程还在：等测试说放才关，关掉就是 exec / 退出。
             let _ = release_rx.recv();

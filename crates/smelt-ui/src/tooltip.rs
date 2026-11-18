@@ -1,5 +1,6 @@
 //! 基于 gpui-base 的提示内容。触发、延迟和定位由 GPUI 的 tooltip 机制负责。
 //! 紧凑样式：左右 6、上下 5、4 圆角，小号中等字重，`floating` 层级投影；快捷键用 [`crate::keybind::Keybind`]。
+//! 出现时原地淡入（[`crate::motion::overlay_enter`]），不挪：它贴着指针，没有「从哪来」要交代。
 
 use gpui::{
     Action, AnyElement, AnyView, App, AppContext as _, Context, IntoElement, KeyContext,
@@ -10,6 +11,7 @@ use gpui_base::StyledExt as _;
 
 use crate::keybind::{Keybind, keycaps};
 use crate::kit::{RADIUS, TYPE, elevation};
+use crate::motion::{EnterFrom, overlay_enter};
 use crate::ui_theme;
 
 enum TooltipContent {
@@ -156,6 +158,8 @@ impl Render for Tooltip {
         // 贴着指针的小浮层用第一层底，比弹层的 `surface` 更跳出窗口底（深色下尤其）。
         let surface = ui_theme::soft();
         let foreground = tooltip_foreground(surface, ui_theme::popover_foreground(surface));
+        // 每次出现都是新建的提示视图，元素状态是新的，入场从头播。
+        let enter = overlay_enter("smelt-tooltip-enter", EnterFrom::InPlace, window, cx);
 
         // 留出阴影绘制的空间；悬浮层尺寸和定位由 GPUI 测量。
         div().child(
@@ -172,6 +176,7 @@ impl Render for Tooltip {
                 .map(|this| TYPE.small_medium.apply(this))
                 .font_features(ui_theme::tabular_figures())
                 .shadow(elevation::floating())
+                .opacity(enter.opacity)
                 .refine_style(&self.style)
                 .child(div().min_w_0().flex_1().child(content))
                 .when_some(shortcut, |this, steps| {

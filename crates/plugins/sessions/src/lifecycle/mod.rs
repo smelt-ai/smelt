@@ -16,10 +16,13 @@
 //! - `peers::agents::AGENT_SETTINGS_CHANGED`：换掉那台机器的 `Sessions::agent_names`，重算
 //!   侧栏。起来时先经 `AGENT_SETTINGS` 拉一份整的（智能体插件要先登记）。
 //! - `HostEvent::ShownViewsChanged`：会话视图露出来、被挡住，[`publish_context`]。
+//! - `HostEvent::RuntimeTopic` 的 `attention.changed`：收进 `Sessions::unread`，有没看过
+//!   的会话变了就重算侧栏。
 //! - `HostEvent::OpenPaths`（从访达拖进来的）：本机上是目录的 [`open_project`]。
 //!
 //! 宿主每台机器只留最新的一份目录，所以这里不用防旧推送：目录里没了就是真没了。
 
+use rust_i18n::t;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -28,6 +31,7 @@ use smelt_plugin_api::model::control_api::{
     WorkspaceConversationArchive, WorkspaceConversationCreate, WorkspaceConversationDelete,
     WorkspaceConversationUpdate, WorkspaceProjectClose, WorkspaceProjectOpen,
 };
+use smelt_plugin_api::model::daemon_state::CORE_TOPIC_ATTENTION_CHANGED;
 use smelt_plugin_api::model::runtime_path::PathStyle;
 use smelt_plugin_api::model::workspace_directory::{
     WorkspaceConversation, WorkspaceConversationArchiveParams, WorkspaceConversationIdParams,
@@ -81,7 +85,16 @@ pub(crate) fn install(sessions: &Entity<Sessions>, cx: &mut App) {
                 on_agent_settings(machine, cx);
             }
         }),
-        Err(error) => cx.update(|cx| notify_error(&format!("读智能体配置：{error}"), cx)),
+        Err(error) => cx.update(|cx| {
+            notify_error(
+                &t!(
+                    "error.failed",
+                    what = t!("action.read_agent_settings"),
+                    error = error
+                ),
+                cx,
+            )
+        }),
     })
     .detach();
 }
@@ -96,6 +109,21 @@ fn on_event(event: &HostEvent, cx: &mut App) {
         HostEvent::WindowActivated => crate::worksets::refresh(true, cx),
         HostEvent::MachinesChanged => on_machines_changed(cx),
         HostEvent::ShownViewsChanged => publish_context(cx),
+        // 侧栏缓存里有按语言算好的字（项目名、机器状态）。
+        HostEvent::LocaleChanged => {
+            Sessions::global(cx).update(cx, |sessions, cx| sessions.rebuild_sidebar(cx));
+        }
+        HostEvent::RuntimeTopic {
+            machine,
+            topic,
+            message,
+        } if topic == CORE_TOPIC_ATTENTION_CHANGED => {
+            Sessions::global(cx).update(cx, |sessions, cx| {
+                if sessions.unread.apply(machine, message) {
+                    sessions.rebuild_sidebar(cx);
+                }
+            });
+        }
         HostEvent::OpenPaths { machine, paths } => open_paths(machine.clone(), paths.clone(), cx),
         HostEvent::Plugin { .. } => {
             if let Some(at) = AT_LATEST_CHANGED.parse(event) {
@@ -149,7 +177,7 @@ fn on_sessions_changed(cx: &mut App) {
             let session_ids: HashSet<&str> = directory
                 .conversations
                 .iter()
-                .flat_map(model::session_ids)
+                .flat_map(WorkspaceConversation::session_ids)
                 .collect();
             sessions
                 .lifecycle
@@ -183,6 +211,7 @@ fn on_machines_changed(cx: &mut App) {
             }
             sessions.lifecycle.seen.remove(machine);
             sessions.lifecycle.behind.retain(|(on, _)| on != machine);
+            sessions.unread.forget(machine);
         }
         sessions.lifecycle.machines = current;
         // 离线、改名也会走到这里：机器行要跟着变。
@@ -233,11 +262,13 @@ fn on_at_latest(at: AtLatest, cx: &mut App) {
     }
 }
 
-/// 选中一段会话：存库、通知重画、[`publish_context`]。只改选中，不建会话、不管会话视图
-/// 露没露、不给焦点——那些归会话视图，它打开到这段会话时调这里（目录里找到了、在侧栏里
-/// 才调）。
+/// 选中一段会话：侧栏里折着的展开（[`Sessions::reveal`]）、存库、通知重画、
+/// [`publish_context`]。不建会话、不管会话视图露没露、不给焦点——那些归会话视图，它打开到
+/// 这段会话时调这里（目录里找到了、在侧栏里才调）。已经选中的也展开：选中后用户可能把它
+/// 所在的项目折了，再从通知跳回来。
 pub(crate) fn select(key: ConversationKey, cx: &mut App) {
     Sessions::global(cx).update(cx, |sessions, cx| {
+        sessions.reveal(&key, cx);
         if sessions.selection.session() == Some(&key) {
             return;
         }
@@ -310,7 +341,7 @@ pub(crate) fn open_session(args: SessionArgs, cx: &mut App) -> Task<Result<(), S
         if opened.await? {
             Ok(())
         } else {
-            Err("会话视图放不下".to_string())
+            Err(t!("error.no_room").into_owned())
         }
     })
 }
@@ -473,7 +504,7 @@ pub(crate) fn create_conversation(
                     },
                     cx,
                 );
-                report_failure("打开会话", opened, cx);
+                report_failure(t!("action.open_session"), opened, cx);
                 Ok(key)
             }
             Err(error) => {
@@ -533,7 +564,7 @@ pub(crate) fn open_project(
     let style = host.path_style(&machine, cx);
     let root = style.clean(root.trim());
     if root.is_empty() {
-        return Task::ready(Err("没有给项目目录".into()));
+        return Task::ready(Err(t!("error.no_project_dir").into_owned()));
     }
     let open = host
         .workspace_directory(&machine, cx)
@@ -572,10 +603,10 @@ pub(crate) fn close_project(
     let style = host.path_style(&machine, cx);
     let root = style.clean(root.trim());
     if root.is_empty() {
-        return Task::ready(Err("没有给项目目录".into()));
+        return Task::ready(Err(t!("error.no_project_dir").into_owned()));
     }
     let Some(directory) = host.workspace_directory(&machine, cx) else {
-        return Task::ready(Err("这台机器的工作区目录还没收到".into()));
+        return Task::ready(Err(t!("error.directory_pending").into_owned()));
     };
     let closing = conversations_under(style, &directory, &root);
     let opened = directory
@@ -673,7 +704,7 @@ fn open_paths(machine: RuntimeKey, paths: Vec<String>, cx: &mut App) {
         cx.update(|cx| {
             for dir in dirs {
                 let opened = open_project(machine.clone(), dir, cx);
-                report_failure("打开项目", opened, cx);
+                report_failure(t!("action.open_project"), opened, cx);
             }
         });
     })

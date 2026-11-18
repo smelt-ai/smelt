@@ -83,7 +83,8 @@ pub(crate) fn automation_form_row() -> Div {
         .items_center()
 }
 
-pub(crate) fn automation_section_label(label: &'static str) -> AnyElement {
+pub(crate) fn automation_section_label(label: impl Into<SharedString>) -> AnyElement {
+    let label: SharedString = label.into();
     div()
         .type_style(TYPE.ui_medium)
         .text_color(rgb(ui_theme::text()))

@@ -2,6 +2,7 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smelt_plugin_api::ui::truncated_line::truncated_line;
@@ -23,7 +24,7 @@ impl Render for ArchivePage {
                 .flex()
                 .flex_col()
                 .size_full()
-                .child(placeholder("没有归档的对话"))
+                .child(placeholder(t!("empty")))
                 .into_any_element();
         }
         let page = cx.entity();
@@ -130,7 +131,7 @@ impl ArchivePage {
         let icon = if row.is_conversation {
             Icon::new(IconName::MessageSquare)
         } else {
-            Icon::new(IconName::SquareTerminal)
+            Icon::new(IconName::Terminal)
         };
         let restore = {
             let (page, machine, row) = (page.clone(), machine.clone(), row.clone());
@@ -195,8 +196,8 @@ impl ArchivePage {
                         Button::new(SharedString::from(format!("{key}-restore")))
                             .quiet()
                             .small()
-                            .icon(IconName::RotateCw)
-                            .icon_action("恢复")
+                            .icon(IconName::Restore)
+                            .icon_action(t!("action.restore"))
                             .disabled(busy)
                             .on_click(move |_, window, cx| {
                                 cx.stop_propagation();
@@ -206,8 +207,8 @@ impl ArchivePage {
                     .child(
                         Button::new(SharedString::from(format!("{key}-delete")))
                             .dismiss()
-                            .icon_path("smelt-icons/trash.svg")
-                            .icon_action("彻底删除")
+                            .icon(IconName::Trash)
+                            .icon_action(t!("action.delete"))
                             .disabled(busy)
                             .on_click(move |_, window, cx| {
                                 cx.stop_propagation();
@@ -222,13 +223,13 @@ impl ArchivePage {
                 let (restore, delete) = (menu_restore.clone(), menu_delete.clone());
                 Menu::new()
                     .item(
-                        MenuItem::new("恢复")
+                        MenuItem::new(t!("action.restore"))
                             .disabled(busy)
                             .on_click(move |_, window, cx| restore(window, cx)),
                     )
                     .separator()
                     .item(
-                        MenuItem::new("彻底删除")
+                        MenuItem::new(t!("action.delete"))
                             .icon(trash_icon())
                             .danger()
                             .disabled(busy)
@@ -251,7 +252,7 @@ pub(crate) fn workset_choices(
         return div()
             .type_style(TYPE.ui)
             .text_color(rgb(ui_theme::muted()))
-            .child("这个项目下没有可用的工作树。先在会话列表里给项目新建一个工作树，再回来恢复。")
+            .child(t!("restore.no_worksets").to_string())
             .into_any_element();
     }
     let picked = page.read(cx).picked_workset.clone();
@@ -276,7 +277,7 @@ pub(crate) fn workset_choices(
         .into_any_element()
 }
 
-fn placeholder(text: &'static str) -> Div {
+fn placeholder(text: impl Into<SharedString>) -> Div {
     div()
         .flex_1()
         .flex()
@@ -287,6 +288,6 @@ fn placeholder(text: &'static str) -> Div {
             div()
                 .type_style(TYPE.ui)
                 .text_color(rgb(ui_theme::muted()))
-                .child(text),
+                .child(text.into()),
         )
 }

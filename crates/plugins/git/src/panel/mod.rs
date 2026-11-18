@@ -12,6 +12,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement};
 use gpui_base::{StyledExt as _, v_virtual_list};
+use rust_i18n::t;
 pub(crate) use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smelt_plugin_api::ui::resizable::{h_resizable, resizable_panel};
 use smelt_plugin_api::ui::scrollbar::Scrollbar;
@@ -318,7 +319,27 @@ fn git_status_response_action(
 
 const GIT_STATUS_MAX_AUTO_RETRIES: u8 = 3;
 
-/// 窄版变更列表为空时的占位文案。
+/// 窄版变更列表为空时显示哪种占位。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EmptyList {
+    Clean,
+    Loading,
+    Failed,
+    Retrying,
+}
+
+impl EmptyList {
+    pub(crate) fn text(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Clean => t!("changes.clean"),
+            Self::Loading => t!("changes.loading"),
+            Self::Failed => t!("changes.failed"),
+            Self::Retrying => t!("changes.retrying"),
+        }
+    }
+}
+
+/// 窄版变更列表为空时的占位。
 ///
 /// 已经拿到一份成功的空快照时，即使后台还在刷新，也显示「工作区干净」——否则
 /// 文件事件把 inflight 钉住时，干净工作区会永远停在「正在读取改动」。
@@ -327,22 +348,22 @@ pub(crate) fn git_empty_list_message(
     status: Option<&GitStatusData>,
     refreshing: bool,
     failure_count: u8,
-) -> &'static str {
+) -> EmptyList {
     if status.is_some_and(|status| status.ok && status.files.is_empty()) {
-        return "工作区干净";
+        return EmptyList::Clean;
     }
     if refreshing {
         if failure_count > 0 {
-            "Git 状态读取失败，正在重试…"
+            EmptyList::Retrying
         } else {
-            "正在读取更改…"
+            EmptyList::Loading
         }
     } else if failure_count > 0 {
-        "Git 状态读取失败"
+        EmptyList::Failed
     } else if status.is_none() {
-        "正在读取更改…"
+        EmptyList::Loading
     } else {
-        "工作区干净"
+        EmptyList::Clean
     }
 }
 
@@ -554,26 +575,26 @@ pub(crate) enum GitWrite {
 
 impl GitWrite {
     /// 同步芯片上的「…中」。
-    pub(crate) fn chip(self) -> &'static str {
+    pub(crate) fn chip(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Commit => "提交中…",
-            Self::CommitAndPush => "提交并推送中…",
-            Self::Push => "推送中…",
-            Self::Fetch => "获取中…",
-            Self::Pull => "拉取中…",
-            Self::Stash => "储藏中…",
-            Self::StashPop => "恢复储藏中…",
-            Self::Checkout => "切换分支中…",
-            Self::Merge => "合并中…",
-            Self::DeleteBranch => "删除分支中…",
-            Self::DeleteRemoteBranch => "删除远端分支中…",
-            Self::DiscardFile => "丢弃文件中…",
-            Self::DiscardChanges => "丢弃更改中…",
-            Self::Stage | Self::IndexFile => "暂存中…",
-            Self::Unstage => "取消暂存中…",
-            Self::StageHunk => "暂存块中…",
-            Self::UnstageHunk => "撤出暂存块中…",
-            Self::DiscardHunk => "丢弃块中…",
+            Self::Commit => t!("busy.commit"),
+            Self::CommitAndPush => t!("busy.commit_and_push"),
+            Self::Push => t!("busy.push"),
+            Self::Fetch => t!("busy.fetch"),
+            Self::Pull => t!("busy.pull"),
+            Self::Stash => t!("busy.stash"),
+            Self::StashPop => t!("busy.stash_pop"),
+            Self::Checkout => t!("busy.checkout"),
+            Self::Merge => t!("busy.merge"),
+            Self::DeleteBranch => t!("busy.delete_branch"),
+            Self::DeleteRemoteBranch => t!("busy.delete_remote_branch"),
+            Self::DiscardFile => t!("busy.discard_file"),
+            Self::DiscardChanges => t!("busy.discard_changes"),
+            Self::Stage | Self::IndexFile => t!("busy.stage"),
+            Self::Unstage => t!("busy.unstage"),
+            Self::StageHunk => t!("busy.stage_hunk"),
+            Self::UnstageHunk => t!("busy.unstage_hunk"),
+            Self::DiscardHunk => t!("busy.discard_hunk"),
         }
     }
 }
@@ -623,17 +644,21 @@ fn stage_toggle_button(id: ElementId, staged: bool) -> Button {
         } else {
             IconName::Plus
         })
-        .icon_action(if staged { "取消暂存" } else { "暂存" })
+        .icon_action(if staged {
+            t!("stage.unstage")
+        } else {
+            t!("stage.stage")
+        })
 }
 
 /// 提交并推送按钮的文案。
 ///
 /// 只有这次操作自己就是提交或推送时才换成进行中。其它写入按钮不可点，
 /// 进行中的名字由这个仓库的同步芯片显示。
-pub(crate) fn commit_button_label(op: Option<GitWrite>) -> &'static str {
+pub(crate) fn commit_button_label(op: Option<GitWrite>) -> std::borrow::Cow<'static, str> {
     match op {
         Some(op @ (GitWrite::Commit | GitWrite::CommitAndPush | GitWrite::Push)) => op.chip(),
-        _ => "提交并推送",
+        _ => t!("commit.commit_and_push"),
     }
 }
 
@@ -702,7 +727,11 @@ fn render_narrow_git_row(
                         } else {
                             IconName::ChevronDown
                         })
-                        .icon_action(if *collapsed { "展开仓库" } else { "收起仓库" })
+                        .icon_action(if *collapsed {
+                            t!("repo.expand")
+                        } else {
+                            t!("repo.collapse")
+                        })
                         .on_click(move |_ev, _window, cx| {
                             let root = root_toggle.clone();
                             ws_toggle.update(cx, |workspace, cx| {
@@ -835,7 +864,7 @@ fn render_narrow_git_row(
                             Button::new(git_repo_id("git-commit-only", root))
                                 .quiet()
                                 .small()
-                                .label("仅提交")
+                                .label(t!("commit.commit_only"))
                                 .disabled(!can_commit)
                                 .on_click(move |_ev, window, cx| {
                                     let root = root_target.clone();
@@ -867,7 +896,7 @@ fn render_narrow_git_row(
                         div()
                             .type_style(TYPE.text_xsmall)
                             .text_color(rgb(ui_theme::faint()))
-                            .child("先暂存要提交的更改"),
+                            .child(t!("commit.stage_first").into_owned()),
                     )
                 })
                 // 失败原因贴在按钮正下方：用户的视线本来就在这里，不用去翻通知中心。
@@ -1110,7 +1139,7 @@ fn render_narrow_git_row(
                                     .flex_shrink_0()
                                     .type_style(TYPE.text_xsmall)
                                     .text_color(rgb(ui_theme::faint()))
-                                    .child("子模块指针"),
+                                    .child(t!("file.submodule").into_owned()),
                             )
                         })
                         .child(stage_action)
@@ -1135,7 +1164,7 @@ fn render_narrow_git_row(
                         let path_diff = path_menu.clone();
                         let path_copy = file_path_copy.clone();
                         let mut menu = Menu::new()
-                            .item(MenuItem::new("打开单文件 Diff").on_click(
+                            .item(MenuItem::new(t!("file.open_diff")).on_click(
                                 move |_ev, _window, cx| {
                                     ws_diff.update(cx, |workspace, cx| {
                                         workspace.open_diff(
@@ -1147,7 +1176,7 @@ fn render_narrow_git_row(
                                     });
                                 },
                             ))
-                            .item(MenuItem::new("复制文件路径").on_click(
+                            .item(MenuItem::new(t!("file.copy_path")).on_click(
                                 move |_ev, _window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         path_copy.clone(),
@@ -1158,16 +1187,16 @@ fn render_narrow_git_row(
                         if local {
                             let path = file_path_finder.clone();
                             menu =
-                                menu.item(MenuItem::new("在 Finder 中显示").on_click(
+                                menu.item(MenuItem::new(t!("file.reveal")).on_click(
                                     move |_ev, _window, _cx| crate::reveal_in_finder(&path),
                                 ));
                         }
                         // 丢弃收不回来，放最后、单独一组。
                         menu.separator().item(
                             MenuItem::new(if untracked {
-                                "删除文件"
+                                t!("discard.file_untracked_ok")
                             } else {
-                                "丢弃更改"
+                                t!("discard.file_ok")
                             })
                             .icon(smelt_plugin_api::ui::trash_icon())
                             .danger()
@@ -1233,38 +1262,43 @@ fn git_ops_menu_items(
     // 推送排在最前：本地攒了提交却没有任何改动时，仓库在列表里只剩这一行，
     // 这个菜单就是它唯一的出口。
     if ahead > 0 {
-        menu = menu.item(item(&ws, &root, format!("推送 ↑{ahead}"), |w, cx| {
+        menu = menu.item(item(&ws, &root, t!("ops.push", ahead = ahead), |w, cx| {
             w.push_only(cx)
         }));
     }
     // 已推送完的分支才能开 PR：还有没推的提交时，网页上看到的不是最新的。
     if ahead == 0 && upstream {
-        menu = menu.item(item(&ws, &root, "在浏览器中创建 PR", |w, cx| {
-            w.open_pull_request(cx)
-        }));
+        menu = menu.item(item(
+            &ws,
+            &root,
+            t!("command.open_pull_request"),
+            |w, cx| w.open_pull_request(cx),
+        ));
     }
     menu = menu
-        .item(item(&ws, &root, "获取", |w, cx| w.git_fetch(cx)))
+        .item(item(&ws, &root, t!("ops.fetch"), |w, cx| w.git_fetch(cx)))
         .item(item(
             &ws,
             &root,
             if behind > 0 {
-                format!("拉取 ↓{behind}")
+                t!("ops.pull_behind", behind = behind)
             } else {
-                "拉取".to_string()
+                t!("ops.pull")
             },
             |w, cx| w.git_pull(cx),
         ));
     if has_changes {
-        menu = menu.separator().item(item(&ws, &root, "储藏更改", |w, cx| {
-            w.git_stash_push(cx)
-        }));
+        menu = menu
+            .separator()
+            .item(item(&ws, &root, t!("ops.stash"), |w, cx| {
+                w.git_stash_push(cx)
+            }));
     }
     if stash_n > 0 {
         menu = menu.item(item(
             &ws,
             &root,
-            format!("恢复储藏 ({stash_n})"),
+            t!("ops.stash_pop", count = stash_n),
             |w, cx| w.git_stash_pop(cx),
         ));
     }
@@ -1272,7 +1306,7 @@ fn git_ops_menu_items(
         let ws_discard = ws;
         let root_discard = root;
         menu = menu.separator().item(
-            MenuItem::new("丢弃全部更改")
+            MenuItem::new(t!("discard.all_menu"))
                 .icon(smelt_plugin_api::ui::trash_icon())
                 .danger()
                 .on_click(move |_ev, window, cx| {

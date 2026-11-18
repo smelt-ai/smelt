@@ -46,6 +46,9 @@ pub use smelt_ui::theme_catalog::{
     swatch as theme_swatch, themes,
 };
 
+// 接口库自己的界面文案（docs/i18n.md）。
+rust_i18n::i18n!("locales", fallback = "en");
+
 mod command;
 mod connections;
 mod context;
@@ -53,6 +56,7 @@ mod context_menu;
 mod event;
 mod file;
 mod layout;
+mod locale;
 mod menu;
 mod online;
 mod page;
@@ -65,8 +69,9 @@ mod view;
 pub mod js;
 
 pub use command::{
-    Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, NO_MAIN_WINDOW,
-    RunCommand, arg_fields, command, commands, invoke, register_commands, run, unregister_commands,
+    Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, RunCommand,
+    arg_fields, command, commands, invoke, no_main_window, register_commands, run,
+    unregister_commands,
 };
 pub use connections::{
     ADD_MACHINE, AddMachine, AddedMachine, Connection, ConnectionLink, ConnectionState,
@@ -81,9 +86,12 @@ pub use context_menu::{
 pub use event::Event;
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use layout::{
-    DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, PanelInfo, PanelState, STACK_PANEL,
-    Stack, StackAxis, StackContent, StackItem, layout, layout_stacks, layouts, parse_layout,
-    register_layouts, unregister_layouts,
+    DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutMaterials, LayoutSource, Material, PanelInfo,
+    PanelState, STACK_PANEL, Stack, StackAxis, StackContent, StackItem, layout, layout_stacks,
+    layouts, parse_layout, register_layouts, unregister_layouts,
+};
+pub use locale::{
+    FALLBACK_LOCALE, LOCALES, Text, locale, set_locale, supported_locale, system_locale,
 };
 pub use menu::{MenuEntry, MenuSlot, menu_items, register_menu_items, unregister_menu_items};
 pub use online::wait_online;
@@ -97,7 +105,7 @@ pub use settings::{SettingsEntry, SettingsGroup};
 pub use view::{
     OPEN_VIEW, OpenView, PluginView, SET_VIEW_BADGE, ViewBadge, ViewBuilder, ViewHandle, ViewInfo,
     ViewInstance, ViewSpec, built_view, create_view, ensure_view, is_registered, register_views,
-    set_view_badge, unregister_views, view, view_badge, views,
+    set_view_badge, slot_views, unregister_views, view, view_badge, views,
 };
 
 /// 桌面挂着的一台机器。
@@ -333,6 +341,9 @@ pub enum HostEvent {
     PagesChanged,
     /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
     CommandsChanged,
+    /// 界面语言换了（读 [`locale`]）：窗口已经重画，存在视图状态里的字（建好的菜单、
+    /// 列表行、取过的 [`views`] 这些登记快照）要重建。
+    LocaleChanged,
     /// 插件发的事件（见 [`Event`]）：`name` 是 `<来源>/<名字>`，载荷的形状由发的插件定，用
     /// [`Event::parse`] 认。
     Plugin {
@@ -499,8 +510,10 @@ pub fn unregister_themes(owner: &str, cx: &mut App) -> Vec<gpui::SharedString> {
 /// 一次运行时调用的默认上限。大仓库的 status、搜索也该在这个时间里回来。
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// 目标机器已经从这台桌面移除时报的话。
-pub const MACHINE_REMOVED: &str = "这台机器已经移除";
+/// 目标机器已经从这台桌面移除时报的话，按当前语言。
+pub fn machine_removed() -> String {
+    rust_i18n::t!("machine_removed").into_owned()
+}
 
 /// 在后台发一次控制调用给那台机器。客户端在主线程取好再带去后台：一次调用是一次 socket
 /// 往返（远程的还要过 iroh），不能卡住界面。失败给的是可以直接显示的原因。
@@ -517,7 +530,7 @@ where
 {
     let client = host(cx).client(machine, cx);
     cx.background_executor().spawn(async move {
-        let client = client.ok_or_else(|| MACHINE_REMOVED.to_string())?;
+        let client = client.ok_or_else(machine_removed)?;
         client.call::<C>(&params, timeout).map_err(call_error_text)
     })
 }
@@ -527,9 +540,9 @@ pub fn call_error_text(error: ControlClientError) -> String {
     match error {
         // 应用刚更新、守护还没换到新版时会这样：守护要等空闲才升级。
         ControlClientError::Protocol(error) if error.code == ControlErrorCode::MethodNotFound => {
-            "正在运行的 smeltd 版本较旧，还不支持这个操作；升级守护进程后重试".to_string()
+            rust_i18n::t!("daemon_outdated").into_owned()
         }
-        ControlClientError::Protocol(error) => error.message,
+        ControlClientError::Protocol(error) => error.text(),
         other => other.to_string(),
     }
 }

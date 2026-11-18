@@ -62,12 +62,12 @@ describe("daemon protocol", () => {
 	});
 
 	test("an older or newer daemon is refused with both numbers", () => {
-		expect(protocolMismatch(2, { [SMELT_PROTOCOL_ENV]: "1" })).toContain("协议是 2，守护要的是 1");
-		expect(protocolMismatch(2, { [SMELT_PROTOCOL_ENV]: "3" })).toContain("守护要的是 3");
+		expect(protocolMismatch(2, { [SMELT_PROTOCOL_ENV]: "1" })).toContain("speaks protocol 2, but the runtime wants 1");
+		expect(protocolMismatch(2, { [SMELT_PROTOCOL_ENV]: "3" })).toContain("the runtime wants 3");
 	});
 
 	test("a daemon that predates the protocol is refused", () => {
-		expect(protocolMismatch(1, {})).toContain("（没给）");
+		expect(protocolMismatch(1, {})).toContain("(none given)");
 	});
 
 	// 复现：smelt-agent 自己拉起的 MCP 网关去掉了 SMELT_* 变量，校验它会让所有 stdio MCP 起不来。

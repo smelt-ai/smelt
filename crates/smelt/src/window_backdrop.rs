@@ -1,176 +1,71 @@
-//! 主窗口背后的系统材质。
+//! 主窗口背后的系统材质（毛玻璃），按地方垫。
 //!
-//! 有材质时主窗口透明，整窗拿材质做底，不铺主题底色（见 `workspace_frame::window_surface`）。
-//! 不给开关：毛玻璃是 smelt 的样子，不是一项偏好；能选的是哪一种系统材质
-//! （[`WindowMaterial`]，存在外观里）。材质整窗一块，不用跟着哪一栏同步位置和大小。着色、
-//! 窗口失焦变样、系统里关掉透明效果都由系统处理。模糊程度系统不让调，不做。
+//! 哪几块地方透、透哪种材质由布局说（`smelt_plugin_api::LayoutMaterials`，按用途：侧栏、
+//! 窗口底），宿主不认识哪块是什么。窗口本身透明，每帧画内容之前先铺底（[`paint`]）：声明了
+//! 材质的地方按外观里的底色不透明度铺一层主题底色、透出底下的材质，别处铺实的主题底色。
+//! 没声明材质的布局、放大了一块面板（停靠区都不画）时整扇窗口是实色。
 //!
-//! - macOS：宿主在 GPUI 的 Metal 视图下面垫一块铺满整窗的 `NSVisualEffectView`，透的是
-//!   窗口后面的桌面和别的窗口。默认用系统内容区材质（`ContentBackground`）。
-//! - Windows 11 22H2 起：系统背景材质 Mica、Acrylic、Mica Alt。GPUI 给了 Mica 和 Mica Alt
-//!   （`MicaBackdrop` / `MicaAltBackdrop`），Acrylic 由这里设。Mica 取的是桌面壁纸的颜色，
-//!   看不到后面的窗口，这是系统的设计；要透出后面的窗口选 Acrylic。
-//! - 别的：没有材质，窗口不透明。Windows 更早的版本只有 GPUI 的 `Blurred`（Acrylic，走
-//!   没公开的接口，和 22H2 起系统给的 Acrylic 不是一回事），拖窗口时会卡，不拿它兜底；
-//!   Linux 的透明窗口看合成器，靠不住。
+//! 各块地方的位置要等排版完才知道：外壳在 prepaint 里把各停靠区和中间的框记进 [`Regions`]，
+//! 窗口根上最先画的那块在 paint 里读（GPUI 先给整棵树 prepaint，再整棵 paint，所以读到的是
+//! 这一帧的位置），铺底、对齐材质，一帧之内完成。字的配色按最透的那种材质算（[`text_tone`]），
+//! 实色的地方对比只会更足。着色、窗口失焦变样、系统里关掉透明效果都由系统处理；模糊程度
+//! 系统不让调，不做。
+//!
+//! - macOS：在 GPUI 的 Metal 视图下面，每块透的地方垫一块 `NSVisualEffectView`，位置大小
+//!   跟着那块地方，透的是窗口后面的桌面和别的窗口。侧栏用系统侧栏材质，窗口底用系统窗口底
+//!   材质。
+//! - Windows 11 22H2 起：系统背景材质只能整扇窗口一种，用 Mica（GPUI 的 `MicaBackdrop`），
+//!   声明了的地方都透它，用途分不出来。Mica 取的是桌面壁纸的颜色，看不到后面的窗口，这是
+//!   系统给主窗口的设计。
+//! - 别的：没有材质，窗口不透明，整扇实色。Windows 更早的版本只有 GPUI 的 `Blurred`（走
+//!   没公开的接口），拖窗口时会卡，不拿它兜底；Linux 的透明窗口看合成器，靠不住。
 //!
 //! 不用 GPUI 在 macOS 上的 `Blurred`：它固定用 `UnderWindowBackground`，又特意剥掉了
 //! 系统的着色和饱和度，只剩纯模糊，铺在侧栏下面和实色分不出来。也不用 macOS 26 的
 //! `NSGlassEffectView`：液态玻璃是给浮在内容上的控件用的，不是侧栏的底。
 
-use gpui::{Window, WindowBackgroundAppearance};
-use smelt_ui::ui_theme::MaterialTone;
+use gpui::{Bounds, Pixels, Window, WindowBackgroundAppearance, fill, point, px, size};
+use gpui_base::dock::DockPlacement;
+use smelt_plugin_api::{LayoutMaterials, Material};
+use smelt_ui::ui_theme::{self, MaterialTone};
 
-/// 窗口底下垫哪一种系统材质。各平台能选的不一样，见 [`WindowMaterial::choices`]。
-///
-/// macOS 列的是 `NSVisualEffectMaterial` 里没废弃的全部 14 种，名字照系统给它定的用途叫；
-/// 整窗只垫一块，用途只是说明它原本长什么样。Windows 是系统背景材质
-/// （`DWMWA_SYSTEMBACKDROP_TYPE`）的全部三种。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowMaterial {
-    Sidebar,
-    Titlebar,
-    HeaderView,
-    Menu,
-    Popover,
-    Sheet,
-    Hud,
-    ToolTip,
-    FullScreenUi,
-    WindowBackground,
-    ContentBackground,
-    UnderWindow,
-    UnderPage,
-    Selection,
-    /// Windows 11 的 Mica：取桌面壁纸的颜色，看不到后面的窗口。
-    Mica,
-    /// Windows 11 的 Acrylic：透出窗口后面的桌面和别的窗口，系统给临时窗口用的那种。
-    Acrylic,
-    /// Windows 11 的 Mica Alt：颜色更重，标签式窗口用的那种。
-    MicaAlt,
-}
-
-impl WindowMaterial {
-    /// 这个平台能选的材质，第一项是默认。没有材质的平台是空的。
-    pub(crate) const fn choices() -> &'static [Self] {
-        if cfg!(target_os = "macos") {
-            &[
-                Self::ContentBackground,
-                Self::Sidebar,
-                Self::Titlebar,
-                Self::HeaderView,
-                Self::Menu,
-                Self::Popover,
-                Self::Sheet,
-                Self::Hud,
-                Self::ToolTip,
-                Self::FullScreenUi,
-                Self::WindowBackground,
-                Self::UnderWindow,
-                Self::UnderPage,
-                Self::Selection,
-            ]
-        } else if cfg!(windows) {
-            &[Self::Mica, Self::Acrylic, Self::MicaAlt]
-        } else {
-            &[]
-        }
-    }
-
-    /// 这个平台的默认材质。没有材质的平台随便给一个，反正用不上。
-    pub(crate) fn platform_default() -> Self {
-        Self::choices().first().copied().unwrap_or(Self::Sidebar)
-    }
-
-    /// 存库的名字。
-    pub(crate) const fn key(self) -> &'static str {
-        match self {
-            Self::Sidebar => "sidebar",
-            Self::Titlebar => "titlebar",
-            Self::HeaderView => "header-view",
-            Self::Menu => "menu",
-            Self::Popover => "popover",
-            Self::Sheet => "sheet",
-            Self::Hud => "hud",
-            Self::ToolTip => "tool-tip",
-            Self::FullScreenUi => "full-screen-ui",
-            Self::WindowBackground => "window",
-            Self::ContentBackground => "content",
-            Self::UnderWindow => "under-window",
-            Self::UnderPage => "under-page",
-            Self::Selection => "selection",
-            Self::Mica => "mica",
-            Self::Acrylic => "acrylic",
-            Self::MicaAlt => "mica-alt",
-        }
-    }
-
-    /// 从库里的名字读回来。不认识的、这个平台没有的，回到默认。
-    pub(crate) fn from_key(key: &str) -> Self {
-        Self::choices()
-            .iter()
-            .copied()
-            .find(|material| material.key() == key)
-            .unwrap_or_else(Self::platform_default)
-    }
-
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Sidebar => "侧栏",
-            Self::Titlebar => "标题栏",
-            Self::HeaderView => "表头",
-            Self::Menu => "菜单",
-            Self::Popover => "弹出框",
-            Self::Sheet => "对话框",
-            Self::Hud => "浮层",
-            Self::ToolTip => "工具提示",
-            Self::FullScreenUi => "全屏界面",
-            Self::WindowBackground => "窗口底（几乎不透）",
-            Self::ContentBackground => "内容区（不透）",
-            Self::UnderWindow => "窗口下层",
-            Self::UnderPage => "页面背后",
-            Self::Selection => "选中高亮（带强调色）",
-            Self::Mica => "Mica",
-            Self::Acrylic => "Acrylic（透出后面的窗口）",
-            Self::MicaAlt => "Mica Alt（颜色更重）",
-        }
-    }
-
-    /// 字压在这种材质上时按哪个颜色配（见 `ui_theme::MaterialTone`）。材质的颜色跟着桌面
-    /// 变，这里是常见桌面上的大致颜色往不利的那头（深色往亮、浅色往暗）留了余量。
-    /// TODO: 除侧栏外都是估值，按实机截图校准。
-    const fn tone(self) -> MaterialTone {
-        let (dark, light) = match self {
+/// 一种材质在这个平台上的代表色：字压在上面时按它配（见 `ui_theme::MaterialTone`）。材质
+/// 的颜色跟着桌面变，这里是常见桌面上的大致颜色往不利的那头（深色往亮、浅色往暗）留了余量。
+/// TODO: 窗口底是估值，按实机截图校准。
+fn tone(material: Material) -> MaterialTone {
+    let (dark, light) = if cfg!(windows) {
+        // Mica 常见约 #202020 / #F3F3F3。
+        (0x2c2c2c, 0xe6e6e6)
+    } else {
+        match material {
             // 常见约 #2D3136 / #E3E3E6。
-            Self::Sidebar => (0x363a40, 0xd6d6da),
-            Self::Titlebar => (0x34343a, 0xdadade),
-            Self::HeaderView => (0x323236, 0xd8d8da),
-            Self::Menu => (0x343438, 0xd8d8db),
-            Self::Popover => (0x38383c, 0xdcdcdf),
-            Self::Sheet => (0x38383a, 0xdedee0),
-            Self::Hud => (0x2c2c2f, 0xd0d0d3),
-            Self::ToolTip => (0x3e3e40, 0xe4e4e6),
-            Self::FullScreenUi => (0x2e2e30, 0xd2d2d4),
+            Material::Sidebar => (0x363a40, 0xd6d6da),
             // 系统窗口底色 #323232 / #ECECEC，几乎不透，余量留得少。
-            Self::WindowBackground => (0x363636, 0xe2e2e2),
-            // 不透，约 #1E1E1E / #FFFFFF。
-            Self::ContentBackground => (0x242424, 0xf6f6f6),
-            Self::UnderWindow => (0x2e3034, 0xdcdcdf),
-            Self::UnderPage => (0x303032, 0xc8c8cb),
-            // 带系统强调色，按默认的蓝估。
-            Self::Selection => (0x2b4f86, 0xb5cdf0),
-            // Mica 常见约 #202020 / #F3F3F3。
-            Self::Mica => (0x2c2c2c, 0xe6e6e6),
-            Self::Acrylic => (0x343434, 0xdadada),
-            Self::MicaAlt => (0x2a2a2a, 0xd8d8d8),
-        };
-        MaterialTone { dark, light }
-    }
+            Material::Window => (0x363636, 0xe2e2e2),
+        }
+    };
+    MaterialTone { dark, light }
 }
 
-/// 字压着的那层材质的代表色，交给色板配字色。这台机器上没有材质时是 `None`。
-pub(crate) fn text_tone(material: WindowMaterial) -> Option<MaterialTone> {
-    available().then(|| material.tone())
+/// 字压着的材质的代表色，交给色板配字色：哪种材质都可能被布局用上，取最不利的那种（深色
+/// 取最亮的、浅色取最暗的）。实色的地方比材质离字更远，对比只会更足。这台机器上没有材质
+/// 时是 `None`。
+pub(crate) fn text_tone() -> Option<MaterialTone> {
+    if !available() {
+        return None;
+    }
+    let luminance = |color: u32| (color >> 16 & 0xff) + (color >> 8 & 0xff) + (color & 0xff);
+    let tones = Material::ALL.map(tone);
+    Some(MaterialTone {
+        dark: tones
+            .iter()
+            .map(|tone| tone.dark)
+            .max_by_key(|&c| luminance(c))?,
+        light: tones
+            .iter()
+            .map(|tone| tone.light)
+            .min_by_key(|&c| luminance(c))?,
+    })
 }
 
 /// 这台机器上有没有窗口材质可透。render 里会问，Windows 上查一次系统版本后缓存。
@@ -185,72 +80,235 @@ pub(crate) const fn available() -> bool {
     cfg!(target_os = "macos")
 }
 
-/// 主窗口的背景外观：有材质时窗口透明、材质垫在下面，没有就不透明。Windows 上材质就是
-/// 背景外观本身；GPUI 没有 Acrylic，先给 Mica，`imp::sync` 再把系统背景材质换成 Acrylic。
-pub(crate) fn window_background(material: WindowMaterial) -> WindowBackgroundAppearance {
+/// 主窗口的背景外观：有材质的机器窗口透明（Windows 上是 Mica），底由 [`paint`] 按地方铺；
+/// 没有就不透明。
+pub(crate) fn window_background() -> WindowBackgroundAppearance {
     if !available() {
-        return WindowBackgroundAppearance::Opaque;
-    }
-    match material {
-        WindowMaterial::Mica | WindowMaterial::Acrylic => WindowBackgroundAppearance::MicaBackdrop,
-        WindowMaterial::MicaAlt => WindowBackgroundAppearance::MicaAltBackdrop,
-        _ => WindowBackgroundAppearance::Transparent,
+        WindowBackgroundAppearance::Opaque
+    } else if cfg!(windows) {
+        WindowBackgroundAppearance::MicaBackdrop
+    } else {
+        WindowBackgroundAppearance::Transparent
     }
 }
 
-/// 把材质种类和深浅设成外观里的样子（macOS 上第一次调用时顺手垫上材质）。
+/// 外壳在 prepaint 里记下的各块地方的位置（窗口坐标），窗口根在 paint 里读完清空。没画的
+/// （停靠区关着、放大了一块面板）这一帧就没有。
+#[derive(Default)]
+pub(crate) struct Regions {
+    left: Option<Bounds<Pixels>>,
+    right: Option<Bounds<Pixels>>,
+    bottom: Option<Bounds<Pixels>>,
+    /// 中间那一列，下停靠区也在里面。
+    center: Option<Bounds<Pixels>>,
+}
+
+impl Regions {
+    pub(crate) fn record(&mut self, placement: DockPlacement, bounds: Bounds<Pixels>) {
+        let slot = match placement {
+            DockPlacement::Left => &mut self.left,
+            DockPlacement::Right => &mut self.right,
+            DockPlacement::Bottom => &mut self.bottom,
+            DockPlacement::Center => &mut self.center,
+        };
+        *slot = Some(bounds);
+    }
+}
+
+/// 外壳和窗口根共用的那份 [`Regions`]：外壳的各页 Dock 往里记，窗口根读。
+pub(crate) type SharedRegions = std::rc::Rc<std::cell::RefCell<Regions>>;
+
+/// 透的地方：哪种材质，铺在哪几块矩形里。
+type Panes = Vec<(Material, Rect)>;
+
+/// 已经交给系统的材质，没变就不再发。
+#[derive(Default)]
+pub(crate) struct Backdrop {
+    applied: Option<(Panes, bool)>,
+}
+
+impl Backdrop {
+    /// 下一帧不管变没变都重发一次：Windows 上系统换深浅时 GPUI 会把窗口的深浅改回跟系统。
+    pub(crate) fn invalidate(&mut self) {
+        self.applied = None;
+    }
+}
+
+/// 铺这一帧的窗口底，把材质对齐到透的那几块地方。窗口根上最先画的那块在 paint 里调。
 ///
-/// 材质默认跟系统的深浅，用户在 smelt 里选的主题可以和系统相反，所以每次换主题都要
-/// 把明暗告诉它。Windows 上系统换深浅时 GPUI 会把窗口的深浅改回跟系统，调用方要在
-/// 系统深浅变了的时候也再调一次。
-pub(crate) fn sync(window: &Window, material: WindowMaterial, dark: bool) {
-    if !available() {
-        return;
+/// `window_bounds` 是整扇窗口；`materials` 是开着的那页的布局说的；`regions` 是这一帧外壳
+/// 记下的位置，读完清空；`bg_opacity` 是透的地方主题底色铺多实，1 就是不透、不垫材质。
+pub(crate) fn paint(
+    window_bounds: Bounds<Pixels>,
+    materials: LayoutMaterials,
+    regions: &mut Regions,
+    bg_opacity: f32,
+    backdrop: &mut Backdrop,
+    window: &mut Window,
+) {
+    let regions = std::mem::take(regions);
+    let scale = window.scale_factor();
+    let panes = if available() && bg_opacity < 1.0 {
+        glass_panes(materials, &regions, scale)
+    } else {
+        Vec::new()
+    };
+    let solid = ui_theme::solid_fill();
+    let glass = ui_theme::glass_fill();
+    let holes: Vec<Rect> = panes.iter().map(|(_, rect)| *rect).collect();
+    for rect in subtract_all(Rect::snapped(window_bounds, scale), &holes) {
+        window.paint_quad(fill(rect.bounds(), solid));
+    }
+    for (_, rect) in &panes {
+        window.paint_quad(fill(rect.bounds(), glass));
     }
 
-    #[cfg(any(target_os = "macos", windows))]
-    imp::sync(window, material, dark);
+    let dark = !ui_theme::is_light();
+    if backdrop.applied.as_ref() == Some(&(panes.clone(), dark)) {
+        return;
+    }
+    sync(window, window_bounds, &panes, dark);
+    backdrop.applied = Some((panes, dark));
+}
+
+/// 布局声明了材质、这一帧又画出来了的地方。中间那一列要扣掉压在它下面的下停靠区。
+fn glass_panes(materials: LayoutMaterials, regions: &Regions, scale: f32) -> Panes {
+    let mut panes = Vec::new();
+    let mut add = |placement: DockPlacement, bounds: Option<Bounds<Pixels>>, holes: &[Rect]| {
+        if let (Some(material), Some(bounds)) = (materials.get(placement), bounds) {
+            for rect in subtract_all(Rect::snapped(bounds, scale), holes) {
+                panes.push((material, rect));
+            }
+        }
+    };
+    let bottom: Vec<Rect> = regions
+        .bottom
+        .map(|bounds| Rect::snapped(bounds, scale))
+        .into_iter()
+        .collect();
+    add(DockPlacement::Center, regions.center, &bottom);
+    add(DockPlacement::Bottom, regions.bottom, &[]);
+    add(DockPlacement::Left, regions.left, &[]);
+    add(DockPlacement::Right, regions.right, &[]);
+    panes
+}
+
+/// 一块矩形，按设备像素对齐过的逻辑坐标：相邻两块（实色和透的）严丝合缝，接缝处不漏一条
+/// 半透的线。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rect {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl Rect {
+    fn snapped(bounds: Bounds<Pixels>, scale: f32) -> Self {
+        let snap = |value: Pixels| (f32::from(value) * scale).round() / scale;
+        Self {
+            left: snap(bounds.origin.x),
+            top: snap(bounds.origin.y),
+            right: snap(bounds.origin.x + bounds.size.width),
+            bottom: snap(bounds.origin.y + bounds.size.height),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.right <= self.left || self.bottom <= self.top
+    }
+
+    fn bounds(&self) -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(self.left), px(self.top)),
+            size: size(px(self.right - self.left), px(self.bottom - self.top)),
+        }
+    }
+
+    /// 扣掉 `hole` 剩下的部分：上、下两条整宽，中间左、右两块，空的不要。
+    fn subtract(self, hole: Rect) -> Vec<Rect> {
+        let hole = Rect {
+            left: hole.left.max(self.left),
+            top: hole.top.max(self.top),
+            right: hole.right.min(self.right),
+            bottom: hole.bottom.min(self.bottom),
+        };
+        if hole.is_empty() {
+            return vec![self];
+        }
+        [
+            Rect {
+                bottom: hole.top,
+                ..self
+            },
+            Rect {
+                top: hole.bottom,
+                ..self
+            },
+            Rect {
+                top: hole.top,
+                bottom: hole.bottom,
+                right: hole.left,
+                ..self
+            },
+            Rect {
+                top: hole.top,
+                bottom: hole.bottom,
+                left: hole.right,
+                ..self
+            },
+        ]
+        .into_iter()
+        .filter(|rect| !rect.is_empty())
+        .collect()
+    }
+}
+
+fn subtract_all(rect: Rect, holes: &[Rect]) -> Vec<Rect> {
+    holes.iter().fold(vec![rect], |rects, hole| {
+        rects
+            .into_iter()
+            .flat_map(|rect| rect.subtract(*hole))
+            .collect()
+    })
+}
+
+/// 把材质交给系统：macOS 上按透的地方摆好各块材质视图，Windows 上只有整窗一种，设深浅。
+fn sync(window: &Window, window_bounds: Bounds<Pixels>, panes: &Panes, dark: bool) {
+    #[cfg(target_os = "macos")]
+    imp::sync(window, window_bounds, panes, dark);
+
+    #[cfg(windows)]
+    {
+        let _ = (window_bounds, panes);
+        imp::set_dark(window, dark);
+    }
 
     #[cfg(not(any(target_os = "macos", windows)))]
-    let _ = (window, material, dark);
+    let _ = (window, window_bounds, panes, dark);
 }
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use gpui::Window;
-    use objc::runtime::{BOOL, NO, Object};
+    use gpui::{Bounds, Pixels, Window};
+    use objc::runtime::{BOOL, NO, Object, YES};
     use objc::{class, msg_send, sel, sel_impl};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use smelt_plugin_api::Material;
 
-    use super::WindowMaterial;
+    use super::Panes;
 
     /// `NSVisualEffectMaterial` 的取值。
-    fn ns_material(material: WindowMaterial) -> i64 {
+    fn ns_material(material: Material) -> i64 {
         match material {
-            WindowMaterial::Titlebar => 3,
-            WindowMaterial::Selection => 4,
-            WindowMaterial::Menu => 5,
-            WindowMaterial::Popover => 6,
-            WindowMaterial::Sidebar => 7,
-            WindowMaterial::HeaderView => 10,
-            WindowMaterial::Sheet => 11,
-            WindowMaterial::WindowBackground => 12,
-            WindowMaterial::Hud => 13,
-            WindowMaterial::FullScreenUi => 15,
-            WindowMaterial::ToolTip => 17,
-            WindowMaterial::ContentBackground => 18,
-            WindowMaterial::UnderWindow => 21,
-            WindowMaterial::UnderPage => 22,
-            // 不是 macOS 的材质不会选到这里，给默认的侧栏。
-            WindowMaterial::Mica | WindowMaterial::Acrylic | WindowMaterial::MicaAlt => 7,
+            Material::Sidebar => 7,
+            Material::Window => 12,
         }
     }
     /// `NSVisualEffectBlendingModeBehindWindow`：透的是窗口后面的桌面和别的窗口。
     const BLENDING_BEHIND_WINDOW: i64 = 0;
     /// `NSVisualEffectStateFollowsWindowActiveState`：窗口失焦时和系统侧栏一样变灰。
     const STATE_FOLLOWS_WINDOW: i64 = 0;
-    /// `NSViewWidthSizable | NSViewHeightSizable`：跟着内容视图一起变大小。
-    const FILL_PARENT: u64 = (1 << 1) | (1 << 4);
     /// `NSWindowBelow`。
     const BELOW: i64 = -1;
 
@@ -291,35 +349,35 @@ mod imp {
         (native_view, container)
     }
 
-    /// 已经垫上的材质。只认正好是 `NSVisualEffectView` 的：GPUI 的 `Blurred` 用的是它的
-    /// 子类，不能把那块当成自己的。
-    unsafe fn find_backdrop(container: *mut Object) -> Option<*mut Object> {
+    /// 已经垫上的材质视图，按先后。只认正好是 `NSVisualEffectView` 的：GPUI 的 `Blurred`
+    /// 用的是它的子类，不能当成自己的。
+    unsafe fn our_views(container: *mut Object) -> Vec<*mut Object> {
         unsafe {
             let subviews: *mut Object = msg_send![container, subviews];
             if subviews.is_null() {
-                return None;
+                return Vec::new();
             }
             let count: usize = msg_send![subviews, count];
-            (0..count).find_map(|i| {
-                let view: *mut Object = msg_send![subviews, objectAtIndex: i];
-                let exact: BOOL = msg_send![view, isMemberOfClass: class!(NSVisualEffectView)];
-                (!view.is_null() && exact != NO).then_some(view)
-            })
+            (0..count)
+                .map(|i| -> *mut Object { msg_send![subviews, objectAtIndex: i] })
+                .filter(|&view| {
+                    let exact: BOOL = msg_send![view, isMemberOfClass: class!(NSVisualEffectView)];
+                    !view.is_null() && exact != NO
+                })
+                .collect()
         }
     }
 
     unsafe fn install(native_view: *mut Object, container: *mut Object) -> *mut Object {
         unsafe {
-            let bounds: NSRect = msg_send![container, bounds];
             let view: *mut Object = msg_send![class!(NSVisualEffectView), alloc];
-            let view: *mut Object = msg_send![view, initWithFrame: bounds];
+            let view: *mut Object = msg_send![view, init];
             assert!(
                 !view.is_null(),
                 "NSVisualEffectView initialization unexpectedly returned nil"
             );
             let _: () = msg_send![view, setBlendingMode: BLENDING_BEHIND_WINDOW];
             let _: () = msg_send![view, setState: STATE_FOLLOWS_WINDOW];
-            let _: () = msg_send![view, setAutoresizingMask: FILL_PARENT];
             // 放在 Metal 视图下面：材质只是底，点击照常落到 GPUI。
             let _: () = msg_send![
                 container,
@@ -333,14 +391,13 @@ mod imp {
         }
     }
 
-    pub(super) fn sync(window: &Window, material: WindowMaterial, dark: bool) {
+    /// 每块透的地方一块材质视图，多的撤掉。位置换成内容视图的坐标：GPUI 的原点在左上，
+    /// AppKit 的不翻转视图原点在左下。
+    pub(super) fn sync(window: &Window, window_bounds: Bounds<Pixels>, panes: &Panes, dark: bool) {
         let (native_view, container) = native_views(window);
         unsafe {
-            let backdrop = match find_backdrop(container) {
-                Some(view) => view,
-                None => install(native_view, container),
-            };
-            let _: () = msg_send![backdrop, setMaterial: ns_material(material)];
+            let flipped: BOOL = msg_send![container, isFlipped];
+            let container_bounds: NSRect = msg_send![container, bounds];
             let name = if dark {
                 c"NSAppearanceNameDarkAqua"
             } else {
@@ -349,7 +406,36 @@ mod imp {
             let name: *mut Object =
                 msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
             let appearance: *mut Object = msg_send![class!(NSAppearance), appearanceNamed: name];
-            let _: () = msg_send![backdrop, setAppearance: appearance];
+
+            let mut views = our_views(container).into_iter();
+            for (material, rect) in panes {
+                let view = views
+                    .next()
+                    .unwrap_or_else(|| install(native_view, container));
+                let top = f64::from(rect.top - f32::from(window_bounds.origin.y));
+                let height = f64::from(rect.bottom - rect.top);
+                let y = if flipped == YES {
+                    top
+                } else {
+                    container_bounds.size.height - top - height
+                };
+                let frame = NSRect {
+                    origin: NSPoint {
+                        x: f64::from(rect.left - f32::from(window_bounds.origin.x)),
+                        y,
+                    },
+                    size: NSSize {
+                        width: f64::from(rect.right - rect.left),
+                        height,
+                    },
+                };
+                let _: () = msg_send![view, setFrame: frame];
+                let _: () = msg_send![view, setMaterial: ns_material(*material)];
+                let _: () = msg_send![view, setAppearance: appearance];
+            }
+            for extra in views {
+                let _: () = msg_send![extra, removeFromSuperview];
+            }
         }
     }
 }
@@ -362,10 +448,7 @@ mod imp {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
     use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::Graphics::Dwm::{
-        DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-        DwmSetWindowAttribute,
-    };
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
     use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
     use windows_sys::core::BOOL;
 
@@ -386,83 +469,114 @@ mod imp {
         })
     }
 
-    /// 先换材质，再设深浅：材质的深浅跟着窗口的深色模式标记走，这个标记也决定系统
-    /// 标题栏的深浅。
-    pub(super) fn sync(window: &Window, material: super::WindowMaterial, dark: bool) {
-        window.set_background_appearance(super::window_background(material));
+    /// Mica 的深浅跟着窗口的深色模式标记走，这个标记也决定系统标题栏的深浅。
+    pub(super) fn set_dark(window: &Window, dark: bool) {
         let handle = HasWindowHandle::window_handle(window)
             .expect("GPUI window must expose a native window handle");
         let RawWindowHandle::Win32(handle) = handle.as_raw() else {
             unreachable!("Windows GPUI windows must use Win32 window handles");
         };
         let hwnd = handle.hwnd.get() as HWND;
-        // GPUI 只会设 Mica 和 Mica Alt：上面已经按 Mica 把窗口画成透明，这里把系统背景
-        // 材质换成 Acrylic。
-        if material == super::WindowMaterial::Acrylic {
-            let backdrop = DWMSBT_TRANSIENTWINDOW;
-            set_attribute(
-                hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE as u32,
-                &backdrop,
-                "背景材质",
-            );
-        }
         let dark = BOOL::from(dark);
-        set_attribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-            &dark,
-            "窗口深浅",
-        );
-    }
-
-    fn set_attribute<T>(hwnd: HWND, attribute: u32, value: &T, what: &str) {
         let result = unsafe {
             DwmSetWindowAttribute(
                 hwnd,
-                attribute,
-                (value as *const T).cast(),
-                size_of::<T>() as u32,
+                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+                (&dark as *const BOOL).cast(),
+                size_of::<BOOL>() as u32,
             )
         };
         if result < 0 {
-            eprintln!("[window] 设置{what}失败：HRESULT {result:#x}");
+            eprintln!("[window] 设置窗口深浅失败：HRESULT {result:#x}");
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::WindowMaterial;
+    use super::*;
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_defaults_to_content_background_without_overriding_saved_material() {
-        assert_eq!(
-            WindowMaterial::platform_default(),
-            WindowMaterial::ContentBackground
-        );
-        assert_eq!(
-            WindowMaterial::from_key(""),
-            WindowMaterial::ContentBackground
-        );
-        assert_eq!(WindowMaterial::from_key("sidebar"), WindowMaterial::Sidebar);
+    fn rect(left: f32, top: f32, right: f32, bottom: f32) -> Rect {
+        Rect {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 
-    /// 这个平台能选的材质按名字存进库再读回来不变；旧库里的 `regular`、空串、别的平台的
-    /// 材质都回到默认。
+    fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(w), px(h)),
+        }
+    }
+
+    fn area(rects: &[Rect]) -> f32 {
+        rects
+            .iter()
+            .map(|r| (r.right - r.left) * (r.bottom - r.top))
+            .sum()
+    }
+
+    /// 扣掉一块，剩下的面积对、不和扣掉的那块重叠；扣在外面的不动。
     #[test]
-    fn material_keys_round_trip_and_unknown_ones_fall_back() {
-        for &material in WindowMaterial::choices() {
-            assert_eq!(WindowMaterial::from_key(material.key()), material);
-        }
-        let foreign = if cfg!(windows) { "sidebar" } else { "mica" };
-        for key in ["regular", "", foreign] {
-            assert_eq!(
-                WindowMaterial::from_key(key),
-                WindowMaterial::platform_default(),
-                "{key:?}"
-            );
-        }
+    fn subtracting_a_hole_leaves_the_rest() {
+        let window = rect(0., 0., 100., 80.);
+        let left = rect(0., 0., 30., 80.);
+        let rest = subtract_all(window, &[left]);
+        assert_eq!(rest, [rect(30., 0., 100., 80.)]);
+        let middle = rect(40., 20., 60., 50.);
+        let rest = subtract_all(window, &[middle]);
+        assert_eq!(rest.len(), 4);
+        assert_eq!(area(&rest), 100. * 80. - 20. * 30.);
+        assert_eq!(subtract_all(window, &[rect(200., 0., 300., 80.)]), [window]);
+        assert!(subtract_all(window, &[window]).is_empty());
+    }
+
+    /// 只有布局声明了的地方透；中间那一列扣掉下停靠区，下停靠区自己没声明就是实色。
+    #[test]
+    fn only_declared_regions_become_glass() {
+        let materials = LayoutMaterials {
+            left: Some(Material::Sidebar),
+            center: Some(Material::Window),
+            ..LayoutMaterials::default()
+        };
+        let mut regions = Regions::default();
+        regions.record(DockPlacement::Left, bounds(0., 0., 30., 80.));
+        regions.record(DockPlacement::Center, bounds(30., 0., 50., 80.));
+        regions.record(DockPlacement::Bottom, bounds(30., 60., 50., 20.));
+        regions.record(DockPlacement::Right, bounds(80., 0., 20., 80.));
+        let panes = glass_panes(materials, &regions, 2.);
+        assert_eq!(
+            panes,
+            [
+                (Material::Window, rect(30., 0., 80., 60.)),
+                (Material::Sidebar, rect(0., 0., 30., 80.)),
+            ]
+        );
+        assert!(glass_panes(LayoutMaterials::default(), &regions, 2.).is_empty());
+    }
+
+    /// 按设备像素对齐：两倍屏上对到半点，实色和透的地方之间不留缝。
+    #[test]
+    fn rects_snap_to_device_pixels() {
+        assert_eq!(
+            Rect::snapped(bounds(0.3, 0., 29.9, 10.), 2.),
+            rect(0.5, 0., 30., 10.)
+        );
+    }
+
+    /// 字按最透的那种材质配：深色取最亮的，浅色取最暗的。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn text_tone_takes_the_least_favourable_material() {
+        assert_eq!(
+            text_tone(),
+            Some(MaterialTone {
+                dark: 0x363a40,
+                light: 0xd6d6da,
+            })
+        );
     }
 }

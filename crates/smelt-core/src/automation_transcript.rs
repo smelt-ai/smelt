@@ -16,7 +16,7 @@ pub fn save_run_transcript_on(
 ) -> Result<(), String> {
     let archived = archive_entries(entries);
     let encoded = serde_json::to_vec(&archived)
-        .map_err(|error| format!("序列化自动化 Run 对话失败: {error}"))?;
+        .map_err(|error| format!("couldn't serialize the automation run conversation: {error}"))?;
     store
         .put_automation_run_transcript(run_id.trim(), &encoded)
         .map_err(Into::into)
@@ -132,6 +132,7 @@ mod tests {
                 error: None,
                 runtime_released_at: None,
                 context_json: context.clone(),
+                error_code: None,
             })
             .collect();
         store

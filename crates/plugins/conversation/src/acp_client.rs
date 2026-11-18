@@ -9,6 +9,7 @@
 //! 转发 `action_rx`），跟 `acp_conn::spawn_acp` 同一种「一个会话一条线程」的
 //! 分工。
 
+use rust_i18n::t;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex};
@@ -17,7 +18,9 @@ use std::time::Duration;
 use serde::Deserialize as _;
 use smelt_plugin_api::client::protocol::daemon::DaemonOperation;
 use smelt_plugin_api::client::{RuntimeClient, RuntimeStream};
-use smelt_plugin_api::model::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
+use smelt_plugin_api::model::acp_session::{
+    AcpEndKind, AcpUserAction, ConversationDebug, ConversationSnapshot,
+};
 use smelt_plugin_api::model::acp_wire::{FrameDelta, FrameMirror};
 use smelt_plugin_api::model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_plugin_api::model::daemon_state::DaemonPhase;
@@ -33,7 +36,7 @@ const ACP_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 fn connect_acp_control(runtime: &RuntimeClient) -> Result<RuntimeStream, String> {
     runtime
         .connect_with_timeout(ACP_CONTROL_TIMEOUT)
-        .map_err(|e| format!("连不上 smeltd：{e}"))
+        .map_err(|e| t!("error.connect", error = e).into_owned())
 }
 
 /// 一次 `acp_open` 的启动参数。执行引擎仍以 `ConversationAgentKind::id()` 那串小写标识
@@ -86,6 +89,8 @@ fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
         "fork_cut": &launch.fork_cut,
         "tail_limit": ACP_INITIAL_TAIL_LIMIT,
         "omit_history": true,
+        // 调试数据只有 Trajectory 窗口要，它打开时自己用 `acp_debug` 拉。
+        "include_debug": false,
         "conversation_binding": &launch.conversation_binding,
     });
     if let Some(prompt) = &launch.pending_agent_preset {
@@ -174,6 +179,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         phase: DaemonPhase::Dead,
         end_reason: reason.to_string(),
         end_kind: AcpEndKind::TransportDisconnected,
+        end_code: None,
         accepted_delivery_ids: Default::default(),
         active_delivery_id: None,
         completed_delivery_id: None,
@@ -230,6 +236,7 @@ fn snapshot_from_live(
     let mut snapshot = fallback_snapshot(&live.end_reason, entries_offset);
     snapshot.phase = live.phase;
     snapshot.end_kind = live.end_kind;
+    snapshot.end_code = live.end_code;
     snapshot.acp_session_id = live.acp_session_id;
     snapshot.history_session_id = live.history_session_id;
     snapshot.session_title = live.session_title;
@@ -243,6 +250,7 @@ fn snapshot_from_live(
     }
     if !matches!(snapshot.phase, DaemonPhase::Dead | DaemonPhase::Failed) {
         snapshot.end_kind = AcpEndKind::Unknown;
+        snapshot.end_code = None;
     }
     snapshot
 }
@@ -339,13 +347,11 @@ fn read_snapshot_frame(
                     return SnapshotFrame::Snapshot(snapshot_from_live(
                         live,
                         entries_offset,
-                        Some(format!("历史读不出来：{error}")),
+                        Some(t!("error.history_unreadable", error = error).into_owned()),
                     ));
                 }
-                let mut terminal = fallback_snapshot(
-                    &format!("会话快照无法解析，启动等待已结束：{error}"),
-                    entries_offset,
-                );
+                let mut terminal =
+                    fallback_snapshot(&t!("error.snapshot_invalid", error = error), entries_offset);
                 terminal.end_kind = AcpEndKind::Unknown;
                 SnapshotFrame::Unreadable(terminal)
             }
@@ -368,7 +374,7 @@ fn snapshot_after_stream_disconnect(
         return None;
     }
 
-    let mut disconnected = fallback_snapshot("与 smeltd 的连接已断开", entries_offset);
+    let mut disconnected = fallback_snapshot(&t!("error.disconnected"), entries_offset);
     disconnected.session_title = session_title;
     Some(disconnected)
 }
@@ -379,7 +385,46 @@ fn acp_snapshot_request(id: &str, before: usize, limit: usize) -> serde_json::Va
         "id": id,
         "before": before,
         "limit": limit,
+        "include_debug": false,
     })
+}
+
+fn acp_debug_request(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "op": DaemonOperation::AcpDebug,
+        "id": id,
+    })
+}
+
+/// `acp_debug` 回包。新版 smeltd 总会回一行；空回包是旧版不认识这个操作，直接断开了。
+fn debug_from_response(response: &str) -> Result<ConversationDebug, String> {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return Err(t!("debug.runtime_too_old").into_owned());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|_| t!("debug.parse_failed").into_owned())?;
+    if let Some(debug) = value.get("debug") {
+        return serde_json::from_value(debug.clone()).map_err(|_| t!("debug.invalid").into_owned());
+    }
+    Err(value
+        .get("error")
+        .and_then(|error| error.as_str())
+        .filter(|error| !error.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| t!("error.no_session").into_owned()))
+}
+
+/// 一次性取会话的工具参数表和 runtime debug。阻塞，调用方放到后台执行。
+pub fn load_acp_debug(runtime: &RuntimeClient, id: &str) -> Result<ConversationDebug, String> {
+    let mut stream = connect_acp_control(runtime)?;
+    smelt_plugin_api::client::protocol::write_json_line(&mut stream, &acp_debug_request(id))
+        .map_err(|e| t!("debug.send_failed", error = e).into_owned())?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|e| t!("debug.read_failed", error = e).into_owned())?;
+    debug_from_response(&response)
 }
 
 /// 把一次 `acp_snapshot` 回包还原成历史页。
@@ -388,13 +433,13 @@ fn acp_snapshot_request(id: &str, before: usize, limit: usize) -> serde_json::Va
 fn history_snapshot_from_response(response: &str) -> Result<ConversationSnapshot, String> {
     let trimmed = response.trim();
     if trimmed.is_empty() {
-        return Err("ACP 会话不存在".to_string());
+        return Err(t!("error.no_session").into_owned());
     }
     let value: serde_json::Value =
-        serde_json::from_str(trimmed).map_err(|_| "历史快照解析失败".to_string())?;
+        serde_json::from_str(trimmed).map_err(|_| t!("error.history_parse_failed").into_owned())?;
     if let Some(snapshot) = value.get("snapshot") {
         return serde_json::from_value(snapshot.clone())
-            .map_err(|_| "历史快照内容无效".to_string());
+            .map_err(|_| t!("error.history_invalid").into_owned());
     }
     if let Some(error) = value
         .get("error")
@@ -403,7 +448,7 @@ fn history_snapshot_from_response(response: &str) -> Result<ConversationSnapshot
     {
         return Err(error.to_string());
     }
-    Err("ACP 会话不存在".to_string())
+    Err(t!("error.no_session").into_owned())
 }
 
 /// Read one bounded page immediately before `before` without disturbing the long-lived
@@ -419,11 +464,11 @@ pub fn load_acp_history(
         &mut stream,
         &acp_snapshot_request(id, before, limit),
     )
-    .map_err(|e| format!("读取历史请求发送失败：{e}"))?;
+    .map_err(|e| t!("error.history_send_failed", error = e).into_owned())?;
     let mut response = String::new();
     BufReader::new(stream)
         .read_line(&mut response)
-        .map_err(|e| format!("读取历史失败：{e}"))?;
+        .map_err(|e| t!("error.history_read_failed", error = e).into_owned())?;
     history_snapshot_from_response(&response)
 }
 
@@ -469,14 +514,14 @@ pub fn spawn_acp_client(
                 Ok(c) => c,
                 Err(e) => {
                     let _ = event_tx.try_send(ConversationClientEvent::Snapshot(
-                        fallback_snapshot(&format!("连不上 smeltd：{e}"), known_entries_end),
+                        fallback_snapshot(&t!("error.connect", error = e), known_entries_end),
                     ));
                     return;
                 }
             };
             let Ok(mut writer) = conn.try_clone() else {
                 let _ = event_tx.try_send(ConversationClientEvent::Snapshot(fallback_snapshot(
-                    "无法建立 smeltd 双向连接",
+                    &t!("error.duplex"),
                     known_entries_end,
                 )));
                 return;
@@ -487,7 +532,7 @@ pub fn spawn_acp_client(
             let req = acp_open_request(&launch);
             if smelt_plugin_api::client::protocol::write_json_line(&mut writer, &req).is_err() {
                 let _ = event_tx.try_send(ConversationClientEvent::Snapshot(fallback_snapshot(
-                    "向 smeltd 发起会话失败",
+                    &t!("error.open_failed"),
                     known_entries_end,
                 )));
                 return;
@@ -596,29 +641,33 @@ pub fn restart_acp_session(runtime: &RuntimeClient, id: &str) -> Result<(), Stri
         &mut s,
         &serde_json::json!({ "op": DaemonOperation::AcpRestart, "id": id }),
     )
-    .map_err(|e| format!("写请求失败：{e}"))?;
+    .map_err(|e| t!("error.write_failed", error = e).into_owned())?;
     let mut resp = String::new();
     BufReader::new(s)
         .read_line(&mut resp)
-        .map_err(|e| format!("读回执失败：{e}"))?;
-    let v: serde_json::Value =
-        serde_json::from_str(resp.trim()).map_err(|_| "回执解析失败".to_string())?;
+        .map_err(|e| t!("error.reply_read_failed", error = e).into_owned())?;
+    let v: serde_json::Value = serde_json::from_str(resp.trim())
+        .map_err(|_| t!("error.reply_parse_failed").into_owned())?;
     if v["ok"].as_bool() == Some(true) {
         Ok(())
     } else {
-        Err(v["error"].as_str().unwrap_or("重启失败").to_string())
+        Err(v["error"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| t!("error.restart_failed").into_owned()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ACP_INITIAL_TAIL_LIMIT, AcpEndKind, ConversationClientLaunch, ConversationSnapshot,
-        DaemonPhase, SnapshotFrame, acp_open_request, acp_snapshot_request, fallback_snapshot,
+        ACP_INITIAL_TAIL_LIMIT, AcpEndKind, ConversationClientLaunch, ConversationDebug,
+        ConversationSnapshot, DaemonPhase, SnapshotFrame, acp_debug_request, acp_open_request,
+        acp_snapshot_request, debug_from_response, fallback_snapshot,
         history_snapshot_from_response, open_reply_acknowledges_initial, read_snapshot_frame,
         snapshot_after_stream_disconnect,
     };
-    use smelt_plugin_api::model::acp_session::SessionLive;
+    use smelt_plugin_api::model::acp_session::{SessionLive, ToolCallDebug};
     use smelt_plugin_api::model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
     use std::collections::BTreeMap;
 
@@ -648,6 +697,7 @@ mod tests {
         assert_eq!(req["resume_id"], "resume-1");
         assert!(req["fork_id"].is_null());
         assert_eq!(req["tail_limit"], ACP_INITIAL_TAIL_LIMIT);
+        assert_eq!(req["include_debug"], false, "会话链路不带调试数据");
         assert_eq!(req["launch"]["command"], "claude --print");
         assert_eq!(
             req["launch"]["env"]["CLAUDE_CONFIG_DIR"],
@@ -732,7 +782,12 @@ mod tests {
         assert_eq!(snapshot.acp_session_id.as_deref(), Some("agent-1"));
         assert_eq!(snapshot.entries_offset, 4);
         assert!(snapshot.entries.is_empty());
-        assert!(snapshot.history_error.unwrap().contains("历史读不出来"));
+        assert!(
+            snapshot
+                .history_error
+                .unwrap()
+                .contains("Couldn't read the history")
+        );
         assert_eq!(snapshot.end_kind, AcpEndKind::Unknown);
     }
 
@@ -790,9 +845,9 @@ mod tests {
         // 收尾时写下的报错已经算历史，`live.open_turn` 是空的。快照带着它，
         // 不能拿空的当前一轮把它盖掉。
         let mut snapshot = blank_snapshot();
-        snapshot.entries = vec![smelt_plugin_api::model::acp_chat::AcpEntry::Assistant {
-            text: "回合失败：499 status code (no body)".into(),
-            thought: false,
+        snapshot.entries = vec![smelt_plugin_api::model::acp_chat::AcpEntry::TurnFailed {
+            detail: "499 status code (no body)".into(),
+            hint: None,
         }];
         snapshot.entries_offset = 1;
         snapshot.entries_total = 2;
@@ -813,7 +868,7 @@ mod tests {
         assert_eq!(snapshot.entries_total, 2);
         assert!(matches!(
             snapshot.entries.as_slice(),
-            [smelt_plugin_api::model::acp_chat::AcpEntry::Assistant { text, .. }] if text.contains("回合失败")
+            [smelt_plugin_api::model::acp_chat::AcpEntry::TurnFailed { detail, .. }] if detail == "499 status code (no body)"
         ));
     }
 
@@ -881,9 +936,9 @@ mod tests {
     #[test]
     fn blank_history_response_means_the_session_is_gone() {
         let error = history_snapshot_from_response("").expect_err("空响应必须失败");
-        assert_eq!(error, "ACP 会话不存在");
+        assert_eq!(error, "The ACP session doesn't exist");
         let error = history_snapshot_from_response("   \n").expect_err("空白响应必须失败");
-        assert_eq!(error, "ACP 会话不存在");
+        assert_eq!(error, "The ACP session doesn't exist");
     }
 
     #[test]
@@ -903,6 +958,47 @@ mod tests {
         assert_eq!(req["id"], "acp-1");
         assert_eq!(req["before"], 900);
         assert_eq!(req["limit"], 100);
+        assert_eq!(req["include_debug"], false, "翻历史不带调试数据");
+    }
+
+    #[test]
+    fn debug_request_names_the_session() {
+        let req = acp_debug_request("acp-1");
+
+        assert_eq!(req["op"], "acp_debug");
+        assert_eq!(req["id"], "acp-1");
+    }
+
+    #[test]
+    fn debug_response_returns_the_tables() {
+        let debug = ConversationDebug {
+            tool_debug: BTreeMap::from([(
+                "call-1".to_string(),
+                ToolCallDebug {
+                    raw_input: Some(serde_json::json!({ "path": "src/lib.rs" })),
+                    ..ToolCallDebug::default()
+                },
+            )]),
+            ..ConversationDebug::default()
+        };
+        let response = serde_json::json!({ "debug": &debug }).to_string();
+
+        assert_eq!(
+            debug_from_response(&response).expect("合法回包应能读回"),
+            debug
+        );
+    }
+
+    #[test]
+    fn debug_response_errors_are_reported() {
+        let error = debug_from_response("").expect_err("旧运行时断开连接必须失败");
+        assert!(error.contains("too old"), "{error}");
+        let response = serde_json::json!({ "ok": false, "error": "The ACP session doesn't exist" })
+            .to_string();
+        assert_eq!(
+            debug_from_response(&response).expect_err("会话不在必须失败"),
+            "The ACP session doesn't exist"
+        );
     }
 
     /// 守护发的一帧：整段帧原样，增量帧由发送方镜像算出。

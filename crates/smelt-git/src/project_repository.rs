@@ -7,6 +7,9 @@ use std::{
 };
 
 use smelt_core::fs::{FileSystem as _, LocalFs};
+use smelt_runtime_client::protocol::reason::ControlReason;
+
+use crate::GitError;
 
 #[derive(Clone, Debug)]
 pub struct BoundRepository {
@@ -16,47 +19,56 @@ pub struct BoundRepository {
 
 pub fn validate_name(name: &str) -> Result<(), String> {
     if name.chars().any(char::is_control) {
-        return Err("仓库名称不能包含控制字符".into());
+        return Err("The repository name can't contain control characters".into());
     }
-    crate::worktree::validate_segment(name, "仓库名称")
+    crate::worktree::validate_segment(name, "The repository name")
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
-pub fn repository_root(path: &Path) -> Result<PathBuf, String> {
-    let path = fs::canonicalize(path).map_err(|error| format!("无法读取仓库目录：{error}"))?;
-    let text = path.to_str().ok_or("仓库路径不是 UTF-8")?;
+pub fn repository_root(path: &Path) -> Result<PathBuf, GitError> {
+    let path = fs::canonicalize(path)
+        .map_err(|error| format!("couldn't read the repository directory: {error}"))?;
+    let text = path.to_str().ok_or("the repository path isn't UTF-8")?;
     let output = crate::run_git(text, &["rev-parse", "--show-toplevel"])
-        .map_err(|error| format!("无法检查 Git 仓库：{error}"))?;
+        .map_err(|error| format!("couldn't check the Git repository: {error}"))?;
     if !output.success() {
-        return Err("请选择已有 Git 仓库的根目录，而不是普通文件夹".into());
+        return Err(GitError::because(ControlReason::RepositoryNotGit));
     }
     let top = fs::canonicalize(String::from_utf8_lossy(&output.stdout).trim())
-        .map_err(|error| format!("无法解析 Git 根目录：{error}"))?;
+        .map_err(|error| format!("couldn't resolve the Git root: {error}"))?;
     if top != path {
-        return Err(format!("请选择 Git 仓库根目录：{}", top.display()));
+        return Err(GitError::because(ControlReason::RepositoryNotRoot {
+            root: top.display().to_string(),
+        }));
     }
     Ok(path)
 }
 
-fn destination(project: &Path, name: &str) -> Result<PathBuf, String> {
+fn destination(project: &Path, name: &str) -> Result<PathBuf, GitError> {
     validate_name(name)?;
-    let project = fs::canonicalize(project).map_err(|error| format!("无法读取项目：{error}"))?;
+    let project =
+        fs::canonicalize(project).map_err(|error| format!("couldn't read the project: {error}"))?;
     let repos = project.join("repos");
-    fs::create_dir_all(&repos).map_err(|error| format!("无法创建 repos 目录：{error}"))?;
+    fs::create_dir_all(&repos)
+        .map_err(|error| format!("couldn't create the repos directory: {error}"))?;
     if fs::canonicalize(&repos).map_err(|error| error.to_string())? != repos {
-        return Err("项目的 repos 目录不能是指向其它位置的软链接".into());
+        return Err("The project's repos directory can't be a symlink to somewhere else".into());
     }
     let target = repos.join(name);
     match fs::symlink_metadata(&target) {
-        Ok(_) => return Err(format!("目录名已被占用，请修改名称：{}", target.display())),
+        Ok(_) => {
+            return Err(GitError::because(ControlReason::RepositoryNameTaken {
+                path: target.display().to_string(),
+            }));
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("无法检查目标路径：{error}")),
+        Err(error) => return Err(format!("couldn't check the target path: {error}").into()),
     }
     Ok(target)
 }
 
-pub fn bind(project: &Path, source: &Path, name: &str) -> Result<BoundRepository, String> {
+pub fn bind(project: &Path, source: &Path, name: &str) -> Result<BoundRepository, GitError> {
     validate_name(name)?;
     let project = fs::canonicalize(project).map_err(|error| error.to_string())?;
     let root = repository_root(source)?;
@@ -70,25 +82,31 @@ pub fn bind(project: &Path, source: &Path, name: &str) -> Result<BoundRepository
     exclude_managed_directory(&project, "repos")?;
     #[cfg(unix)]
     std::os::unix::fs::symlink(&root, &target)
-        .map_err(|error| format!("创建软链接失败：{error}"))?;
+        .map_err(|error| format!("couldn't create the symlink: {error}"))?;
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&root, &target)
-        .map_err(|error| format!("创建软链接失败，请检查开发者模式或符号链接权限：{error}"))?;
+    std::os::windows::fs::symlink_dir(&root, &target).map_err(|error| {
+        format!("couldn't create the symlink; check Developer Mode or symlink permissions: {error}")
+    })?;
     Ok(BoundRepository {
         root,
         managed_link: Some(target),
     })
 }
 
-pub fn clone_repository(project: &Path, url: &str, name: &str) -> Result<BoundRepository, String> {
+pub fn clone_repository(
+    project: &Path,
+    url: &str,
+    name: &str,
+) -> Result<BoundRepository, GitError> {
     let url = url.trim();
     if url.is_empty() || url.starts_with('-') || url.chars().any(char::is_control) {
-        return Err("请填写有效的 Git URL".into());
+        return Err(GitError::because(ControlReason::RepositoryUrlInvalid));
     }
     let target = destination(project, name)?;
     exclude_managed_directory(project, "repos")?;
     // Reserve the destination exclusively; Git accepts an existing empty directory.
-    fs::create_dir(&target).map_err(|error| format!("无法创建克隆目标：{error}"))?;
+    fs::create_dir(&target)
+        .map_err(|error| format!("couldn't create the clone target: {error}"))?;
     // Git's clone destination must not carry Windows' verbatim path prefix.
     let output = LocalFs.canonicalize(&target).and_then(|git_target| {
         std::process::Command::new("git")
@@ -103,21 +121,25 @@ pub fn clone_repository(project: &Path, url: &str, name: &str) -> Result<BoundRe
             managed_link: None,
         }),
         result => {
-            // Do not echo stderr: Git may include credentials embedded in the URL.
-            let reason = match result {
-                Ok(_) => "Git 克隆失败，请检查 URL、网络和 SSH/凭据配置".to_string(),
-                Err(error) => format!("无法准备或启动 Git 克隆：{error}"),
-            };
             // Never recursively delete a failed clone: it may contain useful data.
-            let retained = match fs::remove_dir(&target) {
-                Ok(()) => String::new(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(_) => format!(
-                    "；已保留克隆目录 {}，重试请换名称或先检查该目录",
-                    target.display()
-                ),
+            let kept = match fs::remove_dir(&target) {
+                Ok(()) => None,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => Some(target.display().to_string()),
             };
-            Err(format!("{reason}{retained}"))
+            // Do not echo stderr: Git may include credentials embedded in the URL.
+            Err(match result {
+                Ok(_) => GitError::because(ControlReason::RepositoryCloneFailed { kept }),
+                Err(error) => {
+                    let mut message = format!("couldn't prepare or start the Git clone: {error}");
+                    if let Some(kept) = kept {
+                        message.push_str(&format!(
+                            "; kept the clone directory {kept}. To retry, use another name or check that directory first"
+                        ));
+                    }
+                    message.into()
+                }
+            })
         }
     }
 }
@@ -125,7 +147,9 @@ pub fn clone_repository(project: &Path, url: &str, name: &str) -> Result<BoundRe
 pub fn remove_link(project: &Path, link: &Path, root: &Path) -> Result<(), String> {
     let project = fs::canonicalize(project).map_err(|error| error.to_string())?;
     if link.parent() != Some(project.join("repos").as_path()) {
-        return Err("软链接不在项目的 repos 目录内，拒绝移除".into());
+        return Err(
+            "The symlink isn't inside the project's repos directory; refusing to remove it".into(),
+        );
     }
     let metadata = match fs::symlink_metadata(link) {
         Ok(metadata) => metadata,
@@ -135,11 +159,13 @@ pub fn remove_link(project: &Path, link: &Path, root: &Path) -> Result<(), Strin
     if fs::canonicalize(project.join("repos")).map_err(|error| error.to_string())?
         != project.join("repos")
     {
-        return Err("repos 目录已被替换为软链接，拒绝删除".into());
+        return Err("The repos directory was replaced by a symlink; refusing to delete".into());
     }
     if !metadata.file_type().is_symlink() || fs::read_link(link).map_err(|e| e.to_string())? != root
     {
-        return Err("软链接已被替换或改指向，拒绝删除；请手动检查".into());
+        return Err(
+            "The symlink was replaced or repointed; refusing to delete. Check it by hand".into(),
+        );
     }
     #[cfg(unix)]
     fs::remove_file(link).map_err(|error| error.to_string())?;
@@ -148,14 +174,14 @@ pub fn remove_link(project: &Path, link: &Path, root: &Path) -> Result<(), Strin
     Ok(())
 }
 
-pub fn exclude_managed_directory(project: &Path, name: &str) -> Result<(), String> {
+pub fn exclude_managed_directory(project: &Path, name: &str) -> Result<(), GitError> {
     let project = fs::canonicalize(project).map_err(|error| error.to_string())?;
     if !project.join(".git").exists() {
         return Ok(());
     }
     let root = repository_root(&project)?;
     let output = crate::run_git(
-        root.to_str().ok_or("项目路径不是 UTF-8")?,
+        root.to_str().ok_or("the project path isn't UTF-8")?,
         &[
             "rev-parse",
             "--path-format=absolute",
@@ -165,13 +191,13 @@ pub fn exclude_managed_directory(project: &Path, name: &str) -> Result<(), Strin
     )
     .map_err(|error| error.to_string())?;
     if !output.success() {
-        return Err("无法定位 Git 本地忽略文件".into());
+        return Err("couldn't locate Git's local exclude file".into());
     }
     let exclude = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     let existing = match fs::read_to_string(&exclude) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error.to_string().into()),
     };
     let pattern = format!("/{name}/");
     if !existing.lines().any(|line| line == pattern) {

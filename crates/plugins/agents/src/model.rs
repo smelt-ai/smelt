@@ -84,22 +84,24 @@ pub(crate) enum MemoryFilter {
 impl MemoryFilter {
     pub(crate) const ALL: [Self; 4] = [Self::All, Self::Pending, Self::Rules, Self::Facts];
 
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> SharedString {
         match self {
-            Self::All => "全部",
-            Self::Pending => "待确认",
-            Self::Rules => "规则",
-            Self::Facts => "事实",
+            Self::All => t!("memory.filter.all"),
+            Self::Pending => t!("memory.filter.pending"),
+            Self::Rules => t!("memory.filter.rules"),
+            Self::Facts => t!("memory.filter.facts"),
         }
+        .into()
     }
 
-    pub(crate) fn tooltip(self) -> &'static str {
+    pub(crate) fn tooltip(self) -> SharedString {
         match self {
-            Self::All => "所有记忆",
-            Self::Pending => "没生效、等你采纳的记忆",
-            Self::Rules => "你本人的情况和你纠正过的做法，每轮都带上",
-            Self::Facts => "项目、资源一类的信息，用到时才召回",
+            Self::All => t!("memory.filter.all_tooltip"),
+            Self::Pending => t!("memory.filter.pending_tooltip"),
+            Self::Rules => t!("memory.filter.rules_tooltip"),
+            Self::Facts => t!("memory.filter.facts_tooltip"),
         }
+        .into()
     }
 
     pub(crate) fn matches(self, entry: &api::model::agent_memory::MemoryEntry) -> bool {
@@ -149,9 +151,9 @@ pub(crate) fn visible_memories<'a>(
 /// 配置页摘要行的条数。只报数，不列条目，记忆再多也是一行。
 pub(crate) fn memory_summary_text(agent: usize, user: usize) -> String {
     if agent + user == 0 {
-        "还没有记忆".to_string()
+        t!("memory.summary_empty").into_owned()
     } else {
-        format!("这个智能体 {agent} 条 · 全局 {user} 条")
+        t!("memory.summary", agent = agent, user = user).into_owned()
     }
 }
 
@@ -190,7 +192,7 @@ pub(crate) fn machine_name(runtime: &RuntimeKey, cx: &App) -> String {
         .find(|machine| machine.key == *runtime)
         .map(|machine| machine.name)
         .unwrap_or_else(|| match runtime {
-            RuntimeKey::Local => "本机".to_string(),
+            RuntimeKey::Local => t!("machine.local").into_owned(),
             RuntimeKey::Remote(id) => id.clone(),
         })
 }
@@ -328,8 +330,8 @@ pub(crate) fn report_edit(task: Task<Result<(), String>>, cx: &mut App) {
         eprintln!("[agents] 改智能体配置失败：{error}");
         cx.update(|cx| {
             let notify = api::Notify {
-                subtitle: "错误".to_string(),
-                body: format!("保存智能体配置失败：{error}"),
+                subtitle: t!("notify.error").into_owned(),
+                body: t!("error.save_settings", error = error).into_owned(),
                 ..Default::default()
             };
             api::NOTIFY.run(&notify, cx).detach();
@@ -348,7 +350,7 @@ pub(crate) fn agent_catalog_monogram(name: &str) -> String {
     let name = name.trim();
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
-        return "智".to_string();
+        return t!("monogram.empty").into_owned();
     };
     if is_cjk(first) {
         return match chars.next() {
@@ -388,17 +390,23 @@ pub(crate) use api::model::agent_definition::agent_engine_kinds;
 pub(crate) fn agent_display_name(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
-        "未命名".to_string()
+        t!("agent.unnamed").into_owned()
     } else {
         name.to_string()
     }
 }
 
 /// 「新对话」命令的标题：有默认智能体就带上它的名字，侧栏按钮、命令面板、菜单都显示它。
-pub(crate) fn new_conversation_title(default_name: Option<&str>) -> String {
+pub(crate) fn new_conversation_title(default_name: Option<&str>) -> api::Text {
+    let name = default_name.map(str::to_string);
+    api::Text::localized(move || new_conversation_label(name.as_deref()))
+}
+
+/// [`new_conversation_title`] 此刻语言下的字。
+pub(crate) fn new_conversation_label(default_name: Option<&str>) -> String {
     match default_name {
-        Some(name) => format!("新对话 · {}", agent_display_name(name)),
-        None => "新对话".to_string(),
+        Some(name) => t!("new_conversation.named", name = agent_display_name(name)).into_owned(),
+        None => t!("new_conversation.title").into_owned(),
     }
 }
 
@@ -414,25 +422,43 @@ pub(crate) fn agent_card_prompt(prompt: &str) -> Option<String> {
 
 pub(crate) fn agent_instructions_footer(prompt_chars: usize) -> String {
     if prompt_chars == 0 {
-        "会作为系统提示词带进每次对话和自动化。".to_string()
+        t!("instructions.footer").into_owned()
     } else {
-        format!("{prompt_chars} 字 · 会作为系统提示词带进每次对话和自动化")
+        t!("instructions.footer_count", count = prompt_chars).into_owned()
     }
 }
 
-pub(crate) fn agent_conversation_start_error(agent: &AgentDefinition) -> Option<&'static str> {
+pub(crate) fn agent_conversation_start_error(agent: &AgentDefinition) -> Option<String> {
     if agent.engine_kind().is_none() {
-        Some("请选择一个可用的执行引擎")
+        Some(t!("error.no_engine").into_owned())
     } else {
         None
     }
 }
 
+fn conversations_text(count: usize) -> String {
+    match count {
+        1 => t!("usage.conversations.one").into_owned(),
+        count => t!("usage.conversations.other", count = count).into_owned(),
+    }
+}
+
+fn automations_text(count: usize) -> String {
+    match count {
+        1 => t!("usage.automations.one").into_owned(),
+        count => t!("usage.automations.other", count = count).into_owned(),
+    }
+}
+
 pub(crate) fn agent_usage_summary(conversations: usize, automations: usize) -> String {
     match (conversations, automations) {
-        (0, 0) => "还没有对话".to_string(),
-        (count, 0) => format!("{count} 段对话"),
-        (0, count) => format!("{count} 条自动化"),
-        (conversations, automations) => format!("{conversations} 段对话 · {automations} 条自动化"),
+        (0, 0) => t!("usage.none").into_owned(),
+        (count, 0) => conversations_text(count),
+        (0, count) => automations_text(count),
+        (conversations, automations) => format!(
+            "{} · {}",
+            conversations_text(conversations),
+            automations_text(automations)
+        ),
     }
 }

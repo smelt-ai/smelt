@@ -18,6 +18,7 @@ use api::{HostEvent, PluginView, ViewHandle, ViewSpec};
 use chrono::Local;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 use crate::contract::{self, Quota};
@@ -36,12 +37,13 @@ pub(crate) fn view_spec() -> ViewSpec {
             .split_once('/')
             .map_or(contract::QUOTA_VIEW, |(_, name)| name)
             .into(),
-        title: "账户额度".into(),
+        title: api::text!("quota.title"),
         icon: IconName::Gauge.path(),
         // 一条额度，不要外壳的标题带。
         draws_top_bar: true,
         instances: false,
         settings: None,
+        fills: Vec::new(),
         build: Rc::new(|_window, cx| Rc::new(cx.new(QuotaBar::new)) as Rc<dyn ViewHandle>),
     }
 }
@@ -78,7 +80,13 @@ impl QuotaBar {
                 let row = quota_row(*target, status)?;
                 let rings = ring_windows(quota);
                 let hint = if rings.len() > 1 {
-                    format!("{} · 外环 {}，内环 {}", row.hint, rings[0].0, rings[1].0)
+                    t!(
+                        "quota.rings",
+                        hint = row.hint,
+                        outer = rings[0].0,
+                        inner = rings[1].0
+                    )
+                    .into_owned()
                 } else {
                     row.hint
                 };
@@ -101,12 +109,15 @@ impl PluginView for QuotaBar {
 }
 
 impl Render for QuotaBar {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let chips = self.chips();
+        // 自己就是一行：贴着窗口下面的角时两头给窗口圆角让位，不贴时留标准边距。
+        let insets = api::safe_area(cx.entity_id(), cx).bar_insets();
         let bar = div()
             .size_full()
             .min_w_0()
-            .px_2()
+            .pl(insets.left)
+            .pr(insets.right)
             .flex()
             .items_center()
             .justify_end()
@@ -115,7 +126,8 @@ impl Render for QuotaBar {
         if chips.is_empty() {
             // 完全没有数据：查询中时给个过渡，不然空着。
             return bar.when(!self.quota.refreshing.is_empty(), |bar| {
-                bar.text_color(rgb(ui_theme::faint())).child("额度查询中…")
+                bar.text_color(rgb(ui_theme::faint()))
+                    .child(t!("quota.loading").into_owned())
             });
         }
         // 能折行的触发器：按钮高度固定折不了行，用列表行（悬停、弹层开着时的底跟别的行一样）。
@@ -160,7 +172,7 @@ struct Chip {
 
 fn chip(quota: &Chip) -> impl IntoElement {
     let tip = if quota.refreshing {
-        format!("{} 正在刷新…", quota.hint)
+        t!("quota.refreshing", hint = quota.hint).into_owned()
     } else {
         quota.hint.clone()
     };
@@ -302,15 +314,15 @@ fn popover(quotas: Vec<Chip>) -> Div {
                 .items_center()
                 .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::muted()))
-                .child("账户额度"),
+                .child(t!("quota.title").into_owned()),
         )
         .children(quotas.into_iter().map(|quota| {
             let color = quota.color;
             let target = quota.target;
             let tip = if quota.refreshing {
-                format!("{} · 正在刷新…", quota.hint)
+                t!("quota.refreshing", hint = quota.hint).into_owned()
             } else {
-                format!("{} · 点击刷新", quota.hint)
+                t!("quota.click_to_refresh", hint = quota.hint).into_owned()
             };
             ListRow::new(SharedString::from(format!("quota-{}", target.id())))
                 .h(px(30.))
@@ -397,18 +409,18 @@ fn until_text(seconds: i64) -> Option<String> {
     let minutes = (seconds % 3_600) / 60;
     if days > 0 {
         if hours > 0 {
-            Some(format!("{days}天{hours}小时"))
+            Some(t!("duration.days_hours", days = days, hours = hours).into_owned())
         } else {
-            Some(format!("{days}天"))
+            Some(t!("duration.days", days = days).into_owned())
         }
     } else if hours > 0 {
         if minutes > 0 {
-            Some(format!("{hours}小时{minutes}分"))
+            Some(t!("duration.hours_minutes", hours = hours, minutes = minutes).into_owned())
         } else {
-            Some(format!("{hours}小时"))
+            Some(t!("duration.hours", hours = hours).into_owned())
         }
     } else if minutes > 0 {
-        Some(format!("{minutes}分"))
+        Some(t!("duration.minutes", minutes = minutes).into_owned())
     } else {
         None
     }
@@ -423,8 +435,8 @@ fn reset_text(window: &ProviderQuotaWindow) -> Option<String> {
         (None, None) => return None,
     };
     Some(match until_text(seconds) {
-        Some(text) => format!("{text}后重置"),
-        None => "即将重置".to_string(),
+        Some(text) => t!("quota.resets_in", time = text).into_owned(),
+        None => t!("quota.resets_soon").into_owned(),
     })
 }
 
@@ -441,7 +453,7 @@ fn ring_windows(quota: &ProviderQuotaData) -> Vec<(String, f64)> {
             let standard: Vec<_> = ["5h", "7d"]
                 .into_iter()
                 .filter_map(|label| quota.windows.iter().find(|window| window.label == label))
-                .map(|window| (window.label.clone(), window.used_percent))
+                .map(|window| (window.display_label(), window.used_percent))
                 .collect();
             if !standard.is_empty() {
                 standard
@@ -450,12 +462,12 @@ fn ring_windows(quota: &ProviderQuotaData) -> Vec<(String, f64)> {
                     .windows
                     .iter()
                     .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent))
-                    .map(|window| vec![(window.label.clone(), window.used_percent)])
+                    .map(|window| vec![(window.display_label(), window.used_percent)])
                     .unwrap_or_default()
             }
         }
         ProviderQuotaData::Copilot(copilot) if copilot.limit.is_some() => {
-            vec![("本周期".into(), quota.used_percent())]
+            vec![(t!("quota.period").into_owned(), quota.used_percent())]
         }
         ProviderQuotaData::Copilot(_) => Vec::new(),
     }
@@ -485,8 +497,14 @@ fn quota_row(target: QuotaTarget, status: &QuotaStatus) -> Option<QuotaRow> {
                 .map(|window| {
                     let used = window.used_percent.round() as u32;
                     match reset_text(window) {
-                        Some(reset) => format!("{} {used}%（{reset}）", window.label),
-                        None => format!("{} {used}%", window.label),
+                        Some(reset) => t!(
+                            "quota.window_reset",
+                            window = window.display_label(),
+                            used = used,
+                            reset = reset
+                        )
+                        .into_owned(),
+                        None => format!("{} {used}%", window.display_label()),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -496,19 +514,23 @@ fn quota_row(target: QuotaTarget, status: &QuotaStatus) -> Option<QuotaRow> {
         ProviderQuotaData::Copilot(copilot) => match copilot.limit {
             Some(limit) => {
                 let used = copilot.used.unwrap_or((limit - copilot.remaining).max(0.0));
-                format!(
-                    "{label} 本周期 {} / {} {}（{}%）",
-                    api::model::copilot_quota::format_amount(used),
-                    api::model::copilot_quota::format_amount(limit),
-                    copilot.unit.label(),
-                    quota.used_percent().round() as u32
+                t!(
+                    "quota.copilot_used",
+                    label = label,
+                    used = api::model::copilot_quota::format_amount(used),
+                    limit = api::model::copilot_quota::format_amount(limit),
+                    unit = copilot.unit.label(),
+                    percent = quota.used_percent().round() as u32
                 )
+                .into_owned()
             }
-            None => format!(
-                "{label} 本周期剩余 {} {}",
-                api::model::copilot_quota::format_amount(copilot.remaining),
-                copilot.unit.label()
-            ),
+            None => t!(
+                "quota.copilot_remaining",
+                label = label,
+                remaining = api::model::copilot_quota::format_amount(copilot.remaining),
+                unit = copilot.unit.label()
+            )
+            .into_owned(),
         },
     };
     Some(QuotaRow { text, color, hint })
@@ -556,9 +578,9 @@ mod tests {
     #[test]
     fn ring_uses_most_constrained_window_when_periods_are_not_standard() {
         let quota = ProviderQuotaData::Windows(ProviderQuota {
-            windows: vec![window("月", 35.0), window("次", 75.0)],
+            windows: vec![window("month", 35.0), window("secondary", 75.0)],
         });
-        assert_eq!(ring_windows(&quota), vec![("次".into(), 75.0)]);
+        assert_eq!(ring_windows(&quota), vec![("Secondary".into(), 75.0)]);
     }
 
     #[test]
@@ -592,7 +614,7 @@ mod tests {
 
         assert_eq!(row.text, "91%");
         assert_eq!(row.color, ui_theme::bad());
-        assert_eq!(row.hint, "Claude 5h 76%（1小时后重置） · 7d 91%");
+        assert_eq!(row.hint, "Claude 5h 76% (resets in 1h) · 7d 91%");
     }
 
     #[test]
@@ -612,16 +634,19 @@ mod tests {
 
         assert_eq!(row.text, "25%");
         assert_eq!(row.color, ui_theme::muted());
-        assert_eq!(row.hint, "Copilot 本周期 25 / 100 premium requests（25%）");
+        assert_eq!(
+            row.hint,
+            "Copilot this period 25 / 100 premium requests (25%)"
+        );
     }
 
     #[test]
     fn until_text_reads_largest_units_first() {
         assert_eq!(until_text(0), None);
         assert_eq!(until_text(-5), None);
-        assert_eq!(until_text(90).as_deref(), Some("1分"));
-        assert_eq!(until_text(3_600).as_deref(), Some("1小时"));
-        assert_eq!(until_text(3_660).as_deref(), Some("1小时1分"));
-        assert_eq!(until_text(86_400 + 7_200).as_deref(), Some("1天2小时"));
+        assert_eq!(until_text(90).as_deref(), Some("1m"));
+        assert_eq!(until_text(3_600).as_deref(), Some("1h"));
+        assert_eq!(until_text(3_660).as_deref(), Some("1h 1m"));
+        assert_eq!(until_text(86_400 + 7_200).as_deref(), Some("1d 2h"));
     }
 }

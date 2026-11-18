@@ -142,8 +142,9 @@ mod tests {
     fn item(kind: AttentionKind) -> AttentionItem {
         AttentionItem {
             kind,
-            title: "等待批准".to_string(),
+            title: "Waiting for approval".to_string(),
             message: "rm -rf build".to_string(),
+            note: None,
         }
     }
 

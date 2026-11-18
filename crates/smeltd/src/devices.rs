@@ -19,7 +19,8 @@ use smelt_core::remote_config::{
     RemoteAccessState, RevokeResult,
 };
 use smelt_runtime_client::protocol::control::{
-    ControlCall, ControlError, ControlErrorCode, ControlMethod, EmptyParams, decode_params,
+    ControlCall, ControlError, ControlErrorCode, ControlMethod, ControlReason, EmptyParams,
+    decode_params,
 };
 
 /// 这条连接是谁。
@@ -187,9 +188,9 @@ fn pair_begin() -> Result<PairingOffer, ControlError> {
         .map(crate::remote::remote_status)
         .unwrap_or_default();
     let RemoteAccessState::Running { endpoint_id, relay } = status else {
-        return Err(ControlError::new(
+        return Err(ControlError::because(
             ControlErrorCode::FailedPrecondition,
-            "远程访问没有开启",
+            ControlReason::RemoteAccessOff,
         ));
     };
     let (code, expires_at) = issue_code();
@@ -207,20 +208,20 @@ fn pair(principal: &Principal, params: PairParams) -> Result<(), ControlError> {
     let endpoint_id = match principal {
         Principal::Device(id) | Principal::Unpaired(id) => id,
         Principal::Local => {
-            return Err(ControlError::new(
+            return Err(ControlError::because(
                 ControlErrorCode::FailedPrecondition,
-                "配对只能从远程设备发起",
+                ControlReason::PairFromRemoteOnly,
             ));
         }
     };
     if !redeem_code(&params.code) {
-        return Err(ControlError::new(
+        return Err(ControlError::because(
             ControlErrorCode::PermissionDenied,
-            "配对码无效或已过期",
+            ControlReason::PairCodeInvalid,
         ));
     }
     let name = match params.name.trim() {
-        "" => "未命名设备".to_string(),
+        "" => "Unnamed device".to_string(),
         name => name.chars().take(64).collect(),
     };
     store()?
@@ -285,9 +286,9 @@ fn revoke(params: DeviceIdParams) -> Result<RevokeResult, ControlError> {
 fn calling_device(principal: &Principal) -> Result<&str, ControlError> {
     match principal {
         Principal::Device(id) => Ok(id),
-        Principal::Local | Principal::Unpaired(_) => Err(ControlError::new(
+        Principal::Local | Principal::Unpaired(_) => Err(ControlError::because(
             ControlErrorCode::FailedPrecondition,
-            "推送只能由已配对的远程设备登记",
+            ControlReason::PushFromPairedOnly,
         )),
     }
 }
@@ -297,7 +298,7 @@ fn calling_device(principal: &Principal) -> Result<&str, ControlError> {
 fn validate_push_registration(params: &PushRegisterParams) -> Result<(), ControlError> {
     let invalid = |message: &str| ControlError::new(ControlErrorCode::InvalidParams, message);
     if params.handle.is_empty() || params.handle.len() > 4096 {
-        return Err(invalid("推送句柄为空或太长"));
+        return Err(invalid("The push handle is empty or too long"));
     }
     let relay = params.relay_url.trim();
     let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
@@ -308,10 +309,10 @@ fn validate_push_registration(params: &PushRegisterParams) -> Result<(), Control
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
         });
     if !(relay.starts_with("https://") || loopback) || relay.len() > 512 {
-        return Err(invalid("推送中继地址必须是 https:// 开头"));
+        return Err(invalid("The push relay address must start with https://"));
     }
     if params.payload_version == 0 {
-        return Err(invalid("推送载荷版本至少是 1"));
+        return Err(invalid("The push payload version must be at least 1"));
     }
     Ok(())
 }
@@ -330,14 +331,17 @@ fn push_register(principal: &Principal, params: PushRegisterParams) -> Result<()
             notify_success: params.success,
             payload_version: params.payload_version,
             notify_message: params.message,
+            locale: params
+                .locale
+                .filter(|locale| !locale.is_empty() && locale.len() <= 35),
             updated_at_ms: now_ms(),
         })
         .map_err(store_error)?;
     if !registered {
         // 和撤销赛跑：设备刚被移出白名单。
-        return Err(ControlError::new(
+        return Err(ControlError::because(
             ControlErrorCode::PermissionDenied,
-            "这台设备已不在配对列表里",
+            ControlReason::DeviceUnpaired,
         ));
     }
     Ok(())
@@ -443,6 +447,7 @@ mod tests {
             success: true,
             payload_version: smelt_core::remote_config::PUSH_PAYLOAD_VERSION,
             message: true,
+            locale: None,
         }
     }
 

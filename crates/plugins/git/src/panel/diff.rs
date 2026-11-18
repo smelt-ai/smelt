@@ -11,6 +11,7 @@
 use std::rc::Rc;
 
 use super::*;
+use rust_i18n::t;
 use smelt_plugin_api::ui::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide};
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
@@ -45,7 +46,8 @@ pub(crate) fn diff_feedback_text(
     } else {
         (end, start)
     };
-    let mut msg = format!("对 {path} 的这几行有反馈：\n");
+    let mut msg = t!("comment.feedback_header", path = path).into_owned();
+    msg.push('\n');
     if start == end {
         msg.push_str(&format!("L{start}\n"));
     } else {
@@ -146,7 +148,7 @@ pub(crate) fn aggregate_diff_ready_for_file(
 pub(crate) fn diff_parse_failure(patch: &str, message: &str) -> String {
     let trimmed = patch.trim();
     if trimmed.is_empty() {
-        return "（无差异）".into();
+        return t!("diff.empty").into_owned();
     }
     let looks_like_diff = trimmed.lines().any(|line| {
         line.starts_with("diff ") || line.starts_with("--- ") || line.starts_with("@@")
@@ -168,16 +170,16 @@ impl GitPanel {
             return placeholder_view(empty_hint);
         };
         if diff.patch.is_none() {
-            return placeholder_view("正在读取…");
+            return placeholder_view(&t!("diff.loading"));
         }
         if let Some(err) = self.diff_parse_error.as_deref() {
             return diff_status_note(err);
         }
         if self.diff_view.is_none() {
-            return placeholder_view("（无差异）");
+            return placeholder_view(&t!("diff.empty"));
         }
         let Some(body) = self.diff_body.clone() else {
-            return placeholder_view("（无差异）");
+            return placeholder_view(&t!("diff.empty"));
         };
         div()
             .flex_1()
@@ -251,14 +253,14 @@ impl GitDiffBody {
         let muted: Hsla = rgb(crate::ui_theme::muted()).into();
         let border = crate::ui_theme::hair();
         let Some(chrome) = self.chrome.as_ref() else {
-            return placeholder_view("（无差异）");
+            return placeholder_view(&t!("diff.empty"));
         };
         let view = chrome.view.clone();
         let (file_path, all_collapsed) = {
             let state = view.read(cx);
             let files = state.files();
             if files.is_empty() {
-                return placeholder_view("（无差异）");
+                return placeholder_view(&t!("diff.empty"));
             }
             let all_collapsed = !files.is_empty()
                 && files
@@ -267,7 +269,12 @@ impl GitDiffBody {
             let file_path = (files.len() == 1).then(|| files[0].path().clone());
             (file_path, all_collapsed)
         };
-        let name = chrome.name.clone();
+        // 聚合的「全部更改」没有文件名，按当前语言现取。
+        let name = if chrome.aggregate {
+            t!("diff.all_changes").into_owned()
+        } else {
+            chrome.name.clone()
+        };
         let host = self.host.clone();
         let ops = chrome.ops;
         let annotations = diff_annotations(
@@ -285,7 +292,7 @@ impl GitDiffBody {
                 .quiet()
                 .small()
                 .flex_none()
-                .label("在文件里打开")
+                .label(t!("diff.open_in_file"))
                 .on_click(move |_ev, _window, cx| {
                     open_file(file_machine.clone(), full_path.clone(), cx);
                 })
@@ -297,9 +304,9 @@ impl GitDiffBody {
                 .small()
                 .flex_none()
                 .label(if all_collapsed {
-                    "全部展开"
+                    t!("diff.expand_all")
                 } else {
-                    "全部收起"
+                    t!("diff.collapse_all")
                 })
                 .on_click(move |_ev, _window, cx| {
                     let Some(host) = host.upgrade() else {
@@ -313,10 +320,10 @@ impl GitDiffBody {
             .quiet()
             .small()
             .flex_none()
-            .label("并排")
+            .label(t!("diff.split"))
             .toggled(chrome.split)
             .selected(chrome.split)
-            .tooltip("并排对照新旧两侧；关掉是统一视图")
+            .tooltip(t!("diff.split_tooltip"))
             .on_click({
                 let host = host.clone();
                 move |_, _window, cx| {
@@ -435,9 +442,9 @@ fn comment_range_label(range: &DiffLineRange) -> String {
     let start = range.start().min(range.end());
     let end = range.start().max(range.end());
     if start == end {
-        format!("对第 L{start} 行发表评论")
+        t!("comment.range_one", line = start).into_owned()
     } else {
-        format!("对第 L{start} 行至第 L{end} 行发表评论")
+        t!("comment.range", start = start, end = end).into_owned()
     }
 }
 
@@ -484,8 +491,8 @@ fn diff_header_suffix(
     let mut row = div().flex().items_center().gap_2();
     if let Some(path) = stage_path {
         let label = match ops {
-            HunkOps::StageDiscard => Some("暂存"),
-            HunkOps::Unstage => Some("取消暂存"),
+            HunkOps::StageDiscard => Some(t!("stage.stage")),
+            HunkOps::Unstage => Some(t!("stage.unstage")),
             HunkOps::None => None,
         };
         if let Some(label) = label {
@@ -518,7 +525,7 @@ fn diff_header_suffix(
             Button::new((ElementId::from("diff-open-header"), rel.clone()))
                 .quiet()
                 .small()
-                .label("打开")
+                .label(t!("diff.open"))
                 .on_click(move |_ev, _window, cx| {
                     open_file(runtime.clone(), full.clone(), cx);
                 }),
@@ -573,9 +580,10 @@ fn hunk_ops_row(
     host: WeakEntity<GitPanel>,
     _cx: &App,
 ) -> Div {
-    let quiet =
-        |id: &'static str, label: &'static str| Button::new((id, idx)).quiet().small().label(label);
-    let danger = |id: &'static str, label: &'static str| {
+    let quiet = |id: &'static str, label: std::borrow::Cow<'static, str>| {
+        Button::new((id, idx)).quiet().small().label(label)
+    };
+    let danger = |id: &'static str, label: std::borrow::Cow<'static, str>| {
         Button::new((id, idx)).danger_quiet().small().label(label)
     };
     let row = div().flex().items_center().gap_2();
@@ -585,7 +593,7 @@ fn hunk_ops_row(
             let (stage_host, stage_root) = (host.clone(), root.clone());
             let (discard_host, discard_root) = (host, root);
             row.child(
-                quiet("hunk-stage", "暂存块").on_click(move |_ev, _window, cx| {
+                quiet("hunk-stage", t!("hunk.stage")).on_click(move |_ev, _window, cx| {
                     let Some(host) = stage_host.upgrade() else {
                         return;
                     };
@@ -594,7 +602,7 @@ fn hunk_ops_row(
                 }),
             )
             .child(
-                danger("hunk-discard", "丢弃块").on_click(move |_ev, window, cx| {
+                danger("hunk-discard", t!("hunk.discard")).on_click(move |_ev, window, cx| {
                     let Some(host) = discard_host.upgrade() else {
                         return;
                     };
@@ -603,7 +611,7 @@ fn hunk_ops_row(
                 }),
             )
         }
-        HunkOps::Unstage => row.child(quiet("hunk-unstage", "取消暂存块").on_click(
+        HunkOps::Unstage => row.child(quiet("hunk-unstage", t!("hunk.unstage")).on_click(
             move |_ev, _window, cx| {
                 let Some(host) = host.upgrade() else {
                     return;
@@ -648,7 +656,11 @@ fn diff_comment_composer(
                                 .bg(rgb(crate::ui_theme::soft()))
                                 .child(Icon::new(IconName::Bot).size(px(15.))),
                         )
-                        .child(div().type_style(TYPE.ui_medium).child("本机留言")),
+                        .child(
+                            div()
+                                .type_style(TYPE.ui_medium)
+                                .child(t!("comment.title").into_owned()),
+                        ),
                 )
                 .child(
                     div()
@@ -672,7 +684,7 @@ fn diff_comment_composer(
                 .child(
                     Button::new("diff-comment-cancel")
                         .small()
-                        .label("取消")
+                        .label(t!("comment.cancel"))
                         .on_click(move |_ev, window, cx| {
                             let Some(host) = clear_host.upgrade() else {
                                 return;
@@ -682,14 +694,17 @@ fn diff_comment_composer(
                             });
                         }),
                 )
-                .child(Button::new("diff-send").small().label("发送评论").on_click(
-                    move |_ev, window, cx| {
-                        let Some(host) = host.upgrade() else {
-                            return;
-                        };
-                        host.update(cx, |this, cx| this.send_diff_comments(window, cx));
-                    },
-                )),
+                .child(
+                    Button::new("diff-send")
+                        .small()
+                        .label(t!("comment.send"))
+                        .on_click(move |_ev, window, cx| {
+                            let Some(host) = host.upgrade() else {
+                                return;
+                            };
+                            host.update(cx, |this, cx| this.send_diff_comments(window, cx));
+                        }),
+                ),
         )
         .border_color(border)
 }

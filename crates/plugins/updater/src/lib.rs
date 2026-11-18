@@ -15,9 +15,11 @@ mod update;
 
 use std::rc::Rc;
 
-use api::{CommandSpec, Handled, MenuEntry, MenuSlot};
+use api::{CommandSpec, Handled, MenuEntry, MenuSlot, text};
 use gpui::App;
 use smelt_plugin_api as api;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.updater";
@@ -53,10 +55,10 @@ pub fn register(cx: &mut App) {
     register_commands(cx);
 }
 
-fn command(name: &str, title: &str, run: impl Fn(&mut App) + 'static) -> CommandSpec {
+fn command(name: &str, title: api::Text, run: impl Fn(&mut App) + 'static) -> CommandSpec {
     CommandSpec {
         name: name.into(),
-        title: title.into(),
+        title,
         key: None,
         context: "Workspace".into(),
         palette: true,
@@ -73,33 +75,33 @@ fn register_commands(cx: &mut App) {
     let mut commands = Vec::new();
     // 顺手发起一次检查，再打开「关于」页看进度。
     #[cfg(any(target_os = "macos", windows))]
-    commands.push(command("check-update", "检查更新", |cx| {
+    commands.push(command("check-update", text!("check.idle"), |cx| {
         if let Some(updater) = update::updater(cx) {
             updater.update(cx, |updater, cx| updater.request_check(cx));
         }
         open_about(cx);
     }));
-    commands.push(command("docs", "帮助文档", |cx| cx.open_url(DOCS_URL)));
-    commands.push(command("report-issue", "反馈问题", |cx| {
+    commands.push(command("docs", text!("docs"), |cx| cx.open_url(DOCS_URL)));
+    commands.push(command("report-issue", text!("report_issue"), |cx| {
         cx.open_url(FEEDBACK_URL)
     }));
-    api::register_commands(OWNER, "更新与帮助", commands, cx).expect("更新与帮助的命令表写错了");
+    api::register_commands(OWNER, text!("group"), commands, cx).expect("更新与帮助的命令表写错了");
 
     let mut menu = Vec::new();
     #[cfg(target_os = "macos")]
     menu.push(MenuEntry {
         slot: MenuSlot::App,
-        title: "检查更新…".into(),
+        title: text!("check_menu"),
         command: "smelt.updater/check-update".into(),
     });
     menu.push(MenuEntry {
         slot: MenuSlot::Help,
-        title: "帮助文档".into(),
+        title: text!("docs"),
         command: "smelt.updater/docs".into(),
     });
     menu.push(MenuEntry {
         slot: MenuSlot::Help,
-        title: "反馈问题".into(),
+        title: text!("report_issue"),
         command: "smelt.updater/report-issue".into(),
     });
     api::register_menu_items(OWNER, menu, cx);

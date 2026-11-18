@@ -10,6 +10,7 @@
 //! 分屏归会话视图（`session_view::SessionView`）：它建、它同步、它扔。眼下那一格换了发
 //! [`SplitEvent::ActivePaneChanged`]，会话视图据此更新活动上下文；分屏自己不碰活动上下文。
 
+use rust_i18n::t;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -38,7 +39,7 @@ use smelt_plugin_api::ui::tooltip::Tooltip;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::ui_theme;
 use smelt_plugin_api::ui::window_bar::{TOP_BAR_HEIGHT, with_window_drag};
-use smelt_plugin_api::{self as api, Adapt, HostEvent, RuntimeKey, SafeArea, ViewInstance};
+use smelt_plugin_api::{self as api, HostEvent, RuntimeKey, SafeArea, ViewInstance};
 
 use crate::model::{self, ConversationKey, Sessions};
 use crate::peers::conversation::{self, ConversationArgs, ConversationStart};
@@ -778,8 +779,8 @@ fn pane_title(
     {
         Some(name) => SharedString::from(name.to_string()),
         None => match kind {
-            PaneKind::Terminal => "终端".into(),
-            PaneKind::Conversation => "对话".into(),
+            PaneKind::Terminal => t!("kind.terminal").into(),
+            PaneKind::Conversation => t!("kind.conversation").into(),
         },
     }
 }
@@ -835,8 +836,8 @@ impl PaneView {
         }
         if !registered {
             self.missing = match self.kind {
-                PaneKind::Terminal => "终端插件还没装上".into(),
-                PaneKind::Conversation => "对话插件还没装上".into(),
+                PaneKind::Terminal => t!("split.terminal_missing").into(),
+                PaneKind::Conversation => t!("split.conversation_missing").into(),
             };
             cx.notify();
             return;
@@ -1136,7 +1137,7 @@ impl TabGroupRenderer for SplitTabGroup {
                 tab_strip(group, tabs, area.title_bar, cx).into_any_element()
             }
         };
-        let insets = area.insets(Adapt::Horizontal);
+        let insets = area.top_bar_insets();
         let gutter = |id: &'static str, width| {
             let gutter = div().id(id).flex_none().w(width).h_full();
             if area.title_bar {
@@ -1151,9 +1152,9 @@ impl TabGroupRenderer for SplitTabGroup {
             .w_full()
             .h(TOP_BAR_HEIGHT)
             .flex_none()
-            .child(gutter("split-bar-leading", insets.left + px(8.)))
+            .child(gutter("split-bar-leading", insets.left))
             .child(bar)
-            .child(gutter("split-bar-trailing", insets.right + px(8.)))
+            .child(gutter("split-bar-trailing", insets.right))
             .into_any_element()
     }
 
@@ -1367,11 +1368,11 @@ mod tests {
         );
         assert_eq!(
             pane_title(&conversation, PaneKind::Terminal, "t2", &[]),
-            "终端"
+            "Terminal"
         );
         assert_eq!(
             pane_title(&conversation, PaneKind::Conversation, "acp", &[]),
-            "对话"
+            "Conversation"
         );
     }
 }

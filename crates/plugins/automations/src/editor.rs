@@ -16,13 +16,14 @@ impl ScheduleKind {
         [Self::Daily, Self::Weekdays, Self::Weekly]
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> SharedString {
         match self {
-            Self::Daily => "每天",
-            Self::Weekdays => "工作日",
-            Self::Weekly => "每周",
-            Self::Interval => "每隔",
+            Self::Daily => t!("schedule_kind.daily"),
+            Self::Weekdays => t!("schedule_kind.weekdays"),
+            Self::Weekly => t!("schedule_kind.weekly"),
+            Self::Interval => t!("schedule_kind.interval"),
         }
+        .into()
     }
 
     pub(crate) fn is_interval(self) -> bool {
@@ -37,11 +38,12 @@ pub(crate) enum IntervalUnit {
 }
 
 impl IntervalUnit {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> SharedString {
         match self {
-            Self::Minutes => "分钟",
-            Self::Hours => "小时",
+            Self::Minutes => t!("interval_unit.minutes"),
+            Self::Hours => t!("interval_unit.hours"),
         }
+        .into()
     }
 }
 
@@ -57,12 +59,13 @@ impl IntervalDayScope {
         [Self::Everyday, Self::Weekdays, Self::Weekly]
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> SharedString {
         match self {
-            Self::Everyday => "每天",
-            Self::Weekdays => "工作日",
-            Self::Weekly => "每周",
+            Self::Everyday => t!("schedule_kind.daily"),
+            Self::Weekdays => t!("schedule_kind.weekdays"),
+            Self::Weekly => t!("schedule_kind.weekly"),
         }
+        .into()
     }
 
     pub(crate) fn from_days(days: u8) -> Self {
@@ -88,6 +91,18 @@ pub(crate) struct ScheduleRuleEditor {
     pub(crate) window_end: Entity<InputState>,
     /// 空窗口默认收起，避免「每隔 15 分钟」第一眼摊开两个「不限」。
     pub(crate) window_open: bool,
+}
+
+impl ScheduleRuleEditor {
+    /// 输入框的占位文字。建的时候和换语言时各设一次。
+    pub(crate) fn label(&self, window: &mut Window, cx: &mut App) {
+        self.window_start.update(cx, |input, cx| {
+            input.set_placeholder(t!("schedule.window_start"), window, cx)
+        });
+        self.window_end.update(cx, |input, cx| {
+            input.set_placeholder(t!("schedule.window_end"), window, cx)
+        });
+    }
 }
 
 pub(crate) struct TriggerEntryEditor {
@@ -117,15 +132,48 @@ pub(crate) struct AutomationEditor {
     pub(crate) quiet_save: bool,
     pub(crate) error: Option<String>,
     /// 正闪着字的按钮：元素 id 和闪的字（「已复制 ✓」），两秒后清掉。
-    pub(crate) flash: Option<(String, &'static str)>,
+    pub(crate) flash: Option<(String, FlashLabel)>,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
+/// 按钮点过后闪的字。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlashLabel {
+    Copied,
+    Regenerated,
+}
+
+impl FlashLabel {
+    pub(crate) fn text(self) -> SharedString {
+        match self {
+            Self::Copied => t!("flash.copied"),
+            Self::Regenerated => t!("flash.regenerated"),
+        }
+        .into()
+    }
+}
+
 impl AutomationEditor {
+    /// 输入框的占位文字。建的时候和换语言时各设一次。
+    pub(crate) fn label(&self, window: &mut Window, cx: &mut App) {
+        self.name.update(cx, |input, cx| {
+            input.set_placeholder(t!("editor.name_placeholder"), window, cx)
+        });
+        self.prompt.update(cx, |input, cx| {
+            input.set_placeholder(t!("editor.prompt_placeholder"), window, cx)
+        });
+        self.command.update(cx, |input, cx| {
+            input.set_placeholder(t!("editor.command_placeholder"), window, cx)
+        });
+        for entry in &self.entries {
+            entry.schedule.label(window, cx);
+        }
+    }
+
     /// 按钮上的字：刚点过的那颗闪一下，其余照常。
-    pub(crate) fn button_label(&self, id: &str, idle: &'static str) -> &'static str {
+    pub(crate) fn button_label(&self, id: &str, idle: SharedString) -> SharedString {
         match &self.flash {
-            Some((flashed, label)) if flashed == id => label,
+            Some((flashed, label)) if flashed == id => label.text(),
             _ => idle,
         }
     }
@@ -194,12 +242,12 @@ pub(crate) fn schedule_from_values(
     let schedule = match kind {
         ScheduleKind::Daily => {
             let (hour, minute) =
-                parse_clock(time).ok_or_else(|| "请输入 00:00 到 23:59 之间的时间".to_string())?;
+                parse_clock(time).ok_or_else(|| t!("error.invalid_time").into_owned())?;
             AutomationSchedule::Daily { hour, minute }
         }
         ScheduleKind::Weekdays => {
             let (hour, minute) =
-                parse_clock(time).ok_or_else(|| "请输入 00:00 到 23:59 之间的时间".to_string())?;
+                parse_clock(time).ok_or_else(|| t!("error.invalid_time").into_owned())?;
             AutomationSchedule::Weekly {
                 days: api::model::automation::SCHEDULE_WEEKDAYS_MASK,
                 hour,
@@ -208,10 +256,10 @@ pub(crate) fn schedule_from_values(
         }
         ScheduleKind::Weekly => {
             let (hour, minute) =
-                parse_clock(time).ok_or_else(|| "请输入 00:00 到 23:59 之间的时间".to_string())?;
+                parse_clock(time).ok_or_else(|| t!("error.invalid_time").into_owned())?;
             let days = weekday_mask & api::model::automation::SCHEDULE_ALL_DAYS_MASK;
             if days == 0 {
-                return Err("请至少选择一天".to_string());
+                return Err(t!("error.no_days").into_owned());
             }
             if days == api::model::automation::SCHEDULE_ALL_DAYS_MASK {
                 AutomationSchedule::Daily { hour, minute }
@@ -225,13 +273,13 @@ pub(crate) fn schedule_from_values(
             let window = match (start.is_empty(), end.is_empty()) {
                 (true, true) => None,
                 (false, false) => {
-                    let start = parse_clock(start)
-                        .ok_or_else(|| "请输入 00:00 到 23:59 之间的时间".to_string())?;
-                    let end = parse_clock(end)
-                        .ok_or_else(|| "请输入 00:00 到 23:59 之间的时间".to_string())?;
+                    let start =
+                        parse_clock(start).ok_or_else(|| t!("error.invalid_time").into_owned())?;
+                    let end =
+                        parse_clock(end).ok_or_else(|| t!("error.invalid_time").into_owned())?;
                     Some((start, end))
                 }
-                _ => return Err("请同时填写开始和结束时间".to_string()),
+                _ => return Err(t!("error.window_incomplete").into_owned()),
             };
             let days = weekday_mask & api::model::automation::SCHEDULE_ALL_DAYS_MASK;
             let constrained = window.is_some()
@@ -243,7 +291,7 @@ pub(crate) fn schedule_from_values(
                         .parse::<u32>()
                         .ok()
                         .filter(|minutes| (1..=24 * 60).contains(minutes))
-                        .ok_or_else(|| "执行间隔需为 1 到 1440 分钟".to_string())?;
+                        .ok_or_else(|| t!("error.interval_minutes").into_owned())?;
                     if !constrained {
                         AutomationSchedule::EveryMinutes { minutes }
                     } else {
@@ -269,7 +317,7 @@ pub(crate) fn schedule_from_values(
                         .parse::<u32>()
                         .ok()
                         .filter(|hours| (1..=24 * 7).contains(hours))
-                        .ok_or_else(|| "执行间隔需为 1 到 168 小时".to_string())?;
+                        .ok_or_else(|| t!("error.interval_hours").into_owned())?;
                     if !constrained {
                         AutomationSchedule::EveryHours { hours }
                     } else {
@@ -292,7 +340,7 @@ pub(crate) fn schedule_from_values(
             }
         }
     };
-    schedule.validate()?;
+    schedule.validate().map_err(|problem| problem.to_string())?;
     Ok(schedule)
 }
 
@@ -325,7 +373,7 @@ pub(crate) fn trigger_from_editor(
             }
         }
     }
-    trigger.validate()?;
+    trigger.validate().map_err(|problem| problem.to_string())?;
     Ok(trigger)
 }
 
@@ -346,7 +394,7 @@ impl AutomationEditor {
         }
     }
 
-    pub(crate) fn missing_fields(&self, cx: &App) -> Vec<&'static str> {
+    pub(crate) fn missing_fields(&self, cx: &App) -> Vec<MissingField> {
         // 引用的是自动化所在那台机器上的智能体。
         let agent_exists = !self.agent_id.is_empty()
             && agent_definition(&self.automation.runtime, &self.agent_id, cx).is_some();
@@ -375,7 +423,7 @@ pub(crate) fn schedule_from_values_for_rule(
             IntervalDayScope::Weekly => {
                 let days = rule.weekday_mask & api::model::automation::SCHEDULE_ALL_DAYS_MASK;
                 if days == 0 {
-                    return Err("请至少选择一天".to_string());
+                    return Err(t!("error.no_days").into_owned());
                 }
                 days
             }
@@ -490,17 +538,15 @@ pub(crate) fn new_schedule_rule(
     let window_open = !window_start_value.is_empty();
     let window_start = cx.new(|cx| {
         InputState::new(window, cx)
-            .placeholder("开始")
             .validate(|value, _| clock_input_is_editable(value))
             .default_value(window_start_value)
     });
     let window_end = cx.new(|cx| {
         InputState::new(window, cx)
-            .placeholder("结束")
             .validate(|value, _| clock_input_is_editable(value))
             .default_value(window_end_value)
     });
-    ScheduleRuleEditor {
+    let editor = ScheduleRuleEditor {
         kind,
         interval_unit,
         interval_day_scope,
@@ -510,7 +556,9 @@ pub(crate) fn new_schedule_rule(
         window_start,
         window_end,
         window_open,
-    }
+    };
+    editor.label(window, cx);
+    editor
 }
 
 pub(crate) fn webhook_ingress_secret(webhook: &WebhookIngress) -> String {
@@ -615,7 +663,7 @@ pub(crate) fn render_add_trigger_button(entity: Entity<AutomationsPage>) -> AnyE
                     .quiet()
                     .w_full()
                     .icon(IconName::Plus)
-                    .label("添加触发器"),
+                    .label(t!("trigger.add")),
                 move |_, _| {
                     let mut menu = Menu::new();
                     let mut saw_advanced = false;
@@ -662,7 +710,7 @@ pub(crate) fn render_trigger_entry(
     let remove_entity = entity.clone();
     let title = trigger_entry_title(entry, cx);
     let hint = trigger_entry_hint(entry);
-    let show_hint = title != hint;
+    let show_hint = title.as_str() != hint.as_ref();
     let icon: Icon = match entry.trigger_kind {
         AutomationTriggerKindId::Webhook => Icon::new(IconName::Webhook),
         AutomationTriggerKindId::Interval => Icon::new(IconName::Clock),
@@ -712,8 +760,8 @@ pub(crate) fn render_trigger_entry(
                 )
                 .child(
                     compact_chip("automation-remove-trigger")
-                        .icon_path("smelt-icons/trash.svg")
-                        .icon_action("删除触发器")
+                        .icon(IconName::Trash)
+                        .icon_action(t!("trigger.delete"))
                         .on_click(move |_, _, cx| {
                             remove_entity.update(cx, |page, cx| {
                                 page.remove_trigger_entry(index, cx);
@@ -749,11 +797,11 @@ pub(crate) fn automation_trigger_glyph(icon: Icon) -> AnyElement {
 
 pub(crate) fn trigger_entry_title(entry: &TriggerEntryEditor, cx: &App) -> String {
     match entry.trigger_kind {
-        AutomationTriggerKindId::Webhook => "当此 webhook 收到请求时".to_string(),
+        AutomationTriggerKindId::Webhook => t!("trigger_preset.webhook_hint").into_owned(),
         AutomationTriggerKindId::Calendar => match entry.schedule.kind {
-            ScheduleKind::Daily => "每天".to_string(),
-            ScheduleKind::Weekdays => "工作日".to_string(),
-            ScheduleKind::Weekly => "每周".to_string(),
+            ScheduleKind::Daily => t!("schedule_kind.daily").into_owned(),
+            ScheduleKind::Weekdays => t!("schedule_kind.weekdays").into_owned(),
+            ScheduleKind::Weekly => t!("schedule_kind.weekly").into_owned(),
             ScheduleKind::Interval => interval_entry_title(entry, cx),
         },
         AutomationTriggerKindId::Interval => interval_entry_title(entry, cx),
@@ -770,24 +818,25 @@ pub(crate) fn interval_entry_title(entry: &TriggerEntryEditor, cx: &App) -> Stri
 pub(crate) fn interval_title(unit: IntervalUnit, value: &str) -> String {
     let value = value.trim();
     match unit {
-        _ if value.is_empty() => "间隔".to_string(),
-        IntervalUnit::Hours if value == "1" => "每小时".to_string(),
-        IntervalUnit::Hours => format!("每隔 {value} 小时"),
-        IntervalUnit::Minutes => format!("每隔 {value} 分钟"),
+        _ if value.is_empty() => t!("trigger_preset.interval").into_owned(),
+        IntervalUnit::Hours if value == "1" => t!("trigger_preset.hourly").into_owned(),
+        IntervalUnit::Hours => t!("schedule.every_hours", count = value).into_owned(),
+        IntervalUnit::Minutes => t!("schedule.every_minutes", count = value).into_owned(),
     }
 }
 
-pub(crate) fn trigger_entry_hint(entry: &TriggerEntryEditor) -> &'static str {
+pub(crate) fn trigger_entry_hint(entry: &TriggerEntryEditor) -> SharedString {
     match entry.trigger_kind {
-        AutomationTriggerKindId::Webhook => "当此 webhook 收到请求时",
+        AutomationTriggerKindId::Webhook => t!("trigger_preset.webhook_hint"),
         AutomationTriggerKindId::Calendar => match entry.schedule.kind {
-            ScheduleKind::Daily => "每天在选定的时间",
-            ScheduleKind::Weekdays => "工作日在选定的时间",
-            ScheduleKind::Weekly => "每周在选定的一天",
-            ScheduleKind::Interval => "按固定间隔执行",
+            ScheduleKind::Daily => t!("trigger_preset.daily_hint"),
+            ScheduleKind::Weekdays => t!("trigger_preset.weekdays_hint"),
+            ScheduleKind::Weekly => t!("trigger_preset.weekly_hint"),
+            ScheduleKind::Interval => t!("trigger_preset.fixed_interval_hint"),
         },
-        AutomationTriggerKindId::Interval => "按固定间隔执行，可限制星期和时段",
+        AutomationTriggerKindId::Interval => t!("trigger_preset.interval_hint"),
     }
+    .into()
 }
 
 pub(crate) fn render_notification_field(
@@ -833,7 +882,7 @@ pub(crate) fn render_notification_field(
         .flex()
         .flex_col()
         .gap_2()
-        .child(automation_section_label("通知"))
+        .child(automation_section_label(t!("notification.title")))
         .child(picker)
         .into_any_element()
 }
@@ -848,7 +897,7 @@ pub(crate) fn render_automation_access_note(is_agent: bool) -> AnyElement {
             div()
                 .type_style(TYPE.text_xsmall_medium)
                 .text_color(rgb(ui_theme::muted()))
-                .child("无人值守 · 完全访问"),
+                .child(t!("access.title").into_owned()),
         )
         .child(
             div()
@@ -859,12 +908,13 @@ pub(crate) fn render_automation_access_note(is_agent: bool) -> AnyElement {
         .into_any_element()
 }
 
-pub(crate) fn automation_access_note(is_agent: bool) -> &'static str {
+pub(crate) fn automation_access_note(is_agent: bool) -> SharedString {
     if is_agent {
-        "运行时不会停下来等你批准，可以读写本机文件、执行命令。在智能体自己的空间里运行，能读到它在对话里攒下的文件和绑定的目录；你的项目不会自动带上，要处理的仓库请在指令里写明路径。"
+        t!("access.agent_note")
     } else {
-        "运行时不会停下来等你批准，命令以你的身份执行，可以读写本机文件。每次都在这条自动化自己的目录里执行。"
+        t!("access.shell_note")
     }
+    .into()
 }
 
 pub(crate) fn notification_preset_icon(preset: AutomationNotificationPreset) -> IconName {
@@ -902,18 +952,18 @@ pub(crate) fn render_webhook_entry(
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(rgb(ui_theme::muted()))
-                .child(if live_url.is_some() {
-                    "向此地址发送 POST 请求即可触发运行。"
+                .child(SharedString::from(if live_url.is_some() {
+                    t!("webhook.post_hint")
                 } else {
-                    "保存此自动化以查看 webhook 配置。"
-                }),
+                    t!("webhook.save_hint")
+                })),
         )
         .when(paused, |body| {
             body.child(
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(rgb(ui_theme::muted()))
-                    .child("自动化已暂停，启用后可继续接收请求。"),
+                    .child(t!("webhook.paused").into_owned()),
             )
         })
         .children({
@@ -942,12 +992,12 @@ pub(crate) fn render_webhook_entry(
                     )
                     .child(
                         compact_chip("automation-copy-webhook")
-                            .label(editor.button_label(&copy_id, "复制"))
+                            .label(editor.button_label(&copy_id, t!("webhook.copy").into()))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_url.clone()));
                                 let copy_id_click = copy_id_click.clone();
                                 copy_entity.update(cx, |page, cx| {
-                                    page.flash_editor_button(copy_id_click, "已复制 ✓", cx);
+                                    page.flash_editor_button(copy_id_click, FlashLabel::Copied, cx);
                                 });
                             }),
                     )
@@ -965,12 +1015,12 @@ pub(crate) fn render_webhook_entry(
                         let copy_entity = copy_entity.clone();
                         let curl_id_click = curl_id.clone();
                         compact_chip("automation-copy-webhook-curl")
-                            .label(editor.button_label(&curl_id, "复制示例"))
+                            .label(editor.button_label(&curl_id, t!("webhook.copy_example").into()))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_curl.clone()));
                                 let curl_id_click = curl_id_click.clone();
                                 copy_entity.update(cx, |page, cx| {
-                                    page.flash_editor_button(curl_id_click, "已复制 ✓", cx);
+                                    page.flash_editor_button(curl_id_click, FlashLabel::Copied, cx);
                                 });
                             })
                     })
@@ -980,7 +1030,7 @@ pub(crate) fn render_webhook_entry(
                     actions.child(
                         compact_chip("automation-regen-webhook")
                             .loading(editor.saving_revision.is_some() && editor.quiet_save)
-                            .label(editor.button_label(&regen_id, "重新生成地址"))
+                            .label(editor.button_label(&regen_id, t!("webhook.regenerate").into()))
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |page, cx| {
                                     page.regenerate_automation_webhook_secret(index, cx);
@@ -993,15 +1043,19 @@ pub(crate) fn render_webhook_entry(
 }
 
 pub(crate) fn webhook_curl_example(url: &str) -> String {
-    format!("curl -sS -X POST {url} -H 'Content-Type: application/json' -d '{{\"text\":\"你好\"}}'")
+    format!(
+        "curl -sS -X POST {url} -H 'Content-Type: application/json' -d '{{\"text\":\"{}\"}}'",
+        t!("webhook.example_text")
+    )
 }
 
-pub(crate) fn automation_prompt_hint(is_webhook: bool) -> &'static str {
+pub(crate) fn automation_prompt_hint(is_webhook: bool) -> SharedString {
     if is_webhook {
-        "收到的请求内容会附在指令后面；想放到指定位置，用 {{payload}} 或字段变量（如 {{text}}）。留空时直接发送请求内容。长期指令请在智能体设置中配置。"
+        t!("prompt.webhook_hint")
     } else {
-        "每次运行时发送给智能体。长期指令请在智能体设置中配置。"
+        t!("prompt.hint")
     }
+    .into()
 }
 
 pub(crate) fn render_schedule_rule(
@@ -1024,7 +1078,7 @@ pub(crate) fn render_schedule_rule(
                 }
             })
     });
-    let clock = |input: &Entity<InputState>, aria: &'static str| {
+    let clock = |input: &Entity<InputState>, aria: std::borrow::Cow<'static, str>| {
         TextInput::new(input)
             .aria_label(aria)
             .w(px(108.))
@@ -1041,7 +1095,7 @@ pub(crate) fn render_schedule_rule(
         let mask = rule.weekday_mask;
         let day_entity = entity.clone();
         Segmented::new((id_prefix, index))
-            .segments(api::model::automation::SCHEDULE_DAY_LABELS)
+            .segments((0..7).map(crate::format::weekday_label))
             .multiple((0..7).map(|day_index| mask & (1_u8 << day_index) != 0))
             .on_select(move |day_index, _, cx| {
                 day_entity.update(cx, |page, cx| {
@@ -1079,7 +1133,7 @@ pub(crate) fn render_schedule_rule(
                         .gap_2()
                         .child(
                             TextInput::new(&rule.interval)
-                                .aria_label("间隔")
+                                .aria_label(t!("trigger_preset.interval"))
                                 .w(px(120.))
                                 .into_any_element(),
                         )
@@ -1115,20 +1169,20 @@ pub(crate) fn render_schedule_rule(
                             div()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
-                                .child("从"),
+                                .child(t!("schedule.from").into_owned()),
                         )
-                        .child(clock(&rule.window_start, "开始时间"))
+                        .child(clock(&rule.window_start, t!("schedule.start_time")))
                         .child(
                             div()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(rgb(ui_theme::muted()))
-                                .child("到"),
+                                .child(t!("schedule.to").into_owned()),
                         )
-                        .child(clock(&rule.window_end, "结束时间"))
+                        .child(clock(&rule.window_end, t!("schedule.end_time")))
                         .child(timezone())
                         .child(
                             compact_chip("automation-interval-window-clear")
-                                .label("全天")
+                                .label(t!("schedule.all_day"))
                                 .on_click(move |_, window, cx| {
                                     close_entity.update(cx, |page, cx| {
                                         page.set_interval_window_open(index, false, window, cx);
@@ -1140,7 +1194,7 @@ pub(crate) fn render_schedule_rule(
                 let open_entity = entity.clone();
                 interval_body = interval_body.child(
                     compact_chip("automation-interval-window-open")
-                        .label("限制时段")
+                        .label(t!("schedule.limit_hours"))
                         .on_click(move |_, window, cx| {
                             open_entity.update(cx, |page, cx| {
                                 page.set_interval_window_open(index, true, window, cx);
@@ -1157,9 +1211,9 @@ pub(crate) fn render_schedule_rule(
             .child(clock(
                 &rule.time,
                 if rule.kind == ScheduleKind::Daily {
-                    "每日执行时间"
+                    t!("schedule.daily_time")
                 } else {
-                    "工作日执行时间"
+                    t!("schedule.weekdays_time")
                 },
             ))
             .child(timezone())
@@ -1174,7 +1228,7 @@ pub(crate) fn render_schedule_rule(
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(clock(&rule.time, "执行时间"))
+                    .child(clock(&rule.time, t!("schedule.run_time")))
                     .child(timezone()),
             )
             .into_any_element(),
@@ -1182,8 +1236,8 @@ pub(crate) fn render_schedule_rule(
     let remove = can_remove.then(|| {
         let remove_entity = entity.clone();
         compact_chip("automation-remove-schedule")
-            .icon_path("smelt-icons/trash.svg")
-            .icon_action("删除时间设置")
+            .icon(IconName::Trash)
+            .icon_action(t!("schedule.delete"))
             .on_click(move |_, _, cx| {
                 remove_entity.update(cx, |page, cx| {
                     page.remove_trigger_entry(index, cx);

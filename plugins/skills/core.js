@@ -10,6 +10,7 @@ import { join, basename, dirname } from "path";
 import * as fs from "fs/promises";
 import { lstat, realpath, symlink, rename, unlink, exchange, copy as copyTree } from "smelt-fs";
 import { run } from "smelt-plugin-api";
+import { t, tn, list as joinList } from "./i18n.js";
 import { AGENTS } from "./agents.js";
 
 const UNIVERSAL = ".agents/skills";
@@ -295,7 +296,7 @@ async function writeLink(at, target) {
   await fs.mkdir(dirname(at), { recursive: true });
   const existing = lstat(at);
   if (existing !== null) {
-    if (existing.kind !== "symlink") throw new Error(`${at} 是实体目录，不能被兼容链接覆盖`);
+    if (existing.kind !== "symlink") throw new Error(t("error.real_dir", { path: at }));
     if (canonical(at) === canonical(target)) return;
     unlink(at);
   }
@@ -303,7 +304,7 @@ async function writeLink(at, target) {
 }
 
 export async function repairBridges(home, skill) {
-  if (skill.placement === "agent") throw new Error("agent 专属 skill 没有兼容链接需要修复");
+  if (skill.placement === "agent") throw new Error(t("error.agent_only_no_links"));
   for (const agent of bridgeAgents(await installedAgents(home), skill.project_scope)) {
     if (skill.bridges.includes(agent.label)) continue;
     const root = join(skill.base, agentRelative(agent, skill.project_scope));
@@ -365,19 +366,19 @@ function pretty(home, path) {
 
 function scopeBase(home, projectRoot, projectScope) {
   if (projectScope) {
-    if (!projectRoot) throw new Error("项目未打开，无法使用项目级 skill");
+    if (!projectRoot) throw new Error(t("error.no_project"));
     return projectRoot;
   }
-  if (!home) throw new Error("无法定位用户主目录");
+  if (!home) throw new Error(t("error.no_home"));
   return home;
 }
 
 function validateSkillName(value) {
   const name = value.trim();
-  if (name.length === 0) throw new Error("名称不能为空");
-  if (name.length > 64) throw new Error("名称过长（最多 64 个字符）");
-  if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error("只能包含字母、数字、连字符(-)和下划线(_)");
-  if (name.startsWith("-") || name.startsWith("_")) throw new Error("不能以 - 或 _ 开头");
+  if (name.length === 0) throw new Error(t("error.name_empty"));
+  if (name.length > 64) throw new Error(t("error.name_long"));
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error(t("error.name_chars"));
+  if (name.startsWith("-") || name.startsWith("_")) throw new Error(t("error.name_start"));
   return name;
 }
 
@@ -394,14 +395,14 @@ function normalizeRequest(request) {
   const universal = request.universal !== false;
   const selected = new Set(request.labels ?? []);
   const labels = AGENTS.filter((agent) => selected.has(agent.label)).map((agent) => agent.label);
-  if (!universal && labels.length === 0) throw new Error("至少选择一个 agent，或者改用「通用」");
+  if (!universal && labels.length === 0) throw new Error(t("error.no_agent"));
   return { universal, labels, project_scope: request.project_scope === true };
 }
 
 function agentRootOrReject(base, agent, projectScope) {
   const relative = agentRelative(agent, projectScope);
   if (relative === undefined) {
-    throw new Error(`${agent.label} 只读取 ${UNIVERSAL}，没有可以单独存放的目录，请改用「通用」`);
+    throw new Error(t("error.agent_reads_universal", { agent: agent.label, dir: UNIVERSAL }));
   }
   return join(base, relative);
 }
@@ -409,7 +410,7 @@ function agentRootOrReject(base, agent, projectScope) {
 function destinationFor(base, name, request) {
   if (request.universal) return join(base, UNIVERSAL, name);
   const primary = AGENTS.find((agent) => agent.label === request.labels[0]);
-  if (primary === undefined) throw new Error("未知的 agent");
+  if (primary === undefined) throw new Error(t("error.unknown_agent"));
   return join(agentRootOrReject(base, primary, request.project_scope), name);
 }
 
@@ -427,15 +428,15 @@ function referencesFor(installed, base, name, request) {
 }
 
 async function locate(home, projectRoot, dir) {
-  if (!dir) throw new Error("缺少 skill 目录");
+  if (!dir) throw new Error(t("error.no_skill_dir"));
   const entry = (await scan(home, projectRoot)).skills.find((candidate) => candidate.dir === dir);
-  if (entry === undefined) throw new Error("这个 skill 已经不在了，请刷新");
+  if (entry === undefined) throw new Error(t("error.skill_gone"));
   return entry;
 }
 
 /// 改作用范围要做的事。预览和执行都走这里，面板上看到的就是会落盘的。
 async function planScopeChange(entry, home, projectRoot, rawRequest) {
-  if (entry.conflicts.length > 0) throw new Error("这个 skill 有同名副本，请先处理冲突");
+  if (entry.conflicts.length > 0) throw new Error(t("error.has_conflicts"));
   const request = normalizeRequest(rawRequest);
   const destinationBase = scopeBase(home, projectRoot, request.project_scope);
   const destination = destinationFor(destinationBase, entry.name, request);
@@ -459,7 +460,7 @@ async function planScopeChange(entry, home, projectRoot, rawRequest) {
 
   if (!settled) {
     if (occupant !== null) {
-      if (occupant.kind !== "symlink") throw new Error(`目标位置已有同名 skill：${pretty(home, destination)}`);
+      if (occupant.kind !== "symlink") throw new Error(t("error.destination_taken", { path: pretty(home, destination) }));
       actions.push({ kind: "unlink", at: destination });
     }
     actions.push({ kind: "move", from: entry.dir, to: destination });
@@ -483,23 +484,27 @@ function agentOfPath(path) {
 
 function linkStep(home, at) {
   const agent = agentOfPath(at);
-  return agent ? `让 ${agent} 能读到：${pretty(home, at)}` : `建立链接 ${pretty(home, at)}`;
+  return agent
+    ? t("step.link_for", { agent, path: pretty(home, at) })
+    : t("step.link", { path: pretty(home, at) });
 }
 
 function describe(home, action) {
   switch (action.kind) {
     case "move":
-      return `移动 ${pretty(home, action.from)} → ${pretty(home, action.to)}`;
+      return t("step.move", { from: pretty(home, action.from), to: pretty(home, action.to) });
     case "link":
       return linkStep(home, action.at);
     case "unlink": {
       const agent = agentOfPath(action.at);
-      return agent ? `${agent} 不再读：${pretty(home, action.at)}` : `移除链接 ${pretty(home, action.at)}`;
+      return agent
+        ? t("step.unlink_for", { agent, path: pretty(home, action.at) })
+        : t("step.unlink", { path: pretty(home, action.at) });
     }
     case "trash":
-      return `移入回收目录 ${pretty(home, action.from)}`;
+      return t("step.trash", { path: pretty(home, action.from) });
     default:
-      return "未知操作";
+      return t("error.unknown_action");
   }
 }
 
@@ -523,7 +528,7 @@ async function execute(home, actions) {
         await moveInto(trashRoot, action.from);
         break;
       default:
-        throw new Error("未知操作");
+        throw new Error(t("error.unknown_action"));
     }
   }
 }
@@ -545,10 +550,10 @@ export async function applyScope(home, projectRoot, dir, request) {
 /// 留下 `keepDir` 那一份，其余连同指向它们的链接一起进回收目录。不合并内容。
 export async function resolveConflict(home, projectRoot, dir, keepDir) {
   const entry = await locate(home, projectRoot, dir);
-  if (entry.conflicts.length === 0) throw new Error("没有需要处理的同名副本");
+  if (entry.conflicts.length === 0) throw new Error(t("error.no_conflicts"));
   const copies = [entry, ...entry.conflicts];
   const keep = copies.find((copy) => copy.dir === keepDir);
-  if (keep === undefined) throw new Error("选择的副本不存在");
+  if (keep === undefined) throw new Error(t("error.copy_missing"));
   const actions = [];
   for (const copy of copies) {
     if (copy.dir === keep.dir) continue;
@@ -574,7 +579,7 @@ export async function migrateLegacy(home, projectRoot) {
   const skipped = [];
   const failed = new Set();
   for (let guard = 0; ; guard += 1) {
-    if (guard === 1000) throw new Error("迁移次数异常，已停止");
+    if (guard === 1000) throw new Error(t("error.migrate_runaway"));
     const entry = (await scan(home, projectRoot)).skills.find(
       (candidate) => candidate.placement === "legacy" && !failed.has(candidate.dir),
     );
@@ -603,20 +608,18 @@ export async function migrateLegacy(home, projectRoot) {
   for (const base of [home, projectRoot].filter((base) => base)) await removeEmptyDir(join(base, LEGACY));
 
   const lines = [];
-  if (migrated.length) lines.push(`已迁移 ${migrated.length} 个到 .agents/skills：${migrated.join("、")}`);
+  if (migrated.length) lines.push(tn("migrate.moved", migrated.length, { names: joinList(migrated) }));
   if (skipped.length) {
-    lines.push(
-      `${skipped.length} 个迁不动：.agents/skills 里已有同名的 skill。请先处理冲突再迁：${skipped.join("、")}`,
-    );
+    lines.push(tn("migrate.skipped", skipped.length, { names: joinList(skipped) }));
   }
-  if (lines.length === 0) lines.push("没有需要迁移的 skill。");
+  if (lines.length === 0) lines.push(t("migrate.none"));
   return { text: lines.join(" "), level: skipped.length > 0 ? "error" : "info", migrated, skipped };
 }
 
 /// 所选目录的 SKILL.md：名字（校验过）和描述。
 async function readSource(source) {
   const text = await attempt(() => fs.readFile(join(source, "SKILL.md"), "utf8"));
-  if (!text.ok) throw new Error(`所选目录中没有可读的 SKILL.md：${message(text.error)}`);
+  if (!text.ok) throw new Error(t("error.no_skill_md", { error: message(text.error) }));
   const frontmatter = parseFrontmatter(text.value);
   return {
     name: validateSkillName((frontmatter.name ?? basename(source)).trim()),
@@ -651,11 +654,11 @@ export async function previewImport(home, projectRoot, rawRequest, source) {
   const destination = destinationFor(base, name, request);
   const occupant = lstat(destination);
   if (occupant !== null && occupant.kind !== "dir") {
-    throw new Error(`同名目标不是可替换的 skill 目录：${pretty(home, destination)}`);
+    throw new Error(t("error.not_replaceable", { path: pretty(home, destination) }));
   }
   const links = referencesFor(await installedAgents(home), base, name, request);
   return {
-    steps: [`复制到 ${pretty(home, destination)}`, ...links.map((at) => linkStep(home, at))],
+    steps: [t("step.copy", { path: pretty(home, destination) }), ...links.map((at) => linkStep(home, at))],
     replaces: occupant !== null,
   };
 }
@@ -664,8 +667,8 @@ export async function previewImport(home, projectRoot, rawRequest, source) {
 export async function pickSkillDirectory() {
   const paths = await run("smelt.app/pick-paths", {
     machine: null,
-    title: "选择要导入的 skill 目录（需含 SKILL.md）",
-    confirm: "导入",
+    title: t("import.pick_title"),
+    confirm: t("import.pick_confirm"),
   });
   return paths?.[0] ?? null;
 }
@@ -692,10 +695,10 @@ export async function importSkill(home, projectRoot, rawRequest, source) {
 async function installTree(home, source, destination) {
   const occupant = lstat(destination);
   if (occupant !== null && occupant.kind !== "dir") {
-    throw new Error(`同名目标不是可替换的 skill 目录：${pretty(home, destination)}`);
+    throw new Error(t("error.not_replaceable", { path: pretty(home, destination) }));
   }
   if (occupant !== null && canonical(source) === canonical(destination)) {
-    throw new Error("所选目录就是要安装的位置，不用再导入");
+    throw new Error(t("error.already_in_place"));
   }
   const staging = join(dirname(destination), ".staging");
   await fs.mkdir(staging, { recursive: true });
@@ -704,7 +707,7 @@ async function installTree(home, source, destination) {
   const skillMd = await attempt(() => fs.stat(join(staged, "SKILL.md")));
   if (!skillMd.ok || !skillMd.value.isFile()) {
     await moveInto(join(home, TRASH, stamp()), staged, basename(destination));
-    throw new Error("复制后缺少 SKILL.md");
+    throw new Error(t("error.copy_lost_skill_md"));
   }
   if (occupant === null) {
     rename(staged, destination);

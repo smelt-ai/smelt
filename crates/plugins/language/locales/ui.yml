@@ -1,0 +1,20 @@
+_version: 2
+page:
+  title:
+    en: Language
+    zh-CN: 语言
+section:
+  interface:
+    en: Interface
+    zh-CN: 界面
+row:
+  language:
+    en: Display language
+    zh-CN: 显示语言
+  language_description:
+    en: Menus, settings and messages in the app. Conversations with agents are not translated.
+    zh-CN: App 里的菜单、设置和提示。和智能体的对话内容不翻译。
+option:
+  system:
+    en: System (%{language})
+    zh-CN: 跟随系统（%{language}）

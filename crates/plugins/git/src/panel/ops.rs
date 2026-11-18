@@ -4,6 +4,7 @@
 //! 状态的交互方法。页面渲染在 `view.rs`。字段仍由 main.rs 的 GitPanel 统一持有。
 
 use super::*;
+use rust_i18n::t;
 
 // 约定：smelt.sessions 的 SEND_TEXT，权威定义在 crates/plugins/sessions/src/contract.rs。
 /// 把文字交给当前会话（终端打进输入、对话填进输入框），不替用户发出。
@@ -57,7 +58,7 @@ impl GitPanel {
             .get(&root)
             .and_then(|cached| cached.value.seen_change(&path))
         else {
-            self.report_background_error(format!("{path} 已不在改动列表里，请刷新后再丢弃。"), cx);
+            self.report_background_error(t!("discard.gone", path = path).into_owned(), cx);
             return;
         };
         let text = Self::discard_file_confirm(&seen);
@@ -690,11 +691,7 @@ impl GitPanel {
                 .get(&repo_root)
                 .map(|cached| cached.value.branch.clone())
                 .unwrap_or_default();
-            let placeholder = if branch.is_empty() {
-                "Commit message（可多行）".to_string()
-            } else {
-                format!("消息（提交到 {branch}）")
-            };
+            let placeholder = commit_placeholder(&branch);
             let state = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(1, 6)
@@ -718,7 +715,7 @@ impl GitPanel {
                 let state = cx.new(|cx| {
                     TextareaState::new(window, cx)
                         .auto_grow(2, 6)
-                        .placeholder("给选中的行写评论，发送前可以再改改…")
+                        .placeholder(t!("comment.placeholder"))
                 });
                 self.diff_comment_input = Some(state);
             }
@@ -912,7 +909,6 @@ impl GitPanel {
         } else {
             GitWrite::Unstage
         };
-        let failure = if stage { "暂存" } else { "取消暂存" };
         let key = root.clone();
         let done_root = root.clone();
         self.spawn_git(
@@ -921,7 +917,12 @@ impl GitPanel {
             move |client: &RuntimeClient| stage_or_unstage(client, root.root, paths, stage),
             move |this, result, cx| {
                 if let Err(err) = result {
-                    this.report_background_error(format!("{failure}失败：{err}"), cx);
+                    let message = if stage {
+                        t!("stage.stage_failed", error = err)
+                    } else {
+                        t!("stage.unstage_failed", error = err)
+                    };
+                    this.report_background_error(message, cx);
                 }
                 // 批量操作会一口气改掉一片文件的暂存状态，之前留下的单文件乐观状态
                 // 全部作废；留着它们只会让复选标记跟真实 status 对不上。
@@ -1196,10 +1197,7 @@ impl GitPanel {
                 return false;
             };
             if !d.patchable {
-                self.report_background_error(
-                    "这个 diff 不支持按块操作（子模块 / 未跟踪文件），请用整文件的勾选框",
-                    cx,
-                );
+                self.report_background_error(t!("hunk.unsupported"), cx);
                 cx.notify();
                 return false;
             }
@@ -1228,11 +1226,7 @@ impl GitPanel {
                 // `git diff HEAD`（暂存+未暂存合起来），其中已进索引的那部分再
                 // apply --cached 就会 "already exists"/"does not apply"。把原因
                 // 说清楚，别只甩 git 的英文原文。
-                Err(format!(
-                    "按块操作失败：{raw}\n\
-                     （这个文件若已部分暂存，当前视图混着暂存与未暂存的改动，\
-                     按块操作会对不上号；先用勾选框整文件取消暂存再试）"
-                ))
+                Err(t!("hunk.apply_failed", error = raw).into_owned())
             },
             move |this, result, cx| match result {
                 Ok(()) => {
@@ -1306,7 +1300,7 @@ impl GitPanel {
                             )
                         })
                         .unwrap_or_else(|err| GitFileDiffResult {
-                            text: format!("无法执行 git diff：{err}"),
+                            text: t!("diff.run_failed", error = err).into_owned(),
                             ..Default::default()
                         });
                     let files = parse_diff_files(&text);
@@ -1375,7 +1369,7 @@ impl GitPanel {
         let r#gen = self.diff_gen;
         self.git_diff = Some(GitDiff {
             root: root.clone(),
-            path: "全部更改".into(),
+            path: String::new(),
             aggregate: true,
             worktree_file: None,
             lines: Rc::new(Vec::new()),
@@ -1409,7 +1403,7 @@ impl GitPanel {
                             )
                         })
                         .map(|result| result.text)
-                        .unwrap_or_else(|err| format!("无法执行 git diff：{err}"));
+                        .unwrap_or_else(|err| t!("diff.run_failed", error = err).into_owned());
                     let parsed = parse_diff_with_file_headers(&text);
                     let files = parse_diff_files(&text);
                     (text, parsed, files)
@@ -1420,7 +1414,7 @@ impl GitPanel {
                 if this.diff_gen == r#gen {
                     this.git_diff = Some(GitDiff {
                         root: root.clone(),
-                        path: "全部更改".into(),
+                        path: String::new(),
                         aggregate: true,
                         worktree_file: None,
                         lines: Rc::new(parsed.lines),
@@ -1524,7 +1518,7 @@ impl GitPanel {
             .as_ref()
             .map(|state| state.read(cx).value().trim().to_string())
             .unwrap_or_default();
-        // 选区带的是文件路径。聚合 diff 的 `git_diff.path` 是「全部更改」。
+        // 选区带的是文件路径。聚合 diff 的 `git_diff.path` 是空的。
         let path = range.path().to_string();
         let msg = diff_feedback_text(&path, range.start(), range.end(), &selected, &comment);
         let sent = SEND_TEXT.run(&SendText { text: msg }, cx);
@@ -1775,7 +1769,7 @@ impl GitPanel {
             .get(&root)
             .map(|cached| cached.value.seen_changes())
         else {
-            self.report_background_error("改动列表还没加载出来，请刷新后再丢弃。", cx);
+            self.report_background_error(t!("discard.not_loaded"), cx);
             return;
         };
         self.discard_all_target = Some((root, seen));
@@ -1979,19 +1973,32 @@ fn stash_pop(client: &RuntimeClient, root: &ProjectRef) -> Result<(), String> {
     git_call::<GitStashPopCall>(client, root_params(root)).map(drop)
 }
 
+/// 提交框的占位：知道分支就写提交到哪。
+pub(crate) fn commit_placeholder(branch: &str) -> String {
+    if branch.is_empty() {
+        t!("commit.placeholder").into_owned()
+    } else {
+        t!("commit.placeholder_branch", branch = branch).into_owned()
+    }
+}
+
 /// 运行时回来的仓库信息 → 新建 PR 页的链接，或者给用户看的原因。
 pub(crate) fn pull_request_link(info: Result<GitRepoInfoResult, String>) -> Result<String, String> {
-    let info = info?.info.ok_or("不是 Git 仓库")?;
+    let info = info?
+        .info
+        .ok_or_else(|| t!("pull_request.not_repo").into_owned())?;
     let head = info
         .upstream_branch
-        .ok_or("当前分支还没推送到远端，先推送再创建 PR")?;
+        .ok_or_else(|| t!("pull_request.not_pushed").into_owned())?;
     let base = info
         .default_branch
-        .ok_or("不知道远端的默认分支，可以先执行 git remote set-head <远端> --auto")?;
+        .ok_or_else(|| t!("pull_request.no_default_branch").into_owned())?;
     if head == base {
-        return Err(format!("当前就在默认分支 {base} 上，切到功能分支再创建 PR"));
+        return Err(t!("pull_request.on_default_branch", branch = base).into_owned());
     }
-    let remote = info.remote_url.ok_or("仓库没有配置远端")?;
+    let remote = info
+        .remote_url
+        .ok_or_else(|| t!("pull_request.no_remote").into_owned())?;
     crate::pull_request::pull_request_url(&remote, &base, &head)
-        .ok_or_else(|| format!("认不出远端 {remote} 是哪家代码托管，无法生成 PR 链接"))
+        .ok_or_else(|| t!("pull_request.unknown_host", remote = remote).into_owned())
 }

@@ -3,6 +3,7 @@
 //! 拉起、升级、交接和过期探测。Windows 上升级是重启，不交接。
 //! 终端网格、远程会话连接留在 `terminal`。
 
+use rust_i18n::t;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -267,7 +268,7 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("无法安装 smeltd 到 {}", managed.display()),
+            t!("daemon.install_failed", path = managed.display()).into_owned(),
         ))
     }
 }
@@ -353,7 +354,7 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "找不到 smeltd（App 包与 ~/.smelt/bin 皆无）",
+                t!("daemon.not_found").into_owned(),
             ))
         };
     };
@@ -369,7 +370,7 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
             install_managed_daemon_from(&bundled)?;
             let path = managed_daemon_path();
             spawn_managed_daemon_and_connect(path.clone()).map_err(|error| {
-                std::io::Error::other(format!("旧守护无响应，重启后仍未就绪：{error}"))
+                std::io::Error::other(t!("daemon.restart_not_ready", error = error).into_owned())
             })?;
             Ok(path)
         }
@@ -393,9 +394,7 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
                 );
                 match upgrade_daemon_exe(Some(&bundled)) {
                     UpgradeOutcome::Upgraded => Ok(managed_daemon_path()),
-                    _ => Err(std::io::Error::other(
-                        "未能停掉旧守护并换上与 App 一致的映像",
-                    )),
+                    _ => Err(std::io::Error::other(t!("daemon.swap_failed").into_owned())),
                 }
             } else {
                 Ok(managed_daemon_path())
@@ -504,7 +503,10 @@ pub(crate) fn connect_daemon() -> std::io::Result<RuntimeStream> {
                 );
                 fallback
             } else {
-                return Err(std::io::Error::new(e.kind(), format!("smeltd 不可用：{e}")));
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    t!("daemon.unavailable", error = e).into_owned(),
+                ));
             }
         }
     };
@@ -571,7 +573,9 @@ fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Resu
                     });
                 None
             }
-            Err(e) => Some(format!("拉起 smeltd 失败（{}）：{e}", spawn_at.display())),
+            Err(e) => {
+                Some(t!("daemon.spawn_failed", path = spawn_at.display(), error = e).into_owned())
+            }
         }
     };
 
@@ -588,24 +592,33 @@ fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Resu
     }
     let secs = timeout.as_secs();
     Err(match (spawn_err, readiness) {
-        (Some(why), _) => std::io::Error::other(format!("smeltd 未就绪：{why}")),
+        (Some(why), _) => std::io::Error::other(t!("daemon.not_ready", why = why).into_owned()),
         (None, Ok(smelt_sys::ready_pipe::Readiness::TimedOut)) => std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            format!(
-                "smeltd 未就绪（已拉起 {}，{secs}s 内未监听 {}）",
-                daemon.display(),
-                path.display()
-            ),
+            t!(
+                "daemon.not_listening",
+                daemon = daemon.display(),
+                secs = secs,
+                socket = path.display()
+            )
+            .into_owned(),
         ),
-        (None, Ok(_)) => std::io::Error::other(format!(
-            "smeltd 未就绪（已拉起 {}，没监听 {} 就退出了，见 ~/.smelt/daemon.log）",
-            daemon.display(),
-            path.display()
-        )),
-        (None, Err(error)) => std::io::Error::other(format!(
-            "smeltd 未就绪（已拉起 {}，等不到它的就绪信号：{error}）",
-            daemon.display()
-        )),
+        (None, Ok(_)) => std::io::Error::other(
+            t!(
+                "daemon.exited",
+                daemon = daemon.display(),
+                socket = path.display()
+            )
+            .into_owned(),
+        ),
+        (None, Err(error)) => std::io::Error::other(
+            t!(
+                "daemon.no_ready_signal",
+                daemon = daemon.display(),
+                error = error
+            )
+            .into_owned(),
+        ),
     })
 }
 
@@ -908,14 +921,17 @@ fn resolve_restart_image(new_exe: Option<&std::path::Path>) -> std::io::Result<s
         Some(path) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("映像不存在：{}", path.display()),
+                t!("daemon.image_missing", path = path.display()).into_owned(),
             ));
         }
         None => pending_upgrade_exe()
             .filter(|path| path.is_file())
             .or_else(bundled_daemon_path)
             .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "没有可切换的 smeltd 映像")
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    t!("daemon.no_image").into_owned(),
+                )
             })?,
     };
     if image_already_in_managed_dir(&src, &dir) {

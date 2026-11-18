@@ -1,11 +1,11 @@
 //! 文本复制按钮。状态按元素路径和 id 保存；同一层的按钮必须使用不同的稳定 id。
 
+use rust_i18n::t;
 use std::time::{Duration, Instant};
 
 use gpui::{App, ClipboardItem, ElementId, IntoElement, RenderOnce, SharedString, Window};
-use gpui_kit_assets::IconName;
 
-use crate::{button::Button, icon_action::IconAction, motion};
+use crate::{IconName, button::Button, icon_action::IconAction, motion};
 
 const ACK_DURATION: Duration = Duration::from_millis(motion::COPY_ACK_MS);
 const ACK_HOLD: Duration = Duration::from_millis(motion::COPY_ACK_MS - 400);
@@ -122,7 +122,10 @@ impl RenderOnce for Clipboard {
             } else {
                 IconName::Copy
             })
-            .accessibility_label(self.accessibility_label.unwrap_or_else(|| "复制".into()))
+            .accessibility_label(
+                self.accessibility_label
+                    .unwrap_or_else(|| t!("action.copy").into()),
+            )
             .disabled(self.disabled)
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();

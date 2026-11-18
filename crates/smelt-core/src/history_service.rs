@@ -25,8 +25,8 @@ pub enum HistoryError {
 impl std::fmt::Display for HistoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnknownAgent(agent) => write!(f, "未知的历史来源：{agent}"),
-            Self::NotInHistory(_) => f.write_str("历史会话已不存在"),
+            Self::UnknownAgent(agent) => write!(f, "unknown history source: {agent}"),
+            Self::NotInHistory(_) => f.write_str("The past session no longer exists"),
             Self::Io(message) => f.write_str(message),
         }
     }
@@ -142,20 +142,23 @@ pub fn delete(params: &HistoryDeleteParams) -> Result<(), HistoryError> {
 /// 拒绝符号链接和没有文件名的路径，避免误删到更高层目录。
 fn delete_history_path(path: &Path) -> Result<(), HistoryError> {
     if path.file_name().is_none() || path.parent().is_none() {
-        return Err(HistoryError::Io("历史会话路径无效".into()));
+        return Err(HistoryError::Io("the past session path is invalid".into()));
     }
     let metadata = LocalFs
         .symlink_metadata(path)
         .ok_or_else(|| HistoryError::NotInHistory(path.display().to_string()))?;
     if metadata.is_symlink {
-        return Err(HistoryError::Io("拒绝删除符号链接形式的历史会话".into()));
+        return Err(HistoryError::Io(
+            "refusing to delete a past session that is a symlink".into(),
+        ));
     }
     let result = if metadata.is_dir {
         LocalFs.remove_dir_all(path)
     } else {
         LocalFs.remove_file(path)
     };
-    result.map_err(|error| HistoryError::Io(format!("删除会话存档失败：{error}")))
+    result
+        .map_err(|error| HistoryError::Io(format!("couldn't delete the session archive: {error}")))
 }
 
 #[cfg(test)]

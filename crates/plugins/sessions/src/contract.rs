@@ -1,5 +1,6 @@
-//! 会话（来源 `smelt.sessions`）对外的约定：两个视图、开会话和跳到会话的命令、往眼下在看的
-//! 会话里递话的命令、分屏的键盘命令，以及会话列表里右键菜单的 id 和上下文。JS 插件按同样
+//! 会话（来源 `smelt.sessions`）对外的约定：两个视图、会话列表行首的插槽、开会话和跳到会话
+//! 的命令、往眼下在看的会话里递话的命令、分屏的键盘命令，以及会话列表里右键菜单的 id 和
+//! 上下文。JS 插件按同样
 //! 的字符串和 JSON 调（`run`、`register_context_menu_items`）。
 //!
 //! 这里是权威定义。插件之间不互相依赖，插件接口也不认识具体功能：调用方各自照抄用到的
@@ -59,6 +60,28 @@ pub(crate) enum SessionAt {
     Session { session_id: String },
     /// 工作区目录里的对话 id，焦点给它眼下那一格。
     Conversation { conversation_id: String },
+}
+
+// ---- 插槽 ----
+
+/// 会话列表每行行首的头像（插槽，见 `smelt_plugin_api` 视图注册表的「插槽」）。填它的是按实例
+/// 建的视图，每行一份，参数是 [`SessionAvatarArgs`]，第一次 `open` 给，之后不换会话。只用
+/// 一个：好几个填进来时由用户在设置「会话列表 → 行首头像」里选，没选过用第一个（按登记
+/// 顺序）；没人填、选了不要时行首是图标、行照常高。
+///
+/// 画在 36pt 见方的格子里，零件可以伸出去一点（举起来的道具、头顶的特效），这边不裁。右下角
+/// 盖着标明哪家 CLI、按状态上色的小圆标，归这边画。会话在干什么、露没露着、跟哪个智能体，
+/// 填的一方自己看宿主的目录、会话状态。
+pub(crate) const SESSION_AVATAR: &str = "smelt.sessions/session-avatar";
+
+/// [`SESSION_AVATAR`] 的参数。线上是 `{"machine": null | "<id>", "conversation": "<id>"}`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SessionAvatarArgs {
+    /// 本机是 `null`。
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    /// 工作区目录里那段会话的 id。
+    pub conversation: String,
 }
 
 // ---- 右键菜单 ----
@@ -266,6 +289,23 @@ mod tests {
         .unwrap();
         assert_eq!(fork.machine, RuntimeKey::Local);
         assert_eq!((fork.cut, fork.prompt.as_str()), (None, ""));
+    }
+
+    #[test]
+    fn session_avatar_args_shape() {
+        let args = SessionAvatarArgs {
+            machine: RuntimeKey::Local,
+            conversation: "c".into(),
+        };
+        let value = serde_json::to_value(&args).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "machine": null, "conversation": "c" })
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionAvatarArgs>(value).unwrap(),
+            args
+        );
     }
 
     #[test]

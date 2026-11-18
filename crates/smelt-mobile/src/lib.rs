@@ -17,6 +17,8 @@
 // 对 Rust 新版属于「未知 cfg」,这里显式允许(宏自身维护,非手写代码)。
 #![allow(unexpected_cfgs)]
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 mod agents;
 pub mod api;
 mod cache;

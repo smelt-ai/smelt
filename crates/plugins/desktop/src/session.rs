@@ -17,6 +17,7 @@ use api::ui::truncated_line::truncated_line;
 use api::{HostEvent, RuntimeKey};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use rust_i18n::t;
 use smelt_plugin_api as api;
 
 use crate::ui_theme;
@@ -27,8 +28,34 @@ enum Status {
     Connected,
     /// 断了，正在自动重连。
     Reconnecting,
-    /// 人点了断开，或连过、断了、压根没连上，自动重连也用完了；文字给人看。
-    Closed(String),
+    /// 人点了断开，或连过、断了、压根没连上，自动重连也用完了。
+    Closed(Closed),
+}
+
+/// 为什么停下了。画的时候才按当前语言写成字。
+enum Closed {
+    /// 本机转发口开不了。
+    Proxy(String),
+    /// 网页视图起不来。
+    WebView(String),
+    /// 人点了断开。
+    ByUser,
+    /// 远端正常关掉的，自动重连用完了。
+    Ended,
+    /// 连接断了，自动重连用完了。
+    Lost,
+}
+
+impl Closed {
+    fn describe(&self) -> String {
+        match self {
+            Closed::Proxy(error) => t!("closed.proxy", error = error).into_owned(),
+            Closed::WebView(error) => t!("closed.webview", error = error).into_owned(),
+            Closed::ByUser => t!("closed.by_user").into_owned(),
+            Closed::Ended => t!("closed.ended").into_owned(),
+            Closed::Lost => t!("closed.lost").into_owned(),
+        }
+    }
 }
 
 /// 自动重连的等待时间，用完就停，之后只等运行时重新上线或人点「重新连接」。
@@ -89,7 +116,7 @@ pub(crate) struct DesktopView {
     controlling: bool,
     /// 要打到远端的文字，按收到的顺序一段一段打，不并发，免得前后颠倒。
     typer: smol::channel::Sender<String>,
-    /// 上一段文字没打进去的原因；下一段打成功就清掉。
+    /// 上一段文字没打进去的原因（运行时给的错误）；下一段打成功就清掉。
     type_error: Option<String>,
     /// 这次断线后已经重连了几次，连上就清零。
     retries: usize,
@@ -126,7 +153,7 @@ impl DesktopView {
                         })
                         .await;
                     let reported = this.update(cx, |view, cx| {
-                        view.type_error = typed.err().map(|error| format!("文字没打进去：{error}"));
+                        view.type_error = typed.err().map(|error| error.to_string());
                         cx.notify();
                     });
                     if reported.is_err() {
@@ -175,7 +202,7 @@ impl DesktopView {
         let proxy = match DesktopProxy::start(self.client.clone()) {
             Ok(proxy) => proxy,
             Err(error) => {
-                self.status = Status::Closed(format!("开不了本机转发口：{error}"));
+                self.status = Status::Closed(Closed::Proxy(error.to_string()));
                 return;
             }
         };
@@ -194,7 +221,7 @@ impl DesktopView {
         let native = match native {
             Ok(native) => native,
             Err(error) => {
-                self.status = Status::Closed(format!("网页视图起不来：{error}"));
+                self.status = Status::Closed(Closed::WebView(error.to_string()));
                 return;
             }
         };
@@ -234,7 +261,7 @@ impl DesktopView {
     /// 人点了断开：连接放掉，留在这一页，等人点「重新连接」。换到别处再回来也会重新连上。
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.drop_connection();
-        self.status = Status::Closed("已断开".to_string());
+        self.status = Status::Closed(Closed::ByUser);
         cx.notify();
     }
 
@@ -263,11 +290,7 @@ impl DesktopView {
     fn schedule_retry(&mut self, clean: bool, cx: &mut Context<Self>) {
         let Some(delay) = retry_delay(self.retries) else {
             self._retry = None;
-            self.status = Status::Closed(if clean {
-                "远程桌面已断开".to_string()
-            } else {
-                "和远程桌面的连接断了".to_string()
-            });
+            self.status = Status::Closed(if clean { Closed::Ended } else { Closed::Lost });
             return;
         };
         self.retries += 1;
@@ -351,14 +374,21 @@ impl DesktopView {
         let connected = matches!(self.status, Status::Connected);
         let closed = matches!(self.status, Status::Closed(_));
         let (label, color) = match &self.status {
-            Status::Connected if self.type_error.is_some() => {
-                (self.type_error.clone().unwrap_or_default(), ui_theme::bad())
+            Status::Connected if self.type_error.is_some() => (
+                t!(
+                    "status.type_failed",
+                    error = self.type_error.as_deref().unwrap_or_default()
+                )
+                .into_owned(),
+                ui_theme::bad(),
+            ),
+            Status::Connecting => (t!("status.connecting").into_owned(), ui_theme::muted()),
+            Status::Reconnecting => (t!("status.reconnecting").into_owned(), ui_theme::muted()),
+            Status::Closed(reason) => (reason.describe(), ui_theme::muted()),
+            Status::Connected if self.controlling => {
+                (t!("status.controlling").into_owned(), ui_theme::need())
             }
-            Status::Connecting => ("正在连接…".to_string(), ui_theme::muted()),
-            Status::Reconnecting => ("连接断了，正在重连…".to_string(), ui_theme::muted()),
-            Status::Closed(reason) => (reason.clone(), ui_theme::muted()),
-            Status::Connected if self.controlling => ("接管中".to_string(), ui_theme::need()),
-            Status::Connected => ("只看".to_string(), ui_theme::muted()),
+            Status::Connected => (t!("status.viewing").into_owned(), ui_theme::muted()),
         };
         let controlling = self.controlling;
         // 页名「远程桌面」在外壳画的标题带上；这一行写连的哪台、连得怎么样，和操作。
@@ -375,7 +405,7 @@ impl DesktopView {
             .when(closed, |d| {
                 d.child(
                     Button::new("desktop-reconnect")
-                        .label("重新连接")
+                        .label(t!("action.reconnect"))
                         .primary()
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.connect(window, cx);
@@ -387,7 +417,11 @@ impl DesktopView {
                 d.child({
                     let button = Button::new("desktop-control")
                         .disabled(!connected)
-                        .label(if controlling { "只看" } else { "接管" })
+                        .label(if controlling {
+                            t!("action.view_only")
+                        } else {
+                            t!("action.take_control")
+                        })
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.set_control(!controlling, cx)),
                         );
@@ -402,7 +436,7 @@ impl DesktopView {
                 .child(
                     Button::new("desktop-disconnect")
                         .quiet()
-                        .label("断开")
+                        .label(t!("action.disconnect"))
                         .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
                 )
             })

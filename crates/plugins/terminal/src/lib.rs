@@ -19,13 +19,15 @@ mod theme;
 use std::rc::Rc;
 
 use gpui::{App, KeyBinding};
-use smelt_plugin_api as api;
+use smelt_plugin_api::{self as api, text};
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// 来源 id，也是本插件库的名字。
 pub const OWNER: &str = "smelt.terminal";
 
-/// 终端的图标（组件库自带的 Lucide `square-terminal`）：实例视图和设置页共用。
-const ICON: &str = "icons/square-terminal.svg";
+/// 终端的图标：实例视图和设置页共用。
+const ICON: &str = api::ui::IconName::Terminal.asset_path();
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
@@ -53,8 +55,12 @@ pub fn register(cx: &mut App) {
     }
     if let Err(error) = api::register_commands(
         OWNER,
-        "终端",
-        vec![contract::SEND_TEXT.spec("打进终端", |text, _, cx| instance::send_text(text, cx))],
+        text!("title"),
+        vec![
+            contract::SEND_TEXT.spec(text!("command.send_text"), |text, _, cx| {
+                instance::send_text(text, cx)
+            }),
+        ],
         cx,
     ) {
         eprintln!("[terminal] 命令登记失败：{error}");

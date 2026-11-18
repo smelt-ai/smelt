@@ -5,6 +5,7 @@
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { main } from "@earendil-works/pi-coding-agent";
 import { consumeAgentInstructions } from "./agent-instructions.ts";
+import { installCacheWarmingDefault } from "./cache-warming-default.ts";
 import { installCompactionThreshold } from "./compaction-threshold.ts";
 import { consumeAgentMemory } from "./agent-memory.ts";
 import { consumeMcpSelection } from "./mcp-selection.ts";
@@ -15,6 +16,7 @@ import { smeltExtensionFactories } from "./runtime-extensions.ts";
 // 否则 token 刷新会按 import.meta.url 再读磁盘；旧运行时目录被回收后就会 ENOENT。
 registerBunOAuthFlows();
 installCompactionThreshold();
+installCacheWarmingDefault();
 consumeAgentInstructions(process.env, process.argv);
 consumeAgentMemory(process.env);
 consumePluginArgs(process.env, process.argv);

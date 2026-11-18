@@ -7,6 +7,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { SmeltBadge, SmeltButton, SmeltConfirmButton } from "smelt-ui";
+import { t } from "./i18n.js";
 
 export const SPACE = { xs: 4, sm: 8, md: 12, lg: 16 };
 export const MONO = "SF Mono, Menlo, monospace";
@@ -77,9 +78,9 @@ export function confirm(id, label, title, description, action, onConfirm) {
 }
 
 export function edited(ms) {
-  if (!ms) return "未知时间";
+  if (!ms) return t("time.unknown");
   const date = new Date(ms);
-  if (Number.isNaN(date.getTime())) return "未知时间";
+  if (Number.isNaN(date.getTime())) return t("time.unknown");
   return date.toLocaleString();
 }
 

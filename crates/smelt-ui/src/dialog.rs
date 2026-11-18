@@ -5,10 +5,14 @@
 //! 那张、[`DialogId::close`] 关指定的那张。卡片（[`Card`]）每次重绘都由调用方重新搭，正文用 [`content`]、底部按钮行用
 //! [`footer`]。确认框（[`Confirm`]）是「删除 / 丢弃 / 重命名」这类二选一的问答。
 //!
+//! 打开时卡片淡入、从下面升 4px 到位，最底下那张的遮罩跟着淡入（[`crate::motion::overlay_enter`]）；
+//! 叠上去的那张只动自己。gpui-base 关掉就卸下，出场淡出做不了。
+//!
 //! 危险确认里 Enter 等于取消，只有点按钮才执行（macOS 的惯例：破坏性操作不是默认按钮）。
 //!
 //! 窗口的根要是 `gpui_base::Root`，且开窗口前调过 [`init`]（应用经 [`crate::init`]）。
 
+use rust_i18n::t;
 use std::rc::Rc;
 
 use gpui::{
@@ -22,6 +26,7 @@ use gpui_base::{
 };
 
 use crate::kit::{ControlSize, RADIUS as KIT_RADIUS, TYPE, TextStyle, elevation};
+use crate::motion::{EnterFrom, overlay_enter};
 use crate::{Button, ui_theme};
 
 /// 卡片圆角。
@@ -228,6 +233,7 @@ impl Render for DialogLayer {
                 (ix, ix == top),
                 (max_w, max_h),
                 layer.clone(),
+                window,
                 cx,
             ));
         }
@@ -241,9 +247,16 @@ fn render_card(
     (ix, topmost): (usize, bool),
     (max_w, max_h): (Pixels, Pixels),
     layer: gpui::WeakEntity<DialogLayer>,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let id = entry.id;
+    let enter = overlay_enter(
+        gpui::ElementId::from(("smelt-dialog-enter", id)),
+        EnterFrom::Below,
+        window,
+        cx,
+    );
     let on_ok = card.on_ok;
     let on_cancel = card.on_cancel;
     let on_close = card.on_close;
@@ -251,9 +264,9 @@ fn render_card(
     // 顶边钉住时，底下仍留 VIEWPORT_MARGIN。
     let max_h = top.map_or(max_h, |top| (max_h + px(VIEWPORT_MARGIN) - top).max(px(0.)));
     // 遮罩只铺最底下那张：叠起来的几层不越压越黑。上面几张也要一块透明的接点击。
-    let backdrop = div()
-        .size_full()
-        .when(ix == 0, |backdrop| backdrop.bg(ui_theme::scrim()));
+    let backdrop = div().size_full().when(ix == 0, |backdrop| {
+        backdrop.bg(ui_theme::scrim()).opacity(enter.opacity)
+    });
     let body = div()
         .id(("smelt-dialog-body", id))
         .flex()
@@ -271,6 +284,7 @@ fn render_card(
         .max_h(max_h)
         .shadow(elevation::overlay())
         .text_color(rgb(ui_theme::text()))
+        .map(|card| enter.apply(card))
         .refine_style(&card.style)
         .child(body)
         .children(card.footer);
@@ -501,7 +515,7 @@ fn confirm_footer(confirm: &Confirm) -> impl IntoElement {
             button: Button::new("dialog-cancel")
                 .quiet()
                 .control_size(ACTION_SIZE)
-                .label("取消")
+                .label(t!("action.cancel"))
                 .debug_selector(|| "dialog-cancel".into()),
             run: None,
             action: Rc::new(Cancel),

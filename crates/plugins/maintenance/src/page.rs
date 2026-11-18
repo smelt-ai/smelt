@@ -7,22 +7,31 @@ use api::{PluginView, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
 use gpui::{
     App, AppContext as _, Context, IntoElement, ParentElement as _, Render, SharedString, Window,
 };
-use smelt_plugin_api as api;
+use rust_i18n::t;
+use smelt_plugin_api::{self as api, text};
 
 use crate::cli_command::{self, SYSTEM_LINK, SystemCommand};
 
 pub(crate) fn register(cx: &mut App) {
-    let keywords = ["smelt 命令", "CLI", "终端命令", "PATH", "/usr/local/bin"];
+    let keywords = [
+        "smelt 命令",
+        "CLI",
+        "终端命令",
+        "command line",
+        "PATH",
+        "/usr/local/bin",
+    ];
     let spec = ViewSpec {
         name: "cli".into(),
-        title: "命令行".into(),
-        icon: api::ui::IconName::SquareTerminal.path(),
+        title: text!("page.title"),
+        icon: api::ui::IconName::Terminal.path(),
         draws_top_bar: false,
         instances: false,
         settings: Some(SettingsEntry {
             group: SettingsGroup::System,
             keywords: keywords.into_iter().map(SharedString::from).collect(),
         }),
+        fills: Vec::new(),
         build: Rc::new(|_, cx| Rc::new(cx.new(|_| CommandPage::default())) as Rc<dyn ViewHandle>),
     };
     if let Err(error) = api::register_views(crate::OWNER, vec![spec], cx) {
@@ -69,10 +78,14 @@ impl CommandPage {
                 page.system = system;
                 page.installing = false;
                 match result {
-                    Ok(()) => notify("完成", "已装好 smelt 命令，新开的终端里就能用", cx),
+                    Ok(()) => notify(&t!("notify.done"), &t!("install.done"), cx),
                     Err(error) => {
                         eprintln!("[maintenance] 装 smelt 命令失败：{error}");
-                        notify("错误", &format!("装 smelt 命令失败：{error}"), cx);
+                        notify(
+                            &t!("notify.error"),
+                            &t!("install.failed", error = error),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -93,26 +106,27 @@ impl Render for CommandPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Self { system, installing } = *self;
         let description: SharedString = match system {
-            SystemCommand::Unknown => "还没检查".into(),
-            SystemCommand::Installed => format!("已装好：{SYSTEM_LINK} 指向这个 App").into(),
-            SystemCommand::Missing => "在 /usr/local/bin 放一个指向这个 App 的 smelt，终端里就能直接敲 smelt agent list。一般要输一次管理员密码".into(),
-            SystemCommand::Stale => {
-                format!("{SYSTEM_LINK} 指向的不是这个 App，重新装一次就换过来").into()
-            }
-            SystemCommand::Taken => format!("{SYSTEM_LINK} 已经是别的程序，没有动它").into(),
+            SystemCommand::Unknown => t!("status.unknown").into(),
+            SystemCommand::Installed => t!("status.installed", link = SYSTEM_LINK).into(),
+            SystemCommand::Missing => t!("status.missing").into(),
+            SystemCommand::Stale => t!("status.stale", link = SYSTEM_LINK).into(),
+            SystemCommand::Taken => t!("status.taken", link = SYSTEM_LINK).into(),
         };
-        let label = match system {
-            SystemCommand::Installed => "重新安装",
-            _ => "安装",
+        let label = if installing {
+            t!("install.running")
+        } else if system == SystemCommand::Installed {
+            t!("install.again")
+        } else {
+            t!("install.action")
         };
         let disabled = installing || system == SystemCommand::Taken;
         let page = cx.entity();
-        let row = SettingsRow::new("终端里的 smelt 命令")
+        let row = SettingsRow::new(t!("row.title"))
             .description(description)
             .child(
                 Button::new("install-cli-command")
                     .small()
-                    .label(if installing { "安装中…" } else { label })
+                    .label(label)
                     .loading(installing)
                     .disabled(disabled)
                     .on_click(move |_, _, cx: &mut App| {

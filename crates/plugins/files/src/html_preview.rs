@@ -13,6 +13,7 @@ use std::rc::{Rc, Weak};
 
 use gpui::*;
 use gpui_webview::{WebView, WebViewHandle};
+use rust_i18n::t;
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 pub(crate) struct HtmlPreview {
@@ -43,7 +44,7 @@ impl HtmlPreview {
                 return Self {
                     webview: None,
                     hide_native: None,
-                    error: Some(format!("网页视图起不来：{error}").into()),
+                    error: Some(t!("preview.webview_failed", error = error).into()),
                     loaded: None,
                     _open_links: None,
                 };
@@ -76,7 +77,7 @@ impl HtmlPreview {
             return;
         };
         if let Err(error) = webview.read(cx).raw().load_html(html) {
-            self.error = Some(format!("页面载入失败：{error}").into());
+            self.error = Some(t!("preview.load_failed", error = error).into());
         } else {
             self.error = None;
             self.loaded = Some(html.clone());

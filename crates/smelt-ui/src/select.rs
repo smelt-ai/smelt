@@ -4,6 +4,7 @@
 //!
 //! 值由调用方持有：传进当前值，选了别的由 [`Select::on_change`] 交回去，调用方存好再重画。
 
+use rust_i18n::t;
 use std::rc::Rc;
 
 use gpui::{
@@ -36,7 +37,7 @@ impl<T: Clone + PartialEq + 'static> Select<T> {
             id: id.into(),
             options: Rc::default(),
             selected: None,
-            placeholder: "请选择".into(),
+            placeholder: t!("select.placeholder").into(),
             disabled: false,
             on_change: None,
             style: StyleRefinement::default(),

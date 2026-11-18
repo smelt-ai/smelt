@@ -14,13 +14,13 @@ use std::sync::Arc;
 
 use gpui::{App, Global, SharedString, Subscription};
 
-use crate::RuntimeKey;
+use crate::{RuntimeKey, Text};
 
 /// 菜单里的一项。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextMenuItem {
-    /// 菜单上的字。
-    pub label: SharedString,
+    /// 菜单上的字，跟着界面语言变（见 [`crate::Text`]）。
+    pub label: Text,
     /// 彩色图标（如应用自己的图标），已经解码好：菜单直接画，不读文件。没有时画 `icon`。
     pub image: Option<Arc<gpui::Image>>,
     /// 线性图标的资源路径，如 `IconName::FolderOpen.path()`；都没有就不画图标。
@@ -117,7 +117,7 @@ pub fn unregister_context_menu_items(owner: &str, cx: &mut App) {
 
 fn validate(items: &[ContextMenuItem]) -> Result<(), String> {
     for item in items {
-        if item.label.trim().is_empty() {
+        if item.label.get().trim().is_empty() {
             return Err("菜单项没有字".to_string());
         }
         match &item.action {
@@ -249,7 +249,7 @@ mod tests {
     fn register_command(owner: &str, cx: &mut App) {
         let spec = CommandSpec {
             name: "open-with".to_string(),
-            title: "用其他应用打开".to_string(),
+            title: "用其他应用打开".into(),
             key: None,
             context: "Workspace".to_string(),
             palette: false,
@@ -257,7 +257,7 @@ mod tests {
             args: None,
             handler: Rc::new(|_, _, _| Handled::ok()),
         };
-        register_commands(owner, owner, vec![spec], cx).unwrap();
+        register_commands(owner, owner.to_string(), vec![spec], cx).unwrap();
     }
 
     fn labels(items: &[ContextMenuItem]) -> Vec<String> {
@@ -401,7 +401,7 @@ mod tests {
         cx.update(|cx| {
             let declared = |name: &str, fields: &[&str]| CommandSpec {
                 name: name.to_string(),
-                title: name.to_string(),
+                title: name.to_string().into(),
                 key: None,
                 context: "Workspace".to_string(),
                 palette: false,

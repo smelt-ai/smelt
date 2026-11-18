@@ -8,6 +8,7 @@
 //!
 //! 下面的 id 和字段照抄自 `crates/plugins/agents/src/contract.rs`，必须和那边一致。
 
+use rust_i18n::t;
 use std::collections::HashMap;
 
 use gpui::{App, Global, Task};
@@ -243,7 +244,7 @@ pub(crate) fn edit_settings(
     cx: &mut App,
 ) -> Task<Result<(), String>> {
     let Some(before) = settings(machine, cx).cloned() else {
-        return Task::ready(Err("那台机器的智能体配置还没收到".to_string()));
+        return Task::ready(Err(t!("error.settings_not_received").into_owned()));
     };
     let mut after = before.clone();
     f(&mut after);

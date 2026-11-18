@@ -2,6 +2,8 @@
 
 use super::*;
 use gpui_base::motion::MotionReveal;
+use rust_i18n::t;
+use smelt_plugin_api::model::acp_chat::{SubagentCardTitle, SubagentProgress};
 use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 
@@ -23,17 +25,17 @@ fn user_bubble_with_menu(
     id: impl Into<gpui::ElementId>,
     bubble: gpui::Stateful<gpui::Div>,
     view: Entity<ConversationView>,
-    fork: Option<(usize, &'static str)>,
+    fork: Option<(usize, SharedString)>,
 ) -> MenuTrigger {
     MenuTrigger::context(id, bubble, move |window, cx| {
         let menu = selected_text_menu(window, cx);
-        let Some((index, label)) = fork else {
+        let Some((index, label)) = fork.clone() else {
             return menu;
         };
         let view = view.clone();
         menu.separator().item(
-            MenuItem::new(label)
-                .icon_path("smelt-icons/git-branch.svg")
+            MenuItem::new(label.clone())
+                .icon(IconName::GitBranch)
                 .on_click(move |_event, _window, cx| {
                     view.update(cx, |this, cx| this.fork_from_user_message(index, cx));
                 }),
@@ -420,7 +422,7 @@ impl ConversationView {
                     // agent 回显的「中断」标记不是用户说的话，别套成气泡——
                     // 那会读成「用户发了一条叫 [Request interrupted...] 的消息」。
                     AcpEntry::User(text) if is_interrupt_marker(text) => {
-                        labeled_divider("已中断".into(), border, muted)
+                        labeled_divider(t!("divider.interrupted").into(), border, muted)
                     }
                     // 用户气泡右对齐限宽（对齐设计稿）：整行铺满时跟 agent 正文
                     // 混成一片，看不出谁在说话。
@@ -437,10 +439,10 @@ impl ConversationView {
                             .when(show_edit, |row| {
                                 row.child(
                                     Button::new(("acp-edit-message", i))
-                                        .icon(IconName::Undo2)
+                                        .icon(IconName::Undo)
                                         .quiet()
                                         .small()
-                                        .icon_action("编辑并重发最后一条消息")
+                                        .icon_action(t!("edit.resend"))
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
                                                 this.rewind_to_message(i, cx);
@@ -463,7 +465,7 @@ impl ConversationView {
                                             cx,
                                         )),
                                     menu_view,
-                                    fork_index.map(|index| (index, "从这里分叉并编辑")),
+                                    fork_index.map(|index| (index, t!("fork.here").into())),
                                 ),
                             ))
                             .into_any_element()
@@ -504,10 +506,10 @@ impl ConversationView {
                             .when(show_edit, |row| {
                                 row.child(
                                     Button::new(("acp-edit-message", i))
-                                        .icon(IconName::Undo2)
+                                        .icon(IconName::Undo)
                                         .quiet()
                                         .small()
-                                        .icon_action("编辑并重发最后一条消息（图片需重新添加）")
+                                        .icon_action(t!("edit.resend_images"))
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
                                                 this.rewind_to_message(i, cx);
@@ -524,7 +526,7 @@ impl ConversationView {
                                         .child(content.child(image_strip)),
                                     menu_view,
                                     fork_index
-                                        .map(|index| (index, "从这里分叉并编辑（图片需重新添加）")),
+                                        .map(|index| (index, t!("fork.here_images").into())),
                                 ),
                             ))
                             .into_any_element()
@@ -589,7 +591,7 @@ impl ConversationView {
                                         .child(this.render_copy_button(
                                             CopySite::Answer(i),
                                             text.clone(),
-                                            "复制回答",
+                                            t!("copy.answer"),
                                             cx,
                                         ))
                                         .when(
@@ -599,10 +601,10 @@ impl ConversationView {
                                             |row| {
                                                 row.child(
                                                     Button::new(("acp-fork-answer", i))
-                                                        .icon_path("smelt-icons/git-branch.svg")
+                                                        .icon(IconName::GitBranch)
                                                         .quiet()
                                                         .small()
-                                                        .icon_action("分叉对话")
+                                                        .icon_action(t!("fork.title"))
                                                         .on_click(cx.listener(
                                                             move |this, _ev, _window, cx| {
                                                                 this.fork_from_answer(i, cx);
@@ -630,16 +632,16 @@ impl ConversationView {
                     } if is_task_completion_tool_title(title) => {
                         let (status_label, status_color) = match status {
                             ToolCallStatus::Pending => {
-                                ("等待完成", gpui::rgb(ui_theme::muted()))
+                                (t!("completion.pending"), gpui::rgb(ui_theme::muted()))
                             }
                             ToolCallStatus::InProgress => {
-                                ("正在完成", gpui::rgb(ui_theme::run()))
+                                (t!("completion.in_progress"), gpui::rgb(ui_theme::run()))
                             }
                             ToolCallStatus::Completed => {
-                                ("完成", gpui::rgb(ui_theme::ok()))
+                                (t!("completion.done"), gpui::rgb(ui_theme::ok()))
                             }
                             ToolCallStatus::Failed => {
-                                ("完成失败", gpui::rgb(ui_theme::bad()))
+                                (t!("completion.failed"), gpui::rgb(ui_theme::bad()))
                             }
                         };
                         let summary = completion_summary_text(output);
@@ -647,7 +649,7 @@ impl ConversationView {
                         let body = if has_summary {
                             summary
                         } else {
-                            "任务完成".to_string()
+                            t!("completion.default").into_owned()
                         };
                         let body_markdown = if !has_summary {
                             body.clone().into()
@@ -691,7 +693,7 @@ impl ConversationView {
                                     .child(this.render_copy_button(
                                         CopySite::Completion(i),
                                         body.clone(),
-                                        "复制完成摘要",
+                                        t!("copy.completion"),
                                         cx,
                                     )),
                             );
@@ -717,12 +719,12 @@ impl ConversationView {
                     } => {
                         let owner = super::super::lookup_owner(&this.layout_cache.borrow().owner_ids, id);
                         let failed = matches!(status, ToolCallStatus::Failed);
-                        let status_label: &str = match status {
-                            ToolCallStatus::Pending => "待执行",
-                            ToolCallStatus::InProgress => "执行中",
-                            ToolCallStatus::Completed => "完成",
-                            ToolCallStatus::Failed => "失败",
-                        };
+                        let status_label = SharedString::from(match status {
+                            ToolCallStatus::Pending => t!("tool.pending"),
+                            ToolCallStatus::InProgress => t!("tool.in_progress"),
+                            ToolCallStatus::Completed => t!("tool.done"),
+                            ToolCallStatus::Failed => t!("tool.failed"),
+                        });
 
                         let has_pending_permission =
                             active_permission_tool_id.as_deref() == Some(id.as_str());
@@ -819,7 +821,7 @@ impl ConversationView {
                                         .flex_shrink_0()
                                         .type_style(TYPE.text_xsmall)
                                         .text_color(gpui::rgb(ui_theme::bad()))
-                                        .child("失败"),
+                                        .child(SharedString::from(t!("tool.failed"))),
                                 );
                             } else if let Some((added, removed)) = diff_stats {
                                 row = row.child(render_compact_diff_stats(added, removed));
@@ -1059,9 +1061,10 @@ impl ConversationView {
                                                             .quiet()
                                                             .small()
                                                             .label(if expanded {
-                                                                "收起".to_string()
+                                                                t!("toggle.collapse").into_owned()
                                                             } else {
-                                                                format!("展开全部 {total} 行")
+                                                                t!("toggle.expand_lines", count = total)
+                                                                    .into_owned()
                                                             })
                                                             .on_click(
                                                                     cx.listener(
@@ -1157,7 +1160,7 @@ impl ConversationView {
                         let expanded = has_output && this.expanded_thoughts.contains(&i);
                         let icon = match note.kind {
                             smelt_plugin_api::model::acp_chat::TaskNoteKind::Subagent => IconName::Bot,
-                            _ => IconName::SquareTerminal,
+                            _ => IconName::Terminal,
                         };
                         let mut row = event_line(muted)
                             .child(Icon::new(icon).size(px(13.)).text_color(muted))
@@ -1194,9 +1197,22 @@ impl ConversationView {
                         block.into_any_element()
                         }
                     }
-                    AcpEntry::Divider(label) => {
-                        labeled_divider(label.clone().into(), border, muted)
+                    AcpEntry::TurnFailed { detail, hint } => {
+                        // 回合失败是状态，不是助手的回答：单独一块原话加下一步，可以选中复制。
+                        let text = smelt_plugin_api::model::acp_chat::turn_failed_text(detail, *hint);
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .type_style(TYPE.body)
+                            .text_color(gpui::rgb(ui_theme::text()))
+                            .child(plain_text_view(("acp-turn-failed", i), &text))
+                            .into_any_element()
                     }
+                    AcpEntry::Divider(_) | AcpEntry::NewSession { .. } => labeled_divider(
+                        entry.divider_label().unwrap_or_default().into(),
+                        border,
+                        muted,
+                    ),
                 };
                 if let Some(run) = tool_run.as_ref()
                     && run.start == i
@@ -1409,8 +1425,8 @@ impl ConversationView {
                 )
                 .children(action.map(|action| {
                     let label = match action {
-                        TurnOutcomeAction::Retry => "重试",
-                        TurnOutcomeAction::Continue => "继续",
+                        TurnOutcomeAction::Retry => t!("action.retry"),
+                        TurnOutcomeAction::Continue => t!("prompt.continue"),
                     };
                     Button::new(("acp-turn-outcome-action", entry_ix))
                         .small()
@@ -1676,17 +1692,19 @@ impl ConversationView {
         let red: gpui::Hsla = gpui::rgb(ui_theme::bad()).into();
         let running = matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress);
         let failed = send.error.is_some() || matches!(status, ToolCallStatus::Failed);
-        let kind = send.kind.label();
+        let kind = peer_message_noun(send.kind);
         let (icon, ink, lead) = match (failed, running, send.spawned) {
-            (true, _, true) => (IconName::TriangleAlert, red, "新建对话".to_string()),
-            (true, _, false) => (IconName::TriangleAlert, red, "发给".to_string()),
-            (false, true, true) => (IconName::Plus, muted, "正在新建对话".to_string()),
-            (false, false, true) => (IconName::Plus, muted, "新建对话".to_string()),
-            (false, true, false) => (IconName::ArrowRight, muted, format!("正在发{kind}给")),
-            (false, false, false) => (IconName::ArrowRight, muted, format!("已发{kind}给")),
+            (true, _, true) => (IconName::Warning, red, t!("peer.spawn")),
+            (true, _, false) => (IconName::Warning, red, t!("peer.send_to")),
+            (false, true, true) => (IconName::Plus, muted, t!("peer.spawning")),
+            (false, false, true) => (IconName::Plus, muted, t!("peer.spawn")),
+            (false, true, false) => (IconName::ArrowRight, muted, t!("peer.sending", kind = kind)),
+            (false, false, false) => (IconName::ArrowRight, muted, t!("peer.sent", kind = kind)),
         };
+        let lead = SharedString::from(lead);
         // 新建对话交代的就是任务：「新建对话 C 并交代任务」。
-        let tail = (send.spawned && !failed && !running).then_some("并交代任务");
+        let tail =
+            (send.spawned && !failed && !running).then(|| SharedString::from(t!("peer.with_task")));
         let has_body = !send.text.trim().is_empty();
         let expanded = has_body && self.expanded_thoughts.contains(&index);
         let mut row = event_line(muted)
@@ -1702,11 +1720,17 @@ impl ConversationView {
             row = row.child(div().flex_shrink_0().child(tail));
         }
         if failed {
-            let reason = send
-                .error
-                .as_deref()
-                .map_or_else(|| "失败".to_string(), |error| format!("失败：{error}"));
-            row = row.child(div().min_w_0().overflow_hidden().text_color(red).child(truncated_line(reason)));
+            let reason = send.error.as_deref().map_or_else(
+                || t!("tool.failed").into_owned(),
+                |error| t!("peer.failed", error = error).into_owned(),
+            );
+            row = row.child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_color(red)
+                    .child(truncated_line(reason)),
+            );
         }
         if has_body {
             row = row
@@ -1762,7 +1786,7 @@ impl ConversationView {
     ) -> gpui::AnyElement {
         let (icon, ink): (IconName, gpui::Hsla) =
             if peer.kind == smelt_plugin_api::model::acp_session::PeerMessageKind::Bounce {
-                (IconName::TriangleAlert, gpui::rgb(ui_theme::bad()).into())
+                (IconName::Warning, gpui::rgb(ui_theme::bad()).into())
             } else {
                 (IconName::Inbox, muted)
             };
@@ -1774,7 +1798,11 @@ impl ConversationView {
                 &peer.source_title,
                 cx,
             ))
-            .child(div().flex_shrink_0().child(peer.kind.received()));
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .child(peer_message_received(peer.kind)),
+            );
         if note.output_tail.trim().is_empty() {
             return centered_event(row).into_any_element();
         }
@@ -1835,7 +1863,7 @@ impl ConversationView {
             .small()
             .label(label.clone())
             .tooltip(sid.clone())
-            .accessibility_label(format!("打开对话 {label}"))
+            .accessibility_label(t!("peer.open", title = label).into_owned())
             .on_click(cx.listener(move |_this, _ev, _window, cx| {
                 // 新对话还在建，没有 id 可跳。
                 if !sid.is_empty() {
@@ -1861,7 +1889,11 @@ impl ConversationView {
             } else {
                 IconName::ChevronRight
             })
-            .accessibility_label(if expanded { "收起" } else { "展开" })
+            .accessibility_label(if expanded {
+                t!("toggle.collapse")
+            } else {
+                t!("toggle.expand")
+            })
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 if !this.expanded_thoughts.remove(&index) {
                     this.expanded_thoughts.insert(index);
@@ -1904,15 +1936,35 @@ impl ConversationView {
         let running = matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending)
             || smelt_plugin_api::model::acp_chat::has_unfinished_tool_call(children);
         let roster = smelt_plugin_api::model::acp_chat::is_subagent_roster(children);
-        let mut headline = smelt_plugin_api::model::acp_chat::subagent_card_title(title, children);
-        if headline.is_empty() {
-            headline = "子代理".to_string();
-        }
-        let progress = smelt_plugin_api::model::acp_chat::subagent_progress_text(status, children);
-        let progress_failed = failed || progress.contains("失败");
-        let show_fail_label = failed && !progress.contains("失败");
+        let headline = match smelt_plugin_api::model::acp_chat::subagent_card_title(title, children)
+        {
+            SubagentCardTitle::Count(count) => crate::plural(
+                count,
+                t!("subagent.roster.one"),
+                t!("subagent.roster.other", count = count),
+            ),
+            SubagentCardTitle::Named(name) if name.is_empty() => {
+                t!("subagent.generic").into_owned()
+            }
+            SubagentCardTitle::Named(name) => name,
+        };
+        let progress = smelt_plugin_api::model::acp_chat::subagent_progress(status, children);
+        let progress_failed = failed || matches!(progress, SubagentProgress::Failed(_));
+        let show_fail_label = failed && !matches!(progress, SubagentProgress::Failed(_));
         let show_header_spinner = running && !(card_expanded && roster);
-        let show_check = !running && !progress_failed && progress.is_empty();
+        let show_check = !running && !progress_failed && progress == SubagentProgress::None;
+        let progress = match progress {
+            SubagentProgress::None => None,
+            SubagentProgress::Running { done, total } => Some(format!("{done}/{total}")),
+            SubagentProgress::Failed(count) => {
+                Some(t!("dispatch.failed", count = count).into_owned())
+            }
+            SubagentProgress::Steps(count) => Some(crate::plural(
+                count,
+                t!("subagent.steps.one"),
+                t!("subagent.steps.other", count = count),
+            )),
+        };
         let owner = super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id);
         let id_for_toggle = id.to_string();
         let mut header = div()
@@ -1946,7 +1998,7 @@ impl ConversationView {
                     .text_color(ink)
                     .child(truncated_line(headline)),
             );
-        if !progress.is_empty() {
+        if let Some(progress) = progress {
             header = header.child(
                 div()
                     .flex_shrink_0()
@@ -1973,7 +2025,7 @@ impl ConversationView {
                 .flex_shrink_0()
                 .type_style(TYPE.text_xsmall)
                 .text_color(red)
-                .child("失败")
+                .child(SharedString::from(t!("tool.failed")))
                 .into_any_element()
         } else if show_check {
             Icon::new(IconName::Check)
@@ -2072,7 +2124,11 @@ impl ConversationView {
         let headline = if single {
             subagent_run_title(&subagents[0], title)
         } else {
-            format!("{} 个子智能体", subagents.len())
+            crate::plural(
+                subagents.len(),
+                t!("subagent.summary.one"),
+                t!("subagent.summary.other", count = subagents.len()),
+            )
         };
         let ink = if progress.problem { red.into() } else { muted };
         let header_status = if single {
@@ -2136,7 +2192,7 @@ impl ConversationView {
                 .w_full()
                 .justify_start()
                 .group(SUBAGENT_STOP_GROUP)
-                .accessibility_label(format!("查看子智能体 {run_title} 的过程"))
+                .accessibility_label(t!("subagent.view_process", title = run_title).into_owned())
                 .child(header)
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     this.open_subagent_inspector(run_id.clone(), run_title.clone(), cx);
@@ -2150,9 +2206,9 @@ impl ConversationView {
                 .justify_start()
                 .group(EXPAND_ICON_GROUP)
                 .accessibility_label(if card_expanded {
-                    format!("收起 {headline}")
+                    t!("toggle.collapse_named", name = headline).into_owned()
                 } else {
-                    format!("展开 {headline}")
+                    t!("toggle.expand_named", name = headline).into_owned()
                 })
                 .child(header)
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -2218,7 +2274,7 @@ impl ConversationView {
         let detail = view
             .and_then(|view| view.last_activity.clone())
             .filter(|_| run_status.is_running())
-            .unwrap_or_else(|| run_status.label().to_string());
+            .unwrap_or_else(|| subagent_status_label(run_status).to_string());
         let run_title = subagent_run_title(run, dispatch_title);
         let row_owner = gpui::SharedString::from(format!("{owner}-{index}"));
         let row = div()
@@ -2262,7 +2318,7 @@ impl ConversationView {
             .w_full()
             .justify_start()
             .group(SUBAGENT_STOP_GROUP)
-            .accessibility_label(format!("查看子智能体 {run_title} 的过程"))
+            .accessibility_label(t!("subagent.view_process", title = run_title).into_owned())
             .child(row)
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.open_subagent_inspector(run_id.clone(), run_title.clone(), cx);
@@ -2286,7 +2342,7 @@ impl ConversationView {
                     .flex_shrink_0()
                     .type_style(TYPE.text_xsmall)
                     .text_color(gpui::rgb(ui_theme::muted()))
-                    .child("正在停止…")
+                    .child(t!("task.stopping").into_owned())
                     .into_any_element(),
             );
         }
@@ -2296,7 +2352,7 @@ impl ConversationView {
             Button::new((gpui::ElementId::from("acp-subagent-stop"), stop_id.clone()))
                 .danger_quiet()
                 .small()
-                .label("停止")
+                .label(t!("stop.stop"))
                 .flex_shrink_0()
                 .opacity(0.0)
                 .group_hover(SUBAGENT_STOP_GROUP, |s| s.opacity(1.0))
@@ -2337,7 +2393,7 @@ impl ConversationView {
                             .text_color(muted)
                             .overflow_hidden()
                             .child(truncated_line(if *thought {
-                                format!("思考  {line}")
+                                t!("thought.line", line = line).into_owned()
                             } else {
                                 line.to_string()
                             }))
@@ -2360,7 +2416,7 @@ impl ConversationView {
                     let ink = if failed { red.into() } else { muted };
                     let mut name = smelt_plugin_api::model::acp_chat::subagent_visible_title(title);
                     if name.is_empty() {
-                        name = "子代理".to_string();
+                        name = t!("subagent.generic").into_owned();
                     }
                     let has_nested = !nested.is_empty() || tool_output_has_content(output);
                     let expanded = self.tool_card_is_expanded(id, has_nested, false);
@@ -2526,7 +2582,7 @@ impl ConversationView {
         let expanded = self.expanded_thoughts.contains(&entry_ix);
         let mut preview = progress_summary(text);
         if !in_process && preview.is_empty() && live_elapsed.is_some() {
-            preview = "正在想".to_string();
+            preview = t!("status.thinking").into_owned();
         }
         let has_details = progress_has_details(text);
         // `in_process` 是「在过程组里」，不是「还在跑」：过程组里的思考和中间说明跑完也
@@ -2593,7 +2649,7 @@ impl ConversationView {
                 .flex_shrink_0()
                 .type_style(TYPE.text_xsmall_medium)
                 .text_color(muted)
-                .child("分析摘要")
+                .child(t!("thought.summary").into_owned())
                 .into_any_element()
         })
         .child(
@@ -2741,9 +2797,9 @@ impl ConversationView {
             .when(mode != ToolLogMode::Inline, |block| {
                 let key = tool_id.to_string();
                 let toggle_label = if expanded {
-                    "收起".to_string()
+                    t!("toggle.collapse").into_owned()
                 } else {
-                    format!("展开全部 {total} 行")
+                    t!("toggle.expand_lines", count = total).into_owned()
                 };
                 block.child(
                     div()
@@ -2771,7 +2827,7 @@ impl ConversationView {
                                 part_ix,
                             },
                             copy_text,
-                            "复制全部",
+                            t!("copy.all"),
                             cx,
                         )),
                 )
@@ -3025,12 +3081,16 @@ fn popover_plain_log(
                     div()
                         .type_style(TYPE.text_xsmall)
                         .text_color(gpui::rgb(ui_theme::faint()))
-                        .child(format!("共 {total} 行")),
+                        .child(SharedString::from(crate::plural(
+                            total,
+                            t!("lines.total.one"),
+                            t!("lines.total.other", count = total),
+                        ))),
                 )
                 .child(
                     Clipboard::new(owner_part(copy_name, tool_id, part_ix))
                         .value(copy)
-                        .icon_action("复制全部"),
+                        .icon_action(t!("copy.all")),
                 ),
         )
         .into_any_element()
@@ -3089,7 +3149,7 @@ pub(super) fn render_nested_transcript(children: &[AcpEntry], muted: gpui::Hsla)
                         .text_color(muted)
                         .overflow_hidden()
                         .child(truncated_line(if *thought {
-                            format!("思考  {line}")
+                            t!("thought.line", line = line).into_owned()
                         } else {
                             line.to_string()
                         }))
@@ -3125,7 +3185,7 @@ fn nested_tool_row(
     let headline = if matches!(kind, ToolKind::Collaborate) {
         let visible = smelt_plugin_api::model::acp_chat::subagent_visible_title(title);
         if visible.is_empty() {
-            "子代理".to_string()
+            t!("subagent.generic").into_owned()
         } else {
             visible
         }
@@ -3154,7 +3214,7 @@ fn nested_tool_row(
                 .flex_shrink_0()
                 .type_style(TYPE.text_xsmall)
                 .text_color(gpui::rgb(ui_theme::bad()))
-                .child("失败"),
+                .child(SharedString::from(t!("tool.failed"))),
         );
     }
     if nested.is_empty() {
@@ -3197,7 +3257,7 @@ pub(super) fn subagent_status_icon(
         }
         SubagentStatus::Completed => (IconName::CircleCheck, faint),
         SubagentStatus::Failed => (IconName::CircleX, gpui::rgb(ui_theme::bad()).into()),
-        SubagentStatus::Interrupted => (IconName::TriangleAlert, gpui::rgb(ui_theme::bad()).into()),
+        SubagentStatus::Interrupted => (IconName::Warning, gpui::rgb(ui_theme::bad()).into()),
         SubagentStatus::Stopped => (IconName::Pause, faint),
     };
     Icon::new(icon)

@@ -36,8 +36,8 @@ impl CapabilitiesPage {
             .error
             .clone()
             .unwrap_or_else(|| match self.machine {
-                RuntimeKey::Local => "正在读取 Pi 配置…".to_string(),
-                RuntimeKey::Remote(_) => "正在读取这台机器的 Pi 配置…".to_string(),
+                RuntimeKey::Local => t!("config.loading").into_owned(),
+                RuntimeKey::Remote(_) => t!("config.loading_remote").into_owned(),
             })
     }
 
@@ -103,7 +103,7 @@ impl CapabilitiesPage {
     pub(crate) fn pi_library_client(&self, cx: &App) -> Result<RuntimeClient, String> {
         api::host(cx)
             .client(&self.machine, cx)
-            .ok_or_else(|| api::MACHINE_REMOVED.to_string())
+            .ok_or_else(api::machine_removed)
     }
 
     /// 换上运行时给的新快照。修改回带的快照比之前发出、还没回来的读取都新。

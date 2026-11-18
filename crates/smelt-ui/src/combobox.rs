@@ -12,6 +12,7 @@
 //!
 //! 选项由调用方给，值由调用方持有：传进当前值，选了别的由 [`Combobox::on_change`] 交回去。
 
+use rust_i18n::t;
 use std::cmp::Reverse;
 use std::rc::Rc;
 
@@ -23,7 +24,6 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb, size, svg,
 };
 use gpui_base::{StyledExt as _, VirtualListScrollHandle, v_virtual_list};
-use gpui_kit_assets::IconNamed as _;
 
 use crate::button::Button;
 use crate::field::{InputEvent, InputState, TextInput};
@@ -554,7 +554,7 @@ impl Render for SearchList {
                 .flex()
                 .justify_center()
                 .text_color(rgb(ui_theme::muted()))
-                .child("没有匹配的结果")
+                .child(t!("combobox.no_matches"))
                 .into_any_element()
         } else {
             v_virtual_list(
@@ -622,7 +622,7 @@ impl Combobox {
             id: id.into(),
             groups,
             selected: None,
-            placeholder: "请选择".into(),
+            placeholder: t!("select.placeholder").into(),
             anchor: Anchor::TopRight,
             on_change: None,
             style: StyleRefinement::default(),
@@ -666,7 +666,7 @@ impl Styled for Combobox {
 impl RenderOnce for Combobox {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let list = window.use_keyed_state((self.id.clone(), "list"), cx, |window, cx| {
-            SearchList::new("搜索", px(320.), window, cx)
+            SearchList::new(t!("combobox.search"), px(320.), window, cx)
         });
         list.update(cx, |list, cx| {
             list.set_groups(self.groups.clone(), self.selected.clone(), cx)

@@ -65,7 +65,7 @@ pub(super) fn pi_model_page(
 }
 
 pub(super) fn section(
-    title: &'static str,
+    title: impl Into<SharedString>,
     action: Option<AnyElement>,
     body: impl IntoElement,
     palette: Palette,
@@ -87,7 +87,7 @@ pub(super) fn section(
                     div()
                         .type_style(TYPE.text_xsmall_medium)
                         .text_color(palette.muted)
-                        .child(title),
+                        .child(title.into()),
                 )
                 .children(action),
         )
@@ -124,7 +124,7 @@ fn default_model_section(
     });
     let title = match (page.pi_model_settings(), &current) {
         (_, Some((provider, model))) => format!("{provider} / {model}"),
-        (Err(_), _) => "无法读取模型配置".to_string(),
+        (Err(_), _) => t!("default_model.unreadable").into_owned(),
         _ => String::new(),
     };
 
@@ -135,7 +135,7 @@ fn default_model_section(
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(palette.danger)
-                    .child(format!("无法读取 settings.json：{error}")),
+                    .child(t!("default_model.read_failed", error = error).into_owned()),
             );
         }
         Ok(_) if explicit.is_none() => {
@@ -143,17 +143,25 @@ fn default_model_section(
                 div()
                     .type_style(TYPE.text_xsmall)
                     .text_color(palette.muted)
-                    .child("尚未选择，正在用 Pi 的内置默认值"),
+                    .child(t!("default_model.unset").into_owned()),
             );
         }
         Ok(_) => {}
     }
     match page.pi_model_settings() {
         Ok(settings) if settings.credential_configured => {
-            status = status.child(Badge::new().ok().child("凭据已配置"));
+            status = status.child(
+                Badge::new()
+                    .ok()
+                    .child(t!("credential.configured").into_owned()),
+            );
         }
         Ok(_) => {
-            status = status.child(Badge::new().need().child("缺少凭据"));
+            status = status.child(
+                Badge::new()
+                    .need()
+                    .child(t!("credential.missing").into_owned()),
+            );
         }
         Err(error) => {
             status = status.child(
@@ -207,7 +215,7 @@ fn default_model_section(
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(palette.danger)
-                .child(format!("操作失败：{error}")),
+                .child(t!("common.action_failed", error = error).into_owned()),
         );
     }
     if let Some(editor) = &page.pi_model_editor {
@@ -219,7 +227,7 @@ fn default_model_section(
             palette.border,
         ));
     }
-    section("默认模型", None, body, palette)
+    section(t!("default_model.title"), None, body, palette)
 }
 
 /// `settings.json` 里用户真的选过的默认模型；没选过返回 `None`。
@@ -248,15 +256,13 @@ fn change_model_button(
     let entity = entity.clone();
     let trigger = Button::new("pi-change-default-model")
         .small()
-        .label("更换模型")
+        .label(t!("default_model.change"))
         .disabled(editing);
     MenuTrigger::dropdown("pi-change-default-model-menu", trigger, move |_, cx| {
         let mut menu = Menu::new();
         let groups = entity.read(cx).pi_model_choice_groups();
         if groups.is_empty() {
-            menu = menu.item(
-                MenuItem::new("还没有可选的模型：先在下面登录或添加 Provider").disabled(true),
-            );
+            menu = menu.item(MenuItem::new(t!("default_model.none")).disabled(true));
         }
         for group in groups {
             let mut sub = Menu::new();
@@ -283,7 +289,7 @@ fn change_model_button(
         let manual_entity = entity.clone();
         menu.separator()
             .item(
-                MenuItem::new("手动填写 Provider 和模型…").on_click(move |_, window, cx| {
+                MenuItem::new(t!("default_model.manual_menu")).on_click(move |_, window, cx| {
                     manual_entity.update(cx, |workspace, cx| {
                         workspace.edit_pi_model_settings(window, cx);
                     });
@@ -319,7 +325,7 @@ fn thinking_level_row(
                 .flex_none()
                 .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
-                .child("推理强度"),
+                .child(t!("default_model.thinking").into_owned()),
         )
         .child(
             div()
@@ -344,7 +350,7 @@ fn thinking_level_row(
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
-                .child("先选一个默认模型")
+                .child(t!("default_model.choose_first").into_owned())
         }))
 }
 
@@ -446,8 +452,8 @@ fn provider_section(
         .quiet()
         .small()
         .icon(IconName::Plus)
-        .label("自定义 Provider")
-        .tooltip("OpenAI / Anthropic 兼容网关、自托管服务或其他模型端点")
+        .label(t!("provider.custom"))
+        .tooltip(t!("provider.custom_tooltip"))
         .disabled(custom_editor.is_some())
         .on_click(move |_, window, cx| {
             add_entity.update(cx, |workspace, cx| {
@@ -462,7 +468,7 @@ fn provider_section(
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(palette.danger)
-                .child(format!("操作失败：{error}")),
+                .child(t!("common.action_failed", error = error).into_owned()),
         );
     }
     // 新增表单放在表头，编辑表单展开在对应那一行下面。
@@ -588,7 +594,7 @@ fn provider_list_footer(
         footer = footer.border_t_1().border_color(palette.border);
     }
     let retry_entity = entity.clone();
-    let retry = move |label: &'static str| {
+    let retry = move |label: std::borrow::Cow<'static, str>| {
         let entity = retry_entity.clone();
         Button::new("pi-auth-load")
             .quiet()
@@ -604,7 +610,7 @@ fn provider_list_footer(
             div()
                 .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
-                .child("正在读取内置 Provider 的登录状态…首次需要准备 Pi 运行时，可能要等一会"),
+                .child(t!("providers.loading").into_owned()),
         ),
         Some(PiAuthProvidersState::Failed(error)) => footer
             .child(
@@ -613,9 +619,11 @@ fn provider_list_footer(
                     .overflow_hidden()
                     .type_style(TYPE.text_xsmall)
                     .text_color(palette.danger)
-                    .child(truncated_line(format!("读取内置 Provider 失败：{error}"))),
+                    .child(truncated_line(
+                        t!("providers.failed", error = error).into_owned(),
+                    )),
             )
-            .child(retry("重试")),
+            .child(retry(t!("common.retry"))),
         Some(PiAuthProvidersState::Ready(_)) => {
             let show_all = page.pi_auth_show_all;
             let toggle_entity = entity.clone();
@@ -624,9 +632,9 @@ fn provider_list_footer(
                     .quiet()
                     .small()
                     .label(if show_all {
-                        "只看常用".to_string()
+                        t!("providers.show_common").into_owned()
                     } else {
-                        format!("显示全部内置 Provider（另有 {hidden} 个）")
+                        t!("providers.show_all", hidden = hidden).into_owned()
                     })
                     .on_click(move |_, _, cx| {
                         toggle_entity.update(cx, |workspace, cx| {
@@ -636,7 +644,7 @@ fn provider_list_footer(
             });
             footer
                 .child(div().flex().items_center().children(toggle))
-                .child(retry("刷新状态"))
+                .child(retry(t!("providers.refresh")))
         }
     }
 }
@@ -658,9 +666,9 @@ fn custom_provider_row(
         provider.display_name.clone()
     };
     let credential = if provider.credential_configured {
-        "凭据已配置"
+        t!("credential.configured")
     } else {
-        "无凭据"
+        t!("credential.none")
     };
     div()
         .flex()
@@ -687,20 +695,27 @@ fn custom_provider_row(
                                 .text_color(palette.fg)
                                 .child(truncated_line(name)),
                         )
-                        .child(Badge::new().child("自定义"))
-                        .children(is_default.then(|| Badge::new().accent().child("默认"))),
+                        .child(Badge::new().child(t!("badge.custom").into_owned()))
+                        .children(is_default.then(|| {
+                            Badge::new()
+                                .accent()
+                                .child(t!("badge.default").into_owned())
+                        })),
                 )
                 .child(
                     div()
                         .overflow_hidden()
                         .type_style(TYPE.text_xsmall)
                         .text_color(palette.muted)
-                        .child(truncated_line(format!(
-                            "{} · {} 个模型 · {}",
-                            provider.id,
-                            provider.models.len(),
-                            credential
-                        ))),
+                        .child(truncated_line(
+                            t!(
+                                "provider.summary",
+                                id = provider.id,
+                                count = provider.models.len(),
+                                credential = credential
+                            )
+                            .into_owned(),
+                        )),
                 ),
         )
         .child(
@@ -713,7 +728,7 @@ fn custom_provider_row(
                     Button::new(format!("pi-edit-custom-provider-{}", provider.id))
                         .quiet()
                         .small()
-                        .label("编辑")
+                        .label(t!("common.edit"))
                         .disabled(editor_open)
                         .on_click(move |_, window, cx| {
                             let provider_id = provider_id.clone();
@@ -726,8 +741,8 @@ fn custom_provider_row(
                     Button::new(format!("pi-delete-custom-provider-{delete_id}"))
                         .quiet()
                         .small()
-                        .icon_path("smelt-icons/trash.svg")
-                        .icon_action("删除此 Provider")
+                        .icon(IconName::Trash)
+                        .icon_action(t!("provider.delete_tooltip"))
                         .disabled(editor_open)
                         .on_click(move |_, window, cx| {
                             let delete_id = delete_id.clone();
@@ -774,7 +789,7 @@ fn config_files_footer(
                 .mr_2()
                 .type_style(TYPE.text_xsmall)
                 .text_color(palette.muted)
-                .child("原生配置文件"),
+                .child(t!("config.native_files").into_owned()),
         )
         .child(file_button(
             "pi-edit-settings-file",
@@ -799,8 +814,8 @@ fn config_files_footer(
             Button::new("pi-refresh-settings")
                 .quiet()
                 .small()
-                .icon(IconName::RefreshCw)
-                .icon_action("重新读取 ~/.pi/agent/ 下的配置")
+                .icon(IconName::Refresh)
+                .icon_action(t!("config.reload_tooltip"))
                 .on_click(move |_, _, cx| {
                     refresh_entity.update(cx, |workspace, cx| {
                         workspace.refresh_pi_settings(cx);
@@ -821,9 +836,9 @@ fn default_model_form(
     let save_entity = manage_entity.clone();
     let cancel_entity = manage_entity;
     let credential_status = if editor.credential_configured {
-        "当前 API key 已配置；留空不会改动它。"
+        t!("model_editor.key_set").into_owned()
     } else {
-        "尚未检测到 API key；请在下方输入。"
+        t!("model_editor.key_missing").into_owned()
     };
 
     let form = div()
@@ -843,7 +858,7 @@ fn default_model_form(
                     div()
                         .type_style(TYPE.ui_medium)
                         .text_color(fg)
-                        .child("手动填写 Provider 和模型"),
+                        .child(t!("model_editor.title").into_owned()),
                 )
                 .child(
                     div()
@@ -870,7 +885,7 @@ fn default_model_form(
                             div()
                                 .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
-                                .child("提供方 (Provider)"),
+                                .child(t!("model_editor.provider").into_owned()),
                         )
                         .child(TextInput::new(&editor.provider)),
                 )
@@ -885,7 +900,7 @@ fn default_model_form(
                             div()
                                 .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
-                                .child("默认模型 ID"),
+                                .child(t!("model_editor.model").into_owned()),
                         )
                         .child(TextInput::new(&editor.model)),
                 ),
@@ -908,7 +923,7 @@ fn default_model_form(
                             div()
                                 .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
-                                .child("API 地址 (可选)"),
+                                .child(t!("model_editor.base_url").into_owned()),
                         )
                         .child(TextInput::new(&editor.base_url)),
                 )
@@ -930,7 +945,7 @@ fn default_model_form(
                             div()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
-                                .child("凭据将安全存放于 ~/.pi/agent/auth.json"),
+                                .child(t!("model_editor.key_storage").into_owned()),
                         ),
                 ),
         )
@@ -945,7 +960,7 @@ fn default_model_form(
                     Button::new("pi-cancel-model-settings")
                         .quiet()
                         .small()
-                        .label("取消")
+                        .label(t!("common.cancel"))
                         .on_click(move |_, _, cx| {
                             cancel_entity.update(cx, |workspace, cx| {
                                 workspace.cancel_pi_model_edit(cx);
@@ -955,7 +970,7 @@ fn default_model_form(
                 .child(
                     Button::new("pi-save-model-settings")
                         .small()
-                        .label("保存配置")
+                        .label(t!("model_editor.save"))
                         .on_click(move |_, window, cx| {
                             save_entity.update(cx, |workspace, cx| {
                                 workspace.save_pi_model_settings(window, cx);
@@ -997,9 +1012,9 @@ fn custom_provider_form(
     let save_default_entity = manage_entity.clone();
 
     let credential_status = if editor.credential_configured {
-        "当前凭据已配置；API key 留空不会改动它。"
+        t!("provider.key_set").into_owned()
     } else {
-        "尚未配置凭据；无鉴权端点可留空 API key。"
+        t!("provider.key_missing").into_owned()
     };
 
     let mut model_rows = div().flex().flex_col().w_full().gap_2();
@@ -1027,15 +1042,15 @@ fn custom_provider_form(
                             div()
                                 .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
-                                .child(format!("模型 {}", index + 1)),
+                                .child(t!("model_row.title", index = index + 1).into_owned()),
                         )
                         .child(div().flex_1())
                         .child(
                             Button::new("pi-remove-custom-model")
                                 .quiet()
                                 .small()
-                                .icon_path("smelt-icons/trash.svg")
-                                .icon_action("移除此模型")
+                                .icon(IconName::Trash)
+                                .icon_action(t!("model_row.remove_tooltip"))
                                 .on_click(move |_, _, cx| {
                                     remove_entity.update(cx, |workspace, cx| {
                                         workspace.remove_pi_custom_model(index, cx);
@@ -1061,7 +1076,7 @@ fn custom_provider_form(
                                     div()
                                         .type_style(TYPE.text_xsmall)
                                         .text_color(muted)
-                                        .child("模型 ID"),
+                                        .child(t!("model_row.id").into_owned()),
                                 )
                                 .child(TextInput::new(&model.id)),
                         )
@@ -1076,7 +1091,7 @@ fn custom_provider_form(
                                     div()
                                         .type_style(TYPE.text_xsmall)
                                         .text_color(muted)
-                                        .child("显示名称"),
+                                        .child(t!("model_row.name").into_owned()),
                                 )
                                 .child(TextInput::new(&model.name)),
                         ),
@@ -1099,7 +1114,7 @@ fn custom_provider_form(
                                     div()
                                         .type_style(TYPE.text_xsmall)
                                         .text_color(muted)
-                                        .child("上下文长度（可选）"),
+                                        .child(t!("model_row.context").into_owned()),
                                 )
                                 .child(TextInput::new(&model.context_window)),
                         )
@@ -1114,7 +1129,7 @@ fn custom_provider_form(
                                     div()
                                         .type_style(TYPE.text_xsmall)
                                         .text_color(muted)
-                                        .child("最大输出（可选）"),
+                                        .child(t!("model_row.max_tokens").into_owned()),
                                 )
                                 .child(TextInput::new(&model.max_tokens)),
                         ),
@@ -1143,12 +1158,12 @@ fn custom_provider_form(
                         .gap_2()
                         .child(div().type_style(TYPE.ui_medium).text_color(fg).child(
                             if editor.previous_id.is_some() {
-                                "编辑自定义 Provider"
+                                t!("provider.edit_title").into_owned()
                             } else {
-                                "添加自定义 Provider"
+                                t!("provider.add_title").into_owned()
                             },
                         ))
-                        .child(Badge::new().child("原生 Pi")),
+                        .child(Badge::new().child(t!("provider.native_badge").into_owned())),
                 )
                 .child(
                     div()
@@ -1182,7 +1197,7 @@ fn custom_provider_form(
                             div()
                                 .type_style(TYPE.text_xsmall)
                                 .text_color(muted)
-                                .child("字母开头，可含字母、数字和短连字符"),
+                                .child(t!("provider.id_hint").into_owned()),
                         ),
                 )
                 .child(
@@ -1196,7 +1211,7 @@ fn custom_provider_form(
                             div()
                                 .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
-                                .child("显示名称（可选）"),
+                                .child(t!("provider.name").into_owned()),
                         )
                         .child(TextInput::new(&editor.display_name)),
                 ),
@@ -1219,7 +1234,7 @@ fn custom_provider_form(
                             div()
                                 .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
-                                .child("API 地址"),
+                                .child(t!("provider.base_url").into_owned()),
                         )
                         .child(TextInput::new(&editor.base_url)),
                 )
@@ -1233,7 +1248,7 @@ fn custom_provider_form(
                             div()
                                 .type_style(TYPE.text_xsmall_medium)
                                 .text_color(fg)
-                                .child("协议"),
+                                .child(t!("provider.api").into_owned()),
                         )
                         .child(MenuTrigger::dropdown(
                             "pi-custom-provider-api-menu",
@@ -1274,7 +1289,7 @@ fn custom_provider_form(
                     div()
                         .type_style(TYPE.text_xsmall)
                         .text_color(muted)
-                        .child("凭据存放于 ~/.pi/agent/auth.json"),
+                        .child(t!("provider.key_storage").into_owned()),
                 ),
         )
         .child(
@@ -1287,7 +1302,7 @@ fn custom_provider_form(
                     div()
                         .type_style(TYPE.ui_medium)
                         .text_color(fg)
-                        .child("模型目录"),
+                        .child(t!("provider.models").into_owned()),
                 )
                 .child(
                     div()
@@ -1298,9 +1313,9 @@ fn custom_provider_form(
                             Button::new("pi-discover-custom-models")
                                 .small()
                                 .label(if discovery_busy {
-                                    "正在读取…"
+                                    t!("memory.loading")
                                 } else {
-                                    "获取模型列表"
+                                    t!("provider.fetch_models")
                                 })
                                 .disabled(discovery_busy)
                                 .on_click(move |_, _, cx| {
@@ -1313,7 +1328,7 @@ fn custom_provider_form(
                             Button::new("pi-add-custom-model")
                                 .small()
                                 .icon(IconName::Plus)
-                                .label("添加模型")
+                                .label(t!("provider.add_model"))
                                 .on_click(move |_, window, cx| {
                                     add_model_entity.update(cx, |workspace, cx| {
                                         workspace.add_pi_custom_model(window, cx);
@@ -1350,7 +1365,7 @@ fn custom_provider_form(
                     Button::new("pi-cancel-custom-provider")
                         .quiet()
                         .small()
-                        .label("取消")
+                        .label(t!("common.cancel"))
                         .on_click(move |_, _, cx| {
                             cancel_entity.update(cx, |workspace, cx| {
                                 workspace.cancel_pi_custom_provider(cx);
@@ -1360,7 +1375,7 @@ fn custom_provider_form(
                 .child(
                     Button::new("pi-save-custom-provider")
                         .small()
-                        .label("保存")
+                        .label(t!("common.save"))
                         .on_click(move |_, window, cx| {
                             save_entity.update(cx, |workspace, cx| {
                                 workspace.save_pi_custom_provider(false, window, cx);
@@ -1370,7 +1385,7 @@ fn custom_provider_form(
                 .child(
                     Button::new("pi-save-custom-provider-default")
                         .small()
-                        .label("保存并设为默认")
+                        .label(t!("provider.save_default"))
                         .on_click(move |_, window, cx| {
                             save_default_entity.update(cx, |workspace, cx| {
                                 workspace.save_pi_custom_provider(true, window, cx);

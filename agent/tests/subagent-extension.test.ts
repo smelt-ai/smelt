@@ -83,8 +83,9 @@ describe("Smelt Pi subagent extension", () => {
 	});
 
 	test("names a dispatch by what it sends out", () => {
-		expect(dispatchTitle({ tasks: [{}, {}] })).toBe("2 个并行任务");
-		expect(dispatchTitle({ chain: [{}, {}, {}] })).toBe("3 步串联");
+		expect(dispatchTitle({ tasks: [{ task: "a" }, { task: "b" }] })).toBe("");
+		expect(dispatchTitle({ chain: [{ task: "a" }, { task: "b" }, { task: "c" }] })).toBe("");
+		expect(dispatchTitle({ tasks: [{ task: "查登录\n细节" }] })).toBe("查登录");
 		expect(dispatchTitle({ task: "迁移数据库\n细节" })).toBe("迁移数据库");
 		expect(dispatchTitle({ task: "x", label: "迁移" })).toBe("迁移");
 	});

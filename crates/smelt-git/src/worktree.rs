@@ -7,6 +7,7 @@ use std::{
 };
 
 use smelt_core::fs::{FileSystem as _, LocalFs};
+use smelt_runtime_client::protocol::reason::ControlReason;
 
 use crate::{GitOutput, run_git};
 
@@ -47,9 +48,12 @@ pub struct FinishReport {
     pub leftover_entries: Vec<PathBuf>,
 }
 
+/// 工作树没建成、关不了或改不了名。用户自己能处理的几种带 `reason`，客户端按自己的语言说；
+/// 其余是 git 或系统的原话。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeError {
     message: String,
+    reason: Option<ControlReason>,
     rollback_errors: Vec<String>,
 }
 
@@ -57,8 +61,23 @@ impl WorktreeError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            reason: None,
             rollback_errors: Vec::new(),
         }
+    }
+
+    fn because(reason: ControlReason) -> Self {
+        Self::new(reason.text().unwrap_or_default()).with_reason(reason)
+    }
+
+    fn with_reason(mut self, reason: ControlReason) -> Self {
+        self.reason = Some(reason);
+        self
+    }
+
+    /// 带种类时客户端按它说；回滚没做完的细节只在 `Display` 里。
+    pub fn reason(&self) -> Option<&ControlReason> {
+        self.reason.as_ref()
     }
 
     fn with_rollback(mut self, errors: Vec<String>) -> Self {
@@ -71,13 +90,23 @@ impl fmt::Display for WorktreeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)?;
         for error in &self.rollback_errors {
-            write!(f, "\n回滚未完成：{error}")?;
+            write!(f, "\nRollback didn't finish: {error}")?;
         }
         Ok(())
     }
 }
 
 impl std::error::Error for WorktreeError {}
+
+impl From<crate::GitError> for WorktreeError {
+    fn from(error: crate::GitError) -> Self {
+        let converted = Self::new(error.message());
+        match error.reason() {
+            Some(reason) => converted.with_reason(reason.clone()),
+            None => converted,
+        }
+    }
+}
 
 struct PreparedRepository {
     name: String,
@@ -88,10 +117,12 @@ struct PreparedRepository {
 }
 
 pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> {
-    let task = validate_segment(&request.task, "工作树名称")?;
+    let task = validate_segment(&request.task, "The worktree name")?;
     let branch = request.branch;
     if branch.is_empty() || branch.trim() != branch {
-        return Err(WorktreeError::new("分支名不能为空或包含首尾空格"));
+        return Err(WorktreeError::new(
+            "The branch name can't be empty or have leading or trailing spaces",
+        ));
     }
 
     // Keep Windows verbatim prefixes out of paths passed to Git and compared with its output.
@@ -99,18 +130,17 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
         .canonicalize(&request.project_root)
         .map_err(|error| {
             WorktreeError::new(format!(
-                "无法解析项目目录 {}：{error}",
+                "couldn't resolve the project directory {}: {error}",
                 request.project_root.display()
             ))
         })?;
-    crate::project_repository::exclude_managed_directory(&project_root, "worktrees")
-        .map_err(WorktreeError::new)?;
+    crate::project_repository::exclude_managed_directory(&project_root, "worktrees")?;
 
     let worktrees_root = project_root.join("worktrees");
     let task_root = worktrees_root.join(&task);
     if task_root.exists() && !task_root.is_dir() {
         return Err(WorktreeError::new(format!(
-            "工作树目标不是目录：{}",
+            "the worktree target isn't a directory: {}",
             task_root.display()
         )));
     }
@@ -119,33 +149,33 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
     let mut roots = HashSet::new();
     let mut prepared = Vec::with_capacity(request.repositories.len());
     if request.repositories.is_empty() {
-        return Err(WorktreeError::new("至少选择一个参与仓库"));
+        return Err(WorktreeError::because(ControlReason::WorktreeNoRepository));
     }
 
     for repository in &request.repositories {
-        validate_segment(&repository.name, "仓库名称")?;
+        validate_segment(&repository.name, "The repository name")?;
         if !names.insert(repository.name.clone()) {
             return Err(WorktreeError::new(format!(
-                "仓库名称重复：{}",
+                "Duplicate repository name: {}",
                 repository.name
             )));
         }
         let root = LocalFs.canonicalize(&repository.root).map_err(|error| {
             WorktreeError::new(format!(
-                "无法解析仓库 {}（{}）：{error}",
+                "couldn't resolve repository {} ({}): {error}",
                 repository.name,
                 repository.root.display()
             ))
         })?;
         if !roots.insert(root.clone()) {
             return Err(WorktreeError::new(format!(
-                "同一个仓库被重复选择：{}",
+                "The same repository was selected twice: {}",
                 root.display()
             )));
         }
         let top = git_output(&root, &["rev-parse", "--show-toplevel"]).map_err(|error| {
             WorktreeError::new(format!(
-                "仓库 {} 无法读取 Git 根目录：{error}",
+                "repository {} couldn't read its Git root: {error}",
                 repository.name
             ))
         })?;
@@ -153,13 +183,13 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
             .canonicalize(Path::new(top.stdout_str().trim()))
             .map_err(|error| {
                 WorktreeError::new(format!(
-                    "仓库 {} 返回了无效的 Git 根目录：{error}",
+                    "repository {} returned an invalid Git root: {error}",
                     repository.name
                 ))
             })?;
         if git_root != root {
             return Err(WorktreeError::new(format!(
-                "{} 不是仓库根目录（Git 根目录是 {}）",
+                "{} isn't a repository root (the Git root is {})",
                 repository.root.display(),
                 git_root.display()
             )));
@@ -170,28 +200,33 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
             || root.starts_with(&worktrees_root)
         {
             return Err(WorktreeError::new(format!(
-                "工作树目录与仓库嵌套：{}",
+                "The worktree directory is nested with a repository: {}",
                 worktree.display()
             )));
         }
         if worktree.exists() {
-            return Err(WorktreeError::new(format!(
-                "工作树目标已存在：{}",
-                worktree.display()
-            )));
+            return Err(WorktreeError::because(
+                ControlReason::WorktreeTargetExists {
+                    path: worktree.display().to_string(),
+                },
+            ));
         }
         if !git_succeeds(&root, &["check-ref-format", "--branch", &branch])? {
-            return Err(WorktreeError::new(format!("无效的 Git 分支名：{branch}")));
+            return Err(WorktreeError::new(format!(
+                "Invalid Git branch name: {branch}"
+            )));
         }
 
         let base_ref = fetch_default_base(&root, &repository.name)?;
         let branch_created = !local_branch_exists(&root, &branch)?;
         if let Some(path) = checked_out_at(&root, &branch)? {
-            return Err(WorktreeError::new(format!(
-                "仓库 {} 的分支 {branch} 已在 {} 检出",
-                repository.name,
-                path.display()
-            )));
+            return Err(WorktreeError::because(
+                ControlReason::WorktreeBranchCheckedOut {
+                    repository: repository.name.clone(),
+                    branch: branch.clone(),
+                    path: path.display().to_string(),
+                },
+            ));
         }
         prepared.push(PreparedRepository {
             name: repository.name.clone(),
@@ -204,7 +239,7 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
 
     fs::create_dir_all(&task_root).map_err(|error| {
         WorktreeError::new(format!(
-            "无法创建工作树目录 {}：{error}",
+            "couldn't create the worktree directory {}: {error}",
             task_root.display()
         ))
     })?;
@@ -242,9 +277,9 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
                 });
                 let errors = rollback_worktrees(&rollback, &branch);
                 return Err(WorktreeError::new(format!(
-                    "创建仓库 {} 的 worktree 失败：{}",
+                    "couldn't create the worktree for repository {}: {}",
                     repository.name,
-                    git_error(&output, "git worktree add 失败")
+                    git_error(&output, "git worktree add failed")
                 ))
                 .with_rollback(errors));
             }
@@ -259,7 +294,7 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
                 });
                 let errors = rollback_worktrees(&rollback, &branch);
                 return Err(WorktreeError::new(format!(
-                    "创建仓库 {} 的 worktree 失败：{error}",
+                    "couldn't create the worktree for repository {}: {error}",
                     repository.name
                 ))
                 .with_rollback(errors));
@@ -316,14 +351,14 @@ pub fn inspect_workset(workset: &Workset) -> Result<Vec<RepositoryState>, Worktr
             Some(path) if path == repository.worktree && repository.worktree.exists() => true,
             Some(path) if path == repository.worktree => {
                 return Err(WorktreeError::new(format!(
-                    "仓库 {} 的 worktree 目录不存在但 Git 仍登记着它：{}",
+                    "repository {}'s worktree directory doesn't exist, but Git still lists it: {}",
                     repository.name,
                     path.display()
                 )));
             }
             Some(path) => {
                 return Err(WorktreeError::new(format!(
-                    "仓库 {} 的分支 {} 已在其他目录检出：{}",
+                    "repository {}'s branch {} is checked out elsewhere: {}",
                     repository.name,
                     workset.branch,
                     path.display()
@@ -331,7 +366,7 @@ pub fn inspect_workset(workset: &Workset) -> Result<Vec<RepositoryState>, Worktr
             }
             None if repository.worktree.exists() => {
                 return Err(WorktreeError::new(format!(
-                    "仓库 {} 的工作目录存在但未登记为 worktree：{}",
+                    "repository {}'s working directory exists but isn't registered as a worktree: {}",
                     repository.name,
                     repository.worktree.display()
                 )));
@@ -344,13 +379,16 @@ pub fn inspect_workset(workset: &Workset) -> Result<Vec<RepositoryState>, Worktr
                 &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
             )
             .map_err(|error| {
-                WorktreeError::new(format!("读取仓库 {} 状态失败：{error}", repository.name))
+                WorktreeError::new(format!(
+                    "couldn't read the status of repository {}: {error}",
+                    repository.name
+                ))
             })?;
             if !status.success() {
                 return Err(WorktreeError::new(format!(
-                    "读取仓库 {} 状态失败：{}",
+                    "couldn't read the status of repository {}: {}",
                     repository.name,
-                    git_error(&status, "git status 失败")
+                    git_error(&status, "git status failed")
                 )));
             }
             !status.stdout.is_empty()
@@ -363,7 +401,7 @@ pub fn inspect_workset(workset: &Workset) -> Result<Vec<RepositoryState>, Worktr
                 merged_into_base(&repository.root, &workset.branch, &repository.base_ref).map_err(
                     |error| {
                         WorktreeError::new(format!(
-                            "检查仓库 {} 的分支合并状态失败：{error}",
+                            "couldn't check whether repository {}'s branch is merged: {error}",
                             repository.name
                         ))
                     },
@@ -371,7 +409,7 @@ pub fn inspect_workset(workset: &Workset) -> Result<Vec<RepositoryState>, Worktr
             )
         } else if !branch_exists && repository.branch_created && present {
             return Err(WorktreeError::new(format!(
-                "仓库 {} 的工作树分支 {} 不存在",
+                "repository {}'s worktree branch {} doesn't exist",
                 repository.name, workset.branch
             )));
         } else {
@@ -397,10 +435,11 @@ pub fn finish_workset(
     let states = inspect_workset(workset)?;
     for (repository, state) in workset.repositories.iter().zip(&states) {
         if state.dirty {
-            return Err(WorktreeError::new(format!(
-                "仓库 {} 有未提交改动或未跟踪文件，已阻止关闭工作树",
-                state.name
-            )));
+            return Err(WorktreeError::because(
+                ControlReason::WorktreeRepositoryDirty {
+                    repository: state.name.clone(),
+                },
+            ));
         }
         let base = repository
             .base_ref
@@ -408,16 +447,22 @@ pub fn finish_workset(
             .unwrap_or(&repository.base_ref);
         match state.merge {
             Some(MergeState::Unmerged) => {
-                return Err(WorktreeError::new(format!(
-                    "仓库 {} 的分支 {} 还有改动没进 {base}，已阻止关闭工作树",
-                    state.name, workset.branch
-                )));
+                return Err(WorktreeError::because(
+                    ControlReason::WorktreeBranchUnmerged {
+                        repository: state.name.clone(),
+                        branch: workset.branch.clone(),
+                        base: base.to_string(),
+                    },
+                ));
             }
             Some(MergeState::Unconfirmed) if !allow_unconfirmed_merge => {
-                return Err(WorktreeError::new(format!(
-                    "无法确认仓库 {} 的分支 {} 是否已合进 {base}（合进去有冲突），已阻止关闭工作树",
-                    state.name, workset.branch
-                )));
+                return Err(WorktreeError::because(
+                    ControlReason::WorktreeMergeUnconfirmed {
+                        repository: state.name.clone(),
+                        branch: workset.branch.clone(),
+                        base: base.to_string(),
+                    },
+                ));
             }
             _ => {}
         }
@@ -436,15 +481,15 @@ pub fn finish_workset(
             let output =
                 git_output(&repository.root, &["worktree", "remove", &path]).map_err(|error| {
                     WorktreeError::new(format!(
-                        "移除仓库 {} 的 worktree 失败（其余操作可能尚未完成）：{error}",
+                        "couldn't remove repository {}'s worktree (other steps may not have finished): {error}",
                         repository.name
                     ))
                 })?;
             if !output.success() {
                 return Err(WorktreeError::new(format!(
-                    "移除仓库 {} 的 worktree 失败（其余操作可能尚未完成）：{}",
+                    "couldn't remove repository {}'s worktree (other steps may not have finished): {}",
                     repository.name,
-                    git_error(&output, "git worktree remove 失败")
+                    git_error(&output, "git worktree remove failed")
                 )));
             }
         }
@@ -452,16 +497,16 @@ pub fn finish_workset(
             let output = git_output(&repository.root, &["branch", "-D", &workset.branch]).map_err(
                 |error| {
                     WorktreeError::new(format!(
-                        "worktree 已移除，但仓库 {} 的分支删除失败：{error}",
+                        "the worktree was removed, but deleting repository {}'s branch failed: {error}",
                         repository.name
                     ))
                 },
             )?;
             if !output.success() {
                 return Err(WorktreeError::new(format!(
-                    "worktree 已移除，但仓库 {} 的分支删除失败：{}",
+                    "the worktree was removed, but deleting repository {}'s branch failed: {}",
                     repository.name,
-                    git_error(&output, "git branch -D 失败")
+                    git_error(&output, "git branch -D failed")
                 )));
             }
         }
@@ -476,7 +521,7 @@ pub fn finish_workset(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => {
             return Err(WorktreeError::new(format!(
-                "工作树已关闭，但无法读取工作树目录 {}：{error}",
+                "the worktree was closed, but its directory {} couldn't be read: {error}",
                 task_root.display()
             )));
         }
@@ -484,7 +529,7 @@ pub fn finish_workset(
     if leftover_entries.is_empty() && task_root.exists() {
         fs::remove_dir(&task_root).map_err(|error| {
             WorktreeError::new(format!(
-                "工作树已关闭，但无法移除空工作树目录 {}：{error}",
+                "the worktree was closed, but its empty directory {} couldn't be removed: {error}",
                 task_root.display()
             ))
         })?;
@@ -516,11 +561,11 @@ pub fn refresh_workset_bases(workset: &Workset) -> Vec<String> {
         }
         let failure = match git_output(&repository.root, &["fetch", &remote]) {
             Ok(output) if output.success() => continue,
-            Ok(output) => git_error(&output, "git fetch 失败"),
+            Ok(output) => git_error(&output, "git fetch failed"),
             Err(error) => error,
         };
         failures.push(format!(
-            "仓库 {} fetch {remote} 失败：{failure}",
+            "repository {} couldn't fetch {remote}: {failure}",
             repository.name
         ));
     }
@@ -551,7 +596,7 @@ fn merged_into_base(root: &Path, branch: &str, base: &str) -> Result<MergeState,
     match ancestor.code {
         Some(0) => return Ok(MergeState::Merged),
         Some(1) => {}
-        _ => return Err(git_error(&ancestor, "git merge-base 失败")),
+        _ => return Err(git_error(&ancestor, "git merge-base failed")),
     }
     let merged = git_output(
         root,
@@ -560,11 +605,11 @@ fn merged_into_base(root: &Path, branch: &str, base: &str) -> Result<MergeState,
     match merged.code {
         Some(0) => {}
         Some(1) => return Ok(MergeState::Unconfirmed),
-        _ => return Err(git_error(&merged, "git merge-tree 失败")),
+        _ => return Err(git_error(&merged, "git merge-tree failed")),
     }
     let base_tree = git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])?;
     if !base_tree.success() {
-        return Err(git_error(&base_tree, "git rev-parse 失败"));
+        return Err(git_error(&base_tree, "git rev-parse failed"));
     }
     let merged_tree = merged.stdout_str();
     Ok(
@@ -581,35 +626,39 @@ pub fn abort_workset_creation(workset: &Workset) -> Result<(), WorktreeError> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(WorktreeError::new("工作树创建失败，自动回滚未完成").with_rollback(errors))
+        Err(WorktreeError::new(
+            "Creating the worktree failed and the automatic rollback didn't finish",
+        )
+        .with_rollback(errors))
     }
 }
 
 pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, WorktreeError> {
-    let task = validate_segment(new_task, "工作树名称")?;
+    let task = validate_segment(new_task, "The worktree name")?;
     if task == workset.task {
         return Ok(workset.clone());
     }
     let old_task_root = workset.project_root.join("worktrees").join(&workset.task);
     let new_task_root = workset.project_root.join("worktrees").join(&task);
     if new_task_root.exists() {
-        return Err(WorktreeError::new(format!(
-            "工作树目标已存在：{}",
-            new_task_root.display()
-        )));
+        return Err(WorktreeError::because(
+            ControlReason::WorktreeTargetExists {
+                path: new_task_root.display().to_string(),
+            },
+        ));
     }
     for repository in &workset.repositories {
         let expected_path = old_task_root.join(&repository.name);
         if repository.worktree != expected_path {
             return Err(WorktreeError::new(format!(
-                "仓库 {} 的 worktree 路径与工作树目录不匹配",
+                "repository {}'s worktree path doesn't match the worktree directory",
                 repository.name
             )));
         }
         let checked_out = checked_out_at(&repository.root, &workset.branch)?;
         if checked_out.as_deref() != Some(repository.worktree.as_path()) {
             return Err(WorktreeError::new(format!(
-                "仓库 {} 的工作树分支未在预期目录检出",
+                "repository {}'s worktree branch isn't checked out in the expected directory",
                 repository.name
             )));
         }
@@ -618,31 +667,33 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
             &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
         )
         .map_err(|error| {
-            WorktreeError::new(format!("读取仓库 {} 状态失败：{error}", repository.name))
+            WorktreeError::new(format!(
+                "couldn't read the status of repository {}: {error}",
+                repository.name
+            ))
         })?;
         if !status.success() {
             return Err(WorktreeError::new(format!(
-                "读取仓库 {} 状态失败：{}",
+                "couldn't read the status of repository {}: {}",
                 repository.name,
-                git_error(&status, "git status 失败")
+                git_error(&status, "git status failed")
             )));
         }
         if !status.stdout.is_empty() {
-            return Err(WorktreeError::new(format!(
-                "仓库 {} 有未提交改动，已阻止重命名",
-                repository.name
-            )));
+            return Err(WorktreeError::because(ControlReason::WorktreeRenameDirty {
+                repository: repository.name.clone(),
+            }));
         }
         if !local_branch_exists(&repository.root, &workset.branch)? {
             return Err(WorktreeError::new(format!(
-                "仓库 {} 的工作树分支 {} 不存在",
+                "repository {}'s worktree branch {} doesn't exist",
                 repository.name, workset.branch
             )));
         }
     }
     fs::create_dir_all(&new_task_root).map_err(|error| {
         WorktreeError::new(format!(
-            "无法创建工作树目录 {}：{error}",
+            "couldn't create the worktree directory {}: {error}",
             new_task_root.display()
         ))
     })?;
@@ -654,18 +705,19 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
             git_output(&repository.worktree, &["branch", "--show-current"]).map_err(|error| {
                 let errors = rollback_renames(&progress, &new_task_root);
                 WorktreeError::new(format!(
-                    "读取仓库 {} 当前分支失败：{error}",
+                    "couldn't read repository {}'s current branch: {error}",
                     repository.name
                 ))
                 .with_rollback(errors)
             })?;
         if !old_branch.success() || old_branch.stdout_str().trim() != workset.branch {
             let errors = rollback_renames(&progress, &new_task_root);
-            return Err(WorktreeError::new(format!(
-                "仓库 {} 当前分支已变化，已取消重命名",
-                repository.name
-            ))
-            .with_rollback(errors));
+            return Err(
+                WorktreeError::because(ControlReason::WorktreeBranchChanged {
+                    repository: repository.name.clone(),
+                })
+                .with_rollback(errors),
+            );
         }
         progress.push((repository.clone(), new_path.clone(), false));
 
@@ -684,16 +736,16 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
             Ok(output) => {
                 let errors = rollback_renames(&progress, &new_task_root);
                 return Err(WorktreeError::new(format!(
-                    "移动仓库 {} 的 worktree 失败：{}",
+                    "couldn't move repository {}'s worktree: {}",
                     repository.name,
-                    git_error(&output, "git worktree move 失败")
+                    git_error(&output, "git worktree move failed")
                 ))
                 .with_rollback(errors));
             }
             Err(error) => {
                 let errors = rollback_renames(&progress, &new_task_root);
                 return Err(WorktreeError::new(format!(
-                    "移动仓库 {} 的 worktree 失败：{error}",
+                    "couldn't move repository {}'s worktree: {error}",
                     repository.name
                 ))
                 .with_rollback(errors));
@@ -705,7 +757,7 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
         if let Err(error) = fs::remove_dir(&old_task_root) {
             let rollback = rollback_renames(&progress, &new_task_root);
             return Err(WorktreeError::new(format!(
-                "工作树已重命名，但无法移除旧目录 {}：{error}",
+                "the worktree was renamed, but the old directory {} couldn't be removed: {error}",
                 old_task_root.display()
             ))
             .with_rollback(rollback));
@@ -742,11 +794,13 @@ fn rollback_renames(
             ) {
                 Ok(output) if output.success() => {}
                 Ok(output) => errors.push(format!(
-                    "{} worktree 回滚: {}",
+                    "{} worktree rollback: {}",
                     repository.name,
-                    git_error(&output, "git worktree move 失败")
+                    git_error(&output, "git worktree move failed")
                 )),
-                Err(error) => errors.push(format!("{} worktree 回滚: {error}", repository.name)),
+                Err(error) => {
+                    errors.push(format!("{} worktree rollback: {error}", repository.name))
+                }
             }
         }
     }
@@ -754,7 +808,7 @@ fn rollback_renames(
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => errors.push(format!(
-            "无法移除工作树目录 {}：{error}",
+            "couldn't remove the worktree directory {}: {error}",
             new_task_root.display()
         )),
     }
@@ -771,7 +825,7 @@ pub(crate) fn validate_segment(value: &str, label: &str) -> Result<String, Workt
         && value.trim() == value;
     if !valid {
         return Err(WorktreeError::new(format!(
-            "{label}必须是单个安全的目录名：{value:?}"
+            "{label} must be a single safe directory name: {value:?}"
         )));
     }
     Ok(value.to_string())
@@ -785,37 +839,38 @@ fn git_output(root: &Path, args: &[&str]) -> Result<GitOutput, String> {
 
 fn git_succeeds(root: &Path, args: &[&str]) -> Result<bool, WorktreeError> {
     let output = git_output(root, args)
-        .map_err(|error| WorktreeError::new(format!("运行 git {:?} 失败：{error}", args)))?;
+        .map_err(|error| WorktreeError::new(format!("couldn't run git {:?}: {error}", args)))?;
     Ok(output.success())
 }
 
 fn local_branch_exists(root: &Path, branch: &str) -> Result<bool, WorktreeError> {
     let ref_name = format!("refs/heads/{branch}");
     let output = git_output(root, &["show-ref", "--verify", "--quiet", &ref_name])
-        .map_err(|error| WorktreeError::new(format!("检查分支 {branch} 失败：{error}")))?;
+        .map_err(|error| WorktreeError::new(format!("couldn't check branch {branch}: {error}")))?;
     match output.code {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
         _ => Err(WorktreeError::new(format!(
-            "检查分支 {branch} 失败：{}",
-            git_error(&output, "git show-ref 失败")
+            "couldn't check branch {branch}: {}",
+            git_error(&output, "git show-ref failed")
         ))),
     }
 }
 
 fn checked_out_at(root: &Path, branch: &str) -> Result<Option<PathBuf>, WorktreeError> {
     let output = git_output(root, &["worktree", "list", "--porcelain", "-z"])
-        .map_err(|error| WorktreeError::new(format!("读取 worktree 列表失败：{error}")))?;
+        .map_err(|error| WorktreeError::new(format!("couldn't read the worktree list: {error}")))?;
     if !output.success() {
         return Err(WorktreeError::new(format!(
-            "读取 worktree 列表失败：{}",
-            git_error(&output, "git worktree list 失败")
+            "couldn't read the worktree list: {}",
+            git_error(&output, "git worktree list failed")
         )));
     }
     let expected = format!("branch refs/heads/{branch}");
     let mut path = None;
-    let output_text = std::str::from_utf8(&output.stdout)
-        .map_err(|error| WorktreeError::new(format!("读取 worktree 路径编码失败：{error}")))?;
+    let output_text = std::str::from_utf8(&output.stdout).map_err(|error| {
+        WorktreeError::new(format!("couldn't decode the worktree path: {error}"))
+    })?;
     for line in output_text.split('\0') {
         if let Some(value) = line.strip_prefix("worktree ") {
             path = Some(PathBuf::from(value));
@@ -829,12 +884,15 @@ fn checked_out_at(root: &Path, branch: &str) -> Result<Option<PathBuf>, Worktree
 }
 
 fn fetch_default_base(root: &Path, name: &str) -> Result<String, WorktreeError> {
-    let remotes = git_output(root, &["remote"])
-        .map_err(|error| WorktreeError::new(format!("仓库 {name} 无法读取远端：{error}")))?;
+    let remotes = git_output(root, &["remote"]).map_err(|error| {
+        WorktreeError::new(format!(
+            "repository {name} couldn't read its remotes: {error}"
+        ))
+    })?;
     if !remotes.success() {
         return Err(WorktreeError::new(format!(
-            "仓库 {name} 无法读取远端：{}",
-            git_error(&remotes, "git remote 失败")
+            "repository {name} couldn't read its remotes: {}",
+            git_error(&remotes, "git remote failed")
         )));
     }
     let mut remotes = remotes
@@ -845,9 +903,9 @@ fn fetch_default_base(root: &Path, name: &str) -> Result<String, WorktreeError> 
         .map(str::to_string)
         .collect::<Vec<_>>();
     if remotes.is_empty() {
-        return Err(WorktreeError::new(format!(
-            "仓库 {name} 没有配置 Git 远端，无法确定上游默认分支"
-        )));
+        return Err(WorktreeError::because(ControlReason::WorktreeNoRemote {
+            repository: name.to_string(),
+        }));
     }
     remotes.sort_by_key(|remote| std::cmp::Reverse(remote.len()));
 
@@ -897,24 +955,30 @@ fn fetch_default_base(root: &Path, name: &str) -> Result<String, WorktreeError> 
         }
     }
     let (remote, base_ref) = selected.ok_or_else(|| {
+        WorktreeError::because(ControlReason::WorktreeNoUpstream {
+            repository: name.to_string(),
+        })
+    })?;
+    let fetched = git_output(root, &["fetch", &remote]).map_err(|error| {
         WorktreeError::new(format!(
-            "仓库 {name} 没有可用的上游默认分支（检查远端 HEAD 或当前分支 upstream）"
+            "repository {name} couldn't fetch {remote}: {error}"
         ))
     })?;
-    let fetched = git_output(root, &["fetch", &remote])
-        .map_err(|error| WorktreeError::new(format!("仓库 {name} fetch {remote} 失败：{error}")))?;
     if !fetched.success() {
         return Err(WorktreeError::new(format!(
-            "仓库 {name} fetch {remote} 失败：{}",
-            git_error(&fetched, "git fetch 失败")
+            "repository {name} couldn't fetch {remote}: {}",
+            git_error(&fetched, "git fetch failed")
         )));
     }
-    let resolved = git_output(root, &["rev-parse", "--verify", &base_ref])
-        .map_err(|error| WorktreeError::new(format!("仓库 {name} 基线不可用：{error}")))?;
+    let resolved = git_output(root, &["rev-parse", "--verify", &base_ref]).map_err(|error| {
+        WorktreeError::new(format!(
+            "repository {name}'s baseline isn't available: {error}"
+        ))
+    })?;
     if !resolved.success() {
         return Err(WorktreeError::new(format!(
-            "仓库 {name} 的上游默认分支 {base_ref} 不存在：{}",
-            git_error(&resolved, "git rev-parse 失败")
+            "repository {name}'s upstream default branch {base_ref} doesn't exist: {}",
+            git_error(&resolved, "git rev-parse failed")
         )));
     }
     Ok(base_ref)
@@ -927,7 +991,7 @@ fn rollback_worktrees(repositories: &[WorktreeRepository], branch: &str) -> Vec<
             Ok(Some(path)) => {
                 if path != repository.worktree {
                     errors.push(format!(
-                        "{}: 分支 {branch} 在其他位置检出：{}",
+                        "{}: branch {branch} is checked out elsewhere: {}",
                         repository.name,
                         path.display()
                     ));
@@ -936,7 +1000,7 @@ fn rollback_worktrees(repositories: &[WorktreeRepository], branch: &str) -> Vec<
             }
             Ok(None) => false,
             Err(error) => {
-                errors.push(format!("{} worktree 检查: {error}", repository.name));
+                errors.push(format!("{} worktree check: {error}", repository.name));
                 true
             }
         };
@@ -947,7 +1011,7 @@ fn rollback_worktrees(repositories: &[WorktreeRepository], branch: &str) -> Vec<
                 Ok(output) => errors.push(format!(
                     "{}: {}",
                     repository.name,
-                    git_error(&output, "无法移除本次创建的 worktree")
+                    git_error(&output, "couldn't remove the worktree created this time")
                 )),
                 Err(error) => errors.push(format!("{}: {error}", repository.name)),
             }
@@ -955,15 +1019,17 @@ fn rollback_worktrees(repositories: &[WorktreeRepository], branch: &str) -> Vec<
         if repository.branch_created && !worktree_remains {
             match local_branch_exists(&repository.root, branch) {
                 Ok(false) => {}
-                Err(error) => errors.push(format!("{} 分支清理: {error}", repository.name)),
+                Err(error) => errors.push(format!("{} branch cleanup: {error}", repository.name)),
                 Ok(true) => match git_output(&repository.root, &["branch", "-D", branch]) {
                     Ok(output) if output.success() => {}
                     Ok(output) => errors.push(format!(
-                        "{} 分支清理: {}",
+                        "{} branch cleanup: {}",
                         repository.name,
-                        git_error(&output, "无法清理本次创建的分支")
+                        git_error(&output, "couldn't clean up the branch created this time")
                     )),
-                    Err(error) => errors.push(format!("{} 分支清理: {error}", repository.name)),
+                    Err(error) => {
+                        errors.push(format!("{} branch cleanup: {error}", repository.name))
+                    }
                 },
             }
         }
@@ -976,7 +1042,7 @@ fn rollback_worktrees(repositories: &[WorktreeRepository], branch: &str) -> Vec<
                     if entries.next().is_none() {
                         if let Err(error) = fs::remove_dir(task_root) {
                             errors.push(format!(
-                                "无法移除空工作树目录 {}：{error}",
+                                "couldn't remove the empty worktree directory {}: {error}",
                                 task_root.display()
                             ));
                         }
@@ -984,7 +1050,7 @@ fn rollback_worktrees(repositories: &[WorktreeRepository], branch: &str) -> Vec<
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => errors.push(format!(
-                    "无法检查工作树目录 {}：{error}",
+                    "couldn't check the worktree directory {}: {error}",
                     task_root.display()
                 )),
             }

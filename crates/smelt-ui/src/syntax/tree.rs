@@ -168,7 +168,7 @@ impl SyntaxTree {
             let name = match &pattern.language {
                 Some(name) => Some(name.to_string()),
                 None => found
-                    .captures
+                    .captures()
                     .iter()
                     .find(|capture| Some(capture.index) == injections.language)
                     .and_then(|capture| language_text(text, capture.node.byte_range())),
@@ -184,7 +184,11 @@ impl SyntaxTree {
                 continue;
             };
             let mut ranges = Vec::new();
-            for capture in found.captures.iter().filter(|c| c.index == content_capture) {
+            for capture in found
+                .captures()
+                .iter()
+                .filter(|c| c.index == content_capture)
+            {
                 content_ranges(capture.node, pattern.include_children, &mut ranges);
             }
             if injected.name == "markdown_inline" {
@@ -364,7 +368,7 @@ fn tree_captures(
     cursor.set_byte_range(range.clone());
     let mut matches = cursor.matches(query, root, RopeText(text));
     while let Some(m) = matches.next() {
-        for capture in m.captures {
+        for capture in m.captures() {
             let node = capture.node.byte_range();
             if node.end <= range.start || node.start >= range.end || node.is_empty() {
                 continue;

@@ -24,17 +24,18 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
     div, px, rgb, svg,
 };
-use gpui_kit_assets::IconName;
+use rust_i18n::t;
 use smelt_plugin_api::client::protocol::control::EmptyParams;
 use smelt_plugin_api::model::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 use smelt_plugin_api::model::control_api::{NewSessionCatalog, NewSessionPinsToggle};
 use smelt_plugin_api::model::new_session::{
-    NewSessionAction, NewSessionSections, NewSessionTarget, PinParams, SECTION_LABELS,
+    NewSessionAction, NewSessionSections, NewSessionTarget, PinParams, section_label,
 };
 use smelt_plugin_api::model::session_control::profile_id_from_option_id;
 use smelt_plugin_api::model::workspace_directory::{
     WorkspaceConversation, WorkspaceTerminal, project_labels, project_name,
 };
+use smelt_plugin_api::ui::IconName;
 use smelt_plugin_api::ui::dialog;
 use smelt_plugin_api::ui::keybind::Keybind;
 use smelt_plugin_api::ui::kit::{RADIUS, TYPE, TypeStyled as _};
@@ -58,7 +59,7 @@ const LIST_HEIGHT: f32 = 420.;
 const PALETTE_TOP: f32 = 80.;
 /// 行高、面板内边距，和组件库的菜单一致。
 const ROW_HEIGHT: f32 = 28.;
-const PADDING: f32 = 2.;
+const PADDING: f32 = 4.;
 
 /// 从命令打开：钉在窗口上方，带位置行。
 pub(super) fn open(
@@ -91,7 +92,7 @@ pub(super) fn open(
 #[derive(IntoElement)]
 pub(crate) struct NewSessionButton {
     id: SharedString,
-    tooltip: &'static str,
+    tooltip: SharedString,
     hover_group: Option<&'static str>,
     machine: RuntimeKey,
     path: String,
@@ -100,13 +101,13 @@ pub(crate) struct NewSessionButton {
 impl NewSessionButton {
     pub(crate) fn new(
         id: impl Into<SharedString>,
-        tooltip: &'static str,
+        tooltip: impl Into<SharedString>,
         machine: RuntimeKey,
         path: String,
     ) -> Self {
         Self {
             id: id.into(),
-            tooltip,
+            tooltip: tooltip.into(),
             hover_group: None,
             machine,
             path,
@@ -244,7 +245,7 @@ impl Host {
     }
 }
 
-/// 列表里的一行：所在的段（`SECTION_LABELS` 的下标，0 是常用）和那一项。
+/// 列表里的一行：所在的段（`section_label` 的下标，0 是常用）和那一项。
 struct Row {
     section: usize,
     action: NewSessionAction,
@@ -269,7 +270,7 @@ impl Launch {
     fn run(self, cx: &mut App) {
         let created =
             lifecycle::create_conversation(self.machine, self.conversation, self.start, cx);
-        crate::report_failure("新建会话", created, cx);
+        crate::report_failure(t!("action.new_session"), created, cx);
     }
 }
 
@@ -391,7 +392,7 @@ impl NewSession {
                         .find(|settings| settings.machine == this.machine)
                         .map(|settings| settings.state),
                     Err(error) => Some(AgentSettingsState::Unavailable {
-                        reason: format!("读不到智能体配置：{error}"),
+                        reason: t!("error.read_agent_settings", error = error).into_owned(),
                     }),
                 };
                 cx.notify();
@@ -492,13 +493,13 @@ impl NewSession {
         let host = api::host(cx);
         // 本机的名字是主机名（常是一串序列号），不如「本机」好认。
         self.machine_name = match self.machine {
-            RuntimeKey::Local => "本机".into(),
+            RuntimeKey::Local => t!("machine.local").into(),
             _ => host
                 .machines(cx)
                 .into_iter()
                 .find(|machine| machine.key == self.machine)
                 .map(|machine| machine.name)
-                .unwrap_or_else(|| "这台机器".into()),
+                .unwrap_or_else(|| t!("machine.this").into()),
         };
         let style = host.path_style(&self.machine, cx);
         let directory = host.workspace_directory(&self.machine, cx);
@@ -525,7 +526,7 @@ impl NewSession {
             match workset {
                 None => project,
                 Some(Some(workset)) => format!("{project} / {}", workset.task),
-                Some(None) => format!("{project} / 工作树已不存在"),
+                Some(None) => format!("{project} / {}", t!("new.workset_gone")),
             }
         });
     }
@@ -564,7 +565,14 @@ impl NewSession {
                 match result {
                     Ok(_) => this.fetch_catalog(cx),
                     Err(error) => {
-                        this.error = Some(format!("保存常用项失败：{error}"));
+                        this.error = Some(
+                            t!(
+                                "error.failed",
+                                what = t!("action.save_favorites"),
+                                error = error
+                            )
+                            .into_owned(),
+                        );
                         cx.notify();
                     }
                 }
@@ -611,11 +619,15 @@ impl NewSession {
             .find(|machine| machine.key == self.machine)
             .and_then(|machine| machine.unavailable)
         {
-            let message = format!("「{}」{reason}，暂时无法新建会话", self.machine_name);
+            let message = t!(
+                "new.machine_unavailable",
+                machine = self.machine_name,
+                reason = reason
+            );
             return self.fail(message, cx);
         }
         let Some(root) = self.root.clone() else {
-            return self.fail("先选一个项目", cx);
+            return self.fail(t!("new.choose_project"), cx);
         };
         let cwd = match &self.workset {
             None => root,
@@ -632,7 +644,7 @@ impl NewSession {
                     });
                 match root {
                     Some(root) => root,
-                    None => return self.fail("工作树已不存在，请重新选择位置", cx),
+                    None => return self.fail(t!("new.workset_gone_choose"), cx),
                 }
             }
         };
@@ -649,16 +661,16 @@ impl NewSession {
                 let settings = match &self.settings {
                     Some(AgentSettingsState::Ready { settings }) => settings,
                     Some(AgentSettingsState::Unavailable { reason }) => {
-                        let message = format!("那台机器的智能体配置不可用：{reason}");
+                        let message = t!("error.agent_settings_unavailable", reason = reason);
                         return self.fail(message, cx);
                     }
                     Some(AgentSettingsState::Absent) | None => {
-                        return self.fail("正在读取那台机器的智能体配置，请稍后再试", cx);
+                        return self.fail(t!("error.agent_settings_loading"), cx);
                     }
                 };
                 let sid = format!("acp-{}", uuid::Uuid::new_v4());
                 let Some(acp) = conversation_acp(settings, agent_option_id, sid, cwd) else {
-                    return self.fail("智能体配置已变更，请重新选择启动项", cx);
+                    return self.fail(t!("new.settings_changed"), cx);
                 };
                 conversation.acp = Some(acp);
                 Some(ConversationStart::default())
@@ -746,8 +758,8 @@ fn action_icon(target: &NewSessionTarget) -> SharedString {
             .and_then(TerminalAgentKind::from_id)
             .or_else(|| TerminalAgentKind::from_command_prefix(command))
             .map(|kind| kind.icon_asset().into())
-            .unwrap_or_else(|| IconName::SquareTerminal.path()),
-        NewSessionTarget::BlankTerminal => IconName::SquareTerminal.path(),
+            .unwrap_or_else(|| IconName::Terminal.path()),
+        NewSessionTarget::BlankTerminal => IconName::Terminal.path(),
     }
 }
 
@@ -799,7 +811,10 @@ impl NewSession {
     /// 命令打开时顶上那行：机器 · 位置，点开换。
     fn render_location(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
-        let location = self.location.as_deref().unwrap_or("选择项目");
+        let location: SharedString = match self.location.as_deref() {
+            Some(location) => location.to_string().into(),
+            None => t!("new.choose_location").into(),
+        };
         let button = Button::new("new-session-location")
             .quiet()
             .small()
@@ -838,19 +853,18 @@ impl NewSession {
                 .flex()
                 .flex_col()
                 .items_start()
-                .child(notice(format!(
-                    "「{}」上还没有打开的项目。",
-                    self.machine_name
-                )))
+                .child(notice(
+                    t!("new.no_projects", machine = self.machine_name).into_owned(),
+                ))
                 .child(
                     div().px(px(6.)).pb(px(4.)).child(
                         Button::new("new-session-open-project")
                             .small()
-                            .label("打开项目…")
+                            .label(t!("command.open_project"))
                             .on_click(move |_, window, cx| {
                                 host.close(window, cx);
                                 let opened = contract::OPEN_PROJECT.run(&(), cx);
-                                crate::report_failure("打开项目", opened, cx);
+                                crate::report_failure(t!("action.open_project"), opened, cx);
                             }),
                     ),
                 )
@@ -858,13 +872,20 @@ impl NewSession {
         }
         match &self.catalog {
             Catalog::Loading => {
-                return notice(format!("正在读取「{}」上装了哪些工具…", self.machine_name));
+                return notice(t!("new.loading_tools", machine = self.machine_name).into_owned());
             }
             Catalog::Failed(error) => {
-                return notice(format!("连不上「{}」：{error}", self.machine_name));
+                return notice(
+                    t!(
+                        "new.unreachable",
+                        machine = self.machine_name,
+                        error = error
+                    )
+                    .into_owned(),
+                );
             }
             Catalog::Ready if self.rows.is_empty() => {
-                return notice("没有可用的启动项".to_string());
+                return notice(t!("new.no_options").into_owned());
             }
             Catalog::Ready => {}
         }
@@ -886,7 +907,7 @@ impl NewSession {
                         .px(px(12.))
                         .type_style(TYPE.small_medium)
                         .text_color(rgb(ui_theme::faint()))
-                        .child(SECTION_LABELS[section])
+                        .child(section_label(section))
                         .into_any_element(),
                     Slot::Row(ix) => self.render_row(ix, cx).into_any_element(),
                 }
@@ -964,9 +985,9 @@ impl NewSession {
                             IconName::Star
                         })
                         .icon_action(if pinned {
-                            "取消常用"
+                            t!("new.unfavorite")
                         } else {
-                            "设为常用"
+                            t!("new.favorite")
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             // 星标在行里，别让这一下也算点了行。
@@ -1017,11 +1038,11 @@ fn location_menu(state: &WeakEntity<NewSession>, cx: &mut App) -> Menu {
             menu = menu.label(machine.name.clone());
         }
         let Some(directory) = host.workspace_directory(&machine.key, cx) else {
-            menu = menu.item(MenuItem::new("还没连上").disabled(true));
+            menu = menu.item(MenuItem::new(t!("new.not_connected")).disabled(true));
             continue;
         };
         if directory.projects.is_empty() {
-            menu = menu.item(MenuItem::new("没有打开的项目").disabled(true));
+            menu = menu.item(MenuItem::new(t!("list.no_projects")).disabled(true));
             continue;
         }
         let style = host.path_style(&machine.key, cx);
@@ -1054,7 +1075,7 @@ fn location_menu(state: &WeakEntity<NewSession>, cx: &mut App) -> Menu {
     }
     let create = state.clone();
     menu.separator().item(
-        MenuItem::new("新建工作树…")
+        MenuItem::new(t!("menu.new_workset"))
             .icon(IconName::GitBranch)
             .disabled(current_root.is_none())
             .on_click(move |_, window, cx| new_worktree(&create, window, cx)),
@@ -1176,10 +1197,10 @@ mod tests {
             command: "make dev".into(),
             provider: None,
         };
-        assert_eq!(action_icon(&terminal), IconName::SquareTerminal.path());
+        assert_eq!(action_icon(&terminal), IconName::Terminal.path());
         assert_eq!(
             action_icon(&NewSessionTarget::BlankTerminal),
-            IconName::SquareTerminal.path()
+            IconName::Terminal.path()
         );
     }
 }

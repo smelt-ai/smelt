@@ -1,4 +1,5 @@
-//! 对话消息里 Markdown 链接的点击处理：本地文件交给应用登记的打开者，其余交给系统。
+//! 对话消息里 Markdown 链接的点击和悬停提示：本地文件交给应用登记的打开者，其余交给系统；
+//! 悬停时提示点下去打开的是什么。
 //!
 //! 只在点击时解析，不改写消息原文：原文改写认不出代码块，代码里的链接也会被换掉，
 //! 复制出来的也是改写后的。不解析的话，gpui-base 的 `TextView` 会把链接目标原样交给
@@ -9,7 +10,9 @@
 
 use std::rc::Rc;
 
-use gpui::{App, ClickEvent, Global, MouseButton, SharedString, Window};
+use gpui::{AnyView, App, ClickEvent, Global, MouseButton, SharedString, Styled as _, Window, px};
+
+use crate::tooltip::Tooltip;
 
 /// Markdown 里文件链接的解析基准。相对路径按 `cwd` 补全；`runtime` 是远程运行时的 id，
 /// 跟着链接交出去，应用据此知道文件在哪台机器上，不会去打开本机同路径的文件。
@@ -92,6 +95,37 @@ pub(crate) fn link_opener(
     }
 }
 
+/// 给 `TextView::link_tooltip` 的提示：悬停时说清点下去会打开什么。
+pub(crate) fn link_tooltip(
+    links: FileLinks<'_>,
+) -> impl Fn(&SharedString, &mut Window, &mut App) -> AnyView + Send + Sync + 'static {
+    let cwd = links.cwd.map(str::to_owned);
+    let runtime = links.runtime.map(str::to_owned);
+    move |url, window, cx| {
+        let links = FileLinks::new(cwd.as_deref(), runtime.as_deref());
+        // 网址可以很长，限宽折行，不让提示横穿窗口。
+        Tooltip::new(link_description(url, links))
+            .max_w(px(TOOLTIP_MAX_WIDTH))
+            .build(window, cx)
+    }
+}
+
+const TOOLTIP_MAX_WIDTH: f32 = 420.;
+
+/// 文件是补全后的绝对路径，有行号带上 `:行号`；别的原样。消息里写的常是相对路径或
+/// `#L42`，提示里给出真正要打开的那个。
+fn link_description(url: &str, links: FileLinks<'_>) -> String {
+    match link_target(url, links) {
+        LinkTarget::File(FileLinkTarget {
+            path,
+            line: Some(line),
+            ..
+        }) => format!("{path}:{line}"),
+        LinkTarget::File(target) => target.path,
+        LinkTarget::Url(url) => url,
+    }
+}
+
 /// 和 gpui-base `TextView` 默认的打开条件一致：左键、中键、键盘、非长按的触摸。右键留给菜单。
 fn opens_link(event: &ClickEvent) -> bool {
     match event {
@@ -133,6 +167,23 @@ mod tests {
         assert_eq!(
             link_target("https://example.com", links),
             LinkTarget::Url("https://example.com".into())
+        );
+    }
+
+    #[test]
+    fn tooltip_names_what_a_click_opens() {
+        let links = FileLinks::new(Some("/tmp/project"), None);
+        assert_eq!(
+            link_description("docs/workspace.md", links),
+            "/tmp/project/docs/workspace.md"
+        );
+        assert_eq!(
+            link_description("/tmp/source.rs#L42", links),
+            "/tmp/source.rs:42"
+        );
+        assert_eq!(
+            link_description("https://example.com/a?b=1", links),
+            "https://example.com/a?b=1"
         );
     }
 

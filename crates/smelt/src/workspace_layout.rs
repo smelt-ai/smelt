@@ -26,6 +26,7 @@
 //! - 页、布局登记变了，外观里换了布局：开着的页撤下了就回去，各页重新挑一份，和装着的不同
 //!   就换。
 
+use rust_i18n::t;
 use std::collections::HashSet;
 
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
@@ -35,6 +36,7 @@ use smelt_plugin_api as api;
 
 use crate::router::PageKey;
 use crate::settings::Appearance;
+use crate::window_backdrop::SharedRegions;
 use crate::workspace_shell::{self, ShellView};
 use crate::{Workspace, plugin_host};
 
@@ -320,10 +322,11 @@ impl Workspace {
     /// 一页空的 Dock，还没装布局。
     pub(crate) fn new_page_dock(
         page: PageKey,
+        regions: SharedRegions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PageDock {
-        let area = workspace_shell::new_area(cx.weak_entity(), window, cx);
+        let area = workspace_shell::new_area(cx.weak_entity(), regions, window, cx);
         let subs = Self::watch_page_dock(page.clone(), &area, window, cx);
         PageDock {
             page,
@@ -373,6 +376,22 @@ impl Workspace {
             .page_ix(self.router.page())
             .expect("开着的那页总在 pages 里")]
         .area
+    }
+
+    /// 开着的那页的布局说哪几块地方垫什么材质。兜底的那页、还没装布局的整页实色。只读内存，
+    /// render 里调。
+    pub(crate) fn open_page_materials(&self, cx: &App) -> api::LayoutMaterials {
+        let layout = self
+            .page_ix(self.router.page())
+            .map(|ix| &self.pages[ix].layout);
+        let Some(InstalledLayout::Registered(id)) = layout else {
+            return api::LayoutMaterials::default();
+        };
+        api::layouts(cx)
+            .into_iter()
+            .find(|info| info.id.as_ref() == id)
+            .map(|info| info.materials)
+            .unwrap_or_default()
     }
 
     fn page_ix(&self, page: &PageKey) -> Option<usize> {
@@ -448,7 +467,7 @@ impl Workspace {
         let ix = match self.page_ix(page) {
             Some(ix) => ix,
             None => {
-                let dock = Self::new_page_dock(page.clone(), window, cx);
+                let dock = Self::new_page_dock(page.clone(), self.regions.clone(), window, cx);
                 self.pages.push(dock);
                 self.pages.len() - 1
             }
@@ -625,7 +644,7 @@ impl Workspace {
         if let Err(error) = smelt_client_store::client_store()
             .and_then(|store| store.delete_workspace_layout_state(&id))
         {
-            crate::status_item::notify_error(format!("恢复布局失败：{error}"));
+            crate::status_item::notify_error(t!("layout.reset_failed", error = error).into_owned());
             return;
         }
         let handle = self.window_handle;
@@ -707,11 +726,11 @@ impl Workspace {
     /// 由 [`Self::sync_outlet`] 管。
     pub(crate) fn sync_shell_view(&mut self, cx: &mut Context<Self>) {
         let dock = self.shell_dock().clone();
-        let mut next = ShellView::of(dock.read(cx), self.traffic_lights, cx);
+        let mut next = ShellView::of(dock.read(cx), self.window_corners, cx);
         let outlet = self.outlet_content(&next.laid_out, cx);
         if workspace_shell::show_in_outlet(&dock, outlet.as_deref(), cx) {
             // 出口顶上那条换了人画：出口有没有标题带变了，贴着窗口顶的按新的重算。
-            next = ShellView::of(dock.read(cx), self.traffic_lights, cx);
+            next = ShellView::of(dock.read(cx), self.window_corners, cx);
         }
         next.outlet = outlet;
         if let Some(content) = &next.outlet
@@ -825,7 +844,7 @@ impl Workspace {
     ) -> Result<(), String> {
         let instance = api::create_view(id, args, window, cx)?;
         if !self.go_to_outlet(window, cx) {
-            return Err(format!("没有能放视图「{id}」的出口"));
+            return Err(t!("layout.no_outlet", id = id).into_owned());
         }
         let page = self.router.page().clone();
         let id = instance.id().to_string();
@@ -926,7 +945,9 @@ impl Workspace {
 
 fn load_state(area: &Entity<DockArea>, state: DockAreaState, window: &mut Window, cx: &mut App) {
     if let Err(error) = workspace_shell::load(area, state, window, cx) {
-        crate::status_item::notify_error(format!("布局没装上：{error:#}"));
+        crate::status_item::notify_error(
+            t!("layout.load_failed", error = format!("{error:#}")).into_owned(),
+        );
     }
 }
 
@@ -947,6 +968,7 @@ mod tests {
             icon: "".into(),
             draws_top_bar: false,
             instances: false,
+            fills: Vec::new(),
             settings: None,
             build: std::rc::Rc::new(
                 |_: &mut gpui::Window, _: &mut gpui::App| -> std::rc::Rc<dyn api::ViewHandle> {
@@ -961,6 +983,7 @@ mod tests {
             id: id.to_string().into(),
             page: "example.layouts/workbench".into(),
             title: id.to_string().into(),
+            materials: api::LayoutMaterials::default(),
         }
     }
 

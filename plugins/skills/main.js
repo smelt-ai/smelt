@@ -31,6 +31,7 @@ import {
 } from "./core.js";
 import { ScopeSession, ImportSession, scopeForm, planView, importSource, importWarnings } from "./editors.js";
 import { SPACE, MONO, TRASH, button, tag, hint, box, section, confirm, edited, pretty } from "./ui.js";
+import { t, tn, list } from "./i18n.js";
 
 /// 当前项目在本机时的根目录；远程项目或没有项目是 null。
 function localProjectRoot() {
@@ -54,7 +55,7 @@ export default class Skills extends View {
     // 同名冲突里各自选了留哪一份：主条目目录 → 选中的副本目录。
     this.keep = new Map();
     this.query = "";
-    this.search = SmeltInputState.new("搜索名称或描述");
+    this.search = SmeltInputState.new(t("search.placeholder"));
     this.search.on("change", (_event, cx) => {
       this.query = this.search.value();
       cx.notify();
@@ -75,12 +76,18 @@ export default class Skills extends View {
       // 事件从插件挂载完就在记，扫描期间换了项目也不会漏。视图卸载时任务跟着取消。
       for (;;) {
         const event = await next_event();
+        // 文案都在 render 里按当前语言取，重画就换过来。搜索框的占位字建状态时就定了，
+        // 要等插件重新加载才换。
+        if (event.type === "locale_changed") {
+          cx.notify();
+          continue;
+        }
         if (event.type !== "active_context_changed") continue;
         if (localProjectRoot() === this.projectRoot) continue;
         try {
           await this.reload(cx);
         } catch (error) {
-          this.notice = { level: "error", text: `刷新失败：${message(error)}` };
+          this.notice = { level: "error", text: t("notice.refresh_failed", { error: message(error) }) };
         }
         cx.notify();
       }
@@ -95,7 +102,7 @@ export default class Skills extends View {
     try {
       this.state = await scan(this.home, this.projectRoot);
     } catch (error) {
-      this.notice = { level: "error", text: `扫描失败：${message(error)}` };
+      this.notice = { level: "error", text: t("notice.scan_failed", { error: message(error) }) };
     }
   }
 
@@ -140,12 +147,12 @@ export default class Skills extends View {
     let result;
     try {
       result = await body();
-      const text = result && result.text ? result.text : `${label}完成`;
+      const text = result && result.text ? result.text : t("notice.done", { action: label });
       const level = result && result.level ? result.level : "info";
       this.notice = { level, text };
     } catch (error) {
       result = undefined;
-      this.notice = { level: "error", text: `${label}失败：${message(error)}` };
+      this.notice = { level: "error", text: t("notice.failed", { action: label, error: message(error) }) };
     }
     await this.reload(cx);
     return result;
@@ -204,7 +211,7 @@ export default class Skills extends View {
     if (skill === null || !this.scope.ready()) return;
     const request = this.scope.request();
     cx.spawn(async (cx) => {
-      const destination = await this.perform(cx, `调整 ${skill.name} 的作用范围`, () =>
+      const destination = await this.perform(cx, t("action.rescope", { name: skill.name }), () =>
         applyScope(this.home, this.projectRoot, skill.dir, request),
       );
       if (destination !== undefined) this.editing = false;
@@ -222,7 +229,7 @@ export default class Skills extends View {
         await this.import.pick();
         await this.import.refresh();
       } catch (error) {
-        this.notice = { level: "error", text: `选择目录失败：${message(error)}` };
+        this.notice = { level: "error", text: t("notice.pick_failed", { error: message(error) }) };
       } finally {
         this.import.picking = false;
         cx.notify();
@@ -237,7 +244,7 @@ export default class Skills extends View {
     const name = this.import.sourceInfo ? this.import.sourceInfo.name : "";
     const request = this.import.request();
     cx.spawn(async (cx) => {
-      const destination = await this.perform(cx, `导入 ${name}`, () =>
+      const destination = await this.perform(cx, t("action.import", { name }), () =>
         importSkill(this.home, this.projectRoot, request, source),
       );
       if (destination !== undefined) this.importing = false;
@@ -247,7 +254,7 @@ export default class Skills extends View {
   }
 
   repairAll(missing, cx) {
-    this.run(cx, "让所有技能在全部 agent 可用", async () => {
+    this.run(cx, t("action.repair_all"), async () => {
       for (const skill of missing) await repairBridges(this.home, skill);
     });
   }
@@ -299,14 +306,14 @@ export default class Skills extends View {
           .when(this.state.skills.length === 0, (el) =>
             el.child(
               this.empty(
-                "还没有 skill",
-                "点「导入」选一个含 SKILL.md 的目录，或放到 ~/.agents/skills/<名字>/。",
+                t("empty.none_title"),
+                t("empty.none_body"),
                 cx,
               ),
             ),
           )
           .when(this.state.skills.length > 0 && shown.length === 0, (el) =>
-            el.child(this.empty("没有匹配的技能", `名称和描述里都没有「${this.query.trim()}」。`, cx)),
+            el.child(this.empty(t("empty.no_match_title"), t("empty.no_match_body", { query: this.query.trim() }), cx)),
           )
           .children(groups.flatMap((group) => [this.groupLabel(group, cx), ...group.skills.map((skill) => this.row(skill, cx))]))
           // 失效链接不属于任何 skill，搜索时不列。
@@ -320,19 +327,19 @@ export default class Skills extends View {
     const missing = this.missingSkills();
     let more = SmeltMenuButton.new("more")
       .label("⋯")
-      .accessibility_label("更多操作")
+      .accessibility_label(t("menu.more"))
       .small()
       .quiet()
-      .item("刷新", (cx) => {
+      .item(t("menu.refresh"), (cx) => {
         this.notice = null;
         cx.spawn(async (cx) => {
           await this.reload(cx);
           cx.notify();
         });
       })
-      .item("打开回收目录", (cx) => this.openPath(`${this.home}/${TRASH}`, cx));
+      .item(t("menu.open_trash"), (cx) => this.openPath(`${this.home}/${TRASH}`, cx));
     if (missing.length > 0) {
-      more = more.item("让所有技能在全部 agent 可用", (cx) => this.repairAll(missing, cx));
+      more = more.item(t("action.repair_all"), (cx) => this.repairAll(missing, cx));
     }
     return h_flex()
       .items_center()
@@ -341,14 +348,14 @@ export default class Skills extends View {
       .py(SPACE.sm)
       .border_b(1)
       .border_color(colors.border)
-      .child(div().text_sm().font_semibold().child("技能"))
+      .child(div().text_sm().font_semibold().child(t("title")))
       .child(div().text_xs().text_color(colors.muted_foreground).child(String(this.state.skills.length)))
       .child(div().flex_1())
-      .child(SmeltTextInput.new(this.search).aria_label("搜索技能").small().cleanable(true).w(180))
+      .child(SmeltTextInput.new(this.search).aria_label(t("search.label")).small().cleanable(true).w(180))
       .child(
         button(
           "import",
-          this.importing ? "收起导入" : "导入",
+          this.importing ? t("import.hide") : t("import.button"),
           (cx) => this.toggleImport(cx),
           this.importing ? "secondary" : "primary",
         ),
@@ -371,7 +378,7 @@ export default class Skills extends View {
           : div().flex_1().min_w_0().text_xs().whitespace_normal().text_color(colors.muted_foreground).child(text),
       )
       .child(
-        button("notice-close", "关闭", (cx) => {
+        button("notice-close", t("notice.close"), (cx) => {
           this.notice = null;
           cx.notify();
         }),
@@ -395,7 +402,7 @@ export default class Skills extends View {
       .pb(SPACE.xs)
       .text_xs()
       .text_color(colors.muted_foreground)
-      .child(group.project ? "项目级" : "用户级")
+      .child(group.project ? t("scope.project") : t("scope.user"))
       .child(String(group.skills.length))
       .when(group.project && this.projectRoot !== null, (el) => el.child(`· ${this.pretty(this.projectRoot)}`));
   }
@@ -443,7 +450,7 @@ export default class Skills extends View {
                 .text_xs()
                 .truncate()
                 .text_color(colors.muted_foreground)
-                .child(skill.description || "（没有描述）"),
+                .child(skill.description || t("no_description")),
             ),
           ),
       )
@@ -455,16 +462,16 @@ export default class Skills extends View {
     const colors = cx.theme().colors;
     const missing = skill.coverage.filter((row) => row.state === "missing");
     if (skill.conflicts.length > 0) {
-      return div().flex_none().text_xs().text_color(colors.destructive).child("需选择");
+      return div().flex_none().text_xs().text_color(colors.destructive).child(t("status.choose"));
     }
-    if (skill.placement === "legacy") return tag("没有 agent 读到", "need");
-    if (missing.length === 1) return tag(`${missing[0].label} 还不能用`, "need");
-    if (missing.length > 1) return tag(`${missing.length} 个 agent 还不能用`, "need");
+    if (skill.placement === "legacy") return tag(t("status.unread"), "need");
+    if (missing.length === 1) return tag(t("status.missing_one", { agent: missing[0].label }), "need");
+    if (missing.length > 1) return tag(t("status.missing_many", { count: missing.length }), "need");
     return div()
       .flex_none()
       .text_xs()
       .text_color(colors.muted_foreground)
-      .child(`${skill.coverage.length} 个 agent`);
+      .child(tn("status.agents", skill.coverage.length));
   }
 
   /// 展开区，从上到下：完整描述 → 可用 agent（缺链接就在这一行补）→ 作用范围（就在
@@ -507,43 +514,43 @@ export default class Skills extends View {
         .gap(SPACE.xs)
         .child(
           this.labelLine(
-            "可用 agent",
+            t("coverage.title"),
             null,
             button(
               `migrate-${skill.dir}`,
-              "迁移到 .agents/skills",
-              (cx) => this.run(cx, "迁移旧目录", () => migrateLegacy(this.home, this.projectRoot)),
+              t("migrate.button"),
+              (cx) => this.run(cx, t("migrate.action"), () => migrateLegacy(this.home, this.projectRoot)),
               "primary",
             ),
             cx,
           ),
         )
-        .child(hint("放在 smelt 私有目录，没有 agent 读得到。", cx));
+        .child(hint(t("coverage.legacy"), cx));
     }
     const missing = skill.coverage.filter((row) => row.state === "missing");
-    const names = missing.map((row) => row.label).join("、");
+    const names = list(missing.map((row) => row.label));
     const repair =
       missing.length > 0
         ? button(
             `repair-${skill.dir}`,
-            missing.length === 1 ? `让 ${names} 也能用` : "让它们也能用",
-            (cx) => this.run(cx, `让 ${skill.name} 在 ${names} 可用`, () => repairBridges(this.home, skill)),
+            missing.length === 1 ? t("coverage.repair_one", { agent: names }) : t("coverage.repair_many"),
+            (cx) => this.run(cx, t("action.repair", { name: skill.name, agents: names }), () => repairBridges(this.home, skill)),
             "primary",
           )
         : null;
     // 能用的只写名字：读 .agents、经链接、本体对用户都是「能用」。
     return v_flex()
       .gap(SPACE.xs)
-      .child(this.labelLine("可用 agent", null, repair, cx))
+      .child(this.labelLine(t("coverage.title"), null, repair, cx))
       .child(
         skill.coverage.length === 0
-          ? hint("这台机器上在用的 agent 都读不到它。", cx)
+          ? hint(t("coverage.none"), cx)
           : h_flex()
               .flex_wrap()
               .gap(SPACE.xs)
               .children(
                 skill.coverage.map((row) =>
-                  row.state === "missing" ? tag(`${row.label} · 还不能用`, "need") : tag(row.label, "ok"),
+                  row.state === "missing" ? tag(t("coverage.row_missing", { agent: row.label }), "need") : tag(row.label, "ok"),
                 ),
               ),
       );
@@ -551,15 +558,18 @@ export default class Skills extends View {
 
   /// 作用范围：现状一句话，右边「修改」，表单就在这一行下面展开。
   scopeLine(skill, cx) {
-    const who = skill.placement === "agent" ? `仅 ${skill.agent ?? "指定 agent"}` : "所有 agent（通用）";
-    const level = skill.project_scope ? "项目级" : "用户级";
+    const who =
+      skill.placement === "agent"
+        ? t("scope.only", { agent: skill.agent ?? t("scope.some_agent") })
+        : t("scope.universal_all");
+    const level = skill.project_scope ? t("scope.project") : t("scope.user");
     return v_flex()
       .gap(SPACE.sm)
       .child(
         this.labelLine(
-          "作用范围",
+          t("scope.title"),
           `${who} · ${level}`,
-          button(`scope-${skill.dir}`, this.editing ? "收起" : "修改", (cx) => this.toggleScope(cx), "secondary"),
+          button(`scope-${skill.dir}`, this.editing ? t("scope.hide") : t("scope.change"), (cx) => this.toggleScope(cx), "secondary"),
           cx,
         ),
       )
@@ -592,11 +602,11 @@ export default class Skills extends View {
       .child(
         confirm(
           `trash-${skill.dir}`,
-          "删除…",
-          `删除「${skill.name}」？`,
-          `技能目录会移到 ~/${TRASH}，可以手动找回。所有 agent 都不会再用到它。`,
-          "删除",
-          (cx) => this.run(cx, `删除 ${skill.name}`, () => trashSkill(this.home, skill)),
+          t("delete.button"),
+          t("delete.title", { name: skill.name }),
+          t("delete.body", { trash: TRASH }),
+          t("delete.confirm"),
+          (cx) => this.run(cx, t("delete.action", { name: skill.name }), () => trashSkill(this.home, skill)),
         ),
       );
   }
@@ -606,12 +616,12 @@ export default class Skills extends View {
     return box(
       [
         ...scopeForm(this.scope, cx, (cx) => this.formChanged(this.scope, cx)),
-        planView(this.scope, "已经是这个状态，无需改动。", cx),
+        planView(this.scope, t("scope.unchanged"), cx),
         h_flex()
           .justify_end()
           .gap(SPACE.sm)
-          .child(button("cancel-scope", "取消", (cx) => this.toggleScope(cx), "secondary"))
-          .child(button("apply-scope", "应用", (cx) => this.applyScope(cx), "primary").disabled(!this.scope.ready())),
+          .child(button("cancel-scope", t("cancel"), (cx) => this.toggleScope(cx), "secondary"))
+          .child(button("apply-scope", t("scope.apply"), (cx) => this.applyScope(cx), "primary").disabled(!this.scope.ready())),
       ],
       cx,
     );
@@ -624,17 +634,17 @@ export default class Skills extends View {
       .gap(SPACE.md)
       .m(SPACE.lg)
       .mb(0)
-      .child(div().text_sm().font_semibold().child("导入技能"))
+      .child(div().text_sm().font_semibold().child(t("import.title")))
       .child(
         box(
           [
-            section("来源", null, [importSource(session, cx, (cx) => this.pickImport(cx))], cx),
-            section("装到哪里", null, scopeForm(session, cx, (cx) => this.formChanged(session, cx)), cx),
+            section(t("import.source"), null, [importSource(session, cx, (cx) => this.pickImport(cx))], cx),
+            section(t("import.destination"), null, scopeForm(session, cx, (cx) => this.formChanged(session, cx)), cx),
             section(
-              "将执行",
+              t("plan.title"),
               null,
               [
-                session.source === null ? hint("选好来源后显示。", cx) : planView(session, "", cx),
+                session.source === null ? hint(t("import.plan_pending"), cx) : planView(session, "", cx),
                 ...importWarnings(session),
               ],
               cx,
@@ -642,8 +652,8 @@ export default class Skills extends View {
             h_flex()
               .justify_end()
               .gap(SPACE.sm)
-              .child(button("cancel-import", "取消", (cx) => this.toggleImport(cx), "secondary"))
-              .child(button("submit-import", "导入", (cx) => this.submitImport(cx), "primary").disabled(!session.ready())),
+              .child(button("cancel-import", t("cancel"), (cx) => this.toggleImport(cx), "secondary"))
+              .child(button("submit-import", t("import.button"), (cx) => this.submitImport(cx), "primary").disabled(!session.ready())),
           ],
           cx,
         ),
@@ -663,18 +673,18 @@ export default class Skills extends View {
     ];
     const keep = this.keep.get(skill.dir) ?? skill.dir;
     return section(
-      `同名冲突：${skill.name}`,
+      t("conflict.title", { name: skill.name }),
       button(
         `keep-${skill.dir}`,
-        "保留选中的一份",
+        t("conflict.keep"),
         (cx) =>
-          this.run(cx, `处理 ${skill.name} 的同名副本`, () =>
+          this.run(cx, t("conflict.action", { name: skill.name }), () =>
             resolveConflict(this.home, this.projectRoot, skill.dir, keep),
           ),
         "primary",
       ),
       [
-        hint(`有 ${copies.length} 份彼此独立的副本。选一份为准，其余移进 ~/${TRASH}。`, cx),
+        hint(t("conflict.hint", { count: copies.length, trash: TRASH }), cx),
         box(copies.map((copy) => this.copyChoice(skill, copy, keep, cx)), cx),
       ],
       cx,
@@ -686,7 +696,11 @@ export default class Skills extends View {
   copyChoice(skill, copy, keep, cx) {
     const colors = cx.theme().colors;
     const where =
-      copy.placement === "universal" ? "通用" : copy.placement === "legacy" ? "旧位置" : copy.agent || "agent";
+      copy.placement === "universal"
+        ? t("place.universal")
+        : copy.placement === "legacy"
+          ? t("place.legacy")
+          : copy.agent || "agent";
     return v_flex()
       .gap(2)
       .child(
@@ -716,7 +730,7 @@ export default class Skills extends View {
     const colors = cx.theme().colors;
     const broken = this.state.broken;
     const shown = broken.slice(0, 5).map((link) => this.pretty(link.path));
-    if (broken.length > shown.length) shown.push(`等共 ${broken.length} 条`);
+    if (broken.length > shown.length) shown.push(t("broken.more", { count: broken.length }));
     return v_flex()
       .child(
         h_flex()
@@ -727,17 +741,17 @@ export default class Skills extends View {
           .pb(SPACE.xs)
           .text_xs()
           .text_color(colors.muted_foreground)
-          .child("已失效")
+          .child(t("broken.title"))
           .child(String(broken.length))
           .child(div().flex_1())
           .child(
             confirm(
               "prune",
-              "清理…",
-              `清理 ${broken.length} 个已失效的条目？`,
-              `它们指向的技能已经不存在。只删这些条目本身，不会动任何真实目录。\n${shown.join("\n")}`,
-              "清理",
-              (cx) => this.run(cx, "清理已失效的条目", () => pruneLinks(broken)),
+              t("broken.button"),
+              tn("broken.confirm_title", broken.length),
+              t("broken.confirm_body", { paths: shown.join("\n") }),
+              t("broken.confirm"),
+              (cx) => this.run(cx, t("broken.action"), () => pruneLinks(broken)),
             ),
           ),
       )
@@ -759,9 +773,9 @@ export default class Skills extends View {
 
   /// 作用范围标签：通用 / 指定 agent / 旧位置 / 冲突。
   chip(skill) {
-    if (skill.conflicts.length > 0) return tag(`冲突 ×${skill.conflicts.length + 1}`, "bad");
+    if (skill.conflicts.length > 0) return tag(t("place.conflict", { count: skill.conflicts.length + 1 }), "bad");
     if (skill.placement === "agent") return tag(skill.agent ?? "agent");
-    if (skill.placement === "legacy") return tag("旧位置", "need");
-    return tag("通用");
+    if (skill.placement === "legacy") return tag(t("place.legacy"), "need");
+    return tag(t("place.universal"));
   }
 }

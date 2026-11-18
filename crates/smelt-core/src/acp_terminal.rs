@@ -134,21 +134,23 @@ impl AcpTerminals {
         }
         let mut child = cmd
             .spawn()
-            .map_err(|err| format!("启动终端命令失败：{err}"))?;
+            .map_err(|err| format!("couldn't start the terminal command: {err}"))?;
         #[cfg(windows)]
         if let Err(error) = smelt_sys::process::attach_suspended(child.id()) {
             let _ = child.wait();
-            return Err(format!("无法把终端命令放进进程树：{error}"));
+            return Err(format!(
+                "couldn't put the terminal command into the process tree: {error}"
+            ));
         }
         let pid = child.id();
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| "终端 stdout 不可用".to_string())?;
+            .ok_or_else(|| "the terminal's stdout isn't available".to_string())?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| "终端 stderr 不可用".to_string())?;
+            .ok_or_else(|| "the terminal's stderr isn't available".to_string())?;
 
         let byte_limit = output_byte_limit
             .and_then(|limit| usize::try_from(limit).ok())
@@ -224,7 +226,7 @@ impl AcpTerminals {
                 }
                 let _ = event_tx.try_send((wait_id, snapshot));
             })
-            .map_err(|err| format!("启动终端等待线程失败：{err}"))?;
+            .map_err(|err| format!("couldn't start the terminal wait thread: {err}"))?;
 
         self.inner
             .lock()
@@ -273,7 +275,7 @@ impl AcpTerminals {
             let inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
             inner
                 .get(id)
-                .ok_or_else(|| format!("终端不存在：{id}"))?
+                .ok_or_else(|| format!("terminal not found: {id}"))?
                 .exit_signal
                 .clone()
         };
@@ -283,7 +285,7 @@ impl AcpTerminals {
             done = cvar.wait(done).unwrap_or_else(|err| err.into_inner());
         }
         self.proto_exit(id)
-            .ok_or_else(|| format!("终端退出状态丢失：{id}"))
+            .ok_or_else(|| format!("the terminal's exit status was lost: {id}"))
     }
 
     pub fn kill(&self, id: &str) -> Result<(), String> {
@@ -291,7 +293,7 @@ impl AcpTerminals {
             let inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
             inner
                 .get(id)
-                .ok_or_else(|| format!("终端不存在：{id}"))?
+                .ok_or_else(|| format!("terminal not found: {id}"))?
                 .pid
         };
         kill_pid(pid);
@@ -303,7 +305,7 @@ impl AcpTerminals {
             let mut inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
             inner
                 .remove(id)
-                .ok_or_else(|| format!("终端不存在：{id}"))?
+                .ok_or_else(|| format!("terminal not found: {id}"))?
         };
         if term
             .exit
@@ -454,21 +456,21 @@ pub fn read_text_file(
     limit: Option<u32>,
 ) -> Result<String, String> {
     if !path.is_absolute() {
-        return Err("fs/read_text_file 的路径必须是绝对路径".into());
+        return Err("the fs/read_text_file path must be absolute".into());
     }
     let content = crate::fs::LocalFs
         .read_to_string(path)
-        .map_err(|err| format!("读取失败：{err}"))?;
+        .map_err(|err| format!("read failed: {err}"))?;
     Ok(slice_lines(&content, line, limit))
 }
 
 pub fn write_text_file(path: &std::path::Path, content: &str) -> Result<(), String> {
     if !path.is_absolute() {
-        return Err("fs/write_text_file 的路径必须是绝对路径".into());
+        return Err("the fs/write_text_file path must be absolute".into());
     }
     crate::fs::LocalFs
         .write(path, content)
-        .map_err(|err| format!("写入失败：{err}"))
+        .map_err(|err| format!("write failed: {err}"))
 }
 
 pub fn slice_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String {

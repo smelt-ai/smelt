@@ -33,10 +33,43 @@ pub struct MemoryEntry {
     /// 事实类且超过 [`MEMORY_STALE_AFTER`] 没用过。
     pub stale: bool,
     /// 待确认的原因：读过外部内容的那一轮或无人值守的运行写的。待确认的记忆不注入、不召回，
-    /// 用户采纳（[`approve_memory`]）后才生效。
+    /// 用户采纳（[`approve_memory`]）后才生效。存的是种类（见 [`pending_reason_text`]），
+    /// 旧库里可能是写好的整句。
     pub pending_reason: Option<String>,
     /// 去掉 frontmatter 的正文，卡片展开时看；frontmatter 坏了就是整个文件。
     pub body: String,
+}
+
+/// 待确认原因的种类：运行时和 Pi 记忆扩展记来源时写的。
+pub const PENDING_NO_PROVENANCE: &str = "no_provenance";
+pub const PENDING_MODIFIED_OUTSIDE: &str = "modified_outside";
+pub const PENDING_LEGACY_BACKFILL: &str = "legacy_backfill";
+
+/// 待确认原因给人看的话。认识的种类按当前语言说，`external_content:` 后面跟读过的工具名；
+/// 不认识的（旧库里写好的整句、比这里新的种类）原样给。
+pub fn pending_reason_text(reason: &str) -> String {
+    use rust_i18n::t;
+    if let Some(sources) = reason.strip_prefix("external_content:") {
+        return t!("memory.pending.external_content", sources = sources).into_owned();
+    }
+    let text = match reason {
+        "unattended" => t!("memory.pending.unattended"),
+        "unknown_origin" => t!("memory.pending.unknown_origin"),
+        "edits_pending" => t!("memory.pending.edits_pending"),
+        "rule_lacks_user_words" => t!("memory.pending.rule_lacks_user_words"),
+        PENDING_NO_PROVENANCE => t!("memory.pending.no_provenance"),
+        PENDING_MODIFIED_OUTSIDE => t!("memory.pending.modified_outside"),
+        PENDING_LEGACY_BACKFILL => t!("memory.pending.legacy_backfill"),
+        other => return other.to_string(),
+    };
+    text.into_owned()
+}
+
+impl MemoryEntry {
+    /// 待确认原因给人看的话。
+    pub fn pending_reason_text(&self) -> Option<String> {
+        self.pending_reason.as_deref().map(pending_reason_text)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

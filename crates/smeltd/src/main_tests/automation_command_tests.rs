@@ -90,7 +90,7 @@ fn automation_commands_and_snapshots_share_one_daemon_owner() {
         }),
     );
     assert_eq!(failed_run["ok"], false);
-    assert!(failed_run["error"].as_str().unwrap().contains("智能体"));
+    assert!(failed_run["error"].as_str().unwrap().contains("agent"));
     let after_failure = automations.lock().unwrap().snapshot();
     assert_eq!(after_failure.revision, 1);
     assert!(after_failure.runs.is_empty());

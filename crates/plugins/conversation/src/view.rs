@@ -13,12 +13,13 @@ use gpui::{
     Anchor, Animation, AnimationExt, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment,
     ListHorizontalSizingBehavior, ListOffset, ListState, ParentElement, PathBuilder, Render,
-    ScrollHandle, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, WeakEntity,
-    Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, list as virtual_list, point,
-    px, size, uniform_list,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions,
+    WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div,
+    list as virtual_list, point, px, size, uniform_list,
 };
 use gpui_base::StyledExt as _;
 use gpui_base::input::RopeExt;
+use rust_i18n::t;
 pub(crate) use smelt_plugin_api::ui::Button;
 use smelt_plugin_api::ui::Clipboard;
 use smelt_plugin_api::ui::ListRow;
@@ -28,6 +29,7 @@ use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smelt_plugin_api::ui::popover::Popover;
 use smelt_plugin_api::ui::scrollbar::{Scrollbar, ScrollbarMode};
 use smelt_plugin_api::ui::{Icon, IconName};
+use std::borrow::Cow;
 
 use crate::acp_client::{
     ACP_HISTORY_PAGE_LIMIT, ConversationClientEvent, ConversationClientHandle,
@@ -37,9 +39,9 @@ use smelt_plugin_api::Runtime;
 use smelt_plugin_api::model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_plugin_api::model::acp_session::{
     AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, BackgroundTaskStatus,
-    BackgroundTaskView, ConversationSnapshot, ElicitFieldKindView, PendingElicitation,
-    PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView, RuntimeDebug,
-    SubagentStatus, SubagentView, ToolCallDebug,
+    BackgroundTaskView, ConversationEndReason, ConversationSnapshot, ElicitFieldKindView,
+    PeerMessageKind, PendingElicitation, PendingPermission, PermissionOptionKindView,
+    PlanEntryStatusView, PlanView, SubagentStatus, SubagentView, ToolCallDebug,
 };
 use smelt_plugin_api::model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_plugin_api::model::agent_status::AcpStatusEvidence;
@@ -121,11 +123,11 @@ fn user_bubble_enter_ready(latest_user_index: Option<usize>, len_at_arm: usize) 
 }
 
 fn working_status_label(elapsed: &str) -> String {
-    format!("正在想 · {elapsed}")
+    t!("status.thinking_for", elapsed = elapsed).into_owned()
 }
 
 fn settled_thought_label(elapsed_ms: u64) -> String {
-    format!("想了 {}", format_duration(elapsed_ms))
+    t!("status.thought_for", elapsed = format_duration(elapsed_ms)).into_owned()
 }
 
 /// 过程组外的思考，用这一问从发出到结束的耗时。进行中或不是思考则没有。
@@ -492,7 +494,7 @@ fn composer_menu_sections(
 /// 运行中改配置只是排队到本轮结束；菜单标题要说清楚，避免当成已经生效。
 fn composer_config_section_label(name: &str, pending: bool, next_turn_hint: bool) -> String {
     if pending && next_turn_hint {
-        format!("{name} · 下轮生效")
+        format!("{name} · {}", t!("config.next_turn"))
     } else {
         name.to_string()
     }
@@ -520,11 +522,11 @@ fn pending_config_choice_names(
                 .options
                 .iter()
                 .find(|(option, _)| option == value)
-                .map(|(_, name)| name.as_str())?;
-            Some(if config.boolean.is_some() {
-                format!("{} {choice}", config.name)
+                .map(|(option, name)| config.option_label(option, name))?;
+            Some(if config.is_switch() {
+                format!("{} {choice}", config.display_name())
             } else {
-                choice.to_string()
+                choice
             })
         })
         .collect()
@@ -537,23 +539,34 @@ fn composer_next_turn_notice(names: &[String], turn_active: bool) -> Option<Stri
     }
     match names {
         [] => None,
-        [name] => Some(format!("{name} · 下轮生效")),
-        [first, second] => Some(format!("{first}、{second} · 下轮生效")),
-        [first, ..] => Some(format!("{first} 等 {} 项 · 下轮生效", names.len())),
+        [name] => Some(format!("{name} · {}", t!("config.next_turn"))),
+        [first, second] => {
+            Some(t!("config.next_turn_two", first = first, second = second).into_owned())
+        }
+        [first, ..] => Some(
+            t!(
+                "config.next_turn_many",
+                first = first,
+                total = names.len(),
+                rest = names.len() - 1
+            )
+            .into_owned(),
+        ),
     }
 }
 
 /// 运行中输入框的快捷键说明：回车插当前回合，⌥Enter 等本轮结束再发。
-fn composer_native_queue_shortcut_hint() -> &'static str {
-    "Enter 插入当前回合 · ⌥Enter 回合后发送"
+fn composer_native_queue_shortcut_hint() -> SharedString {
+    t!("queue.shortcut_hint").into()
 }
 
-fn native_queue_item_kind_label(is_follow_up: bool) -> &'static str {
+fn native_queue_item_kind_label(is_follow_up: bool) -> SharedString {
     if is_follow_up {
-        "下一回合"
+        t!("queue.next_turn")
     } else {
-        "当前回合"
+        t!("queue.current_turn")
     }
+    .into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -919,9 +932,9 @@ fn starting_status_copy(
     waited_seconds: u64,
 ) -> (String, String, String) {
     let title = if is_resuming {
-        "正在恢复上次的会话".to_string()
+        t!("starting.resuming").into_owned()
     } else {
-        format!("正在启动 {agent_label}")
+        t!("starting.title", agent = agent_label).into_owned()
     };
     let detail = status_line
         .map(str::trim)
@@ -929,12 +942,12 @@ fn starting_status_copy(
         .map(str::to_owned)
         .unwrap_or_else(|| {
             if is_resuming {
-                "正在恢复历史消息和工作上下文".to_string()
+                t!("starting.resuming_detail").into_owned()
             } else {
-                "正在建立与 agent 的连接".to_string()
+                t!("starting.connecting").into_owned()
             }
         });
-    let elapsed = format!("已等待 {waited_seconds} 秒");
+    let elapsed = t!("starting.waited", seconds = waited_seconds).into_owned();
 
     (title, detail, elapsed)
 }
@@ -962,7 +975,7 @@ fn next_prompt_dispatch_pending(
     // 成功 Idle 不能清——那是防连续提交并发的闸门。
     let failed_or_cancelled = idle
         && turn_outcome.is_some_and(|outcome| {
-            outcome.failure_message().is_some() || matches!(outcome, AcpTurnOutcome::Cancelled)
+            outcome.failure().is_some() || matches!(outcome, AcpTurnOutcome::Cancelled)
         });
     let settled =
         turn_started_at_ms.is_some() || matches!(phase, DaemonPhase::Dead) || failed_or_cancelled;
@@ -1181,15 +1194,15 @@ fn memory_changes_summary(
         .iter()
         .filter(|entry| entry.pending_reason.is_some())
         .count();
-    let mut parts = vec!["记忆".to_string()];
+    let mut parts = vec![t!("memory.title").into_owned()];
     if created > 0 {
-        parts.push(format!("新记住 {created} 条"));
+        parts.push(t!("memory.created", count = created).into_owned());
     }
     if updated > 0 {
-        parts.push(format!("更新 {updated} 条"));
+        parts.push(t!("memory.updated", count = updated).into_owned());
     }
     if pending > 0 {
-        parts.push(format!("{pending} 条待确认"));
+        parts.push(t!("memory.pending", count = pending).into_owned());
     }
     parts.join(" · ")
 }
@@ -1218,19 +1231,21 @@ enum TurnOutcomeAction {
 fn turn_outcome_card(
     outcome: Option<AcpTurnOutcome>,
     supports_rewind: bool,
-) -> Option<(&'static str, Option<TurnOutcomeAction>)> {
+) -> Option<(SharedString, Option<TurnOutcomeAction>)> {
     let retry = supports_rewind.then_some(TurnOutcomeAction::Retry);
     match outcome? {
         AcpTurnOutcome::Succeeded | AcpTurnOutcome::Cancelled => None,
-        AcpTurnOutcome::Interrupted => Some(("本轮回复已中断，重启后可继续", None)),
-        AcpTurnOutcome::Failed => Some(("这一轮没有完成", retry)),
-        AcpTurnOutcome::Refused => Some(("Agent 拒绝继续处理", retry)),
-        AcpTurnOutcome::MaxTokens => {
-            Some(("回复太长，被截断了", Some(TurnOutcomeAction::Continue)))
-        }
-        AcpTurnOutcome::MaxTurnRequests => {
-            Some(("已达到本轮最大请求数", Some(TurnOutcomeAction::Continue)))
-        }
+        AcpTurnOutcome::Interrupted => Some((t!("outcome.interrupted").into(), None)),
+        AcpTurnOutcome::Failed => Some((t!("outcome.failed").into(), retry)),
+        AcpTurnOutcome::Refused => Some((t!("outcome.refused").into(), retry)),
+        AcpTurnOutcome::MaxTokens => Some((
+            t!("outcome.max_tokens").into(),
+            Some(TurnOutcomeAction::Continue),
+        )),
+        AcpTurnOutcome::MaxTurnRequests => Some((
+            t!("outcome.max_turn_requests").into(),
+            Some(TurnOutcomeAction::Continue),
+        )),
     }
 }
 
@@ -1249,13 +1264,15 @@ fn provider_retry_label(
     match waited {
         Some(waited) if waited < retry.delay_ms => {
             let wait = (retry.delay_ms - waited).div_ceil(1_000);
-            format!("模型请求出错，{wait} 秒后第 {attempt} 次重试")
+            t!("retry.waiting", seconds = wait, attempt = attempt).into_owned()
         }
-        Some(waited) => format!(
-            "模型请求出错，正在第 {attempt} 次重试 · {}",
-            format_duration(waited - retry.delay_ms)
-        ),
-        None => format!("模型请求出错，正在第 {attempt} 次重试"),
+        Some(waited) => t!(
+            "retry.running_for",
+            attempt = attempt,
+            elapsed = format_duration(waited - retry.delay_ms)
+        )
+        .into_owned(),
+        None => t!("retry.running", attempt = attempt).into_owned(),
     }
 }
 
@@ -1322,7 +1339,7 @@ fn conversation_input_for_submit(
 /// 消息上的右键菜单：复制选中的文字。没选中时复制是灰的，不另起一句说明。
 fn selected_text_menu(window: &mut Window, cx: &mut App) -> Menu {
     let body = task_body_from_selection(gpui_base::TextSelection::selected_text(window, cx));
-    let copy = MenuItem::new("复制").disabled(body.is_none());
+    let copy = MenuItem::new(t!("action.copy")).disabled(body.is_none());
     Menu::new().item(match body {
         Some(body) => copy.on_click(move |_event, _window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(body.clone()));
@@ -1398,10 +1415,12 @@ pub struct ConversationView {
     /// 输入变化负责刷新提交按钮，Enter 负责提交；订阅必须和动态字段同生命周期。
     elicitation_input_subscriptions: std::collections::HashMap<usize, gpui::Subscription>,
     phase: DaemonPhase,
-    /// `phase == Dead` 时的展示文案。
+    /// `phase == Dead` 时：有 `end_code` 是细节，没有是整句。给人看用 [`Self::end_text`]。
     end_reason: String,
     /// `phase == Dead` 时的机器可读分类；不能从展示文案反推。
     end_kind: AcpEndKind,
+    /// 运行时说的结束原因种类，render 时按当前语言说。
+    end_code: Option<ConversationEndReason>,
     /// daemon 受理/执行/完成的稳定外部投递身份，随快照恢复。
     accepted_delivery_ids: std::collections::BTreeSet<String>,
     active_delivery_id: Option<String>,
@@ -1475,10 +1494,6 @@ pub struct ConversationView {
     /// 显式换算，不能再假设本地 Vec 从全局 0 开始。
     loaded_entries_offset: usize,
     entries_total: usize,
-    /// Provider 明确暴露的工具原始名称/参数；与聊天条目按 tool call id 关联。
-    tool_debug: std::collections::BTreeMap<String, ToolCallDebug>,
-    /// 受管运行时在本轮开始时明确上报的 system prompt 与可用工具定义。
-    runtime_debug: RuntimeDebug,
     history_loading: bool,
     /// 本会话的 agent 是否收图（握手 Ready 带来）。握手前默认 true——那时还没
     /// 粘图的机会，先假设支持，Ready 到了再按实际能力修正（Grok = false）。
@@ -1693,6 +1708,11 @@ fn elicitation_input_shape(card: &PendingElicitation) -> Vec<(usize, bool)> {
 }
 
 impl ConversationView {
+    /// 结束原因按当前语言说成的一句；活会话是空的。
+    fn end_text(&self) -> String {
+        smelt_plugin_api::model::acp_session::end_text(self.end_code.as_ref(), &self.end_reason)
+    }
+
     /// 新拉起这段对话（新建、分叉）：不当成要续的旧对话，立即向守护发起打开请求（非阻塞，
     /// 握手结果以快照回来）。启动规格、配置、首条消息已经在占位视图上（来自工作区目录），
     /// 随打开请求交给守护，就绪后由它写回、发出。
@@ -1713,6 +1733,7 @@ impl ConversationView {
         self.awaiting_initial_history_snapshot = false;
         self.phase = DaemonPhase::Connecting;
         self.end_reason.clear();
+        self.end_code = None;
         self.starting_since = Some(std::time::Instant::now());
         self.init_input(window, cx);
         if !prefill.trim().is_empty()
@@ -1810,6 +1831,7 @@ impl ConversationView {
             phase: DaemonPhase::Dead,
             end_reason: reason,
             end_kind: AcpEndKind::Unknown,
+            end_code: None,
             accepted_delivery_ids: Default::default(),
             active_delivery_id: None,
             completed_delivery_id: None,
@@ -1837,8 +1859,6 @@ impl ConversationView {
             transcript,
             loaded_entries_offset: 0,
             entries_total: 0,
-            tool_debug: Default::default(),
-            runtime_debug: Default::default(),
             history_loading: false,
             supports_image: true,
             paste_hint: None,
@@ -2006,6 +2026,7 @@ impl ConversationView {
         self.turn_outcome = None;
         self.phase = DaemonPhase::Connecting;
         self.end_reason.clear();
+        self.end_code = None;
         self.starting_since = Some(std::time::Instant::now());
         // 用户点的重新开始：之前自己订没订稳不算到这次头上。
         self.resubscribe_failures = 0;
@@ -2272,15 +2293,26 @@ impl ConversationView {
         }
     }
 
+    /// 输入框的占位文字存在输入框状态里，换语言时要重设。
+    pub(crate) fn relabel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = &self.input {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(t!("composer.placeholder"), window, cx)
+            });
+        }
+        cx.notify();
+    }
+
     fn init_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.input.is_some() {
             return;
         }
         let input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder("想让它做什么？")
+            let mut input = TextareaState::new(window, cx)
                 .submit_on_enter(true)
-                .auto_grow(3, 10)
+                .auto_grow(3, 10);
+            input.set_placeholder(t!("composer.placeholder"), window, cx);
+            input
         });
         self._input_sub = Some(cx.subscribe_in(
             &input,
@@ -2344,7 +2376,7 @@ impl ConversationView {
                         ElicitFieldKindView::Select(_) | ElicitFieldKindView::MultiSelect(_)
                             if field.allow_custom_input =>
                         {
-                            (false, "输入你自己的答案".to_string())
+                            (false, t!("elicit.custom_answer").into_owned())
                         }
                         _ => return None,
                     };
@@ -2501,7 +2533,8 @@ impl ConversationView {
                         this.launch_prep = Some(prep);
                         this.phase = DaemonPhase::Dead;
                         this.starting_since = None;
-                        this.end_reason = format!("准备启动参数失败：{error}");
+                        this.end_reason = t!("error.prepare_launch", error = error).into_owned();
+                        this.end_code = None;
                     }
                 }
                 cx.notify();
@@ -2652,10 +2685,7 @@ impl ConversationView {
                 .get_or_insert_with(Vec::new)
                 .extend(prompt.images);
         }
-        self.paste_hint = Some(
-            "这台机器的运行时版本太旧，不支持随新建对话发出首条消息，消息已放回输入框。请升级运行时。"
-                .to_string(),
-        );
+        self.paste_hint = Some(t!("error.first_message_unsupported").into_owned());
         self.schedule_surface_inputs(cx);
         cx.notify();
     }
@@ -2683,7 +2713,8 @@ impl ConversationView {
         }
         let failures = self.resubscribe_failures;
         if failures >= RESUBSCRIBE_ATTEMPTS {
-            self.end_reason = "和运行时的连接反复断开，点重新开始再试".to_string();
+            self.end_reason = t!("error.resubscribe_exhausted").into_owned();
+            self.end_code = None;
             cx.notify();
             return;
         }
@@ -2726,7 +2757,8 @@ impl ConversationView {
                 match result {
                     Ok(snapshot) => view.prepend_history_page(snapshot, cx),
                     Err(error) => {
-                        view.history_error = Some(format!("历史读不出来：{error}"));
+                        view.history_error =
+                            Some(t!("error.history_unreadable", error = error).into_owned());
                         eprintln!("[workspace] ACP 历史分页失败：{error}");
                     }
                 }
@@ -2753,12 +2785,6 @@ impl ConversationView {
         self.layout_cache.borrow_mut().dirty_from = Some(0);
         self.loaded_entries_offset = snapshot.entries_offset;
         self.entries_total = self.entries_total.max(snapshot.entries_total);
-        if let Some(tool_debug) = snapshot.tool_debug {
-            self.tool_debug = tool_debug;
-        }
-        if let Some(runtime_debug) = snapshot.runtime_debug {
-            self.runtime_debug = runtime_debug;
-        }
 
         self.rendered_images = self
             .rendered_images
@@ -3126,7 +3152,7 @@ impl ConversationView {
         match action {
             TurnOutcomeAction::Continue => {
                 let draft = std::mem::take(&mut self.pending_images);
-                self.send_prompt("继续".to_string(), window, cx);
+                self.send_prompt(t!("prompt.continue").into_owned(), window, cx);
                 self.pending_images = draft;
             }
             TurnOutcomeAction::Retry => {
@@ -3137,7 +3163,7 @@ impl ConversationView {
                     return;
                 };
                 if h.action_tx.try_send(AcpUserAction::RetryLastTurn).is_err() {
-                    self.paste_hint = Some("无法重试这一轮".to_string());
+                    self.paste_hint = Some(t!("hint.retry_failed").into_owned());
                     cx.notify();
                 }
             }
@@ -3285,10 +3311,10 @@ impl ConversationView {
                 };
                 self.paste_hint = Some(match error.kind {
                     smelt_plugin_api::model::conversation::ConversationSubmitErrorKind::Rejected => {
-                        format!("未发送：{}", error.message)
+                        t!("submit.rejected", error = error.message).into_owned()
                     }
                     smelt_plugin_api::model::conversation::ConversationSubmitErrorKind::Unknown => {
-                        format!("发送结果未知：{}；再次发送可能重复。", error.message)
+                        t!("submit.unknown", error = error.message).into_owned()
                     }
                 });
             }
@@ -3304,11 +3330,16 @@ impl ConversationView {
         if images.is_empty() || self.supports_image {
             return (text.to_string(), encode_prompt_images(images));
         }
-        let note = format!(
-            "[该任务附带 {} 张图片，但 {} 不支持图片输入，图片未转发。]",
-            images.len(),
-            self.agent.short_label()
-        );
+        let note = t!(
+            "images.not_forwarded",
+            images = crate::plural(
+                images.len(),
+                t!("images.count.one"),
+                t!("images.count.other", count = images.len())
+            ),
+            agent = self.agent.short_label()
+        )
+        .into_owned();
         self.paste_hint = Some(note.clone());
         let text = if text.trim().is_empty() {
             note
@@ -3392,7 +3423,7 @@ impl ConversationView {
                 .is_ok()
         });
         if !sent {
-            self.paste_hint = Some("无法撤回排队消息".to_string());
+            self.paste_hint = Some(t!("hint.unqueue_failed").into_owned());
             cx.notify();
         }
     }
@@ -3443,10 +3474,8 @@ impl ConversationView {
         // 能力门：agent 不收图就别收进来（Grok = false）。返回 true 照样吞掉这次
         // 粘贴；ExternalPaths 后面那条路径文本也不能放行，否则会被 agent 当成命令。
         if !self.supports_image {
-            self.paste_hint = Some(format!(
-                "{} 不支持图片，已忽略粘贴",
-                self.agent.short_label()
-            ));
+            self.paste_hint =
+                Some(t!("images.paste_unsupported", agent = self.agent.short_label()).into_owned());
             cx.notify();
             return true;
         }
@@ -3476,7 +3505,7 @@ impl ConversationView {
             files: true,
             directories: true,
             multiple: true,
-            prompt: Some("选择要发送的文件".into()),
+            prompt: Some(t!("attach.prompt").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else {
@@ -3502,10 +3531,17 @@ impl ConversationView {
         // 选的是本机的文件。图片读成字节发出去，远程也能用；别的文件只能给路径，
         // 远程那台机器上读不到，说明一下，不插进去。
         if !file_paths.is_empty() && !self.runtime.is_local() {
-            self.paste_hint = Some(format!(
-                "远程对话只能附加图片：{} 个本机文件的路径在那台机器上读不到",
-                file_paths.len()
-            ));
+            self.paste_hint = Some(
+                t!(
+                    "attach.remote_paths",
+                    files = crate::plural(
+                        file_paths.len(),
+                        t!("attach.files.one"),
+                        t!("attach.files.other", count = file_paths.len())
+                    )
+                )
+                .into_owned(),
+            );
             cx.notify();
         } else if !file_paths.is_empty() {
             self.insert_prompt_text(
@@ -3529,7 +3565,11 @@ impl ConversationView {
         }
         let requested = image_paths.len();
         self.pending_external_image_loads += requested;
-        self.paste_hint = Some(format!("正在读取 {requested} 张图片…"));
+        self.paste_hint = Some(crate::plural(
+            requested,
+            t!("images.reading.one"),
+            t!("images.reading.other", count = requested),
+        ));
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -3548,19 +3588,25 @@ impl ConversationView {
                     this.pending_external_image_loads.saturating_sub(requested);
                 this.pending_images.extend(loaded);
                 this.paste_hint = if this.pending_external_image_loads > 0 {
-                    Some(format!(
-                        "正在读取 {} 张图片…",
-                        this.pending_external_image_loads
+                    let count = this.pending_external_image_loads;
+                    Some(crate::plural(
+                        count,
+                        t!("images.reading.one"),
+                        t!("images.reading.other", count = count),
                     ))
                 } else if loaded_count == requested {
                     None
                 } else if loaded_count == 0 {
-                    Some("图片读取失败，请重试".to_string())
+                    Some(t!("images.read_failed").into_owned())
                 } else {
-                    Some(format!(
-                        "已附加 {loaded_count} 张图片，{} 张读取失败",
-                        requested - loaded_count
-                    ))
+                    Some(
+                        t!(
+                            "images.partial",
+                            loaded = loaded_count,
+                            failed = requested - loaded_count
+                        )
+                        .into_owned(),
+                    )
                 };
                 cx.notify();
             });
@@ -3573,9 +3619,11 @@ impl ConversationView {
             return;
         };
         if self.pending_external_image_loads > 0 {
-            self.paste_hint = Some(format!(
-                "正在读取 {} 张图片，请稍候…",
-                self.pending_external_image_loads
+            let count = self.pending_external_image_loads;
+            self.paste_hint = Some(crate::plural(
+                count,
+                t!("images.still_reading.one"),
+                t!("images.still_reading.other", count = count),
             ));
             cx.notify();
             return;
@@ -3639,7 +3687,7 @@ impl ConversationView {
         if !sent {
             self.disarm_user_bubble_enter(nonce);
             self.pending_images = images;
-            self.paste_hint = Some("后续消息未能排队".to_string());
+            self.paste_hint = Some(t!("hint.queue_failed").into_owned());
             cx.notify();
             return;
         }
@@ -3655,7 +3703,7 @@ impl ConversationView {
             return;
         };
         if h.action_tx.try_send(AcpUserAction::Compact).is_err() {
-            self.paste_hint = Some("无法压缩上下文".to_string());
+            self.paste_hint = Some(t!("hint.compact_failed").into_owned());
         }
         cx.notify();
     }
@@ -3669,7 +3717,7 @@ impl ConversationView {
             .try_send(AcpUserAction::StopSubagent { id: id.clone() })
             .is_err()
         {
-            self.paste_hint = Some("无法停止子智能体".to_string());
+            self.paste_hint = Some(t!("hint.stop_subagent_failed").into_owned());
         } else {
             self.stopping_subagents.insert(id);
         }
@@ -3810,7 +3858,7 @@ impl ConversationView {
             .try_send(AcpUserAction::StopBackgroundTask { id: id.clone() })
             .is_err()
         {
-            self.paste_hint = Some("无法停止后台任务".to_string());
+            self.paste_hint = Some(t!("hint.stop_task_failed").into_owned());
         } else {
             self.stopping_background_tasks.insert(id);
         }
@@ -3825,7 +3873,7 @@ impl ConversationView {
             return;
         };
         if h.action_tx.try_send(AcpUserAction::ClearQueue).is_err() {
-            self.paste_hint = Some("无法清空排队消息".to_string());
+            self.paste_hint = Some(t!("hint.clear_queue_failed").into_owned());
         }
         cx.notify();
     }
@@ -3846,7 +3894,7 @@ impl ConversationView {
             })
             .is_err()
         {
-            self.paste_hint = Some("无法回退到这条消息".to_string());
+            self.paste_hint = Some(t!("hint.rewind_failed").into_owned());
             cx.notify();
         }
     }
@@ -3947,12 +3995,6 @@ impl ConversationView {
             self.last_snapshot_revision = snap.snapshot_revision;
         }
 
-        if let Some(tool_debug) = snap.tool_debug.take() {
-            self.tool_debug = tool_debug;
-        }
-        if let Some(runtime_debug) = snap.runtime_debug.take() {
-            self.runtime_debug = runtime_debug;
-        }
         if let Some(conversation_state) = snap.conversation_state.take() {
             self.pending_agent_preset = conversation_state.pending_agent_preset;
             if let Some(binding) = conversation_state.binding {
@@ -4039,6 +4081,7 @@ impl ConversationView {
         self.phase = snap.phase;
         self.end_reason = snap.end_reason;
         self.end_kind = snap.end_kind;
+        self.end_code = snap.end_code;
         let mut prepare_surface_inputs = false;
         if !snap.envelope_omitted {
             self.permissions = snap.pending_permissions;
@@ -4377,7 +4420,7 @@ impl ConversationView {
         &self,
         site: CopySite,
         value: impl Into<String>,
-        tooltip: &'static str,
+        tooltip: Cow<'static, str>,
         cx: &Context<Self>,
     ) -> Button {
         let value = value.into();
@@ -4740,7 +4783,7 @@ impl ConversationView {
         // 正在跑的算当前步；全完成就是 n / n。
         let current = (done + in_progress).min(total);
         let summary = if done == total {
-            format!("{total} / {total} · 完成")
+            format!("{total} / {total} · {}", t!("plan.done"))
         } else if in_progress > 0 {
             format!("{current} / {total}")
         } else {
@@ -4751,7 +4794,9 @@ impl ConversationView {
         } else {
             ui_theme::muted()
         });
-        let current_step = plan_current_step(plan).unwrap_or("等待下一步").to_string();
+        let current_step = plan_current_step(plan)
+            .map(str::to_string)
+            .unwrap_or_else(|| t!("plan.waiting").into_owned());
         let progress = (done as f32 + in_progress as f32 * 0.5) / total as f32;
 
         let mut bar = div()
@@ -4788,7 +4833,7 @@ impl ConversationView {
                             div()
                                 .type_style(TYPE.text_xsmall_medium)
                                 .text_color(gpui::rgb(ui_theme::muted()))
-                                .child("任务进度"),
+                                .child(SharedString::from(t!("plan.title"))),
                         )
                         .child(
                             div()
@@ -4878,7 +4923,7 @@ impl ConversationView {
                                     div()
                                         .type_style(TYPE.ui)
                                         .text_color(gpui::rgb(ui_theme::muted()))
-                                        .child("进行中"),
+                                        .child(SharedString::from(t!("plan.in_progress"))),
                                 ),
                         ),
                     // Pending 与协议未来的新状态都按「待做」渲染。
@@ -4975,16 +5020,20 @@ fn running_subagents(subagents: &[SubagentView]) -> Vec<&SubagentView> {
         .collect()
 }
 
-/// 卡片上一个子智能体叫什么：它自己的标题，没有就用派发的标题。
+/// 卡片上一个子智能体叫什么：它自己的标题，没有就用派发的标题，都没有给泛称。
 fn subagent_run_title(
     run: &smelt_plugin_api::model::acp_chat::SubagentRun,
     dispatch_title: &str,
 ) -> String {
     let own = run.title.trim();
-    if own.is_empty() {
-        smelt_plugin_api::model::acp_chat::subagent_visible_title(dispatch_title)
+    if !own.is_empty() {
+        return own.to_string();
+    }
+    let dispatch = smelt_plugin_api::model::acp_chat::subagent_visible_title(dispatch_title);
+    if dispatch.is_empty() {
+        t!("subagent.generic").into_owned()
     } else {
-        own.to_string()
+        dispatch
     }
 }
 
@@ -5032,23 +5081,26 @@ fn dispatch_progress(statuses: &[SubagentStatus], activity: Option<&str>) -> Dis
     let stopped = count(SubagentStatus::Stopped);
     let text = if total == 1 {
         match (statuses[0], activity) {
-            (SubagentStatus::Running, Some(activity)) => format!("运行中 · 正在：{activity}"),
-            (status, _) => status.label().to_string(),
+            (SubagentStatus::Running, Some(activity)) => {
+                t!("dispatch.running_activity", activity = activity).into_owned()
+            }
+            (status, _) => subagent_status_label(status).to_string(),
         }
     } else if running > 0 {
-        format!("已完成 {}/{total}", total - running)
+        t!("dispatch.progress", done = total - running, total = total).into_owned()
     } else if completed == total {
-        "全部完成".to_string()
+        t!("dispatch.all_done").into_owned()
     } else {
-        let mut parts = vec![format!("完成 {completed}/{total}")];
+        let mut parts =
+            vec![t!("dispatch.completed", done = completed, total = total).into_owned()];
         if failed > 0 {
-            parts.push(format!("{failed} 个失败"));
+            parts.push(t!("dispatch.failed", count = failed).into_owned());
         }
         if interrupted > 0 {
-            parts.push(format!("{interrupted} 个中断"));
+            parts.push(t!("dispatch.interrupted", count = interrupted).into_owned());
         }
         if stopped > 0 {
-            parts.push(format!("{stopped} 个已停止"));
+            parts.push(t!("dispatch.stopped", count = stopped).into_owned());
         }
         parts.join(" · ")
     };
@@ -5075,14 +5127,19 @@ fn dispatch_elapsed_ms(live: &[&SubagentView], now_ms: u64) -> Option<u64> {
 
 /// 后台任务已经跑了多久。时钟往回拨时按刚开始算。
 fn background_task_elapsed(started_at_ms: u64, now_ms: u64) -> String {
-    format!(
-        "已运行 {}",
-        format_duration(now_ms.saturating_sub(started_at_ms))
+    t!(
+        "task.running_for",
+        elapsed = format_duration(now_ms.saturating_sub(started_at_ms))
     )
+    .into_owned()
 }
 
 fn background_task_summary(running: usize) -> String {
-    format!("{running} 个后台任务")
+    crate::plural(
+        running,
+        t!("task.summary.one"),
+        t!("task.summary.other", count = running),
+    )
 }
 
 /// 滚动区是否停在底部（含还没溢出的情况）。
@@ -5346,10 +5403,15 @@ fn pinned_prompt_summary(entry: &AcpEntry) -> Option<String> {
         AcpEntry::User(text) => Some(one_line(text)),
         AcpEntry::UserWithImages { text, images } => {
             let text = one_line(text);
+            let count = crate::plural(
+                images.len(),
+                t!("images.count.one"),
+                t!("images.count.other", count = images.len()),
+            );
             Some(if text.is_empty() {
-                format!("{} 张图片", images.len())
+                count
             } else {
-                format!("{text} · {} 张图片", images.len())
+                format!("{text} · {count}")
             })
         }
         _ => None,
@@ -5649,7 +5711,7 @@ fn current_turn_has_agent_output(entries: &[AcpEntry]) -> bool {
         .iter()
         .rev()
         .take_while(|entry| !is_user_entry(entry))
-        .any(|entry| !matches!(entry, AcpEntry::Divider(_)) && !is_empty_assistant_body(entry))
+        .any(|entry| !entry.is_divider() && !is_empty_assistant_body(entry))
 }
 
 fn is_empty_assistant_body(entry: &AcpEntry) -> bool {
@@ -5741,15 +5803,37 @@ fn consecutive_compact_tool_run(
 
 fn compact_tool_run_label(kind: ToolKind, count: usize) -> String {
     match kind {
-        ToolKind::Search => format!("搜索了 {count} 次"),
-        ToolKind::Read => format!("读取了 {count} 个文件"),
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
-            format!("修改了 {count} 个文件")
-        }
-        ToolKind::Execute => format!("运行了 {count} 条命令"),
-        ToolKind::Fetch => format!("打开了 {count} 个页面"),
-        ToolKind::Image => format!("处理了 {count} 张图"),
-        _ => format!("{} {count} 次", tool_kind_label(&kind)),
+        ToolKind::Search => crate::plural(
+            count,
+            t!("run.search.one"),
+            t!("run.search.other", count = count),
+        ),
+        ToolKind::Read => crate::plural(
+            count,
+            t!("run.read.one"),
+            t!("run.read.other", count = count),
+        ),
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => crate::plural(
+            count,
+            t!("run.edit.one"),
+            t!("run.edit.other", count = count),
+        ),
+        ToolKind::Execute => crate::plural(
+            count,
+            t!("run.execute.one"),
+            t!("run.execute.other", count = count),
+        ),
+        ToolKind::Fetch => crate::plural(
+            count,
+            t!("run.fetch.one"),
+            t!("run.fetch.other", count = count),
+        ),
+        ToolKind::Image => crate::plural(
+            count,
+            t!("run.image.one"),
+            t!("run.image.other", count = count),
+        ),
+        _ => t!("run.other", kind = tool_kind_label(&kind), count = count).into_owned(),
     }
 }
 
@@ -5760,14 +5844,16 @@ pub fn compact_tool_headline(kind: ToolKind, title: &str) -> String {
         return tool_kind_label(&kind).to_string();
     }
     match kind {
-        ToolKind::Fetch => format!("打开了 {}", compact_fetch_target(title)),
-        ToolKind::Search => format!("搜索 {title}"),
-        ToolKind::Read => format!("读取了 {}", compact_path_leaf(title)),
-        ToolKind::Edit => format!("修改了 {}", compact_path_leaf(title)),
-        ToolKind::Delete => format!("删除了 {}", compact_path_leaf(title)),
-        ToolKind::Move => format!("移动了 {}", compact_path_leaf(title)),
-        ToolKind::Execute => format!("运行了 {}", compact_command_leaf(title)),
-        ToolKind::Image => format!("处理了 {}", compact_path_leaf(title)),
+        ToolKind::Fetch => t!("headline.fetch", target = compact_fetch_target(title)).into_owned(),
+        ToolKind::Search => t!("headline.search", query = title).into_owned(),
+        ToolKind::Read => t!("headline.read", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Edit => t!("headline.edit", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Delete => t!("headline.delete", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Move => t!("headline.move", target = compact_path_leaf(title)).into_owned(),
+        ToolKind::Execute => {
+            t!("headline.execute", target = compact_command_leaf(title)).into_owned()
+        }
+        ToolKind::Image => t!("headline.image", target = compact_path_leaf(title)).into_owned(),
         _ => title.to_string(),
     }
 }
@@ -5836,19 +5922,19 @@ fn tool_debug_preview(
 ) -> String {
     let mut fields = Vec::new();
     if let Some(name) = debug.and_then(|debug| debug.name.as_deref()) {
-        fields.push(format!("工具名称: {name}"));
+        fields.push(format!("{}: {name}", t!("debug.tool_name")));
     }
     fields.extend([
-        format!("调用 ID: {id}"),
-        format!("展示标题: {title}"),
-        format!("类型: {kind:?}"),
-        format!("状态: {status:?}"),
+        format!("{}: {id}", t!("debug.call_id")),
+        format!("{}: {title}", t!("debug.display_title")),
+        format!("{}: {kind:?}", t!("debug.kind")),
+        format!("{}: {status:?}", t!("debug.status")),
     ]);
     if let Some(input) = debug.and_then(|debug| debug.raw_input.as_ref()) {
-        fields.push(format!("参数\n{}", pretty_json(input)));
+        fields.push(format!("{}\n{}", t!("debug.arguments"), pretty_json(input)));
     }
     let output = pretty_json(&serde_json::to_value(output).unwrap_or(serde_json::Value::Null));
-    fields.push(format!("完整结果\n{output}"));
+    fields.push(format!("{}\n{output}", t!("debug.result")));
     fields.join("\n\n")
 }
 
@@ -6166,9 +6252,21 @@ fn tool_result_summary(
         return None;
     }
     match kind {
-        ToolKind::Read | ToolKind::Fetch => Some(format!("{lines} 行")),
-        ToolKind::Execute => Some(format!("{lines} 行输出")),
-        ToolKind::Review => Some(format!("{lines} 行结果")),
+        ToolKind::Read | ToolKind::Fetch => Some(crate::plural(
+            lines,
+            t!("lines.plain.one"),
+            t!("lines.plain.other", count = lines),
+        )),
+        ToolKind::Execute => Some(crate::plural(
+            lines,
+            t!("lines.output.one"),
+            t!("lines.output.other", count = lines),
+        )),
+        ToolKind::Review => Some(crate::plural(
+            lines,
+            t!("lines.result.one"),
+            t!("lines.result.other", count = lines),
+        )),
         _ => None,
     }
 }
@@ -6258,21 +6356,38 @@ struct EntryPresentation {
 fn process_group_label(group: ProcessGroupInfo) -> String {
     if group.active && group.active_agents > 0 {
         return if group.active_agents == group.agents {
-            format!("{} 个 Agent 工作中", group.active_agents)
+            crate::plural(
+                group.active_agents,
+                t!("group.agents_working.one"),
+                t!("group.agents_working.other", count = group.active_agents),
+            )
         } else {
-            format!("{}/{} 个 Agent 工作中", group.active_agents, group.agents)
+            t!(
+                "group.some_agents_working",
+                active = group.active_agents,
+                total = group.agents
+            )
+            .into_owned()
         };
     }
     if group.active {
         return if group.agents > 0 && group.active_tool_kind.is_none() {
-            format!("正在协作 · {} 个 Agent", group.agents)
+            t!(
+                "group.collaborating",
+                agents = crate::plural(
+                    group.agents,
+                    t!("group.agents.one"),
+                    t!("group.agents.other", count = group.agents)
+                )
+            )
+            .into_owned()
         } else if let Some(kind) = group.active_tool_kind {
             tool_running_label(kind).to_string()
         } else {
-            "正在想".to_string()
+            t!("status.thinking").into_owned()
         };
     }
-    "执行过程".to_string()
+    t!("group.steps").into_owned()
 }
 
 /// 过程组标题：进行中写当前动作；完成后只留 Grok 式「工作了 9s」，点开再看工具。
@@ -6281,7 +6396,7 @@ fn process_group_header_label(entries: &[AcpEntry], group: ProcessGroupInfo) -> 
         return Some(process_group_label(group));
     }
     if let Some(elapsed) = group.elapsed_ms {
-        return Some(format!("工作了 {}", format_duration(elapsed)));
+        return Some(t!("group.worked_for", elapsed = format_duration(elapsed)).into_owned());
     }
     let summary = process_group_tool_summary(entries, group.first, group.end);
     (!summary.is_empty()).then_some(summary)
@@ -6310,47 +6425,143 @@ fn process_group_tool_summary(entries: &[AcpEntry], first: usize, end: usize) ->
         .map(|(kind, count)| tool_kind_summary(*kind, *count))
         .collect::<Vec<_>>();
     if extra > 0 {
-        parts.push("等".to_string());
+        parts.push(t!("group.more").into_owned());
     }
     parts.join(" · ")
 }
 
 fn tool_kind_summary(kind: ToolKind, count: usize) -> String {
     match kind {
-        ToolKind::Search => format!("搜索了 {count} 次"),
-        ToolKind::Read => format!("读取了 {count} 次"),
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
-            format!("修改了 {count} 次")
-        }
-        ToolKind::Execute => format!("运行了 {count} 次"),
-        ToolKind::Fetch => format!("获取了 {count} 次"),
-        ToolKind::Think => format!("分析了 {count} 次"),
-        ToolKind::Collaborate => format!("{count} 个 Agent"),
-        ToolKind::Review => format!("审阅了 {count} 次"),
-        ToolKind::Image => format!("处理了 {count} 张图片"),
-        ToolKind::Compact => format!("整理了 {count} 次上下文"),
-        ToolKind::Wait => format!("等待了 {count} 次"),
-        ToolKind::SwitchMode => format!("切换了 {count} 次模式"),
-        ToolKind::Other => format!("处理了 {count} 次"),
+        ToolKind::Search => crate::plural(
+            count,
+            t!("summary.search.one"),
+            t!("summary.search.other", count = count),
+        ),
+        ToolKind::Read => crate::plural(
+            count,
+            t!("summary.read.one"),
+            t!("summary.read.other", count = count),
+        ),
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => crate::plural(
+            count,
+            t!("summary.edit.one"),
+            t!("summary.edit.other", count = count),
+        ),
+        ToolKind::Execute => crate::plural(
+            count,
+            t!("summary.execute.one"),
+            t!("summary.execute.other", count = count),
+        ),
+        ToolKind::Fetch => crate::plural(
+            count,
+            t!("summary.fetch.one"),
+            t!("summary.fetch.other", count = count),
+        ),
+        ToolKind::Think => crate::plural(
+            count,
+            t!("summary.think.one"),
+            t!("summary.think.other", count = count),
+        ),
+        ToolKind::Collaborate => crate::plural(
+            count,
+            t!("summary.collaborate.one"),
+            t!("summary.collaborate.other", count = count),
+        ),
+        ToolKind::Review => crate::plural(
+            count,
+            t!("summary.review.one"),
+            t!("summary.review.other", count = count),
+        ),
+        ToolKind::Image => crate::plural(
+            count,
+            t!("summary.image.one"),
+            t!("summary.image.other", count = count),
+        ),
+        ToolKind::Compact => crate::plural(
+            count,
+            t!("summary.compact.one"),
+            t!("summary.compact.other", count = count),
+        ),
+        ToolKind::Wait => crate::plural(
+            count,
+            t!("summary.wait.one"),
+            t!("summary.wait.other", count = count),
+        ),
+        ToolKind::SwitchMode => crate::plural(
+            count,
+            t!("summary.switch_mode.one"),
+            t!("summary.switch_mode.other", count = count),
+        ),
+        ToolKind::Other => crate::plural(
+            count,
+            t!("summary.other.one"),
+            t!("summary.other.other", count = count),
+        ),
     }
 }
 
-fn tool_running_label(kind: ToolKind) -> &'static str {
-    match kind {
-        ToolKind::Read => "正在读取",
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => "正在修改",
-        ToolKind::Search => "正在搜索",
-        ToolKind::Execute => "正在运行",
-        ToolKind::Fetch => "正在获取",
-        ToolKind::Think => "正在分析",
-        ToolKind::SwitchMode => "正在切换模式",
-        ToolKind::Collaborate => "正在协作",
-        ToolKind::Review => "正在审阅",
-        ToolKind::Image => "正在处理图片",
-        ToolKind::Compact => "正在整理上下文",
-        ToolKind::Wait => "正在等待",
-        ToolKind::Other => "正在处理",
+fn subagent_status_label(status: SubagentStatus) -> SharedString {
+    match status {
+        SubagentStatus::Running => t!("subagent.running"),
+        SubagentStatus::Completed => t!("subagent.completed"),
+        SubagentStatus::Failed => t!("subagent.failed"),
+        SubagentStatus::Stopped => t!("subagent.stopped"),
+        SubagentStatus::Interrupted => t!("subagent.interrupted"),
     }
+    .into()
+}
+
+fn background_task_status_label(status: BackgroundTaskStatus) -> SharedString {
+    match status {
+        BackgroundTaskStatus::Running => t!("task.running"),
+        BackgroundTaskStatus::Completed => t!("task.completed"),
+        BackgroundTaskStatus::Failed => t!("task.failed"),
+        BackgroundTaskStatus::Stopped => t!("task.stopped"),
+        BackgroundTaskStatus::TimedOut => t!("task.timed_out"),
+    }
+    .into()
+}
+
+/// 对话之间互发的一条是什么。
+/// 发出时事件行里说发的是什么：「正在发任务给」「Sending a task to」。
+fn peer_message_noun(kind: PeerMessageKind) -> SharedString {
+    match kind {
+        PeerMessageKind::Message => t!("peer.noun.message"),
+        PeerMessageKind::Task => t!("peer.noun.task"),
+        PeerMessageKind::Completion => t!("peer.noun.completion"),
+        PeerMessageKind::Bounce => t!("peer.noun.bounce"),
+    }
+    .into()
+}
+
+/// 收到时事件行里跟在对方名字后面的那半句：「〈A〉发来任务」「〈B〉没收到你的消息」。
+fn peer_message_received(kind: PeerMessageKind) -> SharedString {
+    match kind {
+        PeerMessageKind::Message => t!("peer.received_message"),
+        PeerMessageKind::Task => t!("peer.received_task"),
+        PeerMessageKind::Completion => t!("peer.received_completion"),
+        PeerMessageKind::Bounce => t!("peer.received_bounce"),
+    }
+    .into()
+}
+
+fn tool_running_label(kind: ToolKind) -> SharedString {
+    match kind {
+        ToolKind::Read => t!("running.read"),
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => t!("running.edit"),
+        ToolKind::Search => t!("running.search"),
+        ToolKind::Execute => t!("running.execute"),
+        ToolKind::Fetch => t!("running.fetch"),
+        ToolKind::Think => t!("running.think"),
+        ToolKind::SwitchMode => t!("running.switch_mode"),
+        ToolKind::Collaborate => t!("running.collaborate"),
+        ToolKind::Review => t!("running.review"),
+        ToolKind::Image => t!("running.image"),
+        ToolKind::Compact => t!("running.compact"),
+        ToolKind::Wait => t!("running.wait"),
+        ToolKind::Other => t!("running.other"),
+    }
+    .into()
 }
 
 /// 补齐启动规格、扫技能都要遍历插件目录，给足余量。
@@ -6369,11 +6580,32 @@ struct LoadedSkillsSnapshot {
 /// 输入栏能力按钮的提示、读屏名，以及空对话里那行说明。
 fn loaded_capabilities_summary(skills: usize, mcp_servers: usize) -> String {
     match (skills, mcp_servers) {
-        (0, 0) => "没有加载技能或 MCP".to_string(),
-        (skills, 0) => format!("已加载 {skills} 个技能"),
-        (0, mcp_servers) => format!("已加载 {mcp_servers} 个 MCP"),
-        (skills, mcp_servers) => format!("已加载 {skills} 个技能、{mcp_servers} 个 MCP"),
+        (0, 0) => t!("capabilities.none").into_owned(),
+        (skills, 0) => t!("capabilities.loaded", items = skills_count(skills)).into_owned(),
+        (0, mcp_servers) => t!("capabilities.loaded", items = mcp_count(mcp_servers)).into_owned(),
+        (skills, mcp_servers) => t!(
+            "capabilities.both",
+            skills = skills_count(skills),
+            mcp = mcp_count(mcp_servers)
+        )
+        .into_owned(),
     }
+}
+
+fn skills_count(count: usize) -> String {
+    crate::plural(
+        count,
+        t!("capabilities.skills.one"),
+        t!("capabilities.skills.other", count = count),
+    )
+}
+
+fn mcp_count(count: usize) -> String {
+    crate::plural(
+        count,
+        t!("capabilities.mcp.one"),
+        t!("capabilities.mcp.other", count = count),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6476,13 +6708,13 @@ fn fill_conversation_layout(
     live_elapsed_ms: Option<u64>,
 ) {
     while start < entries.len() {
-        if is_user_entry(&entries[start]) || matches!(entries[start], AcpEntry::Divider(_)) {
+        if is_user_entry(&entries[start]) || entries[start].is_divider() {
             start += 1;
             continue;
         }
         let end = entries[start..]
             .iter()
-            .position(|entry| is_user_entry(entry) || matches!(entry, AcpEntry::Divider(_)))
+            .position(|entry| is_user_entry(entry) || entry.is_divider())
             .map_or(entries.len(), |offset| start + offset);
         let closed = end < entries.len() || !current_turn_active;
         let final_ix = closed
@@ -6508,7 +6740,10 @@ fn fill_conversation_layout(
                 || is_completion_entry(&entries[ix])
                 || is_collaboration_entry(&entries[ix])
                 || is_peer_send_entry(&entries[ix])
-                || matches!(entries[ix], AcpEntry::TaskNote(_))
+                || matches!(
+                    entries[ix],
+                    AcpEntry::TaskNote(_) | AcpEntry::TurnFailed { .. }
+                )
             {
                 if !process_indices.is_empty() {
                     process_groups.push(std::mem::take(&mut process_indices));
@@ -6637,7 +6872,7 @@ fn conversation_segment_start(entries: &[AcpEntry], index: usize) -> usize {
     }
     let mut index = index.min(entries.len() - 1);
     loop {
-        if is_user_entry(&entries[index]) || matches!(entries[index], AcpEntry::Divider(_)) {
+        if is_user_entry(&entries[index]) || entries[index].is_divider() {
             return index.saturating_add(1).min(entries.len());
         }
         if index == 0 {
@@ -6653,7 +6888,7 @@ fn layout_recompute_start(entries: &[AcpEntry], dirty: usize) -> usize {
         return 0;
     }
     let dirty = dirty.min(entries.len() - 1);
-    if is_user_entry(&entries[dirty]) || matches!(entries[dirty], AcpEntry::Divider(_)) {
+    if is_user_entry(&entries[dirty]) || entries[dirty].is_divider() {
         return conversation_segment_start(entries, dirty - 1);
     }
     conversation_segment_start(entries, dirty)
@@ -6912,10 +7147,10 @@ fn tool_kind_label(kind: &ToolKind) -> &'static str {
 /// 标记用同一枚星号；等待是时钟，说不清是什么的工具是扳手。
 fn tool_kind_icon(kind: &ToolKind) -> Icon {
     match kind {
-        ToolKind::Execute => IconName::SquareTerminal.into(),
+        ToolKind::Execute => IconName::Terminal.into(),
         ToolKind::Read | ToolKind::Move | ToolKind::Image => IconName::File.into(),
-        ToolKind::Edit => Icon::path("smelt-icons/square-pen.svg"),
-        ToolKind::Delete => Icon::path("smelt-icons/trash.svg"),
+        ToolKind::Edit => Icon::new(IconName::SquarePen),
+        ToolKind::Delete => Icon::new(IconName::Trash),
         ToolKind::Search | ToolKind::Fetch => IconName::Search.into(),
         ToolKind::Collaborate => IconName::Bot.into(),
         ToolKind::Review | ToolKind::Compact | ToolKind::Think | ToolKind::SwitchMode => {
@@ -7003,7 +7238,7 @@ fn render_diff_lines(
                         .flex_none()
                         .type_style(TYPE.text_xsmall)
                         .text_color(muted_color)
-                        .child("末尾没有换行"),
+                        .child(SharedString::from(t!("diff.no_newline"))),
                 )
             }),
         );

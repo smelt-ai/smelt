@@ -3,7 +3,9 @@
 pub(crate) use chrono::{Local, TimeZone, Utc};
 pub(crate) use gpui::prelude::FluentBuilder;
 pub(crate) use gpui::*;
+pub(crate) use rust_i18n::t;
 pub(crate) use smelt_plugin_api::{self as api, RuntimeKey};
+pub(crate) use std::borrow::Cow;
 
 pub(crate) use api::model::agent_definition::AgentDefinition;
 pub(crate) use api::model::agent_kind::ConversationAgentKind;

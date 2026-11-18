@@ -11,7 +11,7 @@ use smelt_core::workspace_catalog::{self, DirectoryChange, DirectoryError};
 use smelt_core::workspace_directory::{
     WorkspaceConversation, WorkspaceDirectory, WorkspaceRenameParams, WorkspaceRevision,
 };
-use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlReason};
 use smelt_store::Store;
 
 use super::{AcpSessions, EventHubHandle, Sessions, dlog};
@@ -32,7 +32,9 @@ impl WorkspaceDirectoryReader {
 
     /// 守护还没起好（没有服务状态）时用：读不到目录。
     pub(crate) fn unavailable() -> Self {
-        Self(Arc::new(|| Err("工作区目录还没就绪".to_string())))
+        Self(Arc::new(|| {
+            Err("The workspace directory isn't ready yet".to_string())
+        }))
     }
 
     #[cfg(test)]
@@ -195,16 +197,18 @@ pub(crate) fn archive_conversation(
         .conversations
         .iter()
         .find(|c| c.id == id)
-        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "对话不存在"))?;
+        .ok_or_else(|| {
+            ControlError::because(ControlErrorCode::NotFound, ControlReason::ConversationGone)
+        })?;
     if archived {
         if conversation.acp.as_ref().is_some_and(|acp| {
             is_background_acp_session_id(&acp.sid)
                 || automations.lock().unwrap().is_run_session(&acp.sid)
                 || acp.automation_id.is_some()
         }) {
-            return Err(ControlError::new(
+            return Err(ControlError::because(
                 ControlErrorCode::FailedPrecondition,
-                "自动化运行的会话由运行时管理，不能归档",
+                ControlReason::AutomationSessionNotArchivable,
             ));
         }
         for terminal in conversation
@@ -253,29 +257,15 @@ pub(crate) fn enter_conversation(
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceConversation, ControlError> {
     let directory = workspace_catalog::directory_on(store).map_err(control_error)?;
-    let session_ids = session_ids(&conversation);
-    if let Some(existing) = directory
-        .conversations
-        .into_iter()
-        .find(|existing| session_ids_of(existing).any(|id| session_ids.contains(&id)))
-    {
+    if let Some(existing) = directory.conversations.into_iter().find(|existing| {
+        existing
+            .session_ids()
+            .any(|id| conversation.session_ids().any(|own| own == id))
+    }) {
         return Ok(existing);
     }
     create_conversation(store, &conversation, event_hub)?;
     Ok(conversation)
-}
-
-fn session_ids(conversation: &WorkspaceConversation) -> Vec<String> {
-    session_ids_of(conversation).collect()
-}
-
-fn session_ids_of(conversation: &WorkspaceConversation) -> impl Iterator<Item = String> + '_ {
-    conversation.acp.iter().map(|acp| acp.sid.clone()).chain(
-        conversation
-            .terminals
-            .iter()
-            .filter_map(|terminal| terminal.id.clone()),
-    )
 }
 
 /// `session.delete` 删掉的会话从目录里摘掉，改了就推（见 [`workspace_catalog::forget_session_on`]）。

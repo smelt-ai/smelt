@@ -1,6 +1,7 @@
 //! ACP 审批卡与选择题卡。
 
 use super::*;
+use rust_i18n::t;
 use smelt_plugin_api::ui::kit::TYPE;
 use smelt_plugin_api::ui::{Checkbox, Radio, TextInput};
 
@@ -56,7 +57,7 @@ impl ConversationView {
                         muted,
                         animate_ambient,
                     ))
-                    .child("处理中…")
+                    .child(t!("status.working").into_owned())
                     .into_any_element();
             }
             let tool_call_id = card.tool_call_id.clone();
@@ -145,7 +146,7 @@ impl ConversationView {
                             .type_style(TYPE.text_xsmall)
                             .font_family(smelt_plugin_api::model::font_config::font_family())
                             .text_color(muted)
-                            .child(format!("工作目录：{cwd}"))
+                            .child(SharedString::from(t!("approval.cwd", path = cwd)))
                     }))
                     .into_any_element(),
                 ApprovalDetailsView::FileChange { reason, grant_root } => div()
@@ -163,7 +164,7 @@ impl ConversationView {
                             .type_style(TYPE.text_xsmall)
                             .font_family(smelt_plugin_api::model::font_config::font_family())
                             .text_color(muted)
-                            .child(format!("授权目录：{root}"))
+                            .child(SharedString::from(t!("approval.root", path = root)))
                     }))
                     .into_any_element(),
                 ApprovalDetailsView::Permissions { summary } => div()
@@ -246,7 +247,11 @@ impl ConversationView {
                                             .bg(gpui::rgb(ui_theme::need())),
                                     ),
                                 )
-                                .child(div().type_style(TYPE.ui_medium).child("需要批准"))
+                                .child(
+                                    div()
+                                        .type_style(TYPE.ui_medium)
+                                        .child(t!("approval.title").into_owned()),
+                                )
                                 .child(div().flex_1())
                                 .when(remaining > 1, |row| {
                                     row.child(
@@ -257,7 +262,10 @@ impl ConversationView {
                                             .bg(ui_theme::overlay(0x18))
                                             .type_style(TYPE.text_xsmall)
                                             .text_color(muted)
-                                            .child(format!("{remaining} 项待处理")),
+                                            .child(SharedString::from(t!(
+                                                "approval.remaining",
+                                                count = remaining
+                                            ))),
                                     )
                                 }),
                         )
@@ -290,7 +298,7 @@ impl ConversationView {
             let skip = Button::new("acp-elicit-skip")
                 .quiet()
                 .small()
-                .label("跳过")
+                .label(t!("approval.skip"))
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.dismiss_elicitation(cx);
                 }));
@@ -315,7 +323,11 @@ impl ConversationView {
                         .items_center()
                         .w_full()
                         .gap_2()
-                        .child(div().type_style(TYPE.ui_medium).child("等你选择"))
+                        .child(
+                            div()
+                                .type_style(TYPE.ui_medium)
+                                .child(t!("elicit.title").into_owned()),
+                        )
                         .child(div().flex_1())
                         .when(has_multi, |row| {
                             row.child(
@@ -326,7 +338,7 @@ impl ConversationView {
                                     .bg(ui_theme::overlay(0x18))
                                     .type_style(TYPE.text_xsmall)
                                     .text_color(muted)
-                                    .child("可多选"),
+                                    .child(t!("elicit.multi").into_owned()),
                             )
                         })
                         .child(skip),
@@ -361,7 +373,7 @@ impl ConversationView {
                                     field.key.clone(),
                                 ))
                                 .primary()
-                                .label("打开并继续")
+                                .label(t!("elicit.open_continue"))
                                 .on_click(cx.listener(
                                     move |this, _ev, _window, cx| {
                                         cx.open_url(&url);
@@ -380,7 +392,11 @@ impl ConversationView {
                             .flex_col()
                             .gap_1()
                             .child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
-                                format!("{}{}", field.title, if *secret { "（保密）" } else { "" }),
+                                if *secret {
+                                    t!("elicit.secret", title = field.title).into_owned()
+                                } else {
+                                    field.title.clone()
+                                },
                             ))
                             .children(input.map(|input| TextInput::new(&input).w_full())),
                     );
@@ -404,7 +420,7 @@ impl ConversationView {
                 for (oix, opt) in options.iter().enumerate() {
                     let selected = chosen.contains(&oix);
                     let id = gpui::SharedString::from(format!("acp-elicit-opt-{fix}-{oix}"));
-                    let label = opt.label.clone();
+                    let label = opt.display_label();
                     let pick = cx.listener(move |this, _: &(), _window, cx| {
                         this.pick_elicit_option(fix, oix, cx);
                     });
@@ -443,7 +459,7 @@ impl ConversationView {
                                 div()
                                     .type_style(TYPE.text_xsmall)
                                     .text_color(muted)
-                                    .child("以上都不是？输入自己的答案"),
+                                    .child(t!("elicit.none_above").into_owned()),
                             )
                             .child(TextInput::new(&input).w_full())
                     }));
@@ -457,11 +473,11 @@ impl ConversationView {
                         .gap_1()
                         .when(card.fields.len() > 1, |d| {
                             d.child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
-                                format!(
-                                    "{}{}",
-                                    field.title.clone(),
-                                    if is_multi { "（可多选）" } else { "" }
-                                ),
+                                if is_multi {
+                                    t!("elicit.multi_title", title = field.title).into_owned()
+                                } else {
+                                    field.title.clone()
+                                },
                             ))
                         })
                         .child(list),
@@ -474,7 +490,7 @@ impl ConversationView {
                             .debug_selector(|| "acp-elicit-submit".to_string())
                             .primary()
                             .disabled(!ready)
-                            .label("提交")
+                            .label(t!("elicit.submit"))
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 if this.elicit_ready(cx) {
                                     this.submit_elicitation(cx);

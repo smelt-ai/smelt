@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::daemon_state::RuntimePresence;
 use smelt_plugin_api::ui::TextInput;
@@ -233,9 +234,6 @@ impl RecoveryInput {
 /// 与底层 writer 的待写输入上限一致。超过这个量时继续保存只会放大内存占用，且用户
 /// 已经无法确认整段内容是否应在旧会话结束后补发。
 const TERMINAL_RECOVERY_INPUT_MAX_BYTES: usize = 64 * 1024 * 1024;
-const TERMINAL_RECOVERY_OVERFLOW_MESSAGE: &str = "终端重连期间待发送的输入过多，未发送部分已取消";
-const TERMINAL_SESSION_ENDED_MESSAGE: &str = "终端会话已结束，未发送的输入已取消";
-const TERMINAL_REOPENED_MESSAGE: &str = "运行时重启过，终端已重新打开，未发送的输入已取消";
 
 /// PTY 批次只有在网格内容或守护几何状态变化时才需要重画终端。
 /// 后者不能只靠 alacritty damage：远端接管/释放尺寸租约时，行列可能完全没变。
@@ -392,7 +390,7 @@ impl TerminalView {
                 if presence == Some(RuntimePresence::Gone) {
                     let _ = this.update(cx, |this, cx| {
                         if this.terminal_generation == generation {
-                            this.mark_session_runtime_gone(TERMINAL_SESSION_ENDED_MESSAGE);
+                            this.mark_session_runtime_gone(&t!("input.session_ended"));
                             cx.notify();
                         }
                     });
@@ -430,7 +428,7 @@ impl TerminalView {
                             this.reconnecting = false;
                             // 断线时攒下的按键是打给旧进程的，不能灌进刚起来的新进程。
                             if reopen {
-                                this.discard_recovery_input_if_any(TERMINAL_REOPENED_MESSAGE);
+                                this.discard_recovery_input_if_any(&t!("input.reopened"));
                             }
                             this.adopt_terminal(t, cx);
                         });
@@ -532,7 +530,7 @@ impl TerminalView {
             return;
         }
         if self.recovery_input_bytes.saturating_add(byte_len) > TERMINAL_RECOVERY_INPUT_MAX_BYTES {
-            self.write_error = Some(TERMINAL_RECOVERY_OVERFLOW_MESSAGE.to_string());
+            self.write_error = Some(t!("input.overflow").into_owned());
             return;
         }
         self.recovery_input_bytes += byte_len;
@@ -591,7 +589,7 @@ impl TerminalView {
             }
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("在终端中查找…"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("search.placeholder")));
         input.update(cx, |s, cx| s.focus(window, cx));
         self._search_sub = Some(cx.subscribe_in(
             &input,
@@ -967,7 +965,7 @@ impl Render for TerminalView {
         let _timing = smelt_plugin_api::ui::frame_stats::RenderTiming::start("TerminalView");
         if let Some(message) = self.write_error.take() {
             let notify = smelt_plugin_api::Notify {
-                subtitle: "错误".into(),
+                subtitle: t!("notify.error").into_owned(),
                 body: message,
                 ..Default::default()
             };
@@ -1548,7 +1546,7 @@ impl Render for TerminalView {
             // 搜索条：叠在顶部，不抢网格布局（absolute）
             .when(search_open, |root| {
                 let status_label = if search_status.total == 0 {
-                    "无结果".to_string()
+                    t!("search.none").into_owned()
                 } else {
                     format!("{}/{}", search_status.current, search_status.total)
                 };
@@ -1629,9 +1627,7 @@ impl Render for TerminalView {
                         .shadow_md()
                         .type_style(TYPE.text_xsmall)
                         .text_color(rgb(smelt_plugin_api::ui::ui_theme::muted()))
-                        .child(format!(
-                            "与「{runtime}」的连接已断开，正在重连…期间的输入会在恢复后发出"
-                        )),
+                        .child(t!("reconnecting", runtime = runtime).into_owned()),
                 )
             })
     }

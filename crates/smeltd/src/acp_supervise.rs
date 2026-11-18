@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::acp_idle::SuspendedConfig;
+use smelt_core::acp_session::ConversationEndReason;
 
 /// 连续自动重连的上限。
 const AUTO_RECONNECT_ATTEMPTS: u32 = 6;
@@ -191,7 +192,10 @@ pub(crate) fn schedule_acp_auto_reconnect(
         give_up_reconnect(
             sess,
             subscribers,
-            &format!("连接接连中断，自动重连了 {AUTO_RECONNECT_ATTEMPTS} 次都没撑住"),
+            ConversationEndReason::ReconnectExhausted {
+                attempts: AUTO_RECONNECT_ATTEMPTS,
+            },
+            String::new(),
         );
         return;
     };
@@ -233,21 +237,37 @@ pub(crate) fn schedule_acp_auto_reconnect(
                 &task_sessions,
                 &task_subscribers,
             ) {
-                give_up_reconnect(sess, &task_subscribers, &format!("自动重连失败：{error}"));
+                give_up_reconnect(
+                    sess,
+                    &task_subscribers,
+                    ConversationEndReason::ReconnectFailed,
+                    error.to_string(),
+                );
             }
         });
     if let Err(error) = spawned {
-        give_up_reconnect(sess, subscribers, &format!("自动重连失败：{error}"));
+        give_up_reconnect(
+            sess,
+            subscribers,
+            ConversationEndReason::ReconnectFailed,
+            error.to_string(),
+        );
     }
 }
 
 /// 不再自动重连：相位留在结束，原因换成说得清的那句。不摘槽位，用户可以手动重新开始。
-fn give_up_reconnect(sess: &AcpSession, subscribers: &EventHubHandle, reason: &str) {
+fn give_up_reconnect(
+    sess: &AcpSession,
+    subscribers: &EventHubHandle,
+    reason: ConversationEndReason,
+    detail: String,
+) {
     let mut reduced = sess.reduced.lock();
-    smelt_core::acp_session::force_end(
+    smelt_core::acp_session::force_end_because(
         &mut reduced,
         smelt_core::acp_session::AcpEndKind::ProviderFailed,
         reason,
+        detail,
     );
     drop(reduced);
     push_acp_snapshot_since(sess, true, None);

@@ -48,10 +48,11 @@ PNG 为菜单栏用的 32×32 单色蒙版。Oh My Pi 名称与商标归其权�
 以 [FSL-1.1-MIT](https://github.com/charmbracelet/crush/blob/main/LICENSE.md) 发布。
 图形仅用于在 Smelt 中标识对应客户端，Crush 名称与商标归其权利人所有。
 
-`machine-linux.svg` 和 `machine-windows.svg` 是 [Font Awesome Free 6.7.2 Brands](https://github.com/FortAwesome/Font-Awesome/tree/6.7.2/svgs/brands) 的原始 SVG，未修改。Copyright 2024 Fonticons, Inc.；图标以 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 授权，参见上游 [LICENSE.txt](https://github.com/FortAwesome/Font-Awesome/blob/6.7.2/LICENSE.txt)。图标中的商标归其各自权利人所有，不表示对本项目的认可或赞助。
+`agent-custom.svg`（自定义 ACP Agent 的通用图标）是 [Phosphor Icons](https://phosphoricons.com)
+2.1.1 的 `robot`（bold），和界面图标同一份，以 MIT License 发布，未改动图形；许可证原文见
+`../phosphor/LICENSE`。
 
-`monitor.svg` 来自 [Lucide](https://lucide.dev/icons/monitor)，以 ISC License 发布，
-未改动图形。
-
-`agent-custom.svg`（自定义 ACP Agent 的通用图标）来自 [Lucide](https://lucide.dev/icons/bot)
-的 `bot` 图标，以 ISC License 发布，未改动图形。
+界面图标里的 `../phosphor/linux.svg` 是 [Font Awesome Free 6.7.2 Brands](https://github.com/FortAwesome/Font-Awesome/tree/6.7.2/svgs/brands)
+的 `linux`，原始 SVG 未修改。Copyright 2024 Fonticons, Inc.；图标以
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 授权，许可证原文见
+`../phosphor/LICENSE-fontawesome.txt`。Linux 名称与 Tux 形象归其各自权利人所有，不表示对本项目的认可或赞助。

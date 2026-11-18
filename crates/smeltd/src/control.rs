@@ -9,7 +9,7 @@ use smelt_core::agent_definition_store::{self, AgentDefinitionError};
 use smelt_core::agent_event::AGENT_EVENT_VERSION;
 use smelt_core::appearance_settings::{self, SettingsError};
 use smelt_core::automation::{Automation, AutomationCommand, redact_automation_credentials};
-use smelt_core::automation_store::AutomationStore;
+use smelt_core::automation_store::{AutomationError, AutomationStore};
 use smelt_core::control_api::{
     AgentDefinitionGetResult, AgentDefinitionIdParams, AgentDefinitionListResult,
     AgentDefinitionUpdateParams, AgentMemoryRecordReadParams, AgentMemoryRecordWriteParams,
@@ -18,9 +18,9 @@ use smelt_core::control_api::{
 };
 use smelt_runtime_client::protocol::control::{
     CONTROL_API_MIN_SUPPORTED_VERSION, CONTROL_API_VERSION, ControlError, ControlErrorCode,
-    ControlMethod, ControlProtocolDescription, ControlRequestEnvelope, ControlResponse,
-    DaemonRuntimeInfo, EmptyParams, EventProtocolDescription, SUPPORTED_CONTROL_METHODS,
-    SystemDescribeResult, decode_params, decode_request_envelope,
+    ControlMethod, ControlProtocolDescription, ControlReason, ControlRequestEnvelope,
+    ControlResponse, DaemonRuntimeInfo, EmptyParams, EventProtocolDescription,
+    SUPPORTED_CONTROL_METHODS, SystemDescribeResult, decode_params, decode_request_envelope,
 };
 
 use super::session_catalog::published_session_states;
@@ -449,7 +449,7 @@ fn dispatch_control(
             success_value(
                 control_version,
                 &request_id,
-                super::session_control::inspect_runtime(),
+                smelt_core::acp_conn::inspect_acp_runtime(),
             )
         }
         ControlMethod::AgentCliInstall => {
@@ -463,9 +463,11 @@ fn dispatch_control(
                 return error_value(
                     control_version,
                     request_id,
-                    ControlError::new(
+                    ControlError::because(
                         ControlErrorCode::InvalidParams,
-                        format!("未知的 agent：{}", params.agent),
+                        ControlReason::UnknownAgent {
+                            agent: params.agent.clone(),
+                        },
                     ),
                 );
             };
@@ -475,7 +477,7 @@ fn dispatch_control(
                     &request_id,
                     smelt_core::control_api::AgentCliInstallResult {
                         installer: report.installer.to_string(),
-                        diagnostics: super::session_control::inspect_runtime(),
+                        diagnostics: smelt_core::acp_conn::inspect_acp_runtime(),
                     },
                 ),
                 Err(error) => error_value(
@@ -527,11 +529,7 @@ fn dispatch_control(
                 };
             match create_agent_conversation(&params.id, sessions, acp_sessions, event_hub) {
                 Ok(created) => success_value(control_version, &request_id, created),
-                Err(error) => error_value(
-                    control_version,
-                    request_id,
-                    ControlError::new(ControlErrorCode::OperationFailed, error),
-                ),
+                Err(error) => error_value(control_version, request_id, error),
             }
         }
         ControlMethod::NewSessionCatalog => {
@@ -591,6 +589,28 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::ConversationPrompt => {
+            let params: smelt_core::control_api::ConversationPromptParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::conversation_delivery::prompt(params, acp_sessions, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::ConversationTurnResult => {
+            let params: smelt_core::control_api::ConversationTurnResultParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::conversation_delivery::turn_result(params, acp_sessions) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         ControlMethod::SubagentTranscript => {
             let params: smelt_core::control_api::SubagentTranscriptParams =
                 match params_or_error(control_version, &request_id, params) {
@@ -641,7 +661,10 @@ fn dispatch_control(
                 None => error_value(
                     control_version,
                     request_id,
-                    ControlError::new(ControlErrorCode::OperationFailed, "无法创建智能体工作区"),
+                    ControlError::because(
+                        ControlErrorCode::OperationFailed,
+                        ControlReason::AgentWorkspaceUnavailable,
+                    ),
                 ),
             }
         }
@@ -700,7 +723,10 @@ fn dispatch_control(
                 None => error_value(
                     control_version,
                     request_id,
-                    ControlError::new(ControlErrorCode::OperationFailed, "无法创建记忆目录"),
+                    ControlError::because(
+                        ControlErrorCode::OperationFailed,
+                        ControlReason::MemoryDirUnavailable,
+                    ),
                 ),
             }
         }
@@ -868,9 +894,9 @@ fn dispatch_control(
                 super::workspace_directory::default_store().and_then(|store| {
                     if let Some(workset_id) = params.target_workset_id.as_deref() {
                         if params.archived {
-                            return Err(ControlError::new(
+                            return Err(ControlError::because(
                                 ControlErrorCode::InvalidParams,
-                                "归档时不能指定目标工作树",
+                                ControlReason::ArchiveWithTargetWorktree,
                             ));
                         }
                         return super::workspace_directory::restore_conversation_into_workset(
@@ -1452,20 +1478,21 @@ fn control_error_for_settings(error: SettingsError) -> ControlError {
 fn control_error_for_appearance(error: crate::appearance_requests::RequestError) -> ControlError {
     use crate::appearance_requests::RequestError;
     match error {
-        RequestError::NoDesktop => ControlError::new(
+        RequestError::NoDesktop => ControlError::because(
             ControlErrorCode::FailedPrecondition,
-            "外观属于本机桌面客户端，现在没有可接收修改的本机桌面",
+            ControlReason::AppearanceNoDesktop,
         ),
-        RequestError::MultipleDesktops => ControlError::new(
+        RequestError::MultipleDesktops => ControlError::because(
             ControlErrorCode::FailedPrecondition,
-            "有多个本机桌面，无法确定由哪一个修改外观",
+            ControlReason::AppearanceManyDesktops,
         ),
-        RequestError::DeliveryFailed => {
-            ControlError::new(ControlErrorCode::OperationFailed, "外观请求无法投递到桌面")
-        }
-        RequestError::OutcomeUnknown => ControlError::new(
+        RequestError::DeliveryFailed => ControlError::because(
             ControlErrorCode::OperationFailed,
-            "没有收到桌面回执，修改结果未知（可能已生效或稍后生效）",
+            ControlReason::AppearanceUndelivered,
+        ),
+        RequestError::OutcomeUnknown => ControlError::because(
+            ControlErrorCode::OperationFailed,
+            ControlReason::AppearanceOutcomeUnknown,
         ),
         RequestError::Invalid(message) => {
             ControlError::new(ControlErrorCode::InvalidParams, message)
@@ -1476,15 +1503,20 @@ fn control_error_for_appearance(error: crate::appearance_requests::RequestError)
     }
 }
 
-fn control_error_for_automation(error: String) -> ControlError {
-    let code = if error.contains("不存在") {
-        ControlErrorCode::NotFound
-    } else if error.contains("运行中") {
-        ControlErrorCode::Busy
-    } else {
-        ControlErrorCode::FailedPrecondition
+/// 自动化本身的问题带种类给客户端说；存储、执行上下文出错是操作失败，说明原样给。
+fn control_error_for_automation(error: AutomationError) -> ControlError {
+    let code = match &error {
+        AutomationError::Problem(problem) => problem.code(),
+        AutomationError::UnknownWebhook => ControlErrorCode::NotFound,
+        AutomationError::Paused => ControlErrorCode::FailedPrecondition,
+        AutomationError::Failed(_) => ControlErrorCode::OperationFailed,
     };
-    ControlError::new(code, error)
+    match error {
+        AutomationError::Problem(problem) => {
+            ControlError::because(code, ControlReason::Automation { problem })
+        }
+        other => ControlError::new(code, other.to_string()),
+    }
 }
 
 fn find_automation(automations: &AutomationStore, id: &str) -> Result<Automation, ControlError> {
@@ -1493,7 +1525,12 @@ fn find_automation(automations: &AutomationStore, id: &str) -> Result<Automation
         .automations
         .into_iter()
         .find(|automation| automation.id == id)
-        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, format!("自动化不存在: {id}")))
+        .ok_or_else(|| {
+            ControlError::because(
+                ControlErrorCode::NotFound,
+                ControlReason::AutomationNotFound { id: id.to_string() },
+            )
+        })
 }
 
 fn apply_automation(
@@ -1548,10 +1585,11 @@ fn create_agent_conversation(
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     event_hub: &EventHubHandle,
-) -> Result<smelt_core::session_control::CreatedAgentConversation, String> {
+) -> Result<smelt_core::session_control::CreatedAgentConversation, ControlError> {
     let conversation =
         smelt_core::session_control::agent_conversation_session(agent_definition_id)?;
-    super::acp_host::open_daemon_conversation(&conversation, sessions, acp_sessions, event_hub)?;
+    super::acp_host::open_daemon_conversation(&conversation, sessions, acp_sessions, event_hub)
+        .map_err(|error| ControlError::new(ControlErrorCode::OperationFailed, error))?;
     Ok(smelt_core::session_control::CreatedAgentConversation {
         session_id: conversation.sid,
         agent_definition_id: agent_definition_id.trim().to_string(),
@@ -1767,6 +1805,22 @@ mod tests {
             serde_json::json!({"session_id": "acp-nope", "digest": "abc"}),
         );
         assert_eq!(bad["error"]["code"], "invalid_params");
+    }
+
+    #[test]
+    fn conversation_delivery_is_dispatched() {
+        let prompt = dispatch_for_test(
+            "conversation.prompt",
+            serde_json::json!({"session_id": "acp-nope", "delivery_id": "d1", "text": "hi"}),
+        );
+        assert_eq!(prompt["error"]["code"], "not_found");
+
+        let result = dispatch_for_test(
+            "conversation.turn_result",
+            serde_json::json!({"session_id": "acp-nope", "delivery_id": "d1"}),
+        );
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["result"]["status"], "unknown");
     }
 
     #[test]

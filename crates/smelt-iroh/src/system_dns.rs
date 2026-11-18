@@ -68,7 +68,7 @@ impl Resolver for SystemResolver {
     fn lookup_txt(&self, host: String) -> BoxFuture<Result<BoxIter<TxtRecordData>, DnsError>> {
         Box::pin(async move {
             Err(DnsError::from(AnyError::from(format!(
-                "系统解析器不支持 TXT 查询（{host}）"
+                "the system resolver doesn't support TXT lookups ({host})"
             ))))
         })
     }

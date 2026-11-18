@@ -37,6 +37,8 @@ pub fn set_push_registration(registration: Option<PushRegistration>) {
             success: registration.success,
             payload_version: smelt_model::remote_config::PUSH_PAYLOAD_VERSION,
             message: registration.message,
+            // 推送摘要里运行时自己说的话按这台手机的界面语言说（启动时按系统语言定好）。
+            locale: Some(rust_i18n::locale().to_string()),
         }),
         None => Desired::Off,
     };

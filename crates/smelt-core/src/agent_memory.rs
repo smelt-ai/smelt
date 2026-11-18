@@ -160,9 +160,9 @@ struct TrustedStamp {
 /// 给写入再记来源留一点文件系统时间戳粒度余量。
 const EXTERNAL_MODIFY_GRACE_MS: i64 = 5_000;
 
-const NO_PROVENANCE_REASON: &str = "无来源记录，需用户采纳后生效";
-const EXTERNAL_MODIFY_REASON: &str = "文件在记录来源后被外部修改，需重新采纳";
-const LEGACY_BACKFILL_REASON: &str = "升级迁移：升级前已有的记忆";
+const NO_PROVENANCE_REASON: &str = smelt_model::agent_memory::PENDING_NO_PROVENANCE;
+const EXTERNAL_MODIFY_REASON: &str = smelt_model::agent_memory::PENDING_MODIFIED_OUTSIDE;
+const LEGACY_BACKFILL_REASON: &str = smelt_model::agent_memory::PENDING_LEGACY_BACKFILL;
 /// 写在回填行的 `session_id` 上。这类行的 `written_at_ms` 就是当时的 mtime，不再留 5 秒余量。
 pub const LEGACY_BACKFILL_MARKER: &str = "legacy-backfill-v1";
 
@@ -272,7 +272,7 @@ pub fn ensure_legacy_trust_backfill(store: &smelt_store::Store) -> Result<(), Me
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(MemoryRequestError::Store(format!(
-                    "读取记忆目录 {} 失败：{error}",
+                    "couldn't read the memory directory {}: {error}",
                     dir.display()
                 )));
             }
@@ -454,7 +454,7 @@ fn delete_memory_with(
     let file_name = canonical_memory_file_name(file_name).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("不是记忆文件：{file_name}"),
+            format!("not a memory file: {file_name}"),
         )
     })?;
     match std::fs::remove_file(memory_disk_path(dir, &file_name)) {
@@ -504,7 +504,7 @@ pub fn delete_for_agent(
     file_name: &str,
 ) -> std::io::Result<()> {
     let (scope, dir) = layer_scope_and_dir(agent_id, layer)
-        .ok_or_else(|| std::io::Error::other("找不到记忆目录"))?;
+        .ok_or_else(|| std::io::Error::other("can't find the memory directory"))?;
     delete_memory(&dir, &scope, file_name)
 }
 
@@ -514,7 +514,7 @@ pub fn approve_for_agent(
     file_name: &str,
 ) -> std::io::Result<()> {
     let (scope, dir) = layer_scope_and_dir(agent_id, layer)
-        .ok_or_else(|| std::io::Error::other("找不到记忆目录"))?;
+        .ok_or_else(|| std::io::Error::other("can't find the memory directory"))?;
     approve_memory_in(&store()?, &scope, &dir, file_name)
 }
 
@@ -523,7 +523,7 @@ pub fn approve_memory(scope: &MemoryScope, file_name: &str) -> std::io::Result<(
         MemoryScope::Agent(id) => crate::agent_definition_store::agent_memory_dir(id),
         MemoryScope::User => crate::agent_definition_store::user_memory_dir(),
     }
-    .ok_or_else(|| std::io::Error::other("找不到记忆目录"))?;
+    .ok_or_else(|| std::io::Error::other("can't find the memory directory"))?;
     approve_memory_in(&store()?, scope, &dir, file_name)
 }
 
@@ -538,18 +538,18 @@ fn approve_memory_in(
     let file_name = canonical_memory_file_name(file_name).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("不是记忆文件：{file_name}"),
+            format!("not a memory file: {file_name}"),
         )
     })?;
     let path = memory_disk_path(dir, &file_name);
     if !path.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "记忆文件不存在，无法采纳",
+            "The memory file doesn't exist, so it can't be adopted",
         ));
     }
-    let file_mtime_ms =
-        mtime_ms(&path).ok_or_else(|| std::io::Error::other("读不到记忆文件的修改时间"))?;
+    let file_mtime_ms = mtime_ms(&path)
+        .ok_or_else(|| std::io::Error::other("can't read the memory file's modification time"))?;
     let stamp_ms = chrono::Utc::now().timestamp_millis().max(file_mtime_ms);
     store
         .approve_memory(&scope.key(), &file_name, stamp_ms)
@@ -572,9 +572,9 @@ pub enum MemoryRequestError {
 impl std::fmt::Display for MemoryRequestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoSuchLayer => formatter.write_str("这次会话没有这一层记忆"),
-            Self::InvalidFile => formatter.write_str("不是记忆文件"),
-            Self::Disabled => formatter.write_str("这个智能体的记忆已关闭"),
+            Self::NoSuchLayer => formatter.write_str("This session doesn't have this memory layer"),
+            Self::InvalidFile => formatter.write_str("Not a memory file"),
+            Self::Disabled => formatter.write_str("Memory is off for this agent"),
             Self::Store(error) => formatter.write_str(error),
         }
     }

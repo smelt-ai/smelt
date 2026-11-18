@@ -10,6 +10,20 @@
 //! 按实例建的视图（[`ViewSpec::instances`]，如每段会话一份的终端）不归布局：别的插件用
 //! [`create_view`] 按参数建一份，自己摆、自己留着（JS 插件用 `smelt-ui` 的
 //! `SmeltViewInstance`）；只想放进主窗口看的用 [`OPEN_VIEW`] 带参数打开，宿主建一份放进出口。
+//!
+//! # 插槽
+//!
+//! 一个插件想让别的插件往自己的界面里加东西（会话行首的头像、智能体编辑器里的一张卡），就
+//! 定一个插槽：插槽 id（`<自己的来源>/<名字>`）、给填充视图的参数、能填几个、摆成什么样，
+//! 都写在它自己的 `contract.rs` 里。往里填的插件登记一个按实例建的视图，在
+//! [`ViewSpec::fills`] 里写上插槽 id，照抄参数的形状。定插槽的一方用 [`slot_views`] 取填进来
+//! 的视图，按参数 [`create_view`]、自己摆，没人填就画自己的退路；它不认识填的是谁，填的
+//! 插件装上、换掉、删掉，它都不用改。
+//!
+//! 和直接点名 [`create_view`] 的分别在依赖方向：使用方离不开的能力（会话里的终端、对话）
+//! 由使用方点名提供方；可有可无的附加（装饰、额外的卡）由附加的一方认插槽，被附加的一方不
+//! 认识它。宿主只记谁填了哪个插槽，不登记插槽本身：插槽的权威定义在定它的插件里，填的一方
+//! 可能比它先登记。
 
 use std::rc::Rc;
 
@@ -17,7 +31,7 @@ use gpui::{AnyView, App, Context, Entity, FocusHandle, Global, Render, SharedStr
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Command, HostEvent, SettingsEntry};
+use crate::{Command, HostEvent, SettingsEntry, Text};
 
 /// 打开一个视图：哪页的布局里摆了它就去那页让它露出来，哪页都没摆就放进出口（见
 /// [`crate::page`]）；设置页在设置里打开、停在这一页。再把 `args` 交给它
@@ -113,7 +127,8 @@ pub fn view_badge(id: &str, cx: &App) -> Option<SharedString> {
 pub struct ViewSpec {
     /// 来源内的名字，不含 `/`。视图 id 是 `<来源>/<名字>`。
     pub name: SharedString,
-    pub title: SharedString,
+    /// 给人看的名字，跟着界面语言变（见 [`crate::Text`]）。
+    pub title: Text,
     /// 图标的资源路径，如 `IconName::LayoutDashboard.path()`。
     pub icon: SharedString,
     /// 视图自己画顶上那一条（拖窗口、给红黄绿按钮让位、标题）：单独一组时外壳不给它画
@@ -128,6 +143,9 @@ pub struct ViewSpec {
     /// 会话一份的终端和对话。宿主不把它摆进布局，不给它入口；[`OPEN_VIEW`] 带参数打开时
     /// 建一份放进出口。不能是设置页。
     pub instances: bool,
+    /// 往哪些插槽里填（插槽 id，`<来源>/<名字>`，见模块文档的「插槽」）。只有按实例建的
+    /// 视图能填；填几个插槽，每个插槽给的参数形状都要认得。不填是空的。
+    pub fills: Vec<SharedString>,
     /// 第一次露出来时建视图；之后一直用这一份，直到登记被替换或撤下。按实例建的每次
     /// [`create_view`] 建一份新的。
     pub build: ViewBuilder,
@@ -136,7 +154,8 @@ pub struct ViewSpec {
 /// 建视图的函数。
 pub type ViewBuilder = Rc<dyn Fn(&mut Window, &mut App) -> Rc<dyn ViewHandle>>;
 
-/// 登记过的一个视图：登记时给的，加上 id。
+/// 登记过的一个视图：登记时给的，加上 id。标题是取的时候那种界面语言下的字，存着它的
+/// 在 [`HostEvent::LocaleChanged`] 时重取。
 #[derive(Clone)]
 pub struct ViewInfo {
     /// `<来源>/<名字>`。
@@ -146,13 +165,25 @@ pub struct ViewInfo {
     pub draws_top_bar: bool,
     pub settings: Option<SettingsEntry>,
     pub instances: bool,
+    pub fills: Vec<SharedString>,
     pub build: ViewBuilder,
 }
 
 struct Entry {
     owner: String,
+    /// 标题在 `title` 里，`info.title` 不用，取的时候按当前语言填（[`Entry::info`]）。
     info: ViewInfo,
+    title: Text,
     view: Option<Rc<dyn ViewHandle>>,
+}
+
+impl Entry {
+    fn info(&self) -> ViewInfo {
+        ViewInfo {
+            title: self.title.get(),
+            ..self.info.clone()
+        }
+    }
 }
 
 #[derive(Default)]
@@ -171,30 +202,48 @@ pub fn register_views(owner: &str, specs: Vec<ViewSpec>, cx: &mut App) -> Result
     if owner.is_empty() || owner.contains('/') {
         return Err(format!("视图来源「{owner}」不能为空，也不能含 `/`"));
     }
-    let mut infos: Vec<ViewInfo> = Vec::with_capacity(specs.len());
+    let mut infos: Vec<(ViewInfo, Text)> = Vec::with_capacity(specs.len());
     for spec in specs {
         if spec.name.is_empty() || spec.name.contains('/') {
             return Err(format!("视图名「{}」不能为空，也不能含 `/`", spec.name));
         }
         let id: SharedString = format!("{owner}/{}", spec.name).into();
-        if infos.iter().any(|info| info.id == id) {
+        if infos.iter().any(|(info, _)| info.id == id) {
             return Err(format!("视图「{id}」登记了两次"));
         }
-        if spec.title.trim().is_empty() {
+        if spec.title.get().trim().is_empty() {
             return Err(format!("视图「{id}」没有标题"));
         }
         if spec.instances && spec.settings.is_some() {
             return Err(format!("视图「{id}」按实例建，不能是设置页"));
         }
-        infos.push(ViewInfo {
-            id,
-            title: spec.title,
-            icon: spec.icon,
-            draws_top_bar: spec.draws_top_bar,
-            settings: spec.settings,
-            instances: spec.instances,
-            build: spec.build,
-        });
+        if !spec.fills.is_empty() && !spec.instances {
+            return Err(format!("视图「{id}」不是按实例建的，不能填插槽"));
+        }
+        for (index, slot) in spec.fills.iter().enumerate() {
+            let valid = slot.split_once('/').is_some_and(|(owner, name)| {
+                !owner.is_empty() && !name.is_empty() && !name.contains('/')
+            });
+            if !valid {
+                return Err(format!("视图「{id}」填的插槽「{slot}」要是 <来源>/<名字>"));
+            }
+            if spec.fills[..index].contains(slot) {
+                return Err(format!("视图「{id}」填了两次插槽「{slot}」"));
+            }
+        }
+        infos.push((
+            ViewInfo {
+                id,
+                title: SharedString::default(),
+                icon: spec.icon,
+                draws_top_bar: spec.draws_top_bar,
+                settings: spec.settings,
+                instances: spec.instances,
+                fills: spec.fills,
+                build: spec.build,
+            },
+            spec.title,
+        ));
     }
     let views = &mut cx.default_global::<ViewRegistry>().views;
     let at = views
@@ -210,7 +259,7 @@ pub fn register_views(owner: &str, specs: Vec<ViewSpec>, cx: &mut App) -> Result
     }
     let entries: Vec<Entry> = infos
         .into_iter()
-        .map(|info| {
+        .map(|(info, title)| {
             let view = old
                 .iter_mut()
                 .find(|old| old.info.id == info.id && Rc::ptr_eq(&old.info.build, &info.build))
@@ -218,6 +267,7 @@ pub fn register_views(owner: &str, specs: Vec<ViewSpec>, cx: &mut App) -> Result
             Entry {
                 owner: owner.to_string(),
                 info,
+                title,
                 view,
             }
         })
@@ -250,11 +300,20 @@ pub fn unregister_views(owner: &str, cx: &mut App) {
 /// 登记过的视图，按登记顺序。只读内存，render 里可以调。
 pub fn views(cx: &App) -> Vec<ViewInfo> {
     cx.try_global::<ViewRegistry>()
+        .map(|registry| registry.views.iter().map(Entry::info).collect())
+        .unwrap_or_default()
+}
+
+/// 填进插槽 `slot` 的视图，按登记顺序；没人填是空的。只读内存，render 里可以调；建实例
+/// 要窗口，在事件里建。填的视图换了发 [`HostEvent::ViewsChanged`]。
+pub fn slot_views(slot: &str, cx: &App) -> Vec<ViewInfo> {
+    cx.try_global::<ViewRegistry>()
         .map(|registry| {
             registry
                 .views
                 .iter()
-                .map(|entry| entry.info.clone())
+                .filter(|entry| entry.info.fills.iter().any(|fill| fill.as_ref() == slot))
+                .map(Entry::info)
                 .collect()
         })
         .unwrap_or_default()
@@ -262,7 +321,7 @@ pub fn views(cx: &App) -> Vec<ViewInfo> {
 
 /// 一个登记过的视图；没登记是 `None`。只读内存。
 pub fn view(id: &str, cx: &App) -> Option<ViewInfo> {
-    Some(entry(id, cx)?.info.clone())
+    Some(entry(id, cx)?.info())
 }
 
 /// 这个 id 有没有登记。只读内存，render 里可以调：别的视图据此决定要不要给「去那里」的入口。
@@ -412,6 +471,7 @@ mod tests {
             draws_top_bar: false,
             settings: None,
             instances: false,
+            fills: Vec::new(),
             build: Rc::new(|_, cx| -> Rc<dyn ViewHandle> { Rc::new(cx.new(|_| Blank)) }),
         }
     }
@@ -475,6 +535,21 @@ mod tests {
             let mut settings = instance_spec("b");
             settings.settings = Some(SettingsEntry::default());
             assert!(register_views("trader", vec![settings], cx).is_err());
+            // 只有按实例建的能填插槽，插槽 id 要是 <来源>/<名字>，不能填两次。
+            let mut page = spec("b");
+            page.fills = vec!["host/slot".into()];
+            assert!(register_views("trader", vec![page], cx).is_err());
+            for fills in [
+                vec!["slot".into()],
+                vec!["/slot".into()],
+                vec!["host/".into()],
+                vec!["host/a/b".into()],
+                vec!["host/slot".into(), "host/slot".into()],
+            ] {
+                let mut fill = instance_spec("b");
+                fill.fills = fills;
+                assert!(register_views("trader", vec![fill], cx).is_err());
+            }
             assert_eq!(ids(cx), ["trader/a"]);
         });
     }
@@ -503,6 +578,35 @@ mod tests {
 
             assert!(create_view("term/main", &args, window, cx).is_err());
             assert!(create_view("term/missing", &args, window, cx).is_err());
+        });
+    }
+
+    /// 插槽里是填它的视图，按登记顺序；填的插件撤下了就没了。
+    #[gpui::test]
+    fn slot_views_follow_registration(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let fill = |name: &str, slots: &[&str]| ViewSpec {
+                fills: slots
+                    .iter()
+                    .map(|slot| (*slot).to_string().into())
+                    .collect(),
+                ..instance_spec(name)
+            };
+            let slot_ids = |slot: &str, cx: &App| -> Vec<String> {
+                slot_views(slot, cx)
+                    .into_iter()
+                    .map(|view| view.id.into())
+                    .collect()
+            };
+            assert!(slot_views("host/card", cx).is_empty());
+            register_views("a", vec![fill("card", &["host/card", "host/row"])], cx).unwrap();
+            register_views("b", vec![fill("card", &["host/card"]), spec("main")], cx).unwrap();
+            assert_eq!(slot_ids("host/card", cx), ["a/card", "b/card"]);
+            assert_eq!(slot_ids("host/row", cx), ["a/card"]);
+            assert!(slot_views("host/other", cx).is_empty());
+            unregister_views("a", cx);
+            assert_eq!(slot_ids("host/card", cx), ["b/card"]);
+            assert!(slot_views("host/row", cx).is_empty());
         });
     }
 

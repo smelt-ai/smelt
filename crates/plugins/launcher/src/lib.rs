@@ -22,11 +22,14 @@ use api::ui::window_bar::window_bar;
 use api::ui::{Button, ListRow, ui_theme};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_kit_assets::IconName;
+use rust_i18n::t;
+use smelt_plugin_api::ui::IconName;
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 use smelt_plugin_api::{
-    self as api, HostEvent, OpenView, PluginView, RunCommand, ViewHandle, ViewSpec,
+    self as api, HostEvent, OpenView, PluginView, RunCommand, ViewHandle, ViewSpec, text,
 };
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 const OWNER: &str = "smelt.launcher";
 /// 新对话和入口列表。不带参数。
@@ -46,21 +49,23 @@ pub fn register(cx: &mut App) {
         vec![
             ViewSpec {
                 name: "nav".into(),
-                title: "入口".into(),
+                title: text!("view.nav"),
                 icon: IconName::LayoutGrid.path(),
                 // 一列入口，不要外壳的标题带。
                 draws_top_bar: true,
                 instances: false,
                 settings: None,
+                fills: Vec::new(),
                 build: Rc::new(|_, cx| Rc::new(cx.new(Nav::new)) as Rc<dyn ViewHandle>),
             },
             ViewSpec {
                 name: "settings".into(),
-                title: "设置".into(),
+                title: text!("view.settings"),
                 icon: IconName::Settings.path(),
                 draws_top_bar: true,
                 instances: false,
                 settings: None,
+                fills: Vec::new(),
                 build: Rc::new(|_, cx| Rc::new(cx.new(SettingsButton::new)) as Rc<dyn ViewHandle>),
             },
         ],
@@ -79,6 +84,8 @@ fn affects_launcher(event: &HostEvent) -> bool {
             | HostEvent::CommandsChanged
             | HostEvent::ViewBadgesChanged
             | HostEvent::ShownViewsChanged
+            // 入口上的名字是视图标题的快照。
+            | HostEvent::LocaleChanged
     )
 }
 
@@ -313,13 +320,16 @@ impl PluginView for SettingsButton {
 }
 
 impl Render for SettingsButton {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let attention = self.state.attention;
+        // 自己就是一行：贴着窗口下面的角时两头给窗口圆角让位，不贴时留标准边距。
+        let insets = api::safe_area(cx.entity_id(), cx).bar_insets();
         // 普通入口，不做成通栏的大按钮。
         div()
             .size_full()
             .min_w_0()
-            .px_2()
+            .pl(insets.left)
+            .pr(insets.right)
             .flex()
             .items_center()
             .when(self.state.available, |bar| {
@@ -332,7 +342,7 @@ impl Render for SettingsButton {
                             Button::new("launcher-settings-button")
                                 .quiet()
                                 .icon(IconName::Settings)
-                                .label("设置")
+                                .label(t!("settings"))
                                 .on_click(|_, _, cx| run(SETTINGS, cx)),
                         )
                         .when(attention, |slot| {
@@ -378,7 +388,7 @@ fn report_failure<T: 'static>(ran: Task<Result<T, String>>, cx: &mut App) {
 fn notify_error(message: String, cx: &mut App) {
     eprintln!("[launcher] {message}");
     let notify = api::Notify {
-        subtitle: "错误".to_string(),
+        subtitle: t!("notify.error").to_string(),
         body: message,
         ..Default::default()
     };

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
+use rust_i18n::t;
+
 /// 一个支持打开项目目录的本地 IDE。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InstalledIde {
@@ -171,15 +173,15 @@ pub(crate) fn detect_installed() -> Vec<InstalledIde> {
 }
 
 /// 当前平台文件管理器在菜单中使用的名称。
-pub(crate) fn file_manager_label() -> &'static str {
+pub(crate) fn file_manager_label() -> smelt_plugin_api::Text {
     #[cfg(target_os = "macos")]
     {
-        "Finder"
+        "Finder".into()
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        "文件管理器"
+        smelt_plugin_api::text!("file_manager")
     }
 }
 
@@ -200,7 +202,7 @@ pub(crate) fn file_manager_icon() -> Option<Arc<gpui::Image>> {
 /// 在指定 IDE 中打开目录。该函数不等待 IDE 退出，只负责把启动请求交给系统。
 pub(crate) fn open_in(ide: &InstalledIde, path: &Path) -> Result<(), String> {
     if !path.is_dir() {
-        return Err(format!("项目目录不存在或不可访问：{}", path.display()));
+        return Err(t!("error.no_directory", path = path.display()).into_owned());
     }
 
     let mut command = match &ide.launcher {
@@ -219,7 +221,7 @@ pub(crate) fn open_in(ide: &InstalledIde, path: &Path) -> Result<(), String> {
         }
         #[cfg(not(target_os = "macos"))]
         Launcher::MacApp(_) => {
-            return Err(format!("{} 只能在 macOS 上启动", ide.label));
+            return Err(t!("error.macos_only", app = ide.label).into_owned());
         }
     };
 
@@ -229,7 +231,7 @@ pub(crate) fn open_in(ide: &InstalledIde, path: &Path) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("启动 {} 失败：{error}", ide.label))
+        .map_err(|error| t!("error.launch_failed", app = ide.label, error = error).into_owned())
 }
 
 fn executable_in_path(program: &str) -> bool {

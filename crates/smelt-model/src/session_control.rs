@@ -94,6 +94,12 @@ pub struct DaemonConversation {
     pub option: AcpAgentOption,
     /// 接着哪段 provider 对话聊。
     pub resume_id: Option<String>,
+    /// 建它的一方给它起的名字，记成用户起的名字（`custom_title`）。没给就按智能体名、agent
+    /// 显示，之后跟着 agent 报的标题走。
+    pub title: Option<String>,
+    /// agent 不许用的工具（`session.create` 的 `disallowed_tools`）。只交给这次拉起的 runtime，
+    /// 不进工作区目录。
+    pub disallowed_tools: Vec<String>,
 }
 
 impl DaemonConversation {
@@ -105,13 +111,15 @@ impl DaemonConversation {
             "launch": self.option.launch,
             "agent": self.option.kind,
             "resume_id": self.resume_id,
+            "disallowed_tools": self.disallowed_tools,
         })
     }
 
-    /// 进工作区目录的那一条。不存名字：没人起过名的对话按智能体名、agent 显示。
+    /// 进工作区目录的那一条。没人起过名的对话不存名字，按智能体名、agent 显示。
     pub fn directory_entry(&self, conversation_id: String) -> WorkspaceConversation {
         WorkspaceConversation {
             id: conversation_id,
+            custom_title: self.title.clone(),
             acp: Some(WorkspaceAcp {
                 cwd: Some(self.cwd.clone()),
                 sid: self.sid.clone(),
@@ -372,6 +380,8 @@ mod daemon_conversation_tests {
                 history_dir: None,
             },
             resume_id: Some("r1".to_string()),
+            title: None,
+            disallowed_tools: Vec::new(),
         };
         let entry = conversation.directory_entry("conv-1".to_string());
         assert_eq!(entry.id, "conv-1");

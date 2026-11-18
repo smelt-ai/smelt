@@ -2,6 +2,7 @@
 //! 直接喂目录。
 
 use chrono::{Datelike, Local, TimeZone};
+use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::runtime_path::PathStyle;
 use smelt_plugin_api::model::workspace_directory::{
@@ -208,12 +209,14 @@ pub(crate) fn title_of(conversation: &WorkspaceConversation) -> String {
             })
         })
         .filter(|title| !title.trim().is_empty())
-        .unwrap_or(if conversation.acp.is_some() {
-            "未命名对话"
-        } else {
-            "终端"
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if conversation.acp.is_some() {
+                t!("row.untitled").into_owned()
+            } else {
+                t!("row.terminal").into_owned()
+            }
         })
-        .to_string()
 }
 
 /// 「归档于 11-14 10:32」，不是今年的写年份。
@@ -225,9 +228,9 @@ fn archived_when(at: i64, now: i64) -> String {
         return String::new();
     };
     if at.year() == now.year() {
-        format!("归档于 {}", at.format("%m-%d %H:%M"))
+        t!("row.archived_at", time = at.format("%m-%d %H:%M")).into_owned()
     } else {
-        format!("归档于 {}", at.format("%Y-%m-%d"))
+        t!("row.archived_at", time = at.format("%Y-%m-%d")).into_owned()
     }
 }
 

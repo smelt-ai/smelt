@@ -74,12 +74,12 @@ fn destination_dir(system_writable: bool, home: &Path) -> PathBuf {
 /// 不退出、不重开：调用方先 [`relaunch_after_exit`]，再退出这个进程。
 pub fn move_to_applications() -> anyhow::Result<PathBuf> {
     let bundle = crate::updater::current_app_bundle()?;
-    let home = dirs::home_dir().context("找不到用户目录")?;
+    let home = dirs::home_dir().context("couldn't find the home directory")?;
     let dir = destination_dir(is_writable_dir(Path::new(SYSTEM_APPLICATIONS)), &home);
-    std::fs::create_dir_all(&dir).with_context(|| format!("建不了 {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("couldn't create {}", dir.display()))?;
     let name = bundle
         .file_name()
-        .context("App 路径没有文件名")?
+        .context("the app path has no file name")?
         .to_os_string();
     let destination = dir.join(&name);
 
@@ -97,11 +97,14 @@ pub fn move_to_applications() -> anyhow::Result<PathBuf> {
         .and_then(|()| {
             if destination.exists() {
                 move_to_trash(&destination).with_context(|| {
-                    format!("{} 已有一份，移不到废纸篓", destination.display())
+                    format!(
+                        "{} already exists and couldn't be moved to the Trash",
+                        destination.display()
+                    )
                 })?;
             }
             std::fs::rename(&staging, &destination)
-                .with_context(|| format!("放不进 {}", destination.display()))
+                .with_context(|| format!("couldn't put it in {}", destination.display()))
         });
     if let Err(error) = placed {
         let _ = std::fs::remove_dir_all(&staging);
@@ -135,7 +138,7 @@ pub fn relaunch_after_exit(app: &Path) -> anyhow::Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .context("安排重新打开失败")?;
+        .context("couldn't schedule the relaunch")?;
     Ok(())
 }
 
@@ -146,7 +149,7 @@ fn copy_bundle(source: &Path, destination: &Path) -> anyhow::Result<()> {
         .output()?;
     if !output.status.success() {
         anyhow::bail!(
-            "拷贝 App 失败：{}",
+            "copying the app failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -165,7 +168,10 @@ fn clear_quarantine(bundle: &Path) -> anyhow::Result<()> {
         .arg(bundle)
         .output()?;
     if still.status.success() {
-        anyhow::bail!("去不掉 {} 的隔离标记", bundle.display());
+        anyhow::bail!(
+            "couldn't remove the quarantine flag from {}",
+            bundle.display()
+        );
     }
     Ok(())
 }

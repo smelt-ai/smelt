@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::devices::Principal;
+use smelt_core::acp_session::ConversationEndReason;
 use smelt_runtime_client::protocol::control::ControlMethod;
 use smelt_runtime_client::protocol::daemon::{DaemonOperation, DaemonRequest};
 
@@ -108,19 +109,20 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
                             .any(|t| t.id.as_deref() == Some(id)))
             })
         });
-        let message = match blocked {
+        let rejection = match blocked {
             Ok(false) => None,
-            Ok(true) => Some("对话已归档，请先恢复".to_string()),
-            Err(error) => Some(error),
+            Ok(true) => Some((ConversationEndReason::Archived, String::new())),
+            Err(error) => Some((ConversationEndReason::OpenFailed, error)),
         };
-        if let Some(message) = message {
+        if let Some((reason, detail)) = rejection {
             if operation == DaemonOperation::AcpOpen {
-                crate::acp_host::write_rejected_acp_snapshot(conn, &v, &message);
+                crate::acp_host::write_rejected_acp_snapshot(conn, &v, reason, &detail);
             } else {
+                // 终端把这句直接写进输出，没有客户端措辞的机会；运行时不设语言，说英文。
                 let mut conn = conn;
                 write_terminal_error(
                     &mut conn,
-                    &message,
+                    &reason.describe(&detail),
                     v["rows"].as_u64().unwrap_or(24) as u16,
                     v["cols"].as_u64().unwrap_or(80) as u16,
                 );
@@ -156,14 +158,21 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
             let mut conn = conn;
             let result = (|| {
                 if principal.is_remote() {
-                    return Err("外观回执只接受本机桌面".to_string());
+                    return Err(
+                        "Appearance receipts are only accepted from the local desktop".to_string(),
+                    );
                 }
                 let peer = conn.peer_identity()?;
                 authenticate_first_party_desktop(&peer)?;
-                let receipt: smelt_event_protocol::AppearanceApplyReceipt =
-                    serde_json::from_value(v.get("receipt").cloned().ok_or("缺少外观回执")?)
-                        .map_err(|error| error.to_string())?;
-                event_hub.appearance_requests.respond(&peer, &receipt.request_id, receipt.outcome)
+                let receipt: smelt_event_protocol::AppearanceApplyReceipt = serde_json::from_value(
+                    v.get("receipt")
+                        .cloned()
+                        .ok_or("missing appearance receipt")?,
+                )
+                .map_err(|error| error.to_string())?;
+                event_hub
+                    .appearance_requests
+                    .respond(&peer, &receipt.request_id, receipt.outcome)
             })();
             let reply = match result {
                 Ok(()) => serde_json::json!({"ok": true}),
@@ -183,6 +192,7 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
             &event_hub,
         ),
         DaemonOperation::AcpSnapshot => handle_acp_snapshot(conn, &v, &acp_sessions, &event_hub),
+        DaemonOperation::AcpDebug => handle_acp_debug(conn, &v, &acp_sessions),
         DaemonOperation::AcpSkills => handle_acp_skills(conn, &v, &acp_sessions),
         DaemonOperation::AcpSubmitInput => {
             handle_acp_submit_input(conn, &v, &acp_sessions, &workspace_directory, &event_hub)
@@ -241,9 +251,9 @@ fn reject_unpaired<C: ClientSocket>(
         smelt_runtime_client::protocol::control::ControlResponse::<()>::error_with_version(
             version,
             request_id,
-            smelt_runtime_client::protocol::control::ControlError::new(
+            smelt_runtime_client::protocol::control::ControlError::because(
                 smelt_runtime_client::protocol::control::ControlErrorCode::PermissionDenied,
-                "这台设备还没有配对",
+                smelt_runtime_client::protocol::control::ControlReason::DeviceNotPaired,
             ),
         );
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);

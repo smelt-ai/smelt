@@ -15,6 +15,8 @@ pub enum DaemonOperation {
     AcpOpen,
     AcpWatch,
     AcpSnapshot,
+    /// 一次性取会话的调试数据（工具参数表、runtime debug），只给调试视图用。
+    AcpDebug,
     AcpSkills,
     AcpSubmitInput,
     AcpAction,
@@ -95,6 +97,7 @@ mod tests {
             (DaemonOperation::AcpOpen, "acp_open"),
             (DaemonOperation::AcpWatch, "acp_watch"),
             (DaemonOperation::AcpSnapshot, "acp_snapshot"),
+            (DaemonOperation::AcpDebug, "acp_debug"),
             (DaemonOperation::AcpSkills, "acp_skills"),
             (DaemonOperation::AcpSubmitInput, "acp_submit_input"),
             (DaemonOperation::AcpAction, "acp_action"),

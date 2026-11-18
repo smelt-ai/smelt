@@ -9,6 +9,7 @@
 //!
 //! 放掉实例只是断开这段画面，守护里的会话还在；结束会话是运行时的操作，由摆它的一方发。
 
+use rust_i18n::t;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -48,12 +49,13 @@ pub(crate) fn spec() -> ViewSpec {
     ViewSpec {
         // 来源内的名字，跟 `Command::name` 一样从约定里的 id 取。
         name: VIEW.split_once('/').map_or(VIEW, |(_, name)| name).into(),
-        title: "对话".into(),
+        title: api::text!("title"),
         icon: crate::ICON.into(),
         // 一段对话只画消息流和输入栏，顶栏归摆它的一方。
         draws_top_bar: false,
         instances: true,
         settings: None,
+        fills: Vec::new(),
         build: Rc::new(|_, cx| Rc::new(cx.new(ConversationInstance::new)) as Rc<dyn ViewHandle>),
     }
 }
@@ -99,7 +101,7 @@ impl ConversationInstance {
             return;
         };
         let Some(client) = api::host(cx).client(&args.machine, cx) else {
-            self.state = State::Failed(api::MACHINE_REMOVED.into());
+            self.state = State::Failed(api::machine_removed().into());
             cx.notify();
             return;
         };
@@ -137,6 +139,13 @@ impl ConversationInstance {
                     self.refresh_title(cx);
                 }
             }
+            HostEvent::LocaleChanged => {
+                self.refresh_title(cx);
+                if let State::Live(view) = &self.state {
+                    view.update(cx, |view, cx| view.relabel(window, cx));
+                }
+                cx.notify();
+            }
             _ => {}
         }
     }
@@ -159,7 +168,7 @@ impl ConversationInstance {
                 .find(|state| state.id == args.session_id)
                 .and_then(|state| state.conversation_name)
                 .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| "对话".to_string());
+                .unwrap_or_else(|| t!("title").into_owned());
             Some(match &args.machine {
                 RuntimeKey::Local => name,
                 RuntimeKey::Remote(id) => {
@@ -293,7 +302,7 @@ impl PluginView for ConversationInstance {
                 self.connect(window, cx);
             }
             Err(error) => {
-                self.state = State::Failed(format!("对话的参数不对：{error}").into());
+                self.state = State::Failed(t!("error.bad_args", error = error).into());
                 cx.notify();
             }
         }
@@ -329,7 +338,7 @@ impl Render for ConversationInstance {
                     .args
                     .as_ref()
                     .and_then(|args| args.placeholder.clone())
-                    .unwrap_or_else(|| "正在打开对话…".to_string());
+                    .unwrap_or_else(|| t!("status.opening").into_owned());
                 shell
                     .flex()
                     .items_center()
@@ -354,7 +363,7 @@ impl Render for ConversationInstance {
                     this.child(
                         Button::new("conversation-retry")
                             .small()
-                            .label("重试")
+                            .label(t!("action.retry"))
                             .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
                     )
                 }),
@@ -393,7 +402,7 @@ fn directory_view(
     let reason = args
         .placeholder
         .clone()
-        .unwrap_or_else(|| "正在恢复上次的对话…".to_string());
+        .unwrap_or_else(|| t!("status.restoring").into_owned());
     let view = cx.new(|cx| {
         ConversationView::placeholder(
             cx,
@@ -503,15 +512,18 @@ fn run_memory_action(
     let (task, failure) = match action.kind {
         MemoryActionKind::Approve => (
             api::call::<AgentMemoryApprove>(machine, params, api::CALL_TIMEOUT, cx),
-            "采纳失败",
+            t!("memory.approve"),
         ),
         MemoryActionKind::Delete => (
             api::call::<AgentMemoryDelete>(machine, params, api::CALL_TIMEOUT, cx),
-            "删除失败",
+            t!("memory.delete"),
         ),
     };
     cx.spawn(async move |cx| {
-        let error = task.await.err().map(|error| format!("{failure}：{error}"));
+        let error = task
+            .await
+            .err()
+            .map(|error| t!("error.failed", what = failure, error = error).into_owned());
         let _ = view.update(cx, |view, cx| view.finish_memory_action(error, cx));
     })
     .detach();
@@ -669,10 +681,10 @@ pub(crate) fn insert_text(
             .find_map(|(_, _, view)| view.upgrade())
     });
     let Some(view) = view else {
-        return Err(format!("对话「{}」没有开着", text.session_id));
+        return Err(t!("error.not_open", session = text.session_id).into_owned());
     };
     let Some(window) = window else {
-        return Err("主窗口没有打开".to_string());
+        return Err(t!("error.no_window").into_owned());
     };
     view.update(cx, |view, cx| {
         view.insert_prompt_text(&text.text, window, cx);

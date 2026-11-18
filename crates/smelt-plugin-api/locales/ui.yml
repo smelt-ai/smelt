@@ -1,0 +1,25 @@
+_version: 2
+machine_removed:
+  en: This machine has been removed
+  zh-CN: 这台机器已经移除
+command.no_main_window:
+  en: The main window isn't open
+  zh-CN: 主窗口没有打开
+command.missing:
+  en: There's no command "%{id}"
+  zh-CN: 没有命令「%{id}」
+command.not_applicable:
+  en: The command "%{id}" doesn't apply right now
+  zh-CN: 命令「%{id}」眼下不适用
+command.unfinished:
+  en: The command didn't finish
+  zh-CN: 命令没有执行完
+command.plugin_unloaded:
+  en: The plugin was unloaded before the command finished
+  zh-CN: 插件已卸下，命令没有执行完
+daemon_outdated:
+  en: The running smeltd is too old to support this. Upgrade the daemon and try again
+  zh-CN: 正在运行的 smeltd 版本较旧，还不支持这个操作；升级守护进程后重试
+no_remote_file_opener:
+  en: No plugin can open remote files
+  zh-CN: 没有能打开远程文件的插件

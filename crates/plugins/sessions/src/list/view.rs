@@ -1,37 +1,44 @@
-//! 会话列表视图：画 [`Sessions::sidebar`]，自己只留界面上的临时状态（行内改名、拖拽落点）。
-//! 从访达拖进来的文件夹在本机打开成项目。
+//! 会话列表视图：画 [`Sessions::sidebar`]，自己只留界面上的临时状态（行内改名、项目搜索框、
+//! 拖拽落点）和填进行首插槽的头像实例。从访达拖进来的文件夹在本机打开成项目。
 
+use rust_i18n::t;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, DragMoveEvent, Entity, ExternalPaths, FocusHandle,
+    AnyView, App, AppContext as _, Context, DragMoveEvent, Entity, ExternalPaths, FocusHandle,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    Styled as _, Subscription, Window, div, point, px,
+    SharedString, Styled as _, Subscription, Window, div, point, px,
 };
 use gpui_base::AutoScroll;
 use gpui_base::input::{Escape, InputEvent, InputState};
-use smelt_plugin_api::model::agent_status::AgentStatus;
 use smelt_plugin_api::model::control_api::{WorkspaceRename, WorkspaceWorksetRename};
 use smelt_plugin_api::model::workspace_directory::{
     WorkspaceRenameParams, WorkspaceWorksetRenameParams,
 };
 use smelt_plugin_api::ui::motion::{ambient_application_active, ambient_motion_enabled};
 use smelt_plugin_api::ui::scrollbar::{Scrollable, ScrollbarAxis};
-use smelt_plugin_api::ui::ui_theme;
 use smelt_plugin_api::ui::window_bar::window_bar;
-use smelt_plugin_api::{self as api, PluginView, RuntimeKey, ViewHandle};
+use smelt_plugin_api::ui::{ScrollAnchors, ui_theme};
+use smelt_plugin_api::{self as api, HostEvent, PluginView, RuntimeKey, ViewHandle, ViewInstance};
 
 use super::actions;
-use super::buddy::Stage;
 use super::motion::ListMotion;
+use super::offscreen;
 use super::rows::{self, ProjectDrag, RowCtx, SessionDrag};
+use super::session_flip;
 use crate::contract::ListArgs;
-use crate::model::{ConversationKey, Selection, Sessions};
+use crate::contract::{SESSION_AVATAR, SessionAvatarArgs};
+use crate::model::{ConversationKey, Sessions};
 
 /// 建会话列表视图（视图 [`crate::contract::LIST`]，`register` 登记）。只建一份。
-pub(crate) fn build_view(_: &mut Window, cx: &mut App) -> Rc<dyn ViewHandle> {
-    Rc::new(cx.new(ListView::new))
+pub(crate) fn build_view(window: &mut Window, cx: &mut App) -> Rc<dyn ViewHandle> {
+    Rc::new(cx.new(|cx| {
+        let mut view = ListView::new(window, cx);
+        view.sync_avatars(window, cx);
+        view
+    }))
 }
 
 pub(super) struct ListView {
@@ -39,29 +46,29 @@ pub(super) struct ListView {
     scroll: ScrollHandle,
     /// 正在行内改名的那一行。
     pub(super) rename: Option<Rename>,
+    /// 「项目」标题换成的搜索框；没在搜是 `None`。框里的字是 [`Sessions::project_filter`]
+    /// 的来源，边打边写过去。
+    pub(super) search: Option<Search>,
     /// 拖着走时落点在哪（哪一行的上沿或下沿）。只在拖着时画；拖完、放下时清掉。
     pub(super) drop: Option<DropHint>,
+    /// 拖着时拿起的是哪一项（`Sidebar::flip_order` 里的身份），原处画淡。拖拽牌子放掉时清掉。
+    pub(super) lifted: Option<String>,
     /// 拖着会话、项目停在列表上下边缘时自动滚，好拖到看不见的位置。
     auto_scroll: AutoScroll,
     /// 重排滑动、新会话落进列表、开始跑时图标亮一下。
     pub(super) motion: ListMotion,
-    /// 行首小人各在演什么（干活、喊你、欢呼、打招呼）。
-    buddies: Stage,
+    /// 行首头像用的视图：填 [`SESSION_AVATAR`] 插槽的里按用户的选择挑一个
+    /// （`model::AvatarChoice`）；没人填、选了不要是 `None`。
+    avatar_view: Option<SharedString>,
+    /// 侧栏里每段会话（折起来的也算）行首的头像，是 [`Self::avatar_view`] 的实例。
+    avatars: HashMap<ConversationKey, ViewInstance>,
+    /// [`Self::avatars`] 画出来用的那份，变了才换；没人填插槽是 `None`，行首画图标。
+    avatar_views: Option<Rc<HashMap<ConversationKey, AnyView>>>,
+    /// 列表里各行画在哪：可视区外的提示（[`offscreen`]）问它，选中变了让它把那行滚出来。
+    anchors: ScrollAnchors,
+    /// 上次看到的选中：变了就让新选中的那行露出来（从胶囊、通知、命令跳过来时它可能在可视区外）。
+    selected: Option<ConversationKey>,
     _subscriptions: Vec<Subscription>,
-}
-
-/// 侧栏里所有会话（折起来的也算）和它们的状态，给小人比前后。
-fn session_statuses(
-    sidebar: &super::Sidebar,
-) -> impl Iterator<Item = (&ConversationKey, AgentStatus)> {
-    sidebar.session_rows().map(|row| (&row.key, row.status))
-}
-
-fn selected_session(selection: &Selection) -> Option<&ConversationKey> {
-    match selection {
-        Selection::Session(key) => Some(key),
-        _ => None,
-    }
 }
 
 /// 行内改名。
@@ -79,6 +86,14 @@ pub(super) enum RenameTarget {
     Workset { machine: RuntimeKey, id: String },
 }
 
+/// 「项目」标题上的搜索框。
+pub(super) struct Search {
+    pub(super) input: Entity<InputState>,
+    /// 上次写进 [`Sessions::project_filter`] 的字。那边和它对不上就是别处清掉了搜索。
+    pushed: String,
+    _subscription: Subscription,
+}
+
 /// 落点：放在 `target` 的前面（`before`）还是后面。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DropHint {
@@ -93,33 +108,47 @@ pub(super) enum DropTarget {
 }
 
 impl ListView {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sessions = Sessions::global(cx);
         let motion = ListMotion::new(&sessions.read(cx).sidebar);
-        let buddies = {
-            let sessions = sessions.read(cx);
-            Stage::new(
-                session_statuses(&sessions.sidebar),
-                selected_session(&sessions.selection),
-                cx.background_executor().now(),
-            )
-        };
+        // 启动时恢复的选中也露出来：列表从顶上开始，它可能在下面。
+        let selected = sessions.read(cx).selection.session().cloned();
+        let scroll = ScrollHandle::new();
+        let anchors = ScrollAnchors::new(&scroll);
+        anchors.reveal(selected.as_ref().map(|key| session_flip(key).into()));
         let _subscriptions = vec![
             // 侧栏重算、选中变了都在 `Sessions` 上 notify。侧栏换了一份就比一下前后：重排、
-            // 刚开始跑的会话、刚在这里新建的会话露面了，各起各的动画。
-            cx.observe(&sessions, |this, sessions, cx| {
-                this.sidebar_changed(&sessions, cx);
+            // 刚开始跑的会话、刚在这里新建的会话露面了，各起各的动画；会话来了、走了，头像
+            // 跟着建、放。
+            cx.observe_in(&sessions, window, |this, sessions, window, cx| {
+                this.sidebar_changed(&sessions, window, cx);
                 cx.notify();
             }),
+            // 填行首插槽的视图来了、换了、撤下了：建齐头像，或都放掉改画图标。
+            cx.subscribe_in(
+                &api::events(cx),
+                window,
+                |this, _, event: &HostEvent, window, cx| {
+                    if matches!(event, HostEvent::ViewsChanged) {
+                        this.sync_avatars(window, cx);
+                    }
+                },
+            ),
         ];
         Self {
             focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
+            scroll,
             rename: None,
+            search: None,
             drop: None,
+            lifted: None,
             auto_scroll: AutoScroll::default(),
             motion,
-            buddies,
+            avatar_view: None,
+            avatars: HashMap::new(),
+            avatar_views: None,
+            anchors,
+            selected,
             _subscriptions,
         }
     }
@@ -186,7 +215,7 @@ impl ListView {
                 };
                 let renamed =
                     api::call::<WorkspaceRename>(&key.machine, params, api::CALL_TIMEOUT, cx);
-                crate::report_failure("改名", renamed, cx);
+                crate::report_failure(t!("action.rename"), renamed, cx);
             }
             // 工作树一定要有名字。
             RenameTarget::Workset { machine, id } => {
@@ -199,22 +228,98 @@ impl ListView {
                 };
                 let renamed =
                     api::call::<WorkspaceWorksetRename>(&machine, params, api::CALL_TIMEOUT, cx);
-                crate::report_failure("重命名工作树", renamed, cx);
+                crate::report_failure(t!("action.rename_workset"), renamed, cx);
             }
         }
     }
 
-    /// `Sessions` 通知了，比一下侧栏前后。选中变了也会通知，那时侧栏没变，只有小人看选中
-    /// （刚选中的闲着就打个招呼）。
-    fn sidebar_changed(&mut self, sessions: &Entity<Sessions>, cx: &mut Context<Self>) {
+    /// 点「项目」标题上的放大镜：标题换成搜索框并拿到焦点，边打边按名字搜项目。已经在搜就
+    /// 只把焦点放回去。Esc、清空后点别处收起（[`Self::close_search`]）。
+    pub(super) fn start_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = &self.search {
+            search.input.update(cx, |state, cx| state.focus(window, cx));
+            return;
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("list.search_projects").into_owned())
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+        let _subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    let query = input.read(cx).value().to_string();
+                    if let Some(search) = &mut this.search {
+                        search.pushed.clone_from(&query);
+                    }
+                    Sessions::global(cx)
+                        .update(cx, |sessions, cx| sessions.set_project_filter(query, cx));
+                }
+                // 回车：焦点交回列表，搜索留着，好用方向键在搜到的会话里走。
+                InputEvent::PressEnter { .. } => window.focus(&this.focus, cx),
+                // 没字了还点别处就收起（焦点留在点到的地方）；有字留着，标题一直是搜索框，看得出
+                // 列表是滤过的。
+                InputEvent::Blur if input.read(cx).value().is_empty() => {
+                    this.close_search(cx);
+                }
+                InputEvent::Blur | InputEvent::Focus => {}
+            },
+        );
+        self.search = Some(Search {
+            input,
+            pushed: String::new(),
+            _subscription,
+        });
+        cx.notify();
+    }
+
+    /// 收起搜索框，回到「项目」标题，列表回到不搜。返回原来有没有在搜。
+    fn close_search(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.search.take().is_none() {
+            return false;
+        }
+        Sessions::global(cx).update(cx, |sessions, cx| {
+            sessions.set_project_filter(String::new(), cx)
+        });
+        cx.notify();
+        true
+    }
+
+    /// Esc：在改名就取消改名，在搜就收起搜索，焦点交回列表。
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_some() {
+            self.cancel_rename(window, cx);
+        } else if self.close_search(cx) {
+            window.focus(&self.focus, cx);
+        }
+    }
+
+    /// `Sessions` 通知了，比一下侧栏前后。选中变了也会通知，那时侧栏没变。
+    fn sidebar_changed(
+        &mut self,
+        sessions: &Entity<Sessions>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 搜索在别处被清掉了（从通知跳到滤掉的项目里的会话，见 `Sessions::reveal`）：框也收起。
+        let filter = &sessions.read(cx).project_filter;
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.pushed != *filter)
+        {
+            self.search = None;
+        }
         let sidebar = sessions.read(cx).sidebar.clone();
+        let selected = sessions.read(cx).selection.session().cloned();
+        if selected != self.selected {
+            let reveal = selected.as_ref().map(|key| session_flip(key).into());
+            self.anchors.reveal(reveal);
+            self.selected = selected;
+        }
         let now = cx.background_executor().now();
         self.motion.track(&sidebar, now);
-        self.buddies.track(
-            session_statuses(&sidebar),
-            selected_session(&sessions.read(cx).selection),
-            now,
-        );
         let fresh = sessions
             .read(cx)
             .fresh
@@ -222,9 +327,66 @@ impl ListView {
             .filter(|key| sidebar.has_session(key));
         if let Some(key) = fresh {
             sessions.update(cx, |sessions, _| sessions.fresh = None);
-            self.buddies.greet(&key, now);
             self.motion.arrive(key, now);
         }
+        self.sync_avatars(window, cx);
+    }
+
+    /// 侧栏里每段会话备一个行首头像，没了的放掉。用的视图换了（填插槽的变了、用户换了选择）
+    /// 就全换；没人填、选了不要就都放掉，行首画图标。
+    fn sync_avatars(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let filled: Vec<SharedString> = api::slot_views(SESSION_AVATAR, cx)
+            .into_iter()
+            .map(|view| view.id)
+            .collect();
+        let filled = Sessions::global(cx).read(cx).avatar.pick(&filled).cloned();
+        if filled != self.avatar_view {
+            self.avatar_view = filled;
+            self.avatars.clear();
+            self.avatar_views = None;
+            cx.notify();
+        }
+        let Some(view_id) = self.avatar_view.clone() else {
+            return;
+        };
+        let sidebar = Sessions::global(cx).read(cx).sidebar.clone();
+        let keys: HashSet<&ConversationKey> = sidebar.session_rows().map(|row| &row.key).collect();
+        let before = self.avatars.len();
+        self.avatars.retain(|key, _| keys.contains(key));
+        let mut changed = self.avatar_views.is_none() || self.avatars.len() != before;
+        for key in keys {
+            if self.avatars.contains_key(key) {
+                continue;
+            }
+            let args = SessionAvatarArgs {
+                machine: key.machine.clone(),
+                conversation: key.id.clone(),
+            };
+            let created = api::serde_json::to_value(&args)
+                .map_err(|error| error.to_string())
+                .and_then(|args| api::create_view(&view_id, &args, window, cx));
+            match created {
+                Ok(avatar) => {
+                    self.avatars.insert(key.clone(), avatar);
+                    changed = true;
+                }
+                Err(error) => eprintln!("[sessions] 建不了「{}」的行首头像：{error}", key.id),
+            }
+        }
+        if changed {
+            let views = self
+                .avatars
+                .iter()
+                .map(|(key, avatar)| (key.clone(), avatar.view()))
+                .collect();
+            self.avatar_views = Some(Rc::new(views));
+            cx.notify();
+        }
+    }
+
+    /// 列表里一行有多宽：列表宽度去掉行两边的外边距（`mx_2`）。拖拽牌子照它的宽画。
+    pub(super) fn row_width(&self) -> Pixels {
+        (self.scroll.bounds().size.width - px(16.)).max(px(120.))
     }
 
     /// 落点变了才重画。
@@ -288,28 +450,36 @@ impl Render for ListView {
         }
         let sessions = Sessions::global(cx);
         let sessions = sessions.read(cx);
+        let notices = sessions
+            .sidebar
+            .notices_besides(sessions.selection.session());
+        let hint = offscreen::hint(&notices, |key| self.anchors.placement(key));
         let ctx = RowCtx {
             sidebar: sessions.sidebar.clone(),
             view: cx.entity(),
             selection: sessions.selection.clone(),
             drop: cx.has_active_drag().then(|| self.drop.clone()).flatten(),
+            // 松手时 GPUI 立刻重画，牌子却可能晚一帧才放掉：看有没有在拖，原处当场亮回来。
+            lifted: cx.has_active_drag().then(|| self.lifted.clone()).flatten(),
             rename: self
                 .rename
                 .as_ref()
                 .map(|rename| (rename.target.clone(), rename.input.clone())),
+            search: self.search.as_ref().map(|search| search.input.clone()),
             now: chrono::Utc::now().timestamp().max(0) as u64,
             motion,
-            buddies: self.buddies.frame(now, ambient && !cx.reduce_motion()),
+            avatars: self.avatar_views.clone(),
+            anchors: self.anchors.clone(),
         };
+        let rows = div()
+            .flex()
+            .flex_col()
+            .children(rows::sidebar(&ctx, window, cx));
         let content = div()
             .flex()
             .flex_col()
             .pb_3()
-            .children(rows::sidebar(&ctx, window, cx));
-        // 画出来的行里有在动的小人才要下一帧；都站着、看不见时不重绘。
-        if ctx.buddies.wants_frame() {
-            window.request_animation_frame();
-        }
+            .child(self.anchors.root(rows));
         let area = api::safe_area(cx.entity_id(), cx);
         // 滚过了才出上沿那条细线，下面还有才出下沿那条，和上下摆着的东西分开。线一直占着
         // 1px，只换颜色，出现时不跳。
@@ -324,8 +494,8 @@ impl Render for ListView {
             .id("sessions-list")
             .key_context("SessionsList")
             .track_focus(&self.focus)
-            // 改名时按 Esc：输入框自己用不上就往上传，在这里取消。
-            .on_action(cx.listener(|this, _: &Escape, window, cx| this.cancel_rename(window, cx)))
+            // 改名、搜索时按 Esc：输入框自己用不上就往上传，在这里取消改名或收起搜索。
+            .on_action(cx.listener(|this, _: &Escape, window, cx| this.escape(window, cx)))
             // 从访达拖文件夹进会话列表 = 在本机打开成项目。只挂在列表上，不挂整个窗口：对话
             // 输入框要自己收文件。底色铺一层选区色（焦点色带透明度），表示「放这里」。
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(ui_theme::selection()))
@@ -346,12 +516,19 @@ impl Render for ListView {
             })
             .child(edge(offset < px(0.)))
             .child(
-                div().flex_1().min_h_0().flex().flex_col().child(Scrollable::new(
-                    "sessions-list-scroll",
-                    content,
-                    &self.scroll,
-                    ScrollbarAxis::Vertical,
-                )),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(Scrollable::new(
+                        "sessions-list-scroll",
+                        content,
+                        &self.scroll,
+                        ScrollbarAxis::Vertical,
+                    ))
+                    .children(offscreen::pills(hint, self.anchors.top_inset())),
             )
             .child(edge(offset > -self.scroll.max_offset().y))
     }

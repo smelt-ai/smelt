@@ -154,9 +154,11 @@ function createInteraction(
 			// what it decided.
 			const preset = presets.answer(prompt as unknown as PresetPrompt);
 			if (preset) {
+				const question = String(prompt.message);
 				emit({
 					event: "progress",
-					message: `已代答「${String(prompt.message)}」：${preset.reason}`,
+					message: `Answered “${question}” for you: ${preset.reason}`,
+					note: { kind: preset.note, question },
 				});
 				return Promise.resolve(preset.value);
 			}
@@ -251,16 +253,16 @@ async function logout(providerId: string): Promise<void> {
 async function run(argv: string[]): Promise<void> {
 	const [command, providerId] = argv;
 	if (command === "list") return listProviders();
-	if (!providerId) throw new Error(`用法：${command ?? "<command>"} <providerId>`);
+	if (!providerId) throw new Error(`usage: ${command ?? "<command>"} <providerId>`);
 	if (command === "logout") return logout(providerId);
 	if (command === "models") return listModels(providerId);
 	if (command === "login") {
 		const typeIndex = argv.indexOf("--type");
 		const type = typeIndex >= 0 ? argv[typeIndex + 1] : "oauth";
-		if (type !== "oauth" && type !== "api_key") throw new Error(`未知登录方式：${type}`);
+		if (type !== "oauth" && type !== "api_key") throw new Error(`unknown login method: ${type}`);
 		return login(providerId, type, argv.includes("--ask-all"));
 	}
-	throw new Error(`未知命令：${command ?? ""}`);
+	throw new Error(`unknown command: ${command ?? ""}`);
 }
 
 try {

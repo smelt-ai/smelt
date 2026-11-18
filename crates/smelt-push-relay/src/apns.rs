@@ -44,11 +44,11 @@ impl Apns {
         let der = pem_body(p8)?;
         let rng = SystemRandom::new();
         let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der, &rng)
-            .map_err(|error| format!("APNs 私钥读不了：{error}"))?;
+            .map_err(|error| format!("couldn't read the APNs private key: {error}"))?;
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .map_err(|error| format!("建不了 HTTP 客户端：{error}"))?;
+            .map_err(|error| format!("couldn't build the HTTP client: {error}"))?;
         Ok(Self {
             client,
             key,
@@ -82,7 +82,7 @@ impl Apns {
         let signature = self
             .key
             .sign(&self.rng, signing_input.as_bytes())
-            .map_err(|_| "APNs 提供方令牌签名失败".to_string())?;
+            .map_err(|_| "couldn't sign the APNs provider token".to_string())?;
         Ok(format!(
             "{signing_input}.{}",
             URL_SAFE_NO_PAD.encode(signature.as_ref())
@@ -118,7 +118,7 @@ impl Apns {
             .await;
         let response = match response {
             Ok(response) => response,
-            Err(error) => return Outcome::Retry(format!("连不上 APNs：{error}")),
+            Err(error) => return Outcome::Retry(format!("couldn't reach APNs: {error}")),
         };
         let status = response.status().as_u16();
         if status == 200 {
@@ -142,12 +142,12 @@ fn outcome_of(status: u16, reason: &str) -> Outcome {
     match (status, reason) {
         (410, _) | (400, "BadDeviceToken" | "DeviceTokenNotForTopic") => Outcome::Unregistered,
         (403, "ExpiredProviderToken" | "InvalidProviderToken") => {
-            Outcome::Retry(format!("APNs 拒了提供方令牌：{reason}"))
+            Outcome::Retry(format!("APNs rejected the provider token: {reason}"))
         }
         (429, _) | (500..=599, _) => Outcome::Retry(format!("APNs {status} {reason}")),
         // 其余 403（证书、topic 没开推送）是中继自己配错了，换个时间重试也没用，但不是调用方的错：
         // 让运行时退避重试，运维看日志修。
-        (403, _) => Outcome::Retry(format!("APNs 拒绝：{reason}")),
+        (403, _) => Outcome::Retry(format!("APNs refused: {reason}")),
         _ => Outcome::BadRequest(format!("APNs {status} {reason}")),
     }
 }
@@ -160,7 +160,7 @@ fn pem_body(pem: &str) -> Result<Vec<u8>, String> {
         .collect();
     STANDARD
         .decode(body)
-        .map_err(|error| format!("APNs 私钥不是 PEM：{error}"))
+        .map_err(|error| format!("the APNs private key isn't PEM: {error}"))
 }
 
 fn unix_now() -> u64 {
