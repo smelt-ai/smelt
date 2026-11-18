@@ -29,6 +29,9 @@ const MENU_CONTEXT: &str = "SmeltMenu";
 /// 不收缩：项多时面板滚动，不能把行挤到只剩字高。
 const ROW_HEIGHT: f32 = 28.;
 const SURFACE_PADDING: f32 = 4.;
+/// 分隔线：1px 线，上下各留 2。
+const SEPARATOR_GAP: f32 = 2.;
+const SEPARATOR_HEIGHT: f32 = 1. + 2. * SEPARATOR_GAP;
 
 /// 安装菜单的键盘绑定。每个 App 初始化一次。
 pub fn init(cx: &mut App) {
@@ -140,6 +143,16 @@ enum Entry {
     Separator,
 }
 
+impl Entry {
+    /// 画出来的高度。行一律不收缩，所以就是这个值，滚动定位靠它算。
+    fn height(&self) -> f32 {
+        match self {
+            Entry::Separator => SEPARATOR_HEIGHT,
+            Entry::Item(_) | Entry::Label(_) => ROW_HEIGHT,
+        }
+    }
+}
+
 /// 菜单内容，按需在触发时构建。
 #[derive(Default)]
 pub struct Menu {
@@ -147,6 +160,8 @@ pub struct Menu {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     scroll: ScrollHandle,
     placement: Rc<Cell<Option<Placement>>>,
+    /// 打钩项已经滚到眼前。每次打开都重新构建菜单，所以只在第一次画时滚，之后由用户滚。
+    revealed: Cell<bool>,
 }
 
 impl Menu {
@@ -169,6 +184,28 @@ impl Menu {
             self.entries.push(Entry::Separator);
         }
         self
+    }
+
+    /// 第一个打钩项：单选列表（如模型）打开时要先看到当前选的是哪个。
+    fn checked(&self) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| matches!(entry, Entry::Item(item) if item.checked == Some(true)))
+    }
+
+    /// 第一次画时把打钩项滚到面板中间，上下都看得到邻居。行高都是定值，直接算，不等布局：
+    /// 等量好再滚，第一帧会先从顶上闪一下。超出可滚范围的部分由滚动容器自己夹住。
+    fn reveal_checked(&self, max_height: Pixels) {
+        if self.revealed.replace(true) {
+            return;
+        }
+        let Some(index) = self.checked() else {
+            return;
+        };
+        let top: f32 = self.entries[..index].iter().map(Entry::height).sum();
+        let center = SURFACE_PADDING + top + ROW_HEIGHT / 2.;
+        let offset = (px(center) - max_height / 2.).max(px(0.));
+        self.scroll.set_offset(gpui::point(px(0.), -offset));
     }
 
     fn selectable(&self, index: usize) -> bool {
@@ -345,7 +382,11 @@ impl MenuState {
         else {
             return false;
         };
-        let first = menu.next(None, true);
+        // 有打钩项就从它开始：打开时已经滚到它，从头开始会把列表跳回顶上。
+        let first = menu
+            .checked()
+            .filter(|ix| menu.selectable(*ix))
+            .or_else(|| menu.next(None, true));
         if let Some(index) = first {
             menu.scroll.scroll_to_item(index);
         }
@@ -655,7 +696,7 @@ fn render_menu(
                 div()
                     .h(px(1.))
                     .flex_shrink_0()
-                    .my(px(2.))
+                    .my(px(SEPARATOR_GAP))
                     .mx(px(-SURFACE_PADDING))
                     .bg(ui_theme::hair())
                     .into_any_element(),
@@ -822,6 +863,7 @@ fn render_menu(
         }
     }
     let max_height = (viewport_height * 0.5).min(px(450.)).max(px(0.));
+    menu.reveal_checked(max_height);
     let surface = div()
         .id(("menu", depth))
         .role(Role::Menu)
@@ -1270,6 +1312,61 @@ mod tests {
             window.update(|window, cx| window.draw(cx).clear(cx));
             assert_eq!(calls.get(), 1);
         }
+    }
+
+    struct LongProbe {
+        picked: Rc<Cell<Option<usize>>>,
+    }
+
+    impl gpui::Render for LongProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let picked = self.picked.clone();
+            MenuTrigger::context("long-probe", div().size_full(), move |_, _| {
+                let models = (0..30).fold(Menu::new(), |menu, ix| {
+                    let picked = picked.clone();
+                    menu.item(
+                        MenuItem::new(format!("Model {ix}"))
+                            .checked(ix == 20)
+                            .on_click(move |_, _, _| picked.set(Some(ix))),
+                    )
+                });
+                Menu::new().item(MenuItem::new("Model").submenu(models))
+            })
+        }
+    }
+
+    /// 长列表子菜单打开时打钩项已在可见区里，键盘进去也从它开始，不跳回顶上。
+    #[gpui::test]
+    fn long_submenu_reveals_and_starts_at_checked_item(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            init(cx);
+        });
+        let picked = Rc::new(Cell::new(None));
+        let (_, window) = cx.add_window_view({
+            let picked = picked.clone();
+            move |_, _| LongProbe { picked }
+        });
+        window.simulate_resize(gpui::size(px(500.), px(400.)));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.simulate_mouse_down(
+            gpui::point(px(20.), px(20.)),
+            MouseButton::Right,
+            Default::default(),
+        );
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.simulate_keystrokes("down");
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let panel = window.debug_bounds("smelt-menu-1").unwrap();
+        let checked = window.debug_bounds("smelt-menu-item-1-20").unwrap();
+        assert!(
+            panel.top() <= checked.top() && checked.bottom() <= panel.bottom(),
+            "checked row {checked:?} must be inside {panel:?}"
+        );
+        window.simulate_keystrokes("right enter");
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(picked.get(), Some(20));
     }
 
     /// 右键菜单的左上角落在按下的地方；下面放不下就翻到按下处的上面，不盖住它。

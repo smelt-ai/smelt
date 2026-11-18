@@ -1152,7 +1152,8 @@ fn menu_submenu(window: &mut Window, cx: &mut App) -> Draw {
     Box::new(|_, _| dropdown_page())
 }
 
-/// 项数超过面板最高高度（窗口高的一半）：行高不变，面板里滚动，不把每行挤扁。
+/// 项数超过面板最高高度（窗口高的一半）：行高不变，面板里滚动，不把每行挤扁；打开时
+/// 打钩的那项滚到面板中间。
 fn menu_long(window: &mut Window, cx: &mut App) -> Draw {
     use smelt_ui::menu::{Menu, MenuItem, MenuTrigger};
 
@@ -1173,7 +1174,7 @@ fn menu_long(window: &mut Window, cx: &mut App) -> Draw {
                 Button::new("menu-long-trigger").label("模型").small(),
                 |_, _| {
                     (1..=20).fold(Menu::new().label("模型"), |menu, ix| {
-                        menu.item(MenuItem::new(format!("Model-{ix}")).checked(ix == 2))
+                        menu.item(MenuItem::new(format!("Model-{ix}")).checked(ix == 15))
                     })
                 },
             ))
