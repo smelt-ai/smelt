@@ -24,10 +24,10 @@ use smelt_plugin_api::model::workspace_directory::{
 use smelt_plugin_api::{self as api, Command, CommandSpec, Handled, RuntimeKey};
 
 use crate::contract::{
-    self, Activate, Fork, Handoff, ListArgs, Resume, SendText, SessionArgs, SessionAt,
-    StartConversation,
+    self, Activate, Fork, Handoff, ListArgs, Resume, RevealInList, SendText, SessionArgs,
+    SessionAt, StartConversation,
 };
-use crate::model::{ConversationKey, Sessions};
+use crate::model::{self, ConversationKey, Located, Sessions};
 use crate::peers::agents::AGENT_SETTINGS;
 use crate::peers::conversation::{ConversationFork, ConversationStart, ConversationText};
 use crate::peers::terminal::TerminalText;
@@ -46,6 +46,9 @@ pub(crate) fn register(cx: &mut App) {
             .spec_async(api::text!("command.resume_in_terminal"), resume_in_terminal),
         contract::HANDOFF.spec_async(api::text!("command.handoff"), handoff),
         contract::SEND_TEXT.spec_async(api::text!("command.send_text"), send_text),
+        contract::REVEAL_IN_LIST.spec_async(api::text!("command.reveal_in_list"), |args, _, cx| {
+            reveal_in_list(args, cx)
+        }),
         shortcut(
             contract::NEW_SESSION,
             api::text!("menu.new_session"),
@@ -404,6 +407,43 @@ fn open_project(cx: &mut App) -> Handled {
 }
 
 /// 焦点交给会话列表，列表被挡着就先让它露出来。
+fn reveal_in_list(args: RevealInList, cx: &mut App) -> Task<Result<(), String>> {
+    let host = api::host(cx);
+    let style = host.path_style(&args.machine, cx);
+    let directory = host.workspace_directory(&args.machine, cx);
+    let at = SessionAt::Session {
+        session_id: args.session_id,
+    };
+    match model::locate(&args.machine, &at, None, style, directory.as_ref()) {
+        Located::Found(key) => locate_in_list(key, cx),
+        Located::Wait | Located::Missing => Task::ready(Err(t!("error.not_in_list").into_owned())),
+    }
+}
+
+/// 在列表里找出这段会话：展开它所在的组（搜索滤掉了就清掉搜索），列表视图滚过去、闪一下；
+/// 侧栏收着时 `OPEN_VIEW` 把它打开。
+pub(crate) fn locate_in_list(key: ConversationKey, cx: &mut App) -> Task<Result<(), String>> {
+    Sessions::global(cx).update(cx, |sessions, cx| {
+        sessions.reveal(&key, cx);
+        sessions.located = Some(key);
+        cx.notify();
+    });
+    let opened = api::OPEN_VIEW.run(
+        &api::OpenView {
+            view: contract::LIST.to_string(),
+            args: serde_json::Value::Null,
+        },
+        cx,
+    );
+    cx.spawn(async move |_| {
+        if opened.await? {
+            Ok(())
+        } else {
+            Err(t!("error.no_room_list").into_owned())
+        }
+    })
+}
+
 fn focus_list(cx: &mut App) -> Handled {
     let args = match serde_json::to_value(ListArgs { focus: true }) {
         Ok(args) => args,

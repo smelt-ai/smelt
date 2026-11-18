@@ -15,6 +15,11 @@ pub(crate) const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
 /// 在主窗口里露出这个会话。
 pub(crate) const ACTIVATE: Command<Activate, ()> = Command::new("smelt.sessions/activate");
 
+// 约定：smelt.sessions 的 REVEAL_IN_LIST，权威定义在 crates/plugins/sessions/src/contract.rs。
+/// 在会话列表里找出这段会话：侧栏收着就打开，展开所在的组，滚过去闪一下。
+pub(crate) const REVEAL_IN_LIST: Command<RevealInList, ()> =
+    Command::new("smelt.sessions/reveal-in-list");
+
 /// 开一段新对话（跟一个智能体，或裸引擎）：开在那台机器上、`cwd` 里，露在主窗口里。
 pub(crate) const START_CONVERSATION: Command<StartConversation, ()> =
     Command::new("smelt.sessions/start-conversation");
@@ -26,6 +31,15 @@ pub(crate) const FORK: Command<Fork, ()> = Command::new("smelt.sessions/fork");
 /// [`ACTIVATE`] 的参数。
 #[derive(Serialize)]
 pub(crate) struct Activate {
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    /// 守护会话 id。
+    pub session_id: String,
+}
+
+/// [`REVEAL_IN_LIST`] 的参数。
+#[derive(Serialize)]
+pub(crate) struct RevealInList {
     #[serde(with = "machine_json")]
     pub machine: RuntimeKey,
     /// 守护会话 id。

@@ -103,6 +103,8 @@ pub(super) struct ListMotion {
     landing: Option<(String, Pixels)>,
     /// 刚新建的会话从什么时候开始落进列表。
     arrival: Option<(ConversationKey, Instant)>,
+    /// 要找出来的会话（点了标题定位）从什么时候开始闪：只铺底色，不撑开。
+    located: Option<(ConversationKey, Instant)>,
     /// 上一次侧栏里在跑的会话，比出哪些是刚开始跑的。
     running: HashSet<ConversationKey>,
     /// 刚开始跑的会话从什么时候开始亮。
@@ -114,6 +116,8 @@ pub(super) struct Frame {
     pub(super) reorder: u64,
     pub(super) landing: Option<(String, Pixels)>,
     pub(super) arrival: Option<Arrival>,
+    /// 要找出来的那一行和这一帧铺底的不透明度。
+    pub(super) located: Option<(ConversationKey, f32)>,
     /// 刚开始跑的会话图标亮到哪（0 到 1，两头是运行色，中间最亮）。
     pub(super) glows: HashMap<ConversationKey, f32>,
 }
@@ -137,6 +141,7 @@ impl ListMotion {
             dropped: None,
             landing: None,
             arrival: None,
+            located: None,
             running: sidebar.running(),
             glows: HashMap::new(),
         }
@@ -174,6 +179,10 @@ impl ListMotion {
         self.arrival = Some((key, now));
     }
 
+    pub(super) fn locate(&mut self, key: ConversationKey, now: Instant) {
+        self.located = Some((key, now));
+    }
+
     /// 这一帧的取样，和还要不要下一帧（还有动画没播完）。减弱动态效果时新行直接到全高，
     /// 只留铺底的淡入淡出（不动位置）。图标亮一下是装饰，用户看不见（app、窗口在后台）
     /// 或减弱动态效果时直接不播。
@@ -198,6 +207,14 @@ impl ListMotion {
         if arrival.is_none() {
             self.arrival = None;
         }
+        // 铺底只是淡入淡出、不动位置，减弱动态效果时照播。
+        let located = self.located.as_ref().and_then(|(key, at)| {
+            let elapsed = now.saturating_duration_since(*at);
+            (elapsed < WASH_END).then(|| (key.clone(), arrival_wash(elapsed)))
+        });
+        if located.is_none() {
+            self.located = None;
+        }
         if !ambient || reduce_motion {
             self.glows.clear();
         }
@@ -211,11 +228,12 @@ impl ListMotion {
                 (key.clone(), phase)
             })
             .collect();
-        let animating = arrival.is_some() || !glows.is_empty();
+        let animating = arrival.is_some() || located.is_some() || !glows.is_empty();
         let frame = Frame {
             reorder: self.reorder,
             landing: self.landing.clone(),
             arrival,
+            located,
             glows,
         };
         (frame, animating)
@@ -290,5 +308,23 @@ mod tests {
         assert!(arrival_open(Duration::ZERO) < 1e-4);
         assert!(arrival_open(ARRIVAL_OPEN) > 1. - 1e-4);
         assert_eq!(arrival_open(ARRIVAL_OPEN * 2), 1.);
+    }
+
+    #[test]
+    fn a_located_row_washes_in_place_even_with_reduced_motion_then_stops() {
+        let mut motion = ListMotion::new(&Sidebar::default());
+        let key = ConversationKey {
+            machine: smelt_plugin_api::RuntimeKey::Local,
+            id: "c".into(),
+        };
+        let start = Instant::now();
+        motion.locate(key.clone(), start);
+        let (frame, animating) = motion.frame(start + Duration::from_millis(200), true, true);
+        assert!(animating);
+        assert!(frame.arrival.is_none(), "找出来的行不撑开");
+        assert_eq!(frame.located, Some((key, WASH_PEAK)));
+        let (frame, animating) = motion.frame(start + WASH_END, false, true);
+        assert!(!animating);
+        assert!(frame.located.is_none());
     }
 }

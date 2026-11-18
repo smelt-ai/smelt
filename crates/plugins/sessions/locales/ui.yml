@@ -127,6 +127,9 @@ command:
   activate:
     en: "Jump to Session"
     zh-CN: "跳到会话"
+  reveal_in_list:
+    en: "Reveal in Session List"
+    zh-CN: "在会话列表中定位"
   close_pane:
     en: "Close Current Pane or Session"
     zh-CN: "关闭当前分屏或会话"
@@ -246,6 +249,9 @@ error:
   no_room_list:
     en: "There's no room for the session list"
     zh-CN: "会话列表放不下"
+  not_in_list:
+    en: "This session isn't in the session list"
+    zh-CN: "会话列表里没有这段会话"
   no_selection:
     en: "No session is selected"
     zh-CN: "没有选中的会话"

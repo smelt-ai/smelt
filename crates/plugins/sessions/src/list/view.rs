@@ -135,7 +135,8 @@ impl ListView {
                 },
             ),
         ];
-        Self {
+        // 列表是被 `REVEAL_IN_LIST` 打开才建的：要找的会话这时才取得到。
+        let mut this = Self {
             focus: cx.focus_handle(),
             scroll,
             rename: None,
@@ -150,7 +151,9 @@ impl ListView {
             anchors,
             selected,
             _subscriptions,
-        }
+        };
+        this.take_located(&sessions, cx);
+        this
     }
 
     /// 开始行内改名：输入框换下标题，全选原名。回车、点别处保存，Esc 取消。
@@ -329,7 +332,17 @@ impl ListView {
             sessions.update(cx, |sessions, _| sessions.fresh = None);
             self.motion.arrive(key, now);
         }
+        self.take_located(sessions, cx);
         self.sync_avatars(window, cx);
+    }
+
+    /// 有要找出来的会话（`REVEAL_IN_LIST`）就取走：滚过去、闪一下。
+    fn take_located(&mut self, sessions: &Entity<Sessions>, cx: &mut Context<Self>) {
+        let Some(key) = sessions.update(cx, |sessions, _| sessions.located.take()) else {
+            return;
+        };
+        self.anchors.reveal(Some(session_flip(&key).into()));
+        self.motion.locate(key, cx.background_executor().now());
     }
 
     /// 侧栏里每段会话备一个行首头像，没了的放掉。用的视图换了（填插槽的变了、用户换了选择）

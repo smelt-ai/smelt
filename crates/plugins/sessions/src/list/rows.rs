@@ -1120,6 +1120,14 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
         now: ctx.now,
     };
     let row_height = look.lead.row_height();
+    // 落进来的、点标题找出来的，都在行底下铺一层底色。
+    let wash_alpha = arrival.map(|arrival| arrival.wash).or_else(|| {
+        ctx.motion
+            .located
+            .as_ref()
+            .filter(|(located, _)| *located == key)
+            .map(|(_, alpha)| *alpha)
+    });
     let close = {
         let (key, title, status) = (key.clone(), row.title.clone(), row.status);
         Button::new(eid(format!("session-close:{id}")))
@@ -1138,7 +1146,7 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
         .group("session-row")
         .relative()
         .mx_2()
-        .when_some(arrival, |item, arrival| item.child(wash(arrival.wash)));
+        .when_some(wash_alpha, |item, alpha| item.child(wash(alpha)));
     let item = session_face(item, row, &look, &ctx.sidebar, renaming, Some(close))
         .tooltip({
             let tooltip = row.tooltip.clone();

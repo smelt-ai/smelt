@@ -28,7 +28,6 @@ use smelt_plugin_api::ui::Button;
 use smelt_plugin_api::ui::tooltip::Tooltip;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::ui_theme;
-use smelt_plugin_api::ui::window_bar::with_window_drag;
 use smelt_plugin_api::{
     self as api, HostEvent, PluginView, Runtime, RuntimeKey, ViewHandle, ViewSpec,
 };
@@ -331,12 +330,14 @@ impl Render for ConversationInstance {
         let shell = div().size_full().track_focus(&self.focus_handle);
         match &self.state {
             State::Live(view) => {
-                // 顶上是窗口标题栏时，按住名字拖窗口。
-                let drag = smelt_plugin_api::safe_area(cx.entity_id(), cx).title_bar;
+                let session = self
+                    .args
+                    .as_ref()
+                    .map(|args| (args.machine.clone(), args.session_id.clone()));
                 let island = self
                     .title
                     .clone()
-                    .map(|title| title_island(title, view, drag, cx));
+                    .map(|title| title_island(title, view, session, cx));
                 div()
                     .relative()
                     .size_full()
@@ -584,9 +585,15 @@ const TITLE_ISLAND_MAX_WIDTH: f32 = 200.;
 /// 吸顶提问要认得出是哪一问，比名字宽。
 const PROMPT_ISLAND_MAX_WIDTH: f32 = 480.;
 
-/// 浮在对话顶上正中的胶囊：平时是名字（`drag` 时按住拖窗口），最近一问滚出视口后换成
-/// 那一问（按下滚回去）。悬停说完整身份：名字 · 模型。不占布局高度。
-fn title_island(title: String, view: &Entity<ConversationView>, drag: bool, cx: &App) -> gpui::Div {
+/// 浮在对话顶上正中的胶囊：平时是名字（按下在会话列表里找出这段会话），最近一问滚出视口后
+/// 换成那一问（按下滚回去）。都是控件，按下就办、不拖窗口，标题栏别处照样能拖。悬停说完整
+/// 身份：名字 · 模型。不占布局高度。
+fn title_island(
+    title: String,
+    view: &Entity<ConversationView>,
+    session: Option<(RuntimeKey, String)>,
+    cx: &App,
+) -> gpui::Div {
     let conversation = view.read(cx);
     let tip = match conversation.model_name() {
         Some(model) if !model.is_empty() => format!("{title} · {model}"),
@@ -617,21 +624,28 @@ fn title_island(title: String, view: &Entity<ConversationView>, drag: bool, cx: 
                     view.update(cx, |view, cx| view.reveal_pinned_prompt(cx));
                 })
         }
-        None => {
-            let island = island_shell("conversation-title", TITLE_ISLAND_MAX_WIDTH, tip).child(
+        None => island_shell("conversation-title", TITLE_ISLAND_MAX_WIDTH, tip)
+            .child(
                 div()
                     .min_w(px(0.))
                     .overflow_hidden()
                     .type_style(TYPE.ui_medium)
                     .text_color(rgb(ui_theme::text()))
                     .child(truncated_line(title)),
-            );
-            if drag {
-                with_window_drag(island)
-            } else {
-                island
-            }
-        }
+            )
+            .when_some(session, |island, (machine, session_id)| {
+                island.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    let reveal = sessions::REVEAL_IN_LIST.run(
+                        &sessions::RevealInList {
+                            machine: machine.clone(),
+                            session_id: session_id.clone(),
+                        },
+                        cx,
+                    );
+                    log_failure(reveal, "在会话列表里定位失败", cx);
+                })
+            }),
     };
     div()
         .absolute()

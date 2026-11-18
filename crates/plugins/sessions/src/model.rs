@@ -75,6 +75,9 @@ pub(crate) struct Sessions {
     /// 在这台 app 上刚新建、还没在列表里露过面的会话：列表等它出现在侧栏里时取走，播一次
     /// 落进列表的动画。只由 `lifecycle::create_conversation` 放、列表视图取，不通知。
     pub(crate) fresh: Option<ConversationKey>,
+    /// 要在列表里找出来的会话（[`crate::contract::REVEAL_IN_LIST`]）：列表视图取走，滚到那一行、
+    /// 闪一下。放的一方通知。
+    pub(crate) located: Option<ConversationKey>,
     /// 侧栏算好的行（列表画它，上一段 / 下一段按它的顺序）。目录、会话状态、机器、
     /// [`Self::ui`] 变了由 [`Self::rebuild_sidebar`] 重算；render 只读它。
     pub(crate) sidebar: Rc<Sidebar>,
@@ -124,6 +127,7 @@ impl Sessions {
                 active_pane: None,
                 starts: HashMap::new(),
                 fresh: None,
+                located: None,
                 sidebar: Rc::default(),
                 agent_names: HashMap::new(),
                 lifecycle: lifecycle::State::default(),

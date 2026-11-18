@@ -607,7 +607,7 @@ impl Render for Split {
                     .child(self.area.clone()),
             )
             .when(bare && !self.order.is_empty(), |this| {
-                this.child(title_island(self.title.clone(), title_bar))
+                this.child(title_island(self.title.clone(), self.key.clone()))
             })
     }
 }
@@ -640,7 +640,9 @@ fn group_edges(node: &PaneNode, touches: Edges<bool>, f: &mut impl FnMut(&PaneNo
 }
 
 /// 只有终端的会话顶上的名字胶囊。顶上是窗口标题栏时按住拖窗口，双击缩放。
-fn title_island(title: SharedString, title_bar: bool) -> Div {
+/// 终端会话的标题胶囊：点了在会话列表里找出这段会话。是控件，按下就办，不拖窗口（标题栏别处
+/// 照样能拖）。
+fn title_island(title: SharedString, key: ConversationKey) -> Div {
     let tip = title.clone();
     let island = div()
         .id("sessions-title")
@@ -665,7 +667,17 @@ fn title_island(title: SharedString, title_bar: bool) -> Div {
                 .type_style(TYPE.ui_medium)
                 .text_color(rgb(ui_theme::text()))
                 .child(truncated_line(title)),
-        );
+        )
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            let reveal = crate::commands::locate_in_list(key.clone(), cx);
+            cx.spawn(async move |_| {
+                if let Err(error) = reveal.await {
+                    eprintln!("[sessions] 在会话列表里定位失败：{error}");
+                }
+            })
+            .detach();
+        });
     div()
         .absolute()
         .top(px(ui_theme::CHROME_ISLAND_TOP_PX))
@@ -675,11 +687,7 @@ fn title_island(title: SharedString, title_bar: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(if title_bar {
-            with_window_drag(island)
-        } else {
-            island
-        })
+        .child(island)
 }
 
 /// 分屏顶上那一整条拖窗口的带子，和窗口顶栏一样高：按住拖窗口，双击缩放。会话视图

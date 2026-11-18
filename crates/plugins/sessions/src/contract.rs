@@ -139,6 +139,20 @@ pub(crate) const HANDOFF: Command<Handoff, ()> = Command::new("smelt.sessions/ha
 /// （`smelt.conversation/insert-text`），都不替用户发出。没有能接的那一格时失败。
 pub(crate) const SEND_TEXT: Command<SendText, ()> = Command::new("smelt.sessions/send-text");
 
+/// 在会话列表里找到这段会话：侧栏收着就打开，展开它所在的组，滚过去并闪一下。不换选中、
+/// 不动焦点。会话不在列表里（归档了、自动化运行、目录里没有）是失败。
+pub(crate) const REVEAL_IN_LIST: Command<RevealInList, ()> =
+    Command::new("smelt.sessions/reveal-in-list");
+
+/// [`REVEAL_IN_LIST`] 的参数：哪台机器上的哪段守护会话。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RevealInList {
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    /// 守护会话 id，同 [`Activate::session_id`]。
+    pub session_id: String,
+}
+
 /// [`ACTIVATE`] 的参数：哪台机器上的哪段守护会话。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Activate {
@@ -381,6 +395,7 @@ mod tests {
             RESUME_IN_TERMINAL.id(),
             HANDOFF.id(),
             SEND_TEXT.id(),
+            REVEAL_IN_LIST.id(),
             NEW_SESSION.id(),
             OPEN_PROJECT.id(),
             FOCUS_LIST.id(),
