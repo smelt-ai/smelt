@@ -127,6 +127,9 @@ struct Delivery {
 
 /// 插件启动时调一次：装好投影，订上宿主事件。
 pub(crate) fn install(cx: &mut App) {
+    if let Err(error) = api::register_topics(crate::OWNER, [CORE_TOPIC_AUTOMATIONS_CHANGED], cx) {
+        eprintln!("[automations] 话题登记失败：{error}");
+    }
     cx.set_global(AutomationStore::default());
     let store = DeliveredStore::open();
     let delivery = Rc::new(RefCell::new(Delivery {

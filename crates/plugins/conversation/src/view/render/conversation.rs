@@ -448,6 +448,7 @@ impl ConversationView {
                                         )),
                                 )
                             })
+                            .children(this.menu_failure_mark(i, cx))
                             .child(user_bubble_with_enter(
                                 this.user_enter_nonce_for(i),
                                 i,
@@ -515,6 +516,7 @@ impl ConversationView {
                                         )),
                                 )
                             })
+                            .children(this.menu_failure_mark(i, cx))
                             .child(user_bubble_with_enter(
                                 this.user_enter_nonce_for(i),
                                 i,
@@ -616,7 +618,7 @@ impl ConversationView {
                         let menu_view = view.clone();
                         MenuTrigger::context(
                             ("acp-assistant-message-menu", i),
-                            answer,
+                            answer.children(this.menu_failure_mark(i, cx)),
                             move |window, cx| message_menu(&menu_view, i, None, window, cx),
                         )
                         .w_full()
@@ -700,7 +702,7 @@ impl ConversationView {
                         let menu_view = view.clone();
                         MenuTrigger::context(
                             ("acp-completion-message-menu", i),
-                            answer,
+                            answer.children(this.menu_failure_mark(i, cx)),
                             move |window, cx| message_menu(&menu_view, i, None, window, cx),
                         )
                         .w_full()

@@ -82,6 +82,18 @@ pub fn unregister_topics(owner: &str, cx: &mut App) {
     let _ = register_topics(owner, empty, cx);
 }
 
+/// 来源 `owner` 有没有登记话题 `topic`。推来的话题只交给登记了它的 JS 插件（Rust 插件
+/// 收全部，按 `topic` 自己认）。
+#[cfg_attr(not(feature = "js"), allow(dead_code))]
+pub(crate) fn wants(owner: &str, topic: &str, cx: &App) -> bool {
+    cx.try_global::<Topics>().is_some_and(|topics| {
+        topics
+            .owners
+            .iter()
+            .any(|(entry, topics)| entry == owner && topics.contains(topic))
+    })
+}
+
 /// 宿主订阅时读：所有来源要的话题的并集。值是这个话题最近一次有来源新要它的序号，只增不减：
 /// 宿主记下订上时的序号，后来变大了就重订一次（见模块文档）。
 pub fn subscribed_topics(cx: &App) -> BTreeMap<String, u64> {
@@ -127,6 +139,11 @@ mod tests {
 
             assert!(set_topics("a", [" ".to_string()].into(), cx).is_err());
             assert!(topics(cx).is_empty());
+
+            set("a", &["x.changed"], cx);
+            assert!(wants("a", "x.changed", cx));
+            assert!(!wants("b", "x.changed", cx));
+            assert!(!wants("a", "y.changed", cx));
         });
     }
 

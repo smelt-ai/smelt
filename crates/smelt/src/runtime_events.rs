@@ -85,41 +85,52 @@ impl OpenTopics {
 
     /// 关掉不要了的，订上新要的；开着的话题又有插件新要了（序号变大）就重订，新来的也拿到
     /// 快照（见 `smelt_plugin_api` 的 topic 模块文档）。阻塞（连运行时），不在主线程调。上一次
-    /// 没连上的这次再试。
+    /// 没连上的、没重订成的，这次再试。
     fn reconcile(&mut self, wanted: &BTreeMap<String, u64>) {
         let opened = self
             .open
             .iter()
             .map(|(topic, (requested, _))| (topic, *requested));
-        for topic in stale_topics(opened, wanted) {
-            let Some((_, subscription)) = self.open.remove(&topic) else {
-                continue;
-            };
-            subscription.close();
-            if wanted.contains_key(&topic) {
-                // 原来订着的插件在重订的空当里可能错过事件：按积压处理，没有快照的话题重读，
-                // 带快照的等重订上的那份。
-                let _ =
-                    self.sender
-                        .try_send((self.runtime.key().clone(), topic, TopicMessage::Lagged));
+        for (topic, change) in topic_changes(opened, wanted) {
+            match change {
+                TopicChange::Close => {
+                    if let Some((_, subscription)) = self.open.remove(&topic) {
+                        subscription.close();
+                    }
+                }
+                TopicChange::Renew(requested) => {
+                    // 先告诉原来订着的插件按积压处理（带快照的等重订上的那份，没有的重读），
+                    // 再开新的；开上了才关旧的。开不上旧的照常推，序号不动，下次再试。
+                    let _ = self.sender.try_send((
+                        self.runtime.key().clone(),
+                        topic.clone(),
+                        TopicMessage::Lagged,
+                    ));
+                    if let Some(renewed) = self.subscribe(&topic)
+                        && let Some((_, old)) = self.open.insert(topic, (requested, renewed))
+                    {
+                        old.close();
+                    }
+                }
+                TopicChange::Open(requested) => {
+                    if let Some(subscription) = self.subscribe(&topic) {
+                        self.open.insert(topic, (requested, subscription));
+                    }
+                }
             }
         }
-        for (topic, requested) in wanted {
-            if self.open.contains_key(topic) {
-                continue;
-            }
-            let key = self.runtime.key().clone();
-            let sender = self.sender.clone();
-            let name = topic.clone();
-            let opened = SeparateSubscription::open(&self.runtime, topic.clone(), move |message| {
-                sender
-                    .try_send((key.clone(), name.clone(), message))
-                    .is_ok()
-            });
-            if let Some(subscription) = opened {
-                self.open.insert(topic.clone(), (*requested, subscription));
-            }
-        }
+    }
+
+    /// 向这台机器单独订一个话题，推来的转进 `sender`。连不上是 `None`（已记日志）。
+    fn subscribe(&self, topic: &str) -> Option<SeparateSubscription> {
+        let key = self.runtime.key().clone();
+        let sender = self.sender.clone();
+        let name = topic.to_string();
+        SeparateSubscription::open(&self.runtime, topic.to_string(), move |message| {
+            sender
+                .try_send((key.clone(), name.clone(), message))
+                .is_ok()
+        })
     }
 
     fn close(self) {
@@ -129,19 +140,37 @@ impl OpenTopics {
     }
 }
 
-/// 开着的话题里要关掉的：没人要了的，和订上之后又有插件新要了、得重订的。
-fn stale_topics<'a>(
+/// 一个话题的订阅要怎么变。
+#[derive(Debug, PartialEq, Eq)]
+enum TopicChange {
+    /// 没人要了。
+    Close,
+    /// 订上之后又有插件新要了：重订，记新的序号。
+    Renew(u64),
+    /// 要了还没开着（新要的，或上次没连上）。
+    Open(u64),
+}
+
+/// 对照开着的（话题和订上时的序号）和要的，列出要变的话题，按话题名排。
+fn topic_changes<'a>(
     opened: impl Iterator<Item = (&'a String, u64)>,
     wanted: &BTreeMap<String, u64>,
-) -> Vec<String> {
-    opened
-        .filter(|(topic, opened)| {
-            wanted
-                .get(*topic)
-                .is_none_or(|requested| requested > opened)
-        })
-        .map(|(topic, _)| topic.clone())
-        .collect()
+) -> Vec<(String, TopicChange)> {
+    let opened: BTreeMap<&String, u64> = opened.collect();
+    let closed = opened
+        .keys()
+        .filter(|topic| !wanted.contains_key(**topic))
+        .map(|topic| ((*topic).clone(), TopicChange::Close));
+    let changed = wanted
+        .iter()
+        .filter_map(|(topic, &requested)| match opened.get(topic) {
+            Some(&at) if at >= requested => None,
+            Some(_) => Some((topic.clone(), TopicChange::Renew(requested))),
+            None => Some((topic.clone(), TopicChange::Open(requested))),
+        });
+    let mut changes: Vec<_> = closed.chain(changed).collect();
+    changes.sort_by(|a, b| a.0.cmp(&b.0));
+    changes
 }
 
 /// 事件的接收端：核心订阅的，和单独订阅的。
@@ -902,16 +931,22 @@ fn sync_topics(cx: &mut App) {
         .chain(subscriptions.remotes.values())
         .map(|handle| Arc::clone(&handle.round))
         .collect();
-    cx.background_executor()
-        .spawn(async move {
-            for round in rounds {
+    // 订阅要连运行时、会阻塞（远程机器可能很慢），不占后台执行器的线程；每台机器一条
+    // 线程，慢的不拖累别的。话题变化只在插件装上、卸下时有，线程起得不多。
+    for round in rounds {
+        let wanted = wanted.clone();
+        let spawned = std::thread::Builder::new()
+            .name("smelt-topics".into())
+            .spawn(move || {
                 // 先拿这一轮的锁再读并集：几次变化挤在一起时，后跑的按最新的增减。
                 if let Some(topics) = lock(&round).as_mut() {
                     topics.reconcile(&wanted.get());
                 }
-            }
-        })
-        .detach();
+            });
+        if let Err(error) = spawned {
+            eprintln!("[runtime] 起不了同步话题订阅的线程：{error}");
+        }
+    }
 }
 
 /// 远程运行时的订阅跟着 RuntimeHub 走：新添加的起一条，移除的停掉并丢掉它的状态镜像。
@@ -1000,11 +1035,18 @@ mod tests {
             .into_iter()
             .map(|(topic, requested)| (topic.to_string(), requested))
             .collect();
-        let stale = stale_topics(
+        let changes = topic_changes(
             opened.iter().map(|(topic, requested)| (topic, *requested)),
             &wanted,
         );
-        assert_eq!(stale, ["dropped", "renewed"]);
+        assert_eq!(
+            changes,
+            [
+                ("dropped".to_string(), TopicChange::Close),
+                ("new".to_string(), TopicChange::Open(6)),
+                ("renewed".to_string(), TopicChange::Renew(5)),
+            ]
+        );
     }
 
     #[test]

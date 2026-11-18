@@ -8,7 +8,8 @@
 //! [`context_menu_args`]）。执行照常进命令队列，失败由宿主报。
 //!
 //! 按（来源，菜单）整组登记，再登记是整组替换：插件探测完、图标读到了，就把整组再登记
-//! 一次；变了发 [`HostEvent::ContextMenuItemsChanged`]，画菜单的一方把开着的菜单原地重建。
+//! 一次；变了发 [`HostEvent::ContextMenuItemsChanged`]。画菜单的一方在打开时取项，下次打开
+//! 就是新的；已经开着的不跟着变，点到撤下的命令照常报失败。
 
 use std::sync::Arc;
 

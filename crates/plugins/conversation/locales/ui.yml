@@ -572,10 +572,6 @@ notice:
   dismiss:
     en: "Dismiss"
     zh-CN: "关闭提示"
-notify:
-  error:
-    en: Error
-    zh-CN: 错误
 outcome:
   failed:
     en: "This turn didn't finish"

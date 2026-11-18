@@ -64,6 +64,9 @@ pub(crate) struct State {
 
 /// 订阅宿主事件，接上上面那些处理。`register` 里建好 `Sessions` 之后调一次。
 pub(crate) fn install(sessions: &Entity<Sessions>, cx: &mut App) {
+    if let Err(error) = api::register_topics(crate::OWNER, [CORE_TOPIC_ATTENTION_CHANGED], cx) {
+        eprintln!("[sessions] 话题登记失败：{error}");
+    }
     let machines = api::host(cx)
         .machines(cx)
         .into_iter()

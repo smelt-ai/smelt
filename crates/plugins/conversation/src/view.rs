@@ -1373,16 +1373,25 @@ fn message_menu(
     if let Some(extra) = extra {
         menu = menu.separator().item(extra);
     }
-    match view.read(cx).message_menu_context(index, selection) {
-        Some(context) => crate::menu::with_plugin_items(
-            menu,
-            crate::contract::MESSAGE_MENU,
-            &context.machine,
-            &context,
-            cx,
-        ),
-        None => menu,
-    }
+    let Some(context) = view.read(cx).message_menu_context(index, selection) else {
+        return menu;
+    };
+    let weak = view.downgrade();
+    let report: crate::menu::Report = std::rc::Rc::new(move |reason, cx| {
+        weak.update(cx, |this, cx| {
+            this.menu_failure = reason.map(|reason| (index, reason));
+            cx.notify();
+        })
+        .ok();
+    });
+    crate::menu::with_plugin_items(
+        menu,
+        crate::contract::MESSAGE_MENU,
+        &context.machine,
+        &context,
+        report,
+        cx,
+    )
 }
 
 /// 冷启动占位视图的初始状态：agent 身份、启动规格与恢复来源。把 `placeholder`
@@ -1619,6 +1628,9 @@ pub struct ConversationView {
     /// 只武装刚发送的那一条。历史加载和虚拟列表回收不会重播。
     user_enter: Option<UserBubbleEnter>,
     user_enter_nonce: u64,
+    /// 消息右键菜单里别的插件的命令刚失败了：哪一条消息、为什么。挂在那条消息上，点一下
+    /// 收起，再点一项菜单也收起。只在内存里。
+    menu_failure: Option<(usize, SharedString)>,
     /// 复制成功后的对勾。淡出期间不改按钮占位。
     copy_acks: std::collections::HashMap<CopySite, std::time::Instant>,
     /// 待发缩略图挤入。key 是 `Arc<Image>` 的地址，同一张图退回输入栏不再播一次。
@@ -1942,6 +1954,7 @@ impl ConversationView {
             expanded_process_groups: std::collections::HashSet::new(),
             user_enter: None,
             user_enter_nonce: 0,
+            menu_failure: None,
             copy_acks: std::collections::HashMap::new(),
             pending_image_enter: std::collections::HashMap::new(),
             pending_image_seen: std::collections::HashSet::new(),
@@ -3485,6 +3498,28 @@ impl ConversationView {
             cut,
             prompt,
         });
+    }
+
+    /// 第 `index` 条消息上刚失败的菜单命令：`bad` 色的叹号，悬停看为什么，点一下收起。
+    /// 没失败是 `None`。
+    fn menu_failure_mark(&self, index: usize, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (at, reason) = self.menu_failure.as_ref().filter(|(at, _)| *at == index)?;
+        Some(
+            div()
+                .flex_shrink_0()
+                .child(
+                    smelt_plugin_api::ui::Button::new(("acp-menu-failure", *at))
+                        .danger_quiet()
+                        .small()
+                        .icon(IconName::CircleAlert)
+                        .icon_action(reason.clone())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.menu_failure = None;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// 第 `index` 条消息给别的插件的菜单项的上下文，见 [`crate::contract::MESSAGE_MENU`]。

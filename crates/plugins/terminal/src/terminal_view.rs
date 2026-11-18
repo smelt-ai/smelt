@@ -12,6 +12,7 @@ use gpui::*;
 use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::daemon_state::RuntimePresence;
+use smelt_plugin_api::ui::IconAction as _;
 use smelt_plugin_api::ui::TextInput;
 use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smol::Timer;
@@ -211,6 +212,9 @@ pub(crate) struct TerminalView {
     recovery_input_bytes: usize,
     /// 无法恢复时（例如会话已实际退出，或恢复队列超限）的单次提示。
     write_error: Option<String>,
+    /// 右键菜单里别的插件的命令刚失败了：为什么。挂在终端右下角，点一下收起，再点一项菜单
+    /// 也收起。只在内存里。
+    menu_failure: Option<SharedString>,
     /// 当前 epoch 已确认没有 runtime。之后不再重连、不再把按键放进恢复队列，
     /// 避免 make install / 守护换代后连弹「未发送的输入已取消」。
     session_runtime_gone: bool,
@@ -289,6 +293,7 @@ impl TerminalView {
             recovery_input: VecDeque::new(),
             recovery_input_bytes: 0,
             write_error: None,
+            menu_failure: None,
             session_runtime_gone: false,
         }
     }
@@ -516,27 +521,67 @@ impl TerminalView {
             }),
             None => copy,
         };
-        let paste = MenuItem::new(t!("action.paste")).on_click({
-            let view = view.downgrade();
-            move |_, _, cx| {
-                let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-                    return;
-                };
-                view.update(cx, |this, cx| this.paste_text(&text, cx)).ok();
+        // 剪贴板里没有字（空的、是图片）时粘贴是灰的，和复制一样。
+        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+        let paste = MenuItem::new(t!("action.paste")).disabled(clipboard.is_none());
+        let paste = match clipboard {
+            Some(text) => {
+                let view = view.downgrade();
+                paste.on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.paste_text(&text, cx)).ok();
+                })
             }
-        });
+            None => paste,
+        };
         let context = crate::contract::TerminalMenuContext {
             machine: self.machine.clone(),
             session_id: self.session_id.clone(),
             selection,
         };
+        let weak = view.downgrade();
+        let report: crate::menu::Report = Rc::new(move |reason, cx| {
+            weak.update(cx, |this, cx| {
+                this.menu_failure = reason;
+                cx.notify();
+            })
+            .ok();
+        });
         crate::menu::with_plugin_items(
             Menu::new().item(copy).item(paste),
             crate::contract::MENU,
             &self.machine,
             &context,
+            report,
             cx,
         )
+    }
+
+    /// 右键菜单里刚失败的命令：右下角（右上角是搜索条）一个 `bad` 色的叹号，悬停看为什么，点一下收起。按下
+    /// 不往终端传，免得开始框选或转给应用。
+    fn render_menu_failure(&self, reason: SharedString, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .absolute()
+            .bottom_2()
+            .right_4()
+            .rounded_md()
+            .bg(rgb(smelt_plugin_api::ui::ui_theme::surface()))
+            .border_1()
+            .border_color(smelt_plugin_api::ui::ui_theme::hair())
+            .shadow_md()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(
+                smelt_plugin_api::ui::Button::new("terminal-menu-failure")
+                    .danger_quiet()
+                    .small()
+                    .icon(smelt_plugin_api::ui::IconName::CircleAlert)
+                    .icon_action(reason)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu_failure = None;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
     }
 
     fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -1687,6 +1732,9 @@ impl Render for TerminalView {
                         .text_color(rgb(smelt_plugin_api::ui::ui_theme::muted()))
                         .child(t!("reconnecting", runtime = runtime).into_owned()),
                 )
+            })
+            .when_some(self.menu_failure.clone(), |root, reason| {
+                root.child(self.render_menu_failure(reason, cx))
             });
         MenuTrigger::context("terminal-menu", root, move |_window, cx| {
             match menu_view.upgrade() {

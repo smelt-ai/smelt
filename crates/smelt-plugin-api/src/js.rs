@@ -106,7 +106,11 @@ export function locale(): string;
 export function locales(): { code: string; name: string }[];
 /** 系统的首选语言，归到 locales() 里的一个；读不到是 "en"。 */
 export function system_locale(): string;
-/** 换界面语言。不认识的代码归到最接近的带的语言；和现在一样什么都不做。换了发 locale_changed，所有窗口重画。 */
+/**
+ * 换界面语言。不认识的代码归到最接近的带的语言；和现在一样什么都不做。换了发 locale_changed，所有窗口重画。
+ * 这是换语言的机制，给管「用户选了哪种语言」的那个插件用（随 App 的是 smelt.language，它把选择存在自己库里、
+ * 启动时换上）；别的插件调它会和用户的选择打架，下次启动又被换回去。
+ */
 export function set_locale(locale: string): null;
 /** 这个构建的版本号：version 总有；release 是正式发版的版本号，开发构建为 null。 */
 export function app_version(): { version: string; release: string | null };
@@ -457,7 +461,7 @@ export type HostEvent =
   | { type: "commands_changed" }
   /** 要订的运行时话题变了（有插件 register_topics）。宿主据此增减订阅，插件一般不用管。 */
   | { type: "topics_changed" }
-  /** 右键菜单里登记的项变了（有插件 register_context_menu_items）：自己画着的菜单按 context_menu_items 重建。 */
+  /** 右键菜单里登记的项变了（有插件 register_context_menu_items）：自己存着菜单项的按 context_menu_items 重取。 */
   | { type: "context_menu_items_changed" }
   /** 界面语言换了（读 locale()）：窗口已经重画，插件存着的字要按新语言重建。 */
   | { type: "locale_changed" }
@@ -479,7 +483,7 @@ export type TopicMessage =
   | { kind: "unavailable"; reason: string };
 /**
  * 替换本插件要订的运行时话题（如 "attention.changed"）。宿主按所有插件要的并集向每台机器订阅，推来的在
- * next_event 里是 { type: "runtime_topic", machine, topic, message }，所有插件都收得到，按 topic 认自己要的。
+ * next_event 里是 { type: "runtime_topic", machine, topic, message }，只交给登记了这个话题的插件。
  * 带快照的话题订上时先推一份快照；不带快照的，登记后自己读一次初始状态。运行时不认识的话题那台机器上推一条
  * unavailable。空数组撤下全部。
  */
@@ -1253,8 +1257,14 @@ impl JsPlugin {
         });
         let state = Rc::downgrade(&self.0);
         let host_events = crate::events(cx);
-        let events = cx.subscribe(&host_events, move |_, event: &HostEvent, _| {
+        let events = cx.subscribe(&host_events, move |_, event: &HostEvent, cx| {
             if let Some(state) = state.upgrade() {
+                // 推来的话题只给登记了它的：没登记的不该收到，也不让它在队列里越积越多。
+                if let HostEvent::RuntimeTopic { topic, .. } = event
+                    && !crate::topic::wants(&state.borrow().id, topic, cx)
+                {
+                    return;
+                }
                 JsPlugin(state).deliver(event);
             }
         });

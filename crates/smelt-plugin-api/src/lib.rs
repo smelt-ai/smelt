@@ -297,7 +297,9 @@ pub struct OpenInFileManager {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
     /// 那台机器推了一条运行时话题：有插件用 [`register_topics`] 登记要的那些，按并集订，
-    /// 推来的广播给所有插件，按 `topic` 认自己要的。宿主原样转发，不解读。
+    /// 推来的广播给所有 Rust 插件，按 `topic` 认自己要的（JS 插件只收自己登记的）。宿主原样
+    /// 转发，不解读。读哪个话题就自己登记哪个，别的插件登记了也一样：靠别人登记的，那个插件
+    /// 一删这里就断了。
     RuntimeTopic {
         machine: RuntimeKey,
         topic: String,
@@ -342,8 +344,8 @@ pub enum HostEvent {
     PagesChanged,
     /// 要订的运行时话题变了（见 [`register_topics`]）：宿主按新的并集增减订阅。
     TopicsChanged,
-    /// 右键菜单里登记的项变了（见 [`register_context_menu_items`]）：开着的菜单按
-    /// [`context_menu_items`] 原地重建。
+    /// 右键菜单里登记的项变了（见 [`register_context_menu_items`]）。菜单在打开时按
+    /// [`context_menu_items`] 取，下次打开就是新的；自己缓存了菜单项的跟着重取。
     ContextMenuItemsChanged,
     /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
     CommandsChanged,
