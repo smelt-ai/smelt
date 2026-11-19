@@ -3,7 +3,7 @@
 //! 侧栏部分搬到这里（本目录下的文件都归 S1）。
 //!
 //! - 本文件：侧栏算好的样子（[`Sidebar`]），和排序用的纯函数。只在事件里算（
-//!   `Sessions::rebuild_sidebar`），render 只读它。
+//!   `SessionList::rebuild_sidebar`），render 只读它。
 //! - [`group`]：按状态、时间分组。
 //! - [`machine`]：机器的系统图标和连接指示。
 //! - [`view`]：列表视图，行内改名、拖拽、从访达拖进目录的界面状态。
@@ -42,7 +42,7 @@ use smelt_plugin_api::{self as api, RuntimeKey};
 
 use crate::attention::Unread;
 use crate::model::{
-    self, ConversationKey, Fold, Pin, Placement, ProjectKey, Sessions, SidebarGrouping, SidebarUi,
+    self, ConversationKey, Fold, Pin, Placement, ProjectKey, SessionList, SidebarGrouping, SidebarUi,
 };
 use crate::worksets::{MergeSummary, WorksetCheck, WorksetKey};
 
@@ -52,9 +52,9 @@ pub(crate) use view::build_view;
 use machine::MachineLink;
 use offscreen::{Notice, Tally};
 
-/// 侧栏算好的样子：从目录、会话状态、机器表和 [`Sessions::ui`] 现算的行。存在
-/// [`Sessions::sidebar`]，render 只读它；`Sessions::rebuild_sidebar` 重算。选中哪行不在
-/// 这里（选中变了不重算），画的时候对着 `Sessions::selection` 看。
+/// 侧栏算好的样子：从目录、会话状态、机器表和 [`SessionList::ui`] 现算的行。存在
+/// [`SessionList::sidebar`]，render 只读它；`SessionList::rebuild_sidebar` 重算。选中哪行不在
+/// 这里（选中变了不重算），画的时候对着 `SessionList::selection` 看。
 #[derive(Default)]
 pub(crate) struct Sidebar {
     /// 「对话」一段；一段跟智能体的对话都没有时是 `None`，不画这一段。
@@ -75,7 +75,7 @@ pub(crate) struct Sidebar {
     grouping: SidebarGrouping,
     /// 按项目分组时藏起没有会话的项目（[`project_visible`]）。
     hide_empty: bool,
-    /// 正按名字搜项目（[`Sessions::project_filter`] 不空）：各片里只有搜到的项目，一个都没有
+    /// 正按名字搜项目（[`SessionList::project_filter`] 不空）：各片里只有搜到的项目，一个都没有
     /// 时写「没有匹配的项目」而不是「没有打开的项目」。
     filtering: bool,
     /// 列表上要你看一眼的行，从上到下（[`offscreen`]）。
@@ -251,7 +251,7 @@ enum RowIcon {
 
 impl Sidebar {
     /// 按眼下的数据算一遍。只读内存（目录、会话状态都是宿主的内存缓存），不碰库。
-    pub(crate) fn build(sessions: &Sessions, cx: &App) -> Self {
+    pub(crate) fn build(sessions: &SessionList, cx: &App) -> Self {
         let host = api::host(cx);
         let connections = host.connections(cx);
         let mut agent_rows = Vec::new();

@@ -10791,6 +10791,7 @@ dependencies = [
  "smelt-plugin-api",
  "smelt-resources",
  "smelt-runtime-client",
+ "smelt-session-list",
  "smelt-sessions",
  "smelt-skills",
  "smelt-store",
@@ -11284,7 +11285,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-sessions"
+name = "smelt-session-list"
 version = "0.0.0"
 dependencies = [
  "chrono",
@@ -11295,7 +11296,20 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-plugin-api",
- "smol",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "smelt-sessions"
+version = "0.0.0"
+dependencies = [
+ "gpui-base",
+ "gpui-pre",
+ "rust-i18n",
+ "serde",
+ "serde_json",
+ "smelt-plugin-api",
  "tempfile",
  "uuid",
 ]

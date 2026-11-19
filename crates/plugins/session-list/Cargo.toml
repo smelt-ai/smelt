@@ -1,0 +1,35 @@
+# 内置插件「会话列表」（来源 id `smelt.session-list`）：左栏按机器、项目分组列出会话，置顶、
+# 排序、折叠、行首头像，新建会话的菜单和项目的仓库对话框。会话本身（会话视图、分屏、建和
+# 续接会话的命令、选中）归会话插件 `smelt.sessions`，这里按它公布的约定调。只依赖插件接口
+# 和第三方库。
+[package]
+name = "smelt-session-list"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+# 弹层和列表里的上下选择动作。
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 新会话、新终端的 id 由这边先分好。
+uuid = { version = "1", features = ["v4"] }
+# 列表行上的「今天 / 昨天」和时刻。
+chrono = "0.4"
+# 界面文案（locales/ui.yml，见 docs/i18n.md）。
+rust-i18n.workspace = true
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+tempfile = "3"
+
+# 行首头像出图（src/list/rows/snapshots.rs）：真实字形 + 离屏 Metal，特性与 smelt-ui 的快照一致。
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_apple = { package = "gpui-pre-apple", version = "=0.3.12", features = ["font-kit", "runtime_shaders", "test-support"] }

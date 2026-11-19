@@ -3125,7 +3125,7 @@ mod tests {
                 HostValue::Array(vec![HostValue::Number(1.0)]),
             )]))]),
             HostArguments::new([with(("instances", "yes".into()))]),
-            HostArguments::new([with(("fills", "smelt.sessions/session-avatar".into()))]),
+            HostArguments::new([with(("fills", "smelt.session-list/session-avatar".into()))]),
             HostArguments::new([views(&[
                 valid[0].clone(),
                 valid[1].clone(),
@@ -3150,7 +3150,7 @@ mod tests {
                 "register_views",
                 &HostArguments::new([with((
                     "fills",
-                    HostValue::Array(vec!["smelt.sessions/session-avatar".into()]),
+                    HostValue::Array(vec!["smelt.session-list/session-avatar".into()]),
                 ))]),
             )
             .unwrap_err();

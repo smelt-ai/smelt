@@ -40,9 +40,9 @@ use super::{
     workset_flip,
 };
 use crate::dialogs;
-use crate::lifecycle;
+use crate::ops;
 use crate::model::{
-    ConversationKey, FailTarget, Failure, Fold, ProjectKey, Selection, Sessions, SidebarGrouping,
+    ConversationKey, FailTarget, Failure, Fold, ProjectKey, Selection, SessionList, SidebarGrouping,
 };
 use crate::worksets::{MergeSummary, WorksetKey};
 use smelt_plugin_api::ui::kit::{RADIUS, TYPE, TypeStyled as _, elevation};
@@ -82,7 +82,7 @@ pub(super) struct RowCtx {
     /// 给会话行、组、「对话」标题挂上 key（滑动身份），记下它们画在哪：可视区外的提示、
     /// 选中后滚过去用。
     pub(super) anchors: ScrollAnchors,
-    /// 哪些行上的操作刚失败了（[`Sessions::failures`]）。
+    /// 哪些行上的操作刚失败了（[`SessionList::failures`]）。
     pub(super) failures: Rc<HashMap<FailTarget, Failure>>,
 }
 
@@ -502,7 +502,7 @@ fn machine_row(machine: &MachineInfo, area: &Area, angle: f32, cx: &App) -> AnyE
         .when(collapsible, |row| {
             let key = key.clone();
             row.on_click(move |_, _, cx| {
-                Sessions::global(cx).update(cx, |sessions, cx| {
+                SessionList::global(cx).update(cx, |sessions, cx| {
                     sessions.set_machine_collapsed(&key, !collapsed, cx)
                 });
             })
@@ -606,7 +606,7 @@ fn hidden_empty_row(count: usize, level: usize) -> AnyElement {
             t!("list.hidden_projects.other", count = count)
         }))
         .on_click(|_, _, cx| {
-            Sessions::global(cx).update(cx, |sessions, cx| {
+            SessionList::global(cx).update(cx, |sessions, cx| {
                 sessions.set_hide_empty_projects(false, cx)
             });
         })
@@ -750,7 +750,12 @@ fn project_row(
             let (machine, root) = (machine.clone(), root.clone());
             move |_, _, cx| {
                 if !root.is_empty() {
-                    lifecycle::select_project(machine.clone(), root.clone(), cx);
+                    let selected = ops::select_project(machine.clone(), root.clone(), cx);
+                    let target = FailTarget::Project {
+                        machine: machine.clone(),
+                        root: root.clone(),
+                    };
+                    crate::report_row_failure(target, t!("action.select_project"), selected, cx);
                 }
             }
         })
@@ -948,7 +953,7 @@ fn bucket_row(group: &BucketGroup, angle: f32, level: usize) -> AnyElement {
             row.child(collapsed_summary(group.status, group.rows.len(), false))
         })
         .on_click(move |_, _, cx| {
-            Sessions::global(cx).update(cx, |sessions, cx| {
+            SessionList::global(cx).update(cx, |sessions, cx| {
                 sessions.set_bucket_collapsed(bucket.clone(), !collapsed, cx)
             });
         })
@@ -1188,7 +1193,7 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
                     view.update(cx, |view, cx| view.start_rename(target, title, window, cx));
                 } else {
                     // 出口里可能正放着别的页（归档这些）：打开会话视图，露出来再选中。
-                    let opened = lifecycle::open_conversation(key.clone(), cx);
+                    let opened = ops::open_conversation(key.clone(), cx);
                     let target = FailTarget::Conversation(key.clone());
                     crate::report_row_failure(target, t!("action.open_session"), opened, cx);
                 }
@@ -1625,7 +1630,7 @@ fn failure_mark(ctx: &RowCtx, id: &str, target: FailTarget) -> Option<AnyElement
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         let target = target.clone();
-                        Sessions::global(cx)
+                        SessionList::global(cx)
                             .update(cx, |sessions, cx| sessions.set_failure(target, None, cx));
                     }),
             )
@@ -1844,7 +1849,7 @@ fn drop_line(before: bool) -> impl IntoElement {
 }
 
 fn toggle_fold(fold: Fold, collapsed: bool, cx: &mut App) {
-    Sessions::global(cx).update(cx, |sessions, cx| {
+    SessionList::global(cx).update(cx, |sessions, cx| {
         sessions.set_collapsed(fold, collapsed, cx)
     });
 }

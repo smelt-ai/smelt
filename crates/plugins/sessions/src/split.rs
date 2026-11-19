@@ -43,6 +43,7 @@ use smelt_plugin_api::{self as api, HostEvent, RuntimeKey, SafeArea, ViewInstanc
 
 use crate::model::{self, ConversationKey, Sessions};
 use crate::peers::conversation::{self, ConversationArgs, ConversationStart};
+use crate::peers::session_list;
 use crate::peers::terminal::{self, TerminalArgs};
 use crate::session_view::{Pane, PaneKind};
 use crate::split_layout::{self, Node};
@@ -605,7 +606,11 @@ impl Render for Split {
                     .child(self.area.clone()),
             )
             .when(bare && !self.order.is_empty(), |this| {
-                this.child(title_island(self.title.clone(), self.key.clone()))
+                this.child(title_island(
+                    self.title.clone(),
+                    self.key.machine.clone(),
+                    self.order[0].clone(),
+                ))
             })
     }
 }
@@ -638,9 +643,9 @@ fn group_edges(node: &PaneNode, touches: Edges<bool>, f: &mut impl FnMut(&PaneNo
 }
 
 /// 只有终端的会话顶上的名字胶囊。顶上是窗口标题栏时按住拖窗口，双击缩放。
-/// 终端会话的标题胶囊：点了在会话列表里找出这段会话。是控件，按下就办，不拖窗口（标题栏别处
-/// 照样能拖）。
-fn title_island(title: SharedString, key: ConversationKey) -> Div {
+/// 终端会话的标题胶囊：点了在会话列表里找出这段会话（`session` 是它的一格）。是控件，按下
+/// 就办，不拖窗口（标题栏别处照样能拖）。会话列表插件没装时什么都不做，记一句日志。
+fn title_island(title: SharedString, machine: RuntimeKey, session: String) -> Div {
     let tip = title.clone();
     let island = div()
         .id("sessions-title")
@@ -668,7 +673,13 @@ fn title_island(title: SharedString, key: ConversationKey) -> Div {
         )
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             cx.stop_propagation();
-            let reveal = crate::commands::locate_in_list(key.clone(), cx);
+            let reveal = session_list::REVEAL_IN_LIST.run(
+                &session_list::RevealInList {
+                    machine: machine.clone(),
+                    session_id: session.clone(),
+                },
+                cx,
+            );
             cx.spawn(async move |_| {
                 if let Err(error) = reveal.await {
                     eprintln!("[sessions] 在会话列表里定位失败：{error}");

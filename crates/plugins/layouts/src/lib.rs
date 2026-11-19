@@ -109,7 +109,7 @@ mod tests {
                 stack.views(),
                 [
                     "smelt.launcher/nav",
-                    "smelt.sessions/list",
+                    "smelt.session-list/main",
                     "smelt.launcher/settings",
                     "smelt.archive/button",
                     "smelt.agents/quota"

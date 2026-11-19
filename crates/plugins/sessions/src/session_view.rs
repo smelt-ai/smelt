@@ -9,6 +9,9 @@
 //! - `Sessions` 变了（换了选中）、目录推到、视图登记变了：[`SessionView::sync`] 补建选中的
 //!   那段，同步、扔掉目录里没了的，兑现还在等的打开。
 //! - 分屏眼下那一格换了（`SplitEvent`）：推一份进 `Sessions::active_pane`，发布活动上下文。
+//!
+//! 在这里发起的操作（分屏、关格、关会话）失败了，画在视图底下（[`SessionView::failure`]），
+//! 人就在看这段会话。
 
 use rust_i18n::t;
 use std::borrow::Cow;
@@ -19,7 +22,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyView, App, AppContext as _, Axis, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
-    Subscription, Window, div, px, rgb,
+    Subscription, Task, Window, div, px, rgb,
 };
 use gpui_base::StyledExt as _;
 use smelt_plugin_api::model::agent_status::AgentStatus;
@@ -29,12 +32,12 @@ use smelt_plugin_api::model::workspace_directory::{
 use smelt_plugin_api::ui::dialog::Confirm;
 use smelt_plugin_api::ui::kit::RADIUS;
 use smelt_plugin_api::ui::window_bar::window_bar;
-use smelt_plugin_api::ui::{Alert, Button, Icon, IconName, ui_theme};
+use smelt_plugin_api::ui::{Alert, Button, Icon, IconAction as _, IconName, ui_theme};
 use smelt_plugin_api::{self as api, Command, HostEvent, PluginView, RuntimeKey, ViewHandle};
 
 use crate::contract::{self, SessionArgs, SessionAt};
 use crate::lifecycle;
-use crate::model::{self, ConversationKey, FailTarget, Located, Sessions};
+use crate::model::{self, ConversationKey, Located, Sessions};
 use crate::split::{Split, SplitEvent};
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
@@ -76,6 +79,7 @@ pub(crate) fn build_view(window: &mut Window, cx: &mut App) -> Rc<dyn ViewHandle
             add_machine_error: None,
             live: HashMap::new(),
             waiting: None,
+            failure: None,
             _subscriptions: vec![
                 cx.observe_in(&sessions, window, |view, _, window, cx| {
                     view.sync(false, window, cx);
@@ -113,14 +117,13 @@ pub(crate) fn split_pane(axis: Axis, _window: &mut Window, cx: &mut App) -> Resu
     split.update(cx, |split, _| {
         split.expect_pane(session_id.clone(), beside.map(|pane| pane.session_id), axis)
     });
-    let target = FailTarget::Conversation(key.clone());
-    crate::clear_row_failure(target.clone(), cx);
+    clear_failure(cx);
     let updated = lifecycle::update_conversation(key.machine.clone(), conversation, cx);
     cx.spawn(async move |cx| {
         if let Err(error) = updated.await {
             cx.update(|cx| {
                 split.update(cx, |split, _| split.forget_pane(&session_id));
-                crate::fail_row(target, t!("action.split"), error, cx);
+                fail(t!("action.split"), error, cx);
             });
         }
     })
@@ -158,9 +161,8 @@ pub(crate) fn close_pane(window: &mut Window, cx: &mut App) -> Result<(), String
             window,
             cx,
             move |cx| {
-                let target = FailTarget::Conversation(key.clone());
                 let closed = lifecycle::close_conversation(key, cx);
-                crate::report_row_failure(target, t!("action.close_session"), closed, cx)
+                report(t!("action.close_session"), closed, cx)
             },
         );
         return Ok(());
@@ -186,10 +188,10 @@ pub(crate) fn close_pane(window: &mut Window, cx: &mut App) -> Result<(), String
 /// 从目录里删掉一格终端。守护改目录前先收掉它的进程（收不掉就报错、目录不动），格子
 /// 随目录推回来拿掉。按眼下的目录删，确认框开着的时候目录可能又变了。
 fn close_terminal(key: ConversationKey, session_id: String, cx: &mut App) {
-    let target = FailTarget::Conversation(key.clone());
+    clear_failure(cx);
     let mut conversation = match directory_entry(&key, cx) {
         Ok(conversation) => conversation,
-        Err(error) => return crate::fail_row(target, t!("action.close_pane"), error, cx),
+        Err(error) => return fail(t!("action.close_pane"), error, cx),
     };
     let before = conversation.terminals.len();
     conversation
@@ -199,7 +201,44 @@ fn close_terminal(key: ConversationKey, session_id: String, cx: &mut App) {
         return;
     }
     let updated = lifecycle::update_conversation(key.machine, conversation, cx);
-    crate::report_row_failure(target, t!("action.close_pane"), updated, cx);
+    report(t!("action.close_pane"), updated, cx);
+}
+
+/// 会话视图里发起的操作：先摘掉上次的失败（这是新的一次），等它做完，失败了画在视图底下。
+fn report<T: 'static>(what: Cow<'static, str>, ran: Task<Result<T, String>>, cx: &mut App) {
+    clear_failure(cx);
+    cx.spawn(async move |cx| {
+        if let Err(error) = ran.await {
+            cx.update(|cx| fail(what, error, cx));
+        }
+    })
+    .detach();
+}
+
+/// 把一次失败画在会话视图底下（记日志）。视图没建（窗口关了）就发系统通知。
+fn fail(what: Cow<'static, str>, error: String, cx: &mut App) {
+    let message = t!("error.failed", what = what, error = error).into_owned();
+    match built(cx) {
+        Some(view) => {
+            eprintln!("[sessions] {message}");
+            view.update(cx, |view, cx| {
+                view.failure = Some(message.into());
+                cx.notify();
+            });
+        }
+        None => crate::notify_error(&message, cx),
+    }
+}
+
+fn clear_failure(cx: &mut App) {
+    if let Some(view) = built(cx) {
+        view.update(cx, |view, cx| view.dismiss_failure(cx));
+    }
+}
+
+/// 建好的会话视图。
+fn built(cx: &App) -> Option<Entity<SessionView>> {
+    api::built_view(contract::SESSION, cx).and_then(|view| view.view().downcast().ok())
 }
 
 /// `ask` 为真先弹确认（正在跑的这一轮会被终止），否则直接 `run`。
@@ -237,8 +276,7 @@ fn selected(cx: &App) -> Result<(ConversationKey, Entity<Split>), String> {
         .session()
         .cloned()
         .ok_or_else(|| t!("error.no_selection").into_owned())?;
-    let split = api::built_view(contract::SESSION, cx)
-        .and_then(|view| view.view().downcast::<SessionView>().ok())
+    let split = built(cx)
         .and_then(|view| Some(view.read(cx).live.get(&key)?.split.clone()))
         .ok_or_else(|| t!("error.not_open").into_owned())?;
     Ok((key, split))
@@ -272,10 +310,19 @@ pub(crate) struct SessionView {
     /// 还在等目录推到的那次打开（带 `after` 的）。同一时刻只有一个，后来的打开盖掉它；
     /// 推到了兑现或作废，窗口关了跟着视图一起没。
     waiting: Option<SessionArgs>,
+    /// 在这里发起、失败了的操作（「分屏没成功：…」），画在视图底下。再发起操作、点关掉时
+    /// 清掉。
+    failure: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SessionView {
+    fn dismiss_failure(&mut self, cx: &mut Context<Self>) {
+        if self.failure.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// 空页上的「添加远程机器」：打开远程机器插件那一页，没打开的原因画在按钮下面。
     fn add_machine(&mut self, cx: &mut Context<Self>) {
         self.add_machine_error = None;
@@ -476,6 +523,30 @@ impl SessionView {
 impl Render for SessionView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let split = self.split(cx);
+        let failure = self.failure.clone().map(|message| {
+            div()
+                .absolute()
+                .bottom_3()
+                .left_3()
+                .right_3()
+                .flex()
+                .items_start()
+                .gap_1()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Alert::error("session-failure", message)),
+                )
+                .child(
+                    Button::new("session-failure-dismiss")
+                        .dismiss()
+                        .small()
+                        .icon(IconName::Close)
+                        .icon_action(t!("split.dismiss_failure"))
+                        .on_click(cx.listener(|view, _, _, cx| view.dismiss_failure(cx))),
+                )
+        });
         div()
             .relative()
             .size_full()
@@ -501,6 +572,7 @@ impl Render for SessionView {
                         ))
                 }
             })
+            .children(failure)
     }
 }
 

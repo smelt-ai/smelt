@@ -1,5 +1,4 @@
-//! 会话插件的对话框（S4）：新建会话的菜单和项目的仓库（`project_repositories.rs`）。本目录下
-//! 的文件都归 S4。
+//! 会话列表的对话框：新建会话的菜单和项目的仓库（`repositories.rs`）。
 //!
 //! 设置页「Agent」里的「新建菜单」不在这里：按 11-16 的决定归智能体插件。
 
@@ -14,7 +13,7 @@ pub(crate) use new_session::NewSessionButton;
 
 /// 从命令打开新建会话的菜单（钉在窗口上方，带位置行）：预选眼下活动项目，没有就取本机上
 /// 第一个项目。项目行、工作树行的「+」贴着按钮弹，用 [`NewSessionButton`]；行的右键菜单不再
-/// 重复这一项。选好了调 `lifecycle::create_conversation`。
+/// 重复这一项。选好了调会话插件的 `CREATE_CONVERSATION`（[`crate::core`]）。
 pub(crate) fn open_new_session(window: &mut Window, cx: &mut App) {
     new_session::open(window, cx);
 }

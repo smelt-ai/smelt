@@ -1,14 +1,16 @@
-//! 会话插件自己的库（`~/.smelt/plugin-data/smelt.sessions/store.sqlite3`）：侧栏的置顶、手动顺序、
-//! 折叠，每段会话的分屏布局，上次选中的会话，和行首头像用哪个。都是这台桌面自己的界面状态
-//! 和偏好，运行时不存。
+//! 会话插件自己的库（`~/.smelt/plugin-data/smelt.sessions/store.sqlite3`）：每段会话的分屏布局，
+//! 和上次选中的会话。都是这台桌面自己的界面状态，运行时不存。
 //!
-//! 侧栏那部分启动时整份读一次（[`SessionsStore::sidebar`]），之后内存里那份是缓存，改的时候
-//! 同一个事件里写库（见 `model::Sessions::set_pinned` 等）。分屏布局在建会话视图时按需读。
-//! 都是小量写，在事件里同步写；render 里不碰库。库打不开（权限、版本比插件新）就只在内存里
-//! 用，日志里留一句。
+//! 分屏布局在建会话视图时按需读，选中启动时读一次。都是小量写，在事件里同步写；render 里
+//! 不碰库。库打不开（权限、版本比插件新）就只在内存里用，日志里留一句。
 //!
-//! 行里的对话 id、项目根、工作集 id 都指着那台机器的工作区目录；目录里没了的由
-//! [`SessionsStore::prune`] 清掉，移除的机器由 [`SessionsStore::forget_machine`] 清掉。
+//! 行里的对话 id 指着那台机器的工作区目录；目录里没了的由 [`SessionsStore::prune`] 清掉，
+//! 移除的机器由 [`SessionsStore::forget_machine`] 清掉。
+//!
+//! 第一版里的置顶、顺序、折叠、行首头像那几张表（`pinned_*`、`*_order`、`collapsed_*`、
+//! `sidebar`、`avatar_choice`）归会话列表插件了，它第一次建库时从这里抄一份过去
+//! （`smelt.session-list` 的 `store.rs`）。这边不再读写它们。
+// TODO(会话列表改 JS 之后)：那时列表的库早已抄好，加一版迁移删掉这几张表。
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -17,7 +19,7 @@ use smelt_plugin_api::rusqlite::{self, OptionalExtension as _, Transaction, para
 use smelt_plugin_api::{PluginStore, RuntimeKey};
 
 use crate::OWNER;
-use crate::model::{AvatarChoice, ConversationKey, Fold, KnownIds, Pin, ProjectKey, SidebarUi};
+use crate::model::ConversationKey;
 
 const MIGRATIONS: &[&str] = &[
     "
@@ -86,15 +88,7 @@ const MIGRATIONS: &[&str] = &[
 ];
 
 /// 按对话 id 记的表：目录里没了这段对话就清掉。
-const CONVERSATION_TABLES: [&str; 3] = [
-    "pinned_conversation",
-    "conversation_order",
-    "session_layout",
-];
-/// 按项目根记的表。
-const ROOT_TABLES: [&str; 3] = ["pinned_project", "project_order", "collapsed_project"];
-/// 按工作集 id 记的表。
-const WORKSET_TABLES: [&str; 2] = ["pinned_workset", "collapsed_workset"];
+const CONVERSATION_TABLES: [&str; 2] = ["session_layout", "selection"];
 
 /// 一段会话存下的分屏：眼下是哪一格，和分屏怎么摆。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -119,7 +113,7 @@ impl SessionsStore {
         match store {
             Ok(store) => Self { store: Some(store) },
             Err(error) => {
-                eprintln!("[sessions] 打不开会话的库，这次不记侧栏和分屏：{error}");
+                eprintln!("[sessions] 打不开会话的库，这次不记分屏和选中：{error}");
                 Self { store: None }
             }
         }
@@ -132,162 +126,6 @@ impl SessionsStore {
         Self {
             store: Some(Arc::new(store)),
         }
-    }
-
-    /// 侧栏的置顶、顺序、折叠，所有机器的。启动时读一次。
-    pub(crate) fn sidebar(&self) -> SidebarUi {
-        let Some(store) = &self.store else {
-            return SidebarUi::default();
-        };
-        let read = store.read(|db| {
-            let mut ui = SidebarUi::default();
-            for (machine, id) in pairs(
-                db,
-                "SELECT machine, conversation_id FROM pinned_conversation ORDER BY position",
-            )? {
-                ui.machine_entry(&machine).pinned_conversations.push(id);
-            }
-            for (machine, root) in pairs(
-                db,
-                "SELECT machine, root FROM pinned_project ORDER BY position",
-            )? {
-                ui.machine_entry(&machine).pinned_projects.push(root);
-            }
-            for (machine, id) in pairs(db, "SELECT machine, workset_id FROM pinned_workset")? {
-                ui.machine_entry(&machine).pinned_worksets.insert(id);
-            }
-            for (machine, root) in pairs(
-                db,
-                "SELECT machine, root FROM project_order ORDER BY position",
-            )? {
-                ui.project_order.push(ProjectKey { machine, root });
-            }
-            for (machine, id) in pairs(
-                db,
-                "SELECT machine, conversation_id FROM conversation_order ORDER BY position",
-            )? {
-                ui.machine_entry(&machine).conversation_order.push(id);
-            }
-            for (machine, root) in pairs(db, "SELECT machine, root FROM collapsed_project")? {
-                ui.machine_entry(&machine).collapsed_projects.insert(root);
-            }
-            for (machine, id) in pairs(db, "SELECT machine, workset_id FROM collapsed_workset")? {
-                ui.machine_entry(&machine).collapsed_worksets.insert(id);
-            }
-            ui.conversations_collapsed = db
-                .query_row(
-                    "SELECT conversations_collapsed FROM sidebar WHERE id = 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .unwrap_or(false);
-            Ok(ui)
-        });
-        read.unwrap_or_else(|error| {
-            eprintln!("[sessions] 读侧栏状态失败，按默认显示：{error}");
-            SidebarUi::default()
-        })
-    }
-
-    /// 置顶或取消。新置顶的排在已置顶的最后。
-    pub(crate) fn set_pinned(&self, pin: &Pin, pinned: bool) {
-        self.write("置顶", |tx| {
-            let (table, column, machine, id, ordered) = match pin {
-                Pin::Conversation(key) => (
-                    "pinned_conversation",
-                    "conversation_id",
-                    &key.machine,
-                    key.id.as_str(),
-                    true,
-                ),
-                Pin::Project { machine, root } => {
-                    ("pinned_project", "root", machine, root.as_str(), true)
-                }
-                Pin::Workset { machine, id } => {
-                    ("pinned_workset", "workset_id", machine, id.as_str(), false)
-                }
-            };
-            let machine = machine_column(machine);
-            if !pinned {
-                tx.execute(
-                    &format!("DELETE FROM {table} WHERE machine = ?1 AND {column} = ?2"),
-                    params![machine, id],
-                )?;
-                return Ok(());
-            }
-            if ordered {
-                tx.execute(
-                    &format!(
-                        "INSERT OR IGNORE INTO {table} (machine, {column}, position)
-                         SELECT ?1, ?2, COALESCE(MAX(position) + 1, 0) FROM {table}
-                         WHERE machine = ?1"
-                    ),
-                    params![machine, id],
-                )?;
-            } else {
-                tx.execute(
-                    &format!("INSERT OR IGNORE INTO {table} (machine, {column}) VALUES (?1, ?2)"),
-                    params![machine, id],
-                )?;
-            }
-            Ok(())
-        });
-    }
-
-    /// 折起或展开。
-    pub(crate) fn set_collapsed(&self, fold: &Fold, collapsed: bool) {
-        self.write("折叠", |tx| {
-            let (table, column, machine, id) = match fold {
-                Fold::Conversations => {
-                    tx.execute(
-                        "INSERT INTO sidebar (id, conversations_collapsed) VALUES (1, ?1)
-                         ON CONFLICT (id) DO UPDATE SET
-                             conversations_collapsed = excluded.conversations_collapsed",
-                        params![collapsed],
-                    )?;
-                    return Ok(());
-                }
-                Fold::Project { machine, root } => {
-                    ("collapsed_project", "root", machine, root.as_str())
-                }
-                Fold::Workset { machine, id } => {
-                    ("collapsed_workset", "workset_id", machine, id.as_str())
-                }
-            };
-            let sql = if collapsed {
-                format!("INSERT OR IGNORE INTO {table} (machine, {column}) VALUES (?1, ?2)")
-            } else {
-                format!("DELETE FROM {table} WHERE machine = ?1 AND {column} = ?2")
-            };
-            tx.execute(&sql, params![machine_column(machine), id])?;
-            Ok(())
-        });
-    }
-
-    /// 换掉项目的手动顺序（所有机器一份，整份）。位置跨机器排，读回来按位置就是侧栏里的顺序。
-    pub(crate) fn set_project_order(&self, order: &[ProjectKey]) {
-        self.write("项目顺序", |tx| {
-            tx.execute("DELETE FROM project_order", [])?;
-            let mut insert = tx.prepare(
-                "INSERT OR IGNORE INTO project_order (machine, root, position) VALUES (?1, ?2, ?3)",
-            )?;
-            for (position, key) in order.iter().enumerate() {
-                insert.execute(params![
-                    machine_column(&key.machine),
-                    key.root,
-                    position as i64
-                ])?;
-            }
-            Ok(())
-        });
-    }
-
-    /// 换掉那台机器上会话的手动顺序（整份）。
-    pub(crate) fn set_conversation_order(&self, machine: &RuntimeKey, ids: &[String]) {
-        self.write("会话顺序", |tx| {
-            replace_order(tx, "conversation_order", "conversation_id", machine, ids)
-        });
     }
 
     /// 那段会话存下的分屏；没存过、库打不开是 `None`。建会话视图时读，不在 render 里。
@@ -371,70 +209,14 @@ impl SessionsStore {
         });
     }
 
-    /// 行首头像用哪个。没有那一行是没选过，`view_id` 是空的是不要头像。
-    pub(crate) fn avatar_choice(&self) -> AvatarChoice {
-        let Some(store) = &self.store else {
-            return AvatarChoice::Unset;
-        };
-        let read = store.read(|db| {
-            db.query_row(
-                "SELECT view_id FROM avatar_choice WHERE id = 1",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()
-        });
-        match read {
-            Ok(None) => AvatarChoice::Unset,
-            Ok(Some(None)) => AvatarChoice::Icon,
-            Ok(Some(Some(view))) => AvatarChoice::View(view),
-            Err(error) => {
-                eprintln!("[sessions] 读行首头像的选择失败：{error}");
-                AvatarChoice::Unset
-            }
-        }
-    }
-
-    pub(crate) fn save_avatar_choice(&self, choice: &AvatarChoice) {
-        self.write("行首头像", |tx| {
-            let view = match choice {
-                AvatarChoice::Unset => {
-                    tx.execute("DELETE FROM avatar_choice", [])?;
-                    return Ok(());
-                }
-                AvatarChoice::Icon => None,
-                AvatarChoice::View(view) => Some(view.as_str()),
-            };
-            tx.execute(
-                "INSERT INTO avatar_choice (id, view_id) VALUES (1, ?1)
-                 ON CONFLICT (id) DO UPDATE SET view_id = excluded.view_id",
-                params![view],
-            )?;
-            Ok(())
-        });
-    }
-
-    /// 清掉那台机器上目录里已经没有的东西留下的行。`known` 是那台机器整份目录里还在的
-    /// （见 `model::known_ids`）；目录还没收到时不要调。
-    pub(crate) fn prune(&self, machine: &RuntimeKey, known: &KnownIds) {
+    /// 清掉那台机器上目录里已经没有的对话留下的行。`known` 是那台机器整份目录里还在的对话
+    /// id；目录还没收到时不要调。
+    pub(crate) fn prune(&self, machine: &RuntimeKey, known: &HashSet<String>) {
         self.write("清理", |tx| {
             let machine = machine_column(machine);
             for table in CONVERSATION_TABLES {
-                prune_table(tx, table, "conversation_id", machine, &known.conversations)?;
+                prune_table(tx, table, "conversation_id", machine, known)?;
             }
-            for table in ROOT_TABLES {
-                prune_table(tx, table, "root", machine, &known.roots)?;
-            }
-            for table in WORKSET_TABLES {
-                prune_table(tx, table, "workset_id", machine, &known.worksets)?;
-            }
-            prune_table(
-                tx,
-                "selection",
-                "conversation_id",
-                machine,
-                &known.conversations,
-            )?;
             Ok(())
         });
     }
@@ -443,12 +225,7 @@ impl SessionsStore {
     pub(crate) fn forget_machine(&self, machine: &RuntimeKey) {
         self.write("清理", |tx| {
             let machine = machine_column(machine);
-            for table in CONVERSATION_TABLES
-                .into_iter()
-                .chain(ROOT_TABLES)
-                .chain(WORKSET_TABLES)
-                .chain(["selection"])
-            {
+            for table in CONVERSATION_TABLES {
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE machine = ?1"),
                     params![machine],
@@ -466,38 +243,6 @@ impl SessionsStore {
             eprintln!("[sessions] 记{what}失败：{error}");
         }
     }
-}
-
-/// 读两列（机器、键）的结果。
-fn pairs(db: &rusqlite::Connection, sql: &str) -> rusqlite::Result<Vec<(RuntimeKey, String)>> {
-    let mut statement = db.prepare(sql)?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((machine_of(row.get::<_, String>(0)?), row.get(1)?))
-        })?
-        .collect();
-    rows
-}
-
-fn replace_order(
-    tx: &Transaction,
-    table: &str,
-    column: &str,
-    machine: &RuntimeKey,
-    keys: &[String],
-) -> rusqlite::Result<()> {
-    let machine = machine_column(machine);
-    tx.execute(
-        &format!("DELETE FROM {table} WHERE machine = ?1"),
-        params![machine],
-    )?;
-    let mut insert = tx.prepare(&format!(
-        "INSERT OR IGNORE INTO {table} (machine, {column}, position) VALUES (?1, ?2, ?3)"
-    ))?;
-    for (position, key) in keys.iter().enumerate() {
-        insert.execute(params![machine, key, position as i64])?;
-    }
-    Ok(())
 }
 
 fn prune_table(
@@ -560,112 +305,6 @@ mod tests {
     }
 
     #[test]
-    fn pins_keep_pin_order_per_machine() {
-        let (_dir, store) = store();
-        store.set_pinned(&Pin::Conversation(key(RuntimeKey::Local, "b")), true);
-        store.set_pinned(&Pin::Conversation(key(RuntimeKey::Local, "a")), true);
-        store.set_pinned(&Pin::Conversation(key(remote(), "c")), true);
-        // 再置顶一次不改位置。
-        store.set_pinned(&Pin::Conversation(key(RuntimeKey::Local, "b")), true);
-        store.set_pinned(
-            &Pin::Project {
-                machine: RuntimeKey::Local,
-                root: "/repo".into(),
-            },
-            true,
-        );
-        store.set_pinned(
-            &Pin::Workset {
-                machine: remote(),
-                id: "w".into(),
-            },
-            true,
-        );
-
-        let ui = store.sidebar();
-        let local = &ui.machines[&RuntimeKey::Local];
-        assert_eq!(local.pinned_conversations, ["b", "a"]);
-        assert_eq!(local.pinned_projects, ["/repo"]);
-        let box_ui = &ui.machines[&remote()];
-        assert_eq!(box_ui.pinned_conversations, ["c"]);
-        assert!(box_ui.pinned_worksets.contains("w"));
-
-        store.set_pinned(&Pin::Conversation(key(RuntimeKey::Local, "b")), false);
-        store.set_pinned(&Pin::Conversation(key(RuntimeKey::Local, "d")), true);
-        assert_eq!(
-            store.sidebar().machines[&RuntimeKey::Local].pinned_conversations,
-            ["a", "d"]
-        );
-    }
-
-    #[test]
-    fn order_is_replaced_whole_and_collapse_toggles() {
-        let (_dir, store) = store();
-        let project = |machine: RuntimeKey, root: &str| ProjectKey {
-            machine,
-            root: root.into(),
-        };
-        store.set_project_order(&[
-            project(RuntimeKey::Local, "/b"),
-            project(RuntimeKey::Local, "/a"),
-        ]);
-        store.set_project_order(&[
-            project(RuntimeKey::Local, "/a"),
-            project(remote(), "/r"),
-            project(RuntimeKey::Local, "/c"),
-        ]);
-        store.set_conversation_order(&remote(), &["x".into(), "y".into()]);
-        store.set_collapsed(
-            &Fold::Project {
-                machine: RuntimeKey::Local,
-                root: "/a".into(),
-            },
-            true,
-        );
-        store.set_collapsed(
-            &Fold::Workset {
-                machine: remote(),
-                id: "w".into(),
-            },
-            true,
-        );
-        store.set_collapsed(&Fold::Conversations, true);
-
-        let ui = store.sidebar();
-        let local = &ui.machines[&RuntimeKey::Local];
-        // 整份换掉，跨机器的先后照存。
-        assert_eq!(
-            ui.project_order,
-            [
-                project(RuntimeKey::Local, "/a"),
-                project(remote(), "/r"),
-                project(RuntimeKey::Local, "/c"),
-            ]
-        );
-        assert!(local.collapsed_projects.contains("/a"));
-        assert_eq!(ui.machines[&remote()].conversation_order, ["x", "y"]);
-        assert!(ui.machines[&remote()].collapsed_worksets.contains("w"));
-        assert!(ui.conversations_collapsed);
-
-        store.set_collapsed(&Fold::Conversations, false);
-        store.set_collapsed(
-            &Fold::Project {
-                machine: RuntimeKey::Local,
-                root: "/a".into(),
-            },
-            false,
-        );
-        let ui = store.sidebar();
-        assert!(!ui.conversations_collapsed);
-        // 本机什么都不剩时不留这一项。
-        assert!(
-            ui.machines
-                .get(&RuntimeKey::Local)
-                .is_none_or(|local| local.collapsed_projects.is_empty())
-        );
-    }
-
-    #[test]
     fn layout_and_selection_round_trip() {
         let (_dir, store) = store();
         let conversation = key(remote(), "c");
@@ -690,65 +329,23 @@ mod tests {
     }
 
     #[test]
-    fn avatar_choice_round_trips() {
-        let (_dir, store) = store();
-        assert_eq!(store.avatar_choice(), AvatarChoice::Unset);
-        for choice in [
-            AvatarChoice::View("someone.avatars/avatar".into()),
-            AvatarChoice::Icon,
-            AvatarChoice::View("smelt.buddies/avatar".into()),
-            AvatarChoice::Unset,
-        ] {
-            store.save_avatar_choice(&choice);
-            assert_eq!(store.avatar_choice(), choice);
-        }
-    }
-
-    #[test]
     fn prune_drops_rows_the_directory_no_longer_has() {
         let (_dir, store) = store();
         for id in ["keep", "gone"] {
-            store.set_pinned(&Pin::Conversation(key(RuntimeKey::Local, id)), true);
             store.save_layout(&key(RuntimeKey::Local, id), &SavedLayout::default());
         }
-        store.set_conversation_order(&RuntimeKey::Local, &["gone".into(), "keep".into()]);
-        store.set_pinned(&Pin::Conversation(key(remote(), "gone")), true);
-        store.set_collapsed(
-            &Fold::Project {
-                machine: RuntimeKey::Local,
-                root: "/old".into(),
-            },
-            true,
-        );
-        store.set_collapsed(
-            &Fold::Workset {
-                machine: RuntimeKey::Local,
-                id: "w-old".into(),
-            },
-            true,
-        );
+        store.save_layout(&key(remote(), "gone"), &SavedLayout::default());
         store.save_selection(Some(&key(RuntimeKey::Local, "gone")));
 
-        let known = KnownIds {
-            conversations: HashSet::from(["keep".to_string()]),
-            roots: HashSet::new(),
-            worksets: HashSet::new(),
-        };
-        store.prune(&RuntimeKey::Local, &known);
+        store.prune(&RuntimeKey::Local, &HashSet::from(["keep".to_string()]));
 
-        let ui = store.sidebar();
-        let local = &ui.machines[&RuntimeKey::Local];
-        assert_eq!(local.pinned_conversations, ["keep"]);
-        assert_eq!(local.conversation_order, ["keep"]);
-        assert!(local.collapsed_projects.is_empty());
-        assert!(local.collapsed_worksets.is_empty());
         assert_eq!(store.layout(&key(RuntimeKey::Local, "gone")), None);
         assert!(store.layout(&key(RuntimeKey::Local, "keep")).is_some());
         assert_eq!(store.selection(), None);
         // 别的机器不受影响。
-        assert_eq!(ui.machines[&remote()].pinned_conversations, ["gone"]);
+        assert!(store.layout(&key(remote(), "gone")).is_some());
 
         store.forget_machine(&remote());
-        assert!(!store.sidebar().machines.contains_key(&remote()));
+        assert_eq!(store.layout(&key(remote(), "gone")), None);
     }
 }

@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 15;
+pub(crate) const SCHEMA_VERSION: u32 = 16;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -337,6 +337,20 @@ DELETE FROM key_binding
   WHERE command GLOB 'smelt.stage/*' OR command GLOB 'smelt.sessions/activate-[1-9]';
 ";
 
+/// v16：会话列表从会话插件拆成了自己的插件 `smelt.session-list`。布局存档里摆的列表视图
+/// 换成新 id；列表的五条命令改过的键搬到新 id 上，新 id 已经有记录的以新的为准，搬不过去的
+/// 旧记录删掉。只改数据，不动表结构。
+const MIGRATE_V15_TO_V16: &str = "
+UPDATE workspace_layout_state
+  SET state = REPLACE(state, '\"smelt.sessions/list\"', '\"smelt.session-list/main\"');
+UPDATE OR IGNORE key_binding SET command = 'smelt.session-list/' || substr(command, 16)
+  WHERE command IN ('smelt.sessions/focus-list', 'smelt.sessions/prev', 'smelt.sessions/next',
+    'smelt.sessions/new-session', 'smelt.sessions/open-project');
+DELETE FROM key_binding
+  WHERE command IN ('smelt.sessions/focus-list', 'smelt.sessions/prev', 'smelt.sessions/next',
+    'smelt.sessions/new-session', 'smelt.sessions/open-project');
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -390,7 +404,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7..=14 => {}
+        7..=15 => {}
         newer => return Err(format!("client database version {newer} is newer than this app and isn't recognized")),
     }
     if (1..=7).contains(&version) {
@@ -431,6 +445,11 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
     if (1..=14).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V14_TO_V15)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=15).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V15_TO_V16)
             .map_err(|error| error.to_string())?;
     }
     transaction

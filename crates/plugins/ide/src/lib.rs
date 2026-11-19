@@ -28,9 +28,9 @@ rust_i18n::i18n!("locales", fallback = "en");
 /// 本插件的来源 id。
 const OWNER: &str = "smelt.ide";
 
-// 约定：smelt.sessions 的 PROJECT_MENU，上下文是 `{machine, path}`；权威定义在
-// crates/plugins/sessions/src/contract.rs。
-const PROJECT_MENU: &str = "smelt.sessions/project";
+// 约定：smelt.session-list 的 PROJECT_MENU，上下文是 `{machine, path}`；权威定义在
+// crates/plugins/session-list/src/contract.rs。
+const PROJECT_MENU: &str = "smelt.session-list/project";
 
 /// 菜单项点了执行的命令。
 const OPEN_WITH: api::Command<OpenWith, ()> = api::Command::new("smelt.ide/open-with");

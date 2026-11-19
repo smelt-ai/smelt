@@ -1,4 +1,4 @@
-//! 会话用到的别的插件（摆的格子、智能体、变更）的约定：本插件用到的 id 和字段，
+//! 会话用到的别的插件（摆的格子、智能体、会话列表）的约定：本插件用到的 id 和字段，
 //! 照抄自权威定义，形状必须和那边一致。只抄用到的字段：发出去的参数里没抄的字段对方按默认值
 //! 处理。
 
@@ -117,17 +117,12 @@ pub(crate) mod conversation {
 pub(crate) mod agents {
     use serde::Deserialize;
     use smelt_plugin_api::model::agent_host::AgentHostSettings;
-    use smelt_plugin_api::{Command, Event, RuntimeKey, machine_json};
+    use smelt_plugin_api::{Command, RuntimeKey, machine_json};
 
     // 约定：smelt.agents 的 AGENT_SETTINGS。
     /// 各台机器眼下的智能体配置，只含收到过推送的机器。
     pub(crate) const AGENT_SETTINGS: Command<(), Vec<MachineAgentSettings>> =
         Command::new("smelt.agents/agent-settings");
-
-    // 约定：smelt.agents 的 AGENT_SETTINGS_CHANGED。
-    /// 一台机器的智能体配置换了（整份），或那台机器给不了、移除了。
-    pub(crate) const AGENT_SETTINGS_CHANGED: Event<MachineAgentSettings> =
-        Event::new("smelt.agents/agent-settings-changed");
 
     /// 一台机器的智能体配置。
     #[derive(Clone, Debug, Deserialize)]
@@ -153,22 +148,23 @@ pub(crate) mod agents {
     }
 }
 
-/// 变更（来源 `smelt.git`）的约定，权威定义在 `crates/plugins/git/src/contract.rs`。
-pub(crate) mod git {
+/// 会话列表（来源 `smelt.session-list`）的约定，权威定义在
+/// `crates/plugins/session-list/src/contract.rs`。
+pub(crate) mod session_list {
     use serde::Serialize;
     use smelt_plugin_api::{Command, RuntimeKey, machine_json};
 
-    // 约定：smelt.git 的 OPEN_PULL_REQUEST。
-    /// 在浏览器里打开那个仓库当前分支的新建 PR 页。开不了时命令失败，原因给人看。
-    pub(crate) const OPEN_PULL_REQUEST: Command<OpenPullRequest, ()> =
-        Command::new("smelt.git/open-pull-request");
+    // 约定：smelt.session-list 的 REVEAL_IN_LIST。
+    /// 在会话列表里找到这段会话：展开、滚过去、闪一下。不在列表里是失败。
+    pub(crate) const REVEAL_IN_LIST: Command<RevealInList, ()> =
+        Command::new("smelt.session-list/reveal-in-list");
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-    pub(crate) struct OpenPullRequest {
+    pub(crate) struct RevealInList {
         #[serde(with = "machine_json")]
         pub machine: RuntimeKey,
-        /// 仓库根目录：工作树里就是那个仓库的 worktree 目录。
-        pub root: String,
+        /// 守护会话 id。
+        pub session_id: String,
     }
 }
 

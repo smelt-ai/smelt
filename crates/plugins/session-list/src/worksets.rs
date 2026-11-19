@@ -1,5 +1,5 @@
 //! 工作树的合并情况：关闭前、窗口回到前台时问运行时（`workspace.workset.inspect`，会先
-//! fetch 各仓库的基线），结果缓存在 [`Sessions::workset_checks`] 里给侧栏画。
+//! fetch 各仓库的基线），结果缓存在 [`SessionList::workset_checks`] 里给侧栏画。
 //!
 //! 什么时候问，全由事件决定，不起定时器：
 //! - 目录里出现了还没问过的工作树（`SessionsChanged`）：问一次，侧栏才有状态可画。
@@ -20,7 +20,7 @@ use smelt_plugin_api::model::workspace_directory::{
 };
 use smelt_plugin_api::{self as api, RuntimeKey};
 
-use crate::model::Sessions;
+use crate::model::SessionList;
 
 /// 窗口回到前台时，离上次检查超过这么久才再查。查一次要 fetch 每个仓库。
 const RECHECK_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -116,7 +116,7 @@ pub(crate) fn inspect(
     key: WorksetKey,
     cx: &mut App,
 ) -> Task<Result<WorkspaceWorksetInspectResult, String>> {
-    let sessions = Sessions::global(cx);
+    let sessions = SessionList::global(cx);
     sessions.update(cx, |sessions, _| {
         sessions
             .workset_checks
@@ -156,7 +156,7 @@ pub(crate) fn refresh(stale: bool, cx: &mut App) {
             id: workset.id.clone(),
         }));
     }
-    let sessions = Sessions::global(cx);
+    let sessions = SessionList::global(cx);
     let due: Vec<WorksetKey> = sessions.update(cx, |sessions, _| {
         sessions
             .workset_checks

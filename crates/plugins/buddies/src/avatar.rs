@@ -13,7 +13,7 @@ use smelt_plugin_api::{self as api, PluginView, ViewHandle, ViewSpec};
 use crate::buddy::{CANVAS, Portrait};
 use crate::cast::{Cast, ConversationKey};
 use crate::frames::Pacer;
-use crate::peers::sessions::{SESSION_AVATAR, SessionAvatarArgs};
+use crate::peers::session_list::{SESSION_AVATAR, SessionAvatarArgs};
 
 pub(crate) fn spec() -> ViewSpec {
     ViewSpec {

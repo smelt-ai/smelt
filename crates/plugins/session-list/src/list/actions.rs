@@ -17,12 +17,12 @@ use smelt_plugin_api::{self as api, RuntimeKey};
 use super::{
     GroupKey, Sidebar, merge_project_order, move_near, move_to_pin_boundary, splice_group,
 };
-use crate::model::{ConversationKey, FailTarget, Pin, ProjectKey, Sessions};
+use crate::model::{ConversationKey, FailTarget, Pin, ProjectKey, SessionList};
 use crate::worksets::{self, MergeSummary, WorksetKey};
-use crate::{contract, lifecycle, peers};
+use crate::{contract, ops, peers};
 
 fn sidebar(cx: &App) -> std::rc::Rc<Sidebar> {
-    Sessions::global(cx).read(cx).sidebar.clone()
+    SessionList::global(cx).read(cx).sidebar.clone()
 }
 
 // ---- 置顶 ----
@@ -42,7 +42,7 @@ pub(super) fn pin_project(machine: &RuntimeKey, root: &str, pinned: bool, cx: &m
         root: root.to_string(),
     };
     let shown = sidebar(cx).project_keys();
-    let sessions = Sessions::global(cx);
+    let sessions = SessionList::global(cx);
     let order = {
         let ui = &sessions.read(cx).ui;
         let shown = move_to_pin_boundary(&shown, &item, |other| {
@@ -63,7 +63,7 @@ pub(super) fn pin_project(machine: &RuntimeKey, root: &str, pinned: bool, cx: &m
 /// 置顶或取消置顶一段会话。项目里的会话同样挪到交界；「对话」一段按最近动静排，不记手动
 /// 顺序，只改置顶。
 pub(super) fn pin_session(key: &ConversationKey, group: &GroupKey, pinned: bool, cx: &mut App) {
-    let sessions = Sessions::global(cx);
+    let sessions = SessionList::global(cx);
     let order = match group {
         GroupKey::Conversations => None,
         GroupKey::Project { machine, .. } => {
@@ -100,7 +100,7 @@ pub(super) fn pin_workset(machine: &RuntimeKey, id: &str, pinned: bool, cx: &mut
         machine: machine.clone(),
         id: id.to_string(),
     };
-    Sessions::global(cx).update(cx, |sessions, cx| sessions.set_pinned(pin, pinned, cx));
+    SessionList::global(cx).update(cx, |sessions, cx| sessions.set_pinned(pin, pinned, cx));
 }
 
 // ---- 拖动 ----
@@ -112,7 +112,7 @@ pub(super) fn drop_project(from: &ProjectKey, to: &ProjectKey, before: bool, cx:
     if !move_near(&mut shown, from, to, before) {
         return;
     }
-    let sessions = Sessions::global(cx);
+    let sessions = SessionList::global(cx);
     let (pinned, order) = {
         let ui = &sessions.read(cx).ui;
         (
@@ -147,7 +147,7 @@ pub(super) fn drop_session(
         return;
     }
     let order = splice_group(sidebar.conversation_ids(machine), &ids);
-    let sessions = Sessions::global(cx);
+    let sessions = SessionList::global(cx);
     let pinned = sessions
         .read(cx)
         .ui
@@ -169,7 +169,7 @@ pub(super) fn close_session(
     cx: &mut App,
 ) {
     let close = move |cx: &mut App| {
-        let closed = lifecycle::close_conversation(key.clone(), cx);
+        let closed = ops::close_conversation(key.clone(), cx);
         let target = FailTarget::Conversation(key.clone());
         crate::report_row_failure(target, t!("action.close_session"), closed, cx);
     };
@@ -199,7 +199,7 @@ pub(super) fn archive_session(
     cx: &mut App,
 ) {
     let archive = move |cx: &mut App| {
-        let archived = lifecycle::archive_conversation(key.clone(), cx);
+        let archived = ops::archive_conversation(key.clone(), cx);
         let target = FailTarget::Conversation(key.clone());
         crate::report_row_failure(target, t!("action.archive_session"), archived, cx);
     };
@@ -229,7 +229,7 @@ pub(super) fn close_project(
     cx: &mut App,
 ) {
     let close = move |cx: &mut App| {
-        let closed = lifecycle::close_project(machine.clone(), root.clone(), cx);
+        let closed = ops::close_project(machine.clone(), root.clone(), cx);
         let target = FailTarget::Project {
             machine: machine.clone(),
             root: root.clone(),
@@ -460,7 +460,7 @@ fn pick_project(machine: RuntimeKey, cx: &mut App) {
             return;
         };
         cx.update(|cx| {
-            let opened = lifecycle::open_project(machine, root, cx);
+            let opened = ops::open_project(machine, root, cx);
             crate::report_failure(t!("action.add_project"), opened, cx);
         });
     })
@@ -498,7 +498,7 @@ pub(super) fn open_dropped_paths(paths: Vec<PathBuf>, cx: &mut App) {
                 return;
             }
             for root in roots {
-                let opened = lifecycle::open_project(RuntimeKey::Local, root, cx);
+                let opened = ops::open_project(RuntimeKey::Local, root, cx);
                 crate::report_failure(t!("action.add_project"), opened, cx);
             }
         });

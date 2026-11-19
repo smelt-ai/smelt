@@ -3,9 +3,9 @@
 //! `workspace_commands.rs` 里会话那部分搬到这里。
 //!
 //! 处理只做参数到各包函数的转接：去某段会话是打开会话视图（`lifecycle::open_session`），
-//! 新建 `lifecycle::create_conversation`，对话框 `dialogs::*`，分屏
-//! `session_view::{split_pane, cycle_pane, close_pane}`，上一段 / 下一段按
-//! `Sessions::sidebar` 的 `order()` 打开那段。新会话在目录里那条怎么拼在 [`launch`]（纯函数）。
+//! 新建 `lifecycle::create_conversation`，选项目 `lifecycle::select_project`，分屏
+//! `session_view::{split_pane, cycle_pane, close_pane}`。新会话在目录里那条怎么拼在
+//! [`launch`]（纯函数）。
 
 mod launch;
 
@@ -24,15 +24,15 @@ use smelt_plugin_api::model::workspace_directory::{
 use smelt_plugin_api::{self as api, Command, CommandSpec, Handled, RuntimeKey};
 
 use crate::contract::{
-    self, Activate, Fork, Handoff, ListArgs, Resume, RevealInList, SendText, SessionArgs,
-    SessionAt, StartConversation,
+    self, Activate, CreateConversation, Fork, Handoff, Resume, SelectProject, SendText,
+    SessionArgs, SessionAt, StartConversation,
 };
-use crate::model::{self, ConversationKey, Located, Sessions};
+use crate::model::{ConversationKey, Sessions};
 use crate::peers::agents::AGENT_SETTINGS;
 use crate::peers::conversation::{ConversationFork, ConversationStart, ConversationText};
 use crate::peers::terminal::TerminalText;
 use crate::session_view::PaneKind;
-use crate::{dialogs, lifecycle, peers, session_view};
+use crate::{lifecycle, peers, session_view};
 
 /// 登记本插件的命令。`register` 里调一次。
 pub(crate) fn register(cx: &mut App) {
@@ -46,44 +46,21 @@ pub(crate) fn register(cx: &mut App) {
             .spec_async(api::text!("command.resume_in_terminal"), resume_in_terminal),
         contract::HANDOFF.spec_async(api::text!("command.handoff"), handoff),
         contract::SEND_TEXT.spec_async(api::text!("command.send_text"), send_text),
-        contract::REVEAL_IN_LIST.spec_async(api::text!("command.reveal_in_list"), |args, _, cx| {
-            reveal_in_list(args, cx)
+        contract::SELECTION.spec(api::text!("command.selection"), |(), _, cx| {
+            Ok(Sessions::global(cx).read(cx).selection.to_selected())
         }),
-        shortcut(
-            contract::NEW_SESSION,
-            api::text!("menu.new_session"),
-            None,
-            |window, cx| {
-                dialogs::open_new_session(window, cx);
-                Handled::ok()
-            },
+        contract::CREATE_CONVERSATION.spec_async(
+            api::text!("command.create_conversation"),
+            create_conversation,
         ),
-        shortcut(
-            contract::OPEN_PROJECT,
-            api::text!("command.open_project"),
-            None,
-            |_, cx| open_project(cx),
-        ),
-        // ⌘⇧E 跟 VS Code「聚焦资源管理器」一样。
-        shortcut(
-            contract::FOCUS_LIST,
-            api::text!("command.focus_list"),
-            Some("cmd-shift-e"),
-            |_, cx| focus_list(cx),
-        ),
-        // 绑在 Workspace 上比输入框浅：焦点在输入框里时是文首 / 文末。
-        shortcut(
-            contract::PREV_SESSION,
-            api::text!("command.prev_session"),
-            Some("cmd-up"),
-            |_, cx| step_session(false, cx),
-        ),
-        shortcut(
-            contract::NEXT_SESSION,
-            api::text!("command.next_session"),
-            Some("cmd-down"),
-            |_, cx| step_session(true, cx),
-        ),
+        contract::SELECT_PROJECT.spec(api::text!("command.select_project"), |args, _, cx| {
+            let SelectProject {
+                machine,
+                root,
+                after,
+            } = args;
+            lifecycle::select_project(machine, root, after, cx)
+        }),
         // 输入框的缩进绑在更深的 context 上，焦点在输入框里时由它接。
         shortcut(
             contract::PREV_PANE,
@@ -182,6 +159,21 @@ fn activate(args: Activate, _: Option<&mut Window>, cx: &mut App) -> Task<Result
         },
         cx,
     )
+}
+
+/// 新会话：目录里那一条由调用方拼好。有对话的当新对话拉起。
+fn create_conversation(
+    args: CreateConversation,
+    _: Option<&mut Window>,
+    cx: &mut App,
+) -> Task<Result<(), String>> {
+    let CreateConversation {
+        machine,
+        conversation,
+    } = args;
+    let start = conversation.acp.is_some().then(ConversationStart::default);
+    let created = lifecycle::create_conversation(machine, conversation, start, cx);
+    done(created, cx)
 }
 
 fn start_conversation(
@@ -373,117 +365,6 @@ fn send_text(args: SendText, _: Option<&mut Window>, cx: &mut App) -> Task<Resul
 
 // ---- 不带参数的命令 ----
 
-/// 在本机选一个或几个目录当项目打开。没选是撤销，不算失败。
-fn open_project(cx: &mut App) -> Handled {
-    let picked = api::PICK_PATHS.run(
-        &api::PathRequest {
-            machine: RuntimeKey::Local,
-            title: t!("pick.title").into_owned(),
-            confirm: t!("pick.confirm").into_owned(),
-            files: false,
-            multiple: true,
-        },
-        cx,
-    );
-    Handled::Done(cx.spawn(async move |cx| {
-        let roots = picked.await?.unwrap_or_default();
-        let opening = cx.update(|cx| {
-            roots
-                .into_iter()
-                .map(|root| lifecycle::open_project(RuntimeKey::Local, root, cx))
-                .collect::<Vec<_>>()
-        });
-        let mut failed = Vec::new();
-        for opened in opening {
-            if let Err(error) = opened.await {
-                failed.push(error);
-            }
-        }
-        if failed.is_empty() {
-            Ok(serde_json::Value::Null)
-        } else {
-            Err(failed.join("；"))
-        }
-    }))
-}
-
-/// 焦点交给会话列表，列表被挡着就先让它露出来。
-fn reveal_in_list(args: RevealInList, cx: &mut App) -> Task<Result<(), String>> {
-    let host = api::host(cx);
-    let style = host.path_style(&args.machine, cx);
-    let directory = host.workspace_directory(&args.machine, cx);
-    let at = SessionAt::Session {
-        session_id: args.session_id,
-    };
-    match model::locate(&args.machine, &at, None, style, directory.as_ref()) {
-        Located::Found(key) => locate_in_list(key, cx),
-        Located::Wait | Located::Missing => Task::ready(Err(t!("error.not_in_list").into_owned())),
-    }
-}
-
-/// 在列表里找出这段会话：展开它所在的组（搜索滤掉了就清掉搜索），列表视图滚过去、闪一下；
-/// 侧栏收着时 `OPEN_VIEW` 把它打开。
-pub(crate) fn locate_in_list(key: ConversationKey, cx: &mut App) -> Task<Result<(), String>> {
-    Sessions::global(cx).update(cx, |sessions, cx| {
-        sessions.reveal(&key, cx);
-        sessions.located = Some(key);
-        cx.notify();
-    });
-    let opened = api::OPEN_VIEW.run(
-        &api::OpenView {
-            view: contract::LIST.to_string(),
-            args: serde_json::Value::Null,
-        },
-        cx,
-    );
-    cx.spawn(async move |_| {
-        if opened.await? {
-            Ok(())
-        } else {
-            Err(t!("error.no_room_list").into_owned())
-        }
-    })
-}
-
-fn focus_list(cx: &mut App) -> Handled {
-    let args = match serde_json::to_value(ListArgs { focus: true }) {
-        Ok(args) => args,
-        Err(error) => return Handled::err(error.to_string()),
-    };
-    let opened = api::OPEN_VIEW.run(
-        &api::OpenView {
-            view: contract::LIST.to_string(),
-            args,
-        },
-        cx,
-    );
-    Handled::Done(cx.spawn(async move |_| {
-        if opened.await? {
-            Ok(serde_json::Value::Null)
-        } else {
-            Err(t!("error.no_room_list").into_owned())
-        }
-    }))
-}
-
-/// 按列表上的顺序切到上一段 / 下一段会话，到头绕回。打开会话视图：出口里放着别的页时，
-/// 会话视图先露出来再选中、给焦点。
-fn step_session(forward: bool, cx: &mut App) -> Handled {
-    let next = {
-        let sessions = Sessions::global(cx).read(cx);
-        step(
-            sessions.sidebar.order(),
-            sessions.selection.session(),
-            forward,
-        )
-    };
-    let Some(key) = next else {
-        return Handled::ok();
-    };
-    let opened = lifecycle::open_conversation(key, cx);
-    Handled::Done(cx.spawn(async move |_| opened.await.map(|()| serde_json::Value::Null)))
-}
-
 /// 分屏的命令只作用在露着的那段会话上：会话视图没露、没有选中的会话时不接，按键交给
 /// 下一条绑定（⌘W 不能悄悄关掉看不见的会话）。
 fn on_pane(
@@ -504,8 +385,8 @@ fn copy_active_session_id(cx: &mut App) -> Result<(), String> {
     Ok(())
 }
 
-/// 复制一格的会话 id（见 [`id_to_copy`]）。会话列表行的右键菜单也用。
-pub(crate) fn copy_session_id(machine: &RuntimeKey, session_id: &str, cx: &mut App) {
+/// 复制一格的会话 id（见 [`id_to_copy`]）。
+fn copy_session_id(machine: &RuntimeKey, session_id: &str, cx: &mut App) {
     let host = api::host(cx);
     let directory = host.workspace_directory(machine, cx);
     let states = host.session_states(machine, cx);
@@ -603,27 +484,6 @@ fn id_to_copy(
         .to_string()
 }
 
-/// 上一段 / 下一段：按列表上从上到下的顺序，到头绕回。还没选中的（或选中的已经不在列表
-/// 里），下一段是第一段，上一段是最后一段。列表是空的是 `None`。
-fn step(
-    order: &[ConversationKey],
-    current: Option<&ConversationKey>,
-    forward: bool,
-) -> Option<ConversationKey> {
-    let count = order.len();
-    if count == 0 {
-        return None;
-    }
-    let at = current.and_then(|current| order.iter().position(|key| key == current));
-    let next = match (at, forward) {
-        (Some(at), true) => (at + 1) % count,
-        (Some(at), false) => (at + count - 1) % count,
-        (None, true) => 0,
-        (None, false) => count - 1,
-    };
-    Some(order[next].clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,20 +521,5 @@ mod tests {
         assert_eq!(id_to_copy(Some(&directory), &[reported], "term-1"), "tui-9");
         assert_eq!(id_to_copy(Some(&directory), &[], "term-1"), "term-1");
         assert_eq!(id_to_copy(None, &[], "acp-1"), "acp-1");
-    }
-
-    #[test]
-    fn stepping_wraps_around_the_list() {
-        let key = |id: &str| ConversationKey {
-            machine: RuntimeKey::Local,
-            id: id.into(),
-        };
-        let order = [key("a"), key("b"), key("c")];
-        assert_eq!(step(&order, Some(&key("c")), true), Some(key("a")));
-        assert_eq!(step(&order, Some(&key("a")), false), Some(key("c")));
-        assert_eq!(step(&order, Some(&key("a")), true), Some(key("b")));
-        assert_eq!(step(&order, None, true), Some(key("a")));
-        assert_eq!(step(&order, Some(&key("gone")), false), Some(key("c")));
-        assert_eq!(step(&[], None, true), None);
     }
 }

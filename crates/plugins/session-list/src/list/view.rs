@@ -1,4 +1,4 @@
-//! 会话列表视图：画 [`Sessions::sidebar`]，自己只留界面上的临时状态（行内改名、项目搜索框、
+//! 会话列表视图：画 [`SessionList::sidebar`]，自己只留界面上的临时状态（行内改名、项目搜索框、
 //! 拖拽落点）和填进行首插槽的头像实例。从访达拖进来的文件夹在本机打开成项目。
 
 use rust_i18n::t;
@@ -30,7 +30,7 @@ use super::rows::{self, ProjectDrag, RowCtx, SessionDrag};
 use super::session_flip;
 use crate::contract::ListArgs;
 use crate::contract::{SESSION_AVATAR, SessionAvatarArgs};
-use crate::model::{ConversationKey, FailTarget, Sessions};
+use crate::model::{ConversationKey, FailTarget, SessionList};
 use crate::worksets::WorksetKey;
 
 /// 建会话列表视图（视图 [`crate::contract::LIST`]，`register` 登记）。只建一份。
@@ -47,7 +47,7 @@ pub(super) struct ListView {
     scroll: ScrollHandle,
     /// 正在行内改名的那一行。
     pub(super) rename: Option<Rename>,
-    /// 「项目」标题换成的搜索框；没在搜是 `None`。框里的字是 [`Sessions::project_filter`]
+    /// 「项目」标题换成的搜索框；没在搜是 `None`。框里的字是 [`SessionList::project_filter`]
     /// 的来源，边打边写过去。
     pub(super) search: Option<Search>,
     /// 拖着走时落点在哪（哪一行的上沿或下沿）。只在拖着时画；拖完、放下时清掉。
@@ -90,7 +90,7 @@ pub(super) enum RenameTarget {
 /// 「项目」标题上的搜索框。
 pub(super) struct Search {
     pub(super) input: Entity<InputState>,
-    /// 上次写进 [`Sessions::project_filter`] 的字。那边和它对不上就是别处清掉了搜索。
+    /// 上次写进 [`SessionList::project_filter`] 的字。那边和它对不上就是别处清掉了搜索。
     pushed: String,
     _subscription: Subscription,
 }
@@ -110,7 +110,7 @@ pub(super) enum DropTarget {
 
 impl ListView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sessions = Sessions::global(cx);
+        let sessions = SessionList::global(cx);
         let motion = ListMotion::new(&sessions.read(cx).sidebar);
         // 启动时恢复的选中也露出来：列表从顶上开始，它可能在下面。
         let selected = sessions.read(cx).selection.session().cloned();
@@ -118,7 +118,7 @@ impl ListView {
         let anchors = ScrollAnchors::new(&scroll);
         anchors.reveal(selected.as_ref().map(|key| session_flip(key).into()));
         let _subscriptions = vec![
-            // 侧栏重算、选中变了都在 `Sessions` 上 notify。侧栏换了一份就比一下前后：重排、
+            // 侧栏重算、选中变了都在 `SessionList` 上 notify。侧栏换了一份就比一下前后：重排、
             // 刚开始跑的会话、刚在这里新建的会话露面了，各起各的动画；会话来了、走了，头像
             // 跟着建、放。
             cx.observe_in(&sessions, window, |this, sessions, window, cx| {
@@ -262,7 +262,7 @@ impl ListView {
                     if let Some(search) = &mut this.search {
                         search.pushed.clone_from(&query);
                     }
-                    Sessions::global(cx)
+                    SessionList::global(cx)
                         .update(cx, |sessions, cx| sessions.set_project_filter(query, cx));
                 }
                 // 回车：焦点交回列表，搜索留着，好用方向键在搜到的会话里走。
@@ -288,7 +288,7 @@ impl ListView {
         if self.search.take().is_none() {
             return false;
         }
-        Sessions::global(cx).update(cx, |sessions, cx| {
+        SessionList::global(cx).update(cx, |sessions, cx| {
             sessions.set_project_filter(String::new(), cx)
         });
         cx.notify();
@@ -304,14 +304,14 @@ impl ListView {
         }
     }
 
-    /// `Sessions` 通知了，比一下侧栏前后。选中变了也会通知，那时侧栏没变。
+    /// `SessionList` 通知了，比一下侧栏前后。选中变了也会通知，那时侧栏没变。
     fn sidebar_changed(
         &mut self,
-        sessions: &Entity<Sessions>,
+        sessions: &Entity<SessionList>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 搜索在别处被清掉了（从通知跳到滤掉的项目里的会话，见 `Sessions::reveal`）：框也收起。
+        // 搜索在别处被清掉了（从通知跳到滤掉的项目里的会话，见 `SessionList::reveal`）：框也收起。
         let filter = &sessions.read(cx).project_filter;
         if self
             .search
@@ -343,7 +343,7 @@ impl ListView {
     }
 
     /// 有要找出来的会话（`REVEAL_IN_LIST`）就取走：滚过去、闪一下。
-    fn take_located(&mut self, sessions: &Entity<Sessions>, cx: &mut Context<Self>) {
+    fn take_located(&mut self, sessions: &Entity<SessionList>, cx: &mut Context<Self>) {
         let Some(key) = sessions.update(cx, |sessions, _| sessions.located.take()) else {
             return;
         };
@@ -358,7 +358,7 @@ impl ListView {
             .into_iter()
             .map(|view| view.id)
             .collect();
-        let filled = Sessions::global(cx).read(cx).avatar.pick(&filled).cloned();
+        let filled = SessionList::global(cx).read(cx).avatar.pick(&filled).cloned();
         if filled != self.avatar_view {
             self.avatar_view = filled;
             self.avatars.clear();
@@ -368,7 +368,7 @@ impl ListView {
         let Some(view_id) = self.avatar_view.clone() else {
             return;
         };
-        let sidebar = Sessions::global(cx).read(cx).sidebar.clone();
+        let sidebar = SessionList::global(cx).read(cx).sidebar.clone();
         let keys: HashSet<&ConversationKey> = sidebar.session_rows().map(|row| &row.key).collect();
         let before = self.avatars.len();
         self.avatars.retain(|key, _| keys.contains(key));
@@ -467,7 +467,7 @@ impl Render for ListView {
         if animating {
             window.request_animation_frame();
         }
-        let sessions = Sessions::global(cx);
+        let sessions = SessionList::global(cx);
         let sessions = sessions.read(cx);
         let notices = sessions
             .sidebar

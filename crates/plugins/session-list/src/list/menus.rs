@@ -16,7 +16,7 @@ use super::view::{ListView, RenameTarget};
 use super::{ProjectGroup, SessionRow, Sidebar, WorksetGroup};
 use crate::contract::{self, MachineMenuContext, ProjectMenuContext, SessionMenuContext};
 use crate::dialogs;
-use crate::model::{FailTarget, Sessions, SidebarGrouping};
+use crate::model::{FailTarget, SessionList, SidebarGrouping};
 use crate::worksets::WorksetKey;
 
 /// 会话行的菜单。
@@ -300,14 +300,14 @@ pub(super) fn grouping_menu(
         MenuItem::new(label)
             .checked(grouping == mode)
             .on_click(move |_, _, cx| {
-                Sessions::global(cx).update(cx, |sessions, cx| sessions.set_grouping(mode, cx))
+                SessionList::global(cx).update(cx, |sessions, cx| sessions.set_grouping(mode, cx))
             })
     };
     let show = |hide: bool, label: Cow<'static, str>| {
         MenuItem::new(label)
             .checked(hide_empty == hide)
             .on_click(move |_, _, cx| {
-                Sessions::global(cx).update(cx, |sessions, cx| {
+                SessionList::global(cx).update(cx, |sessions, cx| {
                     sessions.set_hide_empty_projects(hide, cx)
                 })
             })
@@ -328,7 +328,7 @@ pub(super) fn grouping_menu(
         MenuItem::new(t!("grouping.by_machine"))
             .checked(by_machine)
             .on_click(move |_, _, cx| {
-                Sessions::global(cx)
+                SessionList::global(cx)
                     .update(cx, |sessions, cx| sessions.set_by_machine(!by_machine, cx))
             }),
     )

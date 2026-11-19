@@ -15,7 +15,7 @@ use smelt_plugin_api::{
 };
 
 use crate::contract::SESSION_AVATAR;
-use crate::model::{AvatarChoice, Sessions};
+use crate::model::{AvatarChoice, SessionList};
 
 pub(crate) fn spec() -> ViewSpec {
     // 搜索词两种语言都写：用哪种语言搜都找得到。
@@ -41,8 +41,8 @@ struct SessionsSettings;
 
 impl SessionsSettings {
     fn new(cx: &mut Context<Self>) -> Self {
-        // 选择改了在 `Sessions` 上通知；填插槽的插件来了、走了发 `ViewsChanged`。
-        cx.observe(&Sessions::global(cx), |_, _, cx| cx.notify())
+        // 选择改了在 `SessionList` 上通知；填插槽的插件来了、走了发 `ViewsChanged`。
+        cx.observe(&SessionList::global(cx), |_, _, cx| cx.notify())
             .detach();
         cx.subscribe(&api::events(cx), |_, _, event: &HostEvent, cx| {
             if matches!(event, HostEvent::ViewsChanged) {
@@ -63,7 +63,7 @@ impl Render for SessionsSettings {
         let filled = api::slot_views(SESSION_AVATAR, cx);
         let ids: Vec<SharedString> = filled.iter().map(|view| view.id.clone()).collect();
         // 下拉里显示的是眼下实际用的那个：没选过、选的卸了时是第一个。
-        let current = match Sessions::global(cx).read(cx).avatar.pick(&ids) {
+        let current = match SessionList::global(cx).read(cx).avatar.pick(&ids) {
             Some(id) => AvatarChoice::View(id.to_string()),
             None => AvatarChoice::Icon,
         };
@@ -76,7 +76,7 @@ impl Render for SessionsSettings {
             .selected(Some(current))
             .on_change(|choice: &AvatarChoice, _, cx: &mut App| {
                 let choice = choice.clone();
-                Sessions::global(cx).update(cx, |sessions, cx| sessions.set_avatar(choice, cx));
+                SessionList::global(cx).update(cx, |sessions, cx| sessions.set_avatar(choice, cx));
             });
         SettingsPage::new("sessions-settings").child(
             SettingsSection::new()

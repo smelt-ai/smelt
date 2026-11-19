@@ -14,7 +14,7 @@ use rust_i18n::t;
 use smelt_plugin_api::ui::IconName;
 use smelt_plugin_api::ui::{Button, Placement};
 
-use crate::lifecycle;
+use crate::ops;
 use crate::model::{ConversationKey, FailTarget};
 
 /// 一处有几段要你看的会话。
@@ -114,7 +114,7 @@ pub(super) fn pills(hint: Hint, top: Pixels) -> Vec<AnyElement> {
             .label(side.tally.label())
             .on_click(move |_, _, cx| {
                 // 出口里可能正放着别的页（归档这些）：和点那一行一样，打开会话视图再选中。
-                let opened = lifecycle::open_conversation(session.clone(), cx);
+                let opened = ops::open_conversation(session.clone(), cx);
                 let target = FailTarget::Conversation(session.clone());
                 crate::report_row_failure(target, t!("action.open_session"), opened, cx);
             });

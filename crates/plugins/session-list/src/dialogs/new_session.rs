@@ -48,9 +48,9 @@ use super::agents::conversation_acp;
 use super::repositories::{self, Mode};
 use crate::model::FailTarget;
 use crate::peers::agents::{AGENT_SETTINGS, AGENT_SETTINGS_CHANGED, AgentSettingsState};
-use crate::peers::conversation::ConversationStart;
+use crate::core::{CREATE_CONVERSATION, CreateConversation};
 use crate::worksets::WorksetKey;
-use crate::{contract, lifecycle};
+use crate::contract;
 
 /// 菜单宽度。从命令打开的那张顶上多一行「机器 · 项目 / 工作树」，宽一些。
 const WIDTH: f32 = 280.;
@@ -260,15 +260,19 @@ enum Slot {
 struct Launch {
     machine: RuntimeKey,
     conversation: WorkspaceConversation,
-    start: Option<ConversationStart>,
     /// 建在哪一行底下（工作树或项目）：没建成，原因挂在那一行上。
     under: FailTarget,
 }
 
 impl Launch {
     fn run(self, cx: &mut App) {
-        let created =
-            lifecycle::create_conversation(self.machine, self.conversation, self.start, cx);
+        let created = CREATE_CONVERSATION.run(
+            &CreateConversation {
+                machine: self.machine,
+                conversation: self.conversation,
+            },
+            cx,
+        );
         crate::report_row_failure(self.under, t!("action.new_session"), created, cx);
     }
 }
@@ -663,7 +667,7 @@ impl NewSession {
             workset_id: self.workset.clone(),
             ..WorkspaceConversation::default()
         };
-        let start = match &action.target {
+        match &action.target {
             NewSessionTarget::Conversation {
                 agent_option_id, ..
             } => {
@@ -682,7 +686,6 @@ impl NewSession {
                     return self.fail(t!("new.settings_changed"), cx);
                 };
                 conversation.acp = Some(acp);
-                Some(ConversationStart::default())
             }
             NewSessionTarget::Terminal { command, .. } => {
                 conversation.terminals = vec![new_terminal(
@@ -690,17 +693,14 @@ impl NewSession {
                     Some(action.label.clone()),
                     Some(command.clone()),
                 )];
-                None
             }
             NewSessionTarget::BlankTerminal => {
                 conversation.terminals = vec![new_terminal(cwd, None, None)];
-                None
             }
-        };
+        }
         Some(Launch {
             machine: self.machine.clone(),
             conversation,
-            start,
             under,
         })
     }

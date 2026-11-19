@@ -1,5 +1,5 @@
-# 内置插件「会话」（来源 id `smelt.sessions`）：会话列表、会话视图（对话加终端分屏）、按工作区
-# 目录恢复和新建会话、跳转，以及侧栏的置顶、排序、折叠和分屏布局（存插件自己的库）。终端、
+# 内置插件「会话」（来源 id `smelt.sessions`）：会话视图（对话加终端分屏）、选中、按工作区
+# 目录恢复和新建会话、跳转，以及分屏布局（存插件自己的库）。会话列表是另一个插件。终端、
 # 对话是别的插件登记的实例视图，这里按约定的 id 建、摆。只依赖插件接口和第三方库。
 [package]
 name = "smelt-sessions"
@@ -14,16 +14,12 @@ workspace = true
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
 gpui = { package = "gpui-pre", version = "=0.3.12" }
-# 分屏的尺寸手柄、弹层和列表里的上下选择动作。
+# 分屏的尺寸手柄。
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 后台任务里的 channel。
-smol = "2"
 # 新会话、新终端的 id 由这边先分好。
 uuid = { version = "1", features = ["v4"] }
-# 列表行上的「今天 / 昨天」和时刻。
-chrono = "0.4"
 # 界面文案（locales/ui.yml，见 docs/i18n.md）。
 rust-i18n.workspace = true
 
@@ -31,6 +27,3 @@ rust-i18n.workspace = true
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 tempfile = "3"
 
-# 行首头像出图（src/list/rows/snapshots.rs）：真实字形 + 离屏 Metal，特性与 smelt-ui 的快照一致。
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_apple = { package = "gpui-pre-apple", version = "=0.3.12", features = ["font-kit", "runtime_shaders", "test-support"] }

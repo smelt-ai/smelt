@@ -124,7 +124,7 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 插件要在别人画的地方放一个入口，比如机器菜单里的「远程桌面」、项目菜单里的「用 IDE 打开」，用菜单贡献：
 
 - 登记：`register_context_menu_items(来源, 菜单 id, 菜单项)`，按（来源，菜单）整组替换。每一项写：标题、彩色图标或线性图标、要执行的命令和参数，或者一层子菜单；可以只在某台机器上列。条件变了，插件自己重新登记。2026-11-16 已做，「用其他应用打开」已改用它（原来专用的 `register_open_with_apps` 删了）。
-- 菜单 id 是字符串，由画菜单的那个插件定义和公布（会话插件的 `smelt.sessions/conversation`、`smelt.sessions/project`、`smelt.sessions/machine`，对话插件消息上的 `smelt.conversation/message`，终端插件的 `smelt.terminal/menu`），上下文的形状写在同一处。宿主只存这张表，不认识任何一个菜单 id。
+- 菜单 id 是字符串，由画菜单的那个插件定义和公布（会话列表插件的 `smelt.session-list/conversation`、`smelt.session-list/project`、`smelt.session-list/machine`，对话插件消息上的 `smelt.conversation/message`，终端插件的 `smelt.terminal/menu`），上下文的形状写在同一处。宿主只存这张表，不认识任何一个菜单 id。
 - 画菜单的插件按菜单 id 取菜单项，点击时执行命令，参数是登记的参数并上上下文（机器、项目根目录，`context_menu_args`）。画菜单的插件各自把取到的项画成菜单项（会话插件的 `list/menus.rs`，对话、终端插件的 `menu.rs`），点了失败挂在发起的地方：会话列表是那一行，对话是那条消息，终端是那一格；找不到落点的（机器菜单）才发系统通知。菜单在打开时取项，开着的不跟着登记变。
 - 应用菜单（App、帮助）是另一张表：`register_menu_items(来源, 菜单项)`，项写在哪个菜单、标题、命令。
 - 不为侧栏底部这类地方开「区域贡献」：一块想单独露出来的东西，就做成视图，由布局摆。比如额度条做成一个小视图，摆在会话列表下面。
@@ -154,7 +154,7 @@ smelt 的每一项功能都是插件，用户也能用同一套接口写自己�
 - 加的一方登记一个按实例建的视图，在 `ViewSpec::fills` 里写上插槽 id，照抄参数的形状进自己的 `peers.rs`。
 - 被加的一方用 `slot_views(插槽 id)` 取填进来的视图（按登记顺序），按参数 `create_view`、自己摆，跟着 `ViewsChanged` 建、放。它不认识填的是谁：填的插件装上、换掉、删掉，它都不用改。
 - 和直接点名 `create_view` 的分别在依赖方向。使用方离不开的能力（会话里的终端、对话）由使用方点名提供方；可有可无的附加由附加的一方认插槽，被附加的一方不认识它。
-- 2026-11-17 已做：会话列表的 `smelt.sessions/session-avatar`，小人插件（`smelt.buddies`）填它。JS 插件能用 `slot_views` 取、用 `SmeltViewInstance` 建。
+- 2026-11-17 已做：会话列表的 `smelt.session-list/session-avatar`（原来是 `smelt.sessions/session-avatar`，11-19 会话列表拆成了自己的插件），小人插件（`smelt.buddies`）填它。JS 插件能用 `slot_views` 取、用 `SmeltViewInstance` 建。
 - 2026-11-18 起 JS 插件也能填：`register_views` 登记 `instances: true` 带 `fills` 的视图，每建一份挂一份入口脚本（见「JS 映射」）。每行一份脚本实例，比 Rust 视图重，填每行都有的插槽时画得简单些。
 
 ### 插件之间的约定
@@ -239,7 +239,7 @@ JS 插件的宿主模块也叫 `smelt-plugin-api`，是 Rust 那份接口的薄�
 
 **舞台是会话插件的一个视图。**
 
-- 会话插件登记两个视图：列表（`smelt.sessions/list`）和会话（`smelt.sessions/session`，原来叫舞台）。默认布局把列表摆在左边，会话是首页出口的默认内容。
+- 会话插件登记会话视图（`smelt.sessions/session`，原来叫舞台），是首页出口的默认内容。列表 11-19 拆成了自己的插件（`smelt.session-list/main`，原来是 `smelt.sessions/list`），默认布局把它摆在左边；选中归会话插件，列表经 `smelt.sessions/selection`、`selection-changed` 跟着。
 - 舞台用能力层的对话组件和终端组件，显示选中的那段会话。终端分屏（现在的 `PaneState`、`term_dock`）归它。
 - 宿主不认识会话的路由：
   - `WorkspaceRoute` 已删（2026-11-16），路由是页加出口（见「摆放」）。`Builtin` 随会话插件拆走时删。
