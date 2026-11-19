@@ -1091,9 +1091,13 @@ impl HistorySourceKind {
         self.terminal()?.cli_resume_syntax()
     }
 
-    /// 能不能从历史页删掉一条记录。删除只删列表里那份存档；Antigravity 的会话在
-    /// 总索引库（`conversation_summaries.db`）和正文库两处，`agy` 可能正开着索引库，
-    /// 只删正文会把索引留成死链，所以不给删，而不是给一个半对的删除。
+    /// 能不能从历史页删掉一条记录。删除只删列表里那份存档。
+    ///
+    /// Antigravity 不给删：一条会话散在索引库（列表、全文搜索、父子关系三张表）、
+    /// 正文库、`brain/<id>/`（含子智能体记录和 git 工作树）、`annotations/`、两份列表
+    /// 缓存等多处，`agy` 自己删时还要停掉在跑的子智能体，正开着的 `agy` 进程也会对
+    /// 删除做出反应。这只有 `agy` 自己做得对，但它只在 TUI 的 `/resume` 选择器里给
+    /// 删除（F4），ACP 没有删除方法。等它的 ACP 有了再接，不从外面拼一个半对的删除。
     pub fn history_deletable(self) -> bool {
         self != Self::Conversation(ConversationAgentKind::Antigravity)
     }
