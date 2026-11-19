@@ -10,9 +10,10 @@
 
 pub use smelt_model::quota_service::*;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
@@ -533,6 +534,7 @@ pub fn refresh(params: QuotaRefreshParams) -> QuotaRefreshResult {
     let result = crate::block_on::block_on_tokio(fetch_provider_quotas(target))
         .unwrap_or_else(|error| ProviderQuotaFetchResult::failed(target, error.to_string()));
     let statuses = result.into_statuses();
+    log_failures(&statuses);
     let targets = quota_targets();
     let previous = load_quota_cache();
     let settled = settled_after_round(previous.as_ref(), &statuses, &targets);
@@ -553,6 +555,32 @@ pub fn refresh(params: QuotaRefreshParams) -> QuotaRefreshResult {
         .collect::<Vec<_>>();
     save_quota_cache(&QuotaCache::new(settled, &merged));
     QuotaRefreshResult { targets, statuses }
+}
+
+/// 每个账户上次记进日志的失败原因。失败原因只在客户端内存里，事后查「额度怎么没了」要靠日志；
+/// 同一个原因连着失败只记一次，不然熔断后每 5 分钟一行。
+static LOGGED_FAILURES: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Mutex::default);
+
+fn log_failures(statuses: &[(QuotaTarget, QuotaStatus)]) {
+    let mut logged = LOGGED_FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (target, status) in statuses {
+        let id = target.id();
+        match &status.error {
+            Some(error) => {
+                if logged.get(&id) != Some(error) {
+                    eprintln!("[quota] {id} 查询失败：{error}");
+                    logged.insert(id, error.clone());
+                }
+            }
+            None => {
+                if logged.remove(&id).is_some() {
+                    eprintln!("[quota] {id} 恢复");
+                }
+            }
+        }
+    }
 }
 
 /// 这一轮之后有定论的账户：这一轮查了的按结果定（没报错就算），没查的沿用上次的，关掉的去掉。
