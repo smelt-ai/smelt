@@ -933,36 +933,23 @@ impl ConversationView {
                             .child(header_right);
                         card = card.child(header);
                         if card_expanded {
+                            // 改过的文件排成一排标签，点开弹窗看；只在第一块 diff 的位置画一次。
+                            let mut edit_chips_drawn = false;
                             for (part_ix, part) in output.iter().enumerate() {
                                 card = match part {
-                                    ToolOutputPart::Diff { path, .. } => {
-                                        let cached = this
-                                            .rendered_diffs
-                                            .get(id)
-                                            .and_then(|parts| parts.get(part_ix))
-                                            .and_then(Option::as_ref);
+                                    ToolOutputPart::Diff { .. } if edit_chips_drawn => card,
+                                    ToolOutputPart::Diff { .. } => {
+                                        edit_chips_drawn = true;
+                                        let chips = tool_edit_chips(
+                                            &this.entries,
+                                            &this.rendered_diffs,
+                                            i,
+                                        );
                                         card.child(
-                                            div().flex().flex_col()
+                                            this.render_edit_chip_row(i, &chips, cx)
                                                 .pl_5()
                                                 .pt_1()
-                                                .pb_1()
-                                                .gap_1()
-                                                .child(
-                                                    plain_text_view(
-                                                        owner_part("acp-diff-path", &owner, part_ix),
-                                                        path,
-                                                    )
-                                                        .type_style(TYPE.text_xsmall)
-                                                        .text_color(muted)
-                                                )
-                                                .children(cached.map(|diff| {
-                                                    render_diff_lines(
-                                                        &diff.lines,
-                                                        owner_part("acp-diff", &owner, part_ix),
-                                                        border,
-                                                        muted,
-                                                    )
-                                                })),
+                                                .pb_1(),
                                         )
                                     }
                                     ToolOutputPart::Text(text) if !text.trim().is_empty() => {
@@ -1474,7 +1461,7 @@ impl ConversationView {
             .into_any_element()
     }
 
-    /// 段首一行：计数行，下面是这段改了哪些文件的标签，点开的标签在原地展开改动。
+    /// 段首一行：计数行，下面是这段改了哪些文件的标签，点开弹窗看改动。
     fn render_segment_head(
         &mut self,
         group: ProcessGroupInfo,
@@ -1512,76 +1499,52 @@ impl ConversationView {
         }
         let mut col = div().flex().flex_col().w_full().gap_1().child(header);
         if show_chips {
-            col = self.render_segment_chips(col, group, &chips, muted, cx);
+            col = self.render_segment_chips(col, group, &chips, cx);
         }
         col.children(agents).into_any_element()
     }
 
-    /// 段里改过的文件一个一个标签；点开的标签在下面原地展开这段对它的改动。
+    /// 段里改过的文件一个一个标签；点哪个就弹窗看这一段对它的改动，顶上能切到别的文件。
     fn render_segment_chips(
         &self,
-        mut col: gpui::Div,
+        col: gpui::Div,
         group: ProcessGroupInfo,
         chips: &[EditChip],
-        muted: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let group_key = group.first;
-        let mut row = div().flex().flex_wrap().w_full().gap_1p5().pb_1();
-        let mut open_chips = Vec::new();
-        for (chip_ix, chip) in chips.iter().enumerate() {
-            let key = (group_key, chip.path.clone());
-            let open = self.expanded_edit_chips.contains(&key);
-            if open {
-                open_chips.push(chip);
-            }
-            row = row.child(
-                render_edit_chip(chip, group_key, open)
-                    .debug_selector(move || format!("ACP_EDIT_CHIP_{group_key}_{chip_ix}"))
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        if !this.expanded_edit_chips.remove(&key) {
-                            this.expanded_edit_chips.insert(key.clone());
-                        }
-                        this.list_state
-                            .remeasure_items(group_key..group_key.saturating_add(1));
-                        cx.notify();
-                    })),
-            );
-        }
-        col = col.child(row);
-        let border: gpui::Hsla = ui_theme::hair().into();
-        for chip in open_chips {
-            let mut block = div().flex().flex_col().w_full().gap_1().pb_2().child(
-                div()
-                    .type_style(TYPE.text_xsmall)
-                    .text_color(muted)
-                    .child(truncated_line(chip.path.clone())),
-            );
-            for &(entry_ix, part_ix) in &chip.parts {
-                let Some(AcpEntry::ToolCall { id, .. }) = self.entries.get(entry_ix) else {
-                    continue;
-                };
-                let Some(diff) = self
-                    .rendered_diffs
-                    .get(id)
-                    .and_then(|parts| parts.get(part_ix))
-                    .and_then(Option::as_ref)
-                else {
-                    continue;
-                };
-                block = block.child(render_diff_lines(
-                    &diff.lines,
+        col.child(self.render_edit_chip_row(group.first, chips, cx).pb_1())
+    }
+
+    /// 一排改动标签，点开弹窗。`owner` 是这排所在的第一条 entry，给标签当身份。
+    fn render_edit_chip_row(
+        &self,
+        owner: usize,
+        chips: &[EditChip],
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let shared: std::rc::Rc<[EditChip]> = chips.into();
+        div()
+            .flex()
+            .flex_wrap()
+            .w_full()
+            .gap_1p5()
+            .children(chips.iter().enumerate().map(|(chip_ix, chip)| {
+                let chips = shared.clone();
+                edit_diff::edit_chip(
                     gpui::ElementId::from((
-                        gpui::ElementId::named_usize("acp-edit-chip-diff", entry_ix),
-                        gpui::SharedString::from(part_ix.to_string()),
+                        gpui::ElementId::named_usize("acp-edit-chip", owner),
+                        gpui::SharedString::from(chip.path.clone()),
                     )),
-                    border,
-                    muted,
-                ));
-            }
-            col = col.child(block);
-        }
-        col
+                    &chip.label,
+                    chip.added,
+                    chip.removed,
+                    false,
+                )
+                .debug_selector(move || format!("ACP_EDIT_CHIP_{owner}_{chip_ix}"))
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    this.open_edit_diff(&chips, chip_ix, window, cx);
+                }))
+            }))
     }
 
     /// 段里派出的子智能体，一个一行。Pi 的点开看它的过程；别的 agent 的子任务没有单独会话，
@@ -2614,7 +2577,7 @@ impl ConversationView {
         trigger: PeekTrigger,
         cx: &Context<Self>,
     ) -> Popover {
-        let (tool_id, kind, output, children, diffs, images) = match self.entries.get(entry_ix) {
+        let (tool_id, kind, output, children, images) = match self.entries.get(entry_ix) {
             Some(AcpEntry::ToolCall {
                 id,
                 kind,
@@ -2626,7 +2589,6 @@ impl ConversationView {
                 *kind,
                 output.clone(),
                 children.clone(),
-                self.rendered_diffs.get(id).cloned(),
                 self.rendered_tool_images.get(id).cloned(),
             ),
             _ => {
@@ -2636,6 +2598,8 @@ impl ConversationView {
             }
         };
         let border: gpui::Hsla = ui_theme::hair().into();
+        let edit_chips: std::rc::Rc<[EditChip]> =
+            tool_edit_chips(&self.entries, &self.rendered_diffs, entry_ix).into();
         let view = cx.weak_entity();
         // 卡片不留内边距：正文自己滚动，内边距在滚动的内容里。
         Popover::new(owner_id("acp-tool-output-pop", &tool_id))
@@ -2654,11 +2618,26 @@ impl ConversationView {
                     tool_id: tool_id.clone(),
                     kind,
                     output: &output,
-                    diffs: diffs.as_deref(),
+                    edit_chips: &edit_chips,
                     images: images.as_deref(),
                     children: &children,
                     muted,
                     border,
+                    on_open_edit: {
+                        let chips = edit_chips.clone();
+                        let view = view.clone();
+                        let popover = popover.clone();
+                        std::rc::Rc::new(move |chip_ix, window, cx| {
+                            // 先收起 hover 卡片再弹窗，两层浮层不叠在一起。
+                            popover
+                                .update(cx, |state, cx| state.dismiss(window, cx))
+                                .ok();
+                            view.update(cx, |this, cx| {
+                                this.open_edit_diff(&chips, chip_ix, window, cx)
+                            })
+                            .ok();
+                        })
+                    },
                     on_preview_image: std::rc::Rc::new(move |image, window, cx| {
                         // 先收起 hover 卡片，再交给工作台弹大图，避免两层浮层叠在一起。
                         popover.update(cx, |state, cx| state.dismiss(window, cx)).ok();
@@ -2995,15 +2974,19 @@ struct ToolOutputPopoverBody<'a> {
     tool_id: gpui::SharedString,
     kind: ToolKind,
     output: &'a [ToolOutputPart],
-    diffs: Option<&'a [Option<super::super::CachedDiff>]>,
+    /// 这次调用改过的文件，在第一块 diff 的位置排成一排标签。
+    edit_chips: &'a [EditChip],
     images: Option<&'a [Option<std::sync::Arc<gpui::Image>>]>,
     children: &'a [AcpEntry],
     muted: gpui::Hsla,
     border: gpui::Hsla,
-    /// 点缩略图看大图。hover 卡片拿不到 `Context<ConversationView>`，经弱引用转发事件。
+    /// 点改动标签弹窗看第几个文件。hover 卡片拿不到 `Context<ConversationView>`，经弱引用转发。
+    on_open_edit: OpenEditHandler,
+    /// 点缩略图看大图。同上，经弱引用转发事件。
     on_preview_image: PreviewImageHandler,
 }
 
+type OpenEditHandler = std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)>;
 type PreviewImageHandler =
     std::rc::Rc<dyn Fn(std::sync::Arc<gpui::Image>, &mut Window, &mut App)>;
 
@@ -3012,44 +2995,36 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
         tool_id,
         kind,
         output,
-        diffs,
+        edit_chips,
         images,
         children,
         muted,
         border,
+        on_open_edit,
         on_preview_image,
     } = body;
+    let mut edit_chips_drawn = false;
     // 滚动容器必须是 block。v_flex 会把子项压进 max_h，content 高度等于视口，
     // 滚轮加在 offset 上也会被钳回 0。卡片本身不滚时，长日志的行视口自己滚。
     let mut col = div().flex().flex_col().w_full().p_2().gap_1();
     for (part_ix, part) in output.iter().enumerate() {
         col = match part {
-            ToolOutputPart::Diff { path, .. } => {
-                let cached = diffs
-                    .and_then(|parts| parts.get(part_ix))
-                    .and_then(Option::as_ref);
-                col.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            plain_text_view(
-                                owner_part("acp-tool-pop-diff-path", &tool_id, part_ix),
-                                path,
-                            )
-                            .type_style(TYPE.text_xsmall)
-                            .text_color(muted),
+            ToolOutputPart::Diff { .. } if edit_chips_drawn => col,
+            ToolOutputPart::Diff { .. } => {
+                edit_chips_drawn = true;
+                col.child(div().flex().flex_wrap().gap_1p5().children(
+                    edit_chips.iter().enumerate().map(|(chip_ix, chip)| {
+                        let open = on_open_edit.clone();
+                        edit_diff::edit_chip(
+                            owner_part("acp-tool-pop-edit-chip", &tool_id, chip_ix),
+                            &chip.label,
+                            chip.added,
+                            chip.removed,
+                            false,
                         )
-                        .children(cached.map(|diff| {
-                            render_diff_lines(
-                                &diff.lines,
-                                owner_part("acp-diff", &tool_id, part_ix),
-                                border,
-                                muted,
-                            )
-                        })),
-                )
+                        .on_click(move |_, window, cx| open(chip_ix, window, cx))
+                    }),
+                ))
             }
             ToolOutputPart::Text(text) if !text.trim().is_empty() => {
                 let body = strip_code_fence(text);
@@ -3353,49 +3328,6 @@ pub(super) fn subagent_status_icon(
 }
 
 /// 一个改动标签：文件名、合计 +/−。点开时描边加深、垫一层底色。
-fn render_edit_chip(chip: &EditChip, group_key: usize, open: bool) -> gpui::Stateful<gpui::Div> {
-    let mono = smelt_plugin_api::model::font_config::font_family();
-    div()
-        .flex()
-        .items_center()
-        .id(gpui::ElementId::from((
-            gpui::ElementId::named_usize("acp-edit-chip", group_key),
-            gpui::SharedString::from(chip.path.clone()),
-        )))
-        .flex_shrink_0()
-        .gap_1p5()
-        .px_2()
-        .py(px(1.))
-        .rounded_md()
-        .border_1()
-        .border_color(if open {
-            ui_theme::hair_strong()
-        } else {
-            ui_theme::hair()
-        })
-        .when(open, |chip| chip.bg(ui_theme::row_hover()))
-        .hover(|chip| chip.border_color(ui_theme::hair_strong()))
-        .cursor_pointer()
-        .font_family(mono)
-        .type_style(TYPE.text_xsmall)
-        .text_color(gpui::rgb(ui_theme::text()))
-        .child(chip.label.clone())
-        .when(chip.added > 0, |row| {
-            row.child(
-                div()
-                    .text_color(gpui::rgb(ui_theme::ok()))
-                    .child(format!("+{}", chip.added)),
-            )
-        })
-        .when(chip.removed > 0, |row| {
-            row.child(
-                div()
-                    .text_color(gpui::rgb(ui_theme::bad()))
-                    .child(format!("−{}", chip.removed)),
-            )
-        })
-}
-
 /// 回合摘要和每段计数共用的一行：可选的状态标记、计数句、红色的失败数、展开箭头。
 /// 结局的一行：带色的图标，后面是中等字重的说明。
 fn outcome_line(icon: IconName, color: u32, text: String) -> gpui::Div {

@@ -64,12 +64,12 @@ use smelt_plugin_api::model::acp_chat::PromptIndexItem;
 /// 一遍「怎么把协议事件变成可展示内容」。这里整段 re-export，文件里大量既有的
 /// 裸 `AcpEntry::...` 用法不用逐处改路径。
 pub use smelt_plugin_api::model::acp_chat::{
-    AcpEntry, AcpImage, DiffLine, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart,
-    compact_diff_lines, completion_summary_text, diff_line_stats, diff_lines, is_interrupt_marker,
-    is_task_completion_tool_title, strip_code_fence,
+    AcpEntry, AcpImage, ToolCallStatus, ToolKind, ToolOutputPart, completion_summary_text,
+    diff_line_stats, is_interrupt_marker, is_task_completion_tool_title, strip_code_fence,
 };
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
+mod edit_diff;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -1131,9 +1131,9 @@ fn merge_snapshot_entries(
     None
 }
 
+/// 一块 diff 的增减行数：段落标签和工具卡片头上的数。
 #[derive(Clone)]
 struct CachedDiff {
-    lines: std::rc::Rc<Vec<DiffLine>>,
     added: usize,
     removed: usize,
 }
@@ -1645,9 +1645,6 @@ pub struct ConversationView {
     /// 手动展开的已结束回合（key = 折叠范围第一条 entry 的索引）。默认只剩一行工作摘要，
     /// 展开后露出过程说明和每段的计数行。
     expanded_turn_folds: std::collections::HashSet<usize>,
-    /// 点开的改动标签（key = 所在段第一条 entry 的索引 + 文件路径），在原地展开这个文件
-    /// 在本段的改动。
-    expanded_edit_chips: std::collections::HashSet<(usize, String)>,
     /// 只武装刚发送的那一条。历史加载和虚拟列表回收不会重播。
     user_enter: Option<UserBubbleEnter>,
     user_enter_nonce: u64,
@@ -1982,7 +1979,6 @@ impl ConversationView {
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_process_groups: std::collections::HashSet::new(),
             expanded_turn_folds: std::collections::HashSet::new(),
-            expanded_edit_chips: std::collections::HashSet::new(),
             user_enter: None,
             user_enter_nonce: 0,
             menu_failure: None,
@@ -3005,11 +3001,6 @@ impl ConversationView {
             .drain()
             .map(|entry_ix| entry_ix + page_len)
             .collect();
-        self.expanded_edit_chips = self
-            .expanded_edit_chips
-            .drain()
-            .map(|(entry_ix, path)| (entry_ix + page_len, path))
-            .collect();
         self.revealed_prompt = self.revealed_prompt.map(|entry_ix| entry_ix + page_len);
         if let Some(enter) = self.user_enter.as_mut() {
             enter.len_at_arm = enter.len_at_arm.saturating_add(page_len);
@@ -3143,6 +3134,49 @@ impl ConversationView {
 
     pub fn cwd(&self) -> Option<String> {
         self.cwd.clone()
+    }
+
+    /// 点改动标签：把这几个文件的各次修改交给弹窗，选中第 `selected` 个。
+    fn open_edit_diff(
+        &self,
+        chips: &[EditChip],
+        selected: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let files = chips
+            .iter()
+            .map(|chip| edit_diff::EditFile {
+                path: chip.path.clone(),
+                label: chip.label.clone(),
+                added: chip.added,
+                removed: chip.removed,
+                edits: chip
+                    .parts
+                    .iter()
+                    .filter_map(|&(entry_ix, part_ix)| match self.entries.get(entry_ix) {
+                        Some(AcpEntry::ToolCall { output, .. }) => match output.get(part_ix) {
+                            Some(ToolOutputPart::Diff {
+                                old_text, new_text, ..
+                            }) => Some(edit_diff::Edit {
+                                old: old_text.clone(),
+                                new: new_text.clone(),
+                            }),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect(),
+            })
+            .collect();
+        edit_diff::open(
+            files,
+            selected,
+            self.cwd.clone(),
+            self.runtime.key().clone(),
+            window,
+            cx,
+        );
     }
 
     pub fn profile_id(&self) -> Option<&str> {
@@ -4577,8 +4611,6 @@ impl ConversationView {
             .retain(|(ix, _)| *ix < self.entries.len());
         self.expanded_turn_folds
             .retain(|ix| *ix < self.entries.len());
-        self.expanded_edit_chips
-            .retain(|(ix, _)| *ix < self.entries.len());
         self.thought_reveals
             .retain(|ix, _| *ix < self.entries.len());
         let entry_len = self.entries.len();
@@ -5619,20 +5651,8 @@ fn build_diff_parts(output: &[ToolOutputPart]) -> Vec<Option<CachedDiff>> {
             ToolOutputPart::Diff {
                 old_text, new_text, ..
             } => {
-                let full = diff_lines(old_text.as_deref().unwrap_or(""), new_text);
-                let added = full
-                    .iter()
-                    .filter(|line| line.tag == DiffLineTag::Added)
-                    .count();
-                let removed = full
-                    .iter()
-                    .filter(|line| line.tag == DiffLineTag::Removed)
-                    .count();
-                Some(CachedDiff {
-                    lines: std::rc::Rc::new(compact_diff_lines(&full, 3)),
-                    added,
-                    removed,
-                })
+                let (added, removed) = diff_line_stats(old_text.as_deref().unwrap_or(""), new_text);
+                Some(CachedDiff { added, removed })
             }
             ToolOutputPart::Text(_) => None,
             ToolOutputPart::Image(_) => None,
@@ -6828,24 +6848,49 @@ struct EditChip {
     parts: Vec<(usize, usize)>,
 }
 
-/// 从 diff 缓存汇总一段的改动标签。还没进缓存的 diff 块跳过；失败的工具不算。
+/// 从 diff 缓存汇总一段的改动标签。失败的工具不算。
 fn segment_edit_chips(
     entries: &[AcpEntry],
     diffs: &std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
     first: usize,
     end: usize,
 ) -> Vec<EditChip> {
+    let tools = entries
+        .iter()
+        .enumerate()
+        .take(end)
+        .skip(first)
+        .filter(|(_, entry)| {
+            !matches!(
+                entry,
+                AcpEntry::ToolCall {
+                    status: ToolCallStatus::Failed,
+                    ..
+                }
+            )
+        });
+    edit_chips(tools, diffs)
+}
+
+/// 一次工具调用改过的文件。失败的也列：它的卡片上照样有这些修改。
+fn tool_edit_chips(
+    entries: &[AcpEntry],
+    diffs: &std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
+    entry_ix: usize,
+) -> Vec<EditChip> {
+    edit_chips(entries.iter().enumerate().skip(entry_ix).take(1), diffs)
+}
+
+/// 按文件汇总这些条目里的 diff 块，文件按第一次出现排。还没进缓存的 diff 块跳过。
+fn edit_chips<'a>(
+    entries: impl Iterator<Item = (usize, &'a AcpEntry)>,
+    diffs: &std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
+) -> Vec<EditChip> {
     let mut chips: Vec<EditChip> = Vec::new();
-    for (entry_ix, entry) in entries.iter().enumerate().take(end).skip(first) {
-        let AcpEntry::ToolCall {
-            id, status, output, ..
-        } = entry
-        else {
+    for (entry_ix, entry) in entries {
+        let AcpEntry::ToolCall { id, output, .. } = entry else {
             continue;
         };
-        if matches!(status, ToolCallStatus::Failed) {
-            continue;
-        }
         let cached = diffs.get(id);
         for (part_ix, part) in output.iter().enumerate() {
             let ToolOutputPart::Diff { path, .. } = part else {
@@ -7555,82 +7600,6 @@ pub fn process_timeline_icon(kind: &ToolKind) -> Icon {
         ToolKind::Search => IconName::Search.into(),
         _ => tool_kind_icon(kind),
     }
-}
-
-/// 渲染一份 diff：逐行红（删）/绿（增）/灰（不变），等宽字体，滚动限高——大改动
-/// 不能把整个消息流撑爆，超出部分滚动查看。`id` 是这块 diff 的身份，每一行再挂
-/// 行号，同一条消息里的多块 diff 不会抢同一个元素。行数据来自
-/// `smelt_plugin_api::model::acp_chat::diff_lines`——跟头部「+N -M」摘要（`diff_line_stats`）
-/// 共用同一次计算结果，数字不会对不上。
-fn render_diff_lines(
-    lines: &[DiffLine],
-    id: gpui::ElementId,
-    border_color: gpui::Hsla,
-    muted_color: gpui::Hsla,
-) -> gpui::AnyElement {
-    let mut rows = div()
-        .flex()
-        .flex_col()
-        .id(id.clone())
-        .max_h(px(320.))
-        .overflow_y_scroll()
-        .rounded_md()
-        .border_1()
-        .border_color(border_color)
-        .font_family(smelt_plugin_api::model::font_config::font_family())
-        .type_style(TYPE.text_xsmall);
-    for (line_ix, line) in lines.iter().enumerate() {
-        let (bg, prefix, fg): (Option<gpui::Hsla>, &str, gpui::Hsla) = match line.tag {
-            DiffLineTag::Removed => (
-                Some(
-                    smelt_plugin_api::ui::ui_theme::tint(
-                        smelt_plugin_api::ui::ui_theme::bad(),
-                        0x22,
-                    )
-                    .into(),
-                ),
-                "-",
-                gpui::rgb(smelt_plugin_api::ui::ui_theme::bad()).into(),
-            ),
-            DiffLineTag::Added => (
-                Some(
-                    smelt_plugin_api::ui::ui_theme::tint(
-                        smelt_plugin_api::ui::ui_theme::ok(),
-                        0x22,
-                    )
-                    .into(),
-                ),
-                "+",
-                gpui::rgb(smelt_plugin_api::ui::ui_theme::ok()).into(),
-            ),
-            DiffLineTag::Context => (None, " ", muted_color),
-        };
-        let mut row = div().flex().items_center().px_2().gap_2();
-        if let Some(bg) = bg {
-            row = row.bg(bg);
-        }
-        let text = format!("{prefix}{}", line.text);
-        rows = rows.child(
-            row.child(
-                plain_text_view((id.clone(), line_ix.to_string()), &text)
-                    .flex_1()
-                    .min_w_0()
-                    .type_style(TYPE.text_xsmall)
-                    .font_family(smelt_plugin_api::model::font_config::font_family())
-                    .text_color(fg),
-            )
-            .when(line.no_newline, |row| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(muted_color)
-                        .child(SharedString::from(t!("diff.no_newline"))),
-                )
-            }),
-        );
-    }
-    rows.into_any_element()
 }
 
 // strip_code_fence / is_interrupt_marker 的单测随实现一起搬进了

@@ -155,9 +155,6 @@ turn_hint.connection_refused:
 turn_hint.rate_limited:
   en: "The server is rate limiting requests. Wait a moment before sending again; if it keeps happening, check your account's quota."
   zh-CN: 被服务端限流了，等一会儿再发；持续出现就要看账号配额。
-diff.unchanged_lines:
-  en: "... %{count} unchanged lines ..."
-  zh-CN: "... 省略 %{count} 行未修改内容 ..."
 new_session.section.conversation:
   en: Conversation
   zh-CN: 对话

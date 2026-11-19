@@ -194,9 +194,15 @@ debug:
     en: "Tool name"
     zh-CN: "工具名称"
 diff:
-  no_newline:
-    en: "No newline at end of file"
-    zh-CN: "末尾没有换行"
+  nth_edit:
+    en: "Edit %{n}"
+    zh-CN: "第 %{n} 次修改"
+  open_in_file:
+    en: "Open in File"
+    zh-CN: "在文件里打开"
+  empty:
+    en: "No differences"
+    zh-CN: "没有差异"
 dispatch:
   all_done:
     en: "All done"

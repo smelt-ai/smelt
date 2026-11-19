@@ -1906,13 +1906,7 @@ fn edit_chips_sum_each_file_in_order_and_skip_failures() {
         ),
         diff_tool("e3", ToolCallStatus::Failed, &["src/z.rs"]),
     ];
-    let cached = |added, removed| {
-        Some(CachedDiff {
-            lines: std::rc::Rc::new(Vec::new()),
-            added,
-            removed,
-        })
-    };
+    let cached = |added, removed| Some(CachedDiff { added, removed });
     let diffs = std::collections::HashMap::from([
         ("e1".to_string(), vec![cached(3, 1)]),
         ("e2".to_string(), vec![cached(2, 0), cached(4, 2)]),
@@ -3271,13 +3265,11 @@ fn process_header_counts_tools_in_a_fixed_order() {
 fn compact_diff_stats_sum_all_cached_diff_parts() {
     let cached = vec![
         Some(CachedDiff {
-            lines: std::rc::Rc::new(Vec::new()),
             added: 3,
             removed: 1,
         }),
         None,
         Some(CachedDiff {
-            lines: std::rc::Rc::new(Vec::new()),
             added: 2,
             removed: 4,
         }),
@@ -4534,6 +4526,27 @@ fn open_conversation<'a>(
     (view, cx)
 }
 
+/// 对话视图挂在 `Root` 下打开，弹窗这类窗口层才装得上。
+fn open_conversation_in_root<'a>(
+    cx: &'a mut gpui::TestAppContext,
+    sid: &'static str,
+    entries: Vec<AcpEntry>,
+    phase: DaemonPhase,
+) -> (
+    gpui::Entity<super::ConversationView>,
+    &'a mut gpui::VisualTestContext,
+) {
+    use gpui::AppContext as _;
+    cx.update(init_ui);
+    let mut view = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let conversation = cx.new(|cx| conversation_fixture(sid, entries, phase, cx));
+        view = Some(conversation.clone());
+        gpui_base::Root::new(conversation, window, cx)
+    });
+    (view.expect("窗口建好时对话视图已建"), cx)
+}
+
 /// 正式窗口的根上有文字选择层，拖选才登记得到。测试把对话视图直接当窗口根时没有这一层。
 struct SelectingConversation {
     view: gpui::Entity<super::ConversationView>,
@@ -5357,7 +5370,6 @@ fn init_ui(cx: &mut gpui::App) {
     smelt_plugin_api::ui::init(cx);
 }
 
-/// 在跑的段收成一行计数，改过的文件露成标签；点标签在原地展开这个文件的改动。
 /// 左侧提问导航：没加载的那一截用运行时给的索引，已加载的现算；当前读到的那问加长，
 /// 指上去出预览，点已加载的直接滚过去，点没加载的先往前翻页。窄了就不画。
 #[gpui::test]
@@ -5557,8 +5569,9 @@ fn a_collapsed_segment_lists_its_subagents(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// 在跑的段收成一行计数，改过的文件露成标签；点标签弹窗看这个文件的改动，对话里不展开。
 #[gpui::test]
-fn clicking_an_edit_chip_opens_its_diff_in_place(cx: &mut gpui::TestAppContext) {
+fn clicking_an_edit_chip_opens_its_diff_in_a_dialog(cx: &mut gpui::TestAppContext) {
     let entries = vec![
         AcpEntry::User("改一下".into()),
         AcpEntry::tool_call(
@@ -5574,13 +5587,9 @@ fn clicking_an_edit_chip_opens_its_diff_in_place(cx: &mut gpui::TestAppContext) 
         ),
         completed_tool("run-1", ToolKind::Execute, "cargo test"),
     ];
-    let (view, cx) = open_conversation(cx, "acp-edit-chip", entries, DaemonPhase::Thinking);
+    let (view, cx) = open_conversation_in_root(cx, "acp-edit-chip", entries, DaemonPhase::Thinking);
     draw_settled(cx);
     draw_settled(cx);
-    assert!(
-        cx.debug_bounds("ACP_TOOL_COMPACT_1").is_none(),
-        "在跑的段默认只露计数"
-    );
     let head_before = view
         .read_with(cx, |view, _| view.list_state.bounds_for_item(1))
         .expect("段首行应已绘制");
@@ -5591,10 +5600,8 @@ fn clicking_an_edit_chip_opens_its_diff_in_place(cx: &mut gpui::TestAppContext) 
     draw_settled(cx);
     draw_settled(cx);
     assert!(
-        view.read_with(cx, |view, _| view
-            .expanded_edit_chips
-            .contains(&(1, "src/lib.rs".to_string()))),
-        "点标签记下展开"
+        cx.update(|window, cx| smelt_plugin_api::ui::dialog::is_open(window, cx)),
+        "点标签弹出 diff"
     );
     assert!(
         view.read_with(cx, |view, _| !view
@@ -5605,8 +5612,5 @@ fn clicking_an_edit_chip_opens_its_diff_in_place(cx: &mut gpui::TestAppContext) 
     let head_after = view
         .read_with(cx, |view, _| view.list_state.bounds_for_item(1))
         .expect("段首行应已绘制");
-    assert!(
-        head_after.size.height > head_before.size.height + px(40.),
-        "改动在原地展开，行高跟着变: {head_before:?} -> {head_after:?}"
-    );
+    assert_eq!(head_after.size, head_before.size, "对话里不原地展开");
 }
