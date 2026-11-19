@@ -29,7 +29,7 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 use gpui::{
     AnyElement, App, Axis, ClickEvent, ClipboardItem, Context, ElementId, Entity, Focusable as _,
     HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, ListOffset,
-    MouseButton, ParentElement as _, Pixels, RenderOnce, SharedString,
+    ListSizingBehavior, MouseButton, ParentElement as _, Pixels, RenderOnce, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled, TextRun, Window, div, list, point,
     prelude::FluentBuilder as _, px,
 };
@@ -235,6 +235,7 @@ pub struct Diff {
     change_indicator: DiffChangeIndicator,
     change_background: bool,
     soft_wrap: bool,
+    fit_height: bool,
     header: HeaderSlots,
     annotations: Rc<Annotations>,
     annotation_content: Option<AnnotationRenderer>,
@@ -267,6 +268,7 @@ impl Diff {
             change_indicator: DiffChangeIndicator::default(),
             change_background: true,
             soft_wrap: false,
+            fit_height: false,
             header: HeaderSlots::default(),
             annotations: Rc::default(),
             annotation_content: None,
@@ -286,6 +288,13 @@ impl Diff {
     /// Emphasizes syntax once the state has prepared it. Default is true.
     pub fn syntax_highlight(mut self, value: bool) -> Self {
         self.syntax_highlight = value;
+        self
+    }
+    /// Takes the height of its rows instead of filling the parent, so a short
+    /// patch gets a short surface. Bound it with a maximum height; past that it
+    /// scrolls as usual. Default is false.
+    pub fn fit_height(mut self, value: bool) -> Self {
+        self.fit_height = value;
         self
     }
     /// Shows a header above each file. Default is true.
@@ -560,6 +569,7 @@ fn render_diff(
     let scrollbar = state.list().clone();
     let horizontal = state.horizontal_scroll().clone();
     let has_rows = !rows.is_empty();
+    let fit_height = props.fit_height;
     let label = match state.files() {
         [file] => t!("diff.label_one", path = file.path()).into_owned(),
         files => t!("diff.label_many", count = files.len()).into_owned(),
@@ -569,11 +579,12 @@ fn render_diff(
         .relative()
         .min_h_0()
         .min_w_0()
-        .flex_1()
+        .when(!fit_height, |body| body.flex_1())
         .child(SelectionLayer::new(
             div()
                 .id("diff-horizontal")
-                .size_full()
+                .w_full()
+                .when(!fit_height, |this| this.h_full())
                 // Preserve offset tracking and clipping without GPUI's
                 // single-axis wheel remapping. The sibling mask owns X input.
                 .when(!soft_wrap, |this| this.overflow_x_hidden())
@@ -590,7 +601,13 @@ fn render_diff(
                             .into_any_element()
                     })
                     .w(content_width)
-                    .h_full(),
+                    .map(|list| {
+                        if fit_height {
+                            list.with_sizing_behavior(ListSizingBehavior::Infer)
+                        } else {
+                            list.h_full()
+                        }
+                    }),
                 ))
                 .into_any_element(),
             scrollbar.clone(),
@@ -746,7 +763,8 @@ fn render_diff(
         .aria_label(label);
     v_flex()
         .id(("diff", cx.entity_id()))
-        .size_full()
+        .w_full()
+        .when(!fit_height, |this| this.h_full())
         .min_w_0()
         .min_h_0()
         .bg(cx.theme().background)

@@ -49,11 +49,9 @@ pub(super) fn open(
     }
     let dialog = cx.new(|cx| EditDiffDialog::new(files, selected, cwd, machine, cx));
     let focus = dialog.read(cx).focus.clone();
-    smelt_plugin_api::ui::dialog::open(window, cx, move |card, window, _| {
-        // 对话框把宽高夹在窗口减去边距以内，这里只表达「尽量大」。
-        let viewport = window.viewport_size();
-        card.w(viewport.width)
-            .h(viewport.height)
+    smelt_plugin_api::ui::dialog::open(window, cx, move |card, _, _| {
+        // 宽度够放一行代码；窗口更窄时对话框自己夹到窗口以内。高度跟着内容走，见 render。
+        card.w(px(WIDTH))
             .p_0()
             .gap_0()
             .overflow_hidden()
@@ -62,6 +60,11 @@ pub(super) fn open(
     // 焦点落在弹窗自己身上，←/→ 才能切文件；Esc 仍由外面的对话框接。
     window.defer(cx, move |window, cx| window.focus(&focus, cx));
 }
+
+/// 弹窗宽度，约一百多个等宽字符。
+const WIDTH: f32 = 960.;
+/// 内容再多，弹窗也只占窗口这么高，剩下的在 diff 里滚。
+const MAX_HEIGHT_RATIO: f32 = 0.8;
 
 pub(super) struct EditDiffDialog {
     files: Vec<EditFile>,
@@ -231,20 +234,22 @@ impl Focusable for EditDiffDialog {
 }
 
 impl Render for EditDiffDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("edit-diff-dialog")
             .key_context("EditDiffDialog")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
-            .size_full()
+            .w_full()
+            .max_h(window.viewport_size().height * MAX_HEIGHT_RATIO)
             .flex()
             .flex_col()
             .child(self.render_title(cx))
             .when(self.files.len() > 1, |col| col.child(self.render_tabs(cx)))
             .child(
                 div()
-                    .flex_1()
+                    .flex()
+                    .flex_col()
                     .min_h_0()
                     .mt_3()
                     .border_t_1()
@@ -260,7 +265,7 @@ impl Render for EditDiffDialog {
                         }
                         body.child(
                             Diff::new(&self.diff)
-                                .size_full()
+                                .fit_height(true)
                                 .line_number(false)
                                 .hunk_separator(DiffHunkSeparator::Simple)
                                 // 只有一块就不要块头，文件名已经在标题里。
