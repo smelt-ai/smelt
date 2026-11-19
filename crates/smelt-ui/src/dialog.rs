@@ -94,7 +94,8 @@ type Callback = Rc<dyn Fn(&mut Window, &mut App)>;
 type Decision = Rc<dyn Fn(&mut Window, &mut App) -> bool>;
 
 /// 一张对话框卡片。[`surface`] 外观加浮起阴影，宽高夹在窗口以内；子元素是正文（太长时
-/// 滚动），[`Card::footer`] 是钉在底下的按钮行。
+/// 滚动），[`Card::footer`] 是钉在底下的按钮行。正文自己会滚的（列表、diff）根元素给
+/// `min_h_0`，就会压到卡片剩下的高度以内、在自己里面滚。
 pub struct Card {
     style: StyleRefinement,
     children: Vec<AnyElement>,
@@ -776,5 +777,37 @@ mod tests {
         assert_eq!(counts.confirmed.get(), 0);
         assert_eq!(counts.alternative.get(), 1);
         assert_eq!(counts.closed.get(), 2);
+    }
+
+    /// 正文比窗口还高，自己会滚（根元素 `min_h_0`）：被压到卡片剩下的高度以内，在自己
+    /// 里面滚，卡片不跟着滚。
+    #[gpui::test]
+    fn a_body_that_scrolls_itself_fits_inside_the_card(cx: &mut TestAppContext) {
+        let cx = window(cx);
+        cx.update(|window, cx| {
+            super::open(window, cx, |card: Card, _, _| {
+                card.child(
+                    div()
+                        .id("tall-body")
+                        .debug_selector(|| "TALL_BODY".into())
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(div().h(px(3000.))),
+                )
+            });
+        });
+        frame(cx);
+        frame(cx);
+        let height = cx
+            .debug_bounds("TALL_BODY")
+            .expect("正文画出来了")
+            .size
+            .height;
+        // 窗口 800 高，上下各留 VIEWPORT_MARGIN，再减卡片内边距。
+        assert!(
+            height <= px(800. - VIEWPORT_MARGIN * 2.),
+            "正文应压到卡片以内：{height:?}"
+        );
+        assert!(height > px(600.), "正文应占满卡片剩下的高度：{height:?}");
     }
 }

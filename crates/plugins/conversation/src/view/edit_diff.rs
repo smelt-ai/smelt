@@ -4,6 +4,8 @@
 //! 不显示行号：有的智能体只送被替换的那一小段，行号会从 1 数起，是错的。
 
 use gpui::prelude::FluentBuilder as _;
+use std::rc::Rc;
+
 use gpui::{
     App, AppContext as _, Context, Div, ElementId, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
@@ -49,9 +51,11 @@ pub(super) fn open(
     }
     let dialog = cx.new(|cx| EditDiffDialog::new(files, selected, cwd, machine, cx));
     let focus = dialog.read(cx).focus.clone();
-    smelt_plugin_api::ui::dialog::open(window, cx, move |card, _, _| {
-        // 宽度够放一行代码；窗口更窄时对话框自己夹到窗口以内。高度跟着内容走，见 render。
+    smelt_plugin_api::ui::dialog::open(window, cx, move |card, window, _| {
+        // 宽度够放一行代码，高度跟着内容走、到上限为止；窗口更小时对话框自己夹到窗口以内。
+        // 内容比上限高时被压到卡片以内，在 diff 里滚，见 render。
         card.w(px(WIDTH))
+            .max_h(window.viewport_size().height * MAX_HEIGHT_RATIO)
             .p_0()
             .gap_0()
             .overflow_hidden()
@@ -72,8 +76,8 @@ pub(super) struct EditDiffDialog {
     cwd: Option<String>,
     machine: RuntimeKey,
     diff: Entity<DiffState>,
-    /// 选中文件有几块能看的修改（前后一样的那次不算）。
-    blocks: usize,
+    /// 选中文件能看的各块（前后一样的那次不算），块头按它写第几次。
+    blocks: Rc<[Block]>,
     /// 「在文件里打开」失败的原因，就地显示在按钮旁边。
     open_error: Option<String>,
     focus: FocusHandle,
@@ -88,8 +92,7 @@ impl EditDiffDialog {
         cx: &mut Context<Self>,
     ) -> Self {
         let selected = selected.min(files.len() - 1);
-        let diff_files = diff_files(&files[selected]);
-        let blocks = diff_files.len();
+        let (blocks, diff_files) = edit_blocks(&files[selected]);
         let diff = cx.new(|cx| DiffState::new(diff_files, cx));
         Self {
             files,
@@ -109,8 +112,8 @@ impl EditDiffDialog {
         }
         self.selected = ix;
         self.open_error = None;
-        let files = diff_files(&self.files[ix]);
-        self.blocks = files.len();
+        let (blocks, files) = edit_blocks(&self.files[ix]);
+        self.blocks = blocks;
         self.diff.update(cx, |state, cx| state.set_files(files, cx));
         cx.notify();
     }
@@ -234,14 +237,16 @@ impl Focusable for EditDiffDialog {
 }
 
 impl Render for EditDiffDialog {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("edit-diff-dialog")
+            .debug_selector(|| "EDIT_DIFF_DIALOG".into())
             .key_context("EditDiffDialog")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
             .w_full()
-            .max_h(window.viewport_size().height * MAX_HEIGHT_RATIO)
+            // 卡片到上限时压得下去，diff 自己滚。
+            .min_h_0()
             .flex()
             .flex_col()
             .child(self.render_title(cx))
@@ -255,7 +260,7 @@ impl Render for EditDiffDialog {
                     .border_t_1()
                     .border_color(ui_theme::hair())
                     .map(|body| {
-                        if self.blocks == 0 {
+                        if self.blocks.is_empty() {
                             return body.p_4().child(
                                 div()
                                     .type_style(TYPE.ui)
@@ -263,15 +268,16 @@ impl Render for EditDiffDialog {
                                     .child(SharedString::from(t!("diff.empty"))),
                             );
                         }
+                        let blocks = self.blocks.clone();
                         body.child(
                             Diff::new(&self.diff)
                                 .fit_height(true)
                                 .line_number(false)
                                 .hunk_separator(DiffHunkSeparator::Simple)
                                 // 只有一块就不要块头，文件名已经在标题里。
-                                .header_visible(self.blocks > 1)
-                                .render_header(|file, _, _| {
-                                    render_edit_header(file).into_any_element()
+                                .header_visible(blocks.len() > 1)
+                                .render_header(move |file, _, _| {
+                                    render_edit_header(&blocks, file).into_any_element()
                                 }),
                         )
                     }),
@@ -327,8 +333,11 @@ pub(super) fn edit_chip(
 }
 
 /// 第几次修改的块头：左边序号，右边这一次的增减。
-fn render_edit_header(file: &DiffFile) -> Div {
-    let nth = edit_ordinal(file.path()).unwrap_or(1);
+fn render_edit_header(blocks: &[Block], file: &DiffFile) -> Div {
+    let nth = blocks
+        .iter()
+        .find(|block| block.key == *file.path())
+        .map_or(1, |block| block.nth);
     div()
         .flex()
         .items_center()
@@ -357,28 +366,37 @@ fn change_counts(added: usize, removed: usize) -> String {
     }
 }
 
-/// 一个文件的各次修改，转成 diff 组件的文件。组件按路径认文件，同一文件的几次修改
-/// 用 `<序号>/<路径>` 区分；路径的扩展名照旧决定语法高亮。前后一样的修改没有内容，跳过。
-fn diff_files(file: &EditFile) -> Vec<DiffFile> {
-    file.edits
-        .iter()
-        .enumerate()
-        .filter_map(|(ix, edit)| {
-            let path = format!("{}/{}", ix + 1, file.path.trim_start_matches('/'));
-            unified_patch(&path, edit.old.as_deref().unwrap_or(""), &edit.new)
-        })
-        .flat_map(|patch| {
-            DiffFile::parse(&patch).unwrap_or_else(|error| {
-                eprintln!("[conversation] 修改转不成 diff：{error}");
-                Vec::new()
-            })
-        })
-        .collect()
+/// diff 里的一块：文件的第 `nth` 次修改。
+#[derive(Debug, PartialEq, Eq)]
+struct Block {
+    /// diff 组件按路径认块，同一文件的几次修改各给一个不重样的路径。
+    key: SharedString,
+    nth: usize,
 }
 
-/// `<序号>/<路径>` 里的序号，见 [`diff_files`]。
-fn edit_ordinal(path: &str) -> Option<usize> {
-    path.split_once('/')?.0.parse().ok()
+/// 一个文件的各次修改，转成 diff 组件的文件，一次修改一块。路径的扩展名照旧决定语法
+/// 高亮。前后一样的修改没有内容，跳过。
+fn edit_blocks(file: &EditFile) -> (Rc<[Block]>, Vec<DiffFile>) {
+    let mut blocks = Vec::new();
+    let mut files = Vec::new();
+    for (ix, edit) in file.edits.iter().enumerate() {
+        let nth = ix + 1;
+        let key = format!("{nth}/{}", file.path.trim_start_matches('/'));
+        let Some(patch) = unified_patch(&key, edit.old.as_deref().unwrap_or(""), &edit.new) else {
+            continue;
+        };
+        match DiffFile::parse(&patch) {
+            Ok(parsed) => {
+                blocks.extend(parsed.iter().map(|diff| Block {
+                    key: diff.path().clone(),
+                    nth,
+                }));
+                files.extend(parsed);
+            }
+            Err(error) => eprintln!("[conversation] 修改转不成 diff：{error}"),
+        }
+    }
+    (blocks.into(), files)
 }
 
 /// 整个文件做上下文的统一 diff，折叠交给组件，用户想看多少展开多少。逐行结果和对话里
@@ -472,12 +490,16 @@ mod tests {
                 },
             ],
         };
-        let files = diff_files(&file);
-        let summary: Vec<_> = files
+        let (blocks, files) = edit_blocks(&file);
+        let nth: Vec<_> = blocks.iter().map(|block| block.nth).collect();
+        assert_eq!(nth, vec![1, 2]);
+        let counts: Vec<_> = files
             .iter()
-            .map(|f| (edit_ordinal(f.path()), f.additions(), f.deletions()))
+            .map(|f| (f.additions(), f.deletions()))
             .collect();
-        assert_eq!(summary, vec![(Some(1), 1, 1), (Some(2), 1, 0)]);
+        assert_eq!(counts, vec![(1, 1), (1, 0)]);
+        // 块和 diff 组件里的文件一一对得上。
+        assert!(blocks.iter().zip(&files).all(|(b, f)| b.key == *f.path()));
         assert_eq!(files[0].language().as_ref(), "rust");
     }
 
@@ -486,5 +508,63 @@ mod tests {
         assert_eq!(change_counts(4, 1), "+4 −1");
         assert_eq!(change_counts(0, 1), "−1");
         assert_eq!(change_counts(3, 0), "+3");
+    }
+
+    struct Host;
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    /// 在 1000×800 的窗口里打开一个文件的弹窗，返回弹窗内容的高度。
+    fn dialog_height(cx: &mut gpui::TestAppContext, new: String) -> gpui::Pixels {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            smelt_plugin_api::ui::init(cx);
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|_| Host);
+            gpui_base::Root::new(host, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(1000.), px(800.)));
+        let file = EditFile {
+            path: "/repo/src/lib.rs".into(),
+            label: "lib.rs".into(),
+            added: new.lines().count(),
+            removed: 1,
+            edits: vec![Edit {
+                old: Some("old\n".into()),
+                new,
+            }],
+        };
+        cx.update(|window, cx| open(vec![file], 0, None, RuntimeKey::Local, window, cx));
+        for _ in 0..4 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        cx.debug_bounds("EDIT_DIFF_DIALOG")
+            .expect("弹窗画出来了")
+            .size
+            .height
+    }
+
+    #[gpui::test]
+    fn a_short_edit_gets_a_short_dialog(cx: &mut gpui::TestAppContext) {
+        let height = dialog_height(cx, "new\n".into());
+        assert!(height < px(200.), "改一行的弹窗应只有几行高：{height:?}");
+    }
+
+    /// 内容比上限高：弹窗停在上限，压到卡片以内，在 diff 里滚，卡片不跟着滚。
+    #[gpui::test]
+    fn a_long_edit_stops_at_the_cap_and_scrolls_inside(cx: &mut gpui::TestAppContext) {
+        let new = (0..300).map(|ix| format!("line {ix}\n")).collect();
+        let height = dialog_height(cx, new);
+        assert!(
+            height <= px(800. * MAX_HEIGHT_RATIO),
+            "弹窗不能高过上限：{height:?}"
+        );
+        assert!(height > px(500.), "内容多时弹窗长到上限附近：{height:?}");
     }
 }
