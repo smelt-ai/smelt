@@ -19,7 +19,7 @@ alacritty_terminal = { version = "0.26", default-features = false }
 # kitty 图形：守护转发来的 PNG 就地解码。
 image = { version = "0.25", default-features = false, features = ["png"] }
 anyhow = "1"
-dirs = "5"
+dirs = "6"
 serde_json = "1"
 smol = "2"
 # 对外约定的参数类型（contract.rs）。
