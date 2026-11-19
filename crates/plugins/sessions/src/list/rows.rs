@@ -56,8 +56,9 @@ const LEAD: f32 = 16.;
 /// 会话行首头像的边长，和放得下它的会话行高。没人填头像插槽时行首是图标，行高照常。
 const AVATAR: f32 = 36.;
 const AVATAR_ROW: f32 = 44.;
-/// 头像右下角标明哪家 CLI、哪个智能体的小圆标。
-const BADGE: f32 = 14.;
+/// 头像右下角标明哪家 CLI、哪个智能体的小圆标，和里面图标、首字的大小。
+const BADGE: f32 = 16.;
+const BADGE_GLYPH: f32 = 10.;
 
 /// 画一遍要的东西：算好的侧栏，加上视图上的临时状态。
 pub(super) struct RowCtx {
@@ -1406,6 +1407,10 @@ fn status_color(status: AgentStatus, selected: bool, glow: Option<f32>) -> Rgba 
 
 /// 行首的头像：`figure` 是填进插槽的视图给这段会话的实例（还没建好是 `None`，空着）。右下角的
 /// 小标标明是哪家 CLI（智能体对话是名字的第一个字），按状态上色（[`status_color`]）。
+///
+/// 小标垫一块实心圆底再描一圈细边，把它从头像上隔开：直接压在彩色像素上，细线条图标和小人的
+/// 轮廓搅在一起认不出。底不取行底色：行底是叠在窗口材质上的半透明色，选中、悬停各不一样，
+/// 实心色对不上；用浮起面的颜色，各种行底上都是同一枚小牌子。
 fn session_avatar(
     id: &str,
     figure: Option<AnyView>,
@@ -1418,14 +1423,14 @@ fn session_avatar(
     let glyph = |path: SharedString| {
         svg()
             .path(path)
-            .size(px(10.))
+            .size(px(BADGE_GLYPH))
             .text_color(color)
             .into_any_element()
     };
     let (mark, tip): (AnyElement, Option<SharedString>) = match icon {
         RowIcon::Agent { mark, name } => (
             div()
-                .text_size(px(8.))
+                .text_size(px(BADGE_GLYPH))
                 .line_height(px(BADGE))
                 .font_weight(TYPE.ui_medium.weight)
                 .text_color(color)
@@ -1439,9 +1444,13 @@ fn session_avatar(
     };
     let badge = div()
         .absolute()
-        .right(px(-2.))
-        .bottom(px(-1.))
+        .right(px(-3.))
+        .bottom(px(-2.))
         .size(px(BADGE))
+        .rounded_full()
+        .bg(rgb(ui_theme::surface()))
+        .border_1()
+        .border_color(ui_theme::hair())
         .flex()
         .items_center()
         .justify_center()
@@ -1958,6 +1967,9 @@ fn relative_time(at: u64, now: u64) -> String {
         delta => t!("span.ago", span = span(delta)).into_owned(),
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod snapshots;
 
 #[cfg(test)]
 mod tests {
