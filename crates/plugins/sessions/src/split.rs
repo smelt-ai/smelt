@@ -954,12 +954,13 @@ impl Render for PaneView {
             .overflow_hidden()
             .track_focus(&self.focus)
             // 点格子就设成眼下那一格：焦点进了这一格，分屏那边的 `on_focus_in` 接着记下。
-            // 点在实例接管焦点的地方由它自己拿；点空了（或被外层这个可聚焦的框先拿走）
-            // 就转交给实例，免得焦点停在框上、键盘没人接。
+            // 实例里哪处能聚焦由实例自己定（对话除了输入框还有提问卡上的输入栏）：点到的
+            // 地方已经拿了焦点，GPUI 会 `prevent_default` 告诉外层，格子就不再插手。
+            // 没人接的点击才转交给实例，免得焦点落在格子这个框上、键盘没人接。
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    if !this.focus_handle(cx).contains_focused(window, cx) {
+                    if !window.default_prevented() {
                         this.focus_now(window, cx);
                         window.prevent_default();
                     }
@@ -1362,5 +1363,114 @@ mod tests {
             pane_title(&conversation, PaneKind::Conversation, "acp", &[]),
             "Conversation"
         );
+    }
+
+    /// 对话那格里不止输入框一个能聚焦的地方（比如提问卡上自己写答案的那栏）。
+    mod pane_focus {
+        use super::*;
+        use gpui::{TestAppContext, VisualTestContext};
+
+        struct Probe {
+            main: FocusHandle,
+            other: FocusHandle,
+        }
+
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let row = || div().w_full().h(px(40.));
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        row()
+                            .track_focus(&self.main)
+                            .debug_selector(|| "main".into()),
+                    )
+                    .child(
+                        row()
+                            .track_focus(&self.other)
+                            .debug_selector(|| "other".into()),
+                    )
+                    .child(row().debug_selector(|| "blank".into()))
+            }
+        }
+
+        impl api::PluginView for Probe {
+            fn open(&mut self, _: &Value, _: &mut Window, _: &mut Context<Self>) {}
+
+            fn focus_target(&self, _: &App) -> Option<FocusHandle> {
+                Some(self.main.clone())
+            }
+        }
+
+        fn register_probe(cx: &mut App) {
+            let (owner, name) = conversation::VIEW.split_once('/').unwrap();
+            api::register_views(
+                owner,
+                vec![api::ViewSpec {
+                    name: name.to_string().into(),
+                    title: name.to_string().into(),
+                    icon: "icons/bell.svg".into(),
+                    draws_top_bar: false,
+                    settings: None,
+                    instances: true,
+                    fills: Vec::new(),
+                    build: Rc::new(|_, cx| -> Rc<dyn api::ViewHandle> {
+                        Rc::new(cx.new(|cx| Probe {
+                            main: cx.focus_handle(),
+                            other: cx.focus_handle(),
+                        }))
+                    }),
+                }],
+                cx,
+            )
+            .unwrap();
+        }
+
+        fn probe_focus(pane: &Entity<PaneView>, cx: &mut VisualTestContext) -> (bool, bool) {
+            cx.update(|window, cx| {
+                let instance = pane.read(cx).instance.as_ref().unwrap();
+                let probe = instance.view().downcast::<Probe>().unwrap();
+                let probe = probe.read(cx);
+                (
+                    probe.main.is_focused(window),
+                    probe.other.is_focused(window),
+                )
+            })
+        }
+
+        #[gpui::test]
+        fn a_click_inside_the_instance_keeps_the_focus_it_landed_on(cx: &mut TestAppContext) {
+            cx.update(register_probe);
+            let (pane, cx) = cx.add_window_view(|window, cx| {
+                let mut pane = PaneView::new(
+                    PaneSpec {
+                        session_id: "s".into(),
+                        kind: PaneKind::Conversation,
+                        args: Value::Null,
+                    },
+                    cx,
+                );
+                pane.ensure_instance(window, cx);
+                pane
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+
+            let other = cx.debug_bounds("other").unwrap();
+            cx.simulate_click(other.center(), Default::default());
+            assert_eq!(
+                probe_focus(&pane, cx),
+                (false, true),
+                "点到实例里另一处能聚焦的地方，焦点留在那"
+            );
+
+            let blank = cx.debug_bounds("blank").unwrap();
+            cx.simulate_click(blank.center(), Default::default());
+            assert_eq!(probe_focus(&pane, cx), (true, false), "点空了转交给实例");
+        }
     }
 }
