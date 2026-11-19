@@ -10,7 +10,7 @@
 
 pub use smelt_model::quota_service::*;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -237,31 +237,24 @@ impl CachedQuotaStatus {
 struct QuotaCache {
     /// 上次写入时间（Unix 毫秒），用于判断缓存是否还新鲜。
     pub saved_at_ms: u64,
-    /// 格式版本只用于判断旧快照有没有覆盖当时的 provider。覆盖范围由
-    /// `provider_ids` 决定，新增 provider 不再需要手工递增版本号。
+    /// 格式版本。和 [`QUOTA_CACHE_VERSION`] 不同就不认 `provider_ids`，启动照查一次。
     pub schema_version: u32,
-    /// 本次缓存生成时注册过的全部 provider，包括没有凭据、未拿到额度的项。
-    /// 用 BTreeSet 保证持久化顺序稳定。
+    /// 有定论的账户：拿到了额度，或确认没有凭据。上次查失败的不在里面，下次启动就不跳过
+    /// 首查，不然它要等一整个刷新周期才露面。用 BTreeSet 保证持久化顺序稳定。
     provider_ids: BTreeSet<String>,
     /// 真正拿到额度的项。键使用 `QuotaTarget::id()`。
     providers: BTreeMap<String, CachedQuotaStatus>,
 }
 
-/// 当前格式开始使用动态 provider map。以后新增 provider 不需要改这个版本。
-const QUOTA_CACHE_VERSION: u32 = 3;
-
-/// 旧 schema 的覆盖范围是历史契约，不能用当前注册表倒推，否则新增 provider 后
-/// 会误把旧缓存当成已覆盖。
-const LEGACY_QUOTA_PROVIDER_IDS_V0: &[&str] = &["codex", "claude", "copilot"];
-const LEGACY_QUOTA_PROVIDER_IDS_V1: &[&str] = &["codex", "claude", "copilot", "grok"];
-const LEGACY_QUOTA_PROVIDER_IDS_V2: &[&str] = &["codex", "claude", "copilot", "grok", "cursor"];
+/// 4 起 `provider_ids` 只记有定论的账户（3 及以前是当时注册过的全部）。新增 provider 不用改它。
+const QUOTA_CACHE_VERSION: u32 = 4;
 
 impl QuotaCache {
-    fn from_statuses(targets: &[QuotaTarget], statuses: &[(QuotaTarget, QuotaStatus)]) -> Self {
+    fn new(settled: BTreeSet<String>, statuses: &[(QuotaTarget, QuotaStatus)]) -> Self {
         Self {
             saved_at_ms: unix_time_ms(),
             schema_version: QUOTA_CACHE_VERSION,
-            provider_ids: targets.iter().map(|target| target.id()).collect(),
+            provider_ids: settled,
             // 只缓存真正拿到 quota 的项；失败态（quota 为 None）不落盘。
             providers: statuses
                 .iter()
@@ -279,24 +272,13 @@ impl QuotaCache {
             >= now
     }
 
-    /// 时间新鲜且已经覆盖当前所有 provider 时，才跳过启动首查。
+    /// 时间新鲜、当前每个账户都有定论时，才跳过启动首查。
     fn can_skip_startup_fetch(&self, targets: &[QuotaTarget]) -> bool {
-        if !self.is_fresh() {
-            return false;
-        }
-        let covered = if self.schema_version >= QUOTA_CACHE_VERSION {
-            self.provider_ids.iter().map(String::as_str).collect()
-        } else {
-            let legacy = match self.schema_version {
-                0 => LEGACY_QUOTA_PROVIDER_IDS_V0,
-                1 => LEGACY_QUOTA_PROVIDER_IDS_V1,
-                _ => LEGACY_QUOTA_PROVIDER_IDS_V2,
-            };
-            legacy.iter().copied().collect::<HashSet<_>>()
-        };
-        targets
-            .iter()
-            .all(|target| covered.contains(target.id().as_str()))
+        self.is_fresh()
+            && self.schema_version == QUOTA_CACHE_VERSION
+            && targets
+                .iter()
+                .all(|target| self.provider_ids.contains(&target.id()))
     }
 
     fn statuses(&self) -> Vec<(QuotaTarget, QuotaStatus)> {
@@ -552,7 +534,9 @@ pub fn refresh(params: QuotaRefreshParams) -> QuotaRefreshResult {
         .unwrap_or_else(|error| ProviderQuotaFetchResult::failed(target, error.to_string()));
     let statuses = result.into_statuses();
     let targets = quota_targets();
-    let mut merged: BTreeMap<String, QuotaStatus> = load_quota_cache()
+    let previous = load_quota_cache();
+    let settled = settled_after_round(previous.as_ref(), &statuses, &targets);
+    let mut merged: BTreeMap<String, QuotaStatus> = previous
         .map(|cache| cache.statuses())
         .unwrap_or_default()
         .into_iter()
@@ -567,8 +551,29 @@ pub fn refresh(params: QuotaRefreshParams) -> QuotaRefreshResult {
         // 关掉的账户不留在缓存里，下次打开时不会先露出一个旧数字。
         .filter(|(target, _)| targets.contains(target))
         .collect::<Vec<_>>();
-    save_quota_cache(&QuotaCache::from_statuses(&targets, &merged));
+    save_quota_cache(&QuotaCache::new(settled, &merged));
     QuotaRefreshResult { targets, statuses }
+}
+
+/// 这一轮之后有定论的账户：这一轮查了的按结果定（没报错就算），没查的沿用上次的，关掉的去掉。
+fn settled_after_round(
+    previous: Option<&QuotaCache>,
+    round: &[(QuotaTarget, QuotaStatus)],
+    targets: &[QuotaTarget],
+) -> BTreeSet<String> {
+    let mut settled = previous
+        .filter(|cache| cache.schema_version == QUOTA_CACHE_VERSION)
+        .map(|cache| cache.provider_ids.clone())
+        .unwrap_or_default();
+    for (target, status) in round {
+        if status.error.is_none() {
+            settled.insert(target.id());
+        } else {
+            settled.remove(&target.id());
+        }
+    }
+    settled.retain(|id| targets.iter().any(|target| target.id() == *id));
+    settled
 }
 
 fn unix_time_ms() -> u64 {
@@ -590,6 +595,10 @@ mod tests {
             .iter()
             .map(|provider| QuotaTarget::agent(provider.agent))
             .collect()
+    }
+
+    fn ids(targets: &[QuotaTarget]) -> BTreeSet<String> {
+        targets.iter().map(|target| target.id()).collect()
     }
 
     fn window_quota(used_percent: f64) -> ProviderQuotaData {
@@ -718,7 +727,7 @@ mod tests {
 
         assert_eq!(statuses[0].1.quota, None);
         assert_eq!(statuses[0].1.error.as_deref(), Some("offline"));
-        let cache = QuotaCache::from_statuses(&agent_targets(), &statuses);
+        let cache = QuotaCache::new(ids(&agent_targets()), &statuses);
         assert!(
             !cache.providers.contains_key("codex"),
             "失效的额度不能留在缓存里，下次启动又显示出来"
@@ -753,22 +762,17 @@ mod tests {
             },
         )];
 
-        let cache = QuotaCache::from_statuses(&agent_targets(), &statuses);
+        let cache = QuotaCache::new(ids(&agent_targets()), &statuses);
         let snapshot = snapshot_from_cache(&cache).unwrap();
         assert_eq!(snapshot.statuses.len(), 1);
         assert_eq!(snapshot.statuses[0].provider_id, "claude");
-        let expected_provider_ids = agent_targets()
-            .into_iter()
-            .map(QuotaTarget::id)
-            .collect::<BTreeSet<_>>();
         assert_eq!(
             snapshot
                 .provider_ids
                 .iter()
                 .cloned()
                 .collect::<BTreeSet<_>>(),
-            expected_provider_ids,
-            "缓存覆盖范围必须从 provider 注册表生成"
+            ids(&agent_targets()),
         );
 
         let cache = cache_from_snapshot(snapshot).unwrap();
@@ -787,7 +791,7 @@ mod tests {
             (targets[1], quota_status(window_quota(90.0))),
         ];
 
-        let cache = QuotaCache::from_statuses(&targets, &statuses);
+        let cache = QuotaCache::new(ids(&targets), &statuses);
 
         assert!(cache.providers.contains_key("copilot"));
         assert!(cache.providers.contains_key("pi:github-copilot"));
@@ -802,9 +806,53 @@ mod tests {
         }
     }
 
+    /// 上次查失败的账户没有定论：下次启动不跳过首查，不然它要等一整个刷新周期才露面。没凭据
+    /// 是定论；这一轮没查的沿用上次；关掉的去掉；旧格式的范围不认。
+    #[test]
+    fn a_failed_account_is_not_settled_and_forces_the_startup_fetch() {
+        let targets = agent_targets();
+        let [codex, claude, copilot, ..] = targets[..] else {
+            panic!("注册表里至少有三家");
+        };
+        let mut previous = QuotaCache::new(ids(&[codex, claude, copilot]), &[]);
+        let failed = QuotaStatus {
+            quota: None,
+            checked_at_ms: 1,
+            error: Some("HTTP 401".into()),
+        };
+        let logged_out = QuotaStatus {
+            quota: None,
+            checked_at_ms: 1,
+            error: None,
+        };
+        let round = vec![
+            (claude, failed),
+            (QuotaTarget::agent(ConversationAgentKind::Grok), logged_out),
+        ];
+
+        let settled = settled_after_round(Some(&previous), &round, &targets[..4]);
+        assert_eq!(
+            settled,
+            ids(&[
+                codex,
+                copilot,
+                QuotaTarget::agent(ConversationAgentKind::Grok)
+            ])
+        );
+        let mut cache = QuotaCache::new(settled, &[]);
+        cache.saved_at_ms = unix_time_ms();
+        assert!(!cache.can_skip_startup_fetch(&targets[..4]));
+
+        previous.schema_version = 3;
+        assert_eq!(
+            settled_after_round(Some(&previous), &[], &targets),
+            BTreeSet::new()
+        );
+    }
+
     #[test]
     fn startup_skip_requires_every_registered_provider_id() {
-        let mut cache = QuotaCache::from_statuses(&agent_targets(), &[]);
+        let mut cache = QuotaCache::new(ids(&agent_targets()), &[]);
         cache.saved_at_ms = unix_time_ms();
         assert!(cache.can_skip_startup_fetch(&agent_targets()));
 
@@ -819,7 +867,7 @@ mod tests {
     /// Pi 里新登录一家订阅 provider 后，覆盖范围变大，旧缓存再新鲜也得重查。
     #[test]
     fn a_newly_logged_in_pi_provider_invalidates_the_startup_skip() {
-        let mut cache = QuotaCache::from_statuses(&agent_targets(), &[]);
+        let mut cache = QuotaCache::new(ids(&agent_targets()), &[]);
         cache.saved_at_ms = unix_time_ms();
 
         let mut targets = agent_targets();
