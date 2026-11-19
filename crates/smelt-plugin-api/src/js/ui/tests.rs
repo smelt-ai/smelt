@@ -12,10 +12,10 @@ use gpui_shell::{
 
 static NEXT_APP: AtomicU64 = AtomicU64::new(0);
 
-pub(super) struct TempApp(PathBuf);
+pub(super) struct TempApp(pub(super) PathBuf);
 
 impl TempApp {
-    fn new(source: &str) -> Self {
+    pub(super) fn new(source: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
             "smelt-shell-ui-{}-{}",
             std::process::id(),
