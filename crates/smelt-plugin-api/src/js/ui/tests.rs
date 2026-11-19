@@ -103,6 +103,10 @@ fn components_hold_only_smelt_controls() {
         [
             "SmeltButton",
             "SmeltMenuButton",
+            "SmeltContextMenu",
+            "SmeltMenuItem",
+            "SmeltMenuSeparator",
+            "SmeltMenuLabel",
             "SmeltConfirmButton",
             "SmeltCheckbox",
             "SmeltRadio",
@@ -273,6 +277,54 @@ export default class App extends View {
 }
 
 #[gpui::test]
+fn context_menu_reaches_a_submenu_item(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltContextMenu, SmeltMenuItem, SmeltMenuLabel, SmeltMenuSeparator } from "smelt-ui";
+export default class App extends View {
+  init() { this.picked = "none"; }
+  render() {
+    const pick = (name) => (_e, cx) => { this.picked = name; cx.notify(); };
+    return div().size_full()
+      .child(SmeltContextMenu.new("menu").w(200).h(40)
+        .items([
+          SmeltMenuItem.new("Move").icon("icons/folder.svg").items([
+            SmeltMenuItem.new("Here").checked(true).on_click(pick("here")),
+            SmeltMenuItem.new("There").on_click(pick("there")),
+          ]),
+          SmeltMenuSeparator.new(),
+          SmeltMenuLabel.new("Danger zone"),
+          SmeltMenuItem.new("Delete").danger().disabled(true).on_click(pick("delete")),
+        ])
+        .child("target"))
+      .child(div().absolute().top(100).child(`picked: ${this.picked}`));
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    context.update(|window, _| window.activate_window());
+    draw(&mut context);
+    context.simulate_mouse_down(
+        point(px(20.), px(10.)),
+        gpui::MouseButton::Right,
+        Modifiers::default(),
+    );
+    draw(&mut context);
+    assert!(
+        context.debug_bounds("smelt-menu-0").is_some(),
+        "menu should open"
+    );
+    context.simulate_keystrokes("down");
+    draw(&mut context);
+    context.simulate_keystrokes("right");
+    draw(&mut context);
+    context.simulate_keystrokes("space");
+    draw(&mut context);
+    let after = tree(&mut context, &view);
+    assert!(after.contains("picked: here"), "{after}");
+}
+
+#[gpui::test]
 fn badge_and_alert_build_from_scripts(cx: &mut TestAppContext) {
     let source = r#"
 import { View, div } from "gpui-kit";
@@ -356,20 +408,21 @@ export default class App extends View {
 fn confirm_and_menu_reject_incomplete_descriptions(cx: &mut TestAppContext) {
     let source = r#"
 import { View, div } from "gpui-kit";
-import { SmeltConfirmButton, SmeltMenuButton } from "smelt-ui";
+import { SmeltConfirmButton, SmeltMenuButton, SmeltMenuItem } from "smelt-ui";
 export default class App extends View {
   render() {
     let rejected = 0;
     for (const bad of [
-      () => SmeltMenuButton.new("m").item("", (_cx) => {}),
-      () => SmeltMenuButton.new("m").item("Open"),
+      () => SmeltMenuItem.new(""),
+      () => SmeltMenuButton.new("m").items("Open"),
       () => SmeltConfirmButton.new("c").title(1),
       () => SmeltConfirmButton.new("c").on_confirm("no"),
     ]) {
       try { bad(); } catch (_) { rejected++; }
     }
     return div().size_full()
-      .child(SmeltMenuButton.new("more").label("More").item("Refresh", (_cx) => {})
+      .child(SmeltMenuButton.new("more").label("More")
+        .items([SmeltMenuItem.new("Refresh").on_click((_e, _cx) => {})])
         .absolute().left(0).top(0))
       .child(`rejected: ${rejected}`);
   }
@@ -379,7 +432,7 @@ export default class App extends View {
     draw(&mut context);
     let snapshot = tree(&mut context, &view);
     assert!(snapshot.contains("rejected: 4"), "{snapshot}");
-    assert!(snapshot.contains(":item(registered)"), "{snapshot}");
+    assert!(snapshot.contains(":items(registered)"), "{snapshot}");
 }
 
 /// 按实例建的视图，记下打开它的参数。

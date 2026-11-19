@@ -1,65 +1,170 @@
-//! `SmeltMenuButton`：按钮带出一个下拉菜单（[`smelt_ui::menu`]），一条 `item` 一条命令。
-//! 按钮的变体、尺寸和状态同 `SmeltButton`。
+//! 菜单（[`smelt_ui::menu`]）：
+//!
+//! - 菜单项是描述，不进界面：`SmeltMenuItem`（一条命令，可带图标、打勾、危险色、禁用；
+//!   `items([...])` 给了就是子菜单）、`SmeltMenuSeparator`、`SmeltMenuLabel`（小标题）。
+//! - 带出菜单的：`SmeltMenuButton`（按钮点开的下拉菜单，按钮的变体、尺寸和状态同
+//!   `SmeltButton`）、`SmeltContextMenu`（子元素上右键点开）。两个都用 `items([...])` 收菜单项。
+//!
+//! 菜单打开时才搭，搭好就留在弹层里，比画出它的那次绘制活得久；脚本回调却只在那次绘制里
+//! 有效。所以每次绘制把整份菜单项写进按控件 id 的槽（[`latest`]），点下去时按「各层名字」
+//! 回槽里找这次绘制的回调。同一层里命令的名字不能重。
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, ElementId, IntoElement, RenderOnce, SharedString, StyleRefinement, Styled, Window,
+    App, ElementId, Entity, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    StyleRefinement, Styled, Window, div,
 };
 use gpui_shell::{
-    ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentCallback, ComponentDescriptor,
-    ComponentMaterializer, ComponentPayload, ComponentRegistry, MaterializeRequest,
-    MethodDescriptor, RegistryError, anyhow,
+    ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentDescriptor,
+    ComponentMaterializer, ComponentPayload, ComponentRegistry, ConstructorDescriptor,
+    MaterializeRequest, MethodDescriptor, RegistryError, anyhow,
 };
 use smelt_ui::button::Button;
 use smelt_ui::menu::{Menu, MenuItem, MenuTrigger};
 
-use super::{button, control_id, id_constructor, latest, ops};
+use super::carrier::{Carrier, take};
+use super::{
+    button, callback_method, control_id, disabled_method, flag_method, id_constructor, latest, ops,
+    string_method,
+};
 
-const OWNER: &str = "SmeltMenuButton";
+/// 脚本给的点击回调；只在描述它的那次绘制里有效。
+type ClickHandler = Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
 
-#[derive(Clone)]
-struct ItemOp {
-    label: String,
-    callback: ComponentArgument,
+const ITEM: &str = "SmeltMenuItem";
+const SEPARATOR: &str = "SmeltMenuSeparator";
+const LABEL: &str = "SmeltMenuLabel";
+const BUTTON: &str = "SmeltMenuButton";
+const CONTEXT: &str = "SmeltContextMenu";
+
+/// 菜单里的一条，脚本描述完就定了。
+enum Entry {
+    Item(Item),
+    Label(SharedString),
+    Separator,
 }
 
-type Items = Vec<(SharedString, ComponentCallback)>;
+struct Item {
+    label: SharedString,
+    icon: Option<SharedString>,
+    icon_color: Option<u32>,
+    image: Option<Arc<gpui::Image>>,
+    checked: Option<bool>,
+    disabled: bool,
+    danger: bool,
+    on_click: Option<ClickHandler>,
+    submenu: Vec<Entry>,
+}
+
+#[derive(Clone)]
+enum ItemOp {
+    Icon(String),
+    IconColor(u32),
+    Png(Arc<gpui::Image>),
+    Checked(bool),
+    Danger,
+}
+
+/// `items([...])` 收下的菜单项，物化时再取。
+#[derive(Clone)]
+struct Items(Vec<ComponentArgument>);
+
+#[derive(Clone)]
+struct Label(String);
+
+/// 物化 `items([...])` 收下的菜单项。同一层里命令的名字不能重：点下去时按名字找回调。
+fn entries(owner: &str, request: &mut MaterializeRequest<'_>) -> anyhow::Result<Vec<Entry>> {
+    let arguments = ops::<Items>(request)
+        .flat_map(|items| items.0.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut entries = Vec::with_capacity(arguments.len());
+    for argument in &arguments {
+        let mut element = request.resolve_element(argument)?;
+        let entry = take::<Entry>(
+            &mut element,
+            &format!("{owner}.items to hold SmeltMenuItem, SmeltMenuSeparator or SmeltMenuLabel"),
+        )?;
+        if let Entry::Item(item) = &entry {
+            anyhow::ensure!(
+                !entries.iter().any(
+                    |earlier| matches!(earlier, Entry::Item(earlier) if earlier.label == item.label)
+                ),
+                "{owner} has two items labelled {:?}",
+                item.label
+            );
+        }
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+/// 按各层名字找到那一项。
+fn find<'a>(entries: &'a [Entry], path: &[SharedString]) -> Option<&'a Item> {
+    let (first, rest) = path.split_first()?;
+    let item = entries.iter().find_map(|entry| match entry {
+        Entry::Item(item) if item.label == *first => Some(item),
+        _ => None,
+    })?;
+    if rest.is_empty() {
+        Some(item)
+    } else {
+        find(&item.submenu, rest)
+    }
+}
+
+/// 按槽里最近一次绘制的菜单项搭菜单。命令点下去时再回槽里按名字找回调。
+fn build(entries: &[Entry], path: &[SharedString], slot: &Entity<Vec<Entry>>) -> Menu {
+    entries.iter().fold(Menu::new(), |menu, entry| match entry {
+        Entry::Separator => menu.separator(),
+        Entry::Label(label) => menu.label(label.clone()),
+        Entry::Item(item) => {
+            let path = [path, std::slice::from_ref(&item.label)].concat();
+            let mut entry = MenuItem::new(item.label.clone()).disabled(item.disabled);
+            if let Some(icon) = &item.icon {
+                entry = entry.icon_path(icon.clone());
+            }
+            if let Some(color) = item.icon_color {
+                entry = entry.icon_color(color);
+            }
+            if let Some(image) = &item.image {
+                entry = entry.image(image.clone());
+            }
+            if let Some(checked) = item.checked {
+                entry = entry.checked(checked);
+            }
+            if item.danger {
+                entry = entry.danger();
+            }
+            if !item.submenu.is_empty() {
+                return menu.item(entry.submenu(build(&item.submenu, &path, slot)));
+            }
+            let slot = slot.clone();
+            menu.item(entry.on_click(move |event, window, cx| {
+                let callback = find(slot.read(cx), &path).and_then(|item| item.on_click.clone());
+                if let Some(callback) = callback {
+                    callback(event, window, cx);
+                }
+            }))
+        }
+    })
+}
 
 #[derive(IntoElement)]
 struct MenuButton {
     id: ElementId,
     button: Button,
-    items: Items,
+    entries: Vec<Entry>,
     disabled: bool,
     style: StyleRefinement,
 }
 
 impl RenderOnce for MenuButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let items = latest(&self.id, self.items, window, cx);
-        // 菜单打开时才搭，搭好就留在弹层里；条目点下去时按名字回槽里找这次绘制的回调，
-        // 菜单开着时脚本重绘过也不会调到作废的回调。
+        let slot = latest(&self.id, self.entries, window, cx);
         let mut trigger = MenuTrigger::dropdown(self.id, self.button, move |_, cx| {
-            items.read(cx).iter().fold(Menu::new(), |menu, (label, _)| {
-                let items = items.clone();
-                let label = label.clone();
-                menu.item(MenuItem::new(label.clone()).on_click(move |_, window, cx| {
-                    let callback = items
-                        .read(cx)
-                        .iter()
-                        .find(|(current, _)| *current == label)
-                        .map(|(_, callback)| callback.clone());
-                    if let Some(callback) = callback {
-                        callback.invoke_and_report_with(
-                            "SmeltMenuButton.item callback failed",
-                            &[],
-                            window,
-                            cx,
-                        );
-                    }
-                }))
-            })
+            build(slot.read(cx), &[], &slot)
         })
         .disabled(self.disabled);
         *trigger.style() = self.style;
@@ -67,35 +172,121 @@ impl RenderOnce for MenuButton {
     }
 }
 
-struct MenuButtonMaterializer;
+#[derive(IntoElement)]
+struct ContextMenu {
+    id: ElementId,
+    trigger: gpui::AnyElement,
+    entries: Vec<Entry>,
+    disabled: bool,
+    style: StyleRefinement,
+}
 
-impl ComponentMaterializer for MenuButtonMaterializer {
+impl RenderOnce for ContextMenu {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let slot = latest(&self.id, self.entries, window, cx);
+        let mut trigger = MenuTrigger::context(self.id, self.trigger, move |_, cx| {
+            build(slot.read(cx), &[], &slot)
+        })
+        .disabled(self.disabled);
+        *trigger.style() = self.style;
+        trigger
+    }
+}
+
+struct ItemMaterializer;
+
+impl ComponentMaterializer for ItemMaterializer {
+    fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
+        let label = request
+            .payload()
+            .downcast_ref::<Label>()
+            .ok_or_else(|| anyhow::anyhow!("{ITEM} received an incompatible payload"))?
+            .0
+            .clone();
+        anyhow::ensure!(
+            request.children_len() == 0,
+            "{ITEM} takes a submenu through items([...]), not children"
+        );
+        let mut item = Item {
+            label: label.into(),
+            icon: None,
+            icon_color: None,
+            image: None,
+            checked: None,
+            disabled: request.disabled(),
+            danger: false,
+            on_click: request.on_click().map(|callback| -> ClickHandler {
+                Rc::new(move |event, window, cx| callback.invoke(event, window, cx))
+            }),
+            submenu: Vec::new(),
+        };
+        for op in ops::<ItemOp>(&request) {
+            match op {
+                ItemOp::Icon(path) => item.icon = Some(path.clone().into()),
+                ItemOp::IconColor(color) => item.icon_color = Some(*color),
+                ItemOp::Png(image) => item.image = Some(image.clone()),
+                ItemOp::Checked(checked) => item.checked = Some(*checked),
+                ItemOp::Danger => item.danger = true,
+            }
+        }
+        item.submenu = entries(ITEM, &mut request)?;
+        reject_style(ITEM, &mut request)?;
+        Ok(Carrier::new(Entry::Item(item)).into_any_element())
+    }
+}
+
+struct SeparatorMaterializer;
+
+impl ComponentMaterializer for SeparatorMaterializer {
+    fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
+        reject_style(SEPARATOR, &mut request)?;
+        Ok(Carrier::new(Entry::Separator).into_any_element())
+    }
+}
+
+struct LabelMaterializer;
+
+impl ComponentMaterializer for LabelMaterializer {
+    fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
+        let label = request
+            .payload()
+            .downcast_ref::<Label>()
+            .ok_or_else(|| anyhow::anyhow!("{LABEL} received an incompatible payload"))?
+            .0
+            .clone();
+        reject_style(LABEL, &mut request)?;
+        Ok(Carrier::new(Entry::Label(label.into())).into_any_element())
+    }
+}
+
+/// 菜单项只是描述，样式、子元素都没处放，给了就报错，不悄悄丢掉。
+fn reject_style(owner: &str, request: &mut MaterializeRequest<'_>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        request.children_len() == 0,
+        "{owner} does not accept children"
+    );
+    anyhow::ensure!(
+        request.take_style() == StyleRefinement::default(),
+        "{owner} is a menu description and takes no styles"
+    );
+    Ok(())
+}
+
+struct ButtonMaterializer;
+
+impl ComponentMaterializer for ButtonMaterializer {
     fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
         anyhow::ensure!(
             request.children_len() == 0,
-            "{OWNER} takes item(label, callback) entries, not children"
+            "{BUTTON} takes its menu through items([...]), not children"
         );
-        let id = control_id(OWNER, &request)?;
-        let button = button::build(OWNER, &request)?;
-        let items = ops::<ItemOp>(&request)
-            .map(|item| {
-                Ok((
-                    SharedString::from(item.label.clone()),
-                    request.resolve_callback(&item.callback)?,
-                ))
-            })
-            .collect::<anyhow::Result<Items>>()?;
-        // 条目点下去时按名字找回调，同名的会调错。
-        for (index, (label, _)) in items.iter().enumerate() {
-            anyhow::ensure!(
-                !items[..index].iter().any(|(earlier, _)| earlier == label),
-                "{OWNER} has two items labelled {label:?}"
-            );
-        }
+        let id = control_id(BUTTON, &request)?;
+        let button = button::build(BUTTON, &request)?;
+        let entries = entries(BUTTON, &mut request)?;
         Ok(MenuButton {
             id: id.into(),
             button,
-            items,
+            entries,
             disabled: request.disabled(),
             style: request.take_style(),
         }
@@ -103,43 +294,185 @@ impl ComponentMaterializer for MenuButtonMaterializer {
     }
 }
 
-fn item_method() -> MethodDescriptor {
+struct ContextMaterializer;
+
+impl ComponentMaterializer for ContextMaterializer {
+    fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
+        let id = control_id(CONTEXT, &request)?;
+        let entries = entries(CONTEXT, &mut request)?;
+        let trigger = div().children(request.take_children()?).into_any_element();
+        Ok(ContextMenu {
+            id: id.into(),
+            trigger,
+            entries,
+            disabled: request.disabled(),
+            style: request.take_style(),
+        }
+        .into_any_element())
+    }
+}
+
+fn items_method(owner: &'static str) -> MethodDescriptor {
     MethodDescriptor::new(
-        "item",
-        vec![
-            ArgumentDescriptor::new("label", ArgumentSchema::String),
-            ArgumentDescriptor::new(
-                "callback",
-                ArgumentSchema::Callback("(cx: Context) => void"),
-            ),
-        ],
-        |args| match args {
-            [
-                ComponentArgument::String(label),
-                callback @ ComponentArgument::Callback(_),
-            ] if !label.trim().is_empty() => Ok(ComponentPayload::new(ItemOp {
-                label: label.clone(),
-                callback: callback.clone(),
-            })),
-            [ComponentArgument::String(_), ComponentArgument::Callback(_)] => {
-                Err(format!("{OWNER}.item label must not be empty"))
+        "items",
+        vec![ArgumentDescriptor::new(
+            "items",
+            ArgumentSchema::Array(Box::new(ArgumentSchema::Element)),
+        )],
+        move |args| match args {
+            [ComponentArgument::Array(items)]
+                if items
+                    .iter()
+                    .all(|item| matches!(item, ComponentArgument::Element(_))) =>
+            {
+                Ok(ComponentPayload::new(Items(items.clone())))
             }
             _ => Err(format!(
-                "{OWNER}.item(label, callback) expects a string and a callback"
+                "{owner}.items expects an array of SmeltMenuItem, SmeltMenuSeparator or SmeltMenuLabel"
             )),
         },
     )
-    .with_documentation("Appends a command in script order; labels must be unique within the menu.")
+    .with_documentation(
+        "Appends menu entries in order: SmeltMenuItem, SmeltMenuSeparator, SmeltMenuLabel. Item labels must be unique within one menu.",
+    )
+}
+
+fn label_constructor(owner: &'static str) -> ConstructorDescriptor {
+    ConstructorDescriptor::new(
+        owner,
+        vec![ArgumentDescriptor::new("label", ArgumentSchema::String)],
+        move |args| match args {
+            [ComponentArgument::String(label)] if !label.trim().is_empty() => {
+                Ok(ComponentPayload::new(Label(label.clone())))
+            }
+            _ => Err(format!("{owner}.new(label) expects a non-empty string")),
+        },
+    )
+}
+
+fn item_methods() -> Vec<MethodDescriptor> {
+    vec![
+        string_method(
+            ITEM,
+            "icon",
+            "A line icon by asset path, such as \"icons/pencil.svg\".",
+            ItemOp::Icon,
+        ),
+        MethodDescriptor::new(
+            "icon_color",
+            vec![ArgumentDescriptor::new("color", ArgumentSchema::Number)],
+            |args| match args {
+                [ComponentArgument::Number(color)]
+                    if color.fract() == 0. && (0. ..=f64::from(0xFF_FF_FF)).contains(color) =>
+                {
+                    Ok(ComponentPayload::new(ItemOp::IconColor(*color as u32)))
+                }
+                _ => Err(format!("{ITEM}.icon_color(color) expects 0xRRGGBB")),
+            },
+        )
+        .with_documentation(
+            "A status color of the line icon itself (such as a connection light), instead of the text color.",
+        ),
+        MethodDescriptor::new(
+            "png",
+            vec![ArgumentDescriptor::new(
+                "bytes",
+                ArgumentSchema::Array(Box::new(ArgumentSchema::Number)),
+            )],
+            |args| match args {
+                [ComponentArgument::Array(bytes)] => bytes
+                    .iter()
+                    .map(|byte| match byte {
+                        ComponentArgument::Number(byte)
+                            if byte.fract() == 0. && (0. ..=255.).contains(byte) =>
+                        {
+                            Ok(*byte as u8)
+                        }
+                        _ => Err(format!("{ITEM}.png expects bytes (0–255)")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|bytes| {
+                        ComponentPayload::new(ItemOp::Png(Arc::new(gpui::Image::from_bytes(
+                            gpui::ImageFormat::Png,
+                            bytes,
+                        ))))
+                    }),
+                _ => Err(format!("{ITEM}.png expects an array of bytes")),
+            },
+        )
+        .with_documentation(
+            "A full-color icon as PNG bytes (such as an app's own icon), drawn instead of the line icon.",
+        ),
+        MethodDescriptor::new(
+            "checked",
+            vec![ArgumentDescriptor::new("checked", ArgumentSchema::Boolean)],
+            |args| match args {
+                [ComponentArgument::Boolean(checked)] => {
+                    Ok(ComponentPayload::new(ItemOp::Checked(*checked)))
+                }
+                _ => Err(format!("{ITEM}.checked expects one boolean")),
+            },
+        )
+        .with_documentation(
+            "Shows a check mark slot; the script owns the state, the menu does not toggle it.",
+        ),
+        flag_method(
+            "danger",
+            ItemOp::Danger,
+            "Uses the danger color for delete or stop entries; confirming is up to the callback.",
+        ),
+        disabled_method(ITEM),
+        callback_method(
+            ITEM,
+            "on_click",
+            "(event: ClickEvent, cx: Context) => void",
+            "Invokes the callback when the item is chosen.",
+            |_| (),
+        ),
+        items_method(ITEM),
+    ]
 }
 
 pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryError> {
     registry.register(
-        ComponentDescriptor::new(OWNER, Arc::new(MenuButtonMaterializer))
-            .with_constructors(vec![id_constructor(OWNER)])
-            .with_methods([button::methods(OWNER), vec![item_method()]].concat())
+        ComponentDescriptor::new(BUTTON, Arc::new(ButtonMaterializer))
+            .with_constructors(vec![id_constructor(BUTTON)])
+            .with_methods([button::methods(BUTTON), vec![items_method(BUTTON)]].concat())
             .with_documentation(
-                "A Smelt button that opens a dropdown menu of commands; styles apply to the trigger.",
+                "A Smelt button that opens a dropdown menu of items([...]); styles apply to the trigger.",
             ),
+    )?;
+    registry.register(
+        ComponentDescriptor::new(CONTEXT, Arc::new(ContextMaterializer))
+            .with_constructors(vec![id_constructor(CONTEXT)])
+            .with_methods(vec![items_method(CONTEXT), disabled_method(CONTEXT)])
+            .with_documentation(
+                "Wraps its children and opens a menu of items([...]) on right click; styles apply to the wrapper.",
+            ),
+    )?;
+    registry.register(
+        ComponentDescriptor::new(ITEM, Arc::new(ItemMaterializer))
+            .with_constructors(vec![label_constructor(ITEM)])
+            .with_methods(item_methods())
+            .with_documentation(
+                "A menu command, or a submenu when it has items([...]); only valid inside a menu's items.",
+            ),
+    )?;
+    registry.register(
+        ComponentDescriptor::new(SEPARATOR, Arc::new(SeparatorMaterializer))
+            .with_constructors(vec![ConstructorDescriptor::new(
+                SEPARATOR,
+                Vec::new(),
+                |_| Ok(ComponentPayload::new(())),
+            )])
+            .with_documentation(
+                "A divider between menu groups; leading and repeated ones are dropped.",
+            ),
+    )?;
+    registry.register(
+        ComponentDescriptor::new(LABEL, Arc::new(LabelMaterializer))
+            .with_constructors(vec![label_constructor(LABEL)])
+            .with_documentation("A small heading above a group of menu items."),
     )?;
     Ok(())
 }

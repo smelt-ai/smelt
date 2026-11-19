@@ -17,6 +17,7 @@ mod alert;
 mod badge;
 #[deny(dead_code)]
 mod button;
+mod carrier;
 #[deny(dead_code)]
 mod choice;
 #[deny(dead_code)]
