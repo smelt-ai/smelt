@@ -122,6 +122,11 @@ fn components_hold_only_smelt_controls() {
             "SmeltKeybind",
             "SmeltTooltip",
             "SmeltSelect",
+            "SmeltPopover",
+            "SmeltSettingsPage",
+            "SmeltSettingsSection",
+            "SmeltSettingsRow",
+            "SmeltDialog",
         ]
     );
     let states = components
@@ -322,6 +327,81 @@ export default class App extends View {
     draw(&mut context);
     let after = tree(&mut context, &view);
     assert!(after.contains("picked: here"), "{after}");
+}
+
+#[gpui::test]
+fn dialog_follows_the_scripts_state(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltButton, SmeltDialog } from "smelt-ui";
+export default class App extends View {
+  init() { this.open = true; this.log = ""; }
+  render() {
+    return div().size_full()
+      .child(SmeltDialog.new("ask").open(this.open).title("Rename").description("Pick a name").w(300)
+        .content(div().child(`body ${this.log}`))
+        .footer(SmeltButton.new("ok").label("OK"))
+        .on_confirm((cx) => { this.log += "confirm;"; cx.notify(); })
+        .on_dismiss((cx) => { this.log += "dismiss;"; this.open = false; cx.notify(); }))
+      .child(`log: ${this.log}`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    context.update(|window, _| window.activate_window());
+    draw(&mut context);
+    draw(&mut context);
+    let is_open = |context: &mut VisualTestContext| {
+        context.update(|window, cx| smelt_ui::dialog::is_open(window, cx))
+    };
+    assert!(is_open(&mut context), "open(true) puts a dialog up");
+    context.simulate_keystrokes("enter");
+    draw(&mut context);
+    assert!(
+        is_open(&mut context),
+        "confirming leaves closing to the script"
+    );
+    context.simulate_keystrokes("escape");
+    draw(&mut context);
+    draw(&mut context);
+    assert!(!is_open(&mut context), "open(false) takes it down");
+    let after = tree(&mut context, &view);
+    assert!(after.contains("log: confirm;dismiss;"), "{after}");
+}
+
+#[gpui::test]
+fn popover_and_settings_build_from_scripts(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import {
+  SmeltButton, SmeltPopover, SmeltSettingsPage, SmeltSettingsRow, SmeltSettingsSection,
+} from "smelt-ui";
+export default class App extends View {
+  init() { this.open = false; this.changes = ""; }
+  render() {
+    return div().size_full().flex().flex_col()
+      .child(SmeltPopover.new("pop").open(this.open).side("top_left").w(240)
+        .on_open_change((open, cx) => { this.changes += `${open};`; this.open = open; cx.notify(); })
+        .trigger(SmeltButton.new("trigger").label("Open").w(80).h(24))
+        .content(div().child("inside the card")))
+      .child(SmeltSettingsPage.new("settings")
+        .child(SmeltSettingsSection.new().title("General").description("About the list")
+          .child(SmeltSettingsRow.new("Avatar").description("What the row shows").note("Since 2026")
+            .child(SmeltButton.new("x").label("X")))))
+      .child(div().absolute().top(400).child(`changes: ${this.changes}`));
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    context.update(|window, _| window.activate_window());
+    draw(&mut context);
+    let snapshot = tree(&mut context, &view);
+    for text in ["SmeltPopover", "SmeltSettingsPage", "SmeltSettingsRow"] {
+        assert!(snapshot.contains(text), "{text}: {snapshot}");
+    }
+    click(&mut context, 20., 12.);
+    let after = tree(&mut context, &view);
+    assert!(after.contains("changes: true;"), "{after}");
 }
 
 #[gpui::test]

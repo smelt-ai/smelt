@@ -99,6 +99,13 @@ impl Popover {
         self
     }
 
+    /// 受控：开不开由调用方定，用户点开、关掉经 [`Popover::on_open_change`] 交回，调用方存好
+    /// 再画。不调就由它自己开关。
+    pub fn open(mut self, open: bool) -> Self {
+        self.base = self.base.open(open);
+        self
+    }
+
     /// 用户开、关它时跑（点触发点、Esc、点外面），参数是开没开。
     pub fn on_open_change(
         mut self,

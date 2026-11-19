@@ -23,6 +23,8 @@ mod choice;
 #[deny(dead_code)]
 mod confirm;
 #[deny(dead_code)]
+mod dialog;
+#[deny(dead_code)]
 mod field;
 #[deny(dead_code)]
 mod keybind;
@@ -31,7 +33,11 @@ mod list_row;
 #[deny(dead_code)]
 mod menu;
 #[deny(dead_code)]
+mod popover;
+#[deny(dead_code)]
 mod select;
+#[deny(dead_code)]
+mod settings;
 #[deny(dead_code)]
 mod sortable;
 #[deny(dead_code)]
@@ -75,6 +81,9 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     keybind::register(&mut registry)?;
     tooltip::register(&mut registry)?;
     select::register(&mut registry)?;
+    popover::register(&mut registry)?;
+    settings::register(&mut registry)?;
+    dialog::register(&mut registry)?;
     registry.freeze()
 }
 
