@@ -23,6 +23,9 @@ impl Render for ConversationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _timing = smelt_plugin_api::ui::frame_stats::RenderTiming::start("ConversationView");
         self.settle_revealed_prompt();
+        if self.list_state.is_scrollbar_dragging() {
+            self.jumped_prompt = None;
+        }
         // 技能目录一次就要数毫秒到几十毫秒。过期必须在启动规格变化时刷新，
         // 不能留到绘制里扫盘。
         debug_assert!(

@@ -4343,7 +4343,7 @@ fn first_history_page_paints_after_the_empty_open_frame(cx: &mut gpui::TestAppCo
 /// 前一条回答超过 4KB，markdown 走后台解析，滚出屏幕后再画会先以空内容出现。
 /// 跳回不能拿它的高度定位，否则提问会被解析完长出来的正文挤走。
 #[gpui::test]
-fn revealing_the_pinned_prompt_parks_it_below_the_title_island(cx: &mut gpui::TestAppContext) {
+fn jumping_to_a_prompt_parks_it_below_the_title_island(cx: &mut gpui::TestAppContext) {
     use gpui::{ListOffset, VisualTestContext};
 
     let long_reply = (0..300)
@@ -4392,7 +4392,7 @@ fn revealing_the_pinned_prompt_parks_it_below_the_title_island(cx: &mut gpui::Te
         "跟着尾部读回答时，这一问已经整条滚出视口"
     );
 
-    cx.update(|_window, cx| view.update(cx, |view, cx| view.reveal_pinned_prompt(cx)));
+    cx.update(|_window, cx| view.update(cx, |view, cx| view.jump_to_prompt(2, cx)));
     draw_settled(cx);
     draw_settled(cx);
     let viewport = view.read_with(cx, |view, _| view.list_state.viewport_bounds());
@@ -5463,6 +5463,90 @@ fn the_prompt_rail_lists_every_prompt_and_jumps_to_it(cx: &mut gpui::TestAppCont
     cx.simulate_resize(gpui::size(px(700.), px(900.)));
     draw_settled(cx);
     assert!(cx.debug_bounds("ACP_PROMPT_RAIL").is_none(), "放不下就不画");
+}
+
+/// 从头滚到尾，读到的那一问按先后走过每一问：挤在最后一屏、永远到不了视口顶的
+/// 那几问也轮得到，滚到底停在最新一问。跳到某一问时亮的就是它。
+#[gpui::test]
+fn the_prompt_rail_reaches_every_prompt_while_scrolling(cx: &mut gpui::TestAppContext) {
+    let long_answer = (0..80)
+        .map(|ix| format!("第 {ix} 段回答"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let short = || AcpEntry::Assistant {
+        text: "短".into(),
+        thought: false,
+    };
+    let (view, cx) = open_conversation(
+        cx,
+        "acp-prompt-rail-sweep",
+        vec![
+            AcpEntry::User("第一问".into()),
+            AcpEntry::Assistant {
+                text: long_answer,
+                thought: false,
+            },
+            AcpEntry::User("第二问".into()),
+            short(),
+            AcpEntry::User("第三问".into()),
+            short(),
+            AcpEntry::User("第四问".into()),
+            short(),
+        ],
+        DaemonPhase::Idle,
+    );
+    cx.simulate_resize(gpui::size(px(1400.), px(900.)));
+    draw_settled(cx);
+    let reading = |cx: &mut gpui::VisualTestContext| {
+        view.read_with(cx, |view, _| {
+            view.reading_prompt_tick(&view.prompt_rail_entries())
+        })
+    };
+    assert_eq!(
+        view.read_with(cx, |view, _| view.list_state.logical_scroll_top().item_ix),
+        1,
+        "贴底时视口顶还在第一问的回答里"
+    );
+    assert_eq!(reading(cx), Some(3), "滚到底读的是最新一问");
+
+    view.update(cx, |view, cx| {
+        view.list_state.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    });
+    draw_settled(cx);
+    let mut seen = vec![reading(cx)];
+    for _ in 0..400 {
+        if view.read_with(cx, |view, _| view.list_state.is_scrolled_to_end()) == Some(true) {
+            break;
+        }
+        view.update(cx, |view, cx| {
+            view.list_state.scroll_by(px(40.));
+            cx.notify();
+        });
+        draw_settled(cx);
+        let tick = reading(cx);
+        if seen.last() != Some(&tick) {
+            seen.push(tick);
+        }
+    }
+    assert_eq!(seen, [Some(0), Some(1), Some(2), Some(3)]);
+
+    // 第二问挤在最后一屏，滚不到视口顶；跳过去时阅读线不在它头上，照样亮它。
+    view.update(cx, |view, cx| view.jump_to_prompt(2, cx));
+    draw_settled(cx);
+    assert_eq!(reading(cx), Some(1), "跳到哪问亮哪问");
+
+    let rail = cx.debug_bounds("ACP_PROMPT_RAIL").expect("宽屏画导航");
+    cx.simulate_event(gpui::ScrollEvent {
+        position: gpui::point(px(700.), rail.center().y),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-200.))),
+        ..Default::default()
+    });
+    draw_settled(cx);
+    assert_eq!(reading(cx), Some(3), "人一滚就回到按阅读线算");
 }
 
 /// 授权请求长在输入框顶上、和输入框连成一体；选项一列菜单，点了就回给 agent。

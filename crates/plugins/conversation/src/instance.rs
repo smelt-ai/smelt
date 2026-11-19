@@ -28,6 +28,7 @@ use smelt_plugin_api::ui::Button;
 use smelt_plugin_api::ui::tooltip::Tooltip;
 use smelt_plugin_api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::ui_theme;
+use smelt_plugin_api::ui::window_bar::window_bar;
 use smelt_plugin_api::{
     self as api, HostEvent, PluginView, Runtime, RuntimeKey, ViewHandle, ViewSpec,
 };
@@ -328,21 +329,18 @@ impl PluginView for ConversationInstance {
 impl Render for ConversationInstance {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shell = div().size_full().track_focus(&self.focus_handle);
-        match &self.state {
+        let mut island = None;
+        let body = match &self.state {
             State::Live(view) => {
                 let session = self
                     .args
                     .as_ref()
                     .map(|args| (args.machine.clone(), args.session_id.clone()));
-                let island = self
+                island = self
                     .title
                     .clone()
                     .map(|title| title_island(title, view, session, cx));
-                div()
-                    .relative()
-                    .size_full()
-                    .child(view.clone())
-                    .children(island)
+                view.clone().into_any_element()
             }
             State::Idle | State::Waiting | State::Missing => {
                 let text = if matches!(self.state, State::Missing) {
@@ -360,6 +358,7 @@ impl Render for ConversationInstance {
                     .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::muted()))
                     .child(text)
+                    .into_any_element()
             }
             State::Failed(message) => shell
                 .flex()
@@ -380,8 +379,24 @@ impl Render for ConversationInstance {
                             .label(t!("action.retry"))
                             .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
                     )
-                }),
-        }
+                })
+                .into_any_element(),
+        };
+        // 顶上是窗口标题栏时自己画拖窗口的那条，盖在正文上：正文的根可聚焦，按下就拿焦点并
+        // `prevent_default`，垫在下面的拖动区永远轮不到。胶囊再盖在这条上面，按下照样是它的。
+        let area = api::safe_area(cx.entity_id(), cx);
+        let title_bar = area.title_bar.then(|| {
+            window_bar("conversation-title-bar", &area)
+                .absolute()
+                .top_0()
+                .left_0()
+        });
+        div()
+            .relative()
+            .size_full()
+            .child(body)
+            .children(title_bar)
+            .children(island)
     }
 }
 
@@ -585,9 +600,9 @@ const TITLE_ISLAND_MAX_WIDTH: f32 = 200.;
 /// 吸顶提问要认得出是哪一问，比名字宽。
 const PROMPT_ISLAND_MAX_WIDTH: f32 = 480.;
 
-/// 浮在对话顶上正中的胶囊：平时是名字（按下在会话列表里找出这段会话），最近一问滚出视口后
-/// 换成那一问（按下滚回去）。都是控件，按下就办、不拖窗口，标题栏别处照样能拖。悬停说完整
-/// 身份：名字 · 模型。不占布局高度。
+/// 浮在对话顶上正中的胶囊：平时是名字，最近一问滚出视口后换成那一问，让人知道正在读哪一问。
+/// 按下都是在会话列表里找出这段会话；对话里跳到哪一问归左侧提问导航。是控件，按下就办、
+/// 不拖窗口，标题栏别处照样能拖。悬停说完整身份：名字 · 模型。不占布局高度。
 fn title_island(
     title: String,
     view: &Entity<ConversationView>,
@@ -602,53 +617,37 @@ fn title_island(
     let pinned = conversation.pinned_prompt();
     let content_under = pinned.is_some();
     let island = match pinned {
-        Some(prompt) => {
-            let view = view.clone();
-            island_shell("conversation-pinned-prompt", PROMPT_ISLAND_MAX_WIDTH, tip)
-                .gap_1p5()
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .type_style(TYPE.ui)
-                        .text_color(rgb(ui_theme::muted()))
-                        .child("↑"),
-                )
-                .child(
-                    div()
-                        .min_w(px(0.))
-                        .overflow_hidden()
-                        .type_style(TYPE.ui)
-                        .text_color(rgb(ui_theme::text()))
-                        .child(truncated_line(prompt)),
-                )
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    cx.stop_propagation();
-                    view.update(cx, |view, cx| view.reveal_pinned_prompt(cx));
-                })
-        }
-        None => island_shell("conversation-title", TITLE_ISLAND_MAX_WIDTH, tip)
+        Some(prompt) => island_shell("conversation-pinned-prompt", PROMPT_ISLAND_MAX_WIDTH, tip)
             .child(
                 div()
                     .min_w(px(0.))
                     .overflow_hidden()
-                    .type_style(TYPE.ui_medium)
+                    .type_style(TYPE.ui)
                     .text_color(rgb(ui_theme::text()))
-                    .child(truncated_line(title)),
-            )
-            .when_some(session, |island, (machine, session_id)| {
-                island.on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    cx.stop_propagation();
-                    let reveal = sessions::REVEAL_IN_LIST.run(
-                        &sessions::RevealInList {
-                            machine: machine.clone(),
-                            session_id: session_id.clone(),
-                        },
-                        cx,
-                    );
-                    log_failure(reveal, "在会话列表里定位失败", cx);
-                })
-            }),
-    };
+                    .child(truncated_line(prompt)),
+            ),
+        None => island_shell("conversation-title", TITLE_ISLAND_MAX_WIDTH, tip).child(
+            div()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .type_style(TYPE.ui_medium)
+                .text_color(rgb(ui_theme::text()))
+                .child(truncated_line(title)),
+        ),
+    }
+    .when_some(session, |island, (machine, session_id)| {
+        island.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            let reveal = sessions::REVEAL_IN_LIST.run(
+                &sessions::RevealInList {
+                    machine: machine.clone(),
+                    session_id: session_id.clone(),
+                },
+                cx,
+            );
+            log_failure(reveal, "在会话列表里定位失败", cx);
+        })
+    });
     // 吸顶时正文从胶囊底下滚过：顶上一条从窗口底那层渐隐到透明，字滚到胶囊边上先淡掉，
     // 不和胶囊叠在一起。用宿主铺窗口底的同一层（有材质时是半透的），不拿实色盖住材质。
     // 只是一层底色，不接事件，滚轮和拖窗口照样落到下面。

@@ -594,10 +594,8 @@ impl Render for Split {
             .flex()
             .flex_col()
             .when(bare, |this| this.pt(px(ui_theme::CHROME_ISLAND_BAND_PX)))
-            // 先画：垫在格子和胶囊下面。
-            .when(title_bar && top_is_free(bare, self.order.len()), |this| {
-                this.child(drag_band())
-            })
+            // 先画：垫在胶囊下面。
+            .when(title_bar && bare, |this| this.child(drag_band()))
             .child(
                 div()
                     .flex_1()
@@ -690,12 +688,12 @@ fn title_island(title: SharedString, key: ConversationKey) -> Div {
         .child(island)
 }
 
-/// 分屏顶上那一整条拖窗口的带子，和窗口顶栏一样高：按住拖窗口，双击缩放。会话视图
-/// 自己画顶（`draws_top_bar`），外壳不再给它画标题带，只靠胶囊拖太窄。顶上是窗口标题栏
-/// （safe area 的 `title_bar`）时才画。
+/// 只有终端时，格子上面让给名字胶囊的那条拖窗口：按住拖窗口，双击缩放。会话视图自己画顶
+/// （`draws_top_bar`），外壳不再给它画标题带，只靠胶囊拖太窄。顶上是窗口标题栏（safe area
+/// 的 `title_bar`）时才画。胶囊画在它上面，按下先拦住。
 ///
-/// 垫在内容下面（调用方先画它）：胶囊（名字、吸顶提问）画在上面，按下先拦住；按在格子里
-/// 第一下是拿焦点（`prevent_default`），也不拖。别的按在这一条里、没拦的都拖窗口。
+/// 有对话时格子从顶上开始，这条垫在下面会被格子整个盖住（可聚焦的视图按下就
+/// `prevent_default`），顶上归格子自己：一格时对话按 safe area 画，分屏后是各组的标题条。
 fn drag_band() -> Stateful<Div> {
     with_window_drag(
         div()
@@ -706,13 +704,6 @@ fn drag_band() -> Stateful<Div> {
             .right_0()
             .h(TOP_BAR_HEIGHT),
     )
-}
-
-/// 顶上那一条能不能拖窗口：格子的标题条（分屏后每格一条，拖它是挪格子）不能被带子压住。
-/// 只有终端时顶上让出了胶囊那一条，格子在它下面，怎么分都行；有对话时格子从顶上开始，
-/// 只剩一格（没有标题条）才行。
-fn top_is_free(terminal_only: bool, panes: usize) -> bool {
-    terminal_only || panes <= 1
 }
 
 // ---- 格子 ----
@@ -1347,17 +1338,6 @@ mod tests {
         );
         assert_eq!(specs[0].args["start"]["prefill"], "hi");
         assert_eq!(specs[1].args["cwd"], "/repo");
-    }
-
-    #[test]
-    fn the_drag_band_stays_off_pane_title_bars() {
-        // 只有终端：格子在胶囊那条下面，分不分屏都能拖。
-        assert!(top_is_free(true, 1));
-        assert!(top_is_free(true, 3));
-        // 有对话：一格没有标题条，能拖；分屏后顶上是各格的标题条，让给它们。
-        assert!(top_is_free(false, 0));
-        assert!(top_is_free(false, 1));
-        assert!(!top_is_free(false, 2));
     }
 
     #[test]

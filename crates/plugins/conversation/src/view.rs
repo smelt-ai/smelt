@@ -1725,6 +1725,9 @@ pub struct ConversationView {
     prompt_rail_hover: Option<PromptIndexItem>,
     /// 点了还没加载到的那一问（全局条目下标）：往前翻页，翻到了再滚过去。
     pending_prompt_jump: Option<usize>,
+    /// 点刻度跳到的那一问（全局条目下标），导航把它当成正在读的，直到人自己滚动或对话
+    /// 内容变了。最后一屏里的几问滚不到视口顶，跳过去时阅读线未必落在它头上，只能记下。
+    jumped_prompt: Option<usize>,
     /// 「强制重启」请求正在路上：用于阻止「停止」按钮重复触发。跟
     /// `DaemonPhase::Connecting` 不是一回事——那是新进程握手阶段，这个是"旧进程
     /// 还没确认死透"的过渡态，两者可能重叠（发出 acp_restart 到收到新一份
@@ -1872,6 +1875,8 @@ impl ConversationView {
             // list 正在可变借用自己的状态，延后通知外层重新判断吸顶提问。
             cx.defer(move |cx| {
                 let _ = view.update(cx, |this, cx| {
+                    // 只有人滚滚轮、触控板才会进这里，读到哪问重新按阅读线算。
+                    this.jumped_prompt = None;
                     this.set_viewing_history(viewing_history, cx);
                     if near_loaded_top {
                         this.load_older_history(cx);
@@ -2016,6 +2021,7 @@ impl ConversationView {
             prompt_index_before: None,
             prompt_rail_hover: None,
             pending_prompt_jump: None,
+            jumped_prompt: None,
             restarting: false,
             cancel_requested_at: None,
             restart_error: None,
@@ -2938,6 +2944,7 @@ impl ConversationView {
     /// 跳到第 `entry_ix` 问（全局条目下标）。没加载到的先往前翻页。
     pub(super) fn jump_to_prompt(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
         self.pending_prompt_jump = Some(entry_ix);
+        self.jumped_prompt = Some(entry_ix);
         self.continue_prompt_jump(cx);
     }
 
@@ -4342,6 +4349,9 @@ impl ConversationView {
         );
         self.layout_cache.borrow_mut().dirty_from = Some(changed_from.unwrap_or(usize::MAX));
         let snapshot_entries_changed = changed_from.is_some();
+        if snapshot_entries_changed {
+            self.jumped_prompt = None;
+        }
         let entries_offset = changed_from.unwrap_or(self.entries.len());
         let previous_permission = self
             .permissions
@@ -4956,16 +4966,8 @@ impl ConversationView {
             .and_then(|ix| pinned_prompt_summary(&self.entries[ix]))
     }
 
-    /// 滚回吸顶的那一问；再点就接着往前一问走。锚点落在提问自己身上，头上
-    /// 让出标题胶囊的高度：前一条回答可能还没量过，或正在后台重新解析。
-    pub fn reveal_pinned_prompt(&mut self, cx: &mut Context<Self>) {
-        let Some(ix) = self.pinned_prompt_ix() else {
-            return;
-        };
-        self.reveal_prompt(ix, cx);
-    }
-
-    /// 把第 `ix` 条（已加载那一截里的下标）提问滚到顶上，头上让出标题胶囊的高度。
+    /// 把第 `ix` 条（已加载那一截里的下标）提问滚到顶上，头上让出标题胶囊的高度。锚点落在
+    /// 提问自己身上：前一条回答可能还没量过，或正在后台重新解析。
     fn reveal_prompt(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(previous) = self.revealed_prompt.replace(ix) {
             self.list_state.remeasure_items(previous..previous + 1);

@@ -3,7 +3,7 @@
 use super::*;
 use smelt_plugin_api::ui::kit::TYPE;
 
-/// 导航占的左侧留白。正文栏两边都空出这么宽才画，窄了就只靠吸顶胶囊。
+/// 导航占的左侧留白。正文栏两边都空出这么宽才画。
 const RAIL_GUTTER: f32 = 56.;
 /// 刻度列离左边的距离和它的宽度（也是指针能点中的宽度）。
 const RAIL_LEFT: f32 = 12.;
@@ -32,8 +32,7 @@ impl ConversationView {
             .clamp(TICK_PITCH_MIN, TICK_PITCH_MAX);
         let rail_height = pitch * ticks.len() as f32;
         let top = ((height - rail_height) / 2.).max(0.);
-        let reading = self.loaded_entries_offset + self.list_state.logical_scroll_top().item_ix;
-        let current = ticks.iter().rposition(|ix| *ix <= reading);
+        let current = self.reading_prompt_tick(&ticks);
         let hovered = self.prompt_rail_hover.as_ref().map(|item| item.entry_ix);
         let mut rail = div()
             .absolute()
@@ -94,6 +93,31 @@ impl ConversationView {
                 .children(peek)
                 .into_any_element(),
         )
+    }
+
+    /// 正在读第几问（`ticks` 里的位置）。刚点刻度跳过去的就是那一问；否则是阅读线以上
+    /// 最后开始的那一问。阅读线平时贴着视口顶；离底不到一屏时随剩下的距离滑到视口底。
+    /// 从头滚到尾它连续扫过整段对话，每一问都轮得到，包括挤在最后一屏里那几问。
+    pub(in crate::view) fn reading_prompt_tick(&self, ticks: &[usize]) -> Option<usize> {
+        if let Some(jumped) = self.jumped_prompt
+            && let Some(k) = ticks.iter().position(|ix| *ix == jumped)
+        {
+            return Some(k);
+        }
+        let list = &self.list_state;
+        let viewport = list.viewport_bounds();
+        let scrolled = -list.scroll_px_offset_for_scrollbar().y;
+        let remaining = (list.max_offset_for_scrollbar().y - scrolled).max(px(0.));
+        let line = viewport.top() + (viewport.size.height - remaining).max(px(0.)) + px(1.);
+        let scroll_top = list.logical_scroll_top().item_ix;
+        ticks.iter().rposition(|&ix| {
+            // 没加载的那一截和滚过顶的都在阅读线上面；还没量过的在下面。
+            ix.checked_sub(self.loaded_entries_offset)
+                .is_none_or(|local| {
+                    local < scroll_top
+                        || list.bounds_for_item(local).is_some_and(|b| b.top() <= line)
+                })
+        })
     }
 }
 
