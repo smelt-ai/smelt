@@ -127,6 +127,8 @@ fn components_hold_only_smelt_controls() {
             "SmeltSettingsSection",
             "SmeltSettingsRow",
             "SmeltDialog",
+            "SmeltScrollView",
+            "SmeltScrollAnchor",
         ]
     );
     let states = components
@@ -402,6 +404,42 @@ export default class App extends View {
     click(&mut context, 20., 12.);
     let after = tree(&mut context, &view);
     assert!(after.contains("changes: true;"), "{after}");
+}
+
+#[gpui::test]
+fn scroll_view_reveals_and_reports_offscreen_rows(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltButton, SmeltScrollAnchor, SmeltScrollView } from "smelt-ui";
+export default class App extends View {
+  init() { this.serial = 0; this.sides = "none"; }
+  render() {
+    const rows = [];
+    for (let i = 0; i < 20; i++) rows.push(SmeltScrollAnchor.new(`r${i}`).h(30).child(`row ${i}`));
+    return div().size_full().flex().flex_col()
+      .child(SmeltButton.new("go").label("Go").h(20)
+        .on_click((_, cx) => { this.serial += 1; cx.notify(); }))
+      .child((this.serial > 0 ? SmeltScrollView.new("list").reveal("r19", this.serial) : SmeltScrollView.new("list"))
+        .h(100).edges().watch(["r0", "r19"])
+        .on_offscreen((above, below, cx) => { this.sides = `${above.join(",")}|${below.join(",")}`; cx.notify(); })
+        .overlay_top(div().child("pill"))
+        .children(rows))
+      .child(div().child(`sides: ${this.sides}`));
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    draw(&mut context);
+    draw(&mut context);
+    let before = tree(&mut context, &view);
+    assert!(before.contains("sides: |r19"), "{before}");
+    click(&mut context, 10., 10.);
+    draw(&mut context);
+    draw(&mut context);
+    draw(&mut context);
+    let after = tree(&mut context, &view);
+    assert!(after.contains("sides: r0|"), "{after}");
 }
 
 #[gpui::test]

@@ -81,6 +81,21 @@ impl ScrollAnchors {
         })
     }
 
+    /// 给一项挂上 `key`，记进包着它的最里层那块滚动内容（[`ScrollAnchors::root`]）。手里没有
+    /// 定位表的元素（脚本插件交来的）用它；外面没有定位表就不记。
+    pub fn anchor_enclosing<E: ParentElement>(key: impl Into<SharedString>, element: E) -> E {
+        let key = key.into();
+        element.on_prepaint(move |bounds, _, cx| {
+            if let Some(anchors) = cx
+                .try_global::<ActiveAnchors>()
+                .and_then(|active| active.0.last())
+            {
+                let edges = (f32::from(bounds.top()), f32::from(bounds.bottom()));
+                anchors.state.borrow_mut().pending.insert(key, edges);
+            }
+        })
+    }
+
     /// `key` 那一项眼下在可视区哪边：上一帧的位置，按眼下滚到的位置算。没画过是 `None`。
     pub fn placement(&self, key: &str) -> Option<Placement> {
         let state = self.state.borrow();

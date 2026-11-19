@@ -35,6 +35,8 @@ mod menu;
 #[deny(dead_code)]
 mod popover;
 #[deny(dead_code)]
+mod scroll_view;
+#[deny(dead_code)]
 mod select;
 #[deny(dead_code)]
 mod settings;
@@ -84,6 +86,7 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     popover::register(&mut registry)?;
     settings::register(&mut registry)?;
     dialog::register(&mut registry)?;
+    scroll_view::register(&mut registry)?;
     registry.freeze()
 }
 
