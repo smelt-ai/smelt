@@ -58,7 +58,8 @@
       "children": [
         { "panel_name": "smelt.files/main", "children": [], "info": { "panel": null } },
         { "panel_name": "smelt.git/main", "children": [], "info": { "panel": null } },
-        { "panel_name": "smelt.history/main", "children": [], "info": { "panel": null } }
+        { "panel_name": "smelt.history/main", "children": [], "info": { "panel": null } },
+        { "panel_name": "smelt.skills/main", "children": [], "info": { "panel": null } }
       ]
     }
   }

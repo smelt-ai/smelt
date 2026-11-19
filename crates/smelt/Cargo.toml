@@ -45,6 +45,7 @@ smelt-maintenance = { path = "../plugins/maintenance" }
 smelt-notifications = { path = "../plugins/notifications" }
 smelt-resources = { path = "../plugins/resources" }
 smelt-sessions = { path = "../plugins/sessions" }
+smelt-skills = { path = "../plugins/skills" }
 smelt-terminal = { path = "../plugins/terminal" }
 smelt-themes = { path = "../plugins/themes" }
 smelt-updater-ui = { path = "../plugins/updater" }

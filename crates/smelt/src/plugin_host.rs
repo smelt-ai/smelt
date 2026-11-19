@@ -405,6 +405,7 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     smelt_maintenance::register(cx);
     smelt_notifications::register(cx);
     smelt_resources::register(cx);
+    smelt_skills::register(cx);
     smelt_updater_ui::register(cx);
 }
 

@@ -50,6 +50,7 @@ members = [
     "crates/plugins/notifications",
     "crates/plugins/resources",
     "crates/plugins/sessions",
+    "crates/plugins/skills",
     "crates/plugins/terminal",
     "crates/plugins/themes",
     "crates/plugins/updater",

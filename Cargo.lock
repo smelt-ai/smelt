@@ -10785,6 +10785,7 @@ dependencies = [
  "smelt-resources",
  "smelt-runtime-client",
  "smelt-sessions",
+ "smelt-skills",
  "smelt-store",
  "smelt-sys",
  "smelt-terminal",
@@ -11284,6 +11285,18 @@ dependencies = [
  "smol",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "smelt-skills"
+version = "0.0.0"
+dependencies = [
+ "dirs 5.0.1",
+ "gpui-pre",
+ "libc",
+ "rust-i18n",
+ "smelt-plugin-api",
+ "tempfile",
 ]
 
 [[package]]
