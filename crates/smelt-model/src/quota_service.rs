@@ -53,16 +53,21 @@ impl QuotaTarget {
         crate::pi_quota::pi_quota_provider(provider).map(|provider| Self::pi(provider.id))
     }
 
-    /// 侧栏文案里的名字。
-    pub fn label(self) -> &'static str {
-        self.agent.short_label()
+    /// 账户属于哪家服务：agent 自己的账户就是它，Pi 底下的按 provider 归到对应那家
+    /// （`pi:github-copilot` 是 Copilot）。
+    pub fn service(self) -> ConversationAgentKind {
+        self.provider
+            .and_then(crate::pi_quota::pi_quota_provider)
+            .map_or(self.agent, |provider| provider.service)
     }
 
-    /// 设置页列表里的名字。Pi 底下有多家，要带上 provider 才分得清。
+    /// 界面上的名字：服务名，凭据不是那家 agent 自己的再带上来源（`Copilot · Pi`）。
     pub fn display_name(self) -> String {
-        match self.provider {
-            Some(provider) => format!("{} · {provider}", self.label()),
-            None => self.label().to_string(),
+        let service = self.service().short_label();
+        if self.service() == self.agent {
+            service.to_string()
+        } else {
+            format!("{service} · {}", self.agent.short_label())
         }
     }
 }
@@ -157,4 +162,26 @@ impl QuotaSettings {
 pub struct QuotaSetEnabledParams {
     pub target: QuotaTarget,
     pub enabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pi 底下的账户按 provider 归到对应那家服务，名字带上来源。
+    #[test]
+    fn pi_targets_belong_to_the_service_of_their_provider() {
+        let copilot = QuotaTarget::agent(ConversationAgentKind::Copilot);
+        let pi_copilot = QuotaTarget::pi("github-copilot");
+        assert_eq!(copilot.service(), ConversationAgentKind::Copilot);
+        assert_eq!(pi_copilot.service(), ConversationAgentKind::Copilot);
+        assert_eq!(copilot.display_name(), "Copilot");
+        assert_eq!(pi_copilot.display_name(), "Copilot · Pi");
+        for provider in crate::pi_quota::PI_QUOTA_PROVIDERS {
+            assert_ne!(
+                QuotaTarget::pi(provider.id).service(),
+                ConversationAgentKind::Pi
+            );
+        }
+    }
 }

@@ -751,26 +751,6 @@ fn provider_switch_value<'a>(
         .map(|(value, _)| value.as_str())
 }
 
-/// Provider 菜单项的显示名。查得到账户额度就在名字后面补一个括号，如
-/// `github-copilot (25%)`；查不到就是原名，不画空括号。
-///
-/// 只对 Pi 生效：额度查的是 Pi 自己 `auth.json` 里的凭据，别家 agent 的同名
-/// provider（比如 Claude 的 `anthropic`）用的是另一套账户，套上这个数字就是
-/// 张冠李戴。
-fn provider_menu_label(
-    agent: ConversationAgentKind,
-    provider: &ModelProviderGroup,
-    cx: &App,
-) -> String {
-    if agent != ConversationAgentKind::Pi {
-        return provider.name.clone();
-    }
-    match crate::agents::pi_quota_badge(&provider.id, cx) {
-        Some(badge) => format!("{} ({badge})", provider.name),
-        None => provider.name.clone(),
-    }
-}
-
 /// 往空列表补第一页历史。
 ///
 /// 新项先带统一高度，滚动条才有长度，并停在最新一条。

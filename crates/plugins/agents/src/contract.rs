@@ -73,8 +73,7 @@ pub(crate) struct AgentSettingsEdit {
 /// 账户额度那一条：每家一枚额度环，点开看全部，点哪家刷新哪家。不带参数，摆在哪归布局。
 pub(crate) const QUOTA_VIEW: &str = "smelt.agents/quota";
 
-/// 本机运行时上各账户的额度（额度那一条、对话模型菜单里的 Pi 额度用）。之后的变化订
-/// [`QUOTA_CHANGED`]。
+/// 本机运行时上各账户的额度。之后的变化订 [`QUOTA_CHANGED`]。
 pub(crate) const QUOTA: Command<(), Quota> = Command::new("smelt.agents/quota");
 
 /// 额度、查询范围或「查询中」变了，带整份。

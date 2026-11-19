@@ -1,7 +1,7 @@
-//! 对话要读的机器、账户一级的状态，权威都在智能体插件（来源 `smelt.agents`）：各台机器的
-//! 智能体配置（自定义 Agent 的名字、记住的会话选项）、Pi 各家 provider 的额度（模型菜单里
-//! 的括号）。这里是只读缓存：第一段对话打开时问一次整份，之后跟着它发的事件整份换，不自己
-//! 读运行时、不先改本地。智能体插件没装、还没问到时是空的：不显示自定义 Agent 的名字和额度。
+//! 对话要读的机器一级的状态，权威都在智能体插件（来源 `smelt.agents`）：各台机器的智能体配置
+//! （自定义 Agent 的名字、记住的会话选项）。这里是只读缓存：第一段对话打开时问一次整份，之后
+//! 跟着它发的事件整份换，不自己读运行时、不先改本地。智能体插件没装、还没问到时是空的：不显示
+//! 自定义 Agent 的名字。
 //!
 //! 还有 Pi 配置变了的信号（[`PiCatalog`]）：模型目录只能问 Pi 进程自己，会话启动时拉一次；
 //! 本机运行时推来 Pi 配置变了（登录、登出、改 provider），活着的对话据此重拉。
@@ -14,10 +14,7 @@ use std::collections::HashMap;
 use gpui::{App, Global, Task};
 use serde::{Deserialize, Serialize};
 use smelt_plugin_api::model::agent_host::AgentHostSettings;
-use smelt_plugin_api::model::agent_kind::ConversationAgentKind;
 use smelt_plugin_api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED;
-use smelt_plugin_api::model::provider_quota::ProviderQuotaData;
-use smelt_plugin_api::model::quota_service::{QuotaStatus, QuotaTarget};
 use smelt_plugin_api::{Command, Event, HostEvent, RuntimeKey, TopicMessage, machine_json};
 
 // ---- 约定：照抄自 crates/plugins/agents/src/contract.rs ----
@@ -36,12 +33,6 @@ const AGENT_SETTINGS_CHANGED: Event<MachineAgentSettings> =
 /// 改一台机器的智能体配置：交 `before` 和 `after`，运行时合并到最新的那份上，交回写好的整份。
 const EDIT_AGENT_SETTINGS: Command<AgentSettingsEdit, AgentHostSettings> =
     Command::new("smelt.agents/edit-agent-settings");
-
-/// 本机运行时上各账户的额度。之后的变化订 [`QUOTA_CHANGED`]。
-const QUOTA: Command<(), Quota> = Command::new("smelt.agents/quota");
-
-/// 额度、查询范围或「查询中」变了，带整份。
-const QUOTA_CHANGED: Event<Quota> = Event::new("smelt.agents/quota-changed");
 
 /// 一台机器的智能体配置。
 #[derive(Clone, Debug, Deserialize)]
@@ -72,23 +63,13 @@ struct AgentSettingsEdit {
     after: AgentHostSettings,
 }
 
-/// 额度现状。这里只用查到的结果，别的字段忽略。
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct Quota {
-    pub(crate) statuses: Vec<(QuotaTarget, QuotaStatus)>,
-}
-
 // ---- 缓存 ----
 
 #[derive(Default)]
 struct Cache {
     /// 每台机器的配置。给不了、移除了的机器不在里面。
     settings: HashMap<RuntimeKey, AgentHostSettings>,
-    /// Pi 各家 provider 的额度短文本，按 provider id。
-    pi_badges: HashMap<String, String>,
     fetch: Fetch,
-    /// 收到过几次额度事件。问整份的回来时已经收到过事件，事件更新，丢掉问来的。
-    quota_events: u64,
 }
 
 #[derive(Default, PartialEq)]
@@ -126,11 +107,6 @@ pub(crate) fn install(cx: &mut App) {
             HostEvent::Plugin { .. } => {
                 if let Some(changed) = AGENT_SETTINGS_CHANGED.parse(event) {
                     set_settings(changed, cx);
-                } else if let Some(quota) = QUOTA_CHANGED.parse(event) {
-                    let cache = cx.global_mut::<Cache>();
-                    cache.quota_events += 1;
-                    cache.pi_badges = pi_badges(&quota);
-                    cx.refresh_windows();
                 }
             }
             _ => {}
@@ -149,16 +125,12 @@ pub(crate) fn ensure_loaded(cx: &mut App) {
         return;
     }
     cache.fetch = Fetch::Loading;
-    let quota_events = cache.quota_events;
     let settings = AGENT_SETTINGS.run(&(), cx);
-    let quota = QUOTA.run(&(), cx);
     cx.spawn(async move |cx| {
         let settings = settings.await;
-        let quota = quota.await;
         cx.update(|cx| {
             let cache = cx.global_mut::<Cache>();
-            let mut loaded = true;
-            match settings {
+            cache.fetch = match settings {
                 // 问的这会儿到了事件的机器以事件为准。
                 Ok(machines) => {
                     for machine in machines {
@@ -166,23 +138,13 @@ pub(crate) fn ensure_loaded(cx: &mut App) {
                             cache.settings.entry(machine.machine).or_insert(settings);
                         }
                     }
+                    Fetch::Done
                 }
                 Err(error) => {
                     eprintln!("[conversation] 取智能体配置失败：{error}");
-                    loaded = false;
+                    Fetch::Idle
                 }
-            }
-            match quota {
-                Ok(quota) if cache.quota_events == quota_events => {
-                    cache.pi_badges = pi_badges(&quota);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!("[conversation] 取账户额度失败：{error}");
-                    loaded = false;
-                }
-            }
-            cache.fetch = if loaded { Fetch::Done } else { Fetch::Idle };
+            };
             cx.refresh_windows();
         });
     })
@@ -202,38 +164,9 @@ fn set_settings(changed: MachineAgentSettings, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// 额度里 Pi 各家 provider 的短文本。
-fn pi_badges(quota: &Quota) -> HashMap<String, String> {
-    quota
-        .statuses
-        .iter()
-        .filter(|(target, _)| target.agent == ConversationAgentKind::Pi)
-        .filter_map(|(target, status)| {
-            Some((
-                target.provider?.to_string(),
-                status.quota.as_ref().map(ProviderQuotaData::short_text)?,
-            ))
-        })
-        .collect()
-}
-
-/// 换上一份额度（测试用，等同收到一次 [`QUOTA_CHANGED`]）。
-#[cfg(test)]
-pub(crate) fn apply_quota(quota: &Quota, cx: &mut App) {
-    cx.default_global::<Cache>().pi_badges = pi_badges(quota);
-}
-
 /// 那台机器的智能体配置；还没收到、给不了是 `None`。只读内存，render 里可以调。
 pub(crate) fn settings<'a>(machine: &RuntimeKey, cx: &'a App) -> Option<&'a AgentHostSettings> {
     cx.try_global::<Cache>()?.settings.get(machine)
-}
-
-/// Pi 那家 provider 的额度短文本（如 `25%`）。查不到是 `None`。只读内存。
-pub(crate) fn pi_quota_badge(provider_id: &str, cx: &App) -> Option<String> {
-    cx.try_global::<Cache>()?
-        .pi_badges
-        .get(provider_id)
-        .cloned()
 }
 
 /// 改那台机器的智能体配置：在手里那份上调 `f`，把改动交给智能体插件。配置还没收到时报错，

@@ -1,5 +1,5 @@
 //! 账户额度：定时请本机运行时刷新，结果留在这里。额度那一条（[`crate::quota_view`]）直接读，
-//! 对话的模型菜单经约定（[`contract::QUOTA`]、[`contract::QUOTA_CHANGED`]）来取。
+//! 别的插件经约定（[`contract::QUOTA`]、[`contract::QUOTA_CHANGED`]）来取。
 //!
 //! 额度是账户状态，不属于哪段会话。凭据在运行时那台机器上，查询和跨启动缓存都由运行时做
 //! （`quota.*`，见 [`api::model::quota_service`]）。这里只管节奏：启动先显示运行时缓存里的

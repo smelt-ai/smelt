@@ -1,8 +1,9 @@
-//! 账户额度那一条（[`contract::QUOTA_VIEW`]）：每家一枚额度环，双环外 5 小时、内周；总额未知
-//! 时写剩余数字。悬停看各窗口和重置时间，点开看全部，点哪家刷新哪家。
+//! 账户额度那一条（[`contract::QUOTA_VIEW`]）：每家服务一枚额度环，双环外 5 小时、内周；总额
+//! 未知时写剩余数字。悬停看各窗口和重置时间，点开看全部，点哪家刷新哪家。
 //!
-//! 只列智能体自己的账户（Codex、Claude、Copilot）。Pi 底下几家 provider 是独立账户，额度跟在
-//! 对话模型菜单的 provider 名字后面，那里才说得清数字属于谁。
+//! 环按服务分（[`QuotaTarget::service`]）：Pi 里登录的 `github-copilot` 和 Copilot CLI 的账户
+//! 都算 Copilot。同一家有几个来源时环上画用得最多的那个，快用完的不会被另一个盖住；弹层里每个
+//! 来源各列一行。
 //!
 //! 状态归 [`quota`]，这里不另存：变了（[`contract::QUOTA_CHANGED`]）就整份换掉手里那份再重画。
 //! 摆在哪归布局。
@@ -27,6 +28,9 @@ use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 点开的列表宽度：名字一栏、用量条、百分比放得下。
 const POPOVER_WIDTH: f32 = 268.;
+
+/// 弹层里名字那一栏：放得下「Copilot · Pi」。
+const NAME_WIDTH: f32 = 84.;
 
 /// 用到这个百分比就算快用完：标黄。
 const WARN_PERCENT: f64 = 75.0;
@@ -81,20 +85,54 @@ impl QuotaBar {
 }
 
 fn chips_for(quota: &Quota) -> Vec<Chip> {
-    quota
-        .statuses
-        .iter()
-        .filter(|(target, _)| target.provider.is_none())
-        .filter_map(|(target, status)| chip_for(quota, *target, status))
-        .collect()
+    let mut chips: Vec<Chip> = Vec::new();
+    for (target, status) in by_service(quota, quota.statuses.iter()) {
+        let Some(chip) = chip_for(quota, *target, status) else {
+            continue;
+        };
+        match chips
+            .iter_mut()
+            .find(|existing| existing.target.service() == target.service())
+        {
+            Some(existing) if chip.used > existing.used => *existing = chip,
+            Some(_) => {}
+            None => chips.push(chip),
+        }
+    }
+    chips
+}
+
+/// 按服务排：那家 agent 自己的账户在什么位置，Pi 里的同一家就跟在它后面；那家自己没开查询的，
+/// 按这个来源本来的位置。
+fn by_service<'a, T: 'a>(
+    quota: &Quota,
+    items: impl Iterator<Item = &'a (QuotaTarget, T)>,
+) -> Vec<&'a (QuotaTarget, T)> {
+    let position = |target: QuotaTarget| {
+        let own = QuotaTarget::agent(target.service());
+        quota
+            .targets
+            .iter()
+            .position(|candidate| *candidate == own)
+            .or_else(|| {
+                quota
+                    .targets
+                    .iter()
+                    .position(|candidate| *candidate == target)
+            })
+            .unwrap_or(usize::MAX)
+    };
+    let mut items: Vec<_> = items.collect();
+    items.sort_by_key(|(target, _)| position(*target));
+    items
 }
 
 fn popover_entries(quota: &Quota) -> Vec<PopoverEntry> {
-    quota
-        .targets
-        .iter()
-        .copied()
-        .filter(|target| target.provider.is_none())
+    let targets: Vec<(QuotaTarget, ())> =
+        quota.targets.iter().map(|target| (*target, ())).collect();
+    by_service(quota, targets.iter())
+        .into_iter()
+        .map(|(target, ())| *target)
         .filter_map(|target| {
             let status = quota
                 .statuses
@@ -281,7 +319,9 @@ fn chip(quota: &Chip) -> impl IntoElement {
                             true,
                         ))
                     } else {
-                        icon.child(Icon::path(quota.target.agent.icon_asset()).size(px(icon_size)))
+                        icon.child(
+                            Icon::path(quota.target.service().icon_asset()).size(px(icon_size)),
+                        )
                     }
                 }),
         )
@@ -417,7 +457,7 @@ fn popover_row(entry: PopoverEntry) -> impl IntoElement {
         }
         PopoverEntry::Pending(pending) => {
             let tip = if pending.refreshing {
-                t!("quota.refreshing", hint = pending.target.label()).into_owned()
+                t!("quota.refreshing", hint = pending.target.display_name()).into_owned()
             } else if let Some(error) = pending.error.as_deref() {
                 t!("quota.click_to_retry", error = error).into_owned()
             } else {
@@ -448,17 +488,17 @@ fn popover_row(entry: PopoverEntry) -> impl IntoElement {
         .rounded(px(6.))
         .type_style(TYPE.text_xsmall)
         .child(
-            Icon::path(target.agent.icon_asset())
+            Icon::path(target.service().icon_asset())
                 .size(px(14.))
                 .text_color(rgb(color)),
         )
         .child(
             div()
-                .w(px(64.))
+                .w(px(NAME_WIDTH))
                 .flex_shrink_0()
                 .overflow_hidden()
                 .text_color(rgb(name_color))
-                .child(truncated_line(target.label())),
+                .child(truncated_line(target.display_name())),
         )
         .child(
             div()
@@ -594,10 +634,9 @@ struct QuotaRow {
     hint: String,
 }
 
-/// 两种额度模型归一成一行。行内数字和模型菜单里的括号走同一个口径
-/// （`ProviderQuotaData::short_text`），两处不会对同一个账户给出不同的百分比。
+/// 两种额度模型归一成一行，数字走 `ProviderQuotaData::short_text` 的口径。
 fn quota_row(target: QuotaTarget, status: &QuotaStatus) -> Option<QuotaRow> {
-    let label = target.label();
+    let label = target.display_name();
     let quota = status.quota.as_ref()?;
     let text = quota.short_text();
     let color = quota_color(quota.used_percent());
@@ -771,7 +810,7 @@ mod tests {
         let grok = QuotaTarget::agent(ConversationAgentKind::Grok);
         let cursor = QuotaTarget::agent(ConversationAgentKind::Cursor);
         let claude = QuotaTarget::agent(ConversationAgentKind::Claude);
-        let pi = QuotaTarget::pi("openrouter");
+        let pi = QuotaTarget::pi("github-copilot");
         let logged_out = QuotaStatus {
             quota: None,
             checked_at_ms: 3,
@@ -809,7 +848,7 @@ mod tests {
         assert_eq!(chips.len(), 1);
         assert_eq!(chips[0].target, codex);
 
-        // Grok 没登录、Cursor 还没查过、Pi provider 都不进左下角弹层；Claude 没登录但用户刚点了，
+        // Grok 没登录、Cursor 和 Pi 的 Copilot 还没查过，都不占行；Claude 没登录但用户刚点了，
         // 查的时候占一行。
         let entries = popover_entries(&quota);
         assert_eq!(entries.len(), 3);
@@ -824,5 +863,47 @@ mod tests {
             PopoverEntry::Pending(p)
                 if p.target == claude && p.refreshing && p.error.is_none()
         ));
+    }
+
+    /// 同一家服务有几个来源：环一家一个，画用得多的那个，图标是那家服务的；弹层每个来源一行，
+    /// Pi 的跟在那家自己的后面。
+    #[test]
+    fn sources_of_one_service_share_a_ring_and_list_side_by_side() {
+        let codex = QuotaTarget::agent(ConversationAgentKind::Codex);
+        let copilot = QuotaTarget::agent(ConversationAgentKind::Copilot);
+        let pi_copilot = QuotaTarget::pi("github-copilot");
+        let pi_claude = QuotaTarget::pi("anthropic");
+        let ready = |used| QuotaStatus {
+            quota: Some(ProviderQuotaData::Windows(ProviderQuota {
+                windows: vec![window("5h", used)],
+            })),
+            checked_at_ms: 1,
+            error: None,
+        };
+        let quota = Quota {
+            targets: vec![codex, copilot, pi_claude, pi_copilot],
+            statuses: vec![
+                (codex, ready(10.0)),
+                (copilot, ready(20.0)),
+                (pi_claude, ready(30.0)),
+                (pi_copilot, ready(95.0)),
+            ],
+            refreshing: Vec::new(),
+            manual: Vec::new(),
+        };
+
+        let chips = chips_for(&quota);
+        let shown: Vec<_> = chips.iter().map(|chip| chip.target).collect();
+        assert_eq!(shown, vec![codex, pi_copilot, pi_claude]);
+        assert!(chips[1].hint.starts_with("Copilot · Pi "));
+
+        let rows: Vec<_> = popover_entries(&quota)
+            .into_iter()
+            .map(|entry| match entry {
+                PopoverEntry::Ready(chip) => chip.target,
+                PopoverEntry::Pending(row) => row.target,
+            })
+            .collect();
+        assert_eq!(rows, vec![codex, copilot, pi_copilot, pi_claude]);
     }
 }
