@@ -6337,8 +6337,21 @@ fn now_tool_label(kind: ToolKind, title: &str) -> String {
     }
 }
 
-fn is_empty_assistant_body(entry: &AcpEntry) -> bool {
-    matches!(entry, AcpEntry::Assistant { text, thought: false } if text.trim().is_empty())
+/// 不占行的条目：还没写出字的正文，还在等答案的提问（题在下面的提问卡上）。不画、不留
+/// 间距，也不把前后的过程隔成两段。
+fn draws_nothing(entry: &AcpEntry) -> bool {
+    match entry {
+        AcpEntry::Assistant {
+            text,
+            thought: false,
+        } => text.trim().is_empty(),
+        AcpEntry::ToolCall {
+            asked: Some(_),
+            status: ToolCallStatus::Pending | ToolCallStatus::InProgress,
+            ..
+        } => true,
+        _ => false,
+    }
 }
 
 /// 时间线上单条工具的动词句，对齐 Grok「Opened page / Searched web for」。
@@ -7416,11 +7429,11 @@ fn fill_conversation_layout(
             None
         };
         // 正文和独立事件保持原位可见，不能被前后的工具收进同一个折叠组。
-        // 空正文不可见，和手机端一样不打断相邻的过程。
+        // 不占行的条目不可见，和手机端一样不打断相邻的过程。
         let mut process_groups: Vec<Vec<usize>> = Vec::new();
         let mut process_indices = Vec::new();
         for ix in start..end {
-            if is_empty_assistant_body(&entries[ix]) {
+            if draws_nothing(&entries[ix]) {
                 continue;
             }
             if matches!(entries[ix], AcpEntry::Assistant { thought: false, .. })
@@ -7454,9 +7467,7 @@ fn fill_conversation_layout(
                 }
             }
         }
-        let last_visible = (start..end)
-            .rev()
-            .find(|ix| !is_empty_assistant_body(&entries[*ix]));
+        let last_visible = (start..end).rev().find(|ix| !draws_nothing(&entries[*ix]));
         let trailing_standalone_thought = !closed
             && last_visible.is_some_and(|ix| {
                 matches!(entries[ix], AcpEntry::Assistant { thought: true, .. })
@@ -7486,7 +7497,7 @@ fn fill_conversation_layout(
             if let (Some(group), None) = (before_answer.next(), before_answer.next()) {
                 let span = group[0]..=group[group.len() - 1];
                 if (start..final_ix)
-                    .filter(|ix| !is_empty_assistant_body(&entries[*ix]))
+                    .filter(|ix| !draws_nothing(&entries[*ix]))
                     .all(|ix| span.contains(&ix))
                 {
                     sole_segment = Some(group[0]);
@@ -7494,7 +7505,7 @@ fn fill_conversation_layout(
                 }
             }
             let first = (start..final_ix)
-                .find(|ix| !is_empty_assistant_body(&entries[*ix]))
+                .find(|ix| !draws_nothing(&entries[*ix]))
                 .unwrap_or(start);
             Some(TurnFoldInfo {
                 first,

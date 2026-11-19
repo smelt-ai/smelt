@@ -189,9 +189,8 @@ fn leading_event(row: gpui::Div) -> gpui::Div {
     div().flex().items_center().w_full().py_1().child(row)
 }
 
-/// 问用户的一次：答完靠左一组问答，题面淡、答案实；跳过的一行「跳过了」加题面。还在等时
-/// 不画——题在下面的提问卡上，状态行写着「等你回答」。没等到答案就结束了（多半是这一轮被
-/// 停掉）画一行「没有回答」。
+/// 问用户的一次：答完靠左一组问答，题面淡、答案实；跳过的一行「跳过了」加题面。没等到答案
+/// 就结束了（多半是这一轮被停掉）画一行「没有回答」。还在等的不走到这里，见 `draws_nothing`。
 fn render_ask_record(
     record: &smelt_plugin_api::model::acp_chat::AskRecord,
     status: ToolCallStatus,
@@ -203,19 +202,13 @@ fn render_ask_record(
             .flex_shrink_0()
             .text_color(ink)
     };
-    match status {
-        ToolCallStatus::Pending | ToolCallStatus::InProgress => {
-            return div().into_any_element();
-        }
-        ToolCallStatus::Failed if record.answers.is_empty() => {
-            return leading_event(
-                event_line(muted)
-                    .child(icon(IconName::MessagesSquare, muted))
-                    .child(t!("ask.unanswered")),
-            )
-            .into_any_element();
-        }
-        _ => {}
+    if status == ToolCallStatus::Failed && record.answers.is_empty() {
+        return leading_event(
+            event_line(muted)
+                .child(icon(IconName::MessagesSquare, muted))
+                .child(t!("ask.unanswered")),
+        )
+        .into_any_element();
     }
     if record.skipped {
         let questions = record
@@ -390,9 +383,10 @@ impl ConversationView {
                 let muted: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
                 let border: gpui::Hsla = ui_theme::hair().into();
                 let presentation = conversation_layout.get(i).copied().unwrap_or_default();
-                let empty_body = this.entries.get(i).is_some_and(is_empty_assistant_body);
-                if empty_body && i + 1 < this.entries.len() {
-                    return div().h(px(0.)).w_full().overflow_hidden().into_any_element();
+                // 不占行的条目高度为 0；它是最后一行时只画末尾的状态行，不在状态行上面空出
+                // 一段间距。
+                if this.entries.get(i).is_some_and(draws_nothing) {
+                    return this.tail_only_row(i, &conversation_layout, animate_ambient, cx);
                 }
                 let final_answer = presentation.final_answer;
                 let turn_fold = presentation.turn_fold;
@@ -595,9 +589,6 @@ impl ConversationView {
                             .into_any_element()
                     }
                     // 过程组只收思考和工具，普通正文始终以完整 Markdown 显示。
-                    AcpEntry::Assistant { text, thought: false } if text.trim().is_empty() => {
-                        div().h(px(0.)).w_full().overflow_hidden().into_any_element()
-                    }
                     // 还没写出字的思考不占行，「正在想」由末尾的「现在」说。
                     AcpEntry::Assistant { text, thought: true } if text.trim().is_empty() => {
                         div().h(px(0.)).w_full().overflow_hidden().into_any_element()
@@ -1273,7 +1264,7 @@ impl ConversationView {
                 }
                 // `gpui::list` 不像 flex 容器那样处理 `gap`；间距必须属于
                 // 虚拟项本身，否则测得的高度不包含消息间的留白。
-                let bottom = if in_process_timeline || empty_body {
+                let bottom = if in_process_timeline {
                     0.
                 } else {
                     match entry {
@@ -1293,7 +1284,7 @@ impl ConversationView {
                 };
                 // 没有顶栏时，第一条和从胶囊跳回的那一问让开标题胶囊；滚上去
                 // 仍会钻到它底下。
-                let top = if !empty_body && clear_capsule && (i == 0 || this.revealed_prompt == Some(i)) {
+                let top = if clear_capsule && (i == 0 || this.revealed_prompt == Some(i)) {
                     ui_theme::CHROME_ISLAND_CLEARANCE_PX
                 } else {
                     0.

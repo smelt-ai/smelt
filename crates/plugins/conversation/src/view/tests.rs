@@ -2446,6 +2446,18 @@ fn an_answered_question_stays_outside_the_process_group() {
     assert!(layout[3].final_answer);
     let tally = super::tally_tools(&entries, 1..3);
     assert_eq!((tally.reads, tally.others), (1, 0), "问答不算工具");
+
+    // 还在等答案时这一条不占行：不画，也不把前后的工具隔成两段。
+    let waiting = vec![
+        entries[0].clone(),
+        entries[1].clone(),
+        asked("ask-2", ToolCallStatus::InProgress),
+        entries[1].clone(),
+    ];
+    assert!(super::draws_nothing(&waiting[2]));
+    let layout = build_conversation_layout(&waiting, true);
+    let group = |ix: usize| layout[ix].process_group.map(|group| group.first);
+    assert_eq!(group(3), Some(1), "等答案的提问前后是同一段过程");
 }
 
 #[test]
