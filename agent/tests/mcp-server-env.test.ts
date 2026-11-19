@@ -151,6 +151,24 @@ describe("MCP server environment", () => {
 		expect(existsSync(join(root, "rea-agents@6.9.0"))).toBe(false);
 	});
 
+	test("concurrent pruning tolerates entries already removed by another caller", async () => {
+		const home = temporaryDir();
+		const root = join(home, "cache", "bun-x");
+		const now = Date.now();
+		const day = 24 * 60 * 60 * 1000;
+		for (const version of ["6.5.0", "6.6.0", "6.7.0", "6.8.0"]) {
+			const dir = join(root, `rea-agents@${version}`);
+			mkdirSync(dir, { recursive: true });
+			const at = (now - 2 * day) / 1000;
+			utimesSync(dir, at, at);
+		}
+		const first = pruneOtherVersions(root, "rea-agents@6.9.0", now);
+		await Promise.resolve();
+		await Promise.all([first, pruneOtherVersions(root, "rea-agents@6.9.0", now)]);
+		expect(existsSync(join(root, "rea-agents@6.5.0"))).toBe(false);
+		await pruneOtherVersions(join(home, "missing"), "rea-agents@6.9.0", now);
+	});
+
 	test("an explicit BUN_INSTALL_CACHE_DIR in mcp.json wins", () => {
 		const transport = createPiDefaultTransport(
 			{

@@ -87,10 +87,24 @@ export async function pruneOtherVersions(root: string, name: string, now: number
 	const at = name.lastIndexOf("@");
 	if (at <= 0) return;
 	const prefix = name.slice(0, at + 1);
-	for (const other of await readdir(root)) {
+	let entries: string[];
+	try {
+		entries = await readdir(root);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	for (const other of entries) {
 		if (other === name || !other.startsWith(prefix) || other.slice(prefix.length).includes("@")) continue;
 		const dir = join(root, other);
-		if (now - (await stat(dir)).mtimeMs < BUN_CACHE_GRACE_MS) continue;
+		let mtimeMs: number;
+		try {
+			mtimeMs = (await stat(dir)).mtimeMs;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+			throw error;
+		}
+		if (now - mtimeMs < BUN_CACHE_GRACE_MS) continue;
 		await rm(dir, { recursive: true, force: true });
 	}
 }
