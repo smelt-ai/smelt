@@ -24,7 +24,7 @@ use smelt_plugin_api::ui::{IconName, TextInput, ui_theme};
 
 use crate::ops;
 use crate::scan::{Access, Placement, Skill, SkillCopy};
-use crate::{FormKind, SkillsPanel, plural};
+use crate::{FormKind, SkillsPanel};
 
 const XS: f32 = 4.;
 const SM: f32 = 8.;
@@ -882,7 +882,10 @@ impl SkillsPanel {
             .on_click(move |_, window, cx| {
                 let entity = entity.clone();
                 Confirm::new(
-                    plural("broken.confirm_title", count),
+                    match count {
+                        1 => t!("broken.confirm_title.one"),
+                        count => t!("broken.confirm_title.other", count = count),
+                    },
                     t!("broken.confirm"),
                     move |_, cx| {
                         entity.update(cx, |this, cx| this.prune(cx));
@@ -956,7 +959,10 @@ fn summary(skill: &Skill) -> AnyElement {
             .flex_none()
             .type_style(TYPE.text_xsmall)
             .text_color(muted())
-            .child(plural("status.agents", skill.coverage.len()))
+            .child(match skill.coverage.len() {
+                1 => t!("status.agents.one"),
+                count => t!("status.agents.other", count = count),
+            })
             .into_any_element(),
         [one] => tag(t!("status.missing_one", agent = one))
             .need()

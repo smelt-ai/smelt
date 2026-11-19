@@ -57,11 +57,6 @@ pub fn register(cx: &mut App) {
 }
 
 /// 按数量挑 `.one` / `.other`。
-fn plural(key: &str, count: usize) -> String {
-    let form = if count == 1 { "one" } else { "other" };
-    t!(&format!("{key}.{form}"), count = count).into_owned()
-}
-
 /// 几个名字连成一串，分隔符跟语言走。
 fn join(names: &[impl AsRef<str>]) -> String {
     names
@@ -682,35 +677,27 @@ fn migration_notice(outcome: &ops::Migration) -> Notice {
     let mut lines = Vec::new();
     if !outcome.migrated.is_empty() {
         lines.push(
-            t!(
-                &format!(
-                    "migrate.moved.{}",
-                    if outcome.migrated.len() == 1 {
-                        "one"
-                    } else {
-                        "other"
-                    }
+            match outcome.migrated.len() {
+                1 => t!("migrate.moved.one", names = join(&outcome.migrated)),
+                count => t!(
+                    "migrate.moved.other",
+                    count = count,
+                    names = join(&outcome.migrated)
                 ),
-                count = outcome.migrated.len(),
-                names = join(&outcome.migrated)
-            )
+            }
             .into_owned(),
         );
     }
     if !outcome.skipped.is_empty() {
         lines.push(
-            t!(
-                &format!(
-                    "migrate.skipped.{}",
-                    if outcome.skipped.len() == 1 {
-                        "one"
-                    } else {
-                        "other"
-                    }
+            match outcome.skipped.len() {
+                1 => t!("migrate.skipped.one", names = join(&outcome.skipped)),
+                count => t!(
+                    "migrate.skipped.other",
+                    count = count,
+                    names = join(&outcome.skipped)
                 ),
-                count = outcome.skipped.len(),
-                names = join(&outcome.skipped)
-            )
+            }
             .into_owned(),
         );
     }
