@@ -97,7 +97,8 @@ impl PiMcpPresetTransport {
 
 pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     // Figma 远程 MCP 只接受已知客户端注册，Pi 文档给的做法就是以 Claude Code 的名义注册。
-    // 工具不多且常用，直接声明给模型（`direct`）。
+    // 用 `deferred` 按需检索后直接调用，不用 `direct`：直接声明的服务器每场对话第一条消息都要
+    // 等它连上（远程 OAuth，常要两三秒、最多十秒），没用到 Figma 的对话也得陪着等。
     PiMcpPreset {
         id: "figma",
         text: PiMcpPresetText::Figma,
@@ -106,7 +107,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
             url: "https://mcp.figma.com/mcp",
             oauth_client_name: Some("Claude Code"),
         },
-        exposure: Some("direct"),
+        exposure: Some("deferred"),
         timeout_secs: None,
         extension_url: None,
         on_remote_desktop: None,

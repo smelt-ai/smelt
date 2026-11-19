@@ -610,7 +610,7 @@ mod tests {
         let figma = &doc["mcpServers"]["figma"];
         assert_eq!(figma["url"], "https://mcp.figma.com/mcp");
         assert_eq!(figma["oauth"]["clientName"], "Claude Code");
-        assert_eq!(figma["exposure"], "direct");
+        assert_eq!(figma["exposure"], "deferred");
         assert!(
             add_pi_mcp_preset_at(&dir, "figma", false).is_err(),
             "重复添加会覆盖用户改过的条目，必须拒绝"
