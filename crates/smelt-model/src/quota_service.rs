@@ -67,7 +67,7 @@ impl QuotaTarget {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaStatus {
     pub quota: Option<ProviderQuotaData>,
     pub checked_at_ms: u64,
@@ -89,8 +89,23 @@ impl<'de> Deserialize<'de> for QuotaTarget {
     }
 }
 
+/// 线上是 [`QuotaTarget::id`] 那串：agent id，Pi 的是 `pi:<provider>`。
+impl schemars::JsonSchema for QuotaTarget {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "QuotaTarget".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
+    }
+}
+
 /// 客户端启动时要的：开着查询的全部账户（决定展示顺序）、缓存里的结果、要不要立刻查一次。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaSnapshot {
     pub targets: Vec<QuotaTarget>,
     pub statuses: Vec<(QuotaTarget, QuotaStatus)>,
@@ -98,13 +113,13 @@ pub struct QuotaSnapshot {
     pub fresh: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaRefreshParams {
     /// `None`：后台刷新全部账户；否则是用户点了这一个，可以弹钥匙串窗口。
     pub target: Option<QuotaTarget>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaRefreshResult {
     /// 开着查询的全部账户。全量刷新时客户端据此更新展示顺序（新登录的 Pi provider 由此出现）。
     pub targets: Vec<QuotaTarget>,
@@ -113,7 +128,7 @@ pub struct QuotaRefreshResult {
 }
 
 /// 设置页的一行。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaProviderSetting {
     pub target: QuotaTarget,
     pub enabled: bool,
@@ -122,7 +137,7 @@ pub struct QuotaProviderSetting {
 }
 
 /// 全部账户的额度开关，含关掉的。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaSettings {
     pub providers: Vec<QuotaProviderSetting>,
 }
@@ -138,7 +153,7 @@ impl QuotaSettings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaSetEnabledParams {
     pub target: QuotaTarget,
     pub enabled: bool,

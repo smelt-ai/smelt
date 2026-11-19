@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum CopilotQuotaUnit {
     AiCredits,
     PremiumRequests,
@@ -17,7 +17,7 @@ impl CopilotQuotaUnit {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CopilotQuota {
     pub unit: CopilotQuotaUnit,
     pub remaining: f64,
@@ -27,7 +27,7 @@ pub struct CopilotQuota {
 
 /// 查询状态始终带时间，即使这次输出没有识别到额度；这样 UI 能结束「查询中」
 /// 状态，也不会因为服务端返回了未知格式而反复查询。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CopilotQuotaStatus {
     pub quota: Option<CopilotQuota>,
     pub checked_at_ms: u64,

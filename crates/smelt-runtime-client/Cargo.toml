@@ -18,6 +18,8 @@ smelt-paths = { path = "../smelt-paths" }
 smelt-event-protocol = { path = "../smelt-event-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 线上类型的 JSON Schema：JS 插件的类型声明由它生成（smelt-plugin-api 的 js/control_types.rs）。
+schemars = { version = "1.2", features = ["uuid1"] }
 uuid = { version = "1", features = ["v4"] }
 # diff 行内词级高亮（protocol::git 的 mark_inline），跟 ACP 对话的逐行 diff 同一个算法库。
 similar = "3"

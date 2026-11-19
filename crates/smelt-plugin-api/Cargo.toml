@@ -40,6 +40,8 @@ gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf
 js = ["dep:gpui-shell"]
 
 [dev-dependencies]
+# 由线上类型生成 JS 的类型声明（src/js/control_types.rs）。
+schemars = "1.2"
 # 性能探针量 CPU 时间（src/js/ui/bench.rs）。
 libc = "0.2"
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }

@@ -11,7 +11,7 @@ use crate::workspace_directory::{WorkspaceAcp, WorkspaceConversation, WorkspaceD
 
 /// 可开对话的 agent 选项。出线（`new_session.catalog`）只带展示与回传用的字段；
 /// 启动规格和历史目录只在运行时那台机器上有意义，不出线，客户端解出来是空的。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAgentOption {
     pub id: String,
@@ -57,7 +57,7 @@ pub fn agent_definition_id_from_option_id(option_id: &str) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HistorySessionSummary {
     /// 运行时那台机器上的存档路径。
@@ -232,14 +232,18 @@ fn is_product_conversation_on(
         || acp_session_id.is_some_and(is_background_acp_session_id)
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 pub struct CreatedAgentConversation {
     pub session_id: String,
     pub agent_definition_id: String,
     pub cwd: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 pub struct AgentConversationSummary {
     pub session_id: String,
     pub title: String,

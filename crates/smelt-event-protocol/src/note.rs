@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// 会话列表上「待处理」那一行里运行时自己说的话。智能体的原话（审批问题、最后一句回复）
 /// 不在这里，还在 `pending_question`。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionNote {
     /// 这一轮没有正常完成。
@@ -44,7 +44,7 @@ impl SessionNote {
 }
 
 /// 一轮没有正常完成的原因。用户自己取消的不算。
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnFailure {
     /// 回复中途断了，重启后可以接着来。
@@ -83,7 +83,7 @@ impl TurnFailure {
 
 /// 对话为什么结束了。会话快照里存这个种类（`end_code`），底层报错放在 `end_reason` 当细节；
 /// 智能体自己报的错没有种类，`end_reason` 就是它的原话。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConversationEndReason {
     /// 和智能体的连接意外断了。
@@ -123,7 +123,9 @@ pub enum ConversationEndReason {
 }
 
 /// 要求先登录的是哪家智能体，决定怎么教人登录。只写确认过登录方式的几家，其余说通用的。
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SignInAgent {
     Copilot,

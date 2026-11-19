@@ -1330,7 +1330,9 @@ pub fn default_acp_pi_cmd() -> String {
 
 /// ACP 启动规格：命令本体保留现有的空白分词语义，环境变量单独结构化存储，
 /// 避免把带空格的值硬塞回 `VAR=value cmd` 这种不可靠的字符串拼接。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct ConversationLaunchSpec {
     pub command: String,
     #[serde(default)]
@@ -1427,7 +1429,9 @@ pub fn format_env_lines(env: &BTreeMap<String, String>) -> String {
 ///   图标，只换启动命令、加环境变量或换数据目录（比如把 Claude 适配器指到另一个
 ///   兼容 CLI：`CLAUDE_CODE_EXECUTABLE=…`）。
 /// - **通用 ACP**（`kind_id` 是 `custom`）：任意 ACP stdio 命令，必须填 `command`。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct AcpProfile {
     /// 稳定 id（新建时生成，不随 label/kind 改变），会话存档和历史页 tab 都用它
     /// 区分「同一个 kind 下的哪一个自定义 Agent」。

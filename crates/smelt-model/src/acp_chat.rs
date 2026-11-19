@@ -13,7 +13,7 @@ use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 
 /// 消息流里的一条。由 agent 会话历史重放，也可随 smeltd 热升级快照交接。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum AcpEntry {
     User(String),
     /// 带图片的用户消息。保留旧的 `User(String)` 变体，兼容已有快照。
@@ -71,7 +71,7 @@ pub enum AcpEntry {
 }
 
 /// 回合失败时运行时认得出、能给出下一步的情况。只放确定能给出动作的：猜错了会把人支到错的地方。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnHint {
     /// 没配 API key。
@@ -175,7 +175,9 @@ pub const SMELT_SUBAGENT_RESULT_CUSTOM_TYPE: &str = "smelt.subagent_result";
 pub const SMELT_PEER_MESSAGE_CUSTOM_TYPE: &str = "smelt.peer_message";
 
 /// 状态行说的是哪一种后台工作。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskNoteKind {
     #[default]
@@ -186,7 +188,7 @@ pub enum TaskNoteKind {
 }
 
 /// Pi 对话里的一次 `session_send`：发给谁、发的是哪类、送出去没有。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerSend {
     pub to_id: String,
@@ -210,7 +212,7 @@ pub struct PeerSend {
 
 /// Pi 对话里的一次 `smelt_ask_user`：问了哪些题、人怎么答的。工具还在跑（卡片等人答）时
 /// `answers` 为空。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AskRecord {
     /// 每道题和答案，按提问顺序。跳过时也列出题面，答案为空。
@@ -221,7 +223,7 @@ pub struct AskRecord {
     pub skipped: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AskAnswer {
     pub question: String,
@@ -314,7 +316,7 @@ pub fn peer_send_from_tool(
 }
 
 /// 发来这条消息的对话。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerNote {
     pub source_session_id: String,
@@ -324,7 +326,7 @@ pub struct PeerNote {
 
 /// 一次 Pi 子智能体派发里的一个子智能体，按父会话记录里写下的那份。运行中的实时状态
 /// 在会话状态的 `subagents` 里，按 `id` 对上。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentRun {
     pub id: String,
@@ -362,7 +364,7 @@ pub fn subagent_runs_from_value(runs: Option<&serde_json::Value>) -> Vec<Subagen
 }
 
 /// 一条后台任务的结束说明。人看到的是状态行；模型另走自定义消息。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskNote {
     /// 旧快照没有这个字段，都是后台任务。
@@ -511,7 +513,7 @@ pub fn auto_title(entries: &[AcpEntry]) -> Option<String> {
 ///
 /// 只能用 [`AcpImage::new`] 构造：摘要缓存是私有字段。构造之后不要原地改
 /// `data_b64`，换图就新建一张，否则缓存的摘要对不上数据。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AcpImage {
     pub mime: String,
     pub data_b64: String,
@@ -538,7 +540,7 @@ impl PartialEq for AcpImage {
 impl Eq for AcpImage {}
 
 /// 一张没有内联的图在运行时那边的位置。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AcpImageRef {
     /// 图片所在顶层条目的全局下标。子代理嵌套条目里的图算在外层那条工具调用上。
     pub entry: u64,
@@ -669,7 +671,7 @@ pub fn entry_with_image_refs(entry: &AcpEntry, index: u64) -> Cow<'_, AcpEntry> 
 }
 
 /// 工具调用的一段输出：纯文本，文件 diff，或嵌入的 ACP 终端。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ToolOutputPart {
     Text(String),
     Diff {
@@ -769,7 +771,9 @@ pub fn find_tool_call_mut<'a>(
 /// 工具类别，跟 `agent-client-protocol::ToolKind` 的 wire 格式（snake_case）
 /// 对齐，落盘数据能跨协议版本读。`Other` 兜底未来协议新增的分类，不会因为一个
 /// 陌生 tag 就让整条记录反序列化失败。
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolKind {
     Read,
@@ -792,7 +796,9 @@ pub enum ToolKind {
 }
 
 /// 工具调用状态，同上对齐 agent-client-protocol 的 wire 格式。
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallStatus {
     #[default]
@@ -874,7 +880,7 @@ pub fn strip_code_fence(text: &str) -> &str {
 
 /// 提问导航里的一问：提问压成一行，加上这一问最后一段回答的开头。对话页左侧的导航条
 /// 用它画刻度和悬停预览；没加载到客户端的那一截由运行时按同一个函数算好发过来。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PromptIndexItem {
     /// 提问在整段对话里的条目序号（不是客户端已加载那一截里的下标）。
     pub entry_ix: usize,

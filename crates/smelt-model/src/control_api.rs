@@ -24,14 +24,14 @@ impl ControlCall for NotifySend {
     const METHOD: ControlMethod = ControlMethod::NotifySend;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct NotifySendParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub message: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct NotifySendResult {
     /// 有桌面客户端连着、收到了。
     pub desktop: bool,
@@ -50,7 +50,7 @@ impl ControlCall for AttentionMarkRead {
     const METHOD: ControlMethod = ControlMethod::AttentionMarkRead;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AttentionMarkReadParams {
     pub session_id: String,
 }
@@ -95,7 +95,7 @@ impl ControlCall for LaunchReplace {
     const METHOD: ControlMethod = ControlMethod::LaunchReplace;
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchReplaceParams {
     /// 客户端看到的那份。
     pub base: Vec<LaunchEntry>,
@@ -113,7 +113,7 @@ impl ControlCall for MemoryTestEmbedding {
     const METHOD: ControlMethod = ControlMethod::MemoryTestEmbedding;
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryTestParams {
     pub base_url: String,
     pub model: String,
@@ -121,7 +121,7 @@ pub struct MemoryTestParams {
     pub api_key: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryTestResult {
     pub dimensions: usize,
     pub elapsed_ms: u64,
@@ -157,14 +157,14 @@ impl ControlCall for AgentMemoryApprove {
     const METHOD: ControlMethod = ControlMethod::AgentMemoryApprove;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemoryFileParams {
     pub agent_id: String,
     pub layer: AgentMemoryLayer,
     pub file_name: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemoryDirParams {
     pub agent_id: String,
     pub layer: AgentMemoryLayer,
@@ -201,7 +201,7 @@ impl ControlCall for AutomationRunDetail {
     const METHOD: ControlMethod = ControlMethod::AutomationRunDetail;
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AutomationRunDetailParams {
     pub run_id: String,
     /// 客户端手上的运行缺输出或指令时才要归档那份。
@@ -216,7 +216,7 @@ fn first_entry_version() -> u32 {
     1
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AutomationRunDetailResult {
     pub archived_run: Option<crate::automation::AutomationRun>,
     pub transcript: Vec<crate::acp_chat::AcpEntry>,
@@ -233,7 +233,7 @@ impl ControlCall for AgentSpaceEnsure {
     const METHOD: ControlMethod = ControlMethod::AgentSpaceEnsure;
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentSpaceResult {
     pub path: String,
 }
@@ -248,13 +248,13 @@ impl ControlCall for AgentCliInspect {
     const METHOD: ControlMethod = ControlMethod::AgentCliInspect;
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentCliInstallParams {
     /// `ConversationAgentKind::id`。
     pub agent: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentCliInstallResult {
     /// 用的包管理器（`brew` / `npm`）。
     pub installer: String,
@@ -458,13 +458,13 @@ impl ControlCall for AutomationRunOnce {
     const METHOD: ControlMethod = ControlMethod::AutomationRunOnce;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionListResult {
     pub sessions: Vec<String>,
 }
 
 /// 一个进程或一棵进程树的资源占用。
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct ProcessUsage {
     /// 两次采样之间的平均 CPU，按单核计，多核可以超过 100。
     pub cpu_percent: f32,
@@ -473,7 +473,7 @@ pub struct ProcessUsage {
     pub process_count: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct SessionResourceUsage {
     pub session_id: String,
     /// 会话根进程的整棵树：终端是 shell 和它起的一切，对话是会话宿主、provider 和工具进程。
@@ -486,7 +486,7 @@ pub struct SessionResourceUsage {
 pub const SESSION_PROCESS_LIMIT: usize = 50;
 
 /// 会话进程树里的一个进程。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct ProcessEntry {
     pub pid: u32,
     /// 进程名（`node`、`cargo`……）。
@@ -498,7 +498,7 @@ pub struct ProcessEntry {
 }
 
 /// 这台运行时此刻的资源占用。
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct ResourceUsageResult {
     /// smeltd 进程本身，不含子进程。
     pub daemon: ProcessUsage,
@@ -508,13 +508,13 @@ pub struct ResourceUsageResult {
     pub total_memory_bytes: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemorySessionParams {
     pub session_id: String,
     pub token: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMemoryLayer {
     /// 这个智能体自己的记忆。
@@ -523,14 +523,14 @@ pub enum AgentMemoryLayer {
     User,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMemoryTrust {
     Trusted,
     Pending,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemoryRecordReadParams {
     pub session_id: String,
     pub token: String,
@@ -538,7 +538,7 @@ pub struct AgentMemoryRecordReadParams {
     pub file: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemoryRecordWriteParams {
     pub session_id: String,
     pub token: String,
@@ -551,14 +551,14 @@ pub struct AgentMemoryRecordWriteParams {
     pub overwrote_existing: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemoryUsageEntry {
     pub file: String,
     pub read_count: u64,
     pub last_read_at_ms: i64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemoryLayerMeta {
     pub usage: Vec<AgentMemoryUsageEntry>,
     /// 待确认的文件名。
@@ -566,7 +566,7 @@ pub struct AgentMemoryLayerMeta {
 }
 
 /// 会话没有某一层记忆（普通会话）时，那一层为空。
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemoryMetaResult {
     /// 智能体当前是否开着记忆。会话启动后用户可能关掉，关掉后不注入、不写入。
     pub enabled: bool,
@@ -580,14 +580,14 @@ pub struct AgentMemoryMetaResult {
     pub rerank_model: Option<AgentMemoryRerankModel>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemoryRerankModel {
     pub provider: String,
     pub id: String,
 }
 
 /// OpenAI 兼容的 `/embeddings` 服务。只发给通过认证的会话。
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentMemoryEmbedding {
     pub base_url: String,
     pub model: String,
@@ -595,45 +595,45 @@ pub struct AgentMemoryEmbedding {
     pub api_key: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentDefinitionListResult {
     pub agents: Vec<AgentDefinition>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentDefinitionIdParams {
     pub id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentDefinitionGetResult {
     pub agent: AgentDefinition,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentDefinitionUpdateParams {
     pub id: String,
     #[serde(flatten)]
     pub patch: AgentDefinitionPatch,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AutomationListResult {
     pub automations: Vec<Automation>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AutomationGetResult {
     pub automation: Automation,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AutomationSetEnabledParams {
     pub id: String,
     pub enabled: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AutomationRunOnceResult {
     pub result: AutomationCommandResult,
 }
@@ -891,7 +891,7 @@ mod tests {
 }
 
 /// 修改 Pi 配置的方法都返回改完之后的完整快照，客户端整份换掉缓存。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PiSaveCustomProviderResult {
     /// 模型目录是否由 Smelt 照端点维护。
     pub auto: bool,
@@ -1090,7 +1090,7 @@ pi_calls! {
 }
 
 /// 一条开给命令行调用的 App 命令。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppCommandInfo {
     /// `<来源>/<名字>`。
     pub id: String,
@@ -1102,12 +1102,12 @@ pub struct AppCommandInfo {
     pub args: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppCommandListResult {
     pub commands: Vec<AppCommandInfo>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppCommandRunParams {
     pub command: String,
     /// 参数对象；不带参数是 `null`。
@@ -1115,13 +1115,13 @@ pub struct AppCommandRunParams {
     pub args: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppCommandRunResult {
     /// 命令交回的值，没有就是 `null`。
     pub result: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewSessionCatalogResult {
     /// 产品智能体在前，裸引擎与 profile 在后，与桌面新建菜单同序。不按探测结果过滤：
     /// 历史列表等地方要靠它把 option id 还原成引擎和 profile。
@@ -1133,7 +1133,9 @@ pub struct NewSessionCatalogResult {
     pub restrictable_agent_ids: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionCreateKind {
     #[default]
@@ -1141,7 +1143,7 @@ pub enum SessionCreateKind {
     Terminal,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionCreateParams {
     /// 必须是工作区菜单里的项目。对话可以留空：给了 `cwd` 就开在那里；选项属于产品智能体时
     /// 开在智能体自己的 space；否则报错。
@@ -1182,24 +1184,24 @@ pub struct SessionCreateParams {
     pub request_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionCreateResult {
     pub session_id: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionIdParams {
     pub session_id: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionAgentBindingsResult {
     /// 会话 id → 智能体定义 id。
     pub bindings: std::collections::BTreeMap<String, String>,
 }
 
 /// `conversation.prompt`：以一次外部投递的身份往对话里发一轮话。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationPromptParams {
     pub session_id: String,
     /// 投递方给这一轮起的 id，在这段对话里唯一。同一个 id 再发不会再执行一次；这一轮结束后
@@ -1213,14 +1215,14 @@ pub struct ConversationPromptParams {
     pub disallowed_tools: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationTurnResultParams {
     pub session_id: String,
     pub delivery_id: String,
 }
 
 /// 一次外部投递那一轮现在怎样。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ConversationTurnStatus {
     /// 收下了，这一轮还没结束（可能还排在别的回合后面）。
@@ -1234,7 +1236,7 @@ pub enum ConversationTurnStatus {
     Unknown,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationImageParams {
     pub session_id: String,
     /// 引用里的全局条目下标（`AcpImageRef::entry`）。
@@ -1247,13 +1249,13 @@ pub struct ConversationImageParams {
     pub max_edge: Option<u32>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationImageResult {
     pub mime: String,
     pub data_b64: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationPromptIndexParams {
     pub session_id: String,
     /// 只要这一条（全局条目下标）之前的提问。客户端已加载的那一截自己算，只问前面没加载的。
@@ -1262,12 +1264,12 @@ pub struct ConversationPromptIndexParams {
     pub before: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationPromptIndexResult {
     pub prompts: Vec<crate::acp_chat::PromptIndexItem>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubagentTranscriptParams {
     /// 会话宿主分的子智能体 id（`sa-` 加 12 位十六进制）。
     pub subagent_id: String,
@@ -1279,7 +1281,7 @@ pub struct SubagentTranscriptParams {
     pub limit: Option<u32>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubagentTranscriptResult {
     pub entries: Vec<crate::acp_chat::AcpEntry>,
     /// `entries` 第一条在整段子会话里的下标。大于 0 说明前面还有。

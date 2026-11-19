@@ -7,7 +7,7 @@ pub const TERMINAL_THEME_VERSION: u32 = 1;
 
 /// 一套终端配色（0xRRGGBB）。字段与 `smelt::terminal` / `smelt::terminal_view`
 /// 里实际渲染用的色位一一对应。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalThemeSnapshot {
     pub version: u32,

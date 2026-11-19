@@ -6,7 +6,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentHostSettings {
     /// 是否由 Smelt 管理各 CLI agent 的结构化 hooks。
     pub hooks_enabled: bool,
@@ -52,6 +52,21 @@ pub struct RetiredCommands;
 impl Serialize for RetiredCommands {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_map(Some(0))?.end()
+    }
+}
+
+/// 恒为空表 `{}`。
+impl schemars::JsonSchema for RetiredCommands {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "RetiredCommands".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "object", "maxProperties": 0 })
     }
 }
 
@@ -215,7 +230,7 @@ fn upsert_config_value(values: &mut Vec<(String, String)>, config_id: String, va
 }
 
 /// 客户端一次修改：它看到的那份和它改成的那份。只有两者不同的字段会被写入。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentHostEdit {
     pub before: AgentHostSettings,
     pub after: AgentHostSettings,

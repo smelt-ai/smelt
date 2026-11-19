@@ -221,14 +221,17 @@ pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
 
 /// 一个编译期 RPC 描述：调用方不能把 A 方法的参数配到 B 方法，也不能把响应解成
 /// 另一种类型。非 Rust 客户端使用同一组公开 method 常量与 JSON 契约。
+///
+/// 参数和结果都要有 JSON Schema：JS 插件的类型声明由它生成（smelt-plugin-api 的
+/// `js/control_types.rs`），新方法不带就编译不过，声明不会漏。
 pub trait ControlCall {
-    type Params: Serialize + DeserializeOwned;
-    type Result: Serialize + DeserializeOwned;
+    type Params: Serialize + DeserializeOwned + schemars::JsonSchema;
+    type Result: Serialize + DeserializeOwned + schemars::JsonSchema;
 
     const METHOD: ControlMethod;
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EmptyParams {}
 
 pub enum SystemDescribe {}
@@ -240,7 +243,7 @@ impl ControlCall for SystemDescribe {
     const METHOD: ControlMethod = ControlMethod::SystemDescribe;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ControlProtocolDescription {
     pub current_version: u16,
     pub min_supported_version: u16,
@@ -249,7 +252,7 @@ pub struct ControlProtocolDescription {
     pub methods: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DaemonRuntimeInfo {
     pub version: String,
     pub exe_mtime: u64,
@@ -286,7 +289,7 @@ pub struct DaemonRuntimeInfo {
 
 /// 事件订阅这一侧的版本。控制方法能按方法清单逐个看，订阅推来的投影不行：协议对不上，
 /// 客户端订阅了也解不出来，只会断开再连。所以运行时在这里报出来，客户端订阅前先对。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EventProtocolDescription {
     /// `event_subscribe` 握手的事件总线协议版本。客户端只看它（见 `compat`）。
     pub protocol_version: u16,
@@ -300,7 +303,7 @@ pub struct EventProtocolDescription {
     pub session_state_schema_version: u16,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SystemDescribeResult {
     pub control: ControlProtocolDescription,
     pub daemon: DaemonRuntimeInfo,
@@ -309,7 +312,7 @@ pub struct SystemDescribeResult {
     pub events: Option<EventProtocolDescription>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlErrorCode {
     InvalidRequest,
@@ -328,13 +331,13 @@ pub enum ControlErrorCode {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ControlVersionRange {
     pub min_supported_version: u16,
     pub max_supported_version: u16,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ControlError {
     pub code: ControlErrorCode,
     /// 运行时按自己的默认语言（英文）说的一句话。给人看用 [`ControlError::text`]。
@@ -389,7 +392,7 @@ impl ControlError {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ControlResponse<T> {
     pub control_version: u16,
     pub request_id: String,
@@ -397,7 +400,7 @@ pub struct ControlResponse<T> {
     pub outcome: ControlOutcome<T>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ControlOutcome<T> {
     Ok { result: T },
@@ -434,7 +437,7 @@ impl<T> ControlResponse<T> {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ControlRequestEnvelope {
     pub control_version: u16,
     pub request_id: String,

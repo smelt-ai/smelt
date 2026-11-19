@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// 每次加载时与注册表对齐。
 pub const LAUNCH_CONFIG_VERSION: u32 = 14;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchSettings {
     pub version: u32,
     /// 除固定的「新建终端」外，下拉菜单里的启动项。

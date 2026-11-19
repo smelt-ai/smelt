@@ -15,6 +15,8 @@
 //! 设置里选（见 `docs/app-plugins.md`）。
 
 #[cfg(test)]
+mod control_types;
+#[cfg(test)]
 mod parity;
 pub mod ui;
 
@@ -40,6 +42,9 @@ use crate::{
 
 /// 模块名，和 Rust 这边的 crate 同名。
 pub const MODULE: &str = "smelt-plugin-api";
+
+/// 运行时数据的类型（控制接口各方法的参数和结果等），由 Rust 线上类型生成，见 `js/control_types.rs`。
+const CONTROL_TYPES: &str = include_str!("js/control_types.d.ts");
 
 const DECLARATIONS: &str = r#"
 /** 一台机器：本机是 null，远程机器是它的 runtime id。 */
@@ -72,9 +77,9 @@ export function active_context(): ActiveContext;
  */
 export function set_active_context(context: ActiveContext): null;
 /** 那台机器的运行时报的会话状态，每格终端、每段对话一条（形状同运行时 subscribe 推的会话状态）。主窗口关着也照常更新；变了发 sessions_changed。 */
-export function session_states(machine: Machine): unknown[];
+export function session_states(machine: Machine): DaemonSessionState[];
 /** 那台机器的工作区目录：开着的项目和对话，是会话的名册（形状同运行时的 workspace 目录）；还没收到时为 null。变了发 sessions_changed。 */
-export function workspace_directory(machine: Machine): unknown | null;
+export function workspace_directory(machine: Machine): WorkspaceDirectory | null;
 /**
  * 系统通知的授权：checking 正在读系统设置，not_requested 还没问过用户（第一次发通知时系统会问，也可以用
  * "smelt.app/request-notification-permission" 先问），granted 允许了（banners 弹横幅、sound 声音、badge Dock
@@ -255,12 +260,20 @@ export function reject_command(id: number, reason: string): null;
 export function run(command: string, args?: unknown): Promise<unknown>;
 /** 那台机器上的路径怎么切。 */
 export function path_style(machine: Machine): "posix" | "windows";
+/** call 在方法名后面的参数：方法的参数全都可以不给时，params 可省（省了是 {}）。 */
+export type CallArgs<P> = {} extends P
+  ? [params?: P | null, timeout_ms?: number]
+  : [params: P, timeout_ms?: number];
 /**
- * 调那台机器的运行时控制接口：method 是线上方法名（如 "session.list"），params 是它的参数（不给是 {}），兑现为
- * 运行时交回的结果。参数、结果的形状见 smelt-runtime-client 里那个方法的定义。运行时报的错、连不上、超时（timeout_ms，
- * 默认 60 秒）都 reject，带可以直接给人看的原因；没有这个方法当场报错。
+ * 调那台机器的运行时控制接口：method 是线上方法名（如 "session.list"），参数和结果的形状见 ControlMethods，兑现为
+ * 运行时交回的结果。运行时报的错、连不上、超时（timeout_ms，默认 60 秒）都 reject，带可以直接给人看的原因；没有这个
+ * 方法当场报错。
  */
-export function call(machine: Machine, method: string, params?: unknown, timeout_ms?: number): Promise<unknown>;
+export function call<M extends keyof ControlMethods>(
+  machine: Machine,
+  method: M,
+  ...args: CallArgs<ControlMethods[M]["params"]>
+): Promise<ControlMethods[M]["result"]>;
 /** 桌面挂着的机器，本机在最前。unavailable 是眼下用不了的原因。变了发 machines_changed。 */
 export function machines(): { machine: Machine; name: string; unavailable: string | null }[];
 /** 登记了的一个视图（见 views）。 */
@@ -761,7 +774,7 @@ impl JsPlugin {
         let rejected = self.clone();
         let assets = self.clone();
         HostModule::new(MODULE)
-            .declarations(DECLARATIONS)
+            .declarations(format!("{DECLARATIONS}{CONTROL_TYPES}"))
             .function("active_context", |_| {
                 let context = in_app("active_context", |cx| crate::active_context(cx))?;
                 let project = context.project.map_or(HostValue::Null, |project| {

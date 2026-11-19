@@ -13,7 +13,7 @@ use smelt_event_protocol::TurnFailure;
 
 /// 一种报错原因。新增种类只往后加；客户端不认识的种类读成 [`ControlReason::Other`]，
 /// 改说 `message`。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ControlReason {
     /// 运行时不认识这个智能体。
@@ -293,7 +293,7 @@ impl ControlReason {
 /// 自动化的配置或这次触发哪里不对：保存前的校验（桌面、手机在本地先查一遍）和运行时拒绝
 /// 保存、触发时说的是同一套。种类在线上跟着 [`ControlReason::Automation`] 走，客户端按
 /// 自己的语言说。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AutomationProblem {
     /// 智能体动作没选智能体。
@@ -423,7 +423,7 @@ impl std::error::Error for AutomationProblem {}
 /// 一次自动化运行没成的原因种类。运行记录里存这个种类（`error_code`），底层报错原样存在
 /// `error` 里当细节；客户端用 [`AutomationRunFailure::describe`] 按自己的语言说。
 /// 没有种类的旧记录只有 `error`，原样显示。
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationRunFailure {
     /// 上一次还在跑，这次跳过了。

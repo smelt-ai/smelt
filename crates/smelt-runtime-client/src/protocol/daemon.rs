@@ -4,7 +4,9 @@
 //! `op` 名称，避免 GUI、手机和 daemon 各自维护字符串常量。
 
 /// smeltd 支持的操作名。序列化值是稳定的 wire contract。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonOperation {
     Control,
@@ -45,7 +47,7 @@ pub enum DaemonOperation {
 }
 
 /// 首帧只先解析操作名，其余字段原样留给对应 handler。
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DaemonRequest {
     #[serde(rename = "op")]
     pub operation: DaemonOperation,
@@ -55,7 +57,9 @@ pub struct DaemonRequest {
 
 /// 终端 `open` 失败回执（`{"ok":false,"err",...}`）里可选的 `code`。没有 `code` 的失败
 /// 就是普通错误，照 `err` 报给人看；带 `code` 的是调用方要分开处理的几种。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalOpenErrorCode {
     /// 守护已经开始停机（升级换映像，或退出），不再起新会话。回执之后这条连接一直开着，

@@ -8,7 +8,9 @@ use agent_client_protocol::v1::schema::ElicitationContentValue;
 use crate::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 
 /// 「分叉副本的切点」：见 `ConversationLaunch::fork_cut`。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct AcpForkCut {
     /// 切点用户消息原文。
     pub text: String,
@@ -17,7 +19,9 @@ pub struct AcpForkCut {
 }
 
 /// 当前窗口里各桶的 token 估数。Pi 用 chars/4，GUI 再对齐到账单 `used`。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsageBreakdown {
     #[serde(default)]
@@ -87,7 +91,7 @@ impl ContextUsageBreakdown {
 
 /// 一组模型候选。ACP 的 `select` 允许按 provider/厂商分组，保留这个边界让
 /// 客户端能分别呈现 Provider 与 Model，而不是把两者压扁成一条难找的菜单。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ModelProviderGroup {
     /// 协议分组 id；仅作稳定识别，切换仍写模型选项值。
     pub id: String,
@@ -100,7 +104,7 @@ pub struct ModelProviderGroup {
 /// 模型选择状态：UI 拿它渲染「当前模型」胶囊和下拉候选。全是纯 String/Vec
 /// 字段，没有 agent_client_protocol 的 schema 类型，直接可以序列化进
 /// acp_session 的 wire 快照，不用另造一份 View 类型。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ModelState {
     /// ACP 配置项 id。写回时必须用它，不能假定各 adapter 都叫 `model`。
     pub config_id: String,
@@ -117,7 +121,7 @@ pub struct ModelState {
 }
 
 /// 一项由 ACP agent 声明的可选会话配置。模型单独显示，避免和输入栏的模型入口重复。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionConfigState {
     pub config_id: String,
     pub name: String,
@@ -134,7 +138,9 @@ pub struct SessionConfigState {
 }
 
 /// 运行时自己写的配置项是哪一种。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SmeltConfig {
     /// 权限模式，值是 `default` / `bypassPermissions`。
@@ -258,7 +264,9 @@ pub struct ElicitOption {
 /// `path` 为 `None` 代表 Smelt 无法提供该运行时；找到但 `--version` 失败时仍
 /// 保留路径，并将原因写入 `error`，避免把损坏的 shim 误报成「未安装」。对于
 /// 首次使用才物化的内置运行时，`path` 是它将落盘的目标入口。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct RuntimeExecutable {
     pub program: String,
     pub path: Option<String>,
@@ -274,14 +282,16 @@ impl RuntimeExecutable {
 
 /// Agent CLI 运行环境的只读诊断快照。探测在运行时那台机器上做（`agent.cli.inspect`），
 /// 线上按各家的稳定 `id` 传；认不出的 id（对端版本更新）丢掉。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(into = "AcpRuntimeDiagnosticsWire", from = "AcpRuntimeDiagnosticsWire")]
 pub struct AcpRuntimeDiagnostics {
     terminal: HashMap<TerminalAgentKind, RuntimeExecutable>,
     acp: HashMap<ConversationAgentKind, RuntimeExecutable>,
 }
 
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 struct AcpRuntimeDiagnosticsWire {
     #[serde(default)]
     terminal: BTreeMap<String, RuntimeExecutable>,

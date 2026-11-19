@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_kind::ConversationAgentKind;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentDefinition {
     pub id: String,
     pub name: String,

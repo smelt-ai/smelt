@@ -50,7 +50,7 @@ pub enum RuntimePresence {
 
 /// GUI 侧订阅状态通道的镜像（serde 反序列化；多出来的 JSON 字段自动忽略）。
 /// 字段对齐 smeltd `SessionState` 广播——B 路线「语义面板」的数据源。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct DaemonSessionState {
     pub id: String,
     /// daemon runtime generation. A recreated session may restart its revision at a lower value.
@@ -258,7 +258,16 @@ impl DaemonSessionState {
 }
 
 /// 跟 smeltd 的 `Phase`（见 `smeltd::session_state`）对应，同样 `rename_all = "snake_case"`。
-#[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Debug,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonPhase {
     /// ACP 握手 / 启动进程。侧栏仍算空闲，对话页才展示「启动中」。

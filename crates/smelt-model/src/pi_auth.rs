@@ -3,7 +3,17 @@
 use rust_i18n::t;
 
 /// 一个 provider 当前的凭据状态。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PiAuthStatus {
     /// 订阅登录过，`auth.json` 里是 OAuth 令牌。
@@ -21,7 +31,9 @@ impl PiAuthStatus {
 }
 
 /// 一个内置 provider 的登录能力与现状。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PiAuthProvider {
     pub id: String,
@@ -47,7 +59,9 @@ pub struct PiAuthProvider {
 }
 
 /// 登录方式。`Models.login` 按它选 `provider.auth.oauth` 还是 `auth.apiKey`。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum PiLoginMethod {
     #[serde(rename = "oauth")]
     OAuth,
@@ -64,7 +78,9 @@ impl PiLoginMethod {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PiPromptKind {
     Text,
@@ -73,7 +89,9 @@ pub enum PiPromptKind {
     ManualCode,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PiPromptOption {
     pub id: String,
     pub label: String,
@@ -81,7 +99,9 @@ pub struct PiPromptOption {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PiAuthLink {
     pub url: String,
     #[serde(default)]
@@ -89,7 +109,9 @@ pub struct PiAuthLink {
 }
 
 /// 登录流程推给宿主的一步。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum PiLoginEvent {
     Providers {
@@ -157,7 +179,9 @@ pub enum PiLoginEvent {
 /// 登录助手自己说的话（MCP 登录的提示、替用户代答的说明）的种类，客户端按自己的语言说。
 /// 同一事件的 `message` / `instructions` 是助手按英文说的同一句，给不认识种类的客户端兜底。
 /// Pi 和 provider 自己的话没有种类，原样显示。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PiLoginNote {
     /// 授权后浏览器打不开回调页时，把地址栏里的地址贴回来。

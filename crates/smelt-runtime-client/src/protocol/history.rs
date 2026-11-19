@@ -33,7 +33,7 @@ history_calls! {
     HistoryDeleteCall => HistoryDelete(HistoryDeleteParams) -> EmptyParams;
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryListParams {
     /// 历史来源的稳定标识（`HistorySourceKind::id`），如 `claude`、`antigravity`。
     pub agent: String,
@@ -42,7 +42,7 @@ pub struct HistoryListParams {
     pub cwd: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistorySession {
     /// 存档在运行时那台机器上的路径；查看和删除时原样带回来。
     pub path: String,
@@ -58,20 +58,20 @@ pub struct HistorySession {
     pub total_tokens: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryListResult {
     pub sessions: Vec<HistorySession>,
     /// resume_id → 这段会话所属的智能体定义 id。只有用产品智能体开的会话才有。
     pub agent_definition_ids: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryDetailParams {
     pub agent: String,
     pub path: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryTurn {
     pub is_user: bool,
     pub timestamp_ms: Option<i64>,
@@ -82,19 +82,19 @@ pub struct HistoryTurn {
     pub tool_paths: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryDetail {
     pub turns: Vec<HistoryTurn>,
     /// 原会话用的模型（读得到才有）。
     pub model: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryDetailResult {
     pub detail: Option<HistoryDetail>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryDeleteParams {
     pub agent: String,
     pub profile_id: Option<String>,

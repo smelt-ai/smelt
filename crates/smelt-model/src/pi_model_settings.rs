@@ -58,20 +58,26 @@ pub fn pi_credential_kind(entry: &serde_json::Value) -> Option<PiCredentialKind>
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PiDefaultModelSummary {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub thinking_level: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PiSettingsSummary {
     pub path: PathBuf,
     pub default_model: Option<PiDefaultModelSummary>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PiDefaultModelConfig {
     pub provider: String,
@@ -82,7 +88,9 @@ pub struct PiDefaultModelConfig {
     pub thinking_level: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PiCustomModel {
     pub id: String,
@@ -93,7 +101,9 @@ pub struct PiCustomModel {
     pub max_tokens: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PiCustomProvider {
     pub id: String,
@@ -107,7 +117,9 @@ pub struct PiCustomProvider {
     pub models: Vec<PiCustomModel>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PiModelSettings {
     pub default_model: PiDefaultModelConfig,
@@ -117,7 +129,9 @@ pub struct PiModelSettings {
 }
 
 /// 智能体定义页下拉用的一条模型。不依赖正在跑的 Pi 会话。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PiModelChoice {
     pub provider: String,
     pub provider_name: String,
@@ -144,7 +158,9 @@ impl PiModelChoice {
 }
 
 /// 下拉里按 provider 分组，避免把所有模型摊成一条长名单。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PiModelChoiceGroup {
     pub provider: String,
     pub provider_name: String,

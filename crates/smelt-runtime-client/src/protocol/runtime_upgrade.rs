@@ -9,13 +9,13 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RuntimeUpgradeRequest {
     /// 要升到的版本，和 Release 的 tag 去掉 `v` 一致，如 `2026.1023.0`、`2026.1023.0-rc.1`。
     pub version: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RuntimeUpgradeReply {
     /// 接下了，开始下载。之后还有一行结局，或者交接成功、连接断开。

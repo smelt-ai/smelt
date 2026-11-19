@@ -18,7 +18,7 @@ pub const MAX_EVENT_ID_BYTES: usize = 128;
 pub const DEFAULT_WEBHOOK_PORT: u16 = 17827;
 pub const DEFAULT_WEBHOOK_BASE_URL: &str = "http://127.0.0.1:17827";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AutomationAction {
     Agent {
@@ -125,7 +125,7 @@ impl AutomationAction {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AutomationSink {
     /// 跑完在 App 里弹通知。
@@ -208,7 +208,7 @@ impl AutomationNotify {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebhookIngress {
     #[serde(default)]
     pub endpoint: String,
@@ -216,7 +216,7 @@ pub struct WebhookIngress {
     pub secret: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EventIngress {
     pub topic: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,7 +224,7 @@ pub struct EventIngress {
 }
 
 /// 一条自动化是一份时机列表：到点、间隔、HTTP、内部事件可混排，共享同一个忙时槽位。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct AutomationTrigger {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<AutomationSchedule>,
@@ -234,7 +234,7 @@ pub struct AutomationTrigger {
     pub events: Vec<EventIngress>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum AutomationTriggerLegacyWire {
     Schedule {
@@ -256,7 +256,7 @@ enum AutomationTriggerLegacyWire {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AutomationTriggerFieldsWire {
     #[serde(default)]
     schedules: Vec<AutomationSchedule>,
@@ -270,7 +270,7 @@ struct AutomationTriggerFieldsWire {
     events: Vec<EventIngress>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 enum AutomationTriggerWire {
     Legacy(AutomationTriggerLegacyWire),
@@ -484,7 +484,7 @@ impl WebhookIngress {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Automation {
     pub id: String,
     pub name: String,
@@ -498,7 +498,7 @@ pub struct Automation {
     pub sinks: Vec<AutomationSink>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AutomationWire {
     id: String,
     name: String,
@@ -696,7 +696,7 @@ pub const SCHEDULE_WEEKDAYS_MASK: u8 =
     SCHEDULE_DAY_MON | SCHEDULE_DAY_TUE | SCHEDULE_DAY_WED | SCHEDULE_DAY_THU | SCHEDULE_DAY_FRI;
 pub const SCHEDULE_ALL_DAYS_MASK: u8 = SCHEDULE_WEEKDAYS_MASK | SCHEDULE_DAY_SAT | SCHEDULE_DAY_SUN;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AutomationSchedule {
     Daily {
@@ -725,7 +725,7 @@ pub enum AutomationSchedule {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AutomationScheduleWire {
     Weekdays {
@@ -996,7 +996,7 @@ where
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AutomationState {
     pub automation_id: String,
     #[serde(default)]
@@ -1005,7 +1005,7 @@ pub struct AutomationState {
     pub last_run_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationRunSource {
     Manual,
@@ -1014,7 +1014,7 @@ pub enum AutomationRunSource {
     Event,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationRunStatus {
     Starting,
@@ -1047,7 +1047,7 @@ impl AutomationRunStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct AutomationRunContext {
     pub automation_name: String,
     pub action: AutomationAction,
@@ -1064,7 +1064,7 @@ pub struct AutomationRunContext {
     pub agent_instructions: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AutomationRunContextWire {
     automation_name: String,
     #[serde(default)]
@@ -1181,7 +1181,7 @@ impl AutomationRunContext {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AutomationRun {
     pub id: String,
     pub automation_id: String,
@@ -1237,7 +1237,7 @@ impl AutomationRun {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AutomationFile {
     pub schema_version: u32,
     #[serde(default)]
@@ -1466,7 +1466,7 @@ impl AutomationFile {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AutomationCommand {
     Upsert {
@@ -1493,7 +1493,7 @@ pub enum AutomationCommand {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "result", content = "value", rename_all = "snake_case")]
 pub enum AutomationCommandResult {
     Applied(bool),
@@ -1674,7 +1674,7 @@ where
 }
 
 /// 外部程序投递的通用事件。自动化按 topic / filter 订阅，不点名自动化 id。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AutomationInboundEvent {
     pub topic: String,
     pub event_id: String,
@@ -2317,7 +2317,7 @@ mod notify_tests {
             serde_json::json!({ "type": "local", "failures_only": true })
         );
 
-        #[derive(Debug, PartialEq, Deserialize)]
+        #[derive(Debug, PartialEq, Deserialize, schemars::JsonSchema)]
         #[serde(tag = "type", rename_all = "snake_case")]
         enum OldSink {
             Local,

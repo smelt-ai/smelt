@@ -9,7 +9,7 @@ use crate::provider_api::DiscoveredModel;
 use serde::{Deserialize, Serialize};
 
 /// 能力库里 Pi 相关的全部展示数据。读不出的部分各自带错误，不连累其它部分。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PiConfig {
     pub model_settings: Result<PiModelSettings, String>,
     pub settings_summary: Result<PiSettingsSummary, String>,
@@ -23,7 +23,7 @@ pub struct PiConfig {
 }
 
 /// 各配置文件在运行时那台机器上的路径，给人看。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PiConfigPaths {
     pub settings: String,
     pub models: String,
@@ -31,7 +31,7 @@ pub struct PiConfigPaths {
     pub mcp: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PiConfigFile {
     Settings,
@@ -40,12 +40,12 @@ pub enum PiConfigFile {
     Mcp,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ThinkingLevelParams {
     pub level: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SaveDefaultModelParams {
     pub config: PiDefaultModelConfig,
     /// 新的 API key；`None` 表示保持已存的那份。
@@ -56,7 +56,7 @@ pub struct SaveDefaultModelParams {
     pub reset_base_url: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DiscoverModelsParams {
     pub base_url: String,
     pub api: String,
@@ -66,12 +66,12 @@ pub struct DiscoverModelsParams {
     pub saved_provider_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DiscoverModelsResult {
     pub models: Vec<DiscoveredModel>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SaveCustomProviderParams {
     /// 编辑已有 provider 时它原来的 id（可能改名）。
     pub previous_id: Option<String>,
@@ -82,51 +82,51 @@ pub struct SaveCustomProviderParams {
     pub set_default: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderIdParams {
     pub provider_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnsureConfigFileParams {
     pub file: PiConfigFile,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnsureConfigFileResult {
     /// 运行时那台机器上的路径。
     pub path: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpPresetParams {
     pub id: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpServerParams {
     pub name: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpEnabledParams {
     pub name: String,
     pub enabled: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginIdParams {
     pub id: String,
 }
 
 /// 同名几份里以哪份为准。`path` 是运行时那台机器上的路径，必须是这个技能的一份。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AdoptPluginParams {
     pub id: String,
     pub path: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ImportPluginParams {
     pub kind: PiPluginKind,
     /// 运行时那台机器上的路径。

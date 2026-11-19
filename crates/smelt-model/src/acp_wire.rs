@@ -26,7 +26,7 @@ use serde_json::Value;
 use crate::acp_chat::AcpEntry;
 
 /// 一条消息的变化：保留旧 JSON 的前 `keep` 个字节，接上 `tail`。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EntryPatch {
     pub index: usize,
     pub keep: usize,
@@ -35,7 +35,7 @@ pub struct EntryPatch {
 
 /// 相对这条连接上一帧的条目变化。`[from, end)` 里没出现在 `patches` 的条目没变；
 /// `end` 之后的条目已删除。应用后双方都丢掉 `keep_from` 之前的镜像。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EntriesDelta {
     pub from: usize,
     pub end: usize,
@@ -233,7 +233,7 @@ impl EntryMirror {
 }
 
 /// 快照头里一个字段的变化：保留旧 JSON 的前 `keep` 个字节，接上 `tail`。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FieldPatch {
     pub keep: usize,
     pub tail: String,
@@ -241,7 +241,7 @@ pub struct FieldPatch {
 
 /// 相对这条连接上一帧的变化。`fields` 的键是 `live.phase`、`snapshot.turn_timings`
 /// 这样的字段路径，值为 `None` 表示这个字段这一帧没有了。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FrameDelta {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: BTreeMap<String, Option<FieldPatch>>,
