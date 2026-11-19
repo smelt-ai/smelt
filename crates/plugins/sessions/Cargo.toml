@@ -30,3 +30,7 @@ rust-i18n.workspace = true
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 tempfile = "3"
+
+# 行首头像出图（src/list/rows/snapshots.rs）：真实字形 + 离屏 Metal，特性与 smelt-ui 的快照一致。
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_apple = { package = "gpui-pre-apple", version = "=0.3.12", features = ["font-kit", "runtime_shaders", "test-support"] }

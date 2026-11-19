@@ -11280,6 +11280,7 @@ dependencies = [
  "chrono",
  "gpui-base",
  "gpui-pre",
+ "gpui-pre-apple",
  "rust-i18n",
  "serde",
  "serde_json",
