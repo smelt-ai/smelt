@@ -371,6 +371,45 @@ export default class App extends View {
     assert!(after.contains("log: confirm;dismiss;"), "{after}");
 }
 
+/// 别处关掉了（全局的 `dialog::close`）：脚本经 on_dismiss 知道，再要开时还开得出来。
+#[gpui::test]
+fn dialog_closed_elsewhere_tells_the_script(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltButton, SmeltDialog } from "smelt-ui";
+export default class App extends View {
+  init() { this.open = true; this.log = ""; }
+  render() {
+    return div().size_full()
+      .child(SmeltButton.new("reopen").label("Reopen").h(20)
+        .on_click((_, cx) => { this.open = true; cx.notify(); }))
+      .child(SmeltDialog.new("ask").open(this.open).title("Rename")
+        .on_dismiss((cx) => { this.log += "dismiss;"; this.open = false; cx.notify(); }))
+      .child(`log: ${this.log}`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    draw(&mut context);
+    let is_open = |context: &mut VisualTestContext| {
+        context.update(|window, cx| smelt_ui::dialog::is_open(window, cx))
+    };
+    assert!(is_open(&mut context));
+    context.update(|window, cx| smelt_ui::dialog::close(window, cx));
+    draw(&mut context);
+    draw(&mut context);
+    assert!(!is_open(&mut context));
+    let after = tree(&mut context, &view);
+    assert!(after.contains("log: dismiss;"), "{after}");
+    click(&mut context, 10., 10.);
+    draw(&mut context);
+    assert!(
+        is_open(&mut context),
+        "reopens after being closed elsewhere"
+    );
+}
+
 #[gpui::test]
 fn popover_and_settings_build_from_scripts(cx: &mut TestAppContext) {
     let source = r#"
@@ -440,6 +479,17 @@ export default class App extends View {
     draw(&mut context);
     let after = tree(&mut context, &view);
     assert!(after.contains("sides: r0|"), "{after}");
+
+    // 滚轮滚回顶上：滚动重画脚本视图，两边跟着报。
+    context.simulate_event(gpui::ScrollEvent {
+        position: point(px(10.), px(60.)),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(1000.))),
+        ..Default::default()
+    });
+    draw(&mut context);
+    draw(&mut context);
+    let back = tree(&mut context, &view);
+    assert!(back.contains("sides: |r19"), "{back}");
 }
 
 #[gpui::test]

@@ -3,8 +3,8 @@
 //!
 //! - `SmeltScrollAnchor.new(key)` 包住一行，滚动区域就记得它在哪。里面的吸顶区段
 //!   （`SmeltStickySection`）停在顶上时，压在标题底下的行算滚出去了。
-//! - `reveal(key, serial)`：`serial` 变了就把那一行滚到看得见（已经看得见不动，还没画出来就
-//!   等它画出来）。同一行要再滚一次，换个 `serial`。
+//! - `reveal(key, serial)`：头一回给、或 `serial` 变了，就把那一行滚到看得见（已经看得见不动，
+//!   还没画出来就等它画出来）。同一行要再滚一次，换个 `serial`。
 //! - `watch(keys)` 配 `on_offscreen((above, below, cx) => …)`：盯着的这几行里，滚到可视区上面、
 //!   下面的各有哪些（按 `watch` 给的顺序），变了才报。
 //! - `overlay_top(元素)` / `overlay_bottom(元素)`：浮在可视区上下沿的东西，上面那个让到停住的
@@ -267,7 +267,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
         },
     )
     .with_documentation(
-        "Scrolls the SmeltScrollAnchor with this key into view whenever serial changes; waits for it to be drawn.",
+        "Scrolls the SmeltScrollAnchor with this key into view the first time it is given and whenever serial changes; waits for it to be drawn.",
     );
     let watch = MethodDescriptor::new(
         "watch",

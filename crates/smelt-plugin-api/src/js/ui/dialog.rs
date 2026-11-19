@@ -49,9 +49,14 @@ struct Latest {
     on_dismiss: Option<ComponentCallback>,
 }
 
-/// 这个控件压上去的那张。控件不再画了（状态被回收）时关掉它。
-#[derive(Default)]
-struct Opened(Option<DialogId>);
+/// 这个控件压上去的那张。开是推到这一帧之后做的，中间再画一次不能又开一张，所以有「正在开」。
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Opened {
+    #[default]
+    Closed,
+    Opening,
+    Open(DialogId),
+}
 
 #[derive(IntoElement)]
 struct ScriptDialog {
@@ -66,18 +71,24 @@ impl RenderOnce for ScriptDialog {
         let opened = window.use_keyed_state((self.id.clone(), "smelt-dialog"), cx, |_, _| {
             Opened::default()
         });
-        let current = opened.read(cx).0;
+        let current = *opened.read(cx);
         match (self.open, current) {
-            (true, None) => {
+            (true, Opened::Closed) => {
+                opened.update(cx, |opened, _| *opened = Opened::Opening);
                 let weak_slot = slot.downgrade();
                 let weak_opened = opened.downgrade();
                 window.defer(cx, move |window, cx| {
+                    // 推迟期间脚本改成了关，或控件不画了：不开。
                     let Some(opened) = weak_opened.upgrade() else {
                         return;
                     };
+                    if *opened.read(cx) != Opened::Opening {
+                        return;
+                    }
                     let own = Rc::new(Cell::new(None::<DialogId>));
                     let id = dialog::open(window, cx, {
                         let own = own.clone();
+                        let weak_opened = opened.downgrade();
                         move |card, window, cx| {
                             // 控件不画了，状态被回收：这张也该关了。正在画对话框层，推到之后关。
                             let Some(slot) = weak_slot.upgrade() else {
@@ -86,20 +97,38 @@ impl RenderOnce for ScriptDialog {
                                 }
                                 return card;
                             };
-                            build(card, &slot, window, cx)
+                            let (own, weak_opened) = (own.get(), weak_opened.clone());
+                            let dismiss = slot.downgrade();
+                            build(card, &slot, window, cx).on_close(move |window, cx| {
+                                // 脚本自己关的先记成了关；还记着这张，就是别处关的（全局的
+                                // `dialog::close`）：记成关，经 on_dismiss 告诉脚本。
+                                let Some(opened) = weak_opened.upgrade() else {
+                                    return;
+                                };
+                                if own.is_none_or(|own| *opened.read(cx) != Opened::Open(own)) {
+                                    return;
+                                }
+                                opened.update(cx, |opened, _| *opened = Opened::Closed);
+                                dismissed(&dismiss, window, cx);
+                            })
                         }
                     });
                     own.set(id);
-                    opened.update(cx, |opened, _| opened.0 = id);
+                    opened.update(cx, |opened, _| {
+                        *opened = id.map_or(Opened::Closed, Opened::Open);
+                    });
                 });
             }
-            (false, Some(id)) => {
-                opened.update(cx, |opened, _| opened.0 = None);
+            (false, Opened::Open(id)) => {
+                opened.update(cx, |opened, _| *opened = Opened::Closed);
                 window.defer(cx, move |window, cx| id.close(window, cx));
+            }
+            (false, Opened::Opening) => {
+                opened.update(cx, |opened, _| *opened = Opened::Closed);
             }
             // 开着的那张由对话框层在这一帧随后重画（窗口根上它排在主体之后），读到的就是
             // 刚交进槽里的这份，不用另外叫它。
-            (true, Some(_)) | (false, None) => {}
+            (true, _) | (false, Opened::Closed) => {}
         }
         div()
     }
@@ -151,19 +180,18 @@ fn build(
         false
     })
     .on_cancel(move |window, cx| {
-        let callback = dismiss
-            .upgrade()
-            .and_then(|slot| slot.read(cx).on_dismiss.clone());
-        if let Some(callback) = callback {
-            callback.invoke_and_report_with(
-                "SmeltDialog.on_dismiss callback failed",
-                &[],
-                window,
-                cx,
-            );
-        }
+        dismissed(&dismiss, window, cx);
         false
     })
+}
+
+fn dismissed(slot: &gpui::WeakEntity<Latest>, window: &mut Window, cx: &mut App) {
+    let callback = slot
+        .upgrade()
+        .and_then(|slot| slot.read(cx).on_dismiss.clone());
+    if let Some(callback) = callback {
+        callback.invoke_and_report_with("SmeltDialog.on_dismiss callback failed", &[], window, cx);
+    }
 }
 
 fn materialize(

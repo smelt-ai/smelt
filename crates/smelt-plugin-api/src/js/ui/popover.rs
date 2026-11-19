@@ -4,7 +4,7 @@
 //!
 //! 开关可以交给它自己，也可以由脚本控制：`open(开没开)` 给了就按它画，用户点开、点外面、
 //! Esc 经 `on_open_change` 交回，脚本存好再画；脚本在卡片里做完事要关掉它，就把状态改成
-//! 关再重画。
+//! 关再重画。触发点不会自己显示「开着」，要的话受控着用，给它 `selected(开没开)`。
 
 use std::sync::Arc;
 
@@ -30,7 +30,8 @@ struct OnOpenChange(ComponentArgument);
 #[derive(Clone, Copy)]
 struct Side(Anchor);
 
-/// 脚本给的触发点：它开没开脚本自己知道（受控时）或不关心，这里不改它的样子。
+/// 脚本给的触发点，原样画：它是脚本搭好的元素，这里改不了它的样子。要按钮在卡片开着时显示
+/// 按下的样子，受控着用，自己给它 `selected(开没开)`。
 #[derive(IntoElement)]
 struct Trigger(AnyElement);
 

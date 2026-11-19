@@ -24,8 +24,13 @@ const SECTION: &str = "SmeltSettingsSection";
 const ROW: &str = "SmeltSettingsRow";
 
 #[derive(Clone)]
-enum TextOp {
+enum SectionOp {
     Title(String),
+    Description(String),
+}
+
+#[derive(Clone)]
+enum RowOp {
     Description(String),
     Note(String),
 }
@@ -57,11 +62,10 @@ impl ComponentMaterializer for SectionMaterializer {
     fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
         no_style(SECTION, &mut request)?;
         let mut section = SettingsSection::new();
-        for op in ops::<TextOp>(&request) {
+        for op in ops::<SectionOp>(&request) {
             section = match op {
-                TextOp::Title(text) => section.title(text.clone()),
-                TextOp::Description(text) => section.description(text.clone()),
-                TextOp::Note(_) => section,
+                SectionOp::Title(text) => section.title(text.clone()),
+                SectionOp::Description(text) => section.description(text.clone()),
             };
         }
         Ok(section
@@ -82,11 +86,10 @@ impl ComponentMaterializer for RowMaterializer {
             .0
             .clone();
         let mut row = SettingsRow::new(title);
-        for op in ops::<TextOp>(&request) {
+        for op in ops::<RowOp>(&request) {
             row = match op {
-                TextOp::Description(text) => row.description(text.clone()),
-                TextOp::Note(text) => row.note(text.clone()),
-                TextOp::Title(_) => row,
+                RowOp::Description(text) => row.description(text.clone()),
+                RowOp::Note(text) => row.note(text.clone()),
             };
         }
         Ok(row.children(request.take_children()?).into_any_element())
@@ -113,13 +116,13 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                     SECTION,
                     "title",
                     "The group heading above the card.",
-                    TextOp::Title,
+                    SectionOp::Title,
                 ),
                 string_method(
                     SECTION,
                     "description",
                     "A sentence under the heading, above the card.",
-                    TextOp::Description,
+                    SectionOp::Description,
                 ),
             ])
             .with_documentation(
@@ -143,13 +146,13 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                     ROW,
                     "description",
                     "What the setting does, under its name; may wrap.",
-                    TextOp::Description,
+                    RowOp::Description,
                 ),
                 string_method(
                     ROW,
                     "note",
                     "A note under the description (source, who uses it, why it is unavailable); line breaks are kept.",
-                    TextOp::Note,
+                    RowOp::Note,
                 ),
             ])
             .with_documentation(
