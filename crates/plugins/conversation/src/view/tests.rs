@@ -33,7 +33,9 @@ use super::{
     usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
     view_history_identity,
 };
-use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
+use gpui::{
+    ClipboardEntry, ExternalPaths, Focusable as _, FollowMode, ListAlignment, ListState, px,
+};
 use smelt_plugin_api::model::acp_chat::{
     AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart,
 };
@@ -2096,7 +2098,7 @@ fn now_names_the_running_tool_in_the_present_tense() {
         completed_tool("read", ToolKind::Read, "src/lib.rs"),
         running(ToolKind::Execute, "cargo test\n--all"),
     ];
-    let state = super::now_state(&entries, &[], false, |_| true);
+    let state = super::now_state(&entries, &[], None, |_| true);
     assert_eq!(
         state.activity,
         super::NowActivity::Tool(ToolKind::Execute, "cargo test\n--all".into())
@@ -2112,8 +2114,11 @@ fn now_names_the_running_tool_in_the_present_tense() {
         "Running a tool"
     );
 
-    let waiting = super::now_state(&entries, &[], true, |_| true);
-    assert_eq!(waiting.activity, super::NowActivity::Waiting);
+    let waiting = super::now_state(&entries, &[], Some(super::UserWait::Approval), |_| true);
+    assert_eq!(
+        waiting.activity,
+        super::NowActivity::Waiting(super::UserWait::Approval)
+    );
     assert_eq!(
         super::now_activity_label(&waiting),
         "Waiting for you to confirm"
@@ -2125,7 +2130,7 @@ fn now_names_the_running_tool_in_the_present_tense() {
         AcpEntry::User("这一轮".into()),
     ];
     assert_eq!(
-        super::now_state(&previous_turn, &[], false, |_| true).activity,
+        super::now_state(&previous_turn, &[], None, |_| true).activity,
         super::NowActivity::Thinking,
         "上一轮没收尾的工具不算这一轮在做的事"
     );
@@ -2142,10 +2147,10 @@ fn now_shows_a_thought_excerpt_only_when_the_thought_is_folded_away() {
             thought: false,
         },
     ];
-    let hidden = super::now_state(&entries, &[], false, |ix| ix == 2);
+    let hidden = super::now_state(&entries, &[], None, |ix| ix == 2);
     assert_eq!(hidden.activity, super::NowActivity::Thinking);
     assert_eq!(hidden.thought_excerpt.as_deref(), Some("先看调用方"));
-    let visible = super::now_state(&entries, &[], false, |_| false);
+    let visible = super::now_state(&entries, &[], None, |_| false);
     assert_eq!(visible.thought_excerpt, None, "看得见的思考不再抄一遍");
 
     let mut answering = entries.clone();
@@ -2153,7 +2158,7 @@ fn now_shows_a_thought_excerpt_only_when_the_thought_is_folded_away() {
         text: "结论是".into(),
         thought: false,
     });
-    let state = super::now_state(&answering, &[], false, |_| true);
+    let state = super::now_state(&answering, &[], None, |_| true);
     assert_eq!(state.activity, super::NowActivity::Answering);
     assert_eq!(state.thought_excerpt, None);
 }
@@ -2178,7 +2183,7 @@ fn now_counts_this_turns_running_subagents() {
         subagent_view("sa-2", SubagentStatus::Completed),
         other_turn,
     ];
-    let state = super::now_state(&entries, &live, false, |_| true);
+    let state = super::now_state(&entries, &live, None, |_| true);
     assert_eq!(
         state.activity,
         super::NowActivity::Agents,
@@ -3935,54 +3940,248 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
     );
 }
 
-#[gpui::test]
-fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestAppContext) {
-    use gpui::VisualTestContext;
+/// 只有一道单选题的提问卡：选项一行一个，说明排在标题下面；点一下就是答案，不另要
+/// 「提交」。自己写了答案时，答案就在输入那一行里交。
+fn ask_card(fields: Vec<ElicitFieldView>) -> PendingElicitation {
+    PendingElicitation {
+        id: "q1".into(),
+        message: "下一步要我执行哪项？".into(),
+        fields,
+        chosen: Default::default(),
+        text_values: Default::default(),
+    }
+}
 
+fn choice(label: &str, description: Option<&str>) -> ElicitOptionView {
+    ElicitOptionView {
+        label: label.into(),
+        description: description.map(Into::into),
+        flag: None,
+    }
+}
+
+fn single_choice_field(options: Vec<ElicitOptionView>) -> ElicitFieldView {
+    ElicitFieldView {
+        key: "q0".into(),
+        title: "下一步要我执行哪项？".into(),
+        required: true,
+        allow_custom_input: true,
+        kind: ElicitFieldKindView::Select(options),
+    }
+}
+
+/// 一段正在等用户回答的对话：输入框建好、焦点在输入框里，提问卡刚到。
+fn ask_view(
+    cx: &mut gpui::TestAppContext,
+    card: PendingElicitation,
+) -> (
+    gpui::Entity<super::ConversationView>,
+    &mut gpui::VisualTestContext,
+    smol::channel::Receiver<smelt_plugin_api::model::acp_session::AcpUserAction>,
+) {
     cx.update(init_ui);
-    let (view, cx) = cx.add_window_view(|_window, cx| {
+    let (handle, actions) = crate::acp_client::ConversationClientHandle::detached();
+    let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = super::ConversationView::placeholder(
             cx,
             super::ConversationOrigin {
                 runtime: offline_runtime(),
                 launch_prep: None,
-                agent: ConversationAgentKind::Claude,
+                agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 profile_id: None,
                 cwd: None,
-                reason: "test placeholder".into(),
+                reason: "ask card".into(),
                 resume_session_id: None,
-                saved_sid: Some("acp-custom-answer-test".into()),
+                saved_sid: Some("acp-ask-card".into()),
             },
         );
-        view.elicitation = Some(PendingElicitation {
-            id: "q1".into(),
-            message: "下一步要我执行哪项？".into(),
-            fields: vec![ElicitFieldView {
-                key: "answer".into(),
-                title: "请选择或输入自己的答案".into(),
-                required: true,
-                allow_custom_input: true,
-                kind: ElicitFieldKindView::Select(vec![ElicitOptionView {
-                    label: "暂时都不做".into(),
-                    description: None,
-                    flag: None,
-                }]),
-            }],
-            chosen: Default::default(),
-            text_values: Default::default(),
-        });
+        view.phase = DaemonPhase::WaitingForUser;
+        view.handle = Some(handle);
+        view.init_input(window, cx);
         view
     });
-    let cx: &mut VisualTestContext = cx;
-    view.update(cx, |view, cx| view.schedule_surface_inputs(cx));
-    cx.run_until_parked();
     cx.update(|window, cx| {
-        let _ = window.draw(cx);
+        let target = view.read(cx).focus_target(cx);
+        window.focus(&target, cx);
+    });
+    draw_settled(cx);
+    view.update(cx, |view, cx| {
+        view.elicitation = Some(card);
+        view.elicit_focus_move = Some(super::ElicitFocusMove::Arrive);
+        view.schedule_surface_inputs(cx);
+    });
+    draw_settled(cx);
+    (view, cx, actions)
+}
+
+fn sent(
+    actions: &smol::channel::Receiver<smelt_plugin_api::model::acp_session::AcpUserAction>,
+) -> Vec<String> {
+    std::iter::from_fn(|| actions.try_recv().ok())
+        .map(|action| format!("{action:?}"))
+        .collect()
+}
+
+#[gpui::test]
+fn a_single_choice_is_answered_by_one_click(cx: &mut gpui::TestAppContext) {
+    let (view, cx, actions) = ask_view(
+        cx,
+        ask_card(vec![single_choice_field(vec![
+            choice("按推荐方案", Some("两个仓库一起改")),
+            choice("先不改", None),
+        ])]),
+    );
+    assert!(
+        cx.debug_bounds("acp-elicit-submit").is_none(),
+        "单个单选题点了就是答案，不要底部的「提交」"
+    );
+    assert!(cx.debug_bounds("acp-elicit-custom-submit").is_none());
+
+    let second = cx
+        .debug_bounds("acp-elicit-opt-0-1")
+        .expect("第二个选项要画出来");
+    cx.simulate_click(second.center(), gpui::Modifiers::none());
+    assert_eq!(
+        sent(&actions),
+        vec![
+            "ElicitationChoose { field_ix: 0, opt_ix: 1 }",
+            "ElicitationSubmit"
+        ]
+    );
+
+    // 自己写了答案：在输入那一行里交。
+    view.update_in(cx, |view, window, cx| {
+        let input = view.elicitation_inputs[&0].clone();
+        input.update(cx, |input, cx| input.set_value("灰度环境", window, cx));
+    });
+    draw_settled(cx);
+    let submit = cx
+        .debug_bounds("acp-elicit-custom-submit")
+        .expect("写了答案就在输入行里给提交");
+    cx.simulate_click(submit.center(), gpui::Modifiers::none());
+    assert_eq!(
+        sent(&actions),
+        vec![
+            "ElicitationText { field_ix: 0, value: \"灰度环境\" }",
+            "ElicitationSubmit"
+        ]
+    );
+}
+
+#[gpui::test]
+fn the_card_takes_the_keyboard_when_it_arrives(cx: &mut gpui::TestAppContext) {
+    let (view, cx, actions) = ask_view(
+        cx,
+        ask_card(vec![single_choice_field(vec![
+            choice("按推荐方案", None),
+            choice("先不改", None),
+        ])]),
+    );
+    cx.update(|window, cx| {
+        assert!(
+            view.read(cx).elicit_focus.is_focused(window),
+            "卡片到了，输入框里没在写东西，键盘交给卡片"
+        );
     });
 
-    cx.debug_bounds("acp-elicit-submit")
-        .expect("single-select cards with custom input need an explicit submit button");
+    // ↓ 到第二个选项，再 ↓ 进「其他答案」的输入框，↑ 回到选项。
+    cx.dispatch_action(super::ElicitDown);
+    assert_eq!(view.read_with(cx, |view, _| view.elicit_cursor), 1);
+    cx.dispatch_action(super::ElicitDown);
+    cx.update(|window, cx| {
+        let view = view.read(cx);
+        assert!(
+            view.elicitation_inputs[&0]
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+    });
+    cx.dispatch_action(gpui_base::input::MoveUp);
+    cx.update(|window, cx| {
+        let view = view.read(cx);
+        assert_eq!(view.elicit_cursor, 1);
+        assert!(view.elicit_focus.is_focused(window));
+    });
+
+    // 数字键直接选；回车选高亮的那项。
+    cx.simulate_keystrokes("1");
+    assert_eq!(
+        sent(&actions),
+        vec![
+            "ElicitationChoose { field_ix: 0, opt_ix: 0 }",
+            "ElicitationSubmit"
+        ]
+    );
+    cx.dispatch_action(super::ElicitPick);
+    assert_eq!(
+        sent(&actions),
+        vec![
+            "ElicitationChoose { field_ix: 0, opt_ix: 0 }",
+            "ElicitationSubmit"
+        ]
+    );
+
+    // Esc 跳过这道题，不停整轮。
+    cx.dispatch_action(super::ElicitSkip);
+    assert_eq!(sent(&actions), vec!["ElicitationDismiss"]);
+
+    // 卡片收走后焦点回到输入框。
+    view.update(cx, |view, cx| {
+        view.elicitation = None;
+        view.elicitation_inputs.clear();
+        view.elicit_focus_move = Some(super::ElicitFocusMove::Leave);
+        view.schedule_surface_inputs(cx);
+    });
+    draw_settled(cx);
+    cx.update(|window, cx| {
+        let input = view.read(cx).input.clone().unwrap();
+        assert!(input.focus_handle(cx).is_focused(window), "答完回到输入框");
+    });
+}
+
+#[gpui::test]
+fn a_half_written_message_keeps_the_keyboard(cx: &mut gpui::TestAppContext) {
+    cx.update(init_ui);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = super::ConversationView::placeholder(
+            cx,
+            super::ConversationOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                profile_id: None,
+                cwd: None,
+                reason: "ask card typing".into(),
+                resume_session_id: None,
+                saved_sid: Some("acp-ask-card-typing".into()),
+            },
+        );
+        view.phase = DaemonPhase::WaitingForUser;
+        view.init_input(window, cx);
+        view
+    });
+    view.update_in(cx, |view, window, cx| {
+        let input = view.input.clone().unwrap();
+        input.update(cx, |input, cx| {
+            input.set_value("写到一半", window, cx);
+            input.focus(window, cx);
+        });
+        view.elicitation = Some(ask_card(vec![single_choice_field(vec![choice(
+            "继续", None,
+        )])]));
+        view.elicit_focus_move = Some(super::ElicitFocusMove::Arrive);
+        view.schedule_surface_inputs(cx);
+    });
+    draw_settled(cx);
+    cx.update(|window, cx| {
+        let input = view.read(cx).input.clone().unwrap();
+        assert!(
+            input.focus_handle(cx).is_focused(window),
+            "输入框里写到一半，卡片不抢键盘"
+        );
+    });
 }
 
 #[gpui::test]

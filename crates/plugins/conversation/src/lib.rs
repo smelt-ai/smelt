@@ -45,6 +45,7 @@ pub fn register(cx: &mut gpui::App) {
         eprintln!("[conversation] 话题登记失败：{error}");
     }
     agents::install(cx);
+    view::bind_elicit_keys(cx);
     if let Err(error) = api::register_views(OWNER, vec![instance::spec()], cx) {
         eprintln!("[conversation] 视图登记失败：{error}");
     }

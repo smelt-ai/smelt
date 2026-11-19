@@ -1476,6 +1476,12 @@ pub struct ConversationView {
     elicitation_inputs: std::collections::HashMap<usize, Entity<InputState>>,
     /// 输入变化负责刷新提交按钮，Enter 负责提交；订阅必须和动态字段同生命周期。
     elicitation_input_subscriptions: std::collections::HashMap<usize, gpui::Subscription>,
+    /// 提问卡自己的焦点。卡片拿着焦点时 ↑↓ 挪高亮、回车选、数字键直接选、Esc 跳过。
+    elicit_focus: FocusHandle,
+    /// 键盘高亮在 [`elicit_rows`] 的哪一行。只有卡片拿着焦点时才画出来。
+    elicit_cursor: usize,
+    /// 卡片换了：下一次有 `Window` 时把焦点交给新卡片，或者卡片收走后交回输入框。
+    elicit_focus_move: Option<ElicitFocusMove>,
     phase: DaemonPhase,
     /// `phase == Dead` 时：有 `end_code` 是细节，没有是整句。给人看用 [`Self::end_text`]。
     end_reason: String,
@@ -1785,6 +1791,57 @@ fn elicitation_input_shape(card: &PendingElicitation) -> Vec<(usize, bool)> {
         .collect()
 }
 
+gpui::actions!(
+    smelt_conversation_ask,
+    [ElicitUp, ElicitDown, ElicitPick, ElicitSkip]
+);
+
+/// 提问卡拿着焦点时的按键上下文。比工作台深，Esc 先到这里，不会被工作台的关闭接走。
+pub(crate) const ELICIT_KEY_CONTEXT: &str = "ElicitCard";
+
+/// 提问卡的按键。方向键、回车、空格、Esc 只绑在卡片自己的上下文上，焦点不在卡片里时
+/// 照常交给别处。
+pub(crate) fn bind_elicit_keys(cx: &mut App) {
+    cx.bind_keys([
+        gpui::KeyBinding::new("up", ElicitUp, Some(ELICIT_KEY_CONTEXT)),
+        gpui::KeyBinding::new("down", ElicitDown, Some(ELICIT_KEY_CONTEXT)),
+        gpui::KeyBinding::new("enter", ElicitPick, Some(ELICIT_KEY_CONTEXT)),
+        gpui::KeyBinding::new("space", ElicitPick, Some(ELICIT_KEY_CONTEXT)),
+        gpui::KeyBinding::new("escape", ElicitSkip, Some(ELICIT_KEY_CONTEXT)),
+    ]);
+}
+
+/// 提问卡上键盘能走到的一行：一个选项，或一个输入框（自由文本字段、「其他答案」）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ElicitRow {
+    Option { field: usize, option: usize },
+    Input(usize),
+}
+
+/// 卡片上从上到下的行，键盘高亮按这个顺序走。外链字段只有一个按钮，不进来。
+fn elicit_rows(card: &PendingElicitation) -> Vec<ElicitRow> {
+    let mut rows = Vec::new();
+    for (field, view) in card.fields.iter().enumerate() {
+        match &view.kind {
+            ElicitFieldKindView::Select(options) | ElicitFieldKindView::MultiSelect(options) => {
+                rows.extend((0..options.len()).map(|option| ElicitRow::Option { field, option }));
+                if view.allow_custom_input {
+                    rows.push(ElicitRow::Input(field));
+                }
+            }
+            ElicitFieldKindView::Text { .. } => rows.push(ElicitRow::Input(field)),
+            ElicitFieldKindView::ExternalUrl(_) => {}
+        }
+    }
+    rows
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ElicitFocusMove {
+    Arrive,
+    Leave,
+}
+
 impl ConversationView {
     /// 结束原因按当前语言说成的一句；活会话是空的。
     fn end_text(&self) -> String {
@@ -1905,6 +1962,9 @@ impl ConversationView {
             elicitation: None,
             elicitation_inputs: Default::default(),
             elicitation_input_subscriptions: Default::default(),
+            elicit_focus: cx.focus_handle(),
+            elicit_cursor: 0,
+            elicit_focus_move: None,
             status_line: None,
             history_error: None,
             history_backfill_started: false,
@@ -2429,6 +2489,7 @@ impl ConversationView {
             cx.with_window(entity_id, |window, cx| {
                 let _ = view.update(cx, |this, cx| {
                     this.ensure_elicitation_inputs(window, cx);
+                    this.settle_elicit_focus(window, cx);
                     this.apply_pending_composer_restore(window, cx);
                     cx.notify();
                 });
@@ -4441,7 +4502,18 @@ impl ConversationView {
                 self.permission_submitting = None;
             }
             let previous_input_shape = self.elicitation.as_ref().map(elicitation_input_shape);
+            let previous_card = self.elicitation.as_ref().map(|card| card.id.clone());
             self.elicitation = snap.pending_elicitation;
+            let current_card = self.elicitation.as_ref().map(|card| card.id.clone());
+            if previous_card != current_card {
+                self.elicit_cursor = 0;
+                self.elicit_focus_move = Some(if current_card.is_some() {
+                    ElicitFocusMove::Arrive
+                } else {
+                    ElicitFocusMove::Leave
+                });
+                prepare_surface_inputs = true;
+            }
             if self.elicitation.is_none() {
                 self.elicitation_inputs.clear();
                 self.elicitation_input_subscriptions.clear();
@@ -4890,19 +4962,149 @@ impl ConversationView {
     /// 更新后的 `chosen`——本地 socket 往返够快，不用做乐观本地更新，免得
     /// 跟服务端真相分叉。单字段单选点了自动追发一条 Submit，跟服务端那边
     /// 「整卡只有一个单选字段，点了就是答案」的判断保持一致。
-    fn pick_elicit_option(&mut self, field_ix: usize, opt_ix: usize, _cx: &mut Context<Self>) {
+    ///
+    /// 单选题的答案要么是选项、要么是自己写的：点了选项就清掉这题写了一半的答案，
+    /// 提交时服务端「写了字就以字为准」才不会盖过刚点的选项。
+    fn pick_elicit_option(
+        &mut self,
+        field_ix: usize,
+        opt_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(h) = live_handle(&self.handle, self.phase) else {
             return;
         };
+        let Some(card) = self.elicitation.as_ref() else {
+            return;
+        };
+        let single_choice = card
+            .fields
+            .get(field_ix)
+            .is_some_and(|field| matches!(field.kind, ElicitFieldKindView::Select(_)));
+        let answers_card = single_choice && card.fields.len() == 1;
+        if let Some(row) = elicit_rows(card).iter().position(|row| {
+            *row == ElicitRow::Option {
+                field: field_ix,
+                option: opt_ix,
+            }
+        }) {
+            self.elicit_cursor = row;
+        }
+        if single_choice && let Some(input) = self.elicitation_inputs.get(&field_ix) {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
         let _ = h
             .action_tx
             .try_send(AcpUserAction::ElicitationChoose { field_ix, opt_ix });
-        let single_select = self.elicitation.as_ref().is_some_and(|card| {
-            card.fields.len() == 1 && matches!(card.fields[0].kind, ElicitFieldKindView::Select(_))
-        });
-        if single_select {
+        if answers_card {
             let _ = h.action_tx.try_send(AcpUserAction::ElicitationSubmit);
         }
+        cx.notify();
+    }
+
+    /// 卡片刚出现：用户正看着这段对话、输入框里没写到一半时，把键盘交给卡片——写到一半
+    /// 就抢走，后面敲的字会变成选项。卡片收走时焦点还在卡片上（或随卡片上的输入框没了），
+    /// 交回输入框。
+    fn settle_elicit_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.elicit_focus_move.take() {
+            Some(ElicitFocusMove::Arrive) => {
+                let watching = self.focus_handle.contains_focused(window, cx)
+                    || self.elicit_focus.is_focused(window);
+                let composer_idle = self
+                    .input
+                    .as_ref()
+                    .is_none_or(|input| input.read(cx).value().trim().is_empty());
+                if self.elicitation.is_some() && watching && composer_idle {
+                    self.focus_elicit_row(0, window, cx);
+                }
+            }
+            Some(ElicitFocusMove::Leave) => {
+                if self.elicit_focus.is_focused(window) || window.focused(cx).is_none() {
+                    self.focus_input(window, cx);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// 高亮挪到第 `row` 行：输入框行把焦点交给那个输入框，选项行由卡片自己拿着焦点。
+    fn focus_elicit_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.elicitation.as_ref() else {
+            return;
+        };
+        let rows = elicit_rows(card);
+        let Some(target) = rows.get(row).copied() else {
+            return;
+        };
+        self.elicit_cursor = row;
+        match target {
+            ElicitRow::Input(field) => {
+                if let Some(input) = self.elicitation_inputs.get(&field) {
+                    input.update(cx, |input, cx| input.focus(window, cx));
+                }
+            }
+            ElicitRow::Option { .. } => window.focus(&self.elicit_focus, cx),
+        }
+        cx.notify();
+    }
+
+    /// ↑↓：在卡片上挪高亮，到头就停。
+    fn move_elicit_cursor(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.elicitation.as_ref() else {
+            return;
+        };
+        let last = elicit_rows(card).len().saturating_sub(1);
+        let row = if down {
+            (self.elicit_cursor + 1).min(last)
+        } else {
+            self.elicit_cursor.saturating_sub(1)
+        };
+        self.focus_elicit_row(row, window, cx);
+    }
+
+    /// 回车、空格：选中高亮的选项，或进到高亮的输入框。
+    fn activate_elicit_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.elicitation.as_ref() else {
+            return;
+        };
+        match elicit_rows(card).get(self.elicit_cursor).copied() {
+            Some(ElicitRow::Option { field, option }) => {
+                self.pick_elicit_option(field, option, window, cx)
+            }
+            Some(ElicitRow::Input(_)) => self.focus_elicit_row(self.elicit_cursor, window, cx),
+            None => {}
+        }
+    }
+
+    /// 数字键 1–9：选高亮所在那道题的第几个选项。
+    fn pick_elicit_number(&mut self, number: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.elicitation.as_ref() else {
+            return;
+        };
+        let rows = elicit_rows(card);
+        let field = match rows.get(self.elicit_cursor) {
+            Some(ElicitRow::Option { field, .. } | ElicitRow::Input(field)) => *field,
+            None => return,
+        };
+        if rows.contains(&ElicitRow::Option {
+            field,
+            option: number - 1,
+        }) {
+            self.pick_elicit_option(field, number - 1, window, cx);
+        }
+    }
+
+    /// 焦点在卡片的某个输入框里时，它在 [`elicit_rows`] 里是第几行。
+    fn focused_elicit_input_row(&self, window: &Window, cx: &App) -> Option<usize> {
+        let card = self.elicitation.as_ref()?;
+        let (&field, _) = self
+            .elicitation_inputs
+            .iter()
+            .find(|(_, input)| input.focus_handle(cx).is_focused(window))?;
+        elicit_rows(card)
+            .iter()
+            .position(|row| *row == ElicitRow::Input(field))
     }
 
     /// 所有必填字段都有值后才可提交（可选字段留空不会阻塞）。
@@ -5983,8 +6185,8 @@ fn live_elapsed_ms(turn_started_at_ms: Option<u64>) -> Option<u64> {
 /// 这一轮此刻在做什么。
 #[derive(Debug, PartialEq, Eq)]
 enum NowActivity {
-    /// 有权限请求等用户点。
-    Waiting,
+    /// 停在用户这边：等批准，或者等回答提问卡。
+    Waiting(UserWait),
     /// 最近一个还在跑的工具（子智能体之外）。
     Tool(ToolKind, String),
     /// 只剩子智能体在跑，主线在等它们。
@@ -5992,6 +6194,13 @@ enum NowActivity {
     /// 最新一段是正文，正在往外写。
     Answering,
     Thinking,
+}
+
+/// 这一轮在等用户做什么。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserWait {
+    Approval,
+    Answer,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -6007,7 +6216,7 @@ struct NowState {
 fn now_state(
     entries: &[AcpEntry],
     live_subagents: &[SubagentView],
-    waiting: bool,
+    waiting: Option<UserWait>,
     hidden: impl Fn(usize) -> bool,
 ) -> NowState {
     let turn_start = latest_user_message_index(entries).map_or(0, |ix| ix + 1);
@@ -6056,8 +6265,8 @@ fn now_state(
             AcpEntry::Assistant { text, .. } => !text.trim().is_empty(),
             _ => true,
         });
-    let activity = if waiting {
-        NowActivity::Waiting
+    let activity = if let Some(wait) = waiting {
+        NowActivity::Waiting(wait)
     } else if let Some((kind, title)) = running_tool {
         NowActivity::Tool(kind, title)
     } else if running_agents > 0 {
@@ -6092,7 +6301,8 @@ fn now_state(
 
 fn now_activity_label(state: &NowState) -> String {
     match &state.activity {
-        NowActivity::Waiting => t!("now.waiting").into_owned(),
+        NowActivity::Waiting(UserWait::Approval) => t!("now.waiting").into_owned(),
+        NowActivity::Waiting(UserWait::Answer) => t!("now.answer").into_owned(),
         NowActivity::Tool(kind, title) => now_tool_label(*kind, title),
         NowActivity::Agents => crate::plural(
             state.running_agents,

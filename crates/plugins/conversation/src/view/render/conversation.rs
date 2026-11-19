@@ -1393,7 +1393,13 @@ impl ConversationView {
         let now_state = now_state(
             &self.entries,
             &self.subagents,
-            !self.permissions.is_empty(),
+            if !self.permissions.is_empty() {
+                Some(UserWait::Approval)
+            } else if self.elicitation.is_some() {
+                Some(UserWait::Answer)
+            } else {
+                None
+            },
             |ix| {
                 layout
                     .get(ix)
@@ -1406,7 +1412,7 @@ impl ConversationView {
             },
         );
         let lead = match now_state.activity {
-            NowActivity::Waiting => div()
+            NowActivity::Waiting(_) => div()
                 .size(px(6.))
                 .mx(px(3.5))
                 .flex_shrink_0()

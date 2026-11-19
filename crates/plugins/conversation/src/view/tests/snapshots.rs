@@ -8,7 +8,8 @@
 //! ```
 //!
 //! 图在 `target/tmp/snapshots/conversation/`：每一问滚到顶各一张，段收着、全展开各一套，
-//! 深浅两套主题，2 倍像素。字形走真实的 CoreText，渲染走离屏 Metal。
+//! 深浅两套主题，2 倍像素。字形走真实的 CoreText，渲染走离屏 Metal。没给真实快照时另画
+//! 等人回答的提问卡（`ask-*`），一张键盘高亮在第二项、一张没有焦点。
 //!
 //! 默认不跑：界面语言、主题色板都是进程级全局，和并行的其它测试会互相盖掉。
 
@@ -43,10 +44,26 @@ fn conversation_snapshots() {
     // 上一份会话的图留着会混进来。
     let _ = std::fs::remove_dir_all(&out);
     std::fs::create_dir_all(&out).expect("建出图目录");
+    let ask = std::env::var_os("SMELT_CONVERSATION_SNAPSHOT")
+        .is_none()
+        .then(ask_snapshot);
     let mut written = Vec::new();
     for (theme, suffix) in [(DEFAULT_LIGHT, "light"), (DEFAULT_DARK, "dark")] {
         for expanded in [false, true] {
-            written.extend(render(&snapshot, theme, suffix, expanded, &out));
+            written.extend(render(&snapshot, theme, suffix, expanded, None, &out));
+        }
+        if let Some(ask) = &ask {
+            for keyboard in [false, true] {
+                let name = if keyboard { "ask-keyboard" } else { "ask" };
+                written.extend(render(
+                    ask,
+                    theme,
+                    suffix,
+                    false,
+                    Some((name, keyboard)),
+                    &out,
+                ));
+            }
         }
     }
     assert!(!written.is_empty(), "一张图也没画出来");
@@ -116,11 +133,83 @@ fn sample_snapshot() -> ConversationSnapshot {
     tail_snapshot(0, 0, entries, DaemonPhase::Thinking)
 }
 
+/// 等人回答的一轮：一道带说明的单选题和一道多选题，一张卡。
+fn ask_snapshot() -> ConversationSnapshot {
+    use smelt_plugin_api::model::acp_session::{
+        ElicitFieldKindView, ElicitFieldView, ElicitOptionView, PendingElicitation,
+    };
+    let option = |label: &str, description: Option<&str>| ElicitOptionView {
+        label: label.into(),
+        description: description.map(Into::into),
+        flag: None,
+    };
+    let mut snapshot = tail_snapshot(
+        0,
+        0,
+        vec![
+            AcpEntry::User("插件里的图片显示不出来，看看怎么修".into()),
+            AcpEntry::Assistant {
+                text: "要支持插件图片，有两种实质不同的改法，需要你定一下。".into(),
+                thought: false,
+            },
+            AcpEntry::ToolCall {
+                id: "ask-1".into(),
+                title: "smelt_ask_user".into(),
+                kind: ToolKind::Other,
+                status: ToolCallStatus::InProgress,
+                output: Vec::new(),
+                children: Vec::new(),
+                subagents: Vec::new(),
+                peer: None,
+            },
+        ],
+        DaemonPhase::WaitingForUser,
+    );
+    snapshot.pending_elicitation = Some(PendingElicitation {
+        id: "ask".into(),
+        message: String::new(),
+        fields: vec![
+            ElicitFieldView {
+                key: "q0".into(),
+                title:
+                    "按哪个方案做？推荐第一种：同时修 GPUI Shell 的资源路径解析，现有写法不用改。"
+                        .into(),
+                required: true,
+                allow_custom_input: true,
+                kind: ElicitFieldKindView::Select(vec![
+                    option(
+                        "按推荐方案",
+                        Some("修 GPUI Shell 和 Smelt，保留现有插件图片写法"),
+                    ),
+                    option("只改 Smelt", Some("新增 Smelt 专用的插件资源路径接口")),
+                    option("先不改", None),
+                ]),
+            },
+            ElicitFieldView {
+                key: "q1".into(),
+                title: "这次发版带上哪些改动？".into(),
+                required: true,
+                allow_custom_input: true,
+                kind: ElicitFieldKindView::MultiSelect(vec![
+                    option("提问卡焦点修复", None),
+                    option("改动弹窗按内容定高", None),
+                    option("纯文本不再画成代码块", None),
+                ]),
+            },
+        ],
+        chosen: [(0, vec![0]), (1, vec![0, 2])].into_iter().collect(),
+        text_values: Default::default(),
+    });
+    snapshot
+}
+
+/// `ask`：画提问卡，带名字和卡片是否拿着键盘（高亮在第二行）。
 fn render(
     snapshot: &ConversationSnapshot,
     theme: &str,
     suffix: &str,
     expanded: bool,
+    ask: Option<(&str, bool)>,
     out: &Path,
 ) -> Vec<std::path::PathBuf> {
     let mut cx = HeadlessAppContext::with_platform(
@@ -181,6 +270,22 @@ fn render(
         }
     };
     draw(&mut cx);
+
+    if let Some((name, keyboard)) = ask {
+        if keyboard {
+            cx.update_window(window.into(), |_, window, cx| {
+                view.update(cx, |view, cx| view.focus_elicit_row(1, window, cx));
+            })
+            .expect("给卡片焦点");
+        }
+        draw(&mut cx);
+        let path = out.join(format!("{name}-{suffix}.png"));
+        cx.capture_screenshot(window.into())
+            .unwrap_or_else(|error| panic!("截图失败: {error:#}"))
+            .save(&path)
+            .unwrap_or_else(|error| panic!("写 {} 失败: {error}", path.display()));
+        return vec![path];
+    }
 
     let prompts: Vec<usize> = cx.update(|cx| {
         view.read(cx)

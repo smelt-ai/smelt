@@ -1,36 +1,9 @@
-//! ACP 审批卡与选择题卡。
+//! ACP 审批卡与提问卡。
 
 use super::*;
 use rust_i18n::t;
 use smelt_plugin_api::ui::kit::TYPE;
-use smelt_plugin_api::ui::{Checkbox, Radio, TextInput};
-
-/// 选择题的一行。外框、字号和悬停透明度留在这里；勾选语义交给 smelt-ui 的单选 / 复选框。
-fn elicit_choice_row<E>(row: E, selected: bool) -> E
-where
-    E: gpui::Styled + gpui::InteractiveElement,
-{
-    let ink = gpui::rgb(ui_theme::ink());
-    row.w_full()
-        .min_w_0()
-        .min_h(px(36.))
-        .px_3p5()
-        .py_2()
-        .type_style(TYPE.ui)
-        .rounded_lg()
-        .border_1()
-        .border_color(if selected {
-            ink.into()
-        } else {
-            ui_theme::hair()
-        })
-        .bg(if selected {
-            gpui::rgb(ui_theme::soft_hover())
-        } else {
-            ui_theme::overlay(0x10)
-        })
-        .hover(|row| row.opacity(0.85))
-}
+use smelt_plugin_api::ui::{Checkbox, TextInput};
 
 impl ConversationView {
     /// 权限请求长在输入框顶上，和输入框连成一体：一个琥珀色小圆点说「等你」，
@@ -224,233 +197,304 @@ impl ConversationView {
         )
     }
 
-    pub(super) fn render_elicitation_card(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
-        let muted: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
-        // 选择题跟审批卡同一套居中栏；描边走 Grok 强调蓝，不走警告黄。
-        // 单字段单选点击即提交；多选是勾选列表，选齐后亮「提交」。
-        let elicitation = self.elicitation.as_ref().map(|card| {
-            let ready = self.elicit_ready(cx);
-            let has_multi = card
-                .fields
-                .iter()
-                .any(|field| matches!(field.kind, ElicitFieldKindView::MultiSelect(_)));
-            let requires_explicit_submit = card.fields.len() > 1
-                || card.fields.iter().any(|field| {
-                    !matches!(field.kind, ElicitFieldKindView::Select(_))
-                        || field.allow_custom_input
-                });
-            let show_footer = requires_explicit_submit
-                && !matches!(
-                    card.fields.as_slice(),
-                    [smelt_plugin_api::model::acp_session::ElicitFieldView {
-                        kind: ElicitFieldKindView::ExternalUrl(_),
-                        ..
-                    }]
-                );
-            let skip = Button::new("acp-elicit-skip")
-                .quiet()
-                .small()
-                .label(t!("approval.skip"))
-                .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.dismiss_elicitation(cx);
-                }));
-            let mut inner = div()
-                .flex()
-                .flex_col()
-                .id("acp-elicit-card")
-                .debug_selector(|| "acp-elicit-card".to_string())
-                .w_full()
+    /// 提问卡：题面在上、「跳过」在右上；选项一行一个，标题下面是说明；能自己写答案的题，
+    /// 最后一行是输入框。单选题点一下就是答案；多选、几道题一起问时最后点「提交」。
+    ///
+    /// 卡片拿着焦点时 ↑↓ 挪高亮、回车或空格选、数字键选第几个、Esc 跳过（见
+    /// [`ConversationView::move_elicit_cursor`]）。
+    /// `keyboard`：焦点在卡片里，画出键盘高亮。
+    pub(super) fn render_elicitation_card(
+        &self,
+        keyboard: bool,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let card = self.elicitation.as_ref()?;
+        let text = gpui::rgb(ui_theme::text());
+        let ready = self.elicit_ready(cx);
+        let cursor_row = keyboard
+            .then(|| elicit_rows(card).get(self.elicit_cursor).copied())
+            .flatten();
+        let only_choice = matches!(
+            card.fields.as_slice(),
+            [field] if matches!(field.kind, ElicitFieldKindView::Select(_))
+        );
+        // 单个单选题点了就是答案；别的（多选、几道题、填空）都要最后点「提交」。外链只有一个按钮。
+        let explicit_submit = !only_choice
+            && !matches!(
+                card.fields.as_slice(),
+                [smelt_plugin_api::model::acp_session::ElicitFieldView {
+                    kind: ElicitFieldKindView::ExternalUrl(_),
+                    ..
+                }]
+            );
+        let custom_text = |field: usize| {
+            self.elicitation_inputs
+                .get(&field)
+                .is_some_and(|input| !input.read(cx).value().trim().is_empty())
+        };
+        let skip = Button::new("acp-elicit-skip")
+            .debug_selector(|| "acp-elicit-skip".to_string())
+            .quiet()
+            .small()
+            .label(t!("approval.skip"))
+            .on_click(cx.listener(|this, _ev, _window, cx| {
+                this.dismiss_elicitation(cx);
+            }));
+        let heading = |content: String| {
+            div()
+                .flex_1()
                 .min_w_0()
-                .flex_shrink_0()
-                .max_w(ui_theme::conversation_max_width())
-                .p_4()
-                .gap_3()
-                .rounded(ui_theme::card_radius())
-                .border_1()
-                .border_color(ui_theme::hair())
-                .bg(gpui::rgb(ui_theme::surface()))
-                .child(
+                .whitespace_normal()
+                .type_style(TYPE.ui)
+                .text_color(text)
+                .child(content)
+        };
+        let mut skip = Some(skip);
+        let mut inner = div()
+            .flex()
+            .flex_col()
+            .id("acp-elicit-card")
+            .debug_selector(|| "acp-elicit-card".to_string())
+            .key_context(ELICIT_KEY_CONTEXT)
+            .track_focus(&self.elicit_focus)
+            .on_action(cx.listener(|this, _: &ElicitUp, window, cx| {
+                this.move_elicit_cursor(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ElicitDown, window, cx| {
+                this.move_elicit_cursor(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ElicitPick, window, cx| {
+                this.activate_elicit_row(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ElicitSkip, _window, cx| {
+                this.dismiss_elicitation(cx);
+            }))
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                let modifiers = &ev.keystroke.modifiers;
+                if modifiers.platform || modifiers.control || modifiers.alt {
+                    return;
+                }
+                // 数字键只在卡片自己拿着焦点时接；焦点在输入框里时是在写答案。
+                if !this.elicit_focus.is_focused(window) {
+                    return;
+                }
+                if let Some(number) = ev
+                    .keystroke
+                    .key
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=9).contains(n))
+                {
+                    this.pick_elicit_number(number, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .w_full()
+            .min_w_0()
+            .flex_shrink_0()
+            .max_w(ui_theme::conversation_max_width())
+            .p_4()
+            .gap_3()
+            .rounded(ui_theme::card_radius())
+            .border_1()
+            .border_color(ui_theme::hair())
+            .bg(gpui::rgb(ui_theme::surface()));
+        if !card.message.trim().is_empty() {
+            inner = inner.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .w_full()
+                    .gap_4()
+                    .child(heading(card.message.clone()))
+                    .children(skip.take()),
+            );
+        }
+        for (fix, field) in card.fields.iter().enumerate() {
+            // 几道题一起问时，各题的题面就是它的小标题；只有一道题时题面在卡片正文里。
+            let title = (card.fields.len() > 1 || card.message.trim().is_empty())
+                .then(|| field.title.trim().to_string())
+                .filter(|title| !title.is_empty());
+            let mut section = div().flex().flex_col().w_full().min_w_0().gap_2();
+            if title.is_some() || skip.is_some() {
+                section = section.child(
                     div()
+                        .flex()
+                        .items_start()
+                        .w_full()
+                        .gap_4()
+                        .child(heading(match &field.kind {
+                            ElicitFieldKindView::Text { secret: true } => {
+                                t!("elicit.secret", title = field.title).into_owned()
+                            }
+                            _ => title.unwrap_or_default(),
+                        }))
+                        .children(skip.take()),
+                );
+            }
+            match &field.kind {
+                ElicitFieldKindView::ExternalUrl(url) => {
+                    let url = url.clone();
+                    section = section.child(
+                        div().child(
+                            Button::new((
+                                gpui::ElementId::from("acp-elicit-url"),
+                                field.key.clone(),
+                            ))
+                            .primary()
+                            .label(t!("elicit.open_continue"))
+                            .on_click(cx.listener(
+                                move |this, _ev, _window, cx| {
+                                    cx.open_url(&url);
+                                    this.submit_elicitation(cx);
+                                },
+                            )),
+                        ),
+                    );
+                }
+                ElicitFieldKindView::Text { .. } => {
+                    section = section.children(
+                        self.elicitation_inputs
+                            .get(&fix)
+                            .map(|input| TextInput::new(input).w_full()),
+                    );
+                }
+                ElicitFieldKindView::Select(options)
+                | ElicitFieldKindView::MultiSelect(options) => {
+                    let multi = matches!(field.kind, ElicitFieldKindView::MultiSelect(_));
+                    let chosen = card.chosen.get(&fix).cloned().unwrap_or_default();
+                    // 单选题写了自己的答案，提交的就是写的字，选项不再显示成选中。
+                    let typed = custom_text(fix);
+                    let mut list = div()
+                        .flex()
+                        .flex_col()
+                        .id((gpui::ElementId::from("acp-elicit-field"), field.key.clone()))
+                        .w_full()
+                        .min_w_0()
+                        .gap_0p5();
+                    for (oix, opt) in options.iter().enumerate() {
+                        let highlighted = cursor_row
+                            == Some(ElicitRow::Option {
+                                field: fix,
+                                option: oix,
+                            });
+                        let checked = chosen.contains(&oix) && (multi || !typed);
+                        let label = opt.display_label();
+                        let row = ListRow::new(gpui::SharedString::from(format!(
+                            "acp-elicit-opt-{fix}-{oix}"
+                        )))
+                        .debug_selector(move || format!("acp-elicit-opt-{fix}-{oix}"))
+                        .selected(highlighted)
                         .flex()
                         .items_center()
                         .w_full()
-                        .gap_2()
+                        .min_w_0()
+                        .min_h(px(36.))
+                        .px_3()
+                        .py_2()
+                        .gap_3()
+                        .when(multi, |row| {
+                            row.child(
+                                Checkbox::new(gpui::SharedString::from(format!(
+                                    "acp-elicit-check-{fix}-{oix}"
+                                )))
+                                .checked(checked)
+                                .accessibility_label(label.clone()),
+                            )
+                        })
                         .child(
                             div()
-                                .type_style(TYPE.ui_medium)
-                                .child(t!("elicit.title").into_owned()),
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .child(
+                                    div()
+                                        .type_style(if checked && !multi {
+                                            TYPE.ui_medium
+                                        } else {
+                                            TYPE.ui
+                                        })
+                                        .child(label),
+                                )
+                                .children(opt.description.clone().map(|description| {
+                                    div()
+                                        .type_style(TYPE.text_small)
+                                        .text_color(gpui::rgb(ui_theme::row_muted(highlighted)))
+                                        .child(description)
+                                })),
                         )
-                        .child(div().flex_1())
-                        .when(has_multi, |row| {
+                        .when(checked && !multi, |row| {
                             row.child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_full()
-                                    .bg(ui_theme::overlay(0x18))
-                                    .type_style(TYPE.text_xsmall)
-                                    .text_color(muted)
-                                    .child(t!("elicit.multi").into_owned()),
+                                Icon::new(IconName::Check)
+                                    .size(px(14.))
+                                    .flex_shrink_0()
+                                    .text_color(text),
                             )
                         })
-                        .child(skip),
-                )
-                .when(!card.message.trim().is_empty(), |card_el| {
-                    card_el.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .type_style(TYPE.ui)
-                            .text_color(muted)
-                            .child(card.message.clone()),
-                    )
-                });
-            for (fix, field) in card.fields.iter().enumerate() {
-                if let ElicitFieldKindView::ExternalUrl(url) = &field.kind {
-                    let url = url.clone();
-                    inner = inner.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .type_style(TYPE.text_xsmall)
-                                    .text_color(muted)
-                                    .child(field.title.clone()),
-                            )
-                            .child(
-                                Button::new((
-                                    gpui::ElementId::from("acp-elicit-url"),
-                                    field.key.clone(),
-                                ))
-                                .primary()
-                                .label(t!("elicit.open_continue"))
-                                .on_click(cx.listener(
-                                    move |this, _ev, _window, cx| {
-                                        cx.open_url(&url);
-                                        this.submit_elicitation(cx);
-                                    },
-                                )),
-                            ),
-                    );
-                    continue;
+                        .on_click(cx.listener(
+                            move |this, _ev, window, cx| {
+                                this.pick_elicit_option(fix, oix, window, cx);
+                            },
+                        ));
+                        list = list.child(row);
+                    }
+                    if field.allow_custom_input
+                        && let Some(input) = self.elicitation_inputs.get(&fix)
+                    {
+                        // 单个单选题没有底部的「提交」：写了答案就在这一行里交。
+                        let inline_submit = only_choice && typed;
+                        list = list.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .w_full()
+                                .min_w_0()
+                                .mt_1()
+                                .gap_2()
+                                .child(TextInput::new(input).w_full().flex_1())
+                                .when(inline_submit, |row| {
+                                    row.child(
+                                        Button::new(("acp-elicit-custom-submit", fix))
+                                            .debug_selector(|| {
+                                                "acp-elicit-custom-submit".to_string()
+                                            })
+                                            .primary()
+                                            .small()
+                                            .icon(IconName::ArrowUp)
+                                            .icon_action(t!("elicit.submit"))
+                                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                                if this.elicit_ready(cx) {
+                                                    this.submit_elicitation(cx);
+                                                }
+                                            })),
+                                    )
+                                }),
+                        );
+                    }
+                    section = section.child(list);
                 }
-                if let ElicitFieldKindView::Text { secret } = &field.kind {
-                    let input = self.elicitation_inputs.get(&fix).cloned();
-                    inner = inner.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
-                                if *secret {
-                                    t!("elicit.secret", title = field.title).into_owned()
-                                } else {
-                                    field.title.clone()
-                                },
-                            ))
-                            .children(input.map(|input| TextInput::new(&input).w_full())),
-                    );
-                    continue;
-                }
-                let (options, is_multi) = match &field.kind {
-                    ElicitFieldKindView::Select(o) => (o, false),
-                    ElicitFieldKindView::MultiSelect(o) => (o, true),
-                    ElicitFieldKindView::Text { .. } => unreachable!(),
-                    ElicitFieldKindView::ExternalUrl(_) => unreachable!(),
-                };
-                let chosen = card.chosen.get(&fix).cloned().unwrap_or_default();
-                let mut list = div()
-                    .flex()
-                    .flex_col()
-                    .id((gpui::ElementId::from("acp-elicit-field"), field.key.clone()))
-                    .w_full()
-                    .min_w_0()
-                    .flex_shrink_0()
-                    .gap_2();
-                for (oix, opt) in options.iter().enumerate() {
-                    let selected = chosen.contains(&oix);
-                    let id = gpui::SharedString::from(format!("acp-elicit-opt-{fix}-{oix}"));
-                    let label = opt.display_label();
-                    let pick = cx.listener(move |this, _: &(), _window, cx| {
-                        this.pick_elicit_option(fix, oix, cx);
-                    });
-                    list = list.child(if is_multi {
-                        elicit_choice_row(
-                            Checkbox::new(id)
-                                .checked(selected)
-                                .label(label)
-                                .debug_selector(move || format!("acp-elicit-opt-{fix}-{oix}"))
-                                .on_change(move |_, window, cx| pick(&(), window, cx)),
-                            selected,
-                        )
-                        .into_any_element()
-                    } else {
-                        elicit_choice_row(
-                            Radio::new(id)
-                                .checked(selected)
-                                .label(label)
-                                .debug_selector(move || format!("acp-elicit-opt-{fix}-{oix}"))
-                                .on_select(move |window, cx| pick(&(), window, cx)),
-                            selected,
-                        )
-                        .into_any_element()
-                    });
-                }
-                if field.allow_custom_input {
-                    let input = self.elicitation_inputs.get(&fix).cloned();
-                    list = list.children(input.map(|input| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .w_full()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .type_style(TYPE.text_xsmall)
-                                    .text_color(muted)
-                                    .child(t!("elicit.none_above").into_owned()),
-                            )
-                            .child(TextInput::new(&input).w_full())
-                    }));
-                }
-                inner = inner.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .w_full()
-                        .min_w_0()
-                        .gap_1()
-                        .when(card.fields.len() > 1, |d| {
-                            d.child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
-                                if is_multi {
-                                    t!("elicit.multi_title", title = field.title).into_owned()
-                                } else {
-                                    field.title.clone()
-                                },
-                            ))
-                        })
-                        .child(list),
-                );
             }
-            if show_footer {
-                inner = inner.child(
-                    div().flex().items_center().w_full().gap_2().child(
-                        Button::new("acp-elicit-submit")
-                            .debug_selector(|| "acp-elicit-submit".to_string())
-                            .primary()
-                            .disabled(!ready)
-                            .label(t!("elicit.submit"))
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                if this.elicit_ready(cx) {
-                                    this.submit_elicitation(cx);
-                                }
-                            })),
-                    ),
-                );
-            }
+            inner = inner.child(section);
+        }
+        if explicit_submit {
+            inner = inner.child(
+                div().flex().justify_end().w_full().child(
+                    Button::new("acp-elicit-submit")
+                        .debug_selector(|| "acp-elicit-submit".to_string())
+                        .primary()
+                        .disabled(!ready)
+                        .label(t!("elicit.submit"))
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            if this.elicit_ready(cx) {
+                                this.submit_elicitation(cx);
+                            }
+                        })),
+                ),
+            );
+        }
+        Some(
             div()
                 .flex()
                 .flex_col()
@@ -461,7 +505,7 @@ impl ConversationView {
                 .pb_3()
                 .flex_shrink_0()
                 .child(inner)
-        });
-        elicitation.map(|el| el.into_any_element())
+                .into_any_element(),
+        )
     }
 }

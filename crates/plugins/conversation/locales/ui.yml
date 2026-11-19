@@ -238,17 +238,8 @@ edit:
     zh-CN: "编辑并重发最后一条消息（图片需重新添加）"
 elicit:
   custom_answer:
-    en: "Enter your own answer"
-    zh-CN: "输入你自己的答案"
-  multi:
-    en: "Multiple choices allowed"
-    zh-CN: "可多选"
-  multi_title:
-    en: "%{title} (choose any)"
-    zh-CN: "%{title}（可多选）"
-  none_above:
-    en: "None of these? Enter your own answer"
-    zh-CN: "以上都不是？输入自己的答案"
+    en: "Other answer…"
+    zh-CN: "其他答案…"
   open_continue:
     en: "Open and Continue"
     zh-CN: "打开并继续"
@@ -258,9 +249,6 @@ elicit:
   submit:
     en: "Submit"
     zh-CN: "提交"
-  title:
-    en: "Waiting for Your Choice"
-    zh-CN: "等你选择"
 empty:
   workbench:
     en: "Workbench"
@@ -564,6 +552,9 @@ now:
     other:
       en: "Waiting for %{count} subagents"
       zh-CN: "等 %{count} 个子智能体做完"
+  answer:
+    en: "Waiting for your answer"
+    zh-CN: "等你回答"
   answering:
     en: "Writing the answer"
     zh-CN: "正在写回答"

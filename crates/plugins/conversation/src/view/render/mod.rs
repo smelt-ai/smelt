@@ -70,6 +70,7 @@ impl Render for ConversationView {
             let id: gpui::ElementId = ("acp-jump-to-latest-enter", cx.entity_id()).into();
             overlay_enter(id, EnterFrom::Below, window, cx)
         });
+        let elicit_keyboard = self.elicit_focus.contains_focused(window, cx);
         self.view(
             composer_focus,
             sweep_presence,
@@ -79,6 +80,7 @@ impl Render for ConversationView {
                 window.is_window_active(),
                 true,
             ),
+            elicit_keyboard,
             cx,
         )
     }
@@ -93,6 +95,7 @@ impl ConversationView {
         sweep_presence: f32,
         jump_enter: Option<OverlayEnter>,
         animate_ambient: bool,
+        elicit_keyboard: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let muted: gpui::Hsla = gpui::rgb(ui_theme::muted()).into();
@@ -518,7 +521,7 @@ impl ConversationView {
                 .flex_1()
                 .min_h(gpui::px(0.)),
         );
-        let elicitation = self.render_elicitation_card(cx);
+        let elicitation = self.render_elicitation_card(elicit_keyboard, cx);
         let permission_tray = self.render_permission_tray(animate_ambient, cx);
         let input_row = self.render_composer(
             composer_focus,
@@ -549,15 +552,22 @@ impl ConversationView {
             // capture_key_down 都轮不到我们（见下面 ⌘V 那段的教训）。
             // 没在补全时一律不拦，按键原样交回输入框。
             .capture_action(
-                cx.listener(|this, _: &gpui_base::input::MoveUp, _window, cx| {
+                cx.listener(|this, _: &gpui_base::input::MoveUp, window, cx| {
                     if this.move_completion(-1, cx) {
+                        cx.stop_propagation();
+                    } else if let Some(row) = this.focused_elicit_input_row(window, cx) {
+                        // 提问卡上的输入框是单行的，↑↓ 用来回到上下的选项。
+                        this.focus_elicit_row(row.saturating_sub(1), window, cx);
                         cx.stop_propagation();
                     }
                 }),
             )
             .capture_action(cx.listener(
-                |this, _: &gpui_base::input::MoveDown, _window, cx| {
+                |this, _: &gpui_base::input::MoveDown, window, cx| {
                     if this.move_completion(1, cx) {
+                        cx.stop_propagation();
+                    } else if let Some(row) = this.focused_elicit_input_row(window, cx) {
+                        this.focus_elicit_row(row + 1, window, cx);
                         cx.stop_propagation();
                     }
                 },
@@ -605,6 +615,10 @@ impl ConversationView {
                         cx.stop_propagation();
                     } else if this.completion.take().is_some() {
                         cx.notify();
+                        cx.stop_propagation();
+                    } else if this.elicitation.is_some() {
+                        // 有题等着回答时，Esc 先跳过这道题，不直接停掉整轮。
+                        this.dismiss_elicitation(cx);
                         cx.stop_propagation();
                     } else if this.is_visibly_running() {
                         this.cancel_turn();

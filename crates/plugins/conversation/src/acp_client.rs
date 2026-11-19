@@ -138,6 +138,23 @@ pub struct ConversationClientHandle {
     conn_cell: Arc<Mutex<Option<RuntimeStream>>>,
 }
 
+#[cfg(test)]
+impl ConversationClientHandle {
+    /// 不连运行时的把手：视图发出去的动作从返回的接收端读。
+    pub(crate) fn detached() -> (Self, smol::channel::Receiver<AcpUserAction>) {
+        let (action_tx, action_rx) = smol::channel::unbounded();
+        let (_event_tx, event_rx) = smol::channel::unbounded();
+        (
+            Self {
+                action_tx,
+                event_rx,
+                conn_cell: Arc::new(Mutex::new(None)),
+            },
+            action_rx,
+        )
+    }
+}
+
 impl Drop for ConversationClientHandle {
     fn drop(&mut self) {
         // `Drop` 经常由 GPUI 主线程触发。获取 cell 的锁和 `shutdown` 都可能进入内核，
