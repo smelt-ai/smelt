@@ -191,6 +191,9 @@ mod tests {
         );
         // 插件目录本身和别处的变化。
         assert_eq!(root("/home/me/.smelt/plugins"), None);
-        assert_eq!(root("/home/me/.smelt/plugin-data/hello.sqlite3"), None);
+        assert_eq!(
+            root("/home/me/.smelt/plugin-data/hello/store.sqlite3"),
+            None
+        );
     }
 }

@@ -1,6 +1,6 @@
 # 本地状态存储
 
-Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。`~/.smelt` 顶层放什么在 `smelt_paths::DECLARED_ENTRIES` 里登记，新加的文件或目录要先登记；没登记的（旧 JSON、迁库备份 `*.bak-v*`、下线功能的目录）都是历史残留，设置「系统 → 清理残留」列出来，确认后删掉（维护插件 `crates/plugins/maintenance/src/residue.rs`）。插件的数据一律放 `plugin-data/<插件 id>…`，不另占顶层。
+Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。`~/.smelt` 顶层放什么在 `smelt_paths::DECLARED_ENTRIES` 里登记，新加的文件或目录要先登记；没登记的（旧 JSON、迁库备份 `*.bak-v*`、下线功能的目录）都是历史残留，设置「系统 → 清理残留」列出来，确认后删掉（维护插件 `crates/plugins/maintenance/src/residue.rs`）。插件的数据一律放 `plugin-data/<插件 id>/`，不另占顶层。
 
 ## 运行时库
 
@@ -54,10 +54,12 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ## 插件库
 
 ```text
-~/.smelt/plugin-data/<插件 id>.sqlite3
+~/.smelt/plugin-data/<插件 id>/store.sqlite3
 ```
 
-每个插件一份，表和版本由插件自己管（`crates/smelt-client-store/src/plugin_store.rs`），宿主不认识里面的表。内置插件也一样：通知插件的开关和发过的通知在 `smelt.notifications.sqlite3`，文件视图的在 `smelt.files.sqlite3`。
+每个插件一个目录，整个归它：库在 `store.sqlite3`，表和版本由插件自己管（`crates/smelt-client-store/src/plugin_store.rs`），宿主不认识里面的表；库以外的文件也放这个目录（JS 插件用 `data_dir()` 取）。内置插件也一样：通知插件的开关和发过的通知在 `smelt.notifications/`，文件视图的在 `smelt.files/`。插件之间不共用目录：复制一个插件改成新 id，数据要另拷一份。
+
+旧版本的库是 `plugin-data/<插件 id>.sqlite3`，插件第一次打开库时挪进自己的目录（先把 WAL 并回主库再改名）；别的进程还开着旧库就这次照用旧位置，下次再挪。
 
 ## 手机缓存
 

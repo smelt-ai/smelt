@@ -316,6 +316,25 @@ my-theme/
 3. **注册表按 id，不分语言**：Rust 和 JS 登记进同一张表。同 id 不是替换：用户插件和随 App 带的插件同 id 时不加载、报重复。插件的库按 id 命名，换一个实现共用 id 就会打开、改写原插件的库；改自带插件是复制一份换个 id，再在布局里换上。换功能走「只放一个的扩展点由用户选」。
 4. **只在画界面上有差别**：Rust 插件直接用 GPUI，JS 插件用 gpui-shell；数据、服务、注册两边拿到的一样。
 
+**随 App 带的 JS 插件**放仓库根 `plugins/<name>/`，编进二进制（`crates/smelt/src/plugins/builtin.rs`）。功能往这里迁，`crates/plugins/` 逐步只剩原子能力（终端、对话这类带运行时状态或渲染量大的）。一个插件一个自包含的目录，复制出去就能跑：
+
+```text
+plugins/archive/
+  gpui-shell.json     id 沿用原来 Rust 插件的（smelt.archive）
+  main.js             入口，只做组装
+  *.js                按职责平铺拆分，不再分子目录
+  locales/            文案
+  assets/             图标、图片
+  tests/              纯逻辑单测；fixtures/ 是给 Rust 测试工具的场景数据
+```
+
+1. **只 import 自己目录里的文件和宿主模块**，不设插件间共享的目录：要复用的进组件库或宿主接口。
+2. **发的就是源码**：写 JS 加 JSDoc，类型检查靠 tsc 的 checkJs，不经编译。用户复制到手的要能直接改。
+3. **迁过来的插件沿用原 id**，同一个提交删掉 Rust 版：插件的数据目录、布局里的视图 id 都不用迁，正式包里任何时候只有一份。
+4. **数据放 `~/.smelt/plugin-data/<id>/`**（JS 用 `data_dir()` 取，库在里面的 `store.sqlite3`），见 `docs/local-storage.md`。
+
+改自带插件是复制一份换个 id，数据另拷一份，不共用：这套步骤写在 smelt skill（`agent/skills/smelt/SKILL.md`）里，由智能体照着做，App 里不另做按钮。
+
 ## 想扩展时选哪种
 
 先看要改的是什么，不是先看会哪种语言：

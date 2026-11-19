@@ -1,4 +1,4 @@
-//! 终端自己的库（`~/.smelt/plugin-data/smelt.terminal.sqlite3`）：终端字号。
+//! 终端自己的库（`~/.smelt/plugin-data/smelt.terminal/store.sqlite3`）：终端字号。
 //!
 //! 只在启动时读一次、设置页改的时候写一次。库打不开（权限、版本比插件新）就用出厂字号，
 //! 改了只在这次运行里有效，日志里留一句。

@@ -1,4 +1,4 @@
-//! 语言插件自己的库（`~/.smelt/plugin-data/smelt.language.sqlite3`）：用户选的界面语言。
+//! 语言插件自己的库（`~/.smelt/plugin-data/smelt.language/store.sqlite3`）：用户选的界面语言。
 //!
 //! 只在启动时读一次、设置页改的时候写一次。库打不开（权限、版本比插件新）就跟着系统，
 //! 改了只在这次运行里有效，日志里留一句。

@@ -166,6 +166,7 @@ const SURFACE: &[(&str, Js)] = &[
     ("client", Via("call")),
     ("session_ops", Via("call")),
     ("plugin_store", Via("store_query / store_execute")),
+    ("plugin_data_dir", Named("data_dir")),
     ("rusqlite", Via("store_query / store_execute")),
     ("paths", Via("smelt-fs 和环境变量")),
     (

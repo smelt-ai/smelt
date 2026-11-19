@@ -1,4 +1,4 @@
-//! 自动化插件自己的库（`~/.smelt/plugin-data/smelt.automations.sqlite3`）：发出去、还挂在
+//! 自动化插件自己的库（`~/.smelt/plugin-data/smelt.automations/store.sqlite3`）：发出去、还挂在
 //! 通知中心里的运行完成通知。记下来是为了运行记录被清掉、机器移除之后撤得掉，重启后也撤得掉。
 //!
 //! 小量写，在事件里同步写；只在启动时读一次。库打不开就只在内存里记，日志里留一句。

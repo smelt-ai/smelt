@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 mod plugin_store;
 mod schema;
 
-pub use plugin_store::{PLUGIN_DATA_DIR, PluginStore, plugin_store};
+pub use plugin_store::{PLUGIN_DATA_DIR, PluginStore, plugin_data_dir, plugin_store};
 pub use rusqlite;
 
 pub const DATABASE_FILE_NAME: &str = "client.sqlite3";

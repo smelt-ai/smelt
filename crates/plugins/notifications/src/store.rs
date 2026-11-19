@@ -1,4 +1,4 @@
-//! 通知插件自己的库（`~/.smelt/plugin-data/smelt.notifications.sqlite3`）：哪类提醒发系统
+//! 通知插件自己的库（`~/.smelt/plugin-data/smelt.notifications/store.sqlite3`）：哪类提醒发系统
 //! 通知，和发出去、还挂在通知中心里的那些。
 //!
 //! 都是小量写，在事件里同步写；只在启动时读一次。库打不开（权限、版本比插件新）就只在

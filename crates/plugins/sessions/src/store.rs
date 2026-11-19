@@ -1,4 +1,4 @@
-//! 会话插件自己的库（`~/.smelt/plugin-data/smelt.sessions.sqlite3`）：侧栏的置顶、手动顺序、
+//! 会话插件自己的库（`~/.smelt/plugin-data/smelt.sessions/store.sqlite3`）：侧栏的置顶、手动顺序、
 //! 折叠，每段会话的分屏布局，上次选中的会话，和行首头像用哪个。都是这台桌面自己的界面状态
 //! 和偏好，运行时不存。
 //!

@@ -208,7 +208,7 @@ Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui
 - 插件能加的：视图（面板）、页、命令、菜单项、布局、主题。改不了 Smelt 自己界面的画法（比如给整个窗口加背景图），用户要的东西超出这些就直说，不要硬凑。
 - 接口以 `gpui-kit.d.ts` 为准，不要凭印象写。它是 `gpui-kit`、`gpui-base`、`smelt-ui`、`smelt-plugin-api`、`smelt-fs` 等模块的完整声明，各插件拿到的是同一份：第一次 `smelt plugin check` 或 Smelt 加载后会生成到插件目录里，也可以先读别的插件目录里的（`ls ~/.smelt/plugins/*/gpui-kit.d.ts`）。文件很大，按模块名和函数名搜，不要整份读。
 - 示例：https://github.com/smelt-ai/smelt-plugin-demo（按钮、状态、系统通知、主题）。
-- 控件用 `smelt-ui` 的，样子和 Smelt 一致。`smelt-plugin-api` 里有：登记视图、命令、页面、布局、主题、菜单（`register_*`），`set_status_menu` 设本插件自己的 macOS 菜单栏图标（每个插件一个，互不顶掉；图标是 `asset()` 取的 PNG 路径），`await next_event()` 等宿主事件，`next_command()` 接自己登记的命令，`store_query` / `store_execute` 读写插件自己的 SQLite 库（在 `~/.smelt/plugin-data/<id>.sqlite3`），`call(machine, method, params)` 调运行时，`locale()` 取当前语言。
+- 控件用 `smelt-ui` 的，样子和 Smelt 一致。`smelt-plugin-api` 里有：登记视图、命令、页面、布局、主题、菜单（`register_*`），`set_status_menu` 设本插件自己的 macOS 菜单栏图标（每个插件一个，互不顶掉；图标是 `asset()` 取的 PNG 路径），`await next_event()` 等宿主事件，`next_command()` 接自己登记的命令，`store_query` / `store_execute` 读写插件自己的 SQLite 库，`data_dir()` 取插件自己的数据目录（`~/.smelt/plugin-data/<id>/`，库也在里面），`call(machine, method, params)` 调运行时，`locale()` 取当前语言。
 - `render` 只读内存：读写文件、跑命令、联网都放到事件回调或 `cx.spawn` 里，结果存在视图上，render 只画它。要等变化就 `await next_event()`，不要定时轮询。
 - 图片和图标：插件目录里的文件经 `smelt-plugin-api` 的 `asset("assets/logo.png")` 取路径，再交给 `image()`、`svg()`、`Icon` 或登记视图、菜单项时的 `icon`；直接写 `"assets/logo.png"` 找不到，画出来是空的。路径相对插件目录，文件不在 `asset` 当场抛错（`smelt plugin check` 查得出）。不经 `asset` 的路径是 Smelt 自带的图标 `icons/<名字>.svg`（名字见 `gpui-kit.d.ts` 里 `ViewInfo.icon` 的说明）。`svg()` 和 `Icon` 只取形状、涂成文字色，彩色的 logo 用 `image()`（SVG、PNG 都行）。网上的图片眼下画不出来（下载进插件目录会触发重挂），用户要就直说。
 - 插件是可信代码，能读写任意文件、运行任意命令，和 Smelt 本身一样。
@@ -219,7 +219,17 @@ Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui
 2. 每改一轮跑 `smelt plugin check ~/.smelt/plugins/<id>`：不开 App 加载并渲染一次，过了退出 0、stdout 是 JSON；没过退出 1，stderr 是带文件行列的错误。查得出语法错误、导入不存在的名字、`init` 和第一次 `render` 里的错、样式方法写错；查不出布局好不好看、点了之后的交互和异步状态。check 不过不算写完。
 3. Smelt 开着时，插件目录里文件一保存就自动重挂这个插件，不用重启（插件视图的状态从头来）。保存一两秒后跑 `smelt plugin status <id>` 确认 App 里挂上了：挂好了退出 0；没挂上或加载失败退出 1，原因在 stderr 和 JSON 的 `error` 里。`smelt plugin status` 不带 id 列全部。
 4. 运行时的 `console.log` 和脚本错误在 `~/.smelt/app.log`，带 `[plugin]` 标记；check 时直接打在 stderr。
-5. 插件运行时自己写的文件放到插件目录外面（比如 `~/.smelt/plugin-data/`），写进插件目录会触发重挂。
+5. 插件运行时自己写的文件放进 `data_dir()`，不要写进插件目录：写进去会触发重挂。
 6. 不要用截屏、AppleScript 之类去点 Smelt 的界面，用上面的命令。check 和 status 过了，用 `smelt app run smelt.app/open-view --args '{"view":"<id>/main"}'` 把它在 App 里打开给用户看。
 7. 插件自己的命令想让智能体也能调（`smelt app run`），登记时加 `cli: true` 并给 `args`（不带参数写 `[]`）。只开给参数能写成 JSON、不用人当场在界面上操作就有结果的命令。
-8. 删掉插件就是删 `~/.smelt/plugins/<id>/`，App 开着会自动撤下；要清干净再删 `~/.smelt/plugin-data/<id>.sqlite3`。删之前先跟用户确认。
+8. 删掉插件就是删 `~/.smelt/plugins/<id>/`，App 开着会自动撤下；要清干净再删 `~/.smelt/plugin-data/<id>/`。删之前先跟用户确认。
+
+改 Smelt 自带的插件：
+
+自带插件只读，App 每次更新整个换掉，不要在它原来的目录里改（`smelt plugin status` 列出的路径在 `~/.smelt/builtin-plugins/` 下的就是自带的）。复制一份成用户自己的插件再改：
+
+1. 跟用户定新 id，不能和原来的相同：同 id 的会被当成重复、不加载。
+2. 先拷数据，再拷插件：新插件一挂上就会建自己的空库。原插件有 `~/.smelt/plugin-data/<原 id>/` 就建好 `~/.smelt/plugin-data/<新 id>/`，库用 `sqlite3 <原目录>/store.sqlite3 ".backup '<新目录>/store.sqlite3'"` 拷（App 开着也拷得完整，不要直接 `cp` 库文件），目录里别的文件照常 `cp`。
+3. `smelt plugin status <原 id>` 取 `path`，把整个目录拷到 `~/.smelt/plugins/<新 id>/`，改 `gpui-shell.json` 的 `id`（`name` 也改一下，好和原来的分开），然后按上面「写和调试」的步骤改、check、看 status。
+4. 新插件的视图 id 是 `<新 id>/<名字>`。原插件照常在跑：它的视图留在布局里，菜单项、命令也还在。用 open-view 打开新的给用户看，跟用户说明原来那份要自己关掉。
+5. 之后 App 更新了原插件，复制出来的这份不会跟着变，要合进来就再对比原插件的新版本手动改。

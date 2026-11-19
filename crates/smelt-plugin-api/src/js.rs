@@ -474,7 +474,9 @@ export function view_args(): unknown;
 export function register_file_opener(name: string): null;
 /** SQL 参数。true / false 存成 1 / 0。 */
 export type SqlValue = string | number | boolean | null;
-/** 在本插件自己的 SQLite 库（~/.smelt/plugin-data/<插件 id>.sqlite3）里查询，每行是列名到值的对象。表由插件自己建；表结构的版本可以记在 PRAGMA user_version。BLOB 列取不出来。 */
+/** 本插件的数据目录（~/.smelt/plugin-data/<插件 id>/），没有就建。插件运行时自己写的文件放这里：写进插件目录会触发重挂。store_query / store_execute 的库也在这里，别直接动它。在 init 或事件里取一次记下，不要在 render 里调。 */
+export function data_dir(): string;
+/** 在本插件自己的 SQLite 库（data_dir() 下的 store.sqlite3）里查询，每行是列名到值的对象。表由插件自己建；表结构的版本可以记在 PRAGMA user_version。BLOB 列取不出来。 */
 export function store_query(sql: string, params?: SqlValue[]): Promise<Record<string, string | number | null>[]>;
 /** 在本插件自己的库里执行一条语句，返回改动的行数。 */
 export function store_execute(sql: string, params?: SqlValue[]): Promise<number>;
@@ -758,6 +760,7 @@ impl JsPlugin {
         let opener_owner = self.0.borrow().id.clone();
         let query_owner = self.0.borrow().id.clone();
         let execute_owner = query_owner.clone();
+        let data_owner = query_owner.clone();
         let event_owner = query_owner.clone();
         let themes = self.clone();
         let layouts = self.clone();
@@ -1305,6 +1308,14 @@ impl JsPlugin {
                 let (sql, params) = sql_arguments("store_execute", arguments)?;
                 let owner = execute_owner.clone();
                 Ok(async move { store_execute(&owner, &sql, params) })
+            })
+            .function("data_dir", move |_| {
+                if data_owner.is_empty() {
+                    return Err(HostError::new("data_dir：插件没有来源身份，没有数据目录"));
+                }
+                crate::plugin_data_dir(&data_owner)
+                    .map(|dir| HostValue::from(dir.to_string_lossy().into_owned()))
+                    .map_err(|error| HostError::new(format!("data_dir：{error}")))
             })
             .async_function("next_command", move |_| Ok(calls.next_command()))
             .function("resolve_command", move |arguments| {
