@@ -503,6 +503,65 @@ fn restore_waits_for_the_model_before_writing_other_settings() {
     restoring.join().unwrap();
 }
 
+/// Pi 驱动发布的脚本工具开关是 off/on 两项的下拉，不是布尔开关。
+fn pi_codemode(on: bool) -> smelt_core::acp_conn::SessionConfigState {
+    select(
+        "codemode",
+        if on { "On" } else { "Off" },
+        &[("off", "Off"), ("on", "On")],
+    )
+}
+
+/// 新开 Pi 对话带着「完全放行 + 脚本工具开」：就绪时脚本工具还是关的，两项要 agent 先后两次
+/// 确认。写回在补做线程里等确认，事件线程每批归并完都要更新守护状态；写回等待期间不能占着
+/// 事件线程要的锁，否则第二次确认进不来，只能等满超时，首条消息跟着干等。
+#[test]
+fn restoring_pi_script_tools_finishes_once_confirmed() {
+    let (session, cmd_rx) = direct_session(quiet_with(|state| {
+        state.config_options = vec![mode("Ask each time"), pi_codemode(false)];
+    }));
+    crate::acp_supervise::remember_relaunch_config(
+        &session,
+        acp_idle::SuspendedConfig::from_values(&[
+            ("mode".into(), "bypassPermissions".into()),
+            ("codemode".into(), "on".into()),
+        ]),
+    );
+    session.startup_hold.store(true, Ordering::SeqCst);
+    let session = Arc::new(session);
+    let subscribers = new_event_hub();
+    let after_ready = {
+        let session = Arc::clone(&session);
+        let subscribers = subscribers.clone();
+        std::thread::spawn(move || {
+            crate::acp_supervise::run_after_ready("acp-idle", &session, &subscribers)
+        })
+    };
+    // 两项一起写：完全放行、脚本工具开。
+    for _ in 0..2 {
+        cmd_rx.recv_blocking().unwrap();
+    }
+    let started = std::time::Instant::now();
+    // 照事件线程的做法：归并一批，再更新守护状态。
+    for options in [
+        vec![mode("Full access"), pi_codemode(false)],
+        vec![mode("Full access"), pi_codemode(true)],
+    ] {
+        smelt_core::acp_session::apply_event(
+            &mut session.reduced.lock(),
+            smelt_core::acp_conn::ConversationEvent::ConfigOptions(options),
+        );
+        crate::acp_host::update_acp_daemon_state(&session, &subscribers);
+    }
+    after_ready.join().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "确认到了就该放行，等了 {:?}",
+        started.elapsed()
+    );
+    assert!(!session.startup_hold.load(Ordering::SeqCst));
+}
+
 #[test]
 fn a_rejected_restore_does_not_hold_the_user_action() {
     let saved = acp_idle::SuspendedConfig::capture(&tuned_state());
