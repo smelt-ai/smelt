@@ -178,8 +178,12 @@ fn fetch_grok_quota_data(_access: CredentialAccess) -> QuotaFetchFuture {
     Box::pin(async { Ok(fetch_grok_quota().await?.map(ProviderQuotaData::Windows)) })
 }
 
-fn fetch_cursor_quota_data(_access: CredentialAccess) -> QuotaFetchFuture {
-    Box::pin(async { Ok(fetch_cursor_quota().await?.map(ProviderQuotaData::Windows)) })
+fn fetch_cursor_quota_data(access: CredentialAccess) -> QuotaFetchFuture {
+    Box::pin(async move {
+        Ok(fetch_cursor_quota(access)
+            .await?
+            .map(ProviderQuotaData::Windows))
+    })
 }
 
 fn fetch_antigravity_quota_data(access: CredentialAccess) -> QuotaFetchFuture {

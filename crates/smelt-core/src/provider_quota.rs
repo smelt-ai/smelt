@@ -184,16 +184,41 @@ pub async fn fetch_grok_quota_with_token(token: &str) -> anyhow::Result<Option<P
     parse_grok_quota(&response.text().await?)
 }
 
-/// 使用 Cursor IDE 本地登录态查询套餐额度。
+/// 使用 Cursor 本地登录态查询套餐额度。
 ///
 /// Cursor 没有官方个人额度 API；这里打的是 Dashboard 同款、未文档化的
-/// Connect RPC。凭据只读 Cursor 的 `state.vscdb`（`cursorAuth/accessToken`），
-/// 不读 `CURSOR_API_KEY`（那是团队 Admin Key，鉴权模型不同）。没有 IDE
-/// 登录态时返回 `Ok(None)`。
-pub async fn fetch_cursor_quota() -> anyhow::Result<Option<ProviderQuota>> {
-    let Some(token) = local_cursor_access_token() else {
-        return Ok(None);
-    };
+/// Connect RPC。先用 Cursor CLI（smelt 跑的就是它）的登录令牌，没有再用
+/// Cursor IDE `state.vscdb` 里的；两边是同一套账户令牌。不读 `CURSOR_API_KEY`
+/// （那是 API Key，鉴权模型不同）。都没有登录态时返回 `Ok(None)`。
+pub async fn fetch_cursor_quota(access: CredentialAccess) -> anyhow::Result<Option<ProviderQuota>> {
+    let (cli, blocked) = local_cursor_cli_credential(access);
+    if let Some(credential) = cli {
+        return match fetch_cursor_quota_with_token(&credential.token).await {
+            // 缓存的令牌过期了：Cursor CLI 下次运行会刷新并写回钥匙串，重读一次。
+            Err(error) if credential.from_keychain && is_unauthorized(&error) => {
+                match keychain_token_after_rejection(
+                    CURSOR_QUOTA_PROVIDER,
+                    CURSOR_CLI_KEYCHAIN_SERVICE,
+                    &credential.token,
+                    read_cursor_cli_keychain,
+                ) {
+                    Some(token) => fetch_cursor_quota_with_token(&token).await,
+                    None => Err(error),
+                }
+            }
+            other => other,
+        };
+    }
+    if let Some(token) = local_cursor_ide_token() {
+        return fetch_cursor_quota_with_token(&token).await;
+    }
+    match blocked {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+async fn fetch_cursor_quota_with_token(token: &str) -> anyhow::Result<Option<ProviderQuota>> {
     let client = quota_http_client()?;
     let response = client
         .post(CURSOR_USAGE_ENDPOINT)
@@ -207,9 +232,11 @@ pub async fn fetch_cursor_quota() -> anyhow::Result<Option<ProviderQuota>> {
         .await?;
     let status = response.status();
     if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "Cursor quota endpoint returned HTTP {status}"
-        ));
+        return Err(QuotaEndpointError {
+            provider: "Cursor",
+            status,
+        }
+        .into());
     }
     parse_cursor_quota(&response.text().await?)
 }
@@ -588,11 +615,143 @@ fn grok_credential_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// 从 Grok CLI 的 `auth.json` 里挑出 grok.com 会话 bearer。
+/// 钥匙串熔断状态用的账户 id，和 `QuotaTarget::id()` 一致。
+const CURSOR_QUOTA_PROVIDER: &str = "cursor";
+/// Cursor CLI 在 macOS 钥匙串里存访问令牌的项（`security add-generic-password` 写入）。
+const CURSOR_CLI_KEYCHAIN_SERVICE: &str = "cursor-access-token";
+const CURSOR_CLI_KEYCHAIN_ACCOUNT: &str = "cursor-user";
+/// Cursor CLI 在 Linux Secret Service 里存整份凭据 JSON 的项。
+const CURSOR_CLI_SECRET_SERVICE: &str = "cursor-credentials";
+
+struct CursorCliCredential {
+    token: String,
+    /// 来自钥匙串缓存的令牌过期后能重读。
+    from_keychain: bool,
+}
+
+/// Cursor CLI 的登录令牌，和 CLI 自己的存储规则一致：
 ///
-/// 优先 `https://auth.x.ai::<client-id>`（当前 SuperGrok OIDC），再退回
-/// 旧版 `https://accounts.x.ai/sign-in`，最后才接受任意带 `key` 的条目。
-fn local_cursor_access_token() -> Option<String> {
+/// - macOS 默认存钥匙串；设了 `AGENT_CLI_CREDENTIAL_STORE=file` 时是 `~/.cursor/auth.json`。
+/// - Linux 是 `$XDG_CONFIG_HOME/cursor/auth.json`；有桌面会话时整份凭据挪进 Secret
+///   Service，文件只留 `{"storedIn":"os-secret-store"}`。
+/// - Windows 是 `%APPDATA%\Cursor\auth.json`。
+///
+/// 第二项是钥匙串被拒绝或正在等授权时的错误，没有别的凭据时才报给用户。
+fn local_cursor_cli_credential(
+    access: CredentialAccess,
+) -> (Option<CursorCliCredential>, Option<anyhow::Error>) {
+    // macOS 先查钥匙串：那是 CLI 的默认存储，从文件模式切回来后旧文件不会删。条目是 CLI 用
+    // `security` 写的，同样用 `security` 读不弹窗。
+    let mut blocked = None;
+    if cfg!(target_os = "macos") {
+        let lookup = keychain_token(
+            CURSOR_QUOTA_PROVIDER,
+            CURSOR_CLI_KEYCHAIN_SERVICE,
+            access,
+            read_cursor_cli_keychain,
+        );
+        if let KeychainLookup::Token(token) = lookup {
+            let credential = CursorCliCredential {
+                token,
+                from_keychain: true,
+            };
+            return (Some(credential), None);
+        }
+        blocked = lookup.blocked_error();
+    }
+
+    for path in cursor_cli_auth_paths() {
+        if let Ok(body) = fs::read(path)
+            && let Some(token) = cursor_token_from_auth_json(&body)
+        {
+            let credential = CursorCliCredential {
+                token,
+                from_keychain: false,
+            };
+            return (Some(credential), None);
+        }
+    }
+
+    // 文件里只有 `storedIn` 标记时，凭据在 Secret Service 里。
+    if cfg!(target_os = "linux") {
+        let output = Command::new("timeout")
+            .args([
+                "2",
+                "secret-tool",
+                "lookup",
+                "service",
+                CURSOR_CLI_SECRET_SERVICE,
+                "account",
+                CURSOR_CLI_KEYCHAIN_ACCOUNT,
+            ])
+            .output();
+        if let Ok(output) = output
+            && output.status.success()
+            && let Some(token) = cursor_token_from_auth_json(&output.stdout)
+        {
+            let credential = CursorCliCredential {
+                token,
+                from_keychain: false,
+            };
+            return (Some(credential), None);
+        }
+    }
+
+    (None, blocked)
+}
+
+fn read_cursor_cli_keychain() -> KeychainRead {
+    match find_generic_password(
+        CURSOR_CLI_KEYCHAIN_SERVICE,
+        Some(CURSOR_CLI_KEYCHAIN_ACCOUNT),
+    ) {
+        KeychainRead::Secret(token) => {
+            let token = token.trim();
+            if token.is_empty() {
+                KeychainRead::NotFound
+            } else {
+                KeychainRead::Secret(token.to_string())
+            }
+        }
+        other => other,
+    }
+}
+
+fn cursor_cli_auth_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if cfg!(target_os = "macos") {
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".cursor/auth.json"));
+        }
+    } else if cfg!(target_os = "windows") {
+        if let Some(app_data) = env::var_os("APPDATA") {
+            paths.push(PathBuf::from(app_data).join("Cursor/auth.json"));
+        }
+    } else {
+        let config = env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".config")));
+        if let Some(config) = config {
+            paths.push(config.join("cursor/auth.json"));
+        }
+    }
+    paths
+}
+
+/// CLI 凭据 JSON（文件或 Secret Service 里的）中的 `accessToken`。只有
+/// `storedIn` 标记、登出标记或缺令牌时是 `None`。
+fn cursor_token_from_auth_json(body: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    value
+        .get("accessToken")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+fn local_cursor_ide_token() -> Option<String> {
     for path in cursor_state_db_paths() {
         if let Some(token) = read_cursor_token_from_db(&path) {
             return Some(token);
@@ -642,6 +801,10 @@ fn read_cursor_token_from_db(path: &Path) -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
+/// 从 Grok CLI 的 `auth.json` 里挑出 grok.com 会话 bearer。
+///
+/// 优先 `https://auth.x.ai::<client-id>`（当前 SuperGrok OIDC），再退回
+/// 旧版 `https://accounts.x.ai/sign-in`，最后才接受任意带 `key` 的条目。
 fn grok_token_from_auth_json(value: &serde_json::Value) -> Option<String> {
     let object = value.as_object()?;
     let mut legacy = None;
@@ -1060,6 +1223,29 @@ mod tests {
         assert_eq!(quota.windows[0].used_percent, 50.0);
         assert_eq!(quota.windows[0].resets_at_ms, Some(1_789_566_331_000));
         assert_eq!(quota.windows[0].label, "month");
+    }
+
+    #[test]
+    fn cursor_cli_auth_json_yields_the_access_token() {
+        assert_eq!(
+            cursor_token_from_auth_json(
+                br#"{"accessToken":" access ","refreshToken":"refresh","apiKey":"key"}"#
+            )
+            .as_deref(),
+            Some("access")
+        );
+    }
+
+    #[test]
+    fn cursor_cli_auth_json_without_token_is_none() {
+        // 凭据在系统密钥库里时文件只剩这个标记；登出后只剩 signedOut。
+        assert_eq!(
+            cursor_token_from_auth_json(br#"{"storedIn":"os-secret-store"}"#),
+            None
+        );
+        assert_eq!(cursor_token_from_auth_json(br#"{"signedOut":true}"#), None);
+        assert_eq!(cursor_token_from_auth_json(br#"{"accessToken":""}"#), None);
+        assert_eq!(cursor_token_from_auth_json(b"not json"), None);
     }
 
     #[test]
