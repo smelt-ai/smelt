@@ -204,7 +204,8 @@ pub(crate) fn set_power_kind_override(kind: Option<PowerKind>) -> Option<PowerKi
 pub(crate) fn current_power_kind() -> PowerKind {
     #[cfg(test)]
     {
-        if let Some(kind) = *POWER_KIND_OVERRIDE.lock().unwrap() {
+        let overridden = *POWER_KIND_OVERRIDE.lock().unwrap();
+        if let Some(kind) = overridden {
             return kind;
         }
     }
