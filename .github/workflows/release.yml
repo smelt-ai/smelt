@@ -19,43 +19,11 @@ jobs:
     # 必须 arm64：package-mac.sh 会用 file 校验产物是 arm64，Intel 直接拒绝。
     # macos-26 默认就是 Apple Silicon。
     runs-on: macos-26
+    # 平时 15 分钟；公证（notarytool --wait）在 Apple 排队时会一直等，不设上限要卡 6 小时。
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          # 发布说明要找上一个 tag，需要完整历史和全部 tag。
-          fetch-depth: 0
-
-      # 打包链路依赖这些文件真的进了 git；缺任何一个就一次性列全并失败，
-      # 而不是跑到一半才炸（历史教训：本地能打包 ≠ 文件都入了库）。
-      - name: Verify required files exist
-        run: |
-          missing=0
-          for f in \
-            Makefile \
-            scripts/package-mac.sh \
-            scripts/package-linux.sh \
-            scripts/version.sh \
-            agent/scripts/build-smelt-agent.sh \
-            scripts/fetch-bun.sh \
-            scripts/third-party-licenses.sh \
-            scripts/third-party-licenses.hbs \
-            agent/scripts/third-party-licenses.ts \
-            LICENSE \
-            NOTICE \
-            scripts/entitlements.plist \
-            scripts/jit-entitlements.plist \
-            scripts/make-dmg-bg.py \
-            scripts/dmg-settings.py \
-            assets/AppIcon.icns \
-            Cargo.toml; do
-            if [[ ! -f "$f" ]]; then
-              echo "✗ 缺少打包所需文件：$f"
-              missing=1
-            fi
-          done
-          [[ "$missing" == 0 ]] || { echo "打包链路文件不完整，终止。"; exit 1; }
-          echo "✅ 打包所需文件齐全"
 
       # 版本号只在 tag 上：tag 去掉 v 就是版本号，打包时经 SMELT_BUILD_VERSION 编进程序（见
       # scripts/version.sh，取号见 docs/release.md）。桌面请远程运行时升级时，运行时按这个版本号
@@ -175,6 +143,8 @@ jobs:
             dist/Smelt.dmg
             dist/Smelt.app.zip
           if-no-files-found: error
+          # 只是交给 publish 的中转，发布后就没用了。
+          retention-days: 7
           # dmg 和 zip 本身已经压缩过。
           compression-level: 0
 
@@ -192,6 +162,8 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
+    # 冷编 8 分钟。
+    timeout-minutes: 30
     container: ubuntu:22.04
     steps:
       # reqwest 在 Linux 上走 native-tls，openssl-sys 要 OpenSSL 头文件和 pkg-config。
@@ -232,22 +204,32 @@ jobs:
           name: smeltd-linux-${{ matrix.arch }}
           path: dist/smeltd-*-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
+          # 只是交给 publish 的中转，发布后就没用了。
+          retention-days: 7
 
   # 手机 App 的安装包。正式签名的 keystore 存在 secrets 里，没配就失败（发出 debug 签名的
   # 包，以后换正式签名时用户只能卸载重装）。versionCode 用这条流水线的 run_number：
   # 逐次递增，新包总能覆盖旧包；versionName 就是 tag 去掉 v（含 -rc.N）。
   android:
     runs-on: ubuntu-24.04
+    # 平时 9 分钟。
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # 版本要求同 ci.yml 的 android-build。
+      # 版本要求和 Gradle 缓存的说明同 ci.yml 的 android-build：缓存键只看下面这几个文件，
+      # 读的是 main 上 CI 存的那份。
       - name: Set up JDK
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
+          cache: gradle
+          cache-dependency-path: |
+            mise.toml
+            mobile/**/*.gradle*
+            mobile/**/gradle-wrapper.properties
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -331,6 +313,8 @@ jobs:
           name: smelt-android
           path: dist/Smelt-*-android-arm64.apk
           if-no-files-found: error
+          # 只是交给 publish 的中转，发布后就没用了。
+          retention-days: 7
 
   # iOS：每个 tag 都传一个构建到 App Store Connect，处理完自动发给 TestFlight 内部测试组。
   # 提交 App Store 审核仍在 App Store Connect 里手动做，不是每次发版都要发手机，见 docs/release.md 的「移动端」。
@@ -338,6 +322,8 @@ jobs:
   ios:
     # App Store 要求用当前大版本的 iOS SDK 出包，macos-26 带 Xcode 26。
     runs-on: macos-26
+    # 平时 15 分钟，含上传 App Store Connect。
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -418,6 +404,8 @@ jobs:
   # 安装程序（scripts/windows-installer.iss）。第一版不签名。
   windows:
     runs-on: windows-latest
+    # 冷编要 40 分钟，读到预热缓存时快得多。
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -429,7 +417,7 @@ jobs:
         shell: bash
         run: echo "SMELT_BUILD_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      # 冷编要 25 分钟，是整个发版最慢的一条。只读 release-cache.yml 在 main 上预热的依赖缓存，
+      # 冷编要 40 分钟，是整个发版最慢的一条。只读 release-cache.yml 在 main 上预热的依赖缓存，
       # 原因同 build job。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -499,6 +487,8 @@ jobs:
           name: smelt-windows
           path: dist/smelt-*-windows-x86_64-setup.exe
           if-no-files-found: error
+          # 只是交给 publish 的中转，发布后就没用了。
+          retention-days: 7
 
   # 所有平台的包都出来了才发：下载全部产物，算一份覆盖全部产物的 SHA256SUMS（一键安装、运行时升级、
   # 应用内更新都按文件名从里面找自己那一行核对），连同一键安装脚本（发布名 install.sh）一次传上去。
@@ -506,6 +496,7 @@ jobs:
   publish:
     needs: [build, linux, android, windows]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7

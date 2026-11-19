@@ -133,7 +133,7 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 不删。
 
 桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`。安装程序和其它产物一起由 `publish` 传到
-Release，校验和写在同一份 `SHA256SUMS` 里。`windows` 读 `release-cache.yml` 在 main 上预热的依赖缓存，冷编要 25 分钟。
+Release，校验和写在同一份 `SHA256SUMS` 里。`windows` 读 `release-cache.yml` 在 main 上预热的依赖缓存，冷编要 40 分钟。
 
 这一版 exe 和安装程序都不签名。下载后 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。
 桌面的应用内更新认的就是这个安装程序：发布里同时有它和 `SHA256SUMS`、清单里已经有它的校验和，才算这个发布能装。

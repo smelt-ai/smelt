@@ -31,6 +31,7 @@ jobs:
   mac:
     # 和 release.yml 的 build 同一种 runner（Apple Silicon 的 macOS），缓存才对得上。
     runs-on: macos-26
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -50,6 +51,8 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    # 冷编要 40 分钟。
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v7

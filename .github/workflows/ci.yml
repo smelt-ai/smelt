@@ -240,11 +240,20 @@ jobs:
 
       # Gradle 9.1 / AGP 9 目前支持到 JDK 25，runner 默认的 JDK 未必在范围内，
       # 钉一个已知可用的。
+      # Gradle 依赖缓存：不缓存时每次都从 Maven Central 现下 Kotlin、AGP 那一整套，GitHub 的
+      # 机器常被它限流（429），发版的 Android 就挂。缓存键只由这几个文件的哈希决定，不带
+      # workflow 和 job 名，main 上这里存的发版也读得到；Flutter 自己那份 Gradle 工程的依赖
+      # 跟着 Flutter 版本走，所以带上 mise.toml。
       - name: Set up JDK
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
+          cache: gradle
+          cache-dependency-path: |
+            mise.toml
+            mobile/**/*.gradle*
+            mobile/**/gradle-wrapper.properties
 
       - name: Set up Android SDK
         # v3 默认还装已下线的 `tools` 包，sdkmanager 直接失败。
