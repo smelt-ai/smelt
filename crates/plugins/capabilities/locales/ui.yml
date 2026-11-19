@@ -1,99 +1,66 @@
 _version: 2
 auth:
   change_api_key:
-    en: "Change API Key"
-    zh-CN: "更换 API key"
-  choose_model:
-    en: "Choose Model"
-    zh-CN: "选模型"
-  choose_model_tooltip:
-    en: "List the models this provider offers now and pick one as the default"
-    zh-CN: "列出这个 Provider 现在能用的模型，挑一个设为默认"
+    en: "Change API Key…"
+    zh-CN: "更换 API key…"
   copy_link:
     en: "Copy Link"
     zh-CN: "复制链接"
-  current_default:
-    en: "Current Default"
-    zh-CN: "当前默认"
-  default_set:
-    en: "Default model set to %{label}"
-    zh-CN: "已设为默认模型：%{label}"
   device_code:
     en: "Open the verification page in your browser and enter this code:"
     zh-CN: "在浏览器里打开验证页，输入下面这串码："
-  done:
-    en: "Signed in. Credentials were saved to ~/.pi/agent/auth.json."
-    zh-CN: "登录成功，凭据已写入 ~/.pi/agent/auth.json。"
-  done_mcp:
-    en: "Signed in. Credentials were saved to ~/.pi/agent/mcp-auth.json."
-    zh-CN: "登录成功，凭据已写入 ~/.pi/agent/mcp-auth.json。"
   enter_api_key:
-    en: "Enter API Key"
-    zh-CN: "填 API key"
+    en: "Enter API Key…"
+    zh-CN: "填写 API key…"
   example:
     en: "Example: %{placeholder}"
     zh-CN: "示例：%{placeholder}"
   failed:
     en: "Sign-in failed: %{error}"
     zh-CN: "登录失败：%{error}"
-  login_title:
-    en: "Sign In to %{name}"
-    zh-CN: "登录 %{name}"
   mcp_signed_in:
     en: "Signed in to MCP server %{name}"
     zh-CN: "MCP 服务器 %{name} 已登录"
-  models_empty:
-    en: "This provider didn't report any models; you can enter one under “Default Model Setup”."
-    zh-CN: "这个 Provider 没有报告可用模型，可在「默认模型配置」里手填。"
-  models_failed:
-    en: "Couldn't read available models (%{error}); you can enter one under “Default Model Setup”."
-    zh-CN: "读不到可用模型（%{error}），可在「默认模型配置」里手填。"
-  models_loading:
-    en: "Loading available models…"
-    zh-CN: "正在读取可用模型…"
   more_actions:
     en: "More Actions"
     zh-CN: "更多操作"
-  more_models:
-    en: "%{count} more models can be entered under “Default Model Setup”."
-    zh-CN: "另有 %{count} 个模型，可在「默认模型配置」里填写。"
   open_authorization:
     en: "Open Authorization Page in Browser"
     zh-CN: "在浏览器中打开授权页"
   open_verification:
     en: "Open Verification Page"
     zh-CN: "打开验证页"
-  picker_title:
-    en: "Models available from %{name}"
-    zh-CN: "%{name} 的可用模型"
-  set_default:
-    en: "Set as Default"
-    zh-CN: "设为默认"
-  set_default_title:
-    en: "Set as Default Model"
-    zh-CN: "设为默认模型"
   sign_in:
-    en: "Sign In"
-    zh-CN: "登录"
+    en: "Sign In…"
+    zh-CN: "登录…"
   sign_in_again:
-    en: "Sign In Again"
-    zh-CN: "重新登录"
+    en: "Sign In Again…"
+    zh-CN: "重新登录…"
   sign_in_step_by_step:
-    en: "Sign In Step by Step (enterprise domain, sign-in method…)"
-    zh-CN: "逐项登录（企业版域名、登录方式等）"
+    en: "Sign In Step by Step…"
+    zh-CN: "逐项登录…"
   sign_in_tooltip:
-    en: "Authorize in the browser; steps with only one possible answer are skipped"
+    en: "Finish in your browser; steps with only one right answer are skipped"
     zh-CN: "在浏览器里完成授权；只有一个正确答案的步骤会自动跳过"
   sign_out:
     en: "Sign Out"
-    zh-CN: "注销"
+    zh-CN: "退出登录"
+  sign_out_question:
+    en: "Sign out of %{name}? You will need to sign in again to use it."
+    zh-CN: "退出 %{name} 的登录？要用时得重新登录。"
   status:
     api_key:
       en: "API key"
       zh-CN: "API key"
+    api_key_from:
+      en: "API key · %{source}"
+      zh-CN: "API key · %{source}"
     none:
       en: "Not set up"
       zh-CN: "未配置"
+    none_subscription:
+      en: "Not signed in · subscription available"
+      zh-CN: "未登录 · 可用订阅登录"
     oauth:
       en: "Signed in"
       zh-CN: "已登录"
@@ -107,21 +74,11 @@ auth:
     en: "Couldn't submit: %{error}"
     zh-CN: "提交失败：%{error}"
   use_api_key:
-    en: "Use API Key Instead"
-    zh-CN: "改用 API key"
+    en: "Use an API Key Instead…"
+    zh-CN: "改用 API key…"
   waiting:
     en: "An authorization link or code will appear shortly; finish signing in in your browser."
     zh-CN: "稍后会给出授权链接或验证码，用浏览器完成登录。"
-badge:
-  custom:
-    en: "Custom"
-    zh-CN: "自定义"
-  default:
-    en: "Default"
-    zh-CN: "默认"
-  subscription:
-    en: "Subscription"
-    zh-CN: "订阅"
 command:
   open_on_machine:
     en: "Open Capabilities on This Machine"
@@ -161,53 +118,40 @@ config:
   native_files:
     en: "Native Config Files"
     zh-CN: "原生配置文件"
-  opened:
-    en: "Opened %{path} in the system text editor"
-    zh-CN: "已在系统文本编辑器打开 %{path}"
   reload_tooltip:
     en: "Reload the config in ~/.pi/agent/"
     zh-CN: "重新读取 ~/.pi/agent/ 下的配置"
   remote_file:
     en: "The config file is on “%{name}” and can't be opened from this computer. Edit it in a terminal on that machine."
     zh-CN: "配置文件在「%{name}」上，这台电脑打不开。可以在那台机器的终端里改。"
-credential:
-  configured:
-    en: "Credentials set"
-    zh-CN: "凭据已配置"
-  missing:
-    en: "Missing credentials"
-    zh-CN: "缺少凭据"
-  none:
-    en: "No credentials"
-    zh-CN: "无凭据"
 default_model:
-  change:
-    en: "Change Model"
-    zh-CN: "更换模型"
-  choose_first:
-    en: "Choose a default model first"
-    zh-CN: "先选一个默认模型"
+  auto:
+    en: "Automatic"
+    zh-CN: "自动"
+  auto_description:
+    en: "Pi picks one from the providers you are signed in to."
+    zh-CN: "由 Pi 从已登录的服务商里挑。"
   manual_menu:
-    en: "Enter Provider and Model Manually…"
-    zh-CN: "手动填写 Provider 和模型…"
+    en: "Enter Manually…"
+    zh-CN: "手动填写…"
   none:
-    en: "No models to choose yet: sign in or add a provider below first"
-    zh-CN: "还没有可选的模型：先在下面登录或添加 Provider"
+    en: "No models yet: sign in to a provider below"
+    zh-CN: "还没有能用的模型：先在下面登录服务商"
   read_failed:
     en: "Couldn't read settings.json: %{error}"
-    zh-CN: "无法读取 settings.json：%{error}"
+    zh-CN: "读不了 settings.json：%{error}"
+  signed_out:
+    en: "Not signed in"
+    zh-CN: "未登录"
   thinking:
     en: "Reasoning Effort"
     zh-CN: "推理强度"
+  thinking_unset:
+    en: "Pi's default"
+    zh-CN: "Pi 默认"
   title:
     en: "Default Model"
     zh-CN: "默认模型"
-  unreadable:
-    en: "Couldn't read the model settings"
-    zh-CN: "无法读取模型配置"
-  unset:
-    en: "Not chosen yet; using Pi's built-in default"
-    zh-CN: "尚未选择，正在用 Pi 的内置默认值"
 discovery:
   auto:
     en: "No models listed: they'll be fetched from the API address on save and refreshed on every launch. To pin your own list, add models above."
@@ -394,58 +338,43 @@ memory:
     en: "Vector Search Service (optional)"
     zh-CN: "向量检索服务（可选）"
 model_editor:
+  api_key:
+    en: "API Key (optional)"
+    zh-CN: "API key（可选）"
   base_url:
-    en: "API Address (optional)"
-    zh-CN: "API 地址 (可选)"
+    en: "API URL (optional)"
+    zh-CN: "API 地址（可选）"
   base_url_placeholder:
-    en: "Leave empty for the official default endpoint"
-    zh-CN: "留空使用官方默认端点"
-  key_missing:
-    en: "No API key found; enter one below."
-    zh-CN: "尚未检测到 API key；请在下方输入。"
+    en: "Leave empty for the provider's own endpoint"
+    zh-CN: "留空用官方端点"
   key_placeholder:
-    en: "Enter API key"
-    zh-CN: "输入 API key"
+    en: "Leave empty to keep the saved one"
+    zh-CN: "留空不改已存的"
   key_required:
-    en: "Enter an API key"
-    zh-CN: "请输入 API key"
-  key_set:
-    en: "An API key is already set; leaving this empty keeps it."
-    zh-CN: "当前 API key 已配置；留空不会改动它。"
-  key_storage:
-    en: "Credentials are stored securely in ~/.pi/agent/auth.json"
-    zh-CN: "凭据将安全存放于 ~/.pi/agent/auth.json"
+    en: "%{provider} has no credentials yet: enter an API key, or sign in below"
+    zh-CN: "%{provider} 还没有凭据：填 API key，或在下面登录"
   model:
-    en: "Default Model ID"
-    zh-CN: "默认模型 ID"
+    en: "Model ID"
+    zh-CN: "模型 ID"
   model_placeholder:
-    en: "Model ID, e.g. deepseek-chat"
-    zh-CN: "模型 ID，如 deepseek-chat"
+    en: "e.g. claude-sonnet-4-5"
+    zh-CN: "如 claude-sonnet-4-5"
   model_required:
-    en: "Model ID can't be empty"
-    zh-CN: "模型 ID 不能为空"
+    en: "Enter a model ID"
+    zh-CN: "填一下模型 ID"
   provider:
-    en: "Provider"
-    zh-CN: "提供方 (Provider)"
+    en: "Provider ID"
+    zh-CN: "服务商 ID"
   provider_placeholder:
-    en: "Provider, e.g. deepseek / anthropic"
-    zh-CN: "提供方，如 deepseek / anthropic"
+    en: "e.g. anthropic"
+    zh-CN: "如 anthropic"
   provider_required:
-    en: "Provider can't be empty"
-    zh-CN: "提供方不能为空"
-  save:
-    en: "Save Settings"
-    zh-CN: "保存配置"
-  saved:
-    en: "Pi model settings saved"
-    zh-CN: "Pi 模型配置已保存"
-  title:
-    en: "Enter Provider and Model Manually"
-    zh-CN: "手动填写 Provider 和模型"
+    en: "Enter a provider ID"
+    zh-CN: "填一下服务商 ID"
 model_row:
   context:
-    en: "Context Length (optional)"
-    zh-CN: "上下文长度（可选）"
+    en: "Context"
+    zh-CN: "上下文"
   context_placeholder:
     en: "Context length (optional)"
     zh-CN: "上下文长度（可选）"
@@ -456,8 +385,8 @@ model_row:
     en: "e.g. gpt-5-mini"
     zh-CN: "例如 gpt-5-mini"
   max_tokens:
-    en: "Max Output (optional)"
-    zh-CN: "最大输出（可选）"
+    en: "Max Output"
+    zh-CN: "最大输出"
   max_tokens_placeholder:
     en: "Max output (optional)"
     zh-CN: "最大输出（可选）"
@@ -469,10 +398,7 @@ model_row:
     zh-CN: "显示名称（可选）"
   remove_tooltip:
     en: "Remove This Model"
-    zh-CN: "移除此模型"
-  title:
-    en: "Model %{index}"
-    zh-CN: "模型 %{index}"
+    zh-CN: "移除这个模型"
 notify:
   done:
     en: "Done"
@@ -577,103 +503,97 @@ plugins:
     en: ", "
     zh-CN: "、"
 provider:
+  add:
+    en: "Add Custom Provider…"
+    zh-CN: "添加自定义服务商…"
   add_model:
     en: "Add Model"
     zh-CN: "添加模型"
   add_title:
-    en: "Add Custom Provider"
-    zh-CN: "添加自定义 Provider"
+    en: "New Custom Provider"
+    zh-CN: "新的自定义服务商"
+  add_tooltip:
+    en: "An OpenAI- or Anthropic-compatible gateway, a self-hosted server, or another model endpoint"
+    zh-CN: "OpenAI / Anthropic 兼容网关、自托管服务或别的模型端点"
   api:
     en: "Protocol"
     zh-CN: "协议"
+  api_key:
+    en: "API Key (optional)"
+    zh-CN: "API key（可选）"
+  auto_synced:
+    en: "synced from the endpoint"
+    zh-CN: "照端点同步"
   base_url:
-    en: "API Address"
+    en: "API URL"
     zh-CN: "API 地址"
   base_url_required:
     en: "Enter the API address"
     zh-CN: "请填写 API 地址"
-  custom:
-    en: "Custom Provider"
-    zh-CN: "自定义 Provider"
-  custom_tooltip:
-    en: "OpenAI / Anthropic-compatible gateways, self-hosted services or other model endpoints"
-    zh-CN: "OpenAI / Anthropic 兼容网关、自托管服务或其他模型端点"
-  delete_tooltip:
-    en: "Delete This Provider"
-    zh-CN: "删除此 Provider"
   discovery_failed:
     en: "%{error}; or enter at least one model by hand"
     zh-CN: "%{error}；或手动填写至少一个模型"
+  edit:
+    en: "Edit…"
+    zh-CN: "编辑…"
   edit_title:
-    en: "Edit Custom Provider"
-    zh-CN: "编辑自定义 Provider"
+    en: "Edit %{id}"
+    zh-CN: "编辑 %{id}"
   fetch_models:
-    en: "Fetch Model List"
-    zh-CN: "获取模型列表"
+    en: "Fetch from Endpoint"
+    zh-CN: "从端点获取"
   id:
     en: "Provider ID"
-    zh-CN: "Provider ID"
-  id_hint:
-    en: "Starts with a letter; may contain letters, digits and hyphens"
-    zh-CN: "字母开头，可含字母、数字和短连字符"
+    zh-CN: "服务商 ID"
   id_placeholder:
     en: "e.g. acme-gateway"
     zh-CN: "例如 acme-gateway"
-  key_missing:
-    en: "No credentials yet; endpoints without auth can leave the API key empty."
-    zh-CN: "尚未配置凭据；无鉴权端点可留空 API key。"
   key_placeholder:
-    en: "API key (can be left empty)"
-    zh-CN: "API key（可留空）"
-  key_set:
-    en: "Credentials are already set; leaving the API key empty keeps them."
-    zh-CN: "当前凭据已配置；API key 留空不会改动它。"
-  key_storage:
-    en: "Credentials are stored in ~/.pi/agent/auth.json"
-    zh-CN: "凭据存放于 ~/.pi/agent/auth.json"
+    en: "Leave empty for endpoints without auth"
+    zh-CN: "无鉴权的端点可留空"
+  model_count:
+    en: "%{count} models"
+    zh-CN: "%{count} 个模型"
   models:
-    en: "Model List"
-    zh-CN: "模型目录"
+    en: "Models"
+    zh-CN: "模型"
   name:
     en: "Display Name (optional)"
     zh-CN: "显示名称（可选）"
   name_placeholder:
     en: "Optional; defaults to the provider ID"
     zh-CN: "可选，默认用 Provider ID"
-  native_badge:
-    en: "Native Pi"
-    zh-CN: "原生 Pi"
-  removed:
-    en: "Removed custom provider %{provider_id}"
-    zh-CN: "已移除自定义 Provider %{provider_id}"
+  no_key:
+    en: "no API key"
+    zh-CN: "无 API key"
+  remove:
+    en: "Delete…"
+    zh-CN: "删除…"
+  remove_confirm:
+    en: "Delete"
+    zh-CN: "删除"
+  remove_question:
+    en: "Delete %{name}? Its entry in models.json and its saved key go too."
+    zh-CN: "删除 %{name}？models.json 里它的配置和存下的 key 一起删掉。"
   save_default:
-    en: "Save and Set as Default"
+    en: "Save and Make Default"
     zh-CN: "保存并设为默认"
-  saved:
-    en: "Custom provider %{id} saved"
-    zh-CN: "自定义 Provider %{id} 已保存"
-  saved_auto:
-    en: "Custom provider %{id} saved; its model list will refresh on every launch"
-    zh-CN: "自定义 Provider %{id} 已保存，模型目录将在每次启动时刷新"
-  summary:
-    en: "%{id} · %{count} models · %{credential}"
-    zh-CN: "%{id} · %{count} 个模型 · %{credential}"
 providers:
   failed:
-    en: "Couldn't read built-in providers: %{error}"
-    zh-CN: "读取内置 Provider 失败：%{error}"
+    en: "Couldn't read the providers: %{error}"
+    zh-CN: "读不到服务商：%{error}"
   loading:
-    en: "Reading built-in provider sign-in status… The first time, the Pi runtime needs to be prepared, which may take a while"
-    zh-CN: "正在读取内置 Provider 的登录状态…首次需要准备 Pi 运行时，可能要等一会"
-  refresh:
-    en: "Refresh Status"
-    zh-CN: "刷新状态"
+    en: "Reading sign-in status… the first time sets up the Pi runtime and can take a while"
+    zh-CN: "正在读取登录状态…第一次要准备 Pi 运行时，会慢一些"
   show_all:
-    en: "Show All Built-in Providers (%{hidden} more)"
-    zh-CN: "显示全部内置 Provider（另有 %{hidden} 个）"
+    en: "Show All Providers (%{hidden} more)"
+    zh-CN: "显示全部服务商（另有 %{hidden} 个）"
   show_common:
     en: "Show Common Only"
     zh-CN: "只看常用"
+  title:
+    en: "Providers"
+    zh-CN: "服务商"
 tab:
   extensions:
     en: "Extensions"

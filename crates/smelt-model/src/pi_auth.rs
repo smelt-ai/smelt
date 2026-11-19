@@ -56,6 +56,9 @@ pub struct PiAuthProvider {
     /// 凭据从哪儿来，例如 "OAuth"、"ANTHROPIC_API_KEY"、"~/.aws/credentials"。
     #[serde(default)]
     pub source: Option<String>,
+    /// 现有凭据能用的模型（Pi 的 `getAvailable`，Copilot 这类只给账号开了的）。没凭据时为空。
+    #[serde(default)]
+    pub models: Vec<crate::provider_api::DiscoveredModel>,
 }
 
 /// 登录方式。`Models.login` 按它选 `provider.auth.oauth` 还是 `auth.apiKey`。

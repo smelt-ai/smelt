@@ -132,7 +132,7 @@ smelt mcp add <预设id>
 smelt mcp enable|disable|remove <服务器名>
 smelt model list
 smelt model default <provider>/<模型id>
-smelt model thinking off|minimal|low|medium|high|xhigh
+smelt model thinking off|minimal|low|medium|high|xhigh|max
 smelt quota
 smelt quota refresh [<账户id>]
 smelt quota settings

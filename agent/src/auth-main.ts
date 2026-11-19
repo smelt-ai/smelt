@@ -64,6 +64,7 @@ async function listProviders(): Promise<void> {
 			// A provider without stored or ambient credentials simply reports
 			// nothing; a failing check must not take down the whole list.
 			const check = await models.checkAuth(provider.id).catch(() => undefined);
+			const status = check?.type ?? "none";
 			return {
 				id: provider.id,
 				name: provider.name,
@@ -72,8 +73,9 @@ async function listProviders(): Promise<void> {
 				subscription: oauth?.isSubscription === true,
 				supportsOauth: oauth !== undefined,
 				supportsApiKey: apiKey !== undefined,
-				status: check?.type ?? "none",
+				status,
 				source: check?.source,
+				models: status === "none" ? [] : await availableModels(models, provider.id),
 			};
 		}),
 	);
@@ -89,17 +91,22 @@ async function listProviders(): Promise<void> {
  * defaults that fail on first use. It needs auth, so an unauthenticated
  * provider falls back to the static catalog.
  */
-async function listModels(providerId: string): Promise<void> {
-	const models = createModels();
+async function availableModels(
+	models: ReturnType<typeof createModels>,
+	providerId: string,
+): Promise<AuthModelSummary[]> {
 	const available = await models.getAvailable(providerId).catch(() => []);
 	const catalog = available.length > 0 ? available : models.getModels(providerId);
-	const summaries: AuthModelSummary[] = catalog.map((model) => ({
+	return catalog.map((model) => ({
 		id: model.id,
 		name: model.name,
 		contextWindow: model.contextWindow,
 		maxTokens: model.maxTokens,
 	}));
-	emit({ event: "models", models: summaries });
+}
+
+async function listModels(providerId: string): Promise<void> {
+	emit({ event: "models", models: await availableModels(createModels(), providerId) });
 }
 
 /**

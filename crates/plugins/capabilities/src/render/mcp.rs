@@ -1,7 +1,6 @@
 //! 能力库「MCP」页签：内置服务器一键添加，`~/.pi/agent/mcp.json` 里的服务器启停、
 //! 登录、移除，每台写着谁在用、能直接勾给智能体用。排版和模型页签同一套（居中限宽、行内按钮 xsmall）。
 
-use super::models::{Palette, card, section};
 use super::*;
 use crate::agents::Usable;
 use crate::models::PiConfigFileKind;
@@ -11,6 +10,65 @@ use api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::kit::TYPE;
 
 const PAGE_MAX_WIDTH: f32 = 760.;
+
+#[derive(Clone, Copy)]
+struct Palette {
+    fg: Hsla,
+    muted: Hsla,
+    border: Hsla,
+    danger: Hsla,
+}
+
+impl Palette {
+    fn new() -> Self {
+        Self {
+            fg: rgb(ui_theme::text()).into(),
+            muted: rgb(ui_theme::muted()).into(),
+            border: ui_theme::hair().into(),
+            danger: rgb(ui_theme::bad()).into(),
+        }
+    }
+}
+
+fn section(
+    title: impl Into<SharedString>,
+    action: Option<AnyElement>,
+    body: impl IntoElement,
+    palette: Palette,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .w_full()
+                .min_h(px(28.))
+                .justify_between()
+                .child(
+                    // 分组标题跟侧栏「最近对话」「项目」一个级别：小号、灰、不加粗。
+                    div()
+                        .type_style(TYPE.text_xsmall_medium)
+                        .text_color(palette.muted)
+                        .child(title.into()),
+                )
+                .children(action),
+        )
+        .child(body)
+}
+
+fn card(palette: Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .rounded_lg()
+        .border_1()
+        .border_color(palette.border)
+}
 
 pub(super) fn pi_mcp_page(
     entity: Entity<CapabilitiesPage>,
@@ -206,7 +264,7 @@ fn servers_section(
                     .as_ref()
                     .filter(|view| view.mcp_server() == Some(server.name.as_str()))
                 {
-                    item = item.child(super::auth::login_panel(entity.clone(), view, None, cx));
+                    item = item.child(super::auth::login_panel(entity.clone(), view, cx));
                 }
                 list = list.child(item);
             }
@@ -240,7 +298,7 @@ fn server_row(
     let running_login = page
         .pi_login
         .as_ref()
-        .filter(|view| view.outcome.is_none())
+        .filter(|view| view.error.is_none())
         .and_then(|view| view.mcp_server());
     let logging_in = running_login == Some(server.name.as_str());
     let any_login = running_login.is_some();

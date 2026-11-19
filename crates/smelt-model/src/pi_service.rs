@@ -2,7 +2,7 @@
 
 use crate::pi_mcp::PiMcpServer;
 use crate::pi_model_settings::{
-    PiCustomProvider, PiDefaultModelConfig, PiModelChoiceGroup, PiModelSettings, PiSettingsSummary,
+    PiCustomProvider, PiDefaultModelConfig, PiModelChoiceGroup, PiModelSettings,
 };
 use crate::pi_plugin_catalog::{PiPlugin, PiPluginKind};
 use crate::provider_api::DiscoveredModel;
@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PiConfig {
     pub model_settings: Result<PiModelSettings, String>,
-    pub settings_summary: Result<PiSettingsSummary, String>,
     pub mcp_servers: Result<Vec<PiMcpServer>, String>,
     pub plugins: Vec<PiPlugin>,
     /// 智能体定义页、记忆重排模型下拉用的可选模型。

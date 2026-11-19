@@ -145,6 +145,7 @@ control_calls! {
     crate::model::control_api::PiConfigEnsureFile,
     crate::model::control_api::PiModelsSetThinkingLevel,
     crate::model::control_api::PiModelsSaveDefault,
+    crate::model::control_api::PiModelsClearDefault,
     crate::model::control_api::PiProvidersDiscoverModels,
     crate::model::control_api::PiProvidersSaveCustom,
     crate::model::control_api::PiProvidersRemoveCustom,

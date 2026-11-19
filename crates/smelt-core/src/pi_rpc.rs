@@ -1122,13 +1122,9 @@ fn settings_default_model(launch: &ConversationLaunch) -> Option<(String, String
     } else {
         crate::pi_model_settings::load_pi_model_settings().ok()
     }?;
-    let provider = settings.default_model.provider.trim().to_string();
-    let model = settings.default_model.model.trim().to_string();
-    if provider.is_empty() || model.is_empty() {
-        None
-    } else {
-        Some((provider, model))
-    }
+    settings
+        .default_model
+        .map(|model| (model.provider, model.model))
 }
 
 fn note_model(
@@ -1472,8 +1468,8 @@ fn parse_available_models(data: &serde_json::Value) -> Vec<PiModel> {
         .map(|models| models.iter().filter_map(parse_model).collect())
         .unwrap_or_default();
 
-    if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
-        for cp in settings.custom_providers {
+    if let Ok(custom_providers) = crate::pi_model_settings::load_pi_custom_providers() {
+        for cp in custom_providers {
             for m in cp.models {
                 if !models
                     .iter()
@@ -1560,8 +1556,8 @@ fn publish_model_event(state: &PiState, event_tx: &smol::channel::Sender<Convers
         ));
     }
 
-    if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
-        for cp in settings.custom_providers {
+    if let Ok(custom_providers) = crate::pi_model_settings::load_pi_custom_providers() {
+        for cp in custom_providers {
             for m in cp.models {
                 let val = format!("{}/{}", cp.id, m.id);
                 let list = providers.entry(cp.id.clone()).or_default();

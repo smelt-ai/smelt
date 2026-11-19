@@ -58,21 +58,13 @@ pub fn pi_credential_kind(entry: &serde_json::Value) -> Option<PiCredentialKind>
     }
 }
 
+/// 一个模型：哪个 provider 的哪个模型 ID。
 #[derive(
     Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
-pub struct PiDefaultModelSummary {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub thinking_level: Option<String>,
-}
-
-#[derive(
-    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
-)]
-pub struct PiSettingsSummary {
-    pub path: PathBuf,
-    pub default_model: Option<PiDefaultModelSummary>,
+pub struct PiModelRef {
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(
@@ -122,10 +114,39 @@ pub struct PiCustomProvider {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct PiModelSettings {
-    pub default_model: PiDefaultModelConfig,
-    pub credential_configured: bool,
+    /// `settings.json` 里用户选的默认模型。`None` 是没选过：Pi 开会话时自己从已登录的
+    /// provider 里挑，挑哪个由 Pi 定，这里不猜。
+    #[serde(default)]
+    pub default_model: Option<PiModelRef>,
+    /// `settings.json` 里的推理强度；`None` 是没设过，Pi 用它自己的默认值。
+    #[serde(default)]
+    pub thinking_level: Option<String>,
     #[serde(default)]
     pub custom_providers: Vec<PiCustomProvider>,
+    /// `models.json` 里只改了地址、没带模型的 provider：Pi 内置的那个改走这个地址。
+    /// provider id → base URL。
+    #[serde(default)]
+    pub endpoint_overrides: std::collections::BTreeMap<String, String>,
+}
+
+/// Pi 认的推理强度，从低到高（Pi 的 `THINKING_LEVEL_OPTIONS`）。
+pub const PI_THINKING_LEVELS: [&str; 7] =
+    ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// 推理强度给人看的名字；不认识的原样给。
+pub fn pi_thinking_level_label(level: &str) -> String {
+    use rust_i18n::t;
+    let text = match level {
+        "off" => t!("config.thinking_level.off"),
+        "minimal" => t!("config.thinking_level.minimal"),
+        "low" => t!("config.thinking_level.low"),
+        "medium" => t!("config.thinking_level.medium"),
+        "high" => t!("config.thinking_level.high"),
+        "xhigh" => t!("config.thinking_level.xhigh"),
+        "max" => t!("config.thinking_level.max"),
+        _ => return level.to_string(),
+    };
+    text.into_owned()
 }
 
 /// 智能体定义页下拉用的一条模型。不依赖正在跑的 Pi 会话。

@@ -24,33 +24,37 @@ impl CapabilitiesPage {
         (id, name, context_window, max_tokens)
     }
 
+    /// 打开「手动填写」，填上现在的默认模型和它的地址改写。
     pub fn edit_pi_model_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pi_model_editor_error = None;
         let settings = match self.pi_model_settings().cloned() {
             Ok(settings) => settings,
             Err(error) => {
-                self.pi_model_editor_error = Some(error.clone());
-                notify_error(error, cx);
+                self.pi_default_error = Some(error);
                 cx.notify();
                 return;
             }
         };
+        self.pi_default_error = None;
+        self.pi_model_editor_error = None;
         self.pi_custom_provider_editor = None;
-
-        let provider =
-            cx.new(|cx| InputState::new(window, cx).default_value(settings.default_model.provider));
-        let model =
-            cx.new(|cx| InputState::new(window, cx).default_value(settings.default_model.model));
-        let base_url =
-            cx.new(|cx| InputState::new(window, cx).default_value(settings.default_model.base_url));
+        let (provider, model) = settings
+            .default_model
+            .map(|model| (model.provider, model.model))
+            .unwrap_or_default();
+        let base_url = settings
+            .endpoint_overrides
+            .get(&provider)
+            .cloned()
+            .unwrap_or_default();
+        let provider = cx.new(|cx| InputState::new(window, cx).default_value(provider));
+        let model = cx.new(|cx| InputState::new(window, cx).default_value(model));
+        let base_url = cx.new(|cx| InputState::new(window, cx).default_value(base_url));
         let api_key = cx.new(|cx| InputState::new(window, cx).masked(true));
         let editor = PiModelEditor {
             provider,
             model,
             base_url,
             api_key,
-            thinking_level: settings.default_model.thinking_level,
-            credential_configured: settings.credential_configured,
         };
         editor.label(window, cx);
         self.pi_model_editor = Some(editor);
@@ -63,19 +67,72 @@ impl CapabilitiesPage {
         cx.notify();
     }
 
-    /// 直接改默认模型的推理强度。只在用户选过默认模型时可用（界面会禁用；运行时
-    /// 也会拒绝），否则写进去的 provider/model 会是 Pi 的兜底值，等于替用户做了选择。
+    /// 新会话的推理强度。Pi 把它当全局设置，选没选默认模型都能改。
     pub fn set_pi_default_thinking_level(&mut self, level: String, cx: &mut Context<Self>) {
-        // 手动填写表单开着时也同步，免得稍后保存表单把这次改动盖回去。
-        if let Some(editor) = &mut self.pi_model_editor {
-            editor.thinking_level = level.clone();
-        }
+        self.pi_default_error = None;
         self.run_pi_mutation::<api::model::control_api::PiModelsSetThinkingLevel>(
             api::model::pi_service::ThinkingLevelParams { level },
             cx,
-            |_, error, cx| notify_error(&error, cx),
+            |this, error, _| this.pi_default_error = Some(error),
         );
         cx.notify();
+    }
+
+    /// 把下拉里选的模型设成默认。
+    pub fn set_pi_default_model(
+        &mut self,
+        provider: String,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.pi_default_error = None;
+        let params = api::model::pi_service::SaveDefaultModelParams {
+            config: api::model::pi_model_settings::PiDefaultModelConfig {
+                provider,
+                model,
+                base_url: String::new(),
+                thinking_level: String::new(),
+            },
+            api_key: None,
+            reset_base_url: false,
+        };
+        self.run_pi_mutation::<api::model::control_api::PiModelsSaveDefault>(
+            params,
+            cx,
+            |this, error, _| this.pi_default_error = Some(error),
+        );
+        cx.notify();
+    }
+
+    /// 不再指定默认模型，交回 Pi 自己挑。
+    pub fn clear_pi_default_model(&mut self, cx: &mut Context<Self>) {
+        self.pi_default_error = None;
+        self.run_pi_mutation::<api::model::control_api::PiModelsClearDefault>(
+            Default::default(),
+            cx,
+            |this, error, _| this.pi_default_error = Some(error),
+        );
+        cx.notify();
+    }
+
+    /// 这个服务商有没有凭据：内置的看登录状态，自定义的看配置。认不出（列表还没读到、
+    /// 服务商名填错了）是 `None`，交给运行时和 Pi 去报。
+    fn pi_provider_has_credential(&self, provider: &str) -> Option<bool> {
+        if let Ok(settings) = self.pi_model_settings()
+            && let Some(custom) = settings
+                .custom_providers
+                .iter()
+                .find(|custom| custom.id == provider)
+        {
+            return Some(custom.credential_configured);
+        }
+        match &self.pi_auth_providers {
+            Some(PiAuthProvidersState::Ready(list)) => list
+                .iter()
+                .find(|builtin| builtin.id == provider)
+                .map(|builtin| builtin.status.configured()),
+            _ => None,
+        }
     }
 
     pub fn save_pi_model_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -84,24 +141,24 @@ impl CapabilitiesPage {
         };
         let provider = editor.provider.read(cx).value().trim().to_string();
         if provider.is_empty() {
-            notify_error(t!("model_editor.provider_required"), cx);
+            self.reject_pi_model_edit(t!("model_editor.provider_required"), cx);
             return;
         }
         let model = editor.model.read(cx).value().trim().to_string();
         if model.is_empty() {
-            notify_error(t!("model_editor.model_required"), cx);
+            self.reject_pi_model_edit(t!("model_editor.model_required"), cx);
             return;
         }
         let base_url = editor.base_url.read(cx).value().trim().to_string();
         if !base_url.is_empty()
             && let Err(error) = api::model::pi_model_settings::validate_api_base_url(&base_url)
         {
-            notify_error(error, cx);
+            self.reject_pi_model_edit(error, cx);
             return;
         }
-        let api_key = editor.api_key.read(cx).value().to_string();
-        if api_key.is_empty() && !editor.credential_configured {
-            notify_error(t!("model_editor.key_required"), cx);
+        let api_key = editor.api_key.read(cx).value().trim().to_string();
+        if api_key.is_empty() && self.pi_provider_has_credential(&provider) == Some(false) {
+            self.reject_pi_model_edit(t!("model_editor.key_required", provider = provider), cx);
             return;
         }
 
@@ -110,7 +167,8 @@ impl CapabilitiesPage {
                 provider,
                 model,
                 base_url,
-                thinking_level: editor.thinking_level,
+                // 推理强度是另一项设置，空着不动它。
+                thinking_level: String::new(),
             },
             api_key: (!api_key.is_empty()).then_some(api_key),
             reset_base_url: true,
@@ -124,7 +182,8 @@ impl CapabilitiesPage {
                     this.pi_model_editor = None;
                     this.pi_model_editor_error = None;
                     this.adopt_pi_config(config, cx);
-                    notify_success(t!("model_editor.saved"), cx);
+                    // 填了 key 的内置服务商要重读登录状态，那一行才会变成已配置。
+                    this.refresh_pi_auth_providers(cx);
                 }
                 Err(error) => this.reject_pi_model_edit(error, cx),
             },
@@ -169,12 +228,12 @@ impl CapabilitiesPage {
         let settings = match self.pi_model_settings().cloned() {
             Ok(settings) => settings,
             Err(error) => {
-                self.pi_model_editor_error = Some(error.clone());
-                notify_error(error, cx);
+                self.pi_auth_error = Some(error);
                 cx.notify();
                 return;
             }
         };
+        self.pi_auth_error = None;
         let existing = provider_id.as_ref().and_then(|provider_id| {
             settings
                 .custom_providers
@@ -368,11 +427,9 @@ impl CapabilitiesPage {
         cx.notify();
     }
 
-    /// 校验没过时必须写进表单：系统通知在前台窗口上经常看不见，用户会以为保存坏了。
+    /// 校验没过、保存失败都写进开着的表单，就在保存按钮上面。
     fn reject_pi_model_edit(&mut self, error: impl Into<String>, cx: &mut Context<Self>) {
-        let error = error.into();
-        self.pi_model_editor_error = Some(error.clone());
-        notify_error(&error, cx);
+        self.pi_model_editor_error = Some(error.into());
         cx.notify();
     }
 
@@ -467,18 +524,11 @@ impl CapabilitiesPage {
             api::CALL_TIMEOUT,
             cx,
             move |this, result, cx| match result {
+                // 存好的那一行出现在列表里（自动同步的写着），不另外提示。
                 Ok(saved) => {
                     this.pi_custom_provider_editor = None;
                     this.pi_model_editor_error = None;
                     this.adopt_pi_config(saved.config, cx);
-                    notify_success(
-                        if saved.auto {
-                            t!("provider.saved_auto", id = id)
-                        } else {
-                            t!("provider.saved", id = id)
-                        },
-                        cx,
-                    );
                 }
                 Err(error) if from_endpoint => this.fail_pi_discovery(error, cx),
                 Err(error) => this.reject_pi_model_edit(error, cx),
@@ -486,25 +536,17 @@ impl CapabilitiesPage {
         );
     }
 
-    pub fn remove_pi_custom_provider(
+    /// 删掉一个自定义服务商（确认过了）。
+    pub(crate) fn remove_pi_custom_provider(
         &mut self,
         provider_id: String,
-        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.run_pi_call::<api::model::control_api::PiProvidersRemoveCustom>(
-            api::model::pi_service::ProviderIdParams {
-                provider_id: provider_id.clone(),
-            },
-            api::CALL_TIMEOUT,
+        self.pi_auth_error = None;
+        self.run_pi_mutation::<api::model::control_api::PiProvidersRemoveCustom>(
+            api::model::pi_service::ProviderIdParams { provider_id },
             cx,
-            move |this, result, cx| match result {
-                Ok(config) => {
-                    this.adopt_pi_config(config, cx);
-                    notify_success(t!("provider.removed", provider_id = provider_id), cx);
-                }
-                Err(error) => notify_error(error, cx),
-            },
+            |this, error, _| this.pi_auth_error = Some(error),
         );
     }
 
@@ -547,12 +589,11 @@ impl CapabilitiesPage {
                 };
                 let opened =
                     api::OPEN_IN_TEXT_EDITOR.run(&api::OpenInTextEditor { path: path.clone() }, cx);
+                // 打开了编辑器就是结果，只有失败要说。
                 cx.spawn(async move |_, cx| {
-                    let message = opened.await;
-                    cx.update(|cx| match message {
-                        Ok(()) => notify_success(t!("config.opened", path = path.display()), cx),
-                        Err(error) => notify_error(error, cx),
-                    })
+                    if let Err(error) = opened.await {
+                        cx.update(|cx| notify_error(error, cx));
+                    }
                 })
                 .detach();
             },

@@ -158,6 +158,7 @@ define_control_methods! {
     PiConfigEnsureFile => (PI_CONFIG_ENSURE_FILE_METHOD, "pi.config.ensure_file"),
     PiModelsSetThinkingLevel => (PI_MODELS_SET_THINKING_LEVEL_METHOD, "pi.models.set_thinking_level"),
     PiModelsSaveDefault => (PI_MODELS_SAVE_DEFAULT_METHOD, "pi.models.save_default"),
+    PiModelsClearDefault => (PI_MODELS_CLEAR_DEFAULT_METHOD, "pi.models.clear_default"),
     PiProvidersDiscoverModels => (PI_PROVIDERS_DISCOVER_MODELS_METHOD, "pi.providers.discover_models"),
     PiProvidersSaveCustom => (PI_PROVIDERS_SAVE_CUSTOM_METHOD, "pi.providers.save_custom"),
     PiProvidersRemoveCustom => (PI_PROVIDERS_REMOVE_CUSTOM_METHOD, "pi.providers.remove_custom"),

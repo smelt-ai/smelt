@@ -210,6 +210,7 @@ fn dispatch_control(
         | ControlMethod::PiConfigEnsureFile
         | ControlMethod::PiModelsSetThinkingLevel
         | ControlMethod::PiModelsSaveDefault
+        | ControlMethod::PiModelsClearDefault
         | ControlMethod::PiProvidersDiscoverModels
         | ControlMethod::PiProvidersSaveCustom
         | ControlMethod::PiProvidersRemoveCustom

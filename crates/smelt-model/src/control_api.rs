@@ -924,6 +924,8 @@ pi_calls! {
         -> crate::pi_service::PiConfig;
     PiModelsSaveDefault => PiModelsSaveDefault(crate::pi_service::SaveDefaultModelParams)
         -> crate::pi_service::PiConfig;
+    /// 不再指定默认模型，交回 Pi 自己从已登录的 provider 里挑。
+    PiModelsClearDefault => PiModelsClearDefault(EmptyParams) -> crate::pi_service::PiConfig;
     /// 问端点它提供哪些模型。没现填 key 时用已存的那份，客户端看不到它。
     PiProvidersDiscoverModels => PiProvidersDiscoverModels(crate::pi_service::DiscoverModelsParams)
         -> crate::pi_service::DiscoverModelsResult;

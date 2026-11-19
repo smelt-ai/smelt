@@ -1496,13 +1496,14 @@ export type PiAuthProvider = {
   status: PiAuthStatus;
   /** 凭据从哪儿来，例如 "OAuth"、"ANTHROPIC_API_KEY"、"~/.aws/credentials"。 */
   source: string | null;
+  /** 现有凭据能用的模型（Pi 的 `getAvailable`，Copilot 这类只给账号开了的）。没凭据时为空。 */
+  models: DiscoveredModel[];
 };
 /** 一个 provider 当前的凭据状态。 */
 export type PiAuthStatus = "none" | "oauth" | "api_key";
 /** 能力库里 Pi 相关的全部展示数据。读不出的部分各自带错误，不连累其它部分。 */
 export type PiConfig = {
   model_settings: Result_of_PiModelSettings_or_string;
-  settings_summary: Result_of_PiSettingsSummary_or_string;
   mcp_servers: Result_of_Array_of_PiMcpServer_or_string;
   plugins: PiPlugin[];
   /** 智能体定义页、记忆重排模型下拉用的可选模型。 */
@@ -1550,19 +1551,8 @@ export type PiCustomProviderInput = {
 export type PiDefaultModelConfig = {
   provider: string;
   model: string;
-  baseUrl: string;
-  thinkingLevel: string;
-};
-export type PiDefaultModelConfigInput = {
-  provider: string;
-  model: string;
   baseUrl?: string;
   thinkingLevel?: string;
-};
-export type PiDefaultModelSummary = {
-  provider: string | null;
-  model: string | null;
-  thinking_level: string | null;
 };
 /** 登录流程推给宿主的一步。 */
 export type PiLoginEvent = {
@@ -1691,10 +1681,25 @@ export type PiModelChoiceGroup = {
   provider_name: string;
   models: PiModelChoice[];
 };
+/** 一个模型：哪个 provider 的哪个模型 ID。 */
+export type PiModelRef = {
+  provider: string;
+  model: string;
+};
 export type PiModelSettings = {
-  defaultModel: PiDefaultModelConfig;
-  credentialConfigured: boolean;
+  /**
+   * `settings.json` 里用户选的默认模型。`None` 是没选过：Pi 开会话时自己从已登录的
+   * provider 里挑，挑哪个由 Pi 定，这里不猜。
+   */
+  defaultModel: PiModelRef | null;
+  /** `settings.json` 里的推理强度；`None` 是没设过，Pi 用它自己的默认值。 */
+  thinkingLevel: string | null;
   customProviders: PiCustomProvider[];
+  /**
+   * `models.json` 里只改了地址、没带模型的 provider：Pi 内置的那个改走这个地址。
+   * provider id → base URL。
+   */
+  endpointOverrides: { [key: string]: string };
 };
 /** 一个可勾选的插件。`id` 是写进智能体配置的稳定标识。 */
 export type PiPlugin = {
@@ -1732,10 +1737,6 @@ export type PiSaveCustomProviderResult = {
   /** 模型目录是否由 Smelt 照端点维护。 */
   auto: boolean;
   config: PiConfig;
-};
-export type PiSettingsSummary = {
-  path: string;
-  default_model: PiDefaultModelSummary | null;
 };
 export type PinParams = {
   key: string;
@@ -1975,11 +1976,6 @@ export type Result_of_PiModelSettings_or_string = {
 } | {
   Err: string;
 };
-export type Result_of_PiSettingsSummary_or_string = {
-  Ok: PiSettingsSummary;
-} | {
-  Err: string;
-};
 export type RevokeResult = {
   /** 是否真有这台设备。 */
   revoked: boolean;
@@ -2007,7 +2003,7 @@ export type SaveCustomProviderParams = {
   set_default: boolean;
 };
 export type SaveDefaultModelParams = {
-  config: PiDefaultModelConfigInput;
+  config: PiDefaultModelConfig;
   /** 新的 API key；`None` 表示保持已存的那份。 */
   api_key?: string | null;
   /**
@@ -2527,6 +2523,7 @@ export interface ControlMethods {
   "pi.config.ensure_file": { params: EnsureConfigFileParams; result: EnsureConfigFileResult };
   "pi.models.set_thinking_level": { params: ThinkingLevelParams; result: PiConfig };
   "pi.models.save_default": { params: SaveDefaultModelParams; result: PiConfig };
+  "pi.models.clear_default": { params: EmptyParams; result: PiConfig };
   "pi.providers.discover_models": { params: DiscoverModelsParams; result: DiscoverModelsResult };
   "pi.providers.save_custom": { params: SaveCustomProviderParams; result: PiSaveCustomProviderResult };
   "pi.providers.remove_custom": { params: ProviderIdParams; result: PiConfig };

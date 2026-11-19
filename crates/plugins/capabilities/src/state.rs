@@ -3,14 +3,13 @@
 use super::*;
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
+/// 「手动填写」默认模型：下拉里找不到的模型（还没进目录的新模型、改过地址的内置服务商）。
 #[derive(Clone)]
 pub struct PiModelEditor {
     pub provider: Entity<InputState>,
     pub model: Entity<InputState>,
     pub base_url: Entity<InputState>,
     pub api_key: Entity<InputState>,
-    pub thinking_level: String,
-    pub credential_configured: bool,
 }
 
 impl PiModelEditor {
@@ -34,12 +33,12 @@ impl PiModelEditor {
             window,
             cx,
         );
-        let key = if self.credential_configured {
-            t!("editor.key_configured")
-        } else {
-            t!("model_editor.key_placeholder")
-        };
-        set_placeholder(&self.api_key, key, window, cx);
+        set_placeholder(
+            &self.api_key,
+            t!("model_editor.key_placeholder"),
+            window,
+            cx,
+        );
     }
 }
 
@@ -139,16 +138,19 @@ pub enum PiAuthProvidersState {
     Failed(String),
 }
 
-/// 「换个默认模型」的选择器：某个已配置 provider 现在能用的模型。
-///
-/// 和 [`PiLoginView::models`] 分开，是因为两者的生命周期不同：那份跟着一次登录
-/// 会话走，登录面板一关就没了；这份是随时可以对任意一个已登录 provider 打开的。
-#[derive(Clone)]
-pub struct PiAuthModelPicker {
-    pub provider_id: String,
-    pub provider_name: String,
-    /// `None` 表示还在问。
-    pub models: Option<Result<Vec<api::model::provider_api::DiscoveredModel>, String>>,
+/// 等用户确认的服务商操作：删掉的配置、注销的登录都要重新填一遍，所以先问一句。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PiProviderConfirm {
+    RemoveCustom(String),
+    SignOut(String),
+}
+
+impl PiProviderConfirm {
+    pub fn provider_id(&self) -> &str {
+        match self {
+            Self::RemoveCustom(id) | Self::SignOut(id) => id,
+        }
+    }
 }
 
 /// 登录流程当前在等用户回答的那个提问。
@@ -192,10 +194,8 @@ pub struct PiLoginView {
     /// 所以放进 `Rc` 跟着 view 一起活。订阅不是 `Send`，不能用 `Arc`。
     #[allow(dead_code, reason = "只为让订阅活到面板关闭，没有读取方")]
     pub input_subscriptions: std::rc::Rc<Vec<gpui::Subscription>>,
-    /// `None` 表示还在跑。
-    pub outcome: Option<Result<(), String>>,
-    /// 登录成功后可选的模型目录，用来一键设默认。
-    pub models: Option<Result<Vec<api::model::provider_api::DiscoveredModel>, String>>,
+    /// 失败的原因；还在跑是 `None`。成功了面板直接收起，那一行的状态自己会变。
+    pub error: Option<String>,
 }
 
 impl PiLoginView {
@@ -215,11 +215,6 @@ impl PiLoginView {
         }
     }
 
-    pub fn title(&self) -> &str {
-        match &self.target {
-            PiLoginTarget::Provider { name, .. } | PiLoginTarget::Mcp { name } => name,
-        }
-    }
     /// 当前提问该用哪个输入框。
     pub fn active_input(&self) -> Option<&Entity<InputState>> {
         match self.prompt.as_ref()?.kind {

@@ -10,7 +10,7 @@ use api::client::protocol::control::{ControlCall, EmptyParams, SystemDescribe};
 use api::client::{DEFAULT_REQUEST_TIMEOUT, RuntimeClient};
 use api::model::control_api::PiConfigGet;
 use api::model::pi_mcp::PiMcpServer;
-use api::model::pi_model_settings::{PiModelChoiceGroup, PiModelSettings, PiSettingsSummary};
+use api::model::pi_model_settings::{PiModelChoiceGroup, PiModelSettings};
 use api::model::pi_plugin_catalog::PiPlugin;
 use api::model::pi_service::{PiConfig, PiConfigPaths};
 
@@ -28,6 +28,11 @@ impl CapabilitiesPage {
     /// 那台机器的快照；还没取到是 `None`。
     pub(crate) fn pi_library_config(&self) -> Option<&PiConfig> {
         self.pi_config.config.as_ref()
+    }
+
+    /// 读快照失败了（不是还在读）。
+    pub(crate) fn pi_library_failed(&self) -> bool {
+        self.pi_config.config.is_none() && self.pi_config.error.is_some()
     }
 
     /// 快照还没到时，各块显示的话。
@@ -83,8 +88,9 @@ impl CapabilitiesPage {
         self.pi_model_editor = None;
         self.pi_custom_provider_editor = None;
         self.pi_auth_providers = None;
-        self.pi_auth_model_picker = None;
+        self.pi_provider_confirm = None;
         self.pi_auth_error = None;
+        self.pi_default_error = None;
         self.pi_mcp_pending_remove = None;
         self.pi_mcp_error = None;
         self.pi_model_editor_error = None;
@@ -168,13 +174,6 @@ impl CapabilitiesPage {
     pub(crate) fn pi_model_settings(&self) -> Result<&PiModelSettings, String> {
         match self.pi_library_config() {
             Some(config) => config.model_settings.as_ref().map_err(Clone::clone),
-            None => Err(self.pi_library_pending_text()),
-        }
-    }
-
-    pub(crate) fn pi_settings(&self) -> Result<&PiSettingsSummary, String> {
-        match self.pi_library_config() {
-            Some(config) => config.settings_summary.as_ref().map_err(Clone::clone),
             None => Err(self.pi_library_pending_text()),
         }
     }

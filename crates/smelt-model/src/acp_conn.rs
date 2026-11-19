@@ -196,13 +196,11 @@ impl SessionConfigState {
             (Some(SmeltConfig::PermissionMode), "bypassPermissions") => {
                 t!("config.permission_mode.full")
             }
-            (Some(SmeltConfig::ThinkingLevel), "off") => t!("config.thinking_level.off"),
-            (Some(SmeltConfig::ThinkingLevel), "minimal") => t!("config.thinking_level.minimal"),
-            (Some(SmeltConfig::ThinkingLevel), "low") => t!("config.thinking_level.low"),
-            (Some(SmeltConfig::ThinkingLevel), "medium") => t!("config.thinking_level.medium"),
-            (Some(SmeltConfig::ThinkingLevel), "high") => t!("config.thinking_level.high"),
-            (Some(SmeltConfig::ThinkingLevel), "xhigh") => t!("config.thinking_level.xhigh"),
-            (Some(SmeltConfig::ThinkingLevel), "max") => t!("config.thinking_level.max"),
+            (Some(SmeltConfig::ThinkingLevel), level)
+                if crate::pi_model_settings::PI_THINKING_LEVELS.contains(&level) =>
+            {
+                return crate::pi_model_settings::pi_thinking_level_label(level);
+            }
             _ => return name.to_string(),
         };
         text.into_owned()

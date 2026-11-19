@@ -43,6 +43,7 @@ fn changes_config(method: ControlMethod) -> bool {
         ControlMethod::PiConfigEnsureFile
             | ControlMethod::PiModelsSetThinkingLevel
             | ControlMethod::PiModelsSaveDefault
+            | ControlMethod::PiModelsClearDefault
             | ControlMethod::PiProvidersSaveCustom
             | ControlMethod::PiProvidersRemoveCustom
             | ControlMethod::PiMcpAddPreset
@@ -79,6 +80,9 @@ fn run(
         }
         ControlMethod::PiModelsSaveDefault => {
             mutate::<PiModelsSaveDefault>(params, pi_service::save_default_model)
+        }
+        ControlMethod::PiModelsClearDefault => {
+            mutate::<PiModelsClearDefault>(params, |_| pi_service::clear_default_model())
         }
         ControlMethod::PiProvidersDiscoverModels => {
             call::<PiProvidersDiscoverModels>(params, pi_service::discover_models)
@@ -203,6 +207,7 @@ mod tests {
         }
         for method in [
             ControlMethod::PiModelsSaveDefault,
+            ControlMethod::PiModelsClearDefault,
             ControlMethod::PiProvidersSaveCustom,
             ControlMethod::PiMcpSetEnabled,
             ControlMethod::PiPluginsRemove,

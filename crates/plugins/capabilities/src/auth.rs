@@ -13,7 +13,7 @@ use api::client::RuntimeClient;
 use api::client::protocol::control::EmptyParams;
 use api::model::control_api::{
     PiAuthLoginAnswer, PiAuthLoginCancel, PiAuthLoginEvents, PiAuthLoginStart, PiAuthLogout,
-    PiAuthModels, PiAuthProviders, PiMcpLoginStart,
+    PiAuthProviders, PiMcpLoginStart,
 };
 use api::model::pi_auth_service::{
     LoginAnswerParams, LoginEventsParams, LoginIdParams, LoginStartParams,
@@ -170,8 +170,7 @@ impl CapabilitiesPage {
             input,
             secret_input,
             input_subscriptions,
-            outcome: None,
-            models: None,
+            error: None,
         });
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -192,7 +191,7 @@ impl CapabilitiesPage {
                         Some(login_id)
                     }
                     (Some(view), Err(error)) => {
-                        view.outcome = Some(Err(error));
+                        view.error = Some(error);
                         None
                     }
                     (None, Ok(login_id)) => {
@@ -334,21 +333,14 @@ impl CapabilitiesPage {
                     view.prompt = None;
                 }
             }
+            // 成功了面板就收起：那一行的状态、默认模型的下拉跟着重读的列表变。
             PiLoginEvent::Done => {
-                view.prompt = None;
-                view.auth_url = None;
-                view.device_code = None;
-                view.outcome = Some(Ok(()));
                 let target = view.target.clone();
+                self.pi_login = None;
                 self.refresh_pi_library(cx);
                 match target {
-                    PiLoginTarget::Provider { id, .. } => {
-                        self.refresh_pi_auth_providers(cx);
-                        self.load_pi_models_for(id, cx);
-                    }
-                    // 没有后续可做，面板直接收起；「已登录」标签随刷新的配置出来。
+                    PiLoginTarget::Provider { .. } => self.refresh_pi_auth_providers(cx),
                     PiLoginTarget::Mcp { name } => {
-                        self.pi_login = None;
                         notify_success(t!("auth.mcp_signed_in", name = name), cx);
                     }
                 }
@@ -362,74 +354,12 @@ impl CapabilitiesPage {
                 view.auth_url = None;
                 view.device_code = None;
                 // 用户自己点的取消不是失败，会话已经被丢掉，走不到这里。
-                view.outcome = Some(Err(message));
+                view.error = Some(message);
             }
             PiLoginEvent::Providers { .. } | PiLoginEvent::Models { .. } => {}
         }
         cx.notify();
         true
-    }
-
-    /// 问一遍某个 provider 现在能用哪些模型，好让「设为默认」有的选。
-    ///
-    /// 结果同时喂给登录面板和模型选择器：两处问的是同一件事，各自起一次子进程
-    /// 只是让用户多等一遍。谁还开着就更新谁。
-    fn load_pi_models_for(&mut self, provider_id: String, cx: &mut Context<Self>) {
-        self.run_pi_call::<PiAuthModels>(
-            ProviderIdParams {
-                provider_id: provider_id.clone(),
-            },
-            AUTH_CALL_TIMEOUT,
-            cx,
-            move |this, outcome, cx| {
-                let outcome = outcome.map(|result| result.models);
-                if let Some(view) = this.pi_login.as_mut()
-                    && view.provider_id() == Some(provider_id.as_str())
-                {
-                    view.models = Some(outcome.clone());
-                }
-                if let Some(picker) = this.pi_auth_model_picker.as_mut()
-                    && picker.provider_id == provider_id
-                {
-                    picker.models = Some(outcome);
-                }
-                cx.notify();
-            },
-        );
-    }
-
-    /// 为一个已配置的 provider 打开模型选择器。
-    ///
-    /// 「设为默认」不能只在登录成功那一瞬间可用：换模型、换回来、登录早就做完
-    /// 了才想起要改，都是常事，否则用户只能回去手打模型 ID。
-    pub fn open_pi_model_picker(
-        &mut self,
-        provider_id: String,
-        provider_name: String,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .pi_auth_model_picker
-            .as_ref()
-            .is_some_and(|picker| picker.provider_id == provider_id)
-        {
-            self.pi_auth_model_picker = None;
-            cx.notify();
-            return;
-        }
-        self.pi_auth_error = None;
-        self.pi_auth_model_picker = Some(PiAuthModelPicker {
-            provider_id: provider_id.clone(),
-            provider_name,
-            models: None,
-        });
-        cx.notify();
-        self.load_pi_models_for(provider_id, cx);
-    }
-
-    pub fn close_pi_model_picker(&mut self, cx: &mut Context<Self>) {
-        self.pi_auth_model_picker = None;
-        cx.notify();
     }
 
     /// 回答当前提问（文本 / 粘贴的 code / 密钥）。
@@ -516,66 +446,46 @@ impl CapabilitiesPage {
         cx.notify();
     }
 
-    /// 把某个 provider 的某个模型设成 Pi 的默认模型。
-    pub fn set_pi_default_model(
+    /// 删除自定义服务商、注销登录先停在确认上。
+    pub fn request_pi_provider_confirm(
         &mut self,
-        provider_id: String,
-        model_id: String,
+        confirm: PiProviderConfirm,
         cx: &mut Context<Self>,
     ) {
-        let label = format!("{provider_id} / {model_id}");
-        let params = api::model::pi_service::SaveDefaultModelParams {
-            config: api::model::pi_model_settings::PiDefaultModelConfig {
-                provider: provider_id,
-                model: model_id,
-                base_url: String::new(),
-                thinking_level: String::new(),
-            },
-            api_key: None,
-            reset_base_url: false,
-        };
-        self.run_pi_call::<api::model::control_api::PiModelsSaveDefault>(
-            params,
-            api::CALL_TIMEOUT,
-            cx,
-            move |this, result, cx| match result {
-                Ok(config) => {
-                    this.pi_auth_model_picker = None;
-                    this.adopt_pi_config(config, cx);
-                    notify_success(t!("auth.default_set", label = label), cx);
-                }
-                Err(error) => {
-                    this.pi_auth_error = Some(error.clone());
-                    notify_error(&error, cx);
-                }
-            },
-        );
+        self.pi_auth_error = None;
+        self.pi_provider_confirm = Some(confirm);
+        cx.notify();
+    }
+
+    pub fn cancel_pi_provider_confirm(&mut self, cx: &mut Context<Self>) {
+        self.pi_provider_confirm = None;
+        cx.notify();
+    }
+
+    pub fn confirm_pi_provider_action(
+        &mut self,
+        confirm: PiProviderConfirm,
+        cx: &mut Context<Self>,
+    ) {
+        self.pi_provider_confirm = None;
+        match confirm {
+            PiProviderConfirm::SignOut(id) => self.logout_pi_provider(id, cx),
+            PiProviderConfirm::RemoveCustom(id) => self.remove_pi_custom_provider(id, cx),
+        }
         cx.notify();
     }
 
     /// 注销一个 provider 的凭据。
-    pub fn logout_pi_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
+    fn logout_pi_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
         self.pi_auth_error = None;
-        cx.notify();
         self.run_pi_call::<PiAuthLogout>(
-            ProviderIdParams {
-                provider_id: provider_id.clone(),
-            },
+            ProviderIdParams { provider_id },
             AUTH_CALL_TIMEOUT,
             cx,
             move |this, outcome, cx| {
-                if let Err(error) = outcome {
-                    this.pi_auth_error = Some(error);
-                } else {
-                    this.refresh_pi_library(cx);
-                    // 凭据没了，它报过的模型也就不能选了。
-                    if this
-                        .pi_auth_model_picker
-                        .as_ref()
-                        .is_some_and(|picker| picker.provider_id == provider_id)
-                    {
-                        this.pi_auth_model_picker = None;
-                    }
+                match outcome {
+                    Ok(_) => this.refresh_pi_library(cx),
+                    Err(error) => this.pi_auth_error = Some(error),
                 }
                 this.refresh_pi_auth_providers(cx);
                 cx.notify();

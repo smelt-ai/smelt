@@ -272,17 +272,19 @@ pub struct CapabilitiesPage {
     pi_auth_providers: Option<PiAuthProvidersState>,
     /// 正在进行的登录：provider 的订阅/API key，或 MCP 服务器的 OAuth。
     pi_login: Option<PiLoginView>,
-    /// 正在为哪个 provider 挑默认模型。
-    pi_auth_model_picker: Option<PiAuthModelPicker>,
-    /// Pi 凭据操作（列表、注销）的最近一次错误。
+    /// 等用户确认的服务商操作（删除自定义服务商、注销登录）。
+    pi_provider_confirm: Option<PiProviderConfirm>,
+    /// 服务商操作（登录、注销、删除）的最近一次错误，写在服务商列表上面。
     pi_auth_error: Option<String>,
+    /// 默认模型、推理强度没改成的原因，写在那两行旁边。
+    pi_default_error: Option<String>,
     /// 凭据面板是否展开到全部内置 provider（默认只列可订阅登录的和已配好的）。
     pi_auth_show_all: bool,
     /// 等用户确认移除的 MCP 服务器名。移除会删掉用户手写的配置，所以要两步。
     pi_mcp_pending_remove: Option<String>,
     /// MCP 配置操作（添加、启停、移除、登录）的最近一次错误。
     pi_mcp_error: Option<String>,
-    /// 交互式原生 Pi 模型表单错误。
+    /// 开着的那张模型表单（手动填写、自定义服务商）的错误，写在表单的保存按钮上面。
     pi_model_editor_error: Option<String>,
     /// 正在等二次确认删除的插件 id。
     pi_plugin_pending_delete: Option<String>,
@@ -321,8 +323,9 @@ impl CapabilitiesPage {
             pi_custom_provider_editor: None,
             pi_auth_providers: None,
             pi_login: None,
-            pi_auth_model_picker: None,
+            pi_provider_confirm: None,
             pi_auth_error: None,
+            pi_default_error: None,
             pi_auth_show_all: false,
             pi_mcp_pending_remove: None,
             pi_mcp_error: None,
