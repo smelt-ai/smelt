@@ -1,7 +1,7 @@
 //! 插件目录里文件一变，就重挂改动的那个插件：写插件的人（和智能体）保存即生效，导入、删除
 //! 插件也靠它挂上、撤下。
 //!
-//! 盯的是用户插件目录 `~/.smelt/plugins/`。靠文件系统事件（macOS 是 FSEvents），不轮询。
+//! 盯的是用户插件目录 `~/.smelt/plugins/`，开发构建还盯仓库里的自带插件 `plugins/`。靠文件系统事件（macOS 是 FSEvents），不轮询。
 //!
 //! 加载插件时 gpui-shell 会往插件目录里写给编辑器的文件（`gpui-kit.d.ts`、`jsconfig.json`、
 //! `node_modules/` 里的依赖链接），这些变化不算，否则每次重挂都会再触发一次。点开头的也
@@ -106,6 +106,9 @@ fn watched_dirs() -> Vec<WatchedDir> {
             dirs.push(user);
         }
     }
+    // 正式构建的自带插件是 App 写出来的，不会有人改。
+    #[cfg(debug_assertions)]
+    dirs.push(super::builtin::repo_dir());
     dirs.into_iter()
         .filter(|dir| dir.is_dir())
         .map(|original| WatchedDir {

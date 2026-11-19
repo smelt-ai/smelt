@@ -1,4 +1,4 @@
-//! 用户插件的导入和删除：只动 `~/.smelt/plugins/`，App 自带的插件不归这里管。
+//! 用户插件的导入和删除：只动 `~/.smelt/plugins/`，App 自带的插件不归这里管，只是 id 不能和它们重。
 //!
 //! 导入是把一个插件目录复制进来，之后和原目录无关。删除是挪进回收目录，不直接抹掉。
 //! 两者都只改磁盘；工作台盯着插件目录，变了自己重挂（见 `watch`）。都是阻塞 IO，放后台线程调。
@@ -56,6 +56,9 @@ fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> 
     let canonical_source = fs::canonicalize(source).map_err(|error| error.to_string())?;
     if canonical_source.starts_with(&canonical_plugins) {
         return Err(t!("plugins.already_inside").into_owned());
+    }
+    if super::builtin::dir().is_some_and(|dir| installed_root(dir, manifest.id()).is_some()) {
+        return Err(t!("plugins.builtin_id", id = manifest.id()).into_owned());
     }
     if let Some(existing) = installed_root(plugins, manifest.id()) {
         return Err(t!("plugins.duplicate_id", path = existing.display()).into_owned());

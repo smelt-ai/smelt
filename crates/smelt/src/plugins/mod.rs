@@ -15,9 +15,13 @@
 //! 没用上游的 `PluginManager`：它按 manifest 给每个插件新建一份空 Policy，拿不到
 //! 宿主注册的模块。这里只用公开的 `PluginManifest::read` 发现插件。
 //!
-//! 插件都在 `~/.smelt/plugins/`：用户自己装的，也是写插件的地方。设置里的「面板插件」页往这里
-//! 导入、从这里删除（见 `manage`）。目录里文件一变就重挂改动的那个插件（见 `watch`），不用重启，
-//! 也不用点「重新加载」。App 自带的功能都是 Rust 插件（`crates/plugins`），不随 App 带 JS 插件。
+//! 插件从两处来（见 [`Source`]）：
+//! 1. App 自带的：仓库根 `plugins/`，编进二进制，只读（见 `builtin`）。
+//! 2. `~/.smelt/plugins/`：用户自己装的，也是写插件的地方。设置里的「面板插件」页往这里导入、
+//!    从这里删除（见 `manage`）。
+//!
+//! 两处 id 不能重：同 id 不是替换，用户插件和自带的重了就不加载、报重复。想改自带插件，复制一份
+//! 换个 id。目录里文件一变就重挂改动的那个插件（见 `watch`），不用重启，也不用点「重新加载」。
 //!
 //! 命令行 `smelt plugin check|status`（见 `cli`）：不开 App 加载并渲染一次插件；查 App 里
 //! 各插件的加载结果（App 每次挂载后写一份快照，见 `status`）。
@@ -28,6 +32,7 @@
 //! 工作台没有包它，这条用不了。
 
 mod assets;
+mod builtin;
 mod check;
 mod cli;
 mod host_fs;
@@ -81,8 +86,20 @@ struct PluginPanel {
     title: String,
     version: String,
     root: PathBuf,
+    source: Source,
+    /// 和先发现的插件同 id，没加载，也没登记任何东西：撤下时不能按 id 撤，那是别人的。
+    duplicate: bool,
     /// 加载失败的原因。
     error: Option<String>,
+}
+
+/// 插件从哪来。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// App 自带的，跟着 App 更新，不能删。
+    Builtin,
+    /// `~/.smelt/plugins/`，用户自己装的。
+    User,
 }
 
 /// 一个插件的视图：脚本画的内容，或者加载失败的原因。加载失败也照样登记、照样摆着，
@@ -201,19 +218,24 @@ fn remount(changed: Option<&BTreeSet<PathBuf>>, window: &mut Window, cx: &mut Ap
     let found = discover();
     let mut theme_errors = register_theme_contributions(&found, cx);
     let previous = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().panels));
-    // 没变的插件原样留着：根目录和 id 都对得上、目录里没有文件变过。
+    // 没变的插件原样留着：根目录和 id 都对得上、目录里没有文件变过，是不是重复也没变（别处
+    // 新出现一个同 id 的，原来加载着的这份就成了重复，要撤下）。
     let mut kept = std::collections::HashMap::new();
     for panel in previous {
         let unchanged = changed.is_some_and(|changed| !changed.contains(&panel.root))
-            && found
-                .iter()
-                .any(|plugin| plugin.root == panel.root && plugin.manifest.id() == panel.id);
+            && found.iter().any(|plugin| {
+                plugin.root == panel.root
+                    && plugin.manifest.id() == panel.id
+                    && plugin.duplicate_of.is_some() == panel.duplicate
+            });
         if unchanged {
             kept.insert(panel.root.clone(), panel);
         } else {
             // 脚本挂载时自己再登记布局、命令、主题；重载后不再登记的、卸掉的插件的不能留着。
             // 事件在这一轮更新结束才发，工作台看到的是挂完的结果，不会先换走再换回来。
-            unmount(&panel.id, cx);
+            if !panel.duplicate {
+                unmount(&panel.id, cx);
+            }
         }
     }
 
@@ -245,19 +267,43 @@ fn remount(changed: Option<&BTreeSet<PathBuf>>, window: &mut Window, cx: &mut Ap
 /// 挂一个插件、登记它的视图。登记不上返回 `None`；加载失败照样登记，视图里画出原因。
 /// `runtime` 第一次有脚本插件要挂时才建。
 fn mount_one(
-    Found { root, manifest }: Found,
+    Found {
+        root,
+        manifest,
+        source,
+        duplicate_of,
+    }: Found,
     theme_error: Option<String>,
     runtime: &mut Option<Result<Rc<ShellRuntime>, String>>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<PluginPanel> {
     let id = manifest.id().to_string();
+    if let Some(other) = duplicate_of {
+        let error = t!(
+            "plugins.duplicate_skipped",
+            id = id,
+            other = other.display().to_string()
+        );
+        eprintln!("[plugins] {} 没加载：{error}", root.display());
+        return Some(PluginPanel {
+            title: manifest.name().to_string(),
+            version: manifest.version().to_string(),
+            id,
+            root,
+            source,
+            duplicate: true,
+            error: Some(error.into_owned()),
+        });
+    }
     if is_theme_only(&manifest) {
         return Some(PluginPanel {
             title: manifest.name().to_string(),
             version: manifest.version().to_string(),
             id,
             root,
+            source,
+            duplicate: false,
             error: theme_error,
         });
     }
@@ -278,6 +324,7 @@ fn mount_one(
             .and_then(|policy| {
                 // 加载时解析导入、挂载时视图拿走的都是默认 Policy。
                 policy::set_default(policy);
+                runtime.set_editor_files(builtin::editor_files(&root));
                 let application = runtime.load_application(&root, manifest.entry())?;
                 runtime.mount_application(&application, window, cx)
             })
@@ -296,6 +343,8 @@ fn mount_one(
         version: manifest.version().to_string(),
         id,
         root,
+        source,
+        duplicate: false,
         error: theme_error.or_else(|| content.as_ref().err().cloned()),
     };
     // 旧登记在挂之前已经撤下，旧视图随之放掉。
@@ -429,6 +478,7 @@ fn mount_view_entry(
         .map_err(|error| t!("plugins.runtime_failed", error = format!("{error:#}")).into_owned())?;
     let view = plugin_policy(id, &plugin).and_then(|policy| {
         policy::set_default(policy);
+        runtime.set_editor_files(builtin::editor_files(root));
         let application = runtime.load_application(root, entry)?;
         runtime.mount_application(&application, window, cx)
     });
@@ -457,7 +507,7 @@ fn plugin_policy(id: &str, plugin: &JsPlugin) -> anyhow::Result<Policy> {
 /// 中止进程。视图在视图注册表里，撤下登记就放掉；布局里摆着的那份随工作台一起放。
 pub(crate) fn shutdown(cx: &mut App) {
     let panels = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().panels));
-    for panel in panels {
+    for panel in panels.iter().filter(|panel| !panel.duplicate) {
         // 视图和设置页的建页函数都要在运行时之前放掉，理由同上。
         api::unregister_views(&panel.id, cx);
     }
@@ -469,6 +519,9 @@ pub(crate) fn shutdown(cx: &mut App) {
 struct Found {
     root: PathBuf,
     manifest: PluginManifest,
+    source: Source,
+    /// 同 id 的插件已经先发现了：它的目录。这一份不加载。
+    duplicate_of: Option<PathBuf>,
 }
 
 /// 先于窗口和外观恢复，登记已安装插件的主题；纯主题包不执行脚本。
@@ -491,7 +544,7 @@ fn register_theme_contributions(
     }
     let mut owners = Vec::new();
     let mut errors = std::collections::HashMap::new();
-    for plugin in found {
+    for plugin in found.iter().filter(|plugin| plugin.duplicate_of.is_none()) {
         let id = plugin.manifest.id();
         // 脚本登记的主题（`script:<id>`）随插件挂载、卸载走（见 `unmount`），这里只管文件里的。
         let owner = format!("files:{id}");
@@ -517,29 +570,45 @@ fn register_theme_contributions(
     errors
 }
 
-/// 找 `~/.smelt/plugins/` 下的插件，同名 id 先到先得。坏的 manifest 记一笔就跳过，不执行任何脚本。
+/// 找插件：先自带的，再 `~/.smelt/plugins/` 下的。同 id 先到先得，后到的记成重复、不加载。
+/// 坏的 manifest 记一笔就跳过，不执行任何脚本。
 fn discover() -> Vec<Found> {
-    let Some(entries) = user_plugin_dir().and_then(|dir| std::fs::read_dir(dir).ok()) else {
-        return Vec::new();
-    };
-    let mut roots: Vec<PathBuf> = entries
-        .flatten()
-        // 点开头的是导入到一半的暂存目录（见 `manage`），不是插件。
-        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-        .map(|entry| entry.path())
-        .filter(|path| path.join(MANIFEST_FILE).is_file())
-        .collect();
-    // 目录遍历顺序随文件系统而变；不排序的话 tab 顺序每次启动都可能不同。
-    roots.sort();
+    let sources = [
+        builtin::dir().map(|dir| (dir.to_path_buf(), Source::Builtin)),
+        user_plugin_dir().map(|dir| (dir, Source::User)),
+    ];
     let mut found: Vec<Found> = Vec::new();
-    for root in roots {
-        match PluginManifest::read(&root) {
-            Ok(manifest) => {
-                if !found.iter().any(|seen| seen.manifest.id() == manifest.id()) {
-                    found.push(Found { root, manifest });
+    for (dir, source) in sources.into_iter().flatten() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut roots: Vec<PathBuf> = entries
+            .flatten()
+            // 点开头的是导入到一半的暂存目录（见 `manage`），不是插件。
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .map(|entry| entry.path())
+            .filter(|path| path.join(MANIFEST_FILE).is_file())
+            .collect();
+        // 目录遍历顺序随文件系统而变；不排序的话 tab 顺序每次启动都可能不同。
+        roots.sort();
+        for root in roots {
+            match PluginManifest::read(&root) {
+                Ok(manifest) => {
+                    let duplicate_of = found
+                        .iter()
+                        .find(|seen| {
+                            seen.duplicate_of.is_none() && seen.manifest.id() == manifest.id()
+                        })
+                        .map(|seen| seen.root.clone());
+                    found.push(Found {
+                        root,
+                        manifest,
+                        source,
+                        duplicate_of,
+                    });
                 }
+                Err(error) => eprintln!("[plugins] {error}"),
             }
-            Err(error) => eprintln!("[plugins] {error}"),
         }
     }
     found
@@ -597,12 +666,13 @@ fn with_registry<R>(read: impl FnOnce(&Registry) -> R) -> R {
     REGISTRY.with(|registry| read(&registry.borrow()))
 }
 
-/// 已挂载的插件，按加载顺序。只读内存。
+/// 用户装的插件，按加载顺序。自带的是 App 的一部分，不在这里列。只读内存。
 pub(crate) fn installed() -> Vec<InstalledPlugin> {
     with_registry(|registry| {
         registry
             .panels
             .iter()
+            .filter(|panel| panel.source == Source::User)
             .map(|panel| InstalledPlugin {
                 id: panel.id.clone(),
                 name: panel.title.clone(),
@@ -751,6 +821,8 @@ export default class App extends View {
         let found = super::Found {
             root: dir.clone(),
             manifest: PluginManifest::read(&dir).unwrap(),
+            source: super::Source::User,
+            duplicate_of: None,
         };
         cx.update(|cx| {
             gpui_base::init(cx);

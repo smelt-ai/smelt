@@ -382,6 +382,9 @@ plugins:
   bad_path:
     en: "The plugin path is invalid"
     zh-CN: "插件路径不对"
+  builtin_id:
+    en: "Smelt already comes with a plugin with ID %{id}. Change the ID in gpui-shell.json, then import"
+    zh-CN: "Smelt 自带的插件里已经有 id %{id}，改掉 gpui-shell.json 里的 id 再导入"
   cleanup_failed:
     en: "Couldn't clean up the folder from an unfinished import: %{error}"
     zh-CN: "清理上次没导完的目录失败：%{error}"
@@ -406,6 +409,9 @@ plugins:
   duplicate_id:
     en: "A plugin with the same ID is already installed (%{path}). Delete it before importing"
     zh-CN: "已经装了 id 相同的插件（%{path}），先删掉它再导入"
+  duplicate_skipped:
+    en: "Not loaded: %{other} already has ID %{id}. Change the ID in gpui-shell.json"
+    zh-CN: "没加载：%{other} 已经用了 id %{id}，改掉 gpui-shell.json 里的 id"
   empty:
     en: "No plugins yet."
     zh-CN: "还没有插件。"
