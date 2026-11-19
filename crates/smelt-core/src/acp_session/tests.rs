@@ -4187,26 +4187,100 @@ fn memory_writes_in_a_turn_share_one_card_row_per_file_and_keep_created() {
 }
 
 #[test]
-fn resolving_memory_updates_the_card_without_reshowing_it() {
+fn resolved_memory_leaves_the_card_without_reshowing_it() {
     use crate::control_api::AgentMemoryLayer::{Agent, User};
     let mut state = fresh_state();
-    note_memory_write(&mut state, "a1", memory_change(Agent, "x.md", true, Some("外部内容")));
-    note_memory_write(&mut state, "a1", memory_change(User, "u.md", true, Some("外部内容")));
+    note_memory_write(
+        &mut state,
+        "a1",
+        memory_change(Agent, "x.md", true, Some("外部内容")),
+    );
+    note_memory_write(
+        &mut state,
+        "a1",
+        memory_change(User, "u.md", true, Some("外部内容")),
+    );
+    note_memory_write(
+        &mut state,
+        "a1",
+        memory_change(Agent, "seen.md", true, None),
+    );
     let id = state.memory_changes.as_ref().unwrap().id;
 
     // 别的智能体自己的层同名文件不相干；用户全局层谁的卡片上有都同步。
-    assert!(!resolve_memory_change(&mut state, "a2", Agent, "x.md", MemoryResolution::Approved));
-    assert!(resolve_memory_change(&mut state, "a2", User, "U.md", MemoryResolution::Approved));
-    assert!(resolve_memory_change(&mut state, "a1", Agent, "x.md", MemoryResolution::Approved));
-    assert!(!resolve_memory_change(&mut state, "a1", Agent, "x.md", MemoryResolution::Approved));
+    assert!(!resolve_memory_change(
+        &mut state,
+        "a2",
+        Agent,
+        "x.md",
+        MemoryResolution::Approved
+    ));
+    assert!(resolve_memory_change(
+        &mut state,
+        "a2",
+        User,
+        "U.md",
+        MemoryResolution::Approved
+    ));
+    // 采纳了就办完了，那一行离开卡片；再采纳一次没东西可变。
+    assert!(resolve_memory_change(
+        &mut state,
+        "a1",
+        Agent,
+        "x.md",
+        MemoryResolution::Approved
+    ));
+    assert!(!resolve_memory_change(
+        &mut state,
+        "a1",
+        Agent,
+        "x.md",
+        MemoryResolution::Approved
+    ));
+    // 已经生效的不用采纳，留着当告知。
+    assert!(!resolve_memory_change(
+        &mut state,
+        "a1",
+        Agent,
+        "seen.md",
+        MemoryResolution::Approved
+    ));
     let changes = state.memory_changes.as_ref().unwrap();
     assert_eq!(changes.id, id, "处理不换 id");
-    assert!(changes.entries.iter().all(|entry| entry.pending_reason.is_none()));
+    let left: Vec<_> = changes
+        .entries
+        .iter()
+        .map(|entry| entry.file_name.as_str())
+        .collect();
+    assert_eq!(left, vec!["seen.md"]);
 
-    assert!(resolve_memory_change(&mut state, "a1", Agent, "x.md", MemoryResolution::Deleted));
-    assert_eq!(state.memory_changes.as_ref().unwrap().entries.len(), 1);
-    assert!(resolve_memory_change(&mut state, "a1", User, "u.md", MemoryResolution::Deleted));
-    assert_eq!(state.memory_changes, None, "删光了卡片就收起");
+    assert!(resolve_memory_change(
+        &mut state,
+        "a1",
+        Agent,
+        "seen.md",
+        MemoryResolution::Deleted
+    ));
+    assert_eq!(state.memory_changes, None, "行都没了卡片就收起");
+}
+
+#[test]
+fn approving_the_only_pending_memory_closes_the_card() {
+    use crate::control_api::AgentMemoryLayer::Agent;
+    let mut state = fresh_state();
+    note_memory_write(
+        &mut state,
+        "a1",
+        memory_change(Agent, "x.md", true, Some("外部内容")),
+    );
+    assert!(resolve_memory_change(
+        &mut state,
+        "a1",
+        Agent,
+        "x.md",
+        MemoryResolution::Approved
+    ));
+    assert_eq!(state.memory_changes, None);
 }
 
 #[test]

@@ -1315,8 +1315,8 @@ pub enum MemoryResolution {
     Deleted,
 }
 
-/// 把用户的采纳、删除同步到卡片上。不换 id：关掉的卡片不因此重新出现。删光了卡片就收起。
-/// 返回卡片是否变了。
+/// 把用户的采纳、删除同步到卡片上：处理过的那一行就办完了，离开卡片；行都没了卡片就收起。
+/// 没碰过的已生效行留着当告知。不换 id：关掉的卡片不因此重新出现。返回卡片是否变了。
 pub fn resolve_memory_change(
     state: &mut AcpSessionState,
     agent_id: &str,
@@ -1337,18 +1337,13 @@ pub fn resolve_memory_change(
     }) else {
         return false;
     };
-    match resolution {
-        MemoryResolution::Approved => {
-            if changes.entries[index].pending_reason.take().is_none() {
-                return false;
-            }
-        }
-        MemoryResolution::Deleted => {
-            changes.entries.remove(index);
-            if changes.entries.is_empty() {
-                state.memory_changes = None;
-            }
-        }
+    // 已经生效的再采纳一次没有要办的事。
+    if resolution == MemoryResolution::Approved && changes.entries[index].pending_reason.is_none() {
+        return false;
+    }
+    changes.entries.remove(index);
+    if changes.entries.is_empty() {
+        state.memory_changes = None;
     }
     true
 }
