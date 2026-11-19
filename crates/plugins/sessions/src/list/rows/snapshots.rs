@@ -6,8 +6,8 @@
 //! ```
 //!
 //! 图在 `target/tmp/snapshots/sessions/avatar-{light,dark}.png`，2 倍像素。小人归别的插件，
-//! 这里拿一块花花绿绿的像素块顶替，看最难认的情形：小标压在彩色像素上。每行是一种小标
-//! （智能体首字、CLI 图标、终端、对话），选中、未选中各一行；每行从左到右是空闲、在跑、要你。
+//! 这里拿一块花花绿绿的像素块顶替，看最难认的情形：小标压在彩色像素上。每三行是一种小标
+//! （智能体首字、Claude、Codex、终端），依次是闲着、在跑（选中）、要你。
 //!
 //! 默认不跑：主题色板是进程级全局，和并行的其它测试会互相盖掉。
 
@@ -55,7 +55,7 @@ fn render(theme: &str, path: &Path) {
         );
     });
     let window = cx
-        .open_window(size(px(360.), px(420.)), |window, cx| {
+        .open_window(size(px(120.), px(580.)), |window, cx| {
             let figure: AnyView = cx.new(|_| StandIn).into();
             let sheet = cx.new(|_| Sheet { figure });
             cx.new(|cx| gpui_base::Root::new(sheet, window, cx))
@@ -102,6 +102,7 @@ struct Sheet {
 impl Render for Sheet {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let claude = ConversationAgentKind::Claude;
+        let codex = ConversationAgentKind::Codex;
         let icons = [
             RowIcon::Agent {
                 mark: "开".into(),
@@ -111,36 +112,36 @@ impl Render for Sheet {
                 path: claude.icon_asset().into(),
                 label: claude.label().into(),
             },
+            RowIcon::Provider {
+                path: codex.icon_asset().into(),
+                label: codex.label().into(),
+            },
             RowIcon::Terminal,
-            RowIcon::Conversation,
         ];
-        let statuses = [
-            AgentStatus::Idle,
-            AgentStatus::Running,
-            AgentStatus::NeedsYou,
+        let cases = [
+            (AgentStatus::Idle, false),
+            (AgentStatus::Running, true),
+            (AgentStatus::NeedsYou, false),
         ];
         let mut rows = Vec::new();
         for (i, icon) in icons.iter().enumerate() {
-            for selected in [false, true] {
-                let avatars = statuses.iter().enumerate().map(|(j, status)| {
-                    session_avatar(
-                        &format!("{i}-{selected}-{j}"),
-                        Some(self.figure.clone()),
-                        icon,
-                        *status,
-                        selected,
-                        None,
-                    )
-                });
+            for (k, (status, selected)) in cases.into_iter().enumerate() {
+                let avatar = session_avatar(
+                    &format!("{i}-{k}"),
+                    Some(self.figure.clone()),
+                    icon,
+                    status,
+                    selected,
+                    None,
+                );
                 rows.push(
-                    ListRow::new(eid(format!("row-{i}-{selected}")))
+                    ListRow::new(eid(format!("row-{i}-{k}")))
                         .selected(selected)
                         .h(px(AVATAR_ROW))
                         .px_2()
                         .flex()
                         .items_center()
-                        .gap_4()
-                        .children(avatars),
+                        .child(avatar),
                 );
             }
         }

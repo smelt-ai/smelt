@@ -57,8 +57,8 @@ const LEAD: f32 = 16.;
 const AVATAR: f32 = 36.;
 const AVATAR_ROW: f32 = 44.;
 /// 头像右下角标明哪家 CLI、哪个智能体的小圆标，和里面图标、首字的大小。
-const BADGE: f32 = 16.;
-const BADGE_GLYPH: f32 = 10.;
+const BADGE: f32 = 18.;
+const BADGE_GLYPH: f32 = 13.;
 
 /// 画一遍要的东西：算好的侧栏，加上视图上的临时状态。
 pub(super) struct RowCtx {
@@ -1406,11 +1406,13 @@ fn status_color(status: AgentStatus, selected: bool, glow: Option<f32>) -> Rgba 
 }
 
 /// 行首的头像：`figure` 是填进插槽的视图给这段会话的实例（还没建好是 `None`，空着）。右下角的
-/// 小标标明是哪家 CLI（智能体对话是名字的第一个字），按状态上色（[`status_color`]）。
+/// 小标标明是哪家 CLI（智能体对话是名字的第一个字）。
 ///
-/// 小标垫一块实心圆底再描一圈细边，把它从头像上隔开：直接压在彩色像素上，细线条图标和小人的
-/// 轮廓搅在一起认不出。底不取行底色：行底是叠在窗口材质上的半透明色，选中、悬停各不一样，
-/// 实心色对不上；用浮起面的颜色，各种行底上都是同一枚小牌子。
+/// 小标垫一块实心圆底，把它从头像上隔开：直接压在彩色像素上，细线条图标和小人的轮廓搅在
+/// 一起认不出。底不取行底色：行底是叠在窗口材质上的半透明色，选中、悬停各不一样，实心色
+/// 对不上；用浮起面的颜色，各种行底上都是同一枚小牌子。图标一律用正文色，它要回答的是
+/// 「哪家」，状态色（尤其闲着的灰、某些主题偏暗的在跑色）压在圆底上对比度不够；状态改由
+/// 圆圈的颜色说（[`status_color`]），闲着只描一圈细边。
 fn session_avatar(
     id: &str,
     figure: Option<AnyView>,
@@ -1419,7 +1421,7 @@ fn session_avatar(
     selected: bool,
     glow: Option<f32>,
 ) -> AnyElement {
-    let color = status_color(status, selected, glow);
+    let color = rgb(ui_theme::text());
     let glyph = |path: SharedString| {
         svg()
             .path(path)
@@ -1449,8 +1451,12 @@ fn session_avatar(
         .size(px(BADGE))
         .rounded_full()
         .bg(rgb(ui_theme::surface()))
-        .border_1()
-        .border_color(ui_theme::hair())
+        .map(|badge| match status {
+            AgentStatus::Idle => badge.border_1().border_color(ui_theme::hair()),
+            _ => badge
+                .border(px(1.5))
+                .border_color(status_color(status, selected, glow)),
+        })
         .flex()
         .items_center()
         .justify_center()
