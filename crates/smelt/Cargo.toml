@@ -105,6 +105,10 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 [target.'cfg(unix)'.dev-dependencies]
 smelt-core = { path = "../smelt-core" }
 
+# 插件资源的渲染测试离屏真画一帧、取像素（同 smelt-ui 的快照）。
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_apple = { package = "gpui-pre-apple", version = "=0.3.12", features = ["font-kit", "runtime_shaders", "test-support"] }
+
 # Windows 11 的 Mica 要按窗口设深浅，系统版本要绕过兼容层读真的（见 window_backdrop.rs）。
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"

@@ -190,6 +190,10 @@ const JS_ONLY: &[(&str, &str)] = &[
     ("locales", "常量 LOCALES"),
     ("store_query", "plugin_store"),
     ("store_execute", "plugin_store"),
+    (
+        "asset",
+        "内置插件的资源用 include_bytes 编进二进制，不在插件目录里",
+    ),
 ];
 
 /// 从本 crate 的 lib.rs 认出根上给出去的小写名字：`pub use` 列出的函数和库、`pub fn`、

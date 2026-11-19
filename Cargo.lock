@@ -10740,6 +10740,7 @@ dependencies = [
  "gpui-base",
  "gpui-fps",
  "gpui-pre",
+ "gpui-pre-apple",
  "gpui-pre-platform",
  "gpui-shell",
  "image",

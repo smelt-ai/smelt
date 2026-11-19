@@ -636,8 +636,9 @@ fn main() {
     // Finder / launchd 启动的 GUI 默认软上限常是 256；在创建窗口、socket 和终端
     // 线程之前先抬高，避免正常多会话也让更新检查等新连接触发 EMFILE。
     smelt_sys::fd_limit::raise_fd_limit();
-    // with_assets 注册图标资源，IconName 和智能体图标的 svg 才能渲染（见 smelt_ui::assets）。
-    let app = gpui_platform::application().with_assets(smelt_ui::assets::Assets);
+    // with_assets 注册资源表：IconName 和智能体图标的 svg（见 smelt_ui::assets），加上插件目录里
+    // 的文件（见 plugins::Assets）。
+    let app = gpui_platform::application().with_assets(plugins::Assets);
     // Dock / Finder「打开」投递的 file:// URL（拖文件夹到 Dock 图标、右键用 Smelt 打开）。
     // 回调里没有 cx，经 channel 转发；unbounded 会缓存首启动时窗口建好前到达的 URL。
     let (url_tx, url_rx) = smol::channel::unbounded::<Vec<String>>();

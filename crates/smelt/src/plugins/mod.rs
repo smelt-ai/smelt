@@ -27,6 +27,7 @@
 //! `window.open_dialog` 要找 `ShellRoot`（窗口第一层，或 `Root` 里面那一层），
 //! 工作台没有包它，这条用不了。
 
+mod assets;
 mod check;
 mod cli;
 mod host_fs;
@@ -50,6 +51,7 @@ use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
 use smelt_plugin_api::js::{JsPlugin, MAIN_VIEW, ViewEntry, ViewLoader};
 use smelt_plugin_api::{self as api, PluginView, ViewHandle, ViewSpec};
 
+pub(crate) use assets::Assets;
 pub(crate) use cli::maybe_run as maybe_run_cli;
 pub(crate) use log::install as install_log;
 pub(crate) use manage::{import, uninstall, user_plugin_dir};
@@ -266,11 +268,11 @@ fn mount_one(
             })
         })
         .clone();
-    let plugin = JsPlugin::for_plugin(&id, manifest.name()).with_view_loader(view_loader(
-        &id,
-        manifest.name(),
-        &root,
-    ));
+    // 先于加载：`init` 和第一次 `render` 就可能要画插件目录里的图。
+    let assets = assets::mount(&id, root.clone());
+    let plugin = JsPlugin::for_plugin(&id, manifest.name())
+        .with_assets(assets.clone(), &root)
+        .with_view_loader(view_loader(&id, manifest.name(), &root, &assets));
     let content = runtime.and_then(|runtime| {
         plugin_policy(&id, &plugin)
             .and_then(|policy| {
@@ -353,22 +355,32 @@ fn unmount(id: &str, cx: &mut App) {
     api::unregister_quit_guard(id, cx);
     api::unregister_topics(id, cx);
     api::unregister_views(id, cx);
+    assets::unmount(id);
 }
 
 /// 插件主入口之外的视图怎么建：入口是插件目录里的另一个脚本，每建一份视图单独加载、挂载
 /// 一份，和主入口、别的视图各是一份实例（像浏览器扩展的 options 页）。设置页和别的视图第一次
 /// 露出来时挂；按实例建的等第一次打开、有了参数再挂（`create_view` 建好马上就打开）。
-fn view_loader(id: &str, name: &str, root: &std::path::Path) -> ViewLoader {
+///
+/// `assets` 是插件这次挂载的资源前缀（见 [`assets::mount`]），视图入口的脚本和主入口用同一个。
+fn view_loader(id: &str, name: &str, root: &std::path::Path, assets: &str) -> ViewLoader {
     let (id, name, root) = (id.to_string(), name.to_string(), root.to_path_buf());
+    let assets = assets.to_string();
     ViewLoader {
         icon: smelt_ui::IconName::Puzzle.path(),
         load: Rc::new(move |view: &ViewEntry| {
             check_view_entry(&root, &view.entry)?;
-            let (id, name, root, entry) =
-                (id.clone(), name.clone(), root.clone(), view.entry.clone());
+            let (id, name, root, entry, assets) = (
+                id.clone(),
+                name.clone(),
+                root.clone(),
+                view.entry.clone(),
+                assets.clone(),
+            );
             let mount: Rc<dyn Fn(serde_json::Value, &mut Window, &mut App) -> Mounted> =
                 Rc::new(move |args, window, cx| {
-                    let plugin = JsPlugin::for_view(&id, &name, args);
+                    let plugin =
+                        JsPlugin::for_view(&id, &name, args).with_assets(assets.clone(), &root);
                     mount_view_entry(&id, &root, &entry, plugin, window, cx)
                 });
             let (settings, instances) = (view.settings, view.instances);

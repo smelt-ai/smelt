@@ -42,7 +42,7 @@ pub(super) fn run(dir: &Path) -> i32 {
     super::log::install_stderr();
     // 结果在应用循环里报、在里面退出：开过窗口的循环不会因为窗口没显示就自己结束。
     gpui_platform::application()
-        .with_assets(smelt_ui::assets::Assets)
+        .with_assets(super::Assets)
         .run(move |cx| {
             let code = match check(&root, &manifest, cx) {
                 Ok(()) => {
@@ -89,11 +89,10 @@ fn check(root: &Path, manifest: &PluginManifest, cx: &mut App) -> Result<(), Str
 
     let runtime = super::runtime(cx)
         .map_err(|error| t!("plugins.runtime_failed", error = format!("{error:#}")).into_owned())?;
-    let plugin = JsPlugin::for_plugin(id, manifest.name()).with_view_loader(super::view_loader(
-        id,
-        manifest.name(),
-        root,
-    ));
+    let assets = super::assets::mount(id, root.to_path_buf());
+    let plugin = JsPlugin::for_plugin(id, manifest.name())
+        .with_assets(assets.clone(), root)
+        .with_view_loader(super::view_loader(id, manifest.name(), root, &assets));
     let policy = super::plugin_policy(id, &plugin).map_err(|error| format!("{error:#}"))?;
     // 加载时解析导入、挂载时视图拿走的都是默认 Policy，同 `mount_one`。
     policy::set_default(policy);

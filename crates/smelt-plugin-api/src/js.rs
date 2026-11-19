@@ -20,6 +20,7 @@ pub mod ui;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use futures_channel::oneshot;
@@ -450,6 +451,14 @@ export type SqlValue = string | number | boolean | null;
 export function store_query(sql: string, params?: SqlValue[]): Promise<Record<string, string | number | null>[]>;
 /** 在本插件自己的库里执行一条语句，返回改动的行数。 */
 export function store_execute(sql: string, params?: SqlValue[]): Promise<number>;
+/**
+ * 本插件目录里一个文件的资源路径，交给 image()、svg()、Icon，或登记视图、菜单项时的 icon：
+ * `image(asset("assets/logo.png"))`。path 相对插件目录，不能是绝对路径、不能用 ".."；文件不在就抛错。
+ * 不经它的路径都是 Smelt 自己的资源（如 "icons/terminal.svg"），插件目录里的文件不会被找到。
+ * 插件目录里改了、删了文件，插件重挂后拿到的是新路径，不会还画旧图。
+ * svg() 和 Icon 只取形状、涂成文字色；要原样的彩色图（logo）用 image()，SVG、PNG 都行。
+ */
+export function asset(path: string): string;
 export type HostEvent =
   | { type: "runtime_topic"; machine: Machine; topic: string; message: TopicMessage }
   | { type: "reconnected"; machine: Machine }
@@ -583,6 +592,8 @@ struct PluginState {
     /// 已经打开过一次。宿主建好视图马上打开一次，参数和挂载时一样的那一次不算「又打开」。
     opened_once: bool,
     view_loader: Option<ViewLoader>,
+    /// 插件目录里的资源（见 [`JsPlugin::with_assets`]）。
+    assets: Option<PluginAssets>,
     /// 脚本登记的视图。这个来源的视图是一组：宿主挂上的主入口视图加上这些，哪边变了
     /// 都整组再登记（见 [`JsPlugin::publish_views`]）。
     views: Vec<ViewSpec>,
@@ -611,6 +622,17 @@ impl JsPlugin {
     /// 主入口登记视图时，入口怎么建成视图。没给就不能登记视图。
     pub fn with_view_loader(self, loader: ViewLoader) -> Self {
         self.0.borrow_mut().view_loader = Some(loader);
+        self
+    }
+
+    /// 插件目录 `root` 里的文件经 `asset(path)` 取路径：`<prefix>/<path>`。前缀由宿主定，带着
+    /// 插件身份和这次挂载，宿主的资源表按它找到插件目录。没给 `asset` 就报错。
+    pub fn with_assets(self, prefix: impl Into<String>, root: impl Into<PathBuf>) -> Self {
+        self.0.borrow_mut().assets = Some(PluginAssets {
+            prefix: prefix.into(),
+            root: root.into(),
+            exists: HashMap::new(),
+        });
         self
     }
 
@@ -722,6 +744,7 @@ impl JsPlugin {
         let guards = self.clone();
         let resolved = self.clone();
         let rejected = self.clone();
+        let assets = self.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
             .function("active_context", |_| {
@@ -1247,6 +1270,15 @@ impl JsPlugin {
                 let reason = arguments.string(1)?.to_string();
                 rejected.reply("reject_command", id, Err(reason))
             })
+            .function("asset", move |arguments| {
+                let path = arguments.string(0)?;
+                let mut state = assets.0.borrow_mut();
+                let assets = state
+                    .assets
+                    .as_mut()
+                    .ok_or_else(|| HostError::new("asset：这份脚本没有插件目录"))?;
+                assets.path(path).map(HostValue::from)
+            })
             .async_function("next_event", move |_| Ok(events.next_event()))
             .function("emit_event", move |arguments| {
                 let name = arguments.string(0)?;
@@ -1473,6 +1505,59 @@ fn in_task<T: Send + 'static>(
             .map(convert)
             .map_err(HostError::new)
     })
+}
+
+/// 一份脚本能取的插件目录里的资源。
+struct PluginAssets {
+    prefix: String,
+    root: PathBuf,
+    /// 问过的文件在不在。插件目录里文件一变宿主就重挂、换一份新的，挂着期间不会变；脚本常在
+    /// render 里调 `asset`，记下来就不用每帧读盘。
+    exists: HashMap<String, bool>,
+}
+
+impl PluginAssets {
+    /// `asset(path)`：文件不在当场报错。图片画不出来只是空着，最难查；报错落在调用的那一行，
+    /// `smelt plugin check` 也查得出。
+    fn path(&mut self, path: &str) -> Result<String, HostError> {
+        let key = asset_path(&self.prefix, path)?;
+        let relative = &key[self.prefix.len() + 1..];
+        let root = &self.root;
+        let exists = *self
+            .exists
+            .entry(relative.to_string())
+            .or_insert_with(|| root.join(relative).is_file());
+        if !exists {
+            return Err(HostError::new(format!("asset：插件目录里没有「{path}」")));
+        }
+        Ok(key)
+    }
+}
+
+/// `asset(path)`：插件目录里的相对路径接到前缀后面。跑出插件目录的、绝对的路径当场报错，
+/// 不等画的时候才静悄悄地空着。`:` 和 `\\` 也不收：gpui-shell 的 `Image` 不收带它们的路径。
+fn asset_path(prefix: &str, path: &str) -> Result<String, HostError> {
+    use std::path::Component;
+    let invalid = || {
+        HostError::new(format!(
+            "asset：「{path}」要是插件目录里的相对路径（不能是绝对路径、不能用 ..）"
+        ))
+    };
+    if path.contains([':', '\\']) {
+        return Err(invalid());
+    }
+    let mut parts = Vec::new();
+    for component in std::path::Path::new(path).components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_str().ok_or_else(invalid)?),
+            Component::CurDir => {}
+            _ => return Err(invalid()),
+        }
+    }
+    if parts.is_empty() {
+        return Err(invalid());
+    }
+    Ok(format!("{prefix}/{}", parts.join("/")))
 }
 
 /// `store_query` / `store_execute` 的参数：SQL 和可选的参数数组。
@@ -3490,6 +3575,47 @@ mod tests {
             Some("machines_changed")
         );
         assert!(plugin.0.borrow().queue.is_empty());
+    }
+
+    #[test]
+    fn asset_paths_join_the_plugins_prefix() {
+        let root = std::env::temp_dir().join(format!("smelt-js-asset-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::create_dir_all(root.join("icons")).unwrap();
+        std::fs::write(root.join("assets/logo.png"), b"png").unwrap();
+        std::fs::write(root.join("icons/check.svg"), b"svg").unwrap();
+        let module = JsPlugin::for_plugin("com.example", "示例")
+            .with_assets("plugin-assets/com.example/3", &root)
+            .module();
+        let asset = |path: &str| module.call("asset", &HostArguments::new([HostValue::from(path)]));
+        assert_eq!(
+            asset("assets/logo.png").unwrap(),
+            HostValue::from("plugin-assets/com.example/3/assets/logo.png")
+        );
+        assert_eq!(
+            asset("./icons//check.svg").unwrap(),
+            HostValue::from("plugin-assets/com.example/3/icons/check.svg")
+        );
+        for bad in [
+            "",
+            ".",
+            "/tmp/a.png",
+            "../a.png",
+            "assets/../../a.png",
+            "C:a.png",
+            "a\\b.png",
+        ] {
+            assert!(asset(bad).is_err(), "收了 {bad:?}");
+        }
+        // 文件不在当场报错；目录也不算。
+        assert!(asset("assets/nope.png").is_err());
+        assert!(asset("assets").is_err());
+        // 没有插件目录的脚本（测试、宿主自己建的）拿不到路径。
+        let bare = JsPlugin::for_plugin("com.example", "示例").module();
+        assert!(
+            bare.call("asset", &HostArguments::new([HostValue::from("a.png")]))
+                .is_err()
+        );
     }
 
     #[test]

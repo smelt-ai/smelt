@@ -210,6 +210,7 @@ Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui
 - 示例：https://github.com/smelt-ai/smelt-plugin-demo（按钮、状态、系统通知、主题）。
 - 控件用 `smelt-ui` 的，样子和 Smelt 一致。`smelt-plugin-api` 里有：登记视图、命令、页面、布局、主题、菜单（`register_*`），`await next_event()` 等宿主事件，`next_command()` 接自己登记的命令，`store_query` / `store_execute` 读写插件自己的 SQLite 库（在 `~/.smelt/plugin-data/<id>.sqlite3`），`call(machine, method, params)` 调运行时，`locale()` 取当前语言。
 - `render` 只读内存：读写文件、跑命令、联网都放到事件回调或 `cx.spawn` 里，结果存在视图上，render 只画它。要等变化就 `await next_event()`，不要定时轮询。
+- 图片和图标：插件目录里的文件经 `smelt-plugin-api` 的 `asset("assets/logo.png")` 取路径，再交给 `image()`、`svg()`、`Icon` 或登记视图、菜单项时的 `icon`；直接写 `"assets/logo.png"` 找不到，画出来是空的。路径相对插件目录，文件不在 `asset` 当场抛错（`smelt plugin check` 查得出）。不经 `asset` 的路径是 Smelt 自带的图标 `icons/<名字>.svg`（名字见 `gpui-kit.d.ts` 里 `ViewInfo.icon` 的说明）。`svg()` 和 `Icon` 只取形状、涂成文字色，彩色的 logo 用 `image()`（SVG、PNG 都行）。网上的图片眼下画不出来（下载进插件目录会触发重挂），用户要就直说。
 - 插件是可信代码，能读写任意文件、运行任意命令，和 Smelt 本身一样。
 
 写和调试：
