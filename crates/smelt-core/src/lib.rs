@@ -18,6 +18,7 @@ pub mod agent_kind;
 pub mod agent_memory;
 pub use smelt_model::agent_status;
 pub mod antigravity_history;
+pub mod antigravity_quota;
 pub use smelt_sys::app_log;
 pub mod appearance_settings;
 pub use smelt_model::attention;

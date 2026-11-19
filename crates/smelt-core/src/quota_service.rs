@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures::future::join_all;
 
 use crate::agent_kind::ConversationAgentKind;
+use crate::antigravity_quota::fetch_antigravity_quota;
 use crate::copilot_quota::{CopilotQuotaStatus as CachedCopilotQuotaStatus, fetch_copilot_quota};
 use crate::pi_quota::{available_pi_quota_providers, fetch_pi_provider_quota};
 use crate::provider_quota::{
@@ -61,6 +62,10 @@ static QUOTA_PROVIDERS: &[StaticQuotaProvider] = &[
     StaticQuotaProvider {
         agent: ConversationAgentKind::Cursor,
         fetch: fetch_cursor_quota_data,
+    },
+    StaticQuotaProvider {
+        agent: ConversationAgentKind::Antigravity,
+        fetch: fetch_antigravity_quota_data,
     },
 ];
 
@@ -175,6 +180,14 @@ fn fetch_grok_quota_data(_access: CredentialAccess) -> QuotaFetchFuture {
 
 fn fetch_cursor_quota_data(_access: CredentialAccess) -> QuotaFetchFuture {
     Box::pin(async { Ok(fetch_cursor_quota().await?.map(ProviderQuotaData::Windows)) })
+}
+
+fn fetch_antigravity_quota_data(access: CredentialAccess) -> QuotaFetchFuture {
+    Box::pin(async move {
+        Ok(fetch_antigravity_quota(access)
+            .await?
+            .map(ProviderQuotaData::Windows))
+    })
 }
 
 /// 跨启动的额度缓存（存进运行时库的 `quota_cache*` 表）。
@@ -605,6 +618,10 @@ mod tests {
             QuotaTarget::agent(ConversationAgentKind::Copilot).id(),
             crate::copilot_quota::COPILOT_QUOTA_PROVIDER
         );
+        assert_eq!(
+            QuotaTarget::agent(ConversationAgentKind::Antigravity).id(),
+            crate::antigravity_quota::ANTIGRAVITY_QUOTA_PROVIDER
+        );
     }
 
     #[test]
@@ -656,6 +673,7 @@ mod tests {
                 QuotaTarget::agent(ConversationAgentKind::Copilot),
                 QuotaTarget::agent(ConversationAgentKind::Grok),
                 QuotaTarget::agent(ConversationAgentKind::Cursor),
+                QuotaTarget::agent(ConversationAgentKind::Antigravity),
             ]
         );
     }

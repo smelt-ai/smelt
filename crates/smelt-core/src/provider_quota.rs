@@ -505,7 +505,7 @@ fn unix_seconds_to_ms(value: i64) -> Option<u64> {
         .and_then(|value| value.checked_mul(1000))
 }
 
-fn parse_rfc3339_ms(value: &str) -> Option<u64> {
+pub(crate) fn parse_rfc3339_ms(value: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|date| date.timestamp_millis())
