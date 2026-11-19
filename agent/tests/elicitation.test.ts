@@ -289,7 +289,10 @@ describe("host elicitation tool", () => {
 					{} as never,
 				),
 			);
-			expect(result.details).toEqual({ cancelled: true });
+			expect(result.details).toEqual({
+				cancelled: true,
+				answers: [{ question: "用哪种节奏？", answer: [] }],
+			});
 			expect(result.isError).toBeUndefined();
 		} finally {
 			await host.close();

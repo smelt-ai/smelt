@@ -189,6 +189,98 @@ fn leading_event(row: gpui::Div) -> gpui::Div {
     div().flex().items_center().w_full().py_1().child(row)
 }
 
+/// 问用户的一次：答完靠左一组问答，题面淡、答案实；跳过的一行「跳过了」加题面。还在等时
+/// 不画——题在下面的提问卡上，状态行写着「等你回答」。没等到答案就结束了（多半是这一轮被
+/// 停掉）画一行「没有回答」。
+fn render_ask_record(
+    record: &smelt_plugin_api::model::acp_chat::AskRecord,
+    status: ToolCallStatus,
+    muted: gpui::Hsla,
+) -> gpui::AnyElement {
+    let icon = |name: IconName, ink: gpui::Hsla| {
+        Icon::new(name)
+            .size(px(13.))
+            .flex_shrink_0()
+            .text_color(ink)
+    };
+    match status {
+        ToolCallStatus::Pending | ToolCallStatus::InProgress => {
+            return div().into_any_element();
+        }
+        ToolCallStatus::Failed if record.answers.is_empty() => {
+            return leading_event(
+                event_line(muted)
+                    .child(icon(IconName::MessagesSquare, muted))
+                    .child(t!("ask.unanswered")),
+            )
+            .into_any_element();
+        }
+        _ => {}
+    }
+    if record.skipped {
+        let questions = record
+            .answers
+            .iter()
+            .map(|item| item.question.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        return leading_event(
+            event_line(muted)
+                .child(icon(IconName::MessagesSquare, muted))
+                .child(div().flex_shrink_0().child(t!("ask.skipped")))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(truncated_line(questions)),
+                ),
+        )
+        .into_any_element();
+    }
+    let text: gpui::Hsla = gpui::rgb(ui_theme::text()).into();
+    let pairs = record.answers.iter().map(|item| {
+        div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .whitespace_normal()
+            .child(
+                div()
+                    .type_style(TYPE.text_xsmall)
+                    .text_color(muted)
+                    .child(item.question.clone()),
+            )
+            .child(
+                div()
+                    .type_style(TYPE.text_small)
+                    .text_color(text)
+                    .child(item.answer.join(" · ")),
+            )
+    });
+    div()
+        .flex()
+        .items_start()
+        .w_full()
+        .min_w_0()
+        .py_1()
+        .gap_2()
+        .child(
+            div()
+                .pt(px(2.))
+                .child(icon(IconName::MessagesSquare, muted)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .children(pairs),
+        )
+        .into_any_element()
+}
+
 struct SubagentCard<'a> {
     index: usize,
     id: &'a str,
@@ -684,6 +776,7 @@ impl ConversationView {
                         children,
                         subagents,
                         peer,
+                        asked,
                     } => {
                         let owner = super::super::lookup_owner(&this.layout_cache.borrow().owner_ids, id);
                         let failed = matches!(status, ToolCallStatus::Failed);
@@ -732,6 +825,8 @@ impl ConversationView {
                         // 发给别的 Pi 对话的一条不是工具卡片，是居中的事件行。
                         if let Some(send) = peer.as_ref() {
                             this.render_peer_send(i, &owner, send, *status, muted, cx)
+                        } else if let Some(record) = asked.as_ref() {
+                            render_ask_record(record, *status, muted)
                         } else if compact_in_process {
                             let can_expand = has_expandable_content;
                             let headline = compact_tool_headline(*kind, title);
@@ -1574,11 +1669,12 @@ impl ConversationView {
                 children,
                 subagents,
                 peer,
+                asked,
             }) = self.entries.get(ix)
             else {
                 continue;
             };
-            if peer.is_some() {
+            if peer.is_some() || asked.is_some() {
                 continue;
             }
             let owner = super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id);
@@ -2485,6 +2581,7 @@ impl ConversationView {
                     children: nested,
                     subagents: _,
                     peer: _,
+                    asked: _,
                 } => {
                     let failed = matches!(status, ToolCallStatus::Failed);
                     let nested_running =

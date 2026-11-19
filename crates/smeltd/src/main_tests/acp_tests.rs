@@ -2414,6 +2414,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         children: Vec::new(),
         subagents: Vec::new(),
         peer: None,
+        asked: None,
     });
     let session = make_acp_session("acp-dangling-tool", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
@@ -3410,6 +3411,7 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
             children: Vec::new(),
             subagents: Vec::new(),
             peer: None,
+            asked: None,
         });
     }
     let sess = make_acp_session("acp-parallel", reduced);
@@ -4092,6 +4094,7 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
         children: Vec::new(),
         subagents: Vec::new(),
         peer: None,
+        asked: None,
     });
     assert_eq!(
         compute_acp_daemon_phase(&running_with_tool),
@@ -4113,6 +4116,7 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
         children: Vec::new(),
         subagents: Vec::new(),
         peer: None,
+        asked: None,
     });
     assert_eq!(
         compute_acp_daemon_phase(&idle_with_tool),
@@ -4176,6 +4180,7 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
         children: Vec::new(),
         subagents: Vec::new(),
         peer: None,
+        asked: None,
     });
     assert_eq!(
         compute_acp_daemon_phase(&completed),
@@ -4261,6 +4266,7 @@ fn pending_question_on_success_is_the_last_reply_of_the_turn() {
             children: Vec::new(),
             subagents: Vec::new(),
             peer: None,
+            asked: None,
         },
         AcpEntry::Assistant {
             text: "改好了：\n\n- 推送不再延迟".into(),

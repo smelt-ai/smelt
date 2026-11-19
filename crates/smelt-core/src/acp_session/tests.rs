@@ -460,6 +460,7 @@ fn replay_commit_marks_a_trailing_open_turn_interrupted() {
         children: Vec::new(),
         subagents: Vec::new(),
         peer: None,
+        asked: None,
     });
 
     state.commit_replay();
@@ -496,6 +497,7 @@ fn replay_commit_ignores_dangling_tools_in_earlier_turns() {
         children: Vec::new(),
         subagents: Vec::new(),
         peer: None,
+        asked: None,
     });
     state.entries.push(AcpEntry::User("第二轮".into()));
     state.entries.push(AcpEntry::Assistant {
@@ -534,6 +536,7 @@ fn replay_commit_keeps_a_recovered_question_answerable() {
         children: Vec::new(),
         subagents: Vec::new(),
         peer: None,
+        asked: None,
     });
     state.elicitation = recovered_elicitation("Choose", Some(&raw_input), "ask-1");
     state.phase = DaemonPhase::WaitingForUser;
@@ -976,6 +979,45 @@ fn tool_children_replace_the_nested_transcript() {
             text
         }] if text == "looking"
     ));
+}
+
+/// 提问记录挂到发起它的那次工具调用上，答完整份替换。
+#[test]
+fn ask_record_lands_on_its_tool_call() {
+    let mut s = fresh_state();
+    apply_event(
+        &mut s,
+        ConversationEvent::ToolStarted {
+            id: "ask-1".into(),
+            title: "smelt_ask_user".into(),
+            kind: ToolKind::Other,
+        },
+    );
+    apply_event(
+        &mut s,
+        ConversationEvent::AskRecord {
+            id: "ask-1".into(),
+            record: Default::default(),
+        },
+    );
+    let answered = crate::acp_chat::AskRecord {
+        answers: vec![crate::acp_chat::AskAnswer {
+            question: "按哪个方案做？".into(),
+            answer: vec!["推荐".into()],
+        }],
+        skipped: false,
+    };
+    apply_event(
+        &mut s,
+        ConversationEvent::AskRecord {
+            id: "ask-1".into(),
+            record: answered.clone(),
+        },
+    );
+    let AcpEntry::ToolCall { asked, .. } = &s.entries[0] else {
+        panic!("should be a tool call");
+    };
+    assert_eq!(asked.as_ref(), Some(&answered));
 }
 
 #[test]

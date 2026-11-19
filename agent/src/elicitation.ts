@@ -151,7 +151,12 @@ function askUserQuestionTool() {
 				};
 			}
 			if (reply.cancelled || !reply.answers) {
-				const details: Record<string, unknown> = { cancelled: true };
+				// 跳过的也列出题面，对话记录里能看出跳过的是哪几道。
+				const answers: AskUserAnswer[] = questions.map((item) => ({
+					question: item.question,
+					answer: [],
+				}));
+				const details: Record<string, unknown> = { cancelled: true, answers };
 				return {
 					content: [{ type: "text" as const, text: "用户跳过了这个问题，没有作答" }],
 					details,

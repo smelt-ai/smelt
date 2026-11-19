@@ -5952,9 +5952,13 @@ fn is_completion_entry(entry: &AcpEntry) -> bool {
     )
 }
 
-/// 发给别的 Pi 对话的一条：画成居中事件行，和状态行一样不收进「处理过程」。
-fn is_peer_send_entry(entry: &AcpEntry) -> bool {
-    matches!(entry, AcpEntry::ToolCall { peer: Some(_), .. })
+/// 画成事件行、不当工具看的调用：发给别的 Pi 对话的一条、问用户的一次。和状态行一样
+/// 不收进「处理过程」，也不计进工具数。
+fn is_event_tool_entry(entry: &AcpEntry) -> bool {
+    matches!(
+        entry,
+        AcpEntry::ToolCall { peer: Some(_), .. } | AcpEntry::ToolCall { asked: Some(_), .. }
+    )
 }
 
 /// 收进回合摘要的条目：工具、后台任务行、失败行、过程说明。只有思考的回合不收。
@@ -6855,12 +6859,13 @@ fn tally_tools(entries: &[AcpEntry], indices: impl IntoIterator<Item = usize>) -
             output,
             subagents,
             peer,
+            asked,
             ..
         }) = entries.get(ix)
         else {
             continue;
         };
-        if peer.is_some() || is_task_completion_tool_title(title) {
+        if peer.is_some() || asked.is_some() || is_task_completion_tool_title(title) {
             continue;
         }
         let failed = matches!(status, ToolCallStatus::Failed);
@@ -7420,7 +7425,7 @@ fn fill_conversation_layout(
             }
             if matches!(entries[ix], AcpEntry::Assistant { thought: false, .. })
                 || is_completion_entry(&entries[ix])
-                || is_peer_send_entry(&entries[ix])
+                || is_event_tool_entry(&entries[ix])
                 || matches!(
                     entries[ix],
                     AcpEntry::TaskNote(_) | AcpEntry::TurnFailed { .. }

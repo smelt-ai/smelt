@@ -128,6 +128,7 @@ fn sample_snapshot() -> ConversationSnapshot {
             children: Vec::new(),
             subagents: Vec::new(),
             peer: None,
+            asked: None,
         },
     ];
     tail_snapshot(0, 0, entries, DaemonPhase::Thinking)
@@ -148,6 +149,46 @@ fn ask_snapshot() -> ConversationSnapshot {
         0,
         vec![
             AcpEntry::User("插件里的图片显示不出来，看看怎么修".into()),
+            AcpEntry::ToolCall {
+                id: "ask-0".into(),
+                title: "smelt_ask_user".into(),
+                kind: ToolKind::Other,
+                status: ToolCallStatus::Completed,
+                output: Vec::new(),
+                children: Vec::new(),
+                subagents: Vec::new(),
+                peer: None,
+                asked: Some(smelt_plugin_api::model::acp_chat::AskRecord {
+                    answers: vec![
+                        smelt_plugin_api::model::acp_chat::AskAnswer {
+                            question: "图片是在哪里显示不出来？".into(),
+                            answer: vec!["插件设置页".into(), "侧栏面板".into()],
+                        },
+                        smelt_plugin_api::model::acp_chat::AskAnswer {
+                            question: "要不要保留旧的图片写法？".into(),
+                            answer: vec!["保留，老插件不用改".into()],
+                        },
+                    ],
+                    skipped: false,
+                }),
+            },
+            AcpEntry::ToolCall {
+                id: "ask-skip".into(),
+                title: "smelt_ask_user".into(),
+                kind: ToolKind::Other,
+                status: ToolCallStatus::Completed,
+                output: Vec::new(),
+                children: Vec::new(),
+                subagents: Vec::new(),
+                peer: None,
+                asked: Some(smelt_plugin_api::model::acp_chat::AskRecord {
+                    answers: vec![smelt_plugin_api::model::acp_chat::AskAnswer {
+                        question: "要顺手清理旧的图片缓存吗？".into(),
+                        answer: Vec::new(),
+                    }],
+                    skipped: true,
+                }),
+            },
             AcpEntry::Assistant {
                 text: "要支持插件图片，有两种实质不同的改法，需要你定一下。".into(),
                 thought: false,
@@ -161,6 +202,7 @@ fn ask_snapshot() -> ConversationSnapshot {
                 children: Vec::new(),
                 subagents: Vec::new(),
                 peer: None,
+                asked: Some(Default::default()),
             },
         ],
         DaemonPhase::WaitingForUser,

@@ -508,6 +508,7 @@ mod tests {
                 }],
                 subagents: Vec::new(),
                 peer: None,
+                asked: None,
             },
             AcpEntry::Assistant {
                 text: "子 agent 已输出：\n\nHello".into(),

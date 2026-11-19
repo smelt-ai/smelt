@@ -62,6 +62,7 @@ fn archive_entry(entry: &AcpEntry) -> AcpEntry {
             children,
             subagents,
             peer,
+            asked,
         } => AcpEntry::ToolCall {
             id: id.clone(),
             title: title.clone(),
@@ -71,6 +72,7 @@ fn archive_entry(entry: &AcpEntry) -> AcpEntry {
             children: children.iter().map(archive_entry).collect(),
             subagents: subagents.clone(),
             peer: peer.clone(),
+            asked: asked.clone(),
         },
         other => other.clone(),
     }

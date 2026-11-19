@@ -3218,6 +3218,7 @@ fn handle_event(
             }
             emit_tool_started(event_tx, id, &name, args.as_ref());
             emit_peer_send(event_tx, id, &name, args.as_ref(), None, None);
+            emit_ask_record(event_tx, id, &name, None);
         }
         Some("tool_execution_update") => {
             let Some(id) = event.get("toolCallId").and_then(serde_json::Value::as_str) else {
@@ -3296,6 +3297,17 @@ fn handle_event(
                 args.as_ref(),
                 event.get("result").and_then(|value| value.get("details")),
                 failure.as_deref(),
+            );
+            emit_ask_record(
+                event_tx,
+                id,
+                &name,
+                Some(
+                    event
+                        .get("result")
+                        .and_then(|value| value.get("details"))
+                        .unwrap_or(&serde_json::Value::Null),
+                ),
             );
             let output = event
                 .get("result")
@@ -3713,6 +3725,23 @@ fn emit_peer_send(
     }
 }
 
+/// `smelt_ask_user` 问了什么、怎么答的。`details` 为 None 是工具刚开始，先记一份空记录；
+/// 结束了就带结果的 `details`（没有时传 `Null`）。出错的结果还原不出记录，就不发，照
+/// 普通工具画。
+fn emit_ask_record(
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    id: &str,
+    name: &str,
+    details: Option<&serde_json::Value>,
+) {
+    if let Some(record) = crate::acp_chat::ask_record_from_tool(name, details) {
+        let _ = event_tx.try_send(ConversationEvent::AskRecord {
+            id: id.to_string(),
+            record,
+        });
+    }
+}
+
 fn subagent_runs_from_details(
     name: &str,
     details: &serde_json::Value,
@@ -3988,6 +4017,12 @@ fn replay_messages(
                     args.as_ref(),
                     message.get("details"),
                     failure.as_deref(),
+                );
+                emit_ask_record(
+                    event_tx,
+                    id,
+                    &name,
+                    Some(message.get("details").unwrap_or(&serde_json::Value::Null)),
                 );
                 let _ = event_tx.try_send(ConversationEvent::ToolFinished {
                     id: id.to_string(),
@@ -5461,6 +5496,126 @@ mod tests {
         );
         assert_eq!(runs[1].id, "sa-b");
         assert_eq!(runs[1].status, crate::acp_session::SubagentStatus::Failed);
+    }
+
+    /// `smelt_ask_user`：开始时先记一份空记录（界面画「在问你」），答完带上每道题的答案，
+    /// 跳过的也列出题面；出错的不出记录，照普通工具画。
+    #[test]
+    fn ask_user_records_what_was_asked_and_answered() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        let records = |event_rx: &smol::channel::Receiver<ConversationEvent>| -> Vec<crate::acp_chat::AskRecord> {
+            std::iter::from_fn(|| event_rx.try_recv().ok())
+                .filter_map(|event| match event {
+                    ConversationEvent::AskRecord { id, record } if id == "ask-1" => Some(record),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut run = |is_error: bool, details: serde_json::Value| {
+            handle_event(
+                serde_json::json!({
+                    "type": "tool_execution_start",
+                    "toolCallId": "ask-1",
+                    "toolName": "smelt_ask_user",
+                    "args": {"question": "按哪个方案做？", "options": ["推荐", "先不改"]}
+                }),
+                &event_tx,
+                &outbound_tx,
+                &mut state,
+                &launch,
+            );
+            handle_event(
+                serde_json::json!({
+                    "type": "tool_execution_end",
+                    "toolCallId": "ask-1",
+                    "toolName": "smelt_ask_user",
+                    "isError": is_error,
+                    "result": {"content": [{"type": "text", "text": "…"}], "details": details}
+                }),
+                &event_tx,
+                &outbound_tx,
+                &mut state,
+                &launch,
+            );
+        };
+
+        run(
+            false,
+            serde_json::json!({"answers": [{"question": "按哪个方案做？", "answer": ["推荐"]}]}),
+        );
+        assert_eq!(
+            records(&event_rx),
+            vec![
+                crate::acp_chat::AskRecord::default(),
+                crate::acp_chat::AskRecord {
+                    answers: vec![crate::acp_chat::AskAnswer {
+                        question: "按哪个方案做？".into(),
+                        answer: vec!["推荐".into()],
+                    }],
+                    skipped: false,
+                },
+            ]
+        );
+
+        run(
+            false,
+            serde_json::json!({"cancelled": true, "answers": [{"question": "按哪个方案做？", "answer": []}]}),
+        );
+        let skipped = records(&event_rx);
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped[1].skipped);
+        assert_eq!(skipped[1].answers[0].question, "按哪个方案做？");
+        assert!(skipped[1].answers[0].answer.is_empty());
+
+        run(true, serde_json::json!({"error": true}));
+        assert_eq!(
+            records(&event_rx),
+            vec![crate::acp_chat::AskRecord::default()],
+            "出错的结果不出记录"
+        );
+    }
+
+    #[test]
+    fn replayed_ask_user_result_restores_the_answers() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let messages = [
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "ask-1",
+                    "name": "smelt_ask_user",
+                    "arguments": {"question": "带上哪些改动？", "multiSelect": true}
+                }]
+            }),
+            serde_json::json!({
+                "role": "toolResult",
+                "toolCallId": "ask-1",
+                "toolName": "smelt_ask_user",
+                "content": [{"type": "text", "text": "[]"}],
+                "details": {"answers": [{"question": "带上哪些改动？", "answer": ["焦点修复", "弹窗定高"]}]}
+            }),
+        ];
+
+        replay_history(&messages, &event_tx, &mut state);
+
+        let restored: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .filter_map(|event| match event {
+                ConversationEvent::AskRecord { id, record } => Some((id, record)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].0, "ask-1");
+        assert_eq!(
+            restored[0].1.answers[0].answer,
+            vec!["焦点修复".to_string(), "弹窗定高".to_string()]
+        );
     }
 
     #[test]

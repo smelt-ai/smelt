@@ -321,6 +321,11 @@ pub enum ConversationEvent {
         id: String,
         send: crate::acp_chat::PeerSend,
     },
+    /// 这次 Pi `smelt_ask_user` 问了什么、怎么答的。工具开始时是空记录，结束后补上答案。
+    AskRecord {
+        id: String,
+        record: crate::acp_chat::AskRecord,
+    },
     /// 这次 Pi `subagent` 调用派出的子智能体（工具结果里的 `runs`），全量替换。
     SubagentRuns {
         id: String,

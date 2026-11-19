@@ -610,6 +610,13 @@ outcome:
   turn_failed:
     en: "Turn failed"
     zh-CN: "这一轮失败了"
+ask:
+  skipped:
+    en: "Skipped"
+    zh-CN: "跳过了"
+  unanswered:
+    en: "Not answered"
+    zh-CN: "没有回答"
 peer:
   failed:
     en: "Failed: %{error}"

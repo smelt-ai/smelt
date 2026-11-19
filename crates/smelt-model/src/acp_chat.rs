@@ -46,6 +46,10 @@ pub enum AcpEntry {
         /// 旧快照没有这个字段。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer: Option<PeerSend>,
+        /// Pi `smelt_ask_user`：问了用户什么、怎么答的。有值就画成问答行，不画工具卡片。
+        /// 旧快照没有这个字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asked: Option<AskRecord>,
     },
     /// 旧运行时在旧对话和新对话之间插的分割线，整句是它写好的。现在的运行时发
     /// [`AcpEntry::NewSession`]。
@@ -202,6 +206,51 @@ pub struct PeerSend {
     /// `session_spawn`：对方是这次新起的对话，`text` 是交代的任务。
     #[serde(default)]
     pub spawned: bool,
+}
+
+/// Pi 对话里的一次 `smelt_ask_user`：问了哪些题、人怎么答的。工具还在跑（卡片等人答）时
+/// `answers` 为空。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskRecord {
+    /// 每道题和答案，按提问顺序。跳过时也列出题面，答案为空。
+    #[serde(default)]
+    pub answers: Vec<AskAnswer>,
+    /// 人跳过了，没有作答。
+    #[serde(default)]
+    pub skipped: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskAnswer {
+    pub question: String,
+    /// 单选一项，多选若干项，自己写的答案也在里面。
+    #[serde(default)]
+    pub answer: Vec<String>,
+}
+
+/// smelt 的 Pi 扩展登记的提问工具。
+pub const PI_ASK_USER_TOOL: &str = "smelt_ask_user";
+
+/// 从 `smelt_ask_user` 的结果 `details` 还原：答了是 `answers`，跳过了另有 `cancelled: true`。
+/// 工具还没结束（没有 `details`）时是一份空记录，界面据此先画「在问你」。出错（没有
+/// `answers` 也没跳过）和别的工具返回 None，照普通工具画。
+pub fn ask_record_from_tool(name: &str, details: Option<&serde_json::Value>) -> Option<AskRecord> {
+    if name != PI_ASK_USER_TOOL {
+        return None;
+    }
+    let Some(details) = details else {
+        return Some(AskRecord::default());
+    };
+    let answers: Vec<AskAnswer> = serde_json::from_value(details.get("answers")?.clone()).ok()?;
+    Some(AskRecord {
+        answers,
+        skipped: details
+            .get("cancelled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 /// Pi 发消息、起新对话的工具名。只认这两个，不按标题猜。
@@ -675,6 +724,7 @@ impl AcpEntry {
             children: Vec::new(),
             subagents: Vec::new(),
             peer: None,
+            asked: None,
         }
     }
 }
@@ -1520,6 +1570,36 @@ mod tests {
         assert!(peer_send_from_tool(PI_SESSION_SEND_TOOL, Some(&args), None, None).is_none());
     }
 
+    #[test]
+    fn ask_record_comes_from_the_ask_tool_details_only() {
+        assert_eq!(
+            ask_record_from_tool(PI_ASK_USER_TOOL, None),
+            Some(AskRecord::default()),
+            "工具刚开始：先有一份空记录"
+        );
+        let answered = serde_json::json!({
+            "answers": [{"question": "按哪个方案做？", "answer": ["推荐"]}],
+        });
+        let record = ask_record_from_tool(PI_ASK_USER_TOOL, Some(&answered)).unwrap();
+        assert!(!record.skipped);
+        assert_eq!(record.answers[0].answer, vec!["推荐".to_string()]);
+        let skipped = serde_json::json!({
+            "cancelled": true,
+            "answers": [{"question": "按哪个方案做？", "answer": []}],
+        });
+        assert!(
+            ask_record_from_tool(PI_ASK_USER_TOOL, Some(&skipped))
+                .unwrap()
+                .skipped
+        );
+        assert_eq!(
+            ask_record_from_tool(PI_ASK_USER_TOOL, Some(&serde_json::json!({"error": true}))),
+            None,
+            "出错没有记录"
+        );
+        assert_eq!(ask_record_from_tool("read", Some(&answered)), None);
+    }
+
     /// 派发的结果按工具调用 id 交回，状态行说的是子智能体自己的 id，不露工具调用 id。
     #[test]
     fn a_dispatch_result_names_its_subagents_not_the_tool_call() {
@@ -1816,6 +1896,7 @@ mod tests {
                 children,
                 subagents: _,
                 peer: _,
+                asked: _,
             } => {
                 assert_eq!(id, "call-1");
                 assert_eq!(title, "Read foo.rs");

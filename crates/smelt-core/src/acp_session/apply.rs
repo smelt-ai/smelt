@@ -274,6 +274,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             apply_subagent_runs(state, &mut outcome, id, runs)
         }
         ConversationEvent::PeerSend { id, send } => apply_peer_send(state, &mut outcome, id, send),
+        ConversationEvent::AskRecord { id, record } => {
+            apply_ask_record(state, &mut outcome, id, record)
+        }
         ConversationEvent::Model(model) => state.model = Some(model),
         ConversationEvent::ConfigOptions(options) => state.config_options = options,
         ConversationEvent::Plan(plan) => apply_plan(state, plan),
@@ -416,6 +419,7 @@ fn is_transcript_delta(ev: &ConversationEvent) -> bool {
             | ConversationEvent::ToolChildren { .. }
             | ConversationEvent::SubagentRuns { .. }
             | ConversationEvent::PeerSend { .. }
+            | ConversationEvent::AskRecord { .. }
             | ConversationEvent::ToolDebug { .. }
             | ConversationEvent::UserChunk(_)
             | ConversationEvent::UserImage(_)
@@ -1079,6 +1083,20 @@ fn apply_peer_send(
         crate::acp_chat::find_tool_call_mut(&mut state.entries, &id)
     {
         *peer = Some(send);
+    }
+}
+
+fn apply_ask_record(
+    state: &mut AcpSessionState,
+    outcome: &mut ApplyOutcome,
+    id: String,
+    record: crate::acp_chat::AskRecord,
+) {
+    outcome.entries_offset = crate::acp_chat::find_tool_top_level_index(&state.entries, &id);
+    if let Some(AcpEntry::ToolCall { asked, .. }) =
+        crate::acp_chat::find_tool_call_mut(&mut state.entries, &id)
+    {
+        *asked = Some(record);
     }
 }
 
