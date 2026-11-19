@@ -1308,17 +1308,22 @@ pub fn markdown_view(id: impl Into<ElementId>, text: impl Into<SharedString>) ->
     markdown_view_with_selection(id, text, true)
 }
 
-/// 原样显示的纯文本（工具输出、diff 原文等），可框选复制。不解析 Markdown：转义后放进
-/// `<pre>`，按 HTML 渲染，样式和 Markdown 正文同一套色板。
+/// 原样显示的纯文本（工具输出、diff 原文等），可框选复制。不解析 Markdown，按 HTML
+/// 渲染成一段正文，样式和 Markdown 正文同一套色板。
 pub fn plain_text_view(id: impl Into<ElementId>, text: &str) -> TextView {
     TextView::html(id, preformatted_html(text))
         .selectable(true)
         .style(text_view_style(gpui::StyleRefinement::default()))
 }
 
+/// 包进 `<textarea>` 而不是 `<pre>`：gpui-base 把 `<pre>` 画成带框的代码块，
+/// `<textarea>` 才是保留空白的普通段落。
 fn preformatted_html(text: &str) -> String {
-    let mut html = String::with_capacity(text.len() + 11);
-    html.push_str("<pre>");
+    // 和浏览器的 `<pre>` 一样，末尾那个换行不画成空行。
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let mut html = String::with_capacity(text.len() + 23);
+    // 解析器会吞掉开标签后紧跟的一个换行，先垫一个，正文开头的换行才留得住。
+    html.push_str("<textarea>\n");
     for ch in text.chars() {
         match ch {
             '&' => html.push_str("&amp;"),
@@ -1329,7 +1334,7 @@ fn preformatted_html(text: &str) -> String {
             _ => html.push(ch),
         }
     }
-    html.push_str("</pre>");
+    html.push_str("</textarea>");
     html
 }
 
@@ -1479,7 +1484,7 @@ mod tests {
     fn preformatted_html_preserves_literal_tool_output() {
         assert_eq!(
             preformatted_html("# heading\n* item\n`code` <tag> & \"quoted\" 'single'"),
-            "<pre># heading\n* item\n`code` &lt;tag&gt; &amp; &quot;quoted&quot; &#39;single&#39;</pre>"
+            "<textarea>\n# heading\n* item\n`code` &lt;tag&gt; &amp; &quot;quoted&quot; &#39;single&#39;</textarea>"
         );
     }
 
@@ -1549,6 +1554,36 @@ mod tests {
         );
         assert!(text.contains("let v: Vec<String> = vec![];"), "{text}");
         assert!(!text.contains('\\'), "{text}");
+    }
+
+    /// 纯文本原样成一段正文：保留缩进和换行，标记不解析，也不套代码块的框。
+    #[gpui::test]
+    fn plain_text_is_a_paragraph_kept_as_written(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            crate::init(cx);
+        });
+        let source = "\n    let x = a < b && c;\n\t# 不是标题 &amp; </textarea> <b>粗</b>\n";
+        let state = cx.new(|cx| TextViewState::html(&preformatted_html(source), cx));
+        cx.run_until_parked();
+        let (rendered, copied) = cx.update(|cx| {
+            state.update(cx, |state, cx| {
+                state.select_all(cx);
+                (
+                    state.rendered_text().as_str().to_string(),
+                    state.selected_text(),
+                )
+            })
+        });
+        // 每个段落块在渲染文本里都以换行收尾（上游约定），原文末尾的换行已去掉。
+        assert_eq!(
+            rendered,
+            "\n    let x = a < b && c;\n\t# 不是标题 &amp; </textarea> <b>粗</b>\n"
+        );
+        assert_eq!(
+            copied.trim_end_matches('\n'),
+            rendered.trim_end_matches('\n')
+        );
     }
 
     #[test]
