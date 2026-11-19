@@ -4,8 +4,10 @@
 //! 所以这里保证：
 //!
 //! - 读到的令牌留在守护进程内存里，后台刷新直接复用，不再调 `security`。
-//! - 令牌被接口拒绝（多半过期）时才重读，后台最多 [`BACKGROUND_REREAD_AFTER`] 一次。令牌
-//!   过期而 CLI 又没在跑时，重读拿到的还是旧令牌，不限频就又成了定时弹窗。
+//! - 令牌被接口拒绝（多半过期）时，钥匙串在上次读之后被写过（[`keychain_changed_at`]，
+//!   CLI 刷新令牌会写回）才重读，否则最多 [`BACKGROUND_REREAD_AFTER`] 一次。令牌过期而
+//!   CLI 又没在跑时，钥匙串没人写，重读拿到的还是旧令牌，不限频就又成了定时弹窗；反过来
+//!   只按固定间隔重读，CLI 刚写回的新令牌要干等一个间隔，额度就跟着消失这么久。
 //! - 用户拒绝后这家进入熔断，状态存在运行时库里，守护重启、升级也不会再弹，直到用户手动
 //!   刷新。退出码不是「没有这一项」的都按拒绝算：宁可少查一次额度，也不反复打断用户。
 //! - 同一时间只读一次：窗口还开着时，再来的刷新直接返回「忙」，不叠第二个窗口，也不算查询
@@ -17,9 +19,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::process::Command;
 use std::sync::{LazyLock, Mutex, MutexGuard, TryLockError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
-/// 令牌被拒绝后，后台两次重读钥匙串的最短间隔。
+/// 令牌被拒绝而钥匙串又没被写过时，后台两次重读钥匙串的最短间隔。
 const BACKGROUND_REREAD_AFTER: Duration = Duration::from_secs(3600);
 
 /// `security` 找不到钥匙串项时的退出码（`errSecItemNotFound` 取低 8 位）。
@@ -106,7 +108,19 @@ fn classify_failure(exit_code: Option<i32>) -> KeychainRead {
 
 struct CachedToken {
     token: String,
-    read_at: Instant,
+    /// 开始读钥匙串的时刻（墙上时间，要和钥匙串文件的修改时间比）。
+    read_at: SystemTime,
+}
+
+impl CachedToken {
+    /// 读过之后钥匙串可能换了令牌：文件在读之后被写过，或者已经隔了一个兜底间隔（令牌项
+    /// 不在登录钥匙串里时，文件时间看不出它变没变）。
+    fn may_be_outdated(&self, now: SystemTime, keychain_changed_at: Option<SystemTime>) -> bool {
+        keychain_changed_at.is_some_and(|changed| changed > self.read_at)
+            || now
+                .duration_since(self.read_at)
+                .is_ok_and(|elapsed| elapsed >= BACKGROUND_REREAD_AFTER)
+    }
 }
 
 /// 按「账户 + 钥匙串项」存的令牌。一个账户可能有多项（Copilot 的多个登录用户）。
@@ -122,7 +136,7 @@ impl TokenCache {
         item: &str,
         denied: bool,
         access: CredentialAccess,
-        now: Instant,
+        now: SystemTime,
         read: impl FnOnce() -> KeychainRead,
     ) -> KeychainLookup {
         if access == CredentialAccess::Background {
@@ -143,7 +157,8 @@ impl TokenCache {
         provider: &str,
         item: &str,
         rejected: &str,
-        now: Instant,
+        now: SystemTime,
+        keychain_changed_at: Option<SystemTime>,
         read: impl FnOnce() -> KeychainRead,
     ) -> KeychainLookup {
         let Some(cached) = self.tokens.get(&cache_key(provider, item)) else {
@@ -152,7 +167,7 @@ impl TokenCache {
         if cached.token != rejected {
             return KeychainLookup::Token(cached.token.clone());
         }
-        if now.saturating_duration_since(cached.read_at) < BACKGROUND_REREAD_AFTER {
+        if !cached.may_be_outdated(now, keychain_changed_at) {
             return KeychainLookup::NotFound;
         }
         match self.apply_read(provider, item, now, read()) {
@@ -165,7 +180,7 @@ impl TokenCache {
         &mut self,
         provider: &str,
         item: &str,
-        now: Instant,
+        now: SystemTime,
         read: KeychainRead,
     ) -> KeychainLookup {
         match read {
@@ -221,7 +236,7 @@ pub(crate) fn keychain_token(
         return KeychainLookup::Busy;
     };
     let denied = keychain_denied(provider);
-    let result = cache.lookup(provider, item, denied, access, Instant::now(), read);
+    let result = cache.lookup(provider, item, denied, access, SystemTime::now(), read);
     record_denial_change(provider, denied, &result);
     result
 }
@@ -238,12 +253,25 @@ pub(crate) fn keychain_token_after_rejection(
     if denied {
         return None;
     }
-    let result = cache.after_rejection(provider, item, rejected, Instant::now(), read);
+    let result = cache.after_rejection(
+        provider,
+        item,
+        rejected,
+        SystemTime::now(),
+        keychain_changed_at(),
+        read,
+    );
     record_denial_change(provider, denied, &result);
     match result {
         KeychainLookup::Token(token) => Some(token),
         KeychainLookup::NotFound | KeychainLookup::Denied | KeychainLookup::Busy => None,
     }
+}
+
+/// 登录钥匙串文件的修改时间。任何一项写入、更新、删除都会改它，读不会；拿不到就是 `None`。
+fn keychain_changed_at() -> Option<SystemTime> {
+    let path = dirs::home_dir()?.join("Library/Keychains/login.keychain-db");
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 /// 关掉一家的额度查询时丢掉它的令牌。窗口开着拿不到锁也不要紧：关掉之后不会再用，重新
@@ -304,7 +332,7 @@ mod tests {
         KeychainLookup::Token(token.to_string())
     }
 
-    fn cache_with(token_value: &str, read_at: Instant) -> TokenCache {
+    fn cache_with(token_value: &str, read_at: SystemTime) -> TokenCache {
         let mut cache = TokenCache::default();
         cache.apply_read("claude", "item", read_at, secret(token_value));
         cache
@@ -323,7 +351,7 @@ mod tests {
     fn background_refresh_reads_the_keychain_only_once() {
         let mut cache = TokenCache::default();
         let reads = Cell::new(0);
-        let now = Instant::now();
+        let now = SystemTime::now();
         for _ in 0..3 {
             assert_eq!(
                 cache.lookup(
@@ -343,7 +371,7 @@ mod tests {
     /// 手动刷新总是重读：用户可能刚换了号。
     #[test]
     fn user_refresh_rereads_and_picks_up_a_new_token() {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let mut cache = cache_with("old", now);
         let reads = Cell::new(0);
         assert_eq!(
@@ -365,7 +393,7 @@ mod tests {
     fn a_denied_provider_is_only_read_on_user_request() {
         let mut cache = TokenCache::default();
         let reads = Cell::new(0);
-        let now = Instant::now();
+        let now = SystemTime::now();
         assert_eq!(
             cache.lookup(
                 "claude",
@@ -395,7 +423,7 @@ mod tests {
     /// 拒绝后这家的令牌全部作废，别的账户不受影响。
     #[test]
     fn denial_drops_the_tokens_of_that_provider_only() {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let mut cache = cache_with("t1", now);
         cache.apply_read("claude", "other", now, secret("t2"));
         cache.apply_read("copilot", "item", now, secret("t3"));
@@ -414,7 +442,7 @@ mod tests {
     fn a_missing_item_is_not_cached() {
         let mut cache = TokenCache::default();
         let reads = Cell::new(0);
-        let now = Instant::now();
+        let now = SystemTime::now();
         for _ in 0..2 {
             assert_eq!(
                 cache.lookup(
@@ -431,63 +459,123 @@ mod tests {
         assert_eq!(reads.get(), 2);
     }
 
-    /// CLI 没在跑时令牌过期后一直是 401：不能每 5 分钟重读一次，那又成了定时弹窗。
+    /// CLI 没在跑时令牌过期后一直是 401，钥匙串也没人写：不能每 5 分钟重读一次，那又成了
+    /// 定时弹窗。
     #[test]
-    fn a_rejected_token_is_not_reread_within_the_window() {
-        let start = Instant::now();
+    fn a_rejected_token_is_not_reread_while_the_keychain_is_unchanged() {
+        let start = SystemTime::now();
         let mut cache = cache_with("t1", start);
         let reads = Cell::new(0);
         let soon = start + BACKGROUND_REREAD_AFTER - Duration::from_secs(1);
-        assert_eq!(
-            cache.after_rejection("claude", "item", "t1", soon, counted(&reads, secret("t2"))),
-            KeychainLookup::NotFound
-        );
+        for changed_at in [Some(start - Duration::from_secs(1)), None] {
+            assert_eq!(
+                cache.after_rejection(
+                    "claude",
+                    "item",
+                    "t1",
+                    soon,
+                    changed_at,
+                    counted(&reads, secret("t2"))
+                ),
+                KeychainLookup::NotFound
+            );
+        }
         assert_eq!(reads.get(), 0);
     }
 
+    /// CLI 刷新令牌写回了钥匙串：下一次被拒就重读，不等兜底间隔。令牌一小时就过期的账户
+    /// （Antigravity），等一个间隔就是额度消失一小时。
     #[test]
-    fn a_rejected_token_is_reread_after_the_window() {
-        let start = Instant::now();
+    fn a_rejected_token_is_reread_once_the_keychain_was_written() {
+        let start = SystemTime::now();
         let mut cache = cache_with("t1", start);
-        let later = start + BACKGROUND_REREAD_AFTER;
-        assert_eq!(
-            cache.after_rejection("claude", "item", "t1", later, || secret("t2")),
-            token("t2")
-        );
-    }
-
-    /// 重读还是旧令牌：没有新令牌，而且读取时间刷新，下一次重读又要等一个窗口。
-    #[test]
-    fn rereading_the_same_token_restarts_the_window() {
-        let start = Instant::now();
-        let mut cache = cache_with("t1", start);
-        let reads = Cell::new(0);
-        let later = start + BACKGROUND_REREAD_AFTER;
-        assert_eq!(
-            cache.after_rejection("claude", "item", "t1", later, counted(&reads, secret("t1"))),
-            KeychainLookup::NotFound
-        );
+        let soon = start + Duration::from_secs(300);
         assert_eq!(
             cache.after_rejection(
                 "claude",
                 "item",
                 "t1",
-                later + Duration::from_secs(300),
+                soon,
+                Some(start + Duration::from_secs(1)),
+                || secret("t2")
+            ),
+            token("t2")
+        );
+    }
+
+    #[test]
+    fn a_rejected_token_is_reread_after_the_fallback_window() {
+        let start = SystemTime::now();
+        let mut cache = cache_with("t1", start);
+        let later = start + BACKGROUND_REREAD_AFTER;
+        assert_eq!(
+            cache.after_rejection("claude", "item", "t1", later, None, || secret("t2")),
+            token("t2")
+        );
+    }
+
+    /// 重读还是旧令牌（钥匙串是别的项在写）：没有新令牌，读取时间刷新，钥匙串再被写过
+    /// 才重读。
+    #[test]
+    fn rereading_the_same_token_waits_for_the_next_keychain_write() {
+        let start = SystemTime::now();
+        let mut cache = cache_with("t1", start);
+        let reads = Cell::new(0);
+        let written = start + Duration::from_secs(60);
+        let first = start + Duration::from_secs(300);
+        assert_eq!(
+            cache.after_rejection(
+                "claude",
+                "item",
+                "t1",
+                first,
+                Some(written),
+                counted(&reads, secret("t1"))
+            ),
+            KeychainLookup::NotFound
+        );
+        let second = first + Duration::from_secs(300);
+        assert_eq!(
+            cache.after_rejection(
+                "claude",
+                "item",
+                "t1",
+                second,
+                Some(written),
                 counted(&reads, secret("t1"))
             ),
             KeychainLookup::NotFound
         );
         assert_eq!(reads.get(), 1);
+        assert_eq!(
+            cache.after_rejection(
+                "claude",
+                "item",
+                "t1",
+                second,
+                Some(second - Duration::from_secs(1)),
+                counted(&reads, secret("t2"))
+            ),
+            token("t2")
+        );
+        assert_eq!(reads.get(), 2);
     }
 
     /// 缓存里已经是别的令牌（另一轮刷新换过了）：直接用，不读钥匙串。
     #[test]
     fn a_rejection_of_an_outdated_token_uses_the_cached_one() {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let mut cache = cache_with("t2", now);
         let reads = Cell::new(0);
         assert_eq!(
-            cache.after_rejection("claude", "item", "t1", now, counted(&reads, secret("t3"))),
+            cache.after_rejection(
+                "claude",
+                "item",
+                "t1",
+                now,
+                Some(now),
+                counted(&reads, secret("t3"))
+            ),
             token("t2")
         );
         assert_eq!(reads.get(), 0);
@@ -495,7 +583,7 @@ mod tests {
 
     #[test]
     fn denial_while_rereading_a_rejected_token_trips_the_breaker() {
-        let start = Instant::now();
+        let start = SystemTime::now();
         let mut cache = cache_with("t1", start);
         assert_eq!(
             cache.after_rejection(
@@ -503,6 +591,7 @@ mod tests {
                 "item",
                 "t1",
                 start + BACKGROUND_REREAD_AFTER,
+                None,
                 || KeychainRead::Denied
             ),
             KeychainLookup::Denied
