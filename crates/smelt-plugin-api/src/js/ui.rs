@@ -24,9 +24,21 @@ mod confirm;
 #[deny(dead_code)]
 mod field;
 #[deny(dead_code)]
+mod keybind;
+#[deny(dead_code)]
+mod list_row;
+#[deny(dead_code)]
 mod menu;
 #[deny(dead_code)]
+mod select;
+#[deny(dead_code)]
 mod sortable;
+#[deny(dead_code)]
+mod sticky;
+#[deny(dead_code)]
+mod tooltip;
+#[deny(dead_code)]
+mod truncated_line;
 #[deny(dead_code)]
 mod view;
 #[deny(dead_code)]
@@ -56,6 +68,12 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     view::register(&mut registry)?;
     window_bar::register(&mut registry)?;
     sortable::register(&mut registry)?;
+    list_row::register(&mut registry)?;
+    sticky::register(&mut registry)?;
+    truncated_line::register(&mut registry)?;
+    keybind::register(&mut registry)?;
+    tooltip::register(&mut registry)?;
+    select::register(&mut registry)?;
     registry.freeze()
 }
 
@@ -170,6 +188,34 @@ fn disabled_method(owner: &'static str) -> MethodDescriptor {
         },
     )
     .with_documentation("Controls whether the control accepts interaction.")
+}
+
+/// 空格分开的几步快捷键（`cmd-k cmd-s`），每步的写法同快捷键设置。`secondary-` 按 `os` 解：
+/// 构造时还拿不到平台，只查写法（随便给一个平台），画的时候再按真平台解一遍。
+fn parse_keys(keys: &str, os: gpui::OperatingSystem) -> Result<Vec<gpui::Keystroke>, String> {
+    let steps = keys
+        .split_whitespace()
+        .map(|step| {
+            gpui::Keystroke::parse_with_os(step, os).map_err(|error| format!("{step:?}: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if steps.is_empty() {
+        return Err("expected at least one keystroke".into());
+    }
+    Ok(steps)
+}
+
+/// `selected(bool)`：同 [`disabled_method`]，Shell 自己读（[`MaterializeRequest::selected`]）。
+fn selected_method(owner: &'static str) -> MethodDescriptor {
+    MethodDescriptor::new(
+        "selected",
+        vec![ArgumentDescriptor::new("selected", ArgumentSchema::Boolean)],
+        move |args| match args {
+            [ComponentArgument::Boolean(_)] => Ok(ComponentPayload::new(())),
+            _ => Err(format!("{owner}.selected expects one boolean")),
+        },
+    )
+    .with_documentation("Marks the control as the current selection.")
 }
 
 /// 记下的某一类操作，按脚本调用的顺序。

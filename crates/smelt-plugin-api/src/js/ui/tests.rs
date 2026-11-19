@@ -112,6 +112,12 @@ fn components_hold_only_smelt_controls() {
             "SmeltViewInstance",
             "SmeltWindowBar",
             "SmeltSortableList",
+            "SmeltListRow",
+            "SmeltStickySection",
+            "SmeltTruncatedLine",
+            "SmeltKeybind",
+            "SmeltTooltip",
+            "SmeltSelect",
         ]
     );
     let states = components
@@ -208,6 +214,62 @@ export default class App extends View {
     draw(&mut context);
     let typed = tree(&mut context, &view);
     assert!(typed.contains("query: [abc]"), "{typed}");
+}
+
+#[gpui::test]
+fn list_controls_build_from_scripts(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import {
+  SmeltKeybind, SmeltListRow, SmeltSelect, SmeltStickySection, SmeltTooltip, SmeltTruncatedLine,
+} from "smelt-ui";
+export default class App extends View {
+  init() { this.clicks = 0; this.pick = "b"; }
+  render() {
+    let rejected = 0;
+    for (const bad of [
+      () => SmeltKeybind.new("k-cmd"),
+      () => SmeltKeybind.new(""),
+      () => SmeltTooltip.new("", "x"),
+      () => SmeltTooltip.new("t", "x").keys("k-cmd"),
+      () => SmeltListRow.new(""),
+    ]) {
+      try { bad(); } catch (_) { rejected++; }
+    }
+    return div().size_full().flex().flex_col()
+      .child(SmeltListRow.new("row").selected(true).h(24).w(200)
+        .on_click((_e, cx) => { this.clicks++; cx.notify(); })
+        .child(SmeltTruncatedLine.new("a row title")))
+      .child(SmeltSelect.new("pick").w(160)
+        .option("a", "Alpha").option("b", "Beta").value(this.pick)
+        .on_change((value, cx) => { this.pick = value; cx.notify(); }))
+      .child(SmeltTooltip.new("tip", "Say hi").keys("cmd-k cmd-s").child("hover me"))
+      .child(SmeltKeybind.new("cmd-shift-k"))
+      .child(SmeltStickySection.new().child("Header").child(div().child("Body")))
+      .child(`state: ${this.clicks}|${this.pick}|${rejected}`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    let snapshot = tree(&mut context, &view);
+    for text in [
+        "SmeltListRow",
+        "SmeltTruncatedLine",
+        "SmeltSelect",
+        "SmeltTooltip",
+        "hover me",
+        "SmeltKeybind",
+        "SmeltStickySection",
+        "Header",
+        "Body",
+        "state: 0|b|5",
+    ] {
+        assert!(snapshot.contains(text), "{text}: {snapshot}");
+    }
+    click(&mut context, 8., 8.);
+    let after = tree(&mut context, &view);
+    assert!(after.contains("state: 1|b|5"), "{after}");
 }
 
 #[gpui::test]
