@@ -2,25 +2,28 @@
  * 把 agent/ 编成 smelt-agent。
  * Bun 1.4.3 仍然打不开 `./src/...worker.ts`（Cannot find module）。
  * 嵌入文件落在 Bun 的虚拟文件系统里：macOS / Linux 是 /$bunfs/root/，Windows 是
- * B:/~BUN/root/。这里按编译目标把 Pi 写死的两条说明符改成对应平台上的那两个路径。
+ * B:/~BUN/root/。这里按本机平台把 Pi 写死的两条说明符改成对应平台上的那两个路径。
  * Pi 在这条路径失败时会退回进程内缩放，冒烟就看不出 worker 没起来。
  * 编进来的 MCP 服务器里按自身路径读文件的地方同理，见 `bunfsPaths`。
  *
  * --splitting 和图片 worker、codemode worker 一起要过冒烟（compiled-smoke.ts）。
  * Bun 1.4.0 上拆块会让 photon 报 `exports_photon_rs is not defined`，1.4.3 没有。
  *
- * 用法：bun agent/scripts/compile-smelt-agent.ts <outfile> <bun-target>
+ * 只编本机平台，底座就是跑这个脚本的 Bun（scripts/fetch-bun.sh 钉死、核过哈希的那份）。
+ * 只给 target 时，Bun 认不出本机就是那个 target（Linux x64 baseline 上就认不出）会去
+ * GitHub 下 `bun-<target>-v<版本>`：canary 没有这个发布，下了也不是钉死的那份。
+ *
+ * 用法：bun agent/scripts/compile-smelt-agent.ts <outfile>
  */
 import { dirname, join } from "node:path";
 
 const outfile = process.argv[2];
-const compileTarget = process.argv[3];
-if (!outfile || !compileTarget) {
-	console.error("用法：bun agent/scripts/compile-smelt-agent.ts <outfile> <bun-target>");
+if (!outfile) {
+	console.error("用法：bun agent/scripts/compile-smelt-agent.ts <outfile>");
 	process.exit(2);
 }
 
-const BUNFS_ROOT = compileTarget.startsWith("bun-windows-") ? "B:/~BUN/root/" : "/$bunfs/root/";
+const BUNFS_ROOT = process.platform === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/";
 const IMAGE_WORKER = `${BUNFS_ROOT}utils/image-resize-worker.js`;
 const CODEMODE_WORKER = `${BUNFS_ROOT}extensions/codemode/worker.js`;
 
@@ -125,7 +128,7 @@ const result = await Bun.build({
 	plugins: [bunfsPaths, packageBins],
 	compile: {
 		outfile,
-		target: compileTarget,
+		executablePath: process.execPath,
 		// 认运行那台机器的系统证书库（macOS 钥匙串、Linux /etc/ssl），和 Rust 侧
 		// reqwest 的 native-tls 一致。只认 Bun 自带的根证书时，做 HTTPS 解密的公司
 		// 网络里登录、调模型都会报 TLS 错误。
