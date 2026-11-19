@@ -136,7 +136,12 @@ pub(crate) fn run_after_ready(id: &str, sess: &AcpSession, subscribers: &EventHu
     // 写回期间用户又在输入框里改了配置（见 [`hold_submit_config`]），接着写，最后一份为准。
     // 那边在回合收尾锁里、启动闸关着时才往这里放，所以拿着锁复核为空再开闸，不会漏。
     let turn_completion = loop {
-        while let Some(config) = sess.after_ready.lock().config.take() {
+        // 取出来再写：写回要等 agent 确认，事件线程归并确认时也要拿 after_ready。
+        // `while let` 的锁守卫活到循环体结束，在条件里取会拿着锁等满超时。
+        loop {
+            let Some(config) = sess.after_ready.lock().config.take() else {
+                break;
+            };
             crate::acp_idle::restore_suspended_config(id, sess, &config, subscribers);
         }
         let turn_completion = sess.turn_completion.lock();
