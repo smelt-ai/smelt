@@ -6,10 +6,11 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, ElementId, IntoElement, ParentElement as _, Pixels, Styled as _, Window, div,
-    px,
+    AnyElement, App, AvailableSpace, Bounds, ContentMask, Display, Element, ElementId,
+    FlexDirection, GlobalElementId, InspectorElementId, IntoElement, LayoutId, ParentElement as _,
+    Pixels, Style, Styled as _, Window, div, px, relative, size,
 };
-use gpui_base::{MotionReveal, spring};
+use gpui_base::spring;
 use smelt_plugin_api::ui::kit::MOTION;
 use smelt_plugin_api::ui::motion::ease_snap;
 
@@ -47,8 +48,8 @@ impl FoldMotion {
         self.open * 90.
     }
 
-    /// 把这一组的子行放进 `rows`。动画里套一层按进度裁高、淡入淡出；停在收起时不建子行；
-    /// 停在展开时直接铺进列表，不留裁剪层（裁剪层量高度晚一帧，子行增减时会先裁掉一截）。
+    /// 把这一组的子行放进 `rows`。停在收起时不建子行；展开时自然布局并记录高度，
+    /// 动画时按进度裁高、淡入淡出。一直保留同一个容器，收起第一帧就能拿到原高度。
     pub(super) fn body(
         self,
         rows: &mut Vec<AnyElement>,
@@ -60,19 +61,132 @@ impl FoldMotion {
         if self.collapsed && self.open <= SETTLED {
             return;
         }
-        if !self.collapsed && self.open >= 1. - SETTLED {
-            build(rows, window, cx);
-            return;
-        }
         let mut body = Vec::new();
         build(&mut body, window, cx);
         let body = div()
             .flex()
             .flex_col()
+            .w_full()
             .opacity(self.open)
             .children(body)
             .into_any_element();
-        rows.push(MotionReveal::new(self.body, self.open, body).into_any_element());
+        rows.push(FoldBody::new(self.body, self.open, body).into_any_element());
+    }
+}
+
+/// 和 MotionReveal 一样在动画时量高裁剪；完全展开时用自然布局并记录高度，避免收起第一帧
+/// 因裁剪层刚出现、尚未量高而把后面的行挤上去。自然布局也不会裁掉刚增多的子行。
+struct FoldBody {
+    id: ElementId,
+    open: f32,
+    child: AnyElement,
+}
+
+impl FoldBody {
+    fn new(id: ElementId, open: f32, child: AnyElement) -> Self {
+        Self {
+            id,
+            open: open.clamp(0., 1.),
+            child,
+        }
+    }
+}
+
+impl IntoElement for FoldBody {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for FoldBody {
+    type RequestLayoutState = Option<LayoutId>;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        if self.open >= 1. - 0.001 {
+            style.display = Display::Flex;
+            style.flex_direction = FlexDirection::Column;
+            let child = self.child.request_layout(window, cx);
+            (window.request_layout(style, [child], cx), Some(child))
+        } else {
+            let height = window.with_element_state(
+                id.expect("FoldBody 必须有稳定 id"),
+                |height: Option<Pixels>, _| (height, height.unwrap_or(px(0.))),
+            );
+            style.size.height = (height.unwrap_or(px(0.)) * self.open).into();
+            (window.request_layout(style, None, cx), None)
+        }
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        child_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let height = if let Some(layout) = child_layout {
+            window.layout_bounds(*layout).size.height
+        } else {
+            self.child
+                .layout_as_root(
+                    size(
+                        AvailableSpace::Definite(bounds.size.width),
+                        AvailableSpace::MinContent,
+                    ),
+                    window,
+                    cx,
+                )
+                .height
+        };
+        let changed = window.with_element_state(
+            id.expect("FoldBody 必须有稳定 id"),
+            |previous: Option<Pixels>, _| (previous != Some(height), height),
+        );
+        if changed && child_layout.is_none() {
+            window.request_animation_frame();
+        }
+        if child_layout.is_some() {
+            self.child.prepaint(window, cx);
+        } else {
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                self.child.prepaint_at(bounds.origin, window, cx);
+            });
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        child_layout: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let mask = child_layout.is_none().then_some(ContentMask { bounds });
+        window.with_content_mask(mask, |window| self.child.paint(window, cx));
     }
 }
 
@@ -290,6 +404,196 @@ pub(super) fn wash(alpha: f32) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(debug_assertions)]
+    use gpui::InteractiveElement as _;
+
+    #[cfg(debug_assertions)]
+    struct FoldProbe {
+        collapsed: bool,
+        body_height: Pixels,
+    }
+
+    #[cfg(debug_assertions)]
+    impl gpui::Render for FoldProbe {
+        fn render(
+            &mut self,
+            window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let fold = FoldMotion::new("probe", self.collapsed, window, cx);
+            let mut rows = Vec::new();
+            fold.body(&mut rows, window, cx, |rows, _, _| {
+                rows.push(
+                    div()
+                        .debug_selector(|| "fold-row".into())
+                        .flex()
+                        .mx(px(8.))
+                        .h(self.body_height)
+                        .child(div().w(px(40.)).flex_shrink_0())
+                        .into_any_element(),
+                );
+            });
+            div()
+                .flex()
+                .flex_col()
+                .w(px(200.))
+                .children(rows)
+                .child(div().debug_selector(|| "after-fold".into()).h(px(20.)))
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn closing_an_open_group_keeps_following_rows_in_place_on_the_first_frame(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_reduce_motion(false));
+        let (view, window) = cx.add_window_view(|_, _| FoldProbe {
+            collapsed: false,
+            body_height: px(120.),
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let before = window.debug_bounds("after-fold").unwrap().top();
+
+        // 展开着的内容变化时，要当帧自然撑高，不能沿用上次量到的高度。
+        view.update(window, |view, cx| {
+            view.body_height = px(160.);
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let grown = window.debug_bounds("after-fold").unwrap().top();
+        assert_eq!(grown - before, px(40.));
+
+        view.update(window, |view, cx| {
+            view.collapsed = true;
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let first_frame = window.debug_bounds("after-fold").unwrap().top();
+        assert_eq!(first_frame, grown, "收起第一帧不能先跳到最终位置");
+
+        window.executor().advance_clock(Duration::from_millis(40));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let middle = window.debug_bounds("after-fold").unwrap().top();
+        assert!(middle < grown && middle > grown - px(160.));
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn opening_a_closed_group_moves_following_rows_smoothly(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(false));
+        let (view, window) = cx.add_window_view(|_, _| FoldProbe {
+            collapsed: true,
+            body_height: px(120.),
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let closed = window.debug_bounds("after-fold").unwrap().top();
+        view.update(window, |view, cx| {
+            view.collapsed = false;
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(window.debug_bounds("after-fold").unwrap().top(), closed);
+        window.executor().advance_clock(Duration::from_millis(40));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let middle = window.debug_bounds("after-fold").unwrap().top();
+        assert!(middle > closed && middle < closed + px(120.));
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn folding_keeps_rows_constrained_to_the_list_width(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(false));
+        let (view, window) = cx.add_window_view(|_, _| FoldProbe {
+            collapsed: false,
+            body_height: px(120.),
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let row = window.debug_bounds("fold-row").unwrap();
+        assert_eq!(row.size.width, px(184.));
+
+        view.update(window, |view, cx| {
+            view.collapsed = true;
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.executor().advance_clock(Duration::from_millis(40));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let closing = window.debug_bounds("fold-row").unwrap();
+        assert_eq!(closing.size.width, row.size.width);
+        assert_eq!(closing.left(), row.left());
+
+        window.executor().advance_clock(Duration::from_secs(2));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(window, |view, cx| {
+            view.collapsed = false;
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.executor().advance_clock(Duration::from_millis(40));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let opening = window.debug_bounds("fold-row").unwrap();
+        assert_eq!(opening.size.width, row.size.width);
+        assert_eq!(opening.left(), row.left());
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn reversing_a_fold_does_not_jump(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(false));
+        let (view, window) = cx.add_window_view(|_, _| FoldProbe {
+            collapsed: false,
+            body_height: px(120.),
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let open = window.debug_bounds("after-fold").unwrap().top();
+        view.update(window, |view, cx| {
+            view.collapsed = true;
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.executor().advance_clock(Duration::from_millis(40));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let middle = window.debug_bounds("after-fold").unwrap().top();
+        assert!(middle < open && middle > open - px(120.));
+
+        view.update(window, |view, cx| {
+            view.collapsed = false;
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(window.debug_bounds("after-fold").unwrap().top(), middle);
+        window.executor().advance_clock(Duration::from_secs(2));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(window.debug_bounds("after-fold").unwrap().top(), open);
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn reduced_motion_changes_fold_immediately(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (view, window) = cx.add_window_view(|_, _| FoldProbe {
+            collapsed: false,
+            body_height: px(120.),
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let open = window.debug_bounds("after-fold").unwrap().top();
+        view.update(window, |view, cx| {
+            view.collapsed = true;
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            window.debug_bounds("after-fold").unwrap().top(),
+            open - px(120.)
+        );
+        view.update(window, |view, cx| {
+            view.collapsed = false;
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(window.debug_bounds("after-fold").unwrap().top(), open);
+    }
 
     #[test]
     fn wash_fades_in_holds_and_leaves_nothing_behind() {
