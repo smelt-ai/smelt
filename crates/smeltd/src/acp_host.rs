@@ -3631,6 +3631,20 @@ pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
                 "conversation input is empty",
             ));
         }
+        if let Some(slot) = acp_sessions.get(id)
+            && acp_sessions
+                .with_current(id, &slot, |session| {
+                    matches!(
+                        &*session.conversation_binding.lock(),
+                        Some(smelt_core::conversation::ConversationBinding::Automation { .. })
+                    )
+                })
+                .unwrap_or(false)
+        {
+            return Err(smelt_core::conversation::ConversationSubmitError::rejected(
+                "automation Run input is daemon-owned",
+            ));
+        }
         // 用户在这个对话里说话了，别的对话发来的消息链断在这里，提醒也算看过。
         crate::peer_messages::reset_chain(id);
         subscribers.mark_attention_read(id);
@@ -3638,6 +3652,14 @@ pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
             .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
         acp_sessions
             .with_current(id, &slot, |session| {
+                if matches!(
+                    &*session.conversation_binding.lock(),
+                    Some(smelt_core::conversation::ConversationBinding::Automation { .. })
+                ) {
+                    return Err(smelt_core::conversation::ConversationSubmitError::rejected(
+                        "automation Run input is daemon-owned",
+                    ));
+                }
                 apply_submit_config_values(session, &config_values, subscribers)?;
                 dispatch_conversation_input(session, input, subscribers)
             })
@@ -3655,6 +3677,37 @@ pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
         submit_started.elapsed()
     ));
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
+}
+
+/// 外部连接不能控制自动化运行；审批等允许的动作仍可从任一连接发送。
+fn automation_action_error(
+    session: &AcpSession,
+    action: &smelt_core::acp_session::AcpUserAction,
+) -> Option<&'static str> {
+    use smelt_core::acp_session::AcpUserAction;
+    if !matches!(
+        &*session.conversation_binding.lock(),
+        Some(smelt_core::conversation::ConversationBinding::Automation { .. })
+    ) {
+        return None;
+    }
+    match action {
+        AcpUserAction::Prompt { .. } | AcpUserAction::FollowUp { .. } => {
+            Some("automation Run input is daemon-owned")
+        }
+        AcpUserAction::Cancel
+        | AcpUserAction::DeliverQueuedNow { .. }
+        | AcpUserAction::WithdrawPendingPrompt { .. }
+        | AcpUserAction::Compact
+        | AcpUserAction::ClearQueue
+        | AcpUserAction::StopBackgroundTask { .. }
+        | AcpUserAction::StopSubagent { .. }
+        | AcpUserAction::RewindToMessage { .. }
+        | AcpUserAction::RetryLastTurn
+        | AcpUserAction::SetConfigOption { .. }
+        | AcpUserAction::RestartRuntime => Some("automation Run action is daemon-owned"),
+        _ => None,
+    }
 }
 
 /// Apply one protocol action without attaching a control client. Prompt here always means
@@ -3701,36 +3754,7 @@ pub(crate) fn handle_acp_action<C: ClientSocket>(
 
     let managed_binding = acp_sessions
         .with_current(id, &slot, |session| {
-            match &*session.conversation_binding.lock() {
-                Some(smelt_core::conversation::ConversationBinding::Automation { .. })
-                    if matches!(
-                        &action,
-                        smelt_core::acp_session::AcpUserAction::Prompt { .. }
-                            | smelt_core::acp_session::AcpUserAction::FollowUp { .. }
-                    ) =>
-                {
-                    Some("automation Run input is daemon-owned")
-                }
-                Some(smelt_core::conversation::ConversationBinding::Automation { .. })
-                    if matches!(
-                        &action,
-                        smelt_core::acp_session::AcpUserAction::Cancel
-                            | smelt_core::acp_session::AcpUserAction::DeliverQueuedNow { .. }
-                            | smelt_core::acp_session::AcpUserAction::WithdrawPendingPrompt { .. }
-                            | smelt_core::acp_session::AcpUserAction::Compact
-                            | smelt_core::acp_session::AcpUserAction::ClearQueue
-                            | smelt_core::acp_session::AcpUserAction::StopBackgroundTask { .. }
-                            | smelt_core::acp_session::AcpUserAction::StopSubagent { .. }
-                            | smelt_core::acp_session::AcpUserAction::RewindToMessage { .. }
-                            | smelt_core::acp_session::AcpUserAction::RetryLastTurn
-                            | smelt_core::acp_session::AcpUserAction::SetConfigOption { .. }
-                            | smelt_core::acp_session::AcpUserAction::RestartRuntime
-                    ) =>
-                {
-                    Some("automation Run action is daemon-owned")
-                }
-                _ => None,
-            }
+            automation_action_error(session, &action)
         })
         .flatten();
     if let Some(error) = managed_binding {
@@ -3757,6 +3781,9 @@ pub(crate) fn handle_acp_action<C: ClientSocket>(
 
     let result = acp_sessions
         .with_current(id, &slot, |session| {
+            if let Some(error) = automation_action_error(session, &action) {
+                return Err(error);
+            }
             apply_acp_user_action(session, action, subscribers)
         })
         .unwrap_or(Err("ACP session was replaced"));
@@ -3766,6 +3793,43 @@ pub(crate) fn handle_acp_action<C: ClientSocket>(
         Err(error) => serde_json::json!({"ok": false, "error": error}),
     };
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
+}
+
+/// 自动化现场只接入守护中已有的运行，不用窗口的默认启动规格重启或重建它。
+pub(crate) fn acp_open_slot(
+    req: &AcpOpenRequest,
+    sessions: &Sessions,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+) -> Result<Arc<AcpSlot<AcpSession>>, String> {
+    if matches!(
+        &req.conversation_binding,
+        Some(smelt_core::conversation::ConversationBinding::Automation { .. })
+    ) || smelt_core::session_control::is_background_acp_session_id(&req.id)
+    {
+        let slot = acp_sessions
+            .get(&req.id)
+            .ok_or_else(|| "Automation run is no longer available".to_string())?;
+        let matches_run = match (
+            &*slot.value.conversation_binding.lock(),
+            &req.conversation_binding,
+        ) {
+            (
+                Some(smelt_core::conversation::ConversationBinding::Automation { run_id: bound }),
+                Some(smelt_core::conversation::ConversationBinding::Automation { run_id }),
+            ) => bound == run_id,
+            (
+                Some(smelt_core::conversation::ConversationBinding::Automation { .. }),
+                None | Some(smelt_core::conversation::ConversationBinding::Direct),
+            ) => true,
+            _ => false,
+        };
+        if !matches_run {
+            return Err("Automation run does not match the conversation".to_string());
+        }
+        return Ok(slot);
+    }
+    ensure_acp_session_inner(req, sessions, acp_sessions, subscribers, true)
 }
 
 pub(crate) fn handle_acp_open<C: ClientSocket>(
@@ -3790,7 +3854,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
     let include_debug = request_includes_debug(v);
     let entry_version = request_entry_version(v);
     let id = req.id.clone();
-    let mut slot = match ensure_acp_session(&req, &sessions, &acp_sessions, &subscribers) {
+    let mut slot = match acp_open_slot(&req, &sessions, &acp_sessions, &subscribers) {
         Ok(slot) => slot,
         Err(error) => {
             write_rejected_acp_snapshot(
@@ -3809,7 +3873,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
             .is_some_and(|current| Arc::ptr_eq(&current, &slot));
         if !still_current {
             drop(lifecycle);
-            slot = match ensure_acp_session(&req, &sessions, &acp_sessions, &subscribers) {
+            slot = match acp_open_slot(&req, &sessions, &acp_sessions, &subscribers) {
                 Ok(current) => current,
                 Err(error) => {
                     write_rejected_acp_snapshot(
@@ -3900,11 +3964,18 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
         let Ok(action) = serde_json::from_str(line.trim()) else {
             continue; // 认不出的行跳过，别让一条坏数据掐断整条连接
         };
+        match acp_sessions.with_current(&id, &slot, |session| {
+            automation_action_error(session, &action)
+        }) {
+            Some(Some(_)) => continue,
+            None => break,
+            Some(None) => {}
+        }
         if matches!(
             &action,
             smelt_core::acp_session::AcpUserAction::RestartRuntime
         ) {
-            let _ = restart_acp_session(&id, &acp_sessions, &subscribers);
+            let _ = restart_acp_session_from_client(&id, &slot, &acp_sessions, &subscribers);
             continue;
         }
         // 这些只在进程内部用。客户端发来直接拒绝，也不为它们把挂起的会话拉起来。
@@ -3933,7 +4004,9 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
         }
         if acp_sessions
             .with_current(&id, &slot, |session| {
-                let _ = apply_acp_user_action(session, action, &subscribers);
+                if automation_action_error(session, &action).is_none() {
+                    let _ = apply_acp_user_action(session, action, &subscribers);
+                }
             })
             .is_none()
         {
@@ -4021,6 +4094,16 @@ pub(crate) fn ensure_acp_session(
     acp_sessions: &AcpSessions,
     subscribers: &EventHubHandle,
 ) -> Result<Arc<AcpSlot<AcpSession>>, String> {
+    ensure_acp_session_inner(req, sessions, acp_sessions, subscribers, false)
+}
+
+fn ensure_acp_session_inner(
+    req: &AcpOpenRequest,
+    sessions: &Sessions,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+    client_open: bool,
+) -> Result<Arc<AcpSlot<AcpSession>>, String> {
     loop {
         let (slot, created) = acp_sessions.reserve_with(&req.id, || {
             make_acp_session(
@@ -4033,7 +4116,9 @@ pub(crate) fn ensure_acp_session(
         if created {
             *slot.value.disallowed_tools.lock() = req.disallowed_tools.clone();
         } else {
-            adopt_unknown_conversation_binding(&slot.value, req.conversation_binding.clone());
+            if !client_open {
+                adopt_unknown_conversation_binding(&slot.value, req.conversation_binding.clone());
+            }
             if !req.disallowed_tools.is_empty()
                 && *slot.value.disallowed_tools.lock() != req.disallowed_tools
             {
@@ -4059,6 +4144,18 @@ pub(crate) fn ensure_acp_session(
         if !still_current {
             drop(lifecycle);
             continue;
+        }
+        if client_open && !created {
+            let is_automation = matches!(
+                &*slot.value.conversation_binding.lock(),
+                Some(smelt_core::conversation::ConversationBinding::Automation { .. })
+            );
+            if is_automation {
+                // 老客户端可能不带 binding 或误传 Direct；都只能接入，不能改写或重启。
+                drop(lifecycle);
+                return Ok(slot);
+            }
+            adopt_unknown_conversation_binding(&slot.value, req.conversation_binding.clone());
         }
         let alive = acp_runtime_alive(&slot.value);
         let (needs_relaunch, known_history) = {
@@ -4608,13 +4705,35 @@ pub(crate) fn handle_acp_restart<C: ClientSocket>(
     subscribers: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
-    let result = restart_acp_session(id, acp_sessions, subscribers);
+    let result = acp_sessions
+        .get(id)
+        .ok_or("ACP session not found")
+        .and_then(|slot| restart_acp_session_from_client(id, &slot, acp_sessions, subscribers));
     let response = match result {
         Ok(()) => serde_json::json!({"ok": true}),
         Err(error) => serde_json::json!({"ok": false, "error": error}),
     };
     let mut c = conn;
     let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
+}
+
+fn restart_acp_session_from_client(
+    id: &str,
+    slot: &Arc<AcpSlot<AcpSession>>,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+) -> Result<(), &'static str> {
+    let _lifecycle = slot.lifecycle.lock();
+    if !acp_sessions.is_current(id, slot) {
+        return Err("ACP session was replaced");
+    }
+    if let Some(error) = automation_action_error(
+        &slot.value,
+        &smelt_core::acp_session::AcpUserAction::RestartRuntime,
+    ) {
+        return Err(error);
+    }
+    relaunch_recorded_acp_runtime(id, slot, acp_sessions, subscribers)
 }
 
 /// ACP runtime 的进程级重启原语。socket handler 和 daemon Task Runtime 共用，

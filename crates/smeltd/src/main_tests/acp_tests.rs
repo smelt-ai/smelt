@@ -193,6 +193,97 @@ fn restore_with_local_entries_is_strict_from_the_first_attempt() {
 }
 
 #[test]
+fn automation_live_view_attaches_without_relaunching_or_recreating() {
+    use smelt_core::conversation::ConversationBinding;
+
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-automation-test", || {
+        make_acp_session_value("acp-automation-test", AcpSessionState::default())
+    });
+    *slot.value.conversation_binding.lock() = Some(ConversationBinding::Automation {
+        run_id: "run-1".into(),
+    });
+    let launch = smelt_core::agent_kind::ConversationLaunchSpec::from_command("pi --no-session");
+    *slot.value.launch_spec.lock() = Some(launch.clone());
+    let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: false,
+        supports_compaction: false,
+        supports_native_queue: false,
+        supports_rewind: false,
+    });
+    let request = serde_json::json!({
+        "id": "acp-automation-test",
+        "launch": {"command": "pi"},
+        "conversation_binding": {"type": "automation", "run_id": "run-1"}
+    });
+    let req = parse_acp_open_request(&request).unwrap();
+    let attached = acp_open_slot(&req, &new_sessions(), &acp_sessions, &new_event_hub()).unwrap();
+    assert!(Arc::ptr_eq(&attached, &slot));
+    assert!(slot.value.handle.lock().is_some());
+    assert_eq!(*slot.value.launch_spec.lock(), Some(launch.clone()));
+
+    let (server, client) = RuntimeStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let reader = BufReader::new(server.try_clone().unwrap());
+    let sessions_for_open = Arc::clone(&acp_sessions);
+    let worker = thread::spawn(move || {
+        handle_acp_open(
+            server,
+            reader,
+            &request,
+            new_sessions(),
+            sessions_for_open,
+            new_event_hub(),
+        );
+    });
+    let mut reader = BufReader::new(client);
+    assert!(read_line_containing(&mut reader, "\"snapshot\""));
+    assert!(slot.value.handle.lock().is_some());
+    assert_eq!(*slot.value.launch_spec.lock(), Some(launch));
+    drop(reader);
+    worker.join().unwrap();
+
+    let mut unbound = req.clone();
+    unbound.conversation_binding = None;
+    let attached =
+        acp_open_slot(&unbound, &new_sessions(), &acp_sessions, &new_event_hub()).unwrap();
+    assert!(Arc::ptr_eq(&attached, &slot));
+    assert!(slot.value.handle.lock().is_some());
+
+    let mut direct = req.clone();
+    direct.conversation_binding = Some(ConversationBinding::Direct);
+    let attached =
+        acp_open_slot(&direct, &new_sessions(), &acp_sessions, &new_event_hub()).unwrap();
+    assert!(Arc::ptr_eq(&attached, &slot));
+    assert!(slot.value.handle.lock().is_some());
+
+    let mut other = req.clone();
+    other.conversation_binding = Some(ConversationBinding::Automation {
+        run_id: "run-2".into(),
+    });
+    assert!(acp_open_slot(&other, &new_sessions(), &acp_sessions, &new_event_hub()).is_err());
+    assert!(slot.value.handle.lock().is_some());
+
+    let mut missing = req;
+    missing.id = "acp-automation-missing".into();
+    assert!(acp_open_slot(&missing, &new_sessions(), &acp_sessions, &new_event_hub()).is_err());
+    missing.conversation_binding = None;
+    assert!(acp_open_slot(&missing, &new_sessions(), &acp_sessions, &new_event_hub()).is_err());
+    missing.conversation_binding = Some(ConversationBinding::Direct);
+    assert!(acp_open_slot(&missing, &new_sessions(), &acp_sessions, &new_event_hub()).is_err());
+    assert!(acp_sessions.get(&missing.id).is_none());
+}
+
+#[test]
 fn reopening_live_session_neither_relaunches_nor_trims_history() {
     let mut reduced = AcpSessionState::default();
     for index in 0..5 {
@@ -361,7 +452,7 @@ fn second_control_client_does_not_evict_the_first() {
 }
 
 #[test]
-fn reopening_live_session_adopts_client_binding_when_unknown() {
+fn automation_open_does_not_claim_unknown_session_binding() {
     let mut reduced = AcpSessionState::default();
     reduced.phase = DaemonPhase::Idle;
 
@@ -409,15 +500,13 @@ fn reopening_live_session_adopts_client_binding_when_unknown() {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     let response: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(
-        response["snapshot"]["conversation_state"]["binding"]["run_id"],
-        "run-restored"
+    assert!(
+        response
+            .to_string()
+            .contains("Automation run does not match the conversation")
     );
-    assert!(matches!(
-        &*slot.value.conversation_binding.lock(),
-        Some(smelt_core::conversation::ConversationBinding::Automation { run_id })
-            if run_id == "run-restored"
-    ));
+    assert!(slot.value.conversation_binding.lock().is_none());
+    assert!(slot.value.handle.lock().is_some());
 
     drop(reader);
     drop(client);
@@ -782,6 +871,137 @@ fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
         true
     );
     assert_eq!(selected.lock().unwrap().as_deref(), Some("allow"));
+}
+
+#[test]
+fn automation_control_connection_rejects_control_actions_but_allows_approval() {
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-automation-control", || {
+        make_acp_session_value("acp-automation-control", AcpSessionState::default())
+    });
+    *slot.value.conversation_binding.lock() =
+        Some(smelt_core::conversation::ConversationBinding::Automation {
+            run_id: "run-1".into(),
+        });
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: false,
+        supports_compaction: false,
+        supports_native_queue: false,
+        supports_rewind: false,
+    });
+    slot.value
+        .connection_generation
+        .store(7, std::sync::atomic::Ordering::SeqCst);
+    let (server, client) = RuntimeStream::pair().unwrap();
+    handle_acp_submit_input(
+        server,
+        &serde_json::json!({
+            "id": "acp-automation-control",
+            "input": {"text": "not allowed", "images": []},
+            "config_values": [["model", "different"]],
+        }),
+        &acp_sessions,
+        &new_test_workspace_directory(),
+        &new_event_hub(),
+    );
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&response).unwrap()["ok"],
+        false
+    );
+    assert!(cmd_rx.try_recv().is_err());
+    let (server, client) = RuntimeStream::pair().unwrap();
+    handle_acp_restart(
+        server,
+        &serde_json::json!({"id": "acp-automation-control"}),
+        &acp_sessions,
+        &new_event_hub(),
+    );
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"], "automation Run action is daemon-owned");
+
+    let (approved_tx, approved_rx) = std::sync::mpsc::channel();
+    slot.value
+        .reduced
+        .lock()
+        .permissions
+        .push(smelt_core::acp_session::LivePermission {
+            id: "p1".into(),
+            question: "允许执行？".into(),
+            tool_call_id: "tool-1".into(),
+            options: vec![smelt_core::acp_session::PermissionOptionView {
+                option_id: "allow".into(),
+                name: "允许".into(),
+                kind: smelt_core::acp_session::PermissionOptionKindView::AllowOnce,
+            }],
+            details: smelt_core::acp_session::ApprovalDetailsView::Generic,
+            responder: Some(smelt_core::acp_conn::PermissionResponder::external(
+                move |option| {
+                    approved_tx.send(option).unwrap();
+                },
+            )),
+            raw_request_line: None,
+        });
+    let (server, mut client) = RuntimeStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let reader = BufReader::new(server.try_clone().unwrap());
+    let sessions_for_open = Arc::clone(&acp_sessions);
+    let worker = thread::spawn(move || {
+        handle_acp_open(
+            server,
+            reader,
+            &serde_json::json!({
+                "id": "acp-automation-control",
+                "launch": {"command": "pi"},
+                "conversation_binding": {"type": "automation", "run_id": "run-1"}
+            }),
+            new_sessions(),
+            sessions_for_open,
+            new_event_hub(),
+        );
+    });
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+    assert!(read_line_containing(&mut reader, "\"snapshot\""));
+    writeln!(client, "\"Cancel\"").unwrap();
+    writeln!(
+        client,
+        "{{\"SetConfigOption\":{{\"config_id\":\"mode\",\"value_id\":\"test\"}}}}"
+    )
+    .unwrap();
+    writeln!(client, "\"RestartRuntime\"").unwrap();
+    writeln!(
+        client,
+        "{{\"PermissionSelect\":{{\"tool_call_id\":\"tool-1\",\"option_id\":\"allow\"}}}}"
+    )
+    .unwrap();
+    assert_eq!(
+        approved_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "allow"
+    );
+    assert!(cmd_rx.try_recv().is_err());
+    assert_eq!(
+        slot.value
+            .connection_generation
+            .load(std::sync::atomic::Ordering::SeqCst),
+        7
+    );
+    assert!(slot.value.handle.lock().is_some());
+    drop(reader);
+    drop(client);
+    worker.join().unwrap();
 }
 
 #[test]

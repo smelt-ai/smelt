@@ -264,7 +264,15 @@ impl Driver {
                 }
                 continue;
             };
-            match ensure_run_conversation_binding(&slot.value, &run.id) {
+            let Some(binding) = self
+                .acp_sessions
+                .with_current(session_id, &slot, |session| {
+                    ensure_run_conversation_binding(session, &run.id)
+                })
+            else {
+                continue;
+            };
+            match binding {
                 Ok(true) => push_acp_snapshot_since(&slot.value, true, None),
                 Ok(false) => {}
                 Err(error) => {
