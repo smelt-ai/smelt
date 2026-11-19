@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-dirs = "5"
+dirs = "6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
