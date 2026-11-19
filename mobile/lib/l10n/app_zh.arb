@@ -360,6 +360,8 @@
   "conversationMemoryPending": "待确认",
   "conversationMemoryPendingReason": "待确认：{reason}",
   "conversationMemoryEmptyBody": "（正文为空）",
+  "conversationAskSkipped": "跳过了",
+  "conversationAskUnanswered": "没有回答",
   "filesTitle": "文件",
   "filesOpen": "项目文件",
   "filesSearchHint": "搜文件名和内容",

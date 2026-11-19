@@ -1309,6 +1309,12 @@ class L10nEn extends L10n {
   String get conversationMemoryEmptyBody => '(empty)';
 
   @override
+  String get conversationAskSkipped => 'Skipped';
+
+  @override
+  String get conversationAskUnanswered => 'Not answered';
+
+  @override
   String get filesTitle => 'Files';
 
   @override

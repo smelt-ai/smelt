@@ -1248,6 +1248,12 @@ class L10nZh extends L10n {
   String get conversationMemoryEmptyBody => '（正文为空）';
 
   @override
+  String get conversationAskSkipped => '跳过了';
+
+  @override
+  String get conversationAskUnanswered => '没有回答';
+
+  @override
   String get filesTitle => '文件';
 
   @override

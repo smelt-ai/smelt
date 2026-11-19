@@ -3170,6 +3170,44 @@ impl SseDecode for crate::api::conversation::ApprovalKind {
     }
 }
 
+impl SseDecode for crate::api::conversation::AskAnswerView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_question = <String>::sse_decode(deserializer);
+        let mut var_answer = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::conversation::AskAnswerView {
+            question: var_question,
+            answer: var_answer,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::AskOutcome {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::AskOutcome::Answered,
+            1 => crate::api::conversation::AskOutcome::Skipped,
+            2 => crate::api::conversation::AskOutcome::Unanswered,
+            _ => unreachable!("Invalid variant for AskOutcome: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::AskView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_outcome = <crate::api::conversation::AskOutcome>::sse_decode(deserializer);
+        let mut var_answers =
+            <Vec<crate::api::conversation::AskAnswerView>>::sse_decode(deserializer);
+        return crate::api::conversation::AskView {
+            outcome: var_outcome,
+            answers: var_answers,
+        };
+    }
+}
+
 impl SseDecode for crate::api::catalog::AttentionItem {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3551,6 +3589,7 @@ impl SseDecode for crate::api::conversation::ConversationEntry {
             <Option<crate::api::conversation::ToolCallView>>::sse_decode(deserializer);
         let mut var_taskNote =
             <Option<crate::api::conversation::TaskNoteView>>::sse_decode(deserializer);
+        let mut var_ask = <Option<crate::api::conversation::AskView>>::sse_decode(deserializer);
         return crate::api::conversation::ConversationEntry {
             index: var_index,
             kind: var_kind,
@@ -3559,6 +3598,7 @@ impl SseDecode for crate::api::conversation::ConversationEntry {
             images: var_images,
             tool_call: var_toolCall,
             task_note: var_taskNote,
+            ask: var_ask,
         };
     }
 }
@@ -3936,6 +3976,7 @@ impl SseDecode for crate::api::conversation::EntryKind {
             4 => crate::api::conversation::EntryKind::Completion,
             5 => crate::api::conversation::EntryKind::Divider,
             6 => crate::api::conversation::EntryKind::TaskNote,
+            7 => crate::api::conversation::EntryKind::Ask,
             _ => unreachable!("Invalid variant for EntryKind: {}", inner),
         };
     }
@@ -4248,6 +4289,20 @@ impl SseDecode for Vec<crate::api::catalog::AgentDefinitionSummary> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::catalog::AgentDefinitionSummary>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::AskAnswerView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::AskAnswerView>::sse_decode(
                 deserializer,
             ));
         }
@@ -4996,6 +5051,19 @@ impl SseDecode for Option<TextDocument> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<TextDocument>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::AskView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::AskView>::sse_decode(
+                deserializer,
+            ));
         } else {
             return None;
         }
@@ -6566,6 +6634,70 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ApprovalKind>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::AskAnswerView {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.question.into_into_dart().into_dart(),
+            self.answer.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::AskAnswerView
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::AskAnswerView>
+    for crate::api::conversation::AskAnswerView
+{
+    fn into_into_dart(self) -> crate::api::conversation::AskAnswerView {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::AskOutcome {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Answered => 0.into_dart(),
+            Self::Skipped => 1.into_dart(),
+            Self::Unanswered => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::AskOutcome
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::AskOutcome>
+    for crate::api::conversation::AskOutcome
+{
+    fn into_into_dart(self) -> crate::api::conversation::AskOutcome {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::AskView {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.outcome.into_into_dart().into_dart(),
+            self.answers.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::AskView
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::AskView>
+    for crate::api::conversation::AskView
+{
+    fn into_into_dart(self) -> crate::api::conversation::AskView {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::catalog::AttentionItem {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -7060,6 +7192,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationEnt
             self.images.into_into_dart().into_dart(),
             self.tool_call.into_into_dart().into_dart(),
             self.task_note.into_into_dart().into_dart(),
+            self.ask.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -7558,6 +7691,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::conversation::EntryKind {
             Self::Completion => 4.into_dart(),
             Self::Divider => 5.into_dart(),
             Self::TaskNote => 6.into_dart(),
+            Self::Ask => 7.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -9420,6 +9554,39 @@ impl SseEncode for crate::api::conversation::ApprovalKind {
     }
 }
 
+impl SseEncode for crate::api::conversation::AskAnswerView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.question, serializer);
+        <Vec<String>>::sse_encode(self.answer, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::AskOutcome {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::AskOutcome::Answered => 0,
+                crate::api::conversation::AskOutcome::Skipped => 1,
+                crate::api::conversation::AskOutcome::Unanswered => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::AskView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::conversation::AskOutcome>::sse_encode(self.outcome, serializer);
+        <Vec<crate::api::conversation::AskAnswerView>>::sse_encode(self.answers, serializer);
+    }
+}
+
 impl SseEncode for crate::api::catalog::AttentionItem {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -9709,6 +9876,7 @@ impl SseEncode for crate::api::conversation::ConversationEntry {
         <Vec<crate::api::conversation::ConversationImage>>::sse_encode(self.images, serializer);
         <Option<crate::api::conversation::ToolCallView>>::sse_encode(self.tool_call, serializer);
         <Option<crate::api::conversation::TaskNoteView>>::sse_encode(self.task_note, serializer);
+        <Option<crate::api::conversation::AskView>>::sse_encode(self.ask, serializer);
     }
 }
 
@@ -9989,6 +10157,7 @@ impl SseEncode for crate::api::conversation::EntryKind {
                 crate::api::conversation::EntryKind::Completion => 4,
                 crate::api::conversation::EntryKind::Divider => 5,
                 crate::api::conversation::EntryKind::TaskNote => 6,
+                crate::api::conversation::EntryKind::Ask => 7,
                 _ => {
                     unimplemented!("");
                 }
@@ -10232,6 +10401,16 @@ impl SseEncode for Vec<crate::api::catalog::AgentDefinitionSummary> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::catalog::AgentDefinitionSummary>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::AskAnswerView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::AskAnswerView>::sse_encode(item, serializer);
         }
     }
 }
@@ -10790,6 +10969,16 @@ impl SseEncode for Option<TextDocument> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <TextDocument>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::AskView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::AskView>::sse_encode(value, serializer);
         }
     }
 }

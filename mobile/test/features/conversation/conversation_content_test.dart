@@ -86,6 +86,43 @@ void main() {
       expect(find.text('Took 1:42'), findsOneWidget);
     });
 
+    testWidgets('问答：答了是题面加答案，跳过和没答各一行', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          const Column(
+            children: [
+              AskRecordRow(
+                ask: AskView(
+                  outcome: AskOutcome.answered,
+                  answers: [
+                    AskAnswerView(
+                      question: 'Ship which changes?',
+                      answer: ['Focus fix', 'Plain text'],
+                    ),
+                  ],
+                ),
+              ),
+              AskRecordRow(
+                ask: AskView(
+                  outcome: AskOutcome.skipped,
+                  answers: [
+                    AskAnswerView(question: 'Clear the cache?', answer: []),
+                  ],
+                ),
+              ),
+              AskRecordRow(
+                ask: AskView(outcome: AskOutcome.unanswered, answers: []),
+              ),
+            ],
+          ),
+        ),
+      );
+      expect(find.text('Ship which changes?'), findsOneWidget);
+      expect(find.text('Focus fix · Plain text'), findsOneWidget);
+      expect(find.text('Skipped  Clear the cache?'), findsOneWidget);
+      expect(find.text('Not answered'), findsOneWidget);
+    });
+
     testWidgets('后台任务便签：一行说明，点开看输出的尾巴', (tester) async {
       await tester.pumpWidget(
         _host(
@@ -393,6 +430,24 @@ void main() {
       expect(blocks.map((b) => b.key), ['e0', 't1', 'e4', 't5']);
       expect((blocks[1] as ToolGroupBlock).calls.map((c) => c.id), ['a', 'b']);
       expect((blocks[2] as EntryBlock).isFinal, isTrue);
+    });
+
+    test('还在等答案的提问不占行，不拆组；答完是独立的一块', () {
+      const answered = AskView(
+        outcome: AskOutcome.answered,
+        answers: [
+          AskAnswerView(question: 'Which plan?', answer: ['Recommended']),
+        ],
+      );
+      final blocks = buildBlocks([
+        h.entry(0, EntryKind.toolCall, tool: h.tool('a', 'a')),
+        h.entry(1, EntryKind.ask),
+        h.entry(2, EntryKind.toolCall, tool: h.tool('b', 'b')),
+        h.entry(3, EntryKind.ask, ask: answered),
+        h.entry(4, EntryKind.toolCall, tool: h.tool('c', 'c')),
+      ]);
+      expect(blocks.map((b) => b.key), ['t0', 'e3', 't4']);
+      expect((blocks[0] as ToolGroupBlock).calls.map((c) => c.id), ['a', 'b']);
     });
 
     test('视图只带变了的那段：截到 entriesFrom 接上，窗口起点变了就整个换', () {

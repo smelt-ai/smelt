@@ -1113,6 +1113,13 @@ class _ConversationPageState extends State<ConversationPage> {
         child: ConversationDivider(label: entry.text),
       ),
       EntryKind.taskNote => _Reading(child: TaskNoteRow(entry: entry)),
+      EntryKind.ask => switch (entry.ask) {
+        final ask? => _Reading(
+          padding: const EdgeInsets.symmetric(vertical: Space.sm),
+          child: AskRecordRow(ask: ask),
+        ),
+        null => const SizedBox.shrink(),
+      },
       EntryKind.toolCall => const SizedBox.shrink(),
     };
   }

@@ -237,6 +237,10 @@ class _AutomationRunPageState extends State<AutomationRunPage> {
       ),
       EntryKind.divider => ConversationDivider(label: entry.text),
       EntryKind.taskNote => TaskNoteRow(entry: entry),
+      EntryKind.ask => switch (entry.ask) {
+        final ask? => AskRecordRow(ask: ask),
+        null => null,
+      },
     };
     if (child == null) return const SizedBox.shrink();
     return Padding(

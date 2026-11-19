@@ -37,11 +37,12 @@ class ToolGroupBlock extends ConversationBlock {
   String get key => 't$firstIndex';
 }
 
-/// 画出来什么都没有的条目：空正文、没带工具调用的工具条目。它们夹在两次工具调用之间
-/// 时不该把一组拆开。
+/// 画出来什么都没有的条目：空正文、没带工具调用的工具条目、还在等答案的提问（题在单据
+/// 上）。它们夹在两次工具调用之间时不该把一组拆开。
 bool _invisible(ConversationEntry e) => switch (e.kind) {
   EntryKind.assistant => e.text.trim().isEmpty,
   EntryKind.toolCall => e.toolCall == null,
+  EntryKind.ask => e.ask == null,
   _ => false,
 };
 

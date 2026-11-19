@@ -140,5 +140,7 @@
   "conversationMemoryPending": "To review",
   "conversationMemoryPendingReason": "To review: {reason}",
   "@conversationMemoryPendingReason": {"placeholders": {"reason": {"type": "String"}}},
-  "conversationMemoryEmptyBody": "(empty)"
+  "conversationMemoryEmptyBody": "(empty)",
+  "conversationAskSkipped": "Skipped",
+  "conversationAskUnanswered": "Not answered"
 }

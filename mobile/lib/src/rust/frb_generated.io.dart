@@ -102,6 +102,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApprovalKind dco_decode_approval_kind(dynamic raw);
 
   @protected
+  AskAnswerView dco_decode_ask_answer_view(dynamic raw);
+
+  @protected
+  AskOutcome dco_decode_ask_outcome(dynamic raw);
+
+  @protected
+  AskView dco_decode_ask_view(dynamic raw);
+
+  @protected
   AttentionItem dco_decode_attention_item(dynamic raw);
 
   @protected
@@ -154,6 +163,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AgentDraft dco_decode_box_autoadd_agent_draft(dynamic raw);
+
+  @protected
+  AskView dco_decode_box_autoadd_ask_view(dynamic raw);
 
   @protected
   AttentionItem dco_decode_box_autoadd_attention_item(dynamic raw);
@@ -408,6 +420,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<AskAnswerView> dco_decode_list_ask_answer_view(dynamic raw);
+
+  @protected
   List<AutomationAgentChoice> dco_decode_list_automation_agent_choice(
     dynamic raw,
   );
@@ -586,6 +601,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   dco_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
     dynamic raw,
   );
+
+  @protected
+  AskView? dco_decode_opt_box_autoadd_ask_view(dynamic raw);
 
   @protected
   AttentionItem? dco_decode_opt_box_autoadd_attention_item(dynamic raw);
@@ -913,6 +931,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApprovalKind sse_decode_approval_kind(SseDeserializer deserializer);
 
   @protected
+  AskAnswerView sse_decode_ask_answer_view(SseDeserializer deserializer);
+
+  @protected
+  AskOutcome sse_decode_ask_outcome(SseDeserializer deserializer);
+
+  @protected
+  AskView sse_decode_ask_view(SseDeserializer deserializer);
+
+  @protected
   AttentionItem sse_decode_attention_item(SseDeserializer deserializer);
 
   @protected
@@ -979,6 +1006,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AgentDraft sse_decode_box_autoadd_agent_draft(SseDeserializer deserializer);
+
+  @protected
+  AskView sse_decode_box_autoadd_ask_view(SseDeserializer deserializer);
 
   @protected
   AttentionItem sse_decode_box_autoadd_attention_item(
@@ -1283,6 +1313,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<AskAnswerView> sse_decode_list_ask_answer_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<AutomationAgentChoice> sse_decode_list_automation_agent_choice(
     SseDeserializer deserializer,
   );
@@ -1505,6 +1540,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   sse_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
     SseDeserializer deserializer,
   );
+
+  @protected
+  AskView? sse_decode_opt_box_autoadd_ask_view(SseDeserializer deserializer);
 
   @protected
   AttentionItem? sse_decode_opt_box_autoadd_attention_item(
@@ -1899,6 +1937,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_approval_kind(ApprovalKind self, SseSerializer serializer);
 
   @protected
+  void sse_encode_ask_answer_view(AskAnswerView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ask_outcome(AskOutcome self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ask_view(AskView self, SseSerializer serializer);
+
+  @protected
   void sse_encode_attention_item(AttentionItem self, SseSerializer serializer);
 
   @protected
@@ -1991,6 +2038,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     AgentDraft self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_ask_view(AskView self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_attention_item(
@@ -2389,6 +2439,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_ask_answer_view(
+    List<AskAnswerView> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_automation_agent_choice(
     List<AutomationAgentChoice> self,
     SseSerializer serializer,
@@ -2677,6 +2733,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void
   sse_encode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
     TextDocument? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_ask_view(
+    AskView? self,
     SseSerializer serializer,
   );
 

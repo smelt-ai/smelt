@@ -5,6 +5,7 @@ import '../../data/models.dart';
 import '../../l10n/gen/l10n.dart';
 import '../../theme/galley.dart';
 import '../../ui/status.dart';
+import '../conversation/entry_views.dart';
 import '../conversation/tool_views.dart';
 
 /// 印在长单据上的上下文：会话最近几条（你说了什么、它回了什么、刚跑了哪些工具），
@@ -40,6 +41,7 @@ class TicketContext extends StatelessWidget {
     EntryKind.assistant => !e.thought && e.text.trim().isNotEmpty,
     EntryKind.toolCall => e.toolCall != null,
     EntryKind.taskNote => e.taskNote != null,
+    EntryKind.ask => e.ask != null,
     _ => false,
   };
 }
@@ -129,6 +131,8 @@ class _Line extends StatelessWidget {
             ),
           ],
         );
+      case EntryKind.ask:
+        return AskRecordRow(ask: e.ask!);
       default:
         return Text(
           _plain(e.text),

@@ -124,6 +124,8 @@ pub enum EntryKind {
     Divider,
     /// 后台任务 / 子智能体结束：`task_note`，`text` 是一行说明。
     TaskNote,
+    /// 问用户的一次：`ask`。还在等答案时 `ask` 为空、不画，题在单据上。
+    Ask,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -136,6 +138,30 @@ pub struct ConversationEntry {
     pub images: Vec<ConversationImage>,
     pub tool_call: Option<ToolCallView>,
     pub task_note: Option<TaskNoteView>,
+    pub ask: Option<AskView>,
+}
+
+/// 问用户的一次怎么收场的，和一题一题的问答。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AskView {
+    pub outcome: AskOutcome,
+    pub answers: Vec<AskAnswerView>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AskOutcome {
+    /// 答了：每题一组答案。
+    Answered,
+    /// 人跳过了：`answers` 里只有题面。
+    Skipped,
+    /// 没等到答案这一轮就结束了（多半是被停掉）。
+    Unanswered,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AskAnswerView {
+    pub question: String,
+    pub answer: Vec<String>,
 }
 
 /// 一张图。小图直接给 `bytes`；大图运行时只给引用 `original`，用 [`load_image`] 取。

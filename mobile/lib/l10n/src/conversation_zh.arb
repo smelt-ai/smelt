@@ -119,5 +119,7 @@
   "conversationMemoryActive": "已生效",
   "conversationMemoryPending": "待确认",
   "conversationMemoryPendingReason": "待确认：{reason}",
-  "conversationMemoryEmptyBody": "（正文为空）"
+  "conversationMemoryEmptyBody": "（正文为空）",
+  "conversationAskSkipped": "跳过了",
+  "conversationAskUnanswered": "没有回答"
 }

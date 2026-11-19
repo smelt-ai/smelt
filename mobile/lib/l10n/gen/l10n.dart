@@ -2257,6 +2257,18 @@ abstract class L10n {
   /// **'(empty)'**
   String get conversationMemoryEmptyBody;
 
+  /// No description provided for @conversationAskSkipped.
+  ///
+  /// In en, this message translates to:
+  /// **'Skipped'**
+  String get conversationAskSkipped;
+
+  /// No description provided for @conversationAskUnanswered.
+  ///
+  /// In en, this message translates to:
+  /// **'Not answered'**
+  String get conversationAskUnanswered;
+
   /// No description provided for @filesTitle.
   ///
   /// In en, this message translates to:

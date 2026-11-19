@@ -231,6 +231,7 @@ ConversationEntry entry(
   String text = '',
   bool thought = false,
   ToolCallView? tool,
+  AskView? ask,
 }) => ConversationEntry(
   index: index,
   kind: kind,
@@ -238,6 +239,7 @@ ConversationEntry entry(
   thought: thought,
   images: const [],
   toolCall: tool,
+  ask: ask,
 );
 
 ToolCallView tool(

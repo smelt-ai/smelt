@@ -315,6 +315,68 @@ class ConversationDivider extends StatelessWidget {
   _ => (SessionMark.idle, status),
 };
 
+/// 问用户的一次：答了是一组「题面 / 答案」，跳过是一行「跳过了」加题面，这一轮结束了也没
+/// 等到答案是一行「没有回答」。和桌面一个样子。
+class AskRecordRow extends StatelessWidget {
+  const AskRecordRow({super.key, required this.ask});
+
+  final AskView ask;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = GalleyColors.of(context);
+    final t = GalleyText.of(context);
+    final l10n = L10n.of(context);
+    final icon = Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Icon(
+        LucideIcons.messagesSquare,
+        size: Strokes.iconSmall,
+        color: c.inkMuted,
+      ),
+    );
+    final muted = t.meta.copyWith(color: c.inkMuted);
+    // 穷举：再加一种收场，编译器会在这里拦下。
+    final Widget body = switch (ask.outcome) {
+      AskOutcome.unanswered => Text(
+        l10n.conversationAskUnanswered,
+        style: muted,
+      ),
+      AskOutcome.skipped => Text(
+        [
+          l10n.conversationAskSkipped,
+          ask.answers.map((a) => a.question).join(' · '),
+        ].join('  '),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: muted,
+      ),
+      AskOutcome.answered => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final (i, item) in ask.answers.indexed) ...[
+            if (i > 0) const SizedBox(height: Space.sm),
+            Text(item.question, style: muted),
+            Text(
+              item.answer.join(' · '),
+              style: t.callout.copyWith(color: c.ink),
+            ),
+          ],
+        ],
+      ),
+    };
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        icon,
+        const SizedBox(width: Space.sm),
+        Expanded(child: body),
+      ],
+    );
+  }
+}
+
 /// 后台任务 / 子智能体结束的便签：一行说明（内核拼好），点开看输出的尾巴。
 class TaskNoteRow extends StatefulWidget {
   const TaskNoteRow({super.key, required this.entry});

@@ -13,12 +13,13 @@ use smelt_model::acp_session::{
 use smelt_model::daemon_state::DaemonPhase;
 
 use crate::api::conversation::{
-    ApprovalDetails, ApprovalKind, ChoiceOption, ConfigOption, ContextUsage, ConversationEntry,
-    ConversationImage, ConversationMemoryChange, ConversationMemoryChanges, ConversationNotice, ConversationPhase, ConversationView, DiffLine, DiffOp,
-    DiffView, Elicitation, ElicitationField, ElicitationFieldKind, ElicitationOption, EntryKind, ImageRef,
-    ModelProvider, ModelSelector, PermissionOption, PermissionOptionKind, PermissionRequest,
-    PlanStep, PlanStepStatus, SlashCommand, TaskNoteKind, TaskNoteView, ToolCallView, ToolKind,
-    ToolOutput, ToolOutputKind, ToolStatus,
+    ApprovalDetails, ApprovalKind, AskAnswerView, AskOutcome, AskView, ChoiceOption, ConfigOption,
+    ContextUsage, ConversationEntry, ConversationImage, ConversationMemoryChange,
+    ConversationMemoryChanges, ConversationNotice, ConversationPhase, ConversationView, DiffLine,
+    DiffOp, DiffView, Elicitation, ElicitationField, ElicitationFieldKind, ElicitationOption,
+    EntryKind, ImageRef, ModelProvider, ModelSelector, PermissionOption, PermissionOptionKind,
+    PermissionRequest, PlanStep, PlanStepStatus, SlashCommand, TaskNoteKind, TaskNoteView,
+    ToolCallView, ToolKind, ToolOutput, ToolOutputKind, ToolStatus,
 };
 
 /// 投影出视图，条目只投影从绝对下标 `from` 起的那段（落在窗口外就夹回窗口里）：前面的
@@ -177,6 +178,7 @@ fn blank_entry(index: i64, kind: EntryKind) -> ConversationEntry {
         images: Vec::new(),
         tool_call: None,
         task_note: None,
+        ask: None,
     }
 }
 
@@ -199,6 +201,14 @@ pub(crate) fn conversation_entry(index: i64, entry: &AcpEntry) -> ConversationEn
             text: text.clone(),
             thought: *thought,
             ..blank_entry(index, EntryKind::Assistant)
+        },
+        AcpEntry::ToolCall {
+            status,
+            asked: Some(record),
+            ..
+        } => ConversationEntry {
+            ask: ask_view(*status, record),
+            ..blank_entry(index, EntryKind::Ask)
         },
         AcpEntry::ToolCall {
             id,
@@ -247,6 +257,27 @@ pub(crate) fn conversation_entry(index: i64, entry: &AcpEntry) -> ConversationEn
             ..blank_entry(index, EntryKind::TaskNote)
         },
     }
+}
+
+/// 和桌面同一规则：没答完不出；结束了却一题没答是「没有回答」。
+fn ask_view(status: ToolCallStatus, record: &acp_chat::AskRecord) -> Option<AskView> {
+    let outcome = match status {
+        ToolCallStatus::Pending | ToolCallStatus::InProgress => return None,
+        ToolCallStatus::Failed if record.answers.is_empty() => AskOutcome::Unanswered,
+        _ if record.skipped => AskOutcome::Skipped,
+        _ => AskOutcome::Answered,
+    };
+    Some(AskView {
+        outcome,
+        answers: record
+            .answers
+            .iter()
+            .map(|item| AskAnswerView {
+                question: item.question.clone(),
+                answer: item.answer.clone(),
+            })
+            .collect(),
+    })
 }
 
 /// 大图（`original` 有值）不内联；内联的 base64 解不开就当没有字节，界面画占位。
@@ -729,6 +760,43 @@ mod tests {
         // 空白正文不算最终回答，往前找到完成信号。
         assert_eq!(view.final_answer_index, Some(7));
         assert_eq!(view.last_turn_duration_ms, Some(3500));
+    }
+
+    #[test]
+    fn an_ask_shows_its_answers_once_it_is_settled() {
+        let ask = |status: &str, answers: serde_json::Value, skipped: bool| {
+            json!({"ToolCall": {
+                "id": "ask-1", "title": "smelt_ask_user", "kind": "other", "status": status,
+                "output": [], "asked": {"answers": answers, "skipped": skipped},
+            }})
+        };
+        let answered = json!([{"question": "按哪个方案做？", "answer": ["按推荐方案"]}]);
+        let snapshot = snapshot_from(json!({
+            "entries": [
+                ask("in_progress", json!([]), false),
+                ask("completed", answered.clone(), false),
+                ask("completed", json!([{"question": "清缓存吗？", "answer": []}]), true),
+                ask("failed", json!([]), false),
+            ],
+        }));
+        let entries = conversation_view("acp-1", &snapshot, 0).entries;
+        assert!(entries.iter().all(|entry| entry.kind == EntryKind::Ask));
+        assert!(
+            entries.iter().all(|entry| entry.tool_call.is_none()),
+            "不当工具画"
+        );
+        assert_eq!(entries[0].ask, None, "还在等时不出，题在单据上");
+        let outcome = |ix: usize| entries[ix].ask.as_ref().unwrap().outcome;
+        assert_eq!(outcome(1), AskOutcome::Answered);
+        assert_eq!(
+            entries[1].ask.as_ref().unwrap().answers,
+            vec![AskAnswerView {
+                question: "按哪个方案做？".into(),
+                answer: vec!["按推荐方案".into()],
+            }]
+        );
+        assert_eq!(outcome(2), AskOutcome::Skipped);
+        assert_eq!(outcome(3), AskOutcome::Unanswered);
     }
 
     #[test]
