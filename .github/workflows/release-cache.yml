@@ -1,4 +1,5 @@
-# 给 release.yml 的 macOS 打包预热 release 依赖缓存。
+# 给 release.yml 的 macOS、Windows 打包预热 release 依赖缓存。Linux 两种架构冷编也只要 8 分钟，
+# 比 macOS、iOS 快，不在发版的关键路径上，不占缓存配额。
 #
 # 发版跑在 tag 上，tag 上存的缓存别的 tag 读不到，只有 main 存的大家都能读；而 ci.yml 在 main
 # 上编的是测试用的 debug 产物，release 用不上。所以在 main 上按发版同样的命令编一遍 release，
@@ -46,3 +47,22 @@ jobs:
       # 和 scripts/package-mac.sh --build 编的是同一组目标、同样的参数，产物才对得上。
       - name: Build release binaries
         run: cargo build --release --bin smelt --bin smeltd --bin smelt-notify --bin smelt-installer
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # shared-key 必须和 release.yml 的一致。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+
+      # 和 release.yml 的 windows job 同一条命令。
+      - name: Build release binaries
+        run: cargo build --release -p smelt -p smelt-cli -p smeltd --locked

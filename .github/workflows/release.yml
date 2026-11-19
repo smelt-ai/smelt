@@ -1,5 +1,7 @@
-# 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release，
-# 再附上 Linux 运行时两种架构的包、Windows 安装程序和一键安装脚本；iOS 传到 TestFlight。
+# 打 tag（v*）→ 各平台并行出包（macOS dmg、Linux 运行时两种架构、Android APK、Windows 安装程序），
+# 全部成功后 publish 一次建好 GitHub Release、传齐产物和校验和；iOS 单独传到 TestFlight。
+# 任何一个平台失败就不发：一键安装、运行时升级、应用内更新都不会看到缺包的版本。修好或重跑失败的
+# job 后，publish 会接着跑。
 # 本地打包链路复用：make dist-build → scripts/package-mac.sh；Linux 用 scripts/package-linux.sh。
 name: release
 
@@ -165,57 +167,24 @@ jobs:
           rm -f "${SMELT_ASC_KEY_PATH:-}"
           [[ -n "${KEYCHAIN_PATH:-}" ]] && security delete-keychain "$KEYCHAIN_PATH" || true
 
-      # 发布说明的起点要自己算：GitHub 默认往回找上一个正式版，而 v0.6.6–v0.6.14 在改以
-      # GitHub 为开发源之前的历史上、不是现在 main 的祖先，它会一路退回 v0.6.5，每个版本
-      # 都把以前的 PR 再列一遍。规则：按版本号往前找第一个是本次祖先的 tag；预发布从上一个
-      # tag（含 rc）算起，正式版从上一个正式版算起，正式版的说明就涵盖它之前所有 rc。
-      - name: Release notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          prerelease=false
-          [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=true
-          previous=""
-          seen=false
-          # versionsort.suffix=- 让 v0.9.0-rc.3 排在 v0.9.0 前面。
-          for tag in $(git -c versionsort.suffix=- tag --list 'v*' --sort=-v:refname); do
-            if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then seen=true; continue; fi
-            $seen || continue
-            [[ "$prerelease" == false && "$tag" == *-* ]] && continue
-            git merge-base --is-ancestor "$tag" "$GITHUB_REF_NAME" || continue
-            previous="$tag"
-            break
-          done
-          echo "上一个版本：${previous:-（无）}"
-          args=(-f tag_name="$GITHUB_REF_NAME")
-          [[ -n "$previous" ]] && args+=(-f previous_tag_name="$previous")
-          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body \
-            > "$RUNNER_TEMP/release-notes.md"
-          version="${GITHUB_REF_NAME#v}"
-          cat >> "$RUNNER_TEMP/release-notes.md" <<EOF
-
-          ## Windows
-
-          下载 \`smelt-${version}-windows-x86_64-setup.exe\` 运行即可。按用户安装，不要管理员权限，默认装到 \`%LOCALAPPDATA%\\Programs\\Smelt\`，可选把 \`smelt\` 命令加入 PATH。装好后 Smelt 会在应用内检查更新（设置 → 关于 → 更新），也可以直接运行新版本的安装程序覆盖安装，覆盖前先关掉 Smelt。没有应用内更新的旧版要再手动装一次。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。升级本机守护会重启进程，终端会话不保留。
-          EOF
-          cat "$RUNNER_TEMP/release-notes.md"
-
-      # tag 带 - 后缀（v0.9.0-rc.1）就发成预发布：不成为 Latest，一键安装默认装的
-      # releases/latest 也不会指向它（要装它得设 SMELT_VERSION）。
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+      - name: Upload package
+        uses: actions/upload-artifact@v7
         with:
-          files: |
+          name: smelt-macos
+          path: |
             dist/Smelt.dmg
             dist/Smelt.app.zip
-          body_path: ${{ runner.temp }}/release-notes.md
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          if-no-files-found: error
+          # dmg 和 zip 本身已经压缩过。
+          compression-level: 0
 
   # Linux 运行时的包（设计文档 D7「一键安装」）：两种架构各在对应架构的 runner 上原生构建，
   # 不交叉编译。在 Ubuntu 22.04 容器里编，链接的 glibc 是 2.35，Debian 12+、Ubuntu 22.04+
   # 都能跑；直接在 runner 上编会链到更新的 glibc，老一点的系统上起不来。
   linux:
     strategy:
+      # 一个架构失败不连累另一个：重跑失败的 job 时只重编坏掉的那个。
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
@@ -263,40 +232,6 @@ jobs:
           name: smeltd-linux-${{ matrix.arch }}
           path: dist/smeltd-*-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
-
-  # 等 dmg 那边建好 Release 再往上加，避免两边同时建。附上一键安装脚本（发布名 install.sh）
-  # 和校验和清单：一键安装从清单里认出各架构的包名，并对着它核对。
-  linux-release:
-    needs: [build, linux]
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Download packages
-        uses: actions/download-artifact@v8
-        with:
-          pattern: smeltd-linux-*
-          merge-multiple: true
-          path: dist
-
-      # 先只放 Linux 包的校验和，一键安装和运行时自动升级马上能用；所有产物到齐后
-      # checksums job 再整份重写（两边都按文件名精确匹配，多出的行不影响它们）。
-      - name: Checksums and installer
-        run: |
-          cd dist
-          sha256sum smeltd-*.tar.gz > SHA256SUMS
-          cat SHA256SUMS
-          install -m 0755 ../scripts/get-smeltd.sh install.sh
-
-      - name: Add to GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            dist/smeltd-*.tar.gz
-            dist/SHA256SUMS
-            dist/install.sh
-          prerelease: ${{ contains(github.ref_name, '-') }}
 
   # 手机 App 的安装包。正式签名的 keystore 存在 secrets 里，没配就失败（发出 debug 签名的
   # 包，以后换正式签名时用户只能卸载重装）。versionCode 用这条流水线的 run_number：
@@ -397,26 +332,9 @@ jobs:
           path: dist/Smelt-*-android-arm64.apk
           if-no-files-found: error
 
-  # 同 linux-release：等 dmg 那边建好 Release 再往上加。
-  android-release:
-    needs: [build, android]
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Download APK
-        uses: actions/download-artifact@v8
-        with:
-          name: smelt-android
-          path: dist
-
-      - name: Add to GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: dist/Smelt-*-android-arm64.apk
-          prerelease: ${{ contains(github.ref_name, '-') }}
-
   # iOS：每个 tag 都传一个构建到 App Store Connect，处理完自动发给 TestFlight 内部测试组。
   # 提交 App Store 审核仍在 App Store Connect 里手动做，不是每次发版都要发手机，见 docs/release.md 的「移动端」。
-  # 不挂 Release，也不进 checksums：ipa 只能经 App Store 分发。
+  # 不挂 Release，也不进 SHA256SUMS：ipa 只能经 App Store 分发。
   ios:
     # App Store 要求用当前大版本的 iOS SDK 出包，macos-26 带 Xcode 26。
     runs-on: macos-26
@@ -498,7 +416,6 @@ jobs:
 
   # Windows 本机运行时：smelt、smeltd、smelt-notify、smelt-agent 装在同一个目录里，打成 Inno Setup
   # 安装程序（scripts/windows-installer.iss）。第一版不签名。
-  # 构建和 dmg 并行；上传在 windows-release，等 Release 建好再挂，避免两边同时建。
   windows:
     runs-on: windows-latest
     steps:
@@ -511,6 +428,14 @@ jobs:
       - name: Version from tag
         shell: bash
         run: echo "SMELT_BUILD_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # 冷编要 25 分钟，是整个发版最慢的一条。只读 release-cache.yml 在 main 上预热的依赖缓存，
+      # 原因同 build job。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+          save-if: false
 
       - name: Build
         run: cargo build --release -p smelt -p smelt-cli -p smeltd --locked
@@ -575,35 +500,77 @@ jobs:
           path: dist/smelt-*-windows-x86_64-setup.exe
           if-no-files-found: error
 
-  windows-release:
-    needs: [build, windows]
+  # 所有平台的包都出来了才发：下载全部产物，算一份覆盖全部产物的 SHA256SUMS（一键安装、运行时升级、
+  # 应用内更新都按文件名从里面找自己那一行核对），连同一键安装脚本（发布名 install.sh）一次传上去。
+  # gh release create 带文件时先建草稿、传完再公开，中途不会露出缺文件的发布。
+  publish:
+    needs: [build, linux, android, windows]
     runs-on: ubuntu-24.04
     steps:
-      - name: Download package
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # 发布说明要找上一个 tag，需要完整历史和全部 tag。
+          fetch-depth: 0
+
+      - name: Download packages
         uses: actions/download-artifact@v8
         with:
-          name: smelt-windows
           path: dist
+          merge-multiple: true
 
-      - name: Add to GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: dist/smelt-*-windows-x86_64-setup.exe
-          prerelease: ${{ contains(github.ref_name, '-') }}
+      - name: Checksums and installer
+        run: |
+          install -m 0755 scripts/get-smeltd.sh dist/install.sh
+          cd dist
+          sha256sum -- * | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
 
-  # 所有产物都上传后，把 SHA256SUMS 重写成覆盖全部产物（dmg、自更新 zip、APK、
-  # Linux 包、Windows 安装程序、install.sh）。
-  checksums:
-    needs: [linux-release, android-release, windows-release]
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checksums of all assets
+      # 发布说明的起点要自己算：GitHub 默认往回找上一个正式版，而 v0.6.6–v0.6.14 在改以
+      # GitHub 为开发源之前的历史上、不是现在 main 的祖先，它会一路退回 v0.6.5，每个版本
+      # 都把以前的 PR 再列一遍。规则：按版本号往前找第一个是本次祖先的 tag；预发布从上一个
+      # tag（含 rc）算起，正式版从上一个正式版算起，正式版的说明就涵盖它之前所有 rc。
+      - name: Release notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir dist && cd dist
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'Smelt.dmg' --pattern 'Smelt.app.zip' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'smelt-*-windows-x86_64-setup.exe' --pattern 'install.sh'
-          sha256sum -- * | sort -k2 > SHA256SUMS
-          cat SHA256SUMS
-          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+          prerelease=false
+          [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=true
+          previous=""
+          seen=false
+          # versionsort.suffix=- 让 v0.9.0-rc.3 排在 v0.9.0 前面。
+          for tag in $(git -c versionsort.suffix=- tag --list 'v*' --sort=-v:refname); do
+            if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then seen=true; continue; fi
+            $seen || continue
+            [[ "$prerelease" == false && "$tag" == *-* ]] && continue
+            git merge-base --is-ancestor "$tag" "$GITHUB_REF_NAME" || continue
+            previous="$tag"
+            break
+          done
+          echo "上一个版本：${previous:-（无）}"
+          args=(-f tag_name="$GITHUB_REF_NAME")
+          [[ -n "$previous" ]] && args+=(-f previous_tag_name="$previous")
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body \
+            > "$RUNNER_TEMP/release-notes.md"
+          version="${GITHUB_REF_NAME#v}"
+          cat >> "$RUNNER_TEMP/release-notes.md" <<EOF
+
+          ## Windows
+
+          下载 \`smelt-${version}-windows-x86_64-setup.exe\` 运行即可。按用户安装，不要管理员权限，默认装到 \`%LOCALAPPDATA%\\Programs\\Smelt\`，可选把 \`smelt\` 命令加入 PATH。装好后 Smelt 会在应用内检查更新（设置 → 关于 → 更新），也可以直接运行新版本的安装程序覆盖安装，覆盖前先关掉 Smelt。没有应用内更新的旧版要再手动装一次。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。升级本机守护会重启进程，终端会话不保留。
+          EOF
+          cat "$RUNNER_TEMP/release-notes.md"
+
+      # tag 带 - 后缀（v0.9.0-rc.1）就发成预发布：不成为 Latest，一键安装默认装的
+      # releases/latest 也不会指向它（要装它得设 SMELT_VERSION）。
+      # 上次 publish 传到一半失败会留下草稿，重跑时先删掉它；已经公开的发布不动，create 会报错。
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)" == true ]]; then
+            gh release delete "$GITHUB_REF_NAME" --yes
+          fi
+          args=(--verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md")
+          [[ "$GITHUB_REF_NAME" == *-* ]] && args+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*

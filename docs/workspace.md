@@ -325,7 +325,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 
 ### Windows 桌面与本机运行时
 
-发布包是安装程序 `smelt-<版本>-windows-x86_64-setup.exe`（`.github/workflows/release.yml` 的 `windows` job 用 Inno Setup 按 `scripts/windows-installer.iss` 编，由 `windows-release` 挂到同一个 Release）。第一版只出 x86_64，系统是 Windows 10 1803 及以上。按用户安装，默认装到 `%LOCALAPPDATA%\Programs\Smelt`，安装目录里放在一起：
+发布包是安装程序 `smelt-<版本>-windows-x86_64-setup.exe`（`.github/workflows/release.yml` 的 `windows` job 用 Inno Setup 按 `scripts/windows-installer.iss` 编，由 `publish` 和其它平台的包一起传到 Release）。第一版只出 x86_64，系统是 Windows 10 1803 及以上。按用户安装，默认装到 `%LOCALAPPDATA%\Programs\Smelt`，安装目录里放在一起：
 
 - `smelt.exe`
 - `smelt.com`：`smelt-cli.exe` 改名。`smelt.exe` 是 GUI 子系统；cmd / PowerShell 敲 `smelt` 先找到 `.com`，子命令才有控制台输出

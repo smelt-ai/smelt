@@ -330,12 +330,17 @@ jobs:
       - name: Check
         run: bun run check
 
-  # Windows 上把 smelt-agent 编出来跑一遍冒烟：嵌入文件的路径、可执行文件后缀都和
-  # macOS / Linux 不一样，本地开发机上测不到，不在这里跑就只能等发版时才暴露。
-  pi-agent-windows:
+  # 在发版出包的几个平台上把 smelt-agent 编出来跑一遍冒烟。Windows 嵌入文件的路径、可执行文件
+  # 后缀都和 macOS / Linux 不一样；Linux x64 用的是 baseline 版的 Bun。开发机是 macOS，这些都测不到，
+  # 不在这里跑就只能等发版时才暴露。
+  smelt-agent:
     needs: changes
     if: needs.changes.outputs.pi-agent == 'true'
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -348,7 +353,7 @@ jobs:
   # 取消，以及排不到机器被放弃的 abandoned）。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
   ci-ok:
     if: always()
-    needs: [changes, cargo-deny, rust, mobile, android-build, ios-check, windows, pi-agent, pi-agent-windows]
+    needs: [changes, cargo-deny, rust, mobile, android-build, ios-check, windows, pi-agent, smelt-agent]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize

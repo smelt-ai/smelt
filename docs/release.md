@@ -1,15 +1,17 @@
 # 发版
 
-推 `v*` tag 触发 `.github/workflows/release.yml`，产物都传到同一个 GitHub Release（iOS 例外，传到 TestFlight）：
+推 `v*` tag 触发 `.github/workflows/release.yml`。各平台并行出包，全部成功后由 `publish` 一次建好 GitHub Release、
+传齐产物（iOS 例外，传到 TestFlight）。任何一个平台失败就不发，一键安装、运行时升级、应用内更新都不会看到缺包的
+版本；修好或在 Actions 里重跑失败的 job，`publish` 会接着跑。
 
 | 产物 | job | 说明 |
 |---|---|---|
-| `Smelt.dmg`、`Smelt.app.zip` | `build`（macos-14） | `make dist-build`，Developer ID 签名并公证，见下面的「macOS 签名」。`Smelt.app.zip` 给桌面应用内更新用 |
-| `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
-| `Smelt-<版本>-android-arm64.apk` | `android` → `android-release` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
-| `smelt-<版本>-windows-x86_64-setup.exe` | `windows` → `windows-release` | Inno Setup 安装程序，`smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe` 装在同一个目录。第一版不签名，见下面的「Windows」 |
+| `Smelt.dmg`、`Smelt.app.zip` | `build`（macos-26） | `make dist-build`，Developer ID 签名并公证，见下面的「macOS 签名」。`Smelt.app.zip` 给桌面应用内更新用 |
+| `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`install.sh` | `linux` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
+| `Smelt-<版本>-android-arm64.apk` | `android` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
+| `smelt-<版本>-windows-x86_64-setup.exe` | `windows` | Inno Setup 安装程序，`smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe` 装在同一个目录。第一版不签名，见下面的「Windows」 |
 | iOS 构建（TestFlight） | `ios`（macos-26） | 传到 App Store Connect，处理完自动发给 TestFlight 内部测试组，不挂 Release。签名见下面的「iOS 签名」 |
-| `SHA256SUMS` | `linux-release` → `checksums` | 先只含 Linux 包（一键安装和运行时自动升级马上能用），全部产物到齐后重写成覆盖所有产物 |
+| `SHA256SUMS` | `publish` | 覆盖上面全部产物和 `install.sh`，一键安装、运行时升级、应用内更新都按文件名找自己那一行核对 |
 
 ## 许可证文件
 
@@ -38,7 +40,7 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 
 ## 发布说明
 
-由 `build` job 的「Release notes」步骤生成，不用 GitHub 默认的起点（它往回找上一个正式版，而 v0.6.6–v0.6.14
+由 `publish` job 的「Release notes」步骤生成，不用 GitHub 默认的起点（它往回找上一个正式版，而 v0.6.6–v0.6.14
 不在现在 main 的历史上，会一路退回 v0.6.5，把早就发过的 PR 再列一遍）。起点按版本号往前找第一个是本次祖先的 tag：
 预发布从上一个 tag（含 rc）算起，正式版从上一个正式版算起，所以正式版的说明涵盖它之前所有 rc 的改动。
 
@@ -130,8 +132,8 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 提示先关掉 Smelt。卸载会停掉本机守护（它跑的是 `%USERPROFILE%\.smelt\bin` 里的副本，不在安装目录），数据目录
 不删。
 
-桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`。由 `windows-release` 挂到同一个 Release。
-校验和在 `checksums` 里和其它产物写在一起。
+桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`。安装程序和其它产物一起由 `publish` 传到
+Release，校验和写在同一份 `SHA256SUMS` 里。`windows` 读 `release-cache.yml` 在 main 上预热的依赖缓存，冷编要 25 分钟。
 
 这一版 exe 和安装程序都不签名。下载后 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。
 桌面的应用内更新认的就是这个安装程序：发布里同时有它和 `SHA256SUMS`、清单里已经有它的校验和，才算这个发布能装。
