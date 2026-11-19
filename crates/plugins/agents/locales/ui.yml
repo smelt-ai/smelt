@@ -643,15 +643,24 @@ profile:
     en: "Connect any ACP agent, or change the command, add environment variables or change the data folder of a built-in agent. It adds an item to the “New Conversation” menu; ones based on a built-in agent also appear on the history page."
     zh-CN: "接入任意 ACP Agent，或在内置 Agent 上换命令、加环境变量、换数据目录。「新建对话」菜单会多一项；基于内置 Agent 的还会出现在历史会话页。"
 quota:
+  click_to_check:
+    en: "Not checked yet · click to check"
+    zh-CN: "暂未查到 · 点击查询"
   click_to_refresh:
     en: "%{hint} · click to refresh"
     zh-CN: "%{hint} · 点击刷新"
+  click_to_retry:
+    en: "%{error} · click to retry"
+    zh-CN: "%{error} · 点击重试"
   copilot_remaining:
     en: "%{label} %{remaining} %{unit} left this period"
     zh-CN: "%{label} 本周期剩余 %{remaining} %{unit}"
   copilot_used:
     en: "%{label} this period %{used} / %{limit} %{unit} (%{percent}%)"
     zh-CN: "%{label} 本周期 %{used} / %{limit} %{unit}（%{percent}%）"
+  empty_trigger:
+    en: "Account Quota · click to check"
+    zh-CN: "账户额度 · 点击查询"
   enable_label:
     en: "Check quota for %{name}"
     zh-CN: "查询 %{name} 的额度"
@@ -670,6 +679,9 @@ quota:
   refresh:
     en: "Refresh Account Quota"
     zh-CN: "刷新账户额度"
+  refresh_one:
+    en: "Check %{name} quota"
+    zh-CN: "查询 %{name} 的额度"
   refreshing:
     en: "%{hint} · refreshing…"
     zh-CN: "%{hint} · 正在刷新…"

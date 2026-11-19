@@ -122,6 +122,8 @@ struct AgentSettingsPage {
     profiles: Rc<Vec<ProfileRow>>,
     /// 本机配置的状态：收到了是 `Ok`；给不了是 `Err(原因)`；还没收到是 `Err(None)`。
     profiles_state: Result<(), Option<String>>,
+    /// 各账户最近一次额度查询状态（刷新中、报错），供设置页每行显示刷新按钮与结果。
+    quota: contract::Quota,
     _profile_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
@@ -225,7 +227,12 @@ impl AgentSettingsPage {
                     HostEvent::ShownViewsChanged => this.sync_shown(window, cx),
                     // 输入框的占位文字存在输入框里，换语言时重设。
                     HostEvent::LocaleChanged => this.relabel_inputs(window, cx),
-                    _ => {}
+                    _ => {
+                        if let Some(quota) = contract::QUOTA_CHANGED.parse(event) {
+                            this.quota = quota;
+                            cx.notify();
+                        }
+                    }
                 },
             ),
             cx.observe_global_in::<agent_hosts::AgentHosts>(window, |this, window, cx| {
@@ -241,6 +248,7 @@ impl AgentSettingsPage {
             launch: Launch::default(),
             profiles: Rc::new(Vec::new()),
             profiles_state: Err(None),
+            quota: quota::snapshot(cx),
             _profile_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
@@ -778,7 +786,7 @@ impl Render for AgentSettingsPage {
                     .description(t!("launch.section_description"))
                     .children(self.launch_cells(entity)),
             )
-            .child(quota_section(cx))
+            .child(quota_section(&self.quota, cx))
     }
 }
 
@@ -1274,9 +1282,9 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
     .into_any_element()
 }
 
-/// 每家账户一行：查询开关，钥匙串被拒时再带一个重试。开关在页面露出来时和每轮刷新后读好，
-/// 这里只读那份。
-fn quota_section(cx: &App) -> SettingsSection {
+/// 每家账户一行：查询开关、主动刷新按钮，钥匙串被拒时再带一个重试。开关在页面露出来时
+/// 和每轮刷新后读好，这里只读那份。
+fn quota_section(quota: &contract::Quota, cx: &App) -> SettingsSection {
     let settings = cx.global::<quota::QuotaSettings>().clone();
     SettingsSection::new()
         .title(t!("quota.title"))
@@ -1290,12 +1298,26 @@ fn quota_section(cx: &App) -> SettingsSection {
                     .child(truncated_line(error)),
             )
         }))
-        .children(settings.providers.into_iter().map(quota_row))
+        .children(
+            settings
+                .providers
+                .into_iter()
+                .map(|provider| quota_row(provider, quota)),
+        )
 }
 
-fn quota_row(provider: QuotaProviderSetting) -> SettingsRow {
+fn quota_row(provider: QuotaProviderSetting, quota: &contract::Quota) -> SettingsRow {
     let target = provider.target;
     let denied = provider.enabled && provider.keychain_denied;
+    let refreshing = quota.refreshing.contains(&target);
+    let status = quota
+        .statuses
+        .iter()
+        .find(|(candidate, _)| *candidate == target)
+        .map(|(_, status)| status);
+    let error = status
+        .filter(|status| status.quota.is_none())
+        .and_then(|status| status.error.as_deref());
     let id = target.id();
     let row = SettingsRow::new(target.display_name());
     let row = if denied {
@@ -1303,7 +1325,24 @@ fn quota_row(provider: QuotaProviderSetting) -> SettingsRow {
             Button::new(SharedString::from(format!("quota-retry-{id}")))
                 .quiet()
                 .small()
+                .loading(refreshing)
                 .label(t!("common.retry"))
+                .on_click(move |_, _, cx| quota::request_refresh(target, cx)),
+        )
+    } else if provider.enabled {
+        let row = if let Some(error) = error {
+            row.description(error.to_string())
+                .clamp_description(SharedString::from(format!("quota-error-{id}")), 2)
+        } else {
+            row
+        };
+        row.child(
+            Button::new(SharedString::from(format!("quota-refresh-{id}")))
+                .quiet()
+                .small()
+                .icon(IconName::Refresh)
+                .loading(refreshing)
+                .icon_action(t!("quota.refresh_one", name = target.display_name()))
                 .on_click(move |_, _, cx| quota::request_refresh(target, cx)),
         )
     } else {

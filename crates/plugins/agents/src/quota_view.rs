@@ -71,37 +71,73 @@ impl QuotaBar {
 
     /// 这一条列的账户，按展示顺序；还没查到的不列。
     fn chips(&self) -> Vec<Chip> {
-        self.quota
-            .statuses
-            .iter()
-            .filter(|(target, _)| target.provider.is_none())
-            .filter_map(|(target, status)| {
-                let quota = status.quota.as_ref()?;
-                let row = quota_row(*target, status)?;
-                let rings = ring_windows(quota);
-                let hint = if rings.len() > 1 {
-                    t!(
-                        "quota.rings",
-                        hint = row.hint,
-                        outer = rings[0].0,
-                        inner = rings[1].0
-                    )
-                    .into_owned()
-                } else {
-                    row.hint
-                };
-                Some(Chip {
-                    target: *target,
-                    text: row.text,
-                    color: row.color,
-                    hint,
-                    used: quota.used_percent(),
-                    rings,
-                    refreshing: self.quota.manual.contains(target),
-                })
-            })
-            .collect()
+        chips_for(&self.quota)
     }
+
+    /// 弹层里的全部开启账户（含暂未查到或失败的），按展示顺序。
+    fn popover_rows(&self) -> Vec<PopoverEntry> {
+        popover_entries(&self.quota)
+    }
+}
+
+fn chips_for(quota: &Quota) -> Vec<Chip> {
+    quota
+        .statuses
+        .iter()
+        .filter(|(target, _)| target.provider.is_none())
+        .filter_map(|(target, status)| chip_for(quota, *target, status))
+        .collect()
+}
+
+fn popover_entries(quota: &Quota) -> Vec<PopoverEntry> {
+    quota
+        .targets
+        .iter()
+        .copied()
+        .filter(|target| target.provider.is_none())
+        .map(|target| {
+            let status = quota
+                .statuses
+                .iter()
+                .find(|(candidate, _)| *candidate == target)
+                .map(|(_, status)| status);
+            if let Some(chip) = status.and_then(|status| chip_for(quota, target, status)) {
+                return PopoverEntry::Ready(chip);
+            }
+            let error = status.and_then(|status| status.error.clone());
+            PopoverEntry::Pending(PendingRow {
+                target,
+                refreshing: quota.refreshing.contains(&target),
+                error,
+            })
+        })
+        .collect()
+}
+
+fn chip_for(quota_state: &Quota, target: QuotaTarget, status: &QuotaStatus) -> Option<Chip> {
+    let quota = status.quota.as_ref()?;
+    let row = quota_row(target, status)?;
+    let rings = ring_windows(quota);
+    let hint = if rings.len() > 1 {
+        t!(
+            "quota.rings",
+            hint = row.hint,
+            outer = rings[0].0,
+            inner = rings[1].0
+        )
+        .into_owned()
+    } else {
+        row.hint
+    };
+    Some(Chip {
+        target,
+        text: row.text,
+        color: row.color,
+        hint,
+        used: quota.used_percent(),
+        rings,
+        refreshing: quota_state.manual.contains(&target),
+    })
 }
 
 impl PluginView for QuotaBar {
@@ -111,6 +147,7 @@ impl PluginView for QuotaBar {
 impl Render for QuotaBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let chips = self.chips();
+        let rows = self.popover_rows();
         // 自己就是一行：贴着窗口下面的角时两头给窗口圆角让位，不贴时留标准边距。
         let insets = api::safe_area(cx.entity_id(), cx).bar_insets();
         let bar = div()
@@ -123,8 +160,8 @@ impl Render for QuotaBar {
             .justify_end()
             .type_style(TYPE.text_xsmall)
             .font_family(api::model::font_config::font_family());
-        if chips.is_empty() {
-            // 完全没有数据：查询中时给个过渡，不然空着。
+        if rows.is_empty() {
+            // 所有账户都关掉了：查询中时给个过渡，不然空着。
             return bar.when(!self.quota.refreshing.is_empty(), |bar| {
                 bar.text_color(rgb(ui_theme::faint()))
                     .child(t!("quota.loading").into_owned())
@@ -141,8 +178,33 @@ impl Render for QuotaBar {
             .justify_end()
             .items_center()
             .gap_x_2()
-            .gap_y_1()
-            .children(chips.iter().map(chip));
+            .gap_y_1();
+        let trigger = if chips.is_empty() {
+            let loading = !self.quota.refreshing.is_empty();
+            let tip = if loading {
+                t!("quota.loading").into_owned()
+            } else {
+                t!("quota.empty_trigger").into_owned()
+            };
+            trigger
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_color(rgb(ui_theme::muted()))
+                        .child(Icon::path(IconName::Gauge.path()).size(px(14.)))
+                        .when(loading, |this| {
+                            this.text_color(rgb(ui_theme::faint()))
+                                .child(t!("quota.loading").into_owned())
+                        }),
+                )
+                .tooltip(move |window, cx| {
+                    api::ui::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+        } else {
+            trigger.children(chips.iter().map(chip))
+        };
         bar.child(
             Popover::new("quota-bar-popover")
                 .anchor(Anchor::BottomRight)
@@ -151,7 +213,7 @@ impl Render for QuotaBar {
                 // 触发容器要能收窄，额度才会在里面折行，不把这一条撑宽。
                 .trigger_style(StyleRefinement::default().min_w_0())
                 .trigger(trigger)
-                .content(move |_, _, _| popover(chips.clone())),
+                .content(move |_, _, _| popover(rows.clone())),
         )
     }
 }
@@ -168,6 +230,20 @@ struct Chip {
     rings: Vec<(String, f64)>,
     /// 用户手点刷新、还没回来。启动首查和定时刷新不打扰。
     refreshing: bool,
+}
+
+/// 弹层里未查到数据或查询失败的一行，点一下同样触发单查。
+#[derive(Clone)]
+struct PendingRow {
+    target: QuotaTarget,
+    refreshing: bool,
+    error: Option<String>,
+}
+
+#[derive(Clone)]
+enum PopoverEntry {
+    Ready(Chip),
+    Pending(PendingRow),
 }
 
 fn chip(quota: &Chip) -> impl IntoElement {
@@ -300,8 +376,9 @@ fn rings(rings: Vec<(String, f64)>) -> impl IntoElement {
     .size_full()
 }
 
-/// 点开的列表：每家一行，名字、用量条、百分比。悬停看各窗口和重置时间，点哪家刷新哪家。
-fn popover(quotas: Vec<Chip>) -> Div {
+/// 点开的列表：每家一行，名字、用量条、百分比。悬停看各窗口和重置时间，点哪家刷新哪家；
+/// 暂未查到或失败的账户也列在其中，点一下即可主动查询。
+fn popover(entries: Vec<PopoverEntry>) -> Div {
     div()
         .w_full()
         .flex()
@@ -316,77 +393,113 @@ fn popover(quotas: Vec<Chip>) -> Div {
                 .text_color(rgb(ui_theme::muted()))
                 .child(t!("quota.title").into_owned()),
         )
-        .children(quotas.into_iter().map(|quota| {
-            let color = quota.color;
-            let target = quota.target;
+        .children(entries.into_iter().map(popover_row))
+}
+
+fn popover_row(entry: PopoverEntry) -> impl IntoElement {
+    let (target, color, text, used, refreshing, tip, name_color) = match entry {
+        PopoverEntry::Ready(quota) => {
             let tip = if quota.refreshing {
                 t!("quota.refreshing", hint = quota.hint).into_owned()
             } else {
                 t!("quota.click_to_refresh", hint = quota.hint).into_owned()
             };
-            ListRow::new(SharedString::from(format!("quota-{}", target.id())))
-                .h(px(30.))
-                .px_2()
+            (
+                quota.target,
+                quota.color,
+                quota.text,
+                quota.used,
+                quota.refreshing,
+                tip,
+                ui_theme::text(),
+            )
+        }
+        PopoverEntry::Pending(pending) => {
+            let tip = if pending.refreshing {
+                t!("quota.refreshing", hint = pending.target.label()).into_owned()
+            } else if let Some(error) = pending.error.as_deref() {
+                t!("quota.click_to_retry", error = error).into_owned()
+            } else {
+                t!("quota.click_to_check").into_owned()
+            };
+            let color = if pending.error.is_some() {
+                ui_theme::need()
+            } else {
+                ui_theme::faint()
+            };
+            (
+                pending.target,
+                color,
+                "—".to_string(),
+                0.0,
+                pending.refreshing,
+                tip,
+                ui_theme::muted(),
+            )
+        }
+    };
+    ListRow::new(SharedString::from(format!("quota-{}", target.id())))
+        .h(px(30.))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded(px(6.))
+        .type_style(TYPE.text_xsmall)
+        .child(
+            Icon::path(target.agent.icon_asset())
+                .size(px(14.))
+                .text_color(rgb(color)),
+        )
+        .child(
+            div()
+                .w(px(64.))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .text_color(rgb(name_color))
+                .child(truncated_line(target.label())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .h(px(4.))
+                .rounded_full()
+                .overflow_hidden()
+                .bg(ui_theme::hair())
+                .when(used > 0.0, |track| {
+                    track.child(
+                        div()
+                            .h_full()
+                            .w(relative((used / 100.0).clamp(0.0, 1.0) as f32))
+                            .rounded_full()
+                            .bg(rgb(color)),
+                    )
+                }),
+        )
+        // 点一下发起查询、还没回来时，右侧换成转圈：真在等，等完就停。
+        .child(
+            div()
+                .w(px(36.))
+                .flex_shrink_0()
                 .flex()
-                .items_center()
-                .gap_2()
-                .rounded(px(6.))
-                .type_style(TYPE.text_xsmall)
-                .child(
-                    Icon::path(target.agent.icon_asset())
-                        .size(px(14.))
-                        .text_color(rgb(color)),
-                )
-                .child(
-                    div()
-                        .w(px(64.))
-                        .flex_shrink_0()
-                        .overflow_hidden()
-                        .text_color(rgb(ui_theme::text()))
-                        .child(truncated_line(target.label())),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .h(px(4.))
-                        .rounded_full()
-                        .overflow_hidden()
-                        .bg(ui_theme::hair())
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative((quota.used / 100.0).clamp(0.0, 1.0) as f32))
-                                .rounded_full()
-                                .bg(rgb(color)),
-                        ),
-                )
-                // 手点刷新、还没回来时，百分比那一格换成转圈：真在等，等完就停。
-                .child(
-                    div()
-                        .w(px(36.))
-                        .flex_shrink_0()
-                        .flex()
-                        .justify_end()
-                        .font_family(api::model::font_config::font_family())
-                        .text_color(rgb(color))
-                        .map(|cell| {
-                            if quota.refreshing {
-                                cell.child(api::ui::motion::ambient_spinner(
-                                    SharedString::from(format!("quota-refresh-{}", target.id())),
-                                    rgb(color).into(),
-                                    true,
-                                ))
-                            } else {
-                                cell.child(quota.text)
-                            }
-                        }),
-                )
-                .tooltip(move |window, cx| {
-                    api::ui::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                })
-                // 刷新开始、结束都会发 `QUOTA_CHANGED`，这一条跟着重画。
-                .on_click(move |_, _, cx| quota::request_refresh(target, cx))
-        }))
+                .justify_end()
+                .font_family(api::model::font_config::font_family())
+                .text_color(rgb(color))
+                .map(|cell| {
+                    if refreshing {
+                        cell.child(api::ui::motion::ambient_spinner(
+                            SharedString::from(format!("quota-refresh-{}", target.id())),
+                            rgb(color).into(),
+                            true,
+                        ))
+                    } else {
+                        cell.child(text)
+                    }
+                }),
+        )
+        .tooltip(move |window, cx| api::ui::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+        // 刷新开始、结束都会发 `QUOTA_CHANGED`，这一条跟着重画。
+        .on_click(move |_, _, cx| quota::request_refresh(target, cx))
 }
 
 /// 按已用百分比取字色：>=90% 红、>=75% 黄、否则灰（额度充足，不抢眼）。
@@ -648,5 +761,56 @@ mod tests {
         assert_eq!(until_text(3_600).as_deref(), Some("1h"));
         assert_eq!(until_text(3_660).as_deref(), Some("1h 1m"));
         assert_eq!(until_text(86_400 + 7_200).as_deref(), Some("1d 2h"));
+    }
+
+    #[test]
+    fn popover_entries_include_unfetched_and_failed_targets_while_bar_chips_stay_ready_only() {
+        let codex = QuotaTarget::agent(ConversationAgentKind::Codex);
+        let agy = QuotaTarget::agent(ConversationAgentKind::Antigravity);
+        let grok = QuotaTarget::agent(ConversationAgentKind::Grok);
+        let pi = QuotaTarget::pi("openrouter");
+        let quota = Quota {
+            targets: vec![codex, agy, grok, pi],
+            statuses: vec![
+                (
+                    codex,
+                    QuotaStatus {
+                        quota: Some(ProviderQuotaData::Windows(ProviderQuota {
+                            windows: vec![window("5h", 40.0)],
+                        })),
+                        checked_at_ms: 1,
+                        error: None,
+                    },
+                ),
+                (
+                    agy,
+                    QuotaStatus {
+                        quota: None,
+                        checked_at_ms: 2,
+                        error: Some("HTTP 401".into()),
+                    },
+                ),
+            ],
+            refreshing: vec![agy],
+            manual: vec![agy],
+        };
+
+        let chips = chips_for(&quota);
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].target, codex);
+
+        let entries = popover_entries(&quota);
+        assert_eq!(entries.len(), 3, "Pi provider 不进左下角弹层");
+        assert!(matches!(&entries[0], PopoverEntry::Ready(c) if c.target == codex));
+        assert!(matches!(
+            &entries[1],
+            PopoverEntry::Pending(p)
+                if p.target == agy && p.refreshing && p.error.as_deref() == Some("HTTP 401")
+        ));
+        assert!(matches!(
+            &entries[2],
+            PopoverEntry::Pending(p)
+                if p.target == grok && !p.refreshing && p.error.is_none()
+        ));
     }
 }
