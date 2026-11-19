@@ -40,6 +40,8 @@ gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf
 js = ["dep:gpui-shell"]
 
 [dev-dependencies]
+# 性能探针量 CPU 时间（src/js/ui/bench.rs）。
+libc = "0.2"
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 smol = "2"
 # 查各 crate 的文案（tests/catalogs.rs），用 rust-i18n 构建时同一个加载函数。

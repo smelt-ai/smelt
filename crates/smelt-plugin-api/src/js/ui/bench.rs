@@ -5,7 +5,9 @@
 //! cargo test -j 2 -p smelt-plugin-api --features js --release --lib js::ui::bench -- --ignored --nocapture --test-threads 1
 //! ```
 //!
-//! 每步「做一次动作 + 画一帧」量墙钟时间。测试平台不经 GPU 绘制，两边同一套量法，只看
+//! 峰值内存要每项单独起进程量（同一进程里前一项的分配会留着），见 `scripts/bench-js-memory.sh`。
+//!
+//! 每步「做一次动作 + 画一帧」量墙钟时间和整个进程的 CPU 时间。测试平台不经 GPU 绘制，两边同一套量法，只看
 //! 相对大小和数量级。
 
 use std::{cell::RefCell, ops::Deref, rc::Rc, sync::Arc, time::Duration, time::Instant};
@@ -277,11 +279,16 @@ fn registry() -> FrozenComponentRegistry {
 }
 
 fn bench_policy() -> Policy {
-    let data = Rc::new(super::super::host_value(&snapshot_json()));
+    // 用到才造，不算进别的项的内存。
+    let data = std::cell::OnceCell::new();
     Policy::new()
         .with_host_module(
             HostModule::new("bench-host")
-                .function("snapshot", move |_| Ok((*data).clone()))
+                .function("snapshot", move |_| {
+                    Ok(data
+                        .get_or_init(|| super::super::host_value(&snapshot_json()))
+                        .clone())
+                })
                 .function("sink", |arguments| {
                     let value = super::super::json_value(arguments.value(0)?);
                     std::hint::black_box(&value);
@@ -354,20 +361,38 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.
 }
 
-struct Stats(Vec<Duration>);
+/// 各步的墙钟时间，和这些步里整个进程（含 JIT 编译等后台线程）用掉的 CPU 时间。
+struct Stats {
+    times: Vec<Duration>,
+    cpu: Duration,
+}
 
 impl Stats {
     fn show(mut self) -> String {
-        self.0.sort();
-        let n = self.0.len();
+        self.times.sort();
+        let n = self.times.len();
+        let wall: Duration = self.times.iter().sum();
         format!(
-            "中位 {:>7.2}  p95 {:>7.2}  p99 {:>7.2}  最慢 {:>7.2} ms",
-            ms(self.0[n / 2]),
-            ms(self.0[n * 95 / 100]),
-            ms(self.0[n * 99 / 100]),
-            ms(self.0[n - 1])
+            "中位 {:>6.2}  p99 {:>6.2}  最慢 {:>6.2} ms | CPU 每步 {:>6.2} ms（墙钟的 {:>3.0}%）",
+            ms(self.times[n / 2]),
+            ms(self.times[n * 99 / 100]),
+            ms(self.times[n - 1]),
+            ms(self.cpu) / n as f64,
+            100. * self.cpu.as_secs_f64() / wall.as_secs_f64(),
         )
     }
+}
+
+/// 进程到现在用掉的 CPU 时间（用户态 + 内核态，所有线程）。
+fn cpu_time() -> Duration {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: getrusage 只往给它的结构里写。
+    let usage = unsafe {
+        assert_eq!(libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()), 0);
+        usage.assume_init()
+    };
+    let tv = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
+    tv(usage.ru_utime) + tv(usage.ru_stime)
 }
 
 /// 每一步：做一次动作再画一帧，量整段墙钟时间。前 5 步热身不算。
@@ -381,13 +406,17 @@ fn run(
         draw(context);
     }
     let mut times = Vec::new();
+    let cpu = cpu_time();
     for _ in 0..steps {
         let started = Instant::now();
         step(context);
         draw(context);
         times.push(started.elapsed());
     }
-    Stats(times)
+    Stats {
+        times,
+        cpu: cpu_time() - cpu,
+    }
 }
 
 fn js_case(m: &mut Mounted, label: &str, steps: usize, step: impl FnMut(&mut VisualTestContext)) {
@@ -563,6 +592,27 @@ fn rust_case(
 
 // ---------------------------------------------------------------- 渲染
 
+/// 内存基线：初始化加一个空的 JS 视图。每项单独起进程量峰值内存时，JS 的项拿它做减数。
+#[gpui::test]
+#[ignore = "性能探针，手动跑"]
+fn p00_baseline(cx: &mut TestAppContext) {
+    init(cx, true);
+    let mut m = mount(
+        cx,
+        &format!(
+            "{PRELUDE}export default class App extends View {{ render() {{ return div(); }} }}"
+        ),
+    );
+    draw(&mut m.context);
+}
+
+/// 内存基线：初始化加一个空的 Rust 视图，Rust 的项拿它做减数；和 JS 基线的差是 JS 运行时本身。
+#[gpui::test]
+#[ignore = "性能探针，手动跑"]
+fn p00_rust_baseline(cx: &mut TestAppContext) {
+    rust_case(cx, "空对话", false, false, 1, false);
+}
+
 #[gpui::test]
 #[ignore = "性能探针，手动跑"]
 fn p01_stream_full_50(cx: &mut TestAppContext) {
@@ -681,6 +731,7 @@ fn p15_animation_50_rows(cx: &mut TestAppContext) {
     draw(&mut m.context);
     let before = m.runtime.read_metrics();
     let mut frames = Vec::new();
+    let cpu = cpu_time();
     for _ in 0..5 {
         click_tick(&mut m.context);
         let started = Instant::now();
@@ -695,7 +746,11 @@ fn p15_animation_50_rows(cx: &mut TestAppContext) {
     println!(
         "JS   {:<30} {} | {count} 帧里进 JS 渲染 {} 次",
         "动画 50 行高度过渡",
-        Stats(frames).show(),
+        Stats {
+            times: frames,
+            cpu: cpu_time() - cpu,
+        }
+        .show(),
         after.script_renders() - before.script_renders()
     );
 }

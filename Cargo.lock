@@ -11200,6 +11200,7 @@ dependencies = [
  "gpui-base",
  "gpui-pre",
  "gpui-shell",
+ "libc",
  "rust-i18n",
  "rust-i18n-support",
  "serde",
