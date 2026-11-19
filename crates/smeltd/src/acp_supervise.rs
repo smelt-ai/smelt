@@ -3,11 +3,12 @@
 //! - **断线自动重连**：provider 的字节流意外断开（不是用户关闭，也不是 provider 自己报
 //!   失败）时，按记录的启动规格重新拉起，带上自己的历史身份。连上就断的会话不能
 //!   无限重来：连续 [`AUTO_RECONNECT_ATTEMPTS`] 次都没撑住就停下，相位留在结束，原因
-//!   写清楚，用户可以手动重新开始。连上之后撑过 [`RECONNECT_STABLE_AFTER`] 再断才算
-//!   恢复过，次数回满。
-//! - **就绪后补做**：每次拉起 runtime（新建、重启、重连、闲置唤醒），等它就绪后先把
-//!   会话配置写回去：新建时是客户端带来的初始配置，之后是拉起前那一刻生效的配置。
-//!   再发新建时带来的首条消息。首条消息发出之前，对外把就绪后的空闲报成思考中。
+//!   写清楚。用户再发消息就会重新拉起（见 `acp_idle::launch_for_user_input`）。连上之后
+//!   撑过 [`RECONNECT_STABLE_AFTER`] 再断才算恢复过，次数回满。
+//! - **就绪后补做**：每次拉起 runtime（新建、重启、重连、闲置唤醒、发消息拉起）都关上
+//!   启动闸，等它就绪后先把会话配置写回去：新建时是客户端带来的初始配置，之后是拉起前
+//!   那一刻生效的配置。再发新建时带来的首条消息，然后开闸，放拉起期间排进来的消息。
+//!   首条消息发出之前，对外把就绪后的空闲报成思考中。
 
 use super::*;
 use crate::acp_idle::SuspendedConfig;
@@ -80,32 +81,45 @@ pub(crate) fn after_ready_pending(sess: &AcpSession) -> bool {
     !sess.after_ready.lock().is_empty()
 }
 
-/// 每次拉起各起一条：等这一代就绪后做 [`run_after_ready`]。没起来、换了代或超时就
-/// 原样留给下一次拉起；用到 runtime 的动作也会先把它做完（见 `wake_suspended_acp_session`）。
+/// 用户发消息时带的配置（输入框里刚改的模型、权限模式等）。runtime 还在启动、启动闸
+/// 关着时直接下发，会被随后写回的旧配置盖掉，所以并进就绪后补做的那份，排在旧配置
+/// 后面生效。返回 false 表示启动闸已开，调用方照常下发。要持着回合收尾锁做：开闸前
+/// [`run_after_ready`] 在同一把锁里复核这份为空。
+pub(crate) fn hold_submit_config(
+    _turn_completion: &std::sync::MutexGuard<'_, ()>,
+    sess: &AcpSession,
+    values: &[(String, String)],
+) -> bool {
+    if !sess.startup_hold.load(Ordering::SeqCst) {
+        return false;
+    }
+    if values.is_empty() {
+        return true;
+    }
+    let submitted = SuspendedConfig::from_values(values);
+    let mut pending = sess.after_ready.lock();
+    match pending.config.as_mut() {
+        Some(config) => config.override_with(submitted),
+        None => pending.config = Some(submitted),
+    }
+    true
+}
+
+/// 这一代就绪了：起一条线程做 [`run_after_ready`]。由 drain 在第一次就绪时叫，调用方
+/// 持着回合收尾锁，补做要等 agent 确认，不能在 drain 上做。换了代就不做，留给下一代。
+/// 用到 runtime 的动作也会先把它做完（见 `wake_suspended_acp_session`）。
 pub(crate) fn spawn_after_ready(
     slot: Arc<AcpSlot<AcpSession>>,
     id: String,
     generation: u64,
     subscribers: EventHubHandle,
 ) {
-    if !after_ready_pending(&slot.value) {
-        return;
-    }
     let label = id.clone();
     let spawned = thread::Builder::new()
         .name("smelt-acp-after-ready".into())
         .spawn(move || {
             let sess = &slot.value;
-            let current = || sess.connection_generation.load(Ordering::SeqCst) == generation;
-            // `reduced` 每改一次醒一次，超时只是上限。换代时拉起会重置归约状态，也会叫醒。
-            let (reduced, _) = sess
-                .reduced
-                .wait_timeout_while(crate::acp_idle::ACP_WAKE_READY_TIMEOUT, |reduced| {
-                    current() && crate::acp_idle::acp_ready_outcome(reduced).is_none()
-                });
-            let ready = matches!(crate::acp_idle::acp_ready_outcome(&reduced), Some(Ok(())));
-            drop(reduced);
-            if ready && current() {
+            if sess.connection_generation.load(Ordering::SeqCst) == generation {
                 run_after_ready(&id, sess, &subscribers);
             }
         });
@@ -114,29 +128,83 @@ pub(crate) fn spawn_after_ready(
     }
 }
 
-/// 把就绪后要补的做掉：先写回配置、等 agent 确认，再发首条消息。调用方确认 runtime
-/// 已就绪。后台那条正在做时在门上等它做完；做完的取走了就没有了，不会做两遍。
+/// 把就绪后要补的做掉：先写回配置、等 agent 确认，再发首条消息，最后开启动闸，放拉起
+/// 期间排进来的消息。调用方确认 runtime 已就绪。后台那条正在做时在门上等它做完；做完
+/// 的取走了就没有了，不会做两遍。
 pub(crate) fn run_after_ready(id: &str, sess: &AcpSession, subscribers: &EventHubHandle) {
     let _gate = sess.after_ready_gate.lock();
-    let config = sess.after_ready.lock().config.take();
-    if let Some(config) = config {
-        crate::acp_idle::restore_suspended_config(id, sess, &config, subscribers);
-    }
-    // 发出之后才清：在这之前对外一直报思考中，中间不会闪一下空闲。
-    let Some(prompt) = sess.after_ready.lock().prompt.clone() else {
+    // 写回期间用户又在输入框里改了配置（见 [`hold_submit_config`]），接着写，最后一份为准。
+    // 那边在回合收尾锁里、启动闸关着时才往这里放，所以拿着锁复核为空再开闸，不会漏。
+    let turn_completion = loop {
+        while let Some(config) = sess.after_ready.lock().config.take() {
+            crate::acp_idle::restore_suspended_config(id, sess, &config, subscribers);
+        }
+        let turn_completion = sess.turn_completion.lock();
+        if sess.after_ready.lock().config.is_none() {
+            break turn_completion;
+        }
+    };
+    let prompt = sess.after_ready.lock().prompt.clone();
+    let was_held = sess.startup_hold.swap(false, Ordering::SeqCst);
+    let Some(prompt) = prompt else {
+        // 没有首条消息：当作刚就绪放闸，排着的第一条接着走。别人已经开过闸就没事可做。
+        if was_held {
+            settle_acp_turn_locked(sess, false, true, false, subscribers);
+        }
         return;
     };
     crate::dlog(&format!("acp 发新建时带来的首条消息 id={id}"));
-    let result = dispatch_conversation_input(
-        sess,
-        smelt_core::conversation::ConversationInput::new(prompt.text, prompt.images),
-        subscribers,
-    );
+    let mut input = smelt_core::conversation::ConversationInput::new(prompt.text, prompt.images);
+    let preset_used = prepare_conversation_input(sess, &mut input);
+    let result = send_first_prompt_locked(sess, input.text, input.images, subscribers);
+    // 发出之后才清：在这之前对外一直报思考中，中间不会闪一下空闲。
     sess.after_ready.lock().prompt = None;
-    if let Err(error) = result {
-        eprintln!("[acp] 会话 {id} 发首条消息失败：{}", error.message);
+    drop(turn_completion);
+    match result {
+        Ok(()) if preset_used => consume_agent_preset(sess, subscribers),
+        Ok(()) => {}
+        Err(error) => eprintln!("[acp] 会话 {id} 发首条消息失败：{error}"),
     }
     update_acp_daemon_state(sess, subscribers);
+}
+
+/// 首条消息要排在拉起期间进来的消息前面：闸门空着就直接占住发出，排着的等它的回合
+/// 结束再走；被占着就排到队首。会话命令（`/reload` 这类）不是模型输入，交给 Pi 处理
+/// 后照常放闸。调用方持有回合收尾锁，启动闸已开。
+fn send_first_prompt_locked(
+    sess: &AcpSession,
+    text: String,
+    images: Vec<smelt_core::acp_conn::PromptImage>,
+    subscribers: &EventHubHandle,
+) -> Result<(), &'static str> {
+    if dispatch_pi_session_command(sess, &text, images.clone())? {
+        settle_acp_turn_locked(sess, false, true, false, subscribers);
+        return Ok(());
+    }
+    if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
+        let id = next_pending_prompt_id(sess);
+        edit_pending_prompts(sess, |queue| {
+            queue.push_front(QueuedAcpPrompt {
+                id,
+                text,
+                images,
+                delivery_id: None,
+                origin: AcpPromptOrigin::User,
+                echoed: false,
+            })
+        });
+        push_acp_snapshot_since(sess, false, None);
+        return Ok(());
+    }
+    send_acp_prompt_reserved(
+        sess,
+        text,
+        images,
+        None,
+        AcpPromptOrigin::User,
+        false,
+        subscribers,
+    )
 }
 
 /// 自动重连的账本。
@@ -270,6 +338,7 @@ fn give_up_reconnect(
         detail,
     );
     drop(reduced);
+    return_queued_user_prompts(sess);
     push_acp_snapshot_since(sess, true, None);
     update_acp_daemon_state(sess, subscribers);
 }
@@ -386,6 +455,153 @@ mod tests {
             pending.prompt.as_ref().map(|prompt| prompt.text.as_str()),
             Some("hi")
         );
+    }
+
+    /// 有 runtime、刚就绪的会话。驱动收到的命令从返回的通道里读。
+    fn running_session(
+        id: &str,
+    ) -> (
+        AcpSession,
+        smol::channel::Receiver<smelt_core::acp_conn::ConversationCommand>,
+    ) {
+        let sess = make_acp_session(id, None, None, None);
+        sess.reduced.lock().phase = smelt_core::daemon_state::DaemonPhase::Idle;
+        let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+        let (_event_tx, event_rx) = smol::channel::unbounded();
+        *sess.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
+            cmd_tx,
+            event_rx,
+            stdio: Arc::new(std::sync::Mutex::new(None)),
+            in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            supports_mid_turn_input: false,
+            supports_compaction: false,
+            supports_native_queue: false,
+            supports_rewind: false,
+        });
+        (sess, cmd_rx)
+    }
+
+    fn sent_prompts(
+        cmd_rx: &smol::channel::Receiver<smelt_core::acp_conn::ConversationCommand>,
+    ) -> Vec<String> {
+        std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .filter_map(|command| match command {
+                smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn user_prompt(text: &str) -> smelt_core::acp_session::AcpUserAction {
+        smelt_core::acp_session::AcpUserAction::Prompt {
+            text: text.into(),
+            images: Vec::new(),
+            delivery_id: None,
+        }
+    }
+
+    /// 拉起期间发的消息不抢在首条消息前面：先排队，补做发出首条后才轮到它。
+    #[test]
+    fn prompts_sent_while_starting_wait_behind_the_first_prompt() {
+        let subscribers = crate::new_event_hub();
+        let (sess, cmd_rx) = running_session("acp-starting");
+        sess.startup_hold.store(true, Ordering::SeqCst);
+        sess.after_ready.lock().prompt = Some(smelt_core::acp_session::AcpInitialPrompt {
+            text: "first".into(),
+            images: Vec::new(),
+        });
+
+        apply_acp_user_action(&sess, user_prompt("second"), &subscribers).unwrap();
+        assert!(sent_prompts(&cmd_rx).is_empty(), "启动闸关着不该发");
+        assert_eq!(sess.reduced.lock().pending_prompts.len(), 1);
+        assert!(!sess.prompt_in_flight.load(Ordering::SeqCst));
+
+        run_after_ready("acp-starting", &sess, &subscribers);
+        assert_eq!(sent_prompts(&cmd_rx), vec!["first".to_string()]);
+        assert!(!sess.startup_hold.load(Ordering::SeqCst));
+        assert!(!after_ready_pending(&sess));
+        let queued = sess.reduced.lock().pending_prompts.clone();
+        assert_eq!(queued.len(), 1, "第二条等首条的回合结束");
+        assert_eq!(queued[0].text, "second");
+    }
+
+    /// 没有首条消息：补做完开闸，排着的第一条马上发。
+    #[test]
+    fn after_ready_without_a_first_prompt_releases_the_queue() {
+        let subscribers = crate::new_event_hub();
+        let (sess, cmd_rx) = running_session("acp-woken");
+        sess.startup_hold.store(true, Ordering::SeqCst);
+        apply_acp_user_action(&sess, user_prompt("hello again"), &subscribers).unwrap();
+        assert!(sent_prompts(&cmd_rx).is_empty());
+
+        run_after_ready("acp-woken", &sess, &subscribers);
+        assert_eq!(sent_prompts(&cmd_rx), vec!["hello again".to_string()]);
+        assert!(sess.reduced.lock().pending_prompts.is_empty());
+    }
+
+    /// 启动期间用户在输入框里改的配置排在拉起前那份后面写，不被旧的盖掉；开闸后照常下发。
+    #[test]
+    fn submitted_config_while_starting_overrides_the_relaunch_config() {
+        let sess = make_acp_session("acp-config-hold", None, None, None);
+        remember_relaunch_config(
+            &sess,
+            SuspendedConfig::from_values(&[
+                ("model".into(), "old".into()),
+                ("mode".into(), "plan".into()),
+            ]),
+        );
+        sess.startup_hold.store(true, Ordering::SeqCst);
+        assert!(hold_submit_config(
+            &sess.turn_completion.lock(),
+            &sess,
+            &[("model".into(), "new".into())],
+        ));
+        assert_eq!(
+            sess.after_ready.lock().config,
+            Some(SuspendedConfig::from_values(&[
+                ("model".into(), "new".into()),
+                ("mode".into(), "plan".into()),
+            ]))
+        );
+
+        sess.startup_hold.store(false, Ordering::SeqCst);
+        assert!(!hold_submit_config(
+            &sess.turn_completion.lock(),
+            &sess,
+            &[("model".into(), "newer".into())],
+        ));
+    }
+
+    /// 起不来：用户排着的消息回输入框，任务投来的留在队里等下次拉起。
+    #[test]
+    fn a_stopped_runtime_returns_queued_user_prompts_to_the_composer() {
+        let subscribers = crate::new_event_hub();
+        let (sess, _cmd_rx) = running_session("acp-stopped");
+        sess.startup_hold.store(true, Ordering::SeqCst);
+        apply_acp_user_action(&sess, user_prompt("one"), &subscribers).unwrap();
+        apply_acp_user_action(
+            &sess,
+            smelt_core::acp_session::AcpUserAction::Prompt {
+                text: "task".into(),
+                images: Vec::new(),
+                delivery_id: Some("delivery-1".into()),
+            },
+            &subscribers,
+        )
+        .unwrap();
+        apply_acp_user_action(&sess, user_prompt("two"), &subscribers).unwrap();
+
+        give_up_reconnect(
+            &sess,
+            &subscribers,
+            ConversationEndReason::ReconnectFailed,
+            String::new(),
+        );
+        let reduced = sess.reduced.lock();
+        assert_eq!(reduced.composer_restore_texts, vec!["one", "two"]);
+        assert_eq!(reduced.pending_prompts.len(), 1);
+        assert_eq!(reduced.pending_prompts[0].text, "task");
     }
 
     #[test]

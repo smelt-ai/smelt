@@ -9,8 +9,10 @@
 //! provider 会话占用都不动，客户端看到的仍是空闲。之后真要用 runtime 时，入口先调
 //! [`wake_suspended_acp_session`]。会按记录的启动规格带 `--session` 重新拉起，
 //! 等 Pi 重放完历史，再把动作交过去。往上翻历史走同一条唤醒。会用到 runtime 的
-//! 情况包括：发消息、改配置、往上翻历史、跨智能体投递。客户端重新 `acp_open`
-//! 时，`ensure_acp_session` 本来就会拉起没有 runtime 的会话。
+//! 情况包括：改配置、往上翻历史、跨智能体投递。用户发消息走
+//! [`launch_for_user_input`]：不等就绪，消息在启动闸后面排队；上次因失败停下的
+//! 也一样拉起。客户端重新 `acp_open` 时，`ensure_acp_session` 本来就会拉起没有
+//! runtime 的会话。
 //!
 //! 只挂起确定安全的会话，条件是以下全部满足：
 //! - 有活着的 runtime；
@@ -402,6 +404,19 @@ impl SuspendedConfig {
         self.model.is_none() && self.options.is_empty()
     }
 
+    /// 用 `newer` 里写了的项盖掉这份，没写的保留。
+    pub(crate) fn override_with(&mut self, newer: Self) {
+        if newer.model.is_some() {
+            self.model = newer.model;
+        }
+        for (config_id, value) in newer.options {
+            match self.options.iter_mut().find(|(id, _)| *id == config_id) {
+                Some(slot) => slot.1 = value,
+                None => self.options.push((config_id, value)),
+            }
+        }
+    }
+
     pub(crate) fn capture(reduced: &smelt_core::acp_session::AcpSessionState) -> Self {
         let model_config_id = reduced.model.as_ref().map(|model| model.config_id.as_str());
         Self {
@@ -520,6 +535,38 @@ pub(crate) fn wake_suspended_acp_session(
     wait_for_acp_ready(sess, ACP_WAKE_READY_TIMEOUT)?;
     crate::acp_supervise::run_after_ready(id, sess, subscribers);
     Ok(())
+}
+
+/// 用户发消息要用到 runtime：没在跑就按记录的启动规格拉起，带上自己的历史身份。闲置挂起
+/// 的、上次因失败停下的（没登录、进程退出、恢复失败、自动重连用完）都一样：用户发消息
+/// 就是要接着用，登录好了这一下就能接上，不让人先去点「重新开始」。
+///
+/// 不等就绪：启动闸关着，这条消息进守护的排队，配置写回、首条消息发出后按序放；起不来
+/// 就退回输入框（见 [`crate::acp_host::return_queued_user_prompts`]）。只有用户自己发的
+/// 消息走这里。别的对话、任务的投递不会把失败停下的对话拉起来，免得一个起不来的进程被
+/// 反复拉。
+pub(crate) fn launch_for_user_input(
+    id: &str,
+    slot: &Arc<AcpSlot<AcpSession>>,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+) -> Result<(), String> {
+    let sess = &slot.value;
+    sess.idle.touch();
+    if acp_runtime_alive(sess) {
+        return Ok(());
+    }
+    let _lifecycle = slot.lifecycle.lock();
+    if !acp_sessions.is_current(id, slot) {
+        return Err("ACP session was replaced".to_string());
+    }
+    if acp_runtime_alive(sess) {
+        return Ok(());
+    }
+    crate::dlog(&format!("acp 用户发消息，拉起没在跑的会话 id={id}"));
+    // 用户明确要接着用：之前自动重连失败的次数不再算数。
+    sess.reconnect.lock().reset();
+    relaunch_recorded_acp_runtime(id, slot, acp_sessions, subscribers).map_err(str::to_string)
 }
 
 /// 把拉起前的配置写回刚拉起的 runtime。先模型、再其它项，每一步等 agent 确认：

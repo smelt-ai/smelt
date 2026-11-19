@@ -1127,7 +1127,7 @@ class L10nEn extends L10n {
   }
 
   @override
-  String get conversationStatusEnded => 'Session ended';
+  String get conversationStatusEnded => 'Stopped';
 
   @override
   String get conversationStatusCompacting => 'Compacting context…';
@@ -1146,9 +1146,6 @@ class L10nEn extends L10n {
 
   @override
   String get conversationHintTicket => 'Handle the ticket above first';
-
-  @override
-  String get conversationHintEnded => 'This session has ended';
 
   @override
   String get conversationHintSending => 'Waiting for the machine to confirm…';

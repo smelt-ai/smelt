@@ -279,8 +279,8 @@ ended:
     en: "Resume Session"
     zh-CN: "恢复会话"
   title:
-    en: "Session ended"
-    zh-CN: "会话已结束"
+    en: "Stopped"
+    zh-CN: "已停止"
 error:
   bad_args:
     en: "Invalid conversation arguments: %{error}"

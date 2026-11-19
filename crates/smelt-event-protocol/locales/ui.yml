@@ -42,20 +42,20 @@ conversation_end.open_failed:
   en: Couldn't open the conversation
   zh-CN: 对话没能打开
 conversation_end.sign_in.copilot:
-  en: "GitHub Copilot isn't signed in, or the sign-in expired. Run `copilot` in a terminal, enter `/login` to sign in with GitHub (the account needs a Copilot subscription), then start a new session"
-  zh-CN: GitHub Copilot 还没登录或登录已失效：在终端运行 `copilot`，输入 `/login` 完成 GitHub 登录（账号需要有 Copilot 订阅），然后新建会话
+  en: "GitHub Copilot isn't signed in, or the sign-in expired. Run `copilot` in a terminal, enter `/login` to sign in with GitHub (the account needs a Copilot subscription), then send your message again"
+  zh-CN: GitHub Copilot 还没登录或登录已失效：在终端运行 `copilot`，输入 `/login` 完成 GitHub 登录（账号需要有 Copilot 订阅），再发一次消息即可
 conversation_end.sign_in.claude:
-  en: "Claude Code isn't signed in, or the sign-in expired. Run `claude` in a terminal and enter `/login` to sign in, then start a new session"
-  zh-CN: Claude Code 还没登录或登录已失效：在终端运行 `claude`，输入 `/login` 完成登录，然后新建会话
+  en: "Claude Code isn't signed in, or the sign-in expired. Run `claude` in a terminal and enter `/login` to sign in, then send your message again"
+  zh-CN: Claude Code 还没登录或登录已失效：在终端运行 `claude`，输入 `/login` 完成登录，再发一次消息即可
 conversation_end.sign_in.codex:
-  en: "Codex isn't signed in, or the sign-in expired. Run `codex login` in a terminal to sign in, then start a new session"
-  zh-CN: Codex 还没登录或登录已失效：在终端运行 `codex login` 完成登录，然后新建会话
+  en: "Codex isn't signed in, or the sign-in expired. Run `codex login` in a terminal to sign in, then send your message again"
+  zh-CN: Codex 还没登录或登录已失效：在终端运行 `codex login` 完成登录，再发一次消息即可
 conversation_end.sign_in.antigravity:
-  en: "Antigravity isn't signed in, or the sign-in expired. Run `agy acp --login` in a terminal and sign in with Google (it also works over SSH), then start a new session"
-  zh-CN: Antigravity 还没登录或登录已失效：在终端运行 `agy acp --login` 用 Google 账号登录（SSH 远程也能用），然后新建会话
+  en: "Antigravity isn't signed in, or the sign-in expired. Run `agy acp --login` in a terminal and sign in with Google (it also works over SSH), then send your message again"
+  zh-CN: Antigravity 还没登录或登录已失效：在终端运行 `agy acp --login` 用 Google 账号登录（SSH 远程也能用），再发一次消息即可
 conversation_end.sign_in.other:
-  en: The agent needs you to sign in first. Sign in with this agent's CLI in a terminal, then start a new session
-  zh-CN: agent 要求先登录：在终端里用这个 agent 的 CLI 完成登录，然后新建会话
+  en: The agent needs you to sign in first. Sign in with this agent's CLI in a terminal, then send your message again
+  zh-CN: agent 要求先登录：在终端里用这个 agent 的 CLI 完成登录，再发一次消息即可
 turn_failure.interrupted:
   en: The reply was interrupted; restart to continue
   zh-CN: 本轮回复已中断，重启后可继续

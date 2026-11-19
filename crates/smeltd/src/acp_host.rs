@@ -222,6 +222,9 @@ pub(crate) struct AcpSession {
     pub(crate) after_ready: SessionLock<crate::acp_supervise::AcpAfterReady>,
     /// 串起后台补做和用到 runtime 的动作：动作等补做做完再放行，同一份不会做两遍。
     pub(crate) after_ready_gate: SessionLock<()>,
+    /// 启动闸：每次拉起都关上，就绪后补做（写回配置、发首条消息）做完才开。关着时
+    /// 来的消息一律进 [`Self::pending_prompts`]，不会抢在配置和首条消息前面。
+    pub(crate) startup_hold: AtomicBool,
     /// 断线自动重连的账本，见 `acp_supervise`。
     pub(crate) reconnect: SessionLock<crate::acp_supervise::AcpReconnectBudget>,
     /// 这段对话的 agent 不许用的工具（见 `ConversationLaunch::disallowed_tools`）。建会话时
@@ -1791,6 +1794,7 @@ pub(crate) fn start_acp_event_drain(
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let sess = &slot.value;
             let mut fallback_to_fresh = false;
+            let mut after_ready_started = false;
             smol::block_on(async {
                 while let Ok(first) = event_rx.recv().await {
                     let _turn_completion = sess.turn_completion.lock();
@@ -1968,6 +1972,22 @@ pub(crate) fn start_acp_event_drain(
                         if let Some((text, images)) = resend.take() {
                             queue_retry_prompt(sess, text, images);
                         }
+                        // 这一代第一次就绪：补做写回配置、发首条消息，做完开启动闸。
+                        if !after_ready_started
+                            && sess.startup_hold.load(Ordering::SeqCst)
+                            && matches!(
+                                crate::acp_idle::acp_ready_outcome(&sess.reduced.lock()),
+                                Some(Ok(()))
+                            )
+                        {
+                            after_ready_started = true;
+                            crate::acp_supervise::spawn_after_ready(
+                                Arc::clone(&slot),
+                                session_id.clone(),
+                                generation,
+                                subscribers.clone(),
+                            );
+                        }
                         // 其它 agent 在回合结束时放闸。Pi 还要等它自己声明空闲。
                         settle_acp_turn_locked(
                             sess,
@@ -2019,6 +2039,7 @@ pub(crate) fn start_acp_event_drain(
                     "",
                 );
                 drop(reduced);
+                return_queued_user_prompts(sess);
                 push_acp_snapshot_since(sess, true, None);
                 update_acp_daemon_state(sess, &subscribers);
                 return;
@@ -2049,6 +2070,7 @@ pub(crate) fn start_acp_event_drain(
                 smelt_core::daemon_state::DaemonPhase::Dead
             );
             if already_ended {
+                return_queued_user_prompts(sess);
                 // 终态事件可能先于 waitpid 到达。收尸后再发一帧，清掉旧 pid。
                 push_acp_snapshot_since(sess, false, None);
             } else {
@@ -2109,6 +2131,7 @@ pub(crate) fn mark_session_driver_panic(
             );
         }
         drop(reduced);
+        return_queued_user_prompts(sess);
         push_acp_snapshot_since(sess, true, None);
         update_acp_daemon_state(sess, subscribers);
     }));
@@ -2174,6 +2197,9 @@ pub(crate) fn acp_relaunch(
         (generation, restore_policy)
     };
     crate::acp_supervise::remember_relaunch_config(sess, relaunch_config);
+    // 关上启动闸要在记下拉起前的配置之后：这之后用户提交的配置并在它后面（见
+    // `hold_submit_config`）；也要在挂上新 handle 之前，消息才不会抢在就绪后补做前面。
+    sess.startup_hold.store(true, Ordering::SeqCst);
     // 无头恢复不会经过 GUI 的 AgentHostState 迁移；daemon 自己也要把 Smelt
     // 发布过的旧默认值升到当前适配器，否则历史会话 relaunch 仍会拉旧包。
     upgrade_released_adapter_launch(&mut launch);
@@ -2225,12 +2251,6 @@ pub(crate) fn acp_relaunch(
         id.to_string(),
         acp_sessions,
         generation,
-    );
-    crate::acp_supervise::spawn_after_ready(
-        Arc::clone(slot),
-        id.to_string(),
-        generation,
-        subscribers.clone(),
     );
 }
 
@@ -2347,6 +2367,7 @@ pub(crate) fn make_acp_session(
         idle: Default::default(),
         after_ready: SessionLock::new(Default::default()),
         after_ready_gate: SessionLock::new(()),
+        startup_hold: AtomicBool::new(false),
         reconnect: SessionLock::new(Default::default()),
         disallowed_tools: SessionLock::new(Vec::new()),
         delivery_results: SessionLock::new(VecDeque::new()),
@@ -2415,6 +2436,33 @@ fn restore_prompt_to_composer(sess: &AcpSession, prompt: QueuedAcpPrompt) {
         smelt_core::acp_session::undo_prompt_sent(&mut state);
     }
     smelt_core::acp_session::queue_composer_restore(&mut state, vec![prompt.text], prompt.images);
+}
+
+/// runtime 停了、不会自己再起来：用户排着的消息退回输入框，原因在结束条上。别让它们
+/// 挂在一个不会放行的队里，也不在下次拉起时突然发出去。任务、自动化、别的对话投来的
+/// 归守护，留着等下次拉起。调用方随后发快照。
+pub(crate) fn return_queued_user_prompts(sess: &AcpSession) {
+    let returned = edit_pending_prompts(sess, |queue| {
+        let (user, kept): (VecDeque<_>, VecDeque<_>) = std::mem::take(queue)
+            .into_iter()
+            .partition(|prompt| prompt.delivery_id.is_none());
+        *queue = kept;
+        user
+    });
+    if returned.is_empty() {
+        return;
+    }
+    let mut state = sess.reduced.lock();
+    let mut texts = Vec::with_capacity(returned.len());
+    let mut images = Vec::new();
+    for prompt in returned {
+        if prompt.echoed {
+            smelt_core::acp_session::undo_prompt_sent(&mut state);
+        }
+        texts.push(prompt.text);
+        images.extend(prompt.images);
+    }
+    smelt_core::acp_session::queue_composer_restore(&mut state, texts, images);
 }
 
 pub(crate) fn restore_unaccepted_to_composer(sess: &AcpSession) {
@@ -2529,7 +2577,7 @@ fn remember_outgoing_prompt(
 ///
 /// 其它 agent 的同名文本仍是普通输入。`/reload` 由驱动拒绝，不写给 Pi。
 /// `/shake` 仍走 prompt，由扩展命令执行。
-fn dispatch_pi_session_command(
+pub(crate) fn dispatch_pi_session_command(
     sess: &AcpSession,
     text: &str,
     images: Vec<smelt_core::acp_conn::PromptImage>,
@@ -2828,7 +2876,8 @@ pub(crate) fn try_flush_immediate_delivery(sess: &AcpSession, subscribers: &Even
         sess.reduced.lock().phase,
         smelt_core::daemon_state::DaemonPhase::Idle
     );
-    if !idle || sess.unaccepted_prompt.lock().is_some() {
+    if !idle || sess.unaccepted_prompt.lock().is_some() || sess.startup_hold.load(Ordering::SeqCst)
+    {
         return;
     }
     if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
@@ -3043,6 +3092,9 @@ pub(crate) fn queue_retry_prompt(
 /// 回合结束后只释放一条 daemon 队列中的 prompt。调用方必须持有 `turn_completion`；
 /// 剩余消息等下一次 TurnEnded，保证 provider 永远不会看到并发回合。
 pub(crate) fn flush_pending_acp_prompt_locked(sess: &AcpSession, subscribers: &EventHubHandle) {
+    if sess.startup_hold.load(Ordering::SeqCst) {
+        return;
+    }
     if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -3246,11 +3298,15 @@ fn apply_acp_user_action_inner(
                     return Err(error);
                 }
             }
-            if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
+            // 启动闸关着：配置还没写回、首条消息还没走，先排队，就绪后补做完按序放。
+            // 不碰回合闸门，否则放闸时会当成有一轮在跑。
+            let starting = sess.startup_hold.load(Ordering::SeqCst);
+            if starting || sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
                 // 只有回合还在跑才 steer。取消已经把界面收成 Idle、闸门却还握着等 Pi 空闲时，
                 // 再插进当前回合会把「立即发送」的消息退回队列；再点一次就会连发两遍。
                 // 带投递 id 的是自成一轮的外部投递，结果按它的回合取，不插进别人的回合。
-                let steer = delivery_id.is_none()
+                let steer = !starting
+                    && delivery_id.is_none()
                     && smelt_core::acp_session::accepts_mid_turn_steer(&sess.reduced.lock());
                 if steer {
                     match send_acp_mid_turn_input(sess, text.clone(), images.clone(), subscribers) {
@@ -3501,7 +3557,6 @@ pub(crate) fn dispatch_conversation_input(
     if submitted.contains(&input.submission_id) {
         return Ok(());
     }
-    let pending_preset = sess.pending_agent_preset.lock().clone();
     let binding = sess.conversation_binding.lock().clone();
     match binding.unwrap_or_default() {
         ConversationBinding::Direct => {}
@@ -3512,6 +3567,32 @@ pub(crate) fn dispatch_conversation_input(
         }
     }
     let input_submission_id = input.submission_id.clone();
+    let preset_used = prepare_conversation_input(sess, &mut input);
+    apply_acp_user_action(
+        sess,
+        smelt_core::acp_session::AcpUserAction::Prompt {
+            text: input.text,
+            images: input.images,
+            delivery_id: None,
+        },
+        subscribers,
+    )
+    .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
+    submitted.remember(input_submission_id);
+    drop(submitted);
+    if preset_used {
+        consume_agent_preset(sess, subscribers);
+    }
+    Ok(())
+}
+
+/// 发给 agent 之前对正文的加工：还没用掉的智能体预设并进去，不收图的 agent 把图换成
+/// 一句说明。返回这次用了预设，发出去以后要 [`consume_agent_preset`]。
+pub(crate) fn prepare_conversation_input(
+    sess: &AcpSession,
+    input: &mut smelt_core::conversation::ConversationInput,
+) -> bool {
+    let pending_preset = sess.pending_agent_preset.lock().clone();
     input.text =
         smelt_core::conversation::merge_agent_preset(pending_preset.as_deref(), &input.text);
     if !sess.reduced.lock().supports_image && !input.images.is_empty() {
@@ -3526,30 +3607,20 @@ pub(crate) fn dispatch_conversation_input(
         };
         input.images.clear();
     }
-    apply_acp_user_action(
-        sess,
-        smelt_core::acp_session::AcpUserAction::Prompt {
-            text: input.text,
-            images: input.images,
-            delivery_id: None,
-        },
+    pending_preset.is_some()
+}
+
+/// 预设随一条消息发出去了：清掉，显式发布让所有客户端同步；目录里那份也清掉，冷启动
+/// 不再带上用过的预设。
+pub(crate) fn consume_agent_preset(sess: &AcpSession, subscribers: &EventHubHandle) {
+    *sess.pending_agent_preset.lock() = None;
+    push_acp_snapshot_since(sess, true, None);
+    let sid = sess.state.lock().id.clone();
+    crate::workspace_directory::remember_acp_live(
+        &sid,
+        smelt_store::AcpLiveChange::AgentPresetConsumed,
         subscribers,
-    )
-    .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
-    submitted.remember(input_submission_id);
-    drop(submitted);
-    if pending_preset.is_some() {
-        *sess.pending_agent_preset.lock() = None;
-        // 显式发布消费状态，确保所有客户端同步；目录里那份也清掉，冷启动不再带上用过的预设。
-        push_acp_snapshot_since(sess, true, None);
-        let sid = sess.state.lock().id.clone();
-        crate::workspace_directory::remember_acp_live(
-            &sid,
-            smelt_store::AcpLiveChange::AgentPresetConsumed,
-            subscribers,
-        );
-    }
-    Ok(())
+    );
 }
 
 pub(crate) fn conversation_submit_response(
@@ -3573,6 +3644,9 @@ fn apply_submit_config_values(
     subscribers: &EventHubHandle,
 ) -> Result<(), smelt_core::conversation::ConversationSubmitError> {
     if config_values.is_empty() || sess.handle.lock().is_none() {
+        return Ok(());
+    }
+    if crate::acp_supervise::hold_submit_config(&sess.turn_completion.lock(), sess, config_values) {
         return Ok(());
     }
     for (config_id, value_id) in config_values {
@@ -3648,7 +3722,11 @@ pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
         // 用户在这个对话里说话了，别的对话发来的消息链断在这里，提醒也算看过。
         crate::peer_messages::reset_chain(id);
         subscribers.mark_attention_read(id);
-        let slot = ensure_conversation_runtime(id, acp_sessions, workspace_directory, subscribers)
+        let slot = conversation_slot(id, acp_sessions, workspace_directory, subscribers)
+            .and_then(|slot| {
+                crate::acp_idle::launch_for_user_input(id, &slot, acp_sessions, subscribers)?;
+                Ok(slot)
+            })
             .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
         acp_sessions
             .with_current(id, &slot, |session| {

@@ -1077,7 +1077,7 @@ class L10nZh extends L10n {
   }
 
   @override
-  String get conversationStatusEnded => '会话已结束';
+  String get conversationStatusEnded => '已停止';
 
   @override
   String get conversationStatusCompacting => '正在压缩上下文…';
@@ -1095,9 +1095,6 @@ class L10nZh extends L10n {
 
   @override
   String get conversationHintTicket => '先处理上方的单据';
-
-  @override
-  String get conversationHintEnded => '这段会话已结束';
 
   @override
   String get conversationHintSending => '等机器确认收到…';

@@ -1966,7 +1966,7 @@ abstract class L10n {
   /// No description provided for @conversationStatusEnded.
   ///
   /// In en, this message translates to:
-  /// **'Session ended'**
+  /// **'Stopped'**
   String get conversationStatusEnded;
 
   /// No description provided for @conversationStatusCompacting.
@@ -1998,12 +1998,6 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Handle the ticket above first'**
   String get conversationHintTicket;
-
-  /// No description provided for @conversationHintEnded.
-  ///
-  /// In en, this message translates to:
-  /// **'This session has ended'**
-  String get conversationHintEnded;
 
   /// No description provided for @conversationHintSending.
   ///

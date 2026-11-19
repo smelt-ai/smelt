@@ -1175,8 +1175,6 @@ class _ConversationPageState extends State<ConversationPage> {
                     ? l10n.conversationHintSending
                     : view == null
                     ? l10n.commonLoading
-                    : phase == ConversationPhase.dead
-                    ? l10n.conversationHintEnded
                     : waiting
                     ? l10n.conversationHintTicket
                     : l10n.conversationHint(

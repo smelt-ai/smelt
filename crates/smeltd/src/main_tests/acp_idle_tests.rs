@@ -700,3 +700,43 @@ fn a_poisoned_session_lock_does_not_panic_the_suspend_check() {
         acp_idle::acp_suspend_blocker(&session, long_after_now(), acp_idle::ACP_IDLE_SUSPEND_AFTER);
     assert_eq!(blocker, None);
 }
+
+/// 用户发消息：runtime 在跑就只记活动，不重新拉起。
+#[test]
+fn user_input_to_a_running_conversation_does_not_relaunch() {
+    let acp_sessions = new_test_acp_sessions();
+    let (session, _cmd_rx) = direct_session(quiet_state());
+    let (slot, _) = acp_sessions.reserve_with("acp-idle", || session);
+    let generation = slot.value.connection_generation.load(Ordering::SeqCst);
+    assert_eq!(
+        acp_idle::launch_for_user_input("acp-idle", &slot, &acp_sessions, &new_event_hub()),
+        Ok(())
+    );
+    assert_eq!(
+        slot.value.connection_generation.load(Ordering::SeqCst),
+        generation
+    );
+}
+
+/// 上次因失败停下的对话（这里是没登录）不是终点：用户发消息就按记录的启动规格拉起。
+/// 没记下启动规格时拉不起来，原话回给发消息的人。
+#[test]
+fn user_input_to_a_stopped_conversation_relaunches_it() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut stopped = quiet_state();
+    smelt_core::acp_session::force_end_because(
+        &mut stopped,
+        smelt_core::acp_session::AcpEndKind::RestoreFailed,
+        smelt_core::acp_session::ConversationEndReason::SignInRequired {
+            agent: smelt_core::acp_session::SignInAgent::Antigravity,
+        },
+        "Authentication required",
+    );
+    let (slot, _) = acp_sessions.reserve_with("acp-stopped", || {
+        make_acp_session_value("acp-stopped", stopped)
+    });
+    let error =
+        acp_idle::launch_for_user_input("acp-stopped", &slot, &acp_sessions, &new_event_hub())
+            .unwrap_err();
+    assert!(error.contains("no launch spec"), "{error}");
+}

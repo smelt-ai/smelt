@@ -767,7 +767,7 @@
       }
     }
   },
-  "conversationStatusEnded": "Session ended",
+  "conversationStatusEnded": "Stopped",
   "conversationStatusCompacting": "Compacting context…",
   "conversationNoticeDismiss": "Dismiss notice",
   "conversationHint": "Message {agent}",
@@ -780,7 +780,6 @@
   },
   "conversationHintOffline": "Machine is offline. Your draft is kept.",
   "conversationHintTicket": "Handle the ticket above first",
-  "conversationHintEnded": "This session has ended",
   "conversationHintSending": "Waiting for the machine to confirm…",
   "conversationSend": "Send",
   "conversationStop": "Stop this turn",
