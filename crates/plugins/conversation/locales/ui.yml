@@ -495,9 +495,6 @@ lines:
       en: "%{count} lines"
       zh-CN: "共 %{count} 行"
 memory:
-  pending_subtitle:
-    en: "%{reason}: %{description}"
-    zh-CN: "%{reason}：%{description}"
   approve:
     en: "approve"
     zh-CN: "采纳"
@@ -507,21 +504,6 @@ memory:
   approve_hint:
     en: "Approve: later conversations will use this memory"
     zh-CN: "采纳：之后的对话会用到这条记忆"
-  badge_active:
-    en: "Active"
-    zh-CN: "已生效"
-  badge_changed:
-    en: "Changed"
-    zh-CN: "改"
-  badge_global:
-    en: "Global"
-    zh-CN: "全局"
-  badge_new:
-    en: "New"
-    zh-CN: "新"
-  badge_pending:
-    en: "To Confirm"
-    zh-CN: "待确认"
   collapse:
     en: "Collapse Memory Card"
     zh-CN: "收起记忆卡片"
@@ -546,15 +528,24 @@ memory:
   empty_body:
     en: "(Empty)"
     zh-CN: "（正文为空）"
+  kind_changed:
+    en: "Updated"
+    zh-CN: "更新"
+  kind_created:
+    en: "New"
+    zh-CN: "新记住"
   page:
-    en: "Memory Page"
-    zh-CN: "记忆页"
-  page_hint:
-    en: "Go to this agent's memory page to manage all memories"
-    zh-CN: "去这个智能体的记忆页，管理全部记忆"
+    en: "All Memories"
+    zh-CN: "全部记忆"
   pending:
     en: "%{count} to confirm"
     zh-CN: "%{count} 条待确认"
+  pending_reason:
+    en: "To confirm: %{reason}"
+    zh-CN: "待确认：%{reason}"
+  scope_global:
+    en: "Global"
+    zh-CN: "全局"
   title:
     en: "Memory"
     zh-CN: "记忆"
