@@ -206,11 +206,11 @@ fn save_active_automation_transcripts(
         if entries.is_empty() {
             continue;
         }
-        if let Err(error) = automations
+        let saved = automations
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .save_run_transcript(&run.id, &entries)
-        {
+            .save_run_transcript(&run.id, &entries);
+        if let Err(error) = saved {
             dlog(&format!(
                 "shutdown: 保存自动化 {} 的对话失败：{error}",
                 run.id

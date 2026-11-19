@@ -100,6 +100,9 @@ unnecessary_sort_by = "warn"
 collapsible_if = "warn"
 cloned_ref_to_slice_refs = "warn"
 redundant_clone = "warn"
+# `while let` / `match` / `if let` 条件里拿的锁守卫活到整个代码块结束：在里面等别的线程，
+# 那边要拿同一把锁就互相卡住（补做写回曾因此每次等满 10 秒）。先取值放锁，再判断。
+significant_drop_in_scrutinee = "warn"
 # 正确性闸门：空 dbg/todo 不应进主线。存量 style 警告不在这里 deny，避免一次清不完。
 dbg_macro = "deny"
 todo = "deny"

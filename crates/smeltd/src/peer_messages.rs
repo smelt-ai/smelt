@@ -585,7 +585,8 @@ pub(crate) fn title_of(id: &str, sess: &AcpSession) -> String {
             return title;
         }
     }
-    if let Some(title) = sess.reduced.lock().resolved_session_title() {
+    let resolved = sess.reduced.lock().resolved_session_title();
+    if let Some(title) = resolved {
         return title;
     }
     sess.cwd

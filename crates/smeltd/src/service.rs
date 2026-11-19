@@ -704,7 +704,8 @@ mod tests {
         let error = stop_daemon(&runtime, std::time::Duration::from_millis(200)).unwrap_err();
 
         assert!(error.contains("didn't exit"), "{error}");
-        if let Some(mut child) = child.lock().unwrap().take() {
+        let leftover = child.lock().unwrap().take();
+        if let Some(mut child) = leftover {
             let _ = child.kill();
             let _ = child.wait();
         }

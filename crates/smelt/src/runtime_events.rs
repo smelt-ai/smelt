@@ -604,7 +604,8 @@ impl SeparateSubscription {
         match reader {
             Ok(reader) => Some(Self { shared, reader }),
             Err(error) => {
-                if let Some(closer) = shared.lock().closer.take() {
+                let closer = shared.lock().closer.take();
+                if let Some(closer) = closer {
                     closer.close();
                 }
                 eprintln!("[runtime-events] {key:?} 起单独订阅线程失败：{error}");
@@ -756,7 +757,10 @@ pub(crate) fn spawn_subscription(
                                     && sender.states.try_send((key.clone(), event)).is_ok()
                             },
                         );
-                        if let Some(topics) = lock(&round).take() {
+                        // 先取出来放锁再关：关要等各订阅的读线程退出，不拿着锁让
+                        // [`sync_topics`] 陪着等。取走后它看到的是空，不会再动这一轮。
+                        let topics = lock(&round).take();
+                        if let Some(topics) = topics {
                             topics.close();
                         }
                         if let Some(appearance) = appearance {
