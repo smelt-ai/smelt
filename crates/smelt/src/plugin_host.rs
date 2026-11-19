@@ -209,10 +209,6 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             crate::request_app_quit(cx);
             Ok(())
         }),
-        api::SET_STATUS_MENU.spec(api::text!("command.set_status_menu"), |menu, _, _| {
-            crate::status_item::set_menu(&menu);
-            Ok(())
-        }),
         api::SET_DOCK_BADGE.spec(api::text!("command.set_dock_badge"), |badge, _, _| {
             crate::dock::set_badge(badge.label.as_deref());
             Ok(())

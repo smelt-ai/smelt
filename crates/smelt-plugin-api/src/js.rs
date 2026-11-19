@@ -86,9 +86,20 @@ export function notification_permission():
   | { state: "checking" | "not_requested" | "denied" | "unsupported" }
   | { state: "granted"; banners: boolean; sound: boolean; badge: boolean }
   | { state: "unavailable"; error: string };
-/** 菜单栏菜单里的一项。icon 只取 PNG（字节数组）的透明度当形状，涂成 color（0xRRGGBB）。 */
+/** 本插件在 macOS 菜单栏右上角的图标（见 set_status_menu）。 */
+export interface StatusMenu {
+  /** 图标，PNG：asset() 取的路径。只取透明度当形状，颜色跟着菜单栏的深浅走。不给、读不到用应用图标。 */
+  icon?: string | null;
+  /** 图标右边的字；空的只显示图标。 */
+  title?: string;
+  /** 鼠标停在图标上时的提示。 */
+  tooltip?: string;
+  /** 点开的菜单，从上往下。 */
+  items?: StatusMenuItem[];
+}
+/** 菜单栏菜单里的一项。icon.png 是 asset() 取的 PNG 路径，只取透明度当形状，涂成 color（0xRRGGBB）。 */
 export type StatusMenuItem =
-  | { type: "action"; label: string; icon?: { png: number[]; color: number } | null; command: string; args?: unknown }
+  | { type: "action"; label: string; icon?: { png: string; color: number } | null; command: string; args?: unknown }
   | { type: "separator" };
 /**
  * 那个视图此刻看得见；设置页是设置开着、停在这一页。变了发 shown_views_changed。
@@ -227,8 +238,6 @@ export function reject_command(id: number, reason: string): null;
  * - "smelt.app/quit-now"：直接退出，不问退出守卫、不弹退出确认。接手了退出（set_quit_guard）的插件做完自己的事用它。
  * - "smelt.app/open-page" { page: string } → boolean：进一页，来路上有它就退回去；没有这页、这页没有布局时为 false。
  * - "smelt.app/show-main-window"：把主窗口拿到前面来，已经关了就新开一扇。
- * - "smelt.app/set-status-menu" { title?: string, tooltip?: string, items?: StatusMenuItem[] }：设置菜单栏图标旁的字、
- *   提示和点开的菜单，后设的为准；只有 macOS 有。
  * - "smelt.app/set-dock-badge" { label: string | null }：设置 Dock 图标的角标，null 清掉；只有 macOS 有。
  * - "smelt.app/set-view-badge" { view: string, label: string | null }：设视图入口（面板标签、侧栏那一行）上的角标，
  *   null 清掉；视图建没建都画，变了发 view_badges_changed。
@@ -379,6 +388,11 @@ export interface MenuItem {
 }
 /** 替换本插件放进菜单栏菜单的项。空数组撤下全部；一项不合法整组不登记。 */
 export function register_menu_items(items: MenuItem[]): null;
+/**
+ * 设本插件在 macOS 菜单栏右上角的图标：每个插件一个，各管各的，不会顶掉别的插件的。null 撤掉；
+ * 插件卸下、重挂时也撤掉，挂上后要再设。点菜单项执行它带的命令。只有 macOS 有。
+ */
+export function set_status_menu(menu: StatusMenu | null): null;
 /** 右键菜单里的一项（见 register_context_menu_items）：点了执行 command，或者展开 submenu。 */
 export type ContextMenuItem = {
   label: Text;
@@ -741,6 +755,7 @@ impl JsPlugin {
         let menus = self.clone();
         let topics = self.clone();
         let context_menus = self.clone();
+        let status_menus = self.clone();
         let guards = self.clone();
         let resolved = self.clone();
         let rejected = self.clone();
@@ -1149,6 +1164,25 @@ impl JsPlugin {
                 }
                 in_app("register_menu_items", |cx| {
                     crate::register_menu_items(&owner, entries, cx)
+                })?;
+                Ok(HostValue::Null)
+            })
+            .function("set_status_menu", move |arguments| {
+                status_menus.may_register("set_status_menu")?;
+                let menu = match arguments.get(0).map(json_value) {
+                    None | Some(Value::Null) => None,
+                    Some(value) => {
+                        Some(serde_json::from_value::<crate::StatusMenu>(value).map_err(
+                            |error| HostError::new(format!("set_status_menu：菜单不对：{error}")),
+                        )?)
+                    }
+                };
+                let owner = status_menus.0.borrow().id.clone();
+                if owner.is_empty() {
+                    return Err(HostError::new("插件没有来源身份"));
+                }
+                in_app("set_status_menu", |cx| {
+                    crate::set_status_menu(&owner, menu, cx)
                 })?;
                 Ok(HostValue::Null)
             })
@@ -2847,6 +2881,30 @@ mod tests {
             .err()
             .expect("测试里没有脚本上下文");
         assert!(outside_script.message().contains("只能在视图"));
+    }
+
+    #[test]
+    fn status_menu_is_parsed_before_entering_app() {
+        let module = JsPlugin::for_plugin("example", "示例").module();
+        let set = |menu: HostValue| module.call("set_status_menu", &HostArguments::new([menu]));
+        let bad = set(object(&[(
+            "items",
+            HostValue::Array(vec![object(&[("type", "nope".into())])]),
+        )]))
+        .unwrap_err();
+        assert!(bad.message().contains("菜单不对"), "{}", bad.message());
+        // 合法的（含 null 撤掉）过了解析，到要进 App 时才因为测试里没有脚本上下文停下。
+        for menu in [HostValue::Null, object(&[("title", "NDX".into())])] {
+            assert!(set(menu).unwrap_err().message().contains("只能在视图"));
+        }
+        // 视图入口的脚本不能设，同别的登记。
+        let view = JsPlugin::for_view("example", "示例", Value::Null).module();
+        assert!(
+            view.call("set_status_menu", &HostArguments::new([HostValue::Null]))
+                .unwrap_err()
+                .message()
+                .contains("主入口")
+        );
     }
 
     #[test]

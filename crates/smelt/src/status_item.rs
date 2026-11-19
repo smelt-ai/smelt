@@ -1,7 +1,7 @@
 //! macOS 菜单栏右上角常驻图标（`NSStatusItem`）和系统通知桥。
 //!
-//! 菜单栏图标是宿主给插件的机制（`smelt.app/set-status-menu`）：图标是应用图标，旁边的字、
-//! 提示和点开的菜单都由插件给，点一项就执行它带的命令。列什么、怎么排，宿主不管。
+//! 菜单栏图标是宿主给插件的机制（`smelt_plugin_api::set_status_menu`）：每个插件一个，图标、
+//! 旁边的字、提示和点开的菜单都由插件给，点一项就执行它带的命令。列什么、怎么排，宿主不管。
 //!
 //! GPUI 本身完全没有 status item 这个概念，得绕开它直接摸 AppKit。这里还有一道坎：
 //! 要**响应点击**，而 AppKit 的按钮/菜单项只认 target-action（一个 Objective-C 对象 +
@@ -118,19 +118,44 @@ fn tint_png(data: &[u8], color: u32) -> Option<Vec<u8>> {
     Some(encoded.into_inner())
 }
 
+/// 菜单栏上一张图的字节：给的是字节就用，给的是资源路径就从应用的资源表读。读不到是 `None`。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn image_bytes<'a>(
+    image: &'a smelt_plugin_api::StatusImage,
+    assets: &dyn gpui::AssetSource,
+) -> Option<std::borrow::Cow<'a, [u8]>> {
+    match image {
+        smelt_plugin_api::StatusImage::Png(bytes) => Some(std::borrow::Cow::Borrowed(bytes)),
+        smelt_plugin_api::StatusImage::Asset(path) => match assets.load(path) {
+            Ok(Some(bytes)) => Some(std::borrow::Cow::Owned(bytes.into_owned())),
+            Ok(None) => None,
+            Err(error) => {
+                eprintln!("[status_item] 读菜单栏图片「{path}」失败：{error}");
+                None
+            }
+        },
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::{MenuAction, StatusItemEvent, system_notifications, tint_png};
+    use super::{MenuAction, StatusItemEvent, image_bytes, system_notifications, tint_png};
+    use gpui::AssetSource;
     use objc::declare::ClassDecl;
     use objc::runtime::{Class, Object, Sel};
     use objc::{class, msg_send, sel, sel_impl};
     use smelt_plugin_api::{StatusMenu, StatusMenuItem};
+    use std::cell::RefCell;
     use std::sync::OnceLock;
 
-    /// 应用图标母图（`scripts/make-icon.sh` 产出），直接编进二进制当菜单栏图标用。
-    /// 彩色原样显示（不走 `setTemplate:`，那个只吃 alpha 通道，会把带颜色的方形 logo
-    /// 拍成纯色剪影）。
+    /// 应用图标母图（`scripts/make-icon.sh` 产出），插件没给图标时当菜单栏图标用。
     const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon-1024.png");
+
+    /// 应用图标按 20pt 显示，跟系统自带图标的观感尺寸对齐。
+    const APP_ICON_SIZE: f64 = 20.0;
+
+    /// 插件给的模板图按系统菜单栏图标的常规尺寸显示。
+    const STATUS_ICON_SIZE: f64 = 18.0;
 
     /// 菜单项左侧图标统一占用的尺寸。菜单栏是 2x 显示时，13pt 已经足够辨认，
     /// 也能让各项图标使用同一条文字基线。
@@ -148,19 +173,18 @@ mod imp {
     /// AppKit 调用，不能在这里直接摸 GPUI 的 `Context`）。
     static EVENT_TX: OnceLock<smol::channel::Sender<StatusItemEvent>> = OnceLock::new();
 
-    /// 菜单栏图标建好后常驻：按钮、菜单、点击靶子。AppKit 对象只能在主线程摸；指针存成
-    /// 整数绕开裸指针不是 `Send`/`Sync` 的限制——本文件所有访问都发生在主线程（AppKit 和
-    /// GPUI 事件循环共用同一条主线程），等价于原始指针的正常用法。
-    struct Item {
-        button: usize,
-        menu: usize,
-        target: usize,
-        has_image: bool,
+    thread_local! {
+        /// 来源 → 它的菜单栏图标（`NSStatusItem`，自己按住的那一份）和上次画的样子。AppKit
+        /// 对象只能在主线程摸，同步也只在主线程做，放线程局部。
+        static ITEMS: RefCell<Vec<(String, Item)>> = const { RefCell::new(Vec::new()) };
     }
 
-    static ITEM: OnceLock<Item> = OnceLock::new();
+    struct Item {
+        status_item: *mut Object,
+        drawn: StatusMenu,
+    }
 
-    /// 菜单项的 action：`representedObject` 是 [`set_menu`] 挂上的 [`MenuAction`] JSON。
+    /// 菜单项的 action：`representedObject` 是 [`draw`] 挂上的 [`MenuAction`] JSON。
     extern "C" fn on_run(_this: &Object, _cmd: Sel, sender: *mut Object) {
         let text = unsafe {
             let value: *mut Object = msg_send![sender, representedObject];
@@ -227,56 +251,113 @@ mod imp {
         Some(image)
     }
 
-    /// 第一次设菜单时建菜单栏图标：应用 icon 母图缩到菜单栏尺寸，取不到（理论上不会，PNG
-    /// 编进二进制里的，兜底而已）就退化成文字。图标、菜单、点击靶子实例都常驻到进程退出，
-    /// 故意不释放。
-    fn item() -> &'static Item {
-        ITEM.get_or_init(|| unsafe {
+    /// 所有菜单项共用的点击靶子，常驻到进程退出。
+    fn target() -> *mut Object {
+        static TARGET: OnceLock<usize> = OnceLock::new();
+        *TARGET.get_or_init(|| unsafe {
+            let target: *mut Object = msg_send![target_class(), new]; // +1，永不 release
+            target as usize
+        }) as *mut Object
+    }
+
+    /// 新建一个菜单栏图标，挂上空菜单。新的排在已有的左边（系统的规矩）。
+    fn create() -> *mut Object {
+        unsafe {
             let bar: *mut Object = msg_send![class!(NSStatusBar), systemStatusBar];
             // NSVariableStatusItemLength == -1.0，让系统按内容自适应宽度。
             let item: *mut Object = msg_send![bar, statusItemWithLength: -1.0f64];
-            let _: () = msg_send![item, retain]; // 常驻单例：必须自己按住，不然出了这个
-            // 作用域就被 autorelease 池收走。
-
-            let button: *mut Object = msg_send![item, button];
-            let _: () = msg_send![button, retain];
-            // 母图是 1024×1024，菜单栏图标按 20pt 显示（跟系统自带图标的观感尺寸对齐），
-            // NSImage 自己插值缩小，不用额外裁剪/预生成小图。
-            let has_image = match image(APP_ICON_PNG, 20.0) {
-                Some(icon) => {
-                    let _: () = msg_send![button, setImage: icon];
-                    let _: () = msg_send![icon, release];
-                    let _: () = msg_send![button, setImagePosition: 2u64]; // NSImageLeft：图标靠左，字跟在右边
-                    true
-                }
-                None => false,
-            };
-
-            let target: *mut Object = msg_send![target_class(), new]; // +1，永不 release
-            let menu: *mut Object = msg_send![class!(NSMenu), new]; // +1，永不 release
+            // 拿到的是 autorelease 的，不按住出了这个作用域图标就没了；撤掉时 release。
+            let _: () = msg_send![item, retain];
+            let menu: *mut Object = msg_send![class!(NSMenu), new];
             let _: () = msg_send![item, setMenu: menu]; // 挂了菜单后，点按钮直接弹菜单
-            Item {
-                button: button as usize,
-                menu: menu as usize,
-                target: target as usize,
-                has_image,
-            }
-        })
+            let _: () = msg_send![menu, release]; // setMenu: 会 retain 一份
+            let button: *mut Object = msg_send![item, button];
+            let _: () = msg_send![button, setImagePosition: 2u64]; // NSImageLeft：图标靠左，字跟在右边
+            item
+        }
     }
 
-    /// 装好点击事件的出口和系统通知桥。菜单栏图标等第一次设菜单时才建。
+    /// 撤掉一个菜单栏图标。
+    fn remove(item: *mut Object) {
+        unsafe {
+            let bar: *mut Object = msg_send![class!(NSStatusBar), systemStatusBar];
+            let _: () = msg_send![bar, removeStatusItem: item];
+            let _: () = msg_send![item, release];
+        }
+    }
+
+    /// 装好点击事件的出口和系统通知桥。菜单栏图标等有插件设了才建（见 [`sync`]）。
     pub fn setup(tx: smol::channel::Sender<StatusItemEvent>) {
         let _ = EVENT_TX.set(tx.clone());
         system_notifications::setup(tx);
     }
 
-    /// 按插件给的设置重画菜单栏图标旁的字、提示和菜单：先清空，逐项建菜单项（命令挂在
-    /// `representedObject` 上，点击经 `on_run` 转发）。
-    pub fn set_menu(status: &StatusMenu) {
-        let item = item();
+    /// 按插件们设的菜单栏图标同步：没了的撤掉，新来的建上，变了的重画，没变的不动。
+    pub fn sync(menus: &[(String, StatusMenu)], assets: &dyn AssetSource) {
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            items.retain(|(owner, item)| {
+                let keep = menus.iter().any(|(wanted, _)| wanted == owner);
+                if !keep {
+                    remove(item.status_item);
+                }
+                keep
+            });
+            for (owner, menu) in menus {
+                match items.iter_mut().find(|(existing, _)| existing == owner) {
+                    Some((_, item)) if item.drawn == *menu => {}
+                    Some((_, item)) => {
+                        draw(item.status_item, Some(&item.drawn), menu, assets);
+                        item.drawn = menu.clone();
+                    }
+                    None => {
+                        let status_item = create();
+                        draw(status_item, None, menu, assets);
+                        items.push((
+                            owner.clone(),
+                            Item {
+                                status_item,
+                                drawn: menu.clone(),
+                            },
+                        ));
+                    }
+                }
+            }
+        });
+    }
+
+    /// 画一个菜单栏图标：图标（变了才换，`drawn` 是上次画的）、旁边的字、提示，菜单先清空
+    /// 再逐项建（命令挂在 `representedObject` 上，点击经 `on_run` 转发）。
+    fn draw(
+        status_item: *mut Object,
+        drawn: Option<&StatusMenu>,
+        status: &StatusMenu,
+        assets: &dyn AssetSource,
+    ) {
         unsafe {
-            let button = item.button as *mut Object;
-            let title = if status.title.is_empty() && !item.has_image {
+            let button: *mut Object = msg_send![status_item, button];
+            if drawn.is_none_or(|drawn| drawn.icon != status.icon) {
+                // 插件给的图当模板图：只取透明度，颜色由系统按菜单栏深浅定。没给、或给的不是图，
+                // 用应用图标，彩色原样显示（模板图会把带颜色的方形 logo 拍成纯色剪影）。
+                let custom = status
+                    .icon
+                    .as_ref()
+                    .and_then(|icon| image(&image_bytes(icon, assets)?, STATUS_ICON_SIZE));
+                let icon = match custom {
+                    Some(icon) => {
+                        let _: () = msg_send![icon, setTemplate: objc::runtime::YES];
+                        Some(icon)
+                    }
+                    // 母图是 1024×1024，NSImage 自己插值缩小。
+                    None => image(APP_ICON_PNG, APP_ICON_SIZE),
+                };
+                if let Some(icon) = icon {
+                    let _: () = msg_send![button, setImage: icon];
+                    let _: () = msg_send![icon, release];
+                }
+            }
+            let has_image: *mut Object = msg_send![button, image];
+            let title = if status.title.is_empty() && has_image.is_null() {
                 "smelt"
             } else {
                 status.title.as_str()
@@ -284,8 +365,8 @@ mod imp {
             let _: () = msg_send![button, setTitle: nsstring(title)];
             let _: () = msg_send![button, setToolTip: nsstring(&status.tooltip)];
 
-            let menu = item.menu as *mut Object;
-            let target = item.target as *mut Object;
+            let menu: *mut Object = msg_send![status_item, menu];
+            let target = target();
             let _: () = msg_send![menu, removeAllItems];
             for entry in &status.items {
                 match entry {
@@ -314,7 +395,7 @@ mod imp {
                         let _: () = msg_send![menu_item, setRepresentedObject: nsstring(&action)];
                         let _: () = msg_send![menu_item, setTarget: target];
                         let icon = icon.as_ref().and_then(|icon| {
-                            let tinted = tint_png(&icon.png, icon.color)?;
+                            let tinted = tint_png(&image_bytes(&icon.png, assets)?, icon.color)?;
                             image(&tinted, MENU_ICON_SIZE)
                         });
                         if let Some(icon) = icon {
@@ -357,7 +438,7 @@ mod imp {
     use smelt_plugin_api::StatusMenu;
 
     pub fn setup(_tx: smol::channel::Sender<StatusItemEvent>) {}
-    pub fn set_menu(_status: &StatusMenu) {}
+    pub fn sync(_menus: &[(String, StatusMenu)], _assets: &dyn gpui::AssetSource) {}
     pub fn activate_app() {}
     pub fn is_app_active() -> bool {
         true
@@ -390,7 +471,7 @@ mod imp {
     }
 }
 
-pub use imp::{activate_app, is_app_active, set_menu, setup};
+pub use imp::{activate_app, is_app_active, setup, sync};
 
 #[cfg(target_os = "macos")]
 pub use system_notifications::{

@@ -122,6 +122,9 @@ const SURFACE: &[(&str, Js)] = &[
     ("register_menu_items", Same),
     ("unregister_menu_items", Via("register_menu_items([])")),
     ("menu_items", Host),
+    ("set_status_menu", Same),
+    ("status_menus", Host),
+    ("observe_status_menus", Host),
     ("register_context_menu_items", Same),
     (
         "unregister_context_menu_items",

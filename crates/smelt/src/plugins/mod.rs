@@ -351,6 +351,7 @@ fn unmount(id: &str, cx: &mut App) {
     api::unregister_commands(id, cx);
     api::unregister_file_opener(id, cx);
     api::unregister_menu_items(id, cx);
+    api::set_status_menu(id, None, cx);
     api::unregister_context_menu_items(id, cx);
     api::unregister_quit_guard(id, cx);
     api::unregister_topics(id, cx);

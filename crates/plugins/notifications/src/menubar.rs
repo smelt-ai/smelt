@@ -2,7 +2,7 @@
 //! 会话，点一条跳过去；Dock 图标的角标是要你看的会话数。
 //!
 //! 会话名册（各台机器的工作区目录）、会话状态读宿主的，要你看的会话读本插件的提醒镜像；
-//! 菜单和角标经 `smelt.app/set-status-menu`、`smelt.app/set-dock-badge` 交给宿主画，点菜单项
+//! 菜单和角标经 `set_status_menu`、`smelt.app/set-dock-badge` 交给宿主画，点菜单项
 //! 执行 `smelt.sessions/activate`。主窗口关着也照常更新。算出来和上次交给宿主的一样就不再交。
 
 use std::cell::RefCell;
@@ -14,11 +14,12 @@ use api::model::agent_status::{AgentStatus, terminal_agent_status};
 use api::model::daemon_state::DaemonSessionState;
 use api::model::workspace_directory::WorkspaceConversation;
 use api::ui::ui_theme::agent_status_u32;
-use api::{DockBadge, RuntimeKey, StatusIcon, StatusMenu, StatusMenuItem};
+use api::{DockBadge, RuntimeKey, StatusIcon, StatusImage, StatusMenu, StatusMenuItem};
 use gpui::{App, Task};
 use rust_i18n::t;
 use smelt_plugin_api as api;
 
+use crate::OWNER;
 use crate::sessions::{self, Activate};
 
 /// 各家 agent 的单色母图（32px，只用透明度当形状），手机端也用这一份。
@@ -70,10 +71,6 @@ pub(crate) struct Sent {
 /// 重算菜单和角标，变了才交给宿主。`attention` 是要你看的会话（所有机器的）：会话 id 到
 /// 还等不等你处理。
 pub(crate) fn refresh(sent: &Rc<RefCell<Sent>>, attention: &HashMap<String, bool>, cx: &mut App) {
-    // 宿主命令跟着主窗口的工作台登记，启动时还没有；登记好了会发 CommandsChanged。
-    if api::command(api::SET_STATUS_MENU.id(), cx).is_none() {
-        return;
-    }
     let host = api::host(cx);
     let mut conversations = Vec::new();
     for machine in host.machines(cx) {
@@ -86,9 +83,12 @@ pub(crate) fn refresh(sent: &Rc<RefCell<Sent>>, attention: &HashMap<String, bool
 
     let mut last = sent.borrow_mut();
     if last.menu.as_ref() != Some(&menu) {
-        let task = api::SET_STATUS_MENU.run(&menu.status_menu(), cx);
+        api::set_status_menu(OWNER, Some(menu.status_menu()), cx);
         last.menu = Some(menu);
-        forget_on_failure(task, sent.clone(), |sent| sent.menu = None, cx);
+    }
+    // 宿主命令跟着主窗口的工作台登记，启动时还没有；登记好了会发 CommandsChanged。
+    if api::command(api::SET_DOCK_BADGE.id(), cx).is_none() {
+        return;
     }
     if last.badge.as_ref() != Some(&badge) {
         let task = api::SET_DOCK_BADGE.run(&badge, cx);
@@ -137,7 +137,7 @@ fn forget_on_failure(
 ) {
     cx.spawn(async move |_| {
         if let Err(error) = task.await {
-            eprintln!("[notifications] 菜单栏交给宿主失败：{error}");
+            eprintln!("[notifications] Dock 角标交给宿主失败：{error}");
             forget(&mut sent.borrow_mut());
         }
     })
@@ -299,7 +299,7 @@ impl Menu {
             .map(|entry| StatusMenuItem::Action {
                 label: entry.label.clone(),
                 icon: Some(StatusIcon {
-                    png: logo(entry.agent.as_deref()).to_vec(),
+                    png: StatusImage::Png(logo(entry.agent.as_deref()).to_vec()),
                     color: entry.color,
                 }),
                 command: sessions::ACTIVATE.id().to_string(),
@@ -320,6 +320,8 @@ impl Menu {
             args: api::serde_json::Value::Null,
         });
         StatusMenu {
+            // 用应用图标：这个就是 Smelt 自己的会话菜单。
+            icon: None,
             title: self.title.clone(),
             tooltip: self.tooltip.clone(),
             items,

@@ -712,6 +712,14 @@ fn main() {
         // 首帧前到达；若先启动观察器再 setup，应用级消费者会正确 drain 事件，但
         // UNUserNotificationCenter 尚无 delegate/队列，通知仍会在启动竞态里丢失。
         status_item::setup(status_tx);
+        // 菜单栏图标每个插件一个，插件设了、改了、撤了就同步。
+        smelt_plugin_api::observe_status_menus(cx, |cx| {
+            status_item::sync(
+                &smelt_plugin_api::status_menus(cx),
+                cx.asset_source().as_ref(),
+            );
+        })
+        .detach();
 
         // 状态通道：每个运行时一条常驻 subscribe（见 `runtime_events`），把会话状态写进
         // DaemonStates、工作区目录写进 WorkspaceDirectoriesGlobal，插件经宿主接口读。

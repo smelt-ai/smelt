@@ -160,8 +160,8 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
   `OPEN_NOTIFICATION_SETTINGS`，直接落到系统设置里本应用那一页。被禁止，或允许了但横幅（提醒
   样式是「无」）、Dock 角标被关掉的，写明是哪项；声音关了不算问题。
 - Dock 角标和菜单栏也由这个插件画：读镜像和 `session_states`、`workspace_directory`，用
-  `SET_DOCK_BADGE`、`SET_STATUS_MENU` 交给宿主。宿主只提供菜单栏图标和 Dock 的机制，不知道
-  菜单里是什么；菜单项点了执行插件给的命令。
+  `SET_DOCK_BADGE`、`set_status_menu` 交给宿主。宿主只提供菜单栏图标（每个插件一个）和 Dock
+  的机制，不知道菜单里是什么；菜单项点了执行插件给的命令。
 - 铃铛展示未读；Dock 数字统计未读或仍需行动的会话（每个会话计 1）。菜单栏图标右侧
   使用紧凑的 `N@·M`：N 是待关注会话数，M 是运行中会话数；为 0 的项省略。菜单里列出运行中、
   要你处理和有未读的对话。

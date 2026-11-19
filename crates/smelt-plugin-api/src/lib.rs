@@ -63,6 +63,7 @@ mod page;
 mod quit;
 mod safe_area;
 mod settings;
+mod status_menu;
 mod topic;
 mod view;
 
@@ -103,6 +104,10 @@ pub use page::{
 pub use quit::{QUIT_NOW, QuitGuard, quit_guarded, register_quit_guard, unregister_quit_guard};
 pub use safe_area::{Adapt, SafeArea, safe_area, set_safe_area};
 pub use settings::{SettingsEntry, SettingsGroup};
+pub use status_menu::{
+    StatusIcon, StatusImage, StatusMenu, StatusMenuItem, observe_status_menus, set_status_menu,
+    status_menus,
+};
 pub use topic::{register_topics, subscribed_topics, unregister_topics};
 pub use view::{
     OPEN_VIEW, OpenView, PluginView, SET_VIEW_BADGE, ViewBadge, ViewBuilder, ViewHandle, ViewInfo,
@@ -198,47 +203,6 @@ pub struct PathRequest {
 
 /// 把主窗口拿到前面来；已经关了就新开一扇。
 pub const SHOW_MAIN_WINDOW: Command<(), ()> = Command::new("smelt.app/show-main-window");
-
-/// 设置菜单栏图标旁的文字和点开的菜单。菜单栏图标只有一个、是应用图标，后设的为准；没人
-/// 设过就不显示。只有 macOS 有，别的系统什么都不做。
-pub const SET_STATUS_MENU: Command<StatusMenu, ()> = Command::new("smelt.app/set-status-menu");
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusMenu {
-    /// 图标右边的字；空的只显示图标。
-    #[serde(default)]
-    pub title: String,
-    /// 鼠标停在图标上时的提示。
-    #[serde(default)]
-    pub tooltip: String,
-    /// 点开的菜单，从上往下。
-    #[serde(default)]
-    pub items: Vec<StatusMenuItem>,
-}
-
-/// 菜单里的一项。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum StatusMenuItem {
-    /// 点了执行 `command`（带 `args`），失败由宿主报给用户。
-    Action {
-        label: String,
-        #[serde(default)]
-        icon: Option<StatusIcon>,
-        command: String,
-        #[serde(default)]
-        args: serde_json::Value,
-    },
-    Separator,
-}
-
-/// 菜单项左边的小图标：只取 PNG 的透明度当形状，涂成 `color`。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusIcon {
-    pub png: Vec<u8>,
-    /// `0xRRGGBB`。
-    pub color: u32,
-}
 
 /// 打开系统设置里本应用的通知设置，用户在那里开关通知权限。只有 macOS 有，别的系统什么
 /// 都不做。
@@ -605,48 +569,6 @@ mod tests {
             assert_eq!(machine_from_json(&machine_to_json(&machine)), Some(machine));
         }
         assert_eq!(machine_from_json(&serde_json::json!(1)), None);
-    }
-
-    #[test]
-    fn status_menu_items_are_tagged_for_scripts() {
-        let menu = StatusMenu {
-            title: "1@".into(),
-            tooltip: String::new(),
-            items: vec![
-                StatusMenuItem::Action {
-                    label: "会话".into(),
-                    icon: Some(StatusIcon {
-                        png: vec![1, 2],
-                        color: 0x112233,
-                    }),
-                    command: "example/activate".into(),
-                    args: serde_json::json!({ "machine": null, "session_id": "s" }),
-                },
-                StatusMenuItem::Separator,
-            ],
-        };
-        let value = serde_json::to_value(&menu).unwrap();
-        assert_eq!(value["items"][0]["type"], "action");
-        assert_eq!(value["items"][0]["icon"]["png"], serde_json::json!([1, 2]));
-        assert_eq!(
-            value["items"][1],
-            serde_json::json!({ "type": "separator" })
-        );
-        assert_eq!(serde_json::from_value::<StatusMenu>(value).unwrap(), menu);
-        // 脚本可以只给菜单项，项里可以不带图标和参数。
-        let bare: StatusMenu = serde_json::from_value(serde_json::json!({
-            "items": [{ "type": "action", "label": "打开", "command": "smelt.app/show-main-window" }],
-        }))
-        .unwrap();
-        assert_eq!(bare.title, "");
-        assert!(matches!(
-            &bare.items[0],
-            StatusMenuItem::Action {
-                icon: None,
-                args: serde_json::Value::Null,
-                ..
-            }
-        ));
     }
 
     #[test]

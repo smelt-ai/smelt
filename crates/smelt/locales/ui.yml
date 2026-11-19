@@ -163,9 +163,6 @@ command:
   set_machine_relay:
     en: "Change Remote Machine Relay"
     zh-CN: "改远程机器的中继"
-  set_status_menu:
-    en: "Set Menu Bar Menu"
-    zh-CN: "设置菜单栏菜单"
   set_view_badge:
     en: "Set View Badge"
     zh-CN: "设视图角标"

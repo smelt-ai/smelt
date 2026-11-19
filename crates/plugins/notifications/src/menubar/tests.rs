@@ -220,6 +220,9 @@ fn status_menu_ends_with_opening_the_main_window() {
     assert_eq!(command, sessions::ACTIVATE.id());
     assert_eq!(args["machine"], "box");
     assert_eq!(args["session_id"], "run");
-    assert_eq!(icon.as_ref().unwrap().png, TERMINAL_PNG);
+    assert_eq!(
+        icon.as_ref().unwrap().png,
+        api::StatusImage::Png(TERMINAL_PNG.to_vec())
+    );
     assert_eq!(listed.items[1], StatusMenuItem::Separator);
 }
