@@ -419,6 +419,9 @@ pub enum ApprovalDetailsView {
 pub struct ElicitOptionView {
     /// 智能体给的选项名；开关字段是运行时补的英文兜底。
     pub label: String,
+    /// 选项的补充说明，排在标题下面。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// 开关字段的这一项是「是」还是「否」，客户端按语言说。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flag: Option<bool>,

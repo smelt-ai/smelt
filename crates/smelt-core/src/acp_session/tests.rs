@@ -2628,10 +2628,12 @@ fn choose_elicitation_single_select_signals_auto_submit() {
                 crate::acp_conn::ElicitOption {
                     value: V::String("a".into()),
                     label: "A".into(),
+                    description: None,
                 },
                 crate::acp_conn::ElicitOption {
                     value: V::String("b".into()),
                     label: "B".into(),
+                    description: None,
                 },
             ]),
         }],
@@ -2665,10 +2667,12 @@ fn choose_elicitation_multi_select_toggles() {
                 crate::acp_conn::ElicitOption {
                     value: V::String("a".into()),
                     label: "A".into(),
+                    description: None,
                 },
                 crate::acp_conn::ElicitOption {
                     value: V::String("b".into()),
                     label: "B".into(),
+                    description: None,
                 },
             ]),
         }],
@@ -2712,10 +2716,12 @@ fn submit_elicitation_custom_answer_wins_over_chosen_option() {
                     crate::acp_conn::ElicitOption {
                         value: V::String("a".into()),
                         label: "A".into(),
+                        description: None,
                     },
                     crate::acp_conn::ElicitOption {
                         value: V::String("b".into()),
                         label: "B".into(),
+                        description: None,
                     },
                 ]),
             },
@@ -2727,6 +2733,7 @@ fn submit_elicitation_custom_answer_wins_over_chosen_option() {
                 kind: ElicitFieldKind::MultiSelect(vec![crate::acp_conn::ElicitOption {
                     value: V::String("x".into()),
                     label: "X".into(),
+                    description: None,
                 }]),
             },
         ],
@@ -2773,6 +2780,7 @@ fn set_elicitation_text_rejects_fields_without_custom_input() {
                     "a".into(),
                 ),
                 label: "A".into(),
+                description: None,
             }]),
         }],
         chosen: Default::default(),
@@ -2809,6 +2817,7 @@ fn recovered_elicitation_answer_appends_custom_text() {
                     "a".into(),
                 ),
                 label: "A".into(),
+                description: None,
             }]),
         }],
         chosen: std::collections::BTreeMap::from([(0, vec![0])]),

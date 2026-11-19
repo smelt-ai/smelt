@@ -1597,12 +1597,21 @@ pub(super) fn recovered_elicitation(
         let options = question.get("options")?.as_array()?;
         let options: Vec<crate::acp_conn::ElicitOption> = options
             .iter()
-            .filter_map(|option| option.get("label")?.as_str())
-            .map(|label| crate::acp_conn::ElicitOption {
-                value: agent_client_protocol::v1::schema::ElicitationContentValue::String(
-                    label.to_string(),
-                ),
-                label: label.to_string(),
+            .filter_map(|option| {
+                let label = option.get("label")?.as_str()?;
+                let description = option
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string);
+                Some(crate::acp_conn::ElicitOption {
+                    value: agent_client_protocol::v1::schema::ElicitationContentValue::String(
+                        label.to_string(),
+                    ),
+                    label: label.to_string(),
+                    description,
+                })
             })
             .collect();
         if options.is_empty() {

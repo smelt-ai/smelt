@@ -4391,7 +4391,7 @@ fn handle_extension_ui(
     }
     match method {
         "select" | "confirm" | "input" | "editor" => {
-            handle_generic_elicitation(request, id, method, event_tx, outbound_tx, state)
+            handle_generic_elicitation(request, id, method, event_tx, outbound_tx)
         }
         "notify" => {
             // 扩展发给用户看的通知，走对话里的提示。Pi 的通知会带上连接错误（如 MCP
@@ -4550,59 +4550,18 @@ fn absolute_tool_path(path: &str, cwd: Option<&str>) -> String {
         .into_owned()
 }
 
-/// 与 `agent/src/elicitation.ts` 的 `MULTI_SELECT_TITLE_MARK` 同一份。
-const MULTI_SELECT_TITLE_MARK: &str = "\u{200B}\u{200C}\u{200B}";
-
-fn strip_multi_select_title(title: &str) -> (bool, String) {
-    title
-        .strip_prefix(MULTI_SELECT_TITLE_MARK)
-        .map(|rest| (true, rest.to_string()))
-        .unwrap_or_else(|| (false, title.to_string()))
-}
-
-fn question_text(record: &serde_json::Value) -> Option<&str> {
-    ["question", "header", "prompt"]
-        .iter()
-        .find_map(|key| record.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-}
-
-fn is_multi_select_flag(record: &serde_json::Value) -> bool {
-    record
-        .get("multiSelect")
-        .or_else(|| record.get("multi_select"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-}
-
-/// 在飞的题目工具参数里找与 select 标题同题面的那一条。题目工具不限注册者
-/// （宿主四个名字、用户自装的同类扩展都算），匹配只看参数形状与题面相等。
-/// 返回的记录可直接用 [`is_multi_select_flag`] 判多选。
-fn matching_question<'a>(state: &'a PiState, title: &str) -> Option<&'a serde_json::Value> {
-    state.tool_args.values().find_map(|args| {
-        if let Some(questions) = args.get("questions").and_then(serde_json::Value::as_array) {
-            return questions
-                .iter()
-                .find(|question| question_text(question) == Some(title));
-        }
-        (question_text(args) == Some(title)).then_some(args)
-    })
-}
-
 fn handle_generic_elicitation(
     request: &serde_json::Value,
     request_id: &str,
     method: &str,
     event_tx: &smol::channel::Sender<ConversationEvent>,
     outbound_tx: &smol::channel::Sender<serde_json::Value>,
-    state: &PiState,
 ) {
-    let raw_title = request
+    let title = request
         .get("title")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("Pi needs your input");
-    let (marked_multi, title) = strip_multi_select_title(raw_title);
+        .unwrap_or("Pi needs your input")
+        .to_string();
     let (key, field) = match method {
         "select" => {
             let options: Vec<ElicitOption> = request
@@ -4614,29 +4573,21 @@ fn handle_generic_elicitation(
                 .map(|option| ElicitOption {
                     value: ElicitationContentValue::String(option.to_string()),
                     label: option.to_string(),
+                    description: None,
                 })
                 .collect();
             if options.is_empty() {
                 send_extension_cancel(outbound_tx, request_id);
                 return;
             }
-            // 源头是题目工具：多选按其 multiSelect 标记画勾选卡，并且一律允许
-            // 用户在选项之外自己写答案——题目的合同是答案来自人类，选项只是
-            // 便利不是约束。其他扩展的 select 不受影响。
-            let matched_question = matching_question(state, &title);
-            let kind = if marked_multi || matched_question.is_some_and(is_multi_select_flag) {
-                ElicitFieldKind::MultiSelect(options)
-            } else {
-                ElicitFieldKind::Select(options)
-            };
             (
                 "value",
                 ElicitField {
                     key: "value".to_string(),
                     title: title.clone(),
                     required: true,
-                    allow_custom_input: marked_multi || matched_question.is_some(),
-                    kind,
+                    allow_custom_input: false,
+                    kind: ElicitFieldKind::Select(options),
                 },
             )
         }
@@ -4655,10 +4606,12 @@ fn handle_generic_elicitation(
                     ElicitOption {
                         value: ElicitationContentValue::Boolean(true),
                         label: "Yes".to_string(),
+                        description: None,
                     },
                     ElicitOption {
                         value: ElicitationContentValue::Boolean(false),
                         label: "No".to_string(),
+                        description: None,
                     },
                 ]),
             },
@@ -4694,11 +4647,6 @@ fn handle_generic_elicitation(
             }),
             (_, ElicitationContentValue::String(value)) => serde_json::json!({
                 "type": "extension_ui_response", "id": response_id, "value": value,
-            }),
-            (_, ElicitationContentValue::StringArray(values)) => serde_json::json!({
-                "type": "extension_ui_response",
-                "id": response_id,
-                "value": serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string()),
             }),
             _ => serde_json::json!({
                 "type": "extension_ui_response", "id": response_id, "cancelled": true,
@@ -6759,7 +6707,7 @@ mod tests {
     }
 
     #[test]
-    fn select_stays_single_choice_without_multiselect_tool_args() {
+    fn extension_select_is_a_plain_single_choice() {
         let launch = test_launch(SMELT_PI_AGENT_COMMAND);
         let (event_tx, event_rx) = smol::channel::unbounded();
         let (outbound_tx, outbound_rx) = smol::channel::unbounded();
@@ -6783,7 +6731,7 @@ mod tests {
         else {
             panic!("expected elicitation event");
         };
-        // 没有同题面的题目工具在飞：不开放自定义输入，普通 select 行为不变。
+        // 扩展的 select 只给这几个选项：单选、不另开自己写答案（选择题工具不走这里）。
         assert!(!fields[0].allow_custom_input);
         assert!(matches!(fields[0].kind, ElicitFieldKind::Select(_)));
         let mut content = BTreeMap::new();
@@ -6793,145 +6741,6 @@ mod tests {
         );
         responder.accept(content);
         assert_eq!(outbound_rx.try_recv().unwrap()["value"], "开放番外");
-    }
-
-    #[test]
-    fn select_from_question_tool_allows_custom_answer() {
-        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
-        let (event_tx, event_rx) = smol::channel::unbounded();
-        let (outbound_tx, outbound_rx) = smol::channel::unbounded();
-        let mut state = PiState::new();
-        state.tool_args.insert(
-            "tool-q".to_string(),
-            serde_json::json!({
-                "question": "要发布到哪个环境？",
-                "options": [
-                    {"label": "测试", "description": "先验一圈"},
-                    {"label": "生产", "description": "直接上"}
-                ]
-            }),
-        );
-        handle_extension_ui(
-            &serde_json::json!({
-                "type": "extension_ui_request",
-                "id": "select-custom",
-                "method": "select",
-                "title": "要发布到哪个环境？",
-                "options": ["测试 — 先验一圈", "生产 — 直接上"]
-            }),
-            &event_tx,
-            &outbound_tx,
-            &state,
-            &launch,
-        );
-        let ConversationEvent::Elicitation {
-            fields, responder, ..
-        } = event_rx.try_recv().unwrap()
-        else {
-            panic!("expected elicitation event");
-        };
-        // 题目工具发起的 select：仍里单选，但允许用户自己写答案。
-        assert!(matches!(fields[0].kind, ElicitFieldKind::Select(_)));
-        assert!(fields[0].allow_custom_input);
-        // 用户没点选项、直接提交自己写的答案：原样透传给扩展。
-        let mut content = BTreeMap::new();
-        content.insert(
-            "value".to_string(),
-            ElicitationContentValue::String("灰度环境".to_string()),
-        );
-        responder.accept(content);
-        assert_eq!(outbound_rx.try_recv().unwrap()["value"], "灰度环境");
-    }
-
-    #[test]
-    fn select_with_multiselect_tool_args_emits_a_multi_select_card() {
-        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
-        let (event_tx, event_rx) = smol::channel::unbounded();
-        let (outbound_tx, outbound_rx) = smol::channel::unbounded();
-        let mut state = PiState::new();
-        state.tool_args.insert(
-            "tool-1".to_string(),
-            serde_json::json!({
-                "questions": [{
-                    "question": "提醒走哪个渠道？",
-                    "multiSelect": true,
-                    "options": [
-                        {"label": "Gitea Issue", "description": "仓库待办"},
-                        {"label": "Bark", "description": "手机推送"}
-                    ]
-                }]
-            }),
-        );
-        handle_extension_ui(
-            &serde_json::json!({
-                "type": "extension_ui_request",
-                "id": "select-2",
-                "method": "select",
-                "title": "提醒走哪个渠道？",
-                "options": ["Gitea Issue — 仓库待办", "Bark — 手机推送"]
-            }),
-            &event_tx,
-            &outbound_tx,
-            &state,
-            &launch,
-        );
-        let ConversationEvent::Elicitation {
-            fields, responder, ..
-        } = event_rx.try_recv().unwrap()
-        else {
-            panic!("expected elicitation event");
-        };
-        let ElicitFieldKind::MultiSelect(options) = &fields[0].kind else {
-            panic!("multiSelect tool args should render a multi-select card");
-        };
-        assert_eq!(options.len(), 2);
-        // 题目卡一律允许选项之外自己写答案。
-        assert!(fields[0].allow_custom_input);
-        let mut content = BTreeMap::new();
-        content.insert(
-            "value".to_string(),
-            ElicitationContentValue::StringArray(vec![
-                "Gitea Issue — 仓库待办".to_string(),
-                "Bark — 手机推送".to_string(),
-            ]),
-        );
-        responder.accept(content);
-        assert_eq!(
-            outbound_rx.try_recv().unwrap()["value"],
-            r#"["Gitea Issue — 仓库待办","Bark — 手机推送"]"#
-        );
-    }
-
-    #[test]
-    fn select_title_mark_emits_a_multi_select_card_without_tool_args() {
-        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
-        let (event_tx, event_rx) = smol::channel::unbounded();
-        let (outbound_tx, _) = smol::channel::unbounded();
-        let state = PiState::new();
-        handle_extension_ui(
-            &serde_json::json!({
-                "type": "extension_ui_request",
-                "id": "select-3",
-                "method": "select",
-                "title": format!("{MULTI_SELECT_TITLE_MARK}选几种水果看看"),
-                "options": ["苹果", "香蕉", "橙子"]
-            }),
-            &event_tx,
-            &outbound_tx,
-            &state,
-            &launch,
-        );
-        let ConversationEvent::Elicitation {
-            message, fields, ..
-        } = event_rx.try_recv().unwrap()
-        else {
-            panic!("expected elicitation event");
-        };
-        assert_eq!(message, "选几种水果看看");
-        assert!(matches!(fields[0].kind, ElicitFieldKind::MultiSelect(_)));
-        assert_eq!(fields[0].title, "选几种水果看看");
-        // 标记多选同样来自题目工具：也允许自定义答案。
-        assert!(fields[0].allow_custom_input);
     }
 
     #[test]

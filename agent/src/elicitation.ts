@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SMELT_BACKGROUND_TASK_SOCK_ENV, callBackgroundHost } from "./background-task.ts";
 
 /** Smelt 宿主保留的唯一选择题工具与具名内联 Extension 身份。 */
 export const SMELT_ELICITATION_TOOL_NAME = "smelt_ask_user";
@@ -96,45 +97,17 @@ export function parseAskUserQuestions(input: unknown): AskUserQuestion[] {
 	return single ? [single] : [];
 }
 
-/** Pi `ui.select` 没有多选 API。题目前缀这个不可见标记，宿主据此画勾选卡。 */
-export const MULTI_SELECT_TITLE_MARK = "\u200B\u200C\u200B";
+export type AskUserAnswer = {
+	question: string;
+	answer: string[];
+};
 
-function selectLabels(question: AskUserQuestion): string[] {
-	return question.options.map((option) =>
-		option.description ? `${option.label} — ${option.description}` : option.label,
-	);
-}
-
-function labelFromSelection(question: AskUserQuestion, selected: string): string {
-	const matched = question.options.find(
-		(option) =>
-			selected === option.label ||
-			selected === (option.description ? `${option.label} — ${option.description}` : option.label),
-	);
-	return matched?.label ?? selected;
-}
-
-function parseJsonStringArray(selected: string): string[] | undefined {
-	const trimmed = selected.trim();
-	if (!trimmed.startsWith("[")) {
-		return undefined;
-	}
-	try {
-		const value = JSON.parse(trimmed) as unknown;
-		if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-			return undefined;
-		}
-		return value as string[];
-	} catch {
-		return undefined;
-	}
-}
-
-/** 宿主仅为多选把所选标签编成 JSON 数组字符串；单选标签必须原样处理。 */
-function selectedLabels(question: AskUserQuestion, selected: string): string[] {
-	const values = question.multiSelect ? (parseJsonStringArray(selected) ?? [selected]) : [selected];
-	return values.map((value) => labelFromSelection(question, value));
-}
+type AskUserReply = {
+	ok: boolean;
+	error?: string;
+	cancelled?: boolean;
+	answers?: AskUserAnswer[];
+};
 
 const parameters = Type.Object({
 	questions: Type.Optional(Type.Array(Type.Any())),
@@ -153,41 +126,41 @@ function askUserQuestionTool() {
 		description:
 			"向用户展示选择题并等待点选。需要用户在几个明确选项里做决定时必须用这个工具，不要改口用纯文本追问。多选题把 multiSelect 设为 true。",
 		parameters,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal) {
 			const questions = parseAskUserQuestions(params);
 			if (questions.length === 0) {
+				const details: Record<string, unknown> = { error: true };
 				return {
 					content: [{ type: "text" as const, text: "没有可展示的选项" }],
-					details: { cancelled: true },
+					details,
+					isError: true,
 				};
 			}
-			const answers: Array<{ question: string; answer: string }> = [];
-			for (const question of questions) {
-				const title = question.multiSelect
-					? `${MULTI_SELECT_TITLE_MARK}${question.question}`
-					: question.question;
-				const selected = await ctx.ui.select(title, selectLabels(question));
-				if (selected === undefined) {
-					return {
-						content: [{ type: "text" as const, text: "用户取消了选择" }],
-						details: { cancelled: true },
-					};
-				}
-				const labels = selectedLabels(question, selected);
-				if (labels.length === 0) {
-					return {
-						content: [{ type: "text" as const, text: "用户取消了选择" }],
-						details: { cancelled: true },
-					};
-				}
-				answers.push({
-					question: question.question,
-					answer: labels.join("、"),
-				});
+			// 整组题原样交给会话宿主：一张卡、选项带说明、多选是结构化的，答案按题交回。
+			const reply = (await callBackgroundHost(
+				process.env[SMELT_BACKGROUND_TASK_SOCK_ENV],
+				{ op: "ask_user", questions },
+				signal,
+			)) as AskUserReply;
+			if (!reply.ok) {
+				const details: Record<string, unknown> = { error: true };
+				return {
+					content: [{ type: "text" as const, text: reply.error || "没能向用户提问" }],
+					details,
+					isError: true,
+				};
 			}
+			if (reply.cancelled || !reply.answers) {
+				const details: Record<string, unknown> = { cancelled: true };
+				return {
+					content: [{ type: "text" as const, text: "用户跳过了这个问题，没有作答" }],
+					details,
+				};
+			}
+			const details: Record<string, unknown> = { answers: reply.answers };
 			return {
-				content: [{ type: "text" as const, text: JSON.stringify(answers) }],
-				details: { answers },
+				content: [{ type: "text" as const, text: JSON.stringify(reply.answers) }],
+				details,
 			};
 		},
 	});

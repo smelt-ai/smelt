@@ -3881,14 +3881,17 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
                 kind: ElicitFieldKindView::MultiSelect(vec![
                     ElicitOptionView {
                         label: "苹果".into(),
+                        description: None,
                         flag: None,
                     },
                     ElicitOptionView {
                         label: "香蕉".into(),
+                        description: None,
                         flag: None,
                     },
                     ElicitOptionView {
                         label: "橙子".into(),
+                        description: None,
                         flag: None,
                     },
                 ]),
@@ -3962,6 +3965,7 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
                 allow_custom_input: true,
                 kind: ElicitFieldKindView::Select(vec![ElicitOptionView {
                     label: "暂时都不做".into(),
+                    description: None,
                     flag: None,
                 }]),
             }],

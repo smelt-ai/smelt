@@ -640,6 +640,7 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
                         .map(|o| ElicitOption {
                             value: ElicitationContentValue::String(o.value.clone()),
                             label: o.title.clone(),
+                            description: o.description.clone(),
                         })
                         .collect()
                 } else if let Some(values) = &s.enum_values {
@@ -648,6 +649,7 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
                         .map(|v| ElicitOption {
                             value: ElicitationContentValue::String(v.clone()),
                             label: v.clone(),
+                            description: None,
                         })
                         .collect()
                 } else {
@@ -674,10 +676,12 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
                     ElicitOption {
                         value: ElicitationContentValue::Boolean(true),
                         label: "Yes".into(),
+                        description: None,
                     },
                     ElicitOption {
                         value: ElicitationContentValue::Boolean(false),
                         label: "No".into(),
+                        description: None,
                     },
                 ]),
             }),
@@ -689,6 +693,7 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
                         .map(|v| ElicitOption {
                             value: ElicitationContentValue::String(v.clone()),
                             label: v.clone(),
+                            description: None,
                         })
                         .collect(),
                     MultiSelectItems::Titled(items) => items
@@ -697,6 +702,7 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
                         .map(|o| ElicitOption {
                             value: ElicitationContentValue::String(o.value.clone()),
                             label: o.title.clone(),
+                            description: o.description.clone(),
                         })
                         .collect(),
                     _ => Vec::new(),

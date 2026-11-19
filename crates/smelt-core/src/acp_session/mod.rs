@@ -964,6 +964,7 @@ fn mirror_elicitation_option(option: ElicitOptionView) -> ElicitOption {
             ElicitationContentValue::Boolean,
         ),
         label: option.label,
+        description: option.description,
     }
 }
 
@@ -992,6 +993,7 @@ fn mirror_elicitation_field(field: ElicitFieldView) -> ElicitField {
 fn elicit_option_view(option: &ElicitOption) -> ElicitOptionView {
     ElicitOptionView {
         label: option.label.clone(),
+        description: option.description.clone(),
         flag: match option.value {
             ElicitationContentValue::Boolean(flag) => Some(flag),
             _ => None,

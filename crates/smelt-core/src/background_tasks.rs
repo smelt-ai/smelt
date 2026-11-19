@@ -1,4 +1,5 @@
-//! 一个 Pi 会话的后台任务、子智能体登记（`subagents`），以及别的 Pi 对话发来的消息（`peers`）。
+//! 一个 Pi 会话的后台任务、子智能体登记（`subagents`）、别的 Pi 对话发来的消息（`peers`），
+//! 以及选择题工具要用户回答的题目（`ask`）。
 //!
 //! 三者共用这里的套接字和「交回会话」的投递：结果写给扩展的监听，扩展回 ack
 //! 才算模型收到；`clear_queue` 清掉的静默重发；回退换了监听的由新监听再收一次。
@@ -22,6 +23,7 @@ use crate::acp_conn::ConversationEvent;
 use crate::acp_session::{BackgroundTaskStatus, BackgroundTaskView, PeerDelivery};
 use smelt_sys::process::TreeSignal;
 
+mod ask;
 mod peers;
 mod subagents;
 
@@ -426,6 +428,7 @@ fn handle_client(inner: Arc<Inner>, stream: TaskStream, session_cwd: &str) {
     match request.get("op").and_then(serde_json::Value::as_str) {
         Some("listen") => serve_listen(inner, stream, request_owner(&request)),
         Some("subagent_dispatch") => subagents::serve_dispatch(inner, stream, &request, pending),
+        Some("ask_user") => ask::serve(&inner, stream, &request),
         Some(
             op @ ("session_list" | "session_read" | "session_send" | "session_spawn" | "notify"),
         ) => {
@@ -2446,6 +2449,61 @@ mod tests {
         let mut line = String::new();
         std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut line).unwrap();
         serde_json::from_str(line.trim()).unwrap()
+    }
+
+    /// 选择题经套接字交过来：会话里出一张卡，答了把答案交回去；卡被收走就回取消。
+    #[test]
+    fn ask_user_raises_a_card_and_returns_the_answer() {
+        use agent_client_protocol::v1::schema::ElicitationContentValue;
+
+        let (supervisor, events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let question = serde_json::json!({
+            "op": "ask_user",
+            "questions": [{
+                "question": "按哪个方案做？",
+                "options": [{"label": "按推荐方案", "description": "两个仓库一起改"}, {"label": "先不改"}],
+            }],
+        });
+
+        let asking = {
+            let path = path.clone();
+            let question = question.clone();
+            thread::spawn(move || call(&path, question))
+        };
+        let ConversationEvent::Elicitation {
+            message,
+            fields,
+            responder,
+            ..
+        } = events.recv_blocking().unwrap()
+        else {
+            panic!("选择题要出成提问卡");
+        };
+        assert_eq!(message, "按哪个方案做？");
+        assert!(fields[0].allow_custom_input);
+        responder.accept(std::collections::BTreeMap::from([(
+            fields[0].key.clone(),
+            ElicitationContentValue::String("按推荐方案".into()),
+        )]));
+        assert_eq!(
+            asking.join().unwrap(),
+            serde_json::json!({
+                "ok": true,
+                "answers": [{"question": "按哪个方案做？", "answer": ["按推荐方案"]}],
+            })
+        );
+
+        let asking = thread::spawn(move || call(&path, question));
+        let ConversationEvent::Elicitation { responder, .. } = events.recv_blocking().unwrap()
+        else {
+            panic!("选择题要出成提问卡");
+        };
+        drop(responder);
+        assert_eq!(
+            asking.join().unwrap(),
+            serde_json::json!({"ok": true, "cancelled": true})
+        );
     }
 
     /// 子智能体是另一个 Pi 进程，连的是同一个会话宿主。它的监听不能把会话的监听挤掉，

@@ -249,6 +249,8 @@ pub enum ElicitFieldKind {
 pub struct ElicitOption {
     pub value: ElicitationContentValue,
     pub label: String,
+    /// 选项的补充说明，跟标题分开显示。
+    pub description: Option<String>,
 }
 
 /// 一个 CLI 或运行时可执行文件的本机诊断结果。

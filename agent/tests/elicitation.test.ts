@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Type } from "typebox";
 import {
 	createEventBus,
@@ -6,16 +9,15 @@ import {
 	defineTool,
 	ExtensionRunner,
 	type ExtensionFactory,
-	type ExtensionUIContext,
 	type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 import {
-	MULTI_SELECT_TITLE_MARK,
 	SMELT_ELICITATION_EXTENSION_PATH,
 	SMELT_ELICITATION_TOOL_NAME,
 	parseAskUserQuestions,
 } from "../src/elicitation.ts";
+import { SMELT_BACKGROUND_TASK_SOCK_ENV } from "../src/background-task.ts";
 import { SMELT_EXTENSION_FACTORIES } from "../src/runtime-extensions.ts";
 
 function toolConflicts(
@@ -92,6 +94,50 @@ async function loadHostExtensions(preceding: ExtensionFactory[] = []) {
 		}));
 	await loaded.runner.emit({ type: "session_start", reason: "startup" });
 	return loaded;
+}
+
+/** 假会话宿主：记下每个请求，回固定的答复。 */
+async function fakeHost(answer: Record<string, unknown>) {
+	const path = join(tmpdir(), `smelt-ask-${process.pid}-${Math.random().toString(16).slice(2)}.sock`);
+	const requests: Record<string, unknown>[] = [];
+	const server = createServer((socket) => {
+		let buffer = "";
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString();
+			const newline = buffer.indexOf("\n");
+			if (newline < 0) return;
+			requests.push(JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>);
+			socket.end(`${JSON.stringify(answer)}\n`);
+		});
+	});
+	await new Promise<void>((resolve) => server.listen(path, resolve));
+	return {
+		path,
+		requests,
+		close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+	};
+}
+
+type HostTool = NonNullable<Awaited<ReturnType<typeof loadHostExtensions>>["runner"]["getToolDefinition"] extends (
+	name: string,
+) => infer T
+	? T
+	: never>;
+
+/** 在指定的宿主套接字下取出选择题工具来跑。 */
+async function withHost<T>(path: string | undefined, run: (tool: HostTool) => Promise<T>): Promise<T> {
+	const previous = process.env[SMELT_BACKGROUND_TASK_SOCK_ENV];
+	if (path) process.env[SMELT_BACKGROUND_TASK_SOCK_ENV] = path;
+	else delete process.env[SMELT_BACKGROUND_TASK_SOCK_ENV];
+	try {
+		const { runner } = await loadHostExtensions();
+		const tool = runner.getToolDefinition(SMELT_ELICITATION_TOOL_NAME);
+		expect(tool).toBeDefined();
+		return await run(tool!);
+	} finally {
+		if (previous === undefined) delete process.env[SMELT_BACKGROUND_TASK_SOCK_ENV];
+		else process.env[SMELT_BACKGROUND_TASK_SOCK_ENV] = previous;
+	}
 }
 
 describe("elicitation payload shape", () => {
@@ -175,94 +221,85 @@ describe("host elicitation tool", () => {
 		expect(toolConflicts(extensions)).toEqual([]);
 	});
 
-	test("shows a choice card through ui.select", async () => {
-		const { runner } = await loadHostExtensions();
-		const tool = runner.getToolDefinition(SMELT_ELICITATION_TOOL_NAME);
-		expect(tool).toBeDefined();
-		const shown: Array<{ title: string; options: string[] }> = [];
-		const result = await tool!.execute(
-			"tool-1",
-			{ question: "用哪种节奏？", options: ["紧凑续集", "开放番外"] },
-			new AbortController().signal,
-			() => {},
-			{
-				ui: {
-					select: async (title, options) => {
-						shown.push({ title, options });
-						return options[1];
-					},
-				} as ExtensionUIContext,
-			} as never,
-		);
-		expect(shown).toEqual([{ title: "用哪种节奏？", options: ["紧凑续集", "开放番外"] }]);
-		expect(result.content).toEqual([
-			{
-				type: "text",
-				text: JSON.stringify([{ question: "用哪种节奏？", answer: "开放番外" }]),
-			},
-		]);
-	});
-
-	test("single-select preserves labels that look like JSON arrays", async () => {
-		const { runner } = await loadHostExtensions();
-		const tool = runner.getToolDefinition(SMELT_ELICITATION_TOOL_NAME);
-		expect(tool).toBeDefined();
-		const result = await tool!.execute(
-			"tool-json-label",
-			{ question: "选哪个原文？", options: ['["A"]', "普通标签"] },
-			new AbortController().signal,
-			() => {},
-			{
-				ui: {
-					select: async () => '["A"]',
-				} as unknown as ExtensionUIContext,
-			} as never,
-		);
-		expect(result.content).toEqual([
-			{
-				type: "text",
-				text: JSON.stringify([{ question: "选哪个原文？", answer: '["A"]' }]),
-			},
-		]);
-	});
-
-	test("multi-select returns every chosen label", async () => {
-		const { runner } = await loadHostExtensions();
-		const tool = runner.getToolDefinition(SMELT_ELICITATION_TOOL_NAME);
-		expect(tool).toBeDefined();
-		const shown: string[] = [];
-		const result = await tool!.execute(
-			"tool-2",
-			{
-				questions: [
+	test("hands the whole question group to the session host and returns its answers", async () => {
+		const answers = [
+			{ question: "提醒走哪个渠道？", answer: ["Gitea Issue", "自己写的渠道"] },
+			{ question: "用哪种节奏？", answer: ["开放番外"] },
+		];
+		const host = await fakeHost({ ok: true, answers });
+		try {
+			const result = await withHost(host.path, async (tool) =>
+				tool.execute(
+					"tool-1",
 					{
-						question: "提醒走哪个渠道？",
-						multiSelect: true,
-						options: [
-							{ label: "Gitea Issue", description: "仓库待办" },
-							{ label: "Bark", description: "手机推送" },
-							{ label: "邮件" },
+						questions: [
+							{
+								question: "提醒走哪个渠道？",
+								multiSelect: true,
+								options: [
+									{ label: "Gitea Issue", description: "仓库待办" },
+									{ label: "Bark", description: "手机推送" },
+								],
+							},
+							{ question: "用哪种节奏？", options: ["紧凑续集", "开放番外"] },
 						],
 					},
-				],
-			},
-			new AbortController().signal,
-			() => {},
-			{
-				ui: {
-					select: async (title, options) => {
-						shown.push(title);
-						return JSON.stringify([options[0], options[1]]);
-					},
-				} as ExtensionUIContext,
-			} as never,
+					new AbortController().signal,
+					() => {},
+					{} as never,
+				),
+			);
+			expect(host.requests.filter((request) => request.op === "ask_user")).toEqual([
+				{
+					owner: "",
+					op: "ask_user",
+					questions: [
+						{
+							question: "提醒走哪个渠道？",
+							multiSelect: true,
+							options: [
+								{ label: "Gitea Issue", description: "仓库待办" },
+								{ label: "Bark", description: "手机推送" },
+							],
+						},
+						{
+							question: "用哪种节奏？",
+							multiSelect: false,
+							options: [{ label: "紧凑续集" }, { label: "开放番外" }],
+						},
+					],
+				},
+			]);
+			expect(result.content).toEqual([{ type: "text", text: JSON.stringify(answers) }]);
+			expect(result.details).toEqual({ answers });
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("a skipped card tells the model the user did not answer", async () => {
+		const host = await fakeHost({ ok: true, cancelled: true });
+		try {
+			const result = await withHost(host.path, async (tool) =>
+				tool.execute(
+					"tool-2",
+					{ question: "用哪种节奏？", options: ["紧凑续集"] },
+					new AbortController().signal,
+					() => {},
+					{} as never,
+				),
+			);
+			expect(result.details).toEqual({ cancelled: true });
+			expect(result.isError).toBeUndefined();
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("reports an error when there is nothing to ask", async () => {
+		const result = await withHost(undefined, async (tool) =>
+			tool.execute("tool-3", { question: "空的", options: [] }, new AbortController().signal, () => {}, {} as never),
 		);
-		expect(shown).toEqual([`${MULTI_SELECT_TITLE_MARK}提醒走哪个渠道？`]);
-		expect(result.content).toEqual([
-			{
-				type: "text",
-				text: JSON.stringify([{ question: "提醒走哪个渠道？", answer: "Gitea Issue、Bark" }]),
-			},
-		]);
+		expect(result.isError).toBe(true);
 	});
 });
