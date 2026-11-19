@@ -30,6 +30,10 @@ pub fn smelt_home() -> Option<PathBuf> {
     )
 }
 
+/// smeltd 的本机连接口，在 `~/.smelt` 顶层。启动锁等文件名由它推出来（见 smeltd
+/// `bind_single_instance`），同样要登记在 [`DECLARED_ENTRIES`] 里。
+pub const SMELTD_SOCK: &str = "smeltd.sock";
+
 /// `~/.smelt` 顶层登记过的条目：名字和谁在读写。
 ///
 /// 设置里的「清理残留」只留这里的条目，别的一律当历史残留删掉。所以**往 `~/.smelt` 顶层
@@ -43,9 +47,12 @@ pub const DECLARED_ENTRIES: &[&str] = &[
     // 应用日志和它轮转出来的上一代（smelt-sys `app_log`）。
     "app.log",
     "app.log.1",
-    // 守护自身的生命周期日志、本机连接口（smeltd）。
+    // 守护自身的生命周期日志、本机连接口，和启动时串行化 bind 的锁、Windows 的单实例锁
+    // （smeltd `bind_single_instance`）。
     "daemon.log",
-    "smeltd.sock",
+    SMELTD_SOCK,
+    "smeltd.lock",
+    "smeltd.instance.lock",
     // 运行时和客户端各自的 iroh 身份（smelt-iroh）。
     "iroh-secret",
     "client-iroh-secret",

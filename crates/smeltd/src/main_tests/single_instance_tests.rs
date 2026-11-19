@@ -32,8 +32,8 @@ fn concurrent_starters_leave_exactly_one_listener() {
         .count();
     assert_eq!(listeners, 1, "并发启动只能有一个进程取得 listener");
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("lock"));
-    let _ = std::fs::remove_file(path.with_extension("instance.lock"));
+    let _ = std::fs::remove_file(startup_lock_path(&path));
+    let _ = std::fs::remove_file(instance_lock_path(&path));
 }
 
 #[test]
@@ -48,6 +48,16 @@ fn stale_socket_path_is_replaced_while_holding_startup_lock() {
 
     drop(listener);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("lock"));
-    let _ = std::fs::remove_file(path.with_extension("instance.lock"));
+    let _ = std::fs::remove_file(startup_lock_path(&path));
+    let _ = std::fs::remove_file(instance_lock_path(&path));
+}
+
+/// 锁文件落在 `~/.smelt` 顶层，没登记的话「清理残留」每次都会把这个活文件列出来。
+#[test]
+fn daemon_lock_files_are_declared_entries() {
+    let sock = std::path::Path::new(smelt_paths::SMELTD_SOCK);
+    for lock in [startup_lock_path(sock), instance_lock_path(sock)] {
+        let name = lock.to_str().unwrap();
+        assert!(smelt_paths::is_declared_entry(name), "{name} 没登记");
+    }
 }

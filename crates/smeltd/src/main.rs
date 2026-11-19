@@ -273,7 +273,7 @@ fn acquire_spawn_permit(
 fn sock_path() -> std::path::PathBuf {
     let dir = smelt_paths::smelt_home().unwrap_or_else(|| std::env::temp_dir().join(".smelt"));
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("smeltd.sock")
+    dir.join(smelt_paths::SMELTD_SOCK)
 }
 
 /// 本进程按哪条路径重启。从 `~/.smelt/bin` 起的就是那里固定名字的 smeltd（从旧布局升上来的
@@ -346,7 +346,7 @@ fn bind_single_instance(
     path: &std::path::Path,
     check_existing: bool,
 ) -> std::io::Result<Option<DaemonListener>> {
-    let lock_path = path.with_extension("lock");
+    let lock_path = startup_lock_path(path);
     // 锁只覆盖「检查 → 删僵尸 sock → bind」。函数结束就放锁；长期单实例靠套接字文件本身。
     let _lock = {
         let lock = std::fs::OpenOptions::new()
@@ -382,7 +382,7 @@ fn bind_single_instance(
     check_existing: bool,
 ) -> std::io::Result<Option<DaemonListener>> {
     use smelt_sys::file_lock::ExclusiveFile;
-    let lock_path = path.with_extension("instance.lock");
+    let lock_path = instance_lock_path(path);
     let instance = if check_existing {
         match ExclusiveFile::try_lock(&lock_path)? {
             Some(instance) => instance,
@@ -395,6 +395,19 @@ fn bind_single_instance(
     let _ = std::fs::remove_file(path);
     let listener = RuntimeListener::bind_taking_over(path)?;
     Ok(Some(DaemonListener { listener, instance }))
+}
+
+/// 串行化启动的锁，放在连接口旁边。改名字要同步 `smelt_paths::DECLARED_ENTRIES`，
+/// 不然「清理残留」会把它列出来。
+#[cfg_attr(not(unix), allow(dead_code))]
+fn startup_lock_path(sock: &std::path::Path) -> std::path::PathBuf {
+    sock.with_extension("lock")
+}
+
+/// Windows 的单实例锁，放在连接口旁边。登记要求同 [`startup_lock_path`]。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn instance_lock_path(sock: &std::path::Path) -> std::path::PathBuf {
+    sock.with_extension("instance.lock")
 }
 
 fn bind_fresh_daemon(path: &std::path::Path) -> std::io::Result<Option<DaemonListener>> {

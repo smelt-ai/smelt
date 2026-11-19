@@ -15,7 +15,7 @@ use crate::{LocalConnector, RuntimeClient};
 pub fn smeltd_sock_path() -> PathBuf {
     let dir = smelt_paths::smelt_home().unwrap_or_else(|| std::env::temp_dir().join(".smelt"));
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("smeltd.sock")
+    dir.join(smelt_paths::SMELTD_SOCK)
 }
 
 /// 本机运行时的协议客户端。
