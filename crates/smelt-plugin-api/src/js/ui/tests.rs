@@ -115,7 +115,6 @@ fn components_hold_only_smelt_controls() {
             "SmeltBadge",
             "SmeltViewInstance",
             "SmeltWindowBar",
-            "SmeltSortableList",
             "SmeltListRow",
             "SmeltStickySection",
             "SmeltTruncatedLine",
@@ -129,6 +128,7 @@ fn components_hold_only_smelt_controls() {
             "SmeltDialog",
             "SmeltScrollView",
             "SmeltScrollAnchor",
+            "SmeltDragItem",
         ]
     );
     let states = components
@@ -800,27 +800,32 @@ fn drag(context: &mut VisualTestContext, from_y: f32, to_y: f32) {
 
 /// 拖一行松在别的行上就回调挪到哪；松回原处、松在列表外不回调。
 #[gpui::test]
-fn sortable_list_reports_where_a_row_moved(cx: &mut TestAppContext) {
+fn drag_items_report_drops_of_their_own_kind(cx: &mut TestAppContext) {
     let source = r#"
 import { View, div } from "gpui-kit";
-import { SmeltSortableList } from "smelt-ui";
+import { SmeltDragItem, SmeltScrollView } from "smelt-ui";
 export default class App extends View {
-  init() { this.items = ["a", "b", "c"]; this.calls = []; }
+  init() { this.items = ["a", "b", "c"]; this.calls = []; this.files = ""; }
   render() {
     let rejected = 0;
-    for (const bad of [() => SmeltSortableList.new(""), () => SmeltSortableList.new("l").on_reorder(1)]) {
+    for (const bad of [() => SmeltDragItem.new("", "row"), () => SmeltDragItem.new("x", "row").on_drop(1)]) {
       try { bad(); } catch (_) { rejected++; }
     }
+    const item = (id, kind) => SmeltDragItem.new(id, kind).w(200).h(30)
+      .content(div().size_full().child(`row ${id}`))
+      .on_drop((from, before, cx) => {
+        this.calls.push(`${from}${before ? "<" : ">"}${id}`);
+        const rest = this.items.filter((it) => it !== from);
+        const at = rest.indexOf(id) + (before ? 0 : 1);
+        rest.splice(at, 0, from);
+        this.items = rest;
+        cx.notify();
+      });
     return div().size_full().flex().flex_col()
-      .child(SmeltSortableList.new("list").w(200)
-        .on_reorder((from, to, cx) => {
-          const [item] = this.items.splice(from, 1);
-          this.items.splice(to, 0, item);
-          this.calls.push(`${from}>${to}`);
-          cx.notify();
-        })
-        .children(this.items.map((item) => div().h(30).child(`row ${item}`))))
-      .child(`rejected: ${rejected}; order: ${this.items.join(",")}; calls: ${this.calls.join(" ")}`);
+      .child(SmeltScrollView.new("list").h(200)
+        .on_drop_files((paths, cx) => { this.files = paths.join(","); cx.notify(); })
+        .children([...this.items.map((id) => item(id, "row")), item("d", "other")]))
+      .child(`rejected: ${rejected}; order: ${this.items.join(",")}; calls: ${this.calls.join(" ")}; files: ${this.files}`);
   }
 }
 "#;
@@ -833,30 +838,98 @@ export default class App extends View {
         let line = tree[start..].lines().next().unwrap();
         line.trim_end_matches('"').to_string()
     };
-    assert!(state(&mut context).starts_with("rejected: 2; order: a,b,c; calls: "));
+    assert!(state(&mut context).starts_with("rejected: 2; order: a,b,c; calls: ;"));
 
-    // 第一行拖到第三行的下半：挪到最后。
+    // 第一项拖到第三项的下半：放在它后面。
     drag(&mut context, 15., 80.);
     assert!(
-        state(&mut context).contains("order: b,c,a; calls: 0>2"),
+        state(&mut context).contains("order: b,c,a; calls: a>c;"),
         "{}",
         state(&mut context)
     );
 
-    // 最后一行拖到第一行的上半：挪到最前。
+    // 最后一项拖到第一项的上半：放在它前面。
     drag(&mut context, 75., 5.);
     assert!(
-        state(&mut context).contains("order: a,b,c; calls: 0>2 2>0"),
+        state(&mut context).contains("order: a,b,c; calls: a>c a<b;"),
         "{}",
         state(&mut context)
     );
 
-    // 松回原处、松在列表外：不回调。
+    // 落回自己上、别的种类拖进来、松在外面：都不报。
     drag(&mut context, 45., 50.);
+    drag(&mut context, 105., 15.);
     drag(&mut context, 45., 300.);
     assert!(
-        state(&mut context).ends_with("calls: 0>2 2>0"),
+        state(&mut context).contains("calls: a>c a<b;"),
         "{}",
         state(&mut context)
     );
+
+    // 从访达拖文件进滚动区域。
+    let position = point(px(10.), px(40.));
+    context.simulate_event(gpui::FileDropEvent::Entered {
+        position,
+        paths: gpui::ExternalPaths(
+            ["/tmp/one", "/tmp/two"]
+                .map(Into::into)
+                .into_iter()
+                .collect(),
+        ),
+    });
+    draw(&mut context);
+    context.simulate_event(gpui::FileDropEvent::Submit { position });
+    draw(&mut context);
+    assert!(
+        state(&mut context).ends_with("files: /tmp/one,/tmp/two"),
+        "{}",
+        state(&mut context)
+    );
+}
+
+/// 拖着停在滚动区域下沿：按帧自动滚下去，松手就停。
+#[gpui::test]
+fn dragging_at_the_edge_scrolls(cx: &mut TestAppContext) {
+    use gpui::MouseButton;
+
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltDragItem, SmeltScrollAnchor, SmeltScrollView } from "smelt-ui";
+export default class App extends View {
+  init() { this.above = ""; }
+  render() {
+    const rows = [];
+    for (let i = 0; i < 20; i++) {
+      rows.push(SmeltScrollAnchor.new(`r${i}`).child(
+        SmeltDragItem.new(`r${i}`, "row").h(30).content(div().size_full().child(`row ${i}`))));
+    }
+    return div().size_full().flex().flex_col()
+      .child(SmeltScrollView.new("list").h(100).watch(["r0"])
+        .on_offscreen((above, _below, cx) => { this.above = above.join(","); cx.notify(); })
+        .children(rows))
+      .child(div().child(`above: ${this.above};`));
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    let (from, edge) = (point(px(10.), px(15.)), point(px(10.), px(98.)));
+    context.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(
+        point(px(10.), px(19.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    draw(&mut context);
+    context.simulate_mouse_move(edge, MouseButton::Left, Modifiers::default());
+    draw(&mut context);
+    context
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    draw(&mut context);
+    draw(&mut context);
+    let during = tree(&mut context, &view);
+    assert!(during.contains("above: r0;"), "{during}");
+    context.simulate_mouse_up(edge, MouseButton::Left, Modifiers::default());
+    draw(&mut context);
 }

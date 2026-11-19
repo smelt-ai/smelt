@@ -251,7 +251,6 @@ fn registry() -> FrozenComponentRegistry {
     super::badge::register(&mut registry).unwrap();
     super::view::register(&mut registry).unwrap();
     super::window_bar::register(&mut registry).unwrap();
-    super::sortable::register(&mut registry).unwrap();
     registry
         .register(
             ComponentDescriptor::new("BenchMarkdown", Arc::new(MdMaterializer))

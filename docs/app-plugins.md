@@ -412,7 +412,7 @@ plugins/archive/
 
 ## 已知缺口
 
-- gpui-shell 没有通用的拖放绑定。同一列表里拖动改顺序用 `smelt-ui` 的 `SmeltSortableList`（2026-11-18，拖完回调 `on_reorder(from, to)`，顺序归脚本）；跨列表拖（会话拖进别的分组）、拖文件进来还没有，等有插件要再加。树和编辑器不缺：树用嵌套元素、折叠和虚拟列表拼，每行内容随意；多行编辑器（`TextareaState`）能读写内容和选区。终端由 `SmeltViewInstance` 嵌（2026-11-17）。
+- gpui-shell 没有通用的拖放绑定，拖放用 `smelt-ui` 的（2026-11-20）：`SmeltDragItem.new(id, kind)` 是能拖着换位置的一项，同一 `kind` 的项之间互放，放下时那一项的 `on_drop(from, before)` 交给脚本，顺序归脚本；分组、机器这些规则编进 `kind`，跨置顶区这类意义由脚本定。`SmeltScrollView` 里拖到上下边缘自动滚，`on_drop_files(paths)` 收从访达拖进来的文件。树和编辑器不缺：树用嵌套元素、折叠和虚拟列表拼，每行内容随意；多行编辑器（`TextareaState`）能读写内容和选区。终端由 `SmeltViewInstance` 嵌（2026-11-17）。
 - gpui-shell 的 `gpui-shell.json` 拒绝未知字段，所以脚本要通过宿主函数登记能力。
   - 命令用 `register_commands` 登记，用 `next_command` 取下一条要执行的，做完用 `resolve_command` / `reject_command` 按 id 交回结果（`run` 它的一方等着），用 `run` 执行别人的命令。
   - 命令只管工作台级的动作；跟着焦点变的键（列表上下移动、输入框编辑）用视图自己的 action。

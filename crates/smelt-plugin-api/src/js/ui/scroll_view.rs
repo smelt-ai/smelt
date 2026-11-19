@@ -10,6 +10,10 @@
 //! - `overlay_top(元素)` / `overlay_bottom(元素)`：浮在可视区上下沿的东西，上面那个让到停住的
 //!   吸顶标题下面。
 //! - `edges()`：滚过了上沿出一条细线，下面还有下沿出一条，和上下摆着的东西分开。
+//! - `on_drop_files((paths, cx) => …)`：从访达拖文件进来松手，交来各个路径；拖在上面时铺一层
+//!   选区色表示「放这里」。
+//!
+//! 里面拖着 `SmeltDragItem` 贴着上下边缘时自动滚，离开边缘、松手就停。
 //!
 //! 子元素是内容，样式落在外框上（`flex_1`、`min_h_0` 这些让它占满剩下的高度）。
 
@@ -17,18 +21,21 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ElementId, IntoElement, ParentElement as _, RenderOnce, ScrollHandle,
-    StyleRefinement, Styled as _, Window, div, px,
+    AnyElement, App, Context, ElementId, EntityId, ExternalPaths, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Point, RenderOnce, ScrollHandle, StyleRefinement,
+    Styled as _, Window, div, point, px,
 };
-use gpui_base::StyledExt as _;
+use gpui_base::{AutoScroll, StyledExt as _};
 use gpui_shell::{
-    ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentCallbackArgument,
-    ComponentDescriptor, ComponentMaterializer, ComponentPayload, ComponentRegistry,
-    ConstructorDescriptor, MaterializeRequest, MethodDescriptor, RegistryError, anyhow, gpui,
+    ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentCallback,
+    ComponentCallbackArgument, ComponentDescriptor, ComponentMaterializer, ComponentPayload,
+    ComponentRegistry, ConstructorDescriptor, MaterializeRequest, MethodDescriptor, RegistryError,
+    anyhow, gpui,
 };
 use smelt_ui::scrollbar::{Scrollable, ScrollbarAxis};
 use smelt_ui::{Placement, ScrollAnchors, ui_theme};
 
+use super::drag_item::ItemDrag;
 use super::{callback_method, control_id, flag_method, id_constructor, ops};
 
 const VIEW: &str = "SmeltScrollView";
@@ -42,6 +49,7 @@ enum Op {
     OverlayTop(ComponentArgument),
     OverlayBottom(ComponentArgument),
     Edges,
+    OnDropFiles(ComponentArgument),
 }
 
 /// 跨帧留着的：滚到哪、各行在哪，上次按过的 `serial`，上次报过的上下两边。
@@ -50,6 +58,9 @@ struct State {
     anchors: ScrollAnchors,
     revealed: Option<f64>,
     reported: (Vec<String>, Vec<String>),
+    auto_scroll: AutoScroll,
+    /// 画这块滚动区域的视图：自动滚了要它重画。
+    view: Option<EntityId>,
 }
 
 #[derive(IntoElement)]
@@ -59,10 +70,11 @@ struct ScrollView {
     style: StyleRefinement,
     reveal: Option<(String, f64)>,
     watch: Vec<String>,
-    on_offscreen: Option<gpui_shell::ComponentCallback>,
+    on_offscreen: Option<ComponentCallback>,
     overlay_top: Option<AnyElement>,
     overlay_bottom: Option<AnyElement>,
     edges: bool,
+    on_drop_files: Option<ComponentCallback>,
 }
 
 impl RenderOnce for ScrollView {
@@ -74,8 +86,12 @@ impl RenderOnce for ScrollView {
                 scroll,
                 revealed: None,
                 reported: Default::default(),
+                auto_scroll: AutoScroll::default(),
+                view: None,
             }
         });
+        let view = window.current_view();
+        state.update(cx, |state, _| state.view = Some(view));
         let (scroll, anchors) = {
             let state = state.read(cx);
             (state.scroll.clone(), state.anchors.clone())
@@ -144,6 +160,38 @@ impl RenderOnce for ScrollView {
                     .min_h_0()
                     .flex()
                     .flex_col()
+                    .on_drag_move::<ItemDrag>({
+                        let state = state.downgrade();
+                        move |event, _, cx| {
+                            let _ = state.update(cx, |state, cx| {
+                                auto_scroll(state, event.event.position, cx)
+                            });
+                        }
+                    })
+                    .when_some(self.on_drop_files, |area, callback| {
+                        area.drag_over::<ExternalPaths>(|style, _, _, _| {
+                            style.bg(ui_theme::selection())
+                        })
+                        .on_drop(
+                            move |paths: &ExternalPaths, window, cx| {
+                                let paths = paths
+                                    .paths()
+                                    .iter()
+                                    .map(|path| {
+                                        ComponentCallbackArgument::String(
+                                            path.to_string_lossy().into_owned(),
+                                        )
+                                    })
+                                    .collect();
+                                callback.invoke_and_report_with(
+                                    "SmeltScrollView.on_drop_files callback failed",
+                                    &[ComponentCallbackArgument::Array(paths)],
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )
+                    })
                     .child(Scrollable::new(
                         (self.id.clone(), "scroll"),
                         content,
@@ -175,6 +223,32 @@ impl RenderOnce for ScrollView {
     }
 }
 
+/// 拖着走时指针动了：贴着上下边缘就开始（或接着）自动滚，离开边缘就停。
+fn auto_scroll(state: &mut State, position: Point<Pixels>, cx: &mut Context<State>) {
+    let bounds = state.scroll.bounds();
+    let beside = position.x >= bounds.left() && position.x <= bounds.right();
+    let delta = beside
+        .then(|| AutoScroll::compute_delta(position.y, bounds))
+        .flatten();
+    // 轮询例外：指针停在边缘不动就没有事件，滚动只能按帧推进；周期 16ms，只在拖着且停在
+    // 上下边缘时跑，离开边缘、松手（下一帧看到没在拖）就停。
+    state.auto_scroll.set(delta, cx, |delta, state, cx| {
+        if !cx.has_active_drag() {
+            state.auto_scroll.stop();
+            return;
+        }
+        let offset = state.scroll.offset();
+        let max = f32::from(state.scroll.max_offset().y);
+        let next = px((f32::from(offset.y) - f32::from(delta)).clamp(-max, 0.));
+        if next != offset.y {
+            state.scroll.set_offset(point(offset.x, next));
+            if let Some(view) = state.view {
+                App::notify(cx, view);
+            }
+        }
+    });
+}
+
 struct ScrollViewMaterializer;
 
 impl ComponentMaterializer for ScrollViewMaterializer {
@@ -190,6 +264,7 @@ impl ComponentMaterializer for ScrollViewMaterializer {
             overlay_top: None,
             overlay_bottom: None,
             edges: false,
+            on_drop_files: None,
         };
         for op in ops::<Op>(&request).cloned().collect::<Vec<_>>() {
             match op {
@@ -205,6 +280,9 @@ impl ComponentMaterializer for ScrollViewMaterializer {
                     view.overlay_bottom = Some(request.resolve_element(&element)?)
                 }
                 Op::Edges => view.edges = true,
+                Op::OnDropFiles(callback) => {
+                    view.on_drop_files = Some(request.resolve_callback(&callback)?)
+                }
             }
         }
         anyhow::ensure!(
@@ -312,6 +390,13 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                     "overlay_bottom",
                     "Floats over the bottom edge of the visible area.",
                     Op::OverlayBottom,
+                ),
+                callback_method(
+                    VIEW,
+                    "on_drop_files",
+                    "(paths: string[], cx: Context) => void",
+                    "Runs when files or folders dragged in from the system are dropped on the area, with their paths.",
+                    Op::OnDropFiles,
                 ),
                 flag_method(
                     "edges",

@@ -25,6 +25,8 @@ mod confirm;
 #[deny(dead_code)]
 mod dialog;
 #[deny(dead_code)]
+mod drag_item;
+#[deny(dead_code)]
 mod field;
 #[deny(dead_code)]
 mod keybind;
@@ -40,8 +42,6 @@ mod scroll_view;
 mod select;
 #[deny(dead_code)]
 mod settings;
-#[deny(dead_code)]
-mod sortable;
 #[deny(dead_code)]
 mod sticky;
 #[deny(dead_code)]
@@ -76,7 +76,6 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     badge::register(&mut registry)?;
     view::register(&mut registry)?;
     window_bar::register(&mut registry)?;
-    sortable::register(&mut registry)?;
     list_row::register(&mut registry)?;
     sticky::register(&mut registry)?;
     truncated_line::register(&mut registry)?;
@@ -87,6 +86,7 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     settings::register(&mut registry)?;
     dialog::register(&mut registry)?;
     scroll_view::register(&mut registry)?;
+    drag_item::register(&mut registry)?;
     registry.freeze()
 }
 
