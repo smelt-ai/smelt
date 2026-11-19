@@ -579,12 +579,28 @@ fn render_diff(
         .relative()
         .min_h_0()
         .min_w_0()
-        .when(!fit_height, |body| body.flex_1())
+        // Fitted, the cap above reaches the list only through flex columns
+        // that may shrink below their content: the list then gets the capped
+        // height and scrolls inside it, instead of being as tall as its rows
+        // and clipped (the wrappers in between take their child's layout).
+        .map(|body| {
+            if fit_height {
+                body.flex().flex_col()
+            } else {
+                body.flex_1()
+            }
+        })
         .child(SelectionLayer::new(
             div()
                 .id("diff-horizontal")
                 .w_full()
-                .when(!fit_height, |this| this.h_full())
+                .map(|this| {
+                    if fit_height {
+                        this.flex().flex_col().min_h_0()
+                    } else {
+                        this.h_full()
+                    }
+                })
                 // Preserve offset tracking and clipping without GPUI's
                 // single-axis wheel remapping. The sibling mask owns X input.
                 .when(!soft_wrap, |this| this.overflow_x_hidden())

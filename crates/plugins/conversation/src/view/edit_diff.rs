@@ -556,7 +556,8 @@ mod tests {
         assert!(height < px(200.), "改一行的弹窗应只有几行高：{height:?}");
     }
 
-    /// 内容比上限高：弹窗停在上限，压到卡片以内，在 diff 里滚，卡片不跟着滚。
+    /// 内容比上限高：弹窗停在上限，压到卡片以内，在 diff 里滚，卡片不跟着滚。列表真被压到
+    /// 上限、滚得动，见 smelt-ui 的 `a_fitted_patch_past_its_cap_scrolls_inside_it`。
     #[gpui::test]
     fn a_long_edit_stops_at_the_cap_and_scrolls_inside(cx: &mut gpui::TestAppContext) {
         let new = (0..300).map(|ix| format!("line {ix}\n")).collect();
