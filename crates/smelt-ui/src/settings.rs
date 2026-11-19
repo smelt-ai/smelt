@@ -12,12 +12,14 @@
 //! 页面里都一样宽。
 
 use gpui::{
-    AnyElement, App, ElementId, IntoElement, ParentElement, RenderOnce, ScrollHandle, SharedString,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rems, rgb,
+    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, px, rems, rgb,
 };
 
 use crate::kit::{RADIUS, TYPE, TypeStyled as _};
 use crate::scrollbar::{Scrollable, ScrollbarAxis};
+use crate::tooltip::Tooltip;
 use crate::ui_theme;
 
 /// 卡片里每一项的左右内边距；分组标题、分隔线跟它对齐。
@@ -25,6 +27,8 @@ const CELL_PADDING_X: f32 = 16.;
 /// 卡片里每一项的上下内边距。行内容至少 28 高（一个默认按钮），加上它整行 44。
 const CELL_PADDING_Y: f32 = 8.;
 const ROW_MIN_HEIGHT: f32 = 28.;
+/// 收起的说明悬停出全文时，提示最宽多少（rem）：再宽一行字读不过来。
+const CLAMPED_TOOLTIP_MAX_WIDTH: f32 = 30.;
 /// 分组之间、分组标题和卡片之间的间距。
 const SECTION_GAP: f32 = 24.;
 const HEADER_GAP: f32 = 8.;
@@ -183,10 +187,15 @@ impl RenderOnce for SettingsSection {
 ///
 /// 控件要多宽由控件自己定；名字那一侧占剩下的，太窄时说明换行。控件的禁用、读屏名字也由
 /// 控件自己给。
+///
+/// 说明长短不由我们定时（技能、扩展的自述），用 [`SettingsRow::clamp_description`] 收成
+/// 几行、悬停看全文；来源、状态这类短句放 [`SettingsRow::note`]，不跟着收。
 #[derive(IntoElement)]
 pub struct SettingsRow {
     title: SharedString,
     description: Option<SharedString>,
+    clamp: Option<(ElementId, usize)>,
+    note: Option<SharedString>,
     children: Vec<AnyElement>,
 }
 
@@ -195,12 +204,26 @@ impl SettingsRow {
         Self {
             title: title.into(),
             description: None,
+            clamp: None,
+            note: None,
             children: Vec::new(),
         }
     }
 
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// 说明最多显示 `lines` 行，多的省略，悬停说明看全文。`id` 给悬停提示用，同一页里要唯一。
+    pub fn clamp_description(mut self, id: impl Into<ElementId>, lines: usize) -> Self {
+        self.clamp = Some((id.into(), lines.max(1)));
+        self
+    }
+
+    /// 说明下面的附注（来源、谁在用、失效原因），换行照原样分行，不受收起影响。
+    pub fn note(mut self, note: impl Into<SharedString>) -> Self {
+        self.note = Some(note.into());
         self
     }
 }
@@ -226,11 +249,32 @@ impl RenderOnce for SettingsRow {
                     .child(self.title),
             )
             .when_some(self.description, |this, description| {
+                let text = div()
+                    .type_style(TYPE.text_small)
+                    .text_color(rgb(ui_theme::muted()));
+                this.child(match self.clamp {
+                    Some((id, lines)) => {
+                        let full = description.clone();
+                        text.id(id)
+                            .text_ellipsis()
+                            .line_clamp(lines)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(full.clone())
+                                    .max_w(rems(CLAMPED_TOOLTIP_MAX_WIDTH))
+                                    .build(window, cx)
+                            })
+                            .child(description)
+                            .into_any_element()
+                    }
+                    None => text.child(description).into_any_element(),
+                })
+            })
+            .when_some(self.note, |this, note| {
                 this.child(
                     div()
                         .type_style(TYPE.text_small)
                         .text_color(rgb(ui_theme::muted()))
-                        .child(description),
+                        .child(note),
                 )
             });
         div()

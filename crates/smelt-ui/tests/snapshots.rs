@@ -141,7 +141,7 @@ const SNAPSHOTS: &[Snapshot] = &[
     },
     Snapshot {
         name: "settings",
-        size: (640., 620.),
+        size: (640., 760.),
         setup: settings_page,
     },
     Snapshot {
@@ -1469,6 +1469,19 @@ fn settings_page(window: &mut Window, cx: &mut App) -> Draw {
                             .description("留空用默认的公共 relay")
                             .child(TextInput::new(&relay).w(px(220.))),
                     ),
+            )
+            .child(
+                SettingsSection::new().title("已安装").child(
+                    SettingsRow::new("示例技能")
+                        .description(
+                            "一段很长的说明，用来看收起的样子：第一行写满，第二行也写满，\
+                             第三行开始应该被省略号截掉，悬停时才看得到全文。\n\
+                             第二段：这里的字不应该出现在收起后的行里。",
+                        )
+                        .clamp_description("long-description", 2)
+                        .note("~/.agents/skills/example · 示例智能体 在用\n附注第二行不受收起影响。")
+                        .child(Button::new("delete").quiet().small().label("删除")),
+                ),
             )
             .into_any_element()
     })

@@ -531,12 +531,9 @@ plugins:
     skill:
       en: "No skills installed yet."
       zh-CN: "还没有装技能。"
-  origin:
-    en: "Source: %{origin} · %{path}"
-    zh-CN: "来源：%{origin} · %{path}"
   origin_builtin:
-    en: "Source: built into %{origin}, updated with it"
-    zh-CN: "来源：%{origin} 内置，跟着 Smelt 更新"
+    en: "Built into %{origin}"
+    zh-CN: "%{origin} 内置"
   pick_copy:
     en: "Keep…"
     zh-CN: "以哪份为准"
@@ -546,13 +543,6 @@ plugins:
   scan:
     en: "Scanned Folders"
     zh-CN: "扫描目录"
-  scan_summary:
-    extension:
-      en: "Found %{count} extensions."
-      zh-CN: "当前扫到 %{count} 个扩展。"
-    skill:
-      en: "Found %{count} skills."
-      zh-CN: "当前扫到 %{count} 个技能。"
   sources:
     en: "Sources"
     zh-CN: "来源"
@@ -578,11 +568,11 @@ plugins:
       en: "%{usable} usable skills installed, plus %{broken} broken entries (usually dead symlinks) that should be deleted."
       zh-CN: "已装 %{usable} 个可用的技能，另有 %{broken} 个失效条目（多半是断掉的软链），建议删掉。"
   unused:
-    en: "No agent uses it yet."
-    zh-CN: "暂时没有智能体勾选它。"
+    en: "Not used by any agent"
+    zh-CN: "没有智能体在用"
   used_by:
-    en: "Used by %{names}."
-    zh-CN: "正在被 %{names} 使用。"
+    en: "Used by %{names}"
+    zh-CN: "%{names} 在用"
   user_separator:
     en: ", "
     zh-CN: "、"

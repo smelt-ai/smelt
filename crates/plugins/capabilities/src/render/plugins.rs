@@ -51,7 +51,7 @@ pub(super) fn pi_plugin_page(
         PiPluginKind::Extension => "capabilities-pane:extensions",
     })
     .child(page_intro(summary))
-    .child(overview_section(entity.clone(), kind, plugins.len()))
+    .child(overview_section(entity.clone(), kind))
     .children(page.pi_plugin_error.clone().map(|error| {
         SettingsSection::new()
             .title(t!("plugins.last_failed"))
@@ -65,11 +65,7 @@ pub(super) fn pi_plugin_page(
     .child(list_section(entity, page, kind, &plugins, cx))
 }
 
-fn overview_section(
-    entity: Entity<CapabilitiesPage>,
-    kind: PiPluginKind,
-    count: usize,
-) -> SettingsSection {
+fn overview_section(entity: Entity<CapabilitiesPage>, kind: PiPluginKind) -> SettingsSection {
     let roots = match kind {
         PiPluginKind::Skill => global_skill_roots(),
         PiPluginKind::Extension => vec![global_extension_root()],
@@ -80,23 +76,21 @@ fn overview_section(
 
     let import_entity = entity.clone();
     let refresh_entity = entity;
-    let (found, import_label, import_description, sources) = match kind {
+    let (import_label, import_description, sources) = match kind {
         PiPluginKind::Skill => (
-            t!("plugins.scan_summary.skill", count = count),
             t!("plugins.import_skill"),
             t!("plugins.import_description.skill"),
             t!("plugins.sources_description.skill"),
         ),
         PiPluginKind::Extension => (
-            t!("plugins.scan_summary.extension", count = count),
             t!("plugins.import_extension"),
             t!("plugins.import_description.extension"),
             t!("plugins.sources_description.extension"),
         ),
     };
-    // 目录路径长，列在说明里，不挤到行右边。
+    // 目录路径长，列在说明里，不挤到行右边。扫到几个页首已经说了。
     let scan = SettingsRow::new(t!("plugins.scan"))
-        .description(format!("{found}\n{}", roots.join("\n")))
+        .description(roots.join("\n"))
         .child(
             Button::new("refresh-pi-plugins")
                 .quiet()
@@ -215,6 +209,18 @@ fn adopt_button(entity: &Entity<CapabilitiesPage>, plugin: &PiPlugin) -> Option<
     )
 }
 
+/// 它在哪：内置的写随谁发布；别的写扫描目录下的那一项。路径取自扫描它的那台机器
+/// （`origin` 已把那边的家目录缩成 `~`），不拿本机的家目录去缩。
+fn location(plugin: &PiPlugin) -> String {
+    if plugin.builtin {
+        return t!("plugins.origin_builtin", origin = plugin.origin).into_owned();
+    }
+    match plugin.path.file_name() {
+        Some(name) => format!("{}/{}", plugin.origin, name.to_string_lossy()),
+        None => plugin.origin.clone(),
+    }
+}
+
 fn plugin_row(
     entity: &Entity<CapabilitiesPage>,
     page: &CapabilitiesPage,
@@ -231,40 +237,34 @@ fn plugin_row(
         .flatten();
     let entity = entity.clone();
     let id = plugin.id.clone();
-    let name = plugin.name.clone();
-    let origin = plugin.origin.clone();
-    let path = plugin.path.display().to_string();
-    let broken = plugin.broken.clone();
-    let description = plugin.description.clone();
-    let builtin = plugin.builtin;
 
-    let title = name;
-    let mut detail = Vec::new();
-    if !description.is_empty() {
-        detail.push(description);
-    }
-    if builtin {
-        detail.push(t!("plugins.origin_builtin", origin = origin).into_owned());
-    } else {
-        detail.push(t!("plugins.origin", origin = origin, path = path).into_owned());
-    }
-    if let Some(reason) = &broken {
-        detail.push(t!("plugins.broken", reason = reason).into_owned());
+    // 自述是写给模型看的，常常一大段：收成两行，悬停看全文。下面一行是哪来的、谁在用，
+    // 再往下才是要处理的状态。
+    let mut note = vec![match used_by {
+        Some(used_by) => format!("{} · {used_by}", location(plugin)),
+        None => location(plugin),
+    }];
+    if let Some(reason) = &plugin.broken {
+        note.push(t!("plugins.broken", reason = reason).into_owned());
     }
     if plugin.legacy_location && plugin.duplicates.is_empty() {
-        detail.push(t!("plugins.legacy").into_owned());
+        note.push(t!("plugins.legacy").into_owned());
     }
     if !plugin.duplicates.is_empty() {
-        detail.push(t!("plugins.duplicates", count = plugin.duplicates.len()).into_owned());
+        note.push(t!("plugins.duplicates", count = plugin.duplicates.len()).into_owned());
     }
-    detail.extend(used_by);
 
-    let row = SettingsRow::new(title)
-        .description(detail.join("\n"))
+    let mut row = SettingsRow::new(plugin.name.clone()).note(note.join("\n"));
+    if !plugin.description.is_empty() {
+        row = row
+            .description(plugin.description.clone())
+            .clamp_description(format!("pi-plugin-description-{id}"), 2);
+    }
+    let row = row
         .children(adopt_button(&entity, plugin))
         .children(uses_button);
     // 内置的跟着运行时更新，不能删。
-    if builtin {
+    if plugin.builtin {
         return row;
     }
     if pending {
