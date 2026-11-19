@@ -91,6 +91,9 @@ pub(crate) struct SessionAvatarArgs {
 pub(crate) const PROJECT_MENU: &str = "smelt.sessions/project";
 /// 会话列表里机器行的右键菜单。点了交给命令的上下文是 [`MachineMenuContext`]。
 pub(crate) const MACHINE_MENU: &str = "smelt.sessions/machine";
+/// 会话列表里对话行的右键菜单，别的插件登记的项排在自带的「置顶」「改名」后面。点了交给命令的
+/// 上下文是 [`SessionMenuContext`]。
+pub(crate) const SESSION_MENU: &str = "smelt.sessions/conversation";
 
 /// [`PROJECT_MENU`] 的上下文：右键的是哪个项目。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +109,17 @@ pub(crate) struct ProjectMenuContext {
 pub(crate) struct MachineMenuContext {
     #[serde(with = "machine_json")]
     pub machine: RuntimeKey,
+}
+
+/// [`SESSION_MENU`] 的上下文：右键的是哪台机器上的哪条对话。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SessionMenuContext {
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    /// 工作区目录里那条对话的 id（`workspace_directory` 里的那个，不是守护会话 id）。
+    pub conversation: String,
+    /// 领头那一格的守护会话 id（对话的，或第一格终端的）；还没起过是 `None`。
+    pub session_id: Option<String>,
 }
 
 // ---- 带参数的命令（给别的插件调） ----
@@ -408,7 +422,7 @@ mod tests {
             CLOSE_PANE.id(),
             COPY_SESSION_ID.id(),
         ];
-        let others = [LIST, SESSION, PROJECT_MENU, MACHINE_MENU];
+        let others = [LIST, SESSION, PROJECT_MENU, MACHINE_MENU, SESSION_MENU];
         let mut seen = std::collections::HashSet::new();
         for id in commands.into_iter().chain(others) {
             assert!(id.starts_with("smelt.sessions/"), "{id}");

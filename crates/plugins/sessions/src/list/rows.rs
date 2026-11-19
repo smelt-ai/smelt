@@ -1242,8 +1242,8 @@ fn session(row: &SessionRow, depth: usize, ctx: &RowCtx) -> AnyElement {
     let item = ctx.anchors.anchor(flip_key.clone(), item);
 
     let row = row.clone();
-    let item = MenuTrigger::context(eid(format!("session-menu:{id}")), item, move |_, _| {
-        menus::session_menu(&row, view.clone())
+    let item = MenuTrigger::context(eid(format!("session-menu:{id}")), item, move |_, cx| {
+        menus::session_menu(&row, view.clone(), cx)
     })
     .into_any_element();
     flip(ctx, flip_key, arrival_slot(arrival, row_height, item))

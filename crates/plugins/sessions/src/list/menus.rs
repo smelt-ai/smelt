@@ -1,7 +1,7 @@
 //! 列表上的菜单：会话、项目、工作树、机器（挂在「项目」标题上，按机器分开时也在机器的标题行上），「添加项目」选机器，和
-//! 「筛选与分组」。项目、机器菜单里还有别的插件登记进来的项
-//! （[`contract::PROJECT_MENU`]、[`contract::MACHINE_MENU`]，如「在 IDE 里打开」、机器的重连、
-//! 改名），点了按登记的命令执行，参数并上菜单的上下文。
+//! 「筛选与分组」。会话、项目、机器菜单里还有别的插件登记进来的项
+//! （[`contract::SESSION_MENU`]、[`contract::PROJECT_MENU`]、[`contract::MACHINE_MENU`]，如
+//! 「在 IDE 里打开」、机器的重连、改名），点了按登记的命令执行，参数并上菜单的上下文。
 
 use rust_i18n::t;
 use std::borrow::Cow;
@@ -14,13 +14,13 @@ use smelt_plugin_api::{self as api, ContextMenuAction, ContextMenuItem, RuntimeK
 use super::actions;
 use super::view::{ListView, RenameTarget};
 use super::{ProjectGroup, SessionRow, Sidebar, WorksetGroup};
-use crate::contract::{self, MachineMenuContext, ProjectMenuContext};
+use crate::contract::{self, MachineMenuContext, ProjectMenuContext, SessionMenuContext};
 use crate::dialogs;
 use crate::model::{FailTarget, Sessions, SidebarGrouping};
 use crate::worksets::WorksetKey;
 
 /// 会话行的菜单。
-pub(super) fn session_menu(row: &SessionRow, view: Entity<ListView>) -> Menu {
+pub(super) fn session_menu(row: &SessionRow, view: Entity<ListView>, cx: &App) -> Menu {
     let pin = {
         let key = row.key.clone();
         let group = row.group.clone();
@@ -76,10 +76,24 @@ pub(super) fn session_menu(row: &SessionRow, view: Entity<ListView>) -> Menu {
                 actions::close_session(key.clone(), title.clone(), status, window, cx)
             })
     };
-    Menu::new()
-        .item(pin)
-        .item(rename)
-        .separator()
+    let context = SessionMenuContext {
+        machine: row.key.machine.clone(),
+        conversation: row.key.id.clone(),
+        session_id: row.session_id.clone(),
+    };
+    let target = FailTarget::Conversation(row.key.clone());
+    let plugin_items = plugin_items(
+        contract::SESSION_MENU,
+        &row.key.machine,
+        &context,
+        Some(target),
+        cx,
+    );
+    let mut menu = Menu::new().item(pin).item(rename);
+    if !plugin_items.is_empty() {
+        menu = plugin_items.into_iter().fold(menu.separator(), Menu::item);
+    }
+    menu.separator()
         .item(archive)
         .item(copy_id)
         .separator()
