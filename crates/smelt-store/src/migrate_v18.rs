@@ -6,8 +6,8 @@
 //! 不搬，随 `kv` 一起删掉。单项解析不了就跳过这一项，不让整次升级失败。
 
 use crate::{
-    MemorySettingsRecord, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
-    QuotaCacheWindowRecord, RemoteConfigSnapshot, StoreError, TerminalThemeSnapshot,
+    MemorySettingsRecord, QuotaCacheQuota, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
+    RemoteConfigSnapshot, StoreError, TerminalThemeSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Map, Number, Value};
@@ -38,7 +38,7 @@ pub(crate) struct V17RuntimeState {
     remote_config: Option<RemoteConfigSnapshot>,
     terminal_theme: Option<TerminalThemeSnapshot>,
     pi_auto_models: Vec<String>,
-    quota_cache: Option<QuotaCacheSnapshot>,
+    quota_cache: Vec<QuotaCacheStatusRecord>,
     launch_version: Option<u32>,
     agent_host_pref: Option<(bool, bool)>,
     acp: Vec<(String, AcpExtras)>,
@@ -135,8 +135,9 @@ pub(crate) fn read_v17_state(connection: &Connection) -> Result<V17RuntimeState,
     if let Some(object) = scoped_object(connection, "pi_auto_models")? {
         state.pi_auto_models = string_list(object.get("providers"));
     }
-    state.quota_cache =
-        scoped_object(connection, "quota_cache")?.map(|object| quota_cache(&object));
+    state.quota_cache = scoped_object(connection, "quota_cache")?
+        .map(|object| quota_cache(&object))
+        .unwrap_or_default();
     state.launch_version = read_scope_nodes(connection, "launch")
         .ok()
         .and_then(|nodes| decode_tree(&nodes, "version").ok().flatten())
@@ -245,8 +246,8 @@ pub(crate) fn write_v18_state(
             [provider],
         )?;
     }
-    if let Some(quota) = &state.quota_cache {
-        crate::config::write_quota_cache_snapshot(transaction, quota)?;
+    if !state.quota_cache.is_empty() {
+        crate::config::write_quota_cache(transaction, &state.quota_cache)?;
     }
     if let Some(version) = state.launch_version {
         transaction.execute(
@@ -293,7 +294,7 @@ pub(crate) fn write_v18_state(
     Ok(())
 }
 
-fn quota_cache(object: &Map<String, Value>) -> QuotaCacheSnapshot {
+fn quota_cache(object: &Map<String, Value>) -> Vec<QuotaCacheStatusRecord> {
     let mut statuses = Vec::new();
     for (provider_id, cached) in object
         .get("providers")
@@ -355,15 +356,7 @@ fn quota_cache(object: &Map<String, Value>) -> QuotaCacheSnapshot {
             quota,
         });
     }
-    QuotaCacheSnapshot {
-        saved_at_ms: object
-            .get("saved_at_ms")
-            .and_then(Value::as_i64)
-            .unwrap_or(0),
-        schema_version: u32_field(object.get("schema_version")).unwrap_or(0),
-        provider_ids: string_list(object.get("provider_ids")),
-        statuses,
-    }
+    statuses
 }
 
 fn blobs(connection: &Connection, scope: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {

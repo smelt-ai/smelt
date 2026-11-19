@@ -260,16 +260,7 @@ pub struct QuotaProviderPref {
     pub keychain_denied: bool,
 }
 
-/// 跨启动的额度缓存。只缓存真正拿到额度的项。
-#[derive(Clone, Debug, PartialEq)]
-pub struct QuotaCacheSnapshot {
-    pub saved_at_ms: i64,
-    pub schema_version: u32,
-    /// 生成这份缓存时注册过的全部 provider，包括没拿到额度的。
-    pub provider_ids: Vec<String>,
-    pub statuses: Vec<QuotaCacheStatusRecord>,
-}
-
+/// 跨启动的额度缓存里的一家账户。只缓存拿到了额度的。
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuotaCacheStatusRecord {
     pub provider_id: String,

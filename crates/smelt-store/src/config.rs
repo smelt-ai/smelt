@@ -1,9 +1,8 @@
 //! 运行时的设置与缓存：每项一张单行表（`id = 1`），列表另放子表，按 `position` 保序。
 
 use crate::{
-    MemorySettingsRecord, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
-    QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot, StoreError,
-    TerminalThemeSnapshot,
+    MemorySettingsRecord, QuotaCacheQuota, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
+    QuotaProviderPref, RemoteConfigSnapshot, StoreError, TerminalThemeSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -349,23 +348,9 @@ pub(crate) fn write_quota_keychain_denied(
     Ok(())
 }
 
-pub(crate) fn read_quota_cache_snapshot(
+pub(crate) fn read_quota_cache(
     connection: &Connection,
-) -> Result<Option<QuotaCacheSnapshot>, StoreError> {
-    let head: Option<(i64, u32)> = connection
-        .query_row(
-            "SELECT saved_at_ms, schema_version FROM quota_cache WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let Some((saved_at_ms, schema_version)) = head else {
-        return Ok(None);
-    };
-    let provider_ids = connection
-        .prepare("SELECT provider_id FROM quota_cache_provider ORDER BY provider_id")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<String>, _>>()?;
+) -> Result<Vec<QuotaCacheStatusRecord>, StoreError> {
     let mut window_statement = connection.prepare(
         "SELECT label, used_percent, resets_at_ms, reset_after_seconds
          FROM quota_cache_window WHERE provider_id = ?1 ORDER BY position",
@@ -419,35 +404,17 @@ pub(crate) fn read_quota_cache_snapshot(
             quota,
         });
     }
-    Ok(Some(QuotaCacheSnapshot {
-        saved_at_ms,
-        schema_version,
-        provider_ids,
-        statuses,
-    }))
+    Ok(statuses)
 }
 
-pub(crate) fn write_quota_cache_snapshot(
+/// 整份替换。
+pub(crate) fn write_quota_cache(
     transaction: &Transaction<'_>,
-    snapshot: &QuotaCacheSnapshot,
+    statuses: &[QuotaCacheStatusRecord],
 ) -> Result<(), StoreError> {
-    transaction.execute(
-        "INSERT INTO quota_cache(id, saved_at_ms, schema_version) VALUES (1, ?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET
-           saved_at_ms = excluded.saved_at_ms,
-           schema_version = excluded.schema_version",
-        params![snapshot.saved_at_ms, snapshot.schema_version],
-    )?;
-    transaction.execute("DELETE FROM quota_cache_provider", [])?;
-    for provider_id in &snapshot.provider_ids {
-        transaction.execute(
-            "INSERT OR IGNORE INTO quota_cache_provider(provider_id) VALUES (?1)",
-            [provider_id],
-        )?;
-    }
     // 窗口随状态行级联删除。
     transaction.execute("DELETE FROM quota_cache_status", [])?;
-    for status in &snapshot.statuses {
+    for status in statuses {
         match &status.quota {
             QuotaCacheQuota::Windows(windows) => {
                 transaction.execute(

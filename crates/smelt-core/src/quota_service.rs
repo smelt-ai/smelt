@@ -5,12 +5,12 @@
 //! 定时或用户点击时请运行时 [`refresh`]。任何终端、ACP 或插件会话都不会因为额度
 //! 查询收到 prompt 或被改变状态。
 //!
-//! 结果缓存到运行时库的 `quota_cache*` 表：缓存新鲜（`CACHE_STALE_AFTER` 内）且
-//! 覆盖了当前全部账户时，客户端可以跳过启动首查。
+//! 拿到的数字缓存到运行时库的 `quota_cache*` 表，客户端启动时先显示，同时查一轮。数字最多
+//! 沿用 [`QUOTA_MAX_AGE`]。
 
 pub use smelt_model::quota_service::*;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{LazyLock, Mutex};
@@ -20,17 +20,16 @@ use futures::future::join_all;
 
 use crate::agent_kind::ConversationAgentKind;
 use crate::antigravity_quota::fetch_antigravity_quota;
-use crate::copilot_quota::{CopilotQuotaStatus as CachedCopilotQuotaStatus, fetch_copilot_quota};
+use crate::copilot_quota::fetch_copilot_quota;
 use crate::pi_quota::{available_pi_quota_providers, fetch_pi_provider_quota};
 use crate::provider_quota::{
-    ProviderQuotaData, ProviderQuotaStatus as CachedWindowQuotaStatus, fetch_claude_quota,
-    fetch_codex_quota, fetch_cursor_quota, fetch_grok_quota,
+    ProviderQuotaData, fetch_claude_quota, fetch_codex_quota, fetch_cursor_quota, fetch_grok_quota,
 };
 use crate::quota_credentials::{CredentialAccess, KeychainBusy, forget_keychain_tokens};
+use crate::quota_http::is_transient;
 
-/// 缓存比这个新就跳过启动首查。额度是慢变化的账户状态，1 小时内直接展示
-/// 上次结果不会让用户看到明显过期的数据。
-const CACHE_STALE_AFTER: Duration = Duration::from_secs(3600);
+/// 额度数字最多沿用这么久：查询临时失败时沿用的、启动时先显示的缓存，都不超过它。
+const QUOTA_MAX_AGE: Duration = Duration::from_secs(3600);
 
 type QuotaFetchFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<Option<ProviderQuotaData>>> + Send + 'static>>;
@@ -195,103 +194,6 @@ fn fetch_antigravity_quota_data(access: CredentialAccess) -> QuotaFetchFuture {
     })
 }
 
-/// 跨启动的额度缓存（存进运行时库的 `quota_cache*` 表）。
-#[derive(Clone)]
-enum CachedQuotaStatus {
-    Windows(CachedWindowQuotaStatus),
-    Copilot(CachedCopilotQuotaStatus),
-}
-
-impl CachedQuotaStatus {
-    fn from_status(status: &QuotaStatus) -> Option<Self> {
-        match status.quota.as_ref()? {
-            ProviderQuotaData::Windows(quota) => Some(Self::Windows(CachedWindowQuotaStatus {
-                quota: Some(quota.clone()),
-                checked_at_ms: status.checked_at_ms,
-                error: status.error.clone(),
-            })),
-            ProviderQuotaData::Copilot(quota) => Some(Self::Copilot(CachedCopilotQuotaStatus {
-                quota: Some(quota.clone()),
-                checked_at_ms: status.checked_at_ms,
-                error: status.error.clone(),
-            })),
-        }
-    }
-
-    fn into_status(self) -> QuotaStatus {
-        match self {
-            Self::Windows(status) => QuotaStatus {
-                quota: status.quota.map(ProviderQuotaData::Windows),
-                checked_at_ms: status.checked_at_ms,
-                error: status.error,
-            },
-            Self::Copilot(status) => QuotaStatus {
-                quota: status.quota.map(ProviderQuotaData::Copilot),
-                checked_at_ms: status.checked_at_ms,
-                error: status.error,
-            },
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct QuotaCache {
-    /// 上次写入时间（Unix 毫秒），用于判断缓存是否还新鲜。
-    pub saved_at_ms: u64,
-    /// 格式版本。和 [`QUOTA_CACHE_VERSION`] 不同就不认 `provider_ids`，启动照查一次。
-    pub schema_version: u32,
-    /// 有定论的账户：拿到了额度，或确认没有凭据。上次查失败的不在里面，下次启动就不跳过
-    /// 首查，不然它要等一整个刷新周期才露面。用 BTreeSet 保证持久化顺序稳定。
-    provider_ids: BTreeSet<String>,
-    /// 真正拿到额度的项。键使用 `QuotaTarget::id()`。
-    providers: BTreeMap<String, CachedQuotaStatus>,
-}
-
-/// 4 起 `provider_ids` 只记有定论的账户（3 及以前是当时注册过的全部）。新增 provider 不用改它。
-const QUOTA_CACHE_VERSION: u32 = 4;
-
-impl QuotaCache {
-    fn new(settled: BTreeSet<String>, statuses: &[(QuotaTarget, QuotaStatus)]) -> Self {
-        Self {
-            saved_at_ms: unix_time_ms(),
-            schema_version: QUOTA_CACHE_VERSION,
-            provider_ids: settled,
-            // 只缓存真正拿到 quota 的项；失败态（quota 为 None）不落盘。
-            providers: statuses
-                .iter()
-                .filter_map(|(target, status)| {
-                    CachedQuotaStatus::from_status(status).map(|status| (target.id(), status))
-                })
-                .collect(),
-        }
-    }
-
-    fn is_fresh(&self) -> bool {
-        let now = unix_time_ms();
-        self.saved_at_ms
-            .saturating_add(CACHE_STALE_AFTER.as_millis() as u64)
-            >= now
-    }
-
-    /// 时间新鲜、当前每个账户都有定论时，才跳过启动首查。
-    fn can_skip_startup_fetch(&self, targets: &[QuotaTarget]) -> bool {
-        self.is_fresh()
-            && self.schema_version == QUOTA_CACHE_VERSION
-            && targets
-                .iter()
-                .all(|target| self.provider_ids.contains(&target.id()))
-    }
-
-    fn statuses(&self) -> Vec<(QuotaTarget, QuotaStatus)> {
-        self.providers
-            .iter()
-            .filter_map(|(id, status)| {
-                QuotaTarget::from_id(id).map(|target| (target, status.clone().into_status()))
-            })
-            .collect()
-    }
-}
-
 struct ProviderQuotaFetchResult(Vec<(QuotaTarget, anyhow::Result<Option<ProviderQuotaData>>)>);
 
 impl ProviderQuotaFetchResult {
@@ -304,15 +206,22 @@ impl ProviderQuotaFetchResult {
         )
     }
 
-    fn into_statuses(self) -> Vec<(QuotaTarget, QuotaStatus)> {
-        let checked_at_ms = unix_time_ms();
+    /// `previous` 是缓存里上次的结果，临时失败时沿用。
+    fn into_statuses(
+        self,
+        previous: &BTreeMap<String, QuotaStatus>,
+        now_ms: u64,
+    ) -> Vec<(QuotaTarget, QuotaStatus)> {
         self.0
             .into_iter()
             // 还在等钥匙串授权：这一轮没有结果，不写状态，上次的额度和缓存保持原样。
             .filter(|(_, outcome)| {
                 !matches!(outcome, Err(error) if error.downcast_ref::<KeychainBusy>().is_some())
             })
-            .map(|(target, outcome)| (target, apply_quota_result(outcome, checked_at_ms)))
+            .map(|(target, outcome)| {
+                let status = apply_quota_result(outcome, previous.get(&target.id()), now_ms);
+                (target, status)
+            })
             .collect()
     }
 }
@@ -346,131 +255,99 @@ async fn fetch_provider_quotas(target: Option<QuotaTarget>) -> ProviderQuotaFetc
     ProviderQuotaFetchResult(results)
 }
 
-fn load_quota_cache() -> Option<QuotaCache> {
-    let store = crate::sqlite_state::default_sqlite_store().ok()?;
-    cache_from_snapshot(store.get_quota_cache_snapshot().ok().flatten()?)
+/// 缓存里的额度，按 [`QuotaTarget::id`] 排。只有拿到了数字的账户。
+fn load_cache() -> BTreeMap<String, QuotaStatus> {
+    crate::sqlite_state::default_sqlite_store()
+        .ok()
+        .and_then(|store| store.quota_cache().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(status_from_record)
+        .collect()
 }
 
-fn save_quota_cache(cache: &QuotaCache) {
-    let Some(snapshot) = snapshot_from_cache(cache) else {
-        return;
-    };
+fn save_cache(statuses: &BTreeMap<String, QuotaStatus>) {
+    let records = statuses
+        .iter()
+        .filter_map(|(id, status)| record_from_status(id, status))
+        .collect::<Vec<_>>();
     if let Ok(store) = crate::sqlite_state::default_sqlite_store() {
-        let _ = store.put_quota_cache_snapshot(&snapshot);
+        let _ = store.put_quota_cache(&records);
     }
 }
 
-fn snapshot_from_cache(cache: &QuotaCache) -> Option<smelt_store::QuotaCacheSnapshot> {
-    let statuses = cache
-        .providers
-        .iter()
-        .filter_map(|(provider_id, status)| {
-            let (checked_at_ms, error, quota) = match status {
-                CachedQuotaStatus::Windows(status) => (
-                    status.checked_at_ms,
-                    status.error.clone(),
-                    smelt_store::QuotaCacheQuota::Windows(
-                        status
-                            .quota
-                            .as_ref()?
-                            .windows
-                            .iter()
-                            .map(|window| smelt_store::QuotaCacheWindowRecord {
-                                label: window.label.clone(),
-                                used_percent: window.used_percent,
-                                resets_at_ms: window
-                                    .resets_at_ms
-                                    .and_then(|ms| i64::try_from(ms).ok()),
-                                reset_after_seconds: window
-                                    .reset_after_seconds
-                                    .and_then(|seconds| i64::try_from(seconds).ok()),
-                            })
-                            .collect(),
-                    ),
-                ),
-                CachedQuotaStatus::Copilot(status) => {
-                    let quota = status.quota.as_ref()?;
-                    (
-                        status.checked_at_ms,
-                        status.error.clone(),
-                        smelt_store::QuotaCacheQuota::Copilot {
-                            unit: copilot_unit_name(quota.unit).to_string(),
-                            remaining: quota.remaining,
-                            limit: quota.limit,
-                            used: quota.used,
-                        },
-                    )
-                }
-            };
-            Some(smelt_store::QuotaCacheStatusRecord {
-                provider_id: provider_id.clone(),
-                checked_at_ms: i64::try_from(checked_at_ms).ok()?,
-                error,
-                quota,
-            })
-        })
-        .collect();
-    Some(smelt_store::QuotaCacheSnapshot {
-        saved_at_ms: i64::try_from(cache.saved_at_ms).ok()?,
-        schema_version: cache.schema_version,
-        provider_ids: cache.provider_ids.iter().cloned().collect(),
-        statuses,
+/// 没有数字的状态不落盘。
+fn record_from_status(
+    id: &str,
+    status: &QuotaStatus,
+) -> Option<smelt_store::QuotaCacheStatusRecord> {
+    let quota = match status.quota.as_ref()? {
+        ProviderQuotaData::Windows(quota) => smelt_store::QuotaCacheQuota::Windows(
+            quota
+                .windows
+                .iter()
+                .map(|window| smelt_store::QuotaCacheWindowRecord {
+                    label: window.label.clone(),
+                    used_percent: window.used_percent,
+                    resets_at_ms: window.resets_at_ms.and_then(|ms| i64::try_from(ms).ok()),
+                    reset_after_seconds: window
+                        .reset_after_seconds
+                        .and_then(|seconds| i64::try_from(seconds).ok()),
+                })
+                .collect(),
+        ),
+        ProviderQuotaData::Copilot(quota) => smelt_store::QuotaCacheQuota::Copilot {
+            unit: copilot_unit_name(quota.unit).to_string(),
+            remaining: quota.remaining,
+            limit: quota.limit,
+            used: quota.used,
+        },
+    };
+    Some(smelt_store::QuotaCacheStatusRecord {
+        provider_id: id.to_string(),
+        checked_at_ms: i64::try_from(status.checked_at_ms).ok()?,
+        error: status.error.clone(),
+        quota,
     })
 }
 
-fn cache_from_snapshot(snapshot: smelt_store::QuotaCacheSnapshot) -> Option<QuotaCache> {
-    let providers = snapshot
-        .statuses
-        .into_iter()
-        .filter_map(|record| {
-            let checked_at_ms = u64::try_from(record.checked_at_ms.max(0)).ok()?;
-            let status = match record.quota {
-                smelt_store::QuotaCacheQuota::Windows(windows) => {
-                    CachedQuotaStatus::Windows(CachedWindowQuotaStatus {
-                        quota: Some(crate::provider_quota::ProviderQuota {
-                            windows: windows
-                                .into_iter()
-                                .map(|window| crate::provider_quota::ProviderQuotaWindow {
-                                    label: window.label,
-                                    used_percent: window.used_percent,
-                                    resets_at_ms: window
-                                        .resets_at_ms
-                                        .and_then(|ms| u64::try_from(ms).ok()),
-                                    reset_after_seconds: window
-                                        .reset_after_seconds
-                                        .and_then(|seconds| u64::try_from(seconds).ok()),
-                                })
-                                .collect(),
-                        }),
-                        checked_at_ms,
-                        error: record.error,
+fn status_from_record(
+    record: smelt_store::QuotaCacheStatusRecord,
+) -> Option<(String, QuotaStatus)> {
+    let quota = match record.quota {
+        smelt_store::QuotaCacheQuota::Windows(windows) => {
+            ProviderQuotaData::Windows(crate::provider_quota::ProviderQuota {
+                windows: windows
+                    .into_iter()
+                    .map(|window| crate::provider_quota::ProviderQuotaWindow {
+                        label: window.label,
+                        used_percent: window.used_percent,
+                        resets_at_ms: window.resets_at_ms.and_then(|ms| u64::try_from(ms).ok()),
+                        reset_after_seconds: window
+                            .reset_after_seconds
+                            .and_then(|seconds| u64::try_from(seconds).ok()),
                     })
-                }
-                smelt_store::QuotaCacheQuota::Copilot {
-                    unit,
-                    remaining,
-                    limit,
-                    used,
-                } => CachedQuotaStatus::Copilot(CachedCopilotQuotaStatus {
-                    quota: Some(crate::copilot_quota::CopilotQuota {
-                        unit: copilot_unit_from_name(&unit)?,
-                        remaining,
-                        limit,
-                        used,
-                    }),
-                    checked_at_ms,
-                    error: record.error,
-                }),
-            };
-            Some((record.provider_id, status))
-        })
-        .collect();
-    Some(QuotaCache {
-        saved_at_ms: u64::try_from(snapshot.saved_at_ms.max(0)).ok()?,
-        schema_version: snapshot.schema_version,
-        provider_ids: snapshot.provider_ids.into_iter().collect(),
-        providers,
-    })
+                    .collect(),
+            })
+        }
+        smelt_store::QuotaCacheQuota::Copilot {
+            unit,
+            remaining,
+            limit,
+            used,
+        } => ProviderQuotaData::Copilot(crate::copilot_quota::CopilotQuota {
+            unit: copilot_unit_from_name(&unit)?,
+            remaining,
+            limit,
+            used,
+        }),
+    };
+    let status = QuotaStatus {
+        quota: Some(quota),
+        checked_at_ms: u64::try_from(record.checked_at_ms).ok()?,
+        error: record.error,
+    };
+    Some((record.provider_id, status))
 }
 
 /// 库里 `copilot_unit` 列的取值。
@@ -489,42 +366,56 @@ fn copilot_unit_from_name(name: &str) -> Option<crate::copilot_quota::CopilotQuo
     }
 }
 
+/// 一家这一轮的结果。失败分两种：
+/// - 临时的（连不上、超时、对方 5xx 或限流，见 [`is_transient`]）：上次的数字多半还对，
+///   不超过 [`QUOTA_MAX_AGE`] 就沿用，带上这次的错误。
+/// - 别的（令牌被拒、凭据读不到、返回认不出）：凭据丢了、换了账号时旧数字是错的，清掉，
+///   侧栏不显示这一家，缓存里也随之去掉。
 fn apply_quota_result(
     result: anyhow::Result<Option<ProviderQuotaData>>,
-    checked_at_ms: u64,
+    previous: Option<&QuotaStatus>,
+    now_ms: u64,
 ) -> QuotaStatus {
     match result {
         Ok(quota) => QuotaStatus {
             quota,
-            checked_at_ms,
+            checked_at_ms: now_ms,
             error: None,
         },
-        // 失败即失效：不沿用上一次的成功结果（凭据丢失、换号时旧数字是错的），
-        // 侧栏不显示这一项，缓存里也随之去掉。
-        Err(error) => QuotaStatus {
-            quota: None,
-            checked_at_ms,
-            error: Some(error.to_string()),
+        Err(error) => match previous.filter(|previous| {
+            previous.quota.is_some() && is_recent(previous, now_ms) && is_transient(&error)
+        }) {
+            Some(previous) => QuotaStatus {
+                error: Some(error.to_string()),
+                ..previous.clone()
+            },
+            None => QuotaStatus {
+                quota: None,
+                checked_at_ms: now_ms,
+                error: Some(error.to_string()),
+            },
         },
     }
 }
 
+/// 数字是 [`QUOTA_MAX_AGE`] 以内查到的。
+fn is_recent(status: &QuotaStatus, now_ms: u64) -> bool {
+    status
+        .checked_at_ms
+        .saturating_add(QUOTA_MAX_AGE.as_millis() as u64)
+        >= now_ms
+}
+
+/// 开着查询的账户和缓存里还不旧的结果。客户端启动时先显示这些，同时查一轮。
 pub fn snapshot() -> QuotaSnapshot {
     let targets = quota_targets();
-    let cache = load_quota_cache();
-    QuotaSnapshot {
-        fresh: cache
-            .as_ref()
-            .is_some_and(|cache| cache.can_skip_startup_fetch(&targets)),
-        statuses: cache
-            .as_ref()
-            .map(QuotaCache::statuses)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|(target, _)| targets.contains(target))
-            .collect(),
-        targets,
-    }
+    let now_ms = unix_time_ms();
+    let statuses = load_cache()
+        .into_iter()
+        .filter_map(|(id, status)| Some((QuotaTarget::from_id(&id)?, status)))
+        .filter(|(target, status)| targets.contains(target) && is_recent(status, now_ms))
+        .collect();
+    QuotaSnapshot { targets, statuses }
 }
 
 /// 查一轮额度并更新缓存：只覆盖这一轮查到的账户，其他账户的缓存保持原样。
@@ -533,27 +424,16 @@ pub fn refresh(params: QuotaRefreshParams) -> QuotaRefreshResult {
     let target = params.target;
     let result = crate::block_on::block_on_tokio(fetch_provider_quotas(target))
         .unwrap_or_else(|error| ProviderQuotaFetchResult::failed(target, error.to_string()));
-    let statuses = result.into_statuses();
+    let mut cache = load_cache();
+    let statuses = result.into_statuses(&cache, unix_time_ms());
     log_failures(&statuses);
     let targets = quota_targets();
-    let previous = load_quota_cache();
-    let settled = settled_after_round(previous.as_ref(), &statuses, &targets);
-    let mut merged: BTreeMap<String, QuotaStatus> = previous
-        .map(|cache| cache.statuses())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(target, status)| (target.id(), status))
-        .collect();
     for (target, status) in &statuses {
-        merged.insert(target.id(), status.clone());
+        cache.insert(target.id(), status.clone());
     }
-    let merged = merged
-        .into_iter()
-        .filter_map(|(id, status)| Some((QuotaTarget::from_id(&id)?, status)))
-        // 关掉的账户不留在缓存里，下次打开时不会先露出一个旧数字。
-        .filter(|(target, _)| targets.contains(target))
-        .collect::<Vec<_>>();
-    save_quota_cache(&QuotaCache::new(settled, &merged));
+    // 关掉的账户不留在缓存里，下次打开时不会先露出一个旧数字。
+    cache.retain(|id, _| targets.iter().any(|target| target.id() == *id));
+    save_cache(&cache);
     QuotaRefreshResult { targets, statuses }
 }
 
@@ -583,27 +463,6 @@ fn log_failures(statuses: &[(QuotaTarget, QuotaStatus)]) {
     }
 }
 
-/// 这一轮之后有定论的账户：这一轮查了的按结果定（没报错就算），没查的沿用上次的，关掉的去掉。
-fn settled_after_round(
-    previous: Option<&QuotaCache>,
-    round: &[(QuotaTarget, QuotaStatus)],
-    targets: &[QuotaTarget],
-) -> BTreeSet<String> {
-    let mut settled = previous
-        .filter(|cache| cache.schema_version == QUOTA_CACHE_VERSION)
-        .map(|cache| cache.provider_ids.clone())
-        .unwrap_or_default();
-    for (target, status) in round {
-        if status.error.is_none() {
-            settled.insert(target.id());
-        } else {
-            settled.remove(&target.id());
-        }
-    }
-    settled.retain(|id| targets.iter().any(|target| target.id() == *id));
-    settled
-}
-
 fn unix_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -623,10 +482,6 @@ mod tests {
             .iter()
             .map(|provider| QuotaTarget::agent(provider.agent))
             .collect()
-    }
-
-    fn ids(targets: &[QuotaTarget]) -> BTreeSet<String> {
-        targets.iter().map(|target| target.id()).collect()
     }
 
     fn window_quota(used_percent: f64) -> ProviderQuotaData {
@@ -719,47 +574,71 @@ mod tests {
         );
     }
 
+    fn endpoint_error(status: reqwest::StatusCode) -> anyhow::Error {
+        crate::quota_http::QuotaEndpointError {
+            provider: "Codex",
+            status,
+        }
+        .into()
+    }
+
+    fn fetched_at(checked_at_ms: u64) -> QuotaStatus {
+        QuotaStatus {
+            quota: Some(window_quota(40.0)),
+            checked_at_ms,
+            error: None,
+        }
+    }
+
+    const NOW: u64 = 10_000_000;
+
+    /// 令牌被拒这类失败：旧数字可能是别的账户的，清掉。
     #[test]
-    fn fresh_pre_grok_cache_still_triggers_startup_fetch() {
-        let cache = QuotaCache {
-            saved_at_ms: unix_time_ms(),
-            schema_version: 0,
-            ..QuotaCache::default()
-        };
-        assert!(cache.is_fresh());
-        assert!(!cache.can_skip_startup_fetch(&agent_targets()));
+    fn a_definitive_failure_drops_the_previous_quota() {
+        let previous = fetched_at(NOW - 60_000);
+        let status = apply_quota_result(
+            Err(endpoint_error(reqwest::StatusCode::UNAUTHORIZED)),
+            Some(&previous),
+            NOW,
+        );
+        assert_eq!(status.quota, None);
+        assert_eq!(status.checked_at_ms, NOW);
+        assert!(status.error.is_some());
+    }
+
+    /// 对方 5xx、限流这类临时失败：一小时内的数字照旧显示，时间还是查到它的那次，带上这次的错误。
+    #[test]
+    fn a_transient_failure_keeps_a_recent_quota() {
+        let previous = fetched_at(NOW - 60_000);
+        for code in [
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let status = apply_quota_result(Err(endpoint_error(code)), Some(&previous), NOW);
+            assert_eq!(status.quota, previous.quota);
+            assert_eq!(status.checked_at_ms, previous.checked_at_ms);
+            assert!(status.error.is_some());
+        }
     }
 
     #[test]
-    fn fresh_pre_cursor_cache_still_triggers_startup_fetch() {
-        let cache = QuotaCache {
-            saved_at_ms: unix_time_ms(),
-            schema_version: 1,
-            ..QuotaCache::default()
-        };
-        assert!(cache.is_fresh());
-        assert!(
-            !cache.can_skip_startup_fetch(&agent_targets()),
-            "升级到 Cursor 额度后，schema 1 的新鲜缓存也要再查一次"
+    fn a_transient_failure_does_not_keep_a_quota_past_the_max_age() {
+        let max_age = QUOTA_MAX_AGE.as_millis() as u64;
+        let old = fetched_at(NOW - max_age - 1);
+        let status = apply_quota_result(
+            Err(endpoint_error(reqwest::StatusCode::BAD_GATEWAY)),
+            Some(&old),
+            NOW,
         );
-    }
+        assert_eq!(status.quota, None);
 
-    /// 刷新失败就是失效：不拿上一次的成功结果冒充当前额度（凭据丢了、账号换了时
-    /// 旧数字是错的），也不写进缓存。
-    #[test]
-    fn failed_refresh_drops_the_previous_quota() {
-        let codex = QuotaTarget::agent(ConversationAgentKind::Codex);
-
-        let statuses = ProviderQuotaFetchResult(vec![(codex, Err(anyhow::anyhow!("offline")))])
-            .into_statuses();
-
-        assert_eq!(statuses[0].1.quota, None);
-        assert_eq!(statuses[0].1.error.as_deref(), Some("offline"));
-        let cache = QuotaCache::new(ids(&agent_targets()), &statuses);
-        assert!(
-            !cache.providers.contains_key("codex"),
-            "失效的额度不能留在缓存里，下次启动又显示出来"
+        let status = apply_quota_result(
+            Err(endpoint_error(reqwest::StatusCode::BAD_GATEWAY)),
+            None,
+            NOW,
         );
+        assert_eq!(status.quota, None);
+        assert_eq!(status.checked_at_ms, NOW);
     }
 
     /// 等授权窗口不是额度失效：这一家不出现在结果里，客户端和缓存都保留上次的数字。
@@ -772,135 +651,41 @@ mod tests {
             (claude, Err(KeychainBusy.into())),
             (codex, Err(anyhow::anyhow!("offline"))),
         ])
-        .into_statuses();
+        .into_statuses(&BTreeMap::new(), NOW);
 
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].0, codex);
     }
 
     #[test]
-    fn cache_round_trips_through_the_store_snapshot() {
-        let claude = QuotaTarget::agent(ConversationAgentKind::Claude);
-        let statuses = vec![(
-            claude,
-            QuotaStatus {
-                quota: Some(window_quota(12.0)),
-                checked_at_ms: 9,
-                error: Some("stale".into()),
-            },
-        )];
-
-        let cache = QuotaCache::new(ids(&agent_targets()), &statuses);
-        let snapshot = snapshot_from_cache(&cache).unwrap();
-        assert_eq!(snapshot.statuses.len(), 1);
-        assert_eq!(snapshot.statuses[0].provider_id, "claude");
-        assert_eq!(
-            snapshot
-                .provider_ids
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            ids(&agent_targets()),
-        );
-
-        let cache = cache_from_snapshot(snapshot).unwrap();
-        assert_eq!(cache.statuses(), statuses);
-    }
-
-    /// Pi 的 provider 和同名的独立 CLI 是两个账户，缓存键不能撞。
-    #[test]
-    fn pi_targets_get_their_own_cache_keys() {
-        let targets = vec![
-            QuotaTarget::agent(ConversationAgentKind::Copilot),
-            QuotaTarget::pi("github-copilot"),
-        ];
-        let statuses = vec![
-            (targets[0], quota_status(window_quota(10.0))),
-            (targets[1], quota_status(window_quota(90.0))),
-        ];
-
-        let cache = QuotaCache::new(ids(&targets), &statuses);
-
-        assert!(cache.providers.contains_key("copilot"));
-        assert!(cache.providers.contains_key("pi:github-copilot"));
-        assert_eq!(cache.statuses().len(), 2);
-    }
-
-    fn quota_status(quota: ProviderQuotaData) -> QuotaStatus {
-        QuotaStatus {
-            quota: Some(quota),
-            checked_at_ms: 1,
-            error: None,
-        }
-    }
-
-    /// 上次查失败的账户没有定论：下次启动不跳过首查，不然它要等一整个刷新周期才露面。没凭据
-    /// 是定论；这一轮没查的沿用上次；关掉的去掉；旧格式的范围不认。
-    #[test]
-    fn a_failed_account_is_not_settled_and_forces_the_startup_fetch() {
-        let targets = agent_targets();
-        let [codex, claude, copilot, ..] = targets[..] else {
-            panic!("注册表里至少有三家");
+    fn cached_quota_round_trips_through_the_store_record() {
+        let windows = QuotaStatus {
+            quota: Some(window_quota(12.0)),
+            checked_at_ms: 9,
+            error: Some("stale".into()),
         };
-        let mut previous = QuotaCache::new(ids(&[codex, claude, copilot]), &[]);
-        let failed = QuotaStatus {
+        let copilot = QuotaStatus {
+            quota: Some(ProviderQuotaData::Copilot(
+                crate::copilot_quota::CopilotQuota {
+                    unit: crate::copilot_quota::CopilotQuotaUnit::AiCredits,
+                    remaining: 1.0,
+                    limit: Some(2.0),
+                    used: None,
+                },
+            )),
+            checked_at_ms: 10,
+            error: None,
+        };
+        for (id, status) in [("claude", windows), ("pi:github-copilot", copilot)] {
+            let record = record_from_status(id, &status).unwrap();
+            assert_eq!(status_from_record(record), Some((id.to_string(), status)));
+        }
+
+        let without_quota = QuotaStatus {
             quota: None,
-            checked_at_ms: 1,
+            checked_at_ms: 9,
             error: Some("HTTP 401".into()),
         };
-        let logged_out = QuotaStatus {
-            quota: None,
-            checked_at_ms: 1,
-            error: None,
-        };
-        let round = vec![
-            (claude, failed),
-            (QuotaTarget::agent(ConversationAgentKind::Grok), logged_out),
-        ];
-
-        let settled = settled_after_round(Some(&previous), &round, &targets[..4]);
-        assert_eq!(
-            settled,
-            ids(&[
-                codex,
-                copilot,
-                QuotaTarget::agent(ConversationAgentKind::Grok)
-            ])
-        );
-        let mut cache = QuotaCache::new(settled, &[]);
-        cache.saved_at_ms = unix_time_ms();
-        assert!(!cache.can_skip_startup_fetch(&targets[..4]));
-
-        previous.schema_version = 3;
-        assert_eq!(
-            settled_after_round(Some(&previous), &[], &targets),
-            BTreeSet::new()
-        );
-    }
-
-    #[test]
-    fn startup_skip_requires_every_registered_provider_id() {
-        let mut cache = QuotaCache::new(ids(&agent_targets()), &[]);
-        cache.saved_at_ms = unix_time_ms();
-        assert!(cache.can_skip_startup_fetch(&agent_targets()));
-
-        let missing = agent_targets().into_iter().next().unwrap();
-        cache.provider_ids.remove(&missing.id());
-        assert!(
-            !cache.can_skip_startup_fetch(&agent_targets()),
-            "注册表新增 provider 后，旧缓存必须自动触发首查"
-        );
-    }
-
-    /// Pi 里新登录一家订阅 provider 后，覆盖范围变大，旧缓存再新鲜也得重查。
-    #[test]
-    fn a_newly_logged_in_pi_provider_invalidates_the_startup_skip() {
-        let mut cache = QuotaCache::new(ids(&agent_targets()), &[]);
-        cache.saved_at_ms = unix_time_ms();
-
-        let mut targets = agent_targets();
-        targets.push(QuotaTarget::pi("anthropic"));
-
-        assert!(!cache.can_skip_startup_fetch(&targets));
+        assert_eq!(record_from_status("codex", &without_quota), None);
     }
 }

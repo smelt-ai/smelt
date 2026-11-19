@@ -45,11 +45,11 @@ pub use snapshots::{
     HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
     MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord,
     MemoryUsageRecord, PairedDevice, PublishedSessionRecord, PublishedSessionSnapshot,
-    PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
-    QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot, TerminalThemeSnapshot,
-    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit,
-    WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
-    WorkspaceTerminalRecord, WorkspaceWorksetRecord, WorkspaceWorksetRepositoryRecord,
+    PushRegistration, QuotaCacheQuota, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
+    QuotaProviderPref, RemoteConfigSnapshot, TerminalThemeSnapshot, WorkspaceAcpRecord,
+    WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceProjectRepositoryRecord,
+    WorkspaceSessionRecord, WorkspaceSnapshot, WorkspaceTerminalRecord, WorkspaceWorksetRecord,
+    WorkspaceWorksetRepositoryRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -61,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 39;
+pub const STORE_SCHEMA_VERSION: u32 = 40;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -757,15 +757,13 @@ impl Store {
         imp::put_terminal_theme_snapshot(&self.backend, snapshot)
     }
 
-    pub fn get_quota_cache_snapshot(&self) -> Result<Option<QuotaCacheSnapshot>, StoreError> {
-        imp::get_quota_cache_snapshot(&self.backend)
+    pub fn quota_cache(&self) -> Result<Vec<QuotaCacheStatusRecord>, StoreError> {
+        imp::quota_cache(&self.backend)
     }
 
-    pub fn put_quota_cache_snapshot(
-        &self,
-        snapshot: &QuotaCacheSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_quota_cache_snapshot(&self.backend, snapshot)
+    /// 整份替换额度缓存。
+    pub fn put_quota_cache(&self, statuses: &[QuotaCacheStatusRecord]) -> Result<(), StoreError> {
+        imp::put_quota_cache(&self.backend, statuses)
     }
 
     /// 改过默认值的额度账户。不在列表里的就是默认：开启、未被拒绝。
@@ -1763,17 +1761,22 @@ mod imp {
         )
     }
 
-    pub(super) fn get_quota_cache_snapshot(
+    pub(super) fn quota_cache(
         backend: &Backend,
-    ) -> Result<Option<super::QuotaCacheSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_quota_cache_snapshot)
+    ) -> Result<Vec<super::QuotaCacheStatusRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::config::read_quota_cache(&connection)
     }
 
-    pub(super) fn put_quota_cache_snapshot(
+    pub(super) fn put_quota_cache(
         backend: &Backend,
-        snapshot: &super::QuotaCacheSnapshot,
+        statuses: &[super::QuotaCacheStatusRecord],
     ) -> Result<(), StoreError> {
-        put_config(backend, snapshot, crate::config::write_quota_cache_snapshot)
+        let mut connection = lock_connection(backend)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::config::write_quota_cache(&transaction, statuses)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub(super) fn quota_provider_prefs(
@@ -2111,6 +2114,15 @@ mod imp {
                 }
             }
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 39 {
+            apply_v40(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
             transaction.commit()?;
             return Ok(());
         }
@@ -2860,6 +2872,13 @@ mod imp {
                 transaction.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))?;
             }
         }
+        apply_v40(transaction)
+    }
+
+    /// v40 删掉额度缓存的表头和账户名单（`schema::MIGRATE_V39_TO_V40`）。缓存数据不搬：状态行
+    /// 原样留着。
+    fn apply_v40(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        transaction.execute_batch(crate::schema::MIGRATE_V39_TO_V40)?;
         Ok(())
     }
 
@@ -4439,14 +4458,14 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn get_quota_cache_snapshot(
+    pub(super) fn quota_cache(
         _backend: &Backend,
-    ) -> Result<Option<super::QuotaCacheSnapshot>, StoreError> {
+    ) -> Result<Vec<super::QuotaCacheStatusRecord>, StoreError> {
         unsupported()
     }
-    pub(super) fn put_quota_cache_snapshot(
+    pub(super) fn put_quota_cache(
         _backend: &Backend,
-        _snapshot: &super::QuotaCacheSnapshot,
+        _statuses: &[super::QuotaCacheStatusRecord],
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -5291,11 +5310,8 @@ mod tests {
             assert_eq!(theme.background, 657930);
             assert_eq!(theme.search_hit_current, 13934615);
             assert_eq!(theme.palette, (100..111).collect::<Vec<u32>>());
-            let quota = store.get_quota_cache_snapshot().unwrap().unwrap();
-            assert_eq!(quota.saved_at_ms, 1792250484008);
-            assert_eq!(quota.provider_ids, ["claude", "pi:github-copilot"]);
             assert_eq!(
-                quota.statuses,
+                store.quota_cache().unwrap(),
                 [
                     QuotaCacheStatusRecord {
                         provider_id: "claude".into(),
@@ -8299,6 +8315,63 @@ CREATE TABLE published_session (
         );
     }
 
+    /// v39 的库：额度缓存的表头和账户名单两张表删掉，各家的状态行原样留着。
+    #[test]
+    fn migrates_v39_dropping_quota_cache_head() {
+        let dir = temp_dir("migrate-v39-quota-cache");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{}
+                 {}
+                 CREATE TABLE quota_cache (
+                   id INTEGER PRIMARY KEY CHECK (id = 1),
+                   saved_at_ms INTEGER NOT NULL,
+                   schema_version INTEGER NOT NULL CHECK (schema_version >= 0)
+                 );
+                 CREATE TABLE quota_cache_provider (
+                   provider_id TEXT PRIMARY KEY
+                 ) WITHOUT ROWID;
+                 INSERT INTO quota_cache(id, saved_at_ms, schema_version) VALUES (1, 10, 3);
+                 INSERT INTO quota_cache_provider(provider_id) VALUES ('claude');
+                 INSERT INTO quota_cache_status(provider_id, kind, checked_at_ms)
+                 VALUES ('claude', 'windows', 9);
+                 INSERT INTO quota_cache_window(provider_id, position, label, used_percent)
+                 VALUES ('claude', 0, '5h', 37.0);
+                 PRAGMA user_version = 39;",
+                crate::schema::CREATE_SCHEMA,
+                crate::schema::ENSURE_WORKSPACE_EPOCH
+            ))
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.quota_cache().unwrap(),
+            [QuotaCacheStatusRecord {
+                provider_id: "claude".into(),
+                checked_at_ms: 9,
+                error: None,
+                quota: QuotaCacheQuota::Windows(vec![QuotaCacheWindowRecord {
+                    label: "5h".into(),
+                    used_percent: 37.0,
+                    resets_at_ms: None,
+                    reset_after_seconds: None,
+                }]),
+            }]
+        );
+        drop(store);
+
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v39 升上来的库要和新建的库一个形状"
+        );
+    }
+
     /// v38 及更早还在、v39 删掉的四列。用当前结构的库退回 v26 及更早做夹具时补上：v26 → v27
     /// 重建会话组和 ACP 明细时要从旧表拷这几列。加在表尾，重建按列名拷，位置不影响。
     const V38_CONVERSATION_COLUMNS: &str = "
@@ -9287,37 +9360,33 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         store.put_terminal_theme_snapshot(&theme).unwrap();
         assert_eq!(store.get_terminal_theme_snapshot().unwrap(), Some(theme));
 
-        let quota = QuotaCacheSnapshot {
-            saved_at_ms: 1_000,
-            schema_version: 3,
-            provider_ids: vec!["claude".into(), "copilot".into()],
-            statuses: vec![
-                QuotaCacheStatusRecord {
-                    provider_id: "claude".into(),
-                    checked_at_ms: 900,
-                    error: None,
-                    quota: QuotaCacheQuota::Windows(vec![QuotaCacheWindowRecord {
-                        label: "5h".into(),
-                        used_percent: 37.5,
-                        resets_at_ms: Some(2_000),
-                        reset_after_seconds: None,
-                    }]),
+        assert_eq!(store.quota_cache().unwrap(), []);
+        let quota = vec![
+            QuotaCacheStatusRecord {
+                provider_id: "claude".into(),
+                checked_at_ms: 900,
+                error: None,
+                quota: QuotaCacheQuota::Windows(vec![QuotaCacheWindowRecord {
+                    label: "5h".into(),
+                    used_percent: 37.5,
+                    resets_at_ms: Some(2_000),
+                    reset_after_seconds: None,
+                }]),
+            },
+            QuotaCacheStatusRecord {
+                provider_id: "copilot".into(),
+                checked_at_ms: 900,
+                error: None,
+                quota: QuotaCacheQuota::Copilot {
+                    unit: "ai_credits".into(),
+                    remaining: 11.0,
+                    limit: Some(43.0),
+                    used: None,
                 },
-                QuotaCacheStatusRecord {
-                    provider_id: "copilot".into(),
-                    checked_at_ms: 900,
-                    error: None,
-                    quota: QuotaCacheQuota::Copilot {
-                        unit: "ai_credits".into(),
-                        remaining: 11.0,
-                        limit: Some(43.0),
-                        used: None,
-                    },
-                },
-            ],
-        };
-        store.put_quota_cache_snapshot(&quota).unwrap();
-        assert_eq!(store.get_quota_cache_snapshot().unwrap(), Some(quota));
+            },
+        ];
+        store.put_quota_cache(&quota).unwrap();
+        assert_eq!(store.quota_cache().unwrap(), quota);
 
         assert_eq!(
             store.memory_settings().unwrap(),

@@ -92,9 +92,11 @@ pub async fn fetch_codex_quota_with_token(
     let response = request.send().await?;
     let status = response.status();
     if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "Codex quota endpoint returned HTTP {status}"
-        ));
+        return Err(QuotaEndpointError {
+            provider: "Codex",
+            status,
+        }
+        .into());
     }
     parse_codex_quota(&response.text().await?)
 }
@@ -179,9 +181,11 @@ pub async fn fetch_grok_quota_with_token(token: &str) -> anyhow::Result<Option<P
         .await?;
     let status = response.status();
     if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "Grok quota endpoint returned HTTP {status}"
-        ));
+        return Err(QuotaEndpointError {
+            provider: "Grok",
+            status,
+        }
+        .into());
     }
     parse_grok_quota(&response.text().await?)
 }

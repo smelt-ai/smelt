@@ -1887,12 +1887,10 @@ export type QuotaSetEnabledParams = {
 export type QuotaSettings = {
   providers: QuotaProviderSetting[];
 };
-/** 客户端启动时要的：开着查询的全部账户（决定展示顺序）、缓存里的结果、要不要立刻查一次。 */
+/** 客户端启动时要的：开着查询的全部账户（决定展示顺序）和缓存里还不旧的结果。 */
 export type QuotaSnapshot = {
   targets: string[];
   statuses: [string, QuotaStatus][];
-  /** 缓存新鲜且覆盖了全部账户：不必启动首查。 */
-  fresh: boolean;
 };
 export type QuotaStatus = {
   quota: ProviderQuotaData | null;

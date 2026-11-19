@@ -109,13 +109,11 @@ impl schemars::JsonSchema for QuotaTarget {
     }
 }
 
-/// 客户端启动时要的：开着查询的全部账户（决定展示顺序）、缓存里的结果、要不要立刻查一次。
+/// 客户端启动时要的：开着查询的全部账户（决定展示顺序）和缓存里还不旧的结果。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaSnapshot {
     pub targets: Vec<QuotaTarget>,
     pub statuses: Vec<(QuotaTarget, QuotaStatus)>,
-    /// 缓存新鲜且覆盖了全部账户：不必启动首查。
-    pub fresh: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

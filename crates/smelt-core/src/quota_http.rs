@@ -96,6 +96,28 @@ impl fmt::Display for QuotaEndpointError {
 
 impl std::error::Error for QuotaEndpointError {}
 
+/// 临时失败：连不上、超时、读响应断了，或对方 5xx、限流、请求超时。上次的数字多半还对。
+/// 令牌被拒、返回认不出、代理配错这些不算：要么旧数字可能是错的，要么不会自己好。
+pub(crate) fn is_transient(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            return error.is_timeout()
+                || error.is_connect()
+                || error.is_request()
+                || error.is_body();
+        }
+        cause
+            .downcast_ref::<QuotaEndpointError>()
+            .is_some_and(|error| {
+                error.status.is_server_error()
+                    || matches!(
+                        error.status,
+                        StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT
+                    )
+            })
+    })
+}
+
 /// 令牌被接口拒绝（多半过期了）。
 pub(crate) fn is_unauthorized(error: &anyhow::Error) -> bool {
     error
@@ -114,6 +136,25 @@ mod tests {
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.to_string())
         })
+    }
+
+    #[test]
+    fn only_unreachable_or_overloaded_endpoints_are_transient() {
+        let endpoint = |status| {
+            anyhow::Error::from(QuotaEndpointError {
+                provider: "Codex",
+                status,
+            })
+        };
+        assert!(is_transient(&endpoint(StatusCode::BAD_GATEWAY)));
+        assert!(is_transient(&endpoint(StatusCode::TOO_MANY_REQUESTS)));
+        assert!(is_transient(&endpoint(StatusCode::REQUEST_TIMEOUT)));
+        assert!(!is_transient(&endpoint(StatusCode::UNAUTHORIZED)));
+        assert!(!is_transient(&endpoint(StatusCode::FORBIDDEN)));
+        assert!(!is_transient(&anyhow::anyhow!("expected value at line 1")));
+        assert!(is_transient(
+            &endpoint(StatusCode::SERVICE_UNAVAILABLE).context("Antigravity")
+        ));
     }
 
     #[test]

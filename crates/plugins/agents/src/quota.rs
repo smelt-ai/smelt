@@ -3,7 +3,7 @@
 //!
 //! 额度是账户状态，不属于哪段会话。凭据在运行时那台机器上，查询和跨启动缓存都由运行时做
 //! （`quota.*`，见 [`api::model::quota_service`]）。这里只管节奏：启动先显示运行时缓存里的
-//! 结果，缓存不新鲜才立即查；之后每 [`REFRESH_INTERVAL`] 全量查一次，用户点哪家就单查哪家
+//! 结果，同时立即查一轮；之后每 [`REFRESH_INTERVAL`] 全量查一次，用户点哪家就单查哪家
 //! （只有这时运行时才可能弹钥匙串窗口）。
 //!
 //! 每家查不查的开关也存在运行时，设置页经 [`QuotaSettings`] 读、经 [`set_enabled`] 改。
@@ -170,10 +170,9 @@ fn start_refresh_loop(cx: &mut App) {
             }
             failures = failures.saturating_add(1);
         };
-        let fresh = cached.fresh;
         cx.update(|cx| restore(cached.targets, cached.statuses, cx));
-        // 缓存新鲜：首轮也等定时器或点击；过期或没有缓存才立即查一次。
-        let mut first = !fresh;
+        // 先显示缓存，同时立即查一轮。
+        let mut first = true;
         loop {
             // 本轮查哪家：`None` 是全部（定时），`Some` 是用户点的那家。
             let mut target = None;

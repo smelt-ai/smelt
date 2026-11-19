@@ -16,7 +16,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 44] = [
+pub const TABLES: [&str; 42] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -47,8 +47,6 @@ pub const TABLES: [&str; 44] = [
     "project_repository_catalog",
     "published_session",
     "push_registration",
-    "quota_cache",
-    "quota_cache_provider",
     "quota_cache_status",
     "quota_cache_window",
     "quota_provider_pref",
@@ -540,14 +538,6 @@ CREATE TABLE terminal_theme_palette (
 );
 CREATE TABLE auto_model_provider (
   provider TEXT PRIMARY KEY
-) WITHOUT ROWID;
-CREATE TABLE quota_cache (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  saved_at_ms INTEGER NOT NULL,
-  schema_version INTEGER NOT NULL CHECK (schema_version >= 0)
-);
-CREATE TABLE quota_cache_provider (
-  provider_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 CREATE TABLE quota_cache_status (
   provider_id TEXT PRIMARY KEY,
@@ -1893,6 +1883,13 @@ ALTER TABLE session_group ADD COLUMN closed_workset_root TEXT;
 /// 的代码），客户端按语言说；`error` 改成只存细节。旧记录这一列是 NULL，`error` 是整句。
 /// 还给 `push_registration` 加了 `locale`：手机登记时的界面语言，推送摘要按它说；旧登记是
 /// NULL，按英文说，手机下次登记时补上。
+/// v40：额度缓存只留每家账户的状态。表头（上次写入时间、缓存格式版本）和当时查过的账户名单只用来
+/// 判断启动能不能不查，现在启动一律查一次，这两张表没人读了。
+pub const MIGRATE_V39_TO_V40: &str = "
+DROP TABLE IF EXISTS quota_cache_provider;
+DROP TABLE IF EXISTS quota_cache;
+";
+
 pub const V38_TO_V39_ADDED_COLUMNS: [(&str, &str, &str); 2] = [
     ("automation_run", "error_code", "TEXT"),
     ("push_registration", "locale", "TEXT"),
