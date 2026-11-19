@@ -324,6 +324,13 @@ pub enum ElicitationFieldKind {
     ExternalUrl,
 }
 
+/// 选择题的一个选项：标题，和标题下面一行说明。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ElicitationOption {
+    pub label: String,
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ElicitationField {
     pub key: String,
@@ -332,8 +339,8 @@ pub struct ElicitationField {
     /// 选择题也允许自己输入答案。
     pub allow_custom_input: bool,
     pub kind: ElicitationFieldKind,
-    /// 选项标签，回选时用下标。
-    pub options: Vec<String>,
+    /// 选项，回选时用下标。
+    pub options: Vec<ElicitationOption>,
     pub secret: bool,
     pub url: Option<String>,
     /// 已选中的选项下标。

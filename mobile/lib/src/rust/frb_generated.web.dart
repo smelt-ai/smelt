@@ -327,6 +327,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ElicitationFieldKind dco_decode_elicitation_field_kind(dynamic raw);
 
   @protected
+  ElicitationOption dco_decode_elicitation_option(dynamic raw);
+
+  @protected
   ElicitationTextInput dco_decode_elicitation_text_input(dynamic raw);
 
   @protected
@@ -450,6 +453,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ElicitationField> dco_decode_list_elicitation_field(dynamic raw);
+
+  @protected
+  List<ElicitationOption> dco_decode_list_elicitation_option(dynamic raw);
 
   @protected
   List<ElicitationTextInput> dco_decode_list_elicitation_text_input(
@@ -1188,6 +1194,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ElicitationOption sse_decode_elicitation_option(SseDeserializer deserializer);
+
+  @protected
   ElicitationTextInput sse_decode_elicitation_text_input(
     SseDeserializer deserializer,
   );
@@ -1331,6 +1340,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ElicitationField> sse_decode_list_elicitation_field(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ElicitationOption> sse_decode_list_elicitation_option(
     SseDeserializer deserializer,
   );
 
@@ -2266,6 +2280,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_elicitation_option(
+    ElicitationOption self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_elicitation_text_input(
     ElicitationTextInput self,
     SseSerializer serializer,
@@ -2439,6 +2459,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_elicitation_field(
     List<ElicitationField> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_elicitation_option(
+    List<ElicitationOption> self,
     SseSerializer serializer,
   );
 

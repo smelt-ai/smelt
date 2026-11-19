@@ -3865,7 +3865,8 @@ impl SseDecode for crate::api::conversation::ElicitationField {
         let mut var_allowCustomInput = <bool>::sse_decode(deserializer);
         let mut var_kind =
             <crate::api::conversation::ElicitationFieldKind>::sse_decode(deserializer);
-        let mut var_options = <Vec<String>>::sse_decode(deserializer);
+        let mut var_options =
+            <Vec<crate::api::conversation::ElicitationOption>>::sse_decode(deserializer);
         let mut var_secret = <bool>::sse_decode(deserializer);
         let mut var_url = <Option<String>>::sse_decode(deserializer);
         let mut var_chosen = <Vec<u32>>::sse_decode(deserializer);
@@ -3895,6 +3896,18 @@ impl SseDecode for crate::api::conversation::ElicitationFieldKind {
             2 => crate::api::conversation::ElicitationFieldKind::Text,
             3 => crate::api::conversation::ElicitationFieldKind::ExternalUrl,
             _ => unreachable!("Invalid variant for ElicitationFieldKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ElicitationOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_label = <String>::sse_decode(deserializer);
+        let mut var_description = <Option<String>>::sse_decode(deserializer);
+        return crate::api::conversation::ElicitationOption {
+            label: var_label,
+            description: var_description,
         };
     }
 }
@@ -4411,6 +4424,20 @@ impl SseDecode for Vec<crate::api::conversation::ElicitationField> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::conversation::ElicitationField>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ElicitationOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ElicitationOption>::sse_decode(
                 deserializer,
             ));
         }
@@ -7479,6 +7506,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ElicitationFiel
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ElicitationOption {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.label.into_into_dart().into_dart(),
+            self.description.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ElicitationOption
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ElicitationOption>
+    for crate::api::conversation::ElicitationOption
+{
+    fn into_into_dart(self) -> crate::api::conversation::ElicitationOption {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::conversation::ElicitationTextInput {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -9887,7 +9935,7 @@ impl SseEncode for crate::api::conversation::ElicitationField {
         <bool>::sse_encode(self.required, serializer);
         <bool>::sse_encode(self.allow_custom_input, serializer);
         <crate::api::conversation::ElicitationFieldKind>::sse_encode(self.kind, serializer);
-        <Vec<String>>::sse_encode(self.options, serializer);
+        <Vec<crate::api::conversation::ElicitationOption>>::sse_encode(self.options, serializer);
         <bool>::sse_encode(self.secret, serializer);
         <Option<String>>::sse_encode(self.url, serializer);
         <Vec<u32>>::sse_encode(self.chosen, serializer);
@@ -9910,6 +9958,14 @@ impl SseEncode for crate::api::conversation::ElicitationFieldKind {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::conversation::ElicitationOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.label, serializer);
+        <Option<String>>::sse_encode(self.description, serializer);
     }
 }
 
@@ -10306,6 +10362,16 @@ impl SseEncode for Vec<crate::api::conversation::ElicitationField> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::conversation::ElicitationField>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ElicitationOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ElicitationOption>::sse_encode(item, serializer);
         }
     }
 }

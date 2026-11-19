@@ -3966,7 +3966,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       required_: dco_decode_bool(arr[2]),
       allowCustomInput: dco_decode_bool(arr[3]),
       kind: dco_decode_elicitation_field_kind(arr[4]),
-      options: dco_decode_list_String(arr[5]),
+      options: dco_decode_list_elicitation_option(arr[5]),
       secret: dco_decode_bool(arr[6]),
       url: dco_decode_opt_String(arr[7]),
       chosen: dco_decode_list_prim_u_32_strict(arr[8]),
@@ -3978,6 +3978,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ElicitationFieldKind dco_decode_elicitation_field_kind(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return ElicitationFieldKind.values[raw as int];
+  }
+
+  @protected
+  ElicitationOption dco_decode_elicitation_option(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return ElicitationOption(
+      label: dco_decode_String(arr[0]),
+      description: dco_decode_opt_String(arr[1]),
+    );
   }
 
   @protected
@@ -4344,6 +4356,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<ElicitationField> dco_decode_list_elicitation_field(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_elicitation_field).toList();
+  }
+
+  @protected
+  List<ElicitationOption> dco_decode_list_elicitation_option(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_elicitation_option).toList();
   }
 
   @protected
@@ -6484,7 +6502,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_required_ = sse_decode_bool(deserializer);
     var var_allowCustomInput = sse_decode_bool(deserializer);
     var var_kind = sse_decode_elicitation_field_kind(deserializer);
-    var var_options = sse_decode_list_String(deserializer);
+    var var_options = sse_decode_list_elicitation_option(deserializer);
     var var_secret = sse_decode_bool(deserializer);
     var var_url = sse_decode_opt_String(deserializer);
     var var_chosen = sse_decode_list_prim_u_32_strict(deserializer);
@@ -6510,6 +6528,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return ElicitationFieldKind.values[inner];
+  }
+
+  @protected
+  ElicitationOption sse_decode_elicitation_option(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_label = sse_decode_String(deserializer);
+    var var_description = sse_decode_opt_String(deserializer);
+    return ElicitationOption(label: var_label, description: var_description);
   }
 
   @protected
@@ -6953,6 +6981,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <ElicitationField>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_elicitation_field(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ElicitationOption> sse_decode_list_elicitation_option(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ElicitationOption>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_elicitation_option(deserializer));
     }
     return ans_;
   }
@@ -9430,7 +9472,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.required_, serializer);
     sse_encode_bool(self.allowCustomInput, serializer);
     sse_encode_elicitation_field_kind(self.kind, serializer);
-    sse_encode_list_String(self.options, serializer);
+    sse_encode_list_elicitation_option(self.options, serializer);
     sse_encode_bool(self.secret, serializer);
     sse_encode_opt_String(self.url, serializer);
     sse_encode_list_prim_u_32_strict(self.chosen, serializer);
@@ -9444,6 +9486,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_elicitation_option(
+    ElicitationOption self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.label, serializer);
+    sse_encode_opt_String(self.description, serializer);
   }
 
   @protected
@@ -9827,6 +9879,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_elicitation_field(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_elicitation_option(
+    List<ElicitationOption> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_elicitation_option(item, serializer);
     }
   }
 

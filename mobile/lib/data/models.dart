@@ -201,8 +201,13 @@ extension ElicitationView on Elicitation {
     for (final (index, field) in fields.indexed) {
       if (!field.required_) continue;
       final ready = switch (field.kind) {
-        ElicitationFieldKind.select ||
-        ElicitationFieldKind.multiSelect => field.chosen.isNotEmpty,
+        ElicitationFieldKind.select || ElicitationFieldKind.multiSelect =>
+          field.chosen.isNotEmpty ||
+              (field.allowCustomInput &&
+                  (localTextValues[index] ?? field.textValue)
+                          ?.trim()
+                          .isNotEmpty ==
+                      true),
         ElicitationFieldKind.text =>
           (localTextValues[index] ?? field.textValue)?.trim().isNotEmpty ==
               true,

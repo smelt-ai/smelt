@@ -1849,7 +1849,7 @@ class L10nZh extends L10n {
   String get elicitationDismiss => '跳过';
 
   @override
-  String get elicitationRequired => '必填';
+  String get elicitationOtherAnswer => '其他答案…';
 
   @override
   String get elicitationOpenLink => '打开链接';

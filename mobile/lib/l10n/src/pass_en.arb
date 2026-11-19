@@ -50,7 +50,7 @@
   "approvalRejectAlways": "Always deny",
   "elicitationSubmit": "Send answer",
   "elicitationDismiss": "Skip",
-  "elicitationRequired": "Required",
+  "elicitationOtherAnswer": "Other answer…",
   "elicitationOpenLink": "Open link",
   "elicitationTextHint": "Type your answer"
 }

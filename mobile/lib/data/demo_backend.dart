@@ -194,9 +194,16 @@ class DemoBackend implements Backend {
               key: 'layer',
               title: '规则来源',
               required_: true,
-              allowCustomInput: false,
+              allowCustomInput: true,
               kind: ElicitationFieldKind.select,
-              options: const ['订阅里的规则', '本地 overlay', '两者合并'],
+              options: const [
+                ElicitationOption(
+                  label: '订阅里的规则',
+                  description: '跟着订阅更新，本地不用维护',
+                ),
+                ElicitationOption(label: '本地 overlay', description: '只用本地写的规则'),
+                ElicitationOption(label: '两者合并'),
+              ],
               secret: false,
               chosen: Uint32List(0),
             ),

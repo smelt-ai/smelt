@@ -278,8 +278,23 @@ class ElicitationBody extends StatefulWidget {
 }
 
 class _ElicitationBodyState extends State<ElicitationBody> {
+  /// 各题在手机上打的字：填空题的回答，或选择题「其他答案」里写的。提交时一起交。
   final Map<int, String> _text = {};
+  final Map<int, TextEditingController> _custom = {};
   bool _busy = false;
+
+  @override
+  void dispose() {
+    for (final controller in _custom.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  TextEditingController _customController(int index, String? initial) =>
+      _custom.putIfAbsent(index, () => TextEditingController(text: initial));
+
+  bool _typed(int index) => (_text[index] ?? '').trim().isNotEmpty;
 
   Future<void> _run(Future<void> Function() action) async {
     final l10n = L10n.of(context);
@@ -303,8 +318,11 @@ class _ElicitationBodyState extends State<ElicitationBody> {
     final l10n = L10n.of(context);
     final model = AppScope.of(context);
     final e = widget.elicitation;
+    // 几道题一起问时没有总题面，各题自己带题面；收起时露第一道。
+    final hasMessage = e.message.trim().isNotEmpty;
+    final showFieldTitles = e.fields.length > 1 || !hasMessage;
     final message = Text(
-      e.message,
+      hasMessage || e.fields.isEmpty ? e.message : e.fields.first.title,
       maxLines: widget.expanded ? null : 3,
       overflow: widget.expanded ? null : TextOverflow.ellipsis,
       style: t.body.copyWith(color: c.onPaper),
@@ -327,40 +345,38 @@ class _ElicitationBodyState extends State<ElicitationBody> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        message,
+        if (hasMessage) message,
         for (final (index, field) in e.fields.indexed) ...[
-          const SizedBox(height: Space.lg),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  field.title,
-                  style: t.label.copyWith(color: c.onPaper),
-                ),
-              ),
-              if (field.required_)
-                Text(
-                  l10n.elicitationRequired,
-                  style: t.caption.copyWith(color: c.onPaperMuted),
-                ),
-            ],
-          ),
-          const SizedBox(height: Space.sm),
+          if (hasMessage || index > 0) const SizedBox(height: Space.lg),
+          if (showFieldTitles) ...[
+            Text(field.title, style: t.label.copyWith(color: c.onPaper)),
+            const SizedBox(height: Space.sm),
+          ],
           switch (field.kind) {
             ElicitationFieldKind.select ||
-            ElicitationFieldKind.multiSelect => Wrap(
-              spacing: Space.sm,
-              runSpacing: Space.sm,
+            ElicitationFieldKind.multiSelect => Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                for (final (option, label) in field.options.indexed)
+                for (final (option, choice) in field.options.indexed) ...[
+                  if (option > 0) const SizedBox(height: Space.xs),
                   _Choice(
-                    label: label,
-                    selected: field.chosen.contains(option),
+                    option: choice,
+                    // 单选题写了自己的答案，交的就是写的字，选项不再显示成选中。
+                    selected:
+                        field.chosen.contains(option) &&
+                        (field.kind == ElicitationFieldKind.multiSelect ||
+                            !_typed(index)),
                     multi: field.kind == ElicitationFieldKind.multiSelect,
                     onTap: _busy
                         ? null
                         : () {
                             HapticFeedback.selectionClick();
+                            if (field.kind == ElicitationFieldKind.select) {
+                              // 点了选项，写了一半的答案作废，免得提交时字盖过选项。
+                              setState(() => _text.remove(index));
+                              _custom[index]?.clear();
+                            }
                             _run(
                               () => backend.chooseElicitation(
                                 widget.runtimeId,
@@ -371,6 +387,21 @@ class _ElicitationBodyState extends State<ElicitationBody> {
                             );
                           },
                   ),
+                ],
+                if (field.allowCustomInput) ...[
+                  const SizedBox(height: Space.sm),
+                  TextField(
+                    controller: _customController(index, field.textValue),
+                    minLines: 1,
+                    maxLines: 3,
+                    style: t.body.copyWith(color: c.onPaper),
+                    decoration: InputDecoration(
+                      hintText: l10n.elicitationOtherAnswer,
+                      fillColor: c.paper,
+                    ),
+                    onChanged: (value) => setState(() => _text[index] = value),
+                  ),
+                ],
               ],
             ),
             ElicitationFieldKind.text => TextFormField(
@@ -449,15 +480,16 @@ class _ElicitationBodyState extends State<ElicitationBody> {
   }
 }
 
+/// 选择题的一行：标题，下面一行说明。
 class _Choice extends StatelessWidget {
   const _Choice({
-    required this.label,
+    required this.option,
     required this.selected,
     required this.multi,
     required this.onTap,
   });
 
-  final String label;
+  final ElicitationOption option;
   final bool selected;
   final bool multi;
   final VoidCallback? onTap;
@@ -488,24 +520,42 @@ class _Choice extends StatelessWidget {
                 vertical: Space.sm,
               ),
               child: Row(
-                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(
-                    selected
-                        ? (multi
-                              ? LucideIcons.squareCheck
-                              : LucideIcons.circleCheck)
-                        : (multi ? LucideIcons.square : LucideIcons.circle),
-                    size: Strokes.iconSmall,
-                    color: selected ? c.paper : c.onPaperMuted,
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Icon(
+                      selected
+                          ? (multi
+                                ? LucideIcons.squareCheck
+                                : LucideIcons.circleCheck)
+                          : (multi ? LucideIcons.square : LucideIcons.circle),
+                      size: Strokes.iconSmall,
+                      color: selected ? c.paper : c.onPaperMuted,
+                    ),
                   ),
                   const SizedBox(width: Space.sm),
-                  Flexible(
-                    child: Text(
-                      label,
-                      style: t.callout.copyWith(
-                        color: selected ? c.paper : c.onPaper,
-                      ),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          option.label,
+                          style: t.callout.copyWith(
+                            color: selected ? c.paper : c.onPaper,
+                          ),
+                        ),
+                        if (option.description case final description?)
+                          Text(
+                            description,
+                            style: t.caption.copyWith(
+                              color: selected
+                                  ? c.paper.withValues(alpha: 0.75)
+                                  : c.onPaperMuted,
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 ],

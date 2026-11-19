@@ -37,7 +37,7 @@
   "approvalRejectAlways": "总是拒绝",
   "elicitationSubmit": "提交回答",
   "elicitationDismiss": "跳过",
-  "elicitationRequired": "必填",
+  "elicitationOtherAnswer": "其他答案…",
   "elicitationOpenLink": "打开链接",
   "elicitationTextHint": "输入你的回答"
 }

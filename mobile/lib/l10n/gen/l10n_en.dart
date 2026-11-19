@@ -1928,7 +1928,7 @@ class L10nEn extends L10n {
   String get elicitationDismiss => 'Skip';
 
   @override
-  String get elicitationRequired => 'Required';
+  String get elicitationOtherAnswer => 'Other answer…';
 
   @override
   String get elicitationOpenLink => 'Open link';

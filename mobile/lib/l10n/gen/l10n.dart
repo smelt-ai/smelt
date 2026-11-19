@@ -3271,11 +3271,11 @@ abstract class L10n {
   /// **'Skip'**
   String get elicitationDismiss;
 
-  /// No description provided for @elicitationRequired.
+  /// No description provided for @elicitationOtherAnswer.
   ///
   /// In en, this message translates to:
-  /// **'Required'**
-  String get elicitationRequired;
+  /// **'Other answer…'**
+  String get elicitationOtherAnswer;
 
   /// No description provided for @elicitationOpenLink.
   ///

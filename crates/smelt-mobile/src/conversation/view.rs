@@ -15,7 +15,7 @@ use smelt_model::daemon_state::DaemonPhase;
 use crate::api::conversation::{
     ApprovalDetails, ApprovalKind, ChoiceOption, ConfigOption, ContextUsage, ConversationEntry,
     ConversationImage, ConversationMemoryChange, ConversationMemoryChanges, ConversationNotice, ConversationPhase, ConversationView, DiffLine, DiffOp,
-    DiffView, Elicitation, ElicitationField, ElicitationFieldKind, EntryKind, ImageRef,
+    DiffView, Elicitation, ElicitationField, ElicitationFieldKind, ElicitationOption, EntryKind, ImageRef,
     ModelProvider, ModelSelector, PermissionOption, PermissionOptionKind, PermissionRequest,
     PlanStep, PlanStepStatus, SlashCommand, TaskNoteKind, TaskNoteView, ToolCallView, ToolKind,
     ToolOutput, ToolOutputKind, ToolStatus,
@@ -436,19 +436,13 @@ pub(crate) fn elicitation(pending: &PendingElicitation) -> Elicitation {
             let (kind, options, secret, url) = match &field.kind {
                 ElicitFieldKindView::Select(options) => (
                     ElicitationFieldKind::Select,
-                    options
-                        .iter()
-                        .map(ElicitOptionView::display_label)
-                        .collect(),
+                    options.iter().map(elicitation_option).collect(),
                     false,
                     None,
                 ),
                 ElicitFieldKindView::MultiSelect(options) => (
                     ElicitationFieldKind::MultiSelect,
-                    options
-                        .iter()
-                        .map(ElicitOptionView::display_label)
-                        .collect(),
+                    options.iter().map(elicitation_option).collect(),
                     false,
                     None,
                 ),
@@ -485,6 +479,13 @@ pub(crate) fn elicitation(pending: &PendingElicitation) -> Elicitation {
         message: pending.message.clone(),
         fields,
         is_ready,
+    }
+}
+
+fn elicitation_option(option: &ElicitOptionView) -> ElicitationOption {
+    ElicitationOption {
+        label: option.display_label(),
+        description: option.description.clone(),
     }
 }
 
@@ -792,7 +793,7 @@ mod tests {
         let pending = json!({
             "message": "选一下",
             "fields": [
-                {"key": "color", "title": "颜色", "required": true, "kind": {"Select": [{"label": "红"}, {"label": "绿"}]}},
+                {"key": "color", "title": "颜色", "required": true, "kind": {"Select": [{"label": "红", "description": "暖色"}, {"label": "绿"}]}},
                 {"key": "tags", "title": "标签", "required": false, "kind": {"MultiSelect": [{"label": "a"}, {"label": "b"}]}},
                 {"key": "name", "title": "名字", "kind": {"Text": {"secret": true}}},
                 {"key": "login", "title": "登录", "required": true, "kind": {"ExternalUrl": "https://example.com"}},
@@ -805,7 +806,19 @@ mod tests {
         let elicitation = view.pending_elicitation.unwrap();
         let fields = &elicitation.fields;
         assert_eq!(fields[0].kind, ElicitationFieldKind::Select);
-        assert_eq!(fields[0].options, ["红", "绿"]);
+        assert_eq!(
+            fields[0].options,
+            [
+                ElicitationOption {
+                    label: "红".into(),
+                    description: Some("暖色".into()),
+                },
+                ElicitationOption {
+                    label: "绿".into(),
+                    description: None,
+                },
+            ]
+        );
         assert_eq!(fields[0].chosen, [1]);
         assert_eq!(fields[1].kind, ElicitationFieldKind::MultiSelect);
         assert!(!fields[1].required);
