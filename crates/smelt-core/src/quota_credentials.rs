@@ -4,6 +4,8 @@
 //! 所以这里保证：
 //!
 //! - 读到的令牌留在守护进程内存里，后台刷新直接复用，不再调 `security`。
+//! - 没有这一项（CLI 没装或没登录）也记下，钥匙串之后没被写过就不再调 `security`。登录会
+//!   写钥匙串，下一轮就能读到；没装的账户每轮只看一次文件时间。
 //! - 令牌被接口拒绝（多半过期）时，钥匙串在上次读之后被写过（[`keychain_changed_at`]，
 //!   CLI 刷新令牌会写回）才重读，否则最多 [`BACKGROUND_REREAD_AFTER`] 一次。令牌过期而
 //!   CLI 又没在跑时，钥匙串没人写，重读拿到的还是旧令牌，不限频就又成了定时弹窗；反过来
@@ -106,6 +108,29 @@ fn classify_failure(exit_code: Option<i32>) -> KeychainRead {
     }
 }
 
+/// 判断要不要读钥匙串用到的两个时刻。
+#[derive(Clone, Copy)]
+struct ReadClock {
+    now: SystemTime,
+    /// 登录钥匙串最后一次被写的时刻，见 [`keychain_changed_at`]。
+    keychain_changed_at: Option<SystemTime>,
+}
+
+impl ReadClock {
+    fn current() -> Self {
+        Self {
+            now: SystemTime::now(),
+            keychain_changed_at: keychain_changed_at(),
+        }
+    }
+
+    /// 钥匙串在 `since` 之后被写过。
+    fn written_since(self, since: SystemTime) -> bool {
+        self.keychain_changed_at
+            .is_some_and(|changed| changed > since)
+    }
+}
+
 struct CachedToken {
     token: String,
     /// 开始读钥匙串的时刻（墙上时间，要和钥匙串文件的修改时间比）。
@@ -115,9 +140,10 @@ struct CachedToken {
 impl CachedToken {
     /// 读过之后钥匙串可能换了令牌：文件在读之后被写过，或者已经隔了一个兜底间隔（令牌项
     /// 不在登录钥匙串里时，文件时间看不出它变没变）。
-    fn may_be_outdated(&self, now: SystemTime, keychain_changed_at: Option<SystemTime>) -> bool {
-        keychain_changed_at.is_some_and(|changed| changed > self.read_at)
-            || now
+    fn may_be_outdated(&self, clock: ReadClock) -> bool {
+        clock.written_since(self.read_at)
+            || clock
+                .now
                 .duration_since(self.read_at)
                 .is_ok_and(|elapsed| elapsed >= BACKGROUND_REREAD_AFTER)
     }
@@ -127,6 +153,8 @@ impl CachedToken {
 #[derive(Default)]
 struct TokenCache {
     tokens: HashMap<(String, String), CachedToken>,
+    /// 读过、确认没有的项，值是那次开始读的时刻。
+    missing: HashMap<(String, String), SystemTime>,
 }
 
 impl TokenCache {
@@ -136,18 +164,26 @@ impl TokenCache {
         item: &str,
         denied: bool,
         access: CredentialAccess,
-        now: SystemTime,
+        clock: ReadClock,
         read: impl FnOnce() -> KeychainRead,
     ) -> KeychainLookup {
         if access == CredentialAccess::Background {
             if denied {
                 return KeychainLookup::Denied;
             }
-            if let Some(cached) = self.tokens.get(&cache_key(provider, item)) {
+            let key = cache_key(provider, item);
+            if let Some(cached) = self.tokens.get(&key) {
                 return KeychainLookup::Token(cached.token.clone());
             }
+            // 看不到文件时间时照旧每轮读：读一个没有的项不弹窗。
+            if let Some(probed_at) = self.missing.get(&key)
+                && clock.keychain_changed_at.is_some()
+                && !clock.written_since(*probed_at)
+            {
+                return KeychainLookup::NotFound;
+            }
         }
-        self.apply_read(provider, item, now, read())
+        self.apply_read(provider, item, clock.now, read())
     }
 
     /// 令牌 `rejected` 被接口拒绝后要一个新的。`Token` 只会是和它不同的令牌；没有新令牌
@@ -157,8 +193,7 @@ impl TokenCache {
         provider: &str,
         item: &str,
         rejected: &str,
-        now: SystemTime,
-        keychain_changed_at: Option<SystemTime>,
+        clock: ReadClock,
         read: impl FnOnce() -> KeychainRead,
     ) -> KeychainLookup {
         let Some(cached) = self.tokens.get(&cache_key(provider, item)) else {
@@ -167,10 +202,10 @@ impl TokenCache {
         if cached.token != rejected {
             return KeychainLookup::Token(cached.token.clone());
         }
-        if !cached.may_be_outdated(now, keychain_changed_at) {
+        if !cached.may_be_outdated(clock) {
             return KeychainLookup::NotFound;
         }
-        match self.apply_read(provider, item, now, read()) {
+        match self.apply_read(provider, item, clock.now, read()) {
             KeychainLookup::Token(token) if token == rejected => KeychainLookup::NotFound,
             other => other,
         }
@@ -185,6 +220,7 @@ impl TokenCache {
     ) -> KeychainLookup {
         match read {
             KeychainRead::Secret(token) => {
+                self.missing.remove(&cache_key(provider, item));
                 self.tokens.insert(
                     cache_key(provider, item),
                     CachedToken {
@@ -195,7 +231,9 @@ impl TokenCache {
                 KeychainLookup::Token(token)
             }
             KeychainRead::NotFound => {
-                self.tokens.remove(&cache_key(provider, item));
+                let key = cache_key(provider, item);
+                self.tokens.remove(&key);
+                self.missing.insert(key, now);
                 KeychainLookup::NotFound
             }
             KeychainRead::Denied => {
@@ -207,6 +245,7 @@ impl TokenCache {
 
     fn forget(&mut self, provider: &str) {
         self.tokens.retain(|(owner, _), _| owner != provider);
+        self.missing.retain(|(owner, _), _| owner != provider);
     }
 }
 
@@ -236,7 +275,7 @@ pub(crate) fn keychain_token(
         return KeychainLookup::Busy;
     };
     let denied = keychain_denied(provider);
-    let result = cache.lookup(provider, item, denied, access, SystemTime::now(), read);
+    let result = cache.lookup(provider, item, denied, access, ReadClock::current(), read);
     record_denial_change(provider, denied, &result);
     result
 }
@@ -253,14 +292,7 @@ pub(crate) fn keychain_token_after_rejection(
     if denied {
         return None;
     }
-    let result = cache.after_rejection(
-        provider,
-        item,
-        rejected,
-        SystemTime::now(),
-        keychain_changed_at(),
-        read,
-    );
+    let result = cache.after_rejection(provider, item, rejected, ReadClock::current(), read);
     record_denial_change(provider, denied, &result);
     match result {
         KeychainLookup::Token(token) => Some(token),
@@ -332,6 +364,13 @@ mod tests {
         KeychainLookup::Token(token.to_string())
     }
 
+    fn at(now: SystemTime, keychain_changed_at: Option<SystemTime>) -> ReadClock {
+        ReadClock {
+            now,
+            keychain_changed_at,
+        }
+    }
+
     fn cache_with(token_value: &str, read_at: SystemTime) -> TokenCache {
         let mut cache = TokenCache::default();
         cache.apply_read("claude", "item", read_at, secret(token_value));
@@ -359,7 +398,7 @@ mod tests {
                     "item",
                     false,
                     Background,
-                    now,
+                    at(now, None),
                     counted(&reads, secret("t1"))
                 ),
                 token("t1")
@@ -380,7 +419,7 @@ mod tests {
                 "item",
                 false,
                 UserInitiated,
-                now,
+                at(now, None),
                 counted(&reads, secret("new"))
             ),
             token("new")
@@ -400,7 +439,7 @@ mod tests {
                 "item",
                 true,
                 Background,
-                now,
+                at(now, None),
                 counted(&reads, secret("t1"))
             ),
             KeychainLookup::Denied
@@ -412,7 +451,7 @@ mod tests {
                 "item",
                 true,
                 UserInitiated,
-                now,
+                at(now, None),
                 counted(&reads, secret("t1"))
             ),
             token("t1")
@@ -428,18 +467,23 @@ mod tests {
         cache.apply_read("claude", "other", now, secret("t2"));
         cache.apply_read("copilot", "item", now, secret("t3"));
         assert_eq!(
-            cache.lookup("claude", "item", false, UserInitiated, now, || {
-                KeychainRead::Denied
-            }),
+            cache.lookup(
+                "claude",
+                "item",
+                false,
+                UserInitiated,
+                at(now, None),
+                || { KeychainRead::Denied }
+            ),
             KeychainLookup::Denied
         );
         assert_eq!(cache.tokens.len(), 1);
         assert!(cache.tokens.contains_key(&cache_key("copilot", "item")));
     }
 
-    /// 没有这一项不弹窗，不缓存：用户之后登录，下一轮就能读到。
+    /// 没有这一项不弹窗。看不到钥匙串文件时间时每轮都读：用户之后登录，下一轮就能读到。
     #[test]
-    fn a_missing_item_is_not_cached() {
+    fn a_missing_item_is_reread_when_the_keychain_time_is_unknown() {
         let mut cache = TokenCache::default();
         let reads = Cell::new(0);
         let now = SystemTime::now();
@@ -450,10 +494,67 @@ mod tests {
                     "item",
                     false,
                     Background,
-                    now,
+                    at(now, None),
                     counted(&reads, KeychainRead::NotFound)
                 ),
                 KeychainLookup::NotFound
+            );
+        }
+        assert_eq!(reads.get(), 2);
+    }
+
+    /// 没装、没登录的账户：钥匙串没被写过就不再调 `security`；登录写了钥匙串，下一轮就读到。
+    #[test]
+    fn a_missing_item_is_reprobed_only_after_a_keychain_write() {
+        let mut cache = TokenCache::default();
+        let reads = Cell::new(0);
+        let start = SystemTime::now();
+        let unchanged = Some(start - Duration::from_secs(1));
+        for round in 0..3 {
+            assert_eq!(
+                cache.lookup(
+                    "claude",
+                    "item",
+                    false,
+                    Background,
+                    at(start + Duration::from_secs(300 * round), unchanged),
+                    counted(&reads, KeychainRead::NotFound)
+                ),
+                KeychainLookup::NotFound
+            );
+        }
+        assert_eq!(reads.get(), 1);
+        let later = start + Duration::from_secs(900);
+        assert_eq!(
+            cache.lookup(
+                "claude",
+                "item",
+                false,
+                Background,
+                at(later, Some(later - Duration::from_secs(1))),
+                counted(&reads, secret("t1"))
+            ),
+            token("t1")
+        );
+        assert_eq!(reads.get(), 2);
+        assert!(cache.missing.is_empty());
+    }
+
+    /// 用户点了刷新：没有的项也重读，不看钥匙串时间。
+    #[test]
+    fn a_user_refresh_probes_a_missing_item_again() {
+        let mut cache = TokenCache::default();
+        let reads = Cell::new(0);
+        let now = SystemTime::now();
+        let unchanged = Some(now - Duration::from_secs(1));
+        for access in [Background, UserInitiated] {
+            cache.lookup(
+                "claude",
+                "item",
+                false,
+                access,
+                at(now, unchanged),
+                counted(&reads, KeychainRead::NotFound),
             );
         }
         assert_eq!(reads.get(), 2);
@@ -473,8 +574,7 @@ mod tests {
                     "claude",
                     "item",
                     "t1",
-                    soon,
-                    changed_at,
+                    at(soon, changed_at),
                     counted(&reads, secret("t2"))
                 ),
                 KeychainLookup::NotFound
@@ -495,8 +595,7 @@ mod tests {
                 "claude",
                 "item",
                 "t1",
-                soon,
-                Some(start + Duration::from_secs(1)),
+                at(soon, Some(start + Duration::from_secs(1))),
                 || secret("t2")
             ),
             token("t2")
@@ -509,7 +608,7 @@ mod tests {
         let mut cache = cache_with("t1", start);
         let later = start + BACKGROUND_REREAD_AFTER;
         assert_eq!(
-            cache.after_rejection("claude", "item", "t1", later, None, || secret("t2")),
+            cache.after_rejection("claude", "item", "t1", at(later, None), || secret("t2")),
             token("t2")
         );
     }
@@ -528,8 +627,7 @@ mod tests {
                 "claude",
                 "item",
                 "t1",
-                first,
-                Some(written),
+                at(first, Some(written)),
                 counted(&reads, secret("t1"))
             ),
             KeychainLookup::NotFound
@@ -540,8 +638,7 @@ mod tests {
                 "claude",
                 "item",
                 "t1",
-                second,
-                Some(written),
+                at(second, Some(written)),
                 counted(&reads, secret("t1"))
             ),
             KeychainLookup::NotFound
@@ -552,8 +649,7 @@ mod tests {
                 "claude",
                 "item",
                 "t1",
-                second,
-                Some(second - Duration::from_secs(1)),
+                at(second, Some(second - Duration::from_secs(1))),
                 counted(&reads, secret("t2"))
             ),
             token("t2")
@@ -572,8 +668,7 @@ mod tests {
                 "claude",
                 "item",
                 "t1",
-                now,
-                Some(now),
+                at(now, Some(now)),
                 counted(&reads, secret("t3"))
             ),
             token("t2")
@@ -590,8 +685,7 @@ mod tests {
                 "claude",
                 "item",
                 "t1",
-                start + BACKGROUND_REREAD_AFTER,
-                None,
+                at(start + BACKGROUND_REREAD_AFTER, None),
                 || KeychainRead::Denied
             ),
             KeychainLookup::Denied

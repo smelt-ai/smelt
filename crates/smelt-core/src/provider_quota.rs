@@ -67,9 +67,11 @@ const GROK_BILLING_ENDPOINT: &str = "https://cli-chat-proxy.grok.com/v1/billing?
 const CURSOR_USAGE_ENDPOINT: &str =
     "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 
-/// 使用 Codex CLI 的 ChatGPT OAuth 凭据查询账户限额。
+/// 使用 Codex CLI 的 ChatGPT OAuth 凭据查询账户限额。没登录时是 `Ok(None)`。
 pub async fn fetch_codex_quota() -> anyhow::Result<Option<ProviderQuota>> {
-    let (token, account_id) = local_codex_credentials()?;
+    let Some((token, account_id)) = local_codex_credentials() else {
+        return Ok(None);
+    };
     fetch_codex_quota_with_token(&token, &account_id).await
 }
 
@@ -552,9 +554,9 @@ fn format_window_seconds(seconds: u64) -> String {
     format!("{}s", seconds)
 }
 
-fn local_codex_credentials() -> anyhow::Result<(String, String)> {
+fn local_codex_credentials() -> Option<(String, String)> {
     if let Some(token) = non_empty_env("CODEX_ACCESS_TOKEN") {
-        return Ok((token, non_empty_env("CODEX_ACCOUNT_ID").unwrap_or_default()));
+        return Some((token, non_empty_env("CODEX_ACCOUNT_ID").unwrap_or_default()));
     }
 
     let mut paths = Vec::new();
@@ -582,9 +584,9 @@ fn local_codex_credentials() -> anyhow::Result<(String, String)> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string();
-        return Ok((token.to_string(), account_id));
+        return Some((token.to_string(), account_id));
     }
-    Err(anyhow::anyhow!("Codex local credentials were not found"))
+    None
 }
 
 fn local_grok_access_token() -> Option<String> {

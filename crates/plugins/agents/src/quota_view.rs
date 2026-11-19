@@ -74,7 +74,7 @@ impl QuotaBar {
         chips_for(&self.quota)
     }
 
-    /// 弹层里的全部开启账户（含暂未查到或失败的），按展示顺序。
+    /// 弹层里列的账户：有额度的、查询失败的、用户刚点了在查的，按展示顺序。
     fn popover_rows(&self) -> Vec<PopoverEntry> {
         popover_entries(&self.quota)
     }
@@ -95,21 +95,25 @@ fn popover_entries(quota: &Quota) -> Vec<PopoverEntry> {
         .iter()
         .copied()
         .filter(|target| target.provider.is_none())
-        .map(|target| {
+        .filter_map(|target| {
             let status = quota
                 .statuses
                 .iter()
                 .find(|(candidate, _)| *candidate == target)
                 .map(|(_, status)| status);
             if let Some(chip) = status.and_then(|status| chip_for(quota, target, status)) {
-                return PopoverEntry::Ready(chip);
+                return Some(PopoverEntry::Ready(chip));
             }
             let error = status.and_then(|status| status.error.clone());
-            PopoverEntry::Pending(PendingRow {
+            // 没有额度也没报错：没装、没登录，或还没查过。不占一行，设置页里列着全部账户。
+            if error.is_none() && !quota.manual.contains(&target) {
+                return None;
+            }
+            Some(PopoverEntry::Pending(PendingRow {
                 target,
                 refreshing: quota.refreshing.contains(&target),
                 error,
-            })
+            }))
         })
         .collect()
 }
@@ -160,12 +164,9 @@ impl Render for QuotaBar {
             .justify_end()
             .type_style(TYPE.text_xsmall)
             .font_family(api::model::font_config::font_family());
+        // 没有能列的账户（都关了，或开着的都没登录）：空着。用户手点的那家会占一行，不用另给过渡。
         if rows.is_empty() {
-            // 所有账户都关掉了：查询中时给个过渡，不然空着。
-            return bar.when(!self.quota.refreshing.is_empty(), |bar| {
-                bar.text_color(rgb(ui_theme::faint()))
-                    .child(t!("quota.loading").into_owned())
-            });
+            return bar;
         }
         // 能折行的触发器：按钮高度固定折不了行，用列表行（悬停、弹层开着时的底跟别的行一样）。
         let trigger = ListRow::new("quota-bar")
@@ -764,13 +765,20 @@ mod tests {
     }
 
     #[test]
-    fn popover_entries_include_unfetched_and_failed_targets_while_bar_chips_stay_ready_only() {
+    fn popover_entries_list_failed_and_clicked_targets_but_not_logged_out_ones() {
         let codex = QuotaTarget::agent(ConversationAgentKind::Codex);
         let agy = QuotaTarget::agent(ConversationAgentKind::Antigravity);
         let grok = QuotaTarget::agent(ConversationAgentKind::Grok);
+        let cursor = QuotaTarget::agent(ConversationAgentKind::Cursor);
+        let claude = QuotaTarget::agent(ConversationAgentKind::Claude);
         let pi = QuotaTarget::pi("openrouter");
+        let logged_out = QuotaStatus {
+            quota: None,
+            checked_at_ms: 3,
+            error: None,
+        };
         let quota = Quota {
-            targets: vec![codex, agy, grok, pi],
+            targets: vec![codex, agy, grok, cursor, claude, pi],
             statuses: vec![
                 (
                     codex,
@@ -790,17 +798,21 @@ mod tests {
                         error: Some("HTTP 401".into()),
                     },
                 ),
+                (grok, logged_out.clone()),
+                (claude, logged_out),
             ],
-            refreshing: vec![agy],
-            manual: vec![agy],
+            refreshing: vec![agy, claude],
+            manual: vec![claude],
         };
 
         let chips = chips_for(&quota);
         assert_eq!(chips.len(), 1);
         assert_eq!(chips[0].target, codex);
 
+        // Grok 没登录、Cursor 还没查过、Pi provider 都不进左下角弹层；Claude 没登录但用户刚点了，
+        // 查的时候占一行。
         let entries = popover_entries(&quota);
-        assert_eq!(entries.len(), 3, "Pi provider 不进左下角弹层");
+        assert_eq!(entries.len(), 3);
         assert!(matches!(&entries[0], PopoverEntry::Ready(c) if c.target == codex));
         assert!(matches!(
             &entries[1],
@@ -810,7 +822,7 @@ mod tests {
         assert!(matches!(
             &entries[2],
             PopoverEntry::Pending(p)
-                if p.target == grok && !p.refreshing && p.error.is_none()
+                if p.target == claude && p.refreshing && p.error.is_none()
         ));
     }
 }
