@@ -67,6 +67,7 @@ folder-tree         tree-view
 repositories        folders
 git-branch          git-branch
 book-open           book-open
+brain               brain
 globe               globe-simple
 puzzle              puzzle-piece
 settings            gear-six

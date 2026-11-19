@@ -36,7 +36,7 @@ impl ConversationView {
             .pr_1p5()
             .pt_1p5()
             .child(
-                Icon::new(IconName::BookOpen)
+                Icon::new(IconName::Brain)
                     .size_3p5()
                     .flex_shrink_0()
                     .text_color(gpui::rgb(ui_theme::muted())),

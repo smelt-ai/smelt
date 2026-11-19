@@ -226,7 +226,7 @@ class _MemoryChangesCardState extends State<MemoryChangesCard> {
               child: Row(
                 children: [
                   Icon(
-                    LucideIcons.bookOpen,
+                    LucideIcons.brain,
                     size: Strokes.iconSmall,
                     color: c.inkMuted,
                   ),

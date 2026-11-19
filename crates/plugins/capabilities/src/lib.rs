@@ -104,7 +104,7 @@ pub fn register(cx: &mut App) {
             page_spec(
                 "memory",
                 api::text!("tab.memory"),
-                IconName::BookOpen,
+                IconName::Brain,
                 Some(SettingsEntry {
                     group: SettingsGroup::Agents,
                     keywords: [

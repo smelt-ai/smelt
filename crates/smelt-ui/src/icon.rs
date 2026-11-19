@@ -97,6 +97,7 @@ icon_names! {
     Repositories => "repositories",
     GitBranch => "git-branch",
     BookOpen => "book-open",
+    Brain => "brain",
     Globe => "globe",
     Puzzle => "puzzle",
     Settings => "settings",
