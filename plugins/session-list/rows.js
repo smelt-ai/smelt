@@ -336,7 +336,6 @@ function machine_row(ctx, machine, area) {
   const key = machine_flip(machine.machine);
   const collapsed = area.collapsed;
   const collapsible = machine.received;
-  const remote = machine.machine != null;
   const state = machine.link.unavailable ?? (machine.received ? null : t("machine.connecting"));
   const menu = ctx.menus.machine(machine.machine);
   const actions_slot = hover_only("machine-row")
@@ -366,22 +365,14 @@ function machine_row(ctx, machine, area) {
           .items(menu),
       ),
     );
-  const os = svg(machine.os_icon).size(14).text_color(light_color(p, machine.link));
+  const os = machine_icon(ctx, `machine:${id}`, machine, 14);
   const row = typed(
     SmeltListRow.new(key).group("machine-row").h(ROW_SM).mx_2().mt_2().px_2().flex().items_center().gap_2(),
     theme.type.text_xsmall_medium,
   )
     .child(disclosure_slot(ctx, "machine-row", os, key, collapsed, collapsible))
     .child(
-      SmeltTooltip.new(`machine-name-tip:${id}`, machine.link.detail)
-        .flex_1()
-        .min_w_0()
-        .child(
-          div()
-            .id(`machine-name:${id}`)
-            .child(SmeltTruncatedLine.new(machine.name))
-            .when(remote, (name) => name.on_hover(refresh_connections(ctx))),
-        ),
+      div().flex_1().min_w_0().child(SmeltTruncatedLine.new(machine.name)),
     )
     .when(state != null, (row) =>
       row.child(typed(div().flex_shrink_0(), theme.type.text_xsmall).text_color(p.faint).child(state)),
@@ -412,21 +403,32 @@ function waiting_machine_row(ctx, machine) {
     theme.type.ui,
   )
     .text_color(p.faint)
-    .child(lead_box().child(svg(machine.os_icon).size(14).text_color(light_color(p, machine.link))))
+    .child(lead_box().child(machine_icon(ctx, `machine-waiting:${id}`, machine, 14)))
     .child(div().flex_1().min_w_0().child(SmeltTruncatedLine.new(machine.name)))
     .child(
       typed(div().flex_shrink_0(), theme.type.text_xsmall).child(
         machine.link.unavailable ?? t("machine.connecting"),
       ),
-    )
-    .when(machine.machine != null, (row) => row.on_hover(refresh_connections(ctx)));
-  const tipped = SmeltTooltip.new(`machine-waiting-tip:${id}`, machine.link.detail).child(row);
+    );
   const menu = ctx.menus.machine(machine.machine);
-  if (menu.length === 0) return tipped;
-  return SmeltContextMenu.new(`machine-context:${id}`).items(menu).child(tipped);
+  if (menu.length === 0) return row;
+  return SmeltContextMenu.new(`machine-context:${id}`).items(menu).child(row);
 }
 
-/** 连接说明里的延迟只在有人看时采样：悬停远程机器时叫宿主重测一次。 */
+/** 机器的系统图标，按连接上色。悬停它看连接说明（走哪条路、多慢），远程机器顺便叫宿主重测一次。 */
+function machine_icon(ctx, id, machine, size) {
+  return SmeltTooltip.new(`${id}:icon-tip`, machine.link.detail)
+    .flex_shrink_0()
+    .child(
+      div()
+        .id(`${id}:icon`)
+        .flex()
+        .when(machine.machine != null, (icon) => icon.on_hover(refresh_connections(ctx)))
+        .child(svg(machine.os_icon).size(size).text_color(light_color(ctx.theme.palette, machine.link))),
+    );
+}
+
+/** 连接说明里的延迟只在有人看时采样：悬停远程机器的图标时叫宿主重测一次。 */
 function refresh_connections(ctx) {
   return (hovered) => {
     if (!hovered) return;
@@ -455,15 +457,12 @@ function empty_note(ctx, text, level) {
     .child(text);
 }
 
-/** 行上标的机器：系统图标按连接上色，后面是灰字写的名字。 */
-function machine_tag(ctx, machine, text, selected) {
+/** 行上标的机器：系统图标按连接上色（悬停看连接说明），后面是灰字写的名字。`id` 在窗口里唯一。 */
+function machine_tag(ctx, id, machine, text, selected) {
   const { theme } = ctx;
-  const p = theme.palette;
   return typed(div().flex_shrink_0().max_w(120).min_w_0().flex().items_center().gap_1(), theme.type.text_xsmall)
-    .text_color(row_faint(p, selected))
-    .when(machine != null, (tag) =>
-      tag.child(svg(machine.os_icon).flex_shrink_0().size(12).text_color(light_color(p, machine.link))),
-    )
+    .text_color(row_faint(theme.palette, selected))
+    .when(machine != null, (tag) => tag.child(machine_icon(ctx, id, machine, 12)))
     .child(div().min_w_0().child(SmeltTruncatedLine.new(text)));
 }
 
@@ -471,17 +470,14 @@ function machine_info(sidebar, machine) {
   return sidebar.machines.find((info) => info.machine === machine) ?? null;
 }
 
-/** 项目行上的机器标签：远程项目写机器名，机器用不了时再写为什么。悬停看完整的连接说明。 */
+/** 项目行上的机器标签：远程项目写机器名，机器用不了时再写为什么。 */
 function project_machine_tag(ctx, id, project, selected) {
   const link = project.link;
   const name = project.machine_name;
   const why = link.unavailable;
   const text = name != null && why != null ? `${name} · ${why}` : (name ?? why);
   if (text == null) return null;
-  const tag = machine_tag(ctx, machine_info(ctx.sidebar, project.machine), text, selected)
-    .id(`project-machine:${id}`)
-    .when(name != null, (tag) => tag.on_hover(refresh_connections(ctx)));
-  return SmeltTooltip.new(`project-machine-tip:${id}`, link.detail).flex_shrink_0().child(tag);
+  return machine_tag(ctx, `project-machine:${id}`, machine_info(ctx.sidebar, project.machine), text, selected);
 }
 
 function project_id(project) {
@@ -765,7 +761,7 @@ function session_face(ctx, el, row, depth, selected, renaming, close) {
         )
         .when(row.pinned, (title) => title.child(pin_marker(ctx)))
         .when(row.machine_name != null, (title) =>
-          title.child(machine_tag(ctx, machine_info(sidebar, key.machine), row.machine_name, selected)),
+          title.child(machine_tag(ctx, `session-machine:${id}`, machine_info(sidebar, key.machine), row.machine_name, selected)),
         )
         .when(row.origin != null, (title) => title.children(origin_labels(ctx, id, row.origin, selected)));
   return typed(
