@@ -48,10 +48,6 @@ action:
   select_project:
     en: "select the project"
     zh-CN: "选中项目"
-agent:
-  monogram_empty:
-    en: "A"
-    zh-CN: "智"
 archive:
   confirm:
     en: "Archive"

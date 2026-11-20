@@ -233,12 +233,8 @@ enum GroupKey {
 /// 行首的图标。
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RowIcon {
-    /// 跟智能体的对话：名字的第一个字，悬停看名字。
-    Agent {
-        mark: SharedString,
-        name: SharedString,
-    },
-    /// 哪家 CLI / ACP 的单色图标（资源路径），悬停看是哪家。
+    /// 哪家 CLI / ACP 的单色图标（资源路径），悬停看是哪家；跟智能体的对话画它底下引擎的
+    /// 图标，悬停看「智能体名 · 引擎」。
     Provider {
         path: SharedString,
         label: SharedString,
@@ -1051,24 +1047,23 @@ fn row_icon(
     states: &[DaemonSessionState],
     agents: &HashMap<String, String>,
 ) -> RowIcon {
-    if let Some(id) = conversation.agent_definition() {
-        let name = agents
-            .get(id)
-            .filter(|name| !name.is_empty())
-            .cloned()
-            .unwrap_or_else(|| id.to_string());
-        return RowIcon::Agent {
-            mark: agent_mark(&name).into(),
-            name: name.into(),
-        };
-    }
     if let Some(acp) = &conversation.acp {
-        return ConversationAgentKind::from_id(&acp.agent)
-            .map(|kind| RowIcon::Provider {
-                path: kind.icon_asset().into(),
-                label: kind.label().into(),
-            })
-            .unwrap_or(RowIcon::Conversation);
+        let Some(kind) = ConversationAgentKind::from_id(&acp.agent) else {
+            return RowIcon::Conversation;
+        };
+        // 智能体是谁看标题（建对话时写进去）和悬停；小标和别的对话一样只答「哪家」。
+        let label = match conversation.agent_definition() {
+            Some(id) => {
+                let name = agents.get(id).map_or(id, |name| name.trim());
+                let name = if name.is_empty() { id } else { name };
+                format!("{name} · {}", kind.label())
+            }
+            None => kind.label().to_string(),
+        };
+        return RowIcon::Provider {
+            path: kind.icon_asset().into(),
+            label: label.into(),
+        };
     }
     let first = conversation.terminals.first();
     let provider = first
@@ -1087,15 +1082,6 @@ fn row_icon(
             label: kind.label().into(),
         })
         .unwrap_or(RowIcon::Terminal)
-}
-
-/// 智能体头像上的字：名字的第一个字。
-fn agent_mark(name: &str) -> String {
-    name.trim()
-        .chars()
-        .next()
-        .map(String::from)
-        .unwrap_or_else(|| t!("agent.monogram_empty").into_owned())
 }
 
 /// 项目组的名字：根目录的最后一段；没有工作目录的那组叫「未指定目录」。
@@ -1645,10 +1631,36 @@ mod tests {
     }
 
     #[test]
-    fn agent_marks_take_the_first_character() {
-        assert_eq!(agent_mark("写作助手"), "写");
-        assert_eq!(agent_mark("  writer"), "w");
-        assert_eq!(agent_mark(""), "A");
+    fn agent_conversations_badge_their_engine_and_name_the_agent_on_hover() {
+        use smelt_plugin_api::model::workspace_directory::WorkspaceAcp;
+        let pi = ConversationAgentKind::Pi;
+        let with = |definition: Option<&str>| WorkspaceConversation {
+            acp: Some(WorkspaceAcp {
+                agent: pi.id().into(),
+                agent_definition_id: definition.map(str::to_string),
+                ..WorkspaceAcp::default()
+            }),
+            ..WorkspaceConversation::default()
+        };
+        let agents = HashMap::from([
+            ("dev".to_string(), "开发助理".to_string()),
+            ("blank".to_string(), " ".to_string()),
+        ]);
+        let icon = |definition| row_icon(&with(definition), &[], &agents);
+        let badge = |label: String| RowIcon::Provider {
+            path: pi.icon_asset().into(),
+            label: label.into(),
+        };
+        assert_eq!(
+            icon(Some("dev")),
+            badge(format!("开发助理 · {}", pi.label()))
+        );
+        assert_eq!(
+            icon(Some("blank")),
+            badge(format!("blank · {}", pi.label()))
+        );
+        assert_eq!(icon(Some("gone")), badge(format!("gone · {}", pi.label())));
+        assert_eq!(icon(None), badge(pi.label().to_string()));
     }
 
     #[test]

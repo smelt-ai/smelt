@@ -5,11 +5,12 @@
 use rust_i18n::t;
 use std::path::Path;
 
-use gpui::{App, Task};
+use gpui::{App, ClipboardItem, Task};
 use smelt_plugin_api::model::control_api::{
     WorkspaceConversationArchive, WorkspaceConversationDelete, WorkspaceProjectClose,
     WorkspaceProjectOpen,
 };
+use smelt_plugin_api::model::daemon_state::DaemonSessionState;
 use smelt_plugin_api::model::runtime_path::PathStyle;
 use smelt_plugin_api::model::workspace_directory::{
     WorkspaceConversationArchiveParams, WorkspaceConversationIdParams, WorkspaceDirectory,
@@ -209,6 +210,42 @@ fn conversations_under(
         .collect()
 }
 
+/// 把这一格的会话 id 放进剪贴板，见 [`id_to_copy`]。
+pub(crate) fn copy_session_id(machine: &RuntimeKey, session_id: &str, cx: &mut App) {
+    let host = api::host(cx);
+    let directory = host.workspace_directory(machine, cx);
+    let states = host.session_states(machine, cx);
+    let id = id_to_copy(directory.as_ref(), &states, session_id);
+    cx.write_to_clipboard(ClipboardItem::new_string(id));
+}
+
+/// 复制会话 id 时给的：agent 自己的对话 id（续接身份、或 hook 报来的那段对话），拿去
+/// `--resume`、找存档才用得上；agent 还没报上来时是守护会话 id。握手、TUI 里 `/resume`
+/// 都会换 id，所以用时现取。和会话插件的「复制会话 id」同一个规则，两边各算一份。
+fn id_to_copy(
+    directory: Option<&WorkspaceDirectory>,
+    states: &[DaemonSessionState],
+    session_id: &str,
+) -> String {
+    let history = directory
+        .and_then(|directory| directory.conversation_of_session(session_id))
+        .and_then(|conversation| conversation.acp.as_ref())
+        .filter(|acp| acp.sid == session_id)
+        .and_then(|acp| acp.history_session_id.as_deref());
+    let reported = || {
+        states
+            .iter()
+            .find(|state| state.id == session_id)
+            .and_then(|state| state.conversation_id.as_deref())
+    };
+    history
+        .or_else(reported)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(session_id)
+        .to_string()
+}
+
 /// 访达拖进来、「用 Smelt 打开」的路径：是目录的当项目打开，文件留给文件打开者。只认
 /// 本机：别的机器上的路径这边判断不了是不是目录。
 pub(crate) fn open_paths(machine: RuntimeKey, paths: Vec<String>, cx: &mut App) {
@@ -245,7 +282,7 @@ pub(crate) fn open_paths(machine: RuntimeKey, paths: Vec<String>, cx: &mut App) 
 mod tests {
     use super::*;
     use smelt_plugin_api::model::workspace_directory::{
-        WorkspaceConversation, WorkspaceTerminal, WorkspaceWorkset,
+        WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal, WorkspaceWorkset,
     };
 
     fn terminals(id: &str, cwd: &str) -> WorkspaceConversation {
@@ -286,5 +323,33 @@ mod tests {
         assert_eq!(conversations_under(style, &directory, "/repo"), ["w", "p"]);
         assert_eq!(conversations_under(style, &directory, "/tmp/x"), ["l"]);
         assert!(conversations_under(style, &directory, "/nowhere").is_empty());
+    }
+
+    #[test]
+    fn the_copied_id_is_the_agents_own_when_known() {
+        let directory = WorkspaceDirectory {
+            conversations: vec![
+                WorkspaceConversation {
+                    id: "c".into(),
+                    acp: Some(WorkspaceAcp {
+                        sid: "acp-1".into(),
+                        history_session_id: Some("h1".into()),
+                        ..WorkspaceAcp::default()
+                    }),
+                    ..WorkspaceConversation::default()
+                },
+                terminals("t", "/repo"),
+            ],
+            ..WorkspaceDirectory::default()
+        };
+        let reported: DaemonSessionState = serde_json::from_value(serde_json::json!({
+            "id": "t-t",
+            "conversation_id": " tui-9 ",
+        }))
+        .unwrap();
+        assert_eq!(id_to_copy(Some(&directory), &[], "acp-1"), "h1");
+        assert_eq!(id_to_copy(Some(&directory), &[reported], "t-t"), "tui-9");
+        assert_eq!(id_to_copy(Some(&directory), &[], "t-t"), "t-t");
+        assert_eq!(id_to_copy(None, &[], "acp-1"), "acp-1");
     }
 }

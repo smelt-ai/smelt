@@ -1,10 +1,9 @@
-//! 小人插件的全局状态 [`Cast`]：每段会话是跟哪个智能体、在什么状态，以及演什么
-//! （[`Stage`]）。头像只读它。
+//! 小人插件的全局状态 [`Cast`]：每段会话在什么状态，以及演什么（[`Stage`]）。头像只读它。
 //!
 //! 只看宿主，全靠事件更新，不起定时器：`HostEvent::SessionsChanged`、`MachinesChanged`、
 //! `ActiveContextChanged` 来了，按宿主的工作区目录、会话状态和露着的会话重算每段会话，交给
-//! [`Stage`] 比前后。已经收到过目录的机器上新冒出来的会话是刚建的，打个招呼。会话跟哪个
-//! 智能体、在什么状态，用目录类型自己的方法算，和会话列表是同一套。
+//! [`Stage`] 比前后。已经收到过目录的机器上新冒出来的会话是刚建的，打个招呼。会话在什么
+//! 状态，用目录类型自己的方法算，和会话列表是同一套。
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,16 +21,9 @@ pub(crate) struct ConversationKey {
     pub(crate) id: String,
 }
 
-/// 一段会话眼下的样子。
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Seat {
-    /// 跟哪个智能体（定义 id）；不是智能体对话、自动化运行的是 `None`。
-    agent: Option<String>,
-    status: AgentStatus,
-}
-
 pub(crate) struct Cast {
-    seats: HashMap<ConversationKey, Seat>,
+    /// 各段会话眼下的状态。
+    seats: HashMap<ConversationKey, AgentStatus>,
     /// 露着的那段会话。
     viewed: Option<ConversationKey>,
     stage: Stage,
@@ -51,13 +43,9 @@ impl Cast {
         cx.global::<CastGlobal>().0.clone()
     }
 
-    /// 会话 `key` 的小人：智能体对话按智能体 id 落，同一台机器上同一个智能体的会话是同一个
-    /// 小人；别的按会话 id 落。
+    /// 会话 `key` 的小人：按会话 id 落，每段会话一个。
     pub(crate) fn buddy_of(&self, key: &ConversationKey) -> Buddy {
-        match self.seats.get(key).and_then(|seat| seat.agent.as_deref()) {
-            Some(agent) => Buddy::of(agent),
-            None => Buddy::of(&key.id),
-        }
+        Buddy::of(&key.id)
     }
 
     pub(crate) fn stage(&self) -> &Stage {
@@ -91,11 +79,7 @@ impl Cast {
                 if known && !self.seats.contains_key(&key) && !self.stage.knows(&key) {
                     fresh.push(key.clone());
                 }
-                let seat = Seat {
-                    agent: conversation.agent_definition().map(str::to_string),
-                    status: conversation.status(&states),
-                };
-                seats.insert(key, seat);
+                seats.insert(key, conversation.status(&states));
             }
             if let Some(session) = viewed_session
                 .as_ref()
@@ -116,7 +100,7 @@ impl Cast {
         }
         let now = cx.background_executor().now();
         self.stage.track(
-            seats.iter().map(|(key, seat)| (key, seat.status)),
+            seats.iter().map(|(key, status)| (key, *status)),
             viewed.as_ref(),
             now,
         );

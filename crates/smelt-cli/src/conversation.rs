@@ -125,6 +125,7 @@ fn summary(conversation: &WorkspaceConversation) -> serde_json::Value {
     serde_json::json!({
         "id": conversation.id,
         "session_id": acp.map(|acp| &acp.sid),
+        "history_session_id": acp.and_then(|acp| acp.history_session_id.as_ref()),
         "title": title,
         "agent": acp.map(|acp| &acp.agent),
         "agent_definition_id": acp.and_then(|acp| acp.agent_definition_id.as_ref()),
@@ -136,7 +137,8 @@ fn summary(conversation: &WorkspaceConversation) -> serde_json::Value {
     })
 }
 
-/// 对话 id 或会话 id 都行。
+/// 对话 id、守护会话 id 或 agent 原生会话 id（`history_session_id`）都行。
+/// 同一段原生历史若存在已归档和当前打开的多条记录，优先命中未归档且最近更新的。
 fn find<'a>(
     conversations: &'a [WorkspaceConversation],
     id: &str,
@@ -145,6 +147,23 @@ fn find<'a>(
         .iter()
         .find(|conversation| {
             conversation.id == id || conversation.acp.as_ref().is_some_and(|acp| acp.sid == id)
+        })
+        .or_else(|| {
+            conversations
+                .iter()
+                .filter(|conversation| {
+                    conversation
+                        .acp
+                        .as_ref()
+                        .and_then(|acp| acp.history_session_id.as_deref())
+                        == Some(id)
+                })
+                .max_by_key(|conversation| {
+                    (
+                        conversation.archived_at.is_none(),
+                        conversation.last_updated_at,
+                    )
+                })
         })
         .ok_or_else(|| t!("conversation.not_found", id = id).into_owned())
 }
@@ -266,6 +285,29 @@ mod tests {
         assert_eq!(find(&conversations, "c1").unwrap().id, "c1");
         assert_eq!(find(&conversations, "s1").unwrap().id, "c1");
         assert!(find(&conversations, "s2").is_err());
+    }
+
+    #[test]
+    fn find_accepts_history_session_id_and_prefers_active() {
+        let mut archived = conversation("old", Some("acp-old"), None, 10);
+        archived.archived_at = Some(1);
+        archived.acp.as_mut().unwrap().history_session_id = Some("native-1".into());
+
+        let mut active = conversation("cur", Some("acp-cur"), None, 5);
+        active.acp.as_mut().unwrap().history_session_id = Some("native-1".into());
+
+        let conversations = [archived, active];
+        assert_eq!(find(&conversations, "native-1").unwrap().id, "cur");
+        assert_eq!(find(&conversations, "acp-old").unwrap().id, "old");
+    }
+
+    #[test]
+    fn summary_exposes_history_session_id() {
+        let mut item = conversation("c1", Some("acp-1"), None, 1);
+        item.acp.as_mut().unwrap().history_session_id = Some("native-1".into());
+        let json = summary(&item);
+        assert_eq!(json["session_id"], "acp-1");
+        assert_eq!(json["history_session_id"], "native-1");
     }
 
     #[test]
