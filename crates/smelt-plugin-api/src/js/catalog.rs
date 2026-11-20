@@ -34,6 +34,21 @@ impl Catalog {
             None => key.to_string(),
         }
     }
+
+    /// `key` 在每种语言下的文案（语言代码 → 文案），插值按 `params` 换好；哪种语言都没有是空表。
+    /// 登记给宿主的标题用它，宿主显示时按当前语言取。
+    pub(super) fn texts(
+        &self,
+        key: &str,
+        params: &[(String, HostValue)],
+    ) -> BTreeMap<String, String> {
+        self.0
+            .iter()
+            .filter_map(|(locale, texts)| {
+                Some((locale.clone(), interpolate(texts.get(key)?, params)))
+            })
+            .collect()
+    }
 }
 
 /// 把 `%{name}` 换成参数里同名的值；参数里没有的原样留着（同 `t!`）。
@@ -135,6 +150,26 @@ row:
         );
         assert_eq!(catalog.text("zh-CN", "row.only_en", &[]), "English only");
         assert_eq!(catalog.text("zh-CN", "row.missing", &[]), "row.missing");
+    }
+
+    #[test]
+    fn texts_carry_every_locale_that_has_the_key() {
+        let (_dir, catalog) = catalog("texts");
+        let params = [
+            ("count".to_string(), HostValue::Number(2.)),
+            ("name".to_string(), HostValue::from("smelt")),
+        ];
+        let texts = catalog.texts("row.count", &params);
+        assert_eq!(texts["en"], "2 sessions in smelt");
+        assert_eq!(texts["zh-CN"], "smelt 里有 2 段会话");
+        assert_eq!(
+            catalog
+                .texts("row.only_en", &[])
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [("en".to_string(), "English only".to_string())]
+        );
+        assert!(catalog.texts("row.missing", &[]).is_empty());
     }
 
     #[test]

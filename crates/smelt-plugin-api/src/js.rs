@@ -184,6 +184,11 @@ export function theme(): SmeltTheme;
  * 没有取英文，再没有给 key 本身。%{name} 按 params 里同名的换。文案表第一次调时读，改了跟着插件重挂。
  */
 export function t(key: string, params?: Record<string, string | number | boolean | null>): string;
+/**
+ * 同 t，但给登记用的 Text：key 在文案表里每种语言的那条拼成一张表，宿主显示时按当前语言取，换语言不用重新登记。
+ * 哪种语言都没有给 key 本身。视图、命令、菜单项的标题用它。
+ */
+export function text(key: string, params?: Record<string, string | number | boolean | null>): Text;
 /** App 带的界面语言：code 是语言代码，name 是这种语言自己的叫法（"简体中文"）。 */
 export function locales(): { code: string; name: string }[];
 /** 系统的首选语言，归到 locales() 里的一个；读不到是 "en"。 */
@@ -708,8 +713,8 @@ struct PluginState {
     built: u64,
     /// 建好的各份视图的脚本，按 `instance`，`notify_view` 重画它们。放掉的留到下次重画时清。
     live: Vec<(u64, WeakEntity<ScriptView>)>,
-    /// 插件的文案表（`t()`），第一次用时从插件目录读；读不出来的原因也留着，每次调都报。
-    catalog: Option<Rc<Result<catalog::Catalog, String>>>,
+    /// 插件的文案表（`t()`、`text()`），第一次用时从插件目录读；读不出来的原因也留着，每次调都报。
+    catalog: Option<Result<Rc<catalog::Catalog>, String>>,
     /// 插件目录里的资源（见 [`JsPlugin::with_assets`]）。
     assets: Option<PluginAssets>,
     _events: Option<Subscription>,
@@ -764,23 +769,35 @@ impl JsPlugin {
 
     /// 插件文案表里 `key` 在当前语言的那条（见 [`catalog`]）。
     fn text(&self, key: &str, params: &[(String, HostValue)]) -> Result<String, HostError> {
-        let catalog = {
-            let mut state = self.0.borrow_mut();
-            let root = state.assets.as_ref().map(|assets| assets.root.clone());
-            state
-                .catalog
-                .get_or_insert_with(|| {
-                    Rc::new(match root {
-                        Some(root) => catalog::Catalog::load(&root),
-                        None => Ok(catalog::Catalog::default()),
-                    })
-                })
-                .clone()
-        };
-        match &*catalog {
-            Ok(catalog) => Ok(catalog.text(&crate::locale(), key, params)),
-            Err(error) => Err(HostError::new(format!("t：插件的文案读不出来：{error}"))),
+        Ok(self.catalog("t")?.text(&crate::locale(), key, params))
+    }
+
+    /// 插件文案表里 `key` 在每种语言下的那条，拼成登记用的 `Text`：一张「语言 → 文案」的表，
+    /// 哪种语言都没有时是键本身（同 `t`）。
+    fn texts(&self, key: &str, params: &[(String, HostValue)]) -> Result<HostValue, HostError> {
+        let texts = self.catalog("text")?.texts(key, params);
+        if texts.is_empty() {
+            return Ok(HostValue::Str(key.to_string()));
         }
+        Ok(HostValue::Object(
+            texts
+                .into_iter()
+                .map(|(locale, text)| (locale, HostValue::Str(text)))
+                .collect(),
+        ))
+    }
+
+    /// 插件的文案表，第一次用时读。
+    fn catalog(&self, function: &str) -> Result<Rc<catalog::Catalog>, HostError> {
+        let mut state = self.0.borrow_mut();
+        let root = state.assets.as_ref().map(|assets| assets.root.clone());
+        let catalog = state.catalog.get_or_insert_with(|| match root {
+            Some(root) => catalog::Catalog::load(&root).map(Rc::new),
+            None => Ok(Rc::default()),
+        });
+        catalog
+            .clone()
+            .map_err(|error| HostError::new(format!("{function}：插件的文案读不出来：{error}")))
     }
 
     /// 第 `instance` 份视图建好了，脚本是 `script`。
@@ -861,6 +878,7 @@ impl JsPlugin {
         let opened = self.clone();
         let notified = self.clone();
         let texts = self.clone();
+        let localized = self.clone();
         let menus = self.clone();
         let topics = self.clone();
         let context_menus = self.clone();
@@ -1455,6 +1473,15 @@ impl JsPlugin {
                     Some(_) => return Err(HostError::new("t：参数要是一个对象")),
                 };
                 texts.text(&key, &params).map(HostValue::Str)
+            })
+            .function("text", move |arguments| {
+                let key = arguments.string(0)?;
+                let params = match arguments.get(1) {
+                    None | Some(HostValue::Null) => Vec::new(),
+                    Some(HostValue::Object(params)) => params.clone(),
+                    Some(_) => return Err(HostError::new("text：参数要是一个对象")),
+                };
+                localized.texts(&key, &params)
             })
             .function("notify_view", move |arguments| {
                 let instance = match arguments.get(0) {

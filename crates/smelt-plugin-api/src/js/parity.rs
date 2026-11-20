@@ -212,6 +212,7 @@ const JS_ONLY: &[(&str, &str)] = &[
         "smelt_ui::ui_theme 的色板、kit::TYPE 字阶和圆角，Rust 插件直接用",
     ),
     ("t", "各 crate 的 t!，文案表是插件目录下的 locales/ui.yml"),
+    ("text", "text! 拼的 Text::keyed，登记的标题跟着语言变"),
     ("locales", "常量 LOCALES"),
     ("store_query", "plugin_store"),
     ("store_execute", "plugin_store"),
