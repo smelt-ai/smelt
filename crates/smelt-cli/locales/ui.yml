@@ -26,7 +26,7 @@ help.text:
     Projects and worktrees:
       smelt project list | open <path> | close <path>
       smelt worktree list [--project <path>]
-      smelt worktree create <project> --task <task name> [--repo <name>...] [--branch <branch>] [--prefix <branch prefix>]
+      smelt worktree create <project> --task <task name> [--repo <name>...] [--branch <branch>] [--prefix <branch prefix>] [--base <base branch>]
       smelt worktree inspect <id>            before finishing: clean? merged?
       smelt worktree finish <id> [--allow-unconfirmed-merge]
 
@@ -99,7 +99,7 @@ help.text:
     项目和工作树：
       smelt project list | open <路径> | close <路径>
       smelt worktree list [--project <路径>]
-      smelt worktree create <项目> --task <任务名> [--repo <仓库名>...] [--branch <分支>] [--prefix <分支前缀>]
+      smelt worktree create <项目> --task <任务名> [--repo <仓库名>...] [--branch <分支>] [--prefix <分支前缀>] [--base <基线分支>]
       smelt worktree inspect <id>            收工前看：干不干净、合没合
       smelt worktree finish <id> [--allow-unconfirmed-merge]
 
@@ -348,8 +348,8 @@ usage_hint:
   en: "See smelt --help for usage"
   zh-CN: "用法见 smelt --help"
 worktree.create_usage:
-  en: "smelt worktree create <project> --task <task name> [--repo <name>...] [--branch <branch>] [--prefix <branch prefix>]"
-  zh-CN: "smelt worktree create <项目> --task <任务名> [--repo <仓库名>...] [--branch <分支>] [--prefix <分支前缀>]"
+  en: "smelt worktree create <project> --task <task name> [--repo <name>...] [--branch <branch>] [--prefix <branch prefix>] [--base <base branch>]"
+  zh-CN: "smelt worktree create <项目> --task <任务名> [--repo <仓库名>...] [--branch <分支>] [--prefix <分支前缀>] [--base <基线分支>]"
 worktree.no_repositories:
   en: "This project has no git repository: the project root and repos/<name> are checked"
   zh-CN: "这个项目里没有 git 仓库：会看项目根目录和 repos/<名字>"

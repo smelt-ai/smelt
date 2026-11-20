@@ -22,6 +22,8 @@ pub struct CreateWorkset {
     pub project_root: PathBuf,
     pub task: String,
     pub branch: String,
+    /// 新分支从哪个分支拉出来。不填用远端默认分支；填了先找远端上的同名分支，再找本地分支。
+    pub base: Option<String>,
     pub repositories: Vec<Repository>,
 }
 
@@ -124,6 +126,11 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
             "The branch name can't be empty or have leading or trailing spaces",
         ));
     }
+    let base = request
+        .base
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| !base.is_empty());
 
     // Keep Windows verbatim prefixes out of paths passed to Git and compared with its output.
     let project_root = LocalFs
@@ -217,7 +224,10 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
             )));
         }
 
-        let base_ref = fetch_default_base(&root, &repository.name)?;
+        let base_ref = match base {
+            Some(base) => fetch_named_base(&root, &repository.name, base)?,
+            None => fetch_default_base(&root, &repository.name)?,
+        };
         let branch_created = !local_branch_exists(&root, &branch)?;
         if let Some(path) = checked_out_at(&root, &branch)? {
             return Err(WorktreeError::because(
@@ -444,6 +454,7 @@ pub fn finish_workset(
         let base = repository
             .base_ref
             .strip_prefix("refs/remotes/")
+            .or_else(|| repository.base_ref.strip_prefix("refs/heads/"))
             .unwrap_or(&repository.base_ref);
         match state.merge {
             Some(MergeState::Unmerged) => {
@@ -883,7 +894,12 @@ fn checked_out_at(root: &Path, branch: &str) -> Result<Option<PathBuf>, Worktree
     Ok(None)
 }
 
-fn fetch_default_base(root: &Path, name: &str) -> Result<String, WorktreeError> {
+/// 仓库的远端，当前分支上游所在的远端排最前，其余按名字从长到短（远端名可以带 `/`）。
+/// 第二项是当前分支的上游（`<远端>/<分支>`）。
+fn ordered_remotes(
+    root: &Path,
+    name: &str,
+) -> Result<(Vec<String>, Option<String>), WorktreeError> {
     let remotes = git_output(root, &["remote"]).map_err(|error| {
         WorktreeError::new(format!(
             "repository {name} couldn't read its remotes: {error}"
@@ -902,11 +918,6 @@ fn fetch_default_base(root: &Path, name: &str) -> Result<String, WorktreeError> 
         .filter(|remote| !remote.is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
-    if remotes.is_empty() {
-        return Err(WorktreeError::because(ControlReason::WorktreeNoRemote {
-            repository: name.to_string(),
-        }));
-    }
     remotes.sort_by_key(|remote| std::cmp::Reverse(remote.len()));
 
     let upstream = git_output(
@@ -928,16 +939,115 @@ fn fetch_default_base(root: &Path, name: &str) -> Result<String, WorktreeError> 
             .find(|remote| upstream.starts_with(&format!("{remote}/")))
             .cloned()
     });
-    let candidates = preferred
-        .into_iter()
-        .chain(remotes.iter().cloned())
-        .collect::<Vec<_>>();
     let mut seen = HashSet::new();
-    let mut selected = None;
-    for remote in candidates {
-        if !seen.insert(remote.clone()) {
+    let ordered = preferred
+        .into_iter()
+        .chain(remotes)
+        .filter(|remote| seen.insert(remote.clone()))
+        .collect();
+    Ok((ordered, upstream))
+}
+
+fn fetch_remote(root: &Path, name: &str, remote: &str) -> Result<(), WorktreeError> {
+    let fetched = git_output(root, &["fetch", remote]).map_err(|error| {
+        WorktreeError::new(format!(
+            "repository {name} couldn't fetch {remote}: {error}"
+        ))
+    })?;
+    if !fetched.success() {
+        return Err(WorktreeError::new(format!(
+            "repository {name} couldn't fetch {remote}: {}",
+            git_error(&fetched, "git fetch failed")
+        )));
+    }
+    Ok(())
+}
+
+fn ref_exists(root: &Path, reference: &str) -> Result<bool, WorktreeError> {
+    let commit = format!("{reference}^{{commit}}");
+    git_succeeds(root, &["rev-parse", "--verify", "--quiet", &commit])
+}
+
+/// 指定的基线分支：优先用远端上的同名分支（fetch 后拿到最新的），都没有再用本地分支。
+/// `<远端>/<分支>` 写法也认。本地已有跟踪分支的远端先 fetch，其余按远端顺序；
+/// 某个远端 fetch 失败只跳过，免得连不上的远端挡住别处能用的分支。
+fn fetch_named_base(root: &Path, name: &str, base: &str) -> Result<String, WorktreeError> {
+    if !git_succeeds(root, &["check-ref-format", "--branch", base])? {
+        return Err(WorktreeError::new(format!(
+            "Invalid Git branch name: {base}"
+        )));
+    }
+    let (remotes, _) = ordered_remotes(root, name)?;
+    // 按远端名从长到短匹配，带 `/` 的远端名才不会被短名截掉。
+    let mut by_length = remotes.clone();
+    by_length.sort_by_key(|remote| std::cmp::Reverse(remote.len()));
+    let qualified = by_length.iter().find_map(|remote| {
+        base.strip_prefix(remote.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+            .filter(|branch| !branch.is_empty())
+            .map(|branch| format!("refs/remotes/{remote}/{branch}"))
+            .map(|reference| (remote.clone(), reference))
+    });
+    let candidates = qualified.into_iter().chain(
+        remotes
+            .iter()
+            .map(|remote| (remote.clone(), format!("refs/remotes/{remote}/{base}"))),
+    );
+    let mut known = Vec::new();
+    let mut unknown = Vec::new();
+    for candidate in candidates {
+        if ref_exists(root, &candidate.1)? {
+            known.push(candidate);
+        } else {
+            unknown.push(candidate);
+        }
+    }
+
+    let mut fetched = HashSet::new();
+    let mut failed = HashSet::new();
+    let mut failures = Vec::new();
+    for (remote, reference) in known.into_iter().chain(unknown) {
+        if failed.contains(&remote) {
             continue;
         }
+        if fetched.insert(remote.clone())
+            && let Err(error) = fetch_remote(root, name, &remote)
+        {
+            failures.push(error.message);
+            failed.insert(remote);
+            continue;
+        }
+        if ref_exists(root, &reference)? {
+            return Ok(reference);
+        }
+    }
+    let local_ref = format!("refs/heads/{base}");
+    if ref_exists(root, &local_ref)? {
+        return Ok(local_ref);
+    }
+    if !failures.is_empty() {
+        return Err(WorktreeError::new(format!(
+            "repository {name} has no branch {base}; some remotes couldn't be fetched: {}",
+            failures.join("; ")
+        )));
+    }
+    Err(WorktreeError::because(
+        ControlReason::WorktreeBaseNotFound {
+            repository: name.to_string(),
+            base: base.to_string(),
+        },
+    ))
+}
+
+fn fetch_default_base(root: &Path, name: &str) -> Result<String, WorktreeError> {
+    let (remotes, upstream) = ordered_remotes(root, name)?;
+    if remotes.is_empty() {
+        return Err(WorktreeError::because(ControlReason::WorktreeNoRemote {
+            repository: name.to_string(),
+        }));
+    }
+    let mut selected = None;
+    for remote in remotes {
         let head_ref = format!("refs/remotes/{remote}/HEAD");
         let head = git_output(root, &["symbolic-ref", "--quiet", &head_ref])
             .ok()
@@ -959,17 +1069,7 @@ fn fetch_default_base(root: &Path, name: &str) -> Result<String, WorktreeError> 
             repository: name.to_string(),
         })
     })?;
-    let fetched = git_output(root, &["fetch", &remote]).map_err(|error| {
-        WorktreeError::new(format!(
-            "repository {name} couldn't fetch {remote}: {error}"
-        ))
-    })?;
-    if !fetched.success() {
-        return Err(WorktreeError::new(format!(
-            "repository {name} couldn't fetch {remote}: {}",
-            git_error(&fetched, "git fetch failed")
-        )));
-    }
+    fetch_remote(root, name, &remote)?;
     let resolved = git_output(root, &["rev-parse", "--verify", &base_ref]).map_err(|error| {
         WorktreeError::new(format!(
             "repository {name}'s baseline isn't available: {error}"

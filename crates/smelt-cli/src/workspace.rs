@@ -155,6 +155,7 @@ struct CreateFlags {
     task: Option<String>,
     branch: Option<String>,
     prefix: Option<String>,
+    base: Option<String>,
     repositories: Vec<String>,
 }
 
@@ -167,6 +168,7 @@ fn parse_create(args: &[String]) -> Result<CreateFlags, String> {
             "--task" => flags.task = Some(value()?),
             "--branch" => flags.branch = Some(value()?),
             "--prefix" => flags.prefix = Some(value()?),
+            "--base" => flags.base = Some(value()?),
             "--repo" => flags.repositories.push(value()?),
             other => return Err(t!("unknown_argument", arg = other).into_owned()),
         }
@@ -204,6 +206,7 @@ fn create(project: &str, flags: CreateFlags) -> Result<serde_json::Value, String
         task: flags.task.unwrap_or_default(),
         branch_prefix: "feat".into(),
         branch: flags.branch,
+        base: flags.base,
         repository_names,
     };
     if let Some(prefix) = flags.prefix {
@@ -247,7 +250,8 @@ mod tests {
     #[test]
     fn create_needs_a_task_and_collects_repositories() {
         let flags = parse_create(&args(&[
-            "--task", "login", "--repo", "app", "--repo", "api", "--prefix", "fix",
+            "--task", "login", "--repo", "app", "--repo", "api", "--prefix", "fix", "--base",
+            "iter/big",
         ]))
         .unwrap();
         assert_eq!(
@@ -256,6 +260,7 @@ mod tests {
                 task: Some("login".into()),
                 branch: None,
                 prefix: Some("fix".into()),
+                base: Some("iter/big".into()),
                 repositories: vec!["app".into(), "api".into()],
             }
         );

@@ -149,6 +149,9 @@ reason.worktree_no_remote:
 reason.worktree_no_upstream:
   en: "%{repository} has no usable upstream default branch (check the remote HEAD or the current branch's upstream)"
   zh-CN: "仓库 %{repository} 没有可用的上游默认分支（检查远端 HEAD 或当前分支 upstream）"
+reason.worktree_base_not_found:
+  en: "%{repository} has no branch %{base}, on its remotes or locally"
+  zh-CN: "仓库 %{repository} 的远端和本地都没有分支 %{base}"
 automation.no_agent:
   en: Choose a configured agent
   zh-CN: 请选择已配置的智能体

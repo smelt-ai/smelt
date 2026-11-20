@@ -132,6 +132,8 @@ pub enum ControlReason {
     WorktreeNoRemote { repository: String },
     /// 仓库找不到可用的上游默认分支。
     WorktreeNoUpstream { repository: String },
+    /// 指定的基线分支在仓库的远端和本地都找不到。
+    WorktreeBaseNotFound { repository: String, base: String },
     /// 选的目录不是 Git 仓库。
     RepositoryNotGit,
     /// 选的是仓库里的子目录，不是根目录。
@@ -271,6 +273,11 @@ impl ControlReason {
             Self::WorktreeNoUpstream { repository } => {
                 t!("reason.worktree_no_upstream", repository = repository)
             }
+            Self::WorktreeBaseNotFound { repository, base } => t!(
+                "reason.worktree_base_not_found",
+                repository = repository,
+                base = base
+            ),
             Self::RepositoryNotGit => t!("reason.repository_not_git"),
             Self::RepositoryNotRoot { root } => t!("reason.repository_not_root", root = root),
             Self::RepositoryNameTaken { path } => t!("reason.repository_name_taken", path = path),

@@ -54,6 +54,7 @@ fn request(project: &Path, repositories: Vec<Repository>) -> CreateWorkset {
         project_root: project.to_path_buf(),
         task: "workspace-session-binding".to_string(),
         branch: "feat/workspace-session-binding".to_string(),
+        base: None,
         repositories,
     }
 }
@@ -99,6 +100,105 @@ fn supports_chinese_branch_and_renaming_to_a_chinese_task() {
     assert_eq!(renamed.branch, "feat/搜索");
     assert!(renamed.repositories[0].worktree.exists());
     finish_workset(&renamed, false).unwrap();
+}
+
+#[test]
+fn creates_from_a_named_remote_base_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let api = repo(project, "api");
+    git(&api.root, &["checkout", "-b", "iter/big"]);
+    fs::write(api.root.join("big.txt"), "big\n").unwrap();
+    git(&api.root, &["add", "big.txt"]);
+    git(&api.root, &["commit", "-m", "big"]);
+    git(&api.root, &["push", "origin", "iter/big"]);
+    // 本地分支落后于远端：应从远端拉出。
+    git(&api.root, &["reset", "--hard", "HEAD~1"]);
+    git(&api.root, &["checkout", "main"]);
+
+    let mut request = request(project, vec![api]);
+    request.base = Some("iter/big".into());
+    let workset = create_workset(request).unwrap();
+    let repository = &workset.repositories[0];
+    assert_eq!(repository.base_ref, "refs/remotes/origin/iter/big");
+    assert!(repository.worktree.join("big.txt").exists());
+}
+
+#[test]
+fn creates_from_a_local_only_base_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let api = repo(project, "api");
+    git(&api.root, &["checkout", "-b", "iter/local"]);
+    fs::write(api.root.join("local.txt"), "local\n").unwrap();
+    git(&api.root, &["add", "local.txt"]);
+    git(&api.root, &["commit", "-m", "local"]);
+    git(&api.root, &["checkout", "main"]);
+
+    let mut request = request(project, vec![api]);
+    request.base = Some("iter/local".into());
+    let workset = create_workset(request).unwrap();
+    let repository = &workset.repositories[0];
+    assert_eq!(repository.base_ref, "refs/heads/iter/local");
+    assert!(repository.worktree.join("local.txt").exists());
+    // 分支没改动，视为已合进基线，能直接关。
+    finish_workset(&workset, false).unwrap();
+}
+
+#[test]
+fn accepts_a_remote_qualified_base_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let api = repo(project, "api");
+    git(&api.root, &["push", "origin", "main:iter/big"]);
+
+    let mut request = request(project, vec![api]);
+    request.base = Some("origin/iter/big".into());
+    let workset = create_workset(request).unwrap();
+    assert_eq!(
+        workset.repositories[0].base_ref,
+        "refs/remotes/origin/iter/big"
+    );
+}
+
+#[test]
+fn an_unreachable_remote_does_not_block_a_local_base_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let api = repo(project, "api");
+    git(&api.root, &["branch", "iter/local"]);
+    fs::remove_dir_all(project.join("remotes/api.git")).unwrap();
+
+    let mut base_request = request(project, vec![api.clone()]);
+    base_request.base = Some("iter/local".into());
+    let workset = create_workset(base_request).unwrap();
+    assert_eq!(workset.repositories[0].base_ref, "refs/heads/iter/local");
+
+    // 分支哪儿都没有时，报错里带上 fetch 失败的原因。
+    let mut request = request(project, vec![api]);
+    request.task = "other".into();
+    request.branch = "feat/other".into();
+    request.base = Some("iter/missing".into());
+    let error = create_workset(request).unwrap_err().to_string();
+    assert!(error.contains("couldn't fetch origin"), "{error}");
+}
+
+#[test]
+fn rejects_a_missing_base_branch_without_creating_a_worktree() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let mut request = request(project, vec![repo(project, "api")]);
+    request.base = Some("iter/missing".into());
+
+    let error = create_workset(request).unwrap_err();
+    assert_eq!(
+        error.reason(),
+        Some(&ControlReason::WorktreeBaseNotFound {
+            repository: "api".into(),
+            base: "iter/missing".into(),
+        })
+    );
+    assert!(!project.join("worktrees/workspace-session-binding").exists());
 }
 
 #[test]
