@@ -372,13 +372,18 @@ function machine_row(ctx, machine, area) {
   )
     .child(disclosure_slot(ctx, "machine-row", os, key, collapsed, collapsible))
     .child(
-      div()
-        .id(`machine-name:${id}`)
+      sampled_on_hover(
+        ctx,
+        `machine-name-hover:${id}`,
+        remote,
+        div()
+          .id(`machine-name:${id}`)
+          .min_w_0()
+          .child(SmeltTruncatedLine.new(machine.name))
+          .tooltip(machine.link.detail),
+      )
         .flex_1()
-        .min_w_0()
-        .child(SmeltTruncatedLine.new(machine.name))
-        .tooltip(machine.link.detail)
-        .when(remote, (name) => name.on_hover(refresh_connections(ctx))),
+        .min_w_0(),
     )
     .when(state != null, (row) =>
       row.child(typed(div().flex_shrink_0(), theme.type.text_xsmall).text_color(p.faint).child(state)),
@@ -416,21 +421,29 @@ function waiting_machine_row(ctx, machine) {
         machine.link.unavailable ?? t("machine.connecting"),
       ),
     )
-    .tooltip(machine.link.detail)
-    .when(machine.machine != null, (row) => row.on_hover(refresh_connections(ctx)));
+    .tooltip(machine.link.detail);
+  const sampled = sampled_on_hover(ctx, `machine-waiting-hover:${id}`, machine.machine != null, row);
   const menu = ctx.menus.machine(machine.machine);
-  if (menu.length === 0) return row;
-  return SmeltContextMenu.new(`machine-context:${id}`).items(menu).child(row);
+  if (menu.length === 0) return sampled;
+  return SmeltContextMenu.new(`machine-context:${id}`).items(menu).child(sampled);
 }
 
-/** 连接说明里的延迟只在有人看时采样：悬停远程机器的名字时叫宿主重测一次。 */
-function refresh_connections(ctx) {
-  return (hovered) => {
-    if (!hovered) return;
-    ctx.list.host
-      .run("smelt.app/refresh-connections")
-      .catch((error) => console.error(`[session-list] 重测连接失败：${error?.message ?? error}`));
-  };
+/**
+ * 连接说明里的延迟只在有人看时采样：悬停远程机器时叫宿主重测一次。包在带提示的元素外面一层：
+ * 提示自己占着元素的悬停监听（gpui 一个元素只有一个），写在同一个元素上，这里就收不到悬停。
+ */
+function sampled_on_hover(ctx, id, remote, child) {
+  return div()
+    .id(id)
+    .child(child)
+    .when(remote, (wrapper) =>
+      wrapper.on_hover((hovered) => {
+        if (!hovered) return;
+        ctx.list.host
+          .run("smelt.app/refresh-connections")
+          .catch((error) => console.error(`[session-list] 重测连接失败：${error?.message ?? error}`));
+      }),
+    );
 }
 
 /** 按项目分组、「显示：有会话」时藏起来的空项目有几个；点一下回到「显示：全部」。 */
@@ -475,10 +488,10 @@ function project_machine_tag(ctx, id, project, selected) {
   const why = link.unavailable;
   const text = name != null && why != null ? `${name} · ${why}` : (name ?? why);
   if (text == null) return null;
-  return machine_tag(ctx, machine_info(ctx.sidebar, project.machine), text, selected)
+  const tag = machine_tag(ctx, machine_info(ctx.sidebar, project.machine), text, selected)
     .id(`project-machine:${id}`)
-    .tooltip(link.detail)
-    .when(name != null, (tag) => tag.on_hover(refresh_connections(ctx)));
+    .tooltip(link.detail);
+  return sampled_on_hover(ctx, `project-machine-hover:${id}`, name != null, tag).flex_shrink_0();
 }
 
 function project_id(project) {
