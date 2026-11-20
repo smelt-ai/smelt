@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { expect, test } from "bun:test";
 
 import {
   folds_over,
@@ -25,29 +24,29 @@ const state = (id, since, turn = 0) => ({ id, phase_since: since, turn_started_a
 
 test("头像在填了插槽的视图里挑", () => {
   const filled = ["a.x/avatar", "b.y/avatar"];
-  assert.equal(pick_avatar({ kind: "unset" }, filled), "a.x/avatar");
-  assert.equal(pick_avatar({ kind: "icon" }, filled), null);
-  assert.equal(pick_avatar({ kind: "view", id: "b.y/avatar" }, filled), "b.y/avatar");
+  expect(pick_avatar({ kind: "unset" }, filled)).toBe("a.x/avatar");
+  expect(pick_avatar({ kind: "icon" }, filled)).toBe(null);
+  expect(pick_avatar({ kind: "view", id: "b.y/avatar" }, filled)).toBe("b.y/avatar");
   // 选的那个卸了按没选过算。
-  assert.equal(pick_avatar({ kind: "view", id: "gone/avatar" }, filled), "a.x/avatar");
+  expect(pick_avatar({ kind: "view", id: "gone/avatar" }, filled)).toBe("a.x/avatar");
   // 没人填，怎么选都是图标。
-  assert.equal(pick_avatar({ kind: "unset" }, []), null);
-  assert.equal(pick_avatar({ kind: "view", id: "b.y/avatar" }, []), null);
+  expect(pick_avatar({ kind: "unset" }, [])).toBe(null);
+  expect(pick_avatar({ kind: "view", id: "b.y/avatar" }, [])).toBe(null);
 });
 
 test("最近动静只看守护", () => {
   const conversation = terminal_session("c", "t1", "/repo");
   conversation.terminals.push({ id: "t2" });
   const states = [state("t1", 100), state("t2", 50), state("other", 900)];
-  assert.equal(last_activity(conversation, states), 100);
-  assert.equal(last_activity(conversation, [state("t2", 50, 120)]), 120);
-  assert.equal(last_activity(conversation, []), 0);
+  expect(last_activity(conversation, states)).toBe(100);
+  expect(last_activity(conversation, [state("t2", 50, 120)])).toBe(120);
+  expect(last_activity(conversation, [])).toBe(0);
 });
 
 test("名字：派生事实里的，没有是通用名", () => {
-  assert.equal(title({ name: null }, true, t), "Conversation");
-  assert.equal(title({ name: null }, false, t), "Terminal");
-  assert.equal(title({ name: "运行时的" }, true, t), "运行时的");
+  expect(title({ name: null }, true, t)).toBe("Conversation");
+  expect(title({ name: null }, false, t)).toBe("Terminal");
+  expect(title({ name: "运行时的" }, true, t)).toBe("运行时的");
 });
 
 test("还在的东西：打开的项目加上会话撑起来的组", () => {
@@ -62,80 +61,83 @@ test("还在的东西：打开的项目加上会话撑起来的组", () => {
     { id: "auto", placement: { kind: "hidden" } },
   ];
   const known = known_ids(directory, facts);
-  assert.ok(known.roots.has("/repo") && known.roots.has("/tmp/x"));
-  assert.ok(known.worksets.has("ws"));
-  assert.ok(known.conversations.has("auto"));
+  expect(known.roots.has("/repo") && known.roots.has("/tmp/x")).toBeTruthy();
+  expect(known.worksets.has("ws")).toBeTruthy();
+  expect(known.conversations.has("auto")).toBeTruthy();
 });
 
 test("按守护会话 id 找列表里的会话：归档的、找不到的没有", () => {
   const directory = { conversations: [terminal_session("c", "t1", "/repo")] };
   const listed = [{ id: "c", placement: { kind: "project", root: "/repo", workset: null } }];
-  assert.deepEqual(listed_session("box", "t1", directory, listed), { machine: "box", id: "c" });
-  assert.equal(listed_session("box", "t9", directory, listed), null);
-  assert.equal(listed_session("box", "t1", null, listed), null);
-  assert.equal(listed_session("box", "t1", directory, [{ id: "c", placement: { kind: "hidden" } }]), null);
+  expect(listed_session("box", "t1", directory, listed)).toStrictEqual({ machine: "box", id: "c" });
+  expect(listed_session("box", "t9", directory, listed)).toBe(null);
+  expect(listed_session("box", "t1", null, listed)).toBe(null);
+  expect(listed_session("box", "t1", directory, [{ id: "c", placement: { kind: "hidden" } }])).toBe(null);
 });
 
 test("选中照线上的形状读", () => {
   const session = selection_from_wire({ kind: "conversation", machine: "box", conversation_id: "c" });
-  assert.deepEqual(selected_session(session), { machine: "box", id: "c" });
+  expect(selected_session(session)).toStrictEqual({ machine: "box", id: "c" });
   const project = selection_from_wire({ kind: "project", machine: null, root: "/repo" });
-  assert.equal(selected_session(project), null);
-  assert.deepEqual(project, { kind: "project", machine: null, root: "/repo" });
-  assert.deepEqual(selection_from_wire({ kind: "none" }), { kind: "none" });
+  expect(selected_session(project)).toBe(null);
+  expect(project).toStrictEqual({ kind: "project", machine: null, root: "/repo" });
+  expect(selection_from_wire({ kind: "none" })).toStrictEqual({ kind: "none" });
 });
 
 test("内存里的界面状态照库的规则改", () => {
   const ui = new_sidebar_ui();
   const a = { kind: "conversation", machine: null, id: "a" };
   const b = { kind: "conversation", machine: null, id: "b" };
-  assert.ok(set_pinned(ui, b, true));
-  assert.ok(set_pinned(ui, a, true));
-  assert.ok(!set_pinned(ui, a, true));
-  assert.deepEqual(ui.machines.get("").pinned_conversations, ["b", "a"]);
-  assert.ok(set_pinned(ui, b, false));
-  assert.ok(!is_pinned(ui, b));
+  expect(set_pinned(ui, b, true)).toBeTruthy();
+  expect(set_pinned(ui, a, true)).toBeTruthy();
+  expect(set_pinned(ui, a, true)).toBeFalsy();
+  expect(ui.machines.get("").pinned_conversations).toStrictEqual(["b", "a"]);
+  expect(set_pinned(ui, b, false)).toBeTruthy();
+  expect(is_pinned(ui, b)).toBeFalsy();
 
   const fold = { kind: "workset", machine: null, id: "w" };
-  assert.ok(set_collapsed(ui, fold, true));
-  assert.ok(is_collapsed(ui, fold));
-  assert.ok(set_collapsed(ui, { kind: "conversations" }, true));
-  assert.ok(is_collapsed(ui, { kind: "conversations" }));
+  expect(set_collapsed(ui, fold, true)).toBeTruthy();
+  expect(is_collapsed(ui, fold)).toBeTruthy();
+  expect(set_collapsed(ui, { kind: "conversations" }, true)).toBeTruthy();
+  expect(is_collapsed(ui, { kind: "conversations" })).toBeTruthy();
 
   prune_ui(ui, null, { conversations: new Set(["a"]), roots: new Set(), worksets: new Set() });
   const local = ui.machines.get("");
-  assert.deepEqual(local.pinned_conversations, ["a"]);
-  assert.equal(local.collapsed_worksets.size, 0);
+  expect(local.pinned_conversations).toStrictEqual(["a"]);
+  expect(local.collapsed_worksets.size).toBe(0);
 });
 
 test("忘掉机器连它的组折叠一起清", () => {
   const ui = new_sidebar_ui();
   set_pinned(ui, { kind: "project", machine: "box", root: "/r" }, true);
-  ui.project_order = [{ machine: "box", root: "/r" }, { machine: null, root: "/l" }];
+  ui.project_order = [
+    { machine: "box", root: "/r" },
+    { machine: null, root: "/l" },
+  ];
   ui.collapsed_machines.add("box");
   ui.collapsed_buckets.add("bucket:box:Idle");
   ui.collapsed_buckets.add("bucket:@local:Idle");
   ui.collapsed_buckets.add("bucket:Idle");
   forget_machine_ui(ui, "box");
-  assert.ok(!ui.machines.has("box"));
-  assert.deepEqual(ui.project_order, [{ machine: null, root: "/l" }]);
-  assert.equal(ui.collapsed_machines.size, 0);
-  assert.deepEqual([...ui.collapsed_buckets], ["bucket:@local:Idle", "bucket:Idle"]);
+  expect(ui.machines.has("box")).toBeFalsy();
+  expect(ui.project_order).toStrictEqual([{ machine: null, root: "/l" }]);
+  expect(ui.collapsed_machines.size).toBe(0);
+  expect([...ui.collapsed_buckets]).toStrictEqual(["bucket:@local:Idle", "bucket:Idle"]);
 });
 
 test("盖在会话上面的几层跟着摆法和分组走", () => {
   const in_workset = { kind: "project", root: "/repo", workset: "w" };
-  assert.deepEqual(folds_over("box", in_workset, "project"), [
+  expect(folds_over("box", in_workset, "project")).toStrictEqual([
     { kind: "project", machine: "box", root: "/repo" },
     { kind: "workset", machine: "box", id: "w" },
   ]);
-  assert.deepEqual(folds_over("box", { kind: "project", root: "/repo", workset: null }, "project"), [
+  expect(folds_over("box", { kind: "project", root: "/repo", workset: null }, "project")).toStrictEqual([
     { kind: "project", machine: "box", root: "/repo" },
   ]);
   // 按状态、时间分组时不画项目、工作集，不去改它们存着的折叠。
-  assert.deepEqual(folds_over("box", in_workset, "status"), []);
+  expect(folds_over("box", in_workset, "status")).toStrictEqual([]);
   for (const grouping of ["project", "last_updated"]) {
-    assert.deepEqual(folds_over("box", { kind: "conversations" }, grouping), [{ kind: "conversations" }]);
-    assert.deepEqual(folds_over("box", { kind: "hidden" }, grouping), []);
+    expect(folds_over("box", { kind: "conversations" }, grouping)).toStrictEqual([{ kind: "conversations" }]);
+    expect(folds_over("box", { kind: "hidden" }, grouping)).toStrictEqual([]);
   }
 });

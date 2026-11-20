@@ -1,15 +1,18 @@
-// 测试用的库：用 Node 自带的 SQLite 照宿主 store_* 的语义做一份（write 一个事务，migrate 按
+// 测试用的库：用 Bun 自带的 SQLite 照宿主 store_* 的语义做一份（write 一个事务，migrate 按
 // user_version 一步一个事务，库比步骤新报错）。
-import { DatabaseSync } from "node:sqlite";
+import { Database } from "bun:sqlite";
 
 export function open_db(path) {
-  const db = new DatabaseSync(path, { allowExtension: false });
+  const db = new Database(path);
   const bind = (params = []) => params.map((value) => (typeof value === "boolean" ? Number(value) : value));
   const run = (sql, params) => db.prepare(sql).run(...bind(params)).changes;
   return {
     raw: db,
     async query(sql, params) {
-      return db.prepare(sql).all(...bind(params)).map((row) => ({ ...row }));
+      return db
+        .prepare(sql)
+        .all(...bind(params))
+        .map((row) => ({ ...row }));
     },
     async execute(sql, params) {
       return run(sql, params);

@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { expect, test } from "bun:test";
 
 import { ListStore, read_only_uri } from "../store.js";
 import { open_db } from "./sqlite.mjs";
@@ -11,7 +10,7 @@ async function store() {
   const dir = mkdtempSync(join(tmpdir(), "session-list-"));
   const list = new ListStore(open_db(join(dir, "store.sqlite3")));
   await list.open(join(dir, "nope", "store.sqlite3"));
-  assert.ok(list.ready);
+  expect(list.ready).toBeTruthy();
   return list;
 }
 
@@ -28,14 +27,14 @@ test("置顶按先后、分机器记", async () => {
   list.set_pinned({ kind: "workset", machine: "box", id: "w" }, true);
   await list.flush();
   let ui = await list.read_sidebar();
-  assert.deepEqual(ui.machines.get("").pinned_conversations, ["b", "a"]);
-  assert.deepEqual(ui.machines.get("box").pinned_conversations, ["c"]);
-  assert.deepEqual(ui.machines.get("").pinned_projects, ["/repo"]);
-  assert.ok(ui.machines.get("box").pinned_worksets.has("w"));
+  expect(ui.machines.get("").pinned_conversations).toStrictEqual(["b", "a"]);
+  expect(ui.machines.get("box").pinned_conversations).toStrictEqual(["c"]);
+  expect(ui.machines.get("").pinned_projects).toStrictEqual(["/repo"]);
+  expect(ui.machines.get("box").pinned_worksets.has("w")).toBeTruthy();
   list.set_pinned(conversation(null, "b"), false);
   await list.flush();
   ui = await list.read_sidebar();
-  assert.deepEqual(ui.machines.get("").pinned_conversations, ["a"]);
+  expect(ui.machines.get("").pinned_conversations).toStrictEqual(["a"]);
 });
 
 test("顺序整份换，折叠来回切", async () => {
@@ -50,24 +49,24 @@ test("顺序整份换，折叠来回切", async () => {
   await list.flush();
   let ui = await list.read_sidebar();
   // 整份换掉，跨机器的先后照存。
-  assert.deepEqual(ui.project_order, [project(null, "/a"), project("box", "/r"), project(null, "/c")]);
-  assert.ok(ui.machines.get("").collapsed_projects.has("/a"));
-  assert.deepEqual(ui.machines.get("box").conversation_order, ["x", "y"]);
-  assert.ok(ui.machines.get("box").collapsed_worksets.has("w"));
-  assert.ok(ui.conversations_collapsed);
+  expect(ui.project_order).toStrictEqual([project(null, "/a"), project("box", "/r"), project(null, "/c")]);
+  expect(ui.machines.get("").collapsed_projects.has("/a")).toBeTruthy();
+  expect(ui.machines.get("box").conversation_order).toStrictEqual(["x", "y"]);
+  expect(ui.machines.get("box").collapsed_worksets.has("w")).toBeTruthy();
+  expect(ui.conversations_collapsed).toBeTruthy();
 
   list.set_collapsed({ kind: "conversations" }, false);
   list.set_collapsed({ kind: "project", machine: null, root: "/a" }, false);
   await list.flush();
   ui = await list.read_sidebar();
-  assert.ok(!ui.conversations_collapsed);
+  expect(ui.conversations_collapsed).toBeFalsy();
   // 本机什么都不剩时不留这一项。
-  assert.ok(!ui.machines.has("") || ui.machines.get("").collapsed_projects.size === 0);
+  expect(!ui.machines.has("") || ui.machines.get("").collapsed_projects.size === 0).toBeTruthy();
 });
 
 test("行首头像的选择存得回来", async () => {
   const list = await store();
-  assert.deepEqual(await list.avatar_choice(), { kind: "unset" });
+  expect(await list.avatar_choice()).toStrictEqual({ kind: "unset" });
   for (const choice of [
     { kind: "view", id: "someone.avatars/avatar" },
     { kind: "icon" },
@@ -76,7 +75,7 @@ test("行首头像的选择存得回来", async () => {
   ]) {
     list.save_avatar_choice(choice);
     await list.flush();
-    assert.deepEqual(await list.avatar_choice(), choice);
+    expect(await list.avatar_choice()).toStrictEqual(choice);
   }
 });
 
@@ -91,17 +90,17 @@ test("清掉目录里已经没有的", async () => {
   await list.flush();
   let ui = await list.read_sidebar();
   const local = ui.machines.get("");
-  assert.deepEqual(local.pinned_conversations, ["keep"]);
-  assert.deepEqual(local.conversation_order, ["keep"]);
-  assert.equal(local.collapsed_projects.size, 0);
-  assert.equal(local.collapsed_worksets.size, 0);
+  expect(local.pinned_conversations).toStrictEqual(["keep"]);
+  expect(local.conversation_order).toStrictEqual(["keep"]);
+  expect(local.collapsed_projects.size).toBe(0);
+  expect(local.collapsed_worksets.size).toBe(0);
   // 别的机器不受影响。
-  assert.deepEqual(ui.machines.get("box").pinned_conversations, ["gone"]);
+  expect(ui.machines.get("box").pinned_conversations).toStrictEqual(["gone"]);
 
   list.forget_machine("box");
   await list.flush();
   ui = await list.read_sidebar();
-  assert.ok(!ui.machines.has("box"));
+  expect(ui.machines.has("box")).toBeFalsy();
 });
 
 test("新建的库从会话插件的旧库抄一次", async () => {
@@ -125,11 +124,11 @@ test("新建的库从会话插件的旧库抄一次", async () => {
   const list = new ListStore(db);
   await list.open(old_path);
   const ui = await list.read_sidebar();
-  assert.deepEqual(ui.machines.get("").pinned_conversations, ["c"]);
-  assert.ok(ui.conversations_collapsed);
-  assert.deepEqual(await list.avatar_choice(), { kind: "unset" });
+  expect(ui.machines.get("").pinned_conversations).toStrictEqual(["c"]);
+  expect(ui.conversations_collapsed).toBeTruthy();
+  expect(await list.avatar_choice()).toStrictEqual({ kind: "unset" });
   // 挂上的旧库卸掉了；再开一次不再抄。
-  assert.deepEqual(await db.query("PRAGMA database_list").then((rows) => rows.map((row) => row.name)), ["main"]);
+  expect(await db.query("PRAGMA database_list").then((rows) => rows.map((row) => row.name))).toStrictEqual(["main"]);
 });
 
 test("库比插件新：不记，只在内存里用", async () => {
@@ -144,12 +143,12 @@ test("库比插件新：不记，只在内存里用", async () => {
   } finally {
     console.error = error;
   }
-  assert.ok(!list.ready);
+  expect(list.ready).toBeFalsy();
   list.set_pinned(conversation(null, "a"), true);
-  assert.equal((await list.read_sidebar()).machines.size, 0);
+  expect((await list.read_sidebar()).machines.size).toBe(0);
 });
 
 test("只读 URI 转义路径里的特殊字符", () => {
-  assert.equal(read_only_uri("/a b/c?#%.db"), "file:/a b/c%3F%23%25.db?mode=ro");
-  assert.equal(read_only_uri("C:\\x\\s.db"), "file:/C:/x/s.db?mode=ro");
+  expect(read_only_uri("/a b/c?#%.db")).toBe("file:/a b/c%3F%23%25.db?mode=ro");
+  expect(read_only_uri("C:\\x\\s.db")).toBe("file:/C:/x/s.db?mode=ro");
 });

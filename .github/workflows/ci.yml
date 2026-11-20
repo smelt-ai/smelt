@@ -29,6 +29,7 @@ jobs:
       mobile: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.mobile == 'true' }}
       android: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.android == 'true' }}
       pi-agent: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.pi-agent == 'true' }}
+      plugins: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.plugins == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -83,6 +84,10 @@ jobs:
               - *workflow
               - 'scripts/fetch-bun.sh'
               - 'agent/**'
+            plugins:
+              - *workflow
+              - 'scripts/fetch-bun.sh'
+              - 'plugins/**'
 
   # RustSec advisories 加依赖许可证白名单（见 deny.toml）；bans / sources 不跑。
   # ubuntu 上跑：不编代码，只要 cargo metadata + advisory-db，通常几十秒内结束。
@@ -339,6 +344,22 @@ jobs:
       - name: Check
         run: bun run check
 
+  # JS 插件（plugins/<名字>/）的单测：tests/ 下的 *.test.mjs，用 bun:test 写，只测不 import 宿主模块的逻辑。
+  # Bun 和 pi-agent 用同一份。
+  plugins:
+    needs: changes
+    if: needs.changes.outputs.plugins == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Bun
+        run: dirname "$(scripts/fetch-bun.sh)" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: bun test ./plugins
+
   # 在发版出包的几个平台上把 smelt-agent 编出来跑一遍冒烟。Windows 嵌入文件的路径、可执行文件
   # 后缀都和 macOS / Linux 不一样；Linux x64 用的是 baseline 版的 Bun。开发机是 macOS，这些都测不到，
   # 不在这里跑就只能等发版时才暴露。
@@ -362,7 +383,7 @@ jobs:
   # 取消，以及排不到机器被放弃的 abandoned）。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
   ci-ok:
     if: always()
-    needs: [changes, cargo-deny, rust, mobile, android-build, ios-check, windows, pi-agent, smelt-agent]
+    needs: [changes, cargo-deny, rust, mobile, android-build, ios-check, windows, pi-agent, plugins, smelt-agent]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize

@@ -84,7 +84,7 @@ const PIN_TABLE = {
 
 /**
  * 本插件的库。db 是宿主的库函数 { query, execute, write, migrate }（store_query 这些），测试里
- * 换成 Node 的 SQLite。
+ * 换成 Bun 的 SQLite（tests/sqlite.mjs）。
  */
 export class ListStore {
   constructor(db) {

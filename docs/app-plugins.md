@@ -309,7 +309,7 @@ export default class Plugin extends View {
 
 1. **只 import 自己目录里的文件和宿主模块**，不设插件间共享的目录：要复用的进组件库或能力。
 2. **发的就是源码**：写 JS 加 JSDoc，不经编译。用户复制到手的要能直接改。
-3. **逻辑和画面分开放**：数据、规则放不 import gpui-kit 的文件，宿主函数从参数传进来，在 Node 里就能测。视图文件只读这些文件算好的结果。
+3. **逻辑和画面分开放**：数据、规则放不 import gpui-kit 的文件，宿主函数从参数传进来，用 `bun test` 就能测（测试放插件的 `tests/`，用 `bun:test`）。视图文件只读这些文件算好的结果。
 4. **迁过来的插件沿用原 id**，视图、命令、菜单、插槽的 id 都不变，同一个提交删掉 Rust 版。插件的数据目录、布局里的视图 id、用户的快捷键都不用迁。
 5. **数据放 `~/.smelt/plugin-data/<id>/`**（`data_dir()`，库是里面的 `store.sqlite3`，用 `store_query` / `store_execute`），见 `docs/local-storage.md`。
 

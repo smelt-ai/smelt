@@ -2,7 +2,7 @@
 // 菜单和行上的按钮都调这里。要确认的（会话还在跑、项目里还有会话、关工作树）在这里先问：ask 由
 // 列表视图给，弹确认框，{ title, action, description, danger, confirm }，点了确认才调 confirm()。
 //
-// 不 import 宿主模块，在 Node 里就能测。list 是 state.js 的 SessionList。
+// 不 import 宿主模块，用 bun test 就能测。list 是 state.js 的 SessionList。
 
 import { is_pinned } from "./model.js";
 import { merge_project_order, move_near, move_to_pin_boundary, splice_group } from "./sidebar.js";

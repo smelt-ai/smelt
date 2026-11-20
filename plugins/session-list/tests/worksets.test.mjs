@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { expect, test } from "bun:test";
 
 import { RECHECK_AFTER, describe, due_checks, merge_summary, workset_key } from "../worksets.js";
 import { t } from "./helpers.mjs";
@@ -12,12 +11,12 @@ const checked = (repositories) => ({
 
 test("合并情况：挡着的排在确认不了的前面", () => {
   const summary = (repos) => merge_summary(checked(repos));
-  assert.equal(summary([repo("api", false, "merged"), repo("web", false, null)]), "merged");
-  assert.equal(summary([repo("api", false, "unconfirmed")]), "unconfirmed");
-  assert.equal(summary([repo("api", false, "unconfirmed"), repo("web", true, "merged")]), "pending");
-  assert.equal(summary([repo("api", false, "unmerged")]), "pending");
-  assert.equal(merge_summary(undefined), "unknown");
-  assert.equal(merge_summary({ running: false, last: { at: 0, error: "连不上" } }), "unknown");
+  expect(summary([repo("api", false, "merged"), repo("web", false, null)])).toBe("merged");
+  expect(summary([repo("api", false, "unconfirmed")])).toBe("unconfirmed");
+  expect(summary([repo("api", false, "unconfirmed"), repo("web", true, "merged")])).toBe("pending");
+  expect(summary([repo("api", false, "unmerged")])).toBe("pending");
+  expect(merge_summary(undefined)).toBe("unknown");
+  expect(merge_summary({ running: false, last: { at: 0, error: "连不上" } })).toBe("unknown");
 });
 
 test("说明每个仓库一行，刷新失败另起一行", () => {
@@ -25,8 +24,8 @@ test("说明每个仓库一行，刷新失败另起一行", () => {
     { repositories: [repo("api", true, null), repo("web", false, "merged")], refresh_failures: ["web"] },
     t,
   );
-  assert.equal(lines.length, 3);
-  assert.ok(lines[0].includes("api"));
+  expect(lines.length).toBe(3);
+  expect(lines[0].includes("api")).toBeTruthy();
 });
 
 test("只问没问过的，要旧的时才连过期的也问", () => {
@@ -38,6 +37,6 @@ test("只问没问过的，要旧的时才连过期的也问", () => {
     [workset_key(null, "running"), { running: true, last: null }],
   ]);
   const present = [key("new"), key("old"), key("fresh"), key("running")];
-  assert.deepEqual(due_checks(present, checks, false, now), [key("new")]);
-  assert.deepEqual(due_checks(present, checks, true, now), [key("new"), key("old")]);
+  expect(due_checks(present, checks, false, now)).toStrictEqual([key("new")]);
+  expect(due_checks(present, checks, true, now)).toStrictEqual([key("new"), key("old")]);
 });

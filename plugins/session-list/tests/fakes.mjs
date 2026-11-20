@@ -13,7 +13,12 @@ export function fake_host(machines = { "": local_directory() }) {
     runs,
     redraws: 0,
     data: machines,
-    machines: () => Object.keys(host.data).map((key) => ({ machine: key === "" ? null : key, name: key || "本机", unavailable: null })),
+    machines: () =>
+      Object.keys(host.data).map((key) => ({
+        machine: key === "" ? null : key,
+        name: key || "本机",
+        unavailable: null,
+      })),
     connections: () => ({ remotes: [] }),
     local_os: "darwin",
     path_style: () => "posix",
@@ -28,7 +33,7 @@ export function fake_host(machines = { "": local_directory() }) {
       if (host.fail?.(method, params)) throw new Error("运行时拒绝了");
       if (method === "workspace.project.open") return { epoch: "e", revision: 9 };
       const reply = host.replies[method];
-      return typeof reply === "function" ? reply(params) : reply ?? null;
+      return typeof reply === "function" ? reply(params) : (reply ?? null);
     },
     async run(command, args) {
       runs.push([command, args]);
@@ -42,8 +47,7 @@ export function fake_host(machines = { "": local_directory() }) {
     now: () => new Date(2026, 10, 20, 12),
     active_context: () => ({ project: host.active ?? null }),
     uuid: () => `id-${(host.uuids = (host.uuids ?? 0) + 1)}`,
-    conversation_acp: (settings, option, sid, cwd) =>
-      settings.options.includes(option) ? { option, sid, cwd } : null,
+    conversation_acp: (settings, option, sid, cwd) => (settings.options.includes(option) ? { option, sid, cwd } : null),
     input: (placeholder) => fake_input(placeholder),
   };
   return host;
@@ -78,7 +82,10 @@ export function fake_input(placeholder) {
 
 export function fake_store() {
   const writes = [];
-  const record = (name) => (...args) => writes.push([name, ...args]);
+  const record =
+    (name) =>
+    (...args) =>
+      writes.push([name, ...args]);
   return {
     writes,
     set_pinned: record("set_pinned"),
@@ -92,7 +99,15 @@ export function fake_store() {
 }
 
 export const project = (root, workset = null) => ({ kind: "project", root, workset });
-export const fact = (id, placement) => ({ id, name: id, status: "idle", agent: null, automation: false, cwd: null, placement });
+export const fact = (id, placement) => ({
+  id,
+  name: id,
+  status: "idle",
+  agent: null,
+  automation: false,
+  cwd: null,
+  placement,
+});
 
 export function terminals(id, cwd) {
   return { id, terminals: [{ id: `${id}-t`, cwd }], created_at: 1 };
@@ -124,4 +139,3 @@ export function local_directory() {
 export function list(host = fake_host(), store = fake_store()) {
   return new SessionList(host, store, new_sidebar_ui(), { kind: "unset" });
 }
-
