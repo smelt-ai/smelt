@@ -6,6 +6,9 @@ action:
   archive_session:
     en: "archive the session"
     zh-CN: "归档会话"
+  cancel:
+    en: "Cancel"
+    zh-CN: "取消"
   check_merge:
     en: "check the merge status"
     zh-CN: "检查合并状态"

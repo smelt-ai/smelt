@@ -220,6 +220,7 @@ export function folds_over(machine, placement, grouping) {
       return [{ kind: "conversations" }];
     case "project": {
       if (grouping !== "project") return [];
+      /** @type {object[]} */
       const folds = [{ kind: "project", machine, root: placement.root }];
       if (placement.workset != null) folds.push({ kind: "workset", machine, id: placement.workset });
       return folds;

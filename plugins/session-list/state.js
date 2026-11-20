@@ -36,8 +36,11 @@ import {
   set_project_order,
 } from "./model.js";
 import { Unread } from "./attention.js";
-import { build_sidebar, project_flip, session_flip, Sidebar, workset_flip } from "./sidebar.js";
+import { initial_location, NewSession } from "./new_session.js";
+import { Repositories } from "./repositories.js";
+import { bucket_flip, build_sidebar, project_flip, session_flip, Sidebar, workset_flip } from "./sidebar.js";
 import { due_checks, WORKSET_GIT_TIMEOUT, workset_key } from "./worksets.js";
+import { message } from "./util.js";
 
 /** 运行时推「哪些会话有没看过的提醒」的话题。 */
 export const ATTENTION_TOPIC = "attention.changed";
@@ -59,13 +62,15 @@ export function fail_key(target) {
 }
 
 /**
- * host：
+ * host（main.js 拼，测试里换成假的）：
  * - machines()、connections()、local_os、path_style(m)、workspace_directory(m)、session_states(m)、
- *   conversation_facts(m)、path：{ clean, file_name, join }
+ *   conversation_facts(m)、active_context()、path：{ clean, file_name, join, is_absolute, starts_with }、
+ *   project_labels(style, roots)
  * - call(m, method, params, timeout_ms)、run(command, args)
- * - t(key, params)、redraw()（重画本插件的视图）、write_clipboard(text)、
+ * - t(key, params)、redraw()（重画本插件的视图和插件的根）、
  *   path_kind(path) → Promise<"dir" | "file" | null>（本机路径是什么，读不了是 null）、parent_dir(path)（本机）
- * - now() → Date
+ * - now() → Date、uuid()、input(placeholder)（输入框的状态，见 repositories.js）、
+ *   conversation_acp(settings, option_id, sid, cwd)（新对话的启动规格，见 new_session.js）
  */
 export class SessionList {
   constructor(host, store, ui, avatar) {
@@ -86,6 +91,23 @@ export class SessionList {
     this.sidebar = new Sidebar();
     /** machine_key → (智能体定义 id → 名字)。权威在智能体插件，这里是只读缓存。 */
     this.agent_names = new Map();
+    /**
+     * machine_key → 那台机器的智能体配置（AGENT_SETTINGS 的一项：{ state: "ready", settings } |
+     * { state: "unavailable", reason } | { state: "absent" }）。权威在智能体插件，这里是只读缓存，
+     * 新建会话拼对话的启动规格用。还没收到的机器没有。
+     */
+    this.agent_settings = new Map();
+    /** 开着的新建会话菜单（new_session.js），宿主事件转给它们。 */
+    this.launchers = new Set();
+    /** ⌘N 打开的、钉在窗口上方的那份新建会话菜单（插件的根画它）。 */
+    this.palette = null;
+    /** 开着的仓库对话框（repositories.js，插件的根画它）。 */
+    this.repositories = null;
+    /**
+     * 用完的输入框状态（改名、搜索、仓库对话框的）：刚收起时绘制里还可能画到它（对话框关时再画一帧），
+     * 不当场释放，下次建输入框前再放。
+     */
+    this.retired_inputs = [];
     /** 上一份机器表（machine_key）：机器表变了时和它比，认出真的移除了的。 */
     this.known_machines = new Set();
     /** machine_key → 上次处理过的目录版本。会话状态变了也发 sessions_changed，目录没变就不重清库。 */
@@ -102,6 +124,13 @@ export class SessionList {
     this.project_filter = "";
     /** fail_key → { what, error }：在某一行上发起、失败了的操作，画在那一行上。 */
     this.failures = new Map();
+  }
+
+  /** 库读回来了：侧栏的置顶、顺序、折叠和行首头像换成库里那份。起来时调一次，在 start 之前。 */
+  loaded(ui, avatar) {
+    this.ui = ui;
+    this.avatar = avatar;
+    this.rebuild();
   }
 
   /** 起来时调一次：记下机器表，按眼下的目录走一遍，问会话插件选中了什么、智能体插件的配置。 */
@@ -262,7 +291,7 @@ export class SessionList {
     if (changed) this.rebuild();
     if (this.ui.by_machine) this.set_machine_collapsed(key.machine, false);
     const bucket = this.sidebar.bucket_of(key);
-    if (bucket != null) this.set_bucket_collapsed(bucket, false);
+    if (bucket != null) this.set_bucket_collapsed(bucket_flip(bucket), false);
   }
 
   /** 折起或展开按状态、时间分出来的一组（bucket_flip 的写法）。只改内存。 */
@@ -291,11 +320,15 @@ export class SessionList {
    * - window_activated：人常常是去浏览器合完 PR 回来，工作树再看一眼。
    * - machines_changed：机器表里真的消失了的（和上一份比，不是离线）忘掉；重算侧栏。
    * - locale_changed：侧栏缓存里有按语言算好的字，重算。
+   * - views_changed、context_menu_items_changed：行首头像、菜单项是画的时候现取的，重画。
    * - runtime_topic 的 attention.changed：收进 unread，有没看过的会话变了就重算侧栏。
    * - open_paths（从访达拖进来的）：本机上是目录的当项目打开。
    * - plugin：会话插件的选中换了、新会话写进目录了，智能体插件的配置换了。
+   *
+   * 每一条也转给开着的新建会话菜单（launchers），它们自己挑要的。
    */
   on_event(event) {
+    for (const launcher of this.launchers) launcher.on_event(event);
     switch (event.type) {
       case "sessions_changed":
         this.on_sessions_changed();
@@ -309,6 +342,11 @@ export class SessionList {
         return;
       case "locale_changed":
         this.rebuild();
+        return;
+      // 填行首插槽的视图、别的插件登记的菜单项都在画的时候现取：变了重画就行。
+      case "views_changed":
+      case "context_menu_items_changed":
+        this.host.redraw();
         return;
       case "runtime_topic":
         if (event.topic === ATTENTION_TOPIC && this.unread.apply(event.machine, event.message)) {
@@ -378,6 +416,7 @@ export class SessionList {
   /** 换掉一台机器的智能体名字。给不了、移除了的那台就没有名字，会话行不标。 */
   on_agent_settings(changed) {
     const key = machine_key(changed.machine);
+    this.agent_settings.set(key, changed);
     const names =
       changed.state === "ready"
         ? new Map(changed.settings.agents.map((agent) => [agent.id, agent.name.trim()]))
@@ -468,6 +507,29 @@ export class SessionList {
     });
   }
 
+  /**
+   * 行内改名存下：target 同 fail_key 的那几种（会话、工作树），original 是开始改时的名字，value 是
+   * 输入框里的字。没改就什么都不做。会话清空是不要自己起的名字，回到运行时算的；工作树一定要有
+   * 名字，清空不存。失败挂在那一行上。
+   */
+  commit_rename(target, original, value) {
+    const text = value.trim();
+    if (text === original.trim()) return;
+    const t = this.host.t;
+    if (target.kind === "conversation") {
+      const renamed = this.host.call(target.key.machine, "workspace.rename", {
+        conversation_id: target.key.id,
+        terminal_id: null,
+        title: text === "" ? null : text,
+      });
+      this.report_row_failure(target, t("action.rename"), renamed);
+      return;
+    }
+    if (text === "") return;
+    const renamed = this.host.call(target.machine, "workspace.workset.rename", { workset_id: target.id, task: text });
+    this.report_row_failure(target, t("action.rename_workset"), renamed);
+  }
+
   /** 打开一个项目并选中它（已经开着就只选中）。 */
   async open_project(machine, raw_root) {
     const host = this.host;
@@ -505,14 +567,9 @@ export class SessionList {
     if (opened != null) await host.call(machine, "workspace.project.close", { root: opened });
   }
 
-  /** 把这一格的会话 id 放进剪贴板，见 id_to_copy。 */
-  copy_session_id(machine, session_id) {
-    const id = id_to_copy(
-      this.host.workspace_directory(machine),
-      this.host.session_states(machine),
-      session_id,
-    );
-    this.host.write_clipboard(id);
+  /** 「复制会话 ID」放进剪贴板的字，见 id_to_copy。剪贴板在点击回调的 cx 上，由菜单写。 */
+  session_id_to_copy(machine, session_id) {
+    return id_to_copy(this.host.workspace_directory(machine), this.host.session_states(machine), session_id);
   }
 
   /**
@@ -531,6 +588,53 @@ export class SessionList {
     for (const dir of dirs) {
       this.report_failure(this.host.t("action.open_project"), this.open_project(null, dir));
     }
+  }
+
+  // ---- 输入框状态 ----
+
+  retire_input(state) {
+    this.retired_inputs.push(state);
+  }
+
+  /** 放掉收起了的输入框状态。只在事件里调，不在绘制里。 */
+  release_retired_inputs() {
+    for (const state of this.retired_inputs.splice(0)) state.release();
+  }
+
+  // ---- 插件的根画的对话框 ----
+
+  /** ⌘N：钉在窗口上方的新建会话菜单，预选眼下活动项目。已经开着就换一份新的（重读目录）。 */
+  open_palette() {
+    this.palette?.dispose();
+    const owner = { palette: true, redraw: () => this.host.redraw(), close: () => this.close_palette(menu) };
+    const menu = new NewSession(this, initial_location(this.host, undefined, null), owner);
+    this.palette = menu;
+    this.host.redraw();
+  }
+
+  close_palette(menu) {
+    menu.dispose();
+    if (this.palette !== menu) return;
+    this.palette = null;
+    this.host.redraw();
+  }
+
+  /**
+   * 项目的仓库对话框：manage 管理仓库，create 直接到建工作树那一步。created(task) 在工作树建好后
+   * 调（新建会话菜单据此等目录推到后选上它）。叠在已开的对话框上面。
+   */
+  open_repositories(machine, root, mode, created = null) {
+    this.release_retired_inputs();
+    this.repositories?.close();
+    this.repositories = new Repositories(this, machine, root, mode, created);
+    this.host.redraw();
+  }
+
+  close_repositories(dialog) {
+    for (const state of dialog.fields()) this.retire_input(state);
+    if (this.repositories !== dialog) return;
+    this.repositories = null;
+    this.host.redraw();
   }
 
   // ---- 命令 ----
@@ -669,6 +773,3 @@ function same_map(a, b) {
   return true;
 }
 
-function message(error) {
-  return error?.message ?? String(error);
-}

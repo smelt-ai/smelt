@@ -64,6 +64,6 @@ export function buckets(grouping, rows, now) {
     return [];
   }
   return order
-    .map((bucket) => [bucket, ixs.filter((ix) => of[ix] === bucket)])
+    .map((bucket) => /** @type {[string, number[]]} */ ([bucket, ixs.filter((ix) => of[ix] === bucket)]))
     .filter(([, members]) => members.length > 0);
 }

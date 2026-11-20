@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import * as peers from "../peers.js";
+import { bucket_flip } from "../sidebar.js";
 import { conversations_under, id_to_copy, SessionList, step } from "../state.js";
 import { fact, fake_host, fake_store, list, local_directory, project, terminals } from "./fakes.mjs";
 import { path, t } from "./helpers.mjs";
@@ -179,4 +180,33 @@ test("在列表里找出会话：不在列表里是失败", async () => {
   await sessions.reveal_in_list({ machine: null, session_id: "p-t" });
   assert.deepEqual(sessions.located, { machine: null, id: "p" });
   await assert.rejects(sessions.reveal_in_list({ machine: null, session_id: "old-t" }));
+});
+
+test("露出会话时展开它所在的状态、时间组", () => {
+  const sessions = list(fake_host());
+  sessions.set_grouping("status");
+  const key = { machine: null, id: "p" };
+  const bucket = bucket_flip(sessions.sidebar.bucket_of(key));
+  sessions.set_bucket_collapsed(bucket, true);
+  assert.ok(sessions.ui.collapsed_buckets.has(bucket));
+  sessions.reveal(key);
+  assert.ok(!sessions.ui.collapsed_buckets.has(bucket));
+});
+
+test("行内改名：没改不发，会话清空回到运行时的名字，工作树清空不存", async () => {
+  const host = fake_host();
+  const sessions = list(host);
+  const conversation = { kind: "conversation", key: { machine: null, id: "p" } };
+  const workset = { kind: "workset", machine: null, id: "ws" };
+  sessions.commit_rename(conversation, "旧名", " 旧名 ");
+  sessions.commit_rename(workset, "fix", "  ");
+  assert.deepEqual(host.calls, []);
+  sessions.commit_rename(conversation, "旧名", " 新名 ");
+  sessions.commit_rename(conversation, "旧名", "");
+  sessions.commit_rename(workset, "fix", "fix it");
+  assert.deepEqual(host.calls, [
+    [null, "workspace.rename", { conversation_id: "p", terminal_id: null, title: "新名" }],
+    [null, "workspace.rename", { conversation_id: "p", terminal_id: null, title: null }],
+    [null, "workspace.workset.rename", { workset_id: "ws", task: "fix it" }],
+  ]);
 });

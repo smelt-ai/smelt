@@ -8,6 +8,7 @@ import { is_pinned } from "./model.js";
 import { merge_project_order, move_near, move_to_pin_boundary, splice_group } from "./sidebar.js";
 import * as peers from "./peers.js";
 import { describe, merge_of_result, WORKSET_GIT_TIMEOUT } from "./worksets.js";
+import { message } from "./util.js";
 
 const same_project = (a, b) => a.machine === b.machine && a.root === b.root;
 
@@ -261,8 +262,4 @@ export async function open_dropped_paths(list, paths) {
     return;
   }
   for (const root of roots) list.report_failure(host.t("action.add_project"), list.open_project(null, root));
-}
-
-function message(error) {
-  return error?.message ?? String(error);
 }

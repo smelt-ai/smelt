@@ -49,6 +49,12 @@ export const path = {
     const parts = value.split("/").filter(Boolean);
     return parts.length ? parts[parts.length - 1] : null;
   },
+  is_absolute(_style, value) {
+    return value.startsWith("/");
+  },
+  starts_with(_style, value, base) {
+    return value === base || value.startsWith(base.endsWith("/") ? base : `${base}/`);
+  },
   join(_style, base, child) {
     if (child.startsWith("/")) return child;
     return base.endsWith("/") ? `${base}${child}` : `${base}/${child}`;

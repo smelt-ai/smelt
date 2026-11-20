@@ -12,7 +12,6 @@ export function fake_host(machines = { "": local_directory() }) {
     calls,
     runs,
     redraws: 0,
-    clipboard: null,
     data: machines,
     machines: () => Object.keys(host.data).map((key) => ({ machine: key === "" ? null : key, name: key || "本机", unavailable: null })),
     connections: () => ({ remotes: [] }),
@@ -22,10 +21,14 @@ export function fake_host(machines = { "": local_directory() }) {
     session_states: (machine) => host.data[machine ?? ""]?.states ?? [],
     conversation_facts: (machine) => host.data[machine ?? ""]?.facts ?? [],
     path,
+    /** 方法 → 回什么（值或 (params) => 值）；没写的回 null。 */
+    replies: {},
     async call(machine, method, params) {
       calls.push([machine, method, params]);
       if (host.fail?.(method, params)) throw new Error("运行时拒绝了");
-      return method === "workspace.project.open" ? { epoch: "e", revision: 9 } : null;
+      if (method === "workspace.project.open") return { epoch: "e", revision: 9 };
+      const reply = host.replies[method];
+      return typeof reply === "function" ? reply(params) : reply ?? null;
     },
     async run(command, args) {
       runs.push([command, args]);
@@ -34,12 +37,43 @@ export function fake_host(machines = { "": local_directory() }) {
     },
     t,
     redraw: () => (host.redraws += 1),
-    write_clipboard: (text) => (host.clipboard = text),
     path_kind: async (path) => (path.startsWith("/dir") ? "dir" : path.startsWith("/file") ? "file" : null),
     parent_dir: (path) => path.slice(0, path.lastIndexOf("/")) || "/",
     now: () => new Date(2026, 10, 20, 12),
+    active_context: () => ({ project: host.active ?? null }),
+    uuid: () => `id-${(host.uuids = (host.uuids ?? 0) + 1)}`,
+    conversation_acp: (settings, option, sid, cwd) =>
+      settings.options.includes(option) ? { option, sid, cwd } : null,
+    input: (placeholder) => fake_input(placeholder),
   };
   return host;
+}
+
+/** 假输入框：同 SmeltInputState 的 value / set_value / on / release，emit 模拟一次事件。 */
+export function fake_input(placeholder) {
+  let value = "";
+  const handlers = new Map();
+  return {
+    placeholder,
+    released: false,
+    value: () => value,
+    set_value(next) {
+      value = next;
+    },
+    on(name, handler) {
+      handlers.set(name, handler);
+    },
+    emit(name) {
+      handlers.get(name)?.();
+    },
+    type(next) {
+      value = next;
+      handlers.get("change")?.();
+    },
+    release() {
+      this.released = true;
+    },
+  };
 }
 
 export function fake_store() {

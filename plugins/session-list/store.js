@@ -13,6 +13,7 @@
 // TODO：用户都升过来了就删掉这次搬迁，连同会话插件库里那几张表。
 
 import { machine_key, machine_of_key, new_sidebar_ui } from "./model.js";
+import { message } from "./util.js";
 
 /** 迁移步骤：同原来 Rust 版的库，第 1 版。只往后加，不改已有的。 */
 export const MIGRATIONS = [
@@ -323,6 +324,3 @@ async function copy_from_sessions(db, old_path) {
   }
 }
 
-function message(error) {
-  return error?.message ?? String(error);
-}
