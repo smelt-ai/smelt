@@ -1,6 +1,6 @@
 //! 调用的会话（来源 `smelt.sessions`）和会话列表（来源 `smelt.session-list`）的约定：跳到某段
 //! 会话、开新对话、分叉、在列表里找出、上一段 / 下一段。照抄自权威定义
-//! `crates/plugins/sessions/src/contract.rs`、`crates/plugins/session-list/src/contract.rs`，
+//! `crates/plugins/sessions/src/contract.rs`、`plugins/session-list/contract.js`，
 //! id 和字段必须和那边一致。
 //!
 //! 能力库（来源 `smelt.capabilities`）的视图 id 照抄自 `crates/plugins/capabilities/src/
@@ -18,7 +18,7 @@ pub(crate) const CAPABILITIES_VIEW: &str = "smelt.capabilities/main";
 pub(crate) const ACTIVATE: Command<Activate, ()> = Command::new("smelt.sessions/activate");
 
 // 约定：smelt.session-list 的 REVEAL_IN_LIST，权威定义在
-// crates/plugins/session-list/src/contract.rs。
+// plugins/session-list/contract.js。
 /// 在会话列表里找出这段会话：侧栏收着就打开，展开所在的组，滚过去闪一下。
 pub(crate) const REVEAL_IN_LIST: Command<RevealInList, ()> =
     Command::new("smelt.session-list/reveal-in-list");
@@ -32,7 +32,7 @@ pub(crate) const START_CONVERSATION: Command<StartConversation, ()> =
 pub(crate) const FORK: Command<Fork, ()> = Command::new("smelt.sessions/fork");
 
 // 约定：smelt.session-list 的 PREV_SESSION / NEXT_SESSION，权威定义在
-// crates/plugins/session-list/src/contract.rs。
+// plugins/session-list/contract.js。
 /// 按会话列表的顺序切到上一段会话，到头绕回。
 pub(crate) const PREV_SESSION: Command<(), ()> = Command::new("smelt.session-list/prev");
 /// 按会话列表的顺序切到下一段会话，到头绕回。

@@ -43,7 +43,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 const OWNER: &str = "smelt.capabilities";
 
 // 约定：smelt.session-list 的 MACHINE_MENU 和它的上下文，权威定义在
-// crates/plugins/session-list/src/contract.rs。
+// plugins/session-list/contract.js。
 const MACHINE_MENU: &str = "smelt.session-list/machine";
 
 /// [`MACHINE_MENU`] 点了交给命令的上下文：右键的是哪台机器。

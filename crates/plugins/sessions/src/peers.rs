@@ -149,7 +149,7 @@ pub(crate) mod agents {
 }
 
 /// 会话列表（来源 `smelt.session-list`）的约定，权威定义在
-/// `crates/plugins/session-list/src/contract.rs`。
+/// `plugins/session-list/contract.js`。
 pub(crate) mod session_list {
     use serde::Serialize;
     use smelt_plugin_api::{Command, RuntimeKey, machine_json};

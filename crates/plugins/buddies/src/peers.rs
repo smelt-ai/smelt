@@ -1,7 +1,7 @@
 //! 用到的别的插件的约定，照抄自它们的 `contract.rs`，权威定义以那边为准：填的插槽。
 
 /// 会话列表（来源 `smelt.session-list`）的约定，权威定义在
-/// `crates/plugins/session-list/src/contract.rs`。
+/// `plugins/session-list/contract.js`。
 pub(crate) mod session_list {
     use serde::Deserialize;
     use smelt_plugin_api::{RuntimeKey, machine_json};

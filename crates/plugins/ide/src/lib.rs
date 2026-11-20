@@ -29,7 +29,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 const OWNER: &str = "smelt.ide";
 
 // 约定：smelt.session-list 的 PROJECT_MENU，上下文是 `{machine, path}`；权威定义在
-// crates/plugins/session-list/src/contract.rs。
+// plugins/session-list/contract.js。
 const PROJECT_MENU: &str = "smelt.session-list/project";
 
 /// 菜单项点了执行的命令。
