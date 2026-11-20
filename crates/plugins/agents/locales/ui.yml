@@ -197,22 +197,6 @@ delete:
   unnamed_automation:
     en: "Untitled"
     zh-CN: "未命名"
-duration:
-  days:
-    en: "%{days}d"
-    zh-CN: "%{days}天"
-  days_hours:
-    en: "%{days}d %{hours}h"
-    zh-CN: "%{days}天%{hours}小时"
-  hours:
-    en: "%{hours}h"
-    zh-CN: "%{hours}小时"
-  hours_minutes:
-    en: "%{hours}h %{minutes}m"
-    zh-CN: "%{hours}小时%{minutes}分"
-  minutes:
-    en: "%{minutes}m"
-    zh-CN: "%{minutes}分"
 editor:
   back:
     en: "Back"
@@ -642,64 +626,6 @@ profile:
   section_description:
     en: "Connect any ACP agent, or change the command, add environment variables or change the data folder of a built-in agent. It adds an item to the “New Conversation” menu; ones based on a built-in agent also appear on the history page."
     zh-CN: "接入任意 ACP Agent，或在内置 Agent 上换命令、加环境变量、换数据目录。「新建对话」菜单会多一项；基于内置 Agent 的还会出现在历史会话页。"
-quota:
-  click_to_check:
-    en: "Not checked yet · click to check"
-    zh-CN: "暂未查到 · 点击查询"
-  click_to_refresh:
-    en: "%{hint} · click to refresh"
-    zh-CN: "%{hint} · 点击刷新"
-  click_to_retry:
-    en: "%{error} · click to retry"
-    zh-CN: "%{error} · 点击重试"
-  copilot_remaining:
-    en: "%{label} %{remaining} %{unit} left this period"
-    zh-CN: "%{label} 本周期剩余 %{remaining} %{unit}"
-  copilot_used:
-    en: "%{label} this period %{used} / %{limit} %{unit} (%{percent}%)"
-    zh-CN: "%{label} 本周期 %{used} / %{limit} %{unit}（%{percent}%）"
-  empty_trigger:
-    en: "Account Quota · click to check"
-    zh-CN: "账户额度 · 点击查询"
-  enable_label:
-    en: "Check quota for %{name}"
-    zh-CN: "查询 %{name} 的额度"
-  keychain_denied:
-    en: "Keychain access was denied or is unavailable, so automatic reading stopped. Retry asks for permission again."
-    zh-CN: "钥匙串访问被拒绝或不可用，已停止自动读取。点重试会再请求一次授权。"
-  loading:
-    en: "Checking quota…"
-    zh-CN: "额度查询中…"
-  period:
-    en: "This period"
-    zh-CN: "本周期"
-  read_failed:
-    en: "Read Failed"
-    zh-CN: "读取失败"
-  refresh:
-    en: "Refresh Account Quota"
-    zh-CN: "刷新账户额度"
-  refresh_one:
-    en: "Check %{name} quota"
-    zh-CN: "查询 %{name} 的额度"
-  refreshing:
-    en: "%{hint} · refreshing…"
-    zh-CN: "%{hint} · 正在刷新…"
-  resets_in:
-    en: "resets in %{time}"
-    zh-CN: "%{time}后重置"
-  resets_soon:
-    en: "resetting soon"
-    zh-CN: "即将重置"
-  rings:
-    en: "%{hint} · outer %{outer}, inner %{inner}"
-    zh-CN: "%{hint} · 外环 %{outer}，内环 %{inner}"
-  title:
-    en: "Account Quota"
-    zh-CN: "账户额度"
-  window_reset:
-    en: "%{window} %{used}% (%{reset})"
-    zh-CN: "%{window} %{used}%（%{reset}）"
 settings:
   custom_agents:
     en: "Custom Agents"

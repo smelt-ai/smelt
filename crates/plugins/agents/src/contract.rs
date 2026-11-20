@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 use smelt_plugin_api::model::agent_host::AgentHostSettings;
-use smelt_plugin_api::model::quota_service::{QuotaStatus, QuotaTarget};
 use smelt_plugin_api::{Command, Event, RuntimeKey};
 
 /// 智能体页。打开时的参数都可以不给：
@@ -68,39 +67,6 @@ pub(crate) struct AgentSettingsEdit {
     pub(crate) machine: RuntimeKey,
     pub(crate) before: AgentHostSettings,
     pub(crate) after: AgentHostSettings,
-}
-
-/// 账户额度那一条：每家一枚额度环，点开看全部，点哪家刷新哪家。不带参数，摆在哪归布局。
-pub(crate) const QUOTA_VIEW: &str = "smelt.agents/quota";
-
-/// 本机运行时上各账户的额度。之后的变化订 [`QUOTA_CHANGED`]。
-pub(crate) const QUOTA: Command<(), Quota> = Command::new("smelt.agents/quota");
-
-/// 额度、查询范围或「查询中」变了，带整份。
-pub(crate) const QUOTA_CHANGED: Event<Quota> = Event::new("smelt.agents/quota-changed");
-
-/// 用户点了某家的额度：单查这一家（只有这时运行时才可能弹钥匙串窗口）。不等查完就返回，
-/// 结果经 [`QUOTA_CHANGED`] 来。
-pub(crate) const REFRESH_QUOTA: Command<RefreshQuota, ()> =
-    Command::new("smelt.agents/refresh-quota");
-
-/// 额度现状。账户 id 是 [`QuotaTarget::id`] 那串（`codex`、`pi:openrouter`）。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub(crate) struct Quota {
-    /// 开着查询的账户，也是展示顺序。
-    pub(crate) targets: Vec<QuotaTarget>,
-    /// 查到过的结果，按 `targets` 的顺序；还没查到的账户不在里面。
-    pub(crate) statuses: Vec<(QuotaTarget, QuotaStatus)>,
-    /// 正在查的账户。
-    pub(crate) refreshing: Vec<QuotaTarget>,
-    /// 其中是用户点了才查的（后台定时查的不在这里），界面据此给即时反馈。
-    pub(crate) manual: Vec<QuotaTarget>,
-}
-
-/// [`REFRESH_QUOTA`] 的参数。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct RefreshQuota {
-    pub(crate) target: QuotaTarget,
 }
 
 // ---- 插槽 ----

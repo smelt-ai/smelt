@@ -36,7 +36,7 @@
                     "items": [
                       { "view": "smelt.launcher/settings", "fit": true },
                       { "view": "smelt.archive/button", "fit": true },
-                      { "view": "smelt.agents/quota" }
+                      { "view": "smelt.quota/bar" }
                     ]
                   },
                   "fit": true

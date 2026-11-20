@@ -112,7 +112,7 @@ mod tests {
                     "smelt.session-list/main",
                     "smelt.launcher/settings",
                     "smelt.archive/button",
-                    "smelt.agents/quota"
+                    "smelt.quota/bar"
                 ]
             );
             // 上下排：列表吃剩下的高度，入口和底下那条按内容定高。底下那条里设置、归档按钮

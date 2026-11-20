@@ -47,8 +47,6 @@ mod cards;
 mod contract;
 mod editor;
 mod model;
-mod quota;
-mod quota_view;
 mod settings_page;
 mod view;
 
@@ -97,13 +95,11 @@ pub fn register(cx: &mut App) {
                 }),
             },
             settings_page::view_spec(),
-            quota_view::view_spec(),
         ],
         cx,
     )
     .expect("智能体的视图表写错了");
     agent_hosts::install(cx);
-    quota::install(cx);
     automations::install(cx);
     cx.set_global(TitledDefault::default());
     register_commands(new_conversation_title(None), cx);
@@ -139,7 +135,6 @@ fn register_commands(new_conversation_title: api::Text, cx: &mut App) {
         handler: Rc::new(|_, _, cx| new_conversation(cx)),
     }];
     commands.extend(agent_hosts::commands());
-    commands.extend(quota::commands());
     api::register_commands(OWNER, api::text!("title"), commands, cx).expect("智能体的命令登记不上");
 }
 

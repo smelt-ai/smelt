@@ -22,12 +22,11 @@ use api::model::control_api::{
 use api::model::font_config;
 use api::model::launch_settings::launch_entry_is_builtin;
 use api::model::new_session::LaunchEntry;
-use api::model::quota_service::QuotaProviderSetting;
 use api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use api::ui::truncated_line::truncated_line;
 use api::ui::{
-    Button, IconAction as _, IconName, SettingsPage, SettingsRow, SettingsSection, Switch,
-    TextArea, TextInput, ui_theme,
+    Button, IconAction as _, IconName, SettingsPage, SettingsRow, SettingsSection, TextArea,
+    TextInput, ui_theme,
 };
 use api::{HostEvent, PluginView, RuntimeKey, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
 use gpui::prelude::*;
@@ -41,7 +40,6 @@ use smelt_plugin_api::ui::field::{InputEvent, InputState, TextareaState};
 use crate::agent_hosts;
 use crate::contract;
 use crate::model::save_on_input_event;
-use crate::quota;
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 装 CLI 要等包管理器下载，比普通调用久得多。
@@ -122,8 +120,6 @@ struct AgentSettingsPage {
     profiles: Rc<Vec<ProfileRow>>,
     /// 本机配置的状态：收到了是 `Ok`；给不了是 `Err(原因)`；还没收到是 `Err(None)`。
     profiles_state: Result<(), Option<String>>,
-    /// 各账户最近一次额度查询状态（刷新中、报错），供设置页每行显示刷新按钮与结果。
-    quota: contract::Quota,
     _profile_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
@@ -227,19 +223,13 @@ impl AgentSettingsPage {
                     HostEvent::ShownViewsChanged => this.sync_shown(window, cx),
                     // 输入框的占位文字存在输入框里，换语言时重设。
                     HostEvent::LocaleChanged => this.relabel_inputs(window, cx),
-                    _ => {
-                        if let Some(quota) = contract::QUOTA_CHANGED.parse(event) {
-                            this.quota = quota;
-                            cx.notify();
-                        }
-                    }
+                    _ => {}
                 },
             ),
             cx.observe_global_in::<agent_hosts::AgentHosts>(window, |this, window, cx| {
                 this.sync_profile_rows(window, cx);
                 cx.notify();
             }),
-            cx.observe_global::<quota::QuotaSettings>(|_, cx| cx.notify()),
         ];
         let mut page = Self {
             shown: false,
@@ -248,7 +238,6 @@ impl AgentSettingsPage {
             launch: Launch::default(),
             profiles: Rc::new(Vec::new()),
             profiles_state: Err(None),
-            quota: quota::snapshot(cx),
             _profile_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
@@ -279,7 +268,6 @@ impl AgentSettingsPage {
         }
         self.refresh_hooks(cx);
         self.load_launch(window, cx);
-        quota::refresh_settings(cx);
         if self.cli.diagnostics.is_none() {
             self.refresh_cli(cx);
         }
@@ -786,7 +774,6 @@ impl Render for AgentSettingsPage {
                     .description(t!("launch.section_description"))
                     .children(self.launch_cells(entity)),
             )
-            .child(quota_section(&self.quota, cx))
     }
 }
 
@@ -1280,80 +1267,6 @@ fn profile_cell(inputs: &ProfileRow) -> AnyElement {
         )
     })
     .into_any_element()
-}
-
-/// 每家账户一行：查询开关、主动刷新按钮，钥匙串被拒时再带一个重试。开关在页面露出来时
-/// 和每轮刷新后读好，这里只读那份。
-fn quota_section(quota: &contract::Quota, cx: &App) -> SettingsSection {
-    let settings = cx.global::<quota::QuotaSettings>().clone();
-    SettingsSection::new()
-        .title(t!("quota.title"))
-        .children(settings.error.map(|error| {
-            SettingsRow::new(t!("quota.read_failed")).child(
-                div()
-                    .max_w(px(320.))
-                    .overflow_hidden()
-                    .type_style(TYPE.text_xsmall)
-                    .text_color(rgb(ui_theme::muted()))
-                    .child(truncated_line(error)),
-            )
-        }))
-        .children(
-            settings
-                .providers
-                .into_iter()
-                .map(|provider| quota_row(provider, quota)),
-        )
-}
-
-fn quota_row(provider: QuotaProviderSetting, quota: &contract::Quota) -> SettingsRow {
-    let target = provider.target;
-    let denied = provider.enabled && provider.keychain_denied;
-    let refreshing = quota.refreshing.contains(&target);
-    let status = quota
-        .statuses
-        .iter()
-        .find(|(candidate, _)| *candidate == target)
-        .map(|(_, status)| status);
-    let error = status
-        .filter(|status| status.quota.is_none())
-        .and_then(|status| status.error.as_deref());
-    let id = target.id();
-    let row = SettingsRow::new(target.display_name());
-    let row = if denied {
-        row.description(t!("quota.keychain_denied")).child(
-            Button::new(SharedString::from(format!("quota-retry-{id}")))
-                .quiet()
-                .small()
-                .loading(refreshing)
-                .label(t!("common.retry"))
-                .on_click(move |_, _, cx| quota::request_refresh(target, cx)),
-        )
-    } else if provider.enabled {
-        let row = if let Some(error) = error {
-            row.description(error.to_string())
-                .clamp_description(SharedString::from(format!("quota-error-{id}")), 2)
-        } else {
-            row
-        };
-        row.child(
-            Button::new(SharedString::from(format!("quota-refresh-{id}")))
-                .quiet()
-                .small()
-                .icon(IconName::Refresh)
-                .loading(refreshing)
-                .icon_action(t!("quota.refresh_one", name = target.display_name()))
-                .on_click(move |_, _, cx| quota::request_refresh(target, cx)),
-        )
-    } else {
-        row
-    };
-    row.child(
-        Switch::new(SharedString::from(format!("quota-enabled-{id}")))
-            .checked(provider.enabled)
-            .accessibility_label(t!("quota.enable_label", name = target.display_name()))
-            .on_change(move |checked, _, cx| quota::set_enabled(target, checked, cx)),
-    )
 }
 
 // —— 小工具 ——
