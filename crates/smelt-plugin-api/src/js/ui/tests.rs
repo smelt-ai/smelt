@@ -154,6 +154,34 @@ fn components_hold_only_smelt_controls() {
                 .iter()
                 .all(|method| method.documentation().is_some())
     }));
+    // gpui-shell 给所有元素共用一个原型，上面这几个名字是插槽，脚本那层先把参数换成元素 id：
+    // 登记同名的方法收不到别的参数（SmeltMenuItem.image 收路径就这样坏过）。
+    const SHARED_SLOTS: [&str; 10] = [
+        "content",
+        "trigger",
+        "input",
+        "decrement_button",
+        "increment_button",
+        "image",
+        "fallback",
+        "header",
+        "footer",
+        "panel",
+    ];
+    for descriptor in components.descriptors() {
+        for method in descriptor.methods() {
+            assert!(
+                !SHARED_SLOTS.contains(&method.name())
+                    || method
+                        .arguments()
+                        .iter()
+                        .all(|argument| matches!(argument.schema(), ArgumentSchema::Element)),
+                "{}.{} 和共用插槽同名，却不收元素",
+                descriptor.name(),
+                method.name()
+            );
+        }
+    }
     let input = components
         .descriptors()
         .find(|descriptor| descriptor.name() == "SmeltTextInput")
@@ -419,6 +447,27 @@ export default class App extends View {
     draw(&mut context);
     let after = tree(&mut context, &view);
     assert!(after.contains("picked: here"), "{after}");
+}
+
+/// 菜单项的彩色图标收资源路径（如 context_menu_items() 给的 host-images/…）。
+#[gpui::test]
+fn menu_item_takes_a_picture_path(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltContextMenu, SmeltMenuItem } from "smelt-ui";
+export default class App extends View {
+  render() {
+    return div().size_full()
+      .child(SmeltContextMenu.new("menu").w(200).h(40)
+        .items([SmeltMenuItem.new("Zed").picture("host-images/1").on_click((_e, _cx) => {})])
+        .child("target"));
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    let snapshot = tree(&mut context, &view);
+    assert!(snapshot.contains("target"), "{snapshot}");
 }
 
 /// 同一层里同名的项（两台机器上同名的项目）各点各的：按名字和先后找回调。

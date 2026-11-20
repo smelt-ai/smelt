@@ -49,7 +49,7 @@ export function menus(ctx) {
   function plugin_item(entry, target) {
     let item = SmeltMenuItem.new(entry.label);
     if (entry.icon != null) item = item.icon(entry.icon);
-    if (entry.image != null) item = item.image(entry.image);
+    if (entry.image != null) item = item.picture(entry.image);
     if ("submenu" in entry) return item.items(entry.submenu.map((inner) => plugin_item(inner, target)));
     const { command, args } = entry;
     return item.on_click(() => {

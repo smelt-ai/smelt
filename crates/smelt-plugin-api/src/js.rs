@@ -436,7 +436,7 @@ export function command(id: string): CommandInfo | null;
 /** 画右键菜单时取的一项：args 已经并上 context，点了直接 run(command, args)。 */
 export type ContextMenuEntry = {
   label: string;
-  /** 彩色图标的资源路径，和 asset() 给的一样用：SmeltMenuItem.image(path)、image(path)。 */
+  /** 彩色图标的资源路径，和 asset() 给的一样用：SmeltMenuItem.picture(path)、image(path)。 */
   image: string | null;
   icon: string | null;
 } & ({ command: string; args: Record<string, unknown> } | { submenu: ContextMenuEntry[] });

@@ -381,9 +381,11 @@ fn item_methods() -> Vec<MethodDescriptor> {
         .with_documentation(
             "A status color of the line icon itself (such as a connection light), instead of the text color: \"#rgb\" or \"#rrggbb\", such as a theme() color.",
         ),
+        // 不叫 image：gpui-shell 所有元素共用的原型上 image 是头像的插槽，脚本那层先把参数换成
+        // 元素 id，传进来的路径就丢了。
         string_method(
             ITEM,
-            "image",
+            "picture",
             "A full-color icon (such as an app's own icon) drawn instead of the line icon: an asset() path, \
              or the image path a context_menu_items() entry carries.",
             ItemOp::Image,
