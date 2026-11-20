@@ -9,14 +9,15 @@
 //! - `SmeltArrival.new(key, serial)`：新的一行撑开落进来。`serial` 头一回见或变了就播一次。
 //! - `SmeltWash.new(key, serial)`：铺一层底色淡入、停一下、退掉，让眼睛找到这一行。放在行里
 //!   第一个子元素，压在图标和字下面。减弱动态效果时照播（不动位置）。
-//! - `SmeltGlowIcon.new(path, key, serial)`：运行色的图标，刚开始跑时亮一下再回到运行色。
-//!   用户看不见（应用、窗口在后台）或减弱动态效果时不播，叫停的那一次不再接着播。
+//! - `SmeltGlowIcon.new(path, color, key, serial)`：`color` 色的图标，`serial` 头一回见或变了
+//!   就亮一下再回到 `color`。用户看不见（应用、窗口在后台）或减弱动态效果时不播，叫停的
+//!   那一次不再接着播。
 //! - `SmeltSpinner.new(id, color)`：小号的转圈，真在等的地方放，等完就拿掉。减弱动态效果时停
 //!   在静态图标。样式落在包着它的那层上，转圈自己的大小不变。
 //!
 //! 样式：`SmeltFold`、`SmeltFlip`、`SmeltArrival` 落在包着子元素的那层上，`SmeltWash` 落在底色
 //! 那层上（默认铺满、行的圆角、正文色），`SmeltFoldChevron`、`SmeltGlowIcon` 落在图标上
-//! （尺寸；颜色由动画定的不收）。
+//! （尺寸；颜色在构造时给，样式里的不算）。
 
 use std::sync::Arc;
 
@@ -31,9 +32,8 @@ use gpui_shell::{
 };
 use smelt_ui::IconName;
 use smelt_ui::motion::{
-    ARRIVAL_OPEN, RUNNING_GLOW, WASH_END, ambient_application_active, ambient_motion_enabled,
-    arrival_open, disclosure_open, disclosure_settled_closed, flip_slot, fold_body, replay_elapsed,
-    wash_alpha,
+    ARRIVAL_OPEN, GLOW, WASH_END, ambient_application_active, ambient_motion_enabled, arrival_open,
+    disclosure_open, disclosure_settled_closed, flip_slot, fold_body, replay_elapsed, wash_alpha,
 };
 use smelt_ui::ui_theme;
 
@@ -287,6 +287,7 @@ impl ComponentMaterializer for WashMaterializer {
 #[derive(Clone)]
 struct GlowIcon {
     path: String,
+    color: u32,
     replay: Replay,
 }
 
@@ -294,7 +295,11 @@ struct GlowIconMaterializer;
 
 impl ComponentMaterializer for GlowIconMaterializer {
     fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<AnyElement> {
-        let GlowIcon { path, replay } = request
+        let GlowIcon {
+            path,
+            color,
+            replay,
+        } = request
             .payload()
             .downcast_ref::<GlowIcon>()
             .cloned()
@@ -318,11 +323,11 @@ impl ComponentMaterializer for GlowIconMaterializer {
                 cx,
             );
             Ok(match elapsed {
-                Some(elapsed) if elapsed < RUNNING_GLOW => {
+                Some(elapsed) if elapsed < GLOW => {
                     window.request_animation_frame();
-                    ui_theme::running_glow_color(elapsed.as_secs_f32() / RUNNING_GLOW.as_secs_f32())
+                    ui_theme::glow_color(color, elapsed.as_secs_f32() / GLOW.as_secs_f32())
                 }
-                _ => rgb(ui_theme::run()),
+                _ => rgb(color),
             })
         })?;
         let mut icon = svg().path(path);
@@ -481,20 +486,25 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                 "SmeltGlowIcon",
                 vec![
                     ArgumentDescriptor::new("path", ArgumentSchema::String),
+                    ArgumentDescriptor::new("color", ArgumentSchema::String),
                     ArgumentDescriptor::new("key", ArgumentSchema::String),
                     ArgumentDescriptor::new("serial", ArgumentSchema::Number),
                 ],
                 |args| match args {
                     [
                         ComponentArgument::String(path),
+                        ComponentArgument::String(color),
                         ComponentArgument::String(key),
                         ComponentArgument::Number(number),
                     ] if !path.is_empty() && !key.is_empty() => {
+                        let color = crate::parse_hex_color(color)
+                            .map_err(|error| format!("SmeltGlowIcon color: {error}"))?;
                         let serial = serial(*number).ok_or_else(|| {
                             "SmeltGlowIcon serial must be a non-negative integer".to_string()
                         })?;
                         Ok(ComponentPayload::new(GlowIcon {
                             path: path.clone(),
+                            color,
                             replay: Replay {
                                 key: key.clone(),
                                 serial,
@@ -502,13 +512,13 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                         }))
                     }
                     _ => Err(
-                        "SmeltGlowIcon.new(path, key, serial) expects two non-empty strings and a number"
+                        "SmeltGlowIcon.new(path, color, key, serial) expects a non-empty path, a color, a non-empty key and a number"
                             .into(),
                     ),
                 },
             )])
             .with_documentation(
-                "An icon in the running color that brightens once and settles back whenever `serial` is first seen or changes; not played while the user cannot see it or under reduced motion. Styles apply to the icon; its color is the animation's.",
+                "An icon in `color` (\"#rgb\" or \"#rrggbb\", such as a theme() color) that brightens once and settles back to it whenever `serial` is first seen or changes; not played while the user cannot see it or under reduced motion. Styles apply to the icon (size); its color comes from `color`.",
             ),
     )?;
     Ok(())

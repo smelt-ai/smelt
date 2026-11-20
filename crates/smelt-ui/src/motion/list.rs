@@ -1,6 +1,6 @@
 //! 列表的动画零件：一组的开合（[`disclosure_open`] + [`fold_body`]）、新的一行撑开落进来
-//! （[`arrival_open`]）、铺一层底色闪一下让眼睛找到它（[`wash_alpha`]）、刚开始跑的图标亮一下
-//! （[`RUNNING_GLOW`]，颜色见 `ui_theme::running_glow_color`）。重排滑到新位置见
+//! （[`arrival_open`]）、铺一层底色闪一下让眼睛找到它（[`wash_alpha`]）、图标亮一下
+//! （[`GLOW`]，颜色见 `ui_theme::glow_color`）。重排滑到新位置见
 //! [`super::flip_slot`]。
 //!
 //! 进度都在 render 里按时间取（弹簧、[`replay_elapsed`] 的起点挂在元素状态上），没播完就要下一
@@ -162,8 +162,8 @@ pub const WASH_HOLD: Duration = Duration::from_millis(360);
 pub const WASH_END: Duration = Duration::from_millis(1100);
 /// 铺底最浓时的不透明度（铺正文色，深浅主题都看得见，又压不住字）。
 pub const WASH_PEAK: f32 = 0.1;
-/// 刚开始跑的图标亮一下要多久：亮起、再回到运行色。
-pub const RUNNING_GLOW: Duration = Duration::from_secs(2);
+/// 图标亮一下要多久：亮起、再回到原来的颜色。
+pub const GLOW: Duration = Duration::from_secs(2);
 
 /// 撑开的进度：前段快、收尾慢，跟浮层入场同一条曲线。
 pub fn arrival_open(elapsed: Duration) -> f32 {

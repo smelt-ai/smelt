@@ -1,16 +1,17 @@
 //! 设置页的骨架（[`smelt_ui::settings`]），宿主和插件的设置页都用它，各页长得一样：
 //!
 //! - `SmeltSettingsPage.new(id)`：竖着滚的一列分组，页名在设置的工具栏里，这里不画页头。
+//!   样式落在那一列上（限宽、内边距、组间距）。
 //! - `SmeltSettingsSection.new()`：分组，`title` / `description` 在卡片上面，子项之间自动画
-//!   分隔线。
+//!   分隔线。样式落在整组的外框上。
 //! - `SmeltSettingsRow.new(名字)`：一行设置，左边名字和说明，右边控件（子元素）。说明可能很长
-//!   （报错原文）时 `clamp_description(id, 行数)` 收成几行，悬停看全文。
+//!   （报错原文）时 `clamp_description(id, 行数)` 收成几行，悬停看全文。样式落在整行的外框上。
 //!
-//! 外观归骨架，不收样式。
+//! 不给样式就是各页共用的默认样子。
 
 use std::sync::Arc;
 
-use gpui::{IntoElement as _, ParentElement as _, SharedString, StyleRefinement};
+use gpui::{IntoElement as _, ParentElement as _, SharedString, Styled as _};
 use gpui_shell::{
     ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentDescriptor,
     ComponentMaterializer, ComponentPayload, ComponentRegistry, ConstructorDescriptor,
@@ -40,20 +41,12 @@ enum RowOp {
 #[derive(Clone)]
 struct RowTitle(String);
 
-fn no_style(owner: &str, request: &mut MaterializeRequest<'_>) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        request.take_style() == StyleRefinement::default(),
-        "{owner} draws its own layout and takes no styles"
-    );
-    Ok(())
-}
-
 struct PageMaterializer;
 
 impl ComponentMaterializer for PageMaterializer {
     fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
-        no_style(PAGE, &mut request)?;
-        let page = SettingsPage::new(control_id(PAGE, &request)?);
+        let mut page = SettingsPage::new(control_id(PAGE, &request)?);
+        *page.style() = request.take_style();
         Ok(page.children(request.take_children()?).into_any_element())
     }
 }
@@ -62,8 +55,8 @@ struct SectionMaterializer;
 
 impl ComponentMaterializer for SectionMaterializer {
     fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
-        no_style(SECTION, &mut request)?;
         let mut section = SettingsSection::new();
+        *section.style() = request.take_style();
         for op in ops::<SectionOp>(&request) {
             section = match op {
                 SectionOp::Title(text) => section.title(text.clone()),
@@ -80,7 +73,6 @@ struct RowMaterializer;
 
 impl ComponentMaterializer for RowMaterializer {
     fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
-        no_style(ROW, &mut request)?;
         let title = request
             .payload()
             .downcast_ref::<RowTitle>()
@@ -88,6 +80,7 @@ impl ComponentMaterializer for RowMaterializer {
             .0
             .clone();
         let mut row = SettingsRow::new(title);
+        *row.style() = request.take_style();
         for op in ops::<RowOp>(&request) {
             row = match op {
                 RowOp::Description(text) => row.description(text.clone()),
@@ -106,7 +99,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
         ComponentDescriptor::new(PAGE, Arc::new(PageMaterializer))
             .with_constructors(vec![id_constructor(PAGE)])
             .with_documentation(
-                "A settings page: a scrolling column of SmeltSettingsSection children, at the shared page width.",
+                "A settings page: a scrolling column of SmeltSettingsSection children, at the shared page width; styles apply to the column (width, padding, gap).",
             ),
     )?;
     registry.register(
@@ -131,7 +124,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                 ),
             ])
             .with_documentation(
-                "A settings group: a bordered card whose children are separated by hairlines.",
+                "A settings group: a bordered card whose children are separated by hairlines; styles apply to the group's frame.",
             ),
     )?;
     registry.register(
@@ -184,7 +177,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                 ),
             ])
             .with_documentation(
-                "One setting: name and description on the left, its control (the children) on the right.",
+                "One setting: name and description on the left, its control (the children) on the right; styles apply to the row.",
             ),
     )?;
     Ok(())

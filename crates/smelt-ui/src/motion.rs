@@ -8,7 +8,7 @@
 mod list;
 
 pub use list::{
-    ARRIVAL_OPEN, FoldBody, RUNNING_GLOW, WASH_END, WASH_HOLD, WASH_PEAK, WASH_RISE, arrival_open,
+    ARRIVAL_OPEN, FoldBody, GLOW, WASH_END, WASH_HOLD, WASH_PEAK, WASH_RISE, arrival_open,
     disclosure_open, disclosure_settled_closed, fold_body, replay_elapsed, wash_alpha,
 };
 

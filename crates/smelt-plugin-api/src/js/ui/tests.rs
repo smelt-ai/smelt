@@ -667,10 +667,10 @@ export default class App extends View {
         .on_open_change((open, cx) => { this.changes += `${open};`; this.open = open; cx.notify(); })
         .trigger(SmeltButton.new("trigger").label("Open").w(80).h(24))
         .content(div().child("inside the card")))
-      .child(SmeltSettingsPage.new("settings")
-        .child(SmeltSettingsSection.new().title("General").description("About the list")
+      .child(SmeltSettingsPage.new("settings").px(32)
+        .child(SmeltSettingsSection.new().title("General").description("About the list").mt(4)
           .child(SmeltSettingsRow.new("Avatar").description("What the row shows").note("Since 2026")
-            .child(SmeltButton.new("x").label("X")))))
+            .py(4).child(SmeltButton.new("x").label("X")))))
       .child(div().absolute().top(400).child(`changes: ${this.changes}`));
   }
 }
@@ -1272,7 +1272,7 @@ export default class App extends View {
 /// 重排后各项先画在原处再滑到新位置，点击跟着画的地方走；新落进来的一行从零高撑开。
 #[gpui::test]
 fn flips_slide_and_arrivals_open(cx: &mut TestAppContext) {
-    let source = r#"
+    let source = r##"
 import { View, div } from "gpui-kit";
 import { SmeltButton, SmeltFlip, SmeltArrival, SmeltWash, SmeltGlowIcon } from "smelt-ui";
 export default class App extends View {
@@ -1287,7 +1287,7 @@ export default class App extends View {
       });
     const row = (id) => {
       const item = div().relative().child(SmeltWash.new(id, 1)).child(button(id))
-        .child(SmeltGlowIcon.new("icons/terminal.svg", id, 1).size(14));
+        .child(SmeltGlowIcon.new("icons/terminal.svg", "#3b82f6", id, 1).size(14));
       const placed = this.arrived === id ? SmeltArrival.new(id, 1).child(item) : item;
       return SmeltFlip.new(id, this.generation).child(placed);
     };
@@ -1299,7 +1299,7 @@ export default class App extends View {
       .child(div().child(`hit: ${this.hit}`));
   }
 }
-"#;
+"##;
     let (mut context, view, _app) = mount(cx, source);
     context.update(|_, cx| cx.set_reduce_motion(false));
     draw(&mut context);

@@ -881,7 +881,7 @@ function session_icon(ctx, id, row, selected) {
   const glow = row.status === "running" ? ctx.motion.glow_serial(flip_key) : null;
   const glyph =
     glow != null
-      ? SmeltGlowIcon.new(path, flip_key, glow).size(LEAD)
+      ? SmeltGlowIcon.new(path, p.run, flip_key, glow).size(LEAD)
       : svg(path)
           .size(LEAD)
           .text_color(row.status === "idle" ? row_muted(p, selected) : dot_color(p, row.status));

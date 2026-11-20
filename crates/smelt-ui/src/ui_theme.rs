@@ -851,27 +851,26 @@ pub fn session_dot_color(status: AgentStatus) -> Rgba {
     agent_status_color(status)
 }
 
-const RUNNING_GLOW_DARK_LIGHTNESS_GAIN: f32 = 0.08;
-const RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN: f32 = 0.05;
+const GLOW_DARK_LIGHTNESS_GAIN: f32 = 0.08;
+const GLOW_LIGHT_LIGHTNESS_GAIN: f32 = 0.05;
 
-/// 运行中 agent 图标进入状态时的一次性提亮色。
+/// 图标亮一下时的颜色：从 `base` 提亮再回到 `base`。
 ///
-/// 桌面侧栏会话行用 `session_dot_color` 给 agent 图标上色：Running 是静态蓝。进入
-/// 状态时的短暂提亮只改变 HSL 亮度，不按比例放大 RGB，避免蓝通道先饱和后把图标
-/// 推成青色。主题判断也收在这里，调用方不再传容易反转的 light/dark 布尔值。
+/// 只抬 HSL 亮度，不按比例放大 RGB，避免某个通道先饱和把颜色推偏（蓝推成青）。主题判断
+/// 也收在这里，调用方不传容易反转的 light/dark 布尔值。
 ///
-/// `phase` 是 0.0..=1.0 的过渡进度；起点和终点都是基准蓝，中点最亮。浅色底的
-/// 增幅更小，避免在近白背景上失去对比度。终点回到静态蓝后不再预约动画帧。
-pub fn running_glow_color(phase: f32) -> Rgba {
+/// `phase` 是 0.0..=1.0 的过渡进度；起点和终点都是 `base`，中点最亮。浅色底的增幅更小，
+/// 避免在近白背景上失去对比度。
+pub fn glow_color(base: u32, phase: f32) -> Rgba {
     let lightness_gain = if is_light() {
-        RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN
+        GLOW_LIGHT_LIGHTNESS_GAIN
     } else {
-        RUNNING_GLOW_DARK_LIGHTNESS_GAIN
+        GLOW_DARK_LIGHTNESS_GAIN
     };
-    running_glow_color_for(run(), phase, lightness_gain)
+    glow_color_for(base, phase, lightness_gain)
 }
 
-fn running_glow_color_for(base: u32, phase: f32, lightness_gain: f32) -> Rgba {
+fn glow_color_for(base: u32, phase: f32, lightness_gain: f32) -> Rgba {
     // 半个正弦周期保证起点/终点都回到基准色，不给稳态留下动画依赖。
     let wave = (phase.clamp(0.0, 1.0) * std::f32::consts::PI)
         .sin()
@@ -1269,30 +1268,26 @@ mod tests {
     }
 
     #[test]
-    fn running_glow_preserves_hue_and_limits_the_light_theme_peak() {
+    fn glow_preserves_hue_and_limits_the_light_theme_peak() {
         let blue = 0x3b82f6;
         let dark_base: gpui::Hsla = rgb(blue).into();
-        let dark_start: gpui::Hsla =
-            running_glow_color_for(blue, 0.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
-        let dark_peak: gpui::Hsla =
-            running_glow_color_for(blue, 0.5, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
-        let dark_end: gpui::Hsla =
-            running_glow_color_for(blue, 1.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
+        let dark_start: gpui::Hsla = glow_color_for(blue, 0.0, GLOW_DARK_LIGHTNESS_GAIN).into();
+        let dark_peak: gpui::Hsla = glow_color_for(blue, 0.5, GLOW_DARK_LIGHTNESS_GAIN).into();
+        let dark_end: gpui::Hsla = glow_color_for(blue, 1.0, GLOW_DARK_LIGHTNESS_GAIN).into();
         let light_base: gpui::Hsla = rgb(blue).into();
-        let light_peak: gpui::Hsla =
-            running_glow_color_for(blue, 0.5, RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN).into();
+        let light_peak: gpui::Hsla = glow_color_for(blue, 0.5, GLOW_LIGHT_LIGHTNESS_GAIN).into();
 
         let dark_hue_shift = (dark_peak.h - dark_base.h).abs();
         let light_hue_shift = (light_peak.h - light_base.h).abs();
         let dark_lightness_gain = dark_peak.l - dark_base.l;
         let light_lightness_gain = light_peak.l - light_base.l;
-        assert_eq!(dark_start, dark_base, "进入动画必须从静态运行色开始");
-        assert_eq!(dark_end, dark_base, "进入动画必须回到静态运行色结束");
+        assert_eq!(dark_start, dark_base, "亮一下必须从底色开始");
+        assert_eq!(dark_end, dark_base, "亮一下必须回到底色结束");
         assert!(
             dark_hue_shift < 0.001
                 && light_hue_shift < 0.001
                 && dark_lightness_gain > light_lightness_gain,
-            "状态提亮必须保持蓝色色相，且浅色主题更克制：dark hue={dark_hue_shift}, light hue={light_hue_shift}, dark gain={dark_lightness_gain}, light gain={light_lightness_gain}",
+            "提亮必须保持色相，且浅色主题更克制：dark hue={dark_hue_shift}, light hue={light_hue_shift}, dark gain={dark_lightness_gain}, light gain={light_lightness_gain}",
         );
     }
 
