@@ -30,6 +30,7 @@ jobs:
       android: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.android == 'true' }}
       pi-agent: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.pi-agent == 'true' }}
       plugins: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.plugins == 'true' }}
+      plugin-check: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.plugin-check == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -88,6 +89,13 @@ jobs:
               - *workflow
               - 'scripts/fetch-bun.sh'
               - 'plugins/**'
+            # plugin-check：插件和宿主（插件运行时、宿主模块、组件库）哪边改了都可能让插件挂不上。
+            plugin-check:
+              - *workflow
+              - *toolchain
+              - 'crates/**'
+              - 'assets/**'
+              - 'plugins/**'
 
   # RustSec advisories 加依赖许可证白名单（见 deny.toml）；bans / sources 不跑。
   # ubuntu 上跑：不编代码，只要 cargo metadata + advisory-db，通常几十秒内结束。
@@ -125,9 +133,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # GPUI 等 git 依赖编译很慢，缓存 cargo registry 与 target。只在 main 上写，见文件头。
+      # plugin-check 读同一份（shared-key 两边要一致），它自己不写。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: mac-dev
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # 这里不跑 cargo fmt --check：仓库从来没有 rustfmt 干净过（main 上百余处
@@ -360,6 +370,43 @@ jobs:
       - name: Test
         run: bun test ./plugins
 
+  # 用桌面程序的 `smelt plugin check` 把 plugins/ 下每个插件真加载一次、每个视图画一帧（窗口不显示），
+  # 查得出单测碰不到的：导入解析、宿主模块的接口、组件参数、init 和第一次 render 里抛的错。
+  # check 会重写插件目录里的 gpui-kit.d.ts，之后 git diff 不干净就是声明文件没跟上宿主。
+  # 要 GPUI，只能在 macOS 上编；依赖缓存读 rust job 存的那份。
+  plugin-check:
+    needs: changes
+    if: needs.changes.outputs.plugin-check == 'true'
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mac-dev
+          save-if: false
+
+      - name: Build smelt
+        run: cargo build --locked -p smelt --bin smelt
+
+      - name: Check plugins
+        run: |
+          status=0
+          for dir in plugins/*/; do
+            echo "::group::$dir"
+            target/debug/smelt plugin check "$dir" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: gpui-kit.d.ts up to date
+        run: git diff --exit-code -- plugins
+
   # 在发版出包的几个平台上把 smelt-agent 编出来跑一遍冒烟。Windows 嵌入文件的路径、可执行文件
   # 后缀都和 macOS / Linux 不一样；Linux x64 用的是 baseline 版的 Bun。开发机是 macOS，这些都测不到，
   # 不在这里跑就只能等发版时才暴露。
@@ -383,7 +430,7 @@ jobs:
   # 取消，以及排不到机器被放弃的 abandoned）。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
   ci-ok:
     if: always()
-    needs: [changes, cargo-deny, rust, mobile, android-build, ios-check, windows, pi-agent, plugins, smelt-agent]
+    needs: [changes, cargo-deny, rust, mobile, android-build, ios-check, windows, pi-agent, plugins, plugin-check, smelt-agent]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize
