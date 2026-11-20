@@ -2,7 +2,8 @@
 //!
 //! 插件目录里放 gpui-shell 的 manifest `gpui-shell.json` 和入口脚本，界面由 GPUI 原生
 //! 绘制，脚本跑在 UI 线程的 QuickJS 里。一个插件一份脚本实例：入口的默认导出是插件的根，
-//! 挂上但不显示，它在 `init` 里登记视图、命令等；视图按它交出的类在同一份实例里建，id 是
+//! 它在 `init` 里登记视图、命令等，画在零大小的一层里，只用来浮出不贴着哪个视图的对话框、
+//! 弹层（命令打开的）；视图按它交出的类在同一份实例里建，id 是
 //! `<插件 id>/<名字>`，由布局摆放（见 `smelt_plugin_api::js`、`smelt_plugin_api::view`、
 //! `workspace_layout`）。
 //!
@@ -92,9 +93,10 @@ struct PluginPanel {
     duplicate: bool,
     /// 加载失败的原因。
     error: Option<String>,
-    /// 挂上的插件根。不显示，拿着它插件的任务、事件队列才活着；放掉就是卸下。主题包、
-    /// 重复的、加载失败的没有。
-    _script: Option<Entity<ScriptView>>,
+    /// 挂上的插件根。拿着它插件的任务、事件队列才活着；放掉就是卸下。工作台把它画在一层
+    /// 零大小的容器里（见 [`roots`]）：不占地方，它画的对话框、弹层经窗口根的层浮出来。
+    /// 主题包、重复的、加载失败的没有。
+    script: Option<Entity<ScriptView>>,
 }
 
 /// 插件从哪来。
@@ -173,6 +175,8 @@ fn remount(changed: Option<&BTreeSet<PathBuf>>, window: &mut Window, cx: &mut Ap
 
     status::publish(&panels);
     REGISTRY.with(|registry| registry.borrow_mut().panels = panels);
+    // 插件根换了：工作台重画，画的是新的这批根。
+    window.refresh();
     // 首次挂载时订阅可能还没装；后续重载也只在批次末通知一次。
     api::emit(api::HostEvent::ThemesChanged, cx);
     if let Some(appearance) = cx.try_global::<crate::settings::Appearance>() {
@@ -212,7 +216,7 @@ fn mount_one(
             source,
             duplicate: true,
             error: Some(error.into_owned()),
-            _script: None,
+            script: None,
         };
     }
     if is_theme_only(&manifest) {
@@ -224,7 +228,7 @@ fn mount_one(
             source,
             duplicate: false,
             error: theme_error,
-            _script: None,
+            script: None,
         };
     }
     let runtime = runtime
@@ -254,12 +258,13 @@ fn mount_one(
         source,
         duplicate: false,
         error: theme_error.or_else(|| content.as_ref().err().cloned()),
-        _script: content.ok(),
+        script: content.ok(),
     }
 }
 
-/// 加载、挂上插件的根（入口的默认导出）：它的 `init` 就是插件启动，登记视图、命令等。根不
-/// 显示，插件的视图按它登记的类在同一份脚本里建（见 `smelt_plugin_api::js`）。
+/// 加载、挂上插件的根（入口的默认导出）：它的 `init` 就是插件启动，登记视图、命令等。根画在
+/// 零大小的一层里（见 [`roots`]），插件的视图按它登记的类在同一份脚本里建（见
+/// `smelt_plugin_api::js`）。
 fn mount_root(
     runtime: &Rc<ShellRuntime>,
     id: &str,
@@ -480,6 +485,18 @@ fn filesystem_roots() -> Vec<PathBuf> {
     {
         vec![PathBuf::from("/")]
     }
+}
+
+/// 挂上的各插件根，工作台每帧画进一层零大小的容器（插件的对话框、弹层要有个画它的地方，
+/// 命令打开的、不贴着哪个视图的也是）。只读内存。
+pub(crate) fn roots() -> Vec<Entity<ScriptView>> {
+    with_registry(|registry| {
+        registry
+            .panels
+            .iter()
+            .filter_map(|panel| panel.script.clone())
+            .collect()
+    })
 }
 
 fn with_registry<R>(read: impl FnOnce(&Registry) -> R) -> R {

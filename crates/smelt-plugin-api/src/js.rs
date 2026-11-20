@@ -570,8 +570,10 @@ export interface OpenedView {
  */
 export function opened_view(): OpenedView;
 /**
- * 重画本插件的视图：给了 instance 只重画那一份，不给重画还在的每一份。视图共用插件里的状态，状态变了由改的一方
- * 叫它（cx.notify() 只重画正在跑的那份视图：根里的任务、别的视图里的事件改了状态，要靠这个叫醒别的视图）。
+ * 重画本插件的视图：给了 instance 只重画那一份，不给重画还在的每一份，连同插件的根。视图共用插件里的状态，状态变了
+ * 由改的一方叫它（cx.notify() 只重画正在跑的那份视图：根里的任务、别的视图里的事件改了状态，要靠这个叫醒别的视图）。
+ * 插件的根（入口的默认导出）宿主画在零大小的一层里，不占地方：它的 render 只放不贴着哪个视图的浮层（命令打开的
+ * SmeltDialog），平时返回空的 div()。
  * 返回有没有重画到：那一份已经放掉了是 false，可以不再记它。
  */
 export function notify_view(instance?: number): boolean;
@@ -725,6 +727,9 @@ struct PluginState {
     built: u64,
     /// 建好的各份视图的脚本，按 `instance`，`notify_view` 重画它们。放掉的留到下次重画时清。
     live: Vec<(u64, WeakEntity<ScriptView>)>,
+    /// 插件的根（宿主画在零大小的一层里，见 [`JsPlugin::attach`]）：不带 instance 的 `notify_view` 也重画它，
+    /// 它画的对话框、弹层才跟着状态变。
+    root: Option<WeakEntity<ScriptView>>,
     /// 插件的文案表（`t()`、`text()`），第一次用时从插件目录读；读不出来的原因也留着，每次调都报。
     catalog: Option<Result<Rc<catalog::Catalog>, String>>,
     /// 插件目录里的资源（见 [`JsPlugin::with_assets`]）。
@@ -826,11 +831,17 @@ impl JsPlugin {
         let scripts: Vec<Entity<ScriptView>> = {
             let mut state = self.0.borrow_mut();
             state.live.retain(|(_, script)| script.upgrade().is_some());
+            let root = state
+                .root
+                .as_ref()
+                .filter(|_| instance.is_none())
+                .and_then(WeakEntity::upgrade);
             state
                 .live
                 .iter()
                 .filter(|(built, _)| instance.is_none_or(|instance| *built == instance))
                 .filter_map(|(_, script)| script.upgrade())
+                .chain(root)
                 .collect()
         };
         let found = !scripts.is_empty();
@@ -1617,6 +1628,7 @@ impl JsPlugin {
             }
         });
         let mut state = self.0.borrow_mut();
+        state.root = Some(view.downgrade());
         state._release = Some(release);
         state._events = Some(events);
     }

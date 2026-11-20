@@ -553,6 +553,14 @@ impl Render for Workspace {
             )
             // 调试 HUD 叠在内容上面；对话框和命令面板在窗口根的对话框层上。
             .child(self.render_overlay_layers(window, cx))
+            // 插件的根：不占地方，只给它画的对话框、弹层一个出处（见 `plugins::roots`）。
+            .child(
+                div()
+                    .absolute()
+                    .size_0()
+                    .overflow_hidden()
+                    .children(plugins::roots()),
+            )
     }
 }
 
