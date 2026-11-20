@@ -13,6 +13,8 @@
 //!
 //! 别的库发的 tracing 事件一律不碰。
 
+use std::sync::Mutex;
+
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt as _};
@@ -30,21 +32,42 @@ pub(crate) fn install() {
 }
 
 /// `smelt plugin check` 用：同样的事件写到 stderr，跑 check 的人当场看得见脚本的输出和错误。
+/// gpui-shell 自己报的错误另外记下（[`take_shell_errors`]），check 据此判不过。
 pub(super) fn install_stderr() {
-    let subscriber = tracing_subscriber::registry().with(AppLog::new(|scope, level, message| {
+    let mut layer = AppLog::new(|scope, level, message| {
         eprintln!("[{scope}] {level} {message}");
-    }));
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+    layer.keep_shell_errors = true;
+    let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer));
+}
+
+/// check 期间 gpui-shell 自己报的错误：组件建不出来（少了必填的插槽、参数不对）时界面上只画
+/// 一行「Failed to render …」，脚本那边接不到，不记下来 check 就照样算过。脚本自己的
+/// `console.error` 不在里面：离线时插件报连不上是正常的。
+static SHELL_ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// 取走记下的 gpui-shell 错误。
+pub(super) fn take_shell_errors() -> Vec<String> {
+    std::mem::take(
+        &mut *SHELL_ERRORS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
 }
 
 /// 把要的 tracing 事件交给 `write(来源, 级别, 正文)`。
 struct AppLog<W> {
     write: W,
+    /// gpui-shell 自己的错误另记进 [`SHELL_ERRORS`]。
+    keep_shell_errors: bool,
 }
 
 impl<W: Fn(&str, &str, &str)> AppLog<W> {
     fn new(write: W) -> Self {
-        Self { write }
+        Self {
+            write,
+            keep_shell_errors: false,
+        }
     }
 }
 
@@ -104,6 +127,16 @@ where
             format!("{}: {}", metadata.target(), message.0)
         };
         (self.write)(source, level_name(metadata.level()), &text);
+        if self.keep_shell_errors
+            && *metadata.level() == Level::ERROR
+            && source == "plugin"
+            && metadata.target() != SCRIPT_TARGET
+        {
+            SHELL_ERRORS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(text);
+        }
     }
 }
 
@@ -166,6 +199,24 @@ mod tests {
                 plugin("error", "boom"),
             ]
         );
+    }
+
+    #[test]
+    fn check_keeps_shell_errors_but_not_script_errors() {
+        take_shell_errors();
+        let mut layer = AppLog::new(|_: &str, _: &str, _: &str| {});
+        layer.keep_shell_errors = true;
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "gpui_shell::script", "offline");
+            tracing::warn!(target: "gpui_shell::component_registry", "style unused");
+            tracing::error!(target: "gpui_shell::materialize", "Popover requires content");
+        });
+        assert_eq!(
+            take_shell_errors(),
+            ["gpui_shell::materialize: Popover requires content"]
+        );
+        assert!(take_shell_errors().is_empty(), "取走了就清空");
     }
 
     #[test]

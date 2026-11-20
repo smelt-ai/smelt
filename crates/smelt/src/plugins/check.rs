@@ -4,7 +4,7 @@
 //! [`CheckHost`]：没有机器、没有会话、窗口不显示。查得出的：清单、主题文件、语法错误、
 //! 解析不到的导入、默认导出不对、根的 `init` 里抛的错，以及登记的视图（按实例建的除外）
 //! 建不出来（类没交出）、`init` 和第一次 `render` 里抛的错、样式方法和参数写错、元素用了
-//! 两次。查不出的：布局和绘制、之后的交互和异步状态、要连上运行时才有的数据，这些还得在 App 里看（`smelt plugin status`、`~/.smelt/app.log`）。
+//! 两次、组件建不出来（少了必填的插槽等，gpui-shell 报的错误）。查不出的：布局和绘制、之后的交互和异步状态、要连上运行时才有的数据，这些还得在 App 里看（`smelt plugin status`、`~/.smelt/app.log`）。
 //!
 //! 顺带把给编辑器的 `gpui-kit.d.ts`、`jsconfig.json` 写进插件目录，新插件第一次 check 完
 //! 就有接口声明可查。
@@ -122,6 +122,9 @@ fn check_views(
     let id = manifest.id();
     let script = super::mount_root(runtime, id, root, manifest.entry(), plugin, window, cx)
         .map_err(|error| format!("{error:#}"))?;
+    if let Some(error) = super::log::take_shell_errors().into_iter().next() {
+        return Err(error);
+    }
     let prefix = format!("{id}/");
     let views = api::views(cx)
         .into_iter()
@@ -132,7 +135,9 @@ fn check_views(
         let drawn = view.clone();
         window.replace_root(cx, move |_, _| Probe(drawn));
         window.draw(cx).clear(cx);
-        if let Some(error) = api::js::script_view_error(&view, cx) {
+        let error = api::js::script_view_error(&view, cx)
+            .or_else(|| super::log::take_shell_errors().into_iter().next());
+        if let Some(error) = error {
             result = Err(format!("{}：{error}", info.id));
             break;
         }
