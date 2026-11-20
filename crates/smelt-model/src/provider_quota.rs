@@ -55,6 +55,10 @@ pub struct ProviderQuotaWindow {
     pub resets_at_ms: Option<u64>,
     /// 没有绝对时间时保留相对重置秒数。
     pub reset_after_seconds: Option<u64>,
+    /// 只管一部分模型的额度：服务端给的模型组名（「Gemini」「Opus」「GPT-5.3-Codex-Spark」）。
+    /// 没有就是整个账户的。同一账户可以有几组同样时长的窗口，各算各的。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]

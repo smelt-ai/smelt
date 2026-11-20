@@ -105,26 +105,31 @@ export function reset_text(t, window, now_ms) {
   return left == null ? t("resets_soon") : t("resets_in", { time: left });
 }
 
+/** 最紧的那个窗口；同样紧的取后一个，和 Rust 的 max_by 一样。 */
+function worst(windows) {
+  return windows.reduce((a, b) => (a == null || b.used_percent >= a.used_percent ? b : a), null);
+}
+
 /**
- * 环上画哪几个窗口，从外到内，各带名字和已用百分比：5 小时在外、周在内；没有标准窗口时只画最紧张的那个。
- * Copilot 知道总额时画本周期一环；不知道总额算不出比例，写剩余数字，不画假的额度环。
+ * 环上画哪几个窗口，从外到内，各带名字和已用百分比：5 小时在外、周在内，几组模型各有一个时取最紧的那组；没有
+ * 标准窗口时只画最紧张的那个。Copilot 知道总额时画本周期一环；不知道总额算不出比例，写剩余数字，不画假的额度环。
  */
 export function ring_windows(t, facts) {
   if (facts.copilot != null) {
     return facts.copilot.limit != null ? [{ label: t("period"), used: facts.used_percent }] : [];
   }
   const standard = ["5h", "7d"]
-    .map((label) => facts.windows.find((window) => window.label === label))
+    .map((label) => worst(facts.windows.filter((window) => window.label === label)))
     .filter((window) => window != null)
     .map((window) => ({ label: window.display_label, used: window.used_percent }));
   if (standard.length > 0) return standard;
-  // 同样紧的取后一个，和 Rust 的 max_by 一样。
-  const worst = facts.windows.reduce((a, b) => (a == null || b.used_percent >= a.used_percent ? b : a), null);
-  return worst == null ? [] : [{ label: worst.display_label, used: worst.used_percent }];
+  const tightest = worst(facts.windows);
+  return tightest == null ? [] : [{ label: tightest.display_label, used: tightest.used_percent }];
 }
 
 /**
- * 悬停提示一行写完，像状态栏：名字写一次，窗口之间用「·」隔开，如「Claude 5h 76%（2小时后重置） · 7d 30%」。
+ * 悬停提示像状态栏：名字写一次，窗口之间用「·」隔开，如「Claude 5h 76%（2小时后重置） · 7d 30%」。只管一部分
+ * 模型的窗口按组另起一行，组名打头，如「Gemini 5h 28% · 7d 12%」；第一行是名字和整个账户的窗口。
  */
 export function quota_hint(t, name, facts, now_ms) {
   const copilot = facts.copilot;
@@ -139,16 +144,43 @@ export function quota_hint(t, name, facts, now_ms) {
         })
       : t("copilot_remaining", { label: name, remaining: copilot.remaining, unit: copilot.unit });
   }
-  const windows = facts.windows
-    .map((window) => {
-      const used = Math.round(window.used_percent);
-      const reset = reset_text(t, window, now_ms);
-      return reset == null
-        ? `${window.display_label} ${used}%`
-        : t("window_reset", { window: window.display_label, used, reset });
-    })
-    .join(" · ");
-  return `${name} ${windows}`;
+  const line = (head, windows) =>
+    [
+      head,
+      windows
+        .map((window) => {
+          const used = Math.round(window.used_percent);
+          const reset = reset_text(t, window, now_ms);
+          return reset == null
+            ? `${window.display_label} ${used}%`
+            : t("window_reset", { window: window.display_label, used, reset });
+        })
+        .join(" · "),
+    ]
+      .filter((part) => part !== "")
+      .join(" ");
+  const scopes = [];
+  for (const window of facts.windows) {
+    if (window.scope != null && !scopes.includes(window.scope)) scopes.push(window.scope);
+  }
+  return [
+    line(
+      name,
+      facts.windows.filter((window) => window.scope == null),
+    ),
+    ...scopes.map((scope) =>
+      line(
+        scope,
+        facts.windows.filter((window) => window.scope === scope),
+      ),
+    ),
+  ].join("\n");
+}
+
+/** 给提示的第一行（名字那行）接上说明（外环内环、点击刷新），不接到最后一组模型后面。 */
+export function decorate_head(hint, wrap) {
+  const [head, ...rest] = hint.split("\n");
+  return [wrap(head), ...rest].join("\n");
 }
 
 /** 一家账户在这一条上的样子；没有额度（没登录、失败、还没查到）或认不出的账户是 null。 */
@@ -166,7 +198,10 @@ function chip_for(state, host, id, status, now_ms) {
     icon: target.icon,
     text: facts.short_text,
     tone: quota_tone(facts.used_percent),
-    hint: rings.length > 1 ? host.t("rings", { hint, outer: rings[0].label, inner: rings[1].label }) : hint,
+    hint:
+      rings.length > 1
+        ? decorate_head(hint, (head) => host.t("rings", { hint: head, outer: rings[0].label, inner: rings[1].label }))
+        : hint,
     used: facts.used_percent,
     rings,
     // 用户手点刷新、还没回来。启动首查和定时刷新不打扰。

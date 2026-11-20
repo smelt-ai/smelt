@@ -365,14 +365,14 @@ export function quota_target(id: string): { id: string; service: string; name: s
 /**
  * 一份额度（QuotaStatus.quota）的读法，和模型菜单的括号同一个口径：short_text 是短字（通常是已用百分比，Copilot 不知道
  * 总额时是剩余量），used_percent 是风险配色用的已用比例（算不出时为 0）。windows 是窗口型的各窗口，label 是原样的
- * （"5h"、"7d"、"primary"），display_label 按当前语言说好；copilot 是 Copilot 型的数额，已按同一规则写成字，used 只在
- * 知道总额时有。
+ * （"5h"、"7d"、"primary"），display_label 按当前语言说好，scope 是只管一部分模型的窗口的模型组名（"Gemini"、
+ * "Opus"），整个账户的是 null；copilot 是 Copilot 型的数额，已按同一规则写成字，used 只在知道总额时有。
  */
 export function quota_facts(data: ProviderQuotaData): QuotaFacts;
 export interface QuotaFacts {
   short_text: string;
   used_percent: number;
-  windows: { label: string; display_label: string; used_percent: number; resets_at_ms: number | null; reset_after_seconds: number | null }[];
+  windows: { label: string; display_label: string; scope: string | null; used_percent: number; resets_at_ms: number | null; reset_after_seconds: number | null }[];
   copilot: { unit: string; remaining: string; limit: string | null; used: string | null } | null;
 }
 /** 新建目录（new_session.catalog）里一项行首的图标 "icons/<名字>.svg"，认 CLI 的规则和侧栏一致。 */
@@ -2666,6 +2666,13 @@ fn quota_facts(data: &crate::model::provider_quota::ProviderQuotaData) -> HostVa
                     HostObject::new()
                         .field("label", window.label.clone())
                         .field("display_label", window.display_label())
+                        .field(
+                            "scope",
+                            window
+                                .scope
+                                .clone()
+                                .map_or(HostValue::Null, HostValue::from),
+                        )
                         .field("used_percent", window.used_percent)
                         .field("resets_at_ms", optional(window.resets_at_ms))
                         .field("reset_after_seconds", optional(window.reset_after_seconds))
@@ -3179,12 +3186,14 @@ mod tests {
                     used_percent: 20.0,
                     resets_at_ms: None,
                     reset_after_seconds: Some(60),
+                    scope: None,
                 },
                 ProviderQuotaWindow {
                     label: "secondary".into(),
                     used_percent: 75.4,
                     resets_at_ms: None,
                     reset_after_seconds: None,
+                    scope: Some("Gemini".into()),
                 },
             ],
         }));
@@ -3198,6 +3207,8 @@ mod tests {
             HostValue::Number(60.)
         );
         assert_eq!(field(&list[1], "label"), HostValue::from("secondary"));
+        assert_eq!(field(&list[0], "scope"), HostValue::Null);
+        assert_eq!(field(&list[1], "scope"), HostValue::from("Gemini"));
         assert_ne!(
             field(&list[1], "display_label"),
             HostValue::from("secondary")

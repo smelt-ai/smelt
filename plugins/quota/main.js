@@ -29,6 +29,7 @@ import {
   apply,
   begin_refresh,
   chips,
+  decorate_head,
   empty_state,
   enabled_targets,
   next_manual,
@@ -236,7 +237,7 @@ function rings_element(rings, palette) {
 /** 一家账户的额度：环和服务图标（手点刷新时换成转圈），不知道总额时写剩余数字。 */
 function chip_element(chip, look) {
   const p = look.palette;
-  const tip = chip.refreshing ? api.t("refreshing", { hint: chip.hint }) : chip.hint;
+  const tip = chip.refreshing ? decorate_head(chip.hint, (hint) => api.t("refreshing", { hint })) : chip.hint;
   const icon_size = chip.rings.length > 1 ? 9 : 11;
   return SmeltTooltip.new(`quota-chip-tip-${chip.id}`, tip).child(
     div()
@@ -277,9 +278,9 @@ function popover_row(entry, look) {
       used: chip.used,
       refreshing: chip.refreshing,
       name_color: p.text,
-      tip: chip.refreshing
-        ? api.t("refreshing", { hint: chip.hint })
-        : api.t("click_to_refresh", { hint: chip.hint }),
+      tip: decorate_head(chip.hint, (hint) =>
+        chip.refreshing ? api.t("refreshing", { hint }) : api.t("click_to_refresh", { hint }),
+      ),
     };
   } else {
     row = {

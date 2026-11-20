@@ -4,6 +4,7 @@ import {
   apply,
   begin_refresh,
   chips,
+  decorate_head,
   empty_state,
   enabled_targets,
   next_manual,
@@ -69,6 +70,7 @@ const window = (label, used_percent, extra = {}) => ({
   used_percent,
   resets_at_ms: null,
   reset_after_seconds: null,
+  scope: null,
   ...extra,
 });
 const ready = (used) => ({ quota: { windows: { windows: [window("5h", used)] } }, checked_at_ms: 1, error: null });
@@ -152,6 +154,40 @@ test("Copilot 的提示保留数额的说法", () => {
   expect(quota_hint(t, "Copilot", facts, 0)).toBe(
     t("copilot_used", { label: "Copilot", used: "25", limit: "100", unit: "premium requests", percent: 25 }),
   );
+});
+
+test("几组模型各有窗口：环取每种时长里最紧的那组，提示一组一行", () => {
+  const facts = quota_facts({
+    windows: {
+      windows: [
+        window("5h", 28, { scope: "Gemini" }),
+        window("7d", 12, { scope: "Gemini" }),
+        window("5h", 0, { scope: "Claude and GPT" }),
+        window("7d", 50, { scope: "Claude and GPT" }),
+      ],
+    },
+  });
+  expect(ring_windows(t, facts)).toStrictEqual([
+    { label: "5h", used: 28 },
+    { label: "7d", used: 50 },
+  ]);
+  expect(quota_hint(t, "Antigravity", facts, 0)).toBe("Antigravity\nGemini 5h 28% · 7d 12%\nClaude and GPT 5h 0% · 7d 50%");
+});
+
+test("整个账户的窗口和名字一行，单独计的模型另起一行", () => {
+  const facts = quota_facts({
+    windows: { windows: [window("5h", 9), window("7d", 34), window("7d", 61, { scope: "Sonnet" })] },
+  });
+  expect(quota_hint(t, "Claude", facts, 0)).toBe("Claude 5h 9% · 7d 34%\nSonnet 7d 61%");
+  expect(ring_windows(t, facts)).toStrictEqual([
+    { label: "5h", used: 9 },
+    { label: "7d", used: 61 },
+  ]);
+});
+
+test("外环内环、点击刷新这类说明接在名字那行", () => {
+  expect(decorate_head("Claude 5h 9%\nSonnet 7d 61%", (head) => `${head} · x`)).toBe("Claude 5h 9% · x\nSonnet 7d 61%");
+  expect(decorate_head("Codex 5h 9%", (head) => `${head} · x`)).toBe("Codex 5h 9% · x");
 });
 
 test("剩余时间从大单位写起", () => {

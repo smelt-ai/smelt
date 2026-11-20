@@ -47,6 +47,8 @@ struct AntigravityQuotaSummary {
 #[serde(rename_all = "camelCase")]
 struct AntigravityQuotaSummaryGroup {
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     buckets: Vec<AntigravitySummaryBucket>,
 }
 
@@ -246,8 +248,8 @@ pub async fn fetch_antigravity_quota_with_token(
 
 /// 解析 `fetchQuotaStatus` / `retrieveUserQuota` 返回的 JSON。
 ///
-/// 优先从 `quotaSummary.groups` 抽取标准的 `5h` 与 `7d` 窗口，使侧栏显示双环；
-/// 没有汇总时退回按模型池归并 `buckets`。
+/// 优先从 `quotaSummary.groups` 抽取标准的 `5h` 与 `7d` 窗口，每组模型各一套，带组名；
+/// 没有汇总时退回按模型池归并 `buckets`，一池一个不知道时长的窗口。
 pub fn parse_antigravity_quota(body: &str) -> anyhow::Result<Option<ProviderQuota>> {
     let response: AntigravityQuotaResponse = serde_json::from_str(body)?;
     if let Some(summary) = response.quota_summary.as_ref() {
@@ -261,8 +263,17 @@ pub fn parse_antigravity_quota(body: &str) -> anyhow::Result<Option<ProviderQuot
 }
 
 fn parse_summary_windows(summary: &AntigravityQuotaSummary) -> Vec<ProviderQuotaWindow> {
-    let mut slots: [Option<MergedQuota>; 2] = [None; 2];
+    // 按组出现的先后排；没有组名的几组并成整个账户的一套。
+    let mut groups: Vec<(Option<String>, [Option<MergedQuota>; 2])> = Vec::new();
     for group in &summary.groups {
+        let scope = group.display_name.as_deref().and_then(group_scope);
+        let at = match groups.iter().position(|(name, _)| *name == scope) {
+            Some(at) => at,
+            None => {
+                groups.push((scope, [None; 2]));
+                groups.len() - 1
+            }
+        };
         for bucket in &group.buckets {
             let Some(kind) = SummaryWindow::from_bucket(bucket) else {
                 continue;
@@ -272,21 +283,36 @@ fn parse_summary_windows(summary: &AntigravityQuotaSummary) -> Vec<ProviderQuota
             else {
                 continue;
             };
-            merge_slot(&mut slots[kind.index()], entry);
+            merge_slot(&mut groups[at].1[kind.index()], entry);
         }
     }
-    SummaryWindow::ALL
+    groups
         .into_iter()
-        .filter_map(|kind| {
-            let quota = slots[kind.index()]?;
-            Some(ProviderQuotaWindow {
-                label: kind.label().to_string(),
-                used_percent: quota.used_percent,
-                resets_at_ms: quota.resets_at_ms,
-                reset_after_seconds: None,
+        .flat_map(|(scope, slots)| {
+            SummaryWindow::ALL.into_iter().filter_map(move |kind| {
+                let quota = slots[kind.index()]?;
+                Some(ProviderQuotaWindow {
+                    label: kind.label().to_string(),
+                    used_percent: quota.used_percent,
+                    resets_at_ms: quota.resets_at_ms,
+                    reset_after_seconds: None,
+                    scope: scope.clone(),
+                })
             })
         })
         .collect()
+}
+
+/// 汇总里的组名（「Gemini Models」「Claude and GPT models」）去掉末尾的「models」，留下模型名。
+fn group_scope(display_name: &str) -> Option<String> {
+    let name = display_name.trim();
+    let name = match name.len().checked_sub(" models".len()) {
+        Some(cut) if name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(" models") => {
+            name[..cut].trim_end()
+        }
+        _ => name,
+    };
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn parse_bucket_windows(buckets: &[AntigravityQuotaBucket]) -> Vec<ProviderQuotaWindow> {
@@ -313,11 +339,13 @@ fn parse_bucket_windows(buckets: &[AntigravityQuotaBucket]) -> Vec<ProviderQuota
         .into_iter()
         .filter_map(|pool| {
             let quota = pools[pool.index()]?;
+            // 按模型的桶不说窗口多长，只知道什么时候重置。
             Some(ProviderQuotaWindow {
-                label: pool.label().to_string(),
+                label: "period".to_string(),
                 used_percent: quota.used_percent,
                 resets_at_ms: quota.resets_at_ms,
                 reset_after_seconds: None,
+                scope: Some(pool.label().to_string()),
             })
         })
         .collect()
@@ -484,17 +512,32 @@ mod tests {
         }"#;
 
         let quota = parse_antigravity_quota(body).unwrap().unwrap();
-        assert_eq!(quota.windows.len(), 2);
-        assert_eq!(quota.windows[0].label, "5h");
-        assert!((quota.windows[0].used_percent - 28.0).abs() < 0.001);
+        let windows: Vec<(Option<&str>, &str, u32)> = quota
+            .windows
+            .iter()
+            .map(|window| {
+                (
+                    window.scope.as_deref(),
+                    window.label.as_str(),
+                    window.used_percent.round() as u32,
+                )
+            })
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                (Some("Gemini"), "5h", 28),
+                (Some("Gemini"), "7d", 12),
+                (Some("Claude and GPT"), "5h", 0),
+                (Some("Claude and GPT"), "7d", 50),
+            ]
+        );
         assert_eq!(
             quota.windows[0].resets_at_ms,
             parse_rfc3339_ms("2026-11-18T17:32:49Z")
         );
-        assert_eq!(quota.windows[1].label, "7d");
-        assert!((quota.windows[1].used_percent - 50.0).abs() < 0.001);
         assert_eq!(
-            quota.windows[1].resets_at_ms,
+            quota.windows[3].resets_at_ms,
             parse_rfc3339_ms("2026-11-25T15:35:11Z")
         );
     }
@@ -522,9 +565,10 @@ mod tests {
 
         let quota = parse_antigravity_quota(body).unwrap().unwrap();
         assert_eq!(quota.windows.len(), 2);
-        assert_eq!(quota.windows[0].label, "Gemini");
+        assert_eq!(quota.windows[0].scope.as_deref(), Some("Gemini"));
+        assert_eq!(quota.windows[0].label, "period");
         assert!((quota.windows[0].used_percent - 20.0).abs() < 0.001);
-        assert_eq!(quota.windows[1].label, "Claude / GPT");
+        assert_eq!(quota.windows[1].scope.as_deref(), Some("Claude / GPT"));
         assert!((quota.windows[1].used_percent - 50.0).abs() < 0.001);
     }
 
@@ -549,6 +593,8 @@ mod tests {
         let quota = parse_antigravity_quota(body).unwrap().unwrap();
         assert_eq!(quota.windows.len(), 1);
         assert_eq!(quota.windows[0].label, "5h");
+        // 没有组名的并成整个账户的。
+        assert_eq!(quota.windows[0].scope, None);
         assert_eq!(quota.windows[0].used_percent, 100.0);
         assert!(quota.windows[0].resets_at_ms.is_some());
     }

@@ -326,6 +326,7 @@ fn status_from_record(
                         reset_after_seconds: window
                             .reset_after_seconds
                             .and_then(|seconds| u64::try_from(seconds).ok()),
+                        scope: None,
                     })
                     .collect(),
             })
@@ -491,6 +492,7 @@ mod tests {
                 used_percent,
                 resets_at_ms: None,
                 reset_after_seconds: None,
+                scope: None,
             }],
         })
     }
