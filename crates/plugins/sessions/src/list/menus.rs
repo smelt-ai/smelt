@@ -58,13 +58,14 @@ pub(super) fn session_menu(row: &SessionRow, view: Entity<ListView>, cx: &App) -
             })
     };
     let copy_id = {
+        let machine = row.key.machine.clone();
         let id = row.session_id.clone();
         MenuItem::new(t!("menu.copy_session_id"))
             .icon(IconName::Copy)
             .disabled(id.is_none())
             .on_click(move |_, _, cx| {
                 if let Some(id) = &id {
-                    cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+                    crate::commands::copy_session_id(&machine, id, cx);
                 }
             })
     };
