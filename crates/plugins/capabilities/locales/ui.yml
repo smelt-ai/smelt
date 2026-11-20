@@ -99,9 +99,6 @@ common:
   delete:
     en: "Delete"
     zh-CN: "删除"
-  edit:
-    en: "Edit"
-    zh-CN: "编辑"
   retry:
     en: "Retry"
     zh-CN: "重试"
