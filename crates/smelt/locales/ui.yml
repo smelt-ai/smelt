@@ -449,8 +449,8 @@ plugins:
     en: "Last Action Failed"
     zh-CN: "上一次操作失败"
   list_hint:
-    en: "Each plugin is a view: placed in the workbench layout it's a panel; otherwise it opens in the main area."
-    zh-CN: "每个插件是一个视图：摆进工作台布局的是面板，没摆进去的打开时显示在主区域。"
+    en: "A plugin's views placed in the workbench layout are panels; the others open in the main area."
+    zh-CN: "插件的视图摆进工作台布局的是面板，没摆进去的打开时显示在主区域。"
   load_failed:
     en: "Failed to load: %{error}"
     zh-CN: "加载失败：%{error}"
@@ -481,9 +481,6 @@ plugins:
   runtime_failed:
     en: "Couldn't start the plugin runtime: %{error}"
     zh-CN: "插件运行时启动失败：%{error}"
-  settings_failed:
-    en: "Couldn't load the settings page: %{error}"
-    zh-CN: "设置页加载失败：%{error}"
   target_exists:
     en: "%{path} already exists"
     zh-CN: "%{path} 已经存在"
@@ -493,12 +490,6 @@ plugins:
   trust_warning:
     en: "Plugins can read and write any file and run any command, just like Smelt. Only import ones you trust. Deleted plugins move to ~/.smelt/trash/plugins so you can get them back."
     zh-CN: "插件和 Smelt 一样能读写任意文件、运行任意命令，只导入你信任的。删除的插件挪进 ~/.smelt/trash/plugins，需要时能找回。"
-  view_failed:
-    en: "Couldn't load the plugin: %{error}"
-    zh-CN: "插件加载失败：%{error}"
-  view_used:
-    en: "This plugin view was already used. Reload the plugin"
-    zh-CN: "插件视图已经用过，请重新加载插件"
   write:
     en: "Write Your Own Plugin"
     zh-CN: "自己写插件"

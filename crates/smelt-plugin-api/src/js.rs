@@ -19,6 +19,9 @@ mod control_types;
 #[cfg(test)]
 mod parity;
 pub mod ui;
+mod view;
+
+pub use view::script_view_error;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -26,7 +29,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use futures_channel::oneshot;
-use gpui::{App, Entity, SharedString, Subscription};
+use gpui::{App, Entity, SharedString, Subscription, WeakEntity};
 use gpui_shell::{
     HostArguments, HostError, HostModule, HostObject, HostResult, HostValue, ScriptView,
 };
@@ -36,8 +39,8 @@ use crate::client::protocol::control::ControlMethod;
 use crate::model::daemon_state::RuntimePresence;
 use crate::{
     CommandSpec, ContextMenuAction, ContextMenuItem, Handled, HostEvent, MenuEntry, MenuSlot,
-    NotificationPermission, RuntimeKey, SettingsEntry, SettingsGroup, Text, TopicMessage,
-    ViewBuilder, ViewSpec, rusqlite,
+    NotificationPermission, RuntimeKey, SettingsEntry, SettingsGroup, Text, TopicMessage, ViewSpec,
+    rusqlite,
 };
 
 /// 模块名，和 Rust 这边的 crate 同名。
@@ -108,7 +111,7 @@ export type StatusMenuItem =
   | { type: "separator" };
 /**
  * 那个视图此刻看得见；设置页是设置开着、停在这一页。变了发 shown_views_changed。
- * 视图 id 是 "<来源>/<名字>"：插件主入口是 "<插件 id>/main"，设置页是 "<插件 id>/<name>"。
+ * 视图 id 是 "<来源>/<名字>"：插件登记的视图（设置页也是）是 "<插件 id>/<name>"。
  */
 export function view_shown(view: string): boolean;
 /** 那个视图摆在某一页眼下装的布局里（不管露没露着）。没摆的视图打开时放进出口。变了发 laid_out_views_changed。 */
@@ -431,10 +434,11 @@ export function set_quit_guard(name: string | null): null;
 /** 打开文件，交给登记的文件打开者；没有打开者时本机文件用系统文本编辑器打开，远程的 reject。line 从 1 数。 */
 export function open_file(machine: Machine, path: string, line?: number): Promise<null>;
 /**
- * 本插件登记的一个视图（主入口之外的），同 Rust 的 ViewSpec。
+ * 本插件登记的一个视图，同 Rust 的 ViewSpec。视图的 View 类先用 gpui-base 的 DockArea.register_panel(name, Class)
+ * 交出（name 同这里的 name），宿主要建时在本插件这份脚本里建：各视图和插件的根共享模块里的状态。
  */
 export interface ViewSpec {
-  /** 本插件内的名字，不含 "/"；视图 id 是 "<插件 id>/<name>"。"main" 不能用：那是插件主入口的视图。 */
+  /** 本插件内的名字，不含 "/"；视图 id 是 "<插件 id>/<name>"。 */
   name: string;
   /** 入口、侧栏上的名字。 */
   title: Text;
@@ -446,30 +450,39 @@ export interface ViewSpec {
    * 的标题带。
    */
   draws_top_bar?: boolean;
-  /**
-   * 视图的入口脚本，插件目录里的相对路径，如 "settings.tsx"。每份视图单独加载、挂载一次它，和主入口、
-   * 别的视图是各自的脚本实例，不共享内存：要共享的存在插件自己的库里（store_query / store_execute），
-   * 要主入口跟着变就 run 一条它登记的命令或 emit_event。打开时给的参数用 view_args 取。
-   * 入口脚本里不能调 register_* 登记东西，登记都在主入口里做。
-   */
-  entry: string;
   /** 是一页设置：放进设置侧栏的哪一组（默认 "plugins"）、按哪些词能搜到。不能和 instances 同时给。 */
   settings?: { group?: "general" | "agents" | "system" | "plugins"; keywords?: string[] } | null;
   /**
-   * 按实例建：别的插件每 create_view（JS 里是 SmeltViewInstance）一次、或带参数 OPEN_VIEW 一次，就按入口新挂
-   * 一份脚本，参数用 view_args 取。不进布局、没有入口。默认 false。
+   * 按实例建：别的插件每 create_view（JS 里是 SmeltViewInstance）一次、或带参数 OPEN_VIEW 一次，就新建一份，
+   * 参数在 init 里用 opened_view() 取。不进布局、没有入口。默认 false。
    */
   instances?: boolean;
   /** 往哪些插槽里填（插槽 id "<来源>/<名字>"，参数形状见定插槽的插件的约定）。只有 instances 的能填。 */
   fills?: string[];
 }
-/** 替换本插件登记的视图（主入口那个不算，它一直在）。空数组撤下全部；一个不合法整组不登记。 */
-export function register_views(views: ViewSpec[]): null;
 /**
- * 这份视图最近一次打开时给的参数（OPEN_VIEW、create_view 的 args）；还没打开过、没给为 null。按实例建的视图挂上时
- * 已经有了。之后再打开（换参数）发 view_opened。
+ * 替换本插件登记的视图。空数组撤下全部；一个不合法整组不登记。视图的类没用 DockArea.register_panel 交出的，
+ * 建的时候画出原因（smelt plugin check 会建一遍查出来）。
  */
-export function view_args(): unknown;
+export function register_views(views: ViewSpec[]): null;
+/** 一份视图是怎么打开的（见 opened_view）。instance 在本插件里每建一份视图加一，再次打开的 view_opened 按它认。 */
+export interface OpenedView {
+  view: string;
+  instance: number;
+  /** 打开时给的参数（OPEN_VIEW、create_view 的 args）；没给为 null。 */
+  args: unknown;
+}
+/**
+ * 正在建的这份视图：只能在视图的 init 里同步调（宿主建视图时同步跑 init，过了就取不到）。之后再打开（换参数）
+ * 由插件的事件流发 view_opened。
+ */
+export function opened_view(): OpenedView;
+/**
+ * 重画本插件的视图：给了 instance 只重画那一份，不给重画还在的每一份。视图共用插件里的状态，状态变了由改的一方
+ * 叫它（cx.notify() 只重画正在跑的那份视图：根里的任务、别的视图里的事件改了状态，要靠这个叫醒别的视图）。
+ * 返回有没有重画到：那一份已经放掉了是 false，可以不再记它。
+ */
+export function notify_view(instance?: number): boolean;
 /** 让本插件的命令 name 当文件打开者（它要另外登记，requires_args）；执行时参数是 { machine, path, line }。打开文件只放一个打开者，眼下只有内置的文件插件登记；好几个都登记时该由用户选，这项设置还没做。 */
 export function register_file_opener(name: string): null;
 /** SQL 参数。true / false 存成 1 / 0。 */
@@ -513,8 +526,8 @@ export type HostEvent =
   | { type: "context_menu_items_changed" }
   /** 界面语言换了（读 locale()）：窗口已经重画，插件存着的字要按新语言重建。 */
   | { type: "locale_changed" }
-  /** 这份视图又被打开了一次，args 同 view_args()。只发给这份视图自己的脚本；建好后马上打开、参数没变的那一次不发。 */
-  | { type: "view_opened"; args: unknown }
+  /** 本插件的一份视图又被打开了一次（instance 同 opened_view() 给的）。建好后马上打开、参数没变的那一次不发。 */
+  | { type: "view_opened"; view: string; instance: number; args: unknown }
   /** 插件发的事件（见 emit_event）：name 是 "<来源>/<名字>"，载荷形状由发的插件定。 */
   | { type: "plugin"; name: string; payload: unknown }
   /** 要在那台机器上打开这些路径（拖到 Dock 图标上的、Finder 里「用 Smelt 打开」的），绝对路径，可能是目录也可能是文件。 */
@@ -557,38 +570,30 @@ struct CommandCall {
     args: Value,
 }
 
-/// 宿主怎么把插件目录里的一个入口建成视图（见 `register_views`）。
-#[derive(Clone)]
-pub struct ViewLoader {
-    /// 脚本登记视图时没给图标、和插件主入口的视图用这个图标。
-    pub icon: SharedString,
-    /// 校验入口（插件目录里的相对路径），给出建视图的函数。
-    pub load: LoadView,
+/// 正在建、或又打开了一次的一份视图（`opened_view()`、`view_opened` 事件）。
+#[derive(Clone, Debug, PartialEq)]
+struct Opening {
+    view: SharedString,
+    /// 本插件里第几份建出来的视图，再次打开时脚本按它认。
+    instance: u64,
+    args: Value,
 }
 
-/// 校验 JS 视图入口、给出建视图函数的宿主函数。每建一份视图挂一份入口脚本。
-pub type LoadView = Rc<dyn Fn(&ViewEntry) -> Result<ViewBuilder, String>>;
-
-/// 脚本登记的一个视图要怎么建。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ViewEntry {
-    /// 入口脚本，插件目录里的相对路径。
-    pub entry: String,
-    /// 是一页设置（宿主按设置页的宽度摆）。
-    pub settings: bool,
-    /// 按实例建：第一次打开时才带着参数挂脚本，脚本一开始 `view_args()` 就拿得到。
-    pub instances: bool,
+impl Opening {
+    fn value(&self) -> HostObject {
+        HostObject::new()
+            .field("view", self.view.as_ref())
+            .field("instance", self.instance as f64)
+            .field("args", host_value(&self.args))
+    }
 }
 
-/// 脚本 `next_event()` 等到的：宿主广播的事件，或者只给这份视图的「又打开了一次」。
+/// 脚本 `next_event()` 等到的：宿主广播的事件，或者本插件的一份视图又打开了一次。
 #[derive(Debug)]
 enum ScriptEvent {
     Host(HostEvent),
-    Opened(Value),
+    Opened(Opening),
 }
-
-/// JS 插件主入口挂成的视图，名字固定：id 是 `<插件 id>/main`。
-pub const MAIN_VIEW: &str = "main";
 
 /// 一个 JS 插件在宿主这边的身份。
 #[derive(Clone, Default)]
@@ -602,8 +607,8 @@ struct PluginState {
     name: String,
     theme_owner: String,
     queue: VecDeque<HostEvent>,
-    /// 又打开了一次、脚本还没取走的参数。只留最后一次：`view_args()` 也只给最后一次。
-    opened: Option<Value>,
+    /// 视图又打开了一次、脚本还没取走的。每次都留：各是一份视图的事。
+    opened: VecDeque<Opening>,
     waiter: Option<oneshot::Sender<ScriptEvent>>,
     /// 执行过、脚本还没取走的命令。
     calls: VecDeque<CommandCall>,
@@ -614,18 +619,14 @@ struct PluginState {
     next_call: u64,
     /// 视图已经释放：它登记的命令不再接。
     released: bool,
-    /// 主入口之外的视图那份脚本：和主入口同一个身份，但不能登记，登记会顶掉主入口登记的那组。
-    view_script: bool,
-    /// 这份视图最近一次打开时给的参数（`view_args()`）。
-    args: Value,
-    /// 已经打开过一次。宿主建好视图马上打开一次，参数和挂载时一样的那一次不算「又打开」。
-    opened_once: bool,
-    view_loader: Option<ViewLoader>,
+    /// 正在建的那份视图：建视图时宿主同步跑它的 `init`，这期间 `opened_view()` 取它。
+    building: Option<Opening>,
+    /// 已经建过几份视图，下一份的 `instance` 是它加一。
+    built: u64,
+    /// 建好的各份视图的脚本，按 `instance`，`notify_view` 重画它们。放掉的留到下次重画时清。
+    live: Vec<(u64, WeakEntity<ScriptView>)>,
     /// 插件目录里的资源（见 [`JsPlugin::with_assets`]）。
     assets: Option<PluginAssets>,
-    /// 脚本登记的视图。这个来源的视图是一组：宿主挂上的主入口视图加上这些，哪边变了
-    /// 都整组再登记（见 [`JsPlugin::publish_views`]）。
-    views: Vec<ViewSpec>,
     _events: Option<Subscription>,
     _release: Option<Subscription>,
 }
@@ -648,12 +649,6 @@ impl JsPlugin {
         plugin
     }
 
-    /// 主入口登记视图时，入口怎么建成视图。没给就不能登记视图。
-    pub fn with_view_loader(self, loader: ViewLoader) -> Self {
-        self.0.borrow_mut().view_loader = Some(loader);
-        self
-    }
-
     /// 插件目录 `root` 里的文件经 `asset(path)` 取路径：`<prefix>/<path>`。前缀由宿主定，带着
     /// 插件身份和这次挂载，宿主的资源表按它找到插件目录。没给 `asset` 就报错。
     pub fn with_assets(self, prefix: impl Into<String>, root: impl Into<PathBuf>) -> Self {
@@ -665,88 +660,80 @@ impl JsPlugin {
         self
     }
 
-    /// 主入口之外一份视图的脚本身份：读写的是同一个插件的库、执行的是同样的命令，但
-    /// `register_*` 一律报错。`args` 是挂载前就知道的打开参数（按实例建的视图），没有给 `Null`。
-    pub fn for_view(id: &str, name: &str, args: Value) -> Self {
-        let plugin = Self::for_plugin(id, name);
-        {
-            let mut state = plugin.0.borrow_mut();
-            state.view_script = true;
-            state.args = args;
-        }
-        plugin
+    /// 视图 `view` 要按 `args` 建一份了：在返回的这次建视图期间 `opened_view()` 取得到它。
+    fn begin_building(&self, view: &SharedString, args: Value) -> Opening {
+        let mut state = self.0.borrow_mut();
+        state.built += 1;
+        let opening = Opening {
+            view: view.clone(),
+            instance: state.built,
+            args,
+        };
+        state.building = Some(opening.clone());
+        opening
     }
 
-    /// 这份视图又被打开了一次（`PluginView::open`）：参数换成这次的，排一条 `view_opened`
-    /// 给它的脚本。建好后的第一次打开、参数和挂载时一样，脚本已经知道，不发。视图已经释放
-    /// 就不管。
-    pub fn opened(&self, args: &Value) {
+    fn end_building(&self) {
+        self.0.borrow_mut().building = None;
+    }
+
+    /// 第 `instance` 份视图建好了，脚本是 `script`。
+    fn track(&self, instance: u64, script: &Entity<ScriptView>) {
+        self.0
+            .borrow_mut()
+            .live
+            .push((instance, script.downgrade()));
+    }
+
+    /// 重画第 `instance` 份视图，`None` 是每一份。推到这轮更新之后：调的可能正是要重画的
+    /// 那一份。返回有没有重画到。
+    fn notify_views(&self, instance: Option<u64>, cx: &mut App) -> bool {
+        let scripts: Vec<Entity<ScriptView>> = {
+            let mut state = self.0.borrow_mut();
+            state.live.retain(|(_, script)| script.upgrade().is_some());
+            state
+                .live
+                .iter()
+                .filter(|(built, _)| instance.is_none_or(|instance| *built == instance))
+                .filter_map(|(_, script)| script.upgrade())
+                .collect()
+        };
+        let found = !scripts.is_empty();
+        if found {
+            cx.defer(move |cx| {
+                for script in scripts {
+                    script.update(cx, |script, cx| script.refresh(cx));
+                }
+            });
+        }
+        found
+    }
+
+    /// 一份视图又被打开了一次：排一条 `view_opened` 给插件的事件流。插件已经释放就不管。
+    fn reopened(&self, opening: Opening) {
         let mut state = self.0.borrow_mut();
         if state.released {
             return;
         }
-        let first = !std::mem::replace(&mut state.opened_once, true);
-        if first && state.args == *args {
-            return;
+        if let Some(waiter) = state.waiter.take() {
+            match waiter.send(ScriptEvent::Opened(opening)) {
+                Ok(()) => return,
+                // 等的那个 Promise 已经没人要了：排着，下一次 `next_event()` 先拿到。
+                Err(ScriptEvent::Opened(opening)) => state.opened.push_back(opening),
+                Err(ScriptEvent::Host(_)) => unreachable!("送出去的是 Opened"),
+            }
+        } else {
+            state.opened.push_back(opening);
         }
-        state.args = args.clone();
-        if let Some(waiter) = state.waiter.take()
-            && waiter.send(ScriptEvent::Opened(args.clone())).is_ok()
-        {
-            return;
-        }
-        // 没人在等，或者等的那个 Promise 已经没人要了：排着，下一次 `next_event()` 先拿到。
-        state.opened = Some(args.clone());
     }
 
-    /// 主入口挂成的视图（名字是 [`MAIN_VIEW`]），和脚本登记的视图并成一组登记。
-    pub fn set_main_view(&self, spec: ViewSpec, cx: &mut App) -> Result<(), String> {
-        let views = self.0.borrow().views.clone();
-        self.publish_views(Some(spec), views, cx)
-    }
-
-    /// 脚本登记的视图换成这一组，和主入口的视图并起来整组登记。
+    /// 脚本登记的视图换成这一组。
     fn set_views(&self, specs: Vec<ViewSpec>, cx: &mut App) -> Result<(), String> {
-        let owner = self.0.borrow().id.clone();
-        // 主入口的视图从注册表里取回来，不在这里另存一份：它的建视图函数拿着脚本视图，
-        // 存在这里就成了脚本视图 → 宿主模块 → 这里 → 脚本视图的环，插件卸下也放不掉。
-        let main = crate::view(&format!("{owner}/{MAIN_VIEW}"), cx).map(|info| ViewSpec {
-            name: MAIN_VIEW.into(),
-            // 主入口的标题是清单里的插件名，不翻译，取回来原样再登记。
-            title: info.title.into(),
-            icon: info.icon,
-            draws_top_bar: info.draws_top_bar,
-            instances: info.instances,
-            settings: info.settings,
-            fills: info.fills,
-            build: info.build,
-        });
-        self.publish_views(main, specs.clone(), cx)?;
-        self.0.borrow_mut().views = specs;
-        Ok(())
-    }
-
-    fn publish_views(
-        &self,
-        main: Option<ViewSpec>,
-        views: Vec<ViewSpec>,
-        cx: &mut App,
-    ) -> Result<(), String> {
         let owner = self.0.borrow().id.clone();
         if owner.is_empty() {
             return Err("插件没有视图来源身份".to_string());
         }
-        crate::register_views(&owner, main.into_iter().chain(views).collect(), cx)
-    }
-
-    /// 登记前先过这一关：主入口之外的视图脚本不能登记。
-    fn may_register(&self, name: &str) -> Result<(), HostError> {
-        if self.0.borrow().view_script {
-            return Err(HostError::new(format!(
-                "{name}：视图入口里不能登记，登记放在插件主入口里"
-            )));
-        }
-        Ok(())
+        crate::register_views(&owner, specs, cx)
     }
 
     /// 这个插件的 `smelt-plugin-api` 模块，装进它自己的 Policy。
@@ -762,12 +749,9 @@ impl JsPlugin {
         let execute_owner = query_owner.clone();
         let data_owner = query_owner.clone();
         let event_owner = query_owner.clone();
-        let themes = self.clone();
-        let layouts = self.clone();
-        let pages = self.clone();
-        let openers = self.clone();
         let views = self.clone();
-        let view_args = self.clone();
+        let opened = self.clone();
+        let notified = self.clone();
         let menus = self.clone();
         let topics = self.clone();
         let context_menus = self.clone();
@@ -993,7 +977,6 @@ impl JsPlugin {
                 )
             })
             .function("register_themes", move |arguments| {
-                themes.may_register("register_themes")?;
                 let values = arguments
                     .value(0)?
                     .as_array()
@@ -1016,7 +999,6 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_layouts", move |arguments| {
-                layouts.may_register("register_layouts")?;
                 let layouts = layout_arguments(arguments)?;
                 if layout_owner.is_empty() {
                     return Err(HostError::new("插件没有布局来源身份"));
@@ -1040,7 +1022,6 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_pages", move |arguments| {
-                pages.may_register("register_pages")?;
                 let pages = page_arguments(arguments)?;
                 if page_owner.is_empty() {
                     return Err(HostError::new("插件没有页的来源身份"));
@@ -1061,7 +1042,6 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_commands", move |arguments| {
-                commands.may_register("register_commands")?;
                 let specs = command_arguments(arguments, &commands)?;
                 let (owner, group) = {
                     let state = commands.0.borrow();
@@ -1147,7 +1127,6 @@ impl JsPlugin {
                 })
             })
             .function("register_topics", move |arguments| {
-                topics.may_register("register_topics")?;
                 let list = arguments
                     .value(0)?
                     .as_array()
@@ -1172,7 +1151,6 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_menu_items", move |arguments| {
-                menus.may_register("register_menu_items")?;
                 let entries = menu_arguments(arguments)?;
                 let owner = menus.0.borrow().id.clone();
                 if owner.is_empty() {
@@ -1184,7 +1162,6 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("set_status_menu", move |arguments| {
-                status_menus.may_register("set_status_menu")?;
                 let menu = match arguments.get(0).map(json_value) {
                     None | Some(Value::Null) => None,
                     Some(value) => {
@@ -1203,7 +1180,6 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_context_menu_items", move |arguments| {
-                context_menus.may_register("register_context_menu_items")?;
                 let menu = arguments.string(0)?.to_string();
                 let items = arguments
                     .value(1)?
@@ -1225,7 +1201,6 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("set_quit_guard", move |arguments| {
-                guards.may_register("set_quit_guard")?;
                 let name = match arguments.value(0)? {
                     HostValue::Null => None,
                     HostValue::Str(name) if !name.is_empty() && !name.contains('/') => {
@@ -1276,7 +1251,6 @@ impl JsPlugin {
                 )
             })
             .function("register_file_opener", move |arguments| {
-                openers.may_register("register_file_opener")?;
                 let name = arguments.string(0)?;
                 if opener_owner.is_empty() {
                     return Err(HostError::new("插件没有命令来源身份"));
@@ -1287,17 +1261,41 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_views", move |arguments| {
-                views.may_register("register_views")?;
-                let loader = views.0.borrow().view_loader.clone();
-                let loader =
-                    loader.ok_or_else(|| HostError::new("register_views：这个插件不能登记视图"))?;
-                let specs = view_arguments(arguments, &loader)?;
+                let owner = views.0.borrow().id.clone();
+                let specs = view_arguments(arguments, &owner, &views)?;
                 in_app("register_views", |cx| views.set_views(specs, cx))?
                     .map_err(|error| HostError::new(format!("register_views：{error}")))?;
                 Ok(HostValue::Null)
             })
-            .function("view_args", move |_| {
-                Ok(host_value(&view_args.0.borrow().args))
+            .function("opened_view", move |_| {
+                opened
+                    .0
+                    .borrow()
+                    .building
+                    .as_ref()
+                    .map(|opening| opening.value().into())
+                    .ok_or_else(|| {
+                        HostError::new(
+                            "opened_view：只能在视图的 init 里调（宿主建这份视图的时候）",
+                        )
+                    })
+            })
+            .function("notify_view", move |arguments| {
+                let instance = match arguments.get(0) {
+                    None | Some(HostValue::Null) => None,
+                    Some(HostValue::Number(number))
+                        if *number >= 1. && number.fract() == 0. && *number <= u64::MAX as f64 =>
+                    {
+                        Some(*number as u64)
+                    }
+                    Some(_) => {
+                        return Err(HostError::new(
+                            "notify_view：instance 要是视图的编号（正整数）",
+                        ));
+                    }
+                };
+                let found = in_app("notify_view", |cx| notified.notify_views(instance, cx))?;
+                Ok(HostValue::Bool(found))
             })
             .async_function("store_query", move |arguments| {
                 let (sql, params) = sql_arguments("store_query", arguments)?;
@@ -1376,9 +1374,9 @@ impl JsPlugin {
     fn next_event(&self) -> impl Future<Output = Result<HostValue, HostError>> + Send + use<> {
         let (sender, receiver) = oneshot::channel();
         let mut state = self.0.borrow_mut();
-        // 又打开了一次排在最前：脚本先换到新参数，再看别的变化。
-        let ready = match state.opened.take() {
-            Some(args) => Some(ScriptEvent::Opened(args)),
+        // 又打开了一次排在最前：视图先换到新参数，再看别的变化。
+        let ready = match state.opened.pop_front() {
+            Some(opening) => Some(ScriptEvent::Opened(opening)),
             None => state.queue.pop_front().map(ScriptEvent::Host),
         };
         match ready {
@@ -1393,10 +1391,9 @@ impl JsPlugin {
                 .await
                 .map(|event| match event {
                     ScriptEvent::Host(event) => event_value(&event),
-                    ScriptEvent::Opened(args) => HostObject::new()
-                        .field("type", "view_opened")
-                        .field("args", host_value(&args))
-                        .into(),
+                    ScriptEvent::Opened(opening) => {
+                        opening.value().field("type", "view_opened").into()
+                    }
                 })
                 .map_err(|_| HostError::new("next_event：被后一次 next_event 顶掉了"))
         }
@@ -1505,7 +1502,7 @@ impl JsPlugin {
     fn detach(&self) {
         let mut state = self.0.borrow_mut();
         state.queue.clear();
-        state.opened = None;
+        state.opened.clear();
         state.waiter = None;
         state._events = None;
         state.calls.clear();
@@ -1842,10 +1839,12 @@ fn layout_materials(value: Option<&HostValue>) -> Result<crate::LayoutMaterials,
     Ok(materials)
 }
 
-/// `register_views` 的参数。入口交给宿主的加载器校验、变成建视图的函数。
+/// `register_views` 的参数。视图按 `DockArea.register_panel` 交出的同名类在插件 `plugin` 那份
+/// 脚本里建（见 [`view::builder`]）；`application` 是那份脚本的 Policy 的应用名，就是插件 id。
 fn view_arguments(
     arguments: &HostArguments,
-    loader: &ViewLoader,
+    application: &str,
+    plugin: &JsPlugin,
 ) -> Result<Vec<ViewSpec>, HostError> {
     let invalid = |what: &str| HostError::new(format!("register_views：{what}"));
     arguments
@@ -1878,15 +1877,9 @@ fn view_arguments(
                 ))),
             };
             let name = text("name")?.ok_or_else(|| invalid("每个视图都要有 name"))?;
-            if name == MAIN_VIEW {
-                return Err(invalid(&format!(
-                    "视图不能叫「{MAIN_VIEW}」，那是插件主入口的视图"
-                )));
-            }
             let title = text_field(view, "title")
                 .map_err(|error| invalid(&error))?
                 .ok_or_else(|| invalid(&format!("「{name}」要有 title")))?;
-            let entry = text("entry")?.ok_or_else(|| invalid(&format!("「{name}」要有 entry")))?;
             let icon = text("icon")?.map(SharedString::from);
             let settings = match view.get("settings") {
                 None | Some(HostValue::Null) => None,
@@ -1933,17 +1926,19 @@ fn view_arguments(
             let instances = flag("instances")?;
             let fills = strings(view.get("fills"), "fills")?;
             // 能不能这样组合（按实例建的不能是设置页、只有按实例建的能填插槽、插槽 id 的
-            // 形状）由 `register_views` 统一查，这里不另写一份。
-            let build = (loader.load)(&ViewEntry {
-                entry,
-                settings: settings.is_some(),
+            // 形状）、名字合不合法由 `register_views` 统一查，这里不另写一份。
+            let name = SharedString::from(name);
+            let build = view::builder(
+                plugin,
+                gpui_shell::dock::panel_name(application, &name),
+                name.clone(),
+                settings.is_some(),
                 instances,
-            })
-            .map_err(|error| invalid(&format!("「{name}」的 entry：{error}")))?;
+            );
             Ok(ViewSpec {
-                name: name.into(),
+                name,
                 title,
-                icon: icon.unwrap_or_else(|| loader.icon.clone()),
+                icon: icon.unwrap_or_else(|| smelt_ui::IconName::Puzzle.path()),
                 draws_top_bar,
                 instances,
                 settings,
@@ -2921,14 +2916,6 @@ mod tests {
         for menu in [HostValue::Null, object(&[("title", "NDX".into())])] {
             assert!(set(menu).unwrap_err().message().contains("只能在视图"));
         }
-        // 视图入口的脚本不能设，同别的登记。
-        let view = JsPlugin::for_view("example", "示例", Value::Null).module();
-        assert!(
-            view.call("set_status_menu", &HostArguments::new([HostValue::Null]))
-                .unwrap_err()
-                .message()
-                .contains("主入口")
-        );
     }
 
     #[test]
@@ -3078,32 +3065,22 @@ mod tests {
         object.into()
     }
 
-    /// 只认 `view.tsx`，记下问过哪些入口。
-    fn loader(asked: Rc<RefCell<Vec<ViewEntry>>>) -> ViewLoader {
-        ViewLoader {
-            icon: "icons/puzzle.svg".into(),
-            load: Rc::new(move |entry| {
-                asked.borrow_mut().push(entry.clone());
-                if entry.entry == "view.tsx" {
-                    Ok(Rc::new(|_, _| unreachable!("登记时不建视图")))
-                } else {
-                    Err(format!("插件目录里没有 {}", entry.entry))
-                }
-            }),
-        }
+    fn view_specs(fields: &[(&str, HostValue)]) -> Result<Vec<ViewSpec>, HostError> {
+        let arguments = HostArguments::new([HostValue::Array(vec![object(fields)])]);
+        view_arguments(
+            &arguments,
+            "example",
+            &JsPlugin::for_plugin("example", "示例"),
+        )
     }
 
     #[test]
     fn view_registration_rejects_invalid_arguments_before_entering_app() {
-        let asked = Rc::new(RefCell::new(Vec::new()));
-        let module = JsPlugin::for_plugin("example", "示例")
-            .with_view_loader(loader(asked.clone()))
-            .module();
+        let module = JsPlugin::for_plugin("example", "示例").module();
         let views = |fields: &[(&str, HostValue)]| HostValue::Array(vec![object(fields)]);
         let valid = [
             ("name", HostValue::from("avatar")),
             ("title", "头像".into()),
-            ("entry", "view.tsx".into()),
         ];
         let with = |extra: (&str, HostValue)| {
             let mut fields = valid.to_vec();
@@ -3115,8 +3092,8 @@ mod tests {
             HostArguments::default(),
             HostArguments::new([HostValue::Null]),
             HostArguments::new([HostValue::Array(vec![HostValue::Null])]),
-            HostArguments::new([views(&valid[..2])]),
-            HostArguments::new([views(&[valid[0].clone(), valid[2].clone()])]),
+            HostArguments::new([views(&valid[..1])]),
+            HostArguments::new([views(&valid[1..])]),
             HostArguments::new([with(("settings", "general".into()))]),
             HostArguments::new([with(settings(&[("group", "sidebar".into())]))]),
             HostArguments::new([with(settings(&[("keywords", "通知".into())]))]),
@@ -3126,16 +3103,6 @@ mod tests {
             )]))]),
             HostArguments::new([with(("instances", "yes".into()))]),
             HostArguments::new([with(("fills", "smelt.session-list/session-avatar".into()))]),
-            HostArguments::new([views(&[
-                valid[0].clone(),
-                valid[1].clone(),
-                ("entry", "missing.tsx".into()),
-            ])]),
-            HostArguments::new([views(&[
-                ("name", "main".into()),
-                valid[1].clone(),
-                valid[2].clone(),
-            ])]),
         ] {
             let error = module.call("register_views", &arguments).unwrap_err();
             assert!(
@@ -3144,7 +3111,7 @@ mod tests {
                 error.message()
             );
         }
-        // 参数对了才进 App；测试里没有 App。入口在进 App 前就交给加载器校验过。
+        // 参数对了才进 App；测试里没有 App。
         let error = module
             .call(
                 "register_views",
@@ -3159,59 +3126,27 @@ mod tests {
             "{}",
             error.message()
         );
-        let last = asked.borrow().last().cloned();
-        assert_eq!(
-            last,
-            Some(ViewEntry {
-                entry: "view.tsx".into(),
-                settings: false,
-                instances: false,
-            })
-        );
     }
 
+    /// `main` 不再是保留名：迁过来的插件沿用原来的视图 id `<插件 id>/main`。
     #[test]
-    fn view_registration_tells_the_loader_what_kind_of_view_it_builds() {
-        let asked = Rc::new(RefCell::new(Vec::new()));
-        let module = JsPlugin::for_plugin("example", "示例")
-            .with_view_loader(loader(asked.clone()))
-            .module();
-        let view = |extra: (&str, HostValue)| {
-            HostArguments::new([HostValue::Array(vec![object(&[
-                ("name", "v".into()),
-                ("title", "视图".into()),
-                ("entry", "view.tsx".into()),
-                extra,
-            ])])])
-        };
-        let _ = module.call("register_views", &view(("settings", object(&[]))));
-        let _ = module.call(
-            "register_views",
-            &view(("instances", HostValue::Bool(true))),
-        );
-        let kinds: Vec<(bool, bool)> = asked
-            .borrow()
-            .iter()
-            .map(|entry| (entry.settings, entry.instances))
-            .collect();
-        assert_eq!(kinds, [(true, false), (false, true)]);
+    fn any_view_name_is_the_plugins_own() {
+        let specs = view_specs(&[("name", "main".into()), ("title", "会话".into())]).unwrap();
+        assert_eq!(specs[0].name, "main");
+        assert!(!specs[0].instances);
+        assert!(specs[0].settings.is_none());
     }
 
     #[test]
     fn a_view_can_bring_its_own_icon() {
-        let loader = loader(Rc::default());
         let icons = |icon: Option<HostValue>| {
-            let mut fields = vec![
-                ("name", HostValue::from("v")),
-                ("title", "视图".into()),
-                ("entry", "view.tsx".into()),
-            ];
+            let mut fields = vec![("name", HostValue::from("v")), ("title", "视图".into())];
             fields.extend(icon.map(|icon| ("icon", icon)));
-            let arguments = HostArguments::new([HostValue::Array(vec![object(&fields)])]);
-            view_arguments(&arguments, &loader).map(|specs| specs[0].icon.clone())
+            view_specs(&fields).map(|specs| specs[0].icon.clone())
         };
-        assert_eq!(icons(None).unwrap(), "icons/puzzle.svg");
-        assert_eq!(icons(Some(HostValue::Null)).unwrap(), "icons/puzzle.svg");
+        let puzzle = smelt_ui::IconName::Puzzle.path();
+        assert_eq!(icons(None).unwrap(), puzzle);
+        assert_eq!(icons(Some(HostValue::Null)).unwrap(), puzzle);
         assert_eq!(
             icons(Some("icons/terminal.svg".into())).unwrap(),
             "icons/terminal.svg"
@@ -3221,16 +3156,10 @@ mod tests {
 
     #[test]
     fn a_view_can_draw_its_own_top_bar() {
-        let loader = loader(Rc::default());
         let draws = |flag: Option<HostValue>| {
-            let mut fields = vec![
-                ("name", HostValue::from("v")),
-                ("title", "视图".into()),
-                ("entry", "view.tsx".into()),
-            ];
+            let mut fields = vec![("name", HostValue::from("v")), ("title", "视图".into())];
             fields.extend(flag.map(|flag| ("draws_top_bar", flag)));
-            let arguments = HostArguments::new([HostValue::Array(vec![object(&fields)])]);
-            view_arguments(&arguments, &loader).map(|specs| specs[0].draws_top_bar)
+            view_specs(&fields).map(|specs| specs[0].draws_top_bar)
         };
         assert!(!draws(None).unwrap());
         assert!(!draws(Some(HostValue::Null)).unwrap());
@@ -3239,94 +3168,98 @@ mod tests {
     }
 
     #[test]
-    fn views_need_a_loader() {
-        let module = JsPlugin::for_plugin("example", "示例").module();
-        let error = module
-            .call(
-                "register_views",
-                &HostArguments::new([HostValue::Array(Vec::new())]),
-            )
-            .unwrap_err();
-        assert!(
-            error.message().contains("不能登记视图"),
-            "{}",
-            error.message()
+    fn opened_view_is_only_there_while_the_view_is_built() {
+        let plugin = JsPlugin::for_plugin("example", "示例");
+        let module = plugin.module();
+        let opened = || module.call("opened_view", &HostArguments::default());
+        assert!(opened().is_err());
+
+        let args = serde_json::json!({ "conversation": "a" });
+        plugin.begin_building(&"chat".into(), args.clone());
+        assert_eq!(
+            json_value(&opened().unwrap()),
+            serde_json::json!({ "view": "chat", "instance": 1, "args": args })
+        );
+        plugin.end_building();
+        assert!(opened().is_err());
+
+        // 每建一份加一。
+        plugin.begin_building(&"chat".into(), Value::Null);
+        assert_eq!(
+            json_value(&opened().unwrap()),
+            serde_json::json!({ "view": "chat", "instance": 2, "args": null })
         );
     }
 
     #[test]
-    fn a_view_script_cannot_register_anything() {
-        let module = JsPlugin::for_view("example", "示例", Value::Null)
-            .with_view_loader(loader(Rc::default()))
-            .module();
-        for name in [
-            "register_themes",
-            "register_layouts",
-            "register_pages",
-            "register_commands",
-            "register_views",
+    fn notify_view_takes_only_a_view_number() {
+        let module = JsPlugin::for_plugin("example", "示例").module();
+        for bad in [
+            HostValue::from("1"),
+            HostValue::Number(0.),
+            HostValue::Number(1.5),
+            HostValue::Number(-1.),
         ] {
             let error = module
-                .call(name, &HostArguments::new([HostValue::Array(Vec::new())]))
+                .call("notify_view", &HostArguments::new([bad]))
                 .unwrap_err();
-            assert!(error.message().contains("视图入口里不能登记"), "{name}");
+            assert!(error.to_string().contains("instance"), "{error}");
         }
+        // 参数对，不在 App 里调才报这个。
         let error = module
-            .call("register_file_opener", &HostArguments::new(["open".into()]))
+            .call("notify_view", &HostArguments::new([HostValue::Number(1.)]))
             .unwrap_err();
-        assert!(error.message().contains("视图入口里不能登记"));
+        assert!(error.to_string().contains("只能在"), "{error}");
+    }
+
+    fn opening(instance: u64, n: u64) -> Opening {
+        Opening {
+            view: "chat".into(),
+            instance,
+            args: serde_json::json!({ "n": n }),
+        }
     }
 
     #[test]
-    fn view_args_start_with_the_mount_args_and_follow_each_open() {
-        let first = serde_json::json!({ "conversation": "a" });
-        let plugin = JsPlugin::for_view("example", "示例", first.clone());
-        let module = plugin.module();
-        let args = || json_value(&module.call("view_args", &HostArguments::default()).unwrap());
-        assert_eq!(args(), first);
-        // 建好马上打开的那一次，参数挂载时就给了，不再当「又打开了一次」发。
-        plugin.opened(&first);
-        assert!(plugin.0.borrow().opened.is_none());
-
-        let second = serde_json::json!({ "conversation": "b" });
-        let third = serde_json::json!({ "conversation": "c" });
+    fn reopened_views_come_first_and_each_counts() {
+        let plugin = JsPlugin::for_plugin("example", "示例");
         plugin.deliver(&HostEvent::MachinesChanged);
-        plugin.opened(&second);
-        plugin.opened(&third);
-        assert_eq!(args(), third);
-        // 只留最后一次，排在别的事件前面。
+        plugin.reopened(opening(1, 1));
+        plugin.reopened(opening(2, 2));
+        plugin.reopened(opening(1, 3));
         let next = || json_value(&smol::block_on(plugin.next_event()).unwrap());
-        assert_eq!(
-            next(),
-            serde_json::json!({ "type": "view_opened", "args": third })
-        );
+        for (instance, n) in [(1, 1), (2, 2), (1, 3)] {
+            assert_eq!(
+                next(),
+                serde_json::json!({
+                    "type": "view_opened",
+                    "view": "chat",
+                    "instance": instance,
+                    "args": { "n": n },
+                })
+            );
+        }
         assert_eq!(next(), serde_json::json!({ "type": "machines_changed" }));
 
         plugin.detach();
-        plugin.opened(&first);
-        assert_eq!(args(), third);
+        plugin.reopened(opening(1, 4));
+        assert!(plugin.0.borrow().opened.is_empty());
     }
 
-    /// 主入口挂载时没有参数，第一次带着参数打开（OPEN_VIEW）也要告诉它。
     #[test]
-    fn the_first_open_counts_when_its_args_are_new() {
+    fn a_reopen_wakes_a_waiting_script() {
         let plugin = JsPlugin::for_plugin("example", "示例");
-        let args = serde_json::json!({ "tab": "logs" });
-        plugin.opened(&args);
-        assert_eq!(plugin.0.borrow().opened, Some(args));
-    }
-
-    #[test]
-    fn an_open_wakes_a_waiting_script() {
-        let plugin = JsPlugin::for_view("example", "示例", Value::Null);
-        plugin.opened(&Value::Null);
         let waiting = plugin.next_event();
-        let args = serde_json::json!({ "n": 1 });
-        plugin.opened(&args);
-        assert!(plugin.0.borrow().opened.is_none());
+        plugin.reopened(opening(3, 1));
+        assert!(plugin.0.borrow().opened.is_empty());
         assert_eq!(
             json_value(&smol::block_on(waiting).unwrap()),
-            serde_json::json!({ "type": "view_opened", "args": args })
+            serde_json::json!({
+                "type": "view_opened",
+                "view": "chat",
+                "instance": 3,
+                "args": { "n": 1 },
+            })
         );
     }
 

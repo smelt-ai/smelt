@@ -137,7 +137,7 @@
 - 视图第一次露出来时建，之后一直留着，直到登记被替换或撤下。打开时从插件自己的库里读，改了马上写回，不靠视图活着保存东西。
 - 每个视图是插件脚本里的一个 View 类，登记时交出类本身（见「插件运行时」）。名字由插件自己起；`main` 不再是保留名，会话列表沿用 `smelt.session-list/main`，布局不用改。
 - 视图登记里写标题、图标、是否自己画顶栏（`draws_top_bar`）。自己画顶栏的视图顶上放 `smelt-ui` 的 `SmeltWindowBar`。
-- 视图打开时的参数：建的时候作为 `init(props)` 交给它；已经建好的视图再被打开、参数变了，收到 `view_opened` 事件。
+- 视图打开时的参数：建的时候在 `init` 里用 `opened_view()` 取；已经建好的视图再被打开、参数变了，插件收到 `view_opened` 事件。
 - 视图登记里不写位置。入口放在哪，是菜单贡献和布局的事。
 - 按实例建的视图（`instances`，如每段会话一份的终端、对话）不进布局、没有入口：别的插件用 `SmeltViewInstance` 按视图 id 和参数建一份自己摆；只想放进主窗口看的用 `smelt.app/open-view` 带参数打开，宿主建一份放进出口。
 
@@ -211,10 +211,15 @@
 
 - 插件的入口脚本加载一次，是这个插件唯一的一份脚本实例，活到插件卸下。
 - 入口的默认导出是插件的根（一个 View 类）。宿主挂上它但不显示，它的 `init` 就是插件的启动：起事件循环、命令循环，登记视图、命令、菜单、话题。
-- 插件的每个视图都是这份实例里的一个 View 类，`register_views` 登记时交出类本身。宿主要建时在同一份实例里建，各视图共享模块里的状态。
+- 插件的每个视图都是这份实例里的一个 View 类。宿主要建时在同一份实例里建，各视图共享模块里的状态。
   - 设置页、按实例建的视图、填插槽的视图，都是这样。
   - 不再给每个视图单独加载一份脚本，也就没有视图之间「不共享内存、只能经库和事件同步」的问题。
-- 机制用 gpui-shell 的视图类登记：它的 `DockArea.register_panel(name, Class)` 就是「脚本交出类、宿主按需建」。宿主函数收不了类，所以要么接这条机制，要么给上游提一个通用的接口，不 fork。
+- 怎么交出类：宿主函数收不了类，用 gpui-shell 现成的 `DockArea.register_panel(name, Class)`（「脚本交出类、宿主按名字在同一份实例里建」），`register_views` 里同名的视图就按它建。上游没有更直接的接口，不 fork、不等。
+  - 打开参数：宿主建视图是同步的，`init` 就跑在里面。视图在 `init` 里调 `opened_view()` 取 `{ view, instance, args }`，只有这时取得到。
+  - 再次打开：宿主找不到具体哪份视图，往插件的事件流里发 `{ type: "view_opened", view, instance, args }`，插件的事件循环按 `instance` 转给那份视图。
+  - 插件的事件流只有一条（`next_event` 同时只能一个在等），由根的事件循环取，改模块里的状态。
+  - 重画：gpui-shell 的 `cx.notify()` 只重画正在跑的那份视图，根的任务里调重画的是根；视图在自己的任务里等根用 JS 的 Promise 叫醒也一样（接着跑的还是根那一轮）。所以状态改了用宿主的 `notify_view(instance?)`：给编号重画那一份，不给重画插件还在的每一份。视图自己的点击里改了只关自己的状态，照常 `cx.notify()`。
+- 加载失败的插件没有视图可登记（视图名是脚本登记的），错误在设置的插件页、`smelt plugin status` 和 `~/.smelt/app.log` 里看。
 - 这是对现有 JS 插件的破坏性改动（原来主入口自动登记成 `<id>/main`，别的视图各有 `entry`）。用户插件跟着改，不写兼容。
 
 ### 随 App 带的插件
@@ -269,6 +274,37 @@ plugins/session-list/
   locales/ui.yml      文案
   assets/             图标、图片
   tests/              纯逻辑单测；fixtures/ 是对照出图用的场景数据
+```
+
+入口的样子：
+
+```js
+import { View, div } from "gpui-kit";
+import { DockArea } from "gpui-base";
+import { register_views, next_event, notify_view, opened_view } from "smelt-plugin-api";
+
+const state = { sessions: [] }; // 各视图共用
+
+class List extends View {
+  init(_props, _cx) {
+    const { instance, args } = opened_view(); // 只在 init 里取得到
+  }
+  render() { return div().children(state.sessions.map(row)); }
+}
+
+export default class Plugin extends View {
+  init(_props, cx) {
+    DockArea.register_panel("main", List);
+    register_views([{ name: "main", title: "会话" }]);
+    cx.spawn(async () => {
+      for (;;) {
+        const event = await next_event();
+        if (apply(state, event)) notify_view(); // 根里 cx.notify() 重画的是根
+      }
+    });
+  }
+  render() { return div(); } // 根不显示
+}
 ```
 
 1. **只 import 自己目录里的文件和宿主模块**，不设插件间共享的目录：要复用的进组件库或能力。

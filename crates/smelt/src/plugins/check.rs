@@ -2,9 +2,9 @@
 //!
 //! 和 App 加载插件走同一套（同一个运行时、同一份 Policy 和宿主模块），只是宿主换成离线的
 //! [`CheckHost`]：没有机器、没有会话、窗口不显示。查得出的：清单、主题文件、语法错误、
-//! 解析不到的导入、默认导出不对、`init` 和第一次 `render` 里抛的错、样式方法和参数写错、
-//! 元素用了两次、登记的视图入口不在。查不出的：布局和绘制、之后的交互和异步状态、要连上
-//! 运行时才有的数据，这些还得在 App 里看（`smelt plugin status`、`~/.smelt/app.log`）。
+//! 解析不到的导入、默认导出不对、根的 `init` 里抛的错，以及登记的视图（按实例建的除外）
+//! 建不出来（类没交出）、`init` 和第一次 `render` 里抛的错、样式方法和参数写错、元素用了
+//! 两次。查不出的：布局和绘制、之后的交互和异步状态、要连上运行时才有的数据，这些还得在 App 里看（`smelt plugin status`、`~/.smelt/app.log`）。
 //!
 //! 顺带把给编辑器的 `gpui-kit.d.ts`、`jsconfig.json` 写进插件目录，新插件第一次 check 完
 //! 就有接口声明可查。
@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use gpui::*;
 use gpui_shell::plugin::PluginManifest;
-use gpui_shell::policy;
 use rust_i18n::t;
 use smelt_plugin_api::js::JsPlugin;
 use smelt_plugin_api::{self as api, Machine, RuntimeKey};
@@ -90,12 +89,7 @@ fn check(root: &Path, manifest: &PluginManifest, cx: &mut App) -> Result<(), Str
     let runtime = super::runtime(cx)
         .map_err(|error| t!("plugins.runtime_failed", error = format!("{error:#}")).into_owned())?;
     let assets = super::assets::mount(id, root.to_path_buf());
-    let plugin = JsPlugin::for_plugin(id, manifest.name())
-        .with_assets(assets.clone(), root)
-        .with_view_loader(super::view_loader(id, manifest.name(), root, &assets));
-    let policy = super::plugin_policy(id, &plugin).map_err(|error| format!("{error:#}"))?;
-    // 加载时解析导入、挂载时视图拿走的都是默认 Policy，同 `mount_one`。
-    policy::set_default(policy);
+    let plugin = JsPlugin::for_plugin(id, manifest.name()).with_assets(assets, root);
     let options = WindowOptions {
         show: false,
         focus: false,
@@ -110,15 +104,57 @@ fn check(root: &Path, manifest: &PluginManifest, cx: &mut App) -> Result<(), Str
         .open_window(options, |_, cx| cx.new(|_| Empty))
         .map_err(|error| format!("{error:#}"))?;
     window
-        .update(cx, |_, window, cx| runtime.check(root, window, cx))
+        .update(cx, |_, window, cx| {
+            check_views(&runtime, root, manifest, &plugin, window, cx)
+        })
         .map_err(|error| format!("{error:#}"))?
-        .map(|_| ())
-        .map_err(|error| format!("{error:#}"))
+}
+
+/// 挂上插件的根（跑它的 `init`），再把它登记的视图（按实例建的要参数，不建）各建一份、画一帧。
+fn check_views(
+    runtime: &std::rc::Rc<gpui_shell::ShellRuntime>,
+    root: &Path,
+    manifest: &PluginManifest,
+    plugin: &JsPlugin,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<(), String> {
+    let id = manifest.id();
+    let script = super::mount_root(runtime, id, root, manifest.entry(), plugin, window, cx)
+        .map_err(|error| format!("{error:#}"))?;
+    let prefix = format!("{id}/");
+    let views = api::views(cx)
+        .into_iter()
+        .filter(|view| view.id.starts_with(&prefix) && !view.instances);
+    let mut result = Ok(());
+    for info in views {
+        let view = (info.build)(window, cx).view();
+        let drawn = view.clone();
+        window.replace_root(cx, move |_, _| Probe(drawn));
+        window.draw(cx).clear(cx);
+        if let Some(error) = api::js::script_view_error(&view, cx) {
+            result = Err(format!("{}：{error}", info.id));
+            break;
+        }
+    }
+    // 视图和根都在运行时之前放掉（见 `super::shutdown`）。
+    window.replace_root(cx, |_, _| Empty);
+    drop(script);
+    result
+}
+
+/// 画一帧要检查的视图。
+pub(super) struct Probe(pub(super) AnyView);
+
+impl Render for Probe {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.0.clone()
+    }
 }
 
 /// 离线的宿主：只有本机、不在线、什么会话都没有、视图都没露着。插件在 `init` 和第一次
 /// `render` 里读到的就是这些，读得出来就算过；要连运行时的调用照常报错。
-struct CheckHost;
+pub(super) struct CheckHost;
 
 impl api::Host for CheckHost {
     fn machines(&self, _cx: &App) -> Vec<Machine> {
