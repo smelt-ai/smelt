@@ -37,7 +37,6 @@ smelt-files-ui = { path = "../plugins/files" }
 smelt-git-ui = { path = "../plugins/git" }
 smelt-history = { path = "../plugins/history" }
 smelt-ide = { path = "../plugins/ide" }
-smelt-launcher = { path = "../plugins/launcher" }
 smelt-language = { path = "../plugins/language" }
 smelt-layouts = { path = "../plugins/layouts" }
 smelt-machines = { path = "../plugins/machines" }

@@ -1,5 +1,8 @@
 //! `SmeltTooltip`：给子元素挂悬停提示（[`smelt_ui::tooltip::Tooltip`]），smelt 自己的紧凑样式，
 //! 能带快捷键键帽。gpui-shell 元素自带的 `tooltip(text)` 是 Shell 的样式，和 App 里别处不一样。
+//!
+//! 键帽两种给法：`keys` 写死一串按键；`command` 给一条命令，弹出时按眼下的键位表查它的快捷键
+//! （用户在设置里改过就是改后的），键位表只有宿主看得见。
 
 use std::sync::Arc;
 
@@ -12,6 +15,7 @@ use gpui_shell::{
 use smelt_ui::tooltip::Tooltip;
 
 use super::{ops, parse_keys};
+use crate::RunCommand;
 
 const OWNER: &str = "SmeltTooltip";
 
@@ -21,8 +25,12 @@ struct Spec {
     text: String,
 }
 
+/// 键帽：`keys` 和 `command` 后给的算数。
 #[derive(Clone)]
-struct Keys(String);
+enum Shortcut {
+    Keys(String),
+    Command(String),
+}
 
 struct TooltipMaterializer;
 
@@ -33,14 +41,19 @@ impl ComponentMaterializer for TooltipMaterializer {
             .downcast_ref::<Spec>()
             .ok_or_else(|| anyhow::anyhow!("{OWNER} received an incompatible payload"))?
             .clone();
-        let keys = ops::<Keys>(&request).last().map(|keys| keys.0.clone());
+        let shortcut = ops::<Shortcut>(&request).last().cloned();
         let anchor = div().id(id).tooltip(move |window, cx| {
-            let keys = keys
-                .as_deref()
-                .and_then(|keys| parse_keys(keys, cx.platform_info().os).ok());
-            Tooltip::new(text.clone())
-                .key_binding(keys)
-                .build(window, cx)
+            let tooltip = Tooltip::new(text.clone());
+            match &shortcut {
+                Some(Shortcut::Keys(keys)) => {
+                    tooltip.key_binding(parse_keys(keys, cx.platform_info().os).ok())
+                }
+                Some(Shortcut::Command(command)) => {
+                    tooltip.action(&RunCommand::new(command.clone()), None)
+                }
+                None => tooltip,
+            }
+            .build(window, cx)
         });
         request.finish(anchor)
     }
@@ -74,13 +87,28 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                     vec![ArgumentDescriptor::new("keys", ArgumentSchema::String)],
                     |args| match args {
                         [ComponentArgument::String(keys)] => parse_keys(keys, OperatingSystem::Mac)
-                            .map(|_| ComponentPayload::new(Keys(keys.clone())))
+                            .map(|_| ComponentPayload::new(Shortcut::Keys(keys.clone())))
                             .map_err(|error| format!("{OWNER}.keys({keys:?}): {error}")),
                         _ => Err(format!("{OWNER}.keys(keys) expects one string")),
                     },
                 )
                 .with_documentation(
                     "Shows a shortcut such as \"cmd-k\" after the text; space-separated steps.",
+                ),
+                MethodDescriptor::new(
+                    "command",
+                    vec![ArgumentDescriptor::new("command", ArgumentSchema::String)],
+                    |args| match args {
+                        [ComponentArgument::String(command)] if !command.is_empty() => Ok(
+                            ComponentPayload::new(Shortcut::Command(command.clone())),
+                        ),
+                        _ => Err(format!(
+                            "{OWNER}.command(command) expects a non-empty command id"
+                        )),
+                    },
+                )
+                .with_documentation(
+                    "Shows the shortcut the user has bound to this command (\"<plugin id>/<name>\", run without arguments) after the text, looked up when the tooltip opens; nothing when it has none. The later of keys and command wins.",
                 ),
             ])
             .with_documentation(

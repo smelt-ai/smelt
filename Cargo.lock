@@ -10778,7 +10778,6 @@ dependencies = [
  "smelt-ide",
  "smelt-iroh",
  "smelt-language",
- "smelt-launcher",
  "smelt-layouts",
  "smelt-machines",
  "smelt-maintenance",
@@ -11099,15 +11098,6 @@ dependencies = [
 
 [[package]]
 name = "smelt-language"
-version = "0.0.0"
-dependencies = [
- "gpui-pre",
- "rust-i18n",
- "smelt-plugin-api",
-]
-
-[[package]]
-name = "smelt-launcher"
 version = "0.0.0"
 dependencies = [
  "gpui-pre",

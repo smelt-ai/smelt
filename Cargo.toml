@@ -43,7 +43,6 @@ members = [
     "crates/plugins/history",
     "crates/plugins/ide",
     "crates/plugins/language",
-    "crates/plugins/launcher",
     "crates/plugins/layouts",
     "crates/plugins/machines",
     "crates/plugins/maintenance",

@@ -150,6 +150,8 @@ export function window_active(): boolean;
 export function overlay_open(): boolean;
 /** 现在的界面语言代码（"en"、"zh-CN"）。换了发 locale_changed：插件自己画的字按新语言重画。 */
 export function locale(): string;
+/** 颜色，同 gpui-kit 的 Color：#rgb、#rrggbb、#rrggbbaa，直接交给元素的 bg、text_color 这些。 */
+export type Color = import("gpui-kit").Color;
 /** smelt 的一档字，三样直接交给元素的同名方法：`.text_size(s.text_size).line_height(s.line_height).font_weight(s.font_weight)`。 */
 export interface TextStyle { text_size: string; line_height: string; font_weight: number }
 /**
@@ -162,16 +164,16 @@ export interface TextStyle { text_size: string; line_height: string; font_weight
 export interface SmeltTheme {
   light: boolean;
   palette: {
-    bg: string; side: string; surface: string; soft: string; soft_hover: string; soft_press: string;
-    row_hover: string; row_selected: string; hair: string; hair_strong: string;
-    text: string; muted: string; faint: string; muted_selected: string; faint_selected: string;
-    ink: string; ink_hover: string; ink_press: string; on_ink: string;
-    button_primary: string[]; button_primary_foreground: string;
-    button_submit: string[]; button_submit_foreground: string;
-    button_secondary: string[]; button_secondary_foreground: string;
-    focus: string; selection: string; link: string;
-    run: string; need: string; ok: string; bad: string; on_bad: string;
-    popover_text: string; scrim: string; chart: string[];
+    bg: Color; side: Color; surface: Color; soft: Color; soft_hover: Color; soft_press: Color;
+    row_hover: Color; row_selected: Color; hair: Color; hair_strong: Color;
+    text: Color; muted: Color; faint: Color; muted_selected: Color; faint_selected: Color;
+    ink: Color; ink_hover: Color; ink_press: Color; on_ink: Color;
+    button_primary: Color[]; button_primary_foreground: Color;
+    button_submit: Color[]; button_submit_foreground: Color;
+    button_secondary: Color[]; button_secondary_foreground: Color;
+    focus: Color; selection: Color; link: Color;
+    run: Color; need: Color; ok: Color; bad: Color; on_bad: Color;
+    popover_text: Color; scrim: Color; chart: Color[];
   };
   type: {
     ui: TextStyle; ui_medium: TextStyle; ui_compact: TextStyle; small: TextStyle; small_medium: TextStyle;
@@ -182,7 +184,7 @@ export interface SmeltTheme {
   elevation: { raised: ThemeShadow[]; floating: ThemeShadow[]; overlay: ThemeShadow[]; md: ThemeShadow[]; input: ThemeShadow[] };
 }
 /** 一层投影，同元素 `shadow([...])` 收的形状。 */
-export interface ThemeShadow { x: number; y: number; blur: number; spread: number; color: string; inset: boolean }
+export interface ThemeShadow { x: number; y: number; blur: number; spread: number; color: Color; inset: boolean }
 export function theme(): SmeltTheme;
 /**
  * 插件自己的文案：插件目录下 locales/ui.yml（格式同 Rust crate 的，见 docs/i18n.md）里 key 在当前语言的那条，

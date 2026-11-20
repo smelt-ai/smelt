@@ -395,7 +395,6 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     smelt_git_ui::register(cx);
     smelt_history::register(cx);
     smelt_ide::register(cx);
-    smelt_launcher::register(cx);
     smelt_layouts::register(cx);
     smelt_machines::register(cx);
     smelt_maintenance::register(cx);

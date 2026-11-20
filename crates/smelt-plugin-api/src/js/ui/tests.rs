@@ -361,6 +361,7 @@ export default class App extends View {
       () => SmeltKeybind.new(""),
       () => SmeltTooltip.new("", "x"),
       () => SmeltTooltip.new("t", "x").keys("k-cmd"),
+      () => SmeltTooltip.new("t", "x").command(""),
       () => SmeltListRow.new(""),
     ]) {
       try { bad(); } catch (_) { rejected++; }
@@ -373,6 +374,7 @@ export default class App extends View {
         .option("a", "Alpha").option("b", "Beta").value(this.pick)
         .on_change((value, cx) => { this.pick = value; cx.notify(); }))
       .child(SmeltTooltip.new("tip", "Say hi").keys("cmd-k cmd-s").child("hover me"))
+      .child(SmeltTooltip.new("tip-command", "New").command("smelt.test/new").child("hover too"))
       .child(SmeltKeybind.new("cmd-shift-k"))
       .child(SmeltStickySection.new().child("Header").child(div().child("Body")))
       .child(`state: ${this.clicks}|${this.pick}|${rejected}`);
@@ -392,13 +394,14 @@ export default class App extends View {
         "SmeltStickySection",
         "Header",
         "Body",
-        "state: 0|b|5",
+        "hover too",
+        "state: 0|b|6",
     ] {
         assert!(snapshot.contains(text), "{text}: {snapshot}");
     }
     click(&mut context, 8., 8.);
     let after = tree(&mut context, &view);
-    assert!(after.contains("state: 1|b|5"), "{after}");
+    assert!(after.contains("state: 1|b|6"), "{after}");
 }
 
 #[gpui::test]
