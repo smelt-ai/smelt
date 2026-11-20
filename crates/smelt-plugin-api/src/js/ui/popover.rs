@@ -11,13 +11,12 @@ use std::sync::Arc;
 use gpui::{Anchor, AnyElement, App, IntoElement, ParentElement as _, RenderOnce, Window, div};
 use gpui_base::Selectable;
 use gpui_shell::{
-    ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentCallbackArgument,
-    ComponentMaterializer, ComponentPayload, ComponentRegistry, MaterializeRequest,
-    MethodDescriptor, RegistryError, anyhow, gpui,
+    ComponentArgument, ComponentCallbackArgument, ComponentMaterializer, ComponentRegistry,
+    MaterializeRequest, RegistryError, anyhow, gpui,
 };
 use smelt_ui::popover::Popover;
 
-use super::{bool_method, callback_method, control_id, id_constructor, ops};
+use super::{bool_method, callback_method, control_id, corner_method, id_constructor, ops};
 
 const OWNER: &str = "SmeltPopover";
 
@@ -98,28 +97,11 @@ impl ComponentMaterializer for PopoverMaterializer {
 }
 
 pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryError> {
-    let side = MethodDescriptor::new(
+    let side = corner_method(
+        OWNER,
         "side",
-        vec![ArgumentDescriptor::new(
-            "corner",
-            ArgumentSchema::Enum(&["top_left", "top_right", "bottom_left", "bottom_right"]),
-        )],
-        |args| {
-            let anchor = match args {
-                [ComponentArgument::Enum(corner)] => match corner.as_str() {
-                    "top_left" => Anchor::TopLeft,
-                    "top_right" => Anchor::TopRight,
-                    "bottom_left" => Anchor::BottomLeft,
-                    "bottom_right" => Anchor::BottomRight,
-                    _ => return Err(format!("{OWNER}.side: unknown corner {corner:?}")),
-                },
-                _ => return Err(format!("{OWNER}.side(corner) expects a corner")),
-            };
-            Ok(ComponentPayload::new(Side(anchor)))
-        },
-    )
-    .with_documentation(
         "Which corner of the card is pinned to the trigger; default top_left (opens below, left-aligned). Use bottom_* to open above.",
+        Side,
     );
     registry.register(
         gpui_shell::ComponentDescriptor::new(OWNER, Arc::new(PopoverMaterializer))

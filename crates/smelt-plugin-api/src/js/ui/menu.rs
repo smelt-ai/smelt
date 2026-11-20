@@ -3,7 +3,7 @@
 //! - 菜单项是描述，不进界面：`SmeltMenuItem`（一条命令，可带图标、打勾、危险色、禁用；
 //!   `items([...])` 给了就是子菜单）、`SmeltMenuSeparator`、`SmeltMenuLabel`（小标题）。
 //! - 带出菜单的：`SmeltMenuButton`（按钮点开的下拉菜单，按钮的变体、尺寸和状态同
-//!   `SmeltButton`）、`SmeltContextMenu`（子元素上右键点开）。两个都用 `items([...])` 收菜单项。
+//!   `SmeltButton`，`anchor(角)` 定菜单贴着按钮的哪个角）、`SmeltContextMenu`（子元素上右键点开）。两个都用 `items([...])` 收菜单项。
 //!
 //! 菜单打开时才搭，搭好就留在弹层里，比画出它的那次绘制活得久；脚本回调却只在那次绘制里
 //! 有效。所以每次绘制把整份菜单项写进按控件 id 的槽（[`latest`]），点下去时按「各层名字」
@@ -26,8 +26,8 @@ use smelt_ui::menu::{Menu, MenuItem, MenuTrigger};
 
 use super::carrier::{Carrier, take};
 use super::{
-    button, callback_method, control_id, disabled_method, flag_method, id_constructor, latest, ops,
-    string_method,
+    button, callback_method, control_id, corner_method, disabled_method, flag_method,
+    id_constructor, latest, ops, string_method,
 };
 
 /// 脚本给的点击回调；只在描述它的那次绘制里有效。
@@ -151,11 +151,15 @@ fn build(entries: &[Entry], path: &[SharedString], slot: &Entity<Vec<Entry>>) ->
     })
 }
 
+/// 下拉菜单贴着按钮的哪个角。
+struct MenuAnchor(gpui::Anchor);
+
 #[derive(IntoElement)]
 struct MenuButton {
     id: ElementId,
     button: Button,
     entries: Vec<Entry>,
+    anchor: Option<gpui::Anchor>,
     disabled: bool,
     style: StyleRefinement,
 }
@@ -167,6 +171,9 @@ impl RenderOnce for MenuButton {
             build(slot.read(cx), &[], &slot)
         })
         .disabled(self.disabled);
+        if let Some(anchor) = self.anchor {
+            trigger = trigger.anchor(anchor);
+        }
         *trigger.style() = self.style;
         trigger
     }
@@ -283,10 +290,12 @@ impl ComponentMaterializer for ButtonMaterializer {
         let id = control_id(BUTTON, &request)?;
         let button = button::build(BUTTON, &request)?;
         let entries = entries(BUTTON, &mut request)?;
+        let anchor = ops::<MenuAnchor>(&request).last().map(|anchor| anchor.0);
         Ok(MenuButton {
             id: id.into(),
             button,
             entries,
+            anchor,
             disabled: request.disabled(),
             style: request.take_style(),
         }
@@ -437,7 +446,21 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
     registry.register(
         ComponentDescriptor::new(BUTTON, Arc::new(ButtonMaterializer))
             .with_constructors(vec![id_constructor(BUTTON)])
-            .with_methods([button::methods(BUTTON), vec![items_method(BUTTON)]].concat())
+            .with_methods(
+                [
+                    button::methods(BUTTON),
+                    vec![
+                        items_method(BUTTON),
+                        corner_method(
+                            BUTTON,
+                            "anchor",
+                            "Which corner of the menu is pinned to the button; default top_left (opens below, left-aligned). Use top_right for buttons at the right edge.",
+                            MenuAnchor,
+                        ),
+                    ],
+                ]
+                .concat(),
+            )
             .with_documentation(
                 "A Smelt button that opens a dropdown menu of items([...]); styles apply to the trigger.",
             ),

@@ -393,6 +393,36 @@ export default class App extends View {
     assert!(after.contains("picked: here"), "{after}");
 }
 
+/// 菜单贴哪个角原样交给 `MenuTrigger::anchor`；认不得的角拒掉。测试窗口里量不到触发器的位置
+/// （弹层贴到窗口边上），这里不比坐标。
+#[gpui::test]
+fn menu_button_takes_an_anchor(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltMenuButton, SmeltMenuItem } from "smelt-ui";
+export default class App extends View {
+  render() {
+    let rejected = 0;
+    try { SmeltMenuButton.new("bad").anchor("middle"); } catch (_) { rejected++; }
+    return div().size_full()
+      .child(SmeltMenuButton.new("more").label("More").anchor("top_right")
+        .items([SmeltMenuItem.new("Refresh").on_click((_e, _cx) => {})])
+        .absolute().left(300).top(0))
+      .child(div().absolute().top(100).child(`rejected: ${rejected}`));
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    context.update(|window, _| window.activate_window());
+    draw(&mut context);
+    assert!(tree(&mut context, &view).contains("rejected: 1"));
+    click(&mut context, 320., 10.);
+    assert!(
+        context.debug_bounds("smelt-menu-0").is_some(),
+        "menu should open"
+    );
+}
+
 #[gpui::test]
 fn dialog_follows_the_scripts_state(cx: &mut TestAppContext) {
     let source = r#"

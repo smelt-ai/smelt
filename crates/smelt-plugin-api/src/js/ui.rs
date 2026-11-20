@@ -156,6 +156,37 @@ fn bool_method<T: Send + Sync + 'static>(
     .with_documentation(docs)
 }
 
+/// 弹层贴着触发器的哪个角的方法（下拉菜单、弹出卡片）：`top_left`（默认，从下面左对齐打开）、
+/// `top_right`（从下面右对齐，靠右的按钮用）、`bottom_*`（往上开），记成 `make(角)`。
+fn corner_method<T: Send + Sync + 'static>(
+    owner: &'static str,
+    name: &'static str,
+    docs: &'static str,
+    make: fn(gpui::Anchor) -> T,
+) -> MethodDescriptor {
+    MethodDescriptor::new(
+        name,
+        vec![ArgumentDescriptor::new(
+            "corner",
+            ArgumentSchema::Enum(&["top_left", "top_right", "bottom_left", "bottom_right"]),
+        )],
+        move |args| {
+            let anchor = match args {
+                [ComponentArgument::Enum(corner)] => match corner.as_str() {
+                    "top_left" => gpui::Anchor::TopLeft,
+                    "top_right" => gpui::Anchor::TopRight,
+                    "bottom_left" => gpui::Anchor::BottomLeft,
+                    "bottom_right" => gpui::Anchor::BottomRight,
+                    _ => return Err(format!("{owner}.{name}: unknown corner {corner:?}")),
+                },
+                _ => return Err(format!("{owner}.{name}(corner) expects a corner")),
+            };
+            Ok(ComponentPayload::new(make(anchor)))
+        },
+    )
+    .with_documentation(docs)
+}
+
 /// 不带参数的方法（变体、尺寸），记成 `op`。
 fn flag_method<T: Clone + Send + Sync + 'static>(
     name: &'static str,
