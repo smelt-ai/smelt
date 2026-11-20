@@ -392,3 +392,42 @@ export default class App extends View {
         "{snapshot}"
     );
 }
+
+/// 图标按钮：只给图标是方的（小号 20 见方），关闭控件、浮起的样子也传到真实组件。
+#[gpui::test]
+fn shell_button_icon_dismiss_and_floating(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltButton as Button } from "smelt-ui";
+export default class App extends View {
+  init() { this.hits = [0, 0]; }
+  render() {
+    const hit = i => (_event, cx) => { this.hits[i]++; cx.notify(); };
+    return div().size_full()
+      .child(new Button("close").icon("icons/close.svg").accessibility_label("Close").dismiss().small()
+        .absolute().left(0).top(0).on_click(hit(0)))
+      .child(new Button("pill").icon("icons/arrow-down.svg").label("2 need you").floating().small()
+        .absolute().left(0).top(40).on_click(hit(1)))
+      .child(`hits: ${this.hits.join("|")}`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    let initial = tree(&mut context, &view);
+    for method in ["icon", "dismiss", "floating"] {
+        assert!(
+            initial.contains(&format!(":{method}(registered)")),
+            "{initial}"
+        );
+    }
+    // 小号图标按钮 20 见方：10 在里面，24 已经出去了。
+    for x in [10., 24.] {
+        context.simulate_click(point(px(x), px(10.)), Modifiers::default());
+        draw(&mut context);
+    }
+    context.simulate_click(point(px(10.), px(50.)), Modifiers::default());
+    draw(&mut context);
+    let clicked = tree(&mut context, &view);
+    assert!(clicked.contains("hits: 1|1"), "{clicked}");
+}

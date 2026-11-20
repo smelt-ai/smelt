@@ -18,6 +18,7 @@ const OWNER: &str = "SmeltButton";
 #[derive(Clone)]
 pub(super) enum ButtonOp {
     Label(String),
+    Icon(String),
     AccessibilityLabel(String),
     Tooltip(String),
     Loading(bool),
@@ -26,6 +27,8 @@ pub(super) enum ButtonOp {
     Quiet,
     Danger,
     DangerQuiet,
+    Dismiss,
+    Floating,
     Small,
     Large,
 }
@@ -38,6 +41,12 @@ pub(super) fn methods(owner: &'static str) -> Vec<MethodDescriptor> {
             "label",
             "Sets the visible button label.",
             ButtonOp::Label,
+        ),
+        string_method(
+            owner,
+            "icon",
+            "A line icon by asset path, such as \"icons/plus.svg\", before the label; alone it makes a square icon button (give it accessibility_label).",
+            ButtonOp::Icon,
         ),
         string_method(
             owner,
@@ -60,6 +69,16 @@ pub(super) fn methods(owner: &'static str) -> Vec<MethodDescriptor> {
             ButtonOp::DangerQuiet,
             "Uses the quiet danger role.",
         ),
+        flag_method(
+            "dismiss",
+            ButtonOp::Dismiss,
+            "A close control for a view or row: quiet and faint, never red.",
+        ),
+        flag_method(
+            "floating",
+            ButtonOp::Floating,
+            "Floats over content (a surface fill with a lifted shadow); pair with secondary or quiet.",
+        ),
         flag_method("small", ButtonOp::Small, "Uses the small size."),
         flag_method("large", ButtonOp::Large, "Uses the large size."),
         bool_method(
@@ -78,6 +97,7 @@ pub(super) fn build(owner: &str, request: &MaterializeRequest<'_>) -> anyhow::Re
     for op in ops::<ButtonOp>(request) {
         button = match op {
             ButtonOp::Label(label) => button.label(label.clone()),
+            ButtonOp::Icon(path) => button.icon_path(path.clone()),
             ButtonOp::AccessibilityLabel(label) => button.accessibility_label(label.clone()),
             ButtonOp::Tooltip(tooltip) => button.tooltip(tooltip.clone()),
             ButtonOp::Loading(loading) => button.loading(*loading),
@@ -86,6 +106,8 @@ pub(super) fn build(owner: &str, request: &MaterializeRequest<'_>) -> anyhow::Re
             ButtonOp::Quiet => button.quiet(),
             ButtonOp::Danger => button.danger(),
             ButtonOp::DangerQuiet => button.danger_quiet(),
+            ButtonOp::Dismiss => button.dismiss(),
+            ButtonOp::Floating => button.floating(),
             ButtonOp::Small => button.small(),
             ButtonOp::Large => button.large(),
         };
