@@ -15,14 +15,8 @@ test("在外面的按边数，各边记最近的那一行；看得见的、没�
     notice("far-below", 1, 0),
     notice("not-drawn", 1, 0),
   ];
-  const at = {
-    "far-above": { side: "above", distance: 80 },
-    above: { side: "above", distance: 5 },
-    inside: "visible",
-    below: { side: "below", distance: 30 },
-    "far-below": { side: "below", distance: 120 },
-  };
-  const result = hint(notices, (key) => at[key] ?? null);
+  // 列表按 watch 的顺序报；这里故意打乱，结果只看行在列表里的先后。
+  const result = hint(notices, ["above", "far-above"], ["far-below", "below"]);
   assert.deepEqual(result.above.tally, { need: 1, unread: 1 });
   assert.equal(result.above.nearest.id, "above");
   assert.deepEqual(result.below.tally, { need: 1, unread: 2 });
@@ -30,7 +24,7 @@ test("在外面的按边数，各边记最近的那一行；看得见的、没�
 });
 
 test("都看得见就没有提示", () => {
-  const result = hint([notice("a", 1, 0)], () => "visible");
+  const result = hint([notice("a", 1, 0)], [], []);
   assert.deepEqual(result, {
     above: { tally: { need: 0, unread: 0 }, nearest: null },
     below: { tally: { need: 0, unread: 0 }, nearest: null },

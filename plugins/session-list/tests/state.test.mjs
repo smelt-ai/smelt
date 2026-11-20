@@ -1,96 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { new_sidebar_ui } from "../model.js";
 import * as peers from "../peers.js";
 import { conversations_under, id_to_copy, SessionList, step } from "../state.js";
+import { fact, fake_host, fake_store, list, local_directory, project, terminals } from "./fakes.mjs";
 import { path, t } from "./helpers.mjs";
-
-/** 假宿主：一台本机，目录、派生事实、会话状态都按 machines 给；记下调用和重画。 */
-function fake_host(machines = { "": local_directory() }) {
-  const calls = [];
-  const runs = [];
-  const host = {
-    calls,
-    runs,
-    redraws: 0,
-    clipboard: null,
-    data: machines,
-    machines: () => Object.keys(host.data).map((key) => ({ machine: key === "" ? null : key, name: key || "本机", unavailable: null })),
-    connections: () => ({ remotes: [] }),
-    local_os: "darwin",
-    path_style: () => "posix",
-    workspace_directory: (machine) => host.data[machine ?? ""]?.directory ?? null,
-    session_states: (machine) => host.data[machine ?? ""]?.states ?? [],
-    conversation_facts: (machine) => host.data[machine ?? ""]?.facts ?? [],
-    path,
-    async call(machine, method, params) {
-      calls.push([machine, method, params]);
-      if (host.fail?.(method, params)) throw new Error("运行时拒绝了");
-      return method === "workspace.project.open" ? { epoch: "e", revision: 9 } : null;
-    },
-    async run(command, args) {
-      runs.push([command, args]);
-      if (command === "smelt.app/open-view") return true;
-      return host.answers?.[command] ?? null;
-    },
-    t,
-    redraw: () => (host.redraws += 1),
-    write_clipboard: (text) => (host.clipboard = text),
-    is_dir: async (dir) => dir.startsWith("/dir"),
-    now: () => new Date(2026, 10, 20, 12),
-  };
-  return host;
-}
-
-function fake_store() {
-  const writes = [];
-  const record = (name) => (...args) => writes.push([name, ...args]);
-  return {
-    writes,
-    set_pinned: record("set_pinned"),
-    set_collapsed: record("set_collapsed"),
-    set_project_order: record("set_project_order"),
-    set_conversation_order: record("set_conversation_order"),
-    save_avatar_choice: record("save_avatar_choice"),
-    prune: record("prune"),
-    forget_machine: record("forget_machine"),
-  };
-}
-
-const project = (root, workset = null) => ({ kind: "project", root, workset });
-const fact = (id, placement) => ({ id, name: id, status: "idle", agent: null, automation: false, cwd: null, placement });
-
-function terminals(id, cwd) {
-  return { id, terminals: [{ id: `${id}-t`, cwd }], created_at: 1 };
-}
-
-function local_directory() {
-  const directory = {
-    epoch: "e",
-    revision: 1,
-    projects: ["/repo"],
-    repositories: [],
-    worksets: [{ id: "ws", project_root: "/repo", task: "fix", repositories: [] }],
-    conversations: [
-      { ...terminals("w", "/elsewhere"), workset_id: "ws" },
-      terminals("p", "/repo/sub"),
-      terminals("l", "/tmp/x"),
-      { ...terminals("old", "/repo"), archived_at: 1 },
-    ],
-  };
-  const facts = [
-    fact("w", project("/repo", "ws")),
-    fact("p", project("/repo")),
-    fact("l", project("/tmp/x")),
-    fact("old", { kind: "hidden" }),
-  ];
-  return { directory, facts, states: [] };
-}
-
-function list(host = fake_host(), store = fake_store()) {
-  return new SessionList(host, store, new_sidebar_ui(), { kind: "unset" });
-}
 
 test("关项目连它工作树里的会话一起关", async () => {
   const { directory, facts } = local_directory();

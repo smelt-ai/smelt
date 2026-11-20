@@ -63,7 +63,8 @@ export function fail_key(target) {
  * - machines()、connections()、local_os、path_style(m)、workspace_directory(m)、session_states(m)、
  *   conversation_facts(m)、path：{ clean, file_name, join }
  * - call(m, method, params, timeout_ms)、run(command, args)
- * - t(key, params)、redraw()（重画本插件的视图）、write_clipboard(text)、is_dir(path) → Promise<bool>
+ * - t(key, params)、redraw()（重画本插件的视图）、write_clipboard(text)、
+ *   path_kind(path) → Promise<"dir" | "file" | null>（本机路径是什么，读不了是 null）、parent_dir(path)（本机）
  * - now() → Date
  */
 export class SessionList {
@@ -525,7 +526,7 @@ export class SessionList {
     }
     const dirs = [];
     for (const path of paths) {
-      if (!dirs.includes(path) && (await this.host.is_dir(path).catch(() => false))) dirs.push(path);
+      if (!dirs.includes(path) && (await this.host.path_kind(path).catch(() => null)) === "dir") dirs.push(path);
     }
     for (const dir of dirs) {
       this.report_failure(this.host.t("action.open_project"), this.open_project(null, dir));

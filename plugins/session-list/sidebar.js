@@ -747,10 +747,10 @@ export function merge_project_order(stored, shown, eq = (a, b) => a === b) {
 /**
  * 置顶状态改了之后，把 item 挪到组里置顶区和其余之间的交界：新置顶的排在置顶区最后，取消置顶
  * 的排在其余的最前。不挪的话它会落在按原顺序算出的位置，点完要满屏找。order 是组里眼下从上到
- * 下的顺序，pinned 是改过之后的置顶判断。
+ * 下的顺序，pinned 是改过之后的置顶判断，eq 判断两项是不是同一个（默认 ===）。
  */
-export function move_to_pin_boundary(order, item, pinned) {
-  const rest = order.filter((id) => id !== item);
+export function move_to_pin_boundary(order, item, pinned, eq = (a, b) => a === b) {
+  const rest = order.filter((id) => !eq(id, item));
   return [...rest.filter((id) => pinned(id)), item, ...rest.filter((id) => !pinned(id))];
 }
 

@@ -28,25 +28,24 @@ export function tally_label(tally, t) {
 }
 
 /**
- * 按各行在可视区哪边算两边：placement(key) 给 { side: "above" | "below", distance } 或
- * "visible"，没画过的是 null。notices 是 [{ key, tally, session }]。
+ * 按各行在可视区哪边算两边。notices 是 [{ key, tally, session }]，从上到下；above、below 是列表
+ * 报来的在可视区上面、下面的行的 key（压在吸顶标题底下的算在上面）。各边记最近的那一行：上面
+ * 的取最下面那条，下面的取最上面那条。没画过的行两边都不在，不算。
  * 返回 { above, below }，各是 { tally, nearest: session | null }。
  */
-export function hint(notices, placement) {
-  const above = { tally: empty_tally(), nearest: null, distance: Infinity };
-  const below = { tally: empty_tally(), nearest: null, distance: Infinity };
+export function hint(notices, above, below) {
+  const up = new Set(above);
+  const down = new Set(below);
+  const side = () => ({ tally: empty_tally(), nearest: null });
+  const result = { above: side(), below: side() };
   for (const notice of notices) {
-    const at = placement(notice.key);
-    if (!at || at === "visible") continue;
-    const side = at.side === "above" ? above : below;
-    add_tally(side.tally, notice.tally);
-    if (at.distance < side.distance) {
-      side.distance = at.distance;
-      side.nearest = notice.session;
+    if (up.has(notice.key)) {
+      add_tally(result.above.tally, notice.tally);
+      result.above.nearest = notice.session;
+    } else if (down.has(notice.key)) {
+      add_tally(result.below.tally, notice.tally);
+      result.below.nearest ??= notice.session;
     }
   }
-  return {
-    above: { tally: above.tally, nearest: above.nearest },
-    below: { tally: below.tally, nearest: below.nearest },
-  };
+  return result;
 }
