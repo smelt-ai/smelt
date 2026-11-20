@@ -12,9 +12,9 @@ use gpui_shell::{HostObject, HostValue};
 use smelt_ui::kit::{RADIUS, TYPE, TextStyle, elevation};
 use smelt_ui::ui_theme;
 
-/// `0xRRGGBB` 写成 `#rrggbb`。
+/// `0xRRGGBB` 写成 `#rrggbb`，同组件颜色参数收的写法（[`crate::hex_color`]）。
 fn solid(color: u32) -> HostValue {
-    format!("#{:06x}", color & 0xff_ffff).into()
+    crate::hex_color(color).into()
 }
 
 /// 带透明度的写成 `#rrggbbaa`。

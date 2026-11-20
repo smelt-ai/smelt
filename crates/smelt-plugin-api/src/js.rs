@@ -133,9 +133,9 @@ export interface StatusMenu {
   /** 点开的菜单，从上往下。 */
   items?: StatusMenuItem[];
 }
-/** 菜单栏菜单里的一项。icon.png 是 asset() 取的 PNG 路径，只取透明度当形状，涂成 color（0xRRGGBB）。 */
+/** 菜单栏菜单里的一项。icon.png 是 asset() 取的 PNG 路径，只取透明度当形状，涂成 color（#rrggbb 写法，主题色直接给）。 */
 export type StatusMenuItem =
-  | { type: "action"; label: string; icon?: { png: string; color: number } | null; command: string; args?: unknown }
+  | { type: "action"; label: string; icon?: { png: string; color: string } | null; command: string; args?: unknown }
   | { type: "separator" };
 /**
  * 那个视图此刻看得见；设置页是设置开着、停在这一页。变了发 shown_views_changed。

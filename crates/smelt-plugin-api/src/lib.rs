@@ -49,6 +49,7 @@ pub use smelt_ui::theme_catalog::{
 // 接口库自己的界面文案（docs/i18n.md）。
 rust_i18n::i18n!("locales", fallback = "en");
 
+mod color;
 mod command;
 mod connections;
 mod context;
@@ -72,6 +73,7 @@ mod view;
 #[cfg(feature = "js")]
 pub mod js;
 
+pub use color::{hex_color, parse_hex_color};
 pub use command::{
     Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, RunCommand,
     arg_fields, command, commands, invoke, no_main_window, register_commands, run,

@@ -773,6 +773,37 @@ export default class App extends View {
     assert!(snapshot.contains(":items(registered)"), "{snapshot}");
 }
 
+/// 颜色参数和元素样式、theme() 一个写法（#rgb、#rrggbb）；带透明度的、数字的拒掉。
+#[gpui::test]
+fn color_arguments_take_theme_colors(cx: &mut TestAppContext) {
+    let source = r##"
+import { View, div } from "gpui-kit";
+import { SmeltKeybind, SmeltMenuItem } from "smelt-ui";
+export default class App extends View {
+  render() {
+    let rejected = 0;
+    for (const bad of [
+      () => SmeltKeybind.new("1").backdrop(0x112233),
+      () => SmeltKeybind.new("1").backdrop("#11223380"),
+      () => SmeltMenuItem.new("Light").icon_color("green"),
+    ]) {
+      try { bad(); } catch (_) { rejected++; }
+    }
+    SmeltMenuItem.new("Light").icon_color("#1a7f37");
+    return div().size_full()
+      .child(SmeltKeybind.new("1").backdrop("#f6f6f6"))
+      .child(SmeltKeybind.new("2").backdrop("#fff"))
+      .child(`rejected: ${rejected}`);
+  }
+}
+"##;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    let snapshot = tree(&mut context, &view);
+    assert!(snapshot.contains("rejected: 3"), "{snapshot}");
+    assert!(snapshot.contains(":backdrop(registered)"), "{snapshot}");
+}
+
 /// 按实例建的视图，记下打开它的参数。
 struct Probe {
     args: serde_json::Value,

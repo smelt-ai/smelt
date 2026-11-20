@@ -370,18 +370,16 @@ fn item_methods() -> Vec<MethodDescriptor> {
         ),
         MethodDescriptor::new(
             "icon_color",
-            vec![ArgumentDescriptor::new("color", ArgumentSchema::Number)],
+            vec![ArgumentDescriptor::new("color", ArgumentSchema::String)],
             |args| match args {
-                [ComponentArgument::Number(color)]
-                    if color.fract() == 0. && (0. ..=f64::from(0xFF_FF_FF)).contains(color) =>
-                {
-                    Ok(ComponentPayload::new(ItemOp::IconColor(*color as u32)))
-                }
-                _ => Err(format!("{ITEM}.icon_color(color) expects 0xRRGGBB")),
+                [ComponentArgument::String(color)] => crate::parse_hex_color(color)
+                    .map(|color| ComponentPayload::new(ItemOp::IconColor(color)))
+                    .map_err(|error| format!("{ITEM}.icon_color: {error}")),
+                _ => Err(format!("{ITEM}.icon_color(color) expects \"#rrggbb\"")),
             },
         )
         .with_documentation(
-            "A status color of the line icon itself (such as a connection light), instead of the text color.",
+            "A status color of the line icon itself (such as a connection light), instead of the text color: \"#rgb\" or \"#rrggbb\", such as a theme() color.",
         ),
         MethodDescriptor::new(
             "png",

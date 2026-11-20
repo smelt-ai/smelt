@@ -78,18 +78,16 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
             .with_methods(vec![
                 MethodDescriptor::new(
                     "backdrop",
-                    vec![ArgumentDescriptor::new("color", ArgumentSchema::Number)],
+                    vec![ArgumentDescriptor::new("color", ArgumentSchema::String)],
                     |args| match args {
-                        [ComponentArgument::Number(color)]
-                            if color.fract() == 0. && (0. ..=f64::from(0xFF_FF_FF)).contains(color) =>
-                        {
-                            Ok(ComponentPayload::new(Backdrop(*color as u32)))
-                        }
-                        _ => Err(format!("{OWNER}.backdrop(color) expects 0xRRGGBB")),
+                        [ComponentArgument::String(color)] => crate::parse_hex_color(color)
+                            .map(|color| ComponentPayload::new(Backdrop(color)))
+                            .map_err(|error| format!("{OWNER}.backdrop: {error}")),
+                        _ => Err(format!("{OWNER}.backdrop(color) expects \"#rrggbb\"")),
                     },
                 )
                 .with_documentation(
-                    "The color under the keycaps (0xRRGGBB) when they sit on a popover or card instead of the page background.",
+                    "The color under the keycaps (\"#rgb\" or \"#rrggbb\", such as a theme() color) when they sit on a popover or card instead of the page background.",
                 ),
             ])
             .with_documentation(

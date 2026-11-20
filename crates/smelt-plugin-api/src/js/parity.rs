@@ -61,6 +61,14 @@ const SURFACE: &[(&str, Js)] = &[
     ("conversation_cwd", Via("conversation_facts 里的 cwd")),
     ("placement", Via("conversation_facts 里的 placement")),
     ("new_session_icon", Same),
+    (
+        "hex_color",
+        RustOnly("Rust 的 0xRRGGBB 写成脚本那边的 #rrggbb；JS 本来就用这种写法，theme() 给的就是"),
+    ),
+    (
+        "parse_hex_color",
+        RustOnly("宿主解析脚本给的颜色参数用；JS 直接传 #rrggbb 字符串"),
+    ),
     ("conversation_acp", Same),
     (
         "host.notification_permission",
