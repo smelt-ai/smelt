@@ -18,7 +18,9 @@ use gpui_shell::{
 use smelt_ui::TextInput;
 use smelt_ui::field::InputState;
 
-use super::{bool_method, callback_method, finish_leaf, flag_method, ops, string_method};
+use super::{
+    bool_method, callback_method, disabled_method, finish_leaf, flag_method, ops, string_method,
+};
 
 const STATE: &str = "SmeltInputState";
 const OWNER: &str = "SmeltTextInput";
@@ -42,7 +44,7 @@ impl ComponentMaterializer for TextInputMaterializer {
             .downcast_ref::<ComponentArgument>()
             .ok_or_else(|| anyhow::anyhow!("{OWNER} received an incompatible payload"))?;
         let state = request.with_state::<Entity<InputState>, _>(argument, Clone::clone)?;
-        let mut input = TextInput::new(&state);
+        let mut input = TextInput::new(&state).disabled(request.disabled());
         if let Some(on_escape) = ops::<OnEscape>(&request).last() {
             let callback = request.resolve_callback(&on_escape.0)?;
             input = input.on_escape(move |window, cx| {
@@ -144,6 +146,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                     "Shows a clear button at the end while the field has text; for filters.",
                     InputOp::Cleanable,
                 ),
+                disabled_method(OWNER),
                 callback_method(
                     OWNER,
                     "on_escape",

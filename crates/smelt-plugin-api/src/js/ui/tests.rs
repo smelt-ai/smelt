@@ -173,7 +173,7 @@ export default class App extends View {
   init() { this.on = false; this.pick = "a"; }
   render() {
     return div().size_full()
-      .child(SmeltCheckbox.new("box").label("Box").checked(this.on)
+      .child(SmeltCheckbox.new("box").accessibility_label("Box").checked(this.on)
         .absolute().left(0).top(0)
         .on_change((checked, cx) => { this.on = checked; cx.notify(); }))
       .child(SmeltRadio.new("a").label("A").checked(this.pick === "a")
@@ -231,6 +231,34 @@ export default class App extends View {
     draw(&mut context);
     let typed = tree(&mut context, &view);
     assert!(typed.contains("query: [abc]"), "{typed}");
+}
+
+/// 写入跑着时框是禁用的：点了打字不进去。
+#[gpui::test]
+fn disabled_text_input_takes_no_text(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltInputState, SmeltTextInput } from "smelt-ui";
+export default class App extends View {
+  init() {
+    this.name = SmeltInputState.new();
+    this.name.on("change", (_event, cx) => cx.notify());
+  }
+  render() {
+    return div().size_full()
+      .child(SmeltTextInput.new(this.name).aria_label("Name").disabled(true)
+        .absolute().left(0).top(0).w(200))
+      .child(`name: [${this.name.value()}]`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    click(&mut context, 40., 12.);
+    context.simulate_input("abc");
+    draw(&mut context);
+    let typed = tree(&mut context, &view);
+    assert!(typed.contains("name: []"), "{typed}");
 }
 
 /// 改名：一出来就拿到焦点、原名全选，直接打字就换掉。

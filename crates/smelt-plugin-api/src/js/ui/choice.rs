@@ -22,6 +22,7 @@ const RADIO: &str = "SmeltRadio";
 #[derive(Clone)]
 enum ChoiceOp {
     Label(String),
+    AccessibilityLabel(String),
     Checked(bool),
     Changed(ComponentArgument),
 }
@@ -35,6 +36,7 @@ impl ComponentMaterializer for CheckboxMaterializer {
         for op in ops::<ChoiceOp>(&request) {
             checkbox = match op {
                 ChoiceOp::Label(label) => checkbox.label(label.clone()),
+                ChoiceOp::AccessibilityLabel(label) => checkbox.accessibility_label(label.clone()),
                 ChoiceOp::Checked(checked) => checkbox.checked(*checked),
                 ChoiceOp::Changed(callback) => {
                     let callback = request.resolve_callback(callback)?;
@@ -61,6 +63,7 @@ impl ComponentMaterializer for RadioMaterializer {
         for op in ops::<ChoiceOp>(&request) {
             radio = match op {
                 ChoiceOp::Label(label) => radio.label(label.clone()),
+                ChoiceOp::AccessibilityLabel(label) => radio.accessibility_label(label.clone()),
                 ChoiceOp::Checked(checked) => radio.checked(*checked),
                 ChoiceOp::Changed(callback) => {
                     let callback = request.resolve_callback(callback)?;
@@ -87,6 +90,12 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                 "label",
                 "Sets the visible label, which is also the accessible name; clicking it toggles the control.",
                 ChoiceOp::Label,
+            ),
+            string_method(
+                owner,
+                "accessibility_label",
+                "Names the control for screen readers when it has no visible label, such as a checkbox at the head of a row.",
+                ChoiceOp::AccessibilityLabel,
             ),
             bool_method(
                 owner,
