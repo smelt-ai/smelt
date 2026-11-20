@@ -71,7 +71,11 @@ impl Render for ConversationView {
             overlay_enter(id, EnterFrom::Below, window, cx)
         });
         let elicit_keyboard = self.elicit_focus.contains_focused(window, cx);
-        let prompt_rail = self.render_prompt_rail(window, cx);
+        let prompt_rail = prompt_rail::prompt_rail_fits(self.list_state.viewport_bounds().size)
+            .then(|| self.prompt_rail())
+            .and_then(|rail| {
+                prompt_rail::render_prompt_rail(&rail, self.prompt_rail_hover.as_ref(), window, cx)
+            });
         self.view(
             composer_focus,
             sweep_presence,

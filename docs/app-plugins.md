@@ -330,7 +330,7 @@ export default class Plugin extends View {
 | --- | --- | --- |
 | `session-list` | 会话数据带派生事实 | 整个会话列表：分组、置顶、排序、折叠、拖动、菜单、新建会话和仓库两个对话框、设置页 |
 | `sessions` | — | 会话视图（舞台、分屏、选中、恢复）、新建和续接的命令 |
-| `conversation` | 对话流、markdown、diff、输入框、ACP 连接 | 对话页的摆法（待定） |
+| `conversation` | 对话流、markdown、diff、输入框、ACP 连接；提问导航的数据（有哪几问、正在读哪一问、某一问的预览）和跳到某一问 | 对话页的摆法（待定）；提问导航的画法、悬停和动效（Rust 版已按这个分好，见 `view/render/prompt_rail.rs`） |
 | `terminal` | 终端视图实例 | 终端外围的菜单、标题 |
 | `buddies` | 3D 小人的解码和画法 | 哪段会话配哪个小人、状态反应、打招呼 |
 | `agents`、`automations`、`capabilities`、`skills`、`archive`、`history` | 缺的话题和控制方法补在 smeltd | 全部 |
@@ -412,6 +412,7 @@ export default class Plugin extends View {
 - gpui-shell 没有通用的拖放绑定，拖放用 `smelt-ui` 的：`SmeltDragItem.new(id, kind)` 是能拖着换位置的一项，同一 `kind` 的项之间互放，放下时 `on_drop(from, before, top)` 交给脚本（`top` 是松手时牌子上沿的窗口 y，交给 `SmeltFlip.from_top` 让那一项从手放下的地方落下）；`SmeltScrollView` 里拖到上下边缘自动滚，`on_drop_files(paths)` 收从访达拖进来的文件。
 - gpui-shell 的 `gpui-shell.json` 拒绝未知字段，所以插件的一切都通过宿主函数登记。命令用 `register_commands` 登记，用 `next_command` 取下一条要执行的，做完用 `resolve_command` / `reject_command` 按 id 交回结果。命令只管工作台级的动作；跟着焦点变的键（列表上下移动、输入框编辑）用视图自己的 action。
 - 绕过 smeltd 的修改（手改 Pi 配置文件、直接用 `pi` 命令行）现在收不到，要 smeltd 去监视文件才能补上。
+- gpui-shell 的 `spring` / `transition` 只动 `opacity`、`width`、`height`、`left`、`top`，动不了颜色：颜色过渡写成底色上叠一层、动它的透明度。新挂上的元素弹簧首帧就到位，脚本里没有浮层那样的入场（淡入）零件；提问导航的预览卡迁过去时要补。
 - 手机端是 Flutter，跑不了 gpui-shell。插件只影响桌面，手机直接用 smeltd 协议。
 
 ## 参考

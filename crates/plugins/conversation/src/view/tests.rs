@@ -5703,7 +5703,9 @@ fn the_prompt_rail_reaches_every_prompt_while_scrolling(cx: &mut gpui::TestAppCo
     draw_settled(cx);
     let reading = |cx: &mut gpui::VisualTestContext| {
         view.read_with(cx, |view, _| {
-            view.reading_prompt_tick(&view.prompt_rail_entries())
+            let rail = view.prompt_rail();
+            rail.reading
+                .and_then(|ix| rail.prompts.iter().position(|p| *p == ix))
         })
     };
     assert_eq!(
