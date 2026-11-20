@@ -54,10 +54,6 @@ action:
   split:
     en: "split the view"
     zh-CN: "分屏"
-agent:
-  monogram_empty:
-    en: "A"
-    zh-CN: "智"
 archive:
   confirm:
     en: "Archive"

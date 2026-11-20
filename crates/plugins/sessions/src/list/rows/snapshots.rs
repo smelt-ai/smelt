@@ -2,13 +2,13 @@
 //! 比对。
 //!
 //! ```sh
-//! cargo test -j 2 -p smelt-sessions session_avatar_snapshots -- --ignored --nocapture
+//! cargo test -j 2 -p smelt-session-list session_avatar_snapshots -- --ignored --nocapture
 //! ```
 //!
-//! 图在 `target/tmp/snapshots/sessions/avatar-{light,dark,...}.png`，2 倍像素。小人归别的插件，
-//! 这里用两列顶替：左列是类似真实 buddy 的浅色圆团子，右列是花花绿绿的像素块（模拟小标压在
-//! 最难认的花色上）。每两行是一种小标（智能体首字、Claude、Antigravity、Codex、终端），
-//! 依次是普通行和选中行。
+//! 图在 `target/tmp/snapshots/sessions/avatar-{light,dark,...}.png`，2 倍像素。每行最左是
+//! 没人填头像插槽时的行首图标；小人归别的插件，后面用替身：三个仿真团子（一个戴深色帽子），
+//! 加一块花花绿绿的像素块（模拟小标压在最难认的花色上）。每三行是一种小标（智能体用的 Pi、
+//! Claude、Antigravity、Codex、终端），依次是闲着、在跑（选中）、要你。
 //!
 //! 默认不跑：主题色板是进程级全局，和并行的其它测试会互相盖掉。
 
@@ -81,10 +81,26 @@ fn render(theme: &str, extra_sources: &[String], path: &Path) {
         );
     });
     let window = cx
-        .open_window(size(px(330.), px(500.)), |window, cx| {
-            let buddy: AnyView = cx.new(|_| BuddyStandIn).into();
-            let checker: AnyView = cx.new(|_| StandIn).into();
-            let sheet = cx.new(|_| Sheet { buddy, checker });
+        .open_window(size(px(380.), px(720.)), |window, cx| {
+            let figures: Vec<AnyView> = vec![
+                cx.new(|_| BuddyStandIn {
+                    body: 0x9fd8ee,
+                    hat: false,
+                })
+                .into(),
+                cx.new(|_| BuddyStandIn {
+                    body: 0xf4c6d7,
+                    hat: true,
+                })
+                .into(),
+                cx.new(|_| BuddyStandIn {
+                    body: 0xd8ecb0,
+                    hat: false,
+                })
+                .into(),
+                cx.new(|_| StandIn).into(),
+            ];
+            let sheet = cx.new(|_| Sheet { figures });
             cx.new(|cx| gpui_base::Root::new(sheet, window, cx))
         })
         .expect("开离屏窗口");
@@ -101,17 +117,46 @@ fn render(theme: &str, extra_sources: &[String], path: &Path) {
         .unwrap_or_else(|error| panic!("写 {} 失败: {error}", path.display()));
 }
 
-/// 模拟常见 buddy 颜色（无外边框的柔和青绿圆团子）。
-struct BuddyStandIn;
+/// 顶替小人：压扁的蛋形团子、两只黑眼睛，可戴一顶深色帽子，接近真实小人在 36 见方画布里的样子。
+struct BuddyStandIn {
+    body: u32,
+    hat: bool,
+}
 
 impl Render for BuddyStandIn {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let eye = || div().size(px(4.)).rounded_full().bg(rgb(0x1d1d24));
         div()
             .size(px(AVATAR))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(div().size(px(30.)).rounded_full().bg(rgb(0x88d4e0)))
+            .relative()
+            .child(
+                div()
+                    .absolute()
+                    .left(px(4.))
+                    .bottom(px(2.))
+                    .w(px(28.))
+                    .h(px(if self.hat { 22. } else { 26. }))
+                    .rounded(px(13.))
+                    .bg(rgb(self.body))
+                    .flex()
+                    .justify_center()
+                    .gap(px(7.))
+                    .pt(px(9.))
+                    .child(eye())
+                    .child(eye()),
+            )
+            .when(self.hat, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(6.))
+                        .top(px(4.))
+                        .w(px(24.))
+                        .h(px(10.))
+                        .rounded_t(px(10.))
+                        .bg(rgb(0x2b2b38)),
+                )
+            })
     }
 }
 
@@ -137,141 +182,69 @@ impl Render for StandIn {
 }
 
 struct Sheet {
-    buddy: AnyView,
-    checker: AnyView,
+    figures: Vec<AnyView>,
 }
 
 impl Render for Sheet {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let pi = ConversationAgentKind::Pi;
         let claude = ConversationAgentKind::Claude;
         let antigravity = ConversationAgentKind::Antigravity;
         let codex = ConversationAgentKind::Codex;
         let icons = [
-            (
-                RowIcon::Agent {
-                    mark: "开".into(),
-                    name: "开发助理".into(),
-                },
-                "开发助理",
-            ),
-            (
-                RowIcon::Provider {
-                    path: claude.icon_asset().into(),
-                    label: claude.label().into(),
-                },
-                "Claude",
-            ),
-            (
-                RowIcon::Provider {
-                    path: antigravity.icon_asset().into(),
-                    label: antigravity.label().into(),
-                },
-                "Antigravity",
-            ),
-            (
-                RowIcon::Provider {
-                    path: codex.icon_asset().into(),
-                    label: codex.label().into(),
-                },
-                "Codex",
-            ),
-            (RowIcon::Terminal, "Terminal"),
+            RowIcon::Provider {
+                path: pi.icon_asset().into(),
+                label: format!("开发助理 · {}", pi.label()).into(),
+            },
+            RowIcon::Provider {
+                path: claude.icon_asset().into(),
+                label: claude.label().into(),
+            },
+            RowIcon::Provider {
+                path: antigravity.icon_asset().into(),
+                label: antigravity.label().into(),
+            },
+            RowIcon::Provider {
+                path: codex.icon_asset().into(),
+                label: codex.label().into(),
+            },
+            RowIcon::Terminal,
         ];
-        let cases = [(AgentStatus::Idle, false), (AgentStatus::Running, true)];
         let mut rows = Vec::new();
-        let variant_badge = |icon: &RowIcon, border: bool, shadow: Option<Vec<gpui::BoxShadow>>| {
-            let color = rgb(ui_theme::text());
-            let glyph = |path: SharedString| {
-                svg()
-                    .path(path)
-                    .size(px(BADGE_GLYPH))
-                    .text_color(color)
-                    .into_any_element()
-            };
-            let mark = match icon {
-                RowIcon::Agent { mark, .. } => div()
-                    .text_size(px(BADGE_MARK))
-                    .line_height(px(BADGE_MARK + 1.))
-                    .font_weight(TYPE.ui_medium.weight)
-                    .text_color(color)
-                    .child(mark.clone())
-                    .into_any_element(),
-                RowIcon::Provider { path, .. } => glyph(path.clone()),
-                RowIcon::Terminal => glyph(IconName::Terminal.path()),
-                RowIcon::Conversation => glyph(IconName::MessageSquare.path()),
-            };
-            div()
-                .absolute()
-                .right(px(-3.))
-                .bottom(px(-2.))
-                .size(px(BADGE))
-                .rounded_full()
-                .bg(rgb(ui_theme::surface()))
-                .when(border, |d| {
-                    d.border_1().border_color(ui_theme::hair_strong())
-                })
-                .when_some(shadow, |d, s| d.shadow(s))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(mark)
-        };
-        let avatar_with = |id: &str, figure: AnyView, icon: &RowIcon, border: bool, shadow| {
-            div()
-                .id(eid(id.to_string()))
-                .relative()
-                .size(px(AVATAR))
-                .flex_shrink_0()
-                .child(figure)
-                .child(variant_badge(icon, border, shadow))
-        };
-        for (i, (icon, label)) in icons.iter().enumerate() {
-            for (k, (status, selected)) in cases.into_iter().enumerate() {
-                // 1: 纯无边无影  2: 无边+elements(当前)  3: 无边+raised  4: 旧 1px hair_strong+elements
-                let c1 = avatar_with(
-                    &format!("c1-{i}-{k}"),
-                    self.buddy.clone(),
-                    icon,
-                    false,
-                    None,
-                );
-                let c2 = session_avatar(&format!("c2-{i}-{k}"), Some(self.buddy.clone()), icon);
-                let c3 = avatar_with(
-                    &format!("c3-{i}-{k}"),
-                    self.checker.clone(),
-                    icon,
-                    false,
-                    Some(elevation::raised()),
-                );
-                let c4 = avatar_with(
-                    &format!("c4-{i}-{k}"),
-                    self.checker.clone(),
-                    icon,
-                    true,
-                    Some(elevation::elements()),
-                );
-                let tail = match status {
-                    AgentStatus::Running => div()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(rgb(ui_theme::run()))
-                        .child("18s"),
-                    _ => div()
-                        .type_style(TYPE.text_xsmall)
-                        .text_color(rgb(ui_theme::row_faint(selected)))
-                        .child("5m"),
+        for (i, icon) in icons.iter().enumerate() {
+            for (status, selected) in [
+                (AgentStatus::Idle, false),
+                (AgentStatus::Running, true),
+                (AgentStatus::NeedsYou, false),
+            ] {
+                let label = match icon {
+                    RowIcon::Provider { label, .. } => label.clone(),
+                    RowIcon::Terminal => "Terminal".into(),
+                    RowIcon::Conversation => "Conversation".into(),
                 };
                 rows.push(
-                    ListRow::new(eid(format!("row-{i}-{k}")))
+                    ListRow::new(eid(format!("row-{i}-{status:?}")))
                         .selected(selected)
                         .h(px(AVATAR_ROW))
                         .px_2()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .child(c1)
-                        .child(c2)
-                        .child(c3)
-                        .child(c4)
+                        .gap_3()
+                        .child(session_icon(
+                            &format!("lead-{i}-{status:?}"),
+                            icon,
+                            status,
+                            selected,
+                            None,
+                        ))
+                        .children(self.figures.iter().enumerate().map(|(k, figure)| {
+                            session_avatar(
+                                &format!("{k}-{i}-{status:?}"),
+                                Some(figure.clone()),
+                                icon,
+                                status,
+                            )
+                        }))
                         .child(
                             div()
                                 .flex_1()
@@ -281,9 +254,8 @@ impl Render for Sheet {
                                 } else {
                                     ui_theme::muted()
                                 }))
-                                .child(*label),
-                        )
-                        .child(tail),
+                                .child(label),
+                        ),
                 );
             }
         }

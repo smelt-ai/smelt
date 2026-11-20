@@ -56,10 +56,11 @@ const LEAD: f32 = 16.;
 /// 会话行首头像的边长，和放得下它的会话行高。没人填头像插槽时行首是图标，行高照常。
 const AVATAR: f32 = 36.;
 const AVATAR_ROW: f32 = 44.;
-/// 头像右下角标明哪家 CLI、哪个智能体的小圆标，和里面图标、首字的大小。
-const BADGE: f32 = 18.;
-const BADGE_GLYPH: f32 = 12.;
-const BADGE_MARK: f32 = 11.;
+/// 头像右下角标明哪家 CLI 的小标：图标的大小，和沿轮廓描的那圈边有多宽、用几份错开的图标
+/// 拼出来。小标是次要信息，不到头像一半大，免得盖住小人、比标题还抢眼。
+const BADGE: f32 = 13.;
+const BADGE_HALO: f32 = 1.5;
+const BADGE_HALO_COPIES: usize = 12;
 
 /// 画一遍要的东西：算好的侧栏，加上视图上的临时状态。
 pub(super) struct RowCtx {
@@ -1273,7 +1274,7 @@ fn session_face<E: gpui::Styled + gpui::ParentElement + IntoElement>(
     // 有头像时少缩一级（见 [`session`]）。
     let (lead, depth) = match &look.lead {
         SessionLead::Avatar(figure) => (
-            session_avatar(&id, figure.clone(), &row.icon),
+            session_avatar(&id, figure.clone(), &row.icon, row.status),
             look.depth.saturating_sub(1),
         ),
         SessionLead::Icon => (
@@ -1399,49 +1400,69 @@ fn status_color(status: AgentStatus, selected: bool, glow: Option<f32>) -> Rgba 
     }
 }
 
+/// 头像小标的颜色，见 [`session_avatar`]。
+fn badge_color(status: AgentStatus) -> Rgba {
+    match status {
+        AgentStatus::Idle => rgb(ui_theme::text()),
+        AgentStatus::Running | AgentStatus::NeedsYou => ui_theme::session_dot_color(status),
+    }
+}
+
 /// 行首的头像：`figure` 是填进插槽的视图给这段会话的实例（还没建好是 `None`，空着）。右下角的
-/// 小标只标明是哪家 CLI（智能体对话是名字的第一个字），不承载状态色：状态由小人动作和行尾
-/// 文字说话，免得彩圈在各个主题下压过小人或和底色打架。
+/// 小标标明是哪家 CLI（智能体对话是它底下的引擎），图标跟着状态上色：在跑、要你用状态色，
+/// 闲着用正文色（不像没头像时的行首图标那样转灰：小标本来就小，再灰就认不出了）。在跑也不
+/// 做进入时的提亮，小人自己在动，小标保持安静。
 ///
-/// 小标用不透明的浮起面 `surface` 托底，只靠 `elevation::elements` 极轻的贴身阴影从彩色
-/// 小人上隔开，不画单独边框；图标恒用高对比的正文色 `text`，留出内边距，深浅主题和花色
-/// 背景上都认得清。
-fn session_avatar(id: &str, figure: Option<AnyView>, icon: &RowIcon) -> AnyElement {
-    let color = rgb(ui_theme::text());
-    let glyph = |path: SharedString| {
-        svg()
-            .path(path)
-            .size(px(BADGE_GLYPH))
-            .text_color(color)
-            .into_any_element()
-    };
-    let (mark, tip): (AnyElement, Option<SharedString>) = match icon {
-        RowIcon::Agent { mark, name } => (
-            div()
-                .text_size(px(BADGE_MARK))
-                .line_height(px(BADGE_MARK + 1.))
-                .font_weight(TYPE.ui_medium.weight)
+/// 小标不垫圆底，像贴纸一样贴在小人身上：图标沿轮廓描一圈浮起面 `surface` 色的边，
+/// 把它从花色的小人上隔开，深浅主题下都认得清，又不多出一块盖住小人的圆片。gpui 的 svg 不能
+/// 描边，这圈边是把同一个图标换成边色、往四周错开 [`BADGE_HALO`] 画 [`BADGE_HALO_COPIES`]
+/// 份垫在下面拼出来的。
+fn session_avatar(
+    id: &str,
+    figure: Option<AnyView>,
+    icon: &RowIcon,
+    status: AgentStatus,
+) -> AnyElement {
+    let mark = |color: Rgba| -> AnyElement {
+        let glyph = |path: SharedString| {
+            svg()
+                .path(path)
+                .size(px(BADGE))
                 .text_color(color)
-                .child(mark.clone())
-                .into_any_element(),
-            Some(name.clone()),
-        ),
-        RowIcon::Provider { path, label } => (glyph(path.clone()), Some(label.clone())),
-        RowIcon::Terminal => (glyph(IconName::Terminal.path()), None),
-        RowIcon::Conversation => (glyph(IconName::MessageSquare.path()), None),
+                .into_any_element()
+        };
+        match icon {
+            RowIcon::Provider { path, .. } => glyph(path.clone()),
+            RowIcon::Terminal => glyph(IconName::Terminal.path()),
+            RowIcon::Conversation => glyph(IconName::MessageSquare.path()),
+        }
     };
+    let layer = |x: f32, y: f32, color: Rgba| {
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .size(px(BADGE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(mark(color))
+    };
+    let halo = rgb(ui_theme::surface());
     let badge = div()
         .absolute()
-        .right(px(-3.))
-        .bottom(px(-2.))
+        .right(px(-2.))
+        .bottom(px(-1.))
         .size(px(BADGE))
-        .rounded_full()
-        .bg(rgb(ui_theme::surface()))
-        .shadow(elevation::elements())
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(mark);
+        .children((0..BADGE_HALO_COPIES).map(|k| {
+            let angle = k as f32 * std::f32::consts::TAU / BADGE_HALO_COPIES as f32;
+            layer(BADGE_HALO * angle.cos(), BADGE_HALO * angle.sin(), halo)
+        }))
+        .child(layer(0., 0., badge_color(status)));
+    let tip: Option<SharedString> = match icon {
+        RowIcon::Provider { label, .. } => Some(label.clone()),
+        RowIcon::Terminal | RowIcon::Conversation => None,
+    };
     div()
         .id(eid(format!("session-avatar:{id}")))
         .relative()
@@ -1467,27 +1488,11 @@ fn session_icon(
     let glyph = |path: SharedString| {
         svg()
             .path(path)
-            .size(px(14.))
+            .size(px(LEAD))
             .text_color(color)
             .into_any_element()
     };
     let inner = match icon {
-        RowIcon::Agent { mark, name } => {
-            let name = name.clone();
-            div()
-                .id(eid(format!("session-agent:{id}")))
-                .size(px(LEAD))
-                .rounded_full()
-                .bg(rgb(ui_theme::soft_hover()))
-                .flex()
-                .items_center()
-                .justify_center()
-                .type_style(TYPE.small_medium)
-                .text_color(color)
-                .child(mark.clone())
-                .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
-                .into_any_element()
-        }
         RowIcon::Provider { path, label } => {
             let label = label.clone();
             div()
