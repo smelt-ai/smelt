@@ -58,7 +58,8 @@ const AVATAR: f32 = 36.;
 const AVATAR_ROW: f32 = 44.;
 /// 头像右下角标明哪家 CLI、哪个智能体的小圆标，和里面图标、首字的大小。
 const BADGE: f32 = 18.;
-const BADGE_GLYPH: f32 = 13.;
+const BADGE_GLYPH: f32 = 12.;
+const BADGE_MARK: f32 = 11.;
 
 /// 画一遍要的东西：算好的侧栏，加上视图上的临时状态。
 pub(super) struct RowCtx {
@@ -1272,14 +1273,7 @@ fn session_face<E: gpui::Styled + gpui::ParentElement + IntoElement>(
     // 有头像时少缩一级（见 [`session`]）。
     let (lead, depth) = match &look.lead {
         SessionLead::Avatar(figure) => (
-            session_avatar(
-                &id,
-                figure.clone(),
-                &row.icon,
-                row.status,
-                selected,
-                look.glow,
-            ),
+            session_avatar(&id, figure.clone(), &row.icon),
             look.depth.saturating_sub(1),
         ),
         SessionLead::Icon => (
@@ -1406,21 +1400,13 @@ fn status_color(status: AgentStatus, selected: bool, glow: Option<f32>) -> Rgba 
 }
 
 /// 行首的头像：`figure` 是填进插槽的视图给这段会话的实例（还没建好是 `None`，空着）。右下角的
-/// 小标标明是哪家 CLI（智能体对话是名字的第一个字）。
+/// 小标只标明是哪家 CLI（智能体对话是名字的第一个字），不承载状态色：状态由小人动作和行尾
+/// 文字说话，免得彩圈在各个主题下压过小人或和底色打架。
 ///
-/// 小标垫一块实心圆底，把它从头像上隔开：直接压在彩色像素上，细线条图标和小人的轮廓搅在
-/// 一起认不出。底不取行底色：行底是叠在窗口材质上的半透明色，选中、悬停各不一样，实心色
-/// 对不上；用浮起面的颜色，各种行底上都是同一枚小牌子。图标一律用正文色，它要回答的是
-/// 「哪家」，状态色（尤其闲着的灰、某些主题偏暗的在跑色）压在圆底上对比度不够；状态改由
-/// 圆圈的颜色说（[`status_color`]），闲着只描一圈细边。
-fn session_avatar(
-    id: &str,
-    figure: Option<AnyView>,
-    icon: &RowIcon,
-    status: AgentStatus,
-    selected: bool,
-    glow: Option<f32>,
-) -> AnyElement {
+/// 小标用不透明的浮起面 `surface` 托底，只靠 `elevation::elements` 极轻的贴身阴影从彩色
+/// 小人上隔开，不画单独边框；图标恒用高对比的正文色 `text`，留出内边距，深浅主题和花色
+/// 背景上都认得清。
+fn session_avatar(id: &str, figure: Option<AnyView>, icon: &RowIcon) -> AnyElement {
     let color = rgb(ui_theme::text());
     let glyph = |path: SharedString| {
         svg()
@@ -1432,8 +1418,8 @@ fn session_avatar(
     let (mark, tip): (AnyElement, Option<SharedString>) = match icon {
         RowIcon::Agent { mark, name } => (
             div()
-                .text_size(px(BADGE_GLYPH))
-                .line_height(px(BADGE))
+                .text_size(px(BADGE_MARK))
+                .line_height(px(BADGE_MARK + 1.))
                 .font_weight(TYPE.ui_medium.weight)
                 .text_color(color)
                 .child(mark.clone())
@@ -1451,12 +1437,7 @@ fn session_avatar(
         .size(px(BADGE))
         .rounded_full()
         .bg(rgb(ui_theme::surface()))
-        .map(|badge| match status {
-            AgentStatus::Idle => badge.border_1().border_color(ui_theme::hair()),
-            _ => badge
-                .border(px(1.5))
-                .border_color(status_color(status, selected, glow)),
-        })
+        .shadow(elevation::elements())
         .flex()
         .items_center()
         .justify_center()
