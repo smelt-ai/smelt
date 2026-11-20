@@ -19,6 +19,7 @@ mod catalog;
 mod control_types;
 #[cfg(test)]
 mod parity;
+mod theme;
 pub mod ui;
 mod view;
 
@@ -138,6 +139,35 @@ export function window_active(): boolean;
 export function overlay_open(): boolean;
 /** 现在的界面语言代码（"en"、"zh-CN"）。换了发 locale_changed：插件自己画的字按新语言重画。 */
 export function locale(): string;
+/** smelt 的一档字，三样直接交给元素的同名方法：`.text_size(s.text_size).line_height(s.line_height).font_weight(s.font_weight)`。 */
+export interface TextStyle { text_size: string; line_height: string; font_weight: number }
+/**
+ * smelt 当前主题。palette 是语义色板（名字同 smelt-ui 的 ui_theme），颜色是 #rrggbb，带透明度的是 #rrggbbaa；
+ * 三档按钮色是 [常态, 悬停, 按下]。type 是字阶，按 rem 给，跟着界面字号缩放。radius 单位是像素。
+ * 主题一换视图就重画，render 里现读。
+ */
+export interface SmeltTheme {
+  light: boolean;
+  palette: {
+    bg: string; side: string; surface: string; soft: string; soft_hover: string; soft_press: string;
+    row_hover: string; row_selected: string; hair: string; hair_strong: string;
+    text: string; muted: string; faint: string; muted_selected: string; faint_selected: string;
+    ink: string; ink_hover: string; ink_press: string; on_ink: string;
+    button_primary: string[]; button_primary_foreground: string;
+    button_submit: string[]; button_submit_foreground: string;
+    button_secondary: string[]; button_secondary_foreground: string;
+    focus: string; selection: string; link: string;
+    run: string; need: string; ok: string; bad: string; on_bad: string;
+    popover_text: string; scrim: string; chart: string[];
+  };
+  type: {
+    ui: TextStyle; ui_medium: TextStyle; ui_compact: TextStyle; small: TextStyle; small_medium: TextStyle;
+    body: TextStyle; body_medium: TextStyle; text_small: TextStyle; text_small_medium: TextStyle;
+    text_xsmall: TextStyle; text_xsmall_medium: TextStyle; mono: TextStyle;
+  };
+  radius: { row: number; card: number };
+}
+export function theme(): SmeltTheme;
 /**
  * 插件自己的文案：插件目录下 locales/ui.yml（格式同 Rust crate 的，见 docs/i18n.md）里 key 在当前语言的那条，
  * 没有取英文，再没有给 key 本身。%{name} 按 params 里同名的换。文案表第一次调时读，改了跟着插件重挂。
@@ -1341,6 +1371,7 @@ impl JsPlugin {
                         )
                     })
             })
+            .function("theme", |_| Ok(theme::theme()))
             .function("t", move |arguments| {
                 let key = arguments.string(0)?;
                 let params = match arguments.get(1) {

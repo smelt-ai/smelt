@@ -202,6 +202,10 @@ const JS_ONLY: &[(&str, &str)] = &[
         "conversation_facts",
         "conversation_name、conversation_agent、is_automation_run 和对话状态一次给齐",
     ),
+    (
+        "theme",
+        "smelt_ui::ui_theme 的色板、kit::TYPE 字阶和圆角，Rust 插件直接用",
+    ),
     ("t", "各 crate 的 t!，文案表是插件目录下的 locales/ui.yml"),
     ("locales", "常量 LOCALES"),
     ("store_query", "plugin_store"),
