@@ -1,21 +1,21 @@
 //! 小人：一个小人由几个槽位拼成，职业（拿什么、怎么干活）、身子色、头顶戴的、脸上戴的、脖子上
 //! 戴的（后两样可以没有），戴的东西还各有颜色（不和身子撞色），还有性格（动起来什么样）。全按
-//! 种子（会话 id）落，不让人挑：同一个种子永远是同一个小人。
+//! 种子落：同一个种子永远是同一个小人。
 //!
 //! 不放整段动画：`scripts/buddies_render.py` 用 Blender 渲零件（身子、会转的胳膊和道具、眼睛、
 //! 嘴、戴的、特效，赛车手的车；身子、脸和戴的每个朝向一张，能转身），`scripts/buddies_pack.py` 打包成 [`sprites`]，这里每帧按姿势
 //! （[`Look`]）把零件叠起来画。动作是现算的（[`moves`]）：干活时每拍随机挑一个这一行的动作，
-//! 什么时候眨眼也是随机的，看久了不重样。什么时候演什么（干活、喊你、干完欢呼、被选中打招呼）
-//! 由 [`Stage`] 按状态和露着的会话的变化定。
+//! 什么时候眨眼也是随机的，看久了不重样。演哪一出（干活、喊你、欢呼、打招呼）由用组件的一方
+//! 给，这一出此刻摆成什么样见 [`act`]。
 //!
-//! 零件怎么上色、转角度、叠成一帧见 [`paint`]。数据变化时 [`Buddy::prepare`] 把这个小人要的
-//! 零件画好；每帧只叠，样子没变的帧不重叠（[`Portrait`]）。头顶挂着的部分（天线、毛线帽的球、
+//! 零件怎么上色、转角度、叠成一帧见 [`paint`]。第一次画一个小人后 [`Buddy::prepare`] 把它要的
+//! 零件都画好；每帧只叠，样子没变的帧不重叠（[`Portrait`]）。头顶挂着的部分（天线、毛线帽的球、
 //! 芽）跟着身子慢半拍地晃，要接着上一帧算，状态放在 [`Portrait`] 里（[`swing`]）。
 
+mod act;
 mod moves;
 mod paint;
 mod sprites;
-mod stage;
 mod swing;
 
 use std::sync::Arc;
@@ -26,7 +26,8 @@ use gpui::{
     Window, img, px,
 };
 
-pub(crate) use stage::Stage;
+pub use act::Act;
+pub(crate) use act::Playing;
 
 use moves::{Dice, Look, Role, Temper};
 use paint::{Canvas, MARGIN, Paint, TURN, TURNS, Tint, centroid};
@@ -451,6 +452,21 @@ pub(crate) struct Portrait {
 }
 
 impl Portrait {
+    /// 画 `buddy` 演着 `playing` 在 `now` 的样子，和还要不要下一帧（演着，或者头顶挂着的还在
+    /// 晃）。`moving` 为假（看不见、减弱动态效果）时给定格。
+    pub(crate) fn draw(
+        &mut self,
+        buddy: Buddy,
+        playing: &Playing,
+        now: Instant,
+        moving: bool,
+        window: &mut Window,
+    ) -> (AnyElement, bool) {
+        let (look, animating) = playing.look(buddy, now, moving);
+        let (figure, swinging) = self.show(buddy, look, now, moving, window);
+        (figure, animating || swinging)
+    }
+
     /// 画 `buddy` 在 `now` 摆着 `look` 的样子：盖住 [`CANVAS`] 见方的画布，四周伸出去
     /// [`MARGIN`]（举起来的道具、头顶的特效），外面不裁。`moving` 为假（定格）时挂着的部分
     /// 不晃。另返回挂着的部分还在不在晃，在晃就还要下一帧。

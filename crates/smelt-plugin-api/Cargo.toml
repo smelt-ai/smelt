@@ -35,11 +35,13 @@ rust-i18n.workspace = true
 # 读系统的首选语言。
 sys-locale = "0.3"
 gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b", default-features = false, features = ["quickjs"], optional = true }
+# 小人组件（JS 的 `SmeltBuddy`）。只有 JS 插件用，Rust 插件用不着。
+smelt-buddy = { path = "../smelt-buddy", optional = true }
 # JS 插件的文案（src/js/catalog.rs）：和 Rust crate 用 rust-i18n 构建时同一个加载函数读。
 rust-i18n-support = { version = "4.2", features = ["codegen"], optional = true }
 
 [features]
-js = ["dep:gpui-shell", "dep:rust-i18n-support"]
+js = ["dep:gpui-shell", "dep:rust-i18n-support", "dep:smelt-buddy"]
 
 [dev-dependencies]
 # 由线上类型生成 JS 的类型声明（src/js/control_types.rs）。

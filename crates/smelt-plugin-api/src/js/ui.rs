@@ -2,7 +2,8 @@
 //! `import { SmeltButton } from "smelt-ui"`。
 //!
 //! 是 [`crate::ui`] 的 JS 映射，同一套控件、同一套变体和状态，不照搬别的组件库的属性名。
-//! 只登记插件真用到的控件，缺了再加；每个控件一个子模块。别的插件按实例提供的视图（终端、
+//! 只登记插件真用到的控件，缺了再加；每个控件一个子模块。小人（`SmeltBuddy`）来自
+//! `smelt-buddy`，只有 JS 插件用。别的插件按实例提供的视图（终端、
 //! 对话）经 `SmeltViewInstance` 嵌进来，不按功能各开一个组件。
 //!
 //! 弹层（菜单、确认框）比画出它的那次绘制活得久，脚本回调却只在产生它的那次 render 里
@@ -15,6 +16,8 @@
 mod alert;
 #[deny(dead_code)]
 mod badge;
+#[deny(dead_code)]
+mod buddy;
 #[deny(dead_code)]
 mod button;
 mod carrier;
@@ -90,6 +93,7 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     scroll_view::register(&mut registry)?;
     drag_item::register(&mut registry)?;
     motion::register(&mut registry)?;
+    buddy::register(&mut registry)?;
     registry.freeze()
 }
 

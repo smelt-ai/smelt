@@ -94,7 +94,7 @@
 | 组件库 | `smelt-ui` 的 JS 组件：按钮、菜单、弹层、对话框、下拉、列表行底座、滚动区域、吸顶区段、拖动、悬停提示、键帽、设置页骨架、列表动画（开合、重排、落进来、铺底一闪、开始跑时亮一下） | `crates/smelt-ui` + `smelt-plugin-api/src/js/ui` |
 | Git | 读写仓库 | `crates/smelt-git`，还没映射给 JS |
 | 远程桌面 | 画面组件 | `smelt-runtime-client` 的 `DesktopProxy` |
-| 小人 | 3D 小人的帧解码和画法 | Rust 插件 `crates/plugins/buddies` |
+| 小人 | 会动的 3D 小人：零件、动作、合成、出帧节拍；演哪一出由插件给 | `crates/smelt-buddy`；JS 经 `SmeltBuddy` |
 | 资源量测 | 进程 CPU、内存 | Rust 插件 `crates/plugins/resources` |
 | 更新 | 替换签名过的 App 包（只给随 App 带的更新插件） | `crates/plugins/updater` |
 
@@ -332,7 +332,7 @@ export default class Plugin extends View {
 | `sessions` | — | 会话视图（舞台、分屏、选中、恢复）、新建和续接的命令 |
 | `conversation` | 对话流、markdown、diff、输入框、ACP 连接；提问导航的数据（有哪几问、正在读哪一问、某一问的预览）和跳到某一问 | 对话页的摆法（待定）；提问导航的画法、悬停和动效（Rust 版已按这个分好，见 `view/render/prompt_rail.rs`） |
 | `terminal` | 终端视图实例 | 终端外围的菜单、标题 |
-| `buddies` | 3D 小人的解码和画法 | 哪段会话配哪个小人、状态反应、打招呼 |
+| `buddies` | 组件 `SmeltBuddy`（`crates/smelt-buddy`）：零件、动作、合成、出帧节拍，只听「演哪一出、从什么时候起」 | `plugins/buddies`：哪段会话配哪个小人、什么时候演什么（状态反应、打招呼）、填行首插槽 |
 | `agents`、`automations`、`capabilities`、`skills`、`archive`、`history` | 缺的话题和控制方法补在 smeltd | 全部 |
 | `git` | `smelt-git` 映射给 JS | 界面 |
 | `files` | 大目录的树和搜索、文件预览组件 | 界面 |

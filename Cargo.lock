@@ -10762,7 +10762,6 @@ dependencies = [
  "serde_json",
  "smelt-agents",
  "smelt-automations",
- "smelt-buddies",
  "smelt-capabilities",
  "smelt-cli",
  "smelt-client",
@@ -10834,15 +10833,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-buddies"
+name = "smelt-buddy"
 version = "0.0.0"
 dependencies = [
  "gpui-pre",
  "image",
- "rust-i18n",
- "serde",
- "serde_json",
- "smelt-plugin-api",
 ]
 
 [[package]]
@@ -11189,6 +11184,7 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
+ "smelt-buddy",
  "smelt-client",
  "smelt-client-store",
  "smelt-model",

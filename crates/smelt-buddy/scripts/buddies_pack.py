@@ -1,6 +1,6 @@
 """把 buddies_render.py 渲好的零件打包编进插件（src/buddy/），插件在运行时按姿势拼小人。
 
-  python3 crates/plugins/buddies/scripts/buddies_pack.py target/buddies
+  python3 crates/smelt-buddy/scripts/buddies_pack.py target/buddies
 
 输出：
   assets/buddies.bin            所有零件的 WebP 首尾相接

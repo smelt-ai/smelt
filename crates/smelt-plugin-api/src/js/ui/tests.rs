@@ -137,6 +137,7 @@ fn components_hold_only_smelt_controls() {
             "SmeltArrival",
             "SmeltWash",
             "SmeltGlowIcon",
+            "SmeltBuddy",
         ]
     );
     let states = components
@@ -1358,4 +1359,34 @@ export default class App extends View {
     click(&mut context, 220., 20.);
     let described = tree(&mut context, &view);
     assert!(described.contains("clicks: 1"), "{described}");
+}
+
+/// 小人：脚本给是谁、演哪一出、从什么时候起，画得出来；认不得的戏名、空的 key 当场拒掉。
+#[gpui::test]
+fn buddy_builds_from_scripts(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltBuddy } from "smelt-ui";
+export default class App extends View {
+  render() {
+    let rejected = 0;
+    for (const bad of [
+      () => SmeltBuddy.new("a", "s", "dance", 0),
+      () => SmeltBuddy.new("", "s", "rest", 0),
+      () => SmeltBuddy.new("a", "s", "rest", Number.NaN),
+    ]) {
+      try { bad(); } catch (_) { rejected++; }
+    }
+    return div().size_full().flex()
+      .child(SmeltBuddy.new("one", "conversation-1", "work", Date.now()))
+      .child(SmeltBuddy.new("two", "conversation-2", "cheer", Date.now() - 60000).ml(4))
+      .child(`rejected: ${rejected}`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    let snapshot = tree(&mut context, &view);
+    assert!(snapshot.contains("SmeltBuddy"), "{snapshot}");
+    assert!(snapshot.contains("rejected: 3"), "{snapshot}");
 }

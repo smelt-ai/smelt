@@ -28,7 +28,7 @@ gpui 转不了彩色图，会转的零件（胳膊、手里的道具、方向盘
 
 运行（要装 Blender，`brew install --cask blender`）：
 
-  blender --background --factory-startup --python crates/plugins/buddies/scripts/buddies_render.py \\
+  blender --background --factory-startup --python crates/smelt-buddy/scripts/buddies_render.py \\
       -- target/buddies
 
 输出 <目录>/sprites/<序号>.png、sprites.json（每张的名字、大小、锚点，按成图像素）和 rig.json
