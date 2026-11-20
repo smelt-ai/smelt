@@ -57,6 +57,7 @@ mod context_menu;
 mod event;
 mod facts;
 mod file;
+mod image_asset;
 mod layout;
 mod locale;
 mod menu;
@@ -86,8 +87,9 @@ pub use connections::{
 };
 pub use context::{ActiveContext, ViewedSession, active_context, set_active_context};
 pub use context_menu::{
-    ContextMenuAction, ContextMenuItem, context_menu_args, context_menu_items,
-    register_context_menu_items, unregister_context_menu_items,
+    ContextMenuAction, ContextMenuItem, MenuImage, MenuReport, context_menu_args,
+    context_menu_items, register_context_menu_items, unregister_context_menu_items,
+    with_context_menu_items,
 };
 pub use event::Event;
 pub use facts::{
@@ -95,6 +97,7 @@ pub use facts::{
     is_automation_run, placement,
 };
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
+pub use image_asset::{image_asset, load_image_asset};
 pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutMaterials, LayoutSource, Material, PanelInfo,
     PanelState, STACK_PANEL, Stack, StackAxis, StackContent, StackItem, layout, layout_stacks,

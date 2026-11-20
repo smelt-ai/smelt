@@ -11,7 +11,6 @@ mod acp_client;
 mod agents;
 mod contract;
 mod instance;
-mod menu;
 mod sessions;
 mod view;
 

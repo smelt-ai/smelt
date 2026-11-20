@@ -1373,14 +1373,14 @@ fn message_menu(
         return menu;
     };
     let weak = view.downgrade();
-    let report: crate::menu::Report = std::rc::Rc::new(move |reason, cx| {
+    let report: smelt_plugin_api::MenuReport = std::rc::Rc::new(move |reason, cx| {
         weak.update(cx, |this, cx| {
             this.menu_failure = reason.map(|reason| (index, reason));
             cx.notify();
         })
         .ok();
     });
-    crate::menu::with_plugin_items(
+    smelt_plugin_api::with_context_menu_items(
         menu,
         crate::contract::MESSAGE_MENU,
         &context.machine,

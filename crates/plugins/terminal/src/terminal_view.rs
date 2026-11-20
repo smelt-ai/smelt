@@ -539,14 +539,14 @@ impl TerminalView {
             selection,
         };
         let weak = view.downgrade();
-        let report: crate::menu::Report = Rc::new(move |reason, cx| {
+        let report: smelt_plugin_api::MenuReport = Rc::new(move |reason, cx| {
             weak.update(cx, |this, cx| {
                 this.menu_failure = reason;
                 cx.notify();
             })
             .ok();
         });
-        crate::menu::with_plugin_items(
+        smelt_plugin_api::with_context_menu_items(
             Menu::new().item(copy).item(paste),
             crate::contract::MENU,
             &self.machine,

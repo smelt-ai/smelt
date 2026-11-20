@@ -436,7 +436,8 @@ export function command(id: string): CommandInfo | null;
 /** 画右键菜单时取的一项：args 已经并上 context，点了直接 run(command, args)。 */
 export type ContextMenuEntry = {
   label: string;
-  png: number[] | null;
+  /** 彩色图标的资源路径，和 asset() 给的一样用：SmeltMenuItem.image(path)、image(path)。 */
+  image: string | null;
   icon: string | null;
 } & ({ command: string; args: Record<string, unknown> } | { submenu: ContextMenuEntry[] });
 /**
@@ -504,9 +505,9 @@ export function set_status_menu(menu: StatusMenu | null): null;
 /** 右键菜单里的一项（见 register_context_menu_items）：点了执行 command，或者展开 submenu。 */
 export type ContextMenuItem = {
   label: Text;
-  /** 彩色图标（如应用自己的图标），PNG 字节；有它就不画 icon。 */
-  png?: number[] | null;
-  /** 线性图标的资源路径 "icons/<名字>.svg"，如 "icons/external-link.svg"（名字同 ViewInfo.icon）；png、icon 都没有就不画图标。 */
+  /** 彩色图标（如应用自己的图标）：asset() 取的路径，PNG、SVG 等都行；有它就不画 icon。 */
+  image?: string | null;
+  /** 线性图标的资源路径 "icons/<名字>.svg"，如 "icons/external-link.svg"（名字同 ViewInfo.icon）；image、icon 都没有就不画图标。 */
   icon?: string | null;
   /** 只在这台机器的东西上列（{ machine: null } 是只在本机）；不给是哪台都列。 */
   only_on?: { machine: Machine } | null;
@@ -2415,28 +2416,14 @@ fn context_menu_item(item: &HostValue) -> Result<ContextMenuItem, HostError> {
     let label = text_field(item, "label")
         .map_err(|error| invalid(&error))?
         .ok_or_else(|| invalid("每一项都要有 label"))?;
-    let image = match item.get("png") {
+    let image = match item.get("image") {
         None | Some(HostValue::Null) => None,
-        Some(HostValue::Array(bytes)) => {
-            let bytes = bytes
-                .iter()
-                .map(|byte| match byte {
-                    HostValue::Number(byte)
-                        if (0.0..=255.0).contains(byte) && byte.fract() == 0.0 =>
-                    {
-                        Ok(*byte as u8)
-                    }
-                    _ => Err(invalid(&format!("「{label}」的 png 要是字节（0–255）数组"))),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Some(std::sync::Arc::new(gpui::Image::from_bytes(
-                gpui::ImageFormat::Png,
-                bytes,
-            )))
+        Some(HostValue::Str(path)) if !path.is_empty() => {
+            Some(crate::MenuImage::Asset(path.clone().into()))
         }
         Some(other) => {
             return Err(invalid(&format!(
-                "「{label}」的 png 要是字节数组，收到 {}",
+                "「{label}」的 image 要是 asset() 取的路径，收到 {}",
                 other.describe()
             )));
         }
@@ -2797,19 +2784,14 @@ fn command_value(command: &crate::CommandInfo) -> HostValue {
 
 /// 给脚本画的一项右键菜单：命令的参数已经并上菜单的上下文，点了直接 `run`。
 fn context_menu_value(item: &ContextMenuItem, context: &Value, cx: &App) -> HostValue {
-    let png = item.image.as_ref().map_or(HostValue::Null, |image| {
-        HostValue::Array(
-            image
-                .bytes
-                .iter()
-                .map(|byte| HostValue::Number(f64::from(*byte)))
-                .collect(),
-        )
-    });
+    let image = item
+        .image
+        .as_ref()
+        .map_or(HostValue::Null, |image| image.asset_path().into());
     let object = HostObject::new()
         .field("label", item.label.get().as_ref())
         .field("icon", optional_text(item.icon.as_deref()))
-        .field("png", png);
+        .field("image", image);
     match &item.action {
         ContextMenuAction::Run { command, args } => object
             .field("command", command.as_str())
@@ -3584,7 +3566,7 @@ mod tests {
             object(&[
                 ("label", "Zed".into()),
                 ("command", "example/open".into()),
-                ("png", HostValue::Array(vec![HostValue::Number(256.0)])),
+                ("image", HostValue::Array(vec![HostValue::Number(137.0)])),
             ]),
             object(&[
                 ("label", "Zed".into()),
@@ -3647,10 +3629,7 @@ mod tests {
                 "submenu",
                 HostValue::Array(vec![object(&[
                     ("label", "Zed".into()),
-                    (
-                        "png",
-                        HostValue::Array(vec![HostValue::Number(137.0), HostValue::Number(80.0)]),
-                    ),
+                    ("image", "plugin-assets/example/1/zed.png".into()),
                     ("command", "example/open".into()),
                     ("args", object(&[("app", "zed".into())])),
                 ])]),
@@ -3666,8 +3645,10 @@ mod tests {
         };
         assert_eq!(children[0].machine, None);
         assert_eq!(
-            children[0].image.as_ref().map(|image| image.bytes.clone()),
-            Some(vec![137, 80])
+            children[0].image,
+            Some(crate::MenuImage::Asset(
+                "plugin-assets/example/1/zed.png".into()
+            ))
         );
         assert_eq!(
             children[0].action,
@@ -4041,7 +4022,10 @@ mod tests {
             machine: None,
             action: ContextMenuAction::Submenu(vec![ContextMenuItem {
                 label: "用 Zed".into(),
-                image: None,
+                // 系统给的应用图标常有几十万字节：过插件桥的只是路径。
+                image: Some(crate::MenuImage::Decoded(std::sync::Arc::new(
+                    gpui::Image::from_bytes(gpui::ImageFormat::Png, vec![7; 300_000]),
+                ))),
                 icon: None,
                 machine: None,
                 action: ContextMenuAction::Run {
@@ -4052,10 +4036,18 @@ mod tests {
         };
         let context = serde_json::json!({ "path": "/w/a.rs" });
         let value = cx.update(|cx| context_menu_value(&item, &context, cx));
-        assert_eq!(value.get("png"), Some(&HostValue::Null));
+        assert_eq!(value.get("image"), Some(&HostValue::Null));
         let HostValue::Array(submenu) = value.get("submenu").unwrap() else {
             panic!("要有子菜单");
         };
+        let path = submenu[0].get("image").and_then(HostValue::as_str).unwrap();
+        assert!(path.starts_with("host-images/"), "{path}");
+        assert_eq!(
+            crate::load_image_asset(path)
+                .flatten()
+                .map(|bytes| bytes.len()),
+            Some(300_000)
+        );
         let args = json_value(submenu[0].get("args").unwrap());
         assert_eq!(args, serde_json::json!({ "app": "zed", "path": "/w/a.rs" }));
         assert_eq!(
@@ -4263,7 +4255,10 @@ mod tests {
         };
         run(
             "store_execute",
-            vec!["CREATE TABLE IF NOT EXISTS note (id INTEGER, body TEXT, score REAL, done INTEGER)".into()],
+            vec![
+                "CREATE TABLE IF NOT EXISTS note (id INTEGER, body TEXT, score REAL, done INTEGER)"
+                    .into(),
+            ],
         )
         .unwrap();
         let inserted = run(

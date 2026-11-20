@@ -9,7 +9,6 @@
 
 mod contract;
 mod instance;
-mod menu;
 mod settings_page;
 mod store;
 mod terminal;

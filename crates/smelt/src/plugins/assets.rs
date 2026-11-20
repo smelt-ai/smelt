@@ -9,6 +9,9 @@
 //!   缓存里，都没法逐条清；插件重挂后路径换了，改过、删过、补上的文件按新路径重新取。旧路径
 //!   不再认，旧图留在缓存里直到退出，只有开发时反复重挂才会攒。
 //!
+//! 宿主交给脚本的解码好的图（如右键菜单里应用的图标）按 `host-images/…` 取，见
+//! [`smelt_plugin_api::image_asset`]。
+//!
 //! 别的路径是 Smelt 自己的（`icons/…`、`smelt-icons/…`，见 [`smelt_ui::assets`]）。
 //! 读插件目录用 gpui-shell 的 [`AppAssets`]：限定在目录里、大小有上限、缺文件报一次。
 
@@ -83,6 +86,10 @@ impl AssetSource for Assets {
                 Some(files) => files.load(file),
                 None => Ok(None),
             };
+        }
+        // 撤下了的图：给它的菜单项已经不在，不报。
+        if let Some(bytes) = smelt_plugin_api::load_image_asset(path) {
+            return Ok(bytes.map(Cow::Owned));
         }
         if let Some(bytes) = smelt_ui::assets::load(path) {
             return Ok(Some(Cow::Borrowed(bytes)));

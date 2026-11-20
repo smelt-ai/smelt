@@ -4,7 +4,7 @@
 //! 菜单每次打开时重新构建，根菜单从触发点那侧淡入（[`crate::motion::overlay_enter`]）；子菜单跟着
 //! 指针在各项之间来回换，出来就在原地，不每换一次闪一下。输入框的右键菜单由 [`crate::field`] 自己接：点了先把焦点还给输入框再派发动作。
 
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{cell::Cell, rc::Rc};
 
 use gpui::{
     Anchor, AnyElement, App, Bounds, ClickEvent, Context, ElementId, Entity, FocusHandle,
@@ -56,7 +56,7 @@ pub struct MenuItem {
     label: SharedString,
     icon: Option<SharedString>,
     icon_color: Option<u32>,
-    image: Option<Arc<gpui::Image>>,
+    image: Option<gpui::ImageSource>,
     checked: Option<bool>,
     disabled: bool,
     danger: bool,
@@ -98,10 +98,10 @@ impl MenuItem {
         self
     }
 
-    /// 彩色图标（如应用自己的图标），已经解码好的图片，原色画在图标位上。和线性图标都给时
-    /// 画它。
-    pub fn image(mut self, image: Arc<gpui::Image>) -> Self {
-        self.image = Some(image);
+    /// 彩色图标（如应用自己的图标）：解码好的图片，或资源表里的路径。原色画在图标位上，
+    /// 和线性图标都给时画它。
+    pub fn image(mut self, image: impl Into<gpui::ImageSource>) -> Self {
+        self.image = Some(image.into());
         self
     }
 

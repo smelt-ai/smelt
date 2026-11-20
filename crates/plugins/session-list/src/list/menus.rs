@@ -434,8 +434,8 @@ fn plugin_item(
     if let Some(icon) = item.icon {
         entry = entry.icon_path(icon);
     }
-    if let Some(image) = item.image {
-        entry = entry.image(image);
+    if let Some(image) = &item.image {
+        entry = entry.image(image.source());
     }
     match item.action {
         ContextMenuAction::Run { command, args } => {

@@ -78,6 +78,3 @@ error:
   handshake_closed:
     en: The daemon disconnected without answering the handshake
     zh-CN: 守护没回握手就断开了
-  command_failed:
-    en: "“%{command}” didn't work: %{error}"
-    zh-CN: "「%{command}」没做成：%{error}"

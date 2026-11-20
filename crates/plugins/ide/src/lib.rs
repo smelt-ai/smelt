@@ -152,7 +152,7 @@ fn app_item(
 ) -> ContextMenuItem {
     ContextMenuItem {
         label: label.into(),
-        image,
+        image: image.map(api::MenuImage::Decoded),
         icon: Some(fallback.path()),
         machine: None,
         action: ContextMenuAction::Run {

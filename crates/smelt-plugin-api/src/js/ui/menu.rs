@@ -50,7 +50,7 @@ struct Item {
     label: SharedString,
     icon: Option<SharedString>,
     icon_color: Option<u32>,
-    image: Option<Arc<gpui::Image>>,
+    image: Option<SharedString>,
     checked: Option<bool>,
     disabled: bool,
     danger: bool,
@@ -62,7 +62,7 @@ struct Item {
 enum ItemOp {
     Icon(String),
     IconColor(u32),
-    Png(Arc<gpui::Image>),
+    Image(String),
     Checked(bool),
     Danger,
 }
@@ -232,7 +232,7 @@ impl ComponentMaterializer for ItemMaterializer {
             match op {
                 ItemOp::Icon(path) => item.icon = Some(path.clone().into()),
                 ItemOp::IconColor(color) => item.icon_color = Some(*color),
-                ItemOp::Png(image) => item.image = Some(image.clone()),
+                ItemOp::Image(path) => item.image = Some(path.clone().into()),
                 ItemOp::Checked(checked) => item.checked = Some(*checked),
                 ItemOp::Danger => item.danger = true,
             }
@@ -381,35 +381,12 @@ fn item_methods() -> Vec<MethodDescriptor> {
         .with_documentation(
             "A status color of the line icon itself (such as a connection light), instead of the text color: \"#rgb\" or \"#rrggbb\", such as a theme() color.",
         ),
-        MethodDescriptor::new(
-            "png",
-            vec![ArgumentDescriptor::new(
-                "bytes",
-                ArgumentSchema::Array(Box::new(ArgumentSchema::Number)),
-            )],
-            |args| match args {
-                [ComponentArgument::Array(bytes)] => bytes
-                    .iter()
-                    .map(|byte| match byte {
-                        ComponentArgument::Number(byte)
-                            if byte.fract() == 0. && (0. ..=255.).contains(byte) =>
-                        {
-                            Ok(*byte as u8)
-                        }
-                        _ => Err(format!("{ITEM}.png expects bytes (0–255)")),
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|bytes| {
-                        ComponentPayload::new(ItemOp::Png(Arc::new(gpui::Image::from_bytes(
-                            gpui::ImageFormat::Png,
-                            bytes,
-                        ))))
-                    }),
-                _ => Err(format!("{ITEM}.png expects an array of bytes")),
-            },
-        )
-        .with_documentation(
-            "A full-color icon as PNG bytes (such as an app's own icon), drawn instead of the line icon.",
+        string_method(
+            ITEM,
+            "image",
+            "A full-color icon (such as an app's own icon) drawn instead of the line icon: an asset() path, \
+             or the image path a context_menu_items() entry carries.",
+            ItemOp::Image,
         ),
         MethodDescriptor::new(
             "checked",

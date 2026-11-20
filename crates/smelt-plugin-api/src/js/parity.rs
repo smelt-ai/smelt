@@ -150,6 +150,15 @@ const SURFACE: &[(&str, Js)] = &[
     ),
     ("context_menu_items", Same),
     (
+        "with_context_menu_items",
+        Via("context_menu_items 取项，自己画成 SmeltMenuItem"),
+    ),
+    (
+        "image_asset",
+        Via("context_menu_items 交回的项里 image 已经是资源路径"),
+    ),
+    ("load_image_asset", Host),
+    (
         "context_menu_args",
         Via("context_menu_items 交回的项已经并好参数"),
     ),
