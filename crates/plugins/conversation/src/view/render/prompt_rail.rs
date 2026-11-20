@@ -1,7 +1,11 @@
 //! 对话左侧的提问导航：一问一条刻度，当前读到的那一问加长加深；指上去出预览，点了跳过去。
+//!
+//! 动效：刻度亮起、熄灭按 `control` 弹簧伸缩变色，读到哪一问换了、指针扫过刻度，都看得出从哪
+//! 条到哪条。预览是悬停卡片，开在刻度侧边，按浮层入场只淡入不挪；指针在刻度间移动时卡片不重播
+//! 入场（会闪），按 `overlay` 弹簧滑到新刻度旁边。
 
 use super::*;
-use smelt_plugin_api::ui::kit::TYPE;
+use smelt_plugin_api::ui::kit::{MOTION, TYPE};
 
 /// 导航占的左侧留白。正文栏两边都空出这么宽才画。
 const RAIL_GUTTER: f32 = 56.;
@@ -14,9 +18,17 @@ const TICK_PITCH_MIN: f32 = 3.;
 /// 刻度列上下至少留的空。
 const RAIL_MARGIN: f32 = 48.;
 const PEEK_WIDTH: f32 = 300.;
+/// 刻度平时的长度和亮起（读到的、指着的）时的长度。
+const TICK_SHORT: f32 = 8.;
+const TICK_LONG: f32 = 14.;
 
 impl ConversationView {
-    pub(super) fn render_prompt_rail(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+    /// 要 `window` 取弹簧和入场进度，所以在 `render` 里调，结果交给 `view` 摆。
+    pub(super) fn render_prompt_rail(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let viewport = self.list_state.viewport_bounds();
         let width = f32::from(viewport.size.width);
         let height = f32::from(viewport.size.height);
@@ -43,14 +55,25 @@ impl ConversationView {
             .flex()
             .flex_col()
             .debug_selector(|| "ACP_PROMPT_RAIL".into());
+        let dim = gpui::rgb(ui_theme::faint());
+        let lit_color = gpui::rgb(ui_theme::text());
+        // 弹簧状态按元素 id 挂；套上视图的 id，分屏里几段会话的刻度不串。
+        let rail_scope: gpui::ElementId = ("acp-prompt-rail", cx.entity_id()).into();
         for (k, &entry_ix) in ticks.iter().enumerate() {
-            let is_current = current == Some(k);
-            let is_hovered = hovered == Some(entry_ix);
-            let color = if is_current || is_hovered {
-                ui_theme::text()
+            let target = if current == Some(k) || hovered == Some(entry_ix) {
+                1.
             } else {
-                ui_theme::faint()
+                0.
             };
+            let lit: f32 = window.with_id(rail_scope.clone(), |window| {
+                gpui_base::spring(
+                    gpui::ElementId::named_usize("tick-lit", entry_ix),
+                    target,
+                    MOTION.control,
+                    window,
+                    cx,
+                )
+            });
             rail = rail.child(
                 div()
                     .id(("acp-prompt-tick", entry_ix))
@@ -63,9 +86,9 @@ impl ConversationView {
                     .child(
                         div()
                             .h(px(if pitch < 5. { 1. } else { 2. }))
-                            .w(px(if is_current || is_hovered { 14. } else { 8. }))
+                            .w(px(TICK_SHORT + (TICK_LONG - TICK_SHORT) * lit))
                             .rounded_full()
-                            .bg(gpui::rgb(color)),
+                            .bg(mix_rgba(dim, lit_color, lit)),
                     )
                     .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                         this.hover_prompt_tick(entry_ix, *hovered, cx);
@@ -75,13 +98,20 @@ impl ConversationView {
                     })),
             );
         }
+        // 卡片的进度和位置只在它开着时取：关掉那一帧没人取，状态就回收了，下次打开从头淡入，
+        // 位置也直接落在新刻度旁，不从上次的地方滑过来。
         let peek = self.prompt_rail_hover.as_ref().and_then(|item| {
             let k = ticks.iter().position(|ix| *ix == item.entry_ix)?;
             let y = top + pitch * (k as f32 + 0.5);
-            Some(render_prompt_peek(
-                item,
-                (y - 20.).clamp(8., (height - 120.).max(8.)),
-            ))
+            let target = (y - 20.).clamp(8., (height - 120.).max(8.));
+            let peek_scope: gpui::ElementId = ("acp-prompt-peek", cx.entity_id()).into();
+            let (enter, top) = window.with_id(peek_scope, |window| {
+                let enter = overlay_enter("enter", EnterFrom::InPlace, window, cx);
+                let top: f32 =
+                    gpui_base::spring("top", target, MOTION.overlay.with_epsilon(0.5), window, cx);
+                (enter, top)
+            });
+            Some(render_prompt_peek(item, top, enter.opacity))
         });
         Some(
             div()
@@ -122,7 +152,7 @@ impl ConversationView {
 }
 
 /// 指着刻度时的预览：提问（最多三行），下面是回答的开头。
-fn render_prompt_peek(item: &PromptIndexItem, top: f32) -> gpui::AnyElement {
+fn render_prompt_peek(item: &PromptIndexItem, top: f32, opacity: f32) -> gpui::AnyElement {
     let images = (item.images > 0).then(|| {
         crate::plural(
             item.images,
@@ -150,6 +180,7 @@ fn render_prompt_peek(item: &PromptIndexItem, top: f32) -> gpui::AnyElement {
         .border_color(ui_theme::hair())
         .bg(gpui::rgb(ui_theme::surface()))
         .shadow_lg()
+        .opacity(opacity)
         .debug_selector(|| "ACP_PROMPT_PEEK".into())
         .child(
             div()

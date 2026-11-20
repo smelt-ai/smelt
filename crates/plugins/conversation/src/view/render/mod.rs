@@ -71,10 +71,12 @@ impl Render for ConversationView {
             overlay_enter(id, EnterFrom::Below, window, cx)
         });
         let elicit_keyboard = self.elicit_focus.contains_focused(window, cx);
+        let prompt_rail = self.render_prompt_rail(window, cx);
         self.view(
             composer_focus,
             sweep_presence,
             jump_enter,
+            prompt_rail,
             ambient_motion_enabled(
                 ambient_application_active(cx),
                 window.is_window_active(),
@@ -94,6 +96,7 @@ impl ConversationView {
         composer_focus: f32,
         sweep_presence: f32,
         jump_enter: Option<OverlayEnter>,
+        prompt_rail: Option<gpui::AnyElement>,
         animate_ambient: bool,
         elicit_keyboard: bool,
         cx: &Context<Self>,
@@ -669,7 +672,7 @@ impl ConversationView {
                     .min_h_0()
                     .w_full()
                     .child(list)
-                    .children(self.render_prompt_rail(cx))
+                    .children(prompt_rail)
                     .children((!self.entries.is_empty()).then(|| {
                         Scrollbar::vertical(&self.list_state)
                             .id("acp-message-scrollbar")
