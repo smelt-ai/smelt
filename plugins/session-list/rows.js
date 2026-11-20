@@ -320,7 +320,8 @@ function projects_header(ctx) {
         ),
     );
   if (machines_menu.length === 0) return header;
-  return SmeltContextMenu.new("machines-context").items(machines_menu).child(header);
+  // 菜单项是元素，只能用一次：右键菜单另建一份，不和「…」按钮共用。
+  return SmeltContextMenu.new("machines-context").items(menus.machines()).child(header);
 }
 
 /**
@@ -386,7 +387,8 @@ function machine_row(ctx, machine, area) {
     .child(actions_slot)
     .when(collapsible, (row) => row.on_click(() => list.set_machine_collapsed(machine.machine, !collapsed)));
   if (menu.length === 0) return row;
-  return SmeltContextMenu.new(`machine-row-context:${id}`).items(menu).child(row);
+  // 菜单项是元素，只能用一次：右键菜单另建一份，不和行上的菜单按钮共用。
+  return SmeltContextMenu.new(`machine-row-context:${id}`).items(ctx.menus.machine(machine.machine)).child(row);
 }
 
 /** 还没收到目录的机器：留一行说一声。系统图标按连接上色，悬停看连接说明，右键是这台机器的菜单。 */
@@ -944,8 +946,11 @@ function trailing(ctx, meta, close) {
         .bottom_0()
         .flex()
         .items_center()
+        // 悬停样式挂在这层 div 上：gpui-shell 只把普通样式交给注册组件，按钮自己的 group_hover 会被丢掉。
+        .opacity(0)
+        .group_hover("session-row", (style) => style.opacity(1))
         .on_mouse_down("left", stop)
-        .child(close.opacity(0).group_hover("session-row", (style) => style.opacity(1))),
+        .child(close),
     );
 }
 

@@ -66,7 +66,8 @@ export function new_session_button(list, view, id, tooltip, machine, path, hover
       view.redraw();
     })
     .trigger(SmeltButton.new(`${id}:trigger`).quiet().small().icon(icon("plus")).accessibility_label(tooltip).tooltip(tooltip));
-  if (open) popover = popover.content(menu_body(view.new_session.menu, view.new_session.focus));
+  // SmeltPopover 一定要有 content（只在打开时才画）：关着时给个空的占位，打开后才建菜单。
+  popover = popover.content(open ? menu_body(view.new_session.menu, view.new_session.focus) : div());
   return div()
     .flex_shrink_0()
     .when(hover_group != null && !open, (slot) => slot.opacity(0).group_hover(hover_group, (style) => style.opacity(1)))

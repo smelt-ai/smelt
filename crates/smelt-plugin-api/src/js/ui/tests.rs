@@ -338,7 +338,7 @@ export default class App extends View {
       try { bad(); } catch (_) { rejected++; }
     }
     return div().size_full().flex().flex_col()
-      .child(SmeltListRow.new("row").selected(true).h(24).w(200)
+      .child(SmeltListRow.new("row").selected(true).group("row").tooltip("a row title").h(24).w(200)
         .on_click((_e, cx) => { this.clicks++; cx.notify(); })
         .child(SmeltTruncatedLine.new("a row title")))
       .child(SmeltSelect.new("pick").w(160)
@@ -876,7 +876,7 @@ export default class App extends View {
         .on_click((_event, cx) => { this.shown = false; cx.notify(); }))
       .child(`rejected: ${rejected}`);
     return this.shown
-      ? root.child(SmeltViewInstance.new("probe/pane")
+      ? root.child(SmeltViewInstance.new("probe/pane").id("probe-instance")
           .args(JSON.stringify({ session: this.session }))
           .absolute().left(0).top(80).w(200).h(100))
       : root;

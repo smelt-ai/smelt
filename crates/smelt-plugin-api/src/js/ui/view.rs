@@ -19,7 +19,7 @@ use gpui_shell::{
 };
 use smelt_ui::Alert;
 
-use super::{finish_leaf, ops};
+use super::{finish_leaf, ops, string_method};
 use crate::{HostEvent, ViewInstance};
 
 const OWNER: &str = "SmeltViewInstance";
@@ -34,6 +34,11 @@ struct Target {
 /// 构造时给的视图 id。
 #[derive(Clone)]
 struct ViewId(String);
+
+/// `id(name)`：实例的身份。不给时按树里的位置认，前面多一行、少一行就换一份新实例；
+/// 列表里的实例（如会话行的头像）要给，换位置时还是同一份。
+#[derive(Clone)]
+struct Key(String);
 
 /// `args(json)` 解析好的参数，脚本调用时就解析，写错当场报给脚本。
 #[derive(Clone)]
@@ -51,8 +56,12 @@ impl ComponentMaterializer for ViewInstanceMaterializer {
         let args = ops::<Args>(&request)
             .last()
             .map_or(serde_json::Value::Null, |args| args.0.clone());
+        let id = ops::<Key>(&request).last().map_or_else(
+            || request.element_id().clone(),
+            |Key(key)| ElementId::Name(key.clone().into()),
+        );
         let embed = Embed {
-            id: request.element_id().clone(),
+            id,
             target: Target { view, args },
         };
         // 实例自己不开放样式，套一层放脚本给的布局样式。
@@ -160,6 +169,13 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                 },
             )])
             .with_methods(vec![
+                string_method(
+                    OWNER,
+                    "id",
+                    "The instance's stable identity. Without it the instance follows its place in \
+                     the tree, so a row inserted above builds a new one; give it in lists.",
+                    Key,
+                ),
                 MethodDescriptor::new(
                     "args",
                     vec![ArgumentDescriptor::new("json", ArgumentSchema::String)],
