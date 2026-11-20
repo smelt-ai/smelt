@@ -43,7 +43,7 @@ export const path = {
       } else parts.push(part);
     }
     const joined = parts.join("/");
-    return absolute ? `/${joined}` : joined || ".";
+    return absolute ? `/${joined}` : joined;
   },
   file_name(_style, value) {
     const parts = value.split("/").filter(Boolean);
