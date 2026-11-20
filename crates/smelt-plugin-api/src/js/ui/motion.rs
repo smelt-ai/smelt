@@ -11,6 +11,8 @@
 //!   第一个子元素，压在图标和字下面。减弱动态效果时照播（不动位置）。
 //! - `SmeltGlowIcon.new(path, key, serial)`：运行色的图标，刚开始跑时亮一下再回到运行色。
 //!   用户看不见（应用、窗口在后台）或减弱动态效果时不播，叫停的那一次不再接着播。
+//! - `SmeltSpinner.new(id, color)`：小号的转圈，真在等的地方放，等完就拿掉。减弱动态效果时停
+//!   在静态图标。样式落在包着它的那层上，转圈自己的大小不变。
 //!
 //! 样式：`SmeltFold`、`SmeltFlip`、`SmeltArrival` 落在包着子元素的那层上，`SmeltWash` 落在底色
 //! 那层上（默认铺满、行的圆角、正文色），`SmeltFoldChevron`、`SmeltGlowIcon` 落在图标上
@@ -329,7 +331,68 @@ impl ComponentMaterializer for GlowIconMaterializer {
     }
 }
 
+// ---- SmeltSpinner
+
+#[derive(Clone)]
+struct Spinner {
+    id: String,
+    color: u32,
+}
+
+struct SpinnerMaterializer;
+
+impl ComponentMaterializer for SpinnerMaterializer {
+    fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<AnyElement> {
+        let Spinner { id, color } = request
+            .payload()
+            .downcast_ref::<Spinner>()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("SmeltSpinner received an incompatible payload"))?;
+        anyhow::ensure!(
+            request.children_len() == 0,
+            "SmeltSpinner does not accept children"
+        );
+        let mut slot = div().flex().flex_shrink_0();
+        slot.style().refine(&request.take_style());
+        Ok(slot
+            .child(smelt_ui::motion::ambient_spinner(
+                ElementId::Name(format!("smelt-spinner:{id}").into()),
+                rgb(color).into(),
+                true,
+            ))
+            .into_any_element())
+    }
+}
+
 pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryError> {
+    registry.register(
+        ComponentDescriptor::new("SmeltSpinner", Arc::new(SpinnerMaterializer))
+            .with_constructors(vec![ConstructorDescriptor::new(
+                "SmeltSpinner",
+                vec![
+                    ArgumentDescriptor::new("id", ArgumentSchema::String),
+                    ArgumentDescriptor::new("color", ArgumentSchema::String),
+                ],
+                |args| match args {
+                    [ComponentArgument::String(id), ComponentArgument::String(color)]
+                        if !id.is_empty() =>
+                    {
+                        let color = crate::parse_hex_color(color)
+                            .map_err(|error| format!("SmeltSpinner color: {error}"))?;
+                        Ok(ComponentPayload::new(Spinner {
+                            id: id.clone(),
+                            color,
+                        }))
+                    }
+                    _ => Err(
+                        "SmeltSpinner.new(id, color) expects a non-empty id and \"#rrggbb\"".into(),
+                    ),
+                },
+            )])
+            .with_documentation(
+                "A small loading spinner for something really being waited on; remove it when the wait ends. It stays still under reduced motion. Styles apply to a box around it; the spinner keeps its own size.",
+            ),
+    )?;
     registry.register(
         ComponentDescriptor::new("SmeltFold", Arc::new(FoldMaterializer))
             .with_constructors(vec![fold_constructor("SmeltFold")])

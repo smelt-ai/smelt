@@ -180,6 +180,8 @@ export interface SmeltTheme {
     body: TextStyle; body_medium: TextStyle; text_small: TextStyle; text_small_medium: TextStyle;
     text_xsmall: TextStyle; text_xsmall_medium: TextStyle; mono: TextStyle;
   };
+  /** 字体名：mono 是用户在设置里选的等宽字体（数字、代码用），交给元素的 font_family。 */
+  fonts: { mono: string };
   radius: { xs: number; sm: number; md: number; lg: number; xl: number; row: number; card: number };
   elevation: { raised: ThemeShadow[]; floating: ThemeShadow[]; overlay: ThemeShadow[]; md: ThemeShadow[]; input: ThemeShadow[] };
 }
@@ -354,6 +356,25 @@ export function path_starts_with(style: PathStyle, path: string, prefix: string)
 export function project_labels(style: PathStyle, roots: string[]): string[];
 /** 工作目录 cwd 落在 roots 里哪个项目下：取最深的那个；都不在、cwd 是空的为 null。规则同侧栏摆放（conversation_facts）。 */
 export function project_root_of(style: PathStyle, roots: string[], cwd: string): string | null;
+/**
+ * 额度账户（quota.* 里的账户 id，如 "codex"、"pi:openrouter"）是谁：service 是它算哪家服务（智能体 id，Pi 里登录的
+ * github-copilot 算 "copilot"），name 是界面上的名字（凭据不是那家自己的带上来源，"Copilot · Pi"），icon 是那家服务的图标。
+ * 认不出的 id 为 null。规则和运行时、模型菜单同一份。
+ */
+export function quota_target(id: string): { id: string; service: string; name: string; icon: string } | null;
+/**
+ * 一份额度（QuotaStatus.quota）的读法，和模型菜单的括号同一个口径：short_text 是短字（通常是已用百分比，Copilot 不知道
+ * 总额时是剩余量），used_percent 是风险配色用的已用比例（算不出时为 0）。windows 是窗口型的各窗口，label 是原样的
+ * （"5h"、"7d"、"primary"），display_label 按当前语言说好；copilot 是 Copilot 型的数额，已按同一规则写成字，used 只在
+ * 知道总额时有。
+ */
+export function quota_facts(data: ProviderQuotaData): QuotaFacts;
+export interface QuotaFacts {
+  short_text: string;
+  used_percent: number;
+  windows: { label: string; display_label: string; used_percent: number; resets_at_ms: number | null; reset_after_seconds: number | null }[];
+  copilot: { unit: string; remaining: string; limit: string | null; used: string | null } | null;
+}
 /** 新建目录（new_session.catalog）里一项行首的图标 "icons/<名字>.svg"，认 CLI 的规则和侧栏一致。 */
 export function new_session_icon(action: NewSessionAction): string;
 /**
@@ -1303,6 +1324,28 @@ impl JsPlugin {
                     arguments.string(2)?,
                 )
                 .map_or(HostValue::Null, HostValue::from))
+            })
+            .function("quota_target", |arguments| {
+                let id = arguments.string(0)?;
+                Ok(
+                    crate::model::quota_service::QuotaTarget::from_id(id).map_or(
+                        HostValue::Null,
+                        |target| {
+                            let service = target.service();
+                            HostObject::new()
+                                .field("id", target.id())
+                                .field("service", service.id())
+                                .field("name", target.display_name())
+                                .field("icon", service.icon_asset())
+                                .into()
+                        },
+                    ),
+                )
+            })
+            .function("quota_facts", |arguments| {
+                let data: crate::model::provider_quota::ProviderQuotaData =
+                    parsed("quota_facts", "data", arguments.get(0))?;
+                Ok(quota_facts(&data))
             })
             .function("new_session_icon", |arguments| {
                 let action: crate::model::new_session::NewSessionAction =
@@ -2607,6 +2650,61 @@ fn style_argument(
 }
 
 /// 脚本给的一个参数按 T 的线上形状读；不合法报出是哪个函数的哪个参数。
+/// [`quota_facts`](crate::model::provider_quota::ProviderQuotaData) 给脚本的那份：短字、已用比例，
+/// 窗口带好按语言说的名字，Copilot 的数额写成字。
+fn quota_facts(data: &crate::model::provider_quota::ProviderQuotaData) -> HostValue {
+    use crate::model::copilot_quota::format_amount;
+    use crate::model::provider_quota::ProviderQuotaData;
+    let optional =
+        |value: Option<u64>| value.map_or(HostValue::Null, |value| HostValue::Number(value as f64));
+    let (windows, copilot) = match data {
+        ProviderQuotaData::Windows(quota) => (
+            quota
+                .windows
+                .iter()
+                .map(|window| {
+                    HostObject::new()
+                        .field("label", window.label.clone())
+                        .field("display_label", window.display_label())
+                        .field("used_percent", window.used_percent)
+                        .field("resets_at_ms", optional(window.resets_at_ms))
+                        .field("reset_after_seconds", optional(window.reset_after_seconds))
+                        .into()
+                })
+                .collect(),
+            HostValue::Null,
+        ),
+        ProviderQuotaData::Copilot(quota) => {
+            let used = quota
+                .limit
+                .map(|limit| quota.used.unwrap_or((limit - quota.remaining).max(0.0)));
+            (
+                Vec::new(),
+                HostObject::new()
+                    .field("unit", quota.unit.label())
+                    .field("remaining", format_amount(quota.remaining))
+                    .field(
+                        "limit",
+                        quota
+                            .limit
+                            .map_or(HostValue::Null, |limit| format_amount(limit).into()),
+                    )
+                    .field(
+                        "used",
+                        used.map_or(HostValue::Null, |used| format_amount(used).into()),
+                    )
+                    .into(),
+            )
+        }
+    };
+    HostObject::new()
+        .field("short_text", data.short_text())
+        .field("used_percent", data.used_percent())
+        .field("windows", HostValue::Array(windows))
+        .field("copilot", copilot)
+        .into()
+}
+
 fn parsed<T: serde::de::DeserializeOwned>(
     name: &str,
     what: &str,
@@ -3059,6 +3157,77 @@ mod tests {
         );
     }
 
+    /// 额度的读法和模型菜单同一个口径：窗口型取最紧的那个窗口，Copilot 不知道总额时报剩余量。
+    #[test]
+    fn quota_facts_follow_the_model_rules() {
+        use crate::model::copilot_quota::{CopilotQuota, CopilotQuotaUnit};
+        use crate::model::provider_quota::{ProviderQuota, ProviderQuotaData, ProviderQuotaWindow};
+        let field = |value: &HostValue, name: &str| -> HostValue {
+            let HostValue::Object(fields) = value else {
+                panic!("不是对象");
+            };
+            fields
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("没有 {name}"))
+        };
+        let windows = quota_facts(&ProviderQuotaData::Windows(ProviderQuota {
+            windows: vec![
+                ProviderQuotaWindow {
+                    label: "5h".into(),
+                    used_percent: 20.0,
+                    resets_at_ms: None,
+                    reset_after_seconds: Some(60),
+                },
+                ProviderQuotaWindow {
+                    label: "secondary".into(),
+                    used_percent: 75.4,
+                    resets_at_ms: None,
+                    reset_after_seconds: None,
+                },
+            ],
+        }));
+        assert_eq!(field(&windows, "short_text"), HostValue::from("75%"));
+        assert_eq!(field(&windows, "copilot"), HostValue::Null);
+        let HostValue::Array(list) = field(&windows, "windows") else {
+            panic!("窗口是数组");
+        };
+        assert_eq!(
+            field(&list[0], "reset_after_seconds"),
+            HostValue::Number(60.)
+        );
+        assert_eq!(field(&list[1], "label"), HostValue::from("secondary"));
+        assert_ne!(
+            field(&list[1], "display_label"),
+            HostValue::from("secondary")
+        );
+
+        let unknown_total = quota_facts(&ProviderQuotaData::Copilot(CopilotQuota {
+            unit: CopilotQuotaUnit::PremiumRequests,
+            remaining: 12.5,
+            limit: None,
+            used: None,
+        }));
+        assert_eq!(field(&unknown_total, "short_text"), HostValue::from("12.5"));
+        assert_eq!(field(&unknown_total, "used_percent"), HostValue::Number(0.));
+        let copilot = field(&unknown_total, "copilot");
+        assert_eq!(field(&copilot, "used"), HostValue::Null);
+        assert_eq!(field(&copilot, "unit"), HostValue::from("premium requests"));
+
+        let known_total = quota_facts(&ProviderQuotaData::Copilot(CopilotQuota {
+            unit: CopilotQuotaUnit::AiCredits,
+            remaining: 75.0,
+            limit: Some(100.0),
+            used: None,
+        }));
+        assert_eq!(
+            field(&field(&known_total, "copilot"), "used"),
+            HostValue::from("25")
+        );
+        assert_eq!(field(&known_total, "short_text"), HostValue::from("25%"));
+    }
+
     #[test]
     fn path_functions_follow_the_machines_style() {
         let module = JsPlugin::new().module();
@@ -3119,6 +3288,13 @@ mod tests {
             ),
             HostValue::Bool(false)
         );
+        let HostValue::Object(copilot) = call("quota_target", vec!["pi:github-copilot".into()])
+        else {
+            panic!("认得出 Pi 里的 Copilot");
+        };
+        assert!(copilot.contains(&("service".to_string(), HostValue::from("copilot"))));
+        assert!(copilot.contains(&("name".to_string(), HostValue::from("Copilot · Pi"))));
+        assert_eq!(call("quota_target", vec!["nope".into()]), HostValue::Null);
         assert_eq!(
             call(
                 "project_labels",

@@ -3,17 +3,18 @@
 //! - `SmeltSettingsPage.new(id)`：竖着滚的一列分组，页名在设置的工具栏里，这里不画页头。
 //! - `SmeltSettingsSection.new()`：分组，`title` / `description` 在卡片上面，子项之间自动画
 //!   分隔线。
-//! - `SmeltSettingsRow.new(名字)`：一行设置，左边名字和说明，右边控件（子元素）。
+//! - `SmeltSettingsRow.new(名字)`：一行设置，左边名字和说明，右边控件（子元素）。说明可能很长
+//!   （报错原文）时 `clamp_description(id, 行数)` 收成几行，悬停看全文。
 //!
 //! 外观归骨架，不收样式。
 
 use std::sync::Arc;
 
-use gpui::{IntoElement as _, ParentElement as _, StyleRefinement};
+use gpui::{IntoElement as _, ParentElement as _, SharedString, StyleRefinement};
 use gpui_shell::{
     ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentDescriptor,
     ComponentMaterializer, ComponentPayload, ComponentRegistry, ConstructorDescriptor,
-    MaterializeRequest, RegistryError, anyhow, gpui,
+    MaterializeRequest, MethodDescriptor, RegistryError, anyhow, gpui,
 };
 use smelt_ui::{SettingsPage, SettingsRow, SettingsSection};
 
@@ -33,6 +34,7 @@ enum SectionOp {
 enum RowOp {
     Description(String),
     Note(String),
+    Clamp(String, usize),
 }
 
 #[derive(Clone)]
@@ -90,6 +92,9 @@ impl ComponentMaterializer for RowMaterializer {
             row = match op {
                 RowOp::Description(text) => row.description(text.clone()),
                 RowOp::Note(text) => row.note(text.clone()),
+                RowOp::Clamp(id, lines) => {
+                    row.clamp_description(SharedString::from(id.clone()), *lines)
+                }
             };
         }
         Ok(row.children(request.take_children()?).into_any_element())
@@ -147,6 +152,29 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                     "description",
                     "What the setting does, under its name; may wrap.",
                     RowOp::Description,
+                ),
+                MethodDescriptor::new(
+                    "clamp_description",
+                    vec![
+                        ArgumentDescriptor::new("id", ArgumentSchema::String),
+                        ArgumentDescriptor::new("lines", ArgumentSchema::Number),
+                    ],
+                    |args| match args {
+                        [ComponentArgument::String(id), ComponentArgument::Number(lines)]
+                            if !id.is_empty() && lines.is_finite() && *lines >= 1. =>
+                        {
+                            Ok(ComponentPayload::new(RowOp::Clamp(
+                                id.clone(),
+                                *lines as usize,
+                            )))
+                        }
+                        _ => Err(format!(
+                            "{ROW}.clamp_description(id, lines) expects a non-empty id and a line count of at least 1"
+                        )),
+                    },
+                )
+                .with_documentation(
+                    "Shows at most `lines` lines of the description, the rest on hover; `id` names the hover tip and must be unique on the page.",
                 ),
                 string_method(
                     ROW,

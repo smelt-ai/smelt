@@ -5,6 +5,7 @@
 //! 开关可以交给它自己，也可以由脚本控制：`open(开没开)` 给了就按它画，用户点开、点外面、
 //! Esc 经 `on_open_change` 交回，脚本存好再画；脚本在卡片里做完事要关掉它，就把状态改成
 //! 关再重画。触发点不会自己显示「开着」，要的话受控着用，给它 `selected(开没开)`。
+//! 触发点在横排里默认不比内容窄；里面的内容要折行时给 `shrink_trigger(true)`。
 
 use std::sync::Arc;
 
@@ -28,6 +29,9 @@ struct OnOpenChange(ComponentArgument);
 
 #[derive(Clone, Copy)]
 struct Side(Anchor);
+
+#[derive(Clone, Copy)]
+struct ShrinkTrigger(bool);
 
 /// 脚本给的触发点，原样画：它是脚本搭好的元素，这里改不了它的样子。要按钮在卡片开着时显示
 /// 按下的样子，受控着用，自己给它 `selected(开没开)`。
@@ -69,6 +73,10 @@ impl ComponentMaterializer for PopoverMaterializer {
         if let Some(Side(anchor)) = ops::<Side>(&request).last() {
             popover = popover.anchor(*anchor);
         }
+        if let Some(ShrinkTrigger(true)) = ops::<ShrinkTrigger>(&request).last() {
+            popover =
+                popover.trigger_style(gpui::Styled::min_w_0(gpui::StyleRefinement::default()));
+        }
         if let Some(Open(open)) = ops::<Open>(&request).last() {
             popover = popover.open(*open);
         }
@@ -108,6 +116,12 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
             .with_constructors(vec![id_constructor(OWNER)])
             .with_methods(vec![
                 side,
+                bool_method(
+                    OWNER,
+                    "shrink_trigger",
+                    "Lets the trigger narrow below its content in a row (min width 0), so a trigger that wraps its content wraps instead of widening the row.",
+                    ShrinkTrigger,
+                ),
                 bool_method(
                     OWNER,
                     "open",

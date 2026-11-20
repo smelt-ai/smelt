@@ -251,6 +251,11 @@ const JS_ONLY: &[(&str, &str)] = &[
         "project_root_of",
         "model::workspace_directory::project_root_of",
     ),
+    ("quota_target", "model::quota_service::QuotaTarget"),
+    (
+        "quota_facts",
+        "model::provider_quota::ProviderQuotaData::short_text / used_percent",
+    ),
     (
         "asset",
         "内置插件的资源用 include_bytes 编进二进制，不在插件目录里",

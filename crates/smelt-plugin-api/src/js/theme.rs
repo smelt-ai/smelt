@@ -153,12 +153,16 @@ fn elevations() -> HostValue {
         .into()
 }
 
-/// 当前主题：深浅、色板、字阶、圆角、投影。
+/// 当前主题：深浅、色板、字阶、圆角、投影，和用户选的等宽字体。
 pub(super) fn theme() -> HostValue {
     HostObject::new()
         .field("light", ui_theme::is_light())
         .field("palette", palette())
         .field("type", type_scale())
+        .field(
+            "fonts",
+            HostObject::new().field("mono", crate::model::font_config::font_family()),
+        )
         .field("radius", radius())
         .field("elevation", elevations())
         .into()

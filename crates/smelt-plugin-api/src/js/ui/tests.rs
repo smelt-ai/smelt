@@ -110,6 +110,7 @@ fn components_hold_only_smelt_controls() {
             "SmeltConfirmButton",
             "SmeltCheckbox",
             "SmeltRadio",
+            "SmeltSwitch",
             "SmeltTextInput",
             "SmeltAlert",
             "SmeltBadge",
@@ -129,6 +130,7 @@ fn components_hold_only_smelt_controls() {
             "SmeltScrollView",
             "SmeltScrollAnchor",
             "SmeltDragItem",
+            "SmeltSpinner",
             "SmeltFold",
             "SmeltFoldChevron",
             "SmeltFlip",
@@ -194,13 +196,26 @@ fn components_hold_only_smelt_controls() {
 
 #[gpui::test]
 fn choices_report_through_their_callbacks(cx: &mut TestAppContext) {
-    let source = r#"
+    let source = r##"
 import { View, div } from "gpui-kit";
-import { SmeltCheckbox, SmeltRadio } from "smelt-ui";
+import { SmeltCheckbox, SmeltRadio, SmeltSpinner, SmeltSwitch } from "smelt-ui";
 export default class App extends View {
-  init() { this.on = false; this.pick = "a"; }
+  init() { this.on = false; this.pick = "a"; this.switched = false; }
   render() {
+    let rejected = 0;
+    for (const bad of [
+      () => SmeltSwitch.new("s").label("S"),
+      () => SmeltSpinner.new("", "#000000"),
+      () => SmeltSpinner.new("w", "red"),
+    ]) {
+      try { bad(); } catch (_) { rejected++; }
+    }
     return div().size_full()
+      .child(SmeltSwitch.new("switch").accessibility_label("Switch").checked(this.switched)
+        .absolute().left(100).top(0)
+        .on_change((checked, cx) => { this.switched = checked; cx.notify(); }))
+      .child(SmeltSpinner.new("wait", "#888888").absolute().left(100).top(40))
+      .child(`rejected: ${rejected}`)
       .child(SmeltCheckbox.new("box").accessibility_label("Box").checked(this.on)
         .absolute().left(0).top(0)
         .on_change((checked, cx) => { this.on = checked; cx.notify(); }))
@@ -213,22 +228,26 @@ export default class App extends View {
       .child(SmeltRadio.new("c").label("C").checked(this.pick === "c").disabled(true)
         .absolute().left(0).top(120)
         .on_select((cx) => { this.pick = "c"; cx.notify(); }))
-      .child(`state: ${this.on}|${this.pick}`);
+      .child(`state: ${this.on}|${this.pick}|${this.switched}`);
   }
 }
-"#;
+"##;
     let (mut context, view, _app) = mount(cx, source);
     draw(&mut context);
-    assert!(tree(&mut context, &view).contains("state: false|a"));
+    let first = tree(&mut context, &view);
+    assert!(first.contains("state: false|a|false"), "{first}");
+    assert!(first.contains("rejected: 3"), "{first}");
+    click(&mut context, 108., 8.);
+    assert!(tree(&mut context, &view).contains("state: false|a|true"));
     click(&mut context, 8., 8.);
     click(&mut context, 8., 88.);
     let after = tree(&mut context, &view);
-    assert!(after.contains("state: true|b"), "{after}");
+    assert!(after.contains("state: true|b|true"), "{after}");
     click(&mut context, 8., 8.);
     click(&mut context, 8., 128.);
     let again = tree(&mut context, &view);
     assert!(
-        again.contains("state: false|b"),
+        again.contains("state: false|b|true"),
         "disabled must not select: {again}"
     );
 }
