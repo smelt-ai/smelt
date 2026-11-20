@@ -154,7 +154,9 @@ export function locale(): string;
 export interface TextStyle { text_size: string; line_height: string; font_weight: number }
 /**
  * smelt 当前主题。palette 是语义色板（名字同 smelt-ui 的 ui_theme），颜色是 #rrggbb，带透明度的是 #rrggbbaa；
- * 三档按钮色是 [常态, 悬停, 按下]。type 是字阶，按 rem 给，跟着界面字号缩放。radius 单位是像素。
+ * 三档按钮色是 [常态, 悬停, 按下]。type 是字阶，按 rem 给，跟着界面字号缩放。radius 单位是像素：xs～xl 是控件的
+ * 档位（md 是常规按钮、输入框），row、card 是列表行、卡片的。elevation 是浮起层级，每档几层投影，直接交给
+ * 元素的 `shadow(...)`：raised 贴着内容的卡片，floating 菜单、提示，overlay 对话框，md 自带边框的弹层，input 输入框。
  * 主题一换视图就重画，render 里现读。
  */
 export interface SmeltTheme {
@@ -176,8 +178,11 @@ export interface SmeltTheme {
     body: TextStyle; body_medium: TextStyle; text_small: TextStyle; text_small_medium: TextStyle;
     text_xsmall: TextStyle; text_xsmall_medium: TextStyle; mono: TextStyle;
   };
-  radius: { row: number; card: number };
+  radius: { xs: number; sm: number; md: number; lg: number; xl: number; row: number; card: number };
+  elevation: { raised: ThemeShadow[]; floating: ThemeShadow[]; overlay: ThemeShadow[]; md: ThemeShadow[]; input: ThemeShadow[] };
 }
+/** 一层投影，同元素 `shadow([...])` 收的形状。 */
+export interface ThemeShadow { x: number; y: number; blur: number; spread: number; color: string; inset: boolean }
 export function theme(): SmeltTheme;
 /**
  * 插件自己的文案：插件目录下 locales/ui.yml（格式同 Rust crate 的，见 docs/i18n.md）里 key 在当前语言的那条，
