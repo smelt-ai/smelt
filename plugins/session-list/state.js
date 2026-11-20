@@ -97,6 +97,8 @@ export class SessionList {
      * 新建会话拼对话的启动规格用。还没收到的机器没有。
      */
     this.agent_settings = new Map();
+    /** 上次整份读智能体配置失败的原因（给人看的一句）；读成了是 null。新建会话菜单打开时据此重读。 */
+    this.agent_settings_failure = null;
     /** 开着的新建会话菜单（new_session.js），宿主事件转给它们。 */
     this.launchers = new Set();
     /** ⌘N 打开的、钉在窗口上方的那份新建会话菜单（插件的根画它）。 */
@@ -146,14 +148,9 @@ export class SessionList {
         if (!this.heard_selection) this.on_selection(selected);
       })
       .catch((error) => console.error(`[session-list] 问会话插件选中了什么失败：${message(error)}`));
-    const settings = host
-      .run(peers.AGENT_SETTINGS)
-      .then((all) => {
-        for (const machine of all ?? []) this.on_agent_settings(machine);
-      })
-      .catch((error) =>
-        this.notify_error(this.failed(host.t("action.read_agent_settings"), message(error))),
-      );
+    const settings = this.read_agent_settings().catch((error) =>
+      this.notify_error(this.failed(host.t("action.read_agent_settings"), message(error))),
+    );
     await Promise.all([selection, settings]);
   }
 
@@ -414,6 +411,26 @@ export class SessionList {
   }
 
   /** 换掉一台机器的智能体名字。给不了、移除了的那台就没有名字，会话行不标。 */
+  /**
+   * 整份读一次智能体配置。推送先到的机器不拿这份盖掉（推送更新）。失败记下原因再 reject：新建
+   * 会话菜单写出原因，下次打开再读。
+   */
+  read_agent_settings() {
+    const host = this.host;
+    return host.run(peers.AGENT_SETTINGS).then(
+      (all) => {
+        this.agent_settings_failure = null;
+        for (const machine of all ?? []) {
+          if (!this.agent_settings.has(machine_key(machine.machine))) this.on_agent_settings(machine);
+        }
+      },
+      (error) => {
+        this.agent_settings_failure = host.t("error.read_agent_settings", { error: message(error) });
+        throw error;
+      },
+    );
+  }
+
   on_agent_settings(changed) {
     const key = machine_key(changed.machine);
     this.agent_settings.set(key, changed);

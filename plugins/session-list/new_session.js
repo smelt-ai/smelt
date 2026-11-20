@@ -158,7 +158,7 @@ export class NewSession {
     }
   }
 
-  /** 换了机器（或刚打开）：清掉上一台的，重读新建目录。 */
+  /** 换了机器（或刚打开）：清掉上一台的，重读新建目录；上次没读到智能体配置的，再读一次。 */
   load() {
     this.generation += 1;
     this.catalog = { state: "loading" };
@@ -166,6 +166,13 @@ export class NewSession {
     this.slots = [];
     this.selected = null;
     this.fetch_catalog();
+    if (this.list.agent_settings_failure != null) {
+      const generation = this.generation;
+      const redraw = () => {
+        if (this.generation === generation) this.redraw();
+      };
+      this.list.read_agent_settings().then(redraw, redraw);
+    }
   }
 
   /** 读一次新建目录。读的时候列表照旧显示，回来了整份换掉，选中的尽量留在原处。 */
@@ -348,9 +355,8 @@ export class NewSession {
     switch (action.target) {
       case "conversation": {
         const settings = this.list.agent_settings.get(machine_key(machine));
-        if (settings?.state === "unavailable") {
-          return this.fail(t("error.agent_settings_unavailable", { reason: settings.reason }));
-        }
+        const unavailable = settings?.state === "unavailable" ? settings.reason : settings ? null : this.list.agent_settings_failure;
+        if (unavailable != null) return this.fail(t("error.agent_settings_unavailable", { reason: unavailable }));
         if (settings?.state !== "ready") return this.fail(t("error.agent_settings_loading"));
         const acp = host.conversation_acp(settings.settings, action.agentOptionId, `acp-${host.uuid()}`, cwd);
         if (!acp) return this.fail(t("new.settings_changed"));

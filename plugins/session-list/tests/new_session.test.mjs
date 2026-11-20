@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { initial_location, NewSession, pinned_by_digit, slots } from "../new_session.js";
-import { CREATE_CONVERSATION } from "../peers.js";
+import { AGENT_SETTINGS, CREATE_CONVERSATION } from "../peers.js";
 import { fake_host, list, local_directory } from "./fakes.mjs";
+import { t } from "./helpers.mjs";
 
 const settle = () => new Promise(setImmediate);
 const row = (section, key) => ({ section, action: { key, label: key, target: "blankTerminal" } });
@@ -125,4 +126,29 @@ test("从这里建的工作树推到了就选上", async () => {
   menu.on_event({ type: "sessions_changed" });
   assert.equal(menu.workset, "ws2");
   assert.equal(menu.location, "repo / search");
+});
+
+test("启动时没读到智能体配置：菜单写出原因，下次打开再读", async () => {
+  const host = fake_host();
+  host.replies["new_session.catalog"] = { sections: { common: [action("pi", "conversation", { agentOptionId: "pi" })] } };
+  const run = host.run;
+  let settings_reply = () => Promise.reject(new Error("智能体插件没起来"));
+  host.run = (command, args) => (command === AGENT_SETTINGS ? settings_reply() : run(command, args));
+  const sessions = list(host);
+  await sessions.read_agent_settings().catch(() => {});
+
+  const first = open_menu(sessions, { machine: null, root: "/repo", workset: null });
+  await settle();
+  assert.equal(first.menu.launch(0), false);
+  assert.equal(
+    first.menu.error,
+    t("error.agent_settings_unavailable", { reason: t("error.read_agent_settings", { error: "智能体插件没起来" }) }),
+  );
+  first.menu.dispose();
+
+  settings_reply = async () => [{ machine: null, state: "ready", settings: { agents: [], options: ["pi"] } }];
+  const second = open_menu(sessions, { machine: null, root: "/repo", workset: null });
+  await settle();
+  assert.equal(sessions.agent_settings_failure, null);
+  assert.equal(second.menu.launch(0), true);
 });
