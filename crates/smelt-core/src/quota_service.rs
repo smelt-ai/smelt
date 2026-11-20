@@ -293,6 +293,7 @@ fn record_from_status(
                     reset_after_seconds: window
                         .reset_after_seconds
                         .and_then(|seconds| i64::try_from(seconds).ok()),
+                    scope: window.scope.clone(),
                 })
                 .collect(),
         ),
@@ -326,7 +327,7 @@ fn status_from_record(
                         reset_after_seconds: window
                             .reset_after_seconds
                             .and_then(|seconds| u64::try_from(seconds).ok()),
-                        scope: None,
+                        scope: window.scope,
                     })
                     .collect(),
             })
@@ -661,8 +662,12 @@ mod tests {
 
     #[test]
     fn cached_quota_round_trips_through_the_store_record() {
+        let mut scoped = window_quota(12.0);
+        if let ProviderQuotaData::Windows(quota) = &mut scoped {
+            quota.windows[0].scope = Some("Opus".into());
+        }
         let windows = QuotaStatus {
-            quota: Some(window_quota(12.0)),
+            quota: Some(scoped),
             checked_at_ms: 9,
             error: Some("stale".into()),
         };

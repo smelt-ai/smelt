@@ -352,7 +352,7 @@ pub(crate) fn read_quota_cache(
     connection: &Connection,
 ) -> Result<Vec<QuotaCacheStatusRecord>, StoreError> {
     let mut window_statement = connection.prepare(
-        "SELECT label, used_percent, resets_at_ms, reset_after_seconds
+        "SELECT label, used_percent, resets_at_ms, reset_after_seconds, scope
          FROM quota_cache_window WHERE provider_id = ?1 ORDER BY position",
     )?;
     let mut status_statement = connection.prepare(
@@ -392,6 +392,7 @@ pub(crate) fn read_quota_cache(
                             used_percent: row.get(1)?,
                             resets_at_ms: row.get(2)?,
                             reset_after_seconds: row.get(3)?,
+                            scope: row.get(4)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?,
@@ -426,8 +427,8 @@ pub(crate) fn write_quota_cache(
                     transaction.execute(
                         "INSERT INTO quota_cache_window(
                            provider_id, position, label, used_percent, resets_at_ms,
-                           reset_after_seconds
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                           reset_after_seconds, scope
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
                             status.provider_id,
                             position as i64,
@@ -435,6 +436,7 @@ pub(crate) fn write_quota_cache(
                             window.used_percent,
                             window.resets_at_ms,
                             window.reset_after_seconds,
+                            window.scope,
                         ],
                     )?;
                 }

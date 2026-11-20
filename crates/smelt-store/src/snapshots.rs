@@ -288,6 +288,8 @@ pub struct QuotaCacheWindowRecord {
     pub used_percent: f64,
     pub resets_at_ms: Option<i64>,
     pub reset_after_seconds: Option<i64>,
+    /// 只管哪组模型；整个账户的是 `None`。
+    pub scope: Option<String>,
 }
 
 /// 记忆召回的配置。空字符串表示没设。

@@ -561,6 +561,7 @@ CREATE TABLE quota_cache_window (
   used_percent REAL NOT NULL,
   resets_at_ms INTEGER,
   reset_after_seconds INTEGER,
+  scope TEXT,
   PRIMARY KEY (provider_id, position)
 ) WITHOUT ROWID;
 CREATE TABLE quota_provider_pref (
@@ -1889,6 +1890,12 @@ pub const MIGRATE_V39_TO_V40: &str = "
 DROP TABLE IF EXISTS quota_cache_provider;
 DROP TABLE IF EXISTS quota_cache;
 ";
+
+/// v41：额度窗口记下只管哪组模型（`scope`，如「Gemini」「Opus」），整个账户的是 NULL。旧行都是
+/// NULL，下次查询就换成带组名的。SQLite 把加的列插在最后一列后面、表约束前面，和
+/// `CREATE_SCHEMA` 一致。已经有的跳过（用当前结构造的夹具）。
+pub const V40_TO_V41_ADDED_COLUMNS: [(&str, &str, &str); 1] =
+    [("quota_cache_window", "scope", "TEXT")];
 
 pub const V38_TO_V39_ADDED_COLUMNS: [(&str, &str, &str); 2] = [
     ("automation_run", "error_code", "TEXT"),

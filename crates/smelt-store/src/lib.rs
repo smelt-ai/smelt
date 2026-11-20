@@ -61,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 40;
+pub const STORE_SCHEMA_VERSION: u32 = 41;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -2117,6 +2117,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 40 {
+            apply_v41(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 39 {
             apply_v40(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2879,6 +2888,21 @@ mod imp {
     /// 原样留着。
     fn apply_v40(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
         transaction.execute_batch(crate::schema::MIGRATE_V39_TO_V40)?;
+        apply_v41(transaction)
+    }
+
+    /// v41 给额度窗口加模型组名（`schema::V40_TO_V41_ADDED_COLUMNS`）。已经有的列跳过。
+    fn apply_v41(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        for (table, column, declaration) in crate::schema::V40_TO_V41_ADDED_COLUMNS {
+            if !table_columns(transaction, table)?
+                .iter()
+                .any(|existing| existing == column)
+            {
+                transaction.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {declaration};"
+                ))?;
+            }
+        }
         Ok(())
     }
 
@@ -5310,33 +5334,8 @@ mod tests {
             assert_eq!(theme.background, 657930);
             assert_eq!(theme.search_hit_current, 13934615);
             assert_eq!(theme.palette, (100..111).collect::<Vec<u32>>());
-            assert_eq!(
-                store.quota_cache().unwrap(),
-                [
-                    QuotaCacheStatusRecord {
-                        provider_id: "claude".into(),
-                        checked_at_ms: 1792250484008,
-                        error: None,
-                        quota: QuotaCacheQuota::Windows(vec![QuotaCacheWindowRecord {
-                            label: "5h".into(),
-                            used_percent: 37.0,
-                            resets_at_ms: Some(1792258200463),
-                            reset_after_seconds: None,
-                        }]),
-                    },
-                    QuotaCacheStatusRecord {
-                        provider_id: "pi:github-copilot".into(),
-                        checked_at_ms: 1792250484008,
-                        error: None,
-                        quota: QuotaCacheQuota::Copilot {
-                            unit: "ai_credits".into(),
-                            remaining: 11347.0,
-                            limit: Some(43000.0),
-                            used: Some(31653.0),
-                        },
-                    },
-                ]
-            );
+            // 旧额度缓存早过期了，不搬。
+            assert_eq!(store.quota_cache().unwrap(), []);
             assert_eq!(store.get_launch_snapshot().unwrap().unwrap().version, 14);
             let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
             assert!(prefs.agent_hooks_enabled);
@@ -8358,6 +8357,7 @@ CREATE TABLE published_session (
                     used_percent: 37.0,
                     resets_at_ms: None,
                     reset_after_seconds: None,
+                    scope: None,
                 }]),
             }]
         );
@@ -8369,6 +8369,65 @@ CREATE TABLE published_session (
             normalized_schema(&path),
             normalized_schema(&fresh),
             "从 v39 升上来的库要和新建的库一个形状"
+        );
+    }
+
+    /// v40 的库：额度窗口加上模型组名，旧行是整个账户的（NULL）。
+    #[test]
+    fn migrates_v40_adding_quota_window_scope() {
+        let dir = temp_dir("migrate-v40-quota-scope");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{}
+                 {}
+                 DROP TABLE quota_cache_window;
+                 CREATE TABLE quota_cache_window (
+                   provider_id TEXT NOT NULL REFERENCES quota_cache_status(provider_id) ON DELETE CASCADE,
+                   position INTEGER NOT NULL CHECK (position >= 0),
+                   label TEXT NOT NULL,
+                   used_percent REAL NOT NULL,
+                   resets_at_ms INTEGER,
+                   reset_after_seconds INTEGER,
+                   PRIMARY KEY (provider_id, position)
+                 ) WITHOUT ROWID;
+                 INSERT INTO quota_cache_status(provider_id, kind, checked_at_ms)
+                 VALUES ('claude', 'windows', 9);
+                 INSERT INTO quota_cache_window(provider_id, position, label, used_percent)
+                 VALUES ('claude', 0, '5h', 37.0);
+                 PRAGMA user_version = 40;",
+                crate::schema::CREATE_SCHEMA,
+                crate::schema::ENSURE_WORKSPACE_EPOCH
+            ))
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&path).unwrap();
+        let window = |scope: Option<&str>| QuotaCacheWindowRecord {
+            label: "5h".into(),
+            used_percent: 37.0,
+            resets_at_ms: None,
+            reset_after_seconds: None,
+            scope: scope.map(str::to_string),
+        };
+        let status = |scope| QuotaCacheStatusRecord {
+            provider_id: "claude".into(),
+            checked_at_ms: 9,
+            error: None,
+            quota: QuotaCacheQuota::Windows(vec![window(scope)]),
+        };
+        assert_eq!(store.quota_cache().unwrap(), [status(None)]);
+        store.put_quota_cache(&[status(Some("Opus"))]).unwrap();
+        assert_eq!(store.quota_cache().unwrap(), [status(Some("Opus"))]);
+        drop(store);
+
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v40 升上来的库要和新建的库一个形状"
         );
     }
 
@@ -9371,6 +9430,7 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
                     used_percent: 37.5,
                     resets_at_ms: Some(2_000),
                     reset_after_seconds: None,
+                    scope: Some("Gemini".into()),
                 }]),
             },
             QuotaCacheStatusRecord {
