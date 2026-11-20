@@ -97,6 +97,17 @@ export interface ConversationFacts {
   agent: { id: string; label: string; icon: string } | null;
   /** 自动化跑出来的（绑着自动化，或后台起的）。 */
   automation: boolean;
+  /** 工作目录：跟智能体的对话的，或第一格终端起的时候的（不随终端里 cd 变）；没有是 null。 */
+  cwd: string | null;
+  /**
+   * 摆在侧栏哪儿：project 是在一个项目组里（root 是打开的项目，或不在任何项目里时它自己的工作目录，没有工作目录
+   * 是 ""；workset 是它绑的工作集）；conversations 是「对话」一段（跟智能体的对话，不在打开的项目里）；hidden 是
+   * 不在侧栏（归档的、自动化跑的）。
+   */
+  placement:
+    | { kind: "project"; root: string; workset: string | null }
+    | { kind: "conversations" }
+    | { kind: "hidden" };
 }
 /** 那台机器工作区目录里每段对话的派生事实，顺序同目录；目录还没收到是空数组。变了发 sessions_changed。 */
 export function conversation_facts(machine: Machine): ConversationFacts[];
@@ -312,8 +323,21 @@ export function reject_command(id: number, reason: string): null;
  * - "smelt.app/refresh-connections"：有人在看连接状态了，现在重读连接路径和延迟、重探离线的；露出来时调一次。
  */
 export function run(command: string, args?: unknown): Promise<unknown>;
-/** 那台机器上的路径怎么切。 */
+/** 那台机器上的路径怎么切。下面几个 path_ 函数按它切，和运行时用同一套规则；不要拿字符串自己拼、自己比。 */
 export function path_style(machine: Machine): "posix" | "windows";
+export type PathStyle = "posix" | "windows";
+/** 去掉重复的分隔符和 "."，消掉能消的 ".."；比较两条路径是不是同一处前先各自 clean。 */
+export function path_clean(style: PathStyle, path: string): string;
+/** 拼一段。绝对的 child 整段替换；空的 child 只补一个末尾分隔符。 */
+export function path_join(style: PathStyle, base: string, child: string): string;
+/** 最后一段普通名字；"."、".." 和根目录没有，是 null。 */
+export function path_file_name(style: PathStyle, path: string): string | null;
+/** 是绝对路径。 */
+export function path_is_absolute(style: PathStyle, path: string): boolean;
+/** prefix 的每一段都是 path 的前缀（"/proj" 不包含 "/project"）。Windows 不分大小写。 */
+export function path_starts_with(style: PathStyle, path: string, prefix: string): boolean;
+/** 一组项目在同一个列表里的显示名：目录末段，重名的往前补父目录段（"dev · smelt"）。 */
+export function project_labels(style: PathStyle, roots: string[]): string[];
 /** call 在方法名后面的参数：方法的参数全都可以不给时，params 可省（省了是 {}）。 */
 export type CallArgs<P> = {} extends P
   ? [params?: P | null, timeout_ms?: number]
@@ -544,6 +568,14 @@ export function data_dir(): string;
 export function store_query(sql: string, params?: SqlValue[]): Promise<Record<string, string | number | null>[]>;
 /** 在本插件自己的库里执行一条语句，返回改动的行数。 */
 export function store_execute(sql: string, params?: SqlValue[]): Promise<number>;
+/** 几条语句在一个事务里执行，有一条失败整个回滚（reject）。兑现为每条改动的行数。 */
+export function store_write(statements: { sql: string; params?: SqlValue[] }[]): Promise<number[]>;
+/**
+ * 把本插件的库迁到最新：steps[i] 把版本 i 迁到 i + 1（版本 0 是空库，一步可以是好几条语句），版本记在
+ * PRAGMA user_version，每一步和它的版本号在同一个事务里。库比 steps 新（装回了旧版插件）时 reject、不动它。
+ * 起来时先调它，再读写。
+ */
+export function store_migrate(steps: string[]): Promise<null>;
 /**
  * 本插件目录里一个文件的资源路径，交给 image()、svg()、Icon，或登记视图、菜单项时的 icon：
  * `image(asset("assets/logo.png"))`。path 相对插件目录，不能是绝对路径、不能用 ".."；文件不在就抛错。
@@ -821,6 +853,8 @@ impl JsPlugin {
         let opener_owner = self.0.borrow().id.clone();
         let query_owner = self.0.borrow().id.clone();
         let execute_owner = query_owner.clone();
+        let migrate_owner = query_owner.clone();
+        let write_owner = query_owner.clone();
         let data_owner = query_owner.clone();
         let event_owner = query_owner.clone();
         let views = self.clone();
@@ -876,13 +910,17 @@ impl JsPlugin {
                 in_app("conversation_facts", |cx| {
                     let host = crate::host(cx);
                     let states = host.session_states(&machine, cx);
-                    let directory = host.workspace_directory(&machine, cx);
-                    let conversations =
-                        directory.map_or(Vec::new(), |directory| directory.conversations);
+                    let style = host.path_style(&machine, cx);
+                    let Some(directory) = host.workspace_directory(&machine, cx) else {
+                        return HostValue::Array(Vec::new());
+                    };
                     HostValue::Array(
-                        conversations
+                        directory
+                            .conversations
                             .iter()
-                            .map(|conversation| conversation_facts(conversation, &states))
+                            .map(|conversation| {
+                                conversation_facts(style, &directory, conversation, &states)
+                            })
                             .collect(),
                     )
                 })
@@ -1165,6 +1203,43 @@ impl JsPlugin {
                 }
                 .into())
             })
+            .function("path_clean", |arguments| {
+                let style = style_argument("path_clean", arguments)?;
+                Ok(style.clean(arguments.string(1)?).into())
+            })
+            .function("path_join", |arguments| {
+                let style = style_argument("path_join", arguments)?;
+                Ok(style
+                    .join(arguments.string(1)?, arguments.string(2)?)
+                    .into())
+            })
+            .function("path_file_name", |arguments| {
+                let style = style_argument("path_file_name", arguments)?;
+                Ok(style
+                    .file_name(arguments.string(1)?)
+                    .map_or(HostValue::Null, HostValue::from))
+            })
+            .function("path_is_absolute", |arguments| {
+                let style = style_argument("path_is_absolute", arguments)?;
+                Ok(style.is_absolute(arguments.string(1)?).into())
+            })
+            .function("path_starts_with", |arguments| {
+                let style = style_argument("path_starts_with", arguments)?;
+                Ok(style
+                    .starts_with(arguments.string(1)?, arguments.string(2)?)
+                    .into())
+            })
+            .function("project_labels", |arguments| {
+                let style = style_argument("project_labels", arguments)?;
+                let roots = string_list("project_labels", arguments.get(1))?;
+                let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
+                Ok(HostValue::Array(
+                    crate::model::workspace_directory::project_labels(style, &roots)
+                        .into_iter()
+                        .map(HostValue::from)
+                        .collect(),
+                ))
+            })
             .function("connections", |_| {
                 let connections = in_app("connections", |cx| crate::host(cx).connections(cx))?;
                 serialized("connections", &connections)
@@ -1407,6 +1482,22 @@ impl JsPlugin {
                 let (sql, params) = sql_arguments("store_execute", arguments)?;
                 let owner = execute_owner.clone();
                 Ok(async move { store_execute(&owner, &sql, params) })
+            })
+            .async_function("store_migrate", move |arguments| {
+                let steps = string_list("store_migrate", arguments.get(0))?;
+                let owner = migrate_owner.clone();
+                Ok(async move {
+                    let steps: Vec<&str> = steps.iter().map(String::as_str).collect();
+                    plugin_store(&owner)?
+                        .migrate(&steps)
+                        .map(|()| HostValue::Null)
+                        .map_err(|error| HostError::new(format!("store_migrate：{error}")))
+                })
+            })
+            .async_function("store_write", move |arguments| {
+                let statements = write_statements(arguments)?;
+                let owner = write_owner.clone();
+                Ok(async move { store_write(&owner, statements) })
             })
             .function("data_dir", move |_| {
                 if data_owner.is_empty() {
@@ -1802,6 +1893,71 @@ fn store_query(owner: &str, sql: &str, params: Vec<rusqlite::types::Value>) -> H
         })
         .map_err(|error| HostError::new(format!("store_query：{error}")))?;
     Ok(HostValue::Array(rows))
+}
+
+/// 字符串数组参数。
+fn string_list(name: &str, value: Option<&HostValue>) -> Result<Vec<String>, HostError> {
+    let Some(HostValue::Array(items)) = value else {
+        return Err(HostError::new(format!("{name}：要是字符串数组")));
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            HostValue::Str(text) => Ok(text.clone()),
+            other => Err(HostError::new(format!(
+                "{name}：要是字符串数组，收到 {}",
+                other.describe()
+            ))),
+        })
+        .collect()
+}
+
+/// `store_write` 的参数：`[{ sql, params? }, …]`。
+fn write_statements(
+    arguments: &HostArguments,
+) -> Result<Vec<(String, Vec<rusqlite::types::Value>)>, HostError> {
+    let Some(HostValue::Array(items)) = arguments.get(0) else {
+        return Err(HostError::new("store_write：要一组语句 [{ sql, params? }]"));
+    };
+    items
+        .iter()
+        .map(|item| {
+            let HostValue::Object(fields) = item else {
+                return Err(HostError::new(format!(
+                    "store_write：每条语句要是 {{ sql, params? }}，收到 {}",
+                    item.describe()
+                )));
+            };
+            let field = |name: &str| {
+                fields
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+            };
+            let statement = HostArguments::new(vec![
+                field("sql").unwrap_or(HostValue::Null),
+                field("params").unwrap_or(HostValue::Null),
+            ]);
+            sql_arguments("store_write", &statement)
+        })
+        .collect()
+}
+
+/// 几条语句在一个事务里执行，有一条失败整个回滚。兑现为每条改动的行数。
+fn store_write(owner: &str, statements: Vec<(String, Vec<rusqlite::types::Value>)>) -> HostResult {
+    let store = plugin_store(owner)?;
+    let changed = store
+        .write(|tx| {
+            statements
+                .iter()
+                .map(|(sql, params)| {
+                    tx.execute(sql, rusqlite::params_from_iter(params.iter()))
+                        .map(HostValue::from)
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| HostError::new(format!("store_write：{error}")))?;
+    Ok(HostValue::Array(changed))
 }
 
 fn store_execute(owner: &str, sql: &str, params: Vec<rusqlite::types::Value>) -> HostResult {
@@ -2306,6 +2462,8 @@ fn json_value(value: &HostValue) -> Value {
 /// 宿主的数据转成给脚本的值。
 /// 一段对话给 JS 的派生事实（见 [`crate::facts`]）。
 fn conversation_facts(
+    style: crate::model::runtime_path::PathStyle,
+    directory: &crate::model::workspace_directory::WorkspaceDirectory,
     conversation: &crate::model::workspace_directory::WorkspaceConversation,
     states: &[crate::model::daemon_state::DaemonSessionState],
 ) -> HostValue {
@@ -2331,7 +2489,42 @@ fn conversation_facts(
         .field("status", status)
         .field("agent", agent)
         .field("automation", crate::is_automation_run(conversation))
+        .field(
+            "cwd",
+            crate::conversation_cwd(conversation).map_or(HostValue::Null, HostValue::from),
+        )
+        .field(
+            "placement",
+            placement_value(crate::placement(style, directory, conversation)),
+        )
         .into()
+}
+
+fn placement_value(placement: crate::Placement) -> HostValue {
+    match placement {
+        crate::Placement::Project { root, workset } => HostObject::new()
+            .field("kind", "project")
+            .field("root", root)
+            .field("workset", workset.map_or(HostValue::Null, HostValue::from))
+            .into(),
+        crate::Placement::Conversations => HostObject::new().field("kind", "conversations").into(),
+        crate::Placement::Hidden => HostObject::new().field("kind", "hidden").into(),
+    }
+}
+
+/// 路径函数的第一个参数：`path_style` 给的 "posix" / "windows"。
+fn style_argument(
+    name: &str,
+    arguments: &HostArguments,
+) -> Result<crate::model::runtime_path::PathStyle, HostError> {
+    use crate::model::runtime_path::PathStyle;
+    match arguments.string(0)? {
+        "posix" => Ok(PathStyle::Posix),
+        "windows" => Ok(PathStyle::Windows),
+        other => Err(HostError::new(format!(
+            "{name}：style 要是 \"posix\" 或 \"windows\"，收到 {other:?}"
+        ))),
+    }
 }
 
 fn serialized(name: &str, value: &impl serde::Serialize) -> Result<HostValue, HostError> {
@@ -2677,7 +2870,10 @@ mod tests {
     #[test]
     fn conversation_facts_give_name_status_agent_and_automation() {
         use crate::model::daemon_state::{DaemonPhase, DaemonSessionState};
-        use crate::model::workspace_directory::{WorkspaceAcp, WorkspaceConversation};
+        use crate::model::runtime_path::PathStyle;
+        use crate::model::workspace_directory::{
+            WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
+        };
 
         let conversation = WorkspaceConversation {
             id: "c".into(),
@@ -2696,7 +2892,11 @@ mod tests {
             conversation_name: Some("修 bug".into()),
             ..Default::default()
         };
-        let facts = conversation_facts(&conversation, &[state]);
+        let directory = WorkspaceDirectory {
+            projects: vec!["/repo".into()],
+            ..Default::default()
+        };
+        let facts = conversation_facts(PathStyle::Posix, &directory, &conversation, &[state]);
         let field = |name: &str| match &facts {
             HostValue::Object(fields) => fields
                 .iter()
@@ -2725,13 +2925,98 @@ mod tests {
             id: "t".into(),
             ..Default::default()
         };
-        let facts = conversation_facts(&unnamed, &[]);
+        let facts = conversation_facts(PathStyle::Posix, &directory, &unnamed, &[]);
         let HostValue::Object(fields) = facts else {
             panic!("不是对象");
         };
         assert!(fields.contains(&("name".to_string(), HostValue::Null)));
         assert!(fields.contains(&("status".to_string(), HostValue::from("idle"))));
         assert!(fields.contains(&("agent".to_string(), HostValue::Null)));
+        // 自动化跑的不在侧栏；终端按第一格的工作目录落进打开的项目。
+        assert!(fields.contains(&("cwd".to_string(), HostValue::Null)));
+        let HostValue::Object(automated) =
+            conversation_facts(PathStyle::Posix, &directory, &conversation, &[])
+        else {
+            panic!("不是对象");
+        };
+        assert!(automated.contains(&(
+            "placement".to_string(),
+            HostObject::new().field("kind", "hidden").into()
+        )));
+        let in_repo = WorkspaceConversation {
+            id: "r".into(),
+            terminals: vec![WorkspaceTerminal {
+                cwd: Some("/repo/sub".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let HostValue::Object(fields) =
+            conversation_facts(PathStyle::Posix, &directory, &in_repo, &[])
+        else {
+            panic!("不是对象");
+        };
+        assert!(fields.contains(&("cwd".to_string(), HostValue::from("/repo/sub"))));
+        assert!(
+            fields.contains(&(
+                "placement".to_string(),
+                HostObject::new()
+                    .field("kind", "project")
+                    .field("root", "/repo")
+                    .field("workset", HostValue::Null)
+                    .into()
+            ))
+        );
+    }
+
+    #[test]
+    fn path_functions_follow_the_machines_style() {
+        let module = JsPlugin::new().module();
+        let call = |name: &str, arguments: Vec<HostValue>| {
+            module
+                .call(name, &HostArguments::new(arguments))
+                .unwrap_or_else(|error| panic!("{name}：{error}"))
+        };
+        assert_eq!(
+            call("path_clean", vec!["posix".into(), "/a//b/./c/..".into()]),
+            HostValue::from("/a/b")
+        );
+        assert_eq!(
+            call(
+                "path_join",
+                vec!["windows".into(), r"C:\a".into(), "b".into()]
+            ),
+            HostValue::from(r"C:\a\b")
+        );
+        assert_eq!(
+            call("path_file_name", vec!["posix".into(), "/".into()]),
+            HostValue::Null
+        );
+        assert_eq!(
+            call(
+                "path_starts_with",
+                vec!["posix".into(), "/project".into(), "/proj".into()]
+            ),
+            HostValue::Bool(false)
+        );
+        assert_eq!(
+            call(
+                "project_labels",
+                vec![
+                    "posix".into(),
+                    HostValue::Array(vec!["/a/smelt".into(), "/b/smelt".into()])
+                ]
+            ),
+            HostValue::Array(vec!["a · smelt".into(), "b · smelt".into()])
+        );
+        assert!(
+            module
+                .call(
+                    "path_clean",
+                    &HostArguments::new(["mac".into(), "/".into()])
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -3873,5 +4158,77 @@ mod tests {
             .begin("store_query", &HostArguments::new(["SELECT 1".into()]))
             .unwrap();
         assert!(smol::block_on(begun).is_err());
+    }
+
+    #[test]
+    fn store_migrate_and_write_run_in_transactions() {
+        let owner = format!("js-store-write-test-{}", std::process::id());
+        let module = JsPlugin::for_plugin(&owner, "库").module();
+        let run = |name: &str, values: Vec<HostValue>| {
+            smol::block_on(module.begin(name, &HostArguments::new(values)).unwrap())
+        };
+        let steps = |steps: &[&str]| {
+            vec![HostValue::Array(
+                steps.iter().map(|step| HostValue::from(*step)).collect(),
+            )]
+        };
+        let first = "CREATE TABLE a (x INTEGER PRIMARY KEY); CREATE TABLE b (y TEXT);";
+        run("store_migrate", steps(&[first])).unwrap();
+        // 再迁一次什么都不做；加一步只跑新的那步。
+        run("store_migrate", steps(&[first])).unwrap();
+        run(
+            "store_migrate",
+            steps(&[first, "CREATE TABLE c (z INTEGER);"]),
+        )
+        .unwrap();
+        let version = run("store_query", vec!["PRAGMA user_version".into()]).unwrap();
+        assert_eq!(
+            version,
+            HostValue::Array(vec![HostObject::new().field("user_version", 2).into()])
+        );
+        // 库比插件新：报错，不动它。
+        assert!(run("store_migrate", steps(&[first])).is_err());
+
+        let statement = |sql: &str, params: Vec<HostValue>| -> HostValue {
+            HostObject::new()
+                .field("sql", sql)
+                .field("params", HostValue::Array(params))
+                .into()
+        };
+        let changed = run(
+            "store_write",
+            vec![HostValue::Array(vec![
+                statement("INSERT INTO a (x) VALUES (?1)", vec![1.into()]),
+                statement("INSERT INTO a (x) VALUES (?1)", vec![2.into()]),
+                statement("DELETE FROM a WHERE x = ?1", vec![1.into()]),
+            ])],
+        )
+        .unwrap();
+        assert_eq!(
+            changed,
+            HostValue::Array(vec![1.into(), 1.into(), 1.into()])
+        );
+        // 有一条失败（主键撞了）整个回滚。
+        let failed = run(
+            "store_write",
+            vec![HostValue::Array(vec![
+                statement("INSERT INTO a (x) VALUES (?1)", vec![3.into()]),
+                statement("INSERT INTO a (x) VALUES (?1)", vec![2.into()]),
+            ])],
+        );
+        assert!(failed.is_err());
+        let rows = run("store_query", vec!["SELECT x FROM a ORDER BY x".into()]).unwrap();
+        assert_eq!(
+            rows,
+            HostValue::Array(vec![HostObject::new().field("x", 2).into()])
+        );
+        assert!(
+            module
+                .begin("store_write", &HostArguments::new(["INSERT".into()]))
+                .is_err()
+        );
+        if let Ok(dir) = crate::plugin_data_dir(&owner) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

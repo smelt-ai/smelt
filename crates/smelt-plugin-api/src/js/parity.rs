@@ -58,6 +58,8 @@ const SURFACE: &[(&str, Js)] = &[
         "is_automation_run",
         Via("conversation_facts 里的 automation"),
     ),
+    ("conversation_cwd", Via("conversation_facts 里的 cwd")),
+    ("placement", Via("conversation_facts 里的 placement")),
     (
         "host.notification_permission",
         Named("notification_permission"),
@@ -171,7 +173,10 @@ const SURFACE: &[(&str, Js)] = &[
     ("ui", Via("smelt-ui 模块")),
     ("client", Via("call")),
     ("session_ops", Via("call")),
-    ("plugin_store", Via("store_query / store_execute")),
+    (
+        "plugin_store",
+        Via("store_query / store_execute / store_write / store_migrate"),
+    ),
     ("plugin_data_dir", Named("data_dir")),
     ("rusqlite", Via("store_query / store_execute")),
     ("paths", Via("smelt-fs 和环境变量")),
@@ -200,7 +205,7 @@ const JS_ONLY: &[(&str, &str)] = &[
     ("notify_view", "视图自己的 cx.notify()"),
     (
         "conversation_facts",
-        "conversation_name、conversation_agent、is_automation_run 和对话状态一次给齐",
+        "conversation_name、conversation_agent、is_automation_run、conversation_cwd、placement 和对话状态一次给齐",
     ),
     (
         "theme",
@@ -210,6 +215,17 @@ const JS_ONLY: &[(&str, &str)] = &[
     ("locales", "常量 LOCALES"),
     ("store_query", "plugin_store"),
     ("store_execute", "plugin_store"),
+    ("store_write", "PluginStore::write"),
+    ("store_migrate", "PluginStore::migrate"),
+    ("path_clean", "model::runtime_path::PathStyle::clean"),
+    ("path_join", "PathStyle::join"),
+    ("path_file_name", "PathStyle::file_name"),
+    ("path_is_absolute", "PathStyle::is_absolute"),
+    ("path_starts_with", "PathStyle::starts_with"),
+    (
+        "project_labels",
+        "model::workspace_directory::project_labels",
+    ),
     (
         "asset",
         "内置插件的资源用 include_bytes 编进二进制，不在插件目录里",

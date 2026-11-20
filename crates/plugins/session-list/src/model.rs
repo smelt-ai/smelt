@@ -25,10 +25,7 @@ use gpui::{App, AppContext as _, Context, Entity, Global, SharedString};
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::daemon_state::DaemonSessionState;
 use smelt_plugin_api::model::runtime_path::PathStyle;
-use smelt_plugin_api::model::session_control::is_background_acp_session_id;
-use smelt_plugin_api::model::workspace_directory::{
-    WorkspaceConversation, WorkspaceDirectory, project_root_of,
-};
+use smelt_plugin_api::model::workspace_directory::{WorkspaceConversation, WorkspaceDirectory};
 
 use crate::attention::Unread;
 use crate::core::Selected;
@@ -759,75 +756,8 @@ pub(crate) fn title(conversation: &WorkspaceConversation, states: &[DaemonSessio
     }
 }
 
-/// 这段会话的工作目录：对话的，或第一格终端起的时候的。是起的时候定的，不随终端里
-/// `cd` 变（那是会话状态里的 `cwd`），所以分组稳定。
-pub(crate) fn cwd_of(conversation: &WorkspaceConversation) -> Option<&str> {
-    let cwd = match &conversation.acp {
-        Some(acp) => acp.cwd.as_deref(),
-        None => conversation
-            .terminals
-            .first()
-            .and_then(|terminal| terminal.cwd.as_deref()),
-    };
-    cwd.filter(|cwd| !cwd.is_empty())
-}
-
-/// 会话摆在侧栏哪儿。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Placement {
-    /// 在一个项目组里。`root` 是打开的项目，或者不在任何项目里时它自己的工作目录（自成
-    /// 一组，没有工作目录的是 `""`）。`workset` 是它绑的工作集。
-    Project {
-        root: String,
-        workset: Option<String>,
-    },
-    /// 「对话」那一段：跟智能体的对话，工作目录不在任何打开的项目里。
-    Conversations,
-    /// 不在侧栏：已归档（去归档视图看），或自动化的运行（去自动化看）。
-    Hidden,
-}
-
-pub(crate) fn placement(
-    style: PathStyle,
-    directory: &WorkspaceDirectory,
-    conversation: &WorkspaceConversation,
-) -> Placement {
-    if conversation.archived_at.is_some() || is_automation_run(conversation) {
-        return Placement::Hidden;
-    }
-    if let Some(workset) = conversation
-        .workset_id
-        .as_ref()
-        .and_then(|id| directory.worksets.iter().find(|workset| &workset.id == id))
-    {
-        return Placement::Project {
-            root: workset.project_root.clone(),
-            workset: Some(workset.id.clone()),
-        };
-    }
-    let cwd = cwd_of(conversation);
-    if let Some(root) = cwd.and_then(|cwd| project_root_of(style, &directory.projects, cwd)) {
-        return Placement::Project {
-            root: root.to_string(),
-            workset: None,
-        };
-    }
-    if conversation.agent_definition().is_some() {
-        return Placement::Conversations;
-    }
-    Placement::Project {
-        root: cwd.unwrap_or_default().to_string(),
-        workset: None,
-    }
-}
-
-/// 自动化跑出来的会话：智能体对话绑着自动化，或者是后台起的 ACP 会话。
-fn is_automation_run(conversation: &WorkspaceConversation) -> bool {
-    conversation
-        .acp
-        .as_ref()
-        .is_some_and(|acp| acp.automation_id.is_some() || is_background_acp_session_id(&acp.sid))
-}
+/// 这段会话摆在侧栏哪儿：规则在能力层，和会话插件共用一份。
+pub(crate) use smelt_plugin_api::{Placement, placement};
 
 #[cfg(test)]
 mod tests {

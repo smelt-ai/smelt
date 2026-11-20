@@ -86,7 +86,9 @@
 
 | 能力 | 给插件的东西 | 现在在哪 |
 | --- | --- | --- |
-| 会话数据 | 工作区目录、会话状态，带上几个功能都要的派生事实（对话的状态、agent 种类的名字和图标） | 宿主的镜像 + `smelt-model`；派生事实 JS 还拿不到 |
+| 会话数据 | 工作区目录、会话状态，带上几个功能都要的派生事实（名字、状态、哪家 CLI、是不是自动化跑的、工作目录、摆在侧栏哪儿） | 宿主的镜像 + `smelt-model` + `smelt-plugin-api` 的 `facts`；JS 经 `conversation_facts` |
+| 路径 | 按运行时那台机器的系统切路径（`path_clean`、`path_join` 这些）、项目显示名 | `smelt-model` 的 `runtime_path`；JS 经 `path_*`、`project_labels` |
+| 插件的库 | 自己的 SQLite：查、写、事务、按版本迁移 | `smelt-client-store` 的 `PluginStore`；JS 经 `store_*` |
 | 终端 | 每格终端一个视图实例（`create_view` / `SmeltViewInstance`），字节流、画面、终端菜单的底层 | Rust 插件 `crates/plugins/terminal` |
 | 对话 | 对话流、消息里的 markdown 和 diff、输入框、ACP 连接和会话生命周期 | Rust 插件 `crates/plugins/conversation`；拆到哪一层另定（见「待定」） |
 | 组件库 | `smelt-ui` 的 JS 组件：按钮、菜单、弹层、对话框、下拉、列表行底座、滚动区域、吸顶区段、拖动、悬停提示、键帽、设置页骨架、列表动画（开合、重排、落进来、铺底一闪、开始跑时亮一下） | `crates/smelt-ui` + `smelt-plugin-api/src/js/ui` |
@@ -407,7 +409,7 @@ export default class Plugin extends View {
 
 ## 已知缺口
 
-- gpui-shell 没有通用的拖放绑定，拖放用 `smelt-ui` 的：`SmeltDragItem.new(id, kind)` 是能拖着换位置的一项，同一 `kind` 的项之间互放，放下时 `on_drop(from, before)` 交给脚本；`SmeltScrollView` 里拖到上下边缘自动滚，`on_drop_files(paths)` 收从访达拖进来的文件。
+- gpui-shell 没有通用的拖放绑定，拖放用 `smelt-ui` 的：`SmeltDragItem.new(id, kind)` 是能拖着换位置的一项，同一 `kind` 的项之间互放，放下时 `on_drop(from, before, top)` 交给脚本（`top` 是松手时牌子上沿的窗口 y，交给 `SmeltFlip.from_top` 让那一项从手放下的地方落下）；`SmeltScrollView` 里拖到上下边缘自动滚，`on_drop_files(paths)` 收从访达拖进来的文件。
 - gpui-shell 的 `gpui-shell.json` 拒绝未知字段，所以插件的一切都通过宿主函数登记。命令用 `register_commands` 登记，用 `next_command` 取下一条要执行的，做完用 `resolve_command` / `reject_command` 按 id 交回结果。命令只管工作台级的动作；跟着焦点变的键（列表上下移动、输入框编辑）用视图自己的 action。
 - 绕过 smeltd 的修改（手改 Pi 配置文件、直接用 `pi` 命令行）现在收不到，要 smeltd 去监视文件才能补上。
 - 手机端是 Flutter，跑不了 gpui-shell。插件只影响桌面，手机直接用 smeltd 协议。
