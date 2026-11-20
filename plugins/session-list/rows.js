@@ -25,6 +25,7 @@ import {
   SmeltScrollAnchor,
   SmeltStickySection,
   SmeltTextInput,
+  SmeltTooltip,
   SmeltTruncatedLine,
   SmeltViewInstance,
   SmeltWash,
@@ -372,18 +373,15 @@ function machine_row(ctx, machine, area) {
   )
     .child(disclosure_slot(ctx, "machine-row", os, key, collapsed, collapsible))
     .child(
-      sampled_on_hover(
-        ctx,
-        `machine-name-hover:${id}`,
-        remote,
-        div()
-          .id(`machine-name:${id}`)
-          .min_w_0()
-          .child(SmeltTruncatedLine.new(machine.name))
-          .tooltip(machine.link.detail),
-      )
+      SmeltTooltip.new(`machine-name-tip:${id}`, machine.link.detail)
         .flex_1()
-        .min_w_0(),
+        .min_w_0()
+        .child(
+          div()
+            .id(`machine-name:${id}`)
+            .child(SmeltTruncatedLine.new(machine.name))
+            .when(remote, (name) => name.on_hover(refresh_connections(ctx))),
+        ),
     )
     .when(state != null, (row) =>
       row.child(typed(div().flex_shrink_0(), theme.type.text_xsmall).text_color(p.faint).child(state)),
@@ -421,29 +419,21 @@ function waiting_machine_row(ctx, machine) {
         machine.link.unavailable ?? t("machine.connecting"),
       ),
     )
-    .tooltip(machine.link.detail);
-  const sampled = sampled_on_hover(ctx, `machine-waiting-hover:${id}`, machine.machine != null, row);
+    .when(machine.machine != null, (row) => row.on_hover(refresh_connections(ctx)));
+  const tipped = SmeltTooltip.new(`machine-waiting-tip:${id}`, machine.link.detail).child(row);
   const menu = ctx.menus.machine(machine.machine);
-  if (menu.length === 0) return sampled;
-  return SmeltContextMenu.new(`machine-context:${id}`).items(menu).child(sampled);
+  if (menu.length === 0) return tipped;
+  return SmeltContextMenu.new(`machine-context:${id}`).items(menu).child(tipped);
 }
 
-/**
- * 连接说明里的延迟只在有人看时采样：悬停远程机器时叫宿主重测一次。包在带提示的元素外面一层：
- * 提示自己占着元素的悬停监听（gpui 一个元素只有一个），写在同一个元素上，这里就收不到悬停。
- */
-function sampled_on_hover(ctx, id, remote, child) {
-  return div()
-    .id(id)
-    .child(child)
-    .when(remote, (wrapper) =>
-      wrapper.on_hover((hovered) => {
-        if (!hovered) return;
-        ctx.list.host
-          .run("smelt.app/refresh-connections")
-          .catch((error) => console.error(`[session-list] 重测连接失败：${error?.message ?? error}`));
-      }),
-    );
+/** 连接说明里的延迟只在有人看时采样：悬停远程机器时叫宿主重测一次。 */
+function refresh_connections(ctx) {
+  return (hovered) => {
+    if (!hovered) return;
+    ctx.list.host
+      .run("smelt.app/refresh-connections")
+      .catch((error) => console.error(`[session-list] 重测连接失败：${error?.message ?? error}`));
+  };
 }
 
 /** 按项目分组、「显示：有会话」时藏起来的空项目有几个；点一下回到「显示：全部」。 */
@@ -490,8 +480,8 @@ function project_machine_tag(ctx, id, project, selected) {
   if (text == null) return null;
   const tag = machine_tag(ctx, machine_info(ctx.sidebar, project.machine), text, selected)
     .id(`project-machine:${id}`)
-    .tooltip(link.detail);
-  return sampled_on_hover(ctx, `project-machine-hover:${id}`, name != null, tag).flex_shrink_0();
+    .when(name != null, (tag) => tag.on_hover(refresh_connections(ctx)));
+  return SmeltTooltip.new(`project-machine-tip:${id}`, link.detail).flex_shrink_0().child(tag);
 }
 
 function project_id(project) {
@@ -571,7 +561,7 @@ function project_face(ctx, el, lead, project, selected) {
         .when(project.branch != null, (name) =>
           name.child(
             typed(
-              div().id(`project-branch:${id}`).tooltip(project.branch).flex_shrink_0().max_w(120),
+              SmeltTooltip.new(`project-branch:${id}`, project.branch).flex_shrink_0().max_w(120),
               theme.type.text_xsmall,
             )
               .text_color(row_faint(p, selected))
@@ -621,16 +611,14 @@ function workset_row(ctx, workset) {
   const renaming = rename_state(ctx, { kind: "workset", machine, id: workset.id });
   const title = renaming
     ? rename_field(ctx, renaming)
-    : div()
-        .id(`workset-name:${id}`)
+    : SmeltTooltip.new(`workset-name:${id}`, workset.tooltip)
         .flex_1()
         .min_w_0()
         .flex()
         .items_center()
         .gap_1p5()
         .child(div().min_w_0().child(SmeltTruncatedLine.new(workset.task)))
-        .when(workset.pinned, (name) => name.child(pin_marker(ctx)))
-        .tooltip(workset.tooltip);
+        .when(workset.pinned, (name) => name.child(pin_marker(ctx)));
   const row = typed(
     SmeltListRow.new(`workset:${id}`)
       .group("group-row")
@@ -803,8 +791,7 @@ function origin_labels(ctx, id, origin, selected) {
   if (origin.workset) {
     labels.push(
       typed(
-        div()
-          .id(`session-workset:${id}`)
+        SmeltTooltip.new(`session-workset:${id}`, origin.workset.tooltip)
           .flex_shrink_0()
           .max_w(104)
           .min_w_0()
@@ -818,8 +805,7 @@ function origin_labels(ctx, id, origin, selected) {
       )
         .text_color(row_muted(p, selected))
         .child(svg(icon("git-branch")).size(12).flex_shrink_0().text_color(row_muted(p, selected)))
-        .child(div().min_w_0().child(SmeltTruncatedLine.new(origin.workset.task)))
-        .tooltip(origin.workset.tooltip),
+        .child(div().min_w_0().child(SmeltTruncatedLine.new(origin.workset.task))),
     );
   }
   labels.push(
@@ -828,9 +814,7 @@ function origin_labels(ctx, id, origin, selected) {
       .child(div().min_w_0().child(SmeltTruncatedLine.new(origin.project)))
       .when(origin.branch != null, (label) =>
         label.child(
-          div()
-            .id(`session-branch:${id}`)
-            .tooltip(origin.branch)
+          SmeltTooltip.new(`session-branch:${id}`, origin.branch)
             .min_w_0()
             .text_color(row_faint(p, selected))
             .child(SmeltTruncatedLine.new(origin.branch)),
@@ -885,14 +869,12 @@ function session_avatar(ctx, id, row) {
     .id(`avatar:${id}`)
     .size_full()
     .args(JSON.stringify({ machine: row.key.machine, conversation: row.key.id }));
-  return div()
-    .id(`session-avatar:${id}`)
+  return (row.icon.kind === "provider" ? SmeltTooltip.new(`session-avatar:${id}`, row.icon.label) : div())
     .relative()
     .size(AVATAR)
     .flex_shrink_0()
     .child(figure)
-    .child(badge)
-    .when(row.icon.kind === "provider", (avatar) => avatar.tooltip(row.icon.label));
+    .child(badge);
 }
 
 /** 没人填头像插槽时行首的图标：空闲随行的次要字色，在跑、要人管的用状态色；刚开始跑时亮一下。 */
@@ -908,7 +890,7 @@ function session_icon(ctx, id, row, selected) {
           .size(LEAD)
           .text_color(row.status === "idle" ? row_muted(p, selected) : dot_color(p, row.status));
   const inner =
-    row.icon.kind === "provider" ? div().id(`session-provider:${id}`).child(glyph).tooltip(row.icon.label) : glyph;
+    row.icon.kind === "provider" ? SmeltTooltip.new(`session-provider:${id}`, row.icon.label).child(glyph) : glyph;
   return lead_box().child(inner);
 }
 
@@ -1061,32 +1043,35 @@ function hover_only(group) {
 function search_entry(ctx) {
   const { theme, t } = ctx;
   const p = theme.palette;
-  return div()
-    .id("search-projects")
-    .group("search-projects")
+  return SmeltTooltip.new("search-projects-tip", t("list.search_projects"))
     .flex_1()
     .min_w_0()
     .h_full()
     .ml(-SEARCH_INSET)
-    .px(SEARCH_INSET)
-    .flex()
-    .items_center()
-    .gap_2()
-    .rounded(theme.radius.md)
-    .cursor_text()
-    .hover((entry) => entry.bg(p.bg).shadow(theme.elevation.input))
-    .child(div().flex_1().min_w_0().child(t("grouping.project")))
     .child(
-      // 悬停样式挂在外层 div 上，理由同 disclosure_slot。
       div()
+        .id("search-projects")
+        .group("search-projects")
+        .size_full()
+        .px(SEARCH_INSET)
         .flex()
-        .flex_shrink_0()
-        .opacity(0)
-        .group_hover("search-projects", (style) => style.opacity(1))
-        .child(svg(icon("search")).size(12).text_color(p.muted)),
-    )
-    .tooltip(t("list.search_projects"))
-    .on_click(() => ctx.view.start_search());
+        .items_center()
+        .gap_2()
+        .rounded(theme.radius.md)
+        .cursor_text()
+        .hover((entry) => entry.bg(p.bg).shadow(theme.elevation.input))
+        .child(div().flex_1().min_w_0().child(t("grouping.project")))
+        .child(
+          // 悬停样式挂在外层 div 上，理由同 disclosure_slot。
+          div()
+            .flex()
+            .flex_shrink_0()
+            .opacity(0)
+            .group_hover("search-projects", (style) => style.opacity(1))
+            .child(svg(icon("search")).size(12).text_color(p.muted)),
+        )
+        .on_click(() => ctx.view.start_search()),
+    );
 }
 
 /** 「项目」标题上的搜索框，占标题那一格。字号跟标题一样，只换成常规字重。 */

@@ -1,5 +1,7 @@
 //! `SmeltTooltip`：给子元素挂悬停提示（[`smelt_ui::tooltip::Tooltip`]），smelt 自己的紧凑样式，
-//! 能带快捷键键帽。gpui-shell 元素自带的 `tooltip(text)` 是 Shell 的样式，和 App 里别处不一样。
+//! 能带快捷键键帽。gpui-shell 元素自带的 `tooltip(text)` 在 App 里不弹：它要窗口里的 `ShellRoot`
+//! 提示层，工作台窗口没有包它，找不到就静默不画。普通元素要提示一律用这个；smelt-ui 的按钮、
+//! 列表行自带的 `tooltip` 是 smelt 自己的，照用。
 //!
 //! 键帽两种给法：`keys` 写死一串按键；`command` 给一条命令，弹出时按眼下的键位表查它的快捷键
 //! （用户在设置里改过就是改后的），键位表只有宿主看得见。
@@ -112,7 +114,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                 ),
             ])
             .with_documentation(
-                "Wraps its children and shows a Smelt tooltip when the pointer rests on them.",
+                "Wraps its children and shows a Smelt tooltip when the pointer rests on them. Use this instead of an element's own `tooltip(text)`, which never shows in Smelt's windows; the `tooltip` of Smelt's own components (buttons, list rows) works.",
             ),
     )?;
     Ok(())
