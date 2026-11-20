@@ -233,6 +233,36 @@ export default class App extends View {
     assert!(typed.contains("query: [abc]"), "{typed}");
 }
 
+/// 改名：一出来就拿到焦点、原名全选，直接打字就换掉。
+#[gpui::test]
+fn text_input_state_takes_focus_and_selects_all(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltInputState, SmeltTextInput } from "smelt-ui";
+export default class App extends View {
+  init(_props, cx) {
+    this.name = SmeltInputState.new();
+    this.name.on("change", (_event, cx) => cx.notify());
+  }
+  render(cx) {
+    return div().size_full()
+      .child(div().id("rename").absolute().left(0).top(0).w(100).h(20)
+        .on_click(() => { this.name.set_value("old name"); this.name.focus(); this.name.select_all(); }))
+      .child(SmeltTextInput.new(this.name).aria_label("Name").absolute().left(0).top(40).w(200))
+      .child(`name: [${this.name.value()}]`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    click(&mut context, 20., 10.);
+    draw(&mut context);
+    context.simulate_input("new");
+    draw(&mut context);
+    let typed = tree(&mut context, &view);
+    assert!(typed.contains("name: [new]"), "{typed}");
+}
+
 #[gpui::test]
 fn list_controls_build_from_scripts(cx: &mut TestAppContext) {
     let source = r#"

@@ -3,15 +3,16 @@
 //! 文字放在状态里：在 `init` 里 `SmeltInputState.new(placeholder)` 建一份留在视图上，
 //! `state.on("change", ...)` 订变化、`state.value()` 取字；render 里只
 //! `SmeltTextInput.new(state)` 把它画出来。状态的方法和事件同 gpui-shell 自带的
-//! `InputState`。
+//! `InputState`，另加 `focus()`、`select_all()`：行内改名、展开的搜索框要一出来就能打字，
+//! gpui-shell 的那份给不了。
 
 use std::sync::Arc;
 
 use gpui::{AppContext as _, Entity};
 use gpui_shell::{
-    ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentDescriptor,
+    ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentDataValue, ComponentDescriptor,
     ComponentMaterializer, ComponentPayload, ComponentRegistry, ConstructorDescriptor,
-    MaterializeRequest, RegistryError, StateDescriptor, anyhow,
+    MaterializeRequest, RegistryError, StateDescriptor, StateMethodDescriptor, anyhow,
 };
 use smelt_ui::TextInput;
 use smelt_ui::field::InputState;
@@ -49,6 +50,28 @@ impl ComponentMaterializer for TextInputMaterializer {
     }
 }
 
+/// gpui-shell 给的文字方法，加上拿焦点、全选。
+fn state_methods() -> Vec<StateMethodDescriptor> {
+    let mut methods = gpui_shell::input_token_state_methods();
+    methods.push(StateMethodDescriptor::new::<Entity<InputState>>(
+        "focus",
+        "(): void",
+        |state, _, window, cx| {
+            state.update(cx, |state, cx| state.focus(window, cx));
+            Ok(ComponentDataValue::Null)
+        },
+    ));
+    methods.push(StateMethodDescriptor::new::<Entity<InputState>>(
+        "select_all",
+        "(): void",
+        |state, _, window, cx| {
+            state.update(cx, |state, cx| state.select_all(window, cx));
+            Ok(ComponentDataValue::Null)
+        },
+    ));
+    methods
+}
+
 pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryError> {
     registry.register_state(
         StateDescriptor::new(
@@ -72,7 +95,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                 ))
             },
         )
-        .with_methods(gpui_shell::input_token_state_methods())
+        .with_methods(state_methods())
         .with_input_events::<gpui_base::input::InputMode>()
         .with_documentation(
             "Retained single-line text, created in init() and drawn by SmeltTextInput; read it with value() and subscribe with on(\"change\", ...).",
