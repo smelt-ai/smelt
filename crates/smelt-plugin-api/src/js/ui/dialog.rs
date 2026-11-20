@@ -37,6 +37,7 @@ enum Op {
     Top(f32),
     OnConfirm(ComponentArgument),
     OnDismiss(ComponentArgument),
+    OnOpen(ComponentArgument),
 }
 
 /// 最近一次脚本绘制交来的卡片，对话框层重绘时按它搭。
@@ -50,6 +51,7 @@ struct Latest {
     top: Option<f32>,
     on_confirm: Option<ComponentCallback>,
     on_dismiss: Option<ComponentCallback>,
+    on_open: Option<ComponentCallback>,
 }
 
 /// 这个控件压上去的那张。开是推到这一帧之后做的，中间再画一次不能又开一张，所以有「正在开」。
@@ -79,6 +81,7 @@ impl RenderOnce for ScriptDialog {
             (true, Opened::Closed) => {
                 opened.update(cx, |opened, _| *opened = Opened::Opening);
                 let weak_slot = slot.downgrade();
+                let weak_slot_for_open = slot.downgrade();
                 let weak_opened = opened.downgrade();
                 window.defer(cx, move |window, cx| {
                     // 推迟期间脚本改成了关，或控件不画了：不开。
@@ -120,6 +123,18 @@ impl RenderOnce for ScriptDialog {
                     opened.update(cx, |opened, _| {
                         *opened = id.map_or(Opened::Closed, Opened::Open);
                     });
+                    // 卡片压上去时把焦点拿到了自己身上：脚本要把焦点交给里面的哪一块，在这里交。
+                    let on_open = id
+                        .and_then(|_| weak_slot_for_open.upgrade())
+                        .and_then(|slot| slot.read(cx).on_open.clone());
+                    if let Some(callback) = on_open {
+                        callback.invoke_and_report_with(
+                            "SmeltDialog.on_open callback failed",
+                            &[],
+                            window,
+                            cx,
+                        );
+                    }
                 });
             }
             (false, Opened::Open(id)) => {
@@ -234,6 +249,7 @@ impl ComponentMaterializer for DialogMaterializer {
             top: None,
             on_confirm: None,
             on_dismiss: None,
+            on_open: None,
         };
         for op in ops::<Op>(&request).cloned().collect::<Vec<_>>() {
             match op {
@@ -248,6 +264,7 @@ impl ComponentMaterializer for DialogMaterializer {
                 Op::OnDismiss(callback) => {
                     latest.on_dismiss = Some(request.resolve_callback(&callback)?)
                 }
+                Op::OnOpen(callback) => latest.on_open = Some(request.resolve_callback(&callback)?),
             }
         }
         anyhow::ensure!(
@@ -314,6 +331,13 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                     "(cx: Context) => void",
                     "Runs on Esc or a backdrop click; required. Set open(false) to close.",
                     Op::OnDismiss,
+                ),
+                callback_method(
+                    OWNER,
+                    "on_open",
+                    "(cx: Context) => void",
+                    "Runs once the card is up; the card holds focus then, so move it inside here (a FocusHandle's focus()).",
+                    Op::OnOpen,
                 ),
             ])
             .with_documentation(

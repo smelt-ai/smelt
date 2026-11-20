@@ -429,15 +429,17 @@ fn dialog_follows_the_scripts_state(cx: &mut TestAppContext) {
 import { View, div } from "gpui-kit";
 import { SmeltButton, SmeltDialog } from "smelt-ui";
 export default class App extends View {
-  init() { this.open = true; this.log = ""; }
+  init(_props, cx) { this.open = true; this.log = ""; this.inner = cx.focus_handle(); }
   render() {
     return div().size_full()
       .child(SmeltDialog.new("ask").open(this.open).title("Rename").description("Pick a name").w(300).pin_top(80)
-        .content(div().child(`body ${this.log}`))
+        .content(div().track_focus(this.inner).child(`body ${this.log}`))
+        .on_open((cx) => { this.inner.focus(); this.log += "open;"; cx.notify(); })
         .footer(SmeltButton.new("ok").label("OK"))
         .on_confirm((cx) => { this.log += "confirm;"; cx.notify(); })
         .on_dismiss((cx) => { this.log += "dismiss;"; this.open = false; cx.notify(); }))
-      .child(`log: ${this.log}`);
+      .child(`log: ${this.log}`)
+      .child(`inner focused: ${this.inner.is_focused()}`);
   }
 }
 "#;
@@ -451,6 +453,14 @@ export default class App extends View {
     assert!(is_open(&mut context), "open(true) puts a dialog up");
     let opened = tree(&mut context, &view);
     assert!(opened.contains(":pin_top(registered)"), "{opened}");
+    assert!(
+        opened.contains("log: open;"),
+        "on_open runs once the card is up: {opened}"
+    );
+    assert!(
+        opened.contains("inner focused: true"),
+        "and can move focus inside: {opened}"
+    );
     context.simulate_keystrokes("enter");
     draw(&mut context);
     assert!(
@@ -462,7 +472,7 @@ export default class App extends View {
     draw(&mut context);
     assert!(!is_open(&mut context), "open(false) takes it down");
     let after = tree(&mut context, &view);
-    assert!(after.contains("log: confirm;dismiss;"), "{after}");
+    assert!(after.contains("log: open;confirm;dismiss;"), "{after}");
 }
 
 /// 别处关掉了（全局的 `dialog::close`）：脚本经 on_dismiss 知道，再要开时还开得出来。
