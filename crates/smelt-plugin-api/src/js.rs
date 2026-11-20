@@ -348,6 +348,13 @@ export function path_is_absolute(style: PathStyle, path: string): boolean;
 export function path_starts_with(style: PathStyle, path: string, prefix: string): boolean;
 /** 一组项目在同一个列表里的显示名：目录末段，重名的往前补父目录段（"dev · smelt"）。 */
 export function project_labels(style: PathStyle, roots: string[]): string[];
+/** 新建目录（new_session.catalog）里一项行首的图标 "icons/<名字>.svg"，认 CLI 的规则和侧栏一致。 */
+export function new_session_icon(action: NewSessionAction): string;
+/**
+ * 选了新建目录里的一项对话（agentOptionId 是它的 agentOptionId）：按那台机器的智能体配置（智能体插件给的
+ * AgentHostSettings）拼出新对话在目录里的 acp 那条，sid 由调用方分（"acp-<uuid>"）。配置里已经没有这个选项是 null。
+ */
+export function conversation_acp(settings: AgentHostSettings, agent_option_id: string, sid: string, cwd: string): WorkspaceAcp | null;
 /** call 在方法名后面的参数：方法的参数全都可以不给时，params 可省（省了是 {}）。 */
 export type CallArgs<P> = {} extends P
   ? [params?: P | null, timeout_ms?: number]
@@ -1262,6 +1269,25 @@ impl JsPlugin {
                         .map(HostValue::from)
                         .collect(),
                 ))
+            })
+            .function("new_session_icon", |arguments| {
+                let action: crate::model::new_session::NewSessionAction =
+                    parsed("new_session_icon", "action", arguments.get(0))?;
+                Ok(crate::new_session_icon(&action.target).into())
+            })
+            .function("conversation_acp", |arguments| {
+                let settings: crate::model::agent_host::AgentHostSettings =
+                    parsed("conversation_acp", "settings", arguments.get(0))?;
+                let acp = crate::conversation_acp(
+                    &settings,
+                    arguments.string(1)?,
+                    arguments.string(2)?.to_string(),
+                    arguments.string(3)?.to_string(),
+                );
+                match acp {
+                    Some(acp) => serialized("conversation_acp", &acp),
+                    None => Ok(HostValue::Null),
+                }
             })
             .function("connections", |_| {
                 let connections = in_app("connections", |cx| crate::host(cx).connections(cx))?;
@@ -2559,6 +2585,17 @@ fn style_argument(
     }
 }
 
+/// 脚本给的一个参数按 T 的线上形状读；不合法报出是哪个函数的哪个参数。
+fn parsed<T: serde::de::DeserializeOwned>(
+    name: &str,
+    what: &str,
+    value: Option<&HostValue>,
+) -> Result<T, HostError> {
+    let value = value.map(json_value).unwrap_or(Value::Null);
+    serde_json::from_value(value)
+        .map_err(|error| HostError::new(format!("{name}：{what} 不对：{error}")))
+}
+
 fn serialized(name: &str, value: &impl serde::Serialize) -> Result<HostValue, HostError> {
     serde_json::to_value(value)
         .map(|value| host_value(&value))
@@ -3048,6 +3085,70 @@ mod tests {
                     &HostArguments::new(["mac".into(), "/".into()])
                 )
                 .is_err()
+        );
+    }
+
+    /// 新建目录的项、智能体配置按线上形状（camelCase）读，认不出的选项给 null。
+    #[test]
+    fn new_session_rules_read_the_wire_shapes() {
+        let module = JsPlugin::new().module();
+        let call = |name: &str, arguments: Vec<HostValue>| {
+            module
+                .call(name, &HostArguments::new(arguments))
+                .unwrap_or_else(|error| panic!("{name}：{error}"))
+        };
+        let action = |target: HostObject| -> HostValue {
+            target
+                .field("key", "k")
+                .field("label", "Shell")
+                .field("kind", "terminal")
+                .field("pinned", false)
+                .into()
+        };
+        let terminal = crate::ui::IconName::Terminal.path().to_string();
+        assert_eq!(
+            call(
+                "new_session_icon",
+                vec![action(HostObject::new().field("target", "blankTerminal"))]
+            ),
+            HostValue::from(terminal.as_str())
+        );
+        assert!(
+            module
+                .call(
+                    "new_session_icon",
+                    &HostArguments::new([HostObject::new().field("target", "nope").into()])
+                )
+                .is_err()
+        );
+        let settings = serde_json::to_value(crate::model::agent_host::AgentHostSettings::fresh())
+            .expect("配置转成 JSON");
+        let settings = host_value(&settings);
+        let kind = crate::model::agent_kind::ConversationAgentKind::ALL[0].id();
+        let HostValue::Object(acp) = call(
+            "conversation_acp",
+            vec![
+                settings.clone(),
+                kind.into(),
+                "acp-1".into(),
+                "/repo".into(),
+            ],
+        ) else {
+            panic!("引擎选项拼得出启动规格");
+        };
+        let field = |name: &str| {
+            acp.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value)
+        };
+        assert_eq!(field("sid"), Some(&HostValue::from("acp-1")));
+        assert_eq!(field("agent"), Some(&HostValue::from(kind)));
+        assert_eq!(
+            call(
+                "conversation_acp",
+                vec![settings, "agent:gone".into(), "s".into(), "/r".into()]
+            ),
+            HostValue::Null
         );
     }
 

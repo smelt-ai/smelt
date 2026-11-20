@@ -59,6 +59,7 @@ mod file;
 mod layout;
 mod locale;
 mod menu;
+mod new_session;
 mod online;
 mod page;
 mod quit;
@@ -101,6 +102,7 @@ pub use locale::{
     FALLBACK_LOCALE, LOCALES, Text, locale, set_locale, supported_locale, system_locale,
 };
 pub use menu::{MenuEntry, MenuSlot, menu_items, register_menu_items, unregister_menu_items};
+pub use new_session::{conversation_acp, new_session_icon};
 pub use online::wait_online;
 pub use page::{
     OPEN_PAGE, OUTLET_VIEW, OpenPage, PageInfo, PageSource, home_page, page, pages, register_pages,

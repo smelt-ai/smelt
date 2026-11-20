@@ -60,6 +60,8 @@ const SURFACE: &[(&str, Js)] = &[
     ),
     ("conversation_cwd", Via("conversation_facts 里的 cwd")),
     ("placement", Via("conversation_facts 里的 placement")),
+    ("new_session_icon", Same),
+    ("conversation_acp", Same),
     (
         "host.notification_permission",
         Named("notification_permission"),
