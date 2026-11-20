@@ -52,6 +52,12 @@ const SURFACE: &[(&str, Js)] = &[
     ("host.session_states", Named("session_states")),
     ("host.session_presence", Named("session_presence")),
     ("host.workspace_directory", Named("workspace_directory")),
+    ("conversation_agent", Via("conversation_facts 里的 agent")),
+    ("conversation_name", Via("conversation_facts 里的 name")),
+    (
+        "is_automation_run",
+        Via("conversation_facts 里的 automation"),
+    ),
     (
         "host.notification_permission",
         Named("notification_permission"),
@@ -192,6 +198,10 @@ const JS_ONLY: &[(&str, &str)] = &[
     ("reject_command", "处理函数返回 Err"),
     ("opened_view", "PluginView::open 的参数"),
     ("notify_view", "视图自己的 cx.notify()"),
+    (
+        "conversation_facts",
+        "conversation_name、conversation_agent、is_automation_run 和对话状态一次给齐",
+    ),
     ("t", "各 crate 的 t!，文案表是插件目录下的 locales/ui.yml"),
     ("locales", "常量 LOCALES"),
     ("store_query", "plugin_store"),

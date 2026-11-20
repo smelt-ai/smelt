@@ -54,6 +54,7 @@ mod connections;
 mod context;
 mod context_menu;
 mod event;
+mod facts;
 mod file;
 mod layout;
 mod locale;
@@ -86,6 +87,7 @@ pub use context_menu::{
     register_context_menu_items, unregister_context_menu_items,
 };
 pub use event::Event;
+pub use facts::{ConversationAgent, conversation_agent, conversation_name, is_automation_run};
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutMaterials, LayoutSource, Material, PanelInfo,

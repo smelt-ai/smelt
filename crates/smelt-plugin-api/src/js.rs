@@ -84,6 +84,21 @@ export function set_active_context(context: ActiveContext): null;
 export function session_states(machine: Machine): DaemonSessionState[];
 /** 那台机器的工作区目录：开着的项目和对话，是会话的名册（形状同运行时的 workspace 目录）；还没收到时为 null。变了发 sessions_changed。 */
 export function workspace_directory(machine: Machine): WorkspaceDirectory | null;
+/** 对话的派生事实，几个功能共用一套规则，插件不自己再算。 */
+export interface ConversationFacts {
+  /** 同 workspace_directory 里对话的 id。 */
+  id: string;
+  /** 运行时或用户起的名字；都没有是 null，由插件写通用名。 */
+  name: string | null;
+  /** 各格里最要紧的那个：要你 > 运行中 > 空闲。机器连不上不折算进来。 */
+  status: "needs_you" | "running" | "idle";
+  /** 哪家 CLI；认不出是 null。icon 是图标的资源路径。 */
+  agent: { id: string; label: string; icon: string } | null;
+  /** 自动化跑出来的（绑着自动化，或后台起的）。 */
+  automation: boolean;
+}
+/** 那台机器工作区目录里每段对话的派生事实，顺序同目录；目录还没收到是空数组。变了发 sessions_changed。 */
+export function conversation_facts(machine: Machine): ConversationFacts[];
 /**
  * 系统通知的授权：checking 正在读系统设置，not_requested 还没问过用户（第一次发通知时系统会问，也可以用
  * "smelt.app/request-notification-permission" 先问），granted 允许了（banners 弹横幅、sound 声音、badge Dock
@@ -825,6 +840,22 @@ impl JsPlugin {
                     crate::host(cx).workspace_directory(&machine, cx)
                 })?;
                 serialized("workspace_directory", &directory)
+            })
+            .function("conversation_facts", |arguments| {
+                let machine = machine_argument("conversation_facts", arguments, 0)?;
+                in_app("conversation_facts", |cx| {
+                    let host = crate::host(cx);
+                    let states = host.session_states(&machine, cx);
+                    let directory = host.workspace_directory(&machine, cx);
+                    let conversations =
+                        directory.map_or(Vec::new(), |directory| directory.conversations);
+                    HostValue::Array(
+                        conversations
+                            .iter()
+                            .map(|conversation| conversation_facts(conversation, &states))
+                            .collect(),
+                    )
+                })
             })
             .function("notification_permission", |_| {
                 let permission = in_app("notification_permission", |cx| {
@@ -2242,6 +2273,36 @@ fn json_value(value: &HostValue) -> Value {
 }
 
 /// 宿主的数据转成给脚本的值。
+/// 一段对话给 JS 的派生事实（见 [`crate::facts`]）。
+fn conversation_facts(
+    conversation: &crate::model::workspace_directory::WorkspaceConversation,
+    states: &[crate::model::daemon_state::DaemonSessionState],
+) -> HostValue {
+    use crate::model::agent_status::AgentStatus;
+    let status = match conversation.status(states) {
+        AgentStatus::NeedsYou => "needs_you",
+        AgentStatus::Running => "running",
+        AgentStatus::Idle => "idle",
+    };
+    let agent = crate::conversation_agent(conversation, states).map_or(HostValue::Null, |agent| {
+        HostObject::new()
+            .field("id", agent.id())
+            .field("label", agent.label())
+            .field("icon", agent.icon_asset())
+            .into()
+    });
+    HostObject::new()
+        .field("id", conversation.id.as_str())
+        .field(
+            "name",
+            crate::conversation_name(conversation, states).map_or(HostValue::Null, HostValue::from),
+        )
+        .field("status", status)
+        .field("agent", agent)
+        .field("automation", crate::is_automation_run(conversation))
+        .into()
+}
+
 fn serialized(name: &str, value: &impl serde::Serialize) -> Result<HostValue, HostError> {
     serde_json::to_value(value)
         .map(|value| host_value(&value))
@@ -2581,6 +2642,66 @@ fn event_value(event: &HostEvent) -> HostValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_facts_give_name_status_agent_and_automation() {
+        use crate::model::daemon_state::{DaemonPhase, DaemonSessionState};
+        use crate::model::workspace_directory::{WorkspaceAcp, WorkspaceConversation};
+
+        let conversation = WorkspaceConversation {
+            id: "c".into(),
+            acp: Some(WorkspaceAcp {
+                sid: "acp-automation-1".into(),
+                agent: "claude".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let state = DaemonSessionState {
+            id: "acp-automation-1".into(),
+            phase: DaemonPhase::Thinking,
+            runtime: true,
+            turn_events: true,
+            conversation_name: Some("修 bug".into()),
+            ..Default::default()
+        };
+        let facts = conversation_facts(&conversation, &[state]);
+        let field = |name: &str| match &facts {
+            HostValue::Object(fields) => fields
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap(),
+            other => panic!("不是对象：{other:?}"),
+        };
+        assert_eq!(field("id"), HostValue::from("c"));
+        assert_eq!(field("name"), HostValue::from("修 bug"));
+        assert_eq!(field("status"), HostValue::from("running"));
+        assert_eq!(field("automation"), HostValue::Bool(true));
+        let HostValue::Object(agent) = field("agent") else {
+            panic!("认得出是哪家");
+        };
+        assert_eq!(agent[0], ("id".to_string(), HostValue::from("claude")));
+        assert_eq!(
+            agent[2],
+            (
+                "icon".to_string(),
+                HostValue::from("smelt-icons/agent-claude.svg")
+            )
+        );
+
+        let unnamed = WorkspaceConversation {
+            id: "t".into(),
+            ..Default::default()
+        };
+        let facts = conversation_facts(&unnamed, &[]);
+        let HostValue::Object(fields) = facts else {
+            panic!("不是对象");
+        };
+        assert!(fields.contains(&("name".to_string(), HostValue::Null)));
+        assert!(fields.contains(&("status".to_string(), HostValue::from("idle"))));
+        assert!(fields.contains(&("agent".to_string(), HostValue::Null)));
+    }
 
     #[test]
     fn module_declarations_match_its_functions() {

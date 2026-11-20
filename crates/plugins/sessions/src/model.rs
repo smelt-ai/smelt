@@ -18,13 +18,12 @@ use rust_i18n::t;
 use std::collections::{HashMap, HashSet};
 
 use gpui::{App, AppContext as _, Entity, Global};
-use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::daemon_state::DaemonSessionState;
 use smelt_plugin_api::model::runtime_path::PathStyle;
-use smelt_plugin_api::model::session_control::is_background_acp_session_id;
 use smelt_plugin_api::model::workspace_directory::{
     WorkspaceConversation, WorkspaceDirectory, WorkspaceRevision, project_root_of,
 };
+use smelt_plugin_api::{RuntimeKey, conversation_name, is_automation_run};
 
 use crate::contract::{Selected, SessionAt};
 use crate::lifecycle;
@@ -235,29 +234,9 @@ pub(crate) fn shown_conversation<'a>(
 
 // ---- 从目录和会话状态算的 ----
 
-/// 给人看的名字：运行时算好的展示名（对话的、或第一格终端的），没有就用用户起的名字，
-/// 再没有就是通用名。
+/// 给人看的名字：运行时或用户起的名字（[`conversation_name`]），没有就是通用名。
 pub(crate) fn title(conversation: &WorkspaceConversation, states: &[DaemonSessionState]) -> String {
-    let lead = conversation
-        .acp
-        .as_ref()
-        .map(|acp| acp.sid.as_str())
-        .or_else(|| {
-            conversation
-                .terminals
-                .first()
-                .and_then(|terminal| terminal.id.as_deref())
-        });
-    let named = lead
-        .and_then(|id| states.iter().find(|state| state.id == id))
-        .and_then(|state| state.conversation_name.as_deref());
-    let custom = conversation.custom_title.as_deref();
-    match [named, custom]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|name| !name.is_empty())
-    {
+    match conversation_name(conversation, states) {
         Some(name) => name.to_string(),
         None if conversation.acp.is_some() => t!("kind.conversation").into_owned(),
         None => t!("kind.terminal").into_owned(),
@@ -324,14 +303,6 @@ pub(crate) fn placement(
         root: cwd.unwrap_or_default().to_string(),
         workset: None,
     }
-}
-
-/// 自动化跑出来的会话：智能体对话绑着自动化，或者是后台起的 ACP 会话。
-fn is_automation_run(conversation: &WorkspaceConversation) -> bool {
-    conversation
-        .acp
-        .as_ref()
-        .is_some_and(|acp| acp.automation_id.is_some() || is_background_acp_session_id(&acp.sid))
 }
 
 #[cfg(test)]
