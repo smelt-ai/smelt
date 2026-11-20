@@ -4,7 +4,8 @@
 //! `state.on("change", ...)` 订变化、`state.value()` 取字；render 里只
 //! `SmeltTextInput.new(state)` 把它画出来。状态的方法和事件同 gpui-shell 自带的
 //! `InputState`，另加 `focus()`、`select_all()`：行内改名、展开的搜索框要一出来就能打字，
-//! gpui-shell 的那份给不了。
+//! gpui-shell 的那份给不了。`SmeltTextInput.on_escape(cb)` 接框里用不上的 Esc（取消改名、
+//! 收起搜索）：脚本的 `on_action` 只认脚本自己登记的动作，接不住输入框往上传的 Esc。
 
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ use gpui_shell::{
 use smelt_ui::TextInput;
 use smelt_ui::field::InputState;
 
-use super::{bool_method, finish_leaf, flag_method, ops, string_method};
+use super::{bool_method, callback_method, finish_leaf, flag_method, ops, string_method};
 
 const STATE: &str = "SmeltInputState";
 const OWNER: &str = "SmeltTextInput";
@@ -29,6 +30,9 @@ enum InputOp {
     Cleanable(bool),
 }
 
+#[derive(Clone)]
+struct OnEscape(ComponentArgument);
+
 struct TextInputMaterializer;
 
 impl ComponentMaterializer for TextInputMaterializer {
@@ -39,6 +43,17 @@ impl ComponentMaterializer for TextInputMaterializer {
             .ok_or_else(|| anyhow::anyhow!("{OWNER} received an incompatible payload"))?;
         let state = request.with_state::<Entity<InputState>, _>(argument, Clone::clone)?;
         let mut input = TextInput::new(&state);
+        if let Some(on_escape) = ops::<OnEscape>(&request).last() {
+            let callback = request.resolve_callback(&on_escape.0)?;
+            input = input.on_escape(move |window, cx| {
+                callback.invoke_and_report_with(
+                    "SmeltTextInput.on_escape callback failed",
+                    &[],
+                    window,
+                    cx,
+                )
+            });
+        }
         for op in ops::<InputOp>(&request) {
             input = match op {
                 InputOp::AriaLabel(label) => input.aria_label(label.clone()),
@@ -128,6 +143,13 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                     "cleanable",
                     "Shows a clear button at the end while the field has text; for filters.",
                     InputOp::Cleanable,
+                ),
+                callback_method(
+                    OWNER,
+                    "on_escape",
+                    "(cx: Context) => void",
+                    "Runs on Esc when the field has nothing of its own to dismiss (a selection, composition): cancel a rename, close a search.",
+                    OnEscape,
                 ),
             ])
             .with_documentation("A Smelt single-line text field over a SmeltInputState."),

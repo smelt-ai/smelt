@@ -263,6 +263,32 @@ export default class App extends View {
     assert!(typed.contains("name: [new]"), "{typed}");
 }
 
+/// Esc：框里没什么要先收掉的，交给脚本（取消改名、收起搜索）。
+#[gpui::test]
+fn text_input_reports_escape(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltInputState, SmeltTextInput } from "smelt-ui";
+export default class App extends View {
+  init() { this.name = SmeltInputState.new(); this.escaped = 0; }
+  render() {
+    return div().size_full()
+      .child(SmeltTextInput.new(this.name).aria_label("Name").absolute().left(0).top(0).w(200)
+        .on_escape((cx) => { this.escaped++; cx.notify(); }))
+      .child(`escaped: ${this.escaped}`);
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    draw(&mut context);
+    click(&mut context, 40., 12.);
+    context.simulate_input("abc");
+    context.simulate_keystrokes("escape");
+    draw(&mut context);
+    let escaped = tree(&mut context, &view);
+    assert!(escaped.contains("escaped: 1"), "{escaped}");
+}
+
 #[gpui::test]
 fn list_controls_build_from_scripts(cx: &mut TestAppContext) {
     let source = r#"

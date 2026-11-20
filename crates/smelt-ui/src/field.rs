@@ -19,13 +19,14 @@ use gpui::{
     relative, rgb,
 };
 use gpui_base::input::{
-    Copy, Cut, Input as BaseInput, InputAccessibility, InputBaseState, InputEditorStyle,
+    Copy, Cut, Escape, Input as BaseInput, InputAccessibility, InputBaseState, InputEditorStyle,
     InputModeKind, Paste, SelectAll, Textarea as BaseTextarea,
 };
 pub use gpui_base::input::{InputEvent, InputState, TextareaState};
 use gpui_base::{InputBase, RoleOverride, StyledExt as _};
 use rust_i18n::t;
 use std::borrow::Cow;
+use std::rc::Rc;
 
 use crate::button::{Button, DISABLED_OPACITY};
 use crate::kit::{GLYPHS, RADIUS, TYPE, elevation};
@@ -217,6 +218,7 @@ pub struct TextInput {
     disabled: bool,
     bare: bool,
     label: Option<SharedString>,
+    on_escape: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
 }
 
 impl TextInput {
@@ -230,6 +232,7 @@ impl TextInput {
             disabled: false,
             bare: false,
             label: None,
+            on_escape: None,
         }
     }
 
@@ -268,6 +271,12 @@ impl TextInput {
         self.label = Some(label.into());
         self
     }
+
+    /// 按 Esc、框里又没有要先收掉的（选区、输入法组字）时：行内改名取消、展开的搜索框收起。
+    pub fn on_escape(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_escape = Some(Rc::new(handler));
+        self
+    }
 }
 
 impl Styled for TextInput {
@@ -287,6 +296,7 @@ impl RenderOnce for TextInput {
             disabled,
             bare,
             label,
+            on_escape,
         } = self;
         let presentation = state.read(cx).presentation();
         let masked = presentation.is_masked();
@@ -322,6 +332,9 @@ impl RenderOnce for TextInput {
             density,
             bare,
         )
+        .when_some(on_escape, |this, handler| {
+            this.on_action(move |_: &Escape, window, cx| handler(window, cx))
+        })
         .flex()
         .items_center()
         .children(prefix)
