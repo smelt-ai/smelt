@@ -7,7 +7,7 @@
 //!
 //! 菜单打开时才搭，搭好就留在弹层里，比画出它的那次绘制活得久；脚本回调却只在那次绘制里
 //! 有效。所以每次绘制把整份菜单项写进按控件 id 的槽（[`latest`]），点下去时按「各层名字」
-//! 回槽里找这次绘制的回调。同一层里命令的名字不能重。
+//! 回槽里找这次绘制的回调；同一层里同名的按先后分（[`Step`]）。
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -74,7 +74,7 @@ struct Items(Vec<ComponentArgument>);
 #[derive(Clone)]
 struct Label(String);
 
-/// 物化 `items([...])` 收下的菜单项。同一层里命令的名字不能重：点下去时按名字找回调。
+/// 物化 `items([...])` 收下的菜单项。
 fn entries(owner: &str, request: &mut MaterializeRequest<'_>) -> anyhow::Result<Vec<Entry>> {
     let arguments = ops::<Items>(request)
         .flat_map(|items| items.0.iter().cloned())
@@ -86,27 +86,25 @@ fn entries(owner: &str, request: &mut MaterializeRequest<'_>) -> anyhow::Result<
             &mut element,
             &format!("{owner}.items to hold SmeltMenuItem, SmeltMenuSeparator or SmeltMenuLabel"),
         )?;
-        if let Entry::Item(item) = &entry {
-            anyhow::ensure!(
-                !entries.iter().any(
-                    |earlier| matches!(earlier, Entry::Item(earlier) if earlier.label == item.label)
-                ),
-                "{owner} has two items labelled {:?}",
-                item.label
-            );
-        }
         entries.push(entry);
     }
     Ok(entries)
 }
 
-/// 按各层名字找到那一项。
-fn find<'a>(entries: &'a [Entry], path: &[SharedString]) -> Option<&'a Item> {
-    let (first, rest) = path.split_first()?;
-    let item = entries.iter().find_map(|entry| match entry {
-        Entry::Item(item) if item.label == *first => Some(item),
-        _ => None,
-    })?;
+/// 菜单里的一项在它那一层的位置：名字，和这一层里排在它前面的同名项有几个。按名字认，菜单开着时
+/// 脚本重画、前面多了少了别的项，点下去找回的还是同一项；同名的（两台机器上同名的项目）按先后分。
+type Step = (SharedString, usize);
+
+/// 按各层的位置找到那一项。
+fn find<'a>(entries: &'a [Entry], path: &[Step]) -> Option<&'a Item> {
+    let ((label, nth), rest) = path.split_first()?;
+    let item = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Item(item) if item.label == *label => Some(item),
+            _ => None,
+        })
+        .nth(*nth)?;
     if rest.is_empty() {
         Some(item)
     } else {
@@ -115,12 +113,15 @@ fn find<'a>(entries: &'a [Entry], path: &[SharedString]) -> Option<&'a Item> {
 }
 
 /// 按槽里最近一次绘制的菜单项搭菜单。命令点下去时再回槽里按名字找回调。
-fn build(entries: &[Entry], path: &[SharedString], slot: &Entity<Vec<Entry>>) -> Menu {
+fn build(entries: &[Entry], path: &[Step], slot: &Entity<Vec<Entry>>) -> Menu {
+    let mut seen: Vec<&SharedString> = Vec::new();
     entries.iter().fold(Menu::new(), |menu, entry| match entry {
         Entry::Separator => menu.separator(),
         Entry::Label(label) => menu.label(label.clone()),
         Entry::Item(item) => {
-            let path = [path, std::slice::from_ref(&item.label)].concat();
+            let nth = seen.iter().filter(|label| ***label == item.label).count();
+            seen.push(&item.label);
+            let path = [path, &[(item.label.clone(), nth)]].concat();
             let mut entry = MenuItem::new(item.label.clone()).disabled(item.disabled);
             if let Some(icon) = &item.icon {
                 entry = entry.icon_path(icon.clone());
@@ -342,7 +343,7 @@ fn items_method(owner: &'static str) -> MethodDescriptor {
         },
     )
     .with_documentation(
-        "Appends menu entries in order: SmeltMenuItem, SmeltMenuSeparator, SmeltMenuLabel. Item labels must be unique within one menu.",
+        "Appends menu entries in order: SmeltMenuItem, SmeltMenuSeparator, SmeltMenuLabel.",
     )
 }
 

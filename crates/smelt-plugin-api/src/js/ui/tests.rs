@@ -393,6 +393,44 @@ export default class App extends View {
     assert!(after.contains("picked: here"), "{after}");
 }
 
+/// 同一层里同名的项（两台机器上同名的项目）各点各的：按名字和先后找回调。
+#[gpui::test]
+fn context_menu_tells_same_named_items_apart(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltContextMenu, SmeltMenuItem, SmeltMenuLabel } from "smelt-ui";
+export default class App extends View {
+  init() { this.picked = "none"; }
+  render() {
+    const pick = (name) => (_e, cx) => { this.picked = name; cx.notify(); };
+    return div().size_full()
+      .child(SmeltContextMenu.new("menu").w(200).h(40)
+        .items([
+          SmeltMenuLabel.new("Laptop"),
+          SmeltMenuItem.new("smelt").on_click(pick("laptop")),
+          SmeltMenuLabel.new("Server"),
+          SmeltMenuItem.new("smelt").on_click(pick("server")),
+        ])
+        .child("target"))
+      .child(div().absolute().top(100).child(`picked: ${this.picked}`));
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    context.update(|window, _| window.activate_window());
+    draw(&mut context);
+    context.simulate_mouse_down(
+        point(px(20.), px(10.)),
+        gpui::MouseButton::Right,
+        Modifiers::default(),
+    );
+    draw(&mut context);
+    context.simulate_keystrokes("down down space");
+    draw(&mut context);
+    let after = tree(&mut context, &view);
+    assert!(after.contains("picked: server"), "{after}");
+}
+
 /// 菜单贴哪个角原样交给 `MenuTrigger::anchor`；认不得的角拒掉。测试窗口里量不到触发器的位置
 /// （弹层贴到窗口边上），这里不比坐标。
 #[gpui::test]
