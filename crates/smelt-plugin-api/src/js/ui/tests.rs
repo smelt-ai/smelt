@@ -1255,3 +1255,36 @@ export default class App extends View {
     draw(&mut context);
     assert_eq!(hit(&mut context, &view, end_before), "hit: c", "撑开到全高");
 }
+
+/// 列表行起的悬停组：行里元素的 `group_hover` 跟着整行悬停。悬停时左边那格变宽（改布局的
+/// 悬停样式要元素带 id），把按钮挤到指针底下，点得到就说明生效了。外面套着拖动项、右键菜单，
+/// 和会话列表的行一样。
+#[gpui::test]
+fn a_list_row_group_drives_group_hover_inside_it(cx: &mut TestAppContext) {
+    let (mut context, view, _app) = mount(
+        cx,
+        r#"
+import { View, div } from "gpui-kit";
+import { SmeltButton, SmeltContextMenu, SmeltDragItem, SmeltListRow, SmeltMenuItem } from "smelt-ui";
+export default class App extends View {
+  init() { this.clicks = 0; }
+  render() {
+    const row = SmeltListRow.new("row").group("row").w(400).h(40).flex()
+      .child(div().id("spacer").w(10).h(40).group_hover("row", (el) => el.w(200)))
+      .child(SmeltButton.new("after").label("go").w(40).h(40)
+        .on_click((_e, cx) => { this.clicks++; cx.notify(); }));
+    const item = SmeltDragItem.new("row", "row").content(row);
+    return div().size_full()
+      .child(SmeltContextMenu.new("menu").items([SmeltMenuItem.new("a")]).child(item))
+      .child(`clicks: ${this.clicks}`);
+  }
+}
+"#,
+    );
+    draw(&mut context);
+    context.simulate_mouse_move(point(px(220.), px(20.)), None, Modifiers::default());
+    draw(&mut context);
+    click(&mut context, 220., 20.);
+    let described = tree(&mut context, &view);
+    assert!(described.contains("clicks: 1"), "{described}");
+}

@@ -1002,7 +1002,8 @@ function disclosure_slot(ctx, group, glyph, key, collapsed, collapsible) {
   return lead_box()
     .relative()
     .text_color(muted)
-    .child(collapsible ? glyph.group_hover(group, (style) => style.opacity(0)) : glyph)
+    // 悬停样式挂在包图标的 div 上：gpui-shell 画 svg 时只接普通样式，svg 上的 group_hover 会被丢掉。
+    .child(collapsible ? div().flex().child(glyph).group_hover(group, (style) => style.opacity(0)) : glyph)
     .when(collapsible, (lead) =>
       lead.child(
         div()
@@ -1063,12 +1064,13 @@ function search_entry(ctx) {
     .hover((entry) => entry.bg(p.bg).shadow(theme.elevation.input))
     .child(div().flex_1().min_w_0().child(t("grouping.project")))
     .child(
-      svg(icon("search"))
-        .size(12)
+      // 悬停样式挂在外层 div 上，理由同 disclosure_slot。
+      div()
+        .flex()
         .flex_shrink_0()
-        .text_color(p.muted)
         .opacity(0)
-        .group_hover("search-projects", (style) => style.opacity(1)),
+        .group_hover("search-projects", (style) => style.opacity(1))
+        .child(svg(icon("search")).size(12).text_color(p.muted)),
     )
     .tooltip(t("list.search_projects"))
     .on_click(() => ctx.view.start_search());
