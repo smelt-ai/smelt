@@ -63,9 +63,11 @@ Name: "addtopath"; Description: "把 smelt 命令加入 PATH（在 cmd、PowerSh
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [InstallDelete]
-; 这两个目录随 Pi 整份发布，旧版本多出来的文件要清掉，不能和新文件混在一起。
+; 这几个目录整份发布（skills、native 随 Pi，plugins 是自带 JS 插件），旧版本多出来的文件
+; 要清掉，不能和新文件混在一起。
 Type: filesandordirs; Name: "{app}\skills"
 Type: filesandordirs; Name: "{app}\native"
+Type: filesandordirs; Name: "{app}\plugins"
 ; 改名前叫 smelt-pi.exe，覆盖安装不会删掉它。
 Type: files; Name: "{app}\smelt-pi.exe"
 

@@ -81,9 +81,8 @@ pub const DECLARED_ENTRIES: &[&str] = &[
     "skills",
     // 删掉的插件和技能先挪到这里。
     "trash",
-    // 用户插件、App 自带插件写出的那份（smelt `plugins::builtin`）和每个插件自己的数据。
+    // 用户插件和每个插件自己的数据。
     "plugins",
-    "builtin-plugins",
     "plugin-data",
     // Linux 远程桌面（`install.sh --with-desktop`）。
     "desktop",

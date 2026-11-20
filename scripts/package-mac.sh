@@ -198,6 +198,8 @@ fi
 if [[ -d "$ROOT/target/smelt-agent/skills" ]]; then
   cp -R "$ROOT/target/smelt-agent/skills" "$PI_DIR/skills"
 fi
+# 自带 JS 插件：随 App 签名，发版的包从这里只读加载（crates/smelt/src/plugins/builtin.rs）。
+"$ROOT/scripts/stage-plugins.sh" "$RES/plugins"
 # LICENSE、NOTICE、THIRD_PARTY_LICENSES.txt 放 Resources 根。对外分发（CI 发版）必须带，
 # 缺 cargo-about 直接失败；本机 make install 只是自用，没装就跳过。
 if [[ -n "${CI:-}" ]] || command -v cargo-about >/dev/null; then

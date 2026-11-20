@@ -79,8 +79,6 @@ libc = "0.2"
 smol = "2"  # 定时器、channel
 # 盯着 App 里的 smeltd：重编译、覆盖安装后查一次守护是否落后（见 Workspace::start_daemon_outdated_watch）。
 notify = "8"
-# App 自带的 JS 插件（仓库根 plugins/）编进二进制，见 src/plugins/builtin.rs。
-rust-embed = { version = "8", features = ["include-exclude"] }
 # 菜单栏图标按颜色重新着色（见 src/status_item.rs 的 `tint_png`）。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # macOS：菜单栏 status item 需要直接操作 AppKit（GPUI 没有 status item 概念），

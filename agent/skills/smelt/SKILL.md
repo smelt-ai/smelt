@@ -226,7 +226,7 @@ Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui
 
 改 Smelt 自带的插件：
 
-自带插件只读，App 每次更新整个换掉，不要在它原来的目录里改（`smelt plugin status` 列出的路径在 `~/.smelt/builtin-plugins/` 下的就是自带的）。复制一份成用户自己的插件再改：
+自带插件只读，App 每次更新整个换掉，不要在它原来的目录里改（`smelt plugin status` 列出的路径不在 `~/.smelt/plugins/` 下的就是自带的，在安装包里）。复制一份成用户自己的插件再改：
 
 1. 跟用户定新 id，不能和原来的相同：同 id 的会被当成重复、不加载。
 2. 先拷数据，再拷插件：新插件一挂上就会建自己的空库。原插件有 `~/.smelt/plugin-data/<原 id>/` 就建好 `~/.smelt/plugin-data/<新 id>/`，库用 `sqlite3 <原目录>/store.sqlite3 ".backup '<新目录>/store.sqlite3'"` 拷（App 开着也拷得完整，不要直接 `cp` 库文件），目录里别的文件照常 `cp`。
