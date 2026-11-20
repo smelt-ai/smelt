@@ -10761,7 +10761,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-agents",
- "smelt-archive",
  "smelt-automations",
  "smelt-buddies",
  "smelt-capabilities",
@@ -10818,18 +10817,6 @@ dependencies = [
  "smelt-plugin-api",
  "smol",
  "uuid",
-]
-
-[[package]]
-name = "smelt-archive"
-version = "0.0.0"
-dependencies = [
- "chrono",
- "gpui-base",
- "gpui-pre",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
 ]
 
 [[package]]

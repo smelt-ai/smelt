@@ -240,11 +240,16 @@ const JS_ONLY: &[(&str, &str)] = &[
     ("path_clean", "model::runtime_path::PathStyle::clean"),
     ("path_join", "PathStyle::join"),
     ("path_file_name", "PathStyle::file_name"),
+    ("path_parent", "PathStyle::parent"),
     ("path_is_absolute", "PathStyle::is_absolute"),
     ("path_starts_with", "PathStyle::starts_with"),
     (
         "project_labels",
         "model::workspace_directory::project_labels",
+    ),
+    (
+        "project_root_of",
+        "model::workspace_directory::project_root_of",
     ),
     (
         "asset",

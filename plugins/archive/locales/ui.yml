@@ -7,6 +7,9 @@ title:
   en: Archived Conversations
   zh-CN: 已归档的对话
 action:
+  cancel:
+    en: Cancel
+    zh-CN: 取消
   restore:
     en: Restore
     zh-CN: 恢复

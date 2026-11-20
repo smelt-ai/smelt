@@ -5,7 +5,6 @@ import {
   NEW_CONVERSATION,
   SETTINGS,
   affects_launcher,
-  bar_insets,
   launchable,
   nav_state,
   same_state,
@@ -90,13 +89,3 @@ test("状态按字面比", () => {
   assert.ok(!same_state({ available: true, attention: false }, { available: true, attention: true }));
 });
 
-test("一行两头的边距：碰到的角和标准边距取大的，不相加", () => {
-  const corner = (width) => ({ width, height: 0 });
-  const area = (left, right) => ({
-    title_bar: false,
-    corners: { top_left: corner(0), top_right: corner(0), bottom_left: corner(left), bottom_right: corner(right) },
-    bar_margin: 8,
-  });
-  assert.deepEqual(bar_insets(area(0, 0)), { left: 8, right: 8 });
-  assert.deepEqual(bar_insets(area(12, 0)), { left: 12, right: 8 });
-});

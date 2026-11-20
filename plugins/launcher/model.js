@@ -77,14 +77,3 @@ export function same_state(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-/**
- * 一行控件两头的内边距（safe_area 给的那份）：这一行碰到的角上被占的，和标准边距取大的，不相加——角已经含了
- * 离角上控件的间距。同 smelt-ui 的 SafeArea::bar_insets。
- */
-export function bar_insets(area) {
-  const { corners, bar_margin } = area;
-  return {
-    left: Math.max(corners.top_left.width, corners.bottom_left.width, bar_margin),
-    right: Math.max(corners.top_right.width, corners.bottom_right.width, bar_margin),
-  };
-}

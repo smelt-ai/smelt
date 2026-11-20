@@ -317,7 +317,7 @@ export default class Plugin extends View {
 
 ### 检查
 
-- **单测**：`node --test plugins/<name>/tests/*.test.mjs`，测逻辑文件。
+- **单测**：`bun test plugins/<name>/tests`，测逻辑文件。
 - **类型**：tsc 的 checkJs。类型声明由 `smelt plugin check <目录>` 加载插件时写出（`gpui-kit.d.ts`，不进仓库），CI 先跑它、再跑 tsc。
 - **加载和渲染**：`smelt plugin check <目录>` 不开 App 加载并渲染一次。
 - **对照出图**：从 Rust 插件迁过来时，同一份 `tests/fixtures/` 场景让两版各画一张图比对，删 Rust 版之前做。

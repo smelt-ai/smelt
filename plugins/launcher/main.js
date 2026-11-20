@@ -17,7 +17,6 @@ import {
   NEW_CONVERSATION,
   SETTINGS,
   affects_launcher,
-  bar_insets,
   nav_state,
   same_state,
   settings_state,
@@ -173,7 +172,7 @@ class SettingsButton extends View {
   render() {
     const look = api.theme();
     // 自己就是一行：贴着窗口下面的角时两头给窗口圆角让位，不贴时留标准边距。
-    const insets = bar_insets(api.safe_area(SETTINGS_VIEW));
+    const insets = api.safe_area(SETTINGS_VIEW).bar_insets;
     // 普通入口，不做成通栏的大按钮。
     return div()
       .size_full()

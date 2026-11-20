@@ -27,7 +27,6 @@ smelt-ui = { path = "../smelt-ui" }
 smelt-plugin-api = { path = "../smelt-plugin-api", features = ["js"] }
 # 内置插件：只在 `plugin_host::install` 里登记，宿主别处不认识它们。
 smelt-agents = { path = "../plugins/agents" }
-smelt-archive = { path = "../plugins/archive" }
 smelt-automations = { path = "../plugins/automations" }
 smelt-buddies = { path = "../plugins/buddies" }
 smelt-capabilities = { path = "../plugins/capabilities" }

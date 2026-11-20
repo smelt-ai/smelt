@@ -344,12 +344,16 @@ export function path_clean(style: PathStyle, path: string): string;
 export function path_join(style: PathStyle, base: string, child: string): string;
 /** 最后一段普通名字；"."、".." 和根目录没有，是 null。 */
 export function path_file_name(style: PathStyle, path: string): string | null;
+/** 上一级目录；根目录、空路径没有，是 null。 */
+export function path_parent(style: PathStyle, path: string): string | null;
 /** 是绝对路径。 */
 export function path_is_absolute(style: PathStyle, path: string): boolean;
 /** prefix 的每一段都是 path 的前缀（"/proj" 不包含 "/project"）。Windows 不分大小写。 */
 export function path_starts_with(style: PathStyle, path: string, prefix: string): boolean;
 /** 一组项目在同一个列表里的显示名：目录末段，重名的往前补父目录段（"dev · smelt"）。 */
 export function project_labels(style: PathStyle, roots: string[]): string[];
+/** 工作目录 cwd 落在 roots 里哪个项目下：取最深的那个；都不在、cwd 是空的为 null。规则同侧栏摆放（conversation_facts）。 */
+export function project_root_of(style: PathStyle, roots: string[], cwd: string): string | null;
 /** 新建目录（new_session.catalog）里一项行首的图标 "icons/<名字>.svg"，认 CLI 的规则和侧栏一致。 */
 export function new_session_icon(action: NewSessionAction): string;
 /**
@@ -406,12 +410,12 @@ export interface CornerSize { width: number; height: number }
  * 标题带的视图（没设 draws_top_bar）顶上不是标题栏，上面两个角总是 0；贴着窗口左下、右下角时下面的角有值。
  * 视图还没建、没摆着、按实例建时全为 0。变了发 safe_area_changed。
  *
- * 一行控件（贴底的一条等）两头的内边距取「这一行碰到的角宽」和 bar_margin 里大的，不相加。
+ * bar_insets 是视图整个就是一行控件（贴底的一条等）时两头的内边距：这一行碰到的角宽和标准边距取大的，不相加。
  */
 export function safe_area(view: string): {
   title_bar: boolean;
   corners: { top_left: CornerSize; top_right: CornerSize; bottom_right: CornerSize; bottom_left: CornerSize };
-  bar_margin: number;
+  bar_insets: { left: number; right: number };
 };
 /** 所有来源登记的页（形状同 register_pages，id 是 "<来源>/<名字>"），按登记先后。变了发 pages_changed。 */
 export function pages(): { id: string; title: string; home: boolean; index: string | null }[];
@@ -1263,6 +1267,12 @@ impl JsPlugin {
                     .file_name(arguments.string(1)?)
                     .map_or(HostValue::Null, HostValue::from))
             })
+            .function("path_parent", |arguments| {
+                let style = style_argument("path_parent", arguments)?;
+                Ok(style
+                    .parent(arguments.string(1)?)
+                    .map_or(HostValue::Null, HostValue::from))
+            })
             .function("path_is_absolute", |arguments| {
                 let style = style_argument("path_is_absolute", arguments)?;
                 Ok(style.is_absolute(arguments.string(1)?).into())
@@ -1283,6 +1293,16 @@ impl JsPlugin {
                         .map(HostValue::from)
                         .collect(),
                 ))
+            })
+            .function("project_root_of", |arguments| {
+                let style = style_argument("project_root_of", arguments)?;
+                let roots = string_list("project_root_of", arguments.get(1))?;
+                Ok(crate::model::workspace_directory::project_root_of(
+                    style,
+                    &roots,
+                    arguments.string(2)?,
+                )
+                .map_or(HostValue::Null, HostValue::from))
             })
             .function("new_session_icon", |arguments| {
                 let action: crate::model::new_session::NewSessionAction =
@@ -2715,10 +2735,15 @@ fn safe_area_value(area: &crate::SafeArea) -> HostValue {
                 .field("bottom_right", corner(area.corners.bottom_right))
                 .field("bottom_left", corner(area.corners.bottom_left)),
         )
-        .field(
-            "bar_margin",
-            HostValue::Number(f64::from(f32::from(smelt_ui::window_bar::BAR_MARGIN))),
-        )
+        .field("bar_insets", {
+            let insets = area.bar_insets();
+            HostObject::new()
+                .field("left", HostValue::Number(f64::from(f32::from(insets.left))))
+                .field(
+                    "right",
+                    HostValue::Number(f64::from(f32::from(insets.right))),
+                )
+        })
         .into()
 }
 
@@ -3055,6 +3080,36 @@ mod tests {
         );
         assert_eq!(
             call("path_file_name", vec!["posix".into(), "/".into()]),
+            HostValue::Null
+        );
+        assert_eq!(
+            call("path_parent", vec!["windows".into(), r"C:\a\b".into()]),
+            HostValue::from(r"C:\a")
+        );
+        assert_eq!(
+            call("path_parent", vec!["posix".into(), "/".into()]),
+            HostValue::Null
+        );
+        assert_eq!(
+            call(
+                "project_root_of",
+                vec![
+                    "posix".into(),
+                    HostValue::Array(vec!["/p".into(), "/p/a".into()]),
+                    "/p/a/src".into()
+                ]
+            ),
+            HostValue::from("/p/a")
+        );
+        assert_eq!(
+            call(
+                "project_root_of",
+                vec![
+                    "posix".into(),
+                    HostValue::Array(vec!["/p".into()]),
+                    "/q".into()
+                ]
+            ),
             HostValue::Null
         );
         assert_eq!(
