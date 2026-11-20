@@ -203,7 +203,7 @@ class ArchiveButton extends View {
               .accessibility_label(title)
               .tooltip(title),
           )
-          .when(this.popover_open, (popover) => popover.content(this.card(look))),
+          .content(this.card(look)),
       )
       .when(this.dialog != null, (bar) => bar.child(this.dialog_view(look)));
   }
