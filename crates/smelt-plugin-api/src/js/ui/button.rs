@@ -31,6 +31,7 @@ pub(super) enum ButtonOp {
     Floating,
     Small,
     Large,
+    DropdownCaret,
 }
 
 /// 按钮的外观和状态方法，不含点击：点了做什么各控件自己定。
@@ -81,6 +82,11 @@ pub(super) fn methods(owner: &'static str) -> Vec<MethodDescriptor> {
         ),
         flag_method("small", ButtonOp::Small, "Uses the small size."),
         flag_method("large", ButtonOp::Large, "Uses the large size."),
+        flag_method(
+            "dropdown_caret",
+            ButtonOp::DropdownCaret,
+            "A trailing caret, for a button that opens a menu.",
+        ),
         bool_method(
             owner,
             "loading",
@@ -110,6 +116,7 @@ pub(super) fn build(owner: &str, request: &MaterializeRequest<'_>) -> anyhow::Re
             ButtonOp::Floating => button.floating(),
             ButtonOp::Small => button.small(),
             ButtonOp::Large => button.large(),
+            ButtonOp::DropdownCaret => button.dropdown_caret(true),
         };
     }
     Ok(button)

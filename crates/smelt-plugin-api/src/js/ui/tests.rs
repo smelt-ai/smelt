@@ -432,7 +432,7 @@ export default class App extends View {
   init() { this.open = true; this.log = ""; }
   render() {
     return div().size_full()
-      .child(SmeltDialog.new("ask").open(this.open).title("Rename").description("Pick a name").w(300)
+      .child(SmeltDialog.new("ask").open(this.open).title("Rename").description("Pick a name").w(300).pin_top(80)
         .content(div().child(`body ${this.log}`))
         .footer(SmeltButton.new("ok").label("OK"))
         .on_confirm((cx) => { this.log += "confirm;"; cx.notify(); })
@@ -449,6 +449,8 @@ export default class App extends View {
         context.update(|window, cx| smelt_ui::dialog::is_open(window, cx))
     };
     assert!(is_open(&mut context), "open(true) puts a dialog up");
+    let opened = tree(&mut context, &view);
+    assert!(opened.contains(":pin_top(registered)"), "{opened}");
     context.simulate_keystrokes("enter");
     draw(&mut context);
     assert!(

@@ -7,7 +7,7 @@
 //!
 //! 卡片里是 `title` / `description`，下面 `content(元素)` 是正文（太长时滚动），`footer(元素)`
 //! 是钉在底下的按钮行。脚本每次绘制把这几样交进一个槽，对话框层重画时按槽里最近那份搭。
-//! 样式落在卡片上（宽）。
+//! 样式落在卡片上（宽）。`pin_top(像素)` 把卡片顶边钉住，不再上下居中。
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -18,8 +18,9 @@ use gpui::{
     Styled, Window, div,
 };
 use gpui_shell::{
-    ComponentArgument, ComponentCallback, ComponentDescriptor, ComponentElementFactory,
-    ComponentMaterializer, ComponentRegistry, MaterializeRequest, RegistryError, anyhow, gpui,
+    ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentCallback, ComponentDescriptor,
+    ComponentElementFactory, ComponentMaterializer, ComponentPayload, ComponentRegistry,
+    MaterializeRequest, MethodDescriptor, RegistryError, anyhow, gpui,
 };
 use smelt_ui::dialog::{self, DialogId};
 
@@ -33,6 +34,7 @@ enum Op {
     Title(String),
     Description(String),
     CloseOnBackdrop(bool),
+    Top(f32),
     OnConfirm(ComponentArgument),
     OnDismiss(ComponentArgument),
 }
@@ -45,6 +47,7 @@ struct Latest {
     footer: Option<ComponentElementFactory>,
     style: StyleRefinement,
     close_on_backdrop: bool,
+    top: Option<f32>,
     on_confirm: Option<ComponentCallback>,
     on_dismiss: Option<ComponentCallback>,
 }
@@ -149,6 +152,7 @@ fn build(
     let content = latest.content.clone();
     let footer = latest.footer.clone();
     let close_on_backdrop = latest.close_on_backdrop;
+    let top = latest.top;
     let style = latest.style.clone();
     let mut body = match heading {
         Some((title, description)) => dialog::content(title, description),
@@ -160,6 +164,9 @@ fn build(
     let footer = footer.map(|footer| materialize(&footer, window, cx));
     let mut card = card.close_on_backdrop(close_on_backdrop).child(body);
     *card.style() = style;
+    if let Some(top) = top {
+        card = card.top(gpui::px(top));
+    }
     if let Some(footer) = footer {
         card = card.footer(footer);
     }
@@ -224,6 +231,7 @@ impl ComponentMaterializer for DialogMaterializer {
             footer: request.take_slot_factory("footer"),
             style: StyleRefinement::default(),
             close_on_backdrop: true,
+            top: None,
             on_confirm: None,
             on_dismiss: None,
         };
@@ -233,6 +241,7 @@ impl ComponentMaterializer for DialogMaterializer {
                 Op::Title(text) => latest.title = Some(text.into()),
                 Op::Description(text) => latest.description = Some(text.into()),
                 Op::CloseOnBackdrop(value) => latest.close_on_backdrop = value,
+                Op::Top(offset) => latest.top = Some(offset),
                 Op::OnConfirm(callback) => {
                     latest.on_confirm = Some(request.resolve_callback(&callback)?)
                 }
@@ -278,6 +287,19 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
                     "close_on_backdrop",
                     "Whether clicking the backdrop reports on_dismiss; default true. Turn it off for forms.",
                     Op::CloseOnBackdrop,
+                ),
+                MethodDescriptor::new(
+                    "pin_top",
+                    vec![ArgumentDescriptor::new("offset", ArgumentSchema::Number)],
+                    |args| match args {
+                        [ComponentArgument::Number(offset)] if offset.is_finite() && *offset >= 0. => {
+                            Ok(ComponentPayload::new(Op::Top(*offset as f32)))
+                        }
+                        _ => Err(format!("{OWNER}.pin_top(offset) expects pixels >= 0")),
+                    },
+                )
+                .with_documentation(
+                    "Pins the card's top edge this many pixels below the window top instead of centring it; for dialogs whose height follows their content (a filtered list), so the top does not jump.",
                 ),
                 callback_method(
                     OWNER,

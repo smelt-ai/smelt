@@ -406,7 +406,7 @@ export default class App extends View {
     return div().size_full()
       .child(new Button("close").icon("icons/close.svg").accessibility_label("Close").dismiss().small()
         .absolute().left(0).top(0).on_click(hit(0)))
-      .child(new Button("pill").icon("icons/arrow-down.svg").label("2 need you").floating().small()
+      .child(new Button("pill").icon("icons/arrow-down.svg").label("2 need you").floating().small().dropdown_caret()
         .absolute().left(0).top(40).on_click(hit(1)))
       .child(`hits: ${this.hits.join("|")}`);
   }
@@ -415,7 +415,7 @@ export default class App extends View {
     let (mut context, view, _app) = mount(cx, source);
     draw(&mut context);
     let initial = tree(&mut context, &view);
-    for method in ["icon", "dismiss", "floating"] {
+    for method in ["icon", "dismiss", "floating", "dropdown_caret"] {
         assert!(
             initial.contains(&format!(":{method}(registered)")),
             "{initial}"
