@@ -35,6 +35,8 @@ mod list_row;
 #[deny(dead_code)]
 mod menu;
 #[deny(dead_code)]
+mod motion;
+#[deny(dead_code)]
 mod popover;
 #[deny(dead_code)]
 mod scroll_view;
@@ -87,6 +89,7 @@ pub fn components() -> Result<FrozenComponentRegistry, RegistryError> {
     dialog::register(&mut registry)?;
     scroll_view::register(&mut registry)?;
     drag_item::register(&mut registry)?;
+    motion::register(&mut registry)?;
     registry.freeze()
 }
 

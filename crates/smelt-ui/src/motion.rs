@@ -5,6 +5,13 @@
 //! `.cached()` 子树直接复用上一帧。所以重的子树（对话列表、工作台各栏）要做成 cached 实体，
 //! 链上各层的 render 只读内存。应用不在前台、窗口失焦或系统开了减弱动态效果时，停在静态终态。
 
+mod list;
+
+pub use list::{
+    ARRIVAL_OPEN, FoldBody, RUNNING_GLOW, WASH_END, WASH_HOLD, WASH_PEAK, WASH_RISE, arrival_open,
+    disclosure_open, disclosure_settled_closed, fold_body, replay_elapsed, wash_alpha,
+};
+
 use gpui::{
     Anchor, AnyElement, App, AsyncApp, Bounds, BoxShadow, Element, ElementId, GlobalElementId,
     Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Rgba, Styled,

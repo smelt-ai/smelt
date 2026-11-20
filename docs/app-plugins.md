@@ -89,7 +89,7 @@
 | 会话数据 | 工作区目录、会话状态，带上几个功能都要的派生事实（对话的状态、agent 种类的名字和图标） | 宿主的镜像 + `smelt-model`；派生事实 JS 还拿不到 |
 | 终端 | 每格终端一个视图实例（`create_view` / `SmeltViewInstance`），字节流、画面、终端菜单的底层 | Rust 插件 `crates/plugins/terminal` |
 | 对话 | 对话流、消息里的 markdown 和 diff、输入框、ACP 连接和会话生命周期 | Rust 插件 `crates/plugins/conversation`；拆到哪一层另定（见「待定」） |
-| 组件库 | `smelt-ui` 的 JS 组件：按钮、菜单、弹层、对话框、下拉、列表行底座、滚动区域、吸顶区段、拖动、悬停提示、键帽、设置页骨架、重排动画 | `crates/smelt-ui` + `smelt-plugin-api/src/js/ui` |
+| 组件库 | `smelt-ui` 的 JS 组件：按钮、菜单、弹层、对话框、下拉、列表行底座、滚动区域、吸顶区段、拖动、悬停提示、键帽、设置页骨架、列表动画（开合、重排、落进来、铺底一闪、开始跑时亮一下） | `crates/smelt-ui` + `smelt-plugin-api/src/js/ui` |
 | Git | 读写仓库 | `crates/smelt-git`，还没映射给 JS |
 | 远程桌面 | 画面组件 | `smelt-runtime-client` 的 `DesktopProxy` |
 | 小人 | 3D 小人的帧解码和画法 | Rust 插件 `crates/plugins/buddies` |

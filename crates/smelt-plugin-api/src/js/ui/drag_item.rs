@@ -4,6 +4,8 @@
 //!
 //! - `new(id, kind)`：`id` 是这一项的身份，交给 `on_drop` 的就是它；只有 `kind` 一样的项之间
 //!   能互放，规则（只在同一组里挪、只在同一台机器下挪）编进 `kind` 里。
+//! - `on_drop(from, before, top)` 还给松手时牌子上沿的高度（窗口坐标）：重排时交给那一项的
+//!   `SmeltFlip.from_top`，它就从手放下的地方落到新位置，不先跳回原处再滑过去。
 //! - `content(元素)` 是这一项画出来的样子，拖起来时浮在指针下的牌子也按它画（宽度照这一项）。
 //! - 拖着时原处变淡，要放到的那一项上沿或下沿画一条线；落回自己上不算。
 //!
@@ -59,6 +61,8 @@ struct OnDrop(ComponentArgument);
 #[derive(Default)]
 struct ItemState {
     width: Pixels,
+    /// 拖起来时指针离这一项上沿多远：牌子画在指针减去它的地方。
+    grab: Pixels,
     lifted: bool,
     /// 拖着的东西停在这一项上：`true` 是放在它前面（线在上沿）。
     hint: Option<bool>,
@@ -110,8 +114,9 @@ impl RenderOnce for DragItem {
             })
             .on_drag(drag, {
                 let state = state.clone();
-                move |drag, _, _, cx| {
+                move |drag, offset, _, cx| {
                     let width = state.update(cx, |state, cx| {
+                        state.grab = offset.y;
                         state.lifted = true;
                         state.hint = None;
                         cx.notify();
@@ -162,12 +167,18 @@ impl RenderOnce for DragItem {
                     if dragged.kind != kind || dragged.id == id {
                         return;
                     }
+                    let grab = dragged
+                        .item
+                        .upgrade()
+                        .map_or(px(0.), |item| item.read(cx).grab);
+                    let top = window.mouse_position().y - grab;
                     if let Some(callback) = &on_drop {
                         callback.invoke_and_report_with(
                             "SmeltDragItem.on_drop callback failed",
                             &[
                                 ComponentCallbackArgument::String(dragged.id.to_string()),
                                 ComponentCallbackArgument::Boolean(before),
+                                ComponentCallbackArgument::Number(f64::from(f32::from(top))),
                             ],
                             window,
                             cx,
@@ -282,8 +293,8 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
             .with_methods(vec![callback_method(
                 OWNER,
                 "on_drop",
-                "(from: string, before: boolean, cx: Context) => void",
-                "Runs on this item when an item of the same kind is dropped on it: `from` is the dragged item's id, `before` whether it goes above this one. Reorder your own data and redraw.",
+                "(from: string, before: boolean, top: number, cx: Context) => void",
+                "Runs on this item when an item of the same kind is dropped on it: `from` is the dragged item's id, `before` whether it goes above this one, `top` the window y of the drag preview's top edge (hand it to that item's SmeltFlip.from_top so it lands from there). Reorder your own data and redraw.",
                 OnDrop,
             )])
             .with_documentation(

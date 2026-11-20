@@ -129,6 +129,12 @@ fn components_hold_only_smelt_controls() {
             "SmeltScrollView",
             "SmeltScrollAnchor",
             "SmeltDragItem",
+            "SmeltFold",
+            "SmeltFoldChevron",
+            "SmeltFlip",
+            "SmeltArrival",
+            "SmeltWash",
+            "SmeltGlowIcon",
         ]
     );
     let states = components
@@ -813,8 +819,8 @@ export default class App extends View {
     }
     const item = (id, kind) => SmeltDragItem.new(id, kind).w(200).h(30)
       .content(div().size_full().child(`row ${id}`))
-      .on_drop((from, before, cx) => {
-        this.calls.push(`${from}${before ? "<" : ">"}${id}`);
+      .on_drop((from, before, top, cx) => {
+        this.calls.push(`${from}${before ? "<" : ">"}${id}@${top}`);
         const rest = this.items.filter((it) => it !== from);
         const at = rest.indexOf(id) + (before ? 0 : 1);
         rest.splice(at, 0, from);
@@ -843,7 +849,7 @@ export default class App extends View {
     // 第一项拖到第三项的下半：放在它后面。
     drag(&mut context, 15., 80.);
     assert!(
-        state(&mut context).contains("order: b,c,a; calls: a>c;"),
+        state(&mut context).contains("order: b,c,a; calls: a>c@61;"),
         "{}",
         state(&mut context)
     );
@@ -851,7 +857,7 @@ export default class App extends View {
     // 最后一项拖到第一项的上半：放在它前面。
     drag(&mut context, 75., 5.);
     assert!(
-        state(&mut context).contains("order: a,b,c; calls: a>c a<b;"),
+        state(&mut context).contains("order: a,b,c; calls: a>c@61 a<b@-14;"),
         "{}",
         state(&mut context)
     );
@@ -861,7 +867,7 @@ export default class App extends View {
     drag(&mut context, 105., 15.);
     drag(&mut context, 45., 300.);
     assert!(
-        state(&mut context).contains("calls: a>c a<b;"),
+        state(&mut context).contains("calls: a>c@61 a<b@-14;"),
         "{}",
         state(&mut context)
     );
@@ -932,4 +938,125 @@ export default class App extends View {
     assert!(during.contains("above: r0;"), "{during}");
     context.simulate_mouse_up(edge, MouseButton::Left, Modifiers::default());
     draw(&mut context);
+}
+
+/// 按下第 `y` 像素那一行的按钮，读它报的名字。
+fn hit(context: &mut VisualTestContext, view: &Entity<ScriptView>, y: f32) -> String {
+    click(context, 100., y);
+    let tree = tree(context, view);
+    let start = tree.find("hit: ").expect("状态行");
+    tree[start..]
+        .lines()
+        .next()
+        .unwrap()
+        .trim_end_matches('"')
+        .to_string()
+}
+
+/// 一组合上：第一帧后面的行不动，按弹簧慢慢上去；减弱动态效果时一下到位。
+#[gpui::test]
+fn a_fold_closes_smoothly_and_at_once_under_reduced_motion(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltButton, SmeltFold, SmeltFoldChevron } from "smelt-ui";
+export default class App extends View {
+  init() { this.collapsed = false; this.hit = ""; }
+  render() {
+    const button = (name, h) => SmeltButton.new(name).label(name).w(200).h(h)
+      .on_click((_, cx) => { this.hit = name; if (name === "toggle") this.collapsed = !this.collapsed; cx.notify(); });
+    return div().flex().flex_col().w(200)
+      .child(button("toggle", 30))
+      .child(SmeltFoldChevron.new("g", this.collapsed).size(14))
+      .child(SmeltFold.new("g", this.collapsed).child(button("inside", 120)))
+      .child(button("after", 30))
+      .child(div().child(`hit: ${this.hit}`));
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    context.update(|_, cx| cx.set_reduce_motion(false));
+    draw(&mut context);
+    // 开着：toggle 0–30，箭头 30–44，组里 44–164，after 164–194。
+    assert_eq!(hit(&mut context, &view, 100.), "hit: inside");
+    assert_eq!(hit(&mut context, &view, 10.), "hit: toggle");
+    assert_eq!(
+        hit(&mut context, &view, 180.),
+        "hit: after",
+        "合上第一帧后面的行不动"
+    );
+    context
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    draw(&mut context);
+    assert_eq!(
+        hit(&mut context, &view, 60.),
+        "hit: after",
+        "停稳后组里不画了"
+    );
+
+    // 减弱动态效果：再开再合都一下到位。
+    context.update(|_, cx| cx.set_reduce_motion(true));
+    assert_eq!(hit(&mut context, &view, 10.), "hit: toggle");
+    assert_eq!(hit(&mut context, &view, 100.), "hit: inside");
+    assert_eq!(hit(&mut context, &view, 10.), "hit: toggle");
+    assert_eq!(hit(&mut context, &view, 60.), "hit: after");
+}
+
+/// 重排后各项先画在原处再滑到新位置，点击跟着画的地方走；新落进来的一行从零高撑开。
+#[gpui::test]
+fn flips_slide_and_arrivals_open(cx: &mut TestAppContext) {
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { SmeltButton, SmeltFlip, SmeltArrival, SmeltWash, SmeltGlowIcon } from "smelt-ui";
+export default class App extends View {
+  init() { this.items = ["a", "b"]; this.generation = 0; this.arrived = null; this.hit = ""; }
+  render() {
+    const button = (name) => SmeltButton.new(name).label(name).w(200).h(30)
+      .on_click((_, cx) => {
+        this.hit = name;
+        if (name === "swap") { this.items = [...this.items].reverse(); this.generation += 1; }
+        if (name === "add") { this.items = [...this.items, "c"]; this.arrived = "c"; }
+        cx.notify();
+      });
+    const row = (id) => {
+      const item = div().relative().child(SmeltWash.new(id, 1)).child(button(id))
+        .child(SmeltGlowIcon.new("icons/terminal.svg", id, 1).size(14));
+      const placed = this.arrived === id ? SmeltArrival.new(id, 1).child(item) : item;
+      return SmeltFlip.new(id, this.generation).child(placed);
+    };
+    return div().flex().flex_col().w(200)
+      .child(button("swap"))
+      .child(button("add"))
+      .children(this.items.map(row))
+      .child(button("end"))
+      .child(div().child(`hit: ${this.hit}`));
+  }
+}
+"#;
+    let (mut context, view, _app) = mount(cx, source);
+    context.update(|_, cx| cx.set_reduce_motion(false));
+    draw(&mut context);
+    // swap 0–30，add 30–60，a 60–90，b 90–134（行里还有图标 14），end 之后。
+    assert_eq!(hit(&mut context, &view, 75.), "hit: a");
+    assert_eq!(hit(&mut context, &view, 10.), "hit: swap");
+    assert_eq!(
+        hit(&mut context, &view, 75.),
+        "hit: a",
+        "重排那一帧还画在原处"
+    );
+    context
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    draw(&mut context);
+    assert_eq!(hit(&mut context, &view, 75.), "hit: b", "滑到新位置");
+
+    // 新的一行从零高撑开：刚加进来时 end 紧跟在上一行后面。
+    let end_before = 60. + 44. * 2. + 5.;
+    assert_eq!(hit(&mut context, &view, 45.), "hit: add");
+    assert_eq!(hit(&mut context, &view, end_before), "hit: end");
+    context
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    draw(&mut context);
+    assert_eq!(hit(&mut context, &view, end_before), "hit: c", "撑开到全高");
 }
