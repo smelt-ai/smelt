@@ -243,6 +243,9 @@ pub struct WorkspaceWorksetCreateParams {
     pub branch_prefix: String,
     #[serde(default)]
     pub branch: Option<String>,
+    /// 新分支从哪个分支拉出来；不填用各仓库远端的默认分支。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     pub repository_names: Vec<String>,
 }
 

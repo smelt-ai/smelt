@@ -92,6 +92,7 @@ struct Repositories {
     source: Option<String>,
     task: Entity<InputState>,
     branch: Entity<InputState>,
+    base: Entity<InputState>,
     name: Entity<InputState>,
     url: Entity<InputState>,
     busy: bool,
@@ -122,9 +123,10 @@ impl Repositories {
             };
         let task = input(t!("repo.task_placeholder"), window, cx);
         let branch = input(t!("repo.branch_placeholder"), window, cx);
+        let base = input(t!("repo.base_placeholder"), window, cx);
         let name = input(t!("repo.name_placeholder"), window, cx);
         let url = input(t!("repo.url_placeholder"), window, cx);
-        let subscriptions = [&task, &branch, &name, &url]
+        let subscriptions = [&task, &branch, &base, &name, &url]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
@@ -166,6 +168,7 @@ impl Repositories {
             source: None,
             task,
             branch,
+            base,
             name,
             url,
             busy: false,
@@ -338,11 +341,13 @@ impl Repositories {
             return;
         }
         let branch = self.branch.read(cx).value().trim().to_string();
+        let base = self.base.read(cx).value().trim().to_string();
         let params = WorkspaceWorksetCreateParams {
             project_root: self.project_root.clone(),
             task: task.clone(),
             branch_prefix: "feat".into(),
             branch: (!branch.is_empty()).then_some(branch),
+            base: (!base.is_empty()).then_some(base),
             repository_names: self.selected.iter().cloned().collect(),
         };
         let ran = api::call::<WorkspaceWorksetCreate>(&self.machine, params, WRITE_TIMEOUT, cx);
@@ -472,7 +477,9 @@ impl Render for Repositories {
                 .child(hint(t!("repo.task_hint")))
                 .child(field_label(t!("repo.branch")))
                 .child(TextInput::new(&self.branch).disabled(busy))
-                .child(hint(t!("repo.branch_hint", task = task_or_placeholder)));
+                .child(hint(t!("repo.branch_hint", task = task_or_placeholder)))
+                .child(field_label(t!("repo.base")))
+                .child(TextInput::new(&self.base).disabled(busy));
         }
         if matches!(mode, Mode::Manage | Mode::Create) {
             content = content
