@@ -192,7 +192,7 @@ fn start_conversation(
     let StartConversation { machine, cwd, with } = args;
     let target = machine.clone();
     with_settings(&machine, cx, move |settings, cx| {
-        let acp = launch::started_acp(settings, &with, cwd, new_id())?;
+        let acp = launch::started_acp(settings, &with, cwd, new_acp_id())?;
         Ok(create_acp(
             target,
             acp,
@@ -215,7 +215,7 @@ fn fork(args: Fork, _: Option<&mut Window>, cx: &mut App) -> Task<Result<(), Str
         return Task::ready(Err(t!("error.fork_only_conversation").into_owned()));
     };
     let conversation = WorkspaceConversation {
-        acp: Some(launch::forked_acp(acp, new_id())),
+        acp: Some(launch::forked_acp(acp, new_acp_id())),
         ..launch::blank_conversation(new_id(), source.workset_id.clone())
     };
     let start = ConversationStart {
@@ -253,7 +253,7 @@ fn resume(args: Resume, _: Option<&mut Window>, cx: &mut App) -> Task<Result<(),
     }
     let machine = args.machine.clone();
     with_settings(&machine, cx, move |settings, cx| {
-        let acp = launch::resumed_acp(settings, &args, new_id())?;
+        let acp = launch::resumed_acp(settings, &args, new_acp_id())?;
         Ok(create_acp(
             args.machine,
             acp,
@@ -336,7 +336,7 @@ fn resume_in_terminal(
 fn handoff(args: Handoff, _: Option<&mut Window>, cx: &mut App) -> Task<Result<(), String>> {
     let machine = args.machine.clone();
     with_settings(&machine, cx, move |settings, cx| {
-        let acp = launch::handoff_acp(settings, &args, new_id())?;
+        let acp = launch::handoff_acp(settings, &args, new_acp_id())?;
         Ok(create_acp(
             args.machine,
             acp,
@@ -576,6 +576,11 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// ACP 会话的守护 id 统一带 `acp-` 前缀，和 agent 原生会话 id 及终端 id 区分开。
+fn new_acp_id() -> String {
+    format!("acp-{}", uuid::Uuid::new_v4())
+}
+
 /// 复制会话 id 时给的：agent 自己的对话 id（续接身份、或 hook 报来的那段对话），拿去
 /// `--resume`、找存档才用得上；agent 还没报上来时是守护会话 id。握手、TUI 里 `/resume`
 /// 都会换 id，所以用时现取。
@@ -661,6 +666,9 @@ mod tests {
         assert_eq!(id_to_copy(Some(&directory), &[reported], "term-1"), "tui-9");
         assert_eq!(id_to_copy(Some(&directory), &[], "term-1"), "term-1");
         assert_eq!(id_to_copy(None, &[], "acp-1"), "acp-1");
+        let acp_id = new_acp_id();
+        assert!(acp_id.starts_with("acp-"), "{acp_id}");
+        assert!(uuid::Uuid::parse_str(acp_id.trim_start_matches("acp-")).is_ok());
     }
 
     #[test]
