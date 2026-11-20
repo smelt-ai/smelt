@@ -192,6 +192,7 @@ const JS_ONLY: &[(&str, &str)] = &[
     ("reject_command", "处理函数返回 Err"),
     ("opened_view", "PluginView::open 的参数"),
     ("notify_view", "视图自己的 cx.notify()"),
+    ("t", "各 crate 的 t!，文案表是插件目录下的 locales/ui.yml"),
     ("locales", "常量 LOCALES"),
     ("store_query", "plugin_store"),
     ("store_execute", "plugin_store"),

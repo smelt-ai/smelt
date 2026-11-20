@@ -14,6 +14,7 @@
 //! 插件摆在哪不由插件定，这里没有登记位置的函数；插件可以登记整份布局，用不用由用户在
 //! 设置里选（见 `docs/app-plugins.md`）。
 
+mod catalog;
 #[cfg(test)]
 mod control_types;
 #[cfg(test)]
@@ -122,6 +123,11 @@ export function window_active(): boolean;
 export function overlay_open(): boolean;
 /** 现在的界面语言代码（"en"、"zh-CN"）。换了发 locale_changed：插件自己画的字按新语言重画。 */
 export function locale(): string;
+/**
+ * 插件自己的文案：插件目录下 locales/ui.yml（格式同 Rust crate 的，见 docs/i18n.md）里 key 在当前语言的那条，
+ * 没有取英文，再没有给 key 本身。%{name} 按 params 里同名的换。文案表第一次调时读，改了跟着插件重挂。
+ */
+export function t(key: string, params?: Record<string, string | number | boolean | null>): string;
 /** App 带的界面语言：code 是语言代码，name 是这种语言自己的叫法（"简体中文"）。 */
 export function locales(): { code: string; name: string }[];
 /** 系统的首选语言，归到 locales() 里的一个；读不到是 "en"。 */
@@ -625,6 +631,8 @@ struct PluginState {
     built: u64,
     /// 建好的各份视图的脚本，按 `instance`，`notify_view` 重画它们。放掉的留到下次重画时清。
     live: Vec<(u64, WeakEntity<ScriptView>)>,
+    /// 插件的文案表（`t()`），第一次用时从插件目录读；读不出来的原因也留着，每次调都报。
+    catalog: Option<Rc<Result<catalog::Catalog, String>>>,
     /// 插件目录里的资源（见 [`JsPlugin::with_assets`]）。
     assets: Option<PluginAssets>,
     _events: Option<Subscription>,
@@ -675,6 +683,27 @@ impl JsPlugin {
 
     fn end_building(&self) {
         self.0.borrow_mut().building = None;
+    }
+
+    /// 插件文案表里 `key` 在当前语言的那条（见 [`catalog`]）。
+    fn text(&self, key: &str, params: &[(String, HostValue)]) -> Result<String, HostError> {
+        let catalog = {
+            let mut state = self.0.borrow_mut();
+            let root = state.assets.as_ref().map(|assets| assets.root.clone());
+            state
+                .catalog
+                .get_or_insert_with(|| {
+                    Rc::new(match root {
+                        Some(root) => catalog::Catalog::load(&root),
+                        None => Ok(catalog::Catalog::default()),
+                    })
+                })
+                .clone()
+        };
+        match &*catalog {
+            Ok(catalog) => Ok(catalog.text(&crate::locale(), key, params)),
+            Err(error) => Err(HostError::new(format!("t：插件的文案读不出来：{error}"))),
+        }
     }
 
     /// 第 `instance` 份视图建好了，脚本是 `script`。
@@ -752,6 +781,7 @@ impl JsPlugin {
         let views = self.clone();
         let opened = self.clone();
         let notified = self.clone();
+        let texts = self.clone();
         let menus = self.clone();
         let topics = self.clone();
         let context_menus = self.clone();
@@ -1279,6 +1309,15 @@ impl JsPlugin {
                             "opened_view：只能在视图的 init 里调（宿主建这份视图的时候）",
                         )
                     })
+            })
+            .function("t", move |arguments| {
+                let key = arguments.string(0)?;
+                let params = match arguments.get(1) {
+                    None | Some(HostValue::Null) => Vec::new(),
+                    Some(HostValue::Object(params)) => params.clone(),
+                    Some(_) => return Err(HostError::new("t：参数要是一个对象")),
+                };
+                texts.text(&key, &params).map(HostValue::Str)
             })
             .function("notify_view", move |arguments| {
                 let instance = match arguments.get(0) {
