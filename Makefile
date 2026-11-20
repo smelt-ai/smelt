@@ -126,9 +126,10 @@ install: $(SMELT_AGENT) ## 原子安装到 /Applications（不打 dmg）：退�
 	@# 和在线更新同一条提交：让 Smelt 退出 → 停守护 → 原子交换 App → 打开新版。
 	@./target/release/smelt-installer --local-app dist/Smelt.app
 
-dev: ## 编译 release 并原子安装到 /Applications（= make build 后 make install）
+dev: ## 编译 release 并原子安装到 /Applications（= make build 后 make install）；自带 JS 插件读仓库、改了即生效
 	@# 不写成 `dev: build install` 依赖：make -j 会把两者并行，install 可能装上旧产物。
-	@$(MAKE) --no-print-directory build
+	@# SMELT_LIVE_PLUGINS：装上的包读仓库里的 plugins/ 并盯着它，改 JS 不用重编（见 plugins::builtin）。
+	@SMELT_LIVE_PLUGINS=1 $(MAKE) --no-print-directory build
 	@$(MAKE) --no-print-directory install
 
 clean: ## 清理 make build / make install 的构建产物（target/ 与 dist/，不卸载已安装的 App）

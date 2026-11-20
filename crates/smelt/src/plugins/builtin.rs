@@ -2,7 +2,8 @@
 //!
 //! gpui-shell 从目录加载脚本，所以正式构建启动时把编进来的文件写到
 //! `~/.smelt/builtin-plugins/<内容摘要>/`，从那里加载：摘要相同的目录已经在就不再写，
-//! 别的摘要是旧版本留下的，删掉。开发构建直接读仓库里的 `plugins/`，改了脚本即重挂（见 `watch`）。
+//! 别的摘要是旧版本留下的，删掉。开发用的包（调试构建，和 `make dev` 编的 release）直接读
+//! 仓库里的 `plugins/`，改了脚本即重挂（见 `watch`），只有改 Rust 才要重编。
 //!
 //! 自带插件只读：用户想改，复制一份、换个 id，再在布局里换上自己那份。和自带插件同 id 的
 //! 用户插件不加载，报重复（见 `super::discover`）。
@@ -22,6 +23,10 @@ use std::sync::OnceLock;
 #[exclude = "*/node_modules/*"]
 struct Embedded;
 
+/// 自带插件直接读仓库、改了即重挂：调试构建，和编译时设了 `SMELT_LIVE_PLUGINS` 的 release
+/// （`make dev`）。发版的包不设，读编进去的那份。
+pub(super) const LIVE: bool = cfg!(debug_assertions) || option_env!("SMELT_LIVE_PLUGINS").is_some();
+
 /// 写出来的自带插件放在 `~/.smelt` 下的这个目录。
 #[cfg(not(debug_assertions))]
 const DIR: &str = "builtin-plugins";
@@ -33,9 +38,9 @@ pub(super) fn dir() -> Option<&'static Path> {
 }
 
 /// 加载时要不要往插件目录里写给编辑器的文件（`gpui-kit.d.ts`、`jsconfig.json`）：
-/// 写出来的那份没人在那里改，不写；开发构建读的仓库目录要写，改脚本时有补全。
+/// 写出来的那份没人在那里改，不写；读仓库时要写，改脚本时有补全。
 pub(super) fn editor_files(root: &Path) -> bool {
-    !(cfg!(not(debug_assertions)) && dir().is_some_and(|dir| root.starts_with(dir)))
+    LIVE || !dir().is_some_and(|dir| root.starts_with(dir))
 }
 
 #[cfg(debug_assertions)]
@@ -45,6 +50,9 @@ fn locate() -> Option<PathBuf> {
 
 #[cfg(not(debug_assertions))]
 fn locate() -> Option<PathBuf> {
+    if LIVE {
+        return Some(repo_dir());
+    }
     let parent = smelt_paths::smelt_home()?.join(DIR);
     let files = Embedded::iter().filter_map(|path| {
         let file = Embedded::get(&path)?;
@@ -63,7 +71,6 @@ fn locate() -> Option<PathBuf> {
 }
 
 /// 仓库里的自带插件。
-#[cfg(any(debug_assertions, test))]
 pub(super) fn repo_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins")
 }

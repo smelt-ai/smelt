@@ -226,7 +226,7 @@
 
 ### 随 App 带的插件
 
-- 放仓库根 `plugins/<name>/`，编进二进制（`crates/smelt/src/plugins/builtin.rs`）。正式构建启动时写到 `~/.smelt/builtin-plugins/<内容摘要>/` 再加载，开发构建直接读仓库，改了即重挂。
+- 放仓库根 `plugins/<name>/`，编进二进制（`crates/smelt/src/plugins/builtin.rs`）。发版的包启动时写到 `~/.smelt/builtin-plugins/<内容摘要>/` 再加载；开发用的包（调试构建和 `make dev`）直接读仓库，改了即重挂，只有改 Rust 要重编。
 - 在第一帧之前加载完，布局里摆的视图第一帧就画得出来，不闪空白。
 - 先找自带的再找 `~/.smelt/plugins/`，同 id 不加载、报重复。
 
