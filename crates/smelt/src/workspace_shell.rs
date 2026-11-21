@@ -908,8 +908,8 @@ pub(crate) fn new_area(
 }
 
 /// 外层 Dock 的画法。区域、分栏、中间的框用 gpui-base 的光框：底只由窗口根按地方铺
-/// （`window_backdrop::paint`），栏与栏之间靠分隔条那根 `hair` 分开。各停靠区和中间那一列
-/// 排好后把位置记进 `regions`，窗口根按布局说的材质铺底。
+/// （`window_backdrop::paint`），栏与栏之间靠分隔条那根 `hair` 分开。Dock 每次 prepaint 先
+/// 作废上一套位置，各停靠区和中间那一列排好后再记进 `regions`，窗口根按布局说的材质铺底。
 struct SmeltDockRenderer {
     workspace: gpui::WeakEntity<Workspace>,
     edges: DockEdges,
@@ -928,6 +928,15 @@ impl SmeltDockRenderer {
 }
 
 impl DockAreaRenderer for SmeltDockRenderer {
+    /// 外框的 prepaint 在各停靠区之前（这个子元素排在 gpui-base 加的停靠区前面），Dock 被拷的
+    /// 帧不走到这里，上一套位置照旧。
+    fn frame(&self, _: &mut Window, _: &mut App) -> gpui::Stateful<Div> {
+        let regions = self.regions.clone();
+        div()
+            .id("dock-area")
+            .on_prepaint(move |_, _, _| regions.borrow_mut().begin())
+    }
+
     fn render_split_handle(
         &self,
         handle: &ResizeHandleContext,

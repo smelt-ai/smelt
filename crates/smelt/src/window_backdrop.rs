@@ -5,9 +5,14 @@
 //! 材质的地方按外观里的底色不透明度铺一层主题底色、透出底下的材质，别处铺实的主题底色。
 //! 没声明材质的布局、放大了一块面板（停靠区都不画）时整扇窗口是实色。
 //!
-//! 各块地方的位置要等排版完才知道：外壳在 prepaint 里把各停靠区和中间的框记进 [`Regions`]，
-//! 窗口根上最先画的那块在 paint 里读（GPUI 先给整棵树 prepaint，再整棵 paint，所以读到的是
-//! 这一帧的位置），铺底、对齐材质，一帧之内完成。字的配色按最透的那种材质算（[`text_tone`]），
+//! 各块地方的位置要等排版完才知道：外壳的 Dock 在 prepaint 里把各停靠区和中间的框记进
+//! [`Regions`]，窗口根上最先画的那块在 paint 里读（GPUI 先给整棵树 prepaint，再整棵 paint，
+//! 所以读到的是这一帧的位置），铺底、对齐材质，一帧之内完成。
+//!
+//! GPUI Fast 里没通知的视图照上一帧拷，prepaint、paint 都不再跑，所以两头都不能假设每帧都
+//! 会走到：位置是 Dock 那一次重画记下的一整套（[`Regions::begin`] 开头作废上一套），Dock
+//! 被拷的那帧原样留着、照样有效；铺底在窗口根（Workspace）上，Dock 一变 Workspace 就跟着
+//! 重画（`Workspace::watch_page_dock`），新位置当帧铺上。字的配色按最透的那种材质算（[`text_tone`]），
 //! 实色的地方对比只会更足。着色、窗口失焦变样、系统里关掉透明效果都由系统处理；模糊程度
 //! 系统不让调，不做。
 //!
@@ -92,8 +97,8 @@ pub(crate) fn window_background() -> WindowBackgroundAppearance {
     }
 }
 
-/// 外壳在 prepaint 里记下的各块地方的位置（窗口坐标），窗口根在 paint 里读完清空。没画的
-/// （停靠区关着、放大了一块面板）这一帧就没有。
+/// 外壳的 Dock 上一次重画时记下的各块地方的位置（窗口坐标），窗口根在 paint 里读。没画的
+/// （停靠区关着、放大了一块面板）就没有。
 #[derive(Default)]
 pub(crate) struct Regions {
     left: Option<Bounds<Pixels>>,
@@ -104,6 +109,11 @@ pub(crate) struct Regions {
 }
 
 impl Regions {
+    /// Dock 开始 prepaint：上一次记的作废，这次画出来的各块随后记上。
+    pub(crate) fn begin(&mut self) {
+        *self = Self::default();
+    }
+
     pub(crate) fn record(&mut self, placement: DockPlacement, bounds: Bounds<Pixels>) {
         let slot = match placement {
             DockPlacement::Left => &mut self.left,
@@ -136,20 +146,36 @@ impl Backdrop {
 
 /// 铺这一帧的窗口底，把材质对齐到透的那几块地方。窗口根上最先画的那块在 paint 里调。
 ///
-/// `window_bounds` 是整扇窗口；`materials` 是开着的那页的布局说的；`regions` 是这一帧外壳
-/// 记下的位置，读完清空；`bg_opacity` 是透的地方主题底色铺多实，1 就是不透、不垫材质。
+/// `window_bounds` 是整扇窗口；`materials` 是开着的那页的布局说的；`regions` 是外壳的 Dock
+/// 记下的位置；`bg_opacity` 是透的地方主题底色铺多实，1 就是不透、不垫材质。
 pub(crate) fn paint(
     window_bounds: Bounds<Pixels>,
     materials: LayoutMaterials,
-    regions: &mut Regions,
+    regions: &Regions,
     bg_opacity: f32,
     backdrop: &mut Backdrop,
     window: &mut Window,
 ) {
-    let regions = std::mem::take(regions);
+    let panes = paint_floor(window_bounds, materials, regions, bg_opacity, window);
+    let dark = !ui_theme::is_light();
+    if backdrop.applied.as_ref() == Some(&(panes.clone(), dark)) {
+        return;
+    }
+    sync(window, window_bounds, &panes, dark);
+    backdrop.applied = Some((panes, dark));
+}
+
+/// 铺底：透的地方铺半透的主题底色，别处铺实的。返回透的那几块，交给系统垫材质。
+fn paint_floor(
+    window_bounds: Bounds<Pixels>,
+    materials: LayoutMaterials,
+    regions: &Regions,
+    bg_opacity: f32,
+    window: &mut Window,
+) -> Panes {
     let scale = window.scale_factor();
     let panes = if available() && bg_opacity < 1.0 {
-        glass_panes(materials, &regions, scale)
+        glass_panes(materials, regions, scale)
     } else {
         Vec::new()
     };
@@ -162,13 +188,7 @@ pub(crate) fn paint(
     for (_, rect) in &panes {
         window.paint_quad(fill(rect.bounds(), glass));
     }
-
-    let dark = !ui_theme::is_light();
-    if backdrop.applied.as_ref() == Some(&(panes.clone(), dark)) {
-        return;
-    }
-    sync(window, window_bounds, &panes, dark);
-    backdrop.applied = Some((panes, dark));
+    panes
 }
 
 /// 布局声明了材质、这一帧又画出来了的地方。中间那一列要扣掉压在它下面的下停靠区。
@@ -556,6 +576,159 @@ mod tests {
             ]
         );
         assert!(glass_panes(LayoutMaterials::default(), &regions, 2.).is_empty());
+    }
+
+    /// 外壳那层：最先铺底，读停靠区记下的位置；里面套着停靠区。
+    struct Shell {
+        area: gpui::Entity<Area>,
+        regions: SharedRegions,
+        floors: std::rc::Rc<std::cell::RefCell<Vec<Panes>>>,
+        _area_changed: gpui::Subscription,
+    }
+
+    /// 停靠区那层：左边一栏、右边中间那一列，排好后记下位置。
+    struct Area {
+        regions: SharedRegions,
+        left: bool,
+    }
+
+    impl gpui::Render for Shell {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            let regions = self.regions.clone();
+            let floors = self.floors.clone();
+            let materials = LayoutMaterials {
+                left: Some(Material::Sidebar),
+                ..LayoutMaterials::default()
+            };
+            gpui::div()
+                .relative()
+                .size_full()
+                .child(
+                    gpui::canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, _| {
+                            let panes =
+                                paint_floor(bounds, materials, &regions.borrow(), 0.5, window);
+                            floors.borrow_mut().push(panes);
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .child(self.area.clone())
+        }
+    }
+
+    impl gpui::Render for Area {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            use gpui_base::ElementExt as _;
+            let record = |placement| {
+                let regions = self.regions.clone();
+                move |bounds, _: &mut Window, _: &mut gpui::App| {
+                    regions.borrow_mut().record(placement, bounds)
+                }
+            };
+            let regions = self.regions.clone();
+            gpui::div()
+                .size_full()
+                .flex()
+                .flex_row()
+                .on_prepaint(move |_, _, _| regions.borrow_mut().begin())
+                .children(self.left.then(|| {
+                    gpui::div()
+                        .w(px(30.))
+                        .h_full()
+                        .on_prepaint(record(DockPlacement::Left))
+                }))
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .h_full()
+                        .on_prepaint(record(DockPlacement::Center)),
+                )
+        }
+    }
+
+    /// 按真的出帧画一帧：没通知的视图照上一帧拷（`VisualTestContext::draw` 整窗重画，看不出来）。
+    fn frame(cx: &mut gpui::VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn shows_left(panes: &Panes) -> bool {
+        panes
+            .iter()
+            .any(|(material, _)| *material == Material::Sidebar)
+    }
+
+    /// 只有外壳重画、停靠区照上一帧拷的那帧，左栏照样透：位置不是每帧都会再记一遍。
+    #[gpui::test]
+    fn the_floor_keeps_a_region_whose_view_is_copied(cx: &mut gpui::TestAppContext) {
+        let regions = SharedRegions::default();
+        let floors = std::rc::Rc::<std::cell::RefCell<Vec<Panes>>>::default();
+        let (shell, cx) = shell(cx, &regions, &floors);
+        frame(cx);
+        frame(cx);
+        assert!(shows_left(floors.borrow().last().unwrap()));
+
+        shell.update(cx, |_, cx| cx.notify());
+        frame(cx);
+        assert!(
+            shows_left(floors.borrow().last().unwrap()),
+            "外壳单独重画时左栏变成了实色"
+        );
+    }
+
+    /// 只有停靠区变了（关掉左栏）的那帧，铺底当帧跟上，不照上一帧拷。
+    #[gpui::test]
+    fn the_floor_follows_the_area_in_the_same_frame(cx: &mut gpui::TestAppContext) {
+        let regions = SharedRegions::default();
+        let floors = std::rc::Rc::<std::cell::RefCell<Vec<Panes>>>::default();
+        let (shell, cx) = shell(cx, &regions, &floors);
+        frame(cx);
+        frame(cx);
+        assert!(shows_left(floors.borrow().last().unwrap()));
+
+        let area = shell.read_with(cx, |shell, _| shell.area.clone());
+        area.update(cx, |area, cx| {
+            area.left = false;
+            cx.notify();
+        });
+        frame(cx);
+        assert!(
+            !shows_left(floors.borrow().last().unwrap()),
+            "关掉左栏那帧铺底还是旧的"
+        );
+    }
+
+    /// 外壳套着停靠区，像 Workspace 那样订阅停靠区的变化。
+    fn shell<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        regions: &SharedRegions,
+        floors: &std::rc::Rc<std::cell::RefCell<Vec<Panes>>>,
+    ) -> (gpui::Entity<Shell>, &'a mut gpui::VisualTestContext) {
+        cx.add_window_view(|_, cx| {
+            let area = gpui::AppContext::new(cx, |_| Area {
+                regions: regions.clone(),
+                left: true,
+            });
+            Shell {
+                _area_changed: cx.observe(&area, |_, _, cx| cx.notify()),
+                area,
+                regions: regions.clone(),
+                floors: floors.clone(),
+            }
+        })
     }
 
     /// 按设备像素对齐：两倍屏上对到半点，实色和透的地方之间不留缝。

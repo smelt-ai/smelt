@@ -498,7 +498,7 @@ impl Render for Workspace {
                     window_backdrop::paint(
                         bounds,
                         materials,
-                        &mut regions.borrow_mut(),
+                        &regions.borrow(),
                         bg_opacity,
                         &mut backdrop.borrow_mut(),
                         window,

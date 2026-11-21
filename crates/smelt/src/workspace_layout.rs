@@ -340,6 +340,10 @@ impl Workspace {
 
     /// 订阅一页的 Dock：它的树改了存档，开着时跟着重算看得见什么。外观里换布局另订一次
     /// （[`Self::watch_layout_choice`]）。
+    ///
+    /// 开着的那页 Dock 一变（拖宽、开合、放大）Workspace 就重画：窗口底铺在 Workspace 上，
+    /// 位置是 Dock 记的，只重画 Dock 时窗口底照上一帧拷，和新位置对不上（见
+    /// `window_backdrop`）。
     fn watch_page_dock(
         page: PageKey,
         area: &Entity<DockArea>,
@@ -360,6 +364,7 @@ impl Workspace {
             cx.observe(area, move |this, _, cx| {
                 if this.router.page() == &page {
                     this.sync_shell_view(cx);
+                    cx.notify();
                 }
             }),
         ]
