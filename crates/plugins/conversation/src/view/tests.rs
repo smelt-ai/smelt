@@ -540,6 +540,7 @@ fn selects_the_provider_containing_the_current_model() {
                 id: "openai".to_string(),
                 name: "OpenAI".to_string(),
                 options: vec![("openai/gpt-5".to_string(), "GPT-5".to_string())],
+                preferred_value: None,
             },
             ModelProviderGroup {
                 id: "deepseek".to_string(),
@@ -548,6 +549,7 @@ fn selects_the_provider_containing_the_current_model() {
                     "deepseek/deepseek-v4-pro".to_string(),
                     "DeepSeek-V4-Pro".to_string(),
                 )],
+                preferred_value: None,
             },
         ],
     };
@@ -567,12 +569,23 @@ fn provider_switch_keeps_the_model_name_when_available() {
             ("backup/flash".to_string(), "Flash".to_string()),
             ("backup/pro".to_string(), "Pro".to_string()),
         ],
+        preferred_value: None,
     };
 
     assert_eq!(provider_switch_value(&provider, "Pro"), Some("backup/pro"));
     assert_eq!(
         provider_switch_value(&provider, "Missing"),
         Some("backup/flash")
+    );
+
+    // 没有同名模型时落到首选（会话里上次用的或智能体默认），不是组里第一个。
+    let provider = ModelProviderGroup {
+        preferred_value: Some("backup/pro".to_string()),
+        ..provider
+    };
+    assert_eq!(
+        provider_switch_value(&provider, "Missing"),
+        Some("backup/pro")
     );
 }
 
@@ -581,6 +594,7 @@ fn provider_group(id: &str) -> ModelProviderGroup {
         id: id.to_string(),
         name: id.to_string(),
         options: vec![(format!("{id}/model"), "Model".to_string())],
+        preferred_value: None,
     }
 }
 
