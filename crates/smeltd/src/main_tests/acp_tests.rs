@@ -829,6 +829,53 @@ fn enter_during_a_pi_started_turn_steers_instead_of_holding_the_gate() {
 }
 
 #[test]
+fn follow_up_during_a_pi_started_turn_queues_behind_it() {
+    // ⌥Enter 同理：Pi 自己起的回合不占闸门，按闸门判断会当成新 prompt 发出去，
+    // 驱动见回合在跑只能拒收，排到本轮之后的语义就丢了。
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::ExecutingTool;
+    reduced.turn_started_at_ms = Some(1);
+    let (slot, _) = acp_sessions.reserve_with("acp-provider-turn-follow-up", || {
+        make_acp_session_value("acp-provider-turn-follow-up", reduced)
+    });
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: true,
+        supports_compaction: false,
+        supports_native_queue: true,
+        supports_rewind: false,
+    });
+
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::FollowUp {
+            text: "做完再总结".into(),
+            images: Vec::new(),
+            delivery_id: None,
+        },
+        &new_event_hub(),
+    )
+    .unwrap();
+
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::FollowUp { text, .. } => {
+            assert_eq!(text, "做完再总结");
+        }
+        _ => panic!("回合在跑时 ⌥Enter 应排到它后面"),
+    }
+    assert!(!slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    assert!(slot.value.unaccepted_prompt.lock().is_none());
+    assert!(slot.value.reduced.lock().entries().is_empty());
+}
+
+#[test]
 fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
     let acp_sessions = new_test_acp_sessions();
     let (slot, _) = acp_sessions.reserve_with("acp-automation-action", || {
