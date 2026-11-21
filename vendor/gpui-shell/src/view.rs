@@ -228,7 +228,8 @@ impl ScriptView {
         self.policy.clone()
     }
 
-    pub(crate) fn runtime(&self) -> Rc<ShellRuntime> {
+    /// SMELT: 公开，测试和测速要读运行时的计数（`read_metrics`）。
+    pub fn runtime(&self) -> Rc<ShellRuntime> {
         self.runtime.clone()
     }
 
@@ -271,7 +272,16 @@ impl ScriptView {
         let policy = self.policy.clone();
         let entity = cx.entity();
 
-        match runtime.build_snapshot(&object, Some(entity), policy, window, cx) {
+        // SMELT: 当前这份描述交给构建，`memo(...)` 没变的段从它那里拷。
+        let current = self.current.clone();
+        match runtime.build_snapshot_reusing(
+            &object,
+            Some(entity),
+            current.as_ref(),
+            policy,
+            window,
+            cx,
+        ) {
             Ok(snapshot) => {
                 // Measured here rather than anywhere else because this is the
                 // only place two consecutive descriptions of one view exist at

@@ -999,6 +999,7 @@ fn materialize_registered_component(
             on_click: behavior.on_click,
             application_owner: snapshot.and_then(RenderSnapshot::application_owner),
         });
+    request.set_element_offset(component.element_offset());
     request.attach_render_authority(window, cx);
     match descriptor.materializer().materialize(request) {
         Ok(element) => element,

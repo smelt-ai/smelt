@@ -65,9 +65,37 @@ pub struct RenderSnapshot {
     inner: Rc<SnapshotInner>,
 }
 
+/// SMELT: 一次 `memo(key, deps, build)` 在这份描述里占的那一段。下一次构建同一个视图时，deps
+/// 没变（JS 那边比）、主题没换，就把这一段拷过去，不再跑构建函数。
+#[derive(Clone, Debug)]
+pub(crate) struct MemoRecord {
+    /// JS 那边记 deps 时配的号，两边对得上才算同一次记录。
+    pub(crate) token: u64,
+    pub(crate) start: SpecId,
+    pub(crate) end: SpecId,
+    pub(crate) root: SpecId,
+    /// 这一段登记的处理函数，命中时原样转进新的一代。
+    pub(crate) callbacks: Rc<[crate::spec::CallbackId]>,
+    /// 这一段认领的虚拟列表行数。
+    pub(crate) virtual_items: usize,
+    /// 根在构建函数交出来那一刻的样子；之后调用方在外面往根上加的，拷的时候去掉。
+    pub(crate) root_extent: crate::spec::RootExtent,
+    /// 这一段里面（各层）记下的 `memo` 的 key：这一段被拷走时它们跟着搬。
+    pub(crate) inner: Rc<[String]>,
+}
+
+/// SMELT: 一份描述里各个 `memo(...)` 的记录和录制时的主题版本。
+#[derive(Default)]
+pub(crate) struct MemoTable {
+    pub(crate) records: std::collections::HashMap<String, MemoRecord>,
+    pub(crate) theme_revision: u32,
+}
+
 struct SnapshotInner {
     /// Identifies the callbacks registered while this snapshot was built.
     generation: u64,
+    /// SMELT: 这份描述里的 `memo(...)` 记录。
+    memos: MemoTable,
     root: SpecId,
     arena: SpecArena,
     /// Weak so a snapshot never keeps the VM alive; a snapshot outliving its
@@ -86,8 +114,30 @@ impl RenderSnapshot {
         application: Option<Rc<crate::runtime::ApplicationGeneration>>,
         view: Option<gpui::WeakEntity<crate::ScriptView>>,
     ) -> Self {
+        Self::with_memos(
+            runtime,
+            generation,
+            root,
+            arena,
+            application,
+            view,
+            MemoTable::default(),
+        )
+    }
+
+    /// SMELT: 带上这次构建记下的 `memo(...)` 记录。
+    pub(crate) fn with_memos(
+        runtime: &Rc<ShellRuntime>,
+        generation: u64,
+        root: SpecId,
+        arena: SpecArena,
+        application: Option<Rc<crate::runtime::ApplicationGeneration>>,
+        view: Option<gpui::WeakEntity<crate::ScriptView>>,
+        memos: MemoTable,
+    ) -> Self {
         Self {
             inner: Rc::new(SnapshotInner {
+                memos,
                 generation,
                 root,
                 arena,
@@ -109,6 +159,11 @@ impl RenderSnapshot {
 
     pub(crate) fn root(&self) -> SpecId {
         self.inner.root
+    }
+
+    /// SMELT: 这份描述里的 `memo(...)` 记录。
+    pub(crate) fn memos(&self) -> &MemoTable {
+        &self.inner.memos
     }
 
     pub(crate) fn arena(&self) -> &SpecArena {

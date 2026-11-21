@@ -60,9 +60,28 @@ pub struct RuntimeMetrics {
     materialize_time: Duration,
     structure_repeats: u64,
     structure_changes: u64,
+    // SMELT: memo 命中、重做和沿用的节点数。
+    memo_hits: u64,
+    memo_misses: u64,
+    memo_reused_nodes: u64,
 }
 
 impl RuntimeMetrics {
+    /// SMELT: `memo(...)` 沿用上一份描述的次数（没进 JS）。
+    pub fn memo_hits(&self) -> u64 {
+        self.memo_hits
+    }
+
+    /// SMELT: `memo(...)` 重新跑了构建函数的次数。
+    pub fn memo_misses(&self) -> u64 {
+        self.memo_misses
+    }
+
+    /// SMELT: 命中时从上一份描述拷过来的节点数。
+    pub fn memo_reused_nodes(&self) -> u64 {
+        self.memo_reused_nodes
+    }
+
     /// How many times script `render` has been entered.
     pub fn script_renders(&self) -> u64 {
         self.script_renders
@@ -208,6 +227,11 @@ impl RuntimeMetrics {
             structure_changes: self
                 .structure_changes
                 .saturating_sub(earlier.structure_changes),
+            memo_hits: self.memo_hits.saturating_sub(earlier.memo_hits),
+            memo_misses: self.memo_misses.saturating_sub(earlier.memo_misses),
+            memo_reused_nodes: self
+                .memo_reused_nodes
+                .saturating_sub(earlier.memo_reused_nodes),
         }
     }
 }
@@ -235,6 +259,9 @@ pub(crate) struct Metrics {
     materialize_nanos: Cell<u64>,
     structure_repeats: Cell<u64>,
     structure_changes: Cell<u64>,
+    memo_hits: Cell<u64>,
+    memo_misses: Cell<u64>,
+    memo_reused_nodes: Cell<u64>,
 }
 
 impl Metrics {
@@ -312,6 +339,18 @@ impl Metrics {
         counter.set(counter.get() + 1);
     }
 
+    /// SMELT: 一次 `memo(...)` 命中，沿用了 `nodes` 个节点。
+    pub(crate) fn record_memo_hit(&self, nodes: usize) {
+        self.memo_hits.set(self.memo_hits.get() + 1);
+        self.memo_reused_nodes
+            .set(self.memo_reused_nodes.get() + nodes as u64);
+    }
+
+    /// SMELT: 一次 `memo(...)` 重新跑了构建函数。
+    pub(crate) fn record_memo_miss(&self) {
+        self.memo_misses.set(self.memo_misses.get() + 1);
+    }
+
     pub fn read(&self) -> RuntimeMetrics {
         RuntimeMetrics {
             script_renders: self.script_renders.get(),
@@ -323,6 +362,9 @@ impl Metrics {
             materialize_time: Duration::from_nanos(self.materialize_nanos.get()),
             structure_repeats: self.structure_repeats.get(),
             structure_changes: self.structure_changes.get(),
+            memo_hits: self.memo_hits.get(),
+            memo_misses: self.memo_misses.get(),
+            memo_reused_nodes: self.memo_reused_nodes.get(),
         }
     }
 }

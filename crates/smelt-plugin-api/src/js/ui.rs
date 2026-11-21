@@ -306,4 +306,6 @@ fn latest<T: 'static>(id: &ElementId, value: T, window: &mut Window, cx: &mut Ap
 #[cfg(test)]
 mod bench;
 #[cfg(test)]
+mod memo_tests;
+#[cfg(test)]
 mod tests;

@@ -393,6 +393,39 @@ impl<T: Clone> CallbackArena<T> {
         self.live.retain(|_, (_, entry)| keep(entry));
     }
 
+    /// SMELT: 打开的这一代从 `checkpoint` 起登记的回调 id，`memo(...)` 录完一段时记下它用到的。
+    pub(crate) fn staged_since(&self, checkpoint: usize) -> Vec<CallbackId> {
+        self.building
+            .as_ref()
+            .map_or_else(Vec::new, |(_, entries)| {
+                entries
+                    .get(checkpoint..)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect()
+            })
+    }
+
+    /// SMELT: 这些回调是不是都还能调（上一份描述还在，没被收走）。
+    pub(crate) fn all_live(&self, ids: &[CallbackId]) -> bool {
+        ids.iter().all(|id| self.live.contains_key(id))
+    }
+
+    /// SMELT: 把已提交的回调原样（同一个 id）再登记进打开的这一代。`memo(...)` 命中时沿用上一份
+    /// 描述里的一段，那一段的处理函数要跟着新描述活下去：新一代提交时同 id 的项改记新一代，旧
+    /// 描述收走时只收旧一代的，不会把它们一起收掉。先用 [`Self::all_live`] 查过。
+    pub(crate) fn restage(&mut self, ids: &[CallbackId]) {
+        let Some((_, entries)) = self.building.as_mut() else {
+            return;
+        };
+        for id in ids {
+            if let Some((_, entry)) = self.live.get(id) {
+                entries.push((*id, entry.clone()));
+            }
+        }
+    }
+
     pub(crate) fn push(&mut self, entry: CallbackEntry<T>) -> CallbackId {
         let Some((_, entries)) = self.building.as_mut() else {
             // Reached only if a handler is registered outside a script render,

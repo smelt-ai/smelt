@@ -1096,6 +1096,7 @@ pub(super) struct InputCallbackOwner {
     application: Option<Rc<ApplicationGeneration>>,
     view: Option<WeakEntity<ScriptView>>,
 }
+mod memo;
 mod standard;
 mod template;
 mod theme_api;
@@ -1126,6 +1127,8 @@ pub(crate) mod exports {
         "uniform_list",
         "PathBuilder",
         "Background",
+        // SMELT: 一段描述没变就沿用（engine/quickjs/memo.rs）。
+        "memo",
     ];
 
     /// Components, layout helpers and the theme, all owned by `gpui-base`.
@@ -1384,6 +1387,8 @@ pub struct ShellRuntime {
     templates: RefCell<Vec<Option<Rc<crate::spec::Template>>>>,
     /// The template being discovered, while one is. See [`template`].
     discovery: RefCell<Option<template::Discovery>>,
+    /// SMELT: 正在构建的那份描述的 `memo(...)` 记账，构建之外是 `None`。见 [`memo`]。
+    memo: RefCell<Option<memo::MemoBuild>>,
     /// Retained state created by this runtime's scripts, and only this one's.
     /// Declared before `context` for the same reason `callbacks` is: releasing
     /// an entity can run script destructors.
@@ -1714,6 +1719,7 @@ impl ShellRuntime {
             arena: RefCell::new(SpecArena::new()),
             templates: RefCell::new(Vec::new()),
             discovery: RefCell::new(None),
+            memo: RefCell::new(None),
             entities: RefCell::new(entities),
             pending_nested: RefCell::new(VecDeque::new()),
             flushing_nested: Cell::new(false),
@@ -3108,12 +3114,32 @@ impl ShellRuntime {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<RenderSnapshot> {
+        self.build_snapshot_reusing(object, view, None, policy, window, cx)
+    }
+
+    /// SMELT: 和 [`Self::build_snapshot`] 一样，`previous` 是这个视图当前那份描述：
+    /// `memo(...)` 没变的段从它那里拷。
+    pub(crate) fn build_snapshot_reusing(
+        self: &Rc<Self>,
+        object: &ViewObject,
+        view: Option<Entity<ScriptView>>,
+        previous: Option<&RenderSnapshot>,
+        policy: Rc<crate::policy::Policy>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<RenderSnapshot> {
         // One theme sync per description makes cx.theme() a JS-only cache read.
         // The native snapshot crosses the boundary only when this revision
         // changes, rather than once per component asking for the theme.
         crate::theme_tokens::sync(cx);
         self.arena.borrow_mut().reset();
         let callbacks = self.callbacks.borrow_mut().begin();
+        self.open_memo_build(
+            previous
+                .filter(|previous| previous.belongs_to(self))
+                .cloned(),
+            crate::theme_tokens::revision(),
+        );
 
         let first_render = !object.jit_warm.get();
         let render = || {
@@ -3142,6 +3168,7 @@ impl ShellRuntime {
                 root
             }
             Err(error) => {
+                self.close_memo_build();
                 self.callbacks.borrow_mut().abort();
                 self.arena.borrow_mut().reset();
                 if let Some(view) = view {
@@ -3152,17 +3179,19 @@ impl ShellRuntime {
         };
 
         self.callbacks.borrow_mut().commit();
+        let memos = self.close_memo_build();
         // Taking the arena publishes the description and leaves a fresh scratch
         // arena behind, so the snapshot owns its nodes outright rather than
         // sharing them with the next build.
         let arena = std::mem::take(&mut *self.arena.borrow_mut());
-        let snapshot = RenderSnapshot::new(
+        let snapshot = RenderSnapshot::with_memos(
             self,
             callbacks,
             root,
             arena,
             object.application_generation(),
             view.as_ref().map(Entity::downgrade),
+            memos,
         );
 
         // Promise callbacks only run when the host drains QuickJS's job queue.
@@ -5136,6 +5165,7 @@ impl ShellRuntime {
                 // generation; the retry describes the same tree again, so it
                 // must start from an empty index space.
                 self.callbacks.borrow_mut().rollback();
+                self.restart_memo_build();
                 let diagnosed = self.call_render_once(object, generation);
                 self.set_diagnostics(false);
                 match diagnosed {
@@ -5159,11 +5189,18 @@ impl ShellRuntime {
             let render: Function = instance
                 .get("render")
                 .map_err(|_| js_error::error(ctx, "view class has no render(cx) method"))?;
+            // SMELT: memo 的 deps 记在视图对象名下（prelude 的 memoTables），构建成功才换成这次的。
+            // 失败时不再进 JS（异常还没取走），下次 `__memo_open` 盖掉这次的就是。
+            let open_memo: Function = ctx.globals().get("__memo_open")?;
+            open_memo.call::<_, ()>((instance.clone(),))?;
             let produced: Value = render.call((
                 This(instance),
                 context_object(ctx, ContextBinding::Call(generation))?,
             ))?;
-            element_id(ctx, &produced)
+            let id = element_id(ctx, &produced)?;
+            let close_memo: Function = ctx.globals().get("__memo_close")?;
+            close_memo.call::<_, ()>(())?;
+            Ok(id)
         })
     }
 
@@ -7002,8 +7039,67 @@ globalThis.__gpui = (() => {
 
   globalThis.__template = template;
 
+  // SMELT: memo(key, deps, build)。deps 和上次一样（逐项 Object.is）就把上次那一段描述拷过来，
+  // build 不跑；见 engine/quickjs/memo.rs。deps 存在这里，按视图对象分表，随视图对象回收：
+  // Rust 那边不存 JS 值。`frame` 是正在构建的那个视图的：上次的表、这次的表、正在录的几层
+  // （每层收集里面记下的 key，外层命中时这些跟着搬）。
+  const memoTables = new WeakMap();
+  let memoFrame = null;
+  let memoToken = 0;
+  globalThis.__memo_open = (owner) => {
+    memoFrame = { owner, previous: memoTables.get(owner), next: new Map(), stack: [] };
+  };
+  globalThis.__memo_close = () => {
+    if (memoFrame !== null) memoTables.set(memoFrame.owner, memoFrame.next);
+    memoFrame = null;
+  };
+  const sameDeps = (a, b) => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) if (!Object.is(a[i], b[i])) return false;
+    return true;
+  };
+  const keepMemo = (frame, key, entry) => {
+    frame.next.set(key, entry);
+    const parent = frame.stack[frame.stack.length - 1];
+    if (parent !== undefined) {
+      parent.push(key);
+      for (const inner of entry.inner) parent.push(inner);
+    }
+  };
+  const memo = (key, deps, build) => {
+    if (typeof key !== "string") throw new TypeError("memo(key, deps, build): key must be a string");
+    if (!Array.isArray(deps)) throw new TypeError("memo(key, deps, build): deps must be an array");
+    if (typeof build !== "function") throw new TypeError("memo(key, deps, build): build must be a function");
+    const frame = memoFrame;
+    if (frame === null) return build();
+    const before = frame.previous?.get(key);
+    const reuse = before !== undefined && sameDeps(before.deps, deps);
+    memoToken += 1;
+    const token = memoToken;
+    const id = __memo_enter(key, reuse ? before.token : -1, token);
+    if (id >= 0) {
+      keepMemo(frame, key, { deps: before.deps, token, inner: before.inner });
+      for (const inner of before.inner) frame.next.set(inner, frame.previous.get(inner));
+      return element(id);
+    }
+    if (id !== -1) return build();
+    frame.stack.push([]);
+    let root;
+    try {
+      root = build();
+    } catch (error) {
+      frame.stack.pop();
+      __memo_abort();
+      throw error;
+    }
+    const inner = frame.stack.pop();
+    if (__memo_exit(root?.__id)) keepMemo(frame, key, { deps: deps.slice(), token, inner });
+    return root;
+  };
+
   return {
     __element: element,
+    memo,
     View,
     div: () => element(__div()),
     h_flex: () => element(__h_flex()),
@@ -7845,6 +7941,30 @@ impl ShellRuntime {
             globals.set(
                 "__template_instantiate",
                 Func::from(instantiate_template_binding(instantiate_runtime)),
+            )?;
+            // SMELT: memo。`enter` 一次过桥答命中（根的 id）或要构建，`exit` 录完一段，`abort`
+            // 是构建函数抛了。见 `memo.rs`。
+            let enter_memo_runtime = runtime.clone();
+            globals.set(
+                "__memo_enter",
+                Func::from(move |ctx: Ctx<'_>, key: String, token: f64, next: f64| {
+                    upgrade(&enter_memo_runtime, &ctx)?.enter_memo(&ctx, key, token, next)
+                }),
+            )?;
+            let exit_memo_runtime = runtime.clone();
+            globals.set(
+                "__memo_exit",
+                Func::from(move |ctx: Ctx<'_>, root: Option<SpecId>| {
+                    upgrade(&exit_memo_runtime, &ctx)?.exit_memo(&ctx, root)
+                }),
+            )?;
+            let abort_memo_runtime = runtime.clone();
+            globals.set(
+                "__memo_abort",
+                Func::from(move |ctx: Ctx<'_>| {
+                    upgrade(&abort_memo_runtime, &ctx)?.abort_memo();
+                    JsResult::Ok(())
+                }),
             )?;
             let text_slot_runtime = runtime.clone();
             globals.set(

@@ -63,6 +63,19 @@ const NO_HOLDER: SpecId = SpecId::MAX;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct StructureFingerprint(u64);
 
+/// SMELT: `memo(...)` 的根在构建函数交出来那一刻的大小，见 [`SpecArena::root_extent`]。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RootExtent {
+    children: usize,
+    ops: usize,
+    height: u8,
+}
+
+/// SMELT: 一段 `memo(...)` 拷进来时给结构指纹混进的量：按 key 算，同一个 key 拷来的段算同一个形状。
+pub(crate) fn memo_shape(key: &str) -> u64 {
+    mix(11, hashed(&key))
+}
+
 /// One step of the fingerprint's mixer.
 ///
 /// `DefaultHasher` would do the same job, but this sits on the recording path —
@@ -483,6 +496,10 @@ pub struct RegisteredComponentSpec {
     id: crate::ComponentId,
     name: &'static str,
     payload: crate::ComponentPayload,
+    /// SMELT: 载荷里记的元素参数（`ComponentArgument::Element`）是录制时那份描述里的位置。
+    /// 载荷不透明，拷到别处（[`SpecArena::graft_range`]）改不了里面的数，就记下这个节点挪了
+    /// 多少，物化时解析元素参数加上它。
+    element_offset: i64,
 }
 
 impl RegisteredComponentSpec {
@@ -492,7 +509,17 @@ impl RegisteredComponentSpec {
         name: &'static str,
         payload: crate::ComponentPayload,
     ) -> Self {
-        Self { id, name, payload }
+        Self {
+            id,
+            name,
+            payload,
+            element_offset: 0,
+        }
+    }
+
+    /// SMELT: 载荷里的元素参数要加上的偏移，见 `element_offset` 字段。
+    pub(crate) fn element_offset(&self) -> i64 {
+        self.element_offset
     }
 
     pub fn id(&self) -> crate::ComponentId {
@@ -1385,19 +1412,77 @@ impl SpecArena {
     /// same single-use rule as a described one: its interior is already spoken
     /// for, and only its root is free to be attached.
     pub(crate) fn graft(&mut self, template: &Template) -> SpecId {
-        let base = self.nodes.len() as SpecId;
         let source = &template.arena;
+        // One mix for the whole graft rather than one per node: the template's
+        // own fingerprint already summarizes everything inside it, and a
+        // description that instantiates the same template twice must not look
+        // like one that instantiated two different ones.
+        let shape = mix(9, source.structure);
+        // A template body may not mount an entity (`end_template` refuses it),
+        // so the graft cannot collide with a mount.
+        self.graft_range(
+            source,
+            0,
+            source.nodes.len() as SpecId,
+            template.root,
+            None,
+            shape,
+        )
+        .expect("a template mounts no entity")
+    }
 
-        self.nodes.reserve(source.nodes.len());
-        for node in &source.nodes {
+    /// SMELT: 把 `source` 里 `[start, end)` 这一段节点拷到本描述末尾，答根落在哪。模板和
+    /// `memo(...)` 共用：这一段里的引用（子节点、状态样式、插槽、持有者）只指向段内，整段平移
+    /// 同一个量；指到段外的持有者是被泄露出去的元素，拷来当成没人持有。注册组件载荷里的元素
+    /// 参数改不了，平移量记在节点上（[`RegisteredComponentSpec::element_offset`]）。段里挂的
+    /// 嵌套视图要重新登记，和别处重复就报错，什么也不拷。
+    pub(crate) fn graft_range(
+        &mut self,
+        source: &SpecArena,
+        start: SpecId,
+        end: SpecId,
+        root: SpecId,
+        root_extent: Option<RootExtent>,
+        shape: u64,
+    ) -> Result<SpecId, SpecError> {
+        let range = start as usize..end as usize;
+        let inside = |id: SpecId| (start..end).contains(&id);
+        let mut mounted = SmallVec::<[crate::entities::EntityHandle; 4]>::new();
+        for node in &source.nodes[range.clone()] {
+            match node.component() {
+                Some(Component::ChildView(child)) => mounted.push(child.handle()),
+                Some(Component::DockArea(handle)) => mounted.push(*handle),
+                _ => {}
+            }
+        }
+        if mounted
+            .iter()
+            .any(|handle| self.mounted_views.contains(handle))
+        {
+            return Err(SpecError::DuplicateChildView);
+        }
+        self.mounted_views.extend(mounted);
+
+        let base = self.nodes.len() as SpecId;
+        let moved = |id: SpecId| id - start + base;
+        let delta = i64::from(base) - i64::from(start);
+        self.nodes.reserve(range.len());
+        for (id, node) in (start..end).zip(&source.nodes[range.clone()]) {
             let mut node = node.clone();
+            // 先退回录完时的样子，再平移：之后在外面挂的子元素不在段里，平移不了。
+            if id == root
+                && let Some(extent) = root_extent
+            {
+                node.children.truncate(extent.children);
+                node.ops.truncate(extent.ops);
+            }
             for child in &mut node.children {
-                *child += base;
+                *child = moved(*child);
             }
             for op in &mut node.ops {
                 match op {
                     SpecOp::StateStyle(_, id) | SpecOp::GroupHover(_, id) | SpecOp::Slot(_, id) => {
-                        *id += base
+                        *id = moved(*id)
                     }
                     SpecOp::NullaryStyle(_)
                     | SpecOp::ParamStyle(..)
@@ -1407,29 +1492,82 @@ impl SpecArena {
                     | SpecOp::ActionCallback(..) => {}
                 }
             }
+            if let Some(Component::Registered(component)) = &mut node.component {
+                component.element_offset += delta;
+            }
             self.nodes.push(node);
         }
-        self.parented.extend_from_slice(&source.parented);
-        self.claimed.extend_from_slice(&source.claimed);
+        self.parented
+            .extend_from_slice(&source.parented[range.clone()]);
+        self.claimed
+            .extend_from_slice(&source.claimed[range.clone()]);
         self.holders
-            .extend(source.holders.iter().map(|holder| match *holder {
-                NO_HOLDER => NO_HOLDER,
-                holder => holder + base,
+            .extend(source.holders[range.clone()].iter().map(|holder| {
+                if inside(*holder) {
+                    moved(*holder)
+                } else {
+                    NO_HOLDER
+                }
             }));
-        self.heights.extend_from_slice(&source.heights);
+        self.heights.extend_from_slice(&source.heights[range]);
 
         // The root arrives with no parent so the caller can attach it, whatever
-        // it was in the template.
-        self.parented[(template.root + base) as usize] = false;
-        self.holders[(template.root + base) as usize] = NO_HOLDER;
+        // it was in the source.
+        let root = moved(root);
+        self.parented[root as usize] = false;
+        self.holders[root as usize] = NO_HOLDER;
+        if let Some(extent) = root_extent {
+            self.heights[root as usize] = extent.height;
+        }
+        self.structure = mix(self.structure, shape);
+        Ok(root)
+    }
 
-        // One mix for the whole graft rather than one per node: the template's
-        // own fingerprint already summarizes everything inside it, and a
-        // description that instantiates the same template twice must not look
-        // like one that instantiated two different ones.
-        self.structure = mix(self.structure, mix(9, source.structure));
+    /// SMELT: 根节点眼下有几个子元素、几步操作、多深。`memo(...)` 录完时记下：之后调用方接着往
+    /// 根上加的（`.child(…)`、`.h(…)`、`.on_click(…)`）是外面的，每次构建都会重新加，拷过来的
+    /// 段里不能带着上一次加的（[`Self::graft_range`] 按它退回去）。
+    pub(crate) fn root_extent(&self, root: SpecId) -> RootExtent {
+        let node = &self.nodes[root as usize];
+        RootExtent {
+            children: node.children.len(),
+            ops: node.ops.len(),
+            height: self.heights[root as usize],
+        }
+    }
 
-        template.root + base
+    /// SMELT: `memo(...)` 的构建函数录完以后，查 `[start, 末尾)` 这一段是不是自成一体：根在段
+    /// 里、还没被挂走，段里的节点只引用段里的节点。构建函数用了外面建的元素，或把段里的元素挂到
+    /// 外面，下次命中时拷过去就不对了，只能每次重做。
+    pub(crate) fn self_contained(&self, start: SpecId, root: SpecId) -> bool {
+        let end = self.nodes.len() as SpecId;
+        let inside = |id: SpecId| (start..end).contains(&id);
+        if !inside(root) || self.parented[root as usize] || self.claimed[root as usize] {
+            return false;
+        }
+        (start..end).all(|id| {
+            let index = id as usize;
+            let node = &self.nodes[index];
+            let holder = self.holders[index];
+            (holder == NO_HOLDER || inside(holder))
+                && node.children.iter().all(|child| inside(*child))
+                && node.ops.iter().all(|op| match op {
+                    SpecOp::StateStyle(_, id) | SpecOp::GroupHover(_, id) | SpecOp::Slot(_, id) => {
+                        inside(*id)
+                    }
+                    _ => true,
+                })
+        })
+    }
+
+    /// SMELT: 已认领的虚拟列表行数，`memo(...)` 命中时照样记上。
+    pub(crate) fn virtual_items(&self) -> usize {
+        self.virtual_items
+    }
+
+    /// SMELT: 命中的 `memo(...)` 拷过来的虚拟列表行数，按录制时一样计数，不再查上限（录制时
+    /// 查过了，拷的就是那时的描述）。
+    pub(crate) fn add_virtual_items(&mut self, count: usize) {
+        self.virtual_items = self.virtual_items.saturating_add(count);
     }
 
     /// Writes one call's value into a grafted slot.

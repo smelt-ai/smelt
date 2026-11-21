@@ -806,6 +806,8 @@ pub struct MaterializeRequest<'a> {
         Rc<crate::runtime::ApplicationGeneration>,
         gpui::WeakEntity<crate::ScriptView>,
     )>,
+    /// SMELT: 载荷里的元素参数要加的偏移（节点被 `memo(...)` 或模板拷动过）。
+    element_offset: i64,
 }
 
 pub(crate) type Children = SmallVec<[AnyElement; 8]>;
@@ -862,6 +864,7 @@ impl<'a> MaterializeRequest<'a> {
             selected: init.selected,
             on_click: init.on_click,
             application_owner: init.application_owner,
+            element_offset: 0,
         }
     }
 
@@ -1206,7 +1209,15 @@ impl<'a> MaterializeRequest<'a> {
         let ComponentArgument::Element(element) = argument else {
             anyhow::bail!("component argument is not an Element");
         };
-        (self.resolve_element)(*element, self.window.as_deref_mut(), self.cx.as_deref_mut())
+        // SMELT: 载荷记的是录制时的位置，节点被拷动过就加上挪动的量。
+        let element = u32::try_from(i64::from(*element) + self.element_offset)
+            .map_err(|_| anyhow::anyhow!("component element argument moved out of range"))?;
+        (self.resolve_element)(element, self.window.as_deref_mut(), self.cx.as_deref_mut())
+    }
+
+    /// SMELT: 见 `element_offset` 字段。
+    pub(crate) fn set_element_offset(&mut self, offset: i64) {
+        self.element_offset = offset;
     }
 
     pub fn resolve_entity(

@@ -2172,6 +2172,17 @@ const ELEMENTS: &str = r#"
   export function div(): NativeElement;
 
   /**
+   * SMELT: Reuses the description `build` produced last time this view rendered,
+   * when every entry of `deps` is the same (`Object.is`) and the theme did not
+   * change: `build` does not run and nothing it would describe crosses into the
+   * runtime. `build` must read nothing that is not in `deps`, build its element
+   * from scratch, and hand out no element but the one it returns. `key` is
+   * unique within one render, the way a list row's is. Outside a view render
+   * (an item renderer, an event) it simply calls `build`.
+   */
+  export function memo<T extends NativeElement>(key: string, deps: readonly unknown[], build: () => T): T;
+
+  /**
    * A vector image from the application's own directory.
    *
    * The path resolves against the application root — the directory passed to
