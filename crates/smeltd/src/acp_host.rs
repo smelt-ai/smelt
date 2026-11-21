@@ -3301,14 +3301,16 @@ fn apply_acp_user_action_inner(
             // 启动闸关着：配置还没写回、首条消息还没走，先排队，就绪后补做完按序放。
             // 不碰回合闸门，否则放闸时会当成有一轮在跑。
             let starting = sess.startup_hold.load(Ordering::SeqCst);
-            if starting || sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
-                // 只有回合还在跑才 steer。取消已经把界面收成 Idle、闸门却还握着等 Pi 空闲时，
-                // 再插进当前回合会把「立即发送」的消息退回队列；再点一次就会连发两遍。
+            // 回合在跑不等于闸门握着：Pi 自己起的回合（后台任务结果带 triggerTurn）
+            // 不占闸门。此时当 prompt 发，驱动会改成 steer，daemon 却记成一条等回执的
+            // prompt：气泡先写一遍、Pi 吃掉时又写一遍，回执永远不来，闸门再也放不开。
+            // 只有回合还在跑才 steer。取消已经把界面收成 Idle、闸门却还握着等 Pi 空闲时，
+            // 再插进当前回合会把「立即发送」的消息退回队列；再点一次就会连发两遍。
+            let turn_running =
+                !starting && smelt_core::acp_session::accepts_mid_turn_steer(&sess.reduced.lock());
+            if starting || turn_running || sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
                 // 带投递 id 的是自成一轮的外部投递，结果按它的回合取，不插进别人的回合。
-                let steer = !starting
-                    && delivery_id.is_none()
-                    && smelt_core::acp_session::accepts_mid_turn_steer(&sess.reduced.lock());
-                if steer {
+                if turn_running && delivery_id.is_none() {
                     match send_acp_mid_turn_input(sess, text.clone(), images.clone(), subscribers) {
                         Ok(true) => return Ok(()),
                         Ok(false) => {}
