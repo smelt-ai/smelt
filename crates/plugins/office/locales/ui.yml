@@ -1,0 +1,49 @@
+_version: 2
+office:
+  title:
+    en: Pixel Office
+    zh-CN: 像素办公室
+  empty:
+    en: Your agents will appear here when you open a session.
+    zh-CN: 打开会话后，智能体会出现在这里。
+  syncing:
+    en: Syncing sessions from %{machine}…
+    zh-CN: 正在同步 %{machine} 的会话…
+  unavailable:
+    en: "%{machine}: %{reason}"
+    zh-CN: "%{machine}：%{reason}"
+  ungrouped:
+    en: Workspace
+    zh-CN: 工作区
+  open_failed:
+    en: Could not open this session.
+    zh-CN: 无法打开这段会话。
+session:
+  untitled:
+    en: Untitled session
+    zh-CN: 未命名会话
+  terminal:
+    en: Terminal
+    zh-CN: 终端
+status:
+  thinking:
+    en: Thinking
+    zh-CN: 思考中
+  executing:
+    en: Using tools
+    zh-CN: 执行工具
+  approval:
+    en: Needs approval
+    zh-CN: 等待批准
+  input:
+    en: Needs input
+    zh-CN: 等待输入
+  failed:
+    en: Failed
+    zh-CN: 出错了
+  idle:
+    en: Idle
+    zh-CN: 空闲
+  offline:
+    en: Offline
+    zh-CN: 离线
