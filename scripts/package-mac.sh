@@ -205,7 +205,7 @@ fi
 if [[ -n "${CI:-}" ]] || command -v cargo-about >/dev/null; then
   "$ROOT/scripts/third-party-licenses.sh" "$RES"
 else
-  echo "⚠ 没装 cargo-about，App 里不带第三方许可证清单；自用可以，对外分发不行（cargo install cargo-about --locked）" >&2
+  echo "⚠ 没装 cargo-about，App 里不带第三方许可证清单；自用可以，对外分发不行（cargo install cargo-about --locked --features cli）" >&2
 fi
 # 可选：把当前包在 GitHub Release 上的更新包地址写进 App（release.yml 按 tag 拼好传进来），
 # 刚装好的包才不会把自己当成新版本再下一遍。updater 认这个地址优先于用户状态里记的。

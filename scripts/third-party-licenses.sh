@@ -7,14 +7,14 @@
 #      允许的许可证只认 deny.toml 的 [licenses] allow，这里不另存一份。
 #   2. 编进 smelt-agent 的 npm 依赖：agent/scripts/third-party-licenses.ts。
 #   3. 编进 smelt-agent 的 Bun 运行时。
-# 需要 cargo-about（cargo install cargo-about --locked）和 agent/node_modules（make smelt-agent 会装）。
+# 需要 cargo-about（cargo install cargo-about --locked --features cli）和 agent/node_modules（make smelt-agent 会装）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:?用法：$0 <输出目录>}"
 
 command -v cargo-about >/dev/null || {
-  echo "✗ 缺 cargo-about：cargo install cargo-about --locked" >&2
+  echo "✗ 缺 cargo-about：cargo install cargo-about --locked --features cli" >&2
   exit 1
 }
 [[ -d "$ROOT/agent/node_modules" ]] || {

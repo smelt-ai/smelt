@@ -19,7 +19,7 @@ macOS、Linux、Windows 三种包都带 `LICENSE`、`NOTICE`、`THIRD_PARTY_LICE
 另两种在包的根目录），由 `scripts/third-party-licenses.sh` 在打包时生成。第三方清单有三段：Rust 依赖（cargo-about）、
 编进 smelt-agent 的 npm 依赖（`agent/scripts/third-party-licenses.ts`）、Bun 运行时。允许的许可证只认 `deny.toml`
 的 `[licenses] allow`。三个 job 用 `taiki-e/install-action` 装 cargo-about；本机要对外发包就先
-`cargo install cargo-about --locked`，没装时 `make install` 只是跳过并提示。手机端（APK、iOS）还没带，另做。
+`cargo install cargo-about --locked --features cli`，没装时 `make install` 只是跳过并提示。手机端（APK、iOS）还没带，另做。
 
 ## 发版步骤
 
