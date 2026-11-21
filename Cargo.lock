@@ -10780,6 +10780,7 @@ dependencies = [
  "smelt-maintenance",
  "smelt-model",
  "smelt-notifications",
+ "smelt-office",
  "smelt-pairing",
  "smelt-paths",
  "smelt-plugin-api",
@@ -11174,6 +11175,18 @@ dependencies = [
  "serde",
  "smelt-plugin-api",
  "tempfile",
+]
+
+[[package]]
+name = "smelt-office"
+version = "0.0.0"
+dependencies = [
+ "gpui-base",
+ "gpui-pre",
+ "gpui-pre-apple",
+ "image",
+ "rust-i18n",
+ "smelt-plugin-api",
 ]
 
 [[package]]

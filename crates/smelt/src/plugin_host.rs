@@ -389,6 +389,7 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     smelt_archive::register(cx);
     smelt_automations::register(cx);
     smelt_buddies::register(cx);
+    smelt_office::register(cx);
     smelt_capabilities::register(cx);
     smelt_desktop::register(cx);
     smelt_files_ui::register(cx);
