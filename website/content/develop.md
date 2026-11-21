@@ -77,7 +77,7 @@ make dist-build
 ```
 
 会先 `cargo build --release` 编译核心二进制，再组装成 `dist/Smelt.app`，最后打成
-定制过拖拽安装窗口的 `dist/Smelt.dmg`（仅 Apple Silicon / arm64）。本地默认用
+定制过拖拽安装窗口的 `dist/Smelt.dmg`，架构和编译机一致（arm64 或 x86_64）。本地默认用
 `scripts/setup-codesign-identity.sh` 生成的自签名身份签名，找不到就报错，不回退
 ad-hoc；自签名的包过不了 Gatekeeper，只适合自己用。发布包用 Developer ID 签名并公证，
 见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md) 的「macOS 签名」。不加 `--build` 则跳过编译，直接用已有的 release

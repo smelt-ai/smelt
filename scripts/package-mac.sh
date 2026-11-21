@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把 workspace GUI 打包成可分发的 Smelt.app（Apple Silicon / arm64）。
+# 把 workspace GUI 打包成可分发的 Smelt.app，架构跟编译机走（arm64 或 x86_64，不出 Universal）。
 # 内层二进制和 .app 都签名：本机用 Smelt Local Signing，发布用 Developer ID（再公证 dmg）。
 #
 # 用法：
@@ -99,9 +99,11 @@ if [[ ! -f "$INSTALLER_BIN" ]]; then
   echo "✗ 找不到 ${INSTALLER_BIN}（App installer helper），先：cargo build --release --bin smelt-installer" >&2
   exit 1
 fi
-# 校验是 arm64，避免误把 Intel 产物发给 Apple Silicon 同事
-if ! file "$BIN" | grep -q "arm64"; then
-  echo "✗ $BIN 不是 arm64，同事的 Apple Silicon Mac 会闪退。请在 Apple Silicon 上编译。" >&2
+# 只打本机架构：release.yml 在 Apple Silicon 和 Intel runner 上各打一份。产物架构和本机
+# 不一致（比如 target/ 里留着另一种架构的旧产物）就拒绝，免得 Intel 包里装着 arm64 程序。
+ARCH="$(uname -m)"
+if ! file "$BIN" | grep -q "$ARCH"; then
+  echo "✗ $BIN 不是本机架构 ${ARCH}，重新 cargo build --release。" >&2
   exit 1
 fi
 PI_BIN="$ROOT/target/smelt-agent/smelt-agent"
@@ -119,8 +121,8 @@ if [[ -d "$ROOT/agent/src" ]]; then
     exit 1
   fi
 fi
-if ! file "$PI_BIN" | grep -q "arm64"; then
-  echo "✗ $PI_BIN 不是 arm64。" >&2
+if ! file "$PI_BIN" | grep -q "$ARCH"; then
+  echo "✗ $PI_BIN 不是本机架构 ${ARCH}。" >&2
   exit 1
 fi
 

@@ -15,7 +15,7 @@ Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, Pi, Crush — 
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%2B%20Windows%20desktop%20%2B%20Linux%20runtime-lightgrey)](https://github.com/smelt-ai/smelt/releases)
 
-> **Status**: working prototype, under active development. The desktop app runs on macOS (Apple Silicon) and Windows 10 1803+ (x86_64). The runtime (`smeltd`) also runs headless on Linux. The Windows build is an unsigned installer.
+> **Status**: working prototype, under active development. The desktop app runs on macOS (Apple Silicon and Intel) and Windows 10 1803+ (x86_64). The runtime (`smeltd`) also runs headless on Linux. The Windows build is an unsigned installer.
 
 </div>
 
@@ -29,9 +29,9 @@ What is needed then is not a smarter editor, but a **cockpit** for keeping an ey
 
 ## Installation
 
-### macOS (Apple Silicon)
+### macOS
 
-Download `Smelt.dmg` from [Releases](https://github.com/smelt-ai/smelt/releases) and drag it into Applications.
+Download `Smelt.dmg` (Apple Silicon) or `Smelt-x86_64.dmg` (Intel) from [Releases](https://github.com/smelt-ai/smelt/releases) and drag it into Applications.
 The app checks for updates on launch and on demand (stable/beta channel), showing a prompt when a newer version is available.
 
 ### Windows (x86_64)
