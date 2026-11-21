@@ -111,17 +111,21 @@ impl WorkspaceDirectoriesGlobal {
         snapshot: bool,
         cx: &mut App,
     ) {
-        cx.update_global::<Self, _>(|global, _| {
-            if !snapshot
-                && global
-                    .received
-                    .get(key)
-                    .is_some_and(|current| !directory.version().supersedes(&current.version()))
-            {
-                return;
-            }
-            global.received.insert(key.clone(), directory);
-        });
+        // 先只读判断收不收：可写地取全局就算它变了，插件收到 `SessionsChanged` 会整份重算。
+        // 快照一样（重连）、增量不比手上的新，都不碰。
+        let current = cx
+            .try_global::<Self>()
+            .and_then(|global| global.received.get(key));
+        let take = match current {
+            None => true,
+            Some(current) if snapshot => *current != directory,
+            Some(current) => directory.version().supersedes(&current.version()),
+        };
+        if take {
+            cx.default_global::<Self>()
+                .received
+                .insert(key.clone(), directory);
+        }
     }
 }
 
