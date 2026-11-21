@@ -747,8 +747,9 @@ fn provider_switch_value<'a>(
         .options
         .iter()
         .find(|(_, name)| name == current_model_name)
-        .or_else(|| provider.options.first())
         .map(|(value, _)| value.as_str())
+        .or(provider.preferred_value.as_deref())
+        .or_else(|| provider.options.first().map(|(value, _)| value.as_str()))
 }
 
 /// Provider 菜单项的显示名。查得到账户额度就在名字后面补一个括号，如
