@@ -83,7 +83,7 @@ impl Element for StickySection {
         } else {
             px(0.)
         };
-        crate::scroll_anchors::report_sticky_header(viewport.top(), header.size.height, stuck, cx);
+        crate::scroll_anchors::report_sticky_header(viewport.top(), header.size.height, stuck);
         let mask = (shift > 0.).then(|| {
             let top = (header.bottom() + px(shift)).min(viewport.bottom());
             ContentMask {
