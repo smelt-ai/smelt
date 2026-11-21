@@ -29,6 +29,11 @@ readme = false
 license = "MIT"
 repository = "https://github.com/longbridge/rquickjs.git"
 
+# SMELT: 拷进来的第三方代码，警告不归我们修。从 crates.io 拉时 cargo 本来就把依赖的警告压掉，
+# 换成本地路径后会照常报，混在我们自己的警告里。
+[lints.rust]
+unused = "allow"
+
 [features]
 bindgen = ["rquickjs-core/bindgen"]
 compiler = [
