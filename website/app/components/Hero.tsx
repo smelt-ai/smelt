@@ -41,7 +41,7 @@ export function Hero() {
               <span>
                 <span className="block text-sm font-semibold leading-5">下载 macOS 版</span>
                 <span className="block text-[11px] font-medium leading-4 text-[#1a1208]/70">
-                  Apple Silicon · 免费
+                  Apple Silicon / Intel · 免费
                 </span>
               </span>
             </a>

@@ -15,8 +15,12 @@ use sha2::{Digest, Sha256};
 
 const BUNDLE_ID: &str = "com.zzfn.smelt";
 const APP_NAME: &str = "Smelt";
-/// 自更新用的 App 压缩包，`release.yml` 和 dmg 一起传到 Release 上。
+/// 自更新用的 App 压缩包，`release.yml` 按架构各传一份。arm64 沿用不带架构的老名字，
+/// 已装好的旧版只认这个名字。
+#[cfg(target_arch = "aarch64")]
 const UPDATE_ASSET: &str = "Smelt.app.zip";
+#[cfg(target_arch = "x86_64")]
+const UPDATE_ASSET: &str = "Smelt-x86_64.app.zip";
 const BUNDLED_RELEASE_URL_FILE: &str = "Contents/Resources/SmeltUpdateURL";
 const UPDATE_STATE_DIR: &str = ".smelt";
 const UPDATE_LOCK_FILE: &str = "update.lock";
@@ -2439,16 +2443,23 @@ mod tests {
         assert!(state.staged.unwrap().installer_attempt.is_none());
     }
     #[test]
-    fn update_asset_is_the_app_zip() {
+    fn update_asset_is_the_app_zip_for_this_arch() {
         let release: GithubRelease = serde_json::from_str(
             r#"{"tag_name":"v0.9.0","assets":[
                 {"name":"Smelt.dmg","browser_download_url":"https://example.test/Smelt.dmg"},
-                {"name":"Smelt.app.zip","browser_download_url":"https://example.test/Smelt.app.zip"}]}"#,
+                {"name":"Smelt.app.zip","browser_download_url":"https://example.test/Smelt.app.zip"},
+                {"name":"Smelt-x86_64.dmg","browser_download_url":"https://example.test/Smelt-x86_64.dmg"},
+                {"name":"Smelt-x86_64.app.zip","browser_download_url":"https://example.test/Smelt-x86_64.app.zip"}]}"#,
         )
         .unwrap();
+        let expected = if cfg!(target_arch = "aarch64") {
+            "https://example.test/Smelt.app.zip"
+        } else {
+            "https://example.test/Smelt-x86_64.app.zip"
+        };
         assert_eq!(
             update_asset(&release).map(|asset| asset.browser_download_url.as_str()),
-            Some("https://example.test/Smelt.app.zip")
+            Some(expected)
         );
     }
 
