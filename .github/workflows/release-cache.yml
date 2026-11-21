@@ -36,7 +36,7 @@ jobs:
         include:
           - runner: macos-26
             arch: arm64
-          - runner: macos-15-intel
+          - runner: macos-26-intel
             arch: x86_64
     runs-on: ${{ matrix.runner }}
     # Intel runner 冷编慢得多。
