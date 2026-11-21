@@ -504,7 +504,10 @@ fn with_registry<R>(read: impl FnOnce(&Registry) -> R) -> R {
 }
 
 /// 用户装的插件，按加载顺序。自带的是 App 的一部分，不在这里列。只读内存。
-pub(crate) fn installed() -> Vec<InstalledPlugin> {
+///
+/// 加载失败之外，根上一次画失败也算出错：根画在看不见的一层里（见 [`roots`]），画坏了界面上
+/// 看不出来。
+pub(crate) fn installed(cx: &App) -> Vec<InstalledPlugin> {
     with_registry(|registry| {
         registry
             .panels
@@ -515,7 +518,10 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
                 name: panel.title.clone(),
                 version: panel.version.clone(),
                 root: panel.root.clone(),
-                error: panel.error.clone(),
+                error: panel.error.clone().or_else(|| {
+                    let script = panel.script.as_ref()?.read(cx);
+                    script.build_error().map(str::to_string)
+                }),
             })
             .collect()
     })

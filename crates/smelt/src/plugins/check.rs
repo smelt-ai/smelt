@@ -2,7 +2,7 @@
 //!
 //! 和 App 加载插件走同一套（同一个运行时、同一份 Policy 和宿主模块），只是宿主换成离线的
 //! [`CheckHost`]：没有机器、没有会话、窗口不显示。查得出的：清单、主题文件、语法错误、
-//! 解析不到的导入、默认导出不对、根的 `init` 里抛的错，以及登记的视图（按实例建的除外）
+//! 解析不到的导入、默认导出不对、根的 `init` 和第一次 `render` 里抛的错，以及登记的视图（按实例建的除外）
 //! 建不出来（类没交出）、`init` 和第一次 `render` 里抛的错、样式方法和参数写错、元素用了
 //! 两次、组件建不出来（少了必填的插槽等，gpui-shell 报的错误）。查不出的：布局和绘制、之后的交互和异步状态、要连上运行时才有的数据，这些还得在 App 里看（`smelt plugin status`、`~/.smelt/app.log`）。
 //!
@@ -110,7 +110,8 @@ fn check(root: &Path, manifest: &PluginManifest, cx: &mut App) -> Result<(), Str
         .map_err(|error| format!("{error:#}"))?
 }
 
-/// 挂上插件的根（跑它的 `init`），再把它登记的视图（按实例建的要参数，不建）各建一份、画一帧。
+/// 挂上插件的根（跑它的 `init`）画一帧，再把它登记的视图（按实例建的要参数，不建）各建一份、
+/// 画一帧。根在 App 里画在看不见的一层里（见 `super::roots`），画坏了界面上看不出来，只能在这儿查。
 fn check_views(
     runtime: &std::rc::Rc<gpui_shell::ShellRuntime>,
     root: &Path,
@@ -125,11 +126,22 @@ fn check_views(
     if let Some(error) = super::log::take_shell_errors().into_iter().next() {
         return Err(error);
     }
+    let drawn: AnyView = script.clone().into();
+    window.replace_root(cx, move |_, _| Probe(drawn));
+    window.draw(cx).clear(cx);
+    let mut result = match script
+        .read(cx)
+        .build_error()
+        .map(str::to_string)
+        .or_else(|| super::log::take_shell_errors().into_iter().next())
+    {
+        Some(error) => Err(format!("{id}：{error}")),
+        None => Ok(()),
+    };
     let prefix = format!("{id}/");
     let views = api::views(cx)
         .into_iter()
-        .filter(|view| view.id.starts_with(&prefix) && !view.instances);
-    let mut result = Ok(());
+        .filter(|view| result.is_ok() && view.id.starts_with(&prefix) && !view.instances);
     for info in views {
         let view = (info.build)(window, cx).view();
         let drawn = view.clone();

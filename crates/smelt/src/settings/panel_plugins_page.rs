@@ -33,7 +33,7 @@ pub(super) struct PanelPluginsPage {
 impl PanelPluginsPage {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            plugins: crate::plugins::installed(),
+            plugins: crate::plugins::installed(cx),
             user_dir: crate::plugins::user_plugin_dir(),
             pending_delete: None,
             error: None,
@@ -49,7 +49,7 @@ impl PanelPluginsPage {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.plugins = crate::plugins::installed();
+        self.plugins = crate::plugins::installed(cx);
         cx.notify();
     }
 
