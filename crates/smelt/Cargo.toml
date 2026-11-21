@@ -25,6 +25,7 @@ smelt-client-store = { path = "../smelt-client-store" }
 # 共享 GPUI 组件库（见它的 Cargo.toml 文件头注释）。
 smelt-ui = { path = "../smelt-ui" }
 smelt-plugin-api = { path = "../smelt-plugin-api", features = ["js"] }
+smelt-nsh = { path = "../smelt-nsh" }
 # 内置插件：只在 `plugin_host::install` 里登记，宿主别处不认识它们。
 smelt-agents = { path = "../plugins/agents" }
 smelt-automations = { path = "../plugins/automations" }

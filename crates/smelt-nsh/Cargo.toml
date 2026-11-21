@@ -1,0 +1,31 @@
+# 试点：把 NSH（longbridge/nsh）的界面嵌进 smelt，看插件层换成 NSH 行不行得通。
+# 一块 TSX 写的面板（`pilot/`），构建时打包成字节码，登记成一个视图，从入口列表打开。
+[package]
+name = "smelt-nsh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui = { package = "gpui-fast", version = "=0.1.17" }
+smelt-ui = { path = "../smelt-ui" }
+smelt-plugin-api = { path = "../smelt-plugin-api" }
+# 只要跑 JS 的那部分：网页视图、编辑器、终端、图表这些默认特性都不要。
+nsh-platform-gpui = { version = "=0.6.1", default-features = false, features = ["js"] }
+nsh-core = "=0.6.1"
+nsh-base = { version = "=0.6.1", default-features = false }
+# NSH 带进 gpui-fast-platform；和 smelt 一样开 runtime_shaders，单独编这个 crate 时也不用装完整 Xcode。
+gpui_platform = { package = "gpui-fast-platform", version = "=0.1.17", default-features = false, features = ["runtime_shaders"] }
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[build-dependencies]
+# `pilot/` 照 `nsh build` 打包、编成字节码，见 build.rs。
+nsh-bundler = { version = "=0.6.1", features = ["bundle"] }
+nsh-core = "=0.6.1"
+nsh-js = "=0.6.1"
+nsh-base = { version = "=0.6.1", default-features = false }

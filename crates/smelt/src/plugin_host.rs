@@ -400,6 +400,8 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     smelt_resources::register(cx);
     smelt_skills::register(cx);
     smelt_updater_ui::register(cx);
+    // 试点：NSH 写的面板，入口列表里打开（见 smelt-nsh）。
+    smelt_nsh::register(cx);
 }
 
 /// 此刻看得见的视图。摆视图的地方各报各的：主窗口报开着的那页里露着的视图（含出口里

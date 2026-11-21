@@ -32,6 +32,7 @@ members = [
     "crates/smelt-ui",
     "crates/smelt-buddy",
     "crates/smelt-plugin-api",
+    "crates/smelt-nsh",
     "crates/plugins/agents",
     "crates/plugins/automations",
     "crates/plugins/capabilities",
