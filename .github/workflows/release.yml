@@ -118,8 +118,15 @@ jobs:
       # Finder，headless runner 上和本地打出来的完全一致——定制没生效就是 bug，
       # 别再当成 CI 的预期行为。工具链由 package-mac.sh 自建 venv 装，无需在此预装。
       # 打包时生成第三方许可证清单（scripts/third-party-licenses.sh）。
+      # cargo-about 没发 x86_64-apple-darwin 的预编译包，install-action 退回 cargo-binstall
+      # 源码编译时不带 cli 特性，装不出可执行文件，Intel 上直接 cargo install。
       - name: Install cargo-about
+        if: matrix.arch == 'arm64'
         uses: taiki-e/install-action@cargo-about
+
+      - name: Install cargo-about (Intel)
+        if: matrix.arch == 'x86_64'
+        run: cargo install cargo-about --locked
 
       - name: Build & package
         env:
