@@ -50,7 +50,7 @@ pub enum RuntimePresence {
 
 /// GUI 侧订阅状态通道的镜像（serde 反序列化；多出来的 JSON 字段自动忽略）。
 /// 字段对齐 smeltd `SessionState` 广播——B 路线「语义面板」的数据源。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct DaemonSessionState {
     pub id: String,
     /// daemon runtime generation. A recreated session may restart its revision at a lower value.
