@@ -13214,6 +13214,8 @@ version = "0.0.0"
 dependencies = [
  "gpui-fast",
  "gpui-fast-platform",
+ "libc",
+ "log",
  "nsh-base",
  "nsh-bundler",
  "nsh-core",
