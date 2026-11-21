@@ -240,3 +240,55 @@ export default class App extends View {
     let text = tree(&mut context, &view);
     assert!(text.contains("hits: 3"), "{text}");
 }
+
+/// 会话行的样子：右键菜单（菜单项是载荷里的元素参数）包着行。前面的行数变了、这一行几次都是
+/// 拷过来的，菜单还打得开，点菜单项走的还是这一行的处理函数。
+#[gpui::test]
+fn a_reused_row_keeps_its_context_menu(cx: &mut TestAppContext) {
+    let source = r##"
+import { View, div, memo } from "gpui-kit";
+import { SmeltContextMenu, SmeltMenuItem } from "smelt-ui";
+let builds = 0;
+export default class App extends View {
+  init() { this.extra = 0; this.picked = "none"; }
+  render() {
+    let col = div().flex().flex_col().absolute().top(0).left(0).w(200);
+    for (let i = 0; i < this.extra; i++) col = col.child(div().h(0));
+    const row = memo("row", ["a"], () => {
+      builds += 1;
+      return SmeltContextMenu.new("menu").w(200).h(40)
+        .items([
+          SmeltMenuItem.new("Pick").on_click((_e, cx) => { this.picked = "a"; cx.notify(); }),
+        ])
+        .child("target");
+    });
+    return div().size_full()
+      .child(col.child(row))
+      .child(div().id("grow").absolute().top(100).left(0).w(100).h(20)
+        .on_click((_e, cx) => { this.extra += 2; cx.notify(); }))
+      .child(div().absolute().top(200).child(`builds: ${builds} picked: ${this.picked}`));
+  }
+}
+"##;
+    let (mut context, view, _app) = mount(cx, source);
+    context.update(|window, _| window.activate_window());
+    draw(&mut context);
+    click(&mut context, 8., 108.);
+    click(&mut context, 8., 108.);
+    context.simulate_mouse_down(
+        point(px(20.), px(10.)),
+        gpui::MouseButton::Right,
+        Modifiers::default(),
+    );
+    draw(&mut context);
+    assert!(
+        context.debug_bounds("smelt-menu-0").is_some(),
+        "menu should open"
+    );
+    context.simulate_keystrokes("down");
+    draw(&mut context);
+    context.simulate_keystrokes("space");
+    draw(&mut context);
+    let text = tree(&mut context, &view);
+    assert!(text.contains("builds: 1 picked: a"), "{text}");
+}
