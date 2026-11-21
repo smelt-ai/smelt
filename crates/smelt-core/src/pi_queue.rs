@@ -17,6 +17,15 @@ pub(crate) enum QueueLane {
     FollowUp,
 }
 
+impl From<QueueLane> for crate::acp_conn::InputLane {
+    fn from(lane: QueueLane) -> Self {
+        match lane {
+            QueueLane::Steering => Self::Steering,
+            QueueLane::FollowUp => Self::FollowUp,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct PiQueueMirror {
     steering: Lane,
@@ -147,6 +156,22 @@ impl PiQueueMirror {
                 return;
             }
         }
+    }
+
+    /// 没进 Pi 队列的那条（开了新一轮、被输入处理器接走、被拒收）：从镜像拿掉，
+    /// 把原文和附图还给调用方。
+    pub(crate) fn take_unqueued(&mut self, request_id: &str) -> Option<(String, Vec<PromptImage>)> {
+        for lane in [&mut self.steering, &mut self.follow_up] {
+            if let Some(ix) = lane
+                .inputs
+                .iter()
+                .position(|input| input.request_id.as_deref() == Some(request_id))
+            {
+                let input = lane.inputs.remove(ix);
+                return Some((input.text, input.images));
+            }
+        }
+        None
     }
 
     /// Pi 报了新队列。返回对外的两条队列。
