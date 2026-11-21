@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.87"
 name = "quickjs-jit-runtime"
-version = "0.14.1"
+version = "0.14.2"
 authors = [
     "Mees Delzenne <mees.delzenne@gmail.com>",
     "K. <kayo@illumium.org>",
@@ -448,7 +448,7 @@ path = "benches/tiering.rs"
 harness = false
 
 [dependencies.rquickjs-core]
-version = "=0.14.1"
+version = "=0.14.2"
 features = [
     "jit-abi",
     "loader",
@@ -478,7 +478,7 @@ version = "1"
 version = "1"
 
 [build-dependencies.rquickjs-sys]
-version = "=0.14.1"
+version = "=0.14.2"
 features = ["jit-abi"]
 package = "quickjs-jit-sys"
 

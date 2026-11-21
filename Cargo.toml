@@ -90,12 +90,12 @@ rust-i18n = "4.2"
 # libc 的上限另见 crates/smelt-mobile/Cargo.toml。
 netdev = { git = "https://github.com/shellrow/netdev", rev = "b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313" }
 
-# quickjs-jit-runtime 0.14.1 的源码拷在 vendor/ 下，改动处标了 `SMELT:`。JIT 每次维护都把整张调用
+# quickjs-jit-runtime 0.14.2 的源码拷在 vendor/ 下，改动处标了 `SMELT:`。JIT 每次维护都把整张调用
 # 反馈表拷一遍，Promise 每跑一个任务前后、回收器每回收一个函数各来一次完整维护，JS 一忙主线程
 # 就耗在这里（插件重挂后第一次重建 20 多秒）：
 # - 刷新候选不再各拷一份反馈：上游 longbridge/quickjs-jit#38 原样，未合。
 # - 处理 Promise 任务和回收函数改走「到期才维护」：有编译完成或要回收的代码时照样跑全量。
-# gpui-shell 把 quickjs-jit 钉在 =0.14.1，所以拷的是这一版。gpui-kit 升到带这几处修复的 quickjs-jit
+# gpui-shell 原本钉 =0.14.1，NSH 钉 =0.14.2，两边一起升到 0.14.2，拷的是这一版。gpui-kit 升到带这几处修复的 quickjs-jit
 # 时连同目录一起删掉；版本对不上时 cargo 会警告这条 patch 没用上。
 quickjs-jit-runtime = { path = "vendor/quickjs-jit-runtime" }
 

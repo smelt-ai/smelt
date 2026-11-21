@@ -47,9 +47,10 @@ gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234f
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", default-features = false }
 wry = { version = "0.53.3", package = "lb-wry", optional = true }
 
-rquickjs = { package = "quickjs-jit", version = "=0.14.1", features = ["macro", "loader", "jit-abi"], optional = true }
-rquickjs-jit = { package = "quickjs-jit-runtime", version = "=0.14.1", features = ["compiler"], optional = true }
-quickjs-jit-stdlib = { version = "=0.14.1", default-features = false, features = ["buffer", "crypto", "path", "url", "zlib"], optional = true }
+# SMELT: 上游钉 =0.14.1；NSH 钉 =0.14.2，同一个程序里只能有一份 QuickJS 的 C 代码，跟着升。
+rquickjs = { package = "quickjs-jit", version = "=0.14.2", features = ["macro", "loader", "jit-abi"], optional = true }
+rquickjs-jit = { package = "quickjs-jit-runtime", version = "=0.14.2", features = ["compiler"], optional = true }
+quickjs-jit-stdlib = { version = "=0.14.2", default-features = false, features = ["buffer", "crypto", "path", "url", "zlib"], optional = true }
 jiff = "1.0"
 cap-std = "4.0.3"
 async-channel = "2.5"
