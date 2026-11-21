@@ -56,6 +56,8 @@ members = [
     "crates/smelt-iroh",
     "crates/smelt-mobile", # package 名是 smelt_mobile（cargokit 要求，见其 Cargo.toml）
 ]
+# 打了补丁的第三方 crate 原样拷进来，不是工作区成员（见下面 [patch.crates-io]）。
+exclude = ["vendor/quickjs-jit-runtime"]
 resolver = "3"
 
 # 版本号不写在这里：发版只打 tag，打包时从 tag 算出版本号，经 SMELT_VERSION 编进程序
@@ -87,6 +89,15 @@ rust-i18n = "4.2"
 # netwatch 升到 netdev 0.47 后删掉这条，那时 cargo 会警告这条 patch 没用上。上游官方仓库，不是 fork。
 # libc 的上限另见 crates/smelt-mobile/Cargo.toml。
 netdev = { git = "https://github.com/shellrow/netdev", rev = "b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313" }
+
+# quickjs-jit-runtime 0.14.1 的源码拷在 vendor/ 下，改动处标了 `SMELT:`。JIT 每次维护都把整张调用
+# 反馈表拷一遍，Promise 每跑一个任务前后、回收器每回收一个函数各来一次完整维护，JS 一忙主线程
+# 就耗在这里（插件重挂后第一次重建 20 多秒）：
+# - 刷新候选不再各拷一份反馈：上游 longbridge/quickjs-jit#38 原样，未合。
+# - 处理 Promise 任务和回收函数改走「到期才维护」：有编译完成或要回收的代码时照样跑全量。
+# gpui-shell 把 quickjs-jit 钉在 =0.14.1，所以拷的是这一版。gpui-kit 升到带这几处修复的 quickjs-jit
+# 时连同目录一起删掉；版本对不上时 cargo 会警告这条 patch 没用上。
+quickjs-jit-runtime = { path = "vendor/quickjs-jit-runtime" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }

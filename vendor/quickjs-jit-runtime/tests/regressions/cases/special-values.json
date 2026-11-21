@@ -1,0 +1,7 @@
+{
+  "seed": 0,
+  "source": "function f(){ return [NaN,-0,2n,undefined] }",
+  "invocation": "f()",
+  "expected": "{\"ok\":true,\"value\":{\"id\":1,\"tag\":\"[object Array]\",\"prototype\":\"Array\",\"properties\":[{\"key\":{\"type\":\"string\",\"value\":\"0\"},\"enumerable\":true,\"configurable\":true,\"writable\":true,\"value\":{\"type\":\"number\",\"value\":\"NaN\"},\"get\":null,\"set\":null},{\"key\":{\"type\":\"string\",\"value\":\"1\"},\"enumerable\":true,\"configurable\":true,\"writable\":true,\"value\":{\"type\":\"number\",\"value\":\"-0\"},\"get\":null,\"set\":null},{\"key\":{\"type\":\"string\",\"value\":\"2\"},\"enumerable\":true,\"configurable\":true,\"writable\":true,\"value\":{\"type\":\"bigint\",\"value\":\"2\"},\"get\":null,\"set\":null},{\"key\":{\"type\":\"string\",\"value\":\"3\"},\"enumerable\":true,\"configurable\":true,\"writable\":true,\"value\":{\"type\":\"undefined\"},\"get\":null,\"set\":null},{\"key\":{\"type\":\"string\",\"value\":\"length\"},\"enumerable\":false,\"configurable\":false,\"writable\":true,\"value\":{\"type\":\"number\",\"value\":4},\"get\":null,\"set\":null}]}}",
+  "required_tier": "interpreter-or-automatic"
+}

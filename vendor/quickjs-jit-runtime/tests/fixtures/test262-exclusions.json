@@ -1,0 +1,31 @@
+[
+  {"pattern":"**","reason":"HTML document-all exotic is unavailable in a non-browser Rust host","owner":"jit-runtime","expires":"2027-08-30","features":["IsHTMLDDA"]},
+  {"pattern":"**","reason":"Test262 multi-agent host API is not implemented","owner":"jit-runtime","expires":"2027-08-30","features":["agent"]},
+  {"pattern":"**","reason":"Rust host does not implement Test262 Atomics agent and waiter orchestration","owner":"jit-runtime","expires":"2027-08-30","features":["Atomics"]},
+  {"pattern":"**","reason":"QuickJS is built without the ECMA-402 Intl host surface","owner":"jit-runtime","expires":"2027-08-30","features":["Intl"]},
+  {"pattern":"**","reason":"QuickJS does not advertise Temporal in this pinned revision","owner":"jit-runtime","expires":"2027-08-30","features":["Temporal"]},
+  {"pattern":"**","reason":"Rust host does not expose ShadowRealm host hooks","owner":"jit-runtime","expires":"2027-08-30","features":["ShadowRealm"]}
+  ,{"pattern":"**","reason":"QuickJS pinned test262.conf explicitly skips legacy RegExp statics","owner":"quickjs-baseline","expires":"2027-08-30","features":["legacy-regexp"]}
+  ,{"pattern":"**","reason":"QuickJS pinned test262.conf explicitly skips duplicate named RegExp groups","owner":"quickjs-baseline","expires":"2027-08-30","features":["regexp-duplicate-named-groups"]}
+  ,{"pattern":"**","reason":"Rust host has not implemented $262.createRealm isolation","owner":"jit-runtime","expires":"2027-08-30","features":["cross-realm"]}
+  ,{"pattern":"**","reason":"Rust module loader does not implement JSON import attributes","owner":"jit-runtime","expires":"2027-08-30","features":["json-modules"]}
+  ,{"pattern":"**","reason":"Rust module loader does not implement text import attributes","owner":"jit-runtime","expires":"2027-08-30","features":["import-text"]}
+  ,{"pattern":"**","reason":"Rust module loader does not implement byte import attributes","owner":"jit-runtime","expires":"2027-08-30","features":["import-bytes"]}
+  ,{"pattern":"**","reason":"Feature is explicitly marked =skip by the pinned QuickJS test262.conf","owner":"quickjs-baseline","expires":"2027-08-30","features":["@quickjs-config-skip"]}
+  ,{"pattern":"test/intl402/**","reason":"QuickJS is built without ECMA-402 Intl","owner":"quickjs-baseline","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/built-ins/Atomics/wait/**","reason":"Rust host main thread is configured non-blocking","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/built-ins/SharedArrayBuffer/prototype/grow/**","reason":"QuickJS Rust host has no growable SharedArrayBuffer allocator hooks","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/built-ins/SharedArrayBuffer/prototype/maxByteLength/return-maxbytelength-growable.js","reason":"QuickJS Rust host has no growable SharedArrayBuffer allocator hooks","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/built-ins/TypedArrayConstructors/internals/DefineOwnProperty/BigInt/detached-buffer-throws-realm.js","reason":"Test uses $262.createRealm without declaring the cross-realm feature","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/built-ins/TypedArrayConstructors/internals/DefineOwnProperty/detached-buffer-throws-realm.js","reason":"Test uses $262.createRealm without declaring the cross-realm feature","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/harness/assert-throws-same-realm.js","reason":"Harness self-test requires unimplemented $262.createRealm isolation","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/harness/asyncHelpers-throwsAsync-same-realm.js","reason":"Harness self-test requires unimplemented $262.createRealm isolation","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/language/expressions/template-literal/tv-null-character-escape-sequence.js","reason":"rquickjs eval binding currently rejects source buffers containing an embedded NUL","owner":"rquickjs-core","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/language/module-code/export-expname-from-unpaired-surrogate.js","reason":"Pinned QuickJS parser accepts an unpaired surrogate export name rejected by current Test262","owner":"quickjs-baseline","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/language/module-code/export-expname-import-unpaired-surrogate.js","reason":"Pinned QuickJS parser accepts an unpaired surrogate import/export name rejected by current Test262","owner":"quickjs-baseline","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/language/expressions/dynamic-import/usage-from-eval.js","reason":"QuickJS does not retain the caller filename for dynamic import initiated by host evalScript","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/language/module-code/verify-dfs.js","reason":"Rust module loader cannot alias a cyclic dependency back to the harness-decorated root module record","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/annexB/language/global-code/switch-case-global-existing-non-enumerable-global-init.js","reason":"Generated Annex-B test requires $262.evalScript","owner":"jit-runtime","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/staging/sm/Iterator/from/modify-return.js","reason":"SpiderMonkey staging expectation differs from pinned QuickJS baseline","owner":"quickjs-baseline","expires":"2027-08-30","features":[]}
+  ,{"pattern":"test/built-ins/RegExp/property-escapes/generated/strings/**","reason":"Pinned QuickJS known Unicode property-string parse baseline","owner":"quickjs-baseline","expires":"2027-08-30","features":[]}
+]

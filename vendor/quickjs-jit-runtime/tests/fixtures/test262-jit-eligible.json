@@ -1,0 +1,9 @@
+{
+  "cases": [
+    {
+      "path": "test/language/global-code/decl-func-dup.js",
+      "function": "f",
+      "invocation": "f()"
+    }
+  ]
+}

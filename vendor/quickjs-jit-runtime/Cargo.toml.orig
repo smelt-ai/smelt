@@ -1,0 +1,216 @@
+[package]
+name = "quickjs-jit-runtime"
+version = "0.14.1"
+authors = ["Mees Delzenne <mees.delzenne@gmail.com>", "K. <kayo@illumium.org>"]
+edition = "2021"
+rust-version = "1.87"
+license = "MIT"
+description = "Tiered JIT runtime for the quickjs-jit distribution"
+repository = "https://github.com/longbridge/rquickjs.git"
+build = "build.rs"
+
+[lib]
+name = "rquickjs_jit"
+
+[build-dependencies]
+rquickjs-sys = { package = "quickjs-jit-sys", version = "=0.14.1", path = "../sys", features = ["jit-abi"] }
+
+[dependencies]
+rustc-hash = "2.1"
+rquickjs-core = { package = "quickjs-jit-core", version = "=0.14.1", path = "../core", features = ["jit-abi", "loader"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+[target.'cfg(all(target_endian = "little", any(target_os = "linux", target_os = "macos"), any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(all(target_endian = "little", target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Memory",
+  "Win32_System_SystemInformation",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+cranelift-codegen = { version = "0.116", optional = true, features = ["x86", "arm64", "enable-serde"] }
+cranelift-frontend = { version = "0.116", optional = true }
+cranelift-module = { version = "0.116", optional = true }
+cranelift-object = { version = "0.116", optional = true }
+cranelift-native = { version = "0.116", optional = true }
+gimli = { version = "0.31", optional = true, default-features = false, features = ["write", "std"] }
+postcard = { version = "1", optional = true, default-features = false, features = ["alloc"] }
+target-lexicon = { version = "0.13", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+rquickjs = { package = "quickjs-jit", path = "..", features = ["jit-abi", "loader"] }
+static_assertions = "1"
+trybuild = "1"
+
+[[bin]]
+name = "jit-test262"
+required-features = ["test-support"]
+
+[[bench]]
+name = "micro"
+harness = false
+
+[[bench]]
+name = "algorithms"
+harness = false
+
+[[bench]]
+name = "tiering"
+harness = false
+
+[features]
+default = []
+bindgen = ["rquickjs-core/bindgen"]
+parallel = ["rquickjs-core/parallel"]
+compiler = [
+  "dep:cranelift-codegen",
+  "dep:cranelift-frontend",
+  "dep:cranelift-module",
+  "dep:cranelift-object",
+  "dep:cranelift-native",
+  "dep:gimli",
+  "dep:postcard",
+  "dep:target-lexicon",
+]
+test-support = ["rquickjs-core/jit-test-support"]
+
+[[test]]
+name = "helpers"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "semantics"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "gpui_shell_surface"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "opcodes"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "differential"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "optimized"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "property_specialization"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "polymorphic_property_ic"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "speculative_numeric"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "call_guard_licm"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "semantic_heap"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "generic_call_cleanup"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "property_cache"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "array_semantics"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "return_ownership"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "array_feedback"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "frame_inline"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tagged_call_link"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "profitability_backoff"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "deopt"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "background"
+required-features = ["test-support"]
+
+[[test]]
+name = "osr"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_arrays_typed"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_calls_properties"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_globals"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_closures"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_constructors"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_regexp"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_generic_ops"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "untranslatable_settle"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_iteration"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier2_tdz"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "test262"
+required-features = ["compiler", "test-support"]
