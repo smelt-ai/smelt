@@ -10,6 +10,7 @@ import { SmeltMenuItem, SmeltMenuLabel, SmeltMenuSeparator } from "smelt-ui";
 
 import * as actions from "./actions.js";
 import { MACHINE_MENU, PROJECT_MENU, SESSION_MENU } from "./contract.js";
+import { machine_key } from "./model.js";
 import { icon, message } from "./util.js";
 
 const LIGHT = { good: "ok", degraded: "need", down: "bad" };
@@ -228,5 +229,20 @@ export function menus(ctx) {
     ];
   }
 
-  return { session, project, workset, machine, machines, open_project, grouping };
+  /**
+   * 别的插件往 menu 里登记、给 machine 的项眼下是什么样（一串字，一样就是没变）。行沿用上一次画好的
+   * 菜单前拿它比；一次画里每个菜单、每台机器只取一次。上下文只是并进命令参数，不影响有哪些项。
+   */
+  const signatures = new Map();
+  function signature(menu, machine) {
+    const key = `${menu}\n${machine_key(machine)}`;
+    let value = signatures.get(key);
+    if (value === undefined) {
+      value = JSON.stringify(context_menu_items(menu, machine, {}));
+      signatures.set(key, value);
+    }
+    return value;
+  }
+
+  return { session, project, workset, machine, machines, open_project, grouping, signature };
 }

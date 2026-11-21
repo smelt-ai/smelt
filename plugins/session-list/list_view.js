@@ -6,7 +6,7 @@
 // （只改这份视图的内存，不做 IO、不叫重画）。
 
 import { div, View } from "gpui-kit";
-import { opened_view, notify_view, slot_views, t, theme } from "smelt-plugin-api";
+import { locale, opened_view, notify_view, slot_views, t, theme } from "smelt-plugin-api";
 import { SmeltButton, SmeltDialog, SmeltInputState, SmeltScrollView, SmeltWindowBar } from "smelt-ui";
 
 import * as actions from "./actions.js";
@@ -213,6 +213,7 @@ export function list_view_class(list) {
         list,
         view,
         t,
+        locale: locale(),
         theme: look,
         sidebar,
         selection: list.selection,

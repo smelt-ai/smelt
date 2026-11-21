@@ -302,6 +302,8 @@ function folded(key, rows) {
  */
 export function build_sidebar(input) {
   const { ui, t } = input;
+  const pool = input.pool ?? new ValuePool();
+  pool.begin();
   const agent_rows = [];
   const projects = [];
   const machines = [];
@@ -324,17 +326,20 @@ export function build_sidebar(input) {
         checks: input.workset_checks,
         t,
         path: input.path,
+        pool,
       };
       const ids = fill_machine(machine_input, ui, projects, agent_rows);
       conversation_ids_by_machine.set(machine_key(machine.machine), ids);
     }
-    machines.push({
-      machine: machine.machine,
-      name: machine.name,
-      os_icon: machine_links.os_icon(machine.machine, input.connections, input.local_os),
-      link,
-      received: !!data?.directory,
-    });
+    machines.push(
+      pool.keep(machine_flip(machine.machine), {
+        machine: machine.machine,
+        name: machine.name,
+        os_icon: machine_links.os_icon(machine.machine, input.connections, input.local_os),
+        link,
+        received: !!data?.directory,
+      }),
+    );
   }
   const ordered = pinned_first(
     manual_first(
@@ -347,8 +352,8 @@ export function build_sidebar(input) {
   const by_machine = ui.by_machine && has_remote(machines);
   const filter = input.project_filter;
   const areas = by_machine
-    ? machines.map((machine) => area(machine.machine, ordered, ui, filter, input.now))
-    : [area(undefined, ordered, ui, filter, input.now)];
+    ? machines.map((machine) => area(machine.machine, ordered, ui, filter, input.now, pool))
+    : [area(undefined, ordered, ui, filter, input.now, pool)];
   let conversations = null;
   if (agent_rows.length > 0) {
     // 稳定排序：一样新的保留目录里的顺序。
@@ -375,7 +380,52 @@ export function build_sidebar(input) {
   });
   sidebar.order = sidebar.visible_order();
   sidebar.notices = sidebar.collect_notices();
+  pool.finish();
   return sidebar;
+}
+
+/**
+ * 侧栏每次整份重算，行、机器都是新建的对象。和上一份里同一项一样的换回上一份的那个对象：没变的
+ * 项身份不变，画的时候按身份比就知道它没变（rows.js 的 memo 拿它当 deps）。交回去的对象当只读的
+ * 用，建好以后不能再改。
+ */
+export class ValuePool {
+  constructor() {
+    /** 上一份侧栏里的：身份 → 值（同一身份可能有几样，比如按状态分组时行带着来源）。 */
+    this.previous = new Map();
+    this.next = new Map();
+  }
+
+  /** 开始建一份：上一次没建完的不算。 */
+  begin() {
+    this.next = new Map();
+  }
+
+  /** 上一份里 key 下有和 value 一样的，交回那个；没有交回 value。 */
+  keep(key, value) {
+    const kept = this.previous.get(key)?.find((old) => same_value(old, value)) ?? value;
+    const list = this.next.get(key);
+    if (list) {
+      if (!list.includes(kept)) list.push(kept);
+    } else this.next.set(key, [kept]);
+    return kept;
+  }
+
+  /** 一份建完了：这一份的成了下一份比的对象。 */
+  finish() {
+    this.previous = this.next;
+    this.next = new Map();
+  }
+}
+
+/** 两个由普通对象、数组和原始值组成的值一样不一样。 */
+export function same_value(a, b) {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => Object.hasOwn(b, key) && same_value(a[key], b[key]));
 }
 
 /**
@@ -392,9 +442,7 @@ function fill_machine(input, ui, projects, agent_rows) {
     if (!fact || fact.id !== conversation.id) return;
     const placement = fact.placement;
     if (placement.kind === "conversations") {
-      const row = session_row(conversation, fact, input, ui, { kind: "conversations" });
-      row.machine_name = input.remote_name;
-      agent_rows.push(row);
+      agent_rows.push(session_row(conversation, fact, input, ui, { kind: "conversations" }, input.remote_name));
     } else if (placement.kind === "project") {
       if (!roots.includes(placement.root)) roots.push(placement.root);
       if (!members.has(placement.root)) members.set(placement.root, []);
@@ -514,7 +562,7 @@ function project_group(root, members, manual_sessions, input, ui) {
  * - group：在哪一组里（拖会话只能在同一组里换位置）。
  * - origin：按状态、时间分组时行上补的来源 { project, branch, workset: { task, tooltip } | null }。
  */
-function session_row(conversation, fact, input, ui, group) {
+function session_row(conversation, fact, input, ui, group, machine_name = null) {
   const key = { machine: input.machine, id: conversation.id };
   const states = input.states;
   // 状态推送里没有它（守护重启后还没跑过、离线）时用守护记下的最近一轮结束时间。
@@ -530,7 +578,7 @@ function session_row(conversation, fact, input, ui, group) {
     }
   }
   const name = title(fact, !!conversation.acp, input.t);
-  return {
+  const row = {
     key,
     session_id: ids[0] ?? null,
     title: name,
@@ -543,10 +591,11 @@ function session_row(conversation, fact, input, ui, group) {
     unavailable: input.link.unavailable,
     /** 悬停的说明：完整标题（窄侧栏里常被截断）。 */
     tooltip: name,
-    machine_name: null,
+    machine_name,
     group,
     origin: null,
   };
+  return input.pool ? input.pool.keep(session_flip(key), row) : row;
 }
 
 /** 跟哪个智能体的对话（智能体定义 id）。自动化运行的、不是跟智能体开的是 null。 */
@@ -582,7 +631,7 @@ export function row_icon(conversation, fact, agents) {
  * 「项目」标题下的一片：machine 是 undefined 时装所有机器的项目，否则只装那台机器的。filter 是
  * 搜索框里的字，只装名字搜得到的项目；按状态、时间分组时组里也就只有这些项目的会话。
  */
-export function area(machine, projects, ui, filter, now) {
+export function area(machine, projects, ui, filter, now, pool = null) {
   const members = [];
   projects.forEach((project, ix) => {
     if (machine !== undefined && project.machine !== machine) return;
@@ -601,7 +650,7 @@ export function area(machine, projects, ui, filter, now) {
     /** 这片的项目，projects 的下标，从上到下。 */
     projects: members,
     /** 按状态、时间分组时这片的组；按项目时空着。 */
-    buckets: bucket_groups(machine, in_area, ui, now),
+    buckets: bucket_groups(machine, in_area, ui, now, pool),
   };
 }
 
@@ -610,14 +659,14 @@ export function area(machine, projects, ui, filter, now) {
  * 组里置顶的在前。按项目分组时是空的。machine 是这片的机器：不按机器分开（undefined）时行上还要
  * 标远程机器名，分开时机器的标题行已经写了。
  */
-export function bucket_groups(machine, projects, ui, now) {
+export function bucket_groups(machine, projects, ui, now, pool = null) {
   if (ui.grouping === "project") return [];
   const rows = [];
   for (const project of projects) {
     for (const item of project.items) {
       const workset = item.kind === "workset" ? item.workset : null;
       for (const row of item_rows(item)) {
-        rows.push({
+        const placed = {
           ...row,
           origin: {
             project: project.name,
@@ -625,7 +674,8 @@ export function bucket_groups(machine, projects, ui, now) {
             workset: workset ? { task: workset.task, tooltip: workset.tooltip } : null,
           },
           machine_name: machine === undefined ? project.machine_name : row.machine_name,
-        });
+        };
+        rows.push(pool ? pool.keep(session_flip(row.key), placed) : placed);
       }
     }
   }

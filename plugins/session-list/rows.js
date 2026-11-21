@@ -7,10 +7,12 @@
 // - t、theme（smelt-plugin-api 的 theme()）、now（unix 秒，行尾的相对时间按它算）。
 // - selection、motion（motion.js 的 ListMotion）、avatar_view（行首头像用的视图 id，没有是 null）。
 // - rename：正在改名的 { target, state }（target 见 list_view.js），search：搜索框的状态（没在搜是 null）。
-// - menus：menus.js 给的菜单项（session、project、workset、machine、machines、open_project、grouping）。
+// - menus：menus.js 给的菜单项（session、project、workset、machine、machines、open_project、grouping），
+//   signature(menu, machine) 是别的插件往那个菜单登记的项眼下的样子。
+// - locale：眼下的语言，文案换了没有看它。
 // - new_session_button(id, tooltip, machine, path, hover_group)：项目、工作树行上的「+」。
 
-import { div, svg } from "gpui-kit";
+import { div, memo, svg } from "gpui-kit";
 import {
   SmeltArrival,
   SmeltButton,
@@ -34,6 +36,7 @@ import {
 import * as actions from "./actions.js";
 import { bucket_label } from "./group.js";
 import { machine_id, same_conversation, selected_session } from "./model.js";
+import { SESSION_MENU } from "./contract.js";
 import { fail_key } from "./state.js";
 import {
   bucket_flip,
@@ -672,13 +675,53 @@ function session_drag_kind(ctx, row) {
  * 行首图标，标题自然比上一级的名字往右错开一截。
  */
 function session(ctx, row, depth) {
+  const { list, motion } = ctx;
+  const key = row.key;
+  const flip_key = session_flip(key);
+  const target = { kind: "conversation", key };
+  const selected = same_conversation(selected_session(ctx.selection), key);
+  // 这一行画出来的样子只看这些：都没变（行按身份比，侧栏重算时没变的行沿用原来的对象），就沿用
+  // 上一次画好的，不再进构建。外面那层滑动、落进来的动画每次重新套。
+  const look = {
+    renaming: rename_state(ctx, target),
+    wash: motion.wash_serial(flip_key),
+    glow: row.status === "running" ? motion.glow_serial(flip_key) : null,
+    meta: meta(ctx, row, selected),
+    failure: list.failures.get(fail_key(target)) ?? null,
+    drag: session_drag_kind(ctx, row),
+    machine: row.machine_name != null ? machine_info(ctx.sidebar, key.machine) : null,
+  };
+  const body = memo(
+    `session:${session_id(key)}`,
+    [
+      row,
+      depth,
+      selected,
+      look.renaming,
+      look.wash,
+      look.glow,
+      look.meta.text,
+      look.meta.color,
+      look.meta.unread,
+      look.failure,
+      look.drag,
+      look.machine,
+      ctx.avatar_view,
+      ctx.locale,
+      ctx.menus.signature(SESSION_MENU, key.machine),
+    ],
+    () => session_body(ctx, row, depth, selected, look),
+  );
+  const arrival = motion.arrival_serial(flip_key);
+  return flip(ctx, flip_key, arrival == null ? body : SmeltArrival.new(flip_key, arrival).child(body));
+}
+
+/** 会话行除了外面那层动画的全部：右键菜单、拖动、行本身。只读参数和 ctx 里不变的（list、view、motion、t、主题）。 */
+function session_body(ctx, row, depth, selected, look) {
   const { list, t, motion } = ctx;
   const key = row.key;
   const id = session_id(key);
   const flip_key = session_flip(key);
-  const selected = same_conversation(selected_session(ctx.selection), key);
-  const renaming = rename_state(ctx, { kind: "conversation", key });
-  const wash = motion.wash_serial(flip_key);
   const close = SmeltButton.new(`session-close:${id}`)
     .dismiss()
     .small()
@@ -695,14 +738,14 @@ function session(ctx, row, depth) {
       .selected(selected)
       .group("session-row")
       .relative()
-      .when(wash != null, (item) => item.child(SmeltWash.new(flip_key, wash))),
+      .when(look.wash != null, (item) => item.child(SmeltWash.new(flip_key, look.wash))),
     row,
     depth,
     selected,
-    renaming,
+    look,
     close,
   )
-    .children(failure_mark(ctx, id, { kind: "conversation", key }))
+    .children(failure_mark(ctx, id, { kind: "conversation", key }, look.failure))
     .tooltip(row.tooltip)
     .on_click((event) => {
       if (event.click_count === 2) {
@@ -712,7 +755,7 @@ function session(ctx, row, depth) {
       // 出口里可能正放着别的页（归档这些）：打开会话视图，露出来再选中。
       list.report_row_failure({ kind: "conversation", key }, t("action.open_session"), list.open_conversation(key));
     });
-  const kind = session_drag_kind(ctx, row);
+  const kind = look.drag;
   const item =
     kind == null
       ? face.mx_2()
@@ -725,21 +768,20 @@ function session(ctx, row, depth) {
             motion.drop_at(from, top);
             actions.drop_session(list, dragged.key, key, row.group, before);
           });
-  const anchored = SmeltScrollAnchor.new(flip_key).child(
+  return SmeltScrollAnchor.new(flip_key).child(
     SmeltContextMenu.new(`session-menu:${id}`).items(ctx.menus.session(row)).child(item),
   );
-  const arrival = motion.arrival_serial(flip_key);
-  return flip(ctx, flip_key, arrival == null ? anchored : SmeltArrival.new(flip_key, arrival).child(anchored));
 }
 
-/** 会话行的样子：行首、标题、行尾。renaming 是顶替标题的输入框状态，close 是悬停时换到行尾的关闭键。 */
-function session_face(ctx, el, row, depth, selected, renaming, close) {
-  const { theme, sidebar } = ctx;
+/** 会话行的样子：行首、标题、行尾。look 见 session()，close 是悬停时换到行尾的关闭键。 */
+function session_face(ctx, el, row, depth, selected, look, close) {
+  const { theme } = ctx;
+  const renaming = look.renaming;
   const p = theme.palette;
   const key = row.key;
   const id = session_id(key);
   const avatar = ctx.avatar_view != null;
-  const lead = avatar ? session_avatar(ctx, id, row) : session_icon(ctx, id, row, selected);
+  const lead = avatar ? session_avatar(ctx, id, row) : session_icon(ctx, id, row, selected, look.glow);
   const level = avatar ? Math.max(depth - 1, 0) : depth;
   // 标题亮不亮看要不要你看：需要你处理的、有没看过的提醒的亮且加重，在跑的、闲着的淡下去。选中的照常亮。
   const loud = !tally_is_empty(row_tally(row));
@@ -761,7 +803,7 @@ function session_face(ctx, el, row, depth, selected, renaming, close) {
         )
         .when(row.pinned, (title) => title.child(pin_marker(ctx)))
         .when(row.machine_name != null, (title) =>
-          title.child(machine_tag(ctx, `session-machine:${id}`, machine_info(sidebar, key.machine), row.machine_name, selected)),
+          title.child(machine_tag(ctx, `session-machine:${id}`, look.machine, row.machine_name, selected)),
         )
         .when(row.origin != null, (title) => title.children(origin_labels(ctx, id, row.origin, selected)));
   return typed(
@@ -776,7 +818,7 @@ function session_face(ctx, el, row, depth, selected, renaming, close) {
   )
     .child(lead)
     .child(title)
-    .child(trailing(ctx, meta(ctx, row, selected), close));
+    .child(trailing(ctx, look.meta, close));
 }
 
 /** 按状态、时间分组时标题后面补的来源：工作树的小标签，项目名和分支。 */
@@ -874,11 +916,10 @@ function session_avatar(ctx, id, row) {
 }
 
 /** 没人填头像插槽时行首的图标：空闲随行的次要字色，在跑、要人管的用状态色；刚开始跑时亮一下。 */
-function session_icon(ctx, id, row, selected) {
+function session_icon(ctx, id, row, selected, glow) {
   const p = ctx.theme.palette;
   const path = icon_path(row.icon);
   const flip_key = session_flip(row.key);
-  const glow = row.status === "running" ? ctx.motion.glow_serial(flip_key) : null;
   const glyph =
     glow != null
       ? SmeltGlowIcon.new(path, p.run, flip_key, glow).size(LEAD)
@@ -951,8 +992,7 @@ function trailing(ctx, meta, close) {
  * 这一行上刚失败的操作：行尾一个 bad 色的叹号，悬停看为什么，点一下收起。按下不往行上传，免得
  * 收起时先选中、打开了这一行。
  */
-function failure_mark(ctx, id, target) {
-  const failure = ctx.list.failures.get(fail_key(target));
+function failure_mark(ctx, id, target, failure = ctx.list.failures.get(fail_key(target))) {
   if (!failure) return [];
   const text = ctx.t("error.failed", { what: failure.what, error: failure.error });
   return [

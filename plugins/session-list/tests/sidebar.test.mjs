@@ -20,8 +20,10 @@ import {
   project_visible,
   reordered,
   row_icon,
+  same_value,
   session_flip,
   splice_group,
+  ValuePool,
 } from "../sidebar.js";
 import { path, t } from "./helpers.mjs";
 
@@ -447,4 +449,34 @@ test("整份算：手动顺序、置顶、折叠、搜索、按机器分开", ()
   const searched = build_sidebar(host_input({ project_filter: " LOO " }));
   expect(searched.filtering).toBeTruthy();
   expect(searched.areas[0].projects.map((ix) => searched.projects[ix].root)).toStrictEqual(["/loose"]);
+});
+
+test("重算侧栏：没变的行、机器沿用上一份的对象，变了的是新的", () => {
+  const pool = new ValuePool();
+  const first = build_sidebar(host_input({ pool }));
+  const unread = { has: (_machine, id) => id === "t5" };
+  const second = build_sidebar(host_input({ pool, unread }));
+  const row = (sidebar, root) => sidebar.projects.find((p) => p.root === root).items[0].row;
+  expect(row(second, "/repo")).toBe(row(first, "/repo"));
+  expect(second.conversations.rows[0]).toBe(first.conversations.rows[0]);
+  expect(second.machines[0]).toBe(first.machines[0]);
+  expect(row(second, "/loose")).not.toBe(row(first, "/loose"));
+  expect(row(second, "/loose").unread).toBe(true);
+
+  // 按状态分组时行带着来源，是另一样值；同样沿用。
+  const ui = new_sidebar_ui();
+  ui.grouping = "status";
+  const a = build_sidebar(host_input({ pool, ui }));
+  const b = build_sidebar(host_input({ pool, ui }));
+  const bucket_rows = (sidebar) => sidebar.areas[0].buckets.flatMap((group) => group.rows);
+  expect(bucket_rows(a).length).toBeGreaterThan(0);
+  bucket_rows(b).forEach((row, ix) => expect(row).toBe(bucket_rows(a)[ix]));
+});
+
+test("比值：对象、数组逐项比，键不同就不一样", () => {
+  expect(same_value({ a: [1, { b: null }] }, { a: [1, { b: null }] })).toBe(true);
+  expect(same_value({ a: 1 }, { a: 1, b: undefined })).toBe(false);
+  expect(same_value({ a: 1, b: undefined }, { a: 1, c: undefined })).toBe(false);
+  expect(same_value([1], { 0: 1 })).toBe(false);
+  expect(same_value(NaN, NaN)).toBe(true);
 });

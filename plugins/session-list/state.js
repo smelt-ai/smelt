@@ -38,7 +38,7 @@ import {
 import { Unread } from "./attention.js";
 import { initial_location, NewSession } from "./new_session.js";
 import { Repositories } from "./repositories.js";
-import { bucket_flip, build_sidebar, project_flip, session_flip, Sidebar, workset_flip } from "./sidebar.js";
+import { bucket_flip, build_sidebar, project_flip, session_flip, Sidebar, ValuePool, workset_flip } from "./sidebar.js";
 import { due_checks, WORKSET_GIT_TIMEOUT, workset_key } from "./worksets.js";
 import { message } from "./util.js";
 
@@ -89,6 +89,8 @@ export class SessionList {
     this.located = null;
     /** 侧栏算好的行（列表画它，上一段 / 下一段按它的顺序）。render 只读它。 */
     this.sidebar = new Sidebar();
+    /** 重算侧栏时没变的行、机器沿用上一份的对象（见 ValuePool）。 */
+    this.sidebar_pool = new ValuePool();
     /** machine_key → (智能体定义 id → 名字)。权威在智能体插件，这里是只读缓存。 */
     this.agent_names = new Map();
     /**
@@ -181,6 +183,7 @@ export class SessionList {
       now: host.now(),
       t: host.t,
       path: host.path,
+      pool: this.sidebar_pool,
     });
     host.redraw();
   }
