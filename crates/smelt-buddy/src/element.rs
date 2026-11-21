@@ -1,15 +1,16 @@
 //! 元素 [`BuddyFigure`]：画一个小人演着一出。
 //!
-//! 按元素 id 留着状态（[`Figure`]）：是哪个小人、正在演的那出、正画着的那一帧、出帧节拍。元素
-//! 不再画，状态连同贴图一起放掉。要下一帧时通知这份状态：`use_keyed_state` 的状态由它所在的
-//! 视图观察着，通知它就重画那个视图。
+//! 小人自己是一个视图（[`Figure`]），按元素 id 留在它所在的视图里：是哪个小人、正在演的那出、
+//! 正画着的那一帧、出帧节拍。元素不再画，视图连同贴图一起放掉。换帧只通知这个视图，重画的
+//! 只有小人这一小块，所在的视图（会话列表）和窗口其余部分从上一帧沿用；所在的视图重画时把
+//! 新给的参数交给它，参数没变就不碰它。
 
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, Context, ElementId, Global, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Subscription, Window, canvas, div, px,
+    App, Context, ElementId, Global, IntoElement, ParentElement as _, Render, RenderOnce,
+    SharedString, Styled as _, Subscription, Window, canvas, div, px,
 };
 
 use crate::buddy::{Act, Buddy, CANVAS, Playing, Portrait};
@@ -54,9 +55,18 @@ impl BuddyFigure {
     }
 }
 
-/// 按元素留着的状态。
-struct Figure {
+/// 所在的视图给小人的参数。
+#[derive(Clone, PartialEq)]
+struct Cast {
     seed: SharedString,
+    act: Act,
+    since_ms: f64,
+    still: bool,
+}
+
+/// 小人这个视图，按元素 id 留着。
+struct Figure {
+    cast: Cast,
     buddy: Buddy,
     /// 正在演的那出，和开演时给的 `(act, since_ms)`，比出换没换戏。
     playing: Option<((Act, u64), Playing)>,
@@ -67,18 +77,29 @@ struct Figure {
 }
 
 impl Figure {
-    fn new(seed: SharedString, cx: &mut Context<Self>) -> Self {
-        let buddy = Buddy::of(&seed);
+    fn new(cast: Cast, cx: &mut Context<Self>) -> Self {
+        let buddy = Buddy::of(&cast.seed);
         prepare(buddy, cx);
         let _release = cx.on_release(|figure: &mut Self, cx| figure.portrait.release(cx));
         Self {
-            seed,
+            cast,
             buddy,
             playing: None,
             pacer: Rc::default(),
             portrait: Portrait::default(),
             _release,
         }
+    }
+
+    /// 所在的视图给了新参数。
+    fn recast(&mut self, cast: Cast, cx: &mut Context<Self>) {
+        if cast.seed != self.cast.seed {
+            self.buddy = Buddy::of(&cast.seed);
+            self.playing = None;
+            prepare(self.buddy, cx);
+        }
+        self.cast = cast;
+        cx.notify();
     }
 }
 
@@ -89,40 +110,51 @@ fn prepare(buddy: Buddy, cx: &mut App) {
 
 impl RenderOnce for BuddyFigure {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let cast = Cast {
+            seed: self.seed,
+            act: self.act,
+            since_ms: self.since_ms,
+            still: self.still,
+        };
+        let figure = window.use_keyed_state(self.id, cx, {
+            let cast = cast.clone();
+            move |_, cx| Figure::new(cast, cx)
+        });
+        if figure.read(cx).cast != cast {
+            figure.update(cx, |figure, cx| figure.recast(cast, cx));
+        }
+        figure
+    }
+}
+
+impl Render for Figure {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let clock = SharedClock::get(cx);
         let now = cx.background_executor().now();
         // 按所在的格取样，同一格里画面不变（`frames`）。
         let tick = clock.tick(now);
         let at = clock.at(tick);
-        let figure = window.use_keyed_state(self.id.clone(), cx, {
-            let seed = self.seed.clone();
-            move |_, cx| Figure::new(seed, cx)
-        });
-        let (image, animating, pacer) = figure.update(cx, |figure, cx| {
-            if figure.seed != self.seed {
-                figure.seed = self.seed.clone();
-                figure.buddy = Buddy::of(&figure.seed);
-                figure.playing = None;
-                prepare(figure.buddy, cx);
+        let key = (self.cast.act, self.cast.since_ms.to_bits());
+        let playing = match self.playing {
+            Some((seen, playing)) if seen == key => playing,
+            _ => {
+                let since = started(now, self.cast.since_ms);
+                let playing = Playing::new(
+                    &self.cast.seed,
+                    self.cast.act,
+                    since,
+                    self.cast.since_ms as u64,
+                );
+                self.playing = Some((key, playing));
+                playing
             }
-            let key = (self.act, self.since_ms.to_bits());
-            let playing = match figure.playing {
-                Some((seen, playing)) if seen == key => playing,
-                _ => {
-                    let since = started(now, self.since_ms);
-                    let playing = Playing::new(&figure.seed, self.act, since, self.since_ms as u64);
-                    figure.playing = Some((key, playing));
-                    playing
-                }
-            };
-            let (image, animating) =
-                figure
-                    .portrait
-                    .draw(figure.buddy, &playing, at, !self.still, window);
-            (image, animating, figure.pacer.clone())
-        });
+        };
+        let (image, animating) =
+            self.portrait
+                .draw(self.buddy, &playing, at, !self.cast.still, window);
         // 要不要下一帧放到 prepaint 里定：那时才知道这个小人露没露在可见区里。
-        let figure = figure.downgrade();
+        let pacer = self.pacer.clone();
+        let figure = cx.entity().downgrade();
         let pace = canvas(
             move |bounds, window, _| pacer.drew(tick, animating, bounds, clock, figure, window),
             |_, _, _, _| {},

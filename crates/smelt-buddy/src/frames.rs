@@ -1,7 +1,7 @@
 //! 小人出帧的节拍：按 [`FPS`] 出帧，不跟显示器刷新率；看不见的不要帧。
 //!
 //! 动作一拍一秒多，会转的零件又是每 5° 一格，按刷新率（ProMotion 120Hz）出帧多数帧画出来
-//! 一样，却每帧都把会话列表整段重跑（通知一个视图会把祖先一并标脏）。
+//! 一样，画了也是白画。
 //!
 //! 所有小人按同一个 [`Clock`] 的格取样：同一格里画面不变，换格时一起画，相位不错开。要下一帧
 //! 时挂 `on_next_frame` 而不直接通知：回调跟着显示器刷新走，格没换就再挂一次、不通知视图，
@@ -82,7 +82,9 @@ fn wait<V: 'static>(pacer: Rc<Pacer>, clock: Clock, view: WeakEntity<V>, window:
             return;
         }
         pacer.waiting.set(false);
-        view.update(cx, |_, cx| cx.notify()).ok();
+        // 按 id 通知，不经 `update`：只有小人自己重画。经 `update` 通知算改了它的状态，读过它的
+        // 所在视图（它在那儿比对参数）也要跟着重画。
+        cx.notify(view.entity_id());
     });
 }
 
