@@ -76,9 +76,14 @@ fn mount_frozen(
     (context, view, app)
 }
 
+/// 像平台出一帧那样：先投递上一帧登记的下一帧回调（动画要下一帧时，它通知视图重画），再画。
+/// 保留模式下没被通知的视图沿用上一帧，不投递就看不到动画往前走。
 pub(super) fn draw(context: &mut VisualTestContext) {
     context.run_until_parked();
-    context.update(|window, cx| window.draw(cx).clear(cx));
+    context.update(|window, cx| {
+        window.simulate_next_frame(cx);
+        window.draw(cx).clear(cx);
+    });
 }
 
 pub(super) fn tree(context: &mut VisualTestContext, view: &Entity<ScriptView>) -> String {
