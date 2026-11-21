@@ -11,6 +11,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui = { package = "gpui-fast", version = "=0.1.17" }
 # 解小人的零件（编进来的 WebP）交给 gpui 画。版本跟 gpui 用的同一个，帧类型才对得上。
 image = { version = "0.25", default-features = false, features = ["webp"] }

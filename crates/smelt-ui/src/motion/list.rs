@@ -56,14 +56,6 @@ pub fn fold_body(id: impl Into<ElementId>, open: f32, child: impl IntoElement) -
     }
 }
 
-impl IntoElement for FoldBody {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for FoldBody {
     type RequestLayoutState = Option<LayoutId>;
     type PrepaintState = ();
@@ -265,8 +257,13 @@ mod tests {
     }
 
     #[cfg(debug_assertions)]
+    /// 像平台出一帧那样：先投递上一帧登记的下一帧回调（动画要下一帧时，它通知视图重画），
+    /// 再画。保留模式下没被通知的视图沿用上一帧，不投递就看不到动画往前走。
     fn draw(window: &mut gpui::VisualTestContext) {
-        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
     }
 
     #[cfg(debug_assertions)]
@@ -457,6 +454,10 @@ mod tests {
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             self.seen = replay_elapsed("replay", self.serial, self.stop, window, cx);
+            // 和真正的调用方一样，播着就要下一帧。
+            if self.seen.is_some() {
+                window.request_animation_frame();
+            }
             div()
         }
     }

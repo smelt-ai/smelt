@@ -236,14 +236,6 @@ struct AnchorRoot {
     child: AnyElement,
 }
 
-impl IntoElement for AnchorRoot {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for AnchorRoot {
     type RequestLayoutState = ();
     type PrepaintState = ();

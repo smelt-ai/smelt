@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
-gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui = { package = "gpui-fast", version = "=0.1.17" }
 # 照抄会话插件的菜单上下文，要按同样的 JSON 形状收。
 serde = { version = "1", features = ["derive"] }
 # 远程访问配置的保存按提交顺序一次一次来。
@@ -25,4 +25,4 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 rust-i18n.workspace = true
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }

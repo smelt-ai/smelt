@@ -14,7 +14,7 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
-gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui = { package = "gpui-fast", version = "=0.1.17" }
 # 下载线程往界面推进度的通道（见 update.rs）。
 smol = "2"
 anyhow = "1"

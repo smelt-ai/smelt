@@ -14,9 +14,9 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
-gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui = { package = "gpui-fast", version = "=0.1.17" }
 # 面板组的分隔条换成发丝（见 lib.rs 的 h_resizable）。
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
 # 日志页的提交时间。
 chrono = "0.4"
 # 照抄别的插件的约定（命令参数、菜单上下文）要按同样的 JSON 形状收发。
@@ -25,4 +25,4 @@ serde = { version = "1", features = ["derive"] }
 rust-i18n.workspace = true
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }

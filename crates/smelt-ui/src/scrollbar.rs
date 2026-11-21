@@ -263,13 +263,6 @@ impl WheelArea {
     }
 }
 
-impl IntoElement for WheelArea {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for WheelArea {
     type RequestLayoutState = ();
     type PrepaintState = (Hitbox, Rc<RefCell<WheelState>>);
@@ -527,13 +520,6 @@ fn scroll_axis(handle: &ScrollHandle, axis: Axis, command: ScrollCommand) {
     };
     *position = -target.clamp(px(0.), axis_max(handle, axis));
     handle.set_offset(offset);
-}
-
-impl IntoElement for AxisControl {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
 }
 
 impl Element for AxisControl {

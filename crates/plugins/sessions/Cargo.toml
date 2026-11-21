@@ -13,9 +13,9 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
-gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui = { package = "gpui-fast", version = "=0.1.17" }
 # 分屏的尺寸手柄。
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 新会话、新终端的 id 由这边先分好。
@@ -24,6 +24,6 @@ uuid = { version = "1", features = ["v4"] }
 rust-i18n.workspace = true
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }
 tempfile = "3"
 

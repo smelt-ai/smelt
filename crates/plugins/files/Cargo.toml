@@ -12,11 +12,15 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
-gpui = { package = "gpui-pre", version = "=0.3.12" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+gpui = { package = "gpui-fast", version = "=0.1.17" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
 # HTML 预览：原生网页视图。gpui-webview 和组件库同一个 rev，wry 必须和它用同一份。
-gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
 wry = { package = "lb-wry", version = "0.53.3" }
+# 代码里不点名：gpui-webview 的 GPUI 类型取自 gpui-kit 总包，总包自己不开 gpui-fast 就用默认的
+# gpui-pre，和整个 App 对不上（单独编这个插件时没有别人替它开）。webview 的 gpui-fast 特性不转给它，
+# 两个要一起开（见 gpui-webview 的 README）。
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", default-features = false, features = ["gpui-fast"] }
 # 预览里点的链接从网页视图的回调线程送回 UI 线程。
 smol = "2"
 # 「浏览器打开」：本机路径转成 file:// 地址。
@@ -27,5 +31,5 @@ serde = { version = "1", features = ["derive"] }
 rust-i18n.workspace = true
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }
 tempfile = "3"

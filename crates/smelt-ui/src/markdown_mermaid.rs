@@ -164,14 +164,6 @@ struct MermaidInline {
     image: Arc<MermaidImage>,
 }
 
-impl IntoElement for MermaidInline {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for MermaidInline {
     type RequestLayoutState = ();
     type PrepaintState = AnyElement;

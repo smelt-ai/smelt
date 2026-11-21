@@ -58,19 +58,21 @@ anyhow = "1"
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }
 futures-util = { version = "0.3", features = ["sink", "async-await"] }
-# GPUI 用上游 gpui-kit 钉的 crates.io 快照 gpui-pre =0.3.12。
+# GPUI 用 gpui-kit 钉的 GPUI Fast（gpui-fast =0.1.17）：保留模式，一个视图变了只重画它自己，
+# 窗口其余部分沿用上一帧，侧栏一个动画不会拖着整窗每帧重画。gpui-kit 的每个依赖都开
+# `gpui-fast` 特性跟它走；gpui-kit 仍会把默认的 gpui-pre 一起编进来（特性只能叠加），用不上。
 # gpui-kit 各 crate 跟 longbridge/gpui-kit 上游 main，不用 fork。两边必须同一套，
 # 不能只改其中一个。gpui_platform 开 runtime_shaders 免装完整 Xcode。
-gpui = { package = "gpui-pre", version = "=0.3.12" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui = { package = "gpui-fast", version = "=0.1.17" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
+gpui_platform = { package = "gpui-fast-platform", version = "=0.1.17", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 # 调试 HUD（Cmd+Shift+F）：帧耗时取自 GPUI 自己的帧追踪，不靠连续重绘去量。
-gpui-fps = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+gpui-fps = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
 # 插件：gpui-shell 脚本应用（见 src/plugins）。JS 写界面，GPUI 原生绘制，
 # 引擎 QuickJS 跑在 UI 线程。脚本能用的控件是 smelt-ui 的（`smelt_plugin_api::js::ui`），
 # 不开 `components`：那会带进 gpui-component 和它的控件目录。
-# 不开默认的 `webview`：它会把整个运行时切到 gpui-fast，而 smelt 用 gpui-pre。
-gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b", default-features = false, features = ["quickjs"] }
+# 不开默认的 `webview`：它连着 `components`。网页视图由 desktop、files 插件直接依赖 gpui-webview。
+gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", default-features = false, features = ["quickjs", "gpui-fast"] }
 libc = "0.2"
 smol = "2"  # 定时器、channel
 # 盯着 App 里的 smeltd：重编译、覆盖安装后查一次守护是否落后（见 Workspace::start_daemon_outdated_watch）。
@@ -94,7 +96,7 @@ raw-window-handle = "0.6"
 [dev-dependencies]
 # 测试要用运行时的归约器和存储层校验格式；正式代码不依赖它们（设计文档 P1）。
 smelt-store = { path = "../smelt-store" }
-gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 
 # smelt-core 是 smeltd 的进程和套接字层，第 1 步不移植到 Windows。测试里用到它的
@@ -104,7 +106,7 @@ smelt-core = { path = "../smelt-core" }
 
 # 插件资源的渲染测试离屏真画一帧、取像素（同 smelt-ui 的快照）。
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_apple = { package = "gpui-pre-apple", version = "=0.3.12", features = ["font-kit", "runtime_shaders", "test-support"] }
+gpui_apple = { package = "gpui-fast-apple", version = "=0.1.17", features = ["font-kit", "runtime_shaders", "test-support"] }
 
 # Windows 11 的 Mica 要按窗口设深浅，系统版本要绕过兼容层读真的（见 window_backdrop.rs）。
 [target.'cfg(windows)'.dependencies]

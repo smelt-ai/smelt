@@ -15,14 +15,6 @@ impl<T: 'static> Carrier<T> {
     }
 }
 
-impl<T: 'static> IntoElement for Carrier<T> {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl<T: 'static> Element for Carrier<T> {
     type RequestLayoutState = AnyElement;
     type PrepaintState = ();

@@ -221,7 +221,7 @@ impl ConversationView {
                     title: Some(t!("trace.open").into()),
                     ..Default::default()
                 }),
-                window_bounds: Some(WindowBounds::centered(size(px(1120.), px(760.)), cx)),
+                window_bounds: Some(WindowBounds::centered(None, size(px(1120.), px(760.)), cx)),
                 ..Default::default()
             };
             let Ok(handle) = cx.open_window(options, |window, cx| {

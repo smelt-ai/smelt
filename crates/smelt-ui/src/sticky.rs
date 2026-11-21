@@ -30,14 +30,6 @@ impl StickySection {
     }
 }
 
-impl IntoElement for StickySection {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for StickySection {
     /// 标题的布局，prepaint 时取它的位置。
     type RequestLayoutState = LayoutId;

@@ -10,9 +10,8 @@
 //! 行排版缓存，重绘时不用重新排。
 
 use gpui::{
-    App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, Pixels, ShapedLine, SharedString, Style, TextAlign, TextStyle, Window,
-    px, size,
+    App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId,
+    Pixels, ShapedLine, SharedString, Style, TextAlign, TextStyle, Window, px, size,
 };
 
 const ELLIPSIS: &str = "…";
@@ -38,14 +37,6 @@ pub struct TruncatedLineLayout {
     style: TextStyle,
     font_size: Pixels,
     line_height: Pixels,
-}
-
-impl IntoElement for TruncatedLine {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl Element for TruncatedLine {
@@ -189,8 +180,8 @@ mod tests {
     use super::*;
     use gpui::prelude::FluentBuilder as _;
     use gpui::{
-        Context, InteractiveElement, ParentElement, Render, Styled,
-        VisualTestContext, div,
+        Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, VisualTestContext,
+        div,
     };
 
     /// 截图里的那句：中文标点多，GPUI 的 `.truncate()` 在 352px 宽时截出来 354px。

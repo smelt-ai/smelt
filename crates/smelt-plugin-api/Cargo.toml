@@ -26,15 +26,15 @@ smelt-version = { path = "../smelt-version" }
 smelt-ui = { path = "../smelt-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui = { package = "gpui-fast", version = "=0.1.17" }
 # 布局的格式（`DockAreaState`）。
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
 futures-channel = "0.3"
 # 界面语言：当前语言是 rust-i18n 的全局值，各 crate 的文案共用它（见 src/locale.rs）。
 rust-i18n.workspace = true
 # 读系统的首选语言。
 sys-locale = "0.3"
-gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b", default-features = false, features = ["quickjs"], optional = true }
+gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", default-features = false, features = ["quickjs", "gpui-fast"], optional = true }
 # 小人组件（JS 的 `SmeltBuddy`）。只有 JS 插件用，Rust 插件用不着。
 smelt-buddy = { path = "../smelt-buddy", optional = true }
 # JS 插件的文案（src/js/catalog.rs）：和 Rust crate 用 rust-i18n 构建时同一个加载函数读。
@@ -48,7 +48,7 @@ js = ["dep:gpui-shell", "dep:rust-i18n-support", "dep:smelt-buddy"]
 schemars = "1.2"
 # 性能探针量 CPU 时间（src/js/ui/bench.rs）。
 libc = "0.2"
-gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }
 smol = "2"
 # 查各 crate 的文案（tests/catalogs.rs），用 rust-i18n 构建时同一个加载函数。
 rust-i18n-support = { version = "4.2", features = ["codegen"] }

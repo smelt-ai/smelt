@@ -108,14 +108,6 @@ pub struct AmbientAnimationElement {
     renderer: Box<dyn Fn(f32) -> AnyElement>,
 }
 
-impl IntoElement for AmbientAnimationElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for AmbientAnimationElement {
     type RequestLayoutState = AmbientAnimationLayoutState;
     type PrepaintState = ();
@@ -561,14 +553,6 @@ impl FlipSlot {
     /// 只在重排那一帧生效；`None` 时用上一帧画的位置。
     pub fn from_top(mut self, top: Option<Pixels>) -> Self {
         self.origin_top = top;
-        self
-    }
-}
-
-impl IntoElement for FlipSlot {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
         self
     }
 }

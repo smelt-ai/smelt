@@ -13,12 +13,16 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../../smelt-plugin-api" }
-gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui = { package = "gpui-fast", version = "=0.1.17" }
 # 原生网页视图。gpui-webview 和组件库同一个 rev，一起升级；crates.io 上的 gpui-wry 是它
-# 改名前的旧名字，钉死了 gpui-pre 版本，会卡住升级。不开 gpui-fast：跟着 gpui-kit 用默认的
-# gpui-pre，代价是网页视图盖住同一块区域里的 GPUI 弹层。wry 必须和它用同一份。
-gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
+# 改名前的旧名字，钉死了 gpui-pre 版本，会卡住升级。开 gpui-fast（和整个 App 一致，不一致编不过）：
+# 网页视图挂进 GPUI Fast 的窗口合成，GPUI 弹层画在网页上面。wry 必须和它用同一份。
+gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
 wry = { package = "lb-wry", version = "0.53.3" }
+# 代码里不点名：gpui-webview 的 GPUI 类型取自 gpui-kit 总包，总包自己不开 gpui-fast 就用默认的
+# gpui-pre，和整个 App 对不上（单独编这个插件时没有别人替它开）。webview 的 gpui-fast 特性不转给它，
+# 两个要一起开（见 gpui-webview 的 README）。
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", default-features = false, features = ["gpui-fast"] }
 # 页面消息从网页视图的回调线程送回 UI 线程；要打到远端的文字排队逐段发。
 smol = "2"
 # 照抄别的插件的约定（命令参数、菜单上下文）要按同样的 JSON 形状收发。
