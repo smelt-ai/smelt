@@ -429,20 +429,25 @@ pub(crate) fn view_shown(id: &str, cx: &App) -> bool {
 
 /// 主窗口里看得见的视图；主窗口关了报空的。
 pub(crate) fn set_window_shown(shown: HashSet<String>, cx: &mut App) {
-    let views = cx.default_global::<ShownViews>();
-    if views.window != shown {
-        views.window = shown;
-        api::emit(HostEvent::ShownViewsChanged, cx);
+    // 先只读比较：可写地取全局（`default_global`）就算它变了，读过它的视图都要重画、观察者都
+    // 收到通知，没变不能碰。
+    let current = cx.try_global::<ShownViews>();
+    if current.map_or(shown.is_empty(), |views| views.window == shown) {
+        return;
     }
+    cx.default_global::<ShownViews>().window = shown;
+    api::emit(HostEvent::ShownViewsChanged, cx);
 }
 
 /// 设置停着的那一页（设置页视图的 id）；设置视图放掉了报 `None`。
 pub(crate) fn set_settings_shown(page: Option<SharedString>, cx: &mut App) {
-    let views = cx.default_global::<ShownViews>();
-    if views.settings != page {
-        views.settings = page;
-        api::emit(HostEvent::ShownViewsChanged, cx);
+    // 同 `set_window_shown`：没变不碰全局。
+    let current = cx.try_global::<ShownViews>();
+    if current.map_or(page.is_none(), |views| views.settings == page) {
+        return;
     }
+    cx.default_global::<ShownViews>().settings = page;
+    api::emit(HostEvent::ShownViewsChanged, cx);
 }
 
 /// 摆在各页眼下装的布局里的视图（`workspace_layout::sync_laid_out_views` 算），插件经
@@ -454,11 +459,13 @@ impl Global for LaidOutViews {}
 
 /// 换一份摆着的视图；变了发 [`HostEvent::LaidOutViewsChanged`]。
 pub(crate) fn set_laid_out(views: HashSet<String>, cx: &mut App) {
-    let laid_out = cx.default_global::<LaidOutViews>();
-    if laid_out.0 != views {
-        laid_out.0 = views;
-        api::emit(HostEvent::LaidOutViewsChanged, cx);
+    // 同 `set_window_shown`：没变不碰全局。
+    let current = cx.try_global::<LaidOutViews>();
+    if current.map_or(views.is_empty(), |laid_out| laid_out.0 == views) {
+        return;
     }
+    cx.default_global::<LaidOutViews>().0 = views;
+    api::emit(HostEvent::LaidOutViewsChanged, cx);
 }
 
 impl Workspace {
@@ -502,5 +509,45 @@ impl Workspace {
             self.plugin_overlay_open = open;
             api::emit(HostEvent::OverlayChanged, cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    // 不 `use super::*`：上面 `use gpui::*` 带进来的 `gpui::test` 会把 `#[test]` 解析成它自己，
+    // 无限展开。
+    use super::{
+        LaidOutViews, ShownViews, set_laid_out, set_settings_shown, set_window_shown, view_shown,
+    };
+
+    /// 没变不碰全局：工作台每次同步布局都会把摆着、露着的视图重报一遍，可写地取一下就算
+    /// 它变了，读过它的视图、观察者都会被惊动。
+    #[gpui::test]
+    fn reporting_the_same_views_leaves_the_globals_untouched(cx: &mut gpui::TestAppContext) {
+        let shown = Rc::new(Cell::new(0));
+        let laid_out = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let shown = shown.clone();
+            cx.observe_global::<ShownViews>(move |_| shown.set(shown.get() + 1))
+                .detach();
+            let laid_out = laid_out.clone();
+            cx.observe_global::<LaidOutViews>(move |_| laid_out.set(laid_out.get() + 1))
+                .detach();
+        });
+        let views = HashSet::from(["a/list".to_string()]);
+        for _ in 0..2 {
+            cx.update(|cx| {
+                set_window_shown(views.clone(), cx);
+                set_settings_shown(Some("a/settings".into()), cx);
+                set_laid_out(views.clone(), cx);
+            });
+        }
+        assert_eq!(shown.get(), 1, "露着的视图第二次报的和第一次一样");
+        assert_eq!(laid_out.get(), 1, "摆着的视图第二次报的和第一次一样");
+        assert!(cx.update(|cx| view_shown("a/list", cx)));
     }
 }

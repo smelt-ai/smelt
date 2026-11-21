@@ -33,11 +33,12 @@ impl Global for ActiveContextSlot {}
 /// 发布活动上下文。和上次一样就什么都不做，变了发 [`HostEvent::ActiveContextChanged`]。
 /// 只在事件里调，不在 render 里调。
 pub fn set_active_context(context: ActiveContext, cx: &mut App) {
-    let slot = cx.default_global::<ActiveContextSlot>();
-    if slot.0 == context {
+    // 先只读比较：可写地取全局（`default_global`）就算它变了，读过它的视图都要重画、观察者都
+    // 收到通知，没变不能碰。
+    if active_context(cx) == context {
         return;
     }
-    slot.0 = context;
+    cx.default_global::<ActiveContextSlot>().0 = context;
     crate::emit(HostEvent::ActiveContextChanged, cx);
 }
 
@@ -72,5 +73,30 @@ mod tests {
             set_active_context(ActiveContext::default(), cx);
             assert_eq!(active_context(cx), ActiveContext::default());
         });
+    }
+
+    /// 没变不碰全局：可写地取一下就算它变了，观察者和读过它的视图都会被惊动。
+    #[gpui::test]
+    fn publishing_the_same_context_leaves_the_global_untouched(cx: &mut gpui::TestAppContext) {
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|cx| {
+            let writes = writes.clone();
+            cx.observe_global::<ActiveContextSlot>(move |_| writes.set(writes.get() + 1))
+                .detach();
+        });
+        cx.update(|cx| set_active_context(ActiveContext::default(), cx));
+        assert_eq!(writes.get(), 0, "还没人发布过，发布空的不算变");
+        let context = ActiveContext {
+            project: None,
+            session: Some(ViewedSession {
+                machine: RuntimeKey::Local,
+                id: "s1".into(),
+                at_latest: true,
+            }),
+        };
+        cx.update(|cx| set_active_context(context.clone(), cx));
+        assert_eq!(writes.get(), 1);
+        cx.update(|cx| set_active_context(context, cx));
+        assert_eq!(writes.get(), 1, "和上次一样");
     }
 }

@@ -23,14 +23,15 @@ impl Global for SafeAreas {}
 /// 给摆着的视图设 safe area。变了重画那个视图，发 [`HostEvent::SafeAreaChanged`]（摆着子视图
 /// 的据此重分）。在事件里调，不在 render 里。
 pub fn set_safe_area(view: &AnyView, area: SafeArea, cx: &mut App) {
+    let id = view.entity_id();
+    // 先只读比较：可写地取全局（`default_global`）就算它变了，读过它的视图都要重画、观察者都
+    // 收到通知，没变不能碰。
+    if safe_area(id, cx) == area {
+        return;
+    }
     let areas = &mut cx.default_global::<SafeAreas>().0;
     // 视图放掉了，它那份跟着清掉。
     areas.retain(|_, (view, _)| view.upgrade().is_some());
-    let id = view.entity_id();
-    let before = areas.get(&id).map(|(_, area)| *area).unwrap_or_default();
-    if before == area {
-        return;
-    }
     if area == SafeArea::default() {
         areas.remove(&id);
     } else {
@@ -46,4 +47,44 @@ pub fn safe_area(view: EntityId, cx: &App) -> SafeArea {
         .and_then(|areas| areas.0.get(&view))
         .map(|(_, area)| *area)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, IntoElement, Render, TestAppContext, Window, div};
+
+    use super::*;
+
+    struct Blank;
+
+    impl Render for Blank {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    /// 没变不碰全局：工作台的布局一通知就把各视图的 safe area 重设一遍，可写地取一下就算
+    /// 它变了，所有画顶栏的视图都要跟着重画。
+    #[gpui::test]
+    fn setting_the_same_area_leaves_the_global_untouched(cx: &mut TestAppContext) {
+        let (view, _) = cx.add_window_view(|_, _| Blank);
+        let view = AnyView::from(view);
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|cx| {
+            let writes = writes.clone();
+            cx.observe_global::<SafeAreas>(move |_| writes.set(writes.get() + 1))
+                .detach();
+        });
+        cx.update(|cx| set_safe_area(&view, SafeArea::default(), cx));
+        assert_eq!(writes.get(), 0, "没设过就是全零，设全零不算变");
+        let area = SafeArea {
+            title_bar: true,
+            ..SafeArea::default()
+        };
+        cx.update(|cx| set_safe_area(&view, area, cx));
+        assert_eq!(writes.get(), 1);
+        cx.update(|cx| set_safe_area(&view, area, cx));
+        assert_eq!(writes.get(), 1, "和上次一样");
+        assert_eq!(cx.update(|cx| safe_area(view.entity_id(), cx)), area);
+    }
 }
