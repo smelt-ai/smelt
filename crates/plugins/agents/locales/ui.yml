@@ -103,9 +103,6 @@ common:
   manage:
     en: "Manage"
     zh-CN: "管理"
-  retry:
-    en: "Retry"
-    zh-CN: "重试"
 context:
   description:
     en: "Folders and links are written into the system prompt. Changes apply to new conversations."
