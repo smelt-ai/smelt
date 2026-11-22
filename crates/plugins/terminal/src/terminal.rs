@@ -15,7 +15,7 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell as GridCell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search::{RegexIter, RegexSearch};
 use alacritty_terminal::term::{
@@ -994,43 +994,44 @@ const SEARCH_RESCAN_THROTTLE: Duration = Duration::from_millis(200);
 /// 屏幕（vim/less 等全屏 TUI）、resize 等——这些都由 alacritty 自动判定。
 ///
 /// alacritty 的 damage_cursor() 每次都会无条件把**当前**光标格标脏（为闪烁动画设计）。
-/// smelt 没有闪烁，静止时必须滤掉「仅当前光标那一格」——否则空闲也 33fps。
+/// smelt 没有闪烁，这一格本身不算变化：不然只改标题、响铃也会整帧重画。
 ///
-/// 但光标真的移动时，脏区可能**只有新位置那一格**（旧格不在 partial 里），若仍按
-/// 「等于当前光标就忽略」会吞掉移动 → 光标不重画。所以再记上一批结束时的光标位置：
-/// 动了就算有变化。
+/// 但有些真变化留下的脏区也只有这一格，甚至根本不标：写字和组合字符（`Term::input` 只靠
+/// 光标移动带出脏区）、光标显隐和形状、光标移动（旧格可能不在脏区里）。这些只会落在光标
+/// 和它所在的那一行，所以另记上一批结束时的这两样，变了就算有变化。
 #[derive(Default)]
 struct DamageFilter {
-    last_cursor: Option<(i32, usize)>,
+    /// 光标的位置和画出来的形状（藏着是 `Hidden`）。
+    last_cursor: Option<(Point, CursorShape)>,
+    last_row: Vec<GridCell>,
 }
 
 impl DamageFilter {
     fn take<T: EventListener>(&mut self, term: &mut Term<T>) -> bool {
-        let cursor = term.grid().cursor.point;
-        let cur = (cursor.line.0, cursor.column.0);
-        let cursor_moved = self.last_cursor.replace(cur) != Some(cur);
-        let cursor_line = cur.0 as usize;
-        let cursor_col = cur.1;
+        let point = term.grid().cursor.point;
+        // 不问 renderable_content()：光标停在第 0 列的宽字符后半格时，它算列号会溢出。
+        let shape = if term.mode().contains(TermMode::SHOW_CURSOR) {
+            term.cursor_style().shape
+        } else {
+            CursorShape::Hidden
+        };
+        let cursor = (point, shape);
+        let mut cursor_changed = self.last_cursor.replace(cursor) != Some(cursor);
+        let row = &term.grid()[point.line][..];
+        if self.last_row != row {
+            self.last_row.clear();
+            self.last_row.extend_from_slice(row);
+            cursor_changed = true;
+        }
+        // 脏区用的是画面上的行：往上滚了几行，光标就低几行，可能已经不在画面里。
+        let viewport_line = point.line.0 as usize + term.grid().display_offset();
+        let cursor_in_view = viewport_line < term.screen_lines();
+        let idle_cursor = (viewport_line, point.column.0, point.column.0);
         let damaged = match term.damage() {
             TermDamage::Full => true,
-            TermDamage::Partial(it) => {
-                let mut any = false;
-                let mut only_idle_cursor = true;
-                for l in it {
-                    any = true;
-                    if l.line != cursor_line || l.left != cursor_col || l.right != cursor_col {
-                        only_idle_cursor = false;
-                        break;
-                    }
-                }
-                if !any {
-                    false
-                } else if only_idle_cursor {
-                    // 脏区恰好是当前光标格：只有光标真的动了才算变化
-                    cursor_moved
-                } else {
-                    true
-                }
+            TermDamage::Partial(mut lines) => {
+                (cursor_in_view && cursor_changed)
+                    || lines.any(|l| (l.line, l.left, l.right) != idle_cursor)
             }
         };
         term.reset_damage();
@@ -3796,5 +3797,68 @@ mod redraw_pipeline_tests {
         assert!(terminal.take_damage());
         assert!(!next_wake(&mut redraws), "之后报断开");
         assert!(terminal.is_dead(), "报断开时 dead 已经置位，视图据此重连");
+    }
+}
+
+/// 只在光标那一行、那一格里的变化：alacritty 标的脏区和「什么都没变」一样，要自己分出来。
+#[cfg(test)]
+mod damage_filter_tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+
+    const ROWS: usize = 4;
+
+    /// 先喂 `before`（滚上去 `scrolled` 行），再喂 `batch`：这一批要不要重画。
+    fn redraws(before: &str, scrolled: i32, batch: &str) -> bool {
+        let size = TermSize {
+            rows: ROWS,
+            cols: 8,
+        };
+        let mut term = Term::new(term_config(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        let mut filter = DamageFilter::default();
+        parser.advance(&mut term, before.as_bytes());
+        term.scroll_display(Scroll::Delta(scrolled));
+        filter.take(&mut term);
+        parser.advance(&mut term, batch.as_bytes());
+        filter.take(&mut term)
+    }
+
+    #[test]
+    fn changes_confined_to_the_cursor_are_damage() {
+        for (what, before, batch) in [
+            ("藏光标", "ab", "\x1b[?25l"),
+            ("显示光标", "ab\x1b[?25l", "\x1b[?25h"),
+            ("换光标形状", "ab", "\x1b[6 q"),
+            ("最后一列写字", "\x1b[1;8H", "Z"),
+            ("最后一列只换颜色", "1234567Z\x1b[1;8H", "\x1b[31mZ"),
+            ("最后一列擦到行尾", "1234567Q\x1b[1;8H", "\x1b[K"),
+            ("写完退回原格", "ab", "Z\x08"),
+            ("组合字符晚一批到", "e", "\u{301}"),
+        ] {
+            assert!(redraws(before, 0, batch), "{what}：该重画");
+        }
+    }
+
+    #[test]
+    fn batches_that_change_nothing_visible_are_not_damage() {
+        let history = "1\r\n2\r\n3\r\n4\r\n5\r\n6\x1b[1;2H";
+        let cursor_below_view = "1\r\n2\r\n3\r\n4\r\n5\r\n6";
+        for (what, before, scrolled, batch) in [
+            ("只改标题", "ab", 0, "\x1b]0;title\x07"),
+            ("只换后面的颜色", "ab", 0, "\x1b[31m"),
+            ("本来就藏着", "ab\x1b[?25l", 0, "\x1b[?25l"),
+            ("原样再写一遍", "1234567Z\x1b[1;8H", 0, "Z"),
+            ("上滚时只改标题", history, 1, "\x1b]0;title\x07"),
+            ("光标滚出了画面", cursor_below_view, 2, "\x1b[?25l"),
+        ] {
+            assert!(!redraws(before, scrolled, batch), "{what}：不该重画");
+        }
+    }
+
+    #[test]
+    fn cursor_on_a_wide_spacer_at_column_zero_is_survived() {
+        // 删掉宽字符前半格，后半格挪到第 0 列：alacritty 的 renderable_content() 在这里会溢出。
+        assert!(redraws("中\x1b[H", 0, "\x1b[P"));
     }
 }
