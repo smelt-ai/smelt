@@ -142,6 +142,14 @@ impl AcpRestoreState {
         Some(policy)
     }
 
+    /// 这次连接拿哪个历史身份去恢复。
+    fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Pending { session_id, .. } | Self::Restored { session_id } => Some(session_id),
+            Self::Fresh => None,
+        }
+    }
+
     pub(crate) fn mark_restored(&mut self, session_id: Option<&str>) {
         let session_id = match self {
             Self::Pending { session_id, .. } | Self::Restored { session_id } => {
@@ -552,26 +560,31 @@ pub(crate) fn live_acp_owner_ids(
     ids
 }
 
+/// `resume_id` 是这次若拉起会用的身份（[`resolve_resume_id`] 选好的），不是窗口带来的原值。
 pub(crate) fn acp_open_needs_relaunch(
     created: bool,
     alive: bool,
     has_launch_command: bool,
-    requested_resume_id: Option<&str>,
+    resume_id: Option<&str>,
+    restore: &AcpRestoreState,
     reduced: &smelt_core::acp_session::AcpSessionState,
 ) -> bool {
     created
         || (!alive && has_launch_command)
-        // A reconnect can leave a live handle in Starting without a
-        // canonical id.  Do not hot-attach that half-started runtime when the
-        // GUI still has the persisted history identity; relaunch it with that
-        // identity so the normal load/new supervisor runs again.
+        // A reconnect can leave a live handle in Starting without any history
+        // identity. Do not hot-attach that half-started runtime when there is
+        // one to restore; relaunch it with that identity so the normal load/new
+        // supervisor runs again. `history_session_id` stays empty until Ready,
+        // so a restore in flight is known by its restore state. A session that
+        // gave up its history is starting over on purpose.
         || (alive
-            && requested_resume_id.is_some()
+            && resume_id.is_some()
+            && !reduced.history_abandoned
             && matches!(
                 reduced.phase,
                 smelt_core::daemon_state::DaemonPhase::Connecting
             )
-            && reduced.history_session_id.as_deref() != requested_resume_id)
+            && reduced.history_session_id.as_deref().or(restore.session_id()) != resume_id)
 }
 
 /// 已有 ACP 控制会话仍活着时，默认请求只是 attach；但启动命令或临时环境变了，
@@ -4238,7 +4251,14 @@ fn ensure_acp_session_inner(
             adopt_unknown_conversation_binding(&slot.value, req.conversation_binding.clone());
         }
         let alive = acp_runtime_alive(&slot.value);
-        let (needs_relaunch, known_history) = {
+        let known_history = known_acp_resume_id(&slot.value.reduced.lock());
+        let resume_id = resolve_resume_id(
+            &req.id,
+            req.resume_id.clone(),
+            known_history,
+            req.fork_id.is_none(),
+        );
+        let needs_relaunch = {
             let reduced = slot.value.reduced.lock();
             let current_launch = slot.value.launch_spec.lock().clone();
             let current_ephemeral_env = slot.value.ephemeral_env.lock().clone();
@@ -4249,21 +4269,15 @@ fn ensure_acp_session_inner(
                 &req.launch,
                 &req.ephemeral_env,
             );
-            let needs_relaunch = acp_open_needs_relaunch(
+            acp_open_needs_relaunch(
                 created,
                 alive,
                 !req.launch.command.is_empty(),
-                req.resume_id.as_deref(),
+                resume_id.as_deref(),
+                &slot.value.restore_state.lock(),
                 &reduced,
-            ) || runtime_spec_changed;
-            (needs_relaunch, known_acp_resume_id(&reduced))
+            ) || runtime_spec_changed
         };
-        let resume_id = resolve_resume_id(
-            &req.id,
-            req.resume_id.clone(),
-            known_history,
-            req.fork_id.is_none(),
-        );
         if needs_relaunch {
             // provider session 独占：同一 resume_id 同一时刻只允许一个 ACP 会话
             // 持有。占用者还活着（即使正在重连）就拒绝后来的会话做 session/load，

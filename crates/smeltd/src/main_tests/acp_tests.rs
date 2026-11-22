@@ -77,12 +77,21 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: RuntimeStream, id: &str) 
 
 #[test]
 fn hot_attach_never_relaunches_or_replays_agent_history() {
+    let fresh = AcpRestoreState::Fresh;
     let mut idle = AcpSessionState::default();
     idle.phase = DaemonPhase::Idle;
-    assert!(!acp_open_needs_relaunch(false, true, true, None, &idle));
-    assert!(!acp_open_needs_relaunch(false, true, false, None, &idle));
-    assert!(acp_open_needs_relaunch(true, false, true, None, &idle));
-    assert!(acp_open_needs_relaunch(false, false, true, None, &idle));
+    assert!(!acp_open_needs_relaunch(
+        false, true, true, None, &fresh, &idle
+    ));
+    assert!(!acp_open_needs_relaunch(
+        false, true, false, None, &fresh, &idle
+    ));
+    assert!(acp_open_needs_relaunch(
+        true, false, true, None, &fresh, &idle
+    ));
+    assert!(acp_open_needs_relaunch(
+        false, false, true, None, &fresh, &idle
+    ));
 
     let mut starting = AcpSessionState::default();
     starting.phase = DaemonPhase::Connecting;
@@ -92,6 +101,7 @@ fn hot_attach_never_relaunches_or_replays_agent_history() {
         true,
         true,
         Some("history"),
+        &fresh,
         &starting,
     ));
     assert!(acp_open_needs_relaunch(
@@ -99,6 +109,7 @@ fn hot_attach_never_relaunches_or_replays_agent_history() {
         true,
         true,
         Some("other-history"),
+        &fresh,
         &starting,
     ));
     assert!(!acp_open_needs_relaunch(
@@ -106,8 +117,105 @@ fn hot_attach_never_relaunches_or_replays_agent_history() {
         true,
         true,
         Some("history"),
+        &fresh,
         &idle,
     ));
+    // 一个身份都没有的半启动 runtime：有历史可恢复就带着它重来。
+    let mut anonymous = AcpSessionState::default();
+    anonymous.phase = DaemonPhase::Connecting;
+    assert!(acp_open_needs_relaunch(
+        false,
+        true,
+        true,
+        Some("history"),
+        &fresh,
+        &anonymous,
+    ));
+}
+
+/// 拉起一个活着但一直不回话的 runtime：会话停在连接中，历史身份还没确认。
+fn connecting_open_request(id: &str, resume: &str) -> AcpOpenRequest {
+    parse_acp_open_request(&serde_json::json!({
+        "id": id,
+        "launch": { "command": "sleep 30" },
+        "resume_id": resume,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn reopening_a_connecting_session_keeps_the_restore_in_flight() {
+    let sessions = new_sessions();
+    let acp_sessions = new_test_acp_sessions();
+    let hub = new_event_hub();
+    let id = "acp-reopen-connecting";
+    let req = connecting_open_request(id, "history");
+
+    let slot = acp_open_slot(&req, &sessions, &acp_sessions, &hub).unwrap();
+    let launched = slot.value.connection_generation.load(Ordering::SeqCst);
+    assert_eq!(slot.value.reduced.lock().history_session_id, None);
+
+    // 切走再切回来：每次都是带着同一个历史身份再打开一次。
+    for _ in 0..3 {
+        acp_open_slot(&req, &sessions, &acp_sessions, &hub).unwrap();
+    }
+    let reopened = slot.value.connection_generation.load(Ordering::SeqCst);
+    retire_acp_runtime(&slot.value);
+    assert_eq!(reopened, launched, "正在恢复的 runtime 被再次打开杀掉了");
+}
+
+#[test]
+fn reopening_a_connecting_session_with_another_history_relaunches() {
+    let sessions = new_sessions();
+    let acp_sessions = new_test_acp_sessions();
+    let hub = new_event_hub();
+    let id = "acp-reopen-other-history";
+
+    let first = connecting_open_request(id, "history");
+    let slot = acp_open_slot(&first, &sessions, &acp_sessions, &hub).unwrap();
+    let launched = slot.value.connection_generation.load(Ordering::SeqCst);
+
+    let other = connecting_open_request(id, "other-history");
+    acp_open_slot(&other, &sessions, &acp_sessions, &hub).unwrap();
+    let reopened = slot.value.connection_generation.load(Ordering::SeqCst);
+    let restoring = slot.value.restore_state.lock().clone();
+    retire_acp_runtime(&slot.value);
+    assert!(reopened > launched, "换了历史身份却接在旧的上面");
+    assert!(matches!(
+        restoring,
+        AcpRestoreState::Pending { session_id, .. } if session_id == "other-history"
+    ));
+}
+
+#[test]
+fn reopening_while_starting_over_keeps_the_new_session() {
+    let sessions = new_sessions();
+    let acp_sessions = new_test_acp_sessions();
+    let hub = new_event_hub();
+    let id = "acp-reopen-abandoned";
+    let req = connecting_open_request(id, "missing-history");
+
+    let slot = acp_open_slot(&req, &sessions, &acp_sessions, &hub).unwrap();
+    // 历史确认读不出来：放弃它，改走 session/new。
+    assert!(retire_acp_runtime(&slot.value));
+    acp_sessions.release_resume_for(id);
+    acp_relaunch(
+        &slot,
+        id,
+        req.launch.clone(),
+        None,
+        None,
+        None,
+        Arc::clone(&acp_sessions),
+        &hub,
+        true,
+    );
+    let launched = slot.value.connection_generation.load(Ordering::SeqCst);
+
+    acp_open_slot(&req, &sessions, &acp_sessions, &hub).unwrap();
+    let reopened = slot.value.connection_generation.load(Ordering::SeqCst);
+    retire_acp_runtime(&slot.value);
+    assert_eq!(reopened, launched, "窗口里的旧身份把新会话杀掉了");
 }
 
 #[test]
