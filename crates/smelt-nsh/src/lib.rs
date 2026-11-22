@@ -14,6 +14,7 @@
 
 mod button;
 mod module;
+pub mod plugins;
 mod theme;
 mod view;
 

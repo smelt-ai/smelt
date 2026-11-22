@@ -17,9 +17,15 @@ smelt-plugin-api = { path = "../smelt-plugin-api" }
 # 只要跑 JS 的那部分：网页视图、编辑器、终端、图表这些默认特性都不要。
 nsh-platform-gpui = { version = "=0.6.1", default-features = false, features = ["js"] }
 nsh-core = "=0.6.1"
+# `Policy`：平台 crate 没有再导出。
+nsh-engine = { version = "=0.6.1", default-features = false, features = ["js-core"] }
 nsh-base = { version = "=0.6.1", default-features = false }
 # NSH 带进 gpui-fast-platform；和 smelt 一样开 runtime_shaders，单独编这个 crate 时也不用装完整 Xcode。
 gpui_platform = { package = "gpui-fast-platform", version = "=0.1.17", default-features = false, features = ["runtime_shaders"] }
+# 运行时打包插件（`src/plugins.rs`）：用户装、改插件不用重编 App。
+nsh-bundler = { version = "=0.6.1", features = ["bundle"] }
+# 把插件的包换成能在跑着的引擎里执行的函数；和 nsh-bundler 用同一版解析器。
+oxc = "=0.153.0"
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
@@ -32,6 +38,8 @@ nsh-js = "=0.6.1"
 nsh-base = { version = "=0.6.1", default-features = false }
 
 [dev-dependencies]
+# tests/plugins.rs：在测试平台的窗口里跑真引擎。
+gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }
 # examples/bench.rs：量 CPU 时间、接 NSH 的帧统计日志。
 libc = "0.2"
 log = "0.4"
