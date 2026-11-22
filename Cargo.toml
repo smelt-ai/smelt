@@ -58,7 +58,7 @@ members = [
     "crates/smelt-mobile", # package 名是 smelt_mobile（cargokit 要求，见其 Cargo.toml）
 ]
 # 打了补丁的第三方 crate 原样拷进来，不是工作区成员（见下面 [patch.crates-io]）。
-exclude = ["vendor/quickjs-jit-runtime", "vendor/gpui-shell"]
+exclude = ["vendor/quickjs-jit-runtime", "vendor/gpui-shell", "vendor/nsh-platform-gpui"]
 resolver = "3"
 
 # 版本号不写在这里：发版只打 tag，打包时从 tag 算出版本号，经 SMELT_VERSION 编进程序
@@ -99,6 +99,11 @@ netdev = { git = "https://github.com/shellrow/netdev", rev = "b3bfb0fb5595cd143b
 # gpui-shell 原本钉 =0.14.1，NSH 钉 =0.14.2，两边一起升到 0.14.2，拷的是这一版。gpui-kit 升到带这几处修复的 quickjs-jit
 # 时连同目录一起删掉；版本对不上时 cargo 会警告这条 patch 没用上。
 quickjs-jit-runtime = { path = "vendor/quickjs-jit-runtime" }
+
+# nsh-platform-gpui 0.6.1 的源码拷在 vendor/ 下，改动处标 `SMELT:`。上游把原生组件的 hitbox 一律放在
+# 整块界面之上，画在组件上面的 NSH 元素（菜单、浮层）看得见点不到。升 NSH 时先看上游修了没有：
+# 修了连目录一起删，没修就拿新版覆盖再按 `SMELT:` 合回去。
+nsh-platform-gpui = { path = "vendor/nsh-platform-gpui" }
 
 # gpui-shell 拷在 vendor/ 下（上游 gpui-kit 同一修订），改动处标 `SMELT:`，以后搬到单独仓库。
 # 升 gpui-kit 时先拿新修订的 crates/shell 覆盖，再按 `SMELT:` 把改动合回去。

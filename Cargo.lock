@@ -8109,8 +8109,6 @@ dependencies = [
 [[package]]
 name = "nsh-platform-gpui"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01d1e66c2c25af83258a9d66aea203df59bea7c16be38189f41682b2c7e08d48"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
