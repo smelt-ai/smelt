@@ -1,80 +1,65 @@
 //! `smelt/pilot`：给试点面板的宿主模块，JS 里 `nativeModule("smelt/pilot")` 拿 `Smelt`。
 //!
-//! 模块函数跑在 NSH 的引擎线程，不能碰 GPUI（宿主的东西都在主线程）。所以两头各留一个
-//! 通道，由主线程这头（[`serve`]）接：
-//! - 登记的视图放在一个 `watch` 里，主线程在视图登记变了时换一份，`Smelt.on("views")`
-//!   在引擎线程上等它变；
-//! - `Smelt.openView` 把请求发到主线程，那头跑宿主的「打开视图」命令，结果原路回来。
+//! 模块函数跑在 NSH 的引擎线程，不能碰 GPUI（宿主的东西都在主线程）。本机的对话列表放在一个
+//! `watch` 里，主线程在会话变了时换一份，`Smelt.on("conversations")` 在引擎线程上等它变。
 
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    sync::{LazyLock, OnceLock},
-};
+use std::{cell::RefCell, rc::Rc, sync::LazyLock};
 
 use gpui::App;
 use nsh_core::prelude::*;
-use smelt_plugin_api::{self as api, HostEvent, OpenView};
-use tokio::sync::{mpsc, oneshot, watch};
+use smelt_plugin_api::{self as api, HostEvent, RuntimeKey};
+use tokio::sync::watch;
 
-/// 登记过的一个视图。
+/// 本机的一段跟智能体的对话。
 #[derive(Clone, Debug, PartialEq, JsObject)]
-pub struct ViewEntry {
+pub struct Conversation {
+    /// 守护会话 id，对话视图的 `session_id`。
     pub id: String,
     pub title: String,
 }
 
-static VIEWS: LazyLock<watch::Sender<Vec<ViewEntry>>> =
+static CONVERSATIONS: LazyLock<watch::Sender<Vec<Conversation>>> =
     LazyLock::new(|| watch::Sender::new(Vec::new()));
 
-/// 要主线程打开的视图，和回结果的地方。
-struct OpenRequest {
-    view: String,
-    answer: oneshot::Sender<bool>,
-}
-
-static OPENS: OnceLock<mpsc::UnboundedSender<OpenRequest>> = OnceLock::new();
-
-/// 主线程这头：现在的视图放进 `VIEWS`，登记一变再放；接 `openView` 的请求。只接一次。
+/// 主线程这头：现在的对话放进 `CONVERSATIONS`，会话一变再放。App 启动时调一次。
 pub(crate) fn serve(cx: &mut App) {
-    let (sender, mut requests) = mpsc::unbounded_channel();
-    if OPENS.set(sender).is_err() {
-        return;
-    }
     publish(cx);
     cx.subscribe(&api::events(cx), |_, event, cx| {
-        if matches!(event, HostEvent::ViewsChanged) {
+        if matches!(event, HostEvent::SessionsChanged) {
             publish(cx);
-        }
-    })
-    .detach();
-    cx.spawn(async move |cx| {
-        while let Some(OpenRequest { view, answer }) = requests.recv().await {
-            let opened = cx.update(|cx| {
-                api::OPEN_VIEW.run(
-                    &OpenView {
-                        view,
-                        args: serde_json::Value::Null,
-                    },
-                    cx,
-                )
-            });
-            let _ = answer.send(opened.await.unwrap_or(false));
         }
     })
     .detach();
 }
 
 fn publish(cx: &App) {
-    let views = api::views(cx)
-        .into_iter()
-        .filter(|view| view.settings.is_none() && !view.instances)
-        .map(|view| ViewEntry {
-            id: view.id.to_string(),
-            title: view.title.get().to_string(),
+    let host = api::host(cx);
+    let machine = RuntimeKey::Local;
+    let states = host.session_states(&machine, cx);
+    let conversations = host
+        .workspace_directory(&machine, cx)
+        .map(|directory| {
+            directory
+                .conversations
+                .iter()
+                .filter(|conversation| conversation.archived_at.is_none())
+                .filter_map(|conversation| {
+                    let acp = conversation.acp.as_ref()?;
+                    Some(Conversation {
+                        id: acp.sid.clone(),
+                        title: api::conversation_name(conversation, &states)
+                            .unwrap_or("对话")
+                            .to_owned(),
+                    })
+                })
+                .collect()
         })
-        .collect();
-    VIEWS.send_replace(views);
+        .unwrap_or_default();
+    CONVERSATIONS.send_if_modified(|current| {
+        let changed = *current != conversations;
+        *current = conversations;
+        changed
+    });
 }
 
 #[module]
@@ -82,38 +67,31 @@ pub struct Smelt;
 
 #[module]
 impl Smelt {
-    /// 在宿主里打开 `id`：经主线程跑宿主的打开视图命令。打不开是 false。
-    pub async fn open_view(id: String) -> bool {
-        let Some(opens) = OPENS.get() else {
-            return false;
-        };
-        let (answer, answered) = oneshot::channel();
-        if opens.send(OpenRequest { view: id, answer }).is_err() {
-            return false;
-        }
-        answered.await.unwrap_or(false)
+    /// 新的守护会话 id，给摆新终端的一方。
+    pub fn new_session_id() -> String {
+        uuid::Uuid::new_v4().to_string()
     }
 
-    /// 现在登记的视图交给 `listener`，之后每变一次再交一次（事件只有 `views`），直到调返回的
-    /// 函数或调用方没了。
+    /// 现在的对话交给 `listener`，之后每变一次再交一次（事件只有 `conversations`），直到调
+    /// 返回的函数或调用方没了。
     pub fn on(
         event: String,
-        listener: Callback<Vec<ViewEntry>>,
+        listener: Callback<Vec<Conversation>>,
         cx: CallCx<'_>,
     ) -> Result<Stop, String> {
-        if event != "views" {
+        if event != "conversations" {
             return Err(format!("没有 Smelt 事件 `{event}`"));
         }
         let listener = Rc::new(RefCell::new(Some(listener)));
         let held = listener.clone();
         cx.start(async move {
-            let mut views = VIEWS.subscribe();
+            let mut conversations = CONVERSATIONS.subscribe();
             loop {
                 let Some(listener) = held.borrow().clone() else {
                     return;
                 };
-                listener.post(views.borrow_and_update().clone());
-                if views.changed().await.is_err() {
+                listener.post(conversations.borrow_and_update().clone());
+                if conversations.changed().await.is_err() {
                     return;
                 }
             }

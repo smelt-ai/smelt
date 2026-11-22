@@ -22,6 +22,7 @@ nsh-base = { version = "=0.6.1", default-features = false }
 gpui_platform = { package = "gpui-fast-platform", version = "=0.1.17", default-features = false, features = ["runtime_shaders"] }
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["sync"] }
+uuid = { version = "1", features = ["v4"] }
 
 [build-dependencies]
 # `pilot/` 照 `nsh build` 打包、编成字节码，见 build.rs。

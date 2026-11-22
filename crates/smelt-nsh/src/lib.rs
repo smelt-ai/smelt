@@ -4,15 +4,18 @@
 //! `nsh-pilot/pilot`，入口列表里点开放进出口。一块视图一个 [`AppView`]，自带一条引擎线程；
 //! 它画在 GPUI 里，主题跟着 smelt 的（[`theme`]），背景不画、透出窗口材质。
 //!
-//! 它和宿主打交道的三条路都走一遍：
-//! - 宿主的 Rust 模块 `smelt/pilot`（[`module`]）：推登记的视图、在宿主里打开视图。模块函数
-//!   跑在引擎线程，碰宿主的东西经主线程转一手。
-//! - 宿主的 GPUI 组件：smelt-ui 的按钮登记成 `smelt.button`（[`button`]）。
+//! 面板按方案 2 摆：整块是 NSH，左边对话列表，右边嵌真的对话和终端，量重组件进 NSH 的代价。
+//! 和宿主打交道的几条路：
+//! - 宿主的 Rust 模块 `smelt/pilot`（[`module`]）：推本机的对话列表、分配会话 id。模块函数
+//!   跑在引擎线程，宿主的东西经主线程推过去。
+//! - 宿主登记的视图作原生组件 `smelt.view`（[`view`]）：终端、对话这些重组件。
+//! - smelt-ui 的按钮登记成 `smelt.button`（[`button`]）。
 //! - 主题：smelt-ui 的色板投影成 NSH 的 shadcn 语义位。
 
 mod button;
 mod module;
 mod theme;
+mod view;
 
 use std::{path::PathBuf, rc::Rc};
 
@@ -70,6 +73,8 @@ impl PilotView {
         let app = cx.new(|cx| AppView::new(options, window, cx));
         app.read(cx)
             .register_component(button::NAME, Rc::new(button::SmeltButton::make));
+        app.read(cx)
+            .register_component(view::NAME, Rc::new(view::SmeltView::make));
         apply_theme(&app, cx);
         // SAFETY: 包是本 crate 构建时打的（`build.rs`），和 App 自己的资源一样可信。
         match unsafe { Bundle::read_trusted(&dir.join("bundle.nshc")) } {
