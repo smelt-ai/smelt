@@ -92,9 +92,15 @@
 
 ## 7 · 跨节点会话消息
 
-- `session_list` 合并本机和在线对端的工作区目录，每条带 `machine`。智能体只看得到允许它使用的对端。
-- `session_send / read / spawn` 加可选 `machine`。本机发件队列经转发调对端的投递方法；来源对话由本机按绑定关系确定，对端记下的是 `{runtime_id, session_id}`。跳数预算跟着消息走，正文写明来自哪台机器。
-- 回信直接投回来源节点：配对是双向的，对端能主动连回来。来源节点没开远程访问时退信，并写明原因。
+实现在 `crates/smeltd/src/peer_messages.rs`，扩展工具不加参数。
+
+- 地址：别的机器上的对话写成 `<runtime_id>/<会话 id>`；本机对话的 id 里没有 `/`。`session_send` 的 `to`、`session_read` 的 `sessionId` 照 `session_list` 给的原样填。
+- 发过去：本机门卫检查完，信照样进发件队列；投递线程经节点连接调对方的 `node.peer_deliver`（只收对端节点）。对方用自己的门卫和发件队列投进对话，权限档位、积压上限在那边比。对方收下，这边就算交出去了（`sent` 里是 `forwarded`）；对方投不进去，会把退信发回来。
+- 来源：交出去时，本机对话的 id 带上本机的 runtime id，对方收到的来源就是 `<本机 runtime_id>/<会话 id>`。收信端的提示里写着回给谁，照着回就送回来。对方只收来源是调用方自己那台机器上的对话，不能冒充别的机器。标题后面加上机器名。
+- 权限：智能体主动找别的机器（发、读、列），要用户在机器菜单里打开「允许本机智能体使用」。回给发消息过来的那个对话不需要。跳数预算跟着消息走。
+- `session_list`：同时问允许智能体使用的那几台机器（`node.peer_list`），问不到的写在最后；`session_read` 经 `node.peer_read`。
+- `session_spawn` 只在本机：新对话照抄发起方的启动规格和项目路径，换台机器就不成立。
+- 只在内存里：「收到过谁的消息」最多记 1024 对，守护重启后就没了，那之后回信要用户允许过那台机器。
 
 ## 8 · 数据库
 
@@ -120,4 +126,4 @@ CREATE TABLE peer_node (
 |---|---|
 | PR1 | smelt-iroh 节点端点（同一个 endpoint 收发）、`peer_node`、`node.pair/unpair`、`peer.*`、`op=forward` 和权限、命令行 `--machine` / `machine list` |
 | PR2 | 桌面改走本机转发、迁移旧机器、机器页的智能体开关、连接质量 |
-| PR3 | 跨节点会话消息 |
+| PR3 | 跨节点会话消息（`node.peer_deliver/list/read`，`<runtime_id>/<会话 id>` 地址） |

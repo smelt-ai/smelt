@@ -209,6 +209,30 @@ pub(crate) fn release_dial_only() {
     drop(dial_only);
 }
 
+/// 本节点的对端，按配对先后。读不到库时是空的。
+pub(crate) fn peers() -> Vec<PeerNodeRecord> {
+    smelt_core::sqlite_state::default_sqlite_store()
+        .and_then(|store| store.list_peer_nodes().map_err(|error| error.to_string()))
+        .unwrap_or_default()
+}
+
+pub(crate) fn peer_record(runtime_id: &str) -> Option<PeerNodeRecord> {
+    smelt_core::sqlite_state::default_sqlite_store()
+        .ok()?
+        .peer_node(runtime_id)
+        .ok()?
+}
+
+/// 经本节点的 endpoint 直接调一个对端的客户端（守护自己往外发，不经 `op=forward`）。
+/// 第一次连接时才拨号；阻塞，不能在 tokio 运行时里用。
+pub(crate) fn peer_client(peer: &PeerNodeRecord) -> RuntimeClient {
+    let peer = peer.clone();
+    RuntimeClient::new(move || {
+        let connector = connector(&peer).map_err(std::io::Error::other)?;
+        smelt_runtime_client::Connector::connect(connector.as_ref())
+    })
+}
+
 /// 连入的 endpoint 是哪个对端。
 pub(crate) fn peer_by_endpoint(endpoint_id: &str) -> Result<Option<String>, String> {
     smelt_core::sqlite_state::default_sqlite_store()

@@ -93,3 +93,27 @@ pub struct PeerLinkResult {
     #[serde(default)]
     pub link: Option<PeerLink>,
 }
+
+/// `node.peer_deliver`：对端节点把一条对话消息交给本节点，投给本节点上的对话 `to`。
+/// `delivery.source_session_id` 带着来源机器（`<runtime_id>/<会话 id>`），回信照它发回去。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePeerDeliverParams {
+    pub to: String,
+    pub delivery: crate::acp_session::PeerDelivery,
+    /// 发送方是不是「完全访问」：逐次审批的对话不能给完全访问的对话发消息。
+    pub source_bypasses: bool,
+}
+
+/// `node.peer_list`：本节点上能收消息的对话，形状同本机 `session_list` 的每一项。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePeerListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+/// `node.peer_read`：本节点上一个对话最近的回复，形状同本机 `session_read` 的回答。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePeerReadParams {
+    pub session_id: String,
+    pub limit: usize,
+}

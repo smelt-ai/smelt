@@ -996,6 +996,12 @@ pi_calls! {
     NodePair => NodePair(crate::peer_node::NodePairParams) -> crate::peer_node::NodeInfo;
     /// 对端请本节点删掉它。只收对端节点。
     NodeUnpair => NodeUnpair(EmptyParams) -> EmptyParams;
+    /// 对端节点交来一条对话消息，投给本节点上的对话。只收对端节点。
+    NodePeerDeliver => NodePeerDeliver(crate::peer_node::NodePeerDeliverParams) -> EmptyParams;
+    /// 本节点上能收消息的对话。只收对端节点。
+    NodePeerList => NodePeerList(crate::peer_node::NodePeerListParams) -> serde_json::Value;
+    /// 本节点上一个对话最近的回复。只收对端节点。
+    NodePeerRead => NodePeerRead(crate::peer_node::NodePeerReadParams) -> serde_json::Value;
     /// 本节点的对端。只收本机。
     PeerList => PeerList(EmptyParams) -> crate::peer_node::PeerList;
     /// 用对方的配对串双向配对。只收本机签过名的桌面。

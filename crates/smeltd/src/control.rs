@@ -382,6 +382,14 @@ fn dispatch_control(
             event_hub.mark_attention_read(&params.session_id);
             success_value(control_version, &request_id, EmptyParams::default())
         }
+        message @ (ControlMethod::NodePeerDeliver
+        | ControlMethod::NodePeerList
+        | ControlMethod::NodePeerRead) => {
+            match peer_message_call(message, params, principal, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         peer @ (ControlMethod::NodePair
         | ControlMethod::NodeUnpair
         | ControlMethod::PeerList
@@ -1771,6 +1779,50 @@ pub(crate) fn handle_control<C: ClientSocket + crate::protocol::PeerSource>(
         Err(failure) => error_value(failure.response_version, failure.request_id, failure.error),
     };
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
+}
+
+/// 对端节点之间的对话消息（`node.peer_*`），只收对端节点：调用方是哪台机器取自连接。
+fn peer_message_call(
+    method: ControlMethod,
+    params: serde_json::Value,
+    principal: &crate::devices::Principal,
+    acp_sessions: &AcpSessions,
+    event_hub: &EventHubHandle,
+) -> Result<serde_json::Value, ControlError> {
+    use smelt_core::peer_node::{NodePeerDeliverParams, NodePeerListParams, NodePeerReadParams};
+    let crate::devices::Principal::Peer { runtime_id, .. } = principal else {
+        return Err(ControlError::new(
+            ControlErrorCode::PermissionDenied,
+            "Only a paired machine can exchange conversation messages",
+        ));
+    };
+    let encode = |value: serde_json::Value| Ok(value);
+    match method {
+        ControlMethod::NodePeerDeliver => {
+            let params = decode_params::<NodePeerDeliverParams>(params)?;
+            crate::peer_messages::accept_remote(runtime_id, params, acp_sessions, event_hub)?;
+            encode(serde_json::json!({}))
+        }
+        ControlMethod::NodePeerList => {
+            let params = decode_params::<NodePeerListParams>(params)?;
+            encode(crate::peer_messages::list_for_peer(
+                acp_sessions,
+                params.query.as_deref(),
+            ))
+        }
+        ControlMethod::NodePeerRead => {
+            let params = decode_params::<NodePeerReadParams>(params)?;
+            encode(crate::peer_messages::read_for_peer(
+                acp_sessions,
+                &params.session_id,
+                params.limit,
+            ))
+        }
+        other => Err(ControlError::new(
+            ControlErrorCode::Internal,
+            format!("`{other}` is not a peer message method"),
+        )),
+    }
 }
 
 #[cfg(test)]
