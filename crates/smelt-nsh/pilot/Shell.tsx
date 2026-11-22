@@ -1,20 +1,14 @@
 // 试点的外壳：按方案 2 摆的一块 NSH 界面，嵌在 smelt 的停靠区里（`smelt-nsh`）。插件只按 id 留格子
-// （`Slot`），各自一包，装、改、删都不动这里。
-// 左边顶上和底下是启动栏插件的两个视图，中间是本机的对话（每行一个小人插件的头像，另留一个转圈
-// 量整块重画）；右边上半是点中的那段对话，下半是新开的终端，都是宿主登记的视图，作原生组件
-// `smelt.view` 嵌进来。「菜单」是 TSX 画的弹层，试它盖不盖得住终端。
+// （`Slot`），各自跑在独立 QuickJS VM 里，装、改、删都不动这里。
+// 左边顶上和底下是启动栏插件的两个视图，中间是独立的会话列表插件（它内部按跨 VM 插槽嵌小人插件）；
+// 右边上半是当前选中的对话，下半是新开的终端，都是宿主登记的视图，作原生组件 `smelt.view` 嵌进来。
+// 「菜单」是 TSX 画的弹层，试它盖不盖得住终端。
 
-import { nativeComponent, nativeModule, Scroll, signal, Text, View } from "nsh";
+import { host, nativeComponent, nativeModule, signal, Text, View } from "nsh";
 import { Popover } from "nsh/base";
+import { Slot } from "smelt/slots";
 
-import { Slot } from "./slots.tsx";
-
-interface Conversation { id: string; conversation: string; title: string }
-
-/** `smelt/pilot` 的 `Smelt`（`smelt-nsh` 的 `src/module.rs`）。 */
 interface SmeltApi {
-  /** 本机现在的对话，之后每变一次再给一次；返回停止监听的函数。 */
-  on(event: "conversations", listener: (list: Conversation[]) => void): () => void;
   /** 新的守护会话 id。 */
   newSessionId(): string;
 }
@@ -33,8 +27,30 @@ const SmeltButton = nativeComponent<{ label: string; small?: boolean }, { press:
   events: ["press"],
 });
 
-const conversations = signal<Conversation[]>([]);
-Smelt.on("conversations", (list) => conversations.set(list));
+interface ActiveSession {
+  machine: string | null;
+  id: string;
+}
+
+const activeSession = signal<ActiveSession | null>(null);
+let stateRevision = -1;
+
+function receiveState(next: any) {
+  if (!next || typeof next.revision !== "number" || next.revision <= stateRevision) return;
+  stateRevision = next.revision;
+  const session = next.active_context?.session;
+  if (session && typeof session.id === "string") {
+    const current = activeSession();
+    if (!current || current.id !== session.id || current.machine !== (session.machine ?? null)) {
+      activeSession.set({ machine: session.machine ?? null, id: session.id });
+    }
+  } else if (activeSession() !== null) {
+    activeSession.set(null);
+  }
+}
+
+host.on("smelt.state", receiveState);
+host.call("state").then(receiveState, () => {});
 
 const MENU = [
   { id: "first", title: "第一项" },
@@ -43,48 +59,31 @@ const MENU = [
 ];
 
 export function Shell() {
-  const picked = signal("");
   const terminal = signal("");
   const menu = signal(false);
   const chosen = signal("");
 
   return (
     <View class="flex-1 flex-row">
-      <View class="border-r border-border" style={{ width: 260 }}>
+      <View class="border-r border-border flex-col" style={{ width: 260 }}>
         <Slot id="launcher" view="Nav" args={{ edges: ["top", "left"] }} />
-        <View class="flex-row items-center gap-2 px-3 py-2">
-          <View class="size-3 rounded-full border-2 border-foreground border-t-transparent animate-spin" />
-          <Text class="flex-1 text-sm font-medium text-foreground">对话</Text>
-        </View>
-        <Scroll style={{ flex: 1 }}>
-          <View class="gap-0.5 px-2 pb-2">
-            <Each of={conversations()} key={(conversation: Conversation) => conversation.id}>
-              {(conversation: () => Conversation) => (
-                <View
-                  role="button"
-                  onPress={() => picked.set(conversation().id)}
-                  class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1 active:bg-accent ${
-                    picked() === conversation().id ? "bg-accent" : ""
-                  }`}
-                >
-                  <Slot id="buddies" args={{ machine: null, conversation: conversation().conversation }} />
-                  <Text class="flex-1 min-w-0 text-sm text-foreground" style={{ numberOfLines: 1 }}>
-                    {conversation().title}
-                  </Text>
-                </View>
-              )}
-            </Each>
-          </View>
-        </Scroll>
+        <Slot
+          id="session-list"
+          args={{ avatarPlugin: "buddies" }}
+          style={{ flex: 1, minHeight: 0 }}
+        />
         <View class="py-1.5">
           <Slot id="launcher" view="Settings" args={{ corner: "bottom-left" }} />
         </View>
       </View>
       <View class="flex-1">
         <View class="flex-1">
-          {picked() ? (
+          {activeSession() ? (
             <SmeltView
-              spec={{ view: "smelt.conversation/conversation", args: { machine: null, session_id: picked() } }}
+              spec={{
+                view: "smelt.conversation/conversation",
+                args: { machine: activeSession()!.machine, session_id: activeSession()!.id },
+              }}
               style={{ flex: 1 }}
             />
           ) : (

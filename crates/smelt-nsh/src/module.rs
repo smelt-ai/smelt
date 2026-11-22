@@ -1,73 +1,25 @@
-//! `smelt/pilot`：给试点面板的宿主模块，JS 里 `nativeModule("smelt/pilot")` 拿 `Smelt`。
+//! `smelt/pilot`：给外壳和所有插件的纯同步宿主模块，JS 里 `nativeModule("smelt/pilot")` 拿 `Smelt`。
 //!
-//! 模块函数跑在 NSH 的引擎线程，不能碰 GPUI（宿主的东西都在主线程）。本机的对话列表放在一个
-//! `watch` 里，主线程在会话变了时换一份，`Smelt.on("conversations")` 在引擎线程上等它变。
+//! 跑在 NSH 的引擎线程，不碰 GPUI、不做磁盘或网络 IO；只放和运行时协议共用同一份规则的纯函数
+//! （路径规范、项目名、新建会话启动规格、UUID、本机系统标识），不认识任何具体插件。
 
-use std::{cell::RefCell, rc::Rc, sync::LazyLock};
-
-use gpui::App;
 use nsh_core::prelude::*;
-use smelt_plugin_api::{self as api, HostEvent, RuntimeKey};
-use tokio::sync::watch;
+use smelt_plugin_api::{
+    self as api,
+    model::{
+        agent_host::AgentHostSettings, new_session::NewSessionAction, runtime_path::PathStyle,
+        workspace_directory,
+    },
+};
 
-/// 本机的一段跟智能体的对话。
-#[derive(Clone, Debug, PartialEq, JsObject)]
-pub struct Conversation {
-    /// 守护会话 id，对话视图的 `session_id`。
-    pub id: String,
-    /// 它在目录里的会话 id：插件的视图按这个认它。
-    pub conversation: String,
-    pub title: String,
-}
-
-static CONVERSATIONS: LazyLock<watch::Sender<Vec<Conversation>>> =
-    LazyLock::new(|| watch::Sender::new(Vec::new()));
-
-/// 主线程这头：现在的对话放进 `CONVERSATIONS`，会话一变再放。App 启动时调一次。
-pub(crate) fn serve(cx: &mut App) {
-    publish(cx);
-    cx.subscribe(&api::events(cx), |_, event, cx| {
-        if matches!(event, HostEvent::SessionsChanged) {
-            publish(cx);
-        }
-    })
-    .detach();
-}
-
-fn publish(cx: &App) {
-    let host = api::host(cx);
-    let machine = RuntimeKey::Local;
-    let states = host.session_states(&machine, cx);
-    let conversations = host
-        .workspace_directory(&machine, cx)
-        .map(|directory| {
-            directory
-                .conversations
-                .iter()
-                .filter(|conversation| conversation.archived_at.is_none())
-                .filter_map(|conversation| {
-                    let acp = conversation.acp.as_ref()?;
-                    Some(Conversation {
-                        id: acp.sid.clone(),
-                        conversation: conversation.id.to_string(),
-                        title: api::conversation_name(conversation, &states)
-                            .unwrap_or("对话")
-                            .to_owned(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    CONVERSATIONS.send_if_modified(|current| {
-        let changed = *current != conversations;
-        *current = conversations;
-        changed
-    });
-}
-
-#[cfg(test)]
-pub(crate) fn set_for_test(conversations: Vec<Conversation>) {
-    CONVERSATIONS.send_replace(conversations);
+fn parse_style(style: &str) -> Result<PathStyle, String> {
+    match style {
+        "posix" => Ok(PathStyle::Posix),
+        "windows" => Ok(PathStyle::Windows),
+        other => Err(format!(
+            "style 要是 \"posix\" 或 \"windows\"，收到 {other:?}"
+        )),
+    }
 }
 
 #[module]
@@ -75,36 +27,80 @@ pub struct Smelt;
 
 #[module]
 impl Smelt {
-    /// 新的守护会话 id，给摆新终端的一方。
+    /// 新的 UUID v4（守护会话 id、新建对话 id 等）。
     pub fn new_session_id() -> String {
         uuid::Uuid::new_v4().to_string()
     }
 
-    /// 现在的对话交给 `listener`，之后每变一次再交一次（事件只有 `conversations`），直到调
-    /// 返回的函数或调用方没了。
-    pub fn on(
-        event: String,
-        listener: Callback<Vec<Conversation>>,
-        cx: CallCx<'_>,
-    ) -> Result<Stop, String> {
-        if event != "conversations" {
-            return Err(format!("没有 Smelt 事件 `{event}`"));
+    /// 本机操作系统标识，同 Node `os.platform()`（`"darwin"` / `"linux"` / `"win32"`）。
+    pub fn local_os() -> String {
+        match std::env::consts::OS {
+            "macos" => "darwin",
+            "windows" => "win32",
+            other => other,
         }
-        let listener = Rc::new(RefCell::new(Some(listener)));
-        let held = listener.clone();
-        cx.start(async move {
-            let mut conversations = CONVERSATIONS.subscribe();
-            loop {
-                let Some(listener) = held.borrow().clone() else {
-                    return;
-                };
-                listener.post(conversations.borrow_and_update().clone());
-                if conversations.changed().await.is_err() {
-                    return;
-                }
-            }
-        });
-        Ok(Stop::new(move || drop(listener.take())))
+        .to_owned()
+    }
+
+    pub fn path_clean(style: String, path: String) -> Result<String, String> {
+        Ok(parse_style(&style)?.clean(&path))
+    }
+
+    pub fn path_join(style: String, base: String, child: String) -> Result<String, String> {
+        Ok(parse_style(&style)?.join(&base, &child))
+    }
+
+    pub fn path_file_name(style: String, path: String) -> Result<Option<String>, String> {
+        Ok(parse_style(&style)?.file_name(&path).map(str::to_owned))
+    }
+
+    pub fn path_parent(style: String, path: String) -> Result<Option<String>, String> {
+        Ok(parse_style(&style)?.parent(&path))
+    }
+
+    pub fn path_is_absolute(style: String, path: String) -> Result<bool, String> {
+        Ok(parse_style(&style)?.is_absolute(&path))
+    }
+
+    pub fn path_starts_with(style: String, path: String, base: String) -> Result<bool, String> {
+        Ok(parse_style(&style)?.starts_with(&path, &base))
+    }
+
+    pub fn project_labels(style: String, roots: Vec<String>) -> Result<Vec<String>, String> {
+        let style = parse_style(&style)?;
+        let refs: Vec<&str> = roots.iter().map(String::as_str).collect();
+        Ok(workspace_directory::project_labels(style, &refs))
+    }
+
+    pub fn project_root_of(
+        style: String,
+        roots: Vec<String>,
+        path: String,
+    ) -> Result<Option<String>, String> {
+        let style = parse_style(&style)?;
+        Ok(workspace_directory::project_root_of(style, &roots, &path).map(str::to_owned))
+    }
+
+    pub fn new_session_icon(action_json: String) -> Result<String, String> {
+        let action: NewSessionAction = serde_json::from_str(&action_json)
+            .map_err(|error| format!("new_session_icon：action 不对：{error}"))?;
+        Ok(api::new_session_icon(&action.target))
+    }
+
+    pub fn conversation_acp(
+        settings_json: String,
+        option_id: String,
+        sid: String,
+        cwd: String,
+    ) -> Result<Option<String>, String> {
+        let settings: AgentHostSettings = serde_json::from_str(&settings_json)
+            .map_err(|error| format!("conversation_acp：settings 不对：{error}"))?;
+        match api::conversation_acp(&settings, &option_id, sid, cwd) {
+            Some(acp) => serde_json::to_string(&acp)
+                .map(Some)
+                .map_err(|error| format!("conversation_acp：序列化失败：{error}")),
+            None => Ok(None),
+        }
     }
 }
 

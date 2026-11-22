@@ -40,7 +40,12 @@ export function provideViews(pluginId: string, views: Views) {
     if (typeof Comp !== "function") return;
     const args = signal<unknown>(initialArgs);
     const dispose = mountSlot(target, () => (
-      <ErrorBoundary fallback={<Failed id={pluginId} />}>
+      <ErrorBoundary
+        fallback={(error: unknown) => {
+          console.error(`[plugin:${pluginId}] render error:`, error);
+          return <Failed id={pluginId} />;
+        }}
+      >
         <Comp args={args()} />
       </ErrorBoundary>
     ));

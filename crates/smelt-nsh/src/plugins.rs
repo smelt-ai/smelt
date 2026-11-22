@@ -31,6 +31,8 @@ use serde_json::{Value, json};
 const APP: &str = include_str!("plugins/App.tsx");
 const PROVIDER: &str = include_str!("plugins/provider.tsx");
 const SLOTS: &str = include_str!("plugins/slots.tsx");
+/// 外壳和所有插件共用的别名配置：允许用 `import { Slot } from "smelt/slots"`。
+const NSH_CONFIG: &str = r#"{"resolve":{"alias":{"smelt/slots":"./slots.tsx"}}}"#;
 
 /// 放置方（外壳或插件）上报跨 VM 插槽增改删批次。
 const SLOT_OPS: &str = "smelt.slot.ops";
@@ -90,7 +92,7 @@ impl Plugins {
         let stage = stage.canonicalize().map_err(io)?;
         let dir = stage.join("shell");
         let files = [
-            ("nsh.json", "{}"),
+            ("nsh.json", NSH_CONFIG),
             ("App.tsx", APP),
             ("slots.tsx", SLOTS),
             ("Shell.tsx", shell),
@@ -153,7 +155,7 @@ impl Plugins {
             .iter()
             .map(|(path, bytes)| (Path::new("plugin").join(path), bytes.as_slice()))
             .chain([
-                (PathBuf::from("nsh.json"), b"{}".as_slice()),
+                (PathBuf::from("nsh.json"), NSH_CONFIG.as_bytes()),
                 (PathBuf::from("provider.tsx"), PROVIDER.as_bytes()),
                 (PathBuf::from("slots.tsx"), SLOTS.as_bytes()),
                 (PathBuf::from("entry.ts"), entry.as_bytes()),
@@ -276,19 +278,56 @@ impl PluginHost {
         }
     }
 
+    /// 把一条宿主事件广播给外壳和此刻存活的全部插件 VM。
+    pub fn broadcast_all(&self, event: &str, data: Value) {
+        let channels: Vec<HostChannel> = {
+            let inner = self.lock();
+            inner
+                .shell_channel
+                .iter()
+                .cloned()
+                .chain(inner.plugins.values().map(|entry| entry.channel.clone()))
+                .collect()
+        };
+        for channel in channels {
+            if let Err(error) = channel.send(event, data.clone()) {
+                eprintln!("[nsh-plugins] 广播 {event} 失败：{error}");
+            }
+        }
+    }
+
+    /// 把一条宿主事件只推给指定的插件 VM。
+    pub fn send_to(&self, plugin: &str, event: &str, data: Value) {
+        let channel = self
+            .lock()
+            .plugins
+            .get(plugin)
+            .map(|entry| entry.channel.clone());
+        if let Some(channel) = channel
+            && let Err(error) = channel.send(event, data)
+        {
+            eprintln!("[nsh-plugins] 推送 {event} 给 {plugin} 失败：{error}");
+        }
+    }
+
     /// 把一次变更交给引擎：外壳和插件各自运行在 `harden: true` 的独立 QuickJS VM 中。
     pub fn apply(&self, view: &AppView, change: Change) {
         match change {
             Change::Start { shell, plugins } => {
                 let shell_channel = view.host();
-                let generation = {
+                let (generation, handlers) = {
                     let mut inner = self.lock();
                     inner.next_generation += 1;
                     inner.shell_channel = Some(shell_channel.clone());
                     inner.plugins.clear();
                     inner.instances.clear();
                     inner.failed.clear();
-                    inner.next_generation
+                    let handlers: Vec<(String, CallHandler)> = inner
+                        .handlers
+                        .iter()
+                        .map(|(name, f)| (name.clone(), f.clone()))
+                        .collect();
+                    (inner.next_generation, handlers)
                 };
                 let mut params = serde_json::Map::new();
                 params.insert(
@@ -298,9 +337,15 @@ impl PluginHost {
                 shell_channel.set_params(params);
                 self.attach_slot_ops(&shell_channel, SHELL_OWNER.to_owned(), generation);
 
+                let mut declared_host = vec![SLOT_OPS.to_owned()];
+                for (name, handler) in handlers {
+                    declared_host.push(name.clone());
+                    shell_channel.handle(name, move |call| handler(SHELL_OWNER, call));
+                }
+
                 let mut policy = Policy::default();
                 let mut declared = Capabilities::all();
-                declared.host = vec![SLOT_OPS.to_owned()];
+                declared.host = declared_host;
                 policy.declared = Some(declared);
                 view.load(App::Js(
                     Bundle::source(shell.to_string()).with_policy(policy),

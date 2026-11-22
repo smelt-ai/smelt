@@ -57,7 +57,13 @@ function Failed(props: { id: string }) {
 }
 
 /** 插件 `id` 入口文件导出的一个视图；不写 `view` 就是默认导出。 */
-export function Slot(props: { id: string; view?: string; args?: unknown }) {
+export function Slot(props: {
+  id: string;
+  view?: string;
+  args?: unknown;
+  class?: string;
+  style?: any;
+}) {
   const instance = `${ownerPrefix}:${++nextInstance}`;
   const target = `smelt:i:${instance}`;
   let mounted = false;
@@ -91,7 +97,7 @@ export function Slot(props: { id: string; view?: string; args?: unknown }) {
   });
 
   return (
-    <View slotTarget={target}>
+    <View slotTarget={target} class={props.class} style={props.style}>
       {failedOf(props.id)() ? <Failed id={props.id} /> : null}
     </View>
   );

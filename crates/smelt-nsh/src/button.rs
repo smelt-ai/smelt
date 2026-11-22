@@ -21,6 +21,8 @@ pub(crate) struct SmeltButton {
     /// 悬停提示带上这条命令绑的键。
     command: Option<SharedString>,
     quiet: bool,
+    primary: bool,
+    danger: bool,
     small: bool,
     fill: bool,
     reported: (f32, f32),
@@ -35,6 +37,8 @@ impl SmeltButton {
             tooltip: None,
             command: None,
             quiet: false,
+            primary: false,
+            danger: false,
             small: false,
             fill: false,
             reported: (0., 0.),
@@ -43,15 +47,22 @@ impl SmeltButton {
 
     /// 样子：量的和画的是同一份。
     fn look(&self, id: &'static str) -> smelt_ui::Button {
-        let mut button = smelt_ui::Button::new(id)
-            .accessibility_label(self.label.clone())
-            .child(
+        let mut button = smelt_ui::Button::new(id).accessibility_label(self.label.clone());
+        if !self.label.is_empty() {
+            button = button.child(
                 div()
                     .min_w_0()
                     .overflow_hidden()
                     .child(smelt_ui::truncated_line::truncated_line(self.label.clone())),
             );
-        if self.quiet {
+        }
+        if self.danger && self.quiet {
+            button = button.danger_quiet();
+        } else if self.danger {
+            button = button.danger();
+        } else if self.primary {
+            button = button.primary();
+        } else if self.quiet {
             button = button.quiet();
         }
         if self.small {
@@ -121,6 +132,8 @@ impl NativeComponent for SmeltButton {
             "tooltip" => self.tooltip = text(),
             "command" => self.command = text(),
             "quiet" => self.quiet = flag(),
+            "primary" => self.primary = flag(),
+            "danger" => self.danger = flag(),
             "small" => self.small = flag(),
             "fill" => self.fill = flag(),
             _ => return,
