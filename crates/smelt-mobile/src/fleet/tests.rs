@@ -270,9 +270,13 @@ impl Route for FakeRoute {
                 rtt_ms: Some(3),
             }),
             watch: Arc::new(move |on_change: OnLinkChange| -> Box<dyn Send> {
-                if runtime.online.load(Ordering::SeqCst) {
-                    runtime.watchers.lock().unwrap().push(on_change);
+                // 同真连接：盯上时已经断了（下线、被撤销）立刻报关闭。和 `revoke` 取走回调
+                // 用同一把锁，撤销夹在判断和登记之间时也不丢。
+                let mut watchers = runtime.watchers.lock().unwrap();
+                if runtime.online.load(Ordering::SeqCst) && runtime.paired.load(Ordering::SeqCst) {
+                    watchers.push(on_change);
                 } else {
+                    drop(watchers);
                     on_change(LinkChange::Closed);
                 }
                 Box::new(())
