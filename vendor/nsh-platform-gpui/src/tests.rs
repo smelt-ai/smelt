@@ -186,6 +186,9 @@ fn windows(cx: &mut TestAppContext) {
     // The tests' JS imports all of `nsh/base` (Popover etc.), not only the
     // core part a host serves by default.
     crate::set_ui_sets(vec![nsh_base::registry()]);
+    // SMELT: what is drawn over native components takes their pointer.
+    what_is_drawn_over_a_native_component_takes_the_pointer(cx);
+    a_press_on_a_native_component_closes_a_popover(cx);
     keys_reach_the_fields_of_a_surface_showing_a_native_component(cx);
     a_captured_key_release_is_kept_from_the_window(cx);
     compositions_are_reported_and_hold_values_until_they_end(cx);
@@ -2180,4 +2183,297 @@ fn a_background_app_s_hidden_main_window_is_not_focused(cx: &mut TestAppContext)
     request(WindowRequest::Show, cx);
     wait_for(&view, cx, "focused=true");
     cx.update(|_, cx| crate::window::set_in_background(false, cx));
+}
+
+// SMELT: native components under NSH content (the rest of the file is upstream's).
+
+/// A native component that logs the presses and wheels it gets.
+struct Pad {
+    log: Rc<std::cell::RefCell<Vec<String>>>,
+    name: String,
+}
+
+impl NativeComponent for Pad {
+    fn render(&mut self, _: &mut Window, _: &mut GpuiApp) -> Option<AnyElement> {
+        use gpui::InteractiveElement as _;
+        let (pressed, scrolled) = (self.log.clone(), self.log.clone());
+        let (press, scroll) = (self.name.clone(), self.name.clone());
+        Some(
+            div()
+                .size_full()
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
+                    pressed.borrow_mut().push(format!("press {press}"));
+                })
+                .on_scroll_wheel(move |_, _, _| {
+                    scrolled.borrow_mut().push(format!("wheel {scroll}"));
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn set_prop(
+        &mut self,
+        name: &str,
+        value: Option<&serde_json::Value>,
+        _: &mut Window,
+        _: &mut GpuiApp,
+    ) {
+        let value = value.and_then(|v| v.as_str()).unwrap_or_default();
+        match name {
+            "name" => self.name = value.to_owned(),
+            // What the app heard.
+            "heard" => self.log.borrow_mut().push(value.to_owned()),
+            _ => {}
+        }
+    }
+}
+
+const OVER_COMPONENT: &str = r##"
+import { mount, nativeComponent, signal, View } from "nsh";
+import { Scroll } from "nsh";
+
+const Pad = nativeComponent<{ name: string; heard?: string }, {}>("test.pad", { props: ["name", "heard"], events: [] });
+
+function App() {
+  const heard = signal("");
+  const late = signal(false);
+  const closed = signal(false);
+  setTimeout(() => {
+    late.set(true);
+    heard.set("ready");
+  }, 0);
+  let n = 0;
+  const hear = (what) => () => heard.set(`${what} ${++n}`);
+  const at = (left, top, width, height) => ({ position: "absolute", left, top, width, height });
+  return (
+    <View style={{ flex: 1 }}>
+      <View style={at(0, 0, 400, 300)}>
+        <Pad name="under" heard={heard()} style={at(0, 0, 400, 300)} />
+      </View>
+      <View style={{ ...at(0, 0, 400, 300), pointerEvents: "box-none" }}>
+        <View role="button" onPress={hear("button")} onMouseEnter={hear("enter")} style={at(20, 20, 60, 40)} />
+        <View role="button" hitSlop={10} onPress={hear("slop")} style={at(120, 20, 40, 20)} />
+        {closed() ? null : <View role="button" onPress={() => { closed.set(true); hear("close")(); }} style={at(20, 100, 60, 30)} />}
+      </View>
+      <View style={{ ...at(20, 150, 60, 30), pointerEvents: "none" }} />
+      <View style={{ ...at(100, 100, 40, 40), overflow: "hidden", pointerEvents: "box-none" }}>
+        <View role="button" onPress={hear("clipped")} style={at(0, 0, 100, 40)} />
+      </View>
+      <Scroll style={at(20, 200, 100, 60)}>
+        <View role="button" onPress={hear("row")} style={{ height: 500 }} />
+      </Scroll>
+      <View role="button" onPress={hear("below")} style={at(180, 10, 100, 60)} />
+      <Pad name="above" style={at(180, 20, 40, 40)} />
+      <View role="button" onPress={hear("panel")} style={at(300, 20, 60, 60)}>
+        <Pad name="inner" style={at(0, 0, 60, 30)} />
+        <View role="button" onPress={hear("nested")} style={at(0, 0, 20, 30)} />
+        <View role="button" onPress={hear("overhang")} style={at(0, 70, 40, 30)} />
+      </View>
+      {late() ? <Pad name="late" style={at(300, 200, 100, 100)} /> : null}
+      <Pad name="top" style={at(300, 200, 50, 100)} />
+    </View>
+  );
+}
+mount(App);
+"##;
+
+fn what_is_drawn_over_a_native_component_takes_the_pointer(cx: &mut TestAppContext) {
+    let code = nsh_bundler::compile_module("App.tsx", OVER_COMPONENT, &[]).unwrap();
+    let log = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    let component_log = log.clone();
+    view.update(cx, |view, _| {
+        view.register_component(
+            "test.pad",
+            Rc::new(move |_| {
+                Box::new(Pad {
+                    log: component_log.clone(),
+                    name: String::new(),
+                })
+            }),
+        );
+        view.load(App::Js(Bundle::source(code)));
+    });
+    wait_until_window(cx, "the pads are drawn", |cx| {
+        cx.update(|window, _| window.refresh());
+        log.borrow().iter().any(|line| line == "ready")
+    });
+    cx.run_until_parked();
+    let at = |x: f32, y: f32| gpui::point(gpui::px(x), gpui::px(y));
+    let expect = |cx: &mut VisualTestContext, wanted: &str| {
+        wait_until_window(cx, wanted, |_| {
+            log.borrow().iter().any(|line| line.starts_with(wanted))
+        });
+        let wrong = log
+            .borrow()
+            .iter()
+            .find(|line| {
+                let press = line.starts_with("press ") || line.starts_with("wheel ");
+                press && !line.starts_with(wanted)
+            })
+            .cloned();
+        assert_eq!(wrong, None, "wanted {wanted}");
+        log.borrow_mut().clear();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    };
+    let none = gpui::Modifiers::default();
+    log.borrow_mut().clear();
+
+    cx.simulate_mouse_move(at(50.0, 40.0), None, none);
+    expect(cx, "enter");
+    cx.simulate_click(at(50.0, 40.0), none);
+    expect(cx, "button");
+    // Where the box-none layer has nothing, and through `none`.
+    cx.simulate_click(at(250.0, 120.0), none);
+    expect(cx, "press under");
+    cx.simulate_click(at(40.0, 165.0), none);
+    expect(cx, "press under");
+    cx.simulate_click(at(115.0, 30.0), none);
+    expect(cx, "slop");
+    cx.simulate_click(at(120.0, 120.0), none);
+    expect(cx, "clipped");
+    // Clipped away, the component has it.
+    cx.simulate_click(at(170.0, 120.0), none);
+    expect(cx, "press under");
+    // A component drawn over a view keeps it.
+    cx.simulate_click(at(200.0, 40.0), none);
+    expect(cx, "press above");
+    cx.simulate_click(at(260.0, 40.0), none);
+    expect(cx, "below");
+    // A component within what covers another, what covers it in turn, and
+    // what reaches out of its parent's box.
+    cx.simulate_click(at(330.0, 70.0), none);
+    expect(cx, "panel");
+    cx.simulate_click(at(340.0, 30.0), none);
+    expect(cx, "press inner");
+    cx.simulate_click(at(310.0, 30.0), none);
+    expect(cx, "nested");
+    cx.simulate_click(at(310.0, 105.0), none);
+    expect(cx, "overhang");
+    // Components stack as they are drawn, not as they were made.
+    cx.simulate_click(at(325.0, 250.0), none);
+    expect(cx, "press top");
+    cx.simulate_click(at(375.0, 250.0), none);
+    expect(cx, "press late");
+    // A scroll view over the component takes the wheel.
+    cx.simulate_mouse_move(at(70.0, 230.0), None, none);
+    cx.run_until_parked();
+    log.borrow_mut().clear();
+    cx.simulate_event(gpui::ScrollEvent {
+        position: at(70.0, 230.0),
+        delta: gpui::ScrollDelta::Pixels(at(0.0, -20.0)),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *log.borrow(),
+        Vec::<String>::new(),
+        "the wheel went through"
+    );
+    cx.simulate_click(at(70.0, 230.0), none);
+    expect(cx, "row");
+    // Gone, it leaves the component its box.
+    cx.simulate_click(at(50.0, 115.0), none);
+    expect(cx, "close");
+    cx.simulate_click(at(50.0, 115.0), none);
+    expect(cx, "press under");
+}
+
+const POPOVER_OVER_COMPONENT: &str = r##"
+import { mount, nativeComponent, signal, View } from "nsh";
+import { Popover } from "nsh/base";
+
+const Pad = nativeComponent<{ name: string; heard?: string }, {}>("test.pad", { props: ["name", "heard"], events: [] });
+
+function App() {
+  const heard = signal("");
+  const open = signal(false);
+  setTimeout(() => {
+    open.set(true);
+    heard.set("open");
+  }, 0);
+  return (
+    <View style={{ flex: 1, alignItems: "flex-start" }}>
+      <Popover
+        open={open()}
+        onOpenChange={(next) => { open.set(next.open ?? next); heard.set("closed"); }}
+        align="start"
+        trigger={<View style={{ width: 100, height: 20 }} />}
+      >
+        <View>
+          <View role="button" onPress={() => heard.set("item")} style={{ width: 100, height: 120 }} />
+          <Pad name="inside" style={{ width: 100, height: 30 }} />
+        </View>
+      </Popover>
+      <Pad name="under" heard={heard()} style={{ width: 400, height: 300 }} />
+    </View>
+  );
+}
+mount(App);
+"##;
+
+fn a_press_on_a_native_component_closes_a_popover(cx: &mut TestAppContext) {
+    let code = nsh_bundler::compile_module("App.tsx", POPOVER_OVER_COMPONENT, &[]).unwrap();
+    let log = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    let component_log = log.clone();
+    view.update(cx, |view, _| {
+        view.register_component(
+            "test.pad",
+            Rc::new(move |_| {
+                Box::new(Pad {
+                    log: component_log.clone(),
+                    name: String::new(),
+                })
+            }),
+        );
+        view.load(App::Js(Bundle::source(code)));
+    });
+    let heard = |cx: &mut VisualTestContext, wanted: &str| {
+        wait_until_window(cx, wanted, |cx| {
+            cx.update(|window, _| window.refresh());
+            log.borrow().iter().any(|line| line == wanted)
+        });
+    };
+    heard(cx, "open");
+    let settle = |cx: &mut VisualTestContext| {
+        let since = Instant::now();
+        while since.elapsed() < Duration::from_millis(300) {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            // 轮询例外：用例等引擎线程排好浮层、或确认它没关，没有事件可等；周期 10ms，上限 300ms。
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    // The popup is placed once it is measured, a frame or so after it mounts.
+    settle(cx);
+    log.borrow_mut().clear();
+    // A component in the popover is not outside it.
+    cx.simulate_click(
+        gpui::point(gpui::px(50.0), gpui::px(155.0)),
+        gpui::Modifiers::default(),
+    );
+    settle(cx);
+    assert_eq!(
+        *log.borrow(),
+        ["press inside"],
+        "a press in the popover's component"
+    );
+    log.borrow_mut().clear();
+    cx.simulate_click(
+        gpui::point(gpui::px(50.0), gpui::px(70.0)),
+        gpui::Modifiers::default(),
+    );
+    heard(cx, "item");
+    assert!(!log.borrow().iter().any(|line| line.starts_with("press")));
+    log.borrow_mut().clear();
+    cx.simulate_click(
+        gpui::point(gpui::px(300.0), gpui::px(250.0)),
+        gpui::Modifiers::default(),
+    );
+    heard(cx, "closed");
+    assert!(log.borrow().iter().any(|line| line == "press under"));
 }

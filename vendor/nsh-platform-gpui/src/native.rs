@@ -33,6 +33,8 @@
 //!   report their own size through their [`ComponentContext`], from any
 //!   thread. Registries belong to one `AppView` (and the views made from
 //!   the same [`crate::AppOptions`]): no globals.
+//!   SMELT: what nsh draws above a component has hitboxes of its own over
+//!   the component's ([`Stacking`]), so the pointer there is nsh's.
 //! - **Web views** ([`web`]) are wry web views in GPUI Fast native
 //!   composition surfaces, placed at their view's box by every prepaint.
 //! - **Videos** ([`video`]).
@@ -52,12 +54,12 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AvailableSpace, Bounds, ContentMask, FocusHandle,
+    AnyElement, AnyWindowHandle, App, AvailableSpace, Bounds, ContentMask, FocusHandle, Hitbox,
     HitboxBehavior, IntoElement, ParentElement, Pixels, Styled, Window, px,
 };
 use nsh_core::{
-    Command, EventKind, EventPayload, NativeProps, NodeId, PayloadValue, Points, ROOT_ID, Size,
-    ViewKind,
+    Command, EventKind, EventPayload, NativeProps, NodeId, PayloadValue, PointerEvents, Points,
+    ROOT_ID, Size, ViewKind,
 };
 use nsh_engine::{Access, EngineControl};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -293,6 +295,12 @@ pub(crate) struct NativeState {
     /// The focus handles inside components that the last prepaint found
     /// focused, with their nodes: keys go to them, not to nsh.
     focused: RefCell<Vec<(NodeId, FocusHandle)>>,
+    /// SMELT: the hitboxes over what is drawn above components, from the
+    /// last prepaint: the pointer there is nsh's.
+    covers: RefCell<Vec<Hitbox>>,
+    /// SMELT: one that blocks nothing over each component, from the last
+    /// prepaint: hovered where the pointer is the component's.
+    presses: RefCell<Vec<Hitbox>>,
     /// The component Tab moved to, focused by [`apply_focus`].
     tab_to: std::cell::Cell<Option<NodeId>>,
 }
@@ -507,11 +515,12 @@ pub(crate) fn prepaint(surface: &Rc<Surface>, window: &mut Window, cx: &mut App)
             .filter(|(_, h)| !matches!(h, Host::Video(_)))
             .map(|(id, h)| (*id, h.item_ref()))
             .collect();
-        // Hitboxes stack in insertion order: keep it the same from frame to
-        // frame (nodes made later are usually drawn later, above).
+        // Those not drawn keep one order from frame to frame.
         hosts.sort_unstable_by_key(|(id, _)| *id);
         hosts
     };
+    surface.native.covers.borrow_mut().clear();
+    surface.native.presses.borrow_mut().clear();
     // Video frames (and images) dropped where nothing draws images.
     crate::image::release_dropped(window, cx);
     // Those of the other windows stay as their windows' frames left them.
@@ -522,6 +531,11 @@ pub(crate) fn prepaint(surface: &Rc<Surface>, window: &mut Window, cx: &mut App)
             .view(*id)
             .is_some_and(|v| crate::window::root_of(surface, &v) != this)
     });
+    // SMELT: hitboxes stack in insertion order, so they go in as nsh draws:
+    // the components in draw order, each under what is drawn above it.
+    let mut placed = FxHashMap::default();
+    let mut shown = FxHashMap::default();
+    let mut unordered = Vec::new();
     for (id, host) in hosts {
         let Some(view) = surface.view(id) else {
             continue;
@@ -530,18 +544,221 @@ pub(crate) fn prepaint(surface: &Rc<Surface>, window: &mut Window, cx: &mut App)
             continue;
         }
         let geometry = geometry(surface, &view);
-        match host {
-            HostRef::Component(item) => {
-                item.deliver(window, cx);
-                if let Some(focus) = item.prepaint(geometry, window, cx) {
-                    focused.push((id, focus));
+        if matches!(host, HostRef::Component(_))
+            && let Some(g) = geometry.filter(|g| g.shows())
+        {
+            shown.insert(id, g.visible);
+        }
+        unordered.push(Layer::Host(id));
+        placed.insert(id, (host, view, geometry));
+    }
+    let mut layers = if shown.is_empty() {
+        Vec::new()
+    } else {
+        Stacking::layers(surface, &shown)
+    };
+    // The components not shown and the web views (their own surfaces are
+    // above all that GPUI draws).
+    layers.extend(unordered);
+    for layer in layers {
+        match layer {
+            Layer::Cover(area) => {
+                let cover = window.insert_hitbox(area, HitboxBehavior::BlockMouse);
+                surface.native.covers.borrow_mut().push(cover);
+            }
+            Layer::Host(id) => {
+                let Some((host, view, geometry)) = placed.remove(&id) else {
+                    continue;
+                };
+                match host {
+                    HostRef::Component(item) => {
+                        item.deliver(window, cx);
+                        if let Some(focus) = item.prepaint(geometry, window, cx) {
+                            focused.push((id, focus));
+                        }
+                        if let Some(area) = shown.get(&id) {
+                            let over = window.insert_hitbox(*area, HitboxBehavior::Normal);
+                            surface.native.presses.borrow_mut().push(over);
+                        }
+                    }
+                    HostRef::Web(web) => web.prepaint(surface, &view, geometry, window, cx),
+                    HostRef::Video(_) => {}
                 }
             }
-            HostRef::Web(web) => web.prepaint(surface, &view, geometry, window, cx),
-            HostRef::Video(_) => {}
         }
     }
     *surface.native.focused.borrow_mut() = focused;
+}
+
+/// SMELT: what a prepaint stacks, bottom to top.
+enum Layer {
+    /// A component or web view.
+    Host(NodeId),
+    /// Where something nsh draws is over a component beneath it.
+    Cover(Bounds<Pixels>),
+}
+
+/// SMELT: finds, in draw order, the components and the parts of them that
+/// views drawn later take the pointer over, by the rules hit testing has
+/// ([`crate::input`]'s `pick_in`). It runs every frame, so it goes only into
+/// what has a component in it or can still take the pointer from one.
+struct Stacking<'a> {
+    origin: (f32, f32),
+    /// The visible boxes of the components shown.
+    shown: &'a FxHashMap<NodeId, Bounds<Pixels>>,
+    /// The views with a component shown in them, and those components'.
+    holds: FxHashSet<NodeId>,
+    /// Those of the components drawn so far.
+    beneath: Vec<Bounds<Pixels>>,
+    /// The covers of the views being visited, with the index in `beneath` of
+    /// the component each is over.
+    covered: Vec<(usize, Bounds<Pixels>)>,
+    layers: Vec<Layer>,
+}
+
+impl<'a> Stacking<'a> {
+    fn layers(surface: &Surface, shown: &'a FxHashMap<NodeId, Bounds<Pixels>>) -> Vec<Layer> {
+        let root = surface.input_root();
+        let origin = surface.origin.get();
+        let reach = {
+            let size = root.state().frame.size;
+            crate::render::bounds(origin.0, origin.1, size.width.0, size.height.0)
+        };
+        let mut holds = FxHashSet::default();
+        for id in shown.keys() {
+            let mut above = surface.view(*id);
+            while let Some(view) = above {
+                if !holds.insert(view.id()) {
+                    break;
+                }
+                above = view.parent_view();
+            }
+        }
+        let mut stacking = Stacking {
+            origin,
+            shown,
+            holds,
+            beneath: Vec::new(),
+            covered: Vec::new(),
+            layers: Vec::new(),
+        };
+        stacking.visit(&root, crate::geom::Mat4::new(), Some(reach));
+        stacking.layers
+    }
+
+    /// `world` is `view`'s transform to the root, `reach` where the pointer
+    /// can get to it (`None`: it passes `view` and what is in it).
+    fn visit(&mut self, view: &NshView, world: crate::geom::Mat4, reach: Option<Bounds<Pixels>>) {
+        let Some(s) = view.try_state() else { return };
+        if s.style.hidden || s.concealed {
+            return;
+        }
+        let takes = s.props.pointer_events;
+        let component = self.shown.get(&s.id).copied();
+        let reach = reach.filter(|_| {
+            takes != PointerEvents::None && !s.live.as_ref().is_some_and(|l| l.dying())
+        });
+        let mut inner = reach;
+        let outer = self.covered.len();
+        if let Some(reach) = reach {
+            // A box of the view's, as much of it as the pointer can reach.
+            let on_screen = |left: f32, top: f32, right: f32, bottom: f32| {
+                let (x, y, w, h) = world.bounds(left, top, right - left, bottom - top)?;
+                let (ox, oy) = self.origin;
+                let area = reach.intersect(&crate::render::bounds(x + ox, y + oy, w, h));
+                (!empty(&area)).then_some(area)
+            };
+            let (w, h) = (s.frame.size.width.0, s.frame.size.height.0);
+            let slop = s.props.hit_slop;
+            let (left, top) = (-slop.left.0, -slop.top.0);
+            let (right, bottom) = (w + slop.right.0, h + slop.bottom.0);
+            let mut covers = Vec::new();
+            if component.is_none()
+                && takes != PointerEvents::BoxNone
+                && !self.beneath.is_empty()
+                && let Some(own) = on_screen(left, top, right, bottom)
+            {
+                covers.extend(self.uncovered(own));
+            }
+            inner = if takes == PointerEvents::BoxOnly {
+                None
+            } else if s.clips() {
+                on_screen(0.0, 0.0, w, h)
+            } else if nsh_core::input::laid_out(s.kind, s.id) {
+                match s.overflow {
+                    Some(o) => on_screen(
+                        left.min(o.origin.x.0),
+                        top.min(o.origin.y.0),
+                        right.max(o.origin.x.0 + o.size.width.0),
+                        bottom.max(o.origin.y.0 + o.size.height.0),
+                    ),
+                    None => on_screen(left, top, right, bottom),
+                }
+            } else {
+                Some(reach)
+            };
+            for (under, area) in covers {
+                self.covered.push((under, area));
+                self.layers.push(Layer::Cover(area));
+            }
+        }
+        let id = s.id;
+        drop(s);
+        view.with_children(|children| {
+            for child in children {
+                // One without a component in it matters only where it can
+                // still take the pointer from one beneath it.
+                if !self.holds.contains(&child.id())
+                    && !inner.is_some_and(|area| self.uncovered(area).next().is_some())
+                {
+                    continue;
+                }
+                let Some(local) = child
+                    .try_state()
+                    .map(|child| view.state().child_matrix(&child))
+                else {
+                    continue;
+                };
+                self.visit(child, crate::geom::Mat4::mul(&local, &world), inner);
+            }
+        });
+        self.covered.truncate(outer);
+        // A component is drawn above its container's children.
+        if let Some(area) = component {
+            self.layers.push(Layer::Host(id));
+            self.beneath.push(area);
+        }
+    }
+
+    /// The parts of `area` over components beneath, but those that a view
+    /// being visited covers whole.
+    fn uncovered(&self, area: Bounds<Pixels>) -> impl Iterator<Item = (usize, Bounds<Pixels>)> {
+        self.beneath
+            .iter()
+            .map(move |under| area.intersect(under))
+            .enumerate()
+            .filter(|(under, part)| {
+                !empty(part)
+                    && !self
+                        .covered
+                        .iter()
+                        .any(|(over, cover)| over == under && cover.intersect(part) == *part)
+            })
+    }
+}
+
+/// SMELT: where nsh has the pointer: the surface's hitbox (`own`) and those
+/// over what covers its components.
+pub(crate) fn pointer_hitboxes(surface: &Surface, own: &Hitbox) -> Rc<[Hitbox]> {
+    std::iter::once(own)
+        .chain(surface.native.covers.borrow().iter())
+        .cloned()
+        .collect()
+}
+
+/// SMELT: where components have the pointer.
+pub(crate) fn press_hitboxes(surface: &Surface) -> Vec<Hitbox> {
+    surface.native.presses.borrow().clone()
 }
 
 /// True when focus is inside one of the surface's components: keys go

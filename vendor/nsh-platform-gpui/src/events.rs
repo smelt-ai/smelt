@@ -151,22 +151,44 @@ pub(crate) fn install<V: gpui::EntityInputHandler>(
         window.handle_input(focus, gpui::ElementInputHandler::new(bounds, view), cx);
     }
 
-    if hitbox.is_hovered(window) {
+    // SMELT: the surface's, and those over what covers its components.
+    let hitboxes = crate::native::pointer_hitboxes(surface, hitbox);
+    if let Some(hitbox) = hitboxes.iter().find(|h| h.is_hovered(window)) {
         let (x, y) = root_point(surface, window.mouse_position());
         let c = crate::input::cursor(surface, x, y);
         surface.input.cursor.set(c);
         window.set_cursor_style(cursor_style(c), hitbox);
     }
 
+    // SMELT: a press a component takes is outside the overlays it is not in
+    // (it closes a menu). Captured, as components stop the presses they take.
+    let over = crate::native::press_hitboxes(surface);
+    if !over.is_empty() {
+        let s = surface.clone();
+        window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+            if phase != DispatchPhase::Capture
+                || !matches!(e.button, MouseButton::Left | MouseButton::Right)
+                || !over.iter().any(|h| h.is_hovered_at(e.position, window))
+            {
+                return;
+            }
+            let _in = crate::window::enter(&s, root);
+            let (x, y) = root_point(&s, e.position);
+            crate::input::component_pressed(&s, x, y, crate::keys::modifiers(&e.modifiers));
+            crate::rt::flush(cx);
+        });
+    }
+
     let s = surface.clone();
-    let h = hitbox.clone();
+    let h = hitboxes.clone();
     let f = focus.clone();
     window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
         let _in = crate::window::enter(&s, root);
         // Hit tested at the event's own position against the frame on
         // screen: a press is the surface's whatever the window last saw
         // (no move since it opened, keyboard input since).
-        if phase != DispatchPhase::Bubble || !h.is_hovered_at(e.position, window) {
+        if phase != DispatchPhase::Bubble || !h.iter().any(|h| h.is_hovered_at(e.position, window))
+        {
             return;
         }
         let Some(button) = button(e.button) else {
@@ -275,13 +297,13 @@ pub(crate) fn install<V: gpui::EntityInputHandler>(
     });
 
     let s = surface.clone();
-    let h = hitbox.clone();
+    let h = hitboxes.clone();
     window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
         let _in = crate::window::enter(&s, root);
         if phase != DispatchPhase::Bubble {
             return;
         }
-        let hovered = h.is_hovered_at(e.position, window);
+        let hovered = h.iter().any(|h| h.is_hovered_at(e.position, window));
         if s.input_pressed.get() & 1 != 0 && e.pressed_button.is_none() {
             cancel_press(&s, &e.modifiers);
         }
@@ -349,10 +371,10 @@ pub(crate) fn install<V: gpui::EntityInputHandler>(
     });
 
     let s = surface.clone();
-    let h = hitbox.clone();
+    let h = hitboxes.clone();
     window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
         let _in = crate::window::enter(&s, root);
-        if phase != DispatchPhase::Bubble || !h.should_handle_scroll(window) {
+        if phase != DispatchPhase::Bubble || !h.iter().any(|h| h.should_handle_scroll(window)) {
             return;
         }
         let (x, y) = root_point(&s, e.position);
@@ -407,7 +429,7 @@ pub(crate) fn install<V: gpui::EntityInputHandler>(
     });
 
     let s = surface.clone();
-    let h = hitbox.clone();
+    let h = hitboxes.clone();
     window.on_mouse_event(move |e: &PinchEvent, phase, window, cx| {
         let _in = crate::window::enter(&s, root);
         if phase != DispatchPhase::Bubble {
@@ -415,7 +437,10 @@ pub(crate) fn install<V: gpui::EntityInputHandler>(
         }
         // A pinch begins over the surface and is its own until it ends.
         let ours = s.input.pinching();
-        if !ours && (e.phase != TouchPhase::Started || !h.is_hovered_at(e.position, window)) {
+        if !ours
+            && (e.phase != TouchPhase::Started
+                || !h.iter().any(|h| h.is_hovered_at(e.position, window)))
+        {
             return;
         }
         let (x, y) = root_point(&s, e.position);

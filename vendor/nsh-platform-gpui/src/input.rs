@@ -2327,6 +2327,57 @@ fn report(surface: &Surface, phase: TouchPhase, changed: &Pointer, activated: Op
     );
 }
 
+/// SMELT: a press at `(x, y)` that a native component takes. The core hears
+/// it as a touch that is cancelled at once, with the watchers around the
+/// component: overlays it is outside of hear `onPressOutside`, those it is in
+/// do not.
+pub(crate) fn component_pressed(surface: &Surface, x: f32, y: f32, modifiers: Modifiers) {
+    let Some(hit) = pick(&surface.input_root(), x, y, false) else {
+        return;
+    };
+    let path: Vec<NodeId> = chain(&hit.view)
+        .iter()
+        .filter_map(|view| {
+            let s = view.state();
+            s.events.contains(EventKind::Touch).then_some(s.id)
+        })
+        .collect();
+    if path.is_empty() {
+        return;
+    }
+    let id = surface.input.next_id.get();
+    surface.input.next_id.set(id.wrapping_add(1));
+    let (lx, ly) = local(&hit.view, x, y);
+    let send = |phase, path| {
+        let point = TouchPoint {
+            id,
+            target: hit.view.id(),
+            path,
+            page: nsh_core::geometry::point(Points(x), Points(y)),
+            location: nsh_core::geometry::point(Points(lx), Points(ly)),
+            changed: true,
+            pointer_type: nsh_core::PointerType::Mouse,
+            pressure: TouchPoint::default_pressure(phase, true),
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+        };
+        let event = TouchEvent {
+            phase,
+            timestamp: surface.clock(),
+            points: vec![point],
+            modifiers: modifiers.core(),
+            activated: None,
+        };
+        surface.event(
+            ROOT_ID,
+            EventKind::Touch,
+            EventPayload::Touch(Box::new(event)),
+        );
+    };
+    send(TouchPhase::Start, path);
+    send(TouchPhase::Cancel, Vec::new());
+}
+
 /// Runs `f` on pointer `key` after `ms` unless its press `generation` ended.
 fn after(
     surface: &Rc<Surface>,
