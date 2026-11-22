@@ -1,6 +1,6 @@
 # 同一 session 切换 provider
 
-对应 [issue #369](https://github.com/smelt-ai/smelt/issues/369)。状态：已实现，使用假 ACP 进程完成回归；未调用真实 provider 验收。
+对应 [issue #369](https://github.com/smelt-ai/smelt/issues/369)。状态：已实现，假 ACP 回归及真实 Codex→Pi→Codex 验收通过；Claude 尚未完成真实验收。
 
 ## 行为
 
@@ -66,11 +66,11 @@ responder 和原始工具调用不能变成发给目标的新指令。参考 T3 
 
 ## 验证记录
 
-使用 `-j 2` 串行运行涉及 crate 的测试；共 2,246 项通过，另单独运行 1 项离屏截图测试。
+使用 `-j 2` 串行运行涉及 crate 的测试；共 2,247 项通过，另单独运行 1 项离屏截图测试。
 
 | crate | 通过 | 默认忽略 |
 | --- | ---: | ---: |
-| `smelt-core`（含集成测试） | 877 | 5 |
+| `smelt-core`（含集成测试） | 878 | 5 |
 | `smelt-model` | 324 | 0 |
 | `smelt-runtime-client` | 61 | 0 |
 | `smelt-store` | 90 | 0 |
@@ -79,6 +79,34 @@ responder 和原始工具调用不能变成发给目标的新指令。参考 T3 
 
 本地 IPC 和系统证书测试在沙箱外重跑通过。深浅两套混合历史截图已检查；crate 依赖检查通过。
 格式仅检查改动文件，不格式化整仓；Clippy 保留仓库既有警告，不新增警告。
+
+### 真实 provider 验收（2026-11-23）
+
+使用独立 `SMELT_HOME`、全新临时 SQLite 和空工作目录；未打开或迁移用户主库。
+运行当前分支的 debug `smeltd` 和用仓库钉死 Bun 构建的 `smelt-agent`。
+A 为 Codex CLI 0.171.0 / `gpt-6.1-sol`，B 为 Pi / `zai-coding-cn/glm-5.3`。
+本轮未调用工具、读写项目文件或自动批准权限请求。
+
+| 步骤 | 结果 |
+| --- | --- |
+| A 记住随机 alpha，切至 B | B 的请求不提供 alpha 值，仍准确返回 alpha，并记住新增 beta |
+| B 活跃时正常停止并重启 smeltd | 以旧 Codex 启动信息重连仍恢复 B；B 原生 ID、可见历史不变，准确回忆 alpha/beta |
+| B→A | sid/cwd 不变，恢复最初 A 原生 ID；只交接 Pi 来源的遗漏段，A 准确返回新增 beta |
+| A 活跃时再次重启 smeltd | A 原生 ID、可见历史不变，准确回忆 alpha/beta |
+| 原生存档和 SQLite 只读核对 | 两个独立原生 ID、两个有序引用段、两次 delivered 交接；完整性和外键检查通过 |
+
+最终路径共五轮真实模型请求。原始请求、响应、推送、原生存档副本和关系表快照保留在本地
+临时验收目录，不上传凭据或用户存档。两次重启前后分别比较用户/助手文本和 provider 分隔顺序，
+没有把交接封装或 AGENTS 指令显示成用户消息。原生存档保留三个 A 用户轮次、两个 B 用户轮次。
+
+真实数据发现并补上两项回归：Codex 的 `# AGENTS.md instructions` 封装不能计作用户轮次；
+带 `<smelt_context_handoff>` 的真实用户请求不能被旧的尖括号过滤规则删掉。
+两项均先复现失败，再修复并重跑 core（878 项）及 smeltd（691 项）测试、Clippy。
+
+Claude Code 2.1.330 探测返回未登录，实际请求报 `Authentication required`，未将其计为通过；
+未修改用户认证。初次用系统 Bun 1.3.14 编译 Pi 的启动失败也单独保留，改用仓库钉死版本后通过。
+附加观察：`session.create` 指定的标题在最终目录 `custom_title` 中未保留；标题元数据不属于本轮
+上下文、原生 ID 和重启恢复的通过项，未据此宣称改名行为已验收。
 
 ## 升级、兼容与回退
 
