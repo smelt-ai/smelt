@@ -91,6 +91,9 @@ pub const CORE_TOPIC_PI_CONFIG_CHANGED: &str = "pi_config.changed";
 /// 某台机器上 agent 的历史存档经运行时改过（改名、删除、记下所属智能体），载荷
 /// [`HistoryChanged`]。不进核心订阅，同 [`CORE_TOPIC_PI_CONFIG_CHANGED`]。
 pub const CORE_TOPIC_HISTORY_CHANGED: &str = "history.changed";
+/// 这台运行时的对端节点（`peer.list`）变了：本机配对、改设置、删除，或别的节点来配对、
+/// 取消配对。载荷 [`PeersChanged`]。不进核心订阅，同 [`CORE_TOPIC_PI_CONFIG_CHANGED`]。
+pub const CORE_TOPIC_PEERS_CHANGED: &str = "peers.changed";
 /// v7 核心话题：CLI / Control API 要改外观，载荷 [`AppearanceChangeRequested`]。外观归客户端，
 /// 运行时只校验后转给在线的桌面端。
 pub const CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED: &str = "appearance.change_requested";
@@ -558,6 +561,10 @@ pub struct AgentMemoryChanged {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PiConfigChanged {}
 
+/// 对端节点变了。没有字段：读的一方重取 `peer.list`。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeersChanged {}
+
 /// 经运行时改了历史存档：谁改的都发，读的一方据此重取 `history.list`。agent 自己往存档里
 /// 写新会话不在内（运行时不盯存档目录）。没有字段：读的一方重取自己在看的那几份列表。
 ///
@@ -869,6 +876,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
         )?,
         descriptor(
             CORE_TOPIC_HISTORY_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            None,
+            1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_PEERS_CHANGED,
             CORE_CAPABILITY_WORKSPACE_READ,
             None,
             1024,
@@ -1195,6 +1208,7 @@ mod tests {
             (CORE_TOPIC_AGENT_MEMORY_CHANGED, None, 1),
             (CORE_TOPIC_PI_CONFIG_CHANGED, None, 1),
             (CORE_TOPIC_HISTORY_CHANGED, None, 1),
+            (CORE_TOPIC_PEERS_CHANGED, None, 1),
             (CORE_TOPIC_TERMINAL_NOTIFICATION, None, 1),
             (CORE_TOPIC_TERMINAL_PROGRESS, None, 1),
             (

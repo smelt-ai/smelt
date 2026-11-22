@@ -22,5 +22,5 @@ pub mod protocol;
 pub mod stream;
 
 pub use client::{DEFAULT_REQUEST_TIMEOUT, RequestError, RuntimeClient};
-pub use connector::{Connector, LocalConnector};
+pub use connector::{Connector, ForwardConnector, LocalConnector};
 pub use stream::{RuntimeListener, RuntimeStream};

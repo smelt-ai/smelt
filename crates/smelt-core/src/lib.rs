@@ -48,6 +48,7 @@ pub mod memory_settings;
 mod mirrors;
 pub mod new_session;
 pub use smelt_model::osc;
+pub use smelt_model::peer_node;
 pub mod pi_auth;
 pub mod pi_auth_service;
 pub mod pi_auto_models;

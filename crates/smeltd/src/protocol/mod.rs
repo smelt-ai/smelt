@@ -63,8 +63,11 @@ pub(crate) struct ServerContext {
 /// 未配对的远程设备只能提交配对码（设计文档 D3），连 `system.describe` 都不行。
 fn unpaired_may_call(operation: DaemonOperation, payload: &serde_json::Value) -> bool {
     operation == DaemonOperation::Control
-        && payload.get("method").and_then(serde_json::Value::as_str)
-            == Some(ControlMethod::DevicePair.as_str())
+        && matches!(
+            payload.get("method").and_then(serde_json::Value::as_str),
+            Some(method) if method == ControlMethod::DevicePair.as_str()
+                || method == ControlMethod::NodePair.as_str()
+        )
 }
 
 pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
@@ -94,7 +97,33 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
     let operation = request.operation;
     let v = serde_json::Value::Object(request.payload);
     if matches!(principal, Principal::Unpaired(_)) && !unpaired_may_call(operation, &v) {
-        reject_unpaired(conn, operation, &v);
+        reject(
+            conn,
+            operation,
+            &v,
+            smelt_runtime_client::protocol::control::ControlError::because(
+                smelt_runtime_client::protocol::control::ControlErrorCode::PermissionDenied,
+                smelt_runtime_client::protocol::control::ControlReason::DeviceNotPaired,
+            ),
+        );
+        return;
+    }
+    // 本节点没允许连入的对端：只能配对、取消配对、交回信（见 `peer_nodes`）。
+    if matches!(principal, Principal::Peer { inbound: false, .. })
+        && !(operation == DaemonOperation::Control
+            && crate::peer_nodes::outbound_only_peer_may_call(
+                v.get("method").and_then(serde_json::Value::as_str),
+            ))
+    {
+        reject(
+            conn,
+            operation,
+            &v,
+            smelt_runtime_client::protocol::control::ControlError::new(
+                smelt_runtime_client::protocol::control::ControlErrorCode::PermissionDenied,
+                "This machine hasn't allowed yours to connect in. Allow it in Smelt's machine settings over there",
+            ),
+        );
         return;
     }
     if matches!(operation, DaemonOperation::Open | DaemonOperation::AcpOpen) {
@@ -220,6 +249,12 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
             crate::desktop::handle_desktop_attach(conn, reader, &crate::desktop::vnc_endpoint())
         }
         DaemonOperation::RuntimeUpgrade => crate::runtime_upgrade::handle_runtime_upgrade(conn, &v),
+        DaemonOperation::Forward => {
+            crate::peer_nodes::handle_forward(conn, reader, &v, &principal, &acp_sessions)
+        }
+        DaemonOperation::PeerLinkWatch => {
+            crate::peer_nodes::handle_link_watch(conn, &v, &principal)
+        }
     }
 }
 
@@ -253,10 +288,12 @@ fn handle_desktop_receipt<C, R>(
 }
 
 /// 控制请求回一个带 request_id 的 PermissionDenied，客户端能看懂；其余 op 直接断开。
-fn reject_unpaired<C: ClientSocket>(
+/// 拒掉这个请求。只有控制请求回得了原因，别的 op 直接关掉连接。
+fn reject<C: ClientSocket>(
     mut conn: C,
     operation: DaemonOperation,
     payload: &serde_json::Value,
+    error: smelt_runtime_client::protocol::control::ControlError,
 ) {
     if operation != DaemonOperation::Control {
         return;
@@ -272,12 +309,7 @@ fn reject_unpaired<C: ClientSocket>(
         .unwrap_or(smelt_runtime_client::protocol::control::CONTROL_API_VERSION);
     let response =
         smelt_runtime_client::protocol::control::ControlResponse::<()>::error_with_version(
-            version,
-            request_id,
-            smelt_runtime_client::protocol::control::ControlError::because(
-                smelt_runtime_client::protocol::control::ControlErrorCode::PermissionDenied,
-                smelt_runtime_client::protocol::control::ControlReason::DeviceNotPaired,
-            ),
+            version, request_id, error,
         );
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }

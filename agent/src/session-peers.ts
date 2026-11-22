@@ -15,8 +15,16 @@ export const SMELT_SESSION_READ_TOOL_NAME = "session_read";
 export const SMELT_SESSION_SEND_TOOL_NAME = "session_send";
 export const SMELT_SESSION_SPAWN_TOOL_NAME = "session_spawn";
 
-type PeerSent = { id: string; kind: string; status: "queued" | "pending" | "delivered" | "failed"; error?: string };
-type PeerSession = { id: string; title: string; project?: string | null; state: string; sent?: PeerSent[] };
+type PeerSent = {
+	id: string;
+	kind: string;
+	status: "queued" | "pending" | "delivered" | "forwarded" | "failed";
+	error?: string;
+};
+/** 别的机器上的对话：id 是 `<runtime id>/<会话 id>`，machine 是那台机器的名字。 */
+type PeerSession = { id: string; title: string; project?: string | null; state: string; machine?: string; sent?: PeerSent[] };
+/** 去问过的别的机器；error 是没问到的原因。 */
+type PeerMachine = { name: string; error?: string };
 type PeerTarget = { id: string; title: string };
 
 type PeerHostReply = {
@@ -24,6 +32,7 @@ type PeerHostReply = {
 	error?: string;
 	reason?: string;
 	sessions?: PeerSession[];
+	machines?: PeerMachine[];
 	sessionId?: string;
 	title?: string;
 	state?: string;
@@ -45,6 +54,7 @@ const SENT_LABEL: Record<PeerSent["status"], string> = {
 	queued: "排队中，等对方打开",
 	pending: "已交给对方，等它手上的工具调用做完再看",
 	delivered: "已送到",
+	forwarded: "已交给那台机器，它投不进去会退信",
 	failed: "没送到",
 };
 
@@ -64,12 +74,18 @@ function failed(
 	};
 }
 
-/** `session_list` 写给模型的列表。 */
-export function sessionListText(sessions: readonly PeerSession[]): string {
-	if (sessions.length === 0) return "没有别的 Pi 对话可以发消息。可以用 session_spawn 新建一个。";
-	return sessions
+/** `session_list` 写给模型的列表。别的机器上的对话标出机器，没问到的机器写在最后。 */
+export function sessionListText(sessions: readonly PeerSession[], machines: readonly PeerMachine[] = []): string {
+	const unreachable = machines
+		.filter((machine) => machine.error)
+		.map((machine) => `机器「${machine.name}」没问到：${machine.error}`);
+	if (sessions.length === 0) {
+		return ["没有别的 Pi 对话可以发消息。可以用 session_spawn 新建一个。", ...unreachable].join("\n");
+	}
+	const listed = sessions
 		.map((session) => {
-			const lines = [`- ${session.id} 〈${session.title}〉 ${STATE_LABEL[session.state] ?? session.state}`];
+			const where = session.machine ? ` @ ${session.machine}` : "";
+			const lines = [`- ${session.id} 〈${session.title}〉${where} ${STATE_LABEL[session.state] ?? session.state}`];
 			if (session.project) lines.push(`  项目：${session.project}`);
 			for (const sent of session.sent ?? []) {
 				const reason = sent.status === "failed" && sent.error ? `：${sent.error}` : "";
@@ -78,6 +94,7 @@ export function sessionListText(sessions: readonly PeerSession[]): string {
 			return lines.join("\n");
 		})
 		.join("\n");
+	return [listed, ...unreachable].join("\n");
 }
 
 /** `session_send` 成功后写给模型的说明。 */
@@ -114,10 +131,11 @@ function registerSessionPeerTools(pi: ExtensionAPI): void {
 			name: SMELT_SESSION_LIST_TOOL_NAME,
 			label: "列出对话",
 			description:
-				"列出 Smelt 侧栏里可以发消息的其它 Pi 对话（包括还没打开的）：id、标题、状态，以及你发过去的消息送到没有。",
+				"列出 Smelt 侧栏里可以发消息的其它 Pi 对话（包括还没打开的）：id、标题、状态，以及你发过去的消息送到没有。也列出用户允许你使用的其它机器上的对话，它们的 id 是 <机器 runtime id>/<会话 id>，后面标着机器名。",
 			promptSnippet: "List other Pi conversations you can message",
 			promptGuidelines: [
 				"Use session_list to find another Pi conversation by title before calling session_send.",
+				"Conversations on other machines have ids like <runtime id>/acp-…; use the id exactly as listed.",
 				"The sent field shows whether your earlier messages reached that conversation.",
 			],
 			parameters: Type.Object({
@@ -127,7 +145,11 @@ function registerSessionPeerTools(pi: ExtensionAPI): void {
 				const reply = await callPeers({ op: "session_list", query: params.query }, signal);
 				if (!reply.ok) return failed(reply);
 				const sessions = reply.sessions ?? [];
-				return { content: [{ type: "text" as const, text: sessionListText(sessions) }], details: { sessions } };
+				const machines = reply.machines ?? [];
+				return {
+					content: [{ type: "text" as const, text: sessionListText(sessions, machines) }],
+					details: { sessions, machines },
+				};
 			},
 		}));
 	}
@@ -142,7 +164,7 @@ function registerSessionPeerTools(pi: ExtensionAPI): void {
 				"Use session_read to check progress or results of another conversation without interrupting it.",
 			],
 			parameters: Type.Object({
-				sessionId: Type.String({ description: "对话 id，例如 acp-…" }),
+				sessionId: Type.String({ description: "对话 id，例如 acp-…；别的机器上的是 <机器 runtime id>/acp-…" }),
 				limit: Type.Optional(Type.Number({ description: "最近几条回复，默认 1，最多 5" })),
 			}),
 			async execute(_toolCallId, params, signal) {
@@ -173,7 +195,7 @@ function registerSessionPeerTools(pi: ExtensionAPI): void {
 				"session_send returns as soon as Smelt accepts the message. If it cannot be delivered you get a <peer-message kind=\"bounce\">.",
 ],
 			parameters: Type.Object({
-				to: Type.String({ description: "对方的对话 id，例如 acp-…" }),
+				to: Type.String({ description: "对方的对话 id，例如 acp-…；别的机器上的是 <机器 runtime id>/acp-…" }),
 				text: Type.String({ description: "消息正文。写清楚要对方做什么、做完回什么" }),
 				kind: Type.Optional(
 					Type.Union([Type.Literal("message"), Type.Literal("task"), Type.Literal("completion")], {
@@ -209,7 +231,7 @@ function registerSessionPeerTools(pi: ExtensionAPI): void {
 			name: SMELT_SESSION_SPAWN_TOOL_NAME,
 			label: "新建对话",
 			description:
-				"在同一个项目里新建一个 Pi 对话，交给它一个任务。新对话和你用同一个模型和权限，出现在侧栏里，用户可以随时点进去看、插话或停掉。立刻返回，不等它做完。",
+				"在同一个项目里（只在这台机器上）新建一个 Pi 对话，交给它一个任务。新对话和你用同一个模型和权限，出现在侧栏里，用户可以随时点进去看、插话或停掉。立刻返回，不等它做完。",
 			promptSnippet: "Start a new Pi conversation in this project and hand it a task",
 			promptGuidelines: [
 				"Use session_spawn to hand a self-contained piece of work to a new conversation that runs alongside you.",

@@ -248,6 +248,9 @@ export function reject_command(id: number, reason: string): null;
  * - "smelt.app/rename-machine" { machine: Machine, name: string }：改远程机器在这台电脑上的显示名。
  * - "smelt.app/set-machine-relay" { machine: Machine, relay: string }：改连它用的中继，空的是 n0 的公共 relay；
  *   在线时先请它自己改用新中继，离线时只改这边。
+ * - "smelt.app/set-machine-access" { machine: Machine, agents?: boolean, inbound?: boolean }：改它的权限，只改给了的。
+ *   agents 是这台电脑上的智能体能不能用它，inbound 是它能不能连进来操作这台电脑；connections 里这两项为 null 的
+ *   机器还没迁到本机运行时，改不了。
  * - "smelt.app/reconnect-machine" { machine: Machine }：马上重连一台离线或版本对不上的机器。
  * - "smelt.app/upgrade-machine" { machine: Machine }：请它把运行时升到这个桌面的版本，进度看 connections。
  * - "smelt.app/refresh-connections"：有人在看连接状态了，现在重读连接路径和延迟、重探离线的；露出来时调一次。
@@ -363,6 +366,10 @@ export interface Connection {
   upgrade_note: string | null;
   can_upgrade: boolean;
   can_reconnect: boolean;
+  /** 这台电脑上的智能体能不能经本机运行时使用它；null 是还没迁到本机运行时（旧的直连），没有这个设置。 */
+  agent_access: boolean | null;
+  /** 它能不能连进来操作这台电脑；不能时它只能回这边发过去的消息。null 同上。 */
+  inbound: boolean | null;
 }
 /**
  * 远程机器的连接表：配对了哪些、各自连得怎样；本机不在里面。load_error 是启动时没读出登记过的机器的原因。

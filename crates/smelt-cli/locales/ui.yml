@@ -5,6 +5,10 @@ help.text:
 
     Usage (stdout is JSON; smeltd must be running):
     %{gui}
+    Other machines (paired in Smelt's machine settings):
+      smelt machine list                     paired machines
+      smelt --machine <name|runtime id> <command> ...   run any command below on that machine
+
     Agents (saved definitions, not running conversations):
       smelt agent list | get <id> | delete <id>
       smelt agent create --name <name> [options]
@@ -78,6 +82,10 @@ help.text:
 
     用法（stdout 为 JSON，都需要 smeltd 在跑）：
     %{gui}
+    其它机器（在 Smelt 的机器设置里配对）：
+      smelt machine list                     配对过的机器
+      smelt --machine <名字|runtime id> <命令> ...   在那台机器上执行下面任一命令
+
     智能体（长期定义，不是正在跑的对话）：
       smelt agent list | get <id> | delete <id>
       smelt agent create --name <名称> [选项]
@@ -365,3 +373,18 @@ main.gui_launch_failed:
 main.unknown_command:
   en: "Unknown command: %{command}"
   zh-CN: "未知命令：%{command}"
+machine.missing:
+  en: "--machine needs a machine name or runtime id (see smelt machine list)"
+  zh-CN: "--machine 后面要跟机器名或 runtime id（smelt machine list 查看）"
+machine.not_found:
+  en: "No paired machine named %{name} (see smelt machine list)"
+  zh-CN: "没有叫 %{name} 的机器（smelt machine list 查看）"
+machine.ambiguous:
+  en: "Several machines are named %{name}; use its runtime id (see smelt machine list)"
+  zh-CN: "有好几台机器叫 %{name}，改用 runtime id（smelt machine list 查看）"
+machine.usage:
+  en: "smelt machine list"
+  zh-CN: "smelt machine list"
+machine.unreachable:
+  en: "Couldn't reach that machine through this computer's smeltd: %{error}"
+  zh-CN: "经本机 smeltd 连不上那台机器：%{error}"

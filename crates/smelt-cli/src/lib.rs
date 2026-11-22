@@ -7,7 +7,10 @@
 //! App 里的功能（开视图、开页面等）经 `smelt app` 调插件开给命令行的命令，运行时转给本机
 //! 开着的 App；宿主不认识具体命令。
 //!
-//! 不开放的：配对设备和远程（等于把 shell 交出去）、需要浏览器的登录和凭据、采纳/删除记忆
+//! `--machine` 经本机 smeltd 转发到配对过的其它机器（见 `docs/cross-machine.md`），
+//! 智能体会话只能去用户允许过的机器。
+//!
+//! 不开放的：配对设备和机器、改机器权限（等于把 shell 交出去，只在桌面上做）、需要浏览器的登录和凭据、采纳/删除记忆
 //! （运行时只认签过名的桌面，且拒绝智能体会话进程树）、往桌面打字。
 
 rust_i18n::i18n!("locales", fallback = "en");
@@ -23,7 +26,9 @@ mod workspace;
 
 use rust_i18n::t;
 use smelt_model::appearance_settings::SettingsPatch;
-use smelt_model::control_api::{NotifySend, NotifySendParams, SettingsGet, SettingsUpdate};
+use smelt_model::control_api::{
+    NotifySend, NotifySendParams, PeerList, SettingsGet, SettingsUpdate,
+};
 use smelt_runtime_client::protocol::control::{
     ControlCall, ControlClientError, ControlMethod, EmptyParams,
 };
@@ -40,9 +45,9 @@ where
         .collect();
     match args.get(1).map(String::as_str) {
         Some(
-            "agent" | "app" | "conversation" | "project" | "worktree" | "history" | "automation"
-            | "mcp" | "pi" | "model" | "quota" | "engine" | "hooks" | "settings" | "notify"
-            | "help" | "-h" | "--help" | "--version" | "-V",
+            "--machine" | "machine" | "agent" | "app" | "conversation" | "project" | "worktree"
+            | "history" | "automation" | "mcp" | "pi" | "model" | "quota" | "engine" | "hooks"
+            | "settings" | "notify" | "help" | "-h" | "--help" | "--version" | "-V",
         ) => Some(run(&args)),
         _ => None,
     }
@@ -58,8 +63,26 @@ pub fn use_system_locale() {
 
 fn run(args: &[String]) -> i32 {
     use_system_locale();
+    if args.get(1).map(String::as_str) == Some("--machine") {
+        let Some(machine) = args.get(2) else {
+            return usage(&t!("machine.missing"));
+        };
+        let client = match machine_runtime(machine) {
+            Ok(client) => client,
+            Err(message) => return fail(&message),
+        };
+        let _ = TARGET.set(client);
+        let _ = TARGET_MACHINE.set(machine.clone());
+        let mut rest = vec![args[0].clone()];
+        rest.extend_from_slice(&args[3..]);
+        return run(&rest);
+    }
     let rest = &args[2..];
     match args.get(1).map(String::as_str) {
+        Some("machine") => match rest.first().map(String::as_str) {
+            Some("list") => respond(control::<PeerList>(EmptyParams::default())),
+            _ => usage(&t!("machine.usage")),
+        },
         Some("--version" | "-V") => {
             println!("{}", smelt_version::VERSION);
             0
@@ -138,6 +161,55 @@ fn parse_notify(args: &[String]) -> Result<NotifySendParams, String> {
     Ok(NotifySendParams { title, message })
 }
 
+/// 命令发给哪台机器：`--machine` 选了别的机器就经本机 smeltd 转发过去，没选就是本机。
+static TARGET: std::sync::OnceLock<smelt_runtime_client::RuntimeClient> =
+    std::sync::OnceLock::new();
+
+/// `--machine` 选了别的机器时它的名字或 id，报错时用。
+static TARGET_MACHINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 这次命令要连的运行时。
+pub(crate) fn runtime() -> smelt_runtime_client::RuntimeClient {
+    TARGET
+        .get_or_init(smelt_client::daemon_state::local_runtime)
+        .clone()
+}
+
+/// 按名字或 runtime id 认出一台配对过的机器，返回经本机 smeltd 转发到它的客户端。
+fn machine_runtime(machine: &str) -> Result<smelt_runtime_client::RuntimeClient, String> {
+    let peers = smelt_client::daemon_state::local_runtime()
+        .call::<PeerList>(&EmptyParams::default(), std::time::Duration::from_secs(10))
+        .map_err(|error| t!("control.unreachable", error = error.to_string()).into_owned())?
+        .peers;
+    let runtime_id = pick_machine(&peers, machine)?;
+    Ok(smelt_runtime_client::RuntimeClient::new(
+        smelt_runtime_client::ForwardConnector::new(
+            smelt_runtime_client::LocalConnector::new(
+                smelt_client::daemon_state::smeltd_sock_path(),
+            ),
+            runtime_id,
+        ),
+    ))
+}
+
+/// runtime id 精确匹配优先，其次是名字（不分大小写）；重名时要用 runtime id。
+fn pick_machine(
+    peers: &[smelt_model::peer_node::PeerNode],
+    machine: &str,
+) -> Result<String, String> {
+    if let Some(peer) = peers.iter().find(|peer| peer.runtime_id == machine) {
+        return Ok(peer.runtime_id.clone());
+    }
+    let mut named = peers
+        .iter()
+        .filter(|peer| peer.name.eq_ignore_ascii_case(machine.trim()));
+    match (named.next(), named.next()) {
+        (Some(peer), None) => Ok(peer.runtime_id.clone()),
+        (Some(_), Some(_)) => Err(t!("machine.ambiguous", name = machine).into_owned()),
+        (None, _) => Err(t!("machine.not_found", name = machine).into_owned()),
+    }
+}
+
 /// 一次 Control API 调用。smeltd 没在跑时给出能看懂的原因。
 fn control<C: ControlCall>(params: C::Params) -> Result<C::Result, String> {
     control_within::<C>(params, std::time::Duration::from_secs(10))
@@ -148,7 +220,7 @@ fn control_within<C: ControlCall>(
     params: C::Params,
     timeout: std::time::Duration,
 ) -> Result<C::Result, String> {
-    smelt_client::daemon_state::local_runtime()
+    runtime()
         .call::<C>(&params, timeout)
         .map_err(|error| match error {
             ControlClientError::Protocol(error) => error.text(),
@@ -161,6 +233,10 @@ fn control_within<C: ControlCall>(
                 if C::METHOD == ControlMethod::SettingsUpdate =>
             {
                 t!("control.settings_invalid_response", error = message).into_owned()
+            }
+            // 选了别的机器时，连不上多半是那台机器或转发的问题，不是本机 smeltd 没跑。
+            ControlClientError::Transport(message) if TARGET_MACHINE.get().is_some() => {
+                t!("machine.unreachable", error = message).into_owned()
             }
             ControlClientError::Transport(message) => {
                 t!("control.unreachable", error = message).into_owned()
@@ -325,6 +401,31 @@ mod tests {
         assert_eq!(
             patch.settings.get("appearance.ui_font_px"),
             Some(&serde_json::json!(18))
+        );
+    }
+
+    #[test]
+    fn machines_are_picked_by_id_then_unique_name() {
+        let peer = |id: &str, name: &str| smelt_model::peer_node::PeerNode {
+            runtime_id: id.into(),
+            endpoint_id: format!("ep-{id}"),
+            name: name.into(),
+            relay_url: None,
+            os: None,
+            agent_access: false,
+            inbound: false,
+            added_at_ms: 0,
+        };
+        let peers = [peer("a1", "cc"), peer("b2", "GPU"), peer("c3", "gpu")];
+        assert_eq!(pick_machine(&peers, "a1").unwrap(), "a1");
+        assert_eq!(pick_machine(&peers, "CC").unwrap(), "a1");
+        assert!(pick_machine(&peers, "gpu").is_err(), "重名要用 runtime id");
+        assert_eq!(pick_machine(&peers, "c3").unwrap(), "c3");
+        assert!(pick_machine(&peers, "nope").is_err());
+        assert_eq!(
+            maybe_run(["smelt", "--machine"]),
+            Some(2),
+            "缺机器名不碰 smeltd"
         );
     }
 }

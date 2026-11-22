@@ -414,6 +414,8 @@ fn run_power_source_watch(state: &RemoteState, fd: std::ffi::c_int, stop: &Atomi
 /// 在跑的 endpoint。
 pub(crate) struct RemoteEndpoint {
     pub(crate) endpoint_id: String,
+    /// 用同一个 endpoint 往外拨对端节点（见 [`crate::peer_nodes`]）。测试装的假 endpoint 没有。
+    pub(crate) dialer: Option<Arc<smelt_iroh::runtime::IrohClient>>,
     pub(crate) relay: Option<smelt_iroh::RelaySettings>,
     pub(crate) registry: ConnectionRegistry,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -428,6 +430,8 @@ impl RemoteEndpoint {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+        // 按它拨的对端连接不能再用了。
+        crate::peer_nodes::endpoint_changed();
     }
 }
 
@@ -604,6 +608,7 @@ fn bind_with_backoff(
         if !generation_is_current(&state, generation) {
             return;
         }
+        crate::peer_nodes::release_dial_only();
         match bind_endpoint(relay.clone()) {
             Ok(endpoint) => {
                 let mut guard = state.lock().unwrap();
@@ -627,6 +632,8 @@ fn bind_with_backoff(
                 guard.phase = Phase::Idle;
                 drop(guard);
                 state.notify_changed();
+                // 往外拨改用这个 endpoint：只拨出的那个和按它拨的连接都丢掉。
+                crate::peer_nodes::endpoint_changed();
                 sync_remote_sleep_assertion(&state);
                 return;
             }
@@ -649,18 +656,22 @@ fn bind_with_backoff(
 /// 起一个 iroh endpoint，每条进来的流交给 [`crate::devices::accept_remote_stream`]。
 fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpoint, String> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    type Ready = Result<(String, Arc<smelt_iroh::runtime::IrohClient>), String>;
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Ready>();
     let registry = ConnectionRegistry::default();
     let serve_registry = registry.clone();
     let bind_relay = relay.clone();
     thread::spawn(move || {
+        // 往外拨对端的客户端也拿着它：endpoint 关了之后在途的拨号直接失败，不会撞上已经
+        // 退出的运行时。
         let runtime = match tokio::runtime::Runtime::new() {
-            Ok(runtime) => runtime,
+            Ok(runtime) => Arc::new(runtime),
             Err(error) => {
                 let _ = ready_tx.send(Err(format!("Couldn't start the tokio runtime: {error}")));
                 return;
             }
         };
+        let dial_runtime = Arc::clone(&runtime);
         runtime.block_on(async move {
             let secret = match smelt_iroh::default_secret_path()
                 .and_then(|path| smelt_iroh::load_or_create_secret(&path))
@@ -687,7 +698,9 @@ fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpo
                     return;
                 }
             };
-            let _ = ready_tx.send(Ok(endpoint.id().to_string()));
+            let dialer =
+                smelt_iroh::runtime::IrohClient::on_endpoint(endpoint.clone(), dial_runtime);
+            let _ = ready_tx.send(Ok((endpoint.id().to_string(), dialer)));
             let path_observer: smelt_iroh::PathObserver = Arc::new(|status| {
                 dlog(&format!(
                     "iroh path remote={} kind={} address={} rtt_ms={}",
@@ -720,8 +733,9 @@ fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpo
     });
     // 绑定要连 relay，弱网下比本地绑端口慢得多。
     match ready_rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(Ok(endpoint_id)) => Ok(RemoteEndpoint {
+        Ok(Ok((endpoint_id, dialer))) => Ok(RemoteEndpoint {
             endpoint_id,
+            dialer: Some(dialer),
             relay,
             registry,
             shutdown_tx: Some(shutdown_tx),
@@ -807,6 +821,7 @@ pub(crate) fn install_test_endpoint(state: &RemoteState, endpoint_id: &str) {
     guard.generation = guard.generation.wrapping_add(1);
     guard.endpoint = Some(RemoteEndpoint {
         endpoint_id: endpoint_id.to_string(),
+        dialer: None,
         relay: None,
         registry: ConnectionRegistry::default(),
         shutdown_tx: None,

@@ -32,6 +32,8 @@ mod memory;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod migrate_v18;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod peers;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod push;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod schema;
@@ -44,10 +46,10 @@ pub use snapshots::{
     AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
     HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
     MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord,
-    MemoryUsageRecord, PairedDevice, PublishedSessionRecord, PublishedSessionSnapshot,
-    PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
-    QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot, TerminalThemeSnapshot,
-    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit,
+    MemoryUsageRecord, PairedDevice, PeerNodeRecord, PublishedSessionRecord,
+    PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot,
+    QuotaCacheStatusRecord, QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot,
+    TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit,
     WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
     WorkspaceTerminalRecord, WorkspaceWorksetRecord, WorkspaceWorksetRepositoryRecord,
 };
@@ -61,7 +63,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 39;
+pub const STORE_SCHEMA_VERSION: u32 = 40;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -703,6 +705,32 @@ impl Store {
 
     pub fn touch_paired_device(&self, endpoint_id: &str, now_ms: i64) -> Result<(), StoreError> {
         imp::touch_paired_device(&self.backend, endpoint_id, now_ms)
+    }
+
+    /// 对端节点，按配对先后排。
+    pub fn list_peer_nodes(&self) -> Result<Vec<PeerNodeRecord>, StoreError> {
+        imp::list_peer_nodes(&self.backend)
+    }
+
+    pub fn peer_node(&self, runtime_id: &str) -> Result<Option<PeerNodeRecord>, StoreError> {
+        imp::peer_node(&self.backend, runtime_id)
+    }
+
+    pub fn peer_node_by_endpoint(
+        &self,
+        endpoint_id: &str,
+    ) -> Result<Option<PeerNodeRecord>, StoreError> {
+        imp::peer_node_by_endpoint(&self.backend, endpoint_id)
+    }
+
+    /// 记下或覆盖一个对端。同一个运行时、或同一把密钥的旧记录先删掉（对方重装换了身份）。
+    pub fn put_peer_node(&self, peer: &PeerNodeRecord) -> Result<(), StoreError> {
+        imp::put_peer_node(&self.backend, peer)
+    }
+
+    /// 返回是否真有这个对端。
+    pub fn delete_peer_node(&self, runtime_id: &str) -> Result<bool, StoreError> {
+        imp::delete_peer_node(&self.backend, runtime_id)
     }
 
     /// 登记或更新一台已配对设备的推送。设备不在白名单里时什么都不写，返回 false。
@@ -1654,6 +1682,45 @@ mod imp {
         })
     }
 
+    pub(super) fn list_peer_nodes(
+        backend: &Backend,
+    ) -> Result<Vec<super::PeerNodeRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::peers::list(&connection)
+    }
+
+    pub(super) fn peer_node(
+        backend: &Backend,
+        runtime_id: &str,
+    ) -> Result<Option<super::PeerNodeRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::peers::get(&connection, "runtime_id", runtime_id)
+    }
+
+    pub(super) fn peer_node_by_endpoint(
+        backend: &Backend,
+        endpoint_id: &str,
+    ) -> Result<Option<super::PeerNodeRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::peers::get(&connection, "endpoint_id", endpoint_id)
+    }
+
+    pub(super) fn put_peer_node(
+        backend: &Backend,
+        peer: &super::PeerNodeRecord,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| crate::peers::put(transaction, peer))
+    }
+
+    pub(super) fn delete_peer_node(
+        backend: &Backend,
+        runtime_id: &str,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::peers::delete(transaction, runtime_id)
+        })
+    }
+
     pub(super) fn touch_paired_device(
         backend: &Backend,
         endpoint_id: &str,
@@ -2111,6 +2178,15 @@ mod imp {
                 }
             }
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 39 {
+            apply_v40_peer_node(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
             transaction.commit()?;
             return Ok(());
         }
@@ -2859,6 +2935,17 @@ mod imp {
             {
                 transaction.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))?;
             }
+        }
+        apply_v40_peer_node(transaction)
+    }
+
+    /// v40：对端节点。已经有这张表的库（用当前结构造的夹具）跳过。
+    fn apply_v40_peer_node(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "peer_node")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V39_TO_V40)?;
         }
         Ok(())
     }
@@ -4396,6 +4483,35 @@ mod imp {
     pub(super) fn delete_paired_device(
         _backend: &Backend,
         _endpoint_id: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_peer_nodes(
+        _backend: &Backend,
+    ) -> Result<Vec<super::PeerNodeRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn peer_node(
+        _backend: &Backend,
+        _runtime_id: &str,
+    ) -> Result<Option<super::PeerNodeRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn peer_node_by_endpoint(
+        _backend: &Backend,
+        _endpoint_id: &str,
+    ) -> Result<Option<super::PeerNodeRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_peer_node(
+        _backend: &Backend,
+        _peer: &super::PeerNodeRecord,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn delete_peer_node(
+        _backend: &Backend,
+        _runtime_id: &str,
     ) -> Result<bool, StoreError> {
         unsupported()
     }

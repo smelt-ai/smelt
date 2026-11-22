@@ -163,6 +163,9 @@ command:
   set_machine_relay:
     en: "Change Remote Machine Relay"
     zh-CN: "改远程机器的中继"
+  set_machine_access:
+    en: "Change Remote Machine Access"
+    zh-CN: "改远程机器的权限"
   set_view_badge:
     en: "Set View Badge"
     zh-CN: "设视图角标"
@@ -567,9 +570,6 @@ reserved:
     en: "Undo"
     zh-CN: "撤销"
 runtime:
-  bad_config:
-    en: "The runtime configuration is invalid"
-    zh-CN: "运行时配置无效"
   bad_endpoint:
     en: "The runtime's endpoint ID is invalid: %{id}"
     zh-CN: "运行时的 endpoint id 不合法：%{id}"
@@ -600,6 +600,9 @@ runtime:
   local:
     en: "This Mac"
     zh-CN: "本机"
+  not_migrated:
+    en: "This machine still connects the old way. It moves to this computer's runtime once both are updated and it's online."
+    zh-CN: "这台机器还在用旧方式直连，两边都更新、它在线后会自动迁到本机运行时。"
   offline:
     en: "Offline"
     zh-CN: "离线"

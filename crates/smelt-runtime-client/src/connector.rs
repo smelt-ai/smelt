@@ -47,3 +47,39 @@ impl Connector for LocalConnector {
         RuntimeStream::connect(&self.socket)
     }
 }
+
+/// 经本机运行时转发到它的一个对端节点（`op=forward`）。每次 `connect` 都新开一条到
+/// 本机运行时的连接，等它拨通对端、回了回执才交出：之后这条流就像直接连着那台机器。
+#[derive(Clone, Debug)]
+pub struct ForwardConnector {
+    local: LocalConnector,
+    runtime_id: String,
+}
+
+/// 等本机运行时拨通对端的上限。它拨号自己有 20 秒的时限，这里多留一些。
+const FORWARD_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl ForwardConnector {
+    pub fn new(local: LocalConnector, runtime_id: impl Into<String>) -> Self {
+        Self {
+            local,
+            runtime_id: runtime_id.into(),
+        }
+    }
+
+    pub fn runtime_id(&self) -> &str {
+        &self.runtime_id
+    }
+}
+
+impl Connector for ForwardConnector {
+    fn connect(&self) -> io::Result<RuntimeStream> {
+        use crate::protocol::forward::{ForwardRequest, read_reply};
+        let mut stream = self.local.connect()?;
+        crate::protocol::write_json_line(&mut stream, &ForwardRequest::new(&self.runtime_id))?;
+        stream.set_read_timeout(Some(FORWARD_REPLY_TIMEOUT))?;
+        read_reply(&mut stream)?.into_result()?;
+        stream.set_read_timeout(None)?;
+        Ok(stream)
+    }
+}

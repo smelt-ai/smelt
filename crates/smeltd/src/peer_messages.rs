@@ -18,6 +18,14 @@
 //! - 发给对方、还没送到的到 [`INBOX_LIMIT`] 封就拒收；
 //! - 每个对话记一个链预算，发一条减一，减到 0 拒绝；用户在这个对话里说话时复位。
 //!
+//! 别的机器上的对话：id 写成 `<runtime_id>/<会话 id>`，`runtime_id` 是本节点的对端节点
+//! （见 `docs/cross-machine.md`）。发过去的信照样先进发件队列，投递线程经节点连接交给对方
+//! 的 `node.peer_deliver`，由对方的门卫、发件队列投进它的对话；交出去就算这边的事完了
+//! （[`LetterState::Forwarded`]），对方投不进去会把退信发回来。来源带上本机的 runtime id，
+//! 对方照着回信。智能体主动找别的机器，要用户允许过本机智能体用那台机器；回给发消息过来的
+//! 对话不用。`session_list` / `session_read` 经 `node.peer_list` / `node.peer_read` 问在线的
+//! 那几台。`session_spawn` 只在本机：新对话照抄发起方的启动规格和项目路径，换台机器就不成立。
+//!
 //! 起新对话（`session_spawn`）：照发起方的启动规格在同一个项目里建一个普通的侧栏对话，
 //! 模型、推理强度、权限模式和发起方一样，再把任务作为第一封信投过去。哪一步失败就撤掉
 //! 建了一半的对话，给发起方退信。每个对话同时最多 [`SPAWN_LIMIT`] 个；起出来的对话不能再起。
@@ -26,6 +34,12 @@ use super::*;
 use smelt_core::acp_session::{
     AcpUserAction, PeerDelivery, PeerMessageKind, PeerMessageStatus, PeerMessageView,
 };
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+
+/// 交给别的机器、问别的机器的对话最多等这么久：要走公网拨号。
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 记着收到过哪些别的机器上的对话的消息，最多这么多对。
+const CONTACTS_LIMIT: usize = 1024;
 
 /// 用户说过话之后，一条消息链最多再转这么多跳。
 const INITIAL_HOPS: u32 = 8;
@@ -47,6 +61,11 @@ static CHAINS: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(Default::de
 /// 每个对话起过、还在（或正在建）的新对话。值里出现过的对话不能再起。
 static SPAWNED: LazyLock<Mutex<HashMap<String, Vec<String>>>> = LazyLock::new(Default::default);
 static OUTBOX: LazyLock<Mutex<Outbox>> = LazyLock::new(Default::default);
+/// 本机对话和别的机器上哪个对话通过信：（本机对话，带机器的那一头），收到过、发出过都算。
+/// 这一对之间回信不要求本机智能体权限，也不要求对方被允许连入本机。只在内存里，按先后
+/// 丢掉最早的。
+static CONTACTS: LazyLock<Mutex<std::collections::VecDeque<(String, String)>>> =
+    LazyLock::new(Default::default);
 
 fn lock_outbox() -> std::sync::MutexGuard<'static, Outbox> {
     OUTBOX
@@ -95,12 +114,17 @@ enum LetterState {
         generation: u64,
     },
     Delivered,
+    /// 交给了别的机器，由它投进对话；投不进去它会退信回来。
+    Forwarded,
     Failed(String),
 }
 
 impl Letter {
     fn settled(&self) -> bool {
-        matches!(self.state, LetterState::Delivered | LetterState::Failed(_))
+        matches!(
+            self.state,
+            LetterState::Delivered | LetterState::Forwarded | LetterState::Failed(_)
+        )
     }
 
     fn undelivered_to(&self, target: &str) -> bool {
@@ -325,13 +349,16 @@ impl Courier {
             });
     }
 
-    /// 拉起对方，交给它的宿主。
+    /// 拉起对方，交给它的宿主；别的机器上的交给那台机器。
     fn hand_off(
         &self,
         target: &str,
         delivery: PeerDelivery,
         source_bypasses: bool,
     ) -> Result<(), String> {
+        if let Some((runtime, session)) = split_remote(target) {
+            return forward(runtime, session, delivery, source_bypasses);
+        }
         let slot = crate::acp_host::ensure_conversation_runtime(
             target,
             &self.acp_sessions,
@@ -350,6 +377,221 @@ impl Courier {
         lock_outbox().mark_handed_off(&delivery.id, generation);
         crate::acp_host::deliver_peer_message(sess, delivery).map_err(ToOwned::to_owned)
     }
+}
+
+/// 交给别的机器：来源带上本机的 runtime id，对方照着回信。对方收下就算交出去了。
+fn forward(
+    runtime: &str,
+    session: &str,
+    mut delivery: PeerDelivery,
+    source_bypasses: bool,
+) -> Result<(), String> {
+    let machine = crate::peer_nodes::peer_record(runtime)
+        .ok_or_else(|| "That machine is no longer paired with this computer".to_string())?;
+    let own = own_runtime_id()?;
+    let id = delivery.id.clone();
+    // 那边的对话可以回给这边发信的对话（那台机器没被允许连入本机时也行）。
+    remember_contact(&delivery.source_session_id, &format!("{runtime}/{session}"));
+    delivery.source_session_id = qualify(&own, &delivery.source_session_id);
+    crate::peer_nodes::peer_client(&machine)
+        .call::<smelt_core::control_api::NodePeerDeliver>(
+            &smelt_core::peer_node::NodePeerDeliverParams {
+                to: session.to_string(),
+                delivery,
+                source_bypasses,
+            },
+            REMOTE_TIMEOUT,
+        )
+        .map_err(|error| format!("Couldn't hand it to \"{}\": {error}", machine.name))?;
+    lock_outbox().settle(&id, LetterState::Forwarded);
+    Ok(())
+}
+
+/// 别的机器交来一条（`node.peer_deliver`），投给本机的对话 `to`。门卫规则同本机：对方不在、
+/// 权限档位不合、积压满了都拒收，发送方那边照常退信。来源必须是调用方那台机器上的对话。
+/// 本节点没允许它连入（`inbound`）时，只收回给本机对话的：`to` 之前和这个来源通过信。
+pub(crate) fn accept_remote(
+    from_runtime: &str,
+    inbound: bool,
+    params: smelt_core::peer_node::NodePeerDeliverParams,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+) -> Result<(), ControlError> {
+    let smelt_core::peer_node::NodePeerDeliverParams {
+        to,
+        mut delivery,
+        source_bypasses,
+    } = params;
+    let refuse = |code, message: &str| Err(ControlError::new(code, message));
+    if split_remote(&delivery.source_session_id).map(|(runtime, _)| runtime) != Some(from_runtime) {
+        return refuse(
+            ControlErrorCode::InvalidParams,
+            "The source must be a conversation on the calling machine",
+        );
+    }
+    let Some(machine) = crate::peer_nodes::peer_record(from_runtime) else {
+        return refuse(ControlErrorCode::PermissionDenied, "Not a paired machine");
+    };
+    if !inbound && !contacted(&to, &delivery.source_session_id) {
+        return refuse(
+            ControlErrorCode::PermissionDenied,
+            "This machine only accepts replies from yours: it hasn't allowed your machine to message its conversations first",
+        );
+    }
+    let Some(target) = lookup_peer(&to, acp_sessions) else {
+        return refuse(
+            ControlErrorCode::NotFound,
+            &format!("No such Pi conversation, or it has stopped: {to}"),
+        );
+    };
+    let bounce = delivery.kind == PeerMessageKind::Bounce;
+    if !bounce && target.bypasses == Some(true) && !source_bypasses {
+        return refuse(
+            ControlErrorCode::PermissionDenied,
+            "The other conversation has full access and you ask for approval each time, so you can't message it",
+        );
+    }
+    delivery.source_title = match delivery.source_title.trim() {
+        "" => machine.name.clone(),
+        title => format!("{title} · {}", machine.name),
+    };
+    let source = delivery.source_session_id.clone();
+    let hops = delivery.hops;
+    let courier = Courier {
+        acp_sessions: Arc::clone(acp_sessions),
+        subscribers: subscribers.clone(),
+    };
+    let letter = Letter {
+        delivery,
+        to: to.clone(),
+        to_title: target.title,
+        state: LetterState::Queued,
+        source_bypasses,
+        spawned: false,
+    };
+    if let Accepted::InboxFull = courier.post(letter, (!bounce).then_some(INBOX_LIMIT)) {
+        return refuse(
+            ControlErrorCode::Busy,
+            &format!(
+                "The other conversation has {INBOX_LIMIT} unread messages; wait until it catches up"
+            ),
+        );
+    }
+    if !bounce {
+        remember_contact(&to, &source);
+        lower_chain(&to, hops);
+    }
+    Ok(())
+}
+
+/// 别的机器问本机有哪些对话（`node.peer_list`）：形状同本机 `session_list` 的每一项。
+pub(crate) fn list_for_peer(acp_sessions: &AcpSessions, query: Option<&str>) -> serde_json::Value {
+    let sessions: Vec<serde_json::Value> = matching(directory("", acp_sessions), query)
+        .into_iter()
+        .map(|peer| {
+            serde_json::json!({
+                "id": peer.id,
+                "title": peer.title,
+                "project": peer.project,
+                "state": peer.state,
+            })
+        })
+        .collect();
+    serde_json::json!({"ok": true, "sessions": sessions})
+}
+
+/// 别的机器读本机一个对话最近的回复（`node.peer_read`），回答同本机 `session_read`。
+pub(crate) fn read_for_peer(
+    acp_sessions: &AcpSessions,
+    session_id: &str,
+    limit: usize,
+) -> serde_json::Value {
+    let body = serde_json::json!({"sessionId": session_id, "limit": limit});
+    read("", acp_sessions, &body).unwrap_or_else(|error| error)
+}
+
+/// 别的机器上的对话：`<runtime_id>/<会话 id>`。
+fn split_remote(id: &str) -> Option<(&str, &str)> {
+    id.split_once('/')
+        .filter(|(runtime, session)| !runtime.is_empty() && !session.is_empty())
+}
+
+/// 本机对话的 id 带上本机的 runtime id，别的机器照它回信。已经带着机器的原样。
+fn qualify(own_runtime: &str, id: &str) -> String {
+    if split_remote(id).is_some() {
+        id.to_string()
+    } else {
+        format!("{own_runtime}/{id}")
+    }
+}
+
+fn own_runtime_id() -> Result<String, String> {
+    crate::runtime_identity::runtime_id()
+        .map(|id| id.to_string())
+        .ok_or_else(|| "This runtime has no identity yet".to_string())
+}
+
+fn remember_contact(target: &str, source: &str) {
+    let mut contacts = CONTACTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pair = (target.to_string(), source.to_string());
+    if contacts.contains(&pair) {
+        return;
+    }
+    if contacts.len() >= CONTACTS_LIMIT {
+        contacts.pop_front();
+    }
+    contacts.push_back(pair);
+}
+
+/// `source` 收到过 `remote` 发来的消息。
+fn contacted(source: &str, remote: &str) -> bool {
+    CONTACTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .any(|(target, from)| target == source && from == remote)
+}
+
+/// 发给、读别的机器上的对话：那台机器要还是对端，而且用户允许过本机智能体用它，或者是
+/// 回给发消息过来的对话。
+fn remote_machine(
+    source_id: &str,
+    remote: &str,
+    runtime: &str,
+) -> Result<smelt_store::PeerNodeRecord, serde_json::Value> {
+    let machine = crate::peer_nodes::peer_record(runtime).ok_or_else(|| not_found(remote))?;
+    if !machine.agent_access && !contacted(source_id, remote) {
+        return Err(rejected(
+            "permission",
+            format!(
+                "Agents on this computer may not use the machine \"{}\". The user can allow it in Smelt's machine settings",
+                machine.name
+            ),
+        ));
+    }
+    Ok(machine)
+}
+
+/// 发给谁：本机的对话查注册表和工作区目录；别的机器上的不知道标题和权限档位，标题写成
+/// 「会话 id @ 机器名」，档位由那台机器收下时再比。
+fn target_of(
+    source_id: &str,
+    to: &str,
+    acp_sessions: &AcpSessions,
+) -> Result<Peer, serde_json::Value> {
+    let Some((runtime, session)) = split_remote(to) else {
+        return lookup_peer(to, acp_sessions).ok_or_else(|| not_found(to));
+    };
+    let machine = remote_machine(source_id, to, runtime)?;
+    Ok(Peer {
+        id: to.to_string(),
+        title: format!("{session} @ {}", machine.name),
+        project: None,
+        state: "remote",
+        bypasses: None,
+    })
 }
 
 /// 这一代 runtime 的 `peer_inbox` 对一遍交出去的信。送到的结束；交给更早一代、
@@ -642,6 +884,7 @@ fn sent_to(source: &str, target: &str) -> Vec<serde_json::Value> {
                     LetterState::Queued => "queued",
                     LetterState::HandedOff { .. } => "pending",
                     LetterState::Delivered => "delivered",
+                    LetterState::Forwarded => "forwarded",
                     LetterState::Failed(_) => "failed",
                 },
             });
@@ -653,23 +896,85 @@ fn sent_to(source: &str, target: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn list(
-    source_id: &str,
-    acp_sessions: &AcpSessions,
-    body: &serde_json::Value,
-) -> serde_json::Value {
-    let query = body
-        .get("query")
-        .and_then(serde_json::Value::as_str)
+/// 按标题或 id 过滤，不分大小写。
+fn matching(peers: Vec<Peer>, query: Option<&str>) -> Vec<Peer> {
+    let query = query
         .map(|query| query.trim().to_lowercase())
         .filter(|query| !query.is_empty());
-    let sessions: Vec<serde_json::Value> = directory(source_id, acp_sessions)
+    peers
         .into_iter()
         .filter(|peer| {
             query.as_ref().is_none_or(|query| {
                 peer.title.to_lowercase().contains(query) || peer.id.to_lowercase().contains(query)
             })
         })
+        .collect()
+}
+
+/// 允许本机智能体用的那几台机器上的对话，同时去问；连不上的写进 `machines` 里。
+fn remote_sessions(
+    source_id: &str,
+    query: Option<&str>,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let asked: Vec<_> = crate::peer_nodes::peers()
+        .into_iter()
+        .filter(|machine| machine.agent_access)
+        .map(|machine| {
+            let query = query.map(ToOwned::to_owned);
+            thread::spawn(move || {
+                let reply = crate::peer_nodes::peer_client(&machine)
+                    .call::<smelt_core::control_api::NodePeerList>(
+                    &smelt_core::peer_node::NodePeerListParams { query },
+                    REMOTE_TIMEOUT,
+                );
+                (machine, reply)
+            })
+        })
+        .collect();
+    let mut sessions = Vec::new();
+    let mut machines = Vec::new();
+    for asked in asked {
+        let Ok((machine, reply)) = asked.join() else {
+            continue;
+        };
+        let listed = reply.map_err(|error| error.to_string()).and_then(|reply| {
+            reply
+                .get("sessions")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .ok_or_else(|| "It answered with no conversation list".to_string())
+        });
+        match listed {
+            Ok(listed) => {
+                for mut session in listed {
+                    let Some(id) = session.get("id").and_then(serde_json::Value::as_str) else {
+                        continue;
+                    };
+                    let id = format!("{}/{id}", machine.runtime_id);
+                    session["sent"] = sent_to(source_id, &id).into();
+                    session["id"] = id.into();
+                    session["machine"] = machine.name.clone().into();
+                    sessions.push(session);
+                }
+                machines.push(serde_json::json!({"name": machine.name}));
+            }
+            Err(error) => {
+                machines.push(serde_json::json!({"name": machine.name, "error": error}));
+            }
+        }
+    }
+    (sessions, machines)
+}
+
+fn list(
+    source_id: &str,
+    acp_sessions: &AcpSessions,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    let query = body.get("query").and_then(serde_json::Value::as_str);
+    let (remote, machines) = remote_sessions(source_id, query);
+    let mut sessions: Vec<serde_json::Value> = matching(directory(source_id, acp_sessions), query)
+        .into_iter()
         .map(|peer| {
             serde_json::json!({
                 "id": peer.id,
@@ -680,7 +985,8 @@ fn list(
             })
         })
         .collect();
-    serde_json::json!({"ok": true, "sessions": sessions})
+    sessions.extend(remote);
+    serde_json::json!({"ok": true, "sessions": sessions, "machines": machines})
 }
 
 fn read(
@@ -697,6 +1003,34 @@ fn read(
         .get("limit")
         .and_then(serde_json::Value::as_u64)
         .map_or(1, |limit| (limit as usize).clamp(1, READ_LIMIT_MAX));
+    if let Some((runtime, session)) = split_remote(&id) {
+        let machine = remote_machine(source_id, &id, runtime)?;
+        let mut reply = crate::peer_nodes::peer_client(&machine)
+            .call::<smelt_core::control_api::NodePeerRead>(
+                &smelt_core::peer_node::NodePeerReadParams {
+                    session_id: session.to_string(),
+                    limit,
+                },
+                REMOTE_TIMEOUT,
+            )
+            .map_err(|error| {
+                rejected(
+                    "unreachable",
+                    format!("Couldn't reach \"{}\": {error}", machine.name),
+                )
+            })?;
+        if reply.get("ok") != Some(&serde_json::Value::Bool(true)) {
+            return Err(reply);
+        }
+        let title = reply
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(session)
+            .to_string();
+        reply["sessionId"] = id.clone().into();
+        reply["title"] = format!("{title} @ {}", machine.name).into();
+        return Ok(reply);
+    }
     let Some(slot) = acp_sessions
         .get(&id)
         .filter(|slot| is_live_peer(&id, &slot.value))
@@ -800,7 +1134,7 @@ fn send(
             .and_then(serde_json::Value::as_str)
             .unwrap_or(""),
     );
-    let target = lookup_peer(&to, &courier.acp_sessions).ok_or_else(|| not_found(&to))?;
+    let target = target_of(source_id, &to, &courier.acp_sessions)?;
     let source = &source_slot.value;
     let source_bypasses = bypasses_approval(source);
     if target.bypasses == Some(true) && !source_bypasses {
@@ -1618,5 +1952,158 @@ mod tests {
             crate::acp_host::retire_acp_runtime(&current.value),
             "测试拉起的 runtime 应当能退掉"
         );
+    }
+
+    fn far_machine(runtime_id: &str, agent_access: bool) {
+        smelt_core::sqlite_state::enable_sqlite_state();
+        smelt_core::sqlite_state::default_sqlite_store()
+            .unwrap()
+            .put_peer_node(&smelt_store::PeerNodeRecord {
+                runtime_id: runtime_id.into(),
+                endpoint_id: format!("ep-{runtime_id}"),
+                name: format!("{runtime_id}-box"),
+                relay_url: None,
+                os: None,
+                agent_access,
+                inbound: true,
+                added_at_ms: 0,
+            })
+            .unwrap();
+    }
+
+    /// 别的机器上的对话写成 `<runtime_id>/<会话 id>`；本机对话的 id 交出去时带上本机。
+    #[test]
+    fn remote_ids_carry_their_machine() {
+        assert_eq!(split_remote("rt-far/acp-x"), Some(("rt-far", "acp-x")));
+        assert_eq!(split_remote("acp-x"), None);
+        assert_eq!(split_remote("/acp-x"), None);
+        assert_eq!(qualify("rt-me", "acp-x"), "rt-me/acp-x");
+        assert_eq!(
+            qualify("rt-me", "rt-far/acp-x"),
+            "rt-far/acp-x",
+            "已经带着机器的原样"
+        );
+    }
+
+    /// 智能体主动找别的机器要用户允许过；回给发消息过来的那个对话不用。不是对端的机器
+    /// 当作找不到。
+    #[test]
+    fn reaching_another_machine_needs_agent_access_or_a_message_from_it() {
+        far_machine("rt-locked", false);
+        far_machine("rt-open", true);
+        let acp_sessions = crate::acp_host::new_test_acp_sessions();
+        let denied = target_of("acp-me", "rt-locked/acp-x", &acp_sessions)
+            .err()
+            .unwrap();
+        assert_eq!(denied["reason"], "permission");
+        let open = target_of("acp-me", "rt-open/acp-x", &acp_sessions)
+            .ok()
+            .unwrap();
+        assert_eq!(open.title, "acp-x @ rt-open-box");
+        assert_eq!(open.bypasses, None, "档位由那台机器收下时再比");
+        assert_eq!(
+            target_of("acp-me", "rt-unpaired/acp-x", &acp_sessions)
+                .err()
+                .unwrap()["reason"],
+            "not_found"
+        );
+
+        remember_contact("acp-me", "rt-locked/acp-x");
+        assert!(target_of("acp-me", "rt-locked/acp-x", &acp_sessions).is_ok());
+        assert!(
+            target_of("acp-other", "rt-locked/acp-x", &acp_sessions).is_err(),
+            "只有收到过它消息的那个对话能回"
+        );
+    }
+
+    /// 别的机器交来的信，来源必须是它自己那台机器上的对话；投给本机不存在的对话直接拒。
+    #[test]
+    fn a_machine_can_only_deliver_from_its_own_conversations() {
+        far_machine("rt-sender", false);
+        let acp_sessions = crate::acp_host::new_test_acp_sessions();
+        let deliver = |source: &str, to: &str| {
+            accept_remote(
+                "rt-sender",
+                true,
+                smelt_core::peer_node::NodePeerDeliverParams {
+                    to: to.into(),
+                    delivery: PeerDelivery {
+                        id: "pm-remote".into(),
+                        source_session_id: source.into(),
+                        source_title: "far".into(),
+                        kind: PeerMessageKind::Task,
+                        hops: 3,
+                        reply_to: None,
+                        text: "hi".into(),
+                    },
+                    source_bypasses: false,
+                },
+                &acp_sessions,
+                &crate::new_event_hub(),
+            )
+            .unwrap_err()
+            .code
+        };
+        assert_eq!(
+            deliver("rt-someone-else/acp-s", "acp-t"),
+            ControlErrorCode::InvalidParams
+        );
+        assert_eq!(deliver("acp-s", "acp-t"), ControlErrorCode::InvalidParams);
+        assert_eq!(
+            deliver("rt-sender/acp-s", "acp-missing"),
+            ControlErrorCode::NotFound
+        );
+    }
+
+    /// 没被允许连入本机的机器只能交回信：本机对话之前和它那个对话通过信。
+    #[test]
+    fn a_machine_not_allowed_in_can_only_deliver_replies() {
+        far_machine("rt-outsider", false);
+        let acp_sessions = crate::acp_host::new_test_acp_sessions();
+        let deliver = |to: &str| {
+            accept_remote(
+                "rt-outsider",
+                false,
+                smelt_core::peer_node::NodePeerDeliverParams {
+                    to: to.into(),
+                    delivery: PeerDelivery {
+                        id: format!("pm-outsider-{to}"),
+                        source_session_id: "rt-outsider/acp-s".into(),
+                        source_title: "far".into(),
+                        kind: PeerMessageKind::Completion,
+                        hops: 3,
+                        reply_to: None,
+                        text: "done".into(),
+                    },
+                    source_bypasses: false,
+                },
+                &acp_sessions,
+                &crate::new_event_hub(),
+            )
+            .unwrap_err()
+            .code
+        };
+        assert_eq!(
+            deliver("acp-never-wrote"),
+            ControlErrorCode::PermissionDenied
+        );
+        // 本机对话发过去之后，那边的回信过了这一关（对话不在，接着按找不到拒）。
+        remember_contact("acp-wrote", "rt-outsider/acp-s");
+        assert_eq!(deliver("acp-wrote"), ControlErrorCode::NotFound);
+    }
+
+    /// 别的机器列本机的对话：自己这台机器上的都列，不按来源排除。
+    #[test]
+    fn a_machine_lists_every_local_conversation() {
+        let acp_sessions = crate::acp_host::new_test_acp_sessions();
+        let _a = live_pi(&acp_sessions, "acp-listed-a");
+        let listed = list_for_peer(&acp_sessions, Some("listed-a"));
+        let ids: Vec<&str> = listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|session| session["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["acp-listed-a"]);
     }
 }

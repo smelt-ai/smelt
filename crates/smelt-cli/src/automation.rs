@@ -107,7 +107,7 @@ fn upsert(automation: Automation) -> Result<serde_json::Value, String> {
 
 fn submit(command: AutomationCommand) -> Result<serde_json::Value, String> {
     let (result, snapshot) = smelt_client::session_ops::submit_automation_command(
-        &smelt_runtime_client::local::local_runtime(),
+        &crate::runtime(),
         &command,
     )?;
     let snapshot = redact_automation_credentials(snapshot);
@@ -119,7 +119,7 @@ fn submit(command: AutomationCommand) -> Result<serde_json::Value, String> {
 
 fn list_runs(automation_id: Option<&str>, limit: usize) -> Result<serde_json::Value, String> {
     let snapshot = smelt_client::session_ops::automations_snapshot(
-        &smelt_runtime_client::local::local_runtime(),
+        &crate::runtime(),
     )?;
     Ok(serde_json::json!({ "runs": recent_runs(snapshot.runs, automation_id, limit) }))
 }
