@@ -11335,6 +11335,7 @@ version = "0.0.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "atomic-waker",
  "dirs 5.0.1",
  "gpui-pre",
  "image",

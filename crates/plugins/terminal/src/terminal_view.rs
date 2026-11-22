@@ -253,12 +253,12 @@ impl TerminalView {
     pub(crate) fn from_terminal(
         cx: &mut Context<Self>,
         machine: RuntimeKey,
-        terminal: Terminal,
+        mut terminal: Terminal,
         cwd: Option<String>,
         session_id: String,
     ) -> Self {
         // Zed 式事件驱动重绘：读线程一有新内容就唤醒这里 cx.notify()（见 drive_redraws）。
-        Self::drive_redraws(terminal.redraw_channel(), 0, cx);
+        Self::drive_redraws(&mut terminal, 0, cx);
 
         Self {
             machine,
@@ -300,10 +300,13 @@ impl TerminalView {
 
     /// 驱动重绘的常驻任务：await 读线程的唤醒 → `cx.notify()`。内容一到就画，
     /// 不靠轮询。读线程退出（发送端 drop）时若当前连接仍是这一代且已标记 dead，
-    /// 则触发自动重连；换上新连接后旧 channel 的 Err 不会误触发。
-    fn drive_redraws(rx: smol::channel::Receiver<()>, generation: u64, cx: &mut Context<Self>) {
+    /// 则触发自动重连；换上新连接后旧通道的关闭不会误触发。
+    fn drive_redraws(terminal: &mut Terminal, generation: u64, cx: &mut Context<Self>) {
+        let Some(mut redraws) = terminal.take_redraw_channel() else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
-            while rx.recv().await.is_ok() {
+            while redraws.recv().await.is_some() {
                 if this
                     .update(cx, |this, cx| this.handle_terminal_event(cx))
                     .is_err()
@@ -479,9 +482,9 @@ impl TerminalView {
             cx.drop_image(image, None);
         }
         self.terminal = terminal;
-        // 旧 Terminal 一 drop，它读线程的发送端随之关闭，老的 redraw 任务 recv 到 Err
+        // 旧 Terminal 一 drop，它读线程的发送端随之关闭，老的 redraw 任务 recv 到 None
         // 自行退出；这里给新连接挂一个新的重绘任务。
-        Self::drive_redraws(self.terminal.redraw_channel(), self.terminal_generation, cx);
+        Self::drive_redraws(&mut self.terminal, self.terminal_generation, cx);
         // 新 Terminal 自带空选区，只需重置本视图的拖选 / 应用鼠标交互态。
         self.selecting = false;
         self.app_mouse = false;
