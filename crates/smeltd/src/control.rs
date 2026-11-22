@@ -382,6 +382,26 @@ fn dispatch_control(
             event_hub.mark_attention_read(&params.session_id);
             success_value(control_version, &request_id, EmptyParams::default())
         }
+        peer @ (ControlMethod::NodePair
+        | ControlMethod::NodeUnpair
+        | ControlMethod::PeerList
+        | ControlMethod::PeerPair
+        | ControlMethod::PeerUpdate
+        | ControlMethod::PeerRemove
+        | ControlMethod::PeerLink
+        | ControlMethod::PeerReset) => {
+            // 认不出调用方是谁时按智能体处理：改对端设置要能证明不是智能体会话。
+            let caller_is_agent = || match peer_pid {
+                Some(pid) => {
+                    crate::memory_peer_auth::deny_agent_session_peer(acp_sessions, pid).is_err()
+                }
+                None => true,
+            };
+            match crate::peer_nodes::dispatch(peer, params, principal, caller_is_agent) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         device @ (ControlMethod::DevicePairBegin
         | ControlMethod::DevicePair
         | ControlMethod::DeviceList

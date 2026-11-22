@@ -142,6 +142,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | 组 | 方法 |
 |---|---|
 | 远程与设备 | `remote.config.get` / `remote.config.set` / `remote.status` / `remote.status.wait`（状态和 `known` 不同就回，最多挂 20 秒）；`device.pair_begin` / `device.pair` / `device.list` / `device.revoke` |
+| 对端节点 | `peer.list` / `peer.pair` / `peer.update` / `peer.remove` / `peer.link` / `peer.reset`（只收本机，写方法拒绝智能体会话进程树）；节点之间的 `node.pair`（未配对的连接可调）/ `node.unpair`。另有长连接 op `forward`：经本机运行时转发到一个对端，见 `docs/cross-machine.md` |
 | 提醒与通知 | `attention.mark_read`（`{session_id}`：清这个会话的未读，等批准、等输入、失败这类要处理的不清；变化经 `attention.changed` 推给各端）；`notify.send`（`smelt notify`）；`push.register` / `push.unregister` |
 | 会话生命周期 | `new_session.catalog`、`session.create`（对话可带 `cwd`、`title`、`disallowed_tools`，见下面「插件驱动对话」）、`session.delete`（删完进程顺带把它从工作区目录摘掉：终端摘这一格，最后一格或 ACP 会话删整段对话）、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`conversation.prompt_index`（每一问一行摘要，给提问导航；挂起的对话先唤醒）、`conversation.prompt` / `conversation.turn_result`、`subagent.transcript` |
 | 工作区与文件 | `workspace.conversation.create` / `update` / `delete`、`workspace.project.open` / `close`、`workspace.rename`（改名的唯一入口，名字写在哪由运行时定，在跑的对话同步给 agent）、`workspace.directory`（只读整份目录；目录只经前面几条单条改动写，改了就推 `workspace.changed` 整份目录；关对话时运行时顺带收掉它的终端和 ACP 会话）；`workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |

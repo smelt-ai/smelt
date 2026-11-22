@@ -127,6 +127,7 @@ mod memory_watch;
 #[cfg(target_os = "macos")]
 mod menubar;
 mod peer_messages;
+mod peer_nodes;
 mod pi_control;
 mod presence;
 mod push;

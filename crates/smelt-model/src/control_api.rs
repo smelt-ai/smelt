@@ -992,6 +992,22 @@ pi_calls! {
     PushRegister => PushRegister(crate::remote_config::PushRegisterParams) -> EmptyParams;
     /// 取消调用方这台设备的推送登记。没有登记也算成功。
     PushUnregister => PushUnregister(EmptyParams) -> EmptyParams;
+    /// 另一个节点用本节点发的配对码双向配对，交回本节点的身份。未配对的连接可调。
+    NodePair => NodePair(crate::peer_node::NodePairParams) -> crate::peer_node::NodeInfo;
+    /// 对端请本节点删掉它。只收对端节点。
+    NodeUnpair => NodeUnpair(EmptyParams) -> EmptyParams;
+    /// 本节点的对端。只收本机。
+    PeerList => PeerList(EmptyParams) -> crate::peer_node::PeerList;
+    /// 用对方的配对串双向配对。只收本机签过名的桌面。
+    PeerPair => PeerPair(crate::peer_node::PeerPairParams) -> crate::peer_node::PeerNode;
+    /// 改对端的显示名、中继、系统、智能体权限。只收本机签过名的桌面。
+    PeerUpdate => PeerUpdate(crate::peer_node::PeerUpdateParams) -> crate::peer_node::PeerNode;
+    /// 删掉一个对端，对方在线时请它也删掉本节点。只收本机签过名的桌面。
+    PeerRemove => PeerRemove(crate::peer_node::PeerIdParams) -> EmptyParams;
+    /// 到对端的当前路径和延迟，不为此拨号。只收本机。
+    PeerLink => PeerLink(crate::peer_node::PeerIdParams) -> crate::peer_node::PeerLinkResult;
+    /// 丢掉往外拨的连接重新拨（系统睡醒后）。只收本机。
+    PeerReset => PeerReset(EmptyParams) -> EmptyParams;
     /// 新建菜单里用户标为「常用」的动作。桌面和手机共用这一份。
     NewSessionPinsGet => NewSessionPinsGet(EmptyParams) -> crate::new_session::NewSessionPreferences;
     NewSessionPinsToggle => NewSessionPinsToggle(crate::new_session::PinParams)

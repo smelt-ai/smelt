@@ -138,7 +138,7 @@ pub(crate) fn authorize_memory_mutation(
 ) -> Result<(), ControlError> {
     use crate::devices::Principal;
     match principal {
-        Principal::Device(_) => Ok(()),
+        Principal::Device(_) | Principal::Peer { .. } => Ok(()),
         Principal::Unpaired(_) => Err(denied("unpaired devices cannot adopt or delete memory")),
         Principal::Local => {
             if allow_missing_peer && peer_pid.is_none() {

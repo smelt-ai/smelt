@@ -257,7 +257,7 @@ fn chat(id: &str, message: Option<String>) -> i32 {
     if let Some(text) = message {
         let input = smelt_model::conversation::ConversationInput::new(text, Vec::new());
         if let Err(error) = smelt_client::session_ops::submit_conversation_input(
-            &smelt_runtime_client::local::local_runtime(),
+            &crate::runtime(),
             &created.session_id,
             &input,
             &[],

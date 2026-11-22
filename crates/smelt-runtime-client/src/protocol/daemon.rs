@@ -42,6 +42,8 @@ pub enum DaemonOperation {
     DesktopAttach,
     /// 升到指定版本：运行时自己下载、安装、交接，见 [`super::runtime_upgrade`]。
     RuntimeUpgrade,
+    /// 经本机运行时转发到它的一个对端节点，见 [`super::forward`]。
+    Forward,
 }
 
 /// 首帧只先解析操作名，其余字段原样留给对应 handler。

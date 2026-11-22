@@ -35,6 +35,7 @@ pub mod locale;
 pub mod memory_settings;
 pub mod new_session;
 pub mod osc;
+pub mod peer_node;
 pub mod pi_auth;
 pub mod pi_auth_service;
 pub mod pi_mcp;

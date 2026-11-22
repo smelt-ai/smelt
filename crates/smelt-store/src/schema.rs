@@ -16,7 +16,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 44] = [
+pub const TABLES: [&str; 45] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -42,6 +42,7 @@ pub const TABLES: [&str; 44] = [
     "memory_settings",
     "new_session_pin",
     "paired_device",
+    "peer_node",
     "project",
     "project_repository",
     "project_repository_catalog",
@@ -469,6 +470,15 @@ CREATE TABLE paired_device (
   paired_at_ms INTEGER NOT NULL,
   last_seen_at_ms INTEGER
 ) WITHOUT ROWID;
+CREATE TABLE peer_node (
+  runtime_id TEXT PRIMARY KEY,
+  endpoint_id TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  relay_url TEXT,
+  os TEXT,
+  agent_access INTEGER NOT NULL DEFAULT 0 CHECK (agent_access IN (0, 1)),
+  added_at_ms INTEGER NOT NULL
+);
 CREATE TABLE push_registration (
   device_endpoint_id TEXT PRIMARY KEY REFERENCES paired_device(endpoint_id) ON DELETE CASCADE,
   handle TEXT NOT NULL,
@@ -1904,6 +1914,19 @@ pub const V38_TO_V39_DROPPED_COLUMNS: [(&str, &str); 4] = [
     ("acp_detail", "pending_delivery_id"),
     ("acp_detail", "binding_automation_run_id"),
 ];
+
+/// v40：和本节点双向配对过的对端节点（见 `docs/cross-machine.md`）。
+pub const MIGRATE_V39_TO_V40: &str = "
+CREATE TABLE peer_node (
+  runtime_id TEXT PRIMARY KEY,
+  endpoint_id TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  relay_url TEXT,
+  os TEXT,
+  agent_access INTEGER NOT NULL DEFAULT 0 CHECK (agent_access IN (0, 1)),
+  added_at_ms INTEGER NOT NULL
+);
+";
 
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。
 pub const MIGRATE_V29_TO_V30: &str = "

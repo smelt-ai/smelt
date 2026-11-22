@@ -63,8 +63,11 @@ pub(crate) struct ServerContext {
 /// 未配对的远程设备只能提交配对码（设计文档 D3），连 `system.describe` 都不行。
 fn unpaired_may_call(operation: DaemonOperation, payload: &serde_json::Value) -> bool {
     operation == DaemonOperation::Control
-        && payload.get("method").and_then(serde_json::Value::as_str)
-            == Some(ControlMethod::DevicePair.as_str())
+        && matches!(
+            payload.get("method").and_then(serde_json::Value::as_str),
+            Some(method) if method == ControlMethod::DevicePair.as_str()
+                || method == ControlMethod::NodePair.as_str()
+        )
 }
 
 pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
@@ -220,6 +223,9 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
             crate::desktop::handle_desktop_attach(conn, reader, &crate::desktop::vnc_endpoint())
         }
         DaemonOperation::RuntimeUpgrade => crate::runtime_upgrade::handle_runtime_upgrade(conn, &v),
+        DaemonOperation::Forward => {
+            crate::peer_nodes::handle_forward(conn, reader, &v, &principal, &acp_sessions)
+        }
     }
 }
 

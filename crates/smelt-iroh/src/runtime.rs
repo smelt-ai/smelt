@@ -449,7 +449,12 @@ const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// 解析器：手机只连一台运行时，而 iOS 上 iroh 自带的 DNS 会绕开系统代理，见
 /// [`crate::system_dns`]。
 pub struct IrohClient {
-    runtime: tokio::runtime::Runtime,
+    /// 拨号、读路径用的 tokio 运行时。[`IrohClient::new`] 自己起一个；
+    /// [`IrohClient::on_endpoint`] 和 endpoint 的主人共用一个，这里的引用让它在还有连接器
+    /// 拿着本客户端时不退出。
+    runtime: Arc<tokio::runtime::Runtime>,
+    /// endpoint 是不是自己绑的：是的话 `Drop` 时关掉。借来的由借出方关。
+    owns_endpoint: bool,
     endpoint: Endpoint,
 }
 
@@ -463,7 +468,23 @@ impl IrohClient {
             .build()
             .context("起不了 iroh 客户端的 tokio 运行时")?;
         let endpoint = runtime.block_on(bind_runtime_endpoint(secret, Vec::new(), relay))?;
-        Ok(Arc::new(Self { runtime, endpoint }))
+        Ok(Arc::new(Self {
+            runtime: Arc::new(runtime),
+            owns_endpoint: true,
+            endpoint,
+        }))
+    }
+
+    /// 借一个已经绑好的 endpoint 往外拨：运行时用接受连入的同一个 endpoint 拨对端节点，
+    /// 一台机器只有一个身份（同一把密钥绑两个 endpoint 会在 relay 上互相挤掉）。
+    /// `runtime` 是 endpoint 所在的 tokio 运行时。endpoint 由借出方关；关了之后经本客户端
+    /// 的拨号直接失败。
+    pub fn on_endpoint(endpoint: Endpoint, runtime: Arc<tokio::runtime::Runtime>) -> Arc<Self> {
+        Arc::new(Self {
+            runtime,
+            owns_endpoint: false,
+            endpoint,
+        })
     }
 
     /// 这台客户端的设备身份（endpoint id）。
@@ -492,8 +513,10 @@ impl IrohClient {
 
 impl Drop for IrohClient {
     fn drop(&mut self) {
-        let endpoint = self.endpoint.clone();
-        self.runtime.block_on(async move { endpoint.close().await });
+        if self.owns_endpoint {
+            let endpoint = self.endpoint.clone();
+            self.runtime.block_on(async move { endpoint.close().await });
+        }
     }
 }
 

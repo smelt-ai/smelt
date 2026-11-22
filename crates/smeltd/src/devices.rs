@@ -32,6 +32,11 @@ pub(crate) enum Principal {
     Device(String),
     /// 还没配对的远程设备，只能提交配对码。
     Unpaired(String),
+    /// 双向配对过的对端节点（见 [`crate::peer_nodes`]），权限同已配对设备。
+    Peer {
+        runtime_id: String,
+        endpoint_id: String,
+    },
 }
 
 impl Principal {
@@ -85,7 +90,7 @@ fn normalize_code(code: &str) -> String {
         .collect()
 }
 
-fn issue_code() -> (String, Instant) {
+pub(crate) fn issue_code() -> (String, Instant) {
     let mut codes = CODES.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
     codes.pending.retain(|pending| pending.expires_at > now);
@@ -99,7 +104,7 @@ fn issue_code() -> (String, Instant) {
 }
 
 /// 码对且没过期就作废它并返回 true。
-fn redeem_code(code: &str) -> bool {
+pub(crate) fn redeem_code(code: &str) -> bool {
     let wanted = normalize_code(code);
     let mut codes = CODES.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
@@ -207,6 +212,7 @@ fn pair_begin() -> Result<PairingOffer, ControlError> {
 fn pair(principal: &Principal, params: PairParams) -> Result<(), ControlError> {
     let endpoint_id = match principal {
         Principal::Device(id) | Principal::Unpaired(id) => id,
+        Principal::Peer { endpoint_id, .. } => endpoint_id,
         Principal::Local => {
             return Err(ControlError::because(
                 ControlErrorCode::FailedPrecondition,
@@ -286,10 +292,12 @@ fn revoke(params: DeviceIdParams) -> Result<RevokeResult, ControlError> {
 fn calling_device(principal: &Principal) -> Result<&str, ControlError> {
     match principal {
         Principal::Device(id) => Ok(id),
-        Principal::Local | Principal::Unpaired(_) => Err(ControlError::because(
-            ControlErrorCode::FailedPrecondition,
-            ControlReason::PushFromPairedOnly,
-        )),
+        Principal::Local | Principal::Unpaired(_) | Principal::Peer { .. } => {
+            Err(ControlError::because(
+                ControlErrorCode::FailedPrecondition,
+                ControlReason::PushFromPairedOnly,
+            ))
+        }
     }
 }
 
@@ -384,8 +392,10 @@ pub(crate) struct RemoteStreams;
 
 impl smelt_iroh::runtime::StreamAcceptor for RemoteStreams {
     fn is_trusted(&self, remote: &str) -> bool {
-        match is_paired(remote) {
-            Ok(paired) => paired,
+        match is_paired(remote)
+            .and_then(|paired| Ok(paired || crate::peer_nodes::peer_by_endpoint(remote)?.is_some()))
+        {
+            Ok(trusted) => trusted,
             Err(error) => {
                 crate::dlog(&format!("查设备白名单失败，按未配对处理：{error}"));
                 false
@@ -397,8 +407,19 @@ impl smelt_iroh::runtime::StreamAcceptor for RemoteStreams {
         let remote = remote.to_string();
         // 查库、分发都是阻塞的，不能占着 tokio 线程。
         std::thread::spawn(move || {
-            let principal = match is_paired(&remote) {
-                Ok(true) => {
+            let peer = match crate::peer_nodes::peer_by_endpoint(&remote) {
+                Ok(peer) => peer,
+                Err(error) => {
+                    crate::dlog(&format!("查对端节点失败，拒绝这条连接：{error}"));
+                    return;
+                }
+            };
+            let principal = match (peer, is_paired(&remote)) {
+                (Some(runtime_id), _) => Principal::Peer {
+                    runtime_id,
+                    endpoint_id: remote,
+                },
+                (None, Ok(true)) => {
                     if should_touch(&remote)
                         && let Ok(store) = smelt_core::sqlite_state::default_sqlite_store()
                     {
@@ -406,8 +427,8 @@ impl smelt_iroh::runtime::StreamAcceptor for RemoteStreams {
                     }
                     Principal::Device(remote)
                 }
-                Ok(false) => Principal::Unpaired(remote),
-                Err(error) => {
+                (None, Ok(false)) => Principal::Unpaired(remote),
+                (None, Err(error)) => {
                     crate::dlog(&format!("查设备白名单失败，拒绝这条连接：{error}"));
                     return;
                 }
