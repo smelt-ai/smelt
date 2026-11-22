@@ -72,6 +72,50 @@ fn conversation_snapshots() {
     }
 }
 
+#[test]
+#[ignore = "出图工具，单独运行以免全局主题干扰并行测试"]
+fn provider_switch_snapshots() {
+    rust_i18n::set_locale("zh-CN");
+    let out =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/tmp/snapshots/provider-switch");
+    std::fs::create_dir_all(&out).unwrap();
+    let mut snapshot = tail_snapshot(
+        0,
+        0,
+        vec![
+            AcpEntry::Divider("Codex".into()),
+            AcpEntry::User("在同一个 session 中继续工作".into()),
+            AcpEntry::Assistant {
+                text: "已完成初步检查。".into(),
+                thought: false,
+            },
+            AcpEntry::Divider("Claude".into()),
+            AcpEntry::User("继续实现并运行测试".into()),
+            AcpEntry::Assistant {
+                text: "已收到前面的目标和工作记录。".into(),
+                thought: false,
+            },
+        ],
+        DaemonPhase::Idle,
+    );
+    snapshot.conversation_state = Some(
+        smelt_plugin_api::model::conversation::ConversationStateSnapshot {
+            provider: Some(smelt_plugin_api::model::workspace_directory::WorkspaceAcp {
+                agent: "claude".into(),
+                sid: "acp-snapshot".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    for (theme, suffix) in [
+        (DEFAULT_LIGHT, "provider-switch-light"),
+        (DEFAULT_DARK, "provider-switch-dark"),
+    ] {
+        assert!(!render(&snapshot, theme, suffix, true, None, &out).is_empty());
+    }
+}
+
 fn load_snapshot(path: &Path) -> ConversationSnapshot {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("读 {} 失败: {error}", path.display()));
@@ -281,7 +325,29 @@ fn render(
             let view = cx.new(|cx| {
                 let mut view =
                     conversation_fixture("acp-snapshot", Vec::new(), DaemonPhase::Idle, cx);
+                let mixed = snapshot
+                    .conversation_state
+                    .as_ref()
+                    .is_some_and(|state| state.provider.is_some());
                 view.apply_snapshot(snapshot, cx);
+                if mixed {
+                    view.init_input(window, cx);
+                    view.provider_options =
+                        [ConversationAgentKind::Codex, ConversationAgentKind::Claude]
+                            .into_iter()
+                            .map(
+                                |kind| smelt_plugin_api::model::session_control::AcpAgentOption {
+                                    id: kind.id().into(),
+                                    kind: kind.id().into(),
+                                    label: kind.label().into(),
+                                    profile: false,
+                                    agent_definition_id: None,
+                                    launch: Default::default(),
+                                    history_dir: None,
+                                },
+                            )
+                            .collect();
+                }
                 if expanded {
                     let layout = view.conversation_layout();
                     for item in layout.iter() {

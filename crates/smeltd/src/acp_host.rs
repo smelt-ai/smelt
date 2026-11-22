@@ -165,6 +165,8 @@ impl AcpRestoreState {
 
 pub(crate) struct AcpSession {
     pub(crate) instance: u64,
+    pub(crate) provider_timeline: SessionLock<Option<crate::provider_switch::Timeline>>,
+    pub(crate) provider_switching: AtomicBool,
     /// 改过就自动叫醒等待者。要等相位或配置落定的地方用 `wait_timeout_while` 等，
     /// 不再隔一会儿查一次，也不靠改值的地方记得发快照。
     pub(crate) reduced: Watched<smelt_core::acp_session::AcpSessionState>,
@@ -390,6 +392,7 @@ pub(crate) fn acp_agent_pid(sess: &AcpSession) -> Option<i32> {
 
 #[derive(Clone)]
 pub(crate) struct AcpOpenRequest {
+    pub(crate) provider_key: Option<String>,
     pub(crate) id: String,
     pub(crate) cwd: Option<String>,
     pub(crate) launch: smelt_core::agent_kind::ConversationLaunchSpec,
@@ -432,6 +435,7 @@ pub(crate) fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenReq
         Some(value) => Some(serde_json::from_value(value.clone()).ok()?),
     };
     Some(AcpOpenRequest {
+        provider_key: v["provider_key"].as_str().map(str::to_string),
         id,
         cwd: v["cwd"].as_str().map(String::from),
         launch,
@@ -773,6 +777,9 @@ pub(crate) fn durable_history_write(
 }
 
 fn persist_confirmed_history_id(sess: &AcpSession, subscribers: &EventHubHandle) {
+    if sess.provider_switching.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(history_id) = ({
         let reduced = sess.reduced.lock();
         normalize_resume_id(reduced.history_session_id.clone())
@@ -882,7 +889,7 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
     };
     if let Some(snapshot) = snapshot {
         // agent 报的标题是对话的一部分：变了才记进工作区目录，GUI 没开时冷启动也看得到。
-        if title_changed {
+        if title_changed && !sess.provider_switching.load(Ordering::SeqCst) {
             crate::workspace_directory::remember_acp_session_title(
                 &snapshot.id,
                 title.as_deref(),
@@ -1456,7 +1463,7 @@ pub(crate) fn encode_acp_snapshot(
         SnapshotFrameKind::Full(mirror) => (mirror, true),
         SnapshotFrameKind::Delta(mirror) => (mirror, false),
     };
-    let (mut snap, entries_delta, live, tool_debug_generation, included_tool_debug) = {
+    let (mut snap, entries_delta, mut live, tool_debug_generation, included_tool_debug) = {
         let reduced = sess.reduced.lock();
         let tool_debug_generation = reduced.tool_debug_generation;
         let included_tool_debug =
@@ -1488,7 +1495,7 @@ pub(crate) fn encode_acp_snapshot(
         // 双方都不必再为它留镜像。
         // 要图片引用的连接，镜像记的是替换后的条目：只有含大图的条目才克隆替换，
         // 摘要缓存在原图上，同一张图不会每帧重算。
-        let delta = if full {
+        let delta = if full || sess.provider_timeline.lock().is_some() {
             None
         } else {
             let encoded = mirror.encode_entries_with(
@@ -1529,7 +1536,11 @@ pub(crate) fn encode_acp_snapshot(
             None => {
                 // 增量补不上时不知道对方停在哪，从头要：起点会被抬到父镜像还留着的
                 // 前缀，能给的都给，窗口再按漏帧接上最新的后缀。
-                let from = if full { from } else { 0 };
+                let from = if full || sess.provider_timeline.lock().is_some() {
+                    from
+                } else {
+                    0
+                };
                 // 窗口只订阅当前一轮，但收尾那一步改到的条目已经划进历史。从记脏的
                 // `from` 起一起带上，窗口才接得上，不会当成漏帧把对话清空。
                 let start = if include_history {
@@ -1563,6 +1574,8 @@ pub(crate) fn encode_acp_snapshot(
             included_tool_debug,
         )
     };
+    crate::provider_switch::project(sess, &mut snap);
+    crate::provider_switch::project_live(sess, &mut live);
     if include_envelope {
         set_conversation_snapshot(sess, &mut snap);
     }
@@ -1681,6 +1694,11 @@ pub(crate) fn set_conversation_snapshot(
     snapshot: &mut smelt_core::acp_session::ConversationSnapshot,
 ) {
     snapshot.conversation_state = Some(smelt_core::conversation::ConversationStateSnapshot {
+        provider: sess
+            .provider_timeline
+            .lock()
+            .as_ref()
+            .map(|timeline| timeline.active.clone()),
         binding: sess.conversation_binding.lock().clone(),
         pending_agent_preset: sess.pending_agent_preset.lock().clone(),
     });
@@ -1822,6 +1840,7 @@ pub(crate) fn start_acp_event_drain(
                     let mut runtime_debug_changed = false;
                     let mut envelope_changed = false;
                     let mut turn_ended = false;
+                    let mut handoff_received = false;
                     let mut ready = false;
                     let mut provider_idle = false;
                     let mut prompt_refused = false;
@@ -1848,6 +1867,7 @@ pub(crate) fn start_acp_event_drain(
                         if matches!(&ev, smelt_core::acp_conn::ConversationEvent::PromptAccepted) {
                             // 气泡在提交时就写过了，这里不再新增条目，只是状态变了（provider
                             // 排队提示要收），所以只标 applied，不推 entries 偏移。
+                            crate::provider_switch::acknowledge(sess);
                             if accept_unaccepted_prompt(sess) {
                                 applied = true;
                             }
@@ -1880,10 +1900,19 @@ pub(crate) fn start_acp_event_drain(
                         ) {
                             restore_unaccepted_to_composer(sess);
                         }
+                        handoff_received |= matches!(
+                            &ev,
+                            smelt_core::acp_conn::ConversationEvent::AgentChunk { .. }
+                                | smelt_core::acp_conn::ConversationEvent::ToolCall(_)
+                                | smelt_core::acp_conn::ConversationEvent::TurnEnded(
+                                    agent_client_protocol::v1::schema::StopReason::EndTurn
+                                )
+                        );
                         turn_ended |= ev.ends_turn();
                         ready |=
                             matches!(&ev, smelt_core::acp_conn::ConversationEvent::Ready { .. });
-                        if matches!(restore_policy, Some(AcpRestorePolicy::FreshOnMissing))
+                        if sess.provider_timeline.lock().is_none()
+                            && matches!(restore_policy, Some(AcpRestorePolicy::FreshOnMissing))
                             && matches!(
                                 &ev,
                                 smelt_core::acp_conn::ConversationEvent::RestoreFailed(failure)
@@ -1960,6 +1989,10 @@ pub(crate) fn start_acp_event_drain(
                         runtime_debug_changed |= outcome.runtime_debug_changed;
                         envelope_changed |= outcome.envelope_changed;
                         applied = true;
+                    }
+                    crate::provider_switch::ready(sess);
+                    if handoff_received {
+                        crate::provider_switch::acknowledge(sess);
                     }
                     if prompt_refused && !provider_idle {
                         // 同一批里如果已经空闲，不能先把相位改成思考中，否则这条空闲信号放不出队。
@@ -2165,6 +2198,7 @@ pub(crate) fn acp_relaunch(
     abandon_history: bool,
 ) {
     let sess = &slot.value;
+    crate::provider_switch::reset(sess);
     sess.idle.mark_running();
     let relaunch_config;
     let (generation, restore_policy) = {
@@ -2344,6 +2378,8 @@ pub(crate) fn make_acp_session(
     let instance = next_session_instance();
     AcpSession {
         instance,
+        provider_timeline: SessionLock::new(None),
+        provider_switching: AtomicBool::new(false),
         reduced: Watched::new(smelt_core::acp_session::AcpSessionState::default()),
         snapshot_revision: AtomicU64::new(0),
         connection_generation: AtomicU64::new(0),
@@ -2532,6 +2568,13 @@ pub(crate) fn send_acp_prompt_reserved(
     };
     let shown_images = images.clone();
     let shown_text = text.clone();
+    let text = match crate::provider_switch::prompt(sess, &text) {
+        Ok(text) => text,
+        Err(error) => {
+            sess.prompt_in_flight.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+    };
     in_flight_rpc.fetch_add(1, Ordering::SeqCst);
     if cmd_tx
         .try_send(smelt_core::acp_conn::ConversationCommand::Prompt { text, images })
@@ -2544,6 +2587,7 @@ pub(crate) fn send_acp_prompt_reserved(
         Ok(())
     } else {
         in_flight_rpc.fetch_sub(1, Ordering::SeqCst);
+        crate::provider_switch::not_sent(sess);
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
         *sess.unaccepted_prompt.lock() = None;
         Err("ACP command channel is busy or closed")
@@ -3154,6 +3198,9 @@ pub(crate) fn apply_acp_user_action(
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
     use smelt_core::acp_session::AcpUserAction;
+    if let Some(error) = crate::provider_switch::reject_action(sess, &action) {
+        return Err(error);
+    }
     // 用户在这个对话里说话了，别的对话发来的消息链断在这里。
     if matches!(
         action,
@@ -3186,6 +3233,7 @@ pub(crate) fn apply_acp_user_action(
     let live_change = acp_live_change_of(&action);
     let result = apply_acp_user_action_inner(sess, action, subscribers, false);
     if result.is_ok()
+        && !sess.provider_switching.load(Ordering::SeqCst)
         && let Some(change) = live_change
     {
         let sid = sess.state.lock().id.clone();
@@ -3988,7 +4036,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
             let reduced = sess.reduced.lock();
             let omit_history = req.omit_history;
             let (history_len, open_end) = reduced.open_turn_range();
-            let live = smelt_core::acp_session::live_from_state(&reduced);
+            let mut live = smelt_core::acp_session::live_from_state(&reduced);
             let tool_debug_generation = reduced.tool_debug_generation;
             let (start, end) = if omit_history {
                 (history_len, open_end)
@@ -4005,6 +4053,8 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
             );
             snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
             drop(reduced);
+            crate::provider_switch::project_live(sess, &mut live);
+            crate::provider_switch::project(sess, &mut snapshot);
             set_conversation_snapshot(sess, &mut snapshot);
             apply_entry_version(&mut snapshot, entry_version);
             let provider_pid = acp_agent_pid(sess);
@@ -4197,6 +4247,12 @@ fn ensure_acp_session_inner(
     subscribers: &EventHubHandle,
     client_open: bool,
 ) -> Result<Arc<AcpSlot<AcpSession>>, String> {
+    let req = if let Ok(store) = crate::workspace_directory::default_store() {
+        crate::provider_switch::prepare_open(req.clone(), &store)?
+    } else {
+        req.clone()
+    };
+    let req = &req;
     loop {
         let (slot, created) = acp_sessions.reserve_with(&req.id, || {
             make_acp_session(
@@ -4207,6 +4263,12 @@ fn ensure_acp_session_inner(
             )
         });
         if created {
+            if let Ok(store) = crate::workspace_directory::default_store()
+                && let Err(error) = crate::provider_switch::restore(&slot.value, &store, &req.id)
+            {
+                acp_sessions.remove_if_same(&req.id, &slot);
+                return Err(error);
+            }
             *slot.value.disallowed_tools.lock() = req.disallowed_tools.clone();
         } else {
             if !client_open {
@@ -4250,6 +4312,13 @@ fn ensure_acp_session_inner(
             }
             adopt_unknown_conversation_binding(&slot.value, req.conversation_binding.clone());
         }
+        // 活动 provider 必须在生命周期锁内重读：等锁期间可能已被另一客户端切换。
+        let current_request = if let Ok(store) = crate::workspace_directory::default_store() {
+            crate::provider_switch::prepare_open(req.clone(), &store)?
+        } else {
+            req.clone()
+        };
+        let req = &current_request;
         let alive = acp_runtime_alive(&slot.value);
         let known_history = known_acp_resume_id(&slot.value.reduced.lock());
         let resume_id = resolve_resume_id(
@@ -4386,13 +4455,12 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
         let tail_limit = v["tail_limit"].as_u64().map(|n| n as usize);
         let revision_matches =
             v["snapshot_revision"].as_u64() == Some(sess.snapshot_revision.load(Ordering::SeqCst));
-        let offset = if history_matches && revision_matches {
-            known_entries.unwrap_or(0).min(entries_total)
-        } else if let Some(limit) = tail_limit {
-            entries_total.saturating_sub(limit)
-        } else {
-            0
-        };
+        let (wanted_offset, offset) = crate::provider_switch::watch_offset(
+            sess,
+            entries_total,
+            (history_matches && revision_matches).then_some(known_entries.unwrap_or(0)),
+            tail_limit,
+        );
         let Ok(c) = conn.try_clone() else { return };
         let tool_debug_generation = reduced.tool_debug_generation;
         if image_refs {
@@ -4403,11 +4471,16 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
         if !include_debug {
             omit_debug_sidecars(&mut snapshot);
         }
+        snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
+        crate::provider_switch::project(sess, &mut snapshot);
+        let trim = wanted_offset
+            .saturating_sub(snapshot.entries_offset)
+            .min(snapshot.entries.len());
+        snapshot.entries.drain(..trim);
+        snapshot.entries_offset += trim;
         if image_refs {
-            // 摘要上面都已算好，这里只是就地替换副本。
             apply_image_refs(&mut snapshot);
         }
-        snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
         set_conversation_snapshot(sess, &mut snapshot);
         apply_entry_version(&mut snapshot, entry_version);
         let (initial, mirror) = full_frame(&serde_json::json!({ "snapshot": snapshot }));
@@ -4634,24 +4707,50 @@ pub(crate) fn read_history_page(
         .with_current(id, &slot, |session| {
             let reduced = session.reduced.lock();
             let end = before.min(reduced.entries_total());
-            end.saturating_sub(limit) < reduced.entries_base() && session.idle.is_suspended()
+            (session.provider_timeline.lock().is_some()
+                || end.saturating_sub(limit) < reduced.entries_base())
+                && session.idle.is_suspended()
         })
         .unwrap_or(false);
     if needs_wake {
         crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
+            .map_err(HistoryReadError::Failed)?;
+        crate::acp_idle::wait_for_acp_ready(&slot.value, crate::acp_idle::ACP_WAKE_READY_TIMEOUT)
             .map_err(HistoryReadError::Failed)?;
     }
     acp_sessions
         .with_current(id, &slot, |session| {
             let _output_gate = session.output_gate.lock();
             let reduced = session.reduced.lock();
-            let end = before.min(reduced.entries_total());
-            let start = end.saturating_sub(limit);
+            let mixed = session.provider_timeline.lock().is_some();
+            let (wanted_end, end) = crate::provider_switch::watch_offset(
+                session,
+                reduced.entries_total(),
+                Some(before),
+                None,
+            );
+            let (wanted_start, start) = crate::provider_switch::watch_offset(
+                session,
+                reduced.entries_total(),
+                Some(wanted_end.saturating_sub(limit)),
+                None,
+            );
             // runtime debug 只是账本，历史页不带；不要调试数据时工具参数表也不克隆。
             let mut snapshot =
                 reduced.to_snapshot_range_selective(false, start, end, include_debug, false, true);
             snapshot.snapshot_revision = session.snapshot_revision.load(Ordering::SeqCst);
             drop(reduced);
+            crate::provider_switch::project(session, &mut snapshot);
+            if mixed {
+                let start = wanted_start.saturating_sub(snapshot.entries_offset);
+                let end = wanted_end.saturating_sub(snapshot.entries_offset);
+                snapshot.entries = snapshot
+                    .entries
+                    .get(start..end)
+                    .unwrap_or_default()
+                    .to_vec();
+                snapshot.entries_offset = wanted_start;
+            }
             set_conversation_snapshot(session, &mut snapshot);
             snapshot
         })

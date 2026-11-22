@@ -70,6 +70,7 @@ pub use smelt_plugin_api::model::acp_chat::{
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 mod edit_diff;
+mod provider_switch;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -1745,6 +1746,9 @@ pub struct ConversationView {
     /// 「强制重启」失败时的提示文案（连不上 smeltd、会话已不存在等）；下次
     /// 操作前一直显示，成功后清空。只属于本地展示状态，不落盘。
     restart_error: Option<String>,
+    provider_options: Vec<smelt_plugin_api::model::session_control::AcpAgentOption>,
+    provider_switch_pending: bool,
+    provider_switch_error: Option<String>,
     /// 冷恢复占位待自动启动：GUI 重启后第一次切到这个会话时自动 restart，
     /// 有旧 session id 则协议级续接，没有则新建一轮但保留本地历史。只消费一次——
     /// 自动启动失败（Fatal → Ended）后回到手动，错误得让人看见，不能循环重试。
@@ -2086,6 +2090,9 @@ impl ConversationView {
             restarting: false,
             cancel_requested_at: None,
             restart_error: None,
+            provider_options: Vec::new(),
+            provider_switch_pending: false,
+            provider_switch_error: None,
             pending_initial_prompt: None,
             restart_config_values: Vec::new(),
             conversation_binding:
@@ -2206,6 +2213,7 @@ impl ConversationView {
             cwd: self.cwd.clone(),
             launch: self.launch.clone(),
             engine_kind: self.agent,
+            provider_key: Some(self.current_provider_key()),
             ephemeral_env: Default::default(),
             resume_id,
             fork_id: None,
@@ -2759,6 +2767,7 @@ impl ConversationView {
     /// 发出打开请求、订上这段对话。初始配置和首条消息按这一刻的状态带上：守护这次要
     /// 拉起 runtime 时，就绪后由它写回配置、发出首条消息；热 attach 时守护不看它们。
     fn subscribe(&mut self, mut client: ConversationClientLaunch, cx: &mut Context<Self>) {
+        self.load_provider_options(cx);
         client.initial_config = self.initial_config_values();
         client.initial_prompt = self.pending_initial_prompt.clone();
         let handle = spawn_acp_client(self.runtime.client().clone(), client);
@@ -4392,6 +4401,9 @@ impl ConversationView {
         }
 
         if let Some(conversation_state) = snap.conversation_state.take() {
+            if let Some(provider) = conversation_state.provider {
+                self.adopt_provider(provider);
+            }
             self.pending_agent_preset = conversation_state.pending_agent_preset;
             if let Some(binding) = conversation_state.binding {
                 self.conversation_binding = binding;

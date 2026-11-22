@@ -136,6 +136,7 @@ mod subagent_transcript;
 use devices::Principal;
 mod project_watch;
 mod protocol;
+mod provider_switch;
 mod remote;
 mod runtime_identity;
 mod runtime_upgrade;

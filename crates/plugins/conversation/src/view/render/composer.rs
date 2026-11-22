@@ -390,6 +390,41 @@ impl ConversationView {
             )
         });
 
+        let provider_options = self.provider_options.clone();
+        let selected_provider = self.current_provider_key();
+        let can_switch = self.can_switch_provider();
+        let switch_view = cx.entity().downgrade();
+        let provider_control = MenuTrigger::dropdown(
+            "acp-provider-switch-menu",
+            Button::new("acp-provider-switch")
+                .quiet()
+                .label(if self.provider_switch_pending {
+                    t!("provider_switch.pending").into_owned()
+                } else {
+                    self.agent_label(cx)
+                })
+                .disabled(!can_switch || provider_options.is_empty()),
+            move |_, _| {
+                let mut menu = Menu::new().label(t!("provider_switch.label"));
+                for option in &provider_options {
+                    let target = option.id.clone();
+                    let view = switch_view.clone();
+                    menu = menu.item(
+                        MenuItem::new(option.label.clone())
+                            .checked(selected_provider == target)
+                            .disabled(!can_switch || selected_provider == target)
+                            .on_click(move |_, _, cx| {
+                                let _ = view.update(cx, |view, cx| {
+                                    view.switch_provider(target.clone(), cx)
+                                });
+                            }),
+                    );
+                }
+                menu
+            },
+        )
+        .anchor(gpui::Anchor::BottomLeft);
+
         let input_row = self.input.as_ref().map(|input| {
             let provider_groups = model_state
                 .as_ref()
@@ -429,6 +464,7 @@ impl ConversationView {
                 extra_configs.len(),
             )
             .is_empty();
+            let show_model_control = model_state.is_some() || has_menu;
             let model_control = if has_menu {
                 let this = cx.entity();
                 // Provider 菜单项要按 agent 决定是否补额度括号，闭包里拿不到 self。
@@ -1022,7 +1058,8 @@ impl ConversationView {
                                 .flex_1()
                                 .min_w(px(0.))
                                 .gap_2()
-                                .child(model_control)
+                                .child(div().debug_selector(|| "ACP_PROVIDER_SWITCH".into()).child(provider_control))
+                                .children(show_model_control.then_some(model_control))
                                 .children(next_turn_notice.as_ref().map(|label| {
                                     div()
                                         .flex_shrink_0()
@@ -1103,6 +1140,10 @@ impl ConversationView {
                                 .children(self.render_subagent_chip(cx))
                                 .children(self.render_background_task_chip(cx))
                         )
+                        .children(self.provider_switch_error.as_ref().map(|error| {
+                            div().type_style(TYPE.text_xsmall).text_color(gpui::rgb(ui_theme::bad()))
+                                .child(t!("provider_switch.failed", error = error).into_owned())
+                        }))
                         .children(self.restart_error.as_ref().map(|err| {
                             div()
                                 .flex_shrink_0()

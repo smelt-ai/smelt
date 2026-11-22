@@ -11308,6 +11308,7 @@ version = "0.0.0"
 dependencies = [
  "rusqlite",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -11466,6 +11467,7 @@ dependencies = [
  "clap",
  "core-foundation 0.10.1",
  "core-foundation-sys",
+ "ctor",
  "dirs 5.0.1",
  "flate2",
  "hex",
@@ -11496,6 +11498,7 @@ dependencies = [
  "smelt-sys",
  "smelt-version",
  "smol",
+ "tempfile",
  "tokio",
  "tower",
  "uuid",

@@ -51,6 +51,8 @@ impl ConversationInput {
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConversationStateSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::workspace_directory::WorkspaceAcp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<ConversationBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_agent_preset: Option<String>,

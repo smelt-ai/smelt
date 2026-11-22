@@ -48,6 +48,7 @@ pub struct ConversationClientLaunch {
     pub cwd: Option<String>,
     pub launch: ConversationLaunchSpec,
     pub engine_kind: ConversationAgentKind,
+    pub provider_key: Option<String>,
     /// 仅本次 ACP 子进程可见的环境变量。controller 的远端配置可能含凭据，
     /// 因而这项不能并入可持久化的 `ConversationLaunchSpec`。
     pub ephemeral_env: BTreeMap<String, String>,
@@ -95,6 +96,9 @@ fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
         "entry_version": ACP_ENTRY_VERSION,
         "conversation_binding": &launch.conversation_binding,
     });
+    if let Some(key) = &launch.provider_key {
+        req["provider_key"] = key.clone().into();
+    }
     if let Some(prompt) = &launch.pending_agent_preset {
         req["pending_agent_preset"] = serde_json::Value::String(prompt.clone());
     }
@@ -699,6 +703,7 @@ mod tests {
             launch: ConversationLaunchSpec::from_command("claude --print")
                 .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
             engine_kind: ConversationAgentKind::Claude,
+            provider_key: Some("claude".into()),
             ephemeral_env: [("SESSION_TOKEN".into(), "transient".into())]
                 .into_iter()
                 .collect(),
@@ -715,6 +720,7 @@ mod tests {
 
         assert_eq!(req["op"], "acp_open");
         assert_eq!(req["resume_id"], "resume-1");
+        assert_eq!(req["provider_key"], "claude");
         assert!(req["fork_id"].is_null());
         assert_eq!(req["tail_limit"], ACP_INITIAL_TAIL_LIMIT);
         assert_eq!(req["include_debug"], false, "会话链路不带调试数据");
@@ -736,6 +742,7 @@ mod tests {
             cwd: Some("/repo".into()),
             launch: ConversationLaunchSpec::from_command("pi"),
             engine_kind: ConversationAgentKind::Pi,
+            provider_key: None,
             ephemeral_env: BTreeMap::new(),
             resume_id: None,
             fork_id: None,
@@ -765,6 +772,7 @@ mod tests {
             cwd: Some("/repo".into()),
             launch: ConversationLaunchSpec::from_command("claude --print"),
             engine_kind: ConversationAgentKind::Claude,
+            provider_key: None,
             ephemeral_env: BTreeMap::new(),
             resume_id: None,
             fork_id: None,

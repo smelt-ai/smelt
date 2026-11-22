@@ -16,10 +16,13 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 45] = [
+pub const TABLES: [&str; 48] = [
     "acp_config_value",
+    "acp_context_handoff",
     "acp_detail",
     "acp_launch_env",
+    "acp_provider_segment",
+    "acp_provider_thread",
     "agent_acp_config_memory",
     "agent_acp_env",
     "agent_definition",
@@ -231,7 +234,8 @@ pub const V7_TABLES: [&str; 15] = [
     "subscription_cursor",
 ];
 
-pub const CREATE_SCHEMA: &str = "
+pub const CREATE_SCHEMA: &str = concat!(
+    "
 CREATE TABLE launch_entry (
   position INTEGER PRIMARY KEY CHECK (position >= 0),
   label TEXT NOT NULL,
@@ -589,7 +593,9 @@ CREATE TABLE quota_provider_pref (
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   keychain_denied INTEGER NOT NULL DEFAULT 0 CHECK (keychain_denied IN (0, 1))
 ) WITHOUT ROWID;
-";
+",
+    include_str!("provider_schema.sql")
+);
 
 /// v17 的完整结构，冻结不再改。v17 之前各版本的迁移和形状校验都以它为准：
 /// 那些版本还带着 `kv` 表和旧的 `acp_detail`、`project`。
