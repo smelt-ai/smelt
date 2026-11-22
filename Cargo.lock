@@ -7936,8 +7936,7 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e083cbd14b906efbd94076939c7effd43fa3d1574f1d555919d099e9e0ec3e1c"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "chrono",
  "html5ever 0.27.0",
@@ -7961,8 +7960,7 @@ dependencies = [
 [[package]]
 name = "nsh-bundler"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80ecc1a77d328a278f75365e841324db31805b8da948f54a7ceb5f3840973b15"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "anyhow",
  "dunce",
@@ -7988,8 +7986,7 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b45a8b194c6879bcb26c6e430b804e49e97ec0fea5fad8c78d7710fd41f74a6"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "cap-std",
  "chrono",
@@ -8023,8 +8020,7 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4de944c36204b3f778b4fcf90373496d29507e8d38fb5e92a6e29a4cce637d7"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "crossbeam-channel",
  "env_filter 2.1.0",
@@ -8045,8 +8041,7 @@ dependencies = [
 [[package]]
 name = "nsh-i18n"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9cfb1cfa50808fc3d66147cfb03f5075269157ff392fbda6104eeb3c3b25ee5"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "rust-i18n-support",
  "serde_json",
@@ -8055,8 +8050,7 @@ dependencies = [
 [[package]]
 name = "nsh-js"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27702dc84976d755e24f736d0022689429c421549401b7fd3fa5f1a8cd49dc72"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
@@ -8079,8 +8073,7 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f1b3ce01247cac072395d42177725e7972de498eb148d37443196d870cdaf2b"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -8093,8 +8086,7 @@ dependencies = [
 [[package]]
 name = "nsh-package"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "200354039215917efcfadb5d73605a3a9d611753755da3cf99c40601f0677e3b"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -8109,6 +8101,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-gpui"
 version = "0.6.1"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8141,8 +8134,7 @@ dependencies = [
 [[package]]
 name = "nsh-updater"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c263483a4e5c6977dcade98dd1865b0bbdfbf4ff8dafbacaa3ad198e7bf1e2fe"
+source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",

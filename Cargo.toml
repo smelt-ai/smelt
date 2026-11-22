@@ -58,7 +58,7 @@ members = [
     "crates/smelt-mobile", # package 名是 smelt_mobile（cargokit 要求，见其 Cargo.toml）
 ]
 # 打了补丁的第三方 crate 原样拷进来，不是工作区成员（见下面 [patch.crates-io]）。
-exclude = ["vendor/quickjs-jit-runtime", "vendor/gpui-shell", "vendor/nsh-platform-gpui"]
+exclude = ["vendor/quickjs-jit-runtime", "vendor/gpui-shell"]
 resolver = "3"
 
 # 版本号不写在这里：发版只打 tag，打包时从 tag 算出版本号，经 SMELT_VERSION 编进程序
@@ -100,10 +100,18 @@ netdev = { git = "https://github.com/shellrow/netdev", rev = "b3bfb0fb5595cd143b
 # 时连同目录一起删掉；版本对不上时 cargo 会警告这条 patch 没用上。
 quickjs-jit-runtime = { path = "vendor/quickjs-jit-runtime" }
 
-# nsh-platform-gpui 0.6.1 的源码拷在 vendor/ 下，改动处标 `SMELT:`。上游把原生组件的 hitbox 一律放在
-# 整块界面之上，画在组件上面的 NSH 元素（菜单、浮层）看得见点不到。升 NSH 时先看上游修了没有：
-# 修了连目录一起删，没修就拿新版覆盖再按 `SMELT:` 合回去。
-nsh-platform-gpui = { path = "vendor/nsh-platform-gpui" }
+# NSH 用我们的 fork：一个上游发版一条分支 `smelt/v<版本>`，内容是上游标签加每个改动一个提交，
+# 不强推、不打标签。同步上游时开新分支重放这些提交，这里十个包一起换到同一个 rev。
+nsh-base = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
+nsh-bundler = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
+nsh-core = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
+nsh-engine = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
+nsh-i18n = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
+nsh-js = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
+nsh-macros = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
+nsh-package = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
+nsh-platform-gpui = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
+nsh-updater = { git = "https://github.com/smelt-ai/nsh", rev = "79429f9a192806d9db7739f00e302fc2546a5d88" }
 
 # gpui-shell 拷在 vendor/ 下（上游 gpui-kit 同一修订），改动处标 `SMELT:`，以后搬到单独仓库。
 # 升 gpui-kit 时先拿新修订的 crates/shell 覆盖，再按 `SMELT:` 把改动合回去。
