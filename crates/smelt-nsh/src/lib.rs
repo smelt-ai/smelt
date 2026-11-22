@@ -32,9 +32,11 @@ use gpui::{
     ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
 };
 use nsh_core::element::description::SetDescription;
-use nsh_platform_gpui::{AppErrorKind, AppOptions, AppView};
+use nsh_platform_gpui::{AppOptions, AppView};
 use smelt_plugin_api::{self as api, HostEvent, PluginView, ViewHandle, ViewSpec};
 use tokio::sync::mpsc;
+
+use crate::plugins::PluginHost;
 
 const OWNER: &str = "nsh-pilot";
 const SHELL: &str = include_str!("../pilot/Shell.tsx");
@@ -88,27 +90,28 @@ fn register_components(app: &AppView, pilot: EntityId) {
 /// 起引擎：外壳加上 `sources` 里的插件，之后那里变了什么就换什么。
 fn boot(
     app: &Entity<AppView>,
+    plugin_host: &PluginHost,
     bridge: &host::Bridge,
     sources: PathBuf,
     stage: PathBuf,
     cx: &mut App,
 ) -> Task<()> {
     let (sender, mut changes) = mpsc::unbounded_channel();
-    let live = live::Live::start(sources, stage, SHELL, ui_sets(), bridge.clone(), sender);
-    let bridge = bridge.clone();
+    let _live = live::Live::start(sources, stage, SHELL, ui_sets(), bridge.clone(), sender);
+    let err_host = plugin_host.clone();
     app.update(cx, |view, _| {
         view.on_app_error(move |error| {
             eprintln!("[nsh-pilot] {error}");
-            if matches!(error.kind, AppErrorKind::Stopped) {
-                live.stopped(bridge.take_loading());
-            }
+            err_host.on_app_error(error);
         });
     });
+    let apply_host = plugin_host.clone();
     let app = app.downgrade();
     cx.spawn(async move |cx| {
+        let _keep_live = _live;
         while let Some(change) = changes.recv().await {
             if app
-                .update(cx, |view, _| plugins::apply(view, change))
+                .update(cx, |view, _| apply_host.apply(view, change))
                 .is_err()
             {
                 break;
@@ -120,6 +123,7 @@ fn boot(
 /// 一块试点面板：外面一层是 smelt 的视图，里面是 NSH 的 [`AppView`]。
 struct PilotView {
     app: Entity<AppView>,
+    plugins: PluginHost,
     bridge: host::Bridge,
     /// 插件算字和间距用的 rem，变了重推一次状态。
     rem: f32,
@@ -139,13 +143,15 @@ impl PilotView {
         register_components(app.read(cx), pilot);
         apply_theme(&app, cx);
 
+        let plugins = PluginHost::new();
         let bridge = host::Bridge::default();
-        let mut runs = bridge.serve(app.read(cx));
+        let mut runs = bridge.serve(&plugins);
         let rem = f32::from(window.rem_size());
-        bridge.publish(app.read(cx), pilot, rem, cx);
+        bridge.publish(&plugins, pilot, rem, cx);
 
         let installing = boot(
             &app,
+            &plugins,
             &bridge,
             plugin_dir(),
             std::env::temp_dir().join(format!("smelt-nsh-{}", uuid::Uuid::new_v4())),
@@ -177,6 +183,7 @@ impl PilotView {
         });
         Self {
             app,
+            plugins,
             bridge,
             rem,
             _tasks: [installing, running],
@@ -186,7 +193,7 @@ impl PilotView {
 
     fn publish(&self, cx: &Context<Self>) {
         self.bridge
-            .publish(self.app.read(cx), cx.entity_id(), self.rem, cx);
+            .publish(&self.plugins, cx.entity_id(), self.rem, cx);
     }
 }
 

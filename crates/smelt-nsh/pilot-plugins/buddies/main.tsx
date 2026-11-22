@@ -92,10 +92,8 @@ export default function Avatar(props: { args?: any }) {
         seed={conversation}
         act={actor()?.act ?? "rest"}
         since={actor()?.since ?? 0}
-        style={{ width: CELL, height: CELL }}
+        style={{ width: CELL, height: CELL, pointerEvents: "none" }}
       />
-      {/* 原生组件自己吃指针；它只是画，盖一层，点击和悬停才算摆它的那一行的。 */}
-      <View style={{ position: "absolute", top: 0, left: 0, width: CELL, height: CELL }} />
     </View>
   );
 }

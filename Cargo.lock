@@ -7936,7 +7936,7 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "chrono",
  "html5ever 0.27.0",
@@ -7960,7 +7960,7 @@ dependencies = [
 [[package]]
 name = "nsh-bundler"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "anyhow",
  "dunce",
@@ -7986,7 +7986,7 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "cap-std",
  "chrono",
@@ -8020,7 +8020,7 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "crossbeam-channel",
  "env_filter 2.1.0",
@@ -8041,7 +8041,7 @@ dependencies = [
 [[package]]
 name = "nsh-i18n"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "rust-i18n-support",
  "serde_json",
@@ -8050,7 +8050,7 @@ dependencies = [
 [[package]]
 name = "nsh-js"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
@@ -8073,7 +8073,7 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -8086,7 +8086,7 @@ dependencies = [
 [[package]]
 name = "nsh-package"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -8101,7 +8101,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-gpui"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8134,7 +8134,7 @@ dependencies = [
 [[package]]
 name = "nsh-updater"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=79429f9a192806d9db7739f00e302fc2546a5d88#79429f9a192806d9db7739f00e302fc2546a5d88"
+source = "git+https://github.com/smelt-ai/nsh?rev=9745d255cb1a404fc121e65ec57958911816472d#9745d255cb1a404fc121e65ec57958911816472d"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",

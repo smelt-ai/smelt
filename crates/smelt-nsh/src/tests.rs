@@ -96,7 +96,7 @@ impl Drop for Recorded {
 
 struct Bench<'a> {
     cx: &'a mut VisualTestContext,
-    app: Entity<AppView>,
+    _app: Entity<AppView>,
     log: Rc<RefCell<Log>>,
     sources: PathBuf,
 }
@@ -313,17 +313,43 @@ fn the_pilot_runs_its_plugins_live(cx: &mut TestAppContext) {
             );
         }
     });
-    let bridge = host::Bridge::default();
-    let mut runs = app.update(cx, |view, _| {
-        let runs = bridge.serve(view);
-        bridge.push(view, state("c0"));
-        runs
+    let errors: std::sync::Arc<
+        std::sync::Mutex<Vec<(nsh_platform_gpui::AppErrorKind, Option<String>)>>,
+    > = std::sync::Arc::default();
+    let plugin_host = PluginHost::new();
+    plugin_host.set_plugin_limits(Limits {
+        memory_bytes: 64 << 20,
+        ..Limits::default()
     });
-    let _installing =
-        cx.update(|_, cx| boot(&app, &bridge, sources.clone(), root.join("stage"), cx));
+    let bridge = host::Bridge::default();
+    let mut runs = bridge.serve(&plugin_host);
+    bridge.push(&plugin_host, state("c0"));
+    let _installing = cx.update(|_, cx| {
+        let task = boot(
+            &app,
+            &plugin_host,
+            &bridge,
+            sources.clone(),
+            root.join("stage"),
+            cx,
+        );
+        let err_host = plugin_host.clone();
+        let err_log = errors.clone();
+        app.update(cx, |view, _| {
+            view.on_app_error(move |error| {
+                eprintln!("[nsh-pilot] {error}");
+                err_log
+                    .lock()
+                    .unwrap()
+                    .push((error.kind, error.plugin.clone()));
+                err_host.on_app_error(error);
+            });
+        });
+        task
+    });
     let mut bench = Bench {
         cx,
-        app,
+        _app: app,
         log,
         sources,
     };
@@ -340,9 +366,7 @@ fn the_pilot_runs_its_plugins_live(cx: &mut TestAppContext) {
         act(b, first).is_some_and(|act| act != "rest")
     });
     let people = bench.all(components::BUDDY);
-    bench
-        .app
-        .update(bench.cx, |view, _| bridge.push(view, state("c1")));
+    bridge.push(&plugin_host, state("c1"));
     let second = bench.find(components::BUDDY, "seed", json!("c1"))[0];
     bench.wait("状态变了跟着演", |b| {
         act(b, second).is_some_and(|act| act != "rest")
@@ -494,7 +518,8 @@ fn the_pilot_runs_its_plugins_live(cx: &mut TestAppContext) {
         b.all(components::BUDDY).len() == PEOPLE
     });
 
-    // 装载时吃光内存：去掉它重起，别的都回来。
+    // 装载时吃光内存（A2 强隔离）：只停掉 hungry 自己的 VM，不重启引擎，小人/终端/对话/启动栏一个都不重建。
+    errors.lock().unwrap().clear();
     let hungry = bench.sources.join("hungry");
     fs::create_dir_all(&hungry).unwrap();
     fs::write(
@@ -503,9 +528,25 @@ fn the_pilot_runs_its_plugins_live(cx: &mut TestAppContext) {
     )
     .unwrap();
     let before = bench.all(components::BUDDY);
-    bench.wait("去掉它重起", |b| {
-        let now = b.all(components::BUDDY);
-        now.len() == PEOPLE && now.iter().all(|id| !before.contains(id))
+    bench.wait("hungry 因 OOM 被单独停掉", |_| {
+        errors.lock().unwrap().iter().any(|(kind, plugin)| {
+            *kind == nsh_platform_gpui::AppErrorKind::Stopped && plugin.as_deref() == Some("hungry")
+        })
     });
+    assert_eq!(
+        bench.all(components::BUDDY),
+        before,
+        "hungry OOM 不应重建 buddies"
+    );
+    assert_eq!(
+        bench.all(view::NAME),
+        heavy,
+        "hungry OOM 不应重启引擎或拆掉终端和对话"
+    );
+    assert_eq!(
+        bench.all(components::ICON),
+        icons,
+        "hungry OOM 不应影响 launcher"
+    );
     bench.button("Settings");
 }

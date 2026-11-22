@@ -4,7 +4,7 @@
 // 量整块重画）；右边上半是点中的那段对话，下半是新开的终端，都是宿主登记的视图，作原生组件
 // `smelt.view` 嵌进来。「菜单」是 TSX 画的弹层，试它盖不盖得住终端。
 
-import { host, nativeComponent, nativeModule, Scroll, signal, Text, View } from "nsh";
+import { nativeComponent, nativeModule, Scroll, signal, Text, View } from "nsh";
 import { Popover } from "nsh/base";
 
 import { Slot } from "./slots.tsx";
@@ -32,9 +32,6 @@ const SmeltButton = nativeComponent<{ label: string; small?: boolean }, { press:
   props: ["label", "small"],
   events: ["press"],
 });
-
-// 没人听的事件会一直排着：外壳先听着，插件后装上时自己 `host.call("state")` 取眼下这份。
-host.on("smelt.state", () => {});
 
 const conversations = signal<Conversation[]>([]);
 Smelt.on("conversations", (list) => conversations.set(list));

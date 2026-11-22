@@ -109,10 +109,8 @@ function EntryRow(props: { entry: () => any }) {
         <Icon
           path={entry().icon}
           color={entry().shown ? look().palette.muted_selected : look().palette.muted}
-          style={{ width: 16, height: 16 }}
+          style={{ width: 16, height: 16, pointerEvents: "none" }}
         />
-        {/* 原生组件自己吃指针；它只是画，盖一层，点击和悬停才算这一行的。 */}
-        <View style={{ position: "absolute", top: 0, left: 0, width: 16, height: 16 }} />
       </View>
       <Text
         class="flex-1 min-w-0 text-foreground"

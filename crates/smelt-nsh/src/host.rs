@@ -1,7 +1,8 @@
-//! 试点给插件的宿主这头：一份只读的状态（宿主变了推整份）和两个调用（`state`、`run`）。
+//! 试点给插件的宿主这头：一份只读的状态（宿主变了广播整份）和两个调用（`state`、`run`）。
 //! 只给通用的事实，不认识哪个插件。
 //!
-//! 插件的 `host.call` 在引擎线程上到：`state` 当场拿缓存回，`run` 转到主线程执行、完了再回。
+//! 插件的 `host.call` 经各自的 `HostChannel` 在引擎线程上直达，携带不可伪造的 `plugin_id`：
+//! `state` 当场拿缓存并拼上该插件自己的文案回，`run` 转到主线程执行、完了再回。
 
 use std::{
     collections::BTreeMap,
@@ -10,7 +11,6 @@ use std::{
 
 use gpui::{App, EntityId};
 use nsh_engine::HostCall;
-use nsh_platform_gpui::AppView;
 use serde_json::{Value, json};
 use smelt_plugin_api::{self as api, HostEvent, RuntimeKey, model::agent_status::AgentStatus};
 use smelt_ui::{
@@ -19,7 +19,7 @@ use smelt_ui::{
 };
 use tokio::sync::mpsc;
 
-use crate::plugins;
+use crate::plugins::PluginHost;
 
 /// 推给插件的事件：整份状态，`revision` 只增不减。
 const STATE: &str = "smelt.state";
@@ -37,8 +37,6 @@ struct Shared {
     revision: u64,
     /// 插件 id → 它 `locales/` 里的文案（语言 → 键 → 字）。
     texts: BTreeMap<String, Value>,
-    /// 报了开始装、还没报装好（或出了错但引擎没事）的插件：引擎停掉时就是它。
-    loading: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -46,81 +44,52 @@ pub(crate) struct Bridge(Arc<Mutex<Shared>>);
 
 impl Bridge {
     fn lock(&self) -> MutexGuard<'_, Shared> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0.lock().expect("host bridge lock poisoned")
     }
 
-    /// 接上插件的调用和装载进度。在装载外壳之前调一次。
-    pub fn serve(&self, view: &AppView) -> mpsc::UnboundedReceiver<Run> {
+    /// 把 `state` / `run` 登记到 [`PluginHost`] 上。在装载插件之前调一次。
+    pub fn serve(&self, plugins: &PluginHost) -> mpsc::UnboundedReceiver<Run> {
         let (runs, received) = mpsc::unbounded_channel();
         let bridge = self.clone();
-        view.host().handle(plugins::CALL, move |mut call| {
-            let mut request = call.take_data();
-            let plugin = request["plugin"].as_str().unwrap_or_default().to_owned();
-            match request["name"].as_str().unwrap_or_default() {
-                "state" => {
-                    let shared = bridge.lock();
-                    let mut state = shared.state.clone();
-                    if let Some(fields) = state.as_object_mut() {
-                        let texts = shared.texts.get(&plugin).cloned();
-                        fields.insert("texts".into(), texts.unwrap_or_else(|| json!({})));
-                    }
-                    drop(shared);
-                    call.resolve(state);
+        plugins.handle("state", move |plugin, call| {
+            let state = {
+                let shared = bridge.lock();
+                let mut state = shared.state.clone();
+                if let Some(fields) = state.as_object_mut() {
+                    let texts = shared.texts.get(plugin).cloned();
+                    fields.insert("texts".into(), texts.unwrap_or_else(|| json!({})));
                 }
-                "run" => {
-                    let mut data = request["data"].take();
-                    let Some(command) = data["command"].as_str().map(str::to_owned) else {
-                        return call.reject("run：缺 command");
-                    };
-                    let args = data["args"].take();
-                    if let Err(unsent) = runs.send(Run {
-                        command,
-                        args,
-                        call,
-                    }) {
-                        unsent.0.call.reject("面板已经关了");
-                    }
-                }
-                other => call.reject(format!("宿主没有 {other}")),
-            }
+                state
+            };
+            call.resolve(state);
         });
-        let bridge = self.clone();
-        view.host().handle(plugins::STATUS, move |call| {
-            let status = call.data();
-            let plugin = status["plugin"].as_str().unwrap_or_default();
-            match status["state"].as_str() {
-                Some("running") => bridge.lock().loading = Some(plugin.to_owned()),
-                // 还可能是它吃光了内存、引擎马上要停：先不清。
-                Some("failed") => {
-                    eprintln!("[nsh-pilot] {plugin} 装不上：{}", status["message"]);
-                }
-                _ => {
-                    let mut shared = bridge.lock();
-                    if shared.loading.as_deref() == Some(plugin) {
-                        shared.loading = None;
-                    }
-                }
+        plugins.handle("run", move |_plugin, mut call| {
+            let mut data = call.take_data();
+            let Some(command) = data["command"].as_str().map(str::to_owned) else {
+                return call.reject("run：缺 command");
+            };
+            let args = data["args"].take();
+            if let Err(unsent) = runs.send(Run {
+                command,
+                args,
+                call,
+            }) {
+                unsent.0.call.reject("面板已经关了");
             }
         });
         received
-    }
-
-    pub fn take_loading(&self) -> Option<String> {
-        self.lock().loading.take()
     }
 
     pub fn set_texts(&self, plugin: &str, texts: Value) {
         self.lock().texts.insert(plugin.to_owned(), texts);
     }
 
-    /// 按宿主眼下的样子换一份状态，变了才推。在主线程的事件里调，不在 render 里。
-    pub fn publish(&self, app: &AppView, pilot: EntityId, rem: f32, cx: &App) {
-        self.push(app, snapshot(pilot, rem, cx));
+    /// 按宿主眼下的样子换一份状态，变了才广播。在主线程的事件里调，不在 render 里。
+    pub fn publish(&self, plugins: &PluginHost, pilot: EntityId, rem: f32, cx: &App) {
+        self.push(plugins, snapshot(pilot, rem, cx));
     }
 
-    pub(crate) fn push(&self, app: &AppView, mut next: Value) {
+    pub(crate) fn push(&self, plugins: &PluginHost, mut next: Value) {
         let mut shared = self.lock();
         next["revision"] = shared.revision.into();
         if next == shared.state {
@@ -130,9 +99,7 @@ impl Bridge {
         next["revision"] = shared.revision.into();
         shared.state = next.clone();
         drop(shared);
-        if let Err(error) = app.host().send(STATE, next) {
-            eprintln!("[nsh-pilot] 状态送不进去：{error}");
-        }
+        plugins.broadcast(STATE, next);
     }
 }
 

@@ -1,4 +1,5 @@
-//! 盯着一个放插件的目录：里面装、改、删一个插件，只把那一个重新打包送进引擎，不用重编 App。
+//! 盯着一个放插件的目录：里面装、改、删一个插件，只把那一个重新打包送进它自己的 VM，不用重编 App，
+//! 也不影响外壳和其它插件。
 //!
 //! 打包阻塞，在自己的一条线程上做。没有事时它睡在 channel 上；面板关掉，监听和发送端都放掉，
 //! 线程随之结束。
@@ -26,12 +27,10 @@ const QUIET: Duration = Duration::from_millis(200);
 enum Input {
     /// 这个插件的文件变了；`None` 是说不清哪个，全都重看一遍。
     Changed(Option<String>),
-    /// 引擎停了。装到一半停的，那个插件就是起因。
-    Stopped { loading: Option<String> },
 }
 
 pub(crate) struct Live {
-    inputs: mpsc::Sender<Input>,
+    _inputs: mpsc::Sender<Input>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
@@ -59,7 +58,6 @@ impl Live {
                     plugins,
                     bridge,
                     changes,
-                    stopped: false,
                 }
                 .run(&received),
                 Err(error) => eprintln!("[nsh-pilot] 外壳打不了包：{error}"),
@@ -69,15 +67,9 @@ impl Live {
             }
         });
         Self {
-            inputs,
+            _inputs: inputs,
             _watcher: watcher,
         }
-    }
-
-    /// 报引擎停了。
-    pub fn stopped(&self, loading: Option<String>) {
-        // 收的一头只在外壳打不了包时先没，那时也没有引擎可停。
-        let _ = self.inputs.send(Input::Stopped { loading });
     }
 }
 
@@ -86,7 +78,6 @@ struct Worker {
     plugins: Plugins,
     bridge: Bridge,
     changes: UnboundedSender<Change>,
-    stopped: bool,
 }
 
 impl Worker {
@@ -115,7 +106,6 @@ impl Worker {
     /// 主线程那头没了是 `false`。
     fn handle(&mut self, batch: Vec<Input>) -> bool {
         let mut changed = BTreeSet::new();
-        let mut restart = false;
         for input in batch {
             match input {
                 Input::Changed(Some(id)) => {
@@ -125,25 +115,9 @@ impl Worker {
                     changed.extend(self.on_disk());
                     changed.extend(self.plugins.installed().map(str::to_owned));
                 }
-                Input::Stopped { loading: Some(id) } => {
-                    eprintln!("[nsh-pilot] 装 {id} 时引擎停了：去掉它重起，改好保存再装上");
-                    self.plugins.remove(&id);
-                    restart = true;
-                }
-                Input::Stopped { loading: None } => {
-                    // 指不出是谁，马上重起只会再停一次：等有人改了插件再起。
-                    eprintln!("[nsh-pilot] 引擎停了，指不出是哪个插件：改动任一插件就重起");
-                    self.stopped = true;
-                }
             }
         }
         let updates: Vec<Change> = changed.iter().filter_map(|id| self.reload(id)).collect();
-        let updates = if restart || (self.stopped && !updates.is_empty()) {
-            self.stopped = false;
-            vec![self.plugins.start()]
-        } else {
-            updates
-        };
         updates
             .into_iter()
             .all(|change| self.changes.send(change).is_ok())

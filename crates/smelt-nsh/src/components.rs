@@ -1,7 +1,7 @@
 //! 给插件的原生零件里 NSH 拼不出的几样：小人、随包带的线性图标、会拖窗口的标题栏那一条。
 //!
-//! 原生组件一律吃掉自己那块的指针（NSH 不按 `pointerEvents` 放行）：小人、图标这些只画的摆在能点
-//! 的行里时，TSX 那头得在上面盖一层透明的 View，行才点得到。
+//! 小人、图标这些纯视觉组件摆在能点的行里时，JS 侧设 `style={{ pointerEvents: "none" }}` 即可让
+//! 指针穿透到父行。
 
 use gpui::{
     AnyElement, App, Edges, EntityId, IntoElement as _, ParentElement as _, SharedString,

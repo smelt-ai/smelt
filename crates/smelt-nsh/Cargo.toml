@@ -25,7 +25,7 @@ nsh-base = { version = "=0.6.1", default-features = false }
 gpui_platform = { package = "gpui-fast-platform", version = "=0.1.17", default-features = false, features = ["runtime_shaders"] }
 # 运行时打包插件（`src/plugins.rs`）：用户装、改插件不用重编 App。
 nsh-bundler = { version = "=0.6.1", features = ["bundle"] }
-# 把插件的包换成能在跑着的引擎里执行的函数；和 nsh-bundler 用同一版解析器。
+# 只读校验打包产物里剩下的外部 import（`src/plugins.rs`），不做改写；和 nsh-bundler 用同一版解析器。
 oxc = "=0.153.0"
 serde_json = "1"
 # 盯插件目录（src/live.rs），和宿主同一版。
