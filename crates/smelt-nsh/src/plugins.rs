@@ -35,14 +35,15 @@ const SLOTS: &str = include_str!("plugins/slots.tsx");
 
 const INSTALL: &str = "smelt.plugins.install";
 const REMOVE: &str = "smelt.plugins.remove";
-/// 引擎报装载进度：`{plugin, state: "running" | "ready" | "failed", message}`。顶层死循环接不住，
-/// 只有 `running` 没有下文；顶层吃光内存时引擎停掉，最后一个没到 `ready` 的就是它。
+/// 引擎报装载进度：`{plugin, state: "running" | "ready" | "failed" | "settled", message}`。顶层
+/// 死循环接不住，只有 `running` 没有下文；`failed` 之后引擎还好着会再报 `settled`。顶层吃光内存时
+/// 引擎停掉，最后一个既没 `ready` 也没 `settled` 的就是它。
 pub const STATUS: &str = "smelt.plugins.status";
 /// 插件的 `host.call` / `host.post`：`{plugin, name, data}`，`plugin` 由运行时填。
 pub const CALL: &str = "smelt.plugins.call";
 
 /// 一个插件的入口文件，导出它的视图。
-const ENTRY: &str = "main.tsx";
+pub(crate) const ENTRY: &str = "main.tsx";
 /// 包里那层函数的参数：宿主模块、交出视图，和按插件记账、所以盖住全局的那几个。
 const PARAMS: &str = "__smelt_require, __smelt_provide, setTimeout, setInterval, clearTimeout, \
                       clearInterval, requestAnimationFrame, cancelAnimationFrame";
@@ -120,6 +121,11 @@ impl Plugins {
         let compiled = self.compile(id, dir)?;
         self.installed.insert(id.to_owned(), compiled.clone());
         Ok(Change::Install(compiled))
+    }
+
+    /// 装着的插件 id。
+    pub fn installed(&self) -> impl Iterator<Item = &str> {
+        self.installed.keys().map(String::as_str)
     }
 
     pub fn remove(&mut self, id: &str) -> Change {

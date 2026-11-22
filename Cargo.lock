@@ -13210,10 +13210,12 @@ dependencies = [
 name = "smelt-nsh"
 version = "0.0.0"
 dependencies = [
+ "gpui-base",
  "gpui-fast",
  "gpui-fast-platform",
  "libc",
  "log",
+ "notify",
  "nsh-base",
  "nsh-bundler",
  "nsh-core",
@@ -13221,7 +13223,9 @@ dependencies = [
  "nsh-js",
  "nsh-platform-gpui",
  "oxc",
+ "rust-i18n-support",
  "serde_json",
+ "smelt-buddy",
  "smelt-plugin-api",
  "smelt-ui",
  "tokio",

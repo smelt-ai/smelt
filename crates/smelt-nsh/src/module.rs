@@ -15,6 +15,8 @@ use tokio::sync::watch;
 pub struct Conversation {
     /// 守护会话 id，对话视图的 `session_id`。
     pub id: String,
+    /// 它在目录里的会话 id：插件的视图按这个认它。
+    pub conversation: String,
     pub title: String,
 }
 
@@ -47,6 +49,7 @@ fn publish(cx: &App) {
                     let acp = conversation.acp.as_ref()?;
                     Some(Conversation {
                         id: acp.sid.clone(),
+                        conversation: conversation.id.to_string(),
                         title: api::conversation_name(conversation, &states)
                             .unwrap_or("对话")
                             .to_owned(),
@@ -60,6 +63,11 @@ fn publish(cx: &App) {
         *current = conversations;
         changed
     });
+}
+
+#[cfg(test)]
+pub(crate) fn set_for_test(conversations: Vec<Conversation>) {
+    CONVERSATIONS.send_replace(conversations);
 }
 
 #[module]

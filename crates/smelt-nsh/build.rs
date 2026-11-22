@@ -1,5 +1,6 @@
 //! 把下面这几个 TSX 入口照 `nsh build` 打包、编成字节码，放到 `$OUT_DIR/<名字>/bundle.nshc`，
-//! 运行时 `Bundle::read_trusted` 读。`pilot` 是试点面板；`bench-*` 只给 `examples/bench.rs`。打包按 NSH 自带的 `nsh/base`；宿主给的模块和组件
+//! 运行时 `Bundle::read_trusted` 读，只给 `examples/bench.rs`。试点面板和它的插件不在这里：运行时
+//! 打包（`src/plugins.rs`），改插件不重编。打包按 NSH 自带的 `nsh/base`；宿主给的模块和组件
 //! 运行时按名字接（`nativeModule`、`nativeComponent`），打包不用知道。
 
 use std::{
@@ -10,8 +11,7 @@ use std::{
 use nsh_bundler::BundleOptions;
 
 /// （名字，入口，应用 id）。
-const APPS: [(&str, &str, &str); 5] = [
-    ("pilot", "pilot/App.tsx", "ai.smelt.nsh-pilot"),
+const APPS: [(&str, &str, &str); 4] = [
     ("bench-side", "bench/Side.tsx", "ai.smelt.nsh-bench"),
     (
         "bench-side-idle",
@@ -26,9 +26,7 @@ fn main() {
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
-    for dir in ["pilot", "bench"] {
-        println!("cargo:rerun-if-changed={}", root.join(dir).display());
-    }
+    println!("cargo:rerun-if-changed={}", root.join("bench").display());
     for (name, entry, id) in APPS {
         if let Err(message) = build(&root.join(entry), &out.join(name), id, release) {
             eprintln!("{message}");

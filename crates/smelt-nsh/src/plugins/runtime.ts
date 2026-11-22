@@ -16,7 +16,7 @@ type Stop = () => void;
 
 const running = new Map<string, Stop>();
 
-function report(id: string, state: "running" | "ready" | "failed", message?: string) {
+function report(id: string, state: "running" | "ready" | "failed" | "settled", message?: string) {
   host.post("smelt.plugins.status", { plugin: id, state, message: message ?? null });
 }
 
@@ -131,6 +131,8 @@ function install(id: string, code: string) {
   } catch (error) {
     own.close();
     report(id, "failed", String(error));
+    // 内存耗尽也先落到这里，这一拍跑完引擎才停：下一拍还报得出来，才是普通的出错。
+    setTimeout(() => report(id, "settled"), 0);
   }
 }
 
