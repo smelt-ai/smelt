@@ -93,8 +93,12 @@ pub(crate) fn require_session_process(
     }
 }
 
+/// 智能体会话的进程：各会话的 Pi 进程，加会话宿主替它们跑命令的组长（Pi 的 bash 工具
+/// 交给宿主跑，命令挂在守护下面，不在 Pi 进程的子孙里）。
 fn agent_ancestor_pids(acp_sessions: &AcpSessions) -> HashSet<u32> {
-    let mut agent_pids = HashSet::new();
+    let mut agent_pids: HashSet<u32> = smelt_core::background_tasks::agent_task_groups()
+        .into_iter()
+        .collect();
     for (id, slot) in acp_sessions.snapshot() {
         let Some(Some(roots)) = acp_sessions.with_current(&id, &slot, |session| {
             acp_runtime_alive(session).then(|| session_roots(session))
