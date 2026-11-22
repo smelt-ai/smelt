@@ -52,6 +52,7 @@ export class Repositories {
     };
     this.task = field("repo.task_placeholder");
     this.branch = field("repo.branch_placeholder");
+    this.base = field("repo.base_placeholder");
     this.name = field("repo.name_placeholder");
     this.url = field("repo.url_placeholder");
     // 先拿目录里现有的一份垫着，探查回来再换。
@@ -67,9 +68,9 @@ export class Repositories {
     this.host.redraw();
   }
 
-  /** 四个输入框的状态；框关了交给列表，等不在绘制里时释放。 */
+  /** 输入框的状态；框关了交给列表，等不在绘制里时释放。 */
   fields() {
-    return [this.task, this.branch, this.name, this.url];
+    return [this.task, this.branch, this.base, this.name, this.url];
   }
 
   repository_name() {
@@ -219,11 +220,14 @@ export class Repositories {
       return;
     }
     const branch = this.branch.value().trim();
+    const base = this.base.value().trim();
     const params = {
       project_root: this.project_root,
       task,
       branch_prefix: "feat",
       branch: branch || null,
+      // 留空不带：运行时按各仓库远端的默认分支拉。
+      ...(base && { base }),
       repository_names: [...this.selected].sort(),
     };
     const ran = this.host.call(this.machine, "workspace.workset.create_with_branch", params, WRITE_TIMEOUT_MS);

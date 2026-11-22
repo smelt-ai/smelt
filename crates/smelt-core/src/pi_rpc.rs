@@ -138,6 +138,9 @@ struct PiState {
     /// Smelt 侧会话 id，只用于日志可读（Pi 自己的 id 在 `session_id`）。
     sid: String,
     next_request_id: u64,
+    /// 切到某个 provider 时落到哪个模型：provider → 本会话在这个 provider 下最后用的模型值。
+    /// 启动时先用智能体默认模型和 Pi 设置里的默认模型垫底。
+    preferred_models: HashMap<String, String>,
 }
 
 /// 一永在途的回退请求。
@@ -943,6 +946,20 @@ where
         responses.get("smelt-init-commands").unwrap(),
     )?);
 
+    for (provider, id) in [
+        settings_default_model(launch),
+        agent_model_from_launch(launch),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        state
+            .preferred_models
+            .insert(provider.clone(), format!("{provider}/{id}"));
+    }
+    if let Some(model) = state.model.clone() {
+        remember_preferred_model(state, &model);
+    }
     publish_configuration(state, event_tx);
     let _ = event_tx.try_send(ConversationEvent::SessionControls {
         compaction: true,
@@ -1512,6 +1529,14 @@ fn model_value(model: &PiModel) -> String {
     format!("{}/{}", model.provider, model.id)
 }
 
+fn remember_preferred_model(state: &mut PiState, model: &PiModel) {
+    if model.provider != "unknown" && model.id != "unknown" {
+        state
+            .preferred_models
+            .insert(model.provider.clone(), model_value(model));
+    }
+}
+
 /// 这次 `set_model` 成功后，会话当前模型就是请求里的 `provider/id`。
 /// 回包只提供显示名和上下文长度，不另立一个 id。
 fn apply_requested_pi_model(state: &mut PiState, value: &str, data: Option<&serde_json::Value>) {
@@ -1537,6 +1562,9 @@ fn apply_requested_pi_model(state: &mut PiState, value: &str, data: Option<&serd
             .unwrap_or_else(|| id.to_string()),
         context_window: named.and_then(|model| model.context_window),
     });
+    if let Some(model) = state.model.clone() {
+        remember_preferred_model(state, &model);
+    }
 }
 
 fn publish_model_event(state: &PiState, event_tx: &smol::channel::Sender<ConversationEvent>) {
@@ -1594,6 +1622,11 @@ fn publish_model_event(state: &PiState, event_tx: &smol::channel::Sender<Convers
             id: provider.clone(),
             name: provider.clone(),
             options: options.clone(),
+            preferred_value: state
+                .preferred_models
+                .get(provider)
+                .filter(|value| options.iter().any(|(option, _)| option == *value))
+                .cloned(),
         })
         .collect();
     let options = providers.into_values().flatten().collect();
@@ -2660,6 +2693,11 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                 }
             },
             Err(error) => {
+                if matches!(pending, PendingConfig::Model(_)) {
+                    // Pi 的可用模型会在会话中途变（如 Copilot 刷新凭据后收回了某些模型），
+                    // 菜单还是旧列表，provider 一切就落到已经没了的模型上。重拉一次让菜单跟上。
+                    request_available_models(writer, state).await;
+                }
                 let _ = event_tx.try_send(ConversationEvent::ConfigRejected(
                     RuntimeNote::ConfigUpdateFailed { detail: error },
                 ));
@@ -8741,6 +8779,55 @@ mod tests {
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
     }
 
+    /// 复现：从 Copilot 的 Opus 5.5 切到 deepseek 再切回来，不能落到 Copilot 组里排第一的模型。
+    #[test]
+    fn switching_back_to_a_provider_prefers_the_model_last_used_there() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let model = |provider: &str, id: &str| PiModel {
+            provider: provider.into(),
+            id: id.into(),
+            name: id.into(),
+            context_window: None,
+        };
+        let mut state = PiState::new();
+        state.models = vec![
+            model("github-copilot", "claude-fable-5"),
+            model("github-copilot", "claude-opus-5.5"),
+            model("deepseek", "deepseek-flash"),
+        ];
+        state.model = Some(state.models[1].clone());
+        let opus = state.models[1].clone();
+        remember_preferred_model(&mut state, &opus);
+        apply_requested_pi_model(&mut state, "deepseek/deepseek-flash", None);
+
+        publish_model_event(&state, &event_tx);
+        let ConversationEvent::Model(published) = event_rx.try_recv().unwrap() else {
+            panic!("要发模型状态");
+        };
+        let copilot = published
+            .provider_groups
+            .iter()
+            .find(|group| group.id == "github-copilot")
+            .unwrap();
+        assert_eq!(
+            copilot.preferred_value.as_deref(),
+            Some("github-copilot/claude-opus-5.5")
+        );
+
+        // 首选模型不在可用列表里就不给，免得切过去又是 Model not found。
+        state.models.remove(1);
+        publish_model_event(&state, &event_tx);
+        let ConversationEvent::Model(published) = event_rx.try_recv().unwrap() else {
+            panic!("要发模型状态");
+        };
+        let copilot = published
+            .provider_groups
+            .iter()
+            .find(|group| group.id == "github-copilot")
+            .unwrap();
+        assert_eq!(copilot.preferred_value, None);
+    }
+
     fn deepseek_session_with_refresh_command() -> PiState {
         let mut state = PiState::new();
         state.models = vec![PiModel {
@@ -8897,6 +8984,7 @@ mod tests {
             "config-model-1".into(),
             PendingConfig::Model("github-copilot/kimi-k3".into()),
         );
+        let mut writer = futures::io::Cursor::new(Vec::new());
 
         smol::block_on(handle_response(
             serde_json::json!({
@@ -8906,12 +8994,18 @@ mod tests {
                 "success": false,
                 "error": "No API key for github-copilot/kimi-k3"
             }),
-            &mut futures::io::Cursor::new(Vec::new()),
+            &mut writer,
             &event_tx,
             &mut state,
             &in_flight,
         ))
         .unwrap();
+        assert!(
+            rpc_lines(writer)
+                .iter()
+                .any(|r| r["type"] == "get_available_models"),
+            "切模型失败要重拉可用模型，菜单里不能留着 Pi 已经没有的模型"
+        );
 
         let ConversationEvent::ConfigRejected(RuntimeNote::ConfigUpdateFailed { detail }) =
             event_rx.try_recv().unwrap()

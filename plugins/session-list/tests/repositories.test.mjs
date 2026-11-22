@@ -124,3 +124,24 @@ test("建工作树：写入跑着时框关不掉；建好了报初始化失败�
   sessions.open_repositories(null, "/repo", "manage");
   expect(dialog.fields().every((field) => field.released)).toBeTruthy();
 });
+
+test("建工作树：填了基线分支就带上，没填不带", async () => {
+  const host = fake_host();
+  runtime(host, ["api"]);
+  host.replies["workspace.workset.create_with_branch"] = () => ({ setup: [] });
+  const sessions = list(host);
+  const create = async (base) => {
+    sessions.open_repositories(null, "/repo", "create");
+    const dialog = sessions.repositories;
+    await settle();
+    dialog.task.set_value("search");
+    dialog.base.set_value(base);
+    dialog.submit();
+    const params = host.calls.at(-1)[2];
+    await settle();
+    return params;
+  };
+
+  expect((await create(" iter/big ")).base).toBe("iter/big");
+  expect(await create("  ")).not.toHaveProperty("base");
+});

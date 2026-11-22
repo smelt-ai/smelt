@@ -564,14 +564,17 @@ fn selected_provider(model: &ModelState) -> Option<usize> {
         .or_else(|| (!groups.is_empty()).then_some(0))
 }
 
-/// 切到这个 provider 要写回的模型值：同名模型优先，否则组里第一个。
+/// 切到这个 provider 要写回的模型值：同名模型优先，其次 agent 给的首选（会话里上次在这个
+/// provider 用的、或智能体默认模型），最后组里第一个。
 fn provider_switch_value(group: &ModelProviderGroup, current_name: &str) -> Option<String> {
     group
         .options
         .iter()
         .find(|(_, name)| name == current_name)
-        .or_else(|| group.options.first())
-        .map(|(value, _)| value.clone())
+        .map(|(value, _)| value.as_str())
+        .or(group.preferred_value.as_deref())
+        .or_else(|| group.options.first().map(|(value, _)| value.as_str()))
+        .map(str::to_string)
 }
 
 fn model_selector(model: &ModelState) -> ModelSelector {
@@ -1038,11 +1041,13 @@ mod tests {
                     id: "a".into(),
                     name: "A".into(),
                     options: vec![("a/x".into(), "X".into())],
+                    preferred_value: None,
                 },
                 ModelProviderGroup {
                     id: "b".into(),
                     name: "B".into(),
                     options: vec![("b/y".into(), "Y".into())],
+                    preferred_value: None,
                 },
             ],
         };

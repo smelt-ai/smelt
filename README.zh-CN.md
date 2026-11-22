@@ -15,7 +15,7 @@ Claude Code、GitHub Copilot、Codex、Grok、Cursor、OpenCode、Kiro、Pi、Cr
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%2B%20Windows%20desktop%20%2B%20Linux%20runtime-lightgrey)](https://github.com/smelt-ai/smelt/releases)
 
-> **状态**：working prototype，持续迭代中。桌面 App 跑在 macOS（Apple Silicon）和 Windows 10 1803+（x86_64）上；运行时 `smeltd` 也可以无头跑在 Linux 上。Windows 是不签名的安装包。
+> **状态**：working prototype，持续迭代中。桌面 App 跑在 macOS（Apple Silicon 和 Intel）和 Windows 10 1803+（x86_64）上；运行时 `smeltd` 也可以无头跑在 Linux 上。Windows 是不签名的安装包。
 
 </div>
 
@@ -29,9 +29,9 @@ AI 插件让编辑器更聪明，但人还是那个敲键盘的苦力。当 agen
 
 ## 安装
 
-### macOS（Apple Silicon）
+### macOS
 
-从 [Releases](https://github.com/smelt-ai/smelt/releases) 下载 `Smelt.dmg`，拖进 Applications 即可。
+从 [Releases](https://github.com/smelt-ai/smelt/releases) 下载 `Smelt.dmg`（Apple Silicon）或 `Smelt-x86_64.dmg`（Intel），拖进 Applications 即可。
 应用在启动时与手动检查更新（stable/beta 渠道），有新版本时会提示。
 
 ### Windows（x86_64）

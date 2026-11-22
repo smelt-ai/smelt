@@ -391,6 +391,12 @@ repo:
   back:
     en: "Back"
     zh-CN: "返回"
+  base:
+    en: "Base Branch"
+    zh-CN: "基线分支"
+  base_placeholder:
+    en: "Leave empty for the remote default branch, or enter a branch to start from"
+    zh-CN: "留空从远端默认分支拉出，或填写要从哪个分支拉出"
   bind:
     en: "Add Repository"
     zh-CN: "添加仓库"

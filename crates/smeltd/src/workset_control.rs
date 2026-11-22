@@ -309,6 +309,7 @@ pub(crate) fn create(
         project_root: PathBuf::from(&params.project_root),
         task: params.task,
         branch,
+        base: params.base.clone(),
         repositories,
     })
     .map_err(worktree_error)?;

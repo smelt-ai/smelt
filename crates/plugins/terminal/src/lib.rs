@@ -9,6 +9,7 @@
 
 mod contract;
 mod instance;
+mod redraw;
 mod settings_page;
 mod store;
 mod terminal;

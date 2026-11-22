@@ -66,13 +66,13 @@ smelt project list
 smelt project open <路径>
 smelt project close <路径>
 smelt worktree list [--project <路径>]
-smelt worktree create <项目路径> --task <任务名> [--repo <仓库名>...] [--branch <分支>] [--prefix <分支前缀>]
+smelt worktree create <项目路径> --task <任务名> [--repo <仓库名>...] [--branch <分支>] [--prefix <分支前缀>] [--base <基线分支>]
 smelt worktree inspect <id>
 smelt worktree finish <id> [--allow-unconfirmed-merge]
 ```
 
 - 项目就是侧栏里的一个目录。`open` 加进侧栏，`close` 从侧栏拿掉，都不动磁盘上的文件，项目下的对话也留着。
-- 工作树是在项目的 git 仓库上为一个任务开的一组 worktree，放在 `<项目>/worktrees/<任务名>`，分支默认 `feat/<任务名>`。仓库认项目根目录和 `repos/<名字>` 下的，`--repo` 不写就全用；仓库要有远端。结果里的 `path` 是任务目录，在里面干活；`setup` 列出跑过的初始化脚本（`<仓库>/.smelt/worktree-setup`）。
+- 工作树是在项目的 git 仓库上为一个任务开的一组 worktree，放在 `<项目>/worktrees/<任务名>`，分支默认 `feat/<任务名>`，默认从远端默认分支拉出；`--base` 指定从哪个分支拉出（先找远端上的同名分支，没有再用本地分支；也可写 `origin/<分支>`），适合从大迭代分支拆小迭代。仓库认项目根目录和 `repos/<名字>` 下的，`--repo` 不写就全用；不填 `--base` 时仓库要有远端。结果里的 `path` 是任务目录，在里面干活；`setup` 列出跑过的初始化脚本（`<仓库>/.smelt/worktree-setup`）。
 - 收工先 `inspect`：每个仓库 `dirty`（有没有未提交的改动）和 `merge`（分支合没合进基线）。有未提交改动或确实没合并的，`finish` 会拦下，先把情况告诉用户；判断不了合没合时才考虑 `--allow-unconfirmed-merge`，要用户点头。`finish` 后 `retained_branches` 是留下没删的分支。
 
 ## 历史会话

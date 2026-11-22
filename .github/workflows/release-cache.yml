@@ -29,9 +29,18 @@ concurrency:
 
 jobs:
   mac:
-    # 和 release.yml 的 build 同一种 runner（Apple Silicon 的 macOS），缓存才对得上。
-    runs-on: macos-26
-    timeout-minutes: 60
+    # 和 release.yml 的 build 同样的两种 runner，缓存才对得上。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    # Intel runner 冷编慢得多。
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -43,7 +52,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: mac-release
+          shared-key: mac-release-${{ matrix.arch }}
 
       # 和 scripts/package-mac.sh --build 编的是同一组目标、同样的参数，产物才对得上。
       - name: Build release binaries

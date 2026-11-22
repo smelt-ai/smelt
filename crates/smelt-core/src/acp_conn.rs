@@ -3296,6 +3296,7 @@ pub(crate) fn model_from_config(options: &[SessionConfigOption]) -> Option<Model
                         .iter()
                         .map(|option| (option.value.to_string(), option.name.clone()))
                         .collect(),
+                    preferred_value: None,
                 })
                 .collect(),
         ),

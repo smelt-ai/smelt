@@ -1,4 +1,4 @@
-# 打 tag（v*）→ 各平台并行出包（macOS dmg、Linux 运行时两种架构、Android APK、Windows 安装程序），
+# 打 tag（v*）→ 各平台并行出包（macOS 两种架构的 dmg、Linux 运行时两种架构、Android APK、Windows 安装程序），
 # 全部成功后 publish 一次建好 GitHub Release、传齐产物和校验和；iOS 单独传到 TestFlight。
 # 任何一个平台失败就不发：一键安装、运行时升级、应用内更新都不会看到缺包的版本。修好或重跑失败的
 # job 后，publish 会接着跑。
@@ -15,12 +15,25 @@ permissions:
   contents: write
 
 jobs:
+  # macOS 两种架构各在对应的 runner 上原生构建、各出一份包，不打 Universal（体积翻倍）。
+  # package-mac.sh 只打本机架构。arm64 的包沿用不带架构的老名字 Smelt.dmg / Smelt.app.zip：
+  # 已经装好的旧版应用内更新只认 Smelt.app.zip，改名它们就收不到更新了。Intel 的包带 -x86_64。
   build:
-    # 必须 arm64：package-mac.sh 会用 file 校验产物是 arm64，Intel 直接拒绝。
-    # macos-26 默认就是 Apple Silicon。
-    runs-on: macos-26
-    # 平时 15 分钟；公证（notarytool --wait）在 Apple 排队时会一直等，不设上限要卡 6 小时。
-    timeout-minutes: 60
+    strategy:
+      # 一个架构失败不连累另一个：重跑失败的 job 时只重编坏掉的那个。
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+            suffix: ""
+          - runner: macos-26-intel
+            arch: x86_64
+            suffix: "-x86_64"
+    runs-on: ${{ matrix.runner }}
+    # arm64 平时 15 分钟，Intel runner 慢得多；公证（notarytool --wait）在 Apple 排队时会一直等，
+    # 不设上限要卡 6 小时。
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -42,7 +55,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: mac-release
+          shared-key: mac-release-${{ matrix.arch }}
           save-if: false
 
       # 导入 Developer ID Application 证书和公证用的 App Store Connect API 密钥（和 ios job
@@ -105,26 +118,43 @@ jobs:
       # Finder，headless runner 上和本地打出来的完全一致——定制没生效就是 bug，
       # 别再当成 CI 的预期行为。工具链由 package-mac.sh 自建 venv 装，无需在此预装。
       # 打包时生成第三方许可证清单（scripts/third-party-licenses.sh）。
+      # cargo-about 没发 x86_64-apple-darwin 的预编译包，install-action 退回 cargo-binstall
+      # 源码编译时不带 cli 特性（它不是默认特性），装不出可执行文件，Intel 上直接 cargo install。
       - name: Install cargo-about
+        if: matrix.arch == 'arm64'
         uses: taiki-e/install-action@cargo-about
+
+      - name: Install cargo-about (Intel)
+        if: matrix.arch == 'x86_64'
+        run: cargo install cargo-about --locked --features cli
 
       - name: Build & package
         env:
           # 前缀就够：临时钥匙串里只有这一张 Developer ID 证书，codesign 按前缀找到它。
           SMELT_CODESIGN_IDENTITY: "Developer ID Application"
-          SMELT_UPDATE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Smelt.app.zip
+          SMELT_UPDATE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Smelt${{ matrix.suffix }}.app.zip
         run: make dist-build
 
-      # 桌面自更新下载的是这个 zip（见 smelt-client 的 updater）。ditto 保留签名和扩展属性。
+      # 桌面自更新下载的是这个 zip（文件名按架构定，见 smelt-client 的 updater/macos.rs）。
+      # ditto 保留签名和扩展属性。dmg 改名不影响已钉进去的公证票据。
       - name: Update archive
-        run: ditto -c -k --keepParent dist/Smelt.app dist/Smelt.app.zip
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          ditto -c -k --keepParent dist/Smelt.app "dist/Smelt${SUFFIX}.app.zip"
+          [[ -z "$SUFFIX" ]] || mv dist/Smelt.dmg "dist/Smelt${SUFFIX}.dmg"
 
       # 产物必须真的生成，否则后面上传会是空发布。
       - name: Verify artifact
+        env:
+          ARCH: ${{ matrix.arch }}
+          SUFFIX: ${{ matrix.suffix }}
         run: |
-          test -f dist/Smelt.dmg || { echo "✗ 没生成 dist/Smelt.dmg"; exit 1; }
-          test -f dist/Smelt.app.zip || { echo "✗ 没生成 dist/Smelt.app.zip"; exit 1; }
-          ls -lh dist/Smelt.dmg
+          test -f "dist/Smelt${SUFFIX}.dmg" || { echo "✗ 没生成 dist/Smelt${SUFFIX}.dmg"; exit 1; }
+          test -f "dist/Smelt${SUFFIX}.app.zip" || { echo "✗ 没生成 dist/Smelt${SUFFIX}.app.zip"; exit 1; }
+          ls -lh "dist/Smelt${SUFFIX}.dmg"
+          file dist/Smelt.app/Contents/MacOS/smelt | grep -q "$ARCH" \
+            || { echo "✗ App 不是 ${ARCH}"; exit 1; }
           test -x dist/Smelt.app/Contents/MacOS/smelt-notify \
             || { echo "✗ App 缺少可执行的 smelt-notify"; exit 1; }
           echo "✅ 发布产物校验通过"
@@ -138,10 +168,10 @@ jobs:
       - name: Upload package
         uses: actions/upload-artifact@v7
         with:
-          name: smelt-macos
+          name: smelt-macos-${{ matrix.arch }}
           path: |
-            dist/Smelt.dmg
-            dist/Smelt.app.zip
+            dist/Smelt${{ matrix.suffix }}.dmg
+            dist/Smelt${{ matrix.suffix }}.app.zip
           if-no-files-found: error
           # 只是交给 publish 的中转，发布后就没用了。
           retention-days: 7
@@ -550,6 +580,10 @@ jobs:
             > "$RUNNER_TEMP/release-notes.md"
           version="${GITHUB_REF_NAME#v}"
           cat >> "$RUNNER_TEMP/release-notes.md" <<EOF
+
+          ## macOS
+
+          Apple Silicon 下载 \`Smelt.dmg\`，Intel 下载 \`Smelt-x86_64.dmg\`，拖进应用程序文件夹即可，之后在应用内自动更新。
 
           ## Windows
 

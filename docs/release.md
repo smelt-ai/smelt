@@ -6,7 +6,7 @@
 
 | 产物 | job | 说明 |
 |---|---|---|
-| `Smelt.dmg`、`Smelt.app.zip` | `build`（macos-26） | `make dist-build`，Developer ID 签名并公证，见下面的「macOS 签名」。`Smelt.app.zip` 给桌面应用内更新用 |
+| `Smelt.dmg`、`Smelt.app.zip`（arm64）；`Smelt-x86_64.dmg`、`Smelt-x86_64.app.zip`（Intel） | `build`（arm64 在 macos-26，Intel 在 macos-26-intel，各自原生构建） | `make dist-build`，Developer ID 签名并公证，见下面的「macOS 签名」。`.app.zip` 给桌面应用内更新用，应用按自己的架构找文件名；arm64 不带架构后缀是为了让已装好的旧版照样能更新，不要改名 |
 | `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`install.sh` | `linux` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
 | `Smelt-<版本>-android-arm64.apk` | `android` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
 | `smelt-<版本>-windows-x86_64-setup.exe` | `windows` | Inno Setup 安装程序，`smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe` 装在同一个目录。第一版不签名，见下面的「Windows」 |
@@ -19,7 +19,7 @@ macOS、Linux、Windows 三种包都带 `LICENSE`、`NOTICE`、`THIRD_PARTY_LICE
 另两种在包的根目录），由 `scripts/third-party-licenses.sh` 在打包时生成。第三方清单有三段：Rust 依赖（cargo-about）、
 编进 smelt-agent 的 npm 依赖（`agent/scripts/third-party-licenses.ts`）、Bun 运行时。允许的许可证只认 `deny.toml`
 的 `[licenses] allow`。三个 job 用 `taiki-e/install-action` 装 cargo-about；本机要对外发包就先
-`cargo install cargo-about --locked`，没装时 `make install` 只是跳过并提示。手机端（APK、iOS）还没带，另做。
+`cargo install cargo-about --locked --features cli`，没装时 `make install` 只是跳过并提示。手机端（APK、iOS）还没带，另做。
 
 ## 发版步骤
 

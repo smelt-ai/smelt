@@ -1,6 +1,6 @@
 # 文档
 
-smelt 是跨机器、多智能体的原生 AI 编程指挥台：macOS（Apple Silicon）和 Windows 10 1803+（x86_64）上的 GPUI 桌面工作台，Linux 上的无头守护进程 `smeltd`，以及 iOS / Android 的手机和平板「出菜口」。
+smelt 是跨机器、多智能体的原生 AI 编程指挥台：macOS（Apple Silicon、Intel）和 Windows 10 1803+（x86_64）上的 GPUI 桌面工作台，Linux 上的无头守护进程 `smeltd`，以及 iOS / Android 的手机和平板「出菜口」。
 Windows 第一版是不签名的安装包。Linux 上可以只跑 `smeltd`，再用电脑或手机配对上去。
 这页文档只讲怎么用，架构细节不在这——接口和默认行为可能会变。
 
@@ -8,8 +8,8 @@ Windows 第一版是不签名的安装包。Linux 上可以只跑 `smeltd`，再
 
 ### macOS
 
-从 [GitHub Releases](https://github.com/smelt-ai/smelt/releases) 下载 `Smelt.dmg`，拖进
-应用程序文件夹，打开即可，只支持 Apple Silicon Mac。应用在启动时和手动检查更新
+从 [GitHub Releases](https://github.com/smelt-ai/smelt/releases) 下载 `Smelt.dmg`（Apple Silicon）
+或 `Smelt-x86_64.dmg`（Intel），拖进应用程序文件夹，打开即可。应用在启动时和手动检查更新
 （stable/beta 渠道），有新版本时会提示。
 
 ### Windows
@@ -312,7 +312,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。发版�
 能。有 ACP 身份的来源可以选择「ACP 继续」或「CLI/TUI 继续」。
 
 **支持 Linux / Windows 吗？**
-支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`）和 Windows 10 1803+ 的 x86_64 安装包（`smelt-<版本>-windows-x86_64-setup.exe`），都在应用内自动更新。Windows 这一版不签名，也没有 arm64 包；交互 shell 是 `cmd.exe`。Android 发版构建会在应用里查更新，下载 `Smelt-<版本>-android-arm64.apk`，对照 `SHA256SUMS` 校验后交给系统安装；开发构建和 iOS 不查。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
+支持。桌面有 macOS（Apple Silicon 是 `Smelt.dmg`，Intel 是 `Smelt-x86_64.dmg`）和 Windows 10 1803+ 的 x86_64 安装包（`smelt-<版本>-windows-x86_64-setup.exe`），都在应用内自动更新。Windows 这一版不签名，也没有 arm64 包；交互 shell 是 `cmd.exe`。Android 发版构建会在应用里查更新，下载 `Smelt-<版本>-android-arm64.apk`，对照 `SHA256SUMS` 校验后交给系统安装；开发构建和 iOS 不查。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
 
 **在哪反馈问题？**
 去 [GitHub Issues](https://github.com/smelt-ai/smelt/issues/new/choose) 提，有 Bug 反馈

@@ -770,6 +770,65 @@ fn switching_model_does_not_stop_the_current_turn() {
 }
 
 #[test]
+fn enter_during_a_pi_started_turn_steers_instead_of_holding_the_gate() {
+    // 后台任务结果带 triggerTurn 时 Pi 自己起一轮，不占闸门。此时回车若当 prompt 发，
+    // 驱动会改成 steer：气泡写两遍，回执永远不来，下一条消息一直排队。
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::ExecutingTool;
+    reduced.turn_started_at_ms = Some(1);
+    let (slot, _) = acp_sessions.reserve_with("acp-provider-turn-steer", || {
+        make_acp_session_value("acp-provider-turn-steer", reduced)
+    });
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: true,
+        supports_compaction: false,
+        supports_native_queue: true,
+        supports_rewind: false,
+    });
+
+    let (server, client) = RuntimeStream::pair().unwrap();
+    handle_acp_submit_input(
+        server,
+        &serde_json::json!({
+            "id": "acp-provider-turn-steer",
+            "input": {"text": "要这么久吗", "images": []},
+        }),
+        &acp_sessions,
+        &new_test_workspace_directory(),
+        &new_event_hub(),
+    );
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["ok"], true, "{response}");
+
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Steer { text, .. } => {
+            assert_eq!(text, "要这么久吗");
+        }
+        _ => panic!("Pi 自己起的回合里回车也该插进当前回合"),
+    }
+    assert!(cmd_rx.try_recv().is_err());
+    assert!(!slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    assert!(slot.value.unaccepted_prompt.lock().is_none());
+    assert!(slot.value.pending_prompts.lock().is_empty());
+    let state = slot.value.reduced.lock();
+    assert_eq!(state.queued_steering, ["要这么久吗"]);
+    assert!(
+        state.entries().is_empty(),
+        "气泡等 Pi 吃掉这条时再写，不能提前写一遍"
+    );
+}
+
+#[test]
 fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
     let acp_sessions = new_test_acp_sessions();
     let (slot, _) = acp_sessions.reserve_with("acp-automation-action", || {

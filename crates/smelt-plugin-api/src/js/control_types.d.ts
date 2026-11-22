@@ -2386,6 +2386,8 @@ export type WorkspaceWorksetCreateParams = {
   task: string;
   branch_prefix?: string;
   branch?: string | null;
+  /** 新分支从哪个分支拉出来；不填用各仓库远端的默认分支。 */
+  base?: string | null;
   repository_names: string[];
 };
 /** 新建工作树的回执。目录版本平铺在顶层，和以前只回 `WorkspaceRevision` 时同一个形状。 */

@@ -32,6 +32,8 @@ use smelt_plugin_api::model::kitty_graphics::{
     placeholder_marks, resolve_placeholder, without_anchors, without_graphics,
 };
 
+use crate::redraw::{self, RedrawReceiver};
+
 type SearchMatch = (Point, Point);
 type SearchResult = (u64, String, i32, Vec<SearchMatch>);
 type HandshakeResult = (
@@ -987,6 +989,55 @@ const SEARCH_MATCH_CAP: usize = 2000;
 /// 不加节流会每帧 spawn 一个搜索线程。查询串本身变了不受此限制。
 const SEARCH_RESCAN_THROTTLE: Duration = Duration::from_millis(200);
 
+/// 读线程每解析完一批、还拿着网格锁时，用它判定网格内容是否真的变了（读并清 alacritty
+/// 自带的 damage tracking）。涵盖：PTY 写入的字符/颜色、光标移动、翻滚历史、进出备用
+/// 屏幕（vim/less 等全屏 TUI）、resize 等——这些都由 alacritty 自动判定。
+///
+/// alacritty 的 damage_cursor() 每次都会无条件把**当前**光标格标脏（为闪烁动画设计）。
+/// smelt 没有闪烁，静止时必须滤掉「仅当前光标那一格」——否则空闲也 33fps。
+///
+/// 但光标真的移动时，脏区可能**只有新位置那一格**（旧格不在 partial 里），若仍按
+/// 「等于当前光标就忽略」会吞掉移动 → 光标不重画。所以再记上一批结束时的光标位置：
+/// 动了就算有变化。
+#[derive(Default)]
+struct DamageFilter {
+    last_cursor: Option<(i32, usize)>,
+}
+
+impl DamageFilter {
+    fn take<T: EventListener>(&mut self, term: &mut Term<T>) -> bool {
+        let cursor = term.grid().cursor.point;
+        let cur = (cursor.line.0, cursor.column.0);
+        let cursor_moved = self.last_cursor.replace(cur) != Some(cur);
+        let cursor_line = cur.0 as usize;
+        let cursor_col = cur.1;
+        let damaged = match term.damage() {
+            TermDamage::Full => true,
+            TermDamage::Partial(it) => {
+                let mut any = false;
+                let mut only_idle_cursor = true;
+                for l in it {
+                    any = true;
+                    if l.line != cursor_line || l.left != cursor_col || l.right != cursor_col {
+                        only_idle_cursor = false;
+                        break;
+                    }
+                }
+                if !any {
+                    false
+                } else if only_idle_cursor {
+                    // 脏区恰好是当前光标格：只有光标真的动了才算变化
+                    cursor_moved
+                } else {
+                    true
+                }
+            }
+        };
+        term.reset_damage();
+        damaged
+    }
+}
+
 /// 一个内嵌终端：alacritty 的 Term（后台线程写、UI 线程读）+ 守护连接写队列。
 pub struct Terminal {
     term: Arc<Mutex<Term<EventProxy>>>,
@@ -1001,9 +1052,8 @@ pub struct Terminal {
     daemon_geometry: Arc<Mutex<DaemonGeometrySignal>>,
     daemon_geometry_generation: u64,
     remote_geometry_locked: bool,
-    /// `take_damage` 用来识别「光标真的动了」——alacritty 每帧都会把当前光标格标脏，
-    /// 静止时要滤掉；但光标移动后若只标了新位置那一格，也得算变化（见 take_damage）。
-    last_damage_cursor: Mutex<Option<(i32, usize)>>,
+    /// 读线程算好的「网格变过」，[`Self::take_damage`] 取走并清掉。
+    damaged: Arc<AtomicBool>,
     /// 当前搜索查询串；变了就重建 `search_matches`。
     search_query: Mutex<String>,
     /// 全部命中（缓冲绝对坐标 start..=end），按阅读顺序。
@@ -1029,13 +1079,14 @@ pub struct Terminal {
     /// 或 shell 退出都会走到这里——UI 侧据此决定是否自动重连（重连前还会再查
     /// 一次守护里会话还在不在，区分「守护换血」和「shell 真的退了」）。
     dead: Arc<AtomicBool>,
-    /// 重绘唤醒（Zed 式事件驱动）：读线程每喂完一批字节就 `try_send(())`，UI 侧
-    /// 一个 `cx.spawn` 任务 `recv().await` 后 `cx.notify()`。这样「喂内容」与「触发
+    /// 重绘唤醒（Zed 式事件驱动）：读线程每喂完一批字节就 `send()`，UI 侧一个
+    /// `cx.spawn` 任务 `recv().await` 后 `cx.notify()`。这样「喂内容」与「触发
     /// 重绘」是同一个动作，不再依赖 30ms 轮询去 `take_damage()` 事后发现——reattach
     /// 后 agent 空闲、只有唯一一次输出时，轮询的时序/过滤一旦漏掉就永久停帧，正是
-    /// 那个「底部画不出来、一敲键盘/框选才好」的 bug。`bounded(1)` 天然合并突发：
-    /// 空闲无输出＝无唤醒（保住 P0 那条空闲不重绘的优化），有输出才唤醒。
-    redraw_rx: smol::channel::Receiver<()>,
+    /// 那个「底部画不出来、一敲键盘/框选才好」的 bug。突发合并成一次：空闲无输出＝
+    /// 无唤醒（保住 P0 那条空闲不重绘的优化），有输出才唤醒。只有一个任务等它，等的
+    /// 那个用 [`Self::take_redraw_channel`] 拿走。
+    redraw_rx: Option<RedrawReceiver>,
     /// smeltd 转发来的 kitty 图形（读线程写、渲染读）。见 terminal_images。
     images: Arc<Mutex<crate::terminal_images::TerminalImages>>,
 }
@@ -1251,9 +1302,9 @@ impl Terminal {
         // 3) 后台读线程：守护转发的 PTY 字节 → vte 解析更新 Term 网格 + 扫几何标记。
         //    EOF = shell 退出或守护离线（网格冻结，重开会话即恢复）。
         //    复用尺寸行的 BufReader：重放字节可能已在其内部缓冲里。
-        // 重绘唤醒通道：读线程 → UI。bounded(1) 合并突发（已有待处理唤醒时后续 try_send
-        // 直接丢弃，不堆积）。见 Terminal::redraw_rx 字段注释。
-        let (redraw_tx, redraw_rx) = smol::channel::bounded::<()>(1);
+        // 重绘唤醒：读线程 → UI。见 Terminal::redraw_rx 字段注释。
+        let (redraw_tx, redraw_rx) = redraw::channel();
+        let damaged = Arc::new(AtomicBool::new(false));
         let dead: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
         let mut reader = buffered;
@@ -1263,6 +1314,7 @@ impl Terminal {
         let dead_reader = Arc::clone(&dead);
         let ack_writer = writer.clone();
         let images_reader = Arc::clone(&images);
+        let damaged_reader = Arc::clone(&damaged);
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
@@ -1274,6 +1326,7 @@ impl Terminal {
                 .unwrap_or_default();
             let mut buf = [0u8; 4096];
             let mut bytes_seen: usize = 0;
+            let mut damage = DamageFilter::default();
             // reattach 快照是否已整段喂完；越过边界时贴底一次。
             let mut replay_finalized = replay_len == 0;
             loop {
@@ -1308,6 +1361,8 @@ impl Terminal {
                         }
                         bytes_seen += n;
                         let mut first_text_at = None;
+                        // 锁中毒时保守起见当作有变化，避免画面从此卡死不再刷新。
+                        let mut changed = true;
                         if let Ok(mut term) = term_reader.lock() {
                             // A geometry marker is serialized before PTY
                             // output at the new size. Split this read at each
@@ -1338,6 +1393,7 @@ impl Terminal {
                                 replay_finalized = true;
                                 finalize_reattach_term(&mut term);
                             }
+                            changed = damage.take(&mut term);
                             if first_text_timer.is_some()
                                 && term
                                     .renderable_content()
@@ -1356,10 +1412,13 @@ impl Terminal {
                             );
                         }
                         // 喂完这批立刻请求一次重绘（Zed 式：内容生产者驱动重绘）。
-                        // bounded(1) + try_send：已有待处理唤醒就丢弃，天然合并。
+                        // 已有待处理唤醒就合并进那一次。
                         // 关键性质：最后一批喂完后必有一次待处理唤醒 → UI 必定再画一帧，
                         // 与 reattach 快照喂完这个场景精确对应。
-                        let _ = redraw_tx.try_send(());
+                        if changed {
+                            damaged_reader.store(true, Ordering::Release);
+                        }
+                        redraw_tx.send();
                         // 解析完才确认：守护按它判断我们跟不跟得上。每批都确认，最后一批
                         // 一定会被确认到，合并才结束得了；多次确认在写端合并成一帧。
                         ack_writer.acknowledge(bytes_seen as u64);
@@ -1368,9 +1427,9 @@ impl Terminal {
                 }
             }
             // 读线程退出（EOF/守护离线）：标记连接已断，并主动关掉发送端，让 UI 侧
-            // 的 recv 任务收到 Err 而退出——UI 侧据此触发自动重连（见 terminal_view.rs
+            // 的 recv 任务收到 None 而退出——UI 侧据此触发自动重连（见 terminal_view.rs
             // 的 schedule_auto_reconnect）。adopt_terminal 换上新连接后 dead 归零，
-            // 旧 channel 的 Err 不会再误触发重连。
+            // 旧通道的关闭不会再误触发重连。
             dead_reader.store(true, Ordering::Relaxed);
             drop(redraw_tx);
         });
@@ -1385,7 +1444,7 @@ impl Terminal {
             daemon_geometry,
             daemon_geometry_generation: 0,
             remote_geometry_locked: false,
-            last_damage_cursor: Mutex::new(None),
+            damaged,
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),
             search_index: Mutex::new(0),
@@ -1396,7 +1455,7 @@ impl Terminal {
             last_search_rescan: Mutex::new(Instant::now()),
             pending_step: Mutex::new(None),
             dead,
-            redraw_rx,
+            redraw_rx: Some(redraw_rx),
             images,
         })
     }
@@ -1420,9 +1479,9 @@ impl Terminal {
             .unwrap_or_default()
     }
 
-    /// 重绘唤醒的接收端（clone 一份给 UI 侧的 `cx.spawn` 任务 await）。见 `redraw_rx` 字段。
-    pub fn redraw_channel(&self) -> smol::channel::Receiver<()> {
-        self.redraw_rx.clone()
+    /// 重绘唤醒的接收端，只交一次，给 UI 侧的 `cx.spawn` 任务 await。见 `redraw_rx` 字段。
+    pub(crate) fn take_redraw_channel(&mut self) -> Option<RedrawReceiver> {
+        self.redraw_rx.take()
     }
 
     /// 连接是否已断（读线程退出后为 true）。UI 侧拿它判断要不要自动重连；
@@ -1480,62 +1539,14 @@ impl Terminal {
         )))
     }
 
-    /// 自上次调用以来，终端网格内容是否真的变化了（读并清 alacritty 自带的
-    /// damage tracking）。涵盖：PTY 写入的字符/颜色、光标移动、翻滚历史、
-    /// 进出备用屏幕（vim/less 等全屏 TUI）、resize 等——这些都由 alacritty 自动
-    /// 判定。**不**涵盖：用户拖选（Term.selection 的变化 alacritty 不计入 damage，
-    /// 它认为选区高亮是渲染层的事）、Cmd 悬停链接高亮——这两个在 TerminalView
-    /// 各自的鼠标事件处理里已经各自调用 cx.notify()，不依赖这里。
+    /// 自上次调用以来，读线程写进来的内容是否真的让网格变了（判定见 [`DamageFilter`]）。
+    /// **不**涵盖用户自己的操作：滚动、拖选、Cmd 悬停链接高亮在 TerminalView 各自的
+    /// 事件处理里已经各自调用 cx.notify()，不依赖这里。
     ///
-    /// 由 TerminalView 在 PTY 唤醒事件中调用（每个 Terminal 独占一个 Term，不会有
-    /// 多个消费者互相"偷"对方读到的脏区）。
+    /// 在主线程上、每次唤醒都调，所以只取标记，不碰 `term` 锁：输出密时读线程几乎一直
+    /// 攥着它解析。
     pub fn take_damage(&self) -> bool {
-        let Ok(mut term) = self.term.lock() else {
-            // 拿不到锁（锁中毒）：保守起见当作有变化，避免画面从此卡死不再刷新。
-            return true;
-        };
-        // alacritty 的 damage_cursor() 每次都会无条件把**当前**光标格标脏（为闪烁动画
-        // 设计）。smelt 没有闪烁，静止时必须滤掉「仅当前光标那一格」——否则空闲也 33fps。
-        //
-        // 但光标真的移动时，脏区可能**只有新位置那一格**（旧格不在 partial 里），若仍按
-        // 「等于当前光标就忽略」会吞掉移动 → 光标不重画。所以再记一帧光标位置：动了就
-        // 算有变化。
-        let cursor = term.grid().cursor.point;
-        let cur = (cursor.line.0, cursor.column.0);
-        let cursor_moved = match self.last_damage_cursor.lock() {
-            Ok(mut g) => {
-                let moved = g.map(|prev| prev != cur).unwrap_or(true);
-                *g = Some(cur);
-                moved
-            }
-            Err(_) => true,
-        };
-        let cursor_line = cur.0 as usize;
-        let cursor_col = cur.1;
-        let damaged = match term.damage() {
-            TermDamage::Full => true,
-            TermDamage::Partial(it) => {
-                let mut any = false;
-                let mut only_idle_cursor = true;
-                for l in it {
-                    any = true;
-                    if l.line != cursor_line || l.left != cursor_col || l.right != cursor_col {
-                        only_idle_cursor = false;
-                        break;
-                    }
-                }
-                if !any {
-                    false
-                } else if only_idle_cursor {
-                    // 脏区恰好是当前光标格：只有光标真的动了才算变化
-                    cursor_moved
-                } else {
-                    true
-                }
-            }
-        };
-        term.reset_damage();
-        damaged
+        self.damaged.swap(false, Ordering::AcqRel)
     }
 
     /// Apply the daemon's canonical grid without writing a resize frame back.
@@ -3155,7 +3166,6 @@ mod resize_tests {
         };
         let size = TermSize { rows, cols };
         let term = Term::new(term_config(), &size, proxy);
-        let (_, redraw_rx) = smol::channel::bounded::<()>(1);
         let (search_result_tx, search_result_rx) = smol::channel::unbounded();
         (
             Terminal {
@@ -3166,7 +3176,7 @@ mod resize_tests {
                 daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
                 daemon_geometry_generation: 0,
                 remote_geometry_locked: false,
-                last_damage_cursor: Mutex::new(None),
+                damaged: Arc::default(),
                 search_query: Mutex::new(String::new()),
                 search_matches: Mutex::new(Vec::new()),
                 search_index: Mutex::new(0),
@@ -3177,7 +3187,7 @@ mod resize_tests {
                 last_search_rescan: Mutex::new(Instant::now()),
                 pending_step: Mutex::new(None),
                 dead: Arc::new(AtomicBool::new(false)),
-                redraw_rx,
+                redraw_rx: None,
                 images: Arc::default(),
             },
             peer,
@@ -3407,7 +3417,7 @@ mod search_resync_tests {
             daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
             daemon_geometry_generation: 0,
             remote_geometry_locked: false,
-            last_damage_cursor: Mutex::new(None),
+            damaged: Arc::default(),
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),
             search_index: Mutex::new(0),
@@ -3418,11 +3428,8 @@ mod search_resync_tests {
             last_search_rescan: Mutex::new(Instant::now()),
             pending_step: Mutex::new(None),
             dead: Arc::new(AtomicBool::new(false)),
-            // 测试不驱动 UI 重绘，给一个即时关闭的通道占位即可。
-            redraw_rx: {
-                let (_, rx) = smol::channel::bounded::<()>(1);
-                rx
-            },
+            // 测试不驱动 UI 重绘。
+            redraw_rx: None,
             images: Arc::default(),
         }
     }
@@ -3640,5 +3647,154 @@ mod search_literal_tests {
         );
         // offset 不够 → 仍在历史上方，不可见
         assert!(match_to_viewport_hit(start, end, 2, 80, false).is_none());
+    }
+}
+
+/// 读线程到 UI 的整条重绘通路：用假守护（socketpair）走完整的 `Terminal::spawn`，不连真守护。
+#[cfg(all(test, unix))]
+mod redraw_pipeline_tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::mpsc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+    /// 不该等锁的调用最多花这么久，比任何一次调度延迟都宽得多。
+    const NO_WAIT: Duration = Duration::from_secs(1);
+
+    /// 连上假守护，返回终端和守护那一头。
+    fn connect() -> (Terminal, RedrawReceiver, RuntimeStream) {
+        let (mut daemon, client) = RuntimeStream::pair().expect("pair 失败");
+        // 回执先放进缓冲，spawn 发完请求一读就有。
+        writeln!(
+            daemon,
+            "{}",
+            serde_json::json!({ "ok": true, "rows": 5, "cols": 20 })
+        )
+        .expect("写回执失败");
+        let client = Mutex::new(Some(client));
+        let connector = move || -> std::io::Result<RuntimeStream> {
+            Ok(client.lock().unwrap().take().expect("只该连一次"))
+        };
+        let mut terminal =
+            Terminal::spawn(&connector, 5, 20, None, "redraw-test", None).expect("spawn 失败");
+        let redraws = terminal.take_redraw_channel().expect("新终端该有唤醒通道");
+        (terminal, redraws, daemon)
+    }
+
+    /// 等下一次唤醒；连接已断是 `false`。
+    fn next_wake(redraws: &mut RedrawReceiver) -> bool {
+        smol::block_on(smol::future::or(
+            async { redraws.recv().await.is_some() },
+            async {
+                smol::Timer::after(EVENT_TIMEOUT).await;
+                panic!("没等到重绘唤醒")
+            },
+        ))
+    }
+
+    fn output(redraws: &mut RedrawReceiver, daemon: &mut RuntimeStream, bytes: &[u8]) {
+        daemon.write_all(bytes).expect("写输出失败");
+        assert!(next_wake(redraws), "连接不该断");
+    }
+
+    #[test]
+    fn taking_damage_does_not_wait_for_the_parser() {
+        let (terminal, mut redraws, mut daemon) = connect();
+        output(&mut redraws, &mut daemon, b"x");
+
+        // 替读线程攥着网格：它解析下一批时就是这样。
+        let parsing = terminal.term.lock().unwrap();
+        let (done, taken) = mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(|| done.send(terminal.take_damage()).unwrap());
+            let result = taken.recv_timeout(NO_WAIT);
+            drop(parsing);
+            assert_eq!(result, Ok(true), "UI 取脏标记时在等解析用的网格锁");
+        });
+    }
+
+    /// 唤醒被调用时卡住，直到测试放行：相当于读线程在把任务派给主线程的那一下被抢占。
+    struct PausedWake {
+        entered: mpsc::Sender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Wake for PausedWake {
+        fn wake(self: Arc<Self>) {
+            let _ = self.entered.send(());
+            let _ = self.resume.lock().unwrap().recv_timeout(EVENT_TIMEOUT);
+        }
+    }
+
+    #[test]
+    fn waking_the_ui_holds_no_lock_the_ui_needs() {
+        let (_terminal, mut redraws, mut daemon) = connect();
+        let mut recv = Box::pin(redraws.recv());
+        let (entered, woken) = mpsc::channel();
+        let (resume, paused) = mpsc::channel();
+        let waker = Waker::from(Arc::new(PausedWake {
+            entered,
+            resume: Mutex::new(paused),
+        }));
+        assert!(
+            recv.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+
+        daemon.write_all(b"x").expect("写输出失败");
+        woken.recv_timeout(EVENT_TIMEOUT).expect("读线程没唤醒");
+
+        // 读线程还停在 wake 里，UI 已经被叫醒、来取这次唤醒。
+        let (done, polled) = mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(move || {
+                let result = recv.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+                // `.await` 拿到结果就丢掉这个 future，这一步也算在取唤醒里。
+                drop(recv);
+                done.send(matches!(result, Poll::Ready(Some(())))).unwrap();
+            });
+            let result = polled.recv_timeout(NO_WAIT);
+            drop(resume);
+            assert_eq!(result, Ok(true), "UI 取唤醒时在等读线程放开通知的锁");
+        });
+    }
+
+    #[test]
+    fn output_without_grid_changes_is_not_damage() {
+        let (terminal, mut redraws, mut daemon) = connect();
+        output(&mut redraws, &mut daemon, b"x");
+        assert!(terminal.take_damage());
+
+        output(&mut redraws, &mut daemon, b"\x1b]0;title\x07");
+        assert!(!terminal.take_damage(), "只改标题不该重画");
+
+        output(&mut redraws, &mut daemon, b"\x1b[3;4H");
+        assert!(terminal.take_damage(), "只移动光标也要重画");
+    }
+
+    #[test]
+    fn damage_survives_until_taken() {
+        let (terminal, mut redraws, mut daemon) = connect();
+        output(&mut redraws, &mut daemon, b"x");
+        assert!(terminal.take_damage());
+
+        output(&mut redraws, &mut daemon, b"y");
+        output(&mut redraws, &mut daemon, b"\x1b]0;title\x07");
+        assert!(terminal.take_damage(), "后一批没变，也不能吞掉前一批的变化");
+        assert!(!terminal.take_damage(), "取过一次就清掉");
+    }
+
+    #[test]
+    fn last_output_is_delivered_before_disconnect() {
+        let (terminal, mut redraws, mut daemon) = connect();
+        daemon.write_all(b"bye").expect("写输出失败");
+        daemon.shutdown(Shutdown::Write).expect("断开失败");
+
+        assert!(next_wake(&mut redraws), "断开前的最后一批要先交出来");
+        assert!(terminal.take_damage());
+        assert!(!next_wake(&mut redraws), "之后报断开");
+        assert!(terminal.is_dead(), "报断开时 dead 已经置位，视图据此重连");
     }
 }

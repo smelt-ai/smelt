@@ -42,7 +42,9 @@ export function repositories_dialog(dialog) {
       .child(hint(t("repo.task_hint")))
       .child(field_label(t("repo.branch")))
       .child(input(dialog.branch, t("repo.branch")))
-      .child(hint(t("repo.branch_hint", { task })));
+      .child(hint(t("repo.branch_hint", { task })))
+      .child(field_label(t("repo.base")))
+      .child(input(dialog.base, t("repo.base")));
   }
   if (mode === "manage" || mode === "create") {
     content = content.child(repository_list(dialog, task, look, hint)).child(entries(dialog));

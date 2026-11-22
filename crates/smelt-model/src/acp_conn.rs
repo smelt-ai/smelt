@@ -99,6 +99,10 @@ pub struct ModelProviderGroup {
     pub name: String,
     /// 此 provider 下的 `(值 id, 模型名)`。
     pub options: Vec<(String, String)>,
+    /// 切到这个 provider 时默认落到的模型值（会话里上次在这里用的，或智能体默认模型）。
+    /// 一定在 `options` 里；agent 没给就是 `None`，各端回退到组里第一个。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_value: Option<String>,
 }
 
 /// 模型选择状态：UI 拿它渲染「当前模型」胶囊和下拉候选。全是纯 String/Vec
