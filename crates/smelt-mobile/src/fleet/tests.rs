@@ -270,9 +270,13 @@ impl Route for FakeRoute {
                 rtt_ms: Some(3),
             }),
             watch: Arc::new(move |on_change: OnLinkChange| -> Box<dyn Send> {
-                if runtime.online.load(Ordering::SeqCst) {
-                    runtime.watchers.lock().unwrap().push(on_change);
+                // 同真连接：盯上时已经断了（下线、被撤销）立刻报关闭。和 `revoke` 取走回调
+                // 用同一把锁，撤销夹在判断和登记之间时也不丢。
+                let mut watchers = runtime.watchers.lock().unwrap();
+                if runtime.online.load(Ordering::SeqCst) && runtime.paired.load(Ordering::SeqCst) {
+                    watchers.push(on_change);
                 } else {
+                    drop(watchers);
                     on_change(LinkChange::Closed);
                 }
                 Box::new(())
@@ -431,6 +435,17 @@ impl Harness {
             .current()
             .unwrap()
             .generation
+    }
+
+    /// 在 `since` 那一代之后重新连好了。重连先退役旧会话、握手完才装上新的，中间没有当前会话：
+    /// 等重连时不能用 `generation`。
+    fn reconnected(&self, runtime_id: &str, since: u64) -> bool {
+        self.fleet
+            .node(runtime_id)
+            .unwrap()
+            .hub
+            .current()
+            .is_some_and(|current| current.generation > since)
     }
 
     fn pair(
@@ -605,14 +620,7 @@ fn a_shape_change_reconnects_every_runtime() {
     // 一台用自建 relay、一台不指定：换成 n0 预设，所有节点重新连。
     h.pair(&b, None).unwrap();
     assert_eq!(h.transport.shape(), Shape::Preset);
-    wait_until("ra 重新连过", || {
-        h.fleet
-            .node("ra")
-            .unwrap()
-            .hub
-            .current()
-            .is_some_and(|current| current.generation > generation)
-    });
+    wait_until("ra 重新连过", || h.reconnected("ra", generation));
     h.wait_state("ra", ConnectionState::Connected);
     h.wait_state("rb", ConnectionState::Connected);
 
@@ -623,14 +631,7 @@ fn a_shape_change_reconnects_every_runtime() {
         h.transport.shape(),
         Shape::Relay(RelaySettings::parse("relay.example").unwrap())
     );
-    wait_until("ra 又重新连过", || {
-        h.fleet
-            .node("ra")
-            .unwrap()
-            .hub
-            .current()
-            .is_some_and(|current| current.generation > generation)
-    });
+    wait_until("ra 又重新连过", || h.reconnected("ra", generation));
     h.wait_state("ra", ConnectionState::Connected);
 }
 
@@ -963,8 +964,8 @@ fn network_change_replaces_the_endpoint_and_reconnects_every_node() {
 
     assert_eq!(h.transport.network_changes.load(Ordering::SeqCst), 1);
     wait_until("每台机器都重新 connect", || {
-        h.generation("ra") > generations.0
-            && h.generation("rb") > generations.1
+        h.reconnected("ra", generations.0)
+            && h.reconnected("rb", generations.1)
             && h.state("ra") == Some(ConnectionState::Connected)
             && h.state("rb") == Some(ConnectionState::Connected)
     });
