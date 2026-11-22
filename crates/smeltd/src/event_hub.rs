@@ -478,6 +478,22 @@ impl DaemonEventHub {
         Ok(())
     }
 
+    /// 对端节点变了。没人订阅就不发。
+    pub(crate) fn publish_peers_changed(&self) -> Result<(), EventBusError> {
+        let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_PEERS_CHANGED)
+            .expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        self.publish_core(
+            smelt_event_protocol::CORE_TOPIC_PEERS_CHANGED,
+            serde_json::to_value(smelt_event_protocol::PeersChanged {})
+                .map_err(|error| EventBusError::new(format!("serialize peers change: {error}")))?,
+            None,
+        )?;
+        Ok(())
+    }
+
     /// 经运行时改了 Pi 的配置。没人订阅就不发。
     pub(crate) fn publish_pi_config_changed(&self) -> Result<(), EventBusError> {
         let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_PI_CONFIG_CHANGED)

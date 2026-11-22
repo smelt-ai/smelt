@@ -397,7 +397,12 @@ fn dispatch_control(
                 }
                 None => true,
             };
-            match crate::peer_nodes::dispatch(peer, params, principal, caller_is_agent) {
+            let changed = || {
+                if let Err(error) = event_hub.publish_peers_changed() {
+                    crate::dlog(&format!("推送对端变化失败：{error}"));
+                }
+            };
+            match crate::peer_nodes::dispatch(peer, params, principal, caller_is_agent, changed) {
                 Ok(result) => success_value(control_version, &request_id, result),
                 Err(error) => error_value(control_version, request_id, error),
             }

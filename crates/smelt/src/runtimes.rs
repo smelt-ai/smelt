@@ -1,5 +1,9 @@
-//! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时来自
-//! 客户端库里登记的连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
+//! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时是本机运行时的对端节点，
+//! 经本机 smeltd 转发去连（见 `docs/cross-machine.md`）。会话、视图各自记着自己属于哪个
+//! 运行时，调用、连接都发给它。
+//!
+//! 旧版桌面用自己的 iroh 身份直连、记在客户端库里的机器，连上后自动迁成对端节点（见
+//! [`migrate`]）；迁完之前照旧直连。
 
 use rust_i18n::t;
 use smelt_model::runtime_path::PathStyle;
@@ -174,8 +178,13 @@ pub(crate) struct RemoteRuntime {
     pub(crate) connection: smelt_client_store::RuntimeConnection,
     pub(crate) runtime: Runtime,
     pub(crate) status: RuntimeStatus,
-    /// 经哪个中继连它，和它的连接器共用：读眼下的连接路径、改中继都经这里。
-    route: RemoteRoute,
+    /// 怎么连它，和它的客户端共用：迁移时就地换掉，拿着这台机器客户端的终端、对话下次
+    /// 开流就走新的（见 [`SwitchConnector`]）。
+    transport: TransportSlot,
+    /// 盯着连接路径的守卫。
+    watch: LinkWatchSlot,
+    /// 本机智能体能不能经本机运行时用它。还没迁到本机运行时的旧直连机器是 `None`。
+    pub(crate) agent_access: Option<bool>,
     /// 最近一次读到的连接路径和延迟。只在连着时有：连上时、iroh 换了路径时、设置停在机器
     /// 页或悬停在机器名上时读（见 [`sync_link_watch`]、[`sample_links`]），不定时读。
     pub(crate) link: Option<RuntimeLink>,
@@ -201,6 +210,18 @@ pub(crate) struct RuntimeLink {
 }
 
 impl RuntimeLink {
+    fn from_peer(link: smelt_model::peer_node::PeerLink) -> Self {
+        use smelt_model::peer_node::PeerRoute;
+        Self {
+            kind: match link.route {
+                PeerRoute::Direct => LinkKind::Direct,
+                PeerRoute::Relay { address } => LinkKind::Relay(relay_name(&address)),
+                PeerRoute::Other => LinkKind::Other,
+            },
+            rtt_ms: link.rtt_ms,
+        }
+    }
+
     fn from_path(path: &smelt_iroh::PathStatus) -> Self {
         Self {
             kind: match path.kind {
@@ -370,6 +391,7 @@ pub(crate) fn connections(cx: &gpui::App) -> smelt_plugin_api::Connections {
                 upgrade_note: remote.upgrade_note.clone(),
                 can_upgrade: runtime_can_upgrade(key, cx),
                 can_reconnect: runtime_can_reconnect(key, cx),
+                agent_access: remote.agent_access,
             }
         })
         .collect();
@@ -388,17 +410,62 @@ pub(crate) struct RuntimeHub {
     pub(crate) load_error: Option<String>,
     /// 本机守护最近一次探到的状态，订阅线程报来（见 `runtime_events`）。还没探过是 `None`。
     pub(crate) local_status: Option<RuntimeStatus>,
+    /// 已经从本机运行时读到过对端节点。读不到（守护没在跑、还是不认 `peer.*` 的旧版本）时
+    /// 只有客户端库里的旧直连机器，也不迁移、不经它配对。
+    peers_loaded: bool,
 }
 
 impl gpui::Global for RuntimeHub {}
 
-/// 这台桌面的 iroh endpoint，所有远程运行时共用（同一把密钥绑几个会让 relay 上出现重复
-/// 节点）。第一次拨号时才绑；[`reset_iroh_client`] 丢掉之后下一次拨号重绑。
+/// 系统睡醒后换掉往外拨的连接，再请离线的机器立刻重探。
+///
+/// 长睡醒来（中间还换过网络、开关过代理）后，旧 endpoint 可能再也连不上 relay：之后每次
+/// 拨号都等满时限报超时，所有远程机器一直显示离线，重开应用才好（2026-11-09，睡了一个多
+/// 小时，relay 和远程机器都好着，app 里一条到 relay 的连接都没有）。iroh 没能自己恢复，
+/// 卡在哪还没查清（它的警告现在进 app.log，来源 `iroh`），所以不指望它，醒来就换新的。
+///
+/// 经本机运行时转发的机器，请本机运行时丢掉往外拨的连接（`peer.reset`）；还在直连的旧
+/// 机器，丢掉这个桌面自己的 endpoint。旧连接上还活着的订阅、终端、对话随之断开，按原有的
+/// 断线重连接上新的；睡过一觉这些连接多半已经超时，代价很小。
+pub(crate) fn reset_iroh_after_wake(cx: &mut gpui::App) {
+    let routes: Vec<RemoteRoute> = cx
+        .try_global::<RuntimeHub>()
+        .map(|hub| {
+            hub.remotes
+                .iter()
+                .filter_map(|remote| remote.transport.legacy_route())
+                .collect()
+        })
+        .unwrap_or_default();
+    cx.spawn(async move |cx| {
+        let reset = cx
+            .background_executor()
+            .spawn(async move {
+                let peers = local()
+                    .call::<smelt_model::control_api::PeerReset>(
+                        &Default::default(),
+                        smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+                    )
+                    .is_ok();
+                reset_iroh_client(&routes) || peers
+            })
+            .await;
+        if reset {
+            smelt_sys::app_log::log("info", "iroh", "系统睡醒，换掉旧的 iroh 连接");
+            cx.update(|cx| crate::runtime_events::probe_remotes(cx));
+        }
+    })
+    .detach();
+}
+
+/// 这台桌面自己的 iroh endpoint，只给还没迁到本机运行时的旧直连机器用（同一把密钥绑几个
+/// 会让 relay 上出现重复节点）。第一次拨号时才绑；[`reset_iroh_client`] 丢掉之后下一次
+/// 拨号重绑。旧机器都迁完就再也不绑。
 static IROH_CLIENT: std::sync::Mutex<Option<std::sync::Arc<smelt_iroh::runtime::IrohClient>>> =
     std::sync::Mutex::new(None);
 
-/// 这台桌面的 iroh 身份，所有远程运行时共用。绑定要起 tokio 运行时，只能在后台调。
-pub(crate) fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohClient>, String> {
+/// 这台桌面的旧 iroh 身份。绑定要起 tokio 运行时，只能在后台调。
+fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohClient>, String> {
     let mut slot = IROH_CLIENT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(client) = slot.as_ref() {
         return Ok(std::sync::Arc::clone(client));
@@ -414,41 +481,8 @@ pub(crate) fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohCl
     Ok(client)
 }
 
-/// 系统睡醒后丢掉 iroh endpoint，下一次拨号重绑一个新的，再请离线的机器立刻重探。
-///
-/// 长睡醒来（中间还换过网络、开关过代理）后，旧 endpoint 可能再也连不上 relay：之后每次
-/// 拨号都等满时限报超时，所有远程机器一直显示离线，重开应用才好（2026-11-09，睡了一个多
-/// 小时，relay 和远程机器都好着，app 里一条到 relay 的连接都没有）。iroh 没能自己恢复，
-/// 卡在哪还没查清（它的警告现在进 app.log，来源 `iroh`），所以不指望它，醒来就换新的。
-///
-/// 旧 endpoint 上还活着的连接随之关掉：在线的机器订阅断开，按原有的断线重连接到新
-/// endpoint 上；终端、对话照常重连。睡过一觉这些连接多半已经超时，代价很小。还没拨过号
-/// 就什么都不做，不为此去绑。
-pub(crate) fn reset_iroh_after_wake(cx: &mut gpui::App) {
-    let routes: Vec<RemoteRoute> = cx
-        .try_global::<RuntimeHub>()
-        .map(|hub| {
-            hub.remotes
-                .iter()
-                .map(|remote| remote.route.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    cx.spawn(async move |cx| {
-        let reset = cx
-            .background_executor()
-            .spawn(async move { reset_iroh_client(&routes) })
-            .await;
-        if reset {
-            smelt_sys::app_log::log("info", "iroh", "系统睡醒，换掉旧的 iroh endpoint");
-            cx.update(|cx| crate::runtime_events::probe_remotes(cx));
-        }
-    })
-    .detach();
-}
-
-/// 丢掉共用的 iroh endpoint 和各台机器按它拨好的连接器。旧的在最后一份引用放掉时关闭，
-/// 通常就在这里：关连接要等 iroh 收尾，阻塞，只在后台调。之前没绑过返回 `false`。
+/// 丢掉这个桌面的 iroh endpoint 和各台旧机器按它拨好的连接器。旧的在最后一份引用放掉时
+/// 关闭，通常就在这里：关连接要等 iroh 收尾，阻塞，只在后台调。之前没绑过返回 `false`。
 fn reset_iroh_client(routes: &[RemoteRoute]) -> bool {
     // 先清全局这份再清各条路线：反过来的话，夹在中间的拨号会按旧 endpoint 再建一个连接器
     // 留在路线上。就算有拨号赶在这之前拿走了旧的，下一次连接也会认出连接器不是新
@@ -464,7 +498,7 @@ fn reset_iroh_client(routes: &[RemoteRoute]) -> bool {
     true
 }
 
-/// 经哪个中继连一台远程运行时，以及按它拨好的连接器（还没拨过号就是 `None`）。
+/// 经哪个中继直连一台旧机器，以及按它拨好的连接器（还没拨过号就是 `None`）。
 #[derive(Default)]
 struct RouteState {
     relay: Option<smelt_iroh::RelaySettings>,
@@ -490,16 +524,11 @@ impl RouteState {
     }
 }
 
-/// 盯着连接路径的守卫，带着编号：认出守卫换过之后才到的旧事件。
-type RouteWatch = Option<(u64, smelt_iroh::runtime::LinkWatch)>;
-
-/// 一台远程运行时的连接路线，它的连接器和 [`RemoteRuntime`] 共用一份：开着的终端、对话
-/// 拿的都是同一个连接器，改了中继，它们下次开流就走新中继，不用重开。
+/// 一台旧直连机器的连接路线，它的连接器由开着的终端、对话共用：改了中继，它们下次开流
+/// 就走新中继，不用重开。
 #[derive(Clone, Default)]
 struct RemoteRoute {
     state: std::sync::Arc<std::sync::Mutex<RouteState>>,
-    /// 单独一把锁：主线程摘守卫不跟后台读连接路径、拨号抢 `state`。
-    watch: std::sync::Arc<std::sync::Mutex<RouteWatch>>,
 }
 
 impl RemoteRoute {
@@ -509,16 +538,11 @@ impl RemoteRoute {
                 relay,
                 connector: None,
             })),
-            watch: Default::default(),
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, RouteState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn lock_watch(&self) -> std::sync::MutexGuard<'_, RouteWatch> {
-        self.watch.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// 眼下的连接路径和延迟。还没拨过号就读不到，也不会为了读而去拨号。阻塞，只在后台调。
@@ -531,50 +555,26 @@ impl RemoteRoute {
 
     /// 盯着眼下这条连接：iroh 换了选中的路径、连接断了，报到 `events`。还没拨过号就不盯，
     /// 也不为此拨号。阻塞，只在后台调（`watch` 不能在 tokio 运行时里调）。
-    fn watch(&self, runtime_id: &str, events: &smol::channel::Sender<LinkEvent>) {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let Some(connector) = self.lock().connector.clone() else {
-            return;
-        };
-        let generation = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    fn watch(
+        &self,
+        runtime_id: &str,
+        generation: u64,
+        events: &smol::channel::Sender<LinkEvent>,
+    ) -> Option<smelt_iroh::runtime::LinkWatch> {
+        let connector = self.lock().connector.clone()?;
         let runtime_id = runtime_id.to_string();
         let events = events.clone();
         // 回调在 iroh 的 tokio 线程上：只往通道里放，不阻塞。
-        let guard = connector.watch(move |change| {
+        Some(connector.watch(move |change| {
             let _ = events.try_send(LinkEvent {
                 runtime_id: runtime_id.clone(),
                 generation,
-                change,
+                change: match change {
+                    smelt_iroh::runtime::LinkChange::PathSelected => LinkSignal::PathSelected,
+                    smelt_iroh::runtime::LinkChange::Closed => LinkSignal::Closed,
+                },
             });
-        });
-        *self.lock_watch() = Some((generation, guard));
-    }
-
-    fn watching(&self) -> bool {
-        self.lock_watch().is_some()
-    }
-
-    fn is_current(&self, generation: u64) -> bool {
-        self.lock_watch()
-            .as_ref()
-            .is_some_and(|(current, _)| *current == generation)
-    }
-
-    fn unwatch(&self) {
-        *self.lock_watch() = None;
-    }
-
-    /// 只摘编号对得上的那只，摘了返回 `true`：换过守卫后，旧守卫迟到的「断了」不能摘掉
-    /// 新的。
-    fn unwatch_if(&self, generation: u64) -> bool {
-        let mut watch = self.lock_watch();
-        let current = watch
-            .as_ref()
-            .is_some_and(|(current, _)| *current == generation);
-        if current {
-            *watch = None;
-        }
-        current
+        }))
     }
 
     /// 改走另一个中继：丢掉按旧中继拨的连接器，下一次开流按新的重拨。
@@ -583,19 +583,226 @@ impl RemoteRoute {
         self.redial();
     }
 
-    /// 丢掉连接器和盯着它的守卫，下一次开流重拨。
+    /// 丢掉连接器，下一次开流重拨。
     fn redial(&self) {
         self.lock().connector = None;
-        self.unwatch();
     }
 }
 
-/// 一台机器连接上的变化，从 iroh 的线程送到主线程。
+/// 怎么连一台远程机器。
+#[derive(Clone)]
+enum Transport {
+    /// 本机运行时的对端节点：经本机 smeltd 转发（`op=forward`）。
+    Peer,
+    /// 还没迁到本机运行时的旧机器：用这个桌面自己的 iroh 身份直连。
+    Legacy {
+        endpoint: smelt_iroh::EndpointId,
+        route: RemoteRoute,
+    },
+    /// 客户端库里记的地址解析不了。
+    Broken(String),
+}
+
+/// 一台机器的 [`Transport`]，它的客户端和 hub 里那份共用。
+#[derive(Clone)]
+struct TransportSlot(std::sync::Arc<std::sync::Mutex<Transport>>);
+
+impl TransportSlot {
+    fn new(transport: Transport) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(transport)))
+    }
+
+    fn get(&self) -> Transport {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set(&self, transport: Transport) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = transport;
+    }
+
+    fn is_peer(&self) -> bool {
+        matches!(self.get(), Transport::Peer)
+    }
+
+    fn legacy_route(&self) -> Option<RemoteRoute> {
+        match self.get() {
+            Transport::Legacy { route, .. } => Some(route),
+            Transport::Peer | Transport::Broken(_) => None,
+        }
+    }
+}
+
+/// 经本机 smeltd 转发到这个对端。
+fn forward_connector(runtime_id: &str) -> smelt_runtime_client::ForwardConnector {
+    smelt_runtime_client::ForwardConnector::new(
+        smelt_runtime_client::LocalConnector::new(smelt_client::daemon_state::smeltd_sock_path()),
+        runtime_id,
+    )
+}
+
+/// 远程机器的客户端用的连接器：每次连接时按眼下的 [`Transport`] 走。直连要起 tokio 绑
+/// iroh，不能在主线程绑，所以第一次连接（总在后台）时才绑；之后复用同一个，同一条 QUIC
+/// 连接上开流。
+struct SwitchConnector {
+    runtime_id: String,
+    transport: TransportSlot,
+}
+
+impl smelt_runtime_client::Connector for SwitchConnector {
+    fn connect(&self) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
+        match self.transport.get() {
+            Transport::Peer => {
+                smelt_runtime_client::Connector::connect(&forward_connector(&self.runtime_id))
+            }
+            Transport::Legacy { endpoint, route } => legacy_connect(endpoint, &route),
+            Transport::Broken(error) => Err(std::io::Error::other(error)),
+        }
+    }
+}
+
+fn legacy_connect(
+    endpoint: smelt_iroh::EndpointId,
+    route: &RemoteRoute,
+) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
+    let client = iroh_client().map_err(std::io::Error::other)?;
+    let connector = route.lock().connector(&client, endpoint);
+    smelt_runtime_client::Connector::connect(connector.as_ref())
+}
+
+/// 盯着连接路径的守卫，带着编号：认出守卫换过之后才到的旧事件。旧机器是 iroh 的
+/// `LinkWatch`，对端节点是到本机运行时的 `peer_link_watch` 长连接；丢掉就不再盯。
+type WatchGuard = Box<dyn Send>;
+
+#[derive(Clone, Default)]
+struct LinkWatchSlot(std::sync::Arc<std::sync::Mutex<Option<(u64, WatchGuard)>>>);
+
+impl LinkWatchSlot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(u64, WatchGuard)>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn watching(&self) -> bool {
+        self.lock().is_some()
+    }
+
+    fn set(&self, generation: u64, guard: WatchGuard) {
+        *self.lock() = Some((generation, guard));
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.lock()
+            .as_ref()
+            .is_some_and(|(current, _)| *current == generation)
+    }
+
+    fn unwatch(&self) {
+        *self.lock() = None;
+    }
+
+    /// 只摘编号对得上的那只，摘了返回 `true`：换过守卫后，旧守卫迟到的「断了」不能摘掉
+    /// 新的。
+    fn unwatch_if(&self, generation: u64) -> bool {
+        let mut watch = self.lock();
+        let current = watch
+            .as_ref()
+            .is_some_and(|(current, _)| *current == generation);
+        if current {
+            *watch = None;
+        }
+        current
+    }
+}
+
+fn next_watch_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 到本机运行时的 `peer_link_watch` 长连接，丢掉就关掉它，读线程随之退出。
+struct PeerLinkWatch(smelt_runtime_client::RuntimeStream);
+
+impl Drop for PeerLinkWatch {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// 请本机运行时盯着到这个对端的连接：它每报一行路径就送一个 [`LinkSignal::Read`]，连接断了
+/// 或本机运行时关了送 [`LinkSignal::Closed`]。阻塞，只在后台调。
+fn watch_peer_link(
+    runtime_id: &str,
+    generation: u64,
+    events: &smol::channel::Sender<LinkEvent>,
+) -> Option<PeerLinkWatch> {
+    use smelt_runtime_client::protocol::daemon::DaemonOperation;
+    use std::io::BufRead as _;
+
+    let mut stream = smelt_runtime_client::Connector::connect(
+        &smelt_runtime_client::LocalConnector::new(smelt_client::daemon_state::smeltd_sock_path()),
+    )
+    .ok()?;
+    let request = serde_json::json!({
+        "op": DaemonOperation::PeerLinkWatch,
+        "runtime_id": runtime_id,
+    });
+    smelt_runtime_client::protocol::write_json_line(&mut stream, &request).ok()?;
+    let guard = PeerLinkWatch(stream.try_clone().ok()?);
+    let runtime_id = runtime_id.to_string();
+    let events = events.clone();
+    std::thread::spawn(move || {
+        let send = |change| {
+            events
+                .try_send(LinkEvent {
+                    runtime_id: runtime_id.clone(),
+                    generation,
+                    change,
+                })
+                .is_ok()
+        };
+        for line in std::io::BufReader::new(stream).lines() {
+            let Ok(line) = line else { break };
+            let Ok(result) = serde_json::from_str::<smelt_model::peer_node::PeerLinkResult>(&line)
+            else {
+                continue;
+            };
+            if !send(LinkSignal::Read(result.link.map(RuntimeLink::from_peer))) {
+                return;
+            }
+        }
+        send(LinkSignal::Closed);
+    });
+    Some(guard)
+}
+
+/// 本机运行时眼下到这个对端的路径，不为此拨号。阻塞，只在后台调。
+fn peer_link(runtime_id: &str) -> Option<RuntimeLink> {
+    local()
+        .call::<smelt_model::control_api::PeerLink>(
+            &smelt_model::peer_node::PeerIdParams {
+                runtime_id: runtime_id.to_string(),
+            },
+            smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+        )
+        .ok()?
+        .link
+        .map(RuntimeLink::from_peer)
+}
+
+/// 一台机器连接上的变化，从读它的线程送到主线程。
 struct LinkEvent {
     runtime_id: String,
-    /// 报它的那只守卫的编号，见 [`RemoteRoute::watch`]。
+    /// 报它的那只守卫的编号，见 [`LinkWatchSlot`]。
     generation: u64,
-    change: smelt_iroh::runtime::LinkChange,
+    change: LinkSignal,
+}
+
+enum LinkSignal {
+    /// iroh 换了选中的路径：重读一次（旧直连机器）。
+    PathSelected,
+    /// 本机运行时报来的眼下路径（对端节点）。
+    Read(Option<RuntimeLink>),
+    /// 连接断了，守卫到头了。
+    Closed,
 }
 
 /// 连接变化送到主线程的通道，见 [`start_link_events`]。
@@ -611,22 +818,6 @@ fn connected(status: &RuntimeStatus) -> bool {
     )
 }
 
-/// 远程运行时的连接器。iroh 要起 tokio，不能在主线程绑，所以第一次连接（总在后台）时
-/// 才绑；之后复用同一个，同一条 QUIC 连接上开流。endpoint 换过（见
-/// [`reset_iroh_after_wake`]）就按新的重建。
-struct LazyRemoteConnector {
-    endpoint: smelt_iroh::EndpointId,
-    route: RemoteRoute,
-}
-
-impl smelt_runtime_client::Connector for LazyRemoteConnector {
-    fn connect(&self) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
-        let client = iroh_client().map_err(std::io::Error::other)?;
-        let connector = self.route.lock().connector(&client, self.endpoint);
-        smelt_runtime_client::Connector::connect(connector.as_ref())
-    }
-}
-
 /// 中继地址：空的是 n0 的公共 relay。
 fn parse_relay(relay: &str) -> Result<Option<smelt_iroh::RelaySettings>, String> {
     match relay.trim() {
@@ -637,22 +828,77 @@ fn parse_relay(relay: &str) -> Result<Option<smelt_iroh::RelaySettings>, String>
     }
 }
 
-/// 只解析地址，不碰网络，主线程可以调。
-fn remote_client(
+/// 客户端库里一台旧机器怎么直连。只解析地址，不碰网络，主线程可以调。
+fn legacy_transport(connection: &smelt_client_store::RuntimeConnection) -> Transport {
+    let endpoint = match connection.endpoint_id.parse::<smelt_iroh::EndpointId>() {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            return Transport::Broken(
+                t!("runtime.bad_endpoint", id = connection.endpoint_id).into_owned(),
+            );
+        }
+    };
+    match parse_relay(connection.relay_url.as_deref().unwrap_or_default()) {
+        Ok(relay) => Transport::Legacy {
+            endpoint,
+            route: RemoteRoute::new(relay),
+        },
+        Err(error) => Transport::Broken(t!("runtime.bad_relay", error = error).into_owned()),
+    }
+}
+
+/// 直连一台旧机器的客户端，不经 hub：迁移时用旧身份向它要配对码、撤销旧设备。
+fn legacy_client(
     connection: &smelt_client_store::RuntimeConnection,
-) -> Result<(RuntimeClient, RemoteRoute), String> {
-    let endpoint: smelt_iroh::EndpointId = connection
-        .endpoint_id
-        .parse()
-        .map_err(|_| t!("runtime.bad_endpoint", id = connection.endpoint_id).into_owned())?;
-    let relay = parse_relay(connection.relay_url.as_deref().unwrap_or_default())
-        .map_err(|error| t!("runtime.bad_relay", error = error).into_owned())?;
-    let route = RemoteRoute::new(relay);
-    let client = RuntimeClient::new(LazyRemoteConnector {
-        endpoint,
-        route: route.clone(),
+) -> Result<RuntimeClient, String> {
+    match legacy_transport(connection) {
+        Transport::Legacy { endpoint, route } => {
+            Ok(RuntimeClient::new(move || legacy_connect(endpoint, &route)))
+        }
+        Transport::Broken(error) => Err(error),
+        Transport::Peer => unreachable!("legacy_transport 只给直连"),
+    }
+}
+
+/// hub 里的一台机器：客户端按 `transport` 连，迁移时就地换。
+fn remote_entry(
+    connection: smelt_client_store::RuntimeConnection,
+    transport: Transport,
+    agent_access: Option<bool>,
+) -> RemoteRuntime {
+    let status = match &transport {
+        Transport::Broken(error) => RuntimeStatus::Offline(error.clone()),
+        Transport::Peer | Transport::Legacy { .. } => RuntimeStatus::Connecting,
+    };
+    let transport = TransportSlot::new(transport);
+    let client = RuntimeClient::new(SwitchConnector {
+        runtime_id: connection.runtime_id.clone(),
+        transport: transport.clone(),
     });
-    Ok((client, route))
+    RemoteRuntime {
+        runtime: remote_runtime(&connection.runtime_id, client),
+        connection,
+        status,
+        transport,
+        watch: LinkWatchSlot::default(),
+        agent_access,
+        link: None,
+        upgrade_note: None,
+    }
+}
+
+/// 对端节点记成桌面这边的连接形状。
+fn peer_connection(
+    peer: &smelt_model::peer_node::PeerNode,
+) -> smelt_client_store::RuntimeConnection {
+    smelt_client_store::RuntimeConnection {
+        runtime_id: peer.runtime_id.clone(),
+        name: peer.name.clone(),
+        endpoint_id: peer.endpoint_id.clone(),
+        relay_url: peer.relay_url.clone(),
+        os: peer.os.clone(),
+        added_at_ms: peer.added_at_ms,
+    }
 }
 
 /// 本机守护：没在跑就按 App 里的版本拉起（运行中退出了也靠这里补上），再对版本。
@@ -799,6 +1045,9 @@ fn described_status(
 /// 订阅每次重连都会探测一次，不能每次都让看着 hub 的界面重画。
 pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui::App) {
     sync_link_watch(key, &status, cx);
+    if matches!(key, RuntimeKey::Remote(_)) && matches!(status, RuntimeStatus::Online { .. }) {
+        maybe_migrate(key, cx);
+    }
     let changed = cx.try_global::<RuntimeHub>().is_some_and(|hub| match key {
         RuntimeKey::Local => hub.local_status.as_ref() != Some(&status),
         RuntimeKey::Remote(_) => hub
@@ -826,7 +1075,7 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
                     && remote.connection.os.as_deref() != Some(os)
                 {
                     remote.connection.os = Some(os.to_string());
-                    learned = Some(remote.connection.clone());
+                    learned = Some((remote.connection.clone(), remote.transport.is_peer()));
                 }
                 if !connected(&status) {
                     remote.link = None;
@@ -835,17 +1084,43 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
             }
         }
     });
-    if let Some(connection) = learned {
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(error) = smelt_client_store::client_store()
-                    .and_then(|store| store.put_runtime_connection(&connection))
-                {
-                    eprintln!("[runtimes] 保存机器的系统失败：{error}");
-                }
-            })
-            .detach();
+    if let Some((connection, peer)) = learned {
+        save_machine(connection, peer, "保存机器的系统", cx);
     }
+}
+
+/// 记下一台机器在这边的名字、系统：对端节点记在本机运行时，旧直连机器记在客户端库。后台写。
+fn save_machine(
+    connection: smelt_client_store::RuntimeConnection,
+    peer: bool,
+    what: &'static str,
+    cx: &gpui::App,
+) {
+    cx.background_executor()
+        .spawn(async move {
+            let saved = if peer {
+                local()
+                    .call::<smelt_model::control_api::PeerUpdate>(
+                        &smelt_model::peer_node::PeerUpdateParams {
+                            runtime_id: connection.runtime_id.clone(),
+                            name: Some(connection.name.clone()),
+                            os: connection.os.clone(),
+                            ..Default::default()
+                        },
+                        smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            } else {
+                smelt_client_store::client_store()
+                    .and_then(|store| store.put_runtime_connection(&connection))
+                    .map_err(|error| error.to_string())
+            };
+            if let Err(error) = saved {
+                eprintln!("[runtimes] {what}失败：{error}");
+            }
+        })
+        .detach();
 }
 
 fn update_hub(cx: &mut gpui::App, change: impl FnOnce(&mut RuntimeHub)) {
@@ -854,8 +1129,14 @@ fn update_hub(cx: &mut gpui::App, change: impl FnOnce(&mut RuntimeHub)) {
     cx.set_global(hub);
 }
 
-/// 启动时读出登记过的远程运行时（客户端库在本机，同步读，主窗口一起来插件就读得到它们
-/// 的连接），再起连接变化的处理循环。连通性由订阅线程报（见 `runtime_events`）。
+/// 启动时最多等本机运行时这么久交出对端节点：本机 socket，守护在跑就是几毫秒；没在跑
+/// 是立刻连不上，不用等。
+const STARTUP_PEERS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// 启动时读出登记过的远程机器：本机运行时的对端节点和客户端库里还没迁的旧机器。都同步读
+/// （都在本机），主窗口一起来插件就读得到它们的连接。本机运行时这会儿读不到（还没拉起、
+/// 是旧版本）的，连上之后再读（见 [`peers_changed`]）。再起连接变化的处理循环。连通性由
+/// 订阅线程报（见 `runtime_events`）。
 pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
     init_local_runtime_name(cx);
     let mut hub = RuntimeHub::default();
@@ -863,39 +1144,318 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
         Ok(connections) => {
             hub.remotes = connections
                 .into_iter()
-                .map(|connection| match remote_client(&connection) {
-                    Ok((client, route)) => RemoteRuntime {
-                        runtime: remote_runtime(&connection.runtime_id, client),
-                        connection,
-                        status: RuntimeStatus::Connecting,
-                        route,
-                        link: None,
-                        upgrade_note: None,
-                    },
-                    Err(error) => RemoteRuntime {
-                        runtime: remote_runtime(
-                            &connection.runtime_id,
-                            RuntimeClient::new(move || {
-                                Err(std::io::Error::other(t!("runtime.bad_config").into_owned()))
-                            }),
-                        ),
-                        connection,
-                        status: RuntimeStatus::Offline(error),
-                        route: RemoteRoute::default(),
-                        link: None,
-                        upgrade_note: None,
-                    },
+                .map(|connection| {
+                    let transport = legacy_transport(&connection);
+                    remote_entry(connection, transport, None)
                 })
                 .collect();
         }
         Err(error) => hub.load_error = Some(t!("runtime.load_failed", error = error).into_owned()),
     }
+    if let Ok(peers) = load_peers(STARTUP_PEERS_TIMEOUT) {
+        let migrated = merge_peers(&mut hub, peers);
+        forget_legacy(migrated, cx);
+    }
     cx.set_global(hub);
     start_link_events(cx);
+    start_peer_changes(cx);
 }
 
-/// 起连接变化的处理循环：iroh 报来路径换了就重读那台机器的路径和延迟，报来断了就清掉。
-/// 只在有事件时醒。
+/// 本机运行时的对端节点。阻塞。
+fn load_peers(
+    timeout: std::time::Duration,
+) -> Result<Vec<smelt_model::peer_node::PeerNode>, String> {
+    local()
+        .call::<smelt_model::control_api::PeerList>(&Default::default(), timeout)
+        .map(|list| list.peers)
+        .map_err(|error| error.to_string())
+}
+
+/// 按本机运行时的对端表更新 hub：新的加上，旧直连机器已经是对端的就地换成经本机转发，
+/// 不再是对端的移走。交回换过来的旧机器（客户端库里那一行该删了）。
+fn merge_peers(hub: &mut RuntimeHub, peers: Vec<smelt_model::peer_node::PeerNode>) -> Vec<String> {
+    let mut migrated = Vec::new();
+    hub.remotes.retain(|remote| {
+        !remote.transport.is_peer()
+            || peers
+                .iter()
+                .any(|peer| peer.runtime_id == remote.connection.runtime_id)
+    });
+    for peer in peers {
+        let connection = peer_connection(&peer);
+        match hub
+            .remotes
+            .iter_mut()
+            .find(|remote| remote.connection.runtime_id == peer.runtime_id)
+        {
+            Some(remote) => {
+                if !remote.transport.is_peer() {
+                    remote.transport.set(Transport::Peer);
+                    remote.watch.unwatch();
+                    remote.link = None;
+                    migrated.push(peer.runtime_id.clone());
+                }
+                remote.connection = connection;
+                remote.agent_access = Some(peer.agent_access);
+            }
+            None => hub.remotes.push(remote_entry(
+                connection,
+                Transport::Peer,
+                Some(peer.agent_access),
+            )),
+        }
+    }
+    hub.peers_loaded = true;
+    migrated
+}
+
+/// 迁成对端节点的旧机器：从客户端库删掉。没有旧机器了就连这个桌面的 iroh endpoint 一起
+/// 关掉。后台做。
+fn forget_legacy(runtime_ids: Vec<String>, cx: &mut gpui::App) {
+    if runtime_ids.is_empty() {
+        return;
+    }
+    cx.background_executor()
+        .spawn(async move {
+            for runtime_id in runtime_ids {
+                if let Err(error) = smelt_client_store::client_store()
+                    .and_then(|store| store.delete_runtime_connection(&runtime_id))
+                {
+                    eprintln!("[runtimes] 删掉已迁移的旧机器失败：{error}");
+                }
+            }
+        })
+        .detach();
+    release_iroh_if_unused(cx);
+}
+
+/// 没有旧直连机器了：关掉这个桌面自己的 iroh endpoint（它一直挂着 relay 心跳）。后台关。
+fn release_iroh_if_unused(cx: &mut gpui::App) {
+    let legacy_left = cx.try_global::<RuntimeHub>().is_some_and(|hub| {
+        hub.remotes
+            .iter()
+            .any(|remote| remote.transport.legacy_route().is_some())
+    });
+    if !legacy_left {
+        cx.background_executor()
+            .spawn(async { reset_iroh_client(&[]) })
+            .detach();
+    }
+}
+
+/// 本机运行时的对端变了（或刚连上它）就重读一遍，见 [`peers_changed`]。
+static PEER_CHANGES: std::sync::OnceLock<smol::channel::Sender<()>> = std::sync::OnceLock::new();
+
+/// 请主线程重读本机运行时的对端节点：本机运行时推来 `peers.changed`、或刚连上它时调。
+/// 哪个线程都能调，连着来的几次并成一次。
+pub(crate) fn peers_changed() {
+    if let Some(changes) = PEER_CHANGES.get() {
+        let _ = changes.try_send(());
+    }
+}
+
+fn start_peer_changes(cx: &mut gpui::App) {
+    let (changes, received) = smol::channel::bounded::<()>(1);
+    if PEER_CHANGES.set(changes).is_err() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        while received.recv().await.is_ok() {
+            let peers = cx
+                .background_executor()
+                .spawn(async { load_peers(smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT) })
+                .await;
+            let Ok(peers) = peers else {
+                continue;
+            };
+            cx.update(|cx| {
+                let mut migrated = Vec::new();
+                update_hub(cx, |hub| migrated = merge_peers(hub, peers));
+                forget_legacy(migrated, cx);
+                // 刚读到对端表：连着的旧机器这就可以迁了。
+                let online: Vec<RuntimeKey> = cx
+                    .try_global::<RuntimeHub>()
+                    .map(|hub| {
+                        hub.remotes
+                            .iter()
+                            .filter(|remote| matches!(remote.status, RuntimeStatus::Online { .. }))
+                            .map(|remote| remote.runtime.key().clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for key in online {
+                    maybe_migrate(&key, cx);
+                }
+            });
+        }
+    })
+    .detach();
+}
+
+/// 正在迁的旧机器，同一台不同时迁两次。
+static MIGRATING: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+/// 连上的旧直连机器，本机运行时认得对端节点了，就迁过去（见 [`migrate`]）。
+fn maybe_migrate(key: &RuntimeKey, cx: &mut gpui::App) {
+    let Some(hub) = cx.try_global::<RuntimeHub>() else {
+        return;
+    };
+    if !hub.peers_loaded {
+        return;
+    }
+    let Some(remote) = hub
+        .remotes
+        .iter()
+        .find(|remote| remote.runtime.key() == key)
+    else {
+        return;
+    };
+    if remote.transport.legacy_route().is_none() {
+        return;
+    }
+    let connection = remote.connection.clone();
+    {
+        let mut migrating = MIGRATING.lock().unwrap_or_else(|e| e.into_inner());
+        if !migrating
+            .get_or_insert_with(Default::default)
+            .insert(connection.runtime_id.clone())
+        {
+            return;
+        }
+    }
+    let key = key.clone();
+    cx.spawn(async move |cx| {
+        let runtime_id = connection.runtime_id.clone();
+        let migrated = cx
+            .background_executor()
+            .spawn({
+                let connection = connection.clone();
+                async move { migrate(&connection) }
+            })
+            .await;
+        match migrated {
+            Ok(Some(peer)) => {
+                smelt_sys::app_log::log(
+                    "info",
+                    "runtimes",
+                    &format!("{} 已迁到本机运行时", connection.name),
+                );
+                cx.update(|cx| {
+                    let mut moved = Vec::new();
+                    update_hub(cx, |hub| {
+                        let mut peers: Vec<_> = Vec::new();
+                        for remote in &hub.remotes {
+                            if remote.transport.is_peer() {
+                                peers.push(smelt_model::peer_node::PeerNode {
+                                    runtime_id: remote.connection.runtime_id.clone(),
+                                    endpoint_id: remote.connection.endpoint_id.clone(),
+                                    name: remote.connection.name.clone(),
+                                    relay_url: remote.connection.relay_url.clone(),
+                                    os: remote.connection.os.clone(),
+                                    agent_access: remote.agent_access.unwrap_or_default(),
+                                    added_at_ms: remote.connection.added_at_ms,
+                                });
+                            }
+                        }
+                        peers.push(peer);
+                        moved = merge_peers(hub, peers);
+                    });
+                    // 旧身份的连接随撤销断开，订阅按断线重连，接上的就是本机运行时转发的。
+                    crate::runtime_events::reconnect(&key, cx);
+                    forget_legacy(moved, cx);
+                });
+                // 撤销旧身份：那台机器上不再留这个桌面原来的设备。连不上就算了，那边的设备
+                // 列表里留着一条用不上的。
+                cx.background_executor()
+                    .spawn(async move { revoke_legacy(&connection) })
+                    .await;
+                cx.update(release_iroh_if_unused);
+            }
+            // 它还不认节点配对，等它升级。
+            Ok(None) => {}
+            Err(error) => smelt_sys::app_log::log(
+                "warn",
+                "runtimes",
+                &format!("{} 迁到本机运行时失败：{error}", connection.name),
+            ),
+        }
+        MIGRATING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(Default::default)
+            .remove(&runtime_id);
+    })
+    .detach();
+}
+
+/// 把一台旧直连机器迁成本机运行时的对端节点：用这个桌面的旧身份请它发一个配对码，交给
+/// 本机运行时去双向配对，再把这边的名字、系统带过去。它还不认节点配对（旧版本）是
+/// `Ok(None)`。阻塞，只在后台调。
+fn migrate(
+    connection: &smelt_client_store::RuntimeConnection,
+) -> Result<Option<smelt_model::peer_node::PeerNode>, String> {
+    use smelt_model::control_api::{DevicePairBegin, PeerPair, PeerUpdate};
+    use smelt_runtime_client::protocol::control::ControlMethod;
+
+    let legacy = legacy_client(connection)?;
+    let timeout = smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT;
+    let described = legacy.describe().map_err(|error| error.to_string())?;
+    if !described
+        .control
+        .methods
+        .iter()
+        .any(|method| method == ControlMethod::NodePair.as_str())
+    {
+        return Ok(None);
+    }
+    let offer = legacy
+        .call::<DevicePairBegin>(&Default::default(), timeout)
+        .map_err(|error| error.to_string())?;
+    let local = local();
+    let peer = local
+        .call::<PeerPair>(
+            &smelt_model::peer_node::PeerPairParams {
+                pairing_uri: offer.pairing_uri,
+            },
+            LOCAL_PAIR_TIMEOUT,
+        )
+        .map_err(|error| error.to_string())?;
+    if peer.runtime_id != connection.runtime_id {
+        return Err(format!(
+            "paired with {} instead of {}",
+            peer.runtime_id, connection.runtime_id
+        ));
+    }
+    local
+        .call::<PeerUpdate>(
+            &smelt_model::peer_node::PeerUpdateParams {
+                runtime_id: peer.runtime_id.clone(),
+                name: Some(connection.name.clone()),
+                os: connection.os.clone(),
+                ..Default::default()
+            },
+            timeout,
+        )
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+/// 用旧身份请那台机器撤销这个桌面原来的设备。阻塞，只在后台调。
+fn revoke_legacy(connection: &smelt_client_store::RuntimeConnection) {
+    let (Ok(legacy), Ok(me)) = (legacy_client(connection), iroh_client()) else {
+        return;
+    };
+    let _ = legacy.call::<smelt_model::control_api::DeviceRevoke>(
+        &smelt_model::remote_config::DeviceIdParams {
+            endpoint_id: me.id().to_string(),
+        },
+        smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+    );
+}
+
+/// 起连接变化的处理循环：路径换了就重读或记下那台机器的路径和延迟，断了就清掉。只在有
+/// 事件时醒。
 fn start_link_events(cx: &mut gpui::App) {
     let (events, received) = smol::channel::unbounded::<LinkEvent>();
     cx.set_global(LinkEvents(events));
@@ -911,17 +1471,23 @@ fn on_link_event(event: LinkEvent, cx: &mut gpui::App) {
     let Some(remote) = remote_by_id(&event.runtime_id, cx) else {
         return;
     };
-    let route = remote.route.clone();
+    let watch = remote.watch.clone();
+    let transport = remote.transport.get();
     match event.change {
-        smelt_iroh::runtime::LinkChange::PathSelected => {
-            if route.is_current(event.generation) {
-                sample(vec![(event.runtime_id, route)], cx);
+        LinkSignal::PathSelected => {
+            if watch.is_current(event.generation) {
+                sample(vec![(event.runtime_id, transport)], cx);
+            }
+        }
+        LinkSignal::Read(link) => {
+            if watch.is_current(event.generation) {
+                apply_links(vec![(event.runtime_id, link)], cx);
             }
         }
         // 连接断了，守卫也就到头了：摘掉，路径清掉。重拨后状态会先变成离线再变回来，
         // 那时重新装上（见 `sync_link_watch`）。
-        smelt_iroh::runtime::LinkChange::Closed => {
-            if route.unwatch_if(event.generation) {
+        LinkSignal::Closed => {
+            if watch.unwatch_if(event.generation) {
                 apply_links(vec![(event.runtime_id, None)], cx);
             }
         }
@@ -934,13 +1500,14 @@ fn sync_link_watch(key: &RuntimeKey, status: &RuntimeStatus, cx: &mut gpui::App)
     let Some(remote) = remote_of(key, cx) else {
         return;
     };
-    let route = remote.route.clone();
+    let watch = remote.watch.clone();
+    let transport = remote.transport.get();
     let runtime_id = remote.connection.runtime_id.clone();
     if !connected(status) {
-        route.unwatch();
+        watch.unwatch();
         return;
     }
-    if route.watching() {
+    if watch.watching() {
         return;
     }
     let Some(events) = cx.try_global::<LinkEvents>().map(|events| events.0.clone()) else {
@@ -951,18 +1518,35 @@ fn sync_link_watch(key: &RuntimeKey, status: &RuntimeStatus, cx: &mut gpui::App)
         let link = cx
             .background_executor()
             .spawn(async move {
-                route.watch(&watched_id, &events);
-                // 选路可能在装上之前就定了，装上后先读一次。
-                route.read()
+                let generation = next_watch_generation();
+                match transport {
+                    Transport::Legacy { route, .. } => {
+                        if let Some(guard) = route.watch(&watched_id, generation, &events) {
+                            watch.set(generation, Box::new(guard));
+                        }
+                        // 选路可能在装上之前就定了，装上后先读一次。
+                        Some(route.read())
+                    }
+                    // 本机运行时先报一行眼下的路径。
+                    Transport::Peer => {
+                        if let Some(guard) = watch_peer_link(&watched_id, generation, &events) {
+                            watch.set(generation, Box::new(guard));
+                        }
+                        None
+                    }
+                    Transport::Broken(_) => None,
+                }
             })
             .await;
-        cx.update(|cx| apply_links(vec![(runtime_id, link)], cx));
+        if let Some(link) = link {
+            cx.update(|cx| apply_links(vec![(runtime_id, link)], cx));
+        }
     })
     .detach();
 }
 
 /// 现在就重读各台连着的机器的连接路径和延迟：设置停在机器页时调。延迟只在有人看时采样，
-/// 平时只在 iroh 换了路径时读。
+/// 平时只在换了路径时读。
 pub(crate) fn sample_links(cx: &mut gpui::App) {
     let targets: Vec<_> = cx
         .try_global::<RuntimeHub>()
@@ -970,7 +1554,7 @@ pub(crate) fn sample_links(cx: &mut gpui::App) {
             hub.remotes
                 .iter()
                 .filter(|remote| connected(&remote.status))
-                .map(|remote| (remote.connection.runtime_id.clone(), remote.route.clone()))
+                .map(|remote| (remote.connection.runtime_id.clone(), remote.transport.get()))
                 .collect()
         })
         .unwrap_or_default();
@@ -978,7 +1562,7 @@ pub(crate) fn sample_links(cx: &mut gpui::App) {
 }
 
 /// 后台读这几台机器的路径和延迟（不拨号），读完记到 hub 上。
-fn sample(targets: Vec<(String, RemoteRoute)>, cx: &mut gpui::App) {
+fn sample(targets: Vec<(String, Transport)>, cx: &mut gpui::App) {
     if targets.is_empty() {
         return;
     }
@@ -988,7 +1572,14 @@ fn sample(targets: Vec<(String, RemoteRoute)>, cx: &mut gpui::App) {
             .spawn(async move {
                 targets
                     .into_iter()
-                    .map(|(runtime_id, route)| (runtime_id, route.read()))
+                    .map(|(runtime_id, transport)| {
+                        let link = match transport {
+                            Transport::Legacy { route, .. } => route.read(),
+                            Transport::Peer => peer_link(&runtime_id),
+                            Transport::Broken(_) => None,
+                        };
+                        (runtime_id, link)
+                    })
                     .collect::<Vec<_>>()
             })
             .await;
@@ -1037,8 +1628,9 @@ fn remote_by_id<'a>(runtime_id: &str, cx: &'a gpui::App) -> Option<&'a RemoteRun
         .find(|remote| remote.connection.runtime_id == runtime_id)
 }
 
-/// 用配对串添加一个远程运行时：以这台机器的主机名配对，问出它的 runtime_id 和主机名，
-/// 记进客户端库。同一个运行时重新配对就更新原来那条。交回它的 key 和名字。
+/// 用配对串添加一台远程机器，交回它的 key 和名字。本机运行时认得对端节点时交给它双向
+/// 配对；还是旧版本（会话在跑、还没换守护）时照旧用这个桌面自己的身份直连配对，等本机
+/// 运行时换上新版本后自动迁过去。同一台机器重新配对就更新原来那条。
 pub(crate) fn add_runtime(
     uri: String,
     cx: &mut gpui::App,
@@ -1047,10 +1639,28 @@ pub(crate) fn add_runtime(
     if uri.is_empty() {
         return gpui::Task::ready(Err(t!("pair.empty").into_owned()));
     }
+    if let Err(error) = smelt_pairing::parse_pairing_uri(&uri) {
+        use smelt_pairing::PairingError;
+        return gpui::Task::ready(Err(match error {
+            PairingError::NotPairing => t!("pair.not_pairing_link"),
+            PairingError::MissingEndpoint => t!("pair.missing_endpoint"),
+            PairingError::MissingCode => t!("pair.missing_code"),
+        }
+        .into_owned()));
+    }
+    let peers = cx
+        .try_global::<RuntimeHub>()
+        .is_some_and(|hub| hub.peers_loaded);
     cx.spawn(async move |cx| {
         let remote = cx
             .background_executor()
-            .spawn(async move { pair_with(&uri) })
+            .spawn(async move {
+                if peers {
+                    pair_peer(&uri)
+                } else {
+                    pair_legacy(&uri)
+                }
+            })
             .await?;
         let added = (remote.runtime.key().clone(), remote.connection.name.clone());
         cx.update(|cx| {
@@ -1064,19 +1674,34 @@ pub(crate) fn add_runtime(
     })
 }
 
-pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
+/// 本机运行时配对要它自己拨号（最长 30 秒），这边多等一些。
+const LOCAL_PAIR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// 请本机运行时用配对串双向配对，再经它问一次那台机器的状态。阻塞，只在后台调。
+fn pair_peer(uri: &str) -> Result<RemoteRuntime, String> {
+    let peer = local()
+        .call::<smelt_model::control_api::PeerPair>(
+            &smelt_model::peer_node::PeerPairParams {
+                pairing_uri: uri.to_string(),
+            },
+            LOCAL_PAIR_TIMEOUT,
+        )
+        .map_err(|error| t!("pair.failed", error = error).into_owned())?;
+    let mut remote = remote_entry(
+        peer_connection(&peer),
+        Transport::Peer,
+        Some(peer.agent_access),
+    );
+    remote.status = status_of(remote.runtime.client());
+    Ok(remote)
+}
+
+/// 用这个桌面自己的 iroh 身份直连配对，记进客户端库。阻塞，只在后台调。
+pub(crate) fn pair_legacy(uri: &str) -> Result<RemoteRuntime, String> {
     use smelt_model::control_api::DevicePair;
     use smelt_model::remote_config::PairParams;
 
-    let pairing = smelt_pairing::parse_pairing_uri(uri).map_err(|why| {
-        use smelt_pairing::PairingError;
-        match why {
-            PairingError::NotPairing => t!("pair.not_pairing_link"),
-            PairingError::MissingEndpoint => t!("pair.missing_endpoint"),
-            PairingError::MissingCode => t!("pair.missing_code"),
-        }
-        .into_owned()
-    })?;
+    let pairing = smelt_pairing::parse_pairing_uri(uri).map_err(|error| error.to_string())?;
     let mut connection = smelt_client_store::RuntimeConnection {
         runtime_id: String::new(),
         name: String::new(),
@@ -1088,7 +1713,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
             .map(|elapsed| elapsed.as_millis() as i64)
             .unwrap_or_default(),
     };
-    let (client, route) = remote_client(&connection)?;
+    let client = legacy_client(&connection)?;
     client
         .call::<DevicePair>(
             &PairParams {
@@ -1116,17 +1741,13 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
     smelt_client_store::client_store()
         .and_then(|store| store.put_runtime_connection(&connection))
         .map_err(|error| t!("pair.save_failed", error = error).into_owned())?;
-    Ok(RemoteRuntime {
-        runtime: remote_runtime(&connection.runtime_id, client),
-        status: described_status(described),
-        connection,
-        route,
-        link: None,
-        upgrade_note: None,
-    })
+    let transport = legacy_transport(&connection);
+    let mut remote = remote_entry(connection, transport, None);
+    remote.status = described_status(described);
+    Ok(remote)
 }
 
-/// 改一台机器在这台电脑上的显示名：先改 hub，看着连接表的插件立刻换上；客户端库在后台写。
+/// 改一台机器在这台电脑上的显示名：先改 hub，看着连接表的插件立刻换上；在后台写下来。
 pub(crate) fn rename_runtime(runtime_id: String, name: String, cx: &mut gpui::App) {
     let mut renamed = None;
     update_hub(cx, |hub| {
@@ -1136,26 +1757,85 @@ pub(crate) fn rename_runtime(runtime_id: String, name: String, cx: &mut gpui::Ap
             .find(|remote| remote.connection.runtime_id == runtime_id)
         {
             remote.connection.name = name;
-            renamed = Some(remote.connection.clone());
+            renamed = Some((remote.connection.clone(), remote.transport.is_peer()));
         }
     });
-    let Some(connection) = renamed else {
-        return;
-    };
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(error) = smelt_client_store::client_store()
-                .and_then(|store| store.put_runtime_connection(&connection))
-            {
-                eprintln!("[runtimes] 保存机器名字失败：{error}");
-            }
-        })
-        .detach();
+    if let Some((connection, peer)) = renamed {
+        save_machine(connection, peer, "保存机器名字", cx);
+    }
+}
+
+/// 允不允许本机智能体经本机运行时用这台机器。只有对端节点有这个设置。
+pub(crate) fn set_agent_access(
+    runtime_id: String,
+    allowed: bool,
+    cx: &mut gpui::App,
+) -> gpui::Task<Result<(), String>> {
+    let peer = remote_by_id(&runtime_id, cx).is_some_and(|remote| remote.transport.is_peer());
+    if !peer {
+        return gpui::Task::ready(Err(t!("runtime.not_migrated").into_owned()));
+    }
+    cx.spawn(async move |cx| {
+        let updated = cx
+            .background_executor()
+            .spawn({
+                let runtime_id = runtime_id.clone();
+                async move {
+                    local()
+                        .call::<smelt_model::control_api::PeerUpdate>(
+                            &smelt_model::peer_node::PeerUpdateParams {
+                                runtime_id,
+                                agent_access: Some(allowed),
+                                ..Default::default()
+                            },
+                            smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+                        )
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .await?;
+        cx.update(|cx| {
+            update_hub(cx, |hub| {
+                if let Some(remote) = hub
+                    .remotes
+                    .iter_mut()
+                    .find(|remote| remote.connection.runtime_id == runtime_id)
+                {
+                    remote.agent_access = Some(updated.agent_access);
+                }
+            });
+        });
+        Ok(())
+    })
 }
 
 /// 最近一次探测是在线。
 pub(crate) fn runtime_online(key: &RuntimeKey, cx: &gpui::App) -> bool {
     status_of_key(key, cx).is_some_and(|status| matches!(status, RuntimeStatus::Online { .. }))
+}
+
+/// 这边记下的中继改成 `relay`：对端节点改本机运行时里的，旧机器改客户端库里的。阻塞。
+fn save_relay(
+    connection: &smelt_client_store::RuntimeConnection,
+    peer: bool,
+) -> Result<(), String> {
+    if peer {
+        local()
+            .call::<smelt_model::control_api::PeerUpdate>(
+                &smelt_model::peer_node::PeerUpdateParams {
+                    runtime_id: connection.runtime_id.clone(),
+                    relay_url: Some(connection.relay_url.clone().unwrap_or_default()),
+                    ..Default::default()
+                },
+                smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    } else {
+        smelt_client_store::client_store()
+            .and_then(|store| store.put_runtime_connection(connection))
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// 改一台远程机器的中继，`relay` 空着就是 n0 的公共 relay。
@@ -1165,7 +1845,7 @@ pub(crate) fn runtime_online(key: &RuntimeKey, cx: &gpui::App) -> bool {
 /// 按新中继连过去读它的配置，确认改了再记（见 [`RelaySetReply`]）。
 ///
 /// 不在线：只改这边记下的——那台机器多半已经在那边改过（`smeltd relay`），这边跟上才
-/// 连得回去。改完立刻重连，开着的终端和对话下次开流就走新中继（见 [`RemoteRoute`]）。
+/// 连得回去。改完立刻重连，开着的终端和对话下次开流就走新中继。
 pub(crate) fn set_runtime_relay(
     runtime_id: String,
     relay: String,
@@ -1184,7 +1864,9 @@ pub(crate) fn set_runtime_relay(
         Err(error) => return gpui::Task::ready(Err(error)),
     };
     let online = matches!(remote.status, RuntimeStatus::Online { .. });
-    let route = remote.route.clone();
+    let peer = remote.transport.is_peer();
+    let route = remote.transport.legacy_route();
+    let previous = remote.connection.clone();
     let mut connection = remote.connection.clone();
     connection.relay_url = (!relay.is_empty()).then(|| relay.clone());
     cx.spawn(async move |cx| {
@@ -1205,9 +1887,17 @@ pub(crate) fn set_runtime_relay(
                                 return Err(t!("relay.rejected", error = error).into_owned());
                             }
                             // 改没改成以它眼下的配置为准：按新中继连过去问一次。它要重绑
-                            // 新中继，拨号由 iroh 的拨号时限兜着，不另外等。
+                            // 新中继，拨号由 iroh 的拨号时限兜着，不另外等。对端节点要先让
+                            // 本机运行时改走新中继，没改成再改回去。
                             RelaySetReply::Lost(error) => {
-                                let (confirm, _route) = remote_client(&saved)?;
+                                let confirm = if peer {
+                                    save_relay(&saved, true).map_err(|save_error| {
+                                        t!("relay.save_failed", error = save_error).into_owned()
+                                    })?;
+                                    client.clone()
+                                } else {
+                                    legacy_client(&saved)?
+                                };
                                 let now = confirm
                                     .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
                                     .map_err(|confirm_error| {
@@ -1217,21 +1907,26 @@ pub(crate) fn set_runtime_relay(
                                             confirm_error = confirm_error
                                         )
                                         .into_owned()
-                                    })?;
-                                if now.iroh_relay != relay {
+                                    });
+                                let changed = now.is_ok_and(|now| now.iroh_relay == relay);
+                                if !changed {
+                                    if peer {
+                                        let _ = save_relay(&previous, true);
+                                    }
                                     return Err(t!("relay.rejected", error = error).into_owned());
                                 }
                             }
                         }
                     }
                 }
-                smelt_client_store::client_store()
-                    .and_then(|store| store.put_runtime_connection(&saved))
+                save_relay(&saved, peer)
                     .map_err(|error| t!("relay.save_failed", error = error).into_owned())
             })
             .await?;
         cx.update(|cx| {
-            route.retarget(parsed);
+            if let Some(route) = route {
+                route.retarget(parsed);
+            }
             update_hub(cx, |hub| {
                 if let Some(remote) = hub
                     .remotes
@@ -1273,8 +1968,8 @@ fn relay_set_reply<T>(
 /// 配对要走公网拨号，比本机调用慢得多。
 const PAIR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// 移除一个远程运行时：从客户端库删掉，在线的再请它撤销这台设备（连不上就算了）。
-/// 删完就交回，不等撤销。
+/// 移除一台远程机器。对端节点请本机运行时删掉（它在后台请对方也删掉本节点）；旧直连机器
+/// 从客户端库删掉，在线的再请它撤销这台设备（连不上就算了）。删完就交回，不等对方。
 pub(crate) fn remove_runtime(
     runtime_id: String,
     cx: &mut gpui::App,
@@ -1287,19 +1982,34 @@ pub(crate) fn remove_runtime(
     }) else {
         return gpui::Task::ready(Err(smelt_plugin_api::machine_removed()));
     };
+    let peer = remote.transport.is_peer();
     // 在线才顺手请它吊销本机的配对。离线的连不上，拨号要等到超时，不能让移除跟着等；
     // 那台机器上的配对记录留着，要清就在那台机器上撤。
-    let revoke = matches!(remote.status, RuntimeStatus::Online { .. });
+    let revoke = !peer && matches!(remote.status, RuntimeStatus::Online { .. });
     cx.spawn(async move |cx| {
         let removed = cx
             .background_executor()
             .spawn({
                 let runtime_id = runtime_id.clone();
                 async move {
-                    smelt_client_store::client_store()
-                        .and_then(|store| store.delete_runtime_connection(&runtime_id))
-                        .map(|_| ())
-                        .map_err(|error| t!("runtime.remove_failed", error = error).into_owned())
+                    if peer {
+                        local()
+                            .call::<smelt_model::control_api::PeerRemove>(
+                                &smelt_model::peer_node::PeerIdParams { runtime_id },
+                                smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+                            )
+                            .map(|_| ())
+                            .map_err(|error| {
+                                t!("runtime.remove_failed", error = error).into_owned()
+                            })
+                    } else {
+                        smelt_client_store::client_store()
+                            .and_then(|store| store.delete_runtime_connection(&runtime_id))
+                            .map(|_| ())
+                            .map_err(|error| {
+                                t!("runtime.remove_failed", error = error).into_owned()
+                            })
+                    }
                 }
             })
             .await;
@@ -1309,24 +2019,13 @@ pub(crate) fn remove_runtime(
                 hub.remotes
                     .retain(|remote| remote.connection.runtime_id != runtime_id)
             });
-            remote.route.unwatch();
+            remote.watch.unwatch();
         });
         if revoke {
             // 撤销不拖住移除：在后台发完就算。
+            let connection = remote.connection.clone();
             cx.background_executor()
-                .spawn(async move {
-                    if let Ok(client) = iroh_client() {
-                        let _ = remote
-                            .runtime
-                            .client()
-                            .call::<smelt_model::control_api::DeviceRevoke>(
-                                &smelt_model::remote_config::DeviceIdParams {
-                                    endpoint_id: client.id().to_string(),
-                                },
-                                smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
-                            );
-                    }
-                })
+                .spawn(async move { revoke_legacy(&connection) })
                 .detach();
         }
         Ok(())
@@ -1355,23 +2054,21 @@ mod tests {
         cx.update(|cx| {
             assert!(client(&far, cx).is_none(), "还没挂机器时不该取到客户端");
             cx.set_global(RuntimeHub {
-                remotes: vec![RemoteRuntime {
-                    connection: smelt_client_store::RuntimeConnection {
-                        runtime_id: "far".into(),
-                        name: "far".into(),
-                        endpoint_id: String::new(),
-                        relay_url: None,
-                        added_at_ms: 0,
-                        os: Some("windows".into()),
-                    },
-                    runtime: remote_runtime(
-                        "far",
-                        RuntimeClient::new(|| Err(std::io::Error::other("connected far"))),
-                    ),
-                    status: online(),
-                    route: RemoteRoute::default(),
-                    link: None,
-                    upgrade_note: None,
+                remotes: vec![{
+                    let mut far = remote_entry(
+                        smelt_client_store::RuntimeConnection {
+                            runtime_id: "far".into(),
+                            name: "far".into(),
+                            endpoint_id: String::new(),
+                            relay_url: None,
+                            added_at_ms: 0,
+                            os: Some("windows".into()),
+                        },
+                        Transport::Broken("connected far".into()),
+                        None,
+                    );
+                    far.status = online();
+                    far
                 }],
                 ..Default::default()
             });
@@ -1394,6 +2091,92 @@ mod tests {
             );
             assert_eq!(path_style(&RuntimeKey::Local, cx), PathStyle::LOCAL);
         });
+    }
+
+    fn connection(runtime_id: &str) -> smelt_client_store::RuntimeConnection {
+        smelt_client_store::RuntimeConnection {
+            runtime_id: runtime_id.into(),
+            name: format!("{runtime_id} here"),
+            endpoint_id: String::new(),
+            relay_url: None,
+            added_at_ms: 0,
+            os: None,
+        }
+    }
+
+    fn peer(runtime_id: &str, agent_access: bool) -> smelt_model::peer_node::PeerNode {
+        smelt_model::peer_node::PeerNode {
+            runtime_id: runtime_id.into(),
+            endpoint_id: format!("ep-{runtime_id}"),
+            name: format!("{runtime_id} peer"),
+            relay_url: None,
+            os: Some("linux".into()),
+            agent_access,
+            added_at_ms: 1,
+        }
+    }
+
+    fn legacy(runtime_id: &str) -> RemoteRuntime {
+        remote_entry(
+            connection(runtime_id),
+            Transport::Legacy {
+                endpoint: smelt_iroh::load_or_create_secret(&std::env::temp_dir().join(format!(
+                    "smelt-legacy-key-{}-{runtime_id}",
+                    std::process::id()
+                )))
+                .unwrap()
+                .public(),
+                route: RemoteRoute::default(),
+            },
+            None,
+        )
+    }
+
+    /// 本机运行时的对端表是机器列表的来源：旧直连机器已经是对端的就地换过去（客户端库里那行
+    /// 要删），新对端加上，不再是对端的移走；还没迁的旧机器留着。
+    #[test]
+    fn peers_replace_migrated_machines_and_follow_the_runtime() {
+        let mut hub = RuntimeHub {
+            remotes: vec![
+                legacy("moved"),
+                legacy("still-old"),
+                remote_entry(connection("unpaired"), Transport::Peer, Some(false)),
+            ],
+            ..Default::default()
+        };
+        let migrated = merge_peers(&mut hub, vec![peer("moved", false), peer("new", true)]);
+        assert_eq!(migrated, vec!["moved".to_string()]);
+        assert!(hub.peers_loaded);
+        let ids: Vec<_> = hub
+            .remotes
+            .iter()
+            .map(|remote| remote.connection.runtime_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["moved", "still-old", "new"],
+            "原来的位置不变，新的排在后面"
+        );
+        let moved = &hub.remotes[0];
+        assert!(moved.transport.is_peer());
+        assert_eq!(moved.agent_access, Some(false));
+        assert_eq!(
+            moved.connection.name, "moved peer",
+            "名字以本机运行时记的为准"
+        );
+        assert!(hub.remotes[1].transport.legacy_route().is_some());
+        assert_eq!(hub.remotes[1].agent_access, None);
+        assert_eq!(hub.remotes[2].agent_access, Some(true));
+    }
+
+    /// 迁移就地换掉连接方式：之前拿走的同一个客户端，下次连接就走新的。
+    #[test]
+    fn a_held_client_follows_the_transport_switch() {
+        let remote = remote_entry(connection("far"), Transport::Broken("old way".into()), None);
+        let held = remote.runtime.client().clone();
+        assert_eq!(held.connect().unwrap_err().to_string(), "old way");
+        remote.transport.set(Transport::Broken("new way".into()));
+        assert_eq!(held.connect().unwrap_err().to_string(), "new way");
     }
 
     /// 改中继的回复丢了不等于没改：那台机器换中继时会关掉回复要走的那条连接。
@@ -1816,7 +2599,7 @@ mod tests {
         // SAFETY: nextest 每个测试一个进程，这里没有别的线程在读环境变量。
         unsafe { std::env::set_var("SMELT_HOME", &home) };
 
-        let remote = pair_with(&uri).unwrap();
+        let remote = pair_legacy(&uri).unwrap();
         assert!(matches!(remote.status, RuntimeStatus::Online { .. }));
         let stored = smelt_client_store::client_store()
             .unwrap()
@@ -1824,7 +2607,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored, vec![remote.connection]);
 
-        let again = remote_client(&stored[0]).unwrap().0.describe().unwrap();
+        let again = legacy_client(&stored[0]).unwrap().describe().unwrap();
         assert_eq!(
             again.daemon.runtime_id.as_deref(),
             Some(stored[0].runtime_id.as_str())
@@ -1849,7 +2632,7 @@ mod tests {
         // SAFETY: nextest 每个测试一个进程，这里没有别的线程在读环境变量。
         unsafe { std::env::set_var("SMELT_HOME", &home) };
 
-        let remote = pair_with(&uri).unwrap();
+        let remote = pair_legacy(&uri).unwrap();
         let runtime = remote.runtime.clone();
         runtime
             .client()
@@ -1933,6 +2716,66 @@ mod tests {
             remote.connection.name, remote.connection.runtime_id
         );
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// 对着两台真实运行时走一遍旧机器的迁移：用这个桌面的旧身份直连配对，再迁成本机运行时
+    /// 的对端节点、撤销旧设备，之后经本机运行时转发照样连得上。`SMELT_HOME` 指向一台在跑
+    /// 新版 smeltd 的本机运行时，配对串是另一台的。默认不跑：
+    /// `SMELT_HOME=… SMELT_TEST_PAIRING_URI='smelt+iroh://…' cargo test -p smelt migrates_a_real -- --ignored`
+    #[test]
+    #[ignore = "需要两台真实运行时和一次性配对串"]
+    fn migrates_a_real_legacy_machine() {
+        use smelt_model::control_api::{DeviceList, PeerList};
+
+        let uri = std::env::var("SMELT_TEST_PAIRING_URI").expect("设置 SMELT_TEST_PAIRING_URI");
+        let legacy = pair_legacy(&uri).unwrap();
+        let connection = legacy.connection.clone();
+        let me = iroh_client().unwrap().id().to_string();
+        let devices = |client: &RuntimeClient| {
+            client
+                .call::<DeviceList>(&Default::default(), PAIR_TIMEOUT)
+                .unwrap()
+                .devices
+                .into_iter()
+                .map(|device| device.endpoint_id)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            devices(legacy.runtime.client()).contains(&me),
+            "旧身份要先配对上"
+        );
+
+        let peer = migrate(&connection)
+            .unwrap()
+            .expect("新版运行时认得节点配对");
+        assert_eq!(peer.runtime_id, connection.runtime_id);
+        assert_eq!(peer.name, connection.name, "名字跟着带过去");
+        let peers = local()
+            .call::<PeerList>(&Default::default(), PAIR_TIMEOUT)
+            .unwrap()
+            .peers;
+        assert!(
+            peers
+                .iter()
+                .any(|known| known.runtime_id == peer.runtime_id)
+        );
+
+        let forwarded = remote_entry(peer_connection(&peer), Transport::Peer, Some(false));
+        assert!(
+            devices(forwarded.runtime.client()).contains(&me),
+            "迁完、撤销之前旧设备还在"
+        );
+        revoke_legacy(&connection);
+        let described = forwarded.runtime.client().describe().unwrap();
+        assert_eq!(
+            described.daemon.runtime_id.as_deref(),
+            Some(peer.runtime_id.as_str())
+        );
+        assert!(
+            !devices(forwarded.runtime.client()).contains(&me),
+            "撤销之后那边不该再有旧设备"
+        );
+        eprintln!("已迁移 {}（{}）", peer.name, peer.runtime_id);
     }
 
     /// 睡醒换掉 iroh endpoint 后，路线上按旧 endpoint 拨的连接器不能再用：它拴着的那个

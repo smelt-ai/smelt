@@ -40,6 +40,8 @@ const RENAME: api::Command<MachineMenuContext, ()> = api::Command::new("smelt.ma
 const EDIT_RELAY: api::Command<MachineMenuContext, ()> =
     api::Command::new("smelt.machines/edit-relay");
 const REMOVE: api::Command<MachineMenuContext, ()> = api::Command::new("smelt.machines/remove");
+const AGENT_ACCESS: api::Command<MachineMenuContext, ()> =
+    api::Command::new("smelt.machines/agent-access");
 
 /// 菜单项点了执行的那几条命令，和本插件别的命令一起登记（见 `crate::register_commands`）。
 pub(crate) fn commands() -> Vec<api::CommandSpec> {
@@ -65,6 +67,24 @@ pub(crate) fn commands() -> Vec<api::CommandSpec> {
             let (connection, window) = dialog_target(&args.machine, window, cx)?;
             edit_relay(connection, window, cx);
             Ok(())
+        }),
+        // 翻转：允许 ↔ 不允许。还没迁到本机运行时的机器没有这一项。
+        AGENT_ACCESS.spec_async(text!("command.agent_access"), |args, _, cx| {
+            let Some(allowed) = connection(&args.machine, cx).and_then(|c| c.agent_access) else {
+                return Task::ready(Err(api::machine_removed()));
+            };
+            let target = api::SetMachineAgentAccess {
+                machine: args.machine,
+                allowed: !allowed,
+            };
+            let changed = api::SET_MACHINE_AGENT_ACCESS.run(&target, cx);
+            cx.spawn(async move |cx| {
+                let result = changed.await;
+                if let Err(error) = &result {
+                    cx.update(|cx| notify_failure(&t!("agent_access.failed"), error.clone(), cx));
+                }
+                result
+            })
         }),
         REMOVE.spec(text!("command.remove"), |args, window, cx| {
             let (connection, window) = dialog_target(&args.machine, window, cx)?;
@@ -129,6 +149,20 @@ fn machine_items(connection: Connection) -> Vec<ContextMenuItem> {
     // 连得上就能升，不管兼不兼容：升到这个桌面的版本。
     if connection.can_upgrade {
         items.push(item(text!("menu.upgrade"), IconName::ArrowUp, UPGRADE.id()));
+    }
+    // 本机智能体经 `smelt --machine` 用它，默认不许；文字说的是点了会怎样。
+    match connection.agent_access {
+        Some(false) => items.push(item(
+            text!("menu.allow_agents"),
+            IconName::Bot,
+            AGENT_ACCESS.id(),
+        )),
+        Some(true) => items.push(item(
+            text!("menu.disallow_agents"),
+            IconName::Bot,
+            AGENT_ACCESS.id(),
+        )),
+        None => {}
     }
     items.push(item(text!("menu.rename"), IconName::SquarePen, RENAME.id()));
     items.push(item(text!("menu.relay"), IconName::Globe, EDIT_RELAY.id()));

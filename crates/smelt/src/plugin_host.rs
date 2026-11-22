@@ -335,6 +335,16 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
                 runtimes::set_runtime_relay(id, args.relay, cx)
             },
         ),
+        api::SET_MACHINE_AGENT_ACCESS.spec_async(
+            api::text!("command.set_machine_agent_access"),
+            |args, _, cx| {
+                let id = match remote_id(&args.machine, cx) {
+                    Ok(id) => id,
+                    Err(error) => return Task::ready(Err(error)),
+                };
+                runtimes::set_agent_access(id, args.allowed, cx)
+            },
+        ),
         api::RECONNECT_MACHINE.spec(api::text!("command.reconnect_machine"), |args, _, cx| {
             remote_id(&args.machine, cx)?;
             crate::runtime_events::reconnect(&args.machine, cx);

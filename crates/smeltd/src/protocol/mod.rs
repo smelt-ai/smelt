@@ -226,6 +226,9 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         DaemonOperation::Forward => {
             crate::peer_nodes::handle_forward(conn, reader, &v, &principal, &acp_sessions)
         }
+        DaemonOperation::PeerLinkWatch => {
+            crate::peer_nodes::handle_link_watch(conn, &v, &principal)
+        }
     }
 }
 

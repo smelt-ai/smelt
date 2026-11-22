@@ -28,6 +28,9 @@ command:
   remove:
     en: Remove Machine
     zh-CN: 移除机器
+  agent_access:
+    en: Toggle Agent Access to Machine
+    zh-CN: 切换智能体能否使用机器
 menu:
   reconnect:
     en: Reconnect
@@ -44,6 +47,16 @@ menu:
   remove:
     en: Remove…
     zh-CN: 移除…
+  allow_agents:
+    en: Allow Agents Here to Use It
+    zh-CN: 允许本机智能体使用
+  disallow_agents:
+    en: Stop Agents Here from Using It
+    zh-CN: 不再允许本机智能体使用
+agent_access:
+  failed:
+    en: Couldn't change agent access
+    zh-CN: 没改成智能体权限
 error:
   no_window:
     en: The main window isn't open

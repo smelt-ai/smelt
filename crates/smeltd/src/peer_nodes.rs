@@ -230,8 +230,31 @@ fn caller_is_agent(conn: &impl crate::protocol::PeerSource, acp_sessions: &AcpSe
     }
 }
 
-/// `peer.*`、`node.*` 控制方法。`caller_is_agent` 只在本机调用时有意义。
+/// `peer.*`、`node.*` 控制方法。`caller_is_agent` 只在本机调用时有意义；对端表改了调
+/// `changed`（推 `peers.changed`）。
 pub(crate) fn dispatch(
+    method: ControlMethod,
+    params: serde_json::Value,
+    principal: &Principal,
+    caller_is_agent: impl FnOnce() -> bool,
+    changed: impl FnOnce(),
+) -> Result<serde_json::Value, ControlError> {
+    let writes = matches!(
+        method,
+        ControlMethod::NodePair
+            | ControlMethod::NodeUnpair
+            | ControlMethod::PeerPair
+            | ControlMethod::PeerUpdate
+            | ControlMethod::PeerRemove
+    );
+    let result = dispatch_inner(method, params, principal, caller_is_agent);
+    if writes && result.is_ok() {
+        changed();
+    }
+    result
+}
+
+fn dispatch_inner(
     method: ControlMethod,
     params: serde_json::Value,
     principal: &Principal,
@@ -549,13 +572,20 @@ fn update(params: PeerUpdateParams) -> Result<PeerNode, ControlError> {
     Ok(wire(record))
 }
 
-/// 眼下的连接路径。还没拨过号就没有，也不为此去拨。
-fn link(runtime_id: &str) -> PeerLinkResult {
-    let connector = CONNECTORS
+fn cached_connector(runtime_id: &str) -> Option<Arc<RuntimeConnector>> {
+    CONNECTORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .and_then(|connectors| connectors.get(runtime_id).cloned());
+        .and_then(|connectors| connectors.get(runtime_id).cloned())
+}
+
+/// 眼下的连接路径。还没拨过号就没有，也不为此去拨。
+fn link(runtime_id: &str) -> PeerLinkResult {
+    link_of(cached_connector(runtime_id).as_deref())
+}
+
+fn link_of(connector: Option<&RuntimeConnector>) -> PeerLinkResult {
     let link = connector
         .and_then(|connector| connector.path_status())
         .map(|path| PeerLink {
@@ -663,6 +693,57 @@ pub(crate) fn handle_forward<C: ClientSocket + crate::protocol::PeerSource>(
     splice(conn, reader, remote);
 }
 
+/// `op=peer_link_watch`：先回眼下的路径，iroh 换了路径再回，连接断了回一行没有路径的
+/// 就结束；调用方断开也结束。只盯已经拨好的连接，不为此拨号：还没拨过就回一行没有
+/// 路径的结束。
+pub(crate) fn handle_link_watch<C: ClientSocket>(
+    mut conn: C,
+    payload: &serde_json::Value,
+    principal: &Principal,
+) {
+    if principal.is_remote() {
+        return;
+    }
+    let Ok(target) = serde_json::from_value::<ForwardTarget>(payload.clone()) else {
+        return;
+    };
+    let write = |conn: &mut C, result: &PeerLinkResult| {
+        smelt_runtime_client::protocol::write_json_line(conn, result).is_ok()
+    };
+    let Some(connector) = cached_connector(&target.runtime_id) else {
+        let _ = write(&mut conn, &PeerLinkResult::default());
+        return;
+    };
+    // `None`：调用方断开了。
+    let (changes, received) = std::sync::mpsc::channel::<Option<smelt_iroh::runtime::LinkChange>>();
+    let on_change = changes.clone();
+    let _watch = connector.watch(move |change| {
+        let _ = on_change.send(Some(change));
+    });
+    if let Ok(mut reader) = conn.try_clone() {
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 64];
+            while matches!(std::io::Read::read(&mut reader, &mut buffer), Ok(read) if read > 0) {}
+            let _ = changes.send(None);
+        });
+    }
+    if !write(&mut conn, &link_of(Some(&connector))) {
+        return;
+    }
+    while let Ok(Some(change)) = received.recv() {
+        let closed = change == smelt_iroh::runtime::LinkChange::Closed;
+        let result = if closed {
+            PeerLinkResult::default()
+        } else {
+            link_of(Some(&connector))
+        };
+        if !write(&mut conn, &result) || closed {
+            break;
+        }
+    }
+    let _ = conn.shutdown(Shutdown::Both);
+}
+
 /// 两个方向各搬到对端写完：一边写完只关另一边的写方向，让还在回话的一方说完；回话的
 /// 方向（对端到本机）结束时两边整个关掉，叫醒还在等读的另一条线程。
 fn splice<C: ClientSocket>(
@@ -704,7 +785,7 @@ mod tests {
         principal: &Principal,
         agent: bool,
     ) -> Result<serde_json::Value, ControlError> {
-        dispatch(method, params, principal, || agent)
+        dispatch(method, params, principal, || agent, || {})
     }
 
     fn node(runtime_id: &str) -> serde_json::Value {

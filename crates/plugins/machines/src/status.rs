@@ -168,6 +168,7 @@ mod tests {
             upgrade_note: None,
             can_upgrade: false,
             can_reconnect: false,
+            agent_access: None,
         }
     }
 
