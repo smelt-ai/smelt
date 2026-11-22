@@ -48,6 +48,8 @@ fn make_acp_session_value(
 ) -> AcpSession {
     let instance = next_session_instance();
     AcpSession {
+        provider_timeline: SessionLock::new(None),
+        provider_switching: AtomicBool::new(false),
         instance,
         reduced: Watched::new(reduced),
         snapshot_revision: AtomicU64::new(0),

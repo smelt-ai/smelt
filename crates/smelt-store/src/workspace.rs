@@ -262,6 +262,14 @@ pub(crate) fn update_conversation(
             });
         }
     }
+    let provider_history = before
+        .as_ref()
+        .and_then(|saved| saved.acp.as_ref())
+        .and_then(|acp| acp.sid.as_deref())
+        .map(|sid| {
+            crate::providers::read(transaction, sid).map(|history| (sid.to_string(), history))
+        })
+        .transpose()?;
     transaction.execute("DELETE FROM session_group WHERE id = ?1", [group_id])?;
     insert_conversation(
         transaction,
@@ -271,6 +279,9 @@ pub(crate) fn update_conversation(
         &terminal_ids,
         &preserved_history,
     )?;
+    if let Some((sid, history)) = provider_history {
+        crate::providers::write(transaction, &sid, &history)?;
+    }
     Ok(read_conversation(transaction, group_id)? != before)
 }
 
@@ -843,6 +854,14 @@ pub(crate) fn remember_history_session_id(
     // 有了身份，名字就属于那段 provider 对话：对话上起过的名字搬进 `history_title`（那边
     // 已经有名字就以那边的为准），对话上的清掉。名字任何时候只在一处。
     let moved = move_conversation_name_to_history(transaction, &session_id)?;
+    transaction.execute(
+        "UPDATE acp_provider_thread SET history_session_id = ?2
+         WHERE session_id = ?1 AND provider_key = (
+             SELECT CASE WHEN agent_definition_id IS NOT NULL THEN 'agent:' || agent_definition_id
+                 WHEN profile_id IS NOT NULL THEN 'profile:' || profile_id ELSE agent END
+             FROM acp_detail WHERE session_id = ?1)",
+        params![session_id, history_id],
+    )?;
     bind_history_agent(transaction, &session_id)?;
     Ok(Some(updated > 0 || moved))
 }

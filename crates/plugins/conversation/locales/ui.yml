@@ -1099,3 +1099,14 @@ usage:
     conversation:
       en: "Conversation"
       zh-CN: "对话"
+
+provider_switch:
+  label:
+    en: "Switch provider"
+    zh-CN: "切换智能体"
+  pending:
+    en: "Switching…"
+    zh-CN: "切换中…"
+  failed:
+    en: "Couldn't switch provider: %{error}"
+    zh-CN: "切换智能体失败：%{error}"

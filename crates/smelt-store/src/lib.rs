@@ -34,6 +34,12 @@ mod migrate_v18;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod peers;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod providers;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub use providers::{
+    ContextHandoffRecord, ProviderHistory, ProviderSegmentRecord, ProviderThreadRecord,
+};
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod push;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod schema;
@@ -63,7 +69,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 40;
+pub const STORE_SCHEMA_VERSION: u32 = 41;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -191,6 +197,39 @@ pub enum StoredHistoryIdentity {
 }
 
 impl Store {
+    /// 当前 session 下的原生会话身份、历史分段和交接回执。
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    pub fn provider_history(&self, sid: &str) -> Result<ProviderHistory, StoreError> {
+        imp::read(&self.backend, |connection| providers::read(connection, sid))
+    }
+
+    /// 原子提交活动 provider 与其历史引用。expected 是切换前的 agent option id。
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    pub fn switch_provider(
+        &self,
+        sid: &str,
+        expected: &str,
+        active: &WorkspaceAcpRecord,
+        history: &ProviderHistory,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write(&self.backend, |tx| {
+            providers::switch(tx, sid, expected, active, history)?;
+            Ok(WorkspaceDirectoryCommit {
+                changed: true,
+                revision: config::bump_workspace_catalog_revision(tx)?,
+            })
+        })
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    pub fn remember_context_handoff(
+        &self,
+        sid: &str,
+        handoff: &ContextHandoffRecord,
+    ) -> Result<(), StoreError> {
+        imp::write(&self.backend, |tx| providers::handoff(tx, sid, handoff))
+    }
+
     /// 打开已有库。文件不在、或只剩 WAL/SHM sidecar 时失败，绝不建空库。
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
@@ -1046,7 +1085,7 @@ mod imp {
             })
     }
 
-    fn read<T>(
+    pub(super) fn read<T>(
         backend: &Backend,
         read: impl FnOnce(&Connection) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
@@ -1054,7 +1093,7 @@ mod imp {
         read(&connection)
     }
 
-    fn write<T>(
+    pub(super) fn write<T>(
         backend: &Backend,
         write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
@@ -2181,6 +2220,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 40 {
+            apply_v41_providers(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 39 {
             apply_v40_peer_node(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2946,6 +2994,16 @@ mod imp {
             .any(|table| table == "peer_node")
         {
             transaction.execute_batch(crate::schema::MIGRATE_V39_TO_V40)?;
+        }
+        apply_v41_providers(transaction)
+    }
+
+    fn apply_v41_providers(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "acp_provider_thread")
+        {
+            transaction.execute_batch(include_str!("provider_schema.sql"))?;
         }
         Ok(())
     }
@@ -5992,6 +6050,9 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+
+        // These tables didn't exist in this historical fixture; remove them before renaming acp_detail.
+        connection.execute_batch("DROP TABLE IF EXISTS acp_context_handoff; DROP TABLE IF EXISTS acp_provider_segment; DROP TABLE IF EXISTS acp_provider_thread;").unwrap();
         connection.execute_batch(V34_AGENT_COMMAND).unwrap();
         connection.execute_batch(V30_AGENT_PROFILE).unwrap();
         connection.execute_batch(V28_WORKSPACE_EPOCH).unwrap();
@@ -8961,6 +9022,8 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let path = dir.join(DATABASE_FILE_NAME);
         drop(Store::open_or_create(&path).unwrap());
         let connection = rusqlite::Connection::open(&path).unwrap();
+        // These tables didn't exist in this historical fixture; remove them before renaming acp_detail.
+        connection.execute_batch("DROP TABLE IF EXISTS acp_context_handoff; DROP TABLE IF EXISTS acp_provider_segment; DROP TABLE IF EXISTS acp_provider_thread;").unwrap();
         connection
             .execute_batch(&format!(
                 "{V28_WORKSPACE_EPOCH}
@@ -9304,6 +9367,8 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             let path = dir.join(DATABASE_FILE_NAME);
             drop(Store::open_or_create(&path).unwrap());
             let connection = rusqlite::Connection::open(&path).unwrap();
+            // These tables didn't exist in this historical fixture; remove them before renaming acp_detail.
+            connection.execute_batch("DROP TABLE IF EXISTS acp_context_handoff; DROP TABLE IF EXISTS acp_provider_segment; DROP TABLE IF EXISTS acp_provider_thread;").unwrap();
             connection
                 .execute_batch(&format!(
                     "{V28_WORKSPACE_EPOCH}

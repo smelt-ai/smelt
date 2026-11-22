@@ -4314,6 +4314,7 @@ fn snapshot_binding_becomes_the_views_persisted_binding(cx: &mut gpui::TestAppCo
         run_id: "run-1".into(),
     };
     snapshot.conversation_state = Some(ConversationStateSnapshot {
+        provider: None,
         binding: Some(binding.clone()),
         ..Default::default()
     });
@@ -6005,4 +6006,45 @@ fn clicking_an_edit_chip_opens_its_diff_in_a_dialog(cx: &mut gpui::TestAppContex
         .read_with(cx, |view, _| view.list_state.bounds_for_item(1))
         .expect("段首行应已绘制");
     assert_eq!(head_after.size, head_before.size, "对话里不原地展开");
+}
+
+#[gpui::test]
+fn provider_switch_menu_renders_from_cached_catalog_and_is_blocked_while_busy(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (view, cx) =
+        open_conversation_in_root(cx, "acp-provider-menu", Vec::new(), DaemonPhase::Idle);
+    cx.update(|window, cx| view.update(cx, |view, cx| view.init_input(window, cx)));
+    view.update(cx, |view, cx| {
+        view.provider_options = [ConversationAgentKind::Codex, ConversationAgentKind::Claude]
+            .into_iter()
+            .map(
+                |kind| smelt_plugin_api::model::session_control::AcpAgentOption {
+                    id: kind.id().into(),
+                    kind: kind.id().into(),
+                    label: kind.label().into(),
+                    profile: false,
+                    agent_definition_id: None,
+                    launch: Default::default(),
+                    history_dir: None,
+                },
+            )
+            .collect();
+        cx.notify();
+    });
+    draw_settled(cx);
+    let control = cx
+        .debug_bounds("ACP_PROVIDER_SWITCH")
+        .expect("切换入口应已绘制");
+    cx.simulate_click(control.center(), Default::default());
+    draw_settled(cx);
+    assert!(
+        cx.debug_bounds("smelt-menu-0").is_some(),
+        "目录中的 provider 在菜单里选择"
+    );
+    view.update(cx, |view, cx| {
+        view.phase = DaemonPhase::Thinking;
+        view.switch_provider("claude".into(), cx);
+        assert!(!view.provider_switch_pending, "忙碌时不能发切换请求");
+    });
 }

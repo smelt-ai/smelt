@@ -634,6 +634,21 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::ConversationSwitchProvider => {
+            let params: smelt_core::provider_switch::ProviderSwitchParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::provider_switch::switch(params, sessions, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::FailedPrecondition, error),
+                ),
+            }
+        }
         ControlMethod::ConversationPrompt => {
             let params: smelt_core::control_api::ConversationPromptParams =
                 match params_or_error(control_version, &request_id, params) {

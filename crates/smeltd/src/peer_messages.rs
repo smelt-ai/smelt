@@ -1047,7 +1047,14 @@ fn read(
     // 挂起后内存里只剩当前回合，有多少给多少，不为此把对方拉起来。
     let replies = {
         let reduced = sess.reduced.lock();
-        assistant_replies(reduced.entries(), limit)
+        if sess.provider_timeline.lock().is_some() {
+            let mut snapshot = reduced.to_snapshot(false);
+            drop(reduced);
+            crate::provider_switch::project(sess, &mut snapshot);
+            assistant_replies(&snapshot.entries, limit)
+        } else {
+            assistant_replies(reduced.entries(), limit)
+        }
     };
     Ok(serde_json::json!({
         "ok": true,
@@ -1326,6 +1333,7 @@ fn spawn(
         ..Default::default()
     };
     let request = AcpOpenRequest {
+        provider_key: None,
         id: id.clone(),
         cwd: Some(cwd),
         launch,

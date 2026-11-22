@@ -21,6 +21,25 @@ pub(crate) fn prompt_index(
     let gone =
         || ControlError::because(ControlErrorCode::NotFound, ControlReason::ConversationGone);
     let slot = acp_sessions.get(&session_id).ok_or_else(gone)?;
+    if slot.value.provider_timeline.lock().is_some() {
+        let snapshot = crate::acp_host::read_history_page(
+            &session_id,
+            acp_sessions,
+            subscribers,
+            before,
+            usize::MAX,
+            false,
+        )
+        .map_err(|error| match error {
+            crate::acp_host::HistoryReadError::SessionMissing => gone(),
+            crate::acp_host::HistoryReadError::Failed(error) => {
+                ControlError::new(ControlErrorCode::OperationFailed, error)
+            }
+        })?;
+        return Ok(ConversationPromptIndexResult {
+            prompts: smelt_core::acp_chat::prompt_index(&snapshot.entries, snapshot.entries_offset),
+        });
+    }
     let needs_wake = acp_sessions
         .with_current(&session_id, &slot, |session| {
             let reduced = session.reduced.lock();

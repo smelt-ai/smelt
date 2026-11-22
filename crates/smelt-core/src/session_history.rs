@@ -566,15 +566,16 @@ fn read_dir_ok(fs: &dyn FileSystem, dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Codex 的 `response_item.payload.type=="message"` 里，`role=="user"` 的第一条
-/// 常常不是人打的字，是 CLI 自己注入的 `<environment_context>…</environment_context>`
-/// ——拿这个当标题会很怪，跟真实问题一样都用尖括号开头这个弱信号过滤掉。
+/// Codex 原生存档里的 user 消息还包括 CLI 注入的环境和 AGENTS.md 指令封装。
+/// 它们不在 session/load 的用户回放里，不能计入可续接的对话轮次或跨 provider 交接。
 /// 实测这个弱信号会漏（比如 IDE 插件注入的 `# Context from my IDE setup:` 是
 /// `#` 开头，不是 `<`）——协议没有专门的「这条是合成的」标记，只能靠外观猜，
 /// 猜不准的会在真人对话里多出几条奇怪的「用户消息」，暂时接受。
 fn is_synthetic_codex_text(text: &str) -> bool {
-    let t = text.trim_start();
-    t.starts_with('<') || t.starts_with("# Context from")
+    let t = crate::provider_switch::without_handoff(text).trim_start();
+    t.starts_with('<')
+        || t.starts_with("# Context from")
+        || (t.starts_with("# AGENTS.md instructions") && t.contains("<INSTRUCTIONS>"))
 }
 
 fn summarize_codex_session_with(
@@ -2338,6 +2339,7 @@ mod tests {
                 r#"{"timestamp":"2026-07-01T00:00:00Z","type":"session_meta","payload":{"id":"cx-1","cwd":"/proj"}}"#,
                 r#"{"timestamp":"2026-07-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.6-sol","cwd":"/proj"}}"#,
                 r#"{"timestamp":"2026-07-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>cwd stuff</environment_context>"}]}}"#,
+                r##"{"timestamp":"2026-07-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\n\n<INSTRUCTIONS>project rules</INSTRUCTIONS>\n<environment_context>cwd stuff</environment_context>"}]}}"##,
                 r#"{"timestamp":"2026-07-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"实际问题"}]}}"#,
                 r#"{"timestamp":"2026-07-01T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"我来看看"}]}}"#,
                 r#"{"timestamp":"2026-07-01T00:00:04Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c1"}}"#,
@@ -2370,6 +2372,22 @@ mod tests {
         assert!(detail.turns[1].tool_paths.is_empty());
         // 模型在 turn_context 里，不在 session_meta
         assert_eq!(detail.model.as_deref(), Some("gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn codex_reader_keeps_provider_handoff_prompts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rollout-handoff.jsonl");
+        let prompt = "<smelt_context_handoff>\nshared history\n</smelt_context_handoff>\n\nContinue the task";
+        let row = serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}]}
+        });
+        std::fs::write(&path, format!("{row}\n")).unwrap();
+        let detail = load_codex_session_detail(&path).unwrap();
+        assert_eq!(detail.turns.len(), 1);
+        assert!(detail.turns[0].is_user);
+        assert_eq!(detail.turns[0].text, prompt);
     }
 
     #[test]

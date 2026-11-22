@@ -467,6 +467,7 @@ impl Driver {
         find_agent_option_for(execution.kind, None)
             .ok_or_else(|| format!("no {} ACP launch configuration", execution.kind.label()))?;
         let request = AcpOpenRequest {
+            provider_key: None,
             id: session_id.to_string(),
             cwd: Some(run.context.cwd.clone()),
             launch: launch_for_automation_run(execution),

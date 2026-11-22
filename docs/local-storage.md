@@ -8,7 +8,13 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ~/.smelt/smelt.sqlite3
 ```
 
-这台机器上的会话、项目、智能体、自动化、配对设备和远程开关。schema 版本是 `user_version`，当前 `STORE_SCHEMA_VERSION = 32`（`crates/smelt-store/src/lib.rs`）。WAL，5 秒 busy timeout，库文件和 `-wal`/`-shm` 在 Unix 上收紧为 `0600`。
+这台机器上的会话、项目、智能体、自动化、配对设备和远程开关。schema 版本是 `user_version`，当前 `STORE_SCHEMA_VERSION = 41`（`crates/smelt-store/src/lib.rs`）。WAL，5 秒 busy timeout，库文件和 `-wal`/`-shm` 在 Unix 上收紧为 `0600`。
+
+v40→v41 新增 `acp_provider_thread`、`acp_provider_segment` 和 `acp_context_handoff`，
+分别保存同一应用 session 下各 provider 的原生身份、混合历史分段引用和交接状态；正文仍只在
+provider 原生存档。迁移前备份、旧版拒绝 v41 以及备份回退边界见
+[同一 session 切换 provider](session-provider-switching.md#升级兼容与回退)。
+
 
 建库只发生在主文件和 sidecar 都不存在时。主文件没了但 sidecar 还在时拒绝建空库。非空的 `user_version = 0`、形状不符或版本过新的库只拒绝打开，不删表、不重建。以后改已发布结构必须加版本号并写迁移。
 

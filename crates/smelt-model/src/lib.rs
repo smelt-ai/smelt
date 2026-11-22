@@ -46,6 +46,7 @@ pub mod pi_quota;
 pub mod pi_service;
 pub mod provider_api;
 pub mod provider_quota;
+pub mod provider_switch;
 pub mod quota_service;
 pub mod redact;
 pub mod remote_config;

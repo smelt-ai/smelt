@@ -1087,6 +1087,8 @@ pi_calls! {
         -> ConversationPromptIndexResult;
     /// 以一次外部投递的身份往对话里发一轮话（插件驱动对话用）。正在跑就排在这一轮后面，
     /// 不插进去。挂起的对话先唤醒。
+    ConversationSwitchProvider => ConversationSwitchProvider(crate::provider_switch::ProviderSwitchParams)
+        -> crate::workspace_directory::WorkspaceAcp;
     ConversationPrompt => ConversationPrompt(ConversationPromptParams) -> EmptyParams;
     /// 按投递 id 取那一轮的结果。只在运行时内存里，每段对话留最近的若干条。
     ConversationTurnResult => ConversationTurnResult(ConversationTurnResultParams)
