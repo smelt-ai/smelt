@@ -413,6 +413,7 @@ mod tests {
             relay_url: None,
             os: None,
             agent_access: false,
+            inbound: false,
             added_at_ms: 0,
         };
         let peers = [peer("a1", "cc"), peer("b2", "GPU"), peer("c3", "gpu")];

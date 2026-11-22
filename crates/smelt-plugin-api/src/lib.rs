@@ -78,8 +78,8 @@ pub use command::{
 pub use connections::{
     ADD_MACHINE, AddMachine, AddedMachine, Connection, ConnectionLink, ConnectionState,
     Connections, LinkRoute, MachineTarget, RECONNECT_MACHINE, REFRESH_CONNECTIONS, REMOVE_MACHINE,
-    RENAME_MACHINE, RenameMachine, SET_MACHINE_AGENT_ACCESS, SET_MACHINE_RELAY,
-    SetMachineAgentAccess, SetMachineRelay, UPGRADE_MACHINE,
+    RENAME_MACHINE, RenameMachine, SET_MACHINE_ACCESS, SET_MACHINE_RELAY, SetMachineAccess,
+    SetMachineRelay, UPGRADE_MACHINE,
 };
 pub use context::{ActiveContext, ViewedSession, active_context, set_active_context};
 pub use context_menu::{

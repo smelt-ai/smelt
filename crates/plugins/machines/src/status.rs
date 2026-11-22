@@ -169,6 +169,7 @@ mod tests {
             can_upgrade: false,
             can_reconnect: false,
             agent_access: None,
+            inbound: None,
         }
     }
 

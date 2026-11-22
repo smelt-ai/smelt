@@ -31,6 +31,9 @@ command:
   agent_access:
     en: Toggle Agent Access to Machine
     zh-CN: 切换智能体能否使用机器
+  inbound:
+    en: Toggle Whether Machine Can Connect In
+    zh-CN: 切换机器能否连入本机
 menu:
   reconnect:
     en: Reconnect
@@ -53,10 +56,16 @@ menu:
   disallow_agents:
     en: Stop Agents Here from Using It
     zh-CN: 不再允许本机智能体使用
-agent_access:
+  allow_inbound:
+    en: Allow It to Connect to This Computer
+    zh-CN: 允许它连入本机
+  disallow_inbound:
+    en: Stop It from Connecting to This Computer
+    zh-CN: 不再允许它连入本机
+access_change:
   failed:
-    en: Couldn't change agent access
-    zh-CN: 没改成智能体权限
+    en: Couldn't change the machine's access
+    zh-CN: 没改成机器权限
 error:
   no_window:
     en: The main window isn't open

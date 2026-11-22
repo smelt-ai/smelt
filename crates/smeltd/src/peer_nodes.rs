@@ -80,6 +80,7 @@ fn wire(record: PeerNodeRecord) -> PeerNode {
         relay_url: record.relay_url,
         os: record.os,
         agent_access: record.agent_access,
+        inbound: record.inbound,
         added_at_ms: record.added_at_ms,
     }
 }
@@ -233,15 +234,26 @@ pub(crate) fn peer_client(peer: &PeerNodeRecord) -> RuntimeClient {
     })
 }
 
-/// 连入的 endpoint 是哪个对端。
-pub(crate) fn peer_by_endpoint(endpoint_id: &str) -> Result<Option<String>, String> {
+/// 连入的 endpoint 是哪个对端：它的 runtime id，和它能不能连进来操作本节点。
+pub(crate) fn peer_by_endpoint(endpoint_id: &str) -> Result<Option<(String, bool)>, String> {
     smelt_core::sqlite_state::default_sqlite_store()
         .and_then(|store| {
             store
                 .peer_node_by_endpoint(endpoint_id)
                 .map_err(|error| error.to_string())
         })
-        .map(|peer| peer.map(|peer| peer.runtime_id))
+        .map(|peer| peer.map(|peer| (peer.runtime_id, peer.inbound)))
+}
+
+/// 不许连入的对端只能调这几个：配对、取消配对，和把消息交给本节点（`node.peer_deliver`
+/// 只收它回给本节点对话的）。
+pub(crate) fn outbound_only_peer_may_call(method: Option<&str>) -> bool {
+    matches!(
+        method,
+        Some(method) if method == ControlMethod::NodePair.as_str()
+            || method == ControlMethod::NodeUnpair.as_str()
+            || method == ControlMethod::NodePeerDeliver.as_str()
+    )
 }
 
 /// 调用方是不是某个智能体会话（或它的子孙进程）。认不出是谁时按是处理。
@@ -381,8 +393,9 @@ fn display_name(name: &str, fallback: &str) -> String {
     }
 }
 
-/// 用对方的配对串双向配对：经本节点的 endpoint 连过去交出自己的身份，对方记下本节点后
-/// 交回它的身份，这边再记下它。
+/// 用对方的配对串配对：经本节点的 endpoint 连过去交出自己的身份，对方记下本节点后交回它
+/// 的身份，这边再记下它。对方发了配对码，就是同意本节点连进去；本节点没同意对方连回来，
+/// 它默认不能连入（`inbound` 关着），要用户在这边打开。
 fn pair(params: PeerPairParams) -> Result<PeerNode, ControlError> {
     let invalid = |message: String| ControlError::new(ControlErrorCode::InvalidParams, message);
     let pairing = smelt_pairing::parse_pairing_uri(&params.pairing_uri)
@@ -435,6 +448,7 @@ fn pair(params: PeerPairParams) -> Result<PeerNode, ControlError> {
         relay_url: pairing.relay_url,
         os: theirs.os,
         agent_access: existing.as_ref().is_some_and(|peer| peer.agent_access),
+        inbound: existing.as_ref().is_some_and(|peer| peer.inbound),
         added_at_ms: existing
             .as_ref()
             .map_or_else(now_ms, |peer| peer.added_at_ms),
@@ -456,7 +470,8 @@ fn pair(params: PeerPairParams) -> Result<PeerNode, ControlError> {
     Ok(wire(record))
 }
 
-/// 另一个节点拿本节点发的配对码来配对。它的 endpoint id 取自连接，不信参数。
+/// 另一个节点拿本节点发的配对码来配对。它的 endpoint id 取自连接，不信参数。本节点发了
+/// 码，就是同意它连进来（`inbound` 开着）。
 fn accept_pair(principal: &Principal, params: NodePairParams) -> Result<NodeInfo, ControlError> {
     let endpoint_id = match principal {
         Principal::Device(id) | Principal::Unpaired(id) => id.clone(),
@@ -498,6 +513,7 @@ fn accept_pair(principal: &Principal, params: NodePairParams) -> Result<NodeInfo
             .filter(|relay| parse_relay(Some(relay)).is_ok()),
         os: node.os,
         agent_access: existing.as_ref().is_some_and(|peer| peer.agent_access),
+        inbound: true,
         added_at_ms: existing
             .as_ref()
             .map_or_else(now_ms, |peer| peer.added_at_ms),
@@ -518,6 +534,7 @@ fn accept_unpair(principal: &Principal) -> Result<(), ControlError> {
     let Principal::Peer {
         runtime_id,
         endpoint_id,
+        ..
     } = principal
     else {
         return Err(ControlError::new(
@@ -587,11 +604,19 @@ fn update(params: PeerUpdateParams) -> Result<PeerNode, ControlError> {
     if let Some(agent_access) = params.agent_access {
         record.agent_access = agent_access;
     }
+    let shut_out = params.inbound == Some(false) && record.inbound;
+    if let Some(inbound) = params.inbound {
+        record.inbound = inbound;
+    }
     store()?
         .put_peer_node(&record)
         .map_err(|error| failed(error.to_string()))?;
     if redial {
         forget(&record.runtime_id);
+    }
+    // 不许它连入了：断开它现在连着的，重连时按新设置拦。
+    if shut_out {
+        close_inbound(&record.endpoint_id);
     }
     Ok(wire(record))
 }
@@ -838,8 +863,9 @@ mod tests {
             crate::runtime_identity::runtime_id().as_deref()
         );
         assert_eq!(
-            peer_by_endpoint("ep-pairs-with-code").unwrap().as_deref(),
-            Some("rt-pairs-with-code")
+            peer_by_endpoint("ep-pairs-with-code").unwrap(),
+            Some(("rt-pairs-with-code".to_string(), true)),
+            "发了配对码就是同意它连进来"
         );
         let record = peer("rt-pairs-with-code").unwrap();
         assert_eq!(record.name, "far box");
@@ -881,6 +907,7 @@ mod tests {
             relay_url: None,
             os: None,
             agent_access: false,
+            inbound: true,
             added_at_ms: 1,
         };
         store().unwrap().put_peer_node(&record).unwrap();
@@ -894,9 +921,11 @@ mod tests {
             )
             .is_err()
         );
+        // 不许连入的对端也能取消配对。
         let peer_principal = Principal::Peer {
             runtime_id: "rt-unpair".into(),
             endpoint_id: "ep-unpair".into(),
+            inbound: false,
         };
         call(
             ControlMethod::NodeUnpair,
@@ -919,6 +948,7 @@ mod tests {
             relay_url: None,
             os: None,
             agent_access: false,
+            inbound: true,
             added_at_ms: 1,
         };
         store().unwrap().put_peer_node(&record).unwrap();
@@ -989,6 +1019,27 @@ mod tests {
         read_reply(&mut client).unwrap()
     }
 
+    /// 没被允许连入的对端只能配对、取消配对、交回信，连 `system.describe` 都不行。
+    #[test]
+    fn outbound_only_peers_get_three_methods() {
+        for allowed in [
+            ControlMethod::NodePair,
+            ControlMethod::NodeUnpair,
+            ControlMethod::NodePeerDeliver,
+        ] {
+            assert!(outbound_only_peer_may_call(Some(allowed.as_str())));
+        }
+        for denied in [
+            ControlMethod::SystemDescribe,
+            ControlMethod::NodePeerList,
+            ControlMethod::NodePeerRead,
+            ControlMethod::AutomationList,
+        ] {
+            assert!(!outbound_only_peer_may_call(Some(denied.as_str())));
+        }
+        assert!(!outbound_only_peer_may_call(None));
+    }
+
     /// 转发只收本机，不认识的机器直接回不认识，不去拨号。
     #[test]
     fn forward_is_local_only_and_needs_a_known_peer() {
@@ -998,6 +1049,7 @@ mod tests {
         let peer_principal = Principal::Peer {
             runtime_id: "rt-a".into(),
             endpoint_id: "ep-a".into(),
+            inbound: true,
         };
         let reply = forward_as(peer_principal, "rt-any");
         assert_eq!(

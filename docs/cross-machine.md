@@ -15,14 +15,16 @@
 | 概念 | 是什么 | 存在哪 |
 |---|---|---|
 | 节点身份 | 运行时的 `iroh-secret`。同一个 endpoint 既接受连入，也拨出 | 文件，smeltd 独有 |
-| 对端节点（peer） | 和本节点双向配对过的节点：它是谁、怎么连、本机智能体能不能用 | 运行时库 `peer_node`，两边各记对方 |
+| 对端节点（peer） | 和本节点配对过的节点：它是谁、怎么连、本机智能体能不能用它、它能不能连进来 | 运行时库 `peer_node`，两边各记对方 |
 | 客户端设备 | 手机等只连入、不被连的设备 | 运行时库 `paired_device`（不变） |
 
-- 配对是双向的：A 用 B 的配对串配对后，A 的 `peer_node` 有 B，B 的 `peer_node` 有 A，两边都能主动连对方，也都接受对方连入。每一边只记自己信任谁、怎么连对方，就像 `known_hosts` 加 `authorized_keys`，不是同一份数据存两处。
+- 配对后两边互相记下，但**信任分方向**：A 用 B 的配对串配对，是 B 同意 A 连进来操作它（B 记 A 时 `inbound` 开着）；A 没同意 B 反过来连入，A 记 B 时 `inbound` 默认关着，要 A 的用户在机器菜单里打开「允许它连入本机」。每一边只记自己信任谁、怎么连对方，就像 `known_hosts` 加 `authorized_keys`，不是同一份数据存两处。
+- `inbound` 关着的对端连进来，只能调 `node.pair`、`node.unpair`、`node.peer_deliver`，而 `node.peer_deliver` 只收它回给本机对话的消息（本机那个对话之前和它通过信），连 `system.describe` 都不行。它那边的桌面会看到这台机器连不上，原因写着对方没允许连入。
+- 旧机器迁移过来时同理：原来是这台电脑单向控制那台机器，迁移后那台机器仍然不能连回来，信任范围不变。
 - 显示名各记各的：A 怎么称呼 B 只存在 A 这边。
 - 运行时的「远程访问」开关管所有连入：关着时设备和对端节点都连不进来，只能往外拨。
 - 往外拨用哪个 endpoint：远程访问在跑就借它的（同一个 endpoint 收发）；正在绑定就等它；关着才用同一把密钥单独绑一个只拨出的。远程访问的 endpoint 绑上时丢掉只拨出的那个，不让两个同时在线。
-- 节点间互相信任到和已配对设备同等的程度：都是同一个用户的机器。
+- `inbound` 开着的对端，权限和已配对设备一样。
 
 ## 3 · 本机出口：`op=forward`
 
@@ -54,8 +56,8 @@
 | method | 说明 |
 |---|---|
 | `peer.list` | 本节点的对端，按配对先后排 |
-| `peer.pair` | `{pairing_uri}`：用对方的配对串双向配对，回对端记录 |
-| `peer.update` | `{runtime_id, name?, relay_url?, os?, agent_access?}` |
+| `peer.pair` | `{pairing_uri}`：用对方的配对串配对，回对端记录。记下它时 `inbound` 关着 |
+| `peer.update` | `{runtime_id, name?, relay_url?, os?, agent_access?, inbound?}`；关掉 `inbound` 时断开它连着的连接 |
 | `peer.remove` | `{runtime_id}`：删本地记录、断开它连进来的连接，再在后台请它也删掉本节点 |
 | `peer.link` | `{runtime_id}`：当前路径和延迟，不为此拨号 |
 | `peer.reset` | 丢掉往外拨的连接（和只拨出的 endpoint），下次重拨。系统睡醒后桌面调用 |
@@ -64,7 +66,7 @@
 
 | method | 说明 |
 |---|---|
-| `node.pair` | `{code, node: NodeInfo}` → `NodeInfo`。未配对的连接可调。对方的 endpoint id 取自连接本身，不信参数 |
+| `node.pair` | `{code, node: NodeInfo}` → `NodeInfo`。未配对的连接可调。对方的 endpoint id 取自连接本身，不信参数；记下它时 `inbound` 开着（发了码就是同意它连进来） |
 | `node.unpair` | 对端请本节点删掉它 |
 
 `NodeInfo = {runtime_id, name, relay_url, os}`，`name` 是对方机器名，只作首次显示名的默认值。
@@ -85,7 +87,7 @@
 - 机器列表取自 `peer.list`。启动时同步读一次（本机 socket，最多等 1.5 秒）；读不到（守护还没起来、是旧版本）就等连上本机运行时再读。之后本机运行时推 `peers.changed`（单独订阅，不进核心订阅）时重读，别的节点来配对、取消配对也会推。
 - 每台机器的客户端用 `SwitchConnector`：每次连接时看这台机器眼下走哪条路（经本机转发 / 旧直连）。迁移时就地换掉，已经开着的终端、对话拿的是同一个客户端，下次开流就走新的。
 - 连接质量：对端节点订 `peer_link_watch`；设置页露出来时用 `peer.link` 采样。系统睡醒调 `peer.reset`。
-- 添加机器调 `peer.pair`，删除调 `peer.remove`，改名、改系统、改中继调 `peer.update`。机器右键菜单加「允许本机智能体使用」开关（宿主命令 `smelt.app/set-machine-agent-access`，`Connection.agent_access`）。
+- 添加机器调 `peer.pair`，删除调 `peer.remove`，改名、改系统、改中继调 `peer.update`。机器右键菜单加「允许本机智能体使用」「允许它连入本机」两个开关（宿主命令 `smelt.app/set-machine-access`，`Connection.agent_access` / `Connection.inbound`）。
 - **迁移旧机器**：客户端库里的旧机器连上后，用旧身份调 `device.pair_begin` 拿配对码，交给本机 smeltd 走 `peer.pair`，再把这边的名字、系统写进去。然后就地换成经本机转发，删掉客户端库那一行，再用旧身份撤销旧设备；撤销会断开旧连接，订阅随之按断线重连，走的就是新链路。对方还不认 `node.pair`（旧版本）就先留着直连，等它升级后连上时再迁。
 - 本机 smeltd 还是旧版本（会话在跑、还没换守护）时，读不到 `peer.list`：所有机器照旧直连，新加的机器也按旧方式配对，等本机守护换上新版本后再自动迁。
 - 旧直连机器都迁完后，桌面自己的 iroh endpoint 就关掉、不再绑。客户端库的 `runtime_connection` 表和旧直连代码等都迁移完后再删（之后单独发一版）。
@@ -97,10 +99,10 @@
 - 地址：别的机器上的对话写成 `<runtime_id>/<会话 id>`；本机对话的 id 里没有 `/`。`session_send` 的 `to`、`session_read` 的 `sessionId` 照 `session_list` 给的原样填。
 - 发过去：本机门卫检查完，信照样进发件队列；投递线程经节点连接调对方的 `node.peer_deliver`（只收对端节点）。对方用自己的门卫和发件队列投进对话，权限档位、积压上限在那边比。对方收下，这边就算交出去了（`sent` 里是 `forwarded`）；对方投不进去，会把退信发回来。
 - 来源：交出去时，本机对话的 id 带上本机的 runtime id，对方收到的来源就是 `<本机 runtime_id>/<会话 id>`。收信端的提示里写着回给谁，照着回就送回来。对方只收来源是调用方自己那台机器上的对话，不能冒充别的机器。标题后面加上机器名。
-- 权限：智能体主动找别的机器（发、读、列），要用户在机器菜单里打开「允许本机智能体使用」。回给发消息过来的那个对话不需要。跳数预算跟着消息走。
+- 权限：智能体主动找别的机器（发、读、列），要用户在机器菜单里打开「允许本机智能体使用」，对方还要允许这台电脑连入（`inbound`）。通过信的一对对话之间回信这两项都不需要：本机对话发出去、收到过的都记着。跳数预算跟着消息走。
 - `session_list`：同时问允许智能体使用的那几台机器（`node.peer_list`），问不到的写在最后；`session_read` 经 `node.peer_read`。
 - `session_spawn` 只在本机：新对话照抄发起方的启动规格和项目路径，换台机器就不成立。
-- 只在内存里：「收到过谁的消息」最多记 1024 对，守护重启后就没了，那之后回信要用户允许过那台机器。
+- 只在内存里：「和谁通过信」最多记 1024 对，守护重启后就没了，那之后回信要用户开过那两项权限。
 
 ## 8 · 数据库
 
@@ -114,6 +116,7 @@ CREATE TABLE peer_node (
   relay_url    TEXT,
   os           TEXT,
   agent_access INTEGER NOT NULL DEFAULT 0 CHECK (agent_access IN (0, 1)),
+  inbound      INTEGER NOT NULL DEFAULT 0 CHECK (inbound IN (0, 1)),
   added_at_ms  INTEGER NOT NULL
 );
 ```

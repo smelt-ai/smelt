@@ -42,6 +42,7 @@ const EDIT_RELAY: api::Command<MachineMenuContext, ()> =
 const REMOVE: api::Command<MachineMenuContext, ()> = api::Command::new("smelt.machines/remove");
 const AGENT_ACCESS: api::Command<MachineMenuContext, ()> =
     api::Command::new("smelt.machines/agent-access");
+const INBOUND: api::Command<MachineMenuContext, ()> = api::Command::new("smelt.machines/inbound");
 
 /// 菜单项点了执行的那几条命令，和本插件别的命令一起登记（见 `crate::register_commands`）。
 pub(crate) fn commands() -> Vec<api::CommandSpec> {
@@ -68,23 +69,28 @@ pub(crate) fn commands() -> Vec<api::CommandSpec> {
             edit_relay(connection, window, cx);
             Ok(())
         }),
-        // 翻转：允许 ↔ 不允许。还没迁到本机运行时的机器没有这一项。
+        // 两项都是翻转：允许 ↔ 不允许。还没迁到本机运行时的机器没有这两项。
         AGENT_ACCESS.spec_async(text!("command.agent_access"), |args, _, cx| {
             let Some(allowed) = connection(&args.machine, cx).and_then(|c| c.agent_access) else {
                 return Task::ready(Err(api::machine_removed()));
             };
-            let target = api::SetMachineAgentAccess {
+            let target = api::SetMachineAccess {
                 machine: args.machine,
-                allowed: !allowed,
+                agents: Some(!allowed),
+                inbound: None,
             };
-            let changed = api::SET_MACHINE_AGENT_ACCESS.run(&target, cx);
-            cx.spawn(async move |cx| {
-                let result = changed.await;
-                if let Err(error) = &result {
-                    cx.update(|cx| notify_failure(&t!("agent_access.failed"), error.clone(), cx));
-                }
-                result
-            })
+            change_access(target, cx)
+        }),
+        INBOUND.spec_async(text!("command.inbound"), |args, _, cx| {
+            let Some(allowed) = connection(&args.machine, cx).and_then(|c| c.inbound) else {
+                return Task::ready(Err(api::machine_removed()));
+            };
+            let target = api::SetMachineAccess {
+                machine: args.machine,
+                agents: None,
+                inbound: Some(!allowed),
+            };
+            change_access(target, cx)
         }),
         REMOVE.spec(text!("command.remove"), |args, window, cx| {
             let (connection, window) = dialog_target(&args.machine, window, cx)?;
@@ -92,6 +98,18 @@ pub(crate) fn commands() -> Vec<api::CommandSpec> {
             Ok(())
         }),
     ]
+}
+
+/// 改权限，没成就发通知。
+fn change_access(target: api::SetMachineAccess, cx: &mut App) -> Task<Result<(), String>> {
+    let changed = api::SET_MACHINE_ACCESS.run(&target, cx);
+    cx.spawn(async move |cx| {
+        let result = changed.await;
+        if let Err(error) = &result {
+            cx.update(|cx| notify_failure(&t!("access_change.failed"), error.clone(), cx));
+        }
+        result
+    })
 }
 
 /// 开对话框要的：那台机器眼下的连接，和主窗口。
@@ -161,6 +179,20 @@ fn machine_items(connection: Connection) -> Vec<ContextMenuItem> {
             text!("menu.disallow_agents"),
             IconName::Bot,
             AGENT_ACCESS.id(),
+        )),
+        None => {}
+    }
+    // 它能不能连进来操作这台电脑，默认不许；不许时它只能回这边发过去的消息。
+    match connection.inbound {
+        Some(false) => items.push(item(
+            text!("menu.allow_inbound"),
+            IconName::ArrowDown,
+            INBOUND.id(),
+        )),
+        Some(true) => items.push(item(
+            text!("menu.disallow_inbound"),
+            IconName::ArrowDown,
+            INBOUND.id(),
         )),
         None => {}
     }

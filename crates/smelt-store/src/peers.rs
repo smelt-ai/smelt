@@ -3,7 +3,8 @@
 use crate::{PeerNodeRecord, StoreError};
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 
-const COLUMNS: &str = "runtime_id, endpoint_id, name, relay_url, os, agent_access, added_at_ms";
+const COLUMNS: &str =
+    "runtime_id, endpoint_id, name, relay_url, os, agent_access, inbound, added_at_ms";
 
 fn record(row: &Row<'_>) -> rusqlite::Result<PeerNodeRecord> {
     Ok(PeerNodeRecord {
@@ -13,7 +14,8 @@ fn record(row: &Row<'_>) -> rusqlite::Result<PeerNodeRecord> {
         relay_url: row.get(3)?,
         os: row.get(4)?,
         agent_access: row.get(5)?,
-        added_at_ms: row.get(6)?,
+        inbound: row.get(6)?,
+        added_at_ms: row.get(7)?,
     })
 }
 
@@ -48,7 +50,7 @@ pub(crate) fn put(transaction: &Transaction<'_>, peer: &PeerNodeRecord) -> Resul
         params![peer.runtime_id, peer.endpoint_id],
     )?;
     transaction.execute(
-        &format!("INSERT INTO peer_node ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"),
+        &format!("INSERT INTO peer_node ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"),
         params![
             peer.runtime_id,
             peer.endpoint_id,
@@ -56,6 +58,7 @@ pub(crate) fn put(transaction: &Transaction<'_>, peer: &PeerNodeRecord) -> Resul
             peer.relay_url,
             peer.os,
             peer.agent_access,
+            peer.inbound,
             peer.added_at_ms,
         ],
     )?;

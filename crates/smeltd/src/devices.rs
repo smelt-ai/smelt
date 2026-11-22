@@ -32,10 +32,12 @@ pub(crate) enum Principal {
     Device(String),
     /// 还没配对的远程设备，只能提交配对码。
     Unpaired(String),
-    /// 双向配对过的对端节点（见 [`crate::peer_nodes`]），权限同已配对设备。
+    /// 配对过的对端节点（见 [`crate::peer_nodes`]）。`inbound` 是本节点允许它连进来操作：
+    /// 允许时权限同已配对设备，不允许时只能把回给本节点对话的消息交过来。
     Peer {
         runtime_id: String,
         endpoint_id: String,
+        inbound: bool,
     },
 }
 
@@ -415,9 +417,10 @@ impl smelt_iroh::runtime::StreamAcceptor for RemoteStreams {
                 }
             };
             let principal = match (peer, is_paired(&remote)) {
-                (Some(runtime_id), _) => Principal::Peer {
+                (Some((runtime_id, inbound)), _) => Principal::Peer {
                     runtime_id,
                     endpoint_id: remote,
+                    inbound,
                 },
                 (None, Ok(true)) => {
                     if should_touch(&remote)

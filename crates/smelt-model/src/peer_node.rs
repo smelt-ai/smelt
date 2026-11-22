@@ -38,6 +38,10 @@ pub struct PeerNode {
     /// 本机智能体会话能不能经本节点转发到它。
     #[serde(default)]
     pub agent_access: bool,
+    /// 它能不能连进来操作本节点。不能时只收它回给本节点对话的消息（见 `node.peer_deliver`）。
+    /// 发配对码的一方同意了对方连入，扫码的一方默认不让对方连回来。
+    #[serde(default)]
+    pub inbound: bool,
     pub added_at_ms: i64,
 }
 
@@ -69,6 +73,8 @@ pub struct PeerUpdateParams {
     pub os: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_access: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound: Option<bool>,
 }
 
 /// 到一个对端的连接走的哪条路。

@@ -61,8 +61,9 @@ static CHAINS: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(Default::de
 /// 每个对话起过、还在（或正在建）的新对话。值里出现过的对话不能再起。
 static SPAWNED: LazyLock<Mutex<HashMap<String, Vec<String>>>> = LazyLock::new(Default::default);
 static OUTBOX: LazyLock<Mutex<Outbox>> = LazyLock::new(Default::default);
-/// 本机对话收到过别的机器上哪个对话的消息：（本机对话，带机器的来源）。回给它们不要求
-/// 智能体权限。只在内存里，按先后丢掉最早的。
+/// 本机对话和别的机器上哪个对话通过信：（本机对话，带机器的那一头），收到过、发出过都算。
+/// 这一对之间回信不要求本机智能体权限，也不要求对方被允许连入本机。只在内存里，按先后
+/// 丢掉最早的。
 static CONTACTS: LazyLock<Mutex<std::collections::VecDeque<(String, String)>>> =
     LazyLock::new(Default::default);
 
@@ -389,6 +390,8 @@ fn forward(
         .ok_or_else(|| "That machine is no longer paired with this computer".to_string())?;
     let own = own_runtime_id()?;
     let id = delivery.id.clone();
+    // 那边的对话可以回给这边发信的对话（那台机器没被允许连入本机时也行）。
+    remember_contact(&delivery.source_session_id, &format!("{runtime}/{session}"));
     delivery.source_session_id = qualify(&own, &delivery.source_session_id);
     crate::peer_nodes::peer_client(&machine)
         .call::<smelt_core::control_api::NodePeerDeliver>(
@@ -406,8 +409,10 @@ fn forward(
 
 /// 别的机器交来一条（`node.peer_deliver`），投给本机的对话 `to`。门卫规则同本机：对方不在、
 /// 权限档位不合、积压满了都拒收，发送方那边照常退信。来源必须是调用方那台机器上的对话。
+/// 本节点没允许它连入（`inbound`）时，只收回给本机对话的：`to` 之前和这个来源通过信。
 pub(crate) fn accept_remote(
     from_runtime: &str,
+    inbound: bool,
     params: smelt_core::peer_node::NodePeerDeliverParams,
     acp_sessions: &AcpSessions,
     subscribers: &EventHubHandle,
@@ -427,6 +432,12 @@ pub(crate) fn accept_remote(
     let Some(machine) = crate::peer_nodes::peer_record(from_runtime) else {
         return refuse(ControlErrorCode::PermissionDenied, "Not a paired machine");
     };
+    if !inbound && !contacted(&to, &delivery.source_session_id) {
+        return refuse(
+            ControlErrorCode::PermissionDenied,
+            "This machine only accepts replies from yours: it hasn't allowed your machine to message its conversations first",
+        );
+    }
     let Some(target) = lookup_peer(&to, acp_sessions) else {
         return refuse(
             ControlErrorCode::NotFound,
@@ -1954,6 +1965,7 @@ mod tests {
                 relay_url: None,
                 os: None,
                 agent_access,
+                inbound: true,
                 added_at_ms: 0,
             })
             .unwrap();
@@ -2012,6 +2024,7 @@ mod tests {
         let deliver = |source: &str, to: &str| {
             accept_remote(
                 "rt-sender",
+                true,
                 smelt_core::peer_node::NodePeerDeliverParams {
                     to: to.into(),
                     delivery: PeerDelivery {
@@ -2040,6 +2053,43 @@ mod tests {
             deliver("rt-sender/acp-s", "acp-missing"),
             ControlErrorCode::NotFound
         );
+    }
+
+    /// 没被允许连入本机的机器只能交回信：本机对话之前和它那个对话通过信。
+    #[test]
+    fn a_machine_not_allowed_in_can_only_deliver_replies() {
+        far_machine("rt-outsider", false);
+        let acp_sessions = crate::acp_host::new_test_acp_sessions();
+        let deliver = |to: &str| {
+            accept_remote(
+                "rt-outsider",
+                false,
+                smelt_core::peer_node::NodePeerDeliverParams {
+                    to: to.into(),
+                    delivery: PeerDelivery {
+                        id: format!("pm-outsider-{to}"),
+                        source_session_id: "rt-outsider/acp-s".into(),
+                        source_title: "far".into(),
+                        kind: PeerMessageKind::Completion,
+                        hops: 3,
+                        reply_to: None,
+                        text: "done".into(),
+                    },
+                    source_bypasses: false,
+                },
+                &acp_sessions,
+                &crate::new_event_hub(),
+            )
+            .unwrap_err()
+            .code
+        };
+        assert_eq!(
+            deliver("acp-never-wrote"),
+            ControlErrorCode::PermissionDenied
+        );
+        // 本机对话发过去之后，那边的回信过了这一关（对话不在，接着按找不到拒）。
+        remember_contact("acp-wrote", "rt-outsider/acp-s");
+        assert_eq!(deliver("acp-wrote"), ControlErrorCode::NotFound);
     }
 
     /// 别的机器列本机的对话：自己这台机器上的都列，不按来源排除。

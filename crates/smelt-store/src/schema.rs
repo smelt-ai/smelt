@@ -477,6 +477,7 @@ CREATE TABLE peer_node (
   relay_url TEXT,
   os TEXT,
   agent_access INTEGER NOT NULL DEFAULT 0 CHECK (agent_access IN (0, 1)),
+  inbound INTEGER NOT NULL DEFAULT 0 CHECK (inbound IN (0, 1)),
   added_at_ms INTEGER NOT NULL
 );
 CREATE TABLE push_registration (
@@ -1924,6 +1925,7 @@ CREATE TABLE peer_node (
   relay_url TEXT,
   os TEXT,
   agent_access INTEGER NOT NULL DEFAULT 0 CHECK (agent_access IN (0, 1)),
+  inbound INTEGER NOT NULL DEFAULT 0 CHECK (inbound IN (0, 1)),
   added_at_ms INTEGER NOT NULL
 );
 ";

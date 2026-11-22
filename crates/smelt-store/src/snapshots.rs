@@ -368,6 +368,8 @@ pub struct PeerNodeRecord {
     pub os: Option<String>,
     /// 本机智能体会话能不能经本节点转发到它。
     pub agent_access: bool,
+    /// 它能不能连进来操作本节点。不能时只收它回给本节点对话的消息。
+    pub inbound: bool,
     pub added_at_ms: i64,
 }
 

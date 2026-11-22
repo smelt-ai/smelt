@@ -163,9 +163,9 @@ command:
   set_machine_relay:
     en: "Change Remote Machine Relay"
     zh-CN: "改远程机器的中继"
-  set_machine_agent_access:
-    en: "Allow Agents to Use a Remote Machine"
-    zh-CN: "允许智能体使用远程机器"
+  set_machine_access:
+    en: "Change Remote Machine Access"
+    zh-CN: "改远程机器的权限"
   set_view_badge:
     en: "Set View Badge"
     zh-CN: "设视图角标"

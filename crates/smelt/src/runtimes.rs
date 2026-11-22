@@ -185,6 +185,8 @@ pub(crate) struct RemoteRuntime {
     watch: LinkWatchSlot,
     /// 本机智能体能不能经本机运行时用它。还没迁到本机运行时的旧直连机器是 `None`。
     pub(crate) agent_access: Option<bool>,
+    /// 它能不能连进来操作这台电脑。`None` 同上。
+    pub(crate) inbound: Option<bool>,
     /// 最近一次读到的连接路径和延迟。只在连着时有：连上时、iroh 换了路径时、设置停在机器
     /// 页或悬停在机器名上时读（见 [`sync_link_watch`]、[`sample_links`]），不定时读。
     pub(crate) link: Option<RuntimeLink>,
@@ -392,6 +394,7 @@ pub(crate) fn connections(cx: &gpui::App) -> smelt_plugin_api::Connections {
                 can_upgrade: runtime_can_upgrade(key, cx),
                 can_reconnect: runtime_can_reconnect(key, cx),
                 agent_access: remote.agent_access,
+                inbound: remote.inbound,
             }
         })
         .collect();
@@ -864,7 +867,7 @@ fn legacy_client(
 fn remote_entry(
     connection: smelt_client_store::RuntimeConnection,
     transport: Transport,
-    agent_access: Option<bool>,
+    access: Option<PeerAccess>,
 ) -> RemoteRuntime {
     let status = match &transport {
         Transport::Broken(error) => RuntimeStatus::Offline(error.clone()),
@@ -881,9 +884,26 @@ fn remote_entry(
         status,
         transport,
         watch: LinkWatchSlot::default(),
-        agent_access,
+        agent_access: access.map(|access| access.agents),
+        inbound: access.map(|access| access.inbound),
         link: None,
         upgrade_note: None,
+    }
+}
+
+/// 对端节点的两项权限，见 [`RemoteRuntime::agent_access`]、[`RemoteRuntime::inbound`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PeerAccess {
+    agents: bool,
+    inbound: bool,
+}
+
+impl PeerAccess {
+    fn of(peer: &smelt_model::peer_node::PeerNode) -> Self {
+        Self {
+            agents: peer.agent_access,
+            inbound: peer.inbound,
+        }
     }
 }
 
@@ -1197,11 +1217,12 @@ fn merge_peers(hub: &mut RuntimeHub, peers: Vec<smelt_model::peer_node::PeerNode
                 }
                 remote.connection = connection;
                 remote.agent_access = Some(peer.agent_access);
+                remote.inbound = Some(peer.inbound);
             }
             None => hub.remotes.push(remote_entry(
                 connection,
                 Transport::Peer,
-                Some(peer.agent_access),
+                Some(PeerAccess::of(&peer)),
             )),
         }
     }
@@ -1354,6 +1375,7 @@ fn maybe_migrate(key: &RuntimeKey, cx: &mut gpui::App) {
                                     relay_url: remote.connection.relay_url.clone(),
                                     os: remote.connection.os.clone(),
                                     agent_access: remote.agent_access.unwrap_or_default(),
+                                    inbound: remote.inbound.unwrap_or_default(),
                                     added_at_ms: remote.connection.added_at_ms,
                                 });
                             }
@@ -1690,7 +1712,7 @@ fn pair_peer(uri: &str) -> Result<RemoteRuntime, String> {
     let mut remote = remote_entry(
         peer_connection(&peer),
         Transport::Peer,
-        Some(peer.agent_access),
+        Some(PeerAccess::of(&peer)),
     );
     remote.status = status_of(remote.runtime.client());
     Ok(remote)
@@ -1765,10 +1787,12 @@ pub(crate) fn rename_runtime(runtime_id: String, name: String, cx: &mut gpui::Ap
     }
 }
 
-/// 允不允许本机智能体经本机运行时用这台机器。只有对端节点有这个设置。
-pub(crate) fn set_agent_access(
+/// 改一台机器的权限，只改给了的：本机智能体能不能经本机运行时用它（`agents`），它能不能
+/// 连进来操作这台电脑（`inbound`）。只有对端节点有这两项设置。
+pub(crate) fn set_machine_access(
     runtime_id: String,
-    allowed: bool,
+    agents: Option<bool>,
+    inbound: Option<bool>,
     cx: &mut gpui::App,
 ) -> gpui::Task<Result<(), String>> {
     let peer = remote_by_id(&runtime_id, cx).is_some_and(|remote| remote.transport.is_peer());
@@ -1785,7 +1809,8 @@ pub(crate) fn set_agent_access(
                         .call::<smelt_model::control_api::PeerUpdate>(
                             &smelt_model::peer_node::PeerUpdateParams {
                                 runtime_id,
-                                agent_access: Some(allowed),
+                                agent_access: agents,
+                                inbound,
                                 ..Default::default()
                             },
                             smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
@@ -1802,6 +1827,7 @@ pub(crate) fn set_agent_access(
                     .find(|remote| remote.connection.runtime_id == runtime_id)
                 {
                     remote.agent_access = Some(updated.agent_access);
+                    remote.inbound = Some(updated.inbound);
                 }
             });
         });
@@ -2112,6 +2138,7 @@ mod tests {
             relay_url: None,
             os: Some("linux".into()),
             agent_access,
+            inbound: false,
             added_at_ms: 1,
         }
     }
@@ -2140,7 +2167,14 @@ mod tests {
             remotes: vec![
                 legacy("moved"),
                 legacy("still-old"),
-                remote_entry(connection("unpaired"), Transport::Peer, Some(false)),
+                remote_entry(
+                    connection("unpaired"),
+                    Transport::Peer,
+                    Some(PeerAccess {
+                        agents: false,
+                        inbound: false,
+                    }),
+                ),
             ],
             ..Default::default()
         };
@@ -2160,6 +2194,7 @@ mod tests {
         let moved = &hub.remotes[0];
         assert!(moved.transport.is_peer());
         assert_eq!(moved.agent_access, Some(false));
+        assert_eq!(moved.inbound, Some(false));
         assert_eq!(
             moved.connection.name, "moved peer",
             "名字以本机运行时记的为准"
@@ -2760,7 +2795,11 @@ mod tests {
                 .any(|known| known.runtime_id == peer.runtime_id)
         );
 
-        let forwarded = remote_entry(peer_connection(&peer), Transport::Peer, Some(false));
+        let forwarded = remote_entry(
+            peer_connection(&peer),
+            Transport::Peer,
+            Some(PeerAccess::of(&peer)),
+        );
         assert!(
             devices(forwarded.runtime.client()).contains(&me),
             "迁完、撤销之前旧设备还在"

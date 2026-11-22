@@ -1790,7 +1790,12 @@ fn peer_message_call(
     event_hub: &EventHubHandle,
 ) -> Result<serde_json::Value, ControlError> {
     use smelt_core::peer_node::{NodePeerDeliverParams, NodePeerListParams, NodePeerReadParams};
-    let crate::devices::Principal::Peer { runtime_id, .. } = principal else {
+    let crate::devices::Principal::Peer {
+        runtime_id,
+        inbound,
+        ..
+    } = principal
+    else {
         return Err(ControlError::new(
             ControlErrorCode::PermissionDenied,
             "Only a paired machine can exchange conversation messages",
@@ -1800,7 +1805,13 @@ fn peer_message_call(
     match method {
         ControlMethod::NodePeerDeliver => {
             let params = decode_params::<NodePeerDeliverParams>(params)?;
-            crate::peer_messages::accept_remote(runtime_id, params, acp_sessions, event_hub)?;
+            crate::peer_messages::accept_remote(
+                runtime_id,
+                *inbound,
+                params,
+                acp_sessions,
+                event_hub,
+            )?;
             encode(serde_json::json!({}))
         }
         ControlMethod::NodePeerList => {
