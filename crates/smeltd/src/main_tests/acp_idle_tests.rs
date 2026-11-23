@@ -667,7 +667,7 @@ fn a_recently_active_conversation_sets_the_next_wake() {
     let before = crate::event_hub::now_ms();
     let idle_after = acp_idle::ACP_IDLE_SUSPEND_AFTER.as_millis() as u64;
     let sweep =
-        acp_idle::suspend_idle_acp_sessions(&acp_sessions, acp_idle::ACP_IDLE_SUSPEND_AFTER);
+        acp_idle::suspend_idle_acp_sessions(&acp_sessions, acp_idle::ACP_IDLE_SUSPEND_AFTER, 0);
     let deadline = sweep.next_deadline_ms.expect("还没闲置够的会话要排上截止");
     // 会话建好时记的活动早于 `before`，截止落在 `before` 加闲置期前后，差不过一秒。
     assert!(
@@ -684,7 +684,7 @@ fn a_blocked_conversation_past_its_deadline_waits_for_activity() {
     acp_sessions.reserve_with("acp-idle-blocked", || {
         make_acp_session_value("acp-idle-blocked", quiet_state())
     });
-    let sweep = acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO);
+    let sweep = acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO, 0);
     assert_eq!(
         sweep.next_deadline_ms, None,
         "没有 runtime 的会话不排截止，下次拉起会记活动"
@@ -698,7 +698,7 @@ fn a_busy_lifecycle_lock_is_retried_later() {
     let (session, _cmd_rx) = direct_session(quiet_state());
     let (slot, _) = acp_sessions.reserve_with("acp-idle-contended", || session);
     let _held = slot.lifecycle.lock();
-    let sweep = acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO);
+    let sweep = acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO, 0);
     assert!(sweep.contended, "抢不到生命周期锁要稍后重试");
     assert!(!slot.value.idle.is_suspended());
 }
@@ -721,7 +721,7 @@ fn suspending_trims_the_transcript_to_the_current_turn() {
         },
     ]);
     let (slot, _) = acp_sessions.reserve_with("acp-idle", || session);
-    let sweep = acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO);
+    let sweep = acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO, 0);
     assert!(!sweep.contended);
     let reduced = slot.value.reduced.lock();
     assert_eq!(reduced.entries_base(), 2);
@@ -736,7 +736,7 @@ fn waking_without_a_launch_spec_stays_suspended() {
     let acp_sessions = new_test_acp_sessions();
     let (session, _cmd_rx) = direct_session(quiet_state());
     let (slot, _) = acp_sessions.reserve_with("acp-idle", || session);
-    acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO);
+    acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO, 0);
     assert!(slot.value.idle.is_suspended());
     let error =
         acp_idle::wake_suspended_acp_session("acp-idle", &slot, &acp_sessions, &new_event_hub())
@@ -798,4 +798,388 @@ fn user_input_to_a_stopped_conversation_relaunches_it() {
         acp_idle::launch_for_user_input("acp-stopped", &slot, &acp_sessions, &new_event_hub())
             .unwrap_err();
     assert!(error.contains("no launch spec"), "{error}");
+}
+
+fn reserve_live_session(
+    acp_sessions: &AcpSessions,
+    id: &str,
+    reduced: AcpSessionState,
+    last_activity_ms: u64,
+) -> (
+    Arc<AcpSlot<AcpSession>>,
+    smol::channel::Receiver<smelt_core::acp_conn::ConversationCommand>,
+) {
+    let (session, cmd_rx) = direct_session(reduced);
+    session.idle.set_last_activity_ms(last_activity_ms);
+    let (slot, _) = acp_sessions.reserve_with(id, || session);
+    (slot, cmd_rx)
+}
+
+#[test]
+fn sessions_within_the_warm_limit_are_never_suspended() {
+    let acp_sessions = new_test_acp_sessions();
+    let now = crate::event_hub::now_ms();
+    let old = now.saturating_sub(60 * 60 * 1_000);
+    let mut slots = Vec::new();
+    let mut rxs = Vec::new();
+    for i in 0..acp_idle::ACP_IDLE_KEEP_WARM {
+        let (slot, rx) = reserve_live_session(
+            &acp_sessions,
+            &format!("acp-warm-{i}"),
+            quiet_state(),
+            old + (i as u64) * 1_000,
+        );
+        slots.push(slot);
+        rxs.push(rx);
+    }
+
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        acp_idle::ACP_IDLE_KEEP_WARM,
+    );
+    assert_eq!(sweep.next_deadline_ms, None, "保底名额内不排定时唤醒");
+    assert!(!sweep.contended);
+    for (i, slot) in slots.iter().enumerate() {
+        assert!(
+            !slot.value.idle.is_suspended(),
+            "第 {i} 个会话在保底名额内，不应挂起"
+        );
+    }
+}
+
+#[test]
+fn excess_sessions_are_suspended_oldest_activity_first() {
+    let acp_sessions = new_test_acp_sessions();
+    let now = crate::event_hub::now_ms();
+    let min_ms = 60 * 1_000;
+    // 故意乱序插入：最老的两个是 s-oldest(50m) 和 s-second(40m)，其余 5 个较新（即使部分也超过 20m）。
+    let specs = [
+        ("acp-s3", 30 * min_ms),
+        ("acp-oldest", 50 * min_ms),
+        ("acp-s6", 5 * min_ms),
+        ("acp-s4", 25 * min_ms),
+        ("acp-second", 40 * min_ms),
+        ("acp-s5", 10 * min_ms),
+        ("acp-s7", min_ms),
+    ];
+    let mut slots = std::collections::HashMap::new();
+    let mut rxs = Vec::new();
+    for (id, age_ms) in specs {
+        let (slot, rx) =
+            reserve_live_session(&acp_sessions, id, quiet_state(), now.saturating_sub(age_ms));
+        slots.insert(id, slot);
+        rxs.push(rx);
+    }
+
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        acp_idle::ACP_IDLE_KEEP_WARM,
+    );
+    assert_eq!(sweep.next_deadline_ms, None, "回收完剩 5 个，不再排截止");
+    assert!(!sweep.contended);
+    assert!(slots["acp-oldest"].value.idle.is_suspended());
+    assert!(slots["acp-second"].value.idle.is_suspended());
+    for keep in ["acp-s3", "acp-s4", "acp-s5", "acp-s6", "acp-s7"] {
+        assert!(
+            !slots[keep].value.idle.is_suspended(),
+            "{keep} 属于最近活动的 5 个，应保留热态"
+        );
+    }
+}
+
+#[test]
+fn excess_sessions_still_wait_for_the_idle_timeout() {
+    let acp_sessions = new_test_acp_sessions();
+    let now = crate::event_hub::now_ms();
+    let min_ms = 60 * 1_000;
+    let second_activity = now.saturating_sub(10 * min_ms);
+    let specs = [
+        ("acp-oldest", now.saturating_sub(30 * min_ms)),
+        ("acp-second", second_activity),
+        ("acp-s3", now.saturating_sub(5 * min_ms)),
+        ("acp-s4", now.saturating_sub(4 * min_ms)),
+        ("acp-s5", now.saturating_sub(3 * min_ms)),
+        ("acp-s6", now.saturating_sub(2 * min_ms)),
+        ("acp-s7", now.saturating_sub(min_ms)),
+    ];
+    let mut slots = std::collections::HashMap::new();
+    let mut rxs = Vec::new();
+    for (id, activity) in specs {
+        let (slot, rx) = reserve_live_session(&acp_sessions, id, quiet_state(), activity);
+        slots.insert(id, slot);
+        rxs.push(rx);
+    }
+
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        acp_idle::ACP_IDLE_KEEP_WARM,
+    );
+    assert!(slots["acp-oldest"].value.idle.is_suspended());
+    assert!(
+        !slots["acp-second"].value.idle.is_suspended(),
+        "超出名额但未满 20 分钟闲置，不能提前挂起"
+    );
+    assert_eq!(
+        sweep.next_deadline_ms,
+        Some(acp_idle::idle_deadline_ms(
+            second_activity,
+            acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        )),
+        "下一次唤醒应排在超出名额且最早到点的那条会话"
+    );
+    assert!(!sweep.contended);
+}
+
+#[test]
+fn busy_sessions_count_toward_the_warm_pool_without_being_suspended() {
+    let acp_sessions = new_test_acp_sessions();
+    let now = crate::event_hub::now_ms();
+    let min_ms = 60 * 1_000;
+    let mut rxs = Vec::new();
+
+    // 1 个挂着后台任务且很老的会话 + 4 个思考中的会话 = 5 个不可挂起的活会话。
+    let running_task = quiet_with(|state| {
+        state.background_tasks = vec![BackgroundTaskView {
+            id: "bg".into(),
+            title: "bg".into(),
+            command: "sleep 60".into(),
+            status: BackgroundTaskStatus::Running,
+            exit_code: None,
+            output: String::new(),
+            started_at_ms: 0,
+            finished_at_ms: None,
+        }];
+    });
+    let (bg_slot, rx) = reserve_live_session(
+        &acp_sessions,
+        "acp-bg-old",
+        running_task,
+        now.saturating_sub(60 * min_ms),
+    );
+    rxs.push(rx);
+
+    let mut thinking_slots = Vec::new();
+    for i in 0..4u64 {
+        let (slot, rx) = reserve_live_session(
+            &acp_sessions,
+            &format!("acp-busy-{i}"),
+            quiet_with(|state| state.phase = DaemonPhase::Thinking),
+            now.saturating_sub((i + 1) * 1_000),
+        );
+        thinking_slots.push(slot);
+        rxs.push(rx);
+    }
+
+    // 第 6 个是闲置 30 分钟的空闲会话：因为忙碌会话已占满 5 个，它会被回收。
+    let (idle_slot, rx) = reserve_live_session(
+        &acp_sessions,
+        "acp-idle-extra",
+        quiet_state(),
+        now.saturating_sub(30 * min_ms),
+    );
+    rxs.push(rx);
+
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        acp_idle::ACP_IDLE_KEEP_WARM,
+    );
+    assert!(!bg_slot.value.idle.is_suspended());
+    for slot in &thinking_slots {
+        assert!(!slot.value.idle.is_suspended());
+    }
+    assert!(
+        idle_slot.value.idle.is_suspended(),
+        "活会话总数超 5，跳过不可挂起的忙碌会话后应回收空闲会话"
+    );
+    assert_eq!(sweep.next_deadline_ms, None);
+}
+
+#[test]
+fn automation_dead_and_suspended_sessions_do_not_consume_warm_slots() {
+    let acp_sessions = new_test_acp_sessions();
+    let now = crate::event_hub::now_ms();
+    let old = now.saturating_sub(60 * 60 * 1_000);
+    let mut rxs = Vec::new();
+
+    // 5 个闲置很久的互动会话。
+    let mut kept = Vec::new();
+    for i in 0..acp_idle::ACP_IDLE_KEEP_WARM {
+        let (slot, rx) = reserve_live_session(
+            &acp_sessions,
+            &format!("acp-keep-{i}"),
+            quiet_state(),
+            old + (i as u64) * 1_000,
+        );
+        kept.push(slot);
+        rxs.push(rx);
+    }
+
+    // 先挂起 1 个更老的会话，让注册表里确实存在已挂起槽位。
+    let (susp_slot, rx) = reserve_live_session(
+        &acp_sessions,
+        "acp-already-suspended",
+        quiet_state(),
+        old.saturating_sub(10_000),
+    );
+    rxs.push(rx);
+    acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        acp_idle::ACP_IDLE_KEEP_WARM,
+    );
+    assert!(susp_slot.value.idle.is_suspended());
+
+    // 再塞 2 个活自动化会话和 2 个无 runtime 的已停会话：都不该挤掉 5 个保底名额。
+    for i in 0..2 {
+        let (slot, rx) = reserve_live_session(
+            &acp_sessions,
+            &format!("acp-automation-{i}"),
+            quiet_state(),
+            now,
+        );
+        *slot.value.conversation_binding.lock() =
+            Some(smelt_core::conversation::ConversationBinding::Automation {
+                run_id: format!("run-{i}"),
+            });
+        rxs.push(rx);
+        acp_sessions.reserve_with(&format!("acp-dead-{i}"), || {
+            make_acp_session_value(&format!("acp-dead-{i}"), quiet_state())
+        });
+    }
+
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        acp_idle::ACP_IDLE_KEEP_WARM,
+    );
+    assert_eq!(sweep.next_deadline_ms, None);
+    for (i, slot) in kept.iter().enumerate() {
+        assert!(
+            !slot.value.idle.is_suspended(),
+            "第 {i} 个互动会话不应被自动化/已停/已挂起会话挤出保底名额"
+        );
+    }
+}
+
+#[test]
+fn contended_oldest_session_does_not_evict_a_newer_session() {
+    let acp_sessions = new_test_acp_sessions();
+    let now = crate::event_hub::now_ms();
+    let min_ms = 60 * 1_000;
+    let mut slots = Vec::new();
+    let mut rxs = Vec::new();
+    for i in 0..7u64 {
+        let (slot, rx) = reserve_live_session(
+            &acp_sessions,
+            &format!("acp-s{i}"),
+            quiet_state(),
+            now.saturating_sub((60 - i * 5) * min_ms),
+        );
+        slots.push(slot);
+        rxs.push(rx);
+    }
+    // 7 个活会话（超出 2 个）：最老的 s0 锁冲突占住 1 个名额，次老的 s1 应照常挂起，
+    // 第 3 老的 s2 不应被越级挂起。
+    let _held = slots[0].lifecycle.lock();
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        acp_idle::ACP_IDLE_KEEP_WARM,
+    );
+    assert!(sweep.contended);
+    assert!(!slots[0].value.idle.is_suspended());
+    assert!(slots[1].value.idle.is_suspended(), "次老的 s1 应照常挂起");
+    for (i, slot) in slots.iter().enumerate().skip(2) {
+        assert!(
+            !slot.value.idle.is_suspended(),
+            "最老会话锁冲突时不应越过它去挂起更新的会话 s{i}"
+        );
+    }
+}
+
+#[test]
+fn busy_oldest_session_still_schedules_next_idle_deadline() {
+    let acp_sessions = new_test_acp_sessions();
+    let now = crate::event_hub::now_ms();
+    let min_ms = 60 * 1_000;
+    let mut rxs = Vec::new();
+
+    let (busy_old, rx) = reserve_live_session(
+        &acp_sessions,
+        "acp-busy-old",
+        quiet_with(|state| state.phase = DaemonPhase::Thinking),
+        now.saturating_sub(40 * min_ms),
+    );
+    rxs.push(rx);
+
+    let next_idle_activity = now.saturating_sub(10 * min_ms);
+    let (next_idle, rx) = reserve_live_session(
+        &acp_sessions,
+        "acp-idle-next",
+        quiet_state(),
+        next_idle_activity,
+    );
+    rxs.push(rx);
+
+    for i in 0..4u64 {
+        let (_, rx) = reserve_live_session(
+            &acp_sessions,
+            &format!("acp-fresh-{i}"),
+            quiet_state(),
+            now.saturating_sub((i + 1) * min_ms),
+        );
+        rxs.push(rx);
+    }
+
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        acp_idle::ACP_IDLE_KEEP_WARM,
+    );
+    assert!(!busy_old.value.idle.is_suspended());
+    assert!(!next_idle.value.idle.is_suspended());
+    assert_eq!(
+        sweep.next_deadline_ms,
+        Some(acp_idle::idle_deadline_ms(
+            next_idle_activity,
+            acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        )),
+        "跳过最老的忙碌会话后，应排上最近要到期的空闲会话截止"
+    );
+}
+
+#[test]
+fn updating_activity_reorders_eviction_priority() {
+    let acp_sessions = new_test_acp_sessions();
+    let now = crate::event_hub::now_ms();
+    let min_ms = 60 * 1_000;
+    let mut slots = Vec::new();
+    let mut rxs = Vec::new();
+    for i in 0..6u64 {
+        let (slot, rx) = reserve_live_session(
+            &acp_sessions,
+            &format!("acp-s{i}"),
+            quiet_state(),
+            now.saturating_sub((60 - i * 5) * min_ms),
+        );
+        slots.push(slot);
+        rxs.push(rx);
+    }
+    // 原本最老的 s0 刚有了新活动，现在次老的 s1 应当成为被回收的那个。
+    slots[0].value.idle.touch();
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+        acp_idle::ACP_IDLE_KEEP_WARM,
+    );
+    assert_eq!(sweep.next_deadline_ms, None);
+    assert!(!slots[0].value.idle.is_suspended(), "刚活动的 s0 应保留");
+    assert!(slots[1].value.idle.is_suspended(), "此时最老的 s1 应被回收");
+    for slot in &slots[2..] {
+        assert!(!slot.value.idle.is_suspended());
+    }
 }
