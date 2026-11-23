@@ -15,7 +15,6 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -157,7 +156,7 @@ async fn send(
             "the title, subtitle or summary is too long",
         );
     }
-    if !state.limiter.allow(&device.token, Instant::now()) {
+    if !state.limiter.allow(&device.token) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             "too many pushes for this phone",

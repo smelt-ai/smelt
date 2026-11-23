@@ -891,28 +891,39 @@ fn cursor_state_db_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// 只读打开 Cursor 的 VS Code 状态库，取出登录 accessToken。用系统
-/// `sqlite3`，避免给 smelt-core 再加一份 native sqlite 依赖。
+/// 只读打开 Cursor 的 VS Code 状态库，取出登录 accessToken。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 fn read_cursor_token_from_db(path: &Path) -> Option<String> {
     if !path.is_file() {
         return None;
     }
-    let uri = format!("file:{}?mode=ro", path.display());
-    let output = Command::new("sqlite3")
-        .args([
-            "-batch",
-            "-noheader",
-            &uri,
-            "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1;",
-        ])
-        .output()
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    conn.busy_timeout(std::time::Duration::from_millis(250))
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let token = String::from_utf8(output.stdout).ok()?;
-    let token = token.trim();
+    let raw = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken' LIMIT 1",
+            [],
+            |row| match row.get_ref(0)? {
+                rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => {
+                    Ok(std::str::from_utf8(bytes).ok().map(str::to_owned))
+                }
+                _ => Ok(None),
+            },
+        )
+        .ok()
+        .flatten()?;
+    let token = raw.trim();
     (!token.is_empty()).then(|| token.to_string())
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn read_cursor_token_from_db(_path: &Path) -> Option<String> {
+    None
 }
 
 /// 从 Grok CLI 的 `auth.json` 里挑出 grok.com 会话 bearer。
@@ -1472,5 +1483,47 @@ mod tests {
     fn ignores_cursor_payload_without_usage() {
         assert_eq!(parse_cursor_quota(r#"{}"#).unwrap(), None);
         assert_eq!(parse_cursor_quota(r#"{"planUsage":{}}"#).unwrap(), None);
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[test]
+    fn reads_cursor_token_from_db_even_with_query_char_in_path() {
+        let dir = std::env::temp_dir().join(format!("smelt-cursor-db-{}?v1", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("state.vscdb");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB);
+             INSERT INTO ItemTable VALUES ('cursorAuth/accessToken', '  tok-123  ');",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            read_cursor_token_from_db(&db).as_deref(),
+            Some("tok-123"),
+            "含 ? 的路径也应通过 rusqlite 正常只读取出 token"
+        );
+        // 兼容 BLOB 形式存储的 UTF-8 令牌
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE ItemTable SET value = X'626c6f622d746f6b' WHERE key = 'cursorAuth/accessToken'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(read_cursor_token_from_db(&db).as_deref(), Some("blob-tok"));
+        // 空值与不存在的库返回 None
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE ItemTable SET value = '   ' WHERE key = 'cursorAuth/accessToken'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(read_cursor_token_from_db(&db), None);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(read_cursor_token_from_db(&db), None);
     }
 }

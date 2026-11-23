@@ -178,27 +178,40 @@ fn stash_count_with(subprocess: &dyn Subprocess, root: &str) -> u32 {
         .unwrap_or(0)
 }
 
-fn diff_shortstat_with(subprocess: &dyn Subprocess, root: &str) -> (u32, u32) {
-    let Some(out) = run_git_with(subprocess, root, &["diff", "HEAD", "--shortstat"])
+fn diff_numstat_with(subprocess: &dyn Subprocess, root: &str) -> (u32, u32) {
+    let Some(out) = run_git_with(subprocess, root, &["diff", "HEAD", "--numstat", "-z"])
         .ok()
         .filter(Output::success)
     else {
         return (0, 0);
     };
-    let mut insertions = 0;
-    let mut deletions = 0;
-    for part in String::from_utf8_lossy(&out.stdout).trim().split(',') {
-        let part = part.trim();
-        if let Some(value) = part
-            .strip_suffix("insertion(+)")
-            .or_else(|| part.strip_suffix("insertions(+)"))
-        {
-            insertions = value.trim().parse().unwrap_or(0);
-        } else if let Some(value) = part
-            .strip_suffix("deletion(-)")
-            .or_else(|| part.strip_suffix("deletions(-)"))
-        {
-            deletions = value.trim().parse().unwrap_or(0);
+    parse_numstat_z(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// 解析 `git diff --numstat -z` 的机器可读输出，不受系统 locale 语言影响。
+///
+/// 普通条目为 `<added>\t<deleted>\t<path>\0`（二进制文件计数为 `-`）；
+/// 重命名/复制条目为 `<added>\t<deleted>\t\0<old_path>\0<new_path>\0`。
+fn parse_numstat_z(text: &str) -> (u32, u32) {
+    let mut insertions = 0u32;
+    let mut deletions = 0u32;
+    let mut records = text.split('\0');
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let Some((added, rest)) = record.split_once('\t') else {
+            continue;
+        };
+        let Some((deleted, path)) = rest.split_once('\t') else {
+            continue;
+        };
+        insertions = insertions.saturating_add(added.parse::<u32>().unwrap_or(0));
+        deletions = deletions.saturating_add(deleted.parse::<u32>().unwrap_or(0));
+        if path.is_empty() {
+            // 重命名/复制：跳过紧随其后的旧路径与新路径两段。
+            records.next();
+            records.next();
         }
     }
     (insertions, deletions)
@@ -209,7 +222,7 @@ pub fn load_git_status_with(subprocess: &dyn Subprocess, root: &str) -> GitStatu
         return GitStatusData::default();
     };
     status.stash_count = stash_count_with(subprocess, root);
-    (status.insertions, status.deletions) = diff_shortstat_with(subprocess, root);
+    (status.insertions, status.deletions) = diff_numstat_with(subprocess, root);
     status
 }
 
@@ -1293,5 +1306,86 @@ husky - pre-commit hook exited with code 127 (error)"
             "子仓内部文件归子仓自己那一组：{:?}",
             status.files
         );
+    }
+
+    #[test]
+    fn diff_stats_ignore_localized_shortstat_and_read_numstat() {
+        let status_args = [
+            "-C",
+            "/repo",
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "-b",
+            "-z",
+        ];
+        let shortstat_args = [
+            "-C",
+            "/repo",
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "HEAD",
+            "--shortstat",
+        ];
+        let numstat_args = [
+            "-C",
+            "/repo",
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "HEAD",
+            "--numstat",
+            "-z",
+        ];
+        let subprocess = MockSubprocess::new()
+            .when(
+                "git",
+                &status_args,
+                Output {
+                    code: Some(0),
+                    stdout: b"## main\0 M src/lib.rs\0".to_vec(),
+                    stderr: Vec::new(),
+                },
+            )
+            // 非英文 locale 下 shortstat 会本地化，不能依赖它
+            .when(
+                "git",
+                &shortstat_args,
+                Output {
+                    code: Some(0),
+                    stdout: " 1 个文件被修改，插入 3 行(+)，删除 2 行(-)\n"
+                        .as_bytes()
+                        .to_vec(),
+                    stderr: Vec::new(),
+                },
+            )
+            .when(
+                "git",
+                &numstat_args,
+                Output {
+                    code: Some(0),
+                    stdout: b"3\t2\tsrc/lib.rs\0-\t-\timg.png\x001\t4\t\0old.rs\0new.rs\0".to_vec(),
+                    stderr: Vec::new(),
+                },
+            );
+        let status = load_git_status_with(&subprocess, "/repo");
+        assert_eq!((status.insertions, status.deletions), (4, 6));
+    }
+
+    #[test]
+    fn load_git_status_counts_real_repo_insertions_and_deletions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = init_repo(tmp.path());
+        std::fs::write(Path::new(&root).join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        run_git(&root, &["add", "a.txt"]).unwrap();
+        run_git(&root, &["commit", "-qm", "init"]).unwrap();
+
+        // 删一行（two）、改一行（three -> THREE）并增一行（four）=> +2, -2
+        std::fs::write(Path::new(&root).join("a.txt"), "one\nTHREE\nfour\n").unwrap();
+        let status = load_git_status(&root);
+        assert_eq!((status.insertions, status.deletions), (2, 2));
     }
 }

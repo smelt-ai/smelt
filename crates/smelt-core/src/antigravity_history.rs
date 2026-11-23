@@ -84,7 +84,7 @@ fn open_readonly(path: &Path) -> Option<rusqlite::Connection> {
 /// 读出索引表里属于 `want_cwd` 这个项目的会话。
 ///
 /// 过滤按 `workspace_uris` 做：它是一段 JSON 数组文本，形如
-/// `["file:///Users/x/proj"]`。这里不引 JSON 解析，直接比对解码后的路径集合。
+/// `["file:///Users/x/proj"]`。解析后比对本机路径集合。
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub fn list_conversations(override_dir: Option<&str>, want_cwd: &str) -> Vec<ConversationRow> {
     let Some(conn) = open_readonly(&summaries_db(override_dir)) else {
@@ -160,37 +160,19 @@ pub fn workspace_matches(workspace_uris: &str, want_cwd: &str) -> bool {
         .any(|path| path == want_cwd)
 }
 
-/// 从 `["file:///a/b", ...]` 这段文本里取出本地路径。
+/// 从 `["file:///a/b", ...]` 这段 JSON 数组文本里取出本机路径。
 ///
-/// 手写扫描而不是拉 JSON 依赖：这里的形状固定且简单，真正需要处理的是
-/// percent-encoding（路径里有空格/中文时 agy 会编码）。
+/// 经 `serde_json` + `url::Url::to_file_path` 规范解码，正确处理路径中的逗号、方括号、
+/// 百分号编码与 Windows 盘符 `file:///C:/...`（含 `c%3A`）。
 pub fn workspace_uris_paths(workspace_uris: &str) -> Vec<String> {
-    workspace_uris
-        .split(['[', ']', ',', '"'])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.strip_prefix("file://"))
-        .map(percent_decode)
+    let Ok(uris) = serde_json::from_str::<Vec<String>>(workspace_uris) else {
+        return Vec::new();
+    };
+    uris.iter()
+        .filter_map(|uri| url::Url::parse(uri.trim()).ok())
+        .filter_map(|url| url.to_file_path().ok())
+        .filter_map(|path| path.into_os_string().into_string().ok())
         .collect()
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
 }
 
 // ===================== steps 正文 =====================
@@ -518,6 +500,14 @@ mod tests {
         let uris = r#"["file:///Users/a/one","file:///Users/a/two"]"#;
         assert!(workspace_matches(uris, "/Users/a/one"));
         assert!(workspace_matches(uris, "/Users/a/two"));
+    }
+
+    #[test]
+    fn workspace_路径支持逗号方括号与json转义() {
+        let uris = r#"["file:///Users/a/proj,v2","file:///Users/a/%5Bdraft%5D","file:///Users/a/sub\/dir"]"#;
+        assert!(workspace_matches(uris, "/Users/a/proj,v2"));
+        assert!(workspace_matches(uris, "/Users/a/[draft]"));
+        assert!(workspace_matches(uris, "/Users/a/sub/dir"));
     }
 
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
