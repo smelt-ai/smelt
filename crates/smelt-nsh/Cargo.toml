@@ -1,5 +1,5 @@
-# 试点：把 NSH（longbridge/nsh）的界面嵌进 smelt，看插件层换成 NSH 行不行得通。
-# 一块 TSX 写的面板（`pilot/` 外壳 + `pilot-plugins/` 插件），运行时打包，登记成一个视图，从入口列表打开。
+# Smelt 的 NSH（longbridge/nsh）A2 主窗口外壳与插件运行时。
+# 主壳 `shell/MainShell.tsx` 与 `plugins/`、用户插件目录均在运行时打包热重载。
 [package]
 name = "smelt-nsh"
 version.workspace = true
@@ -14,39 +14,48 @@ workspace = true
 gpui = { package = "gpui-fast", version = "=0.1.17" }
 smelt-ui = { path = "../smelt-ui" }
 smelt-buddy = { path = "../smelt-buddy" }
+smelt-desktop = { path = "../smelt-desktop" }
+smelt-terminal = { path = "../smelt-terminal" }
 smelt-plugin-api = { path = "../smelt-plugin-api" }
-# 只要跑 JS 的那部分：网页视图、编辑器、终端、图表这些默认特性都不要。
-nsh-platform-gpui = { version = "=0.6.1", default-features = false, features = ["js"] }
-nsh-core = "=0.6.1"
+# 跑 JS + SVG + 一等文本/代码/差异视图（`Editor`、`DiffView`、`TextView` + `syntect` 语法高亮）。
+nsh-platform-gpui = { version = "=0.6.1", default-features = false, features = ["js", "svg", "editor", "highlight"] }
+nsh-core = { version = "=0.6.1", features = ["svg"] }
 # `Policy`：平台 crate 没有再导出。
 nsh-engine = { version = "=0.6.1", default-features = false, features = ["js-core"] }
-nsh-base = { version = "=0.6.1", default-features = false }
+nsh-base = { version = "=0.6.1", default-features = false, features = ["editor", "highlight"] }
 # NSH 带进 gpui-fast-platform；和 smelt 一样开 runtime_shaders，单独编这个 crate 时也不用装完整 Xcode。
 gpui_platform = { package = "gpui-fast-platform", version = "=0.1.17", default-features = false, features = ["runtime_shaders"] }
 # 运行时打包插件（`src/plugins.rs`）：用户装、改插件不用重编 App。
 nsh-bundler = { version = "=0.6.1", features = ["bundle"] }
-# 只读校验打包产物里剩下的外部 import（`src/plugins.rs`），不做改写；和 nsh-bundler 用同一版解析器。
-oxc = "=0.153.0"
+# 只读校验打包产物里剩下的外部 import 与未声明自由标识符（`src/plugins.rs`），不做改写；和 nsh-bundler 用同一版解析器。
+oxc = { version = "=0.153.0", features = ["semantic"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 盯插件目录（src/live.rs），和宿主同一版。
+# 盯插件目录热重载（`src/manifest.rs`），和宿主同一版。
 notify = "8"
 # 插件目录里 locales/ 的文案，和 smelt-plugin-api 用同一个加载函数读。
 rust-i18n-support = { version = "4.2", features = ["codegen"] }
 tokio = { version = "1", default-features = false, features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
+# 给插件按文本生成二维码矩阵（纯算法、不带图像编码依赖）。
+qrcode = { version = "0.14", default-features = false }
+# 跨平台在 PATH（含 Windows PATHEXT）中定位可执行文件（`os_apps.rs`）。
+which = "8"
+
+# macOS：通过 Launch Services 探测本机 `.app` 并读取应用图标（`os_apps.rs`）。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
 
 [build-dependencies]
-# `pilot/` 照 `nsh build` 打包、编成字节码，见 build.rs。
+# `bench/` 入口照 `nsh build` 打包、编成字节码给 `examples/bench.rs`，见 build.rs。
 nsh-bundler = { version = "=0.6.1", features = ["bundle"] }
 nsh-core = "=0.6.1"
 nsh-js = "=0.6.1"
 nsh-base = { version = "=0.6.1", default-features = false }
 
 [dev-dependencies]
-# tests/plugins.rs：在测试平台的窗口里跑真引擎。
+# tests/*.rs：在测试平台的窗口里跑真引擎。
 gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }
-# src/tests.rs：真按钮要它的全局状态；和 smelt-ui 同一版。
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
 # examples/bench.rs：量 CPU 时间、接 NSH 的帧统计日志。
 libc = "0.2"
 log = "0.4"

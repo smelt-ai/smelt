@@ -88,7 +88,7 @@ version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b5d307320b3181d6d7954e663bd7c774a838b8220fe0593c86d9fb09f498b4b"
 dependencies = [
- "gimli 0.32.3",
+ "gimli",
 ]
 
 [[package]]
@@ -425,7 +425,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -436,7 +436,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -959,7 +959,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "miniz_oxide 0.8.9",
- "object 0.37.3",
+ "object",
  "rustc-demangle",
  "windows-link 0.2.1",
 ]
@@ -1286,9 +1286,6 @@ name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
-dependencies = [
- "allocator-api2",
-]
 
 [[package]]
 name = "by_address"
@@ -1409,7 +1406,7 @@ dependencies = [
  "maybe-owned",
  "rustix",
  "rustix-linux-procfs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "winx",
 ]
 
@@ -1510,7 +1507,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d067ad48b8650848b989a59a86c6c36a995d02d2bf778d45c3c5d57bc2718f02"
 dependencies = [
  "smallvec",
- "target-lexicon 0.12.16",
+ "target-lexicon",
 ]
 
 [[package]]
@@ -2077,140 +2074,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cranelift-bforest"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e15d04a0ce86cb36ead88ad68cf693ffd6cda47052b9e0ac114bc47fd9cd23c4"
-dependencies = [
- "cranelift-entity",
-]
-
-[[package]]
-name = "cranelift-bitset"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c6e3969a7ce267259ce244b7867c5d3bc9e65b0a87e81039588dfdeaede9f34"
-dependencies = [
- "serde",
- "serde_derive",
-]
-
-[[package]]
-name = "cranelift-codegen"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c22032c4cb42558371cf516bb47f26cdad1819d3475c133e93c49f50ebf304e"
-dependencies = [
- "bumpalo",
- "cranelift-bforest",
- "cranelift-bitset",
- "cranelift-codegen-meta",
- "cranelift-codegen-shared",
- "cranelift-control",
- "cranelift-entity",
- "cranelift-isle",
- "gimli 0.31.1",
- "hashbrown 0.14.5",
- "log",
- "regalloc2",
- "rustc-hash 2.1.3",
- "serde",
- "serde_derive",
- "smallvec",
- "target-lexicon 0.13.5",
-]
-
-[[package]]
-name = "cranelift-codegen-meta"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c904bc71c61b27fc57827f4a1379f29de64fe95653b620a3db77d59655eee0b8"
-dependencies = [
- "cranelift-codegen-shared",
-]
-
-[[package]]
-name = "cranelift-codegen-shared"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40180f5497572f644ce88c255480981ae2ec1d7bb4d8e0c0136a13b87a2f2ceb"
-
-[[package]]
-name = "cranelift-control"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26d132c6d0bd8a489563472afc171759da0707804a65ece7ceb15a8c6d7dd5ef"
-dependencies = [
- "arbitrary",
-]
-
-[[package]]
-name = "cranelift-entity"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b2d0d9618275474fbf679dd018ac6e009acbd6ae6850f6a67be33fb3b00b323"
-dependencies = [
- "cranelift-bitset",
- "serde",
- "serde_derive",
-]
-
-[[package]]
-name = "cranelift-frontend"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fac41e16729107393174b0c9e3730fb072866100e1e64e80a1a963b2e484d57"
-dependencies = [
- "cranelift-codegen",
- "log",
- "smallvec",
- "target-lexicon 0.13.5",
-]
-
-[[package]]
-name = "cranelift-isle"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ca20d576e5070044d0a72a9effc2deacf4d6aa650403189d8ea50126483944d"
-
-[[package]]
-name = "cranelift-module"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d55612bebcf16ff7306c8a6f5bdb6d45662b8aa1ee058ecce8807ad87db719b"
-dependencies = [
- "anyhow",
- "cranelift-codegen",
- "cranelift-control",
-]
-
-[[package]]
-name = "cranelift-native"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8dee82f3f1f2c4cba9177f1cc5e350fe98764379bcd29340caa7b01f85076c7"
-dependencies = [
- "cranelift-codegen",
- "libc",
- "target-lexicon 0.13.5",
-]
-
-[[package]]
-name = "cranelift-object"
-version = "0.116.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aad5a6d3e379493c3f8b35dc61c93d0bf5f27003bbe20614e0200b0ec372ef52"
-dependencies = [
- "anyhow",
- "cranelift-codegen",
- "cranelift-control",
- "cranelift-module",
- "log",
- "object 0.36.7",
- "target-lexicon 0.13.5",
-]
-
-[[package]]
 name = "crc32c"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2615,7 +2478,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2812,7 +2675,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.3",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3223,7 +3086,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3636,16 +3499,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3779,6 +3632,12 @@ name = "futures-task"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+
+[[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
 
 [[package]]
 name = "futures-util"
@@ -4019,17 +3878,6 @@ dependencies = [
 
 [[package]]
 name = "gimli"
-version = "0.31.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
-dependencies = [
- "fallible-iterator",
- "indexmap 2.14.2",
- "stable_deref_trait",
-]
-
-[[package]]
-name = "gimli"
 version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
@@ -4199,6 +4047,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "governor"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9efcab3c1958580ff1f25a2a41be1668f7603d849bb63af523b208a3cc1223b8"
+dependencies = [
+ "cfg-if",
+ "dashmap 6.2.1",
+ "futures-sink",
+ "futures-timer",
+ "futures-util",
+ "hashbrown 0.16.1",
+ "nonzero_ext",
+ "parking_lot",
+ "portable-atomic",
+ "smallvec",
+ "spinning_top",
+ "web-time",
+]
+
+[[package]]
 name = "gpu-allocator"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4209,7 +4077,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.58.0",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -4295,9 +4163,7 @@ dependencies = [
  "similar 2.7.0",
  "smallvec",
  "smol",
- "syntect",
  "tracing",
- "two-face 0.4.5",
  "unicode-segmentation",
  "unicode-width",
  "uuid",
@@ -4994,7 +4860,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -5189,47 +5054,6 @@ name = "gpui-pre-ztracing-macro"
 version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85701631a9bbecf47e6d19f145e85e57767e7c50f7192d5b1bf65b5ef43cb373"
-
-[[package]]
-name = "gpui-shell"
-version = "0.10.0"
-dependencies = [
- "anyhow",
- "async-channel",
- "cap-std",
- "flate2",
- "fs2",
- "gpui-base",
- "gpui-component",
- "gpui-fast",
- "gpui-fast-platform",
- "gpui-fps",
- "gpui-kit",
- "gpui-pre",
- "gpui-pre-platform",
- "gpui-pre-reqwest",
- "gpui-webview",
- "image",
- "instant",
- "jiff 1.0.0",
- "libc",
- "quickjs-jit",
- "quickjs-jit-runtime",
- "quickjs-jit-stdlib",
- "schemars 1.2.3",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "smallvec",
- "smol",
- "tar",
- "tracing",
- "tungstenite 0.29.0",
- "usvg 0.46.0",
- "wait-timeout",
- "windows 0.58.0",
-]
 
 [[package]]
 name = "gpui-webview"
@@ -5696,7 +5520,7 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
- "windows-registry 0.4.0",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]
@@ -5711,7 +5535,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -7382,7 +7206,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7816,6 +7640,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "610a5acd306ec67f907abe5567859a3c693fb9886eb1f012ab8f2a47bef3db51"
 
 [[package]]
+name = "nonzero_ext"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
+
+[[package]]
 name = "noop_proc_macro"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7936,7 +7766,7 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "chrono",
  "html5ever 0.27.0",
@@ -7960,7 +7790,7 @@ dependencies = [
 [[package]]
 name = "nsh-bundler"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "anyhow",
  "dunce",
@@ -7986,7 +7816,7 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "cap-std",
  "chrono",
@@ -8020,7 +7850,7 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "crossbeam-channel",
  "env_filter 2.1.0",
@@ -8041,7 +7871,7 @@ dependencies = [
 [[package]]
 name = "nsh-i18n"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "rust-i18n-support",
  "serde_json",
@@ -8050,7 +7880,7 @@ dependencies = [
 [[package]]
 name = "nsh-js"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
@@ -8073,7 +7903,7 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -8086,7 +7916,7 @@ dependencies = [
 [[package]]
 name = "nsh-package"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -8101,7 +7931,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-gpui"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8134,7 +7964,7 @@ dependencies = [
 [[package]]
 name = "nsh-updater"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=90d8f514b733a15e92e261fb394013c871f022a1#90d8f514b733a15e92e261fb394013c871f022a1"
+source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -8163,7 +7993,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8310,7 +8140,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -8738,18 +8568,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c92d4ddb4bd7b50d730c215ff871754d0da6b2178849f8a2a2ab69712d0c073b"
 dependencies = [
  "objc",
-]
-
-[[package]]
-name = "object"
-version = "0.36.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
-dependencies = [
- "crc32fast",
- "hashbrown 0.15.5",
- "indexmap 2.14.2",
- "memchr",
 ]
 
 [[package]]
@@ -10482,9 +10300,6 @@ name = "qrcode"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
-dependencies = [
- "image",
-]
 
 [[package]]
 name = "quick-error"
@@ -10552,28 +10367,6 @@ dependencies = [
  "quickjs-jit-core",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "quickjs-jit-runtime"
-version = "0.14.2"
-dependencies = [
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-module",
- "cranelift-native",
- "cranelift-object",
- "gimli 0.31.1",
- "libc",
- "postcard",
- "quickjs-jit-core",
- "quickjs-jit-sys",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
- "serde_yaml",
- "target-lexicon 0.13.5",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10699,7 +10492,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11063,21 +10856,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "regalloc2"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc06e6b318142614e4a48bc725abbf08ff166694835c43c9dae5a9009704639a"
-dependencies = [
- "allocator-api2",
- "bumpalo",
- "hashbrown 0.15.5",
- "log",
- "rustc-hash 2.1.3",
- "serde",
- "smallvec",
 ]
 
 [[package]]
@@ -11886,7 +11664,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11975,7 +11753,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12422,19 +12200,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap 2.14.2",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "serdect"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12691,6 +12456,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
 dependencies = [
  "bstr",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -12779,7 +12545,6 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
- "dirs 5.0.1",
  "embed-resource",
  "futures-util",
  "gpui-base",
@@ -12787,58 +12552,39 @@ dependencies = [
  "gpui-fast-apple",
  "gpui-fast-platform",
  "gpui-fps",
- "gpui-shell",
  "image",
  "libc",
+ "log",
  "notify",
  "objc",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
  "objc2-user-notifications",
  "raw-window-handle",
- "reqwest",
+ "resvg 0.46.0",
  "rusqlite",
  "rust-i18n",
  "serde",
  "serde_json",
- "smelt-agents",
- "smelt-automations",
- "smelt-capabilities",
  "smelt-cli",
  "smelt-client",
  "smelt-client-store",
  "smelt-conversation",
  "smelt-core",
- "smelt-desktop",
  "smelt-event-protocol",
- "smelt-files-ui",
- "smelt-git-ui",
- "smelt-history",
- "smelt-ide",
  "smelt-iroh",
- "smelt-language",
- "smelt-layouts",
- "smelt-machines",
- "smelt-maintenance",
  "smelt-model",
- "smelt-notifications",
  "smelt-nsh",
  "smelt-pairing",
  "smelt-paths",
  "smelt-plugin-api",
- "smelt-resources",
  "smelt-runtime-client",
- "smelt-sessions",
- "smelt-skills",
  "smelt-store",
  "smelt-sys",
- "smelt-terminal",
- "smelt-themes",
  "smelt-ui",
- "smelt-updater-ui",
  "smelt-version",
  "smol",
- "tokio",
+ "tiny-skia",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -12847,50 +12593,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-agents"
-version = "0.0.0"
-dependencies = [
- "chrono",
- "gpui-base",
- "gpui-fast",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
- "smol",
- "uuid",
-]
-
-[[package]]
-name = "smelt-automations"
-version = "0.0.0"
-dependencies = [
- "chrono",
- "gpui-base",
- "gpui-fast",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
- "tempfile",
- "uuid",
-]
-
-[[package]]
 name = "smelt-buddy"
 version = "0.0.0"
 dependencies = [
  "gpui-fast",
  "image",
-]
-
-[[package]]
-name = "smelt-capabilities"
-version = "0.0.0"
-dependencies = [
- "gpui-base",
- "gpui-fast",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
 ]
 
 [[package]]
@@ -12914,7 +12621,7 @@ name = "smelt-client"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "hex",
  "libc",
  "objc2 0.6.5",
@@ -12931,9 +12638,7 @@ dependencies = [
  "smelt-runtime-client",
  "smelt-sys",
  "smelt-version",
- "smol",
  "tempfile",
- "tokio",
  "url",
  "uuid",
 ]
@@ -12977,7 +12682,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "ctor",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "dunce",
  "futures",
  "hex",
@@ -12990,7 +12695,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "shell-words",
- "similar 3.2.0",
  "smelt-event-protocol",
  "smelt-model",
  "smelt-paths",
@@ -13001,7 +12705,6 @@ dependencies = [
  "smol",
  "system-configuration 0.7.0",
  "tempfile",
- "tokio",
  "url",
  "uuid",
  "windows-registry 0.6.1",
@@ -13016,8 +12719,7 @@ dependencies = [
  "gpui-kit",
  "gpui-webview",
  "lb-wry",
- "rust-i18n",
- "serde",
+ "serde_json",
  "smelt-plugin-api",
  "smol",
 ]
@@ -13041,23 +12743,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-files-ui"
-version = "0.0.0"
-dependencies = [
- "gpui-base",
- "gpui-fast",
- "gpui-kit",
- "gpui-webview",
- "lb-wry",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
- "smol",
- "tempfile",
- "url",
-]
-
-[[package]]
 name = "smelt-git"
 version = "0.0.0"
 dependencies = [
@@ -13066,40 +12751,6 @@ dependencies = [
  "smelt-core",
  "smelt-runtime-client",
  "tempfile",
-]
-
-[[package]]
-name = "smelt-git-ui"
-version = "0.0.0"
-dependencies = [
- "chrono",
- "gpui-base",
- "gpui-fast",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
-]
-
-[[package]]
-name = "smelt-history"
-version = "0.0.0"
-dependencies = [
- "gpui-base",
- "gpui-fast",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
-]
-
-[[package]]
-name = "smelt-ide"
-version = "0.0.0"
-dependencies = [
- "gpui-fast",
- "objc",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
 ]
 
 [[package]]
@@ -13123,46 +12774,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-language"
-version = "0.0.0"
-dependencies = [
- "gpui-fast",
- "rust-i18n",
- "smelt-plugin-api",
-]
-
-[[package]]
-name = "smelt-layouts"
-version = "0.0.0"
-dependencies = [
- "gpui-fast",
- "rust-i18n",
- "smelt-plugin-api",
-]
-
-[[package]]
-name = "smelt-machines"
-version = "0.0.0"
-dependencies = [
- "gpui-fast",
- "image",
- "qrcode",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
- "smol",
-]
-
-[[package]]
-name = "smelt-maintenance"
-version = "0.0.0"
-dependencies = [
- "gpui-fast",
- "rust-i18n",
- "smelt-plugin-api",
-]
-
-[[package]]
 name = "smelt-model"
 version = "0.0.0"
 dependencies = [
@@ -13171,7 +12782,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "chrono-tz",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "rust-i18n",
  "schemars 1.2.3",
  "semver",
@@ -13183,26 +12794,15 @@ dependencies = [
  "smelt-paths",
  "smelt-runtime-client",
  "tempfile",
+ "typed-path",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "smelt-notifications"
-version = "0.0.0"
-dependencies = [
- "gpui-fast",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
- "tempfile",
 ]
 
 [[package]]
 name = "smelt-nsh"
 version = "0.0.0"
 dependencies = [
- "gpui-base",
  "gpui-fast",
  "gpui-fast-platform",
  "libc",
@@ -13214,14 +12814,20 @@ dependencies = [
  "nsh-engine",
  "nsh-js",
  "nsh-platform-gpui",
+ "objc",
  "oxc",
+ "qrcode",
  "rust-i18n-support",
+ "serde",
  "serde_json",
  "smelt-buddy",
+ "smelt-desktop",
  "smelt-plugin-api",
+ "smelt-terminal",
  "smelt-ui",
  "tokio",
  "uuid",
+ "which",
 ]
 
 [[package]]
@@ -13235,7 +12841,7 @@ dependencies = [
 name = "smelt-paths"
 version = "0.0.0"
 dependencies = [
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "libc",
  "windows-sys 0.61.2",
 ]
@@ -13247,14 +12853,10 @@ dependencies = [
  "futures-channel",
  "gpui-base",
  "gpui-fast",
- "gpui-shell",
- "libc",
  "rust-i18n",
  "rust-i18n-support",
- "schemars 1.2.3",
  "serde",
  "serde_json",
- "smelt-buddy",
  "smelt-client",
  "smelt-client-store",
  "smelt-model",
@@ -13273,7 +12875,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -13282,8 +12884,9 @@ version = "0.0.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
+ "governor",
  "reqwest",
  "ring",
  "serde",
@@ -13291,18 +12894,6 @@ dependencies = [
  "smelt-push",
  "tokio",
  "tower",
-]
-
-[[package]]
-name = "smelt-resources"
-version = "0.0.0"
-dependencies = [
- "gpui-base",
- "gpui-fast",
- "rust-i18n",
- "serde",
- "smelt-plugin-api",
- "smol",
 ]
 
 [[package]]
@@ -13322,32 +12913,6 @@ dependencies = [
  "smelt-sys",
  "tungstenite 0.29.0",
  "uuid",
-]
-
-[[package]]
-name = "smelt-sessions"
-version = "0.0.0"
-dependencies = [
- "gpui-base",
- "gpui-fast",
- "rust-i18n",
- "serde",
- "serde_json",
- "smelt-plugin-api",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "smelt-skills"
-version = "0.0.0"
-dependencies = [
- "dirs 5.0.1",
- "gpui-fast",
- "libc",
- "rust-i18n",
- "smelt-plugin-api",
- "tempfile",
 ]
 
 [[package]]
@@ -13384,23 +12949,13 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "atomic-waker",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "gpui-fast",
  "image",
  "libc",
- "rust-i18n",
- "serde",
  "serde_json",
  "smelt-plugin-api",
  "smol",
-]
-
-[[package]]
-name = "smelt-themes"
-version = "0.0.0"
-dependencies = [
- "gpui-fast",
- "smelt-plugin-api",
 ]
 
 [[package]]
@@ -13418,7 +12973,7 @@ dependencies = [
  "rustybuzz",
  "serde_json",
  "sha2 0.11.1",
- "similar 2.7.0",
+ "similar 3.2.0",
  "smallvec",
  "smelt-model",
  "smol",
@@ -13462,17 +13017,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-updater-ui"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "gpui-fast",
- "rust-i18n",
- "smelt-plugin-api",
- "smol",
-]
-
-[[package]]
 name = "smelt-version"
 version = "0.0.0"
 
@@ -13511,10 +13055,9 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "chrono",
- "clap",
  "core-foundation 0.10.1",
  "core-foundation-sys",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "flate2",
  "hex",
  "image",
@@ -13582,7 +13125,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13642,6 +13185,15 @@ name = "spin"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
+dependencies = [
+ "lock_api",
+]
+
+[[package]]
+name = "spinning_top"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cf02766a1eb909bc7653557c66b384e44edc3ad979e6257c6173c65ea51bc7d"
 dependencies = [
  "lock_api",
 ]
@@ -14061,12 +13613,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
-name = "target-lexicon"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
-
-[[package]]
 name = "tauri-winrt-notification"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14087,7 +13633,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -15067,12 +14613,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
- "rustls",
- "rustls-pki-types",
  "sha1 0.10.7",
  "thiserror 2.0.21",
- "url",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -15129,7 +14671,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -15247,12 +14789,6 @@ dependencies = [
  "crypto-common 0.2.2",
  "ctutils",
 ]
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
@@ -16054,7 +15590,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -16772,7 +16308,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -17343,7 +16879,7 @@ dependencies = [
  "memchr",
  "nix 0.32.0",
  "typed-path",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "zeroize",
  "zopfli",
 ]

@@ -69,6 +69,10 @@ pub(crate) fn nsh_theme() -> Theme {
         theme.set_color(name, color);
     }
     theme.set_number("radius", RADIUS.md);
+    theme.set_font(
+        "font-mono",
+        smelt_plugin_api::model::font_config::font_family(),
+    );
     theme
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把仓库里的自带 JS 插件（plugins/<名字>/，有 gpui-shell.json 的才算）放进安装包：
+# 把仓库里的自带 JS 插件（plugins/<名字>/，有 smelt-plugin.json 的才算）放进安装包：
 # macOS 是 Smelt.app/Contents/Resources/plugins，Windows 是安装目录下的 plugins。
 # 发版的 App 从那里只读加载（crates/smelt/src/plugins/builtin.rs）。
 #
@@ -20,7 +20,7 @@ git ls-files -co --exclude-standard -z -- plugins | while IFS= read -r -d '' fil
   [[ -f "$file" ]] || continue
   rel="${file#plugins/}"
   name="${rel%%/*}"
-  [[ -f "plugins/${name}/gpui-shell.json" ]] || continue
+  [[ -f "plugins/${name}/smelt-plugin.json" ]] || continue
   case "${rel#*/}" in
     tests/*) continue ;;
   esac

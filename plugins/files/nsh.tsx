@@ -1,0 +1,2342 @@
+// 文件面板（NSH A2 独立 VM 版本）：
+// - 左侧：面包屑 + 脏点 + 错误 + 本地 HTML「浏览器打开」+ Markdown 预览/源码切换 + 树收起按钮，
+//         主体用 1st-class Rust <SmeltEditor>、<SmeltMarkdown>、<Image data:... />
+// - 右侧：<ResizablePanelGroup> 无 JS 往返拖动分栏，搜索框 + 钉目录按钮 + 键盘可控文件树 / 搜索结果树
+// - 全事件驱动：project.watch / project_changed / reconnected / window_activated / active_context，无轮询。
+import { computed, effect, Image, Scroll, signal, Text, View } from "nsh";
+import {
+  ContextMenu,
+  Dialog,
+  Input,
+  MenuItem,
+  MenuSeparator,
+  ResizablePanel,
+  ResizablePanelGroup,
+  Tooltip,
+} from "nsh/base";
+import { Menu } from "nsh/desktop";
+import {
+  activeContext,
+  bootTask,
+  call,
+  callDetail,
+  clipboardWrite,
+  initHost,
+  localOs,
+  onCommand,
+  onEvent,
+  onState,
+  openUrl,
+  pathFileName,
+  pathJoin,
+  pathStartsWith,
+  pathStripPrefix,
+  pathStyle,
+  registerCommands,
+  registerFileOpener,
+  registerViews,
+  revealPath,
+  run,
+  SmeltButton,
+  SmeltEditor,
+  SmeltIcon,
+  SmeltMarkdown,
+  stableMemo,
+  state,
+  store,
+  t,
+  text,
+  viewShown,
+} from "smelt/sdk";
+
+import {
+  ancestorsUnderRoot,
+  breadcrumbSegments,
+  buildSearchTree,
+  collectFileTreeRows,
+  DEFAULT_TREE_WIDTH,
+  editorLanguageForPath,
+  fileTreeRowId,
+  fileTreeRowPath,
+  flattenSearchTree,
+  imageMimeForPath,
+  isHtmlPath,
+  isMarkdownPath,
+  isPreviewableImage,
+  MAX_TREE_WIDTH,
+  MIN_TREE_WIDTH,
+  nameLikelyTruncated,
+  pathToFileUrl,
+  projectKey,
+  treeRoots,
+} from "./model.js";
+import { clampTreeWidth, createFilesStore } from "./store.js";
+
+const VIEW_ID = "smelt.files/main";
+const OPEN_VIEW_CMD = "smelt.app/open-view";
+const PICK_PATHS_CMD = "smelt.app/pick-paths";
+const NOTIFY_CMD = "smelt.app/notify";
+// 约定：smelt.sessions 的 SEND_TEXT（权威定义在 sessions contract）。
+const SEND_TEXT_CMD = "smelt.sessions/send-text";
+
+const SEARCH_DEBOUNCE_MS = 180;
+const PREVIEW_DEBOUNCE_MS = 80;
+
+const POPUP_CLASS = "rounded-(--radius) border border-border bg-popover p-1";
+const MENU_ITEM_CLASS =
+  "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
+
+interface ProjectRef {
+  machine: string | null;
+  root: string;
+}
+
+interface FileRef {
+  machine: string | null;
+  path: string;
+}
+
+interface DirListing {
+  entries: Array<{ name: string; is_dir: boolean }>;
+  stale: boolean;
+}
+
+interface GitCacheEntry {
+  value: { files: Array<[string, string]> };
+  stale: boolean;
+}
+
+interface OpenFileState {
+  id: number;
+  machine: string | null;
+  path: string;
+  content: string;
+  savedContent: string;
+  savedVersion: string | null;
+  imageDataUri: string | null;
+  saveError: string | null;
+  readable: boolean;
+  conflictPending: boolean;
+  reloadInflight: boolean;
+  reloadAgain: boolean;
+  preview: boolean;
+  previewSource: string;
+  pendingGotoLine: number | null;
+}
+
+interface ParkedProjectUi {
+  openFile: OpenFileState | null;
+  selected: string | null;
+  expanded: Set<string>;
+  collapsedRoots: Set<string>;
+  pendingReveal: string | null;
+}
+
+interface SearchHit {
+  path: string;
+  rel: string;
+  line: [number, string] | null;
+}
+
+interface SearchState {
+  machine: string | null;
+  root: string;
+  query: string;
+  done: boolean;
+  hits: SearchHit[];
+  truncated: boolean;
+}
+
+interface UnsavedSwitchDialog {
+  currentId: number;
+  currentName: string;
+  target: FileRef;
+  targetName: string;
+  line: number | null;
+}
+
+interface DeleteDialog {
+  path: string;
+  name: string;
+  isDir: boolean;
+}
+
+const filesStore = createFilesStore(store);
+
+// ---- 模块级响应式状态（与命令处理器、视图渲染共用） ----
+
+const currentProject = signal<ProjectRef | null>(null);
+const treeWidth = signal<number>(DEFAULT_TREE_WIDTH);
+const treeOpen = signal<boolean>(true);
+const pinnedRoots = signal<string[]>([]);
+const expandedDirs = signal<Set<string>>(new Set());
+const collapsedRoots = signal<Set<string>>(new Set());
+const selectedPath = signal<string | null>(null);
+const openFile = signal<OpenFileState | null>(null);
+const filterQuery = signal<string>("");
+const searchState = signal<SearchState | null>(null);
+const unsavedDialog = signal<UnsavedSwitchDialog | null>(null);
+const deleteDialog = signal<DeleteDialog | null>(null);
+const cacheVersion = signal<number>(0);
+
+// 非渲染热数据（通过 cacheVersion 触发重算）
+const dirCache = new Map<string, Map<string, DirListing>>();
+const dirInflight = new Set<string>();
+const dirGeneration = new Map<string, number>();
+
+const gitMarks = new Map<string, GitCacheEntry>();
+const gitInflight = new Set<string>();
+const gitGeneration = new Map<string, number>();
+
+const watches = new Set<string>();
+const parked = new Map<string, ParkedProjectUi>();
+
+let nextFileId = 1;
+let pendingReveal: string | null = null;
+let pendingSwitchAfterSave: { fromId: number; target: FileRef; line: number | null } | null = null;
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+let searchSeq = 0;
+let previewTimer: ReturnType<typeof setTimeout> | null = null;
+let activeEditorApi: any = null;
+let activeEditorFileId = 0;
+let settingsLoaded = false;
+let projectSwitchSeq = 0;
+let lastWindowActive = true;
+
+function bumpCache() {
+  cacheVersion.set(cacheVersion() + 1);
+}
+
+function treeMachine(): string | null {
+  return currentProject()?.machine ?? null;
+}
+
+function styleOpsFor(machine: string | null) {
+  const st = pathStyle(machine);
+  return {
+    isWindows: st === "windows",
+    join: (base: string, child: string) => pathJoin(st, base, child),
+    fileName: (p: string) => pathFileName(st, p),
+    startsWith: (p: string, base: string) => pathStartsWith(st, p, base),
+    stripPrefix: (p: string, base: string) => pathStripPrefix(st, p, base),
+  };
+}
+
+function currentRoots(): string[] {
+  return treeRoots(currentProject(), pinnedRoots());
+}
+
+function isDirty(of: OpenFileState | null): boolean {
+  if (!of || !of.readable || isPreviewableImage(of.path)) return false;
+  return of.content !== of.savedContent;
+}
+
+function getDirMap(machine: string | null): Map<string, DirListing> {
+  const key = machine ?? "";
+  let map = dirCache.get(key);
+  if (!map) {
+    map = new Map();
+    dirCache.set(key, map);
+  }
+  return map;
+}
+
+function notifyError(body: string) {
+  void run(NOTIFY_CMD, { subtitle: t("notify.error"), body }).catch(() => {});
+}
+
+function findOpenFileById(id: number): { current: boolean; file: OpenFileState } | null {
+  const cur = openFile();
+  if (cur && cur.id === id) return { current: true, file: cur };
+  for (const ui of parked.values()) {
+    if (ui.openFile && ui.openFile.id === id) {
+      return { current: false, file: ui.openFile };
+    }
+  }
+  return null;
+}
+
+function patchOpenFileById(id: number, mutator: (prev: OpenFileState) => OpenFileState): boolean {
+  const cur = openFile();
+  if (cur && cur.id === id) {
+    openFile.set(mutator(cur));
+    return true;
+  }
+  for (const [k, ui] of parked.entries()) {
+    if (ui.openFile && ui.openFile.id === id) {
+      parked.set(k, { ...ui, openFile: mutator(ui.openFile) });
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---- 持久化 ----
+
+function persistCurrentProject() {
+  const proj = currentProject();
+  if (!proj) return;
+  void filesStore.saveProject(proj.machine, proj.root, {
+    selected: selectedPath(),
+    openFile: openFile()?.path ?? null,
+    expanded: expandedDirs(),
+    collapsedRoots: collapsedRoots(),
+  });
+}
+
+function persistTreeLayout() {
+  void filesStore.saveTreeLayout(treeWidth(), treeOpen());
+}
+
+function persistPinned() {
+  void filesStore.savePinned(pinnedRoots());
+}
+
+// ---- 监听与失效 ----
+
+function ensureWatch(machine: string | null, root: string) {
+  const key = projectKey(machine, root);
+  if (watches.has(key)) return;
+  watches.add(key);
+  void call(machine, "project.watch", { root }).catch((error) => {
+    console.error(`[files] project.watch(${root}) failed:`, error);
+  });
+}
+
+function markDirsStaleWhere(predicate: (machine: string | null, dir: string) => boolean) {
+  for (const [mKey, map] of dirCache.entries()) {
+    const m = mKey === "" ? null : mKey;
+    for (const [dir, listing] of map.entries()) {
+      if (predicate(m, dir)) {
+        const k = projectKey(m, dir);
+        dirGeneration.set(k, (dirGeneration.get(k) ?? 0) + 1);
+        listing.stale = true;
+      }
+    }
+  }
+  for (const k of dirInflight) {
+    const sep = k.indexOf("\0");
+    const m = sep > 0 ? k.slice(0, sep) : null;
+    const dir = sep >= 0 ? k.slice(sep + 1) : k;
+    if (predicate(m, dir)) {
+      dirGeneration.set(k, (dirGeneration.get(k) ?? 0) + 1);
+    }
+  }
+}
+
+function markGitMarksStaleWhere(predicate: (machine: string | null, root: string) => boolean) {
+  const matched = new Set<string>();
+  for (const k of gitMarks.keys()) matched.add(k);
+  for (const k of gitInflight) matched.add(k);
+  for (const k of matched) {
+    const sep = k.indexOf("\0");
+    const m = sep > 0 ? k.slice(0, sep) : null;
+    const root = sep >= 0 ? k.slice(sep + 1) : k;
+    if (!predicate(m, root)) continue;
+    gitGeneration.set(k, (gitGeneration.get(k) ?? 0) + 1);
+    const cached = gitMarks.get(k);
+    if (cached) cached.stale = true;
+  }
+}
+
+function markEverythingStale(machineFilter: string | null | undefined) {
+  const matchesMachine = (m: string | null) => machineFilter === undefined || m === machineFilter;
+  for (const key of watches) {
+    const sep = key.indexOf("\0");
+    const m = sep > 0 ? key.slice(0, sep) : null;
+    const root = sep >= 0 ? key.slice(sep + 1) : key;
+    if (matchesMachine(m)) {
+      onOpenFileProjectChanged(m, root);
+    }
+  }
+  markGitMarksStaleWhere((m) => matchesMachine(m));
+  markDirsStaleWhere((m) => matchesMachine(m));
+}
+
+// ---- 目录与 Git 状态抓取 ----
+
+function treeRootFor(machine: string | null, path: string): string | null {
+  if (machine !== treeMachine()) return null;
+  const ops = styleOpsFor(machine);
+  let best: string | null = null;
+  for (const root of currentRoots()) {
+    if (ops.startsWith(path, root) && (best == null || root.length > best.length)) {
+      best = root;
+    }
+  }
+  return best;
+}
+
+function ensureDir(machine: string | null, root: string, dir: string) {
+  const key = projectKey(machine, dir);
+  const map = getDirMap(machine);
+  const existing = map.get(dir);
+  if ((existing && !existing.stale) || dirInflight.has(key)) return;
+  dirInflight.add(key);
+  const gen = dirGeneration.get(key) ?? 0;
+
+  void call(machine, "project.tree", { root, dir })
+    .then((result: any) => {
+      dirInflight.delete(key);
+      const entries = Array.isArray(result?.entries)
+        ? result.entries.map((e: any) => ({ name: String(e.name ?? ""), is_dir: Boolean(e.is_dir) }))
+        : [];
+      const stale = (dirGeneration.get(key) ?? 0) !== gen;
+      getDirMap(machine).set(dir, { entries, stale });
+      bumpCache();
+      tryFlushReveal();
+      if (stale && viewShown(VIEW_ID)) {
+        refreshVisible();
+      }
+    })
+    .catch(() => {
+      dirInflight.delete(key);
+    });
+}
+
+function ensureGitStatus(machine: string | null, root: string) {
+  const key = projectKey(machine, root);
+  const existing = gitMarks.get(key);
+  if ((existing && !existing.stale) || gitInflight.has(key)) return;
+  gitInflight.add(key);
+  const gen = gitGeneration.get(key) ?? 0;
+
+  void call(machine, "git.status", { root })
+    .then((result: any) => {
+      gitInflight.delete(key);
+      const stale = (gitGeneration.get(key) ?? 0) !== gen;
+      const files = Array.isArray(result?.files) ? result.files : [];
+      gitMarks.set(key, { value: { files }, stale });
+      bumpCache();
+      if (stale && viewShown(VIEW_ID)) {
+        ensureGitStatus(machine, root);
+      }
+    })
+    .catch(() => {
+      gitInflight.delete(key);
+    });
+}
+
+function refreshVisible() {
+  if (!viewShown(VIEW_ID)) return;
+  const machine = treeMachine();
+  const roots = currentRoots();
+  const ops = styleOpsFor(machine);
+  const collapsed = collapsedRoots();
+  const expanded = expandedDirs();
+
+  for (const root of roots) {
+    ensureWatch(machine, root);
+    if (roots.length > 1 && collapsed.has(root)) continue;
+    ensureDir(machine, root, root);
+    ensureGitStatus(machine, root);
+    for (const dir of expanded) {
+      if (dir !== root && ops.startsWith(dir, root)) {
+        ensureDir(machine, root, dir);
+      }
+    }
+  }
+}
+
+// ---- 文件树定位与交互 ----
+
+function currentTreeRows() {
+  cacheVersion();
+  const machine = treeMachine();
+  const roots = currentRoots();
+  const ops = styleOpsFor(machine);
+  const map = dirCache.get(machine ?? "") ?? new Map();
+  return collectFileTreeRows(
+    ops,
+    {
+      roots,
+      pinned: pinnedRoots(),
+      collapsed: collapsedRoots(),
+    },
+    expandedDirs(),
+    map,
+    (root: string) => gitMarks.get(projectKey(machine, root))?.value ?? null,
+  );
+}
+
+function revealInTree(path: string) {
+  const machine = treeMachine();
+  const root = treeRootFor(machine, path);
+  if (!root) return;
+  const ops = styleOpsFor(machine);
+  const nextCollapsed = new Set(collapsedRoots());
+  const wasCollapsed = nextCollapsed.delete(root);
+  if (wasCollapsed) collapsedRoots.set(nextCollapsed);
+
+  const ancestors = ancestorsUnderRoot(ops, path, root);
+  const nextExpanded = new Set(expandedDirs());
+  let changed = wasCollapsed;
+  for (const dir of ancestors) {
+    if (!nextExpanded.has(dir)) {
+      nextExpanded.add(dir);
+      changed = true;
+    }
+  }
+  if (changed) {
+    expandedDirs.set(nextExpanded);
+    persistCurrentProject();
+  }
+  selectedPath.set(path);
+  pendingReveal = path;
+  refreshVisible();
+  tryFlushReveal();
+}
+
+function revealFromBreadcrumb(path: string, isDir: boolean) {
+  if (!treeOpen()) {
+    treeOpen.set(true);
+    persistTreeLayout();
+  }
+  if (isDir) {
+    const nextExpanded = new Set(expandedDirs());
+    if (!nextExpanded.has(path)) {
+      nextExpanded.add(path);
+      expandedDirs.set(nextExpanded);
+    }
+  }
+  revealInTree(path);
+}
+
+function tryFlushReveal() {
+  if (!pendingReveal) return;
+  const rows = currentTreeRows();
+  if (rows.some((r) => fileTreeRowPath(r) === pendingReveal)) {
+    selectedPath.set(pendingReveal);
+    pendingReveal = null;
+  }
+}
+
+function toggleRootCollapsed(root: string) {
+  const next = new Set(collapsedRoots());
+  if (next.has(root)) {
+    next.delete(root);
+  } else {
+    next.add(root);
+  }
+  collapsedRoots.set(next);
+  persistCurrentProject();
+  refreshVisible();
+}
+
+function toggleExpandDir(dir: string) {
+  const next = new Set(expandedDirs());
+  if (next.has(dir)) {
+    next.delete(dir);
+  } else {
+    next.add(dir);
+  }
+  expandedDirs.set(next);
+  persistCurrentProject();
+  refreshVisible();
+}
+
+function unpinRoot(root: string) {
+  const next = pinnedRoots().filter((r) => r !== root);
+  pinnedRoots.set(next);
+  persistPinned();
+  refreshVisible();
+}
+
+async function pickPinnedRoots() {
+  if (treeMachine() != null) return;
+  try {
+    const picked = await run(PICK_PATHS_CMD, {
+      machine: null,
+      title: t("pin.pick_title"),
+      confirm: t("pin.pick_confirm"),
+      files: false,
+      multiple: true,
+    });
+    if (!Array.isArray(picked) || picked.length === 0) return;
+    const next = [...pinnedRoots()];
+    let added = false;
+    for (const p of picked) {
+      if (typeof p === "string" && p && !next.includes(p)) {
+        next.push(p);
+        added = true;
+      }
+    }
+    if (added) {
+      pinnedRoots.set(next);
+      persistPinned();
+      refreshVisible();
+    }
+  } catch (error: any) {
+    notifyError(error?.message ?? String(error));
+  }
+}
+
+// ---- 文件打开 / 保存 / 外部变更重读 / 预览 ----
+
+function schedulePreviewRefresh() {
+  const cur = openFile();
+  if (!cur || !cur.preview || !isMarkdownPath(cur.path)) return;
+  if (previewTimer) clearTimeout(previewTimer);
+  const fileId = cur.id;
+  previewTimer = setTimeout(() => {
+    previewTimer = null;
+    patchOpenFileById(fileId, (of) =>
+      of.preview && of.previewSource !== of.content ? { ...of, previewSource: of.content } : of,
+    );
+  }, PREVIEW_DEBOUNCE_MS);
+}
+
+function setFilePreview(nextPreview: boolean) {
+  const cur = openFile();
+  if (!cur || !isMarkdownPath(cur.path)) return;
+  openFile.set({
+    ...cur,
+    preview: nextPreview,
+    previewSource: nextPreview ? cur.content : cur.previewSource,
+  });
+}
+
+function jumpEditorToLine(line1Based: number) {
+  if (!activeEditorApi || line1Based <= 0) return;
+  const zeroBased = Math.max(0, Math.floor(line1Based) - 1);
+  try {
+    activeEditorApi.goToLine(zeroBased);
+  } catch {
+    // 编辑器行数尚未挂载时忽略。
+  }
+}
+
+function viewFileOn(machine: string | null, path: string, line: number | null = null) {
+  const cur = openFile();
+  if (cur && isDirty(cur)) {
+    if (cur.machine === machine && cur.path === path) {
+      if (line != null) {
+        if (cur.preview) {
+          setFilePreview(false);
+        }
+        jumpEditorToLine(line);
+      }
+      return;
+    }
+    const curOps = styleOpsFor(cur.machine);
+    const targetOps = styleOpsFor(machine);
+    unsavedDialog.set({
+      currentId: cur.id,
+      currentName: curOps.fileName(cur.path) ?? cur.path,
+      target: { machine, path },
+      targetName: targetOps.fileName(path) ?? path,
+      line,
+    });
+    return;
+  }
+  openFileNow(machine, path, line);
+}
+
+function openFileNow(machine: string | null, path: string, gotoLine: number | null = null) {
+  if (machine === treeMachine()) {
+    revealInTree(path);
+  }
+  const id = nextFileId++;
+  const defaultPreview = isMarkdownPath(path) && gotoLine == null;
+  if (previewTimer) {
+    clearTimeout(previewTimer);
+    previewTimer = null;
+  }
+  pendingSwitchAfterSave = null;
+  unsavedDialog.set(null);
+
+  openFile.set({
+    id,
+    machine,
+    path,
+    content: "",
+    savedContent: "",
+    savedVersion: null,
+    imageDataUri: null,
+    saveError: null,
+    readable: false,
+    conflictPending: false,
+    reloadInflight: false,
+    reloadAgain: false,
+    preview: defaultPreview,
+    previewSource: "",
+    pendingGotoLine: gotoLine,
+  });
+  persistCurrentProject();
+
+  void call(machine, "file.open", { path })
+    .then((result: any) => {
+      const content = result?.content;
+      if (!content || typeof content !== "object") {
+        patchOpenFileById(id, (of) => ({
+          ...of,
+          content: t("unreadable.error", { error: "invalid response" }),
+          readable: false,
+        }));
+        return;
+      }
+      if (content.kind === "text") {
+        const body = String(content.text ?? "");
+        const version = typeof content.version === "string" ? content.version : null;
+        patchOpenFileById(id, (of) => ({
+          ...of,
+          content: body,
+          savedContent: body,
+          savedVersion: version,
+          previewSource: body,
+          readable: true,
+          saveError: null,
+        }));
+        const cur = openFile();
+        if (cur && cur.id === id && gotoLine != null) {
+          queueMicrotask(() => {
+            if (activeEditorFileId === id) {
+              jumpEditorToLine(gotoLine);
+              patchOpenFileById(id, (of) => ({ ...of, pendingGotoLine: null }));
+            }
+          });
+        }
+        return;
+      }
+      if (content.kind === "image") {
+        const mime = imageMimeForPath(path);
+        const b64 = typeof content.data === "string" ? content.data : "";
+        if (mime && b64) {
+          patchOpenFileById(id, (of) => ({
+            ...of,
+            imageDataUri: `data:${mime};base64,${b64}`,
+            readable: false,
+          }));
+        } else {
+          patchOpenFileById(id, (of) => ({
+            ...of,
+            content: t("unreadable.image"),
+            readable: false,
+          }));
+        }
+        return;
+      }
+      if (content.kind === "binary") {
+        patchOpenFileById(id, (of) => ({
+          ...of,
+          content: t("unreadable.binary"),
+          readable: false,
+        }));
+        return;
+      }
+      if (content.kind === "too_large") {
+        const sizeMb = (Number(content.size ?? 0) / (1024 * 1024)).toFixed(1);
+        const limitMb = Math.floor(Number(content.limit ?? 0) / (1024 * 1024));
+        patchOpenFileById(id, (of) => ({
+          ...of,
+          content: t("unreadable.too_large", { size: sizeMb, limit: limitMb }),
+          readable: false,
+        }));
+        return;
+      }
+      patchOpenFileById(id, (of) => ({
+        ...of,
+        content: t("unreadable.binary"),
+        readable: false,
+      }));
+    })
+    .catch((error: any) => {
+      patchOpenFileById(id, (of) => ({
+        ...of,
+        content: t("unreadable.error", { error: error?.message ?? String(error) }),
+        readable: false,
+      }));
+    });
+}
+
+async function saveOpenFile() {
+  const cur = openFile();
+  if (!cur) return;
+  if (isPreviewableImage(cur.path)) return;
+  if (!cur.readable) {
+    openFile.set({ ...cur, saveError: t("save.unreadable") });
+    pendingSwitchAfterSave = null;
+    return;
+  }
+  const id = cur.id;
+  const content = cur.content;
+  const baseVersion = cur.conflictPending ? null : cur.savedVersion;
+
+  const outcome = await callDetail<{ version: string }>(cur.machine, "file.save", {
+    path: cur.path,
+    text: content,
+    base_version: baseVersion,
+  });
+
+  const switchTarget =
+    pendingSwitchAfterSave && pendingSwitchAfterSave.fromId === id
+      ? pendingSwitchAfterSave
+      : null;
+  if (switchTarget) pendingSwitchAfterSave = null;
+
+  if (!findOpenFileById(id)) return;
+
+  if (outcome.ok) {
+    const version =
+      typeof outcome.value?.version === "string" ? outcome.value.version : cur.savedVersion;
+    patchOpenFileById(id, (of) => ({
+      ...of,
+      savedContent: content,
+      savedVersion: version,
+      saveError: null,
+      conflictPending: false,
+    }));
+    if (switchTarget && openFile()?.id === id) {
+      openFileNow(switchTarget.target.machine, switchTarget.target.path, switchTarget.line);
+    }
+  } else if (outcome.code === "conflict") {
+    patchOpenFileById(id, (of) => ({
+      ...of,
+      conflictPending: true,
+      saveError: t("save.conflict"),
+    }));
+  } else {
+    patchOpenFileById(id, (of) => ({
+      ...of,
+      saveError: t("save.failed", { error: outcome.message }),
+    }));
+  }
+}
+
+function onOpenFileProjectChanged(machine: string | null, root: string) {
+  const cur = openFile();
+  if (!cur || cur.machine !== machine || !cur.readable) return;
+  const ops = styleOpsFor(machine);
+  if (!ops.startsWith(cur.path, root)) return;
+  if (cur.reloadInflight) {
+    openFile.set({ ...cur, reloadAgain: true });
+    return;
+  }
+  reloadOpenFile();
+}
+
+function reloadOpenFile() {
+  const cur = openFile();
+  if (!cur || !cur.readable) return;
+  const id = cur.id;
+  const machine = cur.machine;
+  const path = cur.path;
+  openFile.set({ ...cur, reloadInflight: true, reloadAgain: false });
+
+  void call(machine, "file.open", { path })
+    .then((result: any) => {
+      const found = findOpenFileById(id);
+      if (!found) return;
+      const again = found.file.reloadAgain;
+      const content = result?.content;
+      patchOpenFileById(id, (of) => {
+        const next: OpenFileState = { ...of, reloadInflight: false, reloadAgain: false };
+        if (
+          content?.kind === "text" &&
+          typeof content.version === "string" &&
+          of.savedVersion !== content.version
+        ) {
+          if (isDirty(of)) {
+            next.saveError = t("save.changed_elsewhere");
+          } else {
+            const textBody = String(content.text ?? "");
+            next.content = textBody;
+            next.savedContent = textBody;
+            next.savedVersion = content.version;
+            next.previewSource = textBody;
+          }
+        }
+        return next;
+      });
+      if (again && openFile()?.id === id) {
+        reloadOpenFile();
+      }
+    })
+    .catch(() => {
+      patchOpenFileById(id, (of) => ({ ...of, reloadInflight: false, reloadAgain: false }));
+    });
+}
+
+function openFileInBrowser() {
+  const cur = openFile();
+  if (!cur || cur.machine != null) return;
+  const url = pathToFileUrl(cur.path);
+  if (!url) {
+    openFile.set({ ...cur, saveError: t("browser.bad_path") });
+    return;
+  }
+  void openUrl(url).catch((error: any) => {
+    const latest = openFile();
+    if (latest && latest.id === cur.id) {
+      openFile.set({ ...latest, saveError: error?.message ?? String(error) });
+    }
+  });
+}
+
+// ---- 发送到会话 / 删除 ----
+
+function sendToSession(message: string) {
+  void run(SEND_TEXT_CMD, { text: message }).catch((error: any) => {
+    notifyError(t("send.failed", { error: error?.message ?? String(error) }));
+  });
+}
+
+function sendPathToSession(path: string) {
+  const machine = treeMachine();
+  const ops = styleOpsFor(machine);
+  const root = treeRootFor(machine, path);
+  const rel = root ? ops.stripPrefix(path, root) : null;
+  const display = rel && rel.length > 0 ? rel : path;
+  sendToSession(`@${display} `);
+}
+
+function sendEditorSelectionToSession() {
+  const cur = openFile();
+  if (!cur || !activeEditorApi) return;
+  const selected = String(activeEditorApi.selectedText?.() ?? "");
+  if (!selected.trim()) return;
+  const proj = currentProject();
+  const ops = styleOpsFor(cur.machine);
+  const rel =
+    proj && proj.machine === cur.machine ? (ops.stripPrefix(cur.path, proj.root) ?? cur.path) : cur.path;
+  sendToSession(t("send.selection", { path: rel, selected }));
+}
+
+function startDelete(path: string, isDir: boolean) {
+  const ops = styleOpsFor(treeMachine());
+  const name = ops.fileName(path) ?? path;
+  deleteDialog.set({ path, name, isDir });
+}
+
+async function confirmDelete() {
+  const dlg = deleteDialog();
+  if (!dlg) return;
+  deleteDialog.set(null);
+  const machine = treeMachine();
+  const root = treeRootFor(machine, dlg.path);
+  if (!root) return;
+  const ops = styleOpsFor(machine);
+  try {
+    await call(machine, "project.delete_entry", { root, path: dlg.path });
+    // 清掉已删除路径对应的打开文件、选中和展开缓存。
+    const cur = openFile();
+    if (cur && cur.machine === machine && ops.startsWith(cur.path, dlg.path)) {
+      openFile.set(null);
+    }
+    if (selectedPath() && ops.startsWith(selectedPath()!, dlg.path)) {
+      selectedPath.set(null);
+    }
+    const nextExpanded = new Set<string>();
+    for (const dir of expandedDirs()) {
+      if (!ops.startsWith(dir, dlg.path)) nextExpanded.add(dir);
+    }
+    expandedDirs.set(nextExpanded);
+    markDirsStaleWhere((m, dir) => m === machine && ops.startsWith(dir, root));
+    markGitMarksStaleWhere((m, r) => m === machine && r === root);
+    persistCurrentProject();
+    refreshVisible();
+  } catch (error: any) {
+    notifyError(t("delete.failed", { error: error?.message ?? String(error) }));
+  }
+}
+
+// ---- 搜索 ----
+
+function scheduleSearch(query: string) {
+  if (searchTimer) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+  const trimmed = query.trim();
+  const proj = currentProject();
+  if (!trimmed || !proj) {
+    searchState.set(null);
+    return;
+  }
+  const seq = ++searchSeq;
+  searchState.set({
+    machine: proj.machine,
+    root: proj.root,
+    query: trimmed,
+    done: false,
+    hits: [],
+    truncated: false,
+  });
+  searchTimer = setTimeout(() => {
+    searchTimer = null;
+    void call(proj.machine, "project.search", { root: proj.root, query: trimmed })
+      .then((result: any) => {
+        if (seq !== searchSeq) return;
+        const hits: SearchHit[] = Array.isArray(result?.hits)
+          ? result.hits.map((h: any) => ({
+              path: String(h.path ?? ""),
+              rel: String(h.rel ?? ""),
+              line: Array.isArray(h.line) ? [Number(h.line[0]), String(h.line[1] ?? "")] : null,
+            }))
+          : [];
+        searchState.set({
+          machine: proj.machine,
+          root: proj.root,
+          query: trimmed,
+          done: true,
+          hits,
+          truncated: Boolean(result?.truncated),
+        });
+      })
+      .catch(() => {
+        if (seq !== searchSeq) return;
+        searchState.set({
+          machine: proj.machine,
+          root: proj.root,
+          query: trimmed,
+          done: true,
+          hits: [],
+          truncated: false,
+        });
+      });
+  }, SEARCH_DEBOUNCE_MS);
+}
+
+// ---- 切换项目（停放 / 恢复） ----
+
+async function syncProjectFromContext() {
+  const ctxProj = activeContext()?.project;
+  const next: ProjectRef | null =
+    ctxProj && typeof ctxProj.root === "string" && ctxProj.root.length > 0
+      ? { machine: ctxProj.machine ?? null, root: ctxProj.root }
+      : null;
+  const cur = currentProject();
+  if (cur?.machine === next?.machine && cur?.root === next?.root) return;
+
+  // 停放当前项目 UI 现场
+  if (cur) {
+    parked.set(projectKey(cur.machine, cur.root), {
+      openFile: openFile(),
+      selected: selectedPath(),
+      expanded: new Set(expandedDirs()),
+      collapsedRoots: new Set(collapsedRoots()),
+      pendingReveal,
+    });
+  }
+
+  const switchId = ++projectSwitchSeq;
+  currentProject.set(next);
+  filterQuery.set("");
+  searchState.set(null);
+  unsavedDialog.set(null);
+  pendingSwitchAfterSave = null;
+  pendingReveal = null;
+
+  if (!next) {
+    openFile.set(null);
+    selectedPath.set(null);
+    expandedDirs.set(new Set());
+    collapsedRoots.set(new Set());
+    refreshVisible();
+    return;
+  }
+
+  const key = projectKey(next.machine, next.root);
+  const restored = parked.get(key);
+  if (restored) {
+    parked.delete(key);
+    openFile.set(restored.openFile);
+    selectedPath.set(restored.selected);
+    expandedDirs.set(restored.expanded);
+    collapsedRoots.set(restored.collapsedRoots);
+    pendingReveal = restored.pendingReveal;
+    refreshVisible();
+    if (restored.openFile?.readable) {
+      reloadOpenFile();
+    }
+    return;
+  }
+
+  // 从 SQLite 恢复该项目现场
+  openFile.set(null);
+  selectedPath.set(null);
+  expandedDirs.set(new Set());
+  collapsedRoots.set(new Set());
+  const saved = await filesStore.loadProject(next.machine, next.root);
+  if (switchId !== projectSwitchSeq) return;
+  selectedPath.set(saved.selected);
+  expandedDirs.set(saved.expanded);
+  collapsedRoots.set(saved.collapsedRoots);
+  if (saved.openFile) {
+    openFileNow(next.machine, saved.openFile, null);
+  }
+  refreshVisible();
+}
+
+// ---- 树键盘导航 ----
+
+function handleTreeKeyDown(e: any) {
+  const key = e?.key;
+  if (
+    key !== "ArrowUp" &&
+    key !== "ArrowDown" &&
+    key !== "ArrowLeft" &&
+    key !== "ArrowRight" &&
+    key !== "Enter"
+  ) {
+    return;
+  }
+  const rows = currentTreeRows();
+  if (rows.length === 0) return;
+  const curSel = selectedPath();
+  const curIx = curSel != null ? rows.findIndex((r) => fileTreeRowPath(r) === curSel) : -1;
+
+  if (key === "ArrowUp") {
+    let nextIx = curIx > 0 ? curIx - 1 : rows.length - 1;
+    while (nextIx >= 0 && fileTreeRowPath(rows[nextIx]) == null) nextIx -= 1;
+    if (nextIx >= 0) selectedPath.set(fileTreeRowPath(rows[nextIx]));
+    return;
+  }
+  if (key === "ArrowDown") {
+    let nextIx = curIx >= 0 && curIx + 1 < rows.length ? curIx + 1 : 0;
+    while (nextIx < rows.length && fileTreeRowPath(rows[nextIx]) == null) nextIx += 1;
+    if (nextIx < rows.length) selectedPath.set(fileTreeRowPath(rows[nextIx]));
+    return;
+  }
+  if (curIx < 0) return;
+  const row = rows[curIx];
+  const path = fileTreeRowPath(row);
+  if (!path) return;
+
+  if (key === "ArrowLeft") {
+    if (row.kind === "root_header" && row.open) {
+      toggleRootCollapsed(path);
+    } else if (row.kind === "entry" && row.isDir && row.expanded) {
+      toggleExpandDir(path);
+    } else {
+      // 向上找父级行（depth 更小）
+      const depth = row.kind === "entry" ? row.depth : 0;
+      for (let i = curIx - 1; i >= 0; i -= 1) {
+        const candidate = rows[i];
+        const cDepth = candidate.kind === "root_header" ? 0 : candidate.kind === "entry" ? candidate.depth : depth;
+        if (cDepth < depth && fileTreeRowPath(candidate) != null) {
+          selectedPath.set(fileTreeRowPath(candidate));
+          break;
+        }
+      }
+    }
+    return;
+  }
+  if (key === "ArrowRight") {
+    if (row.kind === "root_header") {
+      if (!row.open) toggleRootCollapsed(path);
+      else if (curIx + 1 < rows.length && fileTreeRowPath(rows[curIx + 1])) {
+        selectedPath.set(fileTreeRowPath(rows[curIx + 1]));
+      }
+    } else if (row.kind === "entry" && row.isDir) {
+      if (!row.expanded) toggleExpandDir(path);
+      else if (curIx + 1 < rows.length && fileTreeRowPath(rows[curIx + 1])) {
+        selectedPath.set(fileTreeRowPath(rows[curIx + 1]));
+      }
+    } else if (row.kind === "entry") {
+      viewFileOn(treeMachine(), path, null);
+    }
+    return;
+  }
+  if (key === "Enter") {
+    if (row.kind === "root_header") {
+      toggleRootCollapsed(path);
+    } else if (row.kind === "entry" && row.isDir) {
+      toggleExpandDir(path);
+    } else if (row.kind === "entry") {
+      viewFileOn(treeMachine(), path, null);
+    }
+  }
+}
+
+// ---- 启动注册与事件监听 ----
+
+bootTask(async () => {
+  await initHost();
+  await registerViews([
+    {
+      name: "main",
+      title: text("title"),
+      icon: "icons/folder-tree.svg",
+      export: "default",
+    },
+  ]);
+  await registerCommands(
+    [
+      {
+        name: "save",
+        title: text("command.save"),
+        key: "cmd-s",
+        context: "Files",
+        palette: true,
+        requires_args: false,
+        args: [],
+      },
+      {
+        name: "open",
+        title: text("command.open"),
+        context: "Workspace",
+        palette: false,
+        requires_args: true,
+        args: ["path", "machine", "line"],
+      },
+    ],
+    text("title"),
+  );
+  await registerFileOpener("open");
+
+  if (!settingsLoaded) {
+    settingsLoaded = true;
+    const settings = await filesStore.loadSettings();
+    treeWidth.set(clampTreeWidth(settings.treeWidth));
+    treeOpen.set(settings.treeOpen);
+    pinnedRoots.set(settings.pinned);
+  }
+  await syncProjectFromContext();
+  refreshVisible();
+});
+
+onCommand(async ({ name, args }) => {
+  if (name === "save") {
+    await saveOpenFile();
+    return null;
+  }
+  if (name === "open") {
+    const filePath = typeof args?.path === "string" && args.path.length > 0 ? args.path : null;
+    if (!filePath) {
+      throw new Error(t("error.bad_open_args", { args: JSON.stringify(args ?? null) }));
+    }
+    const machine = typeof args?.machine === "string" ? args.machine : null;
+    const line =
+      typeof args?.line === "number" && Number.isFinite(args.line) && args.line > 0
+        ? Math.floor(args.line)
+        : null;
+    await run(OPEN_VIEW_CMD, { view: VIEW_ID, args: null });
+    viewFileOn(machine, filePath, line);
+    return null;
+  }
+  throw new Error(`unknown command: ${name}`);
+});
+
+onState((next) => {
+  const active = next.window_active !== false;
+  if (active && !lastWindowActive) {
+    markEverythingStale(undefined);
+    refreshVisible();
+  }
+  lastWindowActive = active;
+  void syncProjectFromContext();
+  if (viewShown(VIEW_ID)) {
+    refreshVisible();
+  }
+});
+
+onEvent((event) => {
+  if (!event || typeof event !== "object") return;
+  if (event.type === "project_changed") {
+    const machine = event.machine ?? null;
+    const root = typeof event.root === "string" ? event.root : "";
+    if (!root || !watches.has(projectKey(machine, root))) return;
+    const ops = styleOpsFor(machine);
+    markDirsStaleWhere((m, dir) => m === machine && ops.startsWith(dir, root));
+    onOpenFileProjectChanged(machine, root);
+    markGitMarksStaleWhere((m, r) => m === machine && ops.startsWith(r, root));
+    refreshVisible();
+    return;
+  }
+  if (event.type === "reconnected") {
+    const machine = event.machine ?? null;
+    markEverythingStale(machine);
+    for (const key of [...watches]) {
+      const sep = key.indexOf("\0");
+      const m = sep > 0 ? key.slice(0, sep) : null;
+      if (m === machine) watches.delete(key);
+    }
+    refreshVisible();
+    return;
+  }
+  if (event.type === "window_activated") {
+    markEverythingStale(undefined);
+    refreshVisible();
+    return;
+  }
+  if (event.type === "active_context_changed") {
+    void syncProjectFromContext();
+    return;
+  }
+  if (event.type === "shown_views_changed") {
+    if (viewShown(VIEW_ID)) {
+      refreshVisible();
+    }
+  }
+});
+
+// ---- 子组件 ----
+
+const currentTheme = stableMemo(() => state().theme);
+
+function MenuRow(props: {
+  label: string;
+  iconPath?: string;
+  danger?: boolean;
+  disabled?: boolean;
+  onSelect: () => void;
+}) {
+  const look = currentTheme;
+  return (
+    <MenuItem
+      label={props.label}
+      disabled={props.disabled}
+      class={MENU_ITEM_CLASS}
+      style={{ height: 26, gap: 6 }}
+      onSelect={props.onSelect}
+    >
+      <If when={Boolean(props.iconPath)}>
+        <SmeltIcon
+          path={props.iconPath}
+          size={13}
+          color={props.danger ? look().palette.bad : look().palette.muted}
+        />
+      </If>
+      <Text
+        style={{
+          fontSize: look().type.small.size,
+          lineHeight: look().type.small.line_height,
+          color: props.danger ? look().palette.bad : look().palette.text,
+        }}
+      >
+        {props.label}
+      </Text>
+    </MenuItem>
+  );
+}
+
+function gitMarkColor(mark: string, palette: any): string {
+  if (mark === "D") return palette.bad;
+  if (mark === "A") return palette.ok;
+  if (mark === "U") return palette.run;
+  return palette.need;
+}
+
+function Placeholder(props: { text: string }) {
+  const look = currentTheme;
+  return (
+    <View
+      style={{
+        flex: 1,
+        minWidth: 0,
+        minHeight: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        paddingLeft: 16,
+        paddingRight: 16,
+      }}
+    >
+      <Text
+        style={{
+          fontSize: look().type.ui_medium.size,
+          lineHeight: look().type.ui_medium.line_height,
+          fontWeight: look().type.ui_medium.weight,
+          color: look().palette.muted,
+          textAlign: "center",
+        }}
+      >
+        {props.text}
+      </Text>
+    </View>
+  );
+}
+
+// ---- 主视图 ----
+
+export function Main() {
+  const look = currentTheme;
+  const isMac = localOs() === "darwin";
+
+  const rows = computed(() => currentTreeRows());
+  const roots = computed(() => currentRoots());
+  const isLocalTree = computed(() => treeMachine() == null);
+  const hasQuery = computed(() => filterQuery().trim().length > 0);
+
+  const searchRows = computed(() => {
+    const st = searchState();
+    if (!st) return [];
+    const tree = buildSearchTree(st.hits);
+    return flattenSearchTree(tree, st.hits);
+  });
+
+  const searchStatusText = computed(() => {
+    const st = searchState();
+    if (!st) return "";
+    if (!st.done) return t("search.running");
+    if (st.hits.length === 0) return t("search.none");
+    if (st.truncated) return t("search.hits_truncated", { count: st.hits.length });
+    return t("search.hits", { count: st.hits.length });
+  });
+
+  const breadcrumbs = computed(() => {
+    const of = openFile();
+    if (!of) return [];
+    const r = of.machine === treeMachine() ? roots() : [];
+    const segs = breadcrumbSegments(styleOpsFor(of.machine), of.path, r);
+    const lastIx = segs.length - 1;
+    return segs.map((seg, ix) => ({ ...seg, isLast: ix === lastIx }));
+  });
+
+  const canPreviewMarkdown = computed(() => {
+    const of = openFile();
+    return of != null && isMarkdownPath(of.path);
+  });
+
+  const canOpenInBrowser = computed(() => {
+    const of = openFile();
+    return of != null && of.machine == null && isHtmlPath(of.path);
+  });
+
+  const showingMarkdownPreview = computed(() => {
+    const of = openFile();
+    return of != null && of.preview && isMarkdownPath(of.path);
+  });
+
+  const openFileDirty = computed(() => isDirty(openFile()));
+
+  effect(() => {
+    if (viewShown(VIEW_ID)) {
+      refreshVisible();
+    }
+  });
+
+  function handlePanelKeyDown(e: any) {
+    const key = String(e?.key ?? "").toLowerCase();
+    const mod = isMac ? Boolean(e?.modifiers?.platform) : Boolean(e?.modifiers?.control);
+    if (key === "s" && mod && !e?.modifiers?.alt && !e?.modifiers?.shift) {
+      void saveOpenFile();
+    }
+  }
+
+  function handleEditorContextMenu(e: { x: number; y: number }) {
+    const api = activeEditorApi;
+    const hasSelection = Boolean(api && String(api.selectedText?.() ?? "").trim().length > 0);
+    const cur = openFile();
+    const readOnly = !cur || !cur.readable;
+    void Menu.popup(
+      [
+        {
+          label: t("edit.cut"),
+          disabled: readOnly || !hasSelection,
+          onSelect: () => api?.run?.("cut"),
+        },
+        {
+          label: t("edit.copy"),
+          disabled: !hasSelection,
+          onSelect: () => api?.run?.("copy"),
+        },
+        {
+          label: t("edit.paste"),
+          disabled: readOnly,
+          onSelect: () => api?.run?.("paste"),
+        },
+        {
+          label: t("edit.select_all"),
+          onSelect: () => api?.run?.("selectAll"),
+        },
+        { type: "separator" },
+        {
+          label: t("send.selection_menu"),
+          disabled: !hasSelection,
+          onSelect: () => sendEditorSelectionToSession(),
+        },
+      ],
+      { x: e.x, y: e.y },
+    );
+  }
+
+  return (
+    <View
+      onKeyDown={handlePanelKeyDown}
+      style={{
+        flex: 1,
+        width: "100%",
+        height: "100%",
+        minWidth: 0,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
+      {/* 路径面包屑栏（仅在打开文件时显示） */}
+      <If when={openFile() != null}>
+        <View
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            paddingLeft: 12,
+            paddingRight: 12,
+            paddingTop: 6,
+            paddingBottom: 6,
+            borderBottomWidth: 1,
+            borderBottomColor: look().palette.hair,
+            flexShrink: 0,
+          }}
+        >
+          <View
+            style={{
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 4,
+              minWidth: 0,
+              flex: 1,
+              overflow: "hidden",
+            }}
+          >
+            <Each of={breadcrumbs()} key={(seg: any) => seg.path}>
+              {(seg: () => { label: string; path: string; isLast: boolean }) => {
+                const isLast = () => seg().isLast;
+                const onTreeMachine = () => openFile()?.machine === treeMachine();
+                return (
+                  <View
+                    style={{
+                      display: "flex",
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 4,
+                      flexShrink: isLast() ? 1 : 0,
+                      minWidth: 0,
+                    }}
+                  >
+                    <View
+                      class="rounded hover:bg-accent"
+                      onPress={() => {
+                        if (!onTreeMachine()) return;
+                        revealFromBreadcrumb(seg().path, !isLast());
+                      }}
+                      style={{
+                        paddingLeft: 6,
+                        paddingRight: 6,
+                        paddingTop: 4,
+                        paddingBottom: 4,
+                        minHeight: 26,
+                        display: "flex",
+                        alignItems: "center",
+                        cursor: onTreeMachine() ? "pointer" : "default",
+                      }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: look().type.ui.size,
+                          lineHeight: look().type.ui.line_height,
+                          fontWeight: isLast()
+                            ? look().type.ui_medium.weight
+                            : look().type.ui.weight,
+                          color: isLast() ? look().palette.text : look().palette.muted,
+                          numberOfLines: 1,
+                        }}
+                      >
+                        {seg().label}
+                      </Text>
+                    </View>
+                    <If when={!isLast()}>
+                      <Text
+                        style={{
+                          fontSize: look().type.ui.size,
+                          color: look().palette.muted,
+                        }}
+                      >
+                        {">"}
+                      </Text>
+                    </If>
+                  </View>
+                );
+              }}
+            </Each>
+            <If when={openFileDirty()}>
+              <View
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: 3,
+                  backgroundColor: look().palette.need,
+                  flexShrink: 0,
+                  marginLeft: 4,
+                }}
+              />
+            </If>
+            <If when={Boolean(openFile()?.saveError)}>
+              <Text
+                style={{
+                  fontSize: look().type.text_xsmall.size,
+                  lineHeight: look().type.text_xsmall.line_height,
+                  color: look().palette.need,
+                  marginLeft: 6,
+                  flexShrink: 1,
+                  numberOfLines: 1,
+                }}
+              >
+                {openFile()?.saveError ?? ""}
+              </Text>
+            </If>
+          </View>
+
+          <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0 }}>
+            <If when={canOpenInBrowser()}>
+              <SmeltButton
+                quiet={true}
+                small={true}
+                label={t("browser.open")}
+                onPress={openFileInBrowser}
+              />
+            </If>
+            <If when={canPreviewMarkdown()}>
+              <SmeltButton
+                quiet={true}
+                small={true}
+                label={showingMarkdownPreview() ? t("preview.show_source") : t("preview.show_preview")}
+                onPress={() => setFilePreview(!showingMarkdownPreview())}
+              />
+            </If>
+            <SmeltButton
+              quiet={true}
+              small={true}
+              icon={treeOpen() ? "icons/panel-right.svg" : "icons/panel-left.svg"}
+              tooltip={treeOpen() ? t("tree.collapse") : t("tree.expand")}
+              onPress={() => {
+                treeOpen.set(!treeOpen());
+                persistTreeLayout();
+                refreshVisible();
+              }}
+            />
+          </View>
+        </View>
+      </If>
+
+      {/* 主体：左内容 + 右文件树（Rust 一等 ResizablePanelGroup，拖动零 JS 往返） */}
+      <View style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "row" }}>
+        <ResizablePanelGroup
+          axis="horizontal"
+          handleClass="bg-border group-hover:bg-muted-foreground/50 group-active:bg-muted-foreground/70"
+        >
+          {/* 左侧：文件主体（编辑器 / Markdown 预览 / 图片 / 占位） */}
+          <ResizablePanel minSize={120}>
+            <View
+              style={{
+                flex: 1,
+                width: "100%",
+                height: "100%",
+                minWidth: 0,
+                minHeight: 0,
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+              }}
+            >
+              <If when={openFile() != null} else={<Placeholder text={t("title")} />}>
+                <If
+                  when={Boolean(openFile()?.imageDataUri)}
+                  else={
+                    <If
+                      when={showingMarkdownPreview()}
+                      else={
+                        <SmeltEditor
+                          editorRef={(api: any) => {
+                            activeEditorApi = api;
+                            const cur = openFile();
+                            activeEditorFileId = cur?.id ?? 0;
+                            if (api && cur?.pendingGotoLine != null) {
+                              jumpEditorToLine(cur.pendingGotoLine);
+                              patchOpenFileById(cur.id, (of) => ({ ...of, pendingGotoLine: null }));
+                            }
+                          }}
+                          value={openFile()?.content ?? ""}
+                          language={openFile() ? editorLanguageForPath(openFile()!.path) : "text"}
+                          readOnly={!openFile()?.readable}
+                          lineNumbers={true}
+                          softWrap={false}
+                          accessibilityLabel={openFile()?.path ?? ""}
+                          onChange={({ value }: { value: string }) => {
+                            const cur = openFile();
+                            if (!cur || !cur.readable) return;
+                            if (cur.content === value) return;
+                            openFile.set({ ...cur, content: value });
+                            schedulePreviewRefresh();
+                          }}
+                          onContextMenu={handleEditorContextMenu}
+                        />
+                      }
+                    >
+                      <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
+                        <View style={{ padding: 14, width: "100%", minWidth: 0 }}>
+                          <SmeltMarkdown
+                            markdown={openFile()?.previewSource ?? ""}
+                            cwd={currentProject()?.root ?? null}
+                            machine={openFile()?.machine ?? null}
+                          />
+                        </View>
+                      </Scroll>
+                    </If>
+                  }
+                >
+                  <View
+                    style={{
+                      flex: 1,
+                      width: "100%",
+                      height: "100%",
+                      padding: 16,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <Image
+                      src={openFile()?.imageDataUri ?? ""}
+                      resizeMode="contain"
+                      style={{ width: "100%", height: "100%" }}
+                    />
+                  </View>
+                </If>
+              </If>
+            </View>
+          </ResizablePanel>
+
+          {/* 右侧：搜索栏 + 文件树 / 搜索结果 */}
+          <ResizablePanel
+            fixed={true}
+            visible={treeOpen()}
+            size={treeWidth()}
+            minSize={MIN_TREE_WIDTH}
+            maxSize={MAX_TREE_WIDTH}
+            onResize={({ size }: { size: number }) => {
+              const clamped = clampTreeWidth(size);
+              treeWidth.set(clamped);
+              persistTreeLayout();
+            }}
+          >
+            <View
+              style={{
+                flex: 1,
+                width: "100%",
+                height: "100%",
+                minWidth: 0,
+                minHeight: 0,
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+              }}
+            >
+              {/* 搜索框 + 钉住目录按钮 */}
+              <View
+                style={{
+                  display: "flex",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 4,
+                  paddingLeft: 8,
+                  paddingRight: 8,
+                  paddingTop: 6,
+                  paddingBottom: 6,
+                  borderBottomWidth: 1,
+                  borderBottomColor: look().palette.hair,
+                  flexShrink: 0,
+                }}
+              >
+                <Input
+                  value={filterQuery()}
+                  placeholder={t("search.placeholder")}
+                  onChange={({ value }: { value: string }) => {
+                    filterQuery.set(value);
+                    scheduleSearch(value);
+                  }}
+                  onKeyDown={(e: any) => {
+                    if (e?.key === "Escape") {
+                      filterQuery.set("");
+                      searchState.set(null);
+                    }
+                  }}
+                  class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    height: 26,
+                    fontSize: look().type.small.size,
+                    lineHeight: look().type.small.line_height,
+                  }}
+                />
+                <If when={isLocalTree()}>
+                  <SmeltButton
+                    quiet={true}
+                    small={true}
+                    icon="icons/plus.svg"
+                    tooltip={t("pin.add")}
+                    onPress={() => void pickPinnedRoots()}
+                  />
+                </If>
+              </View>
+
+              {/* 搜索结果 OR 文件树 */}
+              <If
+                when={hasQuery()}
+                else={
+                  <If
+                    when={roots().length > 0}
+                    else={<Placeholder text={t("tree.no_project")} />}
+                  >
+                    <If
+                      when={
+                        !(
+                          roots().length === 1 &&
+                          !(dirCache.get(treeMachine() ?? "")?.has(roots()[0]))
+                        )
+                      }
+                      else={<Placeholder text={t("loading")} />}
+                    >
+                      <View
+                        focusable={true}
+                        onKeyDown={handleTreeKeyDown}
+                        style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}
+                      >
+                        <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
+                          <View style={{ display: "flex", flexDirection: "column", paddingTop: 2, paddingBottom: 4 }}>
+                            <Each of={rows()} key={(row: any) => fileTreeRowId(row)}>
+                              {(row: () => any) => {
+                                const isLoading = () => row().kind === "loading";
+                                const isRoot = () => row().kind === "root_header";
+                                const rowPath = () => fileTreeRowPath(row()) ?? "";
+                                const isSelected = () =>
+                                  selectedPath() != null && selectedPath() === rowPath();
+                                const isOpen = () =>
+                                  row().kind === "entry" &&
+                                  !row().isDir &&
+                                  openFile()?.path === row().path &&
+                                  openFile()?.machine === treeMachine();
+
+                                return (
+                                  <If
+                                    when={isLoading()}
+                                    else={
+                                      <If
+                                        when={isRoot()}
+                                        else={
+                                          /* 普通目录 / 文件行 */
+                                          <ContextMenu popupClass={POPUP_CLASS}>
+                                            <View
+                                              slot="trigger"
+                                              class="hover:bg-accent"
+                                              onPress={() => {
+                                                const r = row();
+                                                selectedPath.set(r.path);
+                                                if (r.isDir) {
+                                                  toggleExpandDir(r.path);
+                                                } else {
+                                                  viewFileOn(treeMachine(), r.path, null);
+                                                }
+                                              }}
+                                              tooltip={
+                                                nameLikelyTruncated(row().name, row().depth, treeWidth()) ? (
+                                                  <Tooltip class="px-2 py-1 rounded bg-popover border border-border">
+                                                    <Text
+                                                      style={{
+                                                        fontSize: look().type.text_xsmall.size,
+                                                        color: look().palette.text,
+                                                      }}
+                                                    >
+                                                      {row().name}
+                                                    </Text>
+                                                  </Tooltip>
+                                                ) : undefined
+                                              }
+                                              style={{
+                                                display: "flex",
+                                                flexDirection: "row",
+                                                alignItems: "center",
+                                                gap: 4,
+                                                height: 24,
+                                                paddingLeft:
+                                                  8 + row().depth * 14 - (isSelected() ? 2 : 0),
+                                                paddingRight: 8,
+                                                borderLeftWidth: isSelected() ? 2 : 0,
+                                                borderLeftColor: look().palette.ink,
+                                                backgroundColor: isOpen()
+                                                  ? look().palette.row_selected
+                                                  : "transparent",
+                                                cursor: "pointer",
+                                                overflow: "hidden",
+                                              }}
+                                            >
+                                              <If
+                                                when={row().isDir}
+                                                else={<View style={{ width: 14, flexShrink: 0 }} />}
+                                              >
+                                                <SmeltIcon
+                                                  path={
+                                                    row().expanded
+                                                      ? "icons/chevron-down.svg"
+                                                      : "icons/chevron-right.svg"
+                                                  }
+                                                  size={12}
+                                                  color={look().palette.muted}
+                                                />
+                                              </If>
+                                              <SmeltIcon
+                                                path={
+                                                  row().isDir
+                                                    ? row().expanded
+                                                      ? "icons/folder-open.svg"
+                                                      : "icons/folder.svg"
+                                                    : "icons/file.svg"
+                                                }
+                                                size={14}
+                                                color={
+                                                  row().isDir
+                                                    ? look().palette.text
+                                                    : look().palette.muted
+                                                }
+                                              />
+                                              <Text
+                                                style={{
+                                                  flex: 1,
+                                                  minWidth: 0,
+                                                  fontSize: look().type.small.size,
+                                                  lineHeight: look().type.small.line_height,
+                                                  color: row().isDir
+                                                    ? look().palette.text
+                                                    : look().palette.muted,
+                                                  numberOfLines: 1,
+                                                }}
+                                              >
+                                                {row().name}
+                                              </Text>
+                                              <If when={Boolean(row().gitMark)}>
+                                                <Text
+                                                  style={{
+                                                    flexShrink: 0,
+                                                    fontSize: look().type.text_xsmall.size,
+                                                    fontWeight: 600,
+                                                    color: gitMarkColor(
+                                                      row().gitMark ?? "M",
+                                                      look().palette,
+                                                    ),
+                                                  }}
+                                                >
+                                                  {row().gitMark ?? ""}
+                                                </Text>
+                                              </If>
+                                            </View>
+                                            <MenuRow
+                                              label={t("send.path_menu")}
+                                              onSelect={() => sendPathToSession(row().path)}
+                                            />
+                                            <MenuRow
+                                              label={t("copy_path")}
+                                              onSelect={() => void clipboardWrite(row().path)}
+                                            />
+                                            <If when={isLocalTree()}>
+                                              <MenuRow
+                                                label={isMac ? t("reveal.finder") : t("reveal.file_manager")}
+                                                onSelect={() => void revealPath(row().path)}
+                                              />
+                                            </If>
+                                            <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />
+                                            <MenuRow
+                                              label={
+                                                row().isDir
+                                                  ? t("delete.folder_menu")
+                                                  : t("delete.file_menu")
+                                              }
+                                              iconPath="icons/trash.svg"
+                                              danger={true}
+                                              onSelect={() => startDelete(row().path, Boolean(row().isDir))}
+                                            />
+                                          </ContextMenu>
+                                        }
+                                      >
+                                        {/* 多根时的根标题行 */}
+                                        <If
+                                          when={Boolean(row().pinned)}
+                                          else={
+                                            <View
+                                              class="hover:bg-accent"
+                                              onPress={() => {
+                                                selectedPath.set(row().path);
+                                                toggleRootCollapsed(row().path);
+                                              }}
+                                              style={{
+                                                display: "flex",
+                                                flexDirection: "row",
+                                                alignItems: "center",
+                                                gap: 4,
+                                                height: 24,
+                                                paddingLeft: isSelected() ? 6 : 8,
+                                                paddingRight: 8,
+                                                borderLeftWidth: isSelected() ? 2 : 0,
+                                                borderLeftColor: look().palette.ink,
+                                                cursor: "pointer",
+                                                overflow: "hidden",
+                                              }}
+                                            >
+                                              <SmeltIcon
+                                                path={
+                                                  row().open
+                                                    ? "icons/chevron-down.svg"
+                                                    : "icons/chevron-right.svg"
+                                                }
+                                                size={12}
+                                                color={look().palette.muted}
+                                              />
+                                              <SmeltIcon
+                                                path="icons/folder-open.svg"
+                                                size={14}
+                                                color={look().palette.text}
+                                              />
+                                              <Text
+                                                style={{
+                                                  flex: 1,
+                                                  minWidth: 0,
+                                                  fontSize: look().type.small_medium.size,
+                                                  fontWeight: look().type.small_medium.weight,
+                                                  color: look().palette.text,
+                                                  numberOfLines: 1,
+                                                }}
+                                              >
+                                                {styleOpsFor(treeMachine()).fileName(row().path) ??
+                                                  row().path}
+                                              </Text>
+                                            </View>
+                                          }
+                                        >
+                                          <ContextMenu popupClass={POPUP_CLASS}>
+                                            <View
+                                              slot="trigger"
+                                              class="hover:bg-accent"
+                                              onPress={() => {
+                                                selectedPath.set(row().path);
+                                                toggleRootCollapsed(row().path);
+                                              }}
+                                              style={{
+                                                display: "flex",
+                                                flexDirection: "row",
+                                                alignItems: "center",
+                                                gap: 4,
+                                                height: 24,
+                                                paddingLeft: isSelected() ? 6 : 8,
+                                                paddingRight: 8,
+                                                borderLeftWidth: isSelected() ? 2 : 0,
+                                                borderLeftColor: look().palette.ink,
+                                                cursor: "pointer",
+                                                overflow: "hidden",
+                                              }}
+                                            >
+                                              <SmeltIcon
+                                                path={
+                                                  row().open
+                                                    ? "icons/chevron-down.svg"
+                                                    : "icons/chevron-right.svg"
+                                                }
+                                                size={12}
+                                                color={look().palette.muted}
+                                              />
+                                              <SmeltIcon
+                                                path="icons/folder-open.svg"
+                                                size={14}
+                                                color={look().palette.text}
+                                              />
+                                              <Text
+                                                style={{
+                                                  flex: 1,
+                                                  minWidth: 0,
+                                                  fontSize: look().type.small_medium.size,
+                                                  fontWeight: look().type.small_medium.weight,
+                                                  color: look().palette.text,
+                                                  numberOfLines: 1,
+                                                }}
+                                              >
+                                                {styleOpsFor(treeMachine()).fileName(row().path) ??
+                                                  row().path}
+                                              </Text>
+                                            </View>
+                                            <MenuRow
+                                              label={t("pin.remove")}
+                                              onSelect={() => unpinRoot(row().path)}
+                                            />
+                                          </ContextMenu>
+                                        </If>
+                                      </If>
+                                    }
+                                  >
+                                    <View
+                                      style={{
+                                        height: 24,
+                                        paddingLeft: 8 + row().depth * 14,
+                                        paddingRight: 8,
+                                        display: "flex",
+                                        flexDirection: "row",
+                                        alignItems: "center",
+                                      }}
+                                    >
+                                      <Text
+                                        style={{
+                                          fontSize: look().type.text_xsmall.size,
+                                          color: look().palette.muted,
+                                        }}
+                                      >
+                                        {t("loading")}
+                                      </Text>
+                                    </View>
+                                  </If>
+                                );
+                              }}
+                            </Each>
+                          </View>
+                        </Scroll>
+                      </View>
+                    </If>
+                  </If>
+                }
+              >
+                {/* 搜索结果视图 */}
+                <View style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
+                  <View style={{ paddingLeft: 8, paddingRight: 8, paddingTop: 4, paddingBottom: 4, flexShrink: 0 }}>
+                    <Text
+                      style={{
+                        fontSize: look().type.text_xsmall.size,
+                        lineHeight: look().type.text_xsmall.line_height,
+                        color: look().palette.muted,
+                      }}
+                    >
+                      {searchStatusText()}
+                    </Text>
+                  </View>
+                  <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
+                    <View style={{ display: "flex", flexDirection: "column", paddingBottom: 4 }}>
+                      <Each of={searchRows()} key={(r: any) => r.key}>
+                        {(row: () => any) => (
+                          <If
+                            when={row().kind === "dir"}
+                            else={
+                              <View
+                                class="hover:bg-accent"
+                                onPress={() =>
+                                  viewFileOn(
+                                    searchState()?.machine ?? treeMachine(),
+                                    row().path,
+                                    row().line,
+                                  )
+                                }
+                                style={{
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  paddingLeft: 8 + row().depth * 12,
+                                  paddingRight: 8,
+                                  paddingTop: 3,
+                                  paddingBottom: 3,
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
+                                  <SmeltIcon path="icons/file.svg" size={13} color={look().palette.muted} />
+                                  <Text
+                                    style={{
+                                      flex: 1,
+                                      minWidth: 0,
+                                      fontSize: look().type.small.size,
+                                      lineHeight: look().type.small.line_height,
+                                      color: look().palette.text,
+                                      numberOfLines: 1,
+                                    }}
+                                  >
+                                    {row().name}
+                                  </Text>
+                                  <If when={row().line != null}>
+                                    <Text
+                                      style={{
+                                        fontSize: look().type.text_xsmall.size,
+                                        color: look().palette.faint,
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      {`:${row().line}`}
+                                    </Text>
+                                  </If>
+                                </View>
+                                <If when={Boolean(row().snippet)}>
+                                  <Text
+                                    style={{
+                                      paddingLeft: 17,
+                                      fontSize: look().type.text_xsmall.size,
+                                      lineHeight: look().type.text_xsmall.line_height,
+                                      color: look().palette.muted,
+                                      numberOfLines: 1,
+                                    }}
+                                  >
+                                    {row().snippet ?? ""}
+                                  </Text>
+                                </If>
+                              </View>
+                            }
+                          >
+                            <View
+                              style={{
+                                display: "flex",
+                                flexDirection: "row",
+                                alignItems: "center",
+                                gap: 4,
+                                height: 22,
+                                paddingLeft: 8 + row().depth * 12,
+                                paddingRight: 8,
+                              }}
+                            >
+                              <SmeltIcon path="icons/folder-open.svg" size={13} color={look().palette.muted} />
+                              <Text
+                                style={{
+                                  flex: 1,
+                                  minWidth: 0,
+                                  fontSize: look().type.small.size,
+                                  color: look().palette.muted,
+                                  numberOfLines: 1,
+                                }}
+                              >
+                                {row().name}
+                              </Text>
+                            </View>
+                          </If>
+                        )}
+                      </Each>
+                    </View>
+                  </Scroll>
+                </View>
+              </If>
+            </View>
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      </View>
+
+      {/* 未保存切换确认框 */}
+      <Dialog
+        open={unsavedDialog() != null}
+        role="alertdialog"
+        animation="fade"
+        accessibilityLabel={t("switch.title", { name: unsavedDialog()?.currentName ?? "" })}
+        backdropClass="bg-black/40"
+        onOpenChange={({ open }: { open: boolean }) => {
+          if (!open) unsavedDialog.set(null);
+        }}
+        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        style={{ width: 440, gap: 12 }}
+      >
+        <If when={unsavedDialog() != null}>
+          <Text
+            style={{
+              color: look().palette.text,
+              fontSize: look().type.ui_medium.size,
+              fontWeight: look().type.ui_medium.weight,
+            }}
+          >
+            {t("switch.title", { name: unsavedDialog()?.currentName ?? "" })}
+          </Text>
+          <Text
+            style={{
+              color: look().palette.muted,
+              fontSize: look().type.ui.size,
+              lineHeight: look().type.ui.line_height,
+            }}
+          >
+            {t("switch.description", { name: unsavedDialog()?.targetName ?? "" })}
+          </Text>
+          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+            <SmeltButton
+              quiet={true}
+              small={true}
+              label={t("cancel")}
+              onPress={() => unsavedDialog.set(null)}
+            />
+            <SmeltButton
+              small={true}
+              label={t("switch.discard")}
+              onPress={() => {
+                const dlg = unsavedDialog();
+                unsavedDialog.set(null);
+                if (dlg) openFileNow(dlg.target.machine, dlg.target.path, dlg.line);
+              }}
+            />
+            <SmeltButton
+              primary={true}
+              small={true}
+              label={t("switch.save")}
+              onPress={() => {
+                const dlg = unsavedDialog();
+                unsavedDialog.set(null);
+                if (!dlg) return;
+                pendingSwitchAfterSave = {
+                  fromId: dlg.currentId,
+                  target: dlg.target,
+                  line: dlg.line,
+                };
+                void saveOpenFile();
+              }}
+            />
+          </View>
+        </If>
+      </Dialog>
+
+      {/* 删除确认框 */}
+      <Dialog
+        open={deleteDialog() != null}
+        role="alertdialog"
+        animation="fade"
+        accessibilityLabel={
+          deleteDialog()?.isDir ? t("delete.folder_confirm") : t("delete.file_confirm")
+        }
+        backdropClass="bg-black/40"
+        onOpenChange={({ open }: { open: boolean }) => {
+          if (!open) deleteDialog.set(null);
+        }}
+        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        style={{ width: 420, gap: 12 }}
+      >
+        <If when={deleteDialog() != null}>
+          <Text
+            style={{
+              color: look().palette.text,
+              fontSize: look().type.ui_medium.size,
+              fontWeight: look().type.ui_medium.weight,
+            }}
+          >
+            {deleteDialog()?.isDir ? t("delete.folder_confirm") : t("delete.file_confirm")}
+          </Text>
+          <Text
+            style={{
+              color: look().palette.muted,
+              fontSize: look().type.ui.size,
+              lineHeight: look().type.ui.line_height,
+            }}
+          >
+            {deleteDialog()?.isDir
+              ? t("delete.folder_description", { name: deleteDialog()?.name ?? "" })
+              : t("delete.file_description", { name: deleteDialog()?.name ?? "" })}
+          </Text>
+          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+            <SmeltButton
+              quiet={true}
+              small={true}
+              label={t("cancel")}
+              onPress={() => deleteDialog.set(null)}
+            />
+            <SmeltButton
+              danger={true}
+              small={true}
+              label={t("delete.action")}
+              onPress={() => void confirmDelete()}
+            />
+          </View>
+        </If>
+      </Dialog>
+    </View>
+  );
+}
+
+export default Main;

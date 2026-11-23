@@ -34,7 +34,7 @@ merman = { version = "=0.9.2", default-features = false, features = ["all-diagra
 usvg = "=0.46.0"
 # usvg 0.46 已经依赖 rustybuzz 0.20.1，显式依赖是为了用 Face 量 advance。
 rustybuzz = "=0.20.1"
-sha2 = "0.11"
+sha2.workspace = true
 hex = "0.4"
 # 图片显示统一抽象（image.rs）：ACP 图片解码 + 降采样。与 smelt 主 crate 同
 # 版本（0.25、默认关全格式），features 保持 png/jpeg/gif/webp——Bmp/Tiff 等
@@ -47,7 +47,7 @@ tree-sitter-language = "0.1"
 # 编辑器的语言服务里 Python 的缩进规则（syntax/editing.rs）。
 regex = "1"
 # 差异视图（diff/）：行内改动按词或字比对、按字素切分、按显示宽度估列宽，行内小数组。
-similar = { version = "2.7", features = ["unicode"] }
+similar = { workspace = true, features = ["unicode"] }
 unicode-segmentation = "1"
 unicode-width = "0.2"
 smallvec = "1"

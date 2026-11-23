@@ -72,8 +72,8 @@ appearance:
     en: "How the views are arranged in the workbench. Plugins can bring their own layouts"
     zh-CN: "工作台里各个视图怎么摆；插件可以带自己的布局"
   layout_none_hint:
-    en: "All views sit in one group in the middle. Install a plugin with layouts to switch here"
-    zh-CN: "所有视图摆在中间一组；装了带布局的插件后可以在这里换"
+    en: "Install a plugin that provides a workbench layout to choose one here"
+    zh-CN: "装了带布局的插件后可以在这里选择"
   no_layouts:
     en: "No layouts available"
     zh-CN: "没有可选的布局"
@@ -233,12 +233,21 @@ error:
     en: "Couldn't save: %{error}"
     zh-CN: "保存失败：%{error}"
 layout:
+  empty_hint:
+    en: "No plugin has registered a home page layout. Check Panel Plugins in Settings to inspect errors or install a layout plugin."
+    zh-CN: "当前没有插件登记首页布局。可在设置的「面板插件」里排查报错或安装布局插件。"
+  empty_title:
+    en: "No workbench layout available"
+    zh-CN: "没有可用的工作台布局"
   load_failed:
     en: "Couldn't load the layout: %{error}"
     zh-CN: "布局没装上：%{error}"
   no_outlet:
     en: "There's no outlet for the view \"%{id}\""
     zh-CN: "没有能放视图「%{id}」的出口"
+  open_plugins:
+    en: "Open Panel Plugins"
+    zh-CN: "打开面板插件"
   reset_failed:
     en: "Couldn't reset the layout: %{error}"
     zh-CN: "恢复布局失败：%{error}"
@@ -374,8 +383,8 @@ plugins:
     en: "Can't open the plugin folder %{path}: %{error}"
     zh-CN: "打不开插件目录 %{path}：%{error}"
   cli_not_loaded:
-    en: "Smelt hasn't loaded a plugin with id %{id}. Check that its folder is in ~/.smelt/plugins/ and that gpui-shell.json has this id"
-    zh-CN: "Smelt 没有加载 id 为 %{id} 的插件。看看它的目录在不在 ~/.smelt/plugins/ 里、gpui-shell.json 里的 id 对不对"
+    en: "Smelt hasn't loaded a plugin with id %{id}. Check that its folder is in ~/.smelt/plugins/ and that smelt-plugin.json has this id"
+    zh-CN: "Smelt 没有加载 id 为 %{id} 的插件。看看它的目录在不在 ~/.smelt/plugins/ 里、smelt-plugin.json 里的 id 对不对"
   cli_usage:
     en: "Usage: smelt plugin check <dir> | status [<id>]"
     zh-CN: "用法：smelt plugin check <目录> | status [<id>]"
@@ -383,8 +392,8 @@ plugins:
     en: "The plugin path is invalid"
     zh-CN: "插件路径不对"
   builtin_id:
-    en: "Smelt already comes with a plugin with ID %{id}. Change the ID in gpui-shell.json, then import"
-    zh-CN: "Smelt 自带的插件里已经有 id %{id}，改掉 gpui-shell.json 里的 id 再导入"
+    en: "Smelt already comes with a plugin with ID %{id}. Change the ID in smelt-plugin.json, then import"
+    zh-CN: "Smelt 自带的插件里已经有 id %{id}，改掉 smelt-plugin.json 里的 id 再导入"
   cleanup_failed:
     en: "Couldn't clean up the folder from an unfinished import: %{error}"
     zh-CN: "清理上次没导完的目录失败：%{error}"
@@ -409,9 +418,6 @@ plugins:
   duplicate_id:
     en: "A plugin with the same ID is already installed (%{path}). Delete it before importing"
     zh-CN: "已经装了 id 相同的插件（%{path}），先删掉它再导入"
-  duplicate_skipped:
-    en: "Not loaded: %{other} already has ID %{id}. Change the ID in gpui-shell.json"
-    zh-CN: "没加载：%{other} 已经用了 id %{id}，改掉 gpui-shell.json 里的 id"
   empty:
     en: "No plugins yet."
     zh-CN: "还没有插件。"
@@ -431,8 +437,8 @@ plugins:
     en: "Import Plugin…"
     zh-CN: "导入插件…"
   import_hint:
-    en: "Pick a folder containing gpui-shell.json to copy into %{dir}. Plugins in %{dir} reload as soon as a file is saved."
-    zh-CN: "选一个含 gpui-shell.json 的目录，复制进 %{dir}。%{dir} 里的插件改完一保存就重新加载。"
+    en: "Pick a folder containing smelt-plugin.json to copy into %{dir}. Plugins in %{dir} reload as soon as a file is saved."
+    zh-CN: "选一个含 smelt-plugin.json 的目录，复制进 %{dir}。%{dir} 里的插件改完一保存就重新加载。"
   import_prompt:
     en: "Import Plugin"
     zh-CN: "导入插件"
@@ -478,9 +484,6 @@ plugins:
   open_log:
     en: "Open Log"
     zh-CN: "打开日志"
-  runtime_failed:
-    en: "Couldn't start the plugin runtime: %{error}"
-    zh-CN: "插件运行时启动失败：%{error}"
   target_exists:
     en: "%{path} already exists"
     zh-CN: "%{path} 已经存在"
@@ -494,8 +497,8 @@ plugins:
     en: "Write Your Own Plugin"
     zh-CN: "自己写插件"
   write_hint:
-    en: "gpui-shell scripts: JavaScript describes the interface and GPUI draws it natively. console.log output and script errors go to the log, tagged [plugin]."
-    zh-CN: "gpui-shell 脚本：JavaScript 描述界面，GPUI 原生绘制。console.log 和脚本错误写进日志，带 [plugin] 标记。"
+    en: "NSH TSX/JS plugins: JavaScript describes the interface and GPUI draws it natively. console.log output and script errors go to the log, tagged [plugin]."
+    zh-CN: "NSH TSX/JS 插件：JavaScript 描述界面，GPUI 原生绘制。console.log 和脚本错误写进日志，带 [plugin] 标记。"
 quit:
   body:
     en: "Background sessions keep running; the current connections will be closed."
@@ -695,6 +698,56 @@ shortcuts:
   view_keys:
     en: "Keys Inside Views"
     zh-CN: "视图里的按键"
+updater:
+  move:
+    moving:
+      en: Moving…
+      zh-CN: 正在移动…
+    failed:
+      en: "Couldn't move: %{error}"
+      zh-CN: 没移成：%{error}
+    confirm_title:
+      en: Move Smelt to Applications?
+      zh-CN: 把 Smelt 移到「应用程序」？
+    confirm:
+      en: Move and Reopen
+      zh-CN: 移过去并重新打开
+    read_only:
+      en: Smelt is running from a read-only location (such as the installer disk image), so automatic updates can't be installed. After moving it reopens automatically; background sessions aren't affected.
+      zh-CN: Smelt 正从只读位置（比如安装盘映像）运行，自动更新装不上。移过去后会自动重新打开，后台会话不受影响。
+    translocated:
+      en: Smelt was opened without being put in Applications, so macOS runs it from a temporary read-only location and automatic updates can't be installed. After moving it reopens automatically; background sessions aren't affected.
+      zh-CN: Smelt 没放进「应用程序」就打开了，macOS 让它在一个临时的只读位置运行，自动更新因此装不上。移过去后会自动重新打开，后台会话不受影响。
+  confirm:
+    restart_title:
+      en: Restart to finish updating?
+      zh-CN: 重启以完成更新？
+    restart:
+      en: Restart and Update
+      zh-CN: 重启并更新
+    quit_title:
+      en: Quit and install the update?
+      zh-CN: 退出并安装更新？
+    quit:
+      en: Quit and Update
+      zh-CN: 退出并更新
+  stop:
+    sentence:
+      en: Updating restarts the background daemon, which interrupts the current reply in running conversations (history is saved; you can continue after the restart)
+      zh-CN: 更新将重启后台守护进程，正在进行的对话本轮回复会被中断（历史记录已保存，重启后可继续对话）
+    separator:
+      en: ", "
+      zh-CN: 、
+    and_more:
+      en: " and others (%{count} in all)"
+      zh-CN: " 等 %{count} 个"
+    busy:
+      one:
+        en: "1 session is in progress: %{names}."
+        zh-CN: 当前有 1 个会话正在进行：%{names}。
+      other:
+        en: "%{count} sessions are in progress: %{names}."
+        zh-CN: 当前有 %{count} 个会话正在进行：%{names}。
 upgrade:
   auto_failed:
     en: "Automatic upgrade failed: %{error}"

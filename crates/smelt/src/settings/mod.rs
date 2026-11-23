@@ -324,6 +324,9 @@ fn set_window_backdrop(edit: impl FnOnce(&mut Appearance), cx: &mut App) {
 /// 设置那一页（[`SETTINGS_PAGE`]），打开它就是去那一页。
 pub(crate) const SETTINGS_VIEW: &str = "smelt/settings";
 
+/// 设置「面板插件」页的视图 id。
+pub(crate) const PANEL_PLUGINS_VIEW: &str = "smelt/panel-plugins";
+
 /// 设置那一页的 id。
 const SETTINGS_PAGE: &str = "smelt/settings";
 
@@ -489,7 +492,7 @@ const HOST_PAGES: [HostPage; 3] = [
             "安装插件",
             "删除插件",
             "卸载插件",
-            "gpui-shell",
+            "nsh",
         ],
         build: build_panel_plugins,
     },
@@ -580,6 +583,22 @@ fn select_page(id: SharedString, cx: &mut App) {
     if chosen_page(cx) != Some(id.as_ref()) {
         cx.set_global(SettingsSelection(Some(id)));
     }
+}
+
+/// 当前选中的设置页 `(视图 id, 标题)`（供 `SMELT_SHELL=nsh` 主壳直接渲染内容区）。
+pub(crate) fn resolved_page(cx: &App) -> Option<(SharedString, SharedString)> {
+    let nav = settings_nav(&smelt_plugin_api::views(cx));
+    let leaf = resolve_page(&nav, chosen_page(cx))?;
+    Some((leaf.id.clone(), SharedString::from(leaf.title.clone())))
+}
+
+/// 监听设置当前选中页的变化（供 `SMELT_SHELL=nsh` 同步到 `MainShell`）。
+pub(crate) fn observe_selection(
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    f: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) -> Subscription {
+    cx.observe_global_in::<SettingsSelection>(window, f)
 }
 
 /// 设置里有没有要你处理的事，有的话落在哪一页：设置页挂着角标（比如「关于」页有新版本）→

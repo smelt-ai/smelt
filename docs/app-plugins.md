@@ -1,6 +1,6 @@
 # 整个 app 插件化
 
-> 状态：方向定于 2026-11-09；2026-11-20 改定「插件只有 JS 一种，Rust 只做宿主和能力」；运行时已切到 **NSH A2**（`crates/smelt-nsh`），9 个内置插件已迁入仓库根 `plugins/`，其余 16 个 Rust 插件仍在 `crates/plugins/` 逐步迁移。
+> 状态：方向定于 2026-11-09；2026-11-20 改定「插件只有 JS 一种，Rust 只做宿主和能力」；运行时已切到 **NSH A2**（`crates/smelt-nsh`），23 个内置插件已迁入仓库根 `plugins/`，仅剩 `conversation` 仍在 `crates/plugins/` 过渡。
 >
 > 本文先写终态，再写从现在走到终态的顺序。每块拆到时，它的接口细节再写回本文。
 
@@ -89,20 +89,20 @@
 | 会话数据 | 工作区目录、会话状态，带上几个功能都要的派生事实（名字、状态、哪家 CLI、是不是自动化跑的、工作目录、摆在侧栏哪儿） | 宿主的镜像 + `smelt-model` + `smelt-plugin-api` 的 `facts`；JS 经 `"smelt/sdk"` |
 | 路径 | 按运行时那台机器的系统切路径（`pathClean`、`pathJoin` 这些）、项目显示名 | `smelt-model` 的 `runtime_path`；JS 经 `"smelt/sdk"` 的 `path*`、`projectLabels` |
 | 插件的库 | 自己的 SQLite：查、写、事务、按版本迁移 | `smelt-client-store` 的 `PluginStore`；JS 经 `"smelt/sdk"` 的 `store` |
-| 终端 | 每格终端一个视图实例（`<ViewInstance>` / `smelt.view`），字节流、画面、终端菜单的底层 | Rust 插件 `crates/plugins/terminal` |
+| 终端 | 终端 GPU 画布、PTY 流、IME、Cmd+F 搜索与断线重连 | `crates/smelt-terminal`；JS 经 `smelt.terminal`（`SmeltNativeTerminal`） |
 | 对话 | 对话流、消息里的 markdown 和 diff、输入框、ACP 连接和会话生命周期 | Rust 插件 `crates/plugins/conversation`；拆到哪一层另定（见「待定」） |
-| 组件库与原生件 | NSH 基础件（`"nsh"`、`"nsh/base"`）+ `smelt/host` 矢量图标 + 原生能力件（`smelt.view`、`smelt.buddy`、`smelt.window-bar`、`smelt.window-drag`、`smelt.backdrop-region`） | `crates/smelt-nsh` + `crates/smelt-ui` |
+| 组件库与原生件 | NSH 基础件（`"nsh"`、`"nsh/base"`）+ `smelt/host` 矢量图标 + 原生能力件（`smelt.view`、`smelt.terminal`、`smelt.desktop`、`smelt.buddy`、`smelt.window-bar`、`smelt.window-drag`、`smelt.backdrop-region`） | `crates/smelt-nsh` + `crates/smelt-ui` |
 | Git | 读写仓库 | `crates/smelt-git`，还没映射给 JS |
-| 远程桌面 | 画面组件 | `smelt-runtime-client` 的 `DesktopProxy` |
+| 远程桌面 | 画面与本地转发口组件 | `crates/smelt-desktop`；JS 经 `smelt.desktop`（`SmeltNativeDesktop`） |
 | 小人 | 会动的 3D 小人：零件、动作、合成、出帧节拍；演哪一出由插件给 | `crates/smelt-buddy`；JS 经 `smelt.buddy`（`SmeltNativeBuddy`） |
-| 资源量测 | 进程 CPU、内存 | Rust 插件 `crates/plugins/resources` |
-| 更新 | 替换签名过的 App 包（只给随 App 带的更新插件） | `crates/plugins/updater` |
+| 资源量测 | 进程 CPU、内存 | 宿主桥 `sys.process_usage`（`crates/smelt-nsh`） |
+| 更新 | 替换签名过的 App 包（只给随 App 带的更新插件） | 宿主受控命令 `smelt.app/*`（`crates/smelt/src/updater/`） |
 
 能力自己要登记视图、命令时，用自己的来源 id（如 `smelt.terminal`），和插件一样进注册表。
 
 ## 终态：插件接口
 
-插件在 NSH A2 运行时中导入 `"nsh"`、`"nsh/base"`、`"smelt/sdk"`、`"smelt/slots"`、`"smelt/host"`。Rust 侧的 `crates/smelt-plugin-api` 是能力 crate 登记用的接口，NSH 宿主桥接在 `crates/smelt-nsh/src/`（`host.rs`、`module.rs`、`plugins/sdk.tsx`）。
+插件在 NSH A2 运行时中导入 `"nsh"`、`"nsh/base"`、`"smelt/sdk"`、`"smelt/host"`。Rust 侧的 `crates/smelt-plugin-api` 是能力 crate 登记用的接口，NSH 宿主桥接在 `crates/smelt-nsh/src/`（`host.rs`、`module.rs`、`plugins/sdk.tsx`）。只有主壳内部使用 `smelt/slots` 挂载顶层插件面板；插件不能互相嵌套其它插件。
 
 ### 读、变化、动作分开走
 
@@ -141,7 +141,7 @@
 - 视图登记里写标题、图标、是否自己画顶栏（`draws_top_bar`）。自己画顶栏的视图顶上放 `SmeltNativeWindowBar`（`smelt.window-bar`）。
 - 视图打开时的参数由宿主随视图挂载/事件传入，不靠写死全局状态。
 - 视图登记里不写位置。入口放在哪，是菜单贡献和布局的事。
-- 按实例建的视图（`instances`，如每段会话一份的终端、对话）不进布局、没有入口：别的插件用 `<ViewInstance>`（自动区分 JS 视图走 `<Slot>`、Rust 视图走 `smelt.view`）按视图 id 和参数建一份自己摆；只想放进主窗口看的用 `smelt.app/open-view` 带参数打开，宿主建一份放进出口。
+- 按实例建的视图（`instances`，如远程桌面 `smelt.desktop/desktop`）不进布局、没有入口：用 `smelt.app/open-view` 带参数打开，宿主主壳按每次打开建一份新实例放进出口。插件内部需要嵌终端、3D 小人、远程桌面等重画布时，直接使用对应原子能力组件（`<SmeltNativeTerminal>`、`<SmeltNativeBuddy>`、`<SmeltNativeDesktop>`），不嵌套其它 JS 插件。
 
 ### 菜单贡献
 
@@ -155,32 +155,21 @@
 
 ### 扩展点
 
-插件往别处加东西的地方都是扩展点：命令、菜单、页、视图、设置页、主题、布局、插槽、文件打开者、退出守卫。每个扩展点先定它是哪一种：
+插件往别处加东西的地方都是扩展点：命令、菜单、页、视图、设置页、主题、布局、文件打开者、退出守卫。每个扩展点先定它是哪一种：
 
-- **并存的**：命令、应用菜单项、右键菜单项、页、视图、设置页、主题、布局、能都摆的插槽。来几个摆几个，装上就有、删了就没。退出守卫也是并存的：退出时挨个问，有一个接手就停。
-- **只放一个的**：眼下用哪个主题、哪份布局，只放一个的插槽（会话行首头像），打开文件交给谁。好几个提供的时候，用哪个**由用户选**：
-  - 选择归扩展点的主人：宿主的在宿主的设置里选，插件定的插槽在那个插件自己的设置页里选、存进它自己的库。
+- **并存的**：命令、应用菜单项、右键菜单项、页、视图、设置页、主题、布局。来几个摆几个，装上就有、删了就没。退出守卫也是并存的：退出时挨个问，有一个接手就停。
+- **只放一个的**：眼下用哪个主题、哪份布局、打开文件交给谁。好几个提供的时候，用哪个**由用户选**：
+  - 选择归扩展点的主人：宿主的在宿主的设置里选，插件的在那个插件自己的设置页里选、存进它自己的库。
   - 没选过用默认的（主人自己定，一般是第一个）；选的那个卸了也按没选过算，原来的选择不删，装回来接着用。
   - 不按登记顺序、内置还是用户装的、谁后来去定谁优先。同 id 也不拿来替换：用户插件和随 App 带的插件同 id 时不加载、报重复，想改自带的就复制一份换个 id。
   - 没有「停用某个插件」的开关去绕：不想要哪个提供的就选别的，或者删掉它。
-- **点名的能力**：使用方离不开、按 id 点名的（会话里的终端、对话）。提供方定约定，别的插件只能往里加东西（命令、右键菜单项、插槽），不能整个换掉。
+- **原子原生能力**：多个插件或高频视图直接复用的重画布（终端 `<SmeltNativeTerminal>`、远程桌面 `<SmeltNativeDesktop>`、3D 小人 `<SmeltNativeBuddy>`），留在 `crates/smelt-*` 并以原生组件暴露给所有插件直接组合；不存在「一个 JS 插件用 Slot 嵌另一个 JS 插件」。
 
 加一个新的扩展点，先按上面定它是哪一种；只放一个的，同一次改动里把选择做进主人的设置。打开文件（`register_file_opener`）眼下只有一个登记方，选择等有第二个时再加，在那之前按最后登记的用。
 
-### 插槽
-
-插件要往别人的界面里、跟着别人的某个东西加一块（会话列表每行行首的头像），用插槽：
-
-- 被加的一方定插槽：插槽 id（`<自己的来源>/<名字>`）、给填充视图的参数、能填几个、摆成什么样、没人填时的退路，写在自己的约定里。宿主不登记插槽本身。
-- 只放一个的插槽，好几个插件都填时用哪个由用户选：被加的一方在自己的设置页里给一项选择，存进自己的库。
-- 加的一方登记一个按实例建的视图，在 `fills` 里写上插槽 id。
-- 被加的一方用 `slot_views(插槽 id)` 取填进来的视图，用 `SmeltViewInstance` 按参数建、自己摆，跟着 `views_changed` 建、放。它不认识填的是谁。
-- 和直接点名的区别在依赖方向：使用方离不开的能力由使用方点名提供方；可有可无的附加由附加的一方认插槽。
-- 已有：会话列表的 `smelt.session-list/session-avatar`，小人填它。
-
 ### 插件之间的约定
 
-插件之间不互相依赖，只经命令、事件、菜单 id、插槽打交道：
+插件之间不互相依赖，也不互相嵌套 UI，只经命令、事件、菜单 id 与运行时话题打交道：
 
 - 一个插件对外给的视图 id、命令 id、菜单 id、插槽 id 和参数形状，权威定义放在提供方自己的 `contract.js`（JSDoc 写清参数和上下文）。调用方照抄用到的 id 和字段，注明出处。
 - 接口不点名任何功能，宿主和能力不实现、也不调用这些约定。
@@ -206,7 +195,7 @@
 
 - 实现位于 `crates/smelt-nsh`（基于 `smelt-ai/nsh` fork）：单引擎线程 + 单界面树（`AppView`）+ 每插件独立加固 QuickJS VM；主壳在 `crates/smelt-nsh/shell/MainShell.tsx`，承载各页 `nsh/base <DockArea>` 并与 `DockAreaState` 无损互转。
 - 插件入口使用 TSX/JS，启动和热重载时由 `nsh-bundler` 自动打包，装改删不用重编 Rust。
-- 同一插件的多个视图、设置页与插槽填充共享该插件 VM 内的模块状态；跨 VM 视图嵌合通过 `smelt/slots`（`<Slot>`）协议完成，Rust 重组件通过 `smelt.view` 桥接。
+- 同一插件的多个视图与设置页共享该插件 VM 内的模块状态；只有宿主外壳通过内部挂载机制将顶层插件视图摆进 `DockArea` / 出口 / 设置页，插件间不嵌套，重画布统一由原子原生能力组件承担。
 - 加载失败的插件没有视图可登记，错误在设置的插件页、`smelt plugin status` 和 `~/.smelt/app.log` 里看。
 
 ### 随 App 带的插件
@@ -240,7 +229,7 @@ plugins/language/
   tests/              纯逻辑单测（用 bun test）
 ```
 
-1. **只 import 自己目录里的文件和宿主模块**（`"nsh"`、`"nsh/base"`、`"smelt/sdk"`、`"smelt/slots"`、`"smelt/host"`），不设插件间共享目录：要复用的进组件库或能力。
+1. **只 import 自己目录里的文件和宿主模块**（`"nsh"`、`"nsh/base"`、`"smelt/sdk"`、`"smelt/host"`），不设插件间共享目录，也不开放 `smelt/slots`：要复用的进组件库或原子能力。
 2. **发的就是源码**：仓库与安装包里发 TSX/JS 源码，运行时经 `nsh-bundler` 打包；用户复制一份即可直接修改。
 3. **逻辑和画面分开放**：数据、规则放不 import NSH 的纯 JS/TS 文件，宿主函数从参数传进来，用 `bun test` 测。
 4. **迁过来的插件沿用原 id**，视图、命令、菜单、插槽的 id 都不变，同一个提交删掉 Rust 版。插件的数据目录、布局里的视图 id、用户的快捷键都不用迁。
@@ -256,25 +245,15 @@ plugins/language/
 
 ## 终态：各功能怎么分
 
-### 已迁入 `plugins/*` 的内置 JS/TSX 插件（9 个）
+### 已迁入 `plugins/*` 的内置 JS/TSX 插件（23 个）
 
-`archive`、`buddies`（画法留在 `crates/smelt-buddy`）、`language`、`launcher`、`layouts`、`machines`、`quota`、`session-list`、`themes`。
+`agents`、`archive`、`automations`、`capabilities`、`desktop`（画布留在 `crates/smelt-desktop`）、`files`、`git`、`history`、`ide`、`language`、`launcher`、`layouts`、`machines`、`maintenance`（受控底层操作留在宿主）、`notifications`（系统通知与菜单栏桥留在宿主，主壳常驻后台）、`quota`、`resources`、`session-list`（直接驱动 `crates/smelt-buddy` 3D 小人）、`sessions`（直接驱动 `crates/smelt-terminal` 终端画布）、`skills`、`terminal`（终端字号设置与主题同步）、`themes`、`updater`（包下载/替换与退出守卫留在宿主）。
 
-### 仍在 `crates/plugins/*` 的 Rust 插件（16 个，待按三问拆分）
+### 仍在 `crates/plugins/*` 的 Rust 插件（1 个，待按三问拆分）
 
 | 现在的 Rust 插件 | 留在 Rust 的能力 | JS 插件 |
 | --- | --- | --- |
-| `sessions` | — | 会话视图（舞台、分屏、选中、恢复）、新建和续接的命令 |
 | `conversation` | 对话流、markdown、diff、输入框、ACP 连接；提问导航的数据和跳转 | 对话页的摆法（待定）；提问导航的画法、悬停和动效（见 `view/render/prompt_rail.rs`） |
-| `terminal` | 终端视图实例 | 终端外围的菜单、标题 |
-| `agents`、`automations`、`capabilities`、`skills`、`history` | 缺的话题和控制方法补在 smeltd | 全部 |
-| `git` | `smelt-git` 映射给 JS | 界面 |
-| `files` | 大目录的树和搜索、文件预览组件 | 界面 |
-| `notifications` | 系统通知、菜单栏、Dock 角标（宿主已有） | 提醒规则、设置页 |
-| `resources` | 进程 CPU、内存量测 | 页 |
-| `updater` | 下载、校验、替换 App 包 | 关于页 |
-| `desktop` | 远程桌面画面 | 外围 |
-| `ide`、`maintenance` | — | 全部 |
 
 ## 会话核心
 
@@ -290,7 +269,7 @@ plugins/language/
 
 - **整个 app 是一个嵌套的路由。** 外层是页：主窗口一次显示一页，每页有自己的布局。内层是出口：页的布局里可以摆一个出口（`smelt/outlet`），出口里显示路由放进去的视图。状态在 `crates/smelt/src/router.rs`。
   - 页按来源整组登记（`register_pages`），有名字、标题、是不是首页，和出口的默认内容（`index`）。插件用 `smelt.app/open-page` 进一页。
-  - 启动进首页：登记在前的那个说自己是首页的。首页没有、或没有给它的布局时，宿主把没摆进别的页的视图都摆在一页里兜底（不存档）。
+  - 启动进首页：登记在前的那个说自己是首页的。首页没有、或没有给它的布局时，工作台直接显示明确的空态/排错提示和「面板插件」入口（不做假兜底页），等布局插件恢复或登记后自动落位。
   - 打开一个视图：哪页的布局里摆了它，就去那页露出来；哪页都没摆，就放进出口。
   - 换页记来路，页里的「返回」退回来的那页。出口里换内容不换页、不记来路。`Cmd+W` 不管路由，只关看得见的会话或分屏。
   - 开过的页留着它的 `DockArea` 和出口里放着的东西。

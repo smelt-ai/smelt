@@ -5,8 +5,9 @@
 //! CPU 熔断、独立 `HostChannel`、独立 `TenantId`）：
 //! - 装、改、删一个插件只重建它自己的 VM，外壳里的终端、对话和别的插件不动；
 //! - 插件死循环、OOM、超节点配额或越权操作节点只停掉并清理它自己的租户，引擎与外壳不重启；
-//! - 跨 VM 组合走统一插槽协议（`<Slot>` → `smelt.slot.ops` → 引擎内 [`PluginHost`] 路由 →
-//!   `smelt.slot.sync` → `mountSlot`），热重载时宿主按 `instances` 表原位重放。
+//! - 只有宿主外壳经内部插槽协议挂载顶层插件视图（`<Slot>` → `smelt.slot.ops` → 引擎内 [`PluginHost`]
+//!   路由 → `smelt.slot.sync` → `mountSlot`），热重载时宿主按 `instances` 表原位重放；插件自身不能
+//!   使用 `smelt/slots` 嵌套其它插件，复用的重画布一律走原子原生能力组件。
 //!
 //! 打包和读文件都阻塞，调用方放到后台做；[`PluginHost::apply`] 在主线程。
 
@@ -20,30 +21,34 @@ use std::{
 
 use nsh_bundler::BundleOptions;
 use nsh_core::{access::Capabilities, element::description::SetDescription};
-use nsh_engine::{
-    AppError, AppErrorKind, DEFAULT_PLUGIN_CPU_WINDOW, HostCall, HostChannel, Limits, PluginConfig,
-    Policy,
-};
+use nsh_engine::{AppError, AppErrorKind, HostCall, HostChannel, Limits, PluginConfig, Policy};
 use nsh_platform_gpui::{App, AppView, Bundle};
-use oxc::{allocator::Allocator, ast::ast::Statement, parser::Parser, span::SourceType};
+use oxc::{
+    allocator::Allocator, ast::ast::Statement, parser::Parser, semantic::SemanticBuilder,
+    span::SourceType,
+};
 use serde_json::{Value, json};
 
 const APP: &str = include_str!("plugins/App.tsx");
 const PROVIDER: &str = include_str!("plugins/provider.tsx");
 const SLOTS: &str = include_str!("plugins/slots.tsx");
-/// 外壳和所有插件共用的别名配置：允许用 `import { Slot } from "smelt/slots"`。
-const NSH_CONFIG: &str = r#"{"resolve":{"alias":{"smelt/slots":"./slots.tsx"}}}"#;
+const SDK: &str = include_str!("plugins/sdk.tsx");
+/// 外壳专用的别名配置：提供外壳内部挂载器 `smelt/slots` 与通用 `smelt/sdk`。
+const SHELL_NSH_CONFIG: &str =
+    r#"{"resolve":{"alias":{"smelt/slots":"./slots.tsx","smelt/sdk":"./sdk.tsx"}}}"#;
+/// Guest 插件的别名配置：仅开放 `smelt/sdk`，不暴露 `smelt/slots`（禁止插件嵌套插件）。
+const PLUGIN_NSH_CONFIG: &str = r#"{"resolve":{"alias":{"smelt/sdk":"./sdk.tsx"}}}"#;
 
-/// 放置方（外壳或插件）上报跨 VM 插槽增改删批次。
+/// 外壳上报跨 VM 顶层视图插槽增改删批次。
 const SLOT_OPS: &str = "smelt.slot.ops";
 /// 宿主推给提供方插件的插槽同步批次（mount / update / unmount）。
 const SLOT_SYNC: &str = "smelt.slot.sync";
-/// 宿主推给放置方的插件故障状态（显示/清除兜底提示）。
+/// 宿主推给外壳的插件故障状态（显示/清除兜底提示）。
 const SLOT_FAILED: &str = "smelt.slot.failed";
 /// 提供方插件挂好 `smelt.slot.sync` 监听后上报就绪，触发活跃实例重放。
 const PLUGIN_READY: &str = "smelt.plugin.ready";
-/// 外壳在 `instances` 表里的 owner 标识。
-const SHELL_OWNER: &str = "__shell__";
+/// 外壳在宿主桥里的身份标识。
+pub(crate) const SHELL_OWNER: &str = "__shell__";
 
 /// 一个插件的入口文件，导出它的视图。
 pub(crate) const ENTRY: &str = "main.tsx";
@@ -58,6 +63,10 @@ pub struct Compiled {
 impl Compiled {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub(crate) fn code(&self) -> &str {
+        &self.code
     }
 }
 
@@ -92,9 +101,11 @@ impl Plugins {
         let stage = stage.canonicalize().map_err(io)?;
         let dir = stage.join("shell");
         let files = [
-            ("nsh.json", NSH_CONFIG),
+            ("nsh.json", SHELL_NSH_CONFIG),
             ("App.tsx", APP),
+            ("provider.tsx", PROVIDER),
             ("slots.tsx", SLOTS),
+            ("sdk.tsx", SDK),
             ("Shell.tsx", shell),
         ];
         write_dir(
@@ -103,6 +114,8 @@ impl Plugins {
         )
         .map_err(io)?;
         let bundle = bundle(&dir.join("App.tsx"), &ui_sets)?;
+        let served = native_specifiers(&ui_sets);
+        validate_imports(SHELL_OWNER, &bundle.code, &served)?;
         Ok(Self {
             shell: bundle.code.into(),
             stage,
@@ -121,7 +134,17 @@ impl Plugins {
 
     /// 装一个插件，或者它的文件变了。打不过包就什么都不变，它上一份照常跑。
     pub fn install(&mut self, id: &str, dir: &Path) -> Result<Change, String> {
-        let compiled = self.compile(id, dir)?;
+        self.install_entry(id, dir, ENTRY)
+    }
+
+    /// 装一个指定入口文件（相对插件目录）的插件。
+    pub fn install_entry(
+        &mut self,
+        id: &str,
+        dir: &Path,
+        entry_rel: &str,
+    ) -> Result<Change, String> {
+        let compiled = self.compile(id, dir, entry_rel)?;
         self.installed.insert(id.to_owned(), compiled.clone());
         Ok(Change::Install(compiled))
     }
@@ -137,27 +160,43 @@ impl Plugins {
     }
 
     /// 拷一份到自己的目录里再打包：插件目录里不落生成的文件，import 也出不了这个目录。
-    fn compile(&self, id: &str, source: &Path) -> Result<Compiled, String> {
+    fn compile(&self, id: &str, source: &Path, entry_rel: &str) -> Result<Compiled, String> {
         if !valid_id(id) {
             return Err(format!("插件 id 不能作目录名：{id}"));
         }
-        let files = read_dir(source).map_err(|error| format!("{}: {error}", source.display()))?;
-        if !files.contains_key(Path::new(ENTRY)) {
-            return Err(format!("{id} 没有 {ENTRY}"));
+        let rel = Path::new(entry_rel);
+        if rel.is_absolute()
+            || rel.components().any(|part| {
+                matches!(
+                    part,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!("{id} 的入口路径不合法：{entry_rel}"));
         }
+        let normalized_entry: PathBuf = rel
+            .components()
+            .filter(|part| !matches!(part, Component::CurDir))
+            .collect();
+        let files = read_dir(source).map_err(|error| format!("{}: {error}", source.display()))?;
+        if !files.contains_key(&normalized_entry) {
+            return Err(format!("{id} 没有 {entry_rel}"));
+        }
+        let import_rel = normalized_entry.to_string_lossy().replace('\\', "/");
         let dir = self.stage.join("plugins").join(id);
         let entry = format!(
             "import {{ provideViews }} from \"./provider.tsx\";\n\
-             import * as views from \"./plugin/{ENTRY}\";\n\
+             import * as views from \"./plugin/{import_rel}\";\n\
              provideViews({id:?}, views);\n"
         );
         let staged: Vec<(PathBuf, &[u8])> = files
             .iter()
             .map(|(path, bytes)| (Path::new("plugin").join(path), bytes.as_slice()))
             .chain([
-                (PathBuf::from("nsh.json"), NSH_CONFIG.as_bytes()),
+                (PathBuf::from("nsh.json"), PLUGIN_NSH_CONFIG.as_bytes()),
                 (PathBuf::from("provider.tsx"), PROVIDER.as_bytes()),
-                (PathBuf::from("slots.tsx"), SLOTS.as_bytes()),
+                (PathBuf::from("sdk.tsx"), SDK.as_bytes()),
                 (PathBuf::from("entry.ts"), entry.as_bytes()),
             ])
             .collect();
@@ -194,6 +233,15 @@ pub struct PluginHost(Arc<Mutex<HostInner>>);
 
 type CallHandler = Arc<dyn Fn(&str, HostCall) + Send + Sync>;
 
+/// 插件 VM 生命周期事件（在引擎线程触发，经 channel 转主线程处理）。
+#[derive(Clone, Debug)]
+pub enum PluginLifecycle {
+    Ready { plugin: String, views: Vec<String> },
+    Fatal { plugin: String, message: String },
+}
+
+type LifecycleObserver = Arc<dyn Fn(PluginLifecycle) + Send + Sync>;
+
 struct PluginEntry {
     generation: u64,
     channel: HostChannel,
@@ -202,13 +250,13 @@ struct PluginEntry {
 
 #[derive(Clone)]
 struct SlotInstance {
-    owner: String,
     target: String,
     plugin: String,
     view: String,
     args: Value,
 }
 
+#[derive(Default)]
 struct HostInner {
     shell_channel: Option<HostChannel>,
     next_generation: u64,
@@ -216,23 +264,12 @@ struct HostInner {
     instances: BTreeMap<String, SlotInstance>,
     failed: BTreeSet<String>,
     handlers: BTreeMap<String, CallHandler>,
+    lifecycle: Option<LifecycleObserver>,
     plugin_limits: Option<Limits>,
+    /// 默认关闭按墙钟计时的 1s 滚动 CPU 窗（`None`）：macOS 休眠唤醒、电池降频或线程抢占会使单次
+    /// 轻量回调的墙钟耗时越过 250ms 而误杀健康插件（如 `smelt.layouts`）。死循环与内存耗尽仍由
+    /// `Limits::default()` 的 `call_budget` / `load_budget` / `memory_bytes` / `max_nodes` 熔断保护。
     cpu_window_budget: Option<Duration>,
-}
-
-impl Default for HostInner {
-    fn default() -> Self {
-        Self {
-            shell_channel: None,
-            next_generation: 0,
-            plugins: BTreeMap::new(),
-            instances: BTreeMap::new(),
-            failed: BTreeSet::new(),
-            handlers: BTreeMap::new(),
-            plugin_limits: None,
-            cpu_window_budget: Some(DEFAULT_PLUGIN_CPU_WINDOW),
-        }
-    }
 }
 
 impl PluginHost {
@@ -296,6 +333,24 @@ impl PluginHost {
         }
     }
 
+    /// 登记插件 VM 生命周期观察者（就绪时拿到导出的视图列表，致命故障时清理宿主登记）。
+    pub fn set_lifecycle_observer(
+        &self,
+        observer: impl Fn(PluginLifecycle) + Send + Sync + 'static,
+    ) {
+        self.lock().lifecycle = Some(Arc::new(observer));
+    }
+
+    /// 把一条事件只推给外壳 VM。
+    pub fn send_to_shell(&self, event: &str, data: Value) {
+        let channel = self.lock().shell_channel.clone();
+        if let Some(channel) = channel
+            && let Err(error) = channel.send(event, data)
+        {
+            eprintln!("[nsh-plugins] 推送 {event} 给外壳失败：{error}");
+        }
+    }
+
     /// 把一条宿主事件只推给指定的插件 VM。
     pub fn send_to(&self, plugin: &str, event: &str, data: Value) {
         let channel = self
@@ -335,7 +390,7 @@ impl PluginHost {
                     Value::String(format!("shell:{generation}")),
                 );
                 shell_channel.set_params(params);
-                self.attach_slot_ops(&shell_channel, SHELL_OWNER.to_owned(), generation);
+                self.attach_slot_ops(&shell_channel);
 
                 let mut declared_host = vec![SLOT_OPS.to_owned()];
                 for (name, handler) in handlers {
@@ -356,20 +411,15 @@ impl PluginHost {
             }
             Change::Install(plugin) => self.load_one(view, plugin),
             Change::Remove(id) => {
-                let (unmounts, status_targets) = {
+                let shell_channel = {
                     let mut inner = self.lock();
                     inner.plugins.remove(&id);
                     let was_failed = inner.failed.remove(&id);
-                    let unmounts = inner.remove_owner_instances(&id);
-                    let targets = if was_failed {
-                        inner.status_channels()
-                    } else {
-                        Vec::new()
-                    };
-                    (unmounts, targets)
+                    was_failed.then(|| inner.shell_channel.clone()).flatten()
                 };
-                flush_sync_batches(unmounts);
-                send_failed_status(&status_targets, &id, false);
+                if let Some(shell_channel) = shell_channel {
+                    send_failed_status(&shell_channel, &id, false);
+                }
                 view.unload_plugin(id);
             }
         }
@@ -384,7 +434,7 @@ impl PluginHost {
         if !error.is_fatal() {
             return;
         }
-        let (unmounts, status_targets) = {
+        let (shell_channel, observer) = {
             let mut inner = self.lock();
             // 若新版本已经加载完成并报就绪，则忽略上一代延迟到达的 Load 错误。
             if error.kind == AppErrorKind::Load
@@ -397,23 +447,27 @@ impl PluginHost {
             }
             inner.plugins.remove(plugin_id);
             inner.failed.insert(plugin_id.to_owned());
-            let unmounts = inner.remove_owner_instances(plugin_id);
-            let targets = inner.status_channels();
-            (unmounts, targets)
+            (inner.shell_channel.clone(), inner.lifecycle.clone())
         };
-        flush_sync_batches(unmounts);
-        send_failed_status(&status_targets, plugin_id, true);
+        if let Some(shell_channel) = shell_channel {
+            send_failed_status(&shell_channel, plugin_id, true);
+        }
+        if let Some(observer) = observer {
+            observer(PluginLifecycle::Fatal {
+                plugin: plugin_id.to_owned(),
+                message: error.to_string(),
+            });
+        }
     }
 
     fn load_one(&self, view: &AppView, plugin: Compiled) {
         let id = plugin.id;
         let channel = HostChannel::new();
-        let (generation, handlers, limits, cpu_window, unmounts, status_targets, failed_snapshot) = {
+        let (generation, handlers, limits, cpu_window, clear_failed_shell) = {
             let mut inner = self.lock();
             inner.next_generation += 1;
             let generation = inner.next_generation;
             let was_failed = inner.failed.remove(&id);
-            let unmounts = inner.remove_owner_instances(&id);
             inner.plugins.insert(
                 id.clone(),
                 PluginEntry {
@@ -427,46 +481,48 @@ impl PluginHost {
                 .iter()
                 .map(|(name, f)| (name.clone(), f.clone()))
                 .collect();
-            let status_targets = if was_failed {
-                inner.status_channels()
-            } else {
-                Vec::new()
-            };
-            let failed_snapshot: Vec<String> = inner.failed.iter().cloned().collect();
+            let clear_failed_shell = was_failed.then(|| inner.shell_channel.clone()).flatten();
             (
                 generation,
                 handlers,
                 inner.plugin_limits,
                 inner.cpu_window_budget,
-                unmounts,
-                status_targets,
-                failed_snapshot,
+                clear_failed_shell,
             )
         };
 
-        flush_sync_batches(unmounts);
-        send_failed_status(&status_targets, &id, false);
-        for failed_id in failed_snapshot {
-            let _ = channel.send(SLOT_FAILED, json!({ "plugin": failed_id, "failed": true }));
+        if let Some(shell_channel) = clear_failed_shell {
+            send_failed_status(&shell_channel, &id, false);
         }
 
         let mut params = serde_json::Map::new();
-        params.insert(
-            "__smelt_owner".into(),
-            Value::String(format!("p:{id}:{generation}")),
-        );
+        params.insert("__smelt_plugin_id".into(), Value::String(id.clone()));
+        if let Ok(data_dir) = smelt_plugin_api::plugin_data_dir(&id) {
+            params.insert(
+                "__smelt_data_dir".into(),
+                Value::String(data_dir.to_string_lossy().into_owned()),
+            );
+        }
         channel.set_params(params);
 
-        // 插件自己的 `<Slot>` 上报也走同一套跨 VM 路由器。
-        self.attach_slot_ops(&channel, id.clone(), generation);
-
-        // 插件初始化完 provideViews 后上报就绪：宿主立即按 instances 表原位重放。
+        // 插件初始化完 provideViews 后上报就绪：宿主立即按外壳 instances 表原位重放。
         {
             let host = self.clone();
             let plugin_id = id.clone();
             let ready_channel = channel.clone();
             channel.handle(PLUGIN_READY, move |call| {
-                let replay: Vec<Value> = {
+                let views: Vec<String> = call
+                    .data()
+                    .get("views")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let (replay, observer) = {
                     let mut inner = host.lock();
                     let Some(entry) = inner.plugins.get_mut(&plugin_id) else {
                         return;
@@ -475,7 +531,7 @@ impl PluginHost {
                         return;
                     }
                     entry.ready = true;
-                    inner
+                    let replay: Vec<Value> = inner
                         .instances
                         .iter()
                         .filter(|(_, inst)| inst.plugin == plugin_id)
@@ -488,19 +544,27 @@ impl PluginHost {
                                 "args": inst.args,
                             })
                         })
-                        .collect()
+                        .collect();
+                    (replay, inner.lifecycle.clone())
                 };
                 if !replay.is_empty()
                     && let Err(error) = ready_channel.send(SLOT_SYNC, Value::Array(replay))
                 {
                     eprintln!("[nsh-plugins] 重放 {plugin_id} 插槽失败：{error}");
                 }
+                if let Some(observer) = observer {
+                    observer(PluginLifecycle::Ready {
+                        plugin: plugin_id.clone(),
+                        views,
+                    });
+                }
                 call.resolve(Value::Null);
             });
         }
 
         // 绑定所有宿主函数：plugin_id 由 Rust 闭包固定，插件无法篡改。
-        let mut declared_host = vec![SLOT_OPS.to_owned(), PLUGIN_READY.to_owned()];
+        // Guest 插件不具备 SLOT_OPS 权限：只有宿主外壳能挂载插件视图。
+        let mut declared_host = vec![PLUGIN_READY.to_owned()];
         for (name, handler) in handlers {
             declared_host.push(name.clone());
             let plugin_id = id.clone();
@@ -521,62 +585,20 @@ impl PluginHost {
         view.load_plugin(config);
     }
 
-    fn attach_slot_ops(&self, channel: &HostChannel, owner: String, generation: u64) {
+    fn attach_slot_ops(&self, channel: &HostChannel) {
         let host = self.clone();
         channel.handle(SLOT_OPS, move |mut call| {
             let Value::Array(ops) = call.take_data() else {
                 return;
             };
-            let outgoing = {
-                let mut inner = host.lock();
-                // 丢弃已替换的旧代插件发来的滞后消息。
-                if owner != SHELL_OWNER
-                    && !inner
-                        .plugins
-                        .get(&owner)
-                        .is_some_and(|entry| entry.generation == generation)
-                {
-                    return;
-                }
-                inner.apply_slot_ops(&owner, ops)
-            };
+            let outgoing = host.lock().apply_slot_ops(ops);
             flush_sync_batches(outgoing);
         });
     }
 }
 
 impl HostInner {
-    fn status_channels(&self) -> Vec<HostChannel> {
-        self.shell_channel
-            .iter()
-            .cloned()
-            .chain(self.plugins.values().map(|entry| entry.channel.clone()))
-            .collect()
-    }
-
-    /// 清理某个 owner（卸载或崩溃的放置方）登记的全部子槽实例，返回要发往各提供方的 unmount 批次。
-    fn remove_owner_instances(&mut self, owner: &str) -> Vec<(HostChannel, Vec<Value>)> {
-        let owned: Vec<(String, String)> = self
-            .instances
-            .iter()
-            .filter(|(_, inst)| inst.owner == owner)
-            .map(|(id, inst)| (id.clone(), inst.plugin.clone()))
-            .collect();
-        if owned.is_empty() {
-            return Vec::new();
-        }
-        let mut by_target: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-        for (instance_id, target_plugin) in owned {
-            self.instances.remove(&instance_id);
-            by_target
-                .entry(target_plugin)
-                .or_default()
-                .push(json!({ "op": "unmount", "instance": instance_id }));
-        }
-        self.resolve_ready_batches(by_target)
-    }
-
-    fn apply_slot_ops(&mut self, owner: &str, ops: Vec<Value>) -> Vec<(HostChannel, Vec<Value>)> {
+    fn apply_slot_ops(&mut self, ops: Vec<Value>) -> Vec<(HostChannel, Vec<Value>)> {
         let mut by_target: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         for mut item in ops {
             let Some(op) = item.get("op").and_then(Value::as_str).map(str::to_owned) else {
@@ -614,7 +636,6 @@ impl HostInner {
                     if let Some(prev) = self.instances.insert(
                         instance.clone(),
                         SlotInstance {
-                            owner: owner.to_owned(),
                             target: target.clone(),
                             plugin: plugin.clone(),
                             view: view.clone(),
@@ -640,9 +661,6 @@ impl HostInner {
                     let Some(inst) = self.instances.get_mut(&instance) else {
                         continue;
                     };
-                    if inst.owner != owner {
-                        continue;
-                    }
                     inst.args = args.clone();
                     by_target
                         .entry(inst.plugin.clone())
@@ -654,11 +672,6 @@ impl HostInner {
                         }));
                 }
                 "unmount" => {
-                    if let Some(inst) = self.instances.get(&instance)
-                        && inst.owner != owner
-                    {
-                        continue;
-                    }
                     if let Some(inst) = self.instances.remove(&instance) {
                         by_target
                             .entry(inst.plugin)
@@ -699,11 +712,8 @@ fn flush_sync_batches(batches: Vec<(HostChannel, Vec<Value>)>) {
     }
 }
 
-fn send_failed_status(channels: &[HostChannel], plugin: &str, failed: bool) {
-    let payload = json!({ "plugin": plugin, "failed": failed });
-    for channel in channels {
-        let _ = channel.send(SLOT_FAILED, payload.clone());
-    }
+fn send_failed_status(channel: &HostChannel, plugin: &str, failed: bool) {
+    let _ = channel.send(SLOT_FAILED, json!({ "plugin": plugin, "failed": failed }));
 }
 
 fn bundle(entry: &Path, ui_sets: &[SetDescription]) -> Result<nsh_bundler::Bundle, String> {
@@ -724,6 +734,97 @@ fn native_specifiers(ui_sets: &[SetDescription]) -> Vec<String> {
         .collect()
 }
 
+/// QuickJS + NSH 沙箱提供的合法全局标识符；打包产物里除此以外的未解析自由标识符多半是漏 import 或拼写错误。
+const ALLOWED_GLOBALS: &[&str] = &[
+    // ECMAScript 标准全局
+    "AggregateError",
+    "Array",
+    "ArrayBuffer",
+    "Atomics",
+    "BigInt",
+    "BigInt64Array",
+    "BigUint64Array",
+    "Boolean",
+    "DataView",
+    "Date",
+    "Error",
+    "EvalError",
+    "FinalizationRegistry",
+    "Float16Array",
+    "Float32Array",
+    "Float64Array",
+    "Function",
+    "Infinity",
+    "Int8Array",
+    "Int16Array",
+    "Int32Array",
+    "Intl",
+    "JSON",
+    "Map",
+    "Math",
+    "NaN",
+    "Number",
+    "Object",
+    "Promise",
+    "Proxy",
+    "RangeError",
+    "ReferenceError",
+    "Reflect",
+    "RegExp",
+    "Set",
+    "SharedArrayBuffer",
+    "String",
+    "Symbol",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Uint16Array",
+    "Uint32Array",
+    "WeakMap",
+    "WeakRef",
+    "WeakSet",
+    "decodeURI",
+    "decodeURIComponent",
+    "encodeURI",
+    "encodeURIComponent",
+    "escape",
+    "eval",
+    "globalThis",
+    "isFinite",
+    "isNaN",
+    "parseFloat",
+    "parseInt",
+    "undefined",
+    "unescape",
+    // QuickJS / Web / NSH 运行时全局
+    "AbortController",
+    "AbortSignal",
+    "CustomEvent",
+    "Event",
+    "EventTarget",
+    "Headers",
+    "Request",
+    "Response",
+    "TextDecoder",
+    "TextEncoder",
+    "URL",
+    "URLSearchParams",
+    "atob",
+    "btoa",
+    "clearInterval",
+    "clearTimeout",
+    "console",
+    "crypto",
+    "fetch",
+    "performance",
+    "queueMicrotask",
+    "setInterval",
+    "setTimeout",
+    "structuredClone",
+];
+
 /// 只读校验打包后的 ES 模块仅 import 宿主允许的模块，拒绝未知外部依赖（不做任何 AST 改写）。
 fn validate_imports(id: &str, code: &str, served: &[String]) -> Result<(), String> {
     let allocator = Allocator::default();
@@ -741,6 +842,29 @@ fn validate_imports(id: &str, code: &str, served: &[String]) -> Result<(), Strin
         if !served.iter().any(|name| name == source) {
             return Err(format!("{id} 引了宿主没给的模块：{source}"));
         }
+    }
+    Ok(())
+}
+
+/// 静态检查打包后的 ES 模块不含未声明的自由标识符（供 `check_plugin` 与内置插件校验用）。
+pub(crate) fn validate_unresolved_references(id: &str, code: &str) -> Result<(), String> {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if let Some(error) = parsed.diagnostics.first() {
+        return Err(format!("{id}: {error}"));
+    }
+    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+    let mut unknown: Vec<String> = semantic
+        .scoping()
+        .root_unresolved_references()
+        .keys()
+        .map(|name| name.as_str())
+        .filter(|name| !ALLOWED_GLOBALS.contains(name))
+        .map(str::to_owned)
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort();
+        return Err(format!("{id} 引用了未定义的标识符：{}", unknown.join(", ")));
     }
     Ok(())
 }
@@ -797,4 +921,59 @@ fn write_dir<'a>(
         fs::write(path, bytes)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_plugin_host_disables_wall_clock_cpu_window() {
+        let host = PluginHost::new();
+        assert_eq!(host.lock().cpu_window_budget, None);
+    }
+
+    #[test]
+    fn validate_unresolved_references_rejects_undeclared_identifier() {
+        let err = validate_unresolved_references(
+            "demo",
+            "export function f() { return missingHelper(1); }",
+        )
+        .expect_err("未定义标识符应当被拦截");
+        assert!(
+            err.contains("missingHelper"),
+            "错误信息应点出未定义名：{err}"
+        );
+    }
+
+    #[test]
+    fn all_builtin_plugins_have_no_undeclared_identifiers() {
+        let stage =
+            std::env::temp_dir().join(format!("smelt-nsh-shell-check-{}", uuid::Uuid::new_v4()));
+        let shell_plugins = Plugins::new(
+            &stage,
+            include_str!("../shell/MainShell.tsx"),
+            crate::ui_sets(),
+        );
+        let _ = fs::remove_dir_all(&stage);
+        let shell_plugins = shell_plugins.expect("MainShell.tsx 打包失败");
+        validate_unresolved_references(SHELL_OWNER, &shell_plugins.shell)
+            .expect("MainShell.tsx 存在未定义标识符");
+
+        let repo_plugins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
+        let mut errors = Vec::new();
+        for entry in fs::read_dir(&repo_plugins).expect("读取 plugins/") {
+            let path = entry.expect("dir entry").path();
+            if path.join(crate::MANIFEST_FILE).is_file()
+                && let Err(err) = crate::check_plugin(&path)
+            {
+                errors.push(format!("{}: {err}", path.display()));
+            }
+        }
+        assert!(
+            errors.is_empty(),
+            "内置插件静态校验失败：\n{}",
+            errors.join("\n")
+        );
+    }
 }

@@ -1,91 +1,101 @@
-//! 进程的 tracing 接收端：把插件和 iroh 的 tracing 事件落进 `~/.smelt/app.log`。
+//! 进程的日志接收端：把 NSH 插件的 `log` 事件和 iroh 的 `tracing` 事件落进 `~/.smelt/app.log`。
 //!
-//! 插件（gpui-shell）的来源记作 `plugin`。
-//! 插件的 `console.log` / `console.error` 不写 stderr，而是发 tracing 事件（target
-//! `gpui_shell::script`）；脚本里没接住的异常、Promise 失败也是 gpui-shell 发的 tracing
-//! 事件。不接住它们，插件作者调试时什么都看不见。
-//!
-//! 脚本输出全收，gpui-shell 自己的只收警告和错误。gpui-shell 不在事件里带插件身份，所有
-//! 插件共用一个脚本运行时，分不出是哪个插件说的；插件自己在消息里写前缀。
-//!
-//! iroh（连远程机器的那套，含 `iroh_relay` 等子库）只收警告和错误，来源记作 `iroh`：
-//! 不接的话 endpoint 连不上 relay 时 app.log 里只有拨号超时，看不出卡在哪。
-//!
-//! 别的库发的 tracing 事件一律不碰。
-
-use std::sync::Mutex;
+//! - NSH JS 插件（`nsh-js`）的 `console.*`、未捕获异常走 `log` crate（target `"js"`），全级别收录，
+//!   来源记作 `plugin`；NSH 运行时本身（`nsh_*`、`nsh::*`，排除帧统计 `nsh::fps`）只收警告和错误，
+//!   同样记作 `plugin`。
+//! - iroh（连远程机器的那套，含 `iroh_relay` 等子库）走 `tracing`，只收警告和错误，来源记作 `iroh`。
+//! - 别的库发的日志事件一律不碰。
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt as _};
 
-/// 插件 `console.*` 的 target。
-const SCRIPT_TARGET: &str = "gpui_shell::script";
-const SHELL_TARGET: &str = "gpui_shell";
-
-/// 装上全局的 tracing 接收端。进程启动时调一次。别处已经装过就不装，不抢。
+/// 装上全局的 `tracing` 与 `log` 接收端。进程启动时调一次。别处已经装过就不装，不抢。
 pub(crate) fn install() {
     let subscriber = tracing_subscriber::registry().with(AppLog::new(|scope, level, message| {
         smelt_sys::app_log::log(level, scope, message);
     }));
     let _ = tracing::subscriber::set_global_default(subscriber);
+    if log::set_logger(&NSH_LOG).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
 }
 
-/// `smelt plugin check` 用：同样的事件写到 stderr，跑 check 的人当场看得见脚本的输出和错误。
-/// gpui-shell 自己报的错误另外记下（[`take_shell_errors`]），check 据此判不过。
-pub(super) fn install_stderr() {
-    let mut layer = AppLog::new(|scope, level, message| {
-        eprintln!("[{scope}] {level} {message}");
-    });
-    layer.keep_shell_errors = true;
-    let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer));
+static NSH_LOG: NshLog = NshLog;
+
+struct NshLog;
+
+impl log::Log for NshLog {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        log_source(metadata.target(), metadata.level()).is_some()
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        let Some(scope) = log_source(record.target(), record.level()) else {
+            return;
+        };
+        let message = format_log_record(record.target(), &record.args().to_string());
+        smelt_sys::app_log::log(log_level_name(record.level()), scope, &message);
+    }
+
+    fn flush(&self) {}
 }
 
-/// check 期间 gpui-shell 自己报的错误：组件建不出来（少了必填的插槽、参数不对）时界面上只画
-/// 一行「Failed to render …」，脚本那边接不到，不记下来 check 就照样算过。脚本自己的
-/// `console.error` 不在里面：离线时插件报连不上是正常的。
-static SHELL_ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+fn log_source(target: &str, level: log::Level) -> Option<&'static str> {
+    if target == "js" {
+        return Some("plugin");
+    }
+    if target == "nsh::fps" || target.starts_with("nsh::fps::") {
+        return None;
+    }
+    if is_nsh(target) && level <= log::Level::Warn {
+        return Some("plugin");
+    }
+    None
+}
 
-/// 取走记下的 gpui-shell 错误。
-pub(super) fn take_shell_errors() -> Vec<String> {
-    std::mem::take(
-        &mut *SHELL_ERRORS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    )
+fn format_log_record(target: &str, message: &str) -> String {
+    if target == "js" {
+        message.to_owned()
+    } else {
+        format!("{target}: {message}")
+    }
+}
+
+fn is_nsh(target: &str) -> bool {
+    let krate = target.split("::").next().unwrap_or(target);
+    krate == "nsh" || krate.starts_with("nsh_")
+}
+
+fn log_level_name(level: log::Level) -> &'static str {
+    match level {
+        log::Level::Error => "error",
+        log::Level::Warn => "warn",
+        log::Level::Info => "info",
+        log::Level::Debug => "debug",
+        log::Level::Trace => "trace",
+    }
 }
 
 /// 把要的 tracing 事件交给 `write(来源, 级别, 正文)`。
 struct AppLog<W> {
     write: W,
-    /// gpui-shell 自己的错误另记进 [`SHELL_ERRORS`]。
-    keep_shell_errors: bool,
 }
 
 impl<W: Fn(&str, &str, &str)> AppLog<W> {
     fn new(write: W) -> Self {
-        Self {
-            write,
-            keep_shell_errors: false,
-        }
+        Self { write }
     }
 }
 
-/// 收不收这条，收的话记成哪个来源：脚本输出全收；gpui-shell 自己的、iroh 的只收警告和
-/// 错误。
-fn source(metadata: &Metadata<'_>) -> Option<&'static str> {
+/// 收不收这条 tracing 事件：只收 iroh 及其子库的警告和错误。
+fn tracing_source(metadata: &Metadata<'_>) -> Option<&'static str> {
     let target = metadata.target();
-    if target == SCRIPT_TARGET {
-        return Some("plugin");
-    }
-    let source = if target == SHELL_TARGET || target.starts_with("gpui_shell::") {
-        "plugin"
-    } else if is_iroh(target) {
-        "iroh"
+    if is_iroh(target) && *metadata.level() <= Level::WARN {
+        Some("iroh")
     } else {
-        return None;
-    };
-    (*metadata.level() <= Level::WARN).then_some(source)
+        None
+    }
 }
 
 /// iroh 和它的子库（`iroh_relay`、`iroh_dns` 等）。
@@ -110,33 +120,18 @@ where
     W: Fn(&str, &str, &str) + Send + Sync + 'static,
 {
     fn enabled(&self, metadata: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
-        source(metadata).is_some()
+        tracing_source(metadata).is_some()
     }
 
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let metadata = event.metadata();
-        let Some(source) = source(metadata) else {
+        let Some(source) = tracing_source(metadata) else {
             return;
         };
         let mut message = MessageText::default();
         event.record(&mut message);
-        // 库自己的事件标上 target，和插件的 console 输出分得开。
-        let text = if metadata.target() == SCRIPT_TARGET {
-            message.0
-        } else {
-            format!("{}: {}", metadata.target(), message.0)
-        };
+        let text = format!("{}: {}", metadata.target(), message.0);
         (self.write)(source, level_name(metadata.level()), &text);
-        if self.keep_shell_errors
-            && *metadata.level() == Level::ERROR
-            && source == "plugin"
-            && metadata.target() != SCRIPT_TARGET
-        {
-            SHELL_ERRORS
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(text);
-        }
     }
 }
 
@@ -172,70 +167,35 @@ mod tests {
                 ));
             }));
         tracing::subscriber::with_default(subscriber, body);
-        let lines = lines.lock().unwrap().clone();
-        lines
+        lines.lock().unwrap().clone()
     }
 
     fn line(scope: &str, level: &str, message: &str) -> (String, String, String) {
         (scope.to_string(), level.to_string(), message.to_string())
     }
 
-    fn plugin(level: &str, message: &str) -> (String, String, String) {
-        line("plugin", level, message)
-    }
-
     #[test]
-    fn script_output_is_kept_at_every_level() {
-        let lines = capture(|| {
-            tracing::debug!(target: "gpui_shell::script", "{}", "starting");
-            tracing::info!(target: "gpui_shell::script", "{}", "[forge] 2 sessions");
-            tracing::error!(target: "gpui_shell::script", "{}", "boom");
-        });
-        assert_eq!(
-            lines,
-            [
-                plugin("debug", "starting"),
-                plugin("info", "[forge] 2 sessions"),
-                plugin("error", "boom"),
-            ]
-        );
-    }
+    fn nsh_js_logs_are_kept_at_every_level_and_runtime_only_warns() {
+        assert_eq!(log_source("js", log::Level::Debug), Some("plugin"));
+        assert_eq!(log_source("js", log::Level::Info), Some("plugin"));
+        assert_eq!(log_source("js", log::Level::Error), Some("plugin"));
+        assert_eq!(format_log_record("js", "[forge] ok"), "[forge] ok");
 
-    #[test]
-    fn check_keeps_shell_errors_but_not_script_errors() {
-        take_shell_errors();
-        let mut layer = AppLog::new(|_: &str, _: &str, _: &str| {});
-        layer.keep_shell_errors = true;
-        let subscriber = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::error!(target: "gpui_shell::script", "offline");
-            tracing::warn!(target: "gpui_shell::component_registry", "style unused");
-            tracing::error!(target: "gpui_shell::materialize", "Popover requires content");
-        });
+        assert_eq!(log_source("nsh_engine::updates", log::Level::Info), None);
         assert_eq!(
-            take_shell_errors(),
-            ["gpui_shell::materialize: Popover requires content"]
+            log_source("nsh_engine::updates", log::Level::Warn),
+            Some("plugin")
         );
-        assert!(take_shell_errors().is_empty(), "取走了就清空");
-    }
-
-    #[test]
-    fn shell_keeps_only_warnings_and_errors_and_names_the_target() {
-        let lines = capture(|| {
-            tracing::debug!(target: "gpui_shell::engine", "noise");
-            tracing::error!(target: "gpui_shell::engine::quickjs::scheduler", "unhandled rejection");
-            tracing::warn!(target: "gpui_shell", "careful");
-        });
         assert_eq!(
-            lines,
-            [
-                plugin(
-                    "error",
-                    "gpui_shell::engine::quickjs::scheduler: unhandled rejection"
-                ),
-                plugin("warn", "gpui_shell: careful"),
-            ]
+            log_source("nsh_platform_gpui::app", log::Level::Error),
+            Some("plugin")
         );
+        assert_eq!(
+            format_log_record("nsh_js::protocol", "bad prop"),
+            "nsh_js::protocol: bad prop"
+        );
+        assert_eq!(log_source("nsh::fps", log::Level::Warn), None);
+        assert_eq!(log_source("nshish::foo", log::Level::Error), None);
     }
 
     #[test]
@@ -260,7 +220,6 @@ mod tests {
     fn other_crates_are_left_alone() {
         let lines = capture(|| {
             tracing::error!(target: "reqwest::connect", "nope");
-            tracing::error!(target: "gpui_shellfish", "not ours either");
             tracing::error!(target: "irohish::thing", "nor this");
         });
         assert!(lines.is_empty());

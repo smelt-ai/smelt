@@ -84,7 +84,7 @@ pub fn unregister_topics(owner: &str, cx: &mut App) {
 
 /// 来源 `owner` 有没有登记话题 `topic`。推来的话题只交给登记了它的 JS 插件（Rust 插件
 /// 收全部，按 `topic` 自己认）。
-#[cfg_attr(not(feature = "js"), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn wants(owner: &str, topic: &str, cx: &App) -> bool {
     cx.try_global::<Topics>().is_some_and(|topics| {
         topics

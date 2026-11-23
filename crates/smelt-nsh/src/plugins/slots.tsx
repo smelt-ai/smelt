@@ -1,4 +1,4 @@
-// 跨 VM 插槽占位：外壳和任意插件都用同一个 `<Slot>`（别名 `SmeltSlot`）摆其它插件的视图。
+// 外壳专用跨 VM 视图挂载器（仅打进主壳包，不暴露给插件）：
 // 同帧内的多次 mount / update / unmount 经微任务合批，通过 `smelt.slot.ops` 交给引擎内路由器，
 // 不回绕 GPUI 主线程；提供方热重载或崩溃时，占位容器不动，由宿主按 instances 表自动重放或标错。
 import { cleanup, effect, host, signal, Text, View } from "nsh";
@@ -29,7 +29,7 @@ host.on("smelt.slot.failed", (data: any) => {
   }
 });
 
-// 每个 VM 唯一前缀（由宿主经 host.params 注入含代数的前缀，避免跨 VM 或热重载后实例 id 碰撞）。
+// 外壳实例前缀（由宿主经 host.params 注入含代数的前缀，避免引擎重启后实例 id 碰撞）。
 const ownerPrefix =
   typeof (host.params as any)?.__smelt_owner === "string"
     ? ((host.params as any).__smelt_owner as string)
@@ -56,7 +56,7 @@ function Failed(props: { id: string }) {
   return <Text class="text-xs text-destructive">{props.id} 出错了</Text>;
 }
 
-/** 插件 `id` 入口文件导出的一个视图；不写 `view` 就是默认导出。 */
+/** 外壳把插件 `id` 导出的顶层视图挂进当前位置；不写 `view` 就是默认导出。 */
 export function Slot(props: {
   id: string;
   view?: string;
@@ -69,22 +69,27 @@ export function Slot(props: {
   let mounted = false;
   let lastPlugin = "";
   let lastView = "";
+  let lastArgsJson: string | undefined;
 
   effect(() => {
     const plugin = props.id;
     const view = props.view ?? "default";
     const args = props.args ?? null;
+    const argsJson = JSON.stringify(args);
     if (!mounted) {
       mounted = true;
       lastPlugin = plugin;
       lastView = view;
+      lastArgsJson = argsJson;
       enqueue({ op: "mount", instance, target, plugin, view, args });
     } else if (plugin !== lastPlugin || view !== lastView) {
       enqueue({ op: "unmount", instance });
       lastPlugin = plugin;
       lastView = view;
+      lastArgsJson = argsJson;
       enqueue({ op: "mount", instance, target, plugin, view, args });
-    } else {
+    } else if (argsJson !== lastArgsJson) {
+      lastArgsJson = argsJson;
       enqueue({ op: "update", instance, args });
     }
   });
@@ -98,7 +103,9 @@ export function Slot(props: {
 
   return (
     <View slotTarget={target} class={props.class} style={props.style}>
-      {failedOf(props.id)() ? <Failed id={props.id} /> : null}
+      <If when={failedOf(props.id)()}>
+        <Failed id={props.id} />
+      </If>
     </View>
   );
 }

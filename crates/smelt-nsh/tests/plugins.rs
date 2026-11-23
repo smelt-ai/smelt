@@ -33,7 +33,6 @@ export function Shell() {
       <Heavy name="terminal" style={{ width: 80, height: 20 }} />
       <Slot id="alpha" args={{ tag: tag() }} />
       <Slot id="beta" />
-      <Slot id="host-slot" />
       {rows.map((index) => <Slot id="row" args={index} />)}
     </View>
   );
@@ -403,21 +402,25 @@ export default function Plugin(props: { args?: { tag?: string } }) {
     assert_eq!(proto_a.2["blocked"], json!(true));
     assert_eq!(proto_a.2["seen"], Value::Null);
 
-    // 插件挂插件（跨 VM 嵌套插槽 + 放置方卸载零孤儿清理）。
-    bench.install("nested-child", &plugin("", "", "nested-child-1"));
-    bench.install(
-        "host-slot",
+    // 禁止插件用 smelt/slots 嵌套其它插件：打包校验直接拒绝，只有宿主外壳拥有挂载插件的权限。
+    bench.refused(
+        "alpha",
         r#"import { View } from "nsh";
-import { Slot } from "../slots.tsx";
-export default function HostSlot() {
-  return <View><Slot id="nested-child" /></View>;
+import { Slot } from "smelt/slots";
+export default function BadNest() {
+  return <View><Slot id="beta" /></View>;
 }
 "#,
     );
-    bench.wait("+nested-child-1");
-    bench.remove("host-slot");
-    bench.wait("-nested-child-1");
-    bench.remove("nested-child");
+    bench.refused(
+        "alpha",
+        r#"import { View } from "nsh";
+import { Slot } from "../slots.tsx";
+export default function BadRelativeNest() {
+  return <View><Slot id="beta" /></View>;
+}
+"#,
+    );
 
     // 一个视图摆很多行：同一个独立 VM，一百个插槽一次重放。
     bench.install(

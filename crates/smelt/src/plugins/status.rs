@@ -9,8 +9,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::PluginPanel;
-
 const FILE_NAME: &str = "plugin-status.json";
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,17 +33,17 @@ fn path() -> Option<PathBuf> {
 }
 
 /// 挂载完写一份。写不了只记日志：快照只给命令行看，不影响插件本身。
-pub(super) fn publish(panels: &[PluginPanel]) {
+pub(crate) fn publish(plugins: &[smelt_nsh::LoadedPluginInfo]) {
     let snapshot = Snapshot {
         pid: std::process::id(),
-        plugins: panels
+        plugins: plugins
             .iter()
-            .map(|panel| Entry {
-                id: panel.id.clone(),
-                name: panel.title.clone(),
-                version: panel.version.clone(),
-                path: panel.root.clone(),
-                error: panel.error.clone(),
+            .map(|plugin| Entry {
+                id: plugin.id.clone(),
+                name: plugin.name.clone(),
+                version: plugin.version.clone(),
+                path: plugin.root.clone(),
+                error: plugin.error.clone(),
             })
             .collect(),
     };

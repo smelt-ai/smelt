@@ -1,0 +1,6 @@
+{
+  "id": "smelt.themes",
+  "name": "Themes",
+  "version": "1.0.0",
+  "entry": "themes/adventure.json"
+}

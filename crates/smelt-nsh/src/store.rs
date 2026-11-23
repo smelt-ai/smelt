@@ -67,11 +67,6 @@ impl StoreHub {
         Self::start(StoreRoot::Global)
     }
 
-    #[cfg(test)]
-    pub(crate) fn in_dir(root: PathBuf) -> Self {
-        Self::start(StoreRoot::Custom(root))
-    }
-
     fn start(root: StoreRoot) -> Self {
         let (sender, receiver) = mpsc::channel::<Request>();
         std::thread::Builder::new()

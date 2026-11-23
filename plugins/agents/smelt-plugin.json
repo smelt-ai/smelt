@@ -1,0 +1,6 @@
+{
+  "id": "smelt.agents",
+  "name": "Agents",
+  "version": "1.0.0",
+  "entry": "nsh/main.tsx"
+}

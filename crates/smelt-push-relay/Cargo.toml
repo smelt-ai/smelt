@@ -20,11 +20,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
+base64.workspace = true
 # 句柄加密。
 aes-gcm = "0.10"
 # APNs 提供方令牌（ES256 JWT）。
 ring = "0.17"
+# 按设备令牌无锁分片限流（GCRA）。
+governor = { version = "0.10", default-features = false, features = ["std", "dashmap"] }
 clap = { workspace = true, features = ["env"] }
 
 [dev-dependencies]

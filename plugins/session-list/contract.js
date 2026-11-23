@@ -11,20 +11,8 @@ export const OWNER = "smelt.session-list";
 /** 视图名：会话列表，单例，摆在布局里。打开参数 `{ focus?: boolean }`：focus 把键盘焦点交给列表。 */
 export const LIST_NAME = "main";
 export const LIST = `${OWNER}/${LIST_NAME}`;
-/** 设置页（「会话列表」：行首头像用哪个）。 */
+/** 设置页（「会话列表」：行首显示小人还是图标）。 */
 export const SETTINGS_NAME = "settings";
-
-// ---- 插槽 ----
-
-/**
- * 会话列表每行行首的头像。填它的是按实例建的视图，每行一份，参数 `{ machine, conversation }`
- * （conversation 是工作区目录里那段会话的 id），第一次打开给，之后不换会话。只用一个：好几个
- * 填进来时由用户在设置里选，没选过用第一个（按登记顺序）；没人填、选了不要时行首是图标。
- *
- * 画在 36pt 见方的格子里，零件可以伸出去一点，这边不裁。右下角盖着标明哪家 CLI、按状态上色
- * 的小圆标，归这边画。
- */
-export const SESSION_AVATAR = `${OWNER}/session-avatar`;
 
 // ---- 右键菜单 ----
 

@@ -101,10 +101,55 @@ struct MenuAction {
     args: serde_json::Value,
 }
 
-/// 把 PNG 的透明度当形状，涂成 `color`（`0xRRGGBB`）。不是 PNG 是 `None`。
+/// 把 SVG 栅格化成指定边长的直通 RGBA 图（把 `currentColor` 落为不透明黑，供着色或模板图取透明度）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn rasterize_svg_rgba(data: &[u8], px_size: u32) -> Option<::image::RgbaImage> {
+    let text = std::str::from_utf8(data).ok()?;
+    if !text.contains("<svg") {
+        return None;
+    }
+    let normalized = text.replace("currentColor", "#000000");
+    let options = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_str(&normalized, &options).ok()?;
+    let tree_size = tree.size();
+    if tree_size.width() <= 0.0 || tree_size.height() <= 0.0 {
+        return None;
+    }
+    let mut pixmap = tiny_skia::Pixmap::new(px_size, px_size)?;
+    let scale = (px_size as f32 / tree_size.width()).min(px_size as f32 / tree_size.height());
+    let tx = (px_size as f32 - tree_size.width() * scale) * 0.5;
+    let ty = (px_size as f32 - tree_size.height() * scale) * 0.5;
+    let transform = tiny_skia::Transform::from_scale(scale, scale).post_translate(tx, ty);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let mut out = ::image::RgbaImage::new(px_size, px_size);
+    for (dst, src) in out.pixels_mut().zip(pixmap.pixels()) {
+        let c = src.demultiply();
+        dst.0 = [c.red(), c.green(), c.blue(), c.alpha()];
+    }
+    Some(out)
+}
+
+/// 把 PNG 或 SVG 编码成 PNG 字节（SVG 按 `px_size` 栅格化）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn ensure_png(data: &[u8], px_size: u32) -> Option<Vec<u8>> {
+    if ::image::load_from_memory(data).is_ok() {
+        return Some(data.to_vec());
+    }
+    let rgba = rasterize_svg_rgba(data, px_size)?;
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    ::image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut encoded, ::image::ImageFormat::Png)
+        .ok()?;
+    Some(encoded.into_inner())
+}
+
+/// 把 PNG 或 SVG 的透明度当形状，涂成 `color`（`0xRRGGBB`）。读不懂是 `None`。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn tint_png(data: &[u8], color: u32) -> Option<Vec<u8>> {
-    let mut rgba = ::image::load_from_memory(data).ok()?.to_rgba8();
+    let mut rgba = match ::image::load_from_memory(data) {
+        Ok(img) => img.to_rgba8(),
+        Err(_) => rasterize_svg_rgba(data, 26)?,
+    };
     let [_, red, green, blue] = color.to_be_bytes();
     for pixel in rgba.pixels_mut() {
         pixel.0[0] = red;
@@ -139,7 +184,9 @@ fn image_bytes<'a>(
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::{MenuAction, StatusItemEvent, image_bytes, system_notifications, tint_png};
+    use super::{
+        MenuAction, StatusItemEvent, ensure_png, image_bytes, system_notifications, tint_png,
+    };
     use gpui::AssetSource;
     use objc::declare::ClassDecl;
     use objc::runtime::{Class, Object, Sel};
@@ -339,10 +386,10 @@ mod imp {
             if drawn.is_none_or(|drawn| drawn.icon != status.icon) {
                 // 插件给的图当模板图：只取透明度，颜色由系统按菜单栏深浅定。没给、或给的不是图，
                 // 用应用图标，彩色原样显示（模板图会把带颜色的方形 logo 拍成纯色剪影）。
-                let custom = status
-                    .icon
-                    .as_ref()
-                    .and_then(|icon| image(&image_bytes(icon, assets)?, STATUS_ICON_SIZE));
+                let custom = status.icon.as_ref().and_then(|icon| {
+                    let png = ensure_png(&image_bytes(icon, assets)?, 36)?;
+                    image(&png, STATUS_ICON_SIZE)
+                });
                 let icon = match custom {
                     Some(icon) => {
                         let _: () = msg_send![icon, setTemplate: objc::runtime::YES];
@@ -564,5 +611,20 @@ mod tests {
         assert_eq!(tinted.get_pixel(0, 0).0, [0x11, 0x22, 0x33, 255]);
         assert_eq!(tinted.get_pixel(1, 0).0[3], 0);
         assert_eq!(tint_png(b"not a png", 0), None);
+    }
+
+    #[test]
+    fn tinting_rasterizes_builtin_svg_icons_with_current_color() {
+        for path in ["smelt-icons/agent-claude.svg", "icons/terminal.svg"] {
+            let bytes = smelt_ui::assets::load(path).expect("内置 SVG 存在");
+            let tinted = tint_png(bytes, 0x336699).expect("SVG 应能栅格化并着色");
+            let img = ::image::load_from_memory(&tinted).unwrap().to_rgba8();
+            assert_eq!((img.width(), img.height()), (26, 26));
+            assert!(
+                img.pixels()
+                    .any(|p| p.0[3] > 0 && p.0[0] == 0x33 && p.0[1] == 0x66 && p.0[2] == 0x99),
+                "{path} 栅格化后应包含着色后的非透明像素"
+            );
+        }
     }
 }

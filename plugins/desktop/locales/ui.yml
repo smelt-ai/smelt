@@ -1,0 +1,63 @@
+_version: 2
+title:
+  en: Remote Desktop
+  zh-CN: 远程桌面
+no_machine:
+  en: No machine selected yet
+  zh-CN: 还没选要连的机器
+machine_removed:
+  en: This machine is no longer connected
+  zh-CN: 这台机器已经移除了
+command:
+  open:
+    en: Open Remote Desktop
+    zh-CN: 打开远程桌面
+error:
+  no_place:
+    en: There's nowhere to put the remote desktop
+    zh-CN: 没有能放远程桌面的地方
+status:
+  connecting:
+    en: Connecting…
+    zh-CN: 正在连接…
+  reconnecting:
+    en: Connection lost. Reconnecting…
+    zh-CN: 连接断了，正在重连…
+  controlling:
+    en: In control
+    zh-CN: 接管中
+  viewing:
+    en: View only
+    zh-CN: 只看
+  type_failed:
+    en: "Text wasn't typed: %{error}"
+    zh-CN: 文字没打进去：%{error}
+closed:
+  proxy:
+    en: "Couldn't open the local forwarding port: %{error}"
+    zh-CN: 开不了本机转发口：%{error}
+  webview:
+    en: "The web view couldn't start: %{error}"
+    zh-CN: 网页视图起不来：%{error}
+  by_user:
+    en: Disconnected
+    zh-CN: 已断开
+  ended:
+    en: The remote desktop has disconnected
+    zh-CN: 远程桌面已断开
+  lost:
+    en: The connection to the remote desktop was lost
+    zh-CN: 和远程桌面的连接断了
+action:
+  reconnect:
+    en: Reconnect
+    zh-CN: 重新连接
+  view_only:
+    en: View Only
+    zh-CN: 只看
+  take_control:
+    en: Take Control
+    zh-CN: 接管
+  disconnect:
+    en: Disconnect
+    zh-CN: 断开

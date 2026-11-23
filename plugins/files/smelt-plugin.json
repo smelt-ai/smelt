@@ -1,0 +1,6 @@
+{
+  "id": "smelt.files",
+  "name": "Files",
+  "version": "1.0.0",
+  "entry": "nsh.tsx"
+}

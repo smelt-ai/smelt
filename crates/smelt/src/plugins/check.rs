@@ -1,25 +1,11 @@
-//! `smelt plugin check <目录>`：不开 App，把插件加载一次、渲染一帧，过了退出 0，没过退出 1。
-//!
-//! 和 App 加载插件走同一套（同一个运行时、同一份 Policy 和宿主模块），只是宿主换成离线的
-//! [`CheckHost`]：没有机器、没有会话、窗口不显示。查得出的：清单、主题文件、语法错误、
-//! 解析不到的导入、默认导出不对、根的 `init` 和第一次 `render` 里抛的错，以及登记的视图（按实例建的除外）
-//! 建不出来（类没交出）、`init` 和第一次 `render` 里抛的错、样式方法和参数写错、元素用了
-//! 两次、组件建不出来（少了必填的插槽等，gpui-shell 报的错误）。查不出的：布局和绘制、之后的交互和异步状态、要连上运行时才有的数据，这些还得在 App 里看（`smelt plugin status`、`~/.smelt/app.log`）。
-//!
-//! 顺带把给编辑器的 `gpui-kit.d.ts`、`jsconfig.json` 写进插件目录，新插件第一次 check 完
-//! 就有接口声明可查。
+//! `smelt plugin check <目录>`：不开 App，校验插件清单、locales、主题文件以及 TSX 打包与外部
+//! import；过了输出 JSON 并退出 0，没过把原因写 stderr 并退出 1。
 
 use std::path::Path;
-use std::sync::Arc;
 
-use gpui::*;
-use gpui_shell::plugin::PluginManifest;
 use rust_i18n::t;
-use smelt_plugin_api::js::JsPlugin;
-use smelt_plugin_api::{self as api, Machine, RuntimeKey};
-use smelt_runtime_client::RuntimeClient;
 
-/// 检查 `dir` 里的插件，返回退出码。读清单在开 GPUI 之前做，清单坏了不用起应用。
+/// 检查 `dir` 里的插件，返回退出码。
 pub(super) fn run(dir: &Path) -> i32 {
     let root = match std::fs::canonicalize(dir) {
         Ok(root) => root,
@@ -31,227 +17,45 @@ pub(super) fn run(dir: &Path) -> i32 {
             ));
         }
     };
-    let manifest = match PluginManifest::read(&root) {
+    if !root.join(smelt_nsh::MANIFEST_FILE).is_file() {
+        return fail(&t!("plugins.no_manifest", file = smelt_nsh::MANIFEST_FILE));
+    }
+    let manifest = match smelt_nsh::PluginManifest::read(&root) {
         Ok(manifest) => manifest,
         Err(error) => return fail(&t!("plugins.bad_manifest", error = error)),
     };
-    if !root.join(manifest.entry()).is_file() {
-        return fail(&t!("plugins.no_entry", entry = manifest.entry()));
+    if !root.join(&manifest.entry).is_file() {
+        return fail(&t!("plugins.no_entry", entry = manifest.entry));
     }
-    super::log::install_stderr();
-    // 结果在应用循环里报、在里面退出：开过窗口的循环不会因为窗口没显示就自己结束。
-    gpui_platform::application()
-        .with_assets(super::Assets)
-        .run(move |cx| {
-            let code = match check(&root, &manifest, cx) {
-                Ok(()) => {
-                    let report = serde_json::json!({
-                        "ok": true,
-                        "id": manifest.id(),
-                        "name": manifest.name(),
-                        "path": root,
-                    });
-                    println!("{report:#}");
-                    0
-                }
-                Err(error) => fail(&error),
-            };
-            // 脚本运行时存在线程局部的注册表里；留到进程退出时再析构，它要用的别的线程局部
-            // 可能已经没了。和 App 退出一样先放掉。
-            super::shutdown(cx);
-            std::process::exit(code);
-        });
-    1
+    match validate(&root, &manifest) {
+        Ok(()) => {
+            let report = serde_json::json!({
+                "ok": true,
+                "id": manifest.id,
+                "name": manifest.name,
+                "path": root,
+            });
+            println!("{report:#}");
+            0
+        }
+        Err(error) => fail(&error),
+    }
+}
+
+fn validate(root: &Path, manifest: &smelt_nsh::PluginManifest) -> Result<(), String> {
+    let themes = super::themes::read(root, &manifest.entry)?;
+    if !themes.is_empty() {
+        let sources: Vec<&str> = themes.iter().map(String::as_str).collect();
+        let mut catalog = smelt_ui::theme_catalog::ThemeCatalog::default();
+        catalog
+            .register(&format!("files:{}", manifest.id), &sources, |_| false)
+            .map_err(|error| error.to_string())?;
+    }
+    smelt_nsh::check_plugin(root)?;
+    Ok(())
 }
 
 fn fail(message: &str) -> i32 {
     eprintln!("{message}");
     1
-}
-
-fn check(root: &Path, manifest: &PluginManifest, cx: &mut App) -> Result<(), String> {
-    gpui_base::init(cx);
-    smelt_ui::init(cx);
-    api::set_locale(api::system_locale(), cx);
-    api::install(CheckHost, cx);
-
-    let id = manifest.id();
-    let themes = super::themes::read(root, manifest.entry())?;
-    if !themes.is_empty() {
-        let sources: Vec<&str> = themes.iter().map(String::as_str).collect();
-        smelt_ui::theme_catalog::register_theme_sets(&format!("files:{id}"), &sources, cx)
-            .map_err(|error| error.to_string())?;
-    }
-    if super::is_theme_only(manifest) {
-        return Ok(());
-    }
-
-    let runtime = super::runtime(cx)
-        .map_err(|error| t!("plugins.runtime_failed", error = format!("{error:#}")).into_owned())?;
-    let assets = super::assets::mount(id, root.to_path_buf());
-    let plugin = JsPlugin::for_plugin(id, manifest.name()).with_assets(assets, root);
-    let options = WindowOptions {
-        show: false,
-        focus: false,
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(480.), px(360.)),
-            cx,
-        ))),
-        ..Default::default()
-    };
-    let window = cx
-        .open_window(options, |_, cx| cx.new(|_| Empty))
-        .map_err(|error| format!("{error:#}"))?;
-    window
-        .update(cx, |_, window, cx| {
-            check_views(&runtime, root, manifest, &plugin, window, cx)
-        })
-        .map_err(|error| format!("{error:#}"))?
-}
-
-/// 挂上插件的根（跑它的 `init`）画一帧，再把它登记的视图（按实例建的要参数，不建）各建一份、
-/// 画一帧。根在 App 里画在看不见的一层里（见 `super::roots`），画坏了界面上看不出来，只能在这儿查。
-fn check_views(
-    runtime: &std::rc::Rc<gpui_shell::ShellRuntime>,
-    root: &Path,
-    manifest: &PluginManifest,
-    plugin: &JsPlugin,
-    window: &mut Window,
-    cx: &mut App,
-) -> Result<(), String> {
-    let id = manifest.id();
-    let script = super::mount_root(runtime, id, root, manifest.entry(), plugin, window, cx)
-        .map_err(|error| format!("{error:#}"))?;
-    if let Some(error) = super::log::take_shell_errors().into_iter().next() {
-        return Err(error);
-    }
-    let drawn: AnyView = script.clone().into();
-    window.replace_root(cx, move |_, _| Probe(drawn));
-    window.draw(cx).clear(cx);
-    let mut result = match script
-        .read(cx)
-        .build_error()
-        .map(str::to_string)
-        .or_else(|| super::log::take_shell_errors().into_iter().next())
-    {
-        Some(error) => Err(format!("{id}：{error}")),
-        None => Ok(()),
-    };
-    let prefix = format!("{id}/");
-    let views = api::views(cx)
-        .into_iter()
-        .filter(|view| result.is_ok() && view.id.starts_with(&prefix) && !view.instances);
-    for info in views {
-        let view = (info.build)(window, cx).view();
-        let drawn = view.clone();
-        window.replace_root(cx, move |_, _| Probe(drawn));
-        window.draw(cx).clear(cx);
-        let error = api::js::script_view_error(&view, cx)
-            .or_else(|| super::log::take_shell_errors().into_iter().next());
-        if let Some(error) = error {
-            result = Err(format!("{}：{error}", info.id));
-            break;
-        }
-    }
-    // 视图和根都在运行时之前放掉（见 `super::shutdown`）。
-    window.replace_root(cx, |_, _| Empty);
-    drop(script);
-    result
-}
-
-/// 画一帧要检查的视图。
-pub(super) struct Probe(pub(super) AnyView);
-
-impl Render for Probe {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.0.clone()
-    }
-}
-
-/// 离线的宿主：只有本机、不在线、什么会话都没有、视图都没露着。插件在 `init` 和第一次
-/// `render` 里读到的就是这些，读得出来就算过；要连运行时的调用照常报错。
-pub(super) struct CheckHost;
-
-impl api::Host for CheckHost {
-    fn machines(&self, _cx: &App) -> Vec<Machine> {
-        vec![Machine {
-            key: RuntimeKey::Local,
-            name: String::new(),
-            unavailable: None,
-        }]
-    }
-
-    fn client(&self, _machine: &RuntimeKey, _cx: &App) -> Option<RuntimeClient> {
-        None
-    }
-
-    fn connector(
-        &self,
-        _machine: &RuntimeKey,
-        _cx: &App,
-    ) -> Option<Arc<dyn api::client::Connector>> {
-        None
-    }
-
-    fn machine_online(&self, _machine: &RuntimeKey, _cx: &App) -> bool {
-        false
-    }
-
-    fn connections(&self, _cx: &App) -> api::Connections {
-        api::Connections::default()
-    }
-
-    fn view_shown(&self, _id: &str, _cx: &App) -> bool {
-        false
-    }
-
-    fn view_laid_out(&self, _id: &str, _cx: &App) -> bool {
-        false
-    }
-
-    fn main_window(&self, _cx: &App) -> Option<AnyWindowHandle> {
-        None
-    }
-
-    fn window_active(&self, _cx: &App) -> bool {
-        false
-    }
-
-    fn overlay_open(&self, _cx: &App) -> bool {
-        false
-    }
-
-    fn path_style(&self, _machine: &RuntimeKey, _cx: &App) -> api::model::runtime_path::PathStyle {
-        api::model::runtime_path::PathStyle::LOCAL
-    }
-
-    fn session_states(
-        &self,
-        _machine: &RuntimeKey,
-        _cx: &App,
-    ) -> Vec<api::model::daemon_state::DaemonSessionState> {
-        Vec::new()
-    }
-
-    fn session_presence(
-        &self,
-        _machine: &RuntimeKey,
-        _session_id: &str,
-        _cx: &App,
-    ) -> Option<api::model::daemon_state::RuntimePresence> {
-        None
-    }
-
-    fn workspace_directory(
-        &self,
-        _machine: &RuntimeKey,
-        _cx: &App,
-    ) -> Option<api::model::workspace_directory::WorkspaceDirectory> {
-        None
-    }
-
-    fn notification_permission(&self, _cx: &App) -> api::NotificationPermission {
-        api::NotificationPermission::Unsupported
-    }
 }

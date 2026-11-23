@@ -17,6 +17,7 @@ mod host_dialog;
 mod host_views;
 mod keymap;
 mod local_daemon;
+mod maintenance;
 mod overlay;
 mod plugin_host;
 mod plugins;
@@ -28,6 +29,7 @@ pub(crate) use runtimes::RuntimeKey;
 mod settings;
 mod status_item;
 mod system_open;
+mod updater;
 mod window_backdrop;
 mod workspace_commands;
 mod workspace_frame;
@@ -53,6 +55,26 @@ use smelt_client::daemon_state::DaemonStateEvent;
 use settings::{Appearance, load_appearance};
 
 rust_i18n::i18n!("locales", fallback = "en");
+
+fn nsh_corners(corners: workspace_frame::WindowCorners) -> smelt_nsh::WindowCorners {
+    smelt_nsh::WindowCorners {
+        lights: corners.lights,
+        rounded: corners.rounded,
+    }
+}
+
+fn nsh_shell_labels() -> smelt_nsh::ShellLabels {
+    use rust_i18n::t;
+    smelt_nsh::ShellLabels {
+        collapse_left: t!("dock.collapse_left").into_owned(),
+        expand_left: t!("dock.expand_left").into_owned(),
+        collapse_right: t!("dock.collapse_right").into_owned(),
+        expand_right: t!("dock.expand_right").into_owned(),
+        zoom: t!("pane.zoom").into_owned(),
+        restore: t!("pane.restore").into_owned(),
+        settings_page_gone: t!("settings.page_gone").into_owned(),
+    }
+}
 
 /// 文件事件里有没有名叫 `name` 的文件。
 fn event_touches_file(event: &notify::Event, name: &std::ffi::OsStr) -> bool {
@@ -93,6 +115,13 @@ struct DaemonStatesSubscription {
 }
 
 impl Global for DaemonStatesSubscription {}
+
+/// App 级常驻的 NSH A2 主壳（单引擎线程 + 所有插件 VM）：
+/// macOS 关掉主窗口时只经 `detach_window` 卸载各页画布，引擎和后台插件（通知、自动化、会话命令等）
+/// 保持运行；重开主窗口时经 `attach_window` 零延迟挂回。
+struct PersistentShell(Entity<smelt_nsh::MainShell>);
+
+impl Global for PersistentShell {}
 
 /// 各运行时推来的工作区目录（项目、对话的名册）。唯一的 daemon 订阅循环写入：首帧整份
 /// 替换，之后的推送只收版本更新的（库换过的算新的，见 `WorkspaceRevision::supersedes`）。
@@ -174,13 +203,15 @@ struct Workspace {
     pages: Vec<workspace_layout::PageDock>,
     /// 主窗口的路由：开着哪页、来路、各页出口里放着什么（见 `router`）。
     router: router::Router,
+    /// 首批脚本插件落定后是否已经做过首启进首页（用来区分「启动中」与「确实没有首页布局」）。
+    home_opened: bool,
     /// 上次退出时首页出口里放着的视图。视图登记好、进首页时放回去（见 `open_home_page`）。
     startup_outlet: Option<String>,
     /// 上次写进客户端库的首页出口，没变就不再写（见 `save_state`）。`None` 是这次还没写过。
     saved_outlet: Option<Option<String>>,
     /// 各页出口里放着的按实例建的视图：路由只记 id，这一份归工作台留着（见
     /// `Workspace::open_instance`），出口换了内容就放掉。
-    outlet_instances: HashMap<router::PageKey, smelt_plugin_api::ViewInstance>,
+    outlet_instances: HashMap<String, smelt_plugin_api::ViewInstance>,
     /// 开着的那页摆着什么、看得见什么的快照。Dock 一变、换页就重算，render 只读它。
     pub(crate) shell_view: workspace_shell::ShellView,
     /// 窗口自己此刻占掉的角（进出全屏时变），算 [`Self::shell_view`] 用。
@@ -208,17 +239,12 @@ struct Workspace {
     show_quit_confirm: bool,
     /// 用户已确认退出；防止重复提交退出动作。
     quit_requested: bool,
-    /// 上次告诉插件的遮罩层开关（见 `note_overlay`），只用来判断变没变。
-    plugin_overlay_open: bool,
     /// 远程机器上的目录选择器：插件要在远程机器上选路径时开（见 `dir_picker`）。
     dir_picker: Option<dir_picker::DirPickerState>,
     /// 守护落后时的自动重启进行中，防止重入。
     daemon_upgrading: bool,
     /// 上次看到主窗口在不在前台（应用在前台、窗口是 key）。变成在前台时告诉插件人回来了。
     workspace_window_active: bool,
-    /// 主窗口是不是 key window，窗口激活变化时和每帧记下。插件问窗口在不在前台时和现问的
-    /// 应用前台合起来答（见 `SmeltHost::window_active`）。
-    main_window_key: bool,
     /// 宿主转给插件的事件里，工作台自己要管的（见 `subscribe_host_events`）。
     _host_events_sub: Option<Subscription>,
     /// 每次通知后让宿主对话框跟上状态，再看遮罩层开关变没变（见 `sync_host_dialogs`、
@@ -238,8 +264,6 @@ struct Workspace {
     _local_runtime_sub: Option<Subscription>,
     /// 盯着 App 里的 smeltd 所在目录：重编译、覆盖安装后查一次守护是否落后。
     _daemon_binary_watcher: Option<notify::RecommendedWatcher>,
-    /// 盯着插件目录：文件一变就重挂改动的插件（见 `plugins::watch`）。
-    _plugin_watcher: Option<notify::RecommendedWatcher>,
     /// 守护落后，但有会话在跑没重启：等会话都停下来再查一次。
     daemon_restart_waiting_idle: bool,
     /// 根节点自己的焦点句柄：有的页面自身没有可聚焦的元素，切过去后如果谁都不 focus，
@@ -251,29 +275,137 @@ struct Workspace {
     focus_handle: FocusHandle,
     /// 开着的宿主对话框，按打开先后（见 `host_dialog`）。
     host_dialogs: Vec<(host_dialog::HostDialog, smelt_ui::dialog::DialogId)>,
+    /// 主窗口唯一的 NSH A2 外壳（承载各页 `DockArea` 和所有 JS 插件 VM）。
+    nsh_shell: Entity<smelt_nsh::MainShell>,
+    /// 各页出口最近一次传入的 `(view_id, args, seq)`。
+    nsh_outlet_args: HashMap<String, (String, serde_json::Value, u64)>,
+    nsh_outlet_seq: u64,
+    _nsh_shell_sub: Subscription,
+    _nsh_shell_observe: Subscription,
+    _settings_sel_sub: Subscription,
 }
 
 impl Workspace {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let workspace_id = cx.entity_id();
+        plugin_host::attach_main_window(workspace_id, window.is_window_active(), cx);
         // 自带命令先于插件登记：出厂键位撞了先登记的留着，自带的键不让插件抢走。
         workspace_commands::register(cx.weak_entity(), cx);
-        // 面板插件在进首页之前挂好：布局和出口按视图 id 摆，注册表里没有的摆不上。
-        plugins::mount_all(window, cx);
-        let plugin_watcher = plugins::watch(window, cx);
+        // 宿主自己的视图（出口、设置）和插件登记在同一张视图注册表里，布局按 id 摆它们。先登记再
+        // 建壳和订阅：这几次登记不用重装布局，布局本来就还没装。
+        host_views::register(cx.weak_entity(), cx);
+
+        let regions: window_backdrop::SharedRegions = Rc::default();
+        let window_corners = workspace_frame::WindowCorners::of(window);
+        let mut sources = Vec::new();
+        if let Some(dir) = plugins::builtin_dir() {
+            sources.push(smelt_nsh::SourceDir {
+                path: dir.to_path_buf(),
+                source: smelt_nsh::PluginSource::Builtin,
+                watch: plugins::builtin_live(),
+            });
+        }
+        if let Some(dir) = plugins::user_plugin_dir() {
+            sources.push(smelt_nsh::SourceDir {
+                path: dir,
+                source: smelt_nsh::PluginSource::User,
+                watch: true,
+            });
+        }
+        let reset_regions = regions.clone();
+        let record_regions = regions.clone();
+        let backdrop = smelt_nsh::BackdropHooks {
+            reset: Some(Rc::new(move || {
+                reset_regions.borrow_mut().begin();
+            })),
+            record: Some(Rc::new(move |placement, bounds, _| {
+                let placement = match placement {
+                    smelt_nsh::BackdropPlacement::Center => gpui_base::dock::DockPlacement::Center,
+                    smelt_nsh::BackdropPlacement::Left => gpui_base::dock::DockPlacement::Left,
+                    smelt_nsh::BackdropPlacement::Right => gpui_base::dock::DockPlacement::Right,
+                    smelt_nsh::BackdropPlacement::Bottom => gpui_base::dock::DockPlacement::Bottom,
+                };
+                record_regions.borrow_mut().set(placement, bounds);
+            })),
+        };
+        let padding = f32::from(ui_theme::shell_padding());
+        let labels = nsh_shell_labels();
+        let corners = nsh_corners(window_corners);
+        let shell = if let Some(existing) = cx
+            .try_global::<PersistentShell>()
+            .map(|persistent| persistent.0.clone())
+        {
+            existing.update(cx, |shell, cx| {
+                shell.attach_window(backdrop, corners, padding, labels, window, cx);
+            });
+            existing
+        } else {
+            let config = smelt_nsh::ShellConfig {
+                sources,
+                backdrop,
+                corners,
+                padding,
+                labels,
+            };
+            let created = cx.new(|cx| smelt_nsh::MainShell::new(config, window, cx));
+            cx.set_global(PersistentShell(created.clone()));
+            created
+        };
+        // NSH 壳每有一次提交重绘就同帧带起 Workspace 铺底，让 window_floor 读到当帧刚 prepaint 好的 Regions，
+        // 停靠区开合、拖分隔条与切页都不再慢一帧闪底色或留下过期的毛玻璃区域。
+        let nsh_shell_observe = cx.observe(&shell, |_, _, cx| cx.notify());
+        let nsh_shell_sub = cx.subscribe_in(
+            &shell,
+            window,
+            |this, shell, event: &smelt_nsh::MainShellEvent, window, cx| match event {
+                smelt_nsh::MainShellEvent::LayoutChanged { page_key } => {
+                    this.page_layout_changed(page_key, window, cx);
+                }
+                smelt_nsh::MainShellEvent::StateChanged => {
+                    this.sync_shell_view(cx);
+                    cx.notify();
+                }
+                smelt_nsh::MainShellEvent::PluginsChanged => {
+                    let all = shell.read(cx).installed_plugins();
+                    plugins::status::publish(&all);
+                    let user_plugins = all
+                        .into_iter()
+                        .filter(|p| p.source == smelt_nsh::PluginSource::User)
+                        .map(|p| plugins::InstalledPlugin {
+                            id: p.id,
+                            name: p.name,
+                            version: p.version,
+                            root: p.root,
+                            error: p.error,
+                        })
+                        .collect();
+                    plugins::set_installed(user_plugins);
+                    cx.notify();
+                }
+                smelt_nsh::MainShellEvent::InitialReady => {
+                    this.open_home_page(window, cx);
+                    this.sync_nsh_settings_page(cx);
+                }
+            },
+        );
+        let settings_sel_sub = settings::observe_selection(window, cx, |this, _, cx| {
+            this.sync_nsh_settings_page(cx);
+        });
 
         let mut ws = Self {
             pages: Vec::new(),
             router: Default::default(),
+            home_opened: false,
             startup_outlet: workspace_persist::load_outlet(),
             saved_outlet: None,
             outlet_instances: HashMap::new(),
             shell_view: Default::default(),
-            window_corners: workspace_frame::WindowCorners::of(window),
+            window_corners,
             _window_bounds_sub: None,
             _layout_choice_sub: None,
             palette: None,
             backdrop: Rc::default(),
-            regions: Rc::default(),
+            regions,
             applied_ui_font_px: None,
             window_handle: window.window_handle(),
             appearance_sync_scheduled: false,
@@ -281,11 +413,9 @@ impl Workspace {
             debug_hud: false,
             show_quit_confirm: false,
             quit_requested: false,
-            plugin_overlay_open: false,
             dir_picker: None,
             daemon_upgrading: false,
             workspace_window_active: false,
-            main_window_key: false,
             _host_events_sub: None,
             _overlay_sub: None,
             _appearance_sub: None,
@@ -295,30 +425,37 @@ impl Workspace {
             local_runtime_seen_online: false,
             _local_runtime_sub: None,
             _daemon_binary_watcher: None,
-            _plugin_watcher: plugin_watcher,
             daemon_restart_waiting_idle: false,
             focus_handle: cx.focus_handle(),
             host_dialogs: Vec::new(),
+            nsh_shell: shell,
+            nsh_outlet_args: HashMap::new(),
+            nsh_outlet_seq: 0,
+            _nsh_shell_sub: nsh_shell_sub,
+            _nsh_shell_observe: nsh_shell_observe,
+            _settings_sel_sub: settings_sel_sub,
         };
-        // 宿主自己的视图（设置）和插件登记在同一张视图注册表里，布局按 id 摆它们。先登记再
-        // 订阅：这几次登记不用重装布局，布局本来就还没装。
-        host_views::register(cx.weak_entity(), cx);
         ws._host_events_sub = Some(ws.subscribe_host_events(window, cx));
         // 对话框和遮罩层的开关散在各处（确认框、命令面板），开关时都会通知工作台。
         ws._overlay_sub = Some(cx.observe_self(|this, cx| {
             this.sync_host_dialogs(cx);
             this.note_overlay(cx);
         }));
-        // 主窗口关了，工作台里的视图就都看不见了。
-        cx.on_release(|_, cx| plugin_host::set_window_shown(HashSet::new(), cx))
-            .detach();
-        // 进首页之前先有一页空的，render 总有 Dock 可画。
-        ws.pages
-            .push(Self::new_page_dock(None, ws.regions.clone(), window, cx));
+        // 主窗口关了，工作台里的视图就都看不见了。若已经重开了新主窗口，旧工作台滞后释放时不覆盖。
+        let shell_for_release = ws.nsh_shell.clone();
+        cx.on_release(move |_, cx| {
+            if plugin_host::release_main_window(workspace_id, cx) {
+                plugin_host::set_window_shown(HashSet::new(), cx);
+                plugin_host::set_settings_shown(None, cx);
+                shell_for_release.update(cx, |shell, cx| shell.detach_window(cx));
+            }
+        })
+        .detach();
         ws._layout_choice_sub = Some(Self::watch_layout_choice(window, cx));
         // 装布局要用 `cx.entity()` 背后的工作台（宿主自己的视图画它），等它建好。
         cx.defer_in(window, |this, window, cx| {
             this.open_home_page(window, cx);
+            this.sync_nsh_settings_page(cx);
         });
         ws.start_daemon_outdated_watch(cx);
         let activation = cx.observe_window_activation(window, |this, window, cx| {
@@ -334,6 +471,9 @@ impl Workspace {
             let corners = workspace_frame::WindowCorners::of(window);
             if corners != this.window_corners {
                 this.window_corners = corners;
+                this.nsh_shell.update(cx, |shell, cx| {
+                    shell.set_corners(nsh_corners(corners), cx);
+                });
                 this.sync_shell_view(cx);
             }
         }));
@@ -364,8 +504,9 @@ impl Workspace {
     pub(crate) fn note_window_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
         let application_active = status_item::is_app_active();
         smelt_ui::motion::set_ambient_application_active(cx, application_active);
-        self.main_window_key = window.is_window_active();
-        let active = application_active && self.main_window_key;
+        let main_window_key = window.is_window_active();
+        plugin_host::set_main_window_key(cx.entity_id(), main_window_key, cx);
+        let active = application_active && main_window_key;
         let became_active = active && !self.workspace_window_active;
         self.workspace_window_active = active;
         if became_active {
@@ -472,6 +613,21 @@ impl Workspace {
             self.check_daemon_outdated(cx);
         }
     }
+
+    pub(crate) fn sync_nsh_chrome(&mut self, cx: &mut Context<Self>) {
+        let padding = f32::from(ui_theme::shell_padding());
+        let labels = nsh_shell_labels();
+        self.nsh_shell
+            .update(cx, |shell, cx| shell.set_chrome(padding, labels, cx));
+    }
+
+    pub(crate) fn sync_nsh_settings_page(&mut self, cx: &mut Context<Self>) {
+        let resolved = settings::resolved_page(cx);
+        plugin_host::set_settings_shown(resolved.as_ref().map(|(id, _)| id.clone()), cx);
+        let page = resolved.map(|(id, title)| (id.to_string(), title.to_string()));
+        self.nsh_shell
+            .update(cx, |shell, cx| shell.set_settings_page(page, cx));
+    }
 }
 
 impl Render for Workspace {
@@ -485,7 +641,6 @@ impl Render for Workspace {
         // 整窗只在这里管底（最先画的那块，见 `window_backdrop::paint`）：布局声明了材质的
         // 停靠区按底色不透明度透出毛玻璃，别处铺实的主题底色；里面的分栏和视图不铺页面底。
         // 背景图也在这一层，铺满整扇窗口，叠在底色上、所有内容下面。
-        let shell_padding = ui_theme::shell_padding();
         let appearance = cx.global::<Appearance>();
         let window_floor = {
             let materials = self.open_page_materials(cx);
@@ -544,27 +699,22 @@ impl Render for Workspace {
                 }
                 cx.propagate();
             }))
-            // 开着的那页是一块 Dock，功能的视图和设置都是里面的面板。
+            // 主窗口由 NSH A2 外壳承载各页的 DockArea、JS 插件与原生重组件；
+            // 首批插件落定后仍无可用首页布局时，在壳上叠加明确的空态/排错页（外壳保持挂载以支持热恢复）。
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .p(shell_padding)
-                    .child(self.shell_dock().clone())
-                    .children(self.render_dock_toggles(shell_padding)),
+                    .child(self.nsh_shell.clone())
+                    .children(
+                        (self.home_opened && self.router.page().is_none())
+                            .then(|| self.render_no_layout_state(cx)),
+                    ),
             )
             // 调试 HUD 叠在内容上面；对话框和命令面板在窗口根的对话框层上。
             .child(self.render_overlay_layers(window, cx))
-            // 插件的根：不占地方，只给它画的对话框、弹层一个出处（见 `plugins::roots`）。
-            .child(
-                div()
-                    .absolute()
-                    .size_0()
-                    .overflow_hidden()
-                    .children(plugins::roots()),
-            )
     }
 }
 
@@ -711,9 +861,8 @@ fn main() {
         // 外观设置：读盘设为全局单例。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。
         // 主题先登记再恢复外观，插件主题在首帧前即可生效。
-        // 界面语言先按系统的首选语言定；语言插件登记时换成用户在设置里选的。
+        // 界面语言先按系统的首选语言定；语言插件启动时换成用户在设置里选的。
         smelt_plugin_api::set_locale(smelt_plugin_api::system_locale(), cx);
-        smelt_themes::register(cx);
         plugins::register_initial_themes(cx);
         let appearance = load_appearance();
         cx.set_global(appearance.clone());
@@ -751,10 +900,14 @@ fn main() {
         if let Err(error) = bundled_helpers::sync_bundled_smelt_notify() {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
+        #[cfg(target_os = "macos")]
+        maintenance::sync_cli_link_at_startup(cx);
         // 登记过的远程运行时：同步读客户端库，iroh 推迟到第一次连接时在后台绑。
         runtimes::start_runtime_hub(cx);
         // 插件要读机器列表，在 RuntimeHub 之后、开主窗口之前装。
         plugin_host::install(current_ws.clone(), cx);
+        // 宿主应用生命周期：在线更新、移入「应用程序」、退出守卫与帮助菜单。
+        updater::register(cx);
         // 快捷键（命令的出厂键位 + 用户改过的）和应用菜单栏，见 `keymap`。要订阅宿主事件，
         // 在插件宿主之后装；命令随后由工作台和插件登记，登记一次重装一次键表。
         keymap::init(cx);
@@ -895,7 +1048,12 @@ fn main() {
         // 退出时的收尾。订阅必须由 app global 持有，否则 app.run 的初始化闭包返回时会被
         // Subscription::drop 自动取消。
         let quit_subscription = cx.on_app_quit(move |cx| {
-            // 插件要在这里释放，别留到线程局部变量析构时（见 `plugins::shutdown`）。
+            if let Some(shell) = cx
+                .try_global::<PersistentShell>()
+                .map(|persistent| persistent.0.clone())
+            {
+                shell.update(cx, |shell, cx| shell.shutdown(cx));
+            }
             plugins::shutdown(cx);
             async {}
         });

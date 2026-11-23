@@ -14,7 +14,7 @@ test("只有不用参数就能开的视图才有入口", () => {
   const indexes = new Set(["smelt.sessions/session"]);
   expect(launchable("smelt.archive/main", false, false, indexes)).toBeTruthy();
   expect(launchable("smelt.agents/settings", true, false, indexes), "设置页").toBeFalsy();
-  expect(launchable("smelt.terminal/terminal", false, true, indexes), "按实例建").toBeFalsy();
+  expect(launchable("smelt.desktop/desktop", false, true, indexes), "按实例建").toBeFalsy();
   expect(launchable("smelt/outlet", false, false, indexes), "出口").toBeFalsy();
   expect(launchable("smelt.launcher/nav", false, false, indexes), "自己").toBeFalsy();
   expect(launchable("smelt.launcher/settings", false, false, indexes), "自己").toBeFalsy();
@@ -28,7 +28,6 @@ const view = (id, extra = {}) => ({
   draws_top_bar: false,
   instances: false,
   settings: null,
-  fills: [],
   ...extra,
 });
 

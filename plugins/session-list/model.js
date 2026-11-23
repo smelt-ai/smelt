@@ -230,19 +230,10 @@ export function folds_over(machine, placement, grouping) {
 }
 
 /**
- * 行首头像用哪个：{ kind: "unset" }（没选过，用第一个填进来的）| { kind: "icon" }（不要头像）|
- * { kind: "view", id }（用这个视图；它没了按没选过算，选择留着）。
- * 在填了插槽的视图 id（按登记顺序）里定用哪个；null 是画图标。
+ * 行首是否画 3D 小人头像：默认（`unset` 或任何非 `icon` 选择）画小人；`{ kind: "icon" }` 画图标。
  */
-export function pick_avatar(choice, filled) {
-  switch (choice.kind) {
-    case "icon":
-      return null;
-    case "view":
-      return filled.find((id) => id === choice.id) ?? filled[0] ?? null;
-    default:
-      return filled[0] ?? null;
-  }
+export function show_buddy_avatar(choice) {
+  return choice?.kind !== "icon";
 }
 
 export function same_avatar_choice(a, b) {

@@ -1,10 +1,9 @@
-//! 设置页：面板插件（gpui-shell 插件，每个是工作台布局里的一个视图）。宿主自己的页，和插件
+//! 设置页：面板插件（NSH JS/TSX 插件，每个是工作台布局里的一个视图）。宿主自己的页，和插件
 //! 的设置页一样是登记的视图（见 [`super::view_specs`]）。
 //!
-//! 列出眼下加载的插件，导入、删除自己装的插件。App 自带的插件跟着 smelt 更新，不能删；用户
-//! 装一个同 id 的副本就能盖过它。和能力库里 Pi 的技能与扩展是两回事：这些插件跑在 smelt 界面
-//! 里，只在本机。改磁盘放后台线程；插件目录一变，工作台自己重挂改动的插件（见
-//! `plugins::watch`），这页不用管挂载。
+//! 列出眼下加载的插件，导入、删除自己装的插件。App 自带的插件跟着 smelt 更新，不能删；和
+//! 能力库里 Pi 的技能与扩展是两回事：这些插件跑在 smelt 界面里，只在本机。改磁盘放后台线程；
+//! 主壳盯着插件目录，文件一变自己重编热重载，这页不用管挂载。
 
 use super::*;
 use crate::plugins::InstalledPlugin;
@@ -33,7 +32,7 @@ pub(super) struct PanelPluginsPage {
 impl PanelPluginsPage {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            plugins: crate::plugins::installed(cx),
+            plugins: crate::plugins::installed(),
             user_dir: crate::plugins::user_plugin_dir(),
             pending_delete: None,
             error: None,
@@ -49,7 +48,7 @@ impl PanelPluginsPage {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.plugins = crate::plugins::installed(cx);
+        self.plugins = crate::plugins::installed();
         cx.notify();
     }
 

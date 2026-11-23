@@ -71,9 +71,6 @@ mod status_menu;
 mod topic;
 mod view;
 
-#[cfg(feature = "js")]
-pub mod js;
-
 pub use color::{hex_color, parse_hex_color};
 pub use command::{
     Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, RunCommand,
@@ -453,12 +450,6 @@ pub fn host(cx: &App) -> Rc<dyn Host> {
 /// 订阅 [`HostEvent`] 用的实体。
 pub fn events(cx: &App) -> Entity<HostEvents> {
     cx.global::<HostGlobal>().events.clone()
-}
-
-/// [`events`]，宿主还没装（测试里）是 `None`。
-#[cfg(feature = "js")]
-pub(crate) fn try_events(cx: &App) -> Option<Entity<HostEvents>> {
-    Some(cx.try_global::<HostGlobal>()?.events.clone())
 }
 
 /// 宿主发一条事件给所有订阅的插件。宿主还没装（测试里）就没人订阅，什么都不做。

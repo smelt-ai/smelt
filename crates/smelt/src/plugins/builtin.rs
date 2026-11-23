@@ -22,12 +22,6 @@ pub(super) fn dir() -> Option<&'static Path> {
     DIR.get_or_init(locate).as_deref()
 }
 
-/// 加载时要不要往插件目录里写给编辑器的文件（`gpui-kit.d.ts`、`jsconfig.json`）：安装包里的
-/// 那份只读、签过名，不写；读仓库时要写，改脚本时有补全。
-pub(super) fn editor_files(root: &Path) -> bool {
-    LIVE || !dir().is_some_and(|dir| root.starts_with(dir))
-}
-
 fn locate() -> Option<PathBuf> {
     if LIVE {
         return Some(repo_dir());

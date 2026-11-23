@@ -1,5 +1,5 @@
 //! 把下面这几个 TSX 入口照 `nsh build` 打包、编成字节码，放到 `$OUT_DIR/<名字>/bundle.nshc`，
-//! 运行时 `Bundle::read_trusted` 读，只给 `examples/bench.rs`。试点面板和它的插件不在这里：运行时
+//! 运行时 `Bundle::read_trusted` 读，只给 `examples/bench.rs`。主壳和插件不在这里：运行时
 //! 打包（`src/plugins.rs`），改插件不重编。打包按 NSH 自带的 `nsh/base`；宿主给的模块和组件
 //! 运行时按名字接（`nativeModule`、`nativeComponent`），打包不用知道。
 

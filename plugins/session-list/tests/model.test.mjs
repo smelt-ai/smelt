@@ -9,12 +9,12 @@ import {
   last_activity,
   listed_session,
   new_sidebar_ui,
-  pick_avatar,
   prune_ui,
   selected_session,
   selection_from_wire,
   set_collapsed,
   set_pinned,
+  show_buddy_avatar,
   title,
 } from "../model.js";
 import { t } from "./helpers.mjs";
@@ -22,16 +22,10 @@ import { t } from "./helpers.mjs";
 const terminal_session = (id, terminal, cwd) => ({ id, terminals: [{ id: terminal, cwd }], acp: null });
 const state = (id, since, turn = 0) => ({ id, phase_since: since, turn_started_at: turn });
 
-test("头像在填了插槽的视图里挑", () => {
-  const filled = ["a.x/avatar", "b.y/avatar"];
-  expect(pick_avatar({ kind: "unset" }, filled)).toBe("a.x/avatar");
-  expect(pick_avatar({ kind: "icon" }, filled)).toBe(null);
-  expect(pick_avatar({ kind: "view", id: "b.y/avatar" }, filled)).toBe("b.y/avatar");
-  // 选的那个卸了按没选过算。
-  expect(pick_avatar({ kind: "view", id: "gone/avatar" }, filled)).toBe("a.x/avatar");
-  // 没人填，怎么选都是图标。
-  expect(pick_avatar({ kind: "unset" }, [])).toBe(null);
-  expect(pick_avatar({ kind: "view", id: "b.y/avatar" }, [])).toBe(null);
+test("行首头像默认显示小人，选不要头像时画图标", () => {
+  expect(show_buddy_avatar({ kind: "unset" })).toBe(true);
+  expect(show_buddy_avatar({ kind: "view", id: "smelt.buddies/avatar" })).toBe(true);
+  expect(show_buddy_avatar({ kind: "icon" })).toBe(false);
 });
 
 test("最近动静只看守护", () => {

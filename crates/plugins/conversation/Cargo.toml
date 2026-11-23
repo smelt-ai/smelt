@@ -19,7 +19,7 @@ gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46
 smol = "2"
 uuid = { version = "1", features = ["v4"] }
 # ACP 对话粘贴图片：协议要 base64 后的字节（见 PromptImage）。
-base64 = "0.23"
+base64.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 界面文案（locales/ui.yml，见 docs/i18n.md）。

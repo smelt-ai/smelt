@@ -1,0 +1,6 @@
+{
+  "id": "smelt.layouts",
+  "name": "Layouts",
+  "version": "1.0.0",
+  "entry": "nsh.tsx"
+}

@@ -15,13 +15,12 @@ workspace = true
 smelt-client-store = { path = "../smelt-client-store" }
 smelt-sys = { path = "../smelt-sys" }
 anyhow = "1"
-dirs = "5"
+dirs.workspace = true
 reqwest = { version = "0.13", features = ["json"] }
 # 更新器按发版号比新旧（Windows 认编进程序的发版号）。
 semver = "1"
-sha2 = "0.11"
+sha2.workspace = true
 hex = "0.4"
-tokio = { version = "1", features = ["full"] }
 url = "2"
 smelt-event-protocol = { path = "../smelt-event-protocol" }
 smelt-model = { path = "../smelt-model" }
@@ -29,7 +28,6 @@ smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-paths = { path = "../smelt-paths" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-smol = "2"
 uuid = { version = "1", features = ["v4"] }
 
 # 「移到应用程序」和 macOS 更新器的 flock / dlopen 只在 macOS 上编（设计文档 D4）。
