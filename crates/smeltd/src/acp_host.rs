@@ -240,6 +240,22 @@ pub(crate) struct AcpSession {
     pub(crate) disallowed_tools: SessionLock<Vec<String>>,
     /// 最近结束的外部投递各自的结果，`conversation.turn_result` 按投递 id 取。只在内存里。
     pub(crate) delivery_results: SessionLock<VecDeque<DeliveryResult>>,
+    /// 非 Pi ACP 的来信收件箱（Pi 走 `background_tasks::peers`）。同步投影到 `reduced.peer_inbox`。
+    pub(crate) non_pi_peer_inbox: SessionLock<Vec<smelt_core::acp_session::PeerMessageView>>,
+    /// 当前正在处理的跨对话 `Task` 来信：回合结束若未显式 `session_send` 回报，自动兜底回传。
+    pub(crate) active_peer_task: SessionLock<Option<ActivePeerTask>>,
+    /// 这条非 Pi ACP 会话是否已经连上内置的 `smelt-peers` MCP Server（决定引导语用工具还是 CLI）。
+    pub(crate) peer_mcp_connected: Arc<AtomicBool>,
+}
+
+/// 正在处理的跨对话 `Task` 来信上下文。
+#[derive(Clone, Debug)]
+pub(crate) struct ActivePeerTask {
+    pub(crate) message_id: String,
+    pub(crate) source_session_id: String,
+    pub(crate) source_title: String,
+    pub(crate) hops: u32,
+    pub(crate) replied: bool,
 }
 
 /// 每段对话留几条投递结果。取结果的一方在回合结束后马上就取，留多了没用。
@@ -253,13 +269,16 @@ pub(crate) struct DeliveryResult {
     pub(crate) text: String,
 }
 
-/// 这一轮最后一段助手正文（不算思考）。从最后一条用户消息往后找。
+fn is_turn_start_entry(entry: &smelt_core::acp_chat::AcpEntry) -> bool {
+    use smelt_core::acp_chat::{AcpEntry, TaskNoteKind};
+    matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
+        || matches!(entry, AcpEntry::TaskNote(note) if note.kind == TaskNoteKind::PeerMessage)
+}
+
+/// 这一轮最后一段助手正文（不算思考）。从最后一条用户或跨对话来信往后找。
 pub(crate) fn last_turn_reply(entries: &[smelt_core::acp_chat::AcpEntry]) -> String {
     use smelt_core::acp_chat::AcpEntry;
-    let turn_start = entries
-        .iter()
-        .rposition(|entry| matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }))
-        .unwrap_or(0);
+    let turn_start = entries.iter().rposition(is_turn_start_entry).unwrap_or(0);
     entries[turn_start..]
         .iter()
         .rev()
@@ -302,9 +321,13 @@ pub(crate) fn remember_delivery_result(
     });
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum AcpPromptOrigin {
     User,
+    Peer {
+        delivery: smelt_core::acp_session::PeerDelivery,
+        source_agent_label: Option<String>,
+    },
 }
 
 /// 原生排队「立即发送」的单槽。clear_queue 还回这一条才发；没还回来就不能再发。
@@ -329,15 +352,17 @@ pub(crate) struct QueuedAcpPrompt {
 }
 
 impl QueuedAcpPrompt {
-    /// 用户自己在输入框里发的、气泡还没写出来的那种才能撤回。外部投递归守护进程；
+    /// 用户自己在输入框里发的、气泡还没写出来的那种才能撤回。外部投递和跨对话来信归守护进程；
     /// 已回显的那条撤回要连气泡一起撤，那是 Pi 拒收的路径，不走这里。
     fn withdrawable(&self) -> bool {
-        self.delivery_id.is_none() && !self.echoed
+        self.delivery_id.is_none()
+            && !self.echoed
+            && matches!(self.origin, AcpPromptOrigin::User)
     }
 }
 
 /// 改 daemon 排队并重写快照里的展示投影。两份必须一起变，所以队列只从这里改。
-/// 已回显的那条气泡就在消息流里，排队条不再列一遍。
+/// 已回显的那条气泡就在消息流里，排队条不再列一遍；跨对话来信由 `peer_inbox` 单独展示。
 pub(crate) fn edit_pending_prompts<R>(
     sess: &AcpSession,
     edit: impl FnOnce(&mut VecDeque<QueuedAcpPrompt>) -> R,
@@ -346,7 +371,7 @@ pub(crate) fn edit_pending_prompts<R>(
     let result = edit(&mut queue);
     sess.reduced.lock().pending_prompts = queue
         .iter()
-        .filter(|prompt| !prompt.echoed)
+        .filter(|prompt| !prompt.echoed && matches!(prompt.origin, AcpPromptOrigin::User))
         .map(|prompt| smelt_core::acp_session::PendingPromptView {
             id: prompt.id,
             text: prompt.text.clone(),
@@ -724,7 +749,7 @@ fn last_reply_line(entries: &[smelt_core::acp_chat::AcpEntry]) -> Option<String>
     use smelt_core::acp_chat::AcpEntry;
     let turn_start = entries
         .iter()
-        .rposition(|entry| matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }))
+        .rposition(is_turn_start_entry)
         .map_or(0, |index| index + 1);
     entries[turn_start..]
         .iter()
@@ -2001,6 +2026,30 @@ pub(crate) fn start_acp_event_drain(
                                 subscribers.clone(),
                             );
                         }
+                        // 非 Pi 对话执行跨对话 `Task` 结束时先取出本轮任务上下文，再放闸派发下一条排队消息，
+                        // 避免 `flush_pending_acp_prompt_locked` 把下一条任务写进来覆盖掉刚刚结束的那一条。
+                        let auto_complete = if turn_ended && !session_uses_pi_admission(sess) {
+                            let reduced = sess.reduced.lock();
+                            let done = matches!(
+                                reduced.phase,
+                                smelt_core::daemon_state::DaemonPhase::Idle
+                                    | smelt_core::daemon_state::DaemonPhase::Succeeded
+                                    | smelt_core::daemon_state::DaemonPhase::Failed
+                            ) && !reduced.background_work_running();
+                            if done {
+                                sess.active_peer_task.lock().take().map(|task| {
+                                    (
+                                        task,
+                                        last_turn_reply(reduced.entries()),
+                                        reduced.turn_outcome,
+                                    )
+                                })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
                         // 其它 agent 在回合结束时放闸。Pi 还要等它自己声明空闲。
                         settle_acp_turn_locked(
                             sess,
@@ -2009,6 +2058,20 @@ pub(crate) fn start_acp_event_drain(
                             provider_idle,
                             &subscribers,
                         );
+                        if let Some((task, reply_text, outcome)) = auto_complete
+                            && !task.replied
+                            && task.hops > 0
+                        {
+                            crate::peer_messages::auto_complete_task(
+                                &session_id,
+                                sess,
+                                task,
+                                reply_text,
+                                outcome,
+                                &acp_sessions,
+                                &subscribers,
+                            );
+                        }
                         // 闸门本来就开着时 settle 不进 flush 分支。还原刚落地的立即发送仍要发出去。
                         try_flush_immediate_delivery(sess, &subscribers);
                         // 交给这个 runtime 的 peer 消息靠它的 `peer_inbox` 结算。
@@ -2207,6 +2270,24 @@ pub(crate) fn acp_relaunch(
             }
             restore_policy
         };
+        // 跨代重启时清理已不在排队队列里的旧 Pending 来信，避免 Outbox 重投被旧代记录吞掉。
+        let pending_ids: std::collections::HashSet<String> = sess
+            .pending_prompts
+            .lock()
+            .iter()
+            .filter_map(|prompt| prompt.delivery_id.clone())
+            .collect();
+        let inbox_snapshot = {
+            let mut inbox = sess.non_pi_peer_inbox.lock();
+            inbox.retain(|item| {
+                item.status != smelt_core::acp_session::PeerMessageStatus::Pending
+                    || pending_ids.contains(&item.id)
+            });
+            inbox.clone()
+        };
+        if !inbox_snapshot.is_empty() || !sess.reduced.lock().peer_inbox.is_empty() {
+            sync_non_pi_peer_inbox(sess, &inbox_snapshot);
+        }
         (generation, restore_policy)
     };
     crate::acp_supervise::remember_relaunch_config(sess, relaunch_config);
@@ -2224,9 +2305,15 @@ pub(crate) fn acp_relaunch(
     let agent_token = sess.state.lock().agent_token.clone();
     sess.state.lock().launch = Some(launch.command.clone());
 
-    // 来源会话 id 绑在这次启动上。Pi 的 session_* 请求由主进程直接回答，
-    // 请求体里的字段不能改这个来源。
-    let peer_handler = smelt_core::pi_rpc::is_smelt_pi_launch(&launch).then(|| {
+    // 来源会话 id 绑在这次启动上。所有非自动化 ACP 会话都能跨对话协作，
+    // 请求体里的来源字段一律不算。
+    let is_automation = crate::peer_messages::is_automation(id)
+        || matches!(
+            *sess.conversation_binding.lock(),
+            Some(smelt_core::conversation::ConversationBinding::Automation { .. })
+        );
+    sess.peer_mcp_connected.store(false, Ordering::SeqCst);
+    let peer_handler = (!is_automation).then(|| {
         crate::peer_messages::bind_peer_handler(
             id.to_string(),
             Arc::downgrade(slot),
@@ -2248,6 +2335,8 @@ pub(crate) fn acp_relaunch(
         fork_session_id: fork_id.map(agent_client_protocol::v1::schema::SessionId::new),
         fork_cut,
         peer_handler,
+        peer_mcp_command: crate::daemon_executable_path().ok(),
+        peer_mcp_connected: Some(Arc::clone(&sess.peer_mcp_connected)),
         disallowed_tools,
     };
     let handle =
@@ -2384,6 +2473,9 @@ pub(crate) fn make_acp_session(
         reconnect: SessionLock::new(Default::default()),
         disallowed_tools: SessionLock::new(Vec::new()),
         delivery_results: SessionLock::new(VecDeque::new()),
+        non_pi_peer_inbox: SessionLock::new(Vec::new()),
+        active_peer_task: SessionLock::new(None),
+        peer_mcp_connected: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -2491,6 +2583,7 @@ pub(crate) fn park_unaccepted_after_cancel(sess: &AcpSession) {
     };
     match prompt.origin {
         AcpPromptOrigin::User => restore_prompt_to_composer(sess, prompt),
+        AcpPromptOrigin::Peer { .. } => {}
     }
 }
 
@@ -2529,6 +2622,25 @@ pub(crate) fn send_acp_prompt_reserved(
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
         *sess.unaccepted_prompt.lock() = None;
         return Err("ACP session is not running");
+    };
+    let text = match &origin {
+        AcpPromptOrigin::User => text,
+        AcpPromptOrigin::Peer {
+            delivery,
+            source_agent_label,
+        } => {
+            // 在真正派发这一刻再检查 MCP 握手状态，避免入队时 MCP 尚未连上导致误写 CLI 引导。
+            let reply_channel = if sess.peer_mcp_connected.load(Ordering::SeqCst) {
+                smelt_core::acp_chat::PeerReplyChannel::Tool
+            } else {
+                smelt_core::acp_chat::PeerReplyChannel::Cli
+            };
+            smelt_core::acp_chat::format_peer_message_text(
+                delivery,
+                source_agent_label.as_deref(),
+                reply_channel,
+            )
+        }
     };
     let shown_images = images.clone();
     let shown_text = text.clone();
@@ -2569,7 +2681,7 @@ fn remember_outgoing_prompt(
             text: text.clone(),
             images: images.clone(),
             delivery_id: delivery_id.clone(),
-            origin,
+            origin: origin.clone(),
             echoed: true,
         });
     }
@@ -2577,13 +2689,95 @@ fn remember_outgoing_prompt(
         // 重发：气泡上一次就写过了，这一轮只是把它真正送进 provider。
         return false;
     }
-    smelt_core::acp_session::note_prompt_sent_with_delivery(
-        &mut sess.reduced.lock(),
-        text,
-        images,
-        delivery_id,
-    );
+    match origin {
+        AcpPromptOrigin::User => {
+            smelt_core::acp_session::note_prompt_sent_with_delivery(
+                &mut sess.reduced.lock(),
+                text,
+                images,
+                delivery_id,
+            );
+        }
+        AcpPromptOrigin::Peer { delivery, .. } => {
+            smelt_core::acp_session::note_peer_message_sent(&mut sess.reduced.lock(), &delivery);
+            mark_non_pi_peer_delivered(sess, &delivery);
+        }
+    }
     true
+}
+
+/// 非 Pi 收件箱保留最近这么多条已送达记录，与 `background_tasks::peers::KEEP_DELIVERED` 一致。
+const NON_PI_KEEP_DELIVERED: usize = 64;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn sync_non_pi_peer_inbox(sess: &AcpSession, views: &[smelt_core::acp_session::PeerMessageView]) {
+    sess.reduced.lock().peer_inbox = views.to_vec();
+}
+
+fn mark_non_pi_peer_delivered(
+    sess: &AcpSession,
+    delivery: &smelt_core::acp_session::PeerDelivery,
+) {
+    use smelt_core::acp_session::{PeerMessageKind, PeerMessageStatus};
+    let snapshot = {
+        let mut inbox = sess.non_pi_peer_inbox.lock();
+        if let Some(entry) = inbox.iter_mut().find(|item| item.id == delivery.id) {
+            entry.status = PeerMessageStatus::Delivered;
+            entry.delivered_at_ms = Some(now_ms());
+        } else {
+            let now = now_ms();
+            inbox.push(smelt_core::acp_session::PeerMessageView {
+                id: delivery.id.clone(),
+                source_session_id: delivery.source_session_id.clone(),
+                source_title: delivery.source_title.clone(),
+                kind: delivery.kind,
+                status: PeerMessageStatus::Delivered,
+                queued_at_ms: now,
+                delivered_at_ms: Some(now),
+            });
+        }
+        let delivered = inbox
+            .iter()
+            .filter(|item| item.status == PeerMessageStatus::Delivered)
+            .count();
+        let mut excess = delivered.saturating_sub(NON_PI_KEEP_DELIVERED);
+        inbox.retain(|item| {
+            if excess > 0 && item.status == PeerMessageStatus::Delivered {
+                excess -= 1;
+                return false;
+            }
+            true
+        });
+        inbox.clone()
+    };
+    sync_non_pi_peer_inbox(sess, &snapshot);
+    if delivery.kind == PeerMessageKind::Task {
+        *sess.active_peer_task.lock() = Some(ActivePeerTask {
+            message_id: delivery.id.clone(),
+            source_session_id: delivery.source_session_id.clone(),
+            source_title: delivery.source_title.clone(),
+            hops: delivery.hops,
+            replied: false,
+        });
+    }
+    let session_id = sess.state.lock().id.clone();
+    let generation = sess.connection_generation.load(Ordering::SeqCst);
+    if let Some(server) = SERVER.get()
+        && crate::peer_messages::awaiting_inbox(&session_id)
+    {
+        crate::peer_messages::observe_inbox(
+            &session_id,
+            generation,
+            &snapshot,
+            &server.acp_sessions,
+            &server.event_hub,
+        );
+    }
 }
 
 /// Pi 的会话命令在进入 Prompt / Steer / FollowUp 之前处理。
@@ -2961,15 +3155,98 @@ fn send_acp_stop_subagent(sess: &AcpSession, id: String) -> Result<(), &'static 
     )
 }
 
-/// 把门卫放行的消息直接交给这个对话的驱动。
+/// 把门卫放行的消息交给这个对话：Pi 走会话宿主的 `smelt.peer_message`，非 Pi ACP 走
+/// 守护侧回合闸门和排队（并在派发成功时直接结算 `peer_inbox`）。
 pub(crate) fn deliver_peer_message(
     sess: &AcpSession,
     message: smelt_core::acp_session::PeerDelivery,
+    source_agent_label: Option<&str>,
+    subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
-    send_acp_command(
+    if session_uses_pi_admission(sess) {
+        return send_acp_command(
+            sess,
+            smelt_core::acp_conn::ConversationCommand::DeliverPeerMessage(message),
+        );
+    }
+    let _turn_completion = sess.turn_completion.lock();
+    if sess.handle.lock().is_none() {
+        return Err("ACP session is not running");
+    }
+    // 同一个 id 只收一次：已送达，或仍在当前排队队列里，才视为重复；
+    // 旧代崩溃残留的 Pending（已不在排队队列里）允许重投。
+    let queued_in_pending = sess
+        .pending_prompts
+        .lock()
+        .iter()
+        .any(|prompt| prompt.delivery_id.as_deref() == Some(message.id.as_str()));
+    let inbox_snapshot = {
+        let mut inbox = sess.non_pi_peer_inbox.lock();
+        if let Some(existing) = inbox.iter_mut().find(|item| item.id == message.id) {
+            if existing.status == smelt_core::acp_session::PeerMessageStatus::Delivered
+                || queued_in_pending
+            {
+                return Ok(());
+            }
+            existing.queued_at_ms = now_ms();
+            existing.delivered_at_ms = None;
+        } else {
+            inbox.push(smelt_core::acp_session::PeerMessageView {
+                id: message.id.clone(),
+                source_session_id: message.source_session_id.clone(),
+                source_title: message.source_title.clone(),
+                kind: message.kind,
+                status: smelt_core::acp_session::PeerMessageStatus::Pending,
+                queued_at_ms: now_ms(),
+                delivered_at_ms: None,
+            });
+        }
+        inbox.clone()
+    };
+    sync_non_pi_peer_inbox(sess, &inbox_snapshot);
+    let delivery_id = Some(message.id.clone());
+    let origin = AcpPromptOrigin::Peer {
+        delivery: message.clone(),
+        source_agent_label: source_agent_label.map(ToOwned::to_owned),
+    };
+    let starting = sess.startup_hold.load(Ordering::SeqCst);
+    let busy = !matches!(
+        sess.reduced.lock().phase,
+        smelt_core::daemon_state::DaemonPhase::Idle
+    );
+    if starting || busy || sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
+        let id = next_pending_prompt_id(sess);
+        edit_pending_prompts(sess, |queue| {
+            queue.push_back(QueuedAcpPrompt {
+                id,
+                text: String::new(),
+                images: Vec::new(),
+                delivery_id,
+                origin,
+                echoed: false,
+            })
+        });
+        push_acp_snapshot_since(sess, false, None);
+        return Ok(());
+    }
+    let result = send_acp_prompt_reserved(
         sess,
-        smelt_core::acp_conn::ConversationCommand::DeliverPeerMessage(message),
-    )
+        String::new(),
+        Vec::new(),
+        delivery_id,
+        origin,
+        false,
+        subscribers,
+    );
+    if result.is_err() {
+        let snapshot = {
+            let mut inbox = sess.non_pi_peer_inbox.lock();
+            inbox.retain(|item| item.id != message.id);
+            inbox.clone()
+        };
+        sync_non_pi_peer_inbox(sess, &snapshot);
+    }
+    result
 }
 
 fn send_acp_command(
@@ -3120,7 +3397,7 @@ pub(crate) fn flush_pending_acp_prompt_locked(sess: &AcpSession, subscribers: &E
         prompt.text.clone(),
         prompt.images.clone(),
         prompt.delivery_id.clone(),
-        prompt.origin,
+        prompt.origin.clone(),
         prompt.echoed,
         subscribers,
     )

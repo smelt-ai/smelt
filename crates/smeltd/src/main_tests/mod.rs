@@ -89,6 +89,9 @@ fn make_acp_session_value(
         reconnect: SessionLock::new(Default::default()),
         disallowed_tools: SessionLock::new(Vec::new()),
         delivery_results: SessionLock::new(VecDeque::new()),
+        non_pi_peer_inbox: SessionLock::new(Vec::new()),
+        active_peer_task: SessionLock::new(None),
+        peer_mcp_connected: Arc::new(AtomicBool::new(false)),
     }
 }
 

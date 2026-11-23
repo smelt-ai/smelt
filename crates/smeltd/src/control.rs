@@ -390,6 +390,43 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        local_peer @ (ControlMethod::PeerSessionList
+        | ControlMethod::PeerSessionRead
+        | ControlMethod::PeerSessionSend
+        | ControlMethod::PeerSessionSpawn) => {
+            let reply = if !matches!(principal, crate::Principal::Local) {
+                Err(ControlError::new(
+                    ControlErrorCode::PermissionDenied,
+                    "peer.session_* is only available to local agent session processes",
+                ))
+            } else if let Some(session_id) = peer_pid
+                .and_then(|pid| crate::memory_peer_auth::caller_session_id(acp_sessions, pid))
+            {
+                let op = match local_peer {
+                    ControlMethod::PeerSessionList => "session_list",
+                    ControlMethod::PeerSessionRead => "session_read",
+                    ControlMethod::PeerSessionSend => "session_send",
+                    ControlMethod::PeerSessionSpawn => "session_spawn",
+                    _ => unreachable!(),
+                };
+                crate::peer_messages::dispatch_local_peer_op(
+                    op,
+                    &session_id,
+                    &params,
+                    acp_sessions,
+                    event_hub,
+                )
+            } else {
+                Err(ControlError::new(
+                    ControlErrorCode::PermissionDenied,
+                    "smelt peer must be invoked from inside an active Smelt agent conversation",
+                ))
+            };
+            match reply {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         peer @ (ControlMethod::NodePair
         | ControlMethod::NodeUnpair
         | ControlMethod::PeerList

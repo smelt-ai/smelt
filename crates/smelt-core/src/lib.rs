@@ -65,6 +65,7 @@ pub use smelt_sys::process_wait;
 pub mod project_catalog;
 pub mod project_files;
 pub use smelt_model::provider_api;
+pub use smelt_model::runtime_path;
 pub mod provider_quota;
 pub mod quota_credentials;
 mod quota_http;

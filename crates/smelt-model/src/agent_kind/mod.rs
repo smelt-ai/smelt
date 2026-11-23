@@ -704,6 +704,176 @@ impl ConversationAgentKind {
                     .is_some_and(|terminal| command_contains_identifier(&c, terminal.cli_program()))
         })
     }
+
+    /// 结合驱动上报的 `mode` 和启动规格，判定这台引擎会话当前的权限姿态。
+    #[must_use]
+    pub fn approval_posture(
+        self,
+        mode: Option<&str>,
+        launch: Option<&ConversationLaunchSpec>,
+    ) -> ApprovalPosture {
+        let mode = mode.map(str::trim).filter(|m| !m.is_empty());
+
+        // 1. CLI 全权限标志（Antigravity / Cursor / Copilot / Grok / Kiro / Oh My Pi）。
+        if let Some(launch) = launch {
+            match self.task_cli() {
+                TaskCliPatch::Append {
+                    full_access,
+                    full_access_aliases,
+                    ..
+                } => {
+                    let mut flags = Vec::with_capacity(1 + full_access_aliases.len());
+                    flags.push(full_access);
+                    flags.extend_from_slice(full_access_aliases);
+                    if command_has_any_flag(&launch.command, &flags) {
+                        return ApprovalPosture::FullAccess;
+                    }
+                }
+                TaskCliPatch::AfterMarker { full_access, .. } => {
+                    if command_has_any_flag(&launch.command, &[full_access]) {
+                        return ApprovalPosture::FullAccess;
+                    }
+                }
+                TaskCliPatch::None => {}
+            }
+            if self == Self::OpenCode
+                && let Some(allows) = opencode_env_allows_all(launch)
+            {
+                return if allows {
+                    ApprovalPosture::FullAccess
+                } else {
+                    ApprovalPosture::RequiresApproval
+                };
+            }
+        }
+
+        // 2. ACP session config `mode`（Pi / Claude / Codex）。
+        if let Some(full_mode) = self.task_params().full_access_mode {
+            return match mode {
+                Some(m) if m == full_mode => ApprovalPosture::FullAccess,
+                Some(_) => ApprovalPosture::RequiresApproval,
+                None => ApprovalPosture::Unknown,
+            };
+        }
+
+        // 3. 通用自定义 ACP 无法保证其内部权限策略，除非显式报了已知全权限 mode。
+        if self == Self::Custom {
+            return match mode {
+                Some("bypassPermissions" | "agent-full-access" | "full-access") => {
+                    ApprovalPosture::FullAccess
+                }
+                _ => ApprovalPosture::Unknown,
+            };
+        }
+
+        // 4. 其余靠 CLI flag 切全权限的内置引擎：未带全权限 flag 时走标准逐次审批。
+        if !matches!(self.task_cli(), TaskCliPatch::None) {
+            return ApprovalPosture::RequiresApproval;
+        }
+
+        ApprovalPosture::Unknown
+    }
+
+    /// 跨引擎 `session_spawn` 时，若发起方是逐次审批，剥离目标启动规格里的免审批开关。
+    /// 返回 `true` 表示目标能保证在逐次审批下运行；返回 `false` 表示无法保证（如通用 Custom）。
+    #[must_use]
+    pub fn strip_full_access(self, launch: &mut ConversationLaunchSpec) -> bool {
+        if self == Self::Custom {
+            return false;
+        }
+        match self.task_cli() {
+            TaskCliPatch::Append {
+                full_access,
+                full_access_aliases,
+                ..
+            } => {
+                let mut flags = Vec::with_capacity(1 + full_access_aliases.len());
+                flags.push(full_access);
+                flags.extend_from_slice(full_access_aliases);
+                launch.command = strip_command_flags(&launch.command, &flags);
+            }
+            TaskCliPatch::AfterMarker { full_access, .. } => {
+                launch.command = strip_command_flags(&launch.command, &[full_access]);
+            }
+            TaskCliPatch::None => {}
+        }
+        if self == Self::OpenCode {
+            let mut config = launch
+                .env
+                .get("OPENCODE_CONFIG_CONTENT")
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(obj) = config.as_object_mut() {
+                obj.insert("permission".into(), serde_json::Value::String("ask".into()));
+            }
+            launch
+                .env
+                .insert("OPENCODE_CONFIG_CONTENT".into(), config.to_string());
+        }
+        true
+    }
+}
+
+/// 一次会话的权限姿态：供跨智能体消息门卫判断是否允许低权限会话向高权限会话发消息。
+///
+/// 各家引擎表达免审批的方式不同（`mode` 配置项、启动参数 flag、环境变量，通用自定义 ACP
+/// 甚至无法判断），统一在这里归一化为三态，不在业务层散落 `match`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalPosture {
+    /// 明确处于逐次审批模式。
+    RequiresApproval,
+    /// 明确处于全权限免审批模式。
+    FullAccess,
+    /// 无法确认（如 dormant 未拉起，或通用自定义 ACP 未上报 mode）。
+    Unknown,
+}
+
+impl ApprovalPosture {
+    /// 目标会话是否允许接收来自 `source` 姿态的跨对话消息。
+    ///
+    /// 核心原则：不静默提权。只有发起方本身已是 `FullAccess`，才允许发给 `FullAccess` 或
+    /// 无法确认权限（`Unknown`）的目标；其它发起方只能发给明确处于 `RequiresApproval` 的目标。
+    #[must_use]
+    pub fn allows_message_to(self, target: Self) -> bool {
+        match self {
+            Self::FullAccess => true,
+            Self::RequiresApproval | Self::Unknown => matches!(target, Self::RequiresApproval),
+        }
+    }
+}
+
+/// 进程级全权限 flag 的剥离辅助：按空白分词删除指定参数及其别名。
+fn strip_command_flags(command: &str, flags: &[&str]) -> String {
+    command
+        .split_whitespace()
+        .filter(|word| !flags.contains(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn command_has_any_flag(command: &str, flags: &[&str]) -> bool {
+    command.split_whitespace().any(|word| flags.contains(&word))
+}
+
+fn opencode_env_allows_all(launch: &ConversationLaunchSpec) -> Option<bool> {
+    let raw = launch.env.get("OPENCODE_CONFIG_CONTENT")?;
+    let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let permission = parsed.get("permission")?;
+    if permission.as_str() == Some("allow") {
+        return Some(true);
+    }
+    if permission.as_str() == Some("ask") {
+        return Some(false);
+    }
+    if let Some(obj) = permission.as_object() {
+        if obj.get("*").and_then(serde_json::Value::as_str) == Some("allow") {
+            return Some(true);
+        }
+        if obj.get("*").and_then(serde_json::Value::as_str) == Some("ask") {
+            return Some(false);
+        }
+    }
+    None
 }
 
 fn command_contains_identifier(command: &str, identifier: &str) -> bool {
@@ -2456,5 +2626,67 @@ mod env_lines_tests {
             parse_env_lines(&format_env_lines(&env)).expect("再解析"),
             env
         );
+    }
+
+    #[test]
+    fn approval_posture_covers_builtin_and_custom_engines() {
+        use crate::agent_kind::{ApprovalPosture, ConversationAgentKind, ConversationLaunchSpec};
+        assert_eq!(
+            ConversationAgentKind::Pi.approval_posture(Some("bypassPermissions"), None),
+            ApprovalPosture::FullAccess
+        );
+        assert_eq!(
+            ConversationAgentKind::Pi.approval_posture(Some("default"), None),
+            ApprovalPosture::RequiresApproval
+        );
+        assert_eq!(
+            ConversationAgentKind::Codex.approval_posture(Some("agent-full-access"), None),
+            ApprovalPosture::FullAccess
+        );
+        assert_eq!(
+            ConversationAgentKind::Codex.approval_posture(Some("read-only"), None),
+            ApprovalPosture::RequiresApproval
+        );
+        assert_eq!(
+            ConversationAgentKind::Antigravity.approval_posture(
+                Some("auto"),
+                Some(&ConversationAgentKind::Antigravity.default_launch())
+            ),
+            ApprovalPosture::FullAccess
+        );
+        let mut agy_launch = ConversationAgentKind::Antigravity.default_launch();
+        assert!(ConversationAgentKind::Antigravity.strip_full_access(&mut agy_launch));
+        assert_eq!(
+            ConversationAgentKind::Antigravity.approval_posture(Some("default"), Some(&agy_launch)),
+            ApprovalPosture::RequiresApproval
+        );
+        assert_eq!(
+            ConversationAgentKind::OpenCode.approval_posture(
+                None,
+                Some(&ConversationAgentKind::OpenCode.default_launch())
+            ),
+            ApprovalPosture::FullAccess
+        );
+        let mut oc_launch = ConversationAgentKind::OpenCode.default_launch();
+        assert!(ConversationAgentKind::OpenCode.strip_full_access(&mut oc_launch));
+        assert_eq!(
+            ConversationAgentKind::OpenCode.approval_posture(None, Some(&oc_launch)),
+            ApprovalPosture::RequiresApproval
+        );
+        assert_eq!(
+            ConversationAgentKind::Custom.approval_posture(None, None),
+            ApprovalPosture::Unknown
+        );
+        let mut custom_launch = ConversationLaunchSpec::from_command("my-custom-acp");
+        assert!(!ConversationAgentKind::Custom.strip_full_access(&mut custom_launch));
+
+        assert!(ApprovalPosture::FullAccess.allows_message_to(ApprovalPosture::FullAccess));
+        assert!(ApprovalPosture::FullAccess.allows_message_to(ApprovalPosture::Unknown));
+        assert!(
+            ApprovalPosture::RequiresApproval.allows_message_to(ApprovalPosture::RequiresApproval)
+        );
+        assert!(!ApprovalPosture::RequiresApproval.allows_message_to(ApprovalPosture::FullAccess));
+        assert!(!ApprovalPosture::RequiresApproval.allows_message_to(ApprovalPosture::Unknown));
+        assert!(!ApprovalPosture::Unknown.allows_message_to(ApprovalPosture::FullAccess));
     }
 }
