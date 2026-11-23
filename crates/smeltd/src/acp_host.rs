@@ -2165,7 +2165,6 @@ pub(crate) fn acp_relaunch(
     abandon_history: bool,
 ) {
     let sess = &slot.value;
-    sess.idle.mark_running();
     let relaunch_config;
     let (generation, restore_policy) = {
         let _turn_completion = sess.turn_completion.lock();
@@ -2254,6 +2253,8 @@ pub(crate) fn acp_relaunch(
         smelt_core::acp_conn::spawn_agent_runtime(app_launch, Some(acp_sessions.spawn_gate()));
     let event_rx = handle.event_rx.clone();
     *sess.handle.lock() = Some(handle);
+    // handle、启动闸与补做配置都就位后再结束挂起并响回收门铃，避免短暂状态空窗和空唤醒。
+    sess.idle.mark_running();
     push_acp_snapshot(sess, false); // 刚 spawn，还没有新内容，不用触发落盘
     update_acp_daemon_state(sess, subscribers);
     start_acp_event_drain(
