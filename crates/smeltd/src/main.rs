@@ -131,6 +131,7 @@ mod pi_control;
 mod presence;
 mod push;
 mod resource_usage;
+mod skills;
 mod subagent_transcript;
 use devices::Principal;
 mod project_watch;

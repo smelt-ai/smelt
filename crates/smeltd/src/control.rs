@@ -190,6 +190,13 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        skills @ (ControlMethod::SkillsScan
+        | ControlMethod::SkillsInspectImport
+        | ControlMethod::SkillsPlan
+        | ControlMethod::SkillsApply) => match super::skills::dispatch(skills, params) {
+            Ok(result) => success_value(control_version, &request_id, result),
+            Err(error) => error_value(control_version, request_id, error),
+        },
         history @ (ControlMethod::HistoryList
         | ControlMethod::HistoryDetail
         | ControlMethod::HistoryDelete) => {

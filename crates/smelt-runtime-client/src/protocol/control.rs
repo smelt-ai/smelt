@@ -216,6 +216,10 @@ define_control_methods! {
     ResourceUsage => (RESOURCE_USAGE_METHOD, "resource.usage"),
     AppCommandList => (APP_COMMAND_LIST_METHOD, "app.command.list"),
     AppCommandRun => (APP_COMMAND_RUN_METHOD, "app.command.run"),
+    SkillsScan => (SKILLS_SCAN_METHOD, "skills.scan"),
+    SkillsInspectImport => (SKILLS_INSPECT_IMPORT_METHOD, "skills.inspect_import"),
+    SkillsPlan => (SKILLS_PLAN_METHOD, "skills.plan"),
+    SkillsApply => (SKILLS_APPLY_METHOD, "skills.apply"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
