@@ -1,4 +1,4 @@
-//! 状态通道（见 docs/archive/state-channel-plan.md）：GUI 侧订阅 smeltd 广播的会话状态
+//! 状态通道（见 `docs/notification-architecture.md`）：GUI 侧订阅 smeltd 广播的会话状态
 //! 镜像。数据模型和订阅的解码状态机在 `smelt_model::daemon_state`（手机也用同一份），
 //! 这里只管阻塞的连接与读行；GUI 那边的 `Entity`/`Global` 包装留在 main crate。
 

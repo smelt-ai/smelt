@@ -7,8 +7,7 @@
 
 ## 智能体记忆（暂停）
 
-第一阶段、来源防护、开关、召回已完成；剩余待办（跨进程并发、记忆卡片管理、手机端、召回持久化与
-标定、后台提炼等）见 [`agent-memory.md`](agent-memory.md) 第 13 节。
+第一阶段、来源防护、开关、召回、记忆卡片与手机端已完成；剩余待办（跨进程并发、召回持久化与标定、后台提炼等）见 [`agent-memory.md`](agent-memory.md) 第 12 节。
 
 ---
 
@@ -48,20 +47,9 @@
 
 ---
 
-## 会话监控
-
-- ✅ 会话状态不靠轮询 `~/.claude/projects/*.jsonl`。agent hook → `smelt-notify`，以及 ACP / provider 原生协议，已经是信源；OSC 不是信源。
-- ✅ 守护相位 `DaemonPhase` 已落地（connecting / thinking / executing_tool / awaiting_approval / waiting_for_user / succeeded / failed / idle / dead）。这是守护事实，不是侧栏 UI 态。ACP 对话页读同一套相位，不再另养 `AcpPhase`。
-
-> worktree · Remix · 交互式 diff 已归入 [`product-roadmap.md`](product-roadmap.md)
-
----
-
 ## 终端渲染（边际）
 
 - 跨行攒批 `shape_line`（对齐 Zed `BatchedTextRun`）
-- 纯事件驱动：bell/title/OSC 通知改事件通道后再删 30ms 兜底轮询
 - 光标闪烁（`BlinkManager`）
-- 可选：Vi 模式、前景 minimum-contrast（连字与 `force_width` 冲突，不做）
 
 **不抄：** AgentHub 关卡片杀 shell（与 smeltd 保活哲学相反）· Seatbelt 沙箱（可选后置）

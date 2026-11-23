@@ -1,6 +1,6 @@
 # 整个 app 插件化
 
-> 状态：方向定于 2026-11-09；2026-11-20 改定「插件只有 JS 一种，Rust 只做宿主和能力」，本文据此重写。
+> 状态：方向定于 2026-11-09；2026-11-20 改定「插件只有 JS 一种，Rust 只做宿主和能力」；运行时已切到 **NSH A2**（`crates/smelt-nsh`），9 个内置插件已迁入仓库根 `plugins/`，其余 16 个 Rust 插件仍在 `crates/plugins/` 逐步迁移。
 >
 > 本文先写终态，再写从现在走到终态的顺序。每块拆到时，它的接口细节再写回本文。
 
@@ -24,7 +24,7 @@
    - 一个功能的状态只存在它自己那里：插件的内存和插件自己的库。
    - 运行时的数据以 smeltd 为权威，客户端只留推送来的只读缓存。
    - 几个功能都要的派生事实（会话状态这类），由能力算好给，插件不各自再算一遍。
-4. **等待一律事件驱动。** 宿主到插件的通知用事件，不让插件轮询。gpui-shell 的宿主不能回调脚本，所以事件做成插件去 await 的异步函数。
+4. **等待一律事件驱动。** 宿主到插件的通知经 NSH 的响应式 `state()` 与离散事件监听（`onEvent` / `onCommand`）推送，不让插件轮询。
 5. **搬走，不加层。** 拆一个 Rust 插件，就是把它整个分成能力和 JS 插件两部分，同一个提交删掉 Rust 版。不留两份并行的实现，不在中间加适配层。
 6. **接口只开通用的。**
    - 加接口前，先看已有机制能不能统一。一个新机制和已有的平行，就是走偏的信号。
@@ -52,7 +52,7 @@
 | 交互机制：滚动锚点、拖动、重排动画、弹层、菜单底层、输入框、焦点 | 给别的插件的约定：命令、菜单 id、插槽 |
 
 **界面用细粒度的元素拼。**
-- JS 视图用 gpui-shell 的元素（div、flex、文字、图标）和 `smelt-ui` 的零件拼。
+- JS/TSX 视图用 `"nsh"`、`"nsh/base"` 的元素组件与 `"smelt/sdk"` 拼装。
 - Rust 不做「一行会话」「一张自动化卡片」这种整块业务组件：做了，那块里面的东西用户又改不了。
 - Rust 组件只做 JS 拼不出、或拼出来太慢的，外观能开成参数的都开成参数。
 
@@ -71,7 +71,7 @@
 | 运行时连接 | 本机 smeltd 的启动、升级、重启；远程机器的配对、连接、中继、升级；按插件登记的话题订阅、转发运行时推送；`call` 调任意控制方法；会话状态和工作区目录的镜像（见「运行时数据只是话题」的例外） |
 | 系统服务 | 系统通知和权限、菜单栏图标、Dock 角标、选路径（远程机器用宿主画的目录浏览）、用编辑器或文件管理器打开、剪贴板、对话框 |
 | 应用生命周期 | 自动更新、挪到「应用程序」、退出前检查有没有活在跑、应用日志 |
-| 宿主机制自己的页 | 外观、快捷键、插件管理、远程机器（连出去的那一半）、关于、更新页。背后是宿主自己的机制（录快捷键、导入卸载插件、更新的状态流转），拆成插件就要给每页开一组只有它一个调用方的接口（原则 6）。宿主以来源 `smelt` 登记进同一张视图表 |
+| 宿主机制自己的页 | 外观、快捷键、插件管理（`crates/smelt/src/settings/`）。背后是宿主自己的机制（录快捷键、导入卸载插件），拆成插件就要给每页开一组只有它一个调用方的接口（原则 6）。宿主以来源 `smelt` 登记进同一张视图表 |
 
 最终的 `Workspace` 只剩窗口、`DockArea`、布局、可见性登记和退出、更新这几件事。
 
@@ -86,15 +86,15 @@
 
 | 能力 | 给插件的东西 | 现在在哪 |
 | --- | --- | --- |
-| 会话数据 | 工作区目录、会话状态，带上几个功能都要的派生事实（名字、状态、哪家 CLI、是不是自动化跑的、工作目录、摆在侧栏哪儿） | 宿主的镜像 + `smelt-model` + `smelt-plugin-api` 的 `facts`；JS 经 `conversation_facts` |
-| 路径 | 按运行时那台机器的系统切路径（`path_clean`、`path_join` 这些）、项目显示名 | `smelt-model` 的 `runtime_path`；JS 经 `path_*`、`project_labels` |
-| 插件的库 | 自己的 SQLite：查、写、事务、按版本迁移 | `smelt-client-store` 的 `PluginStore`；JS 经 `store_*` |
-| 终端 | 每格终端一个视图实例（`create_view` / `SmeltViewInstance`），字节流、画面、终端菜单的底层 | Rust 插件 `crates/plugins/terminal` |
+| 会话数据 | 工作区目录、会话状态，带上几个功能都要的派生事实（名字、状态、哪家 CLI、是不是自动化跑的、工作目录、摆在侧栏哪儿） | 宿主的镜像 + `smelt-model` + `smelt-plugin-api` 的 `facts`；JS 经 `"smelt/sdk"` |
+| 路径 | 按运行时那台机器的系统切路径（`pathClean`、`pathJoin` 这些）、项目显示名 | `smelt-model` 的 `runtime_path`；JS 经 `"smelt/sdk"` 的 `path*`、`projectLabels` |
+| 插件的库 | 自己的 SQLite：查、写、事务、按版本迁移 | `smelt-client-store` 的 `PluginStore`；JS 经 `"smelt/sdk"` 的 `store` |
+| 终端 | 每格终端一个视图实例（`<ViewInstance>` / `smelt.view`），字节流、画面、终端菜单的底层 | Rust 插件 `crates/plugins/terminal` |
 | 对话 | 对话流、消息里的 markdown 和 diff、输入框、ACP 连接和会话生命周期 | Rust 插件 `crates/plugins/conversation`；拆到哪一层另定（见「待定」） |
-| 组件库 | `smelt-ui` 的 JS 组件：按钮、菜单、弹层、对话框、下拉、列表行底座、滚动区域、吸顶区段、拖动、悬停提示、键帽、设置页骨架、列表动画（开合、重排、落进来、铺底一闪、开始跑时亮一下） | `crates/smelt-ui` + `smelt-plugin-api/src/js/ui` |
+| 组件库与原生件 | NSH 基础件（`"nsh"`、`"nsh/base"`）+ `smelt/host` 矢量图标 + 原生能力件（`smelt.view`、`smelt.buddy`、`smelt.window-bar`、`smelt.window-drag`、`smelt.backdrop-region`） | `crates/smelt-nsh` + `crates/smelt-ui` |
 | Git | 读写仓库 | `crates/smelt-git`，还没映射给 JS |
 | 远程桌面 | 画面组件 | `smelt-runtime-client` 的 `DesktopProxy` |
-| 小人 | 会动的 3D 小人：零件、动作、合成、出帧节拍；演哪一出由插件给 | `crates/smelt-buddy`；JS 经 `SmeltBuddy` |
+| 小人 | 会动的 3D 小人：零件、动作、合成、出帧节拍；演哪一出由插件给 | `crates/smelt-buddy`；JS 经 `smelt.buddy`（`SmeltNativeBuddy`） |
 | 资源量测 | 进程 CPU、内存 | Rust 插件 `crates/plugins/resources` |
 | 更新 | 替换签名过的 App 包（只给随 App 带的更新插件） | `crates/plugins/updater` |
 
@@ -102,13 +102,13 @@
 
 ## 终态：插件接口
 
-插件接口就是 JS 的宿主模块 `smelt-plugin-api`，加上组件模块 `smelt-ui`。Rust 那份 `smelt-plugin-api` 是能力 crate 登记东西用的，也是 JS 映射的来源。
+插件在 NSH A2 运行时中导入 `"nsh"`、`"nsh/base"`、`"smelt/sdk"`、`"smelt/slots"`、`"smelt/host"`。Rust 侧的 `crates/smelt-plugin-api` 是能力 crate 登记用的接口，NSH 宿主桥接在 `crates/smelt-nsh/src/`（`host.rs`、`module.rs`、`plugins/sdk.tsx`）。
 
 ### 读、变化、动作分开走
 
-- **读**：同步函数，只读内存。
-- **变化**：事件，用 `await next_event()` 取。不带数据，收到后再去读。
-- **动作**：一律是命令，处理函数交回结果。
+- **读与响应式状态**：纯同步模型函数走 `"smelt/host"`；宿主共享状态通过 `"smelt/sdk"` 的响应式 `state()` 信号读取，组件依赖的字段变化时自动重算。
+- **离散变化**：通过 `onEvent` / `onCommand` 监听宿主事件与命令派发，不轮询。
+- **动作**：一律是命令或宿主桥接调用，处理函数交回结果。
   - 主窗口关着时，用不到窗口的命令照样执行；本来就要把人带到主窗口的命令先开一扇窗。
   - 谁调用谁处理失败：插件调的，插件自己提示；快捷键、菜单、命令面板执行的，由宿主统一发错误通知。
 
@@ -116,10 +116,10 @@
 
 | 类别 | 内容 |
 | --- | --- |
-| 读 | `machines`（只有 key、名字、不可用的原因）、`machine_online`、`session_presence`（会话进程还在不在）、`session_states`、`workspace_directory`、`path_style`、`window_active`、`overlay_open`、`notification_permission`、`view_shown`、`view_laid_out`、`active_context`、各注册表 |
-| 事件 | `machines_changed`、`sessions_changed`、运行时话题（宿主只转发，不解读）、`window_activated`、`overlay_changed`、`notification_permission_changed`、`shown_views_changed`、`laid_out_views_changed`、`active_context_changed`、`locale_changed`，以及各注册表的 `*_changed` |
+| 响应式状态 | `locale`、`locales`、`machines`、`connections`、`active_context`、`pages`、`views`、`commands`、`js_views`、`safe_areas`、`bar_insets`、`theme`、`texts`、`shell`（见 `SmeltState`） |
+| 离散事件 | 宿主推送的运行时话题、视图打开参数变更、命令派发与生命周期事件 |
 | 命令 | 通知；菜单栏和 Dock 角标；选路径；在编辑器或文件管理器里打开；`smelt.app/open-view`（打开设置页也是它）；显示主窗口；机器管理 |
-| 路径 | 插件数据目录（`data_dir()`）、应用日志 |
+| 路径与存储 | 插件数据目录（`dataDir()`）、独立 SQLite（`store.migrate` / `query` / `execute`） |
 
 ### 运行时数据只是话题
 
@@ -137,11 +137,11 @@
 - 设置页就是带 `settings: {组, 搜索关键词}` 的视图。打开带 `settings` 的视图，就是打开设置、停在这一页。
 - 可见性只有一套：`view_shown` 和 `shown_views_changed`。
 - 视图第一次露出来时建，之后一直留着，直到登记被替换或撤下。打开时从插件自己的库里读，改了马上写回，不靠视图活着保存东西。
-- 每个视图是插件脚本里的一个 View 类，登记时交出类本身（见「插件运行时」）。名字由插件自己起；`main` 不再是保留名，会话列表沿用 `smelt.session-list/main`，布局不用改。
-- 视图登记里写标题、图标、是否自己画顶栏（`draws_top_bar`）。自己画顶栏的视图顶上放 `smelt-ui` 的 `SmeltWindowBar`。
-- 视图打开时的参数：建的时候在 `init` 里用 `opened_view()` 取；已经建好的视图再被打开、参数变了，插件收到 `view_opened` 事件。
+- 每个视图是插件脚本里导出的函数组件，登记在 `registerViews(...)` 里。名字由插件自己起；`main` 不再是保留名，会话列表沿用 `smelt.session-list/main`，布局不用改。
+- 视图登记里写标题、图标、是否自己画顶栏（`draws_top_bar`）。自己画顶栏的视图顶上放 `SmeltNativeWindowBar`（`smelt.window-bar`）。
+- 视图打开时的参数由宿主随视图挂载/事件传入，不靠写死全局状态。
 - 视图登记里不写位置。入口放在哪，是菜单贡献和布局的事。
-- 按实例建的视图（`instances`，如每段会话一份的终端、对话）不进布局、没有入口：别的插件用 `SmeltViewInstance` 按视图 id 和参数建一份自己摆；只想放进主窗口看的用 `smelt.app/open-view` 带参数打开，宿主建一份放进出口。
+- 按实例建的视图（`instances`，如每段会话一份的终端、对话）不进布局、没有入口：别的插件用 `<ViewInstance>`（自动区分 JS 视图走 `<Slot>`、Rust 视图走 `smelt.view`）按视图 id 和参数建一份自己摆；只想放进主窗口看的用 `smelt.app/open-view` 带参数打开，宿主建一份放进出口。
 
 ### 菜单贡献
 
@@ -193,155 +193,88 @@
 - 活动上下文（当前项目、正在看的会话、是不是停在最新）是接口里的一个全局槽，由会话插件发布（`set_active_context`），宿主只转发，不解读。
 - 文件、Git、历史、通知这些插件据此决定看哪个目录、把哪段会话标成已读。
 
-### JS 映射
-
-- 每个插件一份自己的 gpui-shell Policy，宿主函数知道是哪个插件在调。
-- 事件用 `await next_event()` 取；每个插件一条队列，同样的事件只留一份。
-- Rust 那份 `smelt-plugin-api` 根上的每一样，都登记在 `src/js/parity.rs` 的表里，写明 JS 那边是同名函数、换了名字的函数、别的形式（命令、组件、gpui-shell 自带的模块），还是只有宿主用、只有 Rust 有（写明为什么）。加接口不填这张表，测试不过。
-- 「只有 Rust 有」在终态里只剩能力内部要的东西（开原生字节流的 `connector`、替换 App 包的 `updater`）。插件要的能力，JS 都得拿得到。
-
 ### 主题
 
 - 主题文件是 smelt 自己的带版本 JSON（格式、校验、推法见 `docs/ui-design-language.md` 第 2 节）。插件目录下的 `themes/*.json` 是主题贡献；有一份不合法，这个插件的主题一个都不装，登记报错。
-- 纯主题包把 `gpui-shell.json` 的 `entry` 指向主题 JSON，不需要 JS。
+- 纯主题包在 `smelt-plugin.json` 里声明主题文件，不需要脚本入口。
 - 插件重载或卸载时，撤下它的主题。当前主题不在了，就回落到同明暗的 Default；原来的选择保留，重新装上后恢复。
 - 主题只在启动和插件变化时读，render 里不读文件。
 
-## 插件运行时
+## 插件运行时（NSH A2）
 
-### 一个插件一份脚本实例
+### 单引擎 + 每插件独立 QuickJS VM
 
-- 插件的入口脚本加载一次，是这个插件唯一的一份脚本实例，活到插件卸下。
-- 入口的默认导出是插件的根（一个 View 类）。宿主挂上它但不显示，它的 `init` 就是插件的启动：起事件循环、命令循环，登记视图、命令、菜单、话题。
-- 插件的每个视图都是这份实例里的一个 View 类。宿主要建时在同一份实例里建，各视图共享模块里的状态。
-  - 设置页、按实例建的视图、填插槽的视图，都是这样。
-  - 不再给每个视图单独加载一份脚本，也就没有视图之间「不共享内存、只能经库和事件同步」的问题。
-- 怎么交出类：宿主函数收不了类，用 gpui-shell 现成的 `DockArea.register_panel(name, Class)`（「脚本交出类、宿主按名字在同一份实例里建」），`register_views` 里同名的视图就按它建。上游没有更直接的接口，不 fork、不等。
-  - 打开参数：宿主建视图是同步的，`init` 就跑在里面。视图在 `init` 里调 `opened_view()` 取 `{ view, instance, args }`，只有这时取得到。
-  - 再次打开：宿主找不到具体哪份视图，往插件的事件流里发 `{ type: "view_opened", view, instance, args }`，插件的事件循环按 `instance` 转给那份视图。
-  - 插件的事件流只有一条（`next_event` 同时只能一个在等），由根的事件循环取，改模块里的状态。
-  - 重画：gpui-shell 的 `cx.notify()` 只重画正在跑的那份视图，根的任务里调重画的是根；视图在自己的任务里等根用 JS 的 Promise 叫醒也一样（接着跑的还是根那一轮）。所以状态改了用宿主的 `notify_view(instance?)`：给编号重画那一份，不给重画插件还在的每一份。视图自己的点击里改了只关自己的状态，照常 `cx.notify()`。
-- 加载失败的插件没有视图可登记（视图名是脚本登记的），错误在设置的插件页、`smelt plugin status` 和 `~/.smelt/app.log` 里看。
-- 这是对现有 JS 插件的破坏性改动（原来主入口自动登记成 `<id>/main`，别的视图各有 `entry`）。用户插件跟着改，不写兼容。
+- 实现位于 `crates/smelt-nsh`（基于 `smelt-ai/nsh` fork）：单引擎线程 + 单界面树（`AppView`）+ 每插件独立加固 QuickJS VM；主壳在 `crates/smelt-nsh/shell/MainShell.tsx`，承载各页 `nsh/base <DockArea>` 并与 `DockAreaState` 无损互转。
+- 插件入口使用 TSX/JS，启动和热重载时由 `nsh-bundler` 自动打包，装改删不用重编 Rust。
+- 同一插件的多个视图、设置页与插槽填充共享该插件 VM 内的模块状态；跨 VM 视图嵌合通过 `smelt/slots`（`<Slot>`）协议完成，Rust 重组件通过 `smelt.view` 桥接。
+- 加载失败的插件没有视图可登记，错误在设置的插件页、`smelt plugin status` 和 `~/.smelt/app.log` 里看。
 
 ### 随 App 带的插件
 
-- 放仓库根 `plugins/<name>/`，打包时放进安装包（`scripts/stage-plugins.sh`；macOS 是 `Contents/Resources/plugins/`，Windows 是安装目录下的 `plugins\`），发版的包从那里只读加载（`crates/smelt/src/plugins/builtin.rs`）；开发用的包（调试构建和 `make dev`）直接读仓库，改了即重挂，只有改 Rust 要重编。
+- 放仓库根 `plugins/<name>/`，打包时放进安装包（`scripts/stage-plugins.sh`；macOS 是 `Contents/Resources/plugins/`，Windows 是安装目录下的 `plugins\`），发版的包从那里只读加载（`crates/smelt/src/plugins/builtin.rs`）；开发用的包（调试构建和 `make dev`）直接读仓库，改了即热重载，只有改 Rust 要重编。
 - 在第一帧之前加载完，布局里摆的视图第一帧就画得出来，不闪空白。
 - 先找自带的再找 `~/.smelt/plugins/`，同 id 不加载、报重复。
 
 ### 画面和数据
 
-改成 JS 前实测过的写法规则（探针 `crates/smelt-plugin-api/src/js/ui/bench.rs`）：
+性能基准在 `crates/smelt-nsh/bench/` 与 `crates/smelt-nsh/examples/bench.rs`，写法规则：
 
-1. 长内容用虚拟列表，或按行拆子视图。
-2. 持续变的条目做子视图（`cx.new` 建的 Entity），变了只通知那一个：会话列表每行一个子视图，状态变了只重画那行，增删、重排、折叠才重画外层。
-3. markdown、diff、高亮、终端用 Rust 组件。
-4. 数据增量推，不拉整份。
-5. 大量数据留 Rust，JS 只拿要画的部分。
-
-会话列表先用现有的「读 + 变化事件」，试点里实测。超出标准再加按键增量推的机制，不先做。
+1. 长内容用虚拟列表，或按行拆细粒度组件/信号。
+2. 持续变的条目按局部信号更新，避免变化一次整棵树重绘。
+3. markdown、diff、高亮、终端用 Rust 组件（`smelt.view`）。
+4. 大量数据留 Rust，JS 只拿要画的部分。
 
 ### 文案
 
-插件的文案放 `locales/ui.yml`，格式和 Rust crate 的一样。宿主给 `t(键, 参数)`（`smelt-plugin-api` 模块），按当前语言读调用方插件自己的那份，用的是 rust-i18n 同一个加载函数。登记给宿主的标题（视图、命令、菜单项）用 `text(键, 参数)`：拿到各种语言的一张表，宿主显示时按当前语言取，同 Rust 的 `text!`。这样：
-
-- 迁过来的插件文案表原样搬，不用改格式。
-- `smelt-plugin-api` 的 `catalogs` 检查连 JS 插件一起查：两种语言都有、代码取的键都在、没有没人取的键。
+插件的文案放 `locales/ui.yml`，格式和 Rust crate 的一样。`"smelt/sdk"` 提供 `t(键, 参数)` 按当前语言读取调用方插件自己的文案表；登记给宿主的标题（视图、命令、菜单项）用 `text(键)` 构造多语言表，宿主显示时按当前语言取，详见 `docs/i18n.md`。
 
 ## 插件的样子
 
-**用户插件**是一个 gpui-shell 文件夹，导入文件夹就算装上。纯主题包不需要 JS：
+**用户插件**与**随 App 带的插件**同一种目录结构，清单文件固定为 `smelt-plugin.json`：
 
 ```text
-my-theme/
-  gpui-shell.json
-  themes/colors.json
-```
-
-```json
-{"id":"com.example.my-theme","name":"我的主题","version":"1.0.0","entry":"themes/colors.json"}
-```
-
-**随 App 带的插件**和用户插件同一种样子，一个插件一个自包含的目录，复制出去就能跑：
-
-```text
-plugins/session-list/
-  gpui-shell.json     id 沿用原来 Rust 插件的（smelt.session-list）
-  main.js             入口：插件的根，只做组装
-  contract.js         对外的约定：视图、命令、菜单、插槽的 id 和参数
-  *.js                按职责平铺拆分，不再分子目录
+plugins/language/
+  smelt-plugin.json   清单（id、name、version、entry / themes / layouts 等）
+  nsh.tsx             入口（复杂插件可放 nsh/main.tsx 并按职责拆分模块）
   locales/ui.yml      文案
-  assets/             图标、图片
-  tests/              纯逻辑单测；fixtures/ 是对照出图用的场景数据
+  tests/              纯逻辑单测（用 bun test）
 ```
 
-入口的样子：
-
-```js
-import { View, div } from "gpui-kit";
-import { DockArea } from "gpui-base";
-import { register_views, next_event, notify_view, opened_view } from "smelt-plugin-api";
-
-const state = { sessions: [] }; // 各视图共用
-
-class List extends View {
-  init(_props, _cx) {
-    const { instance, args } = opened_view(); // 只在 init 里取得到
-  }
-  render() { return div().children(state.sessions.map(row)); }
-}
-
-export default class Plugin extends View {
-  init(_props, cx) {
-    DockArea.register_panel("main", List);
-    register_views([{ name: "main", title: "会话" }]);
-    cx.spawn(async () => {
-      for (;;) {
-        const event = await next_event();
-        if (apply(state, event)) notify_view(); // 根里 cx.notify() 重画的是根
-      }
-    });
-  }
-  render() { return div(); } // 根不显示
-}
-```
-
-1. **只 import 自己目录里的文件和宿主模块**，不设插件间共享的目录：要复用的进组件库或能力。
-2. **发的就是源码**：写 JS 加 JSDoc，不经编译。用户复制到手的要能直接改。
-3. **逻辑和画面分开放**：数据、规则放不 import gpui-kit 的文件，宿主函数从参数传进来，用 `bun test` 就能测（测试放插件的 `tests/`，用 `bun:test`）。视图文件只读这些文件算好的结果。
+1. **只 import 自己目录里的文件和宿主模块**（`"nsh"`、`"nsh/base"`、`"smelt/sdk"`、`"smelt/slots"`、`"smelt/host"`），不设插件间共享目录：要复用的进组件库或能力。
+2. **发的就是源码**：仓库与安装包里发 TSX/JS 源码，运行时经 `nsh-bundler` 打包；用户复制一份即可直接修改。
+3. **逻辑和画面分开放**：数据、规则放不 import NSH 的纯 JS/TS 文件，宿主函数从参数传进来，用 `bun test` 测。
 4. **迁过来的插件沿用原 id**，视图、命令、菜单、插槽的 id 都不变，同一个提交删掉 Rust 版。插件的数据目录、布局里的视图 id、用户的快捷键都不用迁。
-5. **数据放 `~/.smelt/plugin-data/<id>/`**（`data_dir()`，库是里面的 `store.sqlite3`，用 `store_query` / `store_execute`），见 `docs/local-storage.md`。
+5. **数据放 `~/.smelt/plugin-data/<id>/`**（`dataDir()`，库是里面的 `store.sqlite3`，用 `store.migrate` / `store.query` / `store.execute`），见 `docs/local-storage.md`。
 
 改自带插件是复制一份、换个 id、数据另拷一份，再在布局里换上。步骤写在 smelt skill（`agent/skills/smelt/SKILL.md`）里，由智能体照着做，App 里不另做按钮。
 
 ### 检查
 
 - **单测**：`bun test plugins/<name>/tests`，测逻辑文件。
-- **类型**：tsc 的 checkJs。类型声明由 `smelt plugin check <目录>` 加载插件时写出（`gpui-kit.d.ts`，不进仓库），CI 先跑它、再跑 tsc。
-- **加载和渲染**：`smelt plugin check <目录>` 不开 App 加载并渲染一次。
-- **对照出图**：从 Rust 插件迁过来时，同一份 `tests/fixtures/` 场景让两版各画一张图比对，删 Rust 版之前做。
+- **清单与打包校验**：`smelt plugin check <目录>`（`crates/smelt/src/plugins/check.rs`）离线检查 `smelt-plugin.json`、`locales`、主题文件，并运行 `nsh-bundler` 与 `oxc` 外部 import 校验。
+- **对照出图**：从 Rust 插件迁过来时，同一份场景让两版各画一张图比对，删 Rust 版之前做。
 
 ## 终态：各功能怎么分
 
-初稿，每块迁到时再按「分工」三问逐项定，结果写回这里。
+### 已迁入 `plugins/*` 的内置 JS/TSX 插件（9 个）
+
+`archive`、`buddies`（画法留在 `crates/smelt-buddy`）、`language`、`launcher`、`layouts`、`machines`、`quota`、`session-list`、`themes`。
+
+### 仍在 `crates/plugins/*` 的 Rust 插件（16 个，待按三问拆分）
 
 | 现在的 Rust 插件 | 留在 Rust 的能力 | JS 插件 |
 | --- | --- | --- |
-| `session-list` | 会话数据带派生事实 | 整个会话列表：分组、置顶、排序、折叠、拖动、菜单、新建会话和仓库两个对话框、设置页 |
 | `sessions` | — | 会话视图（舞台、分屏、选中、恢复）、新建和续接的命令 |
-| `conversation` | 对话流、markdown、diff、输入框、ACP 连接；提问导航的数据（有哪几问、正在读哪一问、某一问的预览）和跳到某一问 | 对话页的摆法（待定）；提问导航的画法、悬停和动效（Rust 版已按这个分好，见 `view/render/prompt_rail.rs`） |
+| `conversation` | 对话流、markdown、diff、输入框、ACP 连接；提问导航的数据和跳转 | 对话页的摆法（待定）；提问导航的画法、悬停和动效（见 `view/render/prompt_rail.rs`） |
 | `terminal` | 终端视图实例 | 终端外围的菜单、标题 |
-| `buddies` | 组件 `SmeltBuddy`（`crates/smelt-buddy`）：零件、动作、合成、出帧节拍，只听「演哪一出、从什么时候起」 | `plugins/buddies`：哪段会话配哪个小人、什么时候演什么（状态反应、打招呼）、填行首插槽 |
-| `agents`、`automations`、`capabilities`、`skills`、`archive`、`history` | 缺的话题和控制方法补在 smeltd | 全部 |
+| `agents`、`automations`、`capabilities`、`skills`、`history` | 缺的话题和控制方法补在 smeltd | 全部 |
 | `git` | `smelt-git` 映射给 JS | 界面 |
 | `files` | 大目录的树和搜索、文件预览组件 | 界面 |
 | `notifications` | 系统通知、菜单栏、Dock 角标（宿主已有） | 提醒规则、设置页 |
 | `resources` | 进程 CPU、内存量测 | 页 |
 | `updater` | 下载、校验、替换 App 包 | 关于页 |
 | `desktop` | 远程桌面画面 | 外围 |
-| `machines` | 配对、连接（宿主已有） | 远程机器设置页 |
-| `ide`、`maintenance`、`launcher`、`language`、`layouts`、`themes` | — | 全部 |
+| `ide`、`maintenance` | — | 全部 |
 
 ## 会话核心
 
@@ -393,14 +326,12 @@ export default class Plugin extends View {
 5. **切换。** 同一个提交删掉 Rust 插件和应用 `smelt` 里那行 `register`。开发途中只在本地注释掉 Rust 版的登记，不提交两份同 id 的插件。
 6. **自查。** Rust 里还有没有它的名字，有没有给它开专用接口。
 
-### 顺序
+### 剩余迁移顺序
 
-1. **运行时机制。** 一个插件一份脚本实例、视图按类登记；宿主的 `t()`；类型声明和检查进 CI。
-2. **会话列表（试点）。** 最大的一块之一，碰到的机制最全：插槽、右键菜单、拖动、动画、对话框、设置页。试点结束时记两笔账：JS 和 Rust 的行数，补了哪些能力。据此定后面的节奏。
-3. **小插件**：`launcher`、`language`、`layouts`、`themes`、`archive`、`ide`、`maintenance`。
-4. **中等的**：`history`、`notifications`、`skills`、`resources`、`desktop`、`machines`、`updater`、`buddies`。
-5. **大的**：`agents`、`automations`、`capabilities`、`files`、`git`。
-6. **会话插件**，然后是对话页（见「待定」）。
+1. **小插件**：`ide`、`maintenance`。
+2. **中等的**：`history`、`notifications`、`skills`、`resources`、`desktop`、`updater`。
+3. **大的**：`agents`、`automations`、`capabilities`、`files`、`git`。
+4. **会话与对话**：`sessions`、`terminal` 外围、对话页（见「待定」）。
 
 ## 待定，要确认后再动
 
@@ -409,11 +340,8 @@ export default class Plugin extends View {
 
 ## 已知缺口
 
-- gpui-shell 没有通用的拖放绑定，拖放用 `smelt-ui` 的：`SmeltDragItem.new(id, kind)` 是能拖着换位置的一项，同一 `kind` 的项之间互放，放下时 `on_drop(from, before, top)` 交给脚本（`top` 是松手时牌子上沿的窗口 y，交给 `SmeltFlip.from_top` 让那一项从手放下的地方落下）；`SmeltScrollView` 里拖到上下边缘自动滚，`on_drop_files(paths)` 收从访达拖进来的文件。
-- gpui-shell 的 `gpui-shell.json` 拒绝未知字段，所以插件的一切都通过宿主函数登记。命令用 `register_commands` 登记，用 `next_command` 取下一条要执行的，做完用 `resolve_command` / `reject_command` 按 id 交回结果。命令只管工作台级的动作；跟着焦点变的键（列表上下移动、输入框编辑）用视图自己的 action。
 - 绕过 smeltd 的修改（手改 Pi 配置文件、直接用 `pi` 命令行）现在收不到，要 smeltd 去监视文件才能补上。
-- gpui-shell 的 `spring` / `transition` 只动 `opacity`、`width`、`height`、`left`、`top`，动不了颜色：颜色过渡写成底色上叠一层、动它的透明度。新挂上的元素弹簧首帧就到位，脚本里没有浮层那样的入场（淡入）零件；提问导航的预览卡迁过去时要补。
-- 手机端是 Flutter，跑不了 gpui-shell。插件只影响桌面，手机直接用 smeltd 协议。
+- 手机端是 Flutter，跑不了 NSH。插件只影响桌面，手机直接用 smeltd 协议。
 
 ## 参考
 

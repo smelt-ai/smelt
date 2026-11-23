@@ -2,17 +2,21 @@
 
 Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。`~/.smelt` 顶层放什么在 `smelt_paths::DECLARED_ENTRIES` 里登记，新加的文件或目录要先登记；没登记的（旧 JSON、迁库备份 `*.bak-v*`、下线功能的目录）都是历史残留，设置「系统 → 清理残留」列出来，确认后删掉（维护插件 `crates/plugins/maintenance/src/residue.rs`）。插件的数据一律放 `plugin-data/<插件 id>/`，不另占顶层。
 
+## 原则
+
+- **按字段建表，不用 JSON 当库**：业务数据统一存 SQLite 按字段建表，不把一组字段塞进一个 JSON 列（嵌套配置如自动化 trigger，或整块读写、从不按局部查询且带版本号的界面状态如 `DockAreaState` 除外，读到不认识的版本或非法内容回默认值）。
+- **数据单一权威**：同一份数据只存一处，其余地方只留从它推送来的只读缓存。不在客户端另存一份运行时数据再靠对账推断增删，不存可从别处算出来的派生列或镜像表。
+- **改表结构先确认**：改 SQLite 表结构或给 `SCHEMA_VERSION` / `STORE_SCHEMA_VERSION` 加一前，先列出要改的表、列和理由等确认；能不动就不动，一个分支只升一次，所有改动并进同一版。
+
 ## 运行时库
 
 ```text
 ~/.smelt/smelt.sqlite3
 ```
 
-这台机器上的会话、项目、智能体、自动化、配对设备和远程开关。schema 版本是 `user_version`，当前 `STORE_SCHEMA_VERSION = 32`（`crates/smelt-store/src/lib.rs`）。WAL，5 秒 busy timeout，库文件和 `-wal`/`-shm` 在 Unix 上收紧为 `0600`。
+这台机器上的会话、项目、智能体、自动化、配对设备和远程开关。schema 版本是 `user_version`，当前 `STORE_SCHEMA_VERSION = 41`（`crates/smelt-store/src/lib.rs`）。WAL，5 秒 busy timeout，库文件和 `-wal`/`-shm` 在 Unix 上收紧为 `0600`。
 
-建库只发生在主文件和 sidecar 都不存在时。主文件没了但 sidecar 还在时拒绝建空库。非空的 `user_version = 0`、形状不符或版本过新的库只拒绝打开，不删表、不重建。以后改已发布结构必须加版本号并写迁移。
-
-通用 `kv` 表在 v18 删掉。v19→v20 删掉 worktree 继承表（smelt 不管 worktree）。v20→v21 的 `layout_node` 增加 `tabs`，同一格可以叠多个终端。v21→v22 删掉 `layout_node`：对话的终端平铺成 `session.position`，分屏布局归客户端（下面的 `conversation_route.dock_layout`）。v22→v23 删掉跨 Agent 消息的 `peer_message_command` 和 `agent_host_pref.cross_agent_enabled`，以及只为它服务的持久事件表（`event_log`、`event_outbox`、`subscription_cursor`、`event_dead_letter`、`event_delivery_retry`、`command_dedupe`）。事件只在内存里投递。v23→v24 删掉 DeepSeek Harness（`dsh`）的全部数据，`auto_model_provider` 去掉 `harness` 列。v24→v25 的 `published_session` 增加 `cli_exited`。对话 id 退出后仍留着，续接与否看这一列：CLI 发出 `SessionEnded`（用户 `/exit` 回到 shell）后，守护重启、升级或崩溃恢复不再对该终端执行 `--resume`；不发 `SessionEnded` 的 provider（Antigravity、Kiro、Crush，以及只在删除会话时转发 SessionEnd 的 OpenCode）仍按最后一次对话 id 续接。v25→v26 删掉 `workspace_catalog` 的 `writer` / `writer_seq`：整份保存去掉后，目录只经单条改动写，版本号在同一事务里随改动推进，不再需要认出回执丢了的写入方。v26→v27 删掉 `session_group.project_root` 和桌面发布的侧栏菜单三张表（`workspace_menu`、`workspace_menu_project`、`workspace_menu_session`）：会话归哪个项目不存，各端按 cwd 用 `smelt_model::workspace_directory::project_root_of` 现算；手机和守护直接读工作区目录。`project_root` 带外键、`session_group` 又被下面一串表级联引用，所以 `session_group`、`session`、`acp_detail`、`acp_launch_env`、`acp_config_value` 整串改名重建：外键开着时改名会把子表的引用改到旧表上，单独重建会在删旧表时把会话级联删光。v27→v28 删掉远程会话目录 `remote_acp_session`、`remote_terminal_session`：手机、命令行、智能体、Pi 派生新建的对话由运行时起好后直接写进工作区目录，和桌面建的一样恢复和删除；自动化运行的会话不进工作区目录，看 `automation_run` 和守护里活着的会话。守护每次启动都会清空这两张表，没有要搬的数据。v28→v29 给 `workspace_catalog` 加 `epoch`：这份库的随机身份，建库、迁移时写好。目录和命令回执都带着它，版本号只在同一个 `epoch` 里比；库删了重建，版本号从头数，客户端认出是另一份，不会把新目录当成旧的扔掉，本地开着的对话发新建写回新库。
+建库只发生在主文件和 sidecar 都不存在时。主文件没了但 sidecar 还在时拒绝建空库。非空的 `user_version = 0`、形状不符或版本过新的库只拒绝打开，不删表、不重建。以后改已发布结构必须加版本号并写迁移（完整迁移史见 `crates/smelt-store/src/lib.rs`）。
 
 名字只存一处：认得出 provider 身份的对话（ACP 有 `history_session_id`）名字在 `history_title`，历史页、侧栏、手机看到的同一份；还认不出的写在 `session_group.custom_title`（终端分屏是 `session.custom_title`），守护确认身份时在同一事务里搬进 `history_title`。读工作区目录时按身份合起来，不另存。名字只经 `workspace.rename`（命令行按会话 id 改、历史页按身份改的也是同一套写入）写，客户端 `workspace.conversation.create` / `update` 带来的名字不算数。`acp_detail.session_title` 是 agent 报的标题，只由守护在标题变化时写。
 
@@ -20,12 +24,12 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 
 | 范围 | 表 |
 | --- | --- |
-| 工作区 | `project`、`session_group`、`session`、`acp_detail`、`acp_launch_env`、`acp_config_value`、`workspace_catalog` 及项目/会话行 |
+| 工作区 | `project`、`project_repository`、`project_repository_catalog`、`workset`、`workset_repository`、`session_group`、`session`、`acp_detail`、`acp_launch_env`、`acp_config_value`、`workspace_catalog` 及项目/会话行 |
 | 自动化 | `automation`、`automation_state`、`automation_run`、`automation_run_transcript`、`automation_meta` |
 | 智能体 | `agent_definition`、`agent_profile`（自定义 Agent）、`agent_profile_env`、`agent_host_pref`、`agent_acp_env`、`agent_acp_config_memory`、`agent_memory_usage`、`agent_memory_provenance`、`default_conversation_agent` |
 | 启动与历史 | `launch_entry`、`launch_settings`、`new_session_pin`、`history_title`、`history_agent_binding` |
-| 远程 | `paired_device`、`remote_config`、`runtime_identity`、`published_session` |
-| 配置缓存 | `memory_settings`、`terminal_theme`、`terminal_theme_palette`、`auto_model_provider`、`quota_cache` 及额度明细、`quota_provider_pref`（每家额度账户的开关和钥匙串拒绝状态） |
+| 远程 | `paired_device`、`push_registration`、`remote_config`、`runtime_identity`、`published_session` |
+| 配置缓存 | `memory_settings`、`terminal_theme`、`terminal_theme_palette`、`auto_model_provider`、`quota_cache_status`、`quota_cache_window`、`quota_provider_pref`（每家额度账户的开关和钥匙串拒绝状态） |
 
 嵌套配置可以放在 JSON 列里（例如自动化的 trigger）。那是列，不是一份 `*.json` 活文件。
 
@@ -37,7 +41,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ~/.smelt/client.sqlite3
 ```
 
-只属于这台桌面，`SCHEMA_VERSION = 15`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。v4 → v5：`runtime_connection` 增加 `os`。v5 → v6：侧栏顺序从运行时搬到客户端，新建 `sidebar_project_order` / `sidebar_conversation_order`；升级后第一次按运行时目录的先后排，之后按这台桌面自己拖出来的顺序。v6 → v7：新建 `key_binding`，存用户改过的快捷键。v7 → v8：`workspace_ui` 增加 `archive_expanded`。v8 → v9：整个工作台换成一块 Dock，`workspace_ui` 去掉侧栏宽度和开合，`appearance` 增加 `layout_id`，`conversation_route` 去掉舞台覆盖页和工具面板的开合、页签、宽度，新建 `workspace_layout_state`。v9 → v10：快捷键改绑命令，`key_binding.action_id` 改名 `command`，旧动作名换成对应的命令 id（如 `command_palette` → `smelt.palette/toggle`），早已下线的动作名那几行删掉。v10 → v11：对话界面状态只留终端的分屏和当前终端，`conversation_route` 去掉文件树、Git 页的列，删掉 `conversation_route_path`。v11 → v12：删掉 `notify_prefs`，通知开关归通知插件，存在它自己的库里；旧值不搬，插件的开关默认都开。v12 → v13：新建 `pinned_workset`。v13 → v14：`workspace_ui` 去掉 `selected_agent_id`，选中哪个智能体归智能体插件。v14 → v15：会话列表、分屏归会话插件，删掉 `pinned_project`、`pinned_workset`、`collapsed_project`、`collapsed_agent`、`conversation_route`、`sidebar_project_order`、`sidebar_conversation_order` 和 `workspace_ui` 里的会话列和 `archive_expanded`，`route` 改名 `outlet`；终端字号归终端插件，`appearance` 去掉 `font_px` 和没人读的 `bg_color`、`opacity`、`blur`，`glass_style` 改名 `material`；`runtime_connection` 去掉 `smelt_home`，智能体 space 的根改由运行时随智能体配置推来（`agent_spaces_root`）；`smelt.stage/*` 分屏键搬到 `smelt.sessions/*`。旧数据不搬，插件从默认开始。
+只属于这台桌面，`SCHEMA_VERSION = 16`（完整迁移史见 `crates/smelt-client-store/src/schema.rs`）。
 
 | 表 | 内容 |
 | --- | --- |
@@ -57,7 +61,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ~/.smelt/plugin-data/<插件 id>/store.sqlite3
 ```
 
-每个插件一个目录，整个归它：库在 `store.sqlite3`，表和版本由插件自己管（`crates/smelt-client-store/src/plugin_store.rs`），宿主不认识里面的表；库以外的文件也放这个目录（JS 插件用 `data_dir()` 取）。内置插件也一样：通知插件的开关和发过的通知在 `smelt.notifications/`，文件视图的在 `smelt.files/`。插件之间不共用目录：复制一个插件改成新 id，数据要另拷一份。
+每个插件一个目录，整个归它：库在 `store.sqlite3`，表和版本由插件自己管（`crates/smelt-client-store/src/plugin_store.rs`），宿主不认识里面的表；库以外的文件也放这个目录（JS 插件用 `"smelt/sdk"` 的 `dataDir()` 取）。内置插件也一样：通知插件的开关和发过的通知在 `smelt.notifications/`，文件视图的在 `smelt.files/`。插件之间不共用目录：复制一个插件改成新 id，数据要另拷一份。
 
 旧版本的库是 `plugin-data/<插件 id>.sqlite3`，插件第一次打开库时挪进自己的目录（先把 WAL 并回主库再改名）；别的进程还开着旧库就这次照用旧位置，下次再挪。
 

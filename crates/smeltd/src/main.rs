@@ -3041,7 +3041,7 @@ fn spawn_session(
     apply_interactive_pty_env(&mut cmd);
     apply_system_proxy_pty_env(&mut cmd);
     // 整条 hook 链路的地基：没有它，smelt-notify 没法知道自己在哪个会话里，
-    // 后面的 state op 全是空中楼阁（见 docs/archive/state-channel-plan.md）。
+    // 后面的 state op 全是空中楼阁（见 docs/notification-architecture.md）。
     cmd.env("SMELT_SESSION_ID", id);
     cmd.env("SMELT_AGENT_TOKEN", &agent_token);
     cmd.env("SMELT_SOCK", client_conn::child_smelt_sock());

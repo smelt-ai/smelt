@@ -15,9 +15,8 @@
 cargo run --bin smelt
 ```
 
-> 注：`smelt` 原有的 instincts 蒸馏 CLI（`observe`/`digest`/`merge` 等）已整体移除。
-> 工作区二进制：`smelt`（GUI）、`smeltd`（运行时守护）、`smelt-notify`
-> （`crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App）、`smelt-iroh-connect`（iroh 调试）。
+> 工作区二进制：`smelt`（GUI）、`smelt-cli`（命令行）、`smeltd`（运行时守护）、`smelt-notify`
+> （`crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App）、`smelt-push-relay`（APNs 推送中继）、`smelt-iroh-connect`（iroh 调试）。
 > 没有独立的 `gateway` 或 `smelt-iroh-host`。
 > 成员列表见根目录 `Cargo.toml`。
 
@@ -27,11 +26,10 @@ cargo run --bin smelt
 
 | 层 | 选型 | 说明 |
 |----|------|------|
-| GUI 框架 | **GPUI**（`gpui-pre` 0.3.12）+ `longbridge/gpui-kit` | GPU 加速、Metal 渲染 |
+| GUI 框架 | **GPUI**（`gpui-fast` 0.1.17）+ `longbridge/gpui-kit` + **NSH**（`crates/smelt-nsh`） | GPU 加速、Metal 渲染；JS/TSX 插件走 NSH A2 运行时 |
 | 组件库 | **smelt-ui**（`crates/smelt-ui`，建在 gpui-base 的原语上） | 按钮、菜单、对话框、输入框、差异视图、代码编辑器、语法高亮、主题等全是自己的，不依赖 gpui-component，见 `docs/ui-design-language.md` |
 | 终端后端 | **portable-pty** `0.9`（在 `smeltd`） | Unix 起 `$SHELL`；Windows 起 `COMSPEC` 或 `cmd.exe`（ConPTY）并拿到 PTY |
-| 终端状态机 | **alacritty_terminal** `0.26` | ANSI 解析 + 网格模型 + 滚动缓冲 |
-| 定时器 | **smol** `2` | 驱动网格定时快照重绘 |
+| 终端状态机 | **alacritty_terminal** `0.26` | ANSI 解析 + 网格模型 + 滚动缓冲；事件驱动重绘（`RedrawReceiver`） |
 
 **免完整 Xcode**：通过 `gpui_platform` 的 `runtime_shaders` feature 让 Metal 着色器改到
 运行时编译，编译期不调 `xcrun metal`，只装 Command Line Tools 即可构建。
@@ -43,11 +41,10 @@ cargo run --bin smelt
 工作区是虚拟 workspace，代码全部分布在 `crates/` 下（见根目录 `Cargo.toml` 的成员列表）：
 
 - **`crates/smelt`** —— GUI 主程序（bin 名 `smelt`），宿主：窗口、页和布局、命令和快捷键、
-  设置页的机制和外观、运行时连接、用户 JS 插件的运行时（`~/.smelt/plugins/`，gpui-shell 脚本应用）。不认识
-  具体功能，功能都是 `crates/plugins/*` 下的内置插件，在 `plugin_host::install` 里登记。
-- **`crates/plugins/*`** —— 内置插件，一个 crate 一项功能：会话（`sessions`，会话列表和选中的
-  那段会话）、对话（`conversation`）、终端（`terminal`）、智能体（`agents`）、归档、机器、
-  自动化、文件、变更、历史等。只依赖 `smelt-plugin-api`。
+  设置页机制与外观、运行时连接。不认识具体功能，详见 `docs/app-plugins.md`。
+- **`crates/smelt-nsh`** —— NSH A2 主窗口外壳与 JS/TSX 插件运行时（每插件独立 QuickJS VM），加载仓库根 `plugins/*` 与 `~/.smelt/plugins/`。
+- **`plugins/*`** —— 已迁出的内置 JS/TSX 插件（9 个：`archive`、`buddies`、`language`、`launcher`、`layouts`、`machines`、`quota`、`session-list`、`themes`）。
+- **`crates/plugins/*`** —— 过渡期尚未迁出的 Rust 内置插件（16 个：`agents`、`automations`、`capabilities`、`conversation`、`desktop`、`files`、`git`、`history`、`ide`、`maintenance`、`notifications`、`resources`、`sessions`、`skills`、`terminal`、`updater`），只依赖 `smelt-plugin-api`。
 - **`crates/plugins/terminal`**（`smelt-terminal`）—— 内置插件「终端」：`terminal.rs` 是内嵌终端
   前端（连 smeltd 拿字节流 + alacritty 状态机 + 颜色解析），`terminal_view.rs` 是单个终端视图
   （渲染/输入/IME/选区/滚动/resize）。PTY 与 shell 在 `smeltd`。
@@ -59,7 +56,7 @@ cargo run --bin smelt
   的定义在 `smelt-model`，这里只再导出。
 - **`crates/smelt-client`** / **`crates/smelt-client-store`** —— 桌面客户端。后者是
   `~/.smelt/client.sqlite3`（外观、快捷键、各页布局和首页出口、连过哪些运行时、更新状态）。
-  功能的界面状态（置顶、排序等）归各插件自己的存储。`SCHEMA_VERSION = 15`。
+  功能的界面状态（置顶、排序等）归各插件自己的存储。`SCHEMA_VERSION = 16`。
 - **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（本机 socket 与 iroh）。Windows 上本机连接走当前用户的命名管道，Rust 客户端和 Bun / Pi 连同一条；`pair()` 是进程内的内存流（`stream/windows.rs`、`stream/memory.rs`）。不用 AF_UNIX。
 - **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `smelt-notify`）：
   终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、设备配对。远程不再经过网关进程。
@@ -69,7 +66,7 @@ cargo run --bin smelt
 - **`crates/smelt-event-bus`** —— 系统内部进程间事件总线（EventHub）。
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-ui`** —— 宿主和插件共用的界面组件（`ui_theme`/`markdown_mermaid`/按钮、列表行等），不碰客户端库和运行时。
-- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 40，按字段建表，没有通用 kv）。工作区目录（项目、项目仓库、工作集、对话）只由运行时写：客户端发 `workspace.conversation.*` / `workspace.project.*` / `workspace.workset.*` 单条命令，经 `workspace.changed` 收整份目录。
+- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 41，按字段建表，没有通用 kv）。工作区目录（项目、项目仓库、工作集、对话）只由运行时写：客户端发 `workspace.conversation.*` / `workspace.project.*` / `workspace.workset.*` 单条命令，经 `workspace.changed` 收整份目录。
 - **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
 - **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。
 - **`crates/smelt-mobile`** —— 手机 Rust 内核（身份、连接、目录、对话、终端、离线缓存），经 flutter_rust_bridge 给 Flutter。
@@ -101,8 +98,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 - **置顶与归档**：对话或整组终端可在所属项目组内置顶，或归档到与「项目」平级的折叠分段。
   归档停止进程但保留目录记录，通常恢复按原 cwd 归组并沿用本机分屏布局；终端会新起 shell，
   不恢复旧进程，但会保留已识别的 CLI 对话身份，以原 ID 续接 Copilot、Claude 等对话。
-  状态由运行时同步，手机列表隐藏归档项并在各项目组内优先展示置顶对话。
-  命令是 `workspace.conversation.archive` / `.pin`。
+  归档命令是 `workspace.conversation.archive`（归档状态由运行时同步，手机列表隐藏归档项）；置顶存在会话列表插件（`plugins/session-list`）自己的本地库里。
 - **会话列表**：左侧按项目分组，点击切换、`+` 新建、关闭（至少保留一个）
 - **项目仓库与工作树**：项目行已有 `+` 菜单和右键菜单提供「管理项目仓库…」「新建工作树…」。
   项目根恰好是 Git 仓库时首次自动加入，也会发现 `repos/` 下已有仓库；主动移除后不会反复加回。
@@ -136,7 +132,6 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
   终端与智能体工作目录改为所选工作树根目录，工作树外已打开的文件及固定目录不会恢复，
   智能体续接能力取决于服务商。
   Git 忽略文件可能随 worktree 删除，确认前应先检查。
-  设计见[任务工作树与会话分组](superpowers/specs/2026-11-12-task-worktrees-design.md)。
 
 ### 产品级智能体
 
@@ -150,7 +145,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 - GUI 通过 EventHub 的首帧快照和 `automations.changed` 增量接收自动化投影，不再按秒轮询。自动化页保留有界 Run 历史，每条 Run 可查看固化输入、执行上下文、时间线、完整结果和错误。
 - Pi 由应用里的 `smelt-agent` 启动，直接使用官方 JSONL RPC。智能体本身不启动进程；用户每次选择它都会创建一段独立的普通对话，同一定义可以同时拥有多段上下文。
 - 对话继续由 `WsState.sessions` 持久化，并在 ACP 元数据中保存 `agent_definition_id`。自动化权威状态在主库 `~/.smelt/smelt.sqlite3` 的关系表中；旧 `agent_ui.json` 自动化数据不再读取，新功能从空存储开始。0.8.0 开发版写出的单例 `agent_runs` 会在读取时迁移为普通对话，之后不再写回。
-- 自动化通知只有「应用内通知」和「不通知」，仍受设置里任务完成 / 失败通知的总开关约束。存储 schema v2 删掉了从未投递过的飞书 / Webhook sink，载入 v1 数据时剔除，剩下为空就回到默认的应用内通知。
+- 自动化通知按每条自动化自己的 `AutomationNotify` 设置（`Always` / `FailuresOnly` / `Never`）投递，不受全局「通知」页开关约束。
 - 股票、飞书监听与输出目标属于后续 Smelt capability/plugin 层，不写进 Pi 引擎或智能体核心。
 
 ### 历史会话页
@@ -215,7 +210,6 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 | `Cmd+Shift+E` | 聚焦侧栏 |
 | `Esc` | 还原放大的面板 |
 | `Cmd+[` / `Cmd+]` | 循环切换当前会话内的 pane（分屏） |
-| `Cmd+1` ~ `Cmd+9` | 跳到会话列表里第 N 个会话（按显示顺序，跨项目连续数） |
 | `Cmd+D` | 竖切分屏（右侧并排） |
 | `Cmd+Shift+D` | 横切分屏（下方堆叠） |
 | `Cmd+W` | 关闭当前 pane（会话只剩一个 pane 时关掉整个会话）；舞台没露出来时不做什么 |
@@ -229,15 +223,15 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > 工具卡片、内嵌 diff、按钮审批、PLAN 进度条，列表里是紫点）。引擎是同一个 CLI，
 > 区别只在「看它的画面」还是「跟它讲协议」。项目行「+」下拉按这两个通道分组。
 >
-> 对话通道支持八家裸 agent（`settings::ConversationAgentKind`，会话列表头「+Agent」下拉 /
+> 对话通道支持十家内置 agent（`smelt_model::agent_kind::ConversationAgentKind`，会话列表头「+Agent」下拉 /
 > 项目行「+」里选）：**Claude Code**（`@agentclientprotocol/claude-agent-acp`，
 > 自动使用本机 `claude` CLI）、**GitHub Copilot**（CLI 自带 `copilot --acp`）、
 > **Codex**（经 `@agentclientprotocol/codex-acp` 标准 ACP 通道）、**Grok**（CLI 自带
 > `grok agent stdio`，凭据 `~/.grok/auth.json`）、**Antigravity**（CLI 自带 `agy acp`）、
-> **Cursor** / **OpenCode** / **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-agent` 跑 Pi 官方
+> **Cursor** / **OpenCode** / **Kiro** / **OhMyPi**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-agent` 跑 Pi 官方
 > JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。终端通道另有 **Crush**
-> （`settings::TerminalAgentKind`）。
-> 各条启动命令在设置 →「Agent」→「高级」里改。provider 支持历史恢复时，
+> （`smelt_model::agent_kind::TerminalAgentKind`）。
+> 替换启动命令通过自定义 Agent 配置（不再提供按 agent 改启动命令的旧设置）。provider 支持历史恢复时，
 > 「重新开始」是协议级续接而非摆样子的新对话（Pi 使用自身 session id）。
 >
 > 设置 →「Agent」→「自定义 Agent」可以再加对话入口（`AcpProfile`）：类型选**通用 ACP**
@@ -250,18 +244,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > 否则那十几秒是一整屏纯黑。`promptCapabilities.image` 只有 Grok 是 false，
 > 其余已接入的结构化 agent（包括 Pi）可以往对话里粘图片（⌘V，见下）。
 >
-> 2026-07 布局改版（起点是 claude.ai/design「桌面开发者客户端设计」稿，落地时按
-> 实测调整）：窗口为「Session Panel 280px（按项目上下分组）→ Stage → Tool Panel
-> 344px + 图标条 56px」+ Bottom Panel（按需展开）与底部 26px 状态栏；旧的左 Sidebar 与主区 TabBar 已
-> 移除（这些是设计稿数值，代码中的最小宽度常量见 `main.rs` 的
-> `MIN_SIDEBAR_WIDTH=240` / `MIN_TOOL_PANEL_WIDTH=320`）。设计稿原本的「64px 项目
-> rail」左右两列实测割裂（项目只剩一个字母、必须先切项目才看得到会话），改为单列分组。
->
-> 舞台有两种覆盖模式：**详情**（从停靠面板点文件/变更 → 舞台只出内容或 diff，
-> 面板原样停靠）与**双栏全宽**（面板头 ⤢ → 树/列表 + 详情占满舞台，此时面板让位）；
-> 总览/历史仍是整页覆盖。Esc 或返回条收回。主题按名字切换（默认是组件库自带的
-> smelt Dark / smelt Light，themes 插件里还有 Ayu、Catppuccin 等），在设置 →「外观」里换。
-> 色板见 `ui_theme.rs`，切换入口 `settings::apply_named_theme`。
+> 主题按名字切换（默认是组件库自带的 smelt Dark / smelt Light，`plugins/themes` 里还有 Ayu、Catppuccin 等），在设置 →「外观」里换。色板见 `crates/smelt-ui/src/ui_theme.rs`。
 
 ### 终端内（`TerminalView` 聚焦时，见 `terminal_view.rs`）
 
@@ -333,8 +316,9 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 - `smelt-notify.exe`
 - `smelt-agent.exe`
 - Pi 要的 `photon_rs_bg.wasm`（打出来的 `skills/`、`native/` 也在）
+- 内置 JS 插件目录 `plugins/`
 
-不签名，没有自动更新。下载后 SmartScreen 可能提示未知发布者。桌面运行时持有命名互斥量 `SmeltDesktop`，安装程序覆盖装和卸载前靠它请用户先关掉 Smelt。桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`，按需拉起本机守护（`spawn_detached`，尽量脱离调用方的 Job）。没有 systemd。
+不签名，下载后 SmartScreen 可能提示未知发布者；通过安装程序装的发版构建支持应用内更新（`crates/smelt-client/src/updater/windows.rs`，详见 [`windows-support.md`](windows-support.md)）。桌面运行时持有命名互斥量 `SmeltDesktop`，安装程序覆盖装和卸载前靠它请用户先关掉 Smelt。桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`，按需拉起本机守护（`spawn_detached`，尽量脱离调用方的 Job）。没有 systemd。
 
 数据目录是 `%USERPROFILE%\.smelt`。守护监听的是 `%USERPROFILE%\.smelt\smeltd.sock` 这个路径对应的命名管道 `\\.\pipe\smelt-<sid>-daemon-<路径哈希>`，不建这个文件。Rust 客户端（桌面、`smelt-notify`、runtime client）拿 sock 路径连，`RuntimeStream::connect` 换成管道名；交给 Bun / Pi 的 `SMELT_SOCK` 直接是管道名。不建符号链接：守护复制成 `~/.smelt/bin/smeltd.exe`，smelt-agent 一整套复制进 `~/.smelt/bin/agent\`。不另外下载 Bun：MCP 预设写的 `~/.smelt/bin/smelt-agent` 在 Windows 上执行不了，smelt-agent 起 MCP 时换成它自己。
 
@@ -376,7 +360,7 @@ smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea�
 
 ### 远程桌面
 
-配对之后，桌面可以打开那台 Linux 的整块屏幕：运行时转发 VNC，`smelt-runtime-client` 在本机随机端口提供 noVNC 页面，桌面用网页视图打开。打开即接管；切到「只看」后不再发送键鼠。断线后按 1、2、4、8、16、30 秒退避自动重连，运行时重新上线时立刻重连，接管或只看的状态不变；次数用完后等运行时上线或手动重连。中文直接打在画面上。`install.sh --with-desktop` 装上 Xvnc（起始 1440×900）、XFCE 和常驻 Chrome（调试端口 `127.0.0.1:9222`）。内置 `playwright` 预设看到 `~/.smelt/desktop/bin/display` 就用 `--cdp-endpoint http://127.0.0.1:9222`，否则用 `--extension`。见 `docs/archive/remote-runtime.html` 的 D9。
+配对之后，桌面可以打开那台 Linux 的整块屏幕：运行时转发 VNC，`smelt-runtime-client` 在本机随机端口提供 noVNC 页面，桌面用网页视图打开。打开即接管；切到「只看」后不再发送键鼠。断线后按 1、2、4、8、16、30 秒退避自动重连，运行时重新上线时立刻重连，接管或只看的状态不变；次数用完后等运行时上线或手动重连。中文直接打在画面上。`install.sh --with-desktop` 装上 Xvnc（起始 1440×900）、XFCE 和常驻 Chrome（调试端口 `127.0.0.1:9222`）。内置 `playwright` 预设看到 `~/.smelt/desktop/bin/display` 就用 `--cdp-endpoint http://127.0.0.1:9222`，否则用 `--extension`。
 
 ### 终端 Dock
 
@@ -388,10 +372,9 @@ smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea�
 
 ### 手机
 
-`mobile/` 的 Flutter 界面经 FRB 调 `smelt-mobile`。界面叫「出菜口」：四栏是指挥台、会话、智能体、设置；平板是导航、列表、详情三栏；中英双语。内核是一个「机队」：同时连着所有配对过的机器，每台一个节点（连接状态机、会话目录投影、对话订阅、终端字节流），各自重连、互不影响，没有「当前运行时」；全进程共用一个 iroh endpoint，形态由所有机器的 relay 设置决定。跨机器的指挥台（等你处理的单据、各机器在做和刚完成的会话）也在内核里投影。设计见 [`mobile-redesign.md`](mobile-redesign.md) 第 1 节。机器登记和消息草稿存在 App 数据目录的 `smelt-mobile.sqlite3`，按 `user_version` 逐步迁移、不删库。离线时读同目录的 `smelt-mobile-cache.sqlite3`：按 endpoint 存上次的会话列表，以及每台机器最近几个对话的快照尾部（最多 5 段、合计 32MB）。这是缓存，库坏了就重建，不迁版本。终端区域固定深色（底色、前景与 ANSI 色板在 `mobile/lib/theme/terminal_theme.dart`），不随 App 明暗切换，也不跟运行时下发的主题走。构建见 [`mobile/README.md`](../mobile/README.md)，接入步骤的记录见 [`archive/mobile-runtime-p4.md`](archive/mobile-runtime-p4.md)。
+`mobile/` 的 Flutter 界面经 FRB 调 `smelt-mobile`。界面叫「出菜口」：四栏是指挥台、会话、智能体、设置；平板是导航、列表、详情三栏；中英双语。内核是一个「机队」：同时连着所有配对过的机器，每台一个节点（连接状态机、会话目录投影、对话订阅、终端字节流），各自重连、互不影响，没有「当前运行时」；全进程共用一个 iroh endpoint，形态由所有机器的 relay 设置决定。跨机器的指挥台（等你处理的单据、各机器在做和刚完成的会话）也在内核里投影。产品事实见 [`mobile/PRODUCT.md`](../mobile/PRODUCT.md)，视觉系统见 [`mobile/DESIGN.md`](../mobile/DESIGN.md)。机器登记和消息草稿存在 App 数据目录的 `smelt-mobile.sqlite3`，按 `user_version` 逐步迁移、不删库。离线时读同目录的 `smelt-mobile-cache.sqlite3`：按 endpoint 存上次的会话列表，以及每台机器最近几个对话的快照尾部（最多 5 段、合计 32MB）。这是缓存，库坏了就重建，不迁版本。终端区域固定深色（底色、前景与 ANSI 色板在 `mobile/lib/theme/terminal_theme.dart`），不随 App 明暗切换，也不跟运行时下发的主题走。构建见 [`mobile/README.md`](../mobile/README.md)。
 
 ## 路线图
 
 产品待做见 [`product-roadmap.md`](product-roadmap.md)，主航道外的点子见 [`roadmap.md`](roadmap.md)。
 会话状态不靠解析 `~/.claude/projects/*.jsonl`。用量按 provider 查账户。
-[`archive/remote-ops-roadmap.md`](archive/remote-ops-roadmap.md) 是已删除的 JSON-WS 网关路线图，不是现行协议。

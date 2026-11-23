@@ -41,7 +41,7 @@ PrivilegesRequired=lowest
 DefaultDirName={autopf}\Smelt
 DisableProgramGroupPage=yes
 SetupArchitecture=x64
-; Windows 10 1803：AF_UNIX 从这一版起才有（docs/windows-support.md）。
+; Windows 10 1803 起支持 ConPTY 等所需能力（本机守护通信走命名管道，见 docs/windows-support.md）。
 MinVersion=10.0.17134
 ; 桌面运行时持有这个命名互斥量（smelt_sys::mark_desktop_running）。安装和卸载开头都查它，
 ; Smelt 还开着就提示先关掉，免得覆盖或删除正在用的 smelt.exe。
