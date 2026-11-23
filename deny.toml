@@ -21,9 +21,6 @@ ignore = [
     # --- vulnerability（均经 gpui-shell → quickjs-jit-stdlib → llrt_*，本仓库无法单独升）---
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 经 llrt_crypto 引入；llrt 钉在 gpui-shell 所用 rev，且 0.7.6 亦已 yank，需等上游 llrt/gpui-kit 升依赖" },
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin Attack：RustCrypto/RSA 尚无 patched 版本（patched=[]）；仅经 llrt_crypto 进入 JS 运行时加密路径，非 smelt 网络协议私钥路径。规避需换掉 rsa 或等上游修复" },
-    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13.x 经 llrt_compression 引入（llrt 要求 zstd 0.13）；修复要 >=0.14.3，需上游 llrt 改版本约束" },
-    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 随 zstd 0.13 锁在 7.x；修复要 >=8.2.0，同上受 llrt_compression 约束" },
-    { id = "RUSTSEC-2026-0403", reason = "同 RUSTSEC-2026-0398：zstd-safe 7.x / llrt_compression，需上游升级" },
 ]
 
 # 许可证闸门。商业版用同一棵依赖树、闭源发布，所以只收不传染闭源代码的许可：
