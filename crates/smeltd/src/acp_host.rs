@@ -2531,14 +2531,21 @@ pub(crate) fn send_acp_prompt_reserved(
         *sess.unaccepted_prompt.lock() = None;
         return Err("ACP session is not running");
     };
-    let shown_images = images.clone();
-    let shown_text = text.clone();
+    // 先记下再发：驱动发现回合在跑会立刻报拒收，回执不能抢在 `unaccepted_prompt` 之前。
+    let wrote_echo = remember_outgoing_prompt(
+        sess,
+        text.clone(),
+        images.clone(),
+        delivery_id,
+        origin,
+        echoed,
+    );
     in_flight_rpc.fetch_add(1, Ordering::SeqCst);
     if cmd_tx
         .try_send(smelt_core::acp_conn::ConversationCommand::Prompt { text, images })
         .is_ok()
     {
-        if remember_outgoing_prompt(sess, shown_text, shown_images, delivery_id, origin, echoed) {
+        if wrote_echo {
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
         }
@@ -2547,6 +2554,9 @@ pub(crate) fn send_acp_prompt_reserved(
         in_flight_rpc.fetch_sub(1, Ordering::SeqCst);
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
         *sess.unaccepted_prompt.lock() = None;
+        if wrote_echo {
+            smelt_core::acp_session::undo_prompt_sent(&mut sess.reduced.lock());
+        }
         Err("ACP command channel is busy or closed")
     }
 }
@@ -2661,8 +2671,8 @@ fn send_driver_command(
 }
 
 /// 把一条消息插进正在跑的回合。只有 `supports_mid_turn_input` 的驱动能走这里：
-/// 不占 `prompt_in_flight` 闸门（当前回合仍归上一条 prompt），不进 daemon 队列。
-/// 先进入 steering 队列，等 Pi 吃掉后再写入消息流。
+/// 不占 `prompt_in_flight` 闸门，不进 daemon 队列。先挂在输入框上方，Pi 吃掉后
+/// 再写入消息流；Pi 其实已经空了的话，它会直接开新一轮，由 `QueuedInputSettled` 改写。
 /// 返回 `Ok(false)` 表示这条会话不支持插入，调用方应回退到排队。
 pub(crate) fn send_acp_mid_turn_input(
     sess: &AcpSession,
@@ -2734,7 +2744,9 @@ fn send_acp_follow_up(
             true,
         );
     }
-    if !sess.prompt_in_flight.load(Ordering::SeqCst) {
+    // 只有回合在跑才排到它后面，不看闸门：Pi 自己起的回合不占闸门。回合已经结束、
+    // 驱动还没察觉时，Pi 会把这条直接开成新一轮，经 `QueuedInputSettled` 报回。
+    if !smelt_core::acp_session::accepts_mid_turn_steer(&sess.reduced.lock()) {
         return apply_acp_user_action_inner(
             sess,
             smelt_core::acp_session::AcpUserAction::Prompt {
