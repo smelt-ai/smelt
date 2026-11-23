@@ -116,21 +116,42 @@ pub enum AfterRewind {
 ///
 /// 协议要的就是 base64 + mime，所以在进这条通道前就编码好——连接线程不碰
 /// GPUI 的图片类型，`acp.rs 不许引 gpui` 那条底线在这里同样成立。
+/// 回车插进当前回合，还是 ⌥Enter 排到本轮之后。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputLane {
+    Steering,
+    FollowUp,
+}
+
+/// 插话 / 排队的那条最后去了哪。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueuedInputOutcome {
+    /// provider 空着，这条直接开了新一轮。
+    StartedTurn,
+    /// 被扩展命令或输入处理器接走，没有模型回合。
+    Handled,
+    /// provider 拒收（没模型、没登录等），原文要回输入框。
+    Rejected(String),
+}
+
 /// UI → 连接线程的指令。
 pub enum ConversationCommand {
-    /// 发一轮 prompt。调用方负责确保同一 session 不并发发送多个 turn。
+    /// 发一轮 prompt，必须自成一轮。调用方负责确保同一 session 不并发发送多个 turn；
+    /// 驱动发现回合还在跑就按拒收报回（`PromptNotAccepted`），不改写成插话。
     /// `images` 空 = 纯文本那条老路径。
     Prompt {
         text: String,
         images: Vec<PromptImage>,
     },
-    /// 把一条消息插进**正在跑**的 turn。只有 `ConversationHandle::supports_mid_turn_input`
-    /// 为真的驱动才会收到它；调用方不得用它开新回合。
+    /// 回车：插进正在跑的回合；provider 已经空了就开新一轮。由驱动交给 provider
+    /// 原子地判断，结果用 `QueuedInputSettled` 报回。只有
+    /// `ConversationHandle::supports_mid_turn_input` 为真的驱动才会收到它。
     Steer {
         text: String,
         images: Vec<PromptImage>,
     },
-    /// 等当前回合完全结束后再送。只有 `supports_native_queue` 的驱动会处理。
+    /// ⌥Enter：排到当前回合之后；provider 已经空了就开新一轮，同 `Steer`。
+    /// 只有 `supports_native_queue` 的驱动会处理。
     FollowUp {
         text: String,
         images: Vec<PromptImage>,
@@ -413,6 +434,14 @@ pub enum ConversationEvent {
     PromptQueue {
         steering: Vec<String>,
         follow_up: Vec<String>,
+    },
+    /// 一条 `Steer` / `FollowUp` 没进 provider 的队列，宿主要把输入框上方那条撤掉，
+    /// 按 `outcome` 落到别处。
+    QueuedInputSettled {
+        lane: InputLane,
+        text: String,
+        images: Vec<PromptImage>,
+        outcome: QueuedInputOutcome,
     },
     /// `clear_queue` 之后要把原文还回输入框。`revision` 单调增加；客户端处理后
     /// 发送 `AcknowledgeComposerRestore`，服务端清掉文本和图片，但保留 revision 水位。

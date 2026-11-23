@@ -1,9 +1,12 @@
 //! 闲置会话挂起。
 //!
 //! 每场对话的驱动和它的 agent 子进程都在这个 smeltd 里。对话停下以后没人碰，
-//! 这些进程也一直占着内存。这里把闲置够久的 runtime 停掉，也就是挂起，并丢掉
-//! 内存里已经提交的历史前缀。回收线程睡到最早的闲置截止才醒；一个可能变闲置的
-//! 会话都没有时就一直睡，直到下一次活动。
+//! 这些进程也一直占着内存。为了兼顾常用对话的热态体验与多开时的内存占用，这里
+//! 保留最近活动的 [`ACP_IDLE_KEEP_WARM`] 个活会话不按闲置挂起；超过这个名额时，
+//! 按最近活动时间从旧到新，把超出部分里闲置满 [`ACP_IDLE_SUSPEND_AFTER`] 且安全
+//! 的 runtime 停掉（也就是挂起），并丢掉内存里已经提交的历史前缀。回收线程睡到
+//! 最早可能触发挂起的截止才醒；活会话不超过保底名额或没有可挂起的候选时就一直
+//! 睡，直到下一次活动或新 runtime 拉起。
 //!
 //! 挂起只停进程、裁掉已提交前缀。会话本身留在注册表里。绑定、启动规格、
 //! provider 会话占用都不动，客户端看到的仍是空闲。之后真要用 runtime 时，入口先调
@@ -32,7 +35,13 @@
 
 use super::*;
 
-/// 没有任何活动这么久之后挂起。
+/// 活着的非自动化对话不超过这么多时，不按闲置挂起。
+///
+/// 只开着几个主力对话时离开一会儿也不触发冷唤醒；多开超出名额后，才按最近活动时间
+/// 从旧到新回收超出部分。正在跑或暂不可挂起的活会话同样占着常驻内存，一并计入总数。
+pub(crate) const ACP_IDLE_KEEP_WARM: usize = 5;
+
+/// 超出 [`ACP_IDLE_KEEP_WARM`] 后，没有任何活动这么久才挂起。
 ///
 /// 一个闲着的 Pi 常驻约 160MB。唤醒代价因 agent 而异：Pi 拉起、重放两三百条历史到就绪约
 /// 0.1–0.3 秒，察觉不到；Gemini 这类由 agent 自己续接历史的要 2–12 秒，回来发的第一条消息
@@ -87,13 +96,17 @@ impl AcpIdleState {
         self.suspended.store(true, Ordering::SeqCst);
     }
 
-    fn idle_for(&self, now_ms: u64) -> Duration {
-        Duration::from_millis(now_ms.saturating_sub(self.last_activity_ms.load(Ordering::SeqCst)))
+    pub(crate) fn last_activity_ms(&self) -> u64 {
+        self.last_activity_ms.load(Ordering::SeqCst)
     }
 
-    /// 从这时起算闲置够久（毫秒时间戳）。
-    fn idle_deadline_ms(&self, idle_after: Duration) -> u64 {
-        idle_deadline_ms(self.last_activity_ms.load(Ordering::SeqCst), idle_after)
+    #[cfg(test)]
+    pub(crate) fn set_last_activity_ms(&self, at_ms: u64) {
+        self.last_activity_ms.store(at_ms, Ordering::SeqCst);
+    }
+
+    fn idle_for(&self, now_ms: u64) -> Duration {
+        Duration::from_millis(now_ms.saturating_sub(self.last_activity_ms()))
     }
 }
 
@@ -119,10 +132,11 @@ pub(crate) fn idle_retry_delay(attempt: u32) -> Duration {
 
 /// 闲置回收线程的门铃。
 ///
-/// 回收线程睡到最早的「最后活动 + 闲置期」。`touch` 只会把某个会话的截止推到
-/// 「现在 + 闲置期」，不会早于线程手里已有的截止，所以线程有截止可等时不用叫它。
-/// 只有它一个截止都没有、无限期睡着时，下一次活动才得把它叫起来，重新排上这个
-/// 会话。扫描期间也在听：扫过之后才被拉起的会话不能漏掉。
+/// 回收线程睡到最早的「超出保底名额会话的最后活动 + 闲置期」。`touch` 只会把某个
+/// 会话的截止推到「现在 + 闲置期」，不会早于线程手里已有的截止，所以线程有截止可等时
+/// 不用叫它。只有它一个截止都没有、无限期睡着时（比如活会话不超过保底名额），下一次
+/// 活动或新 runtime 拉起才得把它叫起来，重新检查是否超限并排上截止。扫描期间也在听：
+/// 扫过之后才被拉起或改动的会话不能漏掉。
 struct ReaperBell {
     state: Mutex<ReaperBellState>,
     rung: Condvar,
@@ -243,26 +257,31 @@ pub(crate) fn reduced_suspend_blocker(
     None
 }
 
-/// 挂起前必须全部成立的条件。返回第一条不满足的原因。
-pub(crate) fn acp_suspend_blocker(
-    sess: &AcpSession,
-    now_ms: u64,
-    idle_after: Duration,
-) -> Option<&'static str> {
+fn is_automation_binding(sess: &AcpSession) -> bool {
+    matches!(
+        &*sess.conversation_binding.lock(),
+        Some(smelt_core::conversation::ConversationBinding::Automation { .. })
+    )
+}
+
+/// 这个会话是否计入保底温池的活会话总数。
+///
+/// 自动化会话由守护按 Run 终态单独回收，不占用户互动对话的保底名额；已挂起或没有
+/// 活 runtime 的会话也不占。
+fn counts_toward_warm_pool(sess: &AcpSession) -> bool {
+    !sess.idle.is_suspended() && sess.handle.lock().is_some() && !is_automation_binding(sess)
+}
+
+/// 除闲置时长外，挂起前必须全部成立的条件。返回第一条不满足的原因。
+fn acp_non_idle_suspend_blocker(sess: &AcpSession) -> Option<&'static str> {
     if sess.handle.lock().is_none() {
         return Some("no runtime");
     }
     if sess.unreaped_pid.lock().is_some() {
         return Some("previous runtime not reaped");
     }
-    if matches!(
-        &*sess.conversation_binding.lock(),
-        Some(smelt_core::conversation::ConversationBinding::Automation { .. })
-    ) {
+    if is_automation_binding(sess) {
         return Some("daemon-owned binding");
-    }
-    if sess.idle.idle_for(now_ms) < idle_after {
-        return Some("recently active");
     }
     if sess.prompt_in_flight.load(Ordering::SeqCst)
         || !sess.pending_prompts.lock().is_empty()
@@ -274,6 +293,21 @@ pub(crate) fn acp_suspend_blocker(
     reduced_suspend_blocker(&sess.reduced.lock())
 }
 
+/// 挂起前必须全部成立的条件。返回第一条不满足的原因。
+pub(crate) fn acp_suspend_blocker(
+    sess: &AcpSession,
+    now_ms: u64,
+    idle_after: Duration,
+) -> Option<&'static str> {
+    if let Some(reason) = acp_non_idle_suspend_blocker(sess) {
+        return Some(reason);
+    }
+    if sess.idle.idle_for(now_ms) < idle_after {
+        return Some("recently active");
+    }
+    None
+}
+
 pub(crate) fn spawn_acp_idle_reaper(acp_sessions: AcpSessions) {
     let spawned = thread::Builder::new()
         .name("smeltd-acp-idle".into())
@@ -281,7 +315,11 @@ pub(crate) fn spawn_acp_idle_reaper(acp_sessions: AcpSessions) {
             let mut contended_rounds = 0u32;
             loop {
                 let seen = REAPER_BELL.listen();
-                let sweep = suspend_idle_acp_sessions(&acp_sessions, ACP_IDLE_SUSPEND_AFTER);
+                let sweep = suspend_idle_acp_sessions(
+                    &acp_sessions,
+                    ACP_IDLE_SUSPEND_AFTER,
+                    ACP_IDLE_KEEP_WARM,
+                );
                 let now = crate::event_hub::now_ms();
                 let retry_at = if sweep.contended {
                     let delay = idle_retry_delay(contended_rounds);
@@ -306,51 +344,76 @@ pub(crate) fn spawn_acp_idle_reaper(acp_sessions: AcpSessions) {
 /// 一轮扫描之后回收线程要知道的事。
 #[derive(Debug, Default)]
 pub(crate) struct IdleSweep {
-    /// 还没闲置够的会话里，最早到点的那个（毫秒时间戳）。被别的条件挡住、已经
-    /// 过了闲置期的会话不排进来：挡住它的条件解除时总伴随一次活动，`touch` 会
-    /// 重新排上它。
+    /// 超出保底名额、还没闲置够的候选会话里，最早到点的那个（毫秒时间戳）。活会话
+    /// 不超过保底名额时为空；被别的条件挡住的会话不排进来：挡住它的条件解除时总伴随
+    /// 一次活动，`touch` 会重新排上它。
     pub(crate) next_deadline_ms: Option<u64>,
     /// 有会话到点了，却抢不到它的生命周期锁或 spawn 闸门，要过一会儿再试。
     pub(crate) contended: bool,
 }
 
-/// 挂起所有闲置够久的会话。
+/// 挂起超出 `keep_warm` 且闲置够久的会话，按最近活动时间从旧到新优先回收。
 ///
-/// 每个会话在自己的生命周期锁里复核一遍再动手，锁拿不到就记下，稍后重试。随后拿
-/// spawn 闸门的读锁，挡住停机收割。锁序与 `ensure_acp_session` 一致：先
-/// 生命周期锁，后闸门。
+/// 活着的非自动化会话不超过 `keep_warm` 个时不回收，也不排定时截止。超出时最多处理
+/// 超出的那部分名额：不可挂起的忙碌会话仍计入活会话总数，但自身不会被挂起；每个候选
+/// 在自己的生命周期锁里复核一遍再动手，锁拿不到就记下稍后重试，同时保留它的名额，
+/// 不越过它去挂起更新的会话。随后拿 spawn 闸门的读锁，挡住停机收割。锁序与
+/// `ensure_acp_session` 一致：先生命周期锁，后闸门。
 pub(crate) fn suspend_idle_acp_sessions(
     acp_sessions: &AcpSessions,
     idle_after: Duration,
+    keep_warm: usize,
 ) -> IdleSweep {
     let mut sweep = IdleSweep::default();
-    let not_yet = |sess: &AcpSession, sweep: &mut IdleSweep| {
-        if sess.idle.idle_for(crate::event_hub::now_ms()) >= idle_after {
-            return false;
+    let mut live: Vec<(u64, String, Arc<AcpSlot<AcpSession>>)> = acp_sessions
+        .snapshot()
+        .into_iter()
+        .filter(|(_, slot)| counts_toward_warm_pool(&slot.value))
+        .map(|(id, slot)| (slot.value.idle.last_activity_ms(), id, slot))
+        .collect();
+    let mut excess = live.len().saturating_sub(keep_warm);
+    if excess == 0 {
+        return sweep;
+    }
+    // 最久未活动的排在前面；同一毫秒按 id 稳定排序。
+    live.sort_by(|(a_ms, a_id, _), (b_ms, b_id, _)| a_ms.cmp(b_ms).then_with(|| a_id.cmp(b_id)));
+
+    for (sampled_ms, id, slot) in live {
+        if excess == 0 {
+            break;
         }
-        let deadline = sess.idle.idle_deadline_ms(idle_after);
-        sweep.next_deadline_ms = next_reaper_wake_ms(sweep.next_deadline_ms, Some(deadline));
-        true
-    };
-    for (id, slot) in acp_sessions.snapshot() {
         let sess = &slot.value;
-        // 挂起的会话下次拉起时会记活动，到时再排。
-        if sess.idle.is_suspended() || not_yet(sess, &mut sweep) {
+        if !counts_toward_warm_pool(sess) {
+            excess -= 1;
             continue;
         }
         // 发件队列里还有发给它、没送到的信：挂起会让交出去的那几封跟着进程一起没了。
-        if acp_suspend_blocker(sess, crate::event_hub::now_ms(), idle_after).is_some()
+        if acp_non_idle_suspend_blocker(sess).is_some()
             || crate::peer_messages::has_undelivered(&id)
         {
             continue;
         }
-        let Some(_lifecycle) = slot.lifecycle.try_lock() else {
-            sweep.contended = true;
-            continue;
-        };
-        if !acp_sessions.is_current(&id, &slot) || not_yet(sess, &mut sweep) {
+        if sess.idle.last_activity_ms() != sampled_ms {
+            // 排序后刚发生新活动，不再是最老的一批；交由后面的候选或下一轮处理。
             continue;
         }
+        let now = crate::event_hub::now_ms();
+        if Duration::from_millis(now.saturating_sub(sampled_ms)) < idle_after {
+            let deadline = idle_deadline_ms(sampled_ms, idle_after);
+            sweep.next_deadline_ms = next_reaper_wake_ms(sweep.next_deadline_ms, Some(deadline));
+            excess -= 1;
+            continue;
+        }
+        let Some(_lifecycle) = slot.lifecycle.try_lock() else {
+            sweep.contended = true;
+            excess -= 1;
+            continue;
+        };
+        if !acp_sessions.is_current(&id, &slot) || !counts_toward_warm_pool(sess) {
+            excess -= 1;
+            continue;
+        }
+        // 拿锁前若被阻塞或刚有新活动，留给后面的候选或下一轮处理。
         if acp_suspend_blocker(sess, crate::event_hub::now_ms(), idle_after).is_some()
             || crate::peer_messages::has_undelivered(&id)
         {
@@ -359,6 +422,7 @@ pub(crate) fn suspend_idle_acp_sessions(
         let gate = acp_sessions.spawn_gate();
         let Ok(_spawn) = gate.try_read() else {
             sweep.contended = true;
+            excess -= 1;
             continue;
         };
         if retire_acp_runtime(sess) {
@@ -369,6 +433,7 @@ pub(crate) fn suspend_idle_acp_sessions(
             // 留下的 unreaped_pid 挡住后面的挂起和拉起，下次拉起前会先复核它。
             eprintln!("[acp] 闲置挂起会话 {id} 时未能证明 runtime 已退出");
         }
+        excess -= 1;
     }
     sweep
 }

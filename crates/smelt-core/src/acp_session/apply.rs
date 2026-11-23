@@ -177,6 +177,16 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
                 skip_persist = false;
             }
         }
+        ConversationEvent::QueuedInputSettled {
+            lane,
+            text,
+            images,
+            outcome: settled,
+        } => {
+            if apply_queued_input_settled(state, &mut outcome, lane, text, images, settled) {
+                skip_persist = false;
+            }
+        }
         ConversationEvent::ComposerRestore {
             revision,
             texts,
@@ -398,6 +408,54 @@ fn apply_prompt_queue(
     true
 }
 
+/// 一条插话 / 排队没进 provider 的队列。宿主发出时把它挂在输入框上方，这里撤掉：
+/// 开了新一轮就按新回合写气泡，拒收的还回输入框，被扩展接走的就此结束。
+fn apply_queued_input_settled(
+    state: &mut AcpSessionState,
+    outcome: &mut ApplyOutcome,
+    lane: crate::acp_conn::InputLane,
+    text: String,
+    images: Vec<crate::acp_chat::AcpImage>,
+    settled: crate::acp_conn::QueuedInputOutcome,
+) -> bool {
+    match lane {
+        crate::acp_conn::InputLane::Steering => {
+            if let Some(ix) = state
+                .queued_steering
+                .iter()
+                .position(|queued| *queued == text)
+            {
+                state.queued_steering.remove(ix);
+                if ix < state.queued_steering_images.len() {
+                    state.queued_steering_images.remove(ix);
+                }
+            }
+        }
+        crate::acp_conn::InputLane::FollowUp => {
+            if let Some(ix) = state
+                .queued_follow_up
+                .iter()
+                .position(|queued| *queued == text)
+            {
+                state.queued_follow_up.remove(ix);
+            }
+        }
+    }
+    match settled {
+        crate::acp_conn::QueuedInputOutcome::StartedTurn => {
+            let first_new = state.entries.len();
+            super::note_prompt_sent(state, text, images);
+            outcome.entries_offset = Some(first_new);
+            true
+        }
+        crate::acp_conn::QueuedInputOutcome::Rejected(_) => {
+            queue_composer_restore(state, vec![text], images);
+            false
+        }
+        crate::acp_conn::QueuedInputOutcome::Handled => false,
+    }
+}
+
 fn consumed_steering_count(old: &[String], new: &[String]) -> usize {
     if new.len() <= old.len() && old.ends_with(new) {
         old.len() - new.len()
@@ -467,6 +525,7 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
             | ConversationEvent::SessionControls { .. }
             | ConversationEvent::Compaction { .. }
             | ConversationEvent::ProviderRetry(_)
+            | ConversationEvent::QueuedInputSettled { .. }
             | ConversationEvent::PromptQueue { .. }
             | ConversationEvent::ComposerRestore { .. }
             | ConversationEvent::Plan(_)

@@ -15,6 +15,7 @@ use agent_client_protocol::v1::schema::{
 use futures::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, Stream, StreamExt};
 
 use crate::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
+use crate::acp_conn::QueuedInputOutcome;
 use crate::acp_conn::{
     AcpForkCut, AcpStdio, ConfigValue, ContextUsageBreakdown, ConversationCommand,
     ConversationEvent, ConversationHandle, ConversationLaunch, ConversationRestoreFailure,
@@ -100,9 +101,8 @@ struct PiState {
     /// 主循环发出的 `get_state`：id → 发出时的 `compaction_starts`。
     state_requests: HashMap<String, u64>,
     /// 已发出、等 Pi 回执的 steer 请求。只用来把 `in_flight_rpc` 记账还回去；
-    /// steer 不开新回合，不能碰 `prompt_request_id`。
-    steer_request_ids: HashSet<String>,
-    follow_up_request_ids: HashSet<String>,
+    /// 插话 / 排队发的 `prompt`。和 `prompt_request_id` 分开记：进了队列的不开新回合。
+    queued_input_requests: HashMap<String, QueueLane>,
     compact_request_ids: HashSet<String>,
 
     /// `clear_queue` 回执后是否要把 in_flight 还回去（ClearQueue 动作才要）。
@@ -2039,16 +2039,12 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 return Ok(());
             }
             if state.active_turn {
-                // 回合还在跑时回车必须插进当前回合。丢掉这条 prompt 会让输入
-                // 框被清空、Stop 一直亮着，看起来像卡死。
-                return Box::pin(handle_command(
-                    ConversationCommand::Steer { text, images },
-                    writer,
-                    event_tx,
-                    state,
-                    in_flight_rpc,
-                ))
-                .await;
+                // 要自成一轮的 prompt 不能改写成插话：daemon 已经按新回合写了气泡、占了闸门，
+                // 悄悄插进别的回合会让它永远等不到回执。按拒收处理，daemon 退回队列，
+                // 等 Pi 空下来再发。
+                let _ = event_tx.try_send(ConversationEvent::PromptNotAccepted);
+                finish_in_flight(in_flight_rpc);
+                return Ok(());
             }
             state.active_turn = true;
             state.prompt_accepted = false;
@@ -2072,73 +2068,28 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             state.prompt_sent_at = Some(std::time::Instant::now());
         }
         ConversationCommand::Steer { text, images } => {
-            // steer 只对正在跑的回合有意义。界面和 Pi 都空了就降级成普通 prompt，
-            // 否则这条消息会被 Pi 丢掉（用户看得到回显却永远等不到回复）。
-            // Pi 还忙着时不能降级：裸 prompt 会被直接拒绝。
-            if !state.active_turn && !state.provider_busy {
-                return Box::pin(handle_command(
-                    ConversationCommand::Prompt { text, images },
-                    writer,
-                    event_tx,
-                    state,
-                    in_flight_rpc,
-                ))
-                .await;
-            }
-            if consume_session_slash(&text, writer, event_tx, state, in_flight_rpc, true).await? {
-                return Ok(());
-            }
-            let id = state.request_id("steer");
-            state.steer_request_ids.insert(id.clone());
-            state.queue.sent(
+            send_queued_input(
                 QueueLane::Steering,
-                id.clone(),
-                text.clone(),
-                images.clone(),
-            );
-            let mut request = serde_json::json!({
-                "id": id,
-                "type": "steer",
-                "message": text,
-            });
-            let images = encode_pi_images(images);
-            if !images.is_empty() {
-                request["images"] = serde_json::Value::Array(images);
-            }
-            write_rpc(writer, &request).await?;
+                text,
+                images,
+                writer,
+                event_tx,
+                state,
+                in_flight_rpc,
+            )
+            .await?;
         }
         ConversationCommand::FollowUp { text, images } => {
-            if !state.active_turn && !state.provider_busy {
-                return Box::pin(handle_command(
-                    ConversationCommand::Prompt { text, images },
-                    writer,
-                    event_tx,
-                    state,
-                    in_flight_rpc,
-                ))
-                .await;
-            }
-            if consume_session_slash(&text, writer, event_tx, state, in_flight_rpc, true).await? {
-                return Ok(());
-            }
-            let id = state.request_id("follow-up");
-            state.follow_up_request_ids.insert(id.clone());
-            state.queue.sent(
+            send_queued_input(
                 QueueLane::FollowUp,
-                id.clone(),
-                text.clone(),
-                images.clone(),
-            );
-            let mut request = serde_json::json!({
-                "id": id,
-                "type": "follow_up",
-                "message": text,
-            });
-            let images = encode_pi_images(images);
-            if !images.is_empty() {
-                request["images"] = serde_json::Value::Array(images);
-            }
-            write_rpc(writer, &request).await?;
+                text,
+                images,
+                writer,
+                event_tx,
+                state,
+                in_flight_rpc,
+            )
+            .await?;
         }
         ConversationCommand::Compact {
             custom_instructions,
@@ -2278,6 +2229,107 @@ async fn send_compact<W: AsyncWrite + Unpin>(
     write_rpc(writer, &request).await
 }
 
+/// 回车（插进当前回合）和 ⌥Enter（排到本轮之后）。是插话还是开新一轮由 Pi 原子地定：
+/// 发带 `streamingBehavior` 的 `prompt`，Pi 在跑就进队列，空着就直接开一轮，回执的
+/// `disposition` 说明是哪种。这里不按本地状态猜，本地状态总比 Pi 晚一步。
+async fn send_queued_input<W: AsyncWrite + Unpin>(
+    lane: QueueLane,
+    text: String,
+    images: Vec<crate::acp_conn::PromptImage>,
+    writer: &mut W,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    state: &mut PiState,
+    in_flight_rpc: &AtomicUsize,
+) -> Result<(), String> {
+    if consume_session_slash(
+        &text,
+        writer,
+        event_tx,
+        state,
+        in_flight_rpc,
+        state.active_turn,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    let (prefix, behavior) = match lane {
+        QueueLane::Steering => ("steer", "steer"),
+        QueueLane::FollowUp => ("follow-up", "followUp"),
+    };
+    let id = state.request_id(prefix);
+    state.queued_input_requests.insert(id.clone(), lane);
+    state
+        .queue
+        .sent(lane, id.clone(), text.clone(), images.clone());
+    let mut request = serde_json::json!({
+        "id": id,
+        "type": "prompt",
+        "message": text,
+        "streamingBehavior": behavior,
+    });
+    let images = encode_pi_images(images);
+    if !images.is_empty() {
+        request["images"] = serde_json::Value::Array(images);
+    }
+    write_rpc(writer, &request).await
+}
+
+/// 插话 / 排队那条 `prompt` 的回执。
+fn settle_queued_input(
+    lane: QueueLane,
+    id: &str,
+    response: &serde_json::Value,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    state: &mut PiState,
+) {
+    let disposition = response
+        .get("data")
+        .and_then(|data| data.get("disposition"))
+        .and_then(serde_json::Value::as_str);
+    let outcome = match ensure_response_success(response) {
+        Err(error) => QueuedInputOutcome::Rejected(error),
+        Ok(()) if disposition == Some("queued") => {
+            state.queue.acknowledged(id, true);
+            return;
+        }
+        Ok(()) if disposition == Some("started") => {
+            // Pi 空着，这条直接开了一轮：接成 Smelt 自己的回合。回执先于 agent_start，
+            // 所以随后的 agent_start 不会再当成 Pi 自己起的一轮。
+            state.active_turn = true;
+            state.prompt_accepted = true;
+            state.provider_busy = true;
+            state.cancel_requested = false;
+            state.compaction_idle_pending = false;
+            state.last_stop_reason = None;
+            state.last_error = None;
+            state.prompts_sent += 1;
+            QueuedInputOutcome::StartedTurn
+        }
+        Ok(()) => QueuedInputOutcome::Handled,
+    };
+    let Some((text, images)) = state.queue.take_unqueued(id) else {
+        return;
+    };
+    if let QueuedInputOutcome::Rejected(detail) = &outcome {
+        let note = match lane {
+            QueueLane::Steering => RuntimeNote::SteerFailed {
+                detail: detail.clone(),
+            },
+            QueueLane::FollowUp => RuntimeNote::FollowUpFailed {
+                detail: detail.clone(),
+            },
+        };
+        let _ = event_tx.try_send(ConversationEvent::RuntimeNotice(note));
+    }
+    let _ = event_tx.try_send(ConversationEvent::QueuedInputSettled {
+        lane: lane.into(),
+        text,
+        images,
+        outcome,
+    });
+}
+
 async fn send_clear_queue<W: AsyncWrite + Unpin>(
     writer: &mut W,
     state: &mut PiState,
@@ -2290,16 +2342,6 @@ async fn send_clear_queue<W: AsyncWrite + Unpin>(
         &serde_json::json!({"id": id, "type": "clear_queue"}),
     )
     .await
-}
-
-/// 是 Pi 自己确认收进队列的 steer / follow_up。被输入处理器接走的不算。
-fn queued_by_pi(response: &serde_json::Value) -> bool {
-    ensure_response_success(response).is_ok()
-        && response
-            .get("data")
-            .and_then(|data| data.get("disposition"))
-            .and_then(serde_json::Value::as_str)
-            != Some("handled")
 }
 
 fn emit_queue_restore(
@@ -2563,25 +2605,8 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         }
         return Ok(());
     }
-    if state.steer_request_ids.remove(&id) {
-        let result = ensure_response_success(&response);
-        state.queue.acknowledged(&id, queued_by_pi(&response));
-        if let Err(error) = result {
-            let _ = event_tx.try_send(ConversationEvent::RuntimeNotice(RuntimeNote::SteerFailed {
-                detail: error,
-            }));
-        }
-        finish_in_flight(in_flight_rpc);
-        return Ok(());
-    }
-    if state.follow_up_request_ids.remove(&id) {
-        let result = ensure_response_success(&response);
-        state.queue.acknowledged(&id, queued_by_pi(&response));
-        if let Err(error) = result {
-            let _ = event_tx.try_send(ConversationEvent::RuntimeNotice(
-                RuntimeNote::FollowUpFailed { detail: error },
-            ));
-        }
+    if let Some(lane) = state.queued_input_requests.remove(&id) {
+        settle_queued_input(lane, &id, &response, event_tx, state);
         finish_in_flight(in_flight_rpc);
         return Ok(());
     }
@@ -5315,50 +5340,148 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
     }
 
-    #[test]
-    fn steer_injects_into_the_running_turn_without_starting_a_new_one() {
+    fn send_steer(state: &mut PiState, text: &str) -> serde_json::Value {
         let (event_tx, _) = smol::channel::unbounded();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::Steer {
+                text: text.to_string(),
+                images: Vec::new(),
+            },
+            &mut writer,
+            &event_tx,
+            state,
+            &in_flight,
+        ))
+        .unwrap();
+        let line = String::from_utf8(writer.into_inner()).unwrap();
+        serde_json::from_str(line.trim()).unwrap()
+    }
+
+    fn answer(
+        state: &mut PiState,
+        request: &serde_json::Value,
+        response: serde_json::Value,
+    ) -> Vec<ConversationEvent> {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut response = response;
+        response["id"] = request["id"].clone();
+        smol::block_on(handle_response(
+            response,
+            &mut writer,
+            &event_tx,
+            state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        std::iter::from_fn(|| event_rx.try_recv().ok()).collect()
+    }
+
+    /// 插话不按本地状态猜 Pi 在不在跑：一律交给 Pi 的 `prompt` + `streamingBehavior`，
+    /// 由 Pi 原子地决定进队列还是开新一轮。
+    #[test]
+    fn steer_lets_pi_decide_between_queueing_and_starting_a_turn() {
         let mut state = PiState::new();
         state.active_turn = true;
         state.prompt_request_id = Some("smelt-prompt-1".to_string());
-        let in_flight = AtomicUsize::new(1);
-        let mut writer = futures::io::Cursor::new(Vec::new());
 
-        smol::block_on(handle_command(
-            ConversationCommand::Steer {
-                text: "换个方向".to_string(),
-                images: Vec::new(),
-            },
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
+        let request = send_steer(&mut state, "换个方向");
 
-        let line = String::from_utf8(writer.into_inner()).unwrap();
-        let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(request["type"], "steer");
+        assert_eq!(request["type"], "prompt");
+        assert_eq!(request["streamingBehavior"], "steer");
         assert_eq!(request["message"], "换个方向");
         // 回合归属不能被插入改写，否则 prompt 的 response 会认不出自己。
         assert_eq!(state.prompt_request_id.as_deref(), Some("smelt-prompt-1"));
-        assert!(state.active_turn);
-        assert_eq!(state.steer_request_ids.len(), 1);
+        assert_eq!(state.queued_input_requests.len(), 1);
+
+        let events = answer(
+            &mut state,
+            &request,
+            serde_json::json!({"type": "response", "command": "prompt", "success": true,
+                "data": {"disposition": "queued"}}),
+        );
+        assert!(
+            events.is_empty(),
+            "进了队列的由 queue_update 报，回执不另发事件"
+        );
+        let restore = state.queue.cleared(vec!["换个方向".into()], Vec::new());
+        assert_eq!(restore, vec![("换个方向".to_string(), Vec::new())]);
     }
 
-    /// daemon 判定「回合在跑」到命令抵达驱动之间，回合可能刚好结束。此时
-    /// steer 会被 Pi 收进队列直到下一轮，用户等不到回复；降级成 prompt 才不丢。
+    /// daemon 判定「回合在跑」到命令抵达之间，回合可能刚好结束。Pi 会直接开新一轮，
+    /// 驱动要接成自己的回合并报回去，宿主据此把它从队列挪成新回合的气泡。
     #[test]
-    fn steer_after_the_turn_ended_falls_back_to_a_normal_prompt() {
-        let (event_tx, _) = smol::channel::unbounded();
+    fn a_steer_that_pi_started_as_a_new_turn_is_reported() {
         let mut state = PiState::new();
-        state.active_turn = false;
+
+        let request = send_steer(&mut state, "补一句");
+        assert_eq!(request["type"], "prompt");
+        assert!(!state.active_turn, "回执之前不知道 Pi 会怎么处理");
+
+        let events = answer(
+            &mut state,
+            &request,
+            serde_json::json!({"type": "response", "command": "prompt", "success": true,
+                "data": {"disposition": "started"}}),
+        );
+
+        assert!(state.active_turn);
+        assert!(state.provider_busy);
+        assert!(matches!(
+            events.as_slice(),
+            [ConversationEvent::QueuedInputSettled {
+                lane: crate::acp_conn::InputLane::Steering,
+                text,
+                outcome: QueuedInputOutcome::StartedTurn,
+                ..
+            }] if text == "补一句"
+        ));
+        assert!(state.queue.cleared(Vec::new(), Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_rejected_steer_goes_back_to_the_composer() {
+        let mut state = PiState::new();
+        let request = send_steer(&mut state, "没登录");
+
+        let events = answer(
+            &mut state,
+            &request,
+            serde_json::json!({"type": "response", "command": "prompt", "success": false,
+                "error": "No API key"}),
+        );
+
+        assert!(!state.active_turn);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ConversationEvent::RuntimeNotice(RuntimeNote::SteerFailed { .. }),
+                ConversationEvent::QueuedInputSettled {
+                    text,
+                    outcome: QueuedInputOutcome::Rejected(_),
+                    ..
+                },
+            ] if text == "没登录"
+        ));
+    }
+
+    /// 要自成一轮的 prompt 不能被改写成插话：daemon 已经按新回合记了账，插进别的回合
+    /// 就永远等不到回执。
+    #[test]
+    fn a_prompt_during_a_running_turn_is_refused_not_steered() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
         let in_flight = AtomicUsize::new(1);
         let mut writer = futures::io::Cursor::new(Vec::new());
 
         smol::block_on(handle_command(
-            ConversationCommand::Steer {
-                text: "补一句".to_string(),
+            ConversationCommand::Prompt {
+                text: "新问题".to_string(),
                 images: Vec::new(),
             },
             &mut writer,
@@ -5368,12 +5491,12 @@ mod tests {
         ))
         .unwrap();
 
-        let line = String::from_utf8(writer.into_inner()).unwrap();
-        let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(request["type"], "prompt");
-        assert_eq!(request["message"], "补一句");
-        assert!(state.active_turn);
-        assert!(state.steer_request_ids.is_empty());
+        assert!(writer.into_inner().is_empty());
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::PromptNotAccepted)
+        ));
     }
 
     #[test]
@@ -6939,34 +7062,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_during_an_active_turn_is_steered_instead_of_dropped() {
-        let (event_tx, event_rx) = smol::channel::unbounded();
-        let mut state = PiState::new();
-        state.active_turn = true;
-        let in_flight = AtomicUsize::new(2);
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_command(
-            ConversationCommand::Prompt {
-                text: "second".to_string(),
-                images: Vec::new(),
-            },
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-
-        let request: serde_json::Value =
-            serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
-        assert_eq!(request["type"], "steer");
-        assert_eq!(request["message"], "second");
-        assert!(state.active_turn);
-        assert_eq!(in_flight.load(Ordering::SeqCst), 2);
-        assert!(event_rx.try_recv().is_err());
-    }
-
-    #[test]
     fn background_notify_becomes_a_status_event_and_is_not_a_pi_prompt() {
         let event = background_notice_from_outbound(&serde_json::json!({
             "type": "smelt_background_notify",
@@ -7643,7 +7738,8 @@ mod tests {
         .unwrap();
         let request: serde_json::Value =
             serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
-        assert_eq!(request["type"], "steer");
+        assert_eq!(request["type"], "prompt");
+        assert_eq!(request["streamingBehavior"], "steer");
         assert!(!state.active_turn);
     }
 
@@ -8007,10 +8103,11 @@ mod tests {
 
         let request: serde_json::Value =
             serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
-        assert_eq!(request["type"], "follow_up");
+        assert_eq!(request["type"], "prompt");
+        assert_eq!(request["streamingBehavior"], "followUp");
         assert_eq!(request["message"], "做完再总结");
         assert!(state.active_turn);
-        assert_eq!(state.follow_up_request_ids.len(), 1);
+        assert_eq!(state.queued_input_requests.len(), 1);
     }
 
     #[test]
@@ -8330,7 +8427,7 @@ mod tests {
         let in_flight = AtomicUsize::new(0);
         let mut writer = futures::io::Cursor::new(Vec::new());
         smol::block_on(handle_command(
-            ConversationCommand::Prompt {
+            ConversationCommand::Steer {
                 text: "顺便看看日志".to_string(),
                 images: Vec::new(),
             },
@@ -8342,7 +8439,10 @@ mod tests {
         .unwrap();
         let request: serde_json::Value =
             serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
-        assert_eq!(request["type"], "steer", "Pi 正在跑，裸 prompt 会被拒");
+        assert_eq!(
+            request["streamingBehavior"], "steer",
+            "Pi 正在跑，裸 prompt 会被拒"
+        );
 
         handle_event(
             serde_json::json!({"type": "agent_settled", "aborted": false}),

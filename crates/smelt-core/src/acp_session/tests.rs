@@ -4431,3 +4431,60 @@ fn mcp_session_send_tool_call_attaches_peer_send_projection() {
         other => panic!("expected ToolCall, got {other:?}"),
     }
 }
+
+/// 回合刚结束时回车：宿主以为还在跑，挂成插话；Pi 其实空了，直接开了新一轮。
+/// 输入框上方那条要撤掉，按新回合只写一个气泡，之后的队列快照也不能再补一个。
+#[test]
+fn a_steer_pi_started_as_a_new_turn_moves_from_the_queue_to_one_bubble() {
+    let mut state = fresh_state();
+    state.phase = DaemonPhase::Thinking;
+    queue_mid_turn_input(&mut state, "补一句".into(), Vec::new());
+    let turn_seq = state.turn_seq;
+
+    apply_event(
+        &mut state,
+        ConversationEvent::QueuedInputSettled {
+            lane: crate::acp_conn::InputLane::Steering,
+            text: "补一句".into(),
+            images: Vec::new(),
+            outcome: crate::acp_conn::QueuedInputOutcome::StartedTurn,
+        },
+    );
+    apply_event(
+        &mut state,
+        ConversationEvent::PromptQueue {
+            steering: Vec::new(),
+            follow_up: Vec::new(),
+        },
+    );
+
+    assert!(state.queued_steering.is_empty());
+    assert!(state.queued_steering_images.is_empty());
+    assert_eq!(state.turn_seq, turn_seq + 1);
+    let bubbles = state
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry, AcpEntry::User(text) if text == "补一句"))
+        .count();
+    assert_eq!(bubbles, 1);
+}
+
+#[test]
+fn a_rejected_steer_returns_to_the_composer_without_a_bubble() {
+    let mut state = fresh_state();
+    queue_mid_turn_input(&mut state, "没登录".into(), Vec::new());
+
+    apply_event(
+        &mut state,
+        ConversationEvent::QueuedInputSettled {
+            lane: crate::acp_conn::InputLane::Steering,
+            text: "没登录".into(),
+            images: Vec::new(),
+            outcome: crate::acp_conn::QueuedInputOutcome::Rejected("No API key".into()),
+        },
+    );
+
+    assert!(state.queued_steering.is_empty());
+    assert_eq!(state.composer_restore_texts, ["没登录"]);
+    assert!(state.entries().is_empty());
+}
