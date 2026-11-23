@@ -43,6 +43,7 @@ smelt-layouts = { path = "../plugins/layouts" }
 smelt-machines = { path = "../plugins/machines" }
 smelt-maintenance = { path = "../plugins/maintenance" }
 smelt-notifications = { path = "../plugins/notifications" }
+smelt-office = { path = "../plugins/office" }
 smelt-resources = { path = "../plugins/resources" }
 smelt-sessions = { path = "../plugins/sessions" }
 smelt-skills = { path = "../plugins/skills" }

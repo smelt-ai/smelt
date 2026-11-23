@@ -14,6 +14,7 @@ How the product works today.
 - [`push-relay-deployment.md`](push-relay-deployment.md) — Running the push relay that forwards iOS notifications to APNs.
 - [`release.md`](release.md) — Tags, release artifacts, and stable versus pre-release.
 - [`ui-design-language.md`](ui-design-language.md) — Desktop visual language: theme tokens, surfaces, and chrome.
+- [`pixel-office.md`](pixel-office.md) — Pixel Office plugin: provider coverage, runtime state projection, session navigation, and Pixel Agents implementation research.
 - [`mobile/README.md`](../mobile/README.md) — Building the Flutter mobile client.
 
 ## Development

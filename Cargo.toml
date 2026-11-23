@@ -48,6 +48,7 @@ members = [
     "crates/plugins/machines",
     "crates/plugins/maintenance",
     "crates/plugins/notifications",
+    "crates/plugins/office",
     "crates/plugins/resources",
     "crates/plugins/sessions",
     "crates/plugins/skills",
