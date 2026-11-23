@@ -23,14 +23,19 @@ const RAIL_GUTTER: f32 = 56.;
 /// 刻度列离左边的距离和它的宽度（也是指针能点中的宽度）。
 const RAIL_LEFT: f32 = 12.;
 const RAIL_WIDTH: f32 = 28.;
-/// 刻度之间的间距：问少时疏一点，问多时压到看得出一条条为止。
-const TICK_PITCH_MAX: f32 = 10.;
-const TICK_PITCH_MIN: f32 = 3.;
+/// 刻度之间的间距：保持固定舒适行距，超出窗口容量后随当前阅读位置滑动。
+const TICK_PITCH: f32 = 10.;
+/// 滑动窗口最多同时画的刻度数（奇数，当前读到的那一问居中时上下对称）。
+const MAX_VISIBLE_TICKS: usize = 11;
+/// 窗口被截断的一端往里渐隐渐短的刻度数，提示上下还有更多提问。
+const EDGE_FADE_TICKS: usize = 2;
 /// 刻度列上下至少留的空。
 const RAIL_MARGIN: f32 = 48.;
 const PEEK_WIDTH: f32 = 300.;
-/// 刻度平时的长度和亮起（读到的、指着的）时的长度。
+/// 刻度平时的长度、被截断端最外侧的最小长度，以及亮起（读到的、指着的）时的长度。
 const TICK_SHORT: f32 = 8.;
+const TICK_EDGE_MIN: f32 = 4.5;
+const TICK_EDGE_MIN_OPACITY: f32 = 0.35;
 const TICK_LONG: f32 = 14.;
 
 /// 提问导航要的数据，将来由对话能力给 JS 插件。
@@ -80,9 +85,74 @@ impl ConversationView {
     }
 }
 
-/// 消息流两边的留白够不够画导航。不够就不用取 [`PromptRail`]：它每次都要扫一遍条目。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RailWindow {
+    start: usize,
+    end: usize,
+    has_above: bool,
+    has_below: bool,
+}
+
+/// 按视口高度和数量上限算当前滑动窗口覆盖的提问下标区间 `[start..end)`。
+/// 窗口始终围绕正在读的那一问居中，触及首尾时贴边停住，不再溢出或压扁行距。
+fn prompt_rail_window(
+    prompts: &[usize],
+    reading: Option<usize>,
+    viewport_height: f32,
+) -> Option<RailWindow> {
+    let total = prompts.len();
+    if total < 2 {
+        return None;
+    }
+    let usable_height = (viewport_height - 2. * RAIL_MARGIN).max(0.);
+    let viewport_cap = (usable_height / TICK_PITCH).floor() as usize;
+    let max_visible = viewport_cap.min(MAX_VISIBLE_TICKS);
+    if max_visible < 2 {
+        return None;
+    }
+    if total <= max_visible {
+        return Some(RailWindow {
+            start: 0,
+            end: total,
+            has_above: false,
+            has_below: false,
+        });
+    }
+    let anchor = reading
+        .and_then(|ix| prompts.iter().position(|p| *p == ix))
+        .unwrap_or(0);
+    let half = max_visible / 2;
+    let max_start = total - max_visible;
+    let start = anchor.saturating_sub(half).min(max_start);
+    let end = start + max_visible;
+    Some(RailWindow {
+        start,
+        end,
+        has_above: start > 0,
+        has_below: end < total,
+    })
+}
+
+/// 窗口内第 `slot` 条刻度的边缘系数：`0.0` 是被截断端最外侧，`1.0` 是完整刻度。
+fn edge_factor(slot: usize, len: usize, has_above: bool, has_below: bool) -> f32 {
+    let fade = (len.saturating_sub(1) / 2).min(EDGE_FADE_TICKS);
+    if fade == 0 {
+        return 1.;
+    }
+    let mut dist = fade;
+    if has_above {
+        dist = dist.min(slot);
+    }
+    if has_below {
+        dist = dist.min(len - 1 - slot);
+    }
+    (dist as f32 / fade as f32).min(1.)
+}
+
+/// 消息流两边的留白与视口高度够不够画导航。不够就不用取 [`PromptRail`]：它每次都要扫一遍条目。
 pub(super) fn prompt_rail_fits(viewport: gpui::Size<gpui::Pixels>) -> bool {
     viewport.width >= ui_theme::conversation_max_width() + px(2. * RAIL_GUTTER)
+        && viewport.height >= px(2. * RAIL_MARGIN + 2. * TICK_PITCH)
 }
 
 /// 画导航。要 `window` 取弹簧和入场进度，所以在 `render` 里调，结果交给 `view` 摆。
@@ -93,13 +163,13 @@ pub(super) fn render_prompt_rail(
     window: &mut Window,
     cx: &mut Context<ConversationView>,
 ) -> Option<gpui::AnyElement> {
-    if !prompt_rail_fits(rail.viewport) || rail.prompts.len() < 2 {
+    if !prompt_rail_fits(rail.viewport) {
         return None;
     }
     let height = f32::from(rail.viewport.height);
-    let count = rail.prompts.len() as f32;
-    let pitch = ((height - 2. * RAIL_MARGIN) / count).clamp(TICK_PITCH_MIN, TICK_PITCH_MAX);
-    let rail_height = pitch * count;
+    let win = prompt_rail_window(&rail.prompts, rail.reading, height)?;
+    let visible = &rail.prompts[win.start..win.end];
+    let rail_height = TICK_PITCH * visible.len() as f32;
     let top = ((height - rail_height) / 2.).max(0.);
     let hovered = hover.map(|item| item.entry_ix);
     let mut ticks = div()
@@ -113,7 +183,8 @@ pub(super) fn render_prompt_rail(
         .debug_selector(|| "ACP_PROMPT_RAIL".into());
     // 弹簧状态按元素 id 挂；套上视图的 id，分屏里几段会话的刻度不串。
     let rail_scope: gpui::ElementId = ("acp-prompt-rail", cx.entity_id()).into();
-    for (k, &entry_ix) in rail.prompts.iter().enumerate() {
+    for (slot, &entry_ix) in visible.iter().enumerate() {
+        let prompt_ix = win.start + slot;
         let target = if rail.reading == Some(entry_ix) || hovered == Some(entry_ix) {
             1.
         } else {
@@ -128,22 +199,28 @@ pub(super) fn render_prompt_rail(
                 cx,
             )
         });
+        let edge = edge_factor(slot, visible.len(), win.has_above, win.has_below);
+        let rest_width = TICK_EDGE_MIN + (TICK_SHORT - TICK_EDGE_MIN) * edge;
+        let width = rest_width + (TICK_LONG - rest_width) * lit;
+        let rest_opacity = TICK_EDGE_MIN_OPACITY + (1. - TICK_EDGE_MIN_OPACITY) * edge;
+        let tick_opacity = rest_opacity + (1. - rest_opacity) * lit;
         ticks = ticks.child(
             div()
                 .id(("acp-prompt-tick", entry_ix))
-                .debug_selector(move || format!("ACP_PROMPT_TICK_{k}"))
+                .debug_selector(move || format!("ACP_PROMPT_TICK_{prompt_ix}"))
                 .w_full()
-                .h(px(pitch))
+                .h(px(TICK_PITCH))
                 .flex()
                 .items_center()
                 .cursor_pointer()
                 .child(
                     div()
                         .relative()
-                        .h(px(if pitch < 5. { 1. } else { 2. }))
-                        .w(px(TICK_SHORT + (TICK_LONG - TICK_SHORT) * lit))
+                        .h(px(2.))
+                        .w(px(width))
                         .rounded_full()
                         .bg(gpui::rgb(ui_theme::faint()))
+                        .opacity(tick_opacity)
                         .child(
                             div()
                                 .absolute()
@@ -166,8 +243,8 @@ pub(super) fn render_prompt_rail(
     // 卡片的进度和位置只在它开着时取：关掉那一帧没人取，状态就回收了，下次打开从头淡入，
     // 位置也直接落在新刻度旁，不从上次的地方滑过来。
     let peek = hover.and_then(|item| {
-        let k = rail.prompts.iter().position(|ix| *ix == item.entry_ix)?;
-        let y = top + pitch * (k as f32 + 0.5);
+        let slot = visible.iter().position(|ix| *ix == item.entry_ix)?;
+        let y = top + TICK_PITCH * (slot as f32 + 0.5);
         let target = (y - 20.).clamp(8., (height - 120.).max(8.));
         let peek_scope: gpui::ElementId = ("acp-prompt-peek", cx.entity_id()).into();
         let (enter, top) = window.with_id(peek_scope, |window| {
@@ -238,4 +315,89 @@ fn render_prompt_peek(item: &PromptIndexItem, top: f32, opacity: f32) -> gpui::A
             )
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_VISIBLE_TICKS, RailWindow, edge_factor, prompt_rail_window};
+
+    #[test]
+    fn window_shows_all_prompts_when_within_limit() {
+        let prompts: Vec<usize> = (0..7).map(|i| i * 2).collect();
+        assert_eq!(
+            prompt_rail_window(&prompts, Some(12), 800.),
+            Some(RailWindow {
+                start: 0,
+                end: 7,
+                has_above: false,
+                has_below: false,
+            })
+        );
+    }
+
+    #[test]
+    fn window_caps_at_max_visible_ticks_and_slides_around_reading() {
+        let prompts: Vec<usize> = (0..60).map(|i| i * 2).collect();
+        // 读第一问：贴顶停住，只有下方还有更多。
+        assert_eq!(
+            prompt_rail_window(&prompts, Some(0), 1200.),
+            Some(RailWindow {
+                start: 0,
+                end: MAX_VISIBLE_TICKS,
+                has_above: false,
+                has_below: true,
+            })
+        );
+        // 读中间一问：居中滑动，上下都有隐藏提问。
+        assert_eq!(
+            prompt_rail_window(&prompts, Some(30 * 2), 1200.),
+            Some(RailWindow {
+                start: 25,
+                end: 25 + MAX_VISIBLE_TICKS,
+                has_above: true,
+                has_below: true,
+            })
+        );
+        // 读最后一问：贴底停住，只有上方还有更多。
+        assert_eq!(
+            prompt_rail_window(&prompts, Some(59 * 2), 1200.),
+            Some(RailWindow {
+                start: 60 - MAX_VISIBLE_TICKS,
+                end: 60,
+                has_above: true,
+                has_below: false,
+            })
+        );
+    }
+
+    #[test]
+    fn window_adapts_to_short_viewport_and_hides_when_too_short() {
+        let prompts: Vec<usize> = (0..60).map(|i| i * 2).collect();
+        // usable = 160 - 96 = 64 -> 6 ticks（低于 MAX_VISIBLE_TICKS）
+        let win = prompt_rail_window(&prompts, Some(59 * 2), 160.).expect("短视口仍能放 6 条");
+        assert_eq!(win.end - win.start, 6);
+        assert_eq!(win.end, 60);
+        assert!(win.has_above);
+        assert!(!win.has_below);
+
+        // usable = 100 - 96 = 4 -> < 2 ticks，不画
+        assert_eq!(prompt_rail_window(&prompts, Some(0), 100.), None);
+    }
+
+    #[test]
+    fn edge_factor_only_fades_clipped_ends() {
+        assert_eq!(edge_factor(0, 11, false, false), 1.);
+        assert_eq!(edge_factor(10, 11, false, false), 1.);
+
+        // 只有上方截断：顶上 2 条递增，底部不淡
+        assert_eq!(edge_factor(0, 11, true, false), 0.);
+        assert!(edge_factor(1, 11, true, false) > edge_factor(0, 11, true, false));
+        assert!(edge_factor(1, 11, true, false) < 1.);
+        assert_eq!(edge_factor(2, 11, true, false), 1.);
+        assert_eq!(edge_factor(10, 11, true, false), 1.);
+
+        // 极短窗口（2 条）不做衰减，两条都完整可读
+        assert_eq!(edge_factor(0, 2, true, true), 1.);
+        assert_eq!(edge_factor(1, 2, true, true), 1.);
+    }
 }

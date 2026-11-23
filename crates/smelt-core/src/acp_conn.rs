@@ -3357,6 +3357,10 @@ pub(crate) fn session_configs_from_config(
                         .collect(),
                     boolean: None,
                     smelt: None,
+                    is_thought_level: matches!(
+                        opt.category,
+                        Some(SessionConfigOptionCategory::ThoughtLevel)
+                    ),
                 })
             }
             SessionConfigKind::Boolean(flag) => Some(SessionConfigState {
@@ -3372,6 +3376,7 @@ pub(crate) fn session_configs_from_config(
                 options: vec![("true".into(), "On".into()), ("false".into(), "Off".into())],
                 boolean: Some(flag.current_value),
                 smelt: None,
+                is_thought_level: false,
             }),
             _ => None,
         })

@@ -379,3 +379,147 @@ impl gpui::Render for Stage {
             .child(self.view.clone())
     }
 }
+
+/// 离屏渲染完整对话输入栏 + 展开的模型与推理弹层（深浅两套主题，供视觉核对）。
+#[test]
+#[ignore = "出图工具，手动跑"]
+fn model_popover_snapshots() {
+    use smelt_plugin_api::model::acp_conn::{
+        ModelProviderGroup, ModelState, SessionConfigState, SmeltConfig,
+    };
+
+    rust_i18n::set_locale("zh-CN");
+    let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target"),
+        std::path::PathBuf::from,
+    );
+    let out = target.join("tmp/snapshots/model-popover");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).expect("建出图目录");
+
+    let mut snap = sample_snapshot();
+    snap.model = Some(ModelState {
+        config_id: "model".into(),
+        current_value: "anthropic/claude-opus-4-6".into(),
+        current_name: "Claude Opus 4.6".into(),
+        options: vec![
+            ("anthropic/claude-opus-4-6".into(), "Claude Opus 4.6".into()),
+            ("anthropic/claude-sonnet-4-6".into(), "Claude Sonnet 4.6".into()),
+            ("anthropic/claude-haiku-4-5".into(), "Claude Haiku 4.5".into()),
+            ("openai/gpt-5.4".into(), "GPT-5.4".into()),
+            ("google/gemini-4-neon".into(), "Gemini 4 Neon".into()),
+        ],
+        provider_groups: vec![
+            ModelProviderGroup {
+                id: "anthropic".into(),
+                name: "Anthropic".into(),
+                options: vec![
+                    ("anthropic/claude-opus-4-6".into(), "Claude Opus 4.6".into()),
+                    ("anthropic/claude-sonnet-4-6".into(), "Claude Sonnet 4.6".into()),
+                    ("anthropic/claude-haiku-4-5".into(), "Claude Haiku 4.5".into()),
+                ],
+                preferred_value: Some("anthropic/claude-opus-4-6".into()),
+            },
+            ModelProviderGroup {
+                id: "openai".into(),
+                name: "OpenAI".into(),
+                options: vec![("openai/gpt-5.4".into(), "GPT-5.4".into())],
+                preferred_value: None,
+            },
+            ModelProviderGroup {
+                id: "google".into(),
+                name: "Google".into(),
+                options: vec![("google/gemini-4-neon".into(), "Gemini 4 Neon".into())],
+                preferred_value: None,
+            },
+        ],
+    });
+    snap.config_options = vec![
+        SessionConfigState {
+            config_id: "thought_level".into(),
+            name: "Thinking Level".into(),
+            description: None,
+            current_name: "High".into(),
+            options: vec![
+                ("low".into(), "Low".into()),
+                ("medium".into(), "Medium".into()),
+                ("high".into(), "High".into()),
+                ("xhigh".into(), "Extra".into()),
+            ],
+            boolean: None,
+            smelt: Some(SmeltConfig::ThinkingLevel),
+            is_thought_level: true,
+        },
+        SessionConfigState {
+            config_id: "mode".into(),
+            name: "Mode".into(),
+            description: None,
+            current_name: "Default".into(),
+            options: vec![
+                ("default".into(), "Default".into()),
+                ("accept_edits".into(), "Accept edits".into()),
+                ("auto".into(), "Auto".into()),
+                ("plan".into(), "Plan".into()),
+            ],
+            boolean: None,
+            smelt: None,
+            is_thought_level: false,
+        },
+        SessionConfigState {
+            config_id: "script_tools".into(),
+            name: "Script Tools".into(),
+            description: None,
+            current_name: "On".into(),
+            options: vec![("on".into(), "On".into()), ("off".into(), "Off".into())],
+            boolean: Some(true),
+            smelt: Some(SmeltConfig::ScriptTools),
+            is_thought_level: false,
+        },
+    ];
+
+    for (theme, suffix) in [(DEFAULT_LIGHT, "light"), (DEFAULT_DARK, "dark")] {
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_apple::AppleTextSystem::new()),
+            Arc::new(smelt_plugin_api::ui::assets::Assets),
+            || {
+                Ok(Some(Box::new(
+                    gpui_apple::metal_renderer::MetalHeadlessRenderer::new()?,
+                )))
+            },
+        );
+        cx.update(|cx| {
+            init_ui(cx);
+            super::super::bind_model_popover_keys(cx);
+            cx.set_reduce_motion(true);
+            assert!(smelt_plugin_api::apply_theme(theme, cx));
+        });
+        let snap_clone = snap.clone();
+        let window = cx
+            .open_window(size(px(720.), px(640.)), move |window, cx| {
+                let view = cx.new(|cx| {
+                    let mut view =
+                        conversation_fixture("acp-model-snap", Vec::new(), DaemonPhase::Idle, cx);
+                    view.init_input(window, cx);
+                    view.apply_snapshot(snap_clone, cx);
+                    view.model_popover_open = true;
+                    view
+                });
+                let stage = cx.new(|_| Stage { view });
+                cx.new(|cx| gpui_base::Root::new(stage, window, cx))
+            })
+            .expect("开离屏窗口");
+        for _ in 0..4 {
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| {
+                let _ = window.draw(cx);
+            })
+            .expect("重画");
+        }
+        let path = out.join(format!("model-popover-{suffix}.png"));
+        cx.capture_screenshot(window.into())
+            .unwrap_or_else(|error| panic!("截图失败: {error:#}"))
+            .save(&path)
+            .unwrap_or_else(|error| panic!("写 {} 失败: {error}", path.display()));
+        println!("{}", path.display());
+    }
+}

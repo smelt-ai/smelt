@@ -142,6 +142,10 @@ diff:
   unchanged:
     en: "%{count} unchanged lines"
     zh-CN: "%{count} 行没改"
+effort:
+  levels:
+    en: "%{count} levels"
+    zh-CN: "%{count} 档"
 mermaid:
   failed:
     en: "⚠ Couldn't render mermaid: %{msg}"

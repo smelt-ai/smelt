@@ -16,8 +16,11 @@ mod cards;
 mod composer;
 mod conversation;
 mod memory;
+pub(super) mod model_popover;
 mod prompt_rail;
 mod subagents;
+
+pub(super) use model_popover::bind_model_popover_keys;
 
 impl Render for ConversationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -71,7 +74,8 @@ impl Render for ConversationView {
             overlay_enter(id, EnterFrom::Below, window, cx)
         });
         let elicit_keyboard = self.elicit_focus.contains_focused(window, cx);
-        let prompt_rail = prompt_rail::prompt_rail_fits(self.list_state.viewport_bounds().size)
+        let rail_viewport = self.list_state.viewport_bounds().size;
+        let prompt_rail = prompt_rail::prompt_rail_fits(rail_viewport)
             .then(|| self.prompt_rail())
             .and_then(|rail| {
                 prompt_rail::render_prompt_rail(&rail, self.prompt_rail_hover.as_ref(), window, cx)
@@ -80,6 +84,7 @@ impl Render for ConversationView {
             composer_focus,
             sweep_presence,
             jump_enter,
+            rail_viewport,
             prompt_rail,
             ambient_motion_enabled(
                 ambient_application_active(cx),
@@ -100,6 +105,7 @@ impl ConversationView {
         composer_focus: f32,
         sweep_presence: f32,
         jump_enter: Option<OverlayEnter>,
+        rail_viewport: gpui::Size<gpui::Pixels>,
         prompt_rail: Option<gpui::AnyElement>,
         animate_ambient: bool,
         elicit_keyboard: bool,
@@ -612,7 +618,11 @@ impl ConversationView {
             ))
             .capture_action(
                 cx.listener(|this, _: &gpui_base::input::Escape, _window, cx| {
-                    if this.usage_popover_open {
+                    if this.model_popover_open {
+                        this.model_popover_open = false;
+                        cx.notify();
+                        cx.stop_propagation();
+                    } else if this.usage_popover_open {
                         this.usage_popover_open = false;
                         cx.notify();
                         cx.stop_propagation();
@@ -654,6 +664,21 @@ impl ConversationView {
             // action 那条路走不到——这条按 key_down 兜底。
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
                 if ev.keystroke.modifiers.platform
+                    && ev.keystroke.modifiers.shift
+                    && ev.keystroke.key == "m"
+                    && this.has_composer_model_menu()
+                {
+                    this.model_popover_open = !this.model_popover_open;
+                    if this.model_popover_open {
+                        this.usage_popover_open = false;
+                        this.background_tasks_open = false;
+                        this.subagents_open = false;
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if ev.keystroke.modifiers.platform
                     && ev.keystroke.key == "v"
                     && this.take_clipboard_image(cx)
                 {
@@ -676,6 +701,23 @@ impl ConversationView {
                     .min_h_0()
                     .w_full()
                     .child(list)
+                    .child(
+                        // 列表布局完成后若视口尺寸变了（如窗口/分屏缩放），再通知一次让左侧导航同步显隐与窗口容量。
+                        gpui::canvas(
+                            {
+                                let view = cx.entity().downgrade();
+                                let list_state = self.list_state.clone();
+                                move |_bounds, _window, cx| {
+                                    if list_state.viewport_bounds().size != rail_viewport {
+                                        let _ = view.update(cx, |_, cx| cx.notify());
+                                    }
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
                     .children(prompt_rail)
                     .children((!self.entries.is_empty()).then(|| {
                         Scrollbar::vertical(&self.list_state)

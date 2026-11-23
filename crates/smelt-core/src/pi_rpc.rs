@@ -1664,6 +1664,7 @@ fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<Conve
             ],
             boolean: None,
             smelt: Some(SmeltConfig::PermissionMode),
+            is_thought_level: false,
         },
         SessionConfigState {
             config_id: "thought_level".to_string(),
@@ -1679,6 +1680,7 @@ fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<Conve
                 .collect(),
             boolean: None,
             smelt: Some(SmeltConfig::ThinkingLevel),
+            is_thought_level: true,
         },
     ];
     if codemode_command_available(state) {
@@ -1787,6 +1789,7 @@ fn codemode_config(state: &PiState) -> SessionConfigState {
         ],
         boolean: None,
         smelt: Some(SmeltConfig::ScriptTools),
+        is_thought_level: false,
     }
 }
 

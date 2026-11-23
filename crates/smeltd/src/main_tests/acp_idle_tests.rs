@@ -247,6 +247,7 @@ fn select(
             .collect(),
         boolean: None,
         smelt: None,
+        is_thought_level: false,
     }
 }
 

@@ -139,6 +139,9 @@ pub struct SessionConfigState {
     /// 上面的字是英文兜底。智能体自己声明的没有它，原样显示。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smelt: Option<SmeltConfig>,
+    /// ACP 协议声明的 `category: thought_level`（或运行时标明的推理强度）。旧快照缺字段时按 `false` 读。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_thought_level: bool,
 }
 
 /// 运行时自己写的配置项是哪一种。
@@ -162,6 +165,11 @@ impl SessionConfigState {
     /// 是不是只有开、关两项的开关（ACP 的 boolean 配置，或脚本工具）。
     pub fn is_switch(&self) -> bool {
         self.boolean.is_some() || self.smelt == Some(SmeltConfig::ScriptTools)
+    }
+
+    /// 协议或运行时是否明确标明这是推理强度档位。
+    pub fn is_thought_level(&self) -> bool {
+        self.is_thought_level || self.smelt == Some(SmeltConfig::ThinkingLevel)
     }
 
     /// 给人看的配置名。

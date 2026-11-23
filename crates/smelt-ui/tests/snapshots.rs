@@ -31,8 +31,8 @@ use smelt_ui::code_editor::{CodeEditor, EditorState};
 use smelt_ui::field::{InputState, TextareaState};
 use smelt_ui::kit::{ControlSize, TYPE, TypeStyled as _};
 use smelt_ui::{
-    Button, Checkbox, Clipboard, IconAction as _, ListRow, Radio, Segmented, Switch, TextArea,
-    TextInput, theme_catalog, tooltip::Tooltip, ui_theme,
+    Button, Checkbox, Clipboard, EffortSlider, EffortTier, IconAction as _, ListRow, Radio,
+    Segmented, Switch, TextArea, TextInput, theme_catalog, tooltip::Tooltip, ui_theme,
 };
 
 gpui::actions!(tooltip_snapshot, [Save, Sequence]);
@@ -213,6 +213,11 @@ const SNAPSHOTS: &[Snapshot] = &[
         name: "slider",
         size: (420., 140.),
         setup: sliders,
+    },
+    Snapshot {
+        name: "effort-slider",
+        size: (400., 840.),
+        setup: effort_sliders,
     },
     Snapshot {
         name: "tabs",
@@ -2247,6 +2252,52 @@ fn docks(window: &mut Window, cx: &mut App) -> Draw {
             .border_1()
             .border_color(ui_theme::hair())
             .child(area.clone())
+            .into_any_element()
+    })
+}
+
+fn effort_sliders(_: &mut Window, _: &mut App) -> Draw {
+    let tiers = || {
+        vec![
+            EffortTier::new("low", "低"),
+            EffortTier::new("medium", "中"),
+            EffortTier::new("high", "高"),
+            EffortTier::new("xhigh", "超高"),
+            EffortTier::new("max", "Max"),
+        ]
+    };
+    Box::new(move |_, _| {
+        div()
+            .w(px(344.))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                EffortSlider::new("snap-effort-low", "推理强度", tiers())
+                    .selected(0)
+                    .still(true),
+            )
+            .child(
+                EffortSlider::new("snap-effort-mid", "推理强度", tiers())
+                    .selected(1)
+                    .still(true),
+            )
+            .child(
+                EffortSlider::new("snap-effort-maxq", "推理强度", tiers())
+                    .selected(2)
+                    .still(true),
+            )
+            .child(
+                EffortSlider::new("snap-effort-orbit", "推理强度", tiers())
+                    .selected(3)
+                    .still(true),
+            )
+            .child(
+                EffortSlider::new("snap-effort-warp", "推理强度", tiers())
+                    .selected(4)
+                    .pending_hint(Some("下轮生效"))
+                    .still(true),
+            )
             .into_any_element()
     })
 }

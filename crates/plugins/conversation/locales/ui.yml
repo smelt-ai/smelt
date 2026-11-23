@@ -134,9 +134,12 @@ config:
   model:
     en: "Model"
     zh-CN: "模型"
-  provider:
-    en: "Provider"
-    zh-CN: "Provider"
+  no_models:
+    en: "No matching models"
+    zh-CN: "没有匹配的模型"
+  search_models:
+    en: "Search models…"
+    zh-CN: "搜索模型…"
   next_turn:
     en: "applies next turn"
     zh-CN: "下轮生效"

@@ -29,6 +29,7 @@ impl ConversationView {
                 .child(summary)
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.subagents_open = !this.subagents_open;
+                    this.model_popover_open = false;
                     this.background_tasks_open = false;
                     this.usage_popover_open = false;
                     cx.notify();

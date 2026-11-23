@@ -9,7 +9,7 @@ use super::{
     build_markdown_cache, build_tool_image_parts, cached_diff_stats, can_load_older_history,
     classify_attached_paths, compact_token_count, compact_tool_headline,
     composer_config_section_label, composer_menu_sections, composer_model_label,
-    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
+    composer_native_queue_shortcut_hint, composer_next_turn_notice,
     composer_usage_breakdown, config_rejection_is_new, config_selection_is_pending,
     consume_composer_restore, conversation_input_for_submit, diff_cache_matches_output,
     diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress, entries_to_fade_in,
@@ -189,11 +189,40 @@ fn composer_model_label_prefers_the_actual_model_name() {
 }
 
 #[test]
-fn session_menu_nests_models_when_other_sections_exist() {
-    assert!(composer_should_nest_models(2, 1, 12));
-    assert!(composer_should_nest_models(0, 3, 8));
-    assert!(!composer_should_nest_models(0, 1, 40));
-    assert!(!composer_should_nest_models(2, 2, 1));
+fn model_popover_identifies_thinking_configs_and_filters_models() {
+    use super::render::model_popover::{is_thinking_config, subsequence_score};
+
+    // ACP 协议带 `is_thought_level: true` 时不靠写死的 config_id 猜测也能识别。
+    let custom_id_thinking = SessionConfigState {
+        config_id: "custom_reasoning".into(),
+        name: "Thinking Level".into(),
+        description: None,
+        current_name: "High".into(),
+        options: vec![
+            ("low".into(), "Low".into()),
+            ("medium".into(), "Medium".into()),
+            ("high".into(), "High".into()),
+            ("extra".into(), "Extra".into()),
+        ],
+        boolean: None,
+        smelt: None,
+        is_thought_level: true,
+    };
+    assert!(is_thinking_config(
+        &custom_id_thinking,
+        ConversationAgentKind::Antigravity
+    ));
+    assert!(!is_thinking_config(
+        &mode_config("agent"),
+        ConversationAgentKind::Antigravity
+    ));
+
+    assert!(subsequence_score("Gemini 4 Neon", "g4n").is_some());
+    assert!(subsequence_score("Gemini 4 Neon", "opus").is_none());
+    assert!(
+        subsequence_score("Opus 4.6", "op").unwrap()
+            > subsequence_score("Claude Opus 4.6", "op").unwrap()
+    );
 }
 
 #[test]
@@ -241,6 +270,7 @@ fn mode_config(current: &str) -> SessionConfigState {
         ],
         boolean: None,
         smelt: None,
+        is_thought_level: false,
     }
 }
 
@@ -448,6 +478,7 @@ fn next_turn_notice_stays_on_the_composer_not_a_toast() {
         options: vec![("true".into(), "On".into()), ("false".into(), "Off".into())],
         boolean: Some(false),
         smelt: None,
+        is_thought_level: false,
     };
     let names = pending_config_choice_names(
         &pending,
@@ -5766,6 +5797,89 @@ fn the_prompt_rail_reaches_every_prompt_while_scrolling(cx: &mut gpui::TestAppCo
     });
     draw_settled(cx);
     assert_eq!(reading(cx), Some(3), "人一滚就回到按阅读线算");
+}
+
+/// 长对话里左侧提问导航按滑动窗口限制可见刻度数，不溢出视口；跳到边缘一问时窗口跟着滑过去。
+#[gpui::test]
+fn the_prompt_rail_windows_long_conversations_around_the_reading_prompt(
+    cx: &mut gpui::TestAppContext,
+) {
+    let entries: Vec<AcpEntry> = (0..40)
+        .flat_map(|ix| {
+            [
+                AcpEntry::User(format!("第 {} 问", ix + 1)),
+                AcpEntry::Assistant {
+                    text: format!("第 {} 答", ix + 1),
+                    thought: false,
+                },
+            ]
+        })
+        .collect();
+    let (view, cx) = open_conversation(cx, "acp-prompt-rail-window", entries, DaemonPhase::Idle);
+    cx.simulate_resize(gpui::size(px(1400.), px(900.)));
+    draw_settled(cx);
+
+    let rail = cx.debug_bounds("ACP_PROMPT_RAIL").expect("宽屏画导航");
+    assert_eq!(rail.size.height, px(110.), "最多画 11 条刻度 × 10px");
+    assert!(cx.debug_bounds("ACP_PROMPT_TICK_0").is_none(), "最早的问滑出窗口");
+    assert!(cx.debug_bounds("ACP_PROMPT_TICK_28").is_none());
+    let top_tick = cx
+        .debug_bounds("ACP_PROMPT_TICK_29")
+        .expect("窗口从第 30 问开始");
+    assert!(
+        cx.debug_bounds("ACP_PROMPT_TICK_39").is_some(),
+        "滚到底时最新一问在窗口底部"
+    );
+
+    // 点当前窗口最顶上的那一问，窗口以它为中心往前滑出更早的提问。
+    cx.simulate_click(top_tick.center(), gpui::Modifiers::default());
+    draw_settled(cx);
+    let next_top = cx
+        .debug_bounds("ACP_PROMPT_TICK_24")
+        .expect("窗口往前滑出更早的提问");
+    assert!(cx.debug_bounds("ACP_PROMPT_TICK_23").is_none());
+    assert!(cx.debug_bounds("ACP_PROMPT_TICK_34").is_some());
+    assert!(
+        cx.debug_bounds("ACP_PROMPT_TICK_35").is_none(),
+        "后面的提问滑出窗口"
+    );
+
+    // 移开指针再悬停到居中后的那一问上，预览卡按窗口内槽位定位，不按全局下标跑飞。
+    cx.simulate_mouse_move(gpui::point(px(600.), px(400.)), None, gpui::Modifiers::default());
+    draw_settled(cx);
+    let centered_tick = cx
+        .debug_bounds("ACP_PROMPT_TICK_29")
+        .expect("刚跳到的那一问居中留在窗口内");
+    cx.simulate_mouse_move(centered_tick.center(), None, gpui::Modifiers::default());
+    draw_settled(cx);
+    let peek = cx.debug_bounds("ACP_PROMPT_PEEK").expect("悬停弹出预览");
+    assert!(
+        (peek.top() - centered_tick.center().y).abs() < px(80.),
+        "预览卡按窗口内槽位定位，不按全局下标跑飞: peek={peek:?}, tick={centered_tick:?}"
+    );
+
+    // 已在浏览历史时再点一次顶部刻度，窗口仍能继续往前滑。
+    cx.simulate_click(next_top.center(), gpui::Modifiers::default());
+    draw_settled(cx);
+    assert!(
+        cx.debug_bounds("ACP_PROMPT_TICK_19").is_some(),
+        "连续往前跳时窗口继续前滑"
+    );
+    assert!(cx.debug_bounds("ACP_PROMPT_TICK_18").is_none());
+    assert!(cx.debug_bounds("ACP_PROMPT_TICK_29").is_some());
+    assert!(cx.debug_bounds("ACP_PROMPT_TICK_30").is_none());
+
+    // 视口压矮时窗口跟着缩容，不超出视口。
+    cx.simulate_resize(gpui::size(px(1400.), px(160.)));
+    draw_settled(cx);
+    let short_rail = cx.debug_bounds("ACP_PROMPT_RAIL").expect("矮视口按容量缩小窗口");
+    let viewport_h = view.read_with(cx, |v, _| v.list_state.viewport_bounds().size.height);
+    assert!(
+        short_rail.size.height < px(110.) && short_rail.size.height < viewport_h,
+        "刻度列高度 {:?} 应随矮视口 {:?} 缩容且不溢出",
+        short_rail.size.height,
+        viewport_h
+    );
 }
 
 /// 授权请求长在输入框顶上、和输入框连成一体；选项一列菜单，点了就回给 agent。

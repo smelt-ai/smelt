@@ -220,6 +220,23 @@ fn mcp_server_detail(server: &smelt_plugin_api::model::pi_mcp::PiMcpServer) -> S
 }
 
 impl ConversationView {
+    pub(super) fn has_composer_model_menu(&self) -> bool {
+        let provider_count = self
+            .model
+            .as_ref()
+            .map_or(0, |model| model.provider_groups.len());
+        let model_count = self.model.as_ref().map_or(0, |model| {
+            selected_provider_group(model)
+                .map_or(model.options.len(), |group| group.options.len())
+        });
+        let extra_config_count = self
+            .config_options
+            .iter()
+            .filter(|config| config.options.len() > 1)
+            .count();
+        !composer_menu_sections(provider_count, model_count, extra_config_count).is_empty()
+    }
+
     pub(super) fn render_composer(
         &self,
         composer_focus: f32,
@@ -391,25 +408,13 @@ impl ConversationView {
         });
 
         let input_row = self.input.as_ref().map(|input| {
-            let provider_groups = model_state
+            let provider_groups_len = model_state
                 .as_ref()
-                .map(|model| model.provider_groups.clone())
-                .unwrap_or_default();
-            let current_provider = model_state
-                .as_ref()
-                .and_then(selected_provider_group)
-                .cloned();
-            let grouped_models = current_provider.as_ref().map(|group| group.options.clone());
-            let model_options = grouped_models.clone().unwrap_or_else(|| {
-                model_state
-                    .as_ref()
-                    .map(|model| model.options.clone())
-                    .unwrap_or_default()
+                .map_or(0, |model| model.provider_groups.len());
+            let model_options_len = model_state.as_ref().map_or(0, |model| {
+                selected_provider_group(model)
+                    .map_or(model.options.len(), |group| group.options.len())
             });
-            let current_model = model_state
-                .as_ref()
-                .map(|model| model.current_value.clone());
-            let model_config_id = model_state.as_ref().map(|model| model.config_id.clone());
             let model_label = composer_model_label(model_state.as_ref(), &self.agent_label(cx));
             let usage_pct = self.usage.map(|(used, size)| usage_percent(used, size));
             let usage_color = if self.compacting {
@@ -424,170 +429,26 @@ impl ConversationView {
                 .filter(|config| config.options.len() > 1)
                 .collect();
             let has_menu = !composer_menu_sections(
-                provider_groups.len(),
-                model_options.len(),
+                provider_groups_len,
+                model_options_len,
                 extra_configs.len(),
             )
             .is_empty();
             let model_control = if has_menu {
-                let this = cx.entity();
-                let current_provider_id = current_provider.as_ref().map(|p| p.id.clone());
-                let current_model_name = model_state
-                    .as_ref()
-                    .map(|model| model.current_name.clone())
-                    .unwrap_or_default();
-                let grouped = grouped_models.is_some();
-                let pill = Button::new("acp-model-pill")
-                    .quiet()
-                    .small()
-                    .dropdown_caret(true)
-                    .label(model_label)
-                    .when(next_turn_notice.is_some(), |button| {
-                        button.text_color(gpui::rgb(ui_theme::need()))
-                    });
-                MenuTrigger::dropdown("acp-model-pill-menu", pill, move |_window, _cx| {
-                    let mut menu = Menu::new();
-                    let nest_models = composer_should_nest_models(
-                        extra_configs.len(),
-                        provider_groups.len(),
-                        model_options.len(),
-                    );
-                    let sections = composer_menu_sections(
-                        provider_groups.len(),
-                        model_options.len(),
-                        extra_configs.len(),
-                    );
-                    for (ix, section) in sections.iter().enumerate() {
-                        if ix > 0 {
-                            menu = menu.separator();
-                        }
-                        match *section {
-                            ComposerMenuSection::Provider => {
-                                menu = menu.label(t!("config.provider"));
-                                for provider in &provider_groups {
-                                    let is_current = current_provider_id.as_deref()
-                                        == Some(provider.id.as_str());
-                                    let name = provider.name.clone();
-                                    // 只有一个 provider 时没得切，如实列出当前项即可。
-                                    let switch_to = if provider_groups.len() > 1 {
-                                        provider_switch_value(provider, &current_model_name)
-                                            .map(ToOwned::to_owned)
-                                    } else {
-                                        None
-                                    };
-                                    let item = MenuItem::new(name).checked(is_current);
-                                    let item = match switch_to {
-                                        Some(target_value) => {
-                                            let config_id = model_config_id.clone();
-                                            let this = this.clone();
-                                            item.on_click(move |_ev, _window, cx| {
-                                                if let Some(config_id) = config_id.clone() {
-                                                    this.update(cx, |v, view_cx| {
-                                                        v.select_config_option(
-                                                            config_id,
-                                                            target_value.clone(),
-                                                            view_cx,
-                                                        );
-                                                    });
-                                                }
-                                            })
-                                        }
-                                        None => item.disabled(true),
-                                    };
-                                    menu = menu.item(item);
-                                }
-                            }
-                            ComposerMenuSection::Model => {
-                                let model_options = model_options.clone();
-                                let current_model = current_model.clone();
-                                let config_id = model_config_id.clone();
-                                let this = this.clone();
-                                let fill = move |mut menu: Menu| {
-                                    for (value, name) in &model_options {
-                                        let is_cur =
-                                            current_model.as_deref() == Some(value.as_str());
-                                        let option_label = if grouped {
-                                            name.clone()
-                                        } else {
-                                            model_label_with_provider(value, name)
-                                        };
-                                        let value = value.clone();
-                                        let config_id = config_id.clone();
-                                        let this = this.clone();
-                                        let item = MenuItem::new(option_label)
-                                            .checked(is_cur);
-                                        // 单模型没得切，但必须显示，否则弹层只剩会话配置。
-                                        let item = if model_options.len() > 1 {
-                                            item.on_click(move |_ev, _window, cx| {
-                                                if let Some(config_id) = config_id.clone() {
-                                                    this.update(cx, |v, view_cx| {
-                                                        v.select_config_option(
-                                                            config_id,
-                                                            value.clone(),
-                                                            view_cx,
-                                                        );
-                                                    });
-                                                }
-                                            })
-                                        } else {
-                                            item.disabled(true)
-                                        };
-                                        menu = menu.item(item);
-                                    }
-                                    menu
-                                };
-                                let model_section = composer_config_section_label(
-                                    &t!("config.model"),
-                                    model_config_id.as_deref().is_some_and(|id| {
-                                        config_selection_is_pending(&pending_config_values, id)
-                                    }),
-                                    next_turn_hint,
-                                );
-                                menu = if nest_models {
-                                    menu.item(
-                                        MenuItem::new(model_section).submenu(fill(Menu::new())),
-                                    )
-                                } else {
-                                    fill(menu.label(model_section))
-                                };
-                            }
-                            ComposerMenuSection::Config(config_ix) => {
-                                let config = &extra_configs[config_ix];
-                                menu = menu.label(composer_config_section_label(
-                                    &config.display_name(),
-                                    config_selection_is_pending(
-                                        &pending_config_values,
-                                        &config.config_id,
-                                    ),
-                                    next_turn_hint,
-                                ));
-                                for (value, name) in &config.options {
-                                    let is_cur = config.current_name == *name;
-                                    let value = value.clone();
-                                    let config_id = config.config_id.clone();
-                                    let this = this.clone();
-                                    menu = menu.item(
-                                        MenuItem::new(config.option_label(&value, name))
-                                            .checked(is_cur)
-                                            .on_click(move |_ev, _window, cx| {
-                                                this.update(cx, |v, view_cx| {
-                                                    v.select_config_option(
-                                                        config_id.clone(),
-                                                        value.clone(),
-                                                        view_cx,
-                                                    );
-                                                });
-                                            }),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    menu
-                })
-                    // 输入栏贴窗口底，默认 TopLeft 会往下弹，长模型列表把配置挤出屏幕。
-                    .anchor(gpui::Anchor::BottomLeft)
-                    .into_any_element()
+                super::model_popover::ModelPopoverControl::new(
+                    ("acp-model-popover", cx.entity_id()),
+                    cx.entity().downgrade(),
+                    self.agent,
+                    model_state,
+                    extra_configs,
+                    pending_config_values,
+                    next_turn_hint,
+                    model_label,
+                    next_turn_notice.is_some(),
+                    self.model_popover_open,
+                    !animate_ambient,
+                )
+                .into_any_element()
             } else {
                 div()
                     .h(ui_theme::height::xs())
@@ -1074,6 +935,7 @@ impl ConversationView {
                                         })
                                         .on_click(cx.listener(|this, _ev, _window, cx| {
                                             this.usage_popover_open = !this.usage_popover_open;
+                                            this.model_popover_open = false;
                                             this.background_tasks_open = false;
                                             this.subagents_open = false;
                                             cx.notify();
@@ -1394,6 +1256,7 @@ impl ConversationView {
                 .child(summary)
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.background_tasks_open = !this.background_tasks_open;
+                    this.model_popover_open = false;
                     this.usage_popover_open = false;
                     this.subagents_open = false;
                     cx.notify();

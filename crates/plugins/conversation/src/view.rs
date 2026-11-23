@@ -467,15 +467,6 @@ fn usage_meter_color(pct: u32) -> u32 {
     usage_warn_color(pct).unwrap_or(ui_theme::faint())
 }
 
-/// 会话面板要先露配置。模型一长，必须收进二级，否则贴底的菜单只看得见模型。
-fn composer_should_nest_models(
-    extra_config_count: usize,
-    provider_count: usize,
-    model_count: usize,
-) -> bool {
-    model_count > 1 && (extra_config_count > 0 || provider_count > 1)
-}
-
 /// 模型胶囊弹层的一个分区。`Config` 带的是 `extra_configs` 下标。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerMenuSection {
@@ -1574,6 +1565,8 @@ pub struct ConversationView {
     usage_breakdown: Option<smelt_plugin_api::model::acp_conn::ContextUsageBreakdown>,
     /// 底栏用量圆环点开的 Context Usage 面板。只属于本地浏览状态。
     usage_popover_open: bool,
+    /// 底栏模型胶囊点开的模型与推理配置弹层。只属于本地浏览状态。
+    model_popover_open: bool,
     /// 独立 Trajectory 窗口。已打开则前置，不重复开。
     trajectory_window: Option<WindowHandle<trajectory::TrajectoryWindow>>,
     supports_compaction: bool,
@@ -1779,6 +1772,10 @@ gpui::actions!(
 
 /// 提问卡拿着焦点时的按键上下文。比工作台深，Esc 先到这里，不会被工作台的关闭接走。
 pub(crate) const ELICIT_KEY_CONTEXT: &str = "ElicitCard";
+
+pub(crate) fn bind_model_popover_keys(cx: &mut App) {
+    render::bind_model_popover_keys(cx);
+}
 
 /// 提问卡的按键。方向键、回车、空格、Esc 只绑在卡片自己的上下文上，焦点不在卡片里时
 /// 照常交给别处。
@@ -1995,6 +1992,7 @@ impl ConversationView {
             usage_cost: None,
             usage_breakdown: None,
             usage_popover_open: false,
+            model_popover_open: false,
             trajectory_window: None,
             supports_compaction: false,
             supports_native_queue: false,
@@ -2149,6 +2147,7 @@ impl ConversationView {
         self.usage = None; // 上下文用量属于旧会话，别带到新的上
         self.usage_breakdown = None;
         self.usage_popover_open = false;
+        self.model_popover_open = false;
         self.prompt_dispatch_pending = false;
         self.turn_outcome = None;
         self.phase = DaemonPhase::Connecting;
@@ -2987,6 +2986,7 @@ impl ConversationView {
     pub(super) fn jump_to_prompt(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
         self.pending_prompt_jump = Some(entry_ix);
         self.jumped_prompt = Some(entry_ix);
+        self.prompt_rail_hover = None;
         self.continue_prompt_jump(cx);
     }
 
@@ -5160,6 +5160,7 @@ impl ConversationView {
             offset_in_item: px(0.),
         });
         self.set_viewing_history(true, cx);
+        cx.notify();
     }
 
     fn pinned_prompt_ix(&self) -> Option<usize> {
