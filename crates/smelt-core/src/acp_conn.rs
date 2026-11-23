@@ -14,6 +14,8 @@
 
 pub use smelt_model::acp_conn::*;
 
+mod read_image;
+
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -2068,6 +2070,8 @@ async fn run_connection(
             // 收图能力：三条恢复路径共用（bool 是 Copy，多次读没问题）。
             let supports_image = init.agent_capabilities.prompt_capabilities.image;
 
+            let mut read_images =
+                read_image::ReadImageHydrator::new(std::path::PathBuf::from(&cwd));
             // 冷恢复只有一条路径：`session/load`。agent 的 session store 是历史
             // 唯一持久化来源，load 重放的更新负责重建 smeltd 的 entries 投影。
             // `session/resume` 不重放历史，不能拿来冷恢复；smeltd 仍持有完整活体
@@ -2123,6 +2127,7 @@ async fn run_connection(
                                 &mut session,
                                 &channels.event_tx,
                                 &mut ReplayCursor::default(),
+                                &mut read_images,
                             )
                             .await?;
                             let _ = channels
@@ -2135,6 +2140,7 @@ async fn run_connection(
                                 ReadyKind::ResumedWithReplay,
                                 supports_image,
                                 in_flight_rpc,
+                                read_images,
                             )
                             .await;
                         }
@@ -2174,6 +2180,7 @@ async fn run_connection(
                 ReadyKind::Fresh,
                 supports_image,
                 in_flight_rpc,
+                read_images,
             )
             .await
         })
@@ -2195,6 +2202,7 @@ async fn drain_loaded_replay<S: SessionDrive>(
     session: &mut S,
     event_tx: &smol::channel::Sender<ConversationEvent>,
     replay: &mut ReplayCursor,
+    read_images: &mut read_image::ReadImageHydrator,
 ) -> Result<(), agent_client_protocol::Error> {
     loop {
         let ready = {
@@ -2206,7 +2214,7 @@ async fn drain_loaded_replay<S: SessionDrive>(
             Some(update) => {
                 let update = update?;
                 observe_replay(&update, replay);
-                translate_update(update, event_tx).await?;
+                translate_update(update, event_tx, read_images).await?;
             }
             None => return Ok(()),
         }
@@ -2352,6 +2360,7 @@ async fn drive_session<S: SessionDrive>(
     // 握手时 agent 声明的收图能力（promptCapabilities.image），随 Ready 转给 UI。
     supports_image: bool,
     in_flight_rpc: Arc<AtomicUsize>,
+    mut read_images: read_image::ReadImageHydrator,
 ) -> Result<(), agent_client_protocol::Error> {
     let _ = channels.event_tx.try_send(ConversationEvent::Ready {
         session_id: session.session_id().clone(),
@@ -2396,7 +2405,7 @@ async fn drive_session<S: SessionDrive>(
                 // 实测（假 LLM 端点跑真回合）抖 5 次都没能触发乱序——窗口很
                 // 窄，但正文落到「已结束」回合之后是用户可见且极难查的故障，
                 // 不值得用「测不出来」当作不存在。
-                drain_ready_updates(&mut session, &channels.event_tx).await?;
+                drain_ready_updates(&mut session, &channels.event_tx, &mut read_images).await?;
                 let event = match settled {
                     Ok(stop_reason) => ConversationEvent::TurnEnded(stop_reason),
                     Err(msg) => ConversationEvent::TurnFailed(msg),
@@ -2509,7 +2518,7 @@ async fn drive_session<S: SessionDrive>(
             Next::Update(update) => {
                 let update = (*update)?;
                 let completes_prompt = matches!(&update, SessionMessage::PromptResponse(_));
-                translate_update(update, &channels.event_tx).await?;
+                translate_update(update, &channels.event_tx, &mut read_images).await?;
                 if completes_prompt {
                     turn_active = false;
                     finish_rpc(&in_flight_rpc);
@@ -2533,6 +2542,7 @@ async fn drive_session<S: SessionDrive>(
 async fn drain_ready_updates<S: SessionDrive>(
     session: &mut S,
     event_tx: &smol::channel::Sender<ConversationEvent>,
+    read_images: &mut read_image::ReadImageHydrator,
 ) -> Result<(), agent_client_protocol::Error> {
     loop {
         let ready = {
@@ -2541,7 +2551,7 @@ async fn drain_ready_updates<S: SessionDrive>(
             smol::future::poll_once(read).await
         };
         match ready {
-            Some(update) => translate_update(update?, event_tx).await?,
+            Some(update) => translate_update(update?, event_tx, read_images).await?,
             None => return Ok(()),
         }
     }
@@ -2884,6 +2894,7 @@ fn session_title_update(title: MaybeUndefined<String>) -> Option<Option<String>>
 async fn translate_update(
     message: SessionMessage,
     event_tx: &smol::channel::Sender<ConversationEvent>,
+    read_images: &mut read_image::ReadImageHydrator,
 ) -> Result<(), agent_client_protocol::Error> {
     match message {
         SessionMessage::Message(dispatch) => {
@@ -2907,8 +2918,12 @@ async fn translate_update(
                                     .or(notif_parent),
                             })
                         }
-                        SessionUpdate::ToolCall(tc) => Some(ConversationEvent::ToolCall(tc)),
-                        SessionUpdate::ToolCallUpdate(u) => {
+                        SessionUpdate::ToolCall(mut tc) => {
+                            read_images.hydrate_tool_call(&mut tc);
+                            Some(ConversationEvent::ToolCall(tc))
+                        }
+                        SessionUpdate::ToolCallUpdate(mut u) => {
+                            read_images.hydrate_tool_call_update(&mut u);
                             Some(ConversationEvent::ToolCallUpdate(u))
                         }
                         SessionUpdate::UserMessageChunk(chunk) => match chunk.content {
