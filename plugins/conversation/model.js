@@ -893,7 +893,7 @@ export function relativePathToCwd(path, cwd) {
   return path;
 }
 
-/** `lineStats(old, new)` 给出一处改动的 `{ added, removed }`，运行时传宿主的 `diffLineStats`。 */
+/** `lineStats(diff)` 给出一处改动（工具输出里的 `Diff`）的 `{ added, removed }`，运行时传 `diffPartStats`。 */
 export function collectEditFilesFromTool(tc, lineStats) {
   const byPath = new Map();
   const order = [];
@@ -901,7 +901,7 @@ export function collectEditFilesFromTool(tc, lineStats) {
     if (!part || typeof part !== "object" || !("Diff" in part)) continue;
     const d = part.Diff;
     if (!d?.path) continue;
-    const stats = lineStats(d.old_text ?? null, d.new_text ?? "");
+    const stats = lineStats(d);
     let file = byPath.get(d.path);
     if (!file) {
       file = {

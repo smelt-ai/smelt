@@ -280,7 +280,7 @@ function ToolCallRow(props: {
   // 2. Pi smelt_ask_user 问答事件行
   const asked = computed(() => tc()?.asked ?? null);
   // 3. 普通工具或子智能体派发
-  const editFiles = computed(() => collectEditFilesFromTool(tc(), diffLineStats));
+  const editFiles = computed(() => collectEditFilesFromTool(tc(), diffPartStats));
   const textOutputs = computed(() =>
     (tc()?.output ?? [])
       .map((part: any) => {
@@ -643,6 +643,20 @@ function ToolCallRow(props: {
       </View>
     </If>
   );
+}
+
+/**
+ * 一处改动的增删行数，按 `Diff` 对象缓存：显示行每次重建都会把窗口里的改动过一遍，而按行比对
+ * 要把整段文本交给宿主算；合并条目时没变的条目沿用原对象，同一处改动只算一次。
+ */
+const diffStatsCache = new WeakMap<object, { added: number; removed: number }>();
+export function diffPartStats(diff: any): { added: number; removed: number } {
+  let stats = diffStatsCache.get(diff);
+  if (!stats) {
+    stats = diffLineStats(diff.old_text ?? null, diff.new_text ?? "");
+    diffStatsCache.set(diff, stats);
+  }
+  return stats;
 }
 
 export function MessageList(props: {

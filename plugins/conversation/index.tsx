@@ -12,7 +12,6 @@ import {
   agentCatalog,
   call,
   DIALOG_SURFACE_CLASS,
-  diffLineStats,
   forkCutAfter,
   forkCutBefore,
   isInterruptMarker,
@@ -46,7 +45,7 @@ import {
   reconcilePendingConfigValues,
   turnTimingsEqual,
 } from "./model.js";
-import { MessageList } from "./message_list.tsx";
+import { diffPartStats, MessageList } from "./message_list.tsx";
 import { PromptRail, type PromptRailItem } from "./prompt_rail.tsx";
 import { SubagentDrawer } from "./subagents.tsx";
 
@@ -248,7 +247,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       es.loadedOffset,
       expandedTurnFolds(),
       expandedProcessGroups(),
-      diffLineStats,
+      diffPartStats,
     );
   });
 
