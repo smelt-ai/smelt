@@ -4783,6 +4783,8 @@ mod tests {
             fork_session_id: None,
             fork_cut: None,
             peer_handler: None,
+            peer_mcp_command: None,
+            peer_mcp_connected: None,
             disallowed_tools: Vec::new(),
         }
     }

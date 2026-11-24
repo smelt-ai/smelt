@@ -28,9 +28,10 @@ use agent_client_protocol::v1::schema::{
     ClientSessionCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationAcceptAction, ElicitationAction,
     ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
-    ElicitationPropertySchema, ElicitationSchema, ElicitationUrlCapabilities,
+    ElicitationPropertySchema, ElicitationSchema, ElicitationUrlCapabilities, EnvVariable,
     FileSystemCapabilities, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, MultiSelectItems, NewSessionRequest, Plan,
+    KillTerminalResponse, LoadSessionRequest, McpServer, McpServerStdio, MultiSelectItems,
+    NewSessionRequest, Plan,
     PlanCapabilities, PlanEntry, PlanEntryPriority, PlanEntryStatus, PlanUpdate, PlanUpdateContent,
     PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
@@ -86,8 +87,12 @@ pub struct ConversationLaunch {
     /// `occurrence` 与 `ConversationCommand::Rewind` 同语义：在 agent 的可分叉
     /// 列表里按文本配对，`occurrence` 是同文本消息中的第几条（从 0 数起）。
     pub fork_cut: Option<AcpForkCut>,
-    /// 这个 Pi 会话的跨对话请求。来源会话绑在闭包里。非 Pi 会话是 `None`。
+    /// 这个会话的跨对话请求。来源会话绑在闭包里。自动化会话是 `None`。
     pub peer_handler: Option<crate::background_tasks::PeerRequestHandler>,
+    /// 供非 Pi ACP 经 `mcpServers` 启动内置 stdio MCP Server（`smeltd --peer-mcp`）的可执行路径。
+    pub peer_mcp_command: Option<std::path::PathBuf>,
+    /// 收到该会话 MCP 进程握手时置为 true（决定 `<peer-message>` 引导用工具还是 CLI）。
+    pub peer_mcp_connected: Option<Arc<AtomicBool>>,
     /// 这次拉起的 agent 不许用的工具，Claude 权限规则的写法（`Edit`、`Bash(git push:*)`）。
     /// 由 agent 自己的权限引擎执行，任何权限模式下都生效。只有 Claude 适配器认；非空时
     /// 别的 agent 起不来，不悄悄放开跑（见 [`supports_disallowed_tools`]）。
@@ -1698,6 +1703,11 @@ enum SessionStart {
     UnsupportedLoad,
 }
 
+fn rejects_mcp_servers(error: &agent_client_protocol::Error) -> bool {
+    error.code == agent_client_protocol::ErrorCode::INVALID_PARAMS
+        || error.message.to_ascii_lowercase().contains("mcp")
+}
+
 fn select_session_start(has_session_id: bool, load_supported: bool) -> SessionStart {
     match (has_session_id, load_supported) {
         (false, _) => SessionStart::New,
@@ -1824,7 +1834,9 @@ async fn run_connection(
     let perm_last_line = Arc::clone(&last_stdout_line);
     let elicit_last_line = Arc::clone(&last_stdout_line);
     let handshake_complete = Arc::clone(&handshake_watchdog.completed);
-    let terminals = Arc::new(crate::acp_terminal::AcpTerminals::new());
+    let terminals = Arc::new(crate::acp_terminal::AcpTerminals::for_session(
+        launch.sid.clone(),
+    ));
     let term_tx = spawn_terminal_event_forwarder(channels.event_tx.clone());
     let session_cwd = Some(std::path::PathBuf::from(&cwd));
     let result =
@@ -2068,6 +2080,39 @@ async fn run_connection(
             // 收图能力：三条恢复路径共用（bool 是 Copy，多次读没问题）。
             let supports_image = init.agent_capabilities.prompt_capabilities.image;
 
+            // 非 Pi ACP 会话：若带了 `peer_handler` 和 `smeltd` 可执行路径，起会话专属
+            // `PeerSocket` 并经标准 ACP `mcpServers` 注入 `smeltd --peer-mcp`。
+            let (mut peer_socket, peer_mcp_servers) =
+                match (&launch.peer_handler, &launch.peer_mcp_command) {
+                    (Some(handler), Some(command)) => {
+                        let connected = launch
+                            .peer_mcp_connected
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                        match crate::background_tasks::PeerSocket::start(
+                            Arc::clone(handler),
+                            connected,
+                        ) {
+                            Ok(socket) => {
+                                let server = McpServer::Stdio(
+                                    McpServerStdio::new("smelt-peers", command.clone())
+                                        .args(vec!["--peer-mcp".to_string()])
+                                        .env(vec![EnvVariable::new(
+                                            crate::background_tasks::SMELT_PEER_SOCK_ENV,
+                                            socket.socket_path().to_string_lossy().into_owned(),
+                                        )]),
+                                );
+                                (Some(socket), vec![server])
+                            }
+                            Err(error) => {
+                                eprintln!("[acp] 启动会话 peer 套接字失败，降级为无 MCP：{error}");
+                                (None, Vec::new())
+                            }
+                        }
+                    }
+                    _ => (None, Vec::new()),
+                };
+
             // 冷恢复只有一条路径：`session/load`。agent 的 session store 是历史
             // 唯一持久化来源，load 重放的更新负责重建 smeltd 的 entries 投影。
             // `session/resume` 不重放历史，不能拿来冷恢复；smeltd 仍持有完整活体
@@ -2096,16 +2141,41 @@ async fn run_connection(
                     // session 路由，Claude 在响应前同步重放的历史不会被丢掉。
                     // 清空事件必须排在请求之前，不能等到 Ready 再清。
                     let _ = channels.event_tx.try_send(ConversationEvent::HistoryReplayStarted);
-                    let mut load_request = LoadSessionRequest::new(sid.clone(), cwd.clone());
-                    if let Some(meta) = claude_session_meta(launch, true) {
-                        load_request = load_request.meta(meta);
-                    }
-                    match connection
-                        .load_session_from(load_request)
+                    let build_load_request = |with_mcp: bool| {
+                        let mut req = LoadSessionRequest::new(sid.clone(), cwd.clone());
+                        if with_mcp && !peer_mcp_servers.is_empty() {
+                            req = req.mcp_servers(peer_mcp_servers.clone());
+                        }
+                        if let Some(meta) = claude_session_meta(launch, true) {
+                            req = req.meta(meta);
+                        }
+                        req
+                    };
+                    let loaded_res = match connection
+                        .load_session_from(build_load_request(true))
                         .block_task()
                         .start_session()
                         .await
                     {
+                        Err(error)
+                            if !peer_mcp_servers.is_empty() && rejects_mcp_servers(&error) =>
+                        {
+                            eprintln!(
+                                "[acp] session/load 拒收 mcpServers（{error}），去掉 mcpServers 重试"
+                            );
+                            drop(peer_socket.take());
+                            let _ = channels
+                                .event_tx
+                                .try_send(ConversationEvent::HistoryReplayStarted);
+                            connection
+                                .load_session_from(build_load_request(false))
+                                .block_task()
+                                .start_session()
+                                .await
+                        }
+                        other => other,
+                    };
+                    match loaded_res {
                         Ok(SessionSetup {
                             mut session,
                             response: loaded,
@@ -2151,17 +2221,38 @@ async fn run_connection(
 
             // 走官方 builder 就能同时拿到 session/new 的响应（模型档位、模式）
             // 和 session 路由。
-            let mut new_request = NewSessionRequest::new(std::path::Path::new(&cwd));
-            if let Some(meta) = claude_session_meta(launch, false) {
-                new_request = new_request.meta(meta);
-            }
+            let build_new_request = |with_mcp: bool| {
+                let mut req = NewSessionRequest::new(std::path::Path::new(&cwd));
+                if with_mcp && !peer_mcp_servers.is_empty() {
+                    req = req.mcp_servers(peer_mcp_servers.clone());
+                }
+                if let Some(meta) = claude_session_meta(launch, false) {
+                    req = req.meta(meta);
+                }
+                req
+            };
             let SessionSetup {
                 session, response, ..
-            } = connection
-                .build_session_from(new_request)
+            } = match connection
+                .build_session_from(build_new_request(true))
                 .block_task()
                 .start_session()
-                .await?;
+                .await
+            {
+                Err(error) if !peer_mcp_servers.is_empty() && rejects_mcp_servers(&error) => {
+                    eprintln!(
+                        "[acp] session/new 拒收 mcpServers（{error}），去掉 mcpServers 重试"
+                    );
+                    drop(peer_socket.take());
+                    connection
+                        .build_session_from(build_new_request(false))
+                        .block_task()
+                        .start_session()
+                        .await?
+                }
+                other => other?,
+            };
+            let _keep_peer_socket = peer_socket;
             publish_session_surface(
                 response.config_options.as_deref(),
                 response.modes.as_ref(),
@@ -4818,6 +4909,8 @@ mod tool_restriction_tests {
             fork_session_id: None,
             fork_cut: None,
             peer_handler: None,
+            peer_mcp_command: None,
+            peer_mcp_connected: None,
             disallowed_tools: disallowed_tools
                 .iter()
                 .map(|rule| rule.to_string())

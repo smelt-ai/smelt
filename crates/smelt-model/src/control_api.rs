@@ -1002,6 +1002,15 @@ pi_calls! {
     NodePeerList => NodePeerList(crate::peer_node::NodePeerListParams) -> serde_json::Value;
     /// 本节点上一个对话最近的回复。只收对端节点。
     NodePeerRead => NodePeerRead(crate::peer_node::NodePeerReadParams) -> serde_json::Value;
+    /// 活跃 ACP 会话经本机 CLI（`smelt peer`）兜底列可互发消息的对话和可用智能体。
+    /// 来源由守护按调用进程树认定，只收本机。
+    PeerSessionList => PeerSessionList(serde_json::Value) -> serde_json::Value;
+    /// 活跃 ACP 会话经本机 CLI 读另一个对话最近的回复。只收本机。
+    PeerSessionRead => PeerSessionRead(serde_json::Value) -> serde_json::Value;
+    /// 活跃 ACP 会话经本机 CLI 给另一个对话发消息。只收本机。
+    PeerSessionSend => PeerSessionSend(serde_json::Value) -> serde_json::Value;
+    /// 活跃 ACP 会话经本机 CLI 新建另一个对话并交代任务。只收本机。
+    PeerSessionSpawn => PeerSessionSpawn(serde_json::Value) -> serde_json::Value;
     /// 本节点的对端。只收本机。
     PeerList => PeerList(EmptyParams) -> crate::peer_node::PeerList;
     /// 用对方的配对串双向配对。只收本机签过名的桌面。
