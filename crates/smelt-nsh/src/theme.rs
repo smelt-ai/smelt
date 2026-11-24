@@ -87,6 +87,20 @@ pub(crate) fn nsh_theme() -> Theme {
     theme
 }
 
+/// 打包配置（`nsh.json`）里的 `"theme"`：只为让打包器认得 smelt 的令牌类名（`bg-scrim`），
+/// 免得构建时报未知类名。值不会被用到——宿主给每个视图 `set_theme` 整份换上 [`nsh_theme`]——
+/// 所以统一填透明，构建产物和预编译指纹也就不随用户主题变。
+pub(crate) fn build_theme_config() -> serde_json::Value {
+    let tokens = nsh_theme().into_tokens();
+    let mut names: Vec<&str> = tokens.colors().map(|(name, _)| name).collect();
+    names.sort_unstable();
+    let colors: serde_json::Map<String, serde_json::Value> = names
+        .into_iter()
+        .map(|name| (name.to_owned(), "#00000000".into()))
+        .collect();
+    serde_json::json!({ "cssVars": { "light": colors.clone(), "dark": colors } })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +115,17 @@ mod tests {
             a: 0.5,
         };
         assert_eq!(Color::from(alpha(half).dark), Color(0xff000080));
+    }
+
+    #[test]
+    fn build_theme_config_names_every_token_and_ignores_the_palette() {
+        let config = build_theme_config();
+        let light = config["cssVars"]["light"].as_object().unwrap();
+        for name in ["scrim", "faint", "row-selected", "popover-foreground"] {
+            assert_eq!(light[name], "#00000000", "{name}");
+        }
+        let parsed = nsh_platform_gpui::Theme::from_json(&config.to_string()).unwrap();
+        assert!(parsed.color("scrim").is_some());
     }
 
     #[test]

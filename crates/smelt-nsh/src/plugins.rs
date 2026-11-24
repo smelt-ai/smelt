@@ -15,7 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, LazyLock, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -33,8 +33,17 @@ const APP: &str = include_str!("plugins/App.tsx");
 const PROVIDER: &str = include_str!("plugins/provider.tsx");
 const SLOTS: &str = include_str!("plugins/slots.tsx");
 const SDK: &str = include_str!("plugins/sdk.tsx");
-const SHELL_NSH_CONFIG: &str = include_str!("plugins/shell.nsh.json");
-const PLUGIN_NSH_CONFIG: &str = include_str!("plugins/plugin.nsh.json");
+/// 外壳和插件的打包配置：手写的部分加上 [`crate::theme::build_theme_config`] 生成的令牌名。
+static SHELL_NSH_CONFIG: LazyLock<String> =
+    LazyLock::new(|| with_theme_config(include_str!("plugins/shell.nsh.json")));
+static PLUGIN_NSH_CONFIG: LazyLock<String> =
+    LazyLock::new(|| with_theme_config(include_str!("plugins/plugin.nsh.json")));
+
+fn with_theme_config(json: &str) -> String {
+    let mut config: Value = serde_json::from_str(json).expect("内置 nsh.json 是合法 JSON");
+    config["theme"] = crate::theme::build_theme_config();
+    config.to_string()
+}
 
 /// 外壳上报跨 VM 顶层视图插槽增改删批次。
 const SLOT_OPS: &str = "smelt.slot.ops";
@@ -252,7 +261,7 @@ impl Plugins {
         let stage = stage.canonicalize().map_err(io)?;
         let dir = stage.join("shell");
         let files = [
-            ("nsh.json", SHELL_NSH_CONFIG),
+            ("nsh.json", SHELL_NSH_CONFIG.as_str()),
             ("App.tsx", APP),
             ("provider.tsx", PROVIDER),
             ("slots.tsx", SLOTS),
@@ -615,7 +624,7 @@ fn build_plugin_nsh_config(
     if selected.is_empty() && include_sdk_alias {
         return Ok(PLUGIN_NSH_CONFIG.as_bytes().to_vec());
     }
-    let mut config: Value = serde_json::from_str(PLUGIN_NSH_CONFIG)
+    let mut config: Value = serde_json::from_str(&PLUGIN_NSH_CONFIG)
         .map_err(|error| format!("解析内置 plugin.nsh.json 失败：{error}"))?;
     let alias = config
         .get_mut("resolve")
