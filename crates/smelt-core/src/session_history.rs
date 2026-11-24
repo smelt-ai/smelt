@@ -16,6 +16,7 @@ use crate::agent_kind::{ConversationAgentKind, HistorySourceKind};
 use crate::fs::{FileSystem, LocalFs};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use smelt_model::runtime_path::PathStyle;
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,14 @@ fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|t| t.with_timezone(&Utc))
+}
+
+fn same_cwd(a: &str, b: &str) -> bool {
+    same_cwd_in(PathStyle::LOCAL, a, b)
+}
+
+fn same_cwd_in(style: PathStyle, a: &str, b: &str) -> bool {
+    !a.trim().is_empty() && !b.trim().is_empty() && style.same_path(a, b)
 }
 
 type ListSessions = fn(&str, Option<&str>) -> Vec<SessionSummary>;
@@ -467,7 +476,7 @@ fn codex_home(override_dir: Option<&str>) -> PathBuf {
         return PathBuf::from(dir);
     }
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join(".codex")
 }
 
@@ -590,7 +599,10 @@ fn summarize_codex_session_with(
         return None;
     }
     let payload = meta.get("payload")?;
-    if payload.get("cwd").and_then(|v| v.as_str()) != Some(want_cwd) {
+    let Some(session_cwd) = payload.get("cwd").and_then(|v| v.as_str()) else {
+        return None;
+    };
+    if !same_cwd(session_cwd, want_cwd) {
         return None; // 先过滤 cwd，不匹配就不用往下解析整份文件
     }
     let session_id = payload
@@ -781,7 +793,7 @@ fn grok_home(override_dir: Option<&str>) -> PathBuf {
         return PathBuf::from(dir);
     }
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join(".grok")
 }
 
@@ -818,12 +830,14 @@ fn summarize_grok_session_with(
     let summary_path = session_dir.join("summary.json");
     let text = fs.read_to_string(&summary_path).ok()?;
     let summary: Value = serde_json::from_str(&text).ok()?;
-    if summary
+    let Some(session_cwd) = summary
         .get("info")
         .and_then(|i| i.get("cwd"))
         .and_then(|v| v.as_str())
-        != Some(want_cwd)
-    {
+    else {
+        return None;
+    };
+    if !same_cwd(session_cwd, want_cwd) {
         return None;
     }
     let session_id = session_dir
@@ -1015,8 +1029,26 @@ fn copilot_home(override_dir: Option<&str>) -> PathBuf {
         return PathBuf::from(xdg).join("copilot");
     }
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join(".copilot")
+}
+
+fn unquote_yaml_scalar(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+    {
+        return inner.replace("''", "'");
+    }
+    if trimmed.starts_with('"')
+        && trimmed.ends_with('"')
+        && trimmed.len() >= 2
+        && let Ok(unquoted) = serde_json::from_str::<String>(trimmed)
+    {
+        return unquoted;
+    }
+    trimmed.to_string()
 }
 
 /// 只认得住扁平 `key: value` 这一种形状——Copilot 目前这个文件就是这样（实测），
@@ -1024,7 +1056,7 @@ fn copilot_home(override_dir: Option<&str>) -> PathBuf {
 fn parse_flat_yaml(text: &str) -> std::collections::HashMap<String, String> {
     text.lines()
         .filter_map(|line| line.split_once(": "))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .map(|(k, v)| (k.trim().to_string(), unquote_yaml_scalar(v)))
         .collect()
 }
 
@@ -1057,7 +1089,10 @@ fn summarize_copilot_session_with(
         .read_to_string(&session_dir.join("workspace.yaml"))
         .ok()?;
     let fields = parse_flat_yaml(&yaml_text);
-    if fields.get("cwd").map(String::as_str) != Some(want_cwd) {
+    if !fields
+        .get("cwd")
+        .is_some_and(|session_cwd| same_cwd(session_cwd, want_cwd))
+    {
         return None;
     }
     let session_id = session_dir
@@ -1229,7 +1264,7 @@ fn pi_agent_dir(override_dir: Option<&str>) -> PathBuf {
         .map(|dir| PathBuf::from(crate::workspace_override::expand_tilde(&dir)))
         .unwrap_or_else(|| {
             dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .unwrap_or_else(std::env::temp_dir)
                 .join(".pi")
                 .join("agent")
         })
@@ -1676,7 +1711,7 @@ fn summarize_pi_session_with(
 ) -> Option<SessionSummary> {
     let text = fs.read_to_string(path).ok()?;
     let (resume_id, session_cwd, header_timestamp) = pi_session_header(&text)?;
-    if session_cwd != want_cwd {
+    if !same_cwd(&session_cwd, want_cwd) {
         return None;
     }
 
@@ -2606,5 +2641,58 @@ mod tests {
         assert_eq!(detail.turns[2].tool_paths, vec!["src/app.ts".to_string()]);
         // 同一份会话里换过模型：交接头部要交代的是最后在用的那个
         assert_eq!(detail.model.as_deref(), Some("claude-opus-5"));
+    }
+
+    #[test]
+    fn same_cwd_in_normalizes_windows_paths_and_keeps_posix_case() {
+        assert!(same_cwd_in(
+            PathStyle::Windows,
+            r"E:\AI\smelt",
+            "e:/ai/smelt/"
+        ));
+        assert!(same_cwd_in(
+            PathStyle::Windows,
+            r"\\?\E:\AI\smelt",
+            r"E:\AI\smelt"
+        ));
+        assert!(!same_cwd_in(
+            PathStyle::Windows,
+            r"E:\AI\smelt",
+            r"E:\AI\smelt-old"
+        ));
+        assert!(!same_cwd_in(PathStyle::Windows, "", ""));
+        assert!(!same_cwd_in(PathStyle::Windows, "   ", "   "));
+        assert!(same_cwd_in(
+            PathStyle::Posix,
+            "/Users/a/proj/",
+            "/Users/a/proj"
+        ));
+        assert!(!same_cwd_in(
+            PathStyle::Posix,
+            "/Users/a/Proj",
+            "/Users/a/proj"
+        ));
+    }
+
+    #[test]
+    fn parse_flat_yaml_unquotes_quoted_windows_paths() {
+        let plain = parse_flat_yaml("cwd: E:\\AI\\smelt\nsummary: plain\n");
+        assert_eq!(plain.get("cwd").map(String::as_str), Some(r"E:\AI\smelt"));
+
+        let double_quoted = parse_flat_yaml("cwd: \"E:\\\\AI\\\\smelt\"\n");
+        assert_eq!(
+            double_quoted.get("cwd").map(String::as_str),
+            Some(r"E:\AI\smelt")
+        );
+
+        let single_quoted = parse_flat_yaml("cwd: 'E:\\AI\\smelt'\nsummary: 'O''Reilly'\n");
+        assert_eq!(
+            single_quoted.get("cwd").map(String::as_str),
+            Some(r"E:\AI\smelt")
+        );
+        assert_eq!(
+            single_quoted.get("summary").map(String::as_str),
+            Some("O'Reilly")
+        );
     }
 }
