@@ -65,7 +65,7 @@ NSH **不是 React**：组件函数只在挂载时执行**一次**，之后只�
    - `<If when={ready()} else={<Text>Loading</Text>}>{(val) => <Text>{val()}</Text>}</If>`
    - `<Each of={items()} key={(item) => item.id}>{(item, idx) => <Text>{item().name}</Text>}</Each>`
    - 大列表用 `"nsh"` 的 `<List>`（虚拟滚动）。
-4. **副作用与清理**：`effect(() => { const off = onEvent(..., ["view_opened"]); cleanup(off); })`，或配合 `onSlices(["views"], ...)` 按需监听状态切片。不要设定时轮询；等待宿主或运行时变化一律监听事件（`onEvent` 须显式传第二个参数 `types` 数组 / `onSlices` / `waitOnline`）。
+4. **副作用与清理**：`effect(() => { const off = onEvent(..., ["view_opened"]); cleanup(off); })`，或配合 `onSlices(["views"], ...)` 按需监听状态切片。不要设定时轮询；等待宿主或运行时变化一律监听事件（`onEvent` 须显式传第二个参数 `types` 数组 / `onSlices` / `waitOnline`）。要逐帧推进的（拖到边上自动滚动这类）用 `requestAnimationFrame`，按两帧时间差算步长，停下就别再要帧。
 5. **顶层不可阻塞主渲染**：文件/数据库/RPC 都异步放到 `bootTask` 或事件回调里，界面直接读内存 signal。
 6. **主题样式不要硬编码颜色**：尽量使用语义 Tailwind class（见第 6 节）或读取 `theme()` 切片信号（`theme().palette`、`theme().radius`、`theme().type`）。
 

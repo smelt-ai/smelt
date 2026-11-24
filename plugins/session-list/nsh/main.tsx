@@ -76,7 +76,8 @@ const EDGE = 8;
 const INDENT = 16;
 const DRAG_THRESHOLD = 4;
 const AUTOSCROLL_EDGE = 40;
-const AUTOSCROLL_STEP = 8;
+/** 拖到边上时每毫秒滚多少：按两帧间隔算，高刷屏不会滚得更快。 */
+const AUTOSCROLL_SPEED = 0.5;
 const WASH_HOLD_MS = 360;
 const WASH_PEAK_OPACITY = 0.1;
 
@@ -2133,16 +2134,32 @@ export function main() {
   let scrollViewportTop = 0;
   let scrollViewportHeight = 0;
   let scrollContentHeight = 0;
-  let autoScrollTimer: any = null;
+  let autoScrollFrame: number | null = null;
+  let autoScrollLast = 0;
   let autoScrollDir = 0;
   let measureSerial = 0;
 
   const stopAutoScroll = () => {
     autoScrollDir = 0;
-    if (autoScrollTimer != null) {
-      clearInterval(autoScrollTimer);
-      autoScrollTimer = null;
+    if (autoScrollFrame != null) {
+      cancelAnimationFrame(autoScrollFrame);
+      autoScrollFrame = null;
     }
+  };
+
+  // 拖到滚动区边上时跟着显示帧推进；离开边缘、松手就不再要帧。
+  const autoScrollStep = (now: number) => {
+    autoScrollFrame = null;
+    if (!drag()?.active || autoScrollDir === 0) return;
+    const elapsed = Math.min(50, Math.max(0, now - autoScrollLast));
+    autoScrollLast = now;
+    const maxScroll = Math.max(0, scrollContentHeight - scrollViewportHeight);
+    const nextY = Math.max(0, Math.min(maxScroll, scrollOffsetY + autoScrollDir * AUTOSCROLL_SPEED * elapsed));
+    if (nextY !== scrollOffsetY) {
+      scrollOffsetY = nextY;
+      scrollRef?.scrollTo?.({ y: nextY, animated: false });
+    }
+    autoScrollFrame = requestAnimationFrame(autoScrollStep);
   };
 
   const updateAutoScroll = (active: boolean, pointerY: number) => {
@@ -2160,20 +2177,9 @@ export function main() {
       return;
     }
     autoScrollDir = dir;
-    if (autoScrollTimer == null) {
-      // 轮询例外：拖拽悬停在滚动区边缘时需要持续推进滚动偏移，没有原生边缘悬停事件；周期 16ms，松手或离开边缘立即停止。
-      autoScrollTimer = setInterval(() => {
-        if (!drag()?.active || autoScrollDir === 0) {
-          stopAutoScroll();
-          return;
-        }
-        const maxScroll = Math.max(0, scrollContentHeight - scrollViewportHeight);
-        const nextY = Math.max(0, Math.min(maxScroll, scrollOffsetY + autoScrollDir * AUTOSCROLL_STEP));
-        if (nextY !== scrollOffsetY) {
-          scrollOffsetY = nextY;
-          scrollRef?.scrollTo?.({ y: nextY, animated: false });
-        }
-      }, 16);
+    if (autoScrollFrame == null) {
+      autoScrollLast = performance.now();
+      autoScrollFrame = requestAnimationFrame(autoScrollStep);
     }
   };
 
