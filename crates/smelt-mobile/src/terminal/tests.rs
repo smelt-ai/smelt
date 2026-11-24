@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use smelt_runtime_client::RuntimeStream;
-use smelt_runtime_client::protocol::control::ControlResponse;
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlResponse};
 use smelt_runtime_client::protocol::write_json_line;
 
 use super::*;
@@ -15,6 +15,7 @@ const FAST: Timing = Timing {
     header_timeout: Duration::from_secs(2),
     write_timeout: Duration::from_secs(1),
     input_timeout: Duration::from_secs(2),
+    stage_timeout: Duration::from_secs(2),
     probe_timeout: Duration::from_secs(1),
     backoff_base: Duration::from_millis(20),
     backoff_max: Duration::from_millis(80),
@@ -39,6 +40,10 @@ struct FakeRuntime {
     watch_requests: Mutex<Vec<Value>>,
     inputs: Mutex<Vec<Value>>,
     input_reply: Mutex<Value>,
+    first_input_started: Mutex<Option<mpsc::Sender<()>>>,
+    first_input_release: Mutex<Option<mpsc::Receiver<()>>>,
+    control_requests: Mutex<Vec<Value>>,
+    stage_image_missing_method: AtomicBool,
 }
 
 impl FakeRuntime {
@@ -52,6 +57,10 @@ impl FakeRuntime {
             watch_requests: Mutex::new(Vec::new()),
             inputs: Mutex::new(Vec::new()),
             input_reply: Mutex::new(json!({ "ok": true })),
+            first_input_started: Mutex::new(None),
+            first_input_release: Mutex::new(None),
+            control_requests: Mutex::new(Vec::new()),
+            stage_image_missing_method: AtomicBool::new(false),
         })
     }
 
@@ -99,16 +108,44 @@ impl FakeRuntime {
             }
             Some("input") => {
                 self.inputs.lock().unwrap().push(request);
+                if let Some(started) = self.first_input_started.lock().unwrap().take() {
+                    let _ = started.send(());
+                }
+                if let Some(release) = self.first_input_release.lock().unwrap().take() {
+                    let _ = release.recv();
+                }
                 let reply = self.input_reply.lock().unwrap().clone();
                 let _ = write_json_line(&mut &writer, &reply);
             }
             Some("control") => {
-                assert_eq!(request["method"], "system.describe");
+                self.control_requests.lock().unwrap().push(request.clone());
                 let request_id = request["request_id"].as_str().unwrap();
-                let _ = write_json_line(
-                    &mut &writer,
-                    &ControlResponse::ok(request_id, describe_result()),
-                );
+                match request["method"].as_str() {
+                    Some("system.describe") => {
+                        let _ = write_json_line(
+                            &mut &writer,
+                            &ControlResponse::ok(request_id, describe_result()),
+                        );
+                    }
+                    Some("terminal.stage_image") => {
+                        let reply = if self.stage_image_missing_method.load(Ordering::SeqCst) {
+                            ControlResponse::<Value>::error(
+                                request_id,
+                                ControlError::new(
+                                    ControlErrorCode::MethodNotFound,
+                                    "unknown control method `terminal.stage_image`",
+                                ),
+                            )
+                        } else {
+                            ControlResponse::ok(
+                                request_id,
+                                json!({ "path": "/tmp/smelt-terminal-images-1000/img-1.png" }),
+                            )
+                        };
+                        let _ = write_json_line(&mut &writer, &reply);
+                    }
+                    other => panic!("假运行时不认识的 control 方法：{other:?}"),
+                }
             }
             other => panic!("假运行时不认识的 op：{other:?}"),
         }
@@ -176,6 +213,17 @@ impl FakeSource {
                 generation: 1,
                 client: Some(client),
                 connection: ConnectionState::Connected,
+                listeners: Vec::new(),
+            }),
+        })
+    }
+
+    fn disconnected() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(FakeState {
+                generation: 1,
+                client: None,
+                connection: ConnectionState::Disconnected,
                 listeners: Vec::new(),
             }),
         })
@@ -1150,4 +1198,117 @@ fn backoff_doubles_from_500ms_up_to_8s() {
         .map(|failures| timing.backoff(failures).as_millis() as u64)
         .collect();
     assert_eq!(delays, vec![500, 1000, 2000, 4000, 8000, 8000, 8000]);
+}
+
+#[test]
+fn discrete_input_segments_stay_separate_while_regular_inputs_coalesce() {
+    let runtime = FakeRuntime::new(idle_watch);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *runtime.first_input_started.lock().unwrap() = Some(started_tx);
+    *runtime.first_input_release.lock().unwrap() = Some(release_rx);
+
+    let (hub, _source) = setup(&runtime);
+    let recorder = Recorder::new();
+    hub.attach("t1".into(), GEOMETRY, None, recorder.emit())
+        .unwrap();
+    recorder.wait_readies(1);
+
+    // 堵住第一条输入：后面排进来的离散段与普通输入都会留在队列里，验证合并边界。
+    hub.input("t1", "first".into()).unwrap();
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    hub.input_segments(
+        "t1",
+        vec![
+            "\x1b[200~/tmp/a.png \x1b[201~".into(),
+            String::new(),
+            "\x1b[200~/tmp/b.png \x1b[201~".into(),
+            "\x1b[200~hello\x1b[201~".into(),
+            "\r".into(),
+        ],
+    )
+    .unwrap();
+    hub.input("t1", "a".into()).unwrap();
+    hub.input("t1", "b".into()).unwrap();
+
+    release_tx.send(()).unwrap();
+    wait_until("全部离散段和合并输入发出", || {
+        runtime.inputs().len() == 6
+    });
+
+    let received: Vec<String> = runtime
+        .inputs()
+        .iter()
+        .map(|input| input["data"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        received,
+        vec![
+            "first",
+            "\x1b[200~/tmp/a.png \x1b[201~",
+            "\x1b[200~/tmp/b.png \x1b[201~",
+            "\x1b[200~hello\x1b[201~",
+            "\r",
+            "ab",
+        ]
+    );
+    hub.detach("t1");
+}
+
+#[test]
+fn stage_image_calls_control_rpc_and_maps_offline_or_outdated_errors() {
+    let runtime = FakeRuntime::new(idle_watch);
+    let (hub, _source) = setup(&runtime);
+    let png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+    let path = hub
+        .stage_image(
+            "t1",
+            crate::api::conversation::ImageInput {
+                mime: "image/png".into(),
+                bytes: png.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(path, "/tmp/smelt-terminal-images-1000/img-1.png");
+    let requests = runtime.control_requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"], "terminal.stage_image");
+    assert_eq!(requests[0]["params"]["session_id"], "t1");
+    assert_eq!(requests[0]["params"]["mime"], "image/png");
+
+    runtime
+        .stage_image_missing_method
+        .store(true, Ordering::SeqCst);
+    let outdated = hub
+        .stage_image(
+            "t1",
+            crate::api::conversation::ImageInput {
+                mime: "image/png".into(),
+                bytes: png.clone(),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        outdated.kind,
+        crate::api::error::SmeltErrorKind::RuntimeOutdated
+    );
+    assert_eq!(
+        outdated.message,
+        t!("error.runtime_unsupported").into_owned()
+    );
+
+    // 断线时直接报 Offline。
+    let offline_hub = TerminalHub::new(FakeSource::disconnected(), FAST);
+    let offline = offline_hub
+        .stage_image(
+            "t1",
+            crate::api::conversation::ImageInput {
+                mime: "image/png".into(),
+                bytes: png,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(offline.kind, crate::api::error::SmeltErrorKind::Offline);
 }

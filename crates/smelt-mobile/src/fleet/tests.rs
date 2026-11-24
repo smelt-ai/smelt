@@ -60,6 +60,7 @@ const FAST: Timings = Timings {
         header_timeout: Duration::from_secs(1),
         write_timeout: Duration::from_secs(1),
         input_timeout: Duration::from_secs(1),
+        stage_timeout: Duration::from_secs(1),
         probe_timeout: Duration::from_secs(1),
         backoff_base: Duration::from_millis(20),
         backoff_max: Duration::from_millis(80),

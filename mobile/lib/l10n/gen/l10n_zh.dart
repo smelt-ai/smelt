@@ -2241,6 +2241,14 @@ class L10nZh extends L10n {
   String get terminalKeyArrows => '方向键';
 
   @override
+  String get terminalSendingImages => '正在上传图片…';
+
+  @override
+  String terminalImageSendFailed(String message) {
+    return '图片发送失败：$message';
+  }
+
+  @override
   String get updateSection => '更新';
 
   @override

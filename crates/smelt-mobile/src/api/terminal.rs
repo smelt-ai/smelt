@@ -7,6 +7,7 @@
 
 use flutter_rust_bridge::frb;
 
+use crate::api::conversation::ImageInput;
 use crate::api::error::SmeltError;
 use crate::frb_generated::StreamSink;
 use crate::terminal::TerminalUpdate;
@@ -157,6 +158,34 @@ pub fn terminal_input(
         .node(&runtime_id)?
         .terminals
         .input(&session_id, data)
+}
+
+/// 按顺序发送一组不与邻居合并的离散输入段（例如逐张粘贴图片路径、正文、回车）。
+/// 全空忽略，没有附着这个会话时报错。
+#[frb(sync)]
+pub fn terminal_input_segments(
+    runtime_id: String,
+    session_id: String,
+    segments: Vec<String>,
+) -> Result<(), SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .terminals
+        .input_segments(&session_id, segments)
+}
+
+/// 把一张图片上传暂存到运行时临时目录，返回那台机器上的绝对路径。
+///
+/// 会阻塞网络 IO，放到 FRB 工作线程池执行（不能标 `#[frb(sync)]`）。
+pub fn terminal_stage_image(
+    runtime_id: String,
+    session_id: String,
+    image: ImageInput,
+) -> Result<String, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .terminals
+        .stage_image(&session_id, image)
 }
 
 /// 断开附着：关掉连接（运行时据此进入几何租约的宽限期），不再重连，流随之结束。

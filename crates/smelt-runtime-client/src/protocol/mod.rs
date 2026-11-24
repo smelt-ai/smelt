@@ -9,6 +9,7 @@ pub mod git;
 pub mod history;
 pub mod reason;
 pub mod runtime_upgrade;
+pub mod terminal;
 pub mod workspace;
 
 use std::io::{self, Write};

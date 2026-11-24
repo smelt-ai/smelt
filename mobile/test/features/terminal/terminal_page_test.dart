@@ -5,11 +5,13 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:smelt_mobile/data/demo_backend.dart';
 import 'package:smelt_mobile/data/models.dart';
 import 'package:smelt_mobile/data/preferences.dart';
 import 'package:smelt_mobile/data/stores.dart';
+import 'package:smelt_mobile/features/conversation/conversation_images.dart';
 import 'package:smelt_mobile/features/terminal/terminal_page.dart';
 import 'package:smelt_mobile/features/terminal/terminal_shortcut_bar.dart';
 import 'package:smelt_mobile/features/terminal/terminal_stream.dart';
@@ -17,6 +19,7 @@ import 'package:smelt_mobile/l10n/gen/l10n.dart';
 import 'package:smelt_mobile/theme/primitives.dart';
 import 'package:smelt_mobile/theme/terminal_theme.dart';
 import 'package:smelt_mobile/theme/theme.dart';
+import 'package:smelt_mobile/utils/pick_images.dart';
 import 'package:xterm/xterm.dart';
 
 /// 演示后端里那条终端会话。
@@ -91,6 +94,9 @@ class _ScriptedBackend extends DemoBackend {
   final attaches = <_Attach>[];
   final resizes = <TerminalGeometry>[];
   final sentInput = <String>[];
+  final sentSegments = <List<String>>[];
+  final stagedImages = <ImageInput>[];
+  Future<String> Function(ImageInput image)? onStageImage;
 
   _Attach get current => attaches.last;
 
@@ -119,6 +125,24 @@ class _ScriptedBackend extends DemoBackend {
       sentInput.add(data);
 
   @override
+  void terminalInputSegments(
+    String runtimeId,
+    String sessionId,
+    List<String> segments,
+  ) => sentSegments.add(List.of(segments));
+
+  @override
+  Future<String> terminalStageImage(
+    String runtimeId,
+    String sessionId,
+    ImageInput image,
+  ) async {
+    stagedImages.add(image);
+    if (onStageImage != null) return onStageImage!(image);
+    return '/tmp/staged-${stagedImages.length}.png';
+  }
+
+  @override
   void terminalDetach(String runtimeId, String sessionId) => _endCurrent();
 
   void _endCurrent() {
@@ -127,6 +151,9 @@ class _ScriptedBackend extends DemoBackend {
     if (!controller.isClosed) unawaited(controller.close());
   }
 }
+
+Uint8List _png([int width = 1]) =>
+    img.encodePng(img.Image(width: width, height: 1));
 
 /// 只记下输入、其余照演示后端走（附着后推合成输出、回显）。
 class _RecordingDemoBackend extends DemoBackend {
@@ -143,6 +170,7 @@ Widget _app(
   AppModel model, {
   Brightness brightness = Brightness.light,
   Widget? home,
+  ComposerImagePicker? pickImages,
 }) => AppScope(
   model: model,
   child: MaterialApp(
@@ -151,7 +179,11 @@ Widget _app(
     supportedLocales: L10n.supportedLocales,
     home:
         home ??
-        const TerminalPage(runtimeId: _runtimeId, sessionId: _sessionId),
+        TerminalPage(
+          runtimeId: _runtimeId,
+          sessionId: _sessionId,
+          pickImages: pickImages,
+        ),
   ),
 );
 
@@ -160,9 +192,12 @@ Future<AppModel> _open(
   WidgetTester tester,
   DemoBackend backend, {
   Brightness brightness = Brightness.light,
+  ComposerImagePicker? pickImages,
 }) async {
   final model = AppModel(backend, PreferencesStore.memory())..start();
-  await tester.pumpWidget(_app(model, brightness: brightness));
+  await tester.pumpWidget(
+    _app(model, brightness: brightness, pickImages: pickImages),
+  );
   await tester.pump();
   await tester.pump(_settle);
   return model;
@@ -1160,6 +1195,220 @@ void main() {
     await tester.tap(find.byTooltip('Paste'));
     await tester.pump();
     expect(backend.sentInput, ['\x1b[200~hello\nworld\x1b[201~']);
+
+    await _close(tester, model);
+  });
+
+  testWidgets('打开终端输入框可添加和移除图片', (tester) async {
+    final backend = _ScriptedBackend();
+    final model = await _open(
+      tester,
+      backend,
+      pickImages: (_) async => PickedImagesResult(
+        images: [
+          ImageInput(mime: 'image/png', bytes: _png(1)),
+          ImageInput(mime: 'image/png', bytes: _png(2)),
+        ],
+      ),
+    );
+    await _ready(tester, backend);
+
+    await tester.tap(find.byTooltip('Open input box'));
+    await tester.pump();
+    expect(find.byIcon(LucideIcons.imagePlus), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Add image'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ConversationThumbnail), findsNWidgets(2));
+
+    await tester.tap(find.byTooltip('Remove image').first);
+    await tester.pump();
+    expect(find.byType(ConversationThumbnail), findsOneWidget);
+
+    await _close(tester, model);
+  });
+
+  testWidgets('仅选图点发送上传图片并按 bracketed paste 分段提交', (tester) async {
+    final backend = _ScriptedBackend();
+    final model = await _open(
+      tester,
+      backend,
+      pickImages: (_) async => PickedImagesResult(
+        images: [ImageInput(mime: 'image/png', bytes: _png(1))],
+      ),
+    );
+    await _ready(tester, backend);
+
+    await tester.tap(find.byTooltip('Open input box'));
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Add image'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pumpAndSettle();
+
+    expect(backend.stagedImages, hasLength(1));
+    expect(backend.sentSegments, [
+      ['/tmp/staged-1.png ', '\r'],
+    ]);
+    expect(find.byType(ConversationThumbnail), findsNothing);
+
+    backend.current.data('\x1b[?2004h');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Add image'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pumpAndSettle();
+
+    expect(backend.stagedImages, hasLength(2));
+    expect(backend.sentSegments.last, [
+      '\x1b[200~/tmp/staged-2.png \x1b[201~',
+      '\r',
+    ]);
+    expect(find.byType(ConversationThumbnail), findsNothing);
+
+    await _close(tester, model);
+  });
+
+  testWidgets('多图配合正文按序上传并分四段发出', (tester) async {
+    final backend = _ScriptedBackend();
+    final model = await _open(
+      tester,
+      backend,
+      pickImages: (_) async => PickedImagesResult(
+        images: [
+          ImageInput(mime: 'image/png', bytes: _png(1)),
+          ImageInput(mime: 'image/png', bytes: _png(2)),
+        ],
+      ),
+    );
+    await _ready(tester, backend);
+    backend.current.data('\x1b[?2004h');
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Open input box'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Add image'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), '看看这张图');
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pumpAndSettle();
+
+    expect(backend.stagedImages, hasLength(2));
+    expect(backend.sentSegments, [
+      [
+        '\x1b[200~/tmp/staged-1.png \x1b[201~',
+        '\x1b[200~/tmp/staged-2.png \x1b[201~',
+        '\x1b[200~看看这张图\x1b[201~',
+        '\r',
+      ],
+    ]);
+    expect(find.text('看看这张图'), findsNothing);
+    expect(find.byType(ConversationThumbnail), findsNothing);
+
+    await _close(tester, model);
+  });
+
+  testWidgets('图片上传失败时不写 PTY 并保留内容供重发', (tester) async {
+    final backend = _ScriptedBackend();
+    var attempt = 0;
+    backend.onStageImage = (_) async {
+      attempt++;
+      if (attempt == 1) {
+        throw const SmeltError(
+          kind: SmeltErrorKind.runtimeOutdated,
+          message: '运行时不支持这个操作，先升级它',
+        );
+      }
+      return '/tmp/retry-1.png';
+    };
+
+    final model = await _open(
+      tester,
+      backend,
+      pickImages: (_) async => PickedImagesResult(
+        images: [ImageInput(mime: 'image/png', bytes: _png(1))],
+      ),
+    );
+    await _ready(tester, backend);
+
+    await tester.tap(find.byTooltip('Open input box'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Add image'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'fix this');
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pumpAndSettle();
+
+    expect(backend.sentSegments, isEmpty);
+    expect(backend.sentInput, isEmpty);
+    expect(
+      find.text("Couldn't send images: 运行时不支持这个操作，先升级它"),
+      findsOneWidget,
+    );
+    expect(find.text('fix this'), findsOneWidget);
+    expect(find.byType(ConversationThumbnail), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining("Couldn't send images:"), findsNothing);
+    expect(backend.sentSegments, [
+      ['/tmp/retry-1.png ', 'fix this', '\r'],
+    ]);
+    expect(find.text('fix this'), findsNothing);
+    expect(find.byType(ConversationThumbnail), findsNothing);
+
+    await _close(tester, model);
+  });
+
+  testWidgets('切后台模拟选图返回后保持输入框与已选图片不丢', (tester) async {
+    final backend = _ScriptedBackend();
+    final model = await _open(
+      tester,
+      backend,
+      pickImages: (_) async => PickedImagesResult(
+        images: [ImageInput(mime: 'image/png', bytes: _png(1))],
+      ),
+    );
+    await _ready(tester, backend);
+
+    await tester.tap(find.byTooltip('Open input box'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Add image'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'hello');
+    await tester.pump();
+
+    // 打开系统相册会切到后台触发 suspend（流状态回到 connecting），输入框和图片必须保留。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    expect(find.byType(TextField), findsOneWidget);
+    expect(find.text('hello'), findsOneWidget);
+    expect(find.byType(ConversationThumbnail), findsOneWidget);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump(_settle);
+    expect(backend.attaches, hasLength(2));
+    await _ready(tester, backend);
+
+    expect(find.byType(TextField), findsOneWidget);
+    expect(find.text('hello'), findsOneWidget);
+    expect(find.byType(ConversationThumbnail), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pumpAndSettle();
+    expect(backend.sentSegments, [
+      ['/tmp/staged-1.png ', 'hello', '\r'],
+    ]);
 
     await _close(tester, model);
   });

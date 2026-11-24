@@ -4,16 +4,19 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart';
 
-import '../../data/models.dart' show TerminalGeometry;
+import '../../data/models.dart'
+    show ImageInput, TerminalGeometry, describeError;
 import '../../data/preferences.dart';
 import '../../data/stores.dart';
 import '../../l10n/gen/l10n.dart';
 import '../../theme/galley.dart';
 import '../../theme/terminal_theme.dart';
+import '../../utils/pick_images.dart';
 import '../../utils/terminal_links.dart';
 import '../../utils/terminal_paste.dart';
 import '../../utils/xterm_input_filter.dart';
@@ -31,10 +34,12 @@ class TerminalPage extends StatefulWidget {
     super.key,
     required this.runtimeId,
     required this.sessionId,
+    this.pickImages,
   });
 
   final String runtimeId;
   final String sessionId;
+  final ComposerImagePicker? pickImages;
 
   @override
   State<TerminalPage> createState() => _TerminalPageState();
@@ -66,6 +71,10 @@ class _TerminalPageState extends State<TerminalPage>
   bool _composing = false;
   final TextEditingController _composerController = TextEditingController();
   final FocusNode _composerFocusNode = FocusNode();
+  final ImagePicker _picker = ImagePicker();
+  final List<ImageInput> _images = [];
+  bool _sending = false;
+  String? _sendError;
   late double _fontSize;
   int _decoderGeneration = 0;
 
@@ -101,6 +110,7 @@ class _TerminalPageState extends State<TerminalPage>
     _prefs.addListener(_onPrefsChanged);
     _terminalController = TerminalController();
     _terminalController.addListener(_onSelectionChanged);
+    _composerController.addListener(_onComposerTextChanged);
     _stream = TerminalStream(
       backend: model.backend,
       runtimeId: widget.runtimeId,
@@ -116,11 +126,18 @@ class _TerminalPageState extends State<TerminalPage>
       if (!mounted) return;
       if (!_canWriteIn(state)) {
         _closeSoftwareKeyboard();
+      }
+      if (state == TerminalStreamState.ended) {
         _closeComposer();
       }
       setState(() {
         _streamState = state;
-        if (state == TerminalStreamState.ended) _ctrlLatched = false;
+        if (state == TerminalStreamState.ended) {
+          _ctrlLatched = false;
+          _sending = false;
+          _sendError = null;
+          _images.clear();
+        }
       });
     });
   }
@@ -546,15 +563,122 @@ class _TerminalPageState extends State<TerminalPage>
     }
   }
 
-  void _sendComposer() {
-    if (!_canWrite) return;
+  void _onComposerTextChanged() {
+    if (_sendError != null && mounted) {
+      setState(() => _sendError = null);
+    }
+  }
+
+  Future<void> _pickImages() async {
+    if (_sending) return;
+    final l10n = L10n.of(context);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final remaining = kMaxComposerImages - _images.length;
+    if (remaining <= 0) return;
+    try {
+      final pick =
+          widget.pickImages ??
+          (count) => pickComposerImages(_picker, remaining: count);
+      final result = await pick(remaining);
+      if (!mounted) return;
+      if (result.images.isNotEmpty) {
+        setState(() {
+          _images.addAll(
+            result.images.take(kMaxComposerImages - _images.length),
+          );
+          _sendError = null;
+        });
+      }
+      if (result.skipped > 0) {
+        messenger?.showSnackBar(
+          SnackBar(content: Text(l10n.conversationImagesSkipped(result.skipped))),
+        );
+      }
+    } catch (error) {
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text(l10n.conversationAttachFailed(describeError(error))),
+        ),
+      );
+    }
+  }
+
+  void _removeImage(int index) {
+    setState(() {
+      _images.removeAt(index);
+      _sendError = null;
+    });
+  }
+
+  Future<void> _sendComposer() async {
+    if (!_canWrite || _sending) return;
     final text = _composerController.text;
-    if (text.trim().isEmpty) return;
-    _setCtrlLatched(false);
-    _stream.sendInput(
-      '${encodeTerminalPaste(text, bracketed: _terminal.bracketedPasteMode)}\r',
+    final images = List<ImageInput>.of(_images);
+    if (text.trim().isEmpty && images.isEmpty) return;
+
+    if (images.isEmpty) {
+      if (_sendError != null) setState(() => _sendError = null);
+      _setCtrlLatched(false);
+      _stream.sendInput(
+        '${encodeTerminalPaste(text, bracketed: _terminal.bracketedPasteMode)}\r',
+      );
+      _composerController.clear();
+      _jumpToTail();
+      return;
+    }
+
+    final l10n = L10n.of(context);
+    setState(() {
+      _sending = true;
+      _sendError = null;
+    });
+    HapticFeedback.lightImpact();
+
+    final stagedPaths = <String>[];
+    try {
+      for (final image in images) {
+        stagedPaths.add(await _stream.stageImage(image));
+        if (!mounted) return;
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _sending = false;
+        _sendError = l10n.terminalImageSendFailed(describeError(error));
+      });
+      return;
+    }
+
+    if (!mounted) return;
+    if (!_canWrite) {
+      setState(() {
+        _sending = false;
+        if (_streamState != TerminalStreamState.ended) {
+          _sendError = l10n.terminalImageSendFailed(
+            l10n.terminalConnectionDropped,
+          );
+        }
+      });
+      return;
+    }
+
+    final windows =
+        AppScope.of(context).fleet.runtime(widget.runtimeId)?.record.os ==
+        'windows';
+    final segments = encodeTerminalImageSubmission(
+      paths: stagedPaths,
+      text: text,
+      bracketed: _terminal.bracketedPasteMode,
+      windows: windows,
     );
+    _setCtrlLatched(false);
+    _stream.sendInputSegments(segments);
     _composerController.clear();
+    setState(() {
+      _sending = false;
+      _sendError = null;
+      _images.clear();
+    });
     _jumpToTail();
   }
 
@@ -798,15 +922,19 @@ class _TerminalPageState extends State<TerminalPage>
                 child: Composer(
                   controller: _composerController,
                   focusNode: _composerFocusNode,
-                  hint: l10n.terminalComposerHint,
-                  canSend: _canWrite,
+                  hint: _sending
+                      ? l10n.terminalSendingImages
+                      : l10n.terminalComposerHint,
+                  canSend: _canWrite && !_sending,
                   working: false,
-                  sending: false,
-                  readOnly: !_canWrite,
-                  images: const [],
-                  onSend: _sendComposer,
+                  sending: _sending,
+                  readOnly: !_canWrite || _sending,
+                  images: _images,
+                  onSend: () => unawaited(_sendComposer()),
                   onStop: () {},
-                  onRemoveImage: (_) {},
+                  onRemoveImage: _removeImage,
+                  onAttach: _pickImages,
+                  error: _sendError,
                 ),
               ),
             if (_streamState != TerminalStreamState.ended)
@@ -819,7 +947,9 @@ class _TerminalPageState extends State<TerminalPage>
                 keyboardEnabled: _softwareKeyboardEnabled,
                 onToggleKeyboard: _canWrite ? _toggleSoftwareKeyboard : null,
                 composing: _composing,
-                onToggleComposer: _canWrite ? _toggleComposer : null,
+                onToggleComposer: (_canWrite || _composing)
+                    ? _toggleComposer
+                    : null,
               ),
           ],
         ),
@@ -915,6 +1045,7 @@ class _TerminalPageState extends State<TerminalPage>
     WidgetsBinding.instance.removeObserver(this);
     _terminalViewKey.currentState?.closeKeyboard();
     _terminalFocusNode.dispose();
+    _composerController.removeListener(_onComposerTextChanged);
     _composerController.dispose();
     _composerFocusNode.dispose();
     _terminalScrollController.removeListener(_handleTerminalScroll);

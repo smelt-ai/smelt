@@ -19,7 +19,7 @@
 //! 运行时在头行前就关连接、且运行时本身可达（`system.describe` 能回），才说明会话没了：
 //! 附着过的发 `Closed`，从没附着上的发 fatal `Error`。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -30,6 +30,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use smelt_runtime_client::protocol::control::{ControlClientError, EmptyParams, SystemDescribe};
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
+use smelt_runtime_client::protocol::files::Base64Bytes;
+use smelt_runtime_client::protocol::terminal::{
+    MAX_TERMINAL_IMAGE_BYTES, TerminalStageImageCall, TerminalStageImageParams,
+};
 use smelt_runtime_client::{RuntimeClient, RuntimeStream};
 
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
@@ -70,6 +74,8 @@ pub(crate) struct Timing {
     pub write_timeout: Duration,
     /// 一次 `input` 请求的读写时限。
     pub input_timeout: Duration,
+    /// 上传一张图片暂存到运行时的时限。
+    pub stage_timeout: Duration,
     /// 头行前被关时探运行时是否可达的时限。
     pub probe_timeout: Duration,
     pub backoff_base: Duration,
@@ -81,6 +87,7 @@ impl Timing {
         header_timeout: Duration::from_secs(15),
         write_timeout: Duration::from_secs(1),
         input_timeout: Duration::from_secs(10),
+        stage_timeout: Duration::from_secs(30),
         probe_timeout: Duration::from_secs(5),
         backoff_base: Duration::from_millis(500),
         backoff_max: Duration::from_secs(8),
@@ -458,7 +465,7 @@ impl TerminalHub {
                 sent: None,
                 max_scrollback_lines: max_scrollback_lines
                     .map(|lines| lines.clamp(1, MAX_SCROLLBACK_LINES)),
-                input: String::new(),
+                inputs: VecDeque::new(),
             }),
             wake: Condvar::new(),
         });
@@ -517,6 +524,61 @@ impl TerminalHub {
         }
     }
 
+    pub(crate) fn input_segments(
+        &self,
+        session_id: &str,
+        segments: Vec<String>,
+    ) -> Result<(), SmeltError> {
+        if segments.iter().all(String::is_empty) {
+            return Ok(());
+        }
+        let attachment = self.inner.get(session_id)?;
+        if attachment.queue_discrete_inputs(&segments) {
+            Ok(())
+        } else {
+            Err(error(SmeltErrorKind::Other, t!("terminal.disconnected")))
+        }
+    }
+
+    pub(crate) fn stage_image(
+        &self,
+        session_id: &str,
+        image: crate::api::conversation::ImageInput,
+    ) -> Result<String, SmeltError> {
+        if session_id.trim().is_empty() {
+            return Err(error(SmeltErrorKind::Other, t!("error.session_missing")));
+        }
+        if image.bytes.is_empty() || image.bytes.len() > MAX_TERMINAL_IMAGE_BYTES {
+            return Err(error(
+                SmeltErrorKind::Other,
+                t!(
+                    "error.image_invalid",
+                    error = format!("0 < bytes <= {MAX_TERMINAL_IMAGE_BYTES}")
+                ),
+            ));
+        }
+        let Some((_, client)) = self.inner.source.current() else {
+            return Err(error(SmeltErrorKind::Offline, t!("error.not_connected")));
+        };
+        let result = client
+            .call::<TerminalStageImageCall>(
+                &TerminalStageImageParams {
+                    session_id: session_id.to_string(),
+                    mime: image.mime,
+                    data: Base64Bytes(image.bytes),
+                },
+                self.inner.timing.stage_timeout,
+            )
+            .map_err(|call_error| {
+                let mut mapped = crate::catalog::control_error(call_error);
+                if mapped.kind == crate::api::error::SmeltErrorKind::RuntimeOutdated {
+                    mapped.message = t!("error.runtime_unsupported").into_owned();
+                }
+                mapped
+            })?;
+        Ok(result.path)
+    }
+
     pub(crate) fn detach(&self, session_id: &str) {
         let removed = self.inner.attachments().remove(session_id);
         if let Some(attachment) = removed {
@@ -557,7 +619,26 @@ struct State {
     sent: Option<TerminalGeometry>,
     max_scrollback_lines: Option<u32>,
     /// 排队待发的输入。
-    input: String,
+    inputs: VecDeque<QueuedInput>,
+}
+
+enum QueuedInput {
+    Coalesced(String),
+    Discrete(String),
+}
+
+impl QueuedInput {
+    fn as_str_mut(&mut self) -> &mut String {
+        match self {
+            Self::Coalesced(buf) | Self::Discrete(buf) => buf,
+        }
+    }
+
+    fn into_string(self) -> String {
+        match self {
+            Self::Coalesced(buf) | Self::Discrete(buf) => buf,
+        }
+    }
 }
 
 enum Wake {
@@ -759,35 +840,65 @@ impl Attachment {
         if state.stopped {
             return false;
         }
-        state.input.push_str(data);
+        if let Some(QueuedInput::Coalesced(buf)) = state.inputs.back_mut() {
+            buf.push_str(data);
+        } else {
+            state
+                .inputs
+                .push_back(QueuedInput::Coalesced(data.to_string()));
+        }
         drop(state);
         self.wake.notify_all();
         true
     }
 
-    /// 取下一块要发的输入：在途期间攒下的合并发送，单块不超过 64 KB。叫停后返回 None。
+    /// 排队一组不与邻居合并的离散段（用于逐张粘贴图片路径、正文与回车），返回 false 表示附着已停。
+    fn queue_discrete_inputs(&self, segments: &[String]) -> bool {
+        let mut state = self.lock();
+        if state.stopped {
+            return false;
+        }
+        for segment in segments {
+            if !segment.is_empty() {
+                state
+                    .inputs
+                    .push_back(QueuedInput::Discrete(segment.clone()));
+            }
+        }
+        drop(state);
+        self.wake.notify_all();
+        true
+    }
+
+    /// 取下一块要发的输入：普通按键在途期间会合并发送，离散段各自独立发出，单块不超过 64 KB。
+    /// 叫停后返回 None。
     fn next_input(&self) -> Option<String> {
         let state = self.lock();
         let mut state = self
             .wake
-            .wait_while(state, |s| !s.stopped && s.input.is_empty())
+            .wait_while(state, |s| !s.stopped && s.inputs.is_empty())
             .unwrap_or_else(|e| e.into_inner());
         if state.stopped {
             return None;
         }
-        Some(take_chunk(&mut state.input, MAX_INPUT_BYTES))
+        let front = state.inputs.front_mut()?;
+        let buf = front.as_str_mut();
+        if buf.len() <= MAX_INPUT_BYTES {
+            return state.inputs.pop_front().map(QueuedInput::into_string);
+        }
+        Some(take_chunk(buf, MAX_INPUT_BYTES))
     }
 
     /// 输入发送失败：丢掉还没发的（断线后再补发旧按键比丢掉更危险），并告诉界面。
     fn input_failed(&self, message: String) {
-        self.lock().input.clear();
+        self.lock().inputs.clear();
         self.notify_error(message);
     }
 }
 
 fn stop_locked(state: &mut State) {
     state.stopped = true;
-    state.input.clear();
+    state.inputs.clear();
     if let Some(writer) = state.writer.take() {
         // 读线程的 read 随之返回；运行时读到 EOF，归还几何租约（进入宽限期）。
         let _ = writer.shutdown(Shutdown::Both);

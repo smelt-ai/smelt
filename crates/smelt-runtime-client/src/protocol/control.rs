@@ -230,6 +230,7 @@ define_control_methods! {
     ResourceUsage => (RESOURCE_USAGE_METHOD, "resource.usage"),
     AppCommandList => (APP_COMMAND_LIST_METHOD, "app.command.list"),
     AppCommandRun => (APP_COMMAND_RUN_METHOD, "app.command.run"),
+    TerminalStageImage => (TERMINAL_STAGE_IMAGE_METHOD, "terminal.stage_image"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
