@@ -7,6 +7,7 @@ import { signal } from "nsh";
 import {
   call,
   command,
+  currentTheme,
   machineEntry,
   machines,
   openUrl,
@@ -127,7 +128,7 @@ const AUTH_CALL_TIMEOUT_MS = 180_000;
 const MEMORY_TEST_TIMEOUT_MS = 20_000;
 const REFRESH_AUTO_TIMEOUT_MS = 300_000;
 
-export const currentTheme = stableMemo(() => state().theme);
+export { currentTheme };
 
 export function errText(error: unknown): string {
   if (error instanceof Error) return error.message;

@@ -68,7 +68,8 @@ mod appearance_tests {
 
     #[gpui::test]
     fn requested_appearance_reports_unknown_theme(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
         let store = smelt_client_store::ClientStore::open(dir.join("client.sqlite3")).unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -78,12 +79,16 @@ mod appearance_tests {
             cx.set_global(Appearance::default());
             let result = super::apply_requested_appearance_on(
                 &std::collections::BTreeMap::from([(
-                    "appearance.theme".into(), serde_json::json!("not a registered theme"),
+                    "appearance.theme".into(),
+                    serde_json::json!("not a registered theme"),
                 )]),
                 &store,
                 cx,
             );
-            assert!(matches!(result, Err(smelt_model::appearance_settings::SettingsError::Invalid(_))));
+            assert!(matches!(
+                result,
+                Err(smelt_model::appearance_settings::SettingsError::Invalid(_))
+            ));
             assert!(store.appearance().unwrap().is_none());
         });
         drop(store);
@@ -128,7 +133,8 @@ mod appearance_tests {
 
     #[gpui::test]
     fn requested_appearance_does_not_install_when_saving_fails(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
         let store = smelt_client_store::ClientStore::open(dir.join("client.sqlite3")).unwrap();
         let connection = rusqlite::Connection::open(store.path()).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_appearance BEFORE INSERT ON appearance BEGIN SELECT RAISE(FAIL, 'save blocked'); END;").unwrap();
@@ -142,12 +148,16 @@ mod appearance_tests {
             let original = cx.global::<Appearance>().ui_font_family.clone();
             let result = super::apply_requested_appearance_on(
                 &std::collections::BTreeMap::from([(
-                    "appearance.ui_font_family".into(), serde_json::json!("Menlo"),
+                    "appearance.ui_font_family".into(),
+                    serde_json::json!("Menlo"),
                 )]),
                 &store,
                 cx,
             );
-            assert!(matches!(result, Err(smelt_model::appearance_settings::SettingsError::Store(_))));
+            assert!(matches!(
+                result,
+                Err(smelt_model::appearance_settings::SettingsError::Store(_))
+            ));
             assert_eq!(cx.global::<Appearance>().ui_font_family, original);
             assert!(store.appearance().unwrap().is_none());
         });

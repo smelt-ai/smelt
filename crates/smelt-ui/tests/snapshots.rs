@@ -27,12 +27,11 @@ use gpui::{
 use gpui_base::{Root, StyledExt as _};
 use smelt_model::theme_index::{DEFAULT_DARK, DEFAULT_LIGHT};
 use smelt_ui::IconName;
-use smelt_ui::code_editor::{CodeEditor, EditorState};
 use smelt_ui::field::{InputState, TextareaState};
 use smelt_ui::kit::{ControlSize, TYPE, TypeStyled as _};
 use smelt_ui::{
-    Button, Checkbox, Clipboard, EffortSlider, EffortTier, IconAction as _, ListRow, Radio,
-    Segmented, Switch, TextArea, TextInput, theme_catalog, tooltip::Tooltip, ui_theme,
+    Button, Checkbox, Clipboard, IconAction as _, ListRow, Radio, Segmented, Switch, TextArea,
+    TextInput, theme_catalog, tooltip::Tooltip, ui_theme,
 };
 
 gpui::actions!(tooltip_snapshot, [Save, Sequence]);
@@ -98,21 +97,6 @@ const SNAPSHOTS: &[Snapshot] = &[
         name: "field",
         size: (600., 360.),
         setup: fields,
-    },
-    Snapshot {
-        name: "code_editor",
-        size: (640., 340.),
-        setup: code_editor,
-    },
-    Snapshot {
-        name: "code_editor-reveal",
-        size: (640., 340.),
-        setup: code_editor_reveal,
-    },
-    Snapshot {
-        name: "diff",
-        size: (720., 360.),
-        setup: diffs,
     },
     Snapshot {
         name: "dialog",
@@ -213,11 +197,6 @@ const SNAPSHOTS: &[Snapshot] = &[
         name: "slider",
         size: (420., 140.),
         setup: sliders,
-    },
-    Snapshot {
-        name: "effort-slider",
-        size: (400., 840.),
-        setup: effort_sliders,
     },
     Snapshot {
         name: "tabs",
@@ -1315,104 +1294,6 @@ fn fields(window: &mut Window, cx: &mut App) -> Draw {
     })
 }
 
-/// 代码编辑器：Rust 语法高亮、行号、当前行、折叠箭头，搜索栏开在替换模式、有查询词和匹配。
-/// 匹配的底色只在窗口激活时画，离屏窗口不激活，图上看不到。应用内嵌的等宽字体这里没装，
-/// 换成系统自带的 Menlo。
-fn code_editor(window: &mut Window, cx: &mut App) -> Draw {
-    smelt_model::font_config::set_font_family("Menlo");
-    let source = "fn main() {\n    let value = compute(41);\n    println!(\"{value}\");\n}\n\nfn compute(input: u32) -> u32 {\n    // 加一\n    input + 1\n}\n";
-    let state = cx.new(|cx| {
-        let mut state = EditorState::new(window, cx)
-            .language("rust")
-            .line_number(true)
-            .searchable(true)
-            .soft_wrap(false);
-        state.set_highlighter_factory(smelt_ui::syntax::highlighter_factory(), cx);
-        state.set_value(source, window, cx);
-        state
-    });
-    state.update(cx, |state, cx| {
-        state.open_search(true, cx);
-        state.set_search_query("value", true, cx);
-    });
-    Box::new(move |_, _| {
-        div()
-            .h(px(290.))
-            .rounded(px(8.))
-            .overflow_hidden()
-            .border_1()
-            .border_color(ui_theme::hair())
-            .child(CodeEditor::new(&state))
-            .into_any_element()
-    })
-}
-
-/// 代码编辑器跳行：还没画过就灌进 200 行并跳到第 120 行，图上第 120 行在当前行、上面留
-/// 五行（115 起）。对话里的文件链接带行号打开文件就是这个时机，排版还没跟上新内容。
-fn code_editor_reveal(window: &mut Window, cx: &mut App) -> Draw {
-    smelt_model::font_config::set_font_family("Menlo");
-    let source: String = (1..=200)
-        .map(|n| format!("let line_{n} = {n};\n"))
-        .collect();
-    let state = cx.new(|cx| {
-        let mut state = EditorState::new(window, cx)
-            .language("rust")
-            .line_number(true)
-            .soft_wrap(false);
-        state.set_highlighter_factory(smelt_ui::syntax::highlighter_factory(), cx);
-        state.set_value(source, window, cx);
-        smelt_ui::code_editor::reveal_line(&mut state, 120, window, cx);
-        state
-    });
-    Box::new(move |_, _| {
-        div()
-            .h(px(290.))
-            .rounded(px(8.))
-            .overflow_hidden()
-            .border_1()
-            .border_color(ui_theme::hair())
-            .child(CodeEditor::new(&state))
-            .into_any_element()
-    })
-}
-
-/// 差异视图：分栏，一处行内改动、一行新增，Rust 语法高亮，第 2 行有一条批注。
-fn diffs(_: &mut Window, cx: &mut App) -> Draw {
-    use smelt_ui::diff::{
-        Diff, DiffAnnotation, DiffFile, DiffLinePosition, DiffMode, DiffSide, DiffState,
-    };
-
-    smelt_model::font_config::set_font_family("Menlo");
-    let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,5 +1,6 @@\n fn main() {\n-    let value = compute(41);\n+    let value = compute(42);\n+    // 打出来看看\n     println!(\"{value}\");\n }\n \n";
-    let files = DiffFile::parse(patch).expect("合法的补丁");
-    let state = cx.new(|cx| DiffState::new(files, cx).with_mode(DiffMode::Split));
-    Box::new(move |_, _| {
-        let note = DiffAnnotation::line(
-            "note",
-            DiffLinePosition::new("src/main.rs", DiffSide::Modified, 2),
-        );
-        div()
-            .h(px(300.))
-            .rounded(px(8.))
-            .overflow_hidden()
-            .border_1()
-            .border_color(ui_theme::hair())
-            .child(
-                Diff::new(&state)
-                    .size_full()
-                    .annotations([note])
-                    .render_annotation(|_, _, _| {
-                        div()
-                            .px_3()
-                            .py_1()
-                            .child("改成 42 是对的")
-                            .into_any_element()
-                    }),
-            )
-            .into_any_element()
-    })
-}
-
 /// 设置页里出现的几种行：下拉、按钮组、开关、多行说明、输入框，和不是行的自由块。
 fn settings_page(window: &mut Window, cx: &mut App) -> Draw {
     use smelt_ui::{Select, SettingsPage, SettingsRow, SettingsSection};
@@ -2252,52 +2133,6 @@ fn docks(window: &mut Window, cx: &mut App) -> Draw {
             .border_1()
             .border_color(ui_theme::hair())
             .child(area.clone())
-            .into_any_element()
-    })
-}
-
-fn effort_sliders(_: &mut Window, _: &mut App) -> Draw {
-    let tiers = || {
-        vec![
-            EffortTier::new("low", "低"),
-            EffortTier::new("medium", "中"),
-            EffortTier::new("high", "高"),
-            EffortTier::new("xhigh", "超高"),
-            EffortTier::new("max", "Max"),
-        ]
-    };
-    Box::new(move |_, _| {
-        div()
-            .w(px(344.))
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                EffortSlider::new("snap-effort-low", "推理强度", tiers())
-                    .selected(0)
-                    .still(true),
-            )
-            .child(
-                EffortSlider::new("snap-effort-mid", "推理强度", tiers())
-                    .selected(1)
-                    .still(true),
-            )
-            .child(
-                EffortSlider::new("snap-effort-maxq", "推理强度", tiers())
-                    .selected(2)
-                    .still(true),
-            )
-            .child(
-                EffortSlider::new("snap-effort-orbit", "推理强度", tiers())
-                    .selected(3)
-                    .still(true),
-            )
-            .child(
-                EffortSlider::new("snap-effort-warp", "推理强度", tiers())
-                    .selected(4)
-                    .pending_hint(Some("下轮生效"))
-                    .still(true),
-            )
             .into_any_element()
     })
 }

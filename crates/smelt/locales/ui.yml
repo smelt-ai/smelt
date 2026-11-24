@@ -379,6 +379,27 @@ plugins:
   cli_app_not_running:
     en: "No running Smelt has reported its plugins: Smelt isn't open, or it's a version from before this command. smelt plugin check <dir> checks a plugin without the app"
     zh-CN: "没有开着的 Smelt 报过插件状态：Smelt 没开，或者开的是没有这个命令的旧版本。不开 App 也可以用 smelt plugin check <目录> 检查插件"
+  cli_bad_id:
+    en: "Invalid plugin id %{id}: use ASCII letters, digits, ., -, or _, and don't start with ."
+    zh-CN: "插件 id %{id} 不合法：只能含字母、数字和 .-_，且不能以 . 开头"
+  cli_fork_exists:
+    en: "%{path} already has a plugin"
+    zh-CN: "%{path} 已经有插件了"
+  cli_fork_no_source:
+    en: "Built-in plugin %{id} has no editable source entry (%{entry}) in the bundle"
+    zh-CN: "自带插件 %{id} 的打包目录里没有可编辑源码入口（%{entry}）"
+  cli_fork_not_found:
+    en: "No built-in plugin with id %{id}"
+    zh-CN: "找不到 id 为 %{id} 的自带插件"
+  cli_fork_usage:
+    en: "Usage: smelt plugin fork <builtin-id> [--as <new-id>] [--dir <dir>]"
+    zh-CN: "用法：smelt plugin fork <自带插件id> [--as <新id>] [--dir <目录>]"
+  cli_init_exists:
+    en: "%{path} already has a plugin"
+    zh-CN: "%{path} 已经有插件了"
+  cli_init_usage:
+    en: "Usage: smelt plugin init <id> [--theme] [--name <name>] [--dir <dir>]"
+    zh-CN: "用法：smelt plugin init <id> [--theme] [--name <名称>] [--dir <目录>]"
   cli_no_dir:
     en: "Can't open the plugin folder %{path}: %{error}"
     zh-CN: "打不开插件目录 %{path}：%{error}"
@@ -386,20 +407,23 @@ plugins:
     en: "Smelt hasn't loaded a plugin with id %{id}. Check that its folder is in ~/.smelt/plugins/ and that smelt-plugin.json has this id"
     zh-CN: "Smelt 没有加载 id 为 %{id} 的插件。看看它的目录在不在 ~/.smelt/plugins/ 里、smelt-plugin.json 里的 id 对不对"
   cli_usage:
-    en: "Usage: smelt plugin check <dir> | status [<id>]"
-    zh-CN: "用法：smelt plugin check <目录> | status [<id>]"
+    en: "Usage: smelt plugin init <id> [--theme] [--name <name>] [--dir <dir>] | fork <builtin-id> [--as <new-id>] [--dir <dir>] | types <dir> | check <dir> | status [<id>]"
+    zh-CN: "用法：smelt plugin init <id> [--theme] [--name <名称>] [--dir <目录>] | fork <自带插件id> [--as <新id>] [--dir <目录>] | types <目录> | check <目录> | status [<id>]"
   bad_path:
     en: "The plugin path is invalid"
     zh-CN: "插件路径不对"
   builtin_id:
-    en: "Smelt already comes with a plugin with ID %{id}. Change the ID in smelt-plugin.json, then import"
-    zh-CN: "Smelt 自带的插件里已经有 id %{id}，改掉 smelt-plugin.json 里的 id 再导入"
+    en: "Smelt already comes with a plugin with ID %{id}. Use smelt plugin fork %{id} to override it, or pick another ID"
+    zh-CN: "Smelt 自带的插件里已经有 id %{id}；如果要修改自带插件请用 smelt plugin fork %{id}，否则请换个 id"
   cleanup_failed:
     en: "Couldn't clean up the folder from an unfinished import: %{error}"
     zh-CN: "清理上次没导完的目录失败：%{error}"
   confirm_delete:
     en: "Confirm Delete"
     zh-CN: "确认删除"
+  confirm_restore:
+    en: "Confirm Restore"
+    zh-CN: "确认恢复"
   copy_failed:
     en: "Couldn't copy the plugin: %{error}"
     zh-CN: "复制插件失败：%{error}"
@@ -484,6 +508,18 @@ plugins:
   open_log:
     en: "Open Log"
     zh-CN: "打开日志"
+  override_builtin:
+    en: "Overrides built-in plugin (delete to restore default)"
+    zh-CN: "正在覆写自带插件（删除即恢复默认）"
+  override_fallback:
+    en: "Override failed — automatically fell back to the built-in plugin"
+    zh-CN: "覆写版加载失败，已自动回退到自带版本"
+  restore_default:
+    en: "Restore Default…"
+    zh-CN: "恢复默认…"
+  restored:
+    en: "Restored built-in \"%{name}\"; your override is in the trash folder"
+    zh-CN: "已恢复自带「%{name}」，你的覆写目录在回收目录里"
   target_exists:
     en: "%{path} already exists"
     zh-CN: "%{path} 已经存在"

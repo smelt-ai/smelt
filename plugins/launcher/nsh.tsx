@@ -10,9 +10,9 @@ import {
   SmeltButton,
   SmeltIcon,
   SmeltWindowBar,
-  state,
   t,
   text,
+  theme,
   viewBadge,
   viewLaidOut,
   views,
@@ -67,11 +67,8 @@ initHost().then(() => {
 });
 
 export function nav() {
-  const data = computed(() => {
-    state();
-    return nav_state(hostFacade);
-  });
-  const look = computed(() => state().theme);
+  const data = computed(() => nav_state(hostFacade));
+  const look = theme;
 
   return (
     <View style={{ width: "100%", minWidth: 0, display: "flex", flexDirection: "column" }}>
@@ -163,11 +160,8 @@ export function nav() {
 }
 
 export function settings() {
-  const data = computed(() => {
-    state();
-    return settings_state(hostFacade);
-  });
-  const look = computed(() => state().theme);
+  const data = computed(() => settings_state(hostFacade));
+  const look = theme;
   const insets = computed(() => safeArea(SETTINGS_VIEW).bar_insets);
 
   return (

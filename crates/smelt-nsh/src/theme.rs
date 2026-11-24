@@ -65,6 +65,16 @@ pub(crate) fn nsh_theme() -> Theme {
         ("sidebar-accent-foreground", solid(p.text)),
         ("sidebar-border", alpha(p.hair)),
         ("sidebar-ring", alpha(p.focus)),
+        // 全局语义色令牌（全应用共享，由引擎原生解析 Tailwind class，不经 JS 状态广播）。
+        ("faint", solid(p.faint)),
+        ("link", solid(p.link)),
+        ("run", solid(p.run)),
+        ("need", solid(p.need)),
+        ("ok", solid(p.ok)),
+        ("bad", solid(p.bad)),
+        ("on-bad", solid(p.on_bad)),
+        ("soft-hover", solid(p.soft_hover)),
+        ("row-selected", alpha(p.row_selected)),
     ] {
         theme.set_color(name, color);
     }
@@ -90,5 +100,28 @@ mod tests {
             a: 0.5,
         };
         assert_eq!(Color::from(alpha(half).dark), Color(0xff000080));
+    }
+
+    #[test]
+    fn nsh_theme_exposes_smelt_semantic_tokens() {
+        let theme = nsh_theme();
+        for name in [
+            "faint",
+            "link",
+            "run",
+            "need",
+            "ok",
+            "bad",
+            "on-bad",
+            "soft-hover",
+            "row-selected",
+            "chart-1",
+            "chart-5",
+        ] {
+            assert!(
+                theme.color(name).is_some(),
+                "missing NSH theme token {name}"
+            );
+        }
     }
 }

@@ -28,6 +28,7 @@ import {
   state as hostState,
   store,
   t,
+  currentTheme,
   text,
   windowActive,
 } from "smelt/sdk";
@@ -263,7 +264,7 @@ function refreshMenubar() {
   for (const entry of machines()) {
     rows.push(...machineRows(entry));
   }
-  const palette = hostState().theme.palette;
+  const palette = currentTheme().palette;
   const built = buildMenu(rows, attention, palette, agentIds(), t);
   const menuJson = JSON.stringify(built.statusMenu);
   if (menuJson !== lastMenuJson) {
@@ -403,7 +404,6 @@ bootTask(async () => {
   refreshMenubar();
 });
 
-const currentTheme = stableMemo(() => hostState().theme);
 
 function SectionCard(props: { title: string; children?: any }) {
   const look = currentTheme;

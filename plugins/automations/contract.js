@@ -28,9 +28,6 @@ export const AGENT_SETTINGS_CMD = "smelt.agents/agent-settings";
 /** 约定：`smelt.agents` 智能体配置变化事件（`plugins/agents/contract.js`）。 */
 export const AGENT_SETTINGS_CHANGED_EVENT = "smelt.agents/agent-settings-changed";
 
-/** 约定：`smelt.conversation` 按实例挂载的对话视图（`crates/plugins/conversation/src/contract.rs`）。 */
-export const CONVERSATION_VIEW = "smelt.conversation/conversation";
-
 // ---- 宿主通用命令 ----
 
 export const OPEN_VIEW_CMD = "smelt.app/open-view";

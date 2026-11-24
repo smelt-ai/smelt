@@ -370,10 +370,9 @@ jobs:
       - name: Test
         run: bun test ./plugins
 
-  # 用桌面程序的 `smelt plugin check` 把 plugins/ 下每个插件真加载一次、每个视图画一帧（窗口不显示），
-  # 查得出单测碰不到的：导入解析、宿主模块的接口、组件参数、init 和第一次 render 里抛的错。
-  # check 会重写插件目录里的 gpui-kit.d.ts，之后 git diff 不干净就是声明文件没跟上宿主。
-  # 要 GPUI，只能在 macOS 上编；依赖缓存读 rust job 存的那份。
+  # 用桌面程序的 `smelt plugin check` 离线校验 plugins/ 下每个内置插件的清单、文案、主题、TSX 打包、
+  # import 边界与 QuickJS 字节码编译（不改动插件目录）。
+  # 要链接 smelt-nsh / GPUI 依赖，在 macOS 上编；依赖缓存读 rust job 存的那份。
   plugin-check:
     needs: changes
     if: needs.changes.outputs.plugin-check == 'true'
@@ -404,7 +403,7 @@ jobs:
           done
           exit $status
 
-      - name: gpui-kit.d.ts up to date
+      - name: Plugin directories clean
         run: git diff --exit-code -- plugins
 
   # 在发版出包的几个平台上把 smelt-agent 编出来跑一遍冒烟。Windows 嵌入文件的路径、可执行文件

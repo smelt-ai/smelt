@@ -21,6 +21,7 @@ import {
   smeltVersion,
   stableMemo,
   state as hostState,
+  currentTheme,
   t,
   text,
 } from "smelt/sdk";
@@ -247,7 +248,6 @@ bootTask(async () => {
   syncBadge(snapshot());
 });
 
-const currentTheme = stableMemo(() => hostState().theme);
 
 function SectionCard(props: { title?: string; children?: any }) {
   const look = currentTheme;

@@ -26,8 +26,6 @@ smelt-client-store = { path = "../smelt-client-store" }
 smelt-ui = { path = "../smelt-ui" }
 smelt-plugin-api = { path = "../smelt-plugin-api" }
 smelt-nsh = { path = "../smelt-nsh" }
-# 内置插件：只在 `plugin_host::install` 里登记，宿主别处不认识它们。
-smelt-conversation = { path = "../plugins/conversation" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # NSH 插件的 console 输出和运行时告警走 log crate，iroh 走 tracing，一起接到 app.log（见 src/plugins/log.rs）。

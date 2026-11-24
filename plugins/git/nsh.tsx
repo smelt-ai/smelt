@@ -4,7 +4,7 @@
 //           + 右 <ResizablePanelGroup> 多仓分组改动树 & 每仓独立提交框
 // - 历史页：三栏 <ResizablePanelGroup>（分支树 + <SmeltVector> 矢量贝塞尔分支图/提交列表 + 提交详情/单文件 Diff）
 // - 全事件驱动（project.watch / project_changed / reconnected / window_activated），仅前台可见时 60s 自动 fetch。
-import { computed, effect, Scroll, signal, Text, View } from "nsh";
+import { computed, effect, Overlay, Scroll, signal, Text, View } from "nsh";
 import {
   ContextMenu,
   Dialog,
@@ -44,6 +44,11 @@ import {
   state,
   t,
   text,
+  currentTheme,
+  DIALOG_SURFACE_CLASS,
+  MENU_ITEM_CLASS,
+  POPUP_CLASS,
+  TOOLTIP_CLASS,
   viewShown,
   windowActive,
 } from "smelt/sdk";
@@ -95,10 +100,6 @@ const NOTIFY_CMD = "smelt.app/notify";
 const SEND_TEXT_CMD = "smelt.sessions/send-text";
 
 const NETWORK_TIMEOUT_MS = 600_000;
-
-const POPUP_CLASS = "rounded-(--radius) border border-border bg-popover p-1";
-const MENU_ITEM_CLASS =
-  "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
 
 type DiffScope = "all" | "staged" | "unstaged";
 type GitTab = "changes" | "log";
@@ -1370,7 +1371,8 @@ bootTask(async () => {
         name: "prev-hunk",
         title: text("command.prev_hunk"),
         key: "shift-f7",
-        context: "GitChanges",
+        context: "Workspace",
+        when_view_shown: VIEW_ID,
         palette: true,
         requires_args: false,
         args: [],
@@ -1379,7 +1381,8 @@ bootTask(async () => {
         name: "next-hunk",
         title: text("command.next_hunk"),
         key: "f7",
-        context: "GitChanges",
+        context: "Workspace",
+        when_view_shown: VIEW_ID,
         palette: true,
         requires_args: false,
         args: [],
@@ -1426,16 +1429,8 @@ onCommand(async ({ name, args }) => {
 });
 
 onState((next) => {
-  const active = next.window_active !== false;
-  if (active && !lastWindowActive) {
-    markCachesStaleWhere(() => true);
-    refreshVisible();
-  }
-  lastWindowActive = active;
+  lastWindowActive = next.window_active !== false;
   syncProjectFromContext();
-  if (viewShown(VIEW_ID)) {
-    refreshVisible();
-  }
 });
 
 onEvent((event) => {
@@ -1476,7 +1471,6 @@ onEvent((event) => {
 
 // ---- 主题与共用组件 ----
 
-const currentTheme = stableMemo(() => state().theme);
 
 function isLightPalette(palette: any): boolean {
   const bg = String(palette?.bg ?? "#161618").replace("#", "");
@@ -1497,7 +1491,7 @@ function MenuRow(props: {
   const look = currentTheme;
   return (
     <MenuItem
-      label={props.label}
+      closeOnSelect={true}
       disabled={props.disabled}
       class={MENU_ITEM_CLASS}
       style={{ height: 26, gap: 6 }}
@@ -1594,32 +1588,38 @@ function OpsMenu(props: {
     fn(props.repo);
   };
   return (
-    <Menu placement="bottom" align="end" popupClass={POPUP_CLASS}>
-      <View
-        slot="trigger"
-        class="rounded hover:bg-accent"
-        style={{
-          paddingLeft: 6,
-          paddingRight: 6,
-          height: 22,
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 3,
-          cursor: "pointer",
-          flexShrink: 0,
-        }}
-      >
-        <Text
+    <Menu
+      placement="bottom"
+      align="end"
+      popupClass={POPUP_CLASS}
+      popupStyle={{ minWidth: 168 }}
+      trigger={
+        <View
+          class="rounded hover:bg-accent"
           style={{
-            fontFamily: look().fonts?.mono,
-            fontSize: look().type.text_xsmall.size,
-            color: props.triggerColor,
+            paddingLeft: 6,
+            paddingRight: 6,
+            height: 22,
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 3,
+            cursor: "pointer",
+            flexShrink: 0,
           }}
         >
-          {props.triggerLabel}
-        </Text>
-      </View>
+          <Text
+            style={{
+              fontFamily: look().fonts?.mono,
+              fontSize: look().type.text_xsmall.size,
+              color: props.triggerColor,
+            }}
+          >
+            {props.triggerLabel}
+          </Text>
+        </View>
+      }
+    >
       <If when={props.ahead > 0}>
         <MenuRow label={t("ops.push", { ahead: props.ahead })} onSelect={() => runOn(runPushOnly)} />
       </If>
@@ -1879,22 +1879,15 @@ export function Main() {
     return logCommits().find((c) => c.hash === h) ?? null;
   });
 
+  const isShown = computed(() => viewShown(VIEW_ID));
   effect(() => {
-    if (viewShown(VIEW_ID)) {
+    if (isShown()) {
       refreshVisible();
     }
   });
 
-  function handlePanelKeyDown(e: any) {
-    if (gitTab() !== "changes") return;
-    if (e?.key === "F7") {
-      jumpHunk(!e?.modifiers?.shift);
-    }
-  }
-
   return (
     <View
-      onKeyDown={handlePanelKeyDown}
       style={{
         flex: 1,
         width: "100%",
@@ -1965,26 +1958,32 @@ export function Main() {
 
           <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
             <If when={gitTab() === "changes"}>
-              <Menu placement="bottom" align="end" popupClass={POPUP_CLASS}>
-                <View
-                  slot="trigger"
-                  class="rounded hover:bg-accent"
-                  style={{
-                    paddingLeft: 8,
-                    paddingRight: 6,
-                    height: 24,
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 4,
-                    cursor: "pointer",
-                  }}
-                >
-                  <Text style={{ fontSize: look().type.small.size, color: look().palette.muted }}>
-                    {scopeLabel(diffScope())}
-                  </Text>
-                  <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
-                </View>
+              <Menu
+                placement="bottom"
+                align="end"
+                popupClass={POPUP_CLASS}
+                popupStyle={{ minWidth: 140 }}
+                trigger={
+                  <View
+                    class="rounded hover:bg-accent"
+                    style={{
+                      paddingLeft: 8,
+                      paddingRight: 6,
+                      height: 24,
+                      display: "flex",
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 4,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Text style={{ fontSize: look().type.small.size, color: look().palette.muted }}>
+                      {scopeLabel(diffScope())}
+                    </Text>
+                    <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
+                  </View>
+                }
+              >
                 <MenuRow label={t("scope.all")} onSelect={() => setScope("all")} />
                 <MenuRow label={t("scope.staged")} onSelect={() => setScope("staged")} />
                 <MenuRow label={t("scope.unstaged")} onSelect={() => setScope("unstaged")} />
@@ -1992,30 +1991,36 @@ export function Main() {
             </If>
 
             <If when={gitTab() === "log" && repos().length > 1}>
-              <Menu placement="bottom" align="end" popupClass={POPUP_CLASS}>
-                <View
-                  slot="trigger"
-                  class="rounded hover:bg-accent"
-                  style={{
-                    paddingLeft: 8,
-                    paddingRight: 6,
-                    height: 24,
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 4,
-                    cursor: "pointer",
-                  }}
-                >
-                  <Text style={{ fontSize: look().type.small.size, color: look().palette.text }}>
-                    {(() => {
-                      const ar = activeRepo();
-                      const found = repos().find((r) => r.root === ar?.root);
-                      return found ? repoLabelOf(found) : (ar?.root ?? "");
-                    })()}
-                  </Text>
-                  <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
-                </View>
+              <Menu
+                placement="bottom"
+                align="end"
+                popupClass={POPUP_CLASS}
+                popupStyle={{ minWidth: 168 }}
+                trigger={
+                  <View
+                    class="rounded hover:bg-accent"
+                    style={{
+                      paddingLeft: 8,
+                      paddingRight: 6,
+                      height: 24,
+                      display: "flex",
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 4,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Text style={{ fontSize: look().type.small.size, color: look().palette.text }}>
+                      {(() => {
+                        const ar = activeRepo();
+                        const found = repos().find((r) => r.root === ar?.root);
+                        return found ? repoLabelOf(found) : (ar?.root ?? "");
+                      })()}
+                    </Text>
+                    <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
+                  </View>
+                }
+              >
                 <Each of={repos()} key={(r: DiscoveredRepo) => r.root}>
                   {(r: () => DiscoveredRepo) => (
                     <MenuRow
@@ -2143,48 +2148,54 @@ export function Main() {
                               return typeof sc === "object" && sc.branch === b();
                             };
                             return (
-                              <ContextMenu popupClass={POPUP_CLASS} disabled={isHead()}>
-                                <View
-                                  slot="trigger"
-                                  class="rounded hover:bg-accent"
-                                  onPress={() =>
-                                    activeRepo() && setLogScope(activeRepo()!, { branch: b() })
-                                  }
-                                  style={{
-                                    paddingLeft: 12,
-                                    paddingRight: 8,
-                                    height: 24,
-                                    display: "flex",
-                                    flexDirection: "row",
-                                    alignItems: "center",
-                                    gap: 4,
-                                    backgroundColor: selected()
-                                      ? look().palette.row_selected
-                                      : "transparent",
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  <Text
+                              <ContextMenu
+                                popupClass={POPUP_CLASS}
+                                popupStyle={{ minWidth: 168 }}
+                                disabled={isHead()}
+                                trigger={
+                                  <View
+                                    class="rounded hover:bg-accent"
+                                    onPress={() =>
+                                      activeRepo() && setLogScope(activeRepo()!, { branch: b() })
+                                    }
                                     style={{
-                                      width: 8,
-                                      fontSize: look().type.text_xsmall.size,
-                                      color: look().palette.ok,
+                                      width: "100%",
+                                      paddingLeft: 12,
+                                      paddingRight: 8,
+                                      height: 24,
+                                      display: "flex",
+                                      flexDirection: "row",
+                                      alignItems: "center",
+                                      gap: 4,
+                                      backgroundColor: selected()
+                                        ? look().palette.row_selected
+                                        : "transparent",
+                                      cursor: "pointer",
                                     }}
                                   >
-                                    {isHead() ? "●" : ""}
-                                  </Text>
-                                  <Text
-                                    style={{
-                                      flex: 1,
-                                      minWidth: 0,
-                                      fontSize: look().type.small.size,
-                                      color: look().palette.text,
-                                      numberOfLines: 1,
-                                    }}
-                                  >
-                                    {b()}
-                                  </Text>
-                                </View>
+                                    <Text
+                                      style={{
+                                        width: 8,
+                                        fontSize: look().type.text_xsmall.size,
+                                        color: look().palette.ok,
+                                      }}
+                                    >
+                                      {isHead() ? "●" : ""}
+                                    </Text>
+                                    <Text
+                                      style={{
+                                        flex: 1,
+                                        minWidth: 0,
+                                        fontSize: look().type.small.size,
+                                        color: look().palette.text,
+                                        numberOfLines: 1,
+                                      }}
+                                    >
+                                      {b()}
+                                    </Text>
+                                  </View>
+                                }
+                              >
                                 <MenuRow
                                   label={t("branch.checkout")}
                                   onSelect={() => activeRepo() && runCheckout(activeRepo()!, b())}
@@ -2228,40 +2239,45 @@ export function Main() {
                               return typeof sc === "object" && sc.branch === b();
                             };
                             return (
-                              <ContextMenu popupClass={POPUP_CLASS}>
-                                <View
-                                  slot="trigger"
-                                  class="rounded hover:bg-accent"
-                                  onPress={() =>
-                                    activeRepo() && setLogScope(activeRepo()!, { branch: b() })
-                                  }
-                                  style={{
-                                    paddingLeft: 12,
-                                    paddingRight: 8,
-                                    height: 24,
-                                    display: "flex",
-                                    flexDirection: "row",
-                                    alignItems: "center",
-                                    gap: 4,
-                                    backgroundColor: selected()
-                                      ? look().palette.row_selected
-                                      : "transparent",
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  <View style={{ width: 8 }} />
-                                  <Text
+                              <ContextMenu
+                                popupClass={POPUP_CLASS}
+                                popupStyle={{ minWidth: 168 }}
+                                trigger={
+                                  <View
+                                    class="rounded hover:bg-accent"
+                                    onPress={() =>
+                                      activeRepo() && setLogScope(activeRepo()!, { branch: b() })
+                                    }
                                     style={{
-                                      flex: 1,
-                                      minWidth: 0,
-                                      fontSize: look().type.small.size,
-                                      color: look().palette.muted,
-                                      numberOfLines: 1,
+                                      width: "100%",
+                                      paddingLeft: 12,
+                                      paddingRight: 8,
+                                      height: 24,
+                                      display: "flex",
+                                      flexDirection: "row",
+                                      alignItems: "center",
+                                      gap: 4,
+                                      backgroundColor: selected()
+                                        ? look().palette.row_selected
+                                        : "transparent",
+                                      cursor: "pointer",
                                     }}
                                   >
-                                    {b()}
-                                  </Text>
-                                </View>
+                                    <View style={{ width: 8 }} />
+                                    <Text
+                                      style={{
+                                        flex: 1,
+                                        minWidth: 0,
+                                        fontSize: look().type.small.size,
+                                        color: look().palette.muted,
+                                        numberOfLines: 1,
+                                      }}
+                                    >
+                                      {b()}
+                                    </Text>
+                                  </View>
+                                }
+                              >
                                 <MenuRow
                                   label={t("branch.checkout")}
                                   onSelect={() => {
@@ -3001,17 +3017,27 @@ export function Main() {
                                 </Text>
                               </View>
                               <Input
+                                ref={(el: any) => {
+                                  el?.focus?.();
+                                }}
                                 multiline={true}
                                 autoFocus={true}
                                 value={commentText()}
                                 placeholder={t("comment.placeholder")}
                                 onChange={({ value }: { value: string }) => commentText.set(value)}
+                                onKeyPress={(e: any) => {
+                                  if (e?.key === "Escape") clearComment();
+                                }}
                                 class="rounded-(--radius) border border-input bg-card p-2 text-foreground"
                                 style={{
                                   minHeight: 52,
                                   fontSize: look().type.small.size,
                                   lineHeight: look().type.small.line_height,
                                 }}
+                              />
+                              <Overlay
+                                onCancel={clearComment}
+                                style={{ width: 0, height: 0, pointerEvents: "none" }}
                               />
                               <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 6 }}>
                                 <SmeltButton
@@ -3135,97 +3161,102 @@ export function Main() {
                                           when={row().kind === "tree_dir"}
                                           else={
                                             /* 改动文件行 */
-                                            <ContextMenu popupClass={POPUP_CLASS}>
-                                              <View
-                                                slot="trigger"
-                                                class="hover:bg-accent"
-                                                onPress={() =>
-                                                  openAggregateFile(row().repo, row().path)
-                                                }
-                                                style={{
-                                                  display: "flex",
-                                                  flexDirection: "row",
-                                                  alignItems: "center",
-                                                  gap: 4,
-                                                  height: 24,
-                                                  marginLeft: 4,
-                                                  marginRight: 4,
-                                                  paddingLeft: 10 + row().depth * 12,
-                                                  paddingRight: 8,
-                                                  borderRadius: look().radius.row ?? 6,
-                                                  cursor: "pointer",
-                                                  overflow: "hidden",
-                                                }}
-                                              >
-                                                <If when={Boolean(row().gitlink)}>
-                                                  <Text
-                                                    style={{
-                                                      fontSize: look().type.text_xsmall.size,
-                                                      color: look().palette.faint,
-                                                    }}
-                                                  >
-                                                    {repoKindGlyph("submodule")}
-                                                  </Text>
-                                                </If>
-                                                <Text
-                                                  style={{
-                                                    flex: 1,
-                                                    minWidth: 0,
-                                                    fontFamily: look().fonts?.mono,
-                                                    fontSize: look().type.text_xsmall.size,
-                                                    color: look().palette.text,
-                                                    numberOfLines: 1,
-                                                  }}
-                                                >
-                                                  {row().name}
-                                                </Text>
-                                                <If when={Boolean(row().gitlink)}>
-                                                  <Text
-                                                    style={{
-                                                      fontSize: look().type.text_xsmall.size,
-                                                      color: look().palette.faint,
-                                                    }}
-                                                  >
-                                                    {t("file.submodule")}
-                                                  </Text>
-                                                </If>
-                                                <SmeltButton
-                                                  quiet={true}
-                                                  small={true}
-                                                  disabled={Boolean(row().busy)}
-                                                  icon={
-                                                    row().isStaged
-                                                      ? "icons/minus.svg"
-                                                      : "icons/plus.svg"
-                                                  }
-                                                  tooltip={
-                                                    row().isStaged
-                                                      ? t("stage.unstage")
-                                                      : t("stage.stage")
-                                                  }
+                                            <ContextMenu
+                                              popupClass={POPUP_CLASS}
+                                              popupStyle={{ minWidth: 168 }}
+                                              trigger={
+                                                <View
+                                                  class="hover:bg-accent"
                                                   onPress={() =>
-                                                    stageFile(row().repo, row().path, !row().isStaged)
+                                                    openAggregateFile(row().repo, row().path)
                                                   }
-                                                />
-                                                <Text
                                                   style={{
-                                                    fontFamily: look().fonts?.mono,
-                                                    fontSize: look().type.text_xsmall.size,
-                                                    flexShrink: 0,
-                                                    color: (() => {
-                                                      const code = String(row().status ?? " M");
-                                                      const ch = code.trim()[0] ?? "M";
-                                                      if (code === "??" || ch === "A") {
-                                                        return look().palette.ok;
-                                                      }
-                                                      if (ch === "D") return look().palette.bad;
-                                                      return look().palette.need;
-                                                    })(),
+                                                    width: "100%",
+                                                    display: "flex",
+                                                    flexDirection: "row",
+                                                    alignItems: "center",
+                                                    gap: 4,
+                                                    height: 24,
+                                                    marginLeft: 4,
+                                                    marginRight: 4,
+                                                    paddingLeft: 10 + row().depth * 12,
+                                                    paddingRight: 8,
+                                                    borderRadius: look().radius.row ?? 6,
+                                                    cursor: "pointer",
+                                                    overflow: "hidden",
                                                   }}
                                                 >
-                                                  {String(row().status ?? " M").trim()[0] ?? "M"}
-                                                </Text>
-                                              </View>
+                                                  <If when={Boolean(row().gitlink)}>
+                                                    <Text
+                                                      style={{
+                                                        fontSize: look().type.text_xsmall.size,
+                                                        color: look().palette.faint,
+                                                      }}
+                                                    >
+                                                      {repoKindGlyph("submodule")}
+                                                    </Text>
+                                                  </If>
+                                                  <Text
+                                                    style={{
+                                                      flex: 1,
+                                                      minWidth: 0,
+                                                      fontFamily: look().fonts?.mono,
+                                                      fontSize: look().type.text_xsmall.size,
+                                                      color: look().palette.text,
+                                                      numberOfLines: 1,
+                                                    }}
+                                                  >
+                                                    {row().name}
+                                                  </Text>
+                                                  <If when={Boolean(row().gitlink)}>
+                                                    <Text
+                                                      style={{
+                                                        fontSize: look().type.text_xsmall.size,
+                                                        color: look().palette.faint,
+                                                      }}
+                                                    >
+                                                      {t("file.submodule")}
+                                                    </Text>
+                                                  </If>
+                                                  <SmeltButton
+                                                    quiet={true}
+                                                    small={true}
+                                                    disabled={Boolean(row().busy)}
+                                                    icon={
+                                                      row().isStaged
+                                                        ? "icons/minus.svg"
+                                                        : "icons/plus.svg"
+                                                    }
+                                                    tooltip={
+                                                      row().isStaged
+                                                        ? t("stage.unstage")
+                                                        : t("stage.stage")
+                                                    }
+                                                    onPress={() =>
+                                                      stageFile(row().repo, row().path, !row().isStaged)
+                                                    }
+                                                  />
+                                                  <Text
+                                                    style={{
+                                                      fontFamily: look().fonts?.mono,
+                                                      fontSize: look().type.text_xsmall.size,
+                                                      flexShrink: 0,
+                                                      color: (() => {
+                                                        const code = String(row().status ?? " M");
+                                                        const ch = code.trim()[0] ?? "M";
+                                                        if (code === "??" || ch === "A") {
+                                                          return look().palette.ok;
+                                                        }
+                                                        if (ch === "D") return look().palette.bad;
+                                                        return look().palette.need;
+                                                      })(),
+                                                    }}
+                                                  >
+                                                    {String(row().status ?? " M").trim()[0] ?? "M"}
+                                                  </Text>
+                                                </View>
+                                              }
+                                            >
                                               <MenuRow
                                                 label={t("file.open_diff")}
                                                 onSelect={() =>
@@ -3553,7 +3584,7 @@ export function Main() {
                                 </Text>
                                 <Text
                                   tooltip={
-                                    <Tooltip class="px-2 py-1 rounded bg-popover border border-border">
+                                    <Tooltip class={TOOLTIP_CLASS}>
                                       <Text
                                         style={{
                                           fontSize: look().type.text_xsmall.size,
@@ -3623,7 +3654,7 @@ export function Main() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) dangerDialog.set(null);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 440, gap: 10 }}
       >
         <If when={dangerDialog() != null}>

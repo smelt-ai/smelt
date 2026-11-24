@@ -1,7 +1,5 @@
 // 会话插件纯业务逻辑（零宿主 UI 依赖，可直接由 bun test 单测）。
 
-export const CONVERSATION_VIEW = "smelt.conversation/conversation";
-
 export function terminalPaneKey(machine, sessionId) {
   const host = machine == null || machine === "" ? "__local__" : `remote:${machine}`;
   return `${host}\0${sessionId}`;
@@ -164,7 +162,7 @@ export function paneSpecs(machine, conversation, start = null) {
     out.push({
       session_id: conversation.acp.sid,
       kind: "conversation",
-      view: CONVERSATION_VIEW,
+      view: null,
       args: {
         machine: m,
         session_id: conversation.acp.sid,

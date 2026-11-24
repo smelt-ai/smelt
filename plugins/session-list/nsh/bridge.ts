@@ -7,12 +7,14 @@ import {
   activeContext,
   call,
   clipboardWrite,
+  command,
   connections,
   contextMenuItems,
   conversationAcp,
   conversationFacts,
   dataDir,
   initHost,
+  locale,
   localOs,
   machines,
   newSessionId,
@@ -37,6 +39,7 @@ import {
   store as sdkStore,
   t,
   text,
+  theme as sdkTheme,
   workspaceDirectory,
 } from "smelt/sdk";
 
@@ -136,7 +139,7 @@ const shortcut = (id: string, titleKey: string, key?: string) => ({
 });
 
 export function theme() {
-  return state().theme;
+  return sdkTheme();
 }
 
 /** 按当前窗口的 rem 换算间距（0.25rem 一档）。 */
@@ -203,6 +206,7 @@ export const hostAdapter = {
   },
   project_labels: projectLabels,
   call,
+  command,
   run,
   t,
   redraw() {
@@ -245,6 +249,8 @@ export function fetchContextMenuItems(
     .then((items: unknown) => (Array.isArray(items) ? (items as ContributedMenuItem[]) : []))
     .catch(() => []);
 }
+
+export const machineMenuVersion = signal(0);
 
 let storeReady = false;
 let stateReady = false;
@@ -340,6 +346,16 @@ function handleEvent(event: any) {
       if (event.args?.focus) triggerFocusList();
       return;
     }
+    if (event.type === "machines_changed") {
+      prevMachinesKey = digestMachines(state());
+      machineMenuVersion.set(machineMenuVersion() + 1);
+    } else if (event.type === "context_menu_items_changed") {
+      machineMenuVersion.set(machineMenuVersion() + 1);
+    } else if (event.type === "sessions_changed") {
+      prevSessionsKey = digestSessions(state());
+    } else if (event.type === "locale_changed") {
+      prevLocale = String(locale() ?? "");
+    }
     list.on_event(event);
   } catch (error) {
     console.error(`[session-list] 处理宿主事件 ${event.type} 失败：`, error);
@@ -353,32 +369,9 @@ onState((next) => {
     maybeBoot();
     return;
   }
-  const nextMachines = digestMachines(next);
-  const nextSessions = digestSessions(next);
-  const nextLocale = String(next.locale ?? "");
-
-  let rebuilt = false;
-  if (nextMachines !== prevMachinesKey) {
-    prevMachinesKey = nextMachines;
-    list.on_event({ type: "machines_changed" });
-    rebuilt = true;
-  }
-  if (nextSessions !== prevSessionsKey) {
-    prevSessionsKey = nextSessions;
-    list.on_event({ type: "sessions_changed" });
-    rebuilt = true;
-  }
-  if (nextLocale !== prevLocale) {
-    prevLocale = nextLocale;
-    if (!rebuilt) {
-      list.on_event({ type: "locale_changed" });
-      rebuilt = true;
-    }
-  }
+  // 宿主在发出 sessions_changed / machines_changed / locale_changed 事件前总会先推 smelt.state；
+  // 这些变化统一由 onEvent 处理，避免双倍 rebuild 与在无关 state 推送时无谓递增 tick。
   syncFallbackSelection(next);
-  if (!rebuilt) {
-    hostAdapter.redraw();
-  }
 });
 
 onEvent((event) => {

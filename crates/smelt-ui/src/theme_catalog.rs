@@ -221,6 +221,11 @@ fn builtin(name: &str) -> Option<Arc<ThemeConfig>> {
         .cloned()
 }
 
+/// 判断主题名是否为库自带的保留名（`smelt Light` / `smelt Dark`）。
+pub fn is_reserved(name: &str) -> bool {
+    builtin(name).is_some()
+}
+
 /// 同明暗的 smelt 主题：还没装主题、或用户选的主题没了时用它。
 pub(crate) fn builtin_for_mode(mode: ThemeMode) -> Arc<ThemeConfig> {
     BUILTIN
@@ -295,7 +300,7 @@ pub fn register_theme_sets(
     cx: &mut App,
 ) -> Result<Vec<SharedString>, ThemeRegisterError> {
     cx.default_global::<ThemeCatalog>()
-        .register(owner, sources, |name| builtin(name).is_some())
+        .register(owner, sources, is_reserved)
 }
 
 /// 卸下来源 `owner` 的全部主题，返回卸下的名字。同 [`register_theme_sets`]，不动当前主题。
@@ -360,7 +365,6 @@ pub fn apply(name: &str, cx: &mut App) -> bool {
     ui_theme::install_theme(&colors, config.elevation().clone(), dark);
     crate::base_theme::install(&colors, dark, cx);
     let syntax: SharedHighlightStyleResolver = Arc::new(SyntaxPalette::new(syntax_styles(&config)));
-    crate::syntax::install_code_block_highlighter(syntax.clone());
     cx.set_global(ActiveTheme {
         config,
         colors,

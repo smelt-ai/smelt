@@ -24,6 +24,7 @@ import {
   text,
   views,
   viewShown,
+  currentTheme,
   waitOnline,
   workspaceDirectory,
 } from "smelt/sdk";
@@ -187,7 +188,7 @@ export const EMPTY_MEMORIES: AgentMemoriesState = {
 
 // ---- 主题与元数据 ----
 
-export const currentTheme = stableMemo(() => hostState().theme);
+export { currentTheme };
 
 export function errText(error: unknown): string {
   if (error instanceof Error) return error.message;

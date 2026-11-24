@@ -14,6 +14,7 @@ import {
   systemLocale,
   t,
   text,
+  theme,
 } from "smelt/sdk";
 
 import {
@@ -80,7 +81,7 @@ bootTask(async () => {
 });
 
 export function settings() {
-  const look = computed(() => state().theme);
+  const look = theme;
   const options = computed(() => buildOptions(locales(), systemLocale(), t));
   const currentValue = computed(() => choiceToSelectValue(choice()));
   const currentTitle = computed(() => {

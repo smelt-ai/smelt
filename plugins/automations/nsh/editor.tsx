@@ -239,24 +239,30 @@ export function DrillHeader() {
                 onPress={() => void runOnceFromEditor()}
               />
 
-              <Menu placement="bottom" align="end" popupClass={POPUP_CLASS}>
-                <View
-                  slot="trigger"
-                  testID="automation-editor-more"
-                  accessibilityLabel={t("catalog.more")}
-                  class="hover:bg-accent"
-                  style={{
-                    width: 24,
-                    height: 24,
-                    borderRadius: look().radius.md,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    cursor: "default",
-                  }}
-                >
-                  <SmeltIcon path="icons/ellipsis.svg" size={16} color={look().palette.muted} />
-                </View>
+              <Menu
+                placement="bottom"
+                align="end"
+                popupClass={POPUP_CLASS}
+                popupStyle={{ minWidth: 168 }}
+                trigger={
+                  <View
+                    testID="automation-editor-more"
+                    accessibilityLabel={t("catalog.more")}
+                    class="hover:bg-accent"
+                    style={{
+                      width: 24,
+                      height: 24,
+                      borderRadius: look().radius.md,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      cursor: "default",
+                    }}
+                  >
+                    <SmeltIcon path="icons/ellipsis.svg" size={16} color={look().palette.muted} />
+                  </View>
+                }
+              >
                 <MenuRow
                   label={t("menu.delete")}
                   icon="icons/trash.svg"
@@ -830,37 +836,43 @@ function AddTriggerButton() {
   const advancedPresets = BUILTIN_AUTOMATION_TRIGGER_PRESETS.filter((p) => triggerPresetIsAdvanced(p));
 
   return (
-    <Menu placement="bottom" align="start" popupClass={POPUP_CLASS}>
-      <View
-        slot="trigger"
-        testID="automation-add-trigger"
-        class="hover:bg-accent"
-        style={{
-          width: "100%",
-          height: 36,
-          borderRadius: 18,
-          borderWidth: 1,
-          borderStyle: "dashed",
-          borderColor: look().palette.hair_strong,
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 6,
-          cursor: "default",
-        }}
-      >
-        <SmeltIcon path="icons/plus.svg" size={14} color={look().palette.muted} />
-        <Text
+    <Menu
+      placement="bottom"
+      align="start"
+      popupClass={POPUP_CLASS}
+      popupStyle={{ minWidth: 220 }}
+      trigger={
+        <View
+          testID="automation-add-trigger"
+          class="hover:bg-accent"
           style={{
-            fontSize: look().type.ui.size,
-            lineHeight: look().type.ui.line_height,
-            color: look().palette.muted,
+            width: "100%",
+            height: 36,
+            borderRadius: 18,
+            borderWidth: 1,
+            borderStyle: "dashed",
+            borderColor: look().palette.hair_strong,
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 6,
+            cursor: "default",
           }}
         >
-          {t("trigger.add")}
-        </Text>
-      </View>
+          <SmeltIcon path="icons/plus.svg" size={14} color={look().palette.muted} />
+          <Text
+            style={{
+              fontSize: look().type.ui.size,
+              lineHeight: look().type.ui.line_height,
+              color: look().palette.muted,
+            }}
+          >
+            {t("trigger.add")}
+          </Text>
+        </View>
+      }
+    >
       <Each of={regularPresets} key={(p: string) => p}>
         {(preset: () => string) => (
           <MenuRow
@@ -1025,36 +1037,42 @@ export function EditorForm(props: { editor: EditorState }) {
                   </If>
                 }
               >
-                <Menu placement="bottom" align="end" popupClass={POPUP_CLASS}>
-                  <View
-                    slot="trigger"
-                    testID="automation-agent"
-                    class="hover:bg-accent"
-                    style={{
-                      height: 24,
-                      paddingLeft: 10,
-                      paddingRight: 8,
-                      borderRadius: look().radius.md,
-                      display: "flex",
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 6,
-                      cursor: "default",
-                    }}
-                  >
-                    <SmeltIcon path="icons/bot.svg" size={14} color={look().palette.muted} />
-                    <Text
+                <Menu
+                  placement="bottom"
+                  align="end"
+                  popupClass={POPUP_CLASS}
+                  popupStyle={{ minWidth: 168 }}
+                  trigger={
+                    <View
+                      testID="automation-agent"
+                      class="hover:bg-accent"
                       style={{
-                        fontSize: look().type.small.size,
-                        lineHeight: look().type.small.line_height,
-                        color: look().palette.text,
-                        numberOfLines: 1,
+                        height: 24,
+                        paddingLeft: 10,
+                        paddingRight: 8,
+                        borderRadius: look().radius.md,
+                        display: "flex",
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 6,
+                        cursor: "default",
                       }}
                     >
-                      {currentAgentName()}
-                    </Text>
-                    <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
-                  </View>
+                      <SmeltIcon path="icons/bot.svg" size={14} color={look().palette.muted} />
+                      <Text
+                        style={{
+                          fontSize: look().type.small.size,
+                          lineHeight: look().type.small.line_height,
+                          color: look().palette.text,
+                          numberOfLines: 1,
+                        }}
+                      >
+                        {currentAgentName()}
+                      </Text>
+                      <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
+                    </View>
+                  }
+                >
                   <Each of={readyAgents()} key={(a: any) => a.id}>
                     {(agent: () => any) => (
                       <MenuRow

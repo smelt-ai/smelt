@@ -1,4 +1,5 @@
-//! 用户插件的导入和删除：只动 `~/.smelt/plugins/`，App 自带的插件不归这里管，只是 id 不能和它们重。
+//! 用户插件的导入和删除：只动 `~/.smelt/plugins/`，App 自带的插件不归这里管；用户导入或 fork
+//! 与自带插件同 `id` 的目录后会覆写自带版（删掉用户目录即恢复自带版）。
 //!
 //! 导入是把一个插件目录复制进来，之后和原目录无关。删除是挪进回收目录，不直接抹掉。
 //! 两者都只改磁盘；主壳盯着插件目录，变了自己重编热重载。都是阻塞 IO，放后台线程调。
@@ -12,8 +13,15 @@ use smelt_nsh::{MANIFEST_FILE, PluginManifest};
 
 use super::PLUGIN_DIR;
 
-/// 复制时不带的条目：版本库、依赖缓存与编辑器临时文件。
-const SKIPPED_AT_ROOT: &[&str] = &[".git", "node_modules", "gpui-kit.d.ts", "jsconfig.json"];
+/// 复制时不带的条目：版本库、依赖缓存、生成文件与预编译字节码。
+const SKIPPED_AT_ROOT: &[&str] = &[
+    ".git",
+    ".nsh",
+    "node_modules",
+    "tsconfig.json",
+    "bundle.nshc",
+    "bundle.meta.json",
+];
 
 /// 用户插件目录 `~/.smelt/plugins/`。
 pub(crate) fn user_plugin_dir() -> Option<PathBuf> {
@@ -59,9 +67,6 @@ fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> 
     if canonical_source.starts_with(&canonical_plugins) {
         return Err(t!("plugins.already_inside").into_owned());
     }
-    if super::builtin::dir().is_some_and(|dir| installed_root(dir, &manifest.id).is_some()) {
-        return Err(t!("plugins.builtin_id", id = manifest.id).into_owned());
-    }
     if let Some(existing) = installed_root(plugins, &manifest.id) {
         return Err(t!("plugins.duplicate_id", path = existing.display()).into_owned());
     }
@@ -87,7 +92,7 @@ fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> 
 }
 
 /// 插件目录里 id 为 `id` 的插件。
-fn installed_root(plugins: &Path, id: &str) -> Option<PathBuf> {
+pub(super) fn installed_root(plugins: &Path, id: &str) -> Option<PathBuf> {
     fs::read_dir(plugins)
         .ok()?
         .flatten()
@@ -100,20 +105,43 @@ fn installed_root(plugins: &Path, id: &str) -> Option<PathBuf> {
         .find(|root| PluginManifest::read(root).is_ok_and(|manifest| manifest.id == id))
 }
 
+/// 复制自带插件源码供用户修改：跳过版本库/缓存/预编译字节码以及单测目录与 `.test.` 文件。
+pub(super) fn copy_plugin_source(from: &Path, to: &Path) -> io::Result<()> {
+    copy_tree_filtered(from, to, true, true)
+}
+
 /// 复制目录树。软链不复制：插件只能读主目录，带进一条指向别处的链接，不是坏掉就是越界。
 fn copy_tree(from: &Path, to: &Path, root: bool) -> io::Result<()> {
-    fs::create_dir(to)?;
+    copy_tree_filtered(from, to, root, false)
+}
+
+fn copy_tree_filtered(from: &Path, to: &Path, root: bool, fork_mode: bool) -> io::Result<()> {
+    if !to.exists() {
+        fs::create_dir(to)?;
+    }
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         let name = entry.file_name();
+        let name_str = name.to_string_lossy();
         if root && SKIPPED_AT_ROOT.iter().any(|skipped| name == *skipped) {
             continue;
         }
         // `DirEntry::file_type` 不跟随软链。
         let file_type = entry.file_type()?;
+        if fork_mode {
+            if name_str.starts_with('.') {
+                continue;
+            }
+            if file_type.is_dir() && name_str == "tests" {
+                continue;
+            }
+            if file_type.is_file() && name_str.contains(".test.") {
+                continue;
+            }
+        }
         let target = to.join(&name);
         if file_type.is_dir() {
-            copy_tree(&entry.path(), &target, false)?;
+            copy_tree_filtered(&entry.path(), &target, false, fork_mode)?;
         } else if file_type.is_file() {
             fs::copy(entry.path(), &target)?;
         }
@@ -237,9 +265,9 @@ mod tests {
         let scratch = Scratch::new();
         let source = scratch.plugin("src/demo", "com.example.demo");
         scratch.write("src/demo/.git/HEAD", "ref: refs/heads/main");
+        scratch.write("src/demo/.nsh/types/nsh/index.d.ts", "export {}");
         scratch.write("src/demo/node_modules/x/index.js", "");
-        scratch.write("src/demo/gpui-kit.d.ts", "declare module 'x' {}");
-        scratch.write("src/demo/jsconfig.json", "{}");
+        scratch.write("src/demo/tsconfig.json", "{}");
         scratch.write("outside/secret.txt", "secret");
         #[cfg(unix)]
         std::os::unix::fs::symlink(scratch.path("outside"), source.join("linked")).unwrap();
@@ -249,9 +277,9 @@ mod tests {
 
         let target = plugins.join("com.example.demo");
         assert!(!target.join(".git").exists());
+        assert!(!target.join(".nsh").exists());
         assert!(!target.join("node_modules").exists());
-        assert!(!target.join("gpui-kit.d.ts").exists());
-        assert!(!target.join("jsconfig.json").exists());
+        assert!(!target.join("tsconfig.json").exists());
         assert!(fs::symlink_metadata(target.join("linked")).is_err());
     }
 
@@ -272,6 +300,22 @@ mod tests {
         assert!(broken.contains("manifest has a problem"), "{broken}");
         let no_entry = import_into(&scratch.path("src/no-entry"), &plugins).unwrap_err();
         assert!(no_entry.contains("nsh.tsx"), "{no_entry}");
+    }
+
+    #[test]
+    fn import_allows_overriding_a_builtin_id_and_skips_precompiled_bytecode() {
+        let scratch = Scratch::new();
+        let source = scratch.plugin("src/override", "smelt.language");
+        scratch.write("src/override/bundle.nshc", "bytecode");
+        scratch.write("src/override/bundle.meta.json", "{}");
+        let plugins = scratch.path("plugins");
+
+        let manifest = import_into(&source, &plugins).unwrap();
+        assert_eq!(manifest.id, "smelt.language");
+        let target = plugins.join("smelt.language");
+        assert!(target.join("nsh.tsx").is_file());
+        assert!(!target.join("bundle.nshc").exists());
+        assert!(!target.join("bundle.meta.json").exists());
     }
 
     #[test]

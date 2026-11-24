@@ -33,11 +33,50 @@ const APP: &str = include_str!("plugins/App.tsx");
 const PROVIDER: &str = include_str!("plugins/provider.tsx");
 const SLOTS: &str = include_str!("plugins/slots.tsx");
 const SDK: &str = include_str!("plugins/sdk.tsx");
-/// 外壳专用的别名配置：提供外壳内部挂载器 `smelt/slots` 与通用 `smelt/sdk`。
-const SHELL_NSH_CONFIG: &str =
-    r#"{"resolve":{"alias":{"smelt/slots":"./slots.tsx","smelt/sdk":"./sdk.tsx"}}}"#;
-/// Guest 插件的别名配置：仅开放 `smelt/sdk`，不暴露 `smelt/slots`（禁止插件嵌套插件）。
-const PLUGIN_NSH_CONFIG: &str = r#"{"resolve":{"alias":{"smelt/sdk":"./sdk.tsx"}}}"#;
+const SDK_CONVERSATION_FILES: &[(&str, &str)] = &[
+    (
+        "conversation/model.js",
+        include_str!("plugins/conversation/model.js"),
+    ),
+    (
+        "conversation/i18n.ts",
+        include_str!("plugins/conversation/i18n.ts"),
+    ),
+    (
+        "conversation/cards.tsx",
+        include_str!("plugins/conversation/cards.tsx"),
+    ),
+    (
+        "conversation/edit_diff_dialog.tsx",
+        include_str!("plugins/conversation/edit_diff_dialog.tsx"),
+    ),
+    (
+        "conversation/model_popover.tsx",
+        include_str!("plugins/conversation/model_popover.tsx"),
+    ),
+    (
+        "conversation/subagents.tsx",
+        include_str!("plugins/conversation/subagents.tsx"),
+    ),
+    (
+        "conversation/prompt_rail.tsx",
+        include_str!("plugins/conversation/prompt_rail.tsx"),
+    ),
+    (
+        "conversation/message_list.tsx",
+        include_str!("plugins/conversation/message_list.tsx"),
+    ),
+    (
+        "conversation/composer.tsx",
+        include_str!("plugins/conversation/composer.tsx"),
+    ),
+    (
+        "conversation/index.tsx",
+        include_str!("plugins/conversation/index.tsx"),
+    ),
+];
+const SHELL_NSH_CONFIG: &str = include_str!("plugins/shell.nsh.json");
+const PLUGIN_NSH_CONFIG: &str = include_str!("plugins/plugin.nsh.json");
 
 /// 外壳上报跨 VM 顶层视图插槽增改删批次。
 const SLOT_OPS: &str = "smelt.slot.ops";
@@ -53,20 +92,50 @@ pub(crate) const SHELL_OWNER: &str = "__shell__";
 /// 一个插件的入口文件，导出它的视图。
 pub(crate) const ENTRY: &str = "main.tsx";
 
-/// 一个插件打好的标准 ES 模块。
+/// 编译结果：源码形式（用户插件 / 调试 / 热重载）或 QuickJS 字节码（预编译主壳与自带插件）。
+#[derive(Clone, Debug)]
+pub enum CompiledCode {
+    Source(Arc<str>),
+    Bytecode(Arc<[u8]>),
+}
+
+/// 一个插件打好的可执行模块。
 #[derive(Clone, Debug)]
 pub struct Compiled {
     id: String,
-    code: Arc<str>,
+    code: CompiledCode,
 }
 
 impl Compiled {
+    pub(crate) fn from_bytecode(id: String, bytes: Vec<u8>) -> Self {
+        Self {
+            id,
+            code: CompiledCode::Bytecode(Arc::from(bytes)),
+        }
+    }
+
+    pub(crate) fn from_source(id: String, source: String) -> Self {
+        Self {
+            id,
+            code: CompiledCode::Source(source.into()),
+        }
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    pub(crate) fn code(&self) -> &str {
-        &self.code
+    #[cfg(test)]
+    pub(crate) fn is_bytecode(&self) -> bool {
+        matches!(self.code, CompiledCode::Bytecode(_))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_text(&self) -> Option<&str> {
+        match &self.code {
+            CompiledCode::Source(code) => Some(code.as_ref()),
+            CompiledCode::Bytecode(_) => None,
+        }
     }
 }
 
@@ -75,7 +144,7 @@ impl Compiled {
 pub enum Change {
     /// 起一个新引擎：外壳，加上此刻装着的全部插件。
     Start {
-        shell: Arc<str>,
+        shell: CompiledCode,
         plugins: Vec<Compiled>,
     },
     /// 装上或者原地热重载一个插件。
@@ -84,11 +153,36 @@ pub enum Change {
     Remove(String),
 }
 
+/// 对嵌入所有 Guest 插件的 SDK、配置与 QuickJS 字节码版本生成稳定指纹，
+/// 避免升级 Smelt SDK 或 NSH 引擎版本后误读旧的 `.nshc` 预编译产物。
+pub(crate) fn sdk_fingerprint() -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    let feed = |h: &mut u64, bytes: &[u8]| {
+        for &b in bytes {
+            *h ^= u64::from(b);
+            *h = h.wrapping_mul(PRIME);
+        }
+        *h ^= 0xff;
+        *h = h.wrapping_mul(PRIME);
+    };
+    feed(&mut hash, nsh_js::BYTECODE_VERSION.as_bytes());
+    feed(&mut hash, PLUGIN_NSH_CONFIG.as_bytes());
+    feed(&mut hash, PROVIDER.as_bytes());
+    feed(&mut hash, SDK.as_bytes());
+    for (path, text) in SDK_CONVERSATION_FILES {
+        feed(&mut hash, path.as_bytes());
+        feed(&mut hash, text.as_bytes());
+    }
+    format!("{hash:016x}")
+}
+
 /// 装着的插件（编译与暂存层，运行在后台线程）。
 pub struct Plugins {
     stage: PathBuf,
     ui_sets: Vec<SetDescription>,
-    shell: Arc<str>,
+    shell: CompiledCode,
     installed: BTreeMap<String, Compiled>,
 }
 
@@ -110,18 +204,51 @@ impl Plugins {
         ];
         write_dir(
             &dir,
-            files.map(|(path, text)| (Path::new(path), text.as_bytes())),
+            files
+                .into_iter()
+                .chain(SDK_CONVERSATION_FILES.iter().copied())
+                .map(|(path, text)| (Path::new(path), text.as_bytes())),
         )
         .map_err(io)?;
-        let bundle = bundle(&dir.join("App.tsx"), &ui_sets)?;
+        let bundle = bundle(&dir.join("App.tsx"), &ui_sets, false)?;
         let served = native_specifiers(&ui_sets);
         validate_imports(SHELL_OWNER, &bundle.code, &served)?;
         Ok(Self {
-            shell: bundle.code.into(),
+            shell: CompiledCode::Source(bundle.code.into()),
             stage,
             ui_sets,
             installed: BTreeMap::new(),
         })
+    }
+
+    /// 直接使用构建期预编译的主壳 QuickJS 字节码构造；延迟建立 `stage`（全命中预编译插件时不落盘）。
+    pub(crate) fn new_with_bytecode(
+        stage: &Path,
+        shell_bytecode: &'static [u8],
+        ui_sets: Vec<SetDescription>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            stage: stage.to_path_buf(),
+            ui_sets,
+            shell: CompiledCode::Bytecode(Arc::from(shell_bytecode)),
+            installed: BTreeMap::new(),
+        })
+    }
+
+    pub(crate) fn stage(&self) -> &Path {
+        &self.stage
+    }
+
+    pub(crate) fn ui_sets(&self) -> &[SetDescription] {
+        &self.ui_sets
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shell_source(&self) -> Option<&str> {
+        match &self.shell {
+            CompiledCode::Source(src) => Some(src),
+            CompiledCode::Bytecode(_) => None,
+        }
     }
 
     /// 起引擎：外壳加上此刻装着的全部插件。
@@ -145,8 +272,13 @@ impl Plugins {
         entry_rel: &str,
     ) -> Result<Change, String> {
         let compiled = self.compile(id, dir, entry_rel)?;
-        self.installed.insert(id.to_owned(), compiled.clone());
-        Ok(Change::Install(compiled))
+        Ok(self.insert_compiled(compiled))
+    }
+
+    pub(crate) fn insert_compiled(&mut self, compiled: Compiled) -> Change {
+        self.installed
+            .insert(compiled.id().to_owned(), compiled.clone());
+        Change::Install(compiled)
     }
 
     /// 装着的插件 id。
@@ -159,8 +291,15 @@ impl Plugins {
         Change::Remove(id.to_owned())
     }
 
-    /// 拷一份到自己的目录里再打包：插件目录里不落生成的文件，import 也出不了这个目录。
-    fn compile(&self, id: &str, source: &Path, entry_rel: &str) -> Result<Compiled, String> {
+    /// 无共享可变状态地把单个插件打包为 JS 文本，可由上层多线程并行调用。
+    pub(crate) fn compile_source_to_js(
+        stage: &Path,
+        ui_sets: &[SetDescription],
+        id: &str,
+        source: &Path,
+        entry_rel: &str,
+        minify: bool,
+    ) -> Result<String, String> {
         if !valid_id(id) {
             return Err(format!("插件 id 不能作目录名：{id}"));
         }
@@ -184,7 +323,7 @@ impl Plugins {
             return Err(format!("{id} 没有 {entry_rel}"));
         }
         let import_rel = normalized_entry.to_string_lossy().replace('\\', "/");
-        let dir = self.stage.join("plugins").join(id);
+        let raw_dir = stage.join("plugins").join(id);
         let entry = format!(
             "import {{ provideViews }} from \"./provider.tsx\";\n\
              import * as views from \"./plugin/{import_rel}\";\n\
@@ -199,13 +338,22 @@ impl Plugins {
                 (PathBuf::from("sdk.tsx"), SDK.as_bytes()),
                 (PathBuf::from("entry.ts"), entry.as_bytes()),
             ])
+            .chain(
+                SDK_CONVERSATION_FILES
+                    .iter()
+                    .map(|(path, text)| (PathBuf::from(path), text.as_bytes())),
+            )
             .collect();
         write_dir(
-            &dir,
+            &raw_dir,
             staged.iter().map(|(path, bytes)| (path.as_path(), *bytes)),
         )
-        .map_err(|error| format!("{}: {error}", dir.display()))?;
-        let bundle = bundle(&dir.join("entry.ts"), &self.ui_sets)?;
+        .map_err(|error| format!("{}: {error}", raw_dir.display()))?;
+        // macOS `/var` -> `/private/var` 符号链接解析，确保 `inside` 前缀对比一致。
+        let dir = raw_dir
+            .canonicalize()
+            .map_err(|error| format!("{}: {error}", raw_dir.display()))?;
+        let bundle = bundle(&dir.join("entry.ts"), ui_sets, minify)?;
         if let Some(outside) = bundle.watch_files.iter().find(|file| !inside(file, &dir)) {
             return Err(format!(
                 "{id} 引了自己目录以外的文件：{}",
@@ -215,12 +363,16 @@ impl Plugins {
         if let Some(asset) = bundle.assets.first() {
             return Err(format!("{id} 引了资源文件，还不支持：{}", asset.display()));
         }
-        let served = native_specifiers(&self.ui_sets);
+        let served = native_specifiers(ui_sets);
         validate_imports(id, &bundle.code, &served)?;
-        Ok(Compiled {
-            id: id.to_owned(),
-            code: bundle.code.into(),
-        })
+        Ok(bundle.code)
+    }
+
+    /// 拷一份到自己的目录里再打包：插件目录里不落生成的文件，import 也出不了这个目录。
+    fn compile(&self, id: &str, source: &Path, entry_rel: &str) -> Result<Compiled, String> {
+        let code =
+            Self::compile_source_to_js(&self.stage, &self.ui_sets, id, source, entry_rel, false)?;
+        Ok(Compiled::from_source(id.to_owned(), code))
     }
 }
 
@@ -402,9 +554,7 @@ impl PluginHost {
                 let mut declared = Capabilities::all();
                 declared.host = declared_host;
                 policy.declared = Some(declared);
-                view.load(App::Js(
-                    Bundle::source(shell.to_string()).with_policy(policy),
-                ));
+                view.load(App::Js(make_bundle(&shell, policy)));
                 for plugin in plugins {
                     self.load_one(view, plugin);
                 }
@@ -575,7 +725,7 @@ impl PluginHost {
         let mut declared = Capabilities::all();
         declared.host = declared_host;
         policy.declared = Some(declared);
-        let bundle = Bundle::source(plugin.code.to_string()).with_policy(policy);
+        let bundle = make_bundle(&plugin.code, policy);
         let mut config = PluginConfig::new(id, bundle)
             .with_host(channel)
             .with_cpu_window_budget(cpu_window);
@@ -595,6 +745,18 @@ impl PluginHost {
             flush_sync_batches(outgoing);
         });
     }
+}
+
+fn make_bundle(code: &CompiledCode, policy: Policy) -> Bundle {
+    let bundle = match code {
+        CompiledCode::Source(src) => Bundle::source(src.as_ref().to_owned()),
+        CompiledCode::Bytecode(bytes) => {
+            // SAFETY: 字节码仅来自构建期 `include_bytes!` 主壳产物，或发版前 `stage_builtin_plugins`
+            // 产出的同版本、`sdk_fingerprint` 匹配的只读自带插件 `bundle.nshc`。
+            unsafe { Bundle::bytecode(bytes.as_ref().to_vec()) }
+        }
+    };
+    bundle.with_policy(policy)
 }
 
 impl HostInner {
@@ -716,9 +878,15 @@ fn send_failed_status(channel: &HostChannel, plugin: &str, failed: bool) {
     let _ = channel.send(SLOT_FAILED, json!({ "plugin": plugin, "failed": failed }));
 }
 
-fn bundle(entry: &Path, ui_sets: &[SetDescription]) -> Result<nsh_bundler::Bundle, String> {
+fn bundle(
+    entry: &Path,
+    ui_sets: &[SetDescription],
+    minify: bool,
+) -> Result<nsh_bundler::Bundle, String> {
     nsh_bundler::bundle(&BundleOptions {
         entry: entry.to_path_buf(),
+        minify,
+        development: !minify,
         ui_sets: ui_sets.to_vec(),
         ..Default::default()
     })
@@ -869,7 +1037,95 @@ pub(crate) fn validate_unresolved_references(id: &str, code: &str) -> Result<(),
     Ok(())
 }
 
-fn valid_id(id: &str) -> bool {
+/// 从插件入口源码里提取导出的值名称（不含仅类型导出），供 `smelt plugin check` 展示。
+pub(crate) fn extract_entry_exports(path: &Path) -> Vec<String> {
+    let Ok(source) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::tsx());
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, &source, source_type).parse();
+    let mut out = BTreeSet::new();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ExportDefaultDeclaration(_) => {
+                out.insert("default".to_owned());
+            }
+            Statement::ExportDeclaration(decl) => match &decl.declaration {
+                oxc::ast::ast::Declaration::FunctionDeclaration(f) => {
+                    if let Some(id) = &f.id {
+                        out.insert(id.name.as_str().to_owned());
+                    }
+                }
+                oxc::ast::ast::Declaration::ClassDeclaration(c) => {
+                    if let Some(id) = &c.id {
+                        out.insert(id.name.as_str().to_owned());
+                    }
+                }
+                oxc::ast::ast::Declaration::VariableDeclaration(vars) => {
+                    for d in &vars.declarations {
+                        collect_binding_names(&d.id, &mut out);
+                    }
+                }
+                _ => {}
+            },
+            Statement::ExportNamedDeclaration(decl) => {
+                if decl.export_kind.is_type() {
+                    continue;
+                }
+                for specifier in &decl.specifiers {
+                    if specifier.export_kind.is_type() {
+                        continue;
+                    }
+                    out.insert(specifier.exported.name().as_str().to_owned());
+                }
+            }
+            Statement::ExportFromDeclaration(decl) => {
+                if decl.export_kind.is_type() {
+                    continue;
+                }
+                for specifier in &decl.specifiers {
+                    if specifier.export_kind.is_type() {
+                        continue;
+                    }
+                    out.insert(specifier.exported.name().as_str().to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn collect_binding_names(pattern: &oxc::ast::ast::BindingPattern<'_>, out: &mut BTreeSet<String>) {
+    use oxc::ast::ast::BindingPattern;
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => {
+            out.insert(id.name.as_str().to_owned());
+        }
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_binding_names(&prop.value, out);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_binding_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                collect_binding_names(elem, out);
+            }
+            if let Some(rest) = &arr.rest {
+                collect_binding_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(assign) => {
+            collect_binding_names(&assign.left, out);
+        }
+    }
+}
+
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.starts_with('.')
         && !id.is_empty()
         && id
@@ -957,8 +1213,13 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&stage);
         let shell_plugins = shell_plugins.expect("MainShell.tsx 打包失败");
-        validate_unresolved_references(SHELL_OWNER, &shell_plugins.shell)
-            .expect("MainShell.tsx 存在未定义标识符");
+        validate_unresolved_references(
+            SHELL_OWNER,
+            shell_plugins
+                .shell_source()
+                .expect("MainShell.tsx 源码应存在"),
+        )
+        .expect("MainShell.tsx 存在未定义标识符");
 
         let repo_plugins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
         let mut errors = Vec::new();
@@ -975,5 +1236,37 @@ mod tests {
             "内置插件静态校验失败：\n{}",
             errors.join("\n")
         );
+    }
+
+    #[test]
+    fn smelt_host_ui_set_matches_build_description() {
+        use nsh_core::element::description::ExportKind;
+        let sets = crate::ui_sets();
+        let host = sets
+            .iter()
+            .find(|s| s.specifier == "smelt/host")
+            .expect("ui_sets 应包含 smelt/host");
+        let mut actual: Vec<(&str, &str)> = host
+            .exports
+            .iter()
+            .map(|e| {
+                let kind = match e.kind {
+                    ExportKind::Component => "Component",
+                    ExportKind::Module => "Module",
+                    _ => "Other",
+                };
+                (e.name.as_str(), kind)
+            })
+            .collect();
+        actual.sort_unstable();
+        let mut expected = vec![
+            ("Icon", "Component"),
+            ("Smelt", "Module"),
+            ("Vector", "Component"),
+        ];
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "smelt/host 导出需与 build.rs 保持一致");
+        assert!(host.reexported_values.is_empty());
+        assert!(host.native_values.is_empty());
     }
 }

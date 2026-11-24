@@ -45,7 +45,12 @@ import {
   state,
   store,
   t,
+  currentTheme,
+  DIALOG_SURFACE_CLASS,
+  MENU_ITEM_CLASS,
+  POPUP_CLASS,
   text,
+  TOOLTIP_CLASS,
   viewShown,
 } from "smelt/sdk";
 
@@ -81,10 +86,6 @@ const SEND_TEXT_CMD = "smelt.sessions/send-text";
 
 const SEARCH_DEBOUNCE_MS = 180;
 const PREVIEW_DEBOUNCE_MS = 80;
-
-const POPUP_CLASS = "rounded-(--radius) border border-border bg-popover p-1";
-const MENU_ITEM_CLASS =
-  "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
 
 interface ProjectRef {
   machine: string | null;
@@ -294,16 +295,32 @@ function persistPinned() {
 
 // ---- 监听与失效 ----
 
+const failedWatches = new Set<string>();
+const failedDirs = new Set<string>();
+const failedGitMarks = new Set<string>();
+
+function clearFailedWhere(set: Set<string>, predicate: (machine: string | null, path: string) => boolean) {
+  for (const k of [...set]) {
+    const sep = k.indexOf("\0");
+    const m = sep > 0 ? k.slice(0, sep) : null;
+    const p = sep >= 0 ? k.slice(sep + 1) : k;
+    if (predicate(m, p)) set.delete(k);
+  }
+}
+
 function ensureWatch(machine: string | null, root: string) {
   const key = projectKey(machine, root);
-  if (watches.has(key)) return;
+  if (watches.has(key) || failedWatches.has(key)) return;
   watches.add(key);
   void call(machine, "project.watch", { root }).catch((error) => {
+    watches.delete(key);
+    failedWatches.add(key);
     console.error(`[files] project.watch(${root}) failed:`, error);
   });
 }
 
 function markDirsStaleWhere(predicate: (machine: string | null, dir: string) => boolean) {
+  clearFailedWhere(failedDirs, predicate);
   for (const [mKey, map] of dirCache.entries()) {
     const m = mKey === "" ? null : mKey;
     for (const [dir, listing] of map.entries()) {
@@ -325,6 +342,7 @@ function markDirsStaleWhere(predicate: (machine: string | null, dir: string) => 
 }
 
 function markGitMarksStaleWhere(predicate: (machine: string | null, root: string) => boolean) {
+  clearFailedWhere(failedGitMarks, predicate);
   const matched = new Set<string>();
   for (const k of gitMarks.keys()) matched.add(k);
   for (const k of gitInflight) matched.add(k);
@@ -341,6 +359,7 @@ function markGitMarksStaleWhere(predicate: (machine: string | null, root: string
 
 function markEverythingStale(machineFilter: string | null | undefined) {
   const matchesMachine = (m: string | null) => machineFilter === undefined || m === machineFilter;
+  clearFailedWhere(failedWatches, (m) => matchesMachine(m));
   for (const key of watches) {
     const sep = key.indexOf("\0");
     const m = sep > 0 ? key.slice(0, sep) : null;
@@ -371,13 +390,14 @@ function ensureDir(machine: string | null, root: string, dir: string) {
   const key = projectKey(machine, dir);
   const map = getDirMap(machine);
   const existing = map.get(dir);
-  if ((existing && !existing.stale) || dirInflight.has(key)) return;
+  if ((existing && !existing.stale) || dirInflight.has(key) || failedDirs.has(key)) return;
   dirInflight.add(key);
   const gen = dirGeneration.get(key) ?? 0;
 
   void call(machine, "project.tree", { root, dir })
     .then((result: any) => {
       dirInflight.delete(key);
+      failedDirs.delete(key);
       const entries = Array.isArray(result?.entries)
         ? result.entries.map((e: any) => ({ name: String(e.name ?? ""), is_dir: Boolean(e.is_dir) }))
         : [];
@@ -391,19 +411,21 @@ function ensureDir(machine: string | null, root: string, dir: string) {
     })
     .catch(() => {
       dirInflight.delete(key);
+      failedDirs.add(key);
     });
 }
 
 function ensureGitStatus(machine: string | null, root: string) {
   const key = projectKey(machine, root);
   const existing = gitMarks.get(key);
-  if ((existing && !existing.stale) || gitInflight.has(key)) return;
+  if ((existing && !existing.stale) || gitInflight.has(key) || failedGitMarks.has(key)) return;
   gitInflight.add(key);
   const gen = gitGeneration.get(key) ?? 0;
 
   void call(machine, "git.status", { root })
     .then((result: any) => {
       gitInflight.delete(key);
+      failedGitMarks.delete(key);
       const stale = (gitGeneration.get(key) ?? 0) !== gen;
       const files = Array.isArray(result?.files) ? result.files : [];
       gitMarks.set(key, { value: { files }, stale });
@@ -414,6 +436,7 @@ function ensureGitStatus(machine: string | null, root: string) {
     })
     .catch(() => {
       gitInflight.delete(key);
+      failedGitMarks.add(key);
     });
 }
 
@@ -950,6 +973,7 @@ function scheduleSearch(query: string) {
   const trimmed = query.trim();
   const proj = currentProject();
   if (!trimmed || !proj) {
+    searchSeq += 1;
     searchState.set(null);
     return;
   }
@@ -1167,7 +1191,8 @@ bootTask(async () => {
         name: "save",
         title: text("command.save"),
         key: "cmd-s",
-        context: "Files",
+        context: "Workspace",
+        when_view_shown: VIEW_ID,
         palette: true,
         requires_args: false,
         args: [],
@@ -1219,16 +1244,8 @@ onCommand(async ({ name, args }) => {
 });
 
 onState((next) => {
-  const active = next.window_active !== false;
-  if (active && !lastWindowActive) {
-    markEverythingStale(undefined);
-    refreshVisible();
-  }
-  lastWindowActive = active;
+  lastWindowActive = next.window_active !== false;
   void syncProjectFromContext();
-  if (viewShown(VIEW_ID)) {
-    refreshVisible();
-  }
 });
 
 onEvent((event) => {
@@ -1273,7 +1290,6 @@ onEvent((event) => {
 
 // ---- 子组件 ----
 
-const currentTheme = stableMemo(() => state().theme);
 
 function MenuRow(props: {
   label: string;
@@ -1285,7 +1301,7 @@ function MenuRow(props: {
   const look = currentTheme;
   return (
     <MenuItem
-      label={props.label}
+      closeOnSelect={true}
       disabled={props.disabled}
       class={MENU_ITEM_CLASS}
       style={{ height: 26, gap: 6 }}
@@ -1356,6 +1372,11 @@ export function Main() {
 
   const rows = computed(() => currentTreeRows());
   const roots = computed(() => currentRoots());
+  const singleRootLoading = computed(() => {
+    cacheVersion();
+    const r = roots();
+    return r.length === 1 && !dirCache.get(treeMachine() ?? "")?.has(r[0]);
+  });
   const isLocalTree = computed(() => treeMachine() == null);
   const hasQuery = computed(() => filterQuery().trim().length > 0);
 
@@ -1401,19 +1422,12 @@ export function Main() {
 
   const openFileDirty = computed(() => isDirty(openFile()));
 
+  const isShown = computed(() => viewShown(VIEW_ID));
   effect(() => {
-    if (viewShown(VIEW_ID)) {
+    if (isShown()) {
       refreshVisible();
     }
   });
-
-  function handlePanelKeyDown(e: any) {
-    const key = String(e?.key ?? "").toLowerCase();
-    const mod = isMac ? Boolean(e?.modifiers?.platform) : Boolean(e?.modifiers?.control);
-    if (key === "s" && mod && !e?.modifiers?.alt && !e?.modifiers?.shift) {
-      void saveOpenFile();
-    }
-  }
 
   function handleEditorContextMenu(e: { x: number; y: number }) {
     const api = activeEditorApi;
@@ -1454,7 +1468,6 @@ export function Main() {
 
   return (
     <View
-      onKeyDown={handlePanelKeyDown}
       style={{
         flex: 1,
         width: "100%",
@@ -1695,8 +1708,7 @@ export function Main() {
                   >
                     <Image
                       src={openFile()?.imageDataUri ?? ""}
-                      resizeMode="contain"
-                      style={{ width: "100%", height: "100%" }}
+                      style={{ width: "100%", height: "100%", objectFit: "contain" }}
                     />
                   </View>
                 </If>
@@ -1748,14 +1760,15 @@ export function Main() {
                 <Input
                   value={filterQuery()}
                   placeholder={t("search.placeholder")}
+                  accessibilityLabel={t("search.placeholder")}
                   onChange={({ value }: { value: string }) => {
                     filterQuery.set(value);
                     scheduleSearch(value);
                   }}
-                  onKeyDown={(e: any) => {
+                  onKeyPress={(e: any) => {
                     if (e?.key === "Escape") {
                       filterQuery.set("");
-                      searchState.set(null);
+                      scheduleSearch("");
                     }
                   }}
                   class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
@@ -1787,12 +1800,7 @@ export function Main() {
                     else={<Placeholder text={t("tree.no_project")} />}
                   >
                     <If
-                      when={
-                        !(
-                          roots().length === 1 &&
-                          !(dirCache.get(treeMachine() ?? "")?.has(roots()[0]))
-                        )
-                      }
+                      when={!singleRootLoading()}
                       else={<Placeholder text={t("loading")} />}
                     >
                       <View
@@ -1823,110 +1831,115 @@ export function Main() {
                                         when={isRoot()}
                                         else={
                                           /* 普通目录 / 文件行 */
-                                          <ContextMenu popupClass={POPUP_CLASS}>
-                                            <View
-                                              slot="trigger"
-                                              class="hover:bg-accent"
-                                              onPress={() => {
-                                                const r = row();
-                                                selectedPath.set(r.path);
-                                                if (r.isDir) {
-                                                  toggleExpandDir(r.path);
-                                                } else {
-                                                  viewFileOn(treeMachine(), r.path, null);
-                                                }
-                                              }}
-                                              tooltip={
-                                                nameLikelyTruncated(row().name, row().depth, treeWidth()) ? (
-                                                  <Tooltip class="px-2 py-1 rounded bg-popover border border-border">
-                                                    <Text
-                                                      style={{
-                                                        fontSize: look().type.text_xsmall.size,
-                                                        color: look().palette.text,
-                                                      }}
-                                                    >
-                                                      {row().name}
-                                                    </Text>
-                                                  </Tooltip>
-                                                ) : undefined
-                                              }
-                                              style={{
-                                                display: "flex",
-                                                flexDirection: "row",
-                                                alignItems: "center",
-                                                gap: 4,
-                                                height: 24,
-                                                paddingLeft:
-                                                  8 + row().depth * 14 - (isSelected() ? 2 : 0),
-                                                paddingRight: 8,
-                                                borderLeftWidth: isSelected() ? 2 : 0,
-                                                borderLeftColor: look().palette.ink,
-                                                backgroundColor: isOpen()
-                                                  ? look().palette.row_selected
-                                                  : "transparent",
-                                                cursor: "pointer",
-                                                overflow: "hidden",
-                                              }}
-                                            >
-                                              <If
-                                                when={row().isDir}
-                                                else={<View style={{ width: 14, flexShrink: 0 }} />}
-                                              >
-                                                <SmeltIcon
-                                                  path={
-                                                    row().expanded
-                                                      ? "icons/chevron-down.svg"
-                                                      : "icons/chevron-right.svg"
+                                          <ContextMenu
+                                            popupClass={POPUP_CLASS}
+                                            popupStyle={{ minWidth: 168 }}
+                                            trigger={
+                                              <View
+                                                class="hover:bg-accent"
+                                                onPress={() => {
+                                                  const r = row();
+                                                  selectedPath.set(r.path);
+                                                  if (r.isDir) {
+                                                    toggleExpandDir(r.path);
+                                                  } else {
+                                                    viewFileOn(treeMachine(), r.path, null);
                                                   }
-                                                  size={12}
-                                                  color={look().palette.muted}
-                                                />
-                                              </If>
-                                              <SmeltIcon
-                                                path={
-                                                  row().isDir
-                                                    ? row().expanded
-                                                      ? "icons/folder-open.svg"
-                                                      : "icons/folder.svg"
-                                                    : "icons/file.svg"
+                                                }}
+                                                tooltip={
+                                                  nameLikelyTruncated(row().name, row().depth, treeWidth()) ? (
+                                                    <Tooltip class={TOOLTIP_CLASS}>
+                                                      <Text
+                                                        style={{
+                                                          fontSize: look().type.text_xsmall.size,
+                                                          color: look().palette.text,
+                                                        }}
+                                                      >
+                                                        {row().name}
+                                                      </Text>
+                                                    </Tooltip>
+                                                  ) : undefined
                                                 }
-                                                size={14}
-                                                color={
-                                                  row().isDir
-                                                    ? look().palette.text
-                                                    : look().palette.muted
-                                                }
-                                              />
-                                              <Text
                                                 style={{
-                                                  flex: 1,
-                                                  minWidth: 0,
-                                                  fontSize: look().type.small.size,
-                                                  lineHeight: look().type.small.line_height,
-                                                  color: row().isDir
-                                                    ? look().palette.text
-                                                    : look().palette.muted,
-                                                  numberOfLines: 1,
+                                                  width: "100%",
+                                                  display: "flex",
+                                                  flexDirection: "row",
+                                                  alignItems: "center",
+                                                  gap: 4,
+                                                  height: 24,
+                                                  paddingLeft:
+                                                    8 + row().depth * 14 - (isSelected() ? 2 : 0),
+                                                  paddingRight: 8,
+                                                  borderLeftWidth: isSelected() ? 2 : 0,
+                                                  borderLeftColor: look().palette.ink,
+                                                  backgroundColor: isOpen()
+                                                    ? look().palette.row_selected
+                                                    : "transparent",
+                                                  cursor: "pointer",
+                                                  overflow: "hidden",
                                                 }}
                                               >
-                                                {row().name}
-                                              </Text>
-                                              <If when={Boolean(row().gitMark)}>
+                                                <If
+                                                  when={row().isDir}
+                                                  else={<View style={{ width: 14, flexShrink: 0 }} />}
+                                                >
+                                                  <SmeltIcon
+                                                    path={
+                                                      row().expanded
+                                                        ? "icons/chevron-down.svg"
+                                                        : "icons/chevron-right.svg"
+                                                    }
+                                                    size={12}
+                                                    color={look().palette.muted}
+                                                  />
+                                                </If>
+                                                <SmeltIcon
+                                                  path={
+                                                    row().isDir
+                                                      ? row().expanded
+                                                        ? "icons/folder-open.svg"
+                                                        : "icons/folder.svg"
+                                                      : "icons/file.svg"
+                                                  }
+                                                  size={14}
+                                                  color={
+                                                    row().isDir
+                                                      ? look().palette.text
+                                                      : look().palette.muted
+                                                  }
+                                                />
                                                 <Text
                                                   style={{
-                                                    flexShrink: 0,
-                                                    fontSize: look().type.text_xsmall.size,
-                                                    fontWeight: 600,
-                                                    color: gitMarkColor(
-                                                      row().gitMark ?? "M",
-                                                      look().palette,
-                                                    ),
+                                                    flex: 1,
+                                                    minWidth: 0,
+                                                    fontSize: look().type.small.size,
+                                                    lineHeight: look().type.small.line_height,
+                                                    color: row().isDir
+                                                      ? look().palette.text
+                                                      : look().palette.muted,
+                                                    numberOfLines: 1,
                                                   }}
                                                 >
-                                                  {row().gitMark ?? ""}
+                                                  {row().name}
                                                 </Text>
-                                              </If>
-                                            </View>
+                                                <If when={Boolean(row().gitMark)}>
+                                                  <Text
+                                                    style={{
+                                                      flexShrink: 0,
+                                                      fontSize: look().type.text_xsmall.size,
+                                                      fontWeight: 600,
+                                                      color: gitMarkColor(
+                                                        row().gitMark ?? "M",
+                                                        look().palette,
+                                                      ),
+                                                    }}
+                                                  >
+                                                    {row().gitMark ?? ""}
+                                                  </Text>
+                                                </If>
+                                              </View>
+                                            }
+                                          >
                                             <MenuRow
                                               label={t("send.path_menu")}
                                               onSelect={() => sendPathToSession(row().path)}
@@ -2009,56 +2022,61 @@ export function Main() {
                                             </View>
                                           }
                                         >
-                                          <ContextMenu popupClass={POPUP_CLASS}>
-                                            <View
-                                              slot="trigger"
-                                              class="hover:bg-accent"
-                                              onPress={() => {
-                                                selectedPath.set(row().path);
-                                                toggleRootCollapsed(row().path);
-                                              }}
-                                              style={{
-                                                display: "flex",
-                                                flexDirection: "row",
-                                                alignItems: "center",
-                                                gap: 4,
-                                                height: 24,
-                                                paddingLeft: isSelected() ? 6 : 8,
-                                                paddingRight: 8,
-                                                borderLeftWidth: isSelected() ? 2 : 0,
-                                                borderLeftColor: look().palette.ink,
-                                                cursor: "pointer",
-                                                overflow: "hidden",
-                                              }}
-                                            >
-                                              <SmeltIcon
-                                                path={
-                                                  row().open
-                                                    ? "icons/chevron-down.svg"
-                                                    : "icons/chevron-right.svg"
-                                                }
-                                                size={12}
-                                                color={look().palette.muted}
-                                              />
-                                              <SmeltIcon
-                                                path="icons/folder-open.svg"
-                                                size={14}
-                                                color={look().palette.text}
-                                              />
-                                              <Text
+                                          <ContextMenu
+                                            popupClass={POPUP_CLASS}
+                                            popupStyle={{ minWidth: 168 }}
+                                            trigger={
+                                              <View
+                                                class="hover:bg-accent"
+                                                onPress={() => {
+                                                  selectedPath.set(row().path);
+                                                  toggleRootCollapsed(row().path);
+                                                }}
                                                 style={{
-                                                  flex: 1,
-                                                  minWidth: 0,
-                                                  fontSize: look().type.small_medium.size,
-                                                  fontWeight: look().type.small_medium.weight,
-                                                  color: look().palette.text,
-                                                  numberOfLines: 1,
+                                                  width: "100%",
+                                                  display: "flex",
+                                                  flexDirection: "row",
+                                                  alignItems: "center",
+                                                  gap: 4,
+                                                  height: 24,
+                                                  paddingLeft: isSelected() ? 6 : 8,
+                                                  paddingRight: 8,
+                                                  borderLeftWidth: isSelected() ? 2 : 0,
+                                                  borderLeftColor: look().palette.ink,
+                                                  cursor: "pointer",
+                                                  overflow: "hidden",
                                                 }}
                                               >
-                                                {styleOpsFor(treeMachine()).fileName(row().path) ??
-                                                  row().path}
-                                              </Text>
-                                            </View>
+                                                <SmeltIcon
+                                                  path={
+                                                    row().open
+                                                      ? "icons/chevron-down.svg"
+                                                      : "icons/chevron-right.svg"
+                                                  }
+                                                  size={12}
+                                                  color={look().palette.muted}
+                                                />
+                                                <SmeltIcon
+                                                  path="icons/folder-open.svg"
+                                                  size={14}
+                                                  color={look().palette.text}
+                                                />
+                                                <Text
+                                                  style={{
+                                                    flex: 1,
+                                                    minWidth: 0,
+                                                    fontSize: look().type.small_medium.size,
+                                                    fontWeight: look().type.small_medium.weight,
+                                                    color: look().palette.text,
+                                                    numberOfLines: 1,
+                                                  }}
+                                                >
+                                                  {styleOpsFor(treeMachine()).fileName(row().path) ??
+                                                    row().path}
+                                                </Text>
+                                              </View>
+                                            }
+                                          >
                                             <MenuRow
                                               label={t("pin.remove")}
                                               onSelect={() => unpinRoot(row().path)}
@@ -2225,7 +2243,7 @@ export function Main() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) unsavedDialog.set(null);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 440, gap: 12 }}
       >
         <If when={unsavedDialog() != null}>
@@ -2295,7 +2313,7 @@ export function Main() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) deleteDialog.set(null);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 420, gap: 12 }}
       >
         <If when={deleteDialog() != null}>

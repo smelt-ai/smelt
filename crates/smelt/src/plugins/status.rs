@@ -5,34 +5,52 @@
 //! 只放 `~/.smelt/run/`，不放进插件目录：插件目录有文件变就重挂（见 `watch`），写在那里
 //! 会自己触发自己。
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Mutex};
 
 use serde::{Deserialize, Serialize};
+use smelt_nsh::PluginSource;
 
 const FILE_NAME: &str = "plugin-status.json";
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+static LAST_PUBLISHED: Mutex<Option<Snapshot>> = Mutex::new(None);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Snapshot {
     /// 写快照的 App 进程。
     pub(super) pid: u32,
     pub(super) plugins: Vec<Entry>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Entry {
     pub(super) id: String,
     pub(super) name: String,
     pub(super) version: String,
+    pub(super) source: String,
+    #[serde(default)]
+    pub(super) overrides_builtin: bool,
+    #[serde(default)]
+    pub(super) fallback_to_builtin: bool,
     pub(super) path: PathBuf,
+    #[serde(default)]
+    pub(super) views: Vec<String>,
     /// 加载失败的原因；加载好了是 `None`。
     pub(super) error: Option<String>,
+}
+
+fn source_label(source: PluginSource) -> String {
+    match source {
+        PluginSource::Builtin => "builtin",
+        PluginSource::User => "user",
+    }
+    .to_owned()
 }
 
 fn path() -> Option<PathBuf> {
     smelt_paths::smelt_home().map(|home| home.join("run").join(FILE_NAME))
 }
 
-/// 挂载完写一份。写不了只记日志：快照只给命令行看，不影响插件本身。
+/// 挂载完写一份（和上次快照完全一致时跳过写盘）。写不了只记日志：快照只给命令行看，不影响插件本身。
 pub(crate) fn publish(plugins: &[smelt_nsh::LoadedPluginInfo]) {
     let snapshot = Snapshot {
         pid: std::process::id(),
@@ -42,21 +60,35 @@ pub(crate) fn publish(plugins: &[smelt_nsh::LoadedPluginInfo]) {
                 id: plugin.id.clone(),
                 name: plugin.name.clone(),
                 version: plugin.version.clone(),
+                source: source_label(plugin.source),
+                overrides_builtin: plugin.overrides_builtin,
+                fallback_to_builtin: plugin.fallback_to_builtin,
                 path: plugin.root.clone(),
+                views: plugin.views.clone(),
                 error: plugin.error.clone(),
             })
             .collect(),
     };
+    {
+        let last = LAST_PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+        if last.as_ref() == Some(&snapshot) {
+            return;
+        }
+    }
     let Some(path) = path() else {
         return;
     };
-    if let Err(error) = write(&path, &snapshot) {
-        eprintln!("[plugins] 写 {} 失败：{error}", path.display());
+    match write(&path, &snapshot) {
+        Ok(()) => {
+            *LAST_PUBLISHED.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
+        }
+        Err(error) => eprintln!("[plugins] 写 {} 失败：{error}", path.display()),
     }
 }
 
 /// App 退出时删掉自己写的快照。
 pub(super) fn retract() {
+    *LAST_PUBLISHED.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let Some(path) = path() else {
         return;
     };
@@ -101,7 +133,11 @@ mod tests {
                 id: "com.example.hello".into(),
                 name: "你好".into(),
                 version: "0.1.0".into(),
+                source: "user".into(),
+                overrides_builtin: false,
+                fallback_to_builtin: false,
                 path: "/tmp/hello".into(),
+                views: vec!["com.example.hello/main".into()],
                 error: Some("SyntaxError".into()),
             }],
         };

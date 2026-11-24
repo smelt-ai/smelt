@@ -134,7 +134,42 @@ export class SessionList {
   loaded(ui, avatar) {
     this.ui = ui;
     this.avatar = avatar;
+    this.fetched_selection = false;
+    this.fetched_agent_settings = false;
     this.rebuild();
+  }
+
+  has_peer_command(id) {
+    return typeof this.host.command !== "function" || this.host.command(id) != null;
+  }
+
+  sync_peer_commands() {
+    const host = this.host;
+    const tasks = [];
+    if (!this.heard_selection && !this.fetched_selection && this.has_peer_command(peers.SELECTION)) {
+      this.fetched_selection = true;
+      tasks.push(
+        host
+          .run(peers.SELECTION)
+          .then((selected) => {
+            if (!this.heard_selection) this.on_selection(selected);
+          })
+          .catch((error) => {
+            this.fetched_selection = false;
+            console.error(`[session-list] 问会话插件选中了什么失败：${message(error)}`);
+          }),
+      );
+    }
+    if (!this.fetched_agent_settings && this.has_peer_command(peers.AGENT_SETTINGS)) {
+      this.fetched_agent_settings = true;
+      tasks.push(
+        this.read_agent_settings().catch((error) => {
+          this.fetched_agent_settings = false;
+          this.notify_error(this.failed(host.t("action.read_agent_settings"), message(error)));
+        }),
+      );
+    }
+    return Promise.all(tasks);
   }
 
   /** 起来时调一次：记下机器表，按眼下的目录走一遍，问会话插件选中了什么、智能体插件的配置。 */
@@ -144,16 +179,7 @@ export class SessionList {
     // 宿主可能在本插件起来之前就收到了目录：先按眼下的走一遍。
     this.on_sessions_changed();
     this.refresh_worksets(false);
-    const selection = host
-      .run(peers.SELECTION)
-      .then((selected) => {
-        if (!this.heard_selection) this.on_selection(selected);
-      })
-      .catch((error) => console.error(`[session-list] 问会话插件选中了什么失败：${message(error)}`));
-    const settings = this.read_agent_settings().catch((error) =>
-      this.notify_error(this.failed(host.t("action.read_agent_settings"), message(error))),
-    );
-    await Promise.all([selection, settings]);
+    await this.sync_peer_commands();
   }
 
   // ---- 重算 ----
@@ -347,6 +373,9 @@ export class SessionList {
       case "views_changed":
       case "context_menu_items_changed":
         this.host.redraw();
+        return;
+      case "commands_changed":
+        void this.sync_peer_commands();
         return;
       case "runtime_topic":
         if (event.topic === ATTENTION_TOPIC && this.unread.apply(event.machine, event.message)) {
@@ -546,7 +575,10 @@ export class SessionList {
       return;
     }
     if (text === "") return;
-    const renamed = this.host.call(target.machine, "workspace.workset.rename", { workset_id: target.id, task: text });
+    const renamed = this.host.call(target.machine, "workspace.workset.rename_preserving_branch", {
+      workset_id: target.id,
+      task: text,
+    });
     this.report_row_failure(target, t("action.rename_workset"), renamed);
   }
 

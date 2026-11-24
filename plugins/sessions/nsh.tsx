@@ -26,6 +26,7 @@ import {
   pathStartsWith,
   pathStyle,
   registerCommands,
+  registerTopics,
   registerViews,
   resolveCliResume,
   resolveHandoffAcp,
@@ -44,8 +45,8 @@ import {
   store,
   t,
   text,
-  ViewInstance,
-  views,
+  currentTheme,
+  DIALOG_SURFACE_CLASS,
   viewShown,
   workspaceDirectory,
 } from "smelt/sdk";
@@ -110,6 +111,12 @@ import {
   updateSplitSizes,
 } from "./split_tree.js";
 import { createSessionsStore } from "./store.js";
+import {
+  applyAgentSettingsChanged,
+  ConversationPane,
+  notifyPiConfigChanged,
+  sendTextToConversation,
+} from "./conversation_pane.tsx";
 import { sendTextToTerminal, TerminalPane } from "./terminal_pane.tsx";
 
 // ---- 外部插件约定 ----
@@ -118,10 +125,10 @@ const SHOW_MAIN_WINDOW_CMD = "smelt.app/show-main-window";
 const OPEN_VIEW_CMD = "smelt.app/open-view";
 const NOTIFY_CMD = "smelt.app/notify";
 const AGENT_SETTINGS_CMD = "smelt.agents/agent-settings";
+const AGENT_SETTINGS_CHANGED_EVENT = "smelt.agents/agent-settings-changed";
 const ADD_MACHINE_CMD = "smelt.machines/add-machine";
 const REVEAL_IN_LIST_CMD = "smelt.session-list/reveal-in-list";
-const CONVERSATION_INSERT_TEXT_CMD = "smelt.conversation/insert-text";
-const CONVERSATION_AT_LATEST_EVENT = "smelt.conversation/at-latest-changed";
+const TOPIC_PI_CONFIG_CHANGED = "pi_config.changed";
 
 const TOP_BAR_HEIGHT = 34;
 const PANE_BAR_HEIGHT = 26;
@@ -158,6 +165,7 @@ interface LiveSession {
   keyStr: string;
   key: ConversationKey;
   tree: ReturnType<typeof signal<any>>;
+  latestTree: any;
   activePaneId: ReturnType<typeof signal<string | null>>;
   specs: ReturnType<typeof signal<Map<string, PaneSpec>>>;
   expectedPanes: Map<string, { beside: string | null; axis: "horizontal" | "vertical" }>;
@@ -201,7 +209,6 @@ let waitingOpen: {
 let lastPublishedContextJson = "";
 let initializedStore = false;
 
-const currentTheme = stableMemo(() => state().theme);
 
 function newAcpId(): string {
   return `acp-${newSessionId()}`;
@@ -241,8 +248,16 @@ function pathOpsFor(machine: string | null) {
   };
 }
 
-function isViewRegistered(viewId: string): boolean {
-  return views().some((v) => v.id === viewId);
+function updateConversationAtLatest(
+  machine: string | null,
+  sessionId: string,
+  atLatest: boolean,
+) {
+  const bk = convKeyStr(machine ?? null, sessionId);
+  const changed = atLatest
+    ? behindSessions.delete(bk)
+    : !behindSessions.has(bk) && Boolean(behindSessions.add(bk));
+  if (changed) publishContext();
 }
 
 // ---- 选中、活动上下文与事件发布 ----
@@ -376,7 +391,7 @@ function selectProject(
 // ---- 活体会话管理（分屏树与持久化） ----
 
 function persistLiveLayout(live: LiveSession) {
-  const tree = live.tree();
+  const tree = live.latestTree;
   const nextSaved = {
     active_pane: live.activePaneId(),
     layout: tree ? encodeTree(tree) : null,
@@ -431,6 +446,7 @@ function ensureLiveSession(key: ConversationKey, conv: any): LiveSession {
     keyStr: ks,
     key,
     tree: signal(initialTree),
+    latestTree: initialTree,
     activePaneId: signal<string | null>(initialActive),
     specs: signal(specMap),
     expectedPanes: new Map(),
@@ -449,6 +465,7 @@ function ensureLiveSession(key: ConversationKey, conv: any): LiveSession {
     const curIds = [...live.specs().keys()];
     if (curIds.length === 0) return;
     const restored = restoreTree(saved.layout, curIds);
+    live.latestTree = restored;
     live.tree.set(restored);
     const restoredActive =
       saved.active_pane && live.specs().has(saved.active_pane)
@@ -491,12 +508,13 @@ function syncLiveSession(live: LiveSession, conv: any) {
     live.specs.set(nextSpecs);
   }
 
-  const prevTree = live.tree();
+  const prevTree = live.latestTree;
   const nextTree = reconcileTree(prevTree, ids, live.expectedPanes);
   for (const id of ids) {
     live.expectedPanes.delete(id);
   }
   if (JSON.stringify(nextTree) !== JSON.stringify(prevTree)) {
+    live.latestTree = nextTree;
     live.tree.set(nextTree);
   }
 
@@ -1024,11 +1042,7 @@ async function handleCommand(name: string, args: any): Promise<any> {
       if (active.pane.kind === "terminal") {
         sendTextToTerminal(active.key.machine, active.pane.session_id, args?.text ?? "");
       } else {
-        await run(CONVERSATION_INSERT_TEXT_CMD, {
-          machine: active.key.machine,
-          session_id: active.pane.session_id,
-          text: args?.text ?? "",
-        });
+        sendTextToConversation(active.key.machine, active.pane.session_id, args?.text ?? "");
       }
       return null;
     }
@@ -1082,20 +1096,25 @@ onEvent((event: any) => {
     revealSessionArgs(event.args);
     return;
   }
-  if (event.type === "plugin" && event.name === CONVERSATION_AT_LATEST_EVENT) {
-    const payload = event.payload;
-    if (payload && typeof payload.session_id === "string") {
-      const bk = convKeyStr(payload.machine ?? null, payload.session_id);
-      const changed = payload.at_latest
-        ? behindSessions.delete(bk)
-        : !behindSessions.has(bk) && Boolean(behindSessions.add(bk));
-      if (changed) publishContext();
-    }
+  if (event.type === "plugin" && event.name === AGENT_SETTINGS_CHANGED_EVENT) {
+    applyAgentSettingsChanged(event.payload);
+    return;
+  }
+  if (
+    event.type === "runtime_topic" &&
+    event.topic === TOPIC_PI_CONFIG_CHANGED &&
+    event.message?.kind !== "unavailable"
+  ) {
+    notifyPiConfigChanged();
   }
 });
 
 initHost().then(() => {
   knownMachines = new Set(machines().map((m: any) => machineKey(m.machine)));
+
+  registerTopics([TOPIC_PI_CONFIG_CHANGED]).catch((err) =>
+    console.error("[sessions] registerTopics 失败：", err),
+  );
 
   registerViews([
     {
@@ -1259,17 +1278,13 @@ initHost().then(() => {
 function SplitLeafPane(props: {
   live: LiveSession;
   paneId: string;
-  many: boolean;
-  touches: { top: boolean; right: boolean; bottom: boolean; left: boolean };
-  parentArea: any;
+  many: () => boolean;
+  touches: () => { top: boolean; right: boolean; bottom: boolean; left: boolean };
+  parentArea: () => any;
 }) {
   const look = currentTheme;
   const spec = computed(() => props.live.specs().get(props.paneId) ?? null);
   const isActive = computed(() => props.live.activePaneId() === props.paneId);
-  const conversationRegistered = computed(() => {
-    const s = spec();
-    return Boolean(s && s.view && isViewRegistered(s.view));
-  });
   const title = computed(() => {
     const s = spec();
     if (!s) return "";
@@ -1278,10 +1293,10 @@ function SplitLeafPane(props: {
     const states = sessionStates(props.live.key.machine);
     return paneTitle(conv, s.kind, s.session_id, states, t);
   });
-  const groupArea = stableMemo(() => childSafeArea(props.parentArea, props.touches));
+  const groupArea = stableMemo(() => childSafeArea(props.parentArea(), props.touches()));
   const contentArea = stableMemo(() => {
     const base = groupArea();
-    if (!props.many) return base;
+    if (!props.many()) return base;
     return {
       ...base,
       title_bar: false,
@@ -1308,7 +1323,7 @@ function SplitLeafPane(props: {
         minHeight: 0,
       }}
     >
-      <If when={props.many}>
+      <If when={props.many()}>
         <View
           style={{
             display: "flex",
@@ -1368,41 +1383,42 @@ function SplitLeafPane(props: {
         <If
           when={spec()?.kind === "terminal"}
           else={
-            <If
-              when={conversationRegistered()}
-              else={
-                <View
-                  style={{
-                    flex: 1,
-                    width: "100%",
-                    height: "100%",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    padding: 16,
-                  }}
-                >
-                  <Text
-                    style={{
-                      fontSize: look().type.ui.size,
-                      color: look().palette.muted,
-                    }}
-                  >
-                    {t("split.conversation_missing")}
-                  </Text>
-                </View>
-              }
-            >
-              <ViewInstance
-                view={spec()?.view ?? ""}
-                args={spec()?.args ?? null}
-                reuseKey={reuseKey()}
-                safeArea={contentArea()}
-                focusSeq={paneFocusSeq()}
-                onFocusIn={() => setLiveActivePane(props.live, props.paneId, false)}
-                style={{ flex: 1, width: "100%", height: "100%" }}
-              />
-            </If>
+            <ConversationPane
+              args={(spec()?.args as any) ?? null}
+              many={props.many()}
+              safeArea={contentArea()}
+              reuseKey={reuseKey()}
+              focusSeq={paneFocusSeq()}
+              onFocusIn={() => setLiveActivePane(props.live, props.paneId, false)}
+              onAtLatestChange={updateConversationAtLatest}
+              onFork={(machine, sessionId, req) => {
+                void handleCommand("fork", {
+                  machine,
+                  session_id: sessionId,
+                  provider_session_id: req.provider_session_id,
+                  cut: req.cut,
+                  prompt: req.prompt,
+                }).catch((err) => console.error("[sessions] 分叉失败：", err));
+              }}
+              onNewSession={(machine, acp) => {
+                if (!acp?.cwd) return;
+                const payload: Record<string, unknown> = { machine, cwd: acp.cwd };
+                if (acp.agent_definition_id) {
+                  payload.agent_definition_id = acp.agent_definition_id;
+                } else {
+                  payload.agent = acp.agent;
+                  payload.profile_id = acp.profile_id ?? null;
+                }
+                void handleCommand("start-conversation", payload).catch((err) =>
+                  console.error("[sessions] 开新对话失败：", err),
+                );
+              }}
+              onOpenConversation={(machine, sid) => {
+                void handleCommand("activate", { machine, session_id: sid }).catch((err) =>
+                  console.error("[sessions] 切到那段对话失败：", err),
+                );
+              }}
+            />
           }
         >
           <TerminalPane
@@ -1412,7 +1428,7 @@ function SplitLeafPane(props: {
             onFocusIn={() => setLiveActivePane(props.live, props.paneId, false)}
           />
         </If>
-        <If when={props.many && !isActive()}>
+        <If when={props.many() && !isActive()}>
           <View
             style={{
               position: "absolute",
@@ -1430,25 +1446,32 @@ function SplitLeafPane(props: {
   );
 }
 
+function treeShapeKey(node: any): string {
+  if (!node) return "";
+  if (node.kind === "leaf") return `L:${node.id}`;
+  return `S:${node.axis}(${treeShapeKey(node.first)},${treeShapeKey(node.second)})`;
+}
+
 function SplitTreeView(props: {
   live: LiveSession;
   node: any;
   path: number[];
-  many: boolean;
-  touchesMap: Map<string, { top: boolean; right: boolean; bottom: boolean; left: boolean }>;
-  parentArea: any;
+  many: () => boolean;
+  touchesMap: () => Map<string, { top: boolean; right: boolean; bottom: boolean; left: boolean }>;
+  parentArea: () => any;
   onResizeAt: (path: number[], sizes: number[]) => void;
 }) {
   const look = currentTheme;
   if (!props.node) return null;
   if (props.node.kind === "leaf") {
+    const paneId = props.node.id;
     return (
       <SplitLeafPane
         live={props.live}
-        paneId={props.node.id}
+        paneId={paneId}
         many={props.many}
-        touches={
-          props.touchesMap.get(props.node.id) ?? {
+        touches={() =>
+          props.touchesMap().get(paneId) ?? {
             top: true,
             right: true,
             bottom: true,
@@ -1540,12 +1563,13 @@ function LiveSessionView(props: { keyStr: string }) {
       top_right: 0,
     };
   });
+  const shapeKey = computed(() => treeShapeKey(live.tree()));
   const touchesMap = computed(() => paneTouches(live.tree()));
 
   const onResizeAt = (path: number[], sizes: number[]) => {
     live.userEditedLayout = true;
-    const next = updateSplitSizes(live.tree(), path, sizes);
-    live.tree.set(next);
+    // 只更新持久化比例而不替换结构树信号，避免拖曳分屏边界时整树销毁重挂对话与终端。
+    live.latestTree = updateSplitSizes(live.latestTree, path, sizes);
     persistLiveLayout(live);
   };
 
@@ -1581,16 +1605,17 @@ function LiveSessionView(props: { keyStr: string }) {
 
       <View style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {(() => {
-          const tree = live.tree();
+          if (!shapeKey()) return null;
+          const tree = live.latestTree;
           if (!tree) return null;
           return (
             <SplitTreeView
               live={live}
               node={tree}
               path={[]}
-              many={many()}
-              touchesMap={touchesMap()}
-              parentArea={innerArea()}
+              many={many}
+              touchesMap={touchesMap}
+              parentArea={innerArea}
               onResizeAt={onResizeAt}
             />
           );
@@ -1852,7 +1877,7 @@ export function root() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) closeConfirm.set(null);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 420, gap: 12 }}
       >
         <If when={closeConfirm() != null}>

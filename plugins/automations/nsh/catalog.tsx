@@ -97,51 +97,57 @@ function MachinePickingButton(props: {
     <If
       when={targets().length <= 1}
       else={
-        <Menu placement="bottom" align="end" popupClass={POPUP_CLASS}>
-          <View
-            slot="trigger"
-            testID={props.testID}
-            class="hover:bg-accent"
-            style={{
-              height: props.small ? 24 : 28,
-              paddingLeft: props.small ? 10 : 12,
-              paddingRight: props.small ? 8 : 10,
-              borderRadius: props.small ? look().radius.md : look().radius.lg,
-              backgroundColor: props.quiet
-                ? "transparent"
-                : (look().palette.button_secondary?.[0] ?? look().palette.soft),
-              display: "flex",
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 6,
-              flexShrink: 0,
-              cursor: "default",
-            }}
-          >
-            <If when={Boolean(props.icon)}>
-              <SmeltIcon
-                path={props.icon!}
-                size={props.small ? 14 : 15}
-                color={props.quiet ? look().palette.muted : look().palette.text}
-              />
-            </If>
-            <Text
+        <Menu
+          placement="bottom"
+          align="end"
+          popupClass={POPUP_CLASS}
+          popupStyle={{ minWidth: 168 }}
+          trigger={
+            <View
+              testID={props.testID}
+              class="hover:bg-accent"
               style={{
-                fontSize: props.small ? look().type.small.size : look().type.ui_medium.size,
-                lineHeight: props.small
-                  ? look().type.small.line_height
-                  : look().type.ui_medium.line_height,
-                fontWeight: props.quiet
-                  ? look().type.small.weight
-                  : look().type.ui_medium.weight,
-                color: props.quiet ? look().palette.muted : look().palette.text,
-                numberOfLines: 1,
+                height: props.small ? 24 : 28,
+                paddingLeft: props.small ? 10 : 12,
+                paddingRight: props.small ? 8 : 10,
+                borderRadius: props.small ? look().radius.md : look().radius.lg,
+                backgroundColor: props.quiet
+                  ? "transparent"
+                  : (look().palette.button_secondary?.[0] ?? look().palette.soft),
+                display: "flex",
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 6,
+                flexShrink: 0,
+                cursor: "default",
               }}
             >
-              {props.label}
-            </Text>
-            <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
-          </View>
+              <If when={Boolean(props.icon)}>
+                <SmeltIcon
+                  path={props.icon!}
+                  size={props.small ? 14 : 15}
+                  color={props.quiet ? look().palette.muted : look().palette.text}
+                />
+              </If>
+              <Text
+                style={{
+                  fontSize: props.small ? look().type.small.size : look().type.ui_medium.size,
+                  lineHeight: props.small
+                    ? look().type.small.line_height
+                    : look().type.ui_medium.line_height,
+                  fontWeight: props.quiet
+                    ? look().type.small.weight
+                    : look().type.ui_medium.weight,
+                  color: props.quiet ? look().palette.muted : look().palette.text,
+                  numberOfLines: 1,
+                }}
+              >
+                {props.label}
+              </Text>
+              <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
+            </View>
+          }
+        >
           <MenuSectionHeader label={t("catalog.machine_menu")} />
           <Each of={targets()} key={(item: any) => item.key}>
             {(item: () => { key: string; machine: string | null; name: string }) => (
@@ -441,24 +447,30 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
       </View>
 
       <View style={{ width: COL_MENU, flexShrink: 0, display: "flex", alignItems: "flex-end" }}>
-        <Menu placement="bottom" align="end" popupClass={POPUP_CLASS}>
-          <View
-            slot="trigger"
-            testID={`automation-row-more-${rowKey()}`}
-            accessibilityLabel={t("catalog.more")}
-            class="hover:bg-accent"
-            style={{
-              width: 24,
-              height: 24,
-              borderRadius: look().radius.sm,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              cursor: "default",
-            }}
-          >
-            <SmeltIcon path="icons/ellipsis.svg" size={15} color={look().palette.muted} />
-          </View>
+        <Menu
+          placement="bottom"
+          align="end"
+          popupClass={POPUP_CLASS}
+          popupStyle={{ minWidth: 168 }}
+          trigger={
+            <View
+              testID={`automation-row-more-${rowKey()}`}
+              accessibilityLabel={t("catalog.more")}
+              class="hover:bg-accent"
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: look().radius.sm,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "default",
+              }}
+            >
+              <SmeltIcon path="icons/ellipsis.svg" size={15} color={look().palette.muted} />
+            </View>
+          }
+        >
           <If
             when={model().cancelRunId != null}
             else={

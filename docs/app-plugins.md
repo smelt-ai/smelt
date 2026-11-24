@@ -1,6 +1,6 @@
 # 整个 app 插件化
 
-> 状态：方向定于 2026-11-09；2026-11-20 改定「插件只有 JS 一种，Rust 只做宿主和能力」；运行时已切到 **NSH A2**（`crates/smelt-nsh`），23 个内置插件已迁入仓库根 `plugins/`，仅剩 `conversation` 仍在 `crates/plugins/` 过渡。
+> 状态：方向定于 2026-11-09；2026-11-20 改定「插件只有 JS 一种，Rust 只做宿主和能力」；运行时已切到 **NSH A2**（`crates/smelt-nsh`），全部内置功能均已迁出 Rust（`crates/plugins/` 清零），对话能力拆分为纯非 UI 的 `crates/smelt-acp` 与 `"smelt/sdk"` 导出的纯 TSX `<SmeltConversation>`。
 >
 > 本文先写终态，再写从现在走到终态的顺序。每块拆到时，它的接口细节再写回本文。
 
@@ -90,7 +90,7 @@
 | 路径 | 按运行时那台机器的系统切路径（`pathClean`、`pathJoin` 这些）、项目显示名 | `smelt-model` 的 `runtime_path`；JS 经 `"smelt/sdk"` 的 `path*`、`projectLabels` |
 | 插件的库 | 自己的 SQLite：查、写、事务、按版本迁移 | `smelt-client-store` 的 `PluginStore`；JS 经 `"smelt/sdk"` 的 `store` |
 | 终端 | 终端 GPU 画布、PTY 流、IME、Cmd+F 搜索与断线重连 | `crates/smelt-terminal`；JS 经 `smelt.terminal`（`SmeltNativeTerminal`） |
-| 对话 | 对话流、消息里的 markdown 和 diff、输入框、ACP 连接和会话生命周期 | Rust 插件 `crates/plugins/conversation`；拆到哪一层另定（见「待定」） |
+| 对话 | 纯非 UI ACP 连接/帧镜像/节流中心/图片缓存（`crates/smelt-acp`）+ Mermaid SVG 渲染（`smelt-ui`）+ 通用纯 TSX `<SmeltConversation>`（`"smelt/sdk"`） | `crates/smelt-acp` + `crates/smelt-nsh/src/plugins/conversation/` |
 | 组件库与原生件 | NSH 基础件（`"nsh"`、`"nsh/base"`）+ `smelt/host` 矢量图标 + 原生能力件（`smelt.view`、`smelt.terminal`、`smelt.desktop`、`smelt.buddy`、`smelt.window-bar`、`smelt.window-drag`、`smelt.backdrop-region`） | `crates/smelt-nsh` + `crates/smelt-ui` |
 | Git | 读写仓库 | `crates/smelt-git`，还没映射给 JS |
 | 远程桌面 | 画面与本地转发口组件 | `crates/smelt-desktop`；JS 经 `smelt.desktop`（`SmeltNativeDesktop`） |
@@ -161,7 +161,7 @@
 - **只放一个的**：眼下用哪个主题、哪份布局、打开文件交给谁。好几个提供的时候，用哪个**由用户选**：
   - 选择归扩展点的主人：宿主的在宿主的设置里选，插件的在那个插件自己的设置页里选、存进它自己的库。
   - 没选过用默认的（主人自己定，一般是第一个）；选的那个卸了也按没选过算，原来的选择不删，装回来接着用。
-  - 不按登记顺序、内置还是用户装的、谁后来去定谁优先。同 id 也不拿来替换：用户插件和随 App 带的插件同 id 时不加载、报重复，想改自带的就复制一份换个 id。
+  - 不按登记顺序、谁后来去定谁优先；同来源内重名不加载、报重复。用户插件若与随 App 带的插件同 id，则视为**原地覆写自带插件**（详见「随 App 带的插件」），删掉用户插件即恢复自带版；用户覆写版加载、编译、主题校验或启动失败时自动回退到自带版本并在状态中保留错误。
   - 没有「停用某个插件」的开关去绕：不想要哪个提供的就选别的，或者删掉它。
 - **原子原生能力**：多个插件或高频视图直接复用的重画布（终端 `<SmeltNativeTerminal>`、远程桌面 `<SmeltNativeDesktop>`、3D 小人 `<SmeltNativeBuddy>`），留在 `crates/smelt-*` 并以原生组件暴露给所有插件直接组合；不存在「一个 JS 插件用 Slot 嵌另一个 JS 插件」。
 
@@ -200,9 +200,9 @@
 
 ### 随 App 带的插件
 
-- 放仓库根 `plugins/<name>/`，打包时放进安装包（`scripts/stage-plugins.sh`；macOS 是 `Contents/Resources/plugins/`，Windows 是安装目录下的 `plugins\`），发版的包从那里只读加载（`crates/smelt/src/plugins/builtin.rs`）；开发用的包（调试构建和 `make dev`）直接读仓库，改了即热重载，只有改 Rust 要重编。
+- 放仓库根 `plugins/<name>/`，发版打包时经 `scripts/stage-plugins.sh` 预编译为 QuickJS 字节码（`bundle.nshc` + `bundle.meta.json`）并保留可编辑源码放入安装包（macOS 是 `Contents/Resources/plugins/`，Windows 是安装目录下的 `plugins\`），发版的 App 优先加载预编译字节码、零打包冷启（`crates/smelt/src/plugins/builtin.rs`），同时支持 `smelt plugin fork` 离线复制源码；开发用的包（调试构建和 `make dev`）直接读仓库，改了即热重载，只有改 Rust 要重编。
 - 在第一帧之前加载完，布局里摆的视图第一帧就画得出来，不闪空白。
-- 先找自带的再找 `~/.smelt/plugins/`，同 id 不加载、报重复。
+- 同来源（`~/.smelt/plugins/` 内或自带目录内）重复 id 报重复错误跳过；当 `~/.smelt/plugins/` 存在与自带插件同 id 的目录时，**用户插件优先加载并覆写自带插件**（包括首帧前 `register_initial_themes` 的主题包）。一旦用户覆写版在主题校验、文案解析、TSX 打包或 VM 启动阶段失败，宿主会自动回退加载自带版本保证功能不断，同时在 `LoadedPluginInfo`（`overrides_builtin`、`fallback_to_builtin`、`error`）、设置页和 `smelt plugin status` 中明确标出原因；用户修复源码会热重载切回覆写版，删除用户目录会立即恢复自带版。
 
 ### 画面和数据
 
@@ -230,12 +230,12 @@ plugins/language/
 ```
 
 1. **只 import 自己目录里的文件和宿主模块**（`"nsh"`、`"nsh/base"`、`"smelt/sdk"`、`"smelt/host"`），不设插件间共享目录，也不开放 `smelt/slots`：要复用的进组件库或原子能力。
-2. **发的就是源码**：仓库与安装包里发 TSX/JS 源码，运行时经 `nsh-bundler` 打包；用户复制一份即可直接修改。
+2. **发的是源码 + 预编译字节码**：仓库直发 TSX/JS 源码；发版安装包同时带预编译 `bundle.nshc` 与插件源码（跳过 `tests/`），兼顾零打包冷启动与通过 `smelt plugin fork` 直接修改任意内置功能。
 3. **逻辑和画面分开放**：数据、规则放不 import NSH 的纯 JS/TS 文件，宿主函数从参数传进来，用 `bun test` 测。
 4. **迁过来的插件沿用原 id**，视图、命令、菜单、插槽的 id 都不变，同一个提交删掉 Rust 版。插件的数据目录、布局里的视图 id、用户的快捷键都不用迁。
 5. **数据放 `~/.smelt/plugin-data/<id>/`**（`dataDir()`，库是里面的 `store.sqlite3`，用 `store.migrate` / `store.query` / `store.execute`），见 `docs/local-storage.md`。
 
-改自带插件是复制一份、换个 id、数据另拷一份，再在布局里换上。步骤写在 smelt skill（`agent/skills/smelt/SKILL.md`）里，由智能体照着做，App 里不另做按钮。
+改自带插件可用 `smelt plugin fork <原id>` 将源码拷贝到 `~/.smelt/plugins/<原id>/` 原地覆写（自动继承原数据目录、可自动回退并可随时删掉目录一键恢复），也可用 `--as <新id>` 另建副本。步骤写在 smelt skill（`agent/skills/smelt/SKILL.md`）里，由智能体照着做。
 
 ### 检查
 
@@ -245,15 +245,10 @@ plugins/language/
 
 ## 终态：各功能怎么分
 
-### 已迁入 `plugins/*` 的内置 JS/TSX 插件（23 个）
+### 已迁入 `plugins/*` 与能力层的内置功能（全部完成，`crates/plugins/` 0 个 Rust 插件）
 
-`agents`、`archive`、`automations`、`capabilities`、`desktop`（画布留在 `crates/smelt-desktop`）、`files`、`git`、`history`、`ide`、`language`、`launcher`、`layouts`、`machines`、`maintenance`（受控底层操作留在宿主）、`notifications`（系统通知与菜单栏桥留在宿主，主壳常驻后台）、`quota`、`resources`、`session-list`（直接驱动 `crates/smelt-buddy` 3D 小人）、`sessions`（直接驱动 `crates/smelt-terminal` 终端画布）、`skills`、`terminal`（终端字号设置与主题同步）、`themes`、`updater`（包下载/替换与退出守卫留在宿主）。
-
-### 仍在 `crates/plugins/*` 的 Rust 插件（1 个，待按三问拆分）
-
-| 现在的 Rust 插件 | 留在 Rust 的能力 | JS 插件 |
-| --- | --- | --- |
-| `conversation` | 对话流、markdown、diff、输入框、ACP 连接；提问导航的数据和跳转 | 对话页的摆法（待定）；提问导航的画法、悬停和动效（见 `view/render/prompt_rail.rs`） |
+- 23 个独立内置 JS/TSX 插件（`plugins/*`）：`agents`、`archive`、`automations`、`capabilities`、`desktop`（画布留在 `crates/smelt-desktop`）、`files`、`git`、`history`、`ide`、`language`、`launcher`、`layouts`、`machines`、`maintenance`（受控底层操作留在宿主）、`notifications`（系统通知与菜单栏桥留在宿主，主壳常驻后台）、`quota`、`resources`、`session-list`（直接驱动 `crates/smelt-buddy` 3D 小人）、`sessions`（直接驱动 `crates/smelt-terminal` 终端画布与 `"smelt/sdk"` 的 `<SmeltConversation>`）、`skills`、`terminal`（终端字号设置与主题同步）、`themes`、`updater`（包下载/替换与退出守卫留在宿主）。
+- 对话能力（原第 24 个 Rust 插件 `conversation`）：拆分为纯非 UI 的 `crates/smelt-acp` + `smelt-nsh` 宿主能力 `acp.*` / `mermaid.render` + `"smelt/sdk"` 导出的纯 TSX `<SmeltConversation>`，供 `sessions`、`automations` 与任意第三方插件零跨 VM 嵌套直接嵌入。
 
 ## 会话核心
 

@@ -17,6 +17,7 @@ import {
   state as hostState,
   store,
   t,
+  currentTheme,
   terminalThemeSnapshot,
   text,
 } from "smelt/sdk";
@@ -121,7 +122,6 @@ bootTask(async () => {
   publishTerminalTheme(true);
 });
 
-const currentTheme = stableMemo(() => hostState().theme);
 
 export function settings() {
   const look = currentTheme;

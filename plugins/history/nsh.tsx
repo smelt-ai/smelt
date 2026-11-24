@@ -25,6 +25,10 @@ import {
   stableMemo,
   state,
   t,
+  currentTheme,
+  DIALOG_SURFACE_CLASS,
+  MENU_ITEM_CLASS,
+  POPUP_CLASS,
   text,
   viewShown,
 } from "smelt/sdk";
@@ -65,10 +69,6 @@ const PREFETCH_MAX_AGE_MS = 60_000;
 const LIST_MIN_WIDTH = 190;
 const LIST_MAX_WIDTH = 320;
 const CONVERSATION_MAX_WIDTH = 760;
-
-const POPUP_CLASS = "rounded-(--radius) border border-border bg-popover p-1";
-const MENU_ITEM_CLASS =
-  "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
 
 interface Project {
   machine: string | null;
@@ -644,7 +644,6 @@ bootTask(async () => {
 
 // ---- 视图组件 ----
 
-const currentTheme = stableMemo(() => state().theme);
 
 function MenuRow(props: {
   label: string;
@@ -833,6 +832,45 @@ function HistoryTurnItem(props: { turn: Turn; cwd: string; machine: string | nul
         </If>
       </View>
     </View>
+  );
+}
+
+function RenameDialogInput(props: {
+  value: () => string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const look = currentTheme;
+  let inputEl: any = null;
+  let initialSelected = false;
+  let edited = false;
+  return (
+    <Input
+      ref={(el: any) => {
+        inputEl = el ?? null;
+        // 同步抢占焦点，避免右键菜单关闭时的 focus_back 把焦点拉回行。
+        el?.focus?.();
+      }}
+      value={props.value()}
+      autoFocus={true}
+      onLayout={() => {
+        if (initialSelected || edited || !inputEl) return;
+        initialSelected = true;
+        const len = props.value().length;
+        if (len > 0) inputEl.setSelection?.(0, len);
+      }}
+      onChange={({ value }: { value: string }) => {
+        edited = true;
+        props.onChange(value);
+      }}
+      onSubmit={props.onSubmit}
+      onKeyPress={(e: any) => {
+        if (e?.key === "Escape") props.onCancel();
+      }}
+      class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
+      style={{ height: 28, fontSize: look().type.ui.size }}
+    />
   );
 }
 
@@ -1370,7 +1408,7 @@ export function Main() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) renameDialog.set(null);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 380, gap: 12 }}
       >
         <If when={renameDialog() != null}>
@@ -1383,16 +1421,14 @@ export function Main() {
           >
             {t("rename")}
           </Text>
-          <Input
-            value={renameDialog()?.value ?? ""}
-            autoFocus={true}
-            onChange={({ value }: { value: string }) => {
+          <RenameDialogInput
+            value={() => renameDialog()?.value ?? ""}
+            onChange={(value) => {
               const cur = renameDialog();
               if (cur) renameDialog.set({ ...cur, value });
             }}
             onSubmit={submitRename}
-            class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
-            style={{ height: 28, fontSize: look().type.ui.size }}
+            onCancel={() => renameDialog.set(null)}
           />
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
@@ -1421,7 +1457,7 @@ export function Main() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) deleteDialog.set(null);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 420, gap: 12 }}
       >
         <If when={deleteDialog() != null}>

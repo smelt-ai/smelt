@@ -3,7 +3,7 @@
 // - 连进来：远程访问开关、自建 relay、生成一次性配对串与二维码、管理已配对设备；
 // - 角标：有机器离线、不兼容、高延迟或机器表读取失败时在「远程」页挂 "!" 角标。
 
-import { Canvas, computed, Scroll, signal, Text, View } from "nsh";
+import { Canvas, cleanup, computed, Scroll, signal, Text, View } from "nsh";
 import { Dialog, Input, Switch, Tooltip } from "nsh/base";
 import {
   bootTask,
@@ -24,6 +24,9 @@ import {
   state as hostState,
   t,
   text,
+  DIALOG_SURFACE_CLASS,
+  theme,
+  TOOLTIP_CLASS,
   viewShown,
   waitOnline,
 } from "smelt/sdk";
@@ -142,6 +145,8 @@ const addError = signal<string | null>(null);
 const remoteConfig = signal<{ enabled: boolean; iroh_relay: string } | null>(null);
 const relayInput = signal("");
 let relayShown: string | null = null;
+const RELAY_DEBOUNCE_MS = 400;
+let relaySaveTimer: ReturnType<typeof setTimeout> | null = null;
 let configGeneration = 0;
 let configLoadToken = 0;
 let saveChain: Promise<void> = Promise.resolve();
@@ -188,6 +193,7 @@ function findRemote(machine: string) {
 // ---- 本机运行时调用（连进来） ----
 
 function syncRelayInput(config: { enabled: boolean; iroh_relay: string }) {
+  if (relaySaveTimer != null) return;
   if (relayShown !== config.iroh_relay) {
     relayShown = config.iroh_relay;
     relayInput.set(config.iroh_relay);
@@ -301,10 +307,20 @@ function setEnabled(enabled: boolean) {
     remoteError.set(t("error.config_not_loaded"));
     return;
   }
-  saveConfig({ ...cfg, enabled });
+  const iroh_relay =
+    relaySaveTimer != null ? relayInput().trim() : cfg.iroh_relay;
+  if (relaySaveTimer != null) {
+    clearTimeout(relaySaveTimer);
+    relaySaveTimer = null;
+  }
+  saveConfig({ ...cfg, enabled, iroh_relay });
 }
 
 function commitRelay(raw: string) {
+  if (relaySaveTimer != null) {
+    clearTimeout(relaySaveTimer);
+    relaySaveTimer = null;
+  }
   const cfg = remoteConfig();
   if (!cfg) {
     remoteError.set(t("error.config_not_loaded"));
@@ -313,6 +329,27 @@ function commitRelay(raw: string) {
   const trimmed = raw.trim();
   if (cfg.iroh_relay === trimmed) return;
   saveConfig({ ...cfg, iroh_relay: trimmed });
+}
+
+function scheduleRelayCommit(raw: string) {
+  relayInput.set(raw);
+  if (relaySaveTimer != null) {
+    clearTimeout(relaySaveTimer);
+  }
+  relaySaveTimer = setTimeout(() => {
+    relaySaveTimer = null;
+    commitRelay(relayInput());
+  }, RELAY_DEBOUNCE_MS);
+}
+
+function flushRelayCommit() {
+  if (relaySaveTimer == null) {
+    commitRelay(relayInput());
+    return;
+  }
+  clearTimeout(relaySaveTimer);
+  relaySaveTimer = null;
+  commitRelay(relayInput());
 }
 
 function beginPairing() {
@@ -486,6 +523,7 @@ onEvent((event) => {
     if (shown && !pageWasShown) {
       refreshRemote();
     } else if (!shown) {
+      flushRelayCommit();
       watchToken += 1;
     }
     pageWasShown = shown;
@@ -629,7 +667,7 @@ function QrCanvas(props: { matrix: { size: number; bits: string }; displaySize?:
 }
 
 function SectionCard(props: { title: string; description: string; children?: any }) {
-  const look = computed(() => hostState().theme);
+  const look = theme;
   return (
     <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <View style={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -668,7 +706,8 @@ export function remote() {
     pageWasShown = true;
     refreshRemote();
   }
-  const look = computed(() => hostState().theme);
+  cleanup(() => flushRelayCommit());
+  const look = theme;
   const connTable = computed(() => connections());
   const remotes = computed(() => connTable()?.remotes ?? []);
   const loadError = computed(() => connTable()?.load_error ?? null);
@@ -998,9 +1037,9 @@ export function remote() {
                 value={relayInput()}
                 disabled={!loaded()}
                 accessibilityLabel={t("relay.custom")}
-                onChange={({ value }: { value: string }) => relayInput.set(value)}
-                onBlur={() => commitRelay(relayInput())}
-                onSubmit={() => commitRelay(relayInput())}
+                onChange={({ value }: { value: string }) => scheduleRelayCommit(value)}
+                onBlur={() => flushRelayCommit()}
+                onSubmit={() => flushRelayCommit()}
                 class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
                 style={{ height: 28, fontSize: look().type.ui.size }}
               />
@@ -1012,9 +1051,53 @@ export function remote() {
   );
 }
 
+function DialogInput(props: {
+  value: () => string;
+  placeholder?: string;
+  disabled?: () => boolean;
+  selectAll?: boolean;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const look = theme;
+  let inputEl: any = null;
+  let initialSelected = false;
+  let edited = false;
+  return (
+    <Input
+      ref={(el: any) => {
+        inputEl = el ?? null;
+        // 同步抢占焦点，避免右键菜单关闭时的 focus_back 把焦点拉回触发行。
+        el?.focus?.();
+      }}
+      autoFocus={true}
+      disabled={props.disabled?.() ?? false}
+      placeholder={props.placeholder}
+      value={props.value()}
+      onLayout={() => {
+        if (!props.selectAll || initialSelected || edited || !inputEl) return;
+        initialSelected = true;
+        const len = props.value().length;
+        if (len > 0) inputEl.setSelection?.(0, len);
+      }}
+      onChange={({ value }: { value: string }) => {
+        edited = true;
+        props.onChange(value);
+      }}
+      onSubmit={props.onSubmit}
+      onKeyPress={(e: any) => {
+        if (e?.key === "Escape") props.onCancel();
+      }}
+      class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
+      style={{ height: 28, fontSize: look().type.ui.size }}
+    />
+  );
+}
+
 /** 全局对话框（挂载在主壳无头根层，从会话列表右键菜单或设置页都能弹出）。 */
 export function root() {
-  const look = computed(() => hostState().theme);
+  const look = theme;
   return (
     <>
       {/* 移除机器确认框 */}
@@ -1027,7 +1110,7 @@ export function root() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) removePrompt.set(null);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 380, gap: 12 }}
       >
         <If when={removePrompt() != null}>
@@ -1070,7 +1153,7 @@ export function root() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) renamePrompt.set(null);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 380, gap: 12 }}
       >
         <If when={renamePrompt() != null}>
@@ -1086,16 +1169,15 @@ export function root() {
           <Text style={{ color: look().palette.muted, fontSize: look().type.text_xsmall.size }}>
             {t("rename.description")}
           </Text>
-          <Input
-            autoFocus={true}
-            value={renamePrompt()?.value ?? ""}
-            onChange={({ value }: { value: string }) => {
+          <DialogInput
+            value={() => renamePrompt()?.value ?? ""}
+            selectAll={true}
+            onChange={(value) => {
               const cur = renamePrompt();
               if (cur) renamePrompt.set({ ...cur, value });
             }}
             onSubmit={submitRename}
-            class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
-            style={{ height: 28, fontSize: look().type.ui.size }}
+            onCancel={() => renamePrompt.set(null)}
           />
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
@@ -1124,7 +1206,7 @@ export function root() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) closeRelayDialog();
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 420, gap: 12 }}
       >
         <If when={relayPrompt() != null}>
@@ -1140,18 +1222,16 @@ export function root() {
           <Text style={{ color: look().palette.muted, fontSize: look().type.text_xsmall.size }}>
             {relayPrompt()?.online ? t("relay.hint_online") : t("relay.hint_offline")}
           </Text>
-          <Input
-            autoFocus={true}
-            disabled={Boolean(relayPrompt()?.saving)}
+          <DialogInput
+            disabled={() => Boolean(relayPrompt()?.saving)}
             placeholder={t("relay.placeholder")}
-            value={relayPrompt()?.value ?? ""}
-            onChange={({ value }: { value: string }) => {
+            value={() => relayPrompt()?.value ?? ""}
+            onChange={(value) => {
               const cur = relayPrompt();
               if (cur) relayPrompt.set({ ...cur, value });
             }}
             onSubmit={submitRelay}
-            class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
-            style={{ height: 28, fontSize: look().type.ui.size }}
+            onCancel={closeRelayDialog}
           />
           <If when={Boolean(relayPrompt()?.saving)}>
             <Text style={{ color: look().palette.muted, fontSize: look().type.ui.size }}>
@@ -1195,7 +1275,7 @@ export function root() {
             refreshDevices();
           }
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 520, gap: 12 }}
       >
         <Text
@@ -1250,7 +1330,7 @@ export function root() {
                   class="items-center justify-center rounded-(--radius) hover:bg-accent"
                   style={{ width: 24, height: 24, flexShrink: 0 }}
                   tooltip={
-                    <Tooltip class="px-2 py-1 rounded bg-popover border border-border">
+                    <Tooltip class={TOOLTIP_CLASS}>
                       <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
                         {pairingCopied() ? t("pairing.copied") : t("pairing.copy")}
                       </Text>

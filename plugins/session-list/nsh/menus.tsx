@@ -3,7 +3,15 @@
 
 import { Image, signal, Text, View } from "nsh";
 import { Dialog, Menu, MenuItem, MenuSeparator, Submenu, Tooltip } from "nsh/base";
-import { SmeltButton, SmeltIcon } from "smelt/sdk";
+import {
+  DIALOG_SURFACE_CLASS,
+  MENU_ITEM_CLASS,
+  POPUP_CLASS,
+  SmeltButton,
+  SmeltIcon,
+  TOOLTIP_CLASS,
+} from "smelt/sdk";
+export { MENU_ITEM_CLASS, POPUP_CLASS };
 
 import { MACHINE_MENU } from "../contract.js";
 import { icon, message } from "../util.js";
@@ -26,14 +34,10 @@ export interface ConfirmRequest {
   confirm: () => void;
 }
 
-export const POPUP_CLASS = "rounded-(--radius) border border-border bg-popover p-1";
-export const MENU_ITEM_CLASS =
-  "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
-
 export function Tip(props: { text: string }) {
   const look = () => theme();
   return (
-    <Tooltip class="rounded-(--radius) border border-border bg-popover px-2 py-1">
+    <Tooltip class={TOOLTIP_CLASS}>
       <Text
         style={{
           color: look().palette.text,
@@ -73,7 +77,7 @@ export function MenuEntry(props: {
     >
       {props.image ? (
         <View style={{ width: 14, height: 14, flexShrink: 0 }}>
-          <Image src={props.image} resizeMode="contain" style={{ width: 14, height: 14 }} />
+          <Image src={props.image} style={{ width: 14, height: 14, objectFit: "contain" }} />
         </View>
       ) : props.iconPath ? (
         <View style={{ width: 14, height: 14, flexShrink: 0 }}>
@@ -154,8 +158,7 @@ export function ContributedMenuItems(props: {
                     <View style={{ width: 14, height: 14, flexShrink: 0 }}>
                       <Image
                         src={item().image!}
-                        resizeMode="contain"
-                        style={{ width: 14, height: 14 }}
+                        style={{ width: 14, height: 14, objectFit: "contain" }}
                       />
                     </View>
                   ) : item().icon ? (
@@ -404,7 +407,7 @@ export function ConfirmDialog(props: {
       onOpenChange={({ open }) => {
         if (!open) props.onDismiss();
       }}
-      class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+      class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
       style={{ width: 340, gap: space(3) }}
     >
       {req() ? (

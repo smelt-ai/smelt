@@ -114,10 +114,12 @@ impl PanelPluginsPage {
                 .spawn(async move { crate::plugins::uninstall(&root) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_change(
-                    result.map(|()| t!("plugins.deleted", name = plugin.name).into_owned()),
-                    cx,
-                )
+                let message = if plugin.overrides_builtin {
+                    t!("plugins.restored", name = plugin.name).into_owned()
+                } else {
+                    t!("plugins.deleted", name = plugin.name).into_owned()
+                };
+                this.finish_change(result.map(|()| message), cx)
             });
         })
         .detach();
@@ -227,6 +229,14 @@ impl PanelPluginsPage {
             .into_owned()
         }];
         detail.push(plugin.root.display().to_string());
+        if plugin.overrides_builtin {
+            let status_key = if plugin.fallback_to_builtin {
+                "plugins.override_fallback"
+            } else {
+                "plugins.override_builtin"
+            };
+            detail.push(t!(status_key).into_owned());
+        }
         if let Some(error) = &plugin.error {
             detail.push(t!("plugins.load_failed", error = error).into_owned());
         }
@@ -234,11 +244,16 @@ impl PanelPluginsPage {
         let row = Row::new(plugin.name.clone()).description(detail.join("\n"));
         if pending {
             let confirm_id = id.clone();
+            let confirm_label = if plugin.overrides_builtin {
+                t!("plugins.confirm_restore")
+            } else {
+                t!("plugins.confirm_delete")
+            };
             row.child(
                 Button::new(format!("confirm-delete-panel-plugin-{id}"))
                     .danger()
                     .small()
-                    .label(t!("plugins.confirm_delete"))
+                    .label(confirm_label)
                     .disabled(self.busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.confirm_delete(confirm_id.clone(), window, cx)
@@ -252,11 +267,16 @@ impl PanelPluginsPage {
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_delete(cx))),
             )
         } else {
+            let action_label = if plugin.overrides_builtin {
+                t!("plugins.restore_default")
+            } else {
+                t!("plugins.delete")
+            };
             row.child(
                 Button::new(format!("delete-panel-plugin-{id}"))
                     .quiet()
                     .small()
-                    .label(t!("plugins.delete"))
+                    .label(action_label)
                     .disabled(self.busy)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.request_delete(id.clone(), cx)),

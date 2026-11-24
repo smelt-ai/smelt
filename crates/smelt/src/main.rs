@@ -302,7 +302,7 @@ impl Workspace {
             sources.push(smelt_nsh::SourceDir {
                 path: dir.to_path_buf(),
                 source: smelt_nsh::PluginSource::Builtin,
-                watch: plugins::builtin_live(),
+                watch: false,
             });
         }
         if let Some(dir) = plugins::user_plugin_dir() {
@@ -376,6 +376,8 @@ impl Workspace {
                             name: p.name,
                             version: p.version,
                             root: p.root,
+                            overrides_builtin: p.overrides_builtin,
+                            fallback_to_builtin: p.fallback_to_builtin,
                             error: p.error,
                         })
                         .collect();
@@ -830,19 +832,6 @@ fn main() {
         gpui_base::init(cx);
         // smelt 自己的组件：菜单键位、窗口对话框层（挂在窗口根上，要在开窗口之前装）。
         smelt_ui::init(cx);
-        // 消息里点中的文件链接交给登记的文件打开者。链接带着文件所在的机器：远程的就去
-        // 那台机器读，不能打开本机同路径的文件。
-        smelt_ui::markdown_links::set_file_link_handler(
-            |target, cx| {
-                let location = smelt_plugin_api::FileLocation {
-                    machine: target.runtime.map_or(RuntimeKey::Local, RuntimeKey::Remote),
-                    path: target.path,
-                    line: target.line.map(|line| line as usize),
-                };
-                workspace_commands::report_failure(smelt_plugin_api::open_file(location, cx), cx);
-            },
-            cx,
-        );
         // 内嵌终端默认字体 Maple Mono NF（Regular/Bold，v7.9）。Ghostty 同款思路：
         // 默认字体自己带，不赌用户装没装——任何机器上默认字体族都能解析成功，
         // 杜绝"没装字体 → 测量/渲染各自 fallback 到不同字体 → 列宽错乱"。它是打过

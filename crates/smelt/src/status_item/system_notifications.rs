@@ -406,7 +406,8 @@ fn read_settings() {
             let had_pending = state.queue.pending_count() > 0;
             if matches!(
                 authorization,
-                SystemNotificationAuthorization::Denied | SystemNotificationAuthorization::Unavailable
+                SystemNotificationAuthorization::Denied
+                    | SystemNotificationAuthorization::Unavailable
             ) {
                 state.queue.discard_pending_app_notifications();
             }

@@ -6,6 +6,7 @@ import {
   computed,
   effect,
   host,
+  Image,
   nativeComponent,
   nativeModule,
   signal,
@@ -14,6 +15,7 @@ import {
 } from "nsh";
 import {
   Button as BaseButton,
+  Dialog,
   DiffView as BaseDiffView,
   Editor as BaseEditor,
   TextView,
@@ -354,44 +356,44 @@ const DEFAULT_STATE: SmeltState = {
   theme: {
     rem: 16,
     palette: {
-      bg: "#161618",
-      side: "#1a1a1c",
-      surface: "#202024",
-      soft: "#27272c",
-      soft_hover: "#323238",
-      text: "#f4f4f5",
-      muted: "#a1a1aa",
+      bg: "#161616",
+      side: "#121212",
+      surface: "#191919",
+      soft: "#242424",
+      soft_hover: "#2e2e2e",
+      text: "#fafafa",
+      muted: "#aeaeae",
       muted_selected: "#d4d4d8",
-      faint: "#71717a",
+      faint: "#808080",
       faint_selected: "#a1a1aa",
-      ink: "#ffffff",
-      on_ink: "#09090b",
-      link: "#60a5fa",
-      run: "#3b82f6",
-      need: "#f59e0b",
-      ok: "#22c55e",
-      bad: "#ef4444",
+      ink: "#5c5c5c",
+      on_ink: "#ffffff",
+      link: "#a2bcff",
+      run: "#7698fd",
+      need: "#ffca76",
+      ok: "#6bd586",
+      bad: "#f17471",
       on_bad: "#ffffff",
-      hair: "rgba(255,255,255,0.08)",
-      hair_strong: "rgba(255,255,255,0.16)",
-      row_hover: "rgba(255,255,255,0.06)",
-      row_selected: "rgba(255,255,255,0.10)",
-      focus: "rgba(59,130,246,0.5)",
-      button_primary: ["rgba(255,255,255,0.92)", "rgba(255,255,255,0.85)", "rgba(255,255,255,0.75)"],
-      button_primary_fg: "#09090b",
-      button_secondary: ["rgba(255,255,255,0.08)", "rgba(255,255,255,0.12)", "rgba(255,255,255,0.16)"],
-      button_secondary_fg: "#f4f4f5",
-      button_submit: ["rgba(255,255,255,0.92)", "rgba(255,255,255,0.85)", "rgba(255,255,255,0.75)"],
-      button_submit_fg: "#09090b",
+      hair: "rgba(255, 255, 255, 0.102)",
+      hair_strong: "rgba(255, 255, 255, 0.200)",
+      row_hover: "rgba(255, 255, 255, 0.059)",
+      row_selected: "rgba(255, 255, 255, 0.102)",
+      focus: "rgba(118, 152, 253, 1.000)",
+      button_primary: ["rgba(92, 92, 92, 1)", "rgba(74, 74, 74, 1)", "rgba(55, 55, 55, 1)"],
+      button_primary_fg: "#ffffff",
+      button_secondary: ["rgba(255, 255, 255, 0.06)", "rgba(255, 255, 255, 0.11)", "rgba(255, 255, 255, 0.16)"],
+      button_secondary_fg: "#fafafa",
+      button_submit: ["rgba(219, 219, 219, 1)", "rgba(201, 201, 201, 1)", "rgba(176, 176, 176, 1)"],
+      button_submit_fg: "#161616",
     },
     fonts: { mono: "Maple Mono NF" },
     type: {
-      ui: { size: 13, line_height: 18, weight: 400 },
-      ui_medium: { size: 13, line_height: 18, weight: 500 },
-      small: { size: 12, line_height: 16, weight: 400 },
-      small_medium: { size: 12, line_height: 16, weight: 500 },
-      text_xsmall: { size: 11, line_height: 15, weight: 400 },
-      text_xsmall_medium: { size: 11, line_height: 15, weight: 500 },
+      ui: { size: 13, line_height: 20, weight: 440 },
+      ui_medium: { size: 13, line_height: 20, weight: 530 },
+      small: { size: 11, line_height: 12, weight: 440 },
+      small_medium: { size: 11, line_height: 12, weight: 530 },
+      text_xsmall: { size: 12, line_height: 18, weight: 400 },
+      text_xsmall_medium: { size: 12, line_height: 18, weight: 500 },
     },
     radius: { sm: 4, md: 6, lg: 8, row: 6 },
   },
@@ -399,10 +401,42 @@ const DEFAULT_STATE: SmeltState = {
 };
 
 export const state = signal<SmeltState>(DEFAULT_STATE);
+
+// 按顶层切片拆分的细粒度信号：只在对应切片真正变化时触发订阅方，
+// 避免窗口失焦、机器心跳或切换会话把所有插件里的 `t()` / `theme()` / `commands()` 连带重算一遍。
+const localeSlice = signal<string>(DEFAULT_STATE.locale);
+const systemLocaleSlice = signal<string>(DEFAULT_STATE.system_locale);
+const localesSlice = signal<Array<{ code: string; name: string }>>(DEFAULT_STATE.locales);
+const windowActiveSlice = signal<boolean>(DEFAULT_STATE.window_active);
+const notificationPermissionSlice = signal<SmeltState["notification_permission"]>(
+  DEFAULT_STATE.notification_permission,
+);
+const machinesSlice = signal<any[]>(DEFAULT_STATE.machines);
+const connectionsSlice = signal<any>(DEFAULT_STATE.connections);
+const activeContextSlice = signal<{ project: any; session: any }>(DEFAULT_STATE.active_context);
+const pagesSlice = signal<any[]>(DEFAULT_STATE.pages);
+const viewsSlice = signal<any[]>(DEFAULT_STATE.views);
+const commandsSlice = signal<any[]>(DEFAULT_STATE.commands);
+const jsViewsSlice = signal<Record<string, { plugin: string; view: string }>>(DEFAULT_STATE.js_views);
+const safeAreasSlice = signal<Record<string, any>>(DEFAULT_STATE.safe_areas);
+const themeSlice = signal<any>(DEFAULT_STATE.theme);
+const textsSlice = signal<Record<string, Record<string, string>>>({});
+const shellSlice = signal<any>(undefined);
+
+const sliceJsonCache: Record<string, string> = {};
+
+function syncObjectSlice<T>(key: string, sig: { set: (v: T) => void }, next: T) {
+  const encoded = JSON.stringify(next);
+  if (sliceJsonCache[key] === encoded) return;
+  sliceJsonCache[key] = encoded;
+  sig.set(next);
+}
+
 let cachedTexts: Record<string, Record<string, string>> = {};
 let initialized = false;
 const stateListeners = new Set<(next: SmeltState) => void>();
 const eventListeners = new Set<(event: any) => void>();
+const acpEventListeners = new Set<(event: any) => void>();
 let commandHandler: ((call: { name: string; args: any }) => any) | null = null;
 const pendingCommands: Array<{ id: number; name: string; args: any }> = [];
 
@@ -426,6 +460,7 @@ function applyState(next: any) {
   const rev = typeof next.revision === "number" ? next.revision : 0;
   if (rev > 0 && rev < current.revision) {
     if (hasTexts && current.texts !== next.texts) {
+      syncObjectSlice("texts", textsSlice, next.texts);
       const patched: SmeltState = { ...current, texts: next.texts };
       state.set(patched);
       notifyStateListeners(patched);
@@ -437,6 +472,40 @@ function applyState(next: any) {
     ...next,
     texts: hasTexts ? next.texts : cachedTexts,
   };
+  if (localeSlice() !== merged.locale) localeSlice.set(merged.locale);
+  if (systemLocaleSlice() !== merged.system_locale) systemLocaleSlice.set(merged.system_locale);
+  if (windowActiveSlice() !== (merged.window_active !== false)) {
+    windowActiveSlice.set(merged.window_active !== false);
+  }
+  syncObjectSlice("locales", localesSlice, merged.locales ?? []);
+  syncObjectSlice(
+    "notification_permission",
+    notificationPermissionSlice,
+    merged.notification_permission ?? { kind: "unsupported" },
+  );
+  syncObjectSlice("machines", machinesSlice, merged.machines ?? []);
+  syncObjectSlice(
+    "connections",
+    connectionsSlice,
+    merged.connections ?? { remotes: [], load_error: null },
+  );
+  syncObjectSlice(
+    "active_context",
+    activeContextSlice,
+    merged.active_context ?? { project: null, session: null },
+  );
+  syncObjectSlice("pages", pagesSlice, merged.pages ?? []);
+  syncObjectSlice("views", viewsSlice, merged.views ?? []);
+  syncObjectSlice("commands", commandsSlice, merged.commands ?? []);
+  syncObjectSlice("js_views", jsViewsSlice, merged.js_views ?? {});
+  syncObjectSlice("safe_areas", safeAreasSlice, merged.safe_areas ?? {});
+  syncObjectSlice("theme", themeSlice, merged.theme ?? DEFAULT_STATE.theme);
+  if (hasTexts) {
+    syncObjectSlice("texts", textsSlice, next.texts);
+  }
+  if (merged.shell !== undefined) {
+    syncObjectSlice("shell", shellSlice, merged.shell);
+  }
   state.set(merged);
   notifyStateListeners(merged);
 }
@@ -451,6 +520,15 @@ export function initHost(): Promise<SmeltState> {
           listener(event);
         } catch (error) {
           console.error("[smelt/sdk] event listener error:", error);
+        }
+      }
+    });
+    host.on("smelt.acp.event", (event: any) => {
+      for (const listener of [...acpEventListeners]) {
+        try {
+          listener(event);
+        } catch (error) {
+          console.error("[smelt/sdk] acp event listener error:", error);
         }
       }
     });
@@ -505,6 +583,90 @@ export function onEvent(listener: (event: any) => void): () => void {
   return () => eventListeners.delete(listener);
 }
 
+export function onAcpEvent(listener: (event: any) => void): () => void {
+  acpEventListeners.add(listener);
+  return () => acpEventListeners.delete(listener);
+}
+
+// ---- ACP 活体订阅与 Mermaid SVG 能力 ----
+
+export function acpSubscribe(params: {
+  subId: string;
+  machine: string | null;
+  reuseKey?: string;
+  launch: Record<string, unknown>;
+}): Promise<void> {
+  return host.call("acp.subscribe", {
+    sub_id: params.subId,
+    machine: params.machine ?? null,
+    reuse_key: params.reuseKey ?? null,
+    launch: params.launch,
+  });
+}
+
+export function acpUnsubscribe(subId: string, reuseKey?: string): Promise<void> {
+  return host.call("acp.unsubscribe", {
+    sub_id: subId,
+    reuse_key: reuseKey ?? null,
+  });
+}
+
+export function acpAction(subId: string, action: unknown, imageRefs?: string[]): Promise<void> {
+  return host.call("acp.action", {
+    sub_id: subId,
+    action,
+    image_refs: imageRefs ?? [],
+  });
+}
+
+export function acpHistory(
+  machine: string | null,
+  sessionId: string,
+  before: number,
+  limit = 100,
+): Promise<any> {
+  return host.call("acp.history", {
+    machine: machine ?? null,
+    session_id: sessionId,
+    before,
+    limit,
+  });
+}
+
+export function acpRestart(machine: string | null, sessionId: string): Promise<void> {
+  return host.call("acp.restart", {
+    machine: machine ?? null,
+    session_id: sessionId,
+  });
+}
+
+export function acpPasteImage(params: {
+  dataBase64?: string;
+  mime?: string;
+  path?: string;
+}): Promise<any> {
+  return host.call("acp.paste_image", {
+    data_base64: params.dataBase64 ?? null,
+    mime: params.mime ?? null,
+    path: params.path ?? null,
+  });
+}
+
+export function acpClipboardImages(): Promise<{ images: any[]; paths: string[] }> {
+  return host.call("acp.clipboard_images", {});
+}
+
+export function acpImageUri(refId: string): Promise<string | null> {
+  return host.call("acp.image_uri", { ref_id: refId });
+}
+
+export function renderMermaidSvg(source: string): Promise<
+  | { ok: true; data_uri: string; width: number; height: number }
+  | { ok: false; error: string }
+> {
+  return host.call("mermaid.render", { source });
+}
+
 export function onCommand(handler: (call: { name: string; args: any }) => any): void {
   commandHandler = handler;
   while (pendingCommands.length > 0) {
@@ -515,14 +677,18 @@ export function onCommand(handler: (call: { name: string; args: any }) => any): 
 
 // ---- 国际化 ----
 
+export function locale(): string {
+  return localeSlice() || "en";
+}
+
 export function t(key: string, params?: Record<string, unknown>): string {
-  const s = state();
-  const locale = s.locale || "en";
-  const tables = s.texts ?? cachedTexts;
+  const curLocale = localeSlice() || "en";
+  const tables = textsSlice();
+  const dict = Object.keys(tables).length > 0 ? tables : cachedTexts;
   let raw =
-    tables?.[locale]?.[key] ??
-    tables?.[locale.split("-")[0]]?.[key] ??
-    tables?.en?.[key] ??
+    dict?.[curLocale]?.[key] ??
+    dict?.[curLocale.split("-")[0]]?.[key] ??
+    dict?.en?.[key] ??
     key;
   if (params && typeof raw === "string") {
     for (const [k, v] of Object.entries(params)) {
@@ -534,12 +700,13 @@ export function t(key: string, params?: Record<string, unknown>): string {
 
 /** 构造给 registerViews / registerCommands 用的多语言表（宿主按当前语言动态取）。 */
 export function text(key: string): Record<string, string> {
-  const tables = state().texts ?? cachedTexts;
+  const tables = textsSlice();
+  const dict = Object.keys(tables).length > 0 ? tables : cachedTexts;
   const out: Record<string, string> = {};
-  if (tables && typeof tables === "object") {
-    for (const [locale, dict] of Object.entries(tables)) {
-      if (dict && typeof dict[key] === "string") {
-        out[locale] = dict[key];
+  if (dict && typeof dict === "object") {
+    for (const [loc, table] of Object.entries(dict)) {
+      if (table && typeof table[key] === "string") {
+        out[loc] = table[key];
       }
     }
   }
@@ -547,10 +714,25 @@ export function text(key: string): Record<string, string> {
   return out;
 }
 
-// ---- 宿主读取与动作 ----
+// ---- 宿主读取与动作（均绑定细粒度切片信号） ----
+
+/** 细粒度主题快照：只在主题或窗口 `rem` 真正变化时触发订阅方。 */
+export function theme(): any {
+  return themeSlice();
+}
+
+export const currentTheme = theme;
+
+export function jsViews(): Record<string, { plugin: string; view: string }> {
+  return jsViewsSlice();
+}
+
+export function shellState(): any {
+  return shellSlice();
+}
 
 export function machines(): any[] {
-  return state().machines ?? [];
+  return machinesSlice();
 }
 
 export function machineEntry(machine: string | null | undefined): any {
@@ -575,23 +757,23 @@ export function conversationFacts(machine: string | null | undefined): any[] {
 }
 
 export function connections(): any {
-  return state().connections ?? { remotes: [], load_error: null };
+  return connectionsSlice();
 }
 
 export function activeContext(): { project: any; session: any } {
-  return state().active_context ?? { project: null, session: null };
+  return activeContextSlice();
 }
 
 export function views(): any[] {
-  return state().views ?? [];
+  return viewsSlice();
 }
 
 export function pages(): any[] {
-  return state().pages ?? [];
+  return pagesSlice();
 }
 
 export function commands(): any[] {
-  return state().commands ?? [];
+  return commandsSlice();
 }
 
 export function command(id: string): any {
@@ -619,7 +801,7 @@ export function safeArea(viewId: string): {
   bar_insets: { left: number; right: number };
 } {
   return (
-    state().safe_areas?.[viewId] ?? {
+    safeAreasSlice()?.[viewId] ?? {
       title_bar: false,
       top_left: 0,
       top_right: 0,
@@ -671,11 +853,11 @@ export function request(
 }
 
 export function windowActive(): boolean {
-  return state().window_active !== false;
+  return windowActiveSlice();
 }
 
 export function notificationPermission(): SmeltState["notification_permission"] {
-  return state().notification_permission ?? { kind: "unsupported" };
+  return notificationPermissionSlice();
 }
 
 export function setStatusMenu(menu: unknown | null): Promise<void> {
@@ -775,11 +957,11 @@ export function launchPath(opts: {
 }
 
 export function locales(): Array<{ code: string; name: string }> {
-  return state().locales ?? [];
+  return localesSlice();
 }
 
 export function systemLocale(): string {
-  return state().system_locale || "en";
+  return systemLocaleSlice() || "en";
 }
 
 export function setLocale(locale: string | null): Promise<void> {
@@ -819,7 +1001,7 @@ export const store = {
     host.call("store.query", { sql, params }),
   execute: (sql: string, params: unknown[] = []): Promise<number> =>
     host.call("store.execute", { sql, params }),
-  write: (statements: Array<{ sql: string; params?: unknown[] }>): Promise<number> =>
+  write: (statements: Array<{ sql: string; params?: unknown[] }>): Promise<number[]> =>
     host.call("store.write", { statements }),
   migrate: (steps: string[]): Promise<void> => host.call("store.migrate", { steps }),
 };
@@ -896,7 +1078,7 @@ export function stableMemo<T>(fn: () => T): () => T {
   });
 }
 
-// ---- 原生 Rust 视图挂载（仅用于尚未迁出 Rust 的重视图，如 `smelt.conversation/conversation`） ----
+// ---- 宿主原生视图挂载（如设置页内嵌的宿主视图） ----
 
 export function ViewInstance(props: {
   view: string;
@@ -1003,6 +1185,7 @@ export function SmeltIcon(props: {
 export interface SmeltButtonProps {
   label?: string;
   icon?: string;
+  trailingIcon?: string;
   tooltip?: string;
   accessibilityLabel?: string;
   command?: string;
@@ -1010,6 +1193,8 @@ export interface SmeltButtonProps {
   primary?: boolean;
   danger?: boolean;
   dismiss?: boolean;
+  floating?: boolean;
+  circle?: boolean;
   small?: boolean;
   fill?: boolean;
   disabled?: boolean;
@@ -1023,13 +1208,19 @@ export interface SmeltButtonProps {
   children?: any;
 }
 
-/** 主题快照按结构去重：宿主因会话/布局推送新状态时，主题没变就不触发所有按钮重算样式。 */
-const currentTheme = stableMemo(() => state().theme);
+// ---- 共享 NSH 原生 Tailwind 浮层样式（全插件统一质感，零 JS 闭包、引擎侧直接解析） ----
+
+export const POPUP_CLASS = "rounded-lg border border-border bg-popover p-1 shadow-lg";
+export const TOOLTIP_CLASS = "rounded-(--radius) border border-border bg-popover px-2 py-1 shadow-md";
+export const MENU_ITEM_CLASS =
+  "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
+export const INPUT_CLASS = "rounded-(--radius) border border-input bg-card px-2 text-foreground";
+export const DIALOG_SURFACE_CLASS = "rounded-xl border border-border bg-popover shadow-xl";
 
 /** 统一纯 JS/NSH 按钮（建在 `nsh/base <Button>` 上）：无 `BlockMouse` 悬停断层，完整遵循宿主主题色阶。 */
 export function SmeltButton(props: SmeltButtonProps) {
-  const look = currentTheme;
-  const iconOnly = () => !props.label && !props.children && Boolean(props.icon);
+  const look = theme;
+  const iconOnly = () => !props.label && !props.children && Boolean(props.icon) && !props.trailingIcon;
   const interactive = () => !props.disabled && !props.loading;
   const hasTooltip = computed(() => Boolean(props.tooltip));
   const shortcut = () => (props.command ? formatShortcut(command(props.command)?.key) : null);
@@ -1050,7 +1241,20 @@ export function SmeltButton(props: SmeltButtonProps) {
         hoverFg: p.text,
         pressBg: p.row_selected,
         pressFg: p.text,
+        surfaceClass: "",
         disabledOpacity: 0.5,
+      };
+    }
+    if (props.floating) {
+      return {
+        bg: p.surface,
+        fg: p.text,
+        hoverBg: p.soft,
+        hoverFg: p.text,
+        pressBg: p.soft_hover ?? p.row_selected,
+        pressFg: p.text,
+        surfaceClass: "border border-border shadow-sm",
+        disabledOpacity: 0.45,
       };
     }
     if (props.primary) {
@@ -1061,7 +1265,8 @@ export function SmeltButton(props: SmeltButtonProps) {
         hoverFg: primaryFg ?? p.on_ink,
         pressBg: primary?.[2] ?? p.ink,
         pressFg: primaryFg ?? p.on_ink,
-        disabledOpacity: 0.4,
+        surfaceClass: "shadow-xs",
+        disabledOpacity: 0.35,
       };
     }
     if (props.danger && props.quiet) {
@@ -1072,6 +1277,7 @@ export function SmeltButton(props: SmeltButtonProps) {
         hoverFg: p.bad,
         pressBg: p.row_selected,
         pressFg: p.bad,
+        surfaceClass: "",
         disabledOpacity: 0.5,
       };
     }
@@ -1083,17 +1289,19 @@ export function SmeltButton(props: SmeltButtonProps) {
         hoverFg: p.bad,
         pressBg: neutral[2],
         pressFg: p.bad,
+        surfaceClass: "border border-border shadow-xs",
         disabledOpacity: 0.5,
       };
     }
     if (props.quiet) {
       return {
-        bg: props.selected ? softHover : "transparent",
+        bg: props.selected ? p.row_selected : "transparent",
         fg: props.selected ? p.text : p.muted,
         hoverBg: p.row_hover,
         hoverFg: p.text,
         pressBg: p.row_selected,
         pressFg: p.text,
+        surfaceClass: "",
         disabledOpacity: 0.5,
       };
     }
@@ -1104,6 +1312,7 @@ export function SmeltButton(props: SmeltButtonProps) {
       hoverFg: neutralFg,
       pressBg: neutral[2],
       pressFg: neutralFg,
+      surfaceClass: "border border-border shadow-xs",
       disabledOpacity: 0.5,
     };
   });
@@ -1117,32 +1326,37 @@ export function SmeltButton(props: SmeltButtonProps) {
         height: 20,
         px: 0,
         radius: r.md ?? 6,
-        iconSize: 14,
+        iconSize: 13,
         gap: 0,
         textStyle: ty.ui,
       };
     }
+    if (props.circle && iconOnly()) {
+      return props.small
+        ? { width: 24, height: 24, px: 0, radius: 999, iconSize: 13, gap: 0, textStyle: ty.small }
+        : { width: 28, height: 28, px: 0, radius: 999, iconSize: 15, gap: 0, textStyle: ty.ui };
+    }
     if (iconOnly()) {
       return props.small
-        ? { width: 20, height: 20, px: 0, radius: r.sm ?? 4, iconSize: 15, gap: 0, textStyle: ty.small }
-        : { width: 24, height: 24, px: 0, radius: r.md ?? 6, iconSize: 16, gap: 0, textStyle: ty.ui };
+        ? { width: 22, height: 22, px: 0, radius: r.md ?? 6, iconSize: 14, gap: 0, textStyle: ty.small }
+        : { width: 28, height: 28, px: 0, radius: r.md ?? 6, iconSize: 15, gap: 0, textStyle: ty.ui };
     }
     if (props.small) {
       return {
         width: undefined,
-        height: 24,
-        px: 10,
-        radius: r.md ?? 6,
+        height: 26,
+        px: 9,
+        radius: props.floating ? 999 : (r.md ?? 6),
         iconSize: 14,
-        gap: 6,
-        textStyle: props.quiet ? ty.small : ty.small_medium,
+        gap: 5,
+        textStyle: props.quiet ? (ty.text_xsmall ?? ty.small) : (ty.text_xsmall_medium ?? ty.small_medium),
       };
     }
     return {
       width: undefined,
       height: 28,
       px: 12,
-      radius: r.lg ?? r.md ?? 8,
+      radius: props.floating ? 999 : (r.lg ?? r.md ?? 8),
       iconSize: 15,
       gap: 6,
       textStyle: props.quiet ? ty.ui : ty.ui_medium,
@@ -1150,10 +1364,16 @@ export function SmeltButton(props: SmeltButtonProps) {
   });
 
   const a11yLabel = () => props.accessibilityLabel || props.label || props.tooltip || undefined;
+  const buttonClass = () => {
+    const parts: string[] = [];
+    if (interactive() && colors().surfaceClass) parts.push(colors().surfaceClass);
+    if (props.class) parts.push(props.class);
+    return parts.length > 0 ? parts.join(" ") : undefined;
+  };
 
   return (
     <BaseButton
-      class={props.class}
+      class={buttonClass()}
       testID={props.testID}
       disabled={!interactive()}
       selected={Boolean(props.selected || props.toggled)}
@@ -1164,27 +1384,11 @@ export function SmeltButton(props: SmeltButtonProps) {
       }}
       tooltip={
         hasTooltip() ? (
-          <Tooltip class="px-2 py-1 rounded bg-popover border border-border">
-            <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <Text
-                style={{
-                  fontSize: look().type.text_xsmall.size,
-                  lineHeight: look().type.text_xsmall.line_height,
-                  color: look().palette.text,
-                }}
-              >
-                {props.tooltip}
-              </Text>
+          <Tooltip class={TOOLTIP_CLASS}>
+            <View class="flex-row items-center gap-1.5">
+              <Text class="text-xs text-foreground">{props.tooltip}</Text>
               <If when={shortcut() != null}>
-                <Text
-                  style={{
-                    fontSize: look().type.text_xsmall.size,
-                    lineHeight: look().type.text_xsmall.line_height,
-                    color: look().palette.muted,
-                  }}
-                >
-                  {shortcut() ?? ""}
-                </Text>
+                <Text class="text-xs text-muted-foreground">{shortcut() ?? ""}</Text>
               </If>
             </View>
           </Tooltip>
@@ -1250,6 +1454,9 @@ export function SmeltButton(props: SmeltButtonProps) {
           </Text>
         </If>
         {props.children}
+        <If when={Boolean(props.trailingIcon)}>
+          <SmeltIcon path={props.trailingIcon} size={12} opacity={0.72} />
+        </If>
       </View>
       <If when={Boolean(props.loading)}>
         <View
@@ -1287,36 +1494,146 @@ export function SmeltWindowBar(props: { view: string }) {
   return <SmeltNativeWindowBar safeArea={area()} style={{ width: "100%", flexShrink: 0 }} />;
 }
 
+const MERMAID_EXTENSIONS = [{ name: "mermaid", language: "mermaid" }];
+const mermaidClientCache = new Map<
+  string,
+  { ok: true; data_uri: string; width: number; height: number } | { ok: false; error: string }
+>();
+
+function MermaidDiagramBlock(props: { source: string }) {
+  const look = theme;
+  const result = signal<
+    | { ok: true; data_uri: string; width: number; height: number }
+    | { ok: false; error: string }
+    | null
+  >(null);
+  const previewOpen = signal(false);
+
+  effect(() => {
+    const src = String(props.source ?? "").trim();
+    const themeSig = `${look().palette.bg}:${look().palette.text}`;
+    if (!src) {
+      result.set(null);
+      return;
+    }
+    const cacheKey = `${themeSig}\0${src}`;
+    const cached = mermaidClientCache.get(cacheKey);
+    if (cached) {
+      result.set(cached);
+      return;
+    }
+    let stale = false;
+    renderMermaidSvg(src)
+      .then((res) => {
+        if (mermaidClientCache.size >= 128) {
+          const oldest = mermaidClientCache.keys().next().value;
+          if (oldest !== undefined) mermaidClientCache.delete(oldest);
+        }
+        mermaidClientCache.set(cacheKey, res);
+        if (!stale) result.set(res);
+      })
+      .catch((err: any) => {
+        if (!stale) result.set({ ok: false, error: err?.message ?? String(err) });
+      });
+    cleanup(() => {
+      stale = true;
+    });
+  });
+
+  const displaySize = computed(() => {
+    const r = result();
+    if (!r || !r.ok) return { width: 420, height: 140 };
+    const maxW = 680;
+    const scale = r.width > maxW ? maxW / r.width : 1;
+    return {
+      width: Math.max(120, Math.round(r.width * scale)),
+      height: Math.max(64, Math.min(480, Math.round(r.height * scale))),
+    };
+  });
+
+  return (
+    <View class="my-1.5 p-2.5 rounded-lg border border-border bg-card">
+      <If
+        when={result() != null}
+        else={<Text class="text-xs text-faint">…</Text>}
+      >
+        <If
+          when={Boolean(result()?.ok)}
+          else={<Text class="font-mono text-xs text-muted-foreground">{props.source}</Text>}
+        >
+          <View onPress={() => previewOpen.set(true)} class="items-center">
+            <Image
+              src={(result() as any)?.data_uri ?? ""}
+              style={{
+                width: displaySize().width,
+                height: displaySize().height,
+                maxWidth: "100%",
+                objectFit: "contain",
+              }}
+            />
+          </View>
+          <Dialog
+            open={previewOpen()}
+            animation="fade"
+            backdropClass="bg-black/65"
+            onOpenChange={({ open }: any) => previewOpen.set(Boolean(open))}
+            class="m-auto"
+          >
+            <If when={previewOpen() && Boolean(result()?.ok)}>
+              <View
+                class="rounded-xl border border-border bg-background p-4 shadow-xl items-center justify-center"
+                style={{
+                  width: 920,
+                  maxWidth: "92%",
+                  height: 640,
+                  maxHeight: "84%",
+                }}
+              >
+                <Image
+                  src={(result() as any)?.data_uri ?? ""}
+                  style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                />
+              </View>
+            </If>
+          </Dialog>
+        </If>
+      </If>
+    </View>
+  );
+}
+
 export function SmeltMarkdown(props: {
   markdown: string;
   cwd?: string | null;
   machine?: string | null;
   selectable?: boolean;
+  streaming?: boolean;
   style?: any;
   styles?: Record<string, any>;
   onLinkError?: (error: unknown) => void;
 }) {
-  const look = currentTheme;
+  const look = theme;
   const tvStyles = computed(() => {
     const p = look().palette;
-    const ty = look().type;
-    const r = look().radius;
+    const rem = look().rem ?? 16;
+    const bodySize = (14 / 16) * rem;
+    const bodyLineHeight = (23 / 16) * rem;
     const mono = look().fonts?.mono;
     const base: Record<string, any> = {
       root: {
         color: p.text,
-        fontSize: ty.ui.size,
-        lineHeight: ty.ui.line_height,
+        fontSize: bodySize,
+        lineHeight: bodyLineHeight,
       },
       link: { color: p.link },
       code: {
         ...(mono ? { fontFamily: mono } : {}),
         backgroundColor: p.soft,
-        borderRadius: r.sm ?? 4,
+        borderRadius: 6,
       },
       codeBlock: {
-        backgroundColor: p.surface,
-        borderRadius: r.md ?? 6,
+        backgroundColor: p.side ?? p.surface,
+        borderRadius: 10,
         borderColor: p.hair,
       },
       codeBlockCode: {
@@ -1337,8 +1654,16 @@ export function SmeltMarkdown(props: {
   return (
     <TextView
       markdown={props.markdown}
+      options={props.streaming ? { streaming: true } : undefined}
       selectable={props.selectable ?? true}
       links="report"
+      extensions={MERMAID_EXTENSIONS}
+      renderCustom={(node: any) => {
+        if (node?.name === "mermaid") {
+          return <MermaidDiagramBlock source={node.text ?? ""} />;
+        }
+        return null;
+      }}
       styles={tvStyles()}
       style={{ width: "100%", minWidth: 0, ...(props.style ?? {}) }}
       onLinkPress={(event: { url?: string }) => {
@@ -1567,3 +1892,10 @@ export function useHostEvent(listener: (event: any) => void) {
     cleanup(unsub);
   });
 }
+
+export {
+  SmeltConversation,
+  type SmeltConversationProps,
+  type SmeltConversationSpec,
+  type SmeltConversationStart,
+} from "./conversation/index.tsx";

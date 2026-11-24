@@ -8,7 +8,8 @@ import {
   SmeltButton,
   SmeltNativeTerminal,
   stableMemo,
-  state as hostState,
+  currentTheme,
+  locale,
   t,
 } from "smelt/sdk";
 import { terminalPaneKey, terminalWriteErrorKey } from "./model.js";
@@ -16,7 +17,6 @@ import { terminalPaneKey, terminalWriteErrorKey } from "./model.js";
 const TERMINAL_MENU = "smelt.terminal/menu";
 const NOTIFY_CMD = "smelt.app/notify";
 
-const currentTheme = stableMemo(() => hostState().theme);
 
 const openTerminals = new Map<string, Set<(chunk: string) => void>>();
 let nextSendSeq = 0;
@@ -77,7 +77,7 @@ export function TerminalPane(props: {
   });
 
   const labels = stableMemo(() => {
-    void hostState().locale;
+    void locale();
     return {
       copy: t("terminal.copy"),
       paste: t("terminal.paste"),

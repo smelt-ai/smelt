@@ -13,7 +13,18 @@ import {
   Submenu,
   Tooltip,
 } from "nsh/base";
-import { clipboardWrite, SmeltButton, SmeltIcon, t } from "smelt/sdk";
+import {
+  clipboardWrite,
+  DIALOG_SURFACE_CLASS,
+  INPUT_CLASS,
+  MENU_ITEM_CLASS,
+  POPUP_CLASS,
+  SmeltButton,
+  SmeltIcon,
+  t,
+  TOOLTIP_CLASS,
+} from "smelt/sdk";
+export { INPUT_CLASS, MENU_ITEM_CLASS, POPUP_CLASS };
 import { agentUsesItem } from "../model.js";
 import {
   agentSettingsOn,
@@ -24,15 +35,10 @@ import {
   type PageController,
 } from "./state.ts";
 
-export const POPUP_CLASS = "rounded-(--radius) border border-border bg-popover p-1";
-export const MENU_ITEM_CLASS =
-  "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
-export const INPUT_CLASS = "rounded-(--radius) border border-input bg-card px-2 text-foreground";
-
 export function Tip(props: { text: string; maxWidth?: number }) {
   const look = currentTheme;
   return (
-    <Tooltip class="rounded-(--radius) border border-border bg-popover px-2 py-1">
+    <Tooltip class={TOOLTIP_CLASS}>
       <Text
         style={{
           color: look().palette.text,
@@ -591,7 +597,7 @@ export function ConfirmDialog(props: {
       onOpenChange={({ open }: { open: boolean }) => {
         if (!open) props.onDismiss();
       }}
-      class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+      class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
       style={{ width: 420, gap: 12 }}
     >
       <If when={req() != null}>
@@ -667,14 +673,8 @@ export function UsesPopover(props: {
         placement="bottom"
         align="end"
         offset={4}
-        popupStyle={{
-          width: 240,
-          padding: 8,
-          borderRadius: look().radius.md,
-          backgroundColor: look().palette.surface,
-          borderWidth: 1,
-          borderColor: look().palette.hair,
-        }}
+        popupClass="rounded-xl border border-border bg-popover p-2 shadow-lg"
+        popupStyle={{ width: 240 }}
         trigger={
           <View
             role="button"

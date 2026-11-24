@@ -1,7 +1,15 @@
 // 选中运行的右侧详情页：支持挂载实时对话现场，以及落库结果、执行过程（含真实 SmeltDiffView）、输入与元数据。
 import { computed, Scroll, Text, View } from "nsh";
-import { SmeltButton, SmeltDiffView, SmeltIcon, SmeltMarkdown, state, t, ViewInstance } from "smelt/sdk";
-import { CONVERSATION_VIEW } from "../contract.js";
+import {
+  SmeltButton,
+  SmeltConversation,
+  SmeltDiffView,
+  SmeltIcon,
+  SmeltMarkdown,
+  stableMemo,
+  state,
+  t,
+} from "smelt/sdk";
 import {
   classifyAcpEntry,
   classifyToolOutputPart,
@@ -879,9 +887,30 @@ export function RunPane(props: { machine: string | null; run: any }) {
   const r = () => props.run;
   const canCancel = () => isRunStatusActive(r().status);
 
-  const liveStatus = computed(() => {
+  const liveStatus = stableMemo(() => {
     state();
     return liveRunStatusFor(props.machine, r());
+  });
+  const liveKind = computed(() => liveStatus().kind);
+  const liveMachine = computed(() => {
+    const s = liveStatus();
+    return s.kind === "live" ? ((s.args as any).machine ?? null) : null;
+  });
+  const liveSessionId = computed(() => {
+    const s = liveStatus();
+    return s.kind === "live" ? String((s.args as any).session_id ?? "") : "";
+  });
+  const liveSpec = stableMemo(() => {
+    const s = liveStatus();
+    return s.kind === "live" ? ((s.args as any).spec ?? null) : null;
+  });
+  const livePlaceholder = computed(() => {
+    const s = liveStatus();
+    return s.kind === "live" ? ((s.args as any).placeholder ?? null) : null;
+  });
+  const liveReuseKey = computed(() => {
+    const s = liveStatus();
+    return s.kind === "live" ? s.reuseKey : undefined;
   });
 
   return (
@@ -948,38 +977,14 @@ export function RunPane(props: { machine: string | null; run: any }) {
         </View>
       </If>
 
-      <If when={liveStatus().kind === "no_conversation_view"}>
-        <View
-          style={{
-            flexShrink: 0,
-            paddingLeft: 16,
-            paddingRight: 16,
-            paddingTop: 8,
-            paddingBottom: 8,
-            borderBottomWidth: 1,
-            borderBottomColor: look().palette.hair,
-          }}
-        >
-          <Text
-            style={{
-              fontSize: look().type.text_xsmall.size,
-              lineHeight: look().type.text_xsmall.line_height,
-              color: look().palette.muted,
-            }}
-          >
-            {t("editor.no_live_view")}
-          </Text>
-        </View>
-      </If>
-
-      <If when={liveStatus().kind === "unknown_engine"}>
+      <If when={liveKind() === "unknown_engine"}>
         <View style={{ paddingLeft: 16, paddingRight: 16, paddingTop: 12, flexShrink: 0 }}>
           <ErrorAlert message={t("error.unknown_engine")} />
         </View>
       </If>
 
       <If
-        when={liveStatus().kind === "live"}
+        when={liveKind() === "live"}
         else={
           <Scroll style={{ flex: 1, minHeight: 0, width: "100%" }}>
             <View
@@ -999,10 +1004,13 @@ export function RunPane(props: { machine: string | null; run: any }) {
           </Scroll>
         }
       >
-        <ViewInstance
-          view={CONVERSATION_VIEW}
-          args={(liveStatus() as Extract<ReturnType<typeof liveStatus>, { kind: "live" }>).args}
-          reuseKey={(liveStatus() as Extract<ReturnType<typeof liveStatus>, { kind: "live" }>).reuseKey}
+        <SmeltConversation
+          machine={liveMachine()}
+          sessionId={liveSessionId()}
+          spec={liveSpec()}
+          placeholder={livePlaceholder()}
+          embedded={true}
+          reuseKey={liveReuseKey()}
           style={{ flex: 1, width: "100%", height: "100%", minWidth: 0, minHeight: 0 }}
         />
       </If>

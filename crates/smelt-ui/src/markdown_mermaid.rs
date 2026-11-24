@@ -1,55 +1,15 @@
-//! markdown 渲染里的 mermaid 代码块画图：全仓库唯一入口。
+//! 纯 Rust Mermaid 图表 SVG 渲染引擎（全仓库唯一入口，供 NSH `<SmeltMarkdown>` 经宿主 `mermaid.render` 调用）。
 //!
-//! gpui-base 的 `TextView::markdown` 默认把 mermaid 围栏代码块当普通代码块处理
-//! （mermaid 没有 tree-sitter 语法，等于纯文本）。这里接上它的
-//! `markdown_block_parser`/`markdown_block_renderer` 钩子，识别出 mermaid 代码块，
-//! 用 `merman`（纯 Rust，对齐 mermaid.js，Zed 也在用）离线渲成 SVG，再用
-//! GPUI 的 `img()` 全彩显示——注意不是 `svg()`：那个元素只做单色 alpha mask 渲染
-//! （图标那条路），画不出多彩图，`img()` 对 `.svg` 走的才是全彩栅格化管线。
+//! 用 `merman`（纯 Rust，对齐 mermaid.js）离线渲成全彩 SVG data URI，背景透明并跟随当前 Smelt 色板
+//! （见 `theme.rs`）。类图标签包在带 `overflow:hidden` 的嵌套 svg 里，测宽回调使用与 GPUI/NSH 一致的
+//! `usvg 0.46` 系统 fontdb + `rustybuzz` 量真实字形 advance，防止中文与粗体标签被裁切。
 //!
-//! 渲染库换过两次。最早是 `mermaid-rs-renderer`，反向边绕路。接着换成
-//! `rusty-mermaid` 0.2.0，布局好一些，但中文子图 id 解析失败，中文状态名会在
-//! `state/parser.rs:70` 按字节切 UTF-8 直接 panic，stateDiagram 布局不对，ER 注释
-//! 被拼进属性名，也不认识 `@{ shape }`。`merman` 按 mermaid.js 做对齐，37 种图，
-//! 就是为了换掉这些问题。不保留旧渲染器的开关或垫片。
-//!
-//! 输出背景是透明的，跟着外面的亮暗主题走；节点、连线、文字的配色从 smelt 当前
-//! 色板生成（见 `theme.rs`），所以缓存 key 要把整套配色编进去。字体写进站点配置
-//! 的 `fontFamily`，不再在 SVG 文本里做字符串替换。类图标签包在带
-//! `overflow:hidden` 的嵌套 svg 里，
-//! 测宽回调如果只按字符数估算，文字会被裁掉；这里用 GPUI 同一份 usvg 0.46 的
-//! 系统 fontdb，再用 rustybuzz 量 advance。
-//!
-//! 不编 `layout-elk`。它带进的 `merman-elk-layered` 是 EPL-2.0 的 ELK 移植，链进二进制
-//! 就得随附 EPL 文本、出处和对应源码，仓库没有这套流程。而且上游
-//! `default_config.json` 根上的 `layout` 默认是 `elk`，编进来后所有没写布局的流程图、
-//! 状态图、类图、ER 都会换成 ELK，和 GitHub / mermaid.js 上看到的排法不一样。
-//! 不编这个 feature 时，`elk` 请求缺 loader，退回 dagre；图里写 `layout: elk` 也一样。
-//!
-//! 全仓库新增/已有的 `TextView::markdown` 调用点都应该改走这里的 `markdown_view`，
-//! 不要直接调 `TextView::markdown`，否则等于每处都得重新接一遍这两个钩子。
-//!
-//! 内存缓存：GPUI 是即时模式 UI，`BlockNode` 的渲染函数每帧 paint 都会重新调用，
-//! 同一张图只渲一次，否则滚动会变成每帧重算。不落盘——这是派生图，不是状态。
+//! 不编 `layout-elk`（带入 EPL-2.0 许可且改默认布局为 ELK）；`elk` 请求自动退回 dagre。
 
 use rust_i18n::t;
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
-use gpui::prelude::FluentBuilder as _;
-use gpui::{
-    AnyElement, App, AppContext as _, AvailableSpace, Bounds, Context, DevicePixels, DragMoveEvent,
-    Element, ElementId, EmptyView, GlobalElementId, HighlightStyle, ImageSource,
-    InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    ObjectFit, ParentElement, Pixels, Point, Render, RenderImage, ScrollHandle, SharedString, Size,
-    StatefulInteractiveElement, Style, Styled, StyledImage, SvgSize, Task, Window, canvas, div,
-    img, point, px, rgb, size,
-};
-use gpui_base::text::{
-    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextViewStyle, markdown_ast,
-};
-use gpui_base::{h_flex, v_flex};
 use merman::svg::{
     DeterministicTextMeasurer, MeasurementProfileId, SvgPipeline, TextMeasurementPolicy,
     TextMeasurementProfile, TextMeasurementProfileIdentity, TextStyle,
@@ -60,33 +20,16 @@ use merman::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::IconAction as _;
-use crate::scrollbar::{Scrollbar, ScrollbarAxis};
-use crate::ui_theme;
-
-/// 调用方拿到的视图和它留住的解析状态。插件经这里拿，不直接认 gpui-base 的富文本模块。
-pub use gpui_base::text::{TextView, TextViewState};
-
 mod theme;
 
-use crate::kit::{TYPE, TypeStyled as _};
 use theme::DiagramColors;
 
 /// 传给 merman `fontFamily` 的 CSS 字体栈。多词名字必须加引号，否则 CSS 会把
-/// `Hiragino Sans GB` 拆成三个 family。GPUI 的 usvg 按字面名精确匹配
-/// `font-family`，不认 `sans-serif` 这类泛型关键字，栈里得有一个系统字体目录里
-/// 真能查到的名字，中英文才画得出来。
-///
-/// 首选没直接写 PingFang SC：它的文件在
-/// `/System/Library/PrivateFrameworks/FontServices.framework/.../Reserved/
-/// PingFangUI.ttc`，fontdb 只扫标准目录，任何拼法都查不到。冬青黑体简体中文
-/// （Hiragino Sans GB）是 PingFang 之前 macOS 用了很多年的中文默认字体，笔画比
-/// 黑体-简细，而且在标准字体目录里。
+/// `Hiragino Sans GB` 拆成三个 family。usvg 按字面名精确匹配 `font-family`。
 const MERMAID_FONT_FAMILY: &str =
     "\"Hiragino Sans GB\", \"Heiti SC\", \"PingFang SC\", \"Helvetica Neue\", Arial, sans-serif";
 
-/// 机器上没有上面这套字体时，测宽再试的 CJK 家族。只参与量字宽，不写进 SVG 的
-/// `font-family`：macOS 上 Hiragino 能命中，GPUI 栅格化走的就是这条栈。
+/// 机器上没有上面这套字体时，测宽再试的 CJK 家族（只参与量字宽，不写进 SVG）。
 const CJK_MEASURE_FALLBACKS: &[&str] = &[
     "Noto Sans CJK SC",
     "Noto Sans CJK JP",
@@ -96,551 +39,74 @@ const CJK_MEASURE_FALLBACKS: &[&str] = &[
     "Droid Sans Fallback",
 ];
 
-/// 内存缓存 key 版本：换了渲染库、字体栈或 SVG 后处理就跟着升，避免同进程里旧产物被复用。
+/// 内存缓存 key 版本：换了渲染库、字体栈或 SVG 后处理就跟着升。
 const CACHE_FORMAT_VERSION: &str = "v6";
 
-/// 粗体没有独立字重时，在 regular advance 上乘的系数。跟评估原型一致。
+/// 粗体没有独立字重时，在 regular advance 上乘的系数。
 const SYNTHETIC_BOLD_SCALE: f64 = 1.06;
 
-/// parser 阶段存进 `MarkdownNode` 的原始数据。parser 不能碰 Window/App，真正的
-/// 渲染（调 merman、查缓存）都留到 renderer 阶段做。
-struct MermaidBlockData {
-    source: SharedString,
+const MERMAID_URI_CACHE_MAX: usize = 256;
+
+/// 供 NSH 后台线程消费的纯 Rust Mermaid 渲染结果：全彩 SVG data URI 与自然宽高。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MermaidSvgDataUri {
+    pub data_uri: String,
+    pub width: f32,
+    pub height: f32,
 }
 
-/// 判断一个 mdast 节点是不是 ```mermaid 围栏代码块，是的话取出源码。跟
-/// `parse_mermaid_block` 分开是因为 `MarkdownParseContext` 的构造函数对 smelt
-/// 不可见（`pub(crate)`），这个纯函数不需要 context 就能单测。
-fn mermaid_source(node: &markdown_ast::Node) -> Option<SharedString> {
-    let markdown_ast::Node::Code(code) = node else {
-        return None;
-    };
-    if code.lang.as_deref() != Some("mermaid") {
-        return None;
-    }
-    Some(code.value.clone().into())
-}
+/// 线程安全、带进程内存缓存的纯 Rust Mermaid SVG 渲染入口（供 NSH 插件 `<SmeltMarkdown>` 使用）。
+/// 渲染失败返回错误文案；同一 `(源码, 当前主题色板)` 命中缓存直接 O(1) 返回。
+pub fn render_mermaid_svg_data_uri(source: &str) -> Result<MermaidSvgDataUri, String> {
+    use base64::Engine as _;
 
-/// 识别 ```mermaid 围栏代码块。命中就短路掉 gpui-base 默认的 CodeBlock 处理
-/// （见 `format/markdown.rs` 里 `parse_block` 先跑自定义 parser 再走默认分支）。
-fn parse_mermaid_block(
-    node: &markdown_ast::Node,
-    _cx: &MarkdownParseContext<'_>,
-) -> Option<MarkdownNode> {
-    let source = mermaid_source(node)?;
-    Some(
-        MarkdownNode::new(
-            "mermaid",
-            MermaidBlockData {
-                source: source.clone(),
-            },
-        )
-        .text(source.clone())
-        .markdown(format!("```mermaid\n{source}\n```")),
-    )
-}
-
-/// 渲染成功后要显示的东西：full-color SVG 的字节数据 + 它自身的自然像素尺寸
-/// （从 SVG 的 `viewBox` 读出来）。内嵌时按列宽缩小、不放大（见 [`MermaidInline`]），
-/// 看细节点开放大预览（见 [`MermaidPreview`]）。
-struct MermaidImage {
-    image: Arc<gpui::Image>,
-    width: f32,
-    height: f32,
-}
-
-/// 内嵌尺寸：放进可用宽度，不超过自然尺寸，高度按比例跟着宽度走。
-fn mermaid_inline_size(width: f32, height: f32, available_width: Option<f32>) -> Size<Pixels> {
-    let scale = available_width.map_or(1.0, |available| (available / width).clamp(0.0, 1.0));
-    size(px(width * scale), px(height * scale))
-}
-
-/// 内嵌的 mermaid 图。
-///
-/// 复杂图的自然尺寸远超对话列宽，原尺寸加横向滚动只能露出一角。这里用测量布局：
-/// taffy 给出可用宽度时直接算出宽高，不靠 `aspect_ratio` 推导（`crate::image`
-/// 模块注释记着那是历次图片撑破、留白的根因），也不靠上一帧量到的列宽。
-struct MermaidInline {
-    image: Arc<MermaidImage>,
-}
-
-impl Element for MermaidInline {
-    type RequestLayoutState = ();
-    type PrepaintState = AnyElement;
-
-    fn id(&self) -> Option<ElementId> {
-        None
+    struct Cache {
+        map: HashMap<String, Result<MermaidSvgDataUri, String>>,
+        order: VecDeque<String>,
     }
 
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        _cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let (width, height) = (self.image.width, self.image.height);
-        let layout_id =
-            window.request_measured_layout(Style::default(), move |known, available, _, _| {
-                let available_width = known.width.or(match available.width {
-                    AvailableSpace::Definite(width) => Some(width),
-                    // 最小内容宽度给 0，所在的 flex 行才能把它压到列宽以内。
-                    AvailableSpace::MinContent => Some(px(0.)),
-                    AvailableSpace::MaxContent => None,
-                });
-                mermaid_inline_size(width, height, available_width.map(f32::from))
-            });
-        (layout_id, ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        // 父级若把盒子拉宽了，图仍按自己的比例靠左画，不拉伸。
-        let fitted = mermaid_inline_size(
-            self.image.width,
-            self.image.height,
-            Some(f32::from(bounds.size.width)),
-        );
-        let mut image = img(self.image.image.clone())
-            .w(fitted.width)
-            .h(fitted.height)
-            .into_any_element();
-        image.prepaint_as_root(
-            bounds.origin,
-            size(
-                AvailableSpace::Definite(fitted.width),
-                AvailableSpace::Definite(fitted.height),
-            ),
-            window,
-            cx,
-        );
-        image
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        image: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        image.paint(window, cx);
-    }
-}
-
-/// 预览缩放倍数都相对 SVG 自然尺寸（1.0 = 内嵌时的大小）。
-const MIN_PREVIEW_SCALE: f32 = 0.1;
-const MAX_PREVIEW_SCALE: f32 = 8.0;
-const PREVIEW_ZOOM_STEP: f32 = 1.25;
-
-/// 预览栅格的上限。gpui sprite atlas 单图上限 16384px；像素总数再压一道，
-/// 大图放到最大倍数时一张 RGBA 不超过 64MB。超过上限就拉伸这张封顶的栅格。
-const MAX_RASTER_SIDE: f32 = 8192.0;
-const MAX_RASTER_PIXELS: f32 = 16_777_216.0;
-
-fn preview_zoom_in(scale: f32) -> f32 {
-    (scale * PREVIEW_ZOOM_STEP).min(MAX_PREVIEW_SCALE)
-}
-
-fn preview_zoom_out(scale: f32) -> f32 {
-    (scale / PREVIEW_ZOOM_STEP).max(MIN_PREVIEW_SCALE)
-}
-
-/// 「适合窗口」时的实际倍数。小图也会放大填满：预览重新栅格化，放大不糊。
-fn preview_fit_scale(image_width: f32, image_height: f32, viewport: Size<Pixels>) -> f32 {
-    (f32::from(viewport.width) / image_width).min(f32::from(viewport.height) / image_height)
-}
-
-/// 缩放后单个轴上的滚动偏移：保持视口中心对着图上同一点。图比视口窄时它是居中
-/// 摆放的，中心就是图的中点。结果夹在可滚动范围内（偏移向内容方向为负）。
-fn preview_anchored_offset(offset: f32, viewport: f32, old_len: f32, new_len: f32) -> f32 {
-    let center = if old_len > viewport {
-        (viewport / 2.0 - offset) / old_len
-    } else {
-        0.5
-    };
-    let max_scroll = (new_len - viewport).max(0.0);
-    (viewport / 2.0 - center * new_len).clamp(-max_scroll, 0.0)
-}
-
-fn preview_pan_offset(
-    scroll_origin: Point<Pixels>,
-    pointer_origin: Point<Pixels>,
-    pointer_current: Point<Pixels>,
-) -> Point<Pixels> {
-    scroll_origin + pointer_current - pointer_origin
-}
-
-/// 按设备像素算预览栅格尺寸，超过上限时等比缩到上限以内。
-fn preview_raster_size(width: f32, height: f32, device_scale: f32) -> Size<DevicePixels> {
-    let w = width * device_scale;
-    let h = height * device_scale;
-    let shrink = (MAX_RASTER_SIDE / w.max(h))
-        .min((MAX_RASTER_PIXELS / (w * h)).sqrt())
-        .min(1.0);
-    size(
-        DevicePixels(((w * shrink).ceil() as i32).max(1)),
-        DevicePixels(((h * shrink).ceil() as i32).max(1)),
-    )
-}
-
-/// 视口尺寸的小抖动不值得重新栅格化一次。
-fn raster_close_enough(a: Size<DevicePixels>, b: Size<DevicePixels>) -> bool {
-    let close = |a: i32, b: i32| (a - b).abs() <= (b / 50).max(2);
-    close(a.width.0, b.width.0) && close(a.height.0, b.height.0)
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum PreviewZoom {
-    /// 交给布局按 contain 放进视口，窗口变了跟着变。
-    Fit,
-    Scale(f32),
-}
-
-/// 拖拽平移的载荷。只用来让 `on_drag_move` 在指针离开预览区后还能收到移动。
-struct MermaidPan;
-
-/// 放大预览。
-///
-/// `gpui::Image` 的 SVG 只按自然尺寸的 2 倍栅格化一次，放大就是拉伸位图，所以
-/// 预览按当前倍数和窗口缩放自己在后台重新栅格化，栅格好之前先拉伸原图顶着。
-/// 视口尺寸来自上一帧的布局（`measure`），render 只读这些缓存。
-struct MermaidPreview {
-    image: Arc<MermaidImage>,
-    zoom: PreviewZoom,
-    scroll: ScrollHandle,
-    viewport: Option<Size<Pixels>>,
-    scale_factor: f32,
-    raster: Option<Arc<RenderImage>>,
-    /// 在途栅格的目标尺寸，避免同一尺寸重复起任务。
-    pending_raster: Option<Size<DevicePixels>>,
-    raster_task: Option<Task<()>>,
-    /// 按下左键时的指针位置和滚动偏移；内容可滚动时才记。
-    pan_origin: Option<(Point<Pixels>, Point<Pixels>)>,
-}
-
-impl MermaidPreview {
-    fn new(image: Arc<MermaidImage>, cx: &mut Context<Self>) -> Self {
-        // `RenderImage` 的纹理按 id 留在 sprite atlas 里，只丢 `Arc` 不会释放。
-        cx.on_release(|this, cx| {
-            if let Some(raster) = this.raster.take() {
-                cx.drop_image(raster, None);
-            }
+    static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
+        Mutex::new(Cache {
+            map: HashMap::new(),
+            order: VecDeque::new(),
         })
-        .detach();
-        Self {
-            image,
-            zoom: PreviewZoom::Fit,
-            scroll: ScrollHandle::new(),
-            viewport: None,
-            scale_factor: 1.0,
-            raster: None,
-            pending_raster: None,
-            raster_task: None,
-            pan_origin: None,
-        }
-    }
-
-    fn effective_scale(&self) -> Option<f32> {
-        match self.zoom {
-            PreviewZoom::Scale(scale) => Some(scale),
-            PreviewZoom::Fit => self
-                .viewport
-                .map(|viewport| preview_fit_scale(self.image.width, self.image.height, viewport)),
-        }
-    }
-
-    /// 预览区 prepaint 时回报自己的尺寸。只有变了才重新栅格化、重绘。
-    fn measure(&mut self, viewport: Size<Pixels>, scale_factor: f32, cx: &mut Context<Self>) {
-        if viewport.width <= px(0.) || viewport.height <= px(0.) {
-            return;
-        }
-        if self.viewport == Some(viewport) && self.scale_factor == scale_factor {
-            return;
-        }
-        self.viewport = Some(viewport);
-        self.scale_factor = scale_factor;
-        self.sync_raster(cx);
-        cx.notify();
-    }
-
-    fn sync_raster(&mut self, cx: &mut Context<Self>) {
-        let Some(scale) = self.effective_scale() else {
-            return;
-        };
-        let target = preview_raster_size(
-            self.image.width,
-            self.image.height,
-            scale * self.scale_factor,
-        );
-        let current = self
-            .pending_raster
-            .or_else(|| self.raster.as_ref().map(|raster| raster.size(0)));
-        if current.is_some_and(|current| raster_close_enough(current, target)) {
-            return;
-        }
-        self.pending_raster = Some(target);
-        let image = self.image.image.clone();
-        let renderer = cx.svg_renderer();
-        self.raster_task = Some(cx.spawn(async move |this, cx| {
-            let raster = cx
-                .background_executor()
-                .spawn(async move {
-                    renderer
-                        .parse_svg(image.bytes())
-                        .and_then(|svg| renderer.render_parsed(&svg, SvgSize::ExactSize(target)))
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.pending_raster = None;
-                // 失败就继续拉伸原图：内嵌时这张 SVG 已经画出来过。
-                let Ok(raster) = raster else {
-                    return;
-                };
-                if let Some(old) = this.raster.replace(raster) {
-                    cx.drop_image(old, None);
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    fn zoom_to(&mut self, next: f32, cx: &mut Context<Self>) {
-        let current = self.effective_scale().unwrap_or(1.0);
-        if let Some(viewport) = self.viewport {
-            let offset = self.scroll.offset();
-            let (width, height) = (self.image.width, self.image.height);
-            self.scroll.set_offset(point(
-                px(preview_anchored_offset(
-                    f32::from(offset.x),
-                    f32::from(viewport.width),
-                    width * current,
-                    width * next,
-                )),
-                px(preview_anchored_offset(
-                    f32::from(offset.y),
-                    f32::from(viewport.height),
-                    height * current,
-                    height * next,
-                )),
-            ));
-        }
-        self.zoom = PreviewZoom::Scale(next);
-        self.sync_raster(cx);
-        cx.notify();
-    }
-
-    fn zoom_fit(&mut self, cx: &mut Context<Self>) {
-        self.zoom = PreviewZoom::Fit;
-        self.scroll.set_offset(point(px(0.), px(0.)));
-        self.sync_raster(cx);
-        cx.notify();
-    }
-}
-
-impl Render for MermaidPreview {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let scale = self.effective_scale();
-        let source: ImageSource = match &self.raster {
-            Some(raster) => raster.clone().into(),
-            None => self.image.image.clone().into(),
-        };
-        let content = match (self.zoom, self.viewport) {
-            (PreviewZoom::Scale(scale), Some(viewport)) => {
-                let width = self.image.width * scale;
-                let height = self.image.height * scale;
-                // 图比视口小的那个轴撑满视口并居中，大的那个轴才可滚动。
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(width.max(f32::from(viewport.width))))
-                    .h(px(height.max(f32::from(viewport.height))))
-                    .child(
-                        img(source)
-                            .flex_none()
-                            .w(px(width))
-                            .h(px(height))
-                            .object_fit(ObjectFit::Fill),
-                    )
-                    .into_any_element()
-            }
-            _ => img(source)
-                .size_full()
-                .object_fit(ObjectFit::Contain)
-                .into_any_element(),
-        };
-
-        let viewport = div()
-            .id("mermaid-preview-viewport")
-            .size_full()
-            .overflow_scroll()
-            .track_scroll(&self.scroll)
-            .when(matches!(self.zoom, PreviewZoom::Scale(_)), |this| {
-                this.cursor_grab()
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, _| {
-                    let max = this.scroll.max_offset();
-                    this.pan_origin = (max.x > px(0.) || max.y > px(0.))
-                        .then(|| (event.position, this.scroll.offset()));
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.pan_origin = None),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.pan_origin = None),
-            )
-            .on_drag(MermaidPan, |_, _, _, cx| cx.new(|_| EmptyView))
-            .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<MermaidPan>, _, cx| {
-                    let Some((pointer_origin, scroll_origin)) = this.pan_origin else {
-                        return;
-                    };
-                    this.scroll.set_offset(preview_pan_offset(
-                        scroll_origin,
-                        pointer_origin,
-                        event.event.position,
-                    ));
-                    cx.notify();
-                }),
-            )
-            .child(content);
-
-        let measure = canvas(
-            {
-                let view = cx.entity();
-                move |bounds, window, cx| {
-                    let scale_factor = window.scale_factor();
-                    view.update(cx, |this, cx| this.measure(bounds.size, scale_factor, cx));
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .inset_0();
-
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .gap_2()
-            .child(
-                h_flex()
-                    .justify_end()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .type_style(TYPE.ui)
-                            .text_color(rgb(ui_theme::muted()))
-                            .children(scale.map(|scale| format!("{:.0}%", scale * 100.0))),
-                    )
-                    .child(
-                        crate::Button::new("mermaid-preview-zoom-out")
-                            .quiet()
-                            .small()
-                            .label(t!("mermaid.zoom_out"))
-                            .debug_selector(|| "MERMAID_PREVIEW_ZOOM_OUT".to_string())
-                            .disabled(scale.is_some_and(|scale| scale <= MIN_PREVIEW_SCALE))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let scale = this.effective_scale().unwrap_or(1.0);
-                                this.zoom_to(preview_zoom_out(scale), cx);
-                            })),
-                    )
-                    .child(
-                        crate::Button::new("mermaid-preview-zoom-in")
-                            .quiet()
-                            .small()
-                            .label(t!("mermaid.zoom_in"))
-                            .debug_selector(|| "MERMAID_PREVIEW_ZOOM_IN".to_string())
-                            .disabled(scale.is_some_and(|scale| scale >= MAX_PREVIEW_SCALE))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let scale = this.effective_scale().unwrap_or(1.0);
-                                this.zoom_to(preview_zoom_in(scale), cx);
-                            })),
-                    )
-                    .child(
-                        crate::Button::new("mermaid-preview-zoom-fit")
-                            .quiet()
-                            .small()
-                            .label(t!("mermaid.fit"))
-                            .debug_selector(|| "MERMAID_PREVIEW_ZOOM_FIT".to_string())
-                            .disabled(self.zoom == PreviewZoom::Fit)
-                            .on_click(cx.listener(|this, _, _, cx| this.zoom_fit(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(ui_theme::hair())
-                    .bg(rgb(ui_theme::bg()))
-                    .child(viewport)
-                    .child(
-                        div().absolute().inset_0().child(
-                            Scrollbar::new(&self.scroll)
-                                .id("mermaid-preview-scrollbar")
-                                .axis(ScrollbarAxis::Both),
-                        ),
-                    )
-                    .child(measure),
-            )
-    }
-}
-
-fn open_mermaid_preview(image: Arc<MermaidImage>, window: &mut Window, cx: &mut App) {
-    let preview = cx.new(|cx| MermaidPreview::new(image, cx));
-    crate::dialog::open(window, cx, move |card, window, _cx| {
-        // 对话框会把宽高夹在窗口减去边距以内，这里只表达「尽量大」，不替它算边距。
-        let viewport = window.viewport_size();
-        card.w(viewport.width).h(viewport.height).child(
-            crate::dialog::content(t!("mermaid.title"), None)
-                .flex_1()
-                .min_h_0()
-                .child(preview.clone()),
-        )
     });
+
+    let colors = DiagramColors::current();
+    let digest = source_digest(source, &colors);
+    {
+        let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = cache.map.get(&digest) {
+            return hit.clone();
+        }
+    }
+
+    let rendered = render_svg(source, colors).map(|svg| {
+        let (width, height) = parse_viewbox_size(&svg).unwrap_or((400.0, 300.0));
+        let b64 = base64::engine::general_purpose::STANDARD.encode(svg.as_bytes());
+        MermaidSvgDataUri {
+            data_uri: format!("data:image/svg+xml;base64,{b64}"),
+            width,
+            height,
+        }
+    });
+
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if !cache.map.contains_key(&digest) {
+        while cache.map.len() >= MERMAID_URI_CACHE_MAX {
+            if let Some(evicted) = cache.order.pop_front() {
+                cache.map.remove(&evicted);
+            } else {
+                break;
+            }
+        }
+        cache.order.push_back(digest.clone());
+        cache.map.insert(digest, rendered.clone());
+    }
+    rendered
 }
 
-#[derive(Clone)]
-enum MermaidRender {
-    Ok(Arc<MermaidImage>),
-    Err(Arc<str>),
-}
-
-thread_local! {
-    /// 内存态一级缓存，key 是 `source_digest`（已经把配色编进去了）。
-    static MERMAID_RENDER_CACHE: RefCell<HashMap<String, MermaidRender>> = RefCell::new(HashMap::new());
-    /// 正在后台渲染的 digest 集合：同一张图只起一个后台任务，避免滚动/重绘重复触发。
-    static MERMAID_RENDER_INFLIGHT: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-}
-
-/// `sha256(缓存格式版本 + 源码 + 配色)`。配色必须编进去，否则换主题、切亮暗都
-/// 不会触发重渲；格式版本必须编进去，否则升级渲染逻辑后旧缓存会一直被复用。
+/// `sha256(缓存格式版本 + 源码 + 配色)`。配色必须编进去，否则换主题、切亮暗不会触发重渲。
 fn source_digest(source: &str, colors: &DiagramColors) -> String {
     let mut hasher = Sha256::new();
     hasher.update(CACHE_FORMAT_VERSION.as_bytes());
@@ -666,12 +132,8 @@ fn parse_viewbox_size(svg: &str) -> Option<(f32, f32)> {
     (w > 0.0 && h > 0.0).then_some((w, h))
 }
 
-/// mindmap 按 `17 - 3*i` 给深层 section 写 `stroke-width`，到 `edge-depth-5` 就已经
-/// 是 `-1`。浏览器会丢掉非法声明，回落到 `.edge{stroke-width:3}`；resvg / usvg
-/// 见到负数会把这条线整段丢掉。这里把负的声明删掉，正的和 0 保持不动。
-///
-/// 只改标签里的属性和 `<style>` 里的 CSS。文字节点是图里写的字，原样保留：标签里
-/// 写着 `stroke-width:-1` 也照样显示。
+/// mindmap 按 `17 - 3*i` 给深层 section 写 `stroke-width`，到 `edge-depth-5` 是 `-1`。
+/// resvg / usvg 见到负数会把这条线整段丢掉；这里只清理标签属性与 `<style>` 中的负声明，不动文字节点。
 fn strip_negative_stroke_width(svg: &str) -> String {
     let mut out = String::with_capacity(svg.len());
     let mut rest = svg;
@@ -685,7 +147,6 @@ fn strip_negative_stroke_width(svg: &str) -> String {
         let tag = &from_tag[..=close];
         out.push_str(&strip_negative_stroke_width_in(tag));
         rest = &from_tag[close + 1..];
-        // `<style>` 的正文是 CSS（可能包在 CDATA 里），一直处理到 `</style>`。
         if tag.starts_with("<style") && !tag.ends_with("/>") {
             let end = rest.find("</style>").unwrap_or(rest.len());
             out.push_str(&strip_negative_stroke_width_in(&rest[..end]));
@@ -696,7 +157,6 @@ fn strip_negative_stroke_width(svg: &str) -> String {
     out
 }
 
-/// 在一段属性或 CSS 里删掉负的 `stroke-width` 声明。
 fn strip_negative_stroke_width_in(svg: &str) -> String {
     const KEY: &str = "stroke-width";
     let mut out = String::with_capacity(svg.len());
@@ -715,8 +175,6 @@ fn strip_negative_stroke_width_in(svg: &str) -> String {
     out
 }
 
-/// `after_key` 是 `stroke-width` 后面的文本。值是负数时返回声明结束后的剩余切片，
-/// 调用方把整个声明丢掉；不是负数则返回 `None`，原样保留。
 fn negative_stroke_width_tail(after_key: &str) -> Option<&str> {
     let trimmed = after_key.trim_start_matches([' ', '\t', '\n', '\r']);
     let sep = *trimmed.as_bytes().first()?;
@@ -778,8 +236,6 @@ fn negative_number_len(value: &str) -> Option<usize> {
     (digits > 0).then_some(i)
 }
 
-/// 系统字体库里的一个面。字节是 fontdb 共享出来的文件映射：同一个文件（TTC 里的
-/// regular / bold）共用一份，不拷进堆里。
 struct LoadedFace {
     family: String,
     data: Arc<dyn AsRef<[u8]> + Send + Sync>,
@@ -798,8 +254,6 @@ fn measure_faces() -> &'static [LoadedFace] {
     FACES.get_or_init(load_measure_faces)
 }
 
-/// 和 `measure_faces` 一一对应的解析结果，解析不了的是 `None`。量每个标签都要用，
-/// 只解析一次。
 fn parsed_faces() -> &'static [Option<rustybuzz::Face<'static>>] {
     static PARSED: OnceLock<Vec<Option<rustybuzz::Face<'static>>>> = OnceLock::new();
     PARSED.get_or_init(|| {
@@ -810,10 +264,6 @@ fn parsed_faces() -> &'static [Option<rustybuzz::Face<'static>>] {
     })
 }
 
-/// GPUI 的 `SvgRenderer` 用 `usvg::fontdb::Database::load_system_fonts()` 扫系统字体
-/// （另外还会塞 IBM Plex / Lilex，只用来兜泛型家族）。gpui 不把这份 fontdb 公开出来，
-/// 所以这里直接依赖同一个 usvg 0.46，按 SVG 里那条字体栈查询，再退到 sans-serif、
-/// 任意一款，以及 Linux 上常见的 CJK 字体。
 fn load_measure_faces() -> Vec<LoadedFace> {
     let mut db = usvg::fontdb::Database::new();
     db.load_system_fonts();
@@ -880,8 +330,6 @@ fn push_queried_family(
     }
 }
 
-/// 按 fontdb 的面 id 去重。不能按数据指针：`load_system_fonts` 的面是按需映射的，
-/// 用完就解除，下一个文件很可能映射到同一个地址。
 fn push_face(
     db: &mut usvg::fontdb::Database,
     id: usvg::fontdb::ID,
@@ -893,9 +341,7 @@ fn push_face(
     if !seen.insert(id) {
         return;
     }
-    // SAFETY: 映射的是系统字体文件，进程里一直留着。fontdb 的说明是别的进程原地改写
-    // 这个文件时，映射里可能看到改动甚至崩溃；系统字体只会整个替换（新 inode），旧映射
-    // 不受影响。GPUI 栅格化 SVG 时也是这样映射同一批文件。
+    // SAFETY: 映射的是系统字体文件，进程里一直留着；与 GPUI / usvg 栅格化 SVG 映射方式一致。
     let Some((data, index)) = (unsafe { db.make_shared_face_data(id) }) else {
         return;
     };
@@ -952,7 +398,6 @@ fn is_generic_family(name: &str) -> bool {
     )
 }
 
-/// 拆 CSS `font-family` 列表，去掉引号。引号里的逗号不当分隔符。
 fn font_family_names(stack: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut current = String::new();
@@ -994,8 +439,6 @@ fn text_measurement_policy() -> &'static TextMeasurementPolicy {
     })
 }
 
-/// merman 的宽度回调。U+00AD 必须原样交给 shaper，不能先删掉。
-/// 回调得返回有限、非负的 CSS 像素。
 fn measure_label_width(text: &str, style: &TextStyle) -> f64 {
     if text.is_empty() {
         return 0.0;
@@ -1120,8 +563,6 @@ fn style_is_bold(style: &TextStyle) -> bool {
     })
 }
 
-/// 没有任何面能画出这个字符时的宽度。CJK 按 1em、ASCII 按 0.55em，略偏宽，
-/// 避免类图 `overflow:hidden` 把字裁掉。
 fn heuristic_width(text: &str, font_size: f64, bold: bool) -> f64 {
     let em: f64 = text.chars().map(heuristic_em).sum();
     let scale = if bold { SYNTHETIC_BOLD_SCALE } else { 1.0 };
@@ -1149,8 +590,6 @@ fn heuristic_em(ch: char) -> f64 {
     }
 }
 
-/// 每套配色一个 renderer。换过的主题留着，切回来不用重建；条目数就是这次进程里
-/// 用过的配色数。
 fn renderer(colors: DiagramColors) -> Arc<Renderer> {
     static RENDERERS: LazyLock<Mutex<HashMap<DiagramColors, Arc<Renderer>>>> =
         LazyLock::new(Default::default);
@@ -1197,565 +636,34 @@ fn render_svg_inner(source: &str, colors: DiagramColors) -> Result<String, Strin
     }
 }
 
-fn render_or_load(source: &str, colors: DiagramColors) -> Result<MermaidImage, String> {
-    let svg = render_svg(source, colors)?;
-    let (width, height) = parse_viewbox_size(&svg).unwrap_or((400.0, 300.0));
-    let image = gpui::Image::from_bytes(gpui::ImageFormat::Svg, svg.into_bytes());
-    Ok(MermaidImage {
-        image: Arc::new(image),
-        width,
-        height,
-    })
-}
-
-/// renderer 阶段：查内存缓存 → 未命中调 `render_or_load` 并写回 → 渲成 `img()`；
-/// 渲染失败给一个提示条 + 原始 mermaid 源码兜底，不留白、不 panic。
-fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App) -> AnyElement {
-    let Some(data) = node.data::<MermaidBlockData>() else {
-        return div().child(node.as_text().to_string()).into_any_element();
-    };
-
-    let colors = DiagramColors::current();
-    let digest = source_digest(&data.source, &colors);
-
-    if let Some(result) = MERMAID_RENDER_CACHE.with(|c| c.borrow().get(&digest).cloned()) {
-        return mermaid_result_element(result, &digest, &data.source);
-    }
-
-    // 缓存未命中但已有在途任务 → 占位，等后台完成刷新后重渲染命中缓存。
-    if MERMAID_RENDER_INFLIGHT.with(|c| c.borrow().contains(&digest)) {
-        return div()
-            .id(SharedString::from(format!("mermaid-{digest}-pending")))
-            .into_any_element();
-    }
-
-    // 首次见：渲染挪后台线程，完成后只写内存缓存，下一帧直接命中。
-    MERMAID_RENDER_INFLIGHT.with(|c| c.borrow_mut().insert(digest.clone()));
-    let source = data.source.clone();
-    let digest_for_task = digest.clone();
-    cx.spawn(async move |cx| {
-        let outcome = cx
-            .background_executor()
-            .spawn(async move { render_or_load(&source, colors) })
-            .await
-            .map(|img| MermaidRender::Ok(Arc::new(img)))
-            .unwrap_or_else(|e| MermaidRender::Err(e.into()));
-        MERMAID_RENDER_INFLIGHT.with(|c| c.borrow_mut().remove(&digest_for_task));
-        MERMAID_RENDER_CACHE.with(|c| c.borrow_mut().insert(digest_for_task, outcome));
-        cx.update(|cx| cx.refresh_windows());
-    })
-    .detach();
-
-    div()
-        .id(SharedString::from(format!("mermaid-{digest}-pending")))
-        .into_any_element()
-}
-
-fn mermaid_result_element(result: MermaidRender, digest: &str, source: &str) -> AnyElement {
-    match result {
-        MermaidRender::Ok(m) => {
-            let preview = m.clone();
-            // 外层 flex 行撑满列宽；触发区按图的实际宽度收缩，空白处不响应点击。
-            // 点开预览不是链接，光标保持默认箭头。
-            div()
-                .id(SharedString::from(format!("mermaid-{digest}")))
-                .flex()
-                .child(
-                    div()
-                        .id("preview-trigger")
-                        .debug_selector(|| "MERMAID_PREVIEW_TRIGGER".to_string())
-                        .flex()
-                        .on_click(move |_, window, cx| {
-                            open_mermaid_preview(preview.clone(), window, cx);
-                        })
-                        .child(MermaidInline { image: m }),
-                )
-                .into_any_element()
-        }
-        MermaidRender::Err(msg) => div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .text_color(rgb(ui_theme::need()))
-                    .child(t!("mermaid.failed", msg = msg).into_owned()),
-            )
-            .child(
-                div()
-                    .font_family(smelt_model::font_config::font_family())
-                    .text_color(rgb(ui_theme::text()))
-                    .child(source.to_string()),
-            )
-            .into_any_element(),
-    }
-}
-
-/// 全仓库统一的 markdown 渲染入口，替代直接调 `TextView::markdown`——多接的这两
-/// 个钩子就是本文件的 mermaid 支持，以后要加别的自定义 block 渲染也从这里改，
-/// 不要在调用点各自散开接。
-///
-/// `TextView::markdown` 默认 `selectable(false)`，各调用点需要正文可复制时统一打开。
-pub fn markdown_view(id: impl Into<ElementId>, text: impl Into<SharedString>) -> TextView {
-    markdown_view_with_selection(id, text, true)
-}
-
-/// 原样显示的纯文本（工具输出、diff 原文等），可框选复制。不解析 Markdown，按 HTML
-/// 渲染成一段正文，样式和 Markdown 正文同一套色板。
-pub fn plain_text_view(id: impl Into<ElementId>, text: &str) -> TextView {
-    TextView::html(id, preformatted_html(text))
-        .selectable(true)
-        .style(text_view_style(gpui::StyleRefinement::default()))
-}
-
-/// 包进 `<textarea>` 而不是 `<pre>`：gpui-base 把 `<pre>` 画成带框的代码块，
-/// `<textarea>` 才是保留空白的普通段落。
-fn preformatted_html(text: &str) -> String {
-    // 和浏览器的 `<pre>` 一样，末尾那个换行不画成空行。
-    let text = text.strip_suffix('\n').unwrap_or(text);
-    let mut html = String::with_capacity(text.len() + 23);
-    // 解析器会吞掉开标签后紧跟的一个换行，先垫一个，正文开头的换行才留得住。
-    html.push_str("<textarea>\n");
-    for ch in text.chars() {
-        match ch {
-            '&' => html.push_str("&amp;"),
-            '<' => html.push_str("&lt;"),
-            '>' => html.push_str("&gt;"),
-            '"' => html.push_str("&quot;"),
-            '\'' => html.push_str("&#39;"),
-            _ => html.push(ch),
-        }
-    }
-    html.push_str("</textarea>");
-    html
-}
-
-/// ACP 对话里的 Markdown：正文可框选复制，同时链接保持可点击——gpui-base
-/// 的链接打开（MouseUp）会先检查是否已有文本选择，拖拽选择时不会误触链接，
-/// 因此打开 selectable 不会破坏链接点击。
-pub fn markdown_view_clickable(
-    id: impl Into<ElementId>,
-    text: impl Into<SharedString>,
-) -> TextView {
-    markdown_view_with_selection(id, text, true)
-}
-
-/// smelt 的富文本样式，全部取自色板。显式给出，不走 gpui-base 的全局默认样式。
-fn markdown_text_view_style() -> TextViewStyle {
-    // 右上角挂了语言名和复制按钮（见 `code_block_corner`），首行要让开它。
-    text_view_style(gpui::StyleRefinement::default().pt(px(28.)))
-}
-
-/// 两种富文本共用的色板样式；`code_block` 是各自对代码块的额外要求。
-fn text_view_style(code_block: gpui::StyleRefinement) -> TextViewStyle {
-    let radius = px(crate::kit::RADIUS.md);
-    let code_block = code_block.rounded(radius);
-    let table = gpui::StyleRefinement::default().rounded(radius);
-    let table_head = gpui::StyleRefinement::default()
-        .bg(rgb(ui_theme::soft()))
-        .text_color(rgb(ui_theme::text()));
-    // 行内 code 面积小，用代码块的底会糊进正文，改用悬停那档拉开对比。
-    let inline_code = HighlightStyle {
-        background_color: Some(rgb(ui_theme::soft_hover()).into()),
-        ..Default::default()
-    };
-    TextViewStyle::default()
-        .with_foreground(rgb(ui_theme::text()).into())
-        .with_muted_foreground(rgb(ui_theme::muted()).into())
-        .with_link(rgb(ui_theme::link()).into())
-        .with_selection(ui_theme::selection().into())
-        .with_code_background(rgb(ui_theme::soft()).into())
-        .with_border(ui_theme::hair().into())
-        .with_code_block(code_block)
-        .with_table(table)
-        .with_table_head(table_head)
-        .with_inline_code(inline_code)
-        .with_dark(!ui_theme::is_light())
-}
-
-/// 围栏代码块右上角：语言名 + 复制按钮。
-///
-/// 一旦接了 `code_block_actions`，gpui-base 就不再画它自带的语言标签，所以
-/// 语言名在这里一并画。按钮 id 用固定的 `"copy"` 即可：框架按代码块给 actions
-/// 套了一层带位置的 id，不同代码块之间不会撞。
-fn code_block_corner(
-    code_block: &gpui_base::text::CodeBlock,
-    _window: &mut Window,
-    _cx: &mut App,
-) -> AnyElement {
-    let lang = code_block.lang().filter(|lang| !lang.is_empty());
-    h_flex()
-        .gap_1()
-        .items_center()
-        .children(lang.map(|lang| {
-            div()
-                .px_1()
-                .type_style(TYPE.text_xsmall)
-                .text_color(rgb(ui_theme::muted()))
-                .child(lang)
-        }))
-        .child(
-            crate::Clipboard::new("copy")
-                .value(code_block.code())
-                .icon_action(t!("action.copy_code")),
-        )
-        .into_any_element()
-}
-
-fn markdown_view_with_selection(
-    id: impl Into<ElementId>,
-    text: impl Into<SharedString>,
-    selectable: bool,
-) -> TextView {
-    with_markdown_hooks(
-        TextView::markdown(id, text).selectable(selectable),
-        shared_markdown_extensions(),
-    )
-}
-
-/// 对话消息（ACP 对话、会话历史）的 Markdown，解析状态由调用方持有。原始 HTML 按
-/// 原文显示，见 [`chat_markdown_extensions`]；文件链接点击时按 `links` 解析，悬停提示
-/// 点下去打开的是哪个文件或网址，见 [`crate::markdown_links`]。
-///
-/// `TextView::markdown` 把解析结果挂在元素上，元素有一帧没画就丢掉。虚拟列表里的行
-/// 滚出渲染范围再回来，超过 4KB 的正文要先以空内容等后台重新解析，行高跟着跳。
-/// 这类地方自己留住 `TextViewState`，用这个入口画。
-pub fn chat_markdown_view(
-    state: &gpui::Entity<TextViewState>,
-    links: crate::markdown_links::FileLinks<'_>,
-) -> TextView {
-    with_markdown_hooks(
-        TextView::new(state).selectable(true),
-        chat_markdown_extensions(),
-    )
-    .on_link_click(crate::markdown_links::link_opener(links))
-    .link_tooltip(crate::markdown_links::link_tooltip(links))
-}
-
-/// 围栏代码块按围栏写的语言上色，配色是当前主题的 `syntax` 段（见 [`crate::syntax`]）。
-/// 还没装主题时不上色。
-fn with_markdown_hooks(view: TextView, extensions: &MarkdownExtensions) -> TextView {
-    let view = view
-        .style(markdown_text_view_style())
-        .code_block_actions(code_block_corner)
-        .markdown_extensions(extensions.clone());
-    match crate::syntax::code_block_highlighter() {
-        Some(highlighter) => view.shared_code_block_highlighter(highlighter),
-        None => view,
-    }
-}
-
-/// `MarkdownExtensions` assigns a new global revision whenever a parser or renderer is registered.
-/// Rebuilding it from the immediate-mode render path therefore makes every existing `TextViewState`
-/// synchronously reparse unchanged Markdown on every frame. Keep one immutable registry so cloned
-/// views retain a stable revision.
-fn shared_markdown_extensions() -> &'static MarkdownExtensions {
-    static EXTENSIONS: OnceLock<MarkdownExtensions> = OnceLock::new();
-    EXTENSIONS.get_or_init(|| {
-        MarkdownExtensions::default()
-            .block_parser(parse_mermaid_block)
-            .block_renderer("mermaid", render_mermaid_block)
-    })
-}
-
-/// [`shared_markdown_extensions`] 再加上原始 HTML 按原文显示。同样只建一次。
-///
-/// 对话里的尖括号多半是随手写的类型参数、组件名或贴进来的片段，不是要渲染的页面；当
-/// HTML 解释的话，不认识的标签会让整段内容消失。解析时就不认 HTML（`<b>` 也一样），
-/// 代码块、行内代码本来就不受影响，`<https://…>` 这种自动链接不是 HTML，照样是链接。
-fn chat_markdown_extensions() -> &'static MarkdownExtensions {
-    static EXTENSIONS: OnceLock<MarkdownExtensions> = OnceLock::new();
-    EXTENSIONS.get_or_init(|| shared_markdown_extensions().clone().raw_html(false))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn preformatted_html_preserves_literal_tool_output() {
-        assert_eq!(
-            preformatted_html("# heading\n* item\n`code` <tag> & \"quoted\" 'single'"),
-            "<textarea>\n# heading\n* item\n`code` &lt;tag&gt; &amp; &quot;quoted&quot; &#39;single&#39;</textarea>"
-        );
-    }
-
-    /// 测试用的配色：库自带的兜底色板，不碰进程级的当前主题。
     fn colors(dark: bool) -> DiagramColors {
         DiagramColors::from_palette(&crate::ui_theme::builtin_fallback(!dark), !dark)
     }
 
-    struct ChatMarkdownRoot {
-        state: gpui::Entity<TextViewState>,
-    }
-
-    impl gpui::Render for ChatMarkdownRoot {
-        fn render(
-            &mut self,
-            _window: &mut Window,
-            _cx: &mut gpui::Context<Self>,
-        ) -> impl IntoElement {
-            div().w(px(600.)).child(chat_markdown_view(
-                &self.state,
-                crate::markdown_links::FileLinks::default(),
-            ))
-        }
-    }
-
-    /// 对话里的原始 HTML 原样显示：不认识的标签不吞内容，代码里不多出 `\`。
-    #[gpui::test]
-    fn chat_markdown_shows_raw_html_as_written(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            crate::init(cx);
-        });
-        let source = "前 <section class=\"card\">内容</section> 和 <panel> 还有 <b>粗</b>\n\n\
-                      <div>\n块里的字\n</div>\n\n\
-                      <details>\n**要点**\n\n\
-                      1. 步骤\n   - 子项\n\n     ```rust\n     let v: Vec<String> = vec![];\n     ```\n";
-        let (root, cx) = cx.add_window_view(|_window, cx| ChatMarkdownRoot {
-            state: cx.new(|cx| TextViewState::markdown(source, cx)),
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.run_until_parked();
-
-        let text = cx.update(|_window, cx| {
-            let state = root.read(cx).state.clone();
-            state.update(cx, |state, cx| {
-                state.select_all(cx);
-                state.selected_text()
-            })
-        });
-        assert!(
-            text.contains("<section class=\"card\">内容</section>"),
-            "{text}"
-        );
-        assert!(text.contains("<panel>"), "{text}");
-        assert!(text.contains("<b>粗</b>"), "{text}");
-        assert!(text.contains("<div>"), "{text}");
-        assert!(text.contains("块里的字"), "{text}");
-        assert!(text.contains("</div>"), "{text}");
-        // HTML 行后面紧跟的 Markdown 照常解析，不被当成 HTML 块的原文。
-        assert!(text.contains("<details>"), "{text}");
-        assert!(
-            text.contains("要点") && !text.contains("**要点**"),
-            "{text}"
-        );
-        assert!(text.contains("let v: Vec<String> = vec![];"), "{text}");
-        assert!(!text.contains('\\'), "{text}");
-    }
-
-    /// 纯文本原样成一段正文：保留缩进和换行，标记不解析，也不套代码块的框。
-    #[gpui::test]
-    fn plain_text_is_a_paragraph_kept_as_written(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            crate::init(cx);
-        });
-        let source = "\n    let x = a < b && c;\n\t# 不是标题 &amp; </textarea> <b>粗</b>\n";
-        let state = cx.new(|cx| TextViewState::html(&preformatted_html(source), cx));
-        cx.run_until_parked();
-        let (rendered, copied) = cx.update(|cx| {
-            state.update(cx, |state, cx| {
-                state.select_all(cx);
-                (
-                    state.rendered_text().as_str().to_string(),
-                    state.selected_text(),
-                )
-            })
-        });
-        // 每个段落块在渲染文本里都以换行收尾（上游约定），原文末尾的换行已去掉。
-        assert_eq!(
-            rendered,
-            "\n    let x = a < b && c;\n\t# 不是标题 &amp; </textarea> <b>粗</b>\n"
-        );
-        assert_eq!(
-            copied.trim_end_matches('\n'),
-            rendered.trim_end_matches('\n')
-        );
-    }
-
     #[test]
-    fn markdown_extensions_are_reused_across_views() {
-        assert!(std::ptr::eq(
-            shared_markdown_extensions(),
-            shared_markdown_extensions()
-        ));
+    fn render_mermaid_svg_data_uri_produces_valid_data_uri_and_caches() {
+        let first = render_mermaid_svg_data_uri("flowchart TD\nA-->B").expect("应能渲染");
+        assert!(first.data_uri.starts_with("data:image/svg+xml;base64,"));
+        assert!(first.width > 0.0 && first.height > 0.0);
+        let second = render_mermaid_svg_data_uri("flowchart TD\nA-->B").expect("应命中缓存");
+        assert_eq!(first, second);
     }
 
-    #[gpui::test]
-    fn clicking_mermaid_opens_the_zoom_preview(cx: &mut gpui::TestAppContext) {
-        use gpui::VisualTestContext;
-
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            crate::init(cx);
-        });
-        let source = "```mermaid\nflowchart TD\nA-->B\n```";
-        let (_root, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| ChatMarkdownRoot {
-                state: cx.new(|cx| TextViewState::markdown(source, cx)),
-            });
-            gpui_base::Root::new(view, window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let trigger = cx
-            .debug_bounds("MERMAID_PREVIEW_TRIGGER")
-            .expect("Mermaid 图表应可点击打开预览");
-        let natural = render_or_load("flowchart TD\nA-->B", colors(false)).expect("应能渲染");
-        assert!(
-            (f32::from(trigger.size.height) - natural.height).abs() < 1.0,
-            "内嵌图按 SVG 自然高度显示"
-        );
-        cx.simulate_click(trigger.center(), Default::default());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        assert!(
-            cx.update(|window, cx| crate::dialog::is_open(window, cx)),
-            "点击图表后应打开带缩放控件的预览对话框"
-        );
-        assert!(cx.debug_bounds("MERMAID_PREVIEW_ZOOM_OUT").is_some());
-        assert!(cx.debug_bounds("MERMAID_PREVIEW_ZOOM_IN").is_some());
-        assert!(cx.debug_bounds("MERMAID_PREVIEW_ZOOM_FIT").is_some());
-    }
-
-    #[test]
-    fn inline_mermaid_fits_the_column_without_upscaling() {
-        // 比列宽的图等比缩到列宽，高度跟着缩，不留白。
-        assert_eq!(
-            mermaid_inline_size(1800.0, 900.0, Some(600.0)),
-            size(px(600.), px(300.))
-        );
-        // 比列窄的图保持自然尺寸，不放大。
-        assert_eq!(
-            mermaid_inline_size(300.0, 200.0, Some(600.0)),
-            size(px(300.), px(200.))
-        );
-        // 没有宽度约束（max-content）时报自然尺寸，最小内容宽度为 0。
-        assert_eq!(
-            mermaid_inline_size(300.0, 200.0, None),
-            size(px(300.), px(200.))
-        );
-        assert_eq!(
-            mermaid_inline_size(300.0, 200.0, Some(0.0)),
-            size(px(0.), px(0.))
-        );
-    }
-
-    #[test]
-    fn preview_zoom_steps_stay_within_bounds() {
-        assert_eq!(preview_zoom_in(MAX_PREVIEW_SCALE), MAX_PREVIEW_SCALE);
-        assert_eq!(preview_zoom_out(MIN_PREVIEW_SCALE), MIN_PREVIEW_SCALE);
-        assert!((preview_zoom_in(1.0) - 1.25).abs() < f32::EPSILON);
-        assert!((preview_zoom_out(1.0) - 0.8).abs() < 0.0001);
-    }
-
-    #[test]
-    fn preview_fit_uses_the_tighter_axis() {
-        let viewport = size(px(600.), px(400.));
-        assert!((preview_fit_scale(1200.0, 600.0, viewport) - 0.5).abs() < f32::EPSILON);
-        assert!((preview_fit_scale(100.0, 200.0, viewport) - 2.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn preview_zoom_keeps_the_viewport_center_on_the_same_point() {
-        // 1000 宽的图在 400 视口里滚到 -300，中心对着图上 500 处（正中）。放大到 2000
-        // 后中心仍对着正中：偏移 = 200 - 1000 = -800。
-        assert_eq!(
-            preview_anchored_offset(-300.0, 400.0, 1000.0, 2000.0),
-            -800.0
-        );
-        // 图原本比视口窄（居中摆放），放大后从图中点开始。
-        assert_eq!(preview_anchored_offset(0.0, 400.0, 300.0, 600.0), -100.0);
-        // 缩到比视口还小时偏移归零，不会滚出内容。
-        assert_eq!(preview_anchored_offset(-800.0, 400.0, 2000.0, 300.0), 0.0);
-        // 结果夹在可滚动范围内。
-        assert_eq!(
-            preview_anchored_offset(-600.0, 400.0, 1000.0, 1000.0),
-            -600.0
-        );
-        assert_eq!(
-            preview_anchored_offset(-600.0, 400.0, 1000.0, 500.0),
-            -100.0
-        );
-    }
-
-    #[test]
-    fn preview_raster_follows_the_display_scale_and_stays_capped() {
-        // 2 倍屏上放大到 3 倍：每个自然像素对应 6 个设备像素。
-        assert_eq!(
-            preview_raster_size(400.0, 300.0, 6.0),
-            size(DevicePixels(2400), DevicePixels(1800))
-        );
-        // 大图放到最大倍数：长边、总像素都不超过上限，并保持比例。
-        let capped = preview_raster_size(3000.0, 1500.0, MAX_PREVIEW_SCALE * 2.0);
-        assert!(capped.width.0 as f32 <= MAX_RASTER_SIDE);
-        assert!(capped.width.0 as f32 * capped.height.0 as f32 <= MAX_RASTER_PIXELS * 1.001);
-        assert!((capped.width.0 as f32 / capped.height.0 as f32 - 2.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn small_viewport_jitter_does_not_rerasterize() {
-        let base = size(DevicePixels(1000), DevicePixels(800));
-        assert!(raster_close_enough(
-            size(DevicePixels(1010), DevicePixels(795)),
-            base
-        ));
-        assert!(!raster_close_enough(
-            size(DevicePixels(1250), DevicePixels(1000)),
-            base
-        ));
-    }
-
-    #[test]
-    fn dragging_preview_moves_the_scroll_origin_with_the_pointer() {
-        let offset = preview_pan_offset(
-            point(px(-20.), px(-60.)),
-            point(px(100.), px(100.)),
-            point(px(140.), px(80.)),
-        );
-        assert_eq!(offset, point(px(20.), px(-80.)));
-    }
-
-    #[test]
-    fn valid_source_renders_without_writing_disk() {
-        let img = render_or_load("flowchart TD\nA-->B", colors(false)).expect("应能渲染");
-        assert!(img.width > 0.0 && img.height > 0.0);
-        let svg = render_svg("flowchart TD\nA-->B", colors(false)).expect("应能渲出 SVG");
-        assert!(svg.trim_start().starts_with("<svg"));
-        assert!(svg.contains("width=\"100%\""));
-    }
-
-    /// 字体栈来自站点配置，不再做 rusty-mermaid 那次字符串替换。GPUI 的 usvg
-    /// 要在 `font-family` 里看到能对上的字面名。
     #[test]
     fn rendered_svg_uses_cjk_font_stack() {
-        let img =
-            render_or_load("flowchart TD\nA[开始]-->B[结束]", colors(false)).expect("应能渲染");
         let svg = render_svg("flowchart TD\nA[开始]-->B[结束]", colors(false)).unwrap();
-        assert!(
-            svg.contains("Hiragino Sans GB"),
-            "渲染产物应该带上配置的 CJK 字体栈"
-        );
-        assert!(img.width > 0.0 && img.height > 0.0);
+        assert!(svg.contains("Hiragino Sans GB"));
+        let (w, h) = parse_viewbox_size(&svg).expect("应有正 viewBox");
+        assert!(w > 0.0 && h > 0.0);
     }
 
     #[test]
     fn invalid_source_errs_without_panicking() {
-        assert!(render_or_load("this is not mermaid at all {{{", colors(false)).is_err());
+        assert!(render_svg("this is not mermaid at all {{{", colors(false)).is_err());
     }
 
     #[test]
@@ -1769,71 +677,36 @@ mod tests {
     }
 
     #[test]
-    fn parser_only_matches_mermaid_lang() {
-        use markdown_ast::{Code, Node};
-
-        let mermaid_node = Node::Code(Code {
-            lang: Some("mermaid".to_string()),
-            meta: None,
-            value: "graph TD\nA-->B".to_string(),
-            position: None,
-        });
-        let rust_node = Node::Code(Code {
-            lang: Some("rust".to_string()),
-            meta: None,
-            value: "fn main() {}".to_string(),
-            position: None,
-        });
-
-        assert_eq!(
-            mermaid_source(&mermaid_node).as_deref(),
-            Some("graph TD\nA-->B")
-        );
-        assert!(mermaid_source(&rust_node).is_none());
-    }
-
-    #[test]
     fn parse_viewbox_size_handles_single_quotes_and_whitespace() {
         assert_eq!(
-            super::parse_viewbox_size("<svg viewBox='0 0 500 300'></svg>"),
+            parse_viewbox_size("<svg viewBox='0 0 500 300'></svg>"),
             Some((500.0, 300.0))
         );
         assert_eq!(
-            super::parse_viewbox_size("<svg viewBox=\" 0  0   800.5  600.25 \"></svg>"),
+            parse_viewbox_size("<svg viewBox=\" 0  0   800.5  600.25 \"></svg>"),
             Some((800.5, 600.25))
         );
-        assert_eq!(
-            super::parse_viewbox_size("<svg viewBox=\"0 0 -10 20\"></svg>"),
-            None
-        );
+        assert_eq!(parse_viewbox_size("<svg viewBox=\"0 0 -10 20\"></svg>"), None);
     }
 
     #[test]
-    fn strip_negative_stroke_width_keeps_positive_rules() {
+    fn strip_negative_stroke_width_keeps_positive_rules_and_leaves_text_alone() {
         let raw = "<svg><style>#mm .edge-depth-5{stroke-width:-1;}#mm .edge{stroke-width:3;}</style><line stroke-width=\"-4\" stroke=\"red\"/></svg>";
-        let fixed = super::strip_negative_stroke_width(raw);
         assert_eq!(
-            fixed,
+            strip_negative_stroke_width(raw),
             "<svg><style>#mm .edge-depth-5{}#mm .edge{stroke-width:3;}</style><line stroke=\"red\"/></svg>"
         );
-    }
-
-    /// 图里写的字原样显示，哪怕正好是一句负的 `stroke-width`。
-    #[test]
-    fn strip_negative_stroke_width_leaves_text_alone() {
-        let raw = "<svg><style><![CDATA[.a > .b{stroke-width:-2}]]></style><text x=\"1\" style=\"stroke-width:-3\">stroke-width:-1</text></svg>";
-        let fixed = super::strip_negative_stroke_width(raw);
+        let raw2 = "<svg><style><![CDATA[.a > .b{stroke-width:-2}]]></style><text x=\"1\" style=\"stroke-width:-3\">stroke-width:-1</text></svg>";
         assert_eq!(
-            fixed,
+            strip_negative_stroke_width(raw2),
             "<svg><style><![CDATA[.a > .b{}]]></style><text x=\"1\" style=\"\">stroke-width:-1</text></svg>"
         );
     }
 
     #[test]
     fn font_family_names_keep_quoted_spaces() {
-        let names = super::font_family_names(MERMAID_FONT_FAMILY);
         assert_eq!(
-            names,
+            font_family_names(MERMAID_FONT_FAMILY),
             vec![
                 "Hiragino Sans GB",
                 "Heiti SC",
@@ -1845,11 +718,8 @@ mod tests {
         );
     }
 
-    /// 用 GPUI 同一份 usvg 0.46 解析 merman 的 `resvg_safe` 输出。样本覆盖
-    /// rusty-mermaid 已知会坏的几类：中文子图 id、带回边和 classDef 的流程图、
-    /// 中文复合状态、sequence 的 alt/loop/note、类图、带注释的 ER、mindmap、gantt。
     #[test]
-    fn samples_render_svg_that_gpui_usvg_parses() {
+    fn samples_render_svg_that_usvg_parses() {
         let samples = [
             (
                 "flowchart",
@@ -1936,53 +806,16 @@ mod tests {
             for dark in [false, true] {
                 let svg = render_svg(source, colors(dark))
                     .unwrap_or_else(|err| panic!("{name} dark={dark} 渲染失败: {err}"));
-                assert!(svg.trim_start().starts_with("<svg"), "{name} 应该是 svg 根");
-                assert!(svg.contains("width=\"100%\""), "{name} 根宽度应为 100%");
-                let (width, height) =
-                    parse_viewbox_size(&svg).unwrap_or_else(|| panic!("{name} 应有正的 viewBox"));
-                assert!(width > 0.0 && height > 0.0, "{name} viewBox");
-                assert!(
-                    !svg.contains("stroke-width:-"),
-                    "{name} 不应再留下负的 stroke-width"
-                );
-                assert_gpui_usvg_parses(name, &svg);
+                assert!(svg.trim_start().starts_with("<svg"), "{name}");
+                let (w, h) = parse_viewbox_size(&svg).unwrap_or_else(|| panic!("{name} viewBox"));
+                assert!(w > 0.0 && h > 0.0);
+                assert!(!svg.contains("stroke-width:-"));
+                usvg::Tree::from_str(&svg, &usvg::Options::default())
+                    .unwrap_or_else(|err| panic!("{name} usvg 解析失败: {err}"));
             }
         }
-
-        let flow = render_svg(samples[0].1, colors(false)).unwrap();
-        assert!(flow.contains("规划"), "中文子图 id 应该进 SVG");
-        assert!(flow.contains("下一步"));
-        assert!(flow.contains("菱形"));
-        assert!(flow.contains("Hiragino Sans GB"));
-
-        let state = render_svg(samples[1].1, colors(false)).unwrap();
-        assert!(state.contains("空闲"));
-        assert!(state.contains("工作中"));
-
-        let sequence = render_svg(samples[2].1, colors(false)).unwrap();
-        assert!(sequence.contains("备注"));
-        assert!(sequence.contains("重试"));
-
-        let class = render_svg(samples[3].1, colors(false)).unwrap();
-        assert!(class.contains("订单"));
-        assert!(class.contains("确认"));
-
-        let er = render_svg(samples[4].1, colors(false)).unwrap();
-        assert!(er.contains("email"));
-        assert!(
-            !er.contains("SHOULD_NOT_MERGE"),
-            "ER 注释不应进属性名或标签"
-        );
-
-        let mindmap = render_svg(samples[5].1, colors(false)).unwrap();
-        assert!(mindmap.contains("主题"));
-
-        let gantt = render_svg(samples[6].1, colors(false)).unwrap();
-        assert!(gantt.contains("排期") || gantt.contains("方案"));
     }
 
-    /// 不编 `layout-elk`：没写布局的图、写了 `layout: elk` 的图都按 dagre 排，和显式
-    /// `layout: dagre` 一样。有人打开这个 feature，这里会先挂，提醒去看许可证和默认布局。
     #[test]
     fn flowcharts_lay_out_with_dagre_even_when_elk_is_requested() {
         let body = "flowchart TD\nA[开始] --> B[处理]\nB --> C[结束]\nC --> A\n";
@@ -1990,28 +823,12 @@ mod tests {
         let dagre_src = format!("---\nconfig:\n  layout: dagre\n---\n{body}");
 
         let plain = render_svg(body, colors(false)).expect("默认布局应能渲染");
-        let elk = render_svg(&elk_src, colors(false)).expect("layout: elk 应退回 dagre 渲染");
+        let elk = render_svg(&elk_src, colors(false)).expect("layout: elk 应退回 dagre");
         let dagre = render_svg(&dagre_src, colors(false)).expect("layout: dagre 应能渲染");
-        assert_gpui_usvg_parses("layout-elk", &elk);
+        usvg::Tree::from_str(&elk, &usvg::Options::default()).expect("usvg 解析");
 
-        let dagre_box = parse_viewbox_size(&dagre).expect("dagre 应有 viewBox");
-        assert_eq!(
-            parse_viewbox_size(&plain),
-            Some(dagre_box),
-            "默认应是 dagre"
-        );
-        assert_eq!(
-            parse_viewbox_size(&elk),
-            Some(dagre_box),
-            "elk 请求应退回 dagre"
-        );
-    }
-
-    /// gpui-pre 0.3.12 栅格化 SVG 用的就是 usvg 0.46。这里用同一份 crate 解析，
-    /// 确认 `resvg_safe` 的输出不会被这版 usvg 拒掉。
-    fn assert_gpui_usvg_parses(name: &str, svg: &str) {
-        let options = usvg::Options::default();
-        usvg::Tree::from_str(svg, &options)
-            .unwrap_or_else(|err| panic!("{name} 用 usvg 0.46 解析失败: {err}"));
+        let dagre_box = parse_viewbox_size(&dagre).expect("dagre viewBox");
+        assert_eq!(parse_viewbox_size(&plain), Some(dagre_box));
+        assert_eq!(parse_viewbox_size(&elk), Some(dagre_box));
     }
 }

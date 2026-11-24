@@ -200,6 +200,29 @@ test("行内改名：没改不发，会话清空回到运行时的名字，工�
   expect(host.calls).toStrictEqual([
     [null, "workspace.rename", { conversation_id: "p", terminal_id: null, title: "新名" }],
     [null, "workspace.rename", { conversation_id: "p", terminal_id: null, title: null }],
-    [null, "workspace.workset.rename", { workset_id: "ws", task: "fix it" }],
+    [null, "workspace.workset.rename_preserving_branch", { workset_id: "ws", task: "fix it" }],
+  ]);
+});
+
+test("启动时对端命令尚未登记不弹错，commands_changed 到来后再补拉", async () => {
+  const registered = new Set();
+  const host = fake_host();
+  host.command = (id) => (registered.has(id) ? { id } : null);
+  host.answers = {
+    "smelt.sessions/selection": { kind: "none" },
+    "smelt.agents/agent-settings": [],
+  };
+  const sessions = list(host);
+  await sessions.start();
+  expect(host.runs).toStrictEqual([]);
+  expect(sessions.agent_settings_failure).toBeNull();
+
+  registered.add("smelt.sessions/selection");
+  registered.add("smelt.agents/agent-settings");
+  sessions.on_event({ type: "commands_changed" });
+  await Promise.resolve();
+  expect(host.runs.map(([cmd]) => cmd)).toStrictEqual([
+    "smelt.sessions/selection",
+    "smelt.agents/agent-settings",
   ]);
 });

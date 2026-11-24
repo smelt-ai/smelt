@@ -21,6 +21,7 @@ import {
   stableMemo,
   state as hostState,
   t,
+  currentTheme,
   text,
   viewShown,
 } from "smelt/sdk";
@@ -125,7 +126,6 @@ bootTask(async () => {
   syncMachineProbes();
 });
 
-const currentTheme = stableMemo(() => hostState().theme);
 
 type ClosedState =
   | { kind: "proxy"; error: string }

@@ -16,10 +16,13 @@ smelt-ui = { path = "../smelt-ui" }
 smelt-buddy = { path = "../smelt-buddy" }
 smelt-desktop = { path = "../smelt-desktop" }
 smelt-terminal = { path = "../smelt-terminal" }
+smelt-acp = { path = "../smelt-acp" }
 smelt-plugin-api = { path = "../smelt-plugin-api" }
 # 跑 JS + SVG + 一等文本/代码/差异视图（`Editor`、`DiffView`、`TextView` + `syntect` 语法高亮）。
 nsh-platform-gpui = { version = "=0.6.1", default-features = false, features = ["js", "svg", "editor", "highlight"] }
-nsh-core = { version = "=0.6.1", features = ["svg"] }
+nsh-core = { version = "=0.6.1", features = ["svg", "declarations"] }
+# 离线插件类型声明与 QuickJS 字节码编译校验（关掉 zlib/crypto，和引擎特性一致）。
+nsh-js = { version = "=0.6.1", default-features = false }
 # `Policy`：平台 crate 没有再导出。
 nsh-engine = { version = "=0.6.1", default-features = false, features = ["js-core"] }
 nsh-base = { version = "=0.6.1", default-features = false, features = ["editor", "highlight"] }

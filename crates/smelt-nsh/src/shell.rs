@@ -26,7 +26,7 @@ use crate::{
     apply_theme,
     components::BackdropHooks,
     host,
-    manifest::{LoadedPluginInfo, ShellLive, ShellUpdate, SourceDir},
+    manifest::{LoadedPluginInfo, ShellLive, ShellSource, ShellUpdate, SourceDir},
     plugins::{PluginHost, PluginLifecycle},
     register_components,
     shell_layout::{
@@ -37,7 +37,8 @@ use crate::{
     store, ui_sets,
 };
 
-const MAIN_SHELL: &str = include_str!("../shell/MainShell.tsx");
+pub(crate) const MAIN_SHELL_BYTECODE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/main-shell/bundle.nshc"));
 
 /// 传给主壳的本地化界面文案（由 `crates/smelt` 按当前语言填入）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,6 +143,8 @@ pub struct MainShell {
     theme_owners: Vec<String>,
     /// 首批启动扫描中尚未报就绪或失败的脚本插件 id；`None` 表示首批扫描尚未送达。
     initial_pending: Option<BTreeSet<String>>,
+    /// 因覆写版启动崩溃正在自动回退到自带版的插件 id。
+    pending_fallback: BTreeSet<String>,
     /// 首批脚本插件是否已全部落定（就绪、失败或无脚本插件）。
     initial_ready: bool,
     /// 当前绑定窗口的材质分块回调（关窗重开时通过 `attach_window` / `detach_window` 切换，不重建引擎）。
@@ -156,7 +159,7 @@ pub struct MainShell {
     pending_events: Vec<HostEvent>,
     /// 绑定在当前主窗口上的激活/尺寸/外观观察器；关窗时清空，重开窗口时挂到新窗口。
     window_subs: Vec<Subscription>,
-    _live: ShellLive,
+    live: ShellLive,
     _tasks: [Task<()>; 3],
     _subscriptions: [Subscription; 3],
 }
@@ -236,7 +239,13 @@ impl MainShell {
 
         let (updates_tx, mut updates_rx) = mpsc::unbounded_channel::<ShellUpdate>();
         let stage = std::env::temp_dir().join(format!("smelt-nsh-shell-{}", uuid::Uuid::new_v4()));
-        let live = ShellLive::start(config.sources, stage, MAIN_SHELL, ui_sets(), updates_tx);
+        let live = ShellLive::start(
+            config.sources,
+            stage,
+            ShellSource::Bytecode(MAIN_SHELL_BYTECODE),
+            ui_sets(),
+            updates_tx,
+        );
 
         let installing = cx.spawn(async move |this, cx| {
             while let Some(update) = updates_rx.recv().await {
@@ -266,7 +275,10 @@ impl MainShell {
                     }
                 });
                 if any_view_reg {
-                    let _ = this.update(cx, |this, cx| this.schedule_publish(cx));
+                    let _ = this.update(cx, |this, cx| {
+                        this.schedule_publish(cx);
+                        cx.emit(MainShellEvent::PluginsChanged);
+                    });
                 }
             }
         });
@@ -328,6 +340,7 @@ impl MainShell {
             runtime_errors: BTreeMap::new(),
             theme_owners: Vec::new(),
             initial_pending: None,
+            pending_fallback: BTreeSet::new(),
             initial_ready: false,
             backdrop_hooks,
             app_dirty,
@@ -335,7 +348,7 @@ impl MainShell {
             flush_scheduled: false,
             pending_events: Vec::new(),
             window_subs: Vec::new(),
-            _live: live,
+            live,
             _tasks: [installing, serving, handling_shell],
             _subscriptions: [themed, events, app_obs],
         };
@@ -423,6 +436,7 @@ impl MainShell {
             self.initial_pending = Some(initial_scripts.into_iter().collect());
         }
 
+        let mut installed_ids = BTreeSet::new();
         let mut pending_texts = update.texts;
         for change in update.changes {
             match &change {
@@ -433,6 +447,8 @@ impl MainShell {
                 }
                 crate::plugins::Change::Install(compiled) => {
                     let id = compiled.id().to_owned();
+                    installed_ids.insert(id.clone());
+                    self.pending_fallback.remove(&id);
                     self.runtime_errors.remove(&id);
                     // 重新装载前先撤掉旧一版的登记，避免重载去掉某个视图/命令后残留；
                     // 随后立即写入新版文案，再启动新 VM，防止旧清理把刚读出的文案抹掉。
@@ -441,7 +457,10 @@ impl MainShell {
                         self.bridge.set_texts(&id, texts);
                     }
                 }
-                crate::plugins::Change::Remove(_) => {}
+                crate::plugins::Change::Remove(id) => {
+                    self.pending_fallback.remove(id);
+                    self.bridge.forget_plugin(id);
+                }
             }
             self.app.update(cx, |view, _| {
                 self.plugins.apply(view, change);
@@ -452,6 +471,12 @@ impl MainShell {
             .loaded
             .into_iter()
             .map(|mut info| {
+                if info.fallback_to_builtin
+                    && self.pending_fallback.remove(&info.id)
+                    && !installed_ids.contains(&info.id)
+                {
+                    self.settle_initial_plugin(&info.id, cx);
+                }
                 if info.error.is_none()
                     && let Some(err) = theme_errors.remove(&info.id)
                 {
@@ -525,7 +550,7 @@ impl MainShell {
                 cx.emit(MainShellEvent::StateChanged);
             }
             ShellInput::Lifecycle(PluginLifecycle::Ready { plugin, views }) => {
-                self.runtime_errors.remove(&plugin);
+                let cleared_error = self.runtime_errors.remove(&plugin).is_some();
                 let has_root = views.iter().any(|v| v == "root");
                 let changed = if has_root {
                     self.plugin_roots.insert(plugin.clone())
@@ -535,15 +560,29 @@ impl MainShell {
                 if changed {
                     self.schedule_publish(cx);
                 }
+                if cleared_error {
+                    cx.emit(MainShellEvent::PluginsChanged);
+                }
                 self.settle_initial_plugin(&plugin, cx);
             }
             ShellInput::Lifecycle(PluginLifecycle::Fatal { plugin, message }) => {
                 self.plugin_roots.remove(&plugin);
-                self.runtime_errors.insert(plugin.clone(), message);
                 self.bridge.unregister_plugin(&plugin, cx);
+                let can_fallback = self.loaded_plugins.iter().any(|info| {
+                    info.id == plugin && info.overrides_builtin && !info.fallback_to_builtin
+                });
+                if can_fallback {
+                    eprintln!(
+                        "[smelt-nsh] 用户覆写插件 {plugin} 运行崩溃，已请求自动回退自带版本：{message}"
+                    );
+                    self.pending_fallback.insert(plugin.clone());
+                    self.live.request_builtin_fallback(plugin, message);
+                } else {
+                    self.runtime_errors.insert(plugin.clone(), message);
+                    self.settle_initial_plugin(&plugin, cx);
+                }
                 self.schedule_publish(cx);
                 cx.emit(MainShellEvent::PluginsChanged);
-                self.settle_initial_plugin(&plugin, cx);
             }
         }
     }
@@ -752,12 +791,13 @@ impl MainShell {
         &self.app
     }
 
-    /// 供设置「面板插件」页展示的已发现插件清单（含编译或运行错误）。
+    /// 供设置「面板插件」页展示的已发现插件清单（含编译或运行错误及已登记视图）。
     pub fn installed_plugins(&self) -> Vec<LoadedPluginInfo> {
         self.loaded_plugins
             .iter()
             .cloned()
             .map(|mut info| {
+                info.views = self.bridge.views_of(&info.id);
                 if info.error.is_none()
                     && let Some(err) = self.runtime_errors.get(&info.id)
                 {

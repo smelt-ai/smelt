@@ -48,7 +48,7 @@ export function describe(result, t) {
     else state = t("workset.merged");
     return t("workset.repository_state", { name: repository.name, state });
   });
-  if (result.refresh_failures.length > 0) lines.push(t("workset.refresh_failed"));
+  if ((result.refresh_failures?.length ?? 0) > 0) lines.push(t("workset.refresh_failed"));
   return lines;
 }
 

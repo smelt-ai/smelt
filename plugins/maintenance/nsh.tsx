@@ -16,6 +16,7 @@ import {
   stableMemo,
   state as hostState,
   t,
+  currentTheme,
   text,
   viewShown,
 } from "smelt/sdk";
@@ -212,7 +213,6 @@ bootTask(async () => {
   syncVisibility();
 });
 
-const currentTheme = stableMemo(() => hostState().theme);
 
 function PageShell(props: { children?: any }) {
   return (

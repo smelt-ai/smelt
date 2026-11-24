@@ -1,5 +1,5 @@
-# 共享 GPUI UI 基建：主 GUI 和 acp-view 渲染层都要用的一批组件/工具
-# （语义色板、markdown+mermaid 渲染、@/ 补全）。
+# 共享 GPUI UI 基建：主 GUI 与宿主能力层共用的一批组件/工具
+# （语义色板、纯 Rust Mermaid SVG 渲染、主题目录、基础弹窗与控件）。
 # 允许引 GPUI（跟 smelt-core 的边界不同）——这里不是 GUI 无关的纯逻辑，而是
 # 「不属于哪个具体页面、被多处复用」的 UI 层基建。
 # 只放界面：不依赖客户端库和运行时客户端，跨功能共享的状态在 smelt-app-state。
@@ -35,54 +35,12 @@ usvg = "=0.46.0"
 # usvg 0.46 已经依赖 rustybuzz 0.20.1，显式依赖是为了用 Face 量 advance。
 rustybuzz = "=0.20.1"
 sha2.workspace = true
+base64.workspace = true
 hex = "0.4"
 # 图片显示统一抽象（image.rs）：ACP 图片解码 + 降采样。与 smelt 主 crate 同
 # 版本（0.25、默认关全格式），features 保持 png/jpeg/gif/webp——Bmp/Tiff 等
 # 格式当前调用方不会遇到，不为此扩大解码面。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-# 代码语法高亮（syntax/）：文件页的代码编辑器、Markdown 代码块、差异视图共用一套。
-tree-sitter = "0.27.2"
-# 语法包导出的语言入口类型（`LanguageFn`），tree-sitter 本身不再导出它。
-tree-sitter-language = "0.1"
-# 编辑器的语言服务里 Python 的缩进规则（syntax/editing.rs）。
-regex = "1"
-# 差异视图（diff/）：行内改动按词或字比对、按字素切分、按显示宽度估列宽，行内小数组。
-similar = { workspace = true, features = ["unicode"] }
-unicode-segmentation = "1"
-unicode-width = "0.2"
-smallvec = "1"
-tree-sitter-astro-next = "0.1.1"
-tree-sitter-bash = "0.25.1"
-tree-sitter-c = "0.24.1"
-tree-sitter-c-sharp = "0.23.1"
-tree-sitter-cmake = "0.7.1"
-tree-sitter-cpp = "0.23.4"
-tree-sitter-css = "0.25.0"
-tree-sitter-diff = "0.1.0"
-tree-sitter-elixir = "0.3"
-tree-sitter-embedded-template = "0.25.0"
-tree-sitter-go = "0.25.0"
-tree-sitter-html = "0.23.2"
-tree-sitter-java = "0.23.5"
-tree-sitter-javascript = "0.25.0"
-tree-sitter-jsdoc = "0.25.0"
-tree-sitter-json = "0.24.8"
-tree-sitter-kotlin-sg = "0.4.0"
-tree-sitter-lua = "0.5.0"
-tree-sitter-make = "1.1.1"
-tree-sitter-md = "0.5.1"
-tree-sitter-php = "0.25.1"
-tree-sitter-python = "0.25.0"
-tree-sitter-ruby = "0.23.1"
-tree-sitter-rust = "0.24.0"
-tree-sitter-scala = "0.26.13"
-tree-sitter-sequel = "0.3.8"
-tree-sitter-svelte-next = "0.1.1"
-tree-sitter-swift = "0.7.0"
-tree-sitter-toml-ng = "0.7.0"
-tree-sitter-typescript = "0.23.2"
-tree-sitter-yaml = "0.7.1"
-tree-sitter-zig = "1.1.2"
 # 界面文案（locales/ui.yml，见 docs/i18n.md）。
 rust-i18n.workspace = true
 

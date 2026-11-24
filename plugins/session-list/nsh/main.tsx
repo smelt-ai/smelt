@@ -40,6 +40,7 @@ import {
   fetchContextMenuItems,
   hostAdapter,
   list,
+  machineMenuVersion,
   registerFocusCallback,
   space,
   t,
@@ -455,23 +456,42 @@ function InlineRenameInput(props: {
   onCancel: () => void;
 }) {
   const look = () => theme();
+  const anchorEl = signal<any>(null);
+  let inputEl: any = null;
+  let initialSelected = false;
+  let edited = false;
   return (
     <View
+      ref={(el: any) => anchorEl.set(el ?? null)}
       class="flex-1 min-w-0"
       onPress={(e: any) => e?.stopPropagation?.()}
       onPressDown={(e: any) => e?.stopPropagation?.()}
     >
       <Input
+        ref={(el: any) => {
+          inputEl = el ?? null;
+          // 同步请求焦点，保证右键菜单关闭时的 focus_back 不会把焦点抢回行容器。
+          el?.focus?.();
+        }}
         testID="inline-rename-input"
+        accessibilityLabel={t("menu.rename")}
         autoFocus={true}
         value={props.rename()?.value ?? ""}
-        onChange={({ value }: { value: string }) => props.onChange(value)}
+        onLayout={() => {
+          // 滚动容器开启 content_culling 时，首轮 commit 的 Command 早于 InputValue 下发；
+          // 在首帧 onLayout 回调里执行 setSelection，会在同一 engine 帧末尾紧跟 InputValue 合并下发。
+          if (initialSelected || edited || !inputEl) return;
+          initialSelected = true;
+          const len = props.rename()?.value.length ?? 0;
+          if (len > 0) inputEl.setSelection?.(0, len);
+        }}
+        onChange={({ value }: { value: string }) => {
+          edited = true;
+          props.onChange(value);
+        }}
         onSubmit={() => props.onCommit()}
         onBlur={() => props.onCommit()}
         onKeyPress={(e: any) => {
-          if (e?.key === "Escape") props.onCancel();
-        }}
-        onKeyDown={(e: any) => {
           if (e?.key === "Escape") props.onCancel();
         }}
         class="rounded-(--radius) border border-input bg-card px-1.5 text-foreground"
@@ -481,6 +501,77 @@ function InlineRenameInput(props: {
           lineHeight: look().type.ui.line_height,
         }}
       />
+      <If when={anchorEl() != null}>
+        <Overlay
+          anchor={anchorEl()}
+          onPressOutside={() => props.onCommit()}
+          onCancel={() => props.onCancel()}
+          style={{ width: 0, height: 0, pointerEvents: "none" }}
+        />
+      </If>
+    </View>
+  );
+}
+
+function ProjectSearchInput(props: {
+  value: () => string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onClose: () => void;
+  onClearAndClose: () => void;
+}) {
+  const look = () => theme();
+  const anchorEl = signal<any>(null);
+  const focused = signal(true);
+  let inputEl: any = null;
+  return (
+    <View
+      ref={(el: any) => anchorEl.set(el ?? null)}
+      class="flex-1 min-w-0"
+      style={{ marginLeft: -6 }}
+      onPressDown={(e: any) => e?.stopPropagation?.()}
+    >
+      <Input
+        ref={(el: any) => {
+          inputEl = el ?? null;
+          el?.focus?.();
+        }}
+        testID="project-search-input"
+        autoFocus={true}
+        placeholder={t("list.search_projects")}
+        value={props.value()}
+        onChange={({ value }: { value: string }) => props.onChange(value)}
+        onSubmit={() => props.onSubmit()}
+        onFocus={() => focused.set(true)}
+        onBlur={() => {
+          focused.set(false);
+          if (props.value().trim() === "") props.onClose();
+        }}
+        onKeyPress={(e: any) => {
+          if (e?.key === "Escape") props.onClearAndClose();
+        }}
+        class="rounded-(--radius) border border-input bg-card px-1.5 text-foreground"
+        style={{
+          height: 22,
+          fontSize: look().type.text_xsmall.size,
+          lineHeight: look().type.text_xsmall.line_height,
+        }}
+      />
+      <If when={anchorEl() != null && (focused() || props.value().trim() === "")}>
+        <Overlay
+          anchor={anchorEl()}
+          onPressOutside={() => {
+            if (props.value().trim() === "") {
+              props.onClose();
+            } else {
+              focused.set(false);
+              inputEl?.blur?.();
+            }
+          }}
+          onCancel={() => props.onClearAndClose()}
+          style={{ width: 0, height: 0, pointerEvents: "none" }}
+        />
+      </If>
     </View>
   );
 }
@@ -677,7 +768,7 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
           ref={(el: any) => props.registerRowRef(id(), el)}
           role="button"
           testID={`session-row:${row().key.id}`}
-          tooltip={row().tooltip ? <Tip text={row().tooltip} /> : undefined}
+          tooltip={props.rename() == null && row().tooltip ? <Tip text={row().tooltip} /> : undefined}
           onLayout={({ bounds }: any) => {
             if (bounds?.size) {
               rowWidth = bounds.size.width;
@@ -752,7 +843,11 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
             when={hasAvatar()}
             else={
               <View
-                tooltip={providerTip(row().icon) ? <Tip text={providerTip(row().icon)!} /> : undefined}
+                tooltip={
+                  props.rename() == null && providerTip(row().icon) ? (
+                    <Tip text={providerTip(row().icon)!} />
+                  ) : undefined
+                }
                 style={{
                   width: LEAD,
                   height: LEAD,
@@ -772,7 +867,11 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
             }
           >
             <View
-              tooltip={providerTip(row().icon) ? <Tip text={providerTip(row().icon)!} /> : undefined}
+              tooltip={
+                props.rename() == null && providerTip(row().icon) ? (
+                  <Tip text={providerTip(row().icon)!} />
+                ) : undefined
+              }
               style={{
                 position: "relative",
                 width: AVATAR,
@@ -1511,7 +1610,7 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
           <View
             ref={(el: any) => props.registerRowRef(key(), el)}
             role="button"
-            tooltip={workset().tooltip ? <Tip text={workset().tooltip} /> : undefined}
+            tooltip={props.rename() == null && workset().tooltip ? <Tip text={workset().tooltip} /> : undefined}
             onPress={() => {
               if (renaming() || !collapsible()) return;
               list.set_collapsed(
@@ -1714,7 +1813,7 @@ function MachineHeaderRow(props: {
   };
 
   effect(() => {
-    tick();
+    machineMenuVersion();
     loadMenu();
   });
 
@@ -2149,6 +2248,11 @@ export function main() {
     cleanup(unsub);
   });
 
+  effect(() => {
+    machineMenuVersion();
+    refreshMachinesMenu();
+  });
+
   // 跟踪侧栏与选中变化：驱动 FLIP 布局弹簧动画、新落进/定位铺底、刚开跑图标提亮、自动滚入可视区与离屏胶囊。
   effect(() => {
     tick();
@@ -2182,7 +2286,6 @@ export function main() {
         revealRow(key);
       }
       motionTick.set(motionTick() + 1);
-      refreshMachinesMenu();
       recomputeOffscreen();
     } else if (list.located) {
       const key = session_flip(list.located);
@@ -2509,41 +2612,19 @@ export function main() {
           </View>
         }
       >
-        <View
-          class="flex-1 min-w-0"
-          style={{ marginLeft: -6 }}
-          onPressDown={(e: any) => e?.stopPropagation?.()}
-        >
-          <Input
-            testID="project-search-input"
-            autoFocus={true}
-            placeholder={t("list.search_projects")}
-            value={list.project_filter}
-            onChange={({ value }: { value: string }) => list.set_project_filter(value)}
-            onSubmit={() => rootRef?.focus?.()}
-            onBlur={() => {
-              if (list.project_filter.trim() === "") searching.set(false);
-            }}
-            onKeyPress={(e: any) => {
-              if (e?.key === "Escape") {
-                searching.set(false);
-                list.set_project_filter("");
-              }
-            }}
-            onKeyDown={(e: any) => {
-              if (e?.key === "Escape") {
-                searching.set(false);
-                list.set_project_filter("");
-              }
-            }}
-            class="rounded-(--radius) border border-input bg-card px-1.5 text-foreground"
-            style={{
-              height: 22,
-              fontSize: look().type.text_xsmall.size,
-              lineHeight: look().type.text_xsmall.line_height,
-            }}
-          />
-        </View>
+        <ProjectSearchInput
+          value={() => {
+            tick();
+            return list.project_filter;
+          }}
+          onChange={(value) => list.set_project_filter(value)}
+          onSubmit={() => rootRef?.focus?.()}
+          onClose={() => searching.set(false)}
+          onClearAndClose={() => {
+            searching.set(false);
+            list.set_project_filter("");
+          }}
+        />
       </If>
 
       <View
@@ -2593,6 +2674,7 @@ export function main() {
         rootRef = el;
       }}
       testID="session-list-root"
+      focusable={true}
       style={{
         flex: 1,
         minHeight: 0,
@@ -2631,10 +2713,10 @@ export function main() {
           }
           return;
         }
-        if ((e?.modifiers?.meta || e?.modifiers?.ctrl || e?.modifiers?.platform) && e?.key === "ArrowUp") {
+        if ((e?.modifiers?.platform || e?.modifiers?.control) && e?.key === "ArrowUp") {
           list.step_session(false).catch(() => {});
         } else if (
-          (e?.modifiers?.meta || e?.modifiers?.ctrl || e?.modifiers?.platform) &&
+          (e?.modifiers?.platform || e?.modifiers?.control) &&
           e?.key === "ArrowDown"
         ) {
           list.step_session(true).catch(() => {});

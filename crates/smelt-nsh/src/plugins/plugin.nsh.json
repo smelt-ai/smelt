@@ -1,0 +1,33 @@
+{
+  "resolve": {
+    "alias": {
+      "smelt/sdk": "./sdk.tsx"
+    }
+  },
+  "theme": {
+    "cssVars": {
+      "light": {
+        "faint": "#8f8f8f",
+        "link": "#0070f3",
+        "run": "#2563eb",
+        "need": "#d97706",
+        "ok": "#16a34a",
+        "bad": "#dc2626",
+        "on-bad": "#ffffff",
+        "soft-hover": "#e5e5e5",
+        "row-selected": "#00000014"
+      },
+      "dark": {
+        "faint": "#808080",
+        "link": "#38bdf8",
+        "run": "#60a5fa",
+        "need": "#f59e0b",
+        "ok": "#22c55e",
+        "bad": "#f87171",
+        "on-bad": "#ffffff",
+        "soft-hover": "#2e2e2e",
+        "row-selected": "#ffffff1c"
+      }
+    }
+  }
+}

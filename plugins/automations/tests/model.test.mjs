@@ -230,7 +230,6 @@ describe("contract & locales", () => {
     expect(contract.AGENTS_VIEW).toBe("smelt.agents/main");
     expect(contract.AGENT_SETTINGS_CMD).toBe("smelt.agents/agent-settings");
     expect(contract.AGENT_SETTINGS_CHANGED_EVENT).toBe("smelt.agents/agent-settings-changed");
-    expect(contract.CONVERSATION_VIEW).toBe("smelt.conversation/conversation");
     expect(contract.OPEN_VIEW_CMD).toBe("smelt.app/open-view");
     expect(contract.NOTIFY_CMD).toBe("smelt.app/notify");
     expect(contract.WITHDRAW_NOTIFICATION_CMD).toBe("smelt.app/withdraw-notification");

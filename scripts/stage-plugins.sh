@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 把仓库里的自带 JS 插件（plugins/<名字>/，有 smelt-plugin.json 的才算）放进安装包：
-# macOS 是 Smelt.app/Contents/Resources/plugins，Windows 是安装目录下的 plugins。
-# 发版的 App 从那里只读加载（crates/smelt/src/plugins/builtin.rs）。
-#
-# 拷哪些文件按 .gitignore 定（编辑器生成的类型声明、node_modules 都在里面），另外跳过 tests/：
-# 测试和它用的宿主模块替身只在仓库里跑。
+# 把仓库里的自带 JS 插件（plugins/<名字>/，有 smelt-plugin.json 的才算）预编译成 QuickJS 字节码并
+# 放进安装包目录（macOS 是 Smelt.app/Contents/Resources/plugins，Windows 是安装目录下的 plugins）：
+# - 脚本插件产出 bundle.nshc + bundle.meta.json，并保留插件源码与 locales/、themes/（不带 tests/、
+#   *.test.*、dotfiles、node_modules），让发版包冷启零打包加载，同时支持 `smelt plugin fork`；
+# - 纯主题插件产出 smelt-plugin.json + locales/ + 主题 json；
+# 发版的 App 从那里只读、零打包加载（crates/smelt/src/plugins/builtin.rs）。
 #
 # 用法：scripts/stage-plugins.sh <目标 plugins 目录>（整个替换）
 set -euo pipefail
@@ -12,21 +12,25 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${1:?用法：scripts/stage-plugins.sh <目标 plugins 目录>}"
 
-rm -rf "$DEST"
-mkdir -p "$DEST"
-cd "$ROOT"
-git ls-files -co --exclude-standard -z -- plugins | while IFS= read -r -d '' file; do
-  # 已经在工作区删掉的跟踪文件。
-  [[ -f "$file" ]] || continue
-  rel="${file#plugins/}"
-  name="${rel%%/*}"
-  [[ -f "plugins/${name}/smelt-plugin.json" ]] || continue
-  case "${rel#*/}" in
-    tests/*) continue ;;
-  esac
-  mkdir -p "$DEST/$(dirname "$rel")"
-  cp "$file" "$DEST/$rel"
-done
+SMELT_BIN="${SMELT_BIN:-}"
+if [[ -z "$SMELT_BIN" ]]; then
+  TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+  if [[ -x "$TARGET_DIR/release/smelt" ]]; then
+    SMELT_BIN="$TARGET_DIR/release/smelt"
+  elif [[ -f "$TARGET_DIR/release/smelt.exe" ]]; then
+    SMELT_BIN="$TARGET_DIR/release/smelt.exe"
+  fi
+fi
+
+if [[ -z "$SMELT_BIN" || ! -e "$SMELT_BIN" ]]; then
+  echo "✗ 缺少 release 版 smelt 可执行文件（用于预编译内置插件字节码），先跑 make build 或 cargo build --release --bin smelt" >&2
+  exit 1
+fi
+
+"$SMELT_BIN" plugin stage "$ROOT/plugins" "$DEST" >/dev/null
 for dir in "$DEST"/*/; do
-  [[ -d "$dir" ]] && echo "  … 打包插件：$(basename "$dir")"
+  if [[ -d "$dir" ]]; then
+    name="$(basename "$dir")"
+    echo "  … 预编译插件：${name}"
+  fi
 done

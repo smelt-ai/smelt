@@ -14,7 +14,7 @@ description: >-
 - `crates/` 按层次和能力分、不按功能分（线上格式、共享类型、运行时内部、客户端访问、存储、组件库、插件接口与各能力 crate），应用（`smelt`、`smeltd`、`smelt-mobile`、`smelt-push-relay`）只做组装，不含功能代码。
 - Rust 不认识任何插件：不写插件的视图、命令、布局 id，删掉任意插件 Rust 不用改一行。
 - `smelt-model` 只放至少两端（运行时、桌面、手机）都用到的类型和纯函数。
-- `crates/plugins/` 是过渡期：只依赖 `smelt-plugin-api`，宿主只调它的 `register`；修 bug 可就地改，加功能先按 `docs/app-plugins.md` 拆成「Rust 能力 + JS 插件」。依赖规则由 `scripts/lint-crate-deps.sh` 在 CI 中检查。
+- `plugins/` 承载全部 JS/TSX 应用插件（由 `crates/smelt-nsh` 运行时打包并在独立 QuickJS VM 中执行）；`crates/` 仅保留桌面宿主与能力 crate，新增/拆分功能先按 `docs/app-plugins.md` 区分「Rust 能力 + JS 插件」。crate 依赖规则由 `scripts/lint-crate-deps.sh` 检查。
 
 ## render 只读内存，不做 IO
 

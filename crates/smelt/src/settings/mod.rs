@@ -121,7 +121,10 @@ fn registered_theme_entries(cx: &App) -> Vec<smelt_model::theme_index::ThemeEntr
                 "light"
             }
             .into(),
-            family: scoped_theme_family(theme.owner.as_ref().map(|owner| owner.as_ref()), &theme.family),
+            family: scoped_theme_family(
+                theme.owner.as_ref().map(|owner| owner.as_ref()),
+                &theme.family,
+            ),
         })
         .collect()
 }
@@ -230,8 +233,8 @@ pub fn load_appearance() -> Appearance {
 }
 
 fn save_appearance(appearance: &Appearance) {
-    if let Err(error) = smelt_client_store::client_store()
-        .and_then(|store| save_appearance_on(appearance, store))
+    if let Err(error) =
+        smelt_client_store::client_store().and_then(|store| save_appearance_on(appearance, store))
     {
         eprintln!("[storage] 保存外观设置失败: {error}");
     }

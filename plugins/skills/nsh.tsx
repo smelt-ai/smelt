@@ -18,6 +18,8 @@ import {
   stableMemo,
   state,
   t,
+  currentTheme,
+  DIALOG_SURFACE_CLASS,
   text,
   viewShown,
 } from "smelt/sdk";
@@ -93,7 +95,6 @@ const EMPTY_PLAN: PlanState = {
 
 // ---- 全局状态 ----
 
-const currentTheme = stableMemo(() => state().theme);
 const scanData = signal<ScanData>(EMPTY_SCAN);
 const loading = signal(false);
 const offline = signal(false);
@@ -819,7 +820,7 @@ function ImportDialog() {
       onOpenChange={({ open }: { open: boolean }) => {
         if (!open && !importPicking() && !importSubmitting()) closeImportDialog();
       }}
-      class="m-auto rounded-(--radius) border border-border bg-popover p-5"
+      class={`m-auto ${DIALOG_SURFACE_CLASS} p-5`}
       style={{ width: 520, gap: 14 }}
     >
       <If when={importing()}>
@@ -1695,7 +1696,7 @@ export function main() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) deleteDialog.set(null);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 420, gap: 12 }}
       >
         <If when={deleteDialog() != null}>
@@ -1752,7 +1753,7 @@ export function main() {
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) pruneDialogOpen.set(false);
         }}
-        class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
         style={{ width: 420, gap: 12 }}
       >
         <If when={pruneDialogOpen()}>

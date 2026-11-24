@@ -3,6 +3,7 @@ import { computed, Scroll, signal, Text, View } from "nsh";
 import { Dialog, Popover, Radio, Tooltip } from "nsh/base";
 import {
   call,
+  DIALOG_SURFACE_CLASS,
   initHost,
   machines as hostMachines,
   onState,
@@ -16,9 +17,10 @@ import {
   safeArea,
   SmeltButton,
   SmeltIcon,
-  state,
   t,
   text,
+  theme,
+  TOOLTIP_CLASS,
   workspaceDirectory,
 } from "smelt/sdk";
 
@@ -130,7 +132,7 @@ type DialogState =
 export function button() {
   const popoverOpen = signal(false);
   const dialog = signal<DialogState | null>(null);
-  const look = computed(() => state().theme);
+  const look = theme;
   const insets = computed(() => safeArea(BUTTON).bar_insets);
   const list = computed(() => archivedMachines());
   const totalCount = computed(() => {
@@ -188,14 +190,8 @@ export function button() {
           placement="top"
           align="start"
           offset={6}
-          popupStyle={{
-            width: POPOVER_WIDTH,
-            padding: 4,
-            borderRadius: look().radius.md,
-            backgroundColor: look().palette.surface,
-            borderWidth: 1,
-            borderColor: look().palette.hair_strong,
-          }}
+          popupClass="rounded-xl border border-border bg-popover p-1 shadow-lg"
+          popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
             <SmeltButton
               quiet={true}
@@ -280,7 +276,7 @@ export function button() {
                               <View
                                 style={{ paddingLeft: 8, paddingRight: 8 }}
                                 tooltip={
-                                  <Tooltip class="px-2 py-1 rounded bg-popover border border-border">
+                                  <Tooltip class={TOOLTIP_CLASS}>
                                     <Text style={{ fontSize: look().type.text_xsmall.size, color: p().text }}>
                                       {project().root}
                                     </Text>
@@ -415,17 +411,8 @@ export function button() {
       >
         {dialog() ? (
           <View
-            style={{
-              width: CONFIRM_WIDTH,
-              padding: 20,
-              borderRadius: look().radius.md,
-              backgroundColor: look().palette.surface,
-              borderWidth: 1,
-              borderColor: look().palette.hair_strong,
-              display: "flex",
-              flexDirection: "column",
-              gap: 12,
-            }}
+            class={`${DIALOG_SURFACE_CLASS} p-5 flex-col gap-3`}
+            style={{ width: CONFIRM_WIDTH }}
           >
             <Text
               style={{

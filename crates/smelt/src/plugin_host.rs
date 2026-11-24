@@ -373,7 +373,6 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
         api::emit(HostEvent::SessionsChanged, cx)
     })
     .detach();
-    smelt_conversation::register(cx);
 }
 
 /// 此刻看得见的视图。摆视图的地方各报各的：主窗口报开着的那页里露着的视图（含出口里

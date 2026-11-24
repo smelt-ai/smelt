@@ -6,13 +6,17 @@ import { cleanup, computed, effect, host, signal, Text, View } from "nsh";
 import { DockArea } from "nsh/base";
 import { Slot } from "smelt/slots";
 import {
+  jsViews,
+  safeArea,
+  shellState,
   SmeltBackdropRegion,
   SmeltButton,
   SmeltNativeView,
   SmeltNativeWindowBar,
   SmeltNativeWindowDrag,
   stableMemo,
-  state,
+  theme as currentTheme,
+  views,
 } from "smelt/sdk";
 
 /** 外壳专用视图挂载：JS 插件走内部 `<Slot>`，宿主内置/Rust 视图走 `<SmeltNativeView>`。 */
@@ -23,7 +27,7 @@ function HostView(props: {
   style?: any;
 }) {
   const jsTargetKey = computed(() => {
-    const target = state().js_views?.[props.view];
+    const target = jsViews()?.[props.view];
     return target ? `${target.plugin}\0${target.view}` : "";
   });
   const jsPlugin = computed(() => {
@@ -155,10 +159,10 @@ function StackView(props: { node: StackNodeSpec }) {
 
 function OutletPanel(props: { pageKey: string }) {
   const outlet = computed(() => {
-    const pages = (state().shell as ShellSnapshot | undefined)?.pages ?? [];
+    const pages = (shellState() as ShellSnapshot | undefined)?.pages ?? [];
     return pages.find((p) => p.key === props.pageKey)?.outlet ?? null;
   });
-  const outletArea = stableMemo(() => state().safe_areas?.["smelt/outlet"] ?? { title_bar: false });
+  const outletArea = stableMemo(() => safeArea("smelt/outlet"));
   // 用纯字符串区分出口挂载方式：
   // - 单例 JS 视图（如会话页）：同视图切参数时字符串不变，绝不卸载重建；
   // - 按实例建的 JS 视图（如远程桌面）：每次打开（seq 递增）按语义建新实例。
@@ -166,8 +170,8 @@ function OutletPanel(props: { pageKey: string }) {
     const o = outlet();
     if (!o) return outletArea().title_bar ? "empty-bar" : "empty";
     if (o.managed_rust_instance) return "managed";
-    if (state().js_views?.[o.id]) {
-      const isInstance = Boolean(state().views?.find((v: any) => v.id === o.id)?.instances);
+    if (jsViews()?.[o.id]) {
+      const isInstance = Boolean(views()?.find((v: any) => v.id === o.id)?.instances);
       return isInstance ? `js-inst:${o.id}:${o.seq}` : `js:${o.id}`;
     }
     return `rust:${o.id}`;
@@ -227,21 +231,15 @@ function OutletPanel(props: { pageKey: string }) {
 
 function SettingsContentPanel() {
   const settingsPage = computed(
-    () => (state().shell as ShellSnapshot | undefined)?.settings_page ?? null,
+    () => (shellState() as ShellSnapshot | undefined)?.settings_page ?? null,
   );
   const settingsId = computed(() => settingsPage()?.id ?? "");
   const settingsTitle = computed(() => settingsPage()?.title ?? "");
-  const area = stableMemo(
-    () =>
-      state().safe_areas?.["smelt/settings"] ?? {
-        title_bar: false,
-        top_bar_insets: { left: 0, right: 0 },
-      },
-  );
-  const theme = stableMemo(() => state().theme);
+  const area = stableMemo(() => safeArea("smelt/settings") as any);
+  const theme = currentTheme;
   const emptyText = computed(
     () =>
-      (state().shell as ShellSnapshot | undefined)?.labels?.settings_page_gone ??
+      (shellState() as ShellSnapshot | undefined)?.labels?.settings_page_gone ??
       "Settings page unavailable",
   );
 
@@ -305,7 +303,7 @@ function SettingsContentPanel() {
 function PanelBody(props: { pageKey: string; panelId: string }) {
   // 只挑结构字段并按内容去重：仅切换会话或更新标题/角标时绝不重挂面板内容树。
   const bodySpec = stableMemo(() => {
-    const pages = (state().shell as ShellSnapshot | undefined)?.pages ?? [];
+    const pages = (shellState() as ShellSnapshot | undefined)?.pages ?? [];
     const m = pages.find((p) => p.key === props.pageKey)?.meta?.[props.panelId] ?? null;
     if (!m || m.kind === "placeholder") return { kind: "placeholder" as const };
     if (m.kind === "stack" && m.stack) return { kind: "stack" as const, stack: m.stack as StackNodeSpec };
@@ -338,7 +336,7 @@ function PageWorkspace(props: { pageKey: string }) {
     });
   });
   const page = computed(() => {
-    const pages = (state().shell as ShellSnapshot | undefined)?.pages ?? [];
+    const pages = (shellState() as ShellSnapshot | undefined)?.pages ?? [];
     return pages.find((p) => p.key === props.pageKey) ?? null;
   });
   const hasPage = computed(() => page() !== null);
@@ -367,9 +365,9 @@ function PageWorkspace(props: { pageKey: string }) {
     if (right && typeof right.open === "boolean") return right.open;
     return Boolean(page()?.right_dock);
   });
-  const theme = stableMemo(() => state().theme);
-  const labels = stableMemo(() => (state().shell as ShellSnapshot | undefined)?.labels);
-  const padding = computed(() => (state().shell as ShellSnapshot | undefined)?.padding ?? 0);
+  const theme = currentTheme;
+  const labels = stableMemo(() => (shellState() as ShellSnapshot | undefined)?.labels);
+  const padding = computed(() => (shellState() as ShellSnapshot | undefined)?.padding ?? 0);
 
   const reportLayout = (event: { layout?: any } | any) => {
     const nextLayout = event?.layout ?? event;
@@ -624,10 +622,10 @@ function PageWorkspace(props: { pageKey: string }) {
 
 export function Shell() {
   const pageKeys = stableMemo(() =>
-    ((state().shell as ShellSnapshot | undefined)?.pages ?? []).map((p) => p.key),
+    ((shellState() as ShellSnapshot | undefined)?.pages ?? []).map((p) => p.key),
   );
   const pluginRoots = stableMemo(
-    () => (state().shell as ShellSnapshot | undefined)?.plugin_roots ?? [],
+    () => (shellState() as ShellSnapshot | undefined)?.plugin_roots ?? [],
   );
 
   return (

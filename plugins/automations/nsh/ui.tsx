@@ -8,13 +8,17 @@ import {
   MenuSeparator,
   Switch,
 } from "nsh/base";
-import { SmeltButton, SmeltIcon, t } from "smelt/sdk";
+import {
+  DIALOG_SURFACE_CLASS,
+  MENU_ITEM_CLASS,
+  POPUP_CLASS,
+  SmeltButton,
+  SmeltIcon,
+  t,
+} from "smelt/sdk";
+export { MENU_ITEM_CLASS, POPUP_CLASS };
 import { deleteConfirmDescription } from "../model.js";
 import { confirmDeleteAutomation, currentTheme, deletePrompt } from "./state.ts";
-
-export const POPUP_CLASS = "rounded-(--radius) border border-border bg-popover p-1";
-export const MENU_ITEM_CLASS =
-  "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
 
 export function PageToolbar(props: {
   children?: any;
@@ -599,7 +603,7 @@ export function DeleteConfirmDialog() {
       onOpenChange={({ open }: { open: boolean }) => {
         if (!open) deletePrompt.set(null);
       }}
-      class="m-auto rounded-(--radius) border border-border bg-popover p-4"
+      class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
       style={{ width: 420, gap: 14 }}
     >
       <If when={prompt() != null}>

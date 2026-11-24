@@ -14,6 +14,8 @@ import {
   state as hostState,
   t,
   text,
+  theme,
+  TOOLTIP_CLASS,
   viewShown,
   waitOnline,
 } from "smelt/sdk";
@@ -224,7 +226,7 @@ function RingsCanvas(props: { rings: any[]; palette: any }) {
 
 export function bar() {
   const popoverOpen = signal(false);
-  const look = computed(() => hostState().theme);
+  const look = theme;
   const insets = computed(() => safeArea(BAR).bar_insets);
   const data = computed(() => {
     version();
@@ -259,14 +261,8 @@ export function bar() {
           align="end"
           offset={6}
           style={{ minWidth: 0, flexShrink: 1, maxWidth: "100%" }}
-          popupStyle={{
-            width: POPOVER_WIDTH,
-            padding: 4,
-            borderRadius: look().radius.md,
-            backgroundColor: look().palette.surface,
-            borderWidth: 1,
-            borderColor: look().palette.hair_strong,
-          }}
+          popupClass="rounded-xl border border-border bg-popover p-1 shadow-lg"
+          popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
             <View
               class="hover:bg-accent"
@@ -287,7 +283,7 @@ export function bar() {
               }}
               tooltip={
                 data().shown.length === 0 ? (
-                  <Tooltip class="px-2 py-1 rounded bg-popover border border-border">
+                  <Tooltip class={TOOLTIP_CLASS}>
                     <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
                       {t(data().loading ? "loading" : "empty_trigger")}
                     </Text>
@@ -319,7 +315,7 @@ export function bar() {
                             gap: 4,
                           }}
                           tooltip={
-                            <Tooltip class="px-2 py-1 rounded bg-popover border border-border">
+                            <Tooltip class={TOOLTIP_CLASS}>
                               <Text style={{ fontSize: look().type.text_xsmall.size, color: p().text }}>
                                 {tip()}
                               </Text>
@@ -458,7 +454,7 @@ export function bar() {
                       gap: 8,
                     }}
                     tooltip={
-                      <Tooltip class="px-2 py-1 rounded bg-popover border border-border">
+                      <Tooltip class={TOOLTIP_CLASS}>
                         <Text style={{ fontSize: look().type.text_xsmall.size, color: p().text }}>
                           {row().tip}
                         </Text>
@@ -536,7 +532,7 @@ export function bar() {
 export function settings() {
   settingsWasShown = viewShown(SETTINGS_VIEW);
   refreshSettings();
-  const look = computed(() => hostState().theme);
+  const look = theme;
   const current = computed(() => {
     version();
     return settingsState();

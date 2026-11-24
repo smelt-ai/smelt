@@ -26,6 +26,11 @@ test("说明每个仓库一行，刷新失败另起一行", () => {
   );
   expect(lines.length).toBe(3);
   expect(lines[0].includes("api")).toBeTruthy();
+
+  // Rust `WorkspaceWorksetInspectResult.refresh_failures` 带 `skip_serializing_if = "Vec::is_empty"`，
+  // 干净检查结果不会序列化该字段，必须正常返回而不抛 TypeError。
+  const clean = describe({ repositories: [repo("api", false, "merged")] }, t);
+  expect(clean.length).toBe(1);
 });
 
 test("只问没问过的，要旧的时才连过期的也问", () => {

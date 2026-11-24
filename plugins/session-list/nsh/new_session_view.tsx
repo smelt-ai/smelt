@@ -2,7 +2,7 @@
 
 import { computed, Scroll, signal, Text, View } from "nsh";
 import { Dialog, Menu, Popover } from "nsh/base";
-import { newSessionIcon, SmeltButton, SmeltIcon } from "smelt/sdk";
+import { DIALOG_SURFACE_CLASS, newSessionIcon, SmeltButton, SmeltIcon } from "smelt/sdk";
 
 import { OPEN_PROJECT } from "../contract.js";
 import { digit_key, initial_location, NewSession, pinned_by_digit } from "../new_session.js";
@@ -190,7 +190,7 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
     const m = props.menu();
     if (!m) return;
     const mod = e?.modifiers;
-    if (mod?.ctrl || mod?.alt || mod?.shift || mod?.meta) return;
+    if (mod?.control || mod?.alt || mod?.shift || mod?.platform) return;
     const key = String(e?.key ?? "");
     if (key === "ArrowUp" || key === "up") {
       m.step(-1);
@@ -206,6 +206,11 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
 
   return (
     <View
+      ref={(el: any) => {
+        // 打开弹层 / ⌘N 面板时同步拿取键盘焦点，保证 ↑/↓/Enter/1-9 立即生效。
+        el?.focus?.();
+      }}
+      focusable={true}
       style={{ display: "flex", flexDirection: "column", width: "100%", flexShrink: 1, minHeight: 0 }}
       onKeyDown={handleKey}
     >
@@ -510,15 +515,8 @@ export function NewSessionPopover(props: {
         align="start"
         offset={8}
         margin={8}
-        popupStyle={{
-          width: WIDTH,
-          padding: 0,
-          overflow: "hidden",
-          borderRadius: theme().radius.md,
-          backgroundColor: theme().palette.surface,
-          borderWidth: 1,
-          borderColor: theme().palette.hair_strong,
-        }}
+        popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
+        popupStyle={{ width: WIDTH }}
         trigger={
           <SmeltButton
             quiet={true}
@@ -557,7 +555,7 @@ export function PaletteDialog() {
       onOpenChange={({ open }) => {
         if (!open) list.palette?.owner?.close?.();
       }}
-      class="m-auto rounded-(--radius) border border-border bg-popover"
+      class={`m-auto ${DIALOG_SURFACE_CLASS}`}
       style={{ width: PALETTE_WIDTH, padding: 0, overflow: "hidden" }}
     >
       {paletteOpen() ? <MenuBody menu={menu} /> : null}

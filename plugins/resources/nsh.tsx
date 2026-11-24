@@ -27,6 +27,7 @@ import {
   state as hostState,
   t,
   text,
+  theme,
   viewShown,
 } from "smelt/sdk";
 
@@ -265,7 +266,7 @@ bootTask(async () => {
 // ---- 界面组件 ----
 
 function SectionCard(props: { title: string; description?: string; children?: any }) {
-  const look = computed(() => hostState().theme);
+  const look = theme;
   return (
     <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <View
@@ -320,7 +321,7 @@ function SectionCard(props: { title: string; description?: string; children?: an
 }
 
 function Disclosure(props: { open: boolean }) {
-  const look = computed(() => hostState().theme);
+  const look = theme;
   return (
     <View
       style={{
@@ -345,7 +346,7 @@ function UsageColumns(props: {
   memoryBytes: number;
   color: string;
 }) {
-  const look = computed(() => hostState().theme);
+  const look = theme;
   return (
     <View
       style={{
@@ -386,7 +387,7 @@ function UsageColumns(props: {
 }
 
 function RowLabel(props: { label: string; detail?: string | null }) {
-  const look = computed(() => hostState().theme);
+  const look = theme;
   return (
     <View
       style={{
@@ -423,7 +424,7 @@ function RowLabel(props: { label: string; detail?: string | null }) {
 }
 
 function SortHeader(props: { label: string; column: string; width: number }) {
-  const look = computed(() => hostState().theme);
+  const look = theme;
   const active = computed(() => sortBy() === props.column);
   return (
     <BaseButton
@@ -469,7 +470,7 @@ function SortHeader(props: { label: string; column: string; width: number }) {
 }
 
 function SummarySection() {
-  const look = computed(() => hostState().theme);
+  const look = theme;
   const snap = computed(() => snapshot());
   const local = computed(() => snap().local);
   const shareText = computed(() => {
@@ -580,7 +581,7 @@ function SummarySection() {
 }
 
 function MachineSection(props: { section: () => any }) {
-  const look = computed(() => hostState().theme);
+  const look = theme;
   const displayGroups = computed(() => {
     const sec = props.section();
     const sorted = sortGroups(sec.sessions, sortBy());

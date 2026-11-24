@@ -44,6 +44,8 @@ const STATE: &str = "smelt.state";
 const EVENT: &str = "smelt.event";
 /// 推给插件的命令调用请求，插件跑完后用 `command.reply` 交回结果。
 const COMMAND: &str = "smelt.command";
+/// 定向推给订阅方插件的 ACP 对话增量事件（不全局广播）。
+const ACP_EVENT: &str = "smelt.acp.event";
 
 /// 插件发往主线程执行的通用宿主动作。
 pub(crate) enum Action {
@@ -148,6 +150,29 @@ pub(crate) enum Action {
         px: u32,
         call: HostCall,
     },
+    AcpSubscribe {
+        plugin: String,
+        sub_id: String,
+        machine: RuntimeKey,
+        reuse_key: Option<String>,
+        launch: smelt_acp::ConversationClientLaunch,
+        call: HostCall,
+    },
+    AcpHistory {
+        machine: RuntimeKey,
+        session_id: String,
+        before: usize,
+        limit: usize,
+        call: HostCall,
+    },
+    AcpRestart {
+        machine: RuntimeKey,
+        session_id: String,
+        call: HostCall,
+    },
+    AcpClipboardImages {
+        call: HostCall,
+    },
 }
 
 struct PendingCommand {
@@ -172,6 +197,8 @@ struct Shared {
     /// 发往插件 VM 等待 `command.reply` 的在途命令。
     next_command_id: u64,
     pending_commands: BTreeMap<u64, PendingCommand>,
+    /// ACP 活体订阅中心与图片字节缓存（在 `serve` 中绑定定向推送 `PluginHost`）。
+    acp_hub: Option<smelt_acp::AcpHub>,
 }
 
 #[derive(Clone, Default)]
@@ -185,6 +212,223 @@ impl Bridge {
     /// 把通用宿主调用登记到 [`PluginHost`] 上。在装载插件之前调一次。
     pub fn serve(&self, plugins: &PluginHost) -> mpsc::UnboundedReceiver<Action> {
         let (actions, received) = mpsc::unbounded_channel();
+
+        let acp_hub = {
+            let sink_plugins = plugins.clone();
+            let sink: smelt_acp::AcpEventSink = Arc::new(move |owner, payload| {
+                sink_plugins.send_to(owner, ACP_EVENT, payload);
+            });
+            let hub = smelt_acp::AcpHub::new(smelt_acp::ImageStore::new(), sink);
+            self.lock().acp_hub = Some(hub.clone());
+            hub
+        };
+
+        {
+            let actions = actions.clone();
+            plugins.handle("acp.subscribe", move |plugin, mut call| {
+                let mut data = call.take_data();
+                let Some(sub_id) = data["sub_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                else {
+                    return call.reject("acp.subscribe：缺 sub_id 字符串");
+                };
+                let Some(machine) = parse_machine(data.get("machine")) else {
+                    return call.reject("acp.subscribe：machine 要是 null 或字符串");
+                };
+                let reuse_key = data
+                    .get("reuse_key")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let launch: smelt_acp::ConversationClientLaunch =
+                    match serde_json::from_value(data["launch"].take()) {
+                        Ok(launch) => launch,
+                        Err(error) => {
+                            return call.reject(format!("acp.subscribe：launch 参数不对：{error}"));
+                        }
+                    };
+                send_action(
+                    &actions,
+                    Action::AcpSubscribe {
+                        plugin: plugin.to_owned(),
+                        sub_id,
+                        machine,
+                        reuse_key,
+                        launch,
+                        call,
+                    },
+                );
+            });
+        }
+
+        {
+            let hub = acp_hub.clone();
+            plugins.handle("acp.unsubscribe", move |plugin, call| {
+                let data = call.data();
+                let Some(sub_id) = data["sub_id"].as_str() else {
+                    return call.reject("acp.unsubscribe：缺 sub_id 字符串");
+                };
+                let reuse_key = data
+                    .get("reuse_key")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                hub.unsubscribe(plugin, sub_id, reuse_key);
+                call.resolve(Value::Null);
+            });
+        }
+
+        {
+            let hub = acp_hub.clone();
+            plugins.handle("acp.action", move |plugin, mut call| {
+                let mut data = call.take_data();
+                let Some(sub_id) = data["sub_id"].as_str().map(str::to_owned) else {
+                    return call.reject("acp.action：缺 sub_id 字符串");
+                };
+                let action_val = data["action"].take();
+                let image_refs: Vec<String> = data
+                    .get("image_refs")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                match hub.send_action(plugin, &sub_id, action_val, &image_refs) {
+                    Ok(()) => call.resolve(Value::Null),
+                    Err(error) => call.reject(error),
+                }
+            });
+        }
+
+        {
+            let actions = actions.clone();
+            plugins.handle("acp.history", move |_plugin, call| {
+                let data = call.data();
+                let Some(machine) = parse_machine(data.get("machine")) else {
+                    return call.reject("acp.history：machine 要是 null 或字符串");
+                };
+                let Some(session_id) = data["session_id"].as_str().map(str::to_owned) else {
+                    return call.reject("acp.history：缺 session_id 字符串");
+                };
+                let Some(before) = data["before"].as_u64() else {
+                    return call.reject("acp.history：缺 before 非负整数");
+                };
+                let limit = data
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(smelt_acp::ACP_HISTORY_PAGE_LIMIT as u64)
+                    as usize;
+                send_action(
+                    &actions,
+                    Action::AcpHistory {
+                        machine,
+                        session_id,
+                        before: before as usize,
+                        limit,
+                        call,
+                    },
+                );
+            });
+        }
+
+        {
+            let actions = actions.clone();
+            plugins.handle("acp.restart", move |_plugin, call| {
+                let data = call.data();
+                let Some(machine) = parse_machine(data.get("machine")) else {
+                    return call.reject("acp.restart：machine 要是 null 或字符串");
+                };
+                let Some(session_id) = data["session_id"].as_str().map(str::to_owned) else {
+                    return call.reject("acp.restart：缺 session_id 字符串");
+                };
+                send_action(
+                    &actions,
+                    Action::AcpRestart {
+                        machine,
+                        session_id,
+                        call,
+                    },
+                );
+            });
+        }
+
+        {
+            let images = acp_hub.images().clone();
+            plugins.handle("acp.paste_image", move |_plugin, call| {
+                let data = call.data();
+                let data_b64 = data
+                    .get("data_base64")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let mime = data.get("mime").and_then(Value::as_str).map(str::to_owned);
+                let path = data.get("path").and_then(Value::as_str).map(str::to_owned);
+                let images = images.clone();
+                std::thread::spawn(move || {
+                    let result = if let Some(b64) = data_b64 {
+                        images.store_base64(mime.as_deref().unwrap_or("image/png"), &b64)
+                    } else if let Some(raw_path) = path {
+                        let fs_path = raw_path
+                            .strip_prefix("file://")
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| std::path::PathBuf::from(raw_path));
+                        images.store_file(&fs_path)
+                    } else {
+                        Err("acp.paste_image：需要 data_base64 或 path".into())
+                    };
+                    match result
+                        .and_then(|meta| serde_json::to_value(meta).map_err(|e| e.to_string()))
+                    {
+                        Ok(value) => call.resolve(value),
+                        Err(error) => call.reject(error),
+                    }
+                });
+            });
+        }
+
+        {
+            let actions = actions.clone();
+            plugins.handle("acp.clipboard_images", move |_plugin, call| {
+                send_action(&actions, Action::AcpClipboardImages { call });
+            });
+        }
+
+        {
+            let images = acp_hub.images().clone();
+            plugins.handle("acp.image_uri", move |_plugin, call| {
+                let Some(ref_id) = call.data()["ref_id"].as_str() else {
+                    return call.reject("acp.image_uri：缺 ref_id 字符串");
+                };
+                match images.get_data_uri(ref_id) {
+                    Some(uri) => call.resolve(Value::String(uri)),
+                    None => call.resolve(Value::Null),
+                }
+            });
+        }
+
+        plugins.handle("mermaid.render", move |_plugin, call| {
+            let Some(source) = call.data()["source"].as_str().map(str::to_owned) else {
+                return call.reject("mermaid.render：缺 source 字符串");
+            };
+            std::thread::spawn(
+                move || match smelt_ui::markdown_mermaid::render_mermaid_svg_data_uri(&source) {
+                    Ok(rendered) => call.resolve(json!({
+                        "ok": true,
+                        "data_uri": rendered.data_uri,
+                        "width": rendered.width,
+                        "height": rendered.height,
+                    })),
+                    Err(error) => call.resolve(json!({
+                        "ok": false,
+                        "error": error,
+                    })),
+                },
+            );
+        });
 
         let bridge = self.clone();
         plugins.handle("state", move |plugin, call| {
@@ -803,7 +1047,10 @@ impl Bridge {
     }
 
     pub fn forget_plugin(&self, plugin: &str) {
-        let orphaned: Vec<oneshot::Sender<Result<Value, String>>> = {
+        let (acp_hub, orphaned): (
+            Option<smelt_acp::AcpHub>,
+            Vec<oneshot::Sender<Result<Value, String>>>,
+        ) = {
             let mut shared = self.lock();
             shared.texts.remove(plugin);
             shared.topics.remove(plugin);
@@ -814,13 +1061,22 @@ impl Bridge {
                 .filter(|(_, item)| item.plugin == plugin)
                 .map(|(id, _)| *id)
                 .collect();
-            ids.into_iter()
+            let orphaned = ids
+                .into_iter()
                 .filter_map(|id| shared.pending_commands.remove(&id).map(|item| item.reply))
-                .collect()
+                .collect();
+            (shared.acp_hub.clone(), orphaned)
         };
+        if let Some(hub) = acp_hub {
+            hub.remove_owner(plugin);
+        }
         for reply in orphaned {
             let _ = reply.send(Err(format!("插件 {plugin} 已卸载")));
         }
+    }
+
+    pub(crate) fn acp_hub(&self) -> Option<smelt_acp::AcpHub> {
+        self.lock().acp_hub.clone()
     }
 
     /// 撤下插件在宿主 `smelt_plugin_api` 里登记的全部内容并清理本桥上的记录。
@@ -833,7 +1089,7 @@ impl Bridge {
         api::unregister_menu_items(plugin, cx);
         api::set_status_menu(plugin, None, cx);
         api::unregister_context_menu_items(plugin, cx);
-        api::unregister_quit_guard(plugin, cx);
+        // JS 插件无法登记退出守卫；`"smelt.updater"` 的退出守卫由宿主侧注册，热重载/覆写时保留。
         api::unregister_topics(plugin, cx);
         api::unregister_views(plugin, cx);
     }
@@ -890,6 +1146,15 @@ impl Bridge {
             map.insert(id.clone(), json!({ "plugin": plugin, "view": view }));
         }
         Value::Object(map)
+    }
+
+    pub(crate) fn views_of(&self, plugin: &str) -> Vec<String> {
+        self.lock()
+            .js_views
+            .iter()
+            .filter(|(_, (owner, _))| owner == plugin)
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     fn push_split(&self, plugins: &PluginHost, mut plugin_next: Value, shell: Value) {
@@ -1162,6 +1427,132 @@ pub(crate) fn handle_action(action: Action, bridge: &Bridge, plugins: &PluginHos
             smelt_terminal::set_font_px(px);
             cx.refresh_windows();
             call.resolve(Value::Null);
+        }
+        Action::AcpSubscribe {
+            plugin,
+            sub_id,
+            machine,
+            reuse_key,
+            launch,
+            call,
+        } => {
+            let Some(hub) = bridge.acp_hub() else {
+                call.reject("acp.subscribe：ACP hub 未初始化");
+                return;
+            };
+            let Some(client) = api::host(cx).client(&machine, cx) else {
+                call.reject(api::machine_removed());
+                return;
+            };
+            hub.subscribe(
+                client,
+                smelt_acp::SubscribeRequest {
+                    sub_id,
+                    owner: plugin,
+                    machine,
+                    reuse_key,
+                    launch,
+                },
+            );
+            call.resolve(Value::Null);
+        }
+        Action::AcpHistory {
+            machine,
+            session_id,
+            before,
+            limit,
+            call,
+        } => {
+            let client = api::host(cx).client(&machine, cx);
+            let images = bridge.acp_hub().map(|h| h.images().clone());
+            cx.background_executor()
+                .spawn(async move {
+                    let Some(client) = client else {
+                        call.reject(api::machine_removed());
+                        return;
+                    };
+                    match smelt_acp::load_acp_history(&client, &session_id, before, limit) {
+                        Ok(snapshot) => match serde_json::to_value(&snapshot) {
+                            Ok(mut value) => {
+                                if let Some(images) = images {
+                                    images.compact_snapshot_json(&mut value);
+                                }
+                                call.resolve(value);
+                            }
+                            Err(error) => call.reject(error.to_string()),
+                        },
+                        Err(error) => call.reject(format!("{}: {error}", error.code())),
+                    }
+                })
+                .detach();
+        }
+        Action::AcpRestart {
+            machine,
+            session_id,
+            call,
+        } => {
+            let client = api::host(cx).client(&machine, cx);
+            cx.background_executor()
+                .spawn(async move {
+                    let Some(client) = client else {
+                        call.reject(api::machine_removed());
+                        return;
+                    };
+                    match smelt_acp::restart_acp_session(&client, &session_id) {
+                        Ok(()) => call.resolve(Value::Null),
+                        Err(error) => call.reject(format!("{}: {error}", error.code())),
+                    }
+                })
+                .detach();
+        }
+        Action::AcpClipboardImages { call } => {
+            let Some(images_store) = bridge.acp_hub().map(|h| h.images().clone()) else {
+                call.reject("acp.clipboard_images：ACP hub 未初始化");
+                return;
+            };
+            let mut raw_images: Vec<Vec<u8>> = Vec::new();
+            let mut paths: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(item) = cx.read_from_clipboard() {
+                for entry in item.into_entries() {
+                    match entry {
+                        gpui::ClipboardEntry::Image(img) => raw_images.push(img.bytes),
+                        gpui::ClipboardEntry::ExternalPaths(ext) => {
+                            paths.extend(ext.paths().iter().cloned());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            cx.background_executor()
+                .spawn(async move {
+                    let mut stored = Vec::new();
+                    let mut non_image_paths = Vec::new();
+                    for bytes in raw_images {
+                        if let Ok(meta) = images_store.store_bytes(bytes, None) {
+                            stored.push(meta);
+                        }
+                    }
+                    for path in paths {
+                        let is_img = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                            matches!(
+                                e.to_ascii_lowercase().as_str(),
+                                "png" | "jpg" | "jpeg" | "gif" | "webp"
+                            )
+                        });
+                        if is_img {
+                            if let Ok(meta) = images_store.store_file(&path) {
+                                stored.push(meta);
+                            }
+                        } else {
+                            non_image_paths.push(path.to_string_lossy().into_owned());
+                        }
+                    }
+                    call.resolve(json!({
+                        "images": stored,
+                        "paths": non_image_paths,
+                    }));
+                })
+                .detach();
         }
         Action::OpenFile { location, call } => {
             let task = api::open_file(location, cx);
@@ -1660,7 +2051,11 @@ fn send_action(sender: &mpsc::UnboundedSender<Action>, action: Action) {
             | Action::RegisterMenuItems { call, .. }
             | Action::RegisterFileOpener { call, .. }
             | Action::SetStatusMenu { call, .. }
-            | Action::SetTerminalFontPx { call, .. } => call,
+            | Action::SetTerminalFontPx { call, .. }
+            | Action::AcpSubscribe { call, .. }
+            | Action::AcpHistory { call, .. }
+            | Action::AcpRestart { call, .. }
+            | Action::AcpClipboardImages { call, .. } => call,
         };
         call.reject("面板已经关了");
     }

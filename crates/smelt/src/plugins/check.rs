@@ -1,5 +1,5 @@
-//! `smelt plugin check <目录>`：不开 App，校验插件清单、locales、主题文件以及 TSX 打包与外部
-//! import；过了输出 JSON 并退出 0，没过把原因写 stderr 并退出 1。
+//! `smelt plugin check <目录>`：离线校验插件清单、locales、主题文件、TSX 打包、import 与
+//! QuickJS 编译；不修改插件目录，过了输出 JSON 并退出 0，没过把原因写 stderr 并退出 1。
 
 use std::path::Path;
 
@@ -20,39 +20,23 @@ pub(super) fn run(dir: &Path) -> i32 {
     if !root.join(smelt_nsh::MANIFEST_FILE).is_file() {
         return fail(&t!("plugins.no_manifest", file = smelt_nsh::MANIFEST_FILE));
     }
-    let manifest = match smelt_nsh::PluginManifest::read(&root) {
-        Ok(manifest) => manifest,
-        Err(error) => return fail(&t!("plugins.bad_manifest", error = error)),
-    };
-    if !root.join(&manifest.entry).is_file() {
-        return fail(&t!("plugins.no_entry", entry = manifest.entry));
-    }
-    match validate(&root, &manifest) {
-        Ok(()) => {
-            let report = serde_json::json!({
+    match smelt_nsh::check_plugin(&root) {
+        Ok(report) => {
+            let out = serde_json::json!({
                 "ok": true,
-                "id": manifest.id,
-                "name": manifest.name,
+                "id": report.manifest.id,
+                "name": report.manifest.name,
+                "version": report.manifest.version,
                 "path": root,
+                "theme_only": report.theme_only,
+                "themes": report.themes,
+                "exports": report.exports,
             });
-            println!("{report:#}");
+            println!("{out:#}");
             0
         }
         Err(error) => fail(&error),
     }
-}
-
-fn validate(root: &Path, manifest: &smelt_nsh::PluginManifest) -> Result<(), String> {
-    let themes = super::themes::read(root, &manifest.entry)?;
-    if !themes.is_empty() {
-        let sources: Vec<&str> = themes.iter().map(String::as_str).collect();
-        let mut catalog = smelt_ui::theme_catalog::ThemeCatalog::default();
-        catalog
-            .register(&format!("files:{}", manifest.id), &sources, |_| false)
-            .map_err(|error| error.to_string())?;
-    }
-    smelt_nsh::check_plugin(root)?;
-    Ok(())
 }
 
 fn fail(message: &str) -> i32 {

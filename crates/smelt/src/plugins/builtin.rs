@@ -1,20 +1,15 @@
 //! App 自带的 JS 插件：仓库根 `plugins/` 下每个子目录一个，跟着 App 更新。
 //!
-//! - 发版的包从安装包里只读加载：macOS 是 `Smelt.app/Contents/Resources/plugins/`，Windows 是
-//!   安装目录下的 `plugins\`，打包时由 `scripts/stage-plugins.sh` 放进去。插件和 App 一起签名、
-//!   一起整体替换，不往用户目录写副本。
-//! - 开发用的包（调试构建，和 `make dev` 编的 release）直接读仓库里的 `plugins/`，改了脚本即
-//!   重挂（见 `watch`），只有改 Rust 才要重编。
+//! - 随包分发的自带插件由 `scripts/stage-plugins.sh` 预编译进安装包（macOS 是
+//!   `Smelt.app/Contents/Resources/plugins/`，Windows 是安装目录下的 `plugins\`），并直接加载预编译
+//!   QuickJS 字节码，无需运行时现打包、也不挂热重载监听；
+//! - 仅调试构建（`cfg!(debug_assertions)`）找不到安装包插件目录时回退到仓库 `plugins/` 方便跑测。
 //!
-//! 自带插件只读：用户想改，复制一份、换个 id，再在布局里换上自己那份。和自带插件同 id 的
-//! 用户插件不加载，报重复（见 `super::discover`）。
+//! 用户可在 `~/.smelt/plugins/<id>/` 放置同 id 插件覆写自带版（若用户版编译或运行失败，宿主会
+//! 自动回退到自带版本）；也可通过 `smelt plugin fork` 拷贝源码原地覆写或 `--as` 改名并存。
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-/// 自带插件直接读仓库、改了即重挂：调试构建，和编译时设了 `SMELT_LIVE_PLUGINS` 的 release
-/// （`make dev`）。发版的包不设，读安装包里的那份。
-pub(super) const LIVE: bool = cfg!(debug_assertions) || option_env!("SMELT_LIVE_PLUGINS").is_some();
 
 /// 自带插件所在的目录，下面每个子目录一个插件。找不到时 `None`，原因记日志。
 pub(super) fn dir() -> Option<&'static Path> {
@@ -23,18 +18,22 @@ pub(super) fn dir() -> Option<&'static Path> {
 }
 
 fn locate() -> Option<PathBuf> {
-    if LIVE {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| packaged_dir(&exe))
+    {
+        return Some(dir);
+    }
+    if cfg!(debug_assertions) {
         return Some(repo_dir());
     }
-    let exe = std::env::current_exe().ok()?;
-    let dir = packaged_dir(&exe);
-    if dir.is_none() {
+    if let Ok(exe) = std::env::current_exe() {
         eprintln!(
             "[plugins] {} 旁边没有安装包里的自带插件目录，自带插件不加载",
             exe.display()
         );
     }
-    dir
+    None
 }
 
 /// 仓库里的自带插件。

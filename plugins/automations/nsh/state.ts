@@ -21,6 +21,7 @@ import {
   state,
   store,
   t,
+  currentTheme,
   text,
   views,
 } from "smelt/sdk";
@@ -28,7 +29,6 @@ import {
   AGENT_SETTINGS_CHANGED_EVENT,
   AGENT_SETTINGS_CMD,
   AGENTS_VIEW,
-  CONVERSATION_VIEW,
   NOTIFY_CMD,
   OPEN_VIEW_CMD,
   PICK_PATHS_CMD,
@@ -155,13 +155,12 @@ export interface DeletePromptState {
 
 export type LiveRunStatus =
   | { kind: "live"; reuseKey: string; args: Record<string, unknown> }
-  | { kind: "no_conversation_view" }
   | { kind: "unknown_engine" }
   | { kind: "archived" };
 
 // ---- 全局主题与基础信号 ----
 
-export const currentTheme = stableMemo(() => state().theme);
+export { currentTheme };
 
 /** 投影变更计数（驱动依赖 Map 的 computed 重算）。 */
 export const storeVersion = signal(0);
@@ -364,9 +363,6 @@ export function liveRunStatusFor(machine: string | null, runObj: any): LiveRunSt
   const engine = runObj?.context?.engine_kind_id;
   if (typeof engine !== "string" || !allConversationAgentIds().has(engine)) {
     return { kind: "unknown_engine" };
-  }
-  if (!isViewRegistered(CONVERSATION_VIEW)) {
-    return { kind: "no_conversation_view" };
   }
   return {
     kind: "live",

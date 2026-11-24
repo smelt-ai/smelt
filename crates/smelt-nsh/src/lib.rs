@@ -20,12 +20,20 @@ pub mod shell_layout;
 mod store;
 mod terminal;
 mod theme;
+mod types;
 mod view;
 
 pub use components::{BackdropHooks, BackdropPlacement};
-pub use manifest::{LoadedPluginInfo, MANIFEST_FILE, PluginManifest, PluginSource, SourceDir};
+pub use manifest::{
+    LoadedPluginInfo, MANIFEST_FILE, PluginCheckReport, PluginManifest, PluginSource, SourceDir,
+    StageReport, stage_builtin_plugins,
+};
 pub use shell::{MainShell, MainShellEvent, OutletTarget, ShellConfig, ShellLabels};
 pub use shell_layout::{ComputedShellView, WindowCorners};
+pub use types::{
+    PLUGIN_TSCONFIG, PLUGIN_TSCONFIG_BASE, TypesWriteReport, plugin_type_definitions,
+    write_plugin_types,
+};
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
@@ -33,8 +41,13 @@ use gpui::{App, Entity};
 use nsh_core::element::description::SetDescription;
 use nsh_platform_gpui::AppView;
 
-/// 离线检查一个 NSH 插件目录（清单、locales、主题文件、TSX 编译与外部 import 校验）。
-pub fn check_plugin(dir: &Path) -> Result<PluginManifest, String> {
+/// 插件 id 是否合法（仅允许小写/大小写字母、数字与 `._-`，不能以 `.` 开头）。
+pub fn is_valid_plugin_id(id: &str) -> bool {
+    plugins::valid_id(id)
+}
+
+/// 离线检查一个 NSH 插件目录（清单、locales、主题文件、TSX 打包、import 与 QuickJS 字节码编译）。
+pub fn check_plugin(dir: &Path) -> Result<PluginCheckReport, String> {
     manifest::check_plugin(dir, ui_sets())
 }
 
@@ -80,11 +93,16 @@ pub(crate) fn apply_theme(app: &Entity<AppView>, cx: &mut App) {
 
 #[doc(hidden)]
 pub mod testing {
+    use nsh_core::prelude::Registry;
     use nsh_platform_gpui::{ComponentContext, NativeComponent};
 
     pub const BUDDY: &str = crate::components::BUDDY;
 
     pub fn make_buddy(cx: ComponentContext) -> Box<dyn NativeComponent> {
         crate::components::Buddy::make(cx)
+    }
+
+    pub fn host_registry() -> Registry {
+        crate::module::registry()
     }
 }
