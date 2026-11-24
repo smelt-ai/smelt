@@ -681,9 +681,12 @@ export declare function SmeltTooltip(
 export declare const MENU_ITEM_CLASS: string;
 export declare const INPUT_CLASS: string;
 export declare const DIALOG_SURFACE_CLASS: string;
-/** 对话框：`nsh/base` 的 `Dialog` 带上 Smelt 的进出（淡入淡出）和主题的遮罩色 `scrim`。 */
+/** 对话框：`nsh/base` 的 `Dialog` 带上 Smelt 的进出（整层淡入淡出、卡片升 4px）和主题的遮罩色 `scrim`。 */
 export declare function SmeltDialog(
-  props: Omit<Parameters<typeof Dialog>[0], "animation" | "backdropClass">,
+  props: Omit<
+    Parameters<typeof Dialog>[0],
+    "animation" | "backdropClass" | "startingClass" | "startingStyle"
+  >,
 ): JSX.Element;
 
 export declare function SmeltButton(props: SmeltButtonProps): JSX.Element;

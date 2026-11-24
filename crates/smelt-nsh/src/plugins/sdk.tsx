@@ -1662,9 +1662,20 @@ export const MENU_ITEM_CLASS =
 export const INPUT_CLASS = "rounded-(--radius) border border-input bg-card px-2 text-foreground";
 export const DIALOG_SURFACE_CLASS = "rounded-xl border border-border bg-popover shadow-xl";
 
-/** 对话框：`nsh/base` 的 `Dialog` 带上 Smelt 的进出（淡入淡出）和主题的遮罩色 `scrim`。 */
+/**
+ * 对话框：`nsh/base` 的 `Dialog` 带上 Smelt 的进出和主题的遮罩色 `scrim`。整层（遮罩连卡片）淡入淡出，
+ * 卡片同时从下面升 4px（`overlay` 档）。
+ */
 export function SmeltDialog(props: any) {
-  return <Dialog {...props} animation="fade" backdropClass="bg-scrim" />;
+  return (
+    <Dialog
+      {...props}
+      animation="fade"
+      backdropClass="bg-scrim"
+      class={`${props.class ?? ""} transition-transform duration-[240ms] ease-[cubic-bezier(0.32,0.72,0,1)]`}
+      startingClass="translate-y-1"
+    />
+  );
 }
 
 /** 统一纯 JS/NSH 按钮（建在 `nsh/base <Button>` 上）：无 `BlockMouse` 悬停断层，完整遵循宿主主题色阶。 */
