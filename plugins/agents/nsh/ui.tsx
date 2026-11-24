@@ -14,10 +14,12 @@ import {
   INPUT_CLASS,
   MENU_ITEM_CLASS,
   POPUP_CLASS,
+  popupMotion,
   SmeltButton,
   SmeltIcon,
   t,
   TOOLTIP_CLASS,
+  TOOLTIP_MOTION,
 } from "smelt/sdk";
 export { INPUT_CLASS, MENU_ITEM_CLASS, POPUP_CLASS };
 
@@ -27,7 +29,7 @@ import { ConfirmRequest, currentTheme, findEngineMeta } from "./state.ts";
 export function Tip(props: { text: string }) {
   const look = currentTheme;
   return (
-    <Tooltip class={TOOLTIP_CLASS}>
+    <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
       <Text
         style={{
           color: look().palette.text,
@@ -368,6 +370,7 @@ export function DropdownButton(props: {
       placement="bottom"
       align={props.align ?? "start"}
       popupClass={POPUP_CLASS}
+      {...popupMotion("bottom")}
       popupStyle={{ minWidth: props.minWidth ?? 168 }}
       onOpenChange={({ open: next }: { open: boolean }) => open.set(Boolean(next))}
       trigger={

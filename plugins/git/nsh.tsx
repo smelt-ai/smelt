@@ -21,8 +21,12 @@ import {
   bootTask,
   call,
   clipboardWrite,
+  CONTEXT_MENU_MOTION,
+  currentTheme,
+  DIALOG_SURFACE_CLASS,
   initHost,
   localOs,
+  MENU_ITEM_CLASS,
   onCommand,
   onEvent,
   onSlices,
@@ -32,6 +36,8 @@ import {
   pathJoin,
   pathStartsWith,
   pathStyle,
+  POPUP_CLASS,
+  popupMotion,
   registerCommands,
   registerViews,
   revealPath,
@@ -43,11 +49,8 @@ import {
   stableMemo,
   t,
   text,
-  currentTheme,
-  DIALOG_SURFACE_CLASS,
-  MENU_ITEM_CLASS,
-  POPUP_CLASS,
   TOOLTIP_CLASS,
+  TOOLTIP_MOTION,
   viewShown,
   windowActive,
 } from "smelt/sdk";
@@ -1645,6 +1648,7 @@ function OpsMenu(props: {
       placement="bottom"
       align="end"
       popupClass={POPUP_CLASS}
+      {...popupMotion("bottom")}
       popupStyle={{ minWidth: 168 }}
       trigger={
         <View
@@ -2015,6 +2019,7 @@ export function Main() {
                 placement="bottom"
                 align="end"
                 popupClass={POPUP_CLASS}
+                {...popupMotion("bottom")}
                 popupStyle={{ minWidth: 140 }}
                 trigger={
                   <View
@@ -2048,6 +2053,7 @@ export function Main() {
                 placement="bottom"
                 align="end"
                 popupClass={POPUP_CLASS}
+                {...popupMotion("bottom")}
                 popupStyle={{ minWidth: 168 }}
                 trigger={
                   <View
@@ -2203,6 +2209,7 @@ export function Main() {
                             return (
                               <ContextMenu
                                 popupClass={POPUP_CLASS}
+                                {...CONTEXT_MENU_MOTION}
                                 popupStyle={{ minWidth: 168 }}
                                 disabled={isHead()}
                                 trigger={
@@ -2294,6 +2301,7 @@ export function Main() {
                             return (
                               <ContextMenu
                                 popupClass={POPUP_CLASS}
+                                {...CONTEXT_MENU_MOTION}
                                 popupStyle={{ minWidth: 168 }}
                                 trigger={
                                   <View
@@ -3228,6 +3236,7 @@ export function Main() {
                                             /* 改动文件行 */
                                             <ContextMenu
                                               popupClass={POPUP_CLASS}
+                                              {...CONTEXT_MENU_MOTION}
                                               popupStyle={{ minWidth: 168 }}
                                               trigger={
                                                 <View
@@ -3649,7 +3658,7 @@ export function Main() {
                                 </Text>
                                 <Text
                                   tooltip={
-                                    <Tooltip class={TOOLTIP_CLASS}>
+                                    <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
                                       <Text
                                         style={{
                                           fontSize: look().type.text_xsmall.size,

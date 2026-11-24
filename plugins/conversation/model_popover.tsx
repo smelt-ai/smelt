@@ -1,7 +1,7 @@
 // 输入栏工具弹层：模型与推理强度/配置弹层、能力（Skills/MCP）弹层、上下文用量弹层。
 import { computed, Scroll, signal, Text, View } from "nsh";
 import { Input, Popover, Switch } from "nsh/base";
-import { SmeltButton, SmeltIcon, theme } from "smelt/sdk";
+import { OVERLAY_MOTION_CLASS, popupMotion, SmeltButton, SmeltIcon, theme } from "smelt/sdk";
 import { ct } from "./i18n.ts";
 import {
   buildVisibleModels,
@@ -68,7 +68,8 @@ export function ModelConfigPopover(props: {
       placement="top"
       align="start"
       offset={8}
-      popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
+      popupClass={`rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden ${OVERLAY_MOTION_CLASS}`}
+      {...popupMotion("top")}
       popupStyle={{ width: 348 }}
       trigger={
         <SmeltButton
@@ -556,7 +557,8 @@ export function CapabilitiesPopover(props: {
       placement="top"
       align="start"
       offset={8}
-      popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
+      popupClass={`rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden ${OVERLAY_MOTION_CLASS}`}
+      {...popupMotion("top")}
       popupStyle={{ width: 320 }}
       trigger={
         <SmeltButton
@@ -762,7 +764,8 @@ export function UsagePopover(props: {
         placement="top"
         align="end"
         offset={8}
-        popupClass="rounded-xl border border-border bg-popover p-3 shadow-lg"
+        popupClass={`rounded-xl border border-border bg-popover p-3 shadow-lg ${OVERLAY_MOTION_CLASS}`}
+        {...popupMotion("top")}
         popupStyle={{ width: 280 }}
         trigger={
           <SmeltButton

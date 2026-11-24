@@ -1,7 +1,7 @@
 // 自动化下钻头、左侧运行列表与任务表单编辑器。
 import { computed, Scroll, Text, View } from "nsh";
 import { Menu } from "nsh/base";
-import { isManagedAutomationWorkspace, pathStyle, SmeltButton, SmeltIcon, t } from "smelt/sdk";
+import { isManagedAutomationWorkspace, pathStyle, popupMotion, SmeltButton, SmeltIcon, t } from "smelt/sdk";
 import {
   actionKindLabel,
   automationAccessNote,
@@ -241,6 +241,7 @@ export function DrillHeader() {
                 placement="bottom"
                 align="end"
                 popupClass={POPUP_CLASS}
+                {...popupMotion("bottom")}
                 popupStyle={{ minWidth: 168 }}
                 trigger={
                   <View
@@ -831,6 +832,7 @@ function AddTriggerButton() {
       placement="bottom"
       align="start"
       popupClass={POPUP_CLASS}
+      {...popupMotion("bottom")}
       popupStyle={{ minWidth: 220 }}
       trigger={
         <View
@@ -1033,6 +1035,7 @@ export function EditorForm(props: { editor: EditorState }) {
                   placement="bottom"
                   align="end"
                   popupClass={POPUP_CLASS}
+                  {...popupMotion("bottom")}
                   popupStyle={{ minWidth: 168 }}
                   trigger={
                     <View

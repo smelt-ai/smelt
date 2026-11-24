@@ -4,9 +4,11 @@ import { cleanup, computed, Image, List, Scroll, signal, Text, View } from "nsh"
 import { ContextMenu, MenuItem, MenuSeparator } from "nsh/base";
 import {
   clipboardWrite,
+  CONTEXT_MENU_MOTION,
   contextMenuItems,
   diffLineStats,
   isInterruptMarker,
+  POPUP_CLASS,
   run,
   SmeltButton,
   SmeltIcon,
@@ -195,7 +197,8 @@ function MessageContextWrapper(props: {
 
   return (
     <ContextMenu
-      popupClass="rounded-lg border border-border bg-popover p-1 shadow-lg"
+      popupClass={POPUP_CLASS}
+      {...CONTEXT_MENU_MOTION}
       popupStyle={{ minWidth: 184 }}
       onOpenChange={({ open }: any) => {
         if (open) loadContributed();

@@ -7,9 +7,11 @@ import {
   DIALOG_SURFACE_CLASS,
   MENU_ITEM_CLASS,
   POPUP_CLASS,
+  popupMotion,
   SmeltButton,
   SmeltIcon,
   TOOLTIP_CLASS,
+  TOOLTIP_MOTION,
 } from "smelt/sdk";
 export { MENU_ITEM_CLASS, POPUP_CLASS };
 
@@ -37,7 +39,7 @@ export interface ConfirmRequest {
 export function Tip(props: { text: string }) {
   const look = () => theme();
   return (
-    <Tooltip class={TOOLTIP_CLASS}>
+    <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
       <Text
         style={{
           color: look().palette.text,
@@ -324,6 +326,7 @@ export function GroupingMenu(props: { onOpenChange?: (open: boolean) => void }) 
       placement="bottom"
       align="end"
       popupClass={POPUP_CLASS}
+      {...popupMotion("bottom")}
       popupStyle={{ minWidth: 176 }}
       onOpenChange={({ open: next }) => {
         open.set(next);

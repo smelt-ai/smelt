@@ -2,7 +2,7 @@
 
 import { computed, Scroll, Text, View } from "nsh";
 import { ContextMenu } from "nsh/base";
-import { locale, SmeltButton, SmeltIcon, t } from "smelt/sdk";
+import { CONTEXT_MENU_MOTION, locale, SmeltButton, SmeltIcon, t } from "smelt/sdk";
 
 import {
   agentCardPrompt,
@@ -262,6 +262,7 @@ function AgentCatalogRow(props: { machine: string | null; agent: () => any }) {
   return (
     <ContextMenu
       popupClass={POPUP_CLASS}
+      {...CONTEXT_MENU_MOTION}
       popupStyle={{ minWidth: 184 }}
       trigger={
         <View

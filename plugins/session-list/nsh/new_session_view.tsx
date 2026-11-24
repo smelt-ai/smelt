@@ -2,7 +2,7 @@
 
 import { computed, Scroll, signal, Text, View } from "nsh";
 import { Dialog, Menu, Popover } from "nsh/base";
-import { DIALOG_SURFACE_CLASS, newSessionIcon, SmeltButton, SmeltIcon } from "smelt/sdk";
+import { DIALOG_SURFACE_CLASS, newSessionIcon, OVERLAY_MOTION_CLASS, popupMotion, SmeltButton, SmeltIcon } from "smelt/sdk";
 
 import { OPEN_PROJECT } from "../contract.js";
 import { digit_key, initial_location, NewSession, pinned_by_digit } from "../new_session.js";
@@ -116,6 +116,7 @@ function LocationRow(props: { menu: () => any }) {
         placement="bottom"
         align="start"
         popupClass={POPUP_CLASS}
+        {...popupMotion("bottom")}
         popupStyle={{ minWidth: 220 }}
         trigger={
           <View
@@ -526,7 +527,8 @@ export function NewSessionPopover(props: {
         align="start"
         offset={8}
         margin={8}
-        popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
+        popupClass={`rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden ${OVERLAY_MOTION_CLASS}`}
+        {...popupMotion("right")}
         popupStyle={{ width: WIDTH }}
         trigger={
           <SmeltButton

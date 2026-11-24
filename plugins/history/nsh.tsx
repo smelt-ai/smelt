@@ -9,13 +9,18 @@ import {
   call,
   clipboardWrite,
   command,
+  CONTEXT_MENU_MOTION,
+  currentTheme,
+  DIALOG_SURFACE_CLASS,
   handoffPrompt,
   initHost,
   isInterruptMarker,
   launchableProfiles,
   machineMetaEntry,
+  MENU_ITEM_CLASS,
   onEvent,
   onSlices,
+  POPUP_CLASS,
   registerTopics,
   registerViews,
   request,
@@ -25,10 +30,6 @@ import {
   SmeltMarkdown,
   stableMemo,
   t,
-  currentTheme,
-  DIALOG_SURFACE_CLASS,
-  MENU_ITEM_CLASS,
-  POPUP_CLASS,
   text,
   viewShown,
 } from "smelt/sdk";
@@ -1259,6 +1260,7 @@ export function Main() {
                             <View style={{ paddingLeft: 8, paddingRight: 8, paddingBottom: 4 }}>
                               <ContextMenu
                                 popupClass={POPUP_CLASS}
+                                {...CONTEXT_MENU_MOTION}
                                 popupStyle={{ minWidth: 184 }}
                                 trigger={
                                   <View

@@ -7,7 +7,7 @@
 
 import { cleanup, computed, effect, Overlay, Scroll, signal, Text, View } from "nsh";
 import { Collapsible, ContextMenu, Input, Menu, Submenu } from "nsh/base";
-import { fileUriToPath, SmeltButton, SmeltIcon, SmeltNativeBuddy, SmeltWindowBar } from "smelt/sdk";
+import { CONTEXT_MENU_MOTION, fileUriToPath, popupMotion, SmeltButton, SmeltIcon, SmeltNativeBuddy, SmeltWindowBar } from "smelt/sdk";
 
 import * as actions from "../actions.js";
 import {
@@ -746,6 +746,7 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
   return (
     <ContextMenu
       popupClass={POPUP_CLASS}
+      {...CONTEXT_MENU_MOTION}
       popupStyle={{ minWidth: 184 }}
       onOpenChange={({ open }) => {
         if (open) loadContributed();
@@ -1263,6 +1264,7 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
     >
       <ContextMenu
         popupClass={POPUP_CLASS}
+        {...CONTEXT_MENU_MOTION}
         popupStyle={{ minWidth: 184 }}
         onOpenChange={({ open }) => {
           if (open) loadContributed();
@@ -1606,6 +1608,7 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
     >
       <ContextMenu
         popupClass={POPUP_CLASS}
+        {...CONTEXT_MENU_MOTION}
         popupStyle={{ minWidth: 184 }}
         trigger={
           <View
@@ -1828,6 +1831,7 @@ function MachineHeaderRow(props: {
   return (
     <ContextMenu
       popupClass={POPUP_CLASS}
+      {...CONTEXT_MENU_MOTION}
       popupStyle={{ minWidth: 184 }}
       onOpenChange={({ open }) => {
         if (open) loadMenu();
@@ -1921,6 +1925,7 @@ function MachineHeaderRow(props: {
                 placement="bottom"
                 align="end"
                 popupClass={POPUP_CLASS}
+                {...popupMotion("bottom")}
                 popupStyle={{ minWidth: 176 }}
                 onOpenChange={({ open }) => {
                   menuOpen.set(open);
@@ -1978,6 +1983,7 @@ function WaitingMachineRow(props: { machine: () => any }) {
   return (
     <ContextMenu
       popupClass={POPUP_CLASS}
+      {...CONTEXT_MENU_MOTION}
       popupStyle={{ minWidth: 184 }}
       onOpenChange={({ open }) => {
         if (open) loadMenu();
@@ -2551,6 +2557,7 @@ export function main() {
         placement="bottom"
         align="end"
         popupClass={POPUP_CLASS}
+        {...popupMotion("bottom")}
         popupStyle={{ minWidth: 176 }}
         onOpenChange={({ open }) => addProjectOpen.set(open)}
         trigger={
@@ -2654,6 +2661,7 @@ export function main() {
             placement="bottom"
             align="end"
             popupClass={POPUP_CLASS}
+            {...popupMotion("bottom")}
             popupStyle={{ minWidth: 176 }}
             onOpenChange={({ open }) => {
               machinesMenuOpen.set(open);
@@ -2834,6 +2842,7 @@ export function main() {
             >
               <ContextMenu
                 popupClass={POPUP_CLASS}
+                {...CONTEXT_MENU_MOTION}
                 popupStyle={{ minWidth: 184 }}
                 onOpenChange={({ open }) => {
                   if (open) refreshMachinesMenu();

@@ -8,9 +8,11 @@ import {
   initHost,
   machineMeta as hostMachines,
   onSlices,
+  OVERLAY_MOTION_CLASS,
   pathClean,
   pathParent,
   pathStyle,
+  popupMotion,
   projectLabels,
   projectRootOf,
   registerViews,
@@ -22,6 +24,7 @@ import {
   text,
   theme,
   TOOLTIP_CLASS,
+  TOOLTIP_MOTION,
   workspaceDirectory,
 } from "smelt/sdk";
 
@@ -192,7 +195,8 @@ export function button() {
           placement="top"
           align="start"
           offset={6}
-          popupClass="rounded-xl border border-border bg-popover p-1 shadow-lg"
+          popupClass={`rounded-xl border border-border bg-popover p-1 shadow-lg ${OVERLAY_MOTION_CLASS}`}
+          {...popupMotion("top")}
           popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
             <SmeltButton
@@ -278,7 +282,7 @@ export function button() {
                               <View
                                 style={{ paddingLeft: 8, paddingRight: 8 }}
                                 tooltip={
-                                  <Tooltip class={TOOLTIP_CLASS}>
+                                  <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
                                     <Text style={{ fontSize: look().type.text_xsmall.size, color: p().text }}>
                                       {project().root}
                                     </Text>

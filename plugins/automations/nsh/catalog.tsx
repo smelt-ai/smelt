@@ -1,7 +1,7 @@
 // 自动化目录：任务表、模板画廊、跨机器运行记录列表。
 import { computed, Scroll, Text, View } from "nsh";
 import { Menu } from "nsh/base";
-import { SmeltButton, SmeltIcon, t } from "smelt/sdk";
+import { popupMotion, SmeltButton, SmeltIcon, t } from "smelt/sdk";
 import {
   actionAgentDefinitionId,
   activeRunForAutomation,
@@ -100,6 +100,7 @@ function MachinePickingButton(props: {
           placement="bottom"
           align="end"
           popupClass={POPUP_CLASS}
+          {...popupMotion("bottom")}
           popupStyle={{ minWidth: 168 }}
           trigger={
             <View
@@ -448,6 +449,7 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
           placement="bottom"
           align="end"
           popupClass={POPUP_CLASS}
+          {...popupMotion("bottom")}
           popupStyle={{ minWidth: 168 }}
           trigger={
             <View

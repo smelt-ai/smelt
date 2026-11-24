@@ -10,6 +10,7 @@ import {
   call,
   clipboardWrite,
   connections,
+  DIALOG_SURFACE_CLASS,
   initHost,
   locale,
   onCommand,
@@ -24,9 +25,9 @@ import {
   smeltVersion,
   t,
   text,
-  DIALOG_SURFACE_CLASS,
   theme,
   TOOLTIP_CLASS,
+  TOOLTIP_MOTION,
   viewShown,
   waitOnline,
 } from "smelt/sdk";
@@ -1331,7 +1332,7 @@ export function root() {
                   class="items-center justify-center rounded-(--radius) hover:bg-accent"
                   style={{ width: 24, height: 24, flexShrink: 0 }}
                   tooltip={
-                    <Tooltip class={TOOLTIP_CLASS}>
+                    <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
                       <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
                         {pairingCopied() ? t("pairing.copied") : t("pairing.copy")}
                       </Text>

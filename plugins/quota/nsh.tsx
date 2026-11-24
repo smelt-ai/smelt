@@ -7,6 +7,8 @@ import {
   initHost,
   locale,
   onEvent,
+  OVERLAY_MOTION_CLASS,
+  popupMotion,
   quotaFacts,
   quotaTarget,
   registerViews,
@@ -17,6 +19,7 @@ import {
   text,
   theme,
   TOOLTIP_CLASS,
+  TOOLTIP_MOTION,
   viewShown,
   waitOnline,
 } from "smelt/sdk";
@@ -263,7 +266,8 @@ export function bar() {
           align="end"
           offset={6}
           style={{ minWidth: 0, flexShrink: 1, maxWidth: "100%" }}
-          popupClass="rounded-xl border border-border bg-popover p-1 shadow-lg"
+          popupClass={`rounded-xl border border-border bg-popover p-1 shadow-lg ${OVERLAY_MOTION_CLASS}`}
+          {...popupMotion("top")}
           popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
             <View
@@ -285,7 +289,7 @@ export function bar() {
               }}
               tooltip={
                 data().shown.length === 0 ? (
-                  <Tooltip class={TOOLTIP_CLASS}>
+                  <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
                     <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
                       {t(data().loading ? "loading" : "empty_trigger")}
                     </Text>
@@ -317,7 +321,7 @@ export function bar() {
                             gap: 4,
                           }}
                           tooltip={
-                            <Tooltip class={TOOLTIP_CLASS}>
+                            <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
                               <Text style={{ fontSize: look().type.text_xsmall.size, color: p().text }}>
                                 {tip()}
                               </Text>
@@ -456,7 +460,7 @@ export function bar() {
                       gap: 8,
                     }}
                     tooltip={
-                      <Tooltip class={TOOLTIP_CLASS}>
+                      <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
                         <Text style={{ fontSize: look().type.text_xsmall.size, color: p().text }}>
                           {row().tip}
                         </Text>
