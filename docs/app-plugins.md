@@ -68,7 +68,7 @@
 | 命令面板 | 命令注册表上的一个通用界面 |
 | 设置 | 视图注册表上的一个通用界面，单独一页、两个视图：导航（`smelt/settings-nav`）和内容（`smelt/settings`）。和命令面板一样不认识任何一页 |
 | 插件运行时 | 发现、加载、卸载、热重载；按插件分开的 Policy、日志身份、`smelt-fs`；每个插件一份自己的 SQLite；随 App 带的插件放进安装包（见「插件运行时」） |
-| 运行时连接 | 本机 smeltd 的启动、升级、重启；远程机器的配对、连接、中继、升级；按插件登记的话题订阅、转发运行时推送；`call` 调任意控制方法；会话状态和工作区目录的镜像（见「运行时数据只是话题」的例外） |
+| 运行时连接 | 本机 smeltd 的启动、升级、重启；远程机器的配对、连接、中继、升级；按插件登记的话题订阅、转发运行时推送；`call` 调任意控制方法；会话状态、会话提醒和工作区目录的镜像（见「运行时数据只是话题」的例外） |
 | 系统服务 | 系统通知和权限、菜单栏图标、Dock 角标、选路径（远程机器用宿主画的目录浏览）、用编辑器或文件管理器打开、剪贴板、对话框 |
 | 应用生命周期 | 自动更新、挪到「应用程序」、退出前检查有没有活在跑、应用日志 |
 | 宿主机制自己的页 | 外观、快捷键、插件管理（`crates/smelt/src/settings/`）。背后是宿主自己的机制（录快捷键、导入卸载插件），拆成插件就要给每页开一组只有它一个调用方的接口（原则 6）。宿主以来源 `smelt` 登记进同一张视图表 |
@@ -96,7 +96,8 @@
 | 远程桌面 | 画面与本地转发口组件 | `crates/smelt-desktop`；JS 经 `smelt.desktop`（`SmeltNativeDesktop`） |
 | 小人 | 会动的 3D 小人：零件、动作、合成、出帧节拍；演哪一出由插件给 | `crates/smelt-buddy`；JS 经 `smelt.buddy`（`SmeltNativeBuddy`） |
 | 资源量测 | 进程 CPU、内存 | 宿主桥 `sys.process_usage`（`crates/smelt-nsh`） |
-| 宿主内置系统模块 | 在线更新与退出守卫、通知与菜单栏/Dock、CLI 安装与清理、预首帧界面语言、终端字号与配色同步 | 宿主内建模块（`crates/smelt/src/{updater,notifications,maintenance,language,terminal_settings}`，沿用 `smelt.*` 视图/数据目录，0 VM） |
+| 会话提醒 | 各台机器有提醒的会话（等你处理的、没看过的），刚来该响的那条另发事件 | 宿主的镜像（`daemon_states.rs`）；JS 经 `"smelt/sdk"` 的 `sessionAttention`、`attention_alert` 事件 |
+| 宿主内置系统模块 | 在线更新与退出守卫、CLI 安装与清理、预首帧界面语言、终端字号与配色同步 | 宿主内建模块（`crates/smelt/src/{updater,maintenance,language,terminal_settings}`，沿用 `smelt.*` 视图/数据目录，0 VM） |
 
 能力自己要登记视图、命令时，用自己的来源 id（如 `smelt.terminal`），和插件一样进注册表。
 
@@ -128,6 +129,7 @@
 - 插件登记要哪些话题（`register_topics`），宿主按并集订阅、原样转发，不解读，也不缓存：新登记的插件靠重订拿到快照。
 - 插件之间不各自镜像一份。
 - 例外：会话状态和工作区目录（`session_states`、`workspace_directory`）留作宿主接口。三问都答「是」：宿主自己据此行动（重启守护进程前看有没有会话在跑）；只有宿主看得见（多台机器的订阅合并、机器上下线的代数）；插件再小心也做不对（每个插件各自合并一遍，结果会不一样）。宿主留一份镜像（`crates/smelt/src/daemon_states.rs`），插件只读。
+- 会话提醒（`attention.changed`）也在这份镜像里（`session_attention`）：会话列表、通知两个功能都要，快照和按 `revision` 丢旧变化是协议规则，各自镜像一份会不一样。刚来该响的那条宿主另发 `attention_alert`，发之前镜像已经推给插件。
 - 会话的显示名、状态、最后更新时间由 smeltd 算好放进推送（`smeltd/src/session_names.rs`），各端直接用，不自己拼。`conversation_name` 是整段对话的名字，`name` 是这一格的名字。
 - 还没有话题的数据，由 smeltd 补上话题。
 
@@ -247,8 +249,8 @@ plugins/files/
 
 ### 内置插件（`plugins/*`）与宿主内置系统模块（`crates/smelt/src/`）
 
-- 19 个内置插件（`plugins/*`：默认由 **1 个共享内置 VM** 承载全部 `16` 个内置脚本插件，另有 `1` 个共享 JS 模块 + `1` 个 0-VM 纯主题 + `1` 个 0-VM 纯布局；用户覆写哪个插件或共享模块时，仅对应受影响插件拆出跑独立用户 VM）：`agents`、`archive`、`automations`、`capabilities`、`conversation`（共享模块插件 `smelt.conversation` -> `"smelt/conversation"`，零独立 VM，纯 TSX `<SmeltConversation>` 与对话组件，供 `sessions`、`automations` 及任意第三方插件直接导入或 `smelt plugin fork smelt.conversation` 定制）、`desktop`（画布留在 `crates/smelt-desktop`）、`files`、`git`、`history`、`ide`、`launcher`、`layouts`（零 VM 声明式布局插件，`smelt-plugin.json` 声明 `pages` / `layouts`）、`machines`、`quota`、`resources`、`session-list`（直接驱动 `crates/smelt-buddy` 3D 小人）、`sessions`（直接驱动 `crates/smelt-terminal` 终端画布，并导入 `"smelt/conversation"` 的 `<SmeltConversation>`）、`skills`、`themes`（零 VM 声明式纯主题插件）。
-- 5 个宿主核心 / 纯 OS 集成与预首帧偏好模块保留在宿主 `crates/smelt/src/` 中（沿用原 `smelt.*` 视图 id 与 `~/.smelt/plugin-data/smelt.<name>/store.sqlite3` 路径，零 VM、零 IPC 开销）：`language`（预首帧恢复界面语言与系统切换）、`terminal_settings`（直接同步 `crates/smelt-terminal` 主题与全局字号）、`maintenance`（CLI 软链安装与 `~/.smelt` 残留清理）、`updater`（安装包校验/替换、移入「应用程序」与退出守卫）、`notifications`（`attention.changed` 系统通知、macOS 菜单栏与 Dock 角标）。
+- 20 个内置插件（`plugins/*`：默认由 **1 个共享内置 VM** 承载全部 `17` 个内置脚本插件，另有 `1` 个共享 JS 模块 + `1` 个 0-VM 纯主题 + `1` 个 0-VM 纯布局；用户覆写哪个插件或共享模块时，仅对应受影响插件拆出跑独立用户 VM）：`agents`、`archive`、`automations`、`capabilities`、`conversation`（共享模块插件 `smelt.conversation` -> `"smelt/conversation"`，零独立 VM，纯 TSX `<SmeltConversation>` 与对话组件，供 `sessions`、`automations` 及任意第三方插件直接导入或 `smelt plugin fork smelt.conversation` 定制）、`desktop`（画布留在 `crates/smelt-desktop`）、`files`、`git`、`history`、`ide`、`launcher`、`layouts`（零 VM 声明式布局插件，`smelt-plugin.json` 声明 `pages` / `layouts`）、`machines`、`notifications`（何时发/撤系统通知、菜单栏和 Dock 角标的内容、通知设置页；发通知、菜单栏、角标是宿主的系统服务）、`quota`、`resources`、`session-list`（直接驱动 `crates/smelt-buddy` 3D 小人）、`sessions`（直接驱动 `crates/smelt-terminal` 终端画布，并导入 `"smelt/conversation"` 的 `<SmeltConversation>`）、`skills`、`themes`（零 VM 声明式纯主题插件）。
+- 4 个模块连同设置页留在宿主 `crates/smelt/src/` 中（沿用原 `smelt.*` 视图 id 与 `~/.smelt/plugin-data/smelt.<name>/store.sqlite3` 路径）：`language`（预首帧恢复界面语言与系统切换）、`terminal_settings`（直接同步 `crates/smelt-terminal` 主题与全局字号）、`maintenance`（CLI 软链安装与 `~/.smelt` 残留清理）、`updater`（安装包校验/替换、移入「应用程序」与退出守卫）。理由和「宿主机制自己的页」一样：背后的能力只有这一页用，拆成插件就要开只有一个调用方的接口（原则 6）；语言、字号还得在首帧前生效。背后是通用系统服务的（通知、菜单栏、角标）不算例外，功能写在插件里。
 - 对话底层宿主能力：纯非 UI 的 `crates/smelt-acp` + `smelt-nsh` 宿主能力 `acp.*` / `mermaid.render`（经 `"smelt/sdk"` 暴露），上层 UI 全部在 `plugins/conversation/` 中，零跨 VM 嵌套。
 
 ## 会话核心

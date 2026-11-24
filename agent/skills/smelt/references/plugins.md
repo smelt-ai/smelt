@@ -93,7 +93,7 @@ NSH **不是 React**：组件函数只在挂载时执行**一次**，之后只�
   - `key` 可给默认快捷键（如 `"cmd-shift-y"`）；`palette` 控制是否进命令面板；`cli: true` + `args: ["field"]`（空数组 `[]` 表示无参）允许通过 `smelt app run <插件 id>/<name>` 从命令行调用。
   - 用 `onCommand(async ({ name, args }) => { ... })` 分发并返回值或抛错。
 - `registerPages(specs)` & `registerLayouts(specs)`：声明扩展主窗口页面和 Dock 布局。
-- `registerTopics(topics)`：订阅守护运行时广播话题（如 `"attention.changed"`），再由 `onEvent(..., ["runtime_topic"])` 接收 `{ type: "runtime_topic", machine, topic, message }`。
+- `registerTopics(topics)`：订阅守护运行时广播话题（如 `"automations.changed"`；会话提醒宿主已镜像，读 `sessionAttention(machine)`、收 `attention_alert` 事件），再由 `onEvent(..., ["runtime_topic"])` 接收 `{ type: "runtime_topic", machine, topic, message }`。
 - `registerMenuItems(items)`：`{ slot: "app" | "help", title, command }`（仅 macOS）。
 - `registerContextMenuItems(menu, items)`：向其他插件定义的右键菜单注册条目。
 - `setStatusMenu(menu | null)`：设置本插件专属 macOS 菜单栏状态图标与菜单（每插件独立）。

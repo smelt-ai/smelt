@@ -138,13 +138,15 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
 台账以快照 `core.attention.v1` + 事件 `attention.changed`（带 revision、该会话的新状态、
 要响的那条）发布，单独一条订阅：v7 运行时不认这个话题。没有订阅者时不编码事件。
 
-桌面上的出口全在内置插件 `crates/plugins/notifications`（`smelt.notifications`），宿主不认识
-会话提醒：
+桌面上宿主只镜像台账、给发通知的能力，何时发、写什么全在 JS 插件 `plugins/notifications`
+（`smelt.notifications`）：
 
-- 插件订阅各台机器的 `attention.changed`（宿主转成 `HostEvent::RuntimeTopic`），按机器
-  镜像台账（`attention.rs`）。快照整份换；比手里旧的变化丢掉；没收到快照的机器不拿「镜像里
-  没有」当「看过了」。宿主不再自己比较相位边沿、不再在本地扫 BEL。
-- 变化带 `alert` 时：设置里关了这类，或人正看着这段会话（主窗口在前台、舞台上露着、翻在
+- 宿主订阅各台机器的 `attention.changed`，按机器镜像台账（`crates/smelt/src/daemon_states.rs`，
+  和会话状态在一起）。快照整份换；比手里旧的变化丢掉；没收到快照的机器报 `null`，不拿「镜像里
+  没有」当「看过了」。插件经 `sessionAttention(machine)` / `machines()[].attention` 读，变了发
+  `sessions_changed`；会话列表的未读也读这一份。宿主不再自己比较相位边沿、不再在本地扫 BEL。
+- 变化带 `alert` 时宿主另发 `attention_alert`（带这段会话此刻的提醒、按当前语言写好的标题和
+  内容），发之前镜像已经推给插件。插件收到后：设置里关了这类，或人正看着这段会话（主窗口在前台、舞台上露着、翻在
   最新处，取自 `active_context` + `window_active`），不发，并撤掉这段会话之前那条；否则发
   系统通知。看着的会话有未读，插件调 `attention.mark_read` 告诉运行时，运行时清掉后推来
   变化，通知随之撤掉。
@@ -158,8 +160,8 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
   问过的给「请求授权」（`REQUEST_NOTIFICATION_PERMISSION`）；其余都给按钮执行
   `OPEN_NOTIFICATION_SETTINGS`，直接落到系统设置里本应用那一页。被禁止，或允许了但横幅（提醒
   样式是「无」）、Dock 角标被关掉的，写明是哪项；声音关了不算问题。
-- Dock 角标和菜单栏也由这个插件画：读镜像和 `session_states`、`workspace_directory`，用
-  `SET_DOCK_BADGE`、`set_status_menu` 交给宿主。宿主只提供菜单栏图标（每个插件一个）和 Dock
+- Dock 角标和菜单栏也由这个插件画：读镜像、工作区目录和宿主算好的会话事实（名字、状态、智能体
+  图标），用 `SET_DOCK_BADGE`、`setStatusMenu` 交给宿主。宿主只提供菜单栏图标（每个插件一个）和 Dock
   的机制，不知道菜单里是什么；菜单项点了执行插件给的命令。
 - 铃铛展示未读；Dock 数字统计未读或仍需行动的会话（每个会话计 1）。菜单栏图标右侧
   使用紧凑的 `N@·M`：N 是待关注会话数，M 是运行中会话数；为 0 的项省略。菜单里列出运行中、
