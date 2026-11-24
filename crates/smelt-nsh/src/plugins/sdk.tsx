@@ -189,6 +189,16 @@ export function isManagedAutomationWorkspace(
   return Boolean(Smelt.isManagedAutomationWorkspace(style, path, automationId));
 }
 
+export type ProviderInputProblem = "id_required" | "id_invalid" | "base_url_invalid";
+
+export function customProviderIdProblem(id: string): ProviderInputProblem | null {
+  return Smelt.customProviderIdProblem(id) ?? null;
+}
+
+export function apiBaseUrlProblem(baseUrl: string): ProviderInputProblem | null {
+  return Smelt.apiBaseUrlProblem(baseUrl) ?? null;
+}
+
 export interface PiMcpPreset {
   id: string;
   name: string;
@@ -1527,8 +1537,37 @@ export interface SmeltButtonProps {
 
 // ---- 共享 NSH 原生 Tailwind 浮层样式（全插件统一质感，零 JS 闭包、引擎侧直接解析） ----
 
-export const POPUP_CLASS = "rounded-lg border border-border bg-popover p-1 shadow-lg";
-export const TOOLTIP_CLASS = "rounded-(--radius) border border-border bg-popover px-2 py-1 shadow-md";
+// 浮层进出（docs/ui-design-language.md「动效」）：入场 240ms、ease_snap 曲线淡入；出场 120ms 淡出，
+// 比入场短，关掉的东西不该拖着。过渡写在浮层自己的 class 上，进出场的样子由组件的
+// `popupStartingClass` / `popupEndingClass`（提示是 `startingClass` / `endingClass`）给。
+export const OVERLAY_MOTION_CLASS =
+  "transition-[opacity,transform] duration-[240ms] ease-[cubic-bezier(0.32,0.72,0,1)]";
+const OVERLAY_EXIT_CLASS = "opacity-0 duration-[120ms] ease-in";
+const OVERLAY_FROM: Record<OverlaySide, string> = {
+  bottom: "-translate-y-1",
+  top: "translate-y-1",
+  right: "-translate-x-1",
+  left: "translate-x-1",
+};
+export type OverlaySide = "top" | "bottom" | "left" | "right";
+
+/**
+ * 弹出卡片、下拉菜单、选择框的进出：淡入，同时从触发点那一侧挪 4px 到位，交代它从哪弹出来；
+ * 关掉淡出。`side` 是浮层在触发点的哪一侧，即组件的 `placement`（默认下方）。放不下翻边时
+ * 仍按声明的那侧挪：位置要等布局后才知道，入场样子得在第一帧就定。
+ */
+export function popupMotion(side: OverlaySide = "bottom") {
+  return { popupStartingClass: `opacity-0 ${OVERLAY_FROM[side]}`, popupEndingClass: OVERLAY_EXIT_CLASS };
+}
+
+/** 右键菜单的进出：只淡入淡出不挪，放不下会翻边，没有可靠的「从哪来」。 */
+export const CONTEXT_MENU_MOTION = { popupStartingClass: "opacity-0", popupEndingClass: OVERLAY_EXIT_CLASS };
+
+/** 提示的进出：只淡入淡出不挪，它贴着指针。 */
+export const TOOLTIP_MOTION = { startingClass: "opacity-0", endingClass: OVERLAY_EXIT_CLASS };
+
+export const POPUP_CLASS = `rounded-lg border border-border bg-popover p-1 shadow-lg ${OVERLAY_MOTION_CLASS}`;
+export const TOOLTIP_CLASS = `rounded-(--radius) border border-border bg-popover px-2 py-1 shadow-md ${OVERLAY_MOTION_CLASS}`;
 export const MENU_ITEM_CLASS =
   "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
 export const INPUT_CLASS = "rounded-(--radius) border border-input bg-card px-2 text-foreground";
@@ -1701,7 +1740,7 @@ export function SmeltButton(props: SmeltButtonProps) {
       }}
       tooltip={
         hasTooltip() ? (
-          <Tooltip class={TOOLTIP_CLASS}>
+          <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
             <View class="flex-row items-center gap-1.5">
               <Text class="text-xs text-foreground">{props.tooltip}</Text>
               <If when={shortcut() != null}>

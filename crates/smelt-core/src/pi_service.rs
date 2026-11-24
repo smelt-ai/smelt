@@ -49,6 +49,9 @@ pub fn clear_default_model() -> Result<(), String> {
 }
 
 pub fn save_default_model(params: SaveDefaultModelParams) -> Result<(), String> {
+    if !params.config.base_url.is_empty() {
+        crate::pi_model_settings::validate_api_base_url(&params.config.base_url)?;
+    }
     crate::pi_model_settings::save_pi_default_model(&params.config, params.api_key.as_deref())?;
     if params.reset_base_url && params.config.base_url.is_empty() {
         crate::pi_model_settings::clear_pi_provider_base_url(&params.config.provider)?;
@@ -99,6 +102,7 @@ pub fn save_custom_provider(params: SaveCustomProviderParams) -> Result<bool, St
         set_default,
     } = params;
     crate::pi_model_settings::validate_custom_provider_id(&provider.id)?;
+    crate::pi_model_settings::validate_api_base_url(&provider.base_url)?;
     let auto = provider.models.is_empty();
     if auto {
         // Pi 从 models.json 解析模型，写一份空列表等于这个 provider 一个模型都选不了。

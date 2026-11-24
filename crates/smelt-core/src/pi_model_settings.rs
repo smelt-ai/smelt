@@ -1883,6 +1883,30 @@ mod tests {
         assert!(validate_custom_provider_id("acme-").is_err());
         assert!(validate_custom_provider_id("acme--gw").is_err());
         assert!(validate_custom_provider_id("token x").is_err());
+
+        // 设置页按种类写字：空的和写错的是两种。
+        assert_eq!(
+            custom_provider_id_problem(""),
+            Some(ProviderInputProblem::IdRequired)
+        );
+        assert_eq!(
+            custom_provider_id_problem("acme_gateway"),
+            Some(ProviderInputProblem::IdInvalid)
+        );
+        assert_eq!(custom_provider_id_problem("Token-X"), None);
+    }
+
+    #[test]
+    fn api_base_url_must_be_a_full_http_url() {
+        assert_eq!(api_base_url_problem("https://api.example.com/v1"), None);
+        assert_eq!(api_base_url_problem("http://localhost:11434/v1"), None);
+        for bad in ["ftp://example.com", "not-a-url", "http://", ""] {
+            assert_eq!(
+                api_base_url_problem(bad),
+                Some(ProviderInputProblem::BaseUrlInvalid),
+                "{bad}"
+            );
+        }
     }
 }
 

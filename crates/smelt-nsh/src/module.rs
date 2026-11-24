@@ -27,6 +27,7 @@ use smelt_plugin_api::{
         file_link::parse_file_link,
         new_session::{LaunchEntry, NewSessionAction, default_launch_entries},
         pi_mcp::PI_MCP_PRESETS,
+        pi_model_settings::{api_base_url_problem, custom_provider_id_problem},
         provider_quota::ProviderQuotaData,
         quota_service::QuotaTarget,
         runtime_path::PathStyle,
@@ -320,6 +321,17 @@ impl Smelt {
             &path,
             &automation_id,
         ))
+    }
+
+    /// 自定义 Provider ID 哪里不对（`id_required` / `id_invalid`），对的给 `None`。和运行时保存时
+    /// 拦的是同一份规则；提示的字插件自己写。
+    pub fn custom_provider_id_problem(id: String) -> Option<String> {
+        custom_provider_id_problem(&id).map(|problem| problem.as_str().to_string())
+    }
+
+    /// Provider 的 API 地址哪里不对（`base_url_invalid`），对的给 `None`。同上。
+    pub fn api_base_url_problem(base_url: String) -> Option<String> {
+        api_base_url_problem(&base_url).map(|problem| problem.as_str().to_string())
     }
 
     /// 内置 MCP 一键添加预设，按这台机器装没装远程桌面挑那一套，名字和说明按界面语言。

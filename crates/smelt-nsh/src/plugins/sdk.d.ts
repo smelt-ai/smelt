@@ -231,6 +231,11 @@ export declare function isManagedAutomationWorkspace(
   path: string,
   automationId: string,
 ): boolean;
+export type ProviderInputProblem = "id_required" | "id_invalid" | "base_url_invalid";
+/** 自定义 Provider ID 哪里不对，对的给 `null`。和运行时保存时拦的是同一份规则。 */
+export declare function customProviderIdProblem(id: string): ProviderInputProblem | null;
+/** Provider 的 API 地址（完整 HTTP(S) URL）哪里不对，对的给 `null`。同上。 */
+export declare function apiBaseUrlProblem(baseUrl: string): ProviderInputProblem | null;
 export interface PiMcpPreset {
   id: string;
   name: string;
@@ -642,6 +647,14 @@ export interface SmeltButtonProps {
   children?: JSX.Element;
 }
 
+export type OverlaySide = "top" | "bottom" | "left" | "right";
+export declare const OVERLAY_MOTION_CLASS: string;
+export declare function popupMotion(side?: OverlaySide): {
+  popupStartingClass: string;
+  popupEndingClass: string;
+};
+export declare const CONTEXT_MENU_MOTION: { popupStartingClass: string; popupEndingClass: string };
+export declare const TOOLTIP_MOTION: { startingClass: string; endingClass: string };
 export declare const POPUP_CLASS: string;
 export declare const TOOLTIP_CLASS: string;
 export declare const MENU_ITEM_CLASS: string;

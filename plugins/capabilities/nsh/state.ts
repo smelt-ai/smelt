@@ -5,9 +5,11 @@
 
 import { signal } from "nsh";
 import {
+  apiBaseUrlProblem,
   call,
   command,
   currentTheme,
+  customProviderIdProblem,
   machineMeta,
   machineMetaEntry,
   openUrl,
@@ -45,6 +47,9 @@ import {
   validateManualModelDraft,
   withAgentUse,
 } from "../model.js";
+
+/** Provider 表单的校验规则：运行时那一份。 */
+const PROVIDER_RULES = { customProviderIdProblem, apiBaseUrlProblem };
 
 export type CapabilitiesTab = "models" | "skills" | "extensions" | "mcp" | "memory";
 
@@ -573,7 +578,7 @@ export function createPageController(viewId: string, tabs: readonly Capabilities
     const customProviders = cfg?.modelSettings.ok ? cfg.modelSettings.value.customProviders : [];
     const authState = authProviders();
     const builtinProviders = authState?.status === "ready" ? authState.providers : null;
-    const check = validateManualModelDraft(draft, customProviders, builtinProviders, t);
+    const check = validateManualModelDraft(draft, customProviders, builtinProviders, t, PROVIDER_RULES);
     if (!check.ok) {
       modelEditorError.set(check.error);
       return;
@@ -702,7 +707,7 @@ export function createPageController(viewId: string, tabs: readonly Capabilities
   function saveCustomProvider(setDefault: boolean) {
     const cur = customProviderEditor();
     if (!cur || modelEditorSaving()) return;
-    const check = validateAndBuildSaveCustomProviderParams(cur, setDefault, t);
+    const check = validateAndBuildSaveCustomProviderParams(cur, setDefault, t, PROVIDER_RULES);
     if (!check.ok) {
       modelEditorError.set(check.error);
       return;

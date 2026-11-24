@@ -43,8 +43,6 @@ import {
   thinkingLevelLabel,
   unwrapRustResult,
   validateAndBuildSaveCustomProviderParams,
-  validateApiBaseUrl,
-  validateCustomProviderId,
   validateManualModelDraft,
   withAgentUse,
 } from "../model.js";
@@ -209,23 +207,6 @@ describe("Provider protocols, validation & discovery", () => {
     expect(discoveredModelLabel({ id: "gpt-5", name: "GPT 5" })).toBe("GPT 5");
   });
 
-  test("validateCustomProviderId allows mixed case with hyphens and rejects invalid", () => {
-    expect(validateCustomProviderId("Token-X", t).ok).toBe(true);
-    expect(validateCustomProviderId("acme-gateway-2", t).ok).toBe(true);
-    expect(validateCustomProviderId("", t).ok).toBe(false);
-    expect(validateCustomProviderId("1bad", t).ok).toBe(false);
-    expect(validateCustomProviderId("bad--id", t).ok).toBe(false);
-    expect(validateCustomProviderId("bad-", t).ok).toBe(false);
-    expect(validateCustomProviderId("bad_id", t).ok).toBe(false);
-  });
-
-  test("validateApiBaseUrl accepts http(s) URLs and rejects others", () => {
-    expect(validateApiBaseUrl("https://api.example.com/v1", t).ok).toBe(true);
-    expect(validateApiBaseUrl("http://localhost:11434/v1", t).ok).toBe(true);
-    expect(validateApiBaseUrl("ftp://example.com", t).ok).toBe(false);
-    expect(validateApiBaseUrl("not-a-url", t).ok).toBe(false);
-  });
-
   test("parseOptionalUint parses clean integers and rejects garbage", () => {
     expect(parseOptionalUint("128000")).toBe(128000);
     expect(parseOptionalUint(" 4096 ")).toBe(4096);
@@ -370,6 +351,12 @@ describe("Provider merging & model choice grouping (Rust render/models.rs parity
 });
 
 describe("Manual model & custom provider editors", () => {
+  // 规则本身是运行时那份（smelt-model 里有测试）；这里只看表单把哪种问题写成哪句字。
+  const rules = (problems = {}) => ({
+    customProviderIdProblem: (id) => problems.id?.[id] ?? null,
+    apiBaseUrlProblem: (url) => problems.url?.[url] ?? null,
+  });
+
   test("validateManualModelDraft requires credentials for unconfigured known provider", () => {
     const builtins = [normalizeAuthProvider({ id: "openai", name: "OpenAI", status: "none" })];
     const fail = validateManualModelDraft(
@@ -377,6 +364,7 @@ describe("Manual model & custom provider editors", () => {
       [],
       builtins,
       t,
+      rules(),
     );
     expect(fail.ok).toBe(false);
     expect(fail.error).toContain("openai has no credentials yet");
@@ -386,6 +374,7 @@ describe("Manual model & custom provider editors", () => {
       [],
       builtins,
       t,
+      rules(),
     );
     expect(ok.ok).toBe(true);
     expect(ok.params).toEqual({
@@ -436,7 +425,7 @@ describe("Manual model & custom provider editors", () => {
     draft.baseUrl = "https://gw.example/v1";
     draft.apiKey = "sk-key";
 
-    const res = validateAndBuildSaveCustomProviderParams(draft, true, t);
+    const res = validateAndBuildSaveCustomProviderParams(draft, true, t, rules());
     expect(res.ok).toBe(true);
     expect(res.fromEndpoint).toBe(true);
     expect(res.params).toEqual({
@@ -452,6 +441,32 @@ describe("Manual model & custom provider editors", () => {
       api_key: "sk-key",
       set_default: true,
     });
+  });
+
+  test("provider editors turn the runtime's problem kinds into their own text", () => {
+    const draft = buildCustomProviderDraft(null, true);
+    draft.id = "bad_id";
+    draft.baseUrl = "ftp://gw";
+    const badId = validateAndBuildSaveCustomProviderParams(draft, false, t, rules({ id: { bad_id: "id_invalid" } }));
+    expect(badId).toEqual({ ok: false, error: t("pi_model.provider_id_invalid", { id: "bad_id" }) });
+
+    draft.id = "gw";
+    const badUrl = validateAndBuildSaveCustomProviderParams(
+      draft,
+      false,
+      t,
+      rules({ url: { "ftp://gw": "base_url_invalid" } }),
+    );
+    expect(badUrl).toEqual({ ok: false, error: t("pi_model.base_url_invalid") });
+
+    const manual = validateManualModelDraft(
+      { provider: "gw", model: "m", baseUrl: "ftp://gw", apiKey: "k" },
+      [],
+      null,
+      t,
+      rules({ url: { "ftp://gw": "base_url_invalid" } }),
+    );
+    expect(manual).toEqual({ ok: false, error: t("pi_model.base_url_invalid") });
   });
 
   test("buildSaveDefaultModelParams uses camelCase inside config and snake_case outside", () => {

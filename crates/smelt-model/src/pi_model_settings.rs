@@ -207,11 +207,30 @@ pub fn group_pi_model_choices(choices: Vec<PiModelChoice>) -> Vec<PiModelChoiceG
     groups
 }
 
+/// 用户填的 Provider 哪里不对。规则只有这一份：运行时保存时拦（[`validate_api_base_url`]、
+/// [`validate_custom_provider_id`]），设置页经 `smelt/sdk` 调同一份即时提示、自己写字。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderInputProblem {
+    IdRequired,
+    IdInvalid,
+    BaseUrlInvalid,
+}
+
+impl ProviderInputProblem {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IdRequired => "id_required",
+            Self::IdInvalid => "id_invalid",
+            Self::BaseUrlInvalid => "base_url_invalid",
+        }
+    }
+}
+
 /// Provider 的 API 地址：必须是完整的 HTTP(S) URL。
-pub fn validate_api_base_url(base_url: &str) -> Result<(), String> {
+pub fn api_base_url_problem(base_url: &str) -> Option<ProviderInputProblem> {
     match url::Url::parse(base_url) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(()),
-        _ => Err(rust_i18n::t!("pi_model.base_url_invalid").into_owned()),
+        Ok(url) if matches!(url.scheme(), "http" | "https") => None,
+        _ => Some(ProviderInputProblem::BaseUrlInvalid),
     }
 }
 
@@ -219,17 +238,30 @@ pub fn validate_api_base_url(base_url: &str) -> Result<(), String> {
 ///
 /// Pi 把这个字符串当对象键用，大小写敏感、本身几乎不限制字符。我们只拦空键、空白、
 /// 以及会把 JSON 键弄乱的符号；`Token-X` 这种大小写混写必须能过——用户填的就是这个。
-pub fn validate_custom_provider_id(id: &str) -> Result<(), String> {
+pub fn custom_provider_id_problem(id: &str) -> Option<ProviderInputProblem> {
     if id.is_empty() {
-        return Err(rust_i18n::t!("pi_model.provider_id_required").into_owned());
+        return Some(ProviderInputProblem::IdRequired);
     }
     let valid = id.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic())
         && id
             .split('-')
             .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric()));
-    if valid {
-        Ok(())
-    } else {
-        Err(rust_i18n::t!("pi_model.provider_id_invalid", id = id).into_owned())
+    (!valid).then_some(ProviderInputProblem::IdInvalid)
+}
+
+pub fn validate_api_base_url(base_url: &str) -> Result<(), String> {
+    match api_base_url_problem(base_url) {
+        None => Ok(()),
+        Some(_) => Err(rust_i18n::t!("pi_model.base_url_invalid").into_owned()),
+    }
+}
+
+pub fn validate_custom_provider_id(id: &str) -> Result<(), String> {
+    match custom_provider_id_problem(id) {
+        None => Ok(()),
+        Some(ProviderInputProblem::IdRequired) => {
+            Err(rust_i18n::t!("pi_model.provider_id_required").into_owned())
+        }
+        Some(_) => Err(rust_i18n::t!("pi_model.provider_id_invalid", id = id).into_owned()),
     }
 }

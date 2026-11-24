@@ -258,36 +258,22 @@ export function thinkingLevelLabel(level, t) {
   return String(level ?? "");
 }
 
-/** Provider API 地址：必须是完整的 HTTP(S) URL。 */
-export function validateApiBaseUrl(baseUrl, t) {
-  const raw = typeof baseUrl === "string" ? baseUrl.trim() : "";
-  try {
-    const parsed = new URL(raw);
-    if ((parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.host.length > 0) {
-      return { ok: true };
-    }
-  } catch {
-    // fall through
+/**
+ * Provider 表单哪里不对，写成给人看的字。规则是运行时那一份（`rules` 由调用方传 `smelt/sdk` 的
+ * `customProviderIdProblem`、`apiBaseUrlProblem`），保存时运行时还会再拦一次。
+ */
+function providerInputError(problem, t, id) {
+  switch (problem) {
+    case null:
+    case undefined:
+      return null;
+    case "id_required":
+      return t("pi_model.provider_id_required");
+    case "id_invalid":
+      return t("pi_model.provider_id_invalid", { id });
+    default:
+      return t("pi_model.base_url_invalid");
   }
-  return { ok: false, error: t("pi_model.base_url_invalid") };
-}
-
-/** 自定义 Provider ID：以 ASCII 字母开头，只含字母、数字与非相邻/非首尾的短连字符。 */
-export function validateCustomProviderId(id, t) {
-  const value = typeof id === "string" ? id : "";
-  if (value.length === 0) {
-    return { ok: false, error: t("pi_model.provider_id_required") };
-  }
-  const firstCode = value.charCodeAt(0);
-  const startsAlpha =
-    (firstCode >= 65 && firstCode <= 90) || (firstCode >= 97 && firstCode <= 122);
-  const parts = value.split("-");
-  const valid =
-    startsAlpha && parts.every((part) => part.length > 0 && /^[A-Za-z0-9]+$/.test(part));
-  if (valid) {
-    return { ok: true };
-  }
-  return { ok: false, error: t("pi_model.provider_id_invalid", { id: value }) };
 }
 
 export function parseOptionalUint(raw) {
@@ -474,7 +460,7 @@ export function buildSaveDefaultModelParams({ provider, model, baseUrl = "", api
   };
 }
 
-export function validateManualModelDraft(draft, customProviders, builtinProviders, t) {
+export function validateManualModelDraft(draft, customProviders, builtinProviders, t, rules) {
   const provider = String(draft?.provider ?? "").trim();
   if (!provider) {
     return { ok: false, error: t("model_editor.provider_required") };
@@ -485,8 +471,8 @@ export function validateManualModelDraft(draft, customProviders, builtinProvider
   }
   const baseUrl = String(draft?.baseUrl ?? "").trim();
   if (baseUrl.length > 0) {
-    const urlCheck = validateApiBaseUrl(baseUrl, t);
-    if (!urlCheck.ok) return urlCheck;
+    const error = providerInputError(rules.apiBaseUrlProblem(baseUrl), t);
+    if (error) return { ok: false, error };
   }
   const apiKey = String(draft?.apiKey ?? "").trim();
   if (apiKey.length === 0 && providerHasCredential(provider, customProviders, builtinProviders) === false) {
@@ -556,19 +542,19 @@ export function adoptDiscoveredModelRows(rows, model) {
   return [...list, row];
 }
 
-export function validateAndBuildSaveCustomProviderParams(draft, setDefault, t) {
+export function validateAndBuildSaveCustomProviderParams(draft, setDefault, t, rules) {
   const id = String(draft?.id ?? "").trim();
-  const idCheck = validateCustomProviderId(id, t);
-  if (!idCheck.ok) {
-    return { ok: false, error: idCheck.error };
+  const idError = providerInputError(rules.customProviderIdProblem(id), t, id);
+  if (idError) {
+    return { ok: false, error: idError };
   }
   const baseUrl = String(draft?.baseUrl ?? "").trim();
   if (baseUrl.length === 0) {
     return { ok: false, error: t("provider.base_url_required") };
   }
-  const urlCheck = validateApiBaseUrl(baseUrl, t);
-  if (!urlCheck.ok) {
-    return { ok: false, error: urlCheck.error };
+  const urlError = providerInputError(rules.apiBaseUrlProblem(baseUrl), t);
+  if (urlError) {
+    return { ok: false, error: urlError };
   }
 
   const models = [];
