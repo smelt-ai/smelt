@@ -1,7 +1,7 @@
 // 对话消息流列表：自然时间序虚拟列表（initialScrollAtEnd + maintainVisibleContentPosition 自动粘底，
 // 零 inverted 空闲唤醒）、局部流式信号、跨气泡选区、折叠过程行、差异弹窗入口、子智能体卡片与右键菜单。
 import { cleanup, computed, Image, List, Scroll, signal, Text, View } from "nsh";
-import { ContextMenu, MenuItem, MenuSeparator } from "nsh/base";
+import { Collapsible, ContextMenu, MenuItem, MenuSeparator } from "nsh/base";
 import {
   clipboardWrite,
   CONTEXT_MENU_MOTION,
@@ -11,6 +11,7 @@ import {
   POPUP_CLASS,
   run,
   SmeltButton,
+  SmeltDisclosureChevron,
   SmeltIcon,
   SmeltMarkdown,
   theme,
@@ -413,139 +414,13 @@ function ToolCallRow(props: {
         </If>
       }
     >
-      <View style={{ width: "100%", gap: 4 }}>
-        <View
-          onPress={() => {
-            if (hasDetails()) props.onToggleTool(String(tc()?.id ?? ""));
-          }}
-          class={hasDetails() ? "hover:bg-accent" : undefined}
-          style={{
-            minHeight: 26,
-            paddingHorizontal: 8,
-            paddingVertical: 4,
-            borderRadius: look().radius.row ?? 6,
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
-          <If
-            when={running()}
-            else={
-              <SmeltIcon
-                path={toolIconFor(tc()?.kind)}
-                size={13}
-                color={failed() ? look().palette.bad : look().palette.muted}
-              />
-            }
-          >
-            <SmeltIcon spin size={12} color={look().palette.run} />
-          </If>
-          <Text
-            style={{
-              flex: 1,
-              minWidth: 0,
-              fontSize: look().type.small.size,
-              color: failed() ? look().palette.bad : look().palette.muted,
-              numberOfLines: 1,
-            }}
-          >
-            {relativePathToCwd(String(tc()?.title ?? ""), props.cwd())}
-          </Text>
-          <If when={failed()}>
-            <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.bad }}>
-              {ct("status.failed")}
-            </Text>
-          </If>
-          <If when={hasDetails()}>
-            <SmeltIcon
-              path={expanded() ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
-              size={12}
-              color={look().palette.faint}
-            />
-          </If>
-        </View>
-
-        {/* 改动文件差异胶囊 */}
-        <View style={{ paddingLeft: 22 }}>
-          <DiffFileChips
-            files={editFiles}
-            cwd={props.cwd}
-            machine={props.machine}
-            onOpenDiff={props.onOpenDiff}
-          />
-        </View>
-
-        {/* Pi 子智能体派发卡片 */}
-        <If when={(tc()?.subagents?.length ?? 0) > 0}>
-          <View style={{ paddingLeft: 22, gap: 4, paddingTop: 2 }}>
-            <Each of={tc()?.subagents ?? []}>
-              {(runItem) => {
-                const liveMatch = computed(() =>
-                  props.liveSubagents().find((s: any) => s.id === runItem().id) ?? null,
-                );
-                const status = computed(() => liveMatch()?.status ?? runItem().status ?? "completed");
-                const isRunning = computed(() => status() === "running" || status() === "pending");
-                return (
-                  <View
-                    onPress={() =>
-                      props.onInspectSubagent({
-                        id: runItem().id,
-                        title: runItem().title || runItem().id,
-                      })
-                    }
-                    class="hover:bg-accent"
-                    style={{
-                      paddingHorizontal: 10,
-                      paddingVertical: 6,
-                      borderRadius: look().radius.md ?? 8,
-                      borderWidth: 1,
-                      borderColor: look().palette.hair,
-                      backgroundColor: look().palette.surface,
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
-                  >
-                    <If
-                      when={isRunning()}
-                      else={<SmeltIcon path="icons/bot.svg" size={13} color={look().palette.muted} />}
-                    >
-                      <SmeltIcon spin size={12} color={look().palette.run} />
-                    </If>
-                    <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
-                      <Text style={{ fontSize: look().type.small.size, color: look().palette.text, numberOfLines: 1 }}>
-                        {runItem().title || runItem().id}
-                      </Text>
-                      <If when={Boolean(liveMatch()?.lastActivity)}>
-                        <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint, numberOfLines: 1 }}>
-                          {liveMatch()?.lastActivity ?? ""}
-                        </Text>
-                      </If>
-                    </View>
-                    <Text
-                      style={{
-                        fontSize: look().type.text_xsmall.size,
-                        color:
-                          status() === "failed"
-                            ? look().palette.bad
-                            : isRunning()
-                              ? look().palette.run
-                              : look().palette.faint,
-                      }}
-                    >
-                      {statusLabel(status())}
-                    </Text>
-                  </View>
-                );
-              }}
-            </Each>
-          </View>
-        </If>
-
-        {/* 展开后的文本 / 终端 / 图片 / 嵌套子条目 */}
-        <If when={expanded()}>
-          <View style={{ paddingLeft: 22, paddingTop: 4, gap: 6 }}>
+      {/* 展开后的文本 / 终端 / 图片 / 嵌套子条目 */}
+      <Collapsible
+        open={expanded()}
+        reveal={true}
+        style={{ width: "100%" }}
+        content={
+          <View style={{ paddingLeft: 22, paddingTop: 8, gap: 6 }}>
             <Each of={textOutputs()}>
               {(part: () => any) => (
                 <View class="rounded-[10px] border border-border bg-sidebar p-2.5 gap-1">
@@ -642,8 +517,139 @@ function ToolCallRow(props: {
               </View>
             </If>
           </View>
-        </If>
-      </View>
+        }
+      >
+        <View style={{ width: "100%", gap: 4 }}>
+          <View
+            onPress={() => {
+              if (hasDetails()) props.onToggleTool(String(tc()?.id ?? ""));
+            }}
+            class={hasDetails() ? "hover:bg-accent" : undefined}
+            style={{
+              minHeight: 26,
+              paddingHorizontal: 8,
+              paddingVertical: 4,
+              borderRadius: look().radius.row ?? 6,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <If
+              when={running()}
+              else={
+                <SmeltIcon
+                  path={toolIconFor(tc()?.kind)}
+                  size={13}
+                  color={failed() ? look().palette.bad : look().palette.muted}
+                />
+              }
+            >
+              <SmeltIcon spin size={12} color={look().palette.run} />
+            </If>
+            <Text
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontSize: look().type.small.size,
+                color: failed() ? look().palette.bad : look().palette.muted,
+                numberOfLines: 1,
+              }}
+            >
+              {relativePathToCwd(String(tc()?.title ?? ""), props.cwd())}
+            </Text>
+            <If when={failed()}>
+              <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.bad }}>
+                {ct("status.failed")}
+              </Text>
+            </If>
+            <If when={hasDetails()}>
+              <SmeltDisclosureChevron
+                open={expanded()}
+                size={12}
+                color={look().palette.faint}
+              />
+            </If>
+          </View>
+
+          {/* 改动文件差异胶囊 */}
+          <View style={{ paddingLeft: 22 }}>
+            <DiffFileChips
+              files={editFiles}
+              cwd={props.cwd}
+              machine={props.machine}
+              onOpenDiff={props.onOpenDiff}
+            />
+          </View>
+
+          {/* Pi 子智能体派发卡片 */}
+          <If when={(tc()?.subagents?.length ?? 0) > 0}>
+            <View style={{ paddingLeft: 22, gap: 4, paddingTop: 2 }}>
+              <Each of={tc()?.subagents ?? []}>
+                {(runItem) => {
+                  const liveMatch = computed(() =>
+                    props.liveSubagents().find((s: any) => s.id === runItem().id) ?? null,
+                  );
+                  const status = computed(() => liveMatch()?.status ?? runItem().status ?? "completed");
+                  const isRunning = computed(() => status() === "running" || status() === "pending");
+                  return (
+                    <View
+                      onPress={() =>
+                        props.onInspectSubagent({
+                          id: runItem().id,
+                          title: runItem().title || runItem().id,
+                        })
+                      }
+                      class="hover:bg-accent"
+                      style={{
+                        paddingHorizontal: 10,
+                        paddingVertical: 6,
+                        borderRadius: look().radius.md ?? 8,
+                        borderWidth: 1,
+                        borderColor: look().palette.hair,
+                        backgroundColor: look().palette.surface,
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 8,
+                      }}
+                    >
+                      <If
+                        when={isRunning()}
+                        else={<SmeltIcon path="icons/bot.svg" size={13} color={look().palette.muted} />}
+                      >
+                        <SmeltIcon spin size={12} color={look().palette.run} />
+                      </If>
+                      <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+                        <Text style={{ fontSize: look().type.small.size, color: look().palette.text, numberOfLines: 1 }}>
+                          {runItem().title || runItem().id}
+                        </Text>
+                        <If when={Boolean(liveMatch()?.lastActivity)}>
+                          <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint, numberOfLines: 1 }}>
+                            {liveMatch()?.lastActivity ?? ""}
+                          </Text>
+                        </If>
+                      </View>
+                      <Text
+                        style={{
+                          fontSize: look().type.text_xsmall.size,
+                          color:
+                            status() === "failed"
+                              ? look().palette.bad
+                              : isRunning()
+                                ? look().palette.run
+                                : look().palette.faint,
+                        }}
+                      >
+                        {statusLabel(status())}
+                      </Text>
+                    </View>
+                  );
+                }}
+              </Each>
+            </View>
+          </If>
+        </View>
+      </Collapsible>
     </If>
   );
 }
@@ -802,8 +808,8 @@ export function MessageList(props: {
                     gap: 6,
                   }}
                 >
-                  <SmeltIcon
-                    path={r().expanded ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
+                  <SmeltDisclosureChevron
+                    open={r().expanded}
                     size={12}
                     color={look().palette.faint}
                   />
@@ -836,8 +842,8 @@ export function MessageList(props: {
                     <If
                       when={Boolean(r().group?.active && (r().group?.tally?.running ?? 0) > 0)}
                       else={
-                        <SmeltIcon
-                          path={r().expanded ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
+                        <SmeltDisclosureChevron
+                          open={r().expanded}
                           size={12}
                           color={look().palette.faint}
                         />
@@ -972,31 +978,14 @@ export function MessageList(props: {
                         <If
                           when={!isThought()}
                           else={
-                            <View style={{ width: "100%", gap: 4 }}>
-                              <View
-                                onPress={() => toggleSet(expandedThoughts, r().key)}
-                                class="hover:bg-accent"
-                                style={{
-                                  height: 26,
-                                  paddingHorizontal: 8,
-                                  borderRadius: look().radius.row ?? 6,
-                                  flexDirection: "row",
-                                  alignItems: "center",
-                                  gap: 6,
-                                }}
-                              >
-                                <SmeltIcon
-                                  path={thoughtExpanded() ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
-                                  size={12}
-                                  color={look().palette.faint}
-                                />
-                                <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint }}>
-                                  {isStreamingCell() ? ct("status.thinking") : ct("status.thinking").replace("…", "")}
-                                </Text>
-                              </View>
-                              <If when={thoughtExpanded()}>
+                            <Collapsible
+                              open={thoughtExpanded()}
+                              reveal={true}
+                              style={{ width: "100%" }}
+                              content={
                                 <View
                                   style={{
+                                    marginTop: 4,
                                     paddingLeft: 18,
                                     borderLeftWidth: 2,
                                     borderLeftColor: look().palette.hair,
@@ -1010,8 +999,30 @@ export function MessageList(props: {
                                     styles={thoughtMarkdownStyles()}
                                   />
                                 </View>
-                              </If>
-                            </View>
+                              }
+                            >
+                              <View
+                                onPress={() => toggleSet(expandedThoughts, r().key)}
+                                class="hover:bg-accent"
+                                style={{
+                                  height: 26,
+                                  paddingHorizontal: 8,
+                                  borderRadius: look().radius.row ?? 6,
+                                  flexDirection: "row",
+                                  alignItems: "center",
+                                  gap: 6,
+                                }}
+                              >
+                                <SmeltDisclosureChevron
+                                  open={thoughtExpanded()}
+                                  size={12}
+                                  color={look().palette.faint}
+                                />
+                                <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint }}>
+                                  {isStreamingCell() ? ct("status.thinking") : ct("status.thinking").replace("…", "")}
+                                </Text>
+                              </View>
+                            </Collapsible>
                           }
                         >
                           <MessageContextWrapper
@@ -1184,7 +1195,9 @@ export function MessageList(props: {
                         return title ? `${title} · ${st}` : st;
                       };
                       return (
-                        <View
+                        <Collapsible
+                          open={expanded() && tail().length > 0}
+                          reveal={true}
                           style={{
                             paddingHorizontal: 10,
                             paddingVertical: 6,
@@ -1192,8 +1205,20 @@ export function MessageList(props: {
                             borderWidth: 1,
                             borderColor: look().palette.hair,
                             backgroundColor: look().palette.surface,
-                            gap: 4,
                           }}
+                          content={
+                            <Scroll style={{ maxHeight: 140, marginTop: 4, paddingLeft: 18 }}>
+                              <Text
+                                style={{
+                                  fontFamily: look().fonts?.mono,
+                                  fontSize: look().type.text_xsmall.size,
+                                  color: look().palette.muted,
+                                }}
+                              >
+                                {tail()}
+                              </Text>
+                            </Scroll>
+                          }
                         >
                           <View
                             onPress={() => {
@@ -1206,27 +1231,14 @@ export function MessageList(props: {
                               {headline()}
                             </Text>
                             <If when={tail().length > 0}>
-                              <SmeltIcon
-                                path={expanded() ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
+                              <SmeltDisclosureChevron
+                                open={expanded()}
                                 size={12}
                                 color={look().palette.faint}
                               />
                             </If>
                           </View>
-                          <If when={expanded() && tail().length > 0}>
-                            <Scroll style={{ maxHeight: 140, paddingLeft: 18 }}>
-                              <Text
-                                style={{
-                                  fontFamily: look().fonts?.mono,
-                                  fontSize: look().type.text_xsmall.size,
-                                  color: look().palette.muted,
-                                }}
-                              >
-                                {tail()}
-                              </Text>
-                            </Scroll>
-                          </If>
-                        </View>
+                        </Collapsible>
                       );
                     })()}
                   </If>

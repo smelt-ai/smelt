@@ -1,7 +1,7 @@
 // 输入框上方的交互卡片：权限审批卡、Elicitation 提问表单卡、记忆变更审核卡。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Input } from "nsh/base";
-import { call, openUrl, SmeltButton, SmeltIcon, theme } from "smelt/sdk";
+import { Collapsible, Input } from "nsh/base";
+import { call, openUrl, SmeltButton, SmeltDisclosureChevron, SmeltIcon, theme } from "smelt/sdk";
 import { ct } from "./i18n.ts";
 
 function isAllowPermissionKind(kind: unknown): boolean {
@@ -450,14 +450,31 @@ export function MemoryChangesCard(props: {
                   const armed = computed(() => deleteArmedKey() === rowKey());
                   const busy = computed(() => busyKey() === rowKey());
                   return (
-                    <View style={{ paddingHorizontal: 8, paddingVertical: 6, gap: 4 }}>
+                    <Collapsible
+                      open={expanded() && Boolean(entry().body || entry().content)}
+                      reveal={true}
+                      style={{ paddingHorizontal: 8, paddingVertical: 6 }}
+                      content={
+                        <Scroll style={{ maxHeight: 140, marginTop: 4, paddingLeft: 18 }}>
+                          <Text
+                            style={{
+                              fontSize: look().type.text_xsmall.size,
+                              color: look().palette.muted,
+                              fontFamily: look().fonts?.mono,
+                            }}
+                          >
+                            {entry().body ?? entry().content ?? ""}
+                          </Text>
+                        </Scroll>
+                      }
+                    >
                       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                         <View
                           onPress={() => expandedKey.set(expanded() ? null : rowKey())}
                           style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}
                         >
-                          <SmeltIcon
-                            path={expanded() ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
+                          <SmeltDisclosureChevron
+                            open={expanded()}
                             size={12}
                             color={look().palette.faint}
                           />
@@ -506,20 +523,7 @@ export function MemoryChangesCard(props: {
                           }}
                         />
                       </View>
-                      <If when={expanded() && Boolean(entry().body || entry().content)}>
-                        <Scroll style={{ maxHeight: 140, paddingLeft: 18 }}>
-                          <Text
-                            style={{
-                              fontSize: look().type.text_xsmall.size,
-                              color: look().palette.muted,
-                              fontFamily: look().fonts?.mono,
-                            }}
-                          >
-                            {entry().body ?? entry().content ?? ""}
-                          </Text>
-                        </Scroll>
-                      </If>
-                    </View>
+                    </Collapsible>
                   );
                 }}
               </Each>

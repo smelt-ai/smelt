@@ -44,6 +44,7 @@ import {
   run,
   SmeltButton,
   SmeltDiffView,
+  SmeltDisclosureChevron,
   SmeltIcon,
   SmeltVector,
   stableMemo,
@@ -2888,12 +2889,8 @@ export function Main() {
                                     cursor: "pointer",
                                   }}
                                 >
-                                  <SmeltIcon
-                                    path={
-                                      file.collapsed
-                                        ? "icons/chevron-right.svg"
-                                        : "icons/chevron-down.svg"
-                                    }
+                                  <SmeltDisclosureChevron
+                                    open={!file.collapsed}
                                     size={12}
                                     color={look().palette.muted}
                                   />
@@ -3413,12 +3410,8 @@ export function Main() {
                                               cursor: "pointer",
                                             }}
                                           >
-                                            <SmeltIcon
-                                              path={
-                                                row().collapsed
-                                                  ? "icons/chevron-right.svg"
-                                                  : "icons/chevron-down.svg"
-                                              }
+                                            <SmeltDisclosureChevron
+                                              open={!row().collapsed}
                                               size={10}
                                               color={look().palette.muted}
                                             />

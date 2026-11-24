@@ -43,6 +43,7 @@ import {
   revealPath,
   run,
   SmeltButton,
+  SmeltDisclosureChevron,
   SmeltEditor,
   SmeltIcon,
   SmeltMarkdown,
@@ -1895,12 +1896,8 @@ export function Main() {
                                                   when={row().isDir}
                                                   else={<View style={{ width: 14, flexShrink: 0 }} />}
                                                 >
-                                                  <SmeltIcon
-                                                    path={
-                                                      row().expanded
-                                                        ? "icons/chevron-down.svg"
-                                                        : "icons/chevron-right.svg"
-                                                    }
+                                                  <SmeltDisclosureChevron
+                                                    open={row().expanded}
                                                     size={12}
                                                     color={look().palette.muted}
                                                   />
@@ -2004,12 +2001,8 @@ export function Main() {
                                                 overflow: "hidden",
                                               }}
                                             >
-                                              <SmeltIcon
-                                                path={
-                                                  row().open
-                                                    ? "icons/chevron-down.svg"
-                                                    : "icons/chevron-right.svg"
-                                                }
+                                              <SmeltDisclosureChevron
+                                                open={row().open}
                                                 size={12}
                                                 color={look().palette.muted}
                                               />
@@ -2060,12 +2053,8 @@ export function Main() {
                                                   overflow: "hidden",
                                                 }}
                                               >
-                                                <SmeltIcon
-                                                  path={
-                                                    row().open
-                                                      ? "icons/chevron-down.svg"
-                                                      : "icons/chevron-right.svg"
-                                                  }
+                                                <SmeltDisclosureChevron
+                                                  open={row().open}
                                                   size={12}
                                                   color={look().palette.muted}
                                                 />

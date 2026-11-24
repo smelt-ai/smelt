@@ -14,7 +14,7 @@ import {
   Text,
   View,
 } from "nsh";
-import { Input } from "nsh/base";
+import { Collapsible, Input } from "nsh/base";
 import {
   acpClipboardImages,
   acpPasteImage,
@@ -22,6 +22,7 @@ import {
   fileUriToPath,
   run,
   SmeltButton,
+  SmeltDisclosureChevron,
   SmeltIcon,
   theme,
   windowActive,
@@ -558,49 +559,17 @@ export function Composer(props: {
 
           {/* 3. 可折叠计划条 */}
           <If when={planSummary() != null}>
-            <View
+            <Collapsible
+              open={planExpanded()}
+              reveal={true}
               style={{
                 borderBottomWidth: 1,
                 borderBottomColor: look().palette.hair,
                 paddingHorizontal: 16,
                 paddingVertical: 8,
-                gap: 6,
               }}
-            >
-              <View
-                onPress={() => planExpanded.set(!planExpanded())}
-                style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
-              >
-                <SmeltIcon
-                  path={planExpanded() ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
-                  size={12}
-                  color={look().palette.faint}
-                />
-                <Text
-                  style={{
-                    fontSize: look().type.text_xsmall_medium?.size ?? 12,
-                    fontWeight: look().type.text_xsmall_medium?.weight ?? 500,
-                    color: look().palette.muted,
-                  }}
-                >
-                  {ct("plan.title")} ({planSummary()?.done ?? 0}/{planSummary()?.total ?? 0})
-                </Text>
-                <If when={Boolean(planSummary()?.active)}>
-                  <Text
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      fontSize: look().type.text_xsmall.size,
-                      color: look().palette.text,
-                      numberOfLines: 1,
-                    }}
-                  >
-                    · {planSummary()?.active ?? ""}
-                  </Text>
-                </If>
-              </View>
-              <If when={planExpanded()}>
-                <View style={{ paddingLeft: 18, gap: 4 }}>
+              content={
+                <View style={{ marginTop: 6, paddingLeft: 18, gap: 4 }}>
                   <Each of={planSummary()?.entries ?? []}>
                     {(step) => (
                       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -637,8 +606,41 @@ export function Composer(props: {
                     )}
                   </Each>
                 </View>
-              </If>
-            </View>
+              }
+            >
+              <View
+                onPress={() => planExpanded.set(!planExpanded())}
+                style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+              >
+                <SmeltDisclosureChevron
+                  open={planExpanded()}
+                  size={12}
+                  color={look().palette.faint}
+                />
+                <Text
+                  style={{
+                    fontSize: look().type.text_xsmall_medium?.size ?? 12,
+                    fontWeight: look().type.text_xsmall_medium?.weight ?? 500,
+                    color: look().palette.muted,
+                  }}
+                >
+                  {ct("plan.title")} ({planSummary()?.done ?? 0}/{planSummary()?.total ?? 0})
+                </Text>
+                <If when={Boolean(planSummary()?.active)}>
+                  <Text
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: look().type.text_xsmall.size,
+                      color: look().palette.text,
+                      numberOfLines: 1,
+                    }}
+                  >
+                    · {planSummary()?.active ?? ""}
+                  </Text>
+                </If>
+              </View>
+            </Collapsible>
           </If>
 
           {/* 4. 排队中消息条 */}

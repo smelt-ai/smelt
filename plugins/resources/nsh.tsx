@@ -11,7 +11,7 @@
 // - 可见期间收到 `sessions_changed` / `machines_changed` / `locale_changed` 立即重建快照。
 
 import { cleanup, computed, effect, Scroll, signal, Text, View } from "nsh";
-import { Button as BaseButton } from "nsh/base";
+import { Button as BaseButton, Collapsible } from "nsh/base";
 import {
   bootTask,
   call,
@@ -24,7 +24,7 @@ import {
   registerViews,
   run,
   SmeltButton,
-  SmeltIcon,
+  SmeltDisclosureChevron,
   SmeltVector,
   t,
   text,
@@ -333,8 +333,8 @@ function Disclosure(props: { open: boolean }) {
         justifyContent: "flex-start",
       }}
     >
-      <SmeltIcon
-        path={props.open ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
+      <SmeltDisclosureChevron
+        open={props.open}
         size={14}
         color={look().palette.muted}
       />
@@ -666,7 +666,63 @@ function MachineSection(props: { section: () => any }) {
             const hasParts = () => (row().parts?.length ?? 0) > 0;
             const isOpen = () => expanded().has(row().id);
             return (
-              <View style={{ display: "flex", flexDirection: "column" }}>
+              <Collapsible
+                open={hasParts() && isOpen()}
+                reveal={true}
+                style={{ display: "flex", flexDirection: "column" }}
+                content={
+                  <View
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      paddingLeft: DISCLOSURE_COLUMN + 12,
+                      paddingBottom: 4,
+                    }}
+                  >
+                    <Each of={row().parts} key={(part: any) => part.id}>
+                      {(part: () => any) => (
+                        <View
+                          style={{
+                            display: "flex",
+                            flexDirection: "row",
+                            alignItems: "center",
+                            paddingLeft: 8,
+                            paddingRight: 8,
+                            paddingTop: 3,
+                            paddingBottom: 3,
+                            gap: 12,
+                          }}
+                        >
+                          <RowLabel label={part().label} detail={part().detail} />
+                          <View
+                            style={{
+                              display: "flex",
+                              flexDirection: "row",
+                              alignItems: "center",
+                              flexShrink: 0,
+                            }}
+                          >
+                            <View style={{ width: CPU_COLUMN, flexShrink: 0 }} />
+                            <Text
+                              style={{
+                                width: MEMORY_COLUMN,
+                                textAlign: "right",
+                                fontSize: look().type.ui.size,
+                                lineHeight: look().type.ui.line_height,
+                                color: look().palette.muted,
+                                fontVariant: ["tabular-nums"],
+                                numberOfLines: 1,
+                              }}
+                            >
+                              {formatBytes(part().bytes)}
+                            </Text>
+                          </View>
+                        </View>
+                      )}
+                    </Each>
+                  </View>
+                }
+              >
                 <If
                   when={hasParts()}
                   else={
@@ -719,60 +775,7 @@ function MachineSection(props: { section: () => any }) {
                     />
                   </BaseButton>
                 </If>
-
-                <If when={hasParts() && isOpen()}>
-                  <View
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      paddingLeft: DISCLOSURE_COLUMN + 12,
-                      paddingBottom: 4,
-                    }}
-                  >
-                    <Each of={row().parts} key={(part: any) => part.id}>
-                      {(part: () => any) => (
-                        <View
-                          style={{
-                            display: "flex",
-                            flexDirection: "row",
-                            alignItems: "center",
-                            paddingLeft: 8,
-                            paddingRight: 8,
-                            paddingTop: 3,
-                            paddingBottom: 3,
-                            gap: 12,
-                          }}
-                        >
-                          <RowLabel label={part().label} detail={part().detail} />
-                          <View
-                            style={{
-                              display: "flex",
-                              flexDirection: "row",
-                              alignItems: "center",
-                              flexShrink: 0,
-                            }}
-                          >
-                            <View style={{ width: CPU_COLUMN, flexShrink: 0 }} />
-                            <Text
-                              style={{
-                                width: MEMORY_COLUMN,
-                                textAlign: "right",
-                                fontSize: look().type.ui.size,
-                                lineHeight: look().type.ui.line_height,
-                                color: look().palette.muted,
-                                fontVariant: ["tabular-nums"],
-                                numberOfLines: 1,
-                              }}
-                            >
-                              {formatBytes(part().bytes)}
-                            </Text>
-                          </View>
-                        </View>
-                      )}
-                    </Each>
-                  </View>
-                </If>
-              </View>
+              </Collapsible>
             );
           }}
         </Each>
@@ -793,55 +796,11 @@ function MachineSection(props: { section: () => any }) {
             };
 
             return (
-              <View style={{ display: "flex", flexDirection: "column" }}>
-                <View
-                  class="hover:bg-accent active:bg-sidebar-accent"
-                  onPress={() => toggleRow(item().id)}
-                  style={{
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
-                    paddingLeft: 8,
-                    paddingRight: 8,
-                    paddingTop: 4,
-                    paddingBottom: 4,
-                    gap: 12,
-                    borderRadius: look().radius.row ?? 6,
-                    cursor: "default",
-                  }}
-                >
-                  <Disclosure open={isOpen()} />
-                  <RowLabel label={item().group.title} detail={detail()} />
-                  <If when={item().group.jump != null}>
-                    <View
-                      style={{ flexShrink: 0 }}
-                      onPress={(e: any) => e?.stopPropagation?.()}
-                      onPressDown={(e: any) => e?.stopPropagation?.()}
-                    >
-                      <SmeltButton
-                        quiet={true}
-                        small={true}
-                        icon="icons/external-link.svg"
-                        tooltip={t("jump")}
-                        accessibilityLabel={t("jump")}
-                        onPress={(e: any) => {
-                          e?.stopPropagation?.();
-                          const jumpId = item().group.jump;
-                          if (jumpId != null) {
-                            jumpToSession(props.section().machine, jumpId);
-                          }
-                        }}
-                      />
-                    </View>
-                  </If>
-                  <UsageColumns
-                    cpuPercent={item().group.usage.cpu_percent}
-                    memoryBytes={item().group.usage.memory_bytes}
-                    color={look().palette.text}
-                  />
-                </View>
-
-                <If when={isOpen()}>
+              <Collapsible
+                open={isOpen()}
+                reveal={true}
+                style={{ display: "flex", flexDirection: "column" }}
+                content={
                   <View
                     style={{
                       display: "flex",
@@ -946,8 +905,55 @@ function MachineSection(props: { section: () => any }) {
                       </Text>
                     </If>
                   </View>
-                </If>
-              </View>
+                }
+              >
+                <View
+                  class="hover:bg-accent active:bg-sidebar-accent"
+                  onPress={() => toggleRow(item().id)}
+                  style={{
+                    display: "flex",
+                    flexDirection: "row",
+                    alignItems: "center",
+                    paddingLeft: 8,
+                    paddingRight: 8,
+                    paddingTop: 4,
+                    paddingBottom: 4,
+                    gap: 12,
+                    borderRadius: look().radius.row ?? 6,
+                    cursor: "default",
+                  }}
+                >
+                  <Disclosure open={isOpen()} />
+                  <RowLabel label={item().group.title} detail={detail()} />
+                  <If when={item().group.jump != null}>
+                    <View
+                      style={{ flexShrink: 0 }}
+                      onPress={(e: any) => e?.stopPropagation?.()}
+                      onPressDown={(e: any) => e?.stopPropagation?.()}
+                    >
+                      <SmeltButton
+                        quiet={true}
+                        small={true}
+                        icon="icons/external-link.svg"
+                        tooltip={t("jump")}
+                        accessibilityLabel={t("jump")}
+                        onPress={(e: any) => {
+                          e?.stopPropagation?.();
+                          const jumpId = item().group.jump;
+                          if (jumpId != null) {
+                            jumpToSession(props.section().machine, jumpId);
+                          }
+                        }}
+                      />
+                    </View>
+                  </If>
+                  <UsageColumns
+                    cpuPercent={item().group.usage.cpu_percent}
+                    memoryBytes={item().group.usage.memory_bytes}
+                    color={look().palette.text}
+                  />
+                </View>
+              </Collapsible>
             );
           }}
         </Each>

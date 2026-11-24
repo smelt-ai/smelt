@@ -1509,6 +1509,30 @@ export function SmeltIcon(props: {
   );
 }
 
+/**
+ * 展开收起的指示箭头：收起时朝右，展开时转到朝下，跟着转过去（会话列表同一手感）。
+ * 配 `nsh/base` 的 `<Collapsible reveal>` 用，内容跟着展开。
+ */
+export function SmeltDisclosureChevron(props: {
+  open: boolean;
+  size?: number;
+  color?: string;
+  opacity?: number;
+  testID?: string;
+}) {
+  return (
+    <SmeltIcon
+      path="icons/chevron-right.svg"
+      size={props.size ?? 12}
+      color={props.color}
+      opacity={props.opacity}
+      testID={props.testID}
+      class="transition-transform duration-150"
+      rotate={props.open ? 90 : 0}
+    />
+  );
+}
+
 export interface SmeltButtonProps {
   label?: string;
   icon?: string;

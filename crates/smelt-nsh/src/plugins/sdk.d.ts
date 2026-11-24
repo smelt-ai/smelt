@@ -621,6 +621,14 @@ export declare function SmeltIcon(props: {
   testID?: string;
 }): JSX.Element;
 
+export declare function SmeltDisclosureChevron(props: {
+  open: boolean;
+  size?: number;
+  color?: string;
+  opacity?: number;
+  testID?: string;
+}): JSX.Element;
+
 export interface SmeltButtonProps {
   label?: string;
   icon?: SmeltIconPath | (string & {});

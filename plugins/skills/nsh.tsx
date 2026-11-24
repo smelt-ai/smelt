@@ -1,7 +1,7 @@
 // 技能插件（smelt.skills）：通过目标机器 smeltd 的 `skills.*` 控制 RPC 扫描与管理技能，
 // 桌面与远程机器行为一致，UI 进程不直接碰本地磁盘。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Button as BaseButton, Dialog, Input } from "nsh/base";
+import { Button as BaseButton, Collapsible, Dialog, Input } from "nsh/base";
 import { Menu } from "nsh/desktop";
 import {
   activeContext,
@@ -1075,73 +1075,11 @@ function SkillRow(props: { skill: any }) {
   const isLocal = computed(() => targetContext().machine === null);
 
   return (
-    <View style={{ display: "flex", flexDirection: "column" }}>
-      <BaseButton
-        onPress={() => toggleRow(s().dir)}
-        style={{
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 12,
-          paddingLeft: 16,
-          paddingRight: 16,
-          paddingTop: 8,
-          paddingBottom: 8,
-          backgroundColor: open() ? look().palette.row_selected : "transparent",
-        }}
-        hoverStyle={{
-          backgroundColor: open() ? look().palette.row_selected : look().palette.row_hover,
-        }}
-      >
-        <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-          <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Text
-              style={{
-                fontSize: look().type.ui_medium.size,
-                lineHeight: look().type.ui_medium.line_height,
-                fontWeight: look().type.ui_medium.weight,
-                color: look().palette.text,
-                numberOfLines: 1,
-                flexShrink: 1,
-              }}
-            >
-              {s().name}
-            </Text>
-            <BadgePill label={chip().label} tone={chip().tone as any} />
-          </View>
-          <If when={!open()}>
-            <Text
-              style={{
-                fontSize: look().type.text_xsmall.size,
-                lineHeight: look().type.text_xsmall.line_height,
-                color: look().palette.muted,
-                numberOfLines: 1,
-              }}
-            >
-              {s().description || t("no_description")}
-            </Text>
-          </If>
-        </View>
-        <If
-          when={summary().badge}
-          else={
-            <Text
-              style={{
-                fontSize: look().type.text_xsmall.size,
-                color:
-                  summary().tone === "bad" ? look().palette.bad : look().palette.muted,
-                flexShrink: 0,
-              }}
-            >
-              {summary().label}
-            </Text>
-          }
-        >
-          <BadgePill label={summary().label} tone={summary().tone as any} />
-        </If>
-      </BaseButton>
-
-      <If when={open()}>
+    <Collapsible
+      open={open()}
+      reveal={true}
+      style={{ display: "flex", flexDirection: "column" }}
+      content={
         <View
           style={{
             display: "flex",
@@ -1400,8 +1338,73 @@ function SkillRow(props: { skill: any }) {
             />
           </View>
         </View>
-      </If>
-    </View>
+      }
+    >
+      <BaseButton
+        onPress={() => toggleRow(s().dir)}
+        style={{
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 12,
+          paddingLeft: 16,
+          paddingRight: 16,
+          paddingTop: 8,
+          paddingBottom: 8,
+          backgroundColor: open() ? look().palette.row_selected : "transparent",
+        }}
+        hoverStyle={{
+          backgroundColor: open() ? look().palette.row_selected : look().palette.row_hover,
+        }}
+      >
+        <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+          <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Text
+              style={{
+                fontSize: look().type.ui_medium.size,
+                lineHeight: look().type.ui_medium.line_height,
+                fontWeight: look().type.ui_medium.weight,
+                color: look().palette.text,
+                numberOfLines: 1,
+                flexShrink: 1,
+              }}
+            >
+              {s().name}
+            </Text>
+            <BadgePill label={chip().label} tone={chip().tone as any} />
+          </View>
+          <If when={!open()}>
+            <Text
+              style={{
+                fontSize: look().type.text_xsmall.size,
+                lineHeight: look().type.text_xsmall.line_height,
+                color: look().palette.muted,
+                numberOfLines: 1,
+              }}
+            >
+              {s().description || t("no_description")}
+            </Text>
+          </If>
+        </View>
+        <If
+          when={summary().badge}
+          else={
+            <Text
+              style={{
+                fontSize: look().type.text_xsmall.size,
+                color:
+                  summary().tone === "bad" ? look().palette.bad : look().palette.muted,
+                flexShrink: 0,
+              }}
+            >
+              {summary().label}
+            </Text>
+          }
+        >
+          <BadgePill label={summary().label} tone={summary().tone as any} />
+        </If>
+      </BaseButton>
+    </Collapsible>
   );
 }
 

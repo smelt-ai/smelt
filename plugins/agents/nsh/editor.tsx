@@ -1,12 +1,13 @@
 // 智能体编辑页：页头（返回/缩写/标题/页签分段/开始对话）、配置页签、自动化页签与记忆页签。
 
 import { cleanup, computed, Scroll, Text, View } from "nsh";
-import { Input, Submenu } from "nsh/base";
+import { Collapsible, Input, Submenu } from "nsh/base";
 import {
   locale,
   pathJoin,
   pathStyle,
   SmeltButton,
+  SmeltDisclosureChevron,
   SmeltIcon,
   t,
   views,
@@ -1040,7 +1041,65 @@ function MemorySection(props: {
               };
 
               return (
-                <View style={{ display: "flex", flexDirection: "column" }}>
+                <Collapsible
+                  open={isExpanded()}
+                  reveal={true}
+                  style={{ display: "flex", flexDirection: "column" }}
+                  content={
+                    <Scroll
+                      style={{
+                        marginLeft: 12,
+                        marginRight: 12,
+                        marginBottom: 8,
+                        maxHeight: 240,
+                        borderRadius: 6,
+                        backgroundColor: look().palette.side,
+                      }}
+                    >
+                      <View
+                        style={{
+                          paddingLeft: 12,
+                          paddingRight: 12,
+                          paddingTop: 8,
+                          paddingBottom: 8,
+                          display: "flex",
+                          flexDirection: "column",
+                        }}
+                      >
+                        <If
+                          when={bodyLines().length > 0}
+                          else={
+                            <Text
+                              style={{
+                                color: look().palette.faint,
+                                fontSize: look().type.text_xsmall.size,
+                                lineHeight: look().type.text_xsmall.line_height,
+                              }}
+                            >
+                              {t("memory.empty_body")}
+                            </Text>
+                          }
+                        >
+                          <Each of={bodyLines()} key={(_: string, ix: number) => String(ix)}>
+                            {(line: () => string) => (
+                              <View style={{ minHeight: 16 }}>
+                                <Text
+                                  style={{
+                                    color: look().palette.muted,
+                                    fontSize: look().type.text_xsmall.size,
+                                    lineHeight: look().type.text_xsmall.line_height,
+                                  }}
+                                >
+                                  {line()}
+                                </Text>
+                              </View>
+                            )}
+                          </Each>
+                        </If>
+                      </View>
+                    </Scroll>
+                  }
+                >
                   <View
                     style={{
                       paddingLeft: 12,
@@ -1094,8 +1153,8 @@ function MemorySection(props: {
                           gap: 4,
                         }}
                       >
-                        <SmeltIcon
-                          path={isExpanded() ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
+                        <SmeltDisclosureChevron
+                          open={isExpanded()}
                           size={12}
                           color={look().palette.faint}
                         />
@@ -1179,62 +1238,7 @@ function MemorySection(props: {
                       }}
                     />
                   </View>
-
-                  <If when={isExpanded()}>
-                    <Scroll
-                      style={{
-                        marginLeft: 12,
-                        marginRight: 12,
-                        marginBottom: 8,
-                        maxHeight: 240,
-                        borderRadius: 6,
-                        backgroundColor: look().palette.side,
-                      }}
-                    >
-                      <View
-                        style={{
-                          paddingLeft: 12,
-                          paddingRight: 12,
-                          paddingTop: 8,
-                          paddingBottom: 8,
-                          display: "flex",
-                          flexDirection: "column",
-                        }}
-                      >
-                        <If
-                          when={bodyLines().length > 0}
-                          else={
-                            <Text
-                              style={{
-                                color: look().palette.faint,
-                                fontSize: look().type.text_xsmall.size,
-                                lineHeight: look().type.text_xsmall.line_height,
-                              }}
-                            >
-                              {t("memory.empty_body")}
-                            </Text>
-                          }
-                        >
-                          <Each of={bodyLines()} key={(_: string, ix: number) => String(ix)}>
-                            {(line: () => string) => (
-                              <View style={{ minHeight: 16 }}>
-                                <Text
-                                  style={{
-                                    color: look().palette.muted,
-                                    fontSize: look().type.text_xsmall.size,
-                                    lineHeight: look().type.text_xsmall.line_height,
-                                  }}
-                                >
-                                  {line()}
-                                </Text>
-                              </View>
-                            )}
-                          </Each>
-                        </If>
-                      </View>
-                    </Scroll>
-                  </If>
-                </View>
+                </Collapsible>
               );
             }}
           </Each>

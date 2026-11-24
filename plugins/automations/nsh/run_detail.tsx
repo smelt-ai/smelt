@@ -1,8 +1,10 @@
 // 选中运行的右侧详情页：支持挂载实时对话现场，以及落库结果、执行过程（含真实 SmeltDiffView）、输入与元数据。
 import { computed, Scroll, Text, View } from "nsh";
+import { Collapsible } from "nsh/base";
 import {
   SmeltButton,
   SmeltDiffView,
+  SmeltDisclosureChevron,
   SmeltIcon,
   SmeltMarkdown,
   stableMemo,
@@ -52,17 +54,6 @@ const BLOCK_INPUT = "input";
 const BLOCK_INSTRUCTIONS = "instructions";
 const BLOCK_META = "meta";
 
-function DisclosureChevron(props: { expanded: boolean }) {
-  const look = currentTheme;
-  return (
-    <SmeltIcon
-      path={props.expanded ? "icons/chevron-down.svg" : "icons/chevron-right.svg"}
-      size={12}
-      color={look().palette.faint}
-    />
-  );
-}
-
 function DetailDisclosure(props: {
   blockKey: string;
   title: string;
@@ -72,7 +63,12 @@ function DetailDisclosure(props: {
 }) {
   const look = currentTheme;
   return (
-    <View style={{ width: "100%", display: "flex", flexDirection: "column", gap: 8 }}>
+    <Collapsible
+      open={props.expanded}
+      reveal={true}
+      style={{ width: "100%", display: "flex", flexDirection: "column" }}
+      content={<View style={{ width: "100%", paddingTop: 8 }}>{props.children}</View>}
+    >
       <RowItem
         testID={`automation-run-block-${props.blockKey}`}
         onPress={() => toggleRunDetailBlock(props.blockKey)}
@@ -86,7 +82,7 @@ function DetailDisclosure(props: {
           gap: 6,
         }}
       >
-        <DisclosureChevron expanded={props.expanded} />
+        <SmeltDisclosureChevron open={props.expanded} size={12} color={look().palette.faint} />
         <Text
           style={{
             fontSize: look().type.ui_medium.size,
@@ -109,8 +105,7 @@ function DetailDisclosure(props: {
           </Text>
         </If>
       </RowItem>
-      <If when={props.expanded}>{props.children}</If>
-    </View>
+    </Collapsible>
   );
 }
 
@@ -299,7 +294,24 @@ function TranscriptStep(props: {
     props.flag === "failed" ? look().palette.bad : look().palette.faint;
 
   return (
-    <View style={{ width: "100%", display: "flex", flexDirection: "column" }}>
+    <Collapsible
+      open={props.expandable && props.expanded}
+      reveal={true}
+      style={{ width: "100%", display: "flex", flexDirection: "column" }}
+      content={
+        <View
+          style={{
+            width: "100%",
+            minWidth: 0,
+            paddingLeft: 20,
+            paddingTop: 4,
+            paddingBottom: 8,
+          }}
+        >
+          {props.children}
+        </View>
+      }
+    >
       <RowItem
         testID={`automation-run-step-${props.stepKey}`}
         disabled={!props.expandable}
@@ -342,23 +354,10 @@ function TranscriptStep(props: {
           </Text>
         </If>
         <If when={props.expandable}>
-          <DisclosureChevron expanded={props.expanded} />
+          <SmeltDisclosureChevron open={props.expanded} size={12} color={look().palette.faint} />
         </If>
       </RowItem>
-      <If when={props.expandable && props.expanded}>
-        <View
-          style={{
-            width: "100%",
-            minWidth: 0,
-            paddingLeft: 20,
-            paddingTop: 4,
-            paddingBottom: 8,
-          }}
-        >
-          {props.children}
-        </View>
-      </If>
-    </View>
+    </Collapsible>
   );
 }
 
