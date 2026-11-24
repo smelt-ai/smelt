@@ -101,7 +101,13 @@ export function notifyPiConfigChanged() {
 
 function initialConfigFor(machine: string | null, agentId: string): Array<[string, string]> {
   void agentSettingsRev();
-  return rememberedAcpConfig(agentSettingsByMachine.get(machineKey(machine)), agentId);
+  // 运行时给的设置读不懂（两边版本不一致）只是铺不上记住的选项，对话照开。
+  try {
+    return rememberedAcpConfig(agentSettingsByMachine.get(machineKey(machine)), agentId);
+  } catch (err) {
+    console.error("[sessions] 读不懂智能体设置，不铺记住的选项：", err);
+    return [];
+  }
 }
 
 function rememberConfigValue(
@@ -114,7 +120,13 @@ function rememberConfigValue(
   const before = agentSettingsByMachine.get(mk);
   if (!before) return;
   // 记不记、怎么去重按运行时同一份规则（Pi 的默认模型与推理档位归引擎配置，不记）。
-  const after = rememberAcpConfigValue(before, agentId, configId, valueId);
+  let after: unknown;
+  try {
+    after = rememberAcpConfigValue(before, agentId, configId, valueId);
+  } catch (err) {
+    console.error("[sessions] 读不懂智能体设置，这次选择没记住：", err);
+    return;
+  }
   if (!after) return;
   void run(EDIT_AGENT_SETTINGS_CMD, {
     machine: machine ?? null,
