@@ -1,7 +1,7 @@
 // 设置「通用 → 会话列表」（NSH A2 版）：行首显示 3D 小人头像或图标。
 
 import { computed, Scroll, Text, View } from "nsh";
-import { SmeltIcon, SmeltSelect } from "smelt/sdk";
+import { MENU_ITEM_CLASS, SmeltIcon, SmeltSelect } from "smelt/sdk";
 
 import { show_buddy_avatar } from "../model.js";
 import { icon } from "../util.js";
@@ -82,12 +82,12 @@ export function SessionListSettings() {
               if (!value) return;
               list.set_avatar(value === ICON ? { kind: "icon" } : { kind: "unset" });
             }}
-            popupClass="rounded-(--radius) border border-border bg-popover p-1"
-            itemClass="flex-row items-center rounded-(--radius) px-2 py-1 text-sm hover:bg-accent focus:bg-accent"
+            itemClass={`${MENU_ITEM_CLASS} py-1 text-sm text-foreground`}
             trigger={
+              // 下拉列表和触发器一样宽，按最长的选项（「不要头像（显示图标）」）定宽，免得列表里被截断。
               <View
                 style={{
-                  minWidth: 140,
+                  minWidth: 180,
                   height: 28,
                   paddingHorizontal: 10,
                   borderRadius: look().radius.sm,

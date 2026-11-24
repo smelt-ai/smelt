@@ -478,7 +478,7 @@ function fmtCoord(n) {
 }
 
 function splitSvgColor(raw, baseOpacity) {
-  const color = String(raw ?? "#a1a1aa").trim();
+  const color = String(raw).trim();
   const m = color.match(
     /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/i,
   );
@@ -493,6 +493,7 @@ function splitSvgColor(raw, baseOpacity) {
 /**
  * 为 `<SmeltVector>` 生成无坐标轴的面积图内联 SVG：
  * 从左到右铺满宽度、底边为 0、单色描边 + 轻透填充；少于两个有效点或上限无效返回空串。
+ * `stroke` 必填，取主题色板里的色。
  */
 export function buildAreaChartSvg(values, options = {}) {
   if (!Array.isArray(values) || values.length < 2) {
@@ -540,9 +541,9 @@ export function buildAreaChartSvg(values, options = {}) {
     return "";
   }
 
-  const strokeSpec = splitSvgColor(options.stroke ?? "#a1a1aa", Number(options.strokeOpacity ?? 0.9));
+  const strokeSpec = splitSvgColor(options.stroke, Number(options.strokeOpacity ?? 0.9));
   const fillSpec = splitSvgColor(
-    options.fill ?? options.stroke ?? "#a1a1aa",
+    options.fill ?? options.stroke,
     Number(options.fillOpacity ?? 0.16),
   );
 

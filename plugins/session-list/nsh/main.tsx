@@ -576,6 +576,7 @@ function DragPreviewCard(props: { drag: () => DragState | null }) {
   return (
     <If when={d() != null && d()!.active}>
       <View
+        class="shadow-lg"
         style={{
           position: "absolute",
           left: d()!.previewLeft,
@@ -588,9 +589,6 @@ function DragPreviewCard(props: { drag: () => DragState | null }) {
           backgroundColor: look().palette.surface,
           borderWidth: 1,
           borderColor: look().palette.hair,
-          shadowColor: "rgba(0, 0, 0, 0.28)",
-          shadowOffset: { width: 0, height: 6 },
-          shadowRadius: 16,
           opacity: 0.65,
           display: "flex",
           flexDirection: "row",
@@ -2063,14 +2061,11 @@ function OffscreenPill(props: { side: () => { tally: any; nearest: any }; up: bo
       >
         <View
           role="button"
-          class="flex-row items-center rounded-full border border-border bg-popover hover:bg-accent"
+          class="flex-row items-center rounded-full border border-border bg-popover shadow-md hover:bg-accent"
           style={{
             height: 24,
             paddingHorizontal: 10,
             gap: 5,
-            shadowColor: "rgba(0, 0, 0, 0.22)",
-            shadowOffset: { width: 0, height: 3 },
-            shadowRadius: 10,
             cursor: "default",
           }}
           onPress={() => {

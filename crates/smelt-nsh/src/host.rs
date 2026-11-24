@@ -3090,6 +3090,8 @@ fn theme(rem: f32) -> Value {
                 rgba_css(p.button_submit[2]),
             ],
             "button_submit_fg": api::hex_color(p.button_submit_foreground),
+            "scrim": rgba_css(p.scrim),
+            "chart": p.chart.map(api::hex_color),
         },
         "fonts": {
             "mono": font_config::font_family(),

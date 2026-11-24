@@ -348,8 +348,9 @@ describe("commit graph layout & SVG generation", () => {
     expect(rows.every((r) => r.lanes <= 2)).toBe(true);
 
     const w = graphWidth(rows);
-    const svg = commitGraphRowSvg(rows[0], w, 24, false);
+    const svg = commitGraphRowSvg(rows[0], w, 24, ["#000001", "#000002"]);
     expect(svg).toContain("<svg");
+    expect(svg).toContain('stroke="#000001"');
     expect(svg).toContain("<circle");
     expect(svg).toContain("Q");
   });

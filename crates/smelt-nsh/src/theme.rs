@@ -75,6 +75,7 @@ pub(crate) fn nsh_theme() -> Theme {
         ("on-bad", solid(p.on_bad)),
         ("soft-hover", solid(p.soft_hover)),
         ("row-selected", alpha(p.row_selected)),
+        ("scrim", alpha(p.scrim)),
     ] {
         theme.set_color(name, color);
     }
@@ -115,6 +116,7 @@ mod tests {
             "on-bad",
             "soft-hover",
             "row-selected",
+            "scrim",
             "chart-1",
             "chart-5",
         ] {

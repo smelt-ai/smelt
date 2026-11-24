@@ -472,7 +472,6 @@ export function desktop(props: { args?: { machine?: string | null } | null }) {
               width: "100%",
               minWidth: 0,
               minHeight: 0,
-              backgroundColor: "#111111",
               display: "flex",
             }}
           >

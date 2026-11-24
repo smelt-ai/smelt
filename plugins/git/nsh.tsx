@@ -1524,15 +1524,6 @@ onEvent(
 // ---- 主题与共用组件 ----
 
 
-function isLightPalette(palette: any): boolean {
-  const bg = String(palette?.bg ?? "#161618").replace("#", "");
-  if (bg.length !== 6) return false;
-  const r = parseInt(bg.slice(0, 2), 16);
-  const g = parseInt(bg.slice(2, 4), 16);
-  const b = parseInt(bg.slice(4, 6), 16);
-  return 0.299 * r + 0.587 * g + 0.114 * b > 140;
-}
-
 function MenuRow(props: {
   label: string;
   iconPath?: string;
@@ -2420,7 +2411,6 @@ export function Main() {
                           >
                             {(item: () => { commit: CommitNode; graph: any }) => {
                               const sel = () => logSelectedHash() === item().commit.hash;
-                              const light = () => isLightPalette(look().palette);
                               return (
                                 <View
                                   class="hover:bg-accent"
@@ -2447,7 +2437,7 @@ export function Main() {
                                         item().graph,
                                         logGraphW(),
                                         GRAPH_ROW_H,
-                                        light(),
+                                        look().palette.chart,
                                       )}
                                       width={logGraphW()}
                                       height={GRAPH_ROW_H}

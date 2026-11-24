@@ -100,7 +100,6 @@ export function EditDiffDialog(props: {
   return (
     <SmeltDialog
       open={props.dialog() != null}
-      backdropClass="bg-black/45"
       onOpenChange={({ open }: any) => {
         if (!open) props.onClose();
       }}

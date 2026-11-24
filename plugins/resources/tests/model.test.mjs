@@ -325,7 +325,7 @@ describe("buildAreaChartSvg", () => {
   });
 
   test("leaves 20% top headroom by default (max = peak * 1.2)", () => {
-    const svg = buildAreaChartSvg([0, 120], { width: 100, height: 120 });
+    const svg = buildAreaChartSvg([0, 120], { width: 100, height: 120, stroke: "#a1a1aa" });
     // peak = 120 -> max = 144 -> ratio at 120 = 120/144 = 5/6 -> y = 120 * (1/6) = 20
     expect(svg).toContain('d="M0 120 L100 20"');
   });
@@ -335,6 +335,7 @@ describe("buildAreaChartSvg", () => {
       width: 400,
       height: 100,
       max: 40,
+      stroke: "#a1a1aa",
     });
     // First segment: indices 0,1 (x=0,100); second segment: indices 3,4 (x=300,400)
     expect(svg).toContain('d="M0 75 L100 50 L100 100 L0 100 Z"');

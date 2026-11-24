@@ -1047,36 +1047,13 @@ export function consumeComposerRestore(lastRev, incomingRev, incomingTexts, inco
   };
 }
 
-// ---- 推理强度档位视觉映射（对齐原 effort_slider.rs） ----
+// ---- 配置项当前档位 ----
 
 export function selectedConfigIndex(cfg) {
   const opts = cfg?.options ?? [];
   if (opts.length === 0) return 0;
   const ix = opts.findIndex(([, name]) => name === cfg?.current_name);
   return ix >= 0 ? ix : 0;
-}
-
-export function effortProgress(selected, count) {
-  if (!count || count <= 1) return 0;
-  return Math.max(0, Math.min(1, selected / (count - 1)));
-}
-
-export function effortDotColor(progress) {
-  const p = Math.max(0, Math.min(1, Number(progress) || 0));
-  if (p < 0.18) return "#60a5fa";
-  if (p < 0.44) return "#fb923c";
-  if (p < 0.62) return "#f43f5e";
-  if (p < 0.85) return "#c084fc";
-  return "#38bdf8";
-}
-
-export function effortGlowTint(progress) {
-  const p = Math.max(0, Math.min(1, Number(progress) || 0));
-  if (p < 0.18) return "rgba(96, 165, 250, 0.16)";
-  if (p < 0.44) return "rgba(251, 146, 60, 0.18)";
-  if (p < 0.62) return "rgba(244, 63, 94, 0.18)";
-  if (p < 0.85) return "rgba(192, 132, 252, 0.18)";
-  return "rgba(56, 189, 248, 0.20)";
 }
 
 // ---- 输入框运行态顶边扫光模式与颜色透明度（composer.tsx 与 model.test.mjs 共用） ----

@@ -7,9 +7,6 @@ import {
   buildVisibleModels,
   compactTokenCount,
   composerModelLabel,
-  effortDotColor,
-  effortGlowTint,
-  effortProgress,
   isThinkingConfig,
   selectedConfigIndex,
   selectedProviderGroup,
@@ -45,15 +42,7 @@ export function ModelConfigPopover(props: {
     const cfg = thinkingConfig();
     if (!cfg || !Array.isArray(cfg.options) || cfg.options.length === 0) return null;
     const index = selectedConfigIndex(cfg);
-    const progress = effortProgress(index, cfg.options.length);
-    return {
-      index,
-      count: cfg.options.length,
-      progress,
-      dotColor: effortDotColor(progress),
-      glowTint: effortGlowTint(progress),
-      currentName: cfg.current_name ?? cfg.options[index]?.[1] ?? "",
-    };
+    return { currentName: cfg.current_name ?? cfg.options[index]?.[1] ?? "" };
   });
 
   const pendingNotice = () => Boolean(props.hasPendingNotice?.());
@@ -84,17 +73,6 @@ export function ModelConfigPopover(props: {
           }}
         >
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
-            <If when={thinkingMeta() != null}>
-              <View
-                style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: 3,
-                  backgroundColor: thinkingMeta()?.dotColor,
-                  flexShrink: 0,
-                }}
-              />
-            </If>
             <Text
               style={{
                 fontSize: look().type.text_xsmall_medium?.size ?? 12,
@@ -281,8 +259,8 @@ export function ModelConfigPopover(props: {
           </View>
         </If>
 
-        {/* 4. 推理强度（带档位色阶、平滑过渡与底部能量条） */}
-        <If when={thinkingConfig() != null && thinkingMeta() != null}>
+        {/* 4. 推理强度：和下面的配置项同一种分段控件，标题旁带「下轮生效」 */}
+        <If when={thinkingConfig() != null}>
           <View
             style={{
               paddingHorizontal: 12,
@@ -293,124 +271,35 @@ export function ModelConfigPopover(props: {
               gap: 8,
             }}
           >
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                <View
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: 3,
-                    backgroundColor: thinkingMeta()?.dotColor,
-                    transitionProperty: "backgroundColor",
-                    transitionDuration: 180,
-                  }}
-                />
-                <Text
-                  style={{
-                    fontSize: look().type.text_xsmall_medium?.size ?? 12,
-                    fontWeight: look().type.text_xsmall_medium?.weight ?? 500,
-                    color: look().palette.muted,
-                  }}
-                >
-                  {thinkingConfig()?.name || ct("model.thinking")}
-                </Text>
-                <If when={pendingNotice()}>
-                  <Text
-                    style={{
-                      fontSize: look().type.small_medium?.size ?? 11,
-                      color: look().palette.need,
-                    }}
-                  >
-                    · {ct("model.next_turn")}
-                  </Text>
-                </If>
-              </View>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
               <Text
                 style={{
                   fontSize: look().type.text_xsmall_medium?.size ?? 12,
                   fontWeight: look().type.text_xsmall_medium?.weight ?? 500,
-                  color: thinkingMeta()?.dotColor ?? look().palette.text,
+                  color: look().palette.muted,
                 }}
               >
-                {thinkingMeta()?.currentName ?? ""}
+                {thinkingConfig()?.name || ct("model.thinking")}
               </Text>
+              <If when={pendingNotice()}>
+                <Text
+                  style={{
+                    fontSize: look().type.small_medium?.size ?? 11,
+                    color: look().palette.need,
+                  }}
+                >
+                  · {ct("model.next_turn")}
+                </Text>
+              </If>
             </View>
-
-            <View
-              style={{
-                flexDirection: "row",
-                gap: 3,
-                padding: 3,
-                borderRadius: 10,
-                backgroundColor: look().palette.bg,
-                borderWidth: 1,
-                borderColor: look().palette.hair,
+            <ConfigSegments
+              options={() => thinkingConfig()?.options ?? []}
+              current={() => thinkingConfig()?.current_name}
+              onSelect={(value) => {
+                const cfg = thinkingConfig();
+                if (cfg) props.onSelectConfig(cfg.config_id, value);
               }}
-            >
-              <Each of={thinkingConfig()?.options ?? []}>
-                {(opt, idx) => {
-                  const active = computed(() => thinkingConfig()?.current_name === opt()[1]);
-                  const optProgress = computed(() =>
-                    effortProgress(idx(), thinkingConfig()?.options?.length ?? 1),
-                  );
-                  const optColor = computed(() => effortDotColor(optProgress()));
-                  const optTint = computed(() => effortGlowTint(optProgress()));
-                  return (
-                    <View
-                      onPress={() => {
-                        const cfg = thinkingConfig();
-                        if (cfg) props.onSelectConfig(cfg.config_id, opt()[0]);
-                      }}
-                      class={active() ? undefined : "hover:bg-accent"}
-                      style={{
-                        flex: 1,
-                        height: 28,
-                        borderRadius: 7,
-                        alignItems: "center",
-                        justifyContent: "center",
-                        borderWidth: 1,
-                        borderColor: active() ? optColor() : "transparent",
-                        backgroundColor: active() ? optTint() : "transparent",
-                        transitionProperty: "backgroundColor, borderColor",
-                        transitionDuration: 160,
-                      }}
-                    >
-                      <Text
-                        style={{
-                          fontSize: look().type.text_xsmall.size,
-                          fontWeight: active() ? 530 : 440,
-                          color: active() ? look().palette.text : look().palette.muted,
-                          numberOfLines: 1,
-                        }}
-                      >
-                        {opt()[1]}
-                      </Text>
-                    </View>
-                  );
-                }}
-              </Each>
-            </View>
-
-            <View
-              style={{
-                width: "100%",
-                height: 2,
-                borderRadius: 1,
-                backgroundColor: look().palette.hair,
-                overflow: "hidden",
-              }}
-            >
-              <View
-                style={{
-                  width: `${Math.max(12, Math.round((thinkingMeta()?.progress ?? 0) * 100))}%`,
-                  height: "100%",
-                  borderRadius: 1,
-                  backgroundColor: thinkingMeta()?.dotColor,
-                  transitionProperty: "width, backgroundColor",
-                  transitionDuration: 200,
-                }}
-              />
-            </View>
+            />
           </View>
         </If>
 
@@ -441,58 +330,11 @@ export function ModelConfigPopover(props: {
                       >
                         {cfg().name || cfg().config_id}
                       </Text>
-                      <View
-                        style={{
-                          flexDirection: "row",
-                          flexWrap: "wrap",
-                          gap: 3,
-                          padding: 3,
-                          borderRadius: 9,
-                          backgroundColor: look().palette.bg,
-                          borderWidth: 1,
-                          borderColor: look().palette.hair,
-                        }}
-                      >
-                        <Each of={cfg().options ?? []}>
-                          {(opt) => {
-                            const active = computed(() => cfg().current_name === opt()[1]);
-                            return (
-                              <View
-                                onPress={() => props.onSelectConfig(cfg().config_id, opt()[0])}
-                                class={active() ? undefined : "hover:bg-accent"}
-                                style={{
-                                  flexGrow: 1,
-                                  height: 26,
-                                  paddingHorizontal: 8,
-                                  borderRadius: 6,
-                                  alignItems: "center",
-                                  justifyContent: "center",
-                                  borderWidth: 1,
-                                  borderColor: active()
-                                    ? look().palette.hair_strong
-                                    : "transparent",
-                                  backgroundColor: active()
-                                    ? look().palette.surface
-                                    : "transparent",
-                                  transitionProperty: "backgroundColor, borderColor",
-                                  transitionDuration: 150,
-                                }}
-                              >
-                                <Text
-                                  style={{
-                                    fontSize: look().type.text_xsmall.size,
-                                    fontWeight: active() ? 530 : 440,
-                                    color: active() ? look().palette.text : look().palette.muted,
-                                    numberOfLines: 1,
-                                  }}
-                                >
-                                  {opt()[1]}
-                                </Text>
-                              </View>
-                            );
-                          }}
-                        </Each>
-                      </View>
+                      <ConfigSegments
+                        options={() => cfg().options ?? []}
+                        current={() => cfg().current_name}
+                        onSelect={(value) => props.onSelectConfig(cfg().config_id, value)}
+                      />
                     </View>
                   }
                 >
@@ -535,6 +377,66 @@ export function ModelConfigPopover(props: {
         </If>
       </View>
     </SmeltPopover>
+  );
+}
+
+
+/** 配置项的档位：分段控件，选中的那段浮起（`surface` 底、`hair_strong` 边），其余悬停变底。 */
+function ConfigSegments(props: {
+  options: () => any[];
+  current: () => string | null | undefined;
+  onSelect: (value: string) => void;
+}) {
+  const look = theme;
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        flexWrap: "wrap",
+        gap: 3,
+        padding: 3,
+        borderRadius: 9,
+        backgroundColor: look().palette.bg,
+        borderWidth: 1,
+        borderColor: look().palette.hair,
+      }}
+    >
+      <Each of={props.options()}>
+        {(opt) => {
+          const active = computed(() => props.current() === opt()[1]);
+          return (
+            <View
+              onPress={() => props.onSelect(opt()[0])}
+              class={active() ? undefined : "hover:bg-accent"}
+              style={{
+                flexGrow: 1,
+                height: 26,
+                paddingHorizontal: 8,
+                borderRadius: 6,
+                alignItems: "center",
+                justifyContent: "center",
+                borderWidth: 1,
+                borderColor: active() ? look().palette.hair_strong : "transparent",
+                backgroundColor: active() ? look().palette.surface : "transparent",
+                transitionProperty: "backgroundColor, borderColor",
+                transitionDuration: 150,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: look().type.text_xsmall.size,
+                  fontWeight: active() ? 530 : 440,
+                  color: active() ? look().palette.text : look().palette.muted,
+                  numberOfLines: 1,
+                }}
+              >
+                {opt()[1]}
+              </Text>
+            </View>
+          );
+        }}
+      </Each>
+    </View>
   );
 }
 

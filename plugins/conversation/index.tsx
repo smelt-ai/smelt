@@ -1215,7 +1215,6 @@ export function SmeltConversation(props: SmeltConversationProps) {
       {/* 大图预览弹窗 */}
       <SmeltDialog
         open={imagePreview() != null}
-        backdropClass="bg-black/65"
         onOpenChange={({ open }: any) => {
           if (!open) imagePreview.set(null);
         }}

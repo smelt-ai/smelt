@@ -14,9 +14,6 @@ const GRAPH_LANE_W = 14;
 const GRAPH_DOT_R = 3.5;
 const GRAPH_PAD = 8;
 
-const LANE_COLORS_DARK = ["#7dcfff", "#bb9af7", "#e0af68", "#2ac3de", "#ff9e64", "#9ece6a"];
-const LANE_COLORS_LIGHT = ["#1f7aa8", "#7a4aa8", "#9a6b0a", "#117a8a", "#b85c1f", "#4a7a1f"];
-
 export function projectKey(machine, root) {
   return `${machine ?? ""}\0${root}`;
 }
@@ -699,9 +696,9 @@ export function graphWidth(rows) {
   return GRAPH_PAD * 2 + Math.max(3, max) * GRAPH_LANE_W;
 }
 
-export function commitGraphRowSvg(row, width, rowH = GRAPH_ROW_H, isLight = false) {
-  const palette = isLight ? LANE_COLORS_LIGHT : LANE_COLORS_DARK;
-  const colorOf = (lane) => palette[lane % palette.length];
+/** 一行分支图的 SVG。`laneColors` 是主题的分类色（`palette.chart`），按列号取模。 */
+export function commitGraphRowSvg(row, width, rowH, laneColors) {
+  const colorOf = (lane) => laneColors[lane % laneColors.length];
   const laneX = (lane) => GRAPH_PAD + lane * GRAPH_LANE_W + GRAPH_LANE_W / 2;
   const mid = rowH / 2;
   const nodeX = laneX(row.node);

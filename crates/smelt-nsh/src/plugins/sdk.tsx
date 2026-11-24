@@ -468,6 +468,8 @@ const DEFAULT_STATE: SmeltState = {
       button_secondary_fg: "#fafafa",
       button_submit: ["rgba(219, 219, 219, 1)", "rgba(201, 201, 201, 1)", "rgba(176, 176, 176, 1)"],
       button_submit_fg: "#161616",
+      scrim: "rgba(0, 0, 0, 0.600)",
+      chart: ["#7fa3f0", "#6cc294", "#e0ad5c", "#b293e6", "#e07a97"],
     },
     fonts: { mono: "Maple Mono NF" },
     type: {
@@ -1660,9 +1662,9 @@ export const MENU_ITEM_CLASS =
 export const INPUT_CLASS = "rounded-(--radius) border border-input bg-card px-2 text-foreground";
 export const DIALOG_SURFACE_CLASS = "rounded-xl border border-border bg-popover shadow-xl";
 
-/** 对话框：`nsh/base` 的 `Dialog` 带上 Smelt 的进出（淡入淡出）和遮罩；`backdropClass` 换掉默认遮罩。 */
+/** 对话框：`nsh/base` 的 `Dialog` 带上 Smelt 的进出（淡入淡出）和主题的遮罩色 `scrim`。 */
 export function SmeltDialog(props: any) {
-  return <Dialog {...props} animation="fade" backdropClass={props.backdropClass ?? "bg-black/40"} />;
+  return <Dialog {...props} animation="fade" backdropClass="bg-scrim" />;
 }
 
 /** 统一纯 JS/NSH 按钮（建在 `nsh/base <Button>` 上）：无 `BlockMouse` 悬停断层，完整遵循宿主主题色阶。 */
@@ -2022,7 +2024,6 @@ function MermaidDiagramBlock(props: { source: string }) {
           </View>
           <SmeltDialog
             open={previewOpen()}
-            backdropClass="bg-black/65"
             onOpenChange={({ open }: any) => previewOpen.set(Boolean(open))}
             class="m-auto"
           >

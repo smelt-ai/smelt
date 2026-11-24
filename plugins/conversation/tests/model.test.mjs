@@ -13,8 +13,6 @@ import {
   computePromptRailWindow,
   consumeComposerRestore,
   detectCompletionTrigger,
-  effortDotColor,
-  effortProgress,
   isStreamingMetaUnchanged,
   isThinkingConfig,
   mergeEnvelope,
@@ -297,7 +295,7 @@ describe("ACP launch & fork wire contract", () => {
     expect(mergeEnvelope(null, incoming)).toBe(incoming);
   });
 
-  test("effortProgress, effortDotColor, and selectedConfigIndex map reasoning tiers consistently", () => {
+  test("selectedConfigIndex finds the current tier", () => {
     const cfg = {
       config_id: "reasoning_effort",
       current_name: "High",
@@ -308,13 +306,7 @@ describe("ACP launch & fork wire contract", () => {
         ["xhigh", "Extra"],
       ],
     };
-    const ix = selectedConfigIndex(cfg);
-    expect(ix).toBe(2);
-    expect(effortProgress(ix, cfg.options.length)).toBeCloseTo(2 / 3, 5);
-    expect(effortDotColor(0)).toBe("#60a5fa");
-    expect(effortDotColor(1 / 3)).toBe("#fb923c");
-    expect(effortDotColor(2 / 3)).toBe("#c084fc");
-    expect(effortDotColor(1)).toBe("#38bdf8");
+    expect(selectedConfigIndex(cfg)).toBe(2);
   });
 
   test("composerSweepMode resolves off, sweep, hold, and still transitions", () => {
