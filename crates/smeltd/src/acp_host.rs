@@ -1743,10 +1743,11 @@ pub(crate) fn settle_acp_turn_locked(
     provider_idle: bool,
     subscribers: &EventHubHandle,
 ) {
-    let idle = matches!(
-        sess.reduced.lock().phase,
-        smelt_core::daemon_state::DaemonPhase::Idle
-    );
+    let idle = {
+        let reduced = sess.reduced.lock();
+        matches!(reduced.phase, smelt_core::daemon_state::DaemonPhase::Idle)
+            && !reduced.replaying_history
+    };
     if !idle {
         return;
     }
@@ -3106,10 +3107,11 @@ pub(crate) fn note_immediate_queue_restore(
 
 /// 闸门开着、界面空闲、还原已经证明这一条还在队列里，才发一次。再调用不会再发。
 pub(crate) fn try_flush_immediate_delivery(sess: &AcpSession, subscribers: &EventHubHandle) {
-    let idle = matches!(
-        sess.reduced.lock().phase,
-        smelt_core::daemon_state::DaemonPhase::Idle
-    );
+    let idle = {
+        let reduced = sess.reduced.lock();
+        matches!(reduced.phase, smelt_core::daemon_state::DaemonPhase::Idle)
+            && !reduced.replaying_history
+    };
     if !idle || sess.unaccepted_prompt.lock().is_some() || sess.startup_hold.load(Ordering::SeqCst)
     {
         return;
@@ -3237,10 +3239,11 @@ pub(crate) fn deliver_peer_message(
         source_agent_label: source_agent_label.map(ToOwned::to_owned),
     };
     let starting = sess.startup_hold.load(Ordering::SeqCst);
-    let busy = !matches!(
-        sess.reduced.lock().phase,
-        smelt_core::daemon_state::DaemonPhase::Idle
-    );
+    let busy = {
+        let reduced = sess.reduced.lock();
+        reduced.replaying_history
+            || !matches!(reduced.phase, smelt_core::daemon_state::DaemonPhase::Idle)
+    };
     if starting || busy || sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
         let id = next_pending_prompt_id(sess);
         edit_pending_prompts(sess, |queue| {
@@ -3409,7 +3412,7 @@ pub(crate) fn queue_retry_prompt(
 /// 回合结束后只释放一条 daemon 队列中的 prompt。调用方必须持有 `turn_completion`；
 /// 剩余消息等下一次 TurnEnded，保证 provider 永远不会看到并发回合。
 pub(crate) fn flush_pending_acp_prompt_locked(sess: &AcpSession, subscribers: &EventHubHandle) {
-    if sess.startup_hold.load(Ordering::SeqCst) {
+    if sess.startup_hold.load(Ordering::SeqCst) || sess.reduced.lock().replaying_history {
         return;
     }
     if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
@@ -3615,9 +3618,10 @@ fn apply_acp_user_action_inner(
                     return Err(error);
                 }
             }
-            // 启动闸关着：配置还没写回、首条消息还没走，先排队，就绪后补做完按序放。
+            // 启动闸关着或仍在重放历史：配置还没写回、草稿还没提交，先排队，就绪后按序放。
             // 不碰回合闸门，否则放闸时会当成有一轮在跑。
-            let starting = sess.startup_hold.load(Ordering::SeqCst);
+            let starting =
+                sess.startup_hold.load(Ordering::SeqCst) || sess.reduced.lock().replaying_history;
             // 回合在跑不等于闸门握着：Pi 自己起的回合（后台任务结果带 triggerTurn）
             // 不占闸门。此时当 prompt 发，驱动会改成 steer，daemon 却记成一条等回执的
             // prompt：气泡先写一遍、Pi 吃掉时又写一遍，回执永远不来，闸门再也放不开。
@@ -4913,6 +4917,7 @@ pub(crate) fn handle_acp_debug<C: ClientSocket>(
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &reply);
 }
 
+#[derive(Debug)]
 pub(crate) enum HistoryReadError {
     /// 没有这个会话，或者读的过程中它被换掉了。
     SessionMissing,
@@ -4934,16 +4939,39 @@ pub(crate) fn read_history_page(
     let Some(slot) = acp_sessions.get(id) else {
         return Err(HistoryReadError::SessionMissing);
     };
-    let needs_wake = acp_sessions
+    enum PrefixPrep {
+        None,
+        Wake,
+        WaitReady,
+    }
+    let prep = acp_sessions
         .with_current(id, &slot, |session| {
             let reduced = session.reduced.lock();
             let end = before.min(reduced.entries_total());
-            end.saturating_sub(limit) < reduced.entries_base() && session.idle.is_suspended()
+            if end.saturating_sub(limit) >= reduced.entries_base() {
+                PrefixPrep::None
+            } else if session.idle.is_suspended() {
+                PrefixPrep::Wake
+            } else if crate::acp_idle::acp_ready_outcome(&reduced).is_none() {
+                PrefixPrep::WaitReady
+            } else {
+                PrefixPrep::None
+            }
         })
-        .unwrap_or(false);
-    if needs_wake {
-        crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
+        .unwrap_or(PrefixPrep::None);
+    match prep {
+        PrefixPrep::None => {}
+        PrefixPrep::Wake => {
+            crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
+                .map_err(HistoryReadError::Failed)?;
+        }
+        PrefixPrep::WaitReady => {
+            crate::acp_idle::wait_for_acp_ready(
+                &slot.value,
+                crate::acp_idle::ACP_WAKE_READY_TIMEOUT,
+            )
             .map_err(HistoryReadError::Failed)?;
+        }
     }
     acp_sessions
         .with_current(id, &slot, |session| {

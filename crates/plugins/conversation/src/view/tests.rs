@@ -1313,6 +1313,44 @@ fn overlapping_snapshot_keeps_the_contiguous_loaded_suffix() {
 }
 
 #[test]
+fn overlapping_snapshot_truncates_stale_tail_when_total_shrinks() {
+    let mut entries = vec![
+        AcpEntry::User("2".into()),
+        AcpEntry::User("3".into()),
+        AcpEntry::User("4".into()),
+    ];
+    let mut loaded_offset = 2;
+    let mut entries_total = 5;
+
+    assert_eq!(
+        merge_snapshot_entries(
+            &mut entries,
+            &mut loaded_offset,
+            &mut entries_total,
+            0,
+            3,
+            vec![
+                AcpEntry::User("0".into()),
+                AcpEntry::User("1".into()),
+                AcpEntry::User("2".into()),
+            ],
+            false,
+        ),
+        Some(0)
+    );
+    let texts = entries
+        .iter()
+        .map(|entry| match entry {
+            AcpEntry::User(text) => text.as_str(),
+            _ => panic!("expected user entry"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(loaded_offset, 0);
+    assert_eq!(entries_total, 3);
+    assert_eq!(texts, vec!["0", "1", "2"]);
+}
+
+#[test]
 fn snapshot_gap_resets_to_the_newest_contiguous_suffix() {
     let mut entries = vec![AcpEntry::User("10".into()), AcpEntry::User("11".into())];
     let mut loaded_offset = 10;

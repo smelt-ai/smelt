@@ -119,19 +119,35 @@ pub(crate) fn spawn_after_ready(
         .name("smelt-acp-after-ready".into())
         .spawn(move || {
             let sess = &slot.value;
-            if sess.connection_generation.load(Ordering::SeqCst) == generation {
-                run_after_ready(&id, sess, &subscribers);
-            }
+            run_after_ready_for_generation(&id, sess, Some(generation), &subscribers);
         });
     if let Err(error) = spawned {
         eprintln!("[acp] 会话 {label} 起就绪后补做线程失败：{error}");
     }
 }
 
+fn after_ready_still_valid(sess: &AcpSession, expected_generation: Option<u64>) -> bool {
+    expected_generation
+        .is_none_or(|generation| sess.connection_generation.load(Ordering::SeqCst) == generation)
+        && matches!(
+            crate::acp_idle::acp_ready_outcome(&sess.reduced.lock()),
+            Some(Ok(()))
+        )
+}
+
 /// 把就绪后要补的做掉：先写回配置、等 agent 确认，再发首条消息，最后开启动闸，放拉起
 /// 期间排进来的消息。调用方确认 runtime 已就绪。后台那条正在做时在门上等它做完；做完
 /// 的取走了就没有了，不会做两遍。
 pub(crate) fn run_after_ready(id: &str, sess: &AcpSession, subscribers: &EventHubHandle) {
+    run_after_ready_for_generation(id, sess, None, subscribers);
+}
+
+fn run_after_ready_for_generation(
+    id: &str,
+    sess: &AcpSession,
+    expected_generation: Option<u64>,
+    subscribers: &EventHubHandle,
+) {
     let _gate = sess.after_ready_gate.lock();
     // 写回期间用户又在输入框里改了配置（见 [`hold_submit_config`]），接着写，最后一份为准。
     // 那边在回合收尾锁里、启动闸关着时才往这里放，所以拿着锁复核为空再开闸，不会漏。
@@ -139,12 +155,18 @@ pub(crate) fn run_after_ready(id: &str, sess: &AcpSession, subscribers: &EventHu
         // 取出来再写：写回要等 agent 确认，事件线程归并确认时也要拿 after_ready。
         // `while let` 的锁守卫活到循环体结束，在条件里取会拿着锁等满超时。
         loop {
+            if !after_ready_still_valid(sess, expected_generation) {
+                return;
+            }
             let Some(config) = sess.after_ready.lock().config.take() else {
                 break;
             };
             crate::acp_idle::restore_suspended_config(id, sess, &config, subscribers);
         }
         let turn_completion = sess.turn_completion.lock();
+        if !after_ready_still_valid(sess, expected_generation) {
+            return;
+        }
         if sess.after_ready.lock().config.is_none() {
             break turn_completion;
         }
@@ -543,6 +565,44 @@ mod tests {
         run_after_ready("acp-woken", &sess, &subscribers);
         assert_eq!(sent_prompts(&cmd_rx), vec!["hello again".to_string()]);
         assert!(sess.reduced.lock().pending_prompts.is_empty());
+    }
+
+    /// 重放尚未结束或刚换到仍在连接的新代时，陈旧的补做线程不能提前把启动闸放开。
+    #[test]
+    fn stale_after_ready_does_not_release_startup_hold_while_replaying() {
+        let subscribers = crate::new_event_hub();
+        let (sess, cmd_rx) = running_session("acp-replaying");
+        sess.startup_hold.store(true, Ordering::SeqCst);
+        sess.reduced.lock().replaying_history = true;
+        apply_acp_user_action(&sess, user_prompt("queued during replay"), &subscribers).unwrap();
+
+        run_after_ready("acp-replaying", &sess, &subscribers);
+        assert!(
+            sess.startup_hold.load(Ordering::SeqCst),
+            "重放未结束不得放开启动闸"
+        );
+        assert!(
+            sent_prompts(&cmd_rx).is_empty(),
+            "重放未结束不得抢先发出排队消息"
+        );
+        assert_eq!(sess.reduced.lock().pending_prompts.len(), 1);
+    }
+
+    /// 即使启动闸未关，历史重放进行中收到用户消息也必须排队，不能插进草稿中途直接发送。
+    #[test]
+    fn prompts_wait_while_replaying_history_even_if_startup_hold_is_clear() {
+        let subscribers = crate::new_event_hub();
+        let (sess, cmd_rx) = running_session("acp-replay-guard");
+        sess.startup_hold.store(false, Ordering::SeqCst);
+        sess.reduced.lock().replaying_history = true;
+
+        apply_acp_user_action(&sess, user_prompt("wait for replay"), &subscribers).unwrap();
+        assert!(
+            sent_prompts(&cmd_rx).is_empty(),
+            "重放进行中不能直接发 prompt"
+        );
+        assert_eq!(sess.reduced.lock().pending_prompts.len(), 1);
+        assert!(!sess.prompt_in_flight.load(Ordering::SeqCst));
     }
 
     /// 启动期间用户在输入框里改的配置排在拉起前那份后面写，不被旧的盖掉；开闸后照常下发。

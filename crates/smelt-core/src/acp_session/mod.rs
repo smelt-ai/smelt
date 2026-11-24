@@ -1244,7 +1244,7 @@ fn begin_turn_with_entry(
     let started_at_ms = unix_time_ms();
     state.turn_started_at_ms = Some(started_at_ms);
     state.turn_timings.push(TurnTiming {
-        user_index: state.entries.len().saturating_sub(1),
+        user_index: state.entries_base + state.entries.len().saturating_sub(1),
         started_at_ms,
         ended_at_ms: None,
     });
@@ -1262,7 +1262,7 @@ fn begin_turn_with_entry(
 pub fn undo_prompt_sent(
     state: &mut AcpSessionState,
 ) -> Option<(String, Vec<crate::acp_chat::AcpImage>)> {
-    let last_index = state.entries.len().checked_sub(1)?;
+    let last_index = state.entries_base + state.entries.len().checked_sub(1)?;
     if !matches!(
         state.entries.last(),
         Some(AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
