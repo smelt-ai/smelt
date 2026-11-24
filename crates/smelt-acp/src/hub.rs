@@ -92,6 +92,8 @@ struct RouteState {
     owner: String,
     active_sub_id: Option<String>,
     latest_snapshot: Option<Value>,
+    /// 已经收到过完整信封的订阅：只有它收省略帧时才去掉信封键（它手里有上一份可沿用）。
+    envelope_sub_id: Option<String>,
 }
 
 struct LiveSession {
@@ -190,6 +192,7 @@ impl AcpHub {
             owner: owner.clone(),
             active_sub_id: Some(sub_id.clone()),
             latest_snapshot: None,
+            envelope_sub_id: None,
         }));
         let guard = Arc::new(HandleGuard {
             _conn: Mutex::new(Some(handle)),
@@ -254,6 +257,7 @@ impl AcpHub {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             route.active_sub_id = Some(new_sub_id.to_owned());
+            route.envelope_sub_id = None;
             route.latest_snapshot.clone()
         };
         let replayable = latest.filter(|snap| {
@@ -270,6 +274,8 @@ impl AcpHub {
         if replayable.is_none() {
             // 缓存帧是增量尾片或省略了信封时不能直接灌给新挂载组件，向守护请求完整权威快照。
             let _ = parked.session.action_tx.try_send(AcpUserAction::Refresh);
+        } else if let Ok(mut route) = parked.session.route.lock() {
+            route.envelope_sub_id = Some(new_sub_id.to_owned());
         }
         if let Some(old) = state.active.insert(new_sub_id.to_owned(), parked.session)
             && let Ok(mut r) = old.route.lock()
@@ -483,7 +489,14 @@ async fn run_forwarder(
                     );
                 }
             }
-            ConversationClientEvent::Snapshot(snap) => {
+            ConversationClientEvent::Snapshot(mut snap) => {
+                // 挂着的完整帧要被本帧顶掉：本帧省略了信封，信封的更新只在它身上，沿用它的。
+                if snap.envelope_omitted
+                    && let Some(replaced) = pending.take()
+                    && !replaced.envelope_omitted
+                {
+                    snap.keep_envelope(*replaced);
+                }
                 let digest = UrgentDigest::of(&snap);
                 let urgent = last_urgent.as_ref() != Some(&digest);
                 let window_elapsed = last_emit.is_none_or(|t| t.elapsed() >= coalesce);
@@ -510,14 +523,25 @@ fn emit_snapshot(
         return;
     };
     images.compact_snapshot_json(&mut value);
-    let target = {
+    let (target, strip_envelope) = {
         let mut guard = route.lock().unwrap_or_else(|e| e.into_inner());
         guard.latest_snapshot = Some(value.clone());
-        guard
-            .active_sub_id
-            .clone()
-            .map(|sub_id| (guard.owner.clone(), sub_id))
+        let sub_id = guard.active_sub_id.clone();
+        let strip = if snap.envelope_omitted {
+            sub_id.is_some() && guard.envelope_sub_id == sub_id
+        } else {
+            guard.envelope_sub_id.clone_from(&sub_id);
+            false
+        };
+        (sub_id.map(|sub_id| (guard.owner.clone(), sub_id)), strip)
     };
+    // 省略帧里的信封字段是空值不是清空：去掉这些键，插件拿本帧盖上一份就是对的，
+    // 不必自己再列一遍哪些是信封。
+    if strip_envelope && let Some(fields) = value.as_object_mut() {
+        for key in ConversationSnapshot::ENVELOPE_KEYS {
+            fields.remove(*key);
+        }
+    }
     if let Some((owner, sub_id)) = target {
         sink(
             &owner,
@@ -614,6 +638,68 @@ mod tests {
             .unwrap()
             .to_owned();
         assert_eq!(final_phase, "idle");
+    }
+
+    /// 节流窗里先到的完整帧被后到的省略信封帧顶掉时，信封的更新不能丢；之后单独到的
+    /// 省略帧发给插件时去掉信封键，插件照旧沿用手里的那份。
+    #[test]
+    fn coalescing_keeps_envelope_of_replaced_full_frame_and_strips_omitted_envelope() {
+        let received = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recv_clone = Arc::clone(&received);
+        let sink: AcpEventSink = Arc::new(move |owner, val| {
+            recv_clone.lock().unwrap().push((owner.to_owned(), val));
+        });
+        let hub = AcpHub::new(ImageStore::new(), sink);
+        let (handle, _action_rx, event_tx) = ConversationClientHandle::detached();
+        hub.attach_handle(
+            "sub-1".into(),
+            "smelt.sessions".into(),
+            RuntimeKey::Local,
+            "s-1".into(),
+            handle,
+        );
+        let send = |snap: ConversationSnapshot| {
+            event_tx
+                .try_send(ConversationClientEvent::Snapshot(Box::new(snap)))
+                .unwrap();
+        };
+
+        let mut full = fallback_snapshot("", 0);
+        full.phase = DaemonPhase::Thinking;
+        full.available_commands = vec![("a".into(), "A".into())];
+        full.snapshot_revision = 1;
+        send(full.clone());
+
+        // 同一节流窗里：命令变了的完整帧，紧跟一个省略信封的正文帧。
+        full.available_commands.push(("b".into(), "B".into()));
+        full.snapshot_revision = 2;
+        send(full.clone());
+        let mut omitted = fallback_snapshot("", 0);
+        omitted.phase = DaemonPhase::Thinking;
+        omitted.envelope_omitted = true;
+        omitted.snapshot_revision = 3;
+        send(omitted.clone());
+        std::thread::sleep(Duration::from_millis(60));
+
+        let last = received.lock().unwrap().last().unwrap().1["snapshot"].clone();
+        assert_eq!(last["snapshot_revision"], 3);
+        assert_eq!(
+            last["available_commands"].as_array().map(Vec::len),
+            Some(2),
+            "被顶掉的完整帧里的命令更新丢了：{last}"
+        );
+
+        // 单独到的省略帧：去掉信封键，留着正文和相位。
+        omitted.snapshot_revision = 4;
+        send(omitted);
+        std::thread::sleep(Duration::from_millis(60));
+        let last = received.lock().unwrap().last().unwrap().1["snapshot"].clone();
+        assert_eq!(last["snapshot_revision"], 4);
+        assert_eq!(last["envelope_omitted"], true);
+        for key in ConversationSnapshot::ENVELOPE_KEYS {
+            assert!(last.get(*key).is_none(), "省略帧不该带信封键 {key}");
+        }
+        assert_eq!(last["phase"], "thinking");
     }
 
     #[test]

@@ -286,61 +286,38 @@ describe("ACP launch & fork wire contract", () => {
     ).toBe(true);
   });
 
-  test("mergeEnvelope preserves envelope-gated fields while updating always-present streaming fields", () => {
+  test("mergeEnvelope keeps keys the host left out and takes every key the frame carries", () => {
     const prev = {
       pending_permissions: [{ id: "p1", question: "allow?", tool_call_id: "t1", options: [] }],
-      pending_elicitation: { id: "e1", message: "pick", fields: [], chosen: {}, text_values: {} },
       status_line: "Running tests",
       turn_started_at_ms: 12345,
       model: { config_id: "model", current_value: "sonnet", current_name: "Sonnet", options: [] },
       usage: [100, 1000],
       acp_session_id: null,
-      provider_retry: null,
+      provider_retry: { attempt: 1, max_attempts: 3, delay_ms: 500, error: "429" },
     };
+    // 宿主去掉了信封键：只剩每帧都带的字段。
     const incoming = {
       envelope_omitted: true,
       entries_offset: 1,
       entries_total: 2,
       snapshot_revision: 5,
-      replaying_history: false,
       entries: [{ Assistant: { text: "stream", thought: false } }],
       phase: "thinking",
-      end_reason: "",
-      end_kind: "unknown",
-      end_code: null,
-      pending_permissions: [],
-      pending_elicitation: null,
-      status_line: null,
-      turn_started_at_ms: null,
       acp_session_id: "acp-live-1",
-      history_session_id: "hist-1",
-      history_abandoned: false,
-      supports_image: true,
-      supports_compaction: true,
-      supports_native_queue: true,
-      supports_rewind: true,
       usage: [250, 1000],
-      usage_cached_read: 40,
-      usage_cost: 0.01,
-      compacting: false,
-      provider_retry: { attempt: 1, max_attempts: 3, delay_ms: 500, error: "429" },
-      completed_unread: false,
-      turn_outcome: null,
-      should_persist: false,
-      history_error: null,
-      history_omitted: false,
+      provider_retry: null,
     };
     const merged = mergeEnvelope(prev, incoming);
     expect(merged.envelope_omitted).toBe(false);
     expect(merged.pending_permissions).toEqual(prev.pending_permissions);
-    expect(merged.pending_elicitation).toEqual(prev.pending_elicitation);
     expect(merged.status_line).toBe("Running tests");
     expect(merged.turn_started_at_ms).toBe(12345);
     expect(merged.model).toEqual(prev.model);
     expect(merged.usage).toEqual([250, 1000]);
     expect(merged.acp_session_id).toBe("acp-live-1");
-    expect(merged.provider_retry.attempt).toBe(1);
-    expect(merged.supports_rewind).toBe(true);
+    expect(merged.provider_retry).toBeNull();
+    expect(mergeEnvelope(null, incoming)).toBe(incoming);
   });
 
   test("decodeFileUri strips file:// and percent-decodes paths with spaces and CJK", () => {

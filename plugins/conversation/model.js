@@ -1088,42 +1088,12 @@ export function decodeFileUri(uri) {
 }
 
 /**
- * 合并流式快照的信封字段（对齐 `smelt-core/src/acp_session/mod.rs` 的 `include_envelope` 分界）。
- * 当 `incoming.envelope_omitted === true` 时，保留 `prev` 的全部信封字段（审批、提问、状态栏、
- * 回合起始时间、模型、配置、计划、队列、记忆、子智能体、提示等），仅更新本帧始终携带的流式字段。
+ * 合并省略了信封的快照帧。宿主（`smelt-acp`）发来省略帧时已经去掉了信封键，
+ * 本帧带的键都是这一帧的权威值，没带的沿用上一份；不在这里列哪些是信封字段。
  */
 export function mergeEnvelope(prev, incoming) {
   if (!prev || !incoming?.envelope_omitted) return incoming;
-  return {
-    ...prev,
-    entries_offset: incoming.entries_offset,
-    entries_total: incoming.entries_total,
-    snapshot_revision: incoming.snapshot_revision,
-    replaying_history: incoming.replaying_history,
-    entries: incoming.entries,
-    phase: incoming.phase,
-    end_reason: incoming.end_reason,
-    end_kind: incoming.end_kind,
-    end_code: incoming.end_code,
-    acp_session_id: incoming.acp_session_id,
-    history_session_id: incoming.history_session_id,
-    history_abandoned: incoming.history_abandoned,
-    supports_image: incoming.supports_image,
-    supports_compaction: incoming.supports_compaction,
-    supports_native_queue: incoming.supports_native_queue,
-    supports_rewind: incoming.supports_rewind,
-    usage: incoming.usage,
-    usage_cached_read: incoming.usage_cached_read,
-    usage_cost: incoming.usage_cost,
-    compacting: incoming.compacting,
-    provider_retry: incoming.provider_retry,
-    completed_unread: incoming.completed_unread,
-    turn_outcome: incoming.turn_outcome,
-    should_persist: incoming.should_persist,
-    history_error: incoming.history_error,
-    history_omitted: incoming.history_omitted,
-    envelope_omitted: false,
-  };
+  return { ...prev, ...incoming, envelope_omitted: false };
 }
 
 function shallowEqualRecord(a, b) {

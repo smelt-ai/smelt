@@ -1302,9 +1302,71 @@ pub struct ConversationSnapshot {
 }
 
 impl ConversationSnapshot {
+    /// 信封字段序列化后的键名：运行时省略信封（`envelope_omitted`）的帧里它们是空值，
+    /// 接收方要沿用上一份。和 [`Self::keep_envelope`] 是同一张表，别处不再各列一份。
+    pub const ENVELOPE_KEYS: &[&str] = &[
+        "session_title",
+        "accepted_delivery_ids",
+        "active_delivery_id",
+        "completed_delivery_id",
+        "pending_permissions",
+        "pending_elicitation",
+        "status_line",
+        "available_commands",
+        "usage_breakdown",
+        "plan",
+        "background_tasks",
+        "subagents",
+        "peer_inbox",
+        "model",
+        "config_options",
+        "conversation_state",
+        "notice",
+        "memory_changes",
+        "pending_prompts",
+        "queued_steering",
+        "queued_follow_up",
+        "composer_restore_revision",
+        "composer_restore_texts",
+        "composer_restore_images",
+        "turn_started_at_ms",
+        "turn_timings",
+    ];
+
     /// 给人看的结束原因：有种类按当前语言说再接上细节，没有种类原样给 `end_reason`。
     pub fn end_text(&self) -> String {
         end_text(self.end_code.as_ref(), &self.end_reason)
+    }
+
+    /// 这帧省略了信封：信封字段（[`Self::ENVELOPE_KEYS`]）沿用 `previous` 的，其余用本帧的。
+    pub fn keep_envelope(&mut self, previous: Self) {
+        self.session_title = previous.session_title;
+        self.accepted_delivery_ids = previous.accepted_delivery_ids;
+        self.active_delivery_id = previous.active_delivery_id;
+        self.completed_delivery_id = previous.completed_delivery_id;
+        self.pending_permissions = previous.pending_permissions;
+        self.pending_elicitation = previous.pending_elicitation;
+        self.status_line = previous.status_line;
+        self.available_commands = previous.available_commands;
+        self.usage_breakdown = previous.usage_breakdown;
+        self.plan = previous.plan;
+        self.background_tasks = previous.background_tasks;
+        self.subagents = previous.subagents;
+        self.peer_inbox = previous.peer_inbox;
+        self.model = previous.model;
+        self.config_options = previous.config_options;
+        self.conversation_state = previous.conversation_state;
+        self.notice = previous.notice;
+        self.memory_changes = previous.memory_changes;
+        self.pending_prompts = previous.pending_prompts;
+        self.queued_steering = previous.queued_steering;
+        self.queued_follow_up = previous.queued_follow_up;
+        self.composer_restore_revision = previous.composer_restore_revision;
+        self.composer_restore_texts = previous.composer_restore_texts;
+        self.composer_restore_images = previous.composer_restore_images;
+        self.turn_started_at_ms = previous.turn_started_at_ms;
+        self.turn_timings = previous.turn_timings;
+        self.envelope_omitted = previous.envelope_omitted;
     }
 }
 

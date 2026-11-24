@@ -7,7 +7,7 @@
 //! - 两个窗口相交或相接就按下标拼接；不相接时，新的一份若到末尾就以它为准（实时尾部），
 //!   否则丢掉它的条目（孤立的旧页拼上去会留下空洞），只更新快照头。
 //! - 拼好后按快照头的 `entries_total` 截掉多出来的尾巴（对面删了条目）。
-//! - `envelope_omitted` 的帧只带正文和相位：信封字段沿用手里的那份。旧 Dart 只在拼接
+//! - `envelope_omitted` 的帧：信封字段（`ConversationSnapshot::ENVELOPE_KEYS`）沿用手里的那份。旧 Dart 只在拼接
 //!   路径上沿用，不相接的两条路径会把审批、模型等清空，这里统一沿用。
 
 use smelt_model::acp_session::ConversationSnapshot;
@@ -52,7 +52,7 @@ pub(crate) fn merge(
             // 不相接但到了末尾：实时尾部为准，丢掉手里的旧窗口。
             next.entries = next_entries;
             if envelope_omitted {
-                keep_envelope(&mut next, current);
+                next.keep_envelope(current);
             }
             return next;
         }
@@ -85,40 +85,10 @@ pub(crate) fn merge(
     merged.entries_offset = start;
     merged.entries = entries;
     if envelope_omitted && next_is_newer {
-        keep_envelope(&mut merged, other);
+        merged.keep_envelope(other);
     }
     merged.envelope_omitted = false;
     merged
-}
-
-/// `target` 是只带正文的帧：信封字段换回 `previous` 的。
-fn keep_envelope(target: &mut ConversationSnapshot, previous: ConversationSnapshot) {
-    target.pending_permissions = previous.pending_permissions;
-    target.pending_elicitation = previous.pending_elicitation;
-    target.status_line = previous.status_line;
-    target.available_commands = previous.available_commands;
-    target.usage = previous.usage;
-    target.usage_cached_read = previous.usage_cached_read;
-    target.usage_cost = previous.usage_cost;
-    target.usage_breakdown = previous.usage_breakdown;
-    target.plan = previous.plan;
-    target.background_tasks = previous.background_tasks;
-    target.subagents = previous.subagents;
-    target.peer_inbox = previous.peer_inbox;
-    target.model = previous.model;
-    target.config_options = previous.config_options;
-    target.conversation_state = previous.conversation_state;
-    target.provider_retry = previous.provider_retry;
-    target.notice = previous.notice;
-    target.memory_changes = previous.memory_changes;
-    target.pending_prompts = previous.pending_prompts;
-    target.queued_steering = previous.queued_steering;
-    target.queued_follow_up = previous.queued_follow_up;
-    target.turn_started_at_ms = previous.turn_started_at_ms;
-    target.turn_timings = previous.turn_timings;
-    target.completed_unread = previous.completed_unread;
-    target.turn_outcome = previous.turn_outcome;
-    target.envelope_omitted = false;
 }
 
 /// 存缓存用：只留最后 `limit` 条，`entries_total` 不变（缓存窗口没到开头）。
@@ -291,6 +261,28 @@ pub(crate) mod tests {
         let merged = merge(current, next);
         assert_eq!(merged.entries_offset, 50);
         assert_eq!(merged.status_line.as_deref(), Some("干活中"));
+    }
+
+    /// 省略信封的帧照样带用量、重试、回合结果（每帧都带的字段），要用本帧的；
+    /// 标题、还回输入框的原文是信封，要沿用手里的。
+    #[test]
+    fn an_envelope_omitted_frame_takes_per_frame_fields_and_keeps_title() {
+        let mut current = page(0..2, 2, 1);
+        current.session_title = Some("标题".into());
+        current.composer_restore_revision = 3;
+        current.composer_restore_texts = vec!["还回来".into()];
+        current.usage = Some((10, 100));
+        current.completed_unread = true;
+        let mut next = snapshot(1, 2, 2, &["e1'"]);
+        next.envelope_omitted = true;
+        next.usage = Some((20, 100));
+        next.completed_unread = false;
+        let merged = merge(current, next);
+        assert_eq!(merged.usage, Some((20, 100)));
+        assert!(!merged.completed_unread);
+        assert_eq!(merged.session_title.as_deref(), Some("标题"));
+        assert_eq!(merged.composer_restore_revision, 3);
+        assert_eq!(merged.composer_restore_texts, ["还回来"]);
     }
 
     #[test]
