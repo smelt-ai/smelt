@@ -4,7 +4,6 @@
 
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
     io::{BufRead as _, BufReader, Write as _},
     path::PathBuf,
     rc::Rc,
@@ -13,16 +12,14 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, KeyBinding, Modifiers, MouseButton, ParentElement as _,
-    Pixels, Render, Styled as _, TestAppContext, VisualTestContext, Window, canvas, div, point, px,
-    size,
+    Pixels, Render, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
-use nsh_platform_gpui::NativeComponent;
 use serde_json::{Value, json};
 use smelt_nsh::{
     BackdropHooks, MainShell, OutletTarget, PluginSource, ShellConfig, ShellLabels, SourceDir,
-    WindowCorners, testing,
+    WindowCorners,
 };
 use smelt_plugin_api::{
     self as api, Host, Machine, NotificationPermission, PluginView, RuntimeKey, ViewHandle,
@@ -36,72 +33,6 @@ use smelt_plugin_api::{
 };
 
 gpui::actions!(inline_rename_test, [DismissWorkspace]);
-
-#[derive(Default)]
-struct Seen {
-    props: BTreeMap<String, Value>,
-    bounds: Option<Bounds<Pixels>>,
-    painted_frame: u64,
-}
-
-#[derive(Default)]
-struct SpyLog {
-    frame: u64,
-    next: usize,
-    live: BTreeMap<usize, Seen>,
-}
-
-struct SpyBuddy {
-    id: usize,
-    log: Rc<RefCell<SpyLog>>,
-    inner: Box<dyn NativeComponent>,
-}
-
-impl NativeComponent for SpyBuddy {
-    fn render(&mut self, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-        let content = self.inner.render(window, cx)?;
-        let id = self.id;
-        let log_prepaint = self.log.clone();
-        let log_paint = self.log.clone();
-        let probe = canvas(
-            move |bounds, _, _| {
-                if let Some(seen) = log_prepaint.borrow_mut().live.get_mut(&id) {
-                    seen.bounds = Some(bounds);
-                }
-            },
-            move |bounds, (), _, _| {
-                let mut log = log_paint.borrow_mut();
-                let frame = log.frame;
-                if let Some(seen) = log.live.get_mut(&id) {
-                    seen.bounds = Some(bounds);
-                    seen.painted_frame = frame;
-                }
-            },
-        );
-        Some(
-            div()
-                .size_full()
-                .relative()
-                .child(content)
-                .child(probe.absolute().top_0().left_0().size_full())
-                .into_any_element(),
-        )
-    }
-
-    fn set_prop(&mut self, name: &str, value: Option<&Value>, window: &mut Window, cx: &mut App) {
-        if let Some(seen) = self.log.borrow_mut().live.get_mut(&self.id) {
-            seen.props
-                .insert(name.to_owned(), value.cloned().unwrap_or(Value::Null));
-        }
-        self.inner.set_prop(name, value, window, cx);
-    }
-}
-
-impl Drop for SpyBuddy {
-    fn drop(&mut self) {
-        self.log.borrow_mut().live.remove(&self.id);
-    }
-}
 
 struct RenameHost {
     rename_calls: Arc<Mutex<Vec<Value>>>,
@@ -408,19 +339,55 @@ fn wait_until(
     }
 }
 
-fn buddy_bounds(log: &Rc<RefCell<SpyLog>>, seed: &str) -> Option<Bounds<Pixels>> {
-    let log = log.borrow();
-    let frame = log.frame;
-    log.live
-        .values()
-        .filter(|seen| {
-            seen.painted_frame == frame
-                && seen.props.get("seed").and_then(Value::as_str) == Some(seed)
-        })
-        .find_map(|seen| {
-            seen.bounds
-                .filter(|b| b.size.width > px(0.) && b.size.height > px(0.))
-        })
+/// 无障碍树里按文档先后排的标签（从根往下、子节点按顺序），用来看会话行谁在上。
+fn a11y_labels_in_order(cx: &mut VisualTestContext) -> Vec<String> {
+    let Some(raw) = cx.update(|window, _| window.debug_a11y_tree_json()) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    let (Some(root), Some(nodes)) = (
+        parsed.get("root").and_then(Value::as_str),
+        parsed.get("nodes").and_then(Value::as_object),
+    ) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_owned()];
+    while let Some(key) = stack.pop() {
+        let Some(node) = nodes.get(&key) else {
+            continue;
+        };
+        if let Some(label) = node.pointer("/aria/label").and_then(Value::as_str) {
+            out.push(label.to_owned());
+        }
+        if let Some(children) = node.get("children").and_then(Value::as_array) {
+            stack.extend(
+                children
+                    .iter()
+                    .rev()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    out
+}
+
+/// 会话行（无障碍标签以标题开头的按钮）在侧栏里的先后：`Some(true)` 是 `upper` 在 `lower` 上面。
+fn session_above(cx: &mut VisualTestContext, upper: &str, lower: &str) -> Option<bool> {
+    let labels = a11y_labels_in_order(cx);
+    let at = |title: &str| labels.iter().position(|label| label.starts_with(title));
+    Some(at(upper)? < at(lower)?)
+}
+
+/// 侧栏第 `index` 条会话行的头像格（标准布局、1200×800 窗口、一个展开的项目下）。
+fn session_avatar(index: usize) -> Bounds<Pixels> {
+    Bounds::new(
+        point(px(16.), px(148. + 46. * index as f32)),
+        size(px(36.), px(36.)),
+    )
 }
 
 #[gpui::test]
@@ -433,7 +400,6 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     let remote_config_sets = Arc::new(Mutex::new(Vec::<Value>::new()));
     let open_view_calls = Arc::new(Mutex::new(Vec::<Value>::new()));
     let create_calls = Arc::new(Mutex::new(Vec::<Value>::new()));
-    let spy = Rc::new(RefCell::new(SpyLog::default()));
 
     cx.executor().allow_parking();
     let open_view_calls_cmd = open_view_calls.clone();
@@ -497,13 +463,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     });
 
     let repo_plugins = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
-    let spy_reset = spy.clone();
-    let hooks = BackdropHooks {
-        reset: Some(Rc::new(move || {
-            spy_reset.borrow_mut().frame += 1;
-        })),
-        record: None,
-    };
+    let hooks = BackdropHooks::default();
 
     let shell_holder: Rc<RefCell<Option<Entity<MainShell>>>> = Rc::default();
     let shell_holder_init = shell_holder.clone();
@@ -526,22 +486,6 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
                 },
                 window,
                 cx,
-            );
-            let spy_buddy = spy.clone();
-            let app = shell.app_view().read(cx);
-            app.register_component(
-                testing::BUDDY,
-                Rc::new(move |ctx| {
-                    let mut log = spy_buddy.borrow_mut();
-                    log.next += 1;
-                    let id = log.next;
-                    log.live.insert(id, Seen::default());
-                    Box::new(SpyBuddy {
-                        id,
-                        log: spy_buddy.clone(),
-                        inner: testing::make_buddy(ctx),
-                    })
-                }),
             );
             shell
         });
@@ -582,14 +526,14 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     });
 
     assert!(
-        wait_until(cx, Duration::from_secs(15), |_| {
-            buddy_bounds(&spy, "conv-a").is_some() && buddy_bounds(&spy, "conv-b").is_some()
+        wait_until(cx, Duration::from_secs(15), |cx| {
+            session_above(cx, "Alpha Chat", "Beta Chat") == Some(true)
         }),
         "侧栏会话未渲染"
     );
 
-    let a_rect = buddy_bounds(&spy, "conv-a").expect("conv-a bounds");
-    let b_rect = buddy_bounds(&spy, "conv-b").expect("conv-b bounds");
+    let a_rect = session_avatar(0);
+    let b_rect = session_avatar(1);
     let row_a = point(a_rect.center().x + px(50.), a_rect.center().y);
     let row_b = point(b_rect.center().x + px(50.), b_rect.center().y);
     let empty_sidebar = point(px(120.), b_rect.bottom() + px(120.));

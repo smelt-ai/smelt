@@ -12597,14 +12597,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-buddy"
-version = "0.0.0"
-dependencies = [
- "gpui-fast",
- "image",
-]
-
-[[package]]
 name = "smelt-cli"
 version = "0.0.0"
 dependencies = [
@@ -12809,7 +12801,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-acp",
- "smelt-buddy",
  "smelt-desktop",
  "smelt-plugin-api",
  "smelt-terminal",

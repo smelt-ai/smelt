@@ -1,4 +1,4 @@
-// 设置「通用 → 会话列表」（NSH A2 版）：行首显示 3D 小人头像或图标。
+// 设置「通用 → 会话列表」（NSH A2 版）：行首显示会话头像或图标。
 
 import { computed, Scroll, Text, View } from "nsh";
 import { MENU_ITEM_CLASS, SmeltIcon, SmeltSelect } from "smelt/sdk";

@@ -1,7 +1,7 @@
 // 会话列表插件（NSH A2 独立 Guest VM 正式版）：
 // 复用 `plugins/session-list/` 全部纯 JS 逻辑与 SQLite 存储，导出：
 // - `root`：承载 ⌘N 新建会话面板与项目仓库管理对话框（挂在主壳 0×0 无头根层）；
-// - `main`：侧栏会话列表视图（直接驱动原子能力 `<SmeltNativeBuddy>`、分组折叠弹簧动画、悬停图标切换、
+// - `main`：侧栏会话列表视图（行首会话头像 `<Avatar>`（avatar.tsx）、分组折叠弹簧动画、悬停图标切换、
 //   拖拽浮卡与落点线、新建会话「+」弹层、搜索、分组/机器菜单、可视区外提示胶囊、动效与外部拖入项目）；
 // - `settings`：设置「通用 → 会话列表」行首头像选择。
 
@@ -15,7 +15,6 @@ import {
   SmeltDisclosureChevron,
   SmeltIcon,
   SmeltMenu,
-  SmeltNativeBuddy,
   SmeltWindowBar,
 } from "smelt/sdk";
 
@@ -43,6 +42,7 @@ import {
 import { fail_key } from "../state.js";
 import { relative_time, span } from "../time.js";
 import { icon, message } from "../util.js";
+import { Avatar } from "./avatar.tsx";
 import {
   buddyActor,
   clipboardWrite,
@@ -877,12 +877,12 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
                 justifyContent: "center",
               }}
             >
-              <SmeltNativeBuddy
+              <Avatar
                 seed={actor().seed}
                 act={actor().act}
                 since={actor().since}
                 opacity={iconAlpha()}
-                style={{ width: AVATAR, height: AVATAR, flexShrink: 0, pointerEvents: "none" }}
+                size={AVATAR}
               />
               <View
                 style={{

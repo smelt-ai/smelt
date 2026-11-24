@@ -537,11 +537,11 @@ settings:
     en: "Row avatar"
     zh-CN: "行首头像"
   avatar_buddy:
-    en: "Buddy Avatar"
-    zh-CN: "小人头像"
+    en: "Session avatar"
+    zh-CN: "会话头像"
   avatar_description:
-    en: "What each session row starts with: an animated buddy avatar or a CLI icon."
-    zh-CN: "每段会话行最前面显示小人头像还是工具图标。"
+    en: "What each session row starts with: an animated avatar or a CLI icon."
+    zh-CN: "每段会话行最前面显示会动的头像还是工具图标。"
   avatar_icon:
     en: "None (show icon)"
     zh-CN: "不要头像（显示图标）"

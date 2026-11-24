@@ -68,7 +68,7 @@ export { clipboardWrite, t };
 /** 列表每次 rebuild 或状态变化递增，驱动 TSX 细粒度刷新。 */
 export const tick = signal(0);
 
-/** 3D 小人动作状态机（直接驱动 `<SmeltNativeBuddy>`，无跨 VM 插槽）。 */
+/** 行首头像的演出状态机（`<Avatar>` 按它演，无跨 VM 插槽）。 */
 const buddyStage = empty_stage();
 let buddySeats = new Map<string, string>();
 let buddyKnown = new Set<string>();

@@ -1,4 +1,4 @@
-//! 给插件的原生零件里 NSH 拼不出的几样：小人角色、会拖窗口的标题栏带、毛玻璃材质坐标。
+//! 给插件的原生零件里 NSH 拼不出的几样：会拖窗口的标题栏带、毛玻璃材质坐标。
 //!
 //! 图标与按钮已全部走 NSH 一等原生节点（`smelt/host` 的 `<Icon>` 与 `nsh/base` 的 `<Button>`），
 //! 不再绕 GPUI `NativeComponent`。
@@ -7,16 +7,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, IntoElement as _, ParentElement as _, Pixels, SharedString,
-    Styled as _, Window, canvas, div, px, size,
+    AnyElement, App, Bounds, IntoElement as _, Pixels, Styled as _, Window, canvas, div, px, size,
 };
 use nsh_platform_gpui::{ComponentContext, NativeComponent};
 use serde_json::Value;
-use smelt_buddy::{Act, BuddyFigure};
-use smelt_ui::motion::{ambient_application_active, ambient_motion_enabled};
 use smelt_ui::window_bar::{SafeArea, TOP_BAR_HEIGHT, with_window_drag};
 
-pub(crate) const BUDDY: &str = "smelt.buddy";
 pub(crate) const WINDOW_BAR: &str = "smelt.window-bar";
 pub(crate) const WINDOW_DRAG: &str = "smelt.window-drag";
 pub(crate) const BACKDROP_REGION: &str = "smelt.backdrop-region";
@@ -38,81 +34,6 @@ pub type BackdropRecordFn = Rc<dyn Fn(BackdropPlacement, Option<Bounds<Pixels>>,
 pub struct BackdropHooks {
     pub reset: Option<Rc<dyn Fn()>>,
     pub record: Option<BackdropRecordFn>,
-}
-
-fn text(value: Option<&Value>) -> SharedString {
-    value
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-        .into()
-}
-
-pub(crate) struct Buddy {
-    cx: ComponentContext,
-    seed: SharedString,
-    act: Act,
-    since_ms: f64,
-    opacity: f32,
-}
-
-impl Buddy {
-    pub(crate) fn make(cx: ComponentContext) -> Box<dyn NativeComponent> {
-        cx.set_size(smelt_buddy::SIZE, smelt_buddy::SIZE);
-        Box::new(Self {
-            cx,
-            seed: SharedString::default(),
-            act: Act::Rest,
-            since_ms: 0.,
-            opacity: 1.,
-        })
-    }
-}
-
-impl NativeComponent for Buddy {
-    fn render(&mut self, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-        let ambient = ambient_motion_enabled(
-            ambient_application_active(cx),
-            window.is_window_active(),
-            true,
-        );
-        let figure = BuddyFigure::new("smelt-buddy", self.seed.clone(), self.act, self.since_ms)
-            .still(!ambient || cx.reduce_motion());
-        Some(
-            div()
-                .flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .opacity(self.opacity)
-                .child(figure)
-                .into_any_element(),
-        )
-    }
-
-    fn set_prop(&mut self, name: &str, value: Option<&Value>, _: &mut Window, _: &mut App) {
-        match name {
-            "seed" => self.seed = text(value),
-            "act" => match Act::from_name(&text(value)) {
-                Some(act) => self.act = act,
-                None => eprintln!("[smelt-nsh] {BUDDY} 没有这一出：{value:?}"),
-            },
-            "since" => {
-                self.since_ms = value
-                    .and_then(Value::as_f64)
-                    .filter(|since| since.is_finite())
-                    .unwrap_or(0.);
-            }
-            "opacity" => {
-                self.opacity = value
-                    .and_then(Value::as_f64)
-                    .filter(|alpha| alpha.is_finite())
-                    .map_or(1., |alpha| (alpha as f32).clamp(0., 1.));
-            }
-            _ => return,
-        }
-        self.cx.redraw();
-    }
 }
 
 /// 标题栏安全区拖曳带：传 `safeArea`（`{ title_bar, top_left, top_right }`）或 `titleBar`（布尔）；

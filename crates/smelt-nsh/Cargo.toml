@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 gpui = { package = "gpui-fast", version = "=0.1.17" }
 smelt-ui = { path = "../smelt-ui" }
-smelt-buddy = { path = "../smelt-buddy" }
 smelt-desktop = { path = "../smelt-desktop" }
 smelt-terminal = { path = "../smelt-terminal" }
 smelt-acp = { path = "../smelt-acp" }

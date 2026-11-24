@@ -131,14 +131,6 @@ export declare const SmeltNativeView: (props: {
   onFocusIn?: (event: unknown) => void;
 }) => JSX.Element;
 
-export declare const SmeltNativeBuddy: (props: {
-  seed?: unknown;
-  act?: unknown;
-  since?: unknown;
-  opacity?: number;
-  style?: StyleProp<ViewStyle>;
-}) => JSX.Element;
-
 export declare const SmeltNativeWindowBar: (props: {
   safeArea?: unknown;
   titleBar?: unknown;

@@ -43,16 +43,11 @@ import {
 } from "./provider.tsx";
 export { bootTask } from "./provider.tsx";
 
-// ---- 原生组件封装（仅保留 NSH 拼不出的 GPUI 能力件：重视图、小人、标题带、毛玻璃坐标） ----
+// ---- 原生组件封装（仅保留 NSH 拼不出的 GPUI 能力件：重视图、标题带、毛玻璃坐标） ----
 
 export const SmeltNativeView = nativeComponent("smelt.view", {
   props: ["spec", "ends", "safeArea", "focusSeq"],
   events: ["focusIn"],
-}) as any;
-
-export const SmeltNativeBuddy = nativeComponent("smelt.buddy", {
-  props: ["seed", "act", "since", "opacity"],
-  events: [],
 }) as any;
 
 export const SmeltNativeWindowBar = nativeComponent("smelt.window-bar", {

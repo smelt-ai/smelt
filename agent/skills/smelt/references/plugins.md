@@ -120,7 +120,7 @@ NSH **不是 React**：组件函数只在挂载时执行**一次**，之后只�
   - `SmeltIcon`：渲染内置 SVG，`<SmeltIcon path="icons/search.svg" size={14} spin={false} />`。
   - `SmeltVector`：渲染任意内联 SVG 字符串 `<SmeltVector markup="<svg ...>...</svg>" width={16} height={16} />`。
   - `SmeltMarkdown`、`SmeltEditor`、`SmeltDiffView`、`SmeltWindowBar`、`ViewInstance`（以及共享模块 `"smelt/conversation"` 导出的 `<SmeltConversation>`）。
-  - `SmeltNativeTerminal`、`SmeltNativeBuddy`、`SmeltNativeDesktop`。
+  - `SmeltNativeTerminal`、`SmeltNativeDesktop`。
   - 共享浮层样式常量：`POPUP_CLASS`、`TOOLTIP_CLASS`、`MENU_ITEM_CLASS`、`INPUT_CLASS`、`DIALOG_SURFACE_CLASS`。
 - **可用图标路径**：只能使用内置 SVG 资产路径（`icons/<name>.svg` 和 `smelt-icons/agent-<id>.svg`），精确枚举位于 `.nsh/types/smelt/sdk.d.ts` 的 `SmeltIconPath`。
 - **Tailwind 语义令牌**（完整清单见 `.nsh/types/nsh/tokens.d.ts`）：

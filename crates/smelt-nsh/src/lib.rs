@@ -89,7 +89,6 @@ fn register_components(
         view::NAME,
         Rc::new(move |cx| view::SmeltView::make(cx, safe_area.clone())),
     );
-    app.register_component(components::BUDDY, Rc::new(components::Buddy::make));
     app.register_component(components::WINDOW_BAR, Rc::new(components::WindowBar::make));
     app.register_component(
         components::WINDOW_DRAG,
@@ -115,13 +114,6 @@ pub(crate) fn apply_theme(app: &Entity<AppView>, cx: &mut App) {
 #[doc(hidden)]
 pub mod testing {
     use nsh_core::prelude::Registry;
-    use nsh_platform_gpui::{ComponentContext, NativeComponent};
-
-    pub const BUDDY: &str = crate::components::BUDDY;
-
-    pub fn make_buddy(cx: ComponentContext) -> Box<dyn NativeComponent> {
-        crate::components::Buddy::make(cx)
-    }
 
     pub fn host_registry() -> Registry {
         crate::module::registry()
